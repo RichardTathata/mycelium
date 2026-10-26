@@ -171,3 +171,15 @@ choice waits its turn; absolute deadlines; ticker state moved after the check-in
 half is checked in: `a_recorded_node_replays_decision_for_decision`, in CI. Read a trace with
 `mycelium explain`.
 
+
+## Spans are a view of the trace, not a second trace (adopter-surface Y4, 2026-10-26)
+
+`src/span_export.rs` sends a decision record or an evidence record to an OpenTelemetry collector as a span carrying
+only its identity and outcome — `correlation`, `parent`, rule and revision, outcome, a decision's typed reason and the
+record's content hash (D17). The invariants a change here must keep: the span type has **no field** for an input,
+target, effect, subject, resource, arguments, prose reason, mandate or chain link (the sentinel test
+`a_span_carries_the_identity_and_outcome_and_nothing_of_the_inputs` fails by name if one leaks); the collector reads
+the sink by `seq` and **never drains it**, so a replay bundle still gets every record; ids and times derive from the
+record, never a clock or a draw, so the exporter sits outside the sim-seam baseline; and a span is **not an evidence
+path** — `trace.spans_not_evidence` in the guarantee report; the record is read by its hash with `mycelium explain
+--closure`. Feature page: `docs/features/span-export.md`.

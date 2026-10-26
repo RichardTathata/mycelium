@@ -1,0 +1,702 @@
+//! **Trace export as spans** (`docs/plans/adopter-surface.md` row Y4, decision D17): a record's identity and outcome,
+//! sent to an OpenTelemetry collector — and **not an evidence path**.
+//!
+//! A [`RecordSpan`] carries, for one decision record ([`DecisionRecord`]) or one evidence record ([`AeEvidence`]):
+//! the run it belongs to (`correlation`), the record it depends on (`parent`, by content hash), the rule and its
+//! revision, the outcome, a typed reason where the record has one, and the record's own **content hash** as an
+//! opaque reference. That is the whole type: there is no field for a decision's inputs, its target or its effect, nor
+//! for an evidence record's subject, resource, destination, arguments digest, checked constraints, history, route
+//! facts or mandate digest, nor for the audit chain's links. Those are kept on the node on purpose — the evidence
+//! journal is node-local and never gossiped — so leaving them out is the type's shape rather than a filter that
+//! could be forgotten, as [`AeReference`](crate::AeReference) is for the chain.
+//!
+//! **Not an evidence path.** A span store holds what a collector was sent, and nothing in this repository reads one.
+//! A span says *which* record and *what it decided*; what was enforced is the record itself, read by the hash the
+//! span carries on the node that wrote it — `mycelium explain --closure <hash>` over its evidence journal and decision
+//! trace (X4) — and verified there. The guarantee report says so: `trace.spans_not_evidence`.
+//!
+//! **What the evidence span leaves out that the decision span keeps.** A decision record's `reason` is one of its
+//! rule's typed reason codes, never free text, and is carried. An evidence record's `reason` is the evaluator's
+//! human-legible prose, which may name a subject or a resource; it is **not** carried, and the span's `reason` is
+//! absent. Its outcome is the verdict (`permit` / `deny` / `indeterminate`) or, for an execution record, what became
+//! of the dispatch (`completed`, `failed`, …).
+//!
+//! **Pull, from what the node already keeps.** A [`SpanCollector`] reads a [`DecisionSink`] by sequence number and an
+//! evidence journal by cursor — the exporter shape the journal already has — and returns the spans it has not
+//! returned before. It never drains the sink (a replay bundle still gets every record) and holds no lock across a
+//! read. The embedder decides when to collect; this module runs no loop, reads no clock and draws no random number:
+//! a span's time is the record's own event time, and its trace and span ids are derived from the correlation and the
+//! hashes ([`RecordSpan::trace_id`], [`RecordSpan::span_id`]), so the same record always exports as the same span.
+//!
+//! **Best-effort, as the trace is.** The decision sink is lossy by design and a record it dropped has no span; a
+//! record another reader drained before a collection is not seen. The journal is not lossy, and every evidence
+//! record is returned once per collector. A collector is not durable: a new one starts from the beginning, so a
+//! restarted exporter re-sends spans a collector already accepted — the same span, with the same ids.
+//!
+//! The OTLP side (`otlp`) is under the `otel` feature, as the skill runner's export is; the mapping is in every
+//! build so its field set is tested in every build.
+
+#[cfg(all(feature = "gateway", feature = "tls"))]
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use serde::Serialize;
+
+#[cfg(all(feature = "gateway", feature = "tls"))]
+use crate::agent::action_evaluator::{AeEvidence, RecordKind};
+use crate::agent::causal::content_hash;
+#[cfg(all(feature = "gateway", feature = "tls"))]
+use crate::agent::evidence_journal::{read_evidence_journal_from, EvidenceCursor, JournalEntry};
+use crate::decision::{DecisionRecord, DecisionSink};
+
+/// The schema id a span carries as `mycelium.schema`; a change to its attribute set is a new one.
+pub const SPAN_SCHEMA: &str = "mycelium.span/1";
+
+/// Every attribute key a [`RecordSpan`] can carry, in the order [`RecordSpan::attributes`] renders them. Pinned by a
+/// golden (`span_export::tests::the_attribute_set_is_pinned`): adding a key is a schema change made in the open.
+pub const ATTRIBUTE_KEYS: &[&str] = &[
+    "mycelium.schema",
+    "mycelium.source",
+    "mycelium.record_sha256",
+    "mycelium.correlation",
+    "mycelium.parent",
+    "mycelium.rule",
+    "mycelium.rule_revision",
+    "mycelium.outcome",
+    "mycelium.reason",
+];
+
+/// Which record a span names.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SpanSource {
+    /// A decision trace record (`decisions.jsonl`): best-effort, the sink drops and counts.
+    Decision,
+    /// An evidence record of kind `decided`: the verdict at an enforcement point.
+    EvidenceDecided,
+    /// An evidence record of kind `execution`: what became of the dispatch.
+    EvidenceExecution,
+}
+
+impl SpanSource {
+    /// The span's name and its `mycelium.source` value.
+    pub fn label(self) -> &'static str {
+        match self {
+            SpanSource::Decision => "mycelium.decision",
+            SpanSource::EvidenceDecided => "mycelium.evidence.decided",
+            SpanSource::EvidenceExecution => "mycelium.evidence.execution",
+        }
+    }
+}
+
+/// One record's identity and outcome, as a span carries it — and nothing else (D17).
+#[non_exhaustive]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct RecordSpan {
+    pub source: SpanSource,
+    /// Lowercase hex SHA-256 of the record's bytes as written: a journal frame's body, a trace line without its
+    /// newline — the hash a `parent` names and `mycelium explain --closure` takes. Opaque to a collector.
+    pub record_sha256: String,
+    /// The run the record belongs to (X4), when it carries one.
+    pub correlation: Option<String>,
+    /// The content hash of the record it depends on (X4), when it is not a root.
+    pub parent: Option<String>,
+    /// A decision's rule id; an evidence record's enforcement point.
+    pub rule: String,
+    /// A decision's rule revision; an evidence record's policy revision.
+    pub rule_revision: String,
+    /// A decision's outcome kind; an evidence record's verdict or execution state.
+    pub outcome: String,
+    /// A decision's typed reason code. Absent for evidence, whose reason is prose (module doc).
+    pub reason: Option<String>,
+    /// The record's own event time (epoch ms), used as the span's time; not an attribute.
+    pub at_ms: Option<u64>,
+}
+
+/// A serde label for a unit enum (`snake_case` everywhere it is used here), or `unknown` for a shape that is not one.
+fn label_of<T: Serialize>(v: &T) -> String {
+    match serde_json::to_value(v) {
+        Ok(serde_json::Value::String(s)) => s,
+        _ => "unknown".to_string(),
+    }
+}
+
+#[cfg(all(feature = "gateway", feature = "tls"))]
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().fold(String::with_capacity(bytes.len() * 2), |mut s, b| {
+        use std::fmt::Write as _;
+        let _ = write!(s, "{b:02x}");
+        s
+    })
+}
+
+/// The first `N` bytes of a lowercase hex string, or `None` when it is not hex of at least that length.
+fn hex_prefix<const N: usize>(h: &str) -> Option<[u8; N]> {
+    let h = h.as_bytes();
+    if h.len() < N * 2 {
+        return None;
+    }
+    let mut out = [0u8; N];
+    for (i, b) in out.iter_mut().enumerate() {
+        let s = std::str::from_utf8(&h[i * 2..i * 2 + 2]).ok()?;
+        *b = u8::from_str_radix(s, 16).ok()?;
+    }
+    Some(out)
+}
+
+impl RecordSpan {
+    /// The span for one decision record, as the sink holds it. Its hash is the hash of the line the trace writes
+    /// ([`DecisionRecord::to_string_line`]), which is the one a `parent` cites.
+    pub fn from_decision(r: &DecisionRecord) -> Self {
+        RecordSpan {
+            source: SpanSource::Decision,
+            record_sha256: content_hash(r.to_string_line().as_bytes()),
+            correlation: r.correlation.clone(),
+            parent: r.parent.clone(),
+            rule: r.rule.clone(),
+            rule_revision: r.rule_revision.to_string(),
+            outcome: label_of(&r.outcome),
+            reason: Some(r.reason.clone()),
+            at_ms: r.at_ms,
+        }
+    }
+
+    /// The span for one evidence record, from its journal entry; `None` for a frame that is not evidence JSON (it is
+    /// skipped and counted by the collector, never guessed at). The hash is the journal's own.
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    pub fn from_evidence(entry: &JournalEntry) -> Option<Self> {
+        let ev: AeEvidence = serde_json::from_slice(&entry.bytes).ok()?;
+        let (source, outcome) = match ev.kind {
+            RecordKind::Decided => (SpanSource::EvidenceDecided, ev.decision.label().to_string()),
+            RecordKind::Execution => (SpanSource::EvidenceExecution, label_of(&ev.execution)),
+        };
+        Some(RecordSpan {
+            source,
+            record_sha256: hex(&entry.content_hash),
+            correlation: ev.correlation,
+            parent: ev.parent,
+            rule: ev.enforcement_point,
+            rule_revision: ev.policy_revision,
+            outcome,
+            reason: None,
+            // `0` is the field's default for a record written before it existed: visibly not a time.
+            at_ms: (ev.at_ms != 0).then_some(ev.at_ms),
+        })
+    }
+
+    /// The attributes the span carries, keys from [`ATTRIBUTE_KEYS`] in its order; an absent value is omitted, never
+    /// sent empty. The one rendering: the OTLP side sends exactly this.
+    pub fn attributes(&self) -> Vec<(&'static str, String)> {
+        let mut v = vec![
+            ("mycelium.schema", SPAN_SCHEMA.to_string()),
+            ("mycelium.source", self.source.label().to_string()),
+            ("mycelium.record_sha256", self.record_sha256.clone()),
+        ];
+        if let Some(c) = &self.correlation {
+            v.push(("mycelium.correlation", c.clone()));
+        }
+        if let Some(p) = &self.parent {
+            v.push(("mycelium.parent", p.clone()));
+        }
+        v.push(("mycelium.rule", self.rule.clone()));
+        v.push(("mycelium.rule_revision", self.rule_revision.clone()));
+        v.push(("mycelium.outcome", self.outcome.clone()));
+        if let Some(r) = &self.reason {
+            v.push(("mycelium.reason", r.clone()));
+        }
+        v
+    }
+
+    /// The span's trace id: the first 16 bytes of SHA-256 over the correlation, so every record of one run is one
+    /// trace in a collector; a record with no correlation is a trace of its own (its own hash's first 16 bytes).
+    pub fn trace_id(&self) -> [u8; 16] {
+        let basis = match &self.correlation {
+            Some(c) => content_hash(c.as_bytes()),
+            None => self.record_sha256.clone(),
+        };
+        hex_prefix::<16>(&basis).unwrap_or([0u8; 16])
+    }
+
+    /// The span's id: the first 8 bytes of the record's hash.
+    pub fn span_id(&self) -> [u8; 8] {
+        hex_prefix::<8>(&self.record_sha256).unwrap_or([0u8; 8])
+    }
+
+    /// The parent span's id — the first 8 bytes of `parent` — when the record has a parent and shares a trace with
+    /// it, which it does only through a correlation: a parent named without one is an attribute, not a link.
+    pub fn parent_span_id(&self) -> Option<[u8; 8]> {
+        self.correlation.as_ref()?;
+        hex_prefix::<8>(self.parent.as_deref()?)
+    }
+}
+
+/// What one [`SpanCollector::collect`] read.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Collected {
+    pub spans: Vec<RecordSpan>,
+    /// Journal frames that were not evidence JSON — skipped, counted. Always 0 in a build without the journal.
+    pub unparsed: u64,
+    /// Whether the journal read stopped at its page bound rather than the end, so a caller collects again.
+    pub more: bool,
+}
+
+/// Reads what the node already keeps and returns the spans it has not returned before. Pull-based: the embedder calls
+/// [`collect`](Self::collect) on its own schedule.
+#[derive(Debug)]
+pub struct SpanCollector {
+    sink: Option<Arc<DecisionSink>>,
+    last_seq: u64,
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    journal: Option<PathBuf>,
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    cursor: EvidenceCursor,
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    page_records: usize,
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    page_bytes: usize,
+}
+
+impl Default for SpanCollector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SpanCollector {
+    /// A collector with nothing to read; add a sink, a journal or both. A journal page is 1024 records or 4 MiB.
+    pub fn new() -> Self {
+        SpanCollector {
+            sink: None,
+            last_seq: 0,
+            #[cfg(all(feature = "gateway", feature = "tls"))]
+            journal: None,
+            #[cfg(all(feature = "gateway", feature = "tls"))]
+            cursor: EvidenceCursor::default(),
+            #[cfg(all(feature = "gateway", feature = "tls"))]
+            page_records: 1024,
+            #[cfg(all(feature = "gateway", feature = "tls"))]
+            page_bytes: 4 << 20,
+        }
+    }
+
+    /// Read this decision sink — the one handed to the node's decision points — by sequence number, never draining it.
+    pub fn with_decision_sink(mut self, sink: Arc<DecisionSink>) -> Self {
+        self.sink = Some(sink);
+        self
+    }
+
+    /// Read the evidence journal at this path — the one `with_evidence_journal` opened — by cursor. The journal exists
+    /// only where the evaluator seam does (`gateway` + `tls`).
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    pub fn with_evidence_journal(mut self, path: impl Into<PathBuf>) -> Self {
+        self.journal = Some(path.into());
+        self
+    }
+
+    /// One journal page's bounds, records and bytes (a record larger than the byte bound is returned alone).
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    pub fn with_page(mut self, records: usize, bytes: usize) -> Self {
+        self.page_records = records.max(1);
+        self.page_bytes = bytes.max(1);
+        self
+    }
+
+    /// The spans for every record kept since the last collection: the sink's records above the last sequence number
+    /// returned, then one journal page from the cursor. A journal that does not exist yet reads as empty.
+    pub fn collect(&mut self) -> std::io::Result<Collected> {
+        let mut out = Collected::default();
+        if let Some(sink) = &self.sink {
+            for r in sink.snapshot() {
+                if r.seq > self.last_seq {
+                    self.last_seq = r.seq;
+                    out.spans.push(RecordSpan::from_decision(&r));
+                }
+            }
+        }
+        #[cfg(all(feature = "gateway", feature = "tls"))]
+        if let Some(path) = &self.journal {
+            let page = read_evidence_journal_from(path, self.cursor, self.page_records, self.page_bytes)?;
+            for e in &page.entries {
+                match RecordSpan::from_evidence(e) {
+                    Some(s) => out.spans.push(s),
+                    None => out.unparsed += 1,
+                }
+            }
+            self.cursor = page.next;
+            out.more = page.more;
+        }
+        Ok(out)
+    }
+}
+
+/// The OTLP side: a [`RecordSpan`] sent through an OpenTelemetry `TracerProvider`, as the skill runner sends its own.
+#[cfg(feature = "otel")]
+pub mod otlp {
+    use std::time::{Duration, SystemTime};
+
+    use opentelemetry::trace::{
+        SpanContext, SpanId, SpanKind, TraceContextExt as _, TraceFlags, TraceId, TraceState, Tracer as _,
+        TracerProvider as _,
+    };
+    use opentelemetry::{Context, KeyValue};
+    use opentelemetry_sdk::trace::TracerProvider;
+
+    use super::RecordSpan;
+
+    /// The instrumentation scope's name.
+    pub const SCOPE: &str = "mycelium.records";
+
+    /// The span's time: the record's own event time, or `None` (the SDK stamps it).
+    fn at(span: &RecordSpan) -> Option<SystemTime> {
+        span.at_ms.map(|ms| SystemTime::UNIX_EPOCH + Duration::from_millis(ms))
+    }
+
+    /// Send one span: named by its source, its attributes exactly [`RecordSpan::attributes`], its ids derived from
+    /// the record, its parent the record it depends on when they share a trace. A zero-length span at the record's
+    /// time — a record is an instant, not an interval.
+    pub fn emit(provider: &TracerProvider, span: &RecordSpan) {
+        let tracer = provider.tracer(SCOPE);
+        let trace_id = TraceId::from_bytes(span.trace_id());
+        let mut builder = tracer
+            .span_builder(span.source.label())
+            .with_kind(SpanKind::Internal)
+            .with_trace_id(trace_id)
+            .with_span_id(SpanId::from_bytes(span.span_id()))
+            .with_attributes(span.attributes().into_iter().map(|(k, v)| KeyValue::new(k, v)));
+        if let Some(t) = at(span) {
+            builder = builder.with_start_time(t).with_end_time(t);
+        }
+        let parent = match span.parent_span_id() {
+            Some(p) => Context::new().with_remote_span_context(SpanContext::new(
+                trace_id,
+                SpanId::from_bytes(p),
+                TraceFlags::SAMPLED,
+                true,
+                TraceState::default(),
+            )),
+            None => Context::new(),
+        };
+        let mut s = builder.start_with_context(&tracer, &parent);
+        match at(span) {
+            Some(t) => opentelemetry::trace::Span::end_with_timestamp(&mut s, t),
+            None => opentelemetry::trace::Span::end(&mut s),
+        }
+    }
+
+    /// Send every span in order.
+    pub fn export(provider: &TracerProvider, spans: &[RecordSpan]) {
+        for s in spans {
+            emit(provider, s);
+        }
+    }
+
+    /// A provider that sends to an OTLP/gRPC collector at `endpoint`, one span at a time — the skill runner's shape.
+    /// The call needs a Tokio runtime (tonic's). Egress: the endpoint is the embedder's to put on the allow-list;
+    /// this client is not the node's gated one.
+    pub fn provider(endpoint: &str) -> Result<TracerProvider, opentelemetry::trace::TraceError> {
+        use opentelemetry_otlp::WithExportConfig as _;
+        let exporter = opentelemetry_otlp::SpanExporter::builder().with_tonic().with_endpoint(endpoint).build()?;
+        Ok(TracerProvider::builder().with_simple_exporter(exporter).build())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    use crate::agent::journal::JournalEntry as Entry;
+    use crate::decision::{InputSnapshot, OutcomeKind, Provenance};
+
+    /// Sentinels for every part of a record D17 keeps off a span. A test fails if any reaches an exported attribute.
+    pub(super) const SECRET: &[&str] = &[
+        "SECRET-INPUT-VALUE",
+        "SECRET-INPUT-SOURCE",
+        "SECRET-TARGET",
+        "SECRET-EFFECT",
+        "SECRET-TRIGGER",
+        "SECRET-SUBJECT",
+        "SECRET-RESOURCE",
+        "SECRET-OPERATION",
+        "SECRET-DESTINATION",
+        "SECRET-EXECUTION-IDENTITY",
+        "SECRET-ARGS-DIGEST",
+        "SECRET-CHECKED",
+        "SECRET-PROSE-REASON",
+        "SECRET-MANDATE",
+        "SECRET-OPERATION-ID",
+        "SECRET-ATTEMPT-ID",
+        "SECRET-CATALOGUE",
+        "SECRET-NODE",
+    ];
+
+    pub(super) fn decision() -> DecisionRecord {
+        DecisionRecord::new("prov.install", 3, "SECRET-TRIGGER", OutcomeKind::Refusal, "not_eligible")
+            .node("SECRET-NODE", 1)
+            .at(1_700_000_000_123)
+            .target("SECRET-TARGET")
+            .effect("SECRET-EFFECT")
+            .correlation("run-1")
+            .parent_hash("ab".repeat(32))
+            .input(InputSnapshot::new("SECRET-INPUT-SOURCE", "SECRET-INPUT-VALUE", Provenance::Supplied))
+    }
+
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    pub(super) fn evidence_bytes(kind: &str, execution: &str) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({
+            "schema": "mycelium.ae/evidence/1",
+            "kind": kind,
+            "at_ms": 1_700_000_000_456u64,
+            "subject": "SECRET-SUBJECT",
+            "operation": "SECRET-OPERATION",
+            "resource": "SECRET-RESOURCE",
+            "destination": "SECRET-DESTINATION",
+            "execution_identity": "SECRET-EXECUTION-IDENTITY",
+            "decision": "deny",
+            "execution": execution,
+            "policy_revision": "rev-7",
+            "policy_digest": null,
+            "enforcement_point": "gateway:mcp/tools/call",
+            "catalogue": "SECRET-CATALOGUE",
+            "catalogue_revision": "1",
+            "mapping_status": "mapped",
+            "operation_id": "SECRET-OPERATION-ID",
+            "attempt_id": "SECRET-ATTEMPT-ID",
+            "arguments_digest": "SECRET-ARGS-DIGEST",
+            "checked": ["SECRET-CHECKED"],
+            "reason": "SECRET-PROSE-REASON",
+            "correlation": "run-1",
+            "parent": "cd".repeat(32),
+            "node": "SECRET-NODE",
+            "mandate_digest": "SECRET-MANDATE",
+        }))
+        .unwrap()
+    }
+
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    pub(super) fn entry(bytes: Vec<u8>) -> Entry {
+        use sha2::Digest as _;
+        Entry { seq: 0, content_hash: sha2::Sha256::digest(&bytes).into(), bytes }
+    }
+
+    /// Everything a span would send — its name and every attribute value — as one string to search.
+    pub(super) fn sent(s: &RecordSpan) -> String {
+        let mut out = s.source.label().to_string();
+        for (k, v) in s.attributes() {
+            out.push_str(&format!(" {k}={v}"));
+        }
+        out
+    }
+
+    #[test]
+    fn the_attribute_set_is_pinned() {
+        // The golden: a fully populated decision span renders exactly these keys, in this order. A new key is a new
+        // `SPAN_SCHEMA`, decided in the open (D17).
+        let golden = [
+            "mycelium.schema",
+            "mycelium.source",
+            "mycelium.record_sha256",
+            "mycelium.correlation",
+            "mycelium.parent",
+            "mycelium.rule",
+            "mycelium.rule_revision",
+            "mycelium.outcome",
+            "mycelium.reason",
+        ];
+        assert_eq!(ATTRIBUTE_KEYS, golden);
+        let s = RecordSpan::from_decision(&decision());
+        let keys: Vec<_> = s.attributes().into_iter().map(|(k, _)| k).collect();
+        assert_eq!(keys, golden);
+        assert_eq!(SPAN_SCHEMA, "mycelium.span/1");
+        // The evidence span has no reason; every other key is the same set.
+        #[cfg(all(feature = "gateway", feature = "tls"))]
+        {
+            let e = RecordSpan::from_evidence(&entry(evidence_bytes("decided", "none"))).unwrap();
+            let keys: Vec<_> = e.attributes().into_iter().map(|(k, _)| k).collect();
+            assert_eq!(keys, &golden[..8]);
+        }
+    }
+
+    #[test]
+    fn a_span_carries_the_identity_and_outcome_and_nothing_of_the_inputs() {
+        let d = decision();
+        let s = RecordSpan::from_decision(&d);
+        let text = sent(&s);
+        for secret in SECRET {
+            assert!(!text.contains(secret), "{secret} reached the decision span: {text}");
+        }
+        assert_eq!(s.rule, "prov.install");
+        assert_eq!(s.rule_revision, "3");
+        assert_eq!(s.outcome, "refusal");
+        assert_eq!(s.reason.as_deref(), Some("not_eligible"));
+        assert_eq!(s.correlation.as_deref(), Some("run-1"));
+        assert_eq!(s.parent, Some("ab".repeat(32)));
+        // The hash is the trace line's, the one `explain --closure` resolves.
+        assert_eq!(s.record_sha256, content_hash(d.to_string_line().as_bytes()));
+
+        #[cfg(all(feature = "gateway", feature = "tls"))]
+        for (kind, execution, outcome) in [("decided", "none", "deny"), ("execution", "failed", "failed")] {
+            let bytes = evidence_bytes(kind, execution);
+            let e = RecordSpan::from_evidence(&entry(bytes.clone())).unwrap();
+            let text = sent(&e);
+            for secret in SECRET {
+                assert!(!text.contains(secret), "{secret} reached the {kind} evidence span: {text}");
+            }
+            assert_eq!(e.rule, "gateway:mcp/tools/call");
+            assert_eq!(e.rule_revision, "rev-7");
+            assert_eq!(e.outcome, outcome);
+            assert_eq!(e.reason, None);
+            assert_eq!(e.record_sha256, content_hash(&bytes));
+            assert_eq!(e.at_ms, Some(1_700_000_000_456));
+        }
+    }
+
+    #[test]
+    fn ids_derive_from_the_record_so_one_run_is_one_trace() {
+        let s = RecordSpan::from_decision(&decision());
+        #[cfg(all(feature = "gateway", feature = "tls"))]
+        {
+            let e = RecordSpan::from_evidence(&entry(evidence_bytes("decided", "none"))).unwrap();
+            assert_eq!(s.trace_id(), e.trace_id(), "one correlation, one trace");
+        }
+        assert_eq!(s.trace_id(), hex_prefix::<16>(&content_hash(b"run-1")).unwrap());
+        assert_eq!(s.span_id(), hex_prefix::<8>(&s.record_sha256).unwrap());
+        assert_eq!(s.parent_span_id(), Some([0xab; 8]));
+        // Without a correlation, a parent is an attribute, not a link, and the trace is the record's own.
+        let lone = RecordSpan::from_decision(&DecisionRecord::new("r", 1, "t", OutcomeKind::Action, "x").parent_hash("ab".repeat(32)));
+        assert_eq!(lone.parent_span_id(), None);
+        assert_eq!(lone.trace_id(), hex_prefix::<16>(&lone.record_sha256).unwrap());
+        // A parent that is not hex is not a link either.
+        let odd = RecordSpan::from_decision(&DecisionRecord::new("r", 1, "t", OutcomeKind::Action, "x").correlation("c").parent_hash("zz"));
+        assert_eq!(odd.parent_span_id(), None);
+        // The same record is the same span.
+        assert_eq!(RecordSpan::from_decision(&decision()), s);
+    }
+
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    #[test]
+    fn a_frame_that_is_not_evidence_is_counted_never_guessed() {
+        assert!(RecordSpan::from_evidence(&entry(b"not json".to_vec())).is_none());
+        assert!(RecordSpan::from_evidence(&entry(b"{\"schema\":\"other\"}".to_vec())).is_none());
+    }
+
+    #[test]
+    fn the_collector_reads_the_sink_by_sequence_number_and_never_drains_it() {
+        let sink = Arc::new(DecisionSink::default());
+        let mut c = SpanCollector::new().with_decision_sink(Arc::clone(&sink));
+        assert!(c.collect().unwrap().spans.is_empty());
+        sink.record(decision()).unwrap();
+        sink.record(decision().correlation("run-2")).unwrap();
+        let got = c.collect().unwrap();
+        assert_eq!(got.spans.len(), 2);
+        assert_eq!(sink.snapshot().len(), 2, "the collector reads the sink, it does not drain it");
+        assert!(c.collect().unwrap().spans.is_empty(), "each record once");
+        // A drain by another reader (a bundle's export) does not make the collector re-send or lose its place.
+        let _ = sink.drain();
+        sink.record(decision()).unwrap();
+        let again = c.collect().unwrap();
+        assert_eq!(again.spans.len(), 1);
+        assert_eq!(again.unparsed, 0);
+    }
+
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    #[tokio::test]
+    async fn the_collector_returns_each_record_once_and_never_drains_the_sink() {
+        let dir = std::env::temp_dir().join(format!("mycelium-span-export-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("evidence.log");
+        let _ = std::fs::remove_file(&path);
+        let sink = Arc::new(DecisionSink::default());
+        let mut c = SpanCollector::new().with_decision_sink(Arc::clone(&sink)).with_evidence_journal(&path);
+        // Nothing yet, and no journal file: empty, not an error.
+        let first = c.collect().unwrap();
+        assert!(first.spans.is_empty());
+
+        sink.record(decision()).unwrap();
+        let j = crate::EvidenceJournal::open(&path, crate::EvidenceProfile::Strict).unwrap();
+        j.append(evidence_bytes("decided", "none")).await.unwrap();
+        j.append(b"not evidence".to_vec()).await.unwrap();
+        j.append(evidence_bytes("execution", "completed")).await.unwrap();
+
+        let got = c.collect().unwrap();
+        let sources: Vec<_> = got.spans.iter().map(|s| s.source).collect();
+        assert_eq!(sources, [SpanSource::Decision, SpanSource::EvidenceDecided, SpanSource::EvidenceExecution]);
+        assert_eq!(got.unparsed, 1);
+        assert_eq!(sink.snapshot().len(), 1, "the collector reads the sink, it does not drain it");
+        // The spans' hashes are the hashes `explain --closure` resolves over the same files.
+        let frames = crate::read_evidence_journal(&path).unwrap();
+        assert_eq!(got.spans[1].record_sha256, content_hash(&frames[0]), "the journal hash is the hash of the frame body");
+
+        // Again: nothing new.
+        assert!(c.collect().unwrap().spans.is_empty());
+        sink.record(decision()).unwrap();
+        let again = c.collect().unwrap();
+        assert_eq!(again.spans.len(), 1);
+        assert_eq!(again.spans[0].source, SpanSource::Decision);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// The OTLP side, through a real `TracerProvider` and a capturing exporter: what reaches the exporter is exactly
+/// [`RecordSpan::attributes`], with the derived ids and the record's time.
+#[cfg(all(test, feature = "otel"))]
+mod otlp_tests {
+    use std::sync::{Arc, Mutex};
+
+    use opentelemetry::trace::{SpanId, TraceId};
+    use opentelemetry_sdk::export::trace::{ExportResult, SpanData, SpanExporter};
+    use opentelemetry_sdk::trace::TracerProvider;
+
+    use super::tests::decision;
+    use super::*;
+
+    #[derive(Debug, Clone, Default)]
+    struct Capture(Arc<Mutex<Vec<SpanData>>>);
+
+    impl SpanExporter for Capture {
+        fn export(
+            &mut self,
+            batch: Vec<SpanData>,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ExportResult> + Send + 'static>> {
+            self.0.lock().unwrap_or_else(|p| p.into_inner()).extend(batch);
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    #[test]
+    fn what_reaches_the_exporter_is_the_pinned_set_and_no_input() {
+        let cap = Capture::default();
+        let provider = TracerProvider::builder().with_simple_exporter(cap.clone()).build();
+        let mut spans = vec![RecordSpan::from_decision(&decision())];
+        #[cfg(all(feature = "gateway", feature = "tls"))]
+        spans.push(RecordSpan::from_evidence(&super::tests::entry(super::tests::evidence_bytes("execution", "failed"))).unwrap());
+        otlp::export(&provider, &spans);
+        let got = cap.0.lock().unwrap().clone();
+        assert_eq!(got.len(), spans.len());
+
+        for (data, span) in got.iter().zip(spans.iter()) {
+            assert_eq!(data.name, span.source.label());
+            let attrs: Vec<(String, String)> =
+                data.attributes.iter().map(|kv| (kv.key.to_string(), kv.value.to_string())).collect();
+            let expected: Vec<(String, String)> =
+                span.attributes().into_iter().map(|(k, v)| (k.to_string(), v)).collect();
+            assert_eq!(attrs, expected, "the exporter receives exactly the rendering, nothing added");
+            let everything = format!("{data:?}");
+            for secret in super::tests::SECRET {
+                assert!(!everything.contains(secret), "{secret} reached the exporter: {everything}");
+            }
+            assert_eq!(data.span_context.trace_id(), TraceId::from_bytes(span.trace_id()));
+            assert_eq!(data.span_context.span_id(), SpanId::from_bytes(span.span_id()));
+            let t = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_millis(span.at_ms.unwrap());
+            assert_eq!((data.start_time, data.end_time), (t, t));
+        }
+        // The parent link is the record's parent; both records belong to run-1, so they are one trace.
+        assert_eq!(got[0].parent_span_id, SpanId::from_bytes([0xab; 8]));
+        #[cfg(all(feature = "gateway", feature = "tls"))]
+        {
+            assert_eq!(got[0].span_context.trace_id(), got[1].span_context.trace_id());
+            assert_eq!(got[1].parent_span_id, SpanId::from_bytes([0xcd; 8]));
+        }
+    }
+}
+

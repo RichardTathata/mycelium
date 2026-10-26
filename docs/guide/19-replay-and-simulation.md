@@ -256,6 +256,38 @@ saying first when it was given fewer journals than the fleet has nodes. The [cau
 page](../features/causal-records.md) has the doors that carry the fields; [selective recovery](../features/selective-recovery.md)
 is the closure read in anger, from a lost acknowledgement.
 
+## Sending the records to a collector: spans, not evidence
+
+A fleet that already runs an OpenTelemetry collector can see its records there, as spans (adopter-surface Y4). A
+[`SpanCollector`](../../src/span_export.rs) reads the decision sink by sequence number and the evidence journal by
+cursor, without draining either, and returns a span per record it has not returned before; `span_export::otlp`
+(feature `otel`) sends them. The embedder decides when to collect — nothing here runs a loop:
+
+```rust,ignore
+use mycelium::span_export::{otlp, SpanCollector};
+
+let provider = otlp::provider("http://collector:4317")?;          // OTLP/gRPC, inside a Tokio runtime
+let mut spans = SpanCollector::new()
+    .with_decision_sink(sink.clone())                              // the Arc<DecisionSink> the decision points hold
+    .with_evidence_journal("/var/lib/node/evidence.log");          // the path `with_evidence_journal` opened (`gateway` + `tls`)
+// on the embedder's own schedule:
+let got = spans.collect()?;
+otlp::export(&provider, &got.spans);
+```
+
+A span carries the record's identity and outcome and nothing else: `correlation`, `parent`, the rule and its
+revision (an evidence record's enforcement point and policy revision), the outcome, a decision's typed reason, and
+the record's content hash. **Never** its inputs, target or effect, an evidence record's subject, resource,
+arguments, checked constraints, prose reason or mandate, nor the audit chain's links — the type has no field for
+them. Every record of one run is one trace (its id derives from the `correlation`), and a record's parent is its
+span's parent where the two share a run.
+
+**A span is not evidence.** A span store holds what a collector was sent. What was enforced is the record itself:
+take the span's `mycelium.record_sha256` to the node that wrote it and read the record there, with `mycelium explain
+--closure <hash>` over that node's journal and trace. The guarantee report says so in
+[`trace.spans_not_evidence`](../reference/guarantee-catalogue.md). The [span export feature page](../features/span-export.md)
+has what is not built.
+
 ## What this does not establish
 
 - **Not a multi-node schedule.** The scheduler seam's first arm covers one node's waits.

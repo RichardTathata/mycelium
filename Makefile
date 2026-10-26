@@ -220,7 +220,7 @@ gate-knowledge:
 ## coverage is what scripts/check-test-inventory.py proves. The Python line needs pytest and the two
 ## Python packages installed (pip install -e mycelium-py -e langgraph-checkpoint-mycelium -e strands-session-mycelium pytest pytest-asyncio).
 check-full: check
-	cargo clippy --lib --features otel -- -D warnings                  # the one root feature no other line builds (row J)
+	cargo clippy --lib --tests --features otel,tls -- -D warnings      # the one root feature no other line builds (row J); tests: Y4
 	cargo clippy --benches --features gateway,test-util -- -D warnings  # both bench targets (gateway_overhead needs these features)
 	cargo test  --lib --features tls,metrics,a2a,llm,test-frame-filter   # + the row-A frame-filter tests
 	cargo test  --lib --features compliance,a2a   # the audit chain + both gateway enforcement points

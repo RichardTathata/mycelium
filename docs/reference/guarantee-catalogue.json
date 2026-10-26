@@ -326,6 +326,19 @@
       "docs": "docs/design/consensus-electorate.md"
     },
     {
+      "id": "trace.spans_not_evidence",
+      "revision": 1,
+      "subsystem": "trace",
+      "kind": "node_enforced",
+      "promise": "a span this node exports is not an evidence path: it carries a record's identity and outcome — its correlation, parent, rule and revision, outcome, a typed reason, and its content hash as an opaque reference — never its inputs, target, effect, subject, resource, arguments, mandate or the audit chain's links; what was enforced is the record itself, read by that hash on this node (`mycelium explain --closure`) and verified there",
+      "needs": "`otel`; a `span_export::SpanCollector` over the decision sink and the evidence journal, sent through `span_export::otlp` — driven by the embedder",
+      "enforcement_points": [
+        "span_export::RecordSpan::attributes",
+        "span_export::otlp::emit"
+      ],
+      "docs": "docs/features/span-export.md"
+    },
+    {
       "id": "net.confinement",
       "revision": 1,
       "subsystem": "deployment",

@@ -252,6 +252,9 @@ pub mod init;
 /// `mycelium explain --correlation` / `--closure` — one run's records as a chain, and one record's dependency
 /// closure, across evidence journals and decision traces (adopter-surface X4).
 pub mod closure;
+/// Trace export as spans (adopter-surface Y4, D17): a record's identity and outcome sent to an OpenTelemetry collector,
+/// never its inputs — and not an evidence path. The OTLP side is under `otel`.
+pub mod span_export;
 /// The two causal fields a request carries into every record its work produces (adopter-surface X4).
 pub use agent::causal;
 /// `mycelium declare` — a project's declaration sent to a gateway, once or kept current (adopter-surface X10).

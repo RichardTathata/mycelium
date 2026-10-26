@@ -2,7 +2,7 @@
 
 **Generated** from `core_guarantees()` (`src/agent/guarantee.rs`); do not edit. Regenerate with `UPDATE_GUARANTEE_CATALOGUE=1 cargo test --lib --features compliance,a2a the_checked_in_guarantee_catalogue_is_current`. A guarantee is a claim the startup report resolves against the node as built and configured — `enforced` · `not_configured` (the setting named) · `not_in_build` (the feature named) · `not_applicable` (the role fact named) · `not_verifiable_here` (external prerequisites, never counted). The plan is `docs/plans/guarantees-and-rule-catalogue.md`; the live report is `guarantee_report()` / `GET /gateway/guarantees`.
 
-Schema `mycelium.guarantees/1` · 28 core guarantees.
+Schema `mycelium.guarantees/1` · 29 core guarantees.
 
 ## The descriptors
 
@@ -34,6 +34,7 @@ Schema `mycelium.guarantees/1` · 28 core guarantees.
 | `persist.unreadable_refused` | 1 | persistence | NodeEnforced | a node does not start over persisted state it could not read — nothing is compacted over an unreadable snapshot or WAL | `[persistence]` with `on_unreadable = "refuse"` (the default) | `lifecycle (replay; `persistence::quarantine_unreadable`)`, `persistence::do_snapshot (aborts on a corrupt record)` | `docs/operations/deployment.md` |
 | `at_rest.cipher` | 1 | persistence | NodeEnforced | the WAL and snapshot are encrypted at rest | `[persistence]`; `with_data_at_rest_cipher`, before `start()` | `lifecycle (cipher read once at start)` | `docs/operations/crown-jewel.md` |
 | `cons.safety_profile` | 2 | consensus | NodeEnforced | an exclusive outcome — a lock, a leader, a consistent write, a commitment award, a capability-authz policy, any proposal marked safety-sensitive — is decided only by an electorate group: one pinned by member identity, decided by every member it names and frozen after, whose acceptors answer only for their own electorate | `consensus_require_electorate = true`; the electorates declared (`/gateway/govern/electorate`), one marked `exclusive_default` for the cluster-scoped verbs. Its members are fixed at genesis — changing them is a migration that terminates: declare the successor naming the group, retire the group into it (closing it), complete the carry from a majority of it, after which the predecessor is never consulted (docs/design/consensus-electorate.md §8.3); a dead member lowers the group's fault tolerance until it is migrated, a lost majority stops it and cannot migrate. The fleet's default is declared once and moves only by the holder's retirement. The effect is still the caller's to fence at the resource | `consensus::propose (the engine's door)`, `consensus::cross_propose` | `docs/design/consensus-electorate.md` |
+| `trace.spans_not_evidence` | 1 | trace | NodeEnforced | a span this node exports is not an evidence path: it carries a record's identity and outcome — its correlation, parent, rule and revision, outcome, a typed reason, and its content hash as an opaque reference — never its inputs, target, effect, subject, resource, arguments, mandate or the audit chain's links; what was enforced is the record itself, read by that hash on this node (`mycelium explain --closure`) and verified there | `otel`; a `span_export::SpanCollector` over the decision sink and the evidence journal, sent through `span_export::otlp` — driven by the embedder | `span_export::RecordSpan::attributes`, `span_export::otlp::emit` | `docs/features/span-export.md` |
 | `net.confinement` | 1 | deployment | ExternalPrerequisite | agent pods reach nothing but their gateway | the network: separate pods, an enforcing CNI, a NetworkPolicy |  | `docs/design/confined-fleet.md` |
 | `clock.sync` | 1 | deployment | ExternalPrerequisite | this node's wall clock is within the bound every expiry and freshness check assumes | deployment time-sync (NTP or equivalent) |  | `docs/threat-model.md` |
 
@@ -69,5 +70,6 @@ Each guarantee's resolution on an **unstarted** node (nothing attached) under th
 | `persist.unreadable_refused` | not_applicable | not_applicable | enforced | not_applicable |
 | `at_rest.cipher` | not_applicable | not_applicable | not_configured | not_applicable |
 | `cons.safety_profile` | not_configured | not_configured | not_configured | not_configured |
+| `trace.spans_not_evidence` | not_in_build | not_in_build | not_in_build | not_in_build |
 | `net.confinement` | not_verifiable_here | not_verifiable_here | not_verifiable_here | not_verifiable_here |
 | `clock.sync` | not_verifiable_here | not_verifiable_here | not_verifiable_here | not_verifiable_here |
