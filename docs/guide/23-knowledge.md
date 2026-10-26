@@ -179,8 +179,8 @@ An agent about to run wants what is known about its subject. The layer's answer 
 summary** (decision D14): `Selector::select` in [`src/knowledge/selection.rs`](../../src/knowledge/selection.rs)
 returns the records themselves, each with its issuer, its attribution, its standing and your verdict for its
 subject, placed in one `VerdictClass` — standing first, so a retracted record is `Retracted` whatever its
-subject's verdict. Your verdict source is called with a store holding only the records you can read, so a withheld
-record never reaches a verdict. You rank them (a closure that scores a candidate, or says it is not relevant); the
+subject's verdict. Your verdict source is called with a store holding only the records the selection admits whose
+standing is current, so a withheld, withdrawn or unverified record never reaches a verdict. You rank them (a closure that scores a candidate, or says it is not relevant); the
 selector only orders and cuts. It selects verified records by default (`admit_unchecked` widens it).
 
 It reads through a `ReadScope` built from the caller's mandate — enumerating `knowledge.read`, and only inside the
@@ -192,9 +192,10 @@ that something.
 If you condense a selection, the condensed text is a statement someone made, so it goes back as one:
 `write_condensed` takes a claim **signed by its own issuer** under a key not revoked, linked by `DerivedFrom` to every
 source, with every source in **one class** — `Rejected` and `InsufficientEvidence` are two, and a `Retracted` or
-`BasisWithdrawn` record never sits with live ones — and the condensation's **own class, under the subject you file it
-under, the same**, so a summary cannot cross a boundary by changing subject. An expired source is refused: a summary
-does not refresh it. The class is re-derived when you write, and a later retraction of a source reaches the
+`BasisWithdrawn` record never sits with live ones — and **about one subject**, the one every source is about, so its
+class stays its sources' at every later read. A retracted or expired source is refused (a summary does not refresh
+it), and so is an `at_ms` ahead of your clock beyond the drift bound; a record derived from an expired one is
+expired. A summary over several subjects stays a selection. The class is re-derived when you write, and a later retraction of a source reaches the
 condensation as `BasisWithdrawn`, as it reaches anything derived. The feature page is
 [context selection](../features/context-selection.md).
 

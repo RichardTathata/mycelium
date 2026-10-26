@@ -14,11 +14,13 @@
 //! [`Selector::select`] returns records, not text. Each one keeps what the layer knows about it:
 //! its **issuer** (in the record and its id), its **attribution** as stored, its **standing**
 //! ([`Standing`]: current, retracted, basis withdrawn, expired) and the **verdict** the reader holds
-//! for its subject, if any — computed over the readable records only, so a withheld record never
-//! reaches a count. From the last two it derives one [`VerdictClass`]. The ranking is the adopter's —
+//! for its subject, if any — computed over the records this selection admits whose standing is
+//! current, so a withheld, withdrawn, expired or unverified record never reaches a count. From the last two it derives one [`VerdictClass`]. The ranking is the adopter's —
 //! a closure that scores a candidate or says it is not relevant — and this module only orders by it;
 //! there is no vector store and no relevance model here. Verified records only, by default, under keys
-//! not revoked when they were stored.
+//! not revoked when they were stored — and a record derived from one the selection does not admit is
+//! withheld, as one derived from an unreadable record is. Expiry is carried down `DerivedFrom`: a
+//! derivation is no fresher than its oldest source.
 //!
 //! # Compression stays inside one class
 //!
@@ -37,13 +39,16 @@
 //!   from the selection that proposed it — an `InsufficientEvidence` record and a `Rejected` one are
 //!   two classes, *we do not know* and *we looked and it is bad*, and a `Retracted` or
 //!   `BasisWithdrawn` record is never in the class of a live one;
-//! - when **its own class, as if stored under its subject, is its sources' class**: otherwise a
-//!   `Rejected` record's summary filed under an `InsufficientEvidence` subject would cross the
-//!   boundary in two writes. Derived from withdrawn records it would be basis-withdrawn itself, so a
-//!   condensation of retracted records is refused (only their issuer retracts);
-//! - with **no expired source**: a condensation of expired records would be a fresh statement of stale
-//!   ones, which the semantic gate forbids (expired evidence cannot be refreshed). Refused rather than
-//!   accepted with a back-dated `at_ms`, because `at_ms` is the issuer's own claim.
+//! - **about one subject — every source's**: a condensation's class is then its sources' class at
+//!   every later read, whatever the verdict for that subject becomes and whoever reads it, since both
+//!   take the one subject's verdict and the condensation's standing follows its sources'. A summary
+//!   over several subjects is a selection, returned as one; written as a record it is not built;
+//! - with **no retracted source**: a condensation of it would be basis-withdrawn, not retracted, and
+//!   only its issuer retracts. Basis-withdrawn sources give a basis-withdrawn condensation — and
+//!   withdrawn records collapse into one class, whatever the verdict they were about;
+//! - with **no expired source**, and an `at_ms` no later than the reader's clock plus the HLC's drift
+//!   bound and inside the window: a condensation of expired records would be a fresh statement of
+//!   stale ones, which the semantic gate forbids, and one dated ahead would outlive its sources.
 //!
 //! # The mandate scopes what can be read, and the scope is one rule
 //!
@@ -68,9 +73,13 @@
 //! another subject still reaches the record it withdraws: the selector is never more optimistic than
 //! the store.
 //!
+//! Subjects are opaque strings: the path rule is literal (`/` separates, an empty, `.` or `..`
+//! segment is refused), so `%2e%2e` or a Unicode dot leader is an ordinary segment. An adopter that
+//! decodes subjects must normalise them before filing.
+//!
 //! # Not here
 //!
-//! The wiki: its pages carry no issuer, verdict or standing, so selecting one with its provenance
+//! A condensation across subjects (see above). The wiki: its pages carry no issuer, verdict or standing, so selecting one with its provenance
 //! would mean filing it as a record first. A read mandate's epoch and revocation standing: a
 //! knowledge store installs no epoch, so a read scope checks the window and the operation only.
 //! Re-verifying a selected record against the reader's current key view, which
@@ -179,6 +188,18 @@ impl ReadScope {
 
     /// The store, as this scope may read it at `now_ms`.
     pub fn view<'a>(&self, store: &'a KnowledgeStore, now_ms: u64) -> Result<ScopedView<'a>, MandateRefusal> {
+        self.view_admitting(store, now_ms, &|_| true)
+    }
+
+    /// The view, counting only records `admit` accepts — as sources too: a record derived from one
+    /// `admit` refuses is withheld, so a selector that admits only verified records cannot be handed
+    /// unverified content inside a verified record.
+    fn view_admitting<'a>(
+        &self,
+        store: &'a KnowledgeStore,
+        now_ms: u64,
+        admit: &dyn Fn(&RecordId) -> bool,
+    ) -> Result<ScopedView<'a>, MandateRefusal> {
         self.check_window(now_ms)?;
         // A fixpoint over the covered records: drop any whose `DerivedFrom` source is not held or not
         // (still) readable, until nothing changes. Cycle-safe: a cycle of covered records whose
@@ -187,7 +208,7 @@ impl ReadScope {
         // link per pass).
         let mut readable: BTreeSet<RecordId> = store
             .records()
-            .filter(|r| self.covers(r.subject()))
+            .filter(|r| self.covers(r.subject()) && admit(r.id()))
             .map(|r| r.id().clone())
             .collect();
         let covered = readable.clone();
@@ -246,11 +267,15 @@ impl<'a> ScopedView<'a> {
         self.withheld.iter()
     }
 
-    /// A store holding only the readable records, with their attributions and signatures — what a
-    /// verdict is computed over, so a withheld record never reaches a count or a challenger's name.
+    /// A store holding only the readable records, with their attributions and signatures.
     pub fn to_store(&self) -> KnowledgeStore {
+        self.store_where(|_| true)
+    }
+
+    /// A store holding the readable records `keep` accepts, with their attributions and signatures.
+    fn store_where(&self, keep: impl Fn(&KnowledgeRecord) -> bool) -> KnowledgeStore {
         let mut out = KnowledgeStore::new();
-        for record in self.records() {
+        for record in self.records().filter(|r| keep(r)) {
             let attribution = self.store.attribution(record.id());
             match (attribution, self.store.signature(record.id())) {
                 (Some(a @ Attribution::Verified { .. }), Some(sig)) => {
@@ -410,15 +435,20 @@ pub enum CondenseRefusal {
     /// A source is older than the reader's window. A condensation of expired records would be a
     /// fresh statement of stale ones — expired evidence refreshed, which the semantic gate forbids.
     ExpiredSource(RecordId),
+    /// A source's subject is not the condensation's. One subject per condensation, so its class is its
+    /// sources' class at every read; a summary over several subjects is a selection.
+    SubjectMismatch(RecordId),
+    /// A source was withdrawn by its issuer. A condensation of it would be basis-withdrawn, not
+    /// retracted, and only its issuer retracts.
+    RetractedSource(RecordId),
     /// Its sources are in more than one class.
     AcrossVerdicts(Vec<(RecordId, VerdictClass)>),
-    /// Its own class — computed as if it were stored under its subject — is not its sources' class:
-    /// filed under a subject with another verdict, or live over withdrawn sources.
-    ClassMismatch {
-        /// The condensation's own class.
-        own: VerdictClass,
-        /// Its sources' class.
-        sources: VerdictClass,
+    /// Its `at_ms` is later than the reader's clock plus the drift bound, or older than the window: a
+    /// condensation dated in the future would outlive its sources, one dated past the window would be
+    /// expired while they are not.
+    UnusableTime {
+        /// The condensation's `at_ms`.
+        at_ms: u64,
     },
     /// The record itself is malformed (building a draft).
     Malformed(RecordError),
@@ -445,8 +475,9 @@ impl std::fmt::Display for CondenseRefusal {
                 }
                 Ok(())
             }
-            Self::ClassMismatch { own, sources } =>
-                write!(f, "the condensation would be {own:?}; its sources are {sources:?}"),
+            Self::SubjectMismatch(id) => write!(f, "source {id} is about another subject than the condensation"),
+            Self::RetractedSource(id) => write!(f, "source {id} was retracted by its issuer"),
+            Self::UnusableTime { at_ms } => write!(f, "the condensation's at_ms {at_ms} is outside the reader's window"),
             Self::Malformed(e) => write!(f, "malformed condensation: {e}"),
             Self::Mandate(r) => write!(f, "{r}"),
         }
@@ -465,6 +496,7 @@ pub struct Selector<'v> {
     now_ms: u64,
     max_age_ms: u64,
     require_verified: bool,
+    max_clock_drift_ms: u64,
     verdicts: &'v VerdictSource<'v>,
 }
 
@@ -486,7 +518,14 @@ impl<'v> Selector<'v> {
         verdicts: &'v VerdictSource<'v>,
     ) -> Result<Self, MandateRefusal> {
         scope.check_window(now_ms)?;
-        Ok(Self { scope, now_ms, max_age_ms, require_verified: true, verdicts })
+        Ok(Self {
+            scope,
+            now_ms,
+            max_age_ms,
+            require_verified: true,
+            max_clock_drift_ms: mycelium_core::hlc::DEFAULT_MAX_CLOCK_DRIFT_MS,
+            verdicts,
+        })
     }
 
     /// Also select records stored without verification ([`Attribution::Unchecked`]), and let them
@@ -494,6 +533,14 @@ impl<'v> Selector<'v> {
     /// "issuer intact" means an issuer the reader established.
     pub fn admit_unchecked(mut self) -> Self {
         self.require_verified = false;
+        self
+    }
+
+    /// How far ahead of this selector's clock a condensation's `at_ms` may be — the HLC's drift bound by
+    /// default ([`DEFAULT_MAX_CLOCK_DRIFT_MS`](mycelium_core::hlc::DEFAULT_MAX_CLOCK_DRIFT_MS)); a node
+    /// configured with another `max_clock_drift_ms` passes its own.
+    pub fn with_max_clock_drift_ms(mut self, ms: u64) -> Self {
+        self.max_clock_drift_ms = ms;
         self
     }
 
@@ -516,7 +563,41 @@ impl<'v> Selector<'v> {
     }
 
     fn view<'a>(&self, store: &'a KnowledgeStore) -> Result<ScopedView<'a>, MandateRefusal> {
-        self.scope.view(store, self.now_ms)
+        self.scope.view_admitting(store, self.now_ms, &|id| self.admits(store.attribution(id)))
+    }
+
+    /// A record's standing, with expiry carried down `DerivedFrom`: a derivation is no fresher than its
+    /// basis. Its own `at_ms` is the issuer's claim; its sources' are the only times it can be bound to,
+    /// so once any record it derives from (transitively, held in the store) is past the window, so is it.
+    fn standing_of(&self, store: &KnowledgeStore, index: &DependencyIndex, id: &RecordId) -> Option<Standing> {
+        let st = standing(store, index, id, self.now_ms, self.max_age_ms)?;
+        if st != Standing::Current {
+            return Some(st);
+        }
+        let mut seen: BTreeSet<RecordId> = BTreeSet::new();
+        let mut stack: Vec<RecordId> = vec![id.clone()];
+        while let Some(current) = stack.pop() {
+            let Some(record) = store.get(&current) else { continue };
+            for l in record.links().iter().filter(|l| l.kind == LinkKind::DerivedFrom) {
+                if !seen.insert(l.target.clone()) {
+                    continue;
+                }
+                if let Some(basis) = store.get(&l.target) {
+                    if self.now_ms.saturating_sub(basis.at_ms()) > self.max_age_ms {
+                        return Some(Standing::Expired { at_ms: basis.at_ms() });
+                    }
+                    stack.push(l.target.clone());
+                }
+            }
+        }
+        Some(Standing::Current)
+    }
+
+    /// The store a verdict is computed over: the records this selection admits whose standing, over the
+    /// whole store, is current — so a withheld, withdrawn, expired or (verified-only) unchecked record
+    /// never counts toward a verdict or names a challenger.
+    fn verdict_store(&self, store: &KnowledgeStore, view: &ScopedView<'_>, index: &DependencyIndex) -> KnowledgeStore {
+        view.store_where(|r| self.standing_of(store, index, r.id()) == Some(Standing::Current))
     }
 
     /// **Select records for a run.** Reads only through this selector's [`ScopedView`]; scores each
@@ -529,8 +610,8 @@ impl<'v> Selector<'v> {
     ) -> Selection {
         // `new` checked the window at this selector's `now_ms`, which does not move.
         let Ok(view) = self.view(store) else { return Selection::default() };
-        let scoped = view.to_store();
         let index = self.index(store);
+        let scoped = self.verdict_store(store, &view, &index);
         let mut verdicts: BTreeMap<&str, Option<Verdict>> = BTreeMap::new();
         let mut out: Vec<Selected> = Vec::new();
         for record in view.records() {
@@ -538,7 +619,7 @@ impl<'v> Selector<'v> {
             if !self.admits(Some(attribution)) {
                 continue;
             }
-            let Some(st) = standing(store, &index, record.id(), self.now_ms, self.max_age_ms) else { continue };
+            let Some(st) = self.standing_of(store, &index, record.id()) else { continue };
             let verdict = verdicts
                 .entry(record.subject())
                 .or_insert_with(|| (self.verdicts)(&scoped, record.subject()))
@@ -569,35 +650,43 @@ impl<'v> Selector<'v> {
         Selection { records: out, withheld: view.withheld().cloned().collect(), truncated }
     }
 
-    /// The class a condensation over sources of `sources` would have once stored under `subject`
-    /// with `at_ms`, refused unless it is `sources`. Expired sources are refused outright.
-    fn own_class_check(
-        &self,
-        scoped: &KnowledgeStore,
-        sources: VerdictClass,
-        subject: &str,
-        at_ms: u64,
-    ) -> Result<(), CondenseRefusal> {
-        // Derived from a withdrawn or basis-withdrawn record, it is basis-withdrawn itself — so a
-        // condensation of retracted records is refused (only their issuer can retract), and one of
-        // basis-withdrawn records stays basis-withdrawn.
-        let own = if matches!(sources, VerdictClass::Retracted | VerdictClass::BasisWithdrawn) {
-            VerdictClass::BasisWithdrawn
-        } else if self.now_ms.saturating_sub(at_ms) > self.max_age_ms {
-            VerdictClass::Expired
-        } else {
-            VerdictClass::of(&Standing::Current, (self.verdicts)(scoped, subject).as_ref())
-        };
-        if own == sources { Ok(()) } else { Err(CondenseRefusal::ClassMismatch { own, sources }) }
+    /// Is `at_ms` a time this reader can file a condensation at: no later than its clock plus the drift
+    /// bound, and inside the window?
+    fn usable_time(&self, at_ms: u64) -> Result<(), CondenseRefusal> {
+        let future = at_ms > self.now_ms.saturating_add(self.max_clock_drift_ms);
+        let stale = self.now_ms.saturating_sub(at_ms) > self.max_age_ms;
+        if future || stale { Err(CondenseRefusal::UnusableTime { at_ms }) } else { Ok(()) }
+    }
+
+    /// The class rules over a condensation's sources, given each source's id, subject and class: every
+    /// source about `subject`, none retracted or expired, all in one class.
+    fn sources_check(&self, subject: &str, sources: &[(RecordId, &str, VerdictClass)]) -> Result<(), CondenseRefusal> {
+        if sources.is_empty() {
+            return Err(CondenseRefusal::NoSources);
+        }
+        for (id, source_subject, class) in sources {
+            if *source_subject != subject {
+                return Err(CondenseRefusal::SubjectMismatch(id.clone()));
+            }
+            match class {
+                VerdictClass::Retracted => return Err(CondenseRefusal::RetractedSource(id.clone())),
+                VerdictClass::Expired => return Err(CondenseRefusal::ExpiredSource(id.clone())),
+                _ => {}
+            }
+        }
+        let distinct: BTreeSet<VerdictClass> = sources.iter().map(|(_, _, c)| *c).collect();
+        if distinct.len() > 1 {
+            return Err(CondenseRefusal::AcrossVerdicts(sources.iter().map(|(id, _, c)| (id.clone(), *c)).collect()));
+        }
+        Ok(())
     }
 
     /// Build the unsigned draft of a condensation over `sources` (from a selection): a claim by
-    /// `issuer`, linked by `DerivedFrom` to each source once, under the same class rules as
-    /// [`check_condensed`](Self::check_condensed) — one class, none expired, and the draft's own class
-    /// under `subject` the sources' class. Advisory: the write re-derives everything.
+    /// `issuer`, linked by `DerivedFrom` to each source once, under the same rules as
+    /// [`check_condensed`](Self::check_condensed) — in scope, every source about `subject`, none
+    /// retracted or expired, one class, `at_ms` usable. Advisory: the write re-derives everything.
     pub fn condensation_draft(
         &self,
-        store: &KnowledgeStore,
         sources: &[&Selected],
         issuer: IssuerId,
         at_ms: u64,
@@ -605,20 +694,13 @@ impl<'v> Selector<'v> {
         body: Vec<u8>,
     ) -> Result<KnowledgeRecord, CondenseRefusal> {
         let subject = subject.into();
-        let Some(first) = sources.first() else { return Err(CondenseRefusal::NoSources) };
-        if let Some(e) = sources.iter().find(|s| s.class == VerdictClass::Expired) {
-            return Err(CondenseRefusal::ExpiredSource(e.record.id().clone()));
-        }
-        if sources.iter().any(|s| s.class != first.class) {
-            return Err(CondenseRefusal::AcrossVerdicts(
-                sources.iter().map(|s| (s.record.id().clone(), s.class)).collect(),
-            ));
-        }
         if !self.scope.covers(&subject) {
             return Err(CondenseRefusal::SubjectOutsideScope);
         }
-        let view = self.view(store).map_err(CondenseRefusal::Mandate)?;
-        self.own_class_check(&view.to_store(), first.class, &subject, at_ms)?;
+        self.usable_time(at_ms)?;
+        let checked: Vec<(RecordId, &str, VerdictClass)> =
+            sources.iter().map(|s| (s.record.id().clone(), s.record.subject(), s.class)).collect();
+        self.sources_check(&subject, &checked)?;
         let targets: BTreeSet<RecordId> = sources.iter().map(|s| s.record.id().clone()).collect();
         let links = targets.into_iter().map(|target| Link { kind: LinkKind::DerivedFrom, target }).collect();
         KnowledgeRecord::new(issuer, RecordKind::Claim, at_ms, subject, body, links).map_err(CondenseRefusal::Malformed)
@@ -626,8 +708,9 @@ impl<'v> Selector<'v> {
 
     /// **Check a condensation without writing it.** Every rule in the module docs, re-derived now
     /// against `store`: the presented signature its own issuer's under a key not revoked, a claim, its
-    /// subject in scope, linked by `DerivedFrom` only and to at least one source, every source readable
-    /// and admitted, none expired, all in one class, and its own class under its subject that class.
+    /// subject in scope, its `at_ms` usable, linked by `DerivedFrom` only and to at least one source,
+    /// every source readable and admitted, about the condensation's own subject, none retracted or
+    /// expired, all in one class.
     pub fn check_condensed(
         &self,
         store: &KnowledgeStore,
@@ -653,6 +736,7 @@ impl<'v> Selector<'v> {
         if !self.scope.covers(record.subject()) {
             return Err(CondenseRefusal::SubjectOutsideScope);
         }
+        self.usable_time(record.at_ms())?;
         if record.links().is_empty() {
             return Err(CondenseRefusal::NoSources);
         }
@@ -660,28 +744,17 @@ impl<'v> Selector<'v> {
             return Err(CondenseRefusal::NotDerivedFrom(l.kind));
         }
         let view = self.view(store).map_err(CondenseRefusal::Mandate)?;
-        let scoped = view.to_store();
         let index = self.index(store);
-        let mut classes: Vec<(RecordId, VerdictClass)> = Vec::new();
+        let scoped = self.verdict_store(store, &view, &index);
+        let mut checked: Vec<(RecordId, &str, VerdictClass)> = Vec::new();
         for link in record.links() {
             let unreadable = || CondenseRefusal::SourceUnreadable(link.target.clone());
             let source = view.get(&link.target).ok_or_else(unreadable)?;
-            if !self.admits(store.attribution(source.id())) {
-                return Err(unreadable());
-            }
-            let st = standing(store, &index, source.id(), self.now_ms, self.max_age_ms).ok_or_else(unreadable)?;
-            if matches!(st, Standing::Expired { .. }) {
-                return Err(CondenseRefusal::ExpiredSource(source.id().clone()));
-            }
+            let st = self.standing_of(store, &index, source.id()).ok_or_else(unreadable)?;
             let class = VerdictClass::of(&st, (self.verdicts)(&scoped, source.subject()).as_ref());
-            classes.push((source.id().clone(), class));
+            checked.push((source.id().clone(), source.subject(), class));
         }
-        let distinct: BTreeSet<VerdictClass> = classes.iter().map(|(_, c)| *c).collect();
-        if distinct.len() > 1 {
-            return Err(CondenseRefusal::AcrossVerdicts(classes));
-        }
-        let sources = classes[0].1;
-        self.own_class_check(&scoped, sources, record.subject(), record.at_ms())
+        self.sources_check(record.subject(), &checked)
     }
 
     /// **Write a condensation back** into `store`: [`check_condensed`](Self::check_condensed), then
@@ -953,7 +1026,8 @@ mod tests {
     // ── the review of #683 ──────────────────────────────────────────────────────────────────────
 
     /// Review finding 1: a condensation's subject was free, so filing a `Rejected` record's summary under an
-    /// `InsufficientEvidence` subject crossed the boundary in two writes.
+    /// `InsufficientEvidence` subject crossed the boundary in two writes. Since the confirmation round the
+    /// rule is one subject per condensation, which makes its class its sources' at every read.
     #[test]
     fn a_condensation_is_refused_unless_its_own_class_is_its_sources_class() {
         let mut w = World::new();
@@ -962,14 +1036,14 @@ mod tests {
         let switched = w.condensation("condenser", "svc/b", &[&bad]); // would be InsufficientEvidence
         assert_eq!(
             w.write(&selector, switched),
-            Err(CondenseRefusal::ClassMismatch { own: VerdictClass::InsufficientEvidence, sources: VerdictClass::Rejected }),
+            Err(CondenseRefusal::SubjectMismatch(bad.clone())),
             "a Rejected source filed under an InsufficientEvidence subject"
         );
         let s = selector.select(&w.store, &request(), all);
         let bad_s = s.records.iter().find(|x| x.record.id() == &bad).unwrap();
         assert!(matches!(
-            selector.condensation_draft(&w.store, &[bad_s], iss("condenser"), NOW, "svc/b", vec![]),
-            Err(CondenseRefusal::ClassMismatch { .. })
+            selector.condensation_draft(&[bad_s], iss("condenser"), NOW, "svc/b", vec![]),
+            Err(CondenseRefusal::SubjectMismatch(_))
         ), "the draft builder applies the same rule");
         let same = w.condensation("condenser", "svc/a", &[&bad]);
         w.write(&selector, same).expect("filed under its own class's subject");
@@ -980,7 +1054,7 @@ mod tests {
         w.put("observer", RecordKind::Claim, "svc/a", "retract", vec![Link { kind: LinkKind::Retracts, target: gone.clone() }]);
         assert_eq!(
             w.write(&selector, w.condensation("condenser", "svc/a", &[&gone])),
-            Err(CondenseRefusal::ClassMismatch { own: VerdictClass::BasisWithdrawn, sources: VerdictClass::Retracted })
+            Err(CondenseRefusal::RetractedSource(gone.clone()))
         );
         let downstream = w.put("auditor-2", RecordKind::Assessment, "svc/a", "therefore",
             vec![Link { kind: LinkKind::DerivedFrom, target: gone.clone() }]);
@@ -1077,6 +1151,115 @@ mod tests {
         assert!(matches!(got.verdict, Some(Verdict::InsufficientEvidence { have: 0, .. })), "{:?}", got.verdict);
     }
 
+    // ── the confirmation round on #683 ──────────────────────────────────────────────────────────
+
+    /// A verdict source that mirrors `classify`: standing over the store it is handed; a current
+    /// assessment whose body is `bad` makes its subject Rejected, any other current assessment
+    /// InsufficientEvidence, none no verdict.
+    fn live_verdict(st: &KnowledgeStore, subject: &str) -> Option<Verdict> {
+        let idx = DependencyIndex::build(st);
+        let cur: Vec<&KnowledgeRecord> = st
+            .records()
+            .filter(|r| r.subject() == subject && r.kind() == RecordKind::Assessment)
+            .filter(|r| matches!(standing(st, &idx, r.id(), NOW, 1000 * DAY), Some(Standing::Current)))
+            .collect();
+        if cur.iter().any(|r| r.body() == b"bad") {
+            Some(rejected())
+        } else if !cur.is_empty() {
+            Some(insufficient())
+        } else {
+            None
+        }
+    }
+
+    /// Confirmation A: a condensation filed under another subject took that subject's verdict at every
+    /// later read, so a verdict drift after the write re-opened the two-write blend. One subject per
+    /// condensation makes its class its sources' class at every read.
+    #[test]
+    fn a_condensation_is_filed_under_its_sources_subject() {
+        let mut w = World::new();
+        let bad_a = w.put("auditor-1", RecordKind::Assessment, "svc/a", "bad", vec![]);
+        w.put("auditor-2", RecordKind::Assessment, "svc/b", "bad", vec![]);
+        let selector = Selector::new(read("svc"), NOW, DAY, &live_verdict).unwrap();
+        // Both subjects Rejected now, so a class comparison alone accepted this.
+        let elsewhere = w.write(&selector, w.condensation("condenser", "svc/b", &[&bad_a]));
+        assert!(elsewhere.is_err(), "a condensation under another subject than its source's: {elsewhere:?}");
+        w.write(&selector, w.condensation("condenser", "svc/a", &[&bad_a])).expect("under its source's subject");
+    }
+
+    /// Confirmation B: a retraction filed under another subject reached the record's standing but not the
+    /// verdict, so a withdrawn record still made its subject Rejected.
+    #[test]
+    fn a_withdrawn_record_never_counts_toward_a_verdict() {
+        let mut w = World::new();
+        let bad_b = w.put("auditor-2", RecordKind::Assessment, "svc/b", "bad", vec![]);
+        let obs = w.put("observer", RecordKind::Observation, "svc/b", "fine", vec![]);
+        w.put("auditor-2", RecordKind::Claim, "other/x", "retract",
+            vec![Link { kind: LinkKind::Retracts, target: bad_b.clone() }]);
+        let selector = Selector::new(read("svc"), NOW, DAY, &live_verdict).unwrap();
+        let s = selector.select(&w.store, &request(), all);
+        let get = |id: &RecordId| s.records.iter().find(|x| x.record.id() == id).unwrap();
+        assert_eq!(get(&bad_b).class, VerdictClass::Retracted);
+        assert_eq!(get(&obs).class, VerdictClass::Unjudged, "a retracted assessment decides nothing");
+    }
+
+    /// Confirmation C: an unchecked record reached the verdict under the verified-only default.
+    #[test]
+    fn an_unchecked_record_never_counts_toward_a_verdict_under_verified_only() {
+        let mut w = World::new();
+        let obs = w.put("observer", RecordKind::Observation, "svc/c", "fine", vec![]);
+        let forged = KnowledgeRecord::new(iss("auditor-1"), RecordKind::Assessment, NOW - 10, "svc/c", b"bad".to_vec(), vec![]).unwrap();
+        w.store.put(forged);
+        let selector = Selector::new(read("svc"), NOW, DAY, &live_verdict).unwrap();
+        let s = selector.select(&w.store, &request(), all);
+        assert_eq!(s.records.iter().find(|x| x.record.id() == &obs).unwrap().class, VerdictClass::Unjudged);
+    }
+
+    /// Confirmation D: a verified condensation of an unchecked source, written under `admit_unchecked`,
+    /// was selected by a default selector — unverified content laundered by a verified signature.
+    #[test]
+    fn verified_only_withholds_a_record_derived_from_an_unchecked_one() {
+        let mut w = World::new();
+        let forged = KnowledgeRecord::new(iss("auditor-1"), RecordKind::Assessment, NOW - 10, "svc/a", b"bad".to_vec(), vec![]).unwrap();
+        let fid = forged.id().clone();
+        w.store.put(forged);
+        let wide = Selector::new(read("svc"), NOW, DAY, &verdicts).unwrap().admit_unchecked();
+        let c = w.write(&wide, w.condensation("condenser", "svc/a", &[&fid])).expect("written where unchecked records are admitted");
+        let strict = Selector::new(read("svc"), NOW, DAY, &verdicts).unwrap();
+        let s = strict.select(&w.store, &request(), all);
+        assert!(!s.records.iter().any(|x| x.record.id() == &c), "derived from a record verified-only does not admit");
+        assert!(s.withheld.contains(&c));
+    }
+
+    /// Confirmation E: a condensation dated in the future outlived its sources.
+    #[test]
+    fn a_future_dated_condensation_is_refused() {
+        let mut w = World::new();
+        let live = w.put("observer", RecordKind::Observation, "svc/c", "now", vec![]);
+        let selector = Selector::new(read("svc"), NOW, DAY, &verdicts).unwrap();
+        let rec = KnowledgeRecord::new(iss("condenser"), RecordKind::Claim, NOW + 3000 * DAY, "svc/c", vec![],
+            vec![Link { kind: LinkKind::DerivedFrom, target: live.clone() }]).unwrap();
+        assert!(w.write(&selector, rec).is_err());
+    }
+
+    /// Confirmation E: a derivation is no fresher than its basis — once a source ages out of the window,
+    /// so does what was derived from it.
+    #[test]
+    fn a_derived_record_expires_with_its_oldest_source() {
+        let mut w = World::new();
+        let src = KnowledgeRecord::new(iss("observer"), RecordKind::Observation, NOW - DAY / 2, "svc/c", b"x".to_vec(), vec![]).unwrap();
+        let src_id = src.id().clone();
+        let signed = w.sign(src);
+        w.store.put_signed(signed, &w.members, &w.external).unwrap();
+        let selector = Selector::new(read("svc"), NOW, DAY, &verdicts).unwrap();
+        let c = w.write(&selector, w.condensation("condenser", "svc/c", &[&src_id])).unwrap();
+        let later = Selector::new(read("svc"), NOW + 3 * DAY / 4, DAY, &verdicts).unwrap();
+        let s = later.select(&w.store, &request(), all);
+        let class = |id: &RecordId| s.records.iter().find(|x| x.record.id() == id).unwrap().class;
+        assert_eq!(class(&src_id), VerdictClass::Expired);
+        assert_eq!(class(&c), VerdictClass::Expired, "the condensation is no fresher than its source");
+    }
+
     // ── writing a condensation back ─────────────────────────────────────────────────────────────
 
     /// **The exit's first case:** a condensation nobody signed is refused, and so is one signed by
@@ -1137,29 +1320,31 @@ mod tests {
             vec![Link { kind: LinkKind::DerivedFrom, target: withdrawn.clone() }]);
         let selector = Selector::new(read("svc"), NOW, DAY, &verdicts).unwrap();
 
-        for (pair, why) in [
-            ([&bad, &unknown], "rejected with insufficient evidence"),
-            ([&live, &withdrawn], "a retracted record into a live one"),
-            ([&live, &derived], "a basis-withdrawn record into a live one"),
+        // Rejected and InsufficientEvidence are two subjects' verdicts, so one subject per condensation
+        // keeps them apart; within a subject the standing still divides.
+        for (pair, want, why) in [
+            ([&bad, &unknown], CondenseRefusal::SubjectMismatch(unknown.clone()), "rejected with insufficient evidence"),
+            ([&live, &withdrawn], CondenseRefusal::RetractedSource(withdrawn.clone()), "a retracted record into a live one"),
         ] {
             let draft = w.condensation("condenser", "svc/a", &pair);
-            let got = w.write(&selector, draft);
-            assert!(matches!(got, Err(CondenseRefusal::AcrossVerdicts(_))), "{why}: {got:?}");
+            assert_eq!(w.write(&selector, draft), Err(want), "{why}");
         }
+        let got = w.write(&selector, w.condensation("condenser", "svc/a", &[&live, &derived]));
+        assert!(matches!(got, Err(CondenseRefusal::AcrossVerdicts(_))), "a basis-withdrawn record into a live one: {got:?}");
 
         // The draft builder refuses the same, from the selection's classes.
         let s = selector.select(&w.store, &request(), all);
         let pick = |id: &RecordId| s.records.iter().find(|x| x.record.id() == id).unwrap();
         assert!(matches!(
-            selector.condensation_draft(&w.store, &[pick(&bad), pick(&unknown)], iss("condenser"), NOW, "svc/a", vec![]),
-            Err(CondenseRefusal::AcrossVerdicts(_))
+            selector.condensation_draft(&[pick(&bad), pick(&unknown)], iss("condenser"), NOW, "svc/a", vec![]),
+            Err(CondenseRefusal::SubjectMismatch(_))
         ));
 
         // Within one class it is written.
         let groups = s.by_class();
         let rejected: Vec<&Selected> = groups[&VerdictClass::Rejected].clone();
         assert!(rejected.iter().any(|x| x.record.id() == &bad) && rejected.iter().any(|x| x.record.id() == &live));
-        let draft = selector.condensation_draft(&w.store, &rejected, iss("condenser"), NOW, "svc/a", b"both bad".to_vec()).unwrap();
+        let draft = selector.condensation_draft(&rejected, iss("condenser"), NOW, "svc/a", b"both bad".to_vec()).unwrap();
         w.write(&selector, draft).unwrap();
     }
 
@@ -1172,12 +1357,12 @@ mod tests {
         w.put("auditor-1", RecordKind::Assessment, "svc/a", "bad", vec![]);
         let selector = Selector::new(read("svc"), NOW, DAY, &verdicts).unwrap();
         let s = selector.select(&w.store, &request(), all);
-        let draft = selector.condensation_draft(&w.store, &s.records.iter().collect::<Vec<_>>(), iss("condenser"), NOW, "svc/a", vec![])
+        let draft = selector.condensation_draft(&s.records.iter().collect::<Vec<_>>(), iss("condenser"), NOW, "svc/a", vec![])
             .unwrap();
         w.put("observer", RecordKind::Claim, "svc/a", "retract",
             vec![Link { kind: LinkKind::Retracts, target: one.clone() }]);
         let got = w.write(&selector, draft);
-        assert!(matches!(got, Err(CondenseRefusal::AcrossVerdicts(_))), "{got:?}");
+        assert_eq!(got, Err(CondenseRefusal::RetractedSource(one.clone())), "retracted since the selection");
     }
 
     #[test]
