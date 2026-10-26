@@ -751,7 +751,7 @@ fn print_usage() {
          \n\
          Profiles (the config's `profile`, or GOSSIP_PROFILE): `dev` is the default and requires nothing,\n\
          loudly; `secure-single-domain` refuses to start unless every guarantee it requires resolves on\n\
-         this node, naming each unmet one. The report: GET /gateway/guarantees, and one log block at\n\
+         this node, naming each unmet one; `secure-multi-domain` adds the federation family (`fed.*`). The report: GET /gateway/guarantees, and one log block at\n\
          start. Catalogue: docs/reference/guarantee-catalogue.md"
     );
 }

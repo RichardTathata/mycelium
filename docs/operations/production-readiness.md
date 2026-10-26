@@ -103,6 +103,15 @@ this page is the index + the gate.
   guarantee's resolution under four reference configurations, is the generated
   [guarantee catalogue](../reference/guarantee-catalogue.md). Without a profile the node runs as `dev`:
   nothing required, and the log says it is not a production profile.
+- ☐ **A node of a federating domain starts under `secure-multi-domain`** (`profile = "secure-multi-domain"`;
+  adopter-surface Y7). Rev 1 requires everything above, at rev 5, and the seven federation facts the node can check:
+  `fed.domain_enforced` (`domain_profile = "enforced"`: TLS required, SWIM off) on every member, and on a node that
+  attaches an edge or clients `fed.pinned` · `fed.body_bound` · `fed.partner_slots` · `fed.caller_named` ·
+  `fed.catalogue_signed` · `fed.partner_egress`. A member with neither an edge nor a client reads those six
+  `not_applicable` (it faces no partner). The partner's own posture, non-merger and clock agreement across the edge
+  are listed `not_verifiable_here` and are yours to evidence, with the partner's report. The edge and the clients are
+  code attachments, so `mycelium doctor` cannot see them; read the running node's report →
+  [federation § Starting under `secure-multi-domain`](federation.md#starting-under-secure-multi-domain).
 - ☐ **Gateway is not open** — the HTTP gateway has **no auth by default**, and serves that open gateway
   **only on loopback**: a non-loopback `http_addr` (`0.0.0.0`, `::`, a LAN address) with no credential
   model **refuses to start**, naming `http_addr` (2.32.0; plan `post-360-hardening.md` row P1),

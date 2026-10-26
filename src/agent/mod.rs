@@ -1839,6 +1839,9 @@ impl GossipAgent {
         self,
         clients: impl IntoIterator<Item = Arc<crate::federation::client::FederationClient>>,
     ) -> Self {
+        // Counted like every other attachment after the boundary (G13): the `fed.*` guarantees read
+        // these clients, so a set attached after `start()` is one the logged report never saw.
+        self.note_attachment("with_federation_clients");
         let mut kept: Vec<Arc<crate::federation::client::FederationClient>> = Vec::new();
         for c in clients {
             // The node's outbound allow-list reaches a client built without one (`report.egress`,

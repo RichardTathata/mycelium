@@ -293,6 +293,33 @@ Both SDKs raise a distinct type for `unknown` (`DeliveryUnknown` in Python,
 `DeliveryUnknownError` in TypeScript) precisely so it cannot be caught by accident alongside
 ordinary failures and retried.
 
+## Starting under `secure-multi-domain`
+
+`profile = "secure-multi-domain"` (or `GOSSIP_PROFILE`) makes `start()` refuse a node of a federating domain unless
+its side of the edge is set the way this runbook describes (adopter-surface Y7). It requires everything
+`secure-single-domain` requires ([readiness checklist](production-readiness.md)) and the federation family of the
+[guarantee catalogue](../reference/guarantee-catalogue.md):
+
+| Guarantee | On | Met by |
+|---|---|---|
+| `fed.domain_enforced` | every member | `domain_profile = "enforced"`: TLS required, SWIM off (its datagrams are unauthenticated UDP) |
+| `fed.pinned` | a node with clients | `FederationClient::with_tls_pins` on every client — [Encrypting the link](#encrypting-the-link-tls-pinning) |
+| `fed.body_bound` | a node with an edge | `CallPolicy::require_body_binding = true` |
+| `fed.partner_slots` | a node with an edge | `CallPolicy::max_in_flight_per_partner > 0` — [Bounding what a partner can send you](#bounding-what-a-partner-can-send-you) |
+| `fed.caller_named` | a gateway with clients | a gateway credential model, so a call names the local caller, not `anonymous` |
+| `fed.catalogue_signed` | either side | `FederationEdge::with_signing_key` on the edge; `FederationClient::with_partner_key` on every client |
+| `fed.partner_egress` | a node with clients | `egress.allow_hosts` naming every partner endpoint's host |
+
+A member that attaches neither an edge nor a client reads the six side-specific ones `not_applicable` and starts on
+the rest. Three more are listed `not_verifiable_here` and never counted: `fed.partner_posture` (the partner's
+own report, under the same profile, exchanged out of band), `fed.non_merger` (a fact about both domains) and
+`fed.clock_agreement` (a credential's window is wall-clock across the edge). Nothing this node checks makes the
+partner honest.
+
+The edge and the clients are attached in code, so `mycelium doctor`, which builds a node from a file, reports the
+six as `not_applicable`; read the running node's `GET /gateway/guarantees` or `guarantee_report()` after attaching
+them. A refusal names each one unmet, as `[fed.body_bound: not_configured — …]` after `rev 1:`.
+
 ## What this runbook does not cover
 
 - **Running a hub** — a node that is a provider to one partner and a consumer of another — works
