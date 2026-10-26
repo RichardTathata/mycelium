@@ -36,7 +36,7 @@
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, RwLock};
+use std::sync::{Mutex, RwLock, TryLockError};
 
 use tokio::sync::mpsc::{Receiver, Sender};
 
@@ -399,10 +399,13 @@ impl DecisionSink {
         if cut > 0 { rec.completeness.inputs_truncated = true; }
         let size = rec.approx_bytes();
         // The tap is read, and its copy made, before the ring's lock, so a tapped sink holds its lock no longer than an
-        // untapped one; a tap whose reader has gone costs no copy. A tap being replaced (`try_read` fails) skips the copy.
-        let tap = match self.tap.try_read() {
-            Ok(t) => t.as_ref().filter(|tx| !tx.is_closed()).cloned(),
-            Err(_) => None,
+        // untapped one; a tap whose reader has gone costs no copy. A tap being installed (`try_read` would block) skips
+        // the copy, counted below once the record is kept, so a skipped copy is never silent. A poisoned lock is
+        // recovered, as `tap()` recovers it: the slot holds a sender, which a panic cannot leave half-written.
+        let (tap, tap_busy) = match self.tap.try_read() {
+            Ok(t) => (t.as_ref().filter(|tx| !tx.is_closed()).cloned(), false),
+            Err(TryLockError::Poisoned(p)) => (p.into_inner().as_ref().filter(|tx| !tx.is_closed()).cloned(), false),
+            Err(TryLockError::WouldBlock) => (None, true),
         };
         let mut copy = tap.as_ref().map(|_| rec.clone());
         if size > self.cfg.max_bytes {
@@ -428,6 +431,9 @@ impl DecisionSink {
         drop(ring);
         self.recorded.fetch_add(1, Ordering::Relaxed);
         self.inputs_truncated.fetch_add(cut, Ordering::Relaxed);
+        if tap_busy {
+            self.tap_dropped.fetch_add(1, Ordering::Relaxed);
+        }
         if let (Some(tap), Some(mut c)) = (tap, copy.take()) {
             c.seq = seq;
             // Not `sim_seam::chan_try_send`: this verdict changes no decision, and recording it would make a replay
@@ -461,8 +467,14 @@ impl DecisionSink {
     /// taken are not sent. Refused while another reader holds a live tap; once that reader's receiver is dropped the
     /// tap can be taken again. Not a decision point: it may wait for the tap's own lock, never for the ring's.
     pub fn tap(&self, capacity: usize) -> Result<Receiver<DecisionRecord>, AlreadyTapped> {
+        let live = |slot: &Option<Sender<DecisionRecord>>| slot.as_ref().is_some_and(|tx| !tx.is_closed());
+        // A refusal is decided under the read lock and never takes the write lock, so a reader retrying against a live
+        // tap cannot make `record` skip copies; the write lock is taken only to install, and liveness is checked again.
+        if live(&self.tap.read().unwrap_or_else(|p| p.into_inner())) {
+            return Err(AlreadyTapped);
+        }
         let mut slot = self.tap.write().unwrap_or_else(|p| p.into_inner());
-        if slot.as_ref().is_some_and(|tx| !tx.is_closed()) {
+        if live(&slot) {
             return Err(AlreadyTapped);
         }
         let (tx, rx) = tokio::sync::mpsc::channel(capacity.clamp(1, MAX_TAP_CAPACITY));

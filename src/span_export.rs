@@ -763,6 +763,38 @@ mod tests {
         assert_eq!(again.collect().unwrap().spans.len(), 1);
     }
 
+    /// #684's round 3, R1: a refused `tap()` used to take the tap's write lock, so a decision recorded meanwhile
+    /// skipped its copy silently. Now a refusal never takes the write lock, and a skipped copy is counted.
+    #[test]
+    fn a_refused_tap_never_makes_a_kept_record_vanish() {
+        let sink = Arc::new(DecisionSink::new(crate::decision::SinkConfig { max_records: 1 << 20, max_bytes: 1 << 30, max_input_bytes: 256 }));
+        let mut c = SpanCollector::new().with_decision_sink(Arc::clone(&sink), crate::decision::MAX_TAP_CAPACITY).unwrap();
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let retrier = {
+            let (sink, stop) = (Arc::clone(&sink), Arc::clone(&stop));
+            std::thread::spawn(move || {
+                let mut refused = 0u64;
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    if sink.tap(1).is_err() {
+                        refused += 1;
+                    }
+                }
+                refused
+            })
+        };
+        let mut spans = 0u64;
+        for i in 0..20_000 {
+            sink.record(decision()).unwrap();
+            if i % 1000 == 0 {
+                spans += c.collect().unwrap().spans.len() as u64;
+            }
+        }
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        assert!(retrier.join().unwrap() > 0, "the retry loop ran against the live tap");
+        spans += c.collect().unwrap().spans.len() as u64;
+        assert_eq!(spans + sink.tap_dropped(), 20_000, "every kept record is a span or a counted tap drop");
+    }
+
     /// N5 and N4: a capacity outside `1..=MAX_TAP_CAPACITY` is clamped, never a panic; the refusal is an error type.
     #[test]
     fn a_tap_capacity_is_clamped_and_its_refusal_is_an_error() {
