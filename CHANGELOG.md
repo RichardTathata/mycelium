@@ -9,18 +9,6 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Security
-
-- **`zstd` removed from the tree: RUSTSEC-2026-0391, -0398, -0403, -0410** (dated 2026-10-16, in the advisory database since 2026-10-26; unfixed upstream
-  as of wasmtime 50.0.0, whose `wasmtime-internal-cache` still requires `zstd ^0.13`). `zstd` reached the workspace
-  only through wasmtime's on-disk compilation cache, a default feature of `wasmtime`; `mycelium-wasm-host` never
-  configures that cache (no `cache_config` or `Config::cache` call), so the vulnerable code was compiled in and never
-  run. `mycelium-wasm-host` now depends on `wasmtime` with every default feature but `cache`, which takes `zstd`,
-  `zstd-safe`, `zstd-sys`, `wasmtime-internal-cache` and ten crates beneath them out of `Cargo.lock`; nothing else
-  changes. It clears the ten `zstd-safe` *unsound* warnings beside them too (RUSTSEC-2026-0395 to -0397 and -0399 to
-  -0406). **Check:** an application that turns wasmtime's `cache` feature on itself still carries `zstd` until
-  wasmtime requires `zstd` 0.14.3 (`zstd-safe` 8.2.0, `zstd-sys` 2.1.2); `cargo audit -f Cargo.lock` names it.
-
 ### Added
 
 - **`secure-multi-domain` — the profile, and the federation guarantee family it needs** (`docs/plans/adopter-surface.md`
@@ -65,6 +53,24 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   is not built. Feature page `docs/features/context-selection.md`. **Not built:** the wiki side (pages carry no issuer or
   verdict); a read mandate's epoch and revocation standing; re-verifying a selected record against the reader's current
   key view; scoping `KnowledgeStore`'s own methods (no route or SDK verb reads knowledge records).
+
+## [2.38.1] — 2026-10-26
+
+A security PATCH cut from the v2.38.0 tag. Wire **v12** unchanged (`PREV = 11`); no API change.
+
+### Security
+
+- **`zstd` removed from the tree: RUSTSEC-2026-0391, -0398, -0403, -0410** (dated 2026-10-16, in the advisory database since 2026-10-26; unfixed upstream
+  as of wasmtime 50.0.0, whose `wasmtime-internal-cache` still requires `zstd ^0.13`). `zstd` reached the workspace
+  only through wasmtime's on-disk compilation cache, a default feature of `wasmtime`; `mycelium-wasm-host` never
+  configures that cache (no `cache_config` or `Config::cache` call), so the vulnerable code was compiled in and never
+  run. `mycelium-wasm-host` now depends on `wasmtime` with every default feature but `cache`, which takes `zstd`,
+  `zstd-safe`, `zstd-sys`, `wasmtime-internal-cache` and ten crates beneath them out of `Cargo.lock`; nothing else
+  changes. It clears the ten `zstd-safe` *unsound* warnings beside them too (RUSTSEC-2026-0395 to -0397, -0399 to -0402
+  and -0404 to -0406). **Check:** an application that turns wasmtime's `cache` feature on itself still carries `zstd` until
+  wasmtime requires `zstd` 0.14.3 (`zstd-safe` 8.2.0, `zstd-sys` 2.1.2); one that depends on wasmtime with
+  `default-features = false` and calls its `Config::cache*` API compiled only because this crate's `cache` was unified
+  into its build, and must now enable `cache` itself; `cargo audit -f Cargo.lock` names it.
 
 ## [2.38.0] — 2026-10-26
 
