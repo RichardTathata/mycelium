@@ -21,6 +21,8 @@ mycelium-sim = { path = "../mycelium-sim", optional = true }
 # Every default feature but `cache`: the on-disk compilation cache is never configured here (no
 # `cache_config` / `Config::cache` call in the crate), and it is the only path by which `zstd` enters the
 # tree — RUSTSEC-2026-0391, -0398, -0403, -0410, unfixed upstream as of wasmtime 50.0.0.
+# On every wasmtime bump, re-diff this list against that release's `default` (minus `cache`): a
+# default feature added upstream is not picked up here.
 wasmtime = { version = "49", default-features = false, features = [
     "anyhow", "async", "backtrace", "gc", "gc-copying", "gc-drc", "gc-null", "wat", "profiling",
     "parallel-compilation", "cranelift", "pooling-allocator", "demangle", "addr2line", "coredump",
