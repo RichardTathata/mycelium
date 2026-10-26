@@ -15149,6 +15149,233 @@ async fn a_node_providing_every_requirement_starts_under_the_secure_profile() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// A node meeting every `secure-multi-domain` requirement that does not need a partner — the
+/// single-domain set as `a_node_providing_every_requirement_starts_under_the_secure_profile` builds it,
+/// and `domain_profile = enforced` with SWIM off — and, with `federated`, an edge and a client set as
+/// the federation runbook's table says (adopter-surface Y7, review finding 6).
+#[cfg(all(feature = "compliance", feature = "a2a"))]
+async fn secure_multi_domain_node(tag: &str, federated: bool) -> (GossipAgent, u16, std::path::PathBuf) {
+    secure_node_under("secure-multi-domain", tag, federated).await
+}
+
+/// [`secure_multi_domain_node`] under `profile`: the same node, so a test can compare the profiles.
+#[cfg(all(feature = "compliance", feature = "a2a"))]
+async fn secure_node_under(profile: &str, tag: &str, federated: bool) -> (GossipAgent, u16, std::path::PathBuf) {
+    use crate::agent::gateway_authority::ExecutionAuthority;
+    use crate::federation::{call::CallPolicy, client::{FederationClient, GatewayEndpoint}, edge::FederationEdge, DomainId, DomainPolicy, TrustBundle};
+    use crate::knowledge::issuer::TrustedExternalIssuers;
+    use crate::knowledge::IssuerId;
+    use crate::mandate::authority::{ClockModel, DurableEpochs, ExecutionGate, FreshnessPolicy, ResourceTier};
+    use crate::mandate::grant::{EntitlementTable, GrantVerifier};
+    use crate::mandate::{PrincipalId, ResourceAuthority};
+    use crate::{EvidenceJournal, EvidenceProfile, ReferenceEvaluator, Rule};
+    use ed25519_dalek::SigningKey;
+
+    let port = alloc_port();
+    let http_port = alloc_port();
+    let root = std::env::temp_dir().join(format!("y7-{tag}-{port}"));
+    let _ = std::fs::remove_dir_all(&root);
+    let cert_dir = root.join("tls");
+    let id = NodeId::new("127.0.0.1", port).unwrap();
+    let mut cfg = GossipConfig::default();
+    cfg.bind_port = port;
+    cfg.http_port = Some(http_port);
+    cfg.http_addr = "127.0.0.1".to_string();
+    let ca_dir = root.join("issuer");
+    {
+        let issuer_port = alloc_port();
+        let mut icfg = GossipConfig::auto();
+        icfg.bind_port = issuer_port;
+        icfg.tls = Some(TlsConfig { auto_cert_dir: ca_dir.clone(), ..Default::default() });
+        let issuer = GossipAgent::new(NodeId::new("127.0.0.1", issuer_port).unwrap(), icfg);
+        issuer.start().await.expect("the issuer node mints the fleet CA");
+        issuer.shutdown().await;
+    }
+    let (cert_pem, key_pem) = crate::issue_node_cert(&ca_dir, &id, &cert_dir).expect("a node certificate issued off-node");
+    std::fs::copy(ca_dir.join("ca-cert.pem"), cert_dir.join("ca-cert.pem")).unwrap();
+    cfg.tls = Some(TlsConfig { auto_cert_dir: cert_dir, cert_pem: Some(cert_pem), key_pem: Some(key_pem), ca_cert_pem: None });
+    cfg.gateway_tls = Some(crate::GatewayTlsConfig::default());
+    cfg.gateway_auth_token = Some("s3cret".into());
+    cfg.require_identity_proofs = true;
+    cfg.egress.allow_hosts = vec!["idp.coop.example".into(), "beta.example".into()];
+    cfg.persistence = Some(PersistenceConfig {
+        base_path: root.join("data"),
+        sync_mode: SyncMode::Flush,
+        snapshot_wal_threshold: 1_000_000,
+        snapshot_interval_secs: 3_600, on_unreadable: Default::default(),
+    });
+    cfg.consensus_require_electorate = true;
+    cfg.profile = Some(profile.into());
+    cfg.domain_profile = crate::config::DomainProfile::Enforced;
+    cfg.swim_failure_detector = false;
+
+    let mut a = GossipAgent::new(id, cfg).with_a2a();
+    let me = a.node_id().clone();
+    let resource = format!("skill:depot/dispatch@{me}");
+    a.with_action_evaluator(Arc::new(
+        ReferenceEvaluator::new("rev-y7")
+            .with_catalogue("cat-y7", "1")
+            .map_action("skill.invoke", resource.clone())
+            .allow(Rule::new("*", "skill.invoke", resource).requiring_mandate("depot")),
+    ));
+    a.with_evidence_journal(EvidenceJournal::open(root.join("evidence"), EvidenceProfile::Strict).unwrap());
+    a.with_provider_enforcement();
+    let mut entitlements = EntitlementTable::new();
+    entitlements.entitle("depot", PrincipalId::new("operator:acme").unwrap());
+    let mut external = TrustedExternalIssuers::new();
+    external
+        .trust(IssuerId::new("operator:acme").unwrap(), SigningKey::from_bytes(&[51u8; 32]).verifying_key().to_bytes())
+        .unwrap();
+    let gate = ExecutionGate::strict(
+        ResourceAuthority::new("depot", 1),
+        ResourceTier::Serialised,
+        ClockModel { skew_ms: 500 },
+        FreshnessPolicy { freshness_ms: 120_000, interval_ms: 30_000, delivery_ms: 10_000 },
+    )
+    .unwrap();
+    let authority = ExecutionAuthority::new(gate, GrantVerifier::new(entitlements), external);
+    authority.with_durable_epochs(DurableEpochs::open(root.join("epochs")).unwrap());
+    a.with_execution_authority(Arc::new(authority));
+    if federated {
+        let alpha = DomainId::new("alpha.example").unwrap();
+        let beta = DomainId::new("beta.example").unwrap();
+        let key = |b: u8| SigningKey::from_bytes(&[b; 32]);
+        let edge = FederationEdge::new(
+            alpha.clone(), ["demo/whoami"],
+            DomainPolicy { domain: alpha.clone(), revision: 1, grants: vec![(beta.clone(), "demo/whoami".into())] },
+            TrustBundle::trusting([(beta.clone(), key(2).verifying_key().to_bytes())]),
+            CallPolicy { require_body_binding: true, max_in_flight_per_partner: 4, ..CallPolicy::default() },
+        )
+        .with_signing_key(key(1));
+        let client = FederationClient::new(
+            alpha, "alpha-gw", key(1), beta,
+            vec![GatewayEndpoint { id: "b1".into(), base_url: "https://beta.example:8443".into() }],
+            4, Duration::from_secs(30),
+        )
+        .with_tls_pins(vec![[7; 32]])
+        .with_partner_key(key(2).verifying_key().to_bytes());
+        a = a.with_federation_edge(Arc::new(edge)).with_federation_clients([Arc::new(client)]);
+    }
+    (a, http_port, root)
+}
+
+/// Y7 review finding 6: the profile can be met. A node providing every requirement, with an edge
+/// and a client set as the runbook says, starts `Ok` under `secure-multi-domain` rev 1, every `fed.*`
+/// node fact enforced and the three partner-side ones listed as unresolved. Seen failing first: with
+/// the edge's `max_in_flight_per_partner` planted to 0 the start was refused naming `fed.partner_slots`.
+#[cfg(all(feature = "compliance", feature = "a2a"))]
+#[tokio::test]
+async fn a_node_providing_every_requirement_starts_under_the_multi_domain_profile() {
+    use crate::agent::guarantee::{check, SECURE_MULTI_DOMAIN};
+    let (a, _http, root) = secure_multi_domain_node("positive", true).await;
+    check(&a.guarantee_report(), &SECURE_MULTI_DOMAIN).expect("every requirement is enforced before start");
+    a.start().await.expect("and so the profile admits the node");
+    let r = a.guarantee_report();
+    assert!(r.started && r.node_requirements_satisfied(), "required unmet: {:?}", r.required_unmet());
+    assert_eq!(r.profile.as_ref().map(|p| (p.name, p.revision, p.selected)), Some(("secure-multi-domain", 1, true)));
+    for id in ["fed.domain_enforced", "fed.pinned", "fed.body_bound", "fed.partner_slots", "fed.caller_named", "fed.catalogue_signed", "fed.partner_egress"] {
+        assert_eq!(r.entry(id).unwrap().resolution.state(), "enforced", "{id}");
+    }
+    assert!(!r.faces_no_partner());
+    assert_eq!(r.unresolved(), ["net.confinement", "clock.sync", "fed.partner_posture", "fed.non_merger", "fed.clock_agreement"]);
+    a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Y7 review finding 1 (the blocker): a node started under `secure-multi-domain` facing no partner
+/// passes the family on `fed.domain_enforced` alone, so an edge or clients attached **after** `start()`
+/// would admit federated credentials the check never saw. They are inert instead, and counted: the
+/// reviewer's sequence — a `CallPolicy::default()` edge and an unpinned client to `http://evil.example`
+/// attached after start — leaves no edge and no client on the node, `/gateway/federation/domain` answers
+/// `configured: false`, `/gateway/federation/partners` lists none, and the live report still faces no
+/// partner. Seen failing first: the edge was live after start (`federation_edge` set, `configured: true`).
+#[cfg(all(feature = "compliance", feature = "a2a"))]
+#[tokio::test]
+async fn a_federation_attachment_after_start_is_inert_under_the_multi_domain_profile() {
+    use crate::federation::{call::CallPolicy, client::{FederationClient, GatewayEndpoint}, edge::FederationEdge, DomainId, DomainPolicy, TrustBundle};
+    let (a, http_port, root) = secure_multi_domain_node("late", false).await;
+    a.start().await.expect("a member facing no partner starts on fed.domain_enforced");
+    assert!(a.guarantee_report().faces_no_partner());
+    let alpha = DomainId::new("alpha.example").unwrap();
+    let beta = DomainId::new("beta.example").unwrap();
+    let key = |b: u8| ed25519_dalek::SigningKey::from_bytes(&[b; 32]);
+    let edge = FederationEdge::new(alpha.clone(), ["demo/whoami"],
+        DomainPolicy { domain: alpha.clone(), revision: 1, grants: vec![(beta.clone(), "demo/whoami".into())] },
+        TrustBundle::trusting([(beta.clone(), key(2).verifying_key().to_bytes())]),
+        CallPolicy::default());
+    let client = FederationClient::new(alpha, "alpha-gw", key(1), beta,
+        vec![GatewayEndpoint { id: "b1".into(), base_url: "http://evil.example:80".into() }], 4, Duration::from_secs(30));
+    let a = a.with_federation_edge(Arc::new(edge)).with_federation_clients([Arc::new(client)]);
+    assert_eq!(a.late_attachments(), 2, "both counted, each under its own name");
+    assert!(a.task_ctx.federation_edge.get().is_none(), "no edge: `/a2a` admits no federated credential");
+    assert!(a.task_ctx.federation_clients.get().is_none(), "no client: `/gateway/federation/*` mints no credential");
+    let r = a.guarantee_report();
+    assert!(r.faces_no_partner() && r.node_requirements_satisfied(), "the live report is the start-time one: {:?}", r.required_unmet());
+
+    // At the doors, over the node's own HTTPS gateway (pinned on its SPKI, as a partner dials it).
+    let pin = crate::federation::pinning::ed25519_spki_sha256(&a.task_ctx.tls.get().expect("TLS is on").verifying_key_bytes());
+    let http = reqwest::Client::builder()
+        .use_preconfigured_tls(crate::federation::pinning::pinned_client_config(vec![pin]))
+        .build()
+        .unwrap();
+    let get = |path: &'static str| {
+        let http = http.clone();
+        async move {
+            let url = format!("https://127.0.0.1:{http_port}{path}");
+            for _ in 0..100 {
+                if let Ok(r) = http.get(&url).bearer_auth("s3cret").send().await {
+                    return r.json::<serde_json::Value>().await.expect("json");
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            panic!("the gateway came up at {url}");
+        }
+    };
+    assert_eq!(get("/gateway/federation/domain").await["configured"], false, "the late edge serves nothing");
+    assert_eq!(get("/gateway/federation/partners").await["partners"], serde_json::json!([]), "the late client calls nothing");
+    a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Under `secure-single-domain`, which requires nothing of an edge or a client, a late federation
+/// attachment takes effect as before and is counted — the inert rule is `secure-multi-domain`'s alone
+/// (the confirmation round's narrowing, so §66's "no node changes behaviour unless it selects the new
+/// profile" holds). Seen failing first: under the rule as first written, any non-`dev` profile, the
+/// edge stayed unset here.
+#[cfg(all(feature = "compliance", feature = "a2a"))]
+#[tokio::test]
+async fn a_federation_attachment_after_start_takes_effect_under_the_single_domain_profile() {
+    use crate::federation::{call::CallPolicy, edge::FederationEdge, DomainId, DomainPolicy, TrustBundle};
+    let (a, _http, root) = secure_node_under("secure-single-domain", "late-single", false).await;
+    a.start().await.expect("the single-domain profile admits the node");
+    let alpha = DomainId::new("alpha.example").unwrap();
+    let a = a.with_federation_edge(Arc::new(FederationEdge::new(alpha.clone(), ["x"],
+        DomainPolicy { domain: alpha, revision: 1, grants: vec![] }, TrustBundle::default(), CallPolicy::default())));
+    assert_eq!(a.late_attachments(), 1, "counted");
+    assert!(a.task_ctx.federation_edge.get().is_some(), "and applied: this profile requires nothing of an edge");
+    a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Under `dev`, which requires nothing, a late federation attachment takes effect as before, and is
+/// counted — the inert rule is `secure-multi-domain`'s, not a new lifecycle rule for every node.
+#[cfg(all(feature = "compliance", feature = "a2a"))]
+#[tokio::test]
+async fn a_federation_attachment_after_start_takes_effect_under_dev() {
+    use crate::federation::{call::CallPolicy, edge::FederationEdge, DomainId, DomainPolicy, TrustBundle};
+    let port = alloc_port();
+    let mut cfg = GossipConfig::default();
+    cfg.bind_port = port;
+    let a = GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg);
+    a.start().await.expect("start");
+    let alpha = DomainId::new("alpha.example").unwrap();
+    let a = a.with_federation_edge(Arc::new(FederationEdge::new(alpha.clone(), ["x"],
+        DomainPolicy { domain: alpha, revision: 1, grants: vec![] }, TrustBundle::default(), CallPolicy::default())));
+    assert_eq!(a.late_attachments(), 1);
+    assert!(a.task_ctx.federation_edge.get().is_some(), "dev: the attachment applies");
+    a.shutdown().await;
+}
+
 /// `report.egress` (plan §8): the OIDC identity provider is an outbound the substrate chooses, so a
 /// non-empty `egress.allow_hosts` that does not permit it is a **contradiction refused at start**, by
 /// name — not a JWKS fetch that fails later behind a gateway that then refuses every token.

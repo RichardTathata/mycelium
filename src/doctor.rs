@@ -299,6 +299,11 @@ impl Doctor {
             }
             let summary: Vec<String> = counts.iter().map(|(k, v)| format!("{k} {v}")).collect();
             let _ = writeln!(s, "guarantees: {}", summary.join(" · "));
+            if r.profile.as_ref().is_some_and(|p| p.name == "secure-multi-domain") && r.faces_no_partner() {
+                // `doctor` builds a node from a file, which never has an edge or a client attached: say what
+                // that means here rather than leave six `not_applicable` lines to be read as a pass.
+                let _ = writeln!(s, "federation: {} (doctor cannot see an edge or clients attached in code)", crate::agent::guarantee::FACES_NO_PARTNER);
+            }
             for e in &r.entries {
                 let (state, detail) = state_of(&e.resolution);
                 if state != "enforced" {
@@ -354,6 +359,35 @@ mod tests {
         let err = agent.start().await.expect_err("start refuses under the profile");
         assert_eq!(refusal.reason, err.to_string(), "doctor and start() say the same thing");
         assert!(d.report.is_some() && d.confinement.is_some(), "the report is still taken");
+    }
+
+    /// Y7's exit: `doctor` prints the federation family. Under `secure-multi-domain` over a bare
+    /// configuration it names the profile and its revision, lists every `fed.*` id, and gives the same
+    /// refusal `start()` would — including `fed.domain_enforced`, the one federation fact a
+    /// configuration alone decides. The edge's and the clients' facts read `not_applicable`: they are
+    /// code attachments, which a node `doctor` builds from a file never has. Seen failing first: the
+    /// profile name was refused by `validate()` (stage `preflight`).
+    #[tokio::test]
+    async fn doctor_prints_the_federation_family_under_the_multi_domain_profile() {
+        let port = crate::test_util::alloc_port();
+        let path = write_cfg("multi-domain", &format!("bind_port = {port}\nprofile = \"secure-multi-domain\"\n"));
+        let d = run(Some(&path));
+        let refusal = d.refusal.clone().expect("secure-multi-domain over a bare configuration refuses");
+        assert_eq!(refusal.stage, "profile", "{refusal:?}");
+        assert!(refusal.reason.contains("profile `secure-multi-domain` rev 1"), "{}", refusal.reason);
+        assert!(refusal.reason.contains("[fed.domain_enforced: not_configured"), "{}", refusal.reason);
+        let text = d.render();
+        assert!(text.contains("profile: secure-multi-domain rev 1"), "{text}");
+        for id in ["fed.domain_enforced", "fed.pinned", "fed.body_bound", "fed.partner_slots", "fed.caller_named",
+                   "fed.catalogue_signed", "fed.partner_egress", "fed.partner_posture", "fed.non_merger", "fed.clock_agreement"] {
+            assert!(text.contains(&format!("  {id}: ")), "{id} is printed: {text}");
+        }
+        assert!(text.contains("fed.pinned: not_applicable"), "{text}");
+        assert!(text.contains("federation: this node faces no federation partner"), "said in one line: {text}");
+        let cfg = GossipConfig::load_from_file(&path).expect("loads");
+        let agent = GossipAgent::new(NodeId::new(&cfg.bind_address, cfg.bind_port).expect("node"), cfg);
+        let err = agent.start().await.expect_err("start refuses under the profile");
+        assert_eq!(refusal.reason, err.to_string(), "doctor and start() say the same thing");
     }
 
     /// X1's second exit: a table a build cannot enforce is reported as `start()` reports it — the

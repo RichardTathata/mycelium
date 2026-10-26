@@ -543,6 +543,22 @@ mod tests {
     /// - an undeclared caller is unaffected by the full cohort, and shares the undeclared pool;
     /// - a principal *named* like the cohort gets nothing from it: membership comes only from the view;
     /// - dropping held requests releases their places, and a member is admitted again.
+    /// Y7 review finding 7: a cohort budget attached after `start()` is counted as late (G13), under
+    /// its own name, like every other attachment. Seen failing first: `with_cohort_budget` noted nothing.
+    #[tokio::test]
+    async fn a_cohort_budget_attached_after_start_is_counted_as_late() {
+        let port = crate::test_util::alloc_port();
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = port;
+        let agent = GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg);
+        agent.with_cohort_budget(CohortBudget::new(3, 1), CohortView::trusting([]), TrustedExternalIssuers::new());
+        assert_eq!(agent.late_attachments(), 0, "before the boundary nothing is late");
+        agent.start().await.unwrap();
+        agent.with_cohort_budget(CohortBudget::new(3, 1), CohortView::trusting([]), TrustedExternalIssuers::new());
+        assert_eq!(agent.late_attachments(), 1, "after it, counted — even though the second is ignored as a duplicate");
+        agent.shutdown().await;
+    }
+
     #[tokio::test]
     async fn a_declared_cohort_is_capped_together_and_nothing_else_is_affected() {
         let operator = SigningKey::from_bytes(&[61u8; 32]);

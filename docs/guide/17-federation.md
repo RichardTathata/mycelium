@@ -209,6 +209,11 @@ let granted = client.connect().await?;                       // the catalogue is
 let reply = client.call("invoice.submit", text, Repeatability::AtMostOnce).await?;
 ```
 
+To have `start()` refuse a node whose side of the edge is not set this way — no pins, no partner key, an unsigned
+catalogue, no body binding, no slot cap, an open gateway, a partner host off the egress list, or an open domain
+profile — start it under `profile = "secure-multi-domain"`
+([feature page](../features/multi-domain-profile.md), [runbook](../operations/federation.md#starting-under-secure-multi-domain)).
+
 ### Bounding what a partner sends you
 
 Budgets used to run one way. `FederationClient`'s pool meters slots per partner on the **consumer**

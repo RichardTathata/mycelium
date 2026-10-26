@@ -2062,3 +2062,26 @@ pin the release they came from. The other section tables (`[[capability]]`, `[[g
 long and an exhaustive `match` on `Class` needs a `Grant` arm. `wire-check` gained one warning, `unissuable grant`: a
 rule that requires a grant with no rule admitting anyone to `grant.issue` on its resource (`*` for the operation or
 the resource counts; a `@<node>` suffix on either side is not matched — the reading `test --faults grant` shares).
+
+## 66. A third guarantee profile, `secure-multi-domain`; ten `fed.*` guarantees in every report; `GuaranteeReport::unresolved` lists only what applies (unreleased, adopter-surface Y7)
+
+`profile = "secure-multi-domain"` is new: `start()` refuses a node unless the twenty guarantees `secure-single-domain`
+rev 5 requires hold and the seven federation facts too — `fed.domain_enforced` (`domain_profile = "enforced"`), and
+on a node with an edge or clients `fed.pinned`, `fed.body_bound`, `fed.partner_slots`, `fed.caller_named`,
+`fed.catalogue_signed`, `fed.partner_egress` ([federation § Starting under `secure-multi-domain`](../operations/federation.md#starting-under-secure-multi-domain)).
+`secure-single-domain` is **unchanged** (rev 5), and no node changes behaviour unless it selects the new profile.
+
+**What a reader of the report sees change.** Every node's report gains ten entries in the `federation` subsystem —
+`fed.domain_enforced` reads `not_configured` on a node whose domain profile is open, the other nine `not_applicable`
+on a node with no federation edge or client, so a consumer that counts `not_configured` entries counts one more.
+`GuaranteeReport::unresolved()` now leaves out an external prerequisite whose role predicate makes it moot (the
+three federation ones on a node that faces no partner); before, it listed every external prerequisite. The log's
+"external prerequisites are not verifiable here" count follows it. `PROFILE_NAMES` gained the name, so a reader
+older than this release refuses `profile = "secure-multi-domain"` at `validate()` as an unknown profile.
+`with_federation_clients`, `with_federation_edge` and `with_cohort_budget` after `start()` are counted in
+`late_attachments` under their own names. Under `secure-multi-domain` — and only there — a federation edge or
+clients attached after `start()` are **ignored** (a warning, not an error): that profile's check at start never saw
+them; attach them before `start()`. Under `dev` and `secure-single-domain` a late attachment applies as before.
+**Migration:** none is required. To adopt the profile, set what the runbook's table names on every node of every
+federating domain, then select it; read each node's `GET /gateway/guarantees` after attaching its edge and clients,
+because `mycelium doctor` builds a node from a file and cannot see them.

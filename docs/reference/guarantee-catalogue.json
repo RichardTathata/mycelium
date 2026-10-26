@@ -326,6 +326,94 @@
       "docs": "docs/design/consensus-electorate.md"
     },
     {
+      "id": "fed.domain_enforced",
+      "revision": 1,
+      "subsystem": "federation",
+      "kind": "node_enforced",
+      "promise": "this node runs the enforced domain profile: TLS required and SWIM off, so membership at a federation boundary is never decided by unauthenticated UDP",
+      "needs": "`domain_profile = \"enforced\"` (`GOSSIP_DOMAIN_PROFILE`), with `swim_failure_detector = false` and `[tls]`, which `validate()` requires of it",
+      "enforcement_points": [
+        "GossipConfig::validate (domain_profile)"
+      ],
+      "docs": "docs/design/federated-domains.md"
+    },
+    {
+      "id": "fed.pinned",
+      "revision": 1,
+      "subsystem": "federation",
+      "kind": "node_enforced",
+      "promise": "every federation client dials its partner only over TLS terminated by a key the trust bundle pins (an `http://` endpoint is then refused, never called in the clear)",
+      "needs": "`FederationClient::with_tls_pins` on every client, from `TrustBundle::tls_pins_for`",
+      "enforcement_points": [
+        "federation::client::FederationClient::call_as (insecure_endpoint)",
+        "federation::pinning::PinnedServerVerifier"
+      ],
+      "docs": "docs/operations/federation.md"
+    },
+    {
+      "id": "fed.body_bound",
+      "revision": 1,
+      "subsystem": "federation",
+      "kind": "node_enforced",
+      "promise": "the edge refuses a federated credential that does not bind the request body, so a payload rewritten between domains does not verify",
+      "needs": "`CallPolicy::require_body_binding = true` on the attached `FederationEdge` (the 2.12.0 rolling-upgrade window closed)",
+      "enforcement_points": [
+        "federation::call::verify_federated_call",
+        "federation::edge::FederationEdge::authorize"
+      ],
+      "docs": "docs/operations/federation.md"
+    },
+    {
+      "id": "fed.partner_slots",
+      "revision": 1,
+      "subsystem": "federation",
+      "kind": "node_enforced",
+      "promise": "the edge carries at most a fixed number of calls from one partner at once, refusing the next rather than queuing it — per gateway, so N gateways admit N times the cap",
+      "needs": "`CallPolicy::max_in_flight_per_partner > 0` on the attached `FederationEdge`",
+      "enforcement_points": [
+        "federation::edge::FederationEdge::admit"
+      ],
+      "docs": "docs/operations/federation.md"
+    },
+    {
+      "id": "fed.caller_named",
+      "revision": 1,
+      "subsystem": "federation",
+      "kind": "node_enforced",
+      "promise": "on a gateway with federation clients, a credential is required, so a call made through `/gateway/federation/*` names an authenticated local caller rather than `anonymous` — the check `gw.not_open` makes, restated for the federation routes so the family says it; that the route mints under the resolved caller and never the node is by construction (`call_as`), not checked here",
+      "needs": "a gateway credential model (`gateway_auth_token`, or with `compliance` a token table or `[oidc]`) — the same predicate as `gw.not_open`; on an open gateway every call names `anonymous`",
+      "enforcement_points": [
+        "agent::http::federation_routes (call_as with the resolved principal)"
+      ],
+      "docs": "docs/operations/federation.md"
+    },
+    {
+      "id": "fed.catalogue_signed",
+      "revision": 1,
+      "subsystem": "federation",
+      "kind": "node_enforced",
+      "promise": "a catalogue is relied on only once it verifies under the partner's key, and the edge signs the catalogue it serves, so neither side acts on an export list a third party wrote",
+      "needs": "`FederationEdge::with_signing_key` on the edge; `FederationClient::with_partner_key` on every client",
+      "enforcement_points": [
+        "federation::edge::CatalogReply::verify",
+        "federation::edge::FederationEdge::catalog_for"
+      ],
+      "docs": "docs/operations/federation.md"
+    },
+    {
+      "id": "fed.partner_egress",
+      "revision": 1,
+      "subsystem": "federation",
+      "kind": "node_enforced",
+      "promise": "every partner endpoint a federation client dials is permitted by a non-empty egress allow-list the client is held to — by its exact host or by a `.suffix` entry, which admits every host under it, so a suffix entry covers more than the partner",
+      "needs": "`egress.allow_hosts` permitting each partner endpoint's host (the node's list reaches a client built without one), or `FederationClient::with_egress`; name the partner's host exactly to confine calls to it",
+      "enforcement_points": [
+        "federation::client::FederationClient::call_as (egress_permits)",
+        "config::EgressPolicy::permits_url"
+      ],
+      "docs": "docs/operations/federation.md"
+    },
+    {
       "id": "trace.spans_not_evidence",
       "revision": 1,
       "subsystem": "trace",
@@ -357,6 +445,36 @@
       "needs": "deployment time-sync (NTP or equivalent)",
       "enforcement_points": [],
       "docs": "docs/threat-model.md"
+    },
+    {
+      "id": "fed.partner_posture",
+      "revision": 1,
+      "subsystem": "federation",
+      "kind": "external_prerequisite",
+      "promise": "the partner domain runs its side of the edge as this one does: pinned, body-bound, metered, signing its catalogue",
+      "needs": "the partner's own report — its `GET /gateway/guarantees` under `secure-multi-domain`, exchanged out of band",
+      "enforcement_points": [],
+      "docs": "docs/operations/federation.md"
+    },
+    {
+      "id": "fed.non_merger",
+      "revision": 1,
+      "subsystem": "federation",
+      "kind": "external_prerequisite",
+      "promise": "the two domains stay two meshes: no node of one is admitted to the other's gossip",
+      "needs": "separate CAs and networks per domain; the edge the only path between them",
+      "enforcement_points": [],
+      "docs": "docs/design/federated-domains.md"
+    },
+    {
+      "id": "fed.clock_agreement",
+      "revision": 1,
+      "subsystem": "federation",
+      "kind": "external_prerequisite",
+      "promise": "the partner's clock agrees with this node's within `CallPolicy::skew_tolerance`, which every credential window across the edge assumes",
+      "needs": "time-sync on both sides of the edge",
+      "enforcement_points": [],
+      "docs": "docs/operations/federation.md"
     }
   ]
 }

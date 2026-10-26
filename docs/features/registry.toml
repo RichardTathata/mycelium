@@ -447,6 +447,16 @@ ids = ["cargo:mycelium-wiki/control-plane", "cargo:mycelium-wiki/gateway", "carg
 # Added in F2's second round: glossary rows anchored, and the crates as a source
 
 [[feature]]
+name = "The multi-domain profile"
+page = "multi-domain-profile.md"
+example = "none"
+example_watch = ["multi_domain", "secure_multi_domain"]
+ids = ["guarantee:fed.domain_enforced", "guarantee:fed.pinned", "guarantee:fed.body_bound", "guarantee:fed.partner_slots",
+       "guarantee:fed.caller_named", "guarantee:fed.catalogue_signed", "guarantee:fed.partner_egress",
+       "guarantee:fed.partner_posture", "guarantee:fed.non_merger", "guarantee:fed.clock_agreement"]
+links = ["concept:domain", "concept:guarantee-report"]
+
+[[feature]]
 name = "Federated domains"
 page = "todo"
 planned = "federation"
