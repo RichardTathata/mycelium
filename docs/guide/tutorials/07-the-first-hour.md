@@ -114,7 +114,9 @@ do not matter: each node of the class's fleet gets its directories under a tempo
 removed at the end (`--keep` leaves it and the report names it). The fleet's nodes log as nodes do — the dev profile,
 a CA minted for the run, the one-second timers the class sets — so the step sends stderr to `grant.err`, prints its
 last lines if the class did not pass (an unknown argument, a configuration the node refuses), and the verdict is the
-report.
+report. On v2.38.1 the file also holds, from the class's own fleet, a warning that the fleet CA's key is on the node,
+and in step 5 one that decisions will not be recorded: neither is about your configuration, and both are gone from
+the next release.
 
 ```bash one-hour:4
 cd "$HOME/governed-call-py"

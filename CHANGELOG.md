@@ -12,7 +12,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Changed
 
 - **Tutorial 7 and the `one-hour` job, after a walk-through by a newcomer** (an agent that had not seen Mycelium, reading
-  only the page; 121 s on macOS against v2.38.1, every step passing). One `PLATFORM` variable instead of three tarball
+  only the page; 121 s on macOS against v2.38.1, every step's checks passing — though the documented macOS checksum
+  fallback failed as written). One `PLATFORM` variable instead of three tarball
   names to edit; the macOS checksum command with `--ignore-missing` (without it `shasum -c` fails on the tarballs not
   downloaded); `mkdir -p ~/.local/bin` and the `PATH` before a non-root install; the virtual environment kept active for
   steps 2–6; ports 7950 and 8300; steps 4 and 5 send stderr to a file, the fleet's own node logs; step 4 says its

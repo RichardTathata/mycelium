@@ -283,10 +283,12 @@ impl Report {
             if self.classes.iter().any(|c| ran(c) && matches!(c.class, Class::Partition | Class::Recovery)) {
                 logs.push("a cut node's listener errors");
             }
-            let dirs = if f.persistence || f.tls {
-                " — the configuration's `[persistence]` and `[tls]` turn them on, and their `base_path` and `auto_cert_dir` are replaced"
-            } else {
-                ""
+            // Name only the tables this run had (#690's confirmation round, finding 4).
+            let dirs = match (f.persistence, f.tls) {
+                (true, true) => " — the configuration's `[persistence]` and `[tls]` turn them on, and their `base_path` and `auto_cert_dir` are replaced",
+                (true, false) => " — the configuration's `[persistence]` turns them on, and its `base_path` is replaced",
+                (false, true) => " — the configuration's `[tls]` turns them on, and its `auto_cert_dir` is replaced",
+                (false, false) => "",
             };
             s.push_str(&format!(
                 "fleet: its directories are the run's own, under a temporary directory removed at the end unless --keep{dirs}; \
@@ -1926,7 +1928,8 @@ mod tests {
         r.classes[0].state = ClassState::Passed;
         let text = r.render();
         assert!(text.contains("fleet: its directories are the run's own"), "{text}");
-        assert!(text.contains("`base_path` and `auto_cert_dir` are replaced"), "{text}");
+        assert!(text.contains("`[persistence]` turns them on, and its `base_path` is replaced"), "{text}");
+        assert!(!text.contains("[tls]") && !text.contains("auto_cert_dir"), "no TLS in this run: {text}");
         assert!(text.contains("the nodes' log lines on stderr are the fleet's own"), "{text}");
         assert!(!text.contains("a CA minted for the run"), "{text}");
         assert!(!text.contains("listener errors"), "{text}");
@@ -1934,6 +1937,7 @@ mod tests {
         r.fleet.tls = true;
         r.classes[0].class = Class::Recovery;
         let text = r.render();
+        assert!(text.contains("`[persistence]` and `[tls]` turn them on, and their `base_path` and `auto_cert_dir` are replaced"), "{text}");
         assert!(text.contains("a CA minted for the run"), "{text}");
         assert!(text.contains("a cut node's listener errors"), "{text}");
     }
