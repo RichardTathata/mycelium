@@ -6,7 +6,7 @@ All notable changes to this crate. It versions **independently** of the Mycelium
 
 ---
 
-## [0.11.0] — 2026-10-25
+## [0.11.0] — 2026-10-26
 
 **A traced run's `run_id` is its `correlation`** (adopter-surface X4, the substrate's causal records). When a route
 or chat-completion call carries a `run_id`, the router's preflight params carry `_meta.correlation` with the same
