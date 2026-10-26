@@ -5,7 +5,8 @@
 `mycelium doctor` is the [readiness report](../guide/00-concepts.md#doctor) without a node: what `start()` would print
 and whether it would refuse, from a configuration file and the environment alone. It runs the node's own preflight and
 profile check and takes the same [guarantee report](../guide/00-concepts.md#guarantee-report) over a node that is built and
-never started, so it binds no port, creates no directory and attaches nothing. It also prints the
+never started, so it binds no port, creates no directory and attaches nothing. The text form counts the guarantees by
+state, names the enforced ones on an `enforced:` line, and lists each one not enforced with its reason. It also prints the
 [effective configuration](../guide/00-concepts.md#effective-configuration) — every field as loaded, after defaults,
 file and environment, with its source named; a tuning
 field at its auto value prints that value, the node derives the running one — and shows a secret as `set` or

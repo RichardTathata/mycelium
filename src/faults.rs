@@ -13,8 +13,8 @@
 //! exercise and why, in the guarantee report's own vocabulary (`not_configured`, `not_in_build`,
 //! `not_applicable`, `not_verifiable_here`).
 //!
-//! **What the fleet is, and is not.** Its nodes carry the adopter's configuration — profile, TLS,
-//! persistence, every setting — with these rewritten: loopback addresses and free ports; persistence and
+//! **What the fleet is, and is not.** Its nodes carry the adopter's configuration — TLS, persistence,
+//! every setting but the profile, which is reported as declared and not applied — with these rewritten: loopback addresses and free ports; persistence and
 //! the TLS material under a temporary directory the run removes, so no adopter directory is written;
 //! no gateway port (the classes drive the nodes in process); a one-second health check and a one-second
 //! governor cooldown, so a cut is seen in seconds. Each unit's node advertises the unit's
@@ -271,6 +271,12 @@ impl Report {
         if let Some(k) = &self.kept {
             s.push_str(&format!("kept: {} (journals under <class>/, persistence under <class>/persist/)\n", k.display()));
         }
+        s.push_str(
+            "fleet: its directories are the run's own, under a temporary directory removed at the end unless --keep — the \
+             configuration's `[persistence]` and `[tls]` turn them on, and their `base_path` and `auto_cert_dir` are replaced; \
+             the nodes' log lines on stderr are the fleet's own (the dev profile, a CA minted for the run, the one-second \
+             timers set here, a crashed node's listener errors) and the verdict is this report\n",
+        );
         for c in &self.classes {
             s.push('\n');
             let state = match &c.state {
@@ -1883,6 +1889,19 @@ mod tests {
         assert_eq!(r.classes[0].state, ClassState::NotInBuild { feature: "tls" });
         #[cfg(not(feature = "gateway"))]
         assert_eq!(r.classes[0].state, ClassState::NotInBuild { feature: "gateway" });
+    }
+
+    /// The report says where the fleet's directories are and what its nodes' log lines are, once (a walk-through of
+    /// tutorial 7 found the appended `base_path` and `auto_cert_dir` unused, which is by design, and ~30 WARN/ERROR
+    /// lines on stderr read as a failure, which they are not).
+    #[test]
+    fn the_report_says_where_the_fleet_lives_and_what_its_log_lines_are() {
+        let units = vec![unit("p", "principal = \"p\"\n")];
+        let r = run(&units, &[], &CheckOptions::default(), &Options { classes: vec![Class::Recovery], ..Default::default() }).expect("the run");
+        let text = r.render();
+        assert!(text.contains("fleet: its directories are the run's own"), "{text}");
+        assert!(text.contains("`base_path` and `auto_cert_dir` are replaced"), "{text}");
+        assert!(text.contains("the nodes' log lines on stderr are the fleet's own"), "{text}");
     }
 
     /// `recovery` without `[persistence]`: `not_configured`, naming the table; the ids it would drive listed as not

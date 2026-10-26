@@ -9,9 +9,12 @@ report naming what the fleet enforces?
 
 **The claim is measured, or it is not made.** CI's `one-hour` job
 ([`.github/workflows/one-hour.yml`](../../../.github/workflows/one-hour.yml)) walks exactly this path on each
-release it is run against — on v2.37.0 it measured steps 1, 2, 3 and 6; steps 4 and 5 join from v2.38.0, the first release
-that carries their fault classes — in a plain Python container, from the first `curl` to the last `doctor`, and prints the seconds per step to
-the job summary. The commands below are the job's — a test
+release it is run against, in a plain Python container, from the first `curl` to the last `doctor`, and prints the
+seconds per step to the job summary: all six steps took **12 s** on v2.38.0 and **13 s** on v2.38.1 (on v2.37.0,
+before steps 4 and 5 had their fault classes, steps 1, 2, 3 and 6 took 9 s). That is the commands' time, not a
+reader's: **how long a person takes is not measured.** One walk-through by an agent that had not seen Mycelium
+before, reading only this page, took 121 s on macOS (v2.38.1) — not a human figure; its estimate for a developer
+comfortable with a shell and Python was 20–35 minutes, an estimate, not a measurement. The commands below are the job's — a test
 ([`tests/first_hour_tutorial.rs`](../../../tests/first_hour_tutorial.rs)) diffs each fenced block here against the
 workflow's step, so a reader and the job walk one path and the job's green run is the proof that the commands do not
 fail as written. The number the documentation prints for *one hour* is what that job measured on the most recent
@@ -26,14 +29,19 @@ with `unknown argument: test` (that release has no `test` command), and steps 1,
 ```sh
 TAG=v2.38.1                       # the newest release; the job reads it from the Release that triggered it
 REPO=RichardTathata/mycelium
+PLATFORM=linux-x86_64             # or linux-aarch64, macos-aarch64 — the tarball names the release ships
 ```
 
 **On another machine.** The commands are the job's, on Linux x86_64 as root in a clean container. Elsewhere:
-substitute `linux-aarch64` or `macos-aarch64` for `linux-x86_64` in the tarball name; on macOS use
-`shasum -a 256 -c SHA256SUMS` if `sha256sum` is missing; as a non-root user install to a directory on your `PATH`
-you own (`install -m 0755 … ~/.local/bin/mycelium`); with a Python your OS manages (PEP 668:
-`externally-managed-environment`), create a virtual environment first (`python3 -m venv .venv && . .venv/bin/activate`);
-on Linux the binary needs `libssl3` and `ca-certificates`, which the job installs before its clock starts.
+set `PLATFORM` above; on macOS without `sha256sum`, use `shasum -a 256 --ignore-missing -c SHA256SUMS` (without
+`--ignore-missing` it fails on the tarballs you did not download); as a non-root user, install to a directory you own
+and put it on your `PATH` first — `mkdir -p ~/.local/bin && export PATH="$HOME/.local/bin:$PATH"`, then
+`install -m 0755 … ~/.local/bin/mycelium` (`install` does not create the directory, and on macOS it is not on `PATH`
+by default); with a Python your OS manages (PEP 668: `externally-managed-environment`), create a virtual environment
+first (`python3 -m venv "$HOME/.venv-mycelium" && . "$HOME/.venv-mycelium/bin/activate"`) and **keep it active for
+steps 2–6** — step 3's script imports the SDK step 2 installs into it; in a new shell, activate it again. Step 3 starts
+a node on ports **7950** (the mesh) and **8300** (the gateway), which must be free. On Linux the binary needs `libssl3`
+and `ca-certificates`, which the job installs before its clock starts.
 
 ## Step 1 · The published node: download, verify the sum, run it
 
@@ -44,11 +52,11 @@ Every `v*` tag publishes `mycelium`, `mycelium-stem` and `mycelium-artifact` wit
 ```bash one-hour:1
 base="https://github.com/$REPO/releases/download/$TAG"
 ver="${TAG#v}"
-curl -fsSLO --retry 5 --retry-delay 5 --retry-all-errors "$base/mycelium-$ver-linux-x86_64.tar.gz"
+curl -fsSLO --retry 5 --retry-delay 5 --retry-all-errors "$base/mycelium-$ver-$PLATFORM.tar.gz"
 curl -fsSLO --retry 5 --retry-delay 5 --retry-all-errors "$base/SHA256SUMS"
 sha256sum --ignore-missing -c SHA256SUMS
-tar -xzf "mycelium-$ver-linux-x86_64.tar.gz"
-install -m 0755 "mycelium-$ver-linux-x86_64/mycelium" /usr/local/bin/mycelium
+tar -xzf "mycelium-$ver-$PLATFORM.tar.gz"
+install -m 0755 "mycelium-$ver-$PLATFORM/mycelium" /usr/local/bin/mycelium
 got=$(mycelium --version)
 [ "$got" = "mycelium $ver" ] || { echo "::error::mycelium --version printed [$got]"; exit 1; }
 ```
@@ -97,16 +105,21 @@ fleet from that declaration and your configuration and drives it ([grants](../..
 [fault classes](../../features/test-faults.md)): a plain transition is refused and silence refuses within the window;
 a principal no rule names is refused the issue by the evaluator, the treasurer's grant admits the call once; the
 agent's node is stopped before it reads an answer, the treasurer answers the standing request, and after the restart
-the request and the grant are back from the node's own WAL — the agent re-waits and does not ask twice. **Where it
-is enforced:** by the evaluator the `grant` class builds from your declaration's rules, inside the class's own
-in-process fleet — the published node you started in step 3 attaches no evaluator, so it enforces none of this. The
-class needs `[tls]` (the node signs the grant) and `[persistence]` (the grant survives the restart), so the step appends
-both to the scaffold's configuration.
+the request and the grant are back from the node's own WAL — the agent re-waits and does not ask twice. Two more checks
+follow: the grant is bound to its arguments (other arguments ask again and are refused on silence), and the decisions
+are on the record. **Where it is enforced:** by the evaluator the `grant` class builds from your declaration's rules,
+inside the class's own in-process fleet — the published node you started in step 3 attaches no evaluator, so it
+enforces none of this. The class needs `[tls]` (the node signs the grant) and `[persistence]` (the grant survives the
+restart), so the step appends both tables to the scaffold's configuration. Their presence turns them on; their paths
+do not matter: each node of the class's fleet gets its directories under a temporary directory of the run's own,
+removed at the end (`--keep` leaves it and the report names it). The fleet's nodes log as nodes do — the dev profile,
+a CA minted for the run, the one-second timers the class sets, a crashed node's listener errors — so the step sends
+stderr to `grant.err`; the verdict is the report.
 
 ```bash one-hour:4
 cd "$HOME/governed-call-py"
 { cat node.toml; printf '\n[persistence]\nbase_path = "data/grant-persist"\n\n[tls]\nauto_cert_dir = "data/grant-tls"\n'; } > grant.toml
-mycelium test --faults grant units --config grant.toml | tee grant.log
+mycelium test --faults grant units --config grant.toml 2> grant.err | tee grant.log
 grep -q '^grant: passed' grant.log
 grep -q '✓ a grant-required tool is default-deny' grant.log
 grep -q '✓ issuing is the declaration'"'"'s rule' grant.log
@@ -119,12 +132,12 @@ The `recovery` class ([selective recovery](../../features/selective-recovery.md)
 fleet send effects to one mock destination that loses an answer; the node that lost it is restarted over its WAL,
 finds its record *unknown*, probes before any retry, and the destination holds one effect; dependent work elsewhere is
 recovered by its declared class, independent work untouched, and `mycelium explain --closure` renders why from the
-records. Over the same configuration with `[persistence]`.
+records. Over the same configuration with `[persistence]`, and stderr to `recovery.err` as in step 4.
 
 ```bash one-hour:5
 cd "$HOME/governed-call-py"
 { cat node.toml; printf '\n[persistence]\nbase_path = "data/recovery-persist"\n'; } > recovery.toml
-mycelium test --faults recovery units --config recovery.toml | tee recovery.log
+mycelium test --faults recovery units --config recovery.toml 2> recovery.err | tee recovery.log
 grep -q '^recovery: passed' recovery.log
 grep -q '✓ the restarted node finds its lost-acknowledgement record unknown in its own ledger, probes before any retry, and the destination holds one effect' recovery.log
 grep -q '✓ the destination saw each effect once' recovery.log
@@ -134,14 +147,15 @@ grep -q 'mycelium explain --closure' recovery.log
 ## Step 6 · A readiness report naming what the fleet enforces
 
 `mycelium doctor` ([feature page](../../features/doctor.md)) runs `start()`'s own refusal chain and profile check
-over a node built and never started, and lists what the configuration does **not** enforce — so the token table,
-which it does, must not appear as unmet.
+over a node built and never started, counts the guarantees by state, and lists what the configuration does **not**
+enforce — so the token table, which it does, must not appear as unmet, and the count of enforced guarantees must not
+be zero. From the release after v2.38.1, a line `enforced: …` names the enforced ones too.
 
 ```bash one-hour:6
 cd "$HOME/governed-call-py"
 mycelium doctor node.toml | tee doctor.log
 grep -q 'start(): would start' doctor.log
-grep -q 'guarantees: enforced' doctor.log
+grep -Eq 'guarantees: enforced [1-9]' doctor.log
 if grep -q 'gw.token_tables:' doctor.log; then echo '::error::gw.token_tables is listed as unmet'; exit 1; fi
 ```
 

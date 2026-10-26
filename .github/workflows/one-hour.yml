@@ -44,6 +44,7 @@ jobs:
       # On workflow_run for a tag push, head_branch is the tag's name.
       TAG: ${{ inputs.tag || github.event.workflow_run.head_branch }}
       REPO: ${{ github.repository }}
+      PLATFORM: linux-x86_64
     steps:
       - name: The tools a slim container lacks (before the clock), and the tag
         run: |
@@ -67,11 +68,11 @@ jobs:
           base="https://github.com/$REPO/releases/download/$TAG"
           ver="${TAG#v}"
           # A bounded retry: a Release's assets follow its creation by a moment (the release's latency, not the adopter's).
-          curl -fsSLO --retry 5 --retry-delay 5 --retry-all-errors "$base/mycelium-$ver-linux-x86_64.tar.gz"
+          curl -fsSLO --retry 5 --retry-delay 5 --retry-all-errors "$base/mycelium-$ver-$PLATFORM.tar.gz"
           curl -fsSLO --retry 5 --retry-delay 5 --retry-all-errors "$base/SHA256SUMS"
           sha256sum --ignore-missing -c SHA256SUMS
-          tar -xzf "mycelium-$ver-linux-x86_64.tar.gz"
-          install -m 0755 "mycelium-$ver-linux-x86_64/mycelium" /usr/local/bin/mycelium
+          tar -xzf "mycelium-$ver-$PLATFORM.tar.gz"
+          install -m 0755 "mycelium-$ver-$PLATFORM/mycelium" /usr/local/bin/mycelium
           got=$(mycelium --version)
           [ "$got" = "mycelium $ver" ] || { echo "::error::mycelium --version printed [$got]"; exit 1; }
           echo "1-download-verify-run,$(( $(date +%s) - t ))" >> /tmp/steps.csv
@@ -117,7 +118,7 @@ jobs:
           # The class needs [tls] (the node signs the grant) and [persistence] (the grant survives the restart): the
           # scaffold's node.toml with both under the project.
           { cat node.toml; printf '\n[persistence]\nbase_path = "data/grant-persist"\n\n[tls]\nauto_cert_dir = "data/grant-tls"\n'; } > grant.toml
-          mycelium test --faults grant units --config grant.toml | tee grant.log
+          mycelium test --faults grant units --config grant.toml 2> grant.err | tee grant.log
           grep -q '^grant: passed' grant.log
           grep -q '✓ a grant-required tool is default-deny' grant.log
           grep -q '✓ issuing is the declaration'"'"'s rule' grant.log
@@ -133,7 +134,7 @@ jobs:
           cd "$HOME/governed-call-py"
           # The class needs [persistence]: the scaffold's node.toml with a persistence table under the project.
           { cat node.toml; printf '\n[persistence]\nbase_path = "data/recovery-persist"\n'; } > recovery.toml
-          mycelium test --faults recovery units --config recovery.toml | tee recovery.log
+          mycelium test --faults recovery units --config recovery.toml 2> recovery.err | tee recovery.log
           grep -q '^recovery: passed' recovery.log
           grep -q '✓ the restarted node finds its lost-acknowledgement record unknown in its own ledger, probes before any retry, and the destination holds one effect' recovery.log
           grep -q '✓ the destination saw each effect once' recovery.log
@@ -149,7 +150,7 @@ jobs:
           cd "$HOME/governed-call-py"
           mycelium doctor node.toml | tee doctor.log
           grep -q 'start(): would start' doctor.log
-          grep -q 'guarantees: enforced' doctor.log
+          grep -Eq 'guarantees: enforced [1-9]' doctor.log
           # doctor lists only what is NOT enforced; the token table is, so its id must not appear as unmet.
           if grep -q 'gw.token_tables:' doctor.log; then echo '::error::gw.token_tables is listed as unmet'; exit 1; fi
           echo "6-doctor,$(( $(date +%s) - t ))" >> /tmp/steps.csv
