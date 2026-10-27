@@ -1,0 +1,42 @@
+# Two domains, each its own fleet under its own CA: a food bank that holds stock, and a community kitchen that cooks
+# from it. Each serves the other one export and calls the other's, so every guarantee of the edge holds both ways. This
+# file says who serves what, who may call it, and what each side holds of the other; the nodes' own settings are in
+# nodes/*.toml. `bash fleet.sh setup` makes everything it points at under exchange/, certs/ and secrets/ — the pins and
+# public keys in exchange/ are what the two operators hand each other.
+
+# ── The food bank ──────────────────────────────────────────────────────────────────────────────
+[domains."foodbank.example"]
+signing_seed = "secrets/foodbank.example.seed"   # signs its catalogue and its calls' credentials; stays on the gateway
+gateway      = "foodbank-gw"
+# What it serves, and what it grants each partner (a signed catalogue). `reserve` takes a while, as a reservation might.
+exports      = ["pantry/stock", "pantry/reserve"]
+grants       = { "kitchen.example" = ["pantry/stock", "pantry/reserve"] }
+trust        = { "kitchen.example" = "exchange/kitchen.example.pub" }
+# At most this many calls from one partner at once at this gateway; the next is refused, not queued.
+max_in_flight_per_partner = 2
+# The second door: its providers' policy permits exactly this partner principal to invoke what it serves.
+permit_actor = "federation:kitchen.example/token:kitchen/planner"
+
+# The client it holds for the kitchen: where it dials, the key that gateway must present, and the key the kitchen's
+# catalogue must verify under; and which of its local callers its own policy lets reach which export.
+[domains."foodbank.example".partner."kitchen.example"]
+endpoints = ["https://127.0.0.1:8471"]
+pin_file  = "exchange/kitchen-gw.pin"
+key_file  = "exchange/kitchen.example.pub"
+permit    = { "token:foodbank/steward" = ["menu/today"] }
+
+# ── The community kitchen ──────────────────────────────────────────────────────────────────────
+[domains."kitchen.example"]
+signing_seed = "secrets/kitchen.example.seed"
+gateway      = "kitchen-gw"
+exports      = ["menu/today"]
+grants       = { "foodbank.example" = ["menu/today"] }
+trust        = { "foodbank.example" = "exchange/foodbank.example.pub" }
+max_in_flight_per_partner = 2
+permit_actor = "federation:foodbank.example/token:foodbank/steward"
+
+[domains."kitchen.example".partner."foodbank.example"]
+endpoints = ["https://127.0.0.1:8461"]
+pin_file  = "exchange/foodbank-gw.pin"
+key_file  = "exchange/foodbank.example.pub"
+permit    = { "token:kitchen/planner" = ["pantry/stock", "pantry/reserve"] }

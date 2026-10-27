@@ -32,6 +32,26 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The two-domain scaffold** (`docs/plans/adopter-surface.md` Y8): `mycelium init <dir> --template two-domains` writes
+  two fleets of two nodes — a food bank exporting `pantry/stock` and `pantry/reserve`, a community kitchen exporting
+  `menu/today` — each its own domain under `secure-multi-domain`: each domain's CA minted and every certificate issued
+  where no node is pointed, named tokens from the environment, egress lists naming the partner's gateway (or a reserved
+  name that admits nothing), an evaluator, evidence journal and execution authority on every node, and on each gateway
+  an edge that binds bodies and carries at most two of the partner's calls at once and a client for the other, pinned
+  to that gateway's key. A call made at one gateway by its named local caller reaches the other's provider as
+  `federation:kitchen.example/token:kitchen/planner` (or `…foodbank.example/token:foodbank/steward`); each gateway's own
+  `GET /gateway/guarantees` reads all seven `fed.*` node facts `enforced`, `fed.pinned`, `fed.caller_named` and
+  `fed.partner_egress` among them (carried from Y7, #691); a wrong pin, a body rewritten after it was signed and a
+  third concurrent call are each refused; every node's doctor reads `would start`. CI's `Scaffold` job runs every line, building the scaffold against the checkout. One domain is the
+  scaffold with the second fleet deleted, and its README says how (D26).
+- **`mycelium tls ca --out <dir>`** mints a fleet CA on the issuer's host (`mycelium::mint_ca`, refused over an existing
+  CA) — until now only a node started over an empty directory could, so the off-node path had no first step of its
+  own — and **`mycelium tls pin <cert.pem>`** prints a certificate's SPKI SHA-256, the value a federation partner pins.
+- **`mycelium::doctor::run_attached(path, attach)`**: the doctor over a node an embedder builds — the same load,
+  `preflight()`, report and profile check as `run`, with the program's own code attachments (an evaluator, a journal, a
+  federation edge or clients) applied first, so the report and the refusal are that program's `start()`'s. `Doctor`
+  gained `attached` (an exhaustive struct literal breaks; nothing outside the crate builds one).
+
 - **A record a span names, read by its hash on the node that wrote it** (`docs/plans/adopter-surface.md` Y4's last
   promise; `docs/operations/audit.md` §3a): `GET /gateway/records/decision/{sha256}` and
   `GET /gateway/records/evidence/{sha256}`, scope `audit:read`, feature `compliance`. The answer carries the record's
@@ -105,6 +125,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   is not built. Feature page `docs/features/context-selection.md`. **Not built:** the wiki side (pages carry no issuer or
   verdict); a read mandate's epoch and revocation standing; re-verifying a selected record against the reader's current
   key view; scoping `KnowledgeStore`'s own methods (no route or SDK verb reads knowledge records).
+
+### Found
+
+- **A federated credential presented again, with the same body and inside its window, is served again.** The edge
+  checks the signature, the body binding, the window and the grant, and keeps no record of credentials it has served;
+  the two-domain scaffold showed it (the same presented call answered twice). Stated in the federation runbook and the
+  scaffold's README; not changed in this release.
 
 ## [2.38.1] — 2026-10-26
 

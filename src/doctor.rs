@@ -78,6 +78,9 @@ pub struct Doctor {
     /// The JSON form's schema id; a field added later keeps the id, a field removed or renamed bumps it.
     pub schema: &'static str,
     pub config_path: Option<PathBuf>,
+    /// Whether the node was built by [`run_attached`], with the embedder's code attachments, rather
+    /// than from the file alone.
+    pub attached: bool,
     pub effective: Vec<Field>,
     pub refusal: Option<Refusal>,
     pub report: Option<GuaranteeReport>,
@@ -89,9 +92,28 @@ pub struct Doctor {
 /// `mycelium` with no `-c` does). Call it inside a tokio runtime context: the node's constructor
 /// registers with the runtime as the binary's does, though nothing is started.
 pub fn run(config_path: Option<&Path>) -> Doctor {
+    run_inner(config_path, None)
+}
+
+/// The doctor over a node an embedder builds: the same load, `preflight()`, report and
+/// `profile_check()` as [`run`], with `attach` applied to the node between its construction and
+/// `preflight()` — the function the embedder's own program runs before `start()`, so what it attaches
+/// in code (an action evaluator, an evidence journal, a federation edge or clients) is what the report
+/// reads, and the refusal is the one that program's `start()` would give (adopter-surface Y8). The node
+/// is still never started: no port is bound and no persistence directory is created by the doctor —
+/// but `attach` runs as written, so an evidence journal it opens is opened. [`Doctor::attached`] is
+/// `true`, and the text no longer says the doctor cannot see code attachments.
+pub fn run_attached(config_path: Option<&Path>, attach: impl FnOnce(GossipAgent) -> GossipAgent) -> Doctor {
+    run_inner(config_path, Some(Box::new(attach)))
+}
+
+type Attach<'a> = Box<dyn FnOnce(GossipAgent) -> GossipAgent + 'a>;
+
+fn run_inner(config_path: Option<&Path>, attach: Option<Attach<'_>>) -> Doctor {
     let mut d = Doctor {
         schema: SCHEMA,
         config_path: config_path.map(Path::to_path_buf),
+        attached: attach.is_some(),
         effective: Vec::new(),
         refusal: None,
         report: None,
@@ -137,6 +159,10 @@ pub fn run(config_path: Option<&Path>) -> Doctor {
     // `profile_check()` that `start()` runs, in its order; the report taken between them as `start()`
     // takes it — except that `started` reads false here, which the report records.
     let agent = GossipAgent::new(node, cfg);
+    let agent = match attach {
+        Some(attach) => attach(agent),
+        None => agent,
+    };
     if let Err(e) = agent.preflight() {
         d.refusal = Some(refusal("preflight", &e));
     }
@@ -304,8 +330,10 @@ impl Doctor {
             let _ = writeln!(s, "enforced: {}", if enforced.is_empty() { "none".to_string() } else { enforced.join(", ") });
             if r.profile.as_ref().is_some_and(|p| p.name == "secure-multi-domain") && r.faces_no_partner() {
                 // `doctor` builds a node from a file, which never has an edge or a client attached: say what
-                // that means here rather than leave six `not_applicable` lines to be read as a pass.
-                let _ = writeln!(s, "federation: {} (doctor cannot see an edge or clients attached in code)", crate::agent::guarantee::FACES_NO_PARTNER);
+                // that means here rather than leave six `not_applicable` lines to be read as a pass. Over an
+                // embedder's attachments (`run_attached`) the line is a fact about the node, not the doctor.
+                let why = if self.attached { "" } else { " (doctor cannot see an edge or clients attached in code)" };
+                let _ = writeln!(s, "federation: {}{why}", crate::agent::guarantee::FACES_NO_PARTNER);
             }
             for e in &r.entries {
                 let (state, detail) = state_of(&e.resolution);
@@ -391,6 +419,40 @@ mod tests {
         let agent = GossipAgent::new(NodeId::new(&cfg.bind_address, cfg.bind_port).expect("node"), cfg);
         let err = agent.start().await.expect_err("start refuses under the profile");
         assert_eq!(refusal.reason, err.to_string(), "doctor and start() say the same thing");
+    }
+
+    /// Adopter-surface Y8: the doctor over a node an embedder builds sees what it attaches in code. Over the same
+    /// file, `run` reads the client-side `fed.*` guarantees `not_applicable` — a node from a file has no client —
+    /// and `run_attached`, given the attachment the program makes, reads them as that client makes them: here
+    /// unpinned, so `fed.pinned` is `not_configured` and the profile refuses naming it, as that program's `start()`
+    /// would. Seen failing first with `run_inner` ignoring `attach` (`fed.pinned` read `not_applicable`).
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    #[tokio::test]
+    async fn the_doctor_over_an_attached_node_reads_its_attachments_and_starts_refusal() {
+        use crate::federation::{client::{FederationClient, GatewayEndpoint}, DomainId};
+        let port = crate::test_util::alloc_port();
+        let path = write_cfg("attached", &format!("bind_port = {port}\nprofile = \"secure-multi-domain\"\n"));
+        let client = || std::sync::Arc::new(FederationClient::new(
+            DomainId::new("a.example").unwrap(), "node:x", ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]),
+            DomainId::new("b.example").unwrap(), vec![GatewayEndpoint { id: "b#0".into(), base_url: "https://127.0.0.1:1".into() }],
+            1, std::time::Duration::from_secs(60),
+        ));
+        let state = |d: &Doctor, id: &str| d.report.as_ref().and_then(|r| r.entry(id)).map(|e| state_of(&e.resolution).0);
+        let plain = run(Some(&path));
+        assert!(!plain.attached);
+        assert_eq!(state(&plain, "fed.pinned"), Some("not_applicable"));
+        assert!(plain.render().contains("doctor cannot see an edge or clients attached in code"));
+        let attached = run_attached(Some(&path), |agent| agent.with_federation_clients([client()]));
+        assert!(attached.attached);
+        assert_eq!(state(&attached, "fed.pinned"), Some("not_configured"), "the doctor reads the attached client");
+        let refusal = attached.refusal.clone().expect("an unpinned client under the profile refuses");
+        assert!(refusal.reason.contains("fed.pinned: not_configured"), "{}", refusal.reason);
+        assert!(!attached.render().contains("doctor cannot see"), "the doctor no longer says it cannot see attachments");
+        // The same node, started: the same refusal in the same words.
+        let cfg = GossipConfig::load_from_file(&path).expect("loads");
+        let agent = GossipAgent::new(NodeId::new(&cfg.bind_address, cfg.bind_port).expect("node"), cfg).with_federation_clients([client()]);
+        let err = agent.start().await.expect_err("start refuses under the profile");
+        assert_eq!(refusal.reason, err.to_string(), "doctor and the embedder's start() say the same thing");
     }
 
     /// X1's second exit: a table a build cannot enforce is reported as `start()` reports it — the

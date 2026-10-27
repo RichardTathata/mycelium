@@ -188,7 +188,8 @@ identity. The guarantee `id.ca_key_off_node` holds only for a node that starts f
 certificate and the CA **certificate** alone:
 
 ```bash
-# on the issuer's host, where ca-cert.pem + ca-key.pem live (never on a node):
+# on the issuer's host, where ca-cert.pem + ca-key.pem live (never on a node) — minted there once:
+mycelium tls ca --out ./fleet-ca          # refused if ./fleet-ca already holds a CA
 mycelium tls issue --ca-dir ./fleet-ca --node 10.0.0.7:8080 --out ./issued
 # → ./issued/10_0_0_7_8080.cert.pem and .key.pem
 # on the node: copy both plus ./fleet-ca/ca-cert.pem (the certificate only) into its directory, and
@@ -205,7 +206,9 @@ needs the CA key and errors without it, by design. The startup report resolves `
 `enforced` only on such a node; `secure-single-domain` **rev 2 (v2.21.0) requires it** — a node under
 the profile whose certificate was minted on-node refuses to start, naming `id.ca_key_off_node`
 (announced in v2.20.0, one release ahead, per the plan's G12). The issuer's `mycelium` binary needs
-`--features tls`; without it `tls issue` exits 2 saying so.
+`--features tls`; without it `tls ca` and `tls issue` exit 2 saying so. For a federation partner, `mycelium tls pin
+<cert.pem>` prints the hex SPKI SHA-256 of a gateway's certificate — the value the partner's client pins
+([federation § Encrypting the link](federation.md#encrypting-the-link-tls-pinning)).
 
 ### Authenticated identity — enabling proof enforcement (identity-auth Phase 2/3)
 

@@ -701,10 +701,23 @@ fn explain_cli(args: Vec<String>) -> i32 {
 /// the CA (`ca-cert.pem` + `ca-key.pem`) stays in `--ca-dir` on this host; `<out>/<node>.cert.pem` and
 /// `<out>/<node>.key.pem` go to the node, with `ca-cert.pem` (the certificate only), as `[tls]
 /// cert_pem` / `key_pem`. Exits 2 on usage or a file that does not load.
+///
+/// `mycelium tls ca --out <dir>` — mint the fleet CA on the issuer's host (`ca-cert.pem` + `ca-key.pem`), the step
+/// before the first `issue`; refused when `<dir>` already holds a CA. Only `ca-cert.pem` ever goes to a node.
+///
+/// `mycelium tls pin <cert.pem>` — the hex SHA-256 of a certificate's `SubjectPublicKeyInfo`, read from its
+/// structural position: the value a partner's federation client pins (`FederationClient::with_tls_pins`) for a
+/// gateway that serves this certificate's key. An operator hands the partner this line, never the key
+/// (adopter-surface Y8). Exits 2 on usage or a file that is not one PEM certificate.
 fn tls_cli(args: Vec<String>) -> i32 {
-    const USAGE: &str = "Usage: mycelium tls issue --ca-dir <dir> --node <ip:port> --out <dir>";
+    const USAGE: &str = "Usage: mycelium tls ca --out <dir>\n       mycelium tls issue --ca-dir <dir> --node <ip:port> --out <dir>\n       mycelium tls pin <cert.pem>";
     let mut it = args.into_iter();
-    if it.next().as_deref() != Some("issue") { eprintln!("{USAGE}"); return 2; }
+    match it.next().as_deref() {
+        Some("issue") => {}
+        Some("pin") => return tls_pin(it.collect()),
+        Some("ca") => return tls_ca(it.collect()),
+        _ => { eprintln!("{USAGE}"); return 2; }
+    }
     let (mut ca_dir, mut node, mut out): (Option<String>, Option<String>, Option<String>) = (None, None, None);
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -736,9 +749,62 @@ fn tls_cli(args: Vec<String>) -> i32 {
     }
 }
 
+fn tls_ca(args: Vec<String>) -> i32 {
+    let ["--out", dir] = args.iter().map(String::as_str).collect::<Vec<_>>()[..] else {
+        eprintln!("Usage: mycelium tls ca --out <dir>");
+        return 2;
+    };
+    #[cfg(feature = "tls")]
+    match mycelium::mint_ca(std::path::Path::new(dir)) {
+        Ok(cert) => {
+            println!("minted the fleet CA: {} and {dir}/ca-key.pem", cert.display());
+            println!("keep ca-key.pem on this host; a node gets ca-cert.pem only, with a certificate from `mycelium tls issue`");
+            0
+        }
+        Err(e) => { eprintln!("{e}"); 2 }
+    }
+    #[cfg(not(feature = "tls"))]
+    {
+        let _ = dir;
+        eprintln!("mycelium tls ca needs a binary built with the `tls` feature");
+        2
+    }
+}
+
+fn tls_pin(args: Vec<String>) -> i32 {
+    let [path] = args.as_slice() else { eprintln!("Usage: mycelium tls pin <cert.pem>"); return 2; };
+    #[cfg(feature = "tls")]
+    {
+        let pem = match std::fs::read_to_string(path) { Ok(p) => p, Err(e) => { eprintln!("{path}: {e}"); return 2; } };
+        match pin_of_pem(&pem) {
+            Ok(pin) => { println!("{pin}"); 0 }
+            Err(e) => { eprintln!("{path}: {e}"); 2 }
+        }
+    }
+    #[cfg(not(feature = "tls"))]
+    {
+        let _ = path;
+        eprintln!("mycelium tls pin needs a binary built with the `tls` feature");
+        2
+    }
+}
+
+/// The pin of the one certificate in `pem`, as hex: its `SubjectPublicKeyInfo`'s SHA-256, read structurally.
+#[cfg(feature = "tls")]
+fn pin_of_pem(pem: &str) -> Result<String, String> {
+    let blocks: Vec<&str> = pem.split("-----BEGIN CERTIFICATE-----").skip(1).collect();
+    let [block] = blocks.as_slice() else {
+        return Err(format!("expected exactly one PEM certificate, found {}", blocks.len()));
+    };
+    let b64: String = block.split("-----END CERTIFICATE-----").next().unwrap_or("").split_whitespace().collect();
+    let der = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b64).map_err(|e| format!("the certificate is not base64: {e}"))?;
+    let pin = mycelium::federation::pinning::spki_sha256(&der).ok_or("not an X.509 certificate this build can read")?;
+    Ok(pin.iter().map(|b| format!("{b:02x}")).collect())
+}
+
 fn print_usage() {
     eprintln!(
-        "Usage: mycelium [OPTIONS]\n       mycelium init <dir> [--template <name>] | --list\n       mycelium declare [project-dir] [--gateway <url>] [--token <bearer>] [--watch]\n       mycelium doctor [config.toml] [--units <dir>] [--format text|json]\n       mycelium wire-check <units-dir> [--library <dir>] [--schemas <dir>] [--format text|json|dot] [--strict-deployed] [--no-authority]\n       mycelium rules [--format md|json]\n       mycelium test --faults [<class>,…] <units-dir> [--config <node.toml>] [--against <units-dir>] [--format text|json]\n       mycelium explain <decisions.jsonl> [--catalogue <rule-catalogue.json>] [--target <target>]\n       mycelium explain --correlation <id> <files…> | --closure <sha256> <files…> [--fleet <n>]\n       mycelium tls issue --ca-dir <dir> --node <ip:port> --out <dir>\n\
+        "Usage: mycelium [OPTIONS]\n       mycelium init <dir> [--template <name>] | --list\n       mycelium declare [project-dir] [--gateway <url>] [--token <bearer>] [--watch]\n       mycelium doctor [config.toml] [--units <dir>] [--format text|json]\n       mycelium wire-check <units-dir> [--library <dir>] [--schemas <dir>] [--format text|json|dot] [--strict-deployed] [--no-authority]\n       mycelium rules [--format md|json]\n       mycelium test --faults [<class>,…] <units-dir> [--config <node.toml>] [--against <units-dir>] [--format text|json]\n       mycelium explain <decisions.jsonl> [--catalogue <rule-catalogue.json>] [--target <target>]\n       mycelium explain --correlation <id> <files…> | --closure <sha256> <files…> [--fleet <n>]\n       mycelium tls ca --out <dir> | issue --ca-dir <dir> --node <ip:port> --out <dir> | pin <cert.pem>\n\
          \n\
          Options:\n\
          -c, --config <file>      Load configuration from a TOML file\n\
@@ -898,6 +964,44 @@ mod record {
 /// `mycelium --version`: `mycelium <crate version>`, one line, so a script can compare it to a tag.
 fn version_line() -> String {
     format!("mycelium {}", env!("CARGO_PKG_VERSION"))
+}
+
+/// Adopter-surface Y8: the issuer host's three steps — a CA, a node certificate, the pin a partner is handed.
+#[cfg(all(test, feature = "tls"))]
+mod tls_cli_tests {
+    use super::*;
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("mycelium-tls-cli-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        d
+    }
+
+    /// `tls ca` mints a CA `tls issue` can sign with, and refuses a second over it; `tls pin` of the issued
+    /// certificate is the pin a partner's client must hold for a gateway serving that node's key — the value
+    /// `ed25519_spki_sha256` computes from the key alone, so the line an operator hands over is the one that admits.
+    #[test]
+    fn ca_issue_and_pin_are_the_issuers_three_steps() {
+        use ed25519_dalek::pkcs8::DecodePrivateKey;
+        let (ca, out) = (scratch("ca"), scratch("out"));
+        assert_eq!(tls_ca(vec!["--out".into(), ca.display().to_string()]), 0);
+        assert!(ca.join("ca-cert.pem").exists() && ca.join("ca-key.pem").exists());
+        assert_eq!(tls_ca(vec!["--out".into(), ca.display().to_string()]), 2, "a second CA over the first is refused");
+        assert_eq!(tls_ca(vec!["--out".into()]), 2, "usage");
+        let node: mycelium::NodeId = "127.0.0.1:7961".parse().expect("node id");
+        let (cert, key) = mycelium::issue_node_cert(&ca, &node, &out).expect("issued from the minted CA");
+        let pin = pin_of_pem(&std::fs::read_to_string(&cert).expect("cert")).expect("a pin");
+        let pem = std::fs::read_to_string(&key).expect("key");
+        let b64: String = pem.lines().filter(|l| !l.starts_with("-----")).collect();
+        let der = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b64).expect("PEM base64");
+        let sk = ed25519_dalek::SigningKey::from_pkcs8_der(&der).expect("PKCS#8 node key");
+        let from_key = mycelium::federation::pinning::ed25519_spki_sha256(&sk.verifying_key().to_bytes());
+        assert_eq!(pin, from_key.iter().map(|b| format!("{b:02x}")).collect::<String>(), "the pin is the node key's");
+        assert_eq!(tls_pin(vec![cert.display().to_string()]), 0);
+        assert!(pin_of_pem("").is_err() && pin_of_pem(&format!("{0}{0}", std::fs::read_to_string(&cert).unwrap())).is_err(),
+            "no certificate, or two, is refused");
+        let _ = (std::fs::remove_dir_all(&ca), std::fs::remove_dir_all(&out));
+    }
 }
 
 #[cfg(test)]

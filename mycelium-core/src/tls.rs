@@ -482,6 +482,23 @@ mod imp {
         })
     }
 
+    /// **Mint a fleet CA** in `ca_dir` (`ca-cert.pem` + `ca-key.pem`), for the issuer's host that then runs
+    /// [`issue_node_cert`] — the off-node path's first step, which until now only a node started over an empty
+    /// directory could take (adopter-surface Y8). Refuses, naming the path, when `ca_dir` already holds either
+    /// file: a second CA over a fleet's is a new fleet, never a refresh. Returns the certificate's path.
+    pub fn mint_ca(ca_dir: &Path) -> Result<std::path::PathBuf, GossipError> {
+        let err = |reason: String| GossipError::InvalidField { field: "tls", reason };
+        let (cert, key) = (ca_dir.join("ca-cert.pem"), ca_dir.join("ca-key.pem"));
+        for p in [&cert, &key] {
+            if p.exists() {
+                return Err(err(format!("TLS: {p:?} exists — a CA is minted once; a second one over it is a new fleet")));
+            }
+        }
+        fs::create_dir_all(ca_dir).map_err(|e| err(format!("TLS: create {ca_dir:?}: {e}")))?;
+        generate_and_publish_ca(ca_dir, &cert, &key)?;
+        Ok(cert)
+    }
+
     /// **Issue a node certificate off-node** (`id.ca_key_off_node`, plan §8). Runs where the CA key
     /// is — an operator's workstation, a signing host — never on the node: loads the existing CA
     /// from `ca_dir` (never mints one), generates a fresh Ed25519 identity for `node_id`, signs its
@@ -965,7 +982,7 @@ mod imp {
 }
 
 #[cfg(feature = "tls")]
-pub use imp::{ed25519_key_from_cert_der, gateway_server_config_from_pem, generate_rotation, generate_rotation_after, issue_node_cert, load_or_generate, sign_bytes, verify_bytes};
+pub use imp::{ed25519_key_from_cert_der, gateway_server_config_from_pem, generate_rotation, generate_rotation_after, issue_node_cert, load_or_generate, mint_ca, sign_bytes, verify_bytes};
 
 #[cfg(all(test, feature = "tls"))]
 mod key_extract_tests {
@@ -1154,6 +1171,26 @@ mod ca_race_tests {
         assert!(e.to_string().contains("ca.lock"), "{e}");
         assert!(!dir.join("ca-cert.pem").exists(), "no CA was generated behind the lock");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Adopter-surface Y8: `mint_ca` is the issuer host's first step — a CA `issue_node_cert` signs with — and a
+    /// second mint over an existing CA (either file) is refused by name, leaving the first untouched.
+    #[test]
+    fn mint_ca_makes_a_ca_that_issues_and_refuses_a_second() {
+        use crate::node_id::NodeId;
+        let ca_dir = fresh_dir("mint").join("ca");
+        let cert = super::imp::mint_ca(&ca_dir).expect("mints into a new directory");
+        assert_eq!(cert, ca_dir.join("ca-cert.pem"));
+        assert!(ca_dir.join("ca-key.pem").exists());
+        let before = std::fs::read(&cert).unwrap();
+        let err = super::imp::mint_ca(&ca_dir).expect_err("a second CA over the first");
+        assert!(err.to_string().contains("ca-cert.pem") && err.to_string().contains("minted once"), "{err}");
+        assert_eq!(std::fs::read(&cert).unwrap(), before, "the first CA is untouched");
+        std::fs::remove_file(&cert).unwrap();
+        assert!(super::imp::mint_ca(&ca_dir).expect_err("the key alone also refuses").to_string().contains("ca-key.pem"));
+        std::fs::write(&cert, &before).unwrap();
+        let node_dir = fresh_dir("mint-node");
+        super::imp::issue_node_cert(&ca_dir, &NodeId::new("127.0.0.1", 9401).unwrap(), &node_dir).expect("the minted CA issues");
     }
 
     /// `id.ca_key_off_node` (plan §8): a node given a **pre-issued** certificate starts from the CA

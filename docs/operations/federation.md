@@ -320,7 +320,8 @@ partner honest.
 
 The edge and the clients are attached in code, so `mycelium doctor`, which builds a node from a file, reports the
 six as `not_applicable`; read the running node's `GET /gateway/guarantees` or `guarantee_report()` after attaching
-them. A refusal names each one unmet, as `[fed.body_bound: not_configured — …]` after `rev 1:`.
+them, or run `mycelium::doctor::run_attached` — the same doctor, over the node as your program builds it, never
+started. A refusal names each one unmet, as `[fed.body_bound: not_configured — …]` after `rev 1:`.
 
 **A fleet whose mesh nodes run under it.** The two-mesh Docker suite (`make test-federation`, CI job `federation`)
 starts every mesh node of both domains under this profile: a one-shot issuer per domain mints the CA in a volume no
@@ -335,6 +336,24 @@ refuses to start naming `id.ca_key_off_node` alone. **Its consumer is not a node
 the client side's facts — `fed.pinned`, `fed.caller_named`, `fed.partner_egress` on a node holding clients — read
 `not_applicable` on every node there and are shown by the in-process tests only (the two-domain scaffold, Y8, is where
 a client node runs under the profile). It is a test fleet: its keys and gateway token are fixtures in the clear.
+
+**A deployment to start from: the two-domain scaffold.** `mycelium init <dir> --template two-domains` writes two
+fleets of two nodes — a food bank that exports `pantry/stock` and `pantry/reserve`, a kitchen that exports
+`menu/today` — each under this profile, each gateway running an edge and holding a client for the other, with the
+operator's steps in `fleet.sh`: `mycelium tls ca` mints each domain's CA, `mycelium tls issue` each node's certificate,
+`mycelium tls pin` each gateway's key for the partner's client to pin, and the domain signing keys, named tokens and
+egress lists are made or named there. Each gateway's own `GET /gateway/guarantees` reads all seven `fed.*` node facts
+`enforced`, the client side's among them; a call names `federation:kitchen.example/token:kitchen/planner` at the food
+bank's provider, and the other way `…/token:foodbank/steward` at the kitchen's; a wrong pin, a rewritten body and a
+third concurrent call against a cap of two are each refused — CI's `Scaffold` job runs every line
+([`templates/two-domains`](../../templates/two-domains/README.md)). Its four nodes share one host, so the separation of
+`ca/` from each node's `certs/<node>/` is shown by layout, not enforced by the host.
+
+**A credential presented twice.** The edge checks a federated credential's signature, its body binding, its window
+and the grant; it keeps no record of the credentials it has served, so the same credential with the same body,
+presented again inside its window (at most `CallPolicy::max_lifetime`, 300 s by default), is served again. A partner
+that can replay a captured call can repeat its effect within that window; an at-most-once effect needs its own
+idempotency key at the provider ([side effects](../features/side-effects.md)).
 
 ## What this runbook does not cover
 

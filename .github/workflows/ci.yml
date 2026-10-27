@@ -612,8 +612,9 @@ jobs:
     # built against this checkout by rewriting its dependency to a path — a `[patch]` would still fetch the
     # pinned tag, which does not exist yet on a version-bump commit (#666's review) — so a template that needs an
     # API landing in the same release passes, and the tag it pins is what a user gets. The Python scaffold runs
-    # the node built here in place of the published binary; the job prints the target it ran against.
-    name: Scaffold (mycelium init, both templates)
+    # the node built here in place of the published binary; the job prints the target it ran against. The two-domain
+    # template (Y8) is a Rust project too and is built the same way.
+    name: Scaffold (mycelium init, every template)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -751,6 +752,78 @@ jobs:
           cat watch.log
           grep -q 'retracting' watch.log
           kill "$NODE"; wait "$NODE" || true
+      - name: Two-domain template — four nodes under secure-multi-domain, the cross-edge call and each refusal (Y8)
+        # Adopter-surface Y8: two fleets, each its own domain — CAs minted and certificates issued off-node by this
+        # job's `mycelium` (`tls ca`, `tls issue`, `tls pin`), named tokens, egress lists naming the partner, a pinned
+        # key — and one export called across the edge by a named local caller. The node program is the template's,
+        # built against this checkout as the Rust template is (the dependency rewritten to a path); `secure-multi-domain`
+        # is in no published tag before the next release, so the tag the scaffold pins cannot build it yet.
+        run: |
+          set -euo pipefail
+          BIN="$PWD/target/debug/mycelium"; REPO="$PWD"
+          "$BIN" init "$RUNNER_TEMP/two-domains" --template two-domains
+          cd "$RUNNER_TEMP/two-domains"
+          echo "target: this checkout at $GITHUB_SHA (the scaffold pins $(grep -o 'tag = "[^"]*"' Cargo.toml))"
+          sed -i "s|^mycelium = { git = .*|mycelium = { path = \"$REPO\", features = [\"tls\", \"a2a\", \"compliance\"] }|" Cargo.toml
+          grep -q "path = \"$REPO\"" Cargo.toml
+          export MYCELIUM="$BIN" CARGO_TARGET_DIR="$REPO/target"
+          NODE_BIN="$CARGO_TARGET_DIR/debug/two-domains"
+          trap 'bash fleet.sh stop || true; for f in data/*.log; do echo "--- $f"; tail -n 30 "$f"; done' EXIT
+          bash fleet.sh setup
+          test -s exchange/foodbank-gw.pin && test -s exchange/kitchen-gw.pin && test -s exchange/kitchen.example.pub
+          # No node directory holds a CA key, or another node's key.
+          for n in foodbank-gw foodbank-1 kitchen-gw kitchen-1; do
+            test "$(ls certs/$n | grep -c 'key.pem')" = 1 && ! test -e "certs/$n/ca-key.pem"
+          done
+          bash fleet.sh start-all
+          bash fleet.sh connect kitchen-gw | tee connect.log; grep -q '"link":"ready"' connect.log
+          bash fleet.sh connect foodbank-gw | tee connect-back.log; grep -q '"link":"ready"' connect-back.log
+          # The cross-edge call, each way: the local caller's name reaches the provider in the other domain.
+          bash fleet.sh call kitchen-gw pantry/stock | tee call.log
+          grep -q '^200 ' call.log
+          grep -q 'for federation:kitchen.example/token:kitchen/planner' call.log
+          bash fleet.sh call foodbank-gw menu/today 'menu?' | tee call-back.log
+          grep -q "for federation:foodbank.example/token:foodbank/steward: today's menu" call-back.log
+          # Carried from Y7 (#691): each gateway holds a client and an edge, and its own report, read while it runs, shows
+          # every federation fact enforced — the client side's fed.pinned, fed.caller_named and fed.partner_egress too.
+          for g in kitchen-gw foodbank-gw; do
+            bash fleet.sh guarantees "$g" | cut -d' ' -f2- > "guarantees-$g.json"
+            python3 - "guarantees-$g.json" "$g" <<'PY'
+          import json, sys
+          r = json.load(open(sys.argv[1]))
+          assert r["profile"]["name"] == "secure-multi-domain" and r["profile"]["selected"], r["profile"]
+          state = {e["id"]: e["resolution"]["state"] for e in r["entries"]}
+          fed = [g for g in r["profile"]["required"] if g.startswith("fed.")]
+          assert len(fed) == 7 and all(state[g] == "enforced" for g in fed), {g: state[g] for g in fed}
+          unmet = [g for g in r["profile"]["required"] if state[g] not in ("enforced", "not_applicable")]
+          assert not unmet, unmet
+          print(f"{sys.argv[2]}: the seven fed.* enforced; every other requirement enforced or not applicable")
+          PY
+          done
+          # An exceeded slot cap: three concurrent calls against a cap of two, one refused at the edge, not queued.
+          for i in 1 2 3; do bash fleet.sh call kitchen-gw pantry/reserve "reserve $i" > "reserve-$i.log" || true & done; wait
+          cat reserve-*.log
+          test "$(cat reserve-*.log | grep -c 'already carrying 2 calls for kitchen.example')" = 1
+          test "$(cat reserve-*.log | grep -c '^200 ')" = 2
+          # A body rewritten after it was signed, refused at the food bank's edge.
+          "$NODE_BIN" tamper kitchen-gw pantry/stock | tee tamper.log
+          grep -q 'binds a different request body' tamper.log
+          # Every node's doctor, over the node as the program builds it: green under the profile. The nodes are stopped
+          # first: the doctor attaches what the program attaches, the node's evidence journal included, which a running
+          # node holds.
+          bash fleet.sh stop
+          for n in foodbank-gw foodbank-1 kitchen-gw kitchen-1; do
+            bash fleet.sh doctor "$n" > "doctor-$n.log"
+            grep -q '^profile: secure-multi-domain rev 1$' "doctor-$n.log"
+            grep -q '^start(): would start$' "doctor-$n.log" || { cat "doctor-$n.log"; exit 1; }
+          done
+          # The file alone cannot carry the code attachments: the published doctor says so by refusing.
+          if "$BIN" doctor nodes/kitchen-gw.toml > file-doctor.log; then echo "doctor over the file alone started"; exit 1; fi
+          grep -q 'ae.authorised_at_seam: not_configured' file-doctor.log
+          # The README's last lines: a wrong pin, and the kitchen's gateway refuses to talk to the partner at all.
+          printf '%064d' 0 > exchange/foodbank-gw.pin && bash fleet.sh start-all
+          if bash fleet.sh connect kitchen-gw | tee pin.log; then echo "connected under a wrong pin"; exit 1; fi
+          grep -q 'presented an unpinned key' pin.log
 
   python-sdk:
     # The repo's first Python CI job: mycelium-py (call_typed) + the LangGraph
