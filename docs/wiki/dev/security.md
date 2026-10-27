@@ -502,7 +502,10 @@ without a caveat (PR 10b, 2026-09-18):** the two-mesh **Docker** suite runs the 
 container per node and the federation link cut by `docker network disconnect` — the two things the in-process
 test could not claim. `make test-federation`; CI job `federation`; files `examples/federation_node.rs`,
 `docker/docker-compose.federation.yml`, `tests/integration/run_federation.sh`. Every assertion reads a node's
-own tables, never a log line.
+own tables, never a log line. **Since 2026-10-27 (adopter-surface Y7) every mesh node runs under
+`secure-multi-domain`:** certificates issued off-node by a `pki` role, HTTPS gateways the consumer pins, the
+authority, audit and electorate settings, each node's own guarantee report read for the profile met, and a node
+keeping its CA key refused at start by name.
 
 **TLS on the edge, anchored on a pin (row 11, 2026-09-23):** `src/federation/pinning.rs`. The credential made a
 federated call unforgeable; it was still **readable**, and closing that needed a trust anchor the design did not

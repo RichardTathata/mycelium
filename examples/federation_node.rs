@@ -18,17 +18,26 @@
 //! | `member` | a node of a domain under the enforced profile; advertises `FED_EXPORTS` as skills and answers with the caller principal | — |
 //! | `gateway` | a member that also runs the A2A + federation edges | `FED_GRANTS`, `FED_TRUST`, `FED_SIGNING_SEED` |
 //! | `probe` | the *consumer* side: one `FederationClient` behind a control API (not a mesh node) | `FED_ORIGIN`, `FED_PRINCIPAL`, `FED_PARTNER`, `FED_PARTNER_KEY`, `FED_GATEWAYS`, `FED_CONTROL_PORT` |
+//! | `pki` | the off-node issuer: mints a domain's CA where only it holds the key, issues each node's certificate, writes the gateways' SPKI pins, exits | `FED_CA_DIR`, `FED_CERT_OUT`, `FED_NODES`, `FED_PIN_NODES`, `FED_PIN_OUT` |
 //! | `keys` | prints the public half of `FED_SIGNING_SEED` and exits — the suite's keys are derived, never transcribed by hand (`make federation-keys`) | `FED_SIGNING_SEED` |
 //!
 //! Common to `member`/`gateway`: `FED_DOMAIN`, `MYCELIUM_HOSTNAME` (this node's IP **on its mesh
 //! network** — a gateway sits on two networks, so it is passed explicitly), `MYCELIUM_PORT`,
-//! `MYCELIUM_HTTP_PORT`, `MYCELIUM_PEERS` (`host:port,…`), `FED_CA_DIR` (one shared volume per mesh
-//! → one auto-generated CA per mesh), `FED_EXPORTS` (`ns/name,…`).
+//! `MYCELIUM_HTTP_PORT`, `MYCELIUM_PEERS` (`host:port,…`), `FED_EXPORTS` (`ns/name,…`), and the
+//! certificate: `FED_CERT_DIR` (issued off-node by `pki`) or `FED_CA_DIR` (the CA generated on-node —
+//! the development posture, which the secure profile refuses).
+//!
+//! `FED_PROFILE` (default `secure-multi-domain`, adopter-surface Y7) — under it the node carries what
+//! the profile requires: `FED_GATEWAY_TOKEN` closes an HTTPS gateway, `FED_EGRESS_HOSTS` is the
+//! allow-list, `FED_DATA_DIR` (default `/data`) holds persistence, the evidence journal and the
+//! revocation epochs, `FED_PERMIT_ACTOR` is the one principal the evaluator permits to invoke an
+//! export, at the providers `FED_PERMIT_PROVIDERS` names. `dev` is the pre-Y7 node: an open plain-HTTP gateway and nothing else.
 //!
 //! # The admin surface (test image only)
 //!
 //! Mounted with `with_http_routes` **outside** `/gateway/`, so it is unauthenticated by construction
-//! (the library's rule for merged routers). It exists for a runner on a private test network and is
+//! (the library's rule for merged routers — under the secure profile too, a documented class, not a
+//! guarantee). It exists for a runner on a private test network and is
 //! not something to ship: `GET /fed-admin/tables` (the three tables the gate is proved from),
 //! `POST /fed-admin/propose`, `GET /fed-admin/committed/{slot}`, `POST|GET /fed-admin/kv`,
 //! `POST /fed-admin/policy` and `POST /fed-admin/revoke` (gateway only).
@@ -161,13 +170,21 @@ async fn tables(State(s): State<Admin>) -> Json<Value> {
 struct ProposeReq {
     slot: String,
     value: String,
+    /// An exclusive outcome (a lock, a leader): under `consensus_require_electorate` one proposed to
+    /// the whole cluster rather than an electorate group is refused (`cons.safety_profile`).
+    #[serde(default)]
+    safety_sensitive: bool,
 }
 
 async fn propose(State(s): State<Admin>, Json(req): Json<ProposeReq>) -> Json<Value> {
     let outcome = s
         .agent
         .consensus()
-        .cluster_propose(&req.slot, Bytes::from(req.value.into_bytes()), ConsensusConfig::default())
+        .cluster_propose(
+            &req.slot,
+            Bytes::from(req.value.into_bytes()),
+            ConsensusConfig { safety_sensitive: req.safety_sensitive, ..ConsensusConfig::default() },
+        )
         .await;
     let committed = matches!(outcome, ConsensusResult::Committed { .. });
     Json(json!({ "committed": committed, "detail": format!("{outcome:?}") }))
@@ -242,6 +259,62 @@ fn parse_trust(spec: &str) -> TrustBundle {
     }))
 }
 
+/// The authority half of `secure-multi-domain` (the single-domain set's `ae.*`, `prov.enforcement`,
+/// `a2a.admission` and `authz.*`): an action evaluator at the gateway and at every provider, the
+/// evidence journal its decisions are recorded in before dispatch, and an execution authority whose
+/// revocation epochs survive a restart. The evaluator permits exactly one actor — the partner's
+/// principal, `FED_PERMIT_ACTOR` — to invoke a skill this domain exports; everything else is
+/// `Indeterminate`, which the seam refuses. Which exports the partner may call is the edge's signed
+/// catalogue; this is the second door, at the provider, that asks again.
+fn attach_authority(agent: &GossipAgent, exports: &[String]) {
+    use mycelium::knowledge::{issuer::TrustedExternalIssuers, IssuerId};
+    use mycelium::mandate::authority::{ClockModel, DurableEpochs, ExecutionGate, FreshnessPolicy, ResourceTier};
+    use mycelium::mandate::grant::{EntitlementTable, GrantVerifier};
+    use mycelium::mandate::{PrincipalId, ResourceAuthority};
+    use mycelium::{EvidenceJournal, EvidenceProfile, ExecutionAuthority, ReferenceEvaluator, Rule};
+
+    let data = std::path::PathBuf::from(env_or("FED_DATA_DIR", "/data"));
+    let actor = env_or("FED_PERMIT_ACTOR", "");
+    assert!(exports.is_empty() || !actor.is_empty(), "FED_PERMIT_ACTOR is required for a node with FED_EXPORTS");
+    // Both doors name the skill at the provider that serves it (`skill:{ns}/{name}@{provider}`): the
+    // gateway the member it routes to, the provider itself. `FED_PERMIT_PROVIDERS` is that set.
+    let providers: Vec<String> =
+        env_or("FED_PERMIT_PROVIDERS", "").split(',').map(str::trim).filter(|s| !s.is_empty()).map(String::from).collect();
+    assert!(actor.is_empty() || !providers.is_empty(), "FED_PERMIT_PROVIDERS is required with FED_PERMIT_ACTOR");
+    let mut evaluator = ReferenceEvaluator::new("fed-suite-1").with_catalogue("fed-suite", "1");
+    for export in exports.iter().filter(|_| !actor.is_empty()) {
+        for provider in &providers {
+            let resource = format!("skill:{export}@{provider}");
+            evaluator = evaluator.map_action("skill.invoke", resource.clone()).allow(Rule::new(actor.clone(), "skill.invoke", resource));
+        }
+    }
+    // The journal first, so the evaluator's first decision has somewhere to be recorded.
+    agent.with_evidence_journal(EvidenceJournal::open(data.join("evidence"), EvidenceProfile::Strict).expect("evidence journal"));
+    agent.with_action_evaluator(Arc::new(evaluator));
+    agent.with_provider_enforcement();
+    // No mandate is presented in this suite, so the gate decides nothing here; it is attached so a
+    // presented one would be verified at this node, and its epochs kept on disk.
+    let mut external = TrustedExternalIssuers::new();
+    external
+        .trust(
+            IssuerId::new("operator:fed-suite").expect("issuer id"),
+            ed25519_dalek::SigningKey::from_bytes(&[51u8; 32]).verifying_key().to_bytes(),
+        )
+        .expect("trust the suite's operator");
+    let mut entitlements = EntitlementTable::new();
+    entitlements.entitle("fed-suite", PrincipalId::new("operator:fed-suite").expect("principal"));
+    let gate = ExecutionGate::strict(
+        ResourceAuthority::new("fed-suite", 1),
+        ResourceTier::Serialised,
+        ClockModel { skew_ms: 500 },
+        FreshnessPolicy { freshness_ms: 120_000, interval_ms: 30_000, delivery_ms: 10_000 },
+    )
+    .expect("execution gate");
+    let authority = ExecutionAuthority::new(gate, GrantVerifier::new(entitlements), external);
+    authority.with_durable_epochs(DurableEpochs::open(data.join("epochs")).expect("durable epochs"));
+    agent.with_execution_authority(Arc::new(authority));
+}
+
 async fn run_node(role: &str) {
     let dom = must("FED_DOMAIN");
     let my_ip = must("MYCELIUM_HOSTNAME");
@@ -251,17 +324,16 @@ async fn run_node(role: &str) {
     let exports: Vec<String> =
         env_or("FED_EXPORTS", "").split(',').map(str::trim).filter(|s| !s.is_empty()).map(String::from).collect();
 
+    let profile = env_or("FED_PROFILE", "secure-multi-domain");
+    let secure = profile != "dev";
+    let id = NodeId::new(&my_ip, port).expect("self node id");
+
     let mut cfg = GossipConfig::default();
     cfg.cluster_name = Some(dom.clone());
     cfg.bind_address = my_ip.clone();
     cfg.bind_port = port;
     cfg.http_port = Some(http_port);
     cfg.http_addr = "0.0.0.0".to_string();
-    // No gateway credential: the suite's driver and the partner mesh reach these routes over the
-    // compose project's private bridge network, which is the boundary here. A node off that network
-    // would set `gateway_auth_token` instead; without one or this opt-in, `start()` refuses to serve
-    // an open gateway on a non-loopback address (plan `post-360-hardening.md` row P1).
-    cfg.gateway_allow_unauthenticated = true;
     cfg.bootstrap_peers = peers;
     // Fast pings, because peer registration happens on Ping receipt and the suite's formation
     // polls are bounded. `health_check_interval_secs` stays above `reconnect_backoff_secs + 2`:
@@ -273,9 +345,50 @@ async fn run_node(role: &str) {
     // The enforced domain profile (record §9): TLS under this mesh's CA, SWIM off.
     cfg.domain_profile = DomainProfile::Enforced;
     cfg.swim_failure_detector = false;
-    cfg.tls = Some(TlsConfig { auto_cert_dir: must("FED_CA_DIR").into(), ..TlsConfig::default() });
+    cfg.tls = Some(match env("FED_CERT_DIR") {
+        // A certificate issued off-node by the `pki` role: this directory holds the node's
+        // certificate and key and `ca-cert.pem`, never the CA's private key (`id.ca_key_off_node`).
+        Some(dir) => {
+            let dir = std::path::PathBuf::from(dir);
+            let sanitized = id.as_str().replace([':', '.'], "_");
+            TlsConfig {
+                cert_pem: Some(dir.join(format!("{sanitized}.cert.pem"))),
+                key_pem: Some(dir.join(format!("{sanitized}.key.pem"))),
+                auto_cert_dir: dir,
+                ca_cert_pem: None,
+            }
+        }
+        // The development posture: the CA generated in (or read from) a directory this node holds,
+        // private key included. The admission plant runs this way, and so does the profile plant —
+        // where `start()` must refuse it by name.
+        None => TlsConfig { auto_cert_dir: must("FED_CA_DIR").into(), ..TlsConfig::default() },
+    });
+    if secure {
+        // `secure-multi-domain` (adopter-surface Y7): the single-domain twenty and the federation
+        // family. A closed HTTPS gateway (the node identity's certificate), identity proofs, an
+        // egress allow-list, durable persistence, and exclusive outcomes only from an electorate.
+        cfg.profile = Some(profile.clone());
+        cfg.gateway_auth_token = Some(must("FED_GATEWAY_TOKEN"));
+        cfg.gateway_tls = Some(mycelium::GatewayTlsConfig::default());
+        cfg.require_identity_proofs = true;
+        cfg.egress.allow_hosts = env_or("FED_EGRESS_HOSTS", "")
+            .split(',').map(str::trim).filter(|s| !s.is_empty()).map(String::from).collect();
+        cfg.persistence = Some(mycelium::PersistenceConfig {
+            base_path: std::path::PathBuf::from(env_or("FED_DATA_DIR", "/data")).join("kv"),
+            sync_mode: mycelium::SyncMode::Flush,
+            snapshot_wal_threshold: 1_000_000,
+            snapshot_interval_secs: 3_600,
+            on_unreadable: Default::default(),
+        });
+        cfg.consensus_require_electorate = true;
+    } else {
+        // No gateway credential: the suite's driver and the partner mesh reach these routes over the
+        // compose project's private bridge network, which is the boundary here. Without one or this
+        // opt-in, `start()` refuses to serve an open gateway on a non-loopback address (plan
+        // `post-360-hardening.md` row P1).
+        cfg.gateway_allow_unauthenticated = true;
+    }
 
-    let id = NodeId::new(&my_ip, port).expect("self node id");
     let mut agent = GossipAgent::new(id, cfg);
     let mut edge = None;
     if role == "gateway" {
@@ -286,19 +399,32 @@ async fn run_node(role: &str) {
                 exports.clone(),
                 DomainPolicy { domain: domain(&dom), revision: 1, grants: parse_grants(&env_or("FED_GRANTS", "")) },
                 parse_trust(&env_or("FED_TRUST", "")),
-                CallPolicy::default(),
+                // Bodies bound into the credential and a per-partner slot count (`fed.body_bound`,
+                // `fed.partner_slots`); the dev posture keeps the defaults.
+                if secure {
+                    CallPolicy { require_body_binding: true, max_in_flight_per_partner: 4, ..CallPolicy::default() }
+                } else {
+                    CallPolicy::default()
+                },
             )
             .with_signing_key(signing),
         );
         agent = agent.with_a2a().with_federation_edge(Arc::clone(&e));
         edge = Some(e);
     }
+    if secure {
+        attach_authority(&agent, &exports);
+    }
     let agent = Arc::new(agent);
     agent.with_http_routes(admin_router(Admin { agent: Arc::clone(&agent), edge }));
     // SIGINT or SIGTERM (`docker stop`), installed before the bind; a second signal exits at once.
     let shutdown = mycelium::shutdown::ShutdownSignal::install().expect("signal handlers");
-    agent.start().await.expect("start");
-    info!(role, domain = %dom, node = %agent.node_id(), "up under the enforced profile");
+    if let Err(e) = agent.start().await {
+        // The profile plant reads this line: a refusal names every unmet guarantee.
+        eprintln!("federation-node: start refused under profile {profile}: {e}");
+        std::process::exit(3);
+    }
+    info!(role, domain = %dom, node = %agent.node_id(), profile = %profile, "up under the enforced domain profile");
 
     // Every node listens for consensus (the gate's consensus-state leg needs rounds to commit).
     let _listener = agent.consensus().start_consensus_listener(ConsensusConfig::default());
@@ -417,6 +543,20 @@ async fn run_probe() {
     if let Some(k) = env("FED_PARTNER_KEY") {
         client = client.with_partner_key(hex32(&k));
     }
+    // The partner's gateways serve HTTPS on their node identity; pin each one's SPKI, as the
+    // partner publishes them (`fed.pinned`). The `pki` role writes one `.pin` per gateway.
+    if let Some(dir) = env("FED_PINS_DIR") {
+        let mut pins = Vec::new();
+        for entry in std::fs::read_dir(&dir).unwrap_or_else(|e| panic!("FED_PINS_DIR {dir}: {e}")) {
+            let path = entry.expect("pin entry").path();
+            if path.extension().is_some_and(|x| x == "pin") {
+                pins.push(hex32(&std::fs::read_to_string(&path).expect("read pin")));
+            }
+        }
+        assert!(!pins.is_empty(), "FED_PINS_DIR {dir} holds no .pin file");
+        info!(pins = pins.len(), "pinning the partner's gateways");
+        client = client.with_tls_pins(pins);
+    }
     let client = Arc::new(client);
     let app = Router::new()
         .route("/ready", get(|| async { "ok" }))
@@ -429,6 +569,52 @@ async fn run_probe() {
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", port)).await.expect("bind control port");
     info!(port, "probe control API up");
     axum::serve(listener, app).await.expect("serve");
+}
+
+// ── PKI (where the CA key is) ────────────────────────────────────────────────────────────────
+
+/// The off-node issuer (`id.ca_key_off_node`): mints this domain's CA in `FED_CA_DIR` if it has none,
+/// then issues a certificate for each node in `FED_NODES` (`ip:port,…`) under
+/// `FED_CERT_OUT/<node>/` with `ca-cert.pem` beside it — the certificate only. The CA's private key
+/// stays in `FED_CA_DIR`, a volume no node mounts. For each node in `FED_PIN_NODES` it writes the
+/// SPKI pin of its identity (what its HTTPS gateway serves) to `FED_PIN_OUT/<node>.pin`, for the
+/// partner to pin. Exits when done; the nodes wait for it.
+async fn run_pki() {
+    use ed25519_dalek::pkcs8::DecodePrivateKey;
+    let ca_dir = std::path::PathBuf::from(must("FED_CA_DIR"));
+    let out = std::path::PathBuf::from(must("FED_CERT_OUT"));
+    if !ca_dir.join("ca-key.pem").exists() {
+        // The CA is minted the one way the library mints one: a node started over an empty
+        // certificate directory. It runs here, beside the key, and never joins a mesh.
+        let mut cfg = GossipConfig::auto();
+        cfg.bind_address = "127.0.0.1".into();
+        cfg.bind_port = 57999;
+        cfg.tls = Some(TlsConfig { auto_cert_dir: ca_dir.clone(), ..TlsConfig::default() });
+        let issuer = GossipAgent::new(NodeId::new("127.0.0.1", 57999).expect("issuer id"), cfg);
+        issuer.start().await.expect("the issuer mints the domain CA");
+        issuer.shutdown().await;
+    }
+    let pin_nodes: Vec<String> = env_or("FED_PIN_NODES", "").split(',').map(str::trim).filter(|s| !s.is_empty()).map(String::from).collect();
+    for node in must("FED_NODES").split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        let (host, port) = node.rsplit_once(':').unwrap_or_else(|| panic!("FED_NODES entry {node:?}: expected ip:port"));
+        let id = NodeId::new(host, port.parse().expect("port")).expect("node id");
+        let sanitized = id.as_str().replace([':', '.'], "_");
+        let dir = out.join(&sanitized);
+        let (_cert, key) = mycelium::issue_node_cert(&ca_dir, &id, &dir).expect("issue a node certificate");
+        std::fs::copy(ca_dir.join("ca-cert.pem"), dir.join("ca-cert.pem")).expect("copy ca-cert.pem");
+        if pin_nodes.iter().any(|p| p == node) {
+            let pin_dir = std::path::PathBuf::from(must("FED_PIN_OUT"));
+            std::fs::create_dir_all(&pin_dir).expect("pin dir");
+            let pem = std::fs::read_to_string(&key).expect("read node key");
+            let b64: String = pem.lines().filter(|l| !l.starts_with("-----")).collect();
+            let der = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b64).expect("PEM base64");
+            let sk = ed25519_dalek::SigningKey::from_pkcs8_der(&der).expect("PKCS#8 node key");
+            let pin = mycelium::federation::pinning::ed25519_spki_sha256(&sk.verifying_key().to_bytes());
+            std::fs::write(pin_dir.join(format!("{sanitized}.pin")), pin.iter().map(|b| format!("{b:02x}")).collect::<String>())
+                .expect("write pin");
+        }
+        info!(node, "issued off-node");
+    }
 }
 
 /// Print the public half of `FED_SIGNING_SEED`, hex. The compose file needs each domain's public
@@ -452,6 +638,7 @@ async fn main() {
     match role.as_str() {
         "member" | "gateway" => run_node(&role).await,
         "probe" => run_probe().await,
-        other => panic!("unknown FED_ROLE {other:?}: member | gateway | probe | keys"),
+        "pki" => run_pki().await,
+        other => panic!("unknown FED_ROLE {other:?}: member | gateway | probe | pki | keys"),
     }
 }

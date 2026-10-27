@@ -32,6 +32,18 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The two-mesh federation suite runs under `secure-multi-domain`** (adopter-surface Y7's last promise, the first PR of
+  the Y8 track). Every mesh node of both domains now starts under the profile: a one-shot issuer per domain mints the
+  CA in a volume no node mounts and issues each node's certificate off-node; the gateways serve HTTPS on the node
+  identity, closed by a token, and the consumer pins each gateway's SPKI; every node carries identity proofs, an
+  egress allow-list, persistence (`sync_mode = flush`), `consensus_require_electorate`, an action evaluator at the
+  gateway and at every provider with its evidence journal, and an execution authority with durable epochs; the edges
+  bind bodies and meter each partner. The runner reads each node's own `GET /gateway/guarantees` for the profile met
+  (leg 0), shows an exclusive outcome refused outside an electorate (leg 2), and starts a node with its CA key on-node,
+  refused naming `id.ca_key_off_node` (leg 10). The legs that were there — discover, invoke, fail over, sever, keep
+  working, change the grant, reconnect, never merged, the admission plant — pass under the profile unchanged.
+  `examples/federation_node.rs` gains the `pki` role and `FED_PROFILE`; the admission plant's rogue runs `dev`.
+
 - **`secure-multi-domain` — the profile, and the federation guarantee family it needs** (`docs/plans/adopter-surface.md`
   Y7, D25; `docs/features/multi-domain-profile.md`): ten `fed.*` guarantees in the catalogue, resolved by the same
   report as the rest — on this node `fed.domain_enforced` (the enforced domain profile: TLS, SWIM off), and on a node

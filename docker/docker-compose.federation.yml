@@ -1,13 +1,28 @@
 # The two-mesh federation suite (v3 item 2 PR 10b) — item 2's release gate with process isolation
 # and a real network severance, which the in-process choreography (src/lib_tests.rs) cannot claim.
+# Since adopter-surface Y7 every mesh node runs under `profile = "secure-multi-domain"` (rev 1): the
+# single-domain twenty and the federation family, so the gate is shown under the posture a federating
+# deployment is told to run, and the two-domain scaffold (Y8) starts from this fleet.
 #
 #   make test-federation
 #
-# Topology. Two meshes that share nothing: domain **alpha** (a1, a2, gw1, gw2) on `alpha-net` under
-# one auto-generated CA (volume `mycelium-fed-alpha-ca`), domain **beta** (b1, b2) on `beta-net`
-# under another (`mycelium-fed-beta-ca`). The only path between the domains is `edge`: alpha's two
-# gateways and beta's probe — the consumer side, one `FederationClient` behind a control API, not a
-# mesh node.
+# Topology. Two meshes that share nothing: domain **alpha** (a1, a2, gw1, gw2) on `alpha-net`, domain
+# **beta** (b1, b2) on `beta-net`, each under its own CA. The only path between the domains is `edge`:
+# alpha's two gateways and beta's probe — the consumer side, one `FederationClient` behind a control
+# API, not a mesh node.
+#
+# **The CA key is on no node** (`id.ca_key_off_node`). A one-shot `pki-*` service per domain mints the
+# CA in a volume only it mounts (`mycelium-fed-{alpha,beta}-ca`), issues each node's certificate into
+# a second volume (`mycelium-fed-{alpha,beta}-certs`, the certificate, its key and `ca-cert.pem`), and
+# writes the SPKI pin of each alpha gateway to `mycelium-fed-alpha-pins`, which the probe pins
+# (`fed.pinned`'s posture, on the consumer side). The nodes mount the certificates read-only and wait
+# for their `pki` to finish.
+#
+# What else each node carries: a closed HTTPS gateway (`FED_GATEWAY_TOKEN`, a fixture; the node
+# identity's certificate), identity proofs, an egress allow-list naming the partner, persistence with
+# `sync_mode = flush`, `consensus_require_electorate`, an action evaluator at the gateway and at every
+# provider with its evidence journal, an execution authority with durable epochs, and on the
+# gateways an edge that binds bodies and meters each partner's slots — `examples/federation_node.rs`.
 #
 # **Four networks, and why the fourth exists.** The runner severs the federation link by
 # `docker network disconnect mycelium-fed-edge mycelium-fed-beta-probe`. If the runner drove the
@@ -20,10 +35,10 @@
 #
 # Keys. Alpha signs catalogues under seed 11…11, beta signs credentials under 22…22; the public
 # halves arrive as `ALPHA_PUBLIC_KEY` / `BETA_PUBLIC_KEY` from the Makefile, which derives them
-# (`make federation-keys`). Test material, in the clear on purpose.
+# (`make federation-keys`). Test material, in the clear on purpose — as is the gateway token.
 #
 # The image and volume names are pinned (`image:`, `name:`) because the runner starts the
-# admission plant with `docker run` and needs to name both.
+# admission and profile plants with `docker run` and needs to name both.
 
 x-node: &node
   build:
@@ -35,14 +50,51 @@ x-node: &node
     RUST_LOG: "warn,federation_node=info"
     MYCELIUM_PORT: "57000"
     MYCELIUM_HTTP_PORT: "8300"
+    FED_PROFILE: secure-multi-domain
+    FED_GATEWAY_TOKEN: fed-suite-token
   healthcheck:
-    test: ["CMD", "curl", "-sf", "http://localhost:8300/ready"]
+    test: ["CMD", "curl", "-skf", "https://localhost:8300/ready"]
     interval: 3s
     timeout: 3s
     retries: 40
     start_period: 5s
 
 services:
+  # The off-node issuers (`id.ca_key_off_node`): each mints its domain's CA where only it can read the
+  # key, issues every node's certificate, and exits. `restart: "no"` and the nodes' `depends_on`
+  # make them run once, first.
+  pki-alpha:
+    image: mycelium-federation-node:test
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.federation
+    container_name: mycelium-fed-pki-alpha
+    restart: "no"
+    environment:
+      RUST_LOG: "warn,federation_node=info"
+      FED_ROLE: pki
+      FED_CA_DIR: /ca
+      FED_CERT_OUT: /certs
+      FED_NODES: "172.30.0.11:57000,172.30.0.12:57000,172.30.0.13:57000,172.30.0.14:57000"
+      FED_PIN_NODES: "172.30.0.13:57000,172.30.0.14:57000"
+      FED_PIN_OUT: /pins
+    volumes: [ "alpha-ca:/ca", "alpha-certs:/certs", "alpha-pins:/pins" ]
+    network_mode: none
+
+  pki-beta:
+    image: mycelium-federation-node:test
+    container_name: mycelium-fed-pki-beta
+    restart: "no"
+    depends_on:
+      pki-alpha: { condition: service_completed_successfully }
+    environment:
+      RUST_LOG: "warn,federation_node=info"
+      FED_ROLE: pki
+      FED_CA_DIR: /ca
+      FED_CERT_OUT: /certs
+      FED_NODES: "172.31.0.11:57000,172.31.0.12:57000"
+    volumes: [ "beta-ca:/ca", "beta-certs:/certs" ]
+    network_mode: none
   alpha-a1:
     <<: *node
     container_name: mycelium-fed-alpha-a1
@@ -50,11 +102,16 @@ services:
       <<: *node-env
       FED_ROLE: member
       FED_DOMAIN: alpha.example
-      FED_CA_DIR: /ca
+      FED_CERT_DIR: /certs/172_30_0_11_57000
+      FED_EGRESS_HOSTS: beta.example
+      FED_PERMIT_ACTOR: "federation:beta.example/svc/billing"
+      FED_PERMIT_PROVIDERS: "172.30.0.11:57000"
       FED_EXPORTS: "demo/whoami,demo/secret"
       MYCELIUM_HOSTNAME: 172.30.0.11
       MYCELIUM_PEERS: "172.30.0.12:57000,172.30.0.13:57000"
-    volumes: [ "alpha-ca:/ca" ]
+    volumes: [ "alpha-certs:/certs:ro" ]
+    depends_on:
+      pki-alpha: { condition: service_completed_successfully }
     networks:
       alpha-net: { ipv4_address: 172.30.0.11 }
 
@@ -65,10 +122,15 @@ services:
       <<: *node-env
       FED_ROLE: member
       FED_DOMAIN: alpha.example
-      FED_CA_DIR: /ca
+      FED_CERT_DIR: /certs/172_30_0_12_57000
+      FED_EGRESS_HOSTS: beta.example
+      FED_PERMIT_ACTOR: "federation:beta.example/svc/billing"
+      FED_PERMIT_PROVIDERS: "172.30.0.11:57000"
       MYCELIUM_HOSTNAME: 172.30.0.12
       MYCELIUM_PEERS: "172.30.0.11:57000,172.30.0.13:57000"
-    volumes: [ "alpha-ca:/ca" ]
+    volumes: [ "alpha-certs:/certs:ro" ]
+    depends_on:
+      pki-alpha: { condition: service_completed_successfully }
     networks:
       alpha-net: { ipv4_address: 172.30.0.12 }
 
@@ -79,14 +141,19 @@ services:
       <<: *node-env
       FED_ROLE: gateway
       FED_DOMAIN: alpha.example
-      FED_CA_DIR: /ca
+      FED_CERT_DIR: /certs/172_30_0_13_57000
+      FED_EGRESS_HOSTS: beta.example
+      FED_PERMIT_ACTOR: "federation:beta.example/svc/billing"
+      FED_PERMIT_PROVIDERS: "172.30.0.11:57000"
       FED_EXPORTS: "demo/whoami,demo/secret"
       FED_GRANTS: "beta.example=demo/whoami"
       FED_TRUST: "beta.example=${BETA_PUBLIC_KEY}"
       FED_SIGNING_SEED: "1111111111111111111111111111111111111111111111111111111111111111"
       MYCELIUM_HOSTNAME: 172.30.0.13
       MYCELIUM_PEERS: "172.30.0.11:57000,172.30.0.12:57000"
-    volumes: [ "alpha-ca:/ca" ]
+    volumes: [ "alpha-certs:/certs:ro" ]
+    depends_on:
+      pki-alpha: { condition: service_completed_successfully }
     networks:
       alpha-net: { ipv4_address: 172.30.0.13 }
       edge:      { ipv4_address: 172.32.0.13 }
@@ -98,14 +165,19 @@ services:
       <<: *node-env
       FED_ROLE: gateway
       FED_DOMAIN: alpha.example
-      FED_CA_DIR: /ca
+      FED_CERT_DIR: /certs/172_30_0_14_57000
+      FED_EGRESS_HOSTS: beta.example
+      FED_PERMIT_ACTOR: "federation:beta.example/svc/billing"
+      FED_PERMIT_PROVIDERS: "172.30.0.11:57000"
       FED_EXPORTS: "demo/whoami,demo/secret"
       FED_GRANTS: "beta.example=demo/whoami"
       FED_TRUST: "beta.example=${BETA_PUBLIC_KEY}"
       FED_SIGNING_SEED: "1111111111111111111111111111111111111111111111111111111111111111"
       MYCELIUM_HOSTNAME: 172.30.0.14
       MYCELIUM_PEERS: "172.30.0.11:57000,172.30.0.12:57000"
-    volumes: [ "alpha-ca:/ca" ]
+    volumes: [ "alpha-certs:/certs:ro" ]
+    depends_on:
+      pki-alpha: { condition: service_completed_successfully }
     networks:
       alpha-net: { ipv4_address: 172.30.0.14 }
       edge:      { ipv4_address: 172.32.0.14 }
@@ -117,10 +189,13 @@ services:
       <<: *node-env
       FED_ROLE: member
       FED_DOMAIN: beta.example
-      FED_CA_DIR: /ca
+      FED_CERT_DIR: /certs/172_31_0_11_57000
+      FED_EGRESS_HOSTS: alpha.example
       MYCELIUM_HOSTNAME: 172.31.0.11
       MYCELIUM_PEERS: "172.31.0.12:57000"
-    volumes: [ "beta-ca:/ca" ]
+    volumes: [ "beta-certs:/certs:ro" ]
+    depends_on:
+      pki-beta: { condition: service_completed_successfully }
     networks:
       beta-net: { ipv4_address: 172.31.0.11 }
 
@@ -131,10 +206,13 @@ services:
       <<: *node-env
       FED_ROLE: member
       FED_DOMAIN: beta.example
-      FED_CA_DIR: /ca
+      FED_CERT_DIR: /certs/172_31_0_12_57000
+      FED_EGRESS_HOSTS: alpha.example
       MYCELIUM_HOSTNAME: 172.31.0.12
       MYCELIUM_PEERS: "172.31.0.11:57000"
-    volumes: [ "beta-ca:/ca" ]
+    volumes: [ "beta-certs:/certs:ro" ]
+    depends_on:
+      pki-beta: { condition: service_completed_successfully }
     networks:
       beta-net: { ipv4_address: 172.31.0.12 }
 
@@ -149,8 +227,12 @@ services:
       FED_SIGNING_SEED: "2222222222222222222222222222222222222222222222222222222222222222"
       FED_PARTNER: alpha.example
       FED_PARTNER_KEY: "${ALPHA_PUBLIC_KEY}"
-      FED_GATEWAYS: "gw-1=http://172.32.0.13:8300,gw-2=http://172.32.0.14:8300"
+      FED_GATEWAYS: "gw-1=https://172.32.0.13:8300,gw-2=https://172.32.0.14:8300"
+      FED_PINS_DIR: /pins
       FED_CONTROL_PORT: "8400"
+    volumes: [ "alpha-pins:/pins:ro" ]
+    depends_on:
+      pki-alpha: { condition: service_completed_successfully }
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:8400/ready"]
       interval: 3s
@@ -191,8 +273,14 @@ services:
 volumes:
   alpha-ca:
     name: mycelium-fed-alpha-ca
+  alpha-certs:
+    name: mycelium-fed-alpha-certs
+  alpha-pins:
+    name: mycelium-fed-alpha-pins
   beta-ca:
     name: mycelium-fed-beta-ca
+  beta-certs:
+    name: mycelium-fed-beta-certs
 
 networks:
   alpha-net:

@@ -322,6 +322,15 @@ The edge and the clients are attached in code, so `mycelium doctor`, which build
 six as `not_applicable`; read the running node's `GET /gateway/guarantees` or `guarantee_report()` after attaching
 them. A refusal names each one unmet, as `[fed.body_bound: not_configured — …]` after `rev 1:`.
 
+**A fleet that runs under it.** The two-mesh Docker suite (`make test-federation`, CI job `federation`) starts every
+mesh node of both domains under this profile: a one-shot issuer per domain mints the CA in a volume no node mounts
+and issues each node's certificate (`mycelium::issue_node_cert`, what `mycelium tls issue` runs), the gateways serve
+HTTPS on the node identity and the consumer pins each one's SPKI, and each node carries the authority, audit,
+persistence and electorate settings the readiness checklist lists — `examples/federation_node.rs` and the comment at
+the top of `docker/docker-compose.federation.yml` say which setting meets which guarantee. The runner reads each
+node's own `GET /gateway/guarantees` for the profile met, and starts one more node with its CA key on-node, which
+refuses to start naming `id.ca_key_off_node`. It is a test fleet: its keys and gateway token are fixtures in the clear.
+
 ## What this runbook does not cover
 
 - **Running a hub** — a node that is a provider to one partner and a consumer of another — works
