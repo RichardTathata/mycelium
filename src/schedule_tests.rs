@@ -223,7 +223,9 @@ async fn two_holders_under_a_partition_give_one_effect_at_the_destination() {
 /// Y2's exit: a missed run in the trace with its reason. A holder whose wall clock jumps five periods — what a
 /// paused process sees — finds slots no one ran; under `run_once` it decides one run for the gap, records the
 /// decision with the gap and the policy, and the run names that record its parent. The jump goes through the
-/// seam (`sim_seam::step_wall_clock_for_test`), the clock the loop reads.
+/// seam (`sim_seam::step_wall_clock_for_test`), the clock the loop reads — a hook of the non-`sim` build; under
+/// `sim` the kernel owns the clock.
+#[cfg(not(feature = "sim"))]
 #[tokio::test]
 async fn a_missed_run_is_a_decision_in_the_trace_with_its_reason() {
     for (policy, reason, run_reason) in [(MissedRunPolicy::RunOnce, "ran_once", Some("ran_for_gap")), (MissedRunPolicy::Skip, "skipped", None)] {
