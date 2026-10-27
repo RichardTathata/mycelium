@@ -42,7 +42,11 @@ This feature is turned on in code.
 ## See it work
 
 No runnable example exists: the [example index's capability matrix](../../examples/README.md#the-capability-matrix)
-has no row for this feature. The end-to-end runs are tests in [`src/agent/guarantee.rs`](../../src/agent/guarantee.rs),
+has no row for this feature, and the suite's harness binary is not a row either. `make test-federation` runs the
+mesh nodes of two domains under this profile in Docker ([`examples/federation_node.rs`](../../examples/federation_node.rs),
+[`docker/docker-compose.federation.yml`](../../docker/docker-compose.federation.yml),
+[`tests/integration/run_federation.sh`](../../tests/integration/run_federation.sh): legs 0, 2 and 10 read the
+profile). The per-guarantee runs are tests in [`src/agent/guarantee.rs`](../../src/agent/guarantee.rs),
 one per required federation guarantee, each dropping one setting from a node that has every other and showing `start()`
 refuses naming that guarantee and no other in the family: `multi_domain_refuses_naming_fed_domain_enforced`,
 `multi_domain_refuses_naming_fed_pinned`, `multi_domain_refuses_naming_fed_body_bound`,
@@ -64,8 +68,14 @@ rendering of the family is `doctor_prints_the_federation_family_under_the_multi_
   `.suffix` entry, which admits every host under it, so name the partner's host exactly to confine calls to it.
 - `fed.partner_slots` bounds what one gateway carries: a domain running N gateways admits N times the cap
   ([federation § Bounding what a partner can send you](../operations/federation.md#bounding-what-a-partner-can-send-you)).
-- **Open:** the two-mesh Docker suite does not run under this profile yet, the one promise row Y7 of
-  [`adopter-surface.md`](../plans/adopter-surface.md) §8 stays open on, to be closed by the Y8-track precursor PR (the two-mesh suite under the profile).
+- **Its mesh nodes run under it, across real processes:** the two-mesh Docker suite (`make test-federation`, CI job
+  `federation`) starts every mesh node of both domains under this profile — certificates issued off-node, one volume
+  per node, HTTPS gateways the consumer pins, the authority, audit, persistence and electorate settings — reads each
+  node's `GET /gateway/guarantees` for the profile met, shows the evaluator and the body binding refusing, and starts
+  one node with its CA key on-node, which is refused naming `id.ca_key_off_node`
+  ([federation § Starting under `secure-multi-domain`](../operations/federation.md#starting-under-secure-multi-domain)).
+  **Not its consumer:** that is a bare `FederationClient`, not a node, so the client side's `fed.pinned`,
+  `fed.caller_named` and `fed.partner_egress` as a node's facts are shown by the tests above only — carried to Y8.
 - **Not built:** `doctor` cannot report the edge's or the clients' facts (stated in the same row). The upgrade
   notes are [deprecations § 66](../guide/deprecations.md#66-a-third-guarantee-profile-secure-multi-domain-ten-fed-guarantees-in-every-report-guaranteereportunresolved-lists-only-what-applies-unreleased-adopter-surface-y7).
 
