@@ -107,7 +107,21 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `preflight()`, report and profile check as `run`, with the program's own code attachments (an evaluator, a journal, a
   federation edge or clients) applied first, so the report and the refusal are that program's `start()`'s. `Doctor`
   gained `attached` (an exhaustive struct literal breaks; nothing outside the crate builds one).
-
+- **A federation edge serves a credential once** (#695's review, finding 1; `docs/operations/federation.md` § A
+  credential is one call): `/a2a` authorises and claims each federated credential (`FederationEdge::authorize_and_claim`,
+  new; `FederationEdge::claim` returns a `ReplayClaim`), keeps each partner's served credentials — keyed by the digest of
+  the signed bytes — until they expire, and refuses one presented again as `CallRefusal::Replayed` (JSON-RPC -32003,
+  `federation_replays_refused` on `GET /stats`). Before, a captured credential was served as often as it was sent
+  inside its lifetime, repeating its effect; a body binding did not stop it, because the copy carries the same body. Any
+  answer spends a credential: one refused before its dispatch, presented again, is refused -32003 `AlreadyAnswered`
+  (`federation_credentials_already_answered`, not counted as a replay) and never served. Bounded at
+  65 536 a partner (`with_replay_window_per_partner`); full, it refuses what it can no longer rule out as
+  `ReplayUndecidable` (-32004, `federation_replays_undecidable`), never serving a replay. `FederationClient` puts a
+  fresh random JSON-RPC `id` in every call's body (the seam's `nonce` stream) and mints each credential strictly later
+  than its last, so an honest second call — from the same client or another gateway's — is never one.
+  `FederationEdge::authorize` alone stays replay-blind. **Not built:** a set shared across a domain's gateways (a
+  credential is served once at each), and one that survives a restart (it is in memory; a captured credential can be
+  served once more after a restart, inside its lifetime). Upgrade note: `deprecations.md` §70.
 - **A record a span names, read by its hash on the node that wrote it** (`docs/plans/adopter-surface.md` Y4's last
   promise; `docs/operations/audit.md` §3a): `GET /gateway/records/decision/{sha256}` and
   `GET /gateway/records/evidence/{sha256}`, scope `audit:read`, feature `compliance`. The answer carries the record's

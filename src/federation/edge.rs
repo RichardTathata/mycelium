@@ -40,7 +40,8 @@ use super::catalog::filtered_catalog;
 use super::{DomainId, DomainPolicy, TrustBundle};
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 /// The request header a federated call rides in. Its value is [`PresentedCall`] as JSON.
@@ -347,6 +348,122 @@ pub struct FederationEdge {
     /// drop, to release. **Never held across the dispatch**, which is the whole reason the guard
     /// exists rather than a lock held for the duration.
     in_flight: Mutex<HashMap<DomainId, usize>>,
+    /// The credentials this gateway has served, per partner, until they could no longer be served
+    /// anyway (the replay guard — #695's review, finding 1).
+    ///
+    /// Lock-order row 75: leaf, one lock for every partner's window, taken by
+    /// [`FederationEdge::claim`] once per federated call and by [`ReplayClaim`]'s spend or drop, which
+    /// mark it served or refused; never held across the dispatch or with another lock. Each hold is
+    /// one `BTreeMap` insert or state change, an eviction, and at most [`REPLAY_PRUNE_PER_CLAIM`] expired
+    /// entries collected — bounded, whatever the window held when a quiet spell ended.
+    replay: Mutex<HashMap<DomainId, ReplayWindow>>,
+    /// The most entries one partner's window keeps; see [`REPLAY_WINDOW_PER_PARTNER`].
+    replay_limit: usize,
+    /// Credentials refused as [`CallRefusal::Replayed`]. `GET /stats` `federation_replays_refused`.
+    replays_refused: AtomicU64,
+    /// Credentials refused as [`CallRefusal::ReplayUndecidable`]. `GET /stats`
+    /// `federation_replays_undecidable`.
+    replays_undecidable: AtomicU64,
+    /// Credentials refused as [`CallRefusal::AlreadyAnswered`] — a refused call presented again with
+    /// the same credential, not counted as a replay. `GET /stats` `federation_credentials_already_answered`.
+    already_answered: AtomicU64,
+}
+
+/// How many credentials one partner's replay window keeps by default: an entry stays for its
+/// lifetime plus the skew tolerance (330 s at the defaults), so about 198 calls a second sustained
+/// before the window must forget one, at roughly 40 bytes an entry (2.6 MB a partner when full).
+/// [`FederationEdge::with_replay_window_per_partner`] sets another.
+pub const REPLAY_WINDOW_PER_PARTNER: usize = 65_536;
+
+/// The most expired entries one [`FederationEdge::claim`] collects, so a claim after a long quiet
+/// spell does not hold the window's lock while it empties a full window. An expired entry left for
+/// a later claim protects nothing and costs nothing but its place: `authorize` refuses its
+/// credential as `Expired`, and an eviction takes the entry expiring first.
+const REPLAY_PRUNE_PER_CLAIM: usize = 256;
+
+/// One partner's served credentials, ordered by `(expires_at_ms, digest of the signed bytes)`, and
+/// the floor below which a credential is refused because an eviction forgot what was there — the
+/// shape of the caller-envelope window (post-360 row E), keyed on expiry rather than issue time
+/// because expiry is what decides when a credential can no longer be served.
+#[derive(Default)]
+struct ReplayWindow {
+    seen: BTreeMap<(u64, [u8; 32]), Spent>,
+    floor: Option<(u64, [u8; 32])>,
+}
+
+/// What became of a credential this gateway has answered. Every state is spent: none is ever served
+/// again; the state only names the refusal a second presentation gets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Spent {
+    /// Claimed, and its call not yet dispatched or refused.
+    Pending,
+    /// Dispatched: a second presentation is [`CallRefusal::Replayed`].
+    Served,
+    /// Refused before the dispatch: a second presentation is [`CallRefusal::AlreadyAnswered`].
+    Refused,
+}
+
+impl ReplayWindow {
+    /// Forget every entry that expired before `horizon`: [`verify_federated_call`] refuses it as
+    /// `Expired` from then on, so remembering it protects nothing. A floor below the horizon goes
+    /// for the same reason.
+    fn prune(&mut self, horizon: u64) {
+        for _ in 0..REPLAY_PRUNE_PER_CLAIM {
+            if self.seen.first_key_value().is_none_or(|(&(expires, _), _)| expires >= horizon) {
+                break;
+            }
+            self.seen.pop_first();
+        }
+        if self.floor.is_some_and(|(expires, _)| expires < horizon) {
+            self.floor = None;
+        }
+    }
+}
+
+/// A credential claimed at this gateway ([`FederationEdge::claim`]).
+///
+/// **Any answer spends it.** [`Self::spend`] it once the call is dispatched, and a second
+/// presentation is [`CallRefusal::Replayed`]; dropped unspent — a refusal before the dispatch, or an
+/// unwind — it stays spent too, marked refused, and a second presentation is
+/// [`CallRefusal::AlreadyAnswered`]: never served. Giving it back would let a captured copy be served
+/// after the caller had retried with a fresh credential — the effect twice — and a call its caller was
+/// told was refused take effect later (#696's confirmation round). A caller retries with a fresh
+/// credential, as `FederationClient` mints one per call.
+pub struct ReplayClaim {
+    edge: Arc<FederationEdge>,
+    partner: DomainId,
+    key: (u64, [u8; 32]),
+    spent: bool,
+}
+
+impl ReplayClaim {
+    /// The call was dispatched: keep the credential served.
+    pub fn spend(mut self) {
+        self.spent = true;
+        let mut windows = self.edge.replay.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(spent) = windows.get_mut(&self.partner).and_then(|w| w.seen.get_mut(&self.key)) {
+            *spent = Spent::Served;
+        }
+    }
+}
+
+/// Hand-written for the reason [`PartnerSlot`]'s is: the claim holds the edge, and the edge its key.
+impl std::fmt::Debug for ReplayClaim {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReplayClaim").field("partner", &self.partner).field("spent", &self.spent).finish_non_exhaustive()
+    }
+}
+
+impl Drop for ReplayClaim {
+    fn drop(&mut self) {
+        if self.spent {
+            return;
+        }
+        let mut windows = self.edge.replay.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(spent) = windows.get_mut(&self.partner).and_then(|w| w.seen.get_mut(&self.key)) {
+            *spent = Spent::Refused;
+        }
+    }
 }
 
 /// One admitted call's slot at the edge, released when this is dropped.
@@ -398,7 +515,22 @@ impl FederationEdge {
             signing_key: None,
             trust: RwLock::new(EdgeTrust { policy, bundle }),
             in_flight: Mutex::new(HashMap::new()),
+            replay: Mutex::new(HashMap::new()),
+            replay_limit: REPLAY_WINDOW_PER_PARTNER,
+            replays_refused: AtomicU64::new(0),
+            replays_undecidable: AtomicU64::new(0),
+            already_answered: AtomicU64::new(0),
         }
+    }
+
+    /// Keep at most `limit` served credentials per partner (at least one) instead of
+    /// [`REPLAY_WINDOW_PER_PARTNER`]. Past it the oldest-expiring entry is forgotten and every
+    /// credential expiring no later than it is refused as [`CallRefusal::ReplayUndecidable`] until
+    /// that expiry passes — a smaller window costs refusals of late-arriving credentials, never a
+    /// replay served.
+    pub fn with_replay_window_per_partner(mut self, limit: usize) -> Self {
+        self.replay_limit = limit.max(1);
+        self
     }
 
     /// Sign catalogue replies under the domain's key (item 2 PR 10a). Partners verify against the
@@ -457,6 +589,11 @@ impl FederationEdge {
     /// `body` is the request payload **exactly as received**, before parsing. A credential that
     /// binds a body is checked against these bytes; see [`FederatedCaller::body_sha256`] for why a
     /// re-serialisation will not do.
+    ///
+    /// **Replay-blind.** This answers whether the credential may make the call, not whether it
+    /// already has: the same credential authorises the same way every time it is presented. A door
+    /// that dispatches calls [`Self::authorize_and_claim`] instead, as `/a2a` does, or claims with
+    /// [`Self::claim`] itself; a door that only calls this serves a replay.
     pub fn authorize(
         &self,
         presented: &PresentedCall,
@@ -483,6 +620,122 @@ impl FederationEdge {
             &self.call_policy,
             now_ms,
         )
+    }
+
+    /// Authorise `presented` for `requested_export` **and** claim it as served — the path a door
+    /// that dispatches takes. [`Self::authorize`] alone is replay-blind.
+    ///
+    /// Hold the returned [`ReplayClaim`] until the call is dispatched, then [`ReplayClaim::spend`]
+    /// it; dropped unspent — a refusal before anything reached a provider — the credential is spent
+    /// all the same, and presented again it is refused as [`CallRefusal::AlreadyAnswered`] rather
+    /// than counted as a replay. Any answer spends a credential.
+    pub fn authorize_and_claim(
+        self: &Arc<Self>,
+        presented: &PresentedCall,
+        requested_export: &str,
+        body: &[u8],
+        now_ms: u64,
+    ) -> Result<(AcceptedCall, ReplayClaim), CallRefusal> {
+        let accepted = self.authorize(presented, requested_export, body, now_ms)?;
+        let claim = self.claim(presented, now_ms)?;
+        Ok((accepted, claim))
+    }
+
+    /// **Claim `presented` as served**, or refuse it as a replay — once per call, after
+    /// [`Self::authorize`] has accepted it and before the dispatch ([`Self::authorize_and_claim`]
+    /// does both).
+    ///
+    /// The key is the digest of the credential's signed bytes ([`FederatedCaller::canonical_bytes`]),
+    /// so it covers the principal, the export, both times and the body binding: the same credential
+    /// with the same body is refused, and so is the same *unbound* credential with any body. Not
+    /// the signature, which a signer could vary over the same bytes. An honest
+    /// [`FederationClient`](super::client::FederationClient) never presents one twice: each call's
+    /// body carries a fresh random JSON-RPC `id` (the seam's `nonce` stream), so two calls — from
+    /// one client or from two gateways of one domain — bind two bodies.
+    ///
+    /// **Any answer spends the credential.** The claim is taken when this returns; a concurrent
+    /// presentation while it is held is a replay. Spent at the dispatch, a second presentation is
+    /// [`CallRefusal::Replayed`]; dropped unspent — the call refused at this gateway before its
+    /// dispatch (capacity, the task id, an unresolved skill, the evaluator) — it is
+    /// [`CallRefusal::AlreadyAnswered`], counted apart from replays because a caller retrying a
+    /// refused call with the same header is not an attacker. Neither is ever served: a refused
+    /// credential given back could be served from a captured copy after the caller had retried with
+    /// a fresh one, the effect twice, and a call its caller was told was refused could take effect
+    /// later (#696's confirmation round). It also means a replay is refused before the evaluator,
+    /// so a captured copy writes no second evidence record.
+    ///
+    /// **What it bounds, and what it does not.**
+    /// - Entries are kept until `expires_at_ms` plus the skew tolerance has passed by this
+    ///   gateway's clock — after that `authorize` refuses the credential as `Expired` — so the set
+    ///   holds at most what one partner can present within one lifetime. A wall clock stepped back
+    ///   further than the skew tolerance re-opens what it forgot.
+    /// - **Per gateway.** A domain that runs N gateways serves one credential up to N times, once
+    ///   at each: there is no shared set, for the reason `max_in_flight_per_partner` has none.
+    /// - **In memory.** A restart forgets the set, so a credential captured before a restart can be
+    ///   served once more after it, inside its lifetime (at most 300 s by default).
+    /// - **Bounded**, [`REPLAY_WINDOW_PER_PARTNER`] entries a partner by default. Full, it forgets
+    ///   the entry expiring first and refuses everything expiring no later than it as
+    ///   [`CallRefusal::ReplayUndecidable`]: fail closed, counted, never a silent eviction. The
+    ///   window is the partner's, not a principal's, so one principal calling fast enough to fill it
+    ///   raises the floor for every principal of that partner: another's credential that expires
+    ///   sooner is refused as undecidable until the floor passes.
+    ///
+    /// Only credentials that verified reach this, so a forger cannot fill a window.
+    pub fn claim(self: &Arc<Self>, presented: &PresentedCall, now_ms: u64) -> Result<ReplayClaim, CallRefusal> {
+        use sha2::{Digest, Sha256};
+        let credential = presented.credential();
+        let partner = credential.origin_domain.clone();
+        let key = (credential.expires_at_ms, <[u8; 32]>::from(Sha256::digest(credential.canonical_bytes())));
+        let horizon = now_ms.saturating_sub(self.call_policy.skew_tolerance.as_millis() as u64);
+        let outcome = {
+            let mut windows = self.replay.lock().unwrap_or_else(|e| e.into_inner());
+            let window = windows.entry(partner.clone()).or_default();
+            window.prune(horizon);
+            if window.floor.is_some_and(|f| key <= f) {
+                Err(CallRefusal::ReplayUndecidable { partner: partner.clone(), limit: self.replay_limit })
+            } else if let Some(spent) = window.seen.get(&key) {
+                Err(match spent {
+                    Spent::Refused => CallRefusal::AlreadyAnswered { partner: partner.clone() },
+                    Spent::Pending | Spent::Served => CallRefusal::Replayed { partner: partner.clone() },
+                })
+            } else {
+                window.seen.insert(key, Spent::Pending);
+                if window.seen.len() > self.replay_limit
+                    && let Some((oldest, _)) = window.seen.pop_first()
+                {
+                    window.floor = Some(window.floor.map_or(oldest, |f| f.max(oldest)));
+                }
+                Ok(())
+            }
+        };
+        match outcome {
+            Ok(()) => Ok(ReplayClaim { edge: Arc::clone(self), partner, key, spent: false }),
+            Err(refusal) => {
+                let counter = match refusal {
+                    CallRefusal::Replayed { .. } => &self.replays_refused,
+                    CallRefusal::AlreadyAnswered { .. } => &self.already_answered,
+                    _ => &self.replays_undecidable,
+                };
+                counter.fetch_add(1, Ordering::Relaxed);
+                Err(refusal)
+            }
+        }
+    }
+
+    /// Credentials refused as replayed and as undecidable since start, in that order.
+    pub fn replays_refused(&self) -> (u64, u64) {
+        (self.replays_refused.load(Ordering::Relaxed), self.replays_undecidable.load(Ordering::Relaxed))
+    }
+
+    /// Credentials refused as already answered since start — a refused call retried with the same
+    /// credential, which is not counted as a replay.
+    pub fn already_answered(&self) -> u64 {
+        self.already_answered.load(Ordering::Relaxed)
+    }
+
+    /// How many served credentials `partner`'s window holds right now (tests, diagnostics).
+    pub fn replay_entries_for(&self, partner: &DomainId) -> usize {
+        self.replay.lock().unwrap_or_else(|e| e.into_inner()).get(partner).map_or(0, |w| w.seen.len())
     }
 
     /// **Take a slot for `partner`**, or refuse (item 2, the Phase-C audit's last finding).
@@ -927,5 +1180,163 @@ mod tests {
             &wrong,
         );
         assert_eq!(e.authenticate(&gamma, now), Err(CallRefusal::UnknownDomain));
+    }
+
+    /// **A credential is one call** (#695's review, finding 1). The same signed bytes presented a
+    /// second time are refused as a replay, by name and counted; a freshly minted credential for the
+    /// same call is served; and an unbound credential is one call too, whatever body comes with it.
+    #[test]
+    fn the_same_credential_is_served_once_and_a_fresh_one_is_served() {
+        let (sk, vk) = keypair(7);
+        let e = Arc::new(edge(vk));
+        let beta = DomainId::new("beta.example").unwrap();
+        let now = 1_789_000_000_000;
+
+        let call = presented(&sk, "invoice.submit", now);
+        let (_, claim) = e.authorize_and_claim(&call, "invoice.submit", TEST_BODY, now).unwrap();
+        claim.spend();
+        // The copy authorises exactly as the original did — a body binding cannot tell them apart.
+        e.authorize(&call, "invoice.submit", TEST_BODY, now + 5).unwrap();
+        assert_eq!(e.claim(&call, now + 5).map(ReplayClaim::spend), Err(CallRefusal::Replayed { partner: beta.clone() }));
+        assert_eq!(
+            e.authorize_and_claim(&call, "invoice.submit", TEST_BODY, now + 5).map(|(_, c)| c.spend()),
+            Err(CallRefusal::Replayed { partner: beta.clone() }),
+            "the combined path refuses it too"
+        );
+        assert_eq!(e.replays_refused(), (2, 0));
+
+        // A fresh credential for the same export and body — one millisecond later — is another call.
+        let fresh = presented(&sk, "invoice.submit", now + 1);
+        assert_eq!(e.claim(&fresh, now + 5).map(ReplayClaim::spend), Ok(()));
+        assert_eq!(e.replay_entries_for(&beta), 2);
+
+        // Unbound: the key is the signed bytes, so the same credential with another body is a replay.
+        let unbound = PresentedCall::sign(
+            &FederatedCaller {
+                body_sha256: None,
+                origin_domain: beta.clone(),
+                principal: "svc/billing".into(),
+                export: "invoice.submit".into(),
+                issued_at_ms: now + 2,
+                expires_at_ms: now + 60_000,
+            },
+            &sk,
+        );
+        assert_eq!(e.claim(&unbound, now + 5).map(ReplayClaim::spend), Ok(()));
+        assert_eq!(e.claim(&unbound, now + 6).map(ReplayClaim::spend), Err(CallRefusal::Replayed { partner: beta }));
+        assert_eq!(e.replays_refused(), (3, 0));
+    }
+
+    /// The window forgets a credential only once it could not be served anyway: past its expiry
+    /// plus the skew tolerance, when `authorize` refuses it as `Expired`.
+    #[test]
+    fn a_served_credential_is_forgotten_only_after_it_has_expired() {
+        let (sk, vk) = keypair(7);
+        let e = Arc::new(edge(vk));
+        let beta = DomainId::new("beta.example").unwrap();
+        let now = 1_789_000_000_000;
+        let call = presented(&sk, "invoice.submit", now);
+        let expires = now + 60_000;
+        let skew = CallPolicy::default().skew_tolerance.as_millis() as u64;
+        e.claim(&call, now).unwrap().spend();
+
+        // Still inside expiry + skew: remembered, and still refused.
+        let other = presented(&sk, "invoice.submit", now + 1);
+        e.claim(&other, expires + skew).unwrap().spend();
+        assert_eq!(e.replay_entries_for(&beta), 2);
+        assert!(matches!(e.claim(&call, expires + skew).map(ReplayClaim::spend), Err(CallRefusal::Replayed { .. })));
+
+        // Past it: `authorize` refuses the credential as expired, so the window lets it go.
+        assert!(matches!(
+            e.authorize(&call, "invoice.submit", TEST_BODY, expires + skew + 2),
+            Err(CallRefusal::Expired { .. })
+        ));
+        let later = presented(&sk, "invoice.submit", expires + skew + 2);
+        e.claim(&later, expires + skew + 2).unwrap().spend();
+        assert_eq!(e.replay_entries_for(&beta), 1, "both expired entries collected, only the new one kept");
+    }
+
+    /// **Full, it fails closed.** Past its limit a partner's window forgets the entry expiring first
+    /// and refuses everything expiring no later than it as undecidable — the evicted credential
+    /// itself included — while a credential expiring later is served.
+    #[test]
+    fn a_full_window_refuses_what_it_can_no_longer_rule_out() {
+        let (sk, vk) = keypair(7);
+        let e = Arc::new(edge(vk).with_replay_window_per_partner(3));
+        let beta = DomainId::new("beta.example").unwrap();
+        let now = 1_789_000_000_000;
+        let calls: Vec<_> = (0..4).map(|i| presented(&sk, "invoice.submit", now + i)).collect();
+        for c in &calls {
+            e.claim(c, now + 10).unwrap().spend();
+        }
+        assert_eq!(e.replay_entries_for(&beta), 3, "bounded at its limit");
+
+        // The forgotten one is not served again: it is at the floor, so it cannot be ruled out.
+        assert_eq!(
+            e.claim(&calls[0], now + 10).map(ReplayClaim::spend),
+            Err(CallRefusal::ReplayUndecidable { partner: beta.clone(), limit: 3 })
+        );
+        // Nor a credential the partner minted earlier still, arriving late.
+        let late = presented(&sk, "invoice.submit", now - 5);
+        assert!(matches!(e.claim(&late, now + 10).map(ReplayClaim::spend), Err(CallRefusal::ReplayUndecidable { .. })));
+        // The kept ones are still replays, by name.
+        assert!(matches!(e.claim(&calls[3], now + 10).map(ReplayClaim::spend), Err(CallRefusal::Replayed { .. })));
+        // And a credential expiring later than the floor is served.
+        e.claim(&presented(&sk, "invoice.submit", now + 9), now + 10).unwrap().spend();
+        assert_eq!(e.replays_refused(), (1, 2));
+    }
+
+    /// **Two presentations racing, one call.** The claim is one critical section, so of sixteen
+    /// threads presenting the same credential at once exactly one is served.
+    #[test]
+    fn concurrent_presentations_of_one_credential_serve_exactly_one() {
+        let (sk, vk) = keypair(7);
+        let e = Arc::new(edge(vk));
+        let now = 1_789_000_000_000;
+        let call = presented(&sk, "invoice.submit", now);
+        let barrier = Arc::new(std::sync::Barrier::new(16));
+        let served: usize = (0..16)
+            .map(|_| {
+                let (e, call, barrier) = (Arc::clone(&e), call.clone(), Arc::clone(&barrier));
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    e.claim(&call, now).map(ReplayClaim::spend).is_ok()
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|h| h.join().unwrap() as usize)
+            .sum();
+        assert_eq!(served, 1);
+        assert_eq!(e.replays_refused(), (15, 0));
+    }
+
+    /// **Any answer spends a credential** (#696's confirmation round). A claim dropped before the
+    /// dispatch leaves the credential spent and marked refused: presented again it is
+    /// `AlreadyAnswered`, never served and not counted as a replay. A claim spent at the dispatch
+    /// makes the next presentation `Replayed`. And while a claim is held, a concurrent presentation
+    /// is a replay.
+    #[test]
+    fn any_answer_spends_the_credential() {
+        let (sk, vk) = keypair(7);
+        let e = Arc::new(edge(vk));
+        let beta = DomainId::new("beta.example").unwrap();
+        let now = 1_789_000_000_000;
+
+        let refused = presented(&sk, "invoice.submit", now);
+        let held = e.claim(&refused, now).expect("first presentation");
+        assert_eq!(e.claim(&refused, now).map(ReplayClaim::spend), Err(CallRefusal::Replayed { partner: beta.clone() }), "while held");
+        drop(held); // refused before the dispatch
+        assert_eq!(e.replay_entries_for(&beta), 1, "still spent");
+        assert_eq!(
+            e.authorize_and_claim(&refused, "invoice.submit", TEST_BODY, now + 1).map(|(_, c)| c.spend()),
+            Err(CallRefusal::AlreadyAnswered { partner: beta.clone() })
+        );
+        assert_eq!((e.replays_refused(), e.already_answered()), ((1, 0), 1), "a retry is not counted as a replay");
+
+        let served = presented(&sk, "invoice.submit", now + 2);
+        e.claim(&served, now + 2).unwrap().spend();
+        assert_eq!(e.claim(&served, now + 3).map(ReplayClaim::spend), Err(CallRefusal::Replayed { partner: beta }));
+        assert_eq!((e.replays_refused(), e.already_answered()), ((2, 0), 1));
     }
 }

@@ -153,6 +153,48 @@ apart precisely so a transient load answer is not read as a standing authority a
 Read the current occupancy with `FederationEdge::in_flight_for(&partner)` — the map holds only
 partners with work in flight, so an empty read means idle, not unconfigured.
 
+## A credential is one call (replays)
+
+`/a2a` remembers the federated credentials it has served and refuses one presented again: the same signed bytes a
+second time are a **replay**, refused with `Replayed` and JSON-RPC **-32003**, before any slot is taken or anything is
+dispatched, and counted as `federation_replays_refused` on `GET /stats`. There is nothing to configure. A body
+binding does not do this on its own: the copy of a captured call carries the same body, so before this guard anyone
+holding a captured credential — on the path, or a log that kept the header — could send it again inside its lifetime
+and the provider would act again. The key is the credential's signed bytes, so an *unbound* credential presented with a
+different body is a replay too. **Any answer spends a credential.** A call refused before it was dispatched — the
+partner at its slot cap (-32004), a task id another caller owns, a skill that does not resolve, the evaluator's
+refusal — ends its credential too: sent again, it is refused -32003 `AlreadyAnswered` (*already_answered*), never
+served, and counted as `federation_credentials_already_answered`, not as a replay, because a caller retrying with the
+same header is not an attacker. A retry needs a fresh credential. Were a refused credential given back, a captured
+copy could be served after the caller had retried with a fresh one — the effect twice — and a call its caller was
+told was refused could take effect later. An honest client never trips it: `FederationClient` puts a
+fresh random JSON-RPC `id` in every call's body, which the credential binds, so two identical calls — from one client
+or from two gateways of one domain — are two credentials.
+
+The guard is `/a2a`'s, through `FederationEdge::authorize_and_claim`. `FederationEdge::authorize` on its own is
+**replay-blind**: a door you build on it must claim (`FederationEdge::claim`) or it serves replays.
+
+What it does not do, and the window it leaves:
+
+1. **Per gateway.** A domain that runs N gateways serves one credential up to N times, once at each — no shared set,
+   for the reason the slot cap has none.
+2. **In memory.** A restart forgets what was served, so a credential captured before a restart can be served once
+   more after it, inside its lifetime — 300 s at most by default (`CallPolicy::max_lifetime`; shorten it to shorten
+   the window).
+3. **Kept until the credential expires**, plus the 30 s skew tolerance, by the gateway's clock; a wall clock stepped
+   back further than the skew tolerance re-opens what it forgot.
+4. **Bounded**, 65 536 credentials a partner by default (`FederationEdge::with_replay_window_per_partner`) — about 198
+   calls a second sustained at the default 330 s an entry is kept. Full, the window forgets the credential expiring
+   first and refuses every credential expiring no later than it as `ReplayUndecidable` (JSON-RPC **-32004**,
+   `federation_replays_undecidable`): fail closed, never a replay served. A fresh credential is served, so the partner's
+   caller resolves it by calling again (`FederationClient` mints a fresh credential for each call; it does not retry
+   by itself). The window is the partner's, not a principal's: one principal calling fast enough to fill it raises the
+   floor for all of that partner's principals, so another's credential that expires sooner is refused as undecidable
+   until the floor passes. A rising count means the partner calls faster than the window holds; the fix is a larger
+   window or a shorter lifetime.
+
+The catalogue `GET` is not guarded: it changes nothing, and its reply is signed for the asker.
+
 ## Encrypting the link (TLS pinning)
 
 Federated calls are signed, not encrypted: without this step an on-path observer reads every call
@@ -268,6 +310,8 @@ Refusals are typed so they route you to the right file. Two pairs matter most:
 - **`BadSignature` is not `NotPermitted`.** The first says somebody is forging; the second says a
   partner asked for something you chose not to grant. Reading a forgery as a policy gap sends you to
   edit the wrong file.
+- **`Replayed` is not `ReplayUndecidable`.** The first is this exact credential served before — someone
+  holds a captured call; the second is a partner window full, which a fresh credential resolves.
 - **`WrongExport` on a catalogue path** means a credential crossed the catalogue/call boundary,
   which is a partner-side bug rather than a permissions question.
 
@@ -345,16 +389,16 @@ operator's steps in `fleet.sh`: `mycelium tls ca` mints each domain's CA, `mycel
 egress lists are made or named there. Each gateway's own `GET /gateway/guarantees` reads all seven `fed.*` node facts
 `enforced`, the client side's among them; a call names `federation:kitchen.example/token:kitchen/planner` at the food
 bank's provider, and the other way `…/token:foodbank/steward` at the kitchen's; a wrong pin, a rewritten body and a
-third concurrent call against a cap of two are each refused — CI's `Scaffold` job runs every line
+third concurrent call against a cap of two are each refused, and so is the same credential and body sent a second time — CI's `Scaffold` job runs every line
 ([`templates/two-domains`](../../templates/two-domains/README.md)). Its four nodes share one host, so the separation of
 `ca/` from each node's `certs/<node>/` is shown by layout, not enforced by the host.
 
-**A credential presented twice.** The edge checks a federated credential's signature, its body binding, its window
-and the grant; it keeps no record of the credentials it has served, so the same credential with the same body,
-presented again inside its window (at most `CallPolicy::max_lifetime`, 300 s by default), is served again. **Anyone
-who holds a captured credential and its body** — on the path, at a proxy that terminates TLS, in a log that kept a
-request — can repeat its effect within that window, not only the partner; an at-most-once effect needs its own
-idempotency key at the provider ([side effects](../features/side-effects.md)) until the edge refuses a replay.
+**A credential presented twice** is refused at the gateway that served it ([§ A credential is one
+call](#a-credential-is-one-call-replays)); the scaffold's `cargo run -- replay kitchen-gw pantry/stock` shows it. What is
+left is that section's limits: **anyone who holds a captured credential and its body** — on the path, at a proxy that
+terminates TLS, in a log that kept a request — can still have it served once at each other gateway of the domain, or
+once more after the serving gateway restarts, inside its lifetime; an at-most-once effect that must hold across those
+still needs its own idempotency key at the provider ([side effects](../features/side-effects.md)).
 
 ## What this runbook does not cover
 

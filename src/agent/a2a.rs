@@ -811,15 +811,31 @@ async fn dispatch_send(
     #[cfg(feature = "tls")]
     let mut _slot: Option<crate::federation::edge::PartnerSlot> = None;
     #[cfg(feature = "tls")]
+    let mut _claim: Option<crate::federation::edge::ReplayClaim> = None;
+    #[cfg(feature = "tls")]
     if let Some(federated) = federated {
         let Some(edge) = state.task_ctx.federation_edge.get() else {
             return Err(jsonrpc_error(id, -32003, "federation is not enabled at this gateway"));
         };
-        let accepted =
-            match edge.authorize(&federated.presented, skill_id, raw, crate::federation::edge::now_ms()) {
-                Ok(accepted) => accepted,
-                Err(refusal) => return Err(jsonrpc_error(id, -32003, &format!("federated call refused: {refusal}"))),
-            };
+        // Authorised, then claimed as served (#695's review): a second presentation of the same
+        // signed bytes is a replay and repeats nothing. After authority, so only a credential that
+        // verified enters the window; before capacity, so a replay never holds a slot. One clock
+        // read for both. Any answer spends the credential: spent as served at the dispatch, or —
+        // dropped before it by a refusal — as refused, which a second presentation is told
+        // (`already_answered`, -32003, not counted as a replay). -32003 for a replay, which has no
+        // benign reading; -32004 for *cannot rule one out*, which a fresh credential resolves, as
+        // it does a capacity refusal. A retry is a fresh credential.
+        let now = crate::federation::edge::now_ms();
+        let accepted = match edge.authorize_and_claim(&federated.presented, skill_id, raw, now) {
+            Ok((accepted, claim)) => {
+                _claim = Some(claim);
+                accepted
+            }
+            Err(refusal) => {
+                let code = if matches!(refusal, crate::federation::call::CallRefusal::ReplayUndecidable { .. }) { -32004 } else { -32003 };
+                return Err(jsonrpc_error(id, code, &format!("federated call refused: {refusal}")));
+            }
+        };
         // Capacity is asked **after** authority, so a partner we would refuse on authority cannot
         // occupy a slot belonging to one we would admit. Its own code: a capacity refusal is
         // transient and a retry resolves it, while -32003 says go and talk to your operator.
@@ -879,6 +895,11 @@ async fn dispatch_send(
     // Closure plan C2/C3: the presented mandate, and the resource it is presented for, travel to the
     // provider, which verifies them itself.
     let resource_claim = format!("skill:{skill_id}@{target}");
+    // Dispatched from here on: the credential stays served whatever the provider answers.
+    #[cfg(feature = "tls")]
+    if let Some(claim) = _claim.take() {
+        claim.spend();
+    }
     let dispatched = gateway_caller::gateway_rpc_call_with_mandate(
         &state.task_ctx, caller, target,
         "skill.invoke".into(), Bytes::from(text.into_bytes()), timeout, gateway_caller::presented_mandate(params),

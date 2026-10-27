@@ -122,7 +122,7 @@ every remaining site — **what was the old type quietly making impossible to te
 
 | Site | Depends on it | Owner |
 |---|---|---|
-| `mycelium-core/src/ops.rs:57,95,130` · `mesh_handle.rs:156` · `rpc.rs:138` · `a2a.rs:155` · `http.rs:1448,2382,2410` · `consensus_handle.rs:433` | **nonces** (signal dedup, RPC correlation, lock values, handle ids) | **named RNG stream `nonce`** |
+| `mycelium-core/src/ops.rs:57,95,130` · `mesh_handle.rs:156` · `rpc.rs:138` · `a2a.rs:155` · `http.rs:1448,2382,2410` · `consensus_handle.rs:433` · `federation/client.rs` `request_body` | **nonces** (signal dedup, RPC correlation, lock values, handle ids, a federated call's JSON-RPC `id` — #696) | **named RNG stream `nonce`** |
 | `ops.rs:42` · `connection.rs:518` | **opacity shedding roll** (`fastrand::f32() >= fill`) | stream `shed` |
 | `writer.rs:25` (jittered backoff) · `consensus.rs:877,1084` (ballot retry jitter) · `tasks.rs:554` (tick jitter) · `membership_governor.rs:229` (pass jitter) | **jitter** | stream `jitter` |
 | `swim.rs:446,455` · `swim_membership.rs:211` · `tasks.rs:417,484,497,656,737` | **peer selection and shuffles** (ping target, fan-out victims, bootstrap order) | stream `select` |

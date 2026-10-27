@@ -85,6 +85,11 @@ rendering of the family is `doctor_prints_the_federation_family_under_the_multi_
   other, and its own `GET /gateway/guarantees` reads all seven `fed.*` node facts `enforced` while it runs —
   `fed.pinned`, `fed.caller_named` and `fed.partner_egress` among them (CI job `Scaffold`). Four processes on one host,
   not containers.
+- **A replayed credential is refused at `/a2a`**, under any profile — the same signed bytes served once a gateway,
+  in memory, until they expire; per gateway, and forgotten at a restart; a door built on `FederationEdge::authorize`
+  alone must claim, or it is replay-blind
+  ([federation § A credential is one call](../operations/federation.md#a-credential-is-one-call-replays)). No guarantee
+  id: it is not a setting, so there is nothing for the report to resolve.
 - `mycelium doctor <file>` cannot report the edge's or the clients' facts; `doctor::run_attached` can, over the
   program's own attachments, and the scaffold's `doctor` is that. The upgrade
   notes are [deprecations § 66](../guide/deprecations.md#66-a-third-guarantee-profile-secure-multi-domain-ten-fed-guarantees-in-every-report-guaranteereportunresolved-lists-only-what-applies-unreleased-adopter-surface-y7).

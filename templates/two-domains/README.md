@@ -44,7 +44,9 @@ through `GOSSIP_GATEWAY_NAMED_TOKENS`, which `fleet.sh` sets from `secrets/<node
 at most two of its partner's (`max_in_flight_per_partner`); a third concurrent `bash fleet.sh call kitchen-gw
 pantry/reserve` answers `already carrying 2 calls for kitchen.example`. A body rewritten after it was signed is refused
 at the partner's edge: `cargo run -- tamper kitchen-gw pantry/stock` presents a credential the kitchen signed for one
-body with another, and the food bank's edge answers that the credential binds a different body.
+body with another, and the food bank's edge answers that the credential binds a different body. A captured call sent
+again is refused too: `cargo run -- replay kitchen-gw pantry/stock` presents one credential and its body twice, and the
+food bank's edge serves the first and answers the second `-32003`, *replayed*.
 
 **One domain** is this scaffold with the second fleet deleted (D26): remove `nodes/kitchen-gw.toml`,
 `nodes/kitchen-1.toml` and the two `[domains."kitchen.example"…]` tables; from the food bank's table remove `grants`,
@@ -55,8 +57,8 @@ body with another, and the food bank's edge answers that the credential binds a 
 **What this does not establish.**
 - On one machine every directory is readable by every process: the separation `ca/` and `certs/<node>/` show is the
   one each real host has, where a node is given only its own directory.
-- A credential presented a second time, with the same body, inside its window is served again: the edge checks the
-  signature, the body, the window and the grant, and keeps no record of credentials it has seen.
+- A credential is refused a second time **at the gateway that served it**, until it expires: each gateway keeps its own
+  record, in memory, so a domain with several gateways serves one credential once at each, and a restart forgets it.
 - The policy is the reference evaluator over the rules `federation.toml` derives; a deployment attaches its own adapter
   in `src/authority.rs`. No mandate is presented here, so the execution authority is attached and decides nothing yet.
 - `mycelium doctor nodes/<node>.toml` reads the file alone and cannot see what the program attaches in code, so it

@@ -12,6 +12,7 @@
 //! cargo run -- keys <domain>    # a domain's signing key: secrets/<domain>.seed, and exchange/<domain>.pub to hand over
 //! cargo run -- tokens <gateway> # its named local callers' tokens: secrets/<gateway>.tokens, read from the environment
 //! cargo run -- tamper <node> <export>  # what a body rewritten on the path looks like to the partner's edge
+//! cargo run -- replay <node> <export>  # what a captured call sent again looks like to the partner's edge
 //! cargo run -- get|post <node> <path> [json]  # a local caller at a gateway: its domain's CA, its named token
 //! ```
 mod authority;
@@ -30,10 +31,11 @@ async fn main() {
         ["keys", domain] => fleet::keys(domain),
         ["tokens", node] => fleet::tokens(node),
         ["tamper", node, export] => fleet::tamper(node, export).await,
+        ["replay", node, export] => fleet::replay(node, export).await,
         ["get", node, path] => fleet::local_call(node, path, None).await,
         ["post", node, path, body] => fleet::local_call(node, path, Some(body)).await,
         _ => {
-            eprintln!("usage: cargo run -- start <node> | doctor <node> | keys <domain> | tokens <gateway> | tamper <node> <export> | get|post <node> <path> [json]");
+            eprintln!("usage: cargo run -- start <node> | doctor <node> | keys <domain> | tokens <gateway> | tamper <node> <export> | replay <node> <export> | get|post <node> <path> [json]");
             2
         }
     };

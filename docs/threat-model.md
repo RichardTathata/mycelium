@@ -250,8 +250,17 @@ principal of another domain — legitimately federated, or impersonating one.
   operator configuration** (no registry, no transitive trust); filtered catalogs; origin preserved to the provider
   through the federation-aware adapter (item 7's `GatewayCaller`, across a boundary); ≥ 2 replaceable gateways, no
   federation leader; SWIM (unauthenticated UDP) **off** in the enforced profile; on disconnect, discovery expires and
-  calls fail explicitly — reconnect refreshes before new work and never merges.
-- *Residual:* a federated principal is trusted to *invoke what was exported*; the export policy is the operator's
+  calls fail explicitly — reconnect refreshes before new work and never merges. **A credential is one call**
+  (#696): `/a2a` authorises and claims each federated credential (`FederationEdge::authorize_and_claim`), keyed by the
+  digest of its signed bytes until it expires, and refuses a second presentation as `Replayed` — so a captured call,
+  body and all, is not served again at that gateway. Any answer spends the credential: one refused before the
+  dispatch is refused again as `AlreadyAnswered` (counted apart from replays), so a refusal ends a credential and a
+  captured copy of a refused call never takes effect later; a retry is a fresh credential.
+- *Residual:* a federated principal is trusted to *invoke what was exported*; a captured credential can still be
+  served **once at each other gateway** of the domain (the set is per gateway) and **once more after a restart**
+  (it is in memory), inside its lifetime (300 s by default); a door an embedder builds on `FederationEdge::authorize`
+  alone is replay-blind; one principal filling its partner's window raises the floor for every principal of that
+  partner, refusing their sooner-expiring credentials as undecidable (fail closed); the export policy is the operator's
   statement, and the release gate (two meshes, sever every link, change permissions mid-partition, reconnect, prove
   no merge) is what makes it a claim rather than a hope. Issued authority lasts to its expiry across a partition —
   revocation cannot reach a disconnected domain.
