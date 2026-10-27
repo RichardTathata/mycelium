@@ -31,6 +31,17 @@ window counters stay at zero; `kv_untagged_signatures_refused` is new; `mesh.sig
 residual is restated, not closed (a signed `SyncEntry` is a wire change). Upgrade note `deprecations.md` §40: upgrade
 from 2.33.x, not 2.32. Record: [`.log/2026-10-13-f2-refusal-unconditional.md`](.log/2026-10-13-f2-refusal-unconditional.md).
 
+## v2.38.2 release — 2026-10-27 (tag `v2.38.2`) — private keys owner-only
+
+A **security PATCH** cut from the v2.38.1 tag on `release-2.38.x`, not from `main`, which carries unreleased Y4's route,
+Y7's suite and Y8 (MINOR material). Every private TLS key writer in `mycelium-core/src/tls.rs` — the fleet CA's key
+(`generate_and_publish_ca`), an issued node key (`issue_node_cert`), a node's own identity key (`save_key_raw`) — wrote
+with the process umask, 0644 under the usual 022, so every local user could read the key that admits a node to the
+fleet. Each now goes through `write_private` (0600 on unix, an existing file narrowed before any byte is written). Found
+by #695's review; the fix is `19410c12` on `main`, cherry-picked unchanged. A key already on disk is narrowed only when
+rewritten, so the release note asks operators to `chmod 600` older ones. Wire v12 unchanged; no API change.
+Log: `.log/2026-10-27-release-v2.38.2.md`.
+
 ## v2.38.1 release — 2026-10-26 (tag `v2.38.1`) — zstd out of the tree
 
 A **security PATCH** cut from the v2.38.0 tag on `release-2.38.x`, not from `main`, which carries unreleased Y1 and Y7
