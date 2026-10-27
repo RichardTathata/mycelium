@@ -353,7 +353,8 @@ for seq/hash/head (~µs); signing and the KV write happen after release. `GET /g
 (scope `audit:read`). Records are plain KV — tampering fails verification, is never blocked.
 Under the same scope, `GET /gateway/records/{decision,evidence}/{sha256}` (Y4) serves the record a span names, its exact
 bytes, and for evidence the chained reference record that cites its hash (`operations/audit.md` §3a;
-`src/agent/http/compliance.rs`).
+`src/agent/http/compliance.rs`). Decisions come from the sinks registered with the route, read through a tap per
+reader (`TapSlot`) into `src/agent/record_index.rs` — never the ring's lock.
 
 ## WS3 — crown-jewel posture (feature-free)
 

@@ -73,8 +73,8 @@ fn hash_of_answer(body: &serde_json::Value) -> String {
     crate::causal::content_hash(&bytes)
 }
 
-/// A decision record the sink holds is served by the hash its span carries, only under `audit:read`, with the exact
-/// bytes that hash is over, so the holder verifies it by recomputing; it is said to be not chained.
+/// A decision record the agent's sink kept is served by the hash its span carries, only under `audit:read`, with the
+/// exact bytes that hash is over, so the holder verifies it by recomputing; it is said to be not chained.
 #[tokio::test]
 async fn a_decision_record_is_served_by_the_hash_its_span_carries_under_the_audit_scope() {
     let sink = Arc::new(DecisionSink::default());
@@ -94,56 +94,131 @@ async fn a_decision_record_is_served_by_the_hash_its_span_carries_under_the_audi
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["schema"], "mycelium.record/1");
     assert_eq!(body["found"], true);
-    assert_eq!(body["source"], "sink");
+    assert_eq!(body["source"], serde_json::json!({ "from": "sink", "label": "agent" }));
     assert_eq!(hash_of_answer(&body), span.record_sha256, "the bytes served are the bytes the span's hash is over");
     assert_eq!(body["verification"]["hash"], "matches");
     assert_eq!(body["verification"]["chain"]["state"], "not_chained");
     assert_eq!(body["record"]["trigger"], "round 1", "the record itself, not a neighbour");
     // The record carries what the span never does: its inputs are on the node, read here under the audit scope.
     assert_eq!(body["record"]["inputs"][0]["value"], "secret-input-1");
+    // A drain (an embedder writing its trace) does not take a record out of the route's index.
+    sink.drain();
+    let (status, _) = n.get(&path, "auditor").await;
+    assert_eq!(status, 200, "a drained record is still indexed");
     n.stop().await;
 }
 
-/// A record drained out of the sink is served from the trace the embedder declared it writes; without the declaration
-/// the same read cannot rule out that it was evicted, and says so rather than *never existed*.
+/// **The route never takes a sink's ring lock** (#692's review, finding 2): by-hash reads issued while a decision point
+/// records 20,000 records make it drop none `Contended` — the counterpart of the collector's
+/// `a_collector_never_makes_a_decision_point_drop_a_record`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn by_hash_reads_under_load_never_make_a_decision_point_drop_a_record() {
+    let sink = Arc::new(DecisionSink::new(SinkConfig { max_records: 50_000, max_bytes: 256 << 20, ..SinkConfig::default() }));
+    let s2 = Arc::clone(&sink);
+    let n = Arc::new(node("load", move |a, _| a.with_decision_trace(s2)).await);
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let reader = {
+        let (n, stop) = (Arc::clone(&n), Arc::clone(&stop));
+        tokio::spawn(async move {
+            let mut reads = 0u32;
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                let _ = n.get(&format!("/gateway/records/decision/{}", "ab".repeat(32)), "auditor").await;
+                reads += 1;
+            }
+            reads
+        })
+    };
+    let writer = {
+        let sink = Arc::clone(&sink);
+        tokio::task::spawn_blocking(move || {
+            for i in 0..20_000u32 {
+                let _ = sink.record(decision(i));
+                if i % 64 == 0 {
+                    std::thread::yield_now();
+                }
+            }
+        })
+    };
+    writer.await.unwrap();
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    let reads = reader.await.unwrap();
+    assert!(reads > 0, "the route was read while the decisions were made");
+    assert_eq!(sink.drop_counts().contended, 0, "{reads} reads made a decision point drop its record");
+    assert_eq!(sink.last_seq(), 20_000);
+    Arc::try_unwrap(n).ok().expect("the reader is done").stop().await;
+}
+
+/// A node whose embedder declares only a trace: a record drained to it is served from it; a hash it does not hold is
+/// `undetermined` with `not_written` and `evicted` possible, since the sink that wrote the trace is not one the route
+/// reads; and a declared file not written yet is not an empty trace (#692's review, finding 1).
 #[tokio::test]
-async fn a_drained_record_is_served_from_the_declared_trace_and_otherwise_is_said_possibly_evicted() {
-    let sink = Arc::new(DecisionSink::default());
-    let (s2, s3) = (Arc::clone(&sink), Arc::clone(&sink));
-    let declared = node("trace", move |a, dir| {
-        a.with_decision_trace(s2);
-        a.with_decision_trace_file(dir.join("decisions.jsonl"));
-    })
-    .await;
+async fn a_trace_only_node_serves_from_the_trace_and_never_says_never_existed() {
+    let sink = DecisionSink::default();
+    let declared = node("trace", |a, dir| a.with_decision_trace_file(dir.join("decisions.jsonl"))).await;
+    let absent = format!("/gateway/records/decision/{}", "ab".repeat(32));
+
+    // Not written yet: the file is missing.
+    let (status, body) = declared.get(&absent, "auditor").await;
+    assert_eq!(status, 404, "{body}");
+    assert_eq!(body["not_found"], "undetermined");
+    assert_eq!(body["searched"]["trace"]["exists"], false, "{body}");
+    assert_eq!(body["cannot_rule_out"], serde_json::json!(["not_written", "evicted", "not_searched", "never_existed"]));
+    assert!(body["unsearched"].as_str().unwrap().contains("with_decision_record_source"), "{body}");
+
     for i in 0..3 {
         sink.record(decision(i)).unwrap();
     }
-    let jsonl = sink.to_jsonl();
+    let jsonl = format!("not a record\n{}", sink.to_jsonl());
     let span = RecordSpan::from_decision(&sink.drain()[0]);
     std::fs::write(declared.dir.join("decisions.jsonl"), jsonl).unwrap();
-    let path = format!("/gateway/records/decision/{}", span.record_sha256);
-    let (status, body) = declared.get(&path, "auditor").await;
+    let (status, body) = declared.get(&format!("/gateway/records/decision/{}", span.record_sha256), "auditor").await;
     assert_eq!(status, 200, "{body}");
-    assert_eq!(body["source"], "trace");
+    assert_eq!(body["source"]["from"], "trace");
     assert_eq!(hash_of_answer(&body), span.record_sha256);
-    declared.stop().await;
 
-    // The same drain on a node that declares no trace.
-    let undeclared = node("evicted", move |a, _| a.with_decision_trace(s3)).await;
-    let (status, body) = undeclared.get(&path, "auditor").await;
-    assert_eq!(status, 404, "{body}");
-    assert_eq!(body["found"], false);
-    assert_eq!(body["not_found"], "undetermined");
-    assert_eq!(body["cannot_rule_out"], serde_json::json!(["evicted", "never_existed"]), "{body}");
-    assert_eq!(body["searched"]["sink"]["not_searched"], 3);
-    undeclared.stop().await;
+    let (_, body) = declared.get(&absent, "auditor").await;
+    assert_eq!(body["searched"]["trace"]["exists"], true);
+    assert_eq!(body["searched"]["trace"]["records"], 3, "a line that is not a record is not counted as one — {body}");
+    assert_eq!(body["searched"]["trace"]["unparsed"], 1);
+    assert_eq!(body["cannot_rule_out"], serde_json::json!(["not_written", "evicted", "not_searched", "never_existed"]));
+    declared.stop().await;
 }
 
-/// *Not found* says the one meaning it can, or every meaning it cannot rule out: `never_existed` alone from a sink that
-/// holds all it kept and dropped nothing; `not_written` among the possibilities once the sink has dropped a record;
-/// `not_written` alone where the node keeps no trace at all.
+/// A second sink — a stem provisioner's, an activation hook's — is not read until it is registered: its record is not
+/// found, and the answer names it as possibly in a sink not searched. Registered, its later records are served, and the
+/// ones it kept before are counted `missed`, so `evicted` is possible.
 #[tokio::test]
-async fn not_found_names_never_existed_not_written_or_what_it_cannot_rule_out() {
+async fn a_second_sink_is_searched_only_once_registered_and_what_it_kept_before_is_missed() {
+    let agent_sink = Arc::new(DecisionSink::default());
+    let other = Arc::new(DecisionSink::default());
+    let s2 = Arc::clone(&agent_sink);
+    let n = node("second", move |a, _| a.with_decision_trace(s2)).await;
+    other.record(decision(0)).unwrap();
+    let before = RecordSpan::from_decision(&other.snapshot()[0]);
+    let path = format!("/gateway/records/decision/{}", before.record_sha256);
+    let (status, body) = n.get(&path, "auditor").await;
+    assert_eq!(status, 404, "{body}");
+    assert_ne!(body["not_found"], "never_existed", "{body}");
+    assert_eq!(body["cannot_rule_out"], serde_json::json!(["not_searched", "never_existed"]), "{body}");
+
+    n.agent.with_decision_record_source("provisioner", Arc::clone(&other));
+    other.record(decision(1)).unwrap();
+    let after = RecordSpan::from_decision(&other.snapshot()[1]);
+    let (status, body) = n.get(&format!("/gateway/records/decision/{}", after.record_sha256), "auditor").await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["source"], serde_json::json!({ "from": "sink", "label": "provisioner" }));
+    let (_, body) = n.get(&path, "auditor").await;
+    assert_eq!(body["cannot_rule_out"], serde_json::json!(["evicted", "not_searched", "never_existed"]), "{body}");
+    let provisioner = body["searched"]["index"]["sources"].as_array().unwrap().iter().find(|s| s["label"] == "provisioner").cloned().unwrap();
+    assert_eq!(provisioner["missed"], 1, "{body}");
+    n.stop().await;
+}
+
+/// *Not found* for a decision is always `undetermined` and names what the counters cannot rule out: from a clean
+/// registered sink only `not_searched` and `never_existed`; `not_written` once it has dropped a record; and everything
+/// from a node with no decision source at all.
+#[tokio::test]
+async fn not_found_names_what_the_counters_cannot_rule_out() {
     let absent = "ab".repeat(32);
     let path = format!("/gateway/records/decision/{absent}");
 
@@ -153,21 +228,32 @@ async fn not_found_names_never_existed_not_written_or_what_it_cannot_rule_out() 
     sink.record(decision(0)).unwrap();
     let (status, body) = n.get(&path, "auditor").await;
     assert_eq!(status, 404, "{body}");
-    assert_eq!(body["not_found"], "never_existed", "{body}");
-    assert_eq!(body["cannot_rule_out"], serde_json::json!(["never_existed"]));
+    assert_eq!(body["not_found"], "undetermined", "{body}");
+    assert_eq!(body["cannot_rule_out"], serde_json::json!(["not_searched", "never_existed"]), "{body}");
 
     sink.record(decision(1)).unwrap();
     assert!(sink.record(decision(2)).is_err(), "the third record is dropped: the sink holds two");
     let (_, body) = n.get(&path, "auditor").await;
-    assert_eq!(body["not_found"], "undetermined", "{body}");
-    assert_eq!(body["cannot_rule_out"], serde_json::json!(["not_written", "never_existed"]), "{body}");
-    assert_eq!(body["searched"]["sink"]["dropped"]["full"], 1);
+    assert_eq!(body["cannot_rule_out"], serde_json::json!(["not_written", "not_searched", "never_existed"]), "{body}");
+    assert_eq!(body["searched"]["index"]["sources"][0]["dropped"]["full"], 1);
     n.stop().await;
+
+    // A declared trace file that does not exist is not an empty trace: it may not have been written yet.
+    let sink = Arc::new(DecisionSink::default());
+    let s3 = Arc::clone(&sink);
+    let unwritten = node("unwritten", move |a, dir| {
+        a.with_decision_trace(s3);
+        a.with_decision_trace_file(dir.join("decisions.jsonl"));
+    })
+    .await;
+    let (_, body) = unwritten.get(&path, "auditor").await;
+    assert_eq!(body["cannot_rule_out"], serde_json::json!(["not_written", "not_searched", "never_existed"]), "{body}");
+    unwritten.stop().await;
 
     let bare = node("bare", |_, _| {}).await;
     let (status, body) = bare.get(&path, "auditor").await;
     assert_eq!(status, 404);
-    assert_eq!(body["not_found"], "not_written", "{body}");
+    assert_eq!(body["cannot_rule_out"], serde_json::json!(["not_written", "evicted", "not_searched", "never_existed"]), "{body}");
     let (status, body) = bare.get(&format!("/gateway/records/evidence/{absent}"), "auditor").await;
     assert_eq!(status, 404);
     assert_eq!(body["not_found"], "not_written", "no journal: this node writes no evidence — {body}");
@@ -200,7 +286,7 @@ fn evidence(op: &str) -> AeEvidence {
 
 /// An evidence record is served from the journal by the hash its span carries, and verified here two ways: the bytes
 /// hash to it, and this node's signed, hash-linked audit stream holds the reference record that cites it, in its
-/// verified segment.
+/// verified segment — preferred over a citing record that does not verify, sealed before it (#692's review, finding 3).
 #[tokio::test]
 async fn an_evidence_record_is_served_from_the_journal_and_verified_against_the_chain() {
     let n = node("ev", |a, dir| {
@@ -208,9 +294,22 @@ async fn an_evidence_record_is_served_from_the_journal_and_verified_against_the_
     })
     .await;
     let tc = Arc::clone(&n.agent.task_ctx);
-    for op in ["op-1", "op-2"] {
-        super::authz::ae_record(&tc, &evidence(op)).await.unwrap();
+    super::authz::ae_record(&tc, &evidence("op-1")).await.unwrap();
+    // A record citing op-2's hash, planted at the head of this node's stream and signed by a key that is not the
+    // node's: it does not verify, and the genuine reference is sealed past it, at a higher seq.
+    {
+        use crate::{audit_key, AuditAction, AuditOutcome, AuditRecord, SignedAuditRecord};
+        let h = crate::causal::content_hash(&serde_json::to_vec(&evidence("op-2")).unwrap());
+        let detail = serde_json::json!({ "schema": super::action_evaluator::AE_REFERENCE_SCHEMA, "journal_sha256": h });
+        let seq = tc.audit_chain.lock().unwrap().next_seq;
+        let forged = AuditRecord {
+            node_id: tc.node_id.clone(), seq, hlc: 1, principal: "attacker".into(), action: AuditAction::Invoke,
+            target: "ae:cat".into(), outcome: AuditOutcome::Success, detail: Some(detail.to_string()), prev_hash: [9u8; 32],
+        };
+        let key = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+        assert!(n.agent.kv().set(audit_key(&tc.node_id, seq), SignedAuditRecord::sign(forged, &key).encode()));
     }
+    super::authz::ae_record(&tc, &evidence("op-2")).await.unwrap();
     let frames = crate::read_evidence_journal(&n.dir.join("evidence.log")).unwrap();
     let entry = crate::agent::journal::JournalEntry {
         seq: 1,
@@ -229,13 +328,14 @@ async fn an_evidence_record_is_served_from_the_journal_and_verified_against_the_
     assert_eq!(status, 403, "a token without audit:read is refused");
     let (status, body) = n.get(&format!("/gateway/records/evidence/{}", span.record_sha256), "auditor").await;
     assert_eq!(status, 200, "{body}");
-    assert_eq!(body["source"], "journal");
+    assert_eq!(body["source"]["from"], "journal");
     assert_eq!(hash_of_answer(&body), span.record_sha256);
     assert_eq!(body["record"]["operation_id"], "op-2", "the record itself, not its neighbour");
     assert_eq!(body["verification"]["hash"], "matches");
     let chain = &body["verification"]["chain"];
     assert_eq!(chain["state"], "referenced", "{body}");
-    assert_eq!(chain["linked"], true, "{body}");
+    assert_eq!(chain["linked"], true, "the verifying reference, not the planted one sealed before it — {body}");
+    assert_eq!(chain["citing_records"], 2, "{body}");
     // The reference the answer names is in the stream `/gateway/audit` serves, under the same content hash.
     let (_, audit) = n.get("/gateway/audit", "auditor").await;
     let cited = chain["reference_content_hash"].as_str().unwrap();
@@ -249,6 +349,7 @@ async fn an_evidence_record_is_served_from_the_journal_and_verified_against_the_
     assert_eq!(status, 404);
     assert_eq!(body["not_found"], "never_existed", "the journal loses nothing it acknowledged — {body}");
     assert_eq!(body["searched"]["journal"]["records"], 2);
+    assert!(body["unsearched"].as_str().unwrap().contains("earlier open"), "the answer is scoped to this open — {body}");
     n.stop().await;
 }
 

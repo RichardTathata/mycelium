@@ -440,19 +440,30 @@ impl Corpus {
     }
 }
 
+/// The longest trace line [`find_in_trace`] reads — the decision sink's default byte bound, which no one record exceeds
+/// (a record larger than the sink's bound is dropped `Oversized`). A longer line is skipped and counted.
+pub const MAX_TRACE_LINE_BYTES: usize = 1 << 20;
+
 /// What [`find_in_trace`] read from a written trace.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TraceLookup {
+    /// Whether the file exists. A missing file is **not** an empty trace: it may not have been written yet.
+    pub exists: bool,
     /// The line whose content hash is the one asked for, without its newline — the bytes the hash is over.
     pub line: Option<String>,
-    /// The records (non-empty lines) read before it was found, or in the whole file.
+    /// The records read before it was found, or in the whole file: lines that parse as a JSON object, as
+    /// [`Corpus::add_trace`] counts them.
     pub records: usize,
+    /// Lines that are not a record — not UTF-8, not a JSON object — skipped, as `add_trace` skips them.
+    pub unparsed: usize,
+    /// Lines longer than [`MAX_TRACE_LINE_BYTES`], skipped unread.
+    pub oversized: usize,
 }
 
-/// One record of a written decision trace by its content hash, read a line at a time — the rule [`Corpus::add_trace`]
-/// hashes by (a line without its newline or `\r\n`), so a hash `mycelium explain --closure` resolves is one this
-/// finds. For the by-hash read route (adopter-surface Y4), which serves from the trace a node's embedder writes; a
-/// file that does not exist reads as an empty trace. A line that is not UTF-8 is not a record and is skipped.
+/// One record of a written decision trace by its content hash, read a line at a time and each line bounded — the rule
+/// [`Corpus::add_trace`] hashes and counts by (a line without its newline or `\r\n`, a record only if it parses as a
+/// JSON object), so a hash `mycelium explain --closure` resolves is one this finds. For the by-hash read route
+/// (adopter-surface Y4), which serves from the trace a node's embedder declares it writes.
 pub fn find_in_trace(path: &Path, hash: &str) -> std::io::Result<TraceLookup> {
     use std::io::BufRead;
     let file = match std::fs::File::open(path) {
@@ -460,23 +471,64 @@ pub fn find_in_trace(path: &Path, hash: &str) -> std::io::Result<TraceLookup> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(TraceLookup::default()),
         Err(e) => return Err(e),
     };
-    let mut out = TraceLookup::default();
-    for line in std::io::BufReader::new(file).split(b'\n') {
-        let mut line = line?;
-        if line.last() == Some(&b'\r') {
-            line.pop();
+    let mut out = TraceLookup { exists: true, ..TraceLookup::default() };
+    let mut reader = std::io::BufReader::new(file);
+    let mut line: Vec<u8> = Vec::new();
+    let mut too_long = false;
+    loop {
+        let buf = reader.fill_buf()?;
+        let at_end = buf.is_empty();
+        let (chunk, ends_line) = match buf.iter().position(|&b| b == b'\n') {
+            Some(i) => (&buf[..i], true),
+            None => (buf, at_end),
+        };
+        if !too_long {
+            if line.len() + chunk.len() > MAX_TRACE_LINE_BYTES {
+                too_long = true;
+                line.clear();
+            } else {
+                line.extend_from_slice(chunk);
+            }
         }
-        let Ok(text) = String::from_utf8(line) else { continue };
-        if text.trim().is_empty() {
-            continue;
+        let used = chunk.len() + usize::from(ends_line && !at_end);
+        reader.consume(used);
+        if ends_line {
+            if too_long {
+                out.oversized += 1;
+            } else if let Some(found) = trace_line(&mut out, &mut line, hash) {
+                out.line = Some(found);
+                return Ok(out);
+            }
+            line.clear();
+            too_long = false;
         }
-        if content_hash(text.as_bytes()) == hash {
-            out.line = Some(text);
+        if at_end {
             return Ok(out);
         }
-        out.records += 1;
     }
-    Ok(out)
+}
+
+/// One whole line of a trace: counted as a record or as unparsed, and returned when it is the record asked for.
+fn trace_line(out: &mut TraceLookup, line: &mut Vec<u8>, hash: &str) -> Option<String> {
+    if line.last() == Some(&b'\r') {
+        line.pop();
+    }
+    let Ok(text) = std::str::from_utf8(line) else {
+        out.unparsed += 1;
+        return None;
+    };
+    if text.trim().is_empty() {
+        return None;
+    }
+    if !serde_json::from_str::<Value>(text).is_ok_and(|v| v.is_object()) {
+        out.unparsed += 1;
+        return None;
+    }
+    if content_hash(text.as_bytes()) == hash {
+        return Some(text.to_string());
+    }
+    out.records += 1;
+    None
 }
 
 /// A journal is length-prefixed frames: the file's first four bytes are a little-endian length that fits the file,
@@ -704,6 +756,31 @@ mod tests {
         assert!(out.contains("INCOMPLETE: 1 journal(s) given, and the records name 2 node(s)"), "{out}");
         assert!(out.contains("is in none of the files given"), "{out}");
         assert!(out.contains("a trace without decisions.stats.json beside it reports none, which is not zero"), "{out}");
+    }
+
+    /// `find_in_trace` reads a trace as `add_trace` does — a line that is not a JSON object is not a record, `\r\n` is
+    /// one line ending, a last line without a newline is still a line — and skips a line past
+    /// [`MAX_TRACE_LINE_BYTES`] unread, counted (#692's review, finding 5).
+    #[test]
+    fn find_in_trace_agrees_with_add_trace_and_bounds_each_line() {
+        let dir = std::env::temp_dir().join(format!("find-in-trace-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("decisions.jsonl");
+        let (a, b) = (decision(1, Some("r"), None), decision(2, Some("r"), None));
+        let huge = format!("{{\"x\":\"{}\"}}", "y".repeat(MAX_TRACE_LINE_BYTES));
+        std::fs::write(&path, format!("{a}\r\nnot json\n[1]\n{huge}\n{b}")).unwrap();
+        let mut c = Corpus::default();
+        c.add_trace("d", &std::fs::read_to_string(&path).unwrap(), None);
+        let last = c.records.last().unwrap().hash.clone();
+        let got = find_in_trace(&path, &last).unwrap();
+        assert_eq!(got.line.as_deref(), Some(b.as_str()), "the last line, without a newline, is found");
+        assert_eq!((got.exists, got.records, got.unparsed, got.oversized), (true, 1, 2, 1));
+        let first = find_in_trace(&path, &c.records[0].hash).unwrap();
+        assert_eq!(first.line.as_deref(), Some(a.as_str()), "a `\\r\\n` ending is stripped as `add_trace` strips it");
+        let missing = find_in_trace(&dir.join("absent.jsonl"), &last).unwrap();
+        assert!(!missing.exists, "a missing file is not an empty trace");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A real evidence record — serialised by `AeEvidence` itself, not hand-written — is attributed to the node that

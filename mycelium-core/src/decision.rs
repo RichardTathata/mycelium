@@ -305,20 +305,40 @@ pub struct DecisionSink {
     dropped_contended: AtomicU64,
     dropped_oversized: AtomicU64,
     inputs_truncated: AtomicU64,
-    /// A copy of every record kept, for one reader that must never take the ring's lock (adopter-surface Y4's span
-    /// collector). Lock-order row 72: read by `record` with `try_read` **before** the ring's lock and released before
-    /// it, written only by [`tap`](Self::tap); never taken under the ring's lock. The send is a plain `try_send`, not a
-    /// seam choice: whether the reader kept up changes no decision (the ring keeps the record either way), so a
-    /// recording made with a collector replays identically without one (`scripts/sim-seams-baseline.txt`).
-    tap: RwLock<Option<Sender<DecisionRecord>>>,
-    tap_dropped: AtomicU64,
+    /// A copy of every record kept, for one reader per [`TapSlot`] that must never take the ring's lock
+    /// (adopter-surface Y4: the span collector, and the gateway's by-hash record index). Lock-order row 72: read by
+    /// `record` with `try_read` **before** the ring's lock and released before it, written only by
+    /// [`tap_slot`](Self::tap_slot); never taken under the ring's lock. The send is a plain `try_send`, not a seam
+    /// choice: whether a reader kept up changes no decision (the ring keeps the record either way), so a recording made
+    /// with a reader replays identically without one (`scripts/sim-seams-baseline.txt`).
+    tap: RwLock<[Option<Sender<DecisionRecord>>; TAP_SLOTS]>,
+    tap_dropped: [AtomicU64; TAP_SLOTS],
+}
+
+/// How many taps a sink has: one per [`TapSlot`].
+const TAP_SLOTS: usize = 2;
+
+/// Which reader a tap is for — each slot has one live reader at most, and its own drop count.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TapSlot {
+    /// The span collector's (`mycelium::span_export::SpanCollector`); [`DecisionSink::tap`] takes it.
+    Collector,
+    /// The gateway's by-hash record index (`GET /gateway/records/decision/{sha256}`).
+    RecordIndex,
+}
+
+impl TapSlot {
+    fn index(self) -> usize {
+        match self {
+            TapSlot::Collector => 0,
+            TapSlot::RecordIndex => 1,
+        }
+    }
 }
 
 /// The most copies a tap can hold waiting — [`DecisionSink::tap`] clamps its capacity to `1..=MAX_TAP_CAPACITY`.
 pub const MAX_TAP_CAPACITY: usize = 1 << 16;
-
-/// The most records one [`DecisionSink::try_read_after`] copies under the ring's lock.
-pub const MAX_PAGE_RECORDS: usize = 64;
 
 /// Every record a sink has dropped, by reason — read from its counters alone, never under the ring's lock.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
@@ -378,8 +398,8 @@ impl DecisionSink {
             dropped_contended: AtomicU64::new(0),
             dropped_oversized: AtomicU64::new(0),
             inputs_truncated: AtomicU64::new(0),
-            tap: RwLock::new(None),
-            tap_dropped: AtomicU64::new(0),
+            tap: RwLock::new([None, None]),
+            tap_dropped: [AtomicU64::new(0), AtomicU64::new(0)],
         }
     }
 
@@ -405,12 +425,15 @@ impl DecisionSink {
         // untapped one; a tap whose reader has gone costs no copy. A tap being installed (`try_read` would block) skips
         // the copy, counted below once the record is kept, so a skipped copy is never silent. A poisoned lock is
         // recovered, as `tap()` recovers it: the slot holds a sender, which a panic cannot leave half-written.
-        let (tap, tap_busy) = match self.tap.try_read() {
-            Ok(t) => (t.as_ref().filter(|tx| !tx.is_closed()).cloned(), false),
-            Err(TryLockError::Poisoned(p)) => (p.into_inner().as_ref().filter(|tx| !tx.is_closed()).cloned(), false),
-            Err(TryLockError::WouldBlock) => (None, true),
+        let live = |slots: &[Option<Sender<DecisionRecord>>; TAP_SLOTS]| {
+            slots.clone().map(|t| t.filter(|tx| !tx.is_closed()))
         };
-        let mut copy = tap.as_ref().map(|_| rec.clone());
+        let (taps, tap_busy) = match self.tap.try_read() {
+            Ok(t) => (live(&t), false),
+            Err(TryLockError::Poisoned(p)) => (live(&p.into_inner()), false),
+            Err(TryLockError::WouldBlock) => ([None, None], true),
+        };
+        let mut copies = taps.each_ref().map(|t| t.as_ref().map(|_| rec.clone()));
         if size > self.cfg.max_bytes {
             self.dropped_oversized.fetch_add(1, Ordering::Relaxed);
             return Err(Dropped::Oversized);
@@ -434,15 +457,20 @@ impl DecisionSink {
         drop(ring);
         self.recorded.fetch_add(1, Ordering::Relaxed);
         self.inputs_truncated.fetch_add(cut, Ordering::Relaxed);
+        // A tap being installed hid every slot: the copy is counted as dropped at each, since which were live is unknown.
         if tap_busy {
-            self.tap_dropped.fetch_add(1, Ordering::Relaxed);
+            for d in &self.tap_dropped {
+                d.fetch_add(1, Ordering::Relaxed);
+            }
         }
-        if let (Some(tap), Some(mut c)) = (tap, copy.take()) {
-            c.seq = seq;
-            // Not `sim_seam::chan_try_send`: this verdict changes no decision, and recording it would make a replay
-            // depend on whether a collector ran (baseline entry, with the reason).
-            if tap.try_send(c).is_err() {
-                self.tap_dropped.fetch_add(1, Ordering::Relaxed);
+        for (i, tap) in taps.into_iter().enumerate() {
+            if let (Some(tap), Some(mut c)) = (tap, copies[i].take()) {
+                c.seq = seq;
+                // Not `sim_seam::chan_try_send`: this verdict changes no decision, and recording it would make a replay
+                // depend on whether a reader ran (baseline entry, with the reason).
+                if tap.try_send(c).is_err() {
+                    self.tap_dropped[i].fetch_add(1, Ordering::Relaxed);
+                }
             }
         }
         Ok(seq)
@@ -463,26 +491,6 @@ impl DecisionSink {
         ring.records.iter().cloned().collect()
     }
 
-    /// Up to `max` held records whose `seq` is greater than `after`, oldest first — or `None`, without waiting, when
-    /// the ring's lock is held. For a reader that runs while decisions are made and must not make them wait (the
-    /// by-hash read route, adopter-surface Y4): it takes the lock with `try_lock`, copies at most `max` records
-    /// (clamped to `1..=`[`MAX_PAGE_RECORDS`]) and releases it, so one hold costs at most that many copies. A decision
-    /// point that arrives during the hold still drops its record `Contended`, counted as any contention is; the page
-    /// bound is what keeps the window short. Records are kept in `seq` order and the ring only grows at its back or is
-    /// emptied whole ([`drain`](Self::drain)), so reading page after page from the last `seq` seen never returns a
-    /// record twice; a record kept between pages is returned by a later one, and one drained between pages is not.
-    pub fn try_read_after(&self, after: u64, max: usize) -> Option<Vec<DecisionRecord>> {
-        let ring = self.ring.try_lock().ok()?;
-        let start = ring.records.partition_point(|r| r.seq <= after);
-        Some(ring.records.iter().skip(start).take(max.clamp(1, MAX_PAGE_RECORDS)).cloned().collect())
-    }
-
-    /// The `seq` of the newest record kept so far (0 before the first): every kept record has a `seq` in `1..=` this,
-    /// one each, so a held record with the lowest `seq` *n* says the `n - 1` kept before it have left the ring.
-    pub fn last_seq(&self) -> u64 {
-        self.seq.load(Ordering::Relaxed)
-    }
-
     /// A copy of every record this sink keeps from now on, for **one** reader that must never take the ring's lock — a
     /// reader that did (`snapshot`, `drain`) would make a concurrent decision point drop its record `Contended`. At
     /// most `capacity` copies wait (clamped to `1..=`[`MAX_TAP_CAPACITY`]); past that a copy is dropped and counted
@@ -490,24 +498,43 @@ impl DecisionSink {
     /// taken are not sent. Refused while another reader holds a live tap; once that reader's receiver is dropped the
     /// tap can be taken again. Not a decision point: it may wait for the tap's own lock, never for the ring's.
     pub fn tap(&self, capacity: usize) -> Result<Receiver<DecisionRecord>, AlreadyTapped> {
-        let live = |slot: &Option<Sender<DecisionRecord>>| slot.as_ref().is_some_and(|tx| !tx.is_closed());
+        self.tap_slot(TapSlot::Collector, capacity)
+    }
+
+    /// [`tap`](Self::tap) for the reader `slot` names: each slot has one live reader at most and its own drop count, so
+    /// the gateway's record index and a span collector each see every record without displacing the other. Every live
+    /// tap costs `record` one copy of the record.
+    pub fn tap_slot(&self, slot: TapSlot, capacity: usize) -> Result<Receiver<DecisionRecord>, AlreadyTapped> {
+        let i = slot.index();
+        let live = |s: &Option<Sender<DecisionRecord>>| s.as_ref().is_some_and(|tx| !tx.is_closed());
         // A refusal is decided under the read lock and never takes the write lock, so a reader retrying against a live
         // tap cannot make `record` skip copies; the write lock is taken only to install, and liveness is checked again.
-        if live(&self.tap.read().unwrap_or_else(|p| p.into_inner())) {
+        if live(&self.tap.read().unwrap_or_else(|p| p.into_inner())[i]) {
             return Err(AlreadyTapped);
         }
-        let mut slot = self.tap.write().unwrap_or_else(|p| p.into_inner());
-        if live(&slot) {
+        let mut slots = self.tap.write().unwrap_or_else(|p| p.into_inner());
+        if live(&slots[i]) {
             return Err(AlreadyTapped);
         }
         let (tx, rx) = tokio::sync::mpsc::channel(capacity.clamp(1, MAX_TAP_CAPACITY));
-        *slot = Some(tx);
+        slots[i] = Some(tx);
         Ok(rx)
     }
 
-    /// Copies the tap dropped because its reader had not kept up.
+    /// Copies the collector's tap dropped because its reader had not kept up.
     pub fn tap_dropped(&self) -> u64 {
-        self.tap_dropped.load(Ordering::Relaxed)
+        self.tap_dropped_for(TapSlot::Collector)
+    }
+
+    /// Copies the tap for `slot` dropped because its reader had not kept up (or was hidden by a tap being installed).
+    pub fn tap_dropped_for(&self, slot: TapSlot) -> u64 {
+        self.tap_dropped[slot.index()].load(Ordering::Relaxed)
+    }
+
+    /// The `seq` of the newest record kept so far (0 before the first): every kept record has one `seq` in `1..=` this,
+    /// so a reader that tapped the sink when this was *n* never saw the first *n* — read from a counter, no lock.
+    pub fn last_seq(&self) -> u64 {
+        self.seq.load(Ordering::Relaxed)
     }
 
     /// Every record dropped so far, by reason, from the counters alone (no lock).
@@ -726,30 +753,26 @@ mod tests {
             .node("n1", 3).build("2.19.0").at(1_700_000_000_000).target("data/pack").no_parent().no_effect()
     }
 
-    /// The by-hash read route's reader (adopter-surface Y4): pages in `seq` order from the last `seq` seen, never a
-    /// record twice, at most [`MAX_PAGE_RECORDS`] a page — and `None` at once, never a wait, while the ring's lock is held.
+    /// Two readers, one per slot (adopter-surface Y4): the record index and a collector each get every record kept after
+    /// they tapped, neither displaces the other, each slot refuses a second live reader, and each counts its own drops.
     #[test]
-    fn try_read_after_pages_in_seq_order_and_never_waits() {
-        let sink = DecisionSink::default();
-        for i in 0..150 {
-            sink.record(rec(&format!("r{i}"))).unwrap();
+    fn each_tap_slot_has_its_own_reader_and_its_own_drops() {
+        let s = DecisionSink::default();
+        s.record(rec("before")).unwrap();
+        let mut index = s.tap_slot(TapSlot::RecordIndex, 8).unwrap();
+        let mut collector = s.tap(1).unwrap();
+        assert_eq!(s.tap_slot(TapSlot::RecordIndex, 8).unwrap_err(), AlreadyTapped);
+        assert_eq!(s.tap(8).unwrap_err(), AlreadyTapped);
+        for r in ["a", "b"] {
+            s.record(rec(r)).unwrap();
         }
-        let (mut after, mut seen) = (0u64, Vec::new());
-        while let Some(page) = sink.try_read_after(after, 1000) {
-            let Some(last) = page.last() else { break };
-            assert!(page.len() <= MAX_PAGE_RECORDS, "one hold copies at most a page");
-            after = last.seq;
-            seen.extend(page.into_iter().map(|r| r.seq));
-        }
-        assert_eq!(seen, (1..=150).collect::<Vec<_>>());
-        assert_eq!(sink.last_seq(), 150);
-        sink.drain();
-        sink.record(rec("after-drain")).unwrap();
-        let page = sink.try_read_after(0, 10).unwrap();
-        assert_eq!(page.iter().map(|r| r.seq).collect::<Vec<_>>(), vec![151], "a drained record is not returned");
-        let held = sink.ring.lock().unwrap();
-        assert!(sink.try_read_after(0, 10).is_none(), "a held lock is not waited for");
-        drop(held);
+        let seen = |rx: &mut Receiver<DecisionRecord>| std::iter::from_fn(|| rx.try_recv().ok()).map(|r| r.seq).collect::<Vec<_>>();
+        assert_eq!(seen(&mut index), vec![2, 3], "a record kept before the tap is not sent");
+        assert_eq!(seen(&mut collector), vec![2], "the collector's capacity is one");
+        assert_eq!((s.tap_dropped_for(TapSlot::RecordIndex), s.tap_dropped()), (0, 1));
+        assert_eq!(s.last_seq(), 3);
+        drop(index);
+        assert!(s.tap_slot(TapSlot::RecordIndex, 8).is_ok(), "a dropped reader frees its slot");
     }
 
     /// Records are kept in order with strictly increasing sequence numbers; a drained sink is empty and

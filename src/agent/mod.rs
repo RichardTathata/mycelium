@@ -76,6 +76,9 @@ pub mod causal;
 pub(crate) mod journal;
 #[cfg(all(feature = "gateway", feature = "tls"))]
 pub(crate) mod evidence_journal;
+/// The by-hash index of decision records the gateway's record route reads (adopter-surface Y4).
+#[cfg(feature = "compliance")]
+pub(crate) mod record_index;
 /// Row K2: the fleet-wide history scopes — the consensus counter and the gossiped tally.
 #[cfg(all(feature = "gateway", feature = "tls"))]
 pub(crate) mod fleet_history;
@@ -886,6 +889,9 @@ pub(crate) struct TaskCtx {
     /// [`GossipAgent::with_decision_trace_file`] so the by-hash read route can serve a record that has left the sink.
     #[cfg(feature = "compliance")]
     pub(crate) decision_trace_file: std::sync::OnceLock<std::path::PathBuf>,
+    /// The decision sinks registered with the by-hash read route, read through their record-index taps (Y4).
+    #[cfg(feature = "compliance")]
+    pub(crate) record_index: Arc<record_index::RecordIndex>,
 }
 
 impl TaskCtx {
@@ -1445,6 +1451,8 @@ impl GossipAgent {
             audit_sink_tx: std::sync::OnceLock::new(),
             #[cfg(feature = "compliance")]
             decision_trace_file: std::sync::OnceLock::new(),
+            #[cfg(feature = "compliance")]
+            record_index: Arc::new(record_index::RecordIndex::default()),
             filter_opacity_registry: Arc::new(capability_ops::FilterOpacityRegistry::new()),
             group_roster_cache:  Arc::clone(&group_roster_cache),
             tuning_governor:     Arc::new(tuning_governor::TuningGovernor::default()),
@@ -1572,8 +1580,28 @@ impl GossipAgent {
     /// ignored. Off unless called. The records are read with `mycelium explain`.
     pub fn with_decision_trace(&self, sink: Arc<mycelium_core::decision::DecisionSink>) {
         self.note_attachment("with_decision_trace");
+        #[cfg(feature = "compliance")]
+        let for_index = Arc::clone(&sink);
         if self.task_ctx.core.decision_sink.set(sink).is_err() {
             tracing::warn!("with_decision_trace: a sink is already attached; ignoring");
+        } else {
+            // The by-hash read route reads it through its own tap, never through the ring's lock (Y4).
+            #[cfg(feature = "compliance")]
+            self.with_decision_record_source("agent", for_index);
+        }
+    }
+
+    /// Register a decision sink with the by-hash read route (`GET /gateway/records/decision/{sha256}`, adopter-surface
+    /// Y4) — one this agent does not hold, such as a stem provisioner's (`Provisioner::with_decision_trace`) or an
+    /// activation hook's. The route reads it through the sink's record-index tap, so registering never makes a decision
+    /// point wait or drop; records the sink kept before it was registered are not served, and are counted as `missed`.
+    /// The agent's own sink ([`with_decision_trace`](Self::with_decision_trace)) is registered as `agent`. A sink whose
+    /// record-index tap already has a live reader is refused with a warning. A read-only pointer: it may be set before
+    /// or after `start()` and is not counted as a late attachment.
+    #[cfg(feature = "compliance")]
+    pub fn with_decision_record_source(&self, label: &str, sink: Arc<mycelium_core::decision::DecisionSink>) {
+        if self.task_ctx.record_index.add_source(label, sink).is_err() {
+            tracing::warn!("with_decision_record_source: {label}: the sink's record-index tap is already held; ignoring");
         }
     }
 

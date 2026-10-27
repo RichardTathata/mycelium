@@ -299,11 +299,12 @@ take the span's `mycelium.record_sha256` to the node that wrote it and read the 
 scope `audit:read`, feature `compliance`), or with `mycelium explain --closure <hash>` over that node's journal and
 trace. The route answers the record's exact bytes (`record_b64`): SHA-256 over them is the span's hash, which the holder
 recomputes; for an evidence record it also names the reference record in the node's signed audit stream that cites the
-hash, and whether that record verifies. A decision record is not chained. *Not found* is said as one of
-`never_existed`, `not_written` or, with the meanings it cannot rule out, `undetermined` — a sink that dropped records
-or let them go cannot say a missing one never existed ([`audit.md` §3a](../operations/audit.md#3a-a-record-by-its-hash-the-spans-reference)).
-A decision record that has left the sink is served only from a trace the embedder declares it writes
-(`GossipAgent::with_decision_trace_file`). The guarantee report says so in
+hash, and whether that record verifies. A decision record is not chained. Decisions are read from the sinks
+registered with the route — the agent's own, and any other given to `GossipAgent::with_decision_record_source` (a stem
+provisioner's) — through a tap, never the sink's lock, and from a trace the embedder declares
+(`GossipAgent::with_decision_trace_file`). *Not found* is `never_existed` (evidence only, scoped to the journal as
+opened), `not_written`, or `undetermined` with the meanings the node cannot rule out — always so for a decision, which
+may sit in a sink the route was never given ([`audit.md` §3a](../operations/audit.md#3a-a-record-by-its-hash-the-spans-reference)). The guarantee report says so in
 [`trace.spans_not_evidence`](../reference/guarantee-catalogue.md). The [span export feature page](../features/span-export.md)
 has what is not built.
 

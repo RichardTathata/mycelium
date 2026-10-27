@@ -10,9 +10,10 @@ typed reason where the record has one, and the record's own content hash as an o
 record's inputs, target, effect, subject, resource, arguments, mandate or the audit chain's links: the span's type
 has no field for them. A holder of a span reads the record itself by that hash on the node that wrote it, over its
 gateway (`GET /gateway/records/{decision,evidence}/{sha256}`, `audit:read`) or with `mycelium explain --closure`: an
-evidence record from that node's journal, always; a decision record from its sink while the sink holds it, and after
-that only where a trace is written — a `sim` bundle's `decisions.jsonl`, or an embedder that drains its own sink to a
-file and declares it — since the `mycelium` binary writes none otherwise.
+evidence record from that node's journal, always; a decision record from a sink registered with the route (the
+newest 4096 it kept since registration), and otherwise only where a trace is written — a `sim` bundle's
+`decisions.jsonl`, or an embedder that drains its own sink to a file and declares it — since the `mycelium` binary
+writes none otherwise.
 
 ## When to use it, and when not
 
@@ -85,9 +86,11 @@ is a hand-kept copy; no test reads it.
 - **The record a span names is read on the node, by its hash** — `GET /gateway/records/decision/{sha256}` and
   `GET /gateway/records/evidence/{sha256}`, scope `audit:read`, feature `compliance` (`operations/audit.md` §3a): the
   record's exact bytes, which hash to the span's `mycelium.record_sha256`, and for evidence the reference record in
-  the node's signed audit stream that cites it. *Not found* is `never_existed`, `not_written`, or `undetermined` with
-  the meanings the node cannot rule out (`evicted` among them); a decision that has left the sink is served only from
-  a trace the embedder declares (`GossipAgent::with_decision_trace_file`). No SDK verb reads it.
+  the node's signed audit stream that cites it. Decisions come from the sinks registered with the route (the agent's
+  own; others by `GossipAgent::with_decision_record_source`), read through a tap so a read never makes a decision point
+  drop a record, and from a trace the embedder declares (`GossipAgent::with_decision_trace_file`). *Not found* is
+  `never_existed` (evidence only, for the journal as opened), `not_written`, or `undetermined` with the meanings the
+  node cannot rule out — always `undetermined` for a decision. No SDK verb reads it.
 - **Not built** (the plan row is [`adopter-surface.md`](../plans/adopter-surface.md) Y4): an SDK verb for the
   by-hash read; an export loop in the `mycelium` binary or a configuration section for an endpoint — the embedder
   drives the collector; a durable collector cursor; the collector's OTLP client is not the node's egress-gated one,

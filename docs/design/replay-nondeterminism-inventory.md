@@ -171,6 +171,8 @@ no decision (G7). Routing the send through `chan_try_send` (as #684 first did) m
 collector ran — a recording made with one diverged when replayed without it, and a replay with one attached
 panicked in `record` on a `Sent` the collector's wall-clock drain did not reproduce. So it is a plain `try_send`,
 one counted baseline site, shown by `tap_replay_tests::a_tap_records_nothing_so_a_recording_replays_with_or_without_one`.
+Since #692 the sink has a tap per reader (`TapSlot`: the collector and the gateway's by-hash record index); the one
+site sends to each live slot in turn, and whether either reader kept up decides nothing, for the same reason.
 
 ### 2.4 Storage
 
