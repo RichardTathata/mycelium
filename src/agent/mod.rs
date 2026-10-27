@@ -983,6 +983,9 @@ pub struct GossipAgent {
     /// which degrades RPC-heavy Individual-scoped traffic to flood-relay; a pinned peer keeps a
     /// direct route so those RPCs (e.g. tuple-space secondary → primary) don't time out (#150).
     pub(super) pinned_peers: Arc<papaya::HashMap<NodeId, ()>>,
+    /// The schedules this node runs (`GossipAgent::run_schedule`, adopter-surface Y2), by id: a second loop for one id
+    /// would share its candidacy and tombstone it on drop, so it is refused.
+    pub(crate) schedules_running: Arc<papaya::HashMap<Arc<str>, ()>>,
     /// Cached count of live (non-tombstone) store entries. Updated by the GC task;
     /// up to one GC interval stale but O(1) to read via system_stats().
     pub(super) live_entries: Arc<AtomicUsize>,
@@ -1476,6 +1479,7 @@ impl GossipAgent {
             gossip_rxs: std::sync::Mutex::new(Some(gossip_rxs_inner)),
             peer_writers: Arc::new(papaya::HashMap::new()),
             pinned_peers: Arc::new(papaya::HashMap::new()),
+            schedules_running: Arc::new(papaya::HashMap::new()),
             live_entries: Arc::new(AtomicUsize::new(0)),
             state: AtomicU8::new(AgentState::Idle as u8),
             shutdown_tx: shutdown_tx_arc,

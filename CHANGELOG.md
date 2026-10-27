@@ -35,6 +35,30 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Declared recurring work** (`docs/plans/adopter-surface.md` Y2, D15; `docs/features/recurring-work.md`): a unit file's
+  `[[schedule]]` (`id`, `period_secs` up to a week, `phase_secs`, `on_missed`, a `[schedule.holders]` filter), run by
+  the embedding application with `GossipAgent::run_schedule(&decl, work)` (`mycelium::schedule`; one loop per id per
+  node). One holder per schedule: after a warm-up of three lease refreshes, the rendezvous winner on the ring
+  `sched/{id}` among the live hosts that run it and match `holders`, its candidacy carrying its period and phase (a
+  candidate declaring another holds nowhere: `declaration_mismatch`), its holding advertised as
+  `schedule/{id}.holder` and evaporating when it stops — the lease; a run is given one period, through the seam, and
+  work that overruns it is abandoned and the holding withdrawn (`work_overran`). The loop ticks through the timer seam
+  and reads the wall clock through the seam. Each run's idempotency key is `sched/{id}/{slot}`
+  (`ScheduledRun::operation_id`), so two holders under a partition give one effect at a destination that
+  deduplicates (`two_holders_under_a_partition_give_one_effect_at_the_destination`, a link cut at the frame layer, through
+  X5's reconciler). The fleet's last run is the highest `sched/{id}/last/{node}` under the same period and phase, never
+  lowered; a run recorded ahead of a holder's clock is said (`last_ahead`), one more than 64 slots ahead ignored
+  (`ignored_last_far_ahead`). Changing a running schedule's period or phase stops it fleet-wide for the rollout: roll
+  a change under a new id. A missed run is the decision `sched.missed`
+  — `skipped`, `ran_late` (at most 64, each under its own key) or `ran_once` for the gap — recorded in the trace with
+  its inputs, each run it causes naming it its parent; a failed late or gap run is traced and the runs after it go on.
+  `wire-check` reports `schedule without holders` (no unit that runs it declares a capability `holders` matches),
+  `schedule declared two ways`, `schedule in a stem unit` and `runtime with a schedule`; `POST /gateway/units/declare` refuses a `[[schedule]]`
+  (`422 schedule section`) and a stem refuses to start with one; the capability namespace `schedule` is reserved at
+  every advertise door and in the loader; the raw KV routes refuse `sched/` (`deprecations.md` §68). **Not built:** a
+  cron language beyond a period and a phase; a fleet-wide calendar; exclusivity — a partition runs a slot on each
+  side; an SDK or gateway route that runs a schedule; a schedule run recorded and replayed under the kernel; a
+  `mycelium test --faults` class.
 - **The Ops Console observes from the browser, and a gateway lets it — opt-in** (`docs/plans/adopter-surface.md` Y3,
   D16/D28; `docs/operations/observability.md` § The Ops Console). `examples/ops_console` is now a static page
   (`index.html`) that reads each node it is given **directly** and merges their answers itself — Overview, Fleet,

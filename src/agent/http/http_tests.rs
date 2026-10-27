@@ -187,7 +187,7 @@ async fn the_raw_kv_routes_refuse_governance_intents() {
                 "cap/10.0.0.5:9000/demo/echo", "req/n/demo/echo", "mailbox/n/kind/01", "installable/ns/n/ab",
                 "tools/t/n", "skills/ns/n/node/input", "agent/n/task/1/turn", "lock/l", "svc/k/n",
                 "wiki/g/proposal/1", "tuple/inflight/ns/1", "facts/n/f", "cn/r", "mandate/m",
-                "knowledge/head/i/s", "rights/head/h", "clog/x", "comp/n/ns/k", "gcap/g/ns/n/c", "cap-group/g", "audit/1/n"] {
+                "knowledge/head/i/s", "rights/head/h", "clog/x", "comp/n/ns/k", "gcap/g/ns/n/c", "cap-group/g", "audit/1/n", "sched/close/last"] {
         let r = client.post(&base).json(&serde_json::json!({"key": key, "value_b64": base64::engine::general_purpose::STANDARD.encode(b"true")})).send().await.unwrap();
         assert_eq!(r.status(), 403, "POST {key}");
         let body: serde_json::Value = r.json().await.unwrap();
@@ -456,6 +456,19 @@ async fn test_gateway_units_declare_one_handle_for_a_whole_unit() {
     let r = client.post(format!("{base}/gateway/units/declare"))
         .json(&serde_json::json!({ "toml": "[[presence]]\nns = \"a\"\nname = \"b\"\nmin_providers = 0\n" })).send().await.unwrap();
     assert_eq!(r.status(), 400, "validate() runs: a floor of zero is refused before the hosting check");
+    let r = client.post(format!("{base}/gateway/units/declare"))
+        .json(&serde_json::json!({ "toml": "[[schedule]]\nid = \"close\"\nperiod_secs = 60\n[schedule.holders]\nns = \"a\"\nname = \"b\"\n" })).send().await.unwrap();
+    assert_eq!(r.status(), 422, "adopter-surface Y2: the embedding application runs a schedule");
+    assert_eq!(r.json::<serde_json::Value>().await.unwrap()["error"], "schedule section");
+    // The `schedule` capability namespace is the schedule loop's (#694's review, finding 1): refused at both doors.
+    let r = client.post(format!("{base}/gateway/capability/advertise"))
+        .json(&serde_json::json!({ "ns": "schedule", "name": "close" })).send().await.unwrap();
+    assert_eq!(r.status(), 403);
+    assert_eq!(r.json::<serde_json::Value>().await.unwrap()["error"], "reserved_namespace");
+    assert!(agent.capabilities().resolve(&crate::capability::CapFilter::new("schedule", "close")).is_empty());
+    let r = client.post(format!("{base}/gateway/units/declare"))
+        .json(&serde_json::json!({ "toml": "[[capability]]\nns = \"schedule\"\nname = \"close\"\n" })).send().await.unwrap();
+    assert_eq!(r.status(), 400, "the loader refuses the reserved namespace");
     let r = client.post(format!("{base}/gateway/units/declare"))
         .json(&serde_json::json!({ "toml": "not = [toml" })).send().await.unwrap();
     assert_eq!(r.status(), 400);

@@ -123,6 +123,15 @@
 //! name = "optimize"
 //! min_providers = 2
 //! max_providers = 4
+//!
+//! [[schedule]]                           # declared recurring work: one holder runs each slot (Y2, D15)
+//! id          = "ledger-close"           # one key segment; the run's idempotency key is sched/{id}/{slot}
+//! period_secs = 3600                     # 1..=604800; slots start at the Unix epoch plus the phase
+//! phase_secs  = 300                      # 0..period_secs
+//! on_missed   = "run_once"               # skip | run_late | run_once — what the holder does about a gap
+//!   [schedule.holders]                   # the band: hosts advertising this hold it, one at a time
+//!   ns   = "ledger"
+//!   name = "closer"
 //! ```
 //!
 //! Every field, with its type and default, is in `docs/reference/unit-file.md`.
@@ -148,8 +157,9 @@
 //! Who reads the file at runtime: a stem (`mycelium-stem --units <file>`, a binary of
 //! `mycelium-wasm-host` built with feature `stem`) declares every section at startup. An SDK agent
 //! declares the non-hosting sections through `POST /gateway/units/declare`, which refuses
-//! `[hosts]`, `[[presence]]`, `[[activation]]` and `[[serve]]` and reports lanes, mandates and rules
-//! as not enforced. The `mycelium` node binary does not read the file; an application drives the
+//! `[hosts]`, `[[presence]]`, `[[activation]]`, `[[serve]]` and `[[schedule]]` and reports lanes, mandates and
+//! rules as not enforced. A `[[schedule]]` is run by the embedding application, which supplies the work:
+//! [`GossipAgent::run_schedule`](crate::GossipAgent::run_schedule) (`mycelium::schedule`); a stem refuses one. The `mycelium` node binary does not read the file; an application drives the
 //! `[[capability]]` probe loop itself with [`run_capability_probes`]. `mycelium wire-check` reads
 //! every section except `[[activation]]`, and counts a `[[serve]]` skill as an offer.
 
@@ -224,7 +234,56 @@ pub struct NodeCapabilityConfig {
     /// form of `mycelium-reason`'s `serve_model` bridge. A stem only, built with `llm`.
     #[serde(default, rename = "serve")]
     pub serves:       Vec<ServeDecl>,
+    /// Declared recurring work (adopter-surface Y2, D15): one holder per schedule among the hosts its
+    /// `holders` filter matches, a missed run a decision. Run by the application
+    /// ([`GossipAgent::run_schedule`](crate::GossipAgent::run_schedule)); `wire-check` reads it.
+    #[serde(default, rename = "schedule")]
+    pub schedules:    Vec<ScheduleDecl>,
 }
+
+/// A `[[schedule]]` — declared recurring work (adopter-surface Y2, D15). Not a scheduler: a band of **one
+/// holder** per schedule, selected by rendezvous among the live hosts that run it and match `holders`, its
+/// holding advertised as a capability that evaporates when the holder stops re-asserting it (the lease). The
+/// slot due at `now` is `(now − phase) / period`, counted from the Unix epoch; its run's idempotency key is
+/// `sched/{id}/{slot}`, so two holders on two sides of a partition produce one effect at a destination that
+/// deduplicates (X5). What the holder does about slots no one ran is [`on_missed`](Self::on_missed).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScheduleDecl {
+    /// The schedule's name — one key segment, unique in the file.
+    pub id: String,
+    /// The period, in seconds: `1..=` [`MAX_SCHEDULE_PERIOD_SECS`].
+    pub period_secs: u64,
+    /// Where in the period a slot starts, in seconds: `0..period_secs`. Default 0.
+    #[serde(default)]
+    pub phase_secs: u64,
+    /// What the holder does about slots between the last run and the one due now. Default `skip`.
+    #[serde(default)]
+    pub on_missed: MissedRunPolicy,
+    /// The holder band: the hosts that advertise a capability this filter matches may hold the schedule.
+    pub holders: FilterDecl,
+}
+
+/// What a schedule's holder does about **missed runs** — slots after the last run the fleet recorded and before
+/// the one due now (a holder that was down, a handover, a paused process). Each is a typed outcome of the
+/// `sched.missed` decision, recorded with its reason.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MissedRunPolicy {
+    /// Run nothing for the gap; the slot due now runs. Outcome `no_action`, reason `skipped`.
+    #[default]
+    Skip,
+    /// Run each missed slot now, oldest first, each under its own key — at most
+    /// [`MAX_CATCH_UP`](crate::schedule::MAX_CATCH_UP); older ones are skipped and counted. Outcome `action`,
+    /// reason `ran_late` (or `ran_late_capped`).
+    RunLate,
+    /// Run once for the whole gap, under the key of its newest slot, the run saying which slots it stands for.
+    /// Outcome `action`, reason `ran_once`.
+    RunOnce,
+}
+
+/// The longest period a `[[schedule]]` may declare: a week. A longer cycle is a calendar, which this is not.
+pub const MAX_SCHEDULE_PERIOD_SECS: u64 = 7 * 86_400;
 
 /// A `[[serve]]` — register the prompt skill `{ns}/{name}` (routable over `llm.invoke`, what an
 /// `InferenceRouter` resolves) backed by an OpenAI-compatible `endpoint` serving `model`, **while**
@@ -990,6 +1049,11 @@ impl NodeCapabilityConfig {
             if let Some(problem) = crate::capability::capability_name_problem(ns, name) {
                 return Err(invalid(section, format!("{ns:?}/{name:?}: {problem}")));
             }
+            if section != "requirement"
+                && let Some(problem) = crate::capability::reserved_capability_namespace(ns)
+            {
+                return Err(invalid(section, format!("{ns:?}/{name:?}: {problem}")));
+            }
         }
         for g in &self.groups {
             if let Some(problem) = crate::capability::capability_group_name_problem(&g.name) {
@@ -1163,6 +1227,33 @@ impl NodeCapabilityConfig {
                     "[{i}] {}/{}: ceiling {max} is below floor {}", p.filter.ns, p.filter.name, p.min_providers
                 )));
             }
+        }
+        let mut ids = std::collections::BTreeSet::new();
+        for (i, sc) in self.schedules.iter().enumerate() {
+            let at = format!("[{i}] {:?}", sc.id);
+            if let Some(problem) = crate::schedule::id_problem(&sc.id) {
+                return Err(invalid("schedule.id", format!("{at}: {problem}")));
+            }
+            if !ids.insert(sc.id.as_str()) {
+                return Err(invalid("schedule.id", format!("{at}: another [[schedule]] in this file has the same id, and one id is one run per slot")));
+            }
+            if !(1..=MAX_SCHEDULE_PERIOD_SECS).contains(&sc.period_secs) {
+                return Err(invalid("schedule.period_secs", format!(
+                    "{at}: {} is outside 1..={MAX_SCHEDULE_PERIOD_SECS} (a period and a phase, no calendar)", sc.period_secs
+                )));
+            }
+            if sc.phase_secs >= sc.period_secs {
+                return Err(invalid("schedule.phase_secs", format!(
+                    "{at}: {} is not below the period {} — a phase is where in the period a slot starts", sc.phase_secs, sc.period_secs
+                )));
+            }
+            if let Some(problem) = crate::capability::capability_name_problem(&sc.holders.ns, &sc.holders.name) {
+                return Err(invalid("schedule.holders", format!("{at}: {:?}/{:?}: {problem}", sc.holders.ns, sc.holders.name)));
+            }
+            if sc.holders.ranking.is_some() {
+                return Err(invalid("schedule.holders", format!("{at}: a ranking means nothing here — the holder is the rendezvous winner, never the best-ranked host")));
+            }
+            sc.holders.to_filter().map_err(|e| invalid("schedule.holders", format!("{at}: {e}")))?;
         }
         // Last, so every other `[hosts]` refusal keeps its own name: a hosting unit with no
         // provenance policy. An empty trusted list is not "provenance not required" — it is "any

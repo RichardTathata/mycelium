@@ -137,6 +137,7 @@
 //! | `grant/{agent}/{request}/consumed` | written by the agent's commit: the request's grant admitted one transition, so the same tool and arguments ask again |
 //! | `grant/{agent}/{request}/used/{door}` | written by an enforcement point (`gateway`, `provider`) that admitted a call under the grant: a grant admits one call at each door, and a second presentation there is refused `GrantUsed` (adopter-surface X3, second PR) |
 //! | `grant/{agent}/{request}/revoked`  | the revocation, with the issuer, the reason and the checkpoint's sequence, written by `POST /gateway/grants/{agent}/{request}/revoke` (`grant:issue`) at the issuing node |
+//! | `sched/{id}/last/{node}`           | adopter-surface Y2 — the highest slot `{node}` ran for a `[[schedule]]`, `"{slot} {period_ms} {phase_ms}"`: written by the node after a run's work succeeds, never lowered; every candidate reads the highest entry under its own period and phase, so a new holder knows what its predecessor ran (`src/schedule.rs`, `last_prefix`); one entry per node that ever held it. The holding itself is the advertisement `cap/{node}/schedule/{id}.holder`, which evaporates (the lease) |
 //! | `faults/{class}/…`                 | adopter-surface X6 — the writes `mycelium test --faults` makes on the in-process fleet it builds for one run (a synced write per node, the revoke class's plant and forged write, a replay marker); never written on an adopter's node |
 //! | `agent/{node}/provision/{item}/error` | Last provisioning failure — written by the **application** provisioning handler, not the substrate |
 //! | `ui/viz` · `ui/label`              | **The application's**, read by the substrate — a node advertises its own browser page (the `ui/viz` convention the showcases and the Ops Console use). Not reserved: an application writes it. The gateway's cross-origin layer answers a value under `ui/` (and no other key's) to a listed origin (`src/agent/http/cors.rs`, `UI_KEY_PREFIX`; adopter-surface Y3), so nothing else belongs here |
@@ -263,6 +264,9 @@ pub use agent::causal;
 pub mod declare;
 /// `mycelium test --faults` — the existing proofs against an adopter's declaration (adopter-surface X6).
 pub mod faults;
+/// Declared recurring work (adopter-surface Y2, D15): a `[[schedule]]`'s holder elected by rendezvous, its tick
+/// through the timer seam, a missed run a catalogued decision, every run under the idempotency key `sched/{id}/{slot}`.
+pub mod schedule;
 /// The effects vocabulary and the side-effect contract (adopter-surface X5; in the substrate since X9).
 pub mod effects;
 /// The adapter contract — what each runtime adapter carries, by property, and the test that shows it

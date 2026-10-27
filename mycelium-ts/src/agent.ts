@@ -368,7 +368,8 @@ export class MyceliumAgent {
    * Declare a unit file's capabilities, requirements and groups on the node, under one handle
    * (design-time-tooling.md Q2). Pass the file's **text** — read it yourself (`fs.readFile`); the node
    * parses and validates it with its own loader, so this SDK carries no TOML parser. Hosting sections
-   * (`[hosts]`, `[[presence]]`, `[[activation]]`, `[[serve]]`) are a stem's and are refused (422). The handle's
+   * (`[hosts]`, `[[presence]]`, `[[activation]]`, `[[serve]]`) are a stem's and are refused (422), as is
+   * `[[schedule]]`, which the application embedding the node runs. The handle's
    * `drop()` retracts the whole unit; with `leaseSecs`, call `heartbeat()` within every window.
    */
   async declareUnits(

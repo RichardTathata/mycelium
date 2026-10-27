@@ -299,6 +299,10 @@ impl Stem {
     pub fn start(agent: Arc<GossipAgent>, units: &NodeCapabilityConfig, opts: StemOptions) -> Result<Self, StemError> {
         let watch: crate::activation::WatchList = Arc::new(std::sync::Mutex::new(Vec::new()));
         units.validate().map_err(|e| StemError(e.to_string()))?;
+        // Adopter-surface Y2: refused before anything is declared, so a refused stem has advertised nothing.
+        if !units.schedules.is_empty() {
+            return Err(StemError("[[schedule]] is run by the application that embeds the node (mycelium::GossipAgent::run_schedule), which supplies the work: a stem has none to run".into()));
+        }
         // Rows L and M: each `[activation.confine.egress]` activation's proxy, before anything can run it.
         let egress = start_egress_proxies(&agent, units)?;
 
@@ -1008,6 +1012,28 @@ mod tests {
         assert!(gone, "declarations evaporate with the stem");
         a.shutdown().await;
         b.shutdown().await;
+    }
+
+    /// Adopter-surface Y2: a stem refuses a `[[schedule]]` by name — the work is the embedding application's — and
+    /// before it has declared anything.
+    #[tokio::test]
+    async fn a_schedule_is_refused_by_a_stem_before_anything_is_declared() {
+        let units = NodeCapabilityConfig::from_toml_str(
+            "[[capability]]\nns=\"ledger\"\nname=\"closer\"\n[[schedule]]\nid=\"close\"\nperiod_secs=60\n[schedule.holders]\nns=\"ledger\"\nname=\"closer\"\n",
+        ).unwrap();
+        let node = agent(alloc_port(), None).await;
+        // Any write under the unit's capability — an advertisement, or the tombstone a refused start would leave —
+        // moves this watch: the refusal must come before anything is declared, not be cleaned up after.
+        let watch = node.kv().subscribe_prefix(format!("cap/{}/ledger/", node.node_id()));
+        let err = match Stem::start(Arc::clone(&node), &units, stem_opts(&scratch("sched"))) {
+            Ok(stem) => { stem.stop().await; panic!("a stem must refuse [[schedule]]") }
+            Err(e) => e.to_string(),
+        };
+        assert!(err.contains("[[schedule]]") && err.contains("run_schedule"), "{err}");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(!watch.has_changed().unwrap_or(true), "nothing was written under the unit's capability, not even a tombstone");
+        assert!(node.capabilities().resolve(&CapFilter::new("ledger", "closer")).is_empty(), "nothing was advertised");
+        node.shutdown().await;
     }
 
     #[test]
