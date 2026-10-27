@@ -226,6 +226,12 @@ pub(super) async fn gw_units_declare(
     if !units.presence.is_empty() { hosting.push("[[presence]]"); }
     if !units.activations.is_empty() { hosting.push("[[activation]]"); }
     if !units.serves.is_empty() { hosting.push("[[serve]]"); }
+    if !units.schedules.is_empty() {
+        return (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({
+            "error": "schedule section",
+            "detail": "[[schedule]] is run by the application that embeds the node (GossipAgent::run_schedule), which supplies the work; no route runs one for an SDK agent",
+        }))).into_response();
+    }
     if !hosting.is_empty() {
         return (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({
             "error": "hosting sections",

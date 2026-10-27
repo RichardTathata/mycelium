@@ -1407,6 +1407,7 @@ pub(crate) const OWNED_KV_PREFIXES: &[&str] = &[
     "agent/", "svc/", "log/", "clog/", "lock/", "prompts/", "skills/", "installable/", "comp/", "wiki/", "tuple/",
     "facts/", "mandate/", "knowledge/", "rights/", "cn/",
     "grant/",  // adopter-surface X3: grant requests and answers (POST /gateway/grants/{agent}/{request})
+    "sched/",  // adopter-surface Y2: a schedule's last run, written by its holder after the work (src/schedule.rs)
     "faults/", // adopter-surface X6: `mycelium test --faults`'s own writes on the fleet it builds; no route writes it
 ];
 
@@ -1476,6 +1477,8 @@ pub(super) fn refuse_protected_key(key: &str) -> Option<axum::response::Response
         "locks are taken through /gateway/overlay/lock/acquire (consensus:write)"
     } else if key.starts_with("grant/") {
         "grant requests are written by the agent's state machine and answered through POST /gateway/grants/{agent}/{request} (grant:issue)"
+    } else if key.starts_with("sched/") {
+        "`sched/` is written by a schedule's holder after its work runs (`GossipAgent::run_schedule`); a forged last run would skip or repeat slots, and no route writes it"
     } else if key.starts_with("faults/") {
         "`faults/` is written by `mycelium test --faults` on the in-process fleet it builds for one run, never on an adopter's node; no route writes it"
     } else {

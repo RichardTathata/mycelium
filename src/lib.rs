@@ -137,6 +137,7 @@
 //! | `grant/{agent}/{request}/consumed` | written by the agent's commit: the request's grant admitted one transition, so the same tool and arguments ask again |
 //! | `grant/{agent}/{request}/used/{door}` | written by an enforcement point (`gateway`, `provider`) that admitted a call under the grant: a grant admits one call at each door, and a second presentation there is refused `GrantUsed` (adopter-surface X3, second PR) |
 //! | `grant/{agent}/{request}/revoked`  | the revocation, with the issuer, the reason and the checkpoint's sequence, written by `POST /gateway/grants/{agent}/{request}/revoke` (`grant:issue`) at the issuing node |
+//! | `sched/{id}/last`                  | adopter-surface Y2 — the last slot a `[[schedule]]`'s holder ran, decimal ASCII, last-writer-wins: written after each run's work succeeds, read by every candidate so a new holder knows what its predecessor ran (`src/schedule.rs`, `last_key`); the holding itself is the advertisement `cap/{node}/schedule/{id}.holder`, which evaporates (the lease) |
 //! | `faults/{class}/…`                 | adopter-surface X6 — the writes `mycelium test --faults` makes on the in-process fleet it builds for one run (a synced write per node, the revoke class's plant and forged write, a replay marker); never written on an adopter's node |
 //! | `agent/{node}/provision/{item}/error` | Last provisioning failure — written by the **application** provisioning handler, not the substrate |
 //! | `sys/identity/{node}`              | mTLS — 32-byte Ed25519 verifying key history (current‖retained); written at startup by TLS-enabled nodes |
@@ -262,6 +263,9 @@ pub use agent::causal;
 pub mod declare;
 /// `mycelium test --faults` — the existing proofs against an adopter's declaration (adopter-surface X6).
 pub mod faults;
+/// Declared recurring work (adopter-surface Y2, D15): a `[[schedule]]`'s holder elected by rendezvous, its tick
+/// through the timer seam, a missed run a catalogued decision, every run under the idempotency key `sched/{id}/{slot}`.
+pub mod schedule;
 /// The effects vocabulary and the side-effect contract (adopter-surface X5; in the substrate since X9).
 pub mod effects;
 /// The adapter contract — what each runtime adapter carries, by property, and the test that shows it

@@ -22,6 +22,8 @@
 //! | `unhostable entry` | an artifact would satisfy the filter but no unit's `[hosts]` names its kind with budget for its footprint | error |
 //! | `presence unhostable` | a `[[presence]]` floor cannot be met by deployed providers plus distinct hosting units | error |
 //! | `presence bands overlap` | two `[[presence]]` bands, at least one capped, over the same capability and not provably disjoint, can trade a provider back and forth — a capped band sheds against its ceiling while the other's floor or ceiling brings a provider back | warning |
+//! | `schedule without holders` | a `[[schedule]]`'s `holders` filter matches no capability any unit declares and no artifact a unit could host: no host can hold it, so it never runs | error |
+//! | `runtime with a schedule` | a unit an SDK agent loads (`runtime`) declares a `[[schedule]]`, which `POST /gateway/units/declare` refuses (422): the embedding application runs it | error |
 //! | `unauthorisable edge` | the requirer declares authority vocabulary, and no declared rule could admit the call as a skill or a tool — or the rule that would requires a mandate scope no mandate held by the requirer's principal enumerates | error |
 //! | `would bind by provisioning` | no deployed provider, but a hostable artifact matches | warning (error with `strict_deployed`) |
 //! | `would bind after acceptance` | no deployed provider, and the hostable artifact that matches is **proposed** (D20) — it loads only into a shadow lane until a reviewer accepts it | warning (error with `strict_deployed`) |
@@ -754,6 +756,28 @@ pub fn check(units: &[Unit], artifacts: &[(String, ArtifactDescription)], opts: 
         }
     }
 
+    // ── schedules (adopter-surface Y2) ────────────────────────────────────────────────────────
+    // A schedule's holder band is the hosts whose capabilities match `holders`; with none declared, nothing could
+    // hold it and it would never run — the band is required, not inferred.
+    for u in units {
+        for sc in &u.config.schedules {
+            let Ok(filter) = sc.holders.to_filter() else { continue };
+            let deployed = offers.iter().any(|o| filter.matches(&o.cap));
+            let hostable = artifacts.iter().any(|(_, a)| filter.matches(&a.provides.to_capability()) && !resolver.hosts_for(a).is_empty());
+            if !deployed && !hostable {
+                findings.push(Finding {
+                    severity: Severity::Error,
+                    kind:     "schedule without holders".into(),
+                    unit:     Some(u.name.clone()),
+                    message:  format!(
+                        "schedule {:?} names holders {}/{}, and no unit declares a capability that matches nor could host an artifact that provides one: no host can hold it",
+                        sc.id, sc.holders.ns, sc.holders.name
+                    ),
+                });
+            }
+        }
+    }
+
     // Two bands over one capability, at least one capped, fight when a provider both can match is shed by one and
     // brought back by the other (its floor, or its own different ceiling). Identity is the runtime's (`shed_band`:
     // the filter with ranking and max age cleared), so one band spelled two ways is one band.
@@ -997,6 +1021,14 @@ pub fn check(units: &[Unit], artifacts: &[(String, ArtifactDescription)], opts: 
                 });
             }
         }
+        if u.config.runtime.is_some() && !u.config.schedules.is_empty() {
+            findings.push(Finding {
+                severity: Severity::Error,
+                kind:     "runtime with a schedule".into(),
+                unit:     Some(u.name.clone()),
+                message:  "a unit with `runtime` is loaded by an SDK agent through POST /gateway/units/declare, which refuses [[schedule]] (422): the application that embeds the node runs it (GossipAgent::run_schedule)".into(),
+            });
+        }
         if let Some(r) = &u.config.runtime
             && crate::adapter_contract::for_runtime(r).is_none()
         {
@@ -1122,6 +1154,21 @@ mod tests {
         assert!(r.render_dot().contains("\"planner\" -> \"llm-a\""));
         let json: serde_json::Value = serde_json::from_str(&r.render_json()).unwrap();
         assert_eq!(json["schema"], DECLARATION_SCHEMA);
+    }
+
+    /// Y2's exit: a `[[schedule]]` is refused by `wire-check` without a declared holder band — no unit offers what
+    /// its `holders` names — and accepted once one does.
+    #[test]
+    fn a_schedule_without_a_declared_holder_band_is_refused() {
+        let sched = "[[schedule]]\nid=\"close\"\nperiod_secs=3600\n[schedule.holders]\nns=\"ledger\"\nname=\"closer\"\n";
+        let r = check(&[unit("books", sched)], &[], &CheckOptions::default());
+        assert_eq!(r.exit_code(), 1, "{}", r.render_text());
+        assert!(kinds(&r).contains(&("schedule without holders", Severity::Error)), "{:?}", r.findings);
+        let r = check(&[unit("books", sched), unit("closer", "[[capability]]\nns=\"ledger\"\nname=\"closer\"\n")], &[], &CheckOptions::default());
+        assert_eq!(r.exit_code(), 0, "{}", r.render_text());
+        let sdk = format!("runtime=\"python\"\n{sched}[[capability]]\nns=\"ledger\"\nname=\"closer\"\n");
+        let r = check(&[unit("books", &sdk)], &[], &CheckOptions::default());
+        assert!(kinds(&r).contains(&("runtime with a schedule", Severity::Error)), "{:?}", r.findings);
     }
 
     #[test]

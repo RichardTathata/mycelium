@@ -131,6 +131,14 @@ links = ["concept:doctor", "concept:unit-file", "concept:grant", "rule:membershi
          "guarantee:id.revocation_authority", "guarantee:mesh.tls", "guarantee:persist.sync_mode", "cargo:mycelium/sim"]
 
 [[feature]]
+name = "Recurring work"
+page = "recurring-work.md"
+example = "none"
+example_watch = ["recurring_work", "schedule"]
+ids = ["concept:recurring-work", "unit:[[schedule]]", "rule:sched.run", "rule:sched.missed"]
+links = ["concept:unit-file", "concept:side-effect-contract", "concept:decision-trace"]
+
+[[feature]]
 name = "Span export"
 page = "span-export.md"
 example = "none"
