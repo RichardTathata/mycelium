@@ -8,7 +8,9 @@
 //! a holder that stops is timed out by its readers like any advertisement — **the lease is the evaporation**. The
 //! advertisements are re-asserted by the node's persist task, not by the loop; what ties them to the loop is that a
 //! run is given **one period** to finish (a deadline through the seam), and work that overruns it is abandoned, the
-//! overrun traced (`work_overran`) and the holding and candidacy withdrawn until the loop's next tick. (A loop whose
+//! overrun traced (`work_overran`) and the holding and candidacy withdrawn until the loop's next tick — when, being the
+//! same rendezvous winner, it holds again: a holder whose work always overruns re-holds every tick and never hands
+//! over, and its trace says `work_overran` each time. (A loop whose
 //! executor thread is blocked by synchronous work stops ticking while its advertisements are still re-asserted: work
 //! that blocks belongs on a blocking thread.) Nothing is assigned and nothing is locked, so a partition has **two
 //! holders**, one per side; that is why every run carries an idempotency key, `sched/{id}/{slot}`
@@ -26,11 +28,19 @@
 //! highest entry under the same period and phase, so a holder that ran an older slot later cannot pull it back and
 //! a restarted node's stale entry does not count against the fleet's. **A clock ahead** runs its slots early and
 //! records them: a holder whose clock is behind that record runs nothing until it reaches it, and says so once
-//! (`last_ahead`) — bounded only by how far the fleet's clocks disagree.
+//! (`last_ahead`) — for at most [`MAX_AHEAD_SLOTS`] slots: an entry further ahead is left out and that is said once
+//! (`ignored_last_far_ahead`). There is one entry per node that ever ran the schedule, kept for good: no route
+//! clears one (the raw KV routes refuse `sched/`), and the bound is what limits a stale one's reach.
 //!
-//! **A loop warms up** before it may hold: three lease refreshes ([`warm_up_ms`]) after it starts, the time its
-//! peers' advertisements and `last` entries take to reach it, so a node that has just started never holds — nor
-//! decides a gap — on its own entries alone.
+//! **Changing a schedule's period or phase** is a new declaration under the same id: while nodes run both, every
+//! candidate sees a mismatch and **the schedule runs nowhere** for the rollout. Roll a change by declaring it under a
+//! new id (and retiring the old one once the new one runs), or by stopping the schedule everywhere and starting it
+//! again with the new declaration.
+//!
+//! **A loop waits** before it may hold: three lease refreshes ([`warm_up_ms`]) after it starts, so that its peers'
+//! advertisements and `last` entries have had that long to reach it before it holds or decides a gap. A delay, not a
+//! convergence bound: nothing checks that they did arrive, and a node slow to hear its peers can still hold on its own
+//! view.
 //!
 //! **A missed run is a decision.** Slots after the last recorded run and before the one due now — a holder that
 //! was down, a handover longer than a period, a paused process — are decided by the schedule's
@@ -71,6 +81,10 @@ pub const CANDIDATE_NS: &str = "schedule";
 pub const HOLDER_SUFFIX: &str = ".holder";
 /// The most missed slots `run_late` runs in one tick; older ones are skipped and counted.
 pub const MAX_CATCH_UP: u64 = 64;
+/// How far ahead of this node's clock a recorded run is believed: an entry in `sched/{id}/last/` more than this many
+/// slots past the slot due here is left out (and said once, `ignored_last_far_ahead`), so a clock far ahead — a
+/// departed node's — cannot silence a schedule until real time catches up. The run_late cap, reused.
+pub const MAX_AHEAD_SLOTS: u64 = MAX_CATCH_UP;
 
 /// Why `id` cannot name a schedule, or `None`. One key segment — it appears in `sched/{id}/last`, the
 /// candidate's capability name and every run's idempotency key — and not ending in `.holder`, which would make
@@ -297,8 +311,8 @@ fn lease_refresh(period_ms: u64) -> Duration {
 }
 
 /// How long a loop waits after it starts before it may hold: three lease refreshes, the time a peer's
-/// advertisement — and its `last` — takes to reach this node or time out of its view. A node that has just joined
-/// or restarted decides on a view that has had the time to converge, never on its own entries alone.
+/// advertisement — and its `last` — is given to reach this node or time out of its view. A delay: nothing checks
+/// that the view converged in it.
 pub fn warm_up_ms(period_ms: u64) -> u64 {
     3 * lease_refresh(period_ms).as_millis() as u64
 }
@@ -309,9 +323,12 @@ pub fn last_prefix(id: &str) -> String {
 }
 
 /// The fleet's last run of `s`, as this node has it: the **highest** slot among the entries written under the same
-/// period and phase — monotonic, whichever holder wrote last, so a node that ran an older slot later cannot lower it.
-fn fleet_last(kv: &crate::store::KvState, s: &Schedule) -> Option<u64> {
-    crate::store::scan_kv_prefix(kv, &last_prefix(&s.id))
+/// period and phase — monotonic, whichever holder wrote last, so a node that ran an older slot later cannot lower it —
+/// leaving out any entry more than [`MAX_AHEAD_SLOTS`] slots ahead of `now_slot`, which a clock far ahead (a departed
+/// node's, say) would otherwise make the fleet wait for. Returns the slot and how many entries it left out.
+fn fleet_last(kv: &crate::store::KvState, s: &Schedule, now_slot: Option<u64>) -> (Option<u64>, usize) {
+    let mut ignored = 0;
+    let last = crate::store::scan_kv_prefix(kv, &last_prefix(&s.id))
         .into_iter()
         .filter_map(|(_, v)| {
             let text = std::str::from_utf8(&v).ok()?.to_string();
@@ -321,7 +338,13 @@ fn fleet_last(kv: &crate::store::KvState, s: &Schedule) -> Option<u64> {
             let phase = parts.next()?.parse::<u64>().ok()?;
             (period == s.period_ms && phase == s.phase_ms).then_some(slot)
         })
-        .max()
+        .filter(|slot| {
+            let too_far = now_slot.is_some_and(|n| *slot > n.saturating_add(MAX_AHEAD_SLOTS));
+            if too_far { ignored += 1; }
+            !too_far
+        })
+        .max();
+    (last, ignored)
 }
 
 /// A candidate's declaration as its advertisement carries it: `(period_ms, phase_ms)`.
@@ -366,8 +389,10 @@ impl crate::GossipAgent {
         let (r, f) = (Arc::clone(&runs), Arc::clone(&failures));
         self.spawn_task(async move {
             let id = Arc::clone(&schedule.id);
+            // Frees the id however the loop ends — a stop, a shutdown, or `work` panicking through it.
+            let _free = FreeId { running, id: Arc::clone(&id) };
             let started_ns = mycelium_core::sim_seam::mono_now_ns();
-            let mut runner = Runner { schedule, caps, kv, me, ctx, started_ns, candidacy: None, holding: None, was: None, runs: r, failures: f };
+            let mut runner = Runner { schedule, caps, kv, me, ctx, started_ns, candidacy: None, holding: None, was: None, ignored: 0, runs: r, failures: f };
             let mut ticker = mycelium_core::sim_seam::interval_ms(
                 format!("sched/{id}"), check_interval_ms(runner.schedule.period_ms), tokio::time::MissedTickBehavior::Skip,
             );
@@ -380,9 +405,20 @@ impl crate::GossipAgent {
                 }
             }
             drop(runner);
-            running.pin().remove(&id);
         });
         Ok(ScheduleHandle { stop: Some(stop_tx), runs, failures })
+    }
+}
+
+/// Removes a schedule's id from the node's running set when the loop's task ends, by any path.
+struct FreeId {
+    running: Arc<papaya::HashMap<Arc<str>, ()>>,
+    id: Arc<str>,
+}
+
+impl Drop for FreeId {
+    fn drop(&mut self) {
+        self.running.pin().remove(&self.id);
     }
 }
 
@@ -398,6 +434,8 @@ struct Runner {
     candidacy: Option<crate::CapabilityReg>,
     holding: Option<crate::CapabilityReg>,
     was: Option<&'static str>,
+    /// How many far-ahead `last` entries the last tick left out, so a change is said once.
+    ignored: usize,
     runs: Arc<AtomicU64>,
     failures: Arc<AtomicU64>,
 }
@@ -470,7 +508,17 @@ impl Runner {
         } else if !holding {
             self.holding = None;
         }
-        let last = fleet_last(&self.ctx.kv_state, &s);
+        let (last, ignored) = fleet_last(&self.ctx.kv_state, &s, s.slot_at(now));
+        if ignored != self.ignored {
+            if ignored > 0 {
+                self.record(DecisionRecord::new(RUN_RULE, 1, "schedule tick", OutcomeKind::NoAction, "ignored_last_far_ahead")
+                    .node(self.me.to_string(), 0).target(s.id.to_string()).view(ViewStatus::Unknown).no_parent().no_effect()
+                    .input(InputSnapshot::new("`sched/{id}/last/{node}` entries more than MAX_AHEAD_SLOTS past this node's slot, left out",
+                        format!("ignored={ignored} max_ahead={MAX_AHEAD_SLOTS} slot={}", s.slot_at(now).map_or("none".into(), |x| x.to_string())), Provenance::Gossiped))
+                    .input(clock(s.slot_at(now))));
+            }
+            self.ignored = ignored;
+        }
         let tick = decide(&s, now, holding, last);
 
         let view = InputSnapshot::new(

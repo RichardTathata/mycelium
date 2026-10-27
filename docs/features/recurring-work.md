@@ -52,14 +52,20 @@ the gap decided as run once or skipped, the run naming the decision its parent) 
   live candidates runs the slot due; a gap is skipped, run late (at most 64, each under its own key) or run once.
 - One effect per slot **only at a destination that deduplicates** on the run's key, with content that depends on
   the key alone: two holders send it twice.
-- A loop warms up for three lease refreshes before it may hold; a run gets one period, and work that overruns it is
+- A loop waits three lease refreshes before it may hold; a run gets one period, and work that overruns it is
   abandoned, traced (`work_overran`) and the holding withdrawn. A loop whose thread is blocked by synchronous work
   keeps its advertisements re-asserted by the node's persist task: such work belongs on a blocking thread.
 - The fleet's last run is the highest `sched/{id}/last/{node}` under the schedule's period and phase, never lowered;
   a run recorded ahead of a holder's clock (a fast clock elsewhere) is said once (`last_ahead`) and nothing runs
   until the clock reaches it. A schedule with no recorded run starts at the slot due. Holders whose clocks disagree
   across a slot boundary compute two slots — two keys.
-- One id is one schedule: candidates that declare another period or phase hold nowhere (`declaration_mismatch`).
+- One id is one schedule: candidates that declare another period or phase hold nowhere (`declaration_mismatch`) —
+  so changing a running schedule's period or phase stops it fleet-wide for the rollout; roll a change under a new id,
+  or stop it everywhere and start it again.
+- A recorded run more than 64 slots ahead of a holder's clock is ignored and said once; `last` entries are one per
+  node that ever ran the schedule, kept for good, and no route clears one.
+- A holder whose work always overruns re-holds every tick and never hands over; the trace says `work_overran` each
+  time. The warm-up is a delay, not a convergence check.
 - Not built, stated in the plan's Y2 row: a cron language beyond a period and a phase, a fleet-wide calendar, an
   SDK or gateway route that runs a schedule (`POST /gateway/units/declare` refuses one, 422), a stem that runs
   one (it refuses one by name), a schedule class in `mycelium test --faults`, and a schedule run recorded and

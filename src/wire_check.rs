@@ -24,6 +24,7 @@
 //! | `presence bands overlap` | two `[[presence]]` bands, at least one capped, over the same capability and not provably disjoint, can trade a provider back and forth — a capped band sheds against its ceiling while the other's floor or ceiling brings a provider back | warning |
 //! | `schedule without holders` | no unit that runs a `[[schedule]]` — declares it, with no `runtime` and no `[hosts]` — declares a capability its `holders` filter matches: no host can hold it, so it never runs | error |
 //! | `schedule declared two ways` | two units declare one schedule id with a different period, phase, missed-run policy or holders; one id is one schedule fleet-wide, and its candidates refuse to hold while they disagree | error |
+//! | `schedule in a stem unit` | a unit with `[hosts]` or `[[serve]]` — a stem's — declares a `[[schedule]]`, which a stem refuses to start with | error |
 //! | `runtime with a schedule` | a unit an SDK agent loads (`runtime`) declares a `[[schedule]]`, which `POST /gateway/units/declare` refuses (422): the embedding application runs it | error |
 //! | `unauthorisable edge` | the requirer declares authority vocabulary, and no declared rule could admit the call as a skill or a tool — or the rule that would requires a mandate scope no mandate held by the requirer's principal enumerates | error |
 //! | `would bind by provisioning` | no deployed provider, but a hostable artifact matches | warning (error with `strict_deployed`) |
@@ -761,7 +762,19 @@ pub fn check(units: &[Unit], artifacts: &[(String, ArtifactDescription)], opts: 
     // The band is what the runtime elects from: units that run the schedule — declare it, with no `runtime` (an SDK
     // agent's `units/declare` refuses it) and no `[hosts]` (a stem refuses it) — and offer a capability `holders`
     // matches. With none, nothing could hold it and it would never run.
-    let runs_schedules = |u: &Unit| u.config.runtime.is_none() && u.config.hosts.is_none();
+    // A stem is a unit with `[hosts]` or `[[serve]]` (the sections only a stem runs), and it refuses a `[[schedule]]`.
+    let stem_unit = |u: &Unit| u.config.hosts.is_some() || !u.config.serves.is_empty();
+    let runs_schedules = |u: &Unit| u.config.runtime.is_none() && !stem_unit(u);
+    for u in units {
+        if !u.config.schedules.is_empty() && stem_unit(u) {
+            findings.push(Finding {
+                severity: Severity::Error,
+                kind:     "schedule in a stem unit".into(),
+                unit:     Some(u.name.clone()),
+                message:  "a unit with `[hosts]` or `[[serve]]` is a stem's, and a stem refuses to start with a [[schedule]]: the application that embeds the node runs it (GossipAgent::run_schedule)".into(),
+            });
+        }
+    }
     let mut by_id: BTreeMap<&str, Vec<(&Unit, &crate::capability_config::ScheduleDecl)>> = BTreeMap::new();
     for u in units {
         for sc in &u.config.schedules {
@@ -788,8 +801,7 @@ pub fn check(units: &[Unit], artifacts: &[(String, ArtifactDescription)], opts: 
         let Ok(filter) = first.holders.to_filter() else { continue };
         let band: Vec<&str> = decls.iter()
             .filter(|(u, _)| runs_schedules(u))
-            .filter(|(u, _)| u.config.capabilities.iter().any(|c| filter.matches(&c.build_capability_public()))
-                || u.config.serves.iter().any(|sv| filter.matches(&Capability::new(sv.ns.as_str(), sv.name.as_str()))))
+            .filter(|(u, _)| u.config.capabilities.iter().any(|c| filter.matches(&c.build_capability_public())))
             .map(|(u, _)| u.name.as_str())
             .collect();
         if band.is_empty() {
@@ -1199,7 +1211,11 @@ mod tests {
         assert_eq!(r.exit_code(), 0, "{}", r.render_text());
         // A stem unit and an SDK unit cannot run one.
         let stem = format!("{sched}{closer}[hosts]\nkinds=[\"blob\"]\naccept_unsigned=true\n");
-        assert!(has(&check(&[unit("books", &stem)], &[], &CheckOptions::default()), "schedule without holders"));
+        let r = check(&[unit("books", &stem)], &[], &CheckOptions::default());
+        assert!(has(&r, "schedule without holders") && has(&r, "schedule in a stem unit"), "{:?}", r.findings);
+        let serving = format!("{sched}[[serve]]\nns=\"ledger\"\nname=\"closer\"\nendpoint=\"http://127.0.0.1:9/v1\"\nmodel=\"m\"\n");
+        let r = check(&[unit("books", &serving)], &[], &CheckOptions::default());
+        assert!(has(&r, "schedule without holders") && has(&r, "schedule in a stem unit"), "a served skill is not a holder: {:?}", r.findings);
         let sdk = format!("runtime=\"python\"\n{sched}{closer}");
         let r = check(&[unit("books", &sdk)], &[], &CheckOptions::default());
         assert!(has(&r, "runtime with a schedule") && has(&r, "schedule without holders"), "{:?}", r.findings);

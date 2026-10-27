@@ -57,11 +57,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (`ScheduledRun::operation_id`), so two holders under a partition give one effect at a destination that
   deduplicates (`two_holders_under_a_partition_give_one_effect_at_the_destination`, a link cut at the frame layer, through
   X5's reconciler). The fleet's last run is the highest `sched/{id}/last/{node}` under the same period and phase, never
-  lowered; a run recorded ahead of a holder's clock is said (`last_ahead`). A missed run is the decision `sched.missed`
+  lowered; a run recorded ahead of a holder's clock is said (`last_ahead`), one more than 64 slots ahead ignored
+  (`ignored_last_far_ahead`). Changing a running schedule's period or phase stops it fleet-wide for the rollout: roll
+  a change under a new id. A missed run is the decision `sched.missed`
   — `skipped`, `ran_late` (at most 64, each under its own key) or `ran_once` for the gap — recorded in the trace with
   its inputs, each run it causes naming it its parent; a failed late or gap run is traced and the runs after it go on.
   `wire-check` reports `schedule without holders` (no unit that runs it declares a capability `holders` matches),
-  `schedule declared two ways` and `runtime with a schedule`; `POST /gateway/units/declare` refuses a `[[schedule]]`
+  `schedule declared two ways`, `schedule in a stem unit` and `runtime with a schedule`; `POST /gateway/units/declare` refuses a `[[schedule]]`
   (`422 schedule section`) and a stem refuses to start with one; the capability namespace `schedule` is reserved at
   every advertise door and in the loader; the raw KV routes refuse `sched/` (`deprecations.md` §68). **Not built:** a
   cron language beyond a period and a phase; a fleet-wide calendar; exclusivity — a partition runs a slot on each

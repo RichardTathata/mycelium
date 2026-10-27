@@ -428,13 +428,6 @@ impl CapFilter {
     }
 }
 
-/// Why `(namespace, name)` cannot name a capability or a requirement, or `None` when it can.
-///
-/// The pair is two segments of `cap/{node}/{ns}/{name}` (and of `req/…` and
-/// `gcap/{group}/{ns}/{name}/{node}`): an empty segment or one holding a `/` builds a key no reader
-/// parses (`parse_cap_key` refuses it), and `("locality", "self")` *is* the node's own locality entry,
-/// `cap/{node}/locality/self`, which holds a `LocalityPath`, not a `Capability` (#613's review,
-/// finding 6). Every door that writes one of these keys refuses a pair this names a problem for.
 /// The capability namespaces a door that writes an advertisement for someone else refuses, with the reason: each is
 /// written by the substrate for its own decision. `schedule` (adopter-surface Y2) holds a schedule's candidacy and
 /// holding (`mycelium::schedule`): an advertisement written there by anything but the schedule's loop would enter its
@@ -447,6 +440,13 @@ pub fn reserved_capability_namespace(namespace: &str) -> Option<&'static str> {
     )
 }
 
+/// Why `(namespace, name)` cannot name a capability or a requirement, or `None` when it can.
+///
+/// The pair is two segments of `cap/{node}/{ns}/{name}` (and of `req/…` and
+/// `gcap/{group}/{ns}/{name}/{node}`): an empty segment or one holding a `/` builds a key no reader
+/// parses (`parse_cap_key` refuses it), and `("locality", "self")` *is* the node's own locality entry,
+/// `cap/{node}/locality/self`, which holds a `LocalityPath`, not a `Capability` (#613's review,
+/// finding 6). Every door that writes one of these keys refuses a pair this names a problem for.
 pub fn capability_name_problem(namespace: &str, name: &str) -> Option<&'static str> {
     if namespace.is_empty() || name.is_empty() {
         Some("ns and name must not be empty")

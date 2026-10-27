@@ -33,7 +33,7 @@ Schema `mycelium.rules/1` · 31 rules.
 | [`prov.withdraw`](#provwithdraw) | Propagation, Response | catalogue only | Withdrawal removes the install and tombstones its advertisement; restart ≡ provisioning is how it comes back. |
 | [`provider.enforcement`](#providerenforcement) | Authority | catalogue only | Authority where the work happens: a protected call is checked at the provider whichever door it came through; with enforcement on and no evaluator it is refused, with it off nothing is checked. |
 | [`sched.missed`](#schedmissed) | Response | instrumented | A gap is decided, not replayed: skipped, run late each under its own key (at most 64), or run once for the gap under its newest slot's key; a schedule with no recorded run starts at the slot due. |
-| [`sched.run`](#schedrun) | Response | partial — every run, failure and overrun; a change to not_holder, not_eligible, warming_up, last_ahead or declaration_mismatch, once; a tick that changes nothing records nothing | After a warm-up, the rendezvous winner among the live candidates that declare the same period and phase holds and runs the slot due, under the key `sched/{id}/{slot}`, within one period; a partition has a holder on each side, and only a destination that deduplicates makes that one effect — the voluntary singleton, not a lock. |
+| [`sched.run`](#schedrun) | Response | partial — every run, failure and overrun; a change to not_holder, not_eligible, warming_up, last_ahead, ignored_last_far_ahead or declaration_mismatch, once; a tick that changes nothing records nothing | After a warm-up, the rendezvous winner among the live candidates that declare the same period and phase holds and runs the slot due, under the key `sched/{id}/{slot}`, within one period; a partition has a holder on each side, and only a destination that deduplicates makes that one effect — the voluntary singleton, not a lock. |
 | [`signal.admission`](#signaladmission) | Admission | partial — refusals and sheds only; an admitted signal is the hot path and records nothing | Admission is scoped (Cluster · Group · Individual) and shed under load — except Individual and the boundary transitions; shedding happens before the sender is recorded. |
 | [`signal.forwarding`](#signalforwarding) | Propagation | catalogue only | Forwarding is unconditional (flood fallback); only admission is scoped, and a frame addressed to this node terminates here. |
 | [`signal.suppression`](#signalsuppression) | Admission | catalogue only | A kind can be held until a time; held signals are released on flush. Suppression never changes forwarding. |
@@ -546,24 +546,24 @@ A gap is decided, not replayed: skipped, run late each under its own key (at mos
 
 ## `sched.run`
 
-rev 1 · `mycelium::schedule` · Response · trace: partial — every run, failure and overrun; a change to not_holder, not_eligible, warming_up, last_ahead or declaration_mismatch, once; a tick that changes nothing records nothing
+rev 1 · `mycelium::schedule` · Response · trace: partial — every run, failure and overrun; a change to not_holder, not_eligible, warming_up, last_ahead, ignored_last_far_ahead or declaration_mismatch, once; a tick that changes nothing records nothing
 
 After a warm-up, the rendezvous winner among the live candidates that declare the same period and phase holds and runs the slot due, under the key `sched/{id}/{slot}`, within one period; a partition has a holder on each side, and only a destination that deduplicates makes that one effect — the voluntary singleton, not a lock.
 
 - **Trigger:** a schedule's tick, through the timer seam (`sched/{id}`)
 - **Reads:**
   - the schedule's candidates (`cap/*/schedule/{id}`, each carrying its period and phase) and this node's own capabilities against the `holders` filter — scope: the fleet as this node sees it; freshness: as gossiped; an advertisement times out at three of its refreshes; read only after the loop's warm-up
-  - the last slot the fleet ran (the highest `sched/{id}/last/{node}` under this period and phase) — scope: the fleet as this node sees it; freshness: as gossiped; never lowered
+  - the last slot the fleet ran (the highest `sched/{id}/last/{node}` under this period and phase, an entry more than 64 slots ahead of this clock left out) — scope: the fleet as this node sees it; freshness: as gossiped; never lowered
   - `the wall clock through the seam, and the slot it falls in` — scope: this node; freshness: the decision clock
 - **Outcomes:**
   - Action: `ran`, `ran_late`, `ran_for_gap`
-  - NoAction: `not_holder`, `not_eligible`, `not_due`, `already_ran`, `last_ahead`
+  - NoAction: `not_holder`, `not_eligible`, `not_due`, `already_ran`, `last_ahead`, `ignored_last_far_ahead`
   - Deferral: `warming_up`, `work_failed`, `work_overran`
   - Refusal: `declaration_mismatch`
 - **Effects:** the application's work under the idempotency key `sched/{id}/{slot}`, given one period; this node's `sched/{id}/last/{node}`; the holder's advertisement `cap/{node}/schedule/{id}.holder`, which evaporates when it stops (the lease), withdrawn when work overruns
 - **Guards:** Other
 - **Depends on:** [`cap.match`](#capmatch), [`kv.expiry`](#kvexpiry), [`sched.missed`](#schedmissed)
-- **Code:** `schedule::{decide, Runner::tick}` · **Docs:** docs/features/recurring-work.md · **Tests:** `a_tick_runs_the_slot_due_only_on_the_holder_and_only_once`, `two_holders_under_a_partition_give_one_effect_at_the_destination`, `a_host_outside_the_holder_band_never_runs`, `work_that_overruns_its_period_is_abandoned_and_traced`, `one_id_declared_two_ways_holds_nowhere_and_one_node_runs_one_loop_per_id`, `a_run_recorded_ahead_of_this_clock_is_said_and_runs_nothing_until_reached`
+- **Code:** `schedule::{decide, Runner::tick}` · **Docs:** docs/features/recurring-work.md · **Tests:** `a_tick_runs_the_slot_due_only_on_the_holder_and_only_once`, `two_holders_under_a_partition_give_one_effect_at_the_destination`, `a_host_outside_the_holder_band_never_runs`, `work_that_overruns_its_period_is_abandoned_and_traced`, `one_id_declared_two_ways_holds_nowhere_and_one_node_runs_one_loop_per_id`, `a_run_recorded_ahead_of_this_clock_is_said_and_runs_nothing_until_reached`, `a_run_recorded_too_far_ahead_is_left_out_said_once_and_the_schedule_runs`
 
 ## `signal.admission`
 

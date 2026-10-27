@@ -268,7 +268,9 @@ async fn two_holders_under_a_partition_give_one_effect_at_the_destination() {
     }
     let cut = std::time::Instant::now();
     assert!(poll_until(|| handles[other].runs() >= 1, 20_000).await, "the other side holds once the holder's lease has evaporated from its view");
-    assert!(cut.elapsed() >= Duration::from_millis(1_500), "not before the advertisements time out: {:?}", cut.elapsed());
+    // The lease is three refreshes (3 s) from the holder's last write, which landed at most one refresh before the cut.
+    assert!(cut.elapsed() >= Duration::from_millis(1_900) && cut.elapsed() <= Duration::from_millis(8_000),
+        "the takeover follows the lease, not before it nor long after: {:?}", cut.elapsed());
     let both_ran_one = || ledger.by_key().values().any(|(applied, attempts)| *applied == 1 && *attempts == 2);
     assert!(poll_until(both_ran_one, 10_000).await, "two holders ran one slot: {:?}", ledger.by_key());
     assert!(ledger.by_key().values().all(|(applied, _)| *applied == 1), "every key applied once at the destination: {:?}", ledger.by_key());
@@ -349,14 +351,44 @@ async fn a_run_recorded_ahead_of_this_clock_is_said_and_runs_nothing_until_reach
     // A fast peer's entry, ten slots ahead; and one under another period, further still, which must not count.
     let _ = a.kv().set(format!("{}10.0.0.9:9000", last_prefix("close")), format!("{} 2000 0", now_slot + 10));
     let _ = a.kv().set(format!("{}10.0.0.8:9000", last_prefix("close")), format!("{} 60000 0", now_slot + 1_000));
-    assert_eq!(fleet_last(&a.task_ctx.kv_state, &s), Some(now_slot + 10), "the highest entry under this period and phase");
+    assert_eq!(fleet_last(&a.task_ctx.kv_state, &s, Some(now_slot)).0, Some(now_slot + 10), "the highest entry under this period and phase");
     assert!(poll_until(|| traced(&sink, RUN_RULE, "last_ahead") >= 1, 10_000).await, "a run ahead of the clock is said");
     let runs = h.runs();
     tokio::time::sleep(Duration::from_millis(3_000)).await;
     assert_eq!(h.runs(), runs, "nothing runs while the recorded run is ahead of the clock");
     assert_eq!(traced(&sink, RUN_RULE, "last_ahead"), 1, "said once, not every tick");
-    assert_eq!(fleet_last(&a.task_ctx.kv_state, &s), Some(now_slot + 10), "`last` is not lowered");
+    assert_eq!(fleet_last(&a.task_ctx.kv_state, &s, Some(now_slot)).0, Some(now_slot + 10), "`last` is not lowered");
     drop(h);
+    a.shutdown().await;
+}
+
+/// #694's confirmation round, N1: an entry further ahead than `MAX_AHEAD_SLOTS` — a clock a year ahead on a node
+/// since gone — is left out, said once, and the schedule runs; nothing would ever clear it otherwise.
+#[tokio::test]
+async fn a_run_recorded_too_far_ahead_is_left_out_said_once_and_the_schedule_runs() {
+    let (a, sink, _band) = banded(vec![], alloc_port()).await;
+    let s = Schedule::from_decl(&decl("close", 1, MissedRunPolicy::Skip)).unwrap();
+    let now_slot = s.slot_at(mycelium_core::sim_seam::wall_now_ms()).unwrap();
+    let year = 365 * 86_400;
+    let _ = a.kv().set(format!("{}10.0.0.7:9000", last_prefix("close")), format!("{} 1000 0", now_slot + year));
+    assert_eq!(fleet_last(&a.task_ctx.kv_state, &s, Some(now_slot)), (None, 1), "left out, and counted");
+    let h = a.run_schedule(&decl("close", 1, MissedRunPolicy::Skip), |_| async { Ok(()) }).unwrap();
+    assert!(poll_until(|| h.runs() >= 2, 15_000).await, "the schedule runs past a year-ahead entry");
+    assert_eq!(traced(&sink, RUN_RULE, "ignored_last_far_ahead"), 1, "said once");
+    assert_eq!(traced(&sink, RUN_RULE, "last_ahead"), 0);
+    drop(h);
+    a.shutdown().await;
+}
+
+/// A `work` that panics takes its loop down, and the id is free again: the next `run_schedule` for it is accepted.
+#[tokio::test]
+async fn a_panicking_work_frees_the_id() {
+    let (a, _sink, _band) = banded(vec![], alloc_port()).await;
+    let h = a.run_schedule(&decl("close", 1, MissedRunPolicy::Skip), |_| async { panic!("work panicked") }).unwrap();
+    let free = || a.schedules_running.pin().get("close").is_none();
+    assert!(poll_until(free, 15_000).await, "the panic unwound the loop and freed the id");
+    drop(h);
+    assert!(a.run_schedule(&decl("close", 1, MissedRunPolicy::Skip), |_| async { Ok(()) }).is_ok());
     a.shutdown().await;
 }
 

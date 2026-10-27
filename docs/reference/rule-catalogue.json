@@ -1748,7 +1748,7 @@
           "freshness": "as gossiped; an advertisement times out at three of its refreshes; read only after the loop's warm-up"
         },
         {
-          "source": "the last slot the fleet ran (the highest `sched/{id}/last/{node}` under this period and phase)",
+          "source": "the last slot the fleet ran (the highest `sched/{id}/last/{node}` under this period and phase, an entry more than 64 slots ahead of this clock left out)",
           "scope": "the fleet as this node sees it",
           "freshness": "as gossiped; never lowered"
         },
@@ -1774,7 +1774,8 @@
             "not_eligible",
             "not_due",
             "already_ran",
-            "last_ahead"
+            "last_ahead",
+            "ignored_last_far_ahead"
           ]
         },
         {
@@ -1813,10 +1814,11 @@
         "a_host_outside_the_holder_band_never_runs",
         "work_that_overruns_its_period_is_abandoned_and_traced",
         "one_id_declared_two_ways_holds_nowhere_and_one_node_runs_one_loop_per_id",
-        "a_run_recorded_ahead_of_this_clock_is_said_and_runs_nothing_until_reached"
+        "a_run_recorded_ahead_of_this_clock_is_said_and_runs_nothing_until_reached",
+        "a_run_recorded_too_far_ahead_is_left_out_said_once_and_the_schedule_runs"
       ],
       "trace": {
-        "partial": "every run, failure and overrun; a change to not_holder, not_eligible, warming_up, last_ahead or declaration_mismatch, once; a tick that changes nothing records nothing"
+        "partial": "every run, failure and overrun; a change to not_holder, not_eligible, warming_up, last_ahead, ignored_last_far_ahead or declaration_mismatch, once; a tick that changes nothing records nothing"
       },
       "summary": "After a warm-up, the rendezvous winner among the live candidates that declare the same period and phase holds and runs the slot due, under the key `sched/{id}/{slot}`, within one period; a partition has a holder on each side, and only a destination that deduplicates makes that one effect — the voluntary singleton, not a lock."
     },
