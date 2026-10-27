@@ -112,6 +112,56 @@ offending `seq`; the content hashes let you cite exactly which record changed.
 To cite a specific event in an external report, record its `content_hash` — it is
 stable for the logical record and changes if any field is altered.
 
+## 3a. A record by its hash (the span's reference)
+
+A span (adopter-surface Y4, [`span-export`](../features/span-export.md)) carries a record's content hash and nothing
+of what the record says. The record stays on the node that wrote it, and is read there by that hash, under
+`audit:read` (feature `compliance`):
+
+```bash
+# The span's mycelium.source says which: mycelium.decision → decision, mycelium.evidence.* → evidence.
+curl -H 'Authorization: Bearer <audit-token>' \
+     "http://NODE:PORT/gateway/records/evidence/$HASH"
+curl -H 'Authorization: Bearer <audit-token>' \
+     "http://NODE:PORT/gateway/records/decision/$HASH"
+```
+
+`$HASH` is the span's `mycelium.record_sha256`: 64 lowercase hex characters; anything else is `400 bad_hash`. Found
+(`200`):
+
+```json
+{ "schema": "mycelium.record/1", "sha256": "…", "kind": "evidence", "found": true, "source": "journal",
+  "record_b64": "…", "record": { … },
+  "verification": { "hash": "matches",
+                    "chain": { "state": "referenced", "seq": 41, "linked": true, "reference_content_hash": "…" } } }
+```
+
+**Verifying it.** Two checks, the second for evidence only:
+
+1. **The bytes are the record the span named.** Decode `record_b64` and take SHA-256 over it: it is `$HASH`
+   (`sha256sum`, or `verification.hash: "matches"`, which the node computed — recompute it rather than trust it).
+   `record` is the same bytes parsed, for reading.
+2. **An evidence record is the one this node enforced.** `verification.chain` is the reference record in this node's
+   signed, hash-linked audit stream whose `journal_sha256` is `$HASH`: `referenced` with its `seq` and `linked` —
+   whether it is in the stream's verified segment (§3) — and its `content_hash`, which `GET /gateway/audit` lists;
+   `not_referenced` when no reference cites it (the stream pruned to a checkpoint past it, §5). A decision record's
+   chain is `not_chained`: the decision trace is best-effort and nothing seals it.
+
+**Where it is read from.** Evidence: the node's evidence journal (`with_evidence_journal`), which loses nothing it
+acknowledged. A decision: the node's decision sink (`with_decision_trace`), read a page at a time without waiting for
+its lock (`503 sink_busy` if every attempt found it held), then the trace the embedder declared it writes as it
+drains the sink (`GossipAgent::with_decision_trace_file`, a `decisions.jsonl`). A read of the sink copies at most 64
+records per hold of its lock, so a decision point recording during one drops its record as contended, counted as any
+contention is.
+
+**Not found (`404`).** `not_found` is the one meaning the node can give, else `undetermined` with `cannot_rule_out`:
+
+| `not_found` / `cannot_rule_out` | Meaning |
+|---|---|
+| `not_written` | the node keeps no record of that kind (no journal; no sink and no declared trace) — or, in `cannot_rule_out`, the sink has dropped records (`searched.sink.dropped`, by reason), and a dropped decision was never kept anywhere |
+| `evicted` | the record may have been kept and since let go: decisions the sink kept that this read did not search (`searched.sink.not_searched` — drained, or kept after the read) and the declared trace did not hold; evidence a journal cut away when it was opened (`searched.journal.truncated_at_open`) |
+| `never_existed` | no record with this hash was kept here — alone only when nothing else is possible. For a decision it covers **this incarnation**: the sink lives in memory, and a record an earlier incarnation never wrote to the declared trace is not known. Each node's journal is its own: a hash from another node's span is `never_existed` here |
+
 ---
 
 ## 4. Export to an external SIEM / WORM (SOC 2 WS-C)

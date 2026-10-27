@@ -329,6 +329,8 @@ pub(super) fn required_scope(method: &axum::http::Method, matched_path: &str) ->
         "/gateway/llm/stream"          => "llm:invoke",
         // Audit trail (WS2)
         "/gateway/audit"               => "audit:read",
+        "/gateway/records/decision/{sha256}" => "audit:read",
+        "/gateway/records/evidence/{sha256}" => "audit:read",
         "/gateway/transparency"        => "transparency:read",
         "/gateway/identity/revoke"     => "identity:write",
         // WS-C governance (intent publish + effective-state snapshot)

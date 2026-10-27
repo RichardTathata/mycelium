@@ -12,8 +12,9 @@
 //!
 //! **Not an evidence path.** A span store holds what a collector was sent, and nothing in this repository reads one.
 //! A span says *which* record and *what it decided*; what was enforced is the record itself, read by the hash the
-//! span carries on the node that wrote it — `mycelium explain --closure <hash>` over its evidence journal and decision
-//! trace (X4) — and verified there. The guarantee report says so: `trace.spans_not_evidence`.
+//! span carries on the node that wrote it — over its gateway, `GET /gateway/records/{decision,evidence}/{sha256}` under
+//! `audit:read` (feature `compliance`), or with `mycelium explain --closure <hash>` over its evidence journal and
+//! decision trace (X4) — and verified there. The guarantee report says so: `trace.spans_not_evidence`.
 //!
 //! **What the evidence span leaves out that the decision span keeps.** A decision record's `reason` is one of its
 //! rule's typed reason codes, never free text, and is carried. An evidence record's `reason` is the evaluator's

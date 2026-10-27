@@ -440,6 +440,45 @@ impl Corpus {
     }
 }
 
+/// What [`find_in_trace`] read from a written trace.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TraceLookup {
+    /// The line whose content hash is the one asked for, without its newline — the bytes the hash is over.
+    pub line: Option<String>,
+    /// The records (non-empty lines) read before it was found, or in the whole file.
+    pub records: usize,
+}
+
+/// One record of a written decision trace by its content hash, read a line at a time — the rule [`Corpus::add_trace`]
+/// hashes by (a line without its newline or `\r\n`), so a hash `mycelium explain --closure` resolves is one this
+/// finds. For the by-hash read route (adopter-surface Y4), which serves from the trace a node's embedder writes; a
+/// file that does not exist reads as an empty trace. A line that is not UTF-8 is not a record and is skipped.
+pub fn find_in_trace(path: &Path, hash: &str) -> std::io::Result<TraceLookup> {
+    use std::io::BufRead;
+    let file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(TraceLookup::default()),
+        Err(e) => return Err(e),
+    };
+    let mut out = TraceLookup::default();
+    for line in std::io::BufReader::new(file).split(b'\n') {
+        let mut line = line?;
+        if line.last() == Some(&b'\r') {
+            line.pop();
+        }
+        let Ok(text) = String::from_utf8(line) else { continue };
+        if text.trim().is_empty() {
+            continue;
+        }
+        if content_hash(text.as_bytes()) == hash {
+            out.line = Some(text);
+            return Ok(out);
+        }
+        out.records += 1;
+    }
+    Ok(out)
+}
+
 /// A journal is length-prefixed frames: the file's first four bytes are a little-endian length that fits the file,
 /// and that frame's body is a JSON object. Tried first — a text file is read as a journal only if it is one, so a
 /// trace line that happens to spell a length cannot pass (an empty file is neither; it reads as an empty trace).

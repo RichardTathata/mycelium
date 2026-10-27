@@ -292,6 +292,8 @@ fn spawn_handler_with(
         audit_sink: std::sync::OnceLock::new(),
         #[cfg(feature = "compliance")]
         audit_sink_tx: std::sync::OnceLock::new(),
+        #[cfg(feature = "compliance")]
+        decision_trace_file: std::sync::OnceLock::new(),
         filter_opacity_registry: Arc::new(crate::agent::FilterOpacityRegistry::new()),
         group_roster_cache: Arc::new(papaya::HashMap::new()),
         tuning_governor: Arc::new(crate::agent::TuningGovernor::default()),
@@ -4357,6 +4359,8 @@ async fn test_subscribe_notified_via_gossip() {
             audit_sink: std::sync::OnceLock::new(),
             #[cfg(feature = "compliance")]
             audit_sink_tx: std::sync::OnceLock::new(),
+            #[cfg(feature = "compliance")]
+            decision_trace_file: std::sync::OnceLock::new(),
             filter_opacity_registry: Arc::new(crate::agent::FilterOpacityRegistry::new()),
             group_roster_cache: Arc::new(papaya::HashMap::new()),
             tuning_governor: Arc::new(crate::agent::TuningGovernor::default()),

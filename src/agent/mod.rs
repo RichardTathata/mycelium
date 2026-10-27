@@ -882,6 +882,10 @@ pub(crate) struct TaskCtx {
     /// `seal_and_write` mirrors each sealed record here (bounded, drop-on-full).
     #[cfg(feature = "compliance")]
     pub(crate) audit_sink_tx: std::sync::OnceLock<tokio::sync::mpsc::Sender<audit::SignedAuditRecord>>,
+    /// The decision trace this node's embedder writes as it drains its sink (adopter-surface Y4), declared with
+    /// [`GossipAgent::with_decision_trace_file`] so the by-hash read route can serve a record that has left the sink.
+    #[cfg(feature = "compliance")]
+    pub(crate) decision_trace_file: std::sync::OnceLock<std::path::PathBuf>,
 }
 
 impl TaskCtx {
@@ -1439,6 +1443,8 @@ impl GossipAgent {
             audit_sink: std::sync::OnceLock::new(),
             #[cfg(feature = "compliance")]
             audit_sink_tx: std::sync::OnceLock::new(),
+            #[cfg(feature = "compliance")]
+            decision_trace_file: std::sync::OnceLock::new(),
             filter_opacity_registry: Arc::new(capability_ops::FilterOpacityRegistry::new()),
             group_roster_cache:  Arc::clone(&group_roster_cache),
             tuning_governor:     Arc::new(tuning_governor::TuningGovernor::default()),
@@ -1568,6 +1574,19 @@ impl GossipAgent {
         self.note_attachment("with_decision_trace");
         if self.task_ctx.core.decision_sink.set(sink).is_err() {
             tracing::warn!("with_decision_trace: a sink is already attached; ignoring");
+        }
+    }
+
+    /// Declare the decision trace this node's embedder writes (`decisions.jsonl`: one record per line, as
+    /// [`DecisionSink::to_jsonl`](mycelium_core::decision::DecisionSink::to_jsonl) renders the records it
+    /// [`drain`](mycelium_core::decision::DecisionSink::drain)s), so `GET /gateway/records/decision/{sha256}`
+    /// (adopter-surface Y4) can serve a record that has left the sink. The route reads the file; nothing here writes
+    /// it. A read-only pointer that changes no decision, so it may be set before or after `start()` and is not counted
+    /// as a late attachment; set once, a second call warns and is ignored.
+    #[cfg(feature = "compliance")]
+    pub fn with_decision_trace_file(&self, path: impl Into<std::path::PathBuf>) {
+        if self.task_ctx.decision_trace_file.set(path.into()).is_err() {
+            tracing::warn!("with_decision_trace_file: a trace file is already declared; ignoring");
         }
     }
 

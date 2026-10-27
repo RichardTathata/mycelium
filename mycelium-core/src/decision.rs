@@ -317,6 +317,9 @@ pub struct DecisionSink {
 /// The most copies a tap can hold waiting — [`DecisionSink::tap`] clamps its capacity to `1..=MAX_TAP_CAPACITY`.
 pub const MAX_TAP_CAPACITY: usize = 1 << 16;
 
+/// The most records one [`DecisionSink::try_read_after`] copies under the ring's lock.
+pub const MAX_PAGE_RECORDS: usize = 64;
+
 /// Every record a sink has dropped, by reason — read from its counters alone, never under the ring's lock.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct DropCounts {
@@ -458,6 +461,26 @@ impl DecisionSink {
     pub fn snapshot(&self) -> Vec<DecisionRecord> {
         let ring = self.ring.lock().unwrap_or_else(|p| p.into_inner());
         ring.records.iter().cloned().collect()
+    }
+
+    /// Up to `max` held records whose `seq` is greater than `after`, oldest first — or `None`, without waiting, when
+    /// the ring's lock is held. For a reader that runs while decisions are made and must not make them wait (the
+    /// by-hash read route, adopter-surface Y4): it takes the lock with `try_lock`, copies at most `max` records
+    /// (clamped to `1..=`[`MAX_PAGE_RECORDS`]) and releases it, so one hold costs at most that many copies. A decision
+    /// point that arrives during the hold still drops its record `Contended`, counted as any contention is; the page
+    /// bound is what keeps the window short. Records are kept in `seq` order and the ring only grows at its back or is
+    /// emptied whole ([`drain`](Self::drain)), so reading page after page from the last `seq` seen never returns a
+    /// record twice; a record kept between pages is returned by a later one, and one drained between pages is not.
+    pub fn try_read_after(&self, after: u64, max: usize) -> Option<Vec<DecisionRecord>> {
+        let ring = self.ring.try_lock().ok()?;
+        let start = ring.records.partition_point(|r| r.seq <= after);
+        Some(ring.records.iter().skip(start).take(max.clamp(1, MAX_PAGE_RECORDS)).cloned().collect())
+    }
+
+    /// The `seq` of the newest record kept so far (0 before the first): every kept record has a `seq` in `1..=` this,
+    /// one each, so a held record with the lowest `seq` *n* says the `n - 1` kept before it have left the ring.
+    pub fn last_seq(&self) -> u64 {
+        self.seq.load(Ordering::Relaxed)
     }
 
     /// A copy of every record this sink keeps from now on, for **one** reader that must never take the ring's lock — a
@@ -701,6 +724,32 @@ mod tests {
     fn rec(reason: &str) -> DecisionRecord {
         DecisionRecord::new("prov.self_election", 1, "round 7", OutcomeKind::Deferral, reason)
             .node("n1", 3).build("2.19.0").at(1_700_000_000_000).target("data/pack").no_parent().no_effect()
+    }
+
+    /// The by-hash read route's reader (adopter-surface Y4): pages in `seq` order from the last `seq` seen, never a
+    /// record twice, at most [`MAX_PAGE_RECORDS`] a page — and `None` at once, never a wait, while the ring's lock is held.
+    #[test]
+    fn try_read_after_pages_in_seq_order_and_never_waits() {
+        let sink = DecisionSink::default();
+        for i in 0..150 {
+            sink.record(rec(&format!("r{i}"))).unwrap();
+        }
+        let (mut after, mut seen) = (0u64, Vec::new());
+        while let Some(page) = sink.try_read_after(after, 1000) {
+            let Some(last) = page.last() else { break };
+            assert!(page.len() <= MAX_PAGE_RECORDS, "one hold copies at most a page");
+            after = last.seq;
+            seen.extend(page.into_iter().map(|r| r.seq));
+        }
+        assert_eq!(seen, (1..=150).collect::<Vec<_>>());
+        assert_eq!(sink.last_seq(), 150);
+        sink.drain();
+        sink.record(rec("after-drain")).unwrap();
+        let page = sink.try_read_after(0, 10).unwrap();
+        assert_eq!(page.iter().map(|r| r.seq).collect::<Vec<_>>(), vec![151], "a drained record is not returned");
+        let held = sink.ring.lock().unwrap();
+        assert!(sink.try_read_after(0, 10).is_none(), "a held lock is not waited for");
+        drop(held);
     }
 
     /// Records are kept in order with strictly increasing sequence numbers; a drained sink is empty and

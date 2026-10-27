@@ -294,8 +294,16 @@ them. Every record of one run is one trace (its id derives from the `correlation
 span's parent where the two share a run.
 
 **A span is not evidence.** A span store holds what a collector was sent. What was enforced is the record itself:
-take the span's `mycelium.record_sha256` to the node that wrote it and read the record there, with `mycelium explain
---closure <hash>` over that node's journal and trace. The guarantee report says so in
+take the span's `mycelium.record_sha256` to the node that wrote it and read the record there — over its gateway,
+`GET /gateway/records/decision/{sha256}` or `GET /gateway/records/evidence/{sha256}` (by the span's `mycelium.source`;
+scope `audit:read`, feature `compliance`), or with `mycelium explain --closure <hash>` over that node's journal and
+trace. The route answers the record's exact bytes (`record_b64`): SHA-256 over them is the span's hash, which the holder
+recomputes; for an evidence record it also names the reference record in the node's signed audit stream that cites the
+hash, and whether that record verifies. A decision record is not chained. *Not found* is said as one of
+`never_existed`, `not_written` or, with the meanings it cannot rule out, `undetermined` — a sink that dropped records
+or let them go cannot say a missing one never existed ([`audit.md` §3a](../operations/audit.md#3a-a-record-by-its-hash-the-spans-reference)).
+A decision record that has left the sink is served only from a trace the embedder declares it writes
+(`GossipAgent::with_decision_trace_file`). The guarantee report says so in
 [`trace.spans_not_evidence`](../reference/guarantee-catalogue.md). The [span export feature page](../features/span-export.md)
 has what is not built.
 

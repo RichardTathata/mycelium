@@ -32,6 +32,17 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **A record a span names, read by its hash on the node that wrote it** (`docs/plans/adopter-surface.md` Y4's last
+  promise; `docs/operations/audit.md` §3a): `GET /gateway/records/decision/{sha256}` and
+  `GET /gateway/records/evidence/{sha256}`, scope `audit:read`, feature `compliance`. The answer carries the record's
+  exact bytes (`record_b64`), which hash to the span's `mycelium.record_sha256` — the holder recomputes it — and, for an
+  evidence record, the reference record in the node's signed audit stream that cites the hash and whether it verifies;
+  a decision record is said `not_chained`. Evidence is read from the journal; a decision from the sink, a page at a
+  time without waiting for its lock (`503 sink_busy` when it is held on every attempt), then from a trace the embedder
+  declares it writes as it drains the sink (`GossipAgent::with_decision_trace_file`, new). *Not found* (`404`) is
+  `never_existed`, `not_written`, or `undetermined` with the meanings the node cannot rule out — `not_written` once the
+  sink has dropped records, `evicted` once records left it unsearched or a journal was repaired at open. New in
+  `mycelium-core`: `DecisionSink::try_read_after` and `last_seq`; in `mycelium`: `closure::find_in_trace`. No SDK verb.
 - **`secure-multi-domain` — the profile, and the federation guarantee family it needs** (`docs/plans/adopter-surface.md`
   Y7, D25; `docs/features/multi-domain-profile.md`): ten `fed.*` guarantees in the catalogue, resolved by the same
   report as the rest — on this node `fed.domain_enforced` (the enforced domain profile: TLS, SWIM off), and on a node
