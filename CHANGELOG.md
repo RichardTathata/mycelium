@@ -35,6 +35,33 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The Ops Console observes from the browser, and a gateway lets it — opt-in** (`docs/plans/adopter-surface.md` Y3,
+  D16/D28; `docs/operations/observability.md` § The Ops Console). `examples/ops_console` is now a static page
+  (`index.html`) that reads each node it is given **directly** and merges their answers itself — Overview, Fleet,
+  Diagnose, **Guarantees** (each guarantee on each node), **Governors** (`/gateway/govern`), **Tuples**
+  (`/gateway/tuple/overview`), Integrity, Audit, KV (per node, so an unconverged view shows) and Metrics, each from the
+  routes its README names. A node lets a page on another origin read it only through the new
+  **`gateway_cors_origins`** (`GOSSIP_GATEWAY_CORS_ORIGINS`): off by default, exact origins only (`*`, `null`, a path or a
+  default port refused by `validate()`, as is a list with no `http_port`), answered with the origin itself and
+  `Vary: Origin`, and **only** for `GET`/`HEAD` on the read-only routes (`CORS_READ_PATHS`) — never a write, call, stream
+  or governance route, and the KV value route for one `ui/` key only (the `ui/viz` link); a preflight is answered
+  before the auth layer and admits `Authorization`, so the bearer decides every read — and a gateway with **no**
+  credential model may list only loopback origins (`start()` refuses any other by name, since a listed page's script
+  would read what that gateway answers anyone). The page sends its bearer only to the nodes the operator typed or
+  confirmed, accepts a node entry only as `host:port` or `http(s)://host[:port]`, and makes a link of an advertised
+  `ui/viz` only if it is `http:`/`https:`. Not handled, stated: Private Network Access preflights. `examples/observed_fleet.rs` is a three-node fleet with the tuple space mounted; CI renders the
+  page in Chrome against it, tab by tab, and shows a page on an unlisted origin reading every node `blocked` and one
+  without the bearer `unauthorized` (`scripts/ops-console-render.sh`). Every browser showcase, and the coop bootstrap,
+  lists the console's origin `http://127.0.0.1:8099`. Tests: `with_cors_unset_no_answer_carries_an_allow_origin`,
+  `with_cors_set_only_listed_origins_read_only_the_read_paths`, `a_listed_origin_reads_only_ui_keys_through_the_kv_value_route`,
+  `an_open_gateway_refuses_an_origin_that_is_not_on_this_host`, `a_merged_companion_route_is_answered_only_where_listed`,
+  `the_https_gateway_answers_a_listed_origin_the_same_way`,
+  `the_console_reads_only_the_routes_its_readme_names_and_each_is_a_cross_origin_read`,
+  `the_console_opens_no_listener_of_its_own`, `a_cors_origin_is_an_exact_origin_or_it_is_refused_by_name`. **Removed:**
+  the `ops_console` example binary — its `:8099` server and its `/api?host=…&path=…` proxy, which fetched for the browser
+  and so was the aggregating process D16 forbids (`deprecations.md` §67). **Not built:** the community skill cluster
+  (`skillrunner`) has no setting for the origin, so the page reads it `blocked`; the console has no authentication of
+  its own.
 - **The two-domain scaffold** (`docs/plans/adopter-surface.md` Y8): `mycelium init <dir> --template two-domains` writes
   two fleets of two nodes — a food bank exporting `pantry/stock` and `pantry/reserve`, a community kitchen exporting
   `menu/today` — each its own domain under `secure-multi-domain`: each domain's CA minted and every certificate issued

@@ -2086,6 +2086,29 @@ them; attach them before `start()`. Under `dev` and `secure-single-domain` a lat
 federating domain, then select it; read each node's `GET /gateway/guarantees` after attaching its edge and clients,
 because `mycelium doctor` builds a node from a file and cannot see them.
 
+## 67. The `ops_console` example is a static page; its server and `/api` proxy are gone; `GossipConfig` gained `gateway_cors_origins` (unreleased, adopter-surface Y3)
+
+`cargo run --example ops_console` no longer exists: the Ops Console is `examples/ops_console/index.html`, a page you
+serve with any static file host and open in a browser. Its `:8099` server and its `/api?host=…&path=…` proxy, which
+fetched each node's routes for the browser, are removed — a process that fetches the fleet for a page is the
+aggregating process decision D16 forbids, however stateless (D28). A bookmark of `http://127.0.0.1:8099/?target=…`
+keeps working once the page is served on that port.
+
+**What a node must now say.** A browser reads a node's answers from a page on another origin only when the node lists
+that origin: `gateway_cors_origins = ["http://127.0.0.1:8099"]` (or `GOSSIP_GATEWAY_CORS_ORIGINS`). The setting is
+**off by default** and changes nothing for a node that does not set it — no response carries
+`Access-Control-Allow-Origin`. Set, it answers only `GET`/`HEAD` on the read-only routes
+([observability § Cross-origin reads](../operations/observability.md#cross-origin-reads-gateway_cors_origins)), and the
+bearer still decides every read. `validate()` refuses `*`, `null`, an entry with a path, query, fragment, credentials,
+uppercase, a default port or any form a browser would not send, and a non-empty list on a node with no `http_port`,
+naming `gateway_cors_origins`; `start()` refuses a non-loopback origin on a gateway with no credential model.
+
+**What breaks.** `GossipConfig` gained a field, so an exhaustive struct literal breaks (`..Default::default()` is
+unaffected); a reader older than this release refuses a configuration file that sets `gateway_cors_origins` as an
+unknown key only if it denies unknown keys — `GossipConfig` does not, so an older node ignores it and answers no
+cross-origin read. **Migration:** serve `examples/ops_console/` (for example
+`python3 -m http.server 8099 --directory examples/ops_console`) and add its origin to each node you point it at.
+
 ## 69. `mycelium tls issue` refuses to replace a node key it issued before; `--force` replaces it; `tls ca` and `tls pin` are new (unreleased, adopter-surface Y8)
 
 `mycelium tls issue --ca-dir <ca> --node <ip:port> --out <dir>` used to write over `<dir>/<node>.key.pem` silently.

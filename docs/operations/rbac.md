@@ -171,6 +171,33 @@ in `http::COMPANION_PUBLIC_PATHS`: `mycelium-agentfacts`' `GET /.well-known/agen
 no Mycelium credential. A companion route outside the prefixes above is public by construction (the note above),
 which is why `mycelium-tuple-space`'s overview moved under `/gateway/`.
 
+### Cross-origin reads: what a listed page can see
+
+`gateway_cors_origins` (adopter-surface Y3), off by default, lets a browser page on a listed origin *read* the
+answers of the read-only routes (`GET`/`HEAD` only; `CORS_READ_PATHS` and `admits_path` in
+`src/agent/http/cors.rs`). Only its preflight is answered before `gateway_auth`; the read itself passes the bearer
+and its scopes like any other request, so on a gateway with a credential model a listed origin with no bearer
+reads a 401, and the setting decides which pages a browser lets read an answer, not who may obtain one. **On a
+gateway with no credential model it is wider**: that gateway answers anyone who reaches it, the operator's browser
+does, so a listed page's script reads every listed route — which is why `start()` refuses a non-loopback origin
+there ([observability § Cross-origin reads](observability.md#cross-origin-reads-gateway_cors_origins)). What a page
+holding a bearer with each route's scope can read:
+
+| Route | Scope | What it discloses |
+|---|---|---|
+| `/health`, `/ready` | public | liveness and readiness |
+| `/stats`, `/metrics` | public | runtime and tripwire counters, Prometheus series (public already, to any client) |
+| `/gateway/fleet`, `/gateway/diagnose` | `fleet:read` | the members this node sees, their load, opacity and convergence; the narrative over them |
+| `/gateway/guarantees` | `fleet:read` | the node's build features, its profile, each guarantee's resolution and the setting each names |
+| `/gateway/govern` | `govern:read` | the governors' state, and each declared electorate's members by node id |
+| `/gateway/kv/keys` | `kv:read` | every key **name** under the prefix asked (names, not values) |
+| `/gateway/kv` | `kv:read` | the **value** of one key under `ui/` only — the `ui/viz` link — and of no other key |
+| `/gateway/audit` | `audit:read` | the signed audit trail: each record's principal, action, target, outcome and detail |
+| `/gateway/tuple/overview` | `tuple:read` | the tuple space's stages, depths and roles per node |
+
+Grant a token for a page with only the scopes its panels need; a token without `audit:read` reads the Audit tab
+`unauthorized`.
+
 ---
 
 **Scopes match exactly, or `*`.** `scope_admits` accepts the literal scope or the single wildcard
