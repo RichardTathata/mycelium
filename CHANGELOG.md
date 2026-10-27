@@ -32,6 +32,21 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **A record a span names, read by its hash on the node that wrote it** (`docs/plans/adopter-surface.md` Y4's last
+  promise; `docs/operations/audit.md` §3a): `GET /gateway/records/decision/{sha256}` and
+  `GET /gateway/records/evidence/{sha256}`, scope `audit:read`, feature `compliance`. The answer carries the record's
+  exact bytes (`record_b64`), which hash to the span's `mycelium.record_sha256` — the holder recomputes it — and, for an
+  evidence record, the reference record in the node's signed audit stream that cites the hash (a verifying one
+  preferred) and whether it verifies; a decision record is said `not_chained`. Evidence is read from the journal; a
+  decision from the sinks registered with the route — the agent's own and any given to
+  `GossipAgent::with_decision_record_source` (new) — through each sink's own tap, so a read never takes a sink's lock
+  or makes a decision point drop a record, then from a trace the embedder declares
+  (`GossipAgent::with_decision_trace_file`, new). *Not found* (`404`) is `never_existed` (evidence only, for the
+  journal as opened), `not_written`, or `undetermined` with the meanings the node cannot rule out — always so for a
+  decision, which may sit in a sink the route was never given (`not_searched`). New in `mycelium-core`: a tap per
+  reader (`TapSlot`; `tap`, the collector's channel; `tap_ring`, a `TapRing` that keeps the newest copies, the oldest
+  let go; `tap_dropped_for`, `last_seq`); in
+  `mycelium`: `closure::find_in_trace`. No SDK verb.
 - **The two-mesh federation suite's mesh nodes run under `secure-multi-domain`** (adopter-surface Y7's last promise,
   the first PR of the Y8 track). Every mesh node of both domains now starts under the profile: a one-shot issuer per
   domain mints the CA in a volume no node mounts and issues each node's certificate off-node into that node's own

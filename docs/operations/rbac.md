@@ -79,7 +79,7 @@ scope **or** `"*"`. Unmapped routes require `admin` (deny-by-default).
 | `consensus:read` / `consensus:write` | overlay log scan, consistent get, **`/consensus/{*slot}` inspection** / consistent set, lock, elect (and `DELETE /gateway/overlay/elect/{group}`, stepping down — node-wide: any `consensus:write` principal may step **this node** down from any group it leads, or elect it with any `ttl_secs` or `"permanent": true`), log append, cross-group propose — consistent set refuses every owned-namespace key as the KV routes do (403 `protected_key`), and log append/compact refuse a stream under `cn/`, `wiki/` or `reason/` (403 `protected_stream`) |
 | `mcp:invoke` | `POST /mcp` — the MCP JSON-RPC bridge (`initialize`, `tools/list`, `tools/call`) |
 | `llm:read` / `llm:write` / `llm:invoke` | prompt get/list / prompt put,delete / llm call,stream |
-| `audit:read` / `transparency:read` | audit-trail query / revocation transparency log |
+| `audit:read` / `transparency:read` | audit-trail query, and a record by its hash (`GET /gateway/records/{decision,evidence}/{sha256}` — the record a span names, its bytes and its verification, `audit.md` §3a) / revocation transparency log |
 | `identity:write` | key revocation (`POST /gateway/identity/revoke`) |
 | `federation:read` / `federation:invoke` | federation's **consumer** side (item 2 row 11): `GET /gateway/federation/domain`, `/partners`, `/catalog/{domain}` / `POST /gateway/federation/connect`, `/call`. Split because they are different powers — reading which partners exist is operator information; `connect` and `call` spend this domain's credential on a partner's gateway, under the caller's own name |
 | `*` | everything (the legacy `gateway_auth_token` is equivalent) |

@@ -397,6 +397,12 @@ pub(super) async fn run_http_server(
     #[cfg(feature = "compliance")]
     let gateway = gateway.route("/audit", get(gw_audit));
 
+    // Adopter-surface Y4: a record a span names, read by its hash on the node that wrote it, and verified here.
+    #[cfg(feature = "compliance")]
+    let gateway = gateway
+        .route("/records/decision/{sha256}", get(gw_record_decision))
+        .route("/records/evidence/{sha256}", get(gw_record_evidence));
+
     // WS-D / D2: revocation transparency — Merkle heads + client-checkable inclusion proofs.
     #[cfg(feature = "compliance")]
     let gateway = gateway.route("/transparency", get(gw_transparency));
@@ -612,3 +618,6 @@ mod causal_door_tests;
 /// Adopter-surface X3 at the live doors: silence refuses, an issued grant binds the call, issuing is policy.
 #[cfg(all(test, feature = "tls", feature = "compliance"))]
 mod grant_tests;
+/// Adopter-surface Y4's last promise: a record a span names, read by its hash on the node, and verified there.
+#[cfg(all(test, feature = "compliance"))]
+mod record_read_tests;
