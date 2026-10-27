@@ -353,7 +353,8 @@ mod imp {
         let pid = std::process::id();
         let publish = |path: &Path, contents: String, what: &str| -> Result<(), GossipError> {
             let tmp = dir.join(format!(".{what}.tmp-{pid}"));
-            fs::write(&tmp, contents).map_err(|e| err(format!("TLS: write CA {what}: {e}")))?;
+            let written = if what == "key" { write_private(&tmp, contents.as_bytes()) } else { fs::write(&tmp, contents) };
+            written.map_err(|e| err(format!("TLS: write CA {what}: {e}")))?;
             fs::rename(&tmp, path).map_err(|e| err(format!("TLS: publish CA {what}: {e}")))
         };
         publish(key_path, ca_key_pair.serialize_pem(), "key")?;
@@ -527,7 +528,7 @@ mod imp {
         }
         key_pem.push_str("-----END PRIVATE KEY-----\n");
         fs::write(&cert_path, cert_der_to_pem(node_cert_der.as_ref())).map_err(|e| err(format!("TLS: write {cert_path:?}: {e}")))?;
-        fs::write(&key_path, key_pem).map_err(|e| err(format!("TLS: write {key_path:?}: {e}")))?;
+        write_private(&key_path, key_pem.as_bytes()).map_err(|e| err(format!("TLS: write {key_path:?}: {e}")))?;
         Ok((cert_path, key_path))
     }
 
@@ -566,8 +567,29 @@ mod imp {
     }
 
     fn save_key_raw(key: &SigningKey, path: &Path) -> Result<(), GossipError> {
-        fs::write(path, key.as_bytes())
+        write_private(path, key.as_bytes())
             .map_err(|e| GossipError::InvalidField { field: "tls", reason: format!("TLS: write key {:?}: {e}", path) })
+    }
+
+    /// Write a private key readable by its owner only: created `0600` on unix whatever the umask, and narrowed to
+    /// `0600` before any byte is written when the file already exists (a key an older release left `0644`). Every
+    /// private key this module writes goes through here; a certificate is public and does not.
+    fn write_private(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+        use std::io::Write as _;
+        let mut opts = fs::OpenOptions::new();
+        opts.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+            opts.mode(0o600);
+            let mut f = opts.open(path)?;
+            f.set_permissions(fs::Permissions::from_mode(0o600))?;
+            f.write_all(contents)
+        }
+        #[cfg(not(unix))]
+        {
+            opts.open(path)?.write_all(contents)
+        }
     }
 
     fn load_key_raw(path: &Path) -> Result<SigningKey, GossipError> {
@@ -1120,6 +1142,38 @@ mod ca_race_tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// Every private key the TLS module writes is readable by its owner only: the CA key, an issued node key and a
+    /// node's own generated identity key are created `0600` whatever the umask, and a key file left `0644` by an older
+    /// release is narrowed when it is rewritten. Certificates stay as the umask leaves them. Seen failing first: all
+    /// three were `0644` under umask 022.
+    #[cfg(unix)]
+    #[test]
+    fn every_private_key_written_is_owner_only() {
+        use crate::node_id::NodeId;
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        let ca_dir = fresh_dir("modes-ca");
+        load_or_create_ca(&TlsConfig { auto_cert_dir: ca_dir.clone(), ..TlsConfig::default() }).unwrap();
+        assert_eq!(mode(&ca_dir.join("ca-key.pem")), 0o600, "the CA key");
+        let out = fresh_dir("modes-issued");
+        let node = NodeId::new("127.0.0.1", 9402).unwrap();
+        let stale = out.join("127_0_0_1_9402.key.pem");
+        std::fs::write(&stale, b"left by an older release").unwrap();
+        std::fs::set_permissions(&stale, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let (_cert, key) = super::imp::issue_node_cert(&ca_dir, &node, &out).unwrap();
+        assert_eq!(mode(&key), 0o600, "an issued node key, rewritten over a 0644 file");
+        let own = fresh_dir("modes-own");
+        std::fs::copy(ca_dir.join("ca-cert.pem"), own.join("ca-cert.pem")).unwrap();
+        std::fs::copy(ca_dir.join("ca-key.pem"), own.join("ca-key.pem")).unwrap();
+        let cfg = TlsConfig { auto_cert_dir: own.clone(), ..TlsConfig::default() };
+        let node = NodeId::new("127.0.0.1", 9403).unwrap();
+        super::imp::load_or_generate(&cfg, &node, Arc::new(crate::removal::RemovedSet::default()), Default::default()).unwrap();
+        assert_eq!(mode(&own.join("127_0_0_1_9403.key")), 0o600, "a node's own generated identity key");
+        for d in [ca_dir, out, own] {
+            let _ = std::fs::remove_dir_all(d);
+        }
     }
 
     /// Eight nodes start at the same instant on one empty directory, twenty times over. Every one
