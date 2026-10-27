@@ -2137,21 +2137,23 @@ concurrent mints publish one CA, the other refused), and `mycelium tls pin <cert
 pin, refusing a CA certificate and a file that carries a private key. `mycelium::doctor::Doctor` gained `attached`
 (`run_attached` is new), so an exhaustive struct literal breaks; nothing outside the crate builds one.
 
-## 70. A federation edge refuses a credential presented twice; `CallRefusal` gained `Replayed` and `ReplayUndecidable` (unreleased, #695's review)
+## 70. A federation edge refuses a credential presented twice; `CallRefusal` gained `Replayed`, `AlreadyAnswered` and `ReplayUndecidable` (unreleased, #695's review)
 
 A gateway's `/a2a` now serves each federated credential **once**: the same signed bytes presented again are refused
 `-32003` (`Replayed`), and while a partner's window is full a credential expiring no later than the oldest one it had
 to forget is refused `-32004` (`ReplayUndecidable`). Before, the edge kept no record and served a captured credential
 as often as it was sent inside its lifetime ([federation § A credential is one call](../operations/federation.md#a-credential-is-one-call-replays)).
 `FederationClient` now mints each credential with a strictly later `issued_at_ms` than its last, and puts a random
-JSON-RPC `id` in each call's body (it was `1`). A call `/a2a` refuses before its dispatch gives its credential back.
+JSON-RPC `id` in each call's body (it was `1`). **Any answer spends a credential:** one `/a2a` refused before its
+dispatch, presented again, is refused `-32003` `AlreadyAnswered` (counted apart from replays,
+`federation_credentials_already_answered`), never served — a retry needs a fresh credential.
 `FederationEdge::authorize_and_claim` is new; `FederationEdge::claim` returns a `ReplayClaim` to `spend` at the
-dispatch (dropped unspent, it gives the credential back); `FederationEdge::authorize` is unchanged and replay-blind, so
-a door an embedder builds on it alone must claim too.
+dispatch (dropped unspent, the credential stays spent, marked refused); `FederationEdge::authorize` is unchanged and
+replay-blind, so a door an embedder builds on it alone must claim too.
 
 **Who notices.** A client that re-sends a credential already served — a retry that reuses the header rather than
-minting a new one — is refused the second time (one refused before its dispatch is served on the retry); this
-release's `FederationClient` mints per attempt and is unaffected.
+minting a new one — is refused the second time — `Replayed` if it was served, `AlreadyAnswered` if it was refused; this release's
+`FederationClient` mints per attempt and is unaffected.
 A partner running a client older than this release that makes the identical call (same principal, export and body)
 twice inside one millisecond mints one credential twice, and the second is refused as a replay. An exhaustive `match`
 on `CallRefusal` already needed a `_` arm (it is `#[non_exhaustive]`), which must fail closed. `GET /stats` gained

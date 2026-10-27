@@ -40,7 +40,7 @@ use super::catalog::filtered_catalog;
 use super::{DomainId, DomainPolicy, TrustBundle};
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
@@ -352,9 +352,9 @@ pub struct FederationEdge {
     /// anyway (the replay guard — #695's review, finding 1).
     ///
     /// Lock-order row 75: leaf, one lock for every partner's window, taken by
-    /// [`FederationEdge::claim`] once per federated call and by [`ReplayClaim`]'s drop when it gives
-    /// a claim back; never held across the dispatch or with another lock. Each hold is one
-    /// `BTreeSet` insert or remove, an eviction, and at most [`REPLAY_PRUNE_PER_CLAIM`] expired
+    /// [`FederationEdge::claim`] once per federated call and by [`ReplayClaim`]'s spend or drop, which
+    /// mark it served or refused; never held across the dispatch or with another lock. Each hold is
+    /// one `BTreeMap` insert or state change, an eviction, and at most [`REPLAY_PRUNE_PER_CLAIM`] expired
     /// entries collected — bounded, whatever the window held when a quiet spell ended.
     replay: Mutex<HashMap<DomainId, ReplayWindow>>,
     /// The most entries one partner's window keeps; see [`REPLAY_WINDOW_PER_PARTNER`].
@@ -364,6 +364,9 @@ pub struct FederationEdge {
     /// Credentials refused as [`CallRefusal::ReplayUndecidable`]. `GET /stats`
     /// `federation_replays_undecidable`.
     replays_undecidable: AtomicU64,
+    /// Credentials refused as [`CallRefusal::AlreadyAnswered`] — a refused call presented again with
+    /// the same credential, not counted as a replay. `GET /stats` `federation_credentials_already_answered`.
+    already_answered: AtomicU64,
 }
 
 /// How many credentials one partner's replay window keeps by default: an entry stays for its
@@ -384,8 +387,20 @@ const REPLAY_PRUNE_PER_CLAIM: usize = 256;
 /// because expiry is what decides when a credential can no longer be served.
 #[derive(Default)]
 struct ReplayWindow {
-    seen: BTreeSet<(u64, [u8; 32])>,
+    seen: BTreeMap<(u64, [u8; 32]), Spent>,
     floor: Option<(u64, [u8; 32])>,
+}
+
+/// What became of a credential this gateway has answered. Every state is spent: none is ever served
+/// again; the state only names the refusal a second presentation gets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Spent {
+    /// Claimed, and its call not yet dispatched or refused.
+    Pending,
+    /// Dispatched: a second presentation is [`CallRefusal::Replayed`].
+    Served,
+    /// Refused before the dispatch: a second presentation is [`CallRefusal::AlreadyAnswered`].
+    Refused,
 }
 
 impl ReplayWindow {
@@ -394,7 +409,7 @@ impl ReplayWindow {
     /// for the same reason.
     fn prune(&mut self, horizon: u64) {
         for _ in 0..REPLAY_PRUNE_PER_CLAIM {
-            if self.seen.first().is_none_or(|&(expires, _)| expires >= horizon) {
+            if self.seen.first_key_value().is_none_or(|(&(expires, _), _)| expires >= horizon) {
                 break;
             }
             self.seen.pop_first();
@@ -405,13 +420,15 @@ impl ReplayWindow {
     }
 }
 
-/// A credential claimed as served at this gateway ([`FederationEdge::claim`]).
+/// A credential claimed at this gateway ([`FederationEdge::claim`]).
 ///
-/// [`Self::spend`] it once the call is dispatched, and the credential stays served until it expires.
-/// Dropped unspent — on any path out before the dispatch, a refusal or an unwind — it is given back,
-/// so the call it carried, never served, can be presented again. Given back only if the window still
-/// holds it: one forgotten meanwhile under the window's bound stays below the floor, refused as
-/// undecidable, never served twice.
+/// **Any answer spends it.** [`Self::spend`] it once the call is dispatched, and a second
+/// presentation is [`CallRefusal::Replayed`]; dropped unspent — a refusal before the dispatch, or an
+/// unwind — it stays spent too, marked refused, and a second presentation is
+/// [`CallRefusal::AlreadyAnswered`]: never served. Giving it back would let a captured copy be served
+/// after the caller had retried with a fresh credential — the effect twice — and a call its caller was
+/// told was refused take effect later (#696's confirmation round). A caller retries with a fresh
+/// credential, as `FederationClient` mints one per call.
 pub struct ReplayClaim {
     edge: Arc<FederationEdge>,
     partner: DomainId,
@@ -423,6 +440,10 @@ impl ReplayClaim {
     /// The call was dispatched: keep the credential served.
     pub fn spend(mut self) {
         self.spent = true;
+        let mut windows = self.edge.replay.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(spent) = windows.get_mut(&self.partner).and_then(|w| w.seen.get_mut(&self.key)) {
+            *spent = Spent::Served;
+        }
     }
 }
 
@@ -439,8 +460,8 @@ impl Drop for ReplayClaim {
             return;
         }
         let mut windows = self.edge.replay.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(window) = windows.get_mut(&self.partner) {
-            window.seen.remove(&self.key);
+        if let Some(spent) = windows.get_mut(&self.partner).and_then(|w| w.seen.get_mut(&self.key)) {
+            *spent = Spent::Refused;
         }
     }
 }
@@ -498,6 +519,7 @@ impl FederationEdge {
             replay_limit: REPLAY_WINDOW_PER_PARTNER,
             replays_refused: AtomicU64::new(0),
             replays_undecidable: AtomicU64::new(0),
+            already_answered: AtomicU64::new(0),
         }
     }
 
@@ -604,8 +626,9 @@ impl FederationEdge {
     /// that dispatches takes. [`Self::authorize`] alone is replay-blind.
     ///
     /// Hold the returned [`ReplayClaim`] until the call is dispatched, then [`ReplayClaim::spend`]
-    /// it; dropped unspent — a refusal before anything reached a provider — it gives the credential
-    /// back, so a retry of a call that was never served is served rather than called a replay.
+    /// it; dropped unspent — a refusal before anything reached a provider — the credential is spent
+    /// all the same, and presented again it is refused as [`CallRefusal::AlreadyAnswered`] rather
+    /// than counted as a replay. Any answer spends a credential.
     pub fn authorize_and_claim(
         self: &Arc<Self>,
         presented: &PresentedCall,
@@ -630,11 +653,16 @@ impl FederationEdge {
     /// body carries a fresh random JSON-RPC `id` (the seam's `nonce` stream), so two calls — from
     /// one client or from two gateways of one domain — bind two bodies.
     ///
-    /// The claim is taken when this returns and **given back if the returned [`ReplayClaim`] is
-    /// dropped unspent**: a call refused at this gateway before its dispatch (capacity, the task id,
-    /// an unresolved skill, the evaluator) was not served, so the same credential presented again
-    /// is served then. While the claim is held, a concurrent presentation of the same credential is
-    /// refused as a replay.
+    /// **Any answer spends the credential.** The claim is taken when this returns; a concurrent
+    /// presentation while it is held is a replay. Spent at the dispatch, a second presentation is
+    /// [`CallRefusal::Replayed`]; dropped unspent — the call refused at this gateway before its
+    /// dispatch (capacity, the task id, an unresolved skill, the evaluator) — it is
+    /// [`CallRefusal::AlreadyAnswered`], counted apart from replays because a caller retrying a
+    /// refused call with the same header is not an attacker. Neither is ever served: a refused
+    /// credential given back could be served from a captured copy after the caller had retried with
+    /// a fresh one, the effect twice, and a call its caller was told was refused could take effect
+    /// later (#696's confirmation round). It also means a replay is refused before the evaluator,
+    /// so a captured copy writes no second evidence record.
     ///
     /// **What it bounds, and what it does not.**
     /// - Entries are kept until `expires_at_ms` plus the skew tolerance has passed by this
@@ -665,11 +693,15 @@ impl FederationEdge {
             window.prune(horizon);
             if window.floor.is_some_and(|f| key <= f) {
                 Err(CallRefusal::ReplayUndecidable { partner: partner.clone(), limit: self.replay_limit })
-            } else if !window.seen.insert(key) {
-                Err(CallRefusal::Replayed { partner: partner.clone() })
+            } else if let Some(spent) = window.seen.get(&key) {
+                Err(match spent {
+                    Spent::Refused => CallRefusal::AlreadyAnswered { partner: partner.clone() },
+                    Spent::Pending | Spent::Served => CallRefusal::Replayed { partner: partner.clone() },
+                })
             } else {
+                window.seen.insert(key, Spent::Pending);
                 if window.seen.len() > self.replay_limit
-                    && let Some(oldest) = window.seen.pop_first()
+                    && let Some((oldest, _)) = window.seen.pop_first()
                 {
                     window.floor = Some(window.floor.map_or(oldest, |f| f.max(oldest)));
                 }
@@ -679,10 +711,10 @@ impl FederationEdge {
         match outcome {
             Ok(()) => Ok(ReplayClaim { edge: Arc::clone(self), partner, key, spent: false }),
             Err(refusal) => {
-                let counter = if matches!(refusal, CallRefusal::Replayed { .. }) {
-                    &self.replays_refused
-                } else {
-                    &self.replays_undecidable
+                let counter = match refusal {
+                    CallRefusal::Replayed { .. } => &self.replays_refused,
+                    CallRefusal::AlreadyAnswered { .. } => &self.already_answered,
+                    _ => &self.replays_undecidable,
                 };
                 counter.fetch_add(1, Ordering::Relaxed);
                 Err(refusal)
@@ -693,6 +725,12 @@ impl FederationEdge {
     /// Credentials refused as replayed and as undecidable since start, in that order.
     pub fn replays_refused(&self) -> (u64, u64) {
         (self.replays_refused.load(Ordering::Relaxed), self.replays_undecidable.load(Ordering::Relaxed))
+    }
+
+    /// Credentials refused as already answered since start — a refused call retried with the same
+    /// credential, which is not counted as a replay.
+    pub fn already_answered(&self) -> u64 {
+        self.already_answered.load(Ordering::Relaxed)
     }
 
     /// How many served credentials `partner`'s window holds right now (tests, diagnostics).
@@ -1273,25 +1311,32 @@ mod tests {
         assert_eq!(e.replays_refused(), (15, 0));
     }
 
-    /// **A claim dropped before the dispatch gives the credential back** (#696's review): a call
-    /// refused at this gateway before anything reached a provider was not served, so the same
-    /// credential is served when it comes again. Spent, it stays served. And a concurrent
-    /// presentation while the first holds its claim is a replay.
+    /// **Any answer spends a credential** (#696's confirmation round). A claim dropped before the
+    /// dispatch leaves the credential spent and marked refused: presented again it is
+    /// `AlreadyAnswered`, never served and not counted as a replay. A claim spent at the dispatch
+    /// makes the next presentation `Replayed`. And while a claim is held, a concurrent presentation
+    /// is a replay.
     #[test]
-    fn an_unspent_claim_gives_the_credential_back() {
+    fn any_answer_spends_the_credential() {
         let (sk, vk) = keypair(7);
         let e = Arc::new(edge(vk));
         let beta = DomainId::new("beta.example").unwrap();
         let now = 1_789_000_000_000;
-        let call = presented(&sk, "invoice.submit", now);
 
-        let held = e.claim(&call, now).expect("first presentation");
-        assert!(matches!(e.claim(&call, now).map(ReplayClaim::spend), Err(CallRefusal::Replayed { .. })), "while held");
-        drop(held);
-        assert_eq!(e.replay_entries_for(&beta), 0, "given back");
-        let (_, retried) = e.authorize_and_claim(&call, "invoice.submit", TEST_BODY, now + 1).expect("served on retry");
-        retried.spend();
-        assert!(matches!(e.claim(&call, now + 2).map(ReplayClaim::spend), Err(CallRefusal::Replayed { .. })), "spent stays served");
-        assert_eq!(e.replays_refused(), (2, 0));
+        let refused = presented(&sk, "invoice.submit", now);
+        let held = e.claim(&refused, now).expect("first presentation");
+        assert_eq!(e.claim(&refused, now).map(ReplayClaim::spend), Err(CallRefusal::Replayed { partner: beta.clone() }), "while held");
+        drop(held); // refused before the dispatch
+        assert_eq!(e.replay_entries_for(&beta), 1, "still spent");
+        assert_eq!(
+            e.authorize_and_claim(&refused, "invoice.submit", TEST_BODY, now + 1).map(|(_, c)| c.spend()),
+            Err(CallRefusal::AlreadyAnswered { partner: beta.clone() })
+        );
+        assert_eq!((e.replays_refused(), e.already_answered()), ((1, 0), 1), "a retry is not counted as a replay");
+
+        let served = presented(&sk, "invoice.submit", now + 2);
+        e.claim(&served, now + 2).unwrap().spend();
+        assert_eq!(e.claim(&served, now + 3).map(ReplayClaim::spend), Err(CallRefusal::Replayed { partner: beta }));
+        assert_eq!((e.replays_refused(), e.already_answered()), ((2, 0), 1));
     }
 }

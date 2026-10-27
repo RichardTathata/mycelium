@@ -820,10 +820,11 @@ async fn dispatch_send(
         // Authorised, then claimed as served (#695's review): a second presentation of the same
         // signed bytes is a replay and repeats nothing. After authority, so only a credential that
         // verified enters the window; before capacity, so a replay never holds a slot. One clock
-        // read for both. The claim is held to the dispatch and spent there; any refusal before it
-        // drops the claim and gives the credential back, so an unserved call can be retried.
-        // -32003 for a replay, which has no benign reading; -32004 for *cannot rule one out*, which
-        // a fresh credential resolves, as it does a capacity refusal.
+        // read for both. Any answer spends the credential: spent as served at the dispatch, or —
+        // dropped before it by a refusal — as refused, which a second presentation is told
+        // (`already_answered`, -32003, not counted as a replay). -32003 for a replay, which has no
+        // benign reading; -32004 for *cannot rule one out*, which a fresh credential resolves, as
+        // it does a capacity refusal. A retry is a fresh credential.
         let now = crate::federation::edge::now_ms();
         let accepted = match edge.authorize_and_claim(&federated.presented, skill_id, raw, now) {
             Ok((accepted, claim)) => {

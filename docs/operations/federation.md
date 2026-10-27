@@ -161,9 +161,13 @@ dispatched, and counted as `federation_replays_refused` on `GET /stats`. There i
 binding does not do this on its own: the copy of a captured call carries the same body, so before this guard anyone
 holding a captured credential — on the path, or a log that kept the header — could send it again inside its lifetime
 and the provider would act again. The key is the credential's signed bytes, so an *unbound* credential presented with a
-different body is a replay too. A call refused **before it was dispatched** — the partner at its slot cap (-32004), a
-task id another caller owns, a skill that does not resolve, the evaluator's refusal — was not served, so its credential
-is given back and the same credential sent again is served. An honest client never trips it: `FederationClient` puts a
+different body is a replay too. **Any answer spends a credential.** A call refused before it was dispatched — the
+partner at its slot cap (-32004), a task id another caller owns, a skill that does not resolve, the evaluator's
+refusal — ends its credential too: sent again, it is refused -32003 `AlreadyAnswered` (*already_answered*), never
+served, and counted as `federation_credentials_already_answered`, not as a replay, because a caller retrying with the
+same header is not an attacker. A retry needs a fresh credential. Were a refused credential given back, a captured
+copy could be served after the caller had retried with a fresh one — the effect twice — and a call its caller was
+told was refused could take effect later. An honest client never trips it: `FederationClient` puts a
 fresh random JSON-RPC `id` in every call's body, which the credential binds, so two identical calls — from one client
 or from two gateways of one domain — are two credentials.
 

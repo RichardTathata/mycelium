@@ -195,6 +195,15 @@ pub enum CallRefusal {
     /// distinct from [`CallRefusal::Replayed`] because it is not evidence of a replay: a fresh
     /// credential is served, so a retry resolves it, as with [`CallRefusal::AtCapacity`].
     ReplayUndecidable { partner: DomainId, limit: usize },
+    /// This exact credential was **already answered** at this gateway — refused before anything
+    /// was dispatched — and is presented again.
+    ///
+    /// Not served, because any answer spends a credential: had the first refusal given it back, a
+    /// captured copy could be served after the caller had retried with a fresh one, and a call its
+    /// caller was told was refused could take effect later (#696's confirmation round). Kept apart
+    /// from [`CallRefusal::Replayed`] because it is not evidence of an attack: it is what a caller
+    /// that retries a refused call with the same header sees. Retry with a fresh credential.
+    AlreadyAnswered { partner: DomainId },
 }
 
 impl std::fmt::Display for CallRefusal {
@@ -223,6 +232,11 @@ impl std::fmt::Display for CallRefusal {
                 write!(f, "this gateway is already carrying {limit} calls for {partner}; refused, not queued"),
             Self::Replayed { partner } =>
                 write!(f, "this credential from {partner} has already been served at this gateway — replayed"),
+            Self::AlreadyAnswered { partner } => write!(
+                f,
+                "this credential from {partner} was already answered at this gateway (already_answered): \
+                 any answer spends a credential; retry with a fresh one"
+            ),
             Self::ReplayUndecidable { partner, limit } => write!(
                 f,
                 "cannot rule out that this credential from {partner} was served: it expires no later than \

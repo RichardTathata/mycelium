@@ -112,8 +112,9 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   new; `FederationEdge::claim` returns a `ReplayClaim`), keeps each partner's served credentials — keyed by the digest of
   the signed bytes — until they expire, and refuses one presented again as `CallRefusal::Replayed` (JSON-RPC -32003,
   `federation_replays_refused` on `GET /stats`). Before, a captured credential was served as often as it was sent
-  inside its lifetime, repeating its effect; a body binding did not stop it, because the copy carries the same body. A
-  call refused before its dispatch gives its credential back, so a retry of an unserved call is served. Bounded at
+  inside its lifetime, repeating its effect; a body binding did not stop it, because the copy carries the same body. Any
+  answer spends a credential: one refused before its dispatch, presented again, is refused -32003 `AlreadyAnswered`
+  (`federation_credentials_already_answered`, not counted as a replay) and never served. Bounded at
   65 536 a partner (`with_replay_window_per_partner`); full, it refuses what it can no longer rule out as
   `ReplayUndecidable` (-32004, `federation_replays_undecidable`), never serving a replay. `FederationClient` puts a
   fresh random JSON-RPC `id` in every call's body (the seam's `nonce` stream) and mints each credential strictly later

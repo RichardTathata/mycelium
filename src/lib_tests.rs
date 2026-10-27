@@ -10936,16 +10936,18 @@ mod federation_transport {
         a0.shutdown().await;
     }
 
-    /// **A call refused before its dispatch was not served, so its credential is not spent**
-    /// (#696's review, finding 2). With the partner's one slot taken, the call is refused `-32004`
-    /// (*retry shortly*); the same credential and bytes sent again once the slot is free are served,
-    /// not called a replay; sent a third time, they are. And two clients of one domain with one
+    /// **Any answer spends a credential, and a refused one retried is not called an attack**
+    /// (#696's review, finding 2, as its confirmation round corrected it). With the partner's one
+    /// slot taken, the call is refused `-32004`; the same credential and bytes sent again once the
+    /// slot is free are **not served** — refused `-32003` `already_answered`, counted apart from
+    /// replays — so a captured copy can never be served after a refusal; a fresh credential is
+    /// served, and that one sent again is `replayed`. And two clients of one domain with one
     /// principal, making the identical call at once, are served both times (finding 3): each body
-    /// carries its own JSON-RPC `id`. Seen failing first with the claim spent at once (the retry
-    /// answered `-32003` replayed) and with the body's `id` fixed at 1 (a pair minted in one
+    /// carries its own JSON-RPC `id`. Seen failing first with the refused credential given back
+    /// (the retry was served), and with the body's `id` fixed at 1 (a pair minted in one
     /// millisecond collided).
     #[tokio::test]
-    async fn an_unserved_credential_is_served_on_retry_and_two_clients_never_collide() {
+    async fn a_refused_credential_stays_spent_and_two_clients_never_collide() {
         let alpha = DomainId::new("alpha.example").unwrap();
         let beta = DomainId::new("beta.example").unwrap();
         let (beta_sk, beta_vk) = keypair(18);
@@ -10995,11 +10997,39 @@ mod federation_transport {
         drop(busy);
 
         let v: serde_json::Value = post().await.unwrap().json().await.unwrap();
-        assert_eq!(v["result"]["artifacts"][0]["parts"][0]["text"], crate::federation_principal("beta.example", "svc/billing"), "the retry is served: {v}");
+        assert_eq!(v["error"]["code"], -32003, "{v}");
+        assert!(v["error"]["message"].as_str().unwrap().contains("already_answered"), "a refused credential stays spent: {v}");
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "never served");
+        assert_eq!((edge.replays_refused(), edge.already_answered()), ((0, 0), 1), "not counted as a replay");
+
+        // The retry a caller makes: a fresh credential for the same call — served; and then a replay.
+        let issued = fresh_issued_ms();
+        let fresh = PresentedCall::sign(
+            &FederatedCaller {
+                body_sha256: Some(FederatedCaller::digest_of(&body)),
+                origin_domain: beta.clone(),
+                principal: "svc/billing".into(),
+                export: "demo/whoami".into(),
+                issued_at_ms: issued,
+                expires_at_ms: issued + 60_000,
+            },
+            &beta_sk,
+        );
+        let send_fresh = || {
+            raw.post(&a2a)
+                .header(HEADER_FEDERATED_CALL, fresh.to_header_value())
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .body(body.clone())
+                .send()
+        };
+        let v: serde_json::Value = send_fresh().await.unwrap().json().await.unwrap();
+        assert_eq!(v["result"]["artifacts"][0]["parts"][0]["text"], crate::federation_principal("beta.example", "svc/billing"), "{v}");
         assert_eq!(calls.load(Ordering::SeqCst), 1);
-        let v: serde_json::Value = post().await.unwrap().json().await.unwrap();
-        assert_eq!(v["error"]["code"], -32003, "served once, then a replay: {v}");
-        assert_eq!(edge.replays_refused(), (1, 0));
+        let v: serde_json::Value = send_fresh().await.unwrap().json().await.unwrap();
+        assert!(v["error"]["message"].as_str().unwrap().contains("replayed"), "served once, then a replay: {v}");
+        assert_eq!((edge.replays_refused(), edge.already_answered()), ((1, 0), 1));
+        let stats: serde_json::Value = raw.get(format!("http://127.0.0.1:{http_port}/stats")).send().await.unwrap().json().await.unwrap();
+        assert_eq!(stats["federation_credentials_already_answered"], 1, "{stats}");
 
         // Two gateways' clients of one domain, one principal, the identical call at once.
         let endpoint = || vec![GatewayEndpoint { id: "gw-a0".into(), base_url: format!("http://127.0.0.1:{http_port}") }];

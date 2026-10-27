@@ -217,6 +217,9 @@ pub(super) async fn stats_handler(State(ctx): State<Arc<HttpCtx>>) -> impl IntoR
         let (replayed, undecidable) = ctx.agent_ctx.federation_edge.get().map_or((0, 0), |e| e.replays_refused());
         body["federation_replays_refused"] = json!(replayed);
         body["federation_replays_undecidable"] = json!(undecidable);
+        // A refused call presented again with the same credential: refused, never served, not a replay.
+        body["federation_credentials_already_answered"] =
+            json!(ctx.agent_ctx.federation_edge.get().map_or(0, |e| e.already_answered()));
     }
     // Adopter-surface X4: a `correlation` or `parent` carried as a header or in the caller envelope — never read.
     body["causal_fields_misplaced"] = json!(ctx.agent_ctx.misplaced_causal_counts());
