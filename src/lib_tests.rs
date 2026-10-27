@@ -10936,6 +10936,94 @@ mod federation_transport {
         a0.shutdown().await;
     }
 
+    /// **A call refused before its dispatch was not served, so its credential is not spent**
+    /// (#696's review, finding 2). With the partner's one slot taken, the call is refused `-32004`
+    /// (*retry shortly*); the same credential and bytes sent again once the slot is free are served,
+    /// not called a replay; sent a third time, they are. And two clients of one domain with one
+    /// principal, making the identical call at once, are served both times (finding 3): each body
+    /// carries its own JSON-RPC `id`. Seen failing first with the claim spent at once (the retry
+    /// answered `-32003` replayed) and with the body's `id` fixed at 1 (a pair minted in one
+    /// millisecond collided).
+    #[tokio::test]
+    async fn an_unserved_credential_is_served_on_retry_and_two_clients_never_collide() {
+        let alpha = DomainId::new("alpha.example").unwrap();
+        let beta = DomainId::new("beta.example").unwrap();
+        let (beta_sk, beta_vk) = keypair(18);
+        let edge = Arc::new(FederationEdge::new(
+            alpha.clone(),
+            ["demo/whoami"],
+            DomainPolicy { domain: alpha.clone(), revision: 1, grants: vec![(beta.clone(), "demo/whoami".into())] },
+            TrustBundle::trusting([(beta.clone(), beta_vk)]),
+            CallPolicy { require_body_binding: true, max_in_flight_per_partner: 1, ..CallPolicy::default() },
+        ));
+        let http_port = alloc_port();
+        let mut a = mesh(1, Some((http_port, Arc::clone(&edge)))).await;
+        let a0 = Arc::new(a.remove(0));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let _reg = a0.capabilities().advertise_capability(whoami(), Duration::from_secs(5));
+        whoami_provider(Arc::clone(&a0), Arc::clone(&calls));
+        let cap_key = format!("cap/{}/demo/whoami", a0.node_id());
+        poll_until(|| a0.kv().get(&cap_key).is_some(), 5_000).await;
+
+        let body = serde_json::to_vec(&task_body("demo/whoami")).unwrap();
+        let issued = fresh_issued_ms();
+        let presented = PresentedCall::sign(
+            &FederatedCaller {
+                body_sha256: Some(FederatedCaller::digest_of(&body)),
+                origin_domain: beta.clone(),
+                principal: "svc/billing".into(),
+                export: "demo/whoami".into(),
+                issued_at_ms: issued,
+                expires_at_ms: issued + 60_000,
+            },
+            &beta_sk,
+        );
+        let raw = reqwest::Client::new();
+        let a2a = format!("http://127.0.0.1:{http_port}/a2a");
+        let post = || {
+            raw.post(&a2a)
+                .header(HEADER_FEDERATED_CALL, presented.to_header_value())
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .body(body.clone())
+                .send()
+        };
+
+        let busy = edge.admit(&beta).expect("the partner's one slot");
+        let v: serde_json::Value = post().await.unwrap().json().await.unwrap();
+        assert_eq!(v["error"]["code"], -32004, "at capacity: {v}");
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        drop(busy);
+
+        let v: serde_json::Value = post().await.unwrap().json().await.unwrap();
+        assert_eq!(v["result"]["artifacts"][0]["parts"][0]["text"], crate::federation_principal("beta.example", "svc/billing"), "the retry is served: {v}");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let v: serde_json::Value = post().await.unwrap().json().await.unwrap();
+        assert_eq!(v["error"]["code"], -32003, "served once, then a replay: {v}");
+        assert_eq!(edge.replays_refused(), (1, 0));
+
+        // Two gateways' clients of one domain, one principal, the identical call at once.
+        let endpoint = || vec![GatewayEndpoint { id: "gw-a0".into(), base_url: format!("http://127.0.0.1:{http_port}") }];
+        let one = FederationClient::new(beta.clone(), "svc/billing", beta_sk.clone(), alpha.clone(), endpoint(), 4, Duration::from_secs(30));
+        let two = FederationClient::new(beta.clone(), "svc/billing", beta_sk.clone(), alpha.clone(), endpoint(), 4, Duration::from_secs(30));
+        one.connect().await.expect("catalogue");
+        two.connect().await.expect("catalogue");
+        for _ in 0..5 {
+            let (r1, r2) = tokio::join!(
+                one.call("demo/whoami", "?", Repeatability::AtMostOnce),
+                two.call("demo/whoami", "?", Repeatability::AtMostOnce),
+            );
+            // Capacity is one: at most one of a pair may be refused, and only as busy.
+            for r in [r1, r2] {
+                if let Err(e) = r {
+                    assert!(format!("{e:?}").contains("-32004") || format!("{e:?}").contains("already carrying"), "only ever busy, never a replay: {e:?}");
+                }
+            }
+        }
+        assert_eq!(edge.replays_refused(), (1, 0), "no honest call was ever called a replay");
+
+        a0.shutdown().await;
+    }
+
     /// **The release gate's first leg.** Domain B discovers domain A's catalogue and invokes an
     /// export over HTTP, with the provider told `federation:beta.example/svc/billing`; the export
     /// B was not granted is refused before any byte is sent; a forged, an ungranted and a

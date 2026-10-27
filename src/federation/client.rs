@@ -234,6 +234,28 @@ pub struct FederationClient {
     last_issued_ms: std::sync::atomic::AtomicU64,
 }
 
+/// The bytes of one `tasks/send` for `export`, **serialised once**: the digest has to be over the
+/// bytes that actually go on the wire, so the body is encoded here and those same bytes are both
+/// signed over and sent. Handing a `Value` to `.json()` would re-encode it, and the receiver would
+/// then be comparing our digest against a different serialisation of the same JSON — which is how a
+/// binding becomes a source of false refusals instead of a guarantee.
+///
+/// The JSON-RPC `id` is a fresh draw from the seam's `nonce` stream, never a constant: the body is
+/// bound into the credential, so two calls with the same principal, export and text inside one
+/// millisecond — from one client, or from two gateways of one domain each holding a client —
+/// still bind two bodies, and the partner's replay guard serves both. A fixed `id` made them one
+/// credential, the second refused as a replay (#696's review).
+pub(crate) fn request_body(export: &str, text: &str) -> Vec<u8> {
+    let body = serde_json::json!({
+        "jsonrpc": "2.0", "id": mycelium_core::sim_seam::rng_u64_from("nonce", 1), "method": "tasks/send",
+        "params": {
+            "skillId": export,
+            "message": { "role": "user", "parts": [{ "type": "text", "text": text }] },
+        },
+    });
+    serde_json::to_vec(&body).expect("a request we constructed serialises")
+}
+
 /// How long a single attempt may take before the gateway counts as silent.
 ///
 /// **This is a contract obligation, not a tuning knob.** PR 5 says a silent gateway yields
@@ -666,19 +688,7 @@ impl FederationClient {
                     Err(e) => return Err(e),
                 }
             };
-            let body = serde_json::json!({
-                "jsonrpc": "2.0", "id": 1, "method": "tasks/send",
-                "params": {
-                    "skillId": export,
-                    "message": { "role": "user", "parts": [{ "type": "text", "text": text }] },
-                },
-            });
-            // **Serialised once.** The digest has to be over the bytes that actually go on the
-            // wire, so the body is encoded here and those same bytes are both signed over and
-            // sent. Handing the `Value` to `.json()` would re-encode it, and the receiver would
-            // then be comparing our digest against a different serialisation of the same JSON —
-            // which is how a binding becomes a source of false refusals instead of a guarantee.
-            let body_bytes = serde_json::to_vec(&body).expect("a request we constructed serialises");
+            let body_bytes = request_body(export, text);
             let presented = self.present(principal, export, Some(&body_bytes));
             if !self.egress_permits(&ep.base_url) {
                 // Refused before any byte is sent — not a `DeliveryUnknown`: the partner received
@@ -786,5 +796,17 @@ mod issue_time_tests {
         assert!(minted.windows(2).all(|w| w[1].issued_at_ms > w[0].issued_at_ms), "issue times strictly increase");
         let signed: std::collections::HashSet<String> = minted.iter().map(PresentedCall::to_header_value).collect();
         assert_eq!(signed.len(), 1_000, "no two credentials are the same signed bytes");
+    }
+
+    /// **Two clients of one domain never mint one credential** (#696's review). Same origin, same
+    /// principal, same export and text: what makes their credentials differ when both mint in one
+    /// millisecond is the body each binds, so every body this client builds is a different body.
+    #[test]
+    fn every_request_body_is_a_different_body() {
+        let bodies: std::collections::HashSet<Vec<u8>> = (0..1_000).map(|_| request_body("demo/whoami", "?")).collect();
+        assert_eq!(bodies.len(), 1_000, "a body built twice for the same call is two bodies");
+        let v: serde_json::Value = serde_json::from_slice(&request_body("demo/whoami", "?")).unwrap();
+        assert_eq!((v["method"].as_str(), v["params"]["skillId"].as_str()), (Some("tasks/send"), Some("demo/whoami")));
+        assert!(v["id"].as_u64().is_some_and(|id| id >= 1), "{v}");
     }
 }

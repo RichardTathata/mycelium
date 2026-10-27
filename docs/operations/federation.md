@@ -155,14 +155,20 @@ partners with work in flight, so an empty read means idle, not unconfigured.
 
 ## A credential is one call (replays)
 
-Every gateway's edge remembers the credentials it has served and refuses one presented again: the same signed
-bytes a second time are a **replay**, refused with `Replayed` and JSON-RPC **-32003**, before any slot is taken or
-anything is dispatched, and counted as `federation_replays_refused` on `GET /stats`. There is nothing to configure.
-A body binding does not do this on its own: the copy of a captured call carries the same body, so before this guard
-anyone holding a captured credential — on the path, or a log that kept the header — could send it again inside its
-lifetime and the provider would act again. The key is the credential's signed bytes, so an *unbound* credential
-presented with a different body is a replay too. An honest client never trips it: `FederationClient` mints every
-credential with a strictly later `issued_at_ms` than its last, so two identical calls are two credentials.
+`/a2a` remembers the federated credentials it has served and refuses one presented again: the same signed bytes a
+second time are a **replay**, refused with `Replayed` and JSON-RPC **-32003**, before any slot is taken or anything is
+dispatched, and counted as `federation_replays_refused` on `GET /stats`. There is nothing to configure. A body
+binding does not do this on its own: the copy of a captured call carries the same body, so before this guard anyone
+holding a captured credential — on the path, or a log that kept the header — could send it again inside its lifetime
+and the provider would act again. The key is the credential's signed bytes, so an *unbound* credential presented with a
+different body is a replay too. A call refused **before it was dispatched** — the partner at its slot cap (-32004), a
+task id another caller owns, a skill that does not resolve, the evaluator's refusal — was not served, so its credential
+is given back and the same credential sent again is served. An honest client never trips it: `FederationClient` puts a
+fresh random JSON-RPC `id` in every call's body, which the credential binds, so two identical calls — from one client
+or from two gateways of one domain — are two credentials.
+
+The guard is `/a2a`'s, through `FederationEdge::authorize_and_claim`. `FederationEdge::authorize` on its own is
+**replay-blind**: a door you build on it must claim (`FederationEdge::claim`) or it serves replays.
 
 What it does not do, and the window it leaves:
 
@@ -173,13 +179,15 @@ What it does not do, and the window it leaves:
    the window).
 3. **Kept until the credential expires**, plus the 30 s skew tolerance, by the gateway's clock; a wall clock stepped
    back further than the skew tolerance re-opens what it forgot.
-4. **Bounded**, 65 536 credentials a partner by default (`FederationEdge::with_replay_window_per_partner`). Full, the
-   window forgets the credential expiring first and refuses every credential expiring no later than it as
-   `ReplayUndecidable` (JSON-RPC **-32004**, `federation_replays_undecidable`): fail closed, never a replay served. A
-   fresh credential is served, so a partner's client retries through it; a rising count means the partner calls faster
-   than the window holds, and the fix is a larger window or a shorter lifetime.
-5. **Two clients of one domain** with the same principal, minting the identical call in the same millisecond, mint the
-   same credential, and the second is refused as a replay. Give each client its own principal.
+4. **Bounded**, 65 536 credentials a partner by default (`FederationEdge::with_replay_window_per_partner`) — about 198
+   calls a second sustained at the default 330 s an entry is kept. Full, the window forgets the credential expiring
+   first and refuses every credential expiring no later than it as `ReplayUndecidable` (JSON-RPC **-32004**,
+   `federation_replays_undecidable`): fail closed, never a replay served. A fresh credential is served, so the partner's
+   caller resolves it by calling again (`FederationClient` mints a fresh credential for each call; it does not retry
+   by itself). The window is the partner's, not a principal's: one principal calling fast enough to fill it raises the
+   floor for all of that partner's principals, so another's credential that expires sooner is refused as undecidable
+   until the floor passes. A rising count means the partner calls faster than the window holds; the fix is a larger
+   window or a shorter lifetime.
 
 The catalogue `GET` is not guarded: it changes nothing, and its reply is signed for the asker.
 

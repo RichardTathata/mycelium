@@ -2143,10 +2143,15 @@ A gateway's `/a2a` now serves each federated credential **once**: the same signe
 `-32003` (`Replayed`), and while a partner's window is full a credential expiring no later than the oldest one it had
 to forget is refused `-32004` (`ReplayUndecidable`). Before, the edge kept no record and served a captured credential
 as often as it was sent inside its lifetime ([federation § A credential is one call](../operations/federation.md#a-credential-is-one-call-replays)).
-`FederationClient` now mints each credential with a strictly later `issued_at_ms` than its last.
+`FederationClient` now mints each credential with a strictly later `issued_at_ms` than its last, and puts a random
+JSON-RPC `id` in each call's body (it was `1`). A call `/a2a` refuses before its dispatch gives its credential back.
+`FederationEdge::authorize_and_claim` is new; `FederationEdge::claim` returns a `ReplayClaim` to `spend` at the
+dispatch (dropped unspent, it gives the credential back); `FederationEdge::authorize` is unchanged and replay-blind, so
+a door an embedder builds on it alone must claim too.
 
-**Who notices.** A client that re-sends a credential it already sent — a retry that reuses the header rather than
-minting a new one — is refused the second time; this release's `FederationClient` mints per attempt and is unaffected.
+**Who notices.** A client that re-sends a credential already served — a retry that reuses the header rather than
+minting a new one — is refused the second time (one refused before its dispatch is served on the retry); this
+release's `FederationClient` mints per attempt and is unaffected.
 A partner running a client older than this release that makes the identical call (same principal, export and body)
 twice inside one millisecond mints one credential twice, and the second is refused as a replay. An exhaustive `match`
 on `CallRefusal` already needed a `_` arm (it is `#[non_exhaustive]`), which must fail closed. `GET /stats` gained
