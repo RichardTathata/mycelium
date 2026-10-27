@@ -9,16 +9,6 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Security
-
-- **Every private TLS key is written owner-only (0600).** The fleet CA's key, a node key issued off-node
-  (`mycelium tls issue`, `mycelium::issue_node_cert`) and a node's own generated identity key were written with the
-  process umask — under the usual 022, readable by every local user (0644), so anyone on the host could read the key
-  that admits nodes to the fleet or impersonates one. They are now created 0600 on unix, and a key file an older
-  release left 0644 is narrowed when it is rewritten. Certificates are unchanged. **Check:** `stat` each `ca-key.pem`,
-  `*.key.pem` and `<node>.key` under your TLS directories and `chmod 600` any older one — a file this release does not
-  rewrite keeps the mode it has. Found by #695's review; `every_private_key_written_is_owner_only`.
-
 ### Changed
 
 - **`mycelium tls issue` refuses to replace a node key it issued before** unless `--force`, naming what replacing it
@@ -171,6 +161,20 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   checks the signature, the body binding, the window and the grant, and keeps no record of credentials it has served;
   the two-domain scaffold showed it (the same presented call answered twice). Stated in the federation runbook and the
   scaffold's README; the replay guard is its own PR.
+
+## [2.38.2] — 2026-10-27
+
+A security PATCH cut from the v2.38.1 tag. Wire **v12** unchanged (`PREV = 11`); no API change.
+
+### Security
+
+- **Every private TLS key is written owner-only (0600).** The fleet CA's key, a node key issued off-node
+  (`mycelium tls issue`, `mycelium::issue_node_cert`) and a node's own generated identity key were written with the
+  process umask — under the usual 022, readable by every local user (0644), so anyone on the host could read the key
+  that admits nodes to the fleet or impersonates one. They are now created 0600 on unix, and a key file an older
+  release left 0644 is narrowed when it is rewritten. Certificates are unchanged. **Check:** `stat` each `ca-key.pem`,
+  `*.key.pem` and `<node>.key` under your TLS directories and `chmod 600` any older one — a file this release does not
+  rewrite keeps the mode it has. Found by #695's review; `every_private_key_written_is_owner_only`.
 
 ## [2.38.1] — 2026-10-26
 
