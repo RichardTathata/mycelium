@@ -18,8 +18,9 @@ on stderr.
 - **Use it when** you are about to start a node from a configuration and want the refusal, if any, before the node
   runs, with the profile's unmet guarantees named in `start()`'s words; or when you want to see which of a field's
   values won, and where it came from.
-- **Not when** the node attaches an evaluator, a journal or an audit sink in code: `doctor` sees what the `mycelium`
-  binary sees, which attaches none, so an embedder reads its own `guarantee_report()` after attaching. Unreadable
+- **Not when** the node attaches an evaluator, a journal or an audit sink in code: `mycelium doctor` sees what the
+  `mycelium` binary sees, which attaches none. An embedder runs `run_attached` with its own attaching function instead,
+  or reads its own `guarantee_report()` after attaching. Unreadable
   persisted state is found only by opening the directory, which `doctor` does not do; that refusal stays with
   `start()`.
 
@@ -29,6 +30,10 @@ This feature is turned on in code.
 
 - [`run`](../../src/doctor.rs) — loads the three layers (defaults, the file, the environment), validates, builds the
   node without starting it, and runs the same functions `start()` runs.
+- [`run_attached`](../../src/doctor.rs) — the same, with the embedder's attaching function applied to the node before
+  `preflight()`, so what a program attaches in code is what the report reads and the refusal is that program's
+  `start()`'s; the two-domain scaffold's `doctor` is this ([`templates/two-domains`](../../templates/two-domains/README.md)).
+  The node is still never started, but the attaching function runs as written: a journal it opens is opened.
 - [`preflight`](../../src/agent/lifecycle.rs) and [`profile_check`](../../src/agent/lifecycle.rs) — `start()`'s own
   refusal chain and profile check, extracted so `doctor` calls them rather than copies them.
 - [`effective_fields`](../../src/doctor.rs) — the per-field source, by comparing the three layers.
@@ -44,7 +49,8 @@ has no row for this feature. The end-to-end runs are tests in [`src/doctor.rs`](
 `a_table_this_build_cannot_enforce_is_a_refusal_naming_the_feature` (a token table in a build without `compliance`),
 `a_missing_persistence_directory_is_reported_and_not_created`, `the_effective_configuration_names_each_fields_source`,
 `a_secret_is_shown_as_set_and_never_its_value`, `a_credential_bindings_source_names_are_redacted` and
-`every_top_level_field_is_in_the_configuration_reference_table`. The command itself is documented in
+`every_top_level_field_is_in_the_configuration_reference_table`, and
+`the_doctor_over_an_attached_node_reads_its_attachments_and_starts_refusal` (the doctor over a program's attachments). The command itself is documented in
 [diagnostics § Before you start](../operations/diagnostics.md#before-you-start-mycelium-doctor).
 
 ## What it guarantees, and what it does not
@@ -52,7 +58,7 @@ has no row for this feature. The end-to-end runs are tests in [`src/doctor.rs`](
 - `doctor` adds no guarantee of its own; it reports the ones in the [guarantee catalogue](../reference/guarantee-catalogue.md)
   as the node would resolve them, with `started` reading false.
 - It says what this build and this configuration would do; it cannot say `enforced` for a guarantee the catalogue
-  marks `not_verifiable_here`, and it cannot see an attachment made in code. The persistence directory's
+  marks `not_verifiable_here`, and `run` cannot see an attachment made in code (`run_attached` can). The persistence directory's
   `read-only` is its mode bits, not an access check.
 - **Changed with it:** `GossipConfig::validate()` no longer creates `persistence.base_path` as its early check; it
   reads the nearest existing ancestor instead, and `start()` creates the node's directory as before

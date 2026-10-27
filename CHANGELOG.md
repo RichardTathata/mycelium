@@ -9,8 +9,21 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Security
+
+- **Every private TLS key is written owner-only (0600).** The fleet CA's key, a node key issued off-node
+  (`mycelium tls issue`, `mycelium::issue_node_cert`) and a node's own generated identity key were written with the
+  process umask — under the usual 022, readable by every local user (0644), so anyone on the host could read the key
+  that admits nodes to the fleet or impersonates one. They are now created 0600 on unix, and a key file an older
+  release left 0644 is narrowed when it is rewritten. Certificates are unchanged. **Check:** `stat` each `ca-key.pem`,
+  `*.key.pem` and `<node>.key` under your TLS directories and `chmod 600` any older one — a file this release does not
+  rewrite keeps the mode it has. Found by #695's review; `every_private_key_written_is_owner_only`.
+
 ### Changed
 
+- **`mycelium tls issue` refuses to replace a node key it issued before** unless `--force`, naming what replacing it
+  means — the node restarts on the new key, and every partner pinning its gateway needs the new pin
+  (`deprecations.md` §69).
 - **Tutorial 7 and the `one-hour` job, after a walk-through by a newcomer** (an agent that had not seen Mycelium, reading
   only the page; 121 s on macOS against v2.38.1, every step's checks passing — though the documented macOS checksum
   fallback failed as written). One `PLATFORM` variable instead of three tarball
@@ -59,6 +72,27 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and so was the aggregating process D16 forbids (`deprecations.md` §67). **Not built:** the community skill cluster
   (`skillrunner`) has no setting for the origin, so the page reads it `blocked`; the console has no authentication of
   its own.
+- **The two-domain scaffold** (`docs/plans/adopter-surface.md` Y8): `mycelium init <dir> --template two-domains` writes
+  two fleets of two nodes — a food bank exporting `pantry/stock` and `pantry/reserve`, a community kitchen exporting
+  `menu/today` — each its own domain under `secure-multi-domain`: each domain's CA minted and every certificate issued
+  where no node is pointed, named tokens from the environment, egress lists naming the partner's gateway (or a reserved
+  name that admits nothing), an evaluator, evidence journal and execution authority on every node, and on each gateway
+  an edge that binds bodies and carries at most two of the partner's calls at once and a client for the other, pinned
+  to that gateway's key. A call made at one gateway by its named local caller reaches the other's provider as
+  `federation:kitchen.example/token:kitchen/planner` (or `…foodbank.example/token:foodbank/steward`); each gateway's own
+  `GET /gateway/guarantees` reads all seven `fed.*` node facts `enforced`, `fed.pinned`, `fed.caller_named` and
+  `fed.partner_egress` among them (carried from Y7, #691); a wrong pin, a body rewritten after it was signed and a
+  third concurrent call are each refused; every node's doctor reads `would start`. CI's `Scaffold` job runs every line, building the scaffold against the checkout. One domain is the
+  scaffold with the second fleet deleted, and its README says how (D26).
+- **`mycelium tls ca --out <dir>`** mints a fleet CA on the issuer's host (`mycelium::mint_ca`) — until now only a node
+  started over an empty directory could, so the off-node path had no first step of its own. It refuses a directory
+  holding either file, and publishes the pair by hard link, so two concurrent mints publish one CA and the other is
+  refused. **`mycelium tls pin <cert.pem>`** prints a certificate's SPKI SHA-256, the value a federation partner pins;
+  it refuses a CA certificate (whose pin admits no gateway) and a file that carries a private key.
+- **`mycelium::doctor::run_attached(path, attach)`**: the doctor over a node an embedder builds — the same load,
+  `preflight()`, report and profile check as `run`, with the program's own code attachments (an evaluator, a journal, a
+  federation edge or clients) applied first, so the report and the refusal are that program's `start()`'s. `Doctor`
+  gained `attached` (an exhaustive struct literal breaks; nothing outside the crate builds one).
 
 - **A record a span names, read by its hash on the node that wrote it** (`docs/plans/adopter-surface.md` Y4's last
   promise; `docs/operations/audit.md` §3a): `GET /gateway/records/decision/{sha256}` and
@@ -133,6 +167,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   is not built. Feature page `docs/features/context-selection.md`. **Not built:** the wiki side (pages carry no issuer or
   verdict); a read mandate's epoch and revocation standing; re-verifying a selected record against the reader's current
   key view; scoping `KnowledgeStore`'s own methods (no route or SDK verb reads knowledge records).
+
+### Found
+
+- **A federated credential presented again, with the same body and inside its window, is served again.** The edge
+  checks the signature, the body binding, the window and the grant, and keeps no record of credentials it has served;
+  the two-domain scaffold showed it (the same presented call answered twice). Stated in the federation runbook and the
+  scaffold's README; the replay guard is its own PR.
 
 ## [2.38.1] — 2026-10-26
 

@@ -165,8 +165,10 @@ directory and the list equal), pinned to the binary's release tag, into a new or
 (Rust: two nodes sharing one `auto_cert_dir`, so one CA and per-node certificates; a member's direct `mcp.invoke` to
 the provider under `with_provider_enforcement`, an `ActionEvaluator` of twenty lines, an `EvidenceJournal`, a
 `DecisionSink` written to `data/decisions.jsonl`; a prompt skill on the member node, since an `llm.invoke` under
-provider enforcement must name a resource) and `governed-call-py` (the published node with named tokens; `declare_from`,
-`set`, a 403 `insufficient_scope`). CI's `Scaffold` job builds the Rust scaffold against the checkout by rewriting its
+provider enforcement must name a resource), `governed-call-py` (the published node with named tokens; `declare_from`,
+`set`, a 403 `insufficient_scope`) and `two-domains` (Y8: four processes of the scaffold's own program, two domains
+under `secure-multi-domain`, `fleet.sh` running `mycelium tls ca`/`issue`/`pin`; its `doctor` is
+`doctor::run_attached` over the program's attachments, because `mycelium doctor <file>` cannot see them). CI's `Scaffold` job builds the Rust scaffold against the checkout by rewriting its
 dependency to a path (a `[patch]` of a git source still fetches the pinned tag, which a version-bump commit lacks —
 #666's review). Found: `ReferenceEvaluator` declares no
 security-relevant arguments, so a `requires_values` rule cannot see its value through the seam. Entry page

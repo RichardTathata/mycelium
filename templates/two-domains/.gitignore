@@ -1,0 +1,6 @@
+/target
+/data
+# Everything below is a secret or a domain's private material, made by `./fleet.sh setup`; never commit it.
+/ca
+/certs
+/secrets
