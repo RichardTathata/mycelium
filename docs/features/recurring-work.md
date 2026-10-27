@@ -31,14 +31,16 @@ application's.
   `operation_id`, the key an effect it causes carries.
 - [`decide`](../../src/schedule.rs) — one tick's decision, pure.
 - `two_holders_under_a_partition_give_one_effect_at_the_destination`, in
-  [`src/schedule_tests.rs`](../../src/schedule_tests.rs): two nodes that cannot reach each other each hold and run
-  the slot through their own reconciler, the destination applies it once, and healed, one holds.
+  [`src/schedule_tests.rs`](../../src/schedule_tests.rs): two connected nodes elect one holder; cut apart, the other
+  holds once the lease leaves its view, each runs the slot through its own reconciler and the destination applies
+  it once; healed, one holds.
 
 ## See it work
 
 No runnable example exists: the [example index's capability matrix](../../examples/README.md#the-capability-matrix)
 has no row for this feature. The tests, in [`src/schedule_tests.rs`](../../src/schedule_tests.rs):
-`two_holders_under_a_partition_give_one_effect_at_the_destination`,
+`two_holders_under_a_partition_give_one_effect_at_the_destination` (a real link cut at the frame layer: the other
+side holds once the holder's lease has left its view, never before),
 `a_missed_run_is_a_decision_in_the_trace_with_its_reason` (a holder's clock stepped five periods through the seam;
 the gap decided as run once or skipped, the run naming the decision its parent) and
 `a_host_outside_the_holder_band_never_runs`; `wire-check`'s refusal of a schedule no unit can hold is
@@ -48,12 +50,20 @@ the gap decided as run once or skipped, the run naming the decision its parent) 
 
 - The rules are [`sched.run` and `sched.missed`](../reference/rule-catalogue.md): the rendezvous winner among the
   live candidates runs the slot due; a gap is skipped, run late (at most 64, each under its own key) or run once.
-- One effect per slot **only at a destination that deduplicates** on the run's key: two holders send it twice.
-- A schedule with no recorded run starts at the slot due; nothing before the first run is counted missed. A gap
-  is known from `sched/{id}/last` as this node has it, so a partition's two sides may each decide it.
+- One effect per slot **only at a destination that deduplicates** on the run's key, with content that depends on
+  the key alone: two holders send it twice.
+- A loop warms up for three lease refreshes before it may hold; a run gets one period, and work that overruns it is
+  abandoned, traced (`work_overran`) and the holding withdrawn. A loop whose thread is blocked by synchronous work
+  keeps its advertisements re-asserted by the node's persist task: such work belongs on a blocking thread.
+- The fleet's last run is the highest `sched/{id}/last/{node}` under the schedule's period and phase, never lowered;
+  a run recorded ahead of a holder's clock (a fast clock elsewhere) is said once (`last_ahead`) and nothing runs
+  until the clock reaches it. A schedule with no recorded run starts at the slot due. Holders whose clocks disagree
+  across a slot boundary compute two slots — two keys.
+- One id is one schedule: candidates that declare another period or phase hold nowhere (`declaration_mismatch`).
 - Not built, stated in the plan's Y2 row: a cron language beyond a period and a phase, a fleet-wide calendar, an
-  SDK or gateway route that runs a schedule (`POST /gateway/units/declare` refuses one, 422), and a stem that runs
-  one (it refuses one by name).
+  SDK or gateway route that runs a schedule (`POST /gateway/units/declare` refuses one, 422), a stem that runs
+  one (it refuses one by name), a schedule class in `mycelium test --faults`, and a schedule run recorded and
+  replayed under the kernel (the loop's clock, tick and deadline go through the seams; no test records one).
 
 ## Go deeper
 

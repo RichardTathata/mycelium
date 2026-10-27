@@ -1680,9 +1680,9 @@
       "trigger": "a holder's tick that finds slots after the last recorded run and before the one due",
       "inputs": [
         {
-          "source": "the last slot the fleet ran (`sched/{id}/last`)",
+          "source": "the last slot the fleet ran (the highest `sched/{id}/last/{node}` under this period and phase)",
           "scope": "the fleet as this node sees it",
-          "freshness": "as gossiped, last-writer-wins"
+          "freshness": "as gossiped; never lowered; read only after the loop's warm-up"
         },
         {
           "source": "the wall clock through the seam, and the slot it falls in",
@@ -1727,7 +1727,8 @@
       "tests": [
         "a_missed_run_is_decided_by_the_policy_with_its_reason",
         "a_missed_run_is_a_decision_in_the_trace_with_its_reason",
-        "run_late_catches_up_at_most_the_cap_and_counts_the_rest"
+        "run_late_catches_up_at_most_the_cap_and_counts_the_rest",
+        "a_failed_late_run_is_traced_and_the_runs_after_it_go_on"
       ],
       "trace": "instrumented",
       "summary": "A gap is decided, not replayed: skipped, run late each under its own key (at most 64), or run once for the gap under its newest slot's key; a schedule with no recorded run starts at the slot due."
@@ -1742,14 +1743,14 @@
       "trigger": "a schedule's tick, through the timer seam (`sched/{id}`)",
       "inputs": [
         {
-          "source": "the schedule's candidates (`cap/*/schedule/{id}`) and this node's own capabilities against the `holders` filter",
+          "source": "the schedule's candidates (`cap/*/schedule/{id}`, each carrying its period and phase) and this node's own capabilities against the `holders` filter",
           "scope": "the fleet as this node sees it",
-          "freshness": "as gossiped; an advertisement times out at three of its refreshes"
+          "freshness": "as gossiped; an advertisement times out at three of its refreshes; read only after the loop's warm-up"
         },
         {
-          "source": "the last slot the fleet ran (`sched/{id}/last`)",
+          "source": "the last slot the fleet ran (the highest `sched/{id}/last/{node}` under this period and phase)",
           "scope": "the fleet as this node sees it",
-          "freshness": "as gossiped, last-writer-wins"
+          "freshness": "as gossiped; never lowered"
         },
         {
           "source": "the wall clock through the seam, and the slot it falls in",
@@ -1772,18 +1773,27 @@
             "not_holder",
             "not_eligible",
             "not_due",
-            "already_ran"
+            "already_ran",
+            "last_ahead"
           ]
         },
         {
           "kind": "deferral",
           "reasons": [
-            "work_failed"
+            "warming_up",
+            "work_failed",
+            "work_overran"
+          ]
+        },
+        {
+          "kind": "refusal",
+          "reasons": [
+            "declaration_mismatch"
           ]
         }
       ],
       "effects": [
-        "the application's work under the idempotency key `sched/{id}/{slot}`; `sched/{id}/last`; the holder's advertisement `cap/{node}/schedule/{id}.holder`, which evaporates when it stops (the lease)"
+        "the application's work under the idempotency key `sched/{id}/{slot}`, given one period; this node's `sched/{id}/last/{node}`; the holder's advertisement `cap/{node}/schedule/{id}.holder`, which evaporates when it stops (the lease), withdrawn when work overruns"
       ],
       "guards": [
         "other"
@@ -1800,12 +1810,15 @@
       "tests": [
         "a_tick_runs_the_slot_due_only_on_the_holder_and_only_once",
         "two_holders_under_a_partition_give_one_effect_at_the_destination",
-        "a_host_outside_the_holder_band_never_runs"
+        "a_host_outside_the_holder_band_never_runs",
+        "work_that_overruns_its_period_is_abandoned_and_traced",
+        "one_id_declared_two_ways_holds_nowhere_and_one_node_runs_one_loop_per_id",
+        "a_run_recorded_ahead_of_this_clock_is_said_and_runs_nothing_until_reached"
       ],
       "trace": {
-        "partial": "every run and every work failure; a change to not_holder or not_eligible, once; a tick that changes nothing records nothing"
+        "partial": "every run, failure and overrun; a change to not_holder, not_eligible, warming_up, last_ahead or declaration_mismatch, once; a tick that changes nothing records nothing"
       },
-      "summary": "The rendezvous winner among the live candidates holds and runs the slot due, under the key `sched/{id}/{slot}`; a partition has a holder on each side, and only a destination that deduplicates makes that one effect — the voluntary singleton, not a lock."
+      "summary": "After a warm-up, the rendezvous winner among the live candidates that declare the same period and phase holds and runs the slot due, under the key `sched/{id}/{slot}`, within one period; a partition has a holder on each side, and only a destination that deduplicates makes that one effect — the voluntary singleton, not a lock."
     },
     {
       "id": "signal.admission",

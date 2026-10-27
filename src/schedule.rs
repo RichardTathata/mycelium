@@ -2,30 +2,51 @@
 //! application that embeds the node.
 //!
 //! This is the voluntary singleton, not a scheduler. Every node that runs a schedule and matches its
-//! `holders` filter advertises itself a **candidate** (`cap/{node}/schedule/{id}`); the candidates order
-//! themselves by rendezvous on the ring `sched/{id}` ([`crate::election`]), and the first holds. Holding is
-//! advertised as `cap/{node}/schedule/{id}.holder` and lasts only while the holder re-asserts it: a holder that
-//! stops is timed out by its readers like any advertisement — **the lease is the evaporation**. Nothing is
-//! assigned and nothing is locked, so a partition has **two holders**, one per side; that is why every run
-//! carries an idempotency key, `sched/{id}/{slot}` ([`ScheduledRun::operation_id`]), and why its effect goes
-//! through X5's contract (`effects::external`): two holders, one effect at a destination that deduplicates.
+//! `holders` filter advertises itself a **candidate** (`cap/{node}/schedule/{id}`, carrying the period and phase it
+//! declares); the candidates order themselves by rendezvous on the ring `sched/{id}` ([`crate::election`]), and the
+//! first holds. Holding is advertised as `cap/{node}/schedule/{id}.holder` and lasts only while it is re-asserted:
+//! a holder that stops is timed out by its readers like any advertisement — **the lease is the evaporation**. The
+//! advertisements are re-asserted by the node's persist task, not by the loop; what ties them to the loop is that a
+//! run is given **one period** to finish (a deadline through the seam), and work that overruns it is abandoned, the
+//! overrun traced (`work_overran`) and the holding and candidacy withdrawn until the loop's next tick. (A loop whose
+//! executor thread is blocked by synchronous work stops ticking while its advertisements are still re-asserted: work
+//! that blocks belongs on a blocking thread.) Nothing is assigned and nothing is locked, so a partition has **two
+//! holders**, one per side; that is why every run carries an idempotency key, `sched/{id}/{slot}`
+//! ([`ScheduledRun::operation_id`]), and why its effect goes through X5's contract (`effects::external`): two
+//! holders, one effect at a destination that deduplicates — when the content is the run's alone.
+//!
+//! **One id is one schedule fleet-wide.** A candidate whose advertisement declares another period or phase is a
+//! conflict: no node holds while it is in view (`declaration_mismatch`, traced), and `wire-check` refuses two
+//! declarations of one id that differ.
 //!
 //! **A slot** is a period counted from the Unix epoch plus the phase: the slot due at `now` is
 //! `(now − phase) / period`. The node's wall clock is read through the replay seam
-//! ([`sim_seam::wall_now_ms`](mycelium_core::sim_seam::wall_now_ms)) and the loop ticks through the timer seam,
-//! so a recording replays the ticks. The last slot run is written to `sched/{id}/last` (last-writer-wins, kept
-//! across a handover), so a new holder knows what its predecessor ran.
+//! ([`sim_seam::wall_now_ms`](mycelium_core::sim_seam::wall_now_ms)) and the loop ticks through the timer seam.
+//! Each node that runs a slot writes `sched/{id}/last/{node}`, never lowering it; the fleet's last run is the
+//! highest entry under the same period and phase, so a holder that ran an older slot later cannot pull it back and
+//! a restarted node's stale entry does not count against the fleet's. **A clock ahead** runs its slots early and
+//! records them: a holder whose clock is behind that record runs nothing until it reaches it, and says so once
+//! (`last_ahead`) — bounded only by how far the fleet's clocks disagree.
+//!
+//! **A loop warms up** before it may hold: three lease refreshes ([`warm_up_ms`]) after it starts, the time its
+//! peers' advertisements and `last` entries take to reach it, so a node that has just started never holds — nor
+//! decides a gap — on its own entries alone.
 //!
 //! **A missed run is a decision.** Slots after the last recorded run and before the one due now — a holder that
 //! was down, a handover longer than a period, a paused process — are decided by the schedule's
 //! [`MissedRunPolicy`]: skipped, run late each under its own key, or run once for the gap. The decision is
 //! catalogued (`sched.missed`) and recorded in the node's decision trace with its reason and its inputs; each
 //! run it causes names it as its parent. A schedule with no recorded run starts at the slot due now: nothing
-//! before the first run is counted missed.
+//! before the first run is counted missed. A `run_once` run is keyed by the gap's newest slot — it *is* that slot's
+//! run, so a holder that ran the slot on time and one that runs it for a gap make one effect, provided the content
+//! depends on the key alone (content that names the gap would be a `Conflict` at the destination). A failed late or
+//! gap run is traced and not retried; the runs after it go on. A failed on-time run is retried at the next tick.
 //!
 //! **Not built, stated:** no cron-expression language beyond a period and a phase; no fleet-wide calendar; no
 //! exclusivity — a partition runs a slot on both sides, and only the destination's deduplication makes that one
-//! effect; work that fails is retried at the next tick under the same key, without a backoff of its own.
+//! effect; no backoff of its own for failing work; no recorded-and-replayed schedule run under the kernel (the loop's
+//! clock, tick and deadline go through the seams, but no test records one and replays it); `mycelium test --faults`
+//! has no schedule class.
 
 use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -51,11 +72,6 @@ pub const HOLDER_SUFFIX: &str = ".holder";
 /// The most missed slots `run_late` runs in one tick; older ones are skipped and counted.
 pub const MAX_CATCH_UP: u64 = 64;
 
-/// The KV key holding the last slot the fleet ran for `id` — `sched/{id}/last`, the slot as decimal ASCII.
-pub fn last_key(id: &str) -> String {
-    format!("sched/{id}/last")
-}
-
 /// Why `id` cannot name a schedule, or `None`. One key segment — it appears in `sched/{id}/last`, the
 /// candidate's capability name and every run's idempotency key — and not ending in `.holder`, which would make
 /// it another schedule's holder advertisement.
@@ -65,6 +81,9 @@ pub fn id_problem(id: &str) -> Option<&'static str> {
     }
     if !id.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')) {
         return Some("is not one key segment ([A-Za-z0-9._-]+)");
+    }
+    if id.starts_with('.') || id.contains("..") {
+        return Some("starts with `.` or holds `..`, which reads as a path segment");
     }
     if id.ends_with(HOLDER_SUFFIX) {
         return Some("ends in `.holder`, the suffix of a schedule's holder advertisement");
@@ -187,7 +206,7 @@ pub struct Tick {
     pub slot: Option<u64>,
     /// The `sched.run` outcome for the tick.
     pub outcome: OutcomeKind,
-    /// Its reason: `ran`, `not_due`, `not_holder` or `already_ran`.
+    /// Its reason: `ran`, `not_due`, `not_holder`, `already_ran` or `last_ahead`.
     pub reason: &'static str,
     /// The missed-run decision, when there was a gap.
     pub missed: Option<Missed>,
@@ -202,8 +221,13 @@ pub fn decide(s: &Schedule, now_ms: u64, holding: bool, last_run: Option<u64>) -
     if !holding {
         return none(Some(slot), OutcomeKind::NoAction, "not_holder");
     }
-    if last_run.is_some_and(|l| l >= slot) {
+    if last_run == Some(slot) {
         return none(Some(slot), OutcomeKind::NoAction, "already_ran");
+    }
+    if last_run.is_some_and(|l| l > slot) {
+        // A run recorded for a slot this node's clock has not reached: a clock ahead somewhere in the fleet (or here,
+        // before a step back). Nothing runs until this clock reaches it — said, never silent.
+        return none(Some(slot), OutcomeKind::NoAction, "last_ahead");
     }
     let run = |slot, kind| ScheduledRun { schedule: Arc::clone(&s.id), slot, kind, slot_start_ms: s.slot_start_ms(slot) };
     let mut runs = Vec::new();
@@ -249,7 +273,7 @@ impl ScheduleHandle {
         self.runs.load(Ordering::Relaxed)
     }
 
-    /// Runs whose work failed (each retried at the next tick under the same key).
+    /// Runs whose work failed or overran its deadline.
     pub fn failures(&self) -> u64 {
         self.failures.load(Ordering::Relaxed)
     }
@@ -272,32 +296,80 @@ fn lease_refresh(period_ms: u64) -> Duration {
     Duration::from_millis(check_interval_ms(period_ms).max(1_000))
 }
 
+/// How long a loop waits after it starts before it may hold: three lease refreshes, the time a peer's
+/// advertisement — and its `last` — takes to reach this node or time out of its view. A node that has just joined
+/// or restarted decides on a view that has had the time to converge, never on its own entries alone.
+pub fn warm_up_ms(period_ms: u64) -> u64 {
+    3 * lease_refresh(period_ms).as_millis() as u64
+}
+
+/// The prefix of a schedule's `last` entries — one per node that has held it, `sched/{id}/last/{node}`.
+pub fn last_prefix(id: &str) -> String {
+    format!("sched/{id}/last/")
+}
+
+/// The fleet's last run of `s`, as this node has it: the **highest** slot among the entries written under the same
+/// period and phase — monotonic, whichever holder wrote last, so a node that ran an older slot later cannot lower it.
+fn fleet_last(kv: &crate::store::KvState, s: &Schedule) -> Option<u64> {
+    crate::store::scan_kv_prefix(kv, &last_prefix(&s.id))
+        .into_iter()
+        .filter_map(|(_, v)| {
+            let text = std::str::from_utf8(&v).ok()?.to_string();
+            let mut parts = text.split_whitespace();
+            let slot = parts.next()?.parse::<u64>().ok()?;
+            let period = parts.next()?.parse::<u64>().ok()?;
+            let phase = parts.next()?.parse::<u64>().ok()?;
+            (period == s.period_ms && phase == s.phase_ms).then_some(slot)
+        })
+        .max()
+}
+
+/// A candidate's declaration as its advertisement carries it: `(period_ms, phase_ms)`.
+fn declared(cap: &Capability) -> Option<(u64, u64)> {
+    let int = |k: &str| match cap.attributes.get(k) {
+        Some(crate::capability::CapValue::Integer(v)) if *v >= 0 => Some(*v as u64),
+        _ => None,
+    };
+    Some((int("period_ms")?, int("phase_ms")?))
+}
+
 impl crate::GossipAgent {
     /// Run a `[[schedule]]` on this node: take part in electing its holder, and while holding, run `work` for
     /// each slot under the missed-run policy — `mycelium::schedule` has the whole contract. `work` returns
-    /// `Err` to have the slot retried at the next tick; an effect it causes should carry
-    /// [`ScheduledRun::operation_id`] as its idempotency key. Decisions go to this agent's decision trace
+    /// `Err` to have an on-time slot retried at the next tick, and is given one period to finish: past it, the run
+    /// is abandoned, the overrun traced, and this node withdraws its holding until its next tick. An effect `work`
+    /// causes should carry [`ScheduledRun::operation_id`] as its idempotency key, with content that depends on the
+    /// run alone. Decisions go to this agent's decision trace
     /// ([`with_decision_trace`](Self::with_decision_trace)) when one is attached.
     ///
     /// # Errors
-    /// The declaration refused by the unit-file loader's rules, by name.
+    /// The declaration refused by the unit-file loader's rules, by name; a second loop for an id this node already
+    /// runs.
     pub fn run_schedule<F, Fut>(&self, decl: &ScheduleDecl, work: F) -> Result<ScheduleHandle, GossipError>
     where
         F: Fn(ScheduledRun) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<(), String>> + Send + 'static,
     {
         let schedule = Schedule::from_decl(decl)?;
+        if self.schedules_running.pin().insert(Arc::clone(&schedule.id), ()).is_some() {
+            return Err(GossipError::InvalidField { field: "schedule.id", reason: format!(
+                "{:?}: this node already runs a schedule with this id — one loop per id per node", decl.id
+            ) });
+        }
         let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
         let runs = Arc::new(AtomicU64::new(0));
         let failures = Arc::new(AtomicU64::new(0));
         let ctx = Arc::clone(&self.task_ctx);
         let (caps, kv, me) = (self.capabilities(), self.kv(), self.node_id().clone());
+        let running = Arc::clone(&self.schedules_running);
         let mut shutdown_rx = self.shutdown_tx.subscribe();
         let (r, f) = (Arc::clone(&runs), Arc::clone(&failures));
         self.spawn_task(async move {
-            let mut runner = Runner { schedule, caps, kv, me, ctx, candidacy: None, holding: None, was: None, runs: r, failures: f };
+            let id = Arc::clone(&schedule.id);
+            let started_ns = mycelium_core::sim_seam::mono_now_ns();
+            let mut runner = Runner { schedule, caps, kv, me, ctx, started_ns, candidacy: None, holding: None, was: None, runs: r, failures: f };
             let mut ticker = mycelium_core::sim_seam::interval_ms(
-                format!("sched/{}", runner.schedule.id), check_interval_ms(runner.schedule.period_ms), tokio::time::MissedTickBehavior::Skip,
+                format!("sched/{id}"), check_interval_ms(runner.schedule.period_ms), tokio::time::MissedTickBehavior::Skip,
             );
             let mut stop_rx = stop_rx;
             loop {
@@ -307,12 +379,14 @@ impl crate::GossipAgent {
                     _ = ticker.tick() => runner.tick(&work).await,
                 }
             }
+            drop(runner);
+            running.pin().remove(&id);
         });
         Ok(ScheduleHandle { stop: Some(stop_tx), runs, failures })
     }
 }
 
-/// The loop's state: its advertisements, and what it last said about holding (so a non-holder records a
+/// The loop's state: its advertisements, and what it last said when it ran nothing (so a non-holder records a
 /// change, not every tick).
 struct Runner {
     schedule: Schedule,
@@ -320,6 +394,7 @@ struct Runner {
     kv: crate::KvHandle,
     me: NodeId,
     ctx: Arc<crate::agent::TaskCtx>,
+    started_ns: u64,
     candidacy: Option<crate::CapabilityReg>,
     holding: Option<crate::CapabilityReg>,
     was: Option<&'static str>,
@@ -328,56 +403,92 @@ struct Runner {
 }
 
 impl Runner {
+    /// Record `rec` in the agent's trace, returning its sequence number.
+    fn record(&self, rec: DecisionRecord) -> Option<u64> {
+        self.ctx.decision_sink().and_then(|sink| sink.record(rec).ok())
+    }
+
+    /// A `sched.run` record of a tick that runs nothing, once per change of what it says.
+    fn say(&mut self, outcome: OutcomeKind, reason: &'static str, inputs: Vec<InputSnapshot>) {
+        if self.was != Some(reason) {
+            let mut rec = DecisionRecord::new(RUN_RULE, 1, "schedule tick", outcome, reason)
+                .node(self.me.to_string(), 0).target(self.schedule.id.to_string()).view(ViewStatus::Unknown).no_parent().no_effect();
+            for i in inputs { rec = rec.input(i); }
+            self.record(rec);
+        }
+        self.was = Some(reason);
+    }
+
     async fn tick<F, Fut>(&mut self, work: &F)
     where
         F: Fn(ScheduledRun) -> Fut,
         Fut: Future<Output = Result<(), String>>,
     {
-        let s = &self.schedule;
+        let s = self.schedule.clone();
         let now = mycelium_core::sim_seam::wall_now_ms();
         let eligible = self.caps.resolve(&s.holders).iter().any(|(n, _)| *n == self.me);
         if eligible && self.candidacy.is_none() {
             let (attr, value) = crate::election::rule_attribute();
-            self.candidacy = Some(self.caps.advertise_capability(Capability::new(CANDIDATE_NS, s.id.as_ref()).with(attr, value), lease_refresh(s.period_ms)));
+            let cap = Capability::new(CANDIDATE_NS, s.id.as_ref()).with(attr, value)
+                .with("period_ms", crate::capability::CapValue::Integer(s.period_ms as i64))
+                .with("phase_ms", crate::capability::CapValue::Integer(s.phase_ms as i64));
+            self.candidacy = Some(self.caps.advertise_unchecked(cap, lease_refresh(s.period_ms)));
         } else if !eligible {
             self.candidacy = None;
         }
         let candidates = self.caps.resolve(&CapFilter::new(CANDIDATE_NS, s.id.as_ref()));
-        if eligible && !candidates.iter().any(|(n, _)| *n == self.me) {
+        let clock = |slot: Option<u64>| InputSnapshot::new("the wall clock through the seam, and the slot it falls in",
+            format!("now_ms={now} slot={} period_ms={} phase_ms={}", slot.map_or("none".into(), |x| x.to_string()), s.period_ms, s.phase_ms), Provenance::Local);
+        if !eligible {
+            self.holding = None;
+            return self.say(OutcomeKind::NoAction, "not_eligible", vec![clock(s.slot_at(now))]);
+        }
+        if !candidates.iter().any(|(n, _)| *n == self.me) {
             return; // this node's own candidacy is not in its view yet: nothing to decide on until it is
         }
+        let warm = warm_up_ms(s.period_ms);
+        if mycelium_core::sim_seam::mono_since(self.started_ns) < Duration::from_millis(warm) {
+            return self.say(OutcomeKind::Deferral, "warming_up", vec![InputSnapshot::new(
+                "the time since this loop started, against the warm-up (three lease refreshes)", format!("warm_up_ms={warm}"), Provenance::Local)]);
+        }
+        // One id is one schedule fleet-wide: a candidate declaring another period or phase makes every key ambiguous,
+        // so no node holds until the declarations agree.
+        let mismatched: Vec<String> = candidates.iter()
+            .filter(|(_, c)| declared(c) != Some((s.period_ms, s.phase_ms)))
+            .map(|(n, c)| format!("{n}:{:?}", declared(c)))
+            .collect();
+        if !mismatched.is_empty() {
+            self.holding = None;
+            return self.say(OutcomeKind::Refusal, "declaration_mismatch", vec![InputSnapshot::new(
+                "candidates whose advertisement declares another period or phase (`cap/*/schedule/{id}`, as gossiped)",
+                format!("{} (this node: {}/{})", mismatched.join(", "), s.period_ms, s.phase_ms), Provenance::Gossiped)]);
+        }
         let winner = crate::election::elect(&s.ring(), &candidates).cloned();
-        let holding = eligible && winner.as_ref() == Some(&self.me);
+        let holding = winner.as_ref() == Some(&self.me);
         if holding && self.holding.is_none() {
-            self.holding = Some(self.caps.advertise_capability(Capability::new(CANDIDATE_NS, format!("{}{HOLDER_SUFFIX}", s.id)), lease_refresh(s.period_ms)));
+            self.holding = Some(self.caps.advertise_unchecked(Capability::new(CANDIDATE_NS, format!("{}{HOLDER_SUFFIX}", s.id)), lease_refresh(s.period_ms)));
         } else if !holding {
             self.holding = None;
         }
-        let last_raw = self.kv.get(&last_key(&s.id));
-        let last = last_raw.as_ref().and_then(|b| std::str::from_utf8(b).ok()?.trim().parse::<u64>().ok());
-        let tick = decide(s, now, holding, last);
+        let last = fleet_last(&self.ctx.kv_state, &s);
+        let tick = decide(&s, now, holding, last);
 
-        let view = || InputSnapshot::new(
+        let view = InputSnapshot::new(
             "the schedule's candidates as gossiped (`cap/*/schedule/{id}`), this node's eligibility against `holders`, the ring's rendezvous winner",
-            format!("candidates={} eligible={eligible} winner={}", candidates.len(), winner.as_ref().map_or("none".to_string(), |w| w.to_string())),
+            format!("candidates={} winner={}", candidates.len(), winner.as_ref().map_or("none".to_string(), |w| w.to_string())),
             Provenance::Gossiped,
         );
-        let last_input = || InputSnapshot::new("the last slot the fleet ran (`sched/{id}/last`, as gossiped)",
+        let last_input = InputSnapshot::new("the last slot the fleet ran (the highest `sched/{id}/last/{node}` under this period and phase, as gossiped)",
             last.map_or("none".to_string(), |l| l.to_string()), Provenance::Gossiped);
-        let clock = || InputSnapshot::new("the wall clock through the seam, and the slot it falls in",
-            format!("now_ms={now} slot={} period_ms={} phase_ms={}", tick.slot.map_or("none".into(), |x| x.to_string()), s.period_ms, s.phase_ms), Provenance::Local);
-        let record = |rec: DecisionRecord| self.ctx.decision_sink().and_then(|sink| sink.record(rec).ok());
 
-        // A non-holder records when what it says changes, not every tick: the trace keeps what was decided.
         if tick.runs.is_empty() {
-            let reason = if !eligible { "not_eligible" } else { tick.reason };
-            if matches!(reason, "not_holder" | "not_eligible") && self.was != Some(reason) {
-                let rec = DecisionRecord::new(RUN_RULE, 1, "schedule tick", OutcomeKind::NoAction, reason)
-                    .node(self.me.to_string(), 0).target(s.id.to_string()).view(ViewStatus::Unknown).no_parent().no_effect()
-                    .input(view()).input(clock());
-                record(rec);
+            // `already_ran` is every tick of a slot after its run: silence. The rest say something once.
+            if tick.reason != "already_ran" && tick.reason != "not_due" {
+                let outcome = tick.outcome;
+                self.say(outcome, tick.reason, vec![view, last_input, clock(tick.slot)]);
+            } else {
+                self.was = Some(tick.reason);
             }
-            self.was = Some(reason);
             return;
         }
         self.was = Some("ran");
@@ -385,30 +496,49 @@ impl Runner {
         let parent = tick.missed.as_ref().and_then(|m| {
             let rec = DecisionRecord::new(MISSED_RULE, 1, "a gap between the last run and the slot due", m.outcome, m.reason)
                 .node(self.me.to_string(), 0).target(s.id.to_string()).view(ViewStatus::Unknown).no_parent()
-                .input(last_input()).input(clock())
+                .input(last_input.clone()).input(clock(tick.slot))
                 .input(InputSnapshot::new("the schedule's missed-run policy", format!("{:?} first={} last={} skipped={} cap={MAX_CATCH_UP}", s.on_missed, m.first, m.last, m.skipped), Provenance::Local));
             let rec = if m.outcome == OutcomeKind::Action { rec.effect(format!("runs for slots {}..={} follow, each naming this record its parent", m.first, m.last)) } else { rec.no_effect() };
-            record(rec)
+            self.record(rec)
         });
+        let deadline_stream = format!("sched/{}/deadline", s.id);
         for run in tick.runs {
             let reason = match run.kind { RunKind::OnTime => "ran", RunKind::Late => "ran_late", RunKind::ForGap { .. } => "ran_for_gap" };
-            let key = run.operation_id();
-            let slot = run.slot;
-            let outcome = work(run).await;
-            let mut rec = DecisionRecord::new(RUN_RULE, 1, "schedule tick", if outcome.is_ok() { OutcomeKind::Action } else { OutcomeKind::Deferral },
-                    if outcome.is_ok() { reason } else { "work_failed" })
+            let (key, slot, kind) = (run.operation_id(), run.slot, run.kind);
+            // The run's deadline is one period, through the seam: work that overruns it is abandoned, so a holder's
+            // lease is never held by work that has stopped making progress.
+            let outcome = tokio::select! {
+                r = work(run) => Some(r),
+                _ = mycelium_core::sim_seam::sleep_ms(&deadline_stream, s.period_ms) => None,
+            };
+            let (kind_out, reason_out) = match &outcome {
+                Some(Ok(())) => (OutcomeKind::Action, reason),
+                Some(Err(_)) => (OutcomeKind::Deferral, "work_failed"),
+                None => (OutcomeKind::Deferral, "work_overran"),
+            };
+            let mut rec = DecisionRecord::new(RUN_RULE, 1, "schedule tick", kind_out, reason_out)
                 .node(self.me.to_string(), 0).target(s.id.to_string()).view(ViewStatus::Unknown)
-                .input(view()).input(last_input()).input(clock());
+                .input(view.clone()).input(last_input.clone()).input(clock(tick.slot));
             rec = match parent { Some(p) => rec.parent(p), None => rec.no_parent() };
             match outcome {
-                Ok(()) => {
-                    let _ = self.kv.set(last_key(&s.id), slot.to_string());
+                Some(Ok(())) => {
+                    let mine = self.kv.get(&format!("{}{}", last_prefix(&s.id), self.me))
+                        .and_then(|b| std::str::from_utf8(&b).ok()?.split_whitespace().next()?.parse::<u64>().ok());
+                    let written = mine.map_or(slot, |m| m.max(slot));
+                    let _ = self.kv.set(format!("{}{}", last_prefix(&s.id), self.me), format!("{written} {} {}", s.period_ms, s.phase_ms));
                     self.runs.fetch_add(1, Ordering::Relaxed);
-                    record(rec.effect(format!("work done under {key}; sched/{}/last = {slot}", s.id)));
+                    self.record(rec.effect(format!("work done under {key}; this node's sched/{}/last = {written}", s.id)));
                 }
-                Err(e) => {
+                Some(Err(e)) => {
                     self.failures.fetch_add(1, Ordering::Relaxed);
-                    record(rec.effect(format!("work failed under {key}: {e}; retried at the next tick")));
+                    let then = if kind == RunKind::OnTime { "retried at the next tick" } else { "not retried: the runs after it go on" };
+                    self.record(rec.effect(format!("work failed under {key}: {e}; {then}")));
+                }
+                None => {
+                    self.failures.fetch_add(1, Ordering::Relaxed);
+                    self.record(rec.effect(format!("work under {key} overran its deadline of {} ms and was abandoned; this node withdraws its holding until its next tick", s.period_ms)));
+                    self.holding = None;
+                    self.candidacy = None;
                     return;
                 }
             }

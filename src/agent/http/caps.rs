@@ -63,6 +63,12 @@ fn refuse_model_meta(ns: &str, name: &str) -> axum::response::Response {
     }))).into_response()
 }
 
+fn refuse_reserved(ns: &str, name: &str, problem: &str) -> axum::response::Response {
+    (StatusCode::FORBIDDEN, Json(json!({
+        "ok": false, "error": "reserved_namespace", "message": format!("{ns}/{name}: {problem}"),
+    }))).into_response()
+}
+
 pub(super) async fn gw_cap_advertise(
     State(ctx): State<Arc<HttpCtx>>,
     Json(body):  Json<serde_json::Value>,
@@ -79,6 +85,9 @@ pub(super) async fn gw_cap_advertise(
     }
     if ns == MODEL_META_NS {
         return refuse_model_meta(&ns, &name);
+    }
+    if let Some(problem) = crate::capability::reserved_capability_namespace(&ns) {
+        return refuse_reserved(&ns, &name, problem);
     }
     let (interval_secs, lease_secs) = match (timer_secs(&body, "interval_secs"), timer_secs(&body, "lease_secs")) {
         (Ok(i), Ok(l)) => (i.unwrap_or(DEFAULT_INTERVAL_SECS), l),
@@ -226,21 +235,25 @@ pub(super) async fn gw_units_declare(
     if !units.presence.is_empty() { hosting.push("[[presence]]"); }
     if !units.activations.is_empty() { hosting.push("[[activation]]"); }
     if !units.serves.is_empty() { hosting.push("[[serve]]"); }
-    if !units.schedules.is_empty() {
-        return (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({
-            "error": "schedule section",
-            "detail": "[[schedule]] is run by the application that embeds the node (GossipAgent::run_schedule), which supplies the work; no route runs one for an SDK agent",
-        }))).into_response();
-    }
     if !hosting.is_empty() {
         return (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({
             "error": "hosting sections",
             "detail": format!("{} belong to a stem (mycelium-stem): an SDK agent hosts nothing", hosting.join(", ")),
         }))).into_response();
     }
+    if !units.schedules.is_empty() {
+        return (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({
+            "error": "schedule section",
+            "detail": "[[schedule]] is run by the application that embeds the node (GossipAgent::run_schedule), which supplies the work; no route runs one for an SDK agent",
+        }))).into_response();
+    }
     // Row R: a served model's ad is not a client's to write (see `refuse_model_meta`).
     if let Some(c) = units.capabilities.iter().find(|c| c.ns == MODEL_META_NS) {
         return refuse_model_meta(&c.ns, &c.name);
+    }
+    // The unit loader refuses a reserved namespace already; said again here, where the ad would be written.
+    if let Some((c, problem)) = units.capabilities.iter().find_map(|c| crate::capability::reserved_capability_namespace(&c.ns).map(|p| (c, p))) {
+        return refuse_reserved(&c.ns, &c.name, problem);
     }
     // Convert everything before declaring anything: a refusal leaves nothing half-declared.
     let filters = match units.requirements.iter().map(|r| r.to_filter()).collect::<Result<Vec<_>, _>>() {

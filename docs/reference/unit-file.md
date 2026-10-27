@@ -32,7 +32,7 @@ TOML needs one key per line. `ns = "a"; name = "b"` is not valid TOML.
 | `[[presence]]` | `presence unhostable`, `presence bands overlap` | a standing want (needs `[hosts]`) | refused, **422** |
 | `[[activation]]` | not read | run after a blob is placed, confined when it names `[activation.confine]` | refused, **422** |
 | `[[serve]]` | counted as an offer | registers a routable skill (needs feature `llm`) | refused, **422** |
-| `[[schedule]]` | `schedule without holders`, `runtime with a schedule` | refused (the work is the embedding application's) | refused, **422** (`schedule section`) |
+| `[[schedule]]` | `schedule without holders`, `schedule declared two ways`, `runtime with a schedule` | refused (the work is the embedding application's) | refused, **422** (`schedule section`) |
 
 An SDK agent hosts nothing, so the four hosting sections are a stem's. A `[[schedule]]` is neither's: the
 application that embeds the node runs it with `GossipAgent::run_schedule`, supplying the work. The route's guide is
@@ -268,20 +268,24 @@ min_providers = 2
 
 Declared recurring work (adopter-surface Y2): one holder per schedule runs each slot. Every node that runs the
 schedule (`GossipAgent::run_schedule`, in the embedding application) and advertises a capability matching
-`holders` is a candidate; the ring `sched/{id}`'s rendezvous winner among the live candidates holds, and its
-holding, advertised as `schedule/{id}.holder`, evaporates when it stops re-asserting it — the lease. A slot is
-`(now − phase) / period` from the Unix epoch; its run's idempotency key is `sched/{id}/{slot}`, so two holders
-on two sides of a partition make one effect at a destination that deduplicates. The last slot run is kept in
-`sched/{id}/last`. Rules `sched.run` and `sched.missed`
+`holders` is a candidate, advertising the period and phase it declares; after a warm-up of three lease refreshes,
+the ring `sched/{id}`'s rendezvous winner among the live candidates holds, and its holding, advertised as
+`schedule/{id}.holder`, evaporates when it stops re-asserting it — the lease. A run is given one period to finish,
+and work that overruns it is abandoned and the holding withdrawn. A slot is `(now − phase) / period` from the Unix
+epoch; its run's idempotency key is `sched/{id}/{slot}`, so two holders on two sides of a partition make one
+effect at a destination that deduplicates, when the content depends on the key alone. Each node that ran a slot
+keeps `sched/{id}/last/{node}`; the fleet's last run is the highest under the same period and phase. One id is one
+schedule fleet-wide: candidates declaring another period or phase hold nowhere until they agree. The capability
+namespace `schedule` is reserved for these advertisements. Rules `sched.run` and `sched.missed`
 ([rule catalogue](rule-catalogue.md)); the feature page is [recurring work](../features/recurring-work.md).
 
 | Field | Type | Default | Meaning |
 |---|---|---|---|
-| `id` | string | required | One key segment (`[A-Za-z0-9._-]+`), not ending in `.holder`, unique in the file. |
+| `id` | string | required | One key segment (`[A-Za-z0-9._-]+`), not starting with `.`, holding no `..`, not ending in `.holder`, unique in the file — and the same declaration wherever it appears in the fleet. |
 | `period_secs` | integer | required | `1..=604800` (a week). No cron expression and no calendar. |
 | `phase_secs` | integer | `0` | Where in the period a slot starts; refused unless below `period_secs`. |
 | `on_missed` | `"skip"` · `"run_late"` · `"run_once"` | `"skip"` | What the holder does about slots after the last recorded run and before the one due: run nothing for them; run each, oldest first, under its own key (at most 64, the rest skipped and counted); or run once for the gap, under its newest slot's key. The decision is `sched.missed`, recorded with its reason. A schedule with no recorded run starts at the slot due. |
-| `[schedule.holders]` | a filter, as `[[requirement]]` | required | The holder band: hosts that advertise a matching capability may hold the schedule. `wire-check` reports `schedule without holders` when no unit declares one. |
+| `[schedule.holders]` | a filter, as `[[requirement]]`, without `ranking` | required | The holder band: hosts that run the schedule and advertise a matching capability may hold it. `wire-check` reports `schedule without holders` when no unit that runs it — declares it, with no `runtime` and no `[hosts]` — declares such a capability, and `schedule declared two ways` when two units declare one id differently. An empty `ns` or `name`, or a `ranking`, is refused. |
 
 ```toml
 [[schedule]]

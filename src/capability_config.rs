@@ -1049,6 +1049,11 @@ impl NodeCapabilityConfig {
             if let Some(problem) = crate::capability::capability_name_problem(ns, name) {
                 return Err(invalid(section, format!("{ns:?}/{name:?}: {problem}")));
             }
+            if section != "requirement"
+                && let Some(problem) = crate::capability::reserved_capability_namespace(ns)
+            {
+                return Err(invalid(section, format!("{ns:?}/{name:?}: {problem}")));
+            }
         }
         for g in &self.groups {
             if let Some(problem) = crate::capability::capability_group_name_problem(&g.name) {
@@ -1241,6 +1246,12 @@ impl NodeCapabilityConfig {
                 return Err(invalid("schedule.phase_secs", format!(
                     "{at}: {} is not below the period {} — a phase is where in the period a slot starts", sc.phase_secs, sc.period_secs
                 )));
+            }
+            if let Some(problem) = crate::capability::capability_name_problem(&sc.holders.ns, &sc.holders.name) {
+                return Err(invalid("schedule.holders", format!("{at}: {:?}/{:?}: {problem}", sc.holders.ns, sc.holders.name)));
+            }
+            if sc.holders.ranking.is_some() {
+                return Err(invalid("schedule.holders", format!("{at}: a ranking means nothing here — the holder is the rendezvous winner, never the best-ranked host")));
             }
             sc.holders.to_filter().map_err(|e| invalid("schedule.holders", format!("{at}: {e}")))?;
         }

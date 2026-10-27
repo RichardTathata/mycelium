@@ -435,6 +435,18 @@ impl CapFilter {
 /// parses (`parse_cap_key` refuses it), and `("locality", "self")` *is* the node's own locality entry,
 /// `cap/{node}/locality/self`, which holds a `LocalityPath`, not a `Capability` (#613's review,
 /// finding 6). Every door that writes one of these keys refuses a pair this names a problem for.
+/// The capability namespaces a door that writes an advertisement for someone else refuses, with the reason: each is
+/// written by the substrate for its own decision. `schedule` (adopter-surface Y2) holds a schedule's candidacy and
+/// holding (`mycelium::schedule`): an advertisement written there by anything but the schedule's loop would enter its
+/// election as a candidate that runs nothing. `GossipAgent::run_schedule` advertises there through the crate's own
+/// path; [`CapabilitiesHandle::advertise_capability`](crate::CapabilitiesHandle::advertise_capability), the gateway's
+/// `capability/advertise` and `units/declare`, and the unit-file loader refuse it.
+pub fn reserved_capability_namespace(namespace: &str) -> Option<&'static str> {
+    (namespace == crate::schedule::CANDIDATE_NS).then_some(
+        "`schedule` is reserved: it holds a schedule's candidacy and holding, written only by the schedule's own loop (GossipAgent::run_schedule)",
+    )
+}
+
 pub fn capability_name_problem(namespace: &str, name: &str) -> Option<&'static str> {
     if namespace.is_empty() || name.is_empty() {
         Some("ns and name must not be empty")

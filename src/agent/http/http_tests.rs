@@ -460,6 +460,15 @@ async fn test_gateway_units_declare_one_handle_for_a_whole_unit() {
         .json(&serde_json::json!({ "toml": "[[schedule]]\nid = \"close\"\nperiod_secs = 60\n[schedule.holders]\nns = \"a\"\nname = \"b\"\n" })).send().await.unwrap();
     assert_eq!(r.status(), 422, "adopter-surface Y2: the embedding application runs a schedule");
     assert_eq!(r.json::<serde_json::Value>().await.unwrap()["error"], "schedule section");
+    // The `schedule` capability namespace is the schedule loop's (#694's review, finding 1): refused at both doors.
+    let r = client.post(format!("{base}/gateway/capability/advertise"))
+        .json(&serde_json::json!({ "ns": "schedule", "name": "close" })).send().await.unwrap();
+    assert_eq!(r.status(), 403);
+    assert_eq!(r.json::<serde_json::Value>().await.unwrap()["error"], "reserved_namespace");
+    assert!(agent.capabilities().resolve(&crate::capability::CapFilter::new("schedule", "close")).is_empty());
+    let r = client.post(format!("{base}/gateway/units/declare"))
+        .json(&serde_json::json!({ "toml": "[[capability]]\nns = \"schedule\"\nname = \"close\"\n" })).send().await.unwrap();
+    assert_eq!(r.status(), 400, "the loader refuses the reserved namespace");
     let r = client.post(format!("{base}/gateway/units/declare"))
         .json(&serde_json::json!({ "toml": "not = [toml" })).send().await.unwrap();
     assert_eq!(r.status(), 400);

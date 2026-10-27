@@ -1022,11 +1022,16 @@ mod tests {
             "[[capability]]\nns=\"ledger\"\nname=\"closer\"\n[[schedule]]\nid=\"close\"\nperiod_secs=60\n[schedule.holders]\nns=\"ledger\"\nname=\"closer\"\n",
         ).unwrap();
         let node = agent(alloc_port(), None).await;
+        // Any write under the unit's capability — an advertisement, or the tombstone a refused start would leave —
+        // moves this watch: the refusal must come before anything is declared, not be cleaned up after.
+        let watch = node.kv().subscribe_prefix(format!("cap/{}/ledger/", node.node_id()));
         let err = match Stem::start(Arc::clone(&node), &units, stem_opts(&scratch("sched"))) {
             Ok(stem) => { stem.stop().await; panic!("a stem must refuse [[schedule]]") }
             Err(e) => e.to_string(),
         };
         assert!(err.contains("[[schedule]]") && err.contains("run_schedule"), "{err}");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(!watch.has_changed().unwrap_or(true), "nothing was written under the unit's capability, not even a tombstone");
         assert!(node.capabilities().resolve(&CapFilter::new("ledger", "closer")).is_empty(), "nothing was advertised");
         node.shutdown().await;
     }

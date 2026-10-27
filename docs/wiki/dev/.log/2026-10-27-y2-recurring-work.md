@@ -6,5 +6,5 @@
 - Every run carries `sched/{id}/{slot}` as its idempotency key; one effect per slot only at a deduplicating destination
   (X5's reconciler), shown by `two_holders_under_a_partition_give_one_effect_at_the_destination`.
 - A missed run is `sched.missed` (skip · run late ≤ 64 · run once), traced with its inputs; runs are `sched.run`.
-- New owned KV namespace `sched/` (the last slot run); refused on the raw KV routes; `deprecations.md` §67.
+- New owned KV namespace `sched/` (the last slot run); refused on the raw KV routes; `deprecations.md` §68.
 - The loop runs in the embedding application: `units/declare` refuses the section (422) and a stem refuses to start.
