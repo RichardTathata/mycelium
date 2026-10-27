@@ -377,16 +377,16 @@ operator's steps in `fleet.sh`: `mycelium tls ca` mints each domain's CA, `mycel
 egress lists are made or named there. Each gateway's own `GET /gateway/guarantees` reads all seven `fed.*` node facts
 `enforced`, the client side's among them; a call names `federation:kitchen.example/token:kitchen/planner` at the food
 bank's provider, and the other way `…/token:foodbank/steward` at the kitchen's; a wrong pin, a rewritten body and a
-third concurrent call against a cap of two are each refused — CI's `Scaffold` job runs every line
+third concurrent call against a cap of two are each refused, and so is the same credential and body sent a second time — CI's `Scaffold` job runs every line
 ([`templates/two-domains`](../../templates/two-domains/README.md)). Its four nodes share one host, so the separation of
 `ca/` from each node's `certs/<node>/` is shown by layout, not enforced by the host.
 
-**A credential presented twice.** The edge checks a federated credential's signature, its body binding, its window
-and the grant; it keeps no record of the credentials it has served, so the same credential with the same body,
-presented again inside its window (at most `CallPolicy::max_lifetime`, 300 s by default), is served again. **Anyone
-who holds a captured credential and its body** — on the path, at a proxy that terminates TLS, in a log that kept a
-request — can repeat its effect within that window, not only the partner; an at-most-once effect needs its own
-idempotency key at the provider ([side effects](../features/side-effects.md)) until the edge refuses a replay.
+**A credential presented twice** is refused at the gateway that served it ([§ A credential is one
+call](#a-credential-is-one-call-replays)); the scaffold's `cargo run -- replay kitchen-gw pantry/stock` shows it. What is
+left is that section's limits: **anyone who holds a captured credential and its body** — on the path, at a proxy that
+terminates TLS, in a log that kept a request — can still have it served once at each other gateway of the domain, or
+once more after the serving gateway restarts, inside its lifetime; an at-most-once effect that must hold across those
+still needs its own idempotency key at the provider ([side effects](../features/side-effects.md)).
 
 ## What this runbook does not cover
 

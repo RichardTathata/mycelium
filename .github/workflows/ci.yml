@@ -811,6 +811,9 @@ jobs:
           # A body rewritten after it was signed, refused at the food bank's edge.
           "$NODE_BIN" tamper kitchen-gw pantry/stock | tee tamper.log
           grep -q 'binds a different request body' tamper.log
+          # A replayed body: one credential and its body sent twice — the first served, the second refused as replayed.
+          "$NODE_BIN" replay kitchen-gw pantry/stock | tee replay.log
+          grep -q 'again: .*-32003.*replayed' replay.log
           # Every node's doctor, over the node as the program builds it: green under the profile. The nodes are stopped
           # first: the doctor attaches what the program attaches, the node's evidence journal included, which a running
           # node holds.

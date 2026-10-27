@@ -513,9 +513,12 @@ met, the evaluator and the body binding each shown refusing, and a node keeping 
 The consumer is a bare client, not a node under the profile, so the client side's `fed.*` facts are not shown there;
 **the two-domain scaffold (Y8, `templates/two-domains`, CI job `Scaffold`) shows them:** each gateway runs an edge and
 holds a client for the other, and its own report reads all seven `fed.*` node facts `enforced` while it runs. **Found
-there:** the edge keeps no record of the credentials it has served, so the same presented call with the same body is
-served again inside its window — the body binding stops a rewrite, not a replay (federation runbook § Starting under
-`secure-multi-domain`).
+there:** the edge kept no record of the credentials it had served, so the same presented call with the same body was
+served again inside its window — the body binding stops a rewrite, not a replay. **Closed by #696:**
+`FederationEdge::claim` (`src/federation/edge.rs`) serves a credential once per gateway, keyed by the digest of its
+signed bytes until it expires, refusing a second presentation `Replayed` (-32003) and, past its bound, what it can no
+longer rule out `ReplayUndecidable` (-32004) — per gateway and in memory, both stated (federation runbook § A credential
+is one call).
 
 **TLS on the edge, anchored on a pin (row 11, 2026-09-23):** `src/federation/pinning.rs`. The credential made a
 federated call unforgeable; it was still **readable**, and closing that needed a trust anchor the design did not

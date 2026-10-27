@@ -272,6 +272,50 @@ pub async fn tamper(node: &str, export: &str) -> i32 {
     if text.contains("binds a different request body") { 0 } else { 1 }
 }
 
+/// `replay <node> <export>`: one credential `node`'s domain signs for one body, presented to its partner's edge twice,
+/// the same header and the same bytes — what a captured call sent again looks like there. Exits 0 when the edge
+/// serves the first and refuses the second as replayed.
+pub async fn replay(node: &str, export: &str) -> i32 {
+    use mycelium::federation::{call::FederatedCaller, edge::PresentedCall};
+    let fleet = Fleet::load().unwrap_or_else(|e| refuse(&e));
+    let name = domain_of(node);
+    let d = fleet.domain(&name);
+    let (partner, p) = d.partner.iter().next().unwrap_or_else(|| refuse(&format!("{name} has no partner")));
+    let caller = p.permit.keys().next().cloned().unwrap_or_else(|| refuse(&format!("{name} permits no local caller")));
+    let body = serde_json::to_vec(&serde_json::json!({
+        "jsonrpc": "2.0", "id": 1, "method": "tasks/send",
+        "params": { "skillId": export, "message": { "role": "user", "parts": [{ "type": "text", "text": "stock?" }] } },
+    })).expect("serialise");
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).expect("clock").as_millis() as u64;
+    let presented = PresentedCall::sign(
+        &FederatedCaller {
+            origin_domain: domain_id(&name),
+            principal: caller,
+            export: export.into(),
+            issued_at_ms: now,
+            expires_at_ms: now + 60_000,
+            body_sha256: Some(FederatedCaller::digest_of(&body)),
+        },
+        &SigningKey::from_bytes(&hex32(&d.signing_seed)),
+    );
+    let tls = mycelium::federation::pinning::pinned_client_config(vec![hex32(&p.pin_file)]);
+    let http = reqwest::Client::builder().use_preconfigured_tls(tls).build().expect("a pinned client");
+    let url = format!("{}/a2a", p.endpoints[0]);
+    let mut answers = Vec::new();
+    for _ in 0..2 {
+        let reply = http.post(&url).header("x-mycelium-federation-call", presented.to_header_value())
+            .header("content-type", "application/json").body(body.clone()).send().await;
+        answers.push(match reply {
+            Ok(r) => r.text().await.unwrap_or_default(),
+            Err(e) => refuse(&format!("{url}: {e}")),
+        });
+    }
+    println!("{partner}'s edge, first: {}", answers[0]);
+    println!("{partner}'s edge, the same credential and body again: {}", answers[1]);
+    let served = answers[0].contains("\"result\"");
+    if served && answers[1].contains("replayed") { 0 } else { 1 }
+}
+
 /// `get|post <node> <path> [json]`: what a local caller does at its own domain's gateway — HTTPS verified against that
 /// domain's CA (`ca/<domain>/ca-cert.pem`), its named token as the bearer (`secrets/<node>.tokens`). Prints the status
 /// and the body; exits 0 on a 2xx.

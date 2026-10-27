@@ -16,4 +16,4 @@ kept no record, so a replayed `pantry/reserve` repeated its effect.
 forgets), a wall clock stepped back past the skew tolerance re-opens what was forgotten, two clients of one domain with
 one principal can mint one credential in the same millisecond. No guarantee id (nothing to configure).
 
-**Upgrade note:** `deprecations.md` §67.
+**Upgrade note:** `deprecations.md` §70.
