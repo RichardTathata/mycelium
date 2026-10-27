@@ -104,20 +104,36 @@ const hash = new URLSearchParams(location.hash.slice(1));
 // `?nodes=a,b,c`; `?target=host:port` is the one-node link each showcase's "⚙ Ops Console" button carries.
 // The default is `examples/observed_fleet.rs`, the fleet this page is tested against.
 $("#nodes").value = params.get("nodes") || params.get("target") || "127.0.0.1:9061,127.0.0.1:9062,127.0.0.1:9063";
-// A bearer in the fragment (`#token=…`) is never sent to the page's own host; it stays in this page.
+// A bearer in the fragment (`#token=…`) is never sent to the page's own host — but a fragment is kept in the
+// browser's history like the rest of the URL, so prefer typing it into the box.
 $("#token").value = hash.get("token") || "";
 let active = PANELS.some(p=>p.tab===params.get("tab")) ? params.get("tab") : "Overview";
 
 const nodes = () => $("#nodes").value.split(",").map(s=>s.trim()).filter(Boolean);
-const nodeBase = n => /^https?:\/\//.test(n) ? n.replace(/\/+$/,"") : "http://"+n;
+// A node is `host:port` (HTTP) or `http(s)://host[:port]`, and nothing more: its origin is the base every
+// route is appended to, so an entry cannot carry a path, query, fragment or credentials. Anything else is
+// refused (null), and its panel says so.
+function nodeBase(n){
+  let u;
+  try { u = new URL(/^https?:\/\//.test(n) ? n : "http://"+n); } catch(e){ return null; }
+  if(!/^https?:$/.test(u.protocol) || u.username || u.password || u.pathname!=="/" || u.search || u.hash) return null;
+  return u.origin;
+}
+// Which nodes the bearer is sent to: the ones the operator typed, the page's default, or — when the URL
+// carried the bearer too — the ones that URL named (its author knew the bearer). A bearer typed while the
+// nodes came from a link is sent to them only once the operator confirms the list.
+const fromUrl = {nodes: params.has("nodes") || params.has("target"), token: hash.has("token")};
+let bearerNodes = new Set(!fromUrl.nodes || fromUrl.token ? nodes() : []);
 
 // The page's one network call: a GET to a node's own route. A browser refuses the answer of a node that
 // does not list this page's origin, and that refusal is indistinguishable here from an unreachable node.
 async function nodeFetch(node, route){
+  const base = nodeBase(node);
+  if(base===null) return {state:"error", status:"—", detail:`${node} is not host:port or http(s)://host[:port]`};
   const token = $("#token").value.trim();
-  const headers = token ? {Authorization: "Bearer "+token} : {};
+  const headers = token && bearerNodes.has(node) ? {Authorization: "Bearer "+token} : {};
   let r;
-  try { r = await fetch(nodeBase(node)+route, {headers}); }
+  try { r = await fetch(base+route, {headers}); }
   catch(e){ return {state:"blocked", detail:`unreachable, or ${node} does not list this page's origin (${location.origin}) in gateway_cors_origins`}; }
   if(r.status===401 || r.status===403) return {state:"unauthorized", status:r.status, detail:await r.text()};
   if(r.status===404) return {state:"absent", status:404};
@@ -136,12 +152,19 @@ function renderTabs(){
   PANELS.forEach(({tab})=>{ const b=el("button",tab===active?"active":"",tab); b.onclick=()=>{active=tab;renderTabs();refresh();}; nav.appendChild(b); });
 }
 
+// A link a node advertises is followed only if it is http: or https: — `ui/viz` is a KV key any writer can set,
+// and this page holds the bearer, so a `javascript:` or `data:` value is never made a link.
+function httpLink(s){
+  try { const u = new URL(s); return (u.protocol==="http:" || u.protocol==="https:") ? u.href : null; }
+  catch(e){ return null; }
+}
 async function discoverViz(){
   const link = $("#vizlink");
   for(const n of nodes()){
     const [v,l] = await Promise.all(LINK_ROUTES.map(r=>nodeFetch(n,r)));
-    if(v.state==="ok" && v.body && v.body.found){
-      link.href = atob(v.body.value_b64);
+    const href = v.state==="ok" && v.body && v.body.found ? httpLink(atob(v.body.value_b64)) : null;
+    if(href){
+      link.href = href;
       link.textContent = "↗ "+(l.state==="ok" && l.body && l.body.found ? atob(l.body.value_b64) : "visualiser");
       link.style.display = "inline-flex";
       return;
@@ -362,8 +385,15 @@ refresh();
 discoverViz();
 // `?once` renders a single snapshot and stops (what CI's headless browser dumps); otherwise it refreshes.
 if(!params.has("once")) setInterval(refresh, 2500);
-$("#nodes").addEventListener("change", ()=>{ refresh(); discoverViz(); });
-$("#token").addEventListener("change", ()=>{ refresh(); discoverViz(); });
+$("#nodes").addEventListener("change", ()=>{ bearerNodes = new Set(nodes()); refresh(); discoverViz(); });
+$("#token").addEventListener("change", ()=>{
+  const unconfirmed = nodes().filter(n=>!bearerNodes.has(n));
+  if($("#token").value.trim() && unconfirmed.length){
+    if(confirm(`Send this bearer to ${unconfirmed.join(", ")}? They came from the link that opened this page.`)) unconfirmed.forEach(n=>bearerNodes.add(n));
+    else $("#token").value = "";
+  }
+  refresh(); discoverViz();
+});
 </script>
 </body>
 </html>

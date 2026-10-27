@@ -41,12 +41,18 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   **`gateway_cors_origins`** (`GOSSIP_GATEWAY_CORS_ORIGINS`): off by default, exact origins only (`*`, `null`, a path or a
   default port refused by `validate()`, as is a list with no `http_port`), answered with the origin itself and
   `Vary: Origin`, and **only** for `GET`/`HEAD` on the read-only routes (`CORS_READ_PATHS`) — never a write, call, stream
-  or governance route; a preflight is answered before the auth layer and admits `Authorization`, so the bearer still
-  decides every read. `examples/observed_fleet.rs` is a three-node fleet with the tuple space mounted; CI renders the
+  or governance route, and the KV value route for one `ui/` key only (the `ui/viz` link); a preflight is answered
+  before the auth layer and admits `Authorization`, so the bearer decides every read — and a gateway with **no**
+  credential model may list only loopback origins (`start()` refuses any other by name, since a listed page's script
+  would read what that gateway answers anyone). The page sends its bearer only to the nodes the operator typed or
+  confirmed, accepts a node entry only as `host:port` or `http(s)://host[:port]`, and makes a link of an advertised
+  `ui/viz` only if it is `http:`/`https:`. Not handled, stated: Private Network Access preflights. `examples/observed_fleet.rs` is a three-node fleet with the tuple space mounted; CI renders the
   page in Chrome against it, tab by tab, and shows a page on an unlisted origin reading every node `blocked` and one
   without the bearer `unauthorized` (`scripts/ops-console-render.sh`). Every browser showcase, and the coop bootstrap,
   lists the console's origin `http://127.0.0.1:8099`. Tests: `with_cors_unset_no_answer_carries_an_allow_origin`,
-  `with_cors_set_only_listed_origins_read_only_the_read_paths`,
+  `with_cors_set_only_listed_origins_read_only_the_read_paths`, `a_listed_origin_reads_only_ui_keys_through_the_kv_value_route`,
+  `an_open_gateway_refuses_an_origin_that_is_not_on_this_host`, `a_merged_companion_route_is_answered_only_where_listed`,
+  `the_https_gateway_answers_a_listed_origin_the_same_way`,
   `the_console_reads_only_the_routes_its_readme_names_and_each_is_a_cross_origin_read`,
   `the_console_opens_no_listener_of_its_own`, `a_cors_origin_is_an_exact_origin_or_it_is_refused_by_name`. **Removed:**
   the `ops_console` example binary — its `:8099` server and its `/api?host=…&path=…` proxy, which fetched for the browser

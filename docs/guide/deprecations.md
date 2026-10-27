@@ -2100,7 +2100,8 @@ that origin: `gateway_cors_origins = ["http://127.0.0.1:8099"]` (or `GOSSIP_GATE
 `Access-Control-Allow-Origin`. Set, it answers only `GET`/`HEAD` on the read-only routes
 ([observability § Cross-origin reads](../operations/observability.md#cross-origin-reads-gateway_cors_origins)), and the
 bearer still decides every read. `validate()` refuses `*`, `null`, an entry with a path, query, fragment, credentials,
-uppercase or a default port, and a non-empty list on a node with no `http_port`, naming `gateway_cors_origins`.
+uppercase, a default port or any form a browser would not send, and a non-empty list on a node with no `http_port`,
+naming `gateway_cors_origins`; `start()` refuses a non-loopback origin on a gateway with no credential model.
 
 **What breaks.** `GossipConfig` gained a field, so an exhaustive struct literal breaks (`..Default::default()` is
 unaffected); a reader older than this release refuses a configuration file that sets `gateway_cors_origins` as an

@@ -687,9 +687,13 @@ static page reading each node from the browser, so a gateway needed to say which
 changes for a node that does not set it. Set, it answers **only** `GET`/`HEAD` on `CORS_READ_PATHS` and only for an
 exact listed origin, echoed (never `*`), `Vary: Origin`; `*` and `null` (every sandboxed frame's and `file:` page's
 origin) are refused by `validate()`. The one thing it answers before `gateway_auth` is a `GET` preflight, which carries
-no credential by the browser's design; the read itself is authorised like any other, so it widens *which pages a
-browser lets read an answer*, never *who may obtain one* — CORS is enforced by the reader, and a non-browser client
-was never subject to it. A write is never answered with the header, and its preflight is not answered, so a page's
+no credential by the browser's design; the read itself is authorised like any other, so **on a gateway with a
+credential model** it widens *which pages a browser lets read an answer*, not *who may obtain one* — CORS is
+enforced by the reader, and a non-browser client was never subject to it. **On an open gateway it would widen
+who**: the operator's browser reaches the loopback gateway and runs a listed page's script, so `start()` refuses a
+non-loopback origin without a credential model (`an_open_gateway_refuses_an_origin_that_is_not_on_this_host`, seen
+failing first). The KV value route is answered for one `ui/` key only (`admits_path`), so a listed page reads the
+`ui/viz` link and no other value (#693's review, finding 2). Private Network Access is not answered, stated. A write is never answered with the header, and its preflight is not answered, so a page's
 JSON or bearer-carrying write is not sent. Pinned by `with_cors_unset_no_answer_carries_an_allow_origin` and
 `with_cors_set_only_listed_origins_read_only_the_read_paths` (four plants each seen failing), and in a real browser by
 `scripts/ops-console-render.sh`'s `unlisted-origin` and `no-bearer` cases.

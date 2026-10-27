@@ -259,18 +259,33 @@ gateway_cors_origins = ["http://127.0.0.1:8099"]     # or GOSSIP_GATEWAY_CORS_OR
   non-empty list on a node with no `http_port`. A listed origin is answered with itself, never `*`, with
   `Vary: Origin`.
 - **Read-only routes only, `GET`/`HEAD` only:** `/health`, `/ready`, `/stats`, `/metrics`, `/gateway/fleet`,
-  `/gateway/diagnose`, `/gateway/guarantees`, `/gateway/govern`, `/gateway/kv/keys`, `/gateway/kv` (its
-  `GET`), `/gateway/audit` and `/gateway/tuple/overview` (where mounted) — `CORS_READ_PATHS` in
-  `src/agent/http/cors.rs`. No write, call, stream or governance route is ever answered across origins,
-  and a preflight asking for any other method is not answered.
-- **The bearer still decides.** A preflight for a listed origin is answered before the gateway's auth
-  layer (a browser sends no credential on one) and admits the `Authorization` header; the read itself
-  passes `gateway_auth` and its scopes like any other request. The setting widens *which pages may read in
-  a browser*, never *what a caller may read*. A page's JSON or bearer-carrying write needs a preflight,
-  and no write route answers one; a request a browser sends without a preflight (a form post) reaches a
-  gateway whether or not this is set, as it reaches any server — the setting changes nothing there, and
-  a gateway with a credential model answers it 401.
+  `/gateway/diagnose`, `/gateway/guarantees`, `/gateway/govern`, `/gateway/kv/keys` (key **names**),
+  `/gateway/kv` **for one key under `ui/` only** (the `ui/viz` link; any other key, or two `key` parameters,
+  is not answered), `/gateway/audit` and `/gateway/tuple/overview` (where mounted) — `CORS_READ_PATHS` and
+  `admits_path` in `src/agent/http/cors.rs`. No write, call, stream or governance route is ever answered
+  across origins, and a preflight asking for any other method is not answered. What each listed route
+  discloses is [rbac.md § Cross-origin reads](rbac.md#cross-origin-reads-what-a-listed-page-can-see).
+- **With a credential, the bearer decides.** A preflight for a listed origin is answered before the gateway's
+  auth layer (a browser sends no credential on one) and admits the `Authorization` header; the read itself
+  passes `gateway_auth` and its scopes like any other request, so on a gateway with a credential model the
+  setting widens *which pages may read in a browser*, not *what a caller may read*. **Without one it does
+  widen it:** an open gateway answers anyone who can reach it, and a listed page's script runs in the
+  operator's browser, which can. So a gateway with no credential model may list **only loopback origins**
+  (`http://127.0.0.1…`, `http://localhost…`, `http://[::1]…`, pages on this host); `start()` refuses any
+  other by name (`gateway_cors_origins`). A page's JSON or bearer-carrying write needs a preflight, and no
+  write route answers one; a request a browser sends without a preflight (a form post) reaches a gateway
+  whether or not this is set, as it reaches any server — the setting changes nothing there, and a gateway
+  with a credential model answers it 401.
+- **Not handled: Private Network Access.** Chrome's preflight for a public page reaching a private address
+  (`Access-Control-Request-Private-Network`) is not answered, so such a read is refused by a browser that
+  enforces it. Serve the page from an origin on the same network as the nodes.
 - `doctor` lists the setting with its source like every field (`docs/reference/configuration.md`).
+- **The page's bearer.** Typed into the page, it is held in the page only and sent only to the nodes the
+  operator typed (or the page's default). A link's `?nodes=` gets it only once the operator confirms the
+  list — unless the same link carried the bearer as `#token=…`, whose author knew it. A fragment never
+  reaches a server, but it stays in the browser's history like the rest of the URL. A node entry is
+  `host:port` or `http(s)://host[:port]`: a path, query, fragment or credentials in it are refused, and its
+  panel says so. A `ui/viz` link a node advertises is made a link only if it is `http:` or `https:`.
 
 ### The Integrity tab
 

@@ -14,7 +14,9 @@
 #   unlisted-origin the same page served from an origin no node lists: the browser withholds every answer,
 #                   every node `blocked` — CORS enforced end to end, not only in the gateway's tests;
 #   no-bearer       the listed origin without the bearer, on a gated tab (Fleet): every node `unauthorized` —
-#                   the setting never stands in for the credential.
+#                   the setting never stands in for the credential;
+#   viz-link-refused a node advertising `ui/viz = javascript:…`: the page makes no link of it;
+#   viz-link-shown  the same key set to an http: URL: the page links it.
 # The fleet binary is built with `metrics` and `compliance`, so the Metrics and Audit tabs read a mounted route.
 # The browser is $CHROME, else the first of google-chrome, chromium, chromium-browser, or macOS's Chrome.
 set -euo pipefail
@@ -28,6 +30,8 @@ if [[ "${1:-}" == "--list" ]]; then
   for t in $(tabs); do echo "@@case-list@@ $suite::tab-$t"; done
   echo "@@case-list@@ $suite::unlisted-origin"
   echo "@@case-list@@ $suite::no-bearer"
+  echo "@@case-list@@ $suite::viz-link-refused"
+  echo "@@case-list@@ $suite::viz-link-shown"
   exit 0
 fi
 
@@ -67,13 +71,14 @@ for port in 8099 8097; do
 done
 # The tuple space's advertisement and the fleet's membership reach every node by gossip.
 nodes="127.0.0.1:9061,127.0.0.1:9062,127.0.0.1:9063"
-for _ in $(seq 1 60); do
+for _ in $(seq 1 120); do
   n=0
   for p in 9061 9062 9063; do
     curl -sf -H "Authorization: Bearer $token" "http://127.0.0.1:$p/gateway/tuple/overview" | grep -q '"stage":"intake"' && n=$((n+1))
   done
   [[ $n -eq 3 ]] && break; sleep 0.5
 done
+[[ $n -eq 3 ]] || { cat "$work/fleet.log"; echo "ops-console-render: the tuple space reached $n of 3 nodes' views" >&2; exit 1; }
 
 render() {  # <origin> <query> <fragment> <out>
   "$chrome" --headless=new --disable-gpu --no-first-run --no-default-browser-check ${CI:+--no-sandbox} \
@@ -93,4 +98,17 @@ python3 "$here/check-ops-console-render.py" --check "$readme" Overview blocked "
 echo "@@case@@ $suite::no-bearer"
 render "$listed" "once&nodes=$nodes&tab=Fleet" "" "$work/no-bearer.html"
 python3 "$here/check-ops-console-render.py" --check "$readme" Fleet unauthorized "$nodes" "$work/no-bearer.html" || fail=1
+set_viz() {  # the `ui/viz` key, written through node 1's gateway as any KV writer could
+  curl -sf -X POST -H "Authorization: Bearer $token" -H 'Content-Type: application/json' \
+    -d "{\"key\":\"ui/viz\",\"value_b64\":\"$(printf '%s' "$1" | base64 | tr -d '\n')\"}" \
+    http://127.0.0.1:9061/gateway/kv >/dev/null
+}
+echo "@@case@@ $suite::viz-link-refused"
+set_viz "javascript:alert(document.domain)"
+render "$listed" "once&nodes=$nodes&tab=Overview" "token=$token" "$work/viz-refused.html"
+python3 "$here/check-ops-console-render.py" --viz "$work/viz-refused.html" none || fail=1
+echo "@@case@@ $suite::viz-link-shown"
+set_viz "http://127.0.0.1:9999/viz"
+render "$listed" "once&nodes=$nodes&tab=Overview" "token=$token" "$work/viz-shown.html"
+python3 "$here/check-ops-console-render.py" --viz "$work/viz-shown.html" "http://127.0.0.1:9999/viz" || fail=1
 exit $fail

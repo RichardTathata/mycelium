@@ -37,7 +37,11 @@ gateway_cors_origins = ["http://127.0.0.1:8099"]       # GOSSIP_GATEWAY_CORS_ORI
 
 Then list them in the **nodes** box (`host:port` for HTTP, or a full `https://…` URL), or in the URL:
 `?nodes=a:9061,b:9061`, `&tab=Guarantees`, `&once` for one snapshot with no refresh (what CI's headless
-browser dumps), and `#token=…` for a bearer (a fragment never leaves the browser). A showcase's **"⚙ Ops Console"** button opens `?target=host:port` — one node — and the showcases
+browser dumps), and `#token=…` for a bearer — a fragment never reaches a server, but it stays in the browser's
+history, so prefer typing the bearer into the box. The bearer goes only to the nodes you typed (or the default);
+nodes named by a link get it once you confirm them, unless the same link carried the bearer. A node entry is
+`host:port` or `http(s)://host[:port]` — anything with a path or query is refused, and its panel says so. A
+gateway with no credential lists only loopback origins (`start()` refuses any other). A showcase's **"⚙ Ops Console"** button opens `?target=host:port` — one node — and the showcases
 list the console's origin themselves. A node that does not list the page's origin answers nothing the
 page can read, and its panel says so (`blocked`) rather than going blank.
 
@@ -60,7 +64,8 @@ the page's own `PANELS` list (a test holds them equal) and what CI renders, tab 
 | Metrics | `/metrics` | Prometheus series (nodes built `--features metrics`) |
 
 The **"↗ label"** link reads `/gateway/kv?key=ui%2Fviz` and `ui%2Flabel` — the `ui/viz` convention a
-showcase uses to advertise its own page. Each of these paths is on the gateway's cross-origin read list,
+showcase uses to advertise its own page; only an `http:` or `https:` value becomes a link, since any KV writer
+can set the key. `ui/` is the only prefix whose values a gateway answers across origins. Each of these paths is on the gateway's cross-origin read list,
 and no other path is ever read.
 
 Each node's section carries one state: `ok` (rendered from the routes above), `blocked` (unreachable, or

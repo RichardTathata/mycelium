@@ -9,6 +9,11 @@
 //! listed origin's read gets `Access-Control-Allow-Origin: <that origin>` (never `*`) and
 //! `Vary: Origin`; its preflight for `GET`/`HEAD` is answered `204` with `Authorization` admitted, so
 //! the page can present a bearer and the gateway's own `gateway_auth` still decides what it may read.
+//! A gateway with no credential model may list only loopback origins (`start()` refuses any other,
+//! naming `gateway_cors_origins`): without a bearer, a listed page's script would read what the gateway
+//! answers anyone. Chrome's Private Network Access preflight (`Access-Control-Request-Private-Network`) is
+//! not answered, so a page on a public origin reading a gateway on a private address is refused by a
+//! browser that enforces it — not handled, stated.
 //! Everything else — a write, a stream, a call, an unlisted origin, a preflight asking for another
 //! method — passes through untouched and so carries no CORS header: the browser keeps the answer
 //! from the page. CORS limits what a page may *read*; it never authenticates anyone, which is why the
@@ -29,9 +34,11 @@ use axum::{
 
 /// The routes a listed origin may read across origins: the node's probes and the observing routes the
 /// Ops Console renders (`examples/ops_console/README.md` names each panel's route). Read-only, each
-/// one — no write, no SSE stream, no call. `/gateway/kv` is listed for its `GET` (a value peek); its
-/// `POST`/`DELETE` are not, because only `GET`/`HEAD` are ever answered. `/gateway/audit` and
-/// `/gateway/tuple/overview` answer only where mounted (`compliance`; the tuple-space companion).
+/// one — no write, no SSE stream, no call. `/gateway/kv` is listed only for a `GET` of one key under
+/// [`UI_KEY_PREFIX`] (the `ui/viz` link a showcase advertises; [`admits_path`]) — never another key's
+/// value — and `/gateway/kv/keys` answers key names, not values. `/gateway/audit` and
+/// `/gateway/tuple/overview` answer only where mounted (`compliance`; the tuple-space companion). What each
+/// one discloses to a reader holding its scope is `docs/operations/rbac.md` § Cross-origin reads.
 pub(crate) const CORS_READ_PATHS: &[&str] = &[
     "/health",
     "/ready",
@@ -47,6 +54,27 @@ pub(crate) const CORS_READ_PATHS: &[&str] = &[
     "/gateway/tuple/overview",
 ];
 
+/// The one KV prefix whose values a page on another origin may read: the `ui/viz` + `ui/label` convention.
+pub(crate) const UI_KEY_PREFIX: &str = "ui/";
+
+/// Whether a request for `path?query` is a cross-origin read: a path on [`CORS_READ_PATHS`], and for
+/// `/gateway/kv` exactly one `key` parameter, decoded as the route's own query extractor decodes it
+/// (`application/x-www-form-urlencoded`), under [`UI_KEY_PREFIX`]. Two `key` parameters are refused, so a
+/// check reading one and a handler reading the other cannot disagree.
+pub(crate) fn admits_path(path: &str, query: Option<&str>) -> bool {
+    if !CORS_READ_PATHS.contains(&path) {
+        return false;
+    }
+    if path != "/gateway/kv" {
+        return true;
+    }
+    let keys: Vec<String> = url::form_urlencoded::parse(query.unwrap_or("").as_bytes())
+        .filter(|(k, _)| k == "key")
+        .map(|(_, v)| v.into_owned())
+        .collect();
+    matches!(keys.as_slice(), [k] if k.starts_with(UI_KEY_PREFIX))
+}
+
 /// How long a browser may cache an answered preflight.
 const PREFLIGHT_MAX_AGE_SECS: &str = "600";
 
@@ -54,7 +82,7 @@ const PREFLIGHT_MAX_AGE_SECS: &str = "600";
 fn admitted<'a>(origins: &[String], req: &'a Request) -> Option<&'a HeaderValue> {
     let origin = req.headers().get(header::ORIGIN)?;
     let o = origin.to_str().ok()?;
-    (origins.iter().any(|a| a == o) && CORS_READ_PATHS.contains(&req.uri().path())).then_some(origin)
+    (origins.iter().any(|a| a == o) && admits_path(req.uri().path(), req.uri().query())).then_some(origin)
 }
 
 fn is_read(m: &Method) -> bool {
