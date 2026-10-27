@@ -32,6 +32,17 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **A federation edge serves a credential once** (#695's review, finding 1; `docs/operations/federation.md` § A
+  credential is one call): `FederationEdge::claim`, run on `/a2a` after the credential is authorised and before a slot
+  is taken, keeps each partner's served credentials — keyed by the digest of the signed bytes — until they expire, and
+  refuses one presented again as `CallRefusal::Replayed` (JSON-RPC -32003, `federation_replays_refused` on `GET /stats`).
+  Before, a captured credential was served as often as it was sent inside its lifetime, repeating its effect; a body
+  binding did not stop it, because the copy carries the same body. Bounded at 65 536 a partner
+  (`with_replay_window_per_partner`); full, it refuses what it can no longer rule out as `ReplayUndecidable` (-32004,
+  `federation_replays_undecidable`), never serving a replay. `FederationClient` mints each credential strictly later
+  than its last, so an honest second call is never one. **Not built:** a set shared across a domain's gateways (a
+  credential is served once at each), and one that survives a restart (it is in memory; a captured credential can be
+  served once more after a restart, inside its lifetime). Upgrade note: `deprecations.md` §67.
 - **A record a span names, read by its hash on the node that wrote it** (`docs/plans/adopter-surface.md` Y4's last
   promise; `docs/operations/audit.md` §3a): `GET /gateway/records/decision/{sha256}` and
   `GET /gateway/records/evidence/{sha256}`, scope `audit:read`, feature `compliance`. The answer carries the record's

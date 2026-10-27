@@ -820,6 +820,15 @@ async fn dispatch_send(
                 Ok(accepted) => accepted,
                 Err(refusal) => return Err(jsonrpc_error(id, -32003, &format!("federated call refused: {refusal}"))),
             };
+        // Then the credential is claimed as served: a second presentation of the same signed bytes
+        // is a replay and repeats nothing (#695's review). After authority, so only a credential
+        // that verified can enter the window; before capacity, so a replay never holds a slot.
+        // -32003 for a replay, which has no benign reading; -32004 for *cannot rule one out*, which
+        // a fresh credential resolves, as it does a capacity refusal.
+        if let Err(refusal) = edge.claim(&federated.presented, crate::federation::edge::now_ms()) {
+            let code = if matches!(refusal, crate::federation::call::CallRefusal::Replayed { .. }) { -32003 } else { -32004 };
+            return Err(jsonrpc_error(id, code, &format!("federated call refused: {refusal}")));
+        }
         // Capacity is asked **after** authority, so a partner we would refuse on authority cannot
         // occupy a slot belonging to one we would admit. Its own code: a capacity refusal is
         // transient and a retry resolves it, while -32003 says go and talk to your operator.

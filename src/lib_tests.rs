@@ -10827,8 +10827,20 @@ mod federation_transport {
         })
     }
 
+    /// A strictly increasing issue time, as `FederationClient` mints them: two hand-made
+    /// credentials inside one millisecond are two credentials, not one the edge refuses the second
+    /// time as a replay.
+    pub(super) fn fresh_issued_ms() -> u64 {
+        static LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let wall = now_ms();
+        let last = LAST
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |last| Some(wall.max(last + 1)))
+            .unwrap_or_else(|last| last);
+        wall.max(last + 1)
+    }
+
     fn cred(beta: &DomainId, export: &str, sk: &ed25519_dalek::SigningKey) -> PresentedCall {
-        let now = now_ms();
+        let now = fresh_issued_ms();
         PresentedCall::sign(
             &FederatedCaller {
                 body_sha256: None,
@@ -10840,6 +10852,88 @@ mod federation_transport {
             },
             sk,
         )
+    }
+
+    /// **A captured call is not a second call** (#695's review, finding 1). The same credential
+    /// header and the same body bytes, posted to `/a2a` a second time, reach no provider: refused
+    /// `-32003` naming the replay, and counted on `GET /stats`. The original was served; a client
+    /// making the identical call twice in quick succession is served twice, because each attempt
+    /// is its own credential. Seen failing first with `FederationEdge::claim` answering `Ok(())`:
+    /// the replay reached the provider (2 calls where 1 was expected).
+    #[tokio::test]
+    async fn a_replayed_credential_reaches_no_provider() {
+        let alpha = DomainId::new("alpha.example").unwrap();
+        let beta = DomainId::new("beta.example").unwrap();
+        let (beta_sk, beta_vk) = keypair(17);
+        let edge = Arc::new(FederationEdge::new(
+            alpha.clone(),
+            ["demo/whoami"],
+            DomainPolicy { domain: alpha.clone(), revision: 1, grants: vec![(beta.clone(), "demo/whoami".into())] },
+            TrustBundle::trusting([(beta.clone(), beta_vk)]),
+            CallPolicy { require_body_binding: true, ..CallPolicy::default() },
+        ));
+        let http_port = alloc_port();
+        let mut a = mesh(1, Some((http_port, Arc::clone(&edge)))).await;
+        let a0 = Arc::new(a.remove(0));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let _reg = a0.capabilities().advertise_capability(whoami(), Duration::from_secs(5));
+        whoami_provider(Arc::clone(&a0), Arc::clone(&calls));
+        let cap_key = format!("cap/{}/demo/whoami", a0.node_id());
+        poll_until(|| a0.kv().get(&cap_key).is_some(), 5_000).await;
+
+        // The captured call: one credential binding these exact bytes.
+        let body = serde_json::to_vec(&task_body("demo/whoami")).unwrap();
+        let issued = fresh_issued_ms();
+        let captured = PresentedCall::sign(
+            &FederatedCaller {
+                body_sha256: Some(FederatedCaller::digest_of(&body)),
+                origin_domain: beta.clone(),
+                principal: "svc/billing".into(),
+                export: "demo/whoami".into(),
+                issued_at_ms: issued,
+                expires_at_ms: issued + 60_000,
+            },
+            &beta_sk,
+        );
+        let raw = reqwest::Client::new();
+        let a2a = format!("http://127.0.0.1:{http_port}/a2a");
+        let post = || {
+            raw.post(&a2a)
+                .header(HEADER_FEDERATED_CALL, captured.to_header_value())
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .body(body.clone())
+                .send()
+        };
+        let v: serde_json::Value = post().await.unwrap().json().await.unwrap();
+        assert_eq!(v["result"]["artifacts"][0]["parts"][0]["text"], crate::federation_principal("beta.example", "svc/billing"), "{v}");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        let v: serde_json::Value = post().await.unwrap().json().await.unwrap();
+        assert_eq!(v["error"]["code"], -32003, "{v}");
+        assert!(v["error"]["message"].as_str().unwrap().contains("replayed"), "{v}");
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "the replay reached no provider");
+        assert_eq!(edge.replays_refused(), (1, 0));
+        let stats: serde_json::Value = raw.get(format!("http://127.0.0.1:{http_port}/stats")).send().await.unwrap().json().await.unwrap();
+        assert_eq!(stats["federation_replays_refused"], 1, "{stats}");
+        assert_eq!(stats["federation_replays_undecidable"], 0, "{stats}");
+
+        // The client's identical call, twice and at once, is two credentials and two calls.
+        let client = FederationClient::new(
+            beta.clone(), "svc/billing", beta_sk.clone(), alpha.clone(),
+            vec![GatewayEndpoint { id: "gw-a0".into(), base_url: format!("http://127.0.0.1:{http_port}") }],
+            4, Duration::from_secs(30),
+        );
+        client.connect().await.expect("catalogue fetch");
+        let (r1, r2) = tokio::join!(
+            client.call("demo/whoami", "?", Repeatability::AtMostOnce),
+            client.call("demo/whoami", "?", Repeatability::AtMostOnce),
+        );
+        r1.expect("first");
+        r2.expect("second — not refused as a replay of the first");
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        assert_eq!(edge.replays_refused(), (1, 0));
+
+        a0.shutdown().await;
     }
 
     /// **The release gate's first leg.** Domain B discovers domain A's catalogue and invokes an
@@ -12433,7 +12527,7 @@ mod federation_gateway_verbs {
     use crate::federation::{
         call::{CallPolicy, CallRefusal, FederatedCaller},
         client::{ClientError, FederationClient, GatewayEndpoint},
-        edge::{now_ms, FederationEdge, PresentedCall, HEADER_FEDERATED_CALL},
+        edge::{FederationEdge, PresentedCall, HEADER_FEDERATED_CALL},
         gateway::Repeatability,
         session::LinkState,
         DomainId, DomainPolicy, TrustBundle,
@@ -12442,7 +12536,7 @@ mod federation_gateway_verbs {
 
     /// A credential minted by hand, for planting a call the client would refuse to make.
     fn cred_for(origin: &DomainId, export: &str, sk: &ed25519_dalek::SigningKey) -> PresentedCall {
-        let now = now_ms();
+        let now = super::federation_transport::fresh_issued_ms();
         PresentedCall::sign(
             &FederatedCaller {
                 origin_domain: origin.clone(),

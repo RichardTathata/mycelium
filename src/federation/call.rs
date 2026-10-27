@@ -180,6 +180,21 @@ pub enum CallRefusal {
     /// answer about load that a retry probably will. Merging them would tell a partner to go and
     /// ask their operator about a grant they already have.
     AtCapacity { partner: DomainId, limit: usize },
+    /// **This exact credential has already been served at this gateway** — a replay.
+    ///
+    /// A credential is one call: the same signed bytes presented a second time inside their window
+    /// would repeat the call's effect, and a body binding cannot tell the copy from the original
+    /// because the copy carries the same body. Found by #695's review: before this, the edge kept no
+    /// record of what it had served, so a captured `pantry/reserve` could be sent again and was
+    /// answered again. Refused like [`CallRefusal::BodyMismatch`], with no benign reading for an
+    /// honest partner: its client mints a new credential for every attempt.
+    Replayed { partner: DomainId },
+    /// The gateway **cannot rule out** that this credential was served: it expires no later than
+    /// the oldest entry the partner's window had to forget to stay within `limit`, so whether it was
+    /// among them is unknown. Refused — the bound fails closed, never by forgetting silently — and
+    /// distinct from [`CallRefusal::Replayed`] because it is not evidence of a replay: a fresh
+    /// credential is served, so a retry resolves it, as with [`CallRefusal::AtCapacity`].
+    ReplayUndecidable { partner: DomainId, limit: usize },
 }
 
 impl std::fmt::Display for CallRefusal {
@@ -206,6 +221,13 @@ impl std::fmt::Display for CallRefusal {
             Self::NotPermitted => write!(f, "authenticated, but policy does not grant this export"),
             Self::AtCapacity { partner, limit } =>
                 write!(f, "this gateway is already carrying {limit} calls for {partner}; refused, not queued"),
+            Self::Replayed { partner } =>
+                write!(f, "this credential from {partner} has already been served at this gateway — replayed"),
+            Self::ReplayUndecidable { partner, limit } => write!(
+                f,
+                "cannot rule out that this credential from {partner} was served: it expires no later than \
+                 entries this gateway forgot to keep {limit} per partner; present a fresh credential"
+            ),
         }
     }
 }

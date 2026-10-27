@@ -153,6 +153,36 @@ apart precisely so a transient load answer is not read as a standing authority a
 Read the current occupancy with `FederationEdge::in_flight_for(&partner)` — the map holds only
 partners with work in flight, so an empty read means idle, not unconfigured.
 
+## A credential is one call (replays)
+
+Every gateway's edge remembers the credentials it has served and refuses one presented again: the same signed
+bytes a second time are a **replay**, refused with `Replayed` and JSON-RPC **-32003**, before any slot is taken or
+anything is dispatched, and counted as `federation_replays_refused` on `GET /stats`. There is nothing to configure.
+A body binding does not do this on its own: the copy of a captured call carries the same body, so before this guard
+anyone holding a captured credential — on the path, or a log that kept the header — could send it again inside its
+lifetime and the provider would act again. The key is the credential's signed bytes, so an *unbound* credential
+presented with a different body is a replay too. An honest client never trips it: `FederationClient` mints every
+credential with a strictly later `issued_at_ms` than its last, so two identical calls are two credentials.
+
+What it does not do, and the window it leaves:
+
+1. **Per gateway.** A domain that runs N gateways serves one credential up to N times, once at each — no shared set,
+   for the reason the slot cap has none.
+2. **In memory.** A restart forgets what was served, so a credential captured before a restart can be served once
+   more after it, inside its lifetime — 300 s at most by default (`CallPolicy::max_lifetime`; shorten it to shorten
+   the window).
+3. **Kept until the credential expires**, plus the 30 s skew tolerance, by the gateway's clock; a wall clock stepped
+   back further than the skew tolerance re-opens what it forgot.
+4. **Bounded**, 65 536 credentials a partner by default (`FederationEdge::with_replay_window_per_partner`). Full, the
+   window forgets the credential expiring first and refuses every credential expiring no later than it as
+   `ReplayUndecidable` (JSON-RPC **-32004**, `federation_replays_undecidable`): fail closed, never a replay served. A
+   fresh credential is served, so a partner's client retries through it; a rising count means the partner calls faster
+   than the window holds, and the fix is a larger window or a shorter lifetime.
+5. **Two clients of one domain** with the same principal, minting the identical call in the same millisecond, mint the
+   same credential, and the second is refused as a replay. Give each client its own principal.
+
+The catalogue `GET` is not guarded: it changes nothing, and its reply is signed for the asker.
+
 ## Encrypting the link (TLS pinning)
 
 Federated calls are signed, not encrypted: without this step an on-path observer reads every call
@@ -268,6 +298,8 @@ Refusals are typed so they route you to the right file. Two pairs matter most:
 - **`BadSignature` is not `NotPermitted`.** The first says somebody is forging; the second says a
   partner asked for something you chose not to grant. Reading a forgery as a policy gap sends you to
   edit the wrong file.
+- **`Replayed` is not `ReplayUndecidable`.** The first is this exact credential served before — someone
+  holds a captured call; the second is a partner window full, which a fresh credential resolves.
 - **`WrongExport` on a catalogue path** means a credential crossed the catalogue/call boundary,
   which is a partner-side bug rather than a permissions question.
 

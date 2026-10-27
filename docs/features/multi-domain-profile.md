@@ -76,6 +76,10 @@ rendering of the family is `doctor_prints_the_federation_family_under_the_multi_
   ([federation § Starting under `secure-multi-domain`](../operations/federation.md#starting-under-secure-multi-domain)).
   **Not its consumer:** that is a bare `FederationClient`, not a node, so the client side's `fed.pinned`,
   `fed.caller_named` and `fed.partner_egress` as a node's facts are shown by the tests above only — carried to Y8.
+- **A replayed credential is refused at every edge**, under any profile — the same signed bytes served once a gateway,
+  in memory, until they expire; per gateway, and forgotten at a restart
+  ([federation § A credential is one call](../operations/federation.md#a-credential-is-one-call-replays)). No guarantee
+  id: it is not a setting, so there is nothing for the report to resolve.
 - **Not built:** `doctor` cannot report the edge's or the clients' facts (stated in the same row). The upgrade
   notes are [deprecations § 66](../guide/deprecations.md#66-a-third-guarantee-profile-secure-multi-domain-ten-fed-guarantees-in-every-report-guaranteereportunresolved-lists-only-what-applies-unreleased-adopter-surface-y7).
 

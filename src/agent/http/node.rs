@@ -210,6 +210,14 @@ pub(super) async fn stats_handler(State(ctx): State<Arc<HttpCtx>>) -> impl IntoR
         body["caller_envelopes_without_id"] = json!(r.without_id.load(std::sync::atomic::Ordering::Relaxed));
         body["caller_envelopes_replayed"] = json!(r.replayed.load(std::sync::atomic::Ordering::Relaxed));
     }
+    // #695's review: federated credentials refused at this gateway's edge as replayed, and as
+    // undecidable (the partner's window full). Zero without an edge.
+    #[cfg(feature = "tls")]
+    {
+        let (replayed, undecidable) = ctx.agent_ctx.federation_edge.get().map_or((0, 0), |e| e.replays_refused());
+        body["federation_replays_refused"] = json!(replayed);
+        body["federation_replays_undecidable"] = json!(undecidable);
+    }
     // Adopter-surface X4: a `correlation` or `parent` carried as a header or in the caller envelope — never read.
     body["causal_fields_misplaced"] = json!(ctx.agent_ctx.misplaced_causal_counts());
     // Post-360 plan rows F and F2 (`deprecations.md` §35, §40), per node: unsigned KV `Data` frames and

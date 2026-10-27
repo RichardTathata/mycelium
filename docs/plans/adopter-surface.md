@@ -942,6 +942,13 @@ node holding the client must also be attached to `edge`, where alpha's gateways 
 **Not built, stated:** three or more domains stay the test `three_domains_compose_without_trust_composing`, not a
 template; no cloud provisioning.
 
+*(2026-10-27, decided by the maintainer on #695's review)* **"refused under a replayed body"** needs the edge to
+refuse a credential it has already served, which it did not — a captured call was answered as often as it was sent
+inside its lifetime. That guard is its own PR, before this row closes: `FederationEdge::claim` (the replay-guard PR,
+`docs/operations/federation.md` § A credential is one call). Once it and the scaffold have both merged, the scaffold's
+CI step adds the replay check — the same credential and body sent twice, the second refused `-32003` naming the
+replay.
+
 ### Y9 · A scale run that runs *(rev 0.10, D27)*
 
 **What:** V1 as the proof page records it: the hosted `scale-nightly.yml` waits on a `[self-hosted, mycelium-scale]`

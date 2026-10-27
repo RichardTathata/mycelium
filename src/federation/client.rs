@@ -229,6 +229,9 @@ pub struct FederationClient {
     /// Lock-order row 39: leaf, µs, never held across the HTTP await (two critical sections
     /// around it, by construction of `call`).
     state: Mutex<ClientState>,
+    /// The `issued_at_ms` of the last credential this client minted, so the next is strictly later
+    /// (the edge refuses a second presentation of the same signed bytes as a replay).
+    last_issued_ms: std::sync::atomic::AtomicU64,
 }
 
 /// How long a single attempt may take before the gateway counts as silent.
@@ -302,6 +305,7 @@ impl FederationClient {
                 last_catalogue: None,
                 highest_revision: None,
             }),
+            last_issued_ms: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -444,7 +448,18 @@ impl FederationClient {
     /// The principal is a parameter rather than always `self.principal` because a gateway makes
     /// this call *for* somebody (item 2 row 11): see [`Self::call_as`].
     fn present(&self, principal: &str, export: &str, body: Option<&[u8]>) -> PresentedCall {
-        let now = now_ms();
+        // **Strictly later than the last one this client minted**, so two calls with the same
+        // principal, export and body inside one millisecond are two credentials and not one the
+        // partner's edge would refuse the second time as a replay. A step forward of a
+        // millisecond is far inside any skew tolerance.
+        let wall = now_ms();
+        let now = match self.last_issued_ms.fetch_update(
+            std::sync::atomic::Ordering::Relaxed,
+            std::sync::atomic::Ordering::Relaxed,
+            |last| Some(wall.max(last.saturating_add(1))),
+        ) {
+            Ok(last) | Err(last) => wall.max(last.saturating_add(1)),
+        };
         PresentedCall::sign(
             &FederatedCaller {
                 origin_domain: self.origin.clone(),
@@ -744,5 +759,32 @@ mod redirect_tests {
         let r = c.post(format!("http://localhost:{hop}/")).header("x-mycelium-federation-call", "credential").send().await;
         assert!(r.map(|r| r.status().is_redirection()).unwrap_or(true), "the redirect is returned, not followed");
         assert_eq!(hits.load(Ordering::SeqCst), 0, "the credential never reaches the redirect target");
+    }
+}
+
+#[cfg(test)]
+mod issue_time_tests {
+    use super::*;
+
+    /// **Every credential this client mints is a different credential**, so the partner's replay
+    /// guard never refuses an honest second call. A thousand back to back, far faster than one a
+    /// millisecond: each `issued_at_ms` strictly later than the last, and each signed form distinct.
+    #[test]
+    fn every_minted_credential_is_strictly_later_than_the_last() {
+        let origin = DomainId::new("beta.example").unwrap();
+        let partner = DomainId::new("alpha.example").unwrap();
+        let client = FederationClient::new(
+            origin,
+            "svc/billing",
+            ed25519_dalek::SigningKey::from_bytes(&[3; 32]),
+            partner,
+            vec![GatewayEndpoint { id: "gw".into(), base_url: "https://127.0.0.1:1".into() }],
+            1,
+            Duration::from_secs(30),
+        );
+        let minted: Vec<PresentedCall> = (0..1_000).map(|_| client.present("svc/billing", "demo/whoami", Some(b"{}"))).collect();
+        assert!(minted.windows(2).all(|w| w[1].issued_at_ms > w[0].issued_at_ms), "issue times strictly increase");
+        let signed: std::collections::HashSet<String> = minted.iter().map(PresentedCall::to_header_value).collect();
+        assert_eq!(signed.len(), 1_000, "no two credentials are the same signed bytes");
     }
 }

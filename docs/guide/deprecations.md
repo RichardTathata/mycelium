@@ -2085,3 +2085,19 @@ them; attach them before `start()`. Under `dev` and `secure-single-domain` a lat
 **Migration:** none is required. To adopt the profile, set what the runbook's table names on every node of every
 federating domain, then select it; read each node's `GET /gateway/guarantees` after attaching its edge and clients,
 because `mycelium doctor` builds a node from a file and cannot see them.
+
+## 67. A federation edge refuses a credential presented twice; `CallRefusal` gained `Replayed` and `ReplayUndecidable` (unreleased, #695's review)
+
+A gateway's `/a2a` now serves each federated credential **once**: the same signed bytes presented again are refused
+`-32003` (`Replayed`), and while a partner's window is full a credential expiring no later than the oldest one it had
+to forget is refused `-32004` (`ReplayUndecidable`). Before, the edge kept no record and served a captured credential
+as often as it was sent inside its lifetime ([federation § A credential is one call](../operations/federation.md#a-credential-is-one-call-replays)).
+`FederationClient` now mints each credential with a strictly later `issued_at_ms` than its last.
+
+**Who notices.** A client that re-sends a credential it already sent — a retry that reuses the header rather than
+minting a new one — is refused the second time; this release's `FederationClient` mints per attempt and is unaffected.
+A partner running a client older than this release that makes the identical call (same principal, export and body)
+twice inside one millisecond mints one credential twice, and the second is refused as a replay. An exhaustive `match`
+on `CallRefusal` already needed a `_` arm (it is `#[non_exhaustive]`), which must fail closed. `GET /stats` gained
+`federation_replays_refused` and `federation_replays_undecidable`. **Migration:** mint a credential per request;
+upgrade partners' clients.
