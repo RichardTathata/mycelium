@@ -119,11 +119,19 @@ function nodeBase(n){
   if(!/^https?:$/.test(u.protocol) || u.username || u.password || u.pathname!=="/" || u.search || u.hash) return null;
   return u.origin;
 }
-// Which nodes the bearer is sent to: the ones the operator typed, the page's default, or — when the URL
-// carried the bearer too — the ones that URL named (its author knew the bearer). A bearer typed while the
-// nodes came from a link is sent to them only once the operator confirms the list.
-const fromUrl = {nodes: params.has("nodes") || params.has("target"), token: hash.has("token")};
-let bearerNodes = new Set(!fromUrl.nodes || fromUrl.token ? nodes() : []);
+// Which nodes the bearer is sent to, decided at each fetch: a node the operator added in the box (or the page's
+// default list), a node the operator confirmed, or a node the opening link named — but only while the bearer in
+// use is the very one that link carried (`#token=…`, so its author already held it). Any other bearer — one typed
+// over the link's, or typed where the link carried none — goes to a link's node only once the operator confirms
+// it; a node a link named never inherits trust from an edit that kept it in the box.
+const urlNodes = new Set(params.has("nodes") || params.has("target") ? nodes() : []);
+const urlToken = hash.get("token") || "";
+const typedNodes = new Set(urlNodes.size ? [] : nodes());
+const confirmedNodes = new Set();
+function bearerGoesTo(node, token){
+  return typedNodes.has(node) || confirmedNodes.has(node) || (urlNodes.has(node) && urlToken !== "" && token === urlToken);
+}
+let lastNodes = nodes();
 
 // The page's one network call: a GET to a node's own route. A browser refuses the answer of a node that
 // does not list this page's origin, and that refusal is indistinguishable here from an unreachable node.
@@ -131,7 +139,7 @@ async function nodeFetch(node, route){
   const base = nodeBase(node);
   if(base===null) return {state:"error", status:"—", detail:`${node} is not host:port or http(s)://host[:port]`};
   const token = $("#token").value.trim();
-  const headers = token && bearerNodes.has(node) ? {Authorization: "Bearer "+token} : {};
+  const headers = token && bearerGoesTo(node, token) ? {Authorization: "Bearer "+token} : {};
   let r;
   try { r = await fetch(base+route, {headers}); }
   catch(e){ return {state:"blocked", detail:`unreachable, or ${node} does not list this page's origin (${location.origin}) in gateway_cors_origins`}; }
@@ -380,20 +388,32 @@ async function refresh(){
   setStatus(readable===ns.length, `${readable}/${ns.length} node(s) read · ${new Date().toLocaleTimeString()}`);
 }
 
+// What typing a bearer into the box does: ask before sending it to any listed node it is not yet trusted with.
+// Declined, those nodes are read without it (their panels say `unauthorized` where a bearer is needed).
+function bearerTyped(ask = q => confirm(q)){
+  const token = $("#token").value.trim();
+  const unconfirmed = nodes().filter(n=>!bearerGoesTo(n, token));
+  if(token && unconfirmed.length && ask(`Send this bearer to ${unconfirmed.join(", ")}? They came from the link that opened this page.`))
+    unconfirmed.forEach(n=>confirmedNodes.add(n));
+}
+// `#typed=…` stands in for typing a bearer into the box and declining the question — the one way a headless
+// browser, which cannot answer a dialog, can drive that path (CI's `typed-bearer` case). It is treated exactly as a
+// typed bearer, never as the link's, so it reaches only nodes already trusted.
+if(hash.has("typed")){ $("#token").value = hash.get("typed"); bearerTyped(() => false); }
+
 renderTabs();
 refresh();
 discoverViz();
 // `?once` renders a single snapshot and stops (what CI's headless browser dumps); otherwise it refreshes.
 if(!params.has("once")) setInterval(refresh, 2500);
-$("#nodes").addEventListener("change", ()=>{ bearerNodes = new Set(nodes()); refresh(); discoverViz(); });
-$("#token").addEventListener("change", ()=>{
-  const unconfirmed = nodes().filter(n=>!bearerNodes.has(n));
-  if($("#token").value.trim() && unconfirmed.length){
-    if(confirm(`Send this bearer to ${unconfirmed.join(", ")}? They came from the link that opened this page.`)) unconfirmed.forEach(n=>bearerNodes.add(n));
-    else $("#token").value = "";
-  }
+// An edit trusts only the nodes it added; a node already in the box keeps the standing it had.
+$("#nodes").addEventListener("change", ()=>{
+  const now = nodes();
+  now.filter(n=>!lastNodes.includes(n)).forEach(n=>typedNodes.add(n));
+  lastNodes = now;
   refresh(); discoverViz();
 });
+$("#token").addEventListener("change", ()=>{ bearerTyped(); refresh(); discoverViz(); });
 </script>
 </body>
 </html>

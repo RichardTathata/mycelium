@@ -38,8 +38,8 @@ gateway_cors_origins = ["http://127.0.0.1:8099"]       # GOSSIP_GATEWAY_CORS_ORI
 Then list them in the **nodes** box (`host:port` for HTTP, or a full `https://…` URL), or in the URL:
 `?nodes=a:9061,b:9061`, `&tab=Guarantees`, `&once` for one snapshot with no refresh (what CI's headless
 browser dumps), and `#token=…` for a bearer — a fragment never reaches a server, but it stays in the browser's
-history, so prefer typing the bearer into the box. The bearer goes only to the nodes you typed (or the default);
-nodes named by a link get it once you confirm them, unless the same link carried the bearer. A node entry is
+history, so prefer typing the bearer into the box. The bearer goes only to the nodes you added (or the default);
+nodes named by a link get it once you confirm them, or while the bearer in use is the one that same link carried. A node entry is
 `host:port` or `http(s)://host[:port]` — anything with a path or query is refused, and its panel says so. A
 gateway with no credential lists only loopback origins (`start()` refuses any other). A showcase's **"⚙ Ops Console"** button opens `?target=host:port` — one node — and the showcases
 list the console's origin themselves. A node that does not list the page's origin answers nothing the

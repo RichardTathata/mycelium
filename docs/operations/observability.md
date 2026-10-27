@@ -281,8 +281,10 @@ gateway_cors_origins = ["http://127.0.0.1:8099"]     # or GOSSIP_GATEWAY_CORS_OR
   enforces it. Serve the page from an origin on the same network as the nodes.
 - `doctor` lists the setting with its source like every field (`docs/reference/configuration.md`).
 - **The page's bearer.** Typed into the page, it is held in the page only and sent only to the nodes the
-  operator typed (or the page's default). A link's `?nodes=` gets it only once the operator confirms the
-  list — unless the same link carried the bearer as `#token=…`, whose author knew it. A fragment never
+  operator added in the box (or the page's default). A node a link's `?nodes=` named gets it only once the
+  operator confirms the list — or while the bearer in use is the very one the same link carried as
+  `#token=…` (its author knew it); decided at each request, so a bearer typed over the link's goes to the
+  link's nodes only when confirmed, and an edit trusts only the nodes it added. A fragment never
   reaches a server, but it stays in the browser's history like the rest of the URL. A node entry is
   `host:port` or `http(s)://host[:port]`: a path, query, fragment or credentials in it are refused, and its
   panel says so. A `ui/viz` link a node advertises is made a link only if it is `http:` or `https:`.

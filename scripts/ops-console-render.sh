@@ -15,6 +15,9 @@
 #                   every node `blocked` — CORS enforced end to end, not only in the gateway's tests;
 #   no-bearer       the listed origin without the bearer, on a gated tab (Fleet): every node `unauthorized` —
 #                   the setting never stands in for the credential;
+#   typed-bearer    a link naming the nodes and an empty `#token=`, then a bearer typed and the question declined
+#                   (`#typed=`): every node on the gated tab is `unauthorized` — a link cannot name the nodes a
+#                   typed bearer goes to;
 #   viz-link-refused a node advertising `ui/viz = javascript:…`: the page makes no link of it;
 #   viz-link-shown  the same key set to an http: URL: the page links it.
 # The fleet binary is built with `metrics` and `compliance`, so the Metrics and Audit tabs read a mounted route.
@@ -30,6 +33,7 @@ if [[ "${1:-}" == "--list" ]]; then
   for t in $(tabs); do echo "@@case-list@@ $suite::tab-$t"; done
   echo "@@case-list@@ $suite::unlisted-origin"
   echo "@@case-list@@ $suite::no-bearer"
+  echo "@@case-list@@ $suite::typed-bearer"
   echo "@@case-list@@ $suite::viz-link-refused"
   echo "@@case-list@@ $suite::viz-link-shown"
   exit 0
@@ -56,17 +60,23 @@ cleanup() {
 }
 trap cleanup EXIT
 
-listed="http://127.0.0.1:8099"
+# The page's two origins on ports free now (a console someone already serves on :8099 must not stand in for
+# this one): the listed origin, which the fleet names, and an unlisted one.
+free_port() { python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])'; }
+listed_port="$(free_port)"
+unlisted_port="$(free_port)"
+[[ "$listed_port" != "$unlisted_port" ]] || unlisted_port="$(free_port)"
+listed="http://127.0.0.1:$listed_port"
 token="ops-console-ci"
 OBSERVED_FLEET_CORS="$listed" OBSERVED_FLEET_TOKEN="$token" target/debug/examples/observed_fleet >"$work/fleet.log" 2>&1 &
 pids+=($!)
-python3 -m http.server 8099 --bind 127.0.0.1 --directory "$root/examples/ops_console" >"$work/listed.log" 2>&1 &
+python3 -m http.server "$listed_port" --bind 127.0.0.1 --directory "$root/examples/ops_console" >"$work/listed.log" 2>&1 &
 pids+=($!)
-python3 -m http.server 8097 --bind 127.0.0.1 --directory "$root/examples/ops_console" >"$work/unlisted.log" 2>&1 &
+python3 -m http.server "$unlisted_port" --bind 127.0.0.1 --directory "$root/examples/ops_console" >"$work/unlisted.log" 2>&1 &
 pids+=($!)
 for _ in $(seq 1 120); do grep -q "observed-fleet: ready" "$work/fleet.log" && break; sleep 0.5; done
 grep -q "observed-fleet: ready" "$work/fleet.log" || { cat "$work/fleet.log"; echo "ops-console-render: the fleet did not start" >&2; exit 1; }
-for port in 8099 8097; do
+for port in "$listed_port" "$unlisted_port"; do
   for _ in $(seq 1 40); do curl -sf -o /dev/null "http://127.0.0.1:$port/index.html" && break; sleep 0.25; done
 done
 # The tuple space's advertisement and the fleet's membership reach every node by gossip.
@@ -93,11 +103,14 @@ for t in $(tabs); do
   python3 "$here/check-ops-console-render.py" --check "$readme" "$t" ok "$nodes" "$work/$t.html" || fail=1
 done
 echo "@@case@@ $suite::unlisted-origin"
-render "http://127.0.0.1:8097" "once&nodes=$nodes&tab=Overview" "token=$token" "$work/unlisted.html"
+render "http://127.0.0.1:$unlisted_port" "once&nodes=$nodes&tab=Overview" "token=$token" "$work/unlisted.html"
 python3 "$here/check-ops-console-render.py" --check "$readme" Overview blocked "$nodes" "$work/unlisted.html" || fail=1
 echo "@@case@@ $suite::no-bearer"
 render "$listed" "once&nodes=$nodes&tab=Fleet" "" "$work/no-bearer.html"
 python3 "$here/check-ops-console-render.py" --check "$readme" Fleet unauthorized "$nodes" "$work/no-bearer.html" || fail=1
+echo "@@case@@ $suite::typed-bearer"
+render "$listed" "once&nodes=$nodes&tab=Fleet" "token=&typed=$token" "$work/typed-bearer.html"
+python3 "$here/check-ops-console-render.py" --check "$readme" Fleet unauthorized "$nodes" "$work/typed-bearer.html" || fail=1
 set_viz() {  # the `ui/viz` key, written through node 1's gateway as any KV writer could
   curl -sf -X POST -H "Authorization: Bearer $token" -H 'Content-Type: application/json' \
     -d "{\"key\":\"ui/viz\",\"value_b64\":\"$(printf '%s' "$1" | base64 | tr -d '\n')\"}" \
