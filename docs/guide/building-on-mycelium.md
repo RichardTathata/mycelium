@@ -87,7 +87,7 @@ prefixes; **do not write under them:**
 > `grp/` · `sys/` · `consensus/` · `cap/` · `req/` · `cap-group/` · `gcap/` · `mailbox/` ·
 > `schemas/` · `tools/` · `agent/` · `svc/` · `log/` · `clog/` · `lock/` · `prompts/` ·
 > `skills/` · `manifest/` · `audit/` · `installable/` · `comp/` · `tuple/` · `wiki/` · `ckpt/` ·
-> `ckptw/` · `strands/` · `facts/` · `knowledge/` · `mandate/` · `rights/` · `cn/` · `grant/` · `faults/` (the full authoritative table
+> `ckptw/` · `strands/` · `facts/` · `knowledge/` · `mandate/` · `rights/` · `cn/` · `grant/` · `faults/` · `sched/` (the full authoritative table
 > with per-key semantics is in
 > [`src/lib.rs`](../../src/lib.rs) → *KV namespace ownership*). One prefix is **yours but read by the substrate**:
 > `ui/` — write `ui/viz` and `ui/label` to advertise your node's own page, and put nothing else there, because a
@@ -176,7 +176,7 @@ inherits the contract without reading everything:
 - **Our KV keys live under `myapp/…`.** Never write under the substrate's reserved
   prefixes: grp/ sys/ consensus/ cap/ req/ cap-group/ gcap/ mailbox/ schemas/ tools/
   agent/ svc/ log/ clog/ lock/ prompts/ skills/ installable/ comp/ tuple/ wiki/ ckpt/ ckptw/
-  strands/ facts/ manifest/ audit/ knowledge/ mandate/ rights/ cn/ grant/ faults/ (authoritative table: mycelium
+  strands/ facts/ manifest/ audit/ knowledge/ mandate/ rights/ cn/ grant/ faults/ sched/ (authoritative table: mycelium
   `src/lib.rs` → KV namespace ownership). `ui/` is ours to write — `ui/viz`, `ui/label` only — and browser-readable
   where a gateway lists an origin.
 - **One compatibility rule, Rust's definition.** The substrate ships compatible additions on the

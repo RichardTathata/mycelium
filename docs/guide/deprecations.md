@@ -2109,6 +2109,22 @@ unknown key only if it denies unknown keys — `GossipConfig` does not, so an ol
 cross-origin read. **Migration:** serve `examples/ops_console/` (for example
 `python3 -m http.server 8099 --directory examples/ops_console`) and add its origin to each node you point it at.
 
+## 68. A unit file's `[[schedule]]` is refused by readers before this release; `NodeCapabilityConfig` gained `schedules`; `sched/` is an owned namespace and the `schedule` capability namespace reserved (unreleased, adopter-surface Y2)
+
+The unit file gained `[[schedule]]` — declared recurring work, run by the embedding application with
+`GossipAgent::run_schedule` ([unit file § schedule](../reference/unit-file.md#schedule)). Every reader refuses an
+unknown section by name (§49, 2.35.0), so a unit carrying one is refused by a `wire-check`, a gateway or a stem older
+than this release. In this release the gateway's `POST /gateway/units/declare` refuses it too (`422`,
+`schedule section`) and a stem refuses to start with one, naming it: only an application supplies the work. The raw
+KV routes refuse a key under `sched/` (`403 protected_key`): a forged `sched/{id}/last/{node}` would skip or repeat
+slots. The capability namespace `schedule` is reserved for a schedule's candidacy and holding: `advertise_capability`
+writes nothing there (a warning), the gateway's `capability/advertise` and `units/declare` answer `403
+reserved_namespace` / `400`, and the loader refuses a `[[capability]]` or `[[group.provides]]` in it.
+`NodeCapabilityConfig` gained the field `schedules`, so an exhaustive struct literal breaks (`..Default::default()`
+is unaffected). **Migration:** declare `[[schedule]]` only in units read by this release's tools; an application
+writing `sched/` keys through the KV routes, or advertising a capability in the `schedule` namespace, moves them
+elsewhere.
+
 ## 69. `mycelium tls issue` refuses to replace a node key it issued before; `--force` replaces it; `tls ca` and `tls pin` are new (unreleased, adopter-surface Y8)
 
 `mycelium tls issue --ca-dir <ca> --node <ip:port> --out <dir>` used to write over `<dir>/<node>.key.pem` silently.

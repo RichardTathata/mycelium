@@ -428,6 +428,18 @@ impl CapFilter {
     }
 }
 
+/// The capability namespaces a door that writes an advertisement for someone else refuses, with the reason: each is
+/// written by the substrate for its own decision. `schedule` (adopter-surface Y2) holds a schedule's candidacy and
+/// holding (`mycelium::schedule`): an advertisement written there by anything but the schedule's loop would enter its
+/// election as a candidate that runs nothing. `GossipAgent::run_schedule` advertises there through the crate's own
+/// path; [`CapabilitiesHandle::advertise_capability`](crate::CapabilitiesHandle::advertise_capability), the gateway's
+/// `capability/advertise` and `units/declare`, and the unit-file loader refuse it.
+pub fn reserved_capability_namespace(namespace: &str) -> Option<&'static str> {
+    (namespace == crate::schedule::CANDIDATE_NS).then_some(
+        "`schedule` is reserved: it holds a schedule's candidacy and holding, written only by the schedule's own loop (GossipAgent::run_schedule)",
+    )
+}
+
 /// Why `(namespace, name)` cannot name a capability or a requirement, or `None` when it can.
 ///
 /// The pair is two segments of `cap/{node}/{ns}/{name}` (and of `req/…` and

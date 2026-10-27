@@ -70,6 +70,17 @@ impl CapabilitiesHandle {
         capability: Capability,
         interval:   Duration,
     ) -> CapabilityReg {
+        if let Some(problem) = crate::capability::reserved_capability_namespace(&capability.namespace) {
+            warn!(ns = %capability.namespace, name = %capability.name, problem, "advertise_capability: refused; nothing is advertised");
+            let (cancel_tx, _) = tokio::sync::oneshot::channel::<()>();
+            return CapabilityReg { _retract: cancel_tx };
+        }
+        self.advertise_unchecked(capability, interval)
+    }
+
+    /// [`advertise_capability`](Self::advertise_capability) without the reserved-namespace refusal — the path the
+    /// substrate's own advertisements in a reserved namespace take (`mycelium::schedule`).
+    pub(crate) fn advertise_unchecked(&self, capability: Capability, interval: Duration) -> CapabilityReg {
         let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel::<()>();
         // A name that is not a key segment, or the node's own locality entry, is refused: the handle
         // returned holds nothing and nothing is written (#613's review, finding 6).
