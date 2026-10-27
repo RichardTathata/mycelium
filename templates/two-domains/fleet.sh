@@ -28,12 +28,12 @@ partner_of() { for d in $DOMAINS; do [ "$d" = "$(domain_of "$1")" ] || echo "$d"
 tokens_env() { if [ -f "secrets/$1.tokens" ]; then echo "GOSSIP_GATEWAY_NAMED_TOKENS=$(cat "secrets/$1.tokens")"; else echo "GOSSIP_UNUSED=1"; fi; }
 case "${1:-}" in
   setup)
+    cargo build -q                         # first: a build that fails leaves nothing made, so setup can be run again
     [ ! -e secrets ] || { echo "secrets/ exists: setup runs once (remove ca/ certs/ secrets/ exchange/ data/ to start over)"; exit 3; }
     mkdir -p exchange secrets
-    cargo build -q
     for d in $DOMAINS; do
       "$M" tls ca --out "ca/$d"            # each domain's CA, on the issuer's host: ca/ is never a node's directory
-      "$BIN" keys "$d"                     # the domain's signing key; its public half goes to exchange/
+      "$BIN" keys "$d"                     # the domain's signing and operator keys; their public halves go to exchange/
     done
     for n in $NODES; do
       "$M" tls issue --ca-dir "ca/$(domain_of "$n")" --node "$(id_of "$n")" --out "certs/$n"

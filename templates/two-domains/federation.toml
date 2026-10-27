@@ -6,7 +6,8 @@
 
 # ── The food bank ──────────────────────────────────────────────────────────────────────────────
 [domains."foodbank.example"]
-signing_seed = "secrets/foodbank.example.seed"   # signs its catalogue and its calls' credentials; stays on the gateway
+signing_seed = "secrets/foodbank.example.seed"   # signs its catalogue and its calls' credentials; read by the gateway alone
+operator_key = "exchange/foodbank.example.operator.pub"   # the root its mandates verify under; its seed stays with the operator
 gateway      = "foodbank-gw"
 # What it serves, and what it grants each partner (a signed catalogue). `reserve` takes a while, as a reservation might.
 exports      = ["pantry/stock", "pantry/reserve"]
@@ -28,6 +29,7 @@ permit    = { "token:foodbank/steward" = ["menu/today"] }
 # ── The community kitchen ──────────────────────────────────────────────────────────────────────
 [domains."kitchen.example"]
 signing_seed = "secrets/kitchen.example.seed"
+operator_key = "exchange/kitchen.example.operator.pub"
 gateway      = "kitchen-gw"
 exports      = ["menu/today"]
 grants       = { "foodbank.example" = ["menu/today"] }

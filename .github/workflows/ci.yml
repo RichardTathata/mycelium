@@ -771,9 +771,12 @@ jobs:
           trap 'bash fleet.sh stop || true; for f in data/*.log; do echo "--- $f"; tail -n 30 "$f"; done' EXIT
           bash fleet.sh setup
           test -s exchange/foodbank-gw.pin && test -s exchange/kitchen-gw.pin && test -s exchange/kitchen.example.pub
-          # No node directory holds a CA key, or another node's key.
+          # No node directory holds a CA key, or another node's key; every key, seed and token file is owner-only.
           for n in foodbank-gw foodbank-1 kitchen-gw kitchen-1; do
             test "$(ls certs/$n | grep -c 'key.pem')" = 1 && ! test -e "certs/$n/ca-key.pem"
+          done
+          for f in ca/*/ca-key.pem certs/*/*.key.pem secrets/*; do
+            test "$(stat -c %a "$f")" = 600 || { echo "$f is $(stat -c %a "$f"), not 600"; exit 1; }
           done
           bash fleet.sh start-all
           bash fleet.sh connect kitchen-gw | tee connect.log; grep -q '"link":"ready"' connect.log
@@ -817,13 +820,28 @@ jobs:
             grep -q '^profile: secure-multi-domain rev 1$' "doctor-$n.log"
             grep -q '^start(): would start$' "doctor-$n.log" || { cat "doctor-$n.log"; exit 1; }
           done
+          # A domain's signing seed is read by its gateway alone: with it gone, the members still build and would start,
+          # and the gateway refuses naming the file.
+          mv secrets/foodbank.example.seed secrets/kitchen.example.seed "$RUNNER_TEMP/"
+          for n in foodbank-1 kitchen-1; do bash fleet.sh doctor "$n" | grep -q '^start(): would start$'; done
+          if bash fleet.sh doctor foodbank-gw > seedless.log 2>&1; then echo "a gateway built without its seed"; exit 1; fi
+          grep -q 'secrets/foodbank.example.seed' seedless.log
+          mv "$RUNNER_TEMP/foodbank.example.seed" "$RUNNER_TEMP/kitchen.example.seed" secrets/
           # The file alone cannot carry the code attachments: the published doctor says so by refusing.
           if "$BIN" doctor nodes/kitchen-gw.toml > file-doctor.log; then echo "doctor over the file alone started"; exit 1; fi
           grep -q 'ae.authorised_at_seam: not_configured' file-doctor.log
           # The README's last lines: a wrong pin, and the kitchen's gateway refuses to talk to the partner at all.
           printf '%064d' 0 > exchange/foodbank-gw.pin && bash fleet.sh start-all
           if bash fleet.sh connect kitchen-gw | tee pin.log; then echo "connected under a wrong pin"; exit 1; fi
-          grep -q 'presented an unpinned key' pin.log
+          grep -q 'presented an unpinned key' pin.log && grep -q '"sent":false' pin.log
+          if bash fleet.sh call kitchen-gw pantry/stock | tee pin-call.log; then echo "called under a wrong pin"; exit 1; fi
+          grep -q '"error":"link"' pin-call.log && grep -q '"sent":false' pin-call.log
+          # The README's restore: the pin from the food bank gateway's certificate, and the call goes through again.
+          bash fleet.sh stop kitchen-gw && "$BIN" tls pin certs/foodbank-gw/*.cert.pem > exchange/foodbank-gw.pin
+          bash fleet.sh start kitchen-gw && bash fleet.sh connect kitchen-gw && bash fleet.sh call kitchen-gw pantry/stock | grep -q '^200 '
+          # `tls issue` over a key already issued is refused, naming the pin it would invalidate.
+          if "$BIN" tls issue --ca-dir ca/foodbank.example --node 127.0.0.1:7961 --out certs/foodbank-gw 2> reissue.err; then echo "re-issued silently"; exit 1; fi
+          grep -q 'tls pin' reissue.err
 
   python-sdk:
     # The repo's first Python CI job: mycelium-py (call_typed) + the LangGraph

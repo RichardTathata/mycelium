@@ -351,9 +351,10 @@ third concurrent call against a cap of two are each refused — CI's `Scaffold` 
 
 **A credential presented twice.** The edge checks a federated credential's signature, its body binding, its window
 and the grant; it keeps no record of the credentials it has served, so the same credential with the same body,
-presented again inside its window (at most `CallPolicy::max_lifetime`, 300 s by default), is served again. A partner
-that can replay a captured call can repeat its effect within that window; an at-most-once effect needs its own
-idempotency key at the provider ([side effects](../features/side-effects.md)).
+presented again inside its window (at most `CallPolicy::max_lifetime`, 300 s by default), is served again. **Anyone
+who holds a captured credential and its body** — on the path, at a proxy that terminates TLS, in a log that kept a
+request — can repeat its effect within that window, not only the partner; an at-most-once effect needs its own
+idempotency key at the provider ([side effects](../features/side-effects.md)) until the edge refuses a replay.
 
 ## What this runbook does not cover
 

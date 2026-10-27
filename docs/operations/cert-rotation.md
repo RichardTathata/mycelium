@@ -97,7 +97,8 @@ reported as `audit_unverified`, never sealed over). Seal a checkpoint with the *
   any posture. The guarantee `id.revocation_authority` reports `not_configured` while the CA key is on
   the node.
 - **The secure posture cannot rotate** (`rotate_identity` needs the CA key). Recovery there is
-  **re-issue only**: `mycelium tls issue` a new certificate (it is issued after every earlier one, so the
+  **re-issue only**: `mycelium tls issue --force` a new certificate (`--force` because it replaces the node's key and
+  every pin a partner holds for it — [deprecations § 69](../guide/deprecations.md#69-mycelium-tls-issue-refuses-to-replace-a-node-key-it-issued-before---force-replaces-it-tls-ca-and-tls-pin-are-new-unreleased-adopter-surface-y8); it is issued after every earlier one, so the
   new key outranks them), restart the node with it, then `POST /gateway/identity/revoke` the old key.
 - **A retired key still verifies until it is revoked.** `rotate_identity` alone is hygiene.
 - **Anti-entropy** entries carry no author and no signature, so a revocation cannot reach them. (An unsigned
@@ -190,7 +191,7 @@ certificate and the CA **certificate** alone:
 ```bash
 # on the issuer's host, where ca-cert.pem + ca-key.pem live (never on a node) — minted there once:
 mycelium tls ca --out ./fleet-ca          # refused if ./fleet-ca already holds a CA
-mycelium tls issue --ca-dir ./fleet-ca --node 10.0.0.7:8080 --out ./issued
+mycelium tls issue --ca-dir ./fleet-ca --node 10.0.0.7:8080 --out ./issued   # --force to replace a key issued before
 # → ./issued/10_0_0_7_8080.cert.pem and .key.pem
 # on the node: copy both plus ./fleet-ca/ca-cert.pem (the certificate only) into its directory, and
 [tls]

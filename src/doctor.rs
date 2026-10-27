@@ -79,7 +79,8 @@ pub struct Doctor {
     pub schema: &'static str,
     pub config_path: Option<PathBuf>,
     /// Whether the node was built by [`run_attached`], with the embedder's code attachments, rather
-    /// than from the file alone.
+    /// than from the file alone. In the JSON form (`mycelium.doctor/1`) the `attached` field; `false` from
+    /// `mycelium doctor`, which only ever builds from the file.
     pub attached: bool,
     pub effective: Vec<Field>,
     pub refusal: Option<Refusal>,
@@ -155,9 +156,10 @@ fn run_inner(config_path: Option<&Path>, attach: Option<Attach<'_>>) -> Doctor {
             return d;
         }
     };
-    // Built, never started: no port, no directory, no attachment. The same `preflight()` and
-    // `profile_check()` that `start()` runs, in its order; the report taken between them as `start()`
-    // takes it — except that `started` reads false here, which the report records.
+    // Built, never started: no port and no directory — and no attachment, unless `run_attached` was given one, which
+    // then runs as the embedder wrote it (a journal it opens is opened). The same `preflight()` and `profile_check()`
+    // that `start()` runs, in its order; the report taken between them as `start()` takes it — except that `started`
+    // reads false here, which the report records.
     let agent = GossipAgent::new(node, cfg);
     let agent = match attach {
         Some(attach) => attach(agent),

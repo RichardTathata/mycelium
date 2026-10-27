@@ -16,6 +16,7 @@ use std::time::Duration;
 #[serde(deny_unknown_fields)]
 struct Domain {
     signing_seed: PathBuf,
+    operator_key: PathBuf,
     gateway: String,
     exports: Vec<String>,
     #[serde(default)]
@@ -62,8 +63,25 @@ fn read(path: &PathBuf) -> String {
 fn hex32(path: &PathBuf) -> [u8; 32] {
     let s = read(path);
     let s = s.trim();
-    let bytes: Vec<u8> = (0..s.len()).step_by(2).filter_map(|i| s.get(i..i + 2).and_then(|b| u8::from_str_radix(b, 16).ok())).collect();
-    bytes.try_into().unwrap_or_else(|_| refuse(&format!("{}: expected 64 hex characters", path.display())))
+    if s.len() != 64 || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
+        refuse(&format!("{}: expected 64 hex characters", path.display()));
+    }
+    let mut out = [0u8; 32];
+    for (i, b) in out.iter_mut().enumerate() {
+        *b = u8::from_str_radix(&s[2 * i..2 * i + 2], 16).expect("checked hex");
+    }
+    out
+}
+
+/// Write a secret readable by its owner only (0600 on unix), refusing to replace one: a key or a token is made once.
+fn write_secret(path: &PathBuf, contents: &str) {
+    use std::io::Write as _;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
+    let mut f = opts.open(path).unwrap_or_else(|e| refuse(&format!("{}: {e} (a secret is made once)", path.display())));
+    f.write_all(contents.as_bytes()).unwrap_or_else(|e| refuse(&format!("{}: {e}", path.display())));
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -125,7 +143,6 @@ impl Fleet {
         let name = domain_of(node);
         let d = self.domain(&name);
         let me = domain_id(&name);
-        let seed = SigningKey::from_bytes(&hex32(&d.signing_seed));
         let providers: Vec<String> = members_of(&name).into_iter().filter(|(n, _)| *n != d.gateway).map(|(_, id)| id).collect();
         let mut rules = Vec::new();
         if let Some(actor) = &d.permit_actor {
@@ -142,10 +159,13 @@ impl Fleet {
                 }
             }
         }
-        crate::authority::attach(&agent, node, &name, &seed, rules);
+        // A member holds only the operator's public key, the root its mandates verify under; the domain's signing key
+        // is read on the gateway alone, which is the one node that signs (#695's review, finding 2).
+        crate::authority::attach(&agent, node, &name, hex32(&d.operator_key), rules);
         if d.gateway != node {
             return agent;
         }
+        let seed = SigningKey::from_bytes(&hex32(&d.signing_seed));
         let mut agent = agent;
         if !d.exports.is_empty() {
             let grants = d.grants.iter().flat_map(|(p, es)| es.iter().map(move |e| (domain_id(p), e.clone()))).collect();
@@ -177,19 +197,20 @@ impl Fleet {
     }
 }
 
-/// `keys <domain>`: the domain's signing key, made once. The seed stays in `secrets/`; the public half goes to
-/// `exchange/`, which is what the partner's operator is handed.
+/// `keys <domain>`: the domain's two keys, each made once. The **signing** key signs its catalogue and its calls'
+/// credentials: its seed is for the gateway alone (`secrets/<domain>.seed`), its public half for the partner
+/// (`exchange/<domain>.pub`). The **operator** key is the root the domain's own mandates verify under: its seed stays
+/// with the operator (`secrets/<domain>.operator.seed`) and no node reads it; every node reads its public half
+/// (`exchange/<domain>.operator.pub`).
 pub fn keys(domain: &str) -> i32 {
-    let seed = PathBuf::from(format!("secrets/{domain}.seed"));
-    if seed.exists() {
-        refuse(&format!("{} exists: a domain's key is made once (delete it to start the domain over)", seed.display()));
-    }
-    let key = SigningKey::generate(&mut rand_core::OsRng);
     std::fs::create_dir_all("secrets").and_then(|_| std::fs::create_dir_all("exchange")).unwrap_or_else(|e| refuse(&e.to_string()));
-    std::fs::write(&seed, hex(&key.to_bytes())).unwrap_or_else(|e| refuse(&e.to_string()));
-    let public = format!("exchange/{domain}.pub");
-    std::fs::write(&public, hex(&key.verifying_key().to_bytes())).unwrap_or_else(|e| refuse(&e.to_string()));
-    println!("{domain}: {} (secret) and {public} (hand this to the partner)", seed.display());
+    for (what, seed) in [("signing", format!("secrets/{domain}.seed")), ("operator", format!("secrets/{domain}.operator.seed"))] {
+        let key = SigningKey::generate(&mut rand_core::OsRng);
+        write_secret(&PathBuf::from(&seed), &hex(&key.to_bytes()));
+        let public = seed.replace("secrets/", "exchange/").replace(".seed", ".pub");
+        std::fs::write(&public, hex(&key.verifying_key().to_bytes())).unwrap_or_else(|e| refuse(&e.to_string()));
+        println!("{domain}: {what} key {seed} (secret) and {public}");
+    }
     0
 }
 
@@ -206,10 +227,7 @@ pub fn tokens(node: &str) -> i32 {
         .collect();
     entries.push(format!("operator|{}|fleet:read", token()));
     let path = format!("secrets/{node}.tokens");
-    if std::path::Path::new(&path).exists() {
-        refuse(&format!("{path} exists: tokens are made once"));
-    }
-    std::fs::write(&path, entries.join(";")).unwrap_or_else(|e| refuse(&e.to_string()));
+    write_secret(&PathBuf::from(&path), &entries.join(";"));
     println!("{node}: {path} ({} named caller(s))", entries.len());
     0
 }
@@ -260,8 +278,8 @@ pub async fn tamper(node: &str, export: &str) -> i32 {
 pub async fn local_call(node: &str, path: &str, body: Option<&str>) -> i32 {
     let cfg = mycelium::GossipConfig::load_from_file(node_path(node)).unwrap_or_else(|e| refuse(&e.to_string()));
     let port = cfg.http_port.unwrap_or_else(|| refuse(&format!("{node} runs no gateway")));
-    let domain = domain_of(node);
-    let ca = read(&PathBuf::from(format!("ca/{domain}/ca-cert.pem")));
+    // The CA certificate the local caller is given — the one in the gateway's own directory, never the issuer's `ca/`.
+    let ca = read(&PathBuf::from(format!("certs/{node}/ca-cert.pem")));
     // The first entry: the local caller the domain's policy permits across the edge (`tokens`), or `operator`.
     let tokens = read(&PathBuf::from(format!("secrets/{node}.tokens")));
     let token = tokens.split(';').next().and_then(|e| e.split('|').nth(1))

@@ -3,7 +3,6 @@
 //! at the provider; the evidence journal its decisions are recorded in before anything is dispatched; and an
 //! execution authority whose revocation epochs survive a restart. A real deployment attaches its own policy adapter
 //! here — the reference evaluator is a stand-in, and the rules are the scaffold's.
-use ed25519_dalek::SigningKey;
 use mycelium::knowledge::{issuer::TrustedExternalIssuers, IssuerId};
 use mycelium::mandate::authority::{ClockModel, DurableEpochs, ExecutionGate, FreshnessPolicy, ResourceTier};
 use mycelium::mandate::grant::{EntitlementTable, GrantVerifier};
@@ -11,7 +10,7 @@ use mycelium::mandate::{PrincipalId, ResourceAuthority};
 use mycelium::{EvidenceJournal, EvidenceProfile, ExecutionAuthority, GossipAgent, ReferenceEvaluator, Rule};
 use std::sync::Arc;
 
-pub fn attach(agent: &GossipAgent, node: &str, domain: &str, operator: &SigningKey, rules: Vec<(String, String, String)>) {
+pub fn attach(agent: &GossipAgent, node: &str, domain: &str, operator: [u8; 32], rules: Vec<(String, String, String)>) {
     let data = std::path::PathBuf::from(format!("data/{node}"));
     std::fs::create_dir_all(&data).unwrap_or_else(|e| crate::fleet::refuse(&format!("{}: {e}", data.display())));
     let mut evaluator = ReferenceEvaluator::new(format!("{domain}-1")).with_catalogue(domain, "1");
@@ -19,15 +18,17 @@ pub fn attach(agent: &GossipAgent, node: &str, domain: &str, operator: &SigningK
         evaluator = evaluator.map_action(operation.clone(), resource.clone()).allow(Rule::new(actor, operation, resource));
     }
     // The journal first, so the evaluator's first decision has somewhere to be recorded.
-    let journal = EvidenceJournal::open(data.join("evidence"), EvidenceProfile::Strict).unwrap_or_else(|e| crate::fleet::refuse(&format!("evidence journal: {e}")));
+    let journal = EvidenceJournal::open(data.join("evidence"), EvidenceProfile::Strict)
+        .unwrap_or_else(|e| crate::fleet::refuse(&format!("evidence journal: {e} — a running node holds it: stop {node} before `doctor {node}`")));
     agent.with_evidence_journal(journal);
     agent.with_action_evaluator(Arc::new(evaluator));
     agent.with_provider_enforcement();
-    // Mandates this domain's operator issues are verified here, under the domain's own key; none is presented in
-    // this scaffold, so the gate decides nothing yet — it is attached so one would be checked, its epochs on disk.
+    // Mandates this domain's operator issues are verified here, under the operator's public key (`exchange/`); none is
+    // presented in this scaffold, so the gate decides nothing yet — it is attached so one would be checked, its epochs
+    // on disk.
     let issuer = format!("operator:{domain}");
     let mut external = TrustedExternalIssuers::new();
-    external.trust(IssuerId::new(&issuer).expect("issuer id"), operator.verifying_key().to_bytes()).expect("trust the operator");
+    external.trust(IssuerId::new(&issuer).expect("issuer id"), operator).expect("trust the operator");
     let mut entitlements = EntitlementTable::new();
     entitlements.entitle(domain, PrincipalId::new(&issuer).expect("principal"));
     let gate = ExecutionGate::strict(

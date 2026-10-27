@@ -8,6 +8,11 @@ holds a client for the other, pinned to that gateway's key; each node's egress l
 call made at one gateway by its local caller reaches the other domain's provider carrying that caller's name, where
 the provider's own policy decides it again.
 
+**Until the release after v2.38.1, this project builds only against a checkout of the repository**: `secure-multi-domain`,
+`mycelium tls ca` and the doctor this project runs are newer than every published tag, so a `Cargo.toml` pinned to one
+of them does not build. Point its `mycelium` dependency at a checkout (`mycelium = { path = "…", features = [...] }`)
+and use that checkout's `mycelium` binary, as CI does; from the next release the pin `mycelium init` writes is enough.
+
 ```bash
 export MYCELIUM=$(command -v mycelium)   # the published binary: `tls ca`, `tls issue`, `tls pin`
 bash fleet.sh setup                      # CAs, certificates, domain keys, pins, tokens (ca/, certs/, secrets/: never commit)
@@ -29,8 +34,11 @@ What each file is:
 | `exchange/` | what the two operators hand each other: each gateway's pin and each domain's public key — never a private key |
 
 `ca/` is the issuer's: it holds each domain's CA key and no node is pointed at it. `certs/<node>/` holds that node's
-certificate, its key and the CA's certificate, nothing else. A gateway's tokens reach it through
-`GOSSIP_GATEWAY_NAMED_TOKENS`, which `fleet.sh` sets from `secrets/<node>.tokens`.
+certificate, its key and the CA's certificate, nothing else. Each domain has two keys: its **signing** key, which signs
+its catalogue and its calls and is read by its gateway alone (`secrets/<domain>.seed`), and its **operator** key, the
+root its own mandates verify under, whose seed no node reads (`secrets/<domain>.operator.seed`; every node reads
+`exchange/<domain>.operator.pub`). Every key and token file is written owner-only (0600). A gateway's tokens reach it
+through `GOSSIP_GATEWAY_NAMED_TOKENS`, which `fleet.sh` sets from `secrets/<node>.tokens`.
 
 **Refused, each shown in CI.** A partner holding too many calls at once is refused, not queued — each gateway carries
 at most two of its partner's (`max_in_flight_per_partner`); a third concurrent `bash fleet.sh call kitchen-gw
@@ -53,16 +61,25 @@ body with another, and the food bank's edge answers that the credential binds a 
   in `src/authority.rs`. No mandate is presented here, so the execution authority is attached and decides nothing yet.
 - `mycelium doctor nodes/<node>.toml` reads the file alone and cannot see what the program attaches in code, so it
   refuses on the evaluator, the journal and the edge; `bash fleet.sh doctor <node>` is the same doctor over the node as
-  the program builds it.
-- The tag `Cargo.toml` pins is the release `mycelium init` came from; a release before `secure-multi-domain` shipped
-  cannot build this project.
+  the program builds it — and, because it attaches what the program attaches, it cannot run beside the node itself:
+  the running node holds its evidence journal, and the doctor says so and stops.
 
-Every node's doctor, and the call refused when the pin is wrong. The doctor attaches what the program attaches — the
-node's evidence journal among them, which a running node holds — so it reads stopped nodes:
+Every node's doctor, and a wrong pin. The doctor attaches what the program attaches — the node's evidence journal
+among them, which a running node holds — so it reads stopped nodes. With a wrong pin the kitchen's gateway refuses the
+food bank's key during the handshake, so the connection a call needs is never made: `connect` is refused by the pin,
+and a `call` then answers that the link is down — neither sends a byte of a call:
 
 ```bash
 bash fleet.sh stop
 for n in foodbank-gw foodbank-1 kitchen-gw kitchen-1; do bash fleet.sh doctor $n | grep -E '^(profile|start)'; done   # start(): would start
 printf '%064d' 0 > exchange/foodbank-gw.pin && bash fleet.sh start-all
-bash fleet.sh connect kitchen-gw   # 502 … "presented an unpinned key" — refused before any byte of a call is sent
+bash fleet.sh connect kitchen-gw              # 502 … "presented an unpinned key", "sent":false
+bash fleet.sh call kitchen-gw pantry/stock    # 409 … "link: Down", "sent":false
+```
+
+To restore the right pin — the food bank gateway's certificate is the source of it — and reconnect:
+
+```bash
+bash fleet.sh stop kitchen-gw && "$MYCELIUM" tls pin certs/foodbank-gw/*.cert.pem > exchange/foodbank-gw.pin
+bash fleet.sh start kitchen-gw && bash fleet.sh connect kitchen-gw && bash fleet.sh call kitchen-gw pantry/stock
 ```

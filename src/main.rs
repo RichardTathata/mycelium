@@ -710,7 +710,7 @@ fn explain_cli(args: Vec<String>) -> i32 {
 /// gateway that serves this certificate's key. An operator hands the partner this line, never the key
 /// (adopter-surface Y8). Exits 2 on usage or a file that is not one PEM certificate.
 fn tls_cli(args: Vec<String>) -> i32 {
-    const USAGE: &str = "Usage: mycelium tls ca --out <dir>\n       mycelium tls issue --ca-dir <dir> --node <ip:port> --out <dir>\n       mycelium tls pin <cert.pem>";
+    const USAGE: &str = "Usage: mycelium tls ca --out <dir>\n       mycelium tls issue --ca-dir <dir> --node <ip:port> --out <dir> [--force]\n       mycelium tls pin <cert.pem>";
     let mut it = args.into_iter();
     match it.next().as_deref() {
         Some("issue") => {}
@@ -719,8 +719,10 @@ fn tls_cli(args: Vec<String>) -> i32 {
         _ => { eprintln!("{USAGE}"); return 2; }
     }
     let (mut ca_dir, mut node, mut out): (Option<String>, Option<String>, Option<String>) = (None, None, None);
+    let mut force = false;
     while let Some(a) = it.next() {
         match a.as_str() {
+            "--force" => force = true,
             "--ca-dir" => ca_dir = it.next(),
             "--node" => node = it.next(),
             "--out" => out = it.next(),
@@ -732,6 +734,17 @@ fn tls_cli(args: Vec<String>) -> i32 {
     #[cfg(feature = "tls")]
     {
         let node_id: mycelium::NodeId = match node.parse() { Ok(n) => n, Err(e) => { eprintln!("--node: {e}"); return 2; } };
+        // A node key already issued is an identity in use: a partner may pin it, a node may run on it. Issuing over
+        // it replaces both, so it takes `--force` (#695's review, finding 5; deprecations § 67).
+        let existing = std::path::Path::new(&out).join(format!("{}.key.pem", node_id.as_str().replace([':', '.'], "_")));
+        if existing.exists() && !force {
+            eprintln!(
+                "{} exists: issuing over it replaces this node's key, so a node running on it must restart, and every \
+                 partner that pins its gateway must be given the new pin (`mycelium tls pin`); pass --force to issue anyway",
+                existing.display()
+            );
+            return 2;
+        }
         match mycelium::issue_node_cert(std::path::Path::new(&ca_dir), &node_id, std::path::Path::new(&out)) {
             Ok((cert, key)) => {
                 println!("issued {} and {}", cert.display(), key.display());
@@ -743,7 +756,7 @@ fn tls_cli(args: Vec<String>) -> i32 {
     }
     #[cfg(not(feature = "tls"))]
     {
-        let _ = (ca_dir, node, out);
+        let _ = (ca_dir, node, out, force);
         eprintln!("mycelium tls issue needs a binary built with the `tls` feature");
         2
     }
@@ -789,9 +802,14 @@ fn tls_pin(args: Vec<String>) -> i32 {
     }
 }
 
-/// The pin of the one certificate in `pem`, as hex: its `SubjectPublicKeyInfo`'s SHA-256, read structurally.
+/// The pin of the one certificate in `pem`, as hex: its `SubjectPublicKeyInfo`'s SHA-256, read structurally. Refused:
+/// no certificate or more than one, a file that also carries a private key (what is handed to a partner must hold
+/// none), and a CA certificate — no gateway presents the CA's key, so its pin admits nothing (#695's review, finding 6).
 #[cfg(feature = "tls")]
 fn pin_of_pem(pem: &str) -> Result<String, String> {
+    if pem.contains("PRIVATE KEY-----") {
+        return Err("the file carries a private key: pin the certificate alone, and hand the partner only the pin".into());
+    }
     let blocks: Vec<&str> = pem.split("-----BEGIN CERTIFICATE-----").skip(1).collect();
     let [block] = blocks.as_slice() else {
         return Err(format!("expected exactly one PEM certificate, found {}", blocks.len()));
@@ -799,7 +817,52 @@ fn pin_of_pem(pem: &str) -> Result<String, String> {
     let b64: String = block.split("-----END CERTIFICATE-----").next().unwrap_or("").split_whitespace().collect();
     let der = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b64).map_err(|e| format!("the certificate is not base64: {e}"))?;
     let pin = mycelium::federation::pinning::spki_sha256(&der).ok_or("not an X.509 certificate this build can read")?;
+    if is_ca_certificate(&der).ok_or("the certificate's extensions could not be read")? {
+        return Err("a CA certificate (basicConstraints cA): pin the gateway's own certificate, which the CA issued".into());
+    }
     Ok(pin.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// Whether a DER certificate says `basicConstraints cA = TRUE`, read by position: Certificate → tbsCertificate →
+/// `[3]` extensions → the extension whose OID is 2.5.29.19 → its `BasicConstraints` → the leading BOOLEAN. `None` when
+/// the structure is not one this walk can follow; no extensions, or no basicConstraints, is `Some(false)`.
+#[cfg(feature = "tls")]
+fn is_ca_certificate(der: &[u8]) -> Option<bool> {
+    /// One TLV: (tag, contents, the bytes after it).
+    fn tlv(b: &[u8]) -> Option<(u8, &[u8], &[u8])> {
+        let (&tag, rest) = b.split_first()?;
+        let (&len0, rest) = rest.split_first()?;
+        let (len, rest) = if len0 < 0x80 {
+            (len0 as usize, rest)
+        } else {
+            let n = (len0 & 0x7f) as usize;
+            if n == 0 || n > 4 || rest.len() < n { return None; }
+            (rest[..n].iter().fold(0usize, |a, &x| (a << 8) | x as usize), &rest[n..])
+        };
+        (rest.len() >= len).then(|| (tag, &rest[..len], &rest[len..]))
+    }
+    const BASIC_CONSTRAINTS: &[u8] = &[0x55, 0x1d, 0x13];
+    let (0x30, cert, _) = tlv(der)? else { return None };
+    let (0x30, mut tbs, _) = tlv(cert)? else { return None };
+    while !tbs.is_empty() {
+        let (tag, body, rest) = tlv(tbs)?;
+        tbs = rest;
+        if tag != 0xa3 { continue; }
+        let (0x30, mut exts, _) = tlv(body)? else { return None };
+        while !exts.is_empty() {
+            let (0x30, ext, rest) = tlv(exts)? else { return None };
+            exts = rest;
+            let (0x06, oid, fields) = tlv(ext)? else { return None };
+            if oid != BASIC_CONSTRAINTS { continue; }
+            let (mut tag, mut value, after) = tlv(fields)?;
+            if tag == 0x01 { (tag, value, _) = tlv(after)?; }   // `critical`, then the OCTET STRING
+            if tag != 0x04 { return None; }
+            let (0x30, bc, _) = tlv(value)? else { return None };
+            return Some(matches!(tlv(bc), Some((0x01, [v], _)) if *v != 0));
+        }
+        return Some(false);
+    }
+    Some(false)
 }
 
 fn print_usage() {
@@ -1000,6 +1063,35 @@ mod tls_cli_tests {
         assert_eq!(tls_pin(vec![cert.display().to_string()]), 0);
         assert!(pin_of_pem("").is_err() && pin_of_pem(&format!("{0}{0}", std::fs::read_to_string(&cert).unwrap())).is_err(),
             "no certificate, or two, is refused");
+        // A CA certificate pins no gateway, and a bundle with a key is not something to hand a partner. Seen failing
+        // first: both printed a pin.
+        let ca_pem = std::fs::read_to_string(ca.join("ca-cert.pem")).unwrap();
+        assert!(pin_of_pem(&ca_pem).unwrap_err().contains("CA certificate"), "the CA's certificate is refused");
+        let bundle = format!("{}{}", std::fs::read_to_string(&cert).unwrap(), std::fs::read_to_string(&key).unwrap());
+        assert!(pin_of_pem(&bundle).unwrap_err().contains("private key"), "a bundle with its key is refused");
+        let _ = (std::fs::remove_dir_all(&ca), std::fs::remove_dir_all(&out));
+    }
+
+    /// `tls issue` over a node's existing key is refused unless `--force`: the key is an identity in use, and a pin a
+    /// partner holds stops matching once it is replaced. With `--force` it is replaced and the pin changes. Seen
+    /// failing first: the second issue replaced the key silently (exit 0).
+    #[test]
+    fn issuing_over_an_existing_node_key_needs_force() {
+        let (ca, out) = (scratch("reissue-ca"), scratch("reissue-out"));
+        assert_eq!(tls_ca(vec!["--out".into(), ca.display().to_string()]), 0);
+        let issue = |extra: &[&str]| {
+            let mut a: Vec<String> = ["issue", "--ca-dir", &ca.display().to_string(), "--node", "127.0.0.1:7962", "--out", &out.display().to_string()]
+                .iter().map(|s| s.to_string()).collect();
+            a.extend(extra.iter().map(|s| s.to_string()));
+            tls_cli(a)
+        };
+        let cert = out.join("127_0_0_1_7962.cert.pem");
+        assert_eq!(issue(&[]), 0);
+        let before = pin_of_pem(&std::fs::read_to_string(&cert).unwrap()).unwrap();
+        assert_eq!(issue(&[]), 2, "a second issue over the key is refused");
+        assert_eq!(pin_of_pem(&std::fs::read_to_string(&cert).unwrap()).unwrap(), before, "and changes nothing");
+        assert_eq!(issue(&["--force"]), 0);
+        assert_ne!(pin_of_pem(&std::fs::read_to_string(&cert).unwrap()).unwrap(), before, "--force replaces the key, and the pin with it");
         let _ = (std::fs::remove_dir_all(&ca), std::fs::remove_dir_all(&out));
     }
 }
