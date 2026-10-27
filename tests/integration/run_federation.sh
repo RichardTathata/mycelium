@@ -14,9 +14,15 @@
 # Since adopter-surface Y7 every mesh node runs under `secure-multi-domain` (the compose file says
 # what each carries): leg 0 reads each node's own `GET /gateway/guarantees` for the profile met, leg 2
 # shows an exclusive outcome refused outside an electorate, and leg 10 starts a node that keeps its
-# CA key on-node under the same profile and watches it refuse by name. The gateways serve HTTPS on
-# the node identity's certificate; the runner reads them with `-k` (it holds no CA — it is the
-# harness, not a member), while the probe pins each gateway's SPKI.
+# CA key on-node under the same profile and watches it refuse by name — that one requirement only.
+# Leg 0 also searches every node's filesystem for a key that is not its own, and shows the partner
+# side cannot reach the admin surface; leg 1 shows two doors refusing a call the catalogue let
+# through (the evaluator; the body binding). The gateways serve HTTPS on the node identity's
+# certificate; the runner reads them with `-k` (it holds no CA — it is the harness, not a member),
+# while the probe pins each gateway's SPKI. The admin surface is plain HTTP on each node's mesh
+# address, port 8301. **Only the six mesh nodes run under the profile:** the consumer is a bare
+# client, so its side's facts (`fed.pinned`, `fed.caller_named`, `fed.partner_egress` on a node) are
+# shown in-process only, carried to Y8.
 #
 # Style note, learned the hard way: every check runs a **shell function in this shell**. An earlier
 # draft wrapped compound checks in `sh -c "post …"`, where the function does not exist — 26 checks
@@ -62,7 +68,7 @@ ALPHA_IDS="$A1:57000 $A2:57000 $GW1:57000 $GW2:57000"
 BETA_IDS="$B1:57000 $B2:57000"
 
 TOKEN=fed-suite-token   # the compose file's FED_GATEWAY_TOKEN, a fixture
-admin() { curl -skf --max-time 10 "https://$1:8300/fed-admin/$2"; }
+admin() { curl -sf --max-time 10 "http://$1:8301/fed-admin/$2"; }
 post()  { curl -skf --max-time 30 -X POST -H 'content-type: application/json' "$1" -d "$2"; }
 
 # probe VERB [JSON] — POST to the probe's control API; body to /tmp/probe.out, status on stdout.
@@ -80,21 +86,21 @@ body() { jq -e "$1" /tmp/probe.out >/dev/null 2>&1; }
 # -- predicates, all callable by `check` and `poll_until` ------------------------------------
 test_peers()   { [ "$(admin "$1" tables | jq -r '.peers | length')" = "$2" ]; }
 has_cap()      { admin "$1" tables | jq -e --arg k "cap/$A1:57000/demo/whoami" '.entries[] | select(.key | startswith($k))'; }
-commits()      { post "https://$1:8300/fed-admin/propose" "{\"slot\":\"$2\",\"value\":\"$3\"}" | jq -e '.committed == true'; }
+commits()      { post "http://$1:8301/fed-admin/propose" "{\"slot\":\"$2\",\"value\":\"$3\"}" | jq -e '.committed == true'; }
 # An exclusive outcome proposed to the whole cluster: refused, nothing committed (`cons.safety_profile`).
-exclusive_refused() { post "https://$1:8300/fed-admin/propose" "{\"slot\":\"$2\",\"value\":\"x\",\"safety_sensitive\":true}" \
+exclusive_refused() { post "http://$1:8301/fed-admin/propose" "{\"slot\":\"$2\",\"value\":\"x\",\"safety_sensitive\":true}" \
                         | jq -e '.committed == false and (.detail | startswith("ElectorateNotGoverned"))'; }
 slot_absent()  { admin "$1" "committed/$2" | jq -e '.value == null'; }
-kv_put()       { post "https://$1:8300/fed-admin/kv" "{\"key\":\"$2\",\"value\":\"$3\"}"; }
+kv_put()       { post "http://$1:8301/fed-admin/kv" "{\"key\":\"$2\",\"value\":\"$3\"}"; }
 kv_is()        { admin "$1" "kv/$2" | jq -e --arg v "$3" '.value == $v'; }
 link_is()      { curl -sf --max-time 10 "$PROBE/link" | jq -e --arg l "$1" '.link == $l'; }
 retire_gw()    { post "$PROBE/retire" "{\"id\":\"$1\"}" | jq -e '.retired == true'; }
-grant_both()   { post "https://$1:8300/fed-admin/policy" \
+grant_both()   { post "http://$1:8301/fed-admin/policy" \
                    '{"revision":2,"grants":[["beta.example","demo/whoami"],["beta.example","demo/secret"]]}' \
                    | jq -e '.policy_revision == 2'; }
 # The rogue runs the development posture (on-node CA, an open plain-HTTP gateway): it is a node
 # holding beta's CA key, and the question is admission, not its own configuration.
-rogue_alone()  { curl -sf --max-time 10 "http://$ROGUE:8300/fed-admin/tables" | jq -e '.peers | length == 0'; }
+rogue_alone()  { admin "$ROGUE" tables | jq -e '.peers | length == 0'; }
 rogue_ready()  { curl -sf --max-time 5 "http://$ROGUE:8300/ready"; }
 connect_ok()   { [ "$(probe connect)" = 200 ]; }
 
@@ -114,8 +120,25 @@ profile_met()  { guarantees "$1" | jq -e '
 edge_enforced() { guarantees "$1" | jq -e '[.entries[] | select(.id == "fed.body_bound" or .id == "fed.partner_slots"
                                                  or .id == "fed.catalogue_signed") | .resolution.state]
                                            | length == 3 and all(. == "enforced")'; }
-# no_ca_key IP — the CA's private key is in no directory this node was given.
-no_ca_key()    { docker exec "$1" sh -c '! find /certs -name ca-key.pem | grep -q .'; }
+# only_own_key CONTAINER NODE_ID — searching the node's whole filesystem, the one private key it can
+# read is its own: no CA key, no other node's key (each node mounts only its own certificate volume).
+only_own_key() {
+    local own="/certs/$(echo "$2" | tr ':.' '__').key.pem" found
+    found=$(docker exec "$1" sh -c "find / \( -path /proc -o -path /sys -o -path /dev \) -prune -o -type f \
+              \( -name '*.key.pem' -o -name 'ca-key.pem' -o -name '*.key' \) -print" 2>/dev/null | sort)
+    [ "$found" = "$own" ] || { echo "  $1 can read: $(echo $found)" >&2; return 1; }
+}
+# The partner side reaches a gateway on `edge`: the admin surface must not answer there — not on the
+# gateway's listener (no such route, 404) and not on its own port (bound to the mesh address only).
+probe_curl()   { docker exec mycelium-fed-beta-probe curl "$@"; }
+admin_not_on_gateway() { [ "$(probe_curl -sk --max-time 10 -o /dev/null -w '%{http_code}' "https://$1:8300/fed-admin/tables")" = 404 ]; }
+admin_unreachable()    { ! probe_curl -s --max-time 5 -o /dev/null "http://$1:8301/fed-admin/tables"; }
+# unbound_refused GATEWAY_URL — a credential without a body digest, at an edge that requires one.
+unbound_refused() {
+    curl -s --max-time 30 -o /tmp/probe.out -X POST -H 'content-type: application/json' "$PROBE/call_unbound" \
+         -d "{\"gateway\":\"$1\",\"export\":\"demo/whoami\"}" >/dev/null
+    jq -e '(.body | tostring | contains("does not bind the request body")) and (.body.result == null)' /tmp/probe.out
+}
 
 # call_is STATUS JQ [JSON] — one federated call, asserting status and a fact about the body.
 call_is() {
@@ -156,8 +179,13 @@ for ip in $A1 $A2 $GW1 $GW2 $B1 $B2; do
 done
 check "alpha gw1's edge binds bodies, meters partners and signs its catalogue" edge_enforced "$GW1"
 check "alpha gw2's edge binds bodies, meters partners and signs its catalogue" edge_enforced "$GW2"
-for c in alpha-a1 alpha-gw1 beta-b1; do
-    check "mycelium-fed-$c holds no CA private key" no_ca_key "mycelium-fed-$c"
+for pair in alpha-a1=$A1 alpha-a2=$A2 alpha-gw1=$GW1 alpha-gw2=$GW2 beta-b1=$B1 beta-b2=$B2; do
+    c=${pair%%=*}; ip=${pair#*=}
+    check "mycelium-fed-$c can read its own key and no other (no CA key, no other node's)" only_own_key "mycelium-fed-$c" "$ip:57000"
+done
+for gw in 172.32.0.13 172.32.0.14; do
+    check "from the partner side, $gw serves no /fed-admin on its gateway listener" admin_not_on_gateway "$gw"
+    check "from the partner side, $gw's admin port is not reachable"                admin_unreachable "$gw"
 done
 
 # -- 1. Discover, invoke -----------------------------------------------------------------------
@@ -165,7 +193,7 @@ leg 1 discover-invoke "1 . discover, invoke"
 check "before discovery a call is refused locally as a link refusal" \
       call_is 409 '.error == "link"' '{"export":"demo/whoami"}'
 # `connect` writes /tmp/probe.out, so status and body are asserted in two steps.
-if [ "$(probe connect)" = 200 ] && body '.exports == ["demo/whoami"]'; then
+if [ "$(probe connect)" = 200 ] && body '(.exports | sort) == ["demo/ledger","demo/whoami"]'; then
     ok "the signed catalogue is the grant, not the export list"
 else
     fail "the signed catalogue is the grant, not the export list"
@@ -174,6 +202,9 @@ check "the call crosses and the provider is told beta's principal" \
       call_is 200 '.reply == "federation:beta.example/svc/billing"' '{"export":"demo/whoami","repeatable":true}'
 check "an ungranted export is refused locally, before any byte" \
       call_is 409 '.error == "resolve"' '{"export":"demo/secret"}'
+check "a granted export the evaluator does not permit is refused at the door" \
+      call_is 409 '.error == "refused" and (.detail | test("authority|not established|refused"; "i"))' '{"export":"demo/ledger","repeatable":true}'
+check "a credential that does not bind its body is refused by the edge (fed.body_bound)" unbound_refused https://172.32.0.13:8300
 
 # -- 2. Consensus in each mesh -----------------------------------------------------------------
 leg 2 consensus-per-mesh "2 . consensus, per mesh"
@@ -281,10 +312,12 @@ docker run -d --name mycelium-fed-unmet \
     mycelium-federation-node:test >/dev/null
 unmet_exited() { [ "$(docker inspect -f '{{.State.Status}}' mycelium-fed-unmet)" = exited ]; }
 unmet_code()   { [ "$(docker inspect -f '{{.State.ExitCode}}' mycelium-fed-unmet)" = 3 ]; }
-unmet_named()  { docker logs mycelium-fed-unmet 2>&1 | grep 'start refused under profile secure-multi-domain' | grep -q 'id.ca_key_off_node'; }
+# Exactly one requirement unmet, and it is the CA key: the plant changes that one thing.
+unmet_named()  { docker logs mycelium-fed-unmet 2>&1 | grep 'start refused under profile secure-multi-domain' \
+                   | grep -F '1 requirement(s) unmet: [id.ca_key_off_node: ' | grep -qv '\], \['; }
 check "the node with its CA key on-node exits rather than serving" poll_until 60 unmet_exited
 check "its exit is the start refusal (code 3), not a crash"        unmet_code
-check "the refusal names id.ca_key_off_node"                       unmet_named
+check "the refusal names id.ca_key_off_node and no other requirement" unmet_named
 docker logs mycelium-fed-unmet 2>&1 | grep 'start refused' | head -c 600 | sed 's/^/      /'; echo
 docker rm -f mycelium-fed-unmet >/dev/null 2>&1
 

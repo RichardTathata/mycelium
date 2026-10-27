@@ -35,10 +35,10 @@
 //!
 //! # The admin surface (test image only)
 //!
-//! Mounted with `with_http_routes` **outside** `/gateway/`, so it is unauthenticated by construction
-//! (the library's rule for merged routers — under the secure profile too, a documented class, not a
-//! guarantee). It exists for a runner on a private test network and is
-//! not something to ship: `GET /fed-admin/tables` (the three tables the gate is proved from),
+//! Served by its own plain-HTTP listener on **this node's mesh address only**, port
+//! `FED_ADMIN_PORT` (default 8301) — never on the gateway's listener, which a gateway exposes on the
+//! `edge` network to the partner. It is unauthenticated: it exists for a runner on the mesh's private
+//! test network and is not something to ship (leg 0 shows the partner side cannot reach it): `GET /fed-admin/tables` (the three tables the gate is proved from),
 //! `POST /fed-admin/propose`, `GET /fed-admin/committed/{slot}`, `POST|GET /fed-admin/kv`,
 //! `POST /fed-admin/policy` and `POST /fed-admin/revoke` (gateway only).
 
@@ -73,6 +73,13 @@ fn env_or(key: &str, default: &str) -> String {
 
 fn must(key: &str) -> String {
     env(key).unwrap_or_else(|| panic!("{key} is required for FED_ROLE={}", env_or("FED_ROLE", "?")))
+}
+
+/// A configuration this node will not run under: said by name on stderr, exit 3 — the code the
+/// runner reads as *refused at start*, apart from a panic's 101.
+fn refuse(why: &str) -> ! {
+    eprintln!("federation-node: refused: {why}");
+    std::process::exit(3);
 }
 
 fn hex32(s: &str) -> [u8; 32] {
@@ -263,7 +270,8 @@ fn parse_trust(spec: &str) -> TrustBundle {
 /// `a2a.admission` and `authz.*`): an action evaluator at the gateway and at every provider, the
 /// evidence journal its decisions are recorded in before dispatch, and an execution authority whose
 /// revocation epochs survive a restart. The evaluator permits exactly one actor — the partner's
-/// principal, `FED_PERMIT_ACTOR` — to invoke a skill this domain exports; everything else is
+/// principal, `FED_PERMIT_ACTOR` — to invoke the exports `FED_PERMIT_EXPORTS` names (default: every
+/// `FED_EXPORTS`) at the providers `FED_PERMIT_PROVIDERS` names; everything else is
 /// `Indeterminate`, which the seam refuses. Which exports the partner may call is the edge's signed
 /// catalogue; this is the second door, at the provider, that asks again.
 fn attach_authority(agent: &GossipAgent, exports: &[String]) {
@@ -275,14 +283,22 @@ fn attach_authority(agent: &GossipAgent, exports: &[String]) {
 
     let data = std::path::PathBuf::from(env_or("FED_DATA_DIR", "/data"));
     let actor = env_or("FED_PERMIT_ACTOR", "");
-    assert!(exports.is_empty() || !actor.is_empty(), "FED_PERMIT_ACTOR is required for a node with FED_EXPORTS");
+    if !exports.is_empty() && actor.is_empty() {
+        refuse("FED_EXPORTS is set but FED_PERMIT_ACTOR is not: under the secure profile every export needs the principal the evaluator permits");
+    }
     // Both doors name the skill at the provider that serves it (`skill:{ns}/{name}@{provider}`): the
     // gateway the member it routes to, the provider itself. `FED_PERMIT_PROVIDERS` is that set.
     let providers: Vec<String> =
         env_or("FED_PERMIT_PROVIDERS", "").split(',').map(str::trim).filter(|s| !s.is_empty()).map(String::from).collect();
-    assert!(actor.is_empty() || !providers.is_empty(), "FED_PERMIT_PROVIDERS is required with FED_PERMIT_ACTOR");
+    if !actor.is_empty() && providers.is_empty() {
+        refuse("FED_PERMIT_ACTOR is set but FED_PERMIT_PROVIDERS is not: the evaluator names a skill at the provider that serves it");
+    }
     let mut evaluator = ReferenceEvaluator::new("fed-suite-1").with_catalogue("fed-suite", "1");
-    for export in exports.iter().filter(|_| !actor.is_empty()) {
+    let permitted: Vec<String> = match env("FED_PERMIT_EXPORTS") {
+        Some(list) => list.split(',').map(str::trim).filter(|s| !s.is_empty()).map(String::from).collect(),
+        None => exports.to_vec(),
+    };
+    for export in permitted.iter().filter(|_| !actor.is_empty()) {
         for provider in &providers {
             let resource = format!("skill:{export}@{provider}");
             evaluator = evaluator.map_action("skill.invoke", resource.clone()).allow(Rule::new(actor.clone(), "skill.invoke", resource));
@@ -416,7 +432,12 @@ async fn run_node(role: &str) {
         attach_authority(&agent, &exports);
     }
     let agent = Arc::new(agent);
-    agent.with_http_routes(admin_router(Admin { agent: Arc::clone(&agent), edge }));
+    // The admin surface on the mesh address only (see the module doc): the partner, on `edge`,
+    // reaches the gateway's listener and never this one.
+    let admin_port: u16 = env_or("FED_ADMIN_PORT", "8301").parse().expect("FED_ADMIN_PORT");
+    let admin_listener = tokio::net::TcpListener::bind((my_ip.as_str(), admin_port)).await.expect("bind the admin port");
+    let admin = admin_router(Admin { agent: Arc::clone(&agent), edge });
+    tokio::spawn(async move { axum::serve(admin_listener, admin).await.expect("serve admin") });
     // SIGINT or SIGTERM (`docker stop`), installed before the bind; a second signal exits at once.
     let shutdown = mycelium::shutdown::ShutdownSignal::install().expect("signal handlers");
     if let Err(e) = agent.start().await {
@@ -510,6 +531,63 @@ async fn probe_call(State(c): State<Arc<FederationClient>>, Json(req): Json<Call
     }
 }
 
+/// `POST /call_unbound` — one federated call whose credential carries **no body digest**, sent
+/// straight to one gateway (`{"gateway":"https://…","export":"…"}`), pinned like the client. A
+/// `FederationClient` always binds its body, so this is the only way the suite can put an unbound
+/// credential in front of an edge that requires binding (`fed.body_bound`). Returns the status and
+/// the body the gateway answered.
+async fn probe_call_unbound(State(p): State<ProbeState>, Json(req): Json<UnboundReq>) -> Response {
+    use mycelium::federation::{call::FederatedCaller, edge::PresentedCall};
+    let body = serde_json::to_vec(&json!({
+        "jsonrpc": "2.0", "id": 1, "method": "tasks/send",
+        "params": { "skillId": req.export, "message": { "role": "user", "parts": [{ "type": "text", "text": "?" }] } },
+    }))
+    .expect("serialise");
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).expect("clock").as_millis() as u64;
+    let presented = PresentedCall::sign(
+        &FederatedCaller {
+            origin_domain: p.origin.clone(),
+            principal: p.principal.clone(),
+            export: req.export.clone(),
+            issued_at_ms: now,
+            expires_at_ms: now + 60_000,
+            body_sha256: None,
+        },
+        &p.signing,
+    );
+    let sent = p
+        .http
+        .post(format!("{}/a2a", req.gateway.trim_end_matches('/')))
+        .header(mycelium::federation::edge::HEADER_FEDERATED_CALL, presented.to_header_value())
+        .header("content-type", "application/json")
+        .body(body)
+        .send()
+        .await;
+    match sent {
+        Ok(r) => {
+            let status = r.status().as_u16();
+            let text = r.text().await.unwrap_or_default();
+            Json(json!({ "status": status, "body": serde_json::from_str::<Value>(&text).unwrap_or(Value::String(text)) })).into_response()
+        }
+        Err(e) => (StatusCode::BAD_GATEWAY, Json(json!({ "error": "transport", "detail": e.to_string() }))).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct UnboundReq {
+    gateway: String,
+    export: String,
+}
+
+/// What the unbound-call verb needs beside the client: the probe's own identity and a pinned HTTP client.
+#[derive(Clone)]
+struct ProbeState {
+    origin: DomainId,
+    principal: String,
+    signing: ed25519_dalek::SigningKey,
+    http: reqwest::Client,
+}
+
 async fn probe_retire(State(c): State<Arc<FederationClient>>, Json(req): Json<RetireReq>) -> Json<Value> {
     Json(json!({ "retired": c.retire_gateway(&req.id) }))
 }
@@ -531,9 +609,16 @@ async fn run_probe() {
             GatewayEndpoint { id: id.trim().to_string(), base_url: url.trim().trim_end_matches('/').to_string() }
         })
         .collect();
+    let principal = env_or("FED_PRINCIPAL", "svc/billing");
+    let mut probe = ProbeState {
+        origin: origin.clone(),
+        principal: principal.clone(),
+        signing: signing.clone(),
+        http: reqwest::Client::new(),
+    };
     let mut client = FederationClient::new(
         origin,
-        env_or("FED_PRINCIPAL", "svc/billing"),
+        principal,
         signing,
         partner,
         endpoints,
@@ -555,6 +640,11 @@ async fn run_probe() {
         }
         assert!(!pins.is_empty(), "FED_PINS_DIR {dir} holds no .pin file");
         info!(pins = pins.len(), "pinning the partner's gateways");
+        probe.http = reqwest::Client::builder()
+            .use_preconfigured_tls(mycelium::federation::pinning::pinned_client_config(pins.clone()))
+            .timeout(Duration::from_secs(30))
+            .build()
+            .expect("pinned HTTP client");
         client = client.with_tls_pins(pins);
     }
     let client = Arc::new(client);
@@ -564,7 +654,8 @@ async fn run_probe() {
         .route("/call", post(probe_call))
         .route("/retire", post(probe_retire))
         .route("/link", get(probe_link))
-        .with_state(client);
+        .with_state(client)
+        .merge(Router::new().route("/call_unbound", post(probe_call_unbound)).with_state(probe));
     let port: u16 = env_or("FED_CONTROL_PORT", "8400").parse().expect("FED_CONTROL_PORT");
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", port)).await.expect("bind control port");
     info!(port, "probe control API up");
@@ -600,6 +691,11 @@ async fn run_pki() {
         let id = NodeId::new(host, port.parse().expect("port")).expect("node id");
         let sanitized = id.as_str().replace([':', '.'], "_");
         let dir = out.join(&sanitized);
+        // Re-issuing over a node's existing key would replace the identity of a node that may be
+        // running on it; only `FED_PKI_REISSUE=1` says that is meant.
+        if dir.join(format!("{sanitized}.key.pem")).exists() && env("FED_PKI_REISSUE").as_deref() != Some("1") {
+            refuse(&format!("{} already holds a key for {node}: set FED_PKI_REISSUE=1 to re-issue it", dir.display()));
+        }
         let (_cert, key) = mycelium::issue_node_cert(&ca_dir, &id, &dir).expect("issue a node certificate");
         std::fs::copy(ca_dir.join("ca-cert.pem"), dir.join("ca-cert.pem")).expect("copy ca-cert.pem");
         if pin_nodes.iter().any(|p| p == node) {
