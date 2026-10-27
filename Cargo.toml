@@ -216,7 +216,11 @@ required-features = ["tls"]
 name              = "federation_node"
 path              = "examples/federation_node.rs"
 # The two-mesh Docker suite's binary (item 2 PR 10b): the federation edge + client need the
-# gateway, TLS and the A2A edge; the control API and admin routes use axum directly.
+# gateway, TLS and the A2A edge; the control API and admin routes use axum directly. Its default
+# `FED_PROFILE`, `secure-multi-domain`, also needs `compliance` (the audit chain), which the suite's
+# image builds with (`docker/Dockerfile.federation`). It is not a required feature on purpose: the
+# binary compiles without it — CI's examples build has no `compliance` — and a node built so refuses
+# at start naming `audit.chain`, while `FED_PROFILE=dev` and the `pki`/`probe`/`keys` roles run.
 required-features = ["gateway", "tls", "a2a", "cli"]
 
 [[example]]

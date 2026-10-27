@@ -301,7 +301,7 @@ test-federation:
 	EXIT=$$(docker wait mycelium-fed-runner); \
 	if [ "$$EXIT" != "0" ]; then \
 	    echo "-- runner failed: node logs (last 100 lines each, for CI diagnosis) --"; \
-	    for c in alpha-a1 alpha-a2 alpha-gw1 alpha-gw2 beta-b1 beta-b2 beta-probe; do \
+	    for c in pki-alpha pki-beta alpha-a1 alpha-a2 alpha-gw1 alpha-gw2 beta-b1 beta-b2 beta-probe; do \
 	        echo "-- $$c"; docker logs --tail 100 mycelium-fed-$$c 2>&1 || true; \
 	    done; \
 	fi; \
