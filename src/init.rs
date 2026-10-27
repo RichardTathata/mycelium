@@ -58,6 +58,26 @@ pub const TEMPLATES: &[Template] = &[
             file!("governed-call-py", "main.py"),
         ],
     },
+    Template {
+        name: "two-domains",
+        about: "Rust: two fleets of two nodes, each its own domain under secure-multi-domain — certificates issued \
+                off-node, named tokens, egress lists naming the partner, a pinned key each way — calling each other \
+                across one edge by named local callers, refused under a wrong pin, a rewritten body and a full slot count",
+        files: &[
+            file!("two-domains", "Cargo.toml"),
+            file!("two-domains", ".gitignore"),
+            file!("two-domains", "README.md"),
+            file!("two-domains", "federation.toml"),
+            file!("two-domains", "fleet.sh"),
+            file!("two-domains", "nodes/foodbank-gw.toml"),
+            file!("two-domains", "nodes/foodbank-1.toml"),
+            file!("two-domains", "nodes/kitchen-gw.toml"),
+            file!("two-domains", "nodes/kitchen-1.toml"),
+            file!("two-domains", "src/main.rs"),
+            file!("two-domains", "src/fleet.rs"),
+            file!("two-domains", "src/authority.rs"),
+        ],
+    },
 ];
 
 /// The template named `name`.
