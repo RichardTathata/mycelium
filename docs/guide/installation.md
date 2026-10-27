@@ -60,8 +60,10 @@ file is in [deployment § Get the node](../operations/deployment.md#get-the-node
 
 A first fleet in one command: `mycelium init <dir>` writes the `governed-call` template (Rust; two nodes, one call
 permitted and one refused by a policy enforced at the provider, with the evidence printed), and
-`mycelium init <dir> --template governed-call-py` the Python one against the published node — each a project of its
-own, pinned to this binary's release, with a README that says what it shows and what it does not
+`mycelium init <dir> --template governed-call-py` the Python one against the published node, and
+`mycelium init <dir> --template two-domains` two fleets, each its own domain under `secure-multi-domain`, calling
+each other across one edge — each a project of its own, pinned to this binary's release, with a README that says
+what it shows and what it does not
 ([feature page](../features/init.md)).
 
 Before starting a node from a configuration, `mycelium doctor node.toml` says whether `start()` would refuse and why,

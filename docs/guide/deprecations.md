@@ -2101,3 +2101,15 @@ reserved_namespace` / `400`, and the loader refuses a `[[capability]]` or `[[gro
 is unaffected). **Migration:** declare `[[schedule]]` only in units read by this release's tools; an application
 writing `sched/` keys through the KV routes, or advertising a capability in the `schedule` namespace, moves them
 elsewhere.
+
+## 69. `mycelium tls issue` refuses to replace a node key it issued before; `--force` replaces it; `tls ca` and `tls pin` are new (unreleased, adopter-surface Y8)
+
+`mycelium tls issue --ca-dir <ca> --node <ip:port> --out <dir>` used to write over `<dir>/<node>.key.pem` silently.
+A key already issued is an identity in use — a node runs on it, a federation partner pins its gateway's key — so
+issuing over it now exits 2, naming the file and what replacing it means: the node must restart on the new key, and
+every partner that pins its gateway must be given the new pin. **Migration:** a script that re-issues on purpose (the
+secure posture's recovery, [cert rotation § 2](../operations/cert-rotation.md)) adds `--force`. Also new:
+`mycelium tls ca --out <dir>` mints a fleet CA on the issuer's host, refusing a directory that holds one (two
+concurrent mints publish one CA, the other refused), and `mycelium tls pin <cert.pem>` prints a gateway certificate's
+pin, refusing a CA certificate and a file that carries a private key. `mycelium::doctor::Doctor` gained `attached`
+(`run_attached` is new), so an exhaustive struct literal breaks; nothing outside the crate builds one.
