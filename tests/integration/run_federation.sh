@@ -203,7 +203,7 @@ check "the call crosses and the provider is told beta's principal" \
 check "an ungranted export is refused locally, before any byte" \
       call_is 409 '.error == "resolve"' '{"export":"demo/secret"}'
 check "a granted export the evaluator does not permit is refused at the door" \
-      call_is 409 '.error == "refused" and (.detail | test("authority|not established|refused"; "i"))' '{"export":"demo/ledger","repeatable":true}'
+      call_is 409 '.error == "refused" and (.detail | test("authority not established"; "i"))' '{"export":"demo/ledger","repeatable":true}'
 check "a credential that does not bind its body is refused by the edge (fed.body_bound)" unbound_refused https://172.32.0.13:8300
 
 # -- 2. Consensus in each mesh -----------------------------------------------------------------

@@ -435,7 +435,10 @@ async fn run_node(role: &str) {
     // The admin surface on the mesh address only (see the module doc): the partner, on `edge`,
     // reaches the gateway's listener and never this one.
     let admin_port: u16 = env_or("FED_ADMIN_PORT", "8301").parse().expect("FED_ADMIN_PORT");
-    let admin_listener = tokio::net::TcpListener::bind((my_ip.as_str(), admin_port)).await.expect("bind the admin port");
+    let admin_listener = match tokio::net::TcpListener::bind((my_ip.as_str(), admin_port)).await {
+        Ok(l) => l,
+        Err(e) => refuse(&format!("cannot bind the admin surface on {my_ip}:{admin_port} (the mesh address, FED_ADMIN_PORT): {e}")),
+    };
     let admin = admin_router(Admin { agent: Arc::clone(&agent), edge });
     tokio::spawn(async move { axum::serve(admin_listener, admin).await.expect("serve admin") });
     // SIGINT or SIGTERM (`docker stop`), installed before the bind; a second signal exits at once.
@@ -685,17 +688,26 @@ async fn run_pki() {
         issuer.start().await.expect("the issuer mints the domain CA");
         issuer.shutdown().await;
     }
+    let node_list = must("FED_NODES");
+    let nodes: Vec<&str> = node_list.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
+    // Re-issuing over a node's existing key would replace the identity of a node that may be running
+    // on it; only `FED_PKI_REISSUE=1` says that is meant. Every node is checked before any is issued,
+    // so a refusal leaves the volumes as they were, never half re-issued.
+    if env("FED_PKI_REISSUE").as_deref() != Some("1") {
+        for node in &nodes {
+            let sanitized = node.replace([':', '.'], "_");
+            let key = out.join(&sanitized).join(format!("{sanitized}.key.pem"));
+            if key.exists() {
+                refuse(&format!("{} already holds a key for {node}: set FED_PKI_REISSUE=1 to re-issue it", key.display()));
+            }
+        }
+    }
     let pin_nodes: Vec<String> = env_or("FED_PIN_NODES", "").split(',').map(str::trim).filter(|s| !s.is_empty()).map(String::from).collect();
-    for node in must("FED_NODES").split(',').map(str::trim).filter(|s| !s.is_empty()) {
+    for &node in &nodes {
         let (host, port) = node.rsplit_once(':').unwrap_or_else(|| panic!("FED_NODES entry {node:?}: expected ip:port"));
         let id = NodeId::new(host, port.parse().expect("port")).expect("node id");
         let sanitized = id.as_str().replace([':', '.'], "_");
         let dir = out.join(&sanitized);
-        // Re-issuing over a node's existing key would replace the identity of a node that may be
-        // running on it; only `FED_PKI_REISSUE=1` says that is meant.
-        if dir.join(format!("{sanitized}.key.pem")).exists() && env("FED_PKI_REISSUE").as_deref() != Some("1") {
-            refuse(&format!("{} already holds a key for {node}: set FED_PKI_REISSUE=1 to re-issue it", dir.display()));
-        }
         let (_cert, key) = mycelium::issue_node_cert(&ca_dir, &id, &dir).expect("issue a node certificate");
         std::fs::copy(ca_dir.join("ca-cert.pem"), dir.join("ca-cert.pem")).expect("copy ca-cert.pem");
         if pin_nodes.iter().any(|p| p == node) {

@@ -932,7 +932,12 @@ deleted, and the README says so.
 **Depends on:** X0, X2, Y7, X7 (so the template can say what each adapter carries across the edge).
 
 **Exit:** the scaffold runs in CI from the published binaries; the cross-edge call succeeds once and is refused under
-a wrong pin, a replayed body and an exceeded slot cap, each shown; every node's `doctor` is green under the profile.
+a wrong pin, a replayed body and an exceeded slot cap, each shown; every node's `doctor` is green under the profile; and,
+**carried from Y7 (#691)**, a node holding a client shows `fed.pinned`, `fed.caller_named` and `fed.partner_egress`
+`enforced` in its own `GET /gateway/guarantees` while it runs — not only `doctor` green, which cannot see a client attached
+in code — since the two-mesh suite's consumer is a bare `FederationClient` and those three read `not_applicable` on
+every node there. If Y8 grows that suite rather than starting fresh, its beta nodes sit on `beta-net` only: a beta
+node holding the client must also be attached to `edge`, where alpha's gateways are.
 
 **Not built, stated:** three or more domains stay the test `three_domains_compose_without_trust_composing`, not a
 template; no cloud provisioning.
