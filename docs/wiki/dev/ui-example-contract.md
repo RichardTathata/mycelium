@@ -17,7 +17,10 @@ implementation: [`redistribution_viz`](../../../mycelium-tuple-space/examples/re
 2. **Be Ops-Console-present.** After start, advertise the two `ui/viz` KV keys —
    `ui/viz = http://host:port/`, `ui/label = <short name>` — and inject a `⚙ Ops Console` back-link
    into the page (`__OPS_CONSOLE_LINK__`, `cfg!(feature = "gateway")`-gated). This is the two-way
-   linking; the reverse `↗ label` link is the console's job.
+   linking; the reverse `↗ label` link is the console's job. Since Y3 the console is a static page that
+   reads the gateway from the browser, so the dashboard node also lists the console's origin —
+   `gateway_cors_origins = ["http://127.0.0.1:8099"]` — or the back-link opens a console that reads the
+   node `blocked`.
 3. **Audit is an opt-in, not a default.** A UI example *may* expose the tamper-evident audit trail by
    running `compliance` (the guardrails crate uses `metrics-export` alongside for the Metrics tab);
    then the provider's `/gateway/audit` — and the console's **Audit** tab — show the seals. Off by
@@ -76,10 +79,13 @@ doc-comment block. Same contract-4 intent (say what the demo really exercises), 
   file), so rule 4's *injected* concepts mechanism doesn't fit; it carries an equivalent **static**
   concepts panel instead. Content, not mechanism, is what the rule is really about.
 - **`ops_console`** is the **console itself** — the *consumer/observer* of the `ui/viz` convention, not
-  a showcase that advertises it. It serves an HTML dashboard (so it matches the `include_str!`
-  enumeration) but by nature does not advertise its own `ui/viz`, inject an `⚙ Ops Console` back-link
-  into itself, or carry a "what you're seeing" concepts box — it is the thing rules 2 & 4 exist to
-  *serve*. Exempt from rules 2–4 (it does use the `gateway` feature — rule 1). Its own docs live in
+  a showcase that advertises it. Since adopter-surface Y3 (D28) it is **a static page with no binary**
+  (`examples/ops_console/index.html`), so it is no longer an `include_str!` hit at all: it does not
+  advertise its own `ui/viz`, inject an `⚙ Ops Console` back-link into itself, or carry a concepts box —
+  it is the thing rules 2 & 4 exist to *serve*. What it needs from each showcase instead is the origin
+  it is served from, `http://127.0.0.1:8099`, in the showcase gateway's `gateway_cors_origins` — so the
+  back-link's page can read the gateway from the browser — and every compliant showcase below (and the
+  coop bootstrap) lists it. Its own docs live in
   [`examples/ops_console/README.md`](../../../examples/ops_console/README.md).
 
 Every other browser example complies with all four rules via the injected mechanism.
@@ -88,19 +94,19 @@ Every other browser example complies with all four rules via the injected mechan
 
 `/wiki-lint` §4 checks the contract: enumerate browser examples the tree-derived way
 (`grep -rl 'include_str!.*\.html' examples mycelium-*/examples`) and **classify every hit** as either
-*compliant* (advertises `ui/viz`, injects `__OPS_CONSOLE_LINK__` **and** `__CONCEPTS__`, run command
-carries `gateway,metrics`) **or** a *documented exception* above (`conway-gpu` · `three_node_demo` ·
-`ops_console`). A hit that is neither — a browser example missing the mechanism **and** absent from the
+*compliant* (advertises `ui/viz`, injects `__OPS_CONSOLE_LINK__` **and** `__CONCEPTS__`, lists the
+console's origin in `gateway_cors_origins`, run command carries `gateway,metrics`) **or** a *documented
+exception* above (`conway-gpu` · `three_node_demo`; `ops_console` is no longer a hit). A hit that is neither — a browser example missing the mechanism **and** absent from the
 exceptions list — is a finding (either fix it or classify it). An unclassified hit is the gap the
 `ops_console` move exposed (ledger 2026-07-15).
 
-**Current classification (tree-derived, re-verified lint 2026-10-07 — 14 `include_str! *.html` hits):**
+**Current classification (tree-derived, re-verified 2026-10-27 for Y3 — 13 `include_str! *.html` hits):**
 *compliant* — `redistribution_viz` · `catalog_viz` · `llm_council_viz` · `provisioning_viz` ·
 `stigmergy_viz` · `microgrid_viz` · `guardrail_viz` · `wiki_council_viz` · `conway` · `llm_agent`
 (Mesh Control — its documented run command is the guide's, `--features metrics`) ·
 `control_envelope_viz` · `coordination_viz` (both `--features metrics`, gateway default-on; both
 advertise `ui/viz` and inject the link and the concepts box — verified 2026-09-26, having sat
-unclassified through the 2026-09-24 pass); *documented exceptions* — `conway-gpu` ·
-`three_node_demo` · `ops_console`. Re-derive with `grep -rl 'include_str!.*\.html' examples
+unclassified through the 2026-09-24 pass); *documented exception* — `conway-gpu`; not a hit —
+`three_node_demo` (an inline page) and, since Y3, `ops_console` (a static page, no binary). Re-derive with `grep -rl 'include_str!.*\.html' examples
 mycelium-*/examples` each pass, **and diff the hit count against the one written here** — a count
 that moved is a hit nobody classified.

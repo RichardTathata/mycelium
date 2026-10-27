@@ -315,6 +315,9 @@ async fn make_agent(
     cfg.bind_port                  = port;
     cfg.http_port                  = http_port;
     cfg.http_addr                  = "0.0.0.0".to_string();
+    // The Ops Console page, served on the host's :8099, reads the published gateway from the browser (Y3) —
+    // a loopback origin, the one an open gateway may list.
+    if http_port.is_some() { cfg.gateway_cors_origins = vec!["http://127.0.0.1:8099".into()]; }
     // A demo: the gateway serves the compose network (or the cluster) with no credential so the
     // walkthroughs and the scale harness can drive it. What that exposes: every gateway route, to
     // anything that can reach port `http_port` on this container — the compose network, and the
@@ -1771,8 +1774,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Self-advertise this node's browser UI (if the role has one) so the Ops Console can offer a
     // live "↗ visualiser" click-through — the `ui/viz` + `ui/label` KV convention (see conway.rs /
-    // ops_console/main.rs). Only the two UI-serving roles have a page to link to; point the console at
-    // this node's gateway (`http_port`) and it discovers the URL below.
+    // ops_console/README.md). Only the two UI-serving roles have a page to link to; serve the console on the
+    // host's :8099 and point it at this node's published gateway (`127.0.0.1:830x`) — every node lists that
+    // origin (`make_agent`) — and it discovers the URL below.
     match role.as_str() {
         "llm" => {
             let _ = agent.kv().set("ui/viz", format!("http://localhost:{chat_port}/"));

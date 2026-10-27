@@ -1274,6 +1274,7 @@ jobs:
           bash scripts/test-ci-retest.sh --list
           bash scripts/wire-check-examples.sh --list
           bash scripts/example-case.sh --list
+          bash scripts/ops-console-render.sh --list
           ./scripts/with-pyyaml.sh scripts/test-check-example-matrix.py --list
           bash mycelium-blackboard/ci_smoke.sh --list
           bash mycelium-wiki/ci_smoke.sh --list
@@ -1315,6 +1316,21 @@ jobs:
           MYCELIUM_A2A_LIVE_REQUIRED=1 MYCELIUM_A2A_URL=http://127.0.0.1:7312 MYCELIUM_A2A_TOKEN=a2a-sdk-test \
             pytest tests/a2a-sdk -v
 
+  ops-console:
+    # Adopter-surface Y3 (D16, D28): the Ops Console is a static page that reads each node's existing routes from the
+    # browser. Chrome (on the runner image) renders it against a three-node fleet, every tab, and the DOM is checked
+    # against the README's table: each node `ok`, from exactly the routes the row names. Then the same page from an
+    # origin no node lists (every node `blocked` — the browser withholds the answers) and without the bearer (every
+    # node `unauthorized`). The gateway's own CORS refusals are the lib tests' `cors_tests`.
+    name: Ops Console (a static page, rendered against a fleet)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96.0
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --example observed_fleet --features metrics,compliance
+      - run: bash scripts/ops-console-render.sh
+
   strands-fleet:
     # Post-360 plan row P: Strands agents on three nodes plan one shared task, keep their session and swarm memory in
     # the fleet (row O) and call fleet skills through `/a2a` (row N); a call outside an agent's mandate is refused and
@@ -1346,7 +1362,7 @@ jobs:
     if: always()
     needs: [test, embedded, wasm-host, wasm-host-macos, agentfacts, blackboard, effects, commitment, wiki, reason, scaffold,
             guardrails, python-sdk, sdk-ts, loom, demo-smoke, afn-smoke, coop-smoke, conway-gpu, documentation, clippy,
-            audit, test-universe, a2a-sdk, strands-fleet]
+            audit, test-universe, a2a-sdk, strands-fleet, ops-console]
     permissions:
       actions: read
       contents: read

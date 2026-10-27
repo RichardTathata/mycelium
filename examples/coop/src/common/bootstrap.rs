@@ -81,6 +81,8 @@ pub async fn spawn_depot(opts: DepotOpts) -> Result<Depot, Box<dyn std::error::E
     let mut cfg = GossipConfig {
         bind_port: opts.gossip_port,
         http_port: Some(opts.http_port),
+        // The Ops Console page, served on :8099, reads each gateway from the browser (Y3).
+        gateway_cors_origins: vec!["http://127.0.0.1:8099".into()],
         bootstrap_peers,
         tls: Some(TlsConfig { auto_cert_dir: opts.cert_dir.clone(), ..TlsConfig::default() }),
         // Every coop node carries a cluster name (never null on /stats or the `cluster=` metric

@@ -688,6 +688,23 @@ demo nodes that bind `0.0.0.0` with no credential (`three_node_demo`, `federatio
 comment; `confined_fleet_node` carries named tokens. Pinned by `an_exposed_gateway_with_no_credential_refuses_to_start`
 (seen failing first: it started, `Ok(())`) and `an_exposed_gateway_starts_with_a_credential_on_loopback_or_with_the_opt_in`.
 
+**Cross-origin reads are a browser's question, not an authority (adopter-surface Y3, D28).** The Ops Console became a
+static page reading each node from the browser, so a gateway needed to say which pages may read it:
+`gateway_cors_origins` (`src/agent/http/cors.rs`). Off by default — the layer is not installed at all, so nothing
+changes for a node that does not set it. Set, it answers **only** `GET`/`HEAD` on `CORS_READ_PATHS` and only for an
+exact listed origin, echoed (never `*`), `Vary: Origin`; `*` and `null` (every sandboxed frame's and `file:` page's
+origin) are refused by `validate()`. The one thing it answers before `gateway_auth` is a `GET` preflight, which carries
+no credential by the browser's design; the read itself is authorised like any other, so **on a gateway with a
+credential model** it widens *which pages a browser lets read an answer*, not *who may obtain one* — CORS is
+enforced by the reader, and a non-browser client was never subject to it. **On an open gateway it would widen
+who**: the operator's browser reaches the loopback gateway and runs a listed page's script, so `start()` refuses a
+non-loopback origin without a credential model (`an_open_gateway_refuses_an_origin_that_is_not_on_this_host`, seen
+failing first). The KV value route is answered for one `ui/` key only (`admits_path`), so a listed page reads the
+`ui/viz` link and no other value (#693's review, finding 2). Private Network Access is not answered, stated. A write is never answered with the header, and its preflight is not answered, so a page's
+JSON or bearer-carrying write is not sent. Pinned by `with_cors_unset_no_answer_carries_an_allow_origin` and
+`with_cors_set_only_listed_origins_read_only_the_read_paths` (four plants each seen failing), and in a real browser by
+`scripts/ops-console-render.sh`'s `unlisted-origin` and `no-bearer` cases.
+
 **A governed group's membership is governance (2.29.0).** `/gateway/mesh/group` (`mesh:write`) refuses a group under a
 live membership intent 403 `governed_group`; `/gateway/govern/group` (`govern:write`, audited) moves the node. The
 handler had named *who may change an electorate* an open question since 2026-09-24; the boundary chosen is the

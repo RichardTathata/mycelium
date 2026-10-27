@@ -313,8 +313,10 @@ self-attestation layer references.
 **See it live.** To watch the trail fill rather than read about it: run the
 [`community`](../../examples/community/README.md) skills cluster and invoke a skill — every invocation
 writes a record, and its mgmt UI at `:9050/mgmt` shows the trail — or point the
-[Ops Console](../../examples/README.md#ops-console)'s **Audit** tab at any `compliance`-built node (it
-renders each stream's verified badge, chain-tip hash, and records over `GET /gateway/audit`).
+[Ops Console](../../examples/README.md#ops-console)'s **Audit** tab at any `compliance`-built node that lists
+the page's origin in `gateway_cors_origins` (it renders each stream's verified badge, chain-tip hash, and
+records over `GET /gateway/audit`; `cargo run --example observed_fleet --features metrics,compliance` is one).
+The community cluster's skill runner has no setting for that origin, so the console reads it `blocked`.
 
 → Operator querying, evidence verification, and retention:
 [`docs/operations/audit.md`](../operations/audit.md).

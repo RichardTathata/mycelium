@@ -114,6 +114,9 @@ use super::{action_evaluator, evidence_journal, federation_http, fleet_history, 
 
 mod authz;
 mod caps;
+/// Opt-in cross-origin reads for a browser page on another origin (adopter-surface Y3, D28).
+mod cors;
+pub(crate) use cors::CORS_READ_PATHS;
 #[cfg(feature = "compliance")]
 mod compliance;
 #[cfg(feature = "tls")]
@@ -468,6 +471,18 @@ pub(super) async fn run_http_server(
         app
     };
 
+    // Y3 (D28): cross-origin reads, only when the operator names the origins. Outermost, so a
+    // browser's preflight (sent with no credential) is answered before `gateway_auth`; the read itself
+    // still passes `gateway_auth`. With the list empty the layer is not installed at all.
+    let app = if state.agent_ctx.config.gateway_cors_origins.is_empty() {
+        app
+    } else {
+        let origins: Arc<[String]> = state.agent_ctx.config.gateway_cors_origins.clone().into();
+        info!(origins = ?origins, read_paths = ?CORS_READ_PATHS,
+              "gateway: cross-origin reads answered for these origins on these paths only");
+        app.layer(middleware::from_fn_with_state(origins, cors::cors_reads))
+    };
+
     let listener = prepared.listener;
     // The one place the public surface is stated in code; the test
     // `every_listed_public_path_is_mounted_and_public_and_gated_paths_are_not` holds the router to it.
@@ -618,6 +633,9 @@ mod causal_door_tests;
 /// Adopter-surface X3 at the live doors: silence refuses, an issued grant binds the call, issuing is policy.
 #[cfg(all(test, feature = "tls", feature = "compliance"))]
 mod grant_tests;
+/// Adopter-surface Y3 (D28): cross-origin reads, only where an origin is named and only on the read routes.
+#[cfg(test)]
+mod cors_tests;
 /// Adopter-surface Y4's last promise: a record a span names, read by its hash on the node, and verified there.
 #[cfg(all(test, feature = "compliance"))]
 mod record_read_tests;

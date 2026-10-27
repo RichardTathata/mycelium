@@ -1433,6 +1433,20 @@ pub struct GossipConfig {
     #[serde(default)]
     pub gateway_allow_unauthenticated: bool,
 
+    /// **Cross-origin reads from a browser, opt-in** (adopter-surface Y3, D28). The exact origins
+    /// (`scheme://host[:port]`, `http` or `https`, no path) a browser page may read this gateway's
+    /// **read-only routes** from — the list is `CORS_READ_PATHS` in the gateway (`src/agent/http/cors.rs`)
+    /// and `docs/operations/observability.md` § The Ops Console, `GET`/`HEAD` only, never a write, a
+    /// stream or a call. Empty (the default) means no `Access-Control-Allow-Origin` is ever answered, so a page
+    /// on another origin cannot read the gateway's answers. A listed origin is answered with itself
+    /// (never `*`), `Vary: Origin`, and a preflight that admits `Authorization`, so the bearer still
+    /// decides what the page may read — the setting widens *who may read in a browser*, never *what
+    /// a caller is allowed*. `*`, `null` and an origin with a path, query or credentials are refused
+    /// by `validate()`, as is a non-empty list with no `http_port`. Set via
+    /// `GOSSIP_GATEWAY_CORS_ORIGINS` (comma-separated; blank = none).
+    #[serde(default)]
+    pub gateway_cors_origins: Vec<String>,
+
     /// OAuth2-style scoped gateway tokens (`compliance` feature).
     ///
     /// Each [`GatewayToken`] maps a bearer token to a set of `resource:verb`
@@ -1688,6 +1702,134 @@ pub fn parse_named_tokens_env(v: &str) -> Result<Vec<GatewayNamedToken>, GossipE
     Ok(out)
 }
 
+/// One `gateway_cors_origins` entry: an exact browser origin as the `Origin` header carries it —
+/// `http://` or `https://`, a host, an optional port, nothing after. Compared byte for byte, so only the
+/// form a browser serialises is accepted: lowercase ASCII host (a browser sends an internationalised name
+/// in its `xn--` form), a canonical IP literal (dotted quad without leading zeros; IPv6 bracketed and
+/// compressed as a browser writes it), a port of digits with no sign or leading zero and never the
+/// scheme's default, no trailing slash. `*` and `null` are refused — a wildcard answers every page, and
+/// `null` is the origin of every sandboxed frame and `file:` page; a comma is refused because one entry is
+/// one origin (`GOSSIP_GATEWAY_CORS_ORIGINS` splits on it). An entry that passes could be sent by a
+/// browser; one that fails never would be, so it is refused rather than silently never matching.
+pub fn check_cors_origin(origin: &str) -> Result<(), String> {
+    let refuse = |why: &str| Err(format!("{origin:?} is not an exact origin: {why}"));
+    if origin == "*" {
+        return refuse("a wildcard would let every page read the gateway; list each origin");
+    }
+    if origin.eq_ignore_ascii_case("null") {
+        return refuse("`null` is the origin of every sandboxed frame and file: page");
+    }
+    if origin.contains(',') {
+        return refuse("a comma — one entry is one origin");
+    }
+    if !origin.is_ascii() {
+        return refuse("a browser sends an internationalised host in its ASCII (xn--) form");
+    }
+    let (scheme, rest) = match origin.split_once("://") {
+        Some((sc @ ("http" | "https"), r)) => (sc, r),
+        _ => return refuse("it must start with http:// or https:// (lowercase)"),
+    };
+    if rest.contains(['/', '?', '#', '@', ' ', '*']) || rest.chars().any(|c| c.is_ascii_control()) {
+        return refuse("an origin is scheme://host[:port] with no path, query, fragment, credentials or wildcard");
+    }
+    if rest.chars().any(|c| c.is_ascii_uppercase()) {
+        return refuse("browsers send the host in lowercase, so an uppercase entry never matches");
+    }
+    let (host, port) = if let Some(after) = rest.strip_prefix('[') {
+        let Some((inside, tail)) = after.split_once(']') else { return refuse("an unclosed [") };
+        match inside.parse::<std::net::Ipv6Addr>() {
+            Ok(ip) if whatwg_ipv6(&ip) == inside => {}
+            Ok(ip) => return refuse(&format!("a browser writes this IPv6 address as [{}]", whatwg_ipv6(&ip))),
+            Err(_) => return refuse("the bracketed host is not an IPv6 address"),
+        }
+        let port = match tail {
+            "" => None,
+            t => match t.strip_prefix(':') {
+                Some(p) => Some(p),
+                None => return refuse("text after the bracketed host"),
+            },
+        };
+        (inside, port)
+    } else {
+        let (h, p) = match rest.split_once(':') {
+            None => (rest, None),
+            Some((_, p)) if p.contains(':') => return refuse("an IPv6 host is written in brackets, [::1]"),
+            Some((h, p)) => (h, Some(p)),
+        };
+        if h.is_empty() {
+            return refuse("no host");
+        }
+        if !h.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_') {
+            return refuse("a host is letters, digits, `.`, `-` and `_`");
+        }
+        // A host of digits and dots is an IPv4 literal to a browser, which writes it canonically.
+        if h.chars().all(|c| c.is_ascii_digit() || c == '.') {
+            match h.parse::<std::net::Ipv4Addr>() {
+                Ok(ip) if ip.to_string() == h => {}
+                _ => return refuse("an IPv4 host is a dotted quad without leading zeros, as a browser writes it"),
+            }
+        }
+        (h, p)
+    };
+    if host.is_empty() {
+        return refuse("no host");
+    }
+    if let Some(p) = port {
+        if p.is_empty() || !p.bytes().all(|b| b.is_ascii_digit()) || p.starts_with('0') {
+            return refuse("the port is digits with no sign or leading zero");
+        }
+        match p.parse::<u16>() {
+            Ok(0) | Err(_) => return refuse("the port is not 1..=65535"),
+            Ok(80) if scheme == "http" => return refuse("a browser leaves out :80 for http, so this entry never matches"),
+            Ok(443) if scheme == "https" => return refuse("a browser leaves out :443 for https, so this entry never matches"),
+            Ok(_) => {}
+        }
+    }
+    Ok(())
+}
+
+/// An IPv6 address as a browser serialises it in an origin (the URL Standard's IPv6 serializer): eight
+/// lowercase hex pieces without leading zeros, the first longest run of two or more zero pieces written
+/// `::`, and never a dotted IPv4 tail — so `::ffff:127.0.0.1` is `::ffff:7f00:1`, where Rust's `Display`
+/// keeps the dots.
+fn whatwg_ipv6(ip: &std::net::Ipv6Addr) -> String {
+    let seg = ip.segments();
+    let (mut best, mut best_len, mut i) = (None, 1usize, 0usize);
+    while i < 8 {
+        if seg[i] == 0 {
+            let start = i;
+            while i < 8 && seg[i] == 0 {
+                i += 1;
+            }
+            if i - start > best_len {
+                best = Some(start);
+                best_len = i - start;
+            }
+        } else {
+            i += 1;
+        }
+    }
+    let hex = |r: &[u16]| r.iter().map(|p| format!("{p:x}")).collect::<Vec<_>>().join(":");
+    match best {
+        Some(b) => format!("{}::{}", hex(&seg[..b]), hex(&seg[b + best_len..])),
+        None => hex(&seg),
+    }
+}
+
+/// Whether a `gateway_cors_origins` entry (already [`check_cors_origin`]-valid) names a page on this host:
+/// `localhost` (or a name under it), an IPv4 address in `127.0.0.0/8`, or `[::1]`. A page on any other
+/// origin is served by someone else, so a gateway with no credential model refuses to list it at `start()`.
+pub fn cors_origin_is_loopback(origin: &str) -> bool {
+    let Some((_, rest)) = origin.split_once("://") else { return false };
+    let host = match rest.strip_prefix('[') {
+        Some(after) => after.split_once(']').map_or("", |(h, _)| h),
+        None => rest.split_once(':').map_or(rest, |(h, _)| h),
+    };
+    host == "localhost"
+        || host.ends_with(".localhost")
+        || host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.to_canonical().is_loopback())
+}
+
 impl Default for GossipConfig {
     fn default() -> Self {
         Self {
@@ -1759,6 +1901,7 @@ impl Default for GossipConfig {
             emergent_detectors_enabled:    false,
             gateway_auth_token:            None,
             gateway_allow_unauthenticated: false,
+            gateway_cors_origins:          Vec::new(),
             gateway_scoped_tokens:         Vec::new(),
             gateway_named_tokens:          Vec::new(),
             gateway_identity_issuer:       None,
@@ -2190,6 +2333,17 @@ impl GossipConfig {
                 }
             })?;
         }
+        if !self.gateway_cors_origins.is_empty() && self.http_port.is_none() {
+            return Err(GossipError::InvalidField {
+                field:  "gateway_cors_origins",
+                reason: "set without http_port: there is no gateway to answer cross-origin reads".into(),
+            });
+        }
+        for origin in &self.gateway_cors_origins {
+            if let Err(reason) = check_cors_origin(origin) {
+                return Err(GossipError::InvalidField { field: "gateway_cors_origins", reason });
+            }
+        }
         for seg in &self.locality_path {
             if seg.is_empty() {
                 return Err(GossipError::InvalidField {
@@ -2283,6 +2437,7 @@ impl GossipConfig {
     /// `GOSSIP_MAX_STORE_ENTRIES`, `GOSSIP_MAX_CLOCK_DRIFT_MS`,
     /// `GOSSIP_EPIDEMIC_EXTRA_PEERS`,
     /// `GOSSIP_GATEWAY_AUTH_TOKEN`, `GOSSIP_GATEWAY_ALLOW_UNAUTHENTICATED` (strict boolean),
+    /// `GOSSIP_GATEWAY_CORS_ORIGINS` (comma-separated exact origins; blank = none),
     /// `GOSSIP_REQUIRE_IDENTITY_PROOFS` (strict boolean — it can only weaken a `true` default).
     pub fn apply_env_overrides(&mut self) -> Result<(), GossipError> {
         if let Ok(v) = env::var("GOSSIP_BIND_ADDRESS") {
@@ -2534,6 +2689,10 @@ impl GossipConfig {
         }
         if let Ok(v) = env::var("GOSSIP_GATEWAY_AUTH_TOKEN") {
             self.gateway_auth_token = Some(v);
+        }
+        if let Ok(v) = env::var("GOSSIP_GATEWAY_CORS_ORIGINS") {
+            self.gateway_cors_origins =
+                v.split(',').map(str::trim).filter(|o| !o.is_empty()).map(String::from).collect();
         }
         if let Ok(v) = env::var("GOSSIP_GATEWAY_ALLOW_UNAUTHENTICATED") {
             // Strict, unlike the diagnostic toggles above: this one waives a security refusal, so a
@@ -3284,6 +3443,58 @@ mod tests {
         set_test_env(&_lock, var, Some("ture"));
         let err = GossipConfig::default().apply_env_overrides().expect_err("a typo refuses");
         assert!(matches!(err, GossipError::InvalidField { field: "gateway_allow_unauthenticated", .. }), "{err}");
+    }
+
+    /// Y3 (D28): cross-origin reads are off by default, set from the environment as a list, and an
+    /// entry a browser could never send — or one that would admit every page — is refused by name.
+    #[test]
+    fn cors_origins_are_off_by_default_and_parse_from_the_environment() {
+        let _lock = env_test_lock();
+        let var = "GOSSIP_GATEWAY_CORS_ORIGINS";
+        let _guard = EnvGuard(&_lock, var, std::env::var(var).ok());
+        assert!(GossipConfig::default().gateway_cors_origins.is_empty(), "off by default");
+        set_test_env(&_lock, var, Some(" http://127.0.0.1:8099 , https://ops.example ,"));
+        let mut cfg = GossipConfig::default();
+        cfg.apply_env_overrides().expect("a list applies");
+        assert_eq!(cfg.gateway_cors_origins, vec!["http://127.0.0.1:8099", "https://ops.example"]);
+        set_test_env(&_lock, var, Some("  "));
+        let mut cfg = GossipConfig::default();
+        cfg.gateway_cors_origins = vec!["http://x".into()];
+        cfg.apply_env_overrides().expect("blank applies");
+        assert!(cfg.gateway_cors_origins.is_empty(), "a blank variable means none");
+    }
+
+    #[test]
+    fn a_cors_origin_is_an_exact_origin_or_it_is_refused_by_name() {
+        for ok in ["http://127.0.0.1:8099", "https://ops.example", "http://[::1]:8099", "http://localhost", "https://a.b:8443",
+                   "http://xn--bcher-kva.example", "http://[::ffff:7f00:1]", "http://[2001:db8::1:0:0:1]", "http://[1::]"] {
+            assert_eq!(check_cors_origin(ok), Ok(()), "{ok}");
+        }
+        for (o, local) in [("http://127.0.0.1:8099", true), ("http://127.9.9.9", true), ("http://[::1]:8099", true),
+                           ("http://localhost:8099", true), ("http://ops.localhost", true), ("https://ops.example", false),
+                           ("http://10.0.0.1:8099", false), ("http://localhost.example", false)] {
+            assert_eq!(cors_origin_is_loopback(o), local, "{o}");
+        }
+        for bad in [
+            "*", "null", "NULL", "127.0.0.1:8099", "ftp://x", "HTTP://x", "http://", "http://x/", "http://x/path",
+            "http://x?q", "http://x#f", "http://u@x", "http://*.example", "http://X.example", "http://::1",
+            "http://[::1", "http://[::1]x", "http://x:0", "http://x:65536", "http://x:port", "http://x:80",
+            "https://x:443", "http://x :1", "http://x:+8099", "http://x:08099", "http://x:", "http://bücher.example",
+            "http://[0:0:0:0:0:0:0:1]:8099", "http://[::FFFF:127.0.0.1]", "http://[::ffff:127.0.0.1]",
+            "http://[2001:db8:0:0:1::1]", "http://[2001:0db8::1]", "http://127.1:8099", "http://127.000.0.1",
+            "http://010.0.0.1", "http://a,http://b", "http://a!b",
+        ] {
+            assert!(check_cors_origin(bad).is_err(), "{bad} must be refused");
+        }
+        let mut cfg = GossipConfig { http_port: Some(9050), ..GossipConfig::default() };
+        cfg.gateway_cors_origins = vec!["http://127.0.0.1:8099".into(), "*".into()];
+        let err = cfg.validate().expect_err("a wildcard is refused");
+        assert!(matches!(err, GossipError::InvalidField { field: "gateway_cors_origins", .. }), "{err}");
+        cfg.gateway_cors_origins = vec!["http://127.0.0.1:8099".into()];
+        cfg.validate().expect("an exact origin is accepted");
+        cfg.http_port = None;
+        let err = cfg.validate().expect_err("no gateway, nothing to answer");
+        assert!(matches!(err, GossipError::InvalidField { field: "gateway_cors_origins", .. }), "{err}");
     }
 
     #[test]

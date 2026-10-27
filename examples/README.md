@@ -141,6 +141,7 @@ not to raw source. The suite READMEs carry the per-example walkthrough + the exa
 | [`three_arm_workdist`](../docs/plans/three_arm_workdist.md#run-it) · [src](three_arm_workdist.rs) | ● | · | · | ● | Adv | CLI | · | · | · | · | · |
 | [`three_node_demo`](chat/README.md#how-to-run) · [src](three_node_demo.rs) ★ | ● | ● | ● | ● | Adv | Web | real | · | · | ✓ | [✓](units/three_node_demo/) |
 | [`ops_console`](ops_console/README.md#how-to-run) · [src](ops_console) † | ○ | ○ | ○ | ○ | Adv | Web | · | · | · | · | · |
+| [`observed_fleet`](ops_console/README.md#how-to-run) · [src](observed_fleet.rs) | ● | · | · | ● | Adv | Web | · | · | ● | ✓ | · |
 | **The v3 contracts axis** — one decisive demonstration per item | | | | | | | | | | | |
 | [`receipt_ladder`](../docs/guide/18-contracts-and-receipts.md#run-the-ladder) · [src](receipt_ladder.rs) | ● | · | · | · | Adv | CLI | · | · | · | ✓ | · |
 | [`replay_a_bundle`](../docs/guide/19-replay-and-simulation.md#run-it) · [src](../mycelium-sim/examples/replay_a_bundle.rs) | · | · | · | · | Adv | CLI | · | · | · | ✓ | · |
@@ -217,7 +218,9 @@ here so this page is a complete enumeration: a list that is silently short is in
 one that is out of date, and this index has drifted that way before.
 
 ★ **flagship** — the marquee demo of its world. † `ops_console` *observes* every layer and both ops
-surfaces (`/audit`, `/metrics`) rather than emitting them — point it at any node below. Every link above
+surfaces (`/audit`, `/metrics`) rather than emitting them — point it at any node below. It is a static page,
+not a binary, so its CI column is the fleet's: CI renders it in Chrome against `observed_fleet`, every tab
+(`scripts/ops-console-render.sh`). Every link above
 goes to a **run doc** (README or guide chapter), never raw source; the exact commands live in each suite
 README (and, for the visual demos, [Browser showcases](#browser-showcases) below).
 
@@ -259,17 +262,20 @@ skills cluster, reasoning/LangGraph, AFN, A2A, and the interactive chat — is i
 
 ## Ops Console
 
-A generic, read-only dashboard over *any* gateway-enabled node's operational endpoints — `/stats` ·
-`/gateway/fleet` · `/gateway/diagnose` (the Legible-Emergence fleet narrative) · `/gateway/audit` ·
-`/gateway/kv/keys` · `/metrics` — in one place. A *dev/reference* tool, **not** a shipped control plane
+A read-only dashboard over gateway-enabled nodes' existing routes — `/stats` · `/gateway/fleet` ·
+`/gateway/diagnose` · `/gateway/guarantees` · `/gateway/govern` · `/gateway/tuple/overview` ·
+`/gateway/audit` · `/gateway/kv/keys` · `/metrics` — as **a static page**: the browser reads each node you
+list directly and merges their answers itself, with no console server and no proxy. Each node lists the
+page's origin in `gateway_cors_origins` (off by default). An example, **not** a product or a control plane
 (library, not platform); a customer forks it or points Grafana at `/metrics`.
 
 ```
-cargo run --example ops_console            # → http://127.0.0.1:8099/  (default target 127.0.0.1:9050)
+cargo run --example observed_fleet --features metrics       # the three-node fleet CI renders it against
+python3 -m http.server 8099 --bind 127.0.0.1 --directory examples/ops_console
 ```
 
-Full docs — the tab-by-tab endpoint map, the `ui/viz` two-way linking convention, and which host box to
-point at each demo/showcase — are in **[`ops_console/README.md`](ops_console/README.md)**.
+Full docs — the tab-by-tab route map, the cross-origin setting, the `ui/viz` two-way linking convention —
+are in **[`ops_console/README.md`](ops_console/README.md)**.
 
 ## Research artifacts
 

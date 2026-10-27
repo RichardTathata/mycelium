@@ -137,15 +137,17 @@ Layer explainers: gossip-KV [ch01](../../guide/01-gossip-kv.md) · signal-mesh
   *additional* to the fifteen above. A showcase paces its loop so the
   emergence is legible (e.g. a `THINK` dwell for the instant `EchoBackend`) — the batch demos race to
   completion, a showcase must be *watchable*.
-- **Ops Console** (`examples/ops_console/` — `main.rs` + `.html` + README, `:8099`): a generic, read-only dashboard over
-  **any** gateway-enabled node's operational endpoints — `/stats` (runtime + tripwires),
-  `/gateway/fleet` (cluster snapshot), `/gateway/diagnose` (the Legible-Emergence *fleet narrative*),
-  `/gateway/audit` (the signed audit trail — `compliance`-built nodes), `/gateway/kv/keys`, `/metrics`
-  — with a server-side proxy so the browser skips CORS. `cargo run
-  --example ops_console`, then point the host box at the community cluster (`:9050`), a coop demo, or a
-  showcase's printed gateway URL (`conway` `:9090`; `stigmergy_viz`/`llm_council_viz` print theirs;
-  `microgrid_viz` `:9091` / `redistribution_viz` `:9093` need `--features gateway`, off by default in
-  those companion crates). **Dev/reference tool, explicitly *not* a shipped control plane** — the
+- **Ops Console** (`examples/ops_console/` — `index.html` + README; adopter-surface Y3, D16/D28): **a static
+  page** over gateway-enabled nodes' existing routes — `/stats`, `/gateway/fleet`, `/gateway/diagnose`,
+  `/gateway/guarantees`, `/gateway/govern`, `/gateway/tuple/overview`, `/gateway/audit`, `/gateway/kv/keys`,
+  `/metrics` — read by the browser from each node listed and merged on the page; its `:8099` server and
+  `/api?host=…&path=…` proxy were removed in Y3. A node lets the page read it only by listing the page's
+  origin in `gateway_cors_origins` (off by default; read-only routes, `GET`/`HEAD`; `src/agent/http/cors.rs`).
+  Serve it with any static host on `:8099` and point it at `observed_fleet` (the three-node fleet CI renders
+  it against in Chrome, `scripts/ops-console-render.sh`), a coop demo, or a showcase — each showcase and the
+  coop bootstrap list `http://127.0.0.1:8099` (`microgrid_viz` `:9091` / `redistribution_viz` `:9093` need
+  `--features gateway`, off by default in those companion crates; the community skill cluster has no
+  setting for the origin, so the page reads it `blocked`). **Dev/reference tool, explicitly *not* a shipped control plane** — the
   library-not-platform line holds; a customer forks it or scrapes `/metrics` into Grafana.
   *Two-way linking (the `ui/viz` convention):* every browser demo self-advertises its UI as two KV
   keys — `ui/viz` = `http://host:port/`, `ui/label` = a short name — which the console reads from the

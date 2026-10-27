@@ -107,7 +107,8 @@ MOCK_LLM=1 cargo run --example llm_agent --features metrics
 
 `MOCK_LLM=1` skips the Ollama probe (no model needed); drop it to drive the presets with a real local
 model. `--features metrics` installs the Prometheus recorder so the [Ops Console](../../examples/README.md#ops-console)'s
-**Metrics** tab populates when pointed at the demo's gateways (`:9100`–`:9102`).
+**Metrics** tab populates when pointed at the demo's gateways (`:9100`–`:9102`, which list the console's origin
+`http://127.0.0.1:8099`; serve the page there — the demo prints the command).
 
 **What to observe**
 
