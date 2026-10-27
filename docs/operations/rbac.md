@@ -171,6 +171,13 @@ in `http::COMPANION_PUBLIC_PATHS`: `mycelium-agentfacts`' `GET /.well-known/agen
 no Mycelium credential. A companion route outside the prefixes above is public by construction (the note above),
 which is why `mycelium-tuple-space`'s overview moved under `/gateway/`.
 
+**Cross-origin reads do not widen this** (adopter-surface Y3). `gateway_cors_origins`, off by default, lets a
+browser page on a listed origin *read* the answers of the read-only routes (`GET`/`HEAD` only; the list is
+`CORS_READ_PATHS` in `src/agent/http/cors.rs`); only its preflight is answered before `gateway_auth`, and the read
+itself passes the bearer and its scopes like any other request — a listed origin with no bearer reads a 401. It
+decides which pages a browser lets read an answer, not who may obtain one
+([observability § Cross-origin reads](observability.md#cross-origin-reads-gateway_cors_origins)).
+
 ---
 
 **Scopes match exactly, or `*`.** `scope_admits` accepts the literal scope or the single wildcard

@@ -218,6 +218,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut cfg = mycelium::GossipConfig::default();
     cfg.bind_port = gossip_port;
     cfg.http_port = Some(gw_port);
+    // The Ops Console page, served on :8099, reads this gateway from the browser (Y3).
+    cfg.gateway_cors_origins = vec!["http://127.0.0.1:8099".into()];
     let agent = Arc::new(mycelium::GossipAgent::new(
         mycelium::NodeId::new("127.0.0.1", gossip_port)?,
         cfg,

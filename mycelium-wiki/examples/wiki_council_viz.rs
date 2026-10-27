@@ -539,6 +539,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         bind_port: mycelium::test_util::alloc_port(),
         cluster_name: Some(std::env::var("GOSSIP_CLUSTER_NAME").unwrap_or_else(|_| "wiki-council".into())),
         http_port: Some(gwport),
+        // The Ops Console page, served on :8099, reads this gateway from the browser (Y3).
+        gateway_cors_origins: vec!["http://127.0.0.1:8099".into()],
         ..Default::default()
     };
     let gw = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", cfg.bind_port)?, cfg));

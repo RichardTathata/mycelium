@@ -321,9 +321,11 @@ path              = "examples/knowledge_layer.rs"
 # `knowledge` is behind `tls` — the record types verify Ed25519 signatures.
 required-features = ["tls"]
 
+# The Ops Console itself is a static page (`examples/ops_console/index.html`) with no binary of its own
+# (adopter-surface Y3, D28); this is the three-node fleet it is pointed at, and CI renders it against.
 [[example]]
-name              = "ops_console"
-path              = "examples/ops_console/main.rs"
+name              = "observed_fleet"
+path              = "examples/observed_fleet.rs"
 required-features = ["gateway"]
 
 [profile.release]

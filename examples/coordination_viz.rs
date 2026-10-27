@@ -79,6 +79,8 @@ async fn main() {
         };
         if i == 0 {
             cfg.http_port = Some(OPS_PORT);
+            // The Ops Console page, served on :8099, reads this gateway from the browser (Y3).
+            cfg.gateway_cors_origins = vec!["http://127.0.0.1:8099".into()];
         }
         let a = Arc::new(GossipAgent::new(
             NodeId::new("127.0.0.1", port).expect("node id"), cfg));

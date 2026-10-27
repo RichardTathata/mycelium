@@ -1,0 +1,369 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Mycelium — Ops Console</title>
+<style>
+  :root{--bg:#0d1117;--panel:#161b22;--panel2:#1c2230;--border:#30363d;--fg:#c9d1d9;--muted:#8b949e;
+        --accent:#a78bfa;--green:#3fb950;--amber:#d29922;--red:#f85149;--blue:#58a6ff;--mono:ui-monospace,SFMono-Regular,Menlo,monospace}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+  header{display:flex;align-items:center;gap:14px;padding:12px 20px;border-bottom:1px solid var(--border);background:var(--panel);position:sticky;top:0;z-index:5;flex-wrap:wrap}
+  .brand{font-weight:700;letter-spacing:.02em}.brand b{color:var(--accent)}
+  .tag{font-size:10px;text-transform:uppercase;letter-spacing:.12em;color:var(--muted);border:1px solid var(--border);border-radius:6px;padding:2px 7px}
+  header input{background:#0b0f16;border:1px solid var(--border);border-radius:7px;color:var(--fg);font:12px var(--mono);padding:6px 9px;width:180px}
+  header .status{margin-left:auto;font-size:12px;color:var(--muted);font-family:var(--mono)}
+  .dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--muted);margin-right:5px;vertical-align:middle}
+  .dot.ok{background:var(--green)}.dot.bad{background:var(--red)}
+  nav{display:flex;gap:4px;padding:10px 20px 0;border-bottom:1px solid var(--border);background:var(--panel)}
+  nav button{background:none;border:none;border-bottom:2px solid transparent;color:var(--muted);padding:8px 14px;font-size:13px;font-weight:600;cursor:pointer}
+  nav button.active{color:var(--fg);border-bottom-color:var(--accent)}
+  main{padding:20px;max-width:1100px;margin:0 auto}
+  .tiles{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:12px;margin-bottom:18px}
+  .tile{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:14px 16px}
+  .tile .v{font-size:1.7rem;font-weight:700;color:var(--accent);line-height:1;font-family:var(--mono)}
+  .tile .l{font-size:.72rem;color:var(--muted);margin-top:6px;text-transform:uppercase;letter-spacing:.06em}
+  h3{font-size:.75rem;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);margin:22px 0 10px}
+  .trip{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:8px}
+  .trip .row{display:flex;justify-content:space-between;align-items:center;background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:8px 12px;font-size:12px}
+  .trip .n{color:var(--muted);font-family:var(--mono)}
+  .trip .c{font-family:var(--mono);font-weight:700}
+  .trip .c.zero{color:var(--green)}.trip .c.hot{color:var(--red)}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px 18px;margin-bottom:12px}
+  .diag-summary{font-size:1.05rem;line-height:1.45;padding:18px 20px;border-radius:12px;border:1px solid var(--border);margin-bottom:14px}
+  .diag-summary.nominal{background:rgba(63,185,80,.08);border-color:rgba(63,185,80,.35)}
+  .diag-summary.pathology{background:rgba(248,81,73,.08);border-color:rgba(248,81,73,.35)}
+  .finding{border-left:3px solid var(--amber);padding:10px 14px;background:var(--panel2);border-radius:0 8px 8px 0;margin-bottom:8px}
+  .finding .h{font-weight:700}.finding .d{color:var(--muted);font-size:12px;margin-top:3px}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  td,th{text-align:left;padding:6px 10px;border-bottom:1px solid var(--border)}
+  th{color:var(--muted);font-size:.72rem;text-transform:uppercase;letter-spacing:.06em}
+  .kv-ns{font-family:var(--mono);color:var(--blue)}
+  .keys{font-family:var(--mono);font-size:11px;color:var(--muted);max-height:120px;overflow:auto;margin-top:6px;white-space:pre-wrap}
+  pre.metrics{font-family:var(--mono);font-size:11px;color:var(--fg);background:#0b0f16;border:1px solid var(--border);border-radius:10px;padding:14px;overflow:auto;max-height:70vh}
+  .muted{color:var(--muted)}.err{color:var(--red)}
+  .badge{font-size:11px;font-family:var(--mono);padding:2px 8px;border-radius:6px;border:1px solid var(--border)}
+  .badge.ok{color:var(--green);border-color:rgba(63,185,80,.4)}.badge.bad{color:var(--red);border-color:rgba(248,81,73,.4)}
+  a.vizlink{display:none;align-items:center;gap:5px;font-size:12px;font-family:var(--mono);color:var(--green);text-decoration:none;border:1px solid rgba(63,185,80,.4);border-radius:7px;padding:5px 9px}
+  a.vizlink:hover{background:rgba(63,185,80,.1)}
+  header input.nodes{width:340px}
+  header input.token{width:130px}
+  section.nodepanel{border-top:1px solid var(--border);padding-top:6px;margin-top:18px}
+  section.nodepanel>h2{font-size:.9rem;font-family:var(--mono);margin:8px 0 12px;display:flex;gap:8px;align-items:center}
+  .state{font-size:11px;font-family:var(--mono);padding:2px 8px;border-radius:6px;border:1px solid var(--border)}
+  .state.ok{color:var(--green)}.state.blocked,.state.error{color:var(--red)}.state.unauthorized,.state.absent{color:var(--amber)}
+  .merged{margin-bottom:8px}
+  td.g-enforced{color:var(--green)}td.g-not_configured{color:var(--amber)}td.g-not_in_build,td.g-not_applicable,td.g-not_verifiable_here{color:var(--muted)}
+</style>
+</head>
+<body>
+<header>
+  <span class="brand"><b>Mycelium</b> · Ops Console</span>
+  <span class="tag">read-only · static page</span>
+  <label class="muted" style="font-size:12px">nodes <input id="nodes" class="nodes" spellcheck="false" title="Comma-separated gateways: host:port (http) or a full https:// URL"></label>
+  <label class="muted" style="font-size:12px">bearer <input id="token" class="token" type="password" autocomplete="off" title="Sent as Authorization: Bearer to every node; kept in this page only"></label>
+  <a id="vizlink" class="vizlink" target="_blank" rel="noopener" title="Open a node's visualiser (advertised as ui/viz)"></a>
+  <span class="status"><span id="dot" class="dot"></span><span id="stat">connecting…</span></span>
+</header>
+<nav id="tabs"></nav>
+<main id="view"><p class="muted">Loading…</p></main>
+
+<script>
+// ── The Ops Console (adopter-surface Y3, D28) ───────────────────────────────────────────────────────
+//
+// A static page. It runs in the browser against the nodes the operator lists and reads only their
+// existing routes, each node directly: there is no server of its own and no proxy. Fan-out is the
+// browser's — each panel asks every node and merges the answers on this page. A node answers a page on
+// another origin only if its operator listed that origin (`gateway_cors_origins`, off by default), and
+// only on its read-only routes; the bearer, if one is entered, is sent to every node and still decides
+// what may be read. If a panel ever needs a process that polls every node and holds the result, the
+// answer is a new route on a node, never that process (D16).
+
+// Each tab and the routes it renders — `README.md`'s table is this list, and a test holds them equal.
+const PANELS = [
+  {tab:"Overview", routes:["/stats"]},
+  {tab:"Fleet", routes:["/gateway/fleet"]},
+  {tab:"Diagnose", routes:["/gateway/diagnose"]},
+  {tab:"Guarantees", routes:["/gateway/guarantees"]},
+  {tab:"Governors", routes:["/gateway/govern"]},
+  {tab:"Tuples", routes:["/gateway/tuple/overview"]},
+  {tab:"Integrity", routes:["/stats", "/gateway/kv/keys?prefix=grp%2F", "/gateway/kv/keys?prefix=sys%2Fidentity", "/gateway/fleet"]},
+  {tab:"Audit", routes:["/gateway/audit"]},
+  {tab:"KV", routes:["/gateway/kv/keys"]},
+  {tab:"Metrics", routes:["/metrics"]},
+];
+// The `ui/viz` + `ui/label` link a showcase advertises (read with the KV value route).
+const LINK_ROUTES = ["/gateway/kv?key=ui%2Fviz", "/gateway/kv?key=ui%2Flabel"];
+
+const esc = s => String(s==null?"":s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const $ = s => document.querySelector(s);
+const el = (t,c,h)=>{const e=document.createElement(t); if(c)e.className=c; if(h!=null)e.innerHTML=h; return e;};
+
+const params = new URLSearchParams(location.search);
+const hash = new URLSearchParams(location.hash.slice(1));
+// `?nodes=a,b,c`; `?target=host:port` is the one-node link each showcase's "⚙ Ops Console" button carries.
+// The default is `examples/observed_fleet.rs`, the fleet this page is tested against.
+$("#nodes").value = params.get("nodes") || params.get("target") || "127.0.0.1:9061,127.0.0.1:9062,127.0.0.1:9063";
+// A bearer in the fragment (`#token=…`) is never sent to the page's own host; it stays in this page.
+$("#token").value = hash.get("token") || "";
+let active = PANELS.some(p=>p.tab===params.get("tab")) ? params.get("tab") : "Overview";
+
+const nodes = () => $("#nodes").value.split(",").map(s=>s.trim()).filter(Boolean);
+const nodeBase = n => /^https?:\/\//.test(n) ? n.replace(/\/+$/,"") : "http://"+n;
+
+// The page's one network call: a GET to a node's own route. A browser refuses the answer of a node that
+// does not list this page's origin, and that refusal is indistinguishable here from an unreachable node.
+async function nodeFetch(node, route){
+  const token = $("#token").value.trim();
+  const headers = token ? {Authorization: "Bearer "+token} : {};
+  let r;
+  try { r = await fetch(nodeBase(node)+route, {headers}); }
+  catch(e){ return {state:"blocked", detail:`unreachable, or ${node} does not list this page's origin (${location.origin}) in gateway_cors_origins`}; }
+  if(r.status===401 || r.status===403) return {state:"unauthorized", status:r.status, detail:await r.text()};
+  if(r.status===404) return {state:"absent", status:404};
+  if(!r.ok) return {state:"error", status:r.status, detail:await r.text()};
+  const ct = r.headers.get("content-type")||"";
+  return {state:"ok", body: ct.includes("json") ? await r.json() : await r.text()};
+}
+
+const RANK = {blocked:4, unauthorized:3, error:2, absent:1, ok:0};
+const worst = rs => rs.reduce((a,r)=>RANK[r.state]>RANK[a]?r.state:a, "ok");
+
+function setStatus(ok,txt){ $("#dot").className = "dot "+(ok?"ok":"bad"); $("#stat").textContent = txt; }
+
+function renderTabs(){
+  const nav = $("#tabs"); nav.innerHTML="";
+  PANELS.forEach(({tab})=>{ const b=el("button",tab===active?"active":"",tab); b.onclick=()=>{active=tab;renderTabs();refresh();}; nav.appendChild(b); });
+}
+
+async function discoverViz(){
+  const link = $("#vizlink");
+  for(const n of nodes()){
+    const [v,l] = await Promise.all(LINK_ROUTES.map(r=>nodeFetch(n,r)));
+    if(v.state==="ok" && v.body && v.body.found){
+      link.href = atob(v.body.value_b64);
+      link.textContent = "↗ "+(l.state==="ok" && l.body && l.body.found ? atob(l.body.value_b64) : "visualiser");
+      link.style.display = "inline-flex";
+      return;
+    }
+  }
+  link.style.display = "none";
+}
+
+// What a node's answer means when it is not a reading: said, never a blank panel.
+function notRead(tab, node, r){
+  if(r.state==="blocked") return `<p class="err">${esc(r.detail)}</p>`;
+  if(r.state==="unauthorized") return `<p class="err">${r.status} — this node asks for a bearer, or the one entered lacks the
+    route's scope (docs/operations/rbac.md).</p><pre class="keys">${esc(r.detail)}</pre>`;
+  if(r.state==="error") return `<p class="err">${r.status}</p><pre class="keys">${esc(r.detail)}</pre>`;
+  const why = {
+    Audit: `<code>/gateway/audit</code> is served only by a node built with <code>--features compliance</code>.`,
+    Tuples: `<code>/gateway/tuple/overview</code> is the tuple-space companion's route; this node does not mount it.`,
+    Metrics: `<code>/metrics</code> answers only on a node built with <code>--features metrics</code>.`,
+  }[tab] || `this node does not serve the route.`;
+  return `<p class="muted">Not on this node (404) — ${why}</p>`;
+}
+
+// ── Overview: /stats ────────────────────────────────────────────────────────
+const HEADLINE = ["node_id","peers","store_entries","task_count","cluster_name"];
+const TRIPWIRES = ["dropped_frames","membership_flaps","commit_conflicts","schema_mismatch",
+  "opacity_oscillations","individual_flood_fallbacks","rate_limited_senders","cap_authz_violations",
+  "sys_namespace_violations","governed_group_conflicts","capability_coverage_gaps"];
+function overview(s){
+  const tiles = HEADLINE.map(k=>`<div class="tile"><div class="v">${esc(s[k]==null?"—":s[k])}</div><div class="l">${k.replace(/_/g,' ')}</div></div>`).join("");
+  const trip = TRIPWIRES.map(k=>{ const c=Number(s[k]||0); return `<div class="row"><span class="n">${k.replace(/_/g,' ')}</span><span class="c ${c>0?"hot":"zero"}">${c}</span></div>`; }).join("");
+  return `<div class="tiles">${tiles}</div><h3>Tripwires &amp; counters (green = clean)</h3><div class="trip">${trip}</div>`;
+}
+function overviewMerged(ns, rs){
+  const rows = ns.map((n,i)=>{ const r=rs[i][0]; if(r.state!=="ok") return `<tr><td><code>${esc(n)}</code></td><td colspan="4" class="muted">${r.state}</td></tr>`;
+    const s=r.body, hot=TRIPWIRES.reduce((a,k)=>a+Number(s[k]||0),0);
+    return `<tr><td><code>${esc(n)}</code></td><td>${esc(s.peers)}</td><td>${esc(s.store_entries)}</td><td>${esc(s.task_count)}</td><td class="${hot?"err":""}">${hot}</td></tr>`; }).join("");
+  return `<h3>Across the nodes listed — merged on this page</h3><table><thead><tr><th>node</th><th>peers</th><th>store entries</th><th>tasks</th><th>tripwire total</th></tr></thead><tbody>${rows}</tbody></table>`;
+}
+
+// ── Fleet: /gateway/fleet (each node's own view of the fleet) ───────────────
+function fleet(f){
+  const vc = f.view_confidence||{};
+  const tiles = [
+    ["observer",f.observer||"—"],["peers heard",`${vc.peers_heard??"—"} / ${vc.peers_known??"—"}`],
+    ["max staleness", (vc.max_staleness_ms!=null? vc.max_staleness_ms+" ms":"—")],
+    ["opaque nodes", (f.opaque_node_pct!=null? f.opaque_node_pct+"%":"—")],
+    ["store entries", f.store_entries??"—"],["commit conflicts", f.commit_conflicts??0],
+  ].map(([l,v])=>`<div class="tile"><div class="v" style="font-size:1.2rem">${esc(v)}</div><div class="l">${l}</div></div>`).join("");
+  const flags = [
+    ["self-degraded", !!vc.self_degraded],["membership flaps", (f.membership_flaps||0)>0],
+    ["opacity oscillations",(f.opacity_oscillations||0)>0],["coverage gaps",(f.capability_coverage_gaps||[]).length>0],
+  ].map(([l,bad])=>`<span class="badge ${bad?'bad':'ok'}">${l}: ${bad?'⚠':'ok'}</span>`).join(" ");
+  const conv = f.store_convergence||{};
+  return `<div class="tiles">${tiles}</div><div class="card">${flags}</div>
+    <div class="card muted">nodes reporting: ${esc(conv.nodes_reporting??0)} · min/max entries: ${esc(conv.min_entries??0)} / ${esc(conv.max_entries??0)} · store hash: <code>${esc(f.store_hash??"—")}</code></div>`;
+}
+
+// ── Diagnose: /gateway/diagnose (the narrative) ─────────────────────────────
+function diagnose(d){
+  const findings = d.findings||[];
+  let h = `<div class="diag-summary ${findings.length?'pathology':'nominal'}">${esc(d.summary||"(no summary)")}</div>`;
+  findings.forEach(x=>{
+    const title = x.pathology||x.name||x.kind||"finding";
+    const detail = x.detail||x.narrative||x.message||JSON.stringify(x);
+    h += `<div class="finding"><div class="h">${esc(title)}${x.severity?` · ${esc(x.severity)}`:""}</div><div class="d">${esc(detail)}</div></div>`;
+  });
+  if(d.caveat) h += `<div class="card muted">caveat — ${esc(d.caveat)}</div>`;
+  return h;
+}
+
+// ── Guarantees: /gateway/guarantees (what each node enforces, and why not the rest) ─
+function guarantees(g){
+  const p = g.profile||{};
+  const counts = {};
+  (g.entries||[]).forEach(e=>{ const st=(e.resolution||{}).state; counts[st]=(counts[st]||0)+1; });
+  return `<div class="card">profile <code>${esc(p.name)}</code> rev ${esc(p.revision)} ${p.selected?'<span class="badge ok">selected</span>':'<span class="badge">not selected</span>'}
+    · ${esc((p.required||[]).length)} required · started: ${esc(g.started)} · late attachments: ${esc(g.late_attachments)}
+    <div class="muted" style="margin-top:6px">${Object.entries(counts).map(([k,v])=>`${esc(k)} ${v}`).join(" · ")}</div></div>`;
+}
+function guaranteesMerged(ns, rs){
+  const ids = []; const at = {};
+  ns.forEach((n,i)=>{ const r=rs[i][0]; if(r.state!=="ok") return;
+    (r.body.entries||[]).forEach(e=>{ if(!(e.id in at)){ at[e.id]={}; ids.push(e.id); } at[e.id][n]=e.resolution||{}; }); });
+  if(!ids.length) return "";
+  const head = ns.map(n=>`<th>${esc(n)}</th>`).join("");
+  const rows = ids.map(id=>`<tr><td><code>${esc(id)}</code></td>${ns.map(n=>{ const res=at[id][n]; if(!res) return `<td class="muted">—</td>`;
+      return `<td class="g-${esc(res.state)}" title="${esc(res.missing||res.feature||res.reason||"")}">${esc(res.state)}</td>`; }).join("")}</tr>`).join("");
+  return `<h3>Each guarantee, on each node listed — merged on this page</h3><table><thead><tr><th>guarantee</th>${head}</tr></thead><tbody>${rows}</tbody></table>`;
+}
+
+// ── Governors: /gateway/govern (the governor snapshot) ──────────────────────
+function governors(g){
+  const c = g.control||{}, t = c.tuning||{};
+  const params = (g.params||[]).map(p=>`<tr><td><code>${esc(p.param)}</code></td><td>${esc(p.floor??"—")}</td><td>${esc(p.ceiling??"—")}</td><td>${esc(p.ratchet)}</td><td>${p.locally_pinned?"pinned":""}</td><td>${esc(p.pending??"")}</td></tr>`).join("");
+  const elect = (g.electorates||[]).map(e=>`<tr><td><code>${esc(e.group)}</code></td><td>${esc(e.epoch)}</td><td>${esc((e.members||[]).length)}</td><td>${e.exclusive_default?"default":""}</td><td>${esc(e.retired_to||"")}</td></tr>`).join("");
+  return `<div class="card">control profile <code>${esc(c.profile)}</code> · would hold ${esc(c.would_hold)} · opacity releases spaced ${esc(c.opacity_releases_spaced)}
+    · tuning <code>${esc(t.profile)}</code> (held by spacing ${esc(t.held_by_spacing)}, by settling ${esc(t.held_by_settling)}) · auto ${esc(g.auto_enabled)}</div>
+    <table><thead><tr><th>param</th><th>floor</th><th>ceiling</th><th>ratchet</th><th></th><th>pending</th></tr></thead><tbody>${params}</tbody></table>
+    <h3>Electorates seen here</h3>${elect?`<table><thead><tr><th>group</th><th>epoch</th><th>members</th><th></th><th>retired to</th></tr></thead><tbody>${elect}</tbody></table>`:`<p class="muted">none declared</p>`}`;
+}
+
+// ── Tuples: /gateway/tuple/overview (the companion's view, from this node's gossip) ─
+function tuples(t){
+  const rows = (t.nodes||[]).flatMap(n=>{
+    const st = n.stages||[];
+    if(!st.length) return [`<tr><td><code>${esc(n.node_id)}</code></td><td>${esc(n.ns)}</td><td>${esc(n.role)}</td><td colspan="4" class="muted">no stage yet</td></tr>`];
+    return st.map(s=>`<tr><td><code>${esc(n.node_id)}</code></td><td>${esc(n.ns)}</td><td>${esc(n.role)}</td><td>${esc(s.stage)}</td><td>${esc(s.depth)}</td><td>${esc(s.put_total)}</td><td>${esc(s.take_total)}</td></tr>`);
+  }).join("");
+  return rows ? `<table><thead><tr><th>holder</th><th>ns</th><th>role</th><th>stage</th><th>depth</th><th>put</th><th>take</th></tr></thead><tbody>${rows}</tbody></table>`
+              : `<p class="muted">no tuple space advertised in this node's view yet</p>`;
+}
+
+// ── Audit: /gateway/audit (the tamper-evident, signed trail) ────────────────
+function audit(d){
+  if(!d || !Array.isArray(d.streams)) return `<p class="muted">no audit streams in this answer</p>`;
+  if(!d.streams.length) return `<p class="muted">Audit enabled, but no records on this node yet — they accrue as governed actions flow.</p>`;
+  return d.streams.map(s=>{
+    const ok = !!s.verified;
+    const rows = (s.records||[]).map(r=>{ const out=String(r.outcome||""); const denied=/den|reject|fail|block/i.test(out);
+      return `<tr><td style="font-family:var(--mono)">${esc(r.seq)}</td><td>${esc(r.principal)}</td><td><code>${esc(r.action)}</code></td><td class="muted">${esc(r.target??"—")}</td><td><span class="badge ${denied?'bad':'ok'}">${esc(out)}</span></td><td class="muted" style="font-family:var(--mono);font-size:11px">${esc((r.content_hash||"").slice(0,12))}…</td></tr>`; }).join("");
+    return `<div class="card"><div style="display:flex;gap:8px;flex-wrap:wrap"><code>${esc(s.node)}</code>
+      <span class="badge ${ok?'ok':'bad'}">${ok?'chain verified ✓':'VERIFY FAILED ✗'}</span>
+      <span class="muted" style="margin-left:auto;font-size:12px">${esc(s.count)} record(s)</span></div>
+      ${s.verify_error?`<div class="d err">${esc(s.verify_error)}</div>`:""}
+      ${rows?`<table><thead><tr><th>seq</th><th>principal</th><th>action</th><th>target</th><th>outcome</th><th>hash</th></tr></thead><tbody>${rows}</tbody></table>`:""}</div>`;
+  }).join("");
+}
+
+// ── KV: /gateway/kv/keys (namespace map; each node's view, so a gap shows convergence) ─
+function byNamespace(keys){ const m={}; (keys||[]).forEach(k=>{ const ns=(k.split("/")[0]||"(root)")+"/"; (m[ns]=m[ns]||[]).push(k); }); return m; }
+function kv(k){
+  const m = byNamespace(k.keys);
+  const rows = Object.keys(m).sort().map(ns=>`<tr><td class="kv-ns">${esc(ns)}</td><td>${m[ns].length}</td><td><details><summary class="muted" style="cursor:pointer">keys</summary><div class="keys">${esc(m[ns].join("\n"))}</div></details></td></tr>`).join("");
+  return `<div class="muted" style="margin-bottom:10px">${(k.keys||[]).length} live keys</div><table><thead><tr><th>prefix</th><th>count</th><th></th></tr></thead><tbody>${rows}</tbody></table>`;
+}
+function kvMerged(ns, rs){
+  const maps = ns.map((n,i)=>rs[i][0].state==="ok" ? byNamespace(rs[i][0].body.keys) : null);
+  const all = [...new Set(maps.flatMap(m=>m?Object.keys(m):[]))].sort();
+  if(!all.length) return "";
+  const rows = all.map(p=>{ const cs = maps.map(m=>m?((m[p]||[]).length):null); const same = cs.filter(c=>c!=null).every(c=>c===cs.find(x=>x!=null));
+    return `<tr><td class="kv-ns">${esc(p)}</td>${cs.map(c=>`<td class="${same?"":"err"}">${c==null?"—":c}</td>`).join("")}</tr>`; }).join("");
+  return `<h3>Keys per prefix, as each node sees them — merged on this page (red = the views differ)</h3><table><thead><tr><th>prefix</th>${ns.map(n=>`<th>${esc(n)}</th>`).join("")}</tr></thead><tbody>${rows}</tbody></table>`;
+}
+
+// ── Metrics: /metrics (Prometheus) ──────────────────────────────────────────
+function metrics(t){
+  const text = typeof t==="string" ? t : JSON.stringify(t);
+  return text.split("\n").some(l=>l && !l.startsWith("#")) ? `<pre class="metrics">${esc(text)}</pre>`
+    : `<p class="muted"><code>/metrics</code> answered with no series yet.</p>`;
+}
+
+// ── Integrity: preconditions of the refusals (composed from routes the console reads) ─
+function integrity(stats, grp, ids, fleetView){
+  const grpKeys = grp.keys||[], idKeys = ids.keys||[];
+  const rosters = {};
+  grpKeys.forEach(k=>{ const m=/^grp\/([^/]+)\//.exec(k); if(m) rosters[m[1]]=(rosters[m[1]]||0)+1; });
+  const groups = Object.keys(rosters).sort();
+  const grpRows = groups.length ? groups.map(g=>`<tr><td><code>${esc(g)}</code></td><td>${rosters[g]}</td></tr>`).join("")
+    : `<tr><td colspan="2" class="muted">no groups joined on this node — an election would be refused with <code>electorate_unavailable</code>, the substrate declining to decide alone</td></tr>`;
+  const sealed = idKeys.filter(k=>k.startsWith("sys/identity-signed/")).length;
+  const legacy = idKeys.filter(k=>k.startsWith("sys/identity/")).length;
+  const idState = (sealed===0 && legacy===0) ? ["", "no TLS identities on this fleet — proofs are a TLS-only mechanism"]
+    : (sealed>0 && sealed>=legacy) ? ["ok","yes — every identity seen here is sealed"] : ["bad","not yet — an identity without a sealed record means a node has not upgraded"];
+  const trip = [["identity_anchor_conflicts","an identity that did not chain to a trusted key"],["sys_namespace_violations","a remote write to a sys/ key this node owns"],["commit_conflicts","two values committed for one consensus slot"]];
+  const pct = stats.role_concentration_pct;
+  return `<div class="card"><h3>Electorates — can this fleet decide?</h3><table><thead><tr><th>group</th><th>members visible here</th></tr></thead><tbody>${grpRows}</tbody></table></div>
+  <div class="card"><h3>Sealed identity coverage</h3><div class="trip"><div class="row"><span>sealed records</span><b>${sealed}</b></div><div class="row"><span>legacy entries</span><b>${legacy}</b></div><div class="row"><span>safe to require proofs?</span><b class="${idState[0]}">${idState[1]}</b></div></div></div>
+  <div class="card"><h3>Role concentration (P10)</h3><div class="trip"><div class="row"><span>role_concentration_pct</span><b class="${pct>=60?'bad':''}">${pct==null?'—':esc(pct)+'%'}</b></div></div>
+    <p class="muted">fleet members in this node's view: ${esc((fleetView.nodes||[]).length)}</p></div>
+  <div class="card"><h3>Tripwires — detection, not prevention</h3><div class="trip">${trip.map(([k,why])=>`<div class="row"><span><code>${k}</code><br><span class="muted">${why}</span></span><b class="${stats[k]>0?'bad':'ok'}">${esc(stats[k]??'—')}</b></div>`).join("")}</div></div>
+  <div class="card muted">Trust non-transitivity and leadership fencing are refusals at a boundary, not fleet state, so they have no panel: they are demonstrated by <code>federation_trust_is_not_transitive</code> and <code>coordination_integrity</code>.</div>`;
+}
+
+const RENDER = {
+  Overview:   ([s]) => overview(s),
+  Fleet:      ([f]) => fleet(f),
+  Diagnose:   ([d]) => diagnose(d),
+  Guarantees: ([g]) => guarantees(g),
+  Governors:  ([g]) => governors(g),
+  Tuples:     ([t]) => tuples(t),
+  Integrity:  ([s,g,i,f]) => integrity(s,g,i,f),
+  Audit:      ([a]) => audit(a),
+  KV:         ([k]) => kv(k),
+  Metrics:    ([m]) => metrics(m),
+};
+const MERGE = { Overview: overviewMerged, Guarantees: guaranteesMerged, KV: kvMerged };
+
+let generation = 0;
+async function refresh(){
+  const gen = ++generation;
+  const tab = active, panel = PANELS.find(p=>p.tab===tab), ns = nodes();
+  const rs = await Promise.all(ns.map(n=>Promise.all(panel.routes.map(r=>nodeFetch(n,r)))));
+  if(gen!==generation) return;  // a newer refresh (a tab switch) owns the view
+  const view = $("#view"); view.innerHTML = "";
+  const merge = MERGE[tab];
+  const merged = el("div","merged", merge ? merge(ns, rs) : "");
+  merged.dataset.merged = tab;
+  view.appendChild(merged);
+  let readable = 0;
+  ns.forEach((n,i)=>{
+    const state = worst(rs[i]);
+    if(state==="ok") readable++;
+    const sec = el("section","nodepanel");
+    sec.dataset.panel = tab; sec.dataset.node = n; sec.dataset.state = state; sec.dataset.routes = panel.routes.join(" ");
+    const bad = rs[i].find(r=>r.state===state);
+    let body;
+    try { const render = RENDER[tab]; body = state==="ok" ? render(rs[i].map(r=>r.body)) : notRead(tab, n, bad); }
+    catch(e){ sec.dataset.state = "error"; body = `<p class="err">this page could not render the answer: ${esc(e.message||e)}</p>`; }
+    sec.innerHTML = `<h2><code>${esc(n)}</code> <span class="state ${esc(sec.dataset.state)}">${esc(sec.dataset.state)}</span> <span class="muted">${esc(panel.routes.join(" · "))}</span></h2>${body}`;
+    view.appendChild(sec);
+  });
+  view.dataset.rendered = tab;
+  setStatus(readable===ns.length, `${readable}/${ns.length} node(s) read · ${new Date().toLocaleTimeString()}`);
+}
+
+renderTabs();
+refresh();
+discoverViz();
+// `?once` renders a single snapshot and stops (what CI's headless browser dumps); otherwise it refreshes.
+if(!params.has("once")) setInterval(refresh, 2500);
+$("#nodes").addEventListener("change", ()=>{ refresh(); discoverViz(); });
+$("#token").addEventListener("change", ()=>{ refresh(); discoverViz(); });
+</script>
+</body>
+</html>

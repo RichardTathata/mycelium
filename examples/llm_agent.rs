@@ -131,6 +131,8 @@ fn make_agent(port: u16, peers: &[u16], gateway_port: Option<u16>) -> Arc<Gossip
     cfg.bind_address               = "127.0.0.1".to_string();
     cfg.bind_port                  = port;
     cfg.http_port                  = gateway_port;
+    // The Ops Console page, served on :8099, reads each gateway from the browser (Y3).
+    if gateway_port.is_some() { cfg.gateway_cors_origins = vec!["http://127.0.0.1:8099".into()]; }
     cfg.default_ttl                = 20;
     cfg.reconnect_backoff_secs     = 1;
     cfg.gossip_shards              = 1;
@@ -1647,12 +1649,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Self-advertise the Mesh Control UI so the generic Ops Console can offer a live
     // "↗ Mesh Control" click-through — the `ui/viz` + `ui/label` KV convention (see conway.rs /
-    // ops_console/main.rs). `ui/viz` is a single shared cluster KV key, so write it once (not per node);
+    // ops_console/README.md). `ui/viz` is a single shared cluster KV key, so write it once (not per node);
     // it points at n-0's control port, which 307-redirects to whichever node is the elected manager.
     // Point the console at any node's gateway (9100/9101/9102) and it discovers this URL.
     let _ = agent_n0.kv().set("ui/viz", format!("http://localhost:{HTTP_PORT_N0}/"));
     let _ = agent_n0.kv().set("ui/label", "Mesh Control".to_string());
-    println!("Ops Console → cargo run --example ops_console -- 127.0.0.1:{GW_PORT_N0}   (or :{GW_PORT_N1}/:{GW_PORT_N2})");
+    println!("Ops Console → python3 -m http.server 8099 --directory examples/ops_console, then http://127.0.0.1:8099/?nodes=127.0.0.1:{GW_PORT_N0},127.0.0.1:{GW_PORT_N1},127.0.0.1:{GW_PORT_N2}");
 
     // Spare pool — join the gossip ring but start idle (no capabilities advertised)
     let agent_spare0 = make_agent(PORT_SPARE0, &[PORT_N0, PORT_N1, PORT_N2], None);

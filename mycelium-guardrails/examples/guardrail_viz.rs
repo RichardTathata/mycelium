@@ -67,6 +67,8 @@ async fn try_start(
     cfg.cluster_name = Some(std::env::var("GOSSIP_CLUSTER_NAME").unwrap_or_else(|_| "guardrails".to_string()));
     cfg.bind_port = port;
     cfg.http_port = http_port;
+    // The Ops Console page, served on :8099, reads the gateway from the browser (Y3).
+    if http_port.is_some() { cfg.gateway_cors_origins = vec!["http://127.0.0.1:8099".into()]; }
     cfg.bootstrap_peers = boot.into_iter().map(|p| NodeId::new("127.0.0.1", p).unwrap()).collect();
     cfg.reconnect_backoff_secs = 1;
     cfg.health_check_interval_secs = 1;
