@@ -207,6 +207,25 @@ impl GossipAgent {
             }
             _ => {}
         }
+        // Adopter-surface Y3: a page on another host's origin, reading a gateway that has no credential model.
+        // A cross-origin read is made by the operator's browser, so a listed page's script reads whatever the
+        // gateway answers anyone — an open loopback gateway included. Only a page on this host may be listed
+        // there; anything else needs the bearer to be the boundary.
+        #[cfg(feature = "gateway")]
+        if !super::guarantee::gateway_credential_model(&self.config)
+            && let Some(o) = self.config.gateway_cors_origins.iter().find(|o| !crate::config::cors_origin_is_loopback(o))
+        {
+            return Err(GossipError::InvalidField {
+                field:  "gateway_cors_origins",
+                reason: format!(
+                    "`{o}` is not a page on this host, and the gateway has no credential model — a script on \
+                     that page, run by an operator's browser, would read every listed route the gateway answers \
+                     anyone. Configure {}, or list only loopback origins (`http://127.0.0.1:…`, `http://localhost:…`, \
+                     `http://[::1]:…`)",
+                    super::guarantee::GATEWAY_CREDENTIALS,
+                ),
+            });
+        }
         // Post-360 plan row F2: `kv_require_signed_frames` is retired. A TLS node refuses unsigned KV
         // frames whatever it says, and without `[tls]` nothing is signed (#611's review, finding 9).
         // Accepted, so a 2.33 configuration starts, and said once (`deprecations.md` §40).

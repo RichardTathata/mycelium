@@ -207,6 +207,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         GossipConfig {
             bind_port: port,
             http_port: Some(OPS_PORT),
+            // The Ops Console page, served on :8099, reads this gateway from the browser (Y3).
+            gateway_cors_origins: vec!["http://127.0.0.1:8099".into()],
             // Always name the cluster (never null on /stats); overridable via GOSSIP_CLUSTER_NAME.
             cluster_name: Some(std::env::var("GOSSIP_CLUSTER_NAME").unwrap_or_else(|_| "microgrid".to_string())),
             ..Default::default()

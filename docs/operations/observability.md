@@ -225,17 +225,73 @@ See [deployment.md §Choosing a sync mode](deployment.md).
 fallen behind the evidence journal, and there is no exporter in the public tree to be behind — the
 gauge would measure nothing. It lands with the exporter, not before it.
 
-## The Ops Console, and the Integrity tab
+## The Ops Console
 
-`examples/ops_console` is a zero-dependency single-page console you point at any node's gateway —
-it *observes* the layers rather than adding to them, so it needs nothing installed on the fleet.
-Tabs: **Overview · Fleet · Diagnose · Integrity · Audit · KV · Metrics**.
+`examples/ops_console` is **a static page** you open in a browser and point at the nodes you want to
+watch. It reads each node's **existing routes directly**, fans out across them itself and merges their
+answers on the page — there is no console server, no proxy, and nothing that polls the fleet and holds
+the result (decisions D16, D28: a panel that would need such a process becomes a route on a node
+instead). Tabs: **Overview · Fleet · Diagnose · Guarantees · Governors · Tuples · Integrity · Audit · KV ·
+Metrics**, each rendered from the routes its [README](../../examples/ops_console/README.md#what-it-reads)
+names — the table CI renders, tab by tab, in a real browser against a three-node fleet
+(`scripts/ops-console-render.sh`, the *Ops Console* job).
 
 ```bash
-cargo run --example ops_console          # :8099, then set the target host in the header
+cargo run --example observed_fleet --features metrics          # three nodes, gateways :9061–:9063
+python3 -m http.server 8099 --bind 127.0.0.1 --directory examples/ops_console
+# open http://127.0.0.1:8099/?nodes=127.0.0.1:9061,127.0.0.1:9062,127.0.0.1:9063
 ```
 
-The **Integrity** tab is the one to know about, because the coordination and identity properties are
+### Cross-origin reads: `gateway_cors_origins`
+
+A browser shows a page the answers of another origin only if that origin says it may. A gateway says
+so only when its operator names the page's origin:
+
+```toml
+gateway_cors_origins = ["http://127.0.0.1:8099"]     # or GOSSIP_GATEWAY_CORS_ORIGINS=http://127.0.0.1:8099
+```
+
+- **Off by default.** With the list empty no response carries `Access-Control-Allow-Origin`, so a page on
+  another origin reads nothing — the gateway's behaviour is unchanged.
+- **Exact origins only.** `scheme://host[:port]` as a browser sends it — lowercase, no path, no trailing
+  slash, no default port (`:80` for `http`, `:443` for `https`). `*`, `null` (the origin of every sandboxed
+  frame and `file:` page) and anything else are refused by `validate()` naming `gateway_cors_origins`, as is a
+  non-empty list on a node with no `http_port`. A listed origin is answered with itself, never `*`, with
+  `Vary: Origin`.
+- **Read-only routes only, `GET`/`HEAD` only:** `/health`, `/ready`, `/stats`, `/metrics`, `/gateway/fleet`,
+  `/gateway/diagnose`, `/gateway/guarantees`, `/gateway/govern`, `/gateway/kv/keys` (key **names**),
+  `/gateway/kv` **for one key under `ui/` only** (the `ui/viz` link; any other key, or two `key` parameters,
+  is not answered), `/gateway/audit` and `/gateway/tuple/overview` (where mounted) — `CORS_READ_PATHS` and
+  `admits_path` in `src/agent/http/cors.rs`. No write, call, stream or governance route is ever answered
+  across origins, and a preflight asking for any other method is not answered. What each listed route
+  discloses is [rbac.md § Cross-origin reads](rbac.md#cross-origin-reads-what-a-listed-page-can-see).
+- **With a credential, the bearer decides.** A preflight for a listed origin is answered before the gateway's
+  auth layer (a browser sends no credential on one) and admits the `Authorization` header; the read itself
+  passes `gateway_auth` and its scopes like any other request, so on a gateway with a credential model the
+  setting widens *which pages may read in a browser*, not *what a caller may read*. **Without one it does
+  widen it:** an open gateway answers anyone who can reach it, and a listed page's script runs in the
+  operator's browser, which can. So a gateway with no credential model may list **only loopback origins**
+  (`http://127.0.0.1…`, `http://localhost…`, `http://[::1]…`, pages on this host); `start()` refuses any
+  other by name (`gateway_cors_origins`). A page's JSON or bearer-carrying write needs a preflight, and no
+  write route answers one; a request a browser sends without a preflight (a form post) reaches a gateway
+  whether or not this is set, as it reaches any server — the setting changes nothing there, and a gateway
+  with a credential model answers it 401.
+- **Not handled: Private Network Access.** Chrome's preflight for a public page reaching a private address
+  (`Access-Control-Request-Private-Network`) is not answered, so such a read is refused by a browser that
+  enforces it. Serve the page from an origin on the same network as the nodes.
+- `doctor` lists the setting with its source like every field (`docs/reference/configuration.md`).
+- **The page's bearer.** Typed into the page, it is held in the page only and sent only to the nodes the
+  operator added in the box (or the page's default). A node a link's `?nodes=` named gets it only once the
+  operator confirms the list — or while the bearer in use is the very one the same link carried as
+  `#token=…` (its author knew it); decided at each request, so a bearer typed over the link's goes to the
+  link's nodes only when confirmed, and an edit trusts only the nodes it added. A fragment never
+  reaches a server, but it stays in the browser's history like the rest of the URL. A node entry is
+  `host:port` or `http(s)://host[:port]`: a path, query, fragment or credentials in it are refused, and its
+  panel says so. A `ui/viz` link a node advertises is made a link only if it is `http:` or `https:`.
+
+### The Integrity tab
+
+The **Integrity** tab is the one to know about among the panels, because the coordination and identity properties are
 **refusals** — the node declining to decide alone, to trust transitively, or to accept an identity
 it cannot authenticate. A refusal has no dashboard of its own: *you cannot watch a thing not
 happen.* So the tab shows the **preconditions**, before a refusal surprises someone:

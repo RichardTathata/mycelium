@@ -89,7 +89,9 @@ prefixes; **do not write under them:**
 > `skills/` · `manifest/` · `audit/` · `installable/` · `comp/` · `tuple/` · `wiki/` · `ckpt/` ·
 > `ckptw/` · `strands/` · `facts/` · `knowledge/` · `mandate/` · `rights/` · `cn/` · `grant/` · `faults/` · `sched/` (the full authoritative table
 > with per-key semantics is in
-> [`src/lib.rs`](../../src/lib.rs) → *KV namespace ownership*). Note `log/` in particular:
+> [`src/lib.rs`](../../src/lib.rs) → *KV namespace ownership*). One prefix is **yours but read by the substrate**:
+> `ui/` — write `ui/viz` and `ui/label` to advertise your node's own page, and put nothing else there, because a
+> gateway answers values under `ui/` to the browser origins it lists (`gateway_cors_origins`). Note `log/` in particular:
 > `KvHandle::append` writes `log/{stream}/…`, so give your streams an app-scoped name —
 > don't write raw `log/` keys.
 >
@@ -175,7 +177,8 @@ inherits the contract without reading everything:
   prefixes: grp/ sys/ consensus/ cap/ req/ cap-group/ gcap/ mailbox/ schemas/ tools/
   agent/ svc/ log/ clog/ lock/ prompts/ skills/ installable/ comp/ tuple/ wiki/ ckpt/ ckptw/
   strands/ facts/ manifest/ audit/ knowledge/ mandate/ rights/ cn/ grant/ faults/ sched/ (authoritative table: mycelium
-  `src/lib.rs` → KV namespace ownership).
+  `src/lib.rs` → KV namespace ownership). `ui/` is ours to write — `ui/viz`, `ui/label` only — and browser-readable
+  where a gateway lists an origin.
 - **One compatibility rule, Rust's definition.** The substrate ships compatible additions on the
   2.x line: a public field or type never changes shape. When a verb's answer gains meaning (the
   contracts axis: a typed receipt beside today's `bool` / `persisted`), the new representation is

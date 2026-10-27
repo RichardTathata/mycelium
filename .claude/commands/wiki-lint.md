@@ -192,7 +192,8 @@ that silently falls behind.
 **UI-example contract** ([`dev/ui-example-contract.md`](../../docs/wiki/dev/ui-example-contract.md)).
 For every **browser** example (a `.rs` that `include_str!`s an `.html`, or serves inline HTML), verify
 it: (1) advertises `ui/viz` + injects `__OPS_CONSOLE_LINK__`; (2) injects `__CONCEPTS__` (or, for the
-documented inline-HTML/no-gateway/console exceptions `three_node_demo`/`conway-gpu`/`ops_console`,
+documented inline-HTML/no-gateway exceptions `three_node_demo`/`conway-gpu` — `ops_console` is a static page
+with no binary since Y3, so it is no hit —
 carries the equivalent static panel or is exempt); (3) has a documented run command carrying
 `gateway,metrics` (or `metrics` where gateway is default). A UI example missing the concepts box, the
 Ops Console link, or the metrics feature is a finding. Enumerate them the tree-derived way: `grep -rl

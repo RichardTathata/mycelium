@@ -1414,8 +1414,10 @@ pub(crate) const OWNED_KV_PREFIXES: &[&str] = &[
 /// Namespaces the table assigns to an application writing through the gateway's KV routes — the LangGraph
 /// checkpointer's index rows, the Strands session store's rows (`strands-session-mycelium`), the mesh manifest (application-owned, `mesh_manifest.rs`) and the schema
 /// registry (`publish_schema` from Rust; this is a non-Rust application's door). (`agent/{node}/provision/{item}/error`,
-/// an application's provisioning report, is the one owned-namespace subtree the raw routes also accept.)
-pub(crate) const APPLICATION_KV_PREFIXES: &[&str] = &["ckpt/", "ckptw/", "strands/", "manifest/", "schemas/"];
+/// an application's provisioning report, is the one owned-namespace subtree the raw routes also accept.) And `ui/`,
+/// the `ui/viz` + `ui/label` link a node advertises for its own page (adopter-surface Y3; the cross-origin layer
+/// reads its values).
+pub(crate) const APPLICATION_KV_PREFIXES: &[&str] = &["ckpt/", "ckptw/", "strands/", "manifest/", "schemas/", "ui/"];
 
 /// Streams under `log/` that a substrate component or companion owns: the commitment net's records, a wiki's
 /// durable proposals, `mycelium-reason`'s traces. The log routes take a stream name, so without this they
