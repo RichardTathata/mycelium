@@ -1595,13 +1595,14 @@ impl GossipAgent {
     /// Y4) — one this agent does not hold, such as a stem provisioner's (`Provisioner::with_decision_trace`) or an
     /// activation hook's. The route reads it through the sink's record-index tap, so registering never makes a decision
     /// point wait or drop; records the sink kept before it was registered are not served, and are counted as `missed`.
-    /// The agent's own sink ([`with_decision_trace`](Self::with_decision_trace)) is registered as `agent`. A sink whose
-    /// record-index tap already has a live reader is refused with a warning. A read-only pointer: it may be set before
+    /// The agent's own sink ([`with_decision_trace`](Self::with_decision_trace)) is registered as `agent`. Labels are
+    /// unique: a second source under a registered label, or a sink whose record-index tap already has a live reader, is
+    /// refused with a warning. The slot is held for the agent's life. A read-only pointer: it may be set before
     /// or after `start()` and is not counted as a late attachment.
     #[cfg(feature = "compliance")]
     pub fn with_decision_record_source(&self, label: &str, sink: Arc<mycelium_core::decision::DecisionSink>) {
-        if self.task_ctx.record_index.add_source(label, sink).is_err() {
-            tracing::warn!("with_decision_record_source: {label}: the sink's record-index tap is already held; ignoring");
+        if let Err(why) = self.task_ctx.record_index.add_source(label, sink) {
+            tracing::warn!("with_decision_record_source: {label}: {why}; ignoring");
         }
     }
 

@@ -148,6 +148,26 @@ async fn by_hash_reads_under_load_never_make_a_decision_point_drop_a_record() {
     Arc::try_unwrap(n).ok().expect("the reader is done").stop().await;
 }
 
+/// The index keeps the **newest** records (#692's confirmation round, finding A): 5000 decisions with no read between
+/// them, then the 5000th — the span a collector just exported — is served; the oldest are the ones let go, and counted.
+#[tokio::test]
+async fn the_index_keeps_the_newest_records_when_no_one_reads_between_them() {
+    let sink = Arc::new(DecisionSink::new(SinkConfig { max_records: 10_000, max_bytes: 64 << 20, ..SinkConfig::default() }));
+    let s2 = Arc::clone(&sink);
+    let n = node("newest", move |a, _| a.with_decision_trace(s2)).await;
+    for i in 0..5000 {
+        sink.record(decision(i)).unwrap();
+    }
+    let newest = RecordSpan::from_decision(sink.snapshot().last().unwrap());
+    let (status, body) = n.get(&format!("/gateway/records/decision/{}", newest.record_sha256), "auditor").await;
+    assert_eq!(status, 200, "the newest record is the one kept — {body}");
+    let oldest = RecordSpan::from_decision(&sink.snapshot()[0]);
+    let (status, body) = n.get(&format!("/gateway/records/decision/{}", oldest.record_sha256), "auditor").await;
+    assert_eq!(status, 404, "{body}");
+    assert!(body["cannot_rule_out"].as_array().unwrap().iter().any(|m| m == "evicted"), "{body}");
+    n.stop().await;
+}
+
 /// A node whose embedder declares only a trace: a record drained to it is served from it; a hash it does not hold is
 /// `undetermined` with `not_written` and `evicted` possible, since the sink that wrote the trace is not one the route
 /// reads; and a declared file not written yet is not an empty trace (#692's review, finding 1).
@@ -211,6 +231,15 @@ async fn a_second_sink_is_searched_only_once_registered_and_what_it_kept_before_
     assert_eq!(body["cannot_rule_out"], serde_json::json!(["evicted", "not_searched", "never_existed"]), "{body}");
     let provisioner = body["searched"]["index"]["sources"].as_array().unwrap().iter().find(|s| s["label"] == "provisioner").cloned().unwrap();
     assert_eq!(provisioner["missed"], 1, "{body}");
+    // Labels are unique (#692's confirmation round, D): a second source under one is refused, and not read.
+    let third = Arc::new(DecisionSink::default());
+    n.agent.with_decision_record_source("provisioner", Arc::clone(&third));
+    third.record(decision(9)).unwrap();
+    let hidden = RecordSpan::from_decision(&third.snapshot()[0]);
+    let (status, body) = n.get(&format!("/gateway/records/decision/{}", hidden.record_sha256), "auditor").await;
+    assert_eq!(status, 404, "{body}");
+    assert_eq!(body["searched"]["index"]["sources"].as_array().unwrap().len(), 2, "{body}");
+    assert!(third.tap_ring(1, 1).is_ok(), "the refused registration left the sink's slot free");
     n.stop().await;
 }
 

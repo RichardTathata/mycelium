@@ -2,15 +2,20 @@
 //! answers from, fed by each registered sink's [`TapSlot::RecordIndex`] tap — so the route **never takes a sink's ring
 //! lock** (lock-order row 53) and never makes a decision point drop a record.
 //!
-//! **Fed lazily, off the decision path.** A sink sends a copy of each record it keeps to the tap after releasing its own
-//! lock (row 72); nothing here runs a loop. Each lookup first moves what the taps hold into the index — hashing each
-//! line as `Corpus::add_trace` does (`content_hash(to_string_line())`) — then searches it. Called off the async workers.
+//! **Fed lazily, off the decision path.** A sink pushes a copy of each record it keeps into its [`TapRing`] after
+//! releasing its own lock (rows 72, 74); nothing here runs a loop. Each lookup first takes what the rings hold into the
+//! index — hashing each line as `Corpus::add_trace` does (`content_hash(to_string_line())`) — then searches it. Called
+//! off the async workers.
 //!
-//! **Bounded, and every loss counted.** At most [`INDEX_RECORDS`] records and [`INDEX_BYTES`] of their lines; past
-//! either the oldest go (`evicted`). A tap holds at most [`INDEX_RECORDS`] copies waiting between lookups; a copy it
-//! could not hold is the sink's `tap_dropped_for(RecordIndex)`. A source's kept records the index never received —
-//! those kept before it was registered, and those its tap dropped — are `missed`, from the sink's own counters:
-//! `last_seq` less the copies received.
+//! **Bounded, the newest kept, every loss counted.** Between lookups a sink's ring holds the newest [`INDEX_RECORDS`]
+//! copies and at most [`INDEX_BYTES`] of them by the sink's own estimate, the oldest let go; the index holds at most
+//! [`INDEX_RECORDS`] records and [`INDEX_BYTES`] of their lines, the oldest let go (`evicted`). So the memory held for
+//! one registered sink is bounded by twice that, whether or not anyone reads. A source's kept records the index never
+//! received — kept before it was registered, let go by its ring, or dropped by the ring on contention — are `missed`,
+//! from the sink's own counters: `last_seq` less the copies received.
+//!
+//! **A slot for the agent's life.** A registered sink's record-index slot is held until the agent is dropped; labels are
+//! unique (a second source under a label already registered is refused).
 //!
 //! **Only the sinks registered here.** A sink the agent does not hold — a stem provisioner's, an activation hook's —
 //! is read only once registered ([`GossipAgent::with_decision_record_source`](crate::GossipAgent::with_decision_record_source)).
@@ -18,18 +23,20 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
-use mycelium_core::decision::{AlreadyTapped, DecisionRecord, DecisionSink, DropCounts, TapSlot};
-use tokio::sync::mpsc::Receiver;
+use mycelium_core::decision::{DecisionSink, DropCounts, TapRing};
 
 /// The most records the index keeps.
 pub const INDEX_RECORDS: usize = 4096;
 /// The most bytes of record lines the index keeps.
 pub const INDEX_BYTES: usize = 4 << 20;
 
+/// Record lines with their content hashes, `(hash, line)`, oldest first.
+type Hashed = Vec<(String, String)>;
+
 struct Source {
     label: Arc<str>,
     sink: Arc<DecisionSink>,
-    rx: Receiver<DecisionRecord>,
+    ring: Arc<TapRing>,
     received: u64,
 }
 
@@ -64,40 +71,72 @@ pub struct Lookup {
     pub evicted: u64,
 }
 
-/// The index: one lock (lock-order row 73), a leaf — held to move tapped copies in and search, never across a sink's
-/// locks (`try_recv` takes none of them) or anything else.
+/// The index: one lock (lock-order row 73), a leaf — held for a map read or update only, never across a sink's locks
+/// or a ring's (row 74): a sink's tap is taken, and each ring emptied, with this lock released.
 #[derive(Default)]
 pub struct RecordIndex {
     state: Mutex<State>,
 }
 
 impl RecordIndex {
-    /// Register a sink: tap its [`TapSlot::RecordIndex`] slot. Refused when that slot already has a live reader.
-    pub fn add_source(&self, label: impl Into<String>, sink: Arc<DecisionSink>) -> Result<(), AlreadyTapped> {
-        let rx = sink.tap_slot(TapSlot::RecordIndex, INDEX_RECORDS)?;
-        let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
-        st.sources.push(Source { label: Arc::from(label.into()), sink, rx, received: 0 });
+    fn lock(&self) -> std::sync::MutexGuard<'_, State> {
+        self.state.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// Register a sink under `label`: take its record-index tap. Refused, naming why, when the label is already
+    /// registered or the sink's record-index tap already has a live reader.
+    pub fn add_source(&self, label: &str, sink: Arc<DecisionSink>) -> Result<(), &'static str> {
+        if self.lock().sources.iter().any(|s| &*s.label == label) {
+            return Err("a source is already registered under this label");
+        }
+        let ring = sink.tap_ring(INDEX_RECORDS, INDEX_BYTES).map_err(|_| "the sink's record-index tap is already held")?;
+        let mut st = self.lock();
+        // Checked again: a concurrent registration under the same label may have landed meanwhile. The ring dropped
+        // here frees the sink's slot.
+        if st.sources.iter().any(|s| &*s.label == label) {
+            return Err("a source is already registered under this label");
+        }
+        st.sources.push(Source { label: Arc::from(label), sink, ring, received: 0 });
         Ok(())
     }
 
-    /// Move every waiting copy in, then find the record whose line hashes to `hash`.
+    /// Take what each sink's ring holds into the index, then find the record whose line hashes to `hash`.
     pub fn lookup(&self, hash: &str) -> Lookup {
-        let mut guard = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        let rings: Vec<(Arc<str>, Arc<TapRing>)> =
+            self.lock().sources.iter().map(|s| (Arc::clone(&s.label), Arc::clone(&s.ring))).collect();
+        // Emptied and hashed with no lock of the index held.
+        let batches: Vec<(Arc<str>, Hashed)> = rings
+            .into_iter()
+            .map(|(label, ring)| {
+                let lines = ring
+                    .take()
+                    .into_iter()
+                    .map(|r| {
+                        let line = r.to_string_line();
+                        (crate::causal::content_hash(line.as_bytes()), line)
+                    })
+                    .collect();
+                (label, lines)
+            })
+            .collect();
+        let mut guard = self.lock();
         let st = &mut *guard;
-        let mut out = Lookup::default();
-        for src in &mut st.sources {
-            while let Ok(r) = src.rx.try_recv() {
-                src.received += 1;
-                let line = r.to_string_line();
-                let h = crate::causal::content_hash(line.as_bytes());
+        for (label, lines) in batches {
+            if let Some(src) = st.sources.iter_mut().find(|s| s.label == label) {
+                src.received += lines.len() as u64;
+            }
+            for (h, line) in lines {
                 st.bytes += line.len();
-                st.ring.push_back((h, Arc::clone(&src.label), line));
+                st.ring.push_back((h, Arc::clone(&label), line));
                 while st.ring.len() > INDEX_RECORDS || st.bytes > INDEX_BYTES {
                     let Some((_, _, old)) = st.ring.pop_front() else { break };
                     st.bytes = st.bytes.saturating_sub(old.len());
                     st.evicted += 1;
                 }
             }
+        }
+        let mut out = Lookup::default();
+        for src in &st.sources {
             out.sources.push(SourceReport {
                 label: src.label.to_string(),
                 received: src.received,

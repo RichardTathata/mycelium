@@ -36,7 +36,7 @@
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, RwLock, TryLockError};
+use std::sync::{Arc, Mutex, RwLock, TryLockError, Weak};
 
 use tokio::sync::mpsc::{Receiver, Sender};
 
@@ -306,13 +306,59 @@ pub struct DecisionSink {
     dropped_oversized: AtomicU64,
     inputs_truncated: AtomicU64,
     /// A copy of every record kept, for one reader per [`TapSlot`] that must never take the ring's lock
-    /// (adopter-surface Y4: the span collector, and the gateway's by-hash record index). Lock-order row 72: read by
-    /// `record` with `try_read` **before** the ring's lock and released before it, written only by
-    /// [`tap_slot`](Self::tap_slot); never taken under the ring's lock. The send is a plain `try_send`, not a seam
-    /// choice: whether a reader kept up changes no decision (the ring keeps the record either way), so a recording made
-    /// with a reader replays identically without one (`scripts/sim-seams-baseline.txt`).
-    tap: RwLock<[Option<Sender<DecisionRecord>>; TAP_SLOTS]>,
+    /// (adopter-surface Y4: the span collector's channel, and the gateway's by-hash record index's [`TapRing`]).
+    /// Lock-order row 72: read by `record` with `try_read` **before** the ring's lock and released before it, written
+    /// only by [`tap`](Self::tap) and [`tap_ring`](Self::tap_ring); never taken under the ring's lock. The collector's
+    /// send is a plain `try_send`, not a seam choice: whether a reader kept up changes no decision (the ring keeps the
+    /// record either way), so a recording made with a reader replays identically without one
+    /// (`scripts/sim-seams-baseline.txt`).
+    tap: RwLock<Taps>,
     tap_dropped: [AtomicU64; TAP_SLOTS],
+}
+
+#[derive(Clone, Default)]
+struct Taps {
+    collector: Option<Sender<DecisionRecord>>,
+    index: Option<Weak<TapRing>>,
+}
+
+/// A bounded ring a sink pushes a copy of each kept record into, **dropping the oldest** past its bounds — for a reader
+/// that wants the newest records whenever it looks, not the first ones since it last looked (the gateway's by-hash
+/// index, #692's confirmation round). Bounded by count **and** by the records' byte estimate
+/// ([`DecisionRecord::approx_bytes`]). Its one lock (lock-order row 74) is taken by `record` with `try_lock` only,
+/// after the ring's lock is released — a contended push drops the newest copy and counts it, never waits — and by the
+/// reader only to swap the held copies out ([`take`](Self::take)), O(1).
+pub struct TapRing {
+    max_records: usize,
+    max_bytes: usize,
+    inner: Mutex<Ring>,
+    evicted: AtomicU64,
+}
+
+impl TapRing {
+    fn push(&self, rec: DecisionRecord) -> bool {
+        let Ok(mut r) = self.inner.try_lock() else { return false };
+        r.bytes += rec.approx_bytes();
+        r.records.push_back(rec);
+        while r.records.len() > self.max_records || (r.bytes > self.max_bytes && r.records.len() > 1) {
+            let Some(old) = r.records.pop_front() else { break };
+            r.bytes = r.bytes.saturating_sub(old.approx_bytes());
+            self.evicted.fetch_add(1, Ordering::Relaxed);
+        }
+        true
+    }
+
+    /// Every copy held, oldest first, leaving the ring empty.
+    pub fn take(&self) -> Vec<DecisionRecord> {
+        let mut r = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        r.bytes = 0;
+        std::mem::take(&mut r.records).into()
+    }
+
+    /// Copies let go, oldest first, to keep within the bounds.
+    pub fn evicted(&self) -> u64 {
+        self.evicted.load(Ordering::Relaxed)
+    }
 }
 
 /// How many taps a sink has: one per [`TapSlot`].
@@ -324,7 +370,8 @@ const TAP_SLOTS: usize = 2;
 pub enum TapSlot {
     /// The span collector's (`mycelium::span_export::SpanCollector`); [`DecisionSink::tap`] takes it.
     Collector,
-    /// The gateway's by-hash record index (`GET /gateway/records/decision/{sha256}`).
+    /// The gateway's by-hash record index (`GET /gateway/records/decision/{sha256}`); [`DecisionSink::tap_ring`]
+    /// takes it.
     RecordIndex,
 }
 
@@ -398,7 +445,7 @@ impl DecisionSink {
             dropped_contended: AtomicU64::new(0),
             dropped_oversized: AtomicU64::new(0),
             inputs_truncated: AtomicU64::new(0),
-            tap: RwLock::new([None, None]),
+            tap: RwLock::new(Taps::default()),
             tap_dropped: [AtomicU64::new(0), AtomicU64::new(0)],
         }
     }
@@ -425,15 +472,15 @@ impl DecisionSink {
         // untapped one; a tap whose reader has gone costs no copy. A tap being installed (`try_read` would block) skips
         // the copy, counted below once the record is kept, so a skipped copy is never silent. A poisoned lock is
         // recovered, as `tap()` recovers it: the slot holds a sender, which a panic cannot leave half-written.
-        let live = |slots: &[Option<Sender<DecisionRecord>>; TAP_SLOTS]| {
-            slots.clone().map(|t| t.filter(|tx| !tx.is_closed()))
+        let live = |t: &Taps| {
+            (t.collector.as_ref().filter(|tx| !tx.is_closed()).cloned(), t.index.as_ref().and_then(Weak::upgrade))
         };
-        let (taps, tap_busy) = match self.tap.try_read() {
+        let ((collector, index), tap_busy) = match self.tap.try_read() {
             Ok(t) => (live(&t), false),
             Err(TryLockError::Poisoned(p)) => (live(&p.into_inner()), false),
-            Err(TryLockError::WouldBlock) => ([None, None], true),
+            Err(TryLockError::WouldBlock) => ((None, None), true),
         };
-        let mut copies = taps.each_ref().map(|t| t.as_ref().map(|_| rec.clone()));
+        let mut copies = [collector.as_ref().map(|_| rec.clone()), index.as_ref().map(|_| rec.clone())];
         if size > self.cfg.max_bytes {
             self.dropped_oversized.fetch_add(1, Ordering::Relaxed);
             return Err(Dropped::Oversized);
@@ -463,14 +510,18 @@ impl DecisionSink {
                 d.fetch_add(1, Ordering::Relaxed);
             }
         }
-        for (i, tap) in taps.into_iter().enumerate() {
-            if let (Some(tap), Some(mut c)) = (tap, copies[i].take()) {
-                c.seq = seq;
-                // Not `sim_seam::chan_try_send`: this verdict changes no decision, and recording it would make a replay
-                // depend on whether a reader ran (baseline entry, with the reason).
-                if tap.try_send(c).is_err() {
-                    self.tap_dropped[i].fetch_add(1, Ordering::Relaxed);
-                }
+        if let (Some(tap), Some(mut c)) = (collector, copies[0].take()) {
+            c.seq = seq;
+            // Not `sim_seam::chan_try_send`: this verdict changes no decision, and recording it would make a replay
+            // depend on whether a reader ran (baseline entry, with the reason).
+            if tap.try_send(c).is_err() {
+                self.tap_dropped[0].fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        if let (Some(ring), Some(mut c)) = (index, copies[1].take()) {
+            c.seq = seq;
+            if !ring.push(c) {
+                self.tap_dropped[1].fetch_add(1, Ordering::Relaxed);
             }
         }
         Ok(seq)
@@ -498,27 +549,43 @@ impl DecisionSink {
     /// taken are not sent. Refused while another reader holds a live tap; once that reader's receiver is dropped the
     /// tap can be taken again. Not a decision point: it may wait for the tap's own lock, never for the ring's.
     pub fn tap(&self, capacity: usize) -> Result<Receiver<DecisionRecord>, AlreadyTapped> {
-        self.tap_slot(TapSlot::Collector, capacity)
-    }
-
-    /// [`tap`](Self::tap) for the reader `slot` names: each slot has one live reader at most and its own drop count, so
-    /// the gateway's record index and a span collector each see every record without displacing the other. Every live
-    /// tap costs `record` one copy of the record.
-    pub fn tap_slot(&self, slot: TapSlot, capacity: usize) -> Result<Receiver<DecisionRecord>, AlreadyTapped> {
-        let i = slot.index();
-        let live = |s: &Option<Sender<DecisionRecord>>| s.as_ref().is_some_and(|tx| !tx.is_closed());
+        let live = |t: &Taps| t.collector.as_ref().is_some_and(|tx| !tx.is_closed());
         // A refusal is decided under the read lock and never takes the write lock, so a reader retrying against a live
         // tap cannot make `record` skip copies; the write lock is taken only to install, and liveness is checked again.
-        if live(&self.tap.read().unwrap_or_else(|p| p.into_inner())[i]) {
+        if live(&self.tap.read().unwrap_or_else(|p| p.into_inner())) {
             return Err(AlreadyTapped);
         }
-        let mut slots = self.tap.write().unwrap_or_else(|p| p.into_inner());
-        if live(&slots[i]) {
+        let mut taps = self.tap.write().unwrap_or_else(|p| p.into_inner());
+        if live(&taps) {
             return Err(AlreadyTapped);
         }
         let (tx, rx) = tokio::sync::mpsc::channel(capacity.clamp(1, MAX_TAP_CAPACITY));
-        slots[i] = Some(tx);
+        taps.collector = Some(tx);
         Ok(rx)
+    }
+
+    /// The [`TapSlot::RecordIndex`] tap: a [`TapRing`] holding the newest `max_records` copies (and at most `max_bytes`
+    /// of them by estimate, never fewer than one), the oldest let go — beside the collector's tap, which it never
+    /// displaces. Records kept before it was taken are not pushed. Refused while another reader holds the ring; the slot
+    /// is freed when every `Arc` of it is dropped. Not a decision point: it may wait for the tap's own lock, never the
+    /// ring's.
+    pub fn tap_ring(&self, max_records: usize, max_bytes: usize) -> Result<Arc<TapRing>, AlreadyTapped> {
+        let live = |t: &Taps| t.index.as_ref().is_some_and(|w| w.strong_count() > 0);
+        if live(&self.tap.read().unwrap_or_else(|p| p.into_inner())) {
+            return Err(AlreadyTapped);
+        }
+        let mut taps = self.tap.write().unwrap_or_else(|p| p.into_inner());
+        if live(&taps) {
+            return Err(AlreadyTapped);
+        }
+        let ring = Arc::new(TapRing {
+            max_records: max_records.clamp(1, MAX_TAP_CAPACITY),
+            max_bytes: max_bytes.max(1),
+            inner: Mutex::new(Ring { records: VecDeque::new(), bytes: 0 }),
+            evicted: AtomicU64::new(0),
+        });
+        taps.index = Some(Arc::downgrade(&ring));
+        Ok(ring)
     }
 
     /// Copies the collector's tap dropped because its reader had not kept up.
@@ -526,7 +593,9 @@ impl DecisionSink {
         self.tap_dropped_for(TapSlot::Collector)
     }
 
-    /// Copies the tap for `slot` dropped because its reader had not kept up (or was hidden by a tap being installed).
+    /// Copies the tap for `slot` dropped: the collector's because its reader had not kept up, the record index's because
+    /// its ring's lock was held as the copy arrived; either because a tap was being installed. A [`TapRing`]'s oldest
+    /// copies let go to keep its bounds are its own [`evicted`](TapRing::evicted).
     pub fn tap_dropped_for(&self, slot: TapSlot) -> u64 {
         self.tap_dropped[slot.index()].load(Ordering::Relaxed)
     }
@@ -753,26 +822,34 @@ mod tests {
             .node("n1", 3).build("2.19.0").at(1_700_000_000_000).target("data/pack").no_parent().no_effect()
     }
 
-    /// Two readers, one per slot (adopter-surface Y4): the record index and a collector each get every record kept after
-    /// they tapped, neither displaces the other, each slot refuses a second live reader, and each counts its own drops.
+    /// Two readers, one per slot (adopter-surface Y4): the record index's ring and a collector each get every record
+    /// kept after they tapped, neither displaces the other, each slot refuses a second live reader, and the ring keeps
+    /// the **newest** copies — the oldest let go past its count or byte bound, counted (#692's confirmation round, A, B).
     #[test]
-    fn each_tap_slot_has_its_own_reader_and_its_own_drops() {
+    fn each_tap_slot_has_its_own_reader_and_the_ring_keeps_the_newest() {
         let s = DecisionSink::default();
         s.record(rec("before")).unwrap();
-        let mut index = s.tap_slot(TapSlot::RecordIndex, 8).unwrap();
+        let ring = s.tap_ring(3, usize::MAX).unwrap();
         let mut collector = s.tap(1).unwrap();
-        assert_eq!(s.tap_slot(TapSlot::RecordIndex, 8).unwrap_err(), AlreadyTapped);
+        assert_eq!(s.tap_ring(3, usize::MAX).err(), Some(AlreadyTapped));
         assert_eq!(s.tap(8).unwrap_err(), AlreadyTapped);
-        for r in ["a", "b"] {
+        for r in ["a", "b", "c", "d", "e"] {
             s.record(rec(r)).unwrap();
         }
-        let seen = |rx: &mut Receiver<DecisionRecord>| std::iter::from_fn(|| rx.try_recv().ok()).map(|r| r.seq).collect::<Vec<_>>();
-        assert_eq!(seen(&mut index), vec![2, 3], "a record kept before the tap is not sent");
-        assert_eq!(seen(&mut collector), vec![2], "the collector's capacity is one");
-        assert_eq!((s.tap_dropped_for(TapSlot::RecordIndex), s.tap_dropped()), (0, 1));
-        assert_eq!(s.last_seq(), 3);
-        drop(index);
-        assert!(s.tap_slot(TapSlot::RecordIndex, 8).is_ok(), "a dropped reader frees its slot");
+        let seqs = |v: Vec<DecisionRecord>| v.into_iter().map(|r| r.seq).collect::<Vec<_>>();
+        assert_eq!(seqs(ring.take()), vec![4, 5, 6], "the newest three, not the first three");
+        assert_eq!(ring.evicted(), 2);
+        let first = collector.try_recv().unwrap().seq;
+        assert_eq!(first, 2, "the collector's channel keeps what it could hold");
+        assert_eq!((s.tap_dropped_for(TapSlot::RecordIndex), s.tap_dropped()), (0, 4));
+        assert_eq!(s.last_seq(), 6);
+        drop(ring);
+        // By bytes: a ring that holds one record's estimate keeps the newest one.
+        let small = s.tap_ring(100, rec("x").approx_bytes()).unwrap();
+        for r in ["f", "g"] {
+            s.record(rec(r)).unwrap();
+        }
+        assert_eq!(seqs(small.take()), vec![8], "a dropped ring frees its slot; the byte bound keeps the newest");
     }
 
     /// Records are kept in order with strictly increasing sequence numbers; a drained sink is empty and

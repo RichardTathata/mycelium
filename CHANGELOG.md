@@ -44,7 +44,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (`GossipAgent::with_decision_trace_file`, new). *Not found* (`404`) is `never_existed` (evidence only, for the
   journal as opened), `not_written`, or `undetermined` with the meanings the node cannot rule out — always so for a
   decision, which may sit in a sink the route was never given (`not_searched`). New in `mycelium-core`: a tap per
-  reader (`TapSlot`, `DecisionSink::tap_slot`, `tap_dropped_for`, `last_seq`; `tap` is the collector's slot); in
+  reader (`TapSlot`; `tap`, the collector's channel; `tap_ring`, a `TapRing` that keeps the newest copies, the oldest
+  let go; `tap_dropped_for`, `last_seq`); in
   `mycelium`: `closure::find_in_trace`. No SDK verb.
 - **`secure-multi-domain` — the profile, and the federation guarantee family it needs** (`docs/plans/adopter-surface.md`
   Y7, D25; `docs/features/multi-domain-profile.md`): ten `fed.*` guarantees in the catalogue, resolved by the same

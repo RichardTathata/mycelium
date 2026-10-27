@@ -155,8 +155,12 @@ as `agent`) and any other the embedder registers (`GossipAgent::with_decision_re
 provisioner's, an activation hook's) — read through each sink's record-index tap, so the route never takes a sink's
 lock and never makes a decision point drop a record; then the trace the embedder declares it writes as it drains a sink
 (`GossipAgent::with_decision_trace_file`, a `decisions.jsonl`; a line that is not a JSON object is skipped, as `mycelium
-explain` skips it, and a line over 1 MiB is skipped and counted). The route's index keeps the newest 4096 records
-(4 MiB of them) and is not emptied by a drain. **A sink not registered is not searched**, and the answer says so
+explain` skips it, a `\r` is part of a line ending only before a `\n`, and a line over 1 MiB is skipped and
+counted). Each registered sink pushes a copy of every record it keeps into a ring of its own that holds the newest 4096
+(and at most 4 MiB of them by the sink's estimate), the oldest let go — so the newest are there whether or not anyone
+has read; the route's index holds the newest 4096 records (4 MiB of their lines) and is not emptied by a drain. The
+memory held per registered sink is bounded by twice that. Labels are unique, and a sink stays registered for the
+agent's life. **A sink not registered is not searched**, and the answer says so
 (`unsearched`).
 
 **Not found (`404`).** `not_found` is the one meaning the node can give, else `undetermined` with `cannot_rule_out`,

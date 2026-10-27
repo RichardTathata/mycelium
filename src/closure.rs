@@ -478,10 +478,11 @@ pub fn find_in_trace(path: &Path, hash: &str) -> std::io::Result<TraceLookup> {
     loop {
         let buf = reader.fill_buf()?;
         let at_end = buf.is_empty();
-        let (chunk, ends_line) = match buf.iter().position(|&b| b == b'\n') {
+        let (chunk, newline) = match buf.iter().position(|&b| b == b'\n') {
             Some(i) => (&buf[..i], true),
-            None => (buf, at_end),
+            None => (buf, false),
         };
+        let ends_line = newline || at_end;
         if !too_long {
             if line.len() + chunk.len() > MAX_TRACE_LINE_BYTES {
                 too_long = true;
@@ -495,7 +496,7 @@ pub fn find_in_trace(path: &Path, hash: &str) -> std::io::Result<TraceLookup> {
         if ends_line {
             if too_long {
                 out.oversized += 1;
-            } else if let Some(found) = trace_line(&mut out, &mut line, hash) {
+            } else if let Some(found) = trace_line(&mut out, &mut line, newline, hash) {
                 out.line = Some(found);
                 return Ok(out);
             }
@@ -508,9 +509,10 @@ pub fn find_in_trace(path: &Path, hash: &str) -> std::io::Result<TraceLookup> {
     }
 }
 
-/// One whole line of a trace: counted as a record or as unparsed, and returned when it is the record asked for.
-fn trace_line(out: &mut TraceLookup, line: &mut Vec<u8>, hash: &str) -> Option<String> {
-    if line.last() == Some(&b'\r') {
+/// One whole line of a trace: counted as a record or as unparsed, and returned when it is the record asked for. A `\r`
+/// is part of the line ending only before a `\n`, as [`str::lines`] reads it: a last line's bare `\r` is kept.
+fn trace_line(out: &mut TraceLookup, line: &mut Vec<u8>, newline: bool, hash: &str) -> Option<String> {
+    if newline && line.last() == Some(&b'\r') {
         line.pop();
     }
     let Ok(text) = std::str::from_utf8(line) else {
@@ -778,6 +780,14 @@ mod tests {
         assert_eq!((got.exists, got.records, got.unparsed, got.oversized), (true, 1, 2, 1));
         let first = find_in_trace(&path, &c.records[0].hash).unwrap();
         assert_eq!(first.line.as_deref(), Some(a.as_str()), "a `\\r\\n` ending is stripped as `add_trace` strips it");
+        // A last line ending in a bare `\r`: `str::lines` keeps it, so the hash is over the line with it.
+        std::fs::write(&path, format!("{a}\n{b}\r")).unwrap();
+        let mut c = Corpus::default();
+        c.add_trace("d", &std::fs::read_to_string(&path).unwrap(), None);
+        let with_cr = c.records.last().unwrap().hash.clone();
+        assert_eq!(with_cr, content_hash(format!("{b}\r").as_bytes()), "add_trace keeps a final bare \\r");
+        let got = find_in_trace(&path, &with_cr).unwrap();
+        assert_eq!(got.line, Some(format!("{b}\r")), "find_in_trace resolves the hash add_trace gives it");
         let missing = find_in_trace(&dir.join("absent.jsonl"), &last).unwrap();
         assert!(!missing.exists, "a missing file is not an empty trace");
         let _ = std::fs::remove_dir_all(&dir);
