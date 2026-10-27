@@ -97,7 +97,8 @@ reported as `audit_unverified`, never sealed over). Seal a checkpoint with the *
   any posture. The guarantee `id.revocation_authority` reports `not_configured` while the CA key is on
   the node.
 - **The secure posture cannot rotate** (`rotate_identity` needs the CA key). Recovery there is
-  **re-issue only**: `mycelium tls issue` a new certificate (it is issued after every earlier one, so the
+  **re-issue only**: `mycelium tls issue --force` a new certificate (`--force` because it replaces the node's key and
+  every pin a partner holds for it — [deprecations § 69](../guide/deprecations.md#69-mycelium-tls-issue-refuses-to-replace-a-node-key-it-issued-before---force-replaces-it-tls-ca-and-tls-pin-are-new-unreleased-adopter-surface-y8); it is issued after every earlier one, so the
   new key outranks them), restart the node with it, then `POST /gateway/identity/revoke` the old key.
 - **A retired key still verifies until it is revoked.** `rotate_identity` alone is hygiene.
 - **Anti-entropy** entries carry no author and no signature, so a revocation cannot reach them. (An unsigned
@@ -188,8 +189,9 @@ identity. The guarantee `id.ca_key_off_node` holds only for a node that starts f
 certificate and the CA **certificate** alone:
 
 ```bash
-# on the issuer's host, where ca-cert.pem + ca-key.pem live (never on a node):
-mycelium tls issue --ca-dir ./fleet-ca --node 10.0.0.7:8080 --out ./issued
+# on the issuer's host, where ca-cert.pem + ca-key.pem live (never on a node) — minted there once:
+mycelium tls ca --out ./fleet-ca          # refused if ./fleet-ca already holds a CA
+mycelium tls issue --ca-dir ./fleet-ca --node 10.0.0.7:8080 --out ./issued   # --force to replace a key issued before
 # → ./issued/10_0_0_7_8080.cert.pem and .key.pem
 # on the node: copy both plus ./fleet-ca/ca-cert.pem (the certificate only) into its directory, and
 [tls]
@@ -205,7 +207,9 @@ needs the CA key and errors without it, by design. The startup report resolves `
 `enforced` only on such a node; `secure-single-domain` **rev 2 (v2.21.0) requires it** — a node under
 the profile whose certificate was minted on-node refuses to start, naming `id.ca_key_off_node`
 (announced in v2.20.0, one release ahead, per the plan's G12). The issuer's `mycelium` binary needs
-`--features tls`; without it `tls issue` exits 2 saying so.
+`--features tls`; without it `tls ca` and `tls issue` exit 2 saying so. For a federation partner, `mycelium tls pin
+<cert.pem>` prints the hex SPKI SHA-256 of a gateway's certificate — the value the partner's client pins
+([federation § Encrypting the link](federation.md#encrypting-the-link-tls-pinning)).
 
 ### Authenticated identity — enabling proof enforcement (identity-auth Phase 2/3)
 

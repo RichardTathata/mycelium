@@ -1,0 +1,31 @@
+# foodbank-gw — the gateway of foodbank.example. `cargo run -- doctor foodbank-gw` says what start() would do with
+# this file and the attachments `src/main.rs` makes; `mycelium doctor nodes/foodbank-gw.toml` reads the file alone.
+profile = "secure-multi-domain"
+cluster_name = "foodbank.example"   # a label; the domain's boundary is its CA, never this name
+bind_address = "127.0.0.1"
+bind_port = 7961
+domain_profile = "enforced"   # TLS required and SWIM off: no unauthenticated UDP at a federation boundary
+swim_failure_detector = false
+require_identity_proofs = true
+consensus_require_electorate = true
+http_port = 8461
+http_addr = "127.0.0.1"
+gateway_identity_issuer = "foodbank"   # a local caller is token:foodbank/<name>
+
+[egress]
+# Every host this node may reach outbound. The partner's gateway, by the host its endpoint names (federation.toml).
+allow_hosts = ["127.0.0.1"]
+
+[persistence]
+base_path = "data/foodbank-gw/kv"
+sync_mode = "Flush"
+
+# The node's certificate, issued off-node by `mycelium tls issue` (`bash fleet.sh setup`): this directory holds the
+# certificate, its key and ca-cert.pem — never the CA's key, which stays in ca/foodbank.example/.
+[tls]
+auto_cert_dir = "certs/foodbank-gw"
+cert_pem = "certs/foodbank-gw/127_0_0_1_7961.cert.pem"
+key_pem  = "certs/foodbank-gw/127_0_0_1_7961.key.pem"
+
+# HTTPS on the gateway, with the node identity's key: the key the partner pins.
+[gateway_tls]

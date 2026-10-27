@@ -334,6 +334,18 @@ mod imp {
         }
     }
 
+    /// A fresh self-signed Ed25519 CA: its certificate and key pair, written nowhere.
+    fn generate_ca() -> Result<(CertificateDer<'static>, KeyPair), GossipError> {
+        let err = |reason: String| GossipError::InvalidField { field: "tls", reason };
+        let ca_key_pair = KeyPair::generate_for(&PKCS_ED25519).map_err(|e| err(format!("TLS: generate CA key: {e}")))?;
+        let mut ca_params = CertificateParams::new(vec![]).map_err(|e| err(format!("TLS: CA params: {e}")))?;
+        ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        ca_params.not_before = rcgen::date_time_ymd(2024, 1, 1);
+        ca_params.not_after = rcgen::date_time_ymd(2099, 1, 1);
+        let ca_cert = ca_params.self_signed(&ca_key_pair).map_err(|e| err(format!("TLS: self-sign CA: {e}")))?;
+        Ok((CertificateDer::from(ca_cert.der().to_vec()), ca_key_pair))
+    }
+
     /// Generate a CA and publish it: each file written under a temporary name, then renamed into
     /// place. Called only while holding `ca.lock`.
     fn generate_and_publish_ca(
@@ -342,18 +354,13 @@ mod imp {
         key_path: &Path,
     ) -> Result<(CertificateDer<'static>, KeyPair), GossipError> {
         let err = |reason: String| GossipError::InvalidField { field: "tls", reason };
-        let ca_key_pair = KeyPair::generate_for(&PKCS_ED25519).map_err(|e| err(format!("TLS: generate CA key: {e}")))?;
-        let mut ca_params = CertificateParams::new(vec![]).map_err(|e| err(format!("TLS: CA params: {e}")))?;
-        ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-        ca_params.not_before = rcgen::date_time_ymd(2024, 1, 1);
-        ca_params.not_after = rcgen::date_time_ymd(2099, 1, 1);
-        let ca_cert = ca_params.self_signed(&ca_key_pair).map_err(|e| err(format!("TLS: self-sign CA: {e}")))?;
-        let ca_cert_der = CertificateDer::from(ca_cert.der().to_vec());
+        let (ca_cert_der, ca_key_pair) = generate_ca()?;
 
         let pid = std::process::id();
         let publish = |path: &Path, contents: String, what: &str| -> Result<(), GossipError> {
             let tmp = dir.join(format!(".{what}.tmp-{pid}"));
-            fs::write(&tmp, contents).map_err(|e| err(format!("TLS: write CA {what}: {e}")))?;
+            let written = if what == "key" { write_private(&tmp, contents.as_bytes()) } else { fs::write(&tmp, contents) };
+            written.map_err(|e| err(format!("TLS: write CA {what}: {e}")))?;
             fs::rename(&tmp, path).map_err(|e| err(format!("TLS: publish CA {what}: {e}")))
         };
         publish(key_path, ca_key_pair.serialize_pem(), "key")?;
@@ -482,6 +489,43 @@ mod imp {
         })
     }
 
+    /// **Mint a fleet CA** in `ca_dir` (`ca-cert.pem` + `ca-key.pem`), for the issuer's host that then runs
+    /// [`issue_node_cert`] — the off-node path's first step, which until now only a node started over an empty
+    /// directory could take (adopter-surface Y8). Refuses, naming the path, when `ca_dir` already holds either
+    /// file: a second CA over a fleet's is a new fleet, never a refresh. Returns the certificate's path.
+    pub fn mint_ca(ca_dir: &Path) -> Result<std::path::PathBuf, GossipError> {
+        let err = |reason: String| GossipError::InvalidField { field: "tls", reason };
+        let exists = |p: &Path| err(format!("TLS: {p:?} exists — a CA is minted once; a second one over it is a new fleet"));
+        let (cert, key) = (ca_dir.join("ca-cert.pem"), ca_dir.join("ca-key.pem"));
+        for p in [&cert, &key] {
+            if p.exists() {
+                return Err(exists(p));
+            }
+        }
+        fs::create_dir_all(ca_dir).map_err(|e| err(format!("TLS: create {ca_dir:?}: {e}")))?;
+        let (ca_cert_der, ca_key_pair) = generate_ca()?;
+        // Both files written in full under names of this call's own, then published by hard link, which fails when
+        // the name exists — so the check above is a courtesy and the link is the guard: two concurrent mints
+        // publish one CA, and the other is refused rather than replacing it (#695's review, finding 4). The key is
+        // published first and withdrawn if its certificate's name is taken, so the pair is one CA's or neither.
+        let tag = format!("{}-{:x}", std::process::id(), rand_core::RngCore::next_u64(&mut rand_core::OsRng));
+        let (tmp_key, tmp_cert) = (ca_dir.join(format!(".ca-key.mint-{tag}")), ca_dir.join(format!(".ca-cert.mint-{tag}")));
+        let result = (|| {
+            write_private(&tmp_key, ca_key_pair.serialize_pem().as_bytes()).map_err(|e| err(format!("TLS: write CA key: {e}")))?;
+            fs::write(&tmp_cert, cert_der_to_pem(ca_cert_der.as_ref())).map_err(|e| err(format!("TLS: write CA cert: {e}")))?;
+            fs::hard_link(&tmp_key, &key).map_err(|e| if e.kind() == std::io::ErrorKind::AlreadyExists { exists(&key) } else { err(format!("TLS: publish CA key: {e}")) })?;
+            if let Err(e) = fs::hard_link(&tmp_cert, &cert) {
+                let _ = fs::remove_file(&key);
+                return Err(if e.kind() == std::io::ErrorKind::AlreadyExists { exists(&cert) } else { err(format!("TLS: publish CA cert: {e}")) });
+            }
+            Ok(())
+        })();
+        let _ = (fs::remove_file(&tmp_key), fs::remove_file(&tmp_cert));
+        result?;
+        tracing::info!("TLS: minted a fleet CA in {ca_dir:?} — distribute ca-cert.pem, never ca-key.pem");
+        Ok(cert)
+    }
+
     /// **Issue a node certificate off-node** (`id.ca_key_off_node`, plan §8). Runs where the CA key
     /// is — an operator's workstation, a signing host — never on the node: loads the existing CA
     /// from `ca_dir` (never mints one), generates a fresh Ed25519 identity for `node_id`, signs its
@@ -510,7 +554,7 @@ mod imp {
         }
         key_pem.push_str("-----END PRIVATE KEY-----\n");
         fs::write(&cert_path, cert_der_to_pem(node_cert_der.as_ref())).map_err(|e| err(format!("TLS: write {cert_path:?}: {e}")))?;
-        fs::write(&key_path, key_pem).map_err(|e| err(format!("TLS: write {key_path:?}: {e}")))?;
+        write_private(&key_path, key_pem.as_bytes()).map_err(|e| err(format!("TLS: write {key_path:?}: {e}")))?;
         Ok((cert_path, key_path))
     }
 
@@ -549,8 +593,29 @@ mod imp {
     }
 
     fn save_key_raw(key: &SigningKey, path: &Path) -> Result<(), GossipError> {
-        fs::write(path, key.as_bytes())
+        write_private(path, key.as_bytes())
             .map_err(|e| GossipError::InvalidField { field: "tls", reason: format!("TLS: write key {:?}: {e}", path) })
+    }
+
+    /// Write a private key readable by its owner only: created `0600` on unix whatever the umask, and narrowed to
+    /// `0600` before any byte is written when the file already exists (a key an older release left `0644`). Every
+    /// private key this module writes goes through here; a certificate is public and does not.
+    fn write_private(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+        use std::io::Write as _;
+        let mut opts = fs::OpenOptions::new();
+        opts.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+            opts.mode(0o600);
+            let mut f = opts.open(path)?;
+            f.set_permissions(fs::Permissions::from_mode(0o600))?;
+            f.write_all(contents)
+        }
+        #[cfg(not(unix))]
+        {
+            opts.open(path)?.write_all(contents)
+        }
     }
 
     fn load_key_raw(path: &Path) -> Result<SigningKey, GossipError> {
@@ -965,7 +1030,7 @@ mod imp {
 }
 
 #[cfg(feature = "tls")]
-pub use imp::{ed25519_key_from_cert_der, gateway_server_config_from_pem, generate_rotation, generate_rotation_after, issue_node_cert, load_or_generate, sign_bytes, verify_bytes};
+pub use imp::{ed25519_key_from_cert_der, gateway_server_config_from_pem, generate_rotation, generate_rotation_after, issue_node_cert, load_or_generate, mint_ca, sign_bytes, verify_bytes};
 
 #[cfg(all(test, feature = "tls"))]
 mod key_extract_tests {
@@ -1105,6 +1170,60 @@ mod ca_race_tests {
         dir
     }
 
+    /// `mint_ca` under contention: eight concurrent mints into one directory publish exactly one CA, the other seven are
+    /// refused, and the key on disk is the certificate's — never one mint's key beside another's certificate. Seen
+    /// failing first with the check-then-rename publish: several mints returned `Ok` and the last rename won.
+    #[test]
+    fn concurrent_mints_publish_one_ca_and_refuse_the_rest() {
+        let dir = fresh_dir("mint-race").join("ca");
+        let barrier = Arc::new(std::sync::Barrier::new(8));
+        let handles: Vec<_> = (0..8).map(|_| {
+            let (dir, barrier) = (dir.clone(), Arc::clone(&barrier));
+            std::thread::spawn(move || { barrier.wait(); super::imp::mint_ca(&dir) })
+        }).collect();
+        let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        assert_eq!(results.iter().filter(|r| r.is_ok()).count(), 1, "{results:?}");
+        let key = rcgen::KeyPair::from_pem(&std::fs::read_to_string(dir.join("ca-key.pem")).unwrap()).unwrap();
+        let cert = super::imp::pem_cert_to_der(&std::fs::read_to_string(dir.join("ca-cert.pem")).unwrap()).unwrap();
+        let spki = webpki::EndEntityCert::try_from(&cert).unwrap().subject_public_key_info().as_ref().to_vec();
+        // `subject_public_key_info` is the SPKI's contents; the key pair's DER is the whole SEQUENCE around them.
+        assert!(key.public_key_der().ends_with(&spki), "the published key is the published certificate's");
+        let left: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name()).collect();
+        assert_eq!(left.len(), 2, "no temporary file is left: {left:?}");
+    }
+
+    /// Every private key the TLS module writes is readable by its owner only: the CA key, an issued node key and a
+    /// node's own generated identity key are created `0600` whatever the umask, and a key file left `0644` by an older
+    /// release is narrowed when it is rewritten. Certificates stay as the umask leaves them. Seen failing first: all
+    /// three were `0644` under umask 022.
+    #[cfg(unix)]
+    #[test]
+    fn every_private_key_written_is_owner_only() {
+        use crate::node_id::NodeId;
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        let ca_dir = fresh_dir("modes-ca");
+        load_or_create_ca(&TlsConfig { auto_cert_dir: ca_dir.clone(), ..TlsConfig::default() }).unwrap();
+        assert_eq!(mode(&ca_dir.join("ca-key.pem")), 0o600, "the CA key");
+        let out = fresh_dir("modes-issued");
+        let node = NodeId::new("127.0.0.1", 9402).unwrap();
+        let stale = out.join("127_0_0_1_9402.key.pem");
+        std::fs::write(&stale, b"left by an older release").unwrap();
+        std::fs::set_permissions(&stale, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let (_cert, key) = super::imp::issue_node_cert(&ca_dir, &node, &out).unwrap();
+        assert_eq!(mode(&key), 0o600, "an issued node key, rewritten over a 0644 file");
+        let own = fresh_dir("modes-own");
+        std::fs::copy(ca_dir.join("ca-cert.pem"), own.join("ca-cert.pem")).unwrap();
+        std::fs::copy(ca_dir.join("ca-key.pem"), own.join("ca-key.pem")).unwrap();
+        let cfg = TlsConfig { auto_cert_dir: own.clone(), ..TlsConfig::default() };
+        let node = NodeId::new("127.0.0.1", 9403).unwrap();
+        super::imp::load_or_generate(&cfg, &node, Arc::new(crate::removal::RemovedSet::default()), Default::default()).unwrap();
+        assert_eq!(mode(&own.join("127_0_0_1_9403.key")), 0o600, "a node's own generated identity key");
+        for d in [ca_dir, out, own] {
+            let _ = std::fs::remove_dir_all(d);
+        }
+    }
+
     /// Eight nodes start at the same instant on one empty directory, twenty times over. Every one
     /// must hold the same CA, and it must be the CA on disk. Before the fix, each could generate its
     /// own — the root cause of the intermittent federation peering failures.
@@ -1154,6 +1273,26 @@ mod ca_race_tests {
         assert!(e.to_string().contains("ca.lock"), "{e}");
         assert!(!dir.join("ca-cert.pem").exists(), "no CA was generated behind the lock");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Adopter-surface Y8: `mint_ca` is the issuer host's first step — a CA `issue_node_cert` signs with — and a
+    /// second mint over an existing CA (either file) is refused by name, leaving the first untouched.
+    #[test]
+    fn mint_ca_makes_a_ca_that_issues_and_refuses_a_second() {
+        use crate::node_id::NodeId;
+        let ca_dir = fresh_dir("mint").join("ca");
+        let cert = super::imp::mint_ca(&ca_dir).expect("mints into a new directory");
+        assert_eq!(cert, ca_dir.join("ca-cert.pem"));
+        assert!(ca_dir.join("ca-key.pem").exists());
+        let before = std::fs::read(&cert).unwrap();
+        let err = super::imp::mint_ca(&ca_dir).expect_err("a second CA over the first");
+        assert!(err.to_string().contains("ca-cert.pem") && err.to_string().contains("minted once"), "{err}");
+        assert_eq!(std::fs::read(&cert).unwrap(), before, "the first CA is untouched");
+        std::fs::remove_file(&cert).unwrap();
+        assert!(super::imp::mint_ca(&ca_dir).expect_err("the key alone also refuses").to_string().contains("ca-key.pem"));
+        std::fs::write(&cert, &before).unwrap();
+        let node_dir = fresh_dir("mint-node");
+        super::imp::issue_node_cert(&ca_dir, &NodeId::new("127.0.0.1", 9401).unwrap(), &node_dir).expect("the minted CA issues");
     }
 
     /// `id.ca_key_off_node` (plan §8): a node given a **pre-issued** certificate starts from the CA

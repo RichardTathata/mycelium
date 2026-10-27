@@ -2086,7 +2086,19 @@ them; attach them before `start()`. Under `dev` and `secure-single-domain` a lat
 federating domain, then select it; read each node's `GET /gateway/guarantees` after attaching its edge and clients,
 because `mycelium doctor` builds a node from a file and cannot see them.
 
-## 67. A federation edge refuses a credential presented twice; `CallRefusal` gained `Replayed` and `ReplayUndecidable` (unreleased, #695's review)
+## 69. `mycelium tls issue` refuses to replace a node key it issued before; `--force` replaces it; `tls ca` and `tls pin` are new (unreleased, adopter-surface Y8)
+
+`mycelium tls issue --ca-dir <ca> --node <ip:port> --out <dir>` used to write over `<dir>/<node>.key.pem` silently.
+A key already issued is an identity in use — a node runs on it, a federation partner pins its gateway's key — so
+issuing over it now exits 2, naming the file and what replacing it means: the node must restart on the new key, and
+every partner that pins its gateway must be given the new pin. **Migration:** a script that re-issues on purpose (the
+secure posture's recovery, [cert rotation § 2](../operations/cert-rotation.md)) adds `--force`. Also new:
+`mycelium tls ca --out <dir>` mints a fleet CA on the issuer's host, refusing a directory that holds one (two
+concurrent mints publish one CA, the other refused), and `mycelium tls pin <cert.pem>` prints a gateway certificate's
+pin, refusing a CA certificate and a file that carries a private key. `mycelium::doctor::Doctor` gained `attached`
+(`run_attached` is new), so an exhaustive struct literal breaks; nothing outside the crate builds one.
+
+## 70. A federation edge refuses a credential presented twice; `CallRefusal` gained `Replayed` and `ReplayUndecidable` (unreleased, #695's review)
 
 A gateway's `/a2a` now serves each federated credential **once**: the same signed bytes presented again are refused
 `-32003` (`Replayed`), and while a partner's window is full a credential expiring no later than the oldest one it had

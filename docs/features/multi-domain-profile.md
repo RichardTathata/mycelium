@@ -17,7 +17,8 @@ partner. No side is required: a member of a federating domain need not face a pa
   attributed, signed and confined to the partner's hosts.
 - **Not when** you need to know the partner is honest: nothing here checks the partner's posture, non-merger or clock
   agreement, which are `not_verifiable_here` ([federation runbook](../operations/federation.md#starting-under-secure-multi-domain)).
-  Also not for `mycelium doctor` alone: the edge and the clients are code attachments, which a node built from a file never has.
+  Also not for `mycelium doctor nodes/<node>.toml` alone: the edge and the clients are code attachments, which a node
+  built from a file never has — `mycelium::doctor::run_attached` is the same doctor over the node as a program builds it.
 
 ## Turn it on
 
@@ -42,7 +43,11 @@ This feature is turned on in code.
 ## See it work
 
 No runnable example exists: the [example index's capability matrix](../../examples/README.md#the-capability-matrix)
-has no row for this feature, and the suite's harness binary is not a row either. `make test-federation` runs the
+has no row for this feature, and the suite's harness binary is not a row either. A scaffold does:
+`mycelium init <dir> --template two-domains` writes two fleets of two nodes, each its own domain under this profile,
+calling each other across one edge ([`templates/two-domains`](../../templates/two-domains/README.md)); CI's
+`Scaffold` job runs it — the calls, each gateway's report, and the refusals under a wrong pin, a rewritten body and
+a full slot count. `make test-federation` runs the
 mesh nodes of two domains under this profile in Docker ([`examples/federation_node.rs`](../../examples/federation_node.rs),
 [`docker/docker-compose.federation.yml`](../../docker/docker-compose.federation.yml),
 [`tests/integration/run_federation.sh`](../../tests/integration/run_federation.sh): legs 0, 2 and 10 read the
@@ -75,12 +80,17 @@ rendering of the family is `doctor_prints_the_federation_family_under_the_multi_
   one node with its CA key on-node, which is refused naming `id.ca_key_off_node`
   ([federation § Starting under `secure-multi-domain`](../operations/federation.md#starting-under-secure-multi-domain)).
   **Not its consumer:** that is a bare `FederationClient`, not a node, so the client side's `fed.pinned`,
-  `fed.caller_named` and `fed.partner_egress` as a node's facts are shown by the tests above only — carried to Y8.
+  `fed.caller_named` and `fed.partner_egress` as a node's facts are not shown there.
+- **Both sides run under it, in the two-domain scaffold** (Y8): each gateway runs an edge and holds a client for the
+  other, and its own `GET /gateway/guarantees` reads all seven `fed.*` node facts `enforced` while it runs —
+  `fed.pinned`, `fed.caller_named` and `fed.partner_egress` among them (CI job `Scaffold`). Four processes on one host,
+  not containers.
 - **A replayed credential is refused at every edge**, under any profile — the same signed bytes served once a gateway,
   in memory, until they expire; per gateway, and forgotten at a restart
   ([federation § A credential is one call](../operations/federation.md#a-credential-is-one-call-replays)). No guarantee
   id: it is not a setting, so there is nothing for the report to resolve.
-- **Not built:** `doctor` cannot report the edge's or the clients' facts (stated in the same row). The upgrade
+- `mycelium doctor <file>` cannot report the edge's or the clients' facts; `doctor::run_attached` can, over the
+  program's own attachments, and the scaffold's `doctor` is that. The upgrade
   notes are [deprecations § 66](../guide/deprecations.md#66-a-third-guarantee-profile-secure-multi-domain-ten-fed-guarantees-in-every-report-guaranteereportunresolved-lists-only-what-applies-unreleased-adopter-surface-y7).
 
 ## Go deeper

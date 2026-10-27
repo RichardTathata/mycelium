@@ -1,0 +1,26 @@
+# foodbank-1 — a member of foodbank.example. `cargo run -- doctor foodbank-1` says what start() would do with
+# this file and the attachments `src/main.rs` makes; `mycelium doctor nodes/foodbank-1.toml` reads the file alone.
+profile = "secure-multi-domain"
+cluster_name = "foodbank.example"   # a label; the domain's boundary is its CA, never this name
+bind_address = "127.0.0.1"
+bind_port = 7962
+bootstrap_peers = ["127.0.0.1:7961"]
+domain_profile = "enforced"   # TLS required and SWIM off: no unauthenticated UDP at a federation boundary
+swim_failure_detector = false
+require_identity_proofs = true
+consensus_require_electorate = true
+
+[egress]
+# Every host this node may reach outbound. This member calls no partner: a reserved name that admits nothing.
+allow_hosts = ["egress.invalid"]
+
+[persistence]
+base_path = "data/foodbank-1/kv"
+sync_mode = "Flush"
+
+# The node's certificate, issued off-node by `mycelium tls issue` (`bash fleet.sh setup`): this directory holds the
+# certificate, its key and ca-cert.pem — never the CA's key, which stays in ca/foodbank.example/.
+[tls]
+auto_cert_dir = "certs/foodbank-1"
+cert_pem = "certs/foodbank-1/127_0_0_1_7962.cert.pem"
+key_pem  = "certs/foodbank-1/127_0_0_1_7962.key.pem"

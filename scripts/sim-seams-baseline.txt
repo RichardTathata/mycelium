@@ -67,5 +67,5 @@
 1 src/faults/recovery.rs
 1 src/federation/catalog.rs
 4 src/init.rs
-9 src/main.rs
+10 src/main.rs
 1 src/mesh_manifest.rs
