@@ -9,6 +9,32 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Security
+
+- **Check whether you are affected:** a node is exposed only if it hosts WASM components — it runs `mycelium-stem`, or
+  a binary that links `mycelium-wasm-host`; on such a node a non-zero `mycelium_artifact_installs_completed_total` means it
+  has installed components. After upgrading, `grep -A1 '^name = "wasmtime"$' Cargo.lock` in the build shows `49.0.5`,
+  and `cargo audit -f Cargo.lock` no longer reports RUSTSEC-2026-0420, -0422, -0423 or -0424.
+  **Dependency: `wasmtime` / `wasmtime-wasi` 49.0.4 → 49.0.5**, with the cranelift family 0.136.4 → 0.136.5 and pulley
+  and wiggle 49.0.4 → 49.0.5 (four advisories published 2026-10-29). Reachability, read from the host's code:
+  **RUSTSEC-2026-0424** (medium) **is reachable**: a component that lends itself a `borrow<T>` of a resource it defines
+  makes wasmtime allocate host memory to track the lend, charged to nothing — not the store's handle limit, not the
+  linear-memory limiter the host installs (`store.limiter`), not fuel — so a hosted component can grow the node's memory
+  without bound within one call's deadline. A node installing only what `[hosts].trusted_publishers` signed is exposed to
+  those publishers' components only; nothing in the host bounds it otherwise. **RUSTSEC-2026-0420** (medium, 6.4) is not
+  reachable: it is a race in **wasip3** UDP sockets under a per-address `socket_addr_check` policy, and the host links
+  WASI **p2** only (`wasmtime_wasi::p2::add_to_linker_sync`, `mycelium-wasm-host/src/host.rs`) with a context built by
+  `WasiCtxBuilder::new()`, whose default address check refuses every address — and no p3 socket is linked at all. **RUSTSEC-2026-0422** (low) is not reachable: it is a host
+  panic calling a **core-wasm** `TypedFunc` with `I31`/`NoneRef` arguments, and the host instantiates components only and
+  calls them through the component bindings — it builds no core `Module` and takes no `get_typed_func`.
+  **RUSTSEC-2026-0423** (low) is not reachable: it needs the embedder to create a GC `StructType` with a supertype from a
+  second `Engine`; the host creates no `StructType`. **Affected releases:** -0424 every release that ships the WASM host,
+  v2.0.0 through v2.38.2 (wasmtime 45.0.3 to 49.0.4); -0420, -0422 and -0423 v2.17.0 through v2.38.2 (wasmtime 49.x;
+  45.x and 46.x predate them). A node built without `mycelium-wasm-host` does not link wasmtime and is not exposed.
+  wasmtime 49.0.5's `default` features are unchanged from 49.0.4's, so `mycelium-wasm-host`'s list (every default but
+  `cache`) needs no change and `zstd` stays out of the tree. A lockfile change only (`Cargo.lock`; the two other tracked
+  lockfiles hold no wasmtime), no API change; the minimum Rust version wasmtime 49 requires (1.96.0) is unchanged.
+
 ### Changed
 
 - **Directories the TLS module creates for keys and certificates are `0700`, and certificates are written `0644`**,
