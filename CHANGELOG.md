@@ -65,9 +65,11 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   heartbeat's tick, out-of-view nodes' unreadable, forged and expired summaries collected) whose unknown coverage fails
   closed (`unknown_coverage_in_the_tally_is_not_established`). **Shadow first:** untouched under `legacy`, decided and
   counted and nothing held under `observe` (`the_shadow_profile_counts_and_holds_nothing`). `wire-check` reads an
-  exposure rule as no allowance. Rule `ae.exposure` in the catalogue, its reasons the metric's labels. Not built: the
-  exact `fleet_consensus` scope (refused at load), a gate at a tuple take or a signal emit, an operator route that
-  resolves an unresolved effect, signed summaries. Upgrade note: `deprecations.md` §72.
+  exposure rule as no allowance. Rule `ae.exposure` in the catalogue, its reasons the metric's labels. Not built (the narrowing the
+  maintainer accepted): the exact `fleet_consensus` scope (a closure shrinks, so a seat needs a decrement; refused at
+  load), holding at a tuple take or a signal emit (row Y11), an operator route that resolves an `Unresolved` record, the
+  limit of declared lineage (a caller that omits `_meta.parent` is not held; per-actor caps are K2's history rules), and
+  unsigned tally entries. Upgrade note: `deprecations.md` §72.
 - **Declared recurring work** (`docs/plans/adopter-surface.md` Y2, D15; `docs/features/recurring-work.md`): a unit file's
   `[[schedule]]` (`id`, `period_secs` up to a week, `phase_secs`, `on_missed`, a `[schedule.holders]` filter), run by
   the embedding application with `GossipAgent::run_schedule(&decl, work)` (`mycelium::schedule`; one loop per id per

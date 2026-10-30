@@ -86,11 +86,13 @@ fails), `the_shadow_profile_counts_and_holds_nothing`, `a_policy_denial_counts_n
   forgets an unresolved effect. Summaries are unsigned: a member can still write another's (counted by the `sys/`
   tripwire at the owner, and overwritten on its next tick), or, without `[tls]`, invent one this node cannot rule out
   (K2's limit).
-- Not built, stated in the plan's Y5 row: the exact `fleet_consensus` scope (an exact bound needs a seat held until
-  the effect resolves, which no fixed lease expresses — refused at load, by name); a gate at a tuple take or a signal
-  emit (neither has an enforcement point today); an operator route that resolves an unresolved effect; following the
-  cone through the evidence journal past the two causal fields; signed summaries. The
-  [what-is-proven](../operations/what-is-proven.md) ledger has no row for it yet.
+- Not built, stated in the plan's Y5 row (the narrowing the maintainer accepted, 2026-10-30):
+  - **the consensus-seat scope for an exact bound** — a closure *shrinks* as its effects resolve, so a seat would need a decrement no fixed lease expresses, and concurrent admissions overshoot without a reservation taken before the work is admitted; `fleet_consensus` is refused at load, by name.
+  - **holding at a tuple take and a signal emit** — neither door has an action-evaluator enforcement point today, so only calls are held — row Y11.
+  - **an operator route that resolves an `Unresolved` record** — such a record is terminal, a compensation takes only a committed effect, so it holds the work that names it for good.
+  - **the limit of declared lineage** — a caller that omits `_meta.parent` (or names only a descendant in another run) is not held: the policy bounds causal extension as each envelope declares it, and per-actor caps are row K2's history rules.
+  - **unsigned tally entries** — row K2's limit: a member can write another's summary — counted by the `sys/` tripwire at the owner and overwritten on its next tick — or, without `[tls]`, one under an id this node cannot rule out.
+- The [what-is-proven](../operations/what-is-proven.md) ledger has no row for it yet.
 
 ## Go deeper
 
