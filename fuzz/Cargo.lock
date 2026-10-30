@@ -864,7 +864,7 @@ checksum = "743fb55ba31b18fb1ecef6bdc9aa2743314978ac084044301a7eee33fb99a20d"
 
 [[package]]
 name = "mycelium"
-version = "2.38.2"
+version = "2.38.3"
 dependencies = [
  "ahash",
  "arc-swap",
@@ -897,7 +897,7 @@ dependencies = [
 
 [[package]]
 name = "mycelium-core"
-version = "2.38.2"
+version = "2.38.3"
 dependencies = [
  "ahash",
  "arc-swap",
@@ -937,7 +937,7 @@ dependencies = [
 
 [[package]]
 name = "mycelium-sim"
-version = "2.38.2"
+version = "2.38.3"
 dependencies = [
  "sha2",
 ]

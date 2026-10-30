@@ -24,7 +24,7 @@ need a release that carries the `grant` and `recovery` classes** — 2.38.0 or l
 with `unknown argument: test` (that release has no `test` command), and steps 1, 2, 3 and 6 run:
 
 ```sh
-TAG=v2.38.2                       # the newest release; the job reads it from the Release that triggered it
+TAG=v2.38.3                       # the newest release; the job reads it from the Release that triggered it
 REPO=RichardTathata/mycelium
 ```
 
