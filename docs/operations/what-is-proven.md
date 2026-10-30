@@ -2,7 +2,7 @@
 
 ↑ [Operations](README.md) · beside the [shared-responsibility matrix](shared-responsibility-matrix.md)
 
-**As of 2026-10-27 (v2.38.2).** One dated page for the line between what CI proves on every merge,
+**As of 2026-10-30 (v2.38.3).** One dated page for the line between what CI proves on every merge,
 what has been demonstrated with its bound stated, and what has not yet been shown. Every line names
 its evidence. The places that used to restate this list — `CLAUDE.md` § Active work, the contracts-axis
 plan §10, the self-audit series, the publications ledger, both decks — now link here instead, and
@@ -90,7 +90,7 @@ the deployment, multi-machine recovery or NovusLens consumer-rendering gaps belo
 
 ## Not yet shown — and what would show it
 
-| Gap | State on 2026-10-26 | What would show it |
+| Gap | State on 2026-10-30 | What would show it |
 |---|---|---|
 | **Binary provenance** | the Release workflow (adopter-surface X0) attaches `SHA256SUMS` to every tag's tarballs and pushes the image by digest: integrity of the download, not provenance of the build; nothing signs a binary or the image, and reproducible builds are not claimed | a Sigstore or GPG signature on each tarball and the image, verified by the clean-container smoke before the assets are attached |
 | **A named third-party production deployment** | none. NovusLens is a design partner that consumes the evidence records; the council-minutes corpus is envelope-qualified, not live | a customer pilot run to the `customer-pilot.md` bar, named with consent |
