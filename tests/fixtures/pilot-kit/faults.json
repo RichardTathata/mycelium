@@ -1,0 +1,467 @@
+{
+  "schema": "mycelium.test-faults/1",
+  "config_path": "faults.toml",
+  "fleet": {
+    "nodes": 3,
+    "units": [
+      "menu",
+      "pantry"
+    ],
+    "tls": true,
+    "persistence": true,
+    "profile": "dev",
+    "profile_declared": "dev",
+    "gateway_started": false
+  },
+  "wire_check": {
+    "errors": 0,
+    "warnings": 0
+  },
+  "activations": {
+    "declared": 0,
+    "run": 0,
+    "state": "not_applicable",
+    "because": "test --faults runs no activation: a test command is not a command runner (D23)"
+  },
+  "classes": [
+    {
+      "class": "revoke",
+      "asked": false,
+      "state": {
+        "state": "passed"
+      },
+      "checks": [
+        {
+          "name": "first contact: every node holds the others' keys",
+          "ok": true,
+          "detail": "three TLS nodes",
+          "elapsed_ms": 27
+        },
+        {
+          "name": "a peer sees the revocation: the old key untrusted, the new key held",
+          "ok": true,
+          "detail": "old bdf3bd33 new 0adde518",
+          "elapsed_ms": 2135
+        },
+        {
+          "name": "the KV arm: a write signed by the revoked key is refused at a peer",
+          "ok": true,
+          "detail": "plant under the new key landed; the revoked key's write was refused",
+          "elapsed_ms": 531
+        },
+        {
+          "name": "the handshake: a revoked key's certificate is refused at a peer's accept side",
+          "ok": true,
+          "detail": "before rotation Ok(\"accepted\"); stolen now Err(\"server refused: unexpected error: mycelium: 127.0.0.1:26540 has revoked this certificate's key\"); current Ok(\"accepted\")",
+          "elapsed_ms": 6
+        },
+        {
+          "name": "identity chaining: a record chained through the revoked key adds no key at a peer",
+          "ok": true,
+          "detail": "the forged record arrived at the peer's store; the attacker key was not merged",
+          "elapsed_ms": 531
+        },
+        {
+          "name": "a mandate: established at the execution authority, then not established once a checkpoint revokes its term",
+          "ok": true,
+          "detail": "unit pantry: holder token:test-faults/pantry, scope main-hall, tools/call on tool:pantry.stock@127.0.0.1:26540; established true; checkpoint Accepted; after: Some(Unknown(\"the appointment is revoked\"))",
+          "elapsed_ms": 3
+        }
+      ],
+      "exercised": [
+        {
+          "id": "id.revocation_authority",
+          "kind": "guarantee",
+          "state": "not_configured",
+          "detail": "the CA private key is on this node (the development posture): anyone holding it can issue a certificate that outranks every node's key, so revocation authority is only as strong as the CA key's custody"
+        },
+        {
+          "id": "mesh.signed_writes",
+          "kind": "guarantee",
+          "state": "enforced",
+          "detail": null
+        },
+        {
+          "id": "mesh.tls",
+          "kind": "guarantee",
+          "state": "enforced",
+          "detail": null
+        },
+        {
+          "id": "authz.execution_authority",
+          "kind": "guarantee",
+          "state": "not_applicable",
+          "detail": "no `http_port`: this node runs no gateway"
+        },
+        {
+          "id": "authz.durable_epochs",
+          "kind": "guarantee",
+          "state": "not_applicable",
+          "detail": "no execution authority attached"
+        }
+      ],
+      "not_exercised": [],
+      "notes": [
+        "three nodes of the fleet (nodes 0, 1 and 2): the compromised node, the holder of its old key, the verifying peer",
+        "the key half is row Q's three verifiers an in-process fleet can reach — the KV arm, the handshake, identity chaining; consensus, caller envelopes and knowledge records are the suite's (`src/lib_tests.rs`)"
+      ],
+      "elapsed_ms": 4737
+    },
+    {
+      "class": "restart",
+      "asked": false,
+      "state": {
+        "state": "passed"
+      },
+      "checks": [
+        {
+          "name": "a write requiring sync is acknowledged at rung 2, on disk, on every node",
+          "ok": true,
+          "detail": "node 0: OnDisk; node 1: OnDisk; node 2: OnDisk",
+          "elapsed_ms": 14
+        },
+        {
+          "name": "a synced write is replayed from the node's own WAL after a restart",
+          "ok": true,
+          "detail": "node 0: replayed; node 1: replayed; node 2: replayed",
+          "elapsed_ms": 2783
+        },
+        {
+          "name": "unreadable persisted state is refused at start, by name (on_unreadable = refuse)",
+          "ok": true,
+          "detail": "start() refused: Configuration error: field 'persistence' — persistence: /tmp/mycelium-test-faults-29604-1793394238193-0/restart/persist/node-0/127.0.0.1:26543/kv/wal.bin holds a corrupt record at byte 0 with data after it; the records before it were replayed, nothing after it can be trusted; set `persistence.on_unreadable = \"quarantine\"` to move the unreadable files aside and start empty (they are never deleted)",
+          "elapsed_ms": 1189
+        }
+      ],
+      "exercised": [
+        {
+          "id": "persist.configured",
+          "kind": "guarantee",
+          "state": "enforced",
+          "detail": null
+        },
+        {
+          "id": "persist.sync_mode",
+          "kind": "guarantee",
+          "state": "not_configured",
+          "detail": "sync_mode (async: an ack is `buffered`, which the receipt says honestly)"
+        },
+        {
+          "id": "persist.unreadable_refused",
+          "kind": "guarantee",
+          "state": "enforced",
+          "detail": null
+        },
+        {
+          "id": "kv.propagation",
+          "kind": "rule",
+          "state": "catalogue_only",
+          "detail": null
+        }
+      ],
+      "not_exercised": [],
+      "notes": [
+        "persistence relocated to /tmp/mycelium-test-faults-29604-1793394238193-0/restart/persist (one directory per node) for the run; sync_mode Async; on_unreadable Refuse"
+      ],
+      "elapsed_ms": 4087
+    },
+    {
+      "class": "partition",
+      "asked": false,
+      "state": {
+        "state": "passed"
+      },
+      "checks": [
+        {
+          "name": "every node has every other as a peer",
+          "ok": true,
+          "detail": "3 nodes",
+          "elapsed_ms": 275
+        },
+        {
+          "name": "the victim's offers resolve at a peer before the cut",
+          "ok": true,
+          "detail": "node 0 (127.0.0.1:26546), 1 offer(s), observer node 1",
+          "elapsed_ms": 2014
+        },
+        {
+          "name": "a node that goes dark is evicted from every survivor's membership",
+          "ok": true,
+          "detail": "eviction window 3 s",
+          "elapsed_ms": 6202
+        },
+        {
+          "name": "the dark node's offers leave the view after their evaporation window",
+          "ok": true,
+          "detail": "3 × ttl_secs 10 = 30 s",
+          "elapsed_ms": 21483
+        },
+        {
+          "name": "the node back under its identity is a peer again and its offers resolve",
+          "ok": true,
+          "detail": "1 offer(s)",
+          "elapsed_ms": 1029
+        }
+      ],
+      "exercised": [
+        {
+          "id": "mesh.tls",
+          "kind": "guarantee",
+          "state": "enforced",
+          "detail": null
+        },
+        {
+          "id": "membership.governed",
+          "kind": "rule",
+          "state": "instrumented",
+          "detail": null
+        },
+        {
+          "id": "kv.expiry",
+          "kind": "rule",
+          "state": "catalogue_only",
+          "detail": null
+        },
+        {
+          "id": "cap.match",
+          "kind": "rule",
+          "state": "catalogue_only",
+          "detail": null
+        }
+      ],
+      "not_exercised": [],
+      "notes": [
+        "the cut is the node's runtime dropped: no departure is sent, its sockets close; the dark side is not observed — a two-sided partition is not a class here (`--faults two-sided` says so): it is the Docker suites' job (D6)",
+        "the declaration defines no [[group]]: the governor half observed nothing to govern"
+      ],
+      "elapsed_ms": 31220
+    },
+    {
+      "class": "replay",
+      "asked": false,
+      "state": {
+        "state": "not_in_build",
+        "feature": "sim"
+      },
+      "checks": [],
+      "exercised": [],
+      "not_exercised": [
+        {
+          "id": "membership.governed",
+          "kind": "rule",
+          "state": "not_run",
+          "detail": "not_in_build: sim"
+        },
+        {
+          "id": "kv.propagation",
+          "kind": "rule",
+          "state": "not_run",
+          "detail": "not_in_build: sim"
+        }
+      ],
+      "notes": [
+        "the seams are off in every shipped build; build the binary with `cargo build --bin mycelium --features cli,sim` to record and replay"
+      ],
+      "elapsed_ms": 30
+    },
+    {
+      "class": "policy-diff",
+      "asked": false,
+      "state": {
+        "state": "not_configured",
+        "missing": "--against <units-dir> (the second revision)"
+      },
+      "checks": [],
+      "exercised": [],
+      "not_exercised": [
+        {
+          "id": "ae.authorised_at_seam",
+          "kind": "guarantee",
+          "state": "not_applicable",
+          "detail": "not_configured: --against <units-dir> (the second revision)"
+        },
+        {
+          "id": "ae.recorded_before_dispatch",
+          "kind": "guarantee",
+          "state": "not_applicable",
+          "detail": "not_configured: --against <units-dir> (the second revision)"
+        },
+        {
+          "id": "ae.preflight",
+          "kind": "rule",
+          "state": "not_run",
+          "detail": "not_configured: --against <units-dir> (the second revision)"
+        }
+      ],
+      "notes": [],
+      "elapsed_ms": 1
+    },
+    {
+      "class": "recovery",
+      "asked": false,
+      "state": {
+        "state": "passed"
+      },
+      "checks": [
+        {
+          "name": "the restarted node finds its lost-acknowledgement record unknown in its own ledger, probes before any retry, and the destination holds one effect",
+          "ok": true,
+          "detail": "restarted over its WAL: the synced write is back; found unknown; a retry without a probe: the effect's fate is unknown and nothing has asked the destination: probe before any retry; probe: Ok(Done); then committed; the destination reached 1 time(s) for it, one application",
+          "elapsed_ms": 20
+        },
+        {
+          "name": "an idempotent dependent whose fate was unknown is probed, found not done, and resumed by one retry — of two concurrent retries one is refused before anything is sent",
+          "ok": true,
+          "detail": "probe: Ok(NotDone); retries: 1 fresh, 1 refused as a second retry; then committed",
+          "elapsed_ms": 32
+        },
+        {
+          "name": "with a node dark — evicted from the restarted node's peer table — the closure read over two of three journals says it is incomplete: node 1's dependent is in it, node 2's are not, nor the record two steps down through them — its parent is named as a hole",
+          "ok": true,
+          "detail": "node 2 evicted at node 0; 5 member(s); 3dd57543b85a present: true; 9bd3f9098ab0 absent: true; 8a952d2cd5f2 absent: true (its parent 9bd3f9098ab0 is in the withheld journal); INCOMPLETE: 2 journal(s) given for a fleet of 3 nodes — a record on a node whose journal is not here is not in this closure.; 5 record(s) in the closure over 2 file(s); 0 federation boundary(ies); 1 hole(s) cited elsewhere in these files.",
+          "elapsed_ms": 1
+        },
+        {
+          "name": "the returned node's journal completes the closure: every dependent record is in it and no independent one",
+          "ok": true,
+          "detail": "8 member(s); dependents 3dd57543b85a, 9bd3f9098ab0, 8a952d2cd5f2 (two steps down), decccfecf9e4; independents 759bfbb63d28 and 78a55546eaaa outside",
+          "elapsed_ms": 1
+        },
+        {
+          "name": "a compensatable dependent whose fate was unknown is probed, found not done, and never retried",
+          "ok": true,
+          "detail": "probe: Ok(NotDone); a retry: the destination declared itself compensatable, not idempotent: a retry is never safe; then not_done",
+          "elapsed_ms": 17
+        },
+        {
+          "name": "a committed dependent of an effect that did not happen is compensated under the evaluator's permit, as a new record naming it",
+          "ok": true,
+          "detail": "compensated (Fresh); then compensated; the compensation's record names the compensated record as its parent and is in the closure: true",
+          "elapsed_ms": 37
+        },
+        {
+          "name": "an irreversible dependent is neither probed nor retried; it is left — unresolved, escalated — as a new record naming it",
+          "ok": true,
+          "detail": "a probe: an irreversible, unobservable effect: no probe, no retry; its fate stays unknown and the evidence is kept; leave: recorded; then unresolved; the leave's record 9a7ac39a7ac4 is in the closure",
+          "elapsed_ms": 16
+        },
+        {
+          "name": "independent work beside the closure is untouched: its records are outside the closure, its ledger states unchanged, no new record cites it",
+          "ok": true,
+          "detail": "audit-201 committed, report-202 committed; records citing each: 0 and 0 (itself only)",
+          "elapsed_ms": 0
+        },
+        {
+          "name": "the destination saw each effect once: the lost acknowledgement never re-sent, the one retry landed once, the compensation once, nothing vanished twice",
+          "ok": true,
+          "detail": "per key, applications then attempts: order-100 1/1 1/1, label-101 1/1 2/2, points-102 0/0 1/1, notify-103 1/1 1/1, email-104 0/0 1/1, audit-201 1/1 1/1, report-202 1/1 1/1, notify-103-retract 1/1 1/1; 6 application(s) in all, 4 before the recovery",
+          "elapsed_ms": 0
+        },
+        {
+          "name": "`mycelium explain --closure` renders every recovery decision from the three journals, complete",
+          "ok": true,
+          "detail": "12 record(s) rendered; the probe, the retry, the compensation (under its declared operation) and the leave seen: effect.probe, effect.retry, notify-retract, effect.leave; kept as <dir>/closure.txt",
+          "elapsed_ms": 3
+        }
+      ],
+      "exercised": [
+        {
+          "id": "persist.configured",
+          "kind": "guarantee",
+          "state": "enforced",
+          "detail": null
+        },
+        {
+          "id": "persist.sync_mode",
+          "kind": "guarantee",
+          "state": "not_configured",
+          "detail": "sync_mode (async: an ack is `buffered`, which the receipt says honestly)"
+        },
+        {
+          "id": "ae.preflight",
+          "kind": "rule",
+          "state": "catalogue_only",
+          "detail": null
+        }
+      ],
+      "not_exercised": [],
+      "notes": [
+        "root record 11c83e35544c29924eb1cf716bf83ae0ec336f8b2794f52ef6578bf538b1895b (`mycelium explain --closure 11c83e35544c29924eb1cf716bf83ae0ec336f8b2794f52ef6578bf538b1895b <dir>/journal-*/evidence.log --fleet 3` over a kept run); the compensation's permit is recorded before the compensation is sent (the reconciler's `record_permit`), which is this class's ordering and not the gateway's `ae.recorded_before_dispatch`",
+        "node 2 back: every node has every other as a peer again",
+        "the rule applied, per member: unknown + idempotent → probe, then one retry if not done; unknown + compensatable → probe, never retry (found not done it ends `not_done`: nothing at the destination, a new operation is the caller's); committed on a premise that did not happen → compensate under the evaluator's permit; unknown + irreversible → leave (unresolved, escalated); independent work → nothing"
+      ],
+      "elapsed_ms": 586
+    },
+    {
+      "class": "grant",
+      "asked": false,
+      "state": {
+        "state": "passed"
+      },
+      "checks": [
+        {
+          "name": "a grant-required tool is default-deny: a plain transition is refused, and silence within the window refuses",
+          "ok": true,
+          "detail": "plain transition to pantry.reserve: refused — no grant presented for: pantry.reserve: a grant-required tool is invoked through transition_invoking, with its arguments; with arguments, after 1500 ms of silence: refused — no grant presented for: pantry.reserve: no established grant within 1500 ms (request 01a18ea1021e0003); 1 request(s) on the record under grant/node:127.0.0.1:26555/",
+          "elapsed_ms": 1502
+        },
+        {
+          "name": "issuing is the declaration's rule: a principal no rule names is refused, the declared issuer's grant admits the call once",
+          "ok": true,
+          "detail": "test-faults-stranger's issue refused by the evaluator (authority_not_established: authority not established under policy declared: no allowance matches this action; the allow-list does not cover it); steward's issue: written at grant/node:127.0.0.1:26555/01a18ea107ff0000/issued (buffered); the waiting call: admitted under the grant; request 01a18ea107ff0000 consumed: true; state Invoking { tool: \"pantry.reserve\" }",
+          "elapsed_ms": 53
+        },
+        {
+          "name": "the grant holds across a restart: the request and the grant replay from the WAL, the restarted agent re-waits and does not ask twice",
+          "ok": true,
+          "detail": "issued before the stop: written (buffered); after the restart the request and the grant are back from the WAL; the re-wait: admitted under the grant issued before the restart; requests 3 → 3 (did not ask twice); request 01a18ea108330000 consumed: true",
+          "elapsed_ms": 399
+        },
+        {
+          "name": "the grant is bound to its arguments: other arguments ask again and are refused on silence",
+          "ok": true,
+          "detail": "the same tool with other arguments: refused — no grant presented for: pantry.reserve: no established grant within 1500 ms (request 01a18ea109c20000); requests 3 → 4",
+          "elapsed_ms": 1501
+        },
+        {
+          "name": "the decisions are on the record: the refused and the permitted issue at gateway:grants/issue, the request carrying the arguments and the digest the grant binds",
+          "ok": true,
+          "detail": "3 grant.issue decision(s) in /tmp/mycelium-test-faults-29604-1793394238193-0/grant/journal/evidence.log: 2 permitted for steward, 1 refused for test-faults-stranger; request 01a18ea108330000: arguments rendered for a human: true; digest 0003d8d5ad97 bound in the signed grant's operations: true",
+          "elapsed_ms": 1
+        }
+      ],
+      "exercised": [
+        {
+          "id": "persist.configured",
+          "kind": "guarantee",
+          "state": "enforced",
+          "detail": null
+        },
+        {
+          "id": "persist.sync_mode",
+          "kind": "guarantee",
+          "state": "not_configured",
+          "detail": "sync_mode (async: an ack is `buffered`, which the receipt says honestly)"
+        },
+        {
+          "id": "mesh.tls",
+          "kind": "guarantee",
+          "state": "enforced",
+          "detail": null
+        },
+        {
+          "id": "ae.preflight",
+          "kind": "rule",
+          "state": "catalogue_only",
+          "detail": null
+        }
+      ],
+      "not_exercised": [],
+      "notes": [
+        "the evaluator is the declaration's 3 [[rule]](s), the grant-required one read as a selector: its resource names the tool the agent's policy requires a grant for (the state machine's own check is the default-deny shown), and it is also admitted at `tool:<name>@127.0.0.1:26555` and with the node's principal as its actor (the forms the request record and the doors use); the issuer is steward, the actor of the declaration's rule admitting grant.issue on tool:pantry.reserve; issued through the route's own decision (decide_grant), not over HTTP — the fleet has no gateway port, so the route's scope rule is outside this view; the agent is unit pantry on node 127.0.0.1:26555; persistence under /tmp/mycelium-test-faults-29604-1793394238193-0/grant/persist"
+      ],
+      "elapsed_ms": 4201
+    }
+  ],
+  "kept": null
+}

@@ -1,0 +1,33 @@
+# The food bank's provider, declared for `mycelium test --faults`: what it offers, the mandate it holds over its own
+# stock, and the rules its policy decides by — the same shape the scaffold's `federation.toml` serves across the edge.
+# A reservation waits for a grant the food bank's steward issues for that one call: approval that is default-deny.
+principal = "pantry"
+
+[[capability]]
+ns       = "pantry"
+name     = "stock"
+ttl_secs = 10
+  [capability.attrs]
+  store = "main-hall"
+
+[[mandate]]
+holder     = "pantry"
+scope      = "main-hall"
+operations = ["tools/call:tool:pantry.stock"]
+
+[[rule]]
+actor           = "*"
+operation       = "tools/call"
+resource        = "tool:pantry.stock"
+requires_values = { store = "main-hall" }
+
+[[rule]]
+actor          = "pantry"
+operation      = "tools/call"
+resource       = "tool:pantry.reserve"
+requires_grant = true
+
+[[rule]]
+actor     = "steward"
+operation = "grant.issue"
+resource  = "tool:pantry.reserve"

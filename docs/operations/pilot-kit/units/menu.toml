@@ -1,0 +1,8 @@
+# The community kitchen's provider, declared for `mycelium test --faults`: today's menu, offered to any caller its
+# policy names, cooked from what the pantry reports.
+principal = "menu"
+
+[[capability]]
+ns       = "menu"
+name     = "today"
+ttl_secs = 10

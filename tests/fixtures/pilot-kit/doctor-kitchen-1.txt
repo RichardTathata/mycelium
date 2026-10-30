@@ -1,0 +1,122 @@
+mycelium doctor — 2.38.0
+configuration: nodes/kitchen-1.toml
+build features: gateway, tls, compliance, a2a, consensus
+profile: secure-multi-domain rev 1
+start(): would start
+guarantees: enforced 12 · not_applicable 21 · not_configured 3 · not_in_build 1 · not_verifiable_here 2
+enforced: mesh.tls, mesh.signed_writes, id.proofs_required, id.ca_key_off_node, prov.enforcement, authz.durable_epochs, egress.allow_list, persist.configured, persist.sync_mode, persist.unreadable_refused, cons.safety_profile, fed.domain_enforced
+federation: this node faces no federation partner — no edge and no client attached, so the profile's side-specific `fed.*` guarantees do not apply and it is checked as a member on `fed.domain_enforced`; an edge or clients attached after start() are ignored under this profile
+  gw.not_open: not_applicable — no `http_port`: this node runs no gateway → docs/operations/rbac.md
+  gw.exposed_closed: not_applicable — no `http_port`: this node runs no gateway → docs/operations/production-readiness.md
+  gw.token_tables: not_applicable — no `http_port`: this node runs no gateway → docs/operations/rbac.md
+  gw.oidc: not_applicable — no `http_port`: this node runs no gateway → docs/operations/sso.md
+  gw.tls: not_applicable — no `http_port`: this node runs no gateway → docs/operations/gateway-tls.md
+  gw.caller_profile: not_applicable — no `http_port`: this node runs no gateway → docs/guide/20-authorising-actions.md
+  id.revocation_authority: not_configured — the node's certificate is judged once its identity loads (start()) → docs/design/revocation-authority.md
+  ae.authorised_at_seam: not_applicable — no `http_port`: this node runs no gateway → docs/guide/20-authorising-actions.md
+  ae.recorded_before_dispatch: not_applicable — no `http_port`: this node runs no gateway → docs/guide/20-authorising-actions.md
+  a2a.admission: not_applicable — `/a2a` is not mounted (`with_a2a` not called) → docs/operations/production-readiness.md
+  authz.execution_authority: not_applicable — no `http_port`: this node runs no gateway → docs/guide/21-mandates.md
+  audit.chain: not_applicable — no `http_port`: this node runs no gateway → docs/operations/audit.md
+  audit.sink: not_applicable — no `http_port`: this node runs no gateway → docs/operations/audit.md
+  egress.credentials: not_configured — egress_credentials (no binding configured) → docs/operations/crown-jewel.md
+  at_rest.cipher: not_configured — with_data_at_rest_cipher (plaintext WAL and snapshot) → docs/operations/crown-jewel.md
+  fed.pinned: not_applicable — no federation client attached: this node calls no partner → docs/operations/federation.md
+  fed.body_bound: not_applicable — no federation edge attached: this node serves no partner → docs/operations/federation.md
+  fed.partner_slots: not_applicable — no federation edge attached: this node serves no partner → docs/operations/federation.md
+  fed.caller_named: not_applicable — no federation client attached: this node calls no partner → docs/operations/federation.md
+  fed.catalogue_signed: not_applicable — no federation edge or client attached: this node faces no partner → docs/operations/federation.md
+  fed.partner_egress: not_applicable — no federation client attached: this node calls no partner → docs/operations/federation.md
+  trace.spans_not_evidence: not_in_build — otel → docs/features/span-export.md
+  net.confinement: not_verifiable_here — the reference deployment's test (scripts/test-confined-fleet.sh) or the network's own telemetry — a node cannot observe its own network policy → docs/design/confined-fleet.md
+  clock.sync: not_verifiable_here — the deployment's time-sync monitoring; a node cannot verify its own clock against real time (closure plan C11) → docs/threat-model.md
+  fed.partner_posture: not_applicable — no federation edge or client attached: this node faces no partner → docs/operations/federation.md
+  fed.non_merger: not_applicable — no federation edge or client attached: this node faces no partner → docs/design/federated-domains.md
+  fed.clock_agreement: not_applicable — no federation edge or client attached: this node faces no partner → docs/operations/federation.md
+confinement: unmet: audit_sink
+persistence: data/kitchen-1/kv — absent (doctor creates nothing; start() would)
+effective configuration (84 fields):
+  bind_address = "127.0.0.1"   # default
+  bind_port = 7972   # file
+  bootstrap_peers = ["127.0.0.1:7971"]   # file
+  bulk_fetch_timeout_secs = 30   # default
+  cluster_name = "kitchen.example"   # file
+  consensus_electorate = unset   # default
+  consensus_require_electorate = true   # file
+  control_max_staleness_ms = 30000   # default
+  control_min_peers_heard = 1   # default
+  default_ttl = 5   # default
+  domain_profile = "enforced"   # file
+  egress.allow_hosts = ["egress.invalid"]   # file
+  egress_credentials = []   # default
+  emergent_detectors_enabled = false   # default
+  epidemic_extra_peers = 3   # default
+  gateway_allow_unauthenticated = false   # default
+  gateway_auth_token = unset   # default
+  gateway_caller_profile = "secure"   # default
+  gateway_cors_origins = []   # default
+  gateway_identity_issuer = unset   # default
+  gateway_named_tokens = []   # default
+  gateway_scoped_tokens = []   # default
+  gateway_tls = unset   # default
+  gossip_channel_capacity = 1024   # default
+  gossip_fanout = 0   # default
+  gossip_shards = 12   # default
+  group_aware_forwarding = true   # default
+  handshake_timeout_ms = 10000   # default
+  health_check_interval_secs = 10   # default
+  health_check_max_jitter_ms = 0   # default
+  http_addr = "127.0.0.1"   # default
+  http_port = unset   # default
+  inbound_idle_timeout_secs = 300   # default
+  intern_keys = true   # default
+  intern_max_keys = 0   # default
+  kv_require_signed_frames = false   # default
+  locality_path = []   # default
+  max_active_connections = 0   # default
+  max_clock_drift_ms = 300000   # default
+  max_concurrent_bulk_handlers = 64   # default
+  max_connections = 1024   # default
+  max_connections_per_source = 0   # default
+  max_forwarding_peers = 9223372036854775807   # default
+  max_inbound_frames_per_sec = 0   # default
+  max_peers = 9223372036854775807   # default
+  max_seen_entries = 100000   # default
+  max_store_entries = 0   # default
+  membership_cooldown_secs = unset   # default
+  oidc = unset   # default
+  peer_eviction_intervals = 3   # default
+  peer_min_rate_bytes_per_sec = 1024   # default
+  peer_read_stall_timeout_ms = 60000   # default
+  peer_write_stall_timeout_ms = 1140000   # default
+  persistence.base_path = "data/kitchen-1/kv"   # file
+  persistence.on_unreadable = "refuse"   # file
+  persistence.snapshot_interval_secs = 300   # file
+  persistence.snapshot_wal_threshold = 10000   # file
+  persistence.sync_mode = "Flush"   # file
+  ping_peer_sample_size = 20   # default
+  profile = "secure-multi-domain"   # file
+  propagation_window_secs = 60   # default
+  protected_rpc_kinds = []   # default
+  rate_aggregate_threshold_fps = 0   # default
+  rate_observation_enabled = false   # default
+  reconnect_backoff_secs = 5   # default
+  require_identity_proofs = true   # default
+  signal_ordered_delivery = false   # default
+  signal_reorder_max_depth = 64   # default
+  signal_reorder_max_hold_ms = 500   # default
+  signal_window_secs = 600   # default
+  swim_failure_detector = false   # file
+  swim_gossip_updates = 12   # default
+  swim_indirect_probes = 3   # default
+  swim_probe_interval_ms = 500   # default
+  swim_probe_timeout_ms = 300   # default
+  swim_suspicion_timeout_ms = 4000   # default
+  swim_udp_port = unset   # default
+  tcp_accept_backlog = 1024   # default
+  tls.auto_cert_dir = "certs/kitchen-1"   # file
+  tls.ca_cert_pem = unset   # default
+  tls.cert_pem = "certs/kitchen-1/127_0_0_1_7972.cert.pem"   # file
+  tls.key_pem = "certs/kitchen-1/127_0_0_1_7972.key.pem"   # file
+  writer_channel_depth = 1024   # default
+  writer_idle_timeout_secs = 30   # default

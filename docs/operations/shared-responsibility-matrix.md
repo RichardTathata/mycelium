@@ -81,6 +81,59 @@ board. Mycelium contributes only as a well-documented **vendor** in your CC9 ven
 | Availability | **S** | AP design (partition-tolerant), epidemic redundancy, anti-entropy repair | Capacity, backups, multi-AZ, DR |
 | Egress control | **S** | `EgressPolicy` fail-closed allowlist (per node) | Set `allow_hosts`; network-layer enforcement |
 
+## From a `doctor` line to its row
+
+`mycelium doctor` names one guarantee per line, by id; the [guarantee catalogue](../reference/guarantee-catalogue.md)
+says what each promises. This table takes a line of that output to the row above that says who holds it, so an
+auditor reading a pilot's `doctor` output, or the [pilot kit](pilot-kit/README.md)'s report, can go from a state to a
+responsibility without reading the code. `scripts/check-pilot-kit.py` (in `make check`) holds it complete: every id in
+the catalogue is here, every row it names is a row of this page, and a line no row covers says so and why.
+
+| Doctor line | Row (section) |
+|---|---|
+| `gw.not_open` | Gateway access control (CC6) |
+| `gw.exposed_closed` | Gateway access control (CC6) |
+| `gw.token_tables` | Gateway access control (CC6) |
+| `gw.oidc` | Operator authentication (SSO) (CC6) |
+| `gw.tls` | Encryption in transit (gateway) (CC6) |
+| `gw.caller_profile` | Capability authorization (CC6) |
+| `mesh.tls` | Node authentication · Encryption in transit (gossip) (CC6) |
+| `mesh.signed_writes` | Peer-identity integrity (CC6) |
+| `id.proofs_required` | Peer-identity integrity (CC6) |
+| `id.ca_key_off_node` | Key custody (CA, at-rest KMS) (CC6) |
+| `id.revocation_authority` | Key management — compromise (CC6) |
+| `ae.authorised_at_seam` | Capability authorization (CC6) |
+| `ae.recorded_before_dispatch` | Capability authorization (CC6) · Audit trail (CC7) |
+| `prov.enforcement` | Capability authorization (CC6) |
+| `a2a.admission` | Gateway access control (CC6) |
+| `authz.execution_authority` | Scoped authority over a resource (mandates) (CC6) |
+| `authz.durable_epochs` | Scoped authority over a resource (mandates) (CC6) |
+| `audit.chain` | Audit trail (CC7) |
+| `audit.sink` | Audit export (CC7) |
+| `egress.allow_list` | Egress control (Confidentiality & Availability) |
+| `egress.credentials` | Egress control (Confidentiality & Availability) |
+| `persist.configured` | Availability (Confidentiality & Availability) |
+| `persist.sync_mode` | Availability (Confidentiality & Availability) |
+| `persist.unreadable_refused` | Availability (Confidentiality & Availability) |
+| `at_rest.cipher` | Encryption at rest (CC6) |
+| `cons.safety_profile` | *no row* — an exclusive outcome decided once is processing integrity, a category this matrix does not cover; [guide 04](../guide/04-consensus.md) is its record |
+| `fed.domain_enforced` | Cross-domain access (federated domains) (CC6) |
+| `fed.pinned` | Cross-domain access (federated domains) (CC6) |
+| `fed.body_bound` | Cross-domain access (federated domains) (CC6) |
+| `fed.partner_slots` | Cross-domain access (federated domains) (CC6) |
+| `fed.caller_named` | Cross-domain access (federated domains) (CC6) |
+| `fed.catalogue_signed` | Cross-domain access (federated domains) (CC6) |
+| `fed.partner_egress` | Cross-domain access (federated domains) (CC6) |
+| `fed.partner_posture` | Cross-domain access (federated domains) (CC6) |
+| `fed.non_merger` | Cross-domain access (federated domains) (CC6) |
+| `fed.clock_agreement` | Cross-domain access (federated domains) (CC6) |
+| `trace.spans_not_evidence` | Metrics / observability (CC7) |
+| `net.confinement` | Egress control (Confidentiality & Availability) |
+| `clock.sync` | Metrics / observability (CC7) |
+
+A line that reads `not_verifiable_here` is the row's *You own* column in the node's own words: the fact is outside what
+the node can observe, and the deployment's evidence is what shows it.
+
 ## How to read the ⚠ rows
 
 Each open gap is scoped, sequenced, and sized in

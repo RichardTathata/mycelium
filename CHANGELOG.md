@@ -48,6 +48,26 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The pilot kit** (`docs/plans/adopter-surface.md` Y10; [`docs/operations/pilot-kit/`](docs/operations/pilot-kit/README.md)).
+  The kit is everything a pilot needs on its first day, so that the counterparty is the only piece missing.
+  - **The walk.** The README has six steps:
+    - step 0 is the `one-hour` job's path;
+    - then the two-domain scaffold, pointed at a checkout until the next MINOR;
+    - a call across the edge each way;
+    - `doctor` on all four nodes;
+    - `mycelium test --faults` over the kit's own declaration (`units/`, `faults.toml`);
+    - and a report from those two outputs alone.
+  - **The report.** `report.py` fills `report-template.md` with one section per guarantee a fault class exercised. Each
+    section gives its state on each node and in the class's fleet, the row of the shared-responsibility matrix that
+    says who holds it, and a line for the counterparty to write.
+  - **CI.** The README's `bash pilot` blocks run unchanged as one script in CI's `Scaffold` job.
+  - **The runbook.** `customer-pilot.md` now opens by walking the scaffold with the kit.
+  - **The matrix.** The shared-responsibility matrix gains *From a `doctor` line to its row*, mapping every guarantee
+    id in the catalogue to its row.
+  - **The gate.** `scripts/check-pilot-kit.py` (in `make check`) holds that table complete, checks that the report has
+    a section per exercised guarantee over a checked-in fixture of real output, and checks that the proof page keeps
+    the named-deployment line open. That page now says the kit is not the deployment.
+
 - **An Eve agent directory, unchanged, on a fleet** (`docs/plans/adopter-surface.md` Y6, D24;
   `examples/eve_weather/`, CI job `eve-fleet`). This is a demonstration, not a compatibility promise.
   - **The loader:** `mycelium-ts` gains `loadEveAgent`, which reads an Eve `agent/` directory installed beside the one

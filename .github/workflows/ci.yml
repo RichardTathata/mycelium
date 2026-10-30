@@ -28,6 +28,7 @@ jobs:
       - run: python3 scripts/test-check-materials.py
       - run: python3 scripts/test-check-front-doors.py
       - run: python3 scripts/test-check-feature-pages.py
+      - run: python3 scripts/check-pilot-kit.py
 
   test:
     name: Test
@@ -730,6 +731,30 @@ jobs:
           if "$BIN" test --faults "$REPO/tests/fixtures/units/unwired" > tf.txt 2> tf.err; then echo "test ran an unwired declaration"; exit 1; fi
           diff wc.txt tf.txt
           grep -q 'wire-check refused the declaration; nothing ran' tf.err
+      - name: Pilot kit — the kit's README run as written, the report from doctor and test --faults (Y10)
+        # Adopter-surface Y10: the blocks docs/operations/pilot-kit/README.md marks `bash pilot` are extracted and run
+        # as one script, unchanged — the scaffold pointed at this checkout, both domains up, a call each way, doctor on
+        # every node, the fault classes against the kit's declaration, and the report built from those two outputs.
+        # The README is what runs, so a block that fails as written fails here.
+        run: |
+          set -euo pipefail
+          export MYCELIUM_REPO="$PWD" PILOT="$RUNNER_TEMP/pilot" CARGO_TARGET_DIR="$PWD/target"
+          python3 scripts/check-pilot-kit.py --blocks > "$RUNNER_TEMP/pilot-kit.sh"
+          cat "$RUNNER_TEMP/pilot-kit.sh"
+          trap 'cd "$PILOT" 2>/dev/null && bash fleet.sh stop || true; tail -n 30 "$PILOT"/faults.log 2>/dev/null || true' EXIT
+          bash -euo pipefail "$RUNNER_TEMP/pilot-kit.sh"
+          cd "$PILOT"
+          # Every guarantee a fault class exercised has its section, and no placeholder is left.
+          python3 - <<'PY'
+          import json, re
+          r = open("pilot-report.md").read()
+          ex = {e["id"] for c in json.load(open("faults.json"))["classes"] for e in c.get("exercised", []) if e.get("kind") == "guarantee"}
+          got = set(re.findall(r"^### `([^`]+)`$", r, re.M))
+          assert ex and got == ex, (sorted(ex), sorted(got))
+          assert "{{" not in r
+          print(f"pilot-report.md: {len(got)} sections, one per exercised guarantee")
+          PY
+          cat pilot-report.md
       - name: declare — a unit edit under the watch reaches the fleet, a refused one does not (X10)
         run: |
           set -euo pipefail
