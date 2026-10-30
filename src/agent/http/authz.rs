@@ -755,6 +755,11 @@ pub(crate) struct Settling {
     route: Option<crate::agent::route_facts::RouteFacts>,
 }
 
+/// Test hook: the per-actor history admission refused at these nodes, as if the history changed on every try — the
+/// retry-exhausted path a decision can end in after the exposure gate was applied (Y5, #701's confirmation round).
+#[cfg(all(test, feature = "gateway", feature = "tls"))]
+pub(crate) static TEST_HISTORY_REFUSES_ADMIT: std::sync::LazyLock<papaya::HashSet<String>> = std::sync::LazyLock::new(papaya::HashSet::new);
+
 /// Apply the exposure gate (adopter-surface Y5) to the evaluator's outcome. Only a permit is touched (and the caller counts
 /// the gate only when the evaluator permitted, once, so a call the policy refused is never one exposure held): a hold denies it naming the threshold, unknown
 /// coverage on an enforcing rung makes it not established, and in shadow the permit stands with what an enforcing rung
@@ -950,7 +955,8 @@ pub(crate) async fn ae_decide(
     // decided would otherwise count from an earlier instant than the permits admitted meanwhile.
     let history_now = ctx.hlc.decision_now_ms().max(now_ms);
     let mut tries = 0;
-    // Y5: whether the last decision the evaluator made permitted — the exposure gate is counted once, for it.
+    // Y5: whether the final decision is the evaluator's permit with the exposure gate applied — the gate is counted
+    // once, for it; a decision that ends refused for another reason after the history retries counts nothing.
     let mut evaluator_permitted;
     let (outcome, history, admitted) = loop {
         let (history, version) = match (history_request, history_index) {
@@ -998,7 +1004,11 @@ pub(crate) async fn ae_decide(
             decision: ae::DecisionKind::Permit,
             execution: ae::Execution::Attempted,
         };
-        if index.admit(&point, &envelope.actor, version, entry) {
+        #[cfg(test)]
+        let refuse_admit = TEST_HISTORY_REFUSES_ADMIT.pin().contains(&ctx.node_id.to_string());
+        #[cfg(not(test))]
+        let refuse_admit = false;
+        if !refuse_admit && index.admit(&point, &envelope.actor, version, entry) {
             break (outcome, history, true);
         }
         tries += 1;
@@ -1007,6 +1017,9 @@ pub(crate) async fn ae_decide(
                 "the actor's history kept changing while this decision was made on it",
                 envelope.expected_policy_revision.clone().unwrap_or_default(),
             );
+            // Y5 (#701's confirmation round, item 5): the final decision is this refusal, not the permit the
+            // exposure gate was applied to — so the gate is not counted.
+            evaluator_permitted = false;
             break (Err(ae::PreflightRefusal::NotEstablished(refused)), history, false);
         }
     };

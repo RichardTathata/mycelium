@@ -4,9 +4,20 @@
 //!
 //! **The input is the request's causal cone** (X4, X9). A request names what it depends on with its causal fields:
 //! `parent`, the hash of the record it acts on, and `correlation`, its run. It **extends** an unresolved closure when
-//! its `parent` is an unresolved effect's record — its prepared record's hash or its latest execution evidence's hash —
-//! or its `correlation` is that effect's run. A request that names neither, or names records that have resolved, is
-//! **independent** and passes, whoever sends it. The cone is followed as far as those two fields name it: a request
+//! its `parent` is an unresolved effect's record — its prepared record's hash or any execution evidence hash it has had
+//! (a probe writes a new one; the earlier ones still name it) — or its `correlation` is that effect's run. A request
+//! that names neither, or names records that have resolved, is **independent** and passes, whoever sends it.
+//!
+//! **The omission limit.** A request carrying neither `_meta.parent` nor `_meta.correlation` is a root and is never
+//! held: the policy bounds causal extension *as each envelope declares it*, so it binds only callers that propagate
+//! their lineage. A cap on what an actor does whatever it declares is row K2's history rules.
+//!
+//! **Where the causal fields reach.** At the gateway's doors the request's own `_meta` is read. At the provider check
+//! (`provider_enforcement::check`) they are read where the kind's payload carries them: `mcp.invoke`, a JSON-RPC
+//! `tools/call` whose `params._meta` holds them. A `skill.invoke` payload is the skill's text, and an operator's
+//! protected kind's is opaque, so neither carries any to the provider — which reads such a call as a root and never
+//! holds it on exposure; the door that dispatched it (`/a2a` for a skill) decided on the request's own `_meta`. The
+//! caller envelope carries no causal fields by design (X4). The cone is followed as far as those two fields name it: a request
 //! whose parent is a *descendant* of an unresolved effect, in another run and naming no unresolved record itself, is
 //! not followed through the evidence journal — stated, not built. Two numbers are read from the closure a request
 //! extends: its **size** (the unresolved effects it names) and the **age of its oldest record**. They are separate
@@ -34,7 +45,10 @@
 //! **Counted as K2 counts history.** A rule names its scope: [`ExposureScope::EnforcementPoint`] — this node's attached
 //! source, which a rule at this scope requires (no source is *not established*, never clear) — or
 //! [`ExposureScope::FleetTally`] — this node's source, if it has one, plus every node's published summary
-//! (`sys/ae-exposure/{node}`), approximate, under row K2's coverage rules: this node's view of the fleet under the
+//! (`sys/ae-exposure/{node}`), approximate, under row K2's coverage rules (summaries are unsigned, as K2's tally
+//! entries are: a member can write another's — counted by the `sys/` tripwire at the owner — and a forged summary
+//! for an owner **out of view** that marks it `departed` holds the digests it lists fleet-wide until the history
+//! horizon collects it): this node's view of the fleet under the
 //! governors' confidence bound; a peer with no summary, an unreadable, stale, future-dated or truncated one is
 //! **unknown coverage**, and unknown coverage **fails closed** (`Indeterminate`, never a zero). The size bound is
 //! **approximate under concurrency** at both scopes: two requests read the closure before either's own effect is
@@ -97,8 +111,9 @@ impl ClosureKey<'_> {
 pub struct UnresolvedRecord {
     /// The prepared record's hash.
     pub record_hash: String,
-    /// The latest execution evidence's hash, when an evidence journal is attached.
-    pub evidence_hash: Option<String>,
+    /// Every execution evidence hash it has had, the latest last, when an evidence journal is attached — a probe or a
+    /// retry writes a new one, and a request naming an earlier one still names this record.
+    pub evidence_hashes: Vec<String>,
     /// The run it belongs to.
     pub correlation: Option<String>,
     /// When it was prepared, epoch milliseconds.
@@ -108,7 +123,7 @@ pub struct UnresolvedRecord {
 impl UnresolvedRecord {
     /// Does a request naming `key` extend this effect's closure?
     pub fn extended_by(&self, key: &ClosureKey<'_>) -> bool {
-        key.parent.is_some_and(|p| p == self.record_hash || Some(p) == self.evidence_hash.as_deref())
+        key.parent.is_some_and(|p| p == self.record_hash || self.evidence_hashes.iter().any(|e| e == p))
             || key.correlation.is_some_and(|c| Some(c) == self.correlation.as_deref())
     }
 }
@@ -558,9 +573,9 @@ pub(crate) const HISTORY_HORIZON_MS: u64 = 24 * 60 * 60 * 1000;
 pub(crate) struct SummaryRecord {
     /// The prepared record's hash, digested.
     pub(crate) r: String,
-    /// The latest execution evidence's hash, digested.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) e: Option<String>,
+    /// Every execution evidence hash it has had, digested.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) e: Vec<String>,
     /// The run's correlation, digested.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) c: Option<String>,
@@ -571,11 +586,11 @@ pub(crate) struct SummaryRecord {
 #[cfg(any(test, all(feature = "gateway", feature = "tls")))]
 impl SummaryRecord {
     pub(crate) fn of(r: &UnresolvedRecord) -> Self {
-        SummaryRecord { r: digest(&r.record_hash), e: r.evidence_hash.as_deref().map(digest), c: r.correlation.as_deref().map(digest), t: r.prepared_at_ms }
+        SummaryRecord { r: digest(&r.record_hash), e: r.evidence_hashes.iter().map(|h| digest(h)).collect(), c: r.correlation.as_deref().map(digest), t: r.prepared_at_ms }
     }
 
     fn extended_by(&self, parent: Option<&str>, correlation: Option<&str>) -> bool {
-        parent.is_some_and(|p| p == self.r || Some(p) == self.e.as_deref()) || correlation.is_some_and(|c| Some(c) == self.c.as_deref())
+        parent.is_some_and(|p| p == self.r || self.e.iter().any(|e| e == p)) || correlation.is_some_and(|c| Some(c) == self.c.as_deref())
     }
 }
 

@@ -265,18 +265,10 @@ pub(crate) async fn check(ctx: &Arc<TaskCtx>, req: &RpcRequest, already_verified
     };
     let resolved = ResolvedPrincipal { principal: principal.clone(), scopes };
     // The preflight's `_meta`: the mandate from the envelope (C2), and — X4 — the causal fields from the application
-    // payload, where a `tools/call` carries them under `params._meta`. A skill's payload is its text and another
-    // kind's is opaque, so those carry none here: the gateway's own record for the call carries them.
-    let mut meta = serde_json::Map::new();
+    // payload where its kind carries them (`causal_meta`). The exposure policy (Y5) decides on these.
+    let mut meta = causal_meta(kind, &payload);
     if let Some(m) = &mandate {
         meta.insert("mandate".into(), m.clone());
-    }
-    if kind == crate::signal::signal_kind::MCP_INVOKE && let Ok(call) = serde_json::from_slice::<Value>(&payload) {
-        for key in ["correlation", "parent"] {
-            if let Some(v) = call["params"]["_meta"].get(key) {
-                meta.insert(key.into(), v.clone());
-            }
-        }
     }
     let params = if meta.is_empty() { Value::Null } else { json!({ "_meta": meta }) };
     let decided =
@@ -464,6 +456,23 @@ pub(crate) fn withdrawn() -> ProviderRefusal {
         "authority_not_established",
         "the serve loop ended while this call's authority was being decided".into(),
     )
+}
+
+/// The causal fields (X4) a protected call's payload carries to the provider, by kind. `mcp.invoke` is a JSON-RPC
+/// `tools/call` and carries them under `params._meta`; a `skill.invoke` payload is the skill's text and an operator's
+/// protected kind's is opaque, so **neither carries any** — the provider reads such a call as a root, and the exposure
+/// policy never holds it here; the door that dispatched it decided on the request's own `_meta` (`/a2a` for a skill).
+/// The caller envelope carries no causal fields by design (X4).
+pub(crate) fn causal_meta(kind: &str, payload: &[u8]) -> serde_json::Map<String, Value> {
+    let mut meta = serde_json::Map::new();
+    if kind == crate::signal::signal_kind::MCP_INVOKE && let Ok(call) = serde_json::from_slice::<Value>(payload) {
+        for key in ["correlation", "parent"] {
+            if let Some(v) = call["params"]["_meta"].get(key) {
+                meta.insert(key.into(), v.clone());
+            }
+        }
+    }
+    meta
 }
 
 /// The operation, resource and arguments of a protected call, derived as the gateway derives them.

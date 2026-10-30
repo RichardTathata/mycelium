@@ -58,8 +58,17 @@ fails), `the_shadow_profile_counts_and_holds_nothing`, `a_policy_denial_counts_n
   closure is held when that closure holds `max_unresolved` effects or its oldest is older than `max_oldest_age_ms`,
   each threshold on its own; the hold is a deny naming the threshold, recorded before nothing is dispatched.
 - **Only dependent work.** A request extends a closure when its `parent` is an unresolved effect's prepared record or
-  latest execution evidence, or its `correlation` is that effect's run. A request whose parent is a *descendant* of
-  one in another run, naming no unresolved effect itself, is not followed through the evidence journal (not built).
+  any execution evidence it has had (a probe writes a new one; the earlier ones still name it), or its `correlation`
+  is that effect's run. A request whose parent is a *descendant* of one in another run, naming no unresolved effect
+  itself, is not followed through the evidence journal (not built).
+- **The omission limit.** A call with neither `_meta.parent` nor `_meta.correlation` is a root and is never held: the
+  policy bounds causal extension as each envelope declares it, so it binds only callers that propagate their lineage.
+  A cap on what an actor does whatever it declares is row K2's history rules.
+- **Where the causal fields reach.** At the gateway's doors, the request's own `_meta`. At the provider check, only
+  `mcp.invoke` carries them (its JSON-RPC `params._meta`); a `skill.invoke` payload is the skill's text and an
+  operator's protected kind's is opaque, so the provider reads either as a root and never holds it on exposure — the
+  door that dispatched it decided on the request's own `_meta` (`/a2a` for a skill). The caller envelope carries no
+  causal fields by design.
 - **What it never holds is structural.** The gate is in the gateway's decision, not in the shared seam a compensation
   is decided through; a probe passes no evaluator; a protective shed and a rescue from zero are governor actions, not
   requests; and at a door the operations in `EXEMPT_OPERATIONS` (a probe, a compensation, a leave, a grant's issue and
@@ -83,15 +92,13 @@ fails), `the_shadow_profile_counts_and_holds_nothing`, `a_policy_denial_counts_n
   `fleet_tally` rule fails closed until every peer publishes, so it waits for the whole fleet to be upgraded. A gateway
   with no source of its own reads only the summaries. An out-of-view node's unreadable, future-dated or non-member
   summary is dropped and counted, and any summary past the history horizon is collected — the one place the policy
-  forgets an unresolved effect. Summaries are unsigned: a member can still write another's (counted by the `sys/`
-  tripwire at the owner, and overwritten on its next tick), or, without `[tls]`, invent one this node cannot rule out
-  (K2's limit).
+  forgets an unresolved effect. Summaries are unsigned — the limit is the last *not built* item below.
 - Not built, stated in the plan's Y5 row (the narrowing the maintainer accepted, 2026-10-30):
   - **the consensus-seat scope for an exact bound** — a closure *shrinks* as its effects resolve, so a seat would need a decrement no fixed lease expresses, and concurrent admissions overshoot without a reservation taken before the work is admitted; `fleet_consensus` is refused at load, by name.
   - **holding at a tuple take and a signal emit** — neither door has an action-evaluator enforcement point today, so only calls are held — row Y11.
   - **an operator route that resolves an `Unresolved` record** — such a record is terminal, a compensation takes only a committed effect, so it holds the work that names it for good.
   - **the limit of declared lineage** — a caller that omits `_meta.parent` (or names only a descendant in another run) is not held: the policy bounds causal extension as each envelope declares it, and per-actor caps are row K2's history rules.
-  - **unsigned tally entries** — row K2's limit: a member can write another's summary — counted by the `sys/` tripwire at the owner and overwritten on its next tick — or, without `[tls]`, one under an id this node cannot rule out.
+  - **unsigned tally entries** — row K2's limit: a member can write another's summary, counted by the `sys/` tripwire at the owner; for an owner in view its next tick overwrites the forgery, but a forged summary for an owner **out of view** that marks it `departed` holds the digests it lists fleet-wide until the 24-hour history horizon collects it; and without `[tls]` one under an id this node cannot rule out is read the same way.
 - The [what-is-proven](../operations/what-is-proven.md) ledger has no row for it yet.
 
 ## Go deeper

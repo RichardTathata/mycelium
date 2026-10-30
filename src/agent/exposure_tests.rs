@@ -18,7 +18,7 @@ fn view(unresolved: u32, oldest_at_ms: Option<u64>) -> Exposure {
 }
 
 fn record(hash: &str, correlation: Option<&str>, t: u64) -> UnresolvedRecord {
-    UnresolvedRecord { record_hash: hash.into(), evidence_hash: None, correlation: correlation.map(str::to_string), prepared_at_ms: t }
+    UnresolvedRecord { record_hash: hash.into(), evidence_hashes: Vec::new(), correlation: correlation.map(str::to_string), prepared_at_ms: t }
 }
 
 const PARENT_H: ClosureKey<'static> = ClosureKey { parent: Some(H), correlation: None };
@@ -61,9 +61,10 @@ fn a_limit_is_refused_by_name_without_a_threshold_at_zero_or_at_consensus() {
 /// prepared hash or evidence hash, or its correlation that record's run. Anything else is independent.
 #[test]
 fn a_request_extends_a_closure_only_by_its_causal_fields() {
-    let r = UnresolvedRecord { evidence_hash: Some(OTHER.into()), ..record(H, Some(RUN), 5) };
+    let r = UnresolvedRecord { evidence_hashes: vec!["5555".into(), OTHER.into()], ..record(H, Some(RUN), 5) };
     assert!(r.extended_by(&ClosureKey { parent: Some(H), correlation: None }), "the prepared record");
-    assert!(r.extended_by(&ClosureKey { parent: Some(OTHER), correlation: None }), "the execution evidence");
+    assert!(r.extended_by(&ClosureKey { parent: Some(OTHER), correlation: None }), "the latest execution evidence");
+    assert!(r.extended_by(&ClosureKey { parent: Some("5555"), correlation: None }), "an earlier execution evidence");
     assert!(r.extended_by(&ClosureKey { parent: None, correlation: Some(RUN) }), "the run");
     assert!(!r.extended_by(&ClosureKey { parent: Some("3333"), correlation: Some("run-8") }));
     assert!(!r.extended_by(&ClosureKey::default()));
@@ -324,8 +325,11 @@ mod doors {
             .with_catalogue("cat-y5", "1")
             .map_action("tools/call", "*")
             .map_action("refund", "*")
+            .map_action("skill.invoke", "*")
             .allow(Rule::new(crate::PRINCIPAL_ANONYMOUS, "tools/call", "tool:post"))
+            .allow(Rule::new(crate::PRINCIPAL_ANONYMOUS, "tools/call", "tool:limited").at_most(100, 600_000))
             .allow(Rule::new(crate::PRINCIPAL_ANONYMOUS, "refund", "*"))
+            .allow(Rule::new(crate::PRINCIPAL_ANONYMOUS, "skill.invoke", "*"))
     }
 
     async fn node_with(tag: &str, policy: ExposurePolicy, source: Option<Arc<dyn ExposureSource>>, tune: impl FnOnce(&mut GossipConfig)) -> Arc<GossipAgent> {
@@ -566,6 +570,84 @@ mod doors {
         assert_eq!(rec.exposure_of(&ClosureKey { parent: Some(&hash), correlation: None }).unwrap().unresolved, 1);
         assert_eq!(rec.exposure_of(&ClosureKey { parent: None, correlation: Some(RUN) }).unwrap().unresolved, 1);
         assert_eq!(rec.exposure_of(&ClosureKey { parent: Some(OTHER), correlation: None }).unwrap().unresolved, 0);
+    }
+
+    /// **Every evidence hash an unresolved record has had** (#701's confirmation round, N1): a probe writes a second
+    /// execution evidence, and a request naming the first still extends the record's closure. Seen failing first with
+    /// `set_evidence_hash` overwriting (the earlier hash named nothing).
+    #[tokio::test]
+    async fn a_request_naming_an_earlier_evidence_hash_still_extends_the_closure() {
+        use crate::effects::external::{EffectClass, ExternalDestination, ExternalEffect, IdempotencyKey, ProbeAnswer, ProbeBudget, Reconciler};
+        use crate::effects::{Effect, EffectRefusal};
+        use crate::DestinationCommit;
+        struct Silent;
+        impl ExternalDestination for Silent {
+            fn identity(&self) -> &str { "silent" }
+            fn dedup_scope(&self) -> &str { "silent" }
+            fn host(&self) -> Option<&str> { None }
+            fn send(&self, _: &IdempotencyKey, _: &Effect) -> Result<DestinationCommit, EffectRefusal> { Err(EffectRefusal::DeliveryUnknown) }
+            fn observe(&self, _: &IdempotencyKey) -> ProbeAnswer { ProbeAnswer::Unknown }
+        }
+        let dir = std::env::temp_dir().join(format!("y5-evidence-history-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let journal = EvidenceJournal::open(dir.join("evidence.log"), EvidenceProfile::Strict).unwrap();
+        let via = NodeId::new("127.0.0.1", 1).unwrap();
+        let rec = Reconciler::open(dir.join("ledger.journal"), Arc::new(Silent), crate::EgressPolicy::default()).unwrap().with_evidence(journal, via);
+        let op = crate::OperationId::new("op-e");
+        let ext = ExternalEffect { effect: Effect::new(op.clone(), crate::AttemptId::of(&op, 1), b"x".to_vec()), class: EffectClass::Idempotent { compensation: None }, probe_budget: ProbeBudget { max_probes: 5, max_age_ms: 600_000 }, composition: None };
+        let _ = rec.apply(&ext, None).await;
+        let e1 = rec.record(&op).unwrap().unwrap().evidence_hash.expect("the apply wrote evidence");
+        let _ = rec.probe(&op).await;
+        let e2 = rec.record(&op).unwrap().unwrap().evidence_hash.expect("the probe wrote evidence");
+        assert_ne!(e1, e2, "the probe wrote a new execution evidence");
+        for e in [&e1, &e2] {
+            assert_eq!(rec.exposure_of(&ClosureKey { parent: Some(e), correlation: None }).unwrap().unresolved, 1, "{e}");
+        }
+    }
+
+    /// **Where the causal fields reach** (#701's confirmation round, N2): at the provider, `mcp.invoke` carries them
+    /// in its JSON-RPC `params._meta` and a dependent call is held there; a `skill.invoke` payload is text and an
+    /// operator kind's opaque, so neither carries any — and a dependent skill call is held at the `/a2a` door that
+    /// dispatches it, which reads the request's own `_meta`.
+    #[tokio::test]
+    async fn a_dependent_call_is_held_where_its_causal_fields_reach() {
+        use crate::agent::provider_enforcement::{causal_meta, ENFORCEMENT_POINT_PROVIDER};
+        let tools = serde_json::to_vec(&serde_json::json!({ "jsonrpc": "2.0", "method": "tools/call", "params": { "name": "post", "_meta": { "parent": H, "correlation": RUN } } })).unwrap();
+        let meta = causal_meta(crate::signal::signal_kind::MCP_INVOKE, &tools);
+        assert_eq!((meta.get("parent").and_then(|v| v.as_str()), meta.get("correlation").and_then(|v| v.as_str())), (Some(H), Some(RUN)));
+        assert!(causal_meta("skill.invoke", br#"{"_meta":{"parent":"x"}}"#).is_empty(), "a skill's payload is its text");
+        assert!(causal_meta("depot.custom", b"opaque").is_empty(), "an operator kind's payload is opaque");
+
+        let a = node("reach", size_one("enforcement_point"), Fixed::of(vec![record(H, None, 0)])).await;
+        a.set_control_profile(Profile::EnforceLocal);
+        let at_provider = ae_preflight(&a.task_ctx, None, "tools/call", "tool:post", &serde_json::json!({}), &serde_json::json!({ "_meta": meta }), ENFORCEMENT_POINT_PROVIDER).await;
+        assert!(held(&at_provider), "a dependent tools/call at the provider: {}", describe(&at_provider));
+        let at_a2a = ae_preflight(&a.task_ctx, None, "skill.invoke", "skill:depot/dispatch@x", &serde_json::json!({ "text": "go" }), &serde_json::json!({ "_meta": { "parent": H } }), "gateway:a2a").await; // `ENFORCEMENT_POINT_A2A`, re-exported only under `a2a`
+        assert!(held(&at_a2a), "a dependent skill call at /a2a: {}", describe(&at_a2a));
+        a.shutdown().await;
+    }
+
+    /// **Counted from the final decision** (#701's confirmation round, item 5): a permit the exposure gate was applied
+    /// to, which ends refused as not established because the actor's history kept changing, counts nothing. Seen
+    /// failing first with the count taken from the evaluator's last permit (`would_hold` 1).
+    #[tokio::test]
+    async fn a_permit_refused_after_the_history_retries_counts_nothing() {
+        let a = node("retries", size_one("enforcement_point"), Fixed::of(vec![record(H, None, 0)])).await;
+        a.set_control_profile(Profile::Observe);
+        // The history index read, so the evaluator's history limit can permit and the retry loop is reached.
+        let ctx = Arc::clone(&a.task_ctx);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while !ctx.history_index.get().is_some_and(|i| matches!(i.view("gateway", "probe", crate::HistoryRequest { window_ms: 1, max_entries: 1 }, 1).0, crate::History::View(_))) {
+            assert!(std::time::Instant::now() < deadline, "the history index was never read");
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        crate::agent::http::TEST_HISTORY_REFUSES_ADMIT.pin().insert(a.node_id().to_string());
+        let p = call_with(&a, "tool:limited", serde_json::json!({ "parent": H })).await;
+        crate::agent::http::TEST_HISTORY_REFUSES_ADMIT.pin().remove(&a.node_id().to_string());
+        assert!(matches!(&p, Preflight::Refuse(PreflightRefusal::NotEstablished(d)) if d.reason.contains("kept changing")), "{}", describe(&p));
+        assert_eq!(a.exposure_counts(), ExposureCounts::default());
+        a.shutdown().await;
     }
 
     fn describe(p: &Preflight) -> String {
