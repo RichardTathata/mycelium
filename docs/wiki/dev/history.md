@@ -38,7 +38,7 @@ material. Four wasmtime advisories published 2026-10-29 — RUSTSEC-2026-0420 (w
 `TypedFunc` with `I31`/`NoneRef`), -0423 (a host-created `StructType` across engines) and -0424 (borrowed resources
 between components) — are fixed in 49.0.5. Read from the host's code, only **-0424** is reachable: a component lending
 itself borrows of a resource it defines makes wasmtime allocate host memory no store limit counts, bounded only by the
-call's deadline, or its fuel budget where one is set. The host links WASI p2 only with the default address check, calls
+call's deadline, or its fuel budget where one is set (none on an unmetered host with no deadline; the advisory does not say the memory is freed when a call returns, and one `Store` serves every call, so it may accumulate across calls). The host links WASI p2 only with the default address check, calls
 components through bindings only and creates no `StructType`, so the other three are not. The fix is #703 on `main`
 (`9fc8d953`, `f3942d51`), cherry-picked; the lock delta is the same 32 packages. wasmtime 49.0.5's `default` features
 are 49.0.4's, so `cache` stays off and `zstd` out. Wire v12 unchanged; no API change.

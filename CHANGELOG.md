@@ -25,7 +25,10 @@ A security PATCH cut from the v2.38.2 tag. Wire **v12** unchanged (`PREV = 11`);
   makes wasmtime allocate host memory to track the lend that no store limit counts — not the store's handle limit, not
   the linear-memory limiter the host installs (`store.limiter`) — so a hosted component can grow the node's memory,
   bounded only by the call's deadline, or its fuel budget where one is set (an install metered under
-  `with_fuel_per_call`, D19: each lend costs instructions). A node installing only what `[hosts].trusted_publishers`
+  `with_fuel_per_call`, D19: each lend costs instructions) — and not at all on an unmetered host whose embedder calls
+  `with_call_deadline(None)` or sets a deadline too large to count in epoch ticks. The advisory does not say whether the
+  lend-tracking memory is freed when a call returns, and an `Instance` keeps one `Store` across calls, so the growth may
+  accumulate past any per-call bound. A node installing only what `[hosts].trusted_publishers`
   signed is exposed to those publishers' components only. **RUSTSEC-2026-0420** (medium, 6.4) is not
   reachable: it is a race in **wasip3** UDP sockets under a per-address `socket_addr_check` policy, and the host links
   WASI **p2** only (`wasmtime_wasi::p2::add_to_linker_sync`, `mycelium-wasm-host/src/host.rs`) with a context built by

@@ -90,7 +90,7 @@ the deployment, multi-machine recovery or NovusLens consumer-rendering gaps belo
 
 ## Not yet shown — and what would show it
 
-| Gap | State on 2026-10-26 | What would show it |
+| Gap | State on 2026-10-30 | What would show it |
 |---|---|---|
 | **Binary provenance** | the Release workflow (adopter-surface X0) attaches `SHA256SUMS` to every tag's tarballs and pushes the image by digest: integrity of the download, not provenance of the build; nothing signs a binary or the image, and reproducible builds are not claimed | a Sigstore or GPG signature on each tarball and the image, verified by the clean-container smoke before the assets are attached |
 | **A named third-party production deployment** | none. NovusLens is a design partner that consumes the evidence records; the council-minutes corpus is envelope-qualified, not live | a customer pilot run to the `customer-pilot.md` bar, named with consent |
