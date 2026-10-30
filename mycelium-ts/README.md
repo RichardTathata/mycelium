@@ -493,6 +493,25 @@ the gateway writes for the call; `mycelium explain --correlation <id> <evidence.
 chain. A malformed value is refused (`request_malformed`; `400` on `set`). Substrate X4,
 `docs/features/causal-records.md`.
 
+### An Eve agent directory (unreleased)
+
+`loadEveAgent(dir)` reads an [Eve](https://www.npmjs.com/package/eve) `agent/` directory installed beside the one
+`eve` version the loader pins, **0.80.0**, and refuses a directory beside any other version (adopter-surface Y6). It is a
+demonstration, not a compatibility promise. Every slot of the directory has a status in `EVE_SLOTS`, and a slot the
+loader does not load is refused by name: `EveRefusedError.refused` lists every one. `schedules/`, `sandbox/` and
+`hooks/` are among them, and so is a tool with `approval`, which points to the `[[rule]]` with `requires_grant` to
+declare instead.
+
+- **Tools:** `serveEveTools(agent)` serves the tools as an MCP server on loopback. A node bridges it
+  (`connect_mcp_server`), so the fleet's `/mcp` door decides each call before the tool's `execute` runs. Arguments are
+  checked with the tool's own Standard Schema.
+- **Instructions and skills:** `declareEveAgent(agent, { mycelium, prompts })` declares the unit (`eveUnitToml`,
+  `runtime = "typescript"`) and writes the instructions and each Markdown skill as a prompt skill
+  `<agent>/<name>`.
+
+Importing a `.ts` tool uses Node's own type stripping, and Eve 0.80.0 needs Node 24. The run, and the table of every
+slot, are in [`examples/eve_weather/README.md`](../examples/eve_weather/README.md).
+
 ### A serve stream refused or closed (0.2.6)
 
 `rpcServe(kind)` throws `ProtectedKindError` (naming the kind) when the node refuses the stream: `403 protected_kind`
@@ -709,3 +728,8 @@ The SDK is a client of one gateway; it carries what the doors it calls carry, an
 - **64-bit values are exact and the shapes match the gateway's** (0.2.0); what the gateway does not return — a
   provider's own record, a peer's durability — this SDK cannot show.
 - **No session.** The SDK keeps nothing between calls.
+- **The Eve loader runs no Eve runtime** (adopter-surface Y6). A tool's `execute` gets an empty context, the
+  `agent.ts` model is read and not routed, and a slot the loader does not load is refused by name, never translated.
+  The server `serveEveTools` runs decides nothing; the bridging node's `/mcp` door does. One Eve version is read,
+  0.80.0. The rest is in [`examples/eve_weather/README.md`](../examples/eve_weather/README.md) § What this does not
+  establish.

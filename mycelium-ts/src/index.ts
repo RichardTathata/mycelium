@@ -57,3 +57,24 @@ export {
 export { Artifacts, ArtifactError, PublishReceipt } from "./artifacts";
 export { TOKEN_ENV, resolveToken, authHeaders, baseUrl, type AuthOptions, type Scheme } from "./auth";
 export { sseStream, SseOverflowError, type SseOptions } from "./sse";
+export {
+  EVE_PINNED_VERSION,
+  EVE_SLOTS,
+  EveRefusedError,
+  EveToolInputError,
+  classifyEveDirectory,
+  declareEveAgent,
+  eveUnitToml,
+  installedEveVersion,
+  loadEveAgent,
+  serveEveTools,
+  type EveAgent,
+  type EveDeclaration,
+  type EveEntry,
+  type EveSkill,
+  type EveSlot,
+  type EveSlotStatus,
+  type EveTool,
+  type EveToolServer,
+  type LoadOptions,
+} from "./eve";

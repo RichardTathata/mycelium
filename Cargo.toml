@@ -276,6 +276,11 @@ path              = "examples/strands_fleet_node.rs"
 required-features = ["tls", "a2a", "compliance"]  # the Strands fleet demo's operator and nodes (plan row P): evaluator, mandates, evidence, named tokens
 
 [[example]]
+name              = "eve_fleet_node"
+path              = "examples/eve_fleet_node.rs"
+required-features = ["compliance", "llm"]  # the Eve fleet demo's nodes (adopter-surface Y6): evaluator, evidence, named tokens, prompts, the MCP bridge
+
+[[example]]
 name              = "strict_eligibility"
 path              = "examples/strict_eligibility.rs"
 # The history source verifies the appointing authority's signed heads and records (`tls`); CI runs it.
