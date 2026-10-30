@@ -68,8 +68,12 @@ the gap decided as run once or skipped, the run naming the decision its parent) 
   time. The warm-up is a delay, not a convergence check.
 - Not built, stated in the plan's Y2 row: a cron language beyond a period and a phase, a fleet-wide calendar, an
   SDK or gateway route that runs a schedule (`POST /gateway/units/declare` refuses one, 422), a stem that runs
-  one (it refuses one by name), a schedule class in `mycelium test --faults`, and a schedule run recorded and
-  replayed under the kernel (the loop's clock, tick and deadline go through the seams; no test records one).
+  one (it refuses one by name), and a schedule class in `mycelium test --faults`.
+- A recording replays it: the loop's clock, tick and deadline go through the seams, and the checked-in recording
+  `tests/replay-corpus/y2-schedule-run/` (one node holding `close`, deciding a missed run under `run_once`, a run
+  that overruns its deadline, then the gap's run and the on-time run) is replayed decision for decision in another
+  process by `tests/schedule_replay.rs`, run in CI. `run_late`, `skip` and a failed run are covered by unit tests,
+  not a recording.
 
 ## Go deeper
 

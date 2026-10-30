@@ -224,9 +224,21 @@ pub struct SyncEntry {
     pub is_tombstone: bool,
 }
 
+/// The hasher that spreads keys over the gossip shards. Per-process random in a shipped build, so no workload
+/// chosen ahead of time lands every key on one shard; **fixed under `sim`**, so a recording replayed in another
+/// process routes each gossip send to the shard it recorded (inventory row `framing.rs` `shard_hasher`). A random
+/// seed hid from every replay made in the recording's own process, which shares one; a checked-in recording,
+/// replayed by the next CI run, diverged at its first sharded send (adopter-surface Y2's replay, 2026-10-28).
+/// The `sim` seed is public, which is acceptable only because **`sim` is never deployed**: it turns the replay seams
+/// on, every shipped build is without it, and the published binaries and image are built without it. A key chosen to
+/// crowd one shard is possible under `sim` and nowhere else. The map is stable for one `ahash` version on one target;
+/// a recording names its build, and a replay refuses another feature set or shard count by name.
 fn shard_hasher() -> &'static RandomState {
     static STATE: OnceLock<RandomState> = OnceLock::new();
-    STATE.get_or_init(RandomState::new)
+    #[cfg(not(feature = "sim"))]
+    return STATE.get_or_init(RandomState::new);
+    #[cfg(feature = "sim")]
+    STATE.get_or_init(|| RandomState::with_seeds(0x5EED_5A4D, 0x0000_0016, 0x7265_706C, 0x6179_0001))
 }
 
 /// Maps a key to one of `n_shards` gossip worker channels.
@@ -1148,6 +1160,24 @@ mod tests {
             other => panic!("expected UnsupportedWireVersion, got {other:?}"),
         }
     }
+}
+
+/// Inventory row `framing.rs` `shard_hasher` (adopter-surface Y2's replay, 2026-10-28): under `sim` the shard a key
+/// maps to is the same in every process, so a recording replayed by another process routes each gossip send to the
+/// recorded shard. The value is pinned rather than compared with a second hasher in this process — one process
+/// shares one seed, which is exactly how the per-process random seed hid from every in-process replay.
+#[cfg(all(test, feature = "sim"))]
+mod shard_seed_tests {
+    use super::shard_for_key;
+
+    #[test]
+    fn under_sim_a_key_maps_to_the_same_shard_in_every_process() {
+        let keys = ["cap/127.0.0.1:15946/ledger/closer", "sched/close/last/127.0.0.1:15946", "sys/identity/n1", "a", "b", "c", "d", "e"];
+        let shards: Vec<usize> = keys.iter().map(|k| shard_for_key(k, 16)).collect();
+        assert_eq!(shards, PINNED, "the shard map moved: a recording replayed in another process would diverge at its first sharded send");
+    }
+
+    const PINNED: [usize; 8] = [6, 6, 7, 0, 4, 10, 1, 6];
 }
 
 #[cfg(test)]
