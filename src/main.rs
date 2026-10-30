@@ -751,6 +751,11 @@ fn tls_cli(args: Vec<String>) -> i32 {
             Ok((cert, key)) => {
                 println!("issued {} and {}", cert.display(), key.display());
                 println!("copy both to the node with {ca_dir}/ca-cert.pem (the certificate only — never ca-key.pem), and set [tls] cert_pem / key_pem");
+                for dir in [std::path::Path::new(&ca_dir), std::path::Path::new(&out)] {
+                    for said in mycelium::tls_writable_by_others(dir) {
+                        eprintln!("warning: {said}");
+                    }
+                }
                 0
             }
             Err(e) => { eprintln!("{e}"); 2 }
@@ -774,6 +779,9 @@ fn tls_ca(args: Vec<String>) -> i32 {
         Ok(cert) => {
             println!("minted the fleet CA: {} and {dir}/ca-key.pem", cert.display());
             println!("keep ca-key.pem on this host; a node gets ca-cert.pem only, with a certificate from `mycelium tls issue`");
+            for said in mycelium::tls_writable_by_others(std::path::Path::new(dir)) {
+                eprintln!("warning: {said}");
+            }
             0
         }
         Err(e) => { eprintln!("{e}"); 2 }

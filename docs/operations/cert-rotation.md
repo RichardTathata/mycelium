@@ -209,9 +209,15 @@ the profile whose certificate was minted on-node refuses to start, naming `id.ca
 (announced in v2.20.0, one release ahead, per the plan's G12). The issuer's `mycelium` binary needs
 `--features tls`; without it `tls ca` and `tls issue` exit 2 saying so. On unix every private key is written `0600`,
 every certificate `0644`, and a directory these steps (or a node) create for them `0700`, whatever the umask; a
-directory that already exists is left as you made it. `tls ca` holds the `ca.lock` a starting node takes, and a mint
-interrupted between its two files leaves `ca-key.pem` without `ca-cert.pem` — the next `tls ca` or `tls issue` names
-that state: remove the key (nothing can have been issued from it) and mint again. For a federation partner, `mycelium tls pin
+directory that already exists is left as you made it — a node at start, and `tls ca` / `tls issue`, warn when the
+directory or its `ca-cert.pem` is writable by group or others, naming the `chmod` to run (`chmod 700 <dir>`,
+`chmod 644 <dir>/ca-cert.pem`); missing parents are created `0700` too. `tls ca` holds the `ca.lock` a starting node
+takes. A `ca-key.pem` without `ca-cert.pem` means one of two things, and every door names which: beside `ca.lock` or a
+`.ca-*.mint-*` / `.*.tmp-*` temporary it is a creation interrupted between its two files — nothing was issued from it,
+so remove the key and those files and create the CA again (`tls ca` also clears stale temporaries itself); with no
+such marker it is a **lost certificate** — the key may have issued every node's certificate, so copy `ca-cert.pem`
+back from any node and never delete the key. A node starting over a lone key refuses, naming the state, rather than
+minting a new CA over the fleet's. For a federation partner, `mycelium tls pin
 <cert.pem>` prints the hex SPKI SHA-256 of a gateway's certificate — the value the partner's client pins
 ([federation § Encrypting the link](federation.md#encrypting-the-link-tls-pinning)).
 

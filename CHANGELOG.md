@@ -15,7 +15,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   on unix, whatever the umask — a node's `auto_cert_dir` when it creates it, and `tls ca` / `tls issue`'s `--out` when
   it does not exist yet; a wider certificate is narrowed when rewritten. Under a permissive umask (`000`, `002`) the
   directories were `0777`/`0775` and the CA certificate `0666`, so another local user could replace the trust anchor.
-  A directory that already exists is left as it is (#695's confirmation round; `deprecations.md` §71).
+  Missing parents are created `0700` too. A directory or `ca-cert.pem` that already exists is left as it is, but a node
+  warns at start, and `mycelium tls ca` / `issue` after their work, when either is writable by group or others.
+  **Remediation** for a deployment created under a permissive umask: `chmod 700 <cert dir>` and
+  `chmod 644 <cert dir>/ca-cert.pem` (#695's confirmation round, #699's review; `deprecations.md` §71).
+- **A node whose certificate directory holds `ca-key.pem` without `ca-cert.pem` refuses to start**, naming the state,
+  where it minted a new CA over the fleet's key. `tls ca`, `tls issue` and rotation name the same state the same way:
+  beside `ca.lock` or a creation's temporaries it is an interrupted creation (remove the key and those files); with no
+  marker it is a lost certificate (copy `ca-cert.pem` back from any node — never delete the key) (#699's review).
 - **`mycelium tls issue` refuses to replace a node key it issued before** unless `--force`, naming what replacing it
   means — the node restarts on the new key, and every partner pinning its gateway needs the new pin
   (`deprecations.md` §69).
@@ -107,8 +114,9 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   started over an empty directory could, so the off-node path had no first step of its own. It refuses a directory
   holding either file, and publishes the pair by hard link, so two concurrent mints publish one CA and the other is
   refused. It holds `ca.lock`, the lock a starting node takes, so it never races a node generating a CA in the same
-  directory; it refuses by name on a filesystem without hard links (FAT, exFAT, some SMB mounts); and a mint
-  interrupted between its key and its certificate is named, with the recovery, by the next `tls ca` or `tls issue`.
+  directory; it refuses by name on a filesystem without hard links (FAT, exFAT, some SMB mounts); a mint interrupted
+  between its key and its certificate is named, with the recovery, by the next `tls ca` or `tls issue`, and a later
+  mint clears the temporaries it left; and the lock is released however its holder ends, a panic included.
   **`mycelium tls pin <cert.pem>`** prints a certificate's SPKI SHA-256, the value a federation partner pins;
   it refuses a CA certificate (whose pin admits no gateway) and a file that carries a private key.
 - **`mycelium::doctor::run_attached(path, attach)`**: the doctor over a node an embedder builds — the same load,
