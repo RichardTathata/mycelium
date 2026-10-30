@@ -160,10 +160,11 @@ function isColocatedTest(name: string): boolean {
 }
 
 /**
- * Entries that are never authored content, skipped as Eve 0.80.0 skips them: the directories Eve's discovery ignores as
- * generated (`GENERATED_AGENT_DIRECTORY_NAMES` in its `discover/filesystem.js`: `.devtools`, `.eve`, `.next`, `.output`,
- * `.vercel`, `node_modules`), and every other name starting with `.` (`.DS_Store`, `.gitkeep`), which no slot of an Eve
- * directory has. Eve also ignores any other root *file* no slot names and warns on any other directory; this loader
+ * Entries at the agent root that are never authored content, skipped as Eve 0.80.0's `classifyAgentRootEntry` skips
+ * them: the directories its discovery ignores as generated (`GENERATED_AGENT_DIRECTORY_NAMES` in
+ * `discover/filesystem.js`: `.devtools`, `.eve`, `.next`, `.output`, `.vercel`, `node_modules`), and every other name
+ * starting with `.` (`.DS_Store`, `.gitkeep`), which no root slot has. Inside `tools/` and `skills/` a dot entry is
+ * refused instead, as Eve errors on it there (see `classifyEveDirectory`). Eve also ignores any other root *file* no slot names and warns on any other directory; this loader
  * refuses both by name instead — stricter than Eve, on purpose: an entry it would skip is one an author may rely on.
  */
 function isNeverAuthored(name: string): boolean {
@@ -191,8 +192,14 @@ export function classifyEveDirectory(dir: string): EveEntry[] {
     out.push({ entry, status: slot.status, reason: slot.onTheFleet });
     if (slot.slot === "skills/" || slot.slot === "tools/") {
       for (const inner of fs.readdirSync(path.join(dir, dirent.name), { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
-        if (isColocatedTest(inner.name) || isNeverAuthored(inner.name)) continue;
+        if (isColocatedTest(inner.name)) continue;
         const sub = `${slot.slot}${inner.name}${inner.isDirectory() ? "/" : ""}`;
+        // Inside a slot Eve 0.80.0 does not skip a dot entry: its discovery errors on the name (`TOOL_SLUG_PATTERN`,
+        // `SKILL_NAME_PATTERN` in `discover/grammar.js` start with a letter or digit). So this loader refuses it too.
+        if (inner.name.startsWith(".")) {
+          out.push({ entry: sub, status: "not built", reason: "a name starting with `.` is no tool or skill name; Eve refuses it too" });
+          continue;
+        }
         const ok =
           inner.isFile() &&
           (slot.slot === "skills/" ? inner.name.endsWith(".md") : TOOL_EXTENSIONS.includes(path.extname(inner.name)));

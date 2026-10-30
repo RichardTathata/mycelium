@@ -188,10 +188,19 @@ test("two tool modules with one name are each refused by name, as Eve refuses a 
   expect(e.message).toContain("two tool modules name one tool: get_weather.js, get_weather.ts");
 });
 
-test("never-authored entries are skipped as Eve skips them: dotfiles and its generated directories", async () => {
-  const dir = agentDir({ ...WEATHER, ".DS_Store": "x", ".eve/": "", "node_modules/": "", "tools/.DS_Store": "x", "skills/.gitkeep": "" });
+test("at the root, never-authored entries are skipped as Eve skips them: dotfiles and its generated directories", async () => {
+  const dir = agentDir({ ...WEATHER, ".DS_Store": "x", ".eve/": "", "node_modules/": "", "skills/": "" });
   expect(classifyEveDirectory(dir).map((e) => e.entry)).toEqual(["agent.ts", "instructions.md", "skills/", "tools/"]);
   expect((await loadEveAgent(dir, opts())).tools.map((t) => t.name)).toEqual(["get_weather"]);
+});
+
+test("inside tools/ and skills/, a dot entry is refused by name, as Eve's discovery errors on it", async () => {
+  const e = await refusal(agentDir({ ...WEATHER, "tools/.DS_Store": "x", "skills/.hidden.md": "x" }));
+  expect(e.refused.map((r) => [r.entry, r.status])).toEqual([
+    ["skills/.hidden.md", "not built"],
+    ["tools/.DS_Store", "not built"],
+  ]);
+  expect(e.message).toContain("a name starting with `.` is no tool or skill name");
 });
 
 test("a nested directory or a module-backed skill is refused by its path; colocated tests are skipped, as Eve skips them", async () => {

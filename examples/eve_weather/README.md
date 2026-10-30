@@ -97,13 +97,17 @@ Within a loaded slot, the loader refuses by name what it does not carry:
 - **The flat layout:** Eve's flat layout, with agent files in the app root beside `package.json`, is not read. The
   loader reads the `agent/` directory, and takes the agent's name from the `package.json` beside it.
 
-**Entries that are never authored content are skipped, as Eve 0.80.0 skips them.**
-- **Skipped:**
+**At the agent root, entries that are never authored content are skipped, as Eve 0.80.0's `classifyAgentRootEntry`
+skips them.**
+- **Skipped at the root:**
   - the directories Eve's discovery ignores as generated (`GENERATED_AGENT_DIRECTORY_NAMES` in its
     `discover/filesystem.js`: `.devtools`, `.eve`, `.next`, `.output`, `.vercel`, `node_modules`);
-  - any other name beginning with `.`, such as `.DS_Store` or `.gitkeep`, at the root or inside `skills/` or `tools/`;
-  - colocated tests (`*.test.*`, `*.spec.*`, `__tests__/`).
-- **Refused:** anything else no slot names. That is stricter than Eve, on purpose. Eve ignores a root file no slot
+  - any other name beginning with `.`, such as `.DS_Store` or `.gitkeep`.
+- **Skipped everywhere:** colocated tests (`*.test.*`, `*.spec.*`, `__tests__/`), as Eve skips them.
+- **Refused inside `tools/` and `skills/`:** a dot entry is refused by name, because Eve's discovery errors on it there.
+  `TOOL_SLUG_PATTERN` and `SKILL_NAME_PATTERN` in its `discover/grammar.js` require a name to start with a letter or
+  digit.
+- **Refused at the root:** anything else no slot names. That is stricter than Eve, on purpose. Eve ignores a root file no slot
   names, and warns on such a directory and ignores it. An entry the loader skipped would be one an author might be
   relying on.
 

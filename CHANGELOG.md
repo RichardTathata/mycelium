@@ -67,7 +67,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
       500. Neither leaves the rejection unhandled.
     - A tool field the fleet does not carry, a streamed result, and two modules naming one tool are each refused by
       name.
-    - Dotfiles and Eve's generated directories are skipped, as Eve skips them. `declareEveAgent` declares the unit (`eveUnitToml`, `runtime = "typescript"`) and
+    - At the agent root, dotfiles and Eve's generated directories are skipped, as Eve skips them. Inside `tools/` and
+      `skills/`, a dot entry is refused by name, as Eve errors on it there. `declareEveAgent` declares the unit (`eveUnitToml`, `runtime = "typescript"`) and
     writes the instructions and Markdown skills as prompt skills.
   - **The demonstration:** `examples/eve_weather/run_demo.mjs` checks that the three files of the example's `agent/`
     are byte for byte the README example of the pinned package. It runs them on three nodes from
