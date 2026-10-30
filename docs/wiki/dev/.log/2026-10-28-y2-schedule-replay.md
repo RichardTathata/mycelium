@@ -15,6 +15,12 @@ replay path that every earlier whole-node replay (`decision_trace_replay`, same 
 - the shutdown sweep (`lifecycle.rs` `shutdown_with_timeout`) tombstoned keys in the store map's iteration order, which
   follows its per-process hasher. Sorted, in every build.
 
+- `GossipConfig::default` set `gossip_shards` from `available_parallelism()` — a **host** read, which the seams gate
+  does not scan. Recorded on a 12-core laptop (16 shards), the bundle diverged on CI's 4-core runner (4 shards): shard
+  6 masked to 4 is shard 2, exactly the replay's. A constant (`SIM_GOSSIP_SHARDS`) under `sim`. So a checked-in
+  recording must be independent of the process *and* the machine: a whole-node replay in the same process on the same
+  host hides both.
+
 A recording's node name is part of it too: it is in the keys the shards hash and the persist streams' names, and
 `start()` requires the name to be the bind address — so the recorded node binds a fixed port (15946, below
 `alloc_port`'s range and the ephemeral floor).

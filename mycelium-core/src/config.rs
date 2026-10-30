@@ -1830,6 +1830,12 @@ pub fn cors_origin_is_loopback(origin: &str) -> bool {
         || host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.to_canonical().is_loopback())
 }
 
+/// The default gossip shard count under `sim`: a constant, where a shipped build reads the host's parallelism. The
+/// shard a key maps to is recorded as the channel stream of each send (`gossip/shard{n}`), so a count read from the
+/// host made a recording replay only on a machine with as many cores (adopter-surface Y2's replay, 2026-10-28).
+#[cfg(feature = "sim")]
+pub const SIM_GOSSIP_SHARDS: usize = 4;
+
 impl Default for GossipConfig {
     fn default() -> Self {
         Self {
@@ -1849,9 +1855,12 @@ impl Default for GossipConfig {
             gossip_channel_capacity: 1024,
             max_seen_entries: 100_000,
             peer_eviction_intervals: 3,
+            #[cfg(not(feature = "sim"))]
             gossip_shards: std::thread::available_parallelism()
                 .map_or(4, |n| n.get())
                 .min(16),
+            #[cfg(feature = "sim")]
+            gossip_shards: SIM_GOSSIP_SHARDS,
             intern_keys: true,
             intern_max_keys: 0,
             ping_peer_sample_size: 20,
@@ -3285,6 +3294,15 @@ mod tests {
         let mut cfg = GossipConfig::default();
         cfg.peer_eviction_intervals = 0;
         assert!(cfg.validate().is_err());
+    }
+
+    /// Y2's replay (2026-10-28, found by CI): the default shard count read the host's CPU count, so a recording made on
+    /// a 12-core machine (16 shards) diverged at its first sharded send replayed on a 4-core runner (4 shards). Under
+    /// `sim` the default is the same on every host.
+    #[cfg(feature = "sim")]
+    #[test]
+    fn under_sim_the_default_shard_count_does_not_read_the_host() {
+        assert_eq!(GossipConfig::default().gossip_shards, SIM_GOSSIP_SHARDS, "a recording's shard map would follow the machine it was made on");
     }
 
     #[test]

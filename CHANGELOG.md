@@ -221,8 +221,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   path, found by the first checked-in recording of a node (Y2's schedule run): the gossip shard hasher
   (`framing::shard_hasher`) was seeded per process, so a send's recorded channel stream (`gossip/shard{n}`) differed
   in the next process — now fixed seeds under `sim` (a shipped build keeps the random seed); and the shutdown sweep
-  tombstoned the node's soft state in the store map's per-process iteration order — now sorted, in every build. Every
-  earlier whole-node replay ran in its recording's own process, which shares one seed. Inventory §2.5.
+  tombstoned the node's soft state in the store map's per-process iteration order — now sorted, in every build. And
+  a recording made on one machine diverged on another: the default `gossip_shards` read the host's CPU count (16 shards
+  on a 12-core laptop, 4 on CI's runner) — now a constant under `sim`. Every earlier whole-node replay ran in its
+  recording's own process on its own machine, which shares both. Inventory §2.5.
 
 - **A federated credential presented again, with the same body and inside its window, is served again.** The edge
   checks the signature, the body binding, the window and the grant, and keeps no record of credentials it has served;
