@@ -437,6 +437,11 @@ struct Stored {
     /// X4's correlation, carried into every record this operation produces; absent on a ledger written before it.
     #[serde(default)]
     correlation: Option<String>,
+    /// Every execution evidence hash this record had before its latest (adopter-surface Y5): a probe or a retry
+    /// writes a new one, and a request naming an earlier one still names this record. Bounded by the record's probes
+    /// and its one retry. Absent on a ledger written before it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    earlier_evidence: Vec<String>,
 }
 
 impl Stored {
@@ -477,7 +482,14 @@ impl Stored {
             evidence_hash: None,
             compensated_by: None,
             correlation,
+            earlier_evidence: Vec::new(),
         }
+    }
+
+    /// Whether this record's outcome is not known — prepared and unanswered, unknown, or escalated unresolved: what an
+    /// unresolved closure holds (adopter-surface Y5). An unreadable state reads as unresolved, the safest reading.
+    fn outcome_unknown(&self) -> bool {
+        matches!(EffectState::parse(&self.state).unwrap_or(EffectState::Unresolved), EffectState::Prepared | EffectState::Unknown | EffectState::Unresolved)
     }
 }
 
@@ -505,6 +517,23 @@ impl Ledger {
 
     fn map(&self) -> std::sync::MutexGuard<'_, HashMap<String, Stored>> {
         self.records.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Every record whose outcome is not known (adopter-surface Y5), by the names a request's causal fields can give it:
+    /// the prepared record's hash, every execution evidence hash it has had and its run's correlation. A scan of **every**
+    /// record under the map's lock (row 68) — the ledger is never compacted, so the hold grows with it — read and
+    /// released; nothing is appended.
+    fn unresolved(&self) -> Vec<crate::agent::exposure::UnresolvedRecord> {
+        self.map()
+            .values()
+            .filter(|s| s.outcome_unknown())
+            .map(|s| crate::agent::exposure::UnresolvedRecord {
+                record_hash: s.record_hash.clone(),
+                evidence_hashes: s.earlier_evidence.iter().chain(s.evidence_hash.as_ref()).cloned().collect(),
+                correlation: s.correlation.clone(),
+                prepared_at_ms: s.prepared_at_ms,
+            })
+            .collect()
     }
 
     /// Append one record's whole row. The caller has already released the map.
@@ -707,7 +736,15 @@ impl Ledger {
 
     #[cfg(all(feature = "gateway", feature = "tls"))]
     async fn set_evidence_hash(&self, op: &OperationId, hash: &str) -> Result<(), ExternalRefusal> {
-        let row = self.change(op.as_str(), |s| s.evidence_hash = Some(hash.to_string()));
+        let row = self.change(op.as_str(), |s| {
+            // The hash it replaces is kept: a request naming it still names this record (Y5).
+            if let Some(old) = s.evidence_hash.replace(hash.to_string())
+                && old != hash
+                && !s.earlier_evidence.contains(&old)
+            {
+                s.earlier_evidence.push(old);
+            }
+        });
         match row { Some(r) => self.write(&r).await, None => Ok(()) }
     }
 
@@ -828,6 +865,16 @@ pub struct Reconciler<D> {
     counts: Arc<RefusalCounts>,
     #[cfg(all(feature = "gateway", feature = "tls"))]
     evidence: Option<(Arc<crate::EvidenceJournal>, crate::NodeId)>,
+}
+
+/// **The reconciler is an exposure source** (adopter-surface Y5): its records whose outcome is not known — prepared and
+/// unanswered, unknown, or unresolved — each named by its prepared record's hash, its latest execution evidence's hash
+/// and its run's correlation, so a request that names one as its `parent`, or carries its correlation, extends that
+/// record's closure. Attach it with `GossipAgent::with_exposure_source`.
+impl<D: ExternalDestination + 'static> crate::agent::exposure::ExposureSource for Reconciler<D> {
+    fn unresolved(&self) -> Result<Vec<crate::agent::exposure::UnresolvedRecord>, String> {
+        Ok(self.ledger.unresolved())
+    }
 }
 
 impl<D: ExternalDestination> Reconciler<D> {

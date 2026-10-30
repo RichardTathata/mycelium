@@ -75,6 +75,28 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The causal exposure policy** (`docs/plans/adopter-surface.md` Y5, D18; `docs/features/exposure-policy.md`): a
+  `[[rule]]` with an `exposure` table (`max_unresolved`, `max_oldest_age_ms`, `scope`) holds new work at the gateway's
+  doors that **extends an unresolved closure** — a request whose `_meta.parent` is an effect whose outcome is not known
+  (its prepared record or latest execution evidence) or whose `_meta.correlation` is that effect's run — while that
+  closure holds that many effects, or its oldest is that old, each threshold on its own
+  (`the_aged_record_threshold_fires_with_the_size_threshold_unmet`); work naming no unresolved effect is independent
+  and passes (`independent_work_passes_while_work_extending_the_closure_is_held`). It never holds a probe, a
+  compensation, a protective shed or a rescue from zero, structurally: the gate is in the gateway's decision
+  (`ae_decide`), not the shared seam a compensation is decided through, and at a door the operations in
+  `EXEMPT_OPERATIONS` are exempt by exact name (`a_compensation_is_admitted_while_a_new_dependent_call_is_held`, whose
+  plant — the gate run in the seam too — refuses the compensation). `GossipAgent::with_exposure_policy`,
+  `with_exposure_source` and `exposure_counts` (only calls the evaluator permitted are counted,
+  `a_policy_denial_counts_nothing`); `mycelium::exposure`; the external-effect `Reconciler` is a source. Counted at the
+  enforcement point (which needs a source) or by a gossiped fleet tally (`sys/ae-exposure/{node}`, on the K2 tally
+  heartbeat's tick, out-of-view nodes' unreadable, forged and expired summaries collected) whose unknown coverage fails
+  closed (`unknown_coverage_in_the_tally_is_not_established`). **Shadow first:** untouched under `legacy`, decided and
+  counted and nothing held under `observe` (`the_shadow_profile_counts_and_holds_nothing`). `wire-check` reads an
+  exposure rule as no allowance. Rule `ae.exposure` in the catalogue, its reasons the metric's labels. Not built (the narrowing the
+  maintainer accepted): the exact `fleet_consensus` scope (a closure shrinks, so a seat needs a decrement; refused at
+  load), holding at a tuple take or a signal emit (row Y11), an operator route that resolves an `Unresolved` record, the
+  limit of declared lineage (a caller that omits `_meta.parent` is not held; per-actor caps are K2's history rules), and
+  unsigned tally entries. Upgrade note: `deprecations.md` §72.
 - **Declared recurring work** (`docs/plans/adopter-surface.md` Y2, D15; `docs/features/recurring-work.md`): a unit file's
   `[[schedule]]` (`id`, `period_secs` up to a week, `phase_secs`, `on_missed`, a `[schedule.holders]` filter), run by
   the embedding application with `GossipAgent::run_schedule(&decl, work)` (`mycelium::schedule`; one loop per id per

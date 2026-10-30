@@ -207,6 +207,19 @@ impl GossipAgent {
             }
             _ => {}
         }
+        // Adopter-surface Y5: a provider checks a protected kind under its own name, so a kind named as one of the
+        // operations the exposure policy never holds would be exempt from it at the provider.
+        #[cfg(all(feature = "gateway", feature = "tls"))]
+        if let Some(k) = self.config.protected_rpc_kinds.iter().find(|k| super::exposure::EXEMPT_OPERATIONS.contains(&k.as_str())) {
+            return Err(GossipError::InvalidField {
+                field:  "protected_rpc_kinds",
+                reason: format!(
+                    "`{k}` is an operation the exposure policy never holds (a probe, a compensation, a leave or a grant), \
+                     and a provider checks a protected kind under its own name — so work under it would pass every exposure \
+                     rule unheld. Name the kind otherwise"
+                ),
+            });
+        }
         // Adopter-surface Y3: a page on another host's origin, reading a gateway that has no credential model.
         // A cross-origin read is made by the operator's browser, so a listed page's script reads whatever the
         // gateway answers anyone — an open loopback gateway included. Only a page on this host may be listed
@@ -556,6 +569,9 @@ impl GossipAgent {
         // collection of its old records while it was away is older than what it holds (#642's review, round 4).
         #[cfg(all(feature = "gateway", feature = "tls"))]
         super::fleet_history::reassert_own(&self.task_ctx);
+        // Adopter-surface Y5: this node's exposure summary re-asserted the same way, for the same reason.
+        #[cfg(all(feature = "gateway", feature = "tls"))]
+        super::exposure::reassert_own(&self.task_ctx);
         self.start_listener(bind_addr).await.inspect_err(|_| {
             self.state.store(AgentState::Idle as u8, Ordering::Release);
         })?;
@@ -1161,6 +1177,9 @@ impl GossipAgent {
         // age out — rather than a withdrawal its peers would read as unknown coverage (#642's review, N3).
         #[cfg(all(feature = "gateway", feature = "tls"))]
         super::fleet_history::depart(&self.task_ctx);
+        // Adopter-surface Y5: the exposure summary's last word, marked departed, beside it.
+        #[cfg(all(feature = "gateway", feature = "tls"))]
+        super::exposure::depart(&self.task_ctx);
         #[cfg(test)]
         {
             let hook = TEST_BEFORE_SWEEP.pin().get(&self.node_id.to_string()).cloned();

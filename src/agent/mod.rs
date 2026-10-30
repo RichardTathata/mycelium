@@ -54,6 +54,7 @@ pub(crate) mod guarantee;
 /// would be dead code — the feature-gated dead-code trap (CLAUDE.md).
 #[cfg(all(feature = "gateway", feature = "tls"))]
 pub(crate) mod action_evaluator;
+pub mod exposure;
 /// Post-360 row R: what a routing enforcement point establishes about a destination and a request's
 /// data class. Every gateway build — a companion's door names them without `tls`, where the preflight is inert.
 #[cfg(feature = "gateway")]
@@ -810,6 +811,17 @@ pub(crate) struct TaskCtx {
     /// asks for is then `Unavailable`.
     #[cfg(all(feature = "gateway", feature = "tls"))]
     pub(crate) history_index: std::sync::OnceLock<Arc<evidence_journal::HistoryIndex>>,
+    /// The causal exposure policy (adopter-surface Y5), set via [`GossipAgent::with_exposure_policy`]: the
+    /// `[[rule]]`s with an `exposure` table. Absent = the gateway's doors hold nothing on exposure.
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    pub(crate) exposure_policy: std::sync::OnceLock<Arc<exposure::ExposurePolicy>>,
+    /// Where an actor's unresolved closure is read (Y5), set via [`GossipAgent::with_exposure_source`] — the
+    /// external-effect reconciler. Absent with a policy attached = every selected request is not established.
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    pub(crate) exposure_source: std::sync::OnceLock<Arc<dyn exposure::ExposureSource>>,
+    /// What the exposure policy judged, held and would have held (Y5).
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    pub(crate) exposure_counters: exposure::ExposureCounters,
     /// Whether this node's fleet-tally heartbeat is running (row K2) — started by its first permit under a
     /// [`HistoryScope::FleetTally`] rule, stopped at shutdown.
     #[cfg(all(feature = "gateway", feature = "tls"))]
@@ -1419,6 +1431,12 @@ impl GossipAgent {
             #[cfg(all(feature = "gateway", feature = "tls"))]
             history_index: std::sync::OnceLock::new(),
             #[cfg(all(feature = "gateway", feature = "tls"))]
+            exposure_policy: std::sync::OnceLock::new(),
+            #[cfg(all(feature = "gateway", feature = "tls"))]
+            exposure_source: std::sync::OnceLock::new(),
+            #[cfg(all(feature = "gateway", feature = "tls"))]
+            exposure_counters: exposure::ExposureCounters::default(),
+            #[cfg(all(feature = "gateway", feature = "tls"))]
             ae_tally_heartbeat: std::sync::atomic::AtomicBool::new(false),
             #[cfg(all(feature = "gateway", feature = "tls"))]
             ae_tally_lock: std::sync::Mutex::new(()),
@@ -1557,6 +1575,45 @@ impl GossipAgent {
             return;
         }
         self.load_history_if_wanted();
+    }
+
+    /// Attach the **causal exposure policy** (adopter-surface Y5): the `[[rule]]`s carrying an `exposure` table,
+    /// which hold new dependent work at the gateway's doors while the actor's unresolved closure is past a threshold
+    /// — its size, or the age of its oldest record. It never holds a probe, a compensation, a protective shed or a
+    /// rescue from zero ([`exposure`] says why that is structural). **Shadow first:** under the `legacy` and
+    /// `observe` profiles it decides and counts ([`exposure_counts`](Self::exposure_counts)) and holds nothing; under
+    /// `enforce-local` and `enforce-allocated` it holds. Attach a source too
+    /// ([`with_exposure_source`](Self::with_exposure_source)): without one every request a rule selects is *not
+    /// established*. A second attach is ignored, with a warning.
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    pub fn with_exposure_policy(&self, policy: Arc<exposure::ExposurePolicy>) {
+        self.note_attachment("with_exposure_policy");
+        if self.task_ctx.action_evaluator.get().is_none() {
+            tracing::warn!(
+                "with_exposure_policy: no action evaluator is attached, so the gateway's doors decide nothing and the \
+                 exposure policy is never consulted (see with_action_evaluator)"
+            );
+        }
+        if self.task_ctx.exposure_policy.set(policy).is_err() {
+            tracing::warn!("with_exposure_policy: a policy is already attached; ignoring");
+        }
+    }
+
+    /// Attach where an actor's unresolved closure is read for the exposure policy (Y5) — the external-effect
+    /// reconciler (`mycelium::effects::external::Reconciler`), or a source of the embedder's own. Its actors are
+    /// the verified principals the effects' compositions name. A second attach is ignored, with a warning.
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    pub fn with_exposure_source(&self, source: Arc<dyn exposure::ExposureSource>) {
+        self.note_attachment("with_exposure_source");
+        if self.task_ctx.exposure_source.set(source).is_err() {
+            tracing::warn!("with_exposure_source: a source is already attached; ignoring");
+        }
+    }
+
+    /// What the exposure policy has judged, held and would have held since it was attached (Y5).
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    pub fn exposure_counts(&self) -> exposure::ExposureCounts {
+        self.task_ctx.exposure_counters.snapshot()
     }
 
     /// Read the actor histories from the evidence journal — in the background — once both a journal and an

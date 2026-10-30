@@ -160,7 +160,7 @@ pub(super) fn run(rep: &mut ClassReport, base: &GossipConfig, units: &[Unit], di
     let evaluator: Arc<dyn crate::ActionEvaluator> = {
         let mut ev = crate::ReferenceEvaluator::new("declared").with_catalogue("declaration", "declared");
         for u in units {
-            for r in &u.config.rules {
+            for r in u.config.rules.iter().filter(|r| !r.is_exposure()) {
                 let built = match r.to_rule() {
                     Ok(b) => b,
                     Err(e) => { rep.state = ClassState::Refused { reason: format!("unit {}: [[rule]]: {e}", u.name) }; return; }

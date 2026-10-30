@@ -174,9 +174,20 @@ A reference-evaluator rule, as written. `"*"` means any.
 | `requires_mandate` | string | absent | The scope a live mandate must cover for the rule to apply. |
 | `requires_grant` | boolean | `false` | The rule applies only under a [grant](../guide/00-concepts.md#grant) — a mandate in the `grant:` family a supervisor issues for one call (`Rule::requiring_grant`). One of this and `requires_mandate`, never both (refused at load). **Who holds a grant is the agent's node** (`node:<id>`), so at a door the actor that presents one is the node's principal, not the unit's; `mycelium test --faults grant` reads the first such rule as a selector — its resource names the tool the agent's policy requires a grant for, its actor the agent's unit — and admits it also with the node as actor and the resource at `tool:<name>@<node>`. A rule with it and no rule admitting anyone to `grant.issue` on its resource (`*` for either, a `@<node>` suffix not matched) is `wire-check`'s warning `unissuable grant`. |
 | `requires_values` | table | empty | Argument values the rule tests by name; the reference evaluator compares for equality. |
+| `exposure` | table | absent | Makes the rule an **exposure rule** (adopter-surface Y5), not an allowance — it admits no edge (`wire-check` reads it so) and governs no unit: it holds work it selects that extends an unresolved closure (its `_meta.parent` or `_meta.correlation` naming an effect whose outcome is not known) while that closure is past a threshold, and carries no `requires_*` field (refused at load). `max_unresolved` (at least 1) — hold once the closure holds this many such effects; `max_oldest_age_ms` (more than 0) — hold once the oldest is older than this; at least one of the two. `scope` — `"enforcement_point"` (the default) or `"fleet_tally"`; `"fleet_consensus"` is not built and refused. An unknown key is refused by name. The [feature page](../features/exposure-policy.md) says what it never holds and how it starts in shadow. |
 
 `actor`, `operation` and `resource` are refused when empty. A key the rule does not have is refused by name, as a
 `[[mandate]]`'s is (§65): a misspelt requirement would otherwise admit without one.
+
+```toml
+# an exposure rule (adopter-surface Y5): hold the planner's tool calls that extend a closure holding three effects
+# with no known outcome, or one older than ten minutes — counted across the fleet's published summaries
+[[rule]]
+actor     = "planner"
+operation = "tools/call"
+resource  = "*"
+exposure  = { max_unresolved = 3, max_oldest_age_ms = 600000, scope = "fleet_tally" }
+```
 
 ```toml
 # examples/units/a2a_skill_authority/gateway.toml

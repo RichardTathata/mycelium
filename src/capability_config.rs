@@ -924,14 +924,62 @@ pub struct RuleDecl {
     pub requires_grant: bool,
     #[serde(default)]
     pub requires_values: BTreeMap<String, toml::Value>,
+    /// **An exposure rule** (adopter-surface Y5): with this table the rule is not an allowance — it holds new dependent
+    /// work it selects while the actor's unresolved closure is past a threshold, and carries no `requires_*` clause.
+    /// Loaded into [`ExposurePolicy`](crate::exposure::ExposurePolicy), never into the evaluator.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exposure: Option<ExposureDecl>,
+}
+
+/// `[rule.exposure]` — the two thresholds and the scope of an exposure rule (Y5). An unknown key is refused by name.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExposureDecl {
+    /// Hold new dependent work once the actor's closure holds this many unresolved effects (at least 1).
+    #[serde(default)]
+    pub max_unresolved: Option<u32>,
+    /// Hold it once the oldest unresolved effect is older than this, in milliseconds (more than 0).
+    #[serde(default)]
+    pub max_oldest_age_ms: Option<u64>,
+    /// `"enforcement_point"` (the default: this node's source) or `"fleet_tally"` (every node's published summary,
+    /// approximate). `"fleet_consensus"` is not built and refused.
+    #[serde(default = "ExposureDecl::default_scope")]
+    pub scope: String,
+}
+
+impl ExposureDecl {
+    fn default_scope() -> String {
+        "enforcement_point".into()
+    }
 }
 
 impl RuleDecl {
+    /// Is this an exposure rule (Y5) rather than an allowance?
+    pub fn is_exposure(&self) -> bool {
+        self.exposure.is_some()
+    }
+
+    /// The exposure rule this declares, checked — `None` for an allowance. An exposure rule carries no `requires_*`
+    /// clause: it selects, and holds on its thresholds; it admits nothing.
+    pub fn to_exposure_rule(&self) -> Option<Result<crate::exposure::ExposureRule, String>> {
+        let e = self.exposure.as_ref()?;
+        if !self.requires_scopes.is_empty() || !self.requires_facts.is_empty() || self.requires_mandate.is_some() || self.requires_grant || !self.requires_values.is_empty() {
+            return Some(Err("an exposure rule selects and holds; it carries no requires_* clause, which belongs to an allowance — write the allowance as its own [[rule]]".into()));
+        }
+        Some(
+            crate::exposure::ExposureLimit::new(e.max_unresolved, e.max_oldest_age_ms, &e.scope)
+                .map(|limit| crate::exposure::ExposureRule { actor: self.actor.clone(), operation: self.operation.clone(), resource: self.resource.clone(), limit })
+                .map_err(|err| err.to_string()),
+        )
+    }
     /// Does this rule admit someone to issue a grant for `resource` (adopter-surface X3)? The reference evaluator's
     /// `*` is any operation and any resource, and a `tool:<name>` names the tool wherever it runs — a `@<node>`
     /// suffix on either side is not part of the match. One reading for `wire-check` and `test --faults grant`, so the
     /// two never disagree about whether a grant could be issued (#680's review, findings 2 and 3).
     pub fn admits_grant_issue_for(&self, resource: &str) -> bool {
+        if self.is_exposure() {
+            return false; // an exposure rule admits nothing (Y5)
+        }
         let bare = |r: &str| r.split('@').next().unwrap_or(r).to_string();
         (self.operation == "grant.issue" || self.operation == "*") && (self.resource == "*" || bare(&self.resource) == bare(resource))
     }
@@ -941,6 +989,9 @@ impl RuleDecl {
     pub fn to_rule(&self) -> Result<crate::Rule, String> {
         if self.requires_grant && self.requires_mandate.is_some() {
             return Err("requires_grant and requires_mandate are one or the other: a grant is a mandate in the grant: family".into());
+        }
+        if self.is_exposure() {
+            return Err("an exposure rule (Y5) is not an allowance: load it into an ExposurePolicy (RuleDecl::to_exposure_rule)".into());
         }
         let mut rule = crate::Rule::new(self.actor.as_str(), self.operation.as_str(), self.resource.as_str());
         rule.requires_scopes = self.requires_scopes.clone();
@@ -1112,6 +1163,10 @@ impl NodeCapabilityConfig {
             // Refused where every reader loads the file, so `wire-check` and `test` agree (#680's review, finding 5).
             if r.requires_grant && r.requires_mandate.is_some() {
                 return Err(invalid("rule", "requires_grant and requires_mandate are one or the other: a grant is a mandate in the grant: family"));
+            }
+            // Y5: an exposure rule is refused where every reader loads the file, by name.
+            if let Some(Err(why)) = r.to_exposure_rule() {
+                return Err(invalid("rule.exposure", why));
             }
         }
         if let Some(h) = &self.hosts {
@@ -1640,7 +1695,7 @@ max_providers = 4
         let typo = toml::from_str::<NodeCapabilityConfig>("[[mandate]]\nholder = \"p\"\nscope = \"s\"\noperations = []\nholders = [\"q\"]\n").unwrap_err().to_string();
         assert!(typo.contains("holders"), "{typo}");
         // The one reading of "may issue": `*` is any operation and any resource; a `@node` suffix is not matched.
-        let rule = |op: &str, res: &str| RuleDecl { actor: "t".into(), operation: op.into(), resource: res.into(), requires_scopes: vec![], requires_facts: vec![], requires_mandate: None, requires_grant: false, requires_values: Default::default() };
+        let rule = |op: &str, res: &str| RuleDecl { actor: "t".into(), operation: op.into(), resource: res.into(), requires_scopes: vec![], requires_facts: vec![], requires_mandate: None, requires_grant: false, requires_values: Default::default(), exposure: None };
         assert!(rule("grant.issue", "tool:x").admits_grant_issue_for("tool:x"));
         assert!(rule("*", "*").admits_grant_issue_for("tool:x"));
         assert!(rule("grant.issue", "tool:x").admits_grant_issue_for("tool:x@127.0.0.1:1"));
