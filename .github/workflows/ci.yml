@@ -733,16 +733,19 @@ jobs:
           grep -q 'wire-check refused the declaration; nothing ran' tf.err
       - name: Pilot kit — the kit's README run as written, the report from doctor and test --faults (Y10)
         # Adopter-surface Y10: the blocks docs/operations/pilot-kit/README.md marks `bash pilot` are extracted and run
-        # as one script, unchanged — the scaffold pointed at this checkout, both domains up, a call each way, doctor on
-        # every node, the fault classes against the kit's declaration, and the report built from those two outputs.
-        # The README is what runs, so a block that fails as written fails here.
+        # unchanged, each in a fresh shell with no MYCELIUM or KIT of its own — the scaffold pointed
+        # at this checkout, both domains up, a call each way, doctor on every node, the fault classes against the kit's
+        # declaration, and the report built from those two outputs. The README is what runs, so a block that fails as
+        # written, or leans on a variable an earlier block set, fails here.
         run: |
           set -euo pipefail
           export MYCELIUM_REPO="$PWD" PILOT="$RUNNER_TEMP/pilot" CARGO_TARGET_DIR="$PWD/target"
-          python3 scripts/check-pilot-kit.py --blocks > "$RUNNER_TEMP/pilot-kit.sh"
-          cat "$RUNNER_TEMP/pilot-kit.sh"
+          python3 scripts/check-pilot-kit.py --blocks-dir "$RUNNER_TEMP/pilot-kit" > "$RUNNER_TEMP/pilot-blocks.txt"
           trap 'cd "$PILOT" 2>/dev/null && bash fleet.sh stop || true; tail -n 30 "$PILOT"/faults.log 2>/dev/null || true' EXIT
-          bash -euo pipefail "$RUNNER_TEMP/pilot-kit.sh"
+          while read -r block; do
+            echo "::group::$block"; cat "$block"; echo "::endgroup::"
+            env -u MYCELIUM -u KIT bash -euo pipefail "$block"   # nothing a block sets reaches the next
+          done < "$RUNNER_TEMP/pilot-blocks.txt"
           cd "$PILOT"
           # Every guarantee a fault class exercised has its section, and no placeholder is left.
           python3 - <<'PY'
@@ -751,6 +754,11 @@ jobs:
           ex = {e["id"] for c in json.load(open("faults.json"))["classes"] for e in c.get("exercised", []) if e.get("kind") == "guarantee"}
           got = set(re.findall(r"^### `([^`]+)`$", r, re.M))
           assert ex and got == ex, (sorted(ex), sorted(got))
+          # Each doctor line names its matrix row (Y10, decided by the maintainer).
+          import glob
+          for f in glob.glob("doctor/*.txt"):
+              lines = [l for l in open(f) if re.match(r"^  [a-z0-9_]+\.[a-z0-9_.]+: ", l)]
+              assert lines and all(" → matrix: " in l for l in lines), f
           assert "{{" not in r
           print(f"pilot-report.md: {len(got)} sections, one per exercised guarantee")
           PY

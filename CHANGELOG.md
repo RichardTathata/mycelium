@@ -11,6 +11,17 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **`mycelium doctor` names each guarantee's row of the shared-responsibility matrix** (adopter-surface Y10, decided by
+  the maintainer on #707's review).
+  - **Text form:** a line for a guarantee not enforced ends with `→ matrix: <row>`, and the enforced ones are listed
+    under one `  enforced → matrix: <row>: <ids>` line per row. A guarantee the matrix has no row for reads `no row`
+    with the reason.
+  - **JSON form:** it gains `matrix` (guarantee id → row); the schema id is unchanged, because the field is added.
+  - **Where the rows come from:** `MATRIX_ROWS` in `src/doctor.rs`, which `scripts/check-pilot-kit.py` holds equal to
+    `docs/operations/shared-responsibility-matrix.md` § *From a `doctor` line to its row*.
+  - **What to check:** a script matching a whole `doctor` line exactly (`^  <id>: <state> — … → <docs>$`) now sees the
+    row after the docs link. The `start():`, `profile:`, `guarantees:` and `enforced:` lines are unchanged.
+
 - **Directories the TLS module creates for keys and certificates are `0700`, and certificates are written `0644`**,
   on unix, whatever the umask — a node's `auto_cert_dir` when it creates it, and `tls ca` / `tls issue`'s `--out` when
   it does not exist yet; a wider certificate is narrowed when rewritten. Under a permissive umask (`000`, `002`) the
@@ -57,10 +68,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     - `doctor` on all four nodes;
     - `mycelium test --faults` over the kit's own declaration (`units/`, `faults.toml`);
     - and a report from those two outputs alone.
-  - **The report.** `report.py` fills `report-template.md` with one section per guarantee a fault class exercised. Each
-    section gives its state on each node and in the class's fleet, the row of the shared-responsibility matrix that
-    says who holds it, and a line for the counterparty to write.
-  - **CI.** The README's `bash pilot` blocks run unchanged as one script in CI's `Scaffold` job.
+  - **The report.** `report.py` fills `report-template.md` with one section per guarantee a fault class exercised,
+    split by whether the class's own fleet enforced it. Each section gives its state on each node and in the class's
+    fleet, the matrix row its `doctor` line names, and a line for the counterparty to write. The report says the
+    cross-edge call feeds nothing into it.
+  - **CI.** The README's `bash pilot` blocks each source `env.sh`, and run unchanged, each in a fresh shell, in CI's
+    `Scaffold` job.
   - **The runbook.** `customer-pilot.md` now opens by walking the scaffold with the kit.
   - **The matrix.** The shared-responsibility matrix gains *From a `doctor` line to its row*, mapping every guarantee
     id in the catalogue to its row.

@@ -83,11 +83,13 @@ board. Mycelium contributes only as a well-documented **vendor** in your CC9 ven
 
 ## From a `doctor` line to its row
 
-`mycelium doctor` names one guarantee per line, by id; the [guarantee catalogue](../reference/guarantee-catalogue.md)
-says what each promises. This table takes a line of that output to the row above that says who holds it, so an
-auditor reading a pilot's `doctor` output, or the [pilot kit](pilot-kit/README.md)'s report, can go from a state to a
-responsibility without reading the code. `scripts/check-pilot-kit.py` (in `make check`) holds it complete: every id in
-the catalogue is here, every row it names is a row of this page, and a line no row covers says so and why.
+`mycelium doctor` names one guarantee per line, by id, and each line names its row here (`→ matrix: …`): the
+[guarantee catalogue](../reference/guarantee-catalogue.md) says what each promises, and this table says who holds the
+control it reports on. An auditor reading a pilot's `doctor` output, or the [pilot kit](pilot-kit/README.md)'s report,
+goes from a state to a responsibility without reading the code. `doctor` prints from its own copy of this table
+(`MATRIX_ROWS` in `src/doctor.rs`), and `scripts/check-pilot-kit.py` (in `make check`) keeps the two equal cell for
+cell. It also checks that every id in the catalogue is here, that every row named is a row of the section it names,
+and that a line no row covers says so and why.
 
 | Doctor line | Row (section) |
 |---|---|
@@ -97,7 +99,7 @@ the catalogue is here, every row it names is a row of this page, and a line no r
 | `gw.oidc` | Operator authentication (SSO) (CC6) |
 | `gw.tls` | Encryption in transit (gateway) (CC6) |
 | `gw.caller_profile` | Capability authorization (CC6) |
-| `mesh.tls` | Node authentication · Encryption in transit (gossip) (CC6) |
+| `mesh.tls` | Node authentication (CC6) · Encryption in transit (gossip) (CC6) |
 | `mesh.signed_writes` | Peer-identity integrity (CC6) |
 | `id.proofs_required` | Peer-identity integrity (CC6) |
 | `id.ca_key_off_node` | Key custody (CA, at-rest KMS) (CC6) |

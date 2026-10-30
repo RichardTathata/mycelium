@@ -30,9 +30,9 @@ together, on one machine, before anything touches theirs:
 | 0 · the hour | [tutorial 7](../guide/tutorials/07-the-first-hour.md), the `one-hour` job's path from the published node | the machine, the network and the release do what the job shows; stop here if they do not |
 | 1–2 · the scaffold | `mycelium init $PILOT --template two-domains`, pointed at a checkout until the next MINOR | two fleets of two nodes, each its own domain under `secure-multi-domain`, with the kit's declaration beside them |
 | 3 · the edge | `bash fleet.sh setup`, `start-all`, `connect`, `call` each way | certificates issued off-node, a pinned key each way, one call across the edge carrying the local caller's name |
-| 4 · `doctor` | `bash fleet.sh doctor <node>` on all four | what `start()` would say, one guarantee per line, under the profile; each line maps to a [matrix row](shared-responsibility-matrix.md#from-a-doctor-line-to-its-row) |
+| 4 · `doctor` | `bash fleet.sh doctor <node>` on all four | what `start()` would say, one guarantee per line, under the profile; each line names its [matrix row](shared-responsibility-matrix.md#from-a-doctor-line-to-its-row), or says it has none and why |
 | 5 · the faults | `mycelium test --faults units --config faults.toml` | revocation, a restart over the WAL, a partition, a lost acknowledgement recovered and a grant across a restart, each against the declaration |
-| 6 · the report | `python3 pilot-kit/report.py --doctor doctor/*.txt --faults faults.json` | one section per guarantee a class exercised, in the guarantee report's words, with a line for the counterparty to fill |
+| 6 · the report | in `$PILOT`: `python3 "$KIT/report.py" --doctor doctor/*.txt --faults faults.json > pilot-report.md` (the kit's `env.sh` sets `KIT`) | one section per guarantee a class exercised, split by whether the class's fleet enforced it, in the guarantee report's words, with a line for the counterparty to fill |
 
 What changes on the counterparty's own hosts is what the scaffold's README says one machine cannot show:
 - each node gets only its own `certs/<node>/` directory;

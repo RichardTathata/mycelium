@@ -1,6 +1,7 @@
-# The food bank's provider, declared for `mycelium test --faults`: what it offers, the mandate it holds over its own
-# stock, and the rules its policy decides by — the same shape the scaffold's `federation.toml` serves across the edge.
-# A reservation waits for a grant the food bank's steward issues for that one call: approval that is default-deny.
+# The food bank's provider, as the kit declares it for `mycelium test --faults` — not a file of the scaffold, which
+# has no `units/`. The classes build their own in-process fleet from it: what the provider offers, the mandate it holds
+# over its stock, and the rules its policy decides by. The reservation's grant rule is what the `grant` class drives on
+# that fleet; the scaffold's own `pantry/reserve`, served by its program, answers without a grant.
 principal = "pantry"
 
 [[capability]]

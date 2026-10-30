@@ -1,5 +1,5 @@
-# The community kitchen's provider, declared for `mycelium test --faults`: today's menu, offered to any caller its
-# policy names, cooked from what the pantry reports.
+# The community kitchen's provider, as the kit declares it for `mycelium test --faults` (the scaffold has no
+# `units/`): today's menu, offered on the classes' own in-process fleet.
 principal = "menu"
 
 [[capability]]
