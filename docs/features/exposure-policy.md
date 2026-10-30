@@ -36,6 +36,12 @@ causal fields, `_meta.parent` and `_meta.correlation`.
   execution evidence's hash and their run.
 - [`set_control_profile`](../../src/agent/control_profile.rs) — the rung the policy acts under: untouched under
   `legacy`, shadow under `observe`, held under `enforce-local` and `enforce-allocated`.
+- [`DOOR_OPERATIONS`](../../src/agent/door.rs) — the operations of the take, claim and emit doors (adopter-surface
+  Y11); a rule naming one of them, or `*`, selects that door, and each gateway route reads the body's `_meta`.
+- [`emit_in`](../../src/agent/door.rs) — the emit door's Rust verb, taking the causal fields; the mailbox,
+  reliable-emit and sharded-emit verbs sit beside it on the service handle.
+- [`take_in`](../../mycelium-tuple-space/src/lib.rs) — the take door's Rust verb; the keyed take's is beside it.
+- [`claim_in`](../../mycelium-blackboard/src/lib.rs) — the claim door's Rust verb.
 - `independent_work_passes_while_work_extending_the_closure_is_held`, in
   [`src/agent/exposure_tests.rs`](../../src/agent/exposure_tests.rs): on an enforcing rung, a call naming the
   unresolved effect as its parent, or carrying its run, is held, and a root call or one naming nothing unresolved is
@@ -50,7 +56,10 @@ has no row for this feature. The tests, in [`src/agent/exposure_tests.rs`](../..
 fails), `the_shadow_profile_counts_and_holds_nothing`, `a_policy_denial_counts_nothing`,
 `the_aged_record_threshold_fires_with_the_size_threshold_unmet`, `an_unreadable_closure_is_not_established_on_an_enforcing_rung`,
 `the_fleet_scope_reads_others_skips_its_own_key_and_removed_members`,
-`publishing_departing_and_collecting_write_what_readers_rely_on` and `unknown_coverage_in_the_tally_is_not_established`.
+`publishing_departing_and_collecting_write_what_readers_rely_on` and `unknown_coverage_in_the_tally_is_not_established`. The doors' tests, in [`tests/exposure_doors.rs`](../../tests/exposure_doors.rs): every take, claim and emit door, by
+its Rust verb and its gateway route, held and admitted (`every_door_holds_work_extending_an_unresolved_closure_and_admits_independent_work`),
+counted in shadow, untouched when no rule selects it (`a_door_no_rule_selects_is_untouched`), and its record carrying
+the fields.
 
 ## What it guarantees, and what it does not
 
@@ -61,6 +70,12 @@ fails), `the_shadow_profile_counts_and_holds_nothing`, `a_policy_denial_counts_n
   any execution evidence it has had (a probe writes a new one; the earlier ones still name it), or its `correlation`
   is that effect's run. A request whose parent is a *descendant* of one in another run, naming no unresolved effect
   itself, is not followed through the evidence journal (not built).
+- **At the take, claim and emit doors, opt-in** (Y11, the plan's D29). A tuple take, a blackboard claim and the four
+  emit doors are decided only when a rule selects their operation; otherwise they are untouched — no decision, no
+  record, no clock read, and a malformed `_meta` is not read. A rule whose operation is `*` selects them too. Their
+  causal fields go on the door's own decision record only (`node:{door}` for a Rust verb, its actor the node;
+  `gateway:{door}` for a route, its actor the caller), never onward: a signal frame and a tuple's WAL record carry no
+  field for them. A door asking under an `EXEMPT_OPERATIONS` name is refused by name.
 - **The omission limit.** A call with neither `_meta.parent` nor `_meta.correlation` is a root and is never held: the
   policy bounds causal extension as each envelope declares it, so it binds only callers that propagate their lineage.
   A cap on what an actor does whatever it declares is row K2's history rules.
@@ -98,7 +113,7 @@ fails), `the_shadow_profile_counts_and_holds_nothing`, `a_policy_denial_counts_n
   forgets an unresolved effect. Summaries are unsigned — the limit is the last *not built* item below.
 - Not built, stated in the plan's Y5 row (the narrowing the maintainer accepted, 2026-10-30):
   - **the consensus-seat scope for an exact bound** — a closure *shrinks* as its effects resolve, so a seat would need a decrement no fixed lease expresses, and concurrent admissions overshoot without a reservation taken before the work is admitted; `fleet_consensus` is refused at load, by name.
-  - **holding at a tuple take and a signal emit** — neither door has an action-evaluator enforcement point today, so only calls are held — row Y11.
+  - **holding at a tuple take and a signal emit** — delivered by row Y11, opt-in and with door-only lineage (above); not built there: carrying the lineage onward through the signal frame or the tuple WAL, and deciding these doors whenever an evaluator is attached without a selecting rule.
   - **an operator route that resolves an `Unresolved` record** — such a record is terminal, a compensation takes only a committed effect, so it holds the work that names it for good.
   - **the limit of declared lineage** — a caller that omits `_meta.parent` (or names only a descendant in another run) is not held: the policy bounds causal extension as each envelope declares it, and per-actor caps are row K2's history rules.
   - **unsigned tally entries** — row K2's limit: a member can write another's summary, counted by the `sys/` tripwire at the owner; for an owner in view its next tick overwrites the forgery, but a forged summary for an owner **out of view** that marks it `departed` holds the digests it lists fleet-wide until the 24-hour history horizon collects it; and without `[tls]` one under an id this node cannot rule out is read the same way.
@@ -106,10 +121,11 @@ fails), `the_shadow_profile_counts_and_holds_nothing`, `a_policy_denial_counts_n
 
 ## Go deeper
 
-- The design record is the plan's D18 and row Y5 ([`plans/adopter-surface.md`](../plans/adopter-surface.md)); the
+- The design record is the plan's D18 and D29 and rows Y5 and Y11 ([`plans/adopter-surface.md`](../plans/adopter-surface.md)); the
   decisive rule it applies unchanged is the stability record's
   ([`design/adaptive-stability.md`](../design/adaptive-stability.md) §2).
 - The code: [`src/agent/exposure.rs`](../../src/agent/exposure.rs); the gate's place is `ae_decide` in
-  [`src/agent/http/authz.rs`](../../src/agent/http/authz.rs).
+  [`src/agent/http/authz.rs`](../../src/agent/http/authz.rs), and the take, claim and emit doors' is
+  [`src/agent/door.rs`](../../src/agent/door.rs).
 - The profile ladder's runbook is [`operations/control-profiles.md`](../operations/control-profiles.md); no
   runbook of its own.

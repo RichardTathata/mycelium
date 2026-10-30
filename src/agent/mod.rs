@@ -70,6 +70,8 @@ pub(crate) mod provider_enforcement;
 pub mod ae_contract;
 /// The two causal fields a request carries into every record its work produces (adopter-surface X4).
 pub mod causal;
+/// Exposure at the take, claim and emit doors (adopter-surface Y11): decided only when an exposure rule selects them.
+pub mod door;
 /// The node-local fsynced journal — the *mechanism* (item 4 PR 3a): the AE evidence journal and
 /// the rights ledger (`control::ledger`) are both thin profiles over it, because a second journal
 /// beside the first is how guarantees drift. Ungated since the ledger landed (item 4 PR 3): it now

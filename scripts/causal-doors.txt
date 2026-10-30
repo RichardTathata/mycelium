@@ -15,6 +15,10 @@
 #            none        no record is written at or beyond this door; nothing reads the fields (stated, not a defect)
 #            refused     the door refuses protected kinds, so no governed work starts here; a kind that is not
 #                        protected passes as bytes and writes no record anywhere
+#            ruled       adopter-surface Y11: the door runs the preflight, and writes a record carrying the fields it
+#                        read, only when an exposure rule selects its operation; otherwise `none` — untouched, nothing
+#                        read, no record. The fields go on this door's record only, never onward (a signal frame and a
+#                        tuple's WAL record carry no field for them)
 #   test     the `#[test]`/`#[tokio::test]` fn that shows it, in src/ or tests/; `-` with the reason after a `#` when
 #            there is none (a gap the registry states rather than hides). The gate checks the door exists, the row
 #            exists and the test exists; it does not check that `carries` is what the code does — that is the test's
@@ -38,7 +42,19 @@ src/agent/service_handle.rs::rpc_call                | bytes      | a_members_di
 src/agent/service_handle.rs::bulk_call               | bytes      | -  # the bulk transport stages the bytes unaltered; no test with the fields
 src/agent/service_handle.rs::scatter_gather          | bytes      | -  # fan-out of rpc_call; no test with the fields
 src/agent/http/mesh.rs::gw_scatter                   | refused    | -  # refuses protected kinds as gw_rpc_call does; no causal test
-src/agent/http/signals.rs::gw_signal_emit            | none       | -  # a signal is not governed work; no record is written for it
-src/agent/http/mesh.rs::gw_mailbox_deliver           | none       | -  # a mailbox message is not governed work; no record is written for it
-src/agent/http/mesh.rs::gw_shard_emit                | none       | -  # a shard emit is not governed work; no record is written for it
-src/agent/http/overlay.rs::gw_overlay_emit_reliable  | none       | -  # an overlay emit is not governed work; no record is written for it
+src/agent/http/signals.rs::gw_signal_emit            | ruled      | every_door_holds_work_extending_an_unresolved_closure_and_admits_independent_work  # not governed work unless an exposure rule selects `signal.emit` (Y11)
+src/agent/http/mesh.rs::gw_mailbox_deliver           | ruled      | every_door_holds_work_extending_an_unresolved_closure_and_admits_independent_work  # `mailbox.deliver`
+src/agent/http/mesh.rs::gw_shard_emit                | ruled      | every_door_holds_work_extending_an_unresolved_closure_and_admits_independent_work  # `shard.emit`
+src/agent/http/overlay.rs::gw_overlay_emit_reliable  | ruled      | every_door_holds_work_extending_an_unresolved_closure_and_admits_independent_work  # `overlay.emit_reliable`
+# ── the take, claim and emit doors (adopter-surface Y11; scanned: the preflight call in `door::decide`, the verbs named)
+src/agent/door.rs::decide                            | ruled      | a_door_no_rule_selects_is_untouched  # every Y11 door decides here; selected, its record carries the fields (a_selected_door_records_the_causal_fields_under_its_own_point)
+src/agent/door.rs::emit_in                           | ruled      | every_door_holds_work_extending_an_unresolved_closure_and_admits_independent_work
+src/agent/door.rs::deliver_event_in                  | ruled      | every_door_holds_work_extending_an_unresolved_closure_and_admits_independent_work
+src/agent/door.rs::emit_reliable_in                  | ruled      | every_door_holds_work_extending_an_unresolved_closure_and_admits_independent_work
+src/agent/door.rs::emit_sharded_in                   | ruled      | every_door_holds_work_extending_an_unresolved_closure_and_admits_independent_work
+mycelium-tuple-space/src/lib.rs::take_in             | ruled      | every_door_holds_work_extending_an_unresolved_closure_and_admits_independent_work
+mycelium-tuple-space/src/lib.rs::take_by_key_in      | ruled      | every_door_holds_work_extending_an_unresolved_closure_and_admits_independent_work
+mycelium-tuple-space/src/http.rs::gw_take            | ruled      | every_door_holds_work_extending_an_unresolved_closure_and_admits_independent_work
+mycelium-tuple-space/src/http.rs::gw_take_by_key     | ruled      | every_door_holds_work_extending_an_unresolved_closure_and_admits_independent_work
+mycelium-blackboard/src/lib.rs::claim_in             | ruled      | every_door_holds_work_extending_an_unresolved_closure_and_admits_independent_work
+mycelium-blackboard/src/http.rs::gw_claim            | ruled      | every_door_holds_work_extending_an_unresolved_closure_and_admits_independent_work

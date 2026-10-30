@@ -2199,3 +2199,20 @@ neither read nor counted. A `protected_rpc_kinds` entry named `effect.probe`, `e
 those are the operations the policy never holds. **Migration:** declare `exposure` only in units read by this
 release's tools; build `RuleDecl` literals with `exposure: None`; use `enforcement_point` until every node is
 upgraded; rename a protected kind that collides.
+
+## 73. A take, claim or emit door is decided when an exposure rule selects it; `TupleError`, `BlackboardError` and `ShardError` gained `Refused` (unreleased, adopter-surface Y11)
+
+A tuple take, a blackboard claim and the four emit doors — `/gateway/tuple/take`, `/gateway/tuple/take_by_key`,
+`/gateway/bb/claim`, `/gateway/signal/emit`, `/gateway/mailbox/deliver`, `/gateway/overlay/emit_reliable`,
+`/gateway/shard/emit`, and the new Rust verbs `take_in`, `take_by_key_in`, `claim_in`, `emit_in`, `deliver_event_in`,
+`emit_reliable_in`, `emit_sharded_in` — run the action evaluator and the exposure gate when an exposure rule selects
+their operation (`tuple.take`, `tuple.take_by_key`, `bb.claim`, `signal.emit`, `mailbox.deliver`,
+`overlay.emit_reliable`, `shard.emit`), and only then ([feature page](../features/exposure-policy.md)). **An exposure
+rule whose `operation` is `*` now selects these doors too**: on a node with an evaluator, a route that answered 200
+answers 403 when the evaluator does not permit the operation or the exposure gate holds the work, and 400 for a
+malformed `_meta`. The existing verbs (`take`, `claim`, `emit`, …) are unchanged and never decided. `TupleError`,
+`BlackboardError` and `ShardError` gained a `Refused` variant, returned only by the new verbs; all three are
+`#[non_exhaustive]`, so a `match` already has a `_` arm. **Migration:** an exposure rule written for Y5's call doors
+names its operation (`tools/call`, `skill.invoke`, …) rather than `*`, or the evaluator permits the door operations it
+should admit.
+

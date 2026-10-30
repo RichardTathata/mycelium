@@ -20,6 +20,12 @@ SCAN = {
     "src/agent/http/signals.rs": ["gw_signal_emit"],
     "src/agent/http/overlay.rs": ["gw_overlay_emit_reliable"],
     "src/agent/service_handle.rs": ["rpc_call", "bulk_call", "scatter_gather"],
+    # Adopter-surface Y11: the take, claim and emit doors' Rust verbs, and the companions' doors (outside src/).
+    "src/agent/door.rs": ["emit_in", "deliver_event_in", "emit_reliable_in", "emit_sharded_in"],
+    "mycelium-tuple-space/src/lib.rs": ["take_in", "take_by_key_in"],
+    "mycelium-tuple-space/src/http.rs": ["gw_take", "gw_take_by_key"],
+    "mycelium-blackboard/src/lib.rs": ["claim_in"],
+    "mycelium-blackboard/src/http.rs": ["gw_claim"],
 }
 TEST_MODULE = re.compile(r"#\[cfg\((all\()?test\b")
 TEST_ATTR = re.compile(r"#\[(tokio::)?test[\]\(]")
@@ -76,6 +82,15 @@ def doors_in_tree(root):
             for sym in SCAN.get(rel, []):
                 if re.search(r"\bfn\s+" + re.escape(sym) + r"\b", "\n".join(lines)):
                     found.add(f"{rel}::{sym}")
+    # The companions' doors, which sit outside src/ and are listed by symbol only.
+    for rel, syms in SCAN.items():
+        path = os.path.join(root, rel)
+        if rel.startswith("src/") or not os.path.exists(path):
+            continue
+        text = open(path, encoding="utf-8").read()
+        for sym in syms:
+            if re.search(r"\bfn\s+" + re.escape(sym) + r"\b", text):
+                found.add(f"{rel}::{sym}")
     return found
 
 
@@ -89,7 +104,7 @@ def registry_rows(path):
         if len(parts) != 3:
             sys.exit(f"check-causal-doors: {path}:{n}: a row has {len(parts)} columns, not 3")
         door, carries, test = parts
-        if carries not in ("record", "record+fwd", "bytes", "none", "refused"):
+        if carries not in ("record", "record+fwd", "ruled", "bytes", "none", "refused"):
             sys.exit(f"check-causal-doors: {path}:{n}: unknown carries '{carries}'")
         rows[door] = (carries, test, n)
     return rows

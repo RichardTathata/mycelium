@@ -25,7 +25,9 @@
 //!
 //! **What it may hold — the stability record's decisive rule, applied unchanged** (`docs/design/adaptive-stability.md`
 //! §2). It holds **new dependent work**: a call admitted at one of the gateway's doors (`/mcp`, `/a2a`, the LLM doors,
-//! the federation route, the provider check) that would extend an unresolved closure. It **never** holds what resolves
+//! the federation route, the provider check) that would extend an unresolved closure — and, where a rule selects
+//! them, a tuple take, a blackboard claim and an emit (adopter-surface Y11, [`door`](super::door): opt-in, the
+//! lineage on the door's own record only). It **never** holds what resolves
 //! the closure or protects the node, and this is structural rather than a rule an operator could misconfigure:
 //!
 //! - a **reconciliation probe** goes through no evaluator at all (`Reconciler::probe`);

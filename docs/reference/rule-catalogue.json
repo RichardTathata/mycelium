@@ -51,12 +51,12 @@
     },
     {
       "id": "ae.exposure",
-      "revision": 1,
+      "revision": 2,
       "subsystem": "mycelium::agent::exposure",
       "responsibilities": [
         "authority"
       ],
-      "trigger": "a gateway dispatch an evaluator permitted, of an actor and operation an exposure `[[rule]]` selects, under the `observe` profile or an enforcing one (adopter-surface Y5)",
+      "trigger": "a gateway dispatch an evaluator permitted, of an actor and operation an exposure `[[rule]]` selects, under the `observe` profile or an enforcing one (adopter-surface Y5); revision 2, adopter-surface Y11 — also a tuple take, a blackboard claim and the four emit doors (`signal.emit`, `mailbox.deliver`, `overlay.emit_reliable`, `shard.emit`), by their Rust verbs and gateway routes, each decided only when a rule selects its operation and untouched otherwise",
       "inputs": [
         {
           "source": "the request's causal fields (`_meta.parent`, `_meta.correlation`) and the unresolved effects they name — an effect whose outcome is not known (prepared and unanswered, unknown, unresolved) whose prepared record or latest execution evidence is the parent, or whose run is the correlation — counted, and the oldest one's preparation time, from the attached exposure source, the external-effect reconciler",
@@ -105,9 +105,12 @@
       "depends_on": [
         "ae.preflight"
       ],
-      "symbol": "exposure::{gate, judge, sum_fleet, collect_summaries}; http::ae_decide",
+      "symbol": "exposure::{gate, judge, sum_fleet, collect_summaries}; http::ae_decide; door::decide",
       "docs": "docs/features/exposure-policy.md",
       "tests": [
+        "every_door_holds_work_extending_an_unresolved_closure_and_admits_independent_work",
+        "in_shadow_every_door_admits_and_counts_what_it_would_hold",
+        "a_door_no_rule_selects_is_untouched",
         "a_compensation_is_admitted_while_a_new_dependent_call_is_held",
         "independent_work_passes_while_work_extending_the_closure_is_held",
         "the_shadow_profile_counts_and_holds_nothing",

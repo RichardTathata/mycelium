@@ -1,4 +1,6 @@
 import { authHeaders, baseUrl, resolveToken, type AuthOptions } from "./auth";
+import type { CausalOptions } from "./types";
+import { withCausal } from "./wire";
 /**
  * mycelium/blackboard — TypeScript client for the Mycelium Blackboard.
  *
@@ -80,12 +82,16 @@ export class Blackboard {
     return body.facts.map(decodeFact);
   }
 
-  /** Competitive destructive claim (Linda `in`): claim one matching fact, or `null`. */
-  async claim(eq: Record<string, string> = {}, present: string[] = []): Promise<Fact | null> {
+  /**
+   * Competitive destructive claim (Linda `in`): claim one matching fact, or `null`.
+   * `causal` (adopter-surface Y11) rides in the body's `_meta`: read only when an exposure rule on the node
+   * selects this door, onto its decision record — work naming an unresolved effect as its parent is then held (403).
+   */
+  async claim(eq: Record<string, string> = {}, present: string[] = [], causal?: CausalOptions): Promise<Fact | null> {
     const r = await fetch(`${this.baseUrl}/gateway/bb/claim`, {
       method: "POST",
       headers: { "Content-Type": "application/json", ...this.auth },
-      body: JSON.stringify({ ns: this.ns, eq, present }),
+      body: JSON.stringify(withCausal({ ns: this.ns, eq, present }, causal)),
     });
     if (!r.ok) throw new Error(`blackboard claim failed: ${r.status}`);
     const body = (await r.json()) as { claimed: boolean; fact?: { id: number; attributes: Record<string, string>; payload_b64: string } };

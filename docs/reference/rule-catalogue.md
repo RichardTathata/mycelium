@@ -57,11 +57,11 @@ An absent credential is anonymous and a present bearer's scopes are dropped: a b
 
 ## `ae.exposure`
 
-rev 1 · `mycelium::agent::exposure` · Authority · trace: catalogue only
+rev 2 · `mycelium::agent::exposure` · Authority · trace: catalogue only
 
 Hold new work that extends an unresolved closure — its parent an unresolved effect's record, or its run that effect's — while that closure is past a threshold, its size or its oldest record's age, each on its own; work that names no unresolved effect passes; never a probe, a compensation, a protective shed or a rescue from zero; shadow under `observe`, held under the enforcing profiles, untouched under `legacy`; a closure that cannot be read is not established, never empty.
 
-- **Trigger:** a gateway dispatch an evaluator permitted, of an actor and operation an exposure `[[rule]]` selects, under the `observe` profile or an enforcing one (adopter-surface Y5)
+- **Trigger:** a gateway dispatch an evaluator permitted, of an actor and operation an exposure `[[rule]]` selects, under the `observe` profile or an enforcing one (adopter-surface Y5); revision 2, adopter-surface Y11 — also a tuple take, a blackboard claim and the four emit doors (`signal.emit`, `mailbox.deliver`, `overlay.emit_reliable`, `shard.emit`), by their Rust verbs and gateway routes, each decided only when a rule selects its operation and untouched otherwise
 - **Reads:**
   - the request's causal fields (`_meta.parent`, `_meta.correlation`) and the unresolved effects they name — an effect whose outcome is not known (prepared and unanswered, unknown, unresolved) whose prepared record or latest execution evidence is the parent, or whose run is the correlation — counted, and the oldest one's preparation time, from the attached exposure source, the external-effect reconciler — scope: this enforcement point (`enforcement_point`, which needs a source), or this node's source if any and every node's `sys/ae-exposure/` summary (`fleet_tally`); freshness: the source read at the decision; a peer's summary as gossiped, `control_max_staleness_ms`, under the governors' confidence bound — a peer with no summary or an unreadable, stale, future-dated or truncated one, or a member out of view whose last summary lists a record the request extends, is unknown coverage
   - `the node's control profile` — scope: this node; freshness: read at the decision
@@ -72,7 +72,7 @@ Hold new work that extends an unresolved closure — its parent an unresolved ef
 - **Effects:** on a hold, the evaluator's permit becomes a deny naming the threshold, recorded in the evidence journal and nothing dispatched; in shadow, the permit stands and what an enforcing profile would have done is added to what it checked · this node's `sys/ae-exposure/{node}` summary, on the tally heartbeat's tick; out-of-view nodes' unreadable, forged or past-the-horizon summaries collected
 - **Guards:** Authority
 - **Depends on:** [`ae.preflight`](#aepreflight)
-- **Code:** `exposure::{gate, judge, sum_fleet, collect_summaries}; http::ae_decide` · **Docs:** docs/features/exposure-policy.md · **Tests:** `a_compensation_is_admitted_while_a_new_dependent_call_is_held`, `independent_work_passes_while_work_extending_the_closure_is_held`, `the_shadow_profile_counts_and_holds_nothing`, `the_aged_record_threshold_fires_with_the_size_threshold_unmet`, `a_policy_denial_counts_nothing`, `an_unreadable_closure_is_not_established_on_an_enforcing_rung`, `the_reconcilers_own_work_and_a_grant_are_never_held`, `unknown_coverage_in_the_tally_is_not_established`
+- **Code:** `exposure::{gate, judge, sum_fleet, collect_summaries}; http::ae_decide; door::decide` · **Docs:** docs/features/exposure-policy.md · **Tests:** `every_door_holds_work_extending_an_unresolved_closure_and_admits_independent_work`, `in_shadow_every_door_admits_and_counts_what_it_would_hold`, `a_door_no_rule_selects_is_untouched`, `a_compensation_is_admitted_while_a_new_dependent_call_is_held`, `independent_work_passes_while_work_extending_the_closure_is_held`, `the_shadow_profile_counts_and_holds_nothing`, `the_aged_record_threshold_fires_with_the_size_threshold_unmet`, `a_policy_denial_counts_nothing`, `an_unreadable_closure_is_not_established_on_an_enforcing_rung`, `the_reconcilers_own_work_and_a_grant_are_never_held`, `unknown_coverage_in_the_tally_is_not_established`
 
 ## `ae.preflight`
 

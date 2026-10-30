@@ -203,6 +203,21 @@ pub enum TupleError {
     NotFound,
     Io(std::io::Error),
     Rpc(String),
+    /// Refused at the take door (adopter-surface Y11): an exposure rule selected the take, and the action evaluator or
+    /// the exposure gate refused it. Nothing was taken. Only [`take_in`](TupleSpace::take_in) and
+    /// [`take_by_key_in`](TupleSpace::take_by_key_in) return it.
+    Refused(mycelium::door::DoorRefusal),
+}
+
+/// What a take did, for the door's record: an item, nothing (it timed out), or unknown (a transport error — the
+/// primary may have handed one out).
+pub(crate) fn take_outcome<T>(taken: &Result<T, TupleError>) -> mycelium::door::DoorOutcome {
+    use mycelium::door::DoorOutcome;
+    match taken {
+        Ok(_) => DoorOutcome::Completed,
+        Err(TupleError::Rpc(_)) => DoorOutcome::Unknown,
+        Err(_) => DoorOutcome::Nothing,
+    }
 }
 
 impl std::fmt::Display for TupleError {
@@ -216,6 +231,7 @@ impl std::fmt::Display for TupleError {
             TupleError::NotFound => write!(f, "unknown item id"),
             TupleError::Io(e) => write!(f, "wal io error: {e}"),
             TupleError::Rpc(s) => write!(f, "rpc error: {s}"),
+            TupleError::Refused(r) => r.fmt(f),
         }
     }
 }
@@ -1257,6 +1273,27 @@ impl TupleSpace {
         rpc::dec_take_resp(&resp)
     }
 
+    /// [`take`](Self::take) through the take door (adopter-surface Y11): decided under `tuple.take` on
+    /// `tuple:{ns}/{stage}`, this node the actor, when an exposure rule selects it — `causal` on the door's own decision
+    /// record, and nowhere further (the tuple's WAL record carries no field for it). Untouched otherwise. A refusal is
+    /// [`TupleError::Refused`], and nothing was taken.
+    pub async fn take_in(
+        &self,
+        stage: &str,
+        timeout: Duration,
+        causal: &mycelium::causal::CausalFields,
+    ) -> Result<(u64, Bytes), TupleError> {
+        let resource = mycelium::door::space_resource("tuple", &self.cfg.namespace, stage);
+        let pass = self
+            .agent
+            .exposure_door_as_node(mycelium::door::OP_TUPLE_TAKE, &resource, causal, "tuple/take")
+            .await
+            .map_err(TupleError::Refused)?;
+        let taken = self.take(stage, timeout).await;
+        pass.finish(take_outcome(&taken)).await;
+        taken
+    }
+
     /// Atomic pipeline advance: acks `id` AND puts `payload` on `next_stage`
     /// in one WAL record — no crash window between stages. Preferred over
     /// separate `put` + `ack` for every mid-pipeline transition.
@@ -1337,6 +1374,26 @@ impl TupleSpace {
             .await
             .map_err(rpc_err)?;
         rpc::dec_take_resp(&resp)
+    }
+
+    /// [`take_by_key`](Self::take_by_key) through the keyed take door (Y11): decided under `tuple.take_by_key` on
+    /// `tuple:{ns}/{stage}` when an exposure rule selects it, as [`take_in`](Self::take_in).
+    pub async fn take_by_key_in(
+        &self,
+        stage: &str,
+        key: &str,
+        timeout: Duration,
+        causal: &mycelium::causal::CausalFields,
+    ) -> Result<(u64, Bytes), TupleError> {
+        let resource = mycelium::door::space_resource("tuple", &self.cfg.namespace, stage);
+        let pass = self
+            .agent
+            .exposure_door_as_node(mycelium::door::OP_TUPLE_TAKE_BY_KEY, &resource, causal, "tuple/take_by_key")
+            .await
+            .map_err(TupleError::Refused)?;
+        let taken = self.take_by_key(stage, key, timeout).await;
+        pass.finish(take_outcome(&taken)).await;
+        taken
     }
 
     /// Atomic keyed pipeline advance (WS-G / M13): acks `id` AND puts `payload` on `next_stage` under

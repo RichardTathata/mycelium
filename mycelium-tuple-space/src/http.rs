@@ -12,7 +12,7 @@
 //!
 //! Base64 appears only here — the internal RPC path stays binary.
 
-use axum::Json;
+use axum::{Extension, Json};
 use axum::extract::{Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -27,6 +27,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::{TupleError, TupleSpace};
+use mycelium::ResolvedPrincipal;
 
 impl TupleSpace {
     /// Returns an axum `Router` with the tuple gateway endpoints, ready for
@@ -105,13 +106,51 @@ struct TakeByKeyBody {
     key: String,
     #[serde(default = "default_take_timeout")]
     timeout_secs: u64,
+    /// Adopter-surface Y11: the causal fields, read only when an exposure rule selects `tuple.take_by_key`.
+    #[serde(default, rename = "_meta")]
+    meta: Option<Value>,
 }
 
-async fn gw_take_by_key(State(ts): State<Arc<TupleSpace>>, Json(b): Json<TakeByKeyBody>) -> Response {
+/// The take door (adopter-surface Y11): decided, the caller the actor and the body's `_meta` its causal fields, when
+/// an exposure rule selects `operation` on this stage; untouched otherwise.
+async fn take_door(
+    ts: &TupleSpace,
+    caller: Option<&ResolvedPrincipal>,
+    operation: &str,
+    stage: &str,
+    meta: &Option<Value>,
+    door: &str,
+) -> Result<mycelium::door::DoorPass, Response> {
+    let params = match meta {
+        Some(m) => json!({ "_meta": m }),
+        None => json!({}),
+    };
+    let resource = mycelium::door::space_resource("tuple", ts.namespace(), stage);
+    ts.agent().exposure_door(caller, operation, &resource, &params, door).await.map_err(|r| door_refused(&r))
+}
+
+/// A door's refusal: 400 for a malformed `_meta`, 403 otherwise, `{"error", "reason"}` — nothing was taken.
+fn door_refused(r: &mycelium::door::DoorRefusal) -> Response {
+    let status = if r.is_malformed() { StatusCode::BAD_REQUEST } else { StatusCode::FORBIDDEN };
+    (status, Json(json!({ "error": r.message, "reason": r.reason }))).into_response()
+}
+
+async fn gw_take_by_key(
+    State(ts): State<Arc<TupleSpace>>,
+    caller: Option<Extension<ResolvedPrincipal>>,
+    Json(b): Json<TakeByKeyBody>,
+) -> Response {
     if ns_mismatch(&ts, &b.ns) {
         return bad_request("unknown namespace");
     }
-    match ts.take_by_key(&b.stage, &b.key, Duration::from_secs(b.timeout_secs)).await {
+    let caller = caller.map(|Extension(c)| c);
+    let pass = match take_door(&ts, caller.as_ref(), mycelium::door::OP_TUPLE_TAKE_BY_KEY, &b.stage, &b.meta, "tuple/take_by_key").await {
+        Ok(p) => p,
+        Err(refused) => return refused,
+    };
+    let taken = ts.take_by_key(&b.stage, &b.key, Duration::from_secs(b.timeout_secs)).await;
+    pass.finish(crate::take_outcome(&taken)).await;
+    match taken {
         Ok((id, payload)) => Json(json!({
             "id": id,
             "stage": b.stage,
@@ -129,17 +168,31 @@ struct TakeBody {
     stage: String,
     #[serde(default = "default_take_timeout")]
     timeout_secs: u64,
+    /// Adopter-surface Y11: the causal fields, read only when an exposure rule selects `tuple.take`.
+    #[serde(default, rename = "_meta")]
+    meta: Option<Value>,
 }
 
 fn default_take_timeout() -> u64 {
     30
 }
 
-async fn gw_take(State(ts): State<Arc<TupleSpace>>, Json(b): Json<TakeBody>) -> Response {
+async fn gw_take(
+    State(ts): State<Arc<TupleSpace>>,
+    caller: Option<Extension<ResolvedPrincipal>>,
+    Json(b): Json<TakeBody>,
+) -> Response {
     if ns_mismatch(&ts, &b.ns) {
         return bad_request("unknown namespace");
     }
-    match ts.take(&b.stage, Duration::from_secs(b.timeout_secs)).await {
+    let caller = caller.map(|Extension(c)| c);
+    let pass = match take_door(&ts, caller.as_ref(), mycelium::door::OP_TUPLE_TAKE, &b.stage, &b.meta, "tuple/take").await {
+        Ok(p) => p,
+        Err(refused) => return refused,
+    };
+    let taken = ts.take(&b.stage, Duration::from_secs(b.timeout_secs)).await;
+    pass.finish(crate::take_outcome(&taken)).await;
+    match taken {
         Ok((id, payload)) => Json(json!({
             "id": id,
             "stage": b.stage,

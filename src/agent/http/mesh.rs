@@ -591,6 +591,7 @@ pub(super) fn mailbox_events(
 /// Returns `{"ok": true}`.
 pub(super) async fn gw_mailbox_deliver(
     State(ctx): State<Arc<HttpCtx>>,
+    caller: Option<axum::Extension<crate::agent::ResolvedPrincipal>>,
     Json(body):  Json<serde_json::Value>,
 ) -> impl IntoResponse {
     use base64::Engine as _;
@@ -616,13 +617,25 @@ pub(super) async fn gw_mailbox_deliver(
         Bytes::new()
     };
 
-    super::mailbox::deliver_event_ctx(
+    // Adopter-surface Y11: decided only when an exposure rule selects `mailbox.deliver` on this kind.
+    let caller = caller.map(|axum::Extension(c)| c);
+    let door = crate::agent::door::decide(
+        &ctx.agent_ctx, crate::agent::door::DoorActor::Caller(caller.as_ref()), crate::agent::door::OP_MAILBOX_DELIVER,
+        &crate::agent::door::signal_resource(&kind), &body, "gateway:mailbox/deliver",
+    ).await;
+    let pass = match door {
+        Ok(p) => p,
+        Err(r) => return crate::agent::door::refusal_response(&r),
+    };
+    let ok = super::mailbox::deliver_event_ctx(
         &ctx.agent_ctx,
         &ctx.agent_ctx.node_id,
         &target,
         kind,
         payload,
     );
+    // Written locally either way; `false` is a full gossip queue, so whether it reached the target is unknown.
+    pass.finish(if ok { crate::agent::door::DoorOutcome::Completed } else { crate::agent::door::DoorOutcome::Unknown }).await;
 
     Json(json!({ "ok": true })).into_response()
 }
@@ -671,6 +684,7 @@ pub(super) async fn gw_shard_owner(
 /// Response 404: `{"ok":false,"error":"no providers"}`
 pub(super) async fn gw_shard_emit(
     State(ctx): State<Arc<HttpCtx>>,
+    caller: Option<axum::Extension<crate::agent::ResolvedPrincipal>>,
     Json(body):  Json<serde_json::Value>,
 ) -> impl IntoResponse {
     use base64::Engine as _;
@@ -713,13 +727,27 @@ pub(super) async fn gw_shard_emit(
     let filter    = CapFilter::new(ns.as_str(), name.as_str());
     let providers = resolve_cap_providers(&ctx.agent_ctx.kv_state, &filter);
 
+    // Adopter-surface Y11: decided only when an exposure rule selects `shard.emit` on this kind.
+    let caller = caller.map(|axum::Extension(c)| c);
+    let door = crate::agent::door::decide(
+        &ctx.agent_ctx, crate::agent::door::DoorActor::Caller(caller.as_ref()), crate::agent::door::OP_SHARD_EMIT,
+        &crate::agent::door::signal_resource(&kind), &body, "gateway:shard/emit",
+    ).await;
+    let pass = match door {
+        Ok(p) => p,
+        Err(r) => return crate::agent::door::refusal_response(&r),
+    };
     match shard_owner(&shard_key, &providers) {
         Some(owner) => {
             super::helpers::emit_signal_async(
                 &ctx.agent_ctx, kind, SignalScope::Individual(owner.clone()), payload,
             ).await;
+            pass.finish(crate::agent::door::DoorOutcome::Completed).await;
             Json(json!({ "ok": true, "owner": owner.to_string() })).into_response()
         }
-        None => (StatusCode::NOT_FOUND, Json(json!({ "ok": false, "error": "no providers" }))).into_response(),
+        None => {
+            pass.finish(crate::agent::door::DoorOutcome::Nothing).await;
+            (StatusCode::NOT_FOUND, Json(json!({ "ok": false, "error": "no providers" }))).into_response()
+        }
     }
 }

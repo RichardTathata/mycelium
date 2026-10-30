@@ -8,7 +8,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use axum::Json;
+use axum::{Extension, Json};
 use axum::extract::{Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -19,6 +19,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::{Blackboard, BlackboardError, Fact, Predicate};
+use mycelium::ResolvedPrincipal;
 
 const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
 
@@ -102,6 +103,10 @@ struct PredicateBody {
     eq: BTreeMap<String, String>,
     #[serde(default)]
     present: Vec<String>,
+    /// Adopter-surface Y11: the causal fields, read only by the claim door, and only when an exposure rule selects
+    /// `bb.claim`.
+    #[serde(default, rename = "_meta")]
+    meta: Option<serde_json::Value>,
 }
 
 async fn gw_read(State(bb): State<Arc<Blackboard>>, Json(b): Json<PredicateBody>) -> Response {
@@ -118,12 +123,36 @@ async fn gw_read(State(bb): State<Arc<Blackboard>>, Json(b): Json<PredicateBody>
     }
 }
 
-async fn gw_claim(State(bb): State<Arc<Blackboard>>, Json(b): Json<PredicateBody>) -> Response {
+async fn gw_claim(
+    State(bb): State<Arc<Blackboard>>,
+    caller: Option<Extension<ResolvedPrincipal>>,
+    Json(b): Json<PredicateBody>,
+) -> Response {
     if ns_mismatch(&bb, &b.ns) {
         return bad_request("unknown namespace");
     }
+    // Adopter-surface Y11: decided, the caller the actor and the body's `_meta` its causal fields, when an exposure
+    // rule selects `bb.claim` on this board; untouched otherwise.
+    let caller = caller.map(|Extension(c)| c);
+    let params = match &b.meta {
+        Some(m) => json!({ "_meta": m }),
+        None => json!({}),
+    };
+    let door = bb
+        .agent()
+        .exposure_door(caller.as_ref(), mycelium::door::OP_BB_CLAIM, &crate::claim_resource(bb.namespace()), &params, "bb/claim")
+        .await;
+    let pass = match door {
+        Ok(p) => p,
+        Err(r) => {
+            let status = if r.is_malformed() { StatusCode::BAD_REQUEST } else { StatusCode::FORBIDDEN };
+            return (status, Json(json!({ "error": r.message, "reason": r.reason }))).into_response();
+        }
+    };
     let pred = build_predicate(&b.eq, &b.present);
-    match bb.claim(&pred).await {
+    let claimed = bb.claim(&pred).await;
+    pass.finish(crate::claim_outcome(&claimed)).await;
+    match claimed {
         Ok(Some(f)) => Json(json!({ "claimed": true, "fact": fact_json(&f) })).into_response(),
         Ok(None) => Json(json!({ "claimed": false })).into_response(),
         Err(e) => err_response(&e),

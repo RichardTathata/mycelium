@@ -48,6 +48,21 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Exposure at the take, claim and emit doors — opt-in** (`docs/plans/adopter-surface.md` Y11, D29;
+  `docs/features/exposure-policy.md`): a tuple take (`tuple.take`, `tuple.take_by_key`), a blackboard claim
+  (`bb.claim`) and the four emit doors (`signal.emit`, `mailbox.deliver`, `overlay.emit_reliable`, `shard.emit`) run the
+  gateway's decision — the action evaluator, then Y5's exposure gate — **only when an exposure rule selects their
+  operation**, and are untouched otherwise: no decision, no record, no clock read. Each is reached two ways: a Rust verb
+  that takes the causal fields (`TupleSpace::{take_in, take_by_key_in}`, `Blackboard::claim_in`,
+  `GossipAgent::emit_in`, `ServiceHandle::{deliver_event_in, emit_reliable_in, emit_sharded_in}`, its actor the node)
+  and its gateway route, which reads the body's `_meta` (its actor the caller). Work naming an unresolved effect is held
+  on an enforcing rung and counted in shadow; independent work passes. The fields go on the door's own decision record
+  only (`mycelium::door`), so X4's *a signal is not governed work* now reads *not unless an exposure rule selects it*
+  (`scripts/causal-doors.txt`, `ruled`). A door asking under an `EXEMPT_OPERATIONS` name is refused by name. Both SDKs'
+  take, claim and emit verbs send `correlation` and `parent` in `_meta`. Rule `ae.exposure` revision 2. **Not built,
+  stated:** carrying the lineage onward through the signal frame or the tuple WAL; deciding these doors whenever an
+  evaluator is attached without a selecting rule. `deprecations.md` §73: `TupleError`, `BlackboardError` and
+  `ShardError` gained `Refused`; a `*`-operation exposure rule now selects these doors.
 - **An Eve agent directory, unchanged, on a fleet** (`docs/plans/adopter-surface.md` Y6, D24;
   `examples/eve_weather/`, CI job `eve-fleet`). This is a demonstration, not a compatibility promise.
   - **The loader:** `mycelium-ts` gains `loadEveAgent`, which reads an Eve `agent/` directory installed beside the one
