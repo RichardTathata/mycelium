@@ -32,8 +32,8 @@ Eight kinds:
 | **C** CAS retry | `papaya` `compute` / `update` closures | which thread wins a retry — a *thread interleaving*, not a single transition |
 
 **Totals (production sites):** W 22 · M 71 · R 27 · T 46 · F 15 · S — every `select!` (not counted per site; owned
-by the kernel's scheduler adapter) · H one seeded (`store.rs`), one unseeded shared state (`framing.rs`
-`shard_hasher`), the rest per-map · C the wiki's recurring race family.
+by the kernel's scheduler adapter) · H two seeded (`store.rs`; `framing.rs` `shard_hasher` under `sim`, 2026-10-28),
+the rest per-map · C the wiki's recurring race family.
 
 ## 2. The inventory, by module
 
@@ -207,7 +207,8 @@ site sends to each live slot in turn, and whether either reader kept up decides 
 | Site | Depends on it | Owner |
 |---|---|---|
 | `mycelium-core/src/store.rs:356` — `RandomState::with_seeds(1, 2, 3, 4)` | store hashing is **fixed** (Merkle/anti-entropy stability) | none needed — already deterministic |
-| `mycelium-core/src/framing.rs:230` — `shard_hasher()` `RandomState::new()` (process-global, once) | **which gossip shard a key maps to** — per-process random, so the same workload lands on different shard channels in different runs (which changes queue-fullness and drop points) | seeded by the kernel (a process seed the bundle records) |
+| `mycelium-core/src/framing.rs` — `shard_hasher()` (process-global, once) | **which gossip shard a key maps to** — and so which channel stream a send is recorded on (`gossip/shard{n}`): per-process random, so a recording replayed in **another** process diverged at its first sharded send. Every whole-node replay before 2026-10-28 (`decision_trace_replay`) ran in its recording's own process, which shares one seed, and the checked-in corpora (`x9-selective-recovery`, scenario A) record no gossip send, so none could see it | **fixed under `sim`, 2026-10-28** (adopter-surface Y2's replay, found by the first checked-in recording of a whole node): `RandomState::with_seeds` under `sim`, `RandomState::new` in a shipped build (no workload chosen ahead lands on one shard); pinned by `framing::shard_seed_tests::under_sim_a_key_maps_to_the_same_shard_in_every_process`, seen failing on the random seed (two processes, two maps) |
+| `src/agent/lifecycle.rs` `shutdown_with_timeout` — the soft-state sweep, its keys collected by iterating the store | **the order of the sweep's tombstones**, each a send through the channel seam: the store map iterates in its per-process hasher's order, so a recording replayed in another process diverged inside the sweep | **fixed 2026-10-28** (the same finding): both key lists are sorted before they are tombstoned, in every build. Seen failing first: the sort removed, the checked-in Y2 recording's replay diverged at the sweep (choices 88, 90) in two runs of three |
 | `mycelium-core/src/persistence.rs` `do_snapshot` — `entries` built by iterating the store | **the snapshot file's bytes**: two nodes holding identical logical state wrote byte-different files, so any byte-level comparison (checksum, dedup, fixture diff) was unsound — and a recorded run could not reproduce its own snapshot | **fixed 2026-09-17** (item 6 PR 4, found by replaying the WAL/snapshot scenario): entries are sorted by key before encoding, so the file is a function of the state it represents. The store's *hasher* was already seeded; its *iteration* was not, and this encoder was an order-sensitive consumer this section had not listed |
 | `src/consensus.rs` (21 `AHashMap` uses; e.g. `voters.values().flatten()` at 419) · `tasks.rs` · `emergent_groups.rs` · `capability_handle.rs` · `swim*.rs` · `wiring.rs` · `opacity.rs` · `helpers.rs` | **iteration order** where an algorithm picks "the first" or accumulates order-sensitively (voter locality sets, fan-out victim sets, group rosters) | seeded hasher under replay; each order-sensitive consumer listed in the coverage map; the static check (PR 3) forbids new unseeded maps on covered paths |
 

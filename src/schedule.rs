@@ -54,9 +54,10 @@
 //!
 //! **Not built, stated:** no cron-expression language beyond a period and a phase; no fleet-wide calendar; no
 //! exclusivity — a partition runs a slot on both sides, and only the destination's deduplication makes that one
-//! effect; no backoff of its own for failing work; no recorded-and-replayed schedule run under the kernel (the loop's
-//! clock, tick and deadline go through the seams, but no test records one and replays it); `mycelium test --faults`
-//! has no schedule class.
+//! effect; no backoff of its own for failing work; `mycelium test --faults` has no schedule class. **A recording
+//! replays it:** the loop's clock, tick and deadline go through the seams, and `tests/schedule_replay.rs` replays the
+//! corpus bundle `tests/replay-corpus/y2-schedule-run/` — a node holding a schedule, deciding a missed run and running
+//! it — decision for decision in another process.
 
 use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};

@@ -1143,11 +1143,15 @@ impl GossipAgent {
         // review: 20/20 shutdowns at a 5 ms interval).
         self.task_ctx.soft_state_gate.close();
         let my_load_prefix = format!("sys/load/{}/", self.node_id);
-        let load_keys: Vec<String> = self.kv_state.store.pin()
+        // Each list of keys swept below is sorted before it is tombstoned: the store map iterates in its hasher's
+        // order, which is per process, and the tombstones are sends through the channel seam — so in store order a
+        // recording replayed by another process diverged at the sweep (adopter-surface Y2's replay, 2026-10-28).
+        let mut load_keys: Vec<String> = self.kv_state.store.pin()
             .iter()
             .filter(|(k, v)| k.starts_with(&*my_load_prefix) && v.data.is_some())
             .map(|(k, _)| k.to_string())
             .collect();
+        load_keys.sort_unstable();
         for key in load_keys {
             let _ = kv_delete(&self.task_ctx, Arc::from(key.as_str()));
         }
@@ -1182,7 +1186,7 @@ impl GossipAgent {
         // left and peers kept routing to this node until the entry's TTL (#611's review; `gcap/` found
         // by enumerating every soft-state task). `cap-group/` stays excluded, as said below.
         let own_suffix = format!("/{}", self.node_id);
-        let agent_owned_keys: Vec<String> = self.kv_state.store.pin()
+        let mut agent_owned_keys: Vec<String> = self.kv_state.store.pin()
             .iter()
             .filter(|(k, v)| {
                 v.data.is_some() && (
@@ -1196,6 +1200,7 @@ impl GossipAgent {
             })
             .map(|(k, _)| k.to_string())
             .collect();
+        agent_owned_keys.sort_unstable();
         for key in agent_owned_keys {
             let _ = kv_delete(&self.task_ctx, Arc::from(key.as_str()));
         }
