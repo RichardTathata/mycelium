@@ -31,6 +31,7 @@ import * as path from "node:path";
 import { pathToFileURL } from "node:url";
 
 import type { MyceliumAgent } from "./agent";
+import type { ScheduleDeclaration, ScheduleRun } from "./types";
 import type { PromptSkillClient } from "./prompt_skill";
 import type { UnitHandle } from "./types";
 
@@ -71,7 +72,7 @@ export const EVE_SLOTS: readonly EveSlot[] = [
   { slot: "sandbox.ts", status: "does not map", onTheFleet: "the Vercel Sandbox API has no counterpart; confined activations (row M) are a stem's, not a tool's" },
   { slot: "sandbox/", status: "does not map", onTheFleet: "the Vercel Sandbox API has no counterpart; confined activations (row M) are a stem's, not a tool's" },
   { slot: "tools/", status: "loaded", onTheFleet: "each `defineTool` module an MCP tool, its schema the tool's, served for a node to bridge; a workflow tool (`task`, `serve`) does not map, and a tool with `approval` is refused — declare a `[[rule]]` with `requires_grant` (X3) instead" },
-  { slot: "schedules/", status: "not built", onTheFleet: "decided (Y6, option B): refused; an SDK route for running schedules is row Y12" },
+  { slot: "schedules/", status: "loaded", onTheFleet: "each `schedules/<name>.md` (frontmatter `cron`, the body its prompt) or `<name>.ts` (`defineSchedule`) a `[[schedule]]` run through the gateway (Y12), when its cron is a period and a phase in UTC; any other cron, a nested schedule or a `.ts` key besides `cron`, `markdown` and `run` is refused by name" },
   { slot: "subagents/", status: "not built", onTheFleet: "maps differently: another unit found by capability, discovery rather than a parent calling a child; this loader does not translate one" },
 ];
 
@@ -121,6 +122,32 @@ export interface EveSkill {
   readonly text: string;
 }
 
+/**
+ * One Eve schedule (`schedules/<name>.md` or `.ts`), its cron read as a period and a phase counted from the Unix epoch in
+ * UTC — Eve's own clock for a cron ("Vercel evaluates the expression in UTC", Eve 0.80.0's `docs/schedules.mdx`).
+ */
+export interface EveSchedule {
+  /** The file's path under `schedules/` without its extension: Eve's rule for a schedule's name. */
+  readonly name: string;
+  /** The fleet's schedule id: `<agent>.<name>`, so two agents' schedules of one name are two schedules. */
+  readonly id: string;
+  readonly cron: string;
+  readonly periodSecs: number;
+  readonly phaseSecs: number;
+  /** `markdown`: a prompt the agent runs on (fire-and-forget); `run`: Eve's handler, called with what the fleet has. */
+  readonly form: "markdown" | "run";
+  readonly markdown?: string;
+  readonly run?: (args: EveScheduleArgs) => Promise<void> | void;
+}
+
+/** What an Eve `run` handler is called with on the fleet: `waitUntil` as Eve's, `to` refused (channels are not built). */
+export interface EveScheduleArgs {
+  readonly to: (...args: unknown[]) => never;
+  readonly waitUntil: (task: Promise<unknown>) => void;
+  /** Eve's pre-built app principal has no counterpart: an empty object. */
+  readonly appAuth: Record<string, never>;
+}
+
 /** An Eve agent directory, read. */
 export interface EveAgent {
   /** The agent's name: one key segment, the namespace of its prompt skills. */
@@ -133,6 +160,8 @@ export interface EveAgent {
   /** `instructions.md` first, then `skills/*.md` by name. */
   readonly skills: readonly EveSkill[];
   readonly tools: readonly EveTool[];
+  /** `schedules/*`, by name: each a period and a phase, run through the gateway by {@link runEveSchedules}. */
+  readonly schedules: readonly EveSchedule[];
   /** Every entry of the directory and how it was read. */
   readonly entries: readonly EveEntry[];
 }
@@ -213,8 +242,100 @@ export function classifyEveDirectory(dir: string): EveEntry[] {
       }
       if (slot.slot === "tools/") out.push(...duplicateTools(path.join(dir, dirent.name)));
     }
+    if (slot.slot === "schedules/") out.push(...classifySchedules(path.join(dir, dirent.name)));
   }
   return out;
+}
+
+const SCHEDULE_EXTENSIONS = [".md", ...TOOL_EXTENSIONS];
+
+/** `schedules/`'s entries the loader does not take, by name: a nested schedule (Eve names it `a/b`, the fleet's id is one
+ *  key segment), a file that is neither Markdown nor a module, a dot entry (no schedule name starts with `.`), and two
+ *  files naming one schedule. */
+function classifySchedules(schedulesDir: string): EveEntry[] {
+  const out: EveEntry[] = [];
+  const byName = new Map<string, string[]>();
+  for (const inner of fs.readdirSync(schedulesDir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+    if (isColocatedTest(inner.name)) continue;
+    const sub = `schedules/${inner.name}${inner.isDirectory() ? "/" : ""}`;
+    if (inner.name.startsWith(".")) {
+      out.push({ entry: sub, status: "not built", reason: "a name starting with `.` is no schedule name" });
+    } else if (inner.isDirectory()) {
+      out.push({ entry: sub, status: "not built", reason: "a nested schedule (Eve names it by its path); a schedule id on the fleet is one key segment" });
+    } else if (!inner.isFile() || !SCHEDULE_EXTENSIONS.includes(path.extname(inner.name))) {
+      out.push({ entry: sub, status: "not built", reason: "only a Markdown or module schedule file is loaded" });
+    } else {
+      const name = inner.name.slice(0, -path.extname(inner.name).length);
+      byName.set(name, [...(byName.get(name) ?? []), inner.name]);
+    }
+  }
+  for (const files of byName.values()) {
+    if (files.length > 1) {
+      for (const f of files) out.push({ entry: `schedules/${f}`, status: "not built", reason: `two files name one schedule: ${files.join(", ")}` });
+    }
+  }
+  return out;
+}
+
+/**
+ * A 5-field cron (`minute hour day-of-month month day-of-week`, UTC) as a period and a phase from the Unix epoch, or why
+ * it is not one. A period and a phase is what a `[[schedule]]` declares (Y2: "no cron-expression language beyond a
+ * period and a phase"), so the crons that are one are read and the rest refused:
+ *
+ * - `* * * * *` — every minute; `*\/N * * * *` with N dividing 60 — every N minutes, on the hour's boundaries;
+ * - `M * * * *` — hourly at minute M; `M *\/N * * *` with N dividing 24 — every N hours at minute M;
+ * - `M H * * *` — daily at H:M; `M H * * D` — weekly on day D (0 or 7 Sunday) at H:M;
+ * - `@hourly`, `@daily` (`@midnight`), `@weekly`.
+ *
+ * A list, a range, a step anywhere else, a day of the month or a month is refused: none is one period.
+ */
+export function cronAsPeriod(cron: string): { periodSecs: number; phaseSecs: number } | { refused: string } {
+  const alias: Record<string, string> = { "@hourly": "0 * * * *", "@daily": "0 0 * * *", "@midnight": "0 0 * * *", "@weekly": "0 0 * * 0" };
+  const fields = (alias[cron.trim()] ?? cron).trim().split(/\s+/);
+  if (fields.length !== 5) return { refused: `\`${cron}\` is not a 5-field cron` };
+  const [m, h, dom, mon, dow] = fields;
+  const num = (f: string, max: number): number | null => (/^\d+$/.test(f) && Number(f) <= max ? Number(f) : null);
+  const step = (f: string): number | null => (/^\*\/\d+$/.test(f) ? Number(f.slice(2)) : null);
+  const notOne = (why: string) => ({ refused: `\`${cron}\` is not a period and a phase: ${why}` });
+  if (dom !== "*" || mon !== "*") return notOne("a day of the month or a month is a calendar");
+  const minute = num(m, 59);
+  if (h === "*" && dow === "*") {
+    if (m === "*") return { periodSecs: 60, phaseSecs: 0 };
+    const n = step(m);
+    if (n !== null) return n >= 1 && 60 % n === 0 ? { periodSecs: n * 60, phaseSecs: 0 } : notOne(`every ${n} minutes does not divide the hour`);
+    if (minute !== null) return { periodSecs: 3600, phaseSecs: minute * 60 };
+    return notOne("its minute is a list, a range or a step");
+  }
+  if (minute === null) return notOne("its minute is not one minute");
+  const hs = step(h);
+  if (hs !== null && dow === "*") {
+    return hs >= 1 && 24 % hs === 0 ? { periodSecs: hs * 3600, phaseSecs: minute * 60 } : notOne(`every ${hs} hours does not divide the day`);
+  }
+  const hour = num(h, 23);
+  if (hour === null) return notOne("its hour is a list, a range or a step");
+  const atTime = hour * 3600 + minute * 60;
+  if (dow === "*") return { periodSecs: 86_400, phaseSecs: atTime };
+  const day = num(dow, 7);
+  if (day === null) return notOne("its day of the week is a list, a range or a step");
+  // The Unix epoch began on a Thursday (day 4): a week's slot starts there.
+  return { periodSecs: 7 * 86_400, phaseSecs: (((day % 7) - 4 + 7) % 7) * 86_400 + atTime };
+}
+
+/** A Markdown schedule's frontmatter: `cron` alone, one `key: value` line, the value bare or quoted. */
+function scheduleFrontmatter(text: string): { cron: string; body: string } | { refused: string } {
+  const m = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/.exec(text);
+  if (!m) return { refused: "it does not start with YAML frontmatter declaring `cron`" };
+  let cron: string | null = null;
+  for (const line of m[1].split(/\r?\n/)) {
+    if (line.trim() === "" || line.trim().startsWith("#")) continue;
+    const kv = /^([A-Za-z_][A-Za-z0-9_-]*):\s*(.*?)\s*$/.exec(line);
+    if (!kv) return { refused: `its frontmatter line \`${line}\` is not read (one \`key: value\` per line)` };
+    if (kv[1] !== "cron") return { refused: `its frontmatter sets \`${kv[1]}\`; only \`cron\` is read` };
+    const v = kv[2];
+    cron = /^(["']).*\1$/.test(v) ? v.slice(1, -1) : v;
+  }
+  if (cron === null || cron === "") return { refused: "its frontmatter declares no `cron`" };
+  return { cron, body: m[2].replace(/^\r?\n/, "") };
 }
 
 /** Two tool modules with one name (`get_weather.ts` and `get_weather.js`): each refused by name, as Eve refuses a slot
@@ -390,7 +511,67 @@ export async function loadEveAgent(dir: string, options: LoadOptions = {}): Prom
   }
   if (toolRefusals.length > 0) throw new EveRefusedError(toolRefusals);
 
-  return { name, dir: root, eveVersion: eveVersion!, model, skills, tools, entries };
+  const schedules: EveSchedule[] = [];
+  const scheduleRefusals: EveEntry[] = [];
+  const schedulesDir = path.join(root, "schedules");
+  if (fs.existsSync(schedulesDir)) {
+    const files = fs
+      .readdirSync(schedulesDir, { withFileTypes: true })
+      .filter((d) => d.isFile() && SCHEDULE_EXTENSIONS.includes(path.extname(d.name)) && !isColocatedTest(d.name) && !d.name.startsWith("."))
+      .map((d) => d.name)
+      .sort();
+    for (const file of files) {
+      const scheduleName = file.slice(0, -path.extname(file).length);
+      const entry = `schedules/${file}`;
+      const refuse = (reason: string) => scheduleRefusals.push({ entry, status: "not built", reason });
+      if (!KEY_SEGMENT.test(scheduleName)) {
+        refuse("its name is not one key segment (lower case, digits, `_`, `-`)");
+        continue;
+      }
+      let cron: string;
+      let form: "markdown" | "run";
+      let markdown: string | undefined;
+      let run: EveSchedule["run"];
+      if (file.endsWith(".md")) {
+        const fm = scheduleFrontmatter(fs.readFileSync(path.join(schedulesDir, file), "utf8"));
+        if ("refused" in fm) {
+          refuse(fm.refused);
+          continue;
+        }
+        [cron, form, markdown] = [fm.cron, "markdown", fm.body];
+      } else {
+        const def = (await importModule(path.join(schedulesDir, file))).default as Record<string, unknown> | undefined;
+        if (typeof def !== "object" || def === null) {
+          refuse("its default export is not a schedule definition");
+          continue;
+        }
+        const extra = Object.keys(def).filter((k) => !["cron", "markdown", "run"].includes(k));
+        if (extra.length > 0) {
+          refuse(`it sets ${extra.map((k) => `\`${k}\``).join(", ")}; only \`cron\`, \`markdown\` and \`run\` are read`);
+          continue;
+        }
+        const hasMarkdown = typeof def.markdown === "string";
+        const hasRun = typeof def.run === "function";
+        if (typeof def.cron !== "string" || hasMarkdown === hasRun) {
+          refuse("a schedule is a `cron` string and exactly one of `markdown` or `run`");
+          continue;
+        }
+        cron = def.cron;
+        form = hasRun ? "run" : "markdown";
+        markdown = hasMarkdown ? (def.markdown as string) : undefined;
+        run = hasRun ? (def.run as EveSchedule["run"]) : undefined;
+      }
+      const period = cronAsPeriod(cron);
+      if ("refused" in period) {
+        refuse(period.refused);
+        continue;
+      }
+      schedules.push({ name: scheduleName, id: `${name}.${scheduleName}`, cron, ...period, form, markdown, run });
+    }
+  }
+  if (scheduleRefusals.length > 0) throw new EveRefusedError(scheduleRefusals);
+
+  return { name, dir: root, eveVersion: eveVersion!, model, skills, tools, schedules, entries };
 }
 
 /** A tool's arguments its own schema refused. */
@@ -570,4 +751,61 @@ export async function declareEveAgent(
     skills.push([agent.name, skill.name]);
   }
   return { unit, skills };
+}
+
+/** How {@link runEveSchedules} runs an agent's schedules. */
+export interface RunSchedulesOptions {
+  /** The holder band. Default: the capability {@link eveUnitToml} declares, `eve/<agent>` — the node the unit was declared
+   *  on, which {@link declareEveAgent} puts in the band. */
+  holders?: { ns: string; name: string };
+  /** What a missed run is. Default `skip`: an Eve cron does not catch up. */
+  onMissed?: ScheduleDeclaration["onMissed"];
+  /**
+   * Runs a Markdown schedule's prompt — Eve runs the agent on it and discards the output. The fleet's runtime for an
+   * agent turn is not built here (row R routes inference, not agent turns), so a Markdown schedule needs this; without
+   * it, {@link runEveSchedules} refuses the schedules by name before opening any stream.
+   */
+  onMarkdown?: (prompt: string, run: ScheduleRun, schedule: EveSchedule) => Promise<void> | void;
+  signal?: AbortSignal;
+}
+
+/**
+ * Run an Eve agent's schedules through the gateway (adopter-surface Y12): one `scheduleRuns` stream per schedule, the
+ * node `mycelium` is connected to standing in its holder band. A `run` schedule's handler is called with Eve's
+ * `waitUntil` (awaited before the run is acknowledged) and a `to` that throws — channels are not built; a Markdown
+ * schedule's prompt goes to `onMarkdown`. A handler that throws is the run's failure, acknowledged as one. Resolves
+ * when every stream ends (`signal`).
+ */
+export async function runEveSchedules(agent: EveAgent, mycelium: MyceliumAgent, options: RunSchedulesOptions = {}): Promise<void> {
+  const markdownOnly = agent.schedules.filter((sc) => sc.form === "markdown");
+  if (markdownOnly.length > 0 && !options.onMarkdown) {
+    throw new EveRefusedError(markdownOnly.map((sc) => ({
+      entry: `schedules/${sc.name}`,
+      status: "not built" as const,
+      reason: "a Markdown schedule runs the agent on its prompt, which the fleet does not do here: pass `onMarkdown`",
+    })));
+  }
+  const holders = options.holders ?? { ns: "eve", name: agent.name };
+  await Promise.all(agent.schedules.map((sc) => {
+    const decl: ScheduleDeclaration = { id: sc.id, periodSecs: sc.periodSecs, phaseSecs: sc.phaseSecs, onMissed: options.onMissed ?? "skip", holders };
+    return mycelium.runSchedule(decl, async (run) => {
+      if (sc.form === "markdown") {
+        await options.onMarkdown!(sc.markdown ?? "", run, sc);
+        return;
+      }
+      const tasks: Promise<unknown>[] = [];
+      await sc.run!({
+        to: () => {
+          throw new Error(`${sc.id}: \`to\` selects a channel, and channels are not built on the fleet (Y6)`);
+        },
+        waitUntil: (task) => {
+          tasks.push(task);
+        },
+        appAuth: {},
+      });
+      await Promise.all(tasks);
+    }, { signal: options.signal }).catch((e: unknown) => {
+      if (!options.signal?.aborted) throw e;
+    });
+  }));
 }

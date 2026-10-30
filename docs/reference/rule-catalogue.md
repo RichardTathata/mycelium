@@ -562,7 +562,7 @@ A gap is decided, not replayed: skipped, run late each under its own key (at mos
 - **Effects:** the runs it causes, each naming this record its parent
 - **Guards:** Other
 - **May trigger:** [`sched.run`](#schedrun)
-- **Code:** `schedule::decide` · **Docs:** docs/features/recurring-work.md · **Tests:** `a_missed_run_is_decided_by_the_policy_with_its_reason`, `a_missed_run_is_a_decision_in_the_trace_with_its_reason`, `run_late_catches_up_at_most_the_cap_and_counts_the_rest`, `a_failed_late_run_is_traced_and_the_runs_after_it_go_on`
+- **Code:** `schedule::decide` · **Docs:** docs/features/recurring-work.md · **Tests:** `a_missed_run_is_decided_by_the_policy_with_its_reason`, `a_missed_run_is_a_decision_in_the_trace_with_its_reason`, `run_late_catches_up_at_most_the_cap_and_counts_the_rest`, `a_failed_late_run_is_traced_and_the_runs_after_it_go_on`, `slots_missed_while_no_client_held_are_a_decision_with_its_reason`
 
 ## `sched.run`
 
@@ -578,12 +578,12 @@ After a warm-up, the rendezvous winner among the live candidates that declare th
 - **Outcomes:**
   - Action: `ran`, `ran_late`, `ran_for_gap`
   - NoAction: `not_holder`, `not_eligible`, `not_due`, `already_ran`, `last_ahead`, `ignored_last_far_ahead`
-  - Deferral: `warming_up`, `work_failed`, `work_overran`
+  - Deferral: `warming_up`, `work_failed`, `work_overran`, `unacknowledged`
   - Refusal: `declaration_mismatch`
-- **Effects:** the application's work under the idempotency key `sched/{id}/{slot}`, given one period; this node's `sched/{id}/last/{node}`; the holder's advertisement `cap/{node}/schedule/{id}.holder`, which evaporates when it stops (the lease), withdrawn when work overruns
+- **Effects:** the application's work under the idempotency key `sched/{id}/{slot}`, given one period — or, for a client's schedule (Y12), the run handed to the client on `GET /gateway/schedules/run` and done when it acknowledges, a run never acknowledged traced `unacknowledged` and not recorded; this node's `sched/{id}/last/{node}`; the holder's advertisement `cap/{node}/schedule/{id}.holder`, which evaporates when it stops (the lease), withdrawn when work overruns or a run goes unacknowledged
 - **Guards:** Other
 - **Depends on:** [`cap.match`](#capmatch), [`kv.expiry`](#kvexpiry), [`sched.missed`](#schedmissed)
-- **Code:** `schedule::{decide, Runner::tick}` · **Docs:** docs/features/recurring-work.md · **Tests:** `a_tick_runs_the_slot_due_only_on_the_holder_and_only_once`, `two_holders_under_a_partition_give_one_effect_at_the_destination`, `a_host_outside_the_holder_band_never_runs`, `work_that_overruns_its_period_is_abandoned_and_traced`, `one_id_declared_two_ways_holds_nowhere_and_one_node_runs_one_loop_per_id`, `a_run_recorded_ahead_of_this_clock_is_said_and_runs_nothing_until_reached`, `a_run_recorded_too_far_ahead_is_left_out_said_once_and_the_schedule_runs`
+- **Code:** `schedule::{decide, Runner::tick}` · **Docs:** docs/features/recurring-work.md · **Tests:** `a_tick_runs_the_slot_due_only_on_the_holder_and_only_once`, `two_holders_under_a_partition_give_one_effect_at_the_destination`, `a_host_outside_the_holder_band_never_runs`, `work_that_overruns_its_period_is_abandoned_and_traced`, `one_id_declared_two_ways_holds_nowhere_and_one_node_runs_one_loop_per_id`, `a_run_recorded_ahead_of_this_clock_is_said_and_runs_nothing_until_reached`, `a_run_recorded_too_far_ahead_is_left_out_said_once_and_the_schedule_runs`, `a_client_receives_its_schedules_runs_and_an_acknowledged_run_records_its_slot`, `a_run_never_acknowledged_is_traced_and_its_slot_is_not_recorded`, `two_clients_under_a_partition_are_handed_one_key_per_slot`
 
 ## `signal.admission`
 

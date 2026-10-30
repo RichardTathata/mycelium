@@ -1,5 +1,6 @@
 //! **Declared recurring work** (adopter-surface Y2, D15): a `[[schedule]]` in a unit file, run by the
-//! application that embeds the node.
+//! application that embeds the node — or, for an SDK agent, by the gateway's node standing in the band for the client
+//! (`GET /gateway/schedules/run`, Y12, which runs this loop with [`spawn_schedule`] and hands each run to the client).
 //!
 //! This is the voluntary singleton, not a scheduler. Every node that runs a schedule and matches its
 //! `holders` filter advertises itself a **candidate** (`cap/{node}/schedule/{id}`, carrying the period and phase it
@@ -358,6 +359,21 @@ fn declared(cap: &Capability) -> Option<(u64, u64)> {
     Some((int("period_ms")?, int("phase_ms")?))
 }
 
+/// Why a run's work did not complete: what [`spawn_schedule`]'s work returns. [`GossipAgent::run_schedule`]'s work
+/// fails with a `String`, which is [`Failed`](Self::Failed); the gateway's run stream (adopter-surface Y12) also
+/// reports a run it handed to a client that never acknowledged it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum RunFailure {
+    /// The work ran and failed: an on-time slot is retried at the next tick.
+    Failed(String),
+    /// The run was handed on and no answer came back — the client went away. Nothing is known about whether it ran,
+    /// so the slot is **not** recorded: the next holder, or this one's next tick, decides it as a slot not yet run
+    /// (on time, or as a missed run under the policy). Traced `unacknowledged`; this node withdraws its holding.
+    /// Constructed by the gateway's run stream only, so a build without `gateway` never makes one.
+    #[cfg_attr(not(feature = "gateway"), allow(dead_code))]
+    Unacknowledged(String),
+}
+
 impl crate::GossipAgent {
     /// Run a `[[schedule]]` on this node: take part in electing its holder, and while holding, run `work` for
     /// each slot under the missed-run policy — `mycelium::schedule` has the whole contract. `work` returns
@@ -375,41 +391,57 @@ impl crate::GossipAgent {
         F: Fn(ScheduledRun) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<(), String>> + Send + 'static,
     {
-        let schedule = Schedule::from_decl(decl)?;
-        if self.schedules_running.pin().insert(Arc::clone(&schedule.id), ()).is_some() {
-            return Err(GossipError::InvalidField { field: "schedule.id", reason: format!(
-                "{:?}: this node already runs a schedule with this id — one loop per id per node", decl.id
-            ) });
-        }
-        let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
-        let runs = Arc::new(AtomicU64::new(0));
-        let failures = Arc::new(AtomicU64::new(0));
-        let ctx = Arc::clone(&self.task_ctx);
-        let (caps, kv, me) = (self.capabilities(), self.kv(), self.node_id().clone());
-        let running = Arc::clone(&self.schedules_running);
-        let mut shutdown_rx = self.shutdown_tx.subscribe();
-        let (r, f) = (Arc::clone(&runs), Arc::clone(&failures));
-        self.spawn_task(async move {
-            let id = Arc::clone(&schedule.id);
-            // Frees the id however the loop ends — a stop, a shutdown, or `work` panicking through it.
-            let _free = FreeId { running, id: Arc::clone(&id) };
-            let started_ns = mycelium_core::sim_seam::mono_now_ns();
-            let mut runner = Runner { schedule, caps, kv, me, ctx, started_ns, candidacy: None, holding: None, was: None, ignored: 0, runs: r, failures: f };
-            let mut ticker = mycelium_core::sim_seam::interval_ms(
-                format!("sched/{id}"), check_interval_ms(runner.schedule.period_ms), tokio::time::MissedTickBehavior::Skip,
-            );
-            let mut stop_rx = stop_rx;
-            loop {
-                tokio::select! {
-                    _ = &mut stop_rx => break,
-                    _ = shutdown_rx.changed() => break,
-                    _ = ticker.tick() => runner.tick(&work).await,
-                }
-            }
-            drop(runner);
-        });
-        Ok(ScheduleHandle { stop: Some(stop_tx), runs, failures })
+        let work = Arc::new(work);
+        spawn_schedule(&self.task_ctx, decl, move |run| {
+            let fut = work(run);
+            async move { fut.await.map_err(RunFailure::Failed) }
+        })
     }
+}
+
+/// The schedule loop, on the node `ctx` belongs to: [`GossipAgent::run_schedule`]'s body, shared with the gateway's
+/// run stream (`GET /gateway/schedules/run`, Y12), which stands this node in the holder band for a client.
+pub(crate) fn spawn_schedule<F, Fut>(ctx: &Arc<crate::agent::TaskCtx>, decl: &ScheduleDecl, work: F) -> Result<ScheduleHandle, GossipError>
+where
+    F: Fn(ScheduledRun) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = Result<(), RunFailure>> + Send + 'static,
+{
+    let schedule = Schedule::from_decl(decl)?;
+    if ctx.schedules_running.pin().insert(Arc::clone(&schedule.id), ()).is_some() {
+        return Err(GossipError::InvalidField { field: "schedule.id", reason: format!(
+            "{:?}: this node already runs a schedule with this id — one loop per id per node", decl.id
+        ) });
+    }
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
+    let runs = Arc::new(AtomicU64::new(0));
+    let failures = Arc::new(AtomicU64::new(0));
+    let caps = crate::CapabilitiesHandle { ctx: Arc::clone(ctx) };
+    let kv = crate::KvHandle::from_core(Arc::clone(&ctx.core));
+    let me = ctx.node_id.clone();
+    let running = Arc::clone(&ctx.schedules_running);
+    let mut shutdown_rx = ctx.shutdown_tx.subscribe();
+    let (r, f) = (Arc::clone(&runs), Arc::clone(&failures));
+    let loop_ctx = Arc::clone(ctx);
+    ctx.spawn_task(async move {
+        let id = Arc::clone(&schedule.id);
+        // Frees the id however the loop ends — a stop, a shutdown, or `work` panicking through it.
+        let _free = FreeId { running, id: Arc::clone(&id) };
+        let started_ns = mycelium_core::sim_seam::mono_now_ns();
+        let mut runner = Runner { schedule, caps, kv, me, ctx: loop_ctx, started_ns, candidacy: None, holding: None, was: None, ignored: 0, runs: r, failures: f };
+        let mut ticker = mycelium_core::sim_seam::interval_ms(
+            format!("sched/{id}"), check_interval_ms(runner.schedule.period_ms), tokio::time::MissedTickBehavior::Skip,
+        );
+        let mut stop_rx = stop_rx;
+        loop {
+            tokio::select! {
+                _ = &mut stop_rx => break,
+                _ = shutdown_rx.changed() => break,
+                _ = ticker.tick() => runner.tick(&work).await,
+            }
+        }
+        drop(runner);
+    });
+    Ok(ScheduleHandle { stop: Some(stop_tx), runs, failures })
 }
 
 /// Removes a schedule's id from the node's running set when the loop's task ends, by any path.
@@ -462,7 +494,7 @@ impl Runner {
     async fn tick<F, Fut>(&mut self, work: &F)
     where
         F: Fn(ScheduledRun) -> Fut,
-        Fut: Future<Output = Result<(), String>>,
+        Fut: Future<Output = Result<(), RunFailure>>,
     {
         let s = self.schedule.clone();
         let now = mycelium_core::sim_seam::wall_now_ms();
@@ -563,7 +595,8 @@ impl Runner {
             };
             let (kind_out, reason_out) = match &outcome {
                 Some(Ok(())) => (OutcomeKind::Action, reason),
-                Some(Err(_)) => (OutcomeKind::Deferral, "work_failed"),
+                Some(Err(RunFailure::Failed(_))) => (OutcomeKind::Deferral, "work_failed"),
+                Some(Err(RunFailure::Unacknowledged(_))) => (OutcomeKind::Deferral, "unacknowledged"),
                 None => (OutcomeKind::Deferral, "work_overran"),
             };
             let mut rec = DecisionRecord::new(RUN_RULE, 1, "schedule tick", kind_out, reason_out)
@@ -579,10 +612,21 @@ impl Runner {
                     self.runs.fetch_add(1, Ordering::Relaxed);
                     self.record(rec.effect(format!("work done under {key}; this node's sched/{}/last = {written}", s.id)));
                 }
-                Some(Err(e)) => {
+                Some(Err(RunFailure::Failed(e))) => {
                     self.failures.fetch_add(1, Ordering::Relaxed);
                     let then = if kind == RunKind::OnTime { "retried at the next tick" } else { "not retried: the runs after it go on" };
                     self.record(rec.effect(format!("work failed under {key}: {e}; {then}")));
+                }
+                Some(Err(RunFailure::Unacknowledged(why))) => {
+                    // Handed on and never answered: whether it ran is unknown, so the slot is not recorded, and a
+                    // holder that cannot reach the work it stands in for stops holding.
+                    self.failures.fetch_add(1, Ordering::Relaxed);
+                    self.record(rec.effect(format!(
+                        "the run under {key} was handed on and not acknowledged ({why}); the slot is not recorded, and this node withdraws its holding and candidacy"
+                    )));
+                    self.holding = None;
+                    self.candidacy = None;
+                    return;
                 }
                 None => {
                     self.failures.fetch_add(1, Ordering::Relaxed);

@@ -56,7 +56,7 @@
 //! - `node.rs` (probes, `/consensus/{*slot}`) · `mcp_bridge.rs` (`/mcp`) · `signals.rs` · `caps.rs` ·
 //!   `mesh.rs` (rpc, scatter, mailbox, shard) · `kv.rs` · `overlay.rs` (consensus, lock, election, log,
 //!   reliable delivery) · `govern.rs` (governance + the fleet reads) · `compliance.rs` (audit, transparency,
-//!   revoke) · `llm_bridge.rs` · `federation_routes.rs`
+//!   revoke) · `llm_bridge.rs` · `federation_routes.rs` · `schedules.rs` (a client's schedule run stream, Y12)
 //! - `http_tests.rs` (module `tests`), `gateway_caller_tests.rs`, `ae_seam_tests.rs` — the test modules, as
 //!   they were; `remainder_tests.rs` — post-360 row E's
 //!
@@ -138,6 +138,8 @@ pub(crate) use mcp_bridge::note_misplaced_causal_headers;
 mod mesh;
 mod node;
 mod overlay;
+/// The schedule run stream (adopter-surface Y12): the gateway's node stands in a schedule's holder band for a client.
+mod schedules;
 mod signals;
 
 use authz::*;
@@ -154,6 +156,7 @@ use mcp_bridge::*;
 use mesh::*;
 use node::*;
 use overlay::*;
+use schedules::*;
 use signals::*;
 
 // The public surface of this module, unchanged: what `agent/mod.rs`, `a2a.rs` and `provider_enforcement.rs` name.
@@ -205,6 +208,9 @@ struct HttpCtx {
     /// Repeat answers to an already-answered request, accepted and dropped (`/stats`
     /// `rpc_respond_duplicates`): a replicated serve loop's losing replica.
     rpc_respond_duplicates: std::sync::atomic::AtomicU64,
+    /// Schedule runs handed to clients on `schedules/run` and not yet acknowledged (adopter-surface Y12), by run id;
+    /// each removed when its run ends. Lock-free (papaya): no lock-order row.
+    schedule_runs:   Arc<PendingRuns>,
 }
 
 /// Returns the process-wide Prometheus scrape handle, installing the recorder
@@ -301,6 +307,7 @@ pub(super) async fn run_http_server(
         oidc,
         served_rpcs:  Mutex::new(ServedRpcs::default()),
         rpc_respond_duplicates: std::sync::atomic::AtomicU64::new(0),
+        schedule_runs: Arc::new(papaya::HashMap::new()),
     });
 
     // ── Language-bridge gateway routes (optionally auth-protected) ────────────
@@ -321,6 +328,8 @@ pub(super) async fn run_http_server(
         .route("/rpc/call",               post(gw_rpc_call))
         .route("/rpc/serve/{kind}",       get(gw_rpc_serve))
         .route("/rpc/respond",            post(gw_rpc_respond))
+        .route("/schedules/run",          get(gw_schedule_run))
+        .route("/schedules/ack",          post(gw_schedule_ack))
         .route("/scatter",                post(gw_scatter))
         .route("/kv",                     get(gw_kv_get).post(gw_kv_set).delete(gw_kv_delete))
         .route("/kv/keys",                get(gw_kv_keys))
@@ -614,6 +623,11 @@ mod tests;
 /// Post-360 hardening row E: the gateway remainder, one test per promise.
 #[cfg(test)]
 mod remainder_tests;
+
+/// Adopter-surface Y12: a client's schedule run stream — runs received, acknowledged or not, a missed run decided
+/// while no client held, one key per slot under a partition.
+#[cfg(test)]
+mod schedule_run_tests;
 
 /// Item 7 gates (`docs/plans/v3-contracts-axis.md` §6.4, D27): the four negative cases the
 /// secure profile must refuse, the `authorized_callers` gate, and the `/a2a` principal.

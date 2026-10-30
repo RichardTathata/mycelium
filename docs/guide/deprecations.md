@@ -2199,3 +2199,19 @@ neither read nor counted. A `protected_rpc_kinds` entry named `effect.probe`, `e
 those are the operations the policy never holds. **Migration:** declare `exposure` only in units read by this
 release's tools; build `RuleDecl` literals with `exposure: None`; use `enforcement_point` until every node is
 upgraded; rename a protected kind that collides.
+
+## 73. A client runs a `[[schedule]]` through the gateway (`GET /gateway/schedules/run`, scope `schedule:run`); `units/declare`'s schedule refusal names it; `sched.run` gained the reason `unacknowledged`; the Eve loader loads `schedules/` (unreleased, adopter-surface Y12)
+
+An SDK agent can now run declared recurring work: `GET /gateway/schedules/run?toml=<one [[schedule]]>` makes the node
+a candidate in the schedule's holder band while the stream is open and hands the client each run, answered with
+`POST /gateway/schedules/ack` ([feature page](../features/recurring-work.md)). Both routes need the new scope
+`schedule:run`; a scoped token without it is refused `403` naming it, and `mesh:serve` does not open them. A unit
+still cannot carry a schedule: `POST /gateway/units/declare` answers `422 schedule section` as before, and its
+`detail` now names the run stream instead of saying no route runs one. The `sched.run` decision has a new reason,
+`unacknowledged` (a `deferral`): a run handed to a client that never answered, its slot not recorded — a consumer
+matching `sched.run`'s reasons exhaustively needs an arm for it. In `mycelium-ts`, `loadEveAgent` now loads an Eve
+`schedules/` directory whose files' crons are a period and a phase, where it refused the directory by name before,
+and refuses by name each schedule it cannot run (another cron, a nested schedule, a key it does not read).
+**Migration:** give a token that runs schedules `schedule:run`; add an arm for `unacknowledged` where `sched.run`'s
+reasons are matched; an Eve agent whose `schedules/` was refused now loads, and its schedules run only when
+`runEveSchedules` is called.

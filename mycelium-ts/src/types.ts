@@ -32,6 +32,44 @@ export interface RpcRequest {
   caller?: GatewayCaller;
 }
 
+/**
+ * A `[[schedule]]` declared through the gateway (adopter-surface Y12): one holder per slot among the nodes that run
+ * it and match `holders`, a slot `(now − phase) / period` counted from the Unix epoch, a missed run decided by
+ * `onMissed`. The node the client is connected to stands in the holder band for it.
+ */
+export interface ScheduleDeclaration {
+  /** One key segment (`[A-Za-z0-9._-]+`), the same id everywhere it is declared. */
+  id: string;
+  /** Whole seconds, `1..=604800`. */
+  periodSecs: number;
+  /** Whole seconds, `0..periodSecs`. Default 0. */
+  phaseSecs?: number;
+  /** What the holder does about slots no one ran. Default `skip`. */
+  onMissed?: "skip" | "run_late" | "run_once";
+  /** The holder band: a node advertising a capability this names may hold the schedule. */
+  holders: { ns: string; name: string };
+}
+
+/** One run of a schedule, handed to the client by `scheduleRuns` (adopter-surface Y12). */
+export interface ScheduleRun {
+  /** Answer it with `scheduleAck`; only the principal it was handed to can. */
+  runId: string;
+  schedule: string;
+  /** The slot this run is for; for a `for_gap` run, the gap's newest slot. */
+  slot: number;
+  /** `on_time` — the slot due now; `late` — a missed slot under `run_late`; `for_gap` — one run for a gap under `run_once`. */
+  kind: "on_time" | "late" | "for_gap";
+  /** The first slot this run stands for: `slot`, or the gap's oldest. */
+  firstSlot: number;
+  /** When the slot started, Unix ms. */
+  slotStartMs: number;
+  /**
+   * The run's idempotency key, `sched/{id}/{slot}`: carry it on every effect the run causes, with content that depends
+   * on the run alone, so two holders running one slot (a partition) make one effect at a destination that deduplicates.
+   */
+  operationId: string;
+}
+
 /** The verified caller context behind a gateway-dispatched RPC (core v3 item 7). */
 export interface GatewayCaller {
   principal: string;

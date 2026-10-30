@@ -84,7 +84,7 @@ refused as unknown. The test `the README's table is the loader's` in
 | `sandbox.ts` | does not map | the Vercel Sandbox API has no counterpart; confined activations (row M) are a stem's, not a tool's |
 | `sandbox/` | does not map | the Vercel Sandbox API has no counterpart; confined activations (row M) are a stem's, not a tool's |
 | `tools/` | loaded | each `defineTool` module an MCP tool, its schema the tool's, served for a node to bridge; a workflow tool (`task`, `serve`) does not map, and a tool with `approval` is refused — declare a `[[rule]]` with `requires_grant` (X3) instead |
-| `schedules/` | not built | decided (Y6, option B): refused; an SDK route for running schedules is row Y12 |
+| `schedules/` | loaded | each `schedules/<name>.md` (frontmatter `cron`, the body its prompt) or `<name>.ts` (`defineSchedule`) a `[[schedule]]` run through the gateway (Y12), when its cron is a period and a phase in UTC; any other cron, a nested schedule or a `.ts` key besides `cron`, `markdown` and `run` is refused by name |
 | `subagents/` | not built | maps differently: another unit found by capability, discovery rather than a parent calling a child; this loader does not translate one |
 
 Within a loaded slot, the loader refuses by name what it does not carry:
@@ -119,8 +119,9 @@ grant, which [`grant-rules.toml`](grant-rules.toml) shows.
 
 - **The *does not map* rows:** `sandbox/` and `getSandbox()`, Workflow hooks (`start`, `resumeHook`, `createHook`, a
   `task` or `serve` tool), and `hooks/`.
-- **The *not built* rows,** each refused by name rather than translated. Among them is `schedules/`, which was decided
-  so (Y6, option B), with the SDK route left as row Y12.
+- **The *not built* rows,** each refused by name rather than translated. `schedules/` was among them by decision (Y6,
+  option B) until row Y12 gave an SDK agent a route for running schedules: it now loads (the table above), and this
+  example's `agent/` has no `schedules/`, so the run below does not exercise it — `mycelium-ts`'s tests do.
 - **Any Eve version but 0.80.0.**
 - **Eve's exact dependency tree.** Eve 0.80.0 pins `undici` 8.10.2, which carries eight advisories fixed in 8.12.2.
   [`package.json`](package.json) overrides it to 8.12.2, so `npm audit` reports none. The `agent/` directory is

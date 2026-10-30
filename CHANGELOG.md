@@ -48,14 +48,31 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **A client runs a schedule through the gateway** (`docs/plans/adopter-surface.md` Y12; `docs/features/recurring-work.md`):
+  `GET /gateway/schedules/run?toml=<one [[schedule]]>` (scope `schedule:run`) makes the node the client is connected to
+  a candidate in the schedule's holder band while the stream is open — elected by the same rendezvous as any holder —
+  and hands the client each run it decides as a `run` event carrying the slot, the kind and the idempotency key
+  `sched/{id}/{slot}`; `POST /gateway/schedules/ack` answers it within one period, only from the principal it was
+  handed to (`403 unserved_run` otherwise, and for a second answer). A run never acknowledged — the stream closed, the
+  client gone — is traced `unacknowledged`, its slot not recorded, and the node withdraws its holding, so the next
+  holder decides the slot (on time, or as a missed run with its reason); closing the stream withdraws the candidacy.
+  Verbs: `scheduleRuns` / `scheduleAck` / `runSchedule` and `scheduleToml` in `mycelium-ts`, `schedule_runs` /
+  `schedule_ack` and `ScheduleDeclaration` in `mycelium-py`. The Eve loader (Y6) now loads `schedules/`: a Markdown or
+  `defineSchedule` file whose cron is a period and a phase in UTC (`cronAsPeriod`: every N minutes or hours dividing
+  the hour or the day, hourly, daily or weekly at a time) becomes a schedule `<agent>.<name>` run by `runEveSchedules`;
+  any other cron, a nested schedule and a key the loader does not read are refused by name. Tests:
+  `src/agent/http/schedule_run_tests.rs` (runs received and acknowledged, a run never acknowledged, slots missed while
+  no client held decided with their reason, one key per slot to two clients under a partition, the refusals and the
+  scope), both SDKs' live suites and `mycelium-ts/tests/eve.test.ts`, each seen failing under a planted fault.
+  Upgrade notes: `deprecations.md` §73.
 - **An Eve agent directory, unchanged, on a fleet** (`docs/plans/adopter-surface.md` Y6, D24;
   `examples/eve_weather/`, CI job `eve-fleet`). This is a demonstration, not a compatibility promise.
   - **The loader:** `mycelium-ts` gains `loadEveAgent`, which reads an Eve `agent/` directory installed beside the one
     `eve` version it pins, **0.80.0**. It refuses a directory beside any other version.
   - **The slot table:** every slot of Eve's agent directory has a status in `EVE_SLOTS`. A slot the loader does not
     load is refused by name, never skipped, and `EveRefusedError` names every one.
-  - **`schedules/` is refused,** by the maintainer's decision (option B); an SDK route for running schedules is the new
-    row Y12.
+  - **`schedules/` was refused,** by the maintainer's decision (option B), with an SDK route for running schedules left
+    as the new row Y12 — which, delivered, loads it (the entry above).
   - **`sandbox/`, `hooks/` and a workflow tool do not map,** and are refused as such.
   - **`subagents/`, `connections/` and `channels/` map by hand.** The loader does not translate them, so it refuses
     them as *not built*.

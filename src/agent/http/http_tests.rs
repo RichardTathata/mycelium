@@ -458,7 +458,7 @@ async fn test_gateway_units_declare_one_handle_for_a_whole_unit() {
     assert_eq!(r.status(), 400, "validate() runs: a floor of zero is refused before the hosting check");
     let r = client.post(format!("{base}/gateway/units/declare"))
         .json(&serde_json::json!({ "toml": "[[schedule]]\nid = \"close\"\nperiod_secs = 60\n[schedule.holders]\nns = \"a\"\nname = \"b\"\n" })).send().await.unwrap();
-    assert_eq!(r.status(), 422, "adopter-surface Y2: the embedding application runs a schedule");
+    assert_eq!(r.status(), 422, "adopter-surface Y2: a unit carries no schedule; Y12's run stream runs one");
     assert_eq!(r.json::<serde_json::Value>().await.unwrap()["error"], "schedule section");
     // The `schedule` capability namespace is the schedule loop's (#694's review, finding 1): refused at both doors.
     let r = client.post(format!("{base}/gateway/capability/advertise"))

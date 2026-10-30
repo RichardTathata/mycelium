@@ -14,10 +14,12 @@ import {
   EveRefusedError,
   answer,
   classifyEveDirectory,
+  cronAsPeriod,
   declareEveAgent,
   eveUnitToml,
   installedEveVersion,
   loadEveAgent,
+  runEveSchedules,
   serveEveTools,
   type EveAgent,
   type LoadOptions,
@@ -109,7 +111,7 @@ test("a directory holding every slot is named slot by slot, an unknown entry as 
 
 test("every slot the loader does not load is refused by name, never skipped", async () => {
   const refusedSlots = EVE_SLOTS.filter((s) => s.status !== "loaded");
-  expect(refusedSlots.map((s) => s.slot)).toEqual(expect.arrayContaining(["schedules/", "sandbox/", "sandbox.ts", "hooks/", "subagents/"]));
+  expect(refusedSlots.map((s) => s.slot)).toEqual(expect.arrayContaining(["sandbox/", "sandbox.ts", "hooks/", "subagents/"]));
   for (const s of refusedSlots) {
     const e = await refusal(agentDir({ ...WEATHER, [s.slot]: s.slot.endsWith("/") ? "" : "x" }));
     expect(e.refused.map((r) => r.entry)).toEqual([s.slot]);
@@ -118,9 +120,111 @@ test("every slot the loader does not load is refused by name, never skipped", as
   }
 });
 
-test("schedules/ is refused by name, and the refusal names Y12", async () => {
-  const e = await refusal(agentDir({ ...WEATHER, "schedules/daily.md": "---\ncron: 0 9 * * *\n---\nSummarise.\n" }));
-  expect(e.message).toContain("schedules/ (not built: decided (Y6, option B): refused; an SDK route for running schedules is row Y12)");
+// ── schedules/ (adopter-surface Y12) ─────────────────────────────────────────
+
+test("a cron that is a period and a phase is read as one, in UTC from the epoch", () => {
+  const cases: [string, number, number][] = [
+    ["* * * * *", 60, 0],
+    ["*/5 * * * *", 300, 0],
+    ["*/30 * * * *", 1800, 0],
+    ["15 * * * *", 3600, 900],
+    ["@hourly", 3600, 0],
+    ["30 */6 * * *", 21_600, 1800],
+    ["0 9 * * *", 86_400, 9 * 3600],
+    ["@daily", 86_400, 0],
+    ["0 0 * * 0", 604_800, 3 * 86_400],
+    ["@weekly", 604_800, 3 * 86_400],
+  ];
+  for (const [cron, periodSecs, phaseSecs] of cases) {
+    expect([cron, cronAsPeriod(cron)]).toEqual([cron, { periodSecs, phaseSecs }]);
+  }
+  // A weekly slot starts on the cron's own day and time: Monday 09:30 UTC.
+  const monday = cronAsPeriod("30 9 * * 1") as { periodSecs: number; phaseSecs: number };
+  const start = new Date((3 * monday.periodSecs + monday.phaseSecs) * 1000);
+  expect([start.getUTCDay(), start.getUTCHours(), start.getUTCMinutes()]).toEqual([1, 9, 30]);
+  expect(cronAsPeriod("0 9 * * 7")).toEqual(cronAsPeriod("0 9 * * 0"));
+});
+
+test("a cron that is not one period is refused, saying why", () => {
+  const cases: [string, string][] = [
+    ["0 9 * * 1-5", "day of the week"],
+    ["0 9,17 * * *", "hour"],
+    ["*/7 * * * *", "does not divide the hour"],
+    ["0 */5 * * *", "does not divide the day"],
+    ["0 0 1 * *", "calendar"],
+    ["0 0 * 6 *", "calendar"],
+    ["0-30 * * * *", "minute"],
+    ["60 * * * *", "minute"],
+    ["0 9 * *", "5-field"],
+    ["@yearly", "5-field"],
+  ];
+  for (const [cron, why] of cases) {
+    const got = cronAsPeriod(cron);
+    expect([cron, "refused" in got]).toEqual([cron, true]);
+    expect((got as { refused: string }).refused).toContain(why);
+  }
+});
+
+test("schedules/ loads a Markdown and a module schedule as the fleet's [[schedule]] ids", async () => {
+  const dir = agentDir({
+    ...WEATHER,
+    "schedules/daily.md": '---\ncron: "0 9 * * *"\n---\n\nSummarise the forecast.\n',
+    "schedules/sweep.ts": 'export default { cron: "*/15 * * * *", async run() {} };\n',
+    "schedules/sweep.test.ts": "x",
+  });
+  const agent = await loadEveAgent(dir, opts());
+  expect(agent.schedules.map((sc) => [sc.id, sc.name, sc.periodSecs, sc.phaseSecs, sc.form])).toEqual([
+    ["weather.daily", "daily", 86_400, 9 * 3600, "markdown"],
+    ["weather.sweep", "sweep", 900, 0, "run"],
+  ]);
+  expect(agent.schedules[0].markdown).toBe("Summarise the forecast.\n");
+});
+
+test("a schedule the fleet cannot run is refused by name, every one in one error", async () => {
+  const e = await refusal(agentDir({
+    ...WEATHER,
+    "schedules/weekdays.md": "---\ncron: 0 9 * * 1-5\n---\nGo.\n",
+    "schedules/billing/": "",
+    "schedules/.hidden.md": "---\ncron: 0 9 * * *\n---\n",
+    "schedules/extra.md": "---\ncron: 0 9 * * *\ntimezone: Europe/London\n---\nGo.\n",
+    "schedules/bare.md": "Go.\n",
+    "schedules/notes.txt": "x",
+    "schedules/twice.md": "---\ncron: 0 9 * * *\n---\nGo.\n",
+    "schedules/twice.ts": 'export default { cron: "0 9 * * *", markdown: "Go." };\n',
+  }));
+  expect(e.refused.map((r) => r.entry).sort()).toEqual([
+    "schedules/.hidden.md",
+    "schedules/billing/",
+    "schedules/notes.txt",
+    "schedules/twice.md",
+    "schedules/twice.ts",
+  ]);
+  // The classification refuses first; the files it takes are then read, and refused by name in their turn.
+  const read = await refusal(agentDir({
+    ...WEATHER,
+    "schedules/weekdays.md": "---\ncron: 0 9 * * 1-5\n---\nGo.\n",
+    "schedules/extra.md": "---\ncron: 0 9 * * *\ntimezone: Europe/London\n---\nGo.\n",
+    "schedules/bare.md": "Go.\n",
+    "schedules/both.ts": 'export default { cron: "0 9 * * *", markdown: "Go.", async run() {} };\n',
+    "schedules/keyed.ts": 'export default { cron: "0 9 * * *", markdown: "Go.", name: "x" };\n',
+    "schedules/Upper.md": "---\ncron: 0 9 * * *\n---\nGo.\n",
+  }));
+  const why = Object.fromEntries(read.refused.map((r) => [r.entry, r.reason]));
+  expect(Object.keys(why).sort()).toEqual([
+    "schedules/Upper.md", "schedules/bare.md", "schedules/both.ts", "schedules/extra.md", "schedules/keyed.ts", "schedules/weekdays.md",
+  ]);
+  expect(why["schedules/weekdays.md"]).toContain("not a period and a phase");
+  expect(why["schedules/extra.md"]).toContain("`timezone`");
+  expect(why["schedules/bare.md"]).toContain("frontmatter");
+  expect(why["schedules/both.ts"]).toContain("exactly one of");
+  expect(why["schedules/keyed.ts"]).toContain("`name`");
+  expect(why["schedules/Upper.md"]).toContain("key segment");
+});
+
+test("runEveSchedules refuses a Markdown schedule it has nothing to run with, before opening a stream", async () => {
+  const agent = await loadEveAgent(agentDir({ ...WEATHER, "schedules/daily.md": "---\ncron: 0 9 * * *\n---\nGo.\n" }), opts());
+  const never = { runSchedule: () => { throw new Error("no stream should open"); } } as unknown as Parameters<typeof runEveSchedules>[1];
+  await expect(runEveSchedules(agent, never)).rejects.toThrow(/schedules\/daily .*pass `onMarkdown`/);
 });
 
 test("an entry no slot names is refused as unknown, and every refusal is named in one error", async () => {

@@ -244,7 +244,7 @@ pub(super) async fn gw_units_declare(
     if !units.schedules.is_empty() {
         return (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({
             "error": "schedule section",
-            "detail": "[[schedule]] is run by the application that embeds the node (GossipAgent::run_schedule), which supplies the work; no route runs one for an SDK agent",
+            "detail": "[[schedule]] is not declared with a unit: a schedule runs while something supplies its work — an SDK agent opens GET /gateway/schedules/run with the section and receives its runs (scope schedule:run); an application embedding the node calls GossipAgent::run_schedule",
         }))).into_response();
     }
     // Row R: a served model's ad is not a client's to write (see `refuse_model_meta`).

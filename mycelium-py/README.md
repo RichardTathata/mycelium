@@ -276,6 +276,27 @@ async for req in agent.rpc_serve("echo"):
 
 Sends a reply to an in-flight RPC request.
 
+#### `schedule_runs(decl) → AsyncIterator[ScheduleRun]` / `schedule_ack(run, error=None)`
+
+Declare a `[[schedule]]` through the gateway and receive its runs (adopter-surface Y12, scope `schedule:run`). The node
+this agent is connected to stands in the schedule's holder band while the stream is open, so it must match `holders`:
+
+```python
+from mycelium import ScheduleDeclaration
+
+band = agent.advertise_capability("ledger", "closer", interval_secs=5)  # put the node in the band
+decl = ScheduleDeclaration("close-day", 86_400, ("ledger", "closer"), on_missed="run_once")
+async for run in agent.schedule_runs(decl):
+    close_the_day(run.operation_id)  # the key every effect of the run carries
+    agent.schedule_ack(run)          # or schedule_ack(run, error="…") for the work's failure
+```
+
+Answer every run within one period. A run you never answer — the stream closed, the process went away — is traced
+`unacknowledged` and its slot is not recorded, so the next holder decides it. A second answer, or one from another
+principal, raises `UnservedRunError`; a declaration the loader refuses, or an id the node already runs, raises
+`ScheduleRefusedError`. A partition runs a slot on each side under one key: carry `operation_id` to a destination that
+deduplicates.
+
 #### `scatter_gather(targets, method, payload, *, min_ok, timeout_secs) → list[dict]`
 
 Fan-out RPC to multiple targets; waits for at least `min_ok` replies. Raises `TimeoutError`

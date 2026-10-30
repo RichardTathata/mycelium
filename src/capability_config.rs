@@ -158,8 +158,9 @@
 //! `mycelium-wasm-host` built with feature `stem`) declares every section at startup. An SDK agent
 //! declares the non-hosting sections through `POST /gateway/units/declare`, which refuses
 //! `[hosts]`, `[[presence]]`, `[[activation]]`, `[[serve]]` and `[[schedule]]` and reports lanes, mandates and
-//! rules as not enforced. A `[[schedule]]` is run by the embedding application, which supplies the work:
-//! [`GossipAgent::run_schedule`](crate::GossipAgent::run_schedule) (`mycelium::schedule`); a stem refuses one. The `mycelium` node binary does not read the file; an application drives the
+//! rules as not enforced. A `[[schedule]]` runs while something supplies its work: the embedding application, with
+//! [`GossipAgent::run_schedule`](crate::GossipAgent::run_schedule) (`mycelium::schedule`), or an SDK agent through the
+//! gateway's run stream (`GET /gateway/schedules/run`, adopter-surface Y12); a stem refuses one. The `mycelium` node binary does not read the file; an application drives the
 //! `[[capability]]` probe loop itself with [`run_capability_probes`]. `mycelium wire-check` reads
 //! every section except `[[activation]]`, and counts a `[[serve]]` skill as an offer.
 
