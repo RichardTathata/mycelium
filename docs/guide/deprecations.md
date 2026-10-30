@@ -2159,3 +2159,16 @@ twice inside one millisecond mints one credential twice, and the second is refus
 on `CallRefusal` already needed a `_` arm (it is `#[non_exhaustive]`), which must fail closed. `GET /stats` gained
 `federation_replays_refused` and `federation_replays_undecidable`. **Migration:** mint a credential per request;
 upgrade partners' clients.
+
+## 71. A `[[rule]]` may carry an `exposure` table, refused by readers before this release; `RuleDecl` gained `exposure`; `sys/ae-exposure/` is a self-owned namespace (unreleased, adopter-surface Y5)
+
+A `[[rule]]` with an `exposure` table is an **exposure rule** — it holds new dependent work while the actor's
+unresolved closure is past a threshold ([feature page](../features/exposure-policy.md)). Every reader refuses an
+unknown key in a `[[rule]]` by name (§65, 2.38.0), so a unit carrying one is refused by a `wire-check`, a gateway, a
+stem or `mycelium test` older than this release. An exposure rule is not an allowance: `RuleDecl::to_rule` refuses
+it and the evaluator loaders skip it; one with a `requires_*` field, no threshold, a zero one or the `fleet_consensus`
+scope is refused at load. `RuleDecl` gained the field `exposure`, so an exhaustive struct literal breaks. The ledger's
+journal rows gained an optional `actor` (absent on rows written before; read as no actor). Every node built with
+`gateway` and `tls` now writes `sys/ae-exposure/{node}` on its tally heartbeat's tick — one key per node, owned, its
+foreign writes counted by the `sys/` tripwire. **Migration:** declare `exposure` only in units read by this
+release's tools; build `RuleDecl` literals with `exposure: None`.

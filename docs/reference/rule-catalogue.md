@@ -2,11 +2,12 @@
 
 **Generated** from the `RuleDescriptor`s each crate registers (`mycelium_core::rule`); do not edit. Regenerate with `UPDATE_RULE_CATALOGUE=1 cargo test -p mycelium-wasm-host --features stem --test rule_catalogue`. A rule is a decision point the substrate already has, described: what triggers it, what it reads, how it can end and why, what it writes, which guards it passes, how it may relate to other rules, where its code and tests are, and whether the decision trace records it. A descriptor executes nothing. A relationship is a hypothesis until a trace or a test shows it. The plan is `docs/plans/guarantees-and-rule-catalogue.md`.
 
-Schema `mycelium.rules/1` · 31 rules.
+Schema `mycelium.rules/1` · 32 rules.
 
 | Rule | Responsibilities | Trace | Summary |
 |---|---|---|---|
 | [`a2a.admission`](#a2aadmission) | Admission, Authority | catalogue only | An absent credential is anonymous and a present bearer's scopes are dropped: a bearer does not gate this route, an evaluator does. |
+| [`ae.exposure`](#aeexposure) | Authority | catalogue only | Hold new dependent work while the actor's unresolved closure is past a threshold — its size, or its oldest record's age, each on its own — never a probe, a compensation, a protective shed or a rescue from zero; shadow under `legacy` and `observe`, held under the enforcing profiles; a closure that cannot be read is not established, never empty. |
 | [`ae.preflight`](#aepreflight) | Authority | catalogue only | Permit, deny or indeterminate, recorded before the work runs; a refused mandate denies before policy runs, so a policy engine cannot launder a revocation. A history limit counts at the scope its rule names: this point, a consensus counter (exact; a seat claimed before admission) or the gossiped tally (approximate, and not established when its coverage is not); a fleet limit past 1 024 seats or a 24-hour window is not established. |
 | [`cap.match`](#capmatch) | Response | catalogue only | The one matching rule, shared by the resolver and the offline check: namespace, name, schema id, typed attribute constraints; opacity skips, it does not unmatch. |
 | [`cons.acceptor_memory`](#consacceptor_memory) | Response | catalogue only | An electorate member must keep its promises across a restart: no `[persistence]` is refused by name at every door, an empty store is warned once its genesis is known, and a peer's copy of this node's own record above its memory withholds the slot until the next start — detection, never prevention, and only of a copy that arrives before the next higher ballot. |
@@ -53,6 +54,25 @@ An absent credential is anonymous and a present bearer's scopes are dropped: a b
 - **Effects:** a principal whose scopes are dropped; the AE preflight decides the rest
 - **May trigger:** [`ae.preflight`](#aepreflight)
 - **Code:** `http::a2a_optional_auth` · **Docs:** docs/operations/production-readiness.md · **Tests:** `a2a_is_anonymous_dispatch_whatever_bearer_is_configured`
+
+## `ae.exposure`
+
+rev 1 · `mycelium::agent::exposure` · Authority · trace: catalogue only
+
+Hold new dependent work while the actor's unresolved closure is past a threshold — its size, or its oldest record's age, each on its own — never a probe, a compensation, a protective shed or a rescue from zero; shadow under `legacy` and `observe`, held under the enforcing profiles; a closure that cannot be read is not established, never empty.
+
+- **Trigger:** a gateway dispatch an evaluator permitted, of an actor and operation an exposure `[[rule]]` selects (adopter-surface Y5)
+- **Reads:**
+  - `the actor's unresolved closure: its effects whose outcome is not known (prepared and unanswered, unknown, unresolved) — their count and the oldest one's preparation time — from the attached exposure source, the external-effect reconciler` — scope: this enforcement point (`enforcement_point`), or this node and every peer's `sys/ae-exposure/` summary (`fleet_tally`); freshness: the source read at the decision; a peer's summary as gossiped, `control_max_staleness_ms`, under the governors' confidence bound — a peer with no summary, a stale, future-dated, unreadable or truncated one, or a node out of view whose last summary lists the actor, is unknown coverage
+  - `the node's control profile` — scope: this node; freshness: read at the decision
+- **Outcomes:**
+  - Action: `clear`, `shadow_would_hold`, `shadow_would_not_establish`
+  - Refusal: `held_size`, `held_age`, `not_established`
+  - NoAction: `exempt`, `untouched`
+- **Effects:** on a hold, the evaluator's permit becomes a deny naming the threshold, recorded in the evidence journal before nothing is dispatched; in shadow, the permit stands and what an enforcing profile would have done is added to what it checked · this node's `sys/ae-exposure/{node}` summary, on the tally heartbeat's tick
+- **Guards:** Authority
+- **Depends on:** [`ae.preflight`](#aepreflight)
+- **Code:** `exposure::{gate, judge, sum_fleet}; http::ae_decide` · **Docs:** docs/features/exposure-policy.md · **Tests:** `a_compensation_is_admitted_while_a_new_dependent_call_is_held`, `the_shadow_profile_counts_and_holds_nothing`, `the_aged_record_threshold_fires_with_the_size_threshold_unmet`, `an_unreadable_closure_is_not_established_on_an_enforcing_rung`, `the_reconcilers_own_work_and_a_grant_are_never_held`, `unknown_coverage_in_the_tally_is_not_established`
 
 ## `ae.preflight`
 

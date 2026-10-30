@@ -755,6 +755,29 @@ pub(crate) struct Settling {
     route: Option<crate::agent::route_facts::RouteFacts>,
 }
 
+/// Apply the exposure gate (adopter-surface Y5) to the evaluator's outcome. Only a permit is touched: a hold denies it
+/// naming the threshold, unknown coverage on an enforcing rung makes it not established, and in shadow the permit
+/// stands with what an enforcing rung would have done added to what it checked — for the evidence record.
+#[cfg(all(feature = "gateway", feature = "tls"))]
+fn apply_exposure(
+    outcome: Result<Option<super::action_evaluator::Decision>, super::action_evaluator::PreflightRefusal>,
+    gate: &crate::agent::exposure::Gate,
+) -> Result<Option<super::action_evaluator::Decision>, super::action_evaluator::PreflightRefusal> {
+    use crate::agent::exposure::Gate;
+    use super::action_evaluator as ae;
+    let Ok(Some(d)) = outcome else { return outcome };
+    match gate {
+        Gate::Untouched | Gate::Exempt(_) | Gate::Proceed(None) => Ok(Some(d)),
+        Gate::Proceed(Some(note)) => Ok(Some(d.checking([format!("exposure: {note}")]))),
+        Gate::Hold(why) => Err(ae::PreflightRefusal::Denied(
+            ae::Decision { verdict: ae::Verdict::Deny, reason: why.clone(), ..d }.checking(["exposure"]),
+        )),
+        Gate::NotEstablished(why) => Err(ae::PreflightRefusal::NotEstablished(
+            ae::Decision { verdict: ae::Verdict::Indeterminate, reason: format!("exposure: {why}"), ..d }.checking(["exposure"]),
+        )),
+    }
+}
+
 /// The decision half of [`ae_preflight`], from the real envelope: everything up to and including the release of the
 /// per-actor history gate. What is left — seat claims and the record — is a [`Settling`].
 #[cfg(all(feature = "gateway", feature = "tls"))]
@@ -901,6 +924,11 @@ pub(crate) async fn ae_decide(
             ))));
         }
     };
+    // Adopter-surface Y5: the causal exposure policy, read here — before the per-actor history gate, so the source's
+    // records are read under no other lock — and applied to the evaluator's permit below, before it is admitted into
+    // the history or claims a seat. This is the gateway's decision, not the shared seam: a compensation the reconciler
+    // asks `preflight` for never reaches it.
+    let exposure = crate::agent::exposure::exposure_gate(ctx, &envelope.actor, operation, resource, now_ms);
     // A fleet counter is history too: an evaluator naming one gets a view even if it asked for no window of its own.
     let history_request = history_request.or_else(|| {
         counters.iter().map(|c| c.window_ms).max().map(|window_ms| ae::HistoryRequest { window_ms, max_entries: 0 })
@@ -952,6 +980,7 @@ pub(crate) async fn ae_decide(
             },
             other => other,
         };
+        let outcome = apply_exposure(outcome, &exposure);
         let (Ok(Some(_)), Some(index), Some(version)) = (&outcome, history_index, version) else {
             break (outcome, history, false);
         };

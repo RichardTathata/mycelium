@@ -1278,7 +1278,8 @@ mod policy_diff {
         let build = |units: &[Unit], revision: &str| -> Result<Arc<dyn ActionEvaluator>, String> {
             let mut ev = ReferenceEvaluator::new(revision).with_catalogue("declaration", revision);
             for u in units {
-                for r in &u.config.rules {
+                // An exposure rule (Y5) is not an allowance: the evaluator never loads it.
+                for r in u.config.rules.iter().filter(|r| !r.is_exposure()) {
                     let rule = r.to_rule().map_err(|e| format!("unit {}: [[rule]]: {e}", u.name))?;
                     ev = ev.map_action(rule.operation.clone(), "*").allow(rule);
                 }
@@ -1322,7 +1323,7 @@ mod policy_diff {
         let mut calls: Vec<(String, String, String, serde_json::Map<String, serde_json::Value>)> = Vec::new();
         let principals: Vec<String> = units.iter().filter_map(|u| u.config.principal.clone()).collect();
         for u in units {
-            for r in &u.config.rules {
+            for r in u.config.rules.iter().filter(|r| !r.is_exposure()) {
                 let actors: Vec<String> = if r.actor == "*" { principals.iter().cloned().chain(std::iter::once("stranger".to_string())).collect() } else { vec![r.actor.clone()] };
                 let (op, res) = (r.operation.clone(), if r.resource == "*" { "resource:any".to_string() } else { r.resource.clone() });
                 let values: serde_json::Map<String, serde_json::Value> = r.requires_values.iter().filter_map(|(k, v)| serde_json::to_value(v).ok().map(|j| (k.clone(), j))).collect();

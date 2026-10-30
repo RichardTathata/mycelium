@@ -259,6 +259,12 @@ fn spawn_handler_with(
         #[cfg(all(feature = "gateway", feature = "tls"))]
         history_index: std::sync::OnceLock::new(),
         #[cfg(all(feature = "gateway", feature = "tls"))]
+        exposure_policy: std::sync::OnceLock::new(),
+        #[cfg(all(feature = "gateway", feature = "tls"))]
+        exposure_source: std::sync::OnceLock::new(),
+        #[cfg(all(feature = "gateway", feature = "tls"))]
+        exposure_counters: crate::agent::exposure::ExposureCounters::default(),
+        #[cfg(all(feature = "gateway", feature = "tls"))]
         ae_tally_heartbeat: std::sync::atomic::AtomicBool::new(false),
         #[cfg(all(feature = "gateway", feature = "tls"))]
         ae_tally_lock: std::sync::Mutex::new(()),
@@ -4327,6 +4333,12 @@ async fn test_subscribe_notified_via_gossip() {
         evidence_journal: std::sync::OnceLock::new(),
         #[cfg(all(feature = "gateway", feature = "tls"))]
         history_index: std::sync::OnceLock::new(),
+        #[cfg(all(feature = "gateway", feature = "tls"))]
+        exposure_policy: std::sync::OnceLock::new(),
+        #[cfg(all(feature = "gateway", feature = "tls"))]
+        exposure_source: std::sync::OnceLock::new(),
+        #[cfg(all(feature = "gateway", feature = "tls"))]
+        exposure_counters: crate::agent::exposure::ExposureCounters::default(),
         #[cfg(all(feature = "gateway", feature = "tls"))]
         ae_tally_heartbeat: std::sync::atomic::AtomicBool::new(false),
         #[cfg(all(feature = "gateway", feature = "tls"))]

@@ -437,6 +437,10 @@ struct Stored {
     /// X4's correlation, carried into every record this operation produces; absent on a ledger written before it.
     #[serde(default)]
     correlation: Option<String>,
+    /// The actor the effect is attributed to — its composition's verified principal (adopter-surface Y5's exposure
+    /// source reads it); absent for an effect applied without a composition, and on a ledger written before it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    actor: Option<String>,
 }
 
 impl Stored {
@@ -458,7 +462,7 @@ impl Stored {
         }
     }
 
-    fn prepared(ext: &ExternalEffect, scope: &str, now_ms: u64, record_hash: &str, correlation: Option<String>) -> Self {
+    fn prepared(ext: &ExternalEffect, scope: &str, now_ms: u64, record_hash: &str, correlation: Option<String>, actor: Option<String>) -> Self {
         Self {
             operation_id: ext.effect.operation_id.to_string(),
             dedup_scope: scope.to_string(),
@@ -477,7 +481,14 @@ impl Stored {
             evidence_hash: None,
             compensated_by: None,
             correlation,
+            actor: actor.or_else(|| ext.composition.as_ref().map(|c| c.principal.to_string())),
         }
+    }
+
+    /// Whether this record's outcome is not known — prepared and unanswered, unknown, or escalated unresolved: what an
+    /// actor's unresolved closure holds (Y5). An unreadable state reads as unresolved, the safest reading.
+    fn outcome_unknown(&self) -> bool {
+        matches!(EffectState::parse(&self.state).unwrap_or(EffectState::Unresolved), EffectState::Prepared | EffectState::Unknown | EffectState::Unresolved)
     }
 }
 
@@ -507,6 +518,29 @@ impl Ledger {
         self.records.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// Every actor's unresolved closure as this ledger holds it (Y5): the attributed records whose outcome is not known,
+    /// counted, and the oldest one's preparation time. Under the map's lock, read and released (row 68); nothing is
+    /// appended.
+    fn exposures(&self) -> HashMap<String, crate::agent::exposure::ActorExposure> {
+        let mut out: HashMap<String, crate::agent::exposure::ActorExposure> = HashMap::new();
+        for s in self.map().values().filter(|s| s.outcome_unknown()) {
+            let Some(actor) = &s.actor else { continue };
+            let e = out.entry(actor.clone()).or_default();
+            *e = e.plus(crate::agent::exposure::ActorExposure { unresolved: 1, oldest_at_ms: Some(s.prepared_at_ms) });
+        }
+        out
+    }
+
+    /// One actor's unresolved closure (Y5) — [`exposures`](Self::exposures) for one actor, one pass under the lock.
+    fn exposure_of(&self, actor: &str) -> crate::agent::exposure::ActorExposure {
+        self.map()
+            .values()
+            .filter(|s| s.actor.as_deref() == Some(actor) && s.outcome_unknown())
+            .fold(crate::agent::exposure::ActorExposure::default(), |e, s| {
+                e.plus(crate::agent::exposure::ActorExposure { unresolved: 1, oldest_at_ms: Some(s.prepared_at_ms) })
+            })
+    }
+
     /// Append one record's whole row. The caller has already released the map.
     async fn write(&self, s: &Stored) -> Result<(), ExternalRefusal> {
         let bytes = serde_json::to_vec(s).map_err(ledger)?;
@@ -529,7 +563,7 @@ impl Ledger {
     /// re-prepared under this effect's declaration. The map is written first and the journal second: the
     /// record is not handed back — and nothing is sent — until the append is acknowledged, and a fresh record
     /// whose append fails is taken out of the map again.
-    async fn prepare(&self, ext: &ExternalEffect, scope: &str, now_ms: u64, record_hash: &str, correlation: Option<String>) -> Result<(LedgerRecord, bool), ExternalRefusal> {
+    async fn prepare(&self, ext: &ExternalEffect, scope: &str, now_ms: u64, record_hash: &str, correlation: Option<String>, actor: Option<String>) -> Result<(LedgerRecord, bool), ExternalRefusal> {
         let op = ext.effect.operation_id.as_str();
         let (row, fresh, write) = {
             let mut map = self.map();
@@ -543,7 +577,7 @@ impl Ledger {
                     // The declaration is this effect's; the history — probes, retries, the first unknown, the
                     // evidence hash, the compensation link — stays, **never reset**: one operation's history is read
                     // conservatively across its episodes, as the SQLite ledger read it (#677's review, finding 2).
-                    let fresh = Stored::prepared(ext, scope, now_ms, record_hash, correlation.or_else(|| s.correlation.clone()));
+                    let fresh = Stored::prepared(ext, scope, now_ms, record_hash, correlation.or_else(|| s.correlation.clone()), actor);
                     s.dedup_scope = fresh.dedup_scope;
                     s.class = fresh.class;
                     s.compensation = fresh.compensation;
@@ -555,11 +589,14 @@ impl Ledger {
                     s.max_age_ms = fresh.max_age_ms;
                     s.record_hash = fresh.record_hash;
                     s.correlation = fresh.correlation;
+                    if fresh.actor.is_some() {
+                        s.actor = fresh.actor;
+                    }
                     (s.clone(), true, true)
                 }
                 Some(s) => (s.clone(), false, false),
                 None => {
-                    let s = Stored::prepared(ext, scope, now_ms, record_hash, correlation);
+                    let s = Stored::prepared(ext, scope, now_ms, record_hash, correlation, actor);
                     map.insert(op.to_string(), s.clone());
                     (s, true, true)
                 }
@@ -576,6 +613,11 @@ impl Ledger {
 
     fn get(&self, op: &OperationId) -> Result<Option<LedgerRecord>, ExternalRefusal> {
         Ok(self.map().get(op.as_str()).map(Stored::record))
+    }
+
+    /// The actor `op`'s record is attributed to, if any (Y5) — a compensation inherits it.
+    fn actor(&self, op: &OperationId) -> Option<String> {
+        self.map().get(op.as_str()).and_then(|s| s.actor.clone())
     }
 
     fn correlation(&self, op: &OperationId) -> Option<String> {
@@ -830,6 +872,20 @@ pub struct Reconciler<D> {
     evidence: Option<(Arc<crate::EvidenceJournal>, crate::NodeId)>,
 }
 
+/// **The reconciler is an exposure source** (adopter-surface Y5): an actor's unresolved closure is its effects in this
+/// ledger whose outcome is not known — prepared and unanswered, unknown, or unresolved — attributed by the effect's
+/// composition. An effect applied without a composition names no actor and counts toward none. Attach it with
+/// `GossipAgent::with_exposure_source`.
+impl<D: ExternalDestination + 'static> crate::agent::exposure::ExposureSource for Reconciler<D> {
+    fn exposure_of(&self, actor: &str) -> Result<crate::agent::exposure::ActorExposure, String> {
+        Ok(self.ledger.exposure_of(actor))
+    }
+
+    fn exposures(&self) -> Result<Vec<(String, crate::agent::exposure::ActorExposure)>, String> {
+        Ok(self.ledger.exposures().into_iter().collect())
+    }
+}
+
 impl<D: ExternalDestination> Reconciler<D> {
     /// Open (or create) the ledger at `ledger_path` for `destination`, under `egress`.
     /// Open a reconciler over the ledger at `ledger_path` (a journal file of this reconciler's own; a second
@@ -964,12 +1020,32 @@ impl<D: ExternalDestination> Reconciler<D> {
     /// `correlation` is carried into every record this operation produces afterwards — the probe, the retry,
     /// the compensation, the leave. The fields are recorded; nothing here reads them (adopter-surface X9).
     pub async fn apply_caused(&self, ext: &ExternalEffect, authority: Option<&ResourceAuthority>, causal: crate::causal::CausalFields) -> Result<DestinationCommit, ExternalRefusal> {
+        self.apply_attributed(ext, authority, causal, None).await
+    }
+
+    /// [`apply_caused`](Self::apply_caused) **attributed to `actor`** (adopter-surface Y5): the record names the actor
+    /// the effect is done for, so the exposure policy counts it in that actor's unresolved closure while its outcome is
+    /// not known. A composed effect is attributed to its composition's principal already; naming another actor for one
+    /// is refused on the attribution leg, before anything is written.
+    pub async fn apply_as(&self, actor: &crate::mandate::PrincipalId, ext: &ExternalEffect, authority: Option<&ResourceAuthority>, causal: crate::causal::CausalFields) -> Result<DestinationCommit, ExternalRefusal> {
+        if let Some(c) = &ext.composition
+            && c.principal != *actor
+        {
+            return Err(self.refuse(ExternalRefusal::Effect(EffectRefusal::Unauthorised {
+                leg: crate::effects::CompositionLeg::Attribution,
+                reason: format!("the effect is composed for {}, not {actor}", c.principal),
+            })));
+        }
+        self.apply_attributed(ext, authority, causal, Some(actor.to_string())).await
+    }
+
+    async fn apply_attributed(&self, ext: &ExternalEffect, authority: Option<&ResourceAuthority>, causal: crate::causal::CausalFields, actor: Option<String>) -> Result<DestinationCommit, ExternalRefusal> {
         self.gate_egress()?;
         let now_ms = Self::now_ms();
         self.check_composed(ext, authority, now_ms)?;
         let scope = self.destination.dedup_scope().to_string();
         let record_hash = prepared_record_hash(ext, &scope);
-        let (record, fresh) = self.ledger.prepare(ext, &scope, now_ms, &record_hash, causal.correlation).await?;
+        let (record, fresh) = self.ledger.prepare(ext, &scope, now_ms, &record_hash, causal.correlation, actor).await?;
         if !fresh {
             self.bind(&record, ext)?;
             match record.state {
@@ -1193,7 +1269,7 @@ impl<D: ExternalDestination> Reconciler<D> {
         let scope = self.destination.dedup_scope().to_string();
         let record_hash = prepared_record_hash(compensation, &scope);
         // The compensation inherits the compensated record's correlation: one run, read as one chain.
-        let (existing, fresh) = self.ledger.prepare(compensation, &scope, now_ms, &record_hash, self.ledger.correlation(op)).await?;
+        let (existing, fresh) = self.ledger.prepare(compensation, &scope, now_ms, &record_hash, self.ledger.correlation(op), self.ledger.actor(op)).await?;
         if !fresh {
             self.bind(&existing, compensation)?;
             return Err(self.refuse(ExternalRefusal::State { state: existing.state, needed: "a compensation not yet sent" }));
@@ -1432,13 +1508,13 @@ mod tests {
     async fn a_failed_record_re_prepared_keeps_its_probes_retries_and_first_unknown() {
         let ledger = Ledger::open(&ledger_file("failed-history")).unwrap();
         let ext = an_effect("op-7", EffectClass::Idempotent { compensation: None });
-        let (_, fresh) = ledger.prepare(&ext, "nowhere", 1_000, "h1", Some("run-7".into())).await.unwrap();
+        let (_, fresh) = ledger.prepare(&ext, "nowhere", 1_000, "h1", Some("run-7".into()), None).await.unwrap();
         assert!(fresh);
         ledger.set_state(&ext.effect.operation_id, EffectState::Unknown, Some(1_000)).await.unwrap();
         ledger.claim_probe(&ext.effect.operation_id, 0).await.unwrap();
         ledger.claim_retry(&ext.effect.operation_id).await.unwrap();
         ledger.set_state(&ext.effect.operation_id, EffectState::Failed, None).await.unwrap();
-        let (again, fresh) = ledger.prepare(&ext, "nowhere", 2_000, "h2", None).await.unwrap();
+        let (again, fresh) = ledger.prepare(&ext, "nowhere", 2_000, "h2", None, None).await.unwrap();
         assert!(fresh, "a failed record is re-prepared");
         assert_eq!(again.state, EffectState::Prepared);
         assert_eq!(again.prepared_at_ms, 2_000, "the declaration is this effect's");

@@ -902,6 +902,8 @@ pub(crate) fn start_heartbeat(ctx: &Arc<TaskCtx>) {
                 _ = ticker.tick() => {
                     write_heartbeat(&task_ctx);
                     let now = task_ctx.hlc.decision_now_ms();
+                    // Adopter-surface Y5: the exposure summary rides the same tick and the same staleness bound.
+                    crate::agent::exposure::publish_summary(&task_ctx, now);
                     withdraw_aged_entries(&task_ctx, now);
                     collect_residue(&task_ctx, now);
                 }

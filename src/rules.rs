@@ -112,6 +112,20 @@ pub static RULES: &[RuleDescriptor] = &[
         summary: "Permit, deny or indeterminate, recorded before the work runs; a refused mandate denies before policy runs, so a policy engine cannot launder a revocation. A history limit counts at the scope its rule names: this point, a consensus counter (exact; a seat claimed before admission) or the gossiped tally (approximate, and not established when its coverage is not); a fleet limit past 1 024 seats or a 24-hour window is not established.",
     },
     RuleDescriptor {
+        id: "ae.exposure", revision: 1, subsystem: "mycelium::agent::exposure", responsibilities: &[Authority],
+        trigger: "a gateway dispatch an evaluator permitted, of an actor and operation an exposure `[[rule]]` selects (adopter-surface Y5)",
+        inputs: &[
+            Input { source: "the actor's unresolved closure: its effects whose outcome is not known (prepared and unanswered, unknown, unresolved) — their count and the oldest one's preparation time — from the attached exposure source, the external-effect reconciler", scope: "this enforcement point (`enforcement_point`), or this node and every peer's `sys/ae-exposure/` summary (`fleet_tally`)", freshness: "the source read at the decision; a peer's summary as gossiped, `control_max_staleness_ms`, under the governors' confidence bound — a peer with no summary, a stale, future-dated, unreadable or truncated one, or a node out of view whose last summary lists the actor, is unknown coverage" },
+            Input { source: "the node's control profile", scope: "this node", freshness: "read at the decision" },
+        ],
+        outcomes: &[Outcome { kind: Action, reasons: &["clear", "shadow_would_hold", "shadow_would_not_establish"] }, Outcome { kind: Refusal, reasons: &["held_size", "held_age", "not_established"] }, Outcome { kind: NoAction, reasons: &["exempt", "untouched"] }],
+        effects: &["on a hold, the evaluator's permit becomes a deny naming the threshold, recorded in the evidence journal before nothing is dispatched; in shadow, the permit stands and what an enforcing profile would have done is added to what it checked", "this node's `sys/ae-exposure/{node}` summary, on the tally heartbeat's tick"],
+        guards: &[Guard::Authority], may_trigger: &[], may_inhibit: &[], depends_on: &["ae.preflight"],
+        symbol: "exposure::{gate, judge, sum_fleet}; http::ae_decide", docs: "docs/features/exposure-policy.md",
+        tests: &["a_compensation_is_admitted_while_a_new_dependent_call_is_held", "the_shadow_profile_counts_and_holds_nothing", "the_aged_record_threshold_fires_with_the_size_threshold_unmet", "an_unreadable_closure_is_not_established_on_an_enforcing_rung", "the_reconcilers_own_work_and_a_grant_are_never_held", "unknown_coverage_in_the_tally_is_not_established"], trace: CatalogueOnly,
+        summary: "Hold new dependent work while the actor's unresolved closure is past a threshold — its size, or its oldest record's age, each on its own — never a probe, a compensation, a protective shed or a rescue from zero; shadow under `legacy` and `observe`, held under the enforcing profiles; a closure that cannot be read is not established, never empty.",
+    },
+    RuleDescriptor {
         id: "provider.enforcement", revision: 1, subsystem: "mycelium::agent::provider_enforcement", responsibilities: &[Authority],
         trigger: "a protected RPC kind arriving at a provider with enforcement on",
         inputs: &[Input { source: "the node's evaluator and execution authority; the carried mandate", scope: "this node", freshness: "the decision clock" }],

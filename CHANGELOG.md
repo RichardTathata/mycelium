@@ -35,6 +35,22 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The causal exposure policy** (`docs/plans/adopter-surface.md` Y5, D18; `docs/features/exposure-policy.md`): a
+  `[[rule]]` with an `exposure` table (`max_unresolved`, `max_oldest_age_ms`, `scope`) holds new dependent work at the
+  gateway's doors while the actor's **unresolved closure** — its effects whose outcome is not known, prepared and
+  unanswered, unknown or unresolved — holds that many, or its oldest is that old, each threshold on its own
+  (`the_aged_record_threshold_fires_with_the_size_threshold_unmet`). It never holds a probe, a compensation, a
+  protective shed or a rescue from zero, structurally: the gate is in the gateway's decision (`ae_decide`), not the
+  shared seam a compensation is decided through, and the reconciler's own operations and a grant's are exempt at a
+  door (`a_compensation_is_admitted_while_a_new_dependent_call_is_held`, whose plant — the gate moved into the seam —
+  refuses the compensation). `GossipAgent::with_exposure_policy`, `with_exposure_source` and `exposure_counts`;
+  `mycelium::exposure`; the external-effect `Reconciler` is a source (`Reconciler::apply_as` attributes an effect to
+  an actor; a composed one is attributed to its composition's principal). Counted at the enforcement point or by a
+  gossiped fleet tally (`sys/ae-exposure/{node}`, on the K2 tally heartbeat's tick) whose unknown coverage fails
+  closed (`unknown_coverage_in_the_tally_is_not_established`). **Shadow first:** under `legacy` and `observe` it
+  decides and counts and holds nothing (`the_shadow_profile_counts_and_holds_nothing`). Rule `ae.exposure` in the
+  catalogue. Not built: the exact `fleet_consensus` scope (refused at load), a gate at a tuple take or a signal emit
+  (neither has an enforcement point), signed summaries. Upgrade note: `deprecations.md` §71.
 - **Declared recurring work** (`docs/plans/adopter-surface.md` Y2, D15; `docs/features/recurring-work.md`): a unit file's
   `[[schedule]]` (`id`, `period_secs` up to a week, `phase_secs`, `on_missed`, a `[schedule.holders]` filter), run by
   the embedding application with `GossipAgent::run_schedule(&decl, work)` (`mycelium::schedule`; one loop per id per

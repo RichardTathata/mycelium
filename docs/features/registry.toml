@@ -139,6 +139,14 @@ ids = ["concept:recurring-work", "unit:[[schedule]]", "rule:sched.run", "rule:sc
 links = ["concept:unit-file", "concept:side-effect-contract", "concept:decision-trace"]
 
 [[feature]]
+name = "Causal exposure policy"
+page = "exposure-policy.md"
+example = "none"
+example_watch = ["exposure_policy", "causal_exposure", "exposure"]
+ids = ["concept:exposure-policy", "rule:ae.exposure"]
+links = ["concept:side-effect-contract", "concept:selective-recovery", "concept:history-scope"]
+
+[[feature]]
 name = "Span export"
 page = "span-export.md"
 example = "none"
