@@ -1,0 +1,18 @@
+{
+  "name": "weather",
+  "private": true,
+  "type": "module",
+  "description": "Eve's tiny example, the weather assistant, run unchanged on a fleet (adopter-surface Y6)",
+  "engines": {
+    "node": ">=24"
+  },
+  "dependencies": {
+    "ai": "7.0.142",
+    "eve": "0.80.0",
+    "zod": "4.6.7"
+  },
+  "overrides": {
+    "undici": "8.12.2"
+  },
+  "//": "undici overridden to 8.12.2: eve 0.80.0 pins 8.10.2, which carries eight advisories fixed in 8.12.2 (2026-10-15); the agent/ directory is unchanged, its dependency tree is not Eve's exactly"
+}

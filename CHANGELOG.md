@@ -75,6 +75,33 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **An Eve agent directory, unchanged, on a fleet** (`docs/plans/adopter-surface.md` Y6, D24;
+  `examples/eve_weather/`, CI job `eve-fleet`). This is a demonstration, not a compatibility promise.
+  - **The loader:** `mycelium-ts` gains `loadEveAgent`, which reads an Eve `agent/` directory installed beside the one
+    `eve` version it pins, **0.80.0**. It refuses a directory beside any other version.
+  - **The slot table:** every slot of Eve's agent directory has a status in `EVE_SLOTS`. A slot the loader does not
+    load is refused by name, never skipped, and `EveRefusedError` names every one.
+  - **`schedules/` is refused,** by the maintainer's decision (option B); an SDK route for running schedules is the new
+    row Y12.
+  - **`sandbox/`, `hooks/` and a workflow tool do not map,** and are refused as such.
+  - **`subagents/`, `connections/` and `channels/` map by hand.** The loader does not translate them, so it refuses
+    them as *not built*.
+  - **A tool with `approval` is refused,** and the refusal names the `[[rule]]` with `requires_grant` to declare instead.
+  - **What the fleet gets:** `serveEveTools` serves the tools as an MCP server a node bridges. Arguments are checked
+    with the tool's Standard Schema. `declareEveAgent` declares the unit (`eveUnitToml`, `runtime = "typescript"`) and
+    writes the instructions and Markdown skills as prompt skills.
+  - **The demonstration:** `examples/eve_weather/run_demo.mjs` checks that the three files of the example's `agent/`
+    are byte for byte the README example of the pinned package. It runs them on three nodes from
+    `examples/eve_fleet_node.rs` (`--features compliance,llm`) and calls `get_weather` through `/mcp`. The forecaster
+    is permitted. A visitor is refused, and `mycelium explain --correlation` reads the refusal back from the deciding
+    gateway's journal. Then `mycelium test --faults grant` runs over the agent's unit with a grant-required rule on
+    the tool, and shows the grant held across a restart.
+  - **The tests:** `mycelium-ts/tests/eve.test.ts` checks the README's slot table against the loader, walks a
+    directory holding every slot, and covers each refusal and the MCP answers. Each test was seen failing under a
+    planted fault.
+  - **Needs:** Node 24, Eve's own floor, for the demonstration. The node-free tests run under the SDK's Node 20.
+  - **Dependencies:** the example locks `undici` at 8.12.2 over Eve's pinned 8.10.2, which carries eight advisories.
+
 - **The causal exposure policy** (`docs/plans/adopter-surface.md` Y5, D18; `docs/features/exposure-policy.md`): a
   `[[rule]]` with an `exposure` table (`max_unresolved`, `max_oldest_age_ms`, `scope`) holds new work at the gateway's
   doors that **extends an unresolved closure** — a request whose `_meta.parent` is an effect whose outcome is not known

@@ -1,0 +1,17 @@
+# The operator's policy for the Eve agent's tool, appended to the unit the loader writes (adopter-surface Y6). Eve's
+# approval policies are not carried: on the fleet a grant is declared here, verified where the call is enforced.
+#
+# `get_weather` waits for a grant (X3): the agent may call it only under a grant the supervisor issues for that one
+# call — approval that is default-deny. `mycelium test --faults grant` drives these two rules on the declaration's own
+# fleet: silence refuses, a principal no rule names is refused the issue, the supervisor's grant admits the call once,
+# and the grant holds across a restart of the agent's node.
+[[rule]]
+actor          = "weather"
+operation      = "tools/call"
+resource       = "tool:get_weather"
+requires_grant = true
+
+[[rule]]
+actor     = "supervisor"
+operation = "grant.issue"
+resource  = "tool:get_weather"
