@@ -594,7 +594,7 @@ pub(crate) fn tally_state_counted(
 /// Whether `node` is a member this node can verify: an identity record it trusts — the keys every verifier of a
 /// node's signature uses (`CoreCtx::trusted_keys`: sealed identity records, certificate standing, revocations) — and
 /// not removed. A node id nobody issued an identity for is not one.
-fn verified_member(ctx: &TaskCtx, node: &str) -> bool {
+pub(crate) fn verified_member(ctx: &TaskCtx, node: &str) -> bool {
     let Ok(id) = node.parse::<mycelium_core::NodeId>() else { return false };
     !ctx.removed.is_node_removed(&id) && !ctx.trusted_keys(&id).is_empty()
 }
@@ -904,6 +904,7 @@ pub(crate) fn start_heartbeat(ctx: &Arc<TaskCtx>) {
                     let now = task_ctx.hlc.decision_now_ms();
                     // Adopter-surface Y5: the exposure summary rides the same tick and the same staleness bound.
                     crate::agent::exposure::publish_summary(&task_ctx, now);
+                    crate::agent::exposure::collect_summaries(&task_ctx, now);
                     withdraw_aged_entries(&task_ctx, now);
                     collect_residue(&task_ctx, now);
                 }

@@ -12,13 +12,16 @@ while the actor's unresolved closure — its effects whose outcome is not known 
   `a_compensation_is_admitted_while_a_new_dependent_call_is_held` — that is the plant.
 - **The exposure is read before the per-actor history gate**, so the ledger's map (lock-order row 68) is never taken
   under another lock.
-- **The reconciler names an actor per row** (`Stored::actor`, from `Reconciler::apply_as` or a composition's
-  principal). An effect applied with neither counts toward nobody's exposure.
-- **The fleet scope is a gauge, not a count of permits:** one `sys/ae-exposure/{node}` summary per node, republished
-  on the K2 tally heartbeat's tick. A node out of view whose last summary lists the actor is unknown coverage (its
-  effects are still unresolved); a departed one is counted.
-- **Shadow under `legacy` and `observe`** — deliberately unlike the governors, for which `legacy` consults nothing:
-  attaching an exposure policy starts in shadow on a node that has not stepped the ladder.
+- **The input is the request's causal cone, not its actor** (#701's review, finding 1): a request extends an
+  unresolved closure only when its `parent` names an unresolved effect's record or its `correlation` that effect's run.
+  The first build attributed effects to actors and held all of an actor's work; independent work passing is the row's
+  own promise (X9 leaves independent work untouched).
+- **The fleet scope is a gauge, not a count of permits:** one `sys/ae-exposure/{node}` summary per node, its records'
+  names digested, republished on the K2 tally heartbeat's tick and collected as K2 collects a non-peer's tally. A peer's
+  `departed` mark is not read; a member out of view whose last summary lists what a request extends is unknown coverage
+  until it departs or passes the history horizon.
+- **`legacy` touches nothing**, as for every governor; `observe` is the shadow rung. A gate is counted only once the
+  evaluator permitted.
 - Not built: the consensus scope (a seat held until resolution has no fixed lease), a gate at a tuple take or a
   signal emit (no enforcement point there).
 

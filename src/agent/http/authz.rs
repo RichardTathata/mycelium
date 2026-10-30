@@ -755,9 +755,10 @@ pub(crate) struct Settling {
     route: Option<crate::agent::route_facts::RouteFacts>,
 }
 
-/// Apply the exposure gate (adopter-surface Y5) to the evaluator's outcome. Only a permit is touched: a hold denies it
-/// naming the threshold, unknown coverage on an enforcing rung makes it not established, and in shadow the permit
-/// stands with what an enforcing rung would have done added to what it checked — for the evidence record.
+/// Apply the exposure gate (adopter-surface Y5) to the evaluator's outcome. Only a permit is touched (and the caller counts
+/// the gate only when the evaluator permitted, once, so a call the policy refused is never one exposure held): a hold denies it naming the threshold, unknown
+/// coverage on an enforcing rung makes it not established, and in shadow the permit stands with what an enforcing rung
+/// would have done added to what it checked — for the evidence record.
 #[cfg(all(feature = "gateway", feature = "tls"))]
 fn apply_exposure(
     outcome: Result<Option<super::action_evaluator::Decision>, super::action_evaluator::PreflightRefusal>,
@@ -767,8 +768,8 @@ fn apply_exposure(
     use super::action_evaluator as ae;
     let Ok(Some(d)) = outcome else { return outcome };
     match gate {
-        Gate::Untouched | Gate::Exempt(_) | Gate::Proceed(None) => Ok(Some(d)),
-        Gate::Proceed(Some(note)) => Ok(Some(d.checking([format!("exposure: {note}")]))),
+        Gate::Untouched | Gate::Exempt(_) | Gate::Independent | Gate::Clear => Ok(Some(d)),
+        Gate::ShadowWouldHold(note) | Gate::ShadowWouldNotEstablish(note) => Ok(Some(d.checking([format!("exposure: {note}")]))),
         Gate::Hold(why) => Err(ae::PreflightRefusal::Denied(
             ae::Decision { verdict: ae::Verdict::Deny, reason: why.clone(), ..d }.checking(["exposure"]),
         )),
@@ -928,7 +929,9 @@ pub(crate) async fn ae_decide(
     // records are read under no other lock — and applied to the evaluator's permit below, before it is admitted into
     // the history or claims a seat. This is the gateway's decision, not the shared seam: a compensation the reconciler
     // asks `preflight` for never reaches it.
-    let exposure = crate::agent::exposure::exposure_gate(ctx, &envelope.actor, operation, resource, now_ms);
+    let exposure = crate::agent::exposure::exposure_gate(
+        ctx, &envelope.actor, operation, resource, envelope.parent.as_deref(), envelope.correlation.as_deref(), now_ms,
+    );
     // A fleet counter is history too: an evaluator naming one gets a view even if it asked for no window of its own.
     let history_request = history_request.or_else(|| {
         counters.iter().map(|c| c.window_ms).max().map(|window_ms| ae::HistoryRequest { window_ms, max_entries: 0 })
@@ -947,6 +950,8 @@ pub(crate) async fn ae_decide(
     // decided would otherwise count from an earlier instant than the permits admitted meanwhile.
     let history_now = ctx.hlc.decision_now_ms().max(now_ms);
     let mut tries = 0;
+    // Y5: whether the last decision the evaluator made permitted — the exposure gate is counted once, for it.
+    let mut evaluator_permitted;
     let (outcome, history, admitted) = loop {
         let (history, version) = match (history_request, history_index) {
             (None, _) => (None, None),
@@ -980,6 +985,7 @@ pub(crate) async fn ae_decide(
             },
             other => other,
         };
+        evaluator_permitted = matches!(outcome, Ok(Some(_)));
         let outcome = apply_exposure(outcome, &exposure);
         let (Ok(Some(_)), Some(index), Some(version)) = (&outcome, history_index, version) else {
             break (outcome, history, false);
@@ -1004,6 +1010,9 @@ pub(crate) async fn ae_decide(
             break (Err(ae::PreflightRefusal::NotEstablished(refused)), history, false);
         }
     };
+    if evaluator_permitted {
+        ctx.exposure_counters.record(&exposure);
+    }
     // Row K2's tally: a permit admitted under a tally rule is published under the actor's gate (a KV read and
     // write), so two permits of one actor at this point do not lose each other's update.
     if let Ok(Some(_)) = &outcome {

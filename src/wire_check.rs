@@ -868,9 +868,11 @@ pub fn check(units: &[Unit], artifacts: &[(String, ArtifactDescription)], opts: 
     // able to admit one of the call shapes the edge could take; a rule that requires a mandate
     // scope needs a declared mandate, held by the requirer's principal, enumerating the operation.
     if opts.authority {
-        let rules: Vec<&crate::capability_config::RuleDecl> = units.iter().flat_map(|u| u.config.rules.iter()).collect();
+        // An exposure rule (adopter-surface Y5) is never an allowance: it admits no edge and governs no unit — the
+        // runtime's evaluator never loads one.
+        let rules: Vec<&crate::capability_config::RuleDecl> = units.iter().flat_map(|u| u.config.rules.iter()).filter(|r| !r.is_exposure()).collect();
         let mandates: Vec<&crate::capability_config::MandateDecl> = units.iter().flat_map(|u| u.config.mandates.iter()).collect();
-        let governed = |u: &Unit| !u.config.mandates.is_empty() || !u.config.rules.is_empty();
+        let governed = |u: &Unit| !u.config.mandates.is_empty() || u.config.rules.iter().any(|r| !r.is_exposure());
         let any_vocabulary = !rules.is_empty() || !mandates.is_empty();
         let unit_of = |name: &str| units.iter().find(|u| u.name == name);
         for e in &edges {
@@ -1374,6 +1376,35 @@ mod tests {
         // Off: nothing of the above.
         let r = check(&[provider, ok], &[], &CheckOptions { authority: false, ..Default::default() });
         assert!(r.findings.iter().all(|f| !f.kind.contains("edge")), "{}", r.render_text());
+    }
+
+    /// **An exposure rule is never an allowance** (adopter-surface Y5; #701's review, finding 3): the
+    /// `a2a_skill_authority` example with its weather rule turned into an exposure rule still reports the weather edge
+    /// `unauthorisable` — the runtime's evaluator never loads such a rule, so nothing admits the call — and a unit whose
+    /// only rule is one is not governed. Seen failing first: 0 errors, the exposure rule read as admitting.
+    #[test]
+    fn an_exposure_rule_admits_no_edge_and_governs_no_unit() {
+        let client = unit("client", include_str!("../examples/units/a2a_skill_authority/client.toml"));
+        let gateway_text = include_str!("../examples/units/a2a_skill_authority/gateway.toml");
+        let weather = "resource  = \"skill:weather/lookup\"";
+        assert!(gateway_text.contains(weather), "the example names its weather rule");
+        let exposed = gateway_text.replacen(weather, &format!("{weather}\nexposure  = {{ max_unresolved = 1 }}"), 1);
+        let gateway = unit("gateway", &exposed);
+        let r = check(&[client.clone(), gateway], &[], &CheckOptions::default());
+        let text = r.render_text();
+        assert!(
+            r.findings.iter().any(|f| f.kind == "unauthorisable edge" && f.message.contains("weather/lookup")),
+            "the weather edge is admitted by nothing once its rule is an exposure rule: {text}"
+        );
+        // A requirer whose only rule is an exposure rule is outside the authority vocabulary.
+        let provider = unit("optimizer", "[[capability]]\nns=\"route\"\nname=\"optimize\"\n");
+        let only_exposure = unit("worker", concat!(
+            "principal=\"worker\"\n[[requirement]]\nns=\"route\"\nname=\"optimize\"\n",
+            "[[rule]]\nactor=\"worker\"\noperation=\"skill.invoke\"\nresource=\"*\"\nexposure = { max_unresolved = 1 }\n",
+        ));
+        let governed = unit("auditor", "principal=\"auditor\"\n[[mandate]]\nholder=\"auditor\"\nscope=\"s\"\noperations=[\"x\"]\n");
+        let r = check(&[provider, only_exposure, governed], &[], &CheckOptions::default());
+        assert!(kinds(&r).contains(&("ungoverned edge", Severity::Warning)), "{}", r.render_text());
     }
 
     /// A rule requiring a grant is admitted at the edge — the grant is issued at run time — and warns when no rule
