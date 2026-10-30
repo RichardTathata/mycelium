@@ -16,7 +16,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   it does not exist yet; a wider certificate is narrowed when rewritten. Under a permissive umask (`000`, `002`) the
   directories were `0777`/`0775` and the CA certificate `0666`, so another local user could replace the trust anchor.
   Missing parents are created `0700` too. A directory or `ca-cert.pem` that already exists is left as it is, but a node
-  warns at start, and `mycelium tls ca` / `issue` after their work, when either is writable by group or others.
+  warns at start, and `mycelium tls ca` / `issue` after their work, when either is writable by group or others (a
+  sticky directory, which lets no one replace another's file, is not warned about).
   **Remediation** for a deployment created under a permissive umask: `chmod 700 <cert dir>` and
   `chmod 644 <cert dir>/ca-cert.pem` (#695's confirmation round, #699's review; `deprecations.md` §71).
 - **A node whose certificate directory holds `ca-key.pem` without `ca-cert.pem` refuses to start**, naming the state,

@@ -339,6 +339,11 @@ mod imp {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn generate_ca_for_test() -> (CertificateDer<'static>, KeyPair) {
+        generate_ca().expect("a CA")
+    }
+
     /// A fresh self-signed Ed25519 CA: its certificate and key pair, written nowhere.
     fn generate_ca() -> Result<(CertificateDer<'static>, KeyPair), GossipError> {
         let err = |reason: String| GossipError::InvalidField { field: "tls", reason };
@@ -351,8 +356,27 @@ mod imp {
         Ok((CertificateDer::from(ca_cert.der().to_vec()), ca_key_pair))
     }
 
-    /// Generate a CA and publish it: each file written under a temporary name, then renamed into
-    /// place. Called only while holding `ca.lock`.
+    /// A generated CA's two files, written in full under temporary names and not yet published.
+    pub(crate) struct StagedCa {
+        pub(crate) key: std::path::PathBuf,
+        pub(crate) cert: std::path::PathBuf,
+    }
+
+    /// Write a generated CA's key and certificate under this process's temporary names (`.key.tmp-<pid>`,
+    /// `.cert.tmp-<pid>`), **both before either is published**: a crash after the key's rename then always leaves the
+    /// certificate's temporary beside it, the marker that reads the lone key as an interrupted creation — never as a
+    /// lost certificate whose key must be kept (#699's confirmation round, N1).
+    pub(crate) fn stage_ca(dir: &Path, ca_cert_der: &CertificateDer<'_>, ca_key_pair: &KeyPair) -> Result<StagedCa, GossipError> {
+        let err = |reason: String| GossipError::InvalidField { field: "tls", reason };
+        let pid = std::process::id();
+        let staged = StagedCa { key: dir.join(format!(".key.tmp-{pid}")), cert: dir.join(format!(".cert.tmp-{pid}")) };
+        write_private(&staged.key, ca_key_pair.serialize_pem().as_bytes()).map_err(|e| err(format!("TLS: write CA key: {e}")))?;
+        write_public(&staged.cert, cert_der_to_pem(ca_cert_der.as_ref()).as_bytes()).map_err(|e| err(format!("TLS: write CA cert: {e}")))?;
+        Ok(staged)
+    }
+
+    /// Generate a CA and publish it: both files written under temporary names, then each renamed into place, the key
+    /// first. Called only while holding `ca.lock`.
     fn generate_and_publish_ca(
         dir: &Path,
         cert_path: &Path,
@@ -361,15 +385,9 @@ mod imp {
         let err = |reason: String| GossipError::InvalidField { field: "tls", reason };
         let (ca_cert_der, ca_key_pair) = generate_ca()?;
 
-        let pid = std::process::id();
-        let publish = |path: &Path, contents: String, what: &str| -> Result<(), GossipError> {
-            let tmp = dir.join(format!(".{what}.tmp-{pid}"));
-            let written = if what == "key" { write_private(&tmp, contents.as_bytes()) } else { write_public(&tmp, contents.as_bytes()) };
-            written.map_err(|e| err(format!("TLS: write CA {what}: {e}")))?;
-            fs::rename(&tmp, path).map_err(|e| err(format!("TLS: publish CA {what}: {e}")))
-        };
-        publish(key_path, ca_key_pair.serialize_pem(), "key")?;
-        publish(cert_path, cert_der_to_pem(ca_cert_der.as_ref()), "cert")?;
+        let staged = stage_ca(dir, &ca_cert_der, &ca_key_pair)?;
+        fs::rename(&staged.key, key_path).map_err(|e| err(format!("TLS: publish CA key: {e}")))?;
+        fs::rename(&staged.cert, cert_path).map_err(|e| err(format!("TLS: publish CA cert: {e}")))?;
 
         tracing::info!("TLS: generated new cluster CA in {dir:?} — distribute ca-cert.pem to all nodes");
         Ok((ca_cert_der, ca_key_pair))
@@ -768,8 +786,9 @@ mod imp {
         {
             use std::os::unix::fs::PermissionsExt;
             let mut said = Vec::new();
-            let mode = |p: &Path| fs::metadata(p).ok().map(|m| m.permissions().mode() & 0o777);
-            if let Some(m) = mode(dir).filter(|m| m & 0o022 != 0) {
+            let mode = |p: &Path| fs::metadata(p).ok().map(|m| m.permissions().mode() & 0o7777);
+            // A sticky directory (`1777`, like `/tmp`) lets no other user rename or delete a file it does not own.
+            if let Some(m) = mode(dir).filter(|m| m & 0o022 != 0 && m & 0o1000 == 0) {
                 said.push(format!(
                     "TLS: {dir:?} is writable by group or others (mode {m:03o}): another local user could replace the \
                      CA certificate in it — run `chmod 700 {}`", dir.display()
@@ -1635,6 +1654,24 @@ mod ca_race_tests {
         }
     }
 
+    /// The crash a node's CA generation can suffer between its two renames — the key published, the certificate not —
+    /// leaves the certificate's temporary beside the key, so every door reads it as an interrupted creation, even once
+    /// the stale `ca.lock` has been removed as the lock's own message says (#699's confirmation round, N1). Seen
+    /// failing first: the certificate's temporary was written only after the key's rename, so the crash left no marker
+    /// and the lone key read as a lost certificate to be kept.
+    #[test]
+    fn a_crash_between_a_nodes_two_renames_reads_as_an_interrupted_creation() {
+        let dir = fresh_dir("node-crash");
+        let (cert_der, key) = super::imp::generate_ca_for_test();
+        let staged = super::imp::stage_ca(&dir, &cert_der, &key).unwrap();
+        std::fs::rename(&staged.key, dir.join("ca-key.pem")).unwrap(); // … and the process dies here
+        let said = super::imp::mint_ca(&dir).expect_err("a half-published CA").to_string();
+        assert!(said.contains("interrupted") && said.contains(".cert.tmp-"), "{said}");
+        let at_start = load_or_create_ca(&TlsConfig { auto_cert_dir: dir.clone(), ..TlsConfig::default() }).err().expect("refused").to_string();
+        assert!(at_start.contains("interrupted"), "{at_start}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A mint sweeps, while it holds the lock, the temporaries an earlier interrupted mint left — the hard link to a
     /// dead CA's key among them — so no dead key stays beside the new one (#699's review, finding 2). Seen failing
     /// first: the stale temporary survived the new mint.
@@ -1666,6 +1703,9 @@ mod ca_race_tests {
         assert!(said.iter().any(|w| w.contains("chmod 700")), "{said:?}");
         assert!(said.iter().any(|w| w.contains("chmod 644") && w.contains("ca-cert.pem")), "{said:?}");
         assert_eq!(std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777, 0o777, "never narrowed silently");
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o1777)).unwrap();
+        let sticky = super::imp::writable_by_others(&dir);
+        assert!(!sticky.iter().any(|w| w.contains("chmod 700")), "a sticky directory lets no one replace another's file: {sticky:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
