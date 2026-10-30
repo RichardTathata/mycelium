@@ -18,10 +18,11 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   **Dependency: `wasmtime` / `wasmtime-wasi` 49.0.4 → 49.0.5**, with the cranelift family 0.136.4 → 0.136.5 and pulley
   and wiggle 49.0.4 → 49.0.5 (four advisories published 2026-10-29). Reachability, read from the host's code:
   **RUSTSEC-2026-0424** (medium) **is reachable**: a component that lends itself a `borrow<T>` of a resource it defines
-  makes wasmtime allocate host memory to track the lend, charged to nothing — not the store's handle limit, not the
-  linear-memory limiter the host installs (`store.limiter`), not fuel — so a hosted component can grow the node's memory
-  without bound within one call's deadline. A node installing only what `[hosts].trusted_publishers` signed is exposed to
-  those publishers' components only; nothing in the host bounds it otherwise. **RUSTSEC-2026-0420** (medium, 6.4) is not
+  makes wasmtime allocate host memory to track the lend that no store limit counts — not the store's handle limit, not
+  the linear-memory limiter the host installs (`store.limiter`) — so a hosted component can grow the node's memory,
+  bounded only by the call's deadline, or its fuel budget where one is set (an install metered under
+  `with_fuel_per_call`, D19: each lend costs instructions). A node installing only what `[hosts].trusted_publishers`
+  signed is exposed to those publishers' components only. **RUSTSEC-2026-0420** (medium, 6.4) is not
   reachable: it is a race in **wasip3** UDP sockets under a per-address `socket_addr_check` policy, and the host links
   WASI **p2** only (`wasmtime_wasi::p2::add_to_linker_sync`, `mycelium-wasm-host/src/host.rs`) with a context built by
   `WasiCtxBuilder::new()`, whose default address check refuses every address — and no p3 socket is linked at all. **RUSTSEC-2026-0422** (low) is not reachable: it is a host
