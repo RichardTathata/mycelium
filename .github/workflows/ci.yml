@@ -762,7 +762,7 @@ jobs:
         # job's `mycelium` (`tls ca`, `tls issue`, `tls pin`), named tokens, egress lists naming the partner, a pinned
         # key — and one export called across the edge by a named local caller. The node program is the template's,
         # built against this checkout as the Rust template is (the dependency rewritten to a path); `secure-multi-domain`
-        # is in no published tag before the next MINOR release (v2.38.2 is a PATCH without it), so the tag the scaffold pins cannot build it yet.
+        # is in no published tag before the next MINOR release (v2.38.2 and v2.38.3 are PATCHes without it), so the tag the scaffold pins cannot build it yet.
         run: |
           set -euo pipefail
           BIN="$PWD/target/debug/mycelium"; REPO="$PWD"

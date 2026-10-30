@@ -53,7 +53,7 @@ every one on every change. The tests are in [`src/init.rs`](../../src/init.rs): 
   through the echo backend. `two-domains` runs the secure one: each domain's CA minted and every certificate issued
   where no node is pointed (`mycelium tls ca`, `tls issue`), a pinned key (`tls pin`), named tokens, egress lists
   naming the partner; on one host every directory is readable by every process, which a real deployment does not share.
-- `two-domains` pins a tag like the others, and **no published tag before the next MINOR release has `secure-multi-domain` (v2.38.2 is a PATCH without it)**,
+- `two-domains` pins a tag like the others, and **no published tag before the next MINOR release has `secure-multi-domain` (v2.38.2 and v2.38.3 are PATCHes without it)**,
   so until then the scaffold builds only against a checkout — CI's `Scaffold` job rewrites its dependency to a path,
   as it does for the Rust template.
 - The plan row is [`adopter-surface.md`](../plans/adopter-surface.md) X2; its *not built* items are the TypeScript
