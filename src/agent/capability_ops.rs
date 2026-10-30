@@ -141,6 +141,13 @@ pub(super) fn scan_prefix_kv(kv_state: &crate::store::KvState, prefix: &str) -> 
 /// Like `scan_prefix_kv`, but also returns each entry's HLC timestamp so
 /// callers can apply `CapFilter::max_age` liveness checks.
 pub(super) fn scan_prefix_kv_with_ts(kv_state: &crate::store::KvState, prefix: &str) -> Vec<(Arc<str>, Bytes, u64)> {
+    // In key order, as `store::scan_kv_prefix` is (#700's review, finding 2): the store iterates in a per-process order.
+    let mut out = scan_prefix_kv_with_ts_unordered(kv_state, prefix);
+    out.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+    out
+}
+
+fn scan_prefix_kv_with_ts_unordered(kv_state: &crate::store::KvState, prefix: &str) -> Vec<(Arc<str>, Bytes, u64)> {
     let seg = prefix.find('/').map_or(prefix, |i| &prefix[..i]);
     let store_guard = kv_state.store.pin();
     let idx_guard   = kv_state.prefix_index.pin();
@@ -175,13 +182,14 @@ pub(super) fn scan_cap_by_ns_name(
     let store_guard = kv_state.store.pin();
     let idx_guard   = kv_state.cap_ns_index.pin();
     let Some(bucket) = idx_guard.get(identity.as_str()) else { return Vec::new() };
-    let result: Vec<_> = bucket.pin().iter()
+    let mut result: Vec<_> = bucket.pin().iter()
         .filter_map(|(key, _)| {
             let entry = store_guard.get(key.as_ref())?;
             let data  = entry.data.clone()?;
             Some((Arc::clone(key), data, entry.timestamp))
         })
         .collect();
+    result.sort_unstable_by(|a, b| a.0.cmp(&b.0));
     result
 }
 

@@ -1,6 +1,6 @@
 {
   "commit": "unknown",
-  "features": "sim",
+  "features": "consensus,gateway,sim,tls",
   "rustc": "unknown",
   "target": "aarch64-macos",
   "version": "2.38.0"

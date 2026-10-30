@@ -8,6 +8,7 @@ rust tests/bounded_append.rs::bounded_append::append_borrow_then_send_LOSES_UPDA
 rust tests/once_guard.rs::once_guard::once_guard_load_then_store_RACES — broken twin, fails by design under loom
 rust tests/publish.rs::publish::publish_relaxed_MISSES_ORDERING — broken twin, fails by design under loom
 rust tests/unique_id.rs::unique_id::unique_id_load_then_store_COLLIDES — broken twin, fails by design under loom
+rust tests/schedule_replay.rs::schedule_replay::record_the_schedule_run_into_the_corpus — the corpus recorder (#[ignore]): re-records tests/replay-corpus/y2-schedule-run/ on purpose, never in CI, which replays the checked-in recording instead
 
 # Measurements and tools, not assertions about correctness.
 rust src/lib.rs::mycelium_core::store::tests::apply_and_notify_throughput_smoke — perf smoke, meaningful only under --release on quiet hardware

@@ -229,6 +229,10 @@ pub struct SyncEntry {
 /// process routes each gossip send to the shard it recorded (inventory row `framing.rs` `shard_hasher`). A random
 /// seed hid from every replay made in the recording's own process, which shares one; a checked-in recording,
 /// replayed by the next CI run, diverged at its first sharded send (adopter-surface Y2's replay, 2026-10-28).
+/// The `sim` seed is public, which is acceptable only because **`sim` is never deployed**: it turns the replay seams
+/// on, every shipped build is without it, and the published binaries and image are built without it. A key chosen to
+/// crowd one shard is possible under `sim` and nowhere else. The map is stable for one `ahash` version on one target;
+/// a recording names its build, and a replay refuses another feature set or shard count by name.
 fn shard_hasher() -> &'static RandomState {
     static STATE: OnceLock<RandomState> = OnceLock::new();
     #[cfg(not(feature = "sim"))]

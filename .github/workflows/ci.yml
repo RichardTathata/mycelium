@@ -314,7 +314,8 @@ jobs:
       - run: cargo test --features sim,test-util --test decision_trace_replay
       # Adopter-surface Y2's last promise: a node holding a `[[schedule]]`, deciding a missed run and running it,
       # recorded into the corpus (`tests/replay-corpus/y2-schedule-run/`) and replayed here — by another process, so a
-      # per-process seed on the replay path diverges — decision for decision (re-record with MYCELIUM_RECORD_CORPUS=1).
+      # per-process seed on the replay path diverges — decision for decision; a recording from another feature set or shard
+      # count is refused by name. The recorder is `#[ignore]` (re-record with `-- --ignored record_the_schedule_run_into_the_corpus`).
       - run: cargo test --features sim --test schedule_replay
       - run: cargo test -p mycelium-wasm-host --features stem,sim --lib the_trace_makes_no_extra_draw_under_the_replay_seams
       # The offline wire-check over the checked-in fixtures (design-time-tooling.md W2): the co-op

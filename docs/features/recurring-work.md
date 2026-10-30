@@ -70,8 +70,10 @@ the gap decided as run once or skipped, the run naming the decision its parent) 
   SDK or gateway route that runs a schedule (`POST /gateway/units/declare` refuses one, 422), a stem that runs
   one (it refuses one by name), and a schedule class in `mycelium test --faults`.
 - A recording replays it: the loop's clock, tick and deadline go through the seams, and the checked-in recording
-  `tests/replay-corpus/y2-schedule-run/` (one node holding `close`, deciding a missed run under `run_once` and
-  running it) is replayed decision for decision in another process by `tests/schedule_replay.rs`, run in CI.
+  `tests/replay-corpus/y2-schedule-run/` (one node holding `close`, deciding a missed run under `run_once`, a run
+  that overruns its deadline, then the gap's run and the on-time run) is replayed decision for decision in another
+  process by `tests/schedule_replay.rs`, run in CI. `run_late`, `skip` and a failed run are covered by unit tests,
+  not a recording.
 
 ## Go deeper
 

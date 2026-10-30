@@ -27,3 +27,10 @@ A recording's node name is part of it too: it is in the keys the shards hash and
 
 **Seen failing first:** the ticker off the seam → diverged at `sched/close` (3/3); the sweep unsorted → diverged at the
 sweep (2/3); the random shard seed → two processes, two maps. Inventory §2.5 rows updated.
+
+**#700's review (2026-10-30).** The bundle names its build — the library's `cfg!` features plus `sim`, and the shard
+count — and a replay under another is refused by name. The recording gained a run that overruns its deadline (the
+deadline is a seam sleep, recorded only when it completes, so a run that finishes in time leaves none). And the store
+map's own iteration order — per-process, distinct from the seeded Merkle hasher — reached periodic writers through
+every scan: `scan_kv_prefix`, `scan_scope`, `scopes_under` and the capability scans now return keys sorted
+(`store::tests::every_scan_returns_its_keys_in_order`). The recorder is `#[ignore]`, in the coverage exceptions.

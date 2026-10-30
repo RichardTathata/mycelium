@@ -56,8 +56,9 @@
 //! exclusivity — a partition runs a slot on both sides, and only the destination's deduplication makes that one
 //! effect; no backoff of its own for failing work; `mycelium test --faults` has no schedule class. **A recording
 //! replays it:** the loop's clock, tick and deadline go through the seams, and `tests/schedule_replay.rs` replays the
-//! corpus bundle `tests/replay-corpus/y2-schedule-run/` — a node holding a schedule, deciding a missed run and running
-//! it — decision for decision in another process.
+//! corpus bundle `tests/replay-corpus/y2-schedule-run/` — a node holding a schedule, deciding a missed run, a run that
+//! overruns its deadline, then the gap's run — decision for decision in another process. `run_late`, `skip` and a
+//! failed run are covered by `decide`'s unit tests, not a recording.
 
 use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};

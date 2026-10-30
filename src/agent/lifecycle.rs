@@ -1092,6 +1092,8 @@ impl GossipAgent {
                         .and_then(|s| s.parse::<crate::node_id::NodeId>().ok());
                     if let Some(n) = found && !nodes.contains(&n) { nodes.push(n); }
                 }
+                // In node order, not the store's per-process one (#700's review, finding 2).
+                nodes.sort_unstable_by(|a, b| a.as_str().cmp(b.as_str()));
                 for node_id in nodes {
                     let get = |prefix: &str| store_guard.get(format!("{prefix}{node_id}").as_str()).and_then(|e| e.data.clone());
                     identity_resync(&peer_keys, &anchor_keys, &standing, &conflicts, &node_id,

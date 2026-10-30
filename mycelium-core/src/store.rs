@@ -305,12 +305,14 @@ pub fn scan_scope(kv: &KvState, outer: &str) -> Vec<(Arc<str>, Bytes)> {
     let store_guard = kv.store.pin();
     let idx_guard = kv.scope_index.pin();
     let Some(bucket) = idx_guard.get(outer) else { return Vec::new() };
-    bucket.pin().iter()
+    let mut out: Vec<(Arc<str>, Bytes)> = bucket.pin().iter()
         .filter_map(|(key, _)| {
             let data = store_guard.get(key.as_ref())?.data.clone()?;
             Some((Arc::clone(key), data))
         })
-        .collect()
+        .collect();
+    out.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+    out
 }
 
 /// The scope-index outer keys under `prefix` (one per scope that has live keys).
@@ -340,14 +342,16 @@ pub fn scopes_under_visiting(kv: &KvState, prefix: &str) -> (Vec<Arc<str>>, usiz
                 }
             }
         }
+        live.sort_unstable();
         return (live, visited);
     }
     let index = kv.scope_index.pin();
     let visited = index.len();
-    let live = index.iter()
+    let mut live: Vec<Arc<str>> = index.iter()
         .filter(|(outer, bucket)| outer.starts_with(prefix) && !bucket.pin().is_empty())
         .map(|(outer, _)| Arc::clone(outer))
         .collect();
+    live.sort_unstable();
     (live, visited)
 }
 
@@ -908,7 +912,19 @@ fn apply_and_notify_inner(kv: &KvState, update: &GossipUpdate) -> crate::receipt
 ///
 /// Exposed as a free function so modules that hold only `Arc<KvState>` (e.g. HTTP
 /// handlers) can perform prefix scans without going through `GossipAgent`.
+///
+/// **In key order**, as is every scan here ([`scan_scope`], [`scopes_under`]): the store map iterates in its
+/// per-process hasher's order, and a caller that writes while it walks a scan — the tally's withdrawal and collection,
+/// a log's compaction, the shutdown sweep — would otherwise write in an order a recording replayed by another process
+/// does not reproduce (#700's review, finding 2).
 pub fn scan_kv_prefix(kv: &KvState, prefix: &str) -> Vec<(Arc<str>, Bytes)> {
+    let mut out = scan_kv_prefix_unordered(kv, prefix);
+    out.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+    out
+}
+
+/// [`scan_kv_prefix`] in the store's iteration order, which follows its per-process hasher.
+fn scan_kv_prefix_unordered(kv: &KvState, prefix: &str) -> Vec<(Arc<str>, Bytes)> {
     let seg         = prefix.find('/').map_or(prefix, |i| &prefix[..i]);
     let store_guard = kv.store.pin();
     let idx_guard   = kv.prefix_index.pin();
@@ -1029,6 +1045,40 @@ mod tests {
         put("sys/ae-tally/node-0/hb".into(), ts, false);
         assert_eq!(scopes_under(&kv, "sys/ae-tally/").len(), 3);
         assert_eq!(scopes_under(&kv, "consensus/life/").len(), 2_000);
+    }
+
+    /// #700's review, finding 2: the store map iterates in its per-process hasher's order, and periodic writers
+    /// (`withdraw_aged_entries`, `collect_residue`, `compact_log`) write in the order a scan returns — so in store order
+    /// a recording replayed by another process diverged wherever two such writes fell in one pass. Every scan returns
+    /// its keys sorted. Twenty keys in a random order come back sorted with probability 1/20!.
+    #[test]
+    fn every_scan_returns_its_keys_in_order() {
+        let kv = KvState::with_scoped_prefixes(0, &["sys/ae-tally/"]);
+        let mut ts = 1 << 20;
+        let mut put = |key: String| {
+            ts += 1;
+            apply_and_notify(&kv, &GossipUpdate {
+                sender: 0, key: Arc::from(key.as_str()), value: Bytes::from_static(b"v"),
+                timestamp: ts, nonce: ts, ttl: 1, is_tombstone: false,
+            });
+        };
+        for i in [17, 3, 11, 0, 19, 8, 5, 14, 1, 12, 6, 18, 2, 9, 15, 4, 13, 7, 16, 10] {
+            put(format!("log/s/{i:04x}"));
+            put(format!("sys/ae-tally/node-{i:02}/hb"));
+            put(format!("sys/ae-tally/node-07/c/k{i:02}"));
+        }
+        let sorted = |v: &[Arc<str>]| v.windows(2).all(|w| w[0] <= w[1]);
+        let keys = |v: Vec<(Arc<str>, Bytes)>| v.into_iter().map(|(k, _)| k).collect::<Vec<_>>();
+        let by_prefix = keys(scan_kv_prefix(&kv, "log/s/"));
+        assert_eq!(by_prefix.len(), 20);
+        assert!(sorted(&by_prefix), "scan_kv_prefix: {by_prefix:?}");
+        let unindexed = keys(scan_kv_prefix(&kv, "sys/ae-tally/node-07/c/"));
+        assert!(sorted(&unindexed), "scan_kv_prefix over the store: {unindexed:?}");
+        let scope = keys(scan_scope(&kv, "sys/ae-tally/node-07"));
+        assert!(scope.len() > 1 && sorted(&scope), "scan_scope: {scope:?}");
+        let scopes = scopes_under(&kv, "sys/ae-tally/");
+        assert_eq!(scopes.len(), 20);
+        assert!(sorted(&scopes), "scopes_under: {scopes:?}");
     }
 
     #[test]

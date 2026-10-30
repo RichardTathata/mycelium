@@ -1,3 +1,4 @@
 {
+  "gossip_shards": "4",
   "schedule": "node=n1 sources=seeded(2, 1700000000000) mono_step_ns=100000000; one node, `close` every second, its own last three slots behind, on_missed=run_once"
 }
