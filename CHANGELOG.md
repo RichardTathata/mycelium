@@ -9,6 +9,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.38.3] — 2026-10-30
+
+A security PATCH cut from the v2.38.2 tag. Wire **v12** unchanged (`PREV = 11`); no API change.
+
 ### Security
 
 - **Check whether you are affected:** a node is exposed only if it hosts WASM components — it runs `mycelium-stem`, or
