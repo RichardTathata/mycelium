@@ -2133,7 +2133,10 @@ issuing over it now exits 2, naming the file and what replacing it means: the no
 every partner that pins its gateway must be given the new pin. **Migration:** a script that re-issues on purpose (the
 secure posture's recovery, [cert rotation § 2](../operations/cert-rotation.md)) adds `--force`. Also new:
 `mycelium tls ca --out <dir>` mints a fleet CA on the issuer's host, refusing a directory that holds one (two
-concurrent mints publish one CA, the other refused), and `mycelium tls pin <cert.pem>` prints a gateway certificate's
+concurrent mints publish one CA, the other refused; it holds `ca.lock`, so it is refused while a node or another mint
+holds it; it needs a filesystem with hard links; a `ca-key.pem` left without `ca-cert.pem` is named by `tls ca`,
+`tls issue` and a node's start — an interrupted creation when its lock or temporaries are beside it, otherwise a lost
+certificate to copy back from a node, never a key to delete), and `mycelium tls pin <cert.pem>` prints a gateway certificate's
 pin, refusing a CA certificate and a file that carries a private key. `mycelium::doctor::Doctor` gained `attached`
 (`run_attached` is new), so an exhaustive struct literal breaks; nothing outside the crate builds one.
 
@@ -2159,3 +2162,19 @@ twice inside one millisecond mints one credential twice, and the second is refus
 on `CallRefusal` already needed a `_` arm (it is `#[non_exhaustive]`), which must fail closed. `GET /stats` gained
 `federation_replays_refused` and `federation_replays_undecidable`. **Migration:** mint a credential per request;
 upgrade partners' clients.
+
+## 71. A directory the TLS module creates for keys and certificates is `0700`; every certificate it writes is `0644` (unreleased, #695's confirmation round)
+
+On unix, `auto_cert_dir` when a node creates it at start, `mycelium tls ca --out` and `mycelium tls issue --out` when
+the directory does not exist yet, are now created `0700` whatever the umask (they were left to the umask, `0755` under
+the usual `022` and `0777` under `000`), and the CA certificate and an issued node certificate are written `0644`,
+narrowed when a wider file is rewritten; their missing parents are created `0700` too. Under a permissive umask another
+local user could otherwise replace the trust anchor. A directory or `ca-cert.pem` that already exists is never
+narrowed silently: a node warns at start, and `mycelium tls ca` / `issue` after their work, when either is writable by
+group or others, naming the command — **remediation for a deployment created under a permissive umask:**
+`chmod 700 <cert dir>` and `chmod 644 <cert dir>/ca-cert.pem`. Also: a node whose certificate directory holds
+`ca-key.pem` without `ca-cert.pem` now refuses to start, naming the state, where it minted a new CA over that key.
+**Who notices.** A deployment whose node directory
+is created by the node and then read by a *different* user — already unable to read the `0600` keys since 2.38.2 —
+now cannot list the directory either. **Migration:** create the directory yourself with the mode you need before the
+first start, or read it as the node's user.
