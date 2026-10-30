@@ -359,7 +359,7 @@ mod imp {
         let pid = std::process::id();
         let publish = |path: &Path, contents: String, what: &str| -> Result<(), GossipError> {
             let tmp = dir.join(format!(".{what}.tmp-{pid}"));
-            let written = if what == "key" { write_private(&tmp, contents.as_bytes()) } else { fs::write(&tmp, contents) };
+            let written = if what == "key" { write_private(&tmp, contents.as_bytes()) } else { write_public(&tmp, contents.as_bytes()) };
             written.map_err(|e| err(format!("TLS: write CA {what}: {e}")))?;
             fs::rename(&tmp, path).map_err(|e| err(format!("TLS: publish CA {what}: {e}")))
         };
@@ -376,7 +376,7 @@ mod imp {
         removed: Arc<crate::removal::RemovedSet>,
         standing: Arc<crate::removal::KeyStanding>,
     ) -> Result<NodeTls, GossipError> {
-        fs::create_dir_all(&cfg.auto_cert_dir).map_err(|e| {
+        create_private_dir(&cfg.auto_cert_dir).map_err(|e| {
             GossipError::InvalidField { field: "tls", reason: format!("TLS: cannot create cert dir {:?}: {e}", cfg.auto_cert_dir) }
         })?;
 
@@ -493,16 +493,68 @@ mod imp {
     /// [`issue_node_cert`] — the off-node path's first step, which until now only a node started over an empty
     /// directory could take (adopter-surface Y8). Refuses, naming the path, when `ca_dir` already holds either
     /// file: a second CA over a fleet's is a new fleet, never a refresh. Returns the certificate's path.
+    ///
+    /// It holds `ca.lock` — the lock [`load_or_create_ca`] takes — for the whole mint, so it never races a node
+    /// generating a CA in the same directory; while another process holds the lock it publishes nothing and is
+    /// refused naming the lock. The pair is published by hard link, so `ca_dir` must be on a filesystem that has
+    /// them (FAT, exFAT and some SMB mounts do not; the refusal says so). A mint that stops between its two links
+    /// leaves `ca-key.pem` alone: nothing can be issued from it, and the next mint names it and how to recover.
     pub fn mint_ca(ca_dir: &Path) -> Result<std::path::PathBuf, GossipError> {
         let err = |reason: String| GossipError::InvalidField { field: "tls", reason };
         let exists = |p: &Path| err(format!("TLS: {p:?} exists — a CA is minted once; a second one over it is a new fleet"));
         let (cert, key) = (ca_dir.join("ca-cert.pem"), ca_dir.join("ca-key.pem"));
-        for p in [&cert, &key] {
-            if p.exists() {
-                return Err(exists(p));
+        let refuse_existing = || -> Result<(), GossipError> {
+            if let Some(why) = interrupted_mint(ca_dir) {
+                return Err(err(why));
             }
+            for p in [&cert, &key] {
+                if p.exists() {
+                    return Err(exists(p));
+                }
+            }
+            Ok(())
+        };
+        refuse_existing()?;
+        create_private_dir(ca_dir).map_err(|e| err(format!("TLS: create {ca_dir:?}: {e}")))?;
+        let lock_path = ca_dir.join("ca.lock");
+        match fs::OpenOptions::new().write(true).create_new(true).open(&lock_path) {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                return Err(err(format!(
+                    "TLS: another process holds {lock_path:?} — a node or a mint is creating a CA here; if none is, one \
+                     crashed while creating it: remove the lock (and a ca-key.pem left without ca-cert.pem) and mint again"
+                )));
+            }
+            Err(e) => return Err(err(format!("TLS: cannot take CA lock {lock_path:?}: {e}"))),
         }
-        fs::create_dir_all(ca_dir).map_err(|e| err(format!("TLS: create {ca_dir:?}: {e}")))?;
+        let held = (|| {
+            refuse_existing()?;
+            publish_minted_ca(ca_dir, &cert, &key, &exists)
+        })();
+        let _ = fs::remove_file(&lock_path);
+        held?;
+        tracing::info!("TLS: minted a fleet CA in {ca_dir:?} — distribute ca-cert.pem, never ca-key.pem");
+        Ok(cert)
+    }
+
+    /// `ca_dir` holds `ca-key.pem` without `ca-cert.pem`: the state a mint leaves when it stops between its two links
+    /// (it publishes the key first). Named, with the recovery, by `tls ca` and `tls issue`. A certificate without a key
+    /// is not this state — a node's directory holds exactly that — so it reads as an existing CA.
+    fn interrupted_mint(ca_dir: &Path) -> Option<String> {
+        let (cert, key) = (ca_dir.join("ca-cert.pem"), ca_dir.join("ca-key.pem"));
+        (key.exists() && !cert.exists()).then(|| format!(
+            "TLS: {ca_dir:?} holds ca-key.pem without ca-cert.pem — a CA mint was interrupted between publishing its key \
+             and its certificate, so nothing can have been issued from it: remove {key:?} (and ca.lock, if present) and mint again"
+        ))
+    }
+
+    /// Publish a freshly generated CA in `ca_dir`, while holding `ca.lock`.
+    fn publish_minted_ca(ca_dir: &Path, cert: &Path, key: &Path, exists: &dyn Fn(&Path) -> GossipError) -> Result<(), GossipError> {
+        let err = |reason: String| GossipError::InvalidField { field: "tls", reason };
+        let no_links = |what: &str, e: std::io::Error| err(format!(
+            "TLS: publish CA {what} by hard link in {ca_dir:?}: {e} — `tls ca` needs a filesystem with hard links (FAT, exFAT \
+             and some SMB mounts have none): mint on a local disk and copy the directory"
+        ));
         let (ca_cert_der, ca_key_pair) = generate_ca()?;
         // Both files written in full under names of this call's own, then published by hard link, which fails when
         // the name exists — so the check above is a courtesy and the link is the guard: two concurrent mints
@@ -512,18 +564,16 @@ mod imp {
         let (tmp_key, tmp_cert) = (ca_dir.join(format!(".ca-key.mint-{tag}")), ca_dir.join(format!(".ca-cert.mint-{tag}")));
         let result = (|| {
             write_private(&tmp_key, ca_key_pair.serialize_pem().as_bytes()).map_err(|e| err(format!("TLS: write CA key: {e}")))?;
-            fs::write(&tmp_cert, cert_der_to_pem(ca_cert_der.as_ref())).map_err(|e| err(format!("TLS: write CA cert: {e}")))?;
-            fs::hard_link(&tmp_key, &key).map_err(|e| if e.kind() == std::io::ErrorKind::AlreadyExists { exists(&key) } else { err(format!("TLS: publish CA key: {e}")) })?;
-            if let Err(e) = fs::hard_link(&tmp_cert, &cert) {
-                let _ = fs::remove_file(&key);
-                return Err(if e.kind() == std::io::ErrorKind::AlreadyExists { exists(&cert) } else { err(format!("TLS: publish CA cert: {e}")) });
+            write_public(&tmp_cert, cert_der_to_pem(ca_cert_der.as_ref()).as_bytes()).map_err(|e| err(format!("TLS: write CA cert: {e}")))?;
+            fs::hard_link(&tmp_key, key).map_err(|e| if e.kind() == std::io::ErrorKind::AlreadyExists { exists(key) } else { no_links("key", e) })?;
+            if let Err(e) = fs::hard_link(&tmp_cert, cert) {
+                let _ = fs::remove_file(key);
+                return Err(if e.kind() == std::io::ErrorKind::AlreadyExists { exists(cert) } else { no_links("certificate", e) });
             }
             Ok(())
         })();
         let _ = (fs::remove_file(&tmp_key), fs::remove_file(&tmp_cert));
-        result?;
-        tracing::info!("TLS: minted a fleet CA in {ca_dir:?} — distribute ca-cert.pem, never ca-key.pem");
-        Ok(cert)
+        result
     }
 
     /// **Issue a node certificate off-node** (`id.ca_key_off_node`, plan §8). Runs where the CA key
@@ -541,7 +591,7 @@ mod imp {
         let (_ca_cert_der, ca_key_pair) = load_existing_ca(&ca_cfg)?;
         let signing_key = generate_key()?;
         let node_cert_der = generate_node_cert(node_id, &signing_key, &ca_key_pair, super::issuance_after(0))?;
-        fs::create_dir_all(out_dir).map_err(|e| err(format!("TLS: create {out_dir:?}: {e}")))?;
+        create_private_dir(out_dir).map_err(|e| err(format!("TLS: create {out_dir:?}: {e}")))?;
         let sanitized = node_id.as_str().replace([':', '.'], "_");
         let cert_path = out_dir.join(format!("{sanitized}.cert.pem"));
         let key_path = out_dir.join(format!("{sanitized}.key.pem"));
@@ -553,7 +603,7 @@ mod imp {
             key_pem.push('\n');
         }
         key_pem.push_str("-----END PRIVATE KEY-----\n");
-        fs::write(&cert_path, cert_der_to_pem(node_cert_der.as_ref())).map_err(|e| err(format!("TLS: write {cert_path:?}: {e}")))?;
+        write_public(&cert_path, cert_der_to_pem(node_cert_der.as_ref()).as_bytes()).map_err(|e| err(format!("TLS: write {cert_path:?}: {e}")))?;
         write_private(&key_path, key_pem.as_bytes()).map_err(|e| err(format!("TLS: write {key_path:?}: {e}")))?;
         Ok((cert_path, key_path))
     }
@@ -574,6 +624,11 @@ mod imp {
         let auto_ca_cert_path = cfg.auto_cert_dir.join("ca-cert.pem");
         let auto_ca_key_path  = cfg.auto_cert_dir.join("ca-key.pem");
         let ca_cert_path = cfg.ca_cert_pem.clone().unwrap_or(auto_ca_cert_path);
+        if cfg.ca_cert_pem.is_none()
+            && let Some(why) = interrupted_mint(&cfg.auto_cert_dir)
+        {
+            return Err(GossipError::InvalidField { field: "tls", reason: why });
+        }
         let pem = fs::read_to_string(&ca_cert_path).map_err(|e| GossipError::InvalidField {
             field: "tls", reason: format!("TLS: needs an existing CA cert ({ca_cert_path:?}) — never minted here: {e}"),
         })?;
@@ -599,22 +654,67 @@ mod imp {
 
     /// Write a private key readable by its owner only: created `0600` on unix whatever the umask, and narrowed to
     /// `0600` before any byte is written when the file already exists (a key an older release left `0644`). Every
-    /// private key this module writes goes through here; a certificate is public and does not.
+    /// private key this module writes goes through here; a certificate goes through [`write_public`]. Elsewhere than
+    /// unix it is a plain write: the file takes whatever the platform gives it.
     fn write_private(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+        write_with_mode(path, contents, 0o600)
+    }
+
+    /// Write a certificate: `0644` on unix whatever the umask, narrowed when it rewrites a wider file, so no other
+    /// local user can replace a trust anchor or a node's certificate (#695's confirmation round, follow-up 4). Elsewhere
+    /// than unix a plain write.
+    fn write_public(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+        write_with_mode(path, contents, 0o644)
+    }
+
+    fn write_with_mode(path: &Path, contents: &[u8], mode: u32) -> std::io::Result<()> {
         use std::io::Write as _;
         let mut opts = fs::OpenOptions::new();
         opts.write(true).create(true).truncate(true);
         #[cfg(unix)]
         {
             use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-            opts.mode(0o600);
+            opts.mode(mode);
             let mut f = opts.open(path)?;
-            f.set_permissions(fs::Permissions::from_mode(0o600))?;
+            f.set_permissions(fs::Permissions::from_mode(mode))?;
             f.write_all(contents)
         }
         #[cfg(not(unix))]
         {
+            let _ = mode;
             opts.open(path)?.write_all(contents)
+        }
+    }
+
+    /// Create a directory for keys and certificates, `0700` on unix whatever the umask: its only reader is the process
+    /// that writes it (a node, or the issuer), and files leave it by being copied, so no other user needs to list or
+    /// enter it — and under a permissive umask a wider directory would let one replace the trust anchor. Missing
+    /// parents are created as the umask leaves them. A directory that already exists is the operator's and is left as
+    /// it is. Elsewhere than unix a plain create.
+    fn create_private_dir(dir: &Path) -> std::io::Result<()> {
+        if dir.is_dir() {
+            return Ok(());
+        }
+        if let Some(parent) = dir.parent().filter(|p| !p.as_os_str().is_empty()) {
+            fs::create_dir_all(parent)?;
+        }
+        let mut b = fs::DirBuilder::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+            b.mode(0o700);
+            match b.create(dir) {
+                Ok(()) => fs::set_permissions(dir, fs::Permissions::from_mode(0o700)),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && dir.is_dir() => Ok(()),
+                Err(e) => Err(e),
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            match b.create(dir) {
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && dir.is_dir() => Ok(()),
+                r => r,
+            }
         }
     }
 
@@ -1293,6 +1393,112 @@ mod ca_race_tests {
         std::fs::write(&cert, &before).unwrap();
         let node_dir = fresh_dir("mint-node");
         super::imp::issue_node_cert(&ca_dir, &NodeId::new("127.0.0.1", 9401).unwrap(), &node_dir).expect("the minted CA issues");
+    }
+
+    /// A mint takes the lock a starting node takes: while another process holds `ca.lock` in the directory, `mint_ca`
+    /// publishes nothing and is refused naming the lock — never a mint racing a node's generation, whose rename would
+    /// replace the minted key and whose certificate would then make the mint's cleanup delete the node's key (#695's
+    /// confirmation round, follow-up 2). Seen failing first: the mint ignored the lock and published.
+    #[test]
+    fn a_mint_takes_the_ca_lock_and_publishes_nothing_while_another_holds_it() {
+        let dir = fresh_dir("mint-lock");
+        std::fs::write(dir.join("ca.lock"), b"").unwrap();
+        let err = super::imp::mint_ca(&dir).expect_err("another process holds the lock");
+        assert!(err.to_string().contains("ca.lock"), "{err}");
+        assert!(!dir.join("ca-key.pem").exists() && !dir.join("ca-cert.pem").exists(), "nothing published behind the lock");
+        std::fs::remove_file(dir.join("ca.lock")).unwrap();
+        super::imp::mint_ca(&dir).expect("mints once the lock is gone");
+        assert!(!dir.join("ca.lock").exists(), "the mint releases the lock");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Mints and node starts racing on one empty directory: whatever wins, the key on disk is the certificate's, every
+    /// node holds the CA on disk, and no lock is left.
+    #[test]
+    fn mints_and_node_starts_racing_leave_one_ca() {
+        for round in 0..10 {
+            let dir = fresh_dir(&format!("mint-node-race-{round}"));
+            let cfg = Arc::new(TlsConfig { auto_cert_dir: dir.clone(), ..TlsConfig::default() });
+            let barrier = Arc::new(Barrier::new(8));
+            let nodes: Vec<_> = (0..4).map(|_| {
+                let (cfg, barrier) = (Arc::clone(&cfg), Arc::clone(&barrier));
+                std::thread::spawn(move || { barrier.wait(); load_or_create_ca(&cfg).map(|c| c.0.as_ref().to_vec()) })
+            }).collect();
+            let mints: Vec<_> = (0..4).map(|_| {
+                let (dir, barrier) = (dir.clone(), Arc::clone(&barrier));
+                std::thread::spawn(move || { barrier.wait(); super::imp::mint_ca(&dir).is_ok() })
+            }).collect();
+            let held: Vec<_> = nodes.into_iter().map(|h| h.join().unwrap()).collect();
+            let minted = mints.into_iter().map(|h| h.join().unwrap()).filter(|ok| *ok).count();
+            assert!(minted <= 1, "round {round}: {minted} mints each reported a CA");
+            let key = rcgen::KeyPair::from_pem(&std::fs::read_to_string(dir.join("ca-key.pem")).unwrap()).unwrap();
+            let cert = super::imp::pem_cert_to_der(&std::fs::read_to_string(dir.join("ca-cert.pem")).unwrap()).unwrap();
+            let spki = webpki::EndEntityCert::try_from(&cert).unwrap().subject_public_key_info().as_ref().to_vec();
+            assert!(key.public_key_der().ends_with(&spki), "round {round}: the key on disk is the certificate's");
+            for h in held.into_iter().flatten() {
+                assert_eq!(h, cert.as_ref().to_vec(), "round {round}: a node holds a CA other than the one on disk");
+            }
+            assert!(!dir.join("ca.lock").exists(), "round {round}: a lock was left behind");
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// A mint interrupted between its two links leaves `ca-key.pem` without `ca-cert.pem`. That state is named — a mint
+    /// that did not finish, from which nothing can have been issued, and how to recover — by `tls ca` and by `tls
+    /// issue`, rather than "a CA is minted once" or a bare read error (#695's confirmation round, follow-up 3). Seen
+    /// failing first: both said nothing of an interrupted mint.
+    #[test]
+    fn a_key_without_its_certificate_is_named_an_interrupted_mint() {
+        use crate::node_id::NodeId;
+        let dir = fresh_dir("half");
+        super::imp::mint_ca(&dir).unwrap();
+        std::fs::remove_file(dir.join("ca-cert.pem")).unwrap();
+        let again = super::imp::mint_ca(&dir).expect_err("a half-published CA").to_string();
+        assert!(again.contains("interrupted") && again.contains("remove"), "{again}");
+        let out = fresh_dir("half-out");
+        let issue = super::imp::issue_node_cert(&dir, &NodeId::new("127.0.0.1", 9404).unwrap(), &out).expect_err("no CA to issue from").to_string();
+        assert!(issue.contains("interrupted"), "{issue}");
+        for d in [dir, out] {
+            let _ = std::fs::remove_dir_all(d);
+        }
+    }
+
+    /// The trust anchor keeps its integrity whatever the umask: a directory the TLS module creates for keys and
+    /// certificates is `0700`, and every certificate it writes is `0644` — narrowed when it rewrites a file left wider
+    /// (#695's confirmation round, follow-up 4). An existing directory is the operator's and is left as it is. Seen
+    /// failing first: the directories were `0755` under umask 022 and a rewritten `0666` certificate stayed `0666`.
+    #[cfg(unix)]
+    #[test]
+    fn key_directories_are_owner_only_and_certificates_are_0644() {
+        use crate::node_id::NodeId;
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        let root = fresh_dir("dir-modes");
+        let ca_dir = root.join("ca");
+        super::imp::mint_ca(&ca_dir).unwrap();
+        assert_eq!(mode(&ca_dir), 0o700, "the CA directory mint_ca creates");
+        assert_eq!(mode(&ca_dir.join("ca-cert.pem")), 0o644, "the minted CA certificate");
+        let out = root.join("issued");
+        let node = NodeId::new("127.0.0.1", 9405).unwrap();
+        let (cert, _key) = super::imp::issue_node_cert(&ca_dir, &node, &out).unwrap();
+        assert_eq!(mode(&out), 0o700, "the directory issue_node_cert creates");
+        std::fs::set_permissions(&cert, std::fs::Permissions::from_mode(0o666)).unwrap();
+        std::fs::remove_file(out.join("127_0_0_1_9405.key.pem")).unwrap();
+        super::imp::issue_node_cert(&ca_dir, &node, &out).unwrap();
+        assert_eq!(mode(&cert), 0o644, "a certificate rewritten over a 0666 file");
+        let own = root.join("own");
+        load_or_create_ca(&TlsConfig { auto_cert_dir: own.clone(), ..TlsConfig::default() }).ok();
+        let cfg = TlsConfig { auto_cert_dir: own.clone(), ..TlsConfig::default() };
+        super::imp::load_or_generate(&cfg, &NodeId::new("127.0.0.1", 9406).unwrap(), Arc::new(crate::removal::RemovedSet::default()), Default::default()).unwrap();
+        assert_eq!(mode(&own), 0o700, "the auto_cert_dir a node creates");
+        assert_eq!(mode(&own.join("ca-cert.pem")), 0o644, "a CA certificate a node generates");
+        let existing = fresh_dir("dir-modes-existing");
+        std::fs::set_permissions(&existing, std::fs::Permissions::from_mode(0o755)).unwrap();
+        super::imp::issue_node_cert(&ca_dir, &NodeId::new("127.0.0.1", 9407).unwrap(), &existing).unwrap();
+        assert_eq!(mode(&existing), 0o755, "an existing directory is left as the operator made it");
+        for d in [root, existing] {
+            let _ = std::fs::remove_dir_all(d);
+        }
     }
 
     /// `id.ca_key_off_node` (plan §8): a node given a **pre-issued** certificate starts from the CA

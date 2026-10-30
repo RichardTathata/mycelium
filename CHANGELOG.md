@@ -11,6 +11,11 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Directories the TLS module creates for keys and certificates are `0700`, and certificates are written `0644`**,
+  on unix, whatever the umask — a node's `auto_cert_dir` when it creates it, and `tls ca` / `tls issue`'s `--out` when
+  it does not exist yet; a wider certificate is narrowed when rewritten. Under a permissive umask (`000`, `002`) the
+  directories were `0777`/`0775` and the CA certificate `0666`, so another local user could replace the trust anchor.
+  A directory that already exists is left as it is (#695's confirmation round; `deprecations.md` §71).
 - **`mycelium tls issue` refuses to replace a node key it issued before** unless `--force`, naming what replacing it
   means — the node restarts on the new key, and every partner pinning its gateway needs the new pin
   (`deprecations.md` §69).
@@ -101,7 +106,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **`mycelium tls ca --out <dir>`** mints a fleet CA on the issuer's host (`mycelium::mint_ca`) — until now only a node
   started over an empty directory could, so the off-node path had no first step of its own. It refuses a directory
   holding either file, and publishes the pair by hard link, so two concurrent mints publish one CA and the other is
-  refused. **`mycelium tls pin <cert.pem>`** prints a certificate's SPKI SHA-256, the value a federation partner pins;
+  refused. It holds `ca.lock`, the lock a starting node takes, so it never races a node generating a CA in the same
+  directory; it refuses by name on a filesystem without hard links (FAT, exFAT, some SMB mounts); and a mint
+  interrupted between its key and its certificate is named, with the recovery, by the next `tls ca` or `tls issue`.
+  **`mycelium tls pin <cert.pem>`** prints a certificate's SPKI SHA-256, the value a federation partner pins;
   it refuses a CA certificate (whose pin admits no gateway) and a file that carries a private key.
 - **`mycelium::doctor::run_attached(path, attach)`**: the doctor over a node an embedder builds — the same load,
   `preflight()`, report and profile check as `run`, with the program's own code attachments (an evaluator, a journal, a

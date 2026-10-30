@@ -697,13 +697,15 @@ fn explain_cli(args: Vec<String>) -> i32 {
     0
 }
 
-/// `mycelium tls issue --ca-dir <dir> --node <ip:port> --out <dir>` — issue a node certificate off-node:
+/// `mycelium tls issue --ca-dir <dir> --node <ip:port> --out <dir> [--force]` — issue a node certificate off-node:
 /// the CA (`ca-cert.pem` + `ca-key.pem`) stays in `--ca-dir` on this host; `<out>/<node>.cert.pem` and
 /// `<out>/<node>.key.pem` go to the node, with `ca-cert.pem` (the certificate only), as `[tls]
-/// cert_pem` / `key_pem`. Exits 2 on usage or a file that does not load.
+/// cert_pem` / `key_pem`. Refuses to replace a node key it issued before unless `--force`. Exits 2 on usage or a
+/// file that does not load.
 ///
 /// `mycelium tls ca --out <dir>` — mint the fleet CA on the issuer's host (`ca-cert.pem` + `ca-key.pem`), the step
-/// before the first `issue`; refused when `<dir>` already holds a CA. Only `ca-cert.pem` ever goes to a node.
+/// before the first `issue`; refused when `<dir>` already holds a CA, names a mint that was interrupted, and needs a
+/// filesystem with hard links. Only `ca-cert.pem` ever goes to a node.
 ///
 /// `mycelium tls pin <cert.pem>` — the hex SHA-256 of a certificate's `SubjectPublicKeyInfo`, read from its
 /// structural position: the value a partner's federation client pins (`FederationClient::with_tls_pins`) for a
@@ -735,7 +737,7 @@ fn tls_cli(args: Vec<String>) -> i32 {
     {
         let node_id: mycelium::NodeId = match node.parse() { Ok(n) => n, Err(e) => { eprintln!("--node: {e}"); return 2; } };
         // A node key already issued is an identity in use: a partner may pin it, a node may run on it. Issuing over
-        // it replaces both, so it takes `--force` (#695's review, finding 5; deprecations § 67).
+        // it replaces both, so it takes `--force` (#695's review, finding 5; deprecations § 69).
         let existing = std::path::Path::new(&out).join(format!("{}.key.pem", node_id.as_str().replace([':', '.'], "_")));
         if existing.exists() && !force {
             eprintln!(
@@ -867,7 +869,7 @@ fn is_ca_certificate(der: &[u8]) -> Option<bool> {
 
 fn print_usage() {
     eprintln!(
-        "Usage: mycelium [OPTIONS]\n       mycelium init <dir> [--template <name>] | --list\n       mycelium declare [project-dir] [--gateway <url>] [--token <bearer>] [--watch]\n       mycelium doctor [config.toml] [--units <dir>] [--format text|json]\n       mycelium wire-check <units-dir> [--library <dir>] [--schemas <dir>] [--format text|json|dot] [--strict-deployed] [--no-authority]\n       mycelium rules [--format md|json]\n       mycelium test --faults [<class>,…] <units-dir> [--config <node.toml>] [--against <units-dir>] [--format text|json]\n       mycelium explain <decisions.jsonl> [--catalogue <rule-catalogue.json>] [--target <target>]\n       mycelium explain --correlation <id> <files…> | --closure <sha256> <files…> [--fleet <n>]\n       mycelium tls ca --out <dir> | issue --ca-dir <dir> --node <ip:port> --out <dir> | pin <cert.pem>\n\
+        "Usage: mycelium [OPTIONS]\n       mycelium init <dir> [--template <name>] | --list\n       mycelium declare [project-dir] [--gateway <url>] [--token <bearer>] [--watch]\n       mycelium doctor [config.toml] [--units <dir>] [--format text|json]\n       mycelium wire-check <units-dir> [--library <dir>] [--schemas <dir>] [--format text|json|dot] [--strict-deployed] [--no-authority]\n       mycelium rules [--format md|json]\n       mycelium test --faults [<class>,…] <units-dir> [--config <node.toml>] [--against <units-dir>] [--format text|json]\n       mycelium explain <decisions.jsonl> [--catalogue <rule-catalogue.json>] [--target <target>]\n       mycelium explain --correlation <id> <files…> | --closure <sha256> <files…> [--fleet <n>]\n       mycelium tls ca --out <dir> | issue --ca-dir <dir> --node <ip:port> --out <dir> [--force] | pin <cert.pem>\n\
          \n\
          Options:\n\
          -c, --config <file>      Load configuration from a TOML file\n\

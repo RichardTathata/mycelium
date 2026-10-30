@@ -190,7 +190,7 @@ certificate and the CA **certificate** alone:
 
 ```bash
 # on the issuer's host, where ca-cert.pem + ca-key.pem live (never on a node) — minted there once:
-mycelium tls ca --out ./fleet-ca          # refused if ./fleet-ca already holds a CA
+mycelium tls ca --out ./fleet-ca          # refused if ./fleet-ca already holds a CA; needs hard links (not FAT/exFAT/some SMB)
 mycelium tls issue --ca-dir ./fleet-ca --node 10.0.0.7:8080 --out ./issued   # --force to replace a key issued before
 # → ./issued/10_0_0_7_8080.cert.pem and .key.pem
 # on the node: copy both plus ./fleet-ca/ca-cert.pem (the certificate only) into its directory, and
@@ -207,7 +207,11 @@ needs the CA key and errors without it, by design. The startup report resolves `
 `enforced` only on such a node; `secure-single-domain` **rev 2 (v2.21.0) requires it** — a node under
 the profile whose certificate was minted on-node refuses to start, naming `id.ca_key_off_node`
 (announced in v2.20.0, one release ahead, per the plan's G12). The issuer's `mycelium` binary needs
-`--features tls`; without it `tls ca` and `tls issue` exit 2 saying so. For a federation partner, `mycelium tls pin
+`--features tls`; without it `tls ca` and `tls issue` exit 2 saying so. On unix every private key is written `0600`,
+every certificate `0644`, and a directory these steps (or a node) create for them `0700`, whatever the umask; a
+directory that already exists is left as you made it. `tls ca` holds the `ca.lock` a starting node takes, and a mint
+interrupted between its two files leaves `ca-key.pem` without `ca-cert.pem` — the next `tls ca` or `tls issue` names
+that state: remove the key (nothing can have been issued from it) and mint again. For a federation partner, `mycelium tls pin
 <cert.pem>` prints the hex SPKI SHA-256 of a gateway's certificate — the value the partner's client pins
 ([federation § Encrypting the link](federation.md#encrypting-the-link-tls-pinning)).
 
