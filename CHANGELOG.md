@@ -90,8 +90,11 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (`422 schedule section`) and a stem refuses to start with one; the capability namespace `schedule` is reserved at
   every advertise door and in the loader; the raw KV routes refuse `sched/` (`deprecations.md` §68). **Not built:** a
   cron language beyond a period and a phase; a fleet-wide calendar; exclusivity — a partition runs a slot on each
-  side; an SDK or gateway route that runs a schedule; a schedule run recorded and replayed under the kernel; a
-  `mycelium test --faults` class.
+  side; an SDK or gateway route that runs a schedule; a `mycelium test --faults` class. **A recording replays it:**
+  the corpus bundle `tests/replay-corpus/y2-schedule-run/` — one node holding a schedule, deciding a missed run under
+  `run_once`, a run that overruns its deadline, then the gap's run — is replayed by `tests/schedule_replay.rs` in
+  another process, decision for decision on every input, in CI; a recording from another feature set or shard count
+  is refused by name.
 - **The Ops Console observes from the browser, and a gateway lets it — opt-in** (`docs/plans/adopter-surface.md` Y3,
   D16/D28; `docs/operations/observability.md` § The Ops Console). `examples/ops_console` is now a static page
   (`index.html`) that reads each node it is given **directly** and merges their answers itself — Overview, Fleet,
@@ -234,6 +237,18 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   key view; scoping `KnowledgeStore`'s own methods (no route or SDK verb reads knowledge records).
 
 ### Found
+
+- **A recording of a whole node could not be replayed by another process** — two per-process seeds on the replay
+  path, found by the first checked-in recording of a node (Y2's schedule run): the gossip shard hasher
+  (`framing::shard_hasher`) was seeded per process, so a send's recorded channel stream (`gossip/shard{n}`) differed
+  in the next process — now fixed seeds under `sim` (a shipped build keeps the random seed); and the shutdown sweep
+  tombstoned the node's soft state in the store map's per-process iteration order — now sorted, in every build. And
+  a recording made on one machine diverged on another: the default `gossip_shards` read the host's CPU count (16 shards
+  on a 12-core laptop, 4 on CI's runner) — now a constant under `sim`. Every earlier whole-node replay ran in its
+  recording's own process on its own machine, which shares both. And every store scan (`scan_kv_prefix`,
+  `scan_scope`, `scopes_under`, the capability scans) returned keys in the store map's per-process order, which
+  periodic writers walked — the fleet tally's withdrawal and collection, `KvHandle::compact_log` — so two such writes
+  in one pass replayed in another order elsewhere: every scan now returns its keys sorted, in every build. Inventory §2.5.
 
 - **A federated credential presented again, with the same body and inside its window, is served again.** The edge
   checks the signature, the body binding, the window and the grant, and keeps no record of credentials it has served;

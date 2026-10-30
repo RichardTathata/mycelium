@@ -321,6 +321,10 @@ The checked-in corpus bundle for the real write-ahead-log race lives in
 `mycelium-core/tests/replay-corpus/` and is replayed by its own test rather than by the example,
 because reproducing that failure means removing a durability fix, and the switch that does so is
 test-only on purpose. A binary that could disable a durability fix would be a data-loss switch.
+The repository's own corpus, `tests/replay-corpus/`, holds recordings of the root crate: X9's selective recovery
+(`tests/faults_recovery_replay.rs`) and a node running a `[[schedule]]` — holding it, deciding a missed run and
+running it (`tests/schedule_replay.rs`). Each is replayed by a process other than the one that recorded it, which is
+what makes a seed shared within one process — a hasher's, say — show up as a divergence.
 
 ---
 
