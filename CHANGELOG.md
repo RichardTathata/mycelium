@@ -88,7 +88,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     them as *not built*.
   - **A tool with `approval` is refused,** and the refusal names the `[[rule]]` with `requires_grant` to declare instead.
   - **What the fleet gets:** `serveEveTools` serves the tools as an MCP server a node bridges. Arguments are checked
-    with the tool's Standard Schema. `declareEveAgent` declares the unit (`eveUnitToml`, `runtime = "typescript"`) and
+    with the tool's Standard Schema.
+    - The server answers only a JSON `POST` with no `Origin` header.
+    - A body that is not one request object is answered `-32600`, and a failure inside a request is answered with a
+      500. Neither leaves the rejection unhandled.
+    - A tool field the fleet does not carry, a streamed result, and two modules naming one tool are each refused by
+      name.
+    - Dotfiles and Eve's generated directories are skipped, as Eve skips them. `declareEveAgent` declares the unit (`eveUnitToml`, `runtime = "typescript"`) and
     writes the instructions and Markdown skills as prompt skills.
   - **The demonstration:** `examples/eve_weather/run_demo.mjs` checks that the three files of the example's `agent/`
     are byte for byte the README example of the pinned package. It runs them on three nodes from

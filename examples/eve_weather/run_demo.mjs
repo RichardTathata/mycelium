@@ -107,7 +107,11 @@ for (const i of [1, 2, 3]) {
     }),
   );
 }
-await Promise.race([Promise.all(ready), new Promise((_, r) => setTimeout(() => r(new Error("the fleet was not ready in 120 s")), 120_000))]);
+let readyTimer;
+await Promise.race([
+  Promise.all(ready),
+  new Promise((_, r) => (readyTimer = setTimeout(() => r(new Error("the fleet was not ready in 120 s")), 120_000))),
+]).finally(() => clearTimeout(readyTimer)); // cleared, so the run does not wait out the bound after the fleet is up
 console.log(`fleet: three nodes ready; get_weather served from ${provider}`);
 
 // ── 4. Declare the agent: its unit, its instructions as a prompt skill ──────

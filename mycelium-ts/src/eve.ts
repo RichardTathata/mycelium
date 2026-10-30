@@ -139,8 +139,8 @@ export interface EveAgent {
 
 /** How {@link loadEveAgent} reads a directory. */
 export interface LoadOptions {
-  /** The agent's name. Default: the `name` of the `package.json` beside `agent/` without its npm scope, else the
-   *  parent directory's name — Eve's own rule. */
+  /** The agent's name. Default: the `name` of the project's `package.json` — the one beside `agent/` — without its npm
+   *  scope, else the project directory's name: Eve's own rule for a standalone root agent. */
   name?: string;
   /** Import a module. Default: Node's dynamic `import()` of the file's URL, so a `.ts` tool runs under Node's own
    *  type stripping (Eve 0.80.0 needs Node 24). */
@@ -160,6 +160,20 @@ function isColocatedTest(name: string): boolean {
 }
 
 /**
+ * Entries that are never authored content, skipped as Eve 0.80.0 skips them: the directories Eve's discovery ignores as
+ * generated (`GENERATED_AGENT_DIRECTORY_NAMES` in its `discover/filesystem.js`: `.devtools`, `.eve`, `.next`, `.output`,
+ * `.vercel`, `node_modules`), and every other name starting with `.` (`.DS_Store`, `.gitkeep`), which no slot of an Eve
+ * directory has. Eve also ignores any other root *file* no slot names and warns on any other directory; this loader
+ * refuses both by name instead — stricter than Eve, on purpose: an entry it would skip is one an author may rely on.
+ */
+function isNeverAuthored(name: string): boolean {
+  return name.startsWith(".") || name === "node_modules";
+}
+
+/** The fields of an Eve 0.80.0 `defineTool` the fleet carries; any other is refused by name. */
+const TOOL_FIELDS = new Set(["description", "inputSchema", "execute"]);
+
+/**
  * Name every entry of an Eve agent directory with its status, without importing anything. An entry no slot names is
  * `unknown`; inside `skills/` and `tools/` an entry the slot does not take (a module-backed skill, a nested directory)
  * is `not built`, named by its path.
@@ -167,6 +181,7 @@ function isColocatedTest(name: string): boolean {
 export function classifyEveDirectory(dir: string): EveEntry[] {
   const out: EveEntry[] = [];
   for (const dirent of fs.readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+    if (isNeverAuthored(dirent.name)) continue;
     const entry = dirent.isDirectory() ? `${dirent.name}/` : dirent.name;
     const slot = EVE_SLOTS.find((s) => s.slot === entry);
     if (!slot) {
@@ -176,7 +191,7 @@ export function classifyEveDirectory(dir: string): EveEntry[] {
     out.push({ entry, status: slot.status, reason: slot.onTheFleet });
     if (slot.slot === "skills/" || slot.slot === "tools/") {
       for (const inner of fs.readdirSync(path.join(dir, dirent.name), { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
-        if (isColocatedTest(inner.name)) continue;
+        if (isColocatedTest(inner.name) || isNeverAuthored(inner.name)) continue;
         const sub = `${slot.slot}${inner.name}${inner.isDirectory() ? "/" : ""}`;
         const ok =
           inner.isFile() &&
@@ -189,9 +204,34 @@ export function classifyEveDirectory(dir: string): EveEntry[] {
           });
         }
       }
+      if (slot.slot === "tools/") out.push(...duplicateTools(path.join(dir, dirent.name)));
     }
   }
   return out;
+}
+
+/** Two tool modules with one name (`get_weather.ts` and `get_weather.js`): each refused by name, as Eve refuses a slot
+ *  collision (`discover/slot-collision`) rather than pick one. */
+function duplicateTools(toolsDir: string): EveEntry[] {
+  const byName = new Map<string, string[]>();
+  for (const f of toolFiles(toolsDir)) {
+    const name = f.slice(0, -path.extname(f).length);
+    byName.set(name, [...(byName.get(name) ?? []), f]);
+  }
+  return [...byName.values()]
+    .filter((files) => files.length > 1)
+    .flatMap((files) =>
+      files.map((f) => ({ entry: `tools/${f}`, status: "not built" as const, reason: `two tool modules name one tool: ${files.join(", ")}` })),
+    );
+}
+
+/** The tool modules of `tools/`, sorted: flat files with a module extension, tests and never-authored names skipped. */
+function toolFiles(toolsDir: string): string[] {
+  return fs
+    .readdirSync(toolsDir, { withFileTypes: true })
+    .filter((d) => d.isFile() && TOOL_EXTENSIONS.includes(path.extname(d.name)) && !isColocatedTest(d.name) && !isNeverAuthored(d.name))
+    .map((d) => d.name)
+    .sort();
 }
 
 /** `node_modules/eve/package.json`'s version, searched upward from `dir`, or `null`. */
@@ -238,6 +278,10 @@ function toolRefusal(name: string, def: unknown): string | null {
   if ("approval" in d || "approvalKey" in d) {
     return "an Eve approval policy is not carried; declare a `[[rule]]` with `requires_grant` for the tool (X3)";
   }
+  const extra = Object.keys(d).filter((k) => !TOOL_FIELDS.has(k));
+  if (extra.length > 0) {
+    return `it sets ${extra.map((k) => `\`${k}\``).join(", ")}, which the fleet does not carry; only \`description\`, \`inputSchema\` and \`execute\` are read`;
+  }
   if (typeof d.description !== "string" || d.description === "") return "it has no `description`";
   if (typeof d.execute !== "function") return "it has no `execute`";
   if (!isStandardSchema(d.inputSchema)) return "its `inputSchema` is not a Standard Schema";
@@ -249,7 +293,8 @@ function toolRefusal(name: string, def: unknown): string | null {
 }
 
 /**
- * Read an Eve agent directory (`agent/`, or a flat one): refuse what the fleet does not load — every such entry, by
+ * Read an Eve agent directory — the `agent/` directory of a single-agent project; Eve's flat layout (agent files in the
+ * app root beside `package.json`) is not read, and is refused at its first non-slot entry. Refuse what the fleet does not load — every such entry, by
  * name, in one {@link EveRefusedError} — then import `agent.ts` and each tool and read the Markdown skills. Nothing is
  * declared or served; see {@link declareEveAgent} and {@link serveEveTools}.
  */
@@ -294,7 +339,7 @@ export async function loadEveAgent(dir: string, options: LoadOptions = {}): Prom
   const skills: EveSkill[] = [{ name: "instructions", text: fs.readFileSync(path.join(root, "instructions.md"), "utf8") }];
   const skillsDir = path.join(root, "skills");
   if (fs.existsSync(skillsDir)) {
-    for (const file of fs.readdirSync(skillsDir).filter((f) => f.endsWith(".md") && !isColocatedTest(f)).sort()) {
+    for (const file of fs.readdirSync(skillsDir).filter((f) => f.endsWith(".md") && !isColocatedTest(f) && !isNeverAuthored(f)).sort()) {
       const skillName = file.slice(0, -".md".length);
       if (!KEY_SEGMENT.test(skillName) || skillName === "instructions") {
         throw new EveRefusedError([{ entry: `skills/${file}`, status: "not built", reason: "its name is not one key segment, or is `instructions`" }]);
@@ -307,11 +352,7 @@ export async function loadEveAgent(dir: string, options: LoadOptions = {}): Prom
   const toolRefusals: EveEntry[] = [];
   const toolsDir = path.join(root, "tools");
   if (fs.existsSync(toolsDir)) {
-    const files = fs
-      .readdirSync(toolsDir)
-      .filter((f) => TOOL_EXTENSIONS.includes(path.extname(f)) && !isColocatedTest(f))
-      .sort();
-    for (const file of files) {
+    for (const file of toolFiles(toolsDir)) {
       const toolName = file.slice(0, -path.extname(file).length);
       const def = (await importModule(path.join(toolsDir, file))).default;
       const why = toolRefusal(toolName, def);
@@ -330,7 +371,12 @@ export async function loadEveAgent(dir: string, options: LoadOptions = {}): Prom
           if (checked.issues) throw new EveToolInputError(toolName, checked.issues);
           // Eve passes a context of its runtime (session, sandbox, auth); the fleet has none to give, so a tool that
           // reads it fails at its call — stated in the README.
-          return await d.execute(checked.value, {});
+          const output = await d.execute(checked.value, {});
+          // A streamed result (an async iterable — Eve's yielded tool output) has no one value to answer with.
+          if (output !== null && typeof output === "object" && Symbol.asyncIterator in output) {
+            throw new Error(`${toolName}: a streamed result (an async iterable) is not carried; return one value`);
+          }
+          return output;
         },
       });
     }
@@ -368,16 +414,33 @@ export function serveEveTools(agent: EveAgent, options: { port?: number; host?: 
       res.writeHead(405).end();
       return;
     }
+    // The bridge (`connect_mcp_server`) posts JSON and sends no `Origin`. A browser does send one, and a page's
+    // "simple" cross-origin POST cannot set `application/json` — so neither reaches a tool past `/mcp`'s decision.
+    if (req.headers.origin !== undefined) {
+      res.writeHead(403, { "content-type": "application/json" }).end(JSON.stringify({ error: "a request with an Origin is refused" }));
+      return;
+    }
+    if (!/^application\/json(\s*;|$)/i.test(req.headers["content-type"] ?? "")) {
+      res.writeHead(415, { "content-type": "application/json" }).end(JSON.stringify({ error: "content-type must be application/json" }));
+      return;
+    }
     const chunks: Buffer[] = [];
     req.on("data", (c: Buffer) => chunks.push(c));
     req.on("end", () => {
-      void answer(agent, Buffer.concat(chunks).toString("utf8")).then((reply) => {
-        if (reply === null) {
-          res.writeHead(202).end();
-          return;
-        }
-        res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(reply));
-      });
+      answer(agent, Buffer.concat(chunks).toString("utf8"))
+        .then((reply) => {
+          if (reply === null) {
+            res.writeHead(202).end();
+            return;
+          }
+          res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(reply));
+        })
+        .catch((e: unknown) => {
+          // Never an unhandled rejection: the process serving the tools outlives a request it could not answer.
+          res
+            .writeHead(500, { "content-type": "application/json" })
+            .end(JSON.stringify({ jsonrpc: "2.0", id: null, error: { code: -32603, message: e instanceof Error ? e.message : String(e) } }));
+        });
     });
   });
   return new Promise((resolve, reject) => {
@@ -395,12 +458,18 @@ export function serveEveTools(agent: EveAgent, options: { port?: number; host?: 
 
 /** One JSON-RPC answer, or `null` for a notification. Exported for the tests. */
 export async function answer(agent: EveAgent, body: string): Promise<Record<string, unknown> | null> {
-  let msg: { id?: unknown; method?: unknown; params?: { name?: unknown; arguments?: unknown } };
+  let parsed: unknown;
   try {
-    msg = JSON.parse(body);
+    parsed = JSON.parse(body);
   } catch {
     return { jsonrpc: "2.0", id: null, error: { code: -32700, message: "parse error" } };
   }
+  // One request object per POST, as the bridge sends: a batch, `null` or a scalar is an invalid request, answered.
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    const what = Array.isArray(parsed) ? "a batch is not supported" : "the body is not a request object";
+    return { jsonrpc: "2.0", id: null, error: { code: -32600, message: `invalid request: ${what}` } };
+  }
+  const msg = parsed as { id?: unknown; method?: unknown; params?: { name?: unknown; arguments?: unknown } | null };
   const id = msg.id ?? null;
   if (msg.id === undefined) return null; // a notification (`notifications/initialized`) is not answered
   switch (msg.method) {

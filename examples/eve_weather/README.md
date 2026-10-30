@@ -87,6 +87,26 @@ refused as unknown. The test `the README's table is the loader's` in
 | `schedules/` | not built | decided (Y6, option B): refused; an SDK route for running schedules is row Y12 |
 | `subagents/` | not built | maps differently: another unit found by capability, discovery rather than a parent calling a child; this loader does not translate one |
 
+Within a loaded slot, the loader refuses by name what it does not carry:
+- **Tool fields:** a tool's fields other than `description`, `inputSchema` and `execute` (`outputSchema`,
+  `toModelOutput`, `endsTurn`, `label`, `deferred`, `availableInSubagents`) are refused, never ignored.
+- **Streamed results:** a tool whose `execute` returns a streamed result (an async iterable) answers an `isError`
+  result naming the tool.
+- **Duplicate names:** two modules that name one tool (`get_weather.ts` and `get_weather.js`) are each refused, as Eve
+  refuses a slot collision.
+- **The flat layout:** Eve's flat layout, with agent files in the app root beside `package.json`, is not read. The
+  loader reads the `agent/` directory, and takes the agent's name from the `package.json` beside it.
+
+**Entries that are never authored content are skipped, as Eve 0.80.0 skips them.**
+- **Skipped:**
+  - the directories Eve's discovery ignores as generated (`GENERATED_AGENT_DIRECTORY_NAMES` in its
+    `discover/filesystem.js`: `.devtools`, `.eve`, `.next`, `.output`, `.vercel`, `node_modules`);
+  - any other name beginning with `.`, such as `.DS_Store` or `.gitkeep`, at the root or inside `skills/` or `tools/`;
+  - colocated tests (`*.test.*`, `*.spec.*`, `__tests__/`).
+- **Refused:** anything else no slot names. That is stricter than Eve, on purpose. Eve ignores a root file no slot
+  names, and warns on such a directory and ignores it. An entry the loader skipped would be one an author might be
+  relying on.
+
 Eve's approval policies map to the grant, which is stronger: the grant is verified where the call is enforced. The
 loader does not translate an Eve `approval`. It refuses the tool by name and points to the `[[rule]]` that declares the
 grant, which [`grant-rules.toml`](grant-rules.toml) shows.
@@ -112,6 +132,12 @@ grant, which [`grant-rules.toml`](grant-rules.toml) shows.
 - **`declareEveAgent` writes the skills; it does not retract them.** It returns their names, and a prompt skill is
   deleted through the prompts route.
 - **The server `serveEveTools` runs decides nothing.** The deciding door is the gateway's `/mcp`, in front of it. Bind
-  the server where only the bridging node reaches it, which is the default `127.0.0.1`.
+  the server where only the bridging node reaches it, which is the default `127.0.0.1`. It answers only a `POST` with
+  `content-type: application/json` and no `Origin` header, which is what the bridge sends. So a browser page on the
+  same host cannot reach a tool with a simple cross-origin request. A local process can, so the bind address is the
+  boundary.
+- **A grant on the tool across a restart, through `/mcp` on the fleet.** Step 7 is X3's test over the agent's unit,
+  in-process. On the fleet, no call carries a grant, because a grant's holder is the agent's node and a bearer at
+  `/mcp` cannot present one. Eve's `execute` is never reached under a grant.
 - **The node bridges once, at connect.** A tool added to the directory after the node bridged is not seen until the
   node bridges again.

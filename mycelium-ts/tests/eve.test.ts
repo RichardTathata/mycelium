@@ -162,6 +162,12 @@ test("a tool that does not map, or carries what the fleet does not translate, is
     ["approve", `export default { description: "d", inputSchema: ${SCHEMA}, approval: "always", async execute() { return 1; } };`, "requires_grant"],
     ["disabled", `export default { kind: "eve:disabled-tool" };`, "removes a framework default"],
     ["no_execute", `export default { description: "d", inputSchema: ${SCHEMA} };`, "no `execute`"],
+    ["labelled", `export default { description: "d", inputSchema: ${SCHEMA}, label: "L", async execute() { return 1; } };`, "sets `label`, which the fleet does not carry"],
+    [
+      "shaped",
+      `export default { description: "d", inputSchema: ${SCHEMA}, outputSchema: ${SCHEMA}, toModelOutput: () => "", async execute() { return 1; } };`,
+      "sets `outputSchema`, `toModelOutput`",
+    ],
     ["plain_schema", `export default { description: "d", inputSchema: { type: "object" }, async execute() { return 1; } };`, "not a Standard Schema"],
     [
       "no_json",
@@ -174,6 +180,18 @@ test("a tool that does not map, or carries what the fleet does not translate, is
     expect(e.refused.map((r) => r.entry)).toEqual([`tools/${name}.ts`]);
     expect(e.message).toContain(says);
   }
+});
+
+test("two tool modules with one name are each refused by name, as Eve refuses a slot collision", async () => {
+  const e = await refusal(agentDir({ ...WEATHER, "tools/get_weather.js": "exports.default = {};" }));
+  expect(e.refused.map((r) => r.entry)).toEqual(["tools/get_weather.js", "tools/get_weather.ts"]);
+  expect(e.message).toContain("two tool modules name one tool: get_weather.js, get_weather.ts");
+});
+
+test("never-authored entries are skipped as Eve skips them: dotfiles and its generated directories", async () => {
+  const dir = agentDir({ ...WEATHER, ".DS_Store": "x", ".eve/": "", "node_modules/": "", "tools/.DS_Store": "x", "skills/.gitkeep": "" });
+  expect(classifyEveDirectory(dir).map((e) => e.entry)).toEqual(["agent.ts", "instructions.md", "skills/", "tools/"]);
+  expect((await loadEveAgent(dir, opts())).tools.map((t) => t.name)).toEqual(["get_weather"]);
 });
 
 test("a nested directory or a module-backed skill is refused by its path; colocated tests are skipped, as Eve skips them", async () => {
@@ -229,6 +247,26 @@ describe("the MCP answers", () => {
     expect(bad.content[0].text).toBe("get_weather: the arguments do not match its schema: city: expected string");
   });
 
+  test("a body that is JSON but not one request object — null, a scalar, a batch — is an invalid request, answered", async () => {
+    for (const [body, says] of [["null", "the body is not a request object"], ["7", "the body is not a request object"], ["[]", "a batch is not supported"]]) {
+      expect((await answer(agent, body))?.error).toEqual({ code: -32600, message: `invalid request: ${says}` });
+    }
+  });
+
+  test("a streamed result is not carried: an isError result naming the tool", async () => {
+    const streaming = await loadEveAgent(
+      agentDir({
+        ...WEATHER,
+        "tools/get_weather.ts": `export default { description: "d", inputSchema: ${SCHEMA}, async execute() { return (async function* () { yield 1; })(); } };`,
+      }),
+      opts(),
+    );
+    const r = (await answer(streaming, JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "get_weather", arguments: { city: "x" } } })))
+      ?.result as { isError: boolean; content: { text: string }[] };
+    expect(r.isError).toBe(true);
+    expect(r.content[0].text).toBe("get_weather: a streamed result (an async iterable) is not carried; return one value");
+  });
+
   test("an unknown tool, an unknown method, a notification and a body that is not JSON", async () => {
     expect((await rpc("tools/call", { name: "nope" }))?.error).toEqual({ code: -32602, message: "unknown tool: nope" });
     expect((await rpc("resources/list"))?.error).toMatchObject({ code: -32601 });
@@ -252,6 +290,37 @@ describe("the MCP answers", () => {
         temperatureF: 72,
       });
       expect((await fetch(server.url)).status).toBe(405);
+      // A browser's simple cross-origin POST: text/plain, with an Origin. Neither reaches a tool.
+      const call = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "get_weather", arguments: { city: "Hull" } } });
+      expect((await fetch(server.url, { method: "POST", headers: { "content-type": "text/plain" }, body: call })).status).toBe(415);
+      expect((await fetch(server.url, { method: "POST", headers: { "content-type": "application/json", origin: "http://evil.example" }, body: call })).status).toBe(403);
+      // A null body is answered, and the server is still there for the next request.
+      const nul = await fetch(server.url, { method: "POST", headers: { "content-type": "application/json" }, body: "null" });
+      expect(((await nul.json()) as { error: { code: number } }).error.code).toBe(-32600);
+      expect((await fetch(server.url, { method: "POST", headers: { "content-type": "application/json; charset=utf-8" }, body: call })).status).toBe(200);
+    } finally {
+      await server.close();
+    }
+  });
+
+  test("a request the server cannot answer is a 500, and the server goes on serving", async () => {
+    let broken = true;
+    const flaky = {
+      ...agent,
+      get tools() {
+        if (broken) throw new Error("the tool list is unreadable");
+        return agent.tools;
+      },
+    } as EveAgent;
+    const server = await serveEveTools(flaky);
+    try {
+      const post = () =>
+        fetch(server.url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }) });
+      const failed = await post();
+      expect(failed.status).toBe(500);
+      expect(((await failed.json()) as { error: { code: number; message: string } }).error).toEqual({ code: -32603, message: "the tool list is unreadable" });
+      broken = false;
+      expect((await post()).status).toBe(200);
     } finally {
       await server.close();
     }
