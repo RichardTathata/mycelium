@@ -89,7 +89,10 @@ fails), `the_shadow_profile_counts_and_holds_nothing`, `a_policy_denial_counts_n
   own effect is prepared, so both can pass a size threshold one of them reaches.
 - **The fleet tally is approximate** — detection, not prevention, as row K2's tally is: each node's summary is
   republished on the tally heartbeat's tick, so a peer's closure can grow unseen within the staleness bound. A
-  `fleet_tally` rule fails closed until every peer publishes, so it waits for the whole fleet to be upgraded. A gateway
+  `fleet_tally` rule fails closed until every peer publishes, so it waits for the whole fleet to be upgraded — and
+  only a node that attaches an exposure policy with a rule, or an exposure source, publishes: a node with neither is
+  inert (no summary, no collection, no clock read, so a recording made without the feature replays unchanged), and
+  a fleet-tally rule reads it as unknown coverage. A gateway
   with no source of its own reads only the summaries. An out-of-view node's unreadable, future-dated or non-member
   summary is dropped and counted, and any summary past the history horizon is collected — the one place the policy
   forgets an unresolved effect. Summaries are unsigned — the limit is the last *not built* item below.

@@ -1179,7 +1179,7 @@ impl GossipAgent {
         super::fleet_history::depart(&self.task_ctx);
         // Adopter-surface Y5: the exposure summary's last word, marked departed, beside it.
         #[cfg(all(feature = "gateway", feature = "tls"))]
-        super::exposure::depart(&self.task_ctx, self.task_ctx.hlc.decision_now_ms());
+        super::exposure::depart(&self.task_ctx);
         #[cfg(test)]
         {
             let hook = TEST_BEFORE_SWEEP.pin().get(&self.node_id.to_string()).cloned();

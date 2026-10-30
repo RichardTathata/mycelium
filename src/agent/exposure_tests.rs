@@ -516,7 +516,7 @@ mod doors {
         publish_summary(&a.task_ctx, now);
         assert!(own(&a).truncated, "a source error is published as truncated");
         assert!(serde_json::from_slice::<Summary>(&summary_bytes(&a.task_ctx, now, true).unwrap()).unwrap().departed);
-        depart(&a.task_ctx, now);
+        depart(&a.task_ctx);
         assert!(own(&a).departed, "the last word is marked departed");
         let ghost = NodeId::new("127.0.0.1", 9).unwrap().to_string();
         put(&a, &ghost, b"not a summary".to_vec());

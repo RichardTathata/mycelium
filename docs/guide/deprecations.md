@@ -2190,7 +2190,9 @@ one or the `fleet_consensus` scope is refused at load. `RuleDecl` gained the fie
 literal breaks. Every node built with `gateway` and `tls` now writes `sys/ae-exposure/{node}` on its tally
 heartbeat's tick — one key per node, owned, its foreign writes counted by the `sys/` tripwire — and collects an
 out-of-view node's unreadable, forged or expired one. **A `fleet_tally` rule fails closed until every node publishes
-a summary**, so it holds or refuses as not established until the whole fleet runs this release; an
+a summary**, so it holds or refuses as not established until the whole fleet runs this release — and a node publishes
+only when it attaches an exposure policy with a rule or an exposure source (a node with neither is inert, and a
+fleet-tally rule reads it as unknown coverage); an
 `enforcement_point` rule needs only the node that decides. Under the `legacy` profile — the default — the policy is
 neither read nor counted. A `protected_rpc_kinds` entry named `effect.probe`, `effect.compensate`, `effect.leave`,
 `grant.issue` or `grant.revoke` refuses the start, by name: a provider checks a protected kind under its own name, and

@@ -738,6 +738,16 @@ mod node {
     use bytes::Bytes;
     use std::sync::Arc;
 
+    /// **Whether this node takes part in the exposure policy at all**: it has a policy with a rule, or a source of
+    /// effects. A node with neither is inert — it publishes no summary, collects none and reads no clock, so it makes
+    /// no seam draw this feature did not exist to make, and every recording made before it replays unchanged
+    /// (`the_checked_in_schedule_run_replays_decision_for_decision`). The cost, stated: such a node's peers find no
+    /// summary for it, so a `fleet_tally` rule elsewhere reads it as unknown coverage and fails closed — every node
+    /// counted by a fleet-tally rule attaches a policy or a source.
+    pub(crate) fn active(ctx: &TaskCtx) -> bool {
+        ctx.exposure_policy.get().is_some_and(|p| !p.rules().is_empty()) || ctx.exposure_source.get().is_some()
+    }
+
     /// The closure the attached source gives for `key`: `Ok(None)` when no source is attached.
     fn local(ctx: &TaskCtx, key: &ClosureKey<'_>) -> Result<Option<ClosureExposure>, String> {
         match ctx.exposure_source.get() {
@@ -824,6 +834,9 @@ mod node {
     /// through the soft-state gate. A node with a source lists its unresolved records, up to [`MAX_SUMMARY_RECORDS`]; one
     /// without says it has none; one whose source cannot list them says `truncated`, which every reader takes as unknown.
     pub(crate) fn publish_summary(ctx: &Arc<TaskCtx>, now_ms: u64) {
+        if !active(ctx) {
+            return;
+        }
         let Some(bytes) = summary_bytes(ctx, now_ms, false) else { return };
         ctx.soft_state_gate.write(|| {
             let _ = mycelium_core::ops::kv_set(ctx, Arc::from(summary_key(&ctx.node_id.to_string()).as_str()), Bytes::from(bytes));
@@ -832,7 +845,11 @@ mod node {
 
     /// This node's last summary at a graceful shutdown, marked departed: a node out of view counts what it lists and
     /// does not wait for it. Written past the soft-state gate by the shutdown sweep, as the tally heartbeat's last word is.
-    pub(crate) fn depart(ctx: &TaskCtx, now_ms: u64) {
+    pub(crate) fn depart(ctx: &TaskCtx) {
+        if !active(ctx) {
+            return;
+        }
+        let now_ms = ctx.hlc.decision_now_ms();
         let Some(bytes) = summary_bytes(ctx, now_ms, true) else { return };
         let _ = mycelium_core::ops::kv_set(ctx, Arc::from(summary_key(&ctx.node_id.to_string()).as_str()), Bytes::from(bytes));
     }
@@ -840,6 +857,9 @@ mod node {
     /// **Before this node's connections come up**: its summary re-asserted on this node only, so a peer's collection of
     /// its old one while it was away is older than what it holds — as row K2's `reassert_own` does for the tally.
     pub(crate) fn reassert_own(ctx: &TaskCtx) {
+        if !active(ctx) {
+            return;
+        }
         let now = ctx.hlc.decision_now_ms();
         if let Some(bytes) = summary_bytes(ctx, now, false) {
             mycelium_core::ops::kv_write_local(ctx, Arc::from(summary_key(&ctx.node_id.to_string()).as_str()), Some(Bytes::from(bytes)));
@@ -852,6 +872,9 @@ mod node {
     /// node holds (`kv_delete_held`), so it loses to anything its owner wrote later. A peer's is never collected. Counted
     /// (`ExposureCounts::collected`).
     pub(crate) fn collect_summaries(ctx: &Arc<TaskCtx>, now_ms: u64) -> usize {
+        if !active(ctx) {
+            return 0;
+        }
         let bound = crate::control::ConfidenceBound::from_config(&ctx.config);
         let (others, can_verify) = others(ctx);
         let mut n = 0;
