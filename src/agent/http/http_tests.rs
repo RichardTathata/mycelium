@@ -2344,7 +2344,7 @@ async fn every_governance_write_route_audits_its_change() {
     // `let gateway = gateway.route(`, a call split across lines); `/govern` alone is the read route. Scope-map and
     // doc lines carry `/gateway/govern/`, not a bare `"/govern/`. The routes are mounted in `mod.rs` only: a family
     // file with a `.route(` of its own would be a second router, so none may have one.
-    let families: [(&str, &str); 14] = [
+    let families: [(&str, &str); 15] = [
         ("authz.rs", include_str!("authz.rs")), ("caps.rs", include_str!("caps.rs")),
         // The cross-origin read layer (Y3): a layer, not a router — its read list names `/gateway/govern`, the read route.
         ("cors.rs", include_str!("cors.rs")),
@@ -2352,7 +2352,8 @@ async fn every_governance_write_route_audits_its_change() {
         ("govern.rs", include_str!("govern.rs")), ("grants.rs", include_str!("grants.rs")), ("kv.rs", include_str!("kv.rs")),
         ("llm_bridge.rs", include_str!("llm_bridge.rs")), ("mcp_bridge.rs", include_str!("mcp_bridge.rs")),
         ("mesh.rs", include_str!("mesh.rs")), ("node.rs", include_str!("node.rs")),
-        ("overlay.rs", include_str!("overlay.rs")), ("signals.rs", include_str!("signals.rs")),
+        ("overlay.rs", include_str!("overlay.rs")), ("schedules.rs", include_str!("schedules.rs")),
+        ("signals.rs", include_str!("signals.rs")),
     ];
     for (name, src) in families {
         assert!(!src.contains(".route("), "{name} mounts a route outside the router in mod.rs");
