@@ -753,6 +753,11 @@ pub(crate) struct Settling {
     enforcement_point: String,
     /// Row R: what a routing door established about the destination, for the evidence record.
     route: Option<crate::agent::route_facts::RouteFacts>,
+    /// Adopter-surface Y11: what the exposure gate would have done on the shadow rung, kept for a refusal a door admits.
+    exposure_shadow: Option<String>,
+    /// Adopter-surface Y11: a take, claim or emit door on the shadow rung admits what the evaluator refused, recording
+    /// the refusal and that it was admitted ([`Settling::admit_in_shadow`]).
+    shadow_admit: bool,
 }
 
 /// Test hook: the per-actor history admission refused at these nodes, as if the history changed on every try — the
@@ -781,6 +786,30 @@ fn apply_exposure(
         Gate::NotEstablished(why) => Err(ae::PreflightRefusal::NotEstablished(
             ae::Decision { verdict: ae::Verdict::Indeterminate, reason: format!("exposure: {why}"), ..d }.checking(["exposure"]),
         )),
+    }
+}
+
+/// [`ae_preflight`] for a take, claim or emit door (adopter-surface Y11): `shadow` — the profile does not enforce —
+/// admits what the evaluator refuses, recorded ([`Settling::admit_in_shadow`]). A refusal decided before settling (a
+/// malformed `_meta`, a panicking evaluator) is still a refusal: the request was not one the door could act on.
+#[cfg(all(feature = "gateway", feature = "tls"))]
+pub(crate) async fn ae_preflight_door(
+    ctx: &Arc<TaskCtx>,
+    caller: Option<&ResolvedPrincipal>,
+    operation: &str,
+    resource: &str,
+    params: &serde_json::Value,
+    enforcement_point: &str,
+    shadow: bool,
+) -> Preflight {
+    match ae_decide(ctx, caller, operation, resource, &serde_json::json!({}), params, enforcement_point, None).await {
+        Decided::Done(p) => p,
+        Decided::Settle(mut s) => {
+            if shadow {
+                s.admit_in_shadow();
+            }
+            s.finish().await
+        }
     }
 }
 
@@ -1047,6 +1076,11 @@ pub(crate) async fn ae_decide(
         point,
         enforcement_point: enforcement_point.to_string(),
         route: route.cloned(),
+        exposure_shadow: match &exposure {
+            crate::agent::exposure::Gate::ShadowWouldHold(n) | crate::agent::exposure::Gate::ShadowWouldNotEstablish(n) => Some(n.clone()),
+            _ => None,
+        },
+        shadow_admit: false,
     }))
 }
 
@@ -1076,6 +1110,13 @@ impl Drop for RetractOnDrop {
 
 #[cfg(all(feature = "gateway", feature = "tls"))]
 impl Settling {
+    /// **A take, claim or emit door on the shadow rung** (adopter-surface Y11, #708's review, finding 3): the evaluator's
+    /// refusal is recorded as it was decided, with what the exposure gate would have done, and the door admits — the
+    /// `observe` rung holds nothing. The record's execution is `attempted`, then the door's own outcome.
+    pub(crate) fn admit_in_shadow(&mut self) {
+        self.shadow_admit = true;
+    }
+
     /// Whether settling may wait on a consensus round: a permit relying on a fleet-consensus counter.
     pub(crate) fn will_claim(&self) -> bool {
         matches!(self.outcome, Ok(Some(_)))
@@ -1085,7 +1126,7 @@ impl Settling {
     /// Claim the permit's seats and record the decision: the rest of [`ae_preflight`].
     pub(crate) async fn finish(self) -> Preflight {
         use super::action_evaluator as ae;
-        let Settling { ctx, envelope, counters, mut outcome, history, admitted, point, enforcement_point, route } = self;
+        let Settling { ctx, envelope, counters, mut outcome, history, admitted, point, enforcement_point, route, exposure_shadow, shadow_admit } = self;
         let ctx = &ctx;
         let enforcement_point = enforcement_point.as_str();
         let (operation, resource) = (envelope.operation.clone(), envelope.resource.clone());
@@ -1189,6 +1230,13 @@ impl Settling {
             // No evaluator — unreachable here, one was fetched above. Nothing decided, nothing to
             // record, nothing to refuse.
             Ok(None) => return Preflight::Inert,
+            // Y11: a door on the shadow rung admits what the evaluator refused, and its record says so.
+            Err(refusal) if shadow_admit => {
+                let mut d = refusal.decision().clone();
+                d.checked.push(format!("shadow — the {} is recorded and the door admits under the observe profile (adopter-surface Y11)", refusal.reason()));
+                d.checked.extend(exposure_shadow.iter().map(|n| format!("exposure: {n}")));
+                (d, ae::Execution::Attempted)
+            }
             Err(refusal) => (refusal.decision().clone(), ae::Execution::None),
         };
 
@@ -1245,6 +1293,7 @@ impl Settling {
                 }
                 Preflight::Proceed { evidence: Box::new(evidence), journal_sha256 }
             }
+            Err(_) if shadow_admit => Preflight::Proceed { evidence: Box::new(evidence), journal_sha256 },
             Err(refusal) => {
                 warn!(actor = %envelope.actor, %operation, %resource,
                       "AE preflight refused: {refusal}");

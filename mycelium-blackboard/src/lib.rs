@@ -143,6 +143,9 @@ pub enum BlackboardError {
     Rpc(String),
     /// WAL I/O error (persistent boards).
     Io(std::io::Error),
+    /// Refused at the claim door (adopter-surface Y11): an exposure rule selected the claim, and the action evaluator
+    /// or the exposure gate refused it. Nothing was claimed. Only [`claim_in`](Blackboard::claim_in) returns it.
+    Refused(mycelium::door::DoorRefusal),
 }
 
 impl std::fmt::Display for BlackboardError {
@@ -156,7 +159,24 @@ impl std::fmt::Display for BlackboardError {
             ),
             BlackboardError::Rpc(s) => write!(f, "rpc error: {s}"),
             BlackboardError::Io(e) => write!(f, "wal io error: {e}"),
+            BlackboardError::Refused(r) => r.fmt(f),
         }
+    }
+}
+
+/// The resource a claim door names: `bb:{ns}` (a predicate names no single resource).
+pub(crate) fn claim_resource(ns: &str) -> String {
+    format!("bb:{ns}")
+}
+
+/// What a claim did, for the door's record: a fact, nothing, or unknown (a transport error — the primary may have
+/// handed one out).
+pub(crate) fn claim_outcome(claimed: &Result<Option<Fact>, BlackboardError>) -> mycelium::door::DoorOutcome {
+    use mycelium::door::DoorOutcome;
+    match claimed {
+        Ok(Some(_)) => DoorOutcome::Completed,
+        Err(BlackboardError::Rpc(_)) => DoorOutcome::Unknown,
+        _ => DoorOutcome::Nothing,
     }
 }
 
@@ -333,6 +353,11 @@ impl Blackboard {
             }
             BoardRole::Client => {}
         }
+        // Adopter-surface Y11 (#708's review, finding 1): a raw gateway call of `blackboard.{ns}.claim` — `rpc/call`,
+        // `scatter`, `overlay/emit_reliable` — runs the claim door's decision on `bb:{ns}`, as the claim door does —
+        // at a gateway node that hosts this board; a gateway without it passes the call undecided.
+        let resource = claim_resource(&bb.cfg.namespace);
+        bb.agent.register_door_kind(rpc::rpc_kind(&bb.cfg.namespace, "claim"), mycelium::door::OP_BB_CLAIM, Arc::new(move |_: &[u8]| resource.clone()));
         Ok(bb)
     }
 
@@ -795,6 +820,24 @@ impl Blackboard {
             .await
             .map_err(|e| BlackboardError::Rpc(e.to_string()))?;
         rpc::dec_opt_fact_resp(&resp)
+    }
+
+    /// [`claim`](Self::claim) through the claim door (adopter-surface Y11): decided under `bb.claim` on `bb:{ns}`, this
+    /// node the actor, when an exposure rule selects it — `causal` on the door's own decision record, and nowhere
+    /// further. Untouched otherwise. A refusal is [`BlackboardError::Refused`], and nothing was claimed.
+    pub async fn claim_in(
+        self: &Arc<Self>,
+        predicate: &Predicate,
+        causal: &mycelium::causal::CausalFields,
+    ) -> Result<Option<Fact>, BlackboardError> {
+        let pass = self
+            .agent
+            .exposure_door_as_node(mycelium::door::OP_BB_CLAIM, &claim_resource(&self.cfg.namespace), causal, "bb/claim")
+            .await
+            .map_err(BlackboardError::Refused)?;
+        let claimed = self.claim(predicate).await;
+        pass.finish(claim_outcome(&claimed)).await;
+        claimed
     }
 
     /// Terminal ack: the claimed fact was consumed.

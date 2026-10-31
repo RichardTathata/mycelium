@@ -398,6 +398,12 @@ impl ResolvedPrincipal {
     pub(crate) fn anonymous(scopes: Vec<String>) -> Self {
         Self { principal: PRINCIPAL_ANONYMOUS.to_string(), scopes }
     }
+
+    /// This node as the actor of a door its own code opens (adopter-surface Y11's Rust verbs): `node:{id}`, no scopes.
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    pub(crate) fn node(node: &NodeId) -> Self {
+        Self { principal: node_principal(node), scopes: Vec::new() }
+    }
 }
 
 /// The authority a request is granted: what the credential holds, intersected with what the

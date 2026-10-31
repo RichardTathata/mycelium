@@ -3,7 +3,7 @@ import { parseLossless, stringifyLossless, toBigInt } from "./json";
 import { Federation } from "./federation";
 import { Artifacts } from "./artifacts";
 import { authHeaders, baseUrl, resolveToken, type AuthOptions } from "./auth";
-import { pathSegment, wholeSeconds } from "./wire";
+import { pathSegment, wholeSeconds, withCausal } from "./wire";
 import {
   KvReceipt,
   CausalOptions,
@@ -507,17 +507,19 @@ export class MyceliumAgent {
    * @returns the gateway's `ok`: `true` when the signal was handed to local delivery and queued for
    *   gossip fan-out; `false` when the gossip queue was full (local delivery still occurred). It does
    *   not say any subscriber ran.
+   * `options.correlation` and `options.parent` (adopter-surface Y11) ride in the body's `_meta`: read only when an
+   * exposure rule on the node selects `signal.emit`, onto that door's decision record.
    */
   async emit(
     kind: string,
     payload: Buffer | Uint8Array = Buffer.alloc(0),
-    options: { scope?: string } = {},
+    options: { scope?: string } & CausalOptions = {},
   ): Promise<boolean> {
-    const data = await this._post("/gateway/signal/emit", {
+    const data = await this._post("/gateway/signal/emit", withCausal({
       kind,
       payload_b64: b64(payload),
       scope: options.scope ?? "cluster",
-    }) as { ok: boolean };
+    }, options)) as { ok: boolean };
     return data.ok === true;
   }
 
@@ -744,14 +746,20 @@ export class MyceliumAgent {
 
   /**
    * Delivers a mailbox event to `target`'s mailbox.
-   * At-least-once within TTL; gossiped to all peers.
+   * At-least-once within TTL; gossiped to all peers. `causal` rides in `_meta` (adopter-surface Y11), read only when
+   * an exposure rule on the node selects `mailbox.deliver`.
    */
-  async deliverEvent(target: string, kind: string, payload: Buffer | Uint8Array = Buffer.alloc(0)): Promise<void> {
-    await this._post("/gateway/mailbox/deliver", {
+  async deliverEvent(
+    target: string,
+    kind: string,
+    payload: Buffer | Uint8Array = Buffer.alloc(0),
+    causal?: CausalOptions,
+  ): Promise<void> {
+    await this._post("/gateway/mailbox/deliver", withCausal({
       target,
       kind,
       payload_b64: b64(payload),
-    });
+    }, causal));
   }
 
   /**
@@ -936,19 +944,21 @@ export class MyceliumAgent {
    * malformed request) is thrown, never reported as a timeout.
    *
    * `timeoutSecs` is whole seconds: a fraction is rounded **up**, and the gateway clamps to 1–300.
+   * `options.correlation` and `options.parent` ride in `_meta` (adopter-surface Y11), read only when an exposure rule
+   * on the node selects `overlay.emit_reliable`.
    */
   async emitReliable(
     target: string,
     kind: string,
     payload: Buffer | Uint8Array = Buffer.alloc(0),
-    options: { timeoutSecs?: number } = {},
+    options: { timeoutSecs?: number } & CausalOptions = {},
   ): Promise<"acknowledged" | "timeout"> {
-    const data = await this._post("/gateway/overlay/emit_reliable", {
+    const data = await this._post("/gateway/overlay/emit_reliable", withCausal({
       target,
       kind,
       payload_b64: b64(payload),
       timeout_secs: wholeSeconds(options.timeoutSecs ?? 5),
-    }) as { ack?: "acknowledged" | "timeout" };
+    }, options)) as { ack?: "acknowledged" | "timeout" };
     // The gateway answers `{"ack": …}`; this read `status`, which is never sent.
     if (data.ack !== "acknowledged" && data.ack !== "timeout") {
       throw new Error(`emit_reliable: unexpected reply ${JSON.stringify(data)}`);
@@ -975,7 +985,8 @@ export class MyceliumAgent {
 
   /**
    * Emits `kind` signal to the consistent-hash owner for `key` among providers of `ns/name`.
-   * Returns the owner node-id string. Throws when no providers match the filter.
+   * Returns the owner node-id string. Throws when no providers match the filter. `causal` rides in `_meta`
+   * (adopter-surface Y11), read only when an exposure rule on the node selects `shard.emit`.
    */
   async emitSharded(
     kind: string,
@@ -983,14 +994,15 @@ export class MyceliumAgent {
     name: string,
     key: string,
     payload: Buffer | Uint8Array = Buffer.alloc(0),
+    causal?: CausalOptions,
   ): Promise<string> {
-    const data = await this._post("/gateway/shard/emit", {
+    const data = await this._post("/gateway/shard/emit", withCausal({
       kind,
       ns,
       name,
       shard_key:   key,
       payload_b64: b64(payload),
-    }) as { ok: boolean; owner?: string; error?: string };
+    }, causal)) as { ok: boolean; owner?: string; error?: string };
     if (!data.ok) throw new Error(data.error ?? "no providers");
     return data.owner!;
   }

@@ -40,6 +40,7 @@ from typing import Optional
 
 import httpx
 
+from ._causal import with_causal
 from ._pool import ClientPool, PoolOwner, base_url
 
 
@@ -90,14 +91,17 @@ class Blackboard(PoolOwner):
         return [_decode_fact(f) for f in r.json()["facts"]]
 
     async def claim(
-        self, eq: Optional[dict[str, str]] = None, present: Optional[list[str]] = None
+        self, eq: Optional[dict[str, str]] = None, present: Optional[list[str]] = None,
+        *, correlation: Optional[str] = None, parent: Optional[str] = None,
     ) -> Optional[tuple[int, dict[str, str], bytes]]:
         """Competitive destructive claim (Linda ``in``): claim one fact matching the
-        predicate, or ``None`` if none match. Returns ``(id, attributes, payload)``."""
+        predicate, or ``None`` if none match. Returns ``(id, attributes, payload)``.
+        ``correlation`` and ``parent`` (adopter-surface Y11) ride in ``_meta``, read only when an exposure rule
+        on the node selects ``bb.claim``."""
         async with self._pool.asy() as c:
-            r = await c.post("/gateway/bb/claim", json={
+            r = await c.post("/gateway/bb/claim", json=with_causal({
                 "ns": self._ns, "eq": eq or {}, "present": present or [],
-            })
+            }, correlation, parent))
         r.raise_for_status()
         body = r.json()
         if not body.get("claimed"):

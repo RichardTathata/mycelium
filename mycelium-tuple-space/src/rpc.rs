@@ -573,6 +573,12 @@ fn err_resp(e: &TupleError) -> Vec<u8> {
 }
 
 /// `[u16 stage_len][stage][rest…]` → `(stage, rest)`.
+/// The stage a take or keyed take request names, for the take door's resource (adopter-surface Y11): a raw gateway
+/// call of the kind is decided on `tuple:{ns}/{stage}`, as the take door is. `None` for a payload that is not a take.
+pub(crate) fn stage_of(p: &[u8]) -> Option<Arc<str>> {
+    parse_stage_prefix(&Bytes::copy_from_slice(p)).map(|(stage, _)| stage)
+}
+
 fn parse_stage_prefix(p: &Bytes) -> Option<(Arc<str>, Bytes)> {
     let len = u16::from_le_bytes(p.get(..2)?.try_into().ok()?) as usize;
     let stage = std::str::from_utf8(p.get(2..2 + len)?).ok()?;

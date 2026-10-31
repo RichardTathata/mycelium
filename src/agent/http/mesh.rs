@@ -78,6 +78,17 @@ pub(super) fn answer_served_rpc(ctx: &HttpCtx, sender: &crate::node_id::NodeId, 
 ///
 /// Sends a blocking RPC call to a named node. `payload_b64` is base64.
 /// Returns `{ "ok": true, "result_b64": "…" }` or `{ "ok": false, "error": "timeout" }`.
+/// What a raw dispatch did, for a door's record (Y11): a reply is completed; a refusal before sending is nothing; a
+/// timeout or a transport error is unknown — never a negative.
+pub(super) fn door_outcome(dispatched: &Result<Bytes, GatewayDispatchError>) -> crate::agent::door::DoorOutcome {
+    use crate::agent::door::DoorOutcome;
+    match dispatched {
+        Ok(_) => DoorOutcome::Completed,
+        Err(GatewayDispatchError::Rpc(_)) => DoorOutcome::Unknown,
+        Err(_) => DoorOutcome::Nothing,
+    }
+}
+
 pub(super) async fn gw_rpc_call(
     State(ctx): State<Arc<HttpCtx>>,
     caller: Option<Extension<ResolvedPrincipal>>,
@@ -116,7 +127,18 @@ pub(super) async fn gw_rpc_call(
     let timeout_secs = body["timeout_secs"].as_u64().unwrap_or(30);
     let timeout      = Duration::from_secs(timeout_secs.clamp(1, 300));
 
-    match gateway_caller::gateway_rpc_call(&ctx.agent_ctx, caller.as_ref(), target, method, payload, timeout).await {
+    // Adopter-surface Y11 (#708's review, finding 1): a raw call of a companion's door kind — a tuple take, a board
+    // claim — runs that door's decision, selected or untouched exactly as the door is, when this node hosts the
+    // companion that registered the kind; otherwise the call passes undecided (pinned in tests/exposure_doors.rs).
+    let door = match crate::agent::door::decide_raw(&ctx.agent_ctx, caller.as_ref(), &method, &payload, &body, "gateway:rpc/call").await {
+        Ok(p) => p,
+        Err(r) => return crate::agent::door::refusal_response(&r),
+    };
+    let dispatched = gateway_caller::gateway_rpc_call(&ctx.agent_ctx, caller.as_ref(), target, method, payload, timeout).await;
+    if let Some(pass) = door {
+        pass.finish(door_outcome(&dispatched)).await;
+    }
+    match dispatched {
         Ok(result) => {
             let result_b64 = base64::engine::general_purpose::STANDARD.encode(&result);
             Json(json!({ "ok": true, "result_b64": result_b64 })).into_response()
@@ -489,6 +511,13 @@ pub(super) async fn gw_scatter(
     let timeout      = Duration::from_secs(timeout_secs);
     let min_ok       = body["min_ok"].as_u64().unwrap_or(1) as usize;
 
+    // Adopter-surface Y11 (#708's review, finding 1): a scatter of a companion's door kind runs that door's decision
+    // once, before any target is called — when this node hosts the companion that registered the kind.
+    let door = match crate::agent::door::decide_raw(&ctx.agent_ctx, caller.as_ref(), &method, &payload, &body, "gateway:scatter").await {
+        Ok(p) => p,
+        Err(r) => return crate::agent::door::refusal_response(&r),
+    };
+
     let mut js: tokio::task::JoinSet<(crate::node_id::NodeId, Result<Bytes, GatewayDispatchError>)>
         = tokio::task::JoinSet::new();
     for target in targets {
@@ -522,6 +551,18 @@ pub(super) async fn gw_scatter(
             }
             _ => {}
         }
+    }
+    if let Some(pass) = door {
+        use crate::agent::door::DoorOutcome;
+        // A reply is a take done somewhere; no reply, and every target refused before dispatch, is nothing; otherwise
+        // a target may have acted without answering.
+        pass.finish(if !replies.is_empty() {
+            DoorOutcome::Completed
+        } else if refused.is_empty() {
+            DoorOutcome::Unknown
+        } else {
+            DoorOutcome::Nothing
+        }).await;
     }
 
     if replies.len() >= min_ok {
@@ -591,6 +632,7 @@ pub(super) fn mailbox_events(
 /// Returns `{"ok": true}`.
 pub(super) async fn gw_mailbox_deliver(
     State(ctx): State<Arc<HttpCtx>>,
+    caller: Option<axum::Extension<crate::agent::ResolvedPrincipal>>,
     Json(body):  Json<serde_json::Value>,
 ) -> impl IntoResponse {
     use base64::Engine as _;
@@ -616,13 +658,25 @@ pub(super) async fn gw_mailbox_deliver(
         Bytes::new()
     };
 
-    super::mailbox::deliver_event_ctx(
+    // Adopter-surface Y11: decided only when an exposure rule selects `mailbox.deliver` on this kind.
+    let caller = caller.map(|axum::Extension(c)| c);
+    let door = crate::agent::door::decide(
+        &ctx.agent_ctx, crate::agent::door::DoorActor::Caller(caller.as_ref()), crate::agent::door::OP_MAILBOX_DELIVER,
+        &crate::agent::door::signal_resource(&kind), &body, "gateway:mailbox/deliver",
+    ).await;
+    let pass = match door {
+        Ok(p) => p,
+        Err(r) => return crate::agent::door::refusal_response(&r),
+    };
+    let ok = super::mailbox::deliver_event_ctx(
         &ctx.agent_ctx,
         &ctx.agent_ctx.node_id,
         &target,
         kind,
         payload,
     );
+    // Written locally either way; `false` is a full gossip queue, so whether it reached the target is unknown.
+    pass.finish(if ok { crate::agent::door::DoorOutcome::Completed } else { crate::agent::door::DoorOutcome::Unknown }).await;
 
     Json(json!({ "ok": true })).into_response()
 }
@@ -671,6 +725,7 @@ pub(super) async fn gw_shard_owner(
 /// Response 404: `{"ok":false,"error":"no providers"}`
 pub(super) async fn gw_shard_emit(
     State(ctx): State<Arc<HttpCtx>>,
+    caller: Option<axum::Extension<crate::agent::ResolvedPrincipal>>,
     Json(body):  Json<serde_json::Value>,
 ) -> impl IntoResponse {
     use base64::Engine as _;
@@ -713,13 +768,28 @@ pub(super) async fn gw_shard_emit(
     let filter    = CapFilter::new(ns.as_str(), name.as_str());
     let providers = resolve_cap_providers(&ctx.agent_ctx.kv_state, &filter);
 
+    // Adopter-surface Y11: decided only when an exposure rule selects `shard.emit` on this kind.
+    let caller = caller.map(|axum::Extension(c)| c);
+    let door = crate::agent::door::decide(
+        &ctx.agent_ctx, crate::agent::door::DoorActor::Caller(caller.as_ref()), crate::agent::door::OP_SHARD_EMIT,
+        &crate::agent::door::signal_resource(&kind), &body, "gateway:shard/emit",
+    ).await;
+    let pass = match door {
+        Ok(p) => p,
+        Err(r) => return crate::agent::door::refusal_response(&r),
+    };
     match shard_owner(&shard_key, &providers) {
         Some(owner) => {
-            super::helpers::emit_signal_async(
+            let ok = super::helpers::emit_signal_async(
                 &ctx.agent_ctx, kind, SignalScope::Individual(owner.clone()), payload,
             ).await;
+            // `false`: handed to no route; local delivery, if any, done — unknown, as the emit door records it.
+            pass.finish(if ok { crate::agent::door::DoorOutcome::Completed } else { crate::agent::door::DoorOutcome::Unknown }).await;
             Json(json!({ "ok": true, "owner": owner.to_string() })).into_response()
         }
-        None => (StatusCode::NOT_FOUND, Json(json!({ "ok": false, "error": "no providers" }))).into_response(),
+        None => {
+            pass.finish(crate::agent::door::DoorOutcome::Nothing).await;
+            (StatusCode::NOT_FOUND, Json(json!({ "ok": false, "error": "no providers" }))).into_response()
+        }
     }
 }

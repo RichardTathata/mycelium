@@ -50,3 +50,17 @@ export function wholeSeconds(secs: number, floor = 1, name = "timeoutSecs"): num
   }
   return whole;
 }
+
+/**
+ * `body` with `_meta` carrying whichever of `correlation` and `parent` is set (adopter-surface X4); unchanged when
+ * neither is. A take, claim or emit door reads it only when an exposure rule on the node selects that door (Y11).
+ */
+export function withCausal<T extends Record<string, unknown>>(
+  body: T,
+  causal?: { correlation?: string; parent?: string },
+): T & { _meta?: Record<string, string> } {
+  const meta: Record<string, string> = {};
+  if (causal?.correlation !== undefined) meta.correlation = causal.correlation;
+  if (causal?.parent !== undefined) meta.parent = causal.parent;
+  return Object.keys(meta).length > 0 ? { ...body, _meta: meta } : body;
+}

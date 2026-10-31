@@ -1,5 +1,6 @@
 import { authHeaders, baseUrl, resolveToken, type AuthOptions } from "./auth";
-import { wholeSeconds } from "./wire";
+import { wholeSeconds, withCausal } from "./wire";
+import type { CausalOptions } from "./types";
 /**
  * mycelium/tuple — TypeScript client for the Mycelium TupleSpace.
  *
@@ -131,15 +132,18 @@ export class TupleSpace {
    * The HTTP request blocks server-side for up to `timeoutSecs`, in whole seconds: a fraction rounds
    * **up** (`0.3` parks for 1 s) and `0` is a poll that answers at once. Before 0.2.4 a fraction was
    * refused 422 (the route reads an integer).
+   * `causal` (adopter-surface Y11) rides in the body's `_meta`: read only when an exposure rule on the node
+   * selects this door, onto its decision record — work naming an unresolved effect as its parent is then held (403).
    */
   async take(
     stage: string,
     timeoutSecs: number = 30,
+    causal?: CausalOptions,
   ): Promise<[number, Uint8Array]> {
     const r = await fetch(`${this.baseUrl}/gateway/tuple/take`, {
       method: "POST",
       headers: { "Content-Type": "application/json", ...this.auth },
-      body: JSON.stringify({ ns: this.ns, stage, timeout_secs: wholeSeconds(timeoutSecs, 0) }),
+      body: JSON.stringify(withCausal({ ns: this.ns, stage, timeout_secs: wholeSeconds(timeoutSecs, 0) }, causal)),
       signal: AbortSignal.timeout((wholeSeconds(timeoutSecs, 0) + 5) * 1000),
     });
     if (r.status === 408) {
@@ -176,16 +180,19 @@ export class TupleSpace {
    * Blocking keyed claim (M13): claims the item on `stage` whose correlation key
    * is `key`, or parks until it arrives. Resolves with `[itemId, payload]` or
    * throws on timeout. `timeoutSecs` rounds up to whole seconds, as {@link take} does.
+   * `causal` (adopter-surface Y11) rides in the body's `_meta`: read only when an exposure rule on the node
+   * selects this door, onto its decision record — work naming an unresolved effect as its parent is then held (403).
    */
   async takeByKey(
     stage: string,
     key: string,
     timeoutSecs: number = 30,
+    causal?: CausalOptions,
   ): Promise<[number, Uint8Array]> {
     const r = await fetch(`${this.baseUrl}/gateway/tuple/take_by_key`, {
       method: "POST",
       headers: { "Content-Type": "application/json", ...this.auth },
-      body: JSON.stringify({ ns: this.ns, stage, key, timeout_secs: wholeSeconds(timeoutSecs, 0) }),
+      body: JSON.stringify(withCausal({ ns: this.ns, stage, key, timeout_secs: wholeSeconds(timeoutSecs, 0) }, causal)),
       signal: AbortSignal.timeout((wholeSeconds(timeoutSecs, 0) + 5) * 1000),
     });
     if (r.status === 408) {

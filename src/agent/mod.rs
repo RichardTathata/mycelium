@@ -70,6 +70,8 @@ pub(crate) mod provider_enforcement;
 pub mod ae_contract;
 /// The two causal fields a request carries into every record its work produces (adopter-surface X4).
 pub mod causal;
+/// Exposure at the take, claim and emit doors (adopter-surface Y11): decided only when an exposure rule selects them.
+pub mod door;
 /// The node-local fsynced journal — the *mechanism* (item 4 PR 3a): the AE evidence journal and
 /// the rights ledger (`control::ledger`) are both thin profiles over it, because a second journal
 /// beside the first is how guarantees drift. Ungated since the ledger landed (item 4 PR 3): it now
@@ -822,6 +824,11 @@ pub(crate) struct TaskCtx {
     /// What the exposure policy judged, held and would have held (Y5).
     #[cfg(all(feature = "gateway", feature = "tls"))]
     pub(crate) exposure_counters: exposure::ExposureCounters,
+    /// The RPC kinds a companion's take or claim door serves (adopter-surface Y11), set via
+    /// [`GossipAgent::register_door_kind`]: a raw `rpc/call`, `scatter` or reliable emit of one runs that door's
+    /// decision here — a gateway that hosts no such companion registers none, and passes the call undecided.
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    pub(crate) door_kinds: papaya::HashMap<Arc<str>, (&'static str, door::DoorKindResource)>,
     /// Whether this node's fleet-tally heartbeat is running (row K2) — started by its first permit under a
     /// [`HistoryScope::FleetTally`] rule, stopped at shutdown.
     #[cfg(all(feature = "gateway", feature = "tls"))]
@@ -1436,6 +1443,8 @@ impl GossipAgent {
             exposure_source: std::sync::OnceLock::new(),
             #[cfg(all(feature = "gateway", feature = "tls"))]
             exposure_counters: exposure::ExposureCounters::default(),
+            #[cfg(all(feature = "gateway", feature = "tls"))]
+            door_kinds: papaya::HashMap::new(),
             #[cfg(all(feature = "gateway", feature = "tls"))]
             ae_tally_heartbeat: std::sync::atomic::AtomicBool::new(false),
             #[cfg(all(feature = "gateway", feature = "tls"))]

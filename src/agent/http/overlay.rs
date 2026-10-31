@@ -848,11 +848,16 @@ pub(super) struct EmitReliableBody {
     kind:         String,
     payload_b64:  Option<String>,
     timeout_secs: Option<u64>,
+    /// Adopter-surface Y11: the causal fields (`correlation`, `parent`), read only when an exposure rule selects
+    /// `overlay.emit_reliable`.
+    #[serde(default, rename = "_meta")]
+    meta:         Option<serde_json::Value>,
 }
 
 /// `POST /gateway/overlay/emit_reliable` — send with explicit ACK.
 ///
-/// Body: `{"target": "IP:PORT", "kind": "K", "payload_b64": "V", "timeout_secs": 5}`.
+/// Body: `{"target": "IP:PORT", "kind": "K", "payload_b64": "V", "timeout_secs": 5}`, and `_meta` with the causal
+/// fields where an exposure rule selects `overlay.emit_reliable` (Y11).
 /// Returns `{"ack": "acknowledged" | "timeout"}`.
 pub(super) async fn gw_overlay_emit_reliable(
     State(ctx): State<Arc<HttpCtx>>,
@@ -880,9 +885,36 @@ pub(super) async fn gw_overlay_emit_reliable(
         return refused;
     }
 
-    match gateway_caller::gateway_rpc_call(&ctx.agent_ctx, caller.as_ref(), target, kind, payload, timeout).await {
-        Ok(_)                                                    => Json(json!({ "ack": "acknowledged" })).into_response(),
+    // Adopter-surface Y11: decided only when an exposure rule selects `overlay.emit_reliable` on this kind, the body's
+    // `_meta` its causal fields.
+    let params = match &body.meta {
+        Some(m) => json!({ "_meta": m }),
+        None => json!({}),
+    };
+    let door = crate::agent::door::decide(
+        &ctx.agent_ctx, crate::agent::door::DoorActor::Caller(caller.as_ref()), crate::agent::door::OP_OVERLAY_EMIT_RELIABLE,
+        &crate::agent::door::signal_resource(&kind), &params, "gateway:overlay/emit_reliable",
+    ).await;
+    let pass = match door {
+        Ok(p) => p,
+        Err(r) => return crate::agent::door::refusal_response(&r),
+    };
+    // #708's review, finding 1: a reliable emit of a companion's door kind runs that door's decision as well, always —
+    // a take rule stricter than the overlay's, or an evaluator denying the take, still applies (round 3: one act, two
+    // records and two counts when both doors are selected).
+    let kind_door = match crate::agent::door::decide_raw(&ctx.agent_ctx, caller.as_ref(), &kind, &payload, &params, "gateway:overlay/emit_reliable").await {
+        Ok(p) => p,
+        Err(r) => return crate::agent::door::refusal_response(&r),
+    };
+    let dispatched = gateway_caller::gateway_rpc_call(&ctx.agent_ctx, caller.as_ref(), target, kind, payload, timeout).await;
+    let outcome = super::mesh::door_outcome(&dispatched);
+    pass.finish(outcome).await;
+    if let Some(p) = kind_door {
+        p.finish(outcome).await;
+    }
+    match dispatched {
+        Ok(_) => Json(json!({ "ack": "acknowledged" })).into_response(),
         Err(GatewayDispatchError::Rpc(super::rpc::RpcError::Timeout)) => Json(json!({ "ack": "timeout" })).into_response(),
-        Err(e)                                                   => dispatch_refused(e),
+        Err(e) => dispatch_refused(e),
     }
 }

@@ -6,12 +6,17 @@ its definition and outside test modules, and each raw door the SCAN list names b
 row in the registry, when a row names a door the code no longer has, or when a row's test is not a `fn` anywhere
 under src/ or tests/. `--self-test` plants an unregistered preflight call in a copy of the tree and expects the gate
 to fail on it.
+
+Adopter-surface Y11's doors are found by their decision calls (`door::decide`, `decide_raw`, `exposure_door`,
+`exposure_door_as_node`, an imported bare `decide`, an aliased `<alias>::decide`, a `(` on the next line). **Not
+caught, stated** (#708's round 3): a renamed import (`use …::door::decide as dd`), a nested-brace import
+(`use …::{door::{decide}}`), and a function pointer to `decide` — code review covers those; the gate does not.
 """
 import os, re, shutil, subprocess, sys, tempfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REGISTRY = os.path.join(ROOT, "scripts", "causal-doors.txt")
-PREFLIGHT = re.compile(r"\b(ae_preflight_routed|ae_preflight|ae_decide)\s*\(")
+PREFLIGHT = re.compile(r"\b(ae_preflight_routed|ae_preflight_door|ae_preflight|ae_decide)\s*\(")
 # Raw doors: file → symbols the registry must list when the file defines them.
 SCAN = {
     # The seam's own file: its wrappers are not scanned as call sites; its two public doors are listed by symbol.
@@ -20,7 +25,19 @@ SCAN = {
     "src/agent/http/signals.rs": ["gw_signal_emit"],
     "src/agent/http/overlay.rs": ["gw_overlay_emit_reliable"],
     "src/agent/service_handle.rs": ["rpc_call", "bulk_call", "scatter_gather"],
+    # Adopter-surface Y11: the take, claim and emit doors' Rust verbs, and the companions' doors (outside src/).
+    "src/agent/door.rs": ["emit_in", "deliver_event_in", "emit_reliable_in", "emit_sharded_in"],
+    "mycelium-tuple-space/src/lib.rs": ["take_in", "take_by_key_in"],
+    "mycelium-tuple-space/src/http.rs": ["gw_take", "gw_take_by_key"],
+    "mycelium-blackboard/src/lib.rs": ["claim_in"],
+    "mycelium-blackboard/src/http.rs": ["gw_claim"],
 }
+# Adopter-surface Y11's doors (#708's review, finding 4): a call that decides a take, claim or emit door. `door::decide`
+# and `door::decide_raw` anywhere; the bare names inside `src/agent/door.rs`, where they are defined; the two public
+# entries a companion calls.
+DOOR_CALL = re.compile(r"(\bdoor::(decide|decide_raw)|\bexposure_door(_as_node)?)\s*\(")
+DOOR_CALL_HOME = re.compile(r"(?<![:\w])(decide|decide_raw)\s*\(")
+DOOR_HOME = "src/agent/door.rs"
 TEST_MODULE = re.compile(r"#\[cfg\((all\()?test\b")
 TEST_ATTR = re.compile(r"#\[(tokio::)?test[\]\(]")
 
@@ -49,8 +66,103 @@ def enclosing_fn(lines, i):
     return f"{ty}::{fn}" if ty else fn
 
 
+def door_call_lines(rel, lines):
+    """The line indexes where a Y11 door decision is called — matched over the whole text, so a call whose `(` sits on
+    the next line is a call (#708's round 2, B). The bare `decide(` / `decide_raw(` count in `door.rs` and in any file
+    that imports them from `door`; `<alias>::decide(` counts where `door` is imported as `<alias>`. A definition
+    (`fn decide(`), a method call (`.decide(`) and a line comment are not calls."""
+    text = "\n".join(lines)
+    patterns = [DOOR_CALL.pattern]
+    imports_bare = rel == DOOR_HOME or re.search(
+        r"\buse\s+[\w:]*\bdoor::(?:\{[^}]*\b(?:decide|decide_raw)\b[^}]*\}|(?:decide|decide_raw)\b)", text)
+    if imports_bare:
+        patterns.append(r"(?<![:\w.])(?:decide|decide_raw)\s*\(")
+    for alias in re.findall(r"\buse\s+[\w:]*\bdoor\s+as\s+(\w+)", text):
+        patterns.append(r"\b" + re.escape(alias) + r"::(?:decide|decide_raw)\s*\(")
+    found = set()
+    for m in re.finditer("|".join(f"(?:{p})" for p in patterns), text):
+        i = text.count("\n", 0, m.start())
+        line = lines[i]
+        before = line[: m.start() - (text.rfind("\n", 0, m.start()) + 1)]
+        if line.strip().startswith("//") or re.search(r"\bfn\s+$", before):
+            continue
+        found.add(i)
+    return found
+
+
+def production_lines(path):
+    """The file's lines up to its test module (a `#[cfg(test)]` that gates a `mod`)."""
+    lines = open(path, encoding="utf-8").read().split("\n")
+    for i, line in enumerate(lines):
+        if TEST_MODULE.search(line):
+            nxt = next((l for l in lines[i + 1:] if l.strip()), "")
+            if re.match(r"\s*(pub(\([^)]*\))?\s+)?mod\s+", nxt):
+                return lines[:i]
+    return lines
+
+
+def door_scan_files(root):
+    """Every Rust file a Y11 door call can sit in: src/ and each companion crate's src/."""
+    tops = [os.path.join(root, "src")] + sorted(
+        os.path.join(root, d, "src") for d in os.listdir(root) if d.startswith("mycelium-") and os.path.isdir(os.path.join(root, d, "src"))
+    )
+    for top in tops:
+        for dirpath, _, files in os.walk(top):
+            for f in files:
+                if f.endswith(".rs") and not f.endswith("_tests.rs") and f != "lib_tests.rs":
+                    path = os.path.join(dirpath, f)
+                    yield os.path.relpath(path, root), path
+
+
+def fn_body(lines, sym):
+    """The text of `fn sym`'s body: from its line to the closing brace at its own indentation."""
+    for i, line in enumerate(lines):
+        m = re.match(r"(\s*)(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+" + re.escape(sym) + r"\b", line)
+        if m:
+            indent = m.group(1)
+            for j in range(i + 1, len(lines)):
+                if lines[j] == indent + "}":
+                    return "\n".join(lines[i:j + 1])
+            return "\n".join(lines[i:])
+    return None
+
+
+def ruled_without_a_call(root, rows):
+    """Each `ruled` row whose symbol neither calls a door's decision nor a same-file fn that does (one level: a
+    route's helper) — the regression where a door's decision is removed and the registry still lists it."""
+    failures = []
+    for door, (carries, _, n) in sorted(rows.items()):
+        if carries != "ruled":
+            continue
+        rel, _, sym = door.rpartition("::")
+        path = os.path.join(root, rel)
+        if not os.path.exists(path):
+            continue
+        lines = production_lines(path)
+        body = fn_body(lines, sym)
+        if body is None:
+            continue
+        call_at = door_call_lines(rel, lines)
+        helpers = {(enclosing_fn(lines, k) or "").split("::")[-1] for k in call_at} - {""}
+        start = next(i for i, l in enumerate(lines) if re.search(r"\bfn\s+" + re.escape(sym) + r"\b", l))
+        span = range(start + 1, start + len(body.split("\n")))
+        body_lines = [lines[i] for i in span]
+        calls = any(i in call_at for i in span) or any(PREFLIGHT.search(l) for l in body_lines) or any(
+            re.search(r"\b" + re.escape(h) + r"\s*\(", l) for h in helpers if h != sym for l in body_lines)
+        if not calls:
+            failures.append(f"row {door} (line {n}) is `ruled` but its fn calls no door decision (`door::decide`, `exposure_door`, …)")
+    return failures
+
+
 def doors_in_tree(root):
     found = set()
+    # Y11: every call that decides a take, claim or emit door is a door, in src/ and in the companions.
+    for rel, path in door_scan_files(root):
+        lines = production_lines(path)
+        for i in door_call_lines(rel, lines):
+            fn = enclosing_fn(lines, i)
+            if fn:
+                found.add(f"{rel}::{fn.split('::')[-1]}")
     src = os.path.join(root, "src")
     for dirpath, _, files in os.walk(src):
         for f in files:
@@ -76,6 +188,15 @@ def doors_in_tree(root):
             for sym in SCAN.get(rel, []):
                 if re.search(r"\bfn\s+" + re.escape(sym) + r"\b", "\n".join(lines)):
                     found.add(f"{rel}::{sym}")
+    # The companions' doors, which sit outside src/ and are listed by symbol only.
+    for rel, syms in SCAN.items():
+        path = os.path.join(root, rel)
+        if rel.startswith("src/") or not os.path.exists(path):
+            continue
+        text = open(path, encoding="utf-8").read()
+        for sym in syms:
+            if re.search(r"\bfn\s+" + re.escape(sym) + r"\b", text):
+                found.add(f"{rel}::{sym}")
     return found
 
 
@@ -89,7 +210,7 @@ def registry_rows(path):
         if len(parts) != 3:
             sys.exit(f"check-causal-doors: {path}:{n}: a row has {len(parts)} columns, not 3")
         door, carries, test = parts
-        if carries not in ("record", "record+fwd", "bytes", "none", "refused"):
+        if carries not in ("record", "record+fwd", "ruled", "bytes", "none", "refused"):
             sys.exit(f"check-causal-doors: {path}:{n}: unknown carries '{carries}'")
         rows[door] = (carries, test, n)
     return rows
@@ -121,6 +242,7 @@ def check(root, registry):
         failures.append(f"door without a row: {door} — add it to scripts/causal-doors.txt with how the fields travel and the test")
     for door in sorted(set(rows) - found):
         failures.append(f"row without a door: {door} (registry line {rows[door][2]}) — the code no longer has it")
+    failures.extend(ruled_without_a_call(root, rows))
     for door, (carries, test, n) in sorted(rows.items()):
         if test != "-" and test not in fns:
             failures.append(f"row {door} (line {n}) names test `{test}`, which is no `#[test]`/`#[tokio::test]` fn under src/ or tests/")
@@ -146,11 +268,35 @@ def main():
             # the place a new handler naturally goes, and the place the first scanner never looked (#672's review).
             with open(os.path.join(tmp, "src", "agent", "http", "mcp_bridge.rs"), "a") as f:
                 f.write("\npub(super) async fn gw_planted_after() {\n    let p = ae_preflight(&ctx, None, \"x\", \"y\", &a, &b, \"planted\").await;\n}\n")
+            # Plant 3 (Y11, #708's review, finding 4): the emit door's decision removed from its route.
+            sig = os.path.join(tmp, "src", "agent", "http", "signals.rs")
+            text = open(sig, encoding="utf-8").read()
+            cut = text.replace("crate::agent::door::decide(", "crate::agent::door::undecided(", 1)
+            assert cut != text, "the self-test's emit-door plant found nothing to remove"
+            open(sig, "w", encoding="utf-8").write(cut)
+            # Plant 4: an ungated route calling the companions' public door entry, in a new file.
+            with open(os.path.join(tmp, "src", "agent", "http", "planted_exposure_route.rs"), "w") as f:
+                f.write("pub(super) async fn gw_planted_exposure() {\n    let p = agent.exposure_door(None, \"x\", \"y\", &b, \"planted\").await;\n}\n")
+            # Plant 5: a new caller of `door::decide` in src/.
+            with open(os.path.join(tmp, "src", "agent", "planted_decider.rs"), "w") as f:
+                f.write("pub(crate) async fn planted_decider() {\n    let p = crate::agent::door::decide(&ctx, a, \"x\", \"y\", &b, \"planted\").await;\n}\n")
+            # Plants 6–8 (#708's round 2, B): an imported bare `decide(`, an aliased `gate::decide(`, and `exposure_door`
+            # with its `(` on the next line.
+            with open(os.path.join(tmp, "src", "agent", "planted_bare.rs"), "w") as f:
+                f.write("use crate::agent::door::decide;\npub(crate) async fn planted_bare() {\n    let p = decide(&ctx, a, \"x\", \"y\", &b, \"planted\").await;\n}\n")
+            with open(os.path.join(tmp, "src", "agent", "planted_alias.rs"), "w") as f:
+                f.write("use crate::agent::door as gate;\npub(crate) async fn planted_alias() {\n    let p = gate::decide(&ctx, a, \"x\", \"y\", &b, \"planted\").await;\n}\n")
+            with open(os.path.join(tmp, "src", "agent", "planted_split.rs"), "w") as f:
+                f.write("pub(crate) async fn planted_split() {\n    let p = agent.exposure_door\n        (None, \"x\", \"y\", &b, \"planted\").await;\n}\n")
             _, _, failures = check(tmp, REGISTRY)
-            for want in ("planted_door.rs::gw_planted", "mcp_bridge.rs::gw_planted_after"):
+            for want in ("planted_door.rs::gw_planted", "mcp_bridge.rs::gw_planted_after", "signals.rs::gw_signal_emit (line",
+                         "planted_exposure_route.rs::gw_planted_exposure", "planted_decider.rs::planted_decider",
+                         "planted_bare.rs::planted_bare", "planted_alias.rs::planted_alias", "planted_split.rs::planted_split"):
                 if not any(want in x for x in failures):
                     sys.exit(f"check-causal-doors --self-test: the planted door {want} was NOT caught")
-            print("check-causal-doors --self-test: a planted new-file door and a planted door appended after an inner cfg(test) are both caught by name")
+            print("check-causal-doors --self-test: a planted new-file door, a door appended after an inner cfg(test), an emit "
+                  "route's decision removed, an ungated `exposure_door` route, a new `door::decide` caller, an imported bare `decide`, an "
+                  "aliased `gate::decide` and a split `exposure_door\\n(` are all caught by name")
             return 0
         finally:
             shutil.rmtree(tmp, ignore_errors=True)

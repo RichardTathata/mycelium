@@ -8,11 +8,17 @@ use crate::node_id::NodeId;
 pub enum ShardError {
     /// No providers matched the capability filter at call time.
     NoProviders,
+    /// Refused at the sharded-emit door (adopter-surface Y11): an exposure rule selected it, and the evaluator or the
+    /// exposure gate refused. Only [`ServiceHandle::emit_sharded_in`](crate::ServiceHandle::emit_sharded_in) returns it.
+    Refused(crate::door::DoorRefusal),
 }
 
 impl std::fmt::Display for ShardError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("no providers for shard key")
+        match self {
+            ShardError::NoProviders => f.write_str("no providers for shard key"),
+            ShardError::Refused(r) => r.fmt(f),
+        }
     }
 }
 
