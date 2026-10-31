@@ -899,14 +899,10 @@ pub(super) async fn gw_overlay_emit_reliable(
         Ok(p) => p,
         Err(r) => return crate::agent::door::refusal_response(&r),
     };
-    // #708's review, finding 1: a reliable emit of a companion's door kind runs that door's decision as well — unless
-    // the overlay door already decided this act (round 2, D: one act, one record and one count).
-    let kind_door = if pass.decided() {
-        Ok(None)
-    } else {
-        crate::agent::door::decide_raw(&ctx.agent_ctx, caller.as_ref(), &kind, &payload, &params, "gateway:overlay/emit_reliable").await
-    };
-    let kind_door = match kind_door {
+    // #708's review, finding 1: a reliable emit of a companion's door kind runs that door's decision as well, always —
+    // a take rule stricter than the overlay's, or an evaluator denying the take, still applies (round 3: one act, two
+    // records and two counts when both doors are selected).
+    let kind_door = match crate::agent::door::decide_raw(&ctx.agent_ctx, caller.as_ref(), &kind, &payload, &params, "gateway:overlay/emit_reliable").await {
         Ok(p) => p,
         Err(r) => return crate::agent::door::refusal_response(&r),
     };

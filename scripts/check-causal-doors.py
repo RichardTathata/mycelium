@@ -6,6 +6,11 @@ its definition and outside test modules, and each raw door the SCAN list names b
 row in the registry, when a row names a door the code no longer has, or when a row's test is not a `fn` anywhere
 under src/ or tests/. `--self-test` plants an unregistered preflight call in a copy of the tree and expects the gate
 to fail on it.
+
+Adopter-surface Y11's doors are found by their decision calls (`door::decide`, `decide_raw`, `exposure_door`,
+`exposure_door_as_node`, an imported bare `decide`, an aliased `<alias>::decide`, a `(` on the next line). **Not
+caught, stated** (#708's round 3): a renamed import (`use …::door::decide as dd`), a nested-brace import
+(`use …::{door::{decide}}`), and a function pointer to `decide` — code review covers those; the gate does not.
 """
 import os, re, shutil, subprocess, sys, tempfile
 

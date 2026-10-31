@@ -362,24 +362,44 @@ async fn a_raw_call_of_a_doors_kind_runs_that_doors_decision() {
     n.agent.shutdown().await;
 }
 
-/// **One act, one decision** (#708's round 2, D): a reliable emit of a door's kind under a rule selecting both doors
-/// (`*`) is decided once, by the overlay door, and the kind door is skipped — one record, one count. Seen failing first
-/// with the kind door run as well: two decision records for the one admitted emit.
+/// **A reliable emit of a door's kind is decided by both doors** (#708's round 3): the overlay door under its own
+/// operation and the kind door under the take's, so a take rule stricter than the overlay's, or an evaluator that
+/// denies the take, still applies — one act, two records and two counts. D1: an overlay rule at `max_unresolved = 5`
+/// and a take rule at 1, a dependent parent: refused, nothing taken. D2: a `*` rule, an evaluator permitting the overlay
+/// operation and not `tuple.take`: refused. Seen failing first against round 2's skip of the kind door once the overlay
+/// door had decided (`0bfa1f62`): both answered 200, and D1 took the item.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_reliable_emit_of_a_doors_kind_is_decided_once() {
+async fn a_reliable_emit_of_a_doors_kind_is_decided_by_both_doors() {
     use base64::Engine as _;
-    let n = node("overlay-once", Some(policy("*"))).await;
+    let limit = |n| ExposureLimit::new(Some(n), None, "enforcement_point").unwrap();
+    let rule_at = |op: &str, n| ExposureRule { actor: "*".into(), operation: op.into(), resource: "*".into(), limit: limit(n) };
+    let emit = |n: &Node| {
+        let body = serde_json::json!({
+            "target": n.agent.node_id().to_string(), "kind": "tuple.work.take",
+            "payload_b64": base64::engine::general_purpose::STANDARD.encode(take_req("in")), "timeout_secs": 1,
+            "_meta": { "parent": H },
+        });
+        reqwest::Client::new().post(format!("{}/gateway/overlay/emit_reliable", n.base)).json(&body).send()
+    };
+
+    // D1: the take's own, stricter threshold holds what the overlay's admits.
+    let n = node("both-d1", Some(ExposurePolicy::new(vec![rule_at("overlay.emit_reliable", 5), rule_at("tuple.take", 1)]))).await;
     n.agent.set_control_profile(Profile::EnforceLocal);
-    let body = serde_json::json!({
-        "target": n.agent.node_id().to_string(), "kind": "tuple.work.take",
-        "payload_b64": base64::engine::general_purpose::STANDARD.encode(take_req("in")), "timeout_secs": 1,
-        "_meta": { "parent": OTHER },
-    });
-    let r = reqwest::Client::new().post(format!("{}/gateway/overlay/emit_reliable", n.base)).json(&body).send().await.unwrap();
-    assert_ne!(r.status().as_u16(), 403);
-    let decided: Vec<_> = n.records().into_iter().filter(|r| r["kind"] == "decided").collect();
-    assert_eq!(decided.len(), 1, "one emit, one decision: {decided:?}");
-    assert_eq!(n.agent.exposure_counts().independent, 1);
+    n.ts.put("in", Bytes::from_static(b"x")).await.unwrap();
+    assert_eq!(emit(&n).await.unwrap().status().as_u16(), 403, "D1: the take rule's threshold was not applied");
+    assert_eq!(n.ts.depth(Some("in")).await.unwrap().iter().map(|d| d.depth).sum::<u32>(), 1, "D1: the held emit took the item");
+    n.agent.shutdown().await;
+
+    // D2: the evaluator's take-specific denial applies though the overlay operation is permitted.
+    let overlay_only = ReferenceEvaluator::new("rev-overlay")
+        .with_catalogue("cat-y11", "1")
+        .map_action("overlay.emit_reliable", "*")
+        .map_action("tuple.take", "*")
+        .allow(Rule::new("*", "overlay.emit_reliable", "*"));
+    let n = node_with("both-d2", Some(ExposurePolicy::new(vec![rule_at("*", 5)])), overlay_only).await;
+    n.agent.set_control_profile(Profile::EnforceLocal);
+    n.ts.put("in", Bytes::from_static(b"x")).await.unwrap();
+    assert_eq!(emit(&n).await.unwrap().status().as_u16(), 403, "D2: the evaluator's denial of the take was not applied");
     n.agent.shutdown().await;
 }
 

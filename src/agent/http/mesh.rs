@@ -128,7 +128,8 @@ pub(super) async fn gw_rpc_call(
     let timeout      = Duration::from_secs(timeout_secs.clamp(1, 300));
 
     // Adopter-surface Y11 (#708's review, finding 1): a raw call of a companion's door kind — a tuple take, a board
-    // claim — runs that door's decision, selected or untouched exactly as the door is.
+    // claim — runs that door's decision, selected or untouched exactly as the door is, when this node hosts the
+    // companion that registered the kind; otherwise the call passes undecided (pinned in tests/exposure_doors.rs).
     let door = match crate::agent::door::decide_raw(&ctx.agent_ctx, caller.as_ref(), &method, &payload, &body, "gateway:rpc/call").await {
         Ok(p) => p,
         Err(r) => return crate::agent::door::refusal_response(&r),
@@ -511,7 +512,7 @@ pub(super) async fn gw_scatter(
     let min_ok       = body["min_ok"].as_u64().unwrap_or(1) as usize;
 
     // Adopter-surface Y11 (#708's review, finding 1): a scatter of a companion's door kind runs that door's decision
-    // once, before any target is called.
+    // once, before any target is called — when this node hosts the companion that registered the kind.
     let door = match crate::agent::door::decide_raw(&ctx.agent_ctx, caller.as_ref(), &method, &payload, &body, "gateway:scatter").await {
         Ok(p) => p,
         Err(r) => return crate::agent::door::refusal_response(&r),

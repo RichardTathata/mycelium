@@ -825,7 +825,8 @@ pub(crate) struct TaskCtx {
     #[cfg(all(feature = "gateway", feature = "tls"))]
     pub(crate) exposure_counters: exposure::ExposureCounters,
     /// The RPC kinds a companion's take or claim door serves (adopter-surface Y11), set via
-    /// [`GossipAgent::register_door_kind`]: a raw `rpc/call`, `scatter` or reliable emit of one runs that door's decision.
+    /// [`GossipAgent::register_door_kind`]: a raw `rpc/call`, `scatter` or reliable emit of one runs that door's
+    /// decision here — a gateway that hosts no such companion registers none, and passes the call undecided.
     #[cfg(all(feature = "gateway", feature = "tls"))]
     pub(crate) door_kinds: papaya::HashMap<Arc<str>, (&'static str, door::DoorKindResource)>,
     /// Whether this node's fleet-tally heartbeat is running (row K2) — started by its first permit under a

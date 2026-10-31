@@ -83,8 +83,9 @@ the fields.
     `tuple.{ns}.take_by_key`, `blackboard.{ns}.claim`) runs that door's decision, selected or untouched exactly as the
     door is — **only at a gateway node that hosts the companion**, since only the companion registers its kinds:
     through a gateway without it the call reaches the provider undecided, and the decision at the provider is not
-    built. A reliable emit of a door's kind that the overlay door already decided (a `*` rule selects both) is
-    decided once, by the overlay door: one record, one count. **Never decided:** the plain verbs (`emit`,
+    built. A reliable emit of a door's kind is decided by both doors — the overlay door under its own operation and
+    the kind door under the take's or the claim's — so a stricter take rule, or an evaluator denying the take, still
+    applies; when a rule selects both, one emit has two records and two counts. **Never decided:** the plain verbs (`emit`,
     `emit_ordered`, `emit_async`, `request`, `advertise`, `advertise_persistent`, `mycelium_core::ops`'s
     `emit_signal`, `emit_signal_ordered` and `emit_signal_async`, `deliver_event`, `emit_reliable`, `emit_sharded`,
     `take`, `take_by_key`, `claim`, a member's own `rpc_call`, `rpc_call_with_mandate`, `rpc_call_as`,

@@ -252,8 +252,8 @@ pub(crate) fn door_kind(ctx: &super::TaskCtx, kind: &str, payload: &[u8]) -> Opt
 }
 
 /// A raw door — `POST /gateway/rpc/call`, `/gateway/scatter`, `/gateway/overlay/emit_reliable` — of a registered door
-/// kind runs that door's decision, selected or untouched exactly as the door is (#708's review, finding 1). `Ok(None)`:
-/// not a door's kind.
+/// kind runs that door's decision, selected or untouched exactly as the door is (#708's review, finding 1) — a kind
+/// registered on this node, so only where the companion is hosted. `Ok(None)`: not a door's kind here.
 #[cfg(feature = "gateway")]
 pub(crate) async fn decide_raw(
     ctx: &Arc<super::TaskCtx>, caller: Option<&super::ResolvedPrincipal>, kind: &str, payload: &[u8], params: &serde_json::Value,
@@ -267,8 +267,9 @@ impl crate::GossipAgent {
     /// **A companion's door kind** (adopter-surface Y11): the RPC kind its take or claim door serves, decided under
     /// `operation` on the resource `resource_of` reads from a call's payload. A raw call of the kind — `POST
     /// /gateway/rpc/call`, `/gateway/scatter`, `/gateway/overlay/emit_reliable` — then runs that door's decision,
-    /// selected or untouched exactly as the door is. `TupleSpace` and `Blackboard` register theirs; a member's own
-    /// `ServiceHandle::rpc_call` of the kind is not decided. A no-op without `gateway` and `tls`.
+    /// selected or untouched exactly as the door is, **at this node only**: a gateway that did not register the kind
+    /// (one hosting no such companion) passes the call to the provider undecided. `TupleSpace` and `Blackboard` register
+    /// theirs; a member's own `ServiceHandle::rpc_call` of the kind is not decided. A no-op without `gateway` and `tls`.
     pub fn register_door_kind(&self, kind: impl Into<Arc<str>>, operation: &'static str, resource_of: DoorKindResource) {
         #[cfg(all(feature = "gateway", feature = "tls"))]
         self.task_ctx.door_kinds.pin().insert(kind.into(), (operation, resource_of));
