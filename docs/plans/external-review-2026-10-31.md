@@ -1,6 +1,6 @@
 # The external code security review of 2026-10-31 — verification and repairs
 
-**Status:** agreed with the maintainer on 2026-10-31, rev 0.3 (rev 0.2 takes the reviewer's two qualifications of the verification, 2026-10-31: F4 is P1 regardless of token lifetime, and F3's window is unmeasured; rev 0.3 takes the independent review of this plan's PR, #711: the journal consumers re-enumerated, R6's exit restated, R2 led by the poisoned writer, the raw routes enumerated). Nine rows; R1, R2+R3 and R4 started. The review is vendored at
+**Status:** agreed with the maintainer on 2026-10-31, rev 0.4 (rev 0.2 takes the reviewer's two qualifications of the verification, 2026-10-31: F4 is P1 regardless of token lifetime, and F3's window is unmeasured; rev 0.3 takes the independent review of this plan's PR, #711: the journal consumers re-enumerated, R6's exit restated, R2 led by the poisoned writer, the raw routes enumerated; rev 0.4 records R1 delivered, 2026-10-31). Nine rows; **R1 delivered** (its PR named in §5); R2+R3 and R4 started. The review is vendored at
 [`external/2026-10-31-code-security-review.md`](external/2026-10-31-code-security-review.md); it examined commit
 `d656f50c` (main after Y11, #708). Every finding was verified independently before this plan was written (§2), under
 the [verification policy](../wiki/dev/testing/verification-policy.md): three read-only agents re-ran or re-derived
@@ -84,6 +84,39 @@ ingest kind refused under `mesh:write` on a gateway that is a group member.
 
 **Not built, stated:** a provider-side scope check inside the companions (the route is the door; a member's direct
 `rpc_call` is not a client).
+
+**As delivered** *(rev 0.4)*. The gate is one function in the auth layer, `companion_kind_gate`
+(`src/agent/http/authz.rs`), run after the route's own scope check with the credential's whole scope set in hand —
+a handler sees only the scopes the route granted, so it could not have decided this. It reads the kind from the
+body field the handler reads (`method` on `rpc/call` and `scatter`, `kind` on `signal/emit`, `mailbox/deliver`,
+`shard/emit` and `overlay/emit_reliable`; `RAW_KIND_ROUTES`), maps it by `mycelium::companion_kind_scope`
+(`src/agent/mod.rs`: `blackboard.*` → `board:*`, `tuple.*` → `tuple:*`, `wiki.*` → `wiki:*`; the read verbs
+`read`/`depth`, `depth`, `access` to `:read`, every other verb under the prefix — an unknown one included — to
+`:write`), and refuses `403 {"error": "insufficient scope", "required_scope": …, "kind": …}`. The six routes:
+`rpc/call`, `scatter`, `signal/emit` and `shard/emit` emit a frame of the kind that reaches the signal-handler
+table an `rpc_rx` registers on, so a companion's handler could serve it; `overlay/emit_reliable` the same under
+`consensus:write`; `mailbox/deliver` writes a `mailbox/` key and reaches no handler, gated alike so the list is C1's.
+Each companion's tests diff the operations it serves, read from its own source, against the table
+(`every_served_operation_maps_to_the_boards_own_scope`, `…_the_spaces_own_scope`, `…_the_wikis_own_scope`); the
+wiki's `access`/`ingest` handlers say why they keep judging the node (`mycelium-wiki/src/agent.rs`).
+**The exit, as met:** `mesh:write` alone — 403 on `bb/post`, 403 naming `board:write` on `rpc/call`, `scatter`
+and the four emit routes of `blackboard.board.post`, 403 naming `tuple:write` on `tuple.work.put`; `board:write`
+alone succeeds on `bb/post` and is refused the raw route naming `mesh:write`; both scopes post through `rpc/call`
+and the fact lands; `tuple:write` cannot carry the board kind; the read verb under the write scope is refused
+naming `board:read` — `a_board_write_through_a_raw_route_needs_board_write_as_the_boards_own_route_does`
+(`mycelium-blackboard/tests/raw_route_scope.rs`),
+`a_tuple_put_through_a_raw_route_needs_tuple_write_as_the_spaces_own_route_does`
+(`mycelium-tuple-space/tests/raw_route_scope.rs`, both companions' test builds now carrying `compliance`),
+`raw_routes_require_a_companion_kinds_family_scope` (`src/agent/http/http_tests.rs`: every route, every family,
+both verbs, a body naming both fields, the `*` token, an ordinary kind) and the mapping's own test in
+`src/lib_tests.rs`. The exit named `tests/exposure_doors.rs`; the pin lives beside the companions and in the
+library instead, because CI runs `tests/` under `tls,a2a` and a scope test there would never execute. Each was
+seen failing with `companion_kind_scope` returning `None` for every kind: the raw-only board post answered 504
+in the library (nothing serves it — the gate is before dispatch) and 200 at both companions, the fact on the board
+and the tuple taken. **The wiki ingest kind** is refused under `mesh:write` naming `wiki:write`
+(`wiki.council.ingest` in the library test); the exit's "on a gateway that is a group member" is not a separate
+test — the gate decides before any dispatch, so membership cannot change the answer, and `mycelium-wiki`'s test
+build carries no scope model.
 
 ### R2 · The restart gate exercises the WAL *(the verification's finding)*
 
@@ -170,4 +203,4 @@ Filled as rows close: each row's promises quoted beside the code and test that d
 
 | Row | Delivered | PR |
 |---|---|---|
-| — | — | — |
+| R1 | *every raw route that takes an RPC kind … requires that companion's family scope* — `companion_kind_gate` (`authz.rs`), `companion_kind_scope` (`agent/mod.rs`), six routes; *refused 403 naming the scope* — the refusal body; *the wiki handlers … the same treatment at the route* — the gate, and the handlers' comments; *`rbac.md` says which scope* — the `mesh:write`, `board:*`, `tuple:*`, `wiki:*` rows; *`confined-fleet.md` names the companion kinds* — § the raw routes; `deprecations.md` §75. Exit: the three tests named in the row, each seen failing first. Not built: a scope check inside the companions. | R1's PR |

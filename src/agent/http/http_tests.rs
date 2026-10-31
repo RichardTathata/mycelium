@@ -3040,3 +3040,124 @@ async fn test_gateway_transparency_inclusion_proof_verifies_and_scope_gates() {
     agent.shutdown().await;
     let _ = std::fs::remove_dir_all(&cert_dir);
 }
+
+/// **External review 2026-10-31, F1 (plan row R1, decision D1).** A companion's operation reached through a raw
+/// route needs the scope the companion's own route needs. Six raw routes, three families, read and write verbs:
+/// a `mesh:write` holder without `board:write` is refused `403 insufficient scope` naming `board:write` on every
+/// route that could carry `blackboard.board.post`; a holder of the wrong family (`tuple:write`) or the wrong verb
+/// (`board:read`) is refused by name too; the right scope passes the gate (the kind then times out — nothing serves
+/// it here, which is the point: the refusal is before dispatch); the `*` token passes; an ordinary kind is untouched.
+/// Seen failing first with `companion_kind_scope` returning `None`: every refusal answered 200.
+#[cfg(feature = "compliance")]
+#[tokio::test]
+async fn raw_routes_require_a_companion_kinds_family_scope() {
+    use axum::http::header::AUTHORIZATION;
+    use base64::Engine as _;
+
+    let gossip_port = alloc_port();
+    let http_port   = alloc_port();
+    let id  = NodeId::new("127.0.0.1", gossip_port).unwrap();
+    let mut cfg = GossipConfig::default();
+    cfg.bind_port = gossip_port;
+    cfg.http_port = Some(http_port);
+    let raw = vec!["mesh:write".to_string(), "consensus:write".to_string()];
+    let with = |extra: &str| { let mut s = raw.clone(); s.push(extra.into()); s };
+    cfg.gateway_scoped_tokens = vec![
+        crate::GatewayToken { token: "raw-only".into(),    scopes: raw.clone() },
+        crate::GatewayToken { token: "board-write".into(), scopes: with("board:write") },
+        crate::GatewayToken { token: "board-read".into(),  scopes: with("board:read") },
+        crate::GatewayToken { token: "tuple-write".into(), scopes: with("tuple:write") },
+        crate::GatewayToken { token: "star".into(),        scopes: vec!["*".into()] },
+    ];
+    let agent = Arc::new(GossipAgent::new(id.clone(), cfg));
+    agent.start().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let client = reqwest::Client::new();
+    let base = format!("http://127.0.0.1:{http_port}");
+    let b64 = base64::engine::general_purpose::STANDARD.encode(b"x");
+    let target = id.to_string();
+    let bodies = |kind: &str| -> Vec<(&'static str, serde_json::Value)> { vec![
+        ("rpc/call", serde_json::json!({"target": target, "method": kind, "payload_b64": b64, "timeout_secs": 1})),
+        ("scatter", serde_json::json!({"targets": [target], "method": kind, "payload_b64": b64, "timeout_secs": 1})),
+        ("signal/emit", serde_json::json!({"kind": kind, "scope": format!("node:{target}"), "payload_b64": b64})),
+        ("mailbox/deliver", serde_json::json!({"target": target, "kind": kind, "payload_b64": b64})),
+        ("shard/emit", serde_json::json!({"kind": kind, "ns": "x", "name": "y", "shard_key": "k", "payload_b64": b64})),
+        ("overlay/emit_reliable", serde_json::json!({"target": target, "kind": kind, "payload_b64": b64, "timeout_secs": 1})),
+    ]};
+    let send = |token: &'static str, route: &'static str, body: serde_json::Value| {
+        client.post(format!("{base}/gateway/{route}")).header(AUTHORIZATION, format!("Bearer {token}")).json(&body).send()
+    };
+    let refused = |v: &serde_json::Value, scope: &str, kind: &str, why: &str| {
+        assert_eq!(v["error"], "insufficient scope", "{why}: {v}");
+        assert_eq!(v["required_scope"], scope, "{why}: {v}");
+        assert_eq!(v["kind"], kind, "{why}: {v}");
+    };
+
+    // Every raw route refuses the board's write kind to a caller without `board:write`, by name.
+    for (route, body) in bodies("blackboard.board.post") {
+        let r = send("raw-only", route, body.clone()).await.unwrap();
+        assert_eq!(r.status(), 403, "{route}: mesh:write alone carried a board post");
+        refused(&r.json().await.unwrap(), "board:write", "blackboard.board.post", route);
+        let r = send("tuple-write", route, body.clone()).await.unwrap();
+        assert_eq!(r.status(), 403, "{route}: the wrong family's scope carried a board post");
+        let r = send("board-read", route, body.clone()).await.unwrap();
+        assert_eq!(r.status(), 403, "{route}: the read scope carried a board post");
+        refused(&r.json().await.unwrap(), "board:write", "blackboard.board.post", route);
+        let r = send("board-write", route, body.clone()).await.unwrap();
+        assert_ne!(r.status(), 403, "{route}: board:write was refused its own kind");
+        let r = send("star", route, body).await.unwrap();
+        assert_ne!(r.status(), 403, "{route}: the `*` token was refused");
+    }
+    // The other two families, and the read verbs.
+    let cases: &[(&str, &str, &str)] = &[
+        ("tuple.work.put",       "tuple:write", "raw-only"),
+        ("tuple.work.take",      "tuple:write", "board-write"),
+        ("wiki.council.ingest",  "wiki:write",  "raw-only"),
+        ("wiki.council.access",  "wiki:read",   "raw-only"),
+        ("blackboard.board.read", "board:read", "board-write"),
+        ("blackboard.board.depth", "board:read", "raw-only"),
+        ("tuple.work.depth",     "tuple:read",  "tuple-write"),
+        ("blackboard.board",     "board:write", "board-read"),   // a malformed kind under the prefix: the write scope
+    ];
+    for (kind, scope, token) in cases {
+        let (route, body) = bodies(kind).remove(0);
+        let r = send(token, route, body).await.unwrap();
+        assert_eq!(r.status(), 403, "{kind} under {token}");
+        refused(&r.json().await.unwrap(), scope, kind, kind);
+    }
+    let (route, body) = bodies("blackboard.board.read").remove(0);
+    let r = send("board-read", route, body).await.unwrap();
+    assert_ne!(r.status(), 403, "board:read was refused a read kind");
+    let (route, body) = bodies("tuple.work.depth").remove(0);
+    let r = send("tuple-write", route, body).await.unwrap();
+    assert_eq!(r.status(), 403, "tuple:write carried a read kind without tuple:read");
+
+    // A body naming both fields is judged by the field the handler reads: `method` on rpc/call, `kind` elsewhere.
+    let r = send("raw-only", "rpc/call", serde_json::json!({"target": target, "method": "blackboard.board.post", "kind": "echo", "payload_b64": b64, "timeout_secs": 1})).await.unwrap();
+    assert_eq!(r.status(), 403, "rpc/call judged `kind` where the handler reads `method`");
+    let r = send("raw-only", "signal/emit", serde_json::json!({"kind": "blackboard.board.post", "method": "echo", "scope": format!("node:{target}"), "payload_b64": b64})).await.unwrap();
+    assert_eq!(r.status(), 403, "signal/emit judged `method` where the handler reads `kind`");
+
+    // The plant: an ordinary kind is untouched, and the route's own scope is still required.
+    for (route, body) in bodies("echo") {
+        let r = send("raw-only", route, body).await.unwrap();
+        assert_ne!(r.status(), 403, "{route}: an ordinary kind was refused");
+    }
+    let r = client.post(format!("{base}/gateway/rpc/call")).header(AUTHORIZATION, "Bearer board-read")
+        .json(&serde_json::json!({"target": target, "method": "blackboard.board.read", "payload_b64": b64, "timeout_secs": 1})).send().await.unwrap();
+    assert_ne!(r.status(), 403);
+    let mut cfg2 = GossipConfig::default();
+    cfg2.bind_port = alloc_port();
+    cfg2.http_port = Some(alloc_port());
+    cfg2.gateway_scoped_tokens = vec![crate::GatewayToken { token: "board-only".into(), scopes: vec!["board:write".into()] }];
+    let agent2 = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", cfg2.bind_port).unwrap(), cfg2.clone()));
+    agent2.start().await.unwrap();
+    let r = client.post(format!("http://127.0.0.1:{}/gateway/rpc/call", cfg2.http_port.unwrap())).header(AUTHORIZATION, "Bearer board-only")
+        .json(&serde_json::json!({"target": target, "method": "blackboard.board.post", "payload_b64": b64, "timeout_secs": 1})).send().await.unwrap();
+    assert_eq!(r.status(), 403, "board:write alone opened the raw route");
+    let v: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(v["required_scope"], "mesh:write", "{v}");
+    agent2.shutdown().await;
+    agent.shutdown().await;
+}
