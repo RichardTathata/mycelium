@@ -2257,3 +2257,39 @@ instead of never; an IdP outage longer than a day makes the gateway refuse OIDC 
 stale keys. **Migration:** none for a healthy IdP. If your IdP publishes an empty JWKS while rotating (some do,
 briefly), tokens are refused during that window; if an outage of more than a day must not lock operators out, keep a
 static-token principal for them (`rbac.md`).
+
+## 76. A companion's RPC kind at a gateway door — in a raw route's body, or the path of a signal or serve stream — needs the companion's family scope (unreleased, external review 2026-10-31 F1, plan row R1)
+
+The gateway's raw routes — `POST /gateway/rpc/call`, `scatter`, `signal/emit`, `mailbox/deliver`, `shard/emit` and
+`overlay/emit_reliable` — take an RPC kind from the request body. A companion serves its operations as kinds of the
+form `blackboard.{ns}.{op}`, `tuple.{ns}.{op}` and `wiki.{group}.{op}`, and its own routes gate each behind a family
+scope (`board:write`, `tuple:write`, `wiki:write`; the read verbs behind `:read`). The raw routes carried the same
+kinds to the same handlers under the route's own scope alone, so a `mesh:write` holder with no `board:write` could
+post to a board through `rpc/call` where `/gateway/bb/post` refused it. Now a companion's kind on a raw route is
+refused `403 {"error": "insufficient scope", "required_scope": "board:write", "kind": "blackboard.board.post"}`
+unless the token also holds the family scope the companion's route would require — the read verbs (`read`,
+`depth` for a board; `depth` for a tuple space; `access` for a wiki) need `:read`, and every other verb under the
+prefix, an unknown one included, needs `:write` ([`rbac.md`](../operations/rbac.md)). The route's own scope is
+still required; an open gateway, which gates no scope on the companion's routes either, is unchanged; a build
+without `compliance` gates no scope anywhere. **Migration:** a scoped token that reached a companion through the
+raw routes under `mesh:write` (or `consensus:write` on `overlay/emit_reliable`) alone now needs the companion's
+scope too — add `board:write`, `tuple:write` or `wiki:write` (or the `:read` form) to it. A token used only on the
+companion's own routes is unaffected.
+
+The two doors that take the kind from the **path** are gated the same way, with the verb fixed by what the door
+does (#714's review): `GET /gateway/signal/sse/{kind}` and `GET /signals/{kind}` register a tap on the handler table
+a companion's `rpc_rx` registers on and receive every frame of the kind, payload included, so observing a
+companion's kind needs the family's `:read` whatever the kind's own verb — a `mesh:read` token read each board
+post's contents where `/gateway/bb/read` refused it; and `GET /gateway/rpc/serve/{kind}` answers the kind's requests
+in the provider's place, so serving a companion's kind needs the family's `:write` as well as `mesh:serve` — a
+`mesh:serve` token served `blackboard.other.post` on a node hosting no board. A declared skill naming a companion
+kind reaches the serve door and is gated the same. The path is read percent-decoded, as the handler reads it. **Not
+built:** a client with `cap:write` can still advertise any capability, a companion's `{ns}.primary` role included —
+that is what `cap:write` means — so a client holding `cap:write`, `mesh:serve` and the family's `:write` can stand
+in for a companion's primary; a client without the family scope cannot be sent its requests.
+
+The gate reads the body before the handler's `Json` extractor, so a request naming a companion's kind is refused
+`403` even where the handler would have answered `415` for its content type or `400` for a missing field; a body
+the gate cannot read as JSON passes through to the handler's own refusal, and one over the 2 MiB limit answers
+`413` as before. (This section is §76 because the plan's sibling PR #712, R4, took §75 first; R2+R3's, #713, is §77. The number
+was taken at the merge, not resolved by overwriting.)

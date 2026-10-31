@@ -403,3 +403,44 @@ mod admission_tests {
         assert!(matches!(dec_id_resp(&Bytes::from(b)), Err(crate::BlackboardError::Rpc(_))), "truncated is malformed");
     }
 }
+
+/// External review 2026-10-31, F1 (plan row R1): every operation this board serves as an RPC kind is mapped by the
+/// gateway's raw-route gate (`mycelium::companion_kind_scope`) to the scope the board's own route requires. The
+/// operations are read from this crate's source — the literal in each `rpc_kind(…, "op")` call and in each
+/// `handler!("op", …)` registration — rather than listed a second time, so a verb registered or called here is
+/// checked against the table without anyone remembering to. Which verbs are reads (`read`, `depth`) is this test's
+/// own statement, matching the board's route table in `http.rs`; a new read verb needs adding here and in the core
+/// table both.
+#[cfg(test)]
+mod raw_route_scope_tests {
+    fn ops_in(src: &str) -> Vec<String> {
+        let registered = src.match_indices("handler!(\"").filter_map(|(i, m)| {
+            let rest = &src[i + m.len()..];
+            Some(rest[..rest.find('"')?].to_string())
+        });
+        registered.chain(src.match_indices("rpc_kind(")
+            .filter_map(|(i, _)| {
+                let rest = &src[i..];
+                let close = rest.find(')')?;
+                let args = &rest[..close];
+                let q1 = args.rfind('"')?;
+                let q0 = args[..q1].rfind('"')?;
+                Some(args[q0 + 1..q1].to_string())
+            }))
+            .collect()
+    }
+
+    #[test]
+    fn every_served_operation_maps_to_the_boards_own_scope() {
+        let mut ops = ops_in(include_str!("rpc.rs"));
+        ops.extend(ops_in(include_str!("lib.rs")));
+        ops.sort();
+        ops.dedup();
+        assert!(ops.len() >= 8, "the scan found too few operations: {ops:?}");
+        for op in &ops {
+            let kind = super::rpc_kind("ns", op);
+            let expected = if matches!(op.as_str(), "read" | "depth") { "board:read" } else { "board:write" };
+            assert_eq!(mycelium::companion_kind_scope(&kind), Some(expected), "{kind}");
+        }
+    }
+}

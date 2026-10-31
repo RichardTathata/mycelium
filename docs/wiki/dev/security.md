@@ -726,7 +726,16 @@ substrate prevents (the guest is foreign code in the node's process — `myceliu
   `rpc_rx` unframed and is treated as a plain member call (no mandate, no evaluator), so an unconfined emit
   of `mcp.invoke` walked past every door that checks authority for it. The protected-kind predicate is one
   ungated function (`is_protected_kind`, `src/agent/mod.rs`) and every gateway door asks it through
-  `refuse_protected_kind`; a new door must ask it too. Two places do not: the wasm host's emit door (`confine_kind`)
+  `refuse_protected_kind`; a new door must ask it too. **A second per-kind rule sits on the same doors since
+  2026-10-31** (external review F1, plan row R1, #714): a *companion's* kind — `blackboard.*`, `tuple.*`, `wiki.*` —
+  needs the companion's family scope as well as the door's own, decided in the auth layer
+  (`authz::companion_kind_gate`, with the credential's whole scope set; `companion_kind_scope` and
+  `companion_kind_family` in `src/agent/mod.rs`, ungated): in a raw route's body, the kind's own verb's scope
+  (`read`/`depth`/`access` → `:read`, every other verb → `:write`); in a signal stream's path, the family's `:read`
+  (a tap receives every frame); in the serve stream's path, the family's `:write` (serving is answering). A new
+  door that carries a kind, in the body or the path, must ask this gate too — `RAW_KIND_ROUTES` and
+  `PATH_KIND_ROUTES` in `authz.rs` are the lists, and each companion's own tests diff the verbs it serves against
+  the table. Two places do not: the wasm host's emit door (`confine_kind`)
   re-implements the same disjunction over a list `with_protected_kinds` copies in — equivalent, a second copy to keep in
   step — and `refuse_unservable_kind` (`src/agent/http/authz.rs`) checks the built-in kinds only, deliberately.
 - **A `[hosts]` table names its provenance policy.** Empty `trusted_publishers` is refused at load

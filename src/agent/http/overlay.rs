@@ -880,7 +880,9 @@ pub(super) async fn gw_overlay_emit_reliable(
     };
     let timeout = Duration::from_secs(body.timeout_secs.unwrap_or(5).clamp(1, 300));
     let kind: Arc<str> = Arc::from(body.kind.as_str());
-    // Closure plan C1: a raw route never carries protected work around the door that checks it.
+    // Closure plan C1: a raw route never carries protected work around the door that checks it. A companion's kind
+    // was already refused by the auth layer unless the token holds the companion's family scope (external review
+    // 2026-10-31 F1, `authz::companion_kind_gate`): a kind sent here can reach an `rpc_rx` receiver for it.
     if let Some(refused) = refuse_protected_kind(&ctx.agent_ctx.config, &kind) {
         return refused;
     }

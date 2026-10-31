@@ -81,7 +81,12 @@ possession proof they sign over `mandate_request_bytes(...)`.
 `mesh:write` opens the raw routes (`rpc/call`, `scatter`, `signal/emit`, …). Those refuse protected kinds
 (`mcp.invoke`, `skill.invoke`, `llm.invoke`, and any in `protected_rpc_kinds`) with `403 protected_kind`, so they
 cannot carry protected work around `/mcp` and `/a2a`. List every kind your own providers serve as protected work in
-`protected_rpc_kinds` (`GOSSIP_PROTECTED_RPC_KINDS`).
+`protected_rpc_kinds` (`GOSSIP_PROTECTED_RPC_KINDS`). A **companion's** kinds — `blackboard.{ns}.{op}`, `tuple.{ns}.{op}`,
+`wiki.{group}.{op}` — need no listing: the raw routes refuse them `403 insufficient scope` to a caller without the
+companion's family scope (`board:write`, `tuple:write`, `wiki:write`; the read verbs their `:read`), the same scope
+the companion's own route asks for (external review 2026-10-31 F1). So withholding `board:write` from a `mesh:write`
+holder keeps it off the board by every route the gateway has; a member's direct `rpc_call` is not a client and is not
+gated here.
 
 **Enforce at the provider too** (closure plan C3). On every node that serves tools or skills, attach the same action
 evaluator and execution authority as the gateway, and turn on `agent.with_provider_enforcement()`. Protected work

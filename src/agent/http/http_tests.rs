@@ -3040,3 +3040,255 @@ async fn test_gateway_transparency_inclusion_proof_verifies_and_scope_gates() {
     agent.shutdown().await;
     let _ = std::fs::remove_dir_all(&cert_dir);
 }
+
+/// **External review 2026-10-31, F1 (plan row R1, decision D1).** A companion's operation reached through a raw
+/// route needs the scope the companion's own route needs. Six raw routes, three families, read and write verbs:
+/// a `mesh:write` holder without `board:write` is refused `403 insufficient scope` naming `board:write` on every
+/// route that could carry `blackboard.board.post`; a holder of the wrong family (`tuple:write`) or the wrong verb
+/// (`board:read`) is refused by name too; the right scope passes the gate (the kind then times out — nothing serves
+/// it here, which is the point: the refusal is before dispatch); the `*` token passes; an ordinary kind is untouched.
+/// Seen failing first with `companion_kind_scope` returning `None`: every refusal answered 200.
+#[cfg(feature = "compliance")]
+#[tokio::test]
+async fn raw_routes_require_a_companion_kinds_family_scope() {
+    use axum::http::header::AUTHORIZATION;
+    use base64::Engine as _;
+
+    let gossip_port = alloc_port();
+    let http_port   = alloc_port();
+    let id  = NodeId::new("127.0.0.1", gossip_port).unwrap();
+    let mut cfg = GossipConfig::default();
+    cfg.bind_port = gossip_port;
+    cfg.http_port = Some(http_port);
+    let raw = vec!["mesh:write".to_string(), "consensus:write".to_string()];
+    let with = |extra: &str| { let mut s = raw.clone(); s.push(extra.into()); s };
+    cfg.gateway_scoped_tokens = vec![
+        crate::GatewayToken { token: "raw-only".into(),    scopes: raw.clone() },
+        crate::GatewayToken { token: "board-write".into(), scopes: with("board:write") },
+        crate::GatewayToken { token: "board-read".into(),  scopes: with("board:read") },
+        crate::GatewayToken { token: "tuple-write".into(), scopes: with("tuple:write") },
+        crate::GatewayToken { token: "star".into(),        scopes: vec!["*".into()] },
+    ];
+    let agent = Arc::new(GossipAgent::new(id.clone(), cfg));
+    agent.start().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let client = reqwest::Client::new();
+    let base = format!("http://127.0.0.1:{http_port}");
+    let b64 = base64::engine::general_purpose::STANDARD.encode(b"x");
+    let target = id.to_string();
+    let bodies = |kind: &str| -> Vec<(&'static str, serde_json::Value)> { vec![
+        ("rpc/call", serde_json::json!({"target": target, "method": kind, "payload_b64": b64, "timeout_secs": 1})),
+        ("scatter", serde_json::json!({"targets": [target], "method": kind, "payload_b64": b64, "timeout_secs": 1})),
+        ("signal/emit", serde_json::json!({"kind": kind, "scope": format!("node:{target}"), "payload_b64": b64})),
+        ("mailbox/deliver", serde_json::json!({"target": target, "kind": kind, "payload_b64": b64})),
+        ("shard/emit", serde_json::json!({"kind": kind, "ns": "x", "name": "y", "shard_key": "k", "payload_b64": b64})),
+        ("overlay/emit_reliable", serde_json::json!({"target": target, "kind": kind, "payload_b64": b64, "timeout_secs": 1})),
+    ]};
+    let send = |token: &'static str, route: &'static str, body: serde_json::Value| {
+        client.post(format!("{base}/gateway/{route}")).header(AUTHORIZATION, format!("Bearer {token}")).json(&body).send()
+    };
+    let refused = |v: &serde_json::Value, scope: &str, kind: &str, why: &str| {
+        assert_eq!(v["error"], "insufficient scope", "{why}: {v}");
+        assert_eq!(v["required_scope"], scope, "{why}: {v}");
+        assert_eq!(v["kind"], kind, "{why}: {v}");
+    };
+
+    // Every raw route refuses the board's write kind to a caller without `board:write`, by name.
+    for (route, body) in bodies("blackboard.board.post") {
+        let r = send("raw-only", route, body.clone()).await.unwrap();
+        assert_eq!(r.status(), 403, "{route}: mesh:write alone carried a board post");
+        refused(&r.json().await.unwrap(), "board:write", "blackboard.board.post", route);
+        let r = send("tuple-write", route, body.clone()).await.unwrap();
+        assert_eq!(r.status(), 403, "{route}: the wrong family's scope carried a board post");
+        let r = send("board-read", route, body.clone()).await.unwrap();
+        assert_eq!(r.status(), 403, "{route}: the read scope carried a board post");
+        refused(&r.json().await.unwrap(), "board:write", "blackboard.board.post", route);
+        let r = send("board-write", route, body.clone()).await.unwrap();
+        assert_ne!(r.status(), 403, "{route}: board:write was refused its own kind");
+        let r = send("star", route, body).await.unwrap();
+        assert_ne!(r.status(), 403, "{route}: the `*` token was refused");
+    }
+    // The other two families, and the read verbs.
+    let cases: &[(&str, &str, &str)] = &[
+        ("tuple.work.put",       "tuple:write", "raw-only"),
+        ("tuple.work.take",      "tuple:write", "board-write"),
+        ("wiki.council.ingest",  "wiki:write",  "raw-only"),
+        ("wiki.council.access",  "wiki:read",   "raw-only"),
+        ("blackboard.board.read", "board:read", "board-write"),
+        ("blackboard.board.depth", "board:read", "raw-only"),
+        ("tuple.work.depth",     "tuple:read",  "tuple-write"),
+        ("blackboard.board",     "board:write", "board-read"),   // a malformed kind under the prefix: the write scope
+    ];
+    for (kind, scope, token) in cases {
+        let (route, body) = bodies(kind).remove(0);
+        let r = send(token, route, body).await.unwrap();
+        assert_eq!(r.status(), 403, "{kind} under {token}");
+        refused(&r.json().await.unwrap(), scope, kind, kind);
+    }
+    let (route, body) = bodies("blackboard.board.read").remove(0);
+    let r = send("board-read", route, body).await.unwrap();
+    assert_ne!(r.status(), 403, "board:read was refused a read kind");
+    let (route, body) = bodies("tuple.work.depth").remove(0);
+    let r = send("tuple-write", route, body).await.unwrap();
+    assert_eq!(r.status(), 403, "tuple:write carried a read kind without tuple:read");
+
+    // A body naming both fields is judged by the field the handler reads: `method` on rpc/call, `kind` elsewhere.
+    let r = send("raw-only", "rpc/call", serde_json::json!({"target": target, "method": "blackboard.board.post", "kind": "echo", "payload_b64": b64, "timeout_secs": 1})).await.unwrap();
+    assert_eq!(r.status(), 403, "rpc/call judged `kind` where the handler reads `method`");
+    let r = send("raw-only", "signal/emit", serde_json::json!({"kind": "blackboard.board.post", "method": "echo", "scope": format!("node:{target}"), "payload_b64": b64})).await.unwrap();
+    assert_eq!(r.status(), 403, "signal/emit judged `method` where the handler reads `kind`");
+
+    // The plant: an ordinary kind is untouched, and the route's own scope is still required.
+    for (route, body) in bodies("echo") {
+        let r = send("raw-only", route, body).await.unwrap();
+        assert_ne!(r.status(), 403, "{route}: an ordinary kind was refused");
+    }
+    let r = client.post(format!("{base}/gateway/rpc/call")).header(AUTHORIZATION, "Bearer board-read")
+        .json(&serde_json::json!({"target": target, "method": "blackboard.board.read", "payload_b64": b64, "timeout_secs": 1})).send().await.unwrap();
+    assert_ne!(r.status(), 403);
+    let mut cfg2 = GossipConfig::default();
+    cfg2.bind_port = alloc_port();
+    cfg2.http_port = Some(alloc_port());
+    cfg2.gateway_scoped_tokens = vec![crate::GatewayToken { token: "board-only".into(), scopes: vec!["board:write".into()] }];
+    let agent2 = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", cfg2.bind_port).unwrap(), cfg2.clone()));
+    agent2.start().await.unwrap();
+    let r = client.post(format!("http://127.0.0.1:{}/gateway/rpc/call", cfg2.http_port.unwrap())).header(AUTHORIZATION, "Bearer board-only")
+        .json(&serde_json::json!({"target": target, "method": "blackboard.board.post", "payload_b64": b64, "timeout_secs": 1})).send().await.unwrap();
+    assert_eq!(r.status(), 403, "board:write alone opened the raw route");
+    let v: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(v["required_scope"], "mesh:write", "{v}");
+    agent2.shutdown().await;
+    agent.shutdown().await;
+}
+
+/// **#714's review, findings 1 and 2: the doors that take the kind from the path.** The two signal streams register a
+/// tap on the handler table `rpc_rx` registers on and receive every frame of the kind, so a `mesh:read` holder read
+/// each board post's payload while `bb/read` refused it; the serve stream answers the kind's requests in the
+/// provider's place, so a `mesh:serve` holder served `blackboard.other.post` on a node that hosts no board. Now a
+/// companion's kind on a signal stream needs the family's `:read` (whatever the verb — observing is reading), and on
+/// the serve stream the family's `:write` (serving is answering writes). The path is read percent-decoded, as the
+/// handler reads it. Seen failing first with `PATH_KIND_ROUTES` empty: every refusal answered 200.
+#[cfg(feature = "compliance")]
+#[tokio::test]
+async fn the_signal_streams_and_the_serve_stream_need_a_companion_kinds_family_scope() {
+    use axum::http::header::AUTHORIZATION;
+
+    let gossip_port = alloc_port();
+    let http_port   = alloc_port();
+    let id  = NodeId::new("127.0.0.1", gossip_port).unwrap();
+    let mut cfg = GossipConfig::default();
+    cfg.bind_port = gossip_port;
+    cfg.http_port = Some(http_port);
+    cfg.gateway_scoped_tokens = vec![
+        crate::GatewayToken { token: "mesh-read".into(),   scopes: vec!["mesh:read".into()] },
+        crate::GatewayToken { token: "board-read".into(),  scopes: vec!["mesh:read".into(), "board:read".into()] },
+        crate::GatewayToken { token: "board-write".into(), scopes: vec!["mesh:read".into(), "board:write".into()] },
+        crate::GatewayToken { token: "serve-only".into(),  scopes: vec!["mesh:serve".into()] },
+        crate::GatewayToken { token: "serve-board".into(), scopes: vec!["mesh:serve".into(), "board:write".into()] },
+        crate::GatewayToken { token: "serve-read".into(),  scopes: vec!["mesh:serve".into(), "board:read".into()] },
+    ];
+    let agent = Arc::new(GossipAgent::new(id.clone(), cfg));
+    agent.start().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let client = reqwest::Client::new();
+    let base = format!("http://127.0.0.1:{http_port}");
+    let get = |token: &'static str, path: String| client.get(format!("{base}{path}")).header(AUTHORIZATION, format!("Bearer {token}")).send();
+    let refused = async |r: reqwest::Response, scope: &str, kind: &str, why: &str| {
+        assert_eq!(r.status(), 403, "{why}");
+        let v: serde_json::Value = r.json().await.unwrap();
+        assert_eq!(v["error"], "insufficient scope", "{why}: {v}");
+        assert_eq!(v["required_scope"], scope, "{why}: {v}");
+        assert_eq!(v["kind"], kind, "{why}: {v}");
+    };
+
+    // The signal streams: a companion's kind needs the family's `:read`, whatever the kind's verb.
+    for door in ["/gateway/signal/sse", "/signals"] {
+        for (kind, scope) in [("blackboard.board.post", "board:read"), ("blackboard.board.read", "board:read"),
+                              ("tuple.work.take", "tuple:read"), ("wiki.council.ingest", "wiki:read")] {
+            let r = get("mesh-read", format!("{door}/{kind}")).await.unwrap();
+            refused(r, scope, kind, &format!("{door}/{kind} under mesh:read")).await;
+        }
+        // The write scope is not the read scope.
+        let r = get("board-write", format!("{door}/blackboard.board.post")).await.unwrap();
+        refused(r, "board:read", "blackboard.board.post", &format!("{door}: board:write observed a board kind")).await;
+        // Percent-encoded, the path is the same kind.
+        let r = get("mesh-read", format!("{door}/blackboard%2Eboard%2Epost")).await.unwrap();
+        refused(r, "board:read", "blackboard.board.post", &format!("{door}: a percent-encoded kind slipped the gate")).await;
+        // An ordinary kind streams as before.
+        let r = get("mesh-read", format!("{door}/repair.request")).await.unwrap();
+        assert_eq!(r.status(), 200, "{door}: an ordinary kind was refused");
+        drop(r);
+        // With `board:read` the stream opens and delivers the board kind's frames.
+        let mut resp = get("board-read", format!("{door}/blackboard.board.post")).await.unwrap();
+        assert_eq!(resp.status(), 200, "{door}: board:read was refused the board kind");
+        let _ = agent.mesh().emit("blackboard.board.post", crate::SignalScope::Cluster, bytes::Bytes::from_static(b"frame"));
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        let mut found = false;
+        while tokio::time::Instant::now() < deadline {
+            match tokio::time::timeout(Duration::from_millis(300), resp.chunk()).await {
+                Ok(Ok(Some(chunk))) => {
+                    if String::from_utf8_lossy(&chunk).contains("blackboard.board.post") { found = true; break; }
+                }
+                Ok(Ok(None)) => break,
+                Ok(Err(_)) => break,
+                Err(_) => continue,
+            }
+        }
+        assert!(found, "{door}: the frame did not reach the board:read stream");
+        drop(resp);
+    }
+
+    // The serve stream: a companion's kind needs the family's `:write`, whatever the verb — serving is answering.
+    for kind in ["blackboard.other.post", "blackboard.other.read", "tuple.other.take"] {
+        let scope = if kind.starts_with("blackboard") { "board:write" } else { "tuple:write" };
+        let r = get("serve-only", format!("/gateway/rpc/serve/{kind}")).await.unwrap();
+        refused(r, scope, kind, &format!("rpc/serve/{kind} under mesh:serve")).await;
+    }
+    let r = get("serve-read", "/gateway/rpc/serve/blackboard.other.post".into()).await.unwrap();
+    refused(r, "board:write", "blackboard.other.post", "rpc/serve: board:read served a board kind").await;
+    let r = get("serve-board", "/gateway/rpc/serve/blackboard.other.post".into()).await.unwrap();
+    assert_eq!(r.status(), 200, "rpc/serve: mesh:serve + board:write was refused the board kind");
+    drop(r);
+    let r = get("serve-only", "/gateway/rpc/serve/work".into()).await.unwrap();
+    assert_eq!(r.status(), 200, "rpc/serve: an ordinary kind was refused");
+    drop(r);
+    // `mesh:serve` is still required: the family scope alone does not serve.
+    let r = get("board-write", "/gateway/rpc/serve/blackboard.other.post".into()).await.unwrap();
+    assert_eq!(r.status(), 403);
+    let v: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(v["required_scope"], "mesh:serve", "{v}");
+    agent.shutdown().await;
+}
+
+/// **#714's review, finding 5.** The raw-route gate reads the body before the handler's `Json` extractor, so a
+/// request naming a companion's kind is refused `403` even where the handler would have answered `415` for its
+/// content type; a body the gate cannot read as JSON passes through to the handler's own refusal.
+#[cfg(feature = "compliance")]
+#[tokio::test]
+async fn the_raw_route_gate_decides_before_the_handlers_extractor() {
+    use axum::http::header::{AUTHORIZATION, CONTENT_TYPE};
+
+    let gossip_port = alloc_port();
+    let http_port   = alloc_port();
+    let id  = NodeId::new("127.0.0.1", gossip_port).unwrap();
+    let mut cfg = GossipConfig::default();
+    cfg.bind_port = gossip_port;
+    cfg.http_port = Some(http_port);
+    cfg.gateway_scoped_tokens = vec![crate::GatewayToken { token: "raw-only".into(), scopes: vec!["mesh:write".into()] }];
+    let agent = Arc::new(GossipAgent::new(id.clone(), cfg));
+    agent.start().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let client = reqwest::Client::new();
+    let base = format!("http://127.0.0.1:{http_port}");
+    let body = format!(r#"{{"target": "{id}", "method": "blackboard.board.post", "timeout_secs": 1}}"#);
+    let r = client.post(format!("{base}/gateway/rpc/call")).header(AUTHORIZATION, "Bearer raw-only")
+        .header(CONTENT_TYPE, "text/plain").body(body.clone()).send().await.unwrap();
+    assert_eq!(r.status(), 403, "a text/plain body naming a board kind reached the extractor's 415");
+    let v: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(v["required_scope"], "board:write", "{v}");
+    let r = client.post(format!("{base}/gateway/rpc/call")).header(AUTHORIZATION, "Bearer raw-only")
+        .header(CONTENT_TYPE, "application/json").body("not json {").send().await.unwrap();
+    assert_eq!(r.status(), 400, "a body that is not JSON is the handler's refusal, not the gate's");
+    agent.shutdown().await;
+}

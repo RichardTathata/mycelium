@@ -617,3 +617,40 @@ fn parse_complete_keyed_req(p: &Bytes) -> Option<(u64, Arc<str>, Arc<str>, Bytes
     let (key, payload) = parse_stage_prefix(&rest2)?;
     Some((id, stage, key, payload))
 }
+
+/// External review 2026-10-31, F1 (plan row R1): every operation this space serves as an RPC kind is mapped by the
+/// gateway's raw-route gate (`mycelium::companion_kind_scope`) to the scope the space's own route requires. The
+/// operations are read from this crate's source — the literal in each `rpc_kind(…, "op")` call, which every
+/// `rpc_rx` registration and `rpc_call` here carries — rather than listed a second time, so a verb registered or
+/// called here is checked against the table without anyone remembering to. Which verb is a read (`depth`) is this
+/// test's own statement, matching the space's route table in `http.rs`; a new read verb needs adding here and in the
+/// core table both.
+#[cfg(test)]
+mod raw_route_scope_tests {
+    fn ops_in(src: &str) -> Vec<String> {
+        src.match_indices("rpc_kind(")
+            .filter_map(|(i, _)| {
+                let rest = &src[i..];
+                let close = rest.find(')')?;
+                let args = &rest[..close];
+                let q1 = args.rfind('"')?;
+                let q0 = args[..q1].rfind('"')?;
+                Some(args[q0 + 1..q1].to_string())
+            })
+            .collect()
+    }
+
+    #[test]
+    fn every_served_operation_maps_to_the_spaces_own_scope() {
+        let mut ops = ops_in(include_str!("rpc.rs"));
+        ops.extend(ops_in(include_str!("lib.rs")));
+        ops.sort();
+        ops.dedup();
+        assert!(ops.len() >= 10, "the scan found too few operations: {ops:?}");
+        for op in &ops {
+            let kind = super::rpc_kind("ns", op);
+            let expected = if op == "depth" { "tuple:read" } else { "tuple:write" };
+            assert_eq!(mycelium::companion_kind_scope(&kind), Some(expected), "{kind}");
+        }
+    }
+}
