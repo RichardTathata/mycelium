@@ -311,6 +311,98 @@ class RpcRequest:
 
 
 @dataclass
+class ScheduleDeclaration:
+    """A ``[[schedule]]`` declared through the gateway (adopter-surface Y12): one holder per slot among the nodes that
+    run it and match ``holders``, a slot ``(now - phase) / period`` counted from the Unix epoch, a missed run decided
+    by ``on_missed`` (``"skip"``, ``"run_late"`` or ``"run_once"``). The node the client is connected to stands in the
+    holder band for it. ``holders`` is ``(ns, name)``."""
+
+    id:          str
+    period_secs: int
+    holders:     "tuple[str, str]"
+    phase_secs:  int = 0
+    on_missed:   str = "skip"
+
+    def toml(self) -> str:
+        """The ``[[schedule]]`` TOML this declares — what :meth:`MyceliumAgent.schedule_runs` sends."""
+        for name, v in (("period_secs", self.period_secs), ("phase_secs", self.phase_secs)):
+            if not isinstance(v, int) or isinstance(v, bool) or v < 0:
+                raise ValueError(f"{name} must be a whole number of seconds, got {v!r}")
+        q = toml_basic_string
+        ns, name = self.holders
+        return "\n".join([
+            "[[schedule]]",
+            f"id = {q(self.id)}",
+            f"period_secs = {self.period_secs}",
+            f"phase_secs = {self.phase_secs}",
+            f"on_missed = {q(self.on_missed)}",
+            "[schedule.holders]",
+            f"ns = {q(ns)}",
+            f"name = {q(name)}",
+        ]) + "\n"
+
+
+_TOML_SHORT = {"\b": "\\b", "\t": "\\t", "\n": "\\n", "\f": "\\f", "\r": "\\r", '"': '\\"', "\\": "\\\\"}
+
+
+def toml_basic_string(value: str) -> str:
+    """``value`` as a TOML basic string (TOML 1.0 § String): ``"`` and ``\\`` escaped, the controls TOML forbids raw
+    (U+0000–U+001F and U+007F) as their short escape or ``\\uXXXX``, every other character — a non-BMP one included —
+    written as itself. Not JSON's escaping: ``json.dumps`` writes a non-BMP character as a surrogate pair, which TOML
+    refuses."""
+    out = ['"']
+    for ch in value:
+        code = ord(ch)
+        if ch in _TOML_SHORT:
+            out.append(_TOML_SHORT[ch])
+        elif code < 0x20 or code == 0x7F:
+            out.append(f"\\u{code:04X}")
+        else:
+            out.append(ch)
+    out.append('"')
+    return "".join(out)
+
+
+@dataclass
+class ScheduleRun:
+    """One run of a schedule, handed to the client by :meth:`MyceliumAgent.schedule_runs` (adopter-surface Y12).
+
+    ``kind`` is ``"on_time"`` (the slot due now), ``"late"`` (a missed slot under ``run_late``) or ``"for_gap"`` (one
+    run for a gap under ``run_once``; ``first_slot`` is the gap's oldest). ``operation_id`` is the run's idempotency
+    key, ``sched/{id}~{principal}/{slot}`` (the schedule scoped by this client's principal): carry it on every effect the run causes, with content that depends on the run alone, so
+    two holders running one slot (a partition) make one effect at a destination that deduplicates."""
+
+    run_id:        str
+    schedule:      str
+    slot:          int
+    kind:          str
+    first_slot:    int
+    slot_start_ms: int
+    operation_id:  str
+
+
+class ScheduleRefusedError(ValueError):
+    """The gateway refused a schedule run stream (adopter-surface Y12): not one valid ``[[schedule]]`` (``status``
+    400 or 422, ``detail`` naming what), or this node already runs the id (``status`` 409, ``schedule_running``)."""
+
+    def __init__(self, status: int, error: str, detail: str) -> None:
+        super().__init__(f"schedule refused ({status} {error}): {detail}")
+        self.status = status
+        self.error = error
+        self.detail = detail
+
+
+class UnservedRunError(PermissionError):
+    """:meth:`MyceliumAgent.schedule_ack` was refused (HTTP 403 ``unserved_run``): the run was not handed to this
+    principal, was answered already, or ended without an answer — past its period, or after the stream closed — and
+    nothing was recorded."""
+
+    def __init__(self, run_id: str, message: str) -> None:
+        super().__init__(message)
+        self.run_id = run_id
+
+
+@dataclass
 class MailboxEvent:
     """An event received from this node's mailbox via :meth:`MyceliumAgent.mailbox`."""
 
@@ -601,7 +693,7 @@ class MyceliumAgent:
         The node parses and validates the text with its own loader — the same file ``mycelium
         wire-check`` reads — so this SDK carries text and never a second parser. Hosting sections
         (``[hosts]``, ``[[presence]]``, ``[[activation]]``, ``[[serve]]``) are a stem's and are
-        refused (422), as is ``[[schedule]]``, which the application embedding the node runs; ``[[lane]]``, ``[[mandate]]`` and ``[[rule]]`` are accepted as declarations and
+        refused (422), as is ``[[schedule]]``, which runs only while something supplies its work — :meth:`schedule_runs` (adopter-surface Y12); ``[[lane]]``, ``[[mandate]]`` and ``[[rule]]`` are accepted as declarations and
         reported in :attr:`UnitHandle.not_enforced`. Drop the handle (or exit its context) to retract the whole
         unit; with ``lease_secs``, call :meth:`UnitHandle.heartbeat` within every window.
         """
@@ -1080,6 +1172,79 @@ class MyceliumAgent:
         }
         with self._pool.sync() as c:
             c.post("/gateway/rpc/respond", json=body).raise_for_status()
+
+    # ── Schedules (adopter-surface Y12) ─────────────────────────────────────
+
+    async def schedule_runs(
+        self, decl: "ScheduleDeclaration", on_status: "Optional[Any]" = None,
+    ) -> "AsyncIterator[ScheduleRun]":
+        """Declare a ``[[schedule]]`` through the gateway and receive its runs, for as long as you iterate.
+
+        The node this agent is connected to stands in the schedule's holder band for you: it is a candidate while the
+        stream is open, elected by rendezvous with every other node running the id, and hands you each run it decides
+        while holding. Answer every run with :meth:`schedule_ack` within one period: an acknowledged run is the slot
+        run; a run you never answer — the stream closed, the process went away — is traced ``unacknowledged`` and its
+        slot is **not** recorded, so the next holder decides it (on time, or as a missed run under ``on_missed``).
+        Leaving the iteration closes the stream and withdraws the candidacy::
+
+            async for run in agent.schedule_runs(ScheduleDeclaration("close", 60, ("ledger", "closer"))):
+                close_the_day(run.operation_id)
+                agent.schedule_ack(run)
+
+        The node must match ``holders`` — advertise that capability on it, e.g. with :meth:`declare_units`. Scope
+        ``schedule:run``. Refusals raise :class:`ScheduleRefusedError`. ``on_status``, if given, is called with each
+        change of what the node says when it hands out nothing — ``"not_eligible"`` (it does not match ``holders``),
+        ``"warming_up"``, ``"not_holder"``, ``"stood_down"``, …
+        """
+        import json as _json
+        url = f"{self._base_url}/gateway/schedules/run"
+        async with httpx.AsyncClient(timeout=None, headers=self._pool.headers, verify=self._pool.verify) as client:
+            async with aconnect_sse(client, "GET", url, params={"toml": decl.toml()}) as event_source:
+                resp = event_source.response
+                if resp.status_code >= 400:
+                    await resp.aread()
+                    if resp.status_code in (400, 409, 422):
+                        try:
+                            data = resp.json()
+                        except ValueError:
+                            data = {}
+                        raise ScheduleRefusedError(resp.status_code, str(data.get("error", "refused")), str(data.get("detail", "")))
+                    resp.raise_for_status()
+                async for event in event_source.aiter_sse():
+                    if event.event == "status":
+                        if on_status is not None:
+                            on_status(str(_json.loads(event.data).get("reason", "")))
+                        continue
+                    if event.event != "run":
+                        continue  # `declared`, the stream's first word
+                    d = _json.loads(event.data)
+                    yield ScheduleRun(
+                        run_id        = d["run_id"],
+                        schedule      = d["schedule"],
+                        slot          = int(d["slot"]),
+                        kind          = d["kind"],
+                        first_slot    = int(d["first_slot"]),
+                        slot_start_ms = int(d["slot_start_ms"]),
+                        operation_id  = d["operation_id"],
+                    )
+
+    def schedule_ack(self, run: "ScheduleRun", error: Optional[str] = None) -> None:
+        """Answer a run :meth:`schedule_runs` handed you: no ``error``, the slot is run; an ``error``, the work failed
+        (an on-time slot is retried at the next tick). Raises :class:`UnservedRunError` for a run not handed to this
+        principal, answered already, or ended without an answer."""
+        body: Dict[str, Any] = {"run_id": run.run_id, "ok": error is None}
+        if error is not None:
+            body["error"] = error
+        with self._pool.sync() as c:
+            resp = c.post("/gateway/schedules/ack", json=body)
+            if resp.status_code == 403:
+                try:
+                    data = resp.json()
+                except ValueError:
+                    data = {}
+                if data.get("error") == "unserved_run":
+                    raise UnservedRunError(run.run_id, str(data.get("message", "unserved_run")))
+            resp.raise_for_status()
 
     # ── Scatter-gather ──────────────────────────────────────────────────────
 

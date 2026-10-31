@@ -25,7 +25,7 @@
 //! | `schedule without holders` | no unit that runs a `[[schedule]]` — declares it, with no `runtime` and no `[hosts]` — declares a capability its `holders` filter matches: no host can hold it, so it never runs | error |
 //! | `schedule declared two ways` | two units declare one schedule id with a different period, phase, missed-run policy or holders; one id is one schedule fleet-wide, and its candidates refuse to hold while they disagree | error |
 //! | `schedule in a stem unit` | a unit with `[hosts]` or `[[serve]]` — a stem's — declares a `[[schedule]]`, which a stem refuses to start with | error |
-//! | `runtime with a schedule` | a unit an SDK agent loads (`runtime`) declares a `[[schedule]]`, which `POST /gateway/units/declare` refuses (422): the embedding application runs it | error |
+//! | `runtime with a schedule` | a unit an SDK agent loads (`runtime`) declares a `[[schedule]]`, which `POST /gateway/units/declare` refuses (422): an SDK agent runs one on `GET /gateway/schedules/run` (Y12), not in its unit | error |
 //! | `unauthorisable edge` | the requirer declares authority vocabulary, and no declared rule could admit the call as a skill or a tool — or the rule that would requires a mandate scope no mandate held by the requirer's principal enumerates | error |
 //! | `would bind by provisioning` | no deployed provider, but a hostable artifact matches | warning (error with `strict_deployed`) |
 //! | `would bind after acceptance` | no deployed provider, and the hostable artifact that matches is **proposed** (D20) — it loads only into a shadow lane until a reviewer accepts it | warning (error with `strict_deployed`) |
@@ -1067,7 +1067,7 @@ pub fn check(units: &[Unit], artifacts: &[(String, ArtifactDescription)], opts: 
                 severity: Severity::Error,
                 kind:     "runtime with a schedule".into(),
                 unit:     Some(u.name.clone()),
-                message:  "a unit with `runtime` is loaded by an SDK agent through POST /gateway/units/declare, which refuses [[schedule]] (422): the application that embeds the node runs it (GossipAgent::run_schedule)".into(),
+                message:  "a unit with `runtime` is loaded by an SDK agent through POST /gateway/units/declare, which refuses [[schedule]] (422): an SDK agent runs a schedule on GET /gateway/schedules/run, with the section, not in its unit".into(),
             });
         }
         if let Some(r) = &u.config.runtime

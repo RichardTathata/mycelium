@@ -1,5 +1,6 @@
 //! **Declared recurring work** (adopter-surface Y2, D15): a `[[schedule]]` in a unit file, run by the
-//! application that embeds the node.
+//! application that embeds the node — or, for an SDK agent, by the gateway's node standing in the band for the client
+//! (`GET /gateway/schedules/run`, Y12, which runs this loop with [`spawn_schedule`] and hands each run to the client).
 //!
 //! This is the voluntary singleton, not a scheduler. Every node that runs a schedule and matches its
 //! `holders` filter advertises itself a **candidate** (`cap/{node}/schedule/{id}`, carrying the period and phase it
@@ -108,6 +109,30 @@ pub fn id_problem(id: &str) -> Option<&'static str> {
         return Some("is reserved as a capability name");
     }
     None
+}
+
+/// The separator between a client's schedule id and its principal in a **client-scoped id** (adopter-surface Y12):
+/// `~`, which [`id_problem`] refuses in every declared id, so no application's `run_schedule` id is ever one.
+pub const CLIENT_SCOPE_SEPARATOR: char = '~';
+
+/// The id a gateway client's schedule runs under: `{id}~{principal}`, the principal as the gateway derived it,
+/// percent-encoded so that only `[A-Za-z0-9_-]` stays as itself — `/`, `:`, `#`, `.`, `~` and every other byte become
+/// `%XX`. The result is one key segment, never equal to an application's id (they hold no `~`), injective (the id holds
+/// no `~` and the encoding none either), and never ends in `.holder` (the encoded part holds no `.`), so one principal's
+/// candidacy cannot read as another's holding. Its ring, its candidacy and holding advertisements, its
+/// `sched/{scoped}/last/{node}` entries, its runs' idempotency keys and its trace target all carry it.
+pub fn client_scoped_id(id: &str, principal: &str) -> String {
+    let mut out = String::with_capacity(id.len() + 1 + principal.len());
+    out.push_str(id);
+    out.push(CLIENT_SCOPE_SEPARATOR);
+    for b in principal.bytes() {
+        if b.is_ascii_alphanumeric() || b == b'_' || b == b'-' {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
 }
 
 /// A validated schedule: the declaration in milliseconds, its holder filter converted.
@@ -358,6 +383,21 @@ fn declared(cap: &Capability) -> Option<(u64, u64)> {
     Some((int("period_ms")?, int("phase_ms")?))
 }
 
+/// Why a run's work did not complete: what [`spawn_schedule`]'s work returns. [`GossipAgent::run_schedule`]'s work
+/// fails with a `String`, which is [`Failed`](Self::Failed); the gateway's run stream (adopter-surface Y12) also
+/// reports a run it handed to a client that never acknowledged it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum RunFailure {
+    /// The work ran and failed: an on-time slot is retried at the next tick.
+    Failed(String),
+    /// The run was handed on and no answer came back — the client went away. Nothing is known about whether it ran,
+    /// so the slot is **not** recorded: the next holder, or this one's next tick, decides it as a slot not yet run
+    /// (on time, or as a missed run under the policy). Traced `unacknowledged`; this node withdraws its holding.
+    /// Constructed by the gateway's run stream only, so a build without `gateway` never makes one.
+    #[cfg_attr(not(feature = "gateway"), allow(dead_code))]
+    Unacknowledged(String),
+}
+
 impl crate::GossipAgent {
     /// Run a `[[schedule]]` on this node: take part in electing its holder, and while holding, run `work` for
     /// each slot under the missed-run policy — `mycelium::schedule` has the whole contract. `work` returns
@@ -375,41 +415,116 @@ impl crate::GossipAgent {
         F: Fn(ScheduledRun) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<(), String>> + Send + 'static,
     {
-        let schedule = Schedule::from_decl(decl)?;
-        if self.schedules_running.pin().insert(Arc::clone(&schedule.id), ()).is_some() {
-            return Err(GossipError::InvalidField { field: "schedule.id", reason: format!(
-                "{:?}: this node already runs a schedule with this id — one loop per id per node", decl.id
-            ) });
-        }
-        let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
-        let runs = Arc::new(AtomicU64::new(0));
-        let failures = Arc::new(AtomicU64::new(0));
-        let ctx = Arc::clone(&self.task_ctx);
-        let (caps, kv, me) = (self.capabilities(), self.kv(), self.node_id().clone());
-        let running = Arc::clone(&self.schedules_running);
-        let mut shutdown_rx = self.shutdown_tx.subscribe();
-        let (r, f) = (Arc::clone(&runs), Arc::clone(&failures));
-        self.spawn_task(async move {
-            let id = Arc::clone(&schedule.id);
-            // Frees the id however the loop ends — a stop, a shutdown, or `work` panicking through it.
-            let _free = FreeId { running, id: Arc::clone(&id) };
-            let started_ns = mycelium_core::sim_seam::mono_now_ns();
-            let mut runner = Runner { schedule, caps, kv, me, ctx, started_ns, candidacy: None, holding: None, was: None, ignored: 0, runs: r, failures: f };
-            let mut ticker = mycelium_core::sim_seam::interval_ms(
-                format!("sched/{id}"), check_interval_ms(runner.schedule.period_ms), tokio::time::MissedTickBehavior::Skip,
-            );
-            let mut stop_rx = stop_rx;
-            loop {
-                tokio::select! {
-                    _ = &mut stop_rx => break,
-                    _ = shutdown_rx.changed() => break,
-                    _ = ticker.tick() => runner.tick(&work).await,
-                }
-            }
-            drop(runner);
-        });
-        Ok(ScheduleHandle { stop: Some(stop_tx), runs, failures })
+        let work = Arc::new(work);
+        spawn_schedule(&self.task_ctx, decl, LoopOptions::default(), move |run| {
+            let fut = work(run);
+            async move { fut.await.map_err(RunFailure::Failed) }
+        })
+        .map_err(SpawnError::into_gossip)
     }
+}
+
+/// Called with each change of what a loop says when it runs nothing (`not_eligible`, `warming_up`, `not_holder`,
+/// `stood_down`, …): the gateway's run stream forwards it to the client as a `status` event.
+pub(crate) type StatusFn = Arc<dyn Fn(&'static str) + Send + Sync>;
+
+/// How a loop behaves beyond [`GossipAgent::run_schedule`]'s contract. The default is that contract.
+#[derive(Default, Clone)]
+pub(crate) struct LoopOptions {
+    /// **Stand down on a stall** (the gateway's run stream, Y12): work that overruns its period withdraws this node's
+    /// candidacy for [`stand_down_ms`], so another node's candidate wins the ring rather than this one re-holding at
+    /// its next tick. An application's own work keeps `run_schedule`'s rule (it re-holds, and says `work_overran`).
+    pub stand_down_on_stall: bool,
+    pub on_status: Option<StatusFn>,
+    /// **Run under a client's scope** (Y12): the principal the gateway derived for the client. The declaration is
+    /// validated under its own id, then run under [`client_scoped_id`], so a client reaches neither an application's
+    /// schedule nor another principal's of the same id.
+    pub client_principal: Option<Arc<str>>,
+}
+
+/// Why [`spawn_schedule`] did not start a loop.
+#[derive(Debug)]
+pub(crate) enum SpawnError {
+    /// The declaration, refused by the unit-file loader's rules.
+    Invalid(GossipError),
+    /// This node already runs a loop for the id.
+    Running(GossipError),
+}
+
+impl SpawnError {
+    fn into_gossip(self) -> GossipError {
+        match self {
+            SpawnError::Invalid(e) | SpawnError::Running(e) => e,
+        }
+    }
+}
+
+/// The longest a stalled client stream's node stands down, whatever the period: ten minutes, so a daily or weekly
+/// schedule is not stood down for days.
+pub const MAX_STAND_DOWN_MS: u64 = 600_000;
+
+/// How long a stalled client stream's node stands down: ten periods, and at least twice the warm-up, so a peer's
+/// candidacy is heard, warms up and holds before this node is a candidate again — at most [`MAX_STAND_DOWN_MS`]. It
+/// stands down only while another candidate is in its view; the sole candidate keeps holding, so a late answer costs
+/// that one slot.
+pub fn stand_down_ms(period_ms: u64) -> u64 {
+    (10 * period_ms).max(2 * warm_up_ms(period_ms)).min(MAX_STAND_DOWN_MS)
+}
+
+/// The schedule loop, on the node `ctx` belongs to: [`GossipAgent::run_schedule`]'s body, shared with the gateway's
+/// run stream (`GET /gateway/schedules/run`, Y12), which stands this node in the holder band for a client.
+pub(crate) fn spawn_schedule<F, Fut>(
+    ctx: &Arc<crate::agent::TaskCtx>,
+    decl: &ScheduleDecl,
+    options: LoopOptions,
+    work: F,
+) -> Result<ScheduleHandle, SpawnError>
+where
+    F: Fn(ScheduledRun) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = Result<(), RunFailure>> + Send + 'static,
+{
+    let mut schedule = Schedule::from_decl(decl).map_err(SpawnError::Invalid)?;
+    if let Some(principal) = &options.client_principal {
+        schedule.id = Arc::from(client_scoped_id(&decl.id, principal).as_str());
+    }
+    if ctx.schedules_running.pin().insert(Arc::clone(&schedule.id), ()).is_some() {
+        return Err(SpawnError::Running(GossipError::InvalidField { field: "schedule.id", reason: format!(
+            "{:?}: this node already runs a schedule with this id — one loop per id per node", decl.id
+        ) }));
+    }
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
+    let runs = Arc::new(AtomicU64::new(0));
+    let failures = Arc::new(AtomicU64::new(0));
+    let caps = crate::CapabilitiesHandle { ctx: Arc::clone(ctx) };
+    let kv = crate::KvHandle::from_core(Arc::clone(&ctx.core));
+    let me = ctx.node_id.clone();
+    let running = Arc::clone(&ctx.schedules_running);
+    let mut shutdown_rx = ctx.shutdown_tx.subscribe();
+    let (r, f) = (Arc::clone(&runs), Arc::clone(&failures));
+    let loop_ctx = Arc::clone(ctx);
+    ctx.spawn_task(async move {
+        let id = Arc::clone(&schedule.id);
+        // Frees the id however the loop ends — a stop, a shutdown, or `work` panicking through it.
+        let _free = FreeId { running, id: Arc::clone(&id) };
+        let started_ns = mycelium_core::sim_seam::mono_now_ns();
+        let mut runner = Runner {
+            schedule, caps, kv, me, ctx: loop_ctx, started_ns, candidacy: None, holding: None, was: None, ignored: 0,
+            runs: r, failures: f, options, stood_down_until_ns: None,
+        };
+        let mut ticker = mycelium_core::sim_seam::interval_ms(
+            format!("sched/{id}"), check_interval_ms(runner.schedule.period_ms), tokio::time::MissedTickBehavior::Skip,
+        );
+        let mut stop_rx = stop_rx;
+        loop {
+            tokio::select! {
+                _ = &mut stop_rx => break,
+                _ = shutdown_rx.changed() => break,
+                _ = ticker.tick() => runner.tick(&work).await,
+            }
+        }
+        drop(runner);
+    });
+    Ok(ScheduleHandle { stop: Some(stop_tx), runs, failures })
 }
 
 /// Removes a schedule's id from the node's running set when the loop's task ends, by any path.
@@ -440,6 +555,9 @@ struct Runner {
     ignored: usize,
     runs: Arc<AtomicU64>,
     failures: Arc<AtomicU64>,
+    options: LoopOptions,
+    /// Set when a stalled client's run overran ([`LoopOptions::stand_down_on_stall`]): no candidacy until then.
+    stood_down_until_ns: Option<u64>,
 }
 
 impl Runner {
@@ -455,6 +573,9 @@ impl Runner {
                 .node(self.me.to_string(), 0).target(self.schedule.id.to_string()).view(ViewStatus::Unknown).no_parent().no_effect();
             for i in inputs { rec = rec.input(i); }
             self.record(rec);
+            if let Some(on_status) = &self.options.on_status {
+                on_status(reason);
+            }
         }
         self.was = Some(reason);
     }
@@ -462,9 +583,23 @@ impl Runner {
     async fn tick<F, Fut>(&mut self, work: &F)
     where
         F: Fn(ScheduledRun) -> Fut,
-        Fut: Future<Output = Result<(), String>>,
+        Fut: Future<Output = Result<(), RunFailure>>,
     {
         let s = self.schedule.clone();
+        if let Some(until) = self.stood_down_until_ns {
+            // Only while another candidate is in view: alone, standing down would run nothing at all.
+            let others = self.caps.resolve(&CapFilter::new(CANDIDATE_NS, s.id.as_ref())).iter().filter(|(n, _)| *n != self.me).count();
+            if others > 0 && mycelium_core::sim_seam::mono_now_ns() < until {
+                self.candidacy = None;
+                self.holding = None;
+                return self.say(OutcomeKind::NoAction, "stood_down", vec![InputSnapshot::new(
+                    "a run of this node's client overran its period while another candidate was in view: its candidacy is withdrawn for the stand-down",
+                    format!("stand_down_ms={} other_candidates={others}", stand_down_ms(s.period_ms)), Provenance::Gossiped)]);
+            }
+            // Back from a stand-down: a fresh warm-up, so the peer that held meanwhile is heard before this node holds.
+            self.stood_down_until_ns = None;
+            self.started_ns = mycelium_core::sim_seam::mono_now_ns();
+        }
         let now = mycelium_core::sim_seam::wall_now_ms();
         let eligible = self.caps.resolve(&s.holders).iter().any(|(n, _)| *n == self.me);
         if eligible && self.candidacy.is_none() {
@@ -563,7 +698,8 @@ impl Runner {
             };
             let (kind_out, reason_out) = match &outcome {
                 Some(Ok(())) => (OutcomeKind::Action, reason),
-                Some(Err(_)) => (OutcomeKind::Deferral, "work_failed"),
+                Some(Err(RunFailure::Failed(_))) => (OutcomeKind::Deferral, "work_failed"),
+                Some(Err(RunFailure::Unacknowledged(_))) => (OutcomeKind::Deferral, "unacknowledged"),
                 None => (OutcomeKind::Deferral, "work_overran"),
             };
             let mut rec = DecisionRecord::new(RUN_RULE, 1, "schedule tick", kind_out, reason_out)
@@ -579,14 +715,38 @@ impl Runner {
                     self.runs.fetch_add(1, Ordering::Relaxed);
                     self.record(rec.effect(format!("work done under {key}; this node's sched/{}/last = {written}", s.id)));
                 }
-                Some(Err(e)) => {
+                Some(Err(RunFailure::Failed(e))) => {
                     self.failures.fetch_add(1, Ordering::Relaxed);
                     let then = if kind == RunKind::OnTime { "retried at the next tick" } else { "not retried: the runs after it go on" };
                     self.record(rec.effect(format!("work failed under {key}: {e}; {then}")));
                 }
+                Some(Err(RunFailure::Unacknowledged(why))) => {
+                    // Handed on and never answered: whether it ran is unknown, so the slot is not recorded. The work
+                    // reports this only when its stream has closed, and the stream owns the loop's handle, so the
+                    // loop ends next — dropping the runner withdraws the holding and the candidacy.
+                    self.failures.fetch_add(1, Ordering::Relaxed);
+                    self.record(rec.effect(format!(
+                        "the run under {key} was handed on and not acknowledged ({why}); the slot is not recorded, and the loop ends with its stream"
+                    )));
+                    return;
+                }
                 None => {
                     self.failures.fetch_add(1, Ordering::Relaxed);
-                    self.record(rec.effect(format!("work under {key} overran its deadline of {} ms and was abandoned; this node withdraws its holding until its next tick", s.period_ms)));
+                    // Read only for a client's loop: an application's loop makes no read here, so a recording of one
+                    // replays draw for draw.
+                    let others = if self.options.stand_down_on_stall {
+                        self.caps.resolve(&CapFilter::new(CANDIDATE_NS, s.id.as_ref())).iter().filter(|(n, _)| *n != self.me).count()
+                    } else {
+                        0
+                    };
+                    let then = if self.options.stand_down_on_stall && others > 0 {
+                        self.stood_down_until_ns = Some(mycelium_core::sim_seam::mono_now_ns()
+                            .saturating_add(stand_down_ms(s.period_ms).saturating_mul(1_000_000)));
+                        format!("this node stands down for {} ms, so another candidate holds", stand_down_ms(s.period_ms))
+                    } else {
+                        "this node withdraws its holding until its next tick".to_string()
+                    };
+                    self.record(rec.effect(format!("work under {key} overran its deadline of {} ms and was abandoned; {then}", s.period_ms)));
                     self.holding = None;
                     self.candidacy = None;
                     return;

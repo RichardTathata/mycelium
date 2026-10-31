@@ -32,10 +32,12 @@ TOML needs one key per line. `ns = "a"; name = "b"` is not valid TOML.
 | `[[presence]]` | `presence unhostable`, `presence bands overlap` | a standing want (needs `[hosts]`) | refused, **422** |
 | `[[activation]]` | not read | run after a blob is placed, confined when it names `[activation.confine]` | refused, **422** |
 | `[[serve]]` | counted as an offer | registers a routable skill (needs feature `llm`) | refused, **422** |
-| `[[schedule]]` | `schedule without holders`, `schedule declared two ways`, `schedule in a stem unit`, `runtime with a schedule` | refused (the work is the embedding application's) | refused, **422** (`schedule section`) |
+| `[[schedule]]` | `schedule without holders`, `schedule declared two ways`, `schedule in a stem unit`, `runtime with a schedule` | refused (the work is the embedding application's) | refused, **422** (`schedule section`): run it on `GET /gateway/schedules/run` instead |
 
-An SDK agent hosts nothing, so the four hosting sections are a stem's. A `[[schedule]]` is neither's: the
-application that embeds the node runs it with `GossipAgent::run_schedule`, supplying the work. The route's guide is
+An SDK agent hosts nothing, so the four hosting sections are a stem's. A `[[schedule]]` is not declared with a unit
+at all: it runs while something supplies its work — the application that embeds the node, with
+`GossipAgent::run_schedule`, or an SDK agent, which sends the section on `GET /gateway/schedules/run` and receives its
+runs while the stream is open (adopter-surface Y12; [feature page](../features/recurring-work.md)). The route's guide is
 [guide 10](../guide/10-language-bridges.md). The `mycelium` node binary does not read the unit file; an
 application that embeds the library can run the `[[capability]]` probe loop with
 `run_capability_probes`.
@@ -278,7 +280,8 @@ min_providers = 2
 ## `[[schedule]]`
 
 Declared recurring work (adopter-surface Y2): one holder per schedule runs each slot. Every node that runs the
-schedule (`GossipAgent::run_schedule`, in the embedding application) and advertises a capability matching
+schedule (`GossipAgent::run_schedule` in the embedding application, or the gateway's run stream for an SDK agent,
+`GET /gateway/schedules/run`) and advertises a capability matching
 `holders` is a candidate, advertising the period and phase it declares; after a warm-up of three lease refreshes,
 the ring `sched/{id}`'s rendezvous winner among the live candidates holds, and its holding, advertised as
 `schedule/{id}.holder`, evaporates when it stops re-asserting it — the lease. A run is given one period to finish,

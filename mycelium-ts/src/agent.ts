@@ -14,6 +14,8 @@ import {
   LogEntry,
   MailboxEvent,
   RpcRequest,
+  ScheduleDeclaration,
+  ScheduleRun,
   Signal,
   CommitResult,
 } from "./types";
@@ -87,6 +89,69 @@ export class ServeEvictedError extends ProtectedKindError {
     super(kind, message);
     this.name = "ServeEvictedError";
   }
+}
+
+/**
+ * The gateway refused a schedule run stream (adopter-surface Y12): the declaration is not one valid `[[schedule]]`
+ * (`status` 400 or 422, `detail` naming what), or this node already runs the id (`status` 409, `schedule_running`).
+ */
+export class ScheduleRefusedError extends Error {
+  constructor(public readonly status: number, public readonly error: string, public readonly detail: string) {
+    super(`schedule refused (${status} ${error}): ${detail}`);
+    this.name = "ScheduleRefusedError";
+  }
+}
+
+/**
+ * `scheduleAck` was refused (HTTP 403 `unserved_run`): the run was not handed to this principal, was answered
+ * already, or ended without an answer — past its period, or after the stream closed — and nothing was recorded.
+ */
+export class UnservedRunError extends Error {
+  readonly status = 403;
+  constructor(public readonly runId: string, message: string) {
+    super(message);
+    this.name = "UnservedRunError";
+  }
+}
+
+/** The `[[schedule]]` TOML a {@link ScheduleDeclaration} declares — what `scheduleRuns` sends. */
+export function scheduleToml(decl: ScheduleDeclaration): string {
+  const q = tomlBasicString;
+  const lines = [
+    "[[schedule]]",
+    `id = ${q(decl.id)}`,
+    `period_secs = ${wholeNumber(decl.periodSecs, "periodSecs")}`,
+    `phase_secs = ${wholeNumber(decl.phaseSecs ?? 0, "phaseSecs")}`,
+    `on_missed = ${q(decl.onMissed ?? "skip")}`,
+    "[schedule.holders]",
+    `ns = ${q(decl.holders.ns)}`,
+    `name = ${q(decl.holders.name)}`,
+  ];
+  return lines.join("\n") + "\n";
+}
+
+/**
+ * `value` as a TOML basic string (TOML 1.0 § String): `"` and `\\` escaped, the controls TOML forbids raw (U+0000–U+001F
+ * and U+007F) as their short escape or `\\uXXXX`, every other character — a non-BMP one included — written as itself.
+ * Not JSON's escaping: `JSON.stringify` leaves U+007F raw, which TOML refuses. A lone surrogate is written raw, which
+ * no TOML reader accepts; every value it writes for the gateway is ASCII-checked server-side, so such a value is
+ * refused there either way.
+ */
+export function tomlBasicString(value: string): string {
+  const short: Record<string, string> = { "\b": "\\b", "\t": "\\t", "\n": "\\n", "\f": "\\f", "\r": "\\r", '"': '\\"', "\\": "\\\\" };
+  let out = '"';
+  for (const ch of value) {
+    const code = ch.codePointAt(0)!;
+    if (short[ch] !== undefined) out += short[ch];
+    else if (code < 0x20 || code === 0x7f) out += "\\u" + code.toString(16).toUpperCase().padStart(4, "0");
+    else out += ch;
+  }
+  return out + '"';
+}
+
+function wholeNumber(v: number, field: string): number {
+  if (!Number.isInteger(v) || v < 0) throw new RangeError(`${field} must be a whole number of seconds, got ${v}`);
+  return v;
 }
 
 /**
@@ -369,7 +434,7 @@ export class MyceliumAgent {
    * (design-time-tooling.md Q2). Pass the file's **text** — read it yourself (`fs.readFile`); the node
    * parses and validates it with its own loader, so this SDK carries no TOML parser. Hosting sections
    * (`[hosts]`, `[[presence]]`, `[[activation]]`, `[[serve]]`) are a stem's and are refused (422), as is
-   * `[[schedule]]`, which the application embedding the node runs. The handle's
+   * `[[schedule]]`, which runs only while something supplies its work: {@link runSchedule} (adopter-surface Y12). The handle's
    * `drop()` retracts the whole unit; with `leaseSecs`, call `heartbeat()` within every window.
    */
   async declareUnits(
@@ -709,6 +774,98 @@ export class MyceliumAgent {
       sender: request.sender,
       result_b64: b64(result),
     });
+  }
+
+  // ── Schedules (adopter-surface Y12) ─────────────────────────────────────────
+
+  /**
+   * Declare a `[[schedule]]` through the gateway and receive its runs, for as long as you read them. The node this
+   * agent is connected to stands in the schedule's holder band for you: it is a candidate while the stream is open,
+   * elected by rendezvous with every other node running the id, and hands you each run it decides while holding.
+   * Answer every run with {@link scheduleAck} within one period: an acknowledged run is the slot run; a run you never
+   * answer — the stream closed, the process went away — is traced `unacknowledged` and its slot is **not** recorded,
+   * so the next holder decides it (on time, or as a missed run under `onMissed`). Ending the iteration (or `signal`)
+   * closes the stream and withdraws the candidacy.
+   *
+   * The node must match `holders` — advertise that capability on it, e.g. with {@link declareUnits}. Scope
+   * `schedule:run`. Refusals throw {@link ScheduleRefusedError}.
+   */
+  async *scheduleRuns(
+    decl: ScheduleDeclaration,
+    options: { signal?: AbortSignal; onStatus?: (reason: string) => void } = {},
+  ): AsyncGenerator<ScheduleRun> {
+    const url = this._sseUrl("/gateway/schedules/run", { toml: scheduleToml(decl) });
+    const refusal = (status: number, body: unknown): Error | undefined => {
+      const b = body as { error?: string; detail?: string } | undefined;
+      if (status === 400 || status === 409 || status === 422) {
+        return new ScheduleRefusedError(status, String(b?.error ?? "refused"), String(b?.detail ?? ""));
+      }
+      return undefined;
+    };
+    type Raw = {
+      run_id: string; schedule: string; slot: number; kind: ScheduleRun["kind"]; first_slot: number;
+      slot_start_ms: number; operation_id: string;
+    };
+    const events = sseStream<ScheduleRun | null>({ url, headers: this.auth }, (data, event) => {
+      // What the node says when it hands out nothing — `not_eligible` (it does not match `holders`), `warming_up`,
+      // `not_holder`, `stood_down`, … — once per change.
+      if (event === "status") {
+        options.onStatus?.(String((JSON.parse(data) as { reason?: string }).reason ?? ""));
+        return null;
+      }
+      if (event !== "run") return null; // `declared`, the stream's first word
+      const r = JSON.parse(data) as Raw;
+      return {
+        runId: r.run_id, schedule: r.schedule, slot: r.slot, kind: r.kind, firstSlot: r.first_slot,
+        slotStartMs: r.slot_start_ms, operationId: r.operation_id,
+      };
+    }, { refusal, signal: options.signal });
+    for await (const run of events) {
+      if (run) yield run;
+    }
+  }
+
+  /**
+   * Answer a run {@link scheduleRuns} handed you: no `error`, the slot is run; an `error`, the work failed (an on-time
+   * slot is retried at the next tick). Throws {@link UnservedRunError} for a run not handed to this principal, answered
+   * already, or ended without an answer.
+   */
+  async scheduleAck(run: ScheduleRun, error?: string): Promise<void> {
+    try {
+      await this._post("/gateway/schedules/ack", error === undefined ? { run_id: run.runId, ok: true } : { run_id: run.runId, ok: false, error });
+    } catch (e) {
+      if (e instanceof Error && / 403 /.test(e.message) && e.message.includes("unserved_run")) {
+        throw new UnservedRunError(run.runId, e.message);
+      }
+      throw e;
+    }
+  }
+
+  /**
+   * Run `work` for each run of a schedule, answering each: resolved, the slot is run; thrown, the work failed. Returns
+   * when the stream ends or `signal` aborts. An answer that does not land — refused (`UnservedRunError`: the run ended
+   * past its period) or lost to the network — is a missed run, not the end of the schedule: the node did not record
+   * the slot and decides it as not yet run, and this keeps reading. `onAckError` is told of each. See
+   * {@link scheduleRuns}.
+   */
+  async runSchedule(
+    decl: ScheduleDeclaration,
+    work: (run: ScheduleRun) => Promise<void> | void,
+    options: { signal?: AbortSignal; onStatus?: (reason: string) => void; onAckError?: (run: ScheduleRun, error: unknown) => void } = {},
+  ): Promise<void> {
+    for await (const run of this.scheduleRuns(decl, options)) {
+      let failure: string | undefined;
+      try {
+        await work(run);
+      } catch (e) {
+        failure = e instanceof Error ? e.message : String(e);
+      }
+      try {
+        await this.scheduleAck(run, failure);
+      } catch (e) {
+        options.onAckError?.(run, e);
+      }
+    }
   }
 
   /**

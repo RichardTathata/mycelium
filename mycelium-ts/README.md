@@ -244,6 +244,31 @@ for await (const req of agent.rpcServe("echo")) {
 
 Sends a reply to an in-flight RPC request.
 
+#### `scheduleRuns(decl, { signal?, onStatus? }) → AsyncGenerator<ScheduleRun>` / `scheduleAck(run, error?)` / `runSchedule(decl, work, { signal?, onStatus?, onAckError? })`
+
+Declare a `[[schedule]]` through the gateway and receive its runs (adopter-surface Y12, scope `schedule:run`). The node
+this agent is connected to stands in the schedule's holder band while the stream is open, so it must match `holders`:
+
+```typescript
+await agent.advertiseCapability("ledger", "closer", { intervalSecs: 5 }); // put the node in the band
+await agent.runSchedule(
+  { id: "close-day", periodSecs: 86_400, onMissed: "run_once", holders: { ns: "ledger", name: "closer" } },
+  async (run) => closeTheDay(run.operationId), // the key every effect of the run carries
+);
+```
+
+Answer every run within one period (`runSchedule` does: resolved is done, thrown is the work's failure). A run you
+never answer — the stream closed, the process went away — is traced `unacknowledged` and its slot is not recorded, so
+the next holder decides it. A second answer, or one from another principal, throws `UnservedRunError`; a declaration
+the loader refuses, or an id the node already runs, throws `ScheduleRefusedError`. A static-token gateway needs `gateway_identity_issuer`
+set fleet-wide, or the stream is refused (`ScheduleRefusedError`, `issuer_not_fleet_wide`). In `runSchedule` an answer that
+does not land (refused, or lost to the network) is a missed run, given to `onAckError`, and the schedule goes on. A
+client that stays connected but stalls makes its node stand down for ten periods (at most ten minutes) so another node
+holds — only while another candidate is in view. `onStatus` is
+told why a stream hands out nothing (`not_eligible`: the node does not match `holders`; `warming_up`; `not_holder`;
+`stood_down`). A partition runs a slot on each side under one key: carry `operationId` to a destination that
+deduplicates. Values are written as TOML basic strings (`tomlBasicString`).
+
 #### `scatterGather(targets, method, payload?, options?) → Promise<Array<{sender, result}>>`
 
 Fan-out RPC to multiple targets; waits for at least `minOk` replies, and throws `TimeoutError` when
@@ -498,9 +523,8 @@ chain. A malformed value is refused (`request_malformed`; `400` on `set`). Subst
 `loadEveAgent(dir)` reads an [Eve](https://www.npmjs.com/package/eve) `agent/` directory installed beside the one
 `eve` version the loader pins, **0.80.0**, and refuses a directory beside any other version (adopter-surface Y6). It is a
 demonstration, not a compatibility promise. Every slot of the directory has a status in `EVE_SLOTS`, and a slot the
-loader does not load is refused by name: `EveRefusedError.refused` lists every one. `schedules/`, `sandbox/` and
-`hooks/` are among them, and so is a tool with `approval`, which points to the `[[rule]]` with `requires_grant` to
-declare instead.
+loader does not load is refused by name: `EveRefusedError.refused` lists every one. `sandbox/` and `hooks/` are among
+them, and so is a tool with `approval`, which points to the `[[rule]]` with `requires_grant` to declare instead.
 
 - **Tools:** `serveEveTools(agent)` serves the tools as an MCP server on loopback. A node bridges it
   (`connect_mcp_server`), so the fleet's `/mcp` door decides each call before the tool's `execute` runs. Arguments are
@@ -508,6 +532,12 @@ declare instead.
 - **Instructions and skills:** `declareEveAgent(agent, { mycelium, prompts })` declares the unit (`eveUnitToml`,
   `runtime = "typescript"`) and writes the instructions and each Markdown skill as a prompt skill
   `<agent>/<name>`.
+- **Schedules (Y12):** each `schedules/<name>.md` or `.ts` whose cron is a period and a phase in UTC (`cronAsPeriod`)
+  is a schedule `<agent>.<name>`; `runEveSchedules(agent, mycelium, { onMarkdown, signal })` runs them through the
+  gateway (`scheduleRuns`, below), the node in the band the unit's `eve/<agent>` capability names. A `run` handler is
+  called with Eve's `waitUntil` and a `to` that throws (channels are not built); a Markdown schedule's prompt goes to
+  `onMarkdown`, without which its schedules are refused by name. Another cron, a nested schedule or a key the loader
+  does not read is refused by name.
 
 Importing a `.ts` tool uses Node's own type stripping, and Eve 0.80.0 needs Node 24. The run, and the table of every
 slot, are in [`examples/eve_weather/README.md`](../examples/eve_weather/README.md).

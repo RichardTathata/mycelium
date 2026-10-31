@@ -561,6 +561,11 @@ pub(crate) struct TaskCtx {
     /// Layers I + II substrate context. Will live in `mycelium-core` (M1).
     pub(crate) core: Arc<CoreCtx>,
 
+    /// The schedules this node runs — `GossipAgent::run_schedule` (adopter-surface Y2) and the gateway's run stream
+    /// for a client (Y12) — by id: a second loop for one id would share its candidacy and tombstone it on drop, so it
+    /// is refused.
+    pub(crate) schedules_running: Arc<papaya::HashMap<Arc<str>, ()>>,
+
     // ── Capability subsystem ─────────────────────────────────────────────────────
     // The soft-state readiness flag (formerly `caps_advertised`) moved to
     // `CoreCtx::soft_state_advertised` in v2 M3 — the persist loop that flips it is
@@ -1002,9 +1007,6 @@ pub struct GossipAgent {
     /// which degrades RPC-heavy Individual-scoped traffic to flood-relay; a pinned peer keeps a
     /// direct route so those RPCs (e.g. tuple-space secondary → primary) don't time out (#150).
     pub(super) pinned_peers: Arc<papaya::HashMap<NodeId, ()>>,
-    /// The schedules this node runs (`GossipAgent::run_schedule`, adopter-surface Y2), by id: a second loop for one id
-    /// would share its candidacy and tombstone it on drop, so it is refused.
-    pub(crate) schedules_running: Arc<papaya::HashMap<Arc<str>, ()>>,
     /// Cached count of live (non-tombstone) store entries. Updated by the GC task;
     /// up to one GC interval stale but O(1) to read via system_stats().
     pub(super) live_entries: Arc<AtomicUsize>,
@@ -1364,6 +1366,7 @@ impl GossipAgent {
             #[cfg(feature = "consensus")]
             acceptor_records: std::sync::Mutex::new(()),
             core: Arc::clone(&core_ctx),
+            schedules_running: Arc::new(papaya::HashMap::new()),
             bulk_transport:  Arc::new(bulk::BulkTransport::new(
                 config.http_port.unwrap_or(0),
                 std::time::Duration::from_secs(config.bulk_fetch_timeout_secs),
@@ -1506,7 +1509,6 @@ impl GossipAgent {
             gossip_rxs: std::sync::Mutex::new(Some(gossip_rxs_inner)),
             peer_writers: Arc::new(papaya::HashMap::new()),
             pinned_peers: Arc::new(papaya::HashMap::new()),
-            schedules_running: Arc::new(papaya::HashMap::new()),
             live_entries: Arc::new(AtomicUsize::new(0)),
             state: AtomicU8::new(AgentState::Idle as u8),
             shutdown_tx: shutdown_tx_arc,

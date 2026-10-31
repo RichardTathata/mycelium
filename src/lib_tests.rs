@@ -189,6 +189,7 @@ fn spawn_handler_with(
         #[cfg(feature = "consensus")]
         acceptor_records: std::sync::Mutex::new(()),
         core: core_ctx,
+        schedules_running: Arc::new(papaya::HashMap::new()),
         bulk_transport: Arc::new(BulkTransport::new(0, Duration::from_secs(5), 64)),
         rpc_pending: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         rpc_reply_sender_mismatches: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -4266,6 +4267,7 @@ async fn test_subscribe_notified_via_gossip() {
         #[cfg(feature = "consensus")]
         acceptor_records: std::sync::Mutex::new(()),
             core: core_ctx,
+            schedules_running: Arc::new(papaya::HashMap::new()),
             bulk_transport: Arc::new(BulkTransport::new(0, Duration::from_secs(5), 64)),
             rpc_pending: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             rpc_reply_sender_mismatches: Arc::new(std::sync::atomic::AtomicU64::new(0)),

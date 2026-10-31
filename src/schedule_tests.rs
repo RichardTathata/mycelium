@@ -385,7 +385,7 @@ async fn a_run_recorded_too_far_ahead_is_left_out_said_once_and_the_schedule_run
 async fn a_panicking_work_frees_the_id() {
     let (a, _sink, _band) = banded(vec![], alloc_port()).await;
     let h = a.run_schedule(&decl("close", 1, MissedRunPolicy::Skip), |_| async { panic!("work panicked") }).unwrap();
-    let free = || a.schedules_running.pin().get("close").is_none();
+    let free = || a.task_ctx.schedules_running.pin().get("close").is_none();
     assert!(poll_until(free, 15_000).await, "the panic unwound the loop and freed the id");
     drop(h);
     assert!(a.run_schedule(&decl("close", 1, MissedRunPolicy::Skip), |_| async { Ok(()) }).is_ok());

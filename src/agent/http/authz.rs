@@ -299,6 +299,10 @@ pub(super) fn required_scope(method: &axum::http::Method, matched_path: &str) ->
         // `mesh:write` here is closed (2.18.2).
         "/gateway/rpc/serve/{kind}" => "mesh:serve",
         "/gateway/rpc/respond"     => "mesh:serve",
+        // Adopter-surface Y12: a client's schedule run stream makes this node a candidate in the schedule's holder
+        // band and hands it the runs — its own scope, not `mesh:serve`, which serves calls and holds nothing.
+        "/gateway/schedules/run"   => "schedule:run",
+        "/gateway/schedules/ack"   => "schedule:run",
         "/gateway/scatter"         => "mesh:write",
         "/gateway/mailbox/deliver" => "mesh:write",
         "/gateway/mailbox/{kind}"  => "mesh:read",
