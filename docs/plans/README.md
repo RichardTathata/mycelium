@@ -160,7 +160,7 @@ future contributor needs so they don't re-litigate a settled choice — lives he
 
 ## Proposed — not yet started
 
-[`external-review-2026-10-31.md`](external-review-2026-10-31.md) — **the external code security review of 2026-10-31** (agreed with the maintainer 2026-10-31, rev 0.1; nine rows, none started): the review's seven findings, all verified true at `d656f50c` — three contradict a claim the repository makes — plus the two the verification added (the grant restart gate proves the exit snapshot, not the WAL; the audit warnings are accepted nowhere in the open); R1–R4 before the next MINOR. The review itself is vendored at [`external/2026-10-31-code-security-review.md`](external/2026-10-31-code-security-review.md).
+[`external-review-2026-10-31.md`](external-review-2026-10-31.md) — **the external code security review of 2026-10-31** (agreed with the maintainer 2026-10-31, rev 0.2; nine rows, R1–R4 started): the review's seven findings, all verified true at `d656f50c` — three contradict a claim the repository makes — plus the two the verification added (the grant restart gate proves the exit snapshot, not the WAL; the audit warnings are accepted nowhere in the open); R1–R4 before the next MINOR. The review itself is vendored at [`external/2026-10-31-code-security-review.md`](external/2026-10-31-code-security-review.md).
 
 [`feature-pages.md`](feature-pages.md) — **feature pages** (proposed, rev 0.2; agreed with the maintainer
 2026-10-19, not started; begins after v2.36.0). One short page per feature: what it is, when to use it, the settings

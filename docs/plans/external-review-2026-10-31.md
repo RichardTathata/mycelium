@@ -1,6 +1,6 @@
 # The external code security review of 2026-10-31 — verification and repairs
 
-**Status:** agreed with the maintainer on 2026-10-31, rev 0.1. Nine rows, none started. The review is vendored at
+**Status:** agreed with the maintainer on 2026-10-31, rev 0.2 (rev 0.2 takes the reviewer's two qualifications of the verification, 2026-10-31: F4 is P1 regardless of token lifetime, and F3's window is unmeasured). Nine rows; R1, R2+R3 and R4 started. The review is vendored at
 [`external/2026-10-31-code-security-review.md`](external/2026-10-31-code-security-review.md); it examined commit
 `d656f50c` (main after Y11, #708). Every finding was verified independently before this plan was written (§2), under
 the [verification policy](../wiki/dev/testing/verification-policy.md): three read-only agents re-ran or re-derived
@@ -32,8 +32,8 @@ It is row R2, and it comes before F2's fix.
 |---|---|---|---|---|
 | F1 | raw `/gateway/rpc/call` under `mesh:write` reaches `blackboard.*.post` around `board:write` | **true, wider**: every tuple-space kind too; `scatter` and `overlay/emit_reliable` carry the same kinds; wiki `ingest`/`access` gate on `req.sender()`, the node id, which through the raw route is the gateway itself | the mechanism (`threat-model.md:457`, closed only for protected kinds); not the scope consequence — `rbac.md:78` lists `rpc call` under `mesh:write` unqualified | **P1** |
 | F2 | the `used/provider` marker goes through `append_try`; work proceeds after a dropped append | **true, narrower**: a graceful restart snapshots from the store and a poisoned writer takes a repairing snapshot, so reuse needs a dropped append *and* a hard crash before any snapshot *and* the envelope re-presented in its window | `grants.md:128` says "buffered"; `what-is-proven.md:64` ("replayed from the WAL across a restart") and the comment at `state_machine.rs:881` say the opposite — a contradiction | **P1** as a contradiction; the window is small |
-| F3 | `ReplicaSync` answers `Persisted` for a record applied but not yet enqueued | **true**; `replica_sync.rs:26-38` claims the dropped-append counter closes this window, and it cannot (the counter is bumped after the apply) — a contradiction | no | P2: no await point in the window; cross-thread only; but the origin polls at exactly that moment |
-| F4 | an empty successful JWKS is read as a failed fetch and the old keys kept; no stale ceiling | **true, narrower**: a replace-rotation is applied; only withdraw-all is ignored; exposure bounded by token `exp` | `sso.md:61` ("a failed fetch keeps the previous keys"); not the empty-set reading or the missing ceiling | P2; P1 with long-lived tokens |
+| F3 | `ReplicaSync` answers `Persisted` for a record applied but not yet enqueued | **true**; `replica_sync.rs:26-38` claims the dropped-append counter closes this window, and it cannot (the counter is bumped after the apply) — a contradiction | no | P2 on impact under the contract, not on the window's width: there is no await point inside it, and its duration is unmeasured (pre-emption can extend it); the origin polls at exactly that moment |
+| F4 | an empty successful JWKS is read as a failed fetch and the old keys kept; no stale ceiling | **true, narrower**: a replace-rotation is applied; only withdraw-all is ignored. Token `exp` does *not* bound it: the holder of a compromised withdrawn key mints fresh short-lived tokens for as long as the verifier trusts the key (the reviewer's qualification, accepted) | `sso.md:61` ("a failed fetch keeps the previous keys"); not the empty-set reading or the missing ceiling | **P1** |
 | F5 | the native HTTPS accept loop has no handshake timeout or admission bound | **true, wider**: `axum::serve` builds hyper without a timer, which silently disables hyper's 30 s header-read default on the plaintext listener too | the 2.32 bounds are the gossip listener's; nothing says whether they cover the gateway; the docs say to proxy, and offer `gateway_tls` as "no proxy required" | P1 for an exposed gateway |
 | F6 | bulk fetches `http://` unconditionally; fails under `gateway_tls`; no fetch size cap | **true**; the reply is capped by the 10 MiB frame limit, the fetch is not; the fetch target is the sender's advertised IP and a sender-chosen port | no | P2 |
 | F7 | a new journal acknowledges `OnDisk` before its directory entry is synced | **true, wider**: four `Journal::open` consumers (`EvidenceJournal`, the rights ledger, `DurableEpochs`, the external-effects ledger) and both companion WALs; the KV WAL is covered by the startup snapshot's directory sync | contradicts `journal.rs:59` ("readable after a restart"); v2.4.4's class | P2 |
@@ -59,7 +59,7 @@ added.
   the in-memory claim stays spent. Never proceed. *Maintainer, 2026-10-31.*
 - **D3 (F3):** an in-flight counter on the two inbound sites, not a change to invariant 1 (*apply, then persist*).
   The invariants page forbids enqueue-before-apply; changing that is a design decision this plan does not take.
-- **D4 (order):** R1, R2+R3 and R4 before the next MINOR; the rest after it. Docs that a finding contradicts are
+- **D4 (order):** R1, R2+R3 and R4 before the next MINOR; the rest after it. The reviewer's reply (rev 0.2) agrees the order of work in the review was over its sample; this one is over the review plus the repository's open list, which stays where it is recorded. Docs that a finding contradicts are
   corrected in the same PR as the code, or restated as limits where the row decides not to build.
 
 ## 4 · Rows
