@@ -61,7 +61,8 @@ pub enum Class {
     Recovery,
     /// A grant that is default-deny and holds across a restart (adopter-surface X3): the declaration's first
     /// grant-required `[[rule]]` driven on its own fleet — silence refuses, the declared issuer's grant admits one
-    /// call, the grant replays from the WAL.
+    /// call, the grant is back after a graceful restart (the exit-snapshot path; the restart that keeps only the WAL
+    /// is `grant_tests`').
     Grant,
 }
 
@@ -766,6 +767,11 @@ fn check(rep: &mut ClassReport, started: &std::time::Instant, name: &str, ok: Op
 // ───────────────────────────────────────────────────────────────────────────────────── restart ──
 
 mod restart {
+    //! What this class proves: the synced write is read back after a restart through `shutdown()`, whose exit
+    //! snapshot is taken from the **store** — so a record the store held and the WAL never took is carried over by
+    //! that snapshot too. The WAL path alone is proved by the restart that keeps only the WAL (`test_util::
+    //! sabotage_exit_snapshot`, external review 2026-10-31, R2); a hard-crash restart class — the exit snapshot
+    //! denied, only the WAL replayed — is **not built** here.
     use super::*;
 
     const GUARANTEES: &[&str] = &["persist.configured", "persist.sync_mode", "persist.unreadable_refused"];
@@ -824,7 +830,7 @@ mod restart {
             restarted.push(format!("node {i}: {}", if back { "replayed" } else { "MISSING" }));
         }
         let all_back = restarted.iter().all(|s| s.ends_with("replayed"));
-        check(rep, &t, "a synced write is replayed from the node's own WAL after a restart", Some(all_back), restarted.join("; "));
+        check(rep, &t, "a synced write is back after a graceful restart (the exit-snapshot path; the WAL alone is proved by the WAL-only restart test)", Some(all_back), restarted.join("; "));
 
         // Unreadable state: a complete record that does not decode, appended to node 0's WAL.
         let t = crate::sim_seam::mono_instant();
@@ -1850,7 +1856,7 @@ mod tests {
         assert_eq!(c.checks.len(), 5, "{c:?}");
         assert!(c.checks[0].name.starts_with("a grant-required tool is default-deny"), "{}", c.checks[0].name);
         assert!(c.checks[1].detail.contains("test-faults-stranger's issue refused by the evaluator") && c.checks[1].detail.contains("treasurer's issue: written"), "{}", c.checks[1].detail);
-        assert!(c.checks[2].detail.contains("back from the WAL") && c.checks[2].detail.contains("did not ask twice"), "{}", c.checks[2].detail);
+        assert!(c.checks[2].detail.contains("back (the exit-snapshot path)") && c.checks[2].detail.contains("did not ask twice"), "{}", c.checks[2].detail);
         assert!(c.checks[4].detail.contains("2 permitted for treasurer, 1 refused for test-faults-stranger"), "{}", c.checks[4].detail);
         assert!(c.exercised.iter().any(|e| e.id == "mesh.tls" && e.state == "enforced"), "{:?}", c.exercised);
         assert!(c.exercised.iter().any(|e| e.id == "persist.configured" && e.state == "enforced"), "{:?}", c.exercised);

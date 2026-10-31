@@ -192,12 +192,14 @@ pub(crate) async fn decide_grant(ctx: &Arc<TaskCtx>, caller: Option<&ResolvedPri
     match decision {
         GrantDecision::Refuse { reason } => {
             let record = json!({ "schema": "mycelium.grant-refusal/1", "request": request, "issuer": issuer, "reason": reason.unwrap_or_default(), "at_ms": now_ms });
-            let written = write_record(ctx, format!("{key}/refused"), record.to_string().into_bytes()).await;
+            // On disk or `503 not_durable` (#713's review, round 2): a `200` carrying `local_durability: failed` is the
+            // shape the revoke lost; an answer that is not on disk is not an answer the agent can be held to.
+            let written = write_record_durable(ctx, format!("{key}/refused"), record.to_string().into_bytes()).await;
             ae_record_execution(ctx, &preflight, if written.is_ok() { super::action_evaluator::Execution::Completed } else { super::action_evaluator::Execution::Failed }).await;
             #[cfg(feature = "metrics")]
             metrics::counter!("mycelium_grants_refused_total").increment(1);
             set_pending_gauge(ctx, now_ms);
-            written.map(|receipt| GrantOutcome { receipt }).map_err(|e| GrantRefusal::door(StatusCode::INTERNAL_SERVER_ERROR, "write_failed", e))
+            written.map(|receipt| GrantOutcome { receipt }).map_err(|e| GrantRefusal::door(StatusCode::SERVICE_UNAVAILABLE, "not_durable", format!("the refusal was not recorded durably, so no answer stands — the request is still pending; retry once the WAL writer is repaired: {e}")))
         }
         GrantDecision::Issue { ttl_secs } => {
             let Some(tls) = ctx.tls.get() else {
@@ -239,20 +241,30 @@ pub(crate) async fn decide_grant(ctx: &Arc<TaskCtx>, caller: Option<&ResolvedPri
             if let Some(authority) = ctx.execution_authority.get() {
                 let _ = authority.offer_checkpoint(&signed_checkpoint, now_ms, &gateway_member_keys(ctx));
             }
-            if let Ok(cp) = serde_json::to_vec(&signed_checkpoint) {
-                let _ = write_record(ctx, format!("{key}/checkpoint"), cp).await;
+            // The checkpoint is on disk before the grant is: a grant whose first checkpoint a restart cannot find is
+            // not established at a verifier (external review 2026-10-31, R3 — the sibling of the use marker).
+            match serde_json::to_vec(&signed_checkpoint) {
+                Ok(cp) => {
+                    if let Err(e) = write_record_durable(ctx, format!("{key}/checkpoint"), cp).await {
+                        ae_record_execution(ctx, &preflight, super::action_evaluator::Execution::Failed).await;
+                        return Err(GrantRefusal::door(StatusCode::SERVICE_UNAVAILABLE, "not_durable", format!("the grant's checkpoint was not recorded durably, so no grant is issued: {e}")));
+                    }
+                }
+                Err(e) => return Err(GrantRefusal::door(StatusCode::INTERNAL_SERVER_ERROR, "serialise", e.to_string())),
             }
             let bytes = match serde_json::to_vec(&grant) {
                 Ok(b) => b,
                 Err(e) => return Err(GrantRefusal::door(StatusCode::INTERNAL_SERVER_ERROR, "serialise", e.to_string())),
             };
-            let written = write_record(ctx, format!("{key}/issued"), bytes).await;
+            // On disk or `503 not_durable` (#713's review, round 2), by the path the checkpoint above took — the
+            // checkpoint guards this write: a writer that refuses appends refuses it first, and no grant is issued.
+            let written = write_record_durable(ctx, format!("{key}/issued"), bytes).await;
             // The execution record says what the write did (#673's review, finding 8).
             ae_record_execution(ctx, &preflight, if written.is_ok() { super::action_evaluator::Execution::Completed } else { super::action_evaluator::Execution::Failed }).await;
             #[cfg(feature = "metrics")]
             metrics::counter!("mycelium_grants_issued_total").increment(1);
             set_pending_gauge(ctx, now_ms);
-            written.map(|receipt| GrantOutcome { receipt }).map_err(|e| GrantRefusal::door(StatusCode::INTERNAL_SERVER_ERROR, "write_failed", e))
+            written.map(|receipt| GrantOutcome { receipt }).map_err(|e| GrantRefusal::door(StatusCode::SERVICE_UNAVAILABLE, "not_durable", format!("the grant was not recorded durably, so no grant stands — the request is still pending; retry once the WAL writer is repaired: {e}")))
         }
     }
 }
@@ -440,13 +452,43 @@ pub(crate) async fn revoke_grant(ctx: &Arc<TaskCtx>, caller: Option<&ResolvedPri
         Ok(b) => b,
         Err(e) => return Err(GrantRefusal::door(StatusCode::INTERNAL_SERVER_ERROR, "serialise", e.to_string())),
     };
-    let cp_written = write_record(ctx, format!("{key}/checkpoint"), cp).await;
+    // Both records on disk, or the route refuses by name (external review 2026-10-31, R3 — the sibling of the use
+    // marker: a `200` with `local_durability: failed` was answered before, and a restart that kept only the WAL
+    // re-armed the grant for the rest of its window). The in-memory revocation above already stands for this
+    // process — work under the grant is refused here until a restart. Repairing the writer records nothing by
+    // itself: **any** restart before the revoke is retried re-arms the grant, so the supervisor owes a retry, once
+    // `/health` no longer reports `wal_refusing_appends`. `503` because the refusal is the node's state, not the
+    // request's, and a retry is the answer.
     let record = json!({ "schema": "mycelium.grant-revocation/1", "request": request, "issuer": issuer, "reason": reason.unwrap_or_default(), "at_ms": now_ms, "checkpoint_seq": 2 });
-    let written = write_record(ctx, format!("{key}/revoked"), record.to_string().into_bytes()).await;
-    ae_record_execution(ctx, &preflight, if written.is_ok() && cp_written.is_ok() { super::action_evaluator::Execution::Completed } else { super::action_evaluator::Execution::Failed }).await;
-    #[cfg(feature = "metrics")]
-    metrics::counter!("mycelium_grants_revoked_total").increment(1);
-    written.map(|receipt| GrantOutcome { receipt }).map_err(|e| GrantRefusal::door(StatusCode::INTERNAL_SERVER_ERROR, "write_failed", e))
+    let written = match write_record_durable(ctx, format!("{key}/checkpoint"), cp).await {
+        Ok(_) => write_record_durable(ctx, format!("{key}/revoked"), record.to_string().into_bytes()).await,
+        Err(e) => Err(e),
+    };
+    ae_record_execution(ctx, &preflight, if written.is_ok() { super::action_evaluator::Execution::Completed } else { super::action_evaluator::Execution::Failed }).await;
+    match written {
+        Ok(receipt) => {
+            #[cfg(feature = "metrics")]
+            metrics::counter!("mycelium_grants_revoked_total").increment(1);
+            Ok(GrantOutcome { receipt })
+        }
+        Err(e) => Err(GrantRefusal::door(StatusCode::SERVICE_UNAVAILABLE, "not_durable", format!("revocation not recorded durably — it stands in this process only, and any restart before this revoke is retried re-arms the grant; retry once the WAL writer is repaired: {e}"))),
+    }
+}
+
+/// [`write_record`]'s durable form: the receipt path's required-sync write — on the WAL and fsynced before it is
+/// applied or gossiped — or `Err` naming why the record is not on disk. A node with no `[persistence]` writes in
+/// memory and answers `Ok` with `local_durability: buffered`, as [`write_record`] does; that node has never claimed
+/// a disk.
+async fn write_record_durable(tc: &Arc<TaskCtx>, key: String, value: Vec<u8>) -> Result<serde_json::Value, String> {
+    if tc.wal.get().is_none() {
+        return write_record(tc, key, value).await;
+    }
+    let op = mycelium_core::receipt::OperationId::generate(&tc.node_id);
+    let attempt = mycelium_core::receipt::AttemptId::fresh(&op);
+    match mycelium_core::ops::kv_set_requiring_sync(tc, op, attempt, Arc::from(key.as_str()), Bytes::from(value), None).await {
+        Ok(r) => Ok(json!({ "ok": true, "key": key, "operation_id": r.operation_id.to_string(), "local_durability": r.local_durability.tag() })),
+        Err(e) => Err(e.to_string()),
+    }
 }
 
 /// One owned-namespace write with its receipt — the shape `POST /gateway/kv` answers with — or why it was not made.

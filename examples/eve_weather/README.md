@@ -53,7 +53,8 @@ CI runs exactly this in the `eve-fleet` job.
    [`grant-rules.toml`](grant-rules.toml) appended, and `mycelium test --faults grant` runs over it. The appended
    rules make `get_weather` grant-required, with the supervisor as its issuer.
    - This is X3's fault class, run here: silence refuses, the declared issuer's grant admits one call, and the grant
-     holds across a restart of the agent's node over the WAL.
+     holds across a restart of the agent's node — a graceful one, the exit-snapshot path; the restart that keeps only
+     the WAL is `grant_tests`' (`a_restart_that_keeps_only_the_wal_replays_the_request_the_grant_and_the_door_marker`).
    - The class drives the agent state machine's own door on the declaration's own in-process fleet. It does not call
      Eve's `execute`. The grant is on the tool's name, which is the same at every door.
 

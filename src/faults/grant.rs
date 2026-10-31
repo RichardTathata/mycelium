@@ -301,7 +301,7 @@ pub(super) fn run(rep: &mut ClassReport, base: &GossipConfig, units: &[Unit], di
     let waiting = fleet.spawn(i, async move { sm2.transition_invoking(&tool2, &args2).await });
     fleet.wait(i, Duration::from_secs(5), || fresh(&a, &seen).is_some());
     let Some(request_b) = fresh(&a, &seen) else {
-        check(rep, &t, "the grant holds across a restart: the request and the grant replay from the WAL, the restarted agent re-waits and does not ask twice", Some(false), "no request was written within 5 s of the call".to_string());
+        check(rep, &t, "the grant holds across a restart (a graceful one — the exit-snapshot path; the WAL alone is proved by the WAL-only restart test): the request and the grant are back, the restarted agent re-waits and does not ask twice", Some(false), "no request was written within 5 s of the call".to_string());
         waiting.abort();
         return;
     };
@@ -322,7 +322,7 @@ pub(super) fn run(rep: &mut ClassReport, base: &GossipConfig, units: &[Unit], di
     drop(a);
     fleet.stop(i);
     if let Err(e) = start_agent_node(&mut fleet, i, &journal_path, &evaluator, &agent_principal) {
-        check(rep, &t, "the grant holds across a restart: the request and the grant replay from the WAL, the restarted agent re-waits and does not ask twice", Some(false), format!("the agent's node did not restart over its own directory: {e}"));
+        check(rep, &t, "the grant holds across a restart (a graceful one — the exit-snapshot path; the WAL alone is proved by the WAL-only restart test): the request and the grant are back, the restarted agent re-waits and does not ask twice", Some(false), format!("the agent's node did not restart over its own directory: {e}"));
         return;
     }
     let a = fleet.agent(i);
@@ -337,11 +337,11 @@ pub(super) fn run(rep: &mut ClassReport, base: &GossipConfig, units: &[Unit], di
     check(
         rep,
         &t,
-        "the grant holds across a restart: the request and the grant replay from the WAL, the restarted agent re-waits and does not ask twice",
+        "the grant holds across a restart (a graceful one — the exit-snapshot path; the WAL alone is proved by the WAL-only restart test): the request and the grant are back, the restarted agent re-waits and does not ask twice",
         Some(ok),
         format!(
             "issued before the stop: {issued_b_text}; after the restart the request and the grant are {}; the re-wait: {}; requests {count_before} → {count_after} ({}); request {request_b} consumed: {consumed_b}",
-            if back { "back from the WAL" } else { "MISSING" },
+            if back { "back (the exit-snapshot path)" } else { "MISSING" },
             match &after { Ok(Some(_)) => "admitted under the grant issued before the restart".to_string(), Ok(None) => "proceeded WITHOUT a grant".to_string(), Err(e) => format!("refused — {e}") },
             if count_after == count_before { "did not ask twice" } else { "ASKED AGAIN" },
         ),
