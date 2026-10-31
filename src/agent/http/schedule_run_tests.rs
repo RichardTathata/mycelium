@@ -305,8 +305,17 @@ async fn two_clients_under_a_partition_are_handed_one_key_per_slot() {
         }));
     }
     let by_both = |m: &BTreeMap<String, BTreeSet<usize>>| m.values().filter(|s| s.len() == 2).count();
-    assert!(poll_until(|| applied.lock().unwrap().len() >= 2, 20_000).await, "connected, the slots run");
-    assert_eq!(by_both(&applied.lock().unwrap()), 0, "connected, one holder hands each slot to one client: {:?}", applied.lock().unwrap());
+    // Connected: once each node sees both candidates and one holder — the warm-up is a delay, not a convergence check,
+    // so a slow start can briefly hold on both sides — one holder hands each slot to one client.
+    let holders = |ag: &GossipAgent| ag.capabilities().resolve(&CapFilter::new(CANDIDATE_NS, "close.holder")).len();
+    let candidates = |ag: &GossipAgent| ag.capabilities().resolve(&CapFilter::new(CANDIDATE_NS, "close")).len();
+    assert!(poll_until(|| candidates(&a) == 2 && candidates(&b) == 2 && holders(&a) == 1 && holders(&b) == 1, 30_000).await,
+        "connected, the nodes agree on one holder: {} / {}", holders(&a), holders(&b));
+    let seen_before: BTreeSet<String> = applied.lock().unwrap().keys().cloned().collect();
+    let after = |m: &BTreeMap<String, BTreeSet<usize>>| m.iter().filter(|(k, _)| !seen_before.contains(*k)).map(|(k, v)| (k.clone(), v.clone())).collect::<BTreeMap<_, _>>();
+    assert!(poll_until(|| after(&applied.lock().unwrap()).len() >= 2, 20_000).await, "connected, the slots run");
+    let connected = after(&applied.lock().unwrap());
+    assert_eq!(by_both(&connected), 0, "connected, one holder hands each slot to one client: {connected:?}");
 
     for (i, ag) in [&a, &b].iter().enumerate() {
         let peer = ids[1 - i].id_hash();
@@ -315,9 +324,9 @@ async fn two_clients_under_a_partition_are_handed_one_key_per_slot() {
             FrameView::Signal { .. } => true,
         }));
     }
-    assert!(poll_until(|| by_both(&applied.lock().unwrap()) >= 1, 20_000).await,
-        "cut apart, both sides hand a slot to their clients: {:?}", applied.lock().unwrap());
+    let cut_apart = poll_until(|| by_both(&applied.lock().unwrap()) >= 1, 20_000).await;
     let keys = applied.lock().unwrap().clone();
+    assert!(cut_apart, "cut apart, both sides hand a slot to their clients: {keys:?}");
     assert!(keys.keys().all(|k| k.starts_with("sched/close/")), "every run is keyed by its slot: {keys:?}");
     // One key per slot: a slot handed to both clients is one key, so a deduplicating destination applies it once.
     let slots: BTreeSet<&str> = keys.keys().map(|k| k.rsplit('/').next().unwrap()).collect();
