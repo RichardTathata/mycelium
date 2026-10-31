@@ -2207,11 +2207,11 @@ a candidate in the schedule's holder band while the stream is open and hands the
 `POST /gateway/schedules/ack` ([feature page](../features/recurring-work.md)). Both routes need the new scope
 `schedule:run`; a scoped token without it is refused `403` naming it, and `mesh:serve` does not open them. A unit
 still cannot carry a schedule: `POST /gateway/units/declare` answers `422 schedule section` as before, and its
-`detail` now names the run stream instead of saying no route runs one. The `sched.run` decision has a new reason,
-`unacknowledged` (a `deferral`): a run handed to a client that never answered, its slot not recorded — a consumer
-matching `sched.run`'s reasons exhaustively needs an arm for it. In `mycelium-ts`, `loadEveAgent` now loads an Eve
+`detail` now names the run stream instead of saying no route runs one. (`sched.run`, the rule behind declared
+recurring work, is itself in no release yet: its reasons `unacknowledged` — a run handed to a client that never
+answered, its slot not recorded — and `stood_down` — a stalled client's node withdrawing its candidacy — arrive with
+it, so no released consumer matches them.) In `mycelium-ts`, `loadEveAgent` now loads an Eve
 `schedules/` directory whose files' crons are a period and a phase, where it refused the directory by name before,
 and refuses by name each schedule it cannot run (another cron, a nested schedule, a key it does not read).
-**Migration:** give a token that runs schedules `schedule:run`; add an arm for `unacknowledged` where `sched.run`'s
-reasons are matched; an Eve agent whose `schedules/` was refused now loads, and its schedules run only when
+**Migration:** give a token that runs schedules `schedule:run`; an Eve agent whose `schedules/` was refused now loads, and its schedules run only when
 `runEveSchedules` is called.

@@ -321,6 +321,20 @@ export function cronAsPeriod(cron: string): { periodSecs: number; phaseSecs: num
   return { periodSecs: 7 * 86_400, phaseSecs: (((day % 7) - 4 + 7) % 7) * 86_400 + atTime };
 }
 
+/**
+ * Why `id` cannot name a schedule on the fleet, or `null` — the server's own rule, `schedule::id_problem` in
+ * `src/schedule.rs` (one key segment `[A-Za-z0-9._-]+`, not starting with `.` or holding `..`, not ending in `.holder`,
+ * the suffix of a schedule's holder advertisement), checked at load so a schedule the stream would refuse (422) is
+ * refused by name here instead. The capability-name part of that rule (no `/`, not empty) is implied by the first.
+ */
+export function scheduleIdProblem(id: string): string | null {
+  if (id === "") return "is empty";
+  if (!/^[A-Za-z0-9._-]+$/.test(id)) return "is not one key segment ([A-Za-z0-9._-]+)";
+  if (id.startsWith(".") || id.includes("..")) return "starts with `.` or holds `..`, which reads as a path segment";
+  if (id.endsWith(".holder")) return "ends in `.holder`, the suffix of a schedule's holder advertisement";
+  return null;
+}
+
 /** A Markdown schedule's frontmatter: `cron` alone, one `key: value` line, the value bare or quoted. */
 function scheduleFrontmatter(text: string): { cron: string; body: string } | { refused: string } {
   const m = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/.exec(text);
@@ -566,7 +580,13 @@ export async function loadEveAgent(dir: string, options: LoadOptions = {}): Prom
         refuse(period.refused);
         continue;
       }
-      schedules.push({ name: scheduleName, id: `${name}.${scheduleName}`, cron, ...period, form, markdown, run });
+      const id = `${name}.${scheduleName}`;
+      const idProblem = scheduleIdProblem(id);
+      if (idProblem !== null) {
+        refuse(`its fleet id \`${id}\` ${idProblem}, so the gateway would refuse it`);
+        continue;
+      }
+      schedules.push({ name: scheduleName, id, cron, ...period, form, markdown, run });
     }
   }
   if (scheduleRefusals.length > 0) throw new EveRefusedError(scheduleRefusals);
@@ -773,8 +793,11 @@ export interface RunSchedulesOptions {
  * Run an Eve agent's schedules through the gateway (adopter-surface Y12): one `scheduleRuns` stream per schedule, the
  * node `mycelium` is connected to standing in its holder band. A `run` schedule's handler is called with Eve's
  * `waitUntil` (awaited before the run is acknowledged) and a `to` that throws — channels are not built; a Markdown
- * schedule's prompt goes to `onMarkdown`. A handler that throws is the run's failure, acknowledged as one. Resolves
- * when every stream ends (`signal`).
+ * schedule's prompt goes to `onMarkdown`. A handler that throws is the run's failure, acknowledged as one, and an
+ * answer that does not land is a missed run (`runSchedule`); neither ends a stream. Resolves when every stream ends
+ * (`signal`). **If one stream fails** — refused when it opens (`ScheduleRefusedError`: the node already runs the id),
+ * or lost — **every stream is closed** and the promise rejects with that error: the agent's schedules run together or
+ * not at all, so none is left running with no caller watching it.
  */
 export async function runEveSchedules(agent: EveAgent, mycelium: MyceliumAgent, options: RunSchedulesOptions = {}): Promise<void> {
   const markdownOnly = agent.schedules.filter((sc) => sc.form === "markdown");
@@ -786,6 +809,12 @@ export async function runEveSchedules(agent: EveAgent, mycelium: MyceliumAgent, 
     })));
   }
   const holders = options.holders ?? { ns: "eve", name: agent.name };
+  // One abort for every stream: the caller's signal, or the first stream to fail.
+  const all = new AbortController();
+  const onAbort = () => all.abort();
+  if (options.signal?.aborted) all.abort();
+  options.signal?.addEventListener("abort", onAbort, { once: true });
+  let failed: unknown = undefined;
   await Promise.all(agent.schedules.map((sc) => {
     const decl: ScheduleDeclaration = { id: sc.id, periodSecs: sc.periodSecs, phaseSecs: sc.phaseSecs, onMissed: options.onMissed ?? "skip", holders };
     return mycelium.runSchedule(decl, async (run) => {
@@ -804,8 +833,11 @@ export async function runEveSchedules(agent: EveAgent, mycelium: MyceliumAgent, 
         appAuth: {},
       });
       await Promise.all(tasks);
-    }, { signal: options.signal }).catch((e: unknown) => {
-      if (!options.signal?.aborted) throw e;
+    }, { signal: all.signal }).catch((e: unknown) => {
+      if (all.signal.aborted) return; // closed by the caller, or by another stream's failure
+      failed = e;
+      all.abort();
     });
-  }));
+  })).finally(() => options.signal?.removeEventListener("abort", onAbort));
+  if (failed !== undefined) throw failed;
 }

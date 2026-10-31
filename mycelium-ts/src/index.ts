@@ -8,6 +8,7 @@ export {
   SupersededError,
   UnservedRunError,
   scheduleToml,
+  tomlBasicString,
 } from "./agent";
 export {
   CapabilityHandle,
@@ -74,6 +75,7 @@ export {
   installedEveVersion,
   loadEveAgent,
   runEveSchedules,
+  scheduleIdProblem,
   serveEveTools,
   type EveAgent,
   type EveDeclaration,

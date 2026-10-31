@@ -84,7 +84,11 @@ the gap decided as run once or skipped, the run naming the decision its parent) 
   answered: the run is traced `unacknowledged` (or `work_overran` past its period), the slot is not recorded, and
   the node withdraws its holding, so the next holder decides the slot as one not yet run — on time, or as a missed
   run under the policy. A client that ran the work and lost its answer can run the slot twice: the key makes that
-  one effect at a destination that deduplicates, as for two holders. A unit cannot carry a schedule
+  one effect at a destination that deduplicates, as for two holders. A client that stays connected and stalls — its
+  run overruns the period — makes its node **stand down**: candidacy and holding withdrawn for ten periods (at least
+  twice the warm-up, `stood_down`), so another node's client takes the slots. A stream whose node runs nothing says
+  why in a `status` event (`not_eligible` for a node outside `holders`); `onStatus` / `on_status` surface it. A unit
+  cannot carry a schedule
   (`POST /gateway/units/declare` refuses one, 422, naming the route).
 - Not built, stated in the plan's Y2 and Y12 rows: a cron language beyond a period and a phase (an Eve cron that is
   not one is refused by name), a fleet-wide calendar, a stem that runs a schedule (it refuses one by name), a

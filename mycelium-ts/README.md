@@ -244,7 +244,7 @@ for await (const req of agent.rpcServe("echo")) {
 
 Sends a reply to an in-flight RPC request.
 
-#### `scheduleRuns(decl, { signal? }) → AsyncGenerator<ScheduleRun>` / `scheduleAck(run, error?)` / `runSchedule(decl, work, { signal? })`
+#### `scheduleRuns(decl, { signal?, onStatus? }) → AsyncGenerator<ScheduleRun>` / `scheduleAck(run, error?)` / `runSchedule(decl, work, { signal?, onStatus?, onAckError? })`
 
 Declare a `[[schedule]]` through the gateway and receive its runs (adopter-surface Y12, scope `schedule:run`). The node
 this agent is connected to stands in the schedule's holder band while the stream is open, so it must match `holders`:
@@ -260,8 +260,12 @@ await agent.runSchedule(
 Answer every run within one period (`runSchedule` does: resolved is done, thrown is the work's failure). A run you
 never answer — the stream closed, the process went away — is traced `unacknowledged` and its slot is not recorded, so
 the next holder decides it. A second answer, or one from another principal, throws `UnservedRunError`; a declaration
-the loader refuses, or an id the node already runs, throws `ScheduleRefusedError`. A partition runs a slot on each
-side under one key: carry `operationId` to a destination that deduplicates.
+the loader refuses, or an id the node already runs, throws `ScheduleRefusedError`. In `runSchedule` an answer that
+does not land (refused, or lost to the network) is a missed run, given to `onAckError`, and the schedule goes on. A
+client that stays connected but stalls makes its node stand down for ten periods so another node holds. `onStatus` is
+told why a stream hands out nothing (`not_eligible`: the node does not match `holders`; `warming_up`; `not_holder`;
+`stood_down`). A partition runs a slot on each side under one key: carry `operationId` to a destination that
+deduplicates. Values are written as TOML basic strings (`tomlBasicString`).
 
 #### `scatterGather(targets, method, payload?, options?) → Promise<Array<{sender, result}>>`
 

@@ -324,11 +324,10 @@ class ScheduleDeclaration:
 
     def toml(self) -> str:
         """The ``[[schedule]]`` TOML this declares — what :meth:`MyceliumAgent.schedule_runs` sends."""
-        import json as _json
         for name, v in (("period_secs", self.period_secs), ("phase_secs", self.phase_secs)):
             if not isinstance(v, int) or isinstance(v, bool) or v < 0:
                 raise ValueError(f"{name} must be a whole number of seconds, got {v!r}")
-        q = _json.dumps  # a TOML basic string reads JSON's escapes
+        q = toml_basic_string
         ns, name = self.holders
         return "\n".join([
             "[[schedule]]",
@@ -340,6 +339,27 @@ class ScheduleDeclaration:
             f"ns = {q(ns)}",
             f"name = {q(name)}",
         ]) + "\n"
+
+
+_TOML_SHORT = {"\b": "\\b", "\t": "\\t", "\n": "\\n", "\f": "\\f", "\r": "\\r", '"': '\\"', "\\": "\\\\"}
+
+
+def toml_basic_string(value: str) -> str:
+    """``value`` as a TOML basic string (TOML 1.0 § String): ``"`` and ``\\`` escaped, the controls TOML forbids raw
+    (U+0000–U+001F and U+007F) as their short escape or ``\\uXXXX``, every other character — a non-BMP one included —
+    written as itself. Not JSON's escaping: ``json.dumps`` writes a non-BMP character as a surrogate pair, which TOML
+    refuses."""
+    out = ['"']
+    for ch in value:
+        code = ord(ch)
+        if ch in _TOML_SHORT:
+            out.append(_TOML_SHORT[ch])
+        elif code < 0x20 or code == 0x7F:
+            out.append(f"\\u{code:04X}")
+        else:
+            out.append(ch)
+    out.append('"')
+    return "".join(out)
 
 
 @dataclass
@@ -1148,7 +1168,9 @@ class MyceliumAgent:
 
     # ── Schedules (adopter-surface Y12) ─────────────────────────────────────
 
-    async def schedule_runs(self, decl: "ScheduleDeclaration") -> "AsyncIterator[ScheduleRun]":
+    async def schedule_runs(
+        self, decl: "ScheduleDeclaration", on_status: "Optional[Any]" = None,
+    ) -> "AsyncIterator[ScheduleRun]":
         """Declare a ``[[schedule]]`` through the gateway and receive its runs, for as long as you iterate.
 
         The node this agent is connected to stands in the schedule's holder band for you: it is a candidate while the
@@ -1163,7 +1185,9 @@ class MyceliumAgent:
                 agent.schedule_ack(run)
 
         The node must match ``holders`` — advertise that capability on it, e.g. with :meth:`declare_units`. Scope
-        ``schedule:run``. Refusals raise :class:`ScheduleRefusedError`.
+        ``schedule:run``. Refusals raise :class:`ScheduleRefusedError`. ``on_status``, if given, is called with each
+        change of what the node says when it hands out nothing — ``"not_eligible"`` (it does not match ``holders``),
+        ``"warming_up"``, ``"not_holder"``, ``"stood_down"``, …
         """
         import json as _json
         url = f"{self._base_url}/gateway/schedules/run"
@@ -1180,6 +1204,10 @@ class MyceliumAgent:
                         raise ScheduleRefusedError(resp.status_code, str(data.get("error", "refused")), str(data.get("detail", "")))
                     resp.raise_for_status()
                 async for event in event_source.aiter_sse():
+                    if event.event == "status":
+                        if on_status is not None:
+                            on_status(str(_json.loads(event.data).get("reason", "")))
+                        continue
                     if event.event != "run":
                         continue  # `declared`, the stream's first word
                     d = _json.loads(event.data)

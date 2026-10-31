@@ -129,4 +129,21 @@ describe_("schedules through the gateway (Y12)", () => {
       fs.rmSync(project, { recursive: true, force: true });
     }
   }, 60_000);
+
+  it("tells the client its node is not in the band: a not_eligible status", async () => {
+    const a = agent();
+    const decl: ScheduleDeclaration = { id: `ts-none-${Math.random().toString(16).slice(2, 10)}`, periodSecs: 1, holders: { ns: "ts-sched", name: "nobody-advertises-this" } };
+    const controller = new AbortController();
+    const said: string[] = [];
+    const reading = (async () => {
+      for await (const _ of a.scheduleRuns(decl, { signal: controller.signal, onStatus: (r) => { said.push(r); controller.abort(); } })) {
+        throw new Error("a node outside the band hands out no run");
+      }
+    })().catch((e: unknown) => { if (!controller.signal.aborted) throw e; });
+    const deadline = Date.now() + 10_000;
+    while (said.length === 0 && Date.now() < deadline) await new Promise((r) => setTimeout(r, 100));
+    controller.abort();
+    await reading;
+    expect(said[0]).toBe("not_eligible");
+  }, 20_000);
 });

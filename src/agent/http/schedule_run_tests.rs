@@ -125,9 +125,17 @@ async fn a_client_receives_its_schedules_runs_and_an_acknowledged_run_records_it
     assert_eq!(again.json::<serde_json::Value>().await.unwrap()["error"], "unserved_run");
     let never = ack(&base, "close/1/999", true).await;
     assert_eq!(never.status(), 403, "a run never handed out is refused");
+    let run_id = run["run_id"].as_str().unwrap();
+    assert!(run_id.len() > format!("close/{slot}/").len() + 8, "the run id carries a random part: {run_id}");
 
-    // The next slot arrives; a failed answer is the work's failure, traced, and the slot is not recorded.
+    // The next slot arrives. An answer to a guessed id — the schedule, the slot and a counter, the id's old shape — is
+    // refused while the run waits; then a failed answer is the work's failure, traced, and the slot is not recorded.
     let next = s.run(5_000).await.expect("the next slot's run");
+    let next_slot = next["slot"].as_u64().unwrap();
+    for n in 0..4 {
+        let guessed = ack(&base, &format!("close/{next_slot}/{n}"), true).await;
+        assert_eq!(guessed.status(), 403, "a guessed run id is refused");
+    }
     assert!(next["slot"].as_u64().unwrap() > slot);
     let r = ack(&base, next["run_id"].as_str().unwrap(), false).await;
     assert_eq!(r.status(), 200);
@@ -293,13 +301,17 @@ async fn two_clients_under_a_partition_are_handed_one_key_per_slot() {
     // Each client applies its run under the run's key; the destination keeps the keys it applied and how often each
     // was presented.
     let applied: Arc<std::sync::Mutex<BTreeMap<String, BTreeSet<usize>>>> = Arc::default();
+    // Every run handed to either client, as handed: (client, the run's slot, its key).
+    let handed: Arc<std::sync::Mutex<Vec<(usize, u64, String)>>> = Arc::default();
     let mut clients = Vec::new();
     for (i, base) in [base_a.clone(), base_b.clone()].into_iter().enumerate() {
-        let applied = Arc::clone(&applied);
+        let (applied, handed) = (Arc::clone(&applied), Arc::clone(&handed));
         let mut s = open(&base, &toml).await;
         clients.push(tokio::spawn(async move {
             while let Some(run) = s.run(60_000).await {
-                applied.lock().unwrap().entry(run["operation_id"].as_str().unwrap().to_string()).or_default().insert(i);
+                let key = run["operation_id"].as_str().unwrap().to_string();
+                handed.lock().unwrap().push((i, run["slot"].as_u64().unwrap(), key.clone()));
+                applied.lock().unwrap().entry(key).or_default().insert(i);
                 ack(&base, run["run_id"].as_str().unwrap(), true).await;
             }
         }));
@@ -327,13 +339,111 @@ async fn two_clients_under_a_partition_are_handed_one_key_per_slot() {
     let cut_apart = poll_until(|| by_both(&applied.lock().unwrap()) >= 1, 20_000).await;
     let keys = applied.lock().unwrap().clone();
     assert!(cut_apart, "cut apart, both sides hand a slot to their clients: {keys:?}");
-    assert!(keys.keys().all(|k| k.starts_with("sched/close/")), "every run is keyed by its slot: {keys:?}");
-    // One key per slot: a slot handed to both clients is one key, so a deduplicating destination applies it once.
-    let slots: BTreeSet<&str> = keys.keys().map(|k| k.rsplit('/').next().unwrap()).collect();
-    assert_eq!(slots.len(), keys.len(), "one key per slot: {keys:?}");
+    // Counted per slot across both clients: each run's key is its own slot's, so the two sides' runs of one slot meet
+    // under one key at a deduplicating destination; each client is handed a slot at most once; and no slot is handed
+    // more than once per side.
+    let handed = handed.lock().unwrap().clone();
+    let mut per_slot: BTreeMap<u64, Vec<(usize, String)>> = BTreeMap::new();
+    for (client, slot, key) in &handed {
+        assert_eq!(key, &format!("sched/close/{slot}"), "a run's key is its slot's: {handed:?}");
+        per_slot.entry(*slot).or_default().push((*client, key.clone()));
+    }
+    for (slot, runs) in &per_slot {
+        let clients: BTreeSet<usize> = runs.iter().map(|(c, _)| *c).collect();
+        assert_eq!(clients.len(), runs.len(), "slot {slot} handed twice to one client: {runs:?}");
+        let keys: BTreeSet<&String> = runs.iter().map(|(_, k)| k).collect();
+        assert_eq!(keys.len(), 1, "slot {slot} handed under more than one key: {runs:?}");
+    }
+    assert!(per_slot.values().any(|r| r.len() == 2), "a slot handed to both clients: {per_slot:?}");
 
     for ag in [&a, &b] { ag.task_ctx.kv_state.frame_filter.pin().remove(&40); }
     for c in clients { c.abort(); }
+    a.shutdown().await;
+    b.shutdown().await;
+}
+
+/// The 409 is the loop's own check, so a stream racing another — or an application's `run_schedule` — for one id is
+/// told `schedule_running`, never `invalid schedule`.
+#[tokio::test]
+async fn an_id_the_node_already_runs_is_a_409_from_the_loops_own_check() {
+    let (agent, _sink, base, _band) = node(vec![], alloc_port()).await;
+    let decl: crate::capability_config::ScheduleDecl = toml::from_str::<std::collections::BTreeMap<String, Vec<crate::capability_config::ScheduleDecl>>>(&schedule_toml("app", 60, "skip"))
+        .unwrap().remove("schedule").unwrap().remove(0);
+    let _app = agent.run_schedule(&decl, |_run| async { Ok(()) }).unwrap();
+    let r = Stream::open(&base, &schedule_toml("app", 60, "skip")).await;
+    assert_eq!(r.status(), 409);
+    assert_eq!(r.json::<serde_json::Value>().await.unwrap()["error"], "schedule_running");
+    agent.shutdown().await;
+}
+
+/// **A stream whose node does not match `holders` says so**: a `status` event `not_eligible`, not silence.
+#[tokio::test]
+async fn a_node_outside_the_band_tells_its_client_not_eligible() {
+    let (agent, _sink, base, _band) = node(vec![], alloc_port()).await;
+    let toml = "[[schedule]]\nid = \"close\"\nperiod_secs = 1\n[schedule.holders]\nns = \"ledger\"\nname = \"nobody\"\n";
+    let mut s = open(&base, toml).await;
+    let mut said = None;
+    while let Some((event, data)) = s.next(10_000).await {
+        assert_ne!(event, "run", "a node outside the band runs nothing: {data}");
+        if event == "status" { said = Some(data); break; }
+    }
+    let said = said.expect("the stream says why it hands out nothing");
+    assert_eq!(said["reason"], "not_eligible", "{said}");
+    assert_eq!(said["schedule"], "close");
+    agent.shutdown().await;
+}
+
+/// **A client that stalls loses the holding to another node.** Two nodes, each with a client; the stalled client's node
+/// holds first (an id is chosen whose ring it wins). Its client takes a run and never answers: the run overruns its
+/// period, the node stands down — `stood_down`, said on its stream — and the healthy client's node holds and is handed
+/// the slots, while the stalled client is handed nothing more.
+#[tokio::test]
+async fn a_stalled_clients_node_stands_down_and_the_healthy_one_takes_the_slots() {
+    let ports = [alloc_port(), alloc_port()];
+    let ids: Vec<NodeId> = ports.iter().map(|p| NodeId::new("127.0.0.1", *p).unwrap()).collect();
+    // An id whose ring the first node wins between the two, so the plant (no stand-down) is seen re-holding there.
+    let cap = || {
+        let (attr, value) = crate::election::rule_attribute();
+        Capability::new(CANDIDATE_NS, "x").with(attr, value)
+    };
+    let pair: Vec<(NodeId, Capability)> = ids.iter().map(|n| (n.clone(), cap())).collect();
+    let id = (0..200).map(|n| format!("stall-{n}")).find(|id| crate::election::elect(&format!("sched/{id}"), &pair) == Some(&ids[0]))
+        .expect("an id the first node wins");
+    let (a, sink_a, base_a, _ba) = node(vec![ids[1].clone()], ports[0]).await;
+    let (b, _sb, base_b, _bb) = node(vec![ids[0].clone()], ports[1]).await;
+    let toml = schedule_toml(&id, 1, "skip");
+
+    // The stalled client: takes runs, answers none.
+    let stalled: Arc<std::sync::Mutex<Vec<u64>>> = Arc::default();
+    let mut sa = open(&base_a, &toml).await;
+    let first = sa.run(15_000).await.expect("the first node holds and hands its client a run");
+    stalled.lock().unwrap().push(first["slot"].as_u64().unwrap());
+    let st = Arc::clone(&stalled);
+    let stalled_reader = tokio::spawn(async move {
+        while let Some((event, data)) = sa.next(60_000).await {
+            if event == "run" { st.lock().unwrap().push(data["slot"].as_u64().unwrap()); }
+        }
+    });
+    // The healthy client, on the other node.
+    let healthy: Arc<std::sync::Mutex<Vec<u64>>> = Arc::default();
+    let h = Arc::clone(&healthy);
+    let base = base_b.clone();
+    let mut sb = open(&base_b, &toml).await;
+    let healthy_reader = tokio::spawn(async move {
+        while let Some(run) = sb.run(60_000).await {
+            h.lock().unwrap().push(run["slot"].as_u64().unwrap());
+            ack(&base, run["run_id"].as_str().unwrap(), true).await;
+        }
+    });
+    assert!(poll_until(|| traced(&sink_a, RUN_RULE, "work_overran") >= 1, 10_000).await, "the stalled run overruns");
+    assert!(poll_until(|| traced(&sink_a, RUN_RULE, "stood_down") >= 1, 5_000).await, "the stalled client's node stands down");
+    assert!(poll_until(|| healthy.lock().unwrap().len() >= 3, 20_000).await,
+        "the healthy client's node takes the slots: {:?}", healthy.lock().unwrap());
+    let stalled_now = stalled.lock().unwrap().clone();
+    let healthy_now = healthy.lock().unwrap().clone();
+    assert!(stalled_now.len() <= 2, "the stalled client is handed nothing once its node stood down: {stalled_now:?} vs {healthy_now:?}");
+    stalled_reader.abort();
+    healthy_reader.abort();
     a.shutdown().await;
     b.shutdown().await;
 }

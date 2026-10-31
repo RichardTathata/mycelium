@@ -20,6 +20,7 @@ import {
   installedEveVersion,
   loadEveAgent,
   runEveSchedules,
+  scheduleIdProblem,
   serveEveTools,
   type EveAgent,
   type LoadOptions,
@@ -449,4 +450,35 @@ describe("the MCP answers", () => {
     expect(declared.skills).toEqual([[agent.name, "instructions"]]);
     expect(prompts[0][2]).toMatchObject({ system: "You are a weather-focused assistant.\n", userTemplate: "{{input}}" });
   });
+});
+
+test("a schedule whose fleet id the gateway would refuse is refused at load, by the server's rule", async () => {
+  expect(scheduleIdProblem("weather.holder")).toContain(".holder");
+  expect(scheduleIdProblem("a..b")).toContain("..");
+  expect(scheduleIdProblem(".a")).toContain("`.`");
+  expect(scheduleIdProblem("a/b")).toContain("key segment");
+  expect(scheduleIdProblem("weather.daily")).toBeNull();
+  const e = await refusal(agentDir({ ...WEATHER, "schedules/holder.md": "---\ncron: 0 9 * * *\n---\nGo.\n" }));
+  expect(e.refused.map((r) => r.entry)).toEqual(["schedules/holder.md"]);
+  expect(e.refused[0].reason).toContain("`weather.holder` ends in `.holder`");
+});
+
+test("runEveSchedules closes every stream when one fails, and rejects with that failure", async () => {
+  const agent = await loadEveAgent(agentDir({
+    ...WEATHER,
+    "schedules/a.ts": 'export default { cron: "* * * * *", async run() {} };\n',
+    "schedules/b.ts": 'export default { cron: "* * * * *", async run() {} };\n',
+  }), opts());
+  const seen: Record<string, AbortSignal> = {};
+  const refused = new Error("409 schedule_running");
+  const fake = {
+    runSchedule: (decl: { id: string }, _work: unknown, o: { signal: AbortSignal }) => {
+      seen[decl.id] = o.signal;
+      if (decl.id === "weather.a") return new Promise((_, reject) => setTimeout(() => reject(refused), 10));
+      // The other stream runs until it is closed.
+      return new Promise<void>((resolve) => o.signal.addEventListener("abort", () => resolve(), { once: true }));
+    },
+  } as unknown as Parameters<typeof runEveSchedules>[1];
+  await expect(runEveSchedules(agent, fake)).rejects.toBe(refused);
+  expect(seen["weather.b"].aborted).toBe(true);
 });

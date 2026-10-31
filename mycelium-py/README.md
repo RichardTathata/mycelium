@@ -276,7 +276,7 @@ async for req in agent.rpc_serve("echo"):
 
 Sends a reply to an in-flight RPC request.
 
-#### `schedule_runs(decl) → AsyncIterator[ScheduleRun]` / `schedule_ack(run, error=None)`
+#### `schedule_runs(decl, on_status=None) → AsyncIterator[ScheduleRun]` / `schedule_ack(run, error=None)`
 
 Declare a `[[schedule]]` through the gateway and receive its runs (adopter-surface Y12, scope `schedule:run`). The node
 this agent is connected to stands in the schedule's holder band while the stream is open, so it must match `holders`:
@@ -294,8 +294,10 @@ async for run in agent.schedule_runs(decl):
 Answer every run within one period. A run you never answer — the stream closed, the process went away — is traced
 `unacknowledged` and its slot is not recorded, so the next holder decides it. A second answer, or one from another
 principal, raises `UnservedRunError`; a declaration the loader refuses, or an id the node already runs, raises
-`ScheduleRefusedError`. A partition runs a slot on each side under one key: carry `operation_id` to a destination that
-deduplicates.
+`ScheduleRefusedError`. A client that stays connected but stalls makes its node stand down for ten periods so another
+node holds; `on_status` is told why a stream hands out nothing (`not_eligible`: the node does not match `holders`;
+`warming_up`; `not_holder`; `stood_down`). A partition runs a slot on each side under one key: carry `operation_id` to
+a destination that deduplicates. Values are written as TOML basic strings (`toml_basic_string`).
 
 #### `scatter_gather(targets, method, payload, *, min_ok, timeout_secs) → list[dict]`
 

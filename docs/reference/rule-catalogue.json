@@ -1847,7 +1847,8 @@
             "not_due",
             "already_ran",
             "last_ahead",
-            "ignored_last_far_ahead"
+            "ignored_last_far_ahead",
+            "stood_down"
           ]
         },
         {
@@ -1867,7 +1868,7 @@
         }
       ],
       "effects": [
-        "the application's work under the idempotency key `sched/{id}/{slot}`, given one period — or, for a client's schedule (Y12), the run handed to the client on `GET /gateway/schedules/run` and done when it acknowledges, a run never acknowledged traced `unacknowledged` and not recorded; this node's `sched/{id}/last/{node}`; the holder's advertisement `cap/{node}/schedule/{id}.holder`, which evaporates when it stops (the lease), withdrawn when work overruns or a run goes unacknowledged"
+        "the application's work under the idempotency key `sched/{id}/{slot}`, given one period — or, for a client's schedule (Y12), the run handed to the client on `GET /gateway/schedules/run` and done when it acknowledges, a run never acknowledged traced `unacknowledged` and not recorded; this node's `sched/{id}/last/{node}`; the holder's advertisement `cap/{node}/schedule/{id}.holder`, which evaporates when it stops (the lease), withdrawn when work overruns — and, for a client's schedule, the candidacy too for the stand-down (`stood_down`), so another node holds; a client's stream is told each change of what the loop says when it runs nothing (a `status` event)"
       ],
       "guards": [
         "other"
@@ -1891,10 +1892,12 @@
         "a_run_recorded_too_far_ahead_is_left_out_said_once_and_the_schedule_runs",
         "a_client_receives_its_schedules_runs_and_an_acknowledged_run_records_its_slot",
         "a_run_never_acknowledged_is_traced_and_its_slot_is_not_recorded",
-        "two_clients_under_a_partition_are_handed_one_key_per_slot"
+        "two_clients_under_a_partition_are_handed_one_key_per_slot",
+        "a_stalled_clients_node_stands_down_and_the_healthy_one_takes_the_slots",
+        "a_node_outside_the_band_tells_its_client_not_eligible"
       ],
       "trace": {
-        "partial": "every run, failure and overrun; a change to not_holder, not_eligible, warming_up, last_ahead, ignored_last_far_ahead or declaration_mismatch, once; a tick that changes nothing records nothing"
+        "partial": "every run, failure and overrun; a change to not_holder, not_eligible, warming_up, last_ahead, ignored_last_far_ahead, stood_down or declaration_mismatch, once; a tick that changes nothing records nothing"
       },
       "summary": "After a warm-up, the rendezvous winner among the live candidates that declare the same period and phase holds and runs the slot due, under the key `sched/{id}/{slot}`, within one period; a partition has a holder on each side, and only a destination that deduplicates makes that one effect — the voluntary singleton, not a lock."
     },

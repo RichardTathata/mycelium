@@ -48,8 +48,14 @@ async def test_a_schedule_declared_through_the_gateway_hands_the_client_its_runs
         assert runs[1].slot > runs[0].slot, "one run per slot, in order"
         with pytest.raises(UnservedRunError):
             agent.schedule_ack(runs[0])
-        # The slot the client acknowledged is the fleet's last run.
-        last = agent.get(f"sched/{decl.id}/last/{agent.health()['node_id']}")
+        # The slot the client acknowledged is the fleet's last run — written after the answer, so polled.
+        key = f"sched/{decl.id}/last/{agent.health()['node_id']}"
+        last = None
+        for _ in range(50):
+            last = agent.get(key)
+            if last is not None and int(last.split()[0]) >= runs[1].slot:
+                break
+            await asyncio.sleep(0.2)
         assert last is not None and int(last.split()[0]) >= runs[1].slot
     finally:
         band.drop()
@@ -64,3 +70,22 @@ async def test_a_declaration_the_loader_refuses_is_refused_by_name() -> None:
             pass
     assert e.value.status == 422
     assert "period_secs" in e.value.detail
+
+
+@pytest.mark.asyncio
+async def test_a_node_outside_the_band_says_not_eligible() -> None:
+    agent = MyceliumAgent(TEST_HOST, TEST_PORT)
+    decl = ScheduleDeclaration(f"py-none-{uuid.uuid4().hex[:8]}", 1, ("py-sched", "nobody-advertises-this"))
+    said: list = []
+
+    async def until_said() -> None:
+        async for _ in agent.schedule_runs(decl, on_status=said.append):
+            raise AssertionError("a node outside the band hands out no run")
+
+    task = asyncio.ensure_future(until_said())
+    for _ in range(100):
+        if said:
+            break
+        await asyncio.sleep(0.1)
+    task.cancel()
+    assert said[:1] == ["not_eligible"], said

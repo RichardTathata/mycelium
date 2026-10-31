@@ -1074,7 +1074,9 @@ stream is open: the node is a candidate in the band, elected by the same rendezv
 event with the slot, the kind and `sched/{id}/{slot}`; `POST /gateway/schedules/ack` answers it, from the principal it
 was handed to only, within the run's one period. The client's acknowledgement is the delivery this row depends on: a
 run handed out and never answered is traced `sched.run` / `unacknowledged`, its slot not recorded, and the node stops
-holding, so the next holder decides the slot as not yet run — on time, or by `sched.missed` with its reason. The verbs
+holding, so the next holder decides the slot as not yet run — on time, or by `sched.missed` with its reason; a client
+that stays connected and stalls makes its node stand down (`stood_down`, ten periods), so another node's client holds,
+and a stream that hands out nothing says why (`status`: `not_eligible`, …). The verbs
 are `scheduleRuns` / `scheduleAck` / `runSchedule` (`mycelium-ts`) and `schedule_runs` / `schedule_ack`
 (`mycelium-py`). The Eve loader reads `schedules/<name>.md` and `.ts`; `cronAsPeriod` reads a cron as a period and a
 phase in UTC when it is one, and `runEveSchedules` runs them as `<agent>.<name>`.

@@ -116,8 +116,7 @@ export class UnservedRunError extends Error {
 
 /** The `[[schedule]]` TOML a {@link ScheduleDeclaration} declares — what `scheduleRuns` sends. */
 export function scheduleToml(decl: ScheduleDeclaration): string {
-  // A TOML basic string reads JSON's escapes, so `JSON.stringify` quotes each value safely.
-  const q = (v: string) => JSON.stringify(v);
+  const q = tomlBasicString;
   const lines = [
     "[[schedule]]",
     `id = ${q(decl.id)}`,
@@ -129,6 +128,23 @@ export function scheduleToml(decl: ScheduleDeclaration): string {
     `name = ${q(decl.holders.name)}`,
   ];
   return lines.join("\n") + "\n";
+}
+
+/**
+ * `value` as a TOML basic string (TOML 1.0 § String): `"` and `\\` escaped, the controls TOML forbids raw (U+0000–U+001F
+ * and U+007F) as their short escape or `\\uXXXX`, every other character — a non-BMP one included — written as itself.
+ * Not JSON's escaping: `JSON.stringify` leaves U+007F raw, which TOML refuses.
+ */
+export function tomlBasicString(value: string): string {
+  const short: Record<string, string> = { "\b": "\\b", "\t": "\\t", "\n": "\\n", "\f": "\\f", "\r": "\\r", '"': '\\"', "\\": "\\\\" };
+  let out = '"';
+  for (const ch of value) {
+    const code = ch.codePointAt(0)!;
+    if (short[ch] !== undefined) out += short[ch];
+    else if (code < 0x20 || code === 0x7f) out += "\\u" + code.toString(16).toUpperCase().padStart(4, "0");
+    else out += ch;
+  }
+  return out + '"';
 }
 
 function wholeNumber(v: number, field: string): number {
@@ -770,7 +786,10 @@ export class MyceliumAgent {
    * The node must match `holders` — advertise that capability on it, e.g. with {@link declareUnits}. Scope
    * `schedule:run`. Refusals throw {@link ScheduleRefusedError}.
    */
-  async *scheduleRuns(decl: ScheduleDeclaration, options: { signal?: AbortSignal } = {}): AsyncGenerator<ScheduleRun> {
+  async *scheduleRuns(
+    decl: ScheduleDeclaration,
+    options: { signal?: AbortSignal; onStatus?: (reason: string) => void } = {},
+  ): AsyncGenerator<ScheduleRun> {
     const url = this._sseUrl("/gateway/schedules/run", { toml: scheduleToml(decl) });
     const refusal = (status: number, body: unknown): Error | undefined => {
       const b = body as { error?: string; detail?: string } | undefined;
@@ -784,6 +803,12 @@ export class MyceliumAgent {
       slot_start_ms: number; operation_id: string;
     };
     const events = sseStream<ScheduleRun | null>({ url, headers: this.auth }, (data, event) => {
+      // What the node says when it hands out nothing — `not_eligible` (it does not match `holders`), `warming_up`,
+      // `not_holder`, `stood_down`, … — once per change.
+      if (event === "status") {
+        options.onStatus?.(String((JSON.parse(data) as { reason?: string }).reason ?? ""));
+        return null;
+      }
       if (event !== "run") return null; // `declared`, the stream's first word
       const r = JSON.parse(data) as Raw;
       return {
@@ -814,12 +839,15 @@ export class MyceliumAgent {
 
   /**
    * Run `work` for each run of a schedule, answering each: resolved, the slot is run; thrown, the work failed. Returns
-   * when the stream ends or `signal` aborts. See {@link scheduleRuns}.
+   * when the stream ends or `signal` aborts. An answer that does not land — refused (`UnservedRunError`: the run ended
+   * past its period) or lost to the network — is a missed run, not the end of the schedule: the node did not record
+   * the slot and decides it as not yet run, and this keeps reading. `onAckError` is told of each. See
+   * {@link scheduleRuns}.
    */
   async runSchedule(
     decl: ScheduleDeclaration,
     work: (run: ScheduleRun) => Promise<void> | void,
-    options: { signal?: AbortSignal } = {},
+    options: { signal?: AbortSignal; onStatus?: (reason: string) => void; onAckError?: (run: ScheduleRun, error: unknown) => void } = {},
   ): Promise<void> {
     for await (const run of this.scheduleRuns(decl, options)) {
       let failure: string | undefined;
@@ -828,7 +856,11 @@ export class MyceliumAgent {
       } catch (e) {
         failure = e instanceof Error ? e.message : String(e);
       }
-      await this.scheduleAck(run, failure);
+      try {
+        await this.scheduleAck(run, failure);
+      } catch (e) {
+        options.onAckError?.(run, e);
+      }
     }
   }
 

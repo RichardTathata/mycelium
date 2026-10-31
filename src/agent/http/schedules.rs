@@ -11,12 +11,24 @@
 //! never answers, the run is traced `unacknowledged` (or `work_overran` past its period), the slot is not recorded,
 //! and this node withdraws its holding: the next holder — another client's node, or this one when a client comes
 //! back — decides the slot as one not yet run, on time or as a missed run under the policy, traced with its reason.
-//! Closing the stream ends the loop and withdraws the candidacy.
+//! Closing the stream ends the loop and withdraws the candidacy. **A client that stays connected and stalls** — its run
+//! overruns the period — makes this node **stand down**: the holding and the candidacy are withdrawn for
+//! [`stand_down_ms`](crate::schedule::stand_down_ms) (ten periods, at least twice the warm-up), so another node's
+//! candidate holds the slots in the meantime.
+//!
+//! **What the client is told.** Besides its runs, the stream sends a `status` event each time what the loop says when it
+//! runs nothing changes — `not_eligible` (this node does not match `holders`), `warming_up`, `not_holder`,
+//! `stood_down`, `declaration_mismatch`, `last_ahead` — so a stream that hands out nothing says why.
+//!
+//! **A `GET` that changes state**, as `GET /gateway/rpc/serve/{kind}` is: opening the stream makes this node a candidate
+//! and its answers record slots under `sched/`. On a gateway with a token model it needs `schedule:run`; on an open
+//! gateway — only on loopback unless `gateway_allow_unauthenticated` — any local process, a web page's request
+//! included, can open one, as it can open a serve stream.
 
 use super::*;
 
 use crate::capability_config::ScheduleDecl;
-use crate::schedule::{spawn_schedule, RunFailure, RunKind, ScheduledRun};
+use crate::schedule::{spawn_schedule, LoopOptions, RunFailure, RunKind, ScheduledRun, SpawnError};
 
 /// A run handed to a client and not yet acknowledged: the principal that opened the stream, and where its answer goes.
 pub(super) struct PendingRun {
@@ -24,9 +36,12 @@ pub(super) struct PendingRun {
     answer: tokio::sync::mpsc::Sender<Result<(), String>>,
 }
 
-/// The runs handed out on every open stream, by run id (`{schedule}/{slot}/{n}`). Each entry is removed by the answer
+/// The runs handed out on every open stream, by run id (`{schedule}/{slot}/{random}`). Each entry is removed by the answer
 /// that takes it, or when its run ends unanswered — overran or abandoned — so the table holds only runs in flight.
 pub(super) type PendingRuns = papaya::HashMap<String, PendingRun>;
+
+/// The seam stream a run id's random part is drawn on (a draw happens only when a client stream hands out a run).
+const RUN_ID_STREAM: &str = "sched/run-id";
 
 /// `GET /gateway/schedules/run?toml=…` — the query names one `[[schedule]]` in the unit file's own shape, and nothing
 /// else.
@@ -67,9 +82,10 @@ impl Drop for ClearRun {
 ///
 /// Events: `declared` once (`{"schedule", "node"}`), then a `run` per run this node decides while holding:
 /// `{"run_id", "schedule", "slot", "kind": "on_time"|"late"|"for_gap", "first_slot", "slot_start_ms",
-/// "operation_id"}`. Answer each with `POST /gateway/schedules/ack`. Refused: an unreadable query or TOML (400), a
-/// section other than one `[[schedule]]` or a declaration the unit-file loader refuses (422, by name), an id this
-/// node already runs (409 `schedule_running`). Scope `schedule:run`.
+/// "operation_id"}`, and a `status` (`{"schedule", "reason"}`) each time what it says when it runs nothing changes.
+/// Answer each run with `POST /gateway/schedules/ack`. Refused: an unreadable query or TOML, or a section other than
+/// `[[schedule]]` (400, naming it); not exactly one `[[schedule]]`, or a declaration the unit-file loader refuses
+/// (422, by name); an id this node already runs (409 `schedule_running`). Scope `schedule:run`.
 pub(super) async fn gw_schedule_run(
     State(ctx): State<Arc<HttpCtx>>,
     caller: Option<Extension<ResolvedPrincipal>>,
@@ -92,13 +108,14 @@ pub(super) async fn gw_schedule_run(
     // The stream's channel: one event at a time, so a run is handed out only once the one before it has been taken.
     let (tx, rx) = tokio::sync::mpsc::channel::<Event>(1);
     let pending = Arc::clone(&ctx.schedule_runs);
-    let seq = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let work_tx = tx.clone();
     let work = move |run: ScheduledRun| {
-        let (tx, pending, principal, seq) = (work_tx.clone(), Arc::clone(&pending), Arc::clone(&principal), Arc::clone(&seq));
+        let (tx, pending, principal) = (work_tx.clone(), Arc::clone(&pending), Arc::clone(&principal));
         async move {
-            let n = seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let run_id = format!("{}/{}/{n}", run.schedule, run.slot);
+            // Unguessable, as `rpc/respond`'s nonce is: a run is answered by whoever holds its id and the principal it
+            // was handed to, and under one shared bearer the principal alone tells two clients apart from nothing.
+            let draw = mycelium_core::sim_seam::rng_u64_from(RUN_ID_STREAM, 0);
+            let run_id = format!("{}/{}/{draw:016x}", run.schedule, run.slot);
             let (answer, mut answered) = tokio::sync::mpsc::channel(1);
             pending.pin().insert(run_id.clone(), PendingRun { principal, answer });
             let _clear = ClearRun { pending, run_id: run_id.clone() };
@@ -125,17 +142,28 @@ pub(super) async fn gw_schedule_run(
         }
     };
     let id = decl.id.clone();
-    // One loop per id per node, whoever runs it — an application's `run_schedule` or another client's stream.
-    if ctx.agent_ctx.schedules_running.pin().contains_key(id.as_str()) {
-        return (StatusCode::CONFLICT, Json(json!({
-            "error": "schedule_running",
-            "schedule": id,
-            "detail": "this node already runs a schedule with this id: one loop per id per node",
-        }))).into_response();
-    }
-    let handle = match spawn_schedule(&ctx.agent_ctx, &decl, work) {
+    // What the loop says when it runs nothing, as it changes: rare (once per change), so unbounded.
+    let (status_tx, status_rx) = tokio::sync::mpsc::unbounded_channel::<&'static str>();
+    let options = LoopOptions {
+        stand_down_on_stall: true,
+        on_status: Some(Arc::new(move |reason| {
+            let _ = status_tx.send(reason);
+        })),
+    };
+    // One loop per id per node, whoever runs it — an application's `run_schedule` or another client's stream. The
+    // check is the loop's own insert, so two streams racing for one id cannot both pass it.
+    let handle = match spawn_schedule(&ctx.agent_ctx, &decl, options, work) {
         Ok(h) => h,
-        Err(e) => return (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({"error": "invalid schedule", "detail": e.to_string()}))).into_response(),
+        Err(SpawnError::Running(e)) => {
+            return (StatusCode::CONFLICT, Json(json!({
+                "error": "schedule_running",
+                "schedule": id,
+                "detail": e.to_string(),
+            }))).into_response();
+        }
+        Err(SpawnError::Invalid(e)) => {
+            return (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({"error": "invalid schedule", "detail": e.to_string()}))).into_response();
+        }
     };
     let declared = Event::default().event("declared").data(json!({
         "schedule": id,
@@ -149,7 +177,17 @@ pub(super) async fn gw_schedule_run(
         let event = rx.recv().await?;
         Some((Ok::<_, Infallible>(event), (rx, handle)))
     });
-    Sse::new(futures_util::StreamExt::chain(first, runs)).keep_alive(KeepAlive::default()).into_response()
+    let status_id = id.clone();
+    let statuses = futures_util::stream::unfold(status_rx, move |mut status_rx| {
+        let id = status_id.clone();
+        async move {
+            let reason = status_rx.recv().await?;
+            let event = Event::default().event("status").data(json!({"schedule": id, "reason": reason}).to_string());
+            Some((Ok::<_, Infallible>(event), status_rx))
+        }
+    });
+    let events = futures_util::stream::select(runs, statuses);
+    Sse::new(futures_util::StreamExt::chain(first, events)).keep_alive(KeepAlive::default()).into_response()
 }
 
 /// `POST /gateway/schedules/ack` — answer a run your own stream handed you.
