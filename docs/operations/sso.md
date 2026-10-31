@@ -57,11 +57,24 @@ cfg.oidc = Some(mycelium::OidcConfig {
   but a refresh forced by an unknown `kid` happens **at most once every 30 s**
   (`JWKS_REFRESH_COOLDOWN`), so a client sending tokens with invented `kid`s cannot
   make the node call your IdP once per request; a token signed under a newly
-  rotated key is accepted at most one cooldown after its first use. A failed fetch
-  keeps the previous keys and is retried on the same 30 s spacing — except while
-  the node holds **no keys at all** (an IdP unreachable at start), when the retry
-  comes after **2 s** (`JWKS_EMPTY_RETRY_BACKOFF`), so a node does not refuse every
-  token for 30 s after the IdP recovers. A token whose `kid` is already cached
+  rotated key is accepted at most one cooldown after its first use. **The JWKS the
+  IdP serves is the whole set of keys that may sign:** a successful fetch replaces
+  the cached keys with what it returned, so a key the IdP has withdrawn stops
+  verifying tokens at the next refresh — an **empty** set withdraws every key. A
+  **failed** fetch (unreachable, a timeout, a non-2xx status, a host the egress
+  list denies, a body that is not a JWKS) keeps the previous keys and is retried on
+  the same 30 s spacing — except while no fetch has **ever succeeded** (an IdP
+  unreachable at start), when the retry comes after **2 s**
+  (`JWKS_EMPTY_RETRY_BACKOFF`), so a node does not refuse every token for 30 s after
+  the IdP recovers. Kept keys have a ceiling: **24 h since the last successful
+  fetch** (`JWKS_MAX_STALE`), whether or not any token was seen in between — a
+  node quiet over a weekend refreshes on its first token, and if that one fetch
+  fails, that token and every token until a fetch succeeds are refused — so an
+  outage cannot leave a node trusting keys of any age; the fetch keeps being
+  retried on its spacing and each failure is logged. The JWKS is read **key by
+  key**: a key of a kind the verifier cannot read or build (a post-quantum `alg`,
+  an ES512/P-521 key) is dropped with a warning naming how many were published
+  and how many usable, and the rest are the set. A token whose `kid` is already cached
   **never waits for the IdP** (past the TTL it is checked against the cached keys
   while they refresh in the background). Requests that do need a fetch share one
   (single-flight), and that fetch — discovery and the JWKS request together — has
@@ -86,8 +99,9 @@ non-empty it must permit the `issuer` and `jwks_uri` hosts. The start-time check
 `issuer` and a `jwks_uri` **you configured** — either off the list and **the node refuses to start**
 naming it (since 2.20.0, `an_oidc_issuer_the_egress_policy_denies_refuses_the_start`). A `jwks_uri`
 taken from discovery is checked only when keys are fetched: off the list, the node starts, logs
-`oidc: the egress policy does not permit the JWKS host; no keys, every token refused`, and answers every
-JWT 401. Google is the common case — issuer `accounts.google.com`, keys at `www.googleapis.com` — so allow
+`oidc: the egress policy does not permit the JWKS host; the held keys are kept, none fetched`, and — holding
+no keys on a cold start — answers every JWT 401; keys already held serve for at most 24 h after the last
+successful fetch (`JWKS_MAX_STALE`), then every token is refused. Google is the common case — issuer `accounts.google.com`, keys at `www.googleapis.com` — so allow
 both, or set `jwks_uri` explicitly. Since 2.23.0 a redirect from either URL is checked against the list
 too. Network-layer egress control must allow the same hosts.
 

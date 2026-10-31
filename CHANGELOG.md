@@ -11,6 +11,15 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **A successful empty JWKS withdraws the IdP's signing keys, and keys the IdP has not confirmed for 24 h are
+  refused** (external review 2026-10-31, F4; `docs/plans/external-review-2026-10-31.md` R4). The OIDC verifier read
+  a fetch that returned no keys as a failed fetch and kept the keys it held, so a key the issuer had withdrawn went
+  on verifying tokens; and nothing bounded how old kept keys could get while fetches failed. A fetch that succeeds
+  is now authoritative — the cache becomes what it returned, an empty set included — and a fetch that fails
+  (unreachable, timed out, **non-2xx**, egress-denied, not a JWKS) keeps the previous keys for at most
+  `JWKS_MAX_STALE` (24 h) after the last success, after which every token is refused until a fetch succeeds.
+  `docs/operations/sso.md` § `jwks_uri`; `deprecations.md` §75.
+
 - **A grant record the disk will not take is a refusal by name** (external review 2026-10-31, F2 — rows R2 and
   R3; D2). A door's `used/{door}` marker, the agent's `consumed` marker and a revocation's checkpoint and `revoked`
   records are on disk, fsynced, before the step they admit; a record the disk will not take refuses that step by name
