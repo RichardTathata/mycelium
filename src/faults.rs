@@ -61,7 +61,8 @@ pub enum Class {
     Recovery,
     /// A grant that is default-deny and holds across a restart (adopter-surface X3): the declaration's first
     /// grant-required `[[rule]]` driven on its own fleet — silence refuses, the declared issuer's grant admits one
-    /// call, the grant replays from the WAL.
+    /// call, the grant is back after a graceful restart (the exit-snapshot path; the restart that keeps only the WAL
+    /// is `grant_tests`').
     Grant,
 }
 
@@ -1855,7 +1856,7 @@ mod tests {
         assert_eq!(c.checks.len(), 5, "{c:?}");
         assert!(c.checks[0].name.starts_with("a grant-required tool is default-deny"), "{}", c.checks[0].name);
         assert!(c.checks[1].detail.contains("test-faults-stranger's issue refused by the evaluator") && c.checks[1].detail.contains("treasurer's issue: written"), "{}", c.checks[1].detail);
-        assert!(c.checks[2].detail.contains("back from the WAL") && c.checks[2].detail.contains("did not ask twice"), "{}", c.checks[2].detail);
+        assert!(c.checks[2].detail.contains("back (the exit-snapshot path)") && c.checks[2].detail.contains("did not ask twice"), "{}", c.checks[2].detail);
         assert!(c.checks[4].detail.contains("2 permitted for treasurer, 1 refused for test-faults-stranger"), "{}", c.checks[4].detail);
         assert!(c.exercised.iter().any(|e| e.id == "mesh.tls" && e.state == "enforced"), "{:?}", c.exercised);
         assert!(c.exercised.iter().any(|e| e.id == "persist.configured" && e.state == "enforced"), "{:?}", c.exercised);

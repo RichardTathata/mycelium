@@ -2262,15 +2262,20 @@ decision D2 on finding F2: a record that cannot be made durable is never a proce
   same path; a record the disk will not take answers **`503 not_durable`** (the node's state, not the request's — a
   retry is the answer) and the execution record says *failed*, where before the route answered `200` with
   `local_durability: failed` and a restart that kept only the WAL re-armed the grant for the rest of its window. The
-  in-memory revocation still stands in this process; a restart before the disk is repaired may re-arm the grant, so the
-  operator retries the revoke once `/health` no longer reports `wal_refusing_appends`. The issue-time checkpoint is
-  on the same path: a checkpoint the disk will not take issues no grant (`503 not_durable`).
+  in-memory revocation stands in this process only — repairing the writer records nothing by itself, so **any** restart
+  before the revoke is retried re-arms the grant; the supervisor owes a retry once `/health` no longer reports
+  `wal_refusing_appends`. The issue-time checkpoint, `…/issued` and `…/refused` are on the same path: an answer the
+  disk will not take is `503 not_durable`, no grant stands, and the request is still pending (the agent re-waits on it,
+  `GET /gateway/grants/pending` lists it).
+- **The two-door residual.** A call through `/mcp` is admitted at two doors, the gateway's and the provider's. If the
+  gateway's `used/gateway` lands and the provider's `used/provider` write fails, the gateway's use is spent (a retry
+  there answers `GrantUsed`, though nothing ran) while a direct call at the provider runs: a use is spent at the door
+  that admitted it, and a refusal at a later door does not give it back. One execution at most, either way.
 
-The request itself stays a buffered append (losing it to a crash means the agent asks again), and `…/issued` was
-already written on the receipt path, its rung in the supervisor's answer; a lost `…/issued` leaves the request standing
-un-answered — the agent re-waits on it, `GET /gateway/grants/pending` lists it, and the supervisor's re-issue is not
-`already_answered` (that refusal needs the `issued` or `refused` record present), so the grant is issued again against
-the same request. Under `sync_mode = "async"` or `"os"` each
+The request itself stays a buffered append (losing it to a crash means the agent asks again). A lost `…/issued`
+leaves the request standing un-answered — the agent re-waits on it, `GET /gateway/grants/pending` lists it, and the
+supervisor's re-issue is not `already_answered` (that refusal needs the `issued` or `refused` record present), so the
+grant is issued again against the same request. Under `sync_mode = "async"` or `"os"` each
 of these four writes is a per-call `fdatasync` the node would not otherwise make. A node without `[persistence]` is
 unchanged — its writes are in memory and it has never claimed a disk ([feature page](../features/grants.md)).
 **Operator note:** a node whose WAL writer is poisoned (`/health`: `wal_refusing_appends`) now refuses every

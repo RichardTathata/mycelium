@@ -341,7 +341,7 @@ pub(super) fn run(rep: &mut ClassReport, base: &GossipConfig, units: &[Unit], di
         Some(ok),
         format!(
             "issued before the stop: {issued_b_text}; after the restart the request and the grant are {}; the re-wait: {}; requests {count_before} → {count_after} ({}); request {request_b} consumed: {consumed_b}",
-            if back { "back from the WAL" } else { "MISSING" },
+            if back { "back (the exit-snapshot path)" } else { "MISSING" },
             match &after { Ok(Some(_)) => "admitted under the grant issued before the restart".to_string(), Ok(None) => "proceeded WITHOUT a grant".to_string(), Err(e) => format!("refused — {e}") },
             if count_after == count_before { "did not ask twice" } else { "ASKED AGAIN" },
         ),

@@ -21,7 +21,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `fdatasync`. The restart gate that showed a grant held across a restart went through `shutdown()`, whose exit
   snapshot is taken from the store, and so never exercised the WAL: a restart that keeps only the WAL is now a test
   of its own, for the grant records and for the acknowledged replica (under `async` and `flush`).
-  `deprecations.md` §77.
+  `deprecations.md` §77 (§75 and §76 are the two PRs beside this one, #712 and #714, in merge order).
 - **`mycelium doctor` names each guarantee's row of the shared-responsibility matrix** (adopter-surface Y10, decided by
   the maintainer on #707's review).
   - **Text form:** a line for a guarantee not enforced ends with `→ matrix: <row>`, and the enforced ones are listed

@@ -192,12 +192,14 @@ pub(crate) async fn decide_grant(ctx: &Arc<TaskCtx>, caller: Option<&ResolvedPri
     match decision {
         GrantDecision::Refuse { reason } => {
             let record = json!({ "schema": "mycelium.grant-refusal/1", "request": request, "issuer": issuer, "reason": reason.unwrap_or_default(), "at_ms": now_ms });
-            let written = write_record(ctx, format!("{key}/refused"), record.to_string().into_bytes()).await;
+            // On disk or `503 not_durable` (#713's review, round 2): a `200` carrying `local_durability: failed` is the
+            // shape the revoke lost; an answer that is not on disk is not an answer the agent can be held to.
+            let written = write_record_durable(ctx, format!("{key}/refused"), record.to_string().into_bytes()).await;
             ae_record_execution(ctx, &preflight, if written.is_ok() { super::action_evaluator::Execution::Completed } else { super::action_evaluator::Execution::Failed }).await;
             #[cfg(feature = "metrics")]
             metrics::counter!("mycelium_grants_refused_total").increment(1);
             set_pending_gauge(ctx, now_ms);
-            written.map(|receipt| GrantOutcome { receipt }).map_err(|e| GrantRefusal::door(StatusCode::INTERNAL_SERVER_ERROR, "write_failed", e))
+            written.map(|receipt| GrantOutcome { receipt }).map_err(|e| GrantRefusal::door(StatusCode::SERVICE_UNAVAILABLE, "not_durable", format!("the refusal was not recorded durably, so no answer stands — the request is still pending; retry once the WAL writer is repaired: {e}")))
         }
         GrantDecision::Issue { ttl_secs } => {
             let Some(tls) = ctx.tls.get() else {
@@ -254,13 +256,15 @@ pub(crate) async fn decide_grant(ctx: &Arc<TaskCtx>, caller: Option<&ResolvedPri
                 Ok(b) => b,
                 Err(e) => return Err(GrantRefusal::door(StatusCode::INTERNAL_SERVER_ERROR, "serialise", e.to_string())),
             };
-            let written = write_record(ctx, format!("{key}/issued"), bytes).await;
+            // On disk or `503 not_durable` (#713's review, round 2), by the path the checkpoint above took — the
+            // checkpoint guards this write: a writer that refuses appends refuses it first, and no grant is issued.
+            let written = write_record_durable(ctx, format!("{key}/issued"), bytes).await;
             // The execution record says what the write did (#673's review, finding 8).
             ae_record_execution(ctx, &preflight, if written.is_ok() { super::action_evaluator::Execution::Completed } else { super::action_evaluator::Execution::Failed }).await;
             #[cfg(feature = "metrics")]
             metrics::counter!("mycelium_grants_issued_total").increment(1);
             set_pending_gauge(ctx, now_ms);
-            written.map(|receipt| GrantOutcome { receipt }).map_err(|e| GrantRefusal::door(StatusCode::INTERNAL_SERVER_ERROR, "write_failed", e))
+            written.map(|receipt| GrantOutcome { receipt }).map_err(|e| GrantRefusal::door(StatusCode::SERVICE_UNAVAILABLE, "not_durable", format!("the grant was not recorded durably, so no grant stands — the request is still pending; retry once the WAL writer is repaired: {e}")))
         }
     }
 }
@@ -451,10 +455,10 @@ pub(crate) async fn revoke_grant(ctx: &Arc<TaskCtx>, caller: Option<&ResolvedPri
     // Both records on disk, or the route refuses by name (external review 2026-10-31, R3 — the sibling of the use
     // marker: a `200` with `local_durability: failed` was answered before, and a restart that kept only the WAL
     // re-armed the grant for the rest of its window). The in-memory revocation above already stands for this
-    // process — work under the grant is refused here until a restart; a restart before the disk is repaired may
-    // re-arm the grant, so the operator retries the revoke once `/health` no longer reports
-    // `wal_refusing_appends`. `503` because the refusal is the node's state, not the request's, and a retry is
-    // the answer.
+    // process — work under the grant is refused here until a restart. Repairing the writer records nothing by
+    // itself: **any** restart before the revoke is retried re-arms the grant, so the supervisor owes a retry, once
+    // `/health` no longer reports `wal_refusing_appends`. `503` because the refusal is the node's state, not the
+    // request's, and a retry is the answer.
     let record = json!({ "schema": "mycelium.grant-revocation/1", "request": request, "issuer": issuer, "reason": reason.unwrap_or_default(), "at_ms": now_ms, "checkpoint_seq": 2 });
     let written = match write_record_durable(ctx, format!("{key}/checkpoint"), cp).await {
         Ok(_) => write_record_durable(ctx, format!("{key}/revoked"), record.to_string().into_bytes()).await,
@@ -467,7 +471,7 @@ pub(crate) async fn revoke_grant(ctx: &Arc<TaskCtx>, caller: Option<&ResolvedPri
             metrics::counter!("mycelium_grants_revoked_total").increment(1);
             Ok(GrantOutcome { receipt })
         }
-        Err(e) => Err(GrantRefusal::door(StatusCode::SERVICE_UNAVAILABLE, "not_durable", format!("revocation not recorded durably — it stands in this process until a restart; retry once the WAL writer is repaired: {e}"))),
+        Err(e) => Err(GrantRefusal::door(StatusCode::SERVICE_UNAVAILABLE, "not_durable", format!("revocation not recorded durably — it stands in this process only, and any restart before this revoke is retried re-arms the grant; retry once the WAL writer is repaired: {e}"))),
     }
 }
 

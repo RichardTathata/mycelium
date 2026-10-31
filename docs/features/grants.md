@@ -36,7 +36,9 @@ This feature is turned on in code.
   (`grant:read`), `POST /gateway/grants/{agent}/{request}` (`grant:issue`) with `{"decision": "issue"|"refuse",
   "ttl_secs", "reason"}`, and `POST /gateway/grants/{agent}/{request}/revoke` (`grant:issue`) with `{"reason"}` at the
   node that issued. Issuing, refusing and revoking are actions the evaluator sees (`grant.issue` · `grant.refuse` ·
-  `grant.revoke` on `tool:{tool}@{agent node}`, the caller as the actor): a client holding `grant:issue` is not thereby
+  `grant.revoke` on `tool:{tool}@{agent node}`, the caller as the actor; a `503 not_durable` on revoke means the supervisor
+  owes a retry — until the retried revoke is on disk the revocation holds only in this process, and any restart re-arms the
+  grant, `deprecations.md` §77): a client holding `grant:issue` is not thereby
   an approver of everything, and a gateway with no evaluator answers nothing. A grant is issued for an agent on this
   node or on a fleet member this node holds the key of; the agent's node decides whether that issuer may
   ([`entitle_grants_from_fleet`](../../src/mandate/grant.rs)). [`gw_grants_stream`](../../src/agent/http/grants.rs) —

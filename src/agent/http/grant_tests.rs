@@ -1072,3 +1072,46 @@ async fn a_consumed_marker_the_disk_will_not_take_refuses_the_invocation_and_lea
     a.shutdown().await;
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// **An answer the disk will not take is no answer** (#713's review, round 2). With the writer poisoned, a refusal
+/// answers `503 not_durable` and writes no `refused` record — the request is still pending and the agent still waits —
+/// and an issue answers `503` from its checkpoint write, with no `issued` record; the writer repaired, the refusal
+/// lands. Seen failing with `refused` back on `write_record`: `200`.
+#[tokio::test]
+async fn an_answer_the_disk_will_not_take_is_refused_and_the_request_stays_pending() {
+    let (http_port, gossip_port) = (alloc_port(), alloc_port());
+    let opts = Opts { gossip_port: Some(gossip_port), persist: true, ..Opts::default() };
+    let dir = std::env::temp_dir().join(format!("x3-grant-{gossip_port}"));
+    let _ = std::fs::remove_dir_all(&dir);
+    let (a, _j, _ran) = node_with(http_port, opts).await;
+    let agent_principal = crate::agent::gateway_caller::node_principal(a.node_id());
+    let prefix = format!("grant/{agent_principal}/");
+    let requests = |a: &GossipAgent| crate::store::scan_kv_prefix(&a.task_ctx.kv_state, &prefix).into_iter().filter(|(k, _)| k.matches('/').count() == 2).count();
+    let args = serde_json::json!({"env": "prod", "replicas": 3});
+    let sm = a.agent_state_machine(policy(60_000));
+    sm.transition(ExecutionState::Planning).await.unwrap();
+    let (sm2, args2) = (Arc::clone(&sm), args.clone());
+    let waiting = tokio::spawn(async move { sm2.transition_invoking("deploy", &args2).await });
+    assert!(until(|| requests(&a) == 1, Duration::from_secs(5)).await);
+    let request = crate::store::scan_kv_prefix(&a.task_ctx.kv_state, &prefix).into_iter().find_map(|(k, _)| k.strip_prefix(prefix.as_str()).filter(|r| !r.contains('/')).map(str::to_string)).unwrap();
+    let path = format!("/gateway/grants/{agent_principal}/{request}");
+    let decide = |decision: &str| supervisor(http_port, "alice-secret", reqwest::Method::POST, &path, Some(serde_json::json!({"decision": decision, "ttl_secs": 60, "reason": "disk"})));
+    a.task_ctx.wal.get().unwrap().poison_for_test("the disk is gone").await.unwrap();
+    let (status, body) = decide("issue").await;
+    assert_eq!(status, 503, "an issue the disk will not take: {body}");
+    assert_eq!(body["error"], "not_durable", "{body}");
+    assert!(mycelium_core::ops::kv_get(&a.task_ctx, &format!("{prefix}{request}/issued")).is_none(), "no grant stands");
+    let (status, body) = decide("refuse").await;
+    assert_eq!(status, 503, "a refusal the disk will not take: {body}");
+    assert_eq!(body["error"], "not_durable", "{body}");
+    assert!(mycelium_core::ops::kv_get(&a.task_ctx, &format!("{prefix}{request}/refused")).is_none(), "no answer stands");
+    assert!(!waiting.is_finished(), "the agent still waits on its pending request");
+    // The disk is back: the refusal lands and the agent is refused.
+    a.task_ctx.wal.get().unwrap().trigger_snapshot().await.unwrap();
+    let (status, body) = decide("refuse").await;
+    assert_eq!(status, 200, "{body}");
+    let err = waiting.await.unwrap().expect_err("refused");
+    assert!(matches!(err, PolicyViolation::GrantRefused(_)), "{err}");
+    a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
