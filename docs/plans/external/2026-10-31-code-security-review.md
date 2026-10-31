@@ -1,7 +1,9 @@
 # Mycelium adversarial code security and architecture review
 
 *Vendored external document, received 2026-10-31. Reviewed commit `d656f50cbb6e4b5f1c7d4fb1ffc022d2bfd9e241`. The
-file-path links of the original are rendered here as repository-relative `file:line` references. The maintainer's
+file-path links of the original are rendered here as repository-relative `file:line` references; the
+`dependency-audit.json` the review says sits beside it is not vendored (its content is the four `cargo audit` warnings
+the plan's §2 re-derives). The maintainer's
 verification of each finding and the work it led to are in
 [`../external-review-2026-10-31.md`](../external-review-2026-10-31.md).*
 

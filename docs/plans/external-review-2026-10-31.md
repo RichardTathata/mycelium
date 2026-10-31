@@ -1,6 +1,6 @@
 # The external code security review of 2026-10-31 — verification and repairs
 
-**Status:** agreed with the maintainer on 2026-10-31, rev 0.2 (rev 0.2 takes the reviewer's two qualifications of the verification, 2026-10-31: F4 is P1 regardless of token lifetime, and F3's window is unmeasured). Nine rows; R1, R2+R3 and R4 started. The review is vendored at
+**Status:** agreed with the maintainer on 2026-10-31, rev 0.3 (rev 0.2 takes the reviewer's two qualifications of the verification, 2026-10-31: F4 is P1 regardless of token lifetime, and F3's window is unmeasured; rev 0.3 takes the independent review of this plan's PR, #711: the journal consumers re-enumerated, R6's exit restated, R2 led by the poisoned writer, the raw routes enumerated). Nine rows; R1, R2+R3 and R4 started. The review is vendored at
 [`external/2026-10-31-code-security-review.md`](external/2026-10-31-code-security-review.md); it examined commit
 `d656f50c` (main after Y11, #708). Every finding was verified independently before this plan was written (§2), under
 the [verification policy](../wiki/dev/testing/verification-policy.md): three read-only agents re-ran or re-derived
@@ -30,13 +30,13 @@ It is row R2, and it comes before F2's fix.
 
 | | Review | Verified as | Documented already? | Priority here |
 |---|---|---|---|---|
-| F1 | raw `/gateway/rpc/call` under `mesh:write` reaches `blackboard.*.post` around `board:write` | **true, wider**: every tuple-space kind too; `scatter` and `overlay/emit_reliable` carry the same kinds; wiki `ingest`/`access` gate on `req.sender()`, the node id, which through the raw route is the gateway itself | the mechanism (`threat-model.md:457`, closed only for protected kinds); not the scope consequence — `rbac.md:78` lists `rpc call` under `mesh:write` unqualified | **P1** |
-| F2 | the `used/provider` marker goes through `append_try`; work proceeds after a dropped append | **true, narrower**: a graceful restart snapshots from the store and a poisoned writer takes a repairing snapshot, so reuse needs a dropped append *and* a hard crash before any snapshot *and* the envelope re-presented in its window | `grants.md:128` says "buffered"; `what-is-proven.md:64` ("replayed from the WAL across a restart") and the comment at `state_machine.rs:881` say the opposite — a contradiction | **P1** as a contradiction; the window is small |
+| F1 | raw `/gateway/rpc/call` under `mesh:write` reaches `blackboard.*.post` around `board:write` | **true, wider**: every tuple-space kind too; `/gateway/scatter` carries the same kinds under `mesh:write` (`/gateway/overlay/emit_reliable` carries them too but already requires `consensus:write`, `authz.rs:323`; `mailbox/deliver` and `shard/emit` take a kind from the request but do not reach a companion's `rpc_rx`, to be confirmed by R1's enumeration); wiki `ingest`/`access` gate on `req.sender()`, the node id, which through the raw route is the gateway itself | the mechanism (`threat-model.md:457`, closed only for protected kinds); not the scope consequence — `rbac.md:78` (line 79 on `main`, after Y12's `schedule:run` row) lists `rpc call` under `mesh:write` unqualified | **P1** |
+| F2 | the `used/provider` marker goes through `append_try`; work proceeds after a dropped append | **true, narrower**: a graceful restart snapshots from the store and a poisoned writer takes a repairing snapshot, so reuse needs a dropped append *and* a hard crash before any snapshot *and* the envelope re-presented in its window | `docs/features/grants.md:128` says "buffered"; `what-is-proven.md:64` ("replayed from the WAL across a restart") and the comment at `state_machine.rs:881` say the opposite — a contradiction | **P1** as a contradiction; the window is small |
 | F3 | `ReplicaSync` answers `Persisted` for a record applied but not yet enqueued | **true**; `replica_sync.rs:26-38` claims the dropped-append counter closes this window, and it cannot (the counter is bumped after the apply) — a contradiction | no | P2 on impact under the contract, not on the window's width: there is no await point inside it, and its duration is unmeasured (pre-emption can extend it); the origin polls at exactly that moment |
 | F4 | an empty successful JWKS is read as a failed fetch and the old keys kept; no stale ceiling | **true, narrower**: a replace-rotation is applied; only withdraw-all is ignored. Token `exp` does *not* bound it: the holder of a compromised withdrawn key mints fresh short-lived tokens for as long as the verifier trusts the key (the reviewer's qualification, accepted) | `sso.md:61` ("a failed fetch keeps the previous keys"); not the empty-set reading or the missing ceiling | **P1** |
-| F5 | the native HTTPS accept loop has no handshake timeout or admission bound | **true, wider**: `axum::serve` builds hyper without a timer, which silently disables hyper's 30 s header-read default on the plaintext listener too | the 2.32 bounds are the gossip listener's; nothing says whether they cover the gateway; the docs say to proxy, and offer `gateway_tls` as "no proxy required" | P1 for an exposed gateway |
+| F5 | the native HTTPS accept loop has no handshake timeout or admission bound | **true, wider**: `axum::serve` builds hyper without a timer, which disables hyper's 30 s header-read default on the plaintext listener too (hyper logs one warn line and returns no timeout) | the 2.32 bounds are the gossip listener's; nothing says whether they cover the gateway; the docs say to proxy, and offer `gateway_tls` as "no proxy required" | P1 for an exposed gateway |
 | F6 | bulk fetches `http://` unconditionally; fails under `gateway_tls`; no fetch size cap | **true**; the reply is capped by the 10 MiB frame limit, the fetch is not; the fetch target is the sender's advertised IP and a sender-chosen port | no | P2 |
-| F7 | a new journal acknowledges `OnDisk` before its directory entry is synced | **true, wider**: four `Journal::open` consumers (`EvidenceJournal`, the rights ledger, `DurableEpochs`, the external-effects ledger) and both companion WALs; the KV WAL is covered by the startup snapshot's directory sync | contradicts `journal.rs:59` ("readable after a restart"); v2.4.4's class | P2 |
+| F7 | a new journal acknowledges `OnDisk` before its directory entry is synced | **true, wider**: six `Journal::open` consumers over seven journals (`EvidenceJournal`, the rights ledger, `DurableEpochs`, the external-effects ledger, the revocation stream `src/agent/revocation.rs:316`, and the knowledge store's heads and records `src/knowledge/durable.rs:158,274`) and both companion WALs; the KV WAL is covered by the startup snapshot's directory sync | contradicts `journal.rs:59-60` ("readable after a restart"); v2.4.4's class | P2 |
 
 Dependencies: `cargo audit` gives exactly the review's four warnings and no vulnerabilities. CI's audit job does not
 `--deny warnings` and there is no `audit.toml`, so they pass by design and are recorded nowhere as accepted. Tokio's
@@ -70,8 +70,9 @@ tests where one exists.
 
 ### R1 · Companion kinds carry their scope on the raw routes *(F1)*
 
-**What:** `/gateway/rpc/call`, `/gateway/scatter` and `/gateway/overlay/emit_reliable` of a companion-namespaced
-kind require that companion's family scope (D1); a `mesh:write`-only caller is refused 403 naming the scope the
+**What:** every raw route that takes an RPC kind from the request — `/gateway/rpc/call` and `/gateway/scatter`
+under `mesh:write`; `/gateway/overlay/emit_reliable`, already under `consensus:write`; `mailbox/deliver` and
+`shard/emit`, enumerated and stated — of a companion-namespaced kind requires that companion's family scope (D1); a `mesh:write`-only caller is refused 403 naming the scope the
 operation needs. The wiki handlers that gate on `req.sender()` get the same treatment at the route. `rbac.md` says
 which scope each companion kind needs on the raw routes, and `confined-fleet.md` names the companion kinds where it
 tells operators to list protected work.
@@ -86,13 +87,14 @@ ingest kind refused under `mesh:write` on a gateway that is a group member.
 
 ### R2 · The restart gate exercises the WAL *(the verification's finding)*
 
-**What:** a grant test that restarts without the exit snapshot — drop the agent without `shutdown()`, or poison the
-writer with a failing snapshot directory — and asserts the request, the grant and the `used/*` markers survive from
+**What:** a grant test that restarts without the exit snapshot — poison the writer with a failing snapshot directory
+(dropping the agent without `shutdown()` leaves the WAL's ownership lock with the writer task, so a restart in the
+same process can be refused as a second owner) — and asserts the request, the grant and the `used/*` markers survive from
 the WAL alone. The same shape for `an_acknowledged_replica_still_holds_the_record_after_restart`. `faults.rs`'s
 `restart` class states which path it proves.
 
-**Exit:** the new test fails with the WAL append removed from `write_owned_kv` (the plant the verification ran), and
-passes after R3.
+**Exit:** the new test fails with the WAL append removed from `write_owned_kv` (the plant the verification ran; the
+eleventh grant test is under `a2a`, so the run needs that feature), and passes after R3.
 
 ### R3 · A grant's use is durable before the work runs *(F2, D2)*
 
@@ -116,7 +118,7 @@ refused — each seen failing first.
 
 **What:** `serve_https` wraps `acceptor.accept` in a timeout (reusing `handshake_timeout_ms`), acquires a semaphore
 sized from a new `gateway_max_connections` before spawning, and releases on shutdown; both hyper builders get a
-timer so `header_read_timeout` is live on the plaintext listener too. `configuration.md` says which bounds are the
+timer so `header_read_timeout` is live on the plaintext listener too. `docs/reference/configuration.md` says which bounds are the
 gossip listener's and which the gateway's.
 
 **Exit:** a socket that connects and sends nothing is closed within the timeout on both listeners; N+1 silent
@@ -127,8 +129,11 @@ sockets do not block a real request; each seen failing first.
 **What:** `Journal::open_inner` syncs the parent after creating the file (and after `create_dir_all` created a
 parent); the tuple-space store and the blackboard WAL do the same. `journal.rs:59`'s guarantee holds as written.
 
-**Exit:** a sim-seam trace assertion that a directory sync precedes the first append, as
-`snapshot_install_syncs_the_directory` does, for the journal and both companion WALs.
+**Exit:** an ordering witness — the journal's syncs go through `std::fs` directly, not the sim seam, so the witness is
+a test-only hook that records each `sync_data`/`fsync_parent` call in order, asserting the parent sync precedes the
+first append on a fresh journal — for the journal and both companion WALs; and, as `snapshot_install_syncs_the_directory`
+does, a real-directory check that the sync is wired. The power-loss property itself is not observable without a
+filesystem fault adapter; stated.
 
 ### R7 · Bulk under `gateway_tls`, with a fetch cap *(F6)*
 
@@ -153,7 +158,7 @@ appended.
 ### R9 · The audit warnings are accepted in the open *(dependencies)*
 
 **What:** `audit.toml` with a dated ignore and reason for each warning CI passes; `rustls-pemfile` replaced by
-`rustls-pki-types`' PEM parsing under `tls`; Tokio bumped past 1.53.3; the stale `bincode` comment in `ci.yml`
+`rustls-pki-types`' PEM parsing under `tls`; Tokio bumped to 1.53.3 or later (1.52.x has no patched release); the stale `bincode` comment in `ci.yml`
 removed. `what-is-proven.md` gets one line naming the accepted warnings.
 
 **Exit:** `cargo audit` reports no warning that `audit.toml` does not name with a reason; `cargo audit` with the
