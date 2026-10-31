@@ -2212,9 +2212,12 @@ rule whose `operation` is `*` now selects these doors too**: on a node with an e
 answers 403 when the evaluator does not permit the operation or the exposure gate holds the work, and 400 for a
 malformed `_meta`; under `observe` a selected door admits what the evaluator refuses, recorded. A raw
 `/gateway/rpc/call`, `/gateway/scatter` or `/gateway/overlay/emit_reliable` of a companion's take or claim kind
-(`tuple.{ns}.take`, `tuple.{ns}.take_by_key`, `blackboard.{ns}.claim`) runs that door's decision too. The existing
-verbs are unchanged and never decided — `emit`, `emit_ordered`, `emit_async`, `deliver_event`, `emit_reliable`,
-`emit_sharded`, `take`, `take_by_key`, `claim`, a member's `rpc_call` — nor is a hosted WASM component's `mesh.emit`. `TupleError`,
+(`tuple.{ns}.take`, `tuple.{ns}.take_by_key`, `blackboard.{ns}.claim`) runs that door's decision too — only at a
+gateway node that hosts the companion; through one without it the call reaches the provider undecided. The existing
+verbs are unchanged and never decided — `emit`, `emit_ordered`, `emit_async`, `request`, `advertise`,
+`advertise_persistent`, `mycelium_core::ops`'s `emit_signal*`, `deliver_event`, `emit_reliable`, `emit_sharded`, `take`,
+`take_by_key`, `claim`, a member's `rpc_call`, `rpc_call_with_mandate` and `rpc_call_as` — nor is a hosted WASM
+component's `mesh.emit`. `TupleError`,
 `BlackboardError` and `ShardError` gained a `Refused` variant, returned only by the new verbs; all three are
 `#[non_exhaustive]`, so a `match` already has a `_` arm. **Migration:** an exposure rule written for Y5's call doors
 names its operation (`tools/call`, `skill.invoke`, …) rather than `*`, or the evaluator permits the door operations it

@@ -74,7 +74,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   only (`mycelium::door`), so X4's *a signal is not governed work* now reads *not unless an exposure rule selects it*
   (`scripts/causal-doors.txt`, `ruled`). A raw `/gateway/rpc/call`, `/gateway/scatter` or
   `/gateway/overlay/emit_reliable` of a companion's take or claim kind runs that door's decision
-  (`GossipAgent::register_door_kind`); `emit_ordered_in` and `emit_async_in` complete the emit verbs; on the shadow
+  (`GossipAgent::register_door_kind`) at a gateway node that hosts the companion — through one without it the call
+  reaches the provider undecided; `emit_ordered_in` and `emit_async_in` complete the emit verbs; on the shadow
   rung a selected door admits what the evaluator refuses, the refusal recorded. A door asking under an
   `EXEMPT_OPERATIONS` name is refused by name. Never decided: the plain verbs and a hosted WASM component's
   `mesh.emit`. Both SDKs'

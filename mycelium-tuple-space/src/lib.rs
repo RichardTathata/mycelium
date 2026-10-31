@@ -363,8 +363,9 @@ impl TupleSpace {
 
     /// The take door's kinds (adopter-surface Y11, #708's review, finding 1): a raw gateway call of `tuple.{ns}.take` or
     /// `tuple.{ns}.take_by_key` — `rpc/call`, `scatter`, `overlay/emit_reliable` — runs the take door's decision on
-    /// `tuple:{ns}/{stage}`, selected or untouched exactly as the door is. A payload that names no stage is decided on
-    /// `tuple:{ns}/` (a rule on `*` selects it; one on a stage does not).
+    /// `tuple:{ns}/{stage}`, selected or untouched exactly as the door is — at a gateway node that hosts this space; a
+    /// gateway without it passes the call undecided. A payload that names no stage is decided on `tuple:{ns}/` (a rule
+    /// on `*` selects it; one on a stage does not).
     fn register_door_kinds(&self) {
         for (op, door) in [("take", mycelium::door::OP_TUPLE_TAKE), ("take_by_key", mycelium::door::OP_TUPLE_TAKE_BY_KEY)] {
             let ns = Arc::clone(&self.cfg.namespace);

@@ -354,7 +354,8 @@ impl Blackboard {
             BoardRole::Client => {}
         }
         // Adopter-surface Y11 (#708's review, finding 1): a raw gateway call of `blackboard.{ns}.claim` — `rpc/call`,
-        // `scatter`, `overlay/emit_reliable` — runs the claim door's decision on `bb:{ns}`, as the claim door does.
+        // `scatter`, `overlay/emit_reliable` — runs the claim door's decision on `bb:{ns}`, as the claim door does —
+        // at a gateway node that hosts this board; a gateway without it passes the call undecided.
         let resource = claim_resource(&bb.cfg.namespace);
         bb.agent.register_door_kind(rpc::rpc_kind(&bb.cfg.namespace, "claim"), mycelium::door::OP_BB_CLAIM, Arc::new(move |_: &[u8]| resource.clone()));
         Ok(bb)

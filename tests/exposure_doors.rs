@@ -362,6 +362,78 @@ async fn a_raw_call_of_a_doors_kind_runs_that_doors_decision() {
     n.agent.shutdown().await;
 }
 
+/// **One act, one decision** (#708's round 2, D): a reliable emit of a door's kind under a rule selecting both doors
+/// (`*`) is decided once, by the overlay door, and the kind door is skipped — one record, one count. Seen failing first
+/// with the kind door run as well: two decision records for the one admitted emit.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_reliable_emit_of_a_doors_kind_is_decided_once() {
+    use base64::Engine as _;
+    let n = node("overlay-once", Some(policy("*"))).await;
+    n.agent.set_control_profile(Profile::EnforceLocal);
+    let body = serde_json::json!({
+        "target": n.agent.node_id().to_string(), "kind": "tuple.work.take",
+        "payload_b64": base64::engine::general_purpose::STANDARD.encode(take_req("in")), "timeout_secs": 1,
+        "_meta": { "parent": OTHER },
+    });
+    let r = reqwest::Client::new().post(format!("{}/gateway/overlay/emit_reliable", n.base)).json(&body).send().await.unwrap();
+    assert_ne!(r.status().as_u16(), 403);
+    let decided: Vec<_> = n.records().into_iter().filter(|r| r["kind"] == "decided").collect();
+    assert_eq!(decided.len(), 1, "one emit, one decision: {decided:?}");
+    assert_eq!(n.agent.exposure_counts().independent, 1);
+    n.agent.shutdown().await;
+}
+
+/// **The limit, pinned** (#708's round 2, A): a raw take is decided only at a gateway that hosts the companion, since
+/// only `TupleSpace::new` registers the kind. Through a gateway with no tuple space — with an evaluator, a source and a
+/// rule selecting `tuple.take` under `enforce-local` — a raw `rpc/call` of `tuple.work.take` naming the unresolved
+/// effect reaches the primary undecided: it answers 200, the item is taken and nothing is recorded or counted. A fix
+/// (the decision at the provider) changes this pin in the open.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_raw_take_through_a_gateway_without_the_companion_is_not_decided() {
+    use base64::Engine as _;
+    let a = node("companion", None).await;
+    a.ts.put("in", Bytes::from_static(b"x")).await.unwrap();
+    let (gossip, http) = (alloc_port(), alloc_port());
+    let mut cfg = GossipConfig::default();
+    cfg.bind_port = gossip;
+    cfg.http_port = Some(http);
+    cfg.http_addr = "127.0.0.1".to_string();
+    cfg.bootstrap_peers = vec![a.agent.node_id().clone()];
+    let b = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", gossip).unwrap(), cfg));
+    let dir = std::env::temp_dir().join(format!("y11-doors-bare-{gossip}"));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let journal = dir.join("evidence.log");
+    b.with_evidence_journal(EvidenceJournal::open(&journal, EvidenceProfile::Strict).unwrap());
+    b.with_action_evaluator(Arc::new(evaluator()));
+    b.with_exposure_policy(Arc::new(policy("tuple.take")));
+    let source = UnresolvedRecord { record_hash: H.into(), evidence_hashes: vec![], correlation: None, prepared_at_ms: 0 };
+    b.with_exposure_source(Arc::new(Fixed(Mutex::new(vec![source]))));
+    b.start().await.unwrap();
+    b.set_control_profile(Profile::EnforceLocal);
+    let body = serde_json::json!({
+        "target": a.agent.node_id().to_string(), "method": "tuple.work.take",
+        "payload_b64": base64::engine::general_purpose::STANDARD.encode(take_req("in")), "timeout_secs": 2,
+        "_meta": { "parent": H },
+    });
+    let client = reqwest::Client::new();
+    let mut status = 0;
+    for _ in 0..50 {
+        status = client.post(format!("http://127.0.0.1:{http}/gateway/rpc/call")).json(&body).send().await.unwrap().status().as_u16();
+        assert_ne!(status, 403, "the companion-free gateway decided the raw take: the limit this test pins has moved");
+        if status == 200 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert_eq!(status, 200, "the raw take never reached the primary");
+    assert_eq!(a.ts.depth(Some("in")).await.unwrap().iter().map(|d| d.depth).sum::<u32>(), 0, "the undecided take took the item");
+    assert!(mycelium::read_evidence_journal(&journal).unwrap().is_empty(), "the companion-free gateway recorded a decision");
+    assert_eq!(b.exposure_counts(), Default::default());
+    b.shutdown().await;
+    a.agent.shutdown().await;
+}
+
 /// **A rule selects by actor and by resource** (#708's review, finding 7). A rule naming the anonymous caller as its
 /// actor holds a route's dependent emit and not this node's own verb, whose actor is `node:{id}`; a rule naming one
 /// stage, `tuple:work/in`, holds a take there and not one on another stage, nor an emit. Seen failing first with the

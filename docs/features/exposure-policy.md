@@ -81,16 +81,24 @@ the fields.
     the tuple space; `claim_in` on the board — and the seven gateway routes. A raw gateway call of a companion's take
     or claim kind (`/gateway/rpc/call`, `/gateway/scatter`, `/gateway/overlay/emit_reliable` of `tuple.{ns}.take`,
     `tuple.{ns}.take_by_key`, `blackboard.{ns}.claim`) runs that door's decision, selected or untouched exactly as the
-    door is. **Never decided:** the plain verbs (`emit`, `emit_ordered`, `emit_async`, `deliver_event`,
-    `emit_reliable`, `emit_sharded`, `take`, `take_by_key`, `claim`, a member's own `rpc_call`, `scatter_gather` and
-    `bulk_call`), a hosted WASM component's `mesh.emit`, and a remote worker's take or claim where the primary serves it:
-    a door is decided on the node the work starts on.
+    door is — **only at a gateway node that hosts the companion**, since only the companion registers its kinds:
+    through a gateway without it the call reaches the provider undecided, and the decision at the provider is not
+    built. A reliable emit of a door's kind that the overlay door already decided (a `*` rule selects both) is
+    decided once, by the overlay door: one record, one count. **Never decided:** the plain verbs (`emit`,
+    `emit_ordered`, `emit_async`, `request`, `advertise`, `advertise_persistent`, `mycelium_core::ops`'s
+    `emit_signal`, `emit_signal_ordered` and `emit_signal_async`, `deliver_event`, `emit_reliable`, `emit_sharded`,
+    `take`, `take_by_key`, `claim`, a member's own `rpc_call`, `rpc_call_with_mandate`, `rpc_call_as`,
+    `scatter_gather` and `bulk_call`), a hosted WASM component's `mesh.emit`, and a remote worker's take or claim where
+    the primary serves it: a door is decided on the node the work starts on.
   - **The resources a rule selects on:** `tuple:{ns}/{stage}` for a take (a raw call whose payload names no stage is
     decided on `tuple:{ns}/`), `bb:{ns}` for a claim (a predicate names no single resource), `signal:{kind}` for the
     four emits.
   - **On the shadow rung a selected door holds nothing,** whatever the evaluator says: a refusal the evaluator decides
     is recorded as decided, with what the exposure gate would have done, and the door admits — its record's execution
-    `attempted`, then the door's own outcome. A malformed `_meta` is still refused. Only a permit is counted.
+    `attempted`, then the door's own outcome. Only a permit is counted. Four cases are still refused on the shadow
+    rung, because the door cannot act on them or cannot say it did: a malformed `_meta`, an evaluator that panics, a
+    door asking under an exempt operation name, and a decision record that cannot be written under a `Strict`
+    evidence journal.
   - **A parked take is decided before it waits,** so its check-then-act window is the park time.
   - Not built: the SDKs raise a door's 403 as their verbs' ordinary error and do not surface its `reason`.
 - **The omission limit.** A call with neither `_meta.parent` nor `_meta.correlation` is a root and is never held: the

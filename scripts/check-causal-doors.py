@@ -61,11 +61,28 @@ def enclosing_fn(lines, i):
     return f"{ty}::{fn}" if ty else fn
 
 
-def is_door_call(rel, line):
-    """A Y11 door call on this line — not a definition, not a comment."""
-    if line.strip().startswith("//") or re.match(r"\s*(pub(\([^)]*\))?\s+)?(async\s+)?fn\s", line):
-        return False
-    return bool(DOOR_CALL.search(line) or (rel == DOOR_HOME and DOOR_CALL_HOME.search(line)))
+def door_call_lines(rel, lines):
+    """The line indexes where a Y11 door decision is called — matched over the whole text, so a call whose `(` sits on
+    the next line is a call (#708's round 2, B). The bare `decide(` / `decide_raw(` count in `door.rs` and in any file
+    that imports them from `door`; `<alias>::decide(` counts where `door` is imported as `<alias>`. A definition
+    (`fn decide(`), a method call (`.decide(`) and a line comment are not calls."""
+    text = "\n".join(lines)
+    patterns = [DOOR_CALL.pattern]
+    imports_bare = rel == DOOR_HOME or re.search(
+        r"\buse\s+[\w:]*\bdoor::(?:\{[^}]*\b(?:decide|decide_raw)\b[^}]*\}|(?:decide|decide_raw)\b)", text)
+    if imports_bare:
+        patterns.append(r"(?<![:\w.])(?:decide|decide_raw)\s*\(")
+    for alias in re.findall(r"\buse\s+[\w:]*\bdoor\s+as\s+(\w+)", text):
+        patterns.append(r"\b" + re.escape(alias) + r"::(?:decide|decide_raw)\s*\(")
+    found = set()
+    for m in re.finditer("|".join(f"(?:{p})" for p in patterns), text):
+        i = text.count("\n", 0, m.start())
+        line = lines[i]
+        before = line[: m.start() - (text.rfind("\n", 0, m.start()) + 1)]
+        if line.strip().startswith("//") or re.search(r"\bfn\s+$", before):
+            continue
+        found.add(i)
+    return found
 
 
 def production_lines(path):
@@ -120,11 +137,12 @@ def ruled_without_a_call(root, rows):
         body = fn_body(lines, sym)
         if body is None:
             continue
-        deciders = {m.group(1) for k, l in enumerate(lines) if is_door_call(rel, l)
-                    for m in [re.match(r"(.*)", enclosing_fn(lines, k) or "")] if m.group(1)}
-        helpers = {d.split("::")[-1] for d in deciders}
-        body_lines = body.split("\n")[1:]
-        calls = any(is_door_call(rel, l) or PREFLIGHT.search(l) for l in body_lines) or any(
+        call_at = door_call_lines(rel, lines)
+        helpers = {(enclosing_fn(lines, k) or "").split("::")[-1] for k in call_at} - {""}
+        start = next(i for i, l in enumerate(lines) if re.search(r"\bfn\s+" + re.escape(sym) + r"\b", l))
+        span = range(start + 1, start + len(body.split("\n")))
+        body_lines = [lines[i] for i in span]
+        calls = any(i in call_at for i in span) or any(PREFLIGHT.search(l) for l in body_lines) or any(
             re.search(r"\b" + re.escape(h) + r"\s*\(", l) for h in helpers if h != sym for l in body_lines)
         if not calls:
             failures.append(f"row {door} (line {n}) is `ruled` but its fn calls no door decision (`door::decide`, `exposure_door`, …)")
@@ -136,11 +154,10 @@ def doors_in_tree(root):
     # Y11: every call that decides a take, claim or emit door is a door, in src/ and in the companions.
     for rel, path in door_scan_files(root):
         lines = production_lines(path)
-        for i, line in enumerate(lines):
-            if is_door_call(rel, line):
-                fn = enclosing_fn(lines, i)
-                if fn:
-                    found.add(f"{rel}::{fn.split('::')[-1]}")
+        for i in door_call_lines(rel, lines):
+            fn = enclosing_fn(lines, i)
+            if fn:
+                found.add(f"{rel}::{fn.split('::')[-1]}")
     src = os.path.join(root, "src")
     for dirpath, _, files in os.walk(src):
         for f in files:
@@ -258,13 +275,23 @@ def main():
             # Plant 5: a new caller of `door::decide` in src/.
             with open(os.path.join(tmp, "src", "agent", "planted_decider.rs"), "w") as f:
                 f.write("pub(crate) async fn planted_decider() {\n    let p = crate::agent::door::decide(&ctx, a, \"x\", \"y\", &b, \"planted\").await;\n}\n")
+            # Plants 6–8 (#708's round 2, B): an imported bare `decide(`, an aliased `gate::decide(`, and `exposure_door`
+            # with its `(` on the next line.
+            with open(os.path.join(tmp, "src", "agent", "planted_bare.rs"), "w") as f:
+                f.write("use crate::agent::door::decide;\npub(crate) async fn planted_bare() {\n    let p = decide(&ctx, a, \"x\", \"y\", &b, \"planted\").await;\n}\n")
+            with open(os.path.join(tmp, "src", "agent", "planted_alias.rs"), "w") as f:
+                f.write("use crate::agent::door as gate;\npub(crate) async fn planted_alias() {\n    let p = gate::decide(&ctx, a, \"x\", \"y\", &b, \"planted\").await;\n}\n")
+            with open(os.path.join(tmp, "src", "agent", "planted_split.rs"), "w") as f:
+                f.write("pub(crate) async fn planted_split() {\n    let p = agent.exposure_door\n        (None, \"x\", \"y\", &b, \"planted\").await;\n}\n")
             _, _, failures = check(tmp, REGISTRY)
             for want in ("planted_door.rs::gw_planted", "mcp_bridge.rs::gw_planted_after", "signals.rs::gw_signal_emit (line",
-                         "planted_exposure_route.rs::gw_planted_exposure", "planted_decider.rs::planted_decider"):
+                         "planted_exposure_route.rs::gw_planted_exposure", "planted_decider.rs::planted_decider",
+                         "planted_bare.rs::planted_bare", "planted_alias.rs::planted_alias", "planted_split.rs::planted_split"):
                 if not any(want in x for x in failures):
                     sys.exit(f"check-causal-doors --self-test: the planted door {want} was NOT caught")
             print("check-causal-doors --self-test: a planted new-file door, a door appended after an inner cfg(test), an emit "
-                  "route's decision removed, an ungated `exposure_door` route and a new `door::decide` caller are all caught by name")
+                  "route's decision removed, an ungated `exposure_door` route, a new `door::decide` caller, an imported bare `decide`, an "
+                  "aliased `gate::decide` and a split `exposure_door\\n(` are all caught by name")
             return 0
         finally:
             shutil.rmtree(tmp, ignore_errors=True)

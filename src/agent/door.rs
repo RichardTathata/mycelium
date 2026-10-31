@@ -15,13 +15,17 @@
 //! *Not built, stated:* carrying lineage onward; and enforcement at these doors whenever an evaluator is attached
 //! without a rule selecting them.
 //!
-//! **Never decided, stated** (#708's review, finding 2): the plain verbs — `MeshHandle::{emit, emit_ordered,
-//! emit_async}`, `ServiceHandle::{deliver_event, emit_reliable, emit_sharded, rpc_call, scatter_gather, bulk_call}`,
-//! `TupleSpace::{take, take_by_key}`, `Blackboard::claim` — and a hosted WASM component's `mesh.emit`
-//! (`mycelium-wasm-host`), and a remote worker's take or claim where the primary serves it: each door is decided at the
-//! node the work starts on, by its `*_in` verb or its gateway route. A raw gateway call of a companion's registered door
-//! kind (`rpc/call`, `scatter`, `overlay/emit_reliable`) runs that door's decision ([`decide_raw`]). A parked take is
-//! decided before it waits, so its check-then-act window is the park time.
+//! **Never decided, stated** (#708's review, finding 2, round 2 C): the plain verbs — `MeshHandle::{emit,
+//! emit_ordered, emit_async, request, advertise, advertise_persistent}`, `mycelium_core::ops::{emit_signal,
+//! emit_signal_ordered, emit_signal_async}`, `ServiceHandle::{deliver_event, emit_reliable, emit_sharded, rpc_call,
+//! rpc_call_with_mandate, rpc_call_as, scatter_gather, bulk_call}`, `TupleSpace::{take, take_by_key}`,
+//! `Blackboard::claim` — and a hosted WASM component's `mesh.emit` (`mycelium-wasm-host`), and a remote worker's take
+//! or claim where the primary serves it: each door is decided at the node the work starts on, by its `*_in` verb or
+//! its gateway route. A raw gateway call of a companion's registered door kind (`rpc/call`, `scatter`,
+//! `overlay/emit_reliable`) runs that door's decision ([`decide_raw`]) — **only at a gateway node that hosts the
+//! companion**, since only the companion registers its kinds: through a gateway without it, the call reaches the
+//! provider undecided (`a_raw_take_through_a_gateway_without_the_companion_is_not_decided`; the decision at the
+//! provider is not built). A parked take is decided before it waits, so its check-then-act window is the park time.
 //!
 //! **The doors' operations** are [`DOOR_OPERATIONS`]. None may be an [`EXEMPT_OPERATIONS`] name, and a door asking
 //! under an exempt name is refused by name ([`DoorRefusal::EXEMPT_NAME`]) — the companions' side of Y5's collision
@@ -233,6 +237,9 @@ pub(crate) fn point(gateway: bool, door: &str) -> String {
 pub(crate) fn door_kind(ctx: &super::TaskCtx, kind: &str, payload: &[u8]) -> Option<(&'static str, String)> {
     #[cfg(all(feature = "gateway", feature = "tls"))]
     {
+        // The opt-in first (#708's round 2, F): no policy, or `legacy`, and the companion's resource closure — which may
+        // copy the payload — is not run.
+        live(ctx)?;
         let kinds = ctx.door_kinds.pin();
         let (operation, resource_of) = kinds.get(kind)?;
         Some((*operation, resource_of(payload)))
