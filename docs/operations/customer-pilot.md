@@ -9,17 +9,41 @@
 > what is proven — is the buyer deck's, and the last item is one dated page,
 > [what-is-proven.md](what-is-proven.md), which a pilot is the way to move lines off.
 
-Mycelium is technically ready to carry a real customer engagement — v2.0 complete, the companion
-ecosystem shipped, security/observability/compliance in place, CI-gated. But every strong signal today
-is **self-assessed**: the project's own audit methodology
-([`docs/analysis/ratings.md`](../analysis/ratings.md), M2) caps any dimension at 9 without **external
-validation**, and calls a 10 "unreachable from inside this loop." A first customer-led project is
-exactly what closes that gap — *the pilot is the validation*. This page is how to run that first one so
-it de-risks the engagement instead of stress-testing the newest code in production.
+A pilot is the validation the project cannot supply itself. Every strong signal so far is **self-assessed**: the
+project's own audit method ([`docs/analysis/ratings.md`](../analysis/ratings.md), M2) caps any dimension at 9 without
+**external validation**, and calls a 10 "unreachable from inside this loop." This page is how to run the first one so
+that it de-risks the engagement rather than stress-testing the newest code in production. It starts from a fleet you
+can run today, the two-domain scaffold, and ends with a report the counterparty signs.
 
 > **The engagement itself** — roles, workbooks, the pinned pack, the acceptance script, handover
 > and closeout — is [engagement-kit.md](engagement-kit.md). This page is the *why* and the shape;
 > that one is the *what you carry on site*.
+
+## Day one: walk the scaffold with the pilot kit
+
+The kit is the directory [`pilot-kit/`](pilot-kit/README.md). Its README is a walk of six steps, and CI runs its
+commands as written on every push, so none of them is untried. On the first day you and the counterparty run it
+together, on one machine, before anything touches theirs:
+
+| Step | What you run | What it tells the pilot |
+|---|---|---|
+| 0 · the hour | [tutorial 7](../guide/tutorials/07-the-first-hour.md), the `one-hour` job's path from the published node | the machine, the network and the release do what the job shows; stop here if they do not |
+| 1–2 · the scaffold | `mycelium init $PILOT --template two-domains`, pointed at a checkout until the next MINOR | two fleets of two nodes, each its own domain under `secure-multi-domain`, with the kit's declaration beside them |
+| 3 · the edge | `bash fleet.sh setup`, `start-all`, `connect`, `call` each way | certificates issued off-node, a pinned key each way, one call across the edge carrying the local caller's name |
+| 4 · `doctor` | `bash fleet.sh doctor <node>` on all four | what `start()` would say, one guarantee per line, under the profile; each line names its [matrix row](shared-responsibility-matrix.md#from-a-doctor-line-to-its-row), or says it has none and why |
+| 5 · the faults | `mycelium test --faults units --config faults.toml` | revocation, a restart over the WAL, a partition, a lost acknowledgement recovered and a grant across a restart, each against the declaration |
+| 6 · the report | in `$PILOT`: `python3 "$KIT/report.py" --doctor doctor/*.txt --faults faults.json > pilot-report.md` (the kit's `env.sh` sets `KIT`) | one section per guarantee a class exercised, split by whether the class's fleet enforced it, in the guarantee report's words, with a line for the counterparty to fill |
+
+What changes on the counterparty's own hosts is what the scaffold's README says one machine cannot show:
+- each node gets only its own `certs/<node>/` directory;
+- `ca/` stays on the issuer's host, and only `exchange/` crosses between the two operators;
+- the policy in `src/authority.rs` becomes their adapter rather than the reference evaluator.
+
+The kit's report is the shape of what comes back: the same sections, regenerated from their `doctor` and
+`test --faults` output, with *Observed in the pilot* written by them.
+
+The kit is not the deployment. The *named deployment* line on [what-is-proven.md](what-is-proven.md) moves only when a
+counterparty runs it on their own hosts and signs the report.
 
 ## The framing (say this out loud with the customer)
 
@@ -48,7 +72,9 @@ it de-risks the engagement instead of stress-testing the newest code in producti
 
 - ☐ **Complete [production-readiness.md](production-readiness.md) for the deployment** — TLS, gateway
   auth, persistence + restart rehearsal, sizing profile, metrics/alerts, `cargo audit`. The pilot does
-  not get to skip these because it is "just a pilot."
+  not get to skip these because it is "just a pilot." `doctor` answers most of them by guarantee id on each of the
+  counterparty's nodes, and the [matrix's doctor-line table](shared-responsibility-matrix.md#from-a-doctor-line-to-its-row)
+  says which side holds each one.
 - ☐ **If the pilot uses the wiki:** provision the node-independent store (shared FS / S3 / doc store),
   set the curator's `Membership` access policy, and confirm `Wiki::shutdown` is called on teardown
   (the curator's background tasks are otherwise long-lived). → [companions/wiki.md](../wiki/dev/companions/wiki.md)
@@ -85,9 +111,10 @@ it de-risks the engagement instead of stress-testing the newest code in producti
 
 ## Exit — turning the pilot into evidence
 
-- ☐ **Write it up** — what held, what surfaced, what was fixed. A successful pilot is the first external
-  data point the M2 audit series has ever had; record it in the calibration ledger's spirit (scores
-  that predicted reality) and in the customer-facing record.
+- ☐ **Write it up** — what held, what surfaced, what was fixed, in the kit's report regenerated from the
+  counterparty's own `doctor` and `test --faults` output, each *Observed in the pilot* line theirs. A successful pilot
+  is the first external data point the M2 audit series has ever had; record it in the calibration ledger's spirit
+  (scores that predicted reality) and, named with consent, on [what-is-proven.md](what-is-proven.md).
 - ☐ **Decide the next envelope** — more nodes, a second primitive, or a second use case — from evidence,
   not optimism.
 

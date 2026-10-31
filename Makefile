@@ -204,6 +204,7 @@ check:
 	python3 scripts/test-check-materials.py                      # missing links/coverage and claim regressions must fail
 	python3 scripts/test-check-front-doors.py                    # a broken route, chooser or operator journey must fail
 	python3 scripts/test-check-feature-pages.py                  # an unmapped id, a missing section, a dead anchor or setting, an absent test or example must fail
+	python3 scripts/check-pilot-kit.py                           # the pilot kit (Y10): the matrix's doctor-line table covers the catalogue, the report has a section per exercised guarantee
 
 ## gate-knowledge — the knowledge layer's SEMANTIC gate (item 3, a Phase D exit condition).
 ## Three negative cases — misleading evidence cannot erase a conflicting observation, cannot refresh
