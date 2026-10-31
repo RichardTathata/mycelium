@@ -1,6 +1,6 @@
 # The external code security review of 2026-10-31 — verification and repairs
 
-**Status:** agreed with the maintainer on 2026-10-31, rev 0.4 (rev 0.2 takes the reviewer's two qualifications of the verification, 2026-10-31: F4 is P1 regardless of token lifetime, and F3's window is unmeasured; rev 0.3 takes the independent review of this plan's PR, #711: the journal consumers re-enumerated, R6's exit restated, R2 led by the poisoned writer, the raw routes enumerated; rev 0.4 records R4 delivered, #712, with the all-unparsable decision). Nine rows; R1, R2+R3 and R4 delivered (#712). The review is vendored at
+**Status:** agreed with the maintainer on 2026-10-31, rev 0.4 (rev 0.2 takes the reviewer's two qualifications of the verification, 2026-10-31: F4 is P1 regardless of token lifetime, and F3's window is unmeasured; rev 0.3 takes the independent review of this plan's PR, #711: the journal consumers re-enumerated, R6's exit restated, R2 led by the poisoned writer, the raw routes enumerated; rev 0.4 records R4 delivered, #712, with the all-unparsable decision). Nine rows; R1 and R2+R3 started; R4 delivered (#712). The review is vendored at
 [`external/2026-10-31-code-security-review.md`](external/2026-10-31-code-security-review.md); it examined commit
 `d656f50c` (main after Y11, #708). Every finding was verified independently before this plan was written (§2), under
 the [verification policy](../wiki/dev/testing/verification-policy.md): three read-only agents re-ran or re-derived
