@@ -87,7 +87,10 @@ Four layers, all additive/opt-in (`src/agent/rbac.rs`, gateway middleware in
 the same gate. Alg-confusion-safe (asymmetric-only allowlist *before* key selection);
 iss/aud/exp checked; JWKS cached with refresh-on-unknown-kid — single-flight under lock-order
 row 17 (a detached fetch task, a cached `kid` never waits), a forced refresh at most once per
-30 s (2 s while no keys are held), one 10 s deadline per fetch (2026-10-10).
+30 s (2 s while no fetch has ever succeeded), one 10 s deadline per fetch (2026-10-10). A successful
+fetch is authoritative — the IdP's published set, read key by key, replaces the cache, an empty set
+withdrawing every key — and keys a failed fetch leaves in place serve for at most `JWKS_MAX_STALE`
+(24 h) after the last success (2026-10-31, external review F4; `.log/2026-10-31-r4-jwks-withdrawal.md`).
 Human-operator auth, not agent identity.
 
 ## Every signature the substrate verifies is domain-tagged (2026-10-09, 2.32.0)

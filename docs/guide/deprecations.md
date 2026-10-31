@@ -2242,6 +2242,22 @@ and refuses by name each schedule it cannot run (another cron, a nested schedule
 uses; an Eve agent whose `schedules/` was refused now loads, and its schedules run only when
 `runEveSchedules` is called.
 
+## 75. A successful empty JWKS withdraws the IdP's keys, and keys the IdP has not confirmed for 24 h are refused (unreleased, external review 2026-10-31 F4)
+
+The OIDC verifier read a JWKS fetch that came back with **no keys** as a **failed** fetch and kept the keys it held,
+so an issuer that withdrew every key — a compromised one among them — saw the node go on accepting tokens signed under
+them; and a fetch that kept failing left the node verifying against keys of any age for as long as it ran. Now a
+fetch that **succeeds** (a 2xx response carrying a JWKS) is authoritative: the cache becomes exactly what it returned,
+an empty set included, so a token signed under a withdrawn `kid` is refused at the next refresh. A fetch that
+**fails** (unreachable, timed out, non-2xx, a host the egress list denies, or a body that is not a JWKS) keeps the
+previous keys as before, for at most **24 h** after the last successful fetch (`JWKS_MAX_STALE`, a constant);
+past that every token is refused until a fetch succeeds. **What changes for a deployment:** a key the IdP has pulled
+from its JWKS stops working within one refresh (the TTL, or the 30 s cooldown when an unknown `kid` forces one)
+instead of never; an IdP outage longer than a day makes the gateway refuse OIDC bearers rather than keep trusting
+stale keys. **Migration:** none for a healthy IdP. If your IdP publishes an empty JWKS while rotating (some do,
+briefly), tokens are refused during that window; if an outage of more than a day must not lock operators out, keep a
+static-token principal for them (`rbac.md`).
+
 ## 76. A companion's RPC kind at a gateway door — in a raw route's body, or the path of a signal or serve stream — needs the companion's family scope (unreleased, external review 2026-10-31 F1, plan row R1)
 
 The gateway's raw routes — `POST /gateway/rpc/call`, `scatter`, `signal/emit`, `mailbox/deliver`, `shard/emit` and
@@ -2275,5 +2291,5 @@ in for a companion's primary; a client without the family scope cannot be sent i
 The gate reads the body before the handler's `Json` extractor, so a request naming a companion's kind is refused
 `403` even where the handler would have answered `415` for its content type or `400` for a missing field; a body
 the gate cannot read as JSON passes through to the handler's own refusal, and one over the 2 MiB limit answers
-`413` as before. (This section is §76 because the plan's two sibling PRs, #712 and #713, carried a §75 on their
-branches when this one was pushed; the number was taken, not resolved by overwriting.)
+`413` as before. (This section is §76 because the plan's sibling PR #712, R4, took §75 first; R2+R3's, #713, is §77. The number
+was taken at the merge, not resolved by overwriting.)
