@@ -39,12 +39,13 @@ describe_("schedules through the gateway (Y12)", () => {
       for (const run of runs) {
         expect(run.schedule).toBe(decl.id);
         expect(run.kind).toBe("on_time");
-        expect(run.operationId).toBe(`sched/${decl.id}/${run.slot}`);
+        // The live node is an open gateway: every client is `anonymous`, and its schedule runs as `{id}~anonymous`.
+        expect(run.operationId).toBe(`sched/${decl.id}~anonymous/${run.slot}`);
       }
       expect(runs[1].slot).toBeGreaterThan(runs[0].slot);
       await expect(a.scheduleAck(runs[0])).rejects.toBeInstanceOf(UnservedRunError);
       const node = (await a.health()).node_id;
-      const last = await a.get(`sched/${decl.id}/last/${node}`);
+      const last = await a.get(`sched/${decl.id}~anonymous/last/${node}`);
       expect(last).not.toBeNull();
       expect(parseInt(last!.toString().split(" ")[0], 10)).toBeGreaterThanOrEqual(runs[1].slot);
     } finally {
@@ -117,7 +118,7 @@ describe_("schedules through the gateway (Y12)", () => {
       const node = (await a.health()).node_id;
       let last: Buffer | null = null;
       while (last === null && Date.now() < deadline) {
-        last = await a.get(`sched/${eve.schedules[0].id}/last/${node}`);
+        last = await a.get(`sched/${eve.schedules[0].id}~anonymous/last/${node}`);
         if (last === null) await new Promise((r) => setTimeout(r, 200));
       }
       expect(last).not.toBeNull();

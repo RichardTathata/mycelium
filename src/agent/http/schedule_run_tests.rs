@@ -3,7 +3,7 @@
 //! missed-run decision with its reason; two holders under a partition hand their clients one key per slot.
 
 use crate::capability::{CapFilter, Capability};
-use crate::schedule::{CANDIDATE_NS, MISSED_RULE, RUN_RULE};
+use crate::schedule::{client_scoped_id, CANDIDATE_NS, MISSED_RULE, RUN_RULE};
 use crate::{GossipAgent, GossipConfig, NodeId};
 use mycelium_core::decision::DecisionSink;
 use std::{sync::Arc, time::Duration};
@@ -98,8 +98,20 @@ async fn poll_until(mut f: impl FnMut() -> bool, ms: u64) -> bool {
     f()
 }
 
-fn last_run(agent: &GossipAgent, id: &str) -> Option<u64> {
+/// `id` as an anonymous client's schedule runs it: scoped by the principal an open gateway derives.
+fn scoped(id: &str) -> String {
+    client_scoped_id(id, crate::agent::gateway_caller::PRINCIPAL_ANONYMOUS)
+}
+
+/// The slot `agent` last ran for the schedule `id` runs under (a scoped id for a client's, the id for an application's).
+fn last_at(agent: &GossipAgent, id: &str) -> Option<u64> {
     let v = agent.kv().get(&format!("sched/{id}/last/{}", agent.node_id()))?;
+    std::str::from_utf8(&v).ok()?.split_whitespace().next()?.parse().ok()
+}
+
+/// An anonymous client's schedule `id`'s last slot on `agent`.
+fn last_run(agent: &GossipAgent, id: &str) -> Option<u64> {
+    let v = agent.kv().get(&format!("sched/{}/last/{}", scoped(id), agent.node_id()))?;
     std::str::from_utf8(&v).ok()?.split_whitespace().next()?.parse().ok()
 }
 
@@ -114,7 +126,7 @@ async fn a_client_receives_its_schedules_runs_and_an_acknowledged_run_records_it
     let slot = run["slot"].as_u64().unwrap();
     assert_eq!(run["schedule"], "close");
     assert_eq!(run["kind"], "on_time");
-    assert_eq!(run["operation_id"], format!("sched/close/{slot}"), "the run's key is the schedule and the slot");
+    assert_eq!(run["operation_id"], format!("sched/{}/{slot}", scoped("close")), "the run's key is the principal's schedule and the slot");
     assert_eq!(last_run(&agent, "close"), None, "nothing is recorded before the client answers");
     let r = ack(&base, run["run_id"].as_str().unwrap(), true).await;
     assert_eq!(r.status(), 200);
@@ -158,7 +170,7 @@ async fn a_run_never_acknowledged_is_traced_and_its_slot_is_not_recorded() {
     let rec = sink.snapshot().into_iter().find(|r| r.reason == "unacknowledged").unwrap();
     assert!(rec.effect.as_deref().unwrap_or("").contains(run["operation_id"].as_str().unwrap()), "{rec:?}");
     assert_eq!(last_run(&agent, "close"), None, "the slot is not recorded");
-    let candidates = || agent.capabilities().resolve(&CapFilter::new(CANDIDATE_NS, "close")).len();
+    let candidates = || agent.capabilities().resolve(&CapFilter::new(CANDIDATE_NS, scoped("close"))).len();
     assert!(poll_until(|| candidates() == 0, 5_000).await, "the candidacy is withdrawn");
     assert!(poll_until(|| agent.task_ctx.schedules_running.pin().get("close").is_none(), 5_000).await, "the id is freed");
     let again = Stream::open(&base, &schedule_toml("close", 1, "skip")).await;
@@ -319,8 +331,8 @@ async fn two_clients_under_a_partition_are_handed_one_key_per_slot() {
     let by_both = |m: &BTreeMap<String, BTreeSet<usize>>| m.values().filter(|s| s.len() == 2).count();
     // Connected: once each node sees both candidates and one holder — the warm-up is a delay, not a convergence check,
     // so a slow start can briefly hold on both sides — one holder hands each slot to one client.
-    let holders = |ag: &GossipAgent| ag.capabilities().resolve(&CapFilter::new(CANDIDATE_NS, "close.holder")).len();
-    let candidates = |ag: &GossipAgent| ag.capabilities().resolve(&CapFilter::new(CANDIDATE_NS, "close")).len();
+    let holders = |ag: &GossipAgent| ag.capabilities().resolve(&CapFilter::new(CANDIDATE_NS, format!("{}.holder", scoped("close")))).len();
+    let candidates = |ag: &GossipAgent| ag.capabilities().resolve(&CapFilter::new(CANDIDATE_NS, scoped("close"))).len();
     assert!(poll_until(|| candidates(&a) == 2 && candidates(&b) == 2 && holders(&a) == 1 && holders(&b) == 1, 30_000).await,
         "connected, the nodes agree on one holder: {} / {}", holders(&a), holders(&b));
     let seen_before: BTreeSet<String> = applied.lock().unwrap().keys().cloned().collect();
@@ -345,7 +357,7 @@ async fn two_clients_under_a_partition_are_handed_one_key_per_slot() {
     let handed = handed.lock().unwrap().clone();
     let mut per_slot: BTreeMap<u64, Vec<(usize, String)>> = BTreeMap::new();
     for (client, slot, key) in &handed {
-        assert_eq!(key, &format!("sched/close/{slot}"), "a run's key is its slot's: {handed:?}");
+        assert_eq!(key, &format!("sched/{}/{slot}", scoped("close")), "a run's key is its slot's: {handed:?}");
         per_slot.entry(*slot).or_default().push((*client, key.clone()));
     }
     for (slot, runs) in &per_slot {
@@ -362,17 +374,20 @@ async fn two_clients_under_a_partition_are_handed_one_key_per_slot() {
     b.shutdown().await;
 }
 
-/// The 409 is the loop's own check, so a stream racing another — or an application's `run_schedule` — for one id is
-/// told `schedule_running`, never `invalid schedule`.
+/// The 409 is the loop's own check, so two streams racing for one id under one principal are told `schedule_running`,
+/// never `invalid schedule`; and an application's `run_schedule` of the same id is no conflict at all (its id space is
+/// not a client's).
 #[tokio::test]
 async fn an_id_the_node_already_runs_is_a_409_from_the_loops_own_check() {
     let (agent, _sink, base, _band) = node(vec![], alloc_port()).await;
-    let decl: crate::capability_config::ScheduleDecl = toml::from_str::<std::collections::BTreeMap<String, Vec<crate::capability_config::ScheduleDecl>>>(&schedule_toml("app", 60, "skip"))
-        .unwrap().remove("schedule").unwrap().remove(0);
-    let _app = agent.run_schedule(&decl, |_run| async { Ok(()) }).unwrap();
-    let r = Stream::open(&base, &schedule_toml("app", 60, "skip")).await;
-    assert_eq!(r.status(), 409);
-    assert_eq!(r.json::<serde_json::Value>().await.unwrap()["error"], "schedule_running");
+    let _app = agent.run_schedule(&app_decl("app", 60, ("ledger", "closer")), |_run| async { Ok(()) }).unwrap();
+    let toml = schedule_toml("app", 60, "skip");
+    let (one, two) = tokio::join!(Stream::open(&base, &toml), Stream::open(&base, &toml));
+    let mut statuses = [one.status().as_u16(), two.status().as_u16()];
+    statuses.sort();
+    assert_eq!(statuses, [200, 409], "one stream runs the id, the racer is told it is running");
+    let loser = if one.status() == 409 { one } else { two };
+    assert_eq!(loser.json::<serde_json::Value>().await.unwrap()["error"], "schedule_running");
     agent.shutdown().await;
 }
 
@@ -407,7 +422,7 @@ async fn a_stalled_clients_node_stands_down_and_the_healthy_one_takes_the_slots(
         Capability::new(CANDIDATE_NS, "x").with(attr, value)
     };
     let pair: Vec<(NodeId, Capability)> = ids.iter().map(|n| (n.clone(), cap())).collect();
-    let id = (0..200).map(|n| format!("stall-{n}")).find(|id| crate::election::elect(&format!("sched/{id}"), &pair) == Some(&ids[0]))
+    let id = (0..200).map(|n| format!("stall-{n}")).find(|id| crate::election::elect(&format!("sched/{}", scoped(id)), &pair) == Some(&ids[0]))
         .expect("an id the first node wins");
     let (a, sink_a, base_a, _ba) = node(vec![ids[1].clone()], ports[0]).await;
     let (b, _sb, base_b, _bb) = node(vec![ids[0].clone()], ports[1]).await;
@@ -446,4 +461,123 @@ async fn a_stalled_clients_node_stands_down_and_the_healthy_one_takes_the_slots(
     healthy_reader.abort();
     a.shutdown().await;
     b.shutdown().await;
+}
+
+/// An application's schedule, on a node advertising `ledger/closer`: its handle and the agent's sink.
+fn app_decl(id: &str, period_secs: u64, holders: (&str, &str)) -> crate::capability_config::ScheduleDecl {
+    let text = format!("[[schedule]]\nid = \"{id}\"\nperiod_secs = {period_secs}\n[schedule.holders]\nns = \"{}\"\nname = \"{}\"\n", holders.0, holders.1);
+    toml::from_str::<std::collections::BTreeMap<String, Vec<crate::capability_config::ScheduleDecl>>>(&text)
+        .unwrap().remove("schedule").unwrap().remove(0)
+}
+
+/// **Finding 1's probe A, now a regression test: a client cannot stop an application's schedule.** Node A runs `close`
+/// with `run_schedule`, every second; a client on node B declares `close` with another period and a band only B is in.
+/// Its schedule is its principal's, `close~anonymous`, so A sees no conflicting candidate: A goes on running and traces
+/// no `declaration_mismatch`.
+#[tokio::test]
+async fn a_client_declaring_an_applications_id_another_way_does_not_stop_it() {
+    let ports = [alloc_port(), alloc_port()];
+    let ids: Vec<NodeId> = ports.iter().map(|p| NodeId::new("127.0.0.1", *p).unwrap()).collect();
+    let (a, sink_a, _base_a, _ba) = node(vec![ids[1].clone()], ports[0]).await;
+    let (b, _sb, base_b, _bb) = node(vec![ids[0].clone()], ports[1]).await;
+    let _b_only = b.capabilities().advertise_capability(Capability::new("b-only", "x"), Duration::from_secs(1));
+    let app = a.run_schedule(&app_decl("close", 1, ("ledger", "closer")), |_run| async { Ok(()) }).unwrap();
+    assert!(poll_until(|| app.runs() >= 1, 15_000).await, "the application's schedule runs");
+    let toml = "[[schedule]]\nid = \"close\"\nperiod_secs = 2\n[schedule.holders]\nns = \"b-only\"\nname = \"x\"\n";
+    let _client = open(&base_b, toml).await;
+    // Long enough for the client's candidacy to reach A and for A to tick on it many times.
+    let before = app.runs();
+    tokio::time::sleep(Duration::from_secs(8)).await;
+    assert!(app.runs() >= before + 4, "the application's schedule kept running: {} → {}", before, app.runs());
+    assert_eq!(traced(&sink_a, RUN_RULE, "declaration_mismatch"), 0, "A saw no conflicting declaration");
+    drop(app);
+    a.shutdown().await;
+    b.shutdown().await;
+}
+
+/// **A client copying an application's declaration exactly cannot take its slots.** Same id, period, phase and band; the
+/// client's candidacy is on its own ring, so the application's holder keeps every slot, and the client's acks write
+/// only its own `sched/close~anonymous/last/…`, never the application's `sched/close/last/…`.
+#[tokio::test]
+async fn a_client_copying_an_applications_declaration_cannot_take_its_slots() {
+    let ports = [alloc_port(), alloc_port()];
+    let ids: Vec<NodeId> = ports.iter().map(|p| NodeId::new("127.0.0.1", *p).unwrap()).collect();
+    let (a, sink_a, _base_a, _ba) = node(vec![ids[1].clone()], ports[0]).await;
+    let (b, _sb, base_b, _bb) = node(vec![ids[0].clone()], ports[1]).await;
+    let app = a.run_schedule(&app_decl("close", 1, ("ledger", "closer")), |_run| async { Ok(()) }).unwrap();
+    assert!(poll_until(|| app.runs() >= 1, 15_000).await, "the application's schedule runs");
+    let mut client = open(&base_b, &schedule_toml("close", 1, "skip")).await;
+    let base = base_b.clone();
+    let acks = tokio::spawn(async move {
+        let mut n = 0;
+        while let Some(run) = client.run(20_000).await {
+            assert_eq!(run["schedule"], "close", "the client sees its own id");
+            ack(&base, run["run_id"].as_str().unwrap(), true).await;
+            n += 1;
+            if n == 4 { break; }
+        }
+        n
+    });
+    let handed = acks.await.unwrap();
+    assert_eq!(handed, 4, "the client's own schedule runs");
+    assert_eq!(last_at(&b, "close"), None, "the client's acks wrote nothing under the application's id");
+    assert!(last_run(&b, "close").is_some(), "they wrote its own scoped entry");
+    let before = app.runs();
+    assert!(poll_until(|| app.runs() > before, 5_000).await, "the application still holds and runs its slots");
+    assert_eq!(traced(&sink_a, RUN_RULE, "not_holder"), 0, "the application's node never lost its holding");
+    drop(app);
+    a.shutdown().await;
+    b.shutdown().await;
+}
+
+/// **Two principals' schedules of one id are two schedules**, each with its own loop on one node.
+#[cfg(feature = "compliance")]
+#[tokio::test]
+async fn two_principals_schedules_of_one_id_run_independently() {
+    use axum::http::header::AUTHORIZATION;
+    let gossip_port = alloc_port();
+    let http_port = alloc_port();
+    let mut cfg = GossipConfig::default();
+    cfg.bind_port = gossip_port;
+    cfg.http_port = Some(http_port);
+    cfg.http_addr = "127.0.0.1".to_string();
+    cfg.gateway_scoped_tokens = vec![
+        crate::GatewayToken { token: "sched-1".into(), scopes: vec!["schedule:run".into()] },
+        crate::GatewayToken { token: "sched-2".into(), scopes: vec!["schedule:run".into()] },
+    ];
+    let agent = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", gossip_port).unwrap(), cfg));
+    agent.start().await.unwrap();
+    let _band = agent.capabilities().advertise_capability(Capability::new("ledger", "closer"), Duration::from_secs(1));
+    let base = format!("http://127.0.0.1:{http_port}");
+    let client = reqwest::Client::new();
+    let toml = schedule_toml("close", 1, "skip");
+    let mut streams = Vec::new();
+    for tok in ["sched-1", "sched-2"] {
+        let resp = client.get(format!("{base}/gateway/schedules/run")).query(&[("toml", &toml)])
+            .header(AUTHORIZATION, format!("Bearer {tok}")).send().await.unwrap();
+        assert_eq!(resp.status(), 200, "{tok}: one id, two principals, two schedules");
+        streams.push((tok, Stream { resp, buf: String::new() }));
+    }
+    let mut keys = Vec::new();
+    for (tok, s) in streams.iter_mut() {
+        let run = s.run(15_000).await.unwrap_or_else(|| panic!("{tok} is handed its own run"));
+        assert_eq!(run["schedule"], "close");
+        let r = client.post(format!("{base}/gateway/schedules/ack")).header(AUTHORIZATION, format!("Bearer {tok}"))
+            .json(&serde_json::json!({"run_id": run["run_id"], "ok": true})).send().await.unwrap();
+        assert_eq!(r.status(), 200);
+        keys.push(run["operation_id"].as_str().unwrap().split('/').nth(1).unwrap().to_string());
+    }
+    assert_ne!(keys[0], keys[1], "two principals' runs are two schedules' runs: {keys:?}");
+    agent.shutdown().await;
+}
+
+#[test]
+fn a_client_scoped_id_is_one_segment_no_application_id_can_be() {
+    assert_eq!(client_scoped_id("close", "anonymous"), "close~anonymous");
+    let oidc = client_scoped_id("close", "oidc:https://idp.example/realm:alice.holder");
+    assert!(!oidc.contains('/') && !oidc.contains(':') && !oidc.ends_with(".holder"), "{oidc}");
+    assert!(crate::schedule::id_problem(&oidc).is_some(), "an application cannot declare a scoped id");
+    // Injective: a principal holding the separator or an escape cannot alias another.
+    assert_ne!(client_scoped_id("a", "b~c"), client_scoped_id("a~b", "c"));
+    assert_ne!(client_scoped_id("a", "%41"), client_scoped_id("a", "A"));
 }

@@ -66,7 +66,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `GET /gateway/schedules/run?toml=<one [[schedule]]>` (scope `schedule:run`) makes the node the client is connected to
   a candidate in the schedule's holder band while the stream is open — elected by the same rendezvous as any holder —
   and hands the client each run it decides as a `run` event carrying the slot, the kind and the idempotency key
-  `sched/{id}/{slot}`; `POST /gateway/schedules/ack` answers it within one period, only from the principal it was
+  `sched/{id}~{principal}/{slot}` — a client's schedule runs under its principal (`{id}~{principal}`, percent-encoded),
+  so it reaches neither an application's `run_schedule` of the same id nor another principal's; `POST /gateway/schedules/ack` answers it within one period, only from the principal it was
   handed to (`403 unserved_run` otherwise, and for a second answer). A run never acknowledged — the stream closed, the
   client gone — is traced `unacknowledged`, its slot not recorded, and the node withdraws its holding, so the next
   holder decides the slot (on time, or as a missed run with its reason); closing the stream withdraws the candidacy.

@@ -368,7 +368,7 @@ class ScheduleRun:
 
     ``kind`` is ``"on_time"`` (the slot due now), ``"late"`` (a missed slot under ``run_late``) or ``"for_gap"`` (one
     run for a gap under ``run_once``; ``first_slot`` is the gap's oldest). ``operation_id`` is the run's idempotency
-    key, ``sched/{id}/{slot}``: carry it on every effect the run causes, with content that depends on the run alone, so
+    key, ``sched/{id}~{principal}/{slot}`` (the schedule scoped by this client's principal): carry it on every effect the run causes, with content that depends on the run alone, so
     two holders running one slot (a partition) make one effect at a destination that deduplicates."""
 
     run_id:        str

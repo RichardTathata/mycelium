@@ -1076,7 +1076,10 @@ was handed to only, within the run's one period. The client's acknowledgement is
 run handed out and never answered is traced `sched.run` / `unacknowledged`, its slot not recorded, and the node stops
 holding, so the next holder decides the slot as not yet run — on time, or by `sched.missed` with its reason; a client
 that stays connected and stalls makes its node stand down (`stood_down`, ten periods), so another node's client holds,
-and a stream that hands out nothing says why (`status`: `not_eligible`, …). The verbs
+and a stream that hands out nothing says why (`status`: `not_eligible`, …). A client's schedule is its principal's
+*(rev 0.17, the maintainer's decision on #709's review)*: the gateway runs it as `{id}~{principal}` (the principal it
+derived, percent-encoded; `~` is refused in every declared id), so a client reaches neither an application's
+`run_schedule` of the same id nor another principal's; clients sharing a principal share a namespace. The verbs
 are `scheduleRuns` / `scheduleAck` / `runSchedule` (`mycelium-ts`) and `schedule_runs` / `schedule_ack`
 (`mycelium-py`). The Eve loader reads `schedules/<name>.md` and `.ts`; `cronAsPeriod` reads a cron as a period and a
 phase in UTC when it is one, and `runEveSchedules` runs them as `<agent>.<name>`.

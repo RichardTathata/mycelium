@@ -111,6 +111,30 @@ pub fn id_problem(id: &str) -> Option<&'static str> {
     None
 }
 
+/// The separator between a client's schedule id and its principal in a **client-scoped id** (adopter-surface Y12):
+/// `~`, which [`id_problem`] refuses in every declared id, so no application's `run_schedule` id is ever one.
+pub const CLIENT_SCOPE_SEPARATOR: char = '~';
+
+/// The id a gateway client's schedule runs under: `{id}~{principal}`, the principal as the gateway derived it,
+/// percent-encoded so that only `[A-Za-z0-9_-]` stays as itself — `/`, `:`, `#`, `.`, `~` and every other byte become
+/// `%XX`. The result is one key segment, never equal to an application's id (they hold no `~`), injective (the id holds
+/// no `~` and the encoding none either), and never ends in `.holder` (the encoded part holds no `.`), so one principal's
+/// candidacy cannot read as another's holding. Its ring, its candidacy and holding advertisements, its
+/// `sched/{scoped}/last/{node}` entries, its runs' idempotency keys and its trace target all carry it.
+pub fn client_scoped_id(id: &str, principal: &str) -> String {
+    let mut out = String::with_capacity(id.len() + 1 + principal.len());
+    out.push_str(id);
+    out.push(CLIENT_SCOPE_SEPARATOR);
+    for b in principal.bytes() {
+        if b.is_ascii_alphanumeric() || b == b'_' || b == b'-' {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
 /// A validated schedule: the declaration in milliseconds, its holder filter converted.
 #[derive(Clone, Debug)]
 pub struct Schedule {
@@ -412,6 +436,10 @@ pub(crate) struct LoopOptions {
     /// its next tick. An application's own work keeps `run_schedule`'s rule (it re-holds, and says `work_overran`).
     pub stand_down_on_stall: bool,
     pub on_status: Option<StatusFn>,
+    /// **Run under a client's scope** (Y12): the principal the gateway derived for the client. The declaration is
+    /// validated under its own id, then run under [`client_scoped_id`], so a client reaches neither an application's
+    /// schedule nor another principal's of the same id.
+    pub client_principal: Option<Arc<str>>,
 }
 
 /// Why [`spawn_schedule`] did not start a loop.
@@ -449,7 +477,10 @@ where
     F: Fn(ScheduledRun) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = Result<(), RunFailure>> + Send + 'static,
 {
-    let schedule = Schedule::from_decl(decl).map_err(SpawnError::Invalid)?;
+    let mut schedule = Schedule::from_decl(decl).map_err(SpawnError::Invalid)?;
+    if let Some(principal) = &options.client_principal {
+        schedule.id = Arc::from(client_scoped_id(&decl.id, principal).as_str());
+    }
     if ctx.schedules_running.pin().insert(Arc::clone(&schedule.id), ()).is_some() {
         return Err(SpawnError::Running(GossipError::InvalidField { field: "schedule.id", reason: format!(
             "{:?}: this node already runs a schedule with this id — one loop per id per node", decl.id

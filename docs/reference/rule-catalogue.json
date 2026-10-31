@@ -1894,7 +1894,10 @@
         "a_run_never_acknowledged_is_traced_and_its_slot_is_not_recorded",
         "two_clients_under_a_partition_are_handed_one_key_per_slot",
         "a_stalled_clients_node_stands_down_and_the_healthy_one_takes_the_slots",
-        "a_node_outside_the_band_tells_its_client_not_eligible"
+        "a_node_outside_the_band_tells_its_client_not_eligible",
+        "a_client_declaring_an_applications_id_another_way_does_not_stop_it",
+        "a_client_copying_an_applications_declaration_cannot_take_its_slots",
+        "two_principals_schedules_of_one_id_run_independently"
       ],
       "trace": {
         "partial": "every run, failure and overrun; a change to not_holder, not_eligible, warming_up, last_ahead, ignored_last_far_ahead, stood_down or declaration_mismatch, once; a tick that changes nothing records nothing"

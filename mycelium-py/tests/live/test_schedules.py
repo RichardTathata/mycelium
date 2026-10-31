@@ -44,12 +44,13 @@ async def test_a_schedule_declared_through_the_gateway_hands_the_client_its_runs
         for run in runs:
             assert run.schedule == decl.id
             assert run.kind == "on_time"
-            assert run.operation_id == f"sched/{decl.id}/{run.slot}"
+            # An open gateway: every client is `anonymous`, its schedule run as `{id}~anonymous`.
+            assert run.operation_id == f"sched/{decl.id}~anonymous/{run.slot}"
         assert runs[1].slot > runs[0].slot, "one run per slot, in order"
         with pytest.raises(UnservedRunError):
             agent.schedule_ack(runs[0])
         # The slot the client acknowledged is the fleet's last run — written after the answer, so polled.
-        key = f"sched/{decl.id}/last/{agent.health()['node_id']}"
+        key = f"sched/{decl.id}~anonymous/last/{agent.health()['node_id']}"
         last = None
         for _ in range(50):
             last = agent.get(key)

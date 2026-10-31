@@ -7,6 +7,14 @@
 //! the slot and the run's idempotency key `sched/{id}/{slot}`. The run is done when the client acknowledges it
 //! (`schedules/ack`, `ok` or the error), within one period like any run's work.
 //!
+//! **A client's schedule is its principal's.** The stream runs the declaration under
+//! [`client_scoped_id`](crate::schedule::client_scoped_id) — `{id}~{principal}`, the principal as this gateway derived
+//! it (never from the request), percent-encoded — so its ring, advertisements, `sched/` entries and trace are its own:
+//! a client reaches neither an application's `run_schedule` of the same id (whose ids cannot hold `~`) nor another
+//! principal's. Clients sharing one principal — an open gateway's `anonymous`, one bearer, one scoped token — share one
+//! namespace. The client sees its own id in `schedule`; a run's `operation_id` is the scoped key
+//! `sched/{id}~{principal}/{slot}`, so two principals' runs of one slot are two effects.
+//!
 //! **A run the client never acknowledged is not a run.** If the stream closes while a run is handed out, or the client
 //! never answers, the run is traced `unacknowledged` (or `work_overran` past its period), the slot is not recorded,
 //! and this node withdraws its holding: the next holder — another client's node, or this one when a client comes
@@ -105,23 +113,25 @@ pub(super) async fn gw_schedule_run(
     let principal: Arc<str> = Arc::from(
         caller.map(|Extension(c)| c.principal).unwrap_or_else(|| gateway_caller::PRINCIPAL_ANONYMOUS.to_string()).as_str(),
     );
+    let scope = Arc::clone(&principal);
     // The stream's channel: one event at a time, so a run is handed out only once the one before it has been taken.
     let (tx, rx) = tokio::sync::mpsc::channel::<Event>(1);
     let pending = Arc::clone(&ctx.schedule_runs);
     let work_tx = tx.clone();
+    let own_id: Arc<str> = Arc::from(decl.id.as_str());
     let work = move |run: ScheduledRun| {
-        let (tx, pending, principal) = (work_tx.clone(), Arc::clone(&pending), Arc::clone(&principal));
+        let (tx, pending, principal, own_id) = (work_tx.clone(), Arc::clone(&pending), Arc::clone(&principal), Arc::clone(&own_id));
         async move {
             // Unguessable, as `rpc/respond`'s nonce is: a run is answered by whoever holds its id and the principal it
             // was handed to, and under one shared bearer the principal alone tells two clients apart from nothing.
             let draw = mycelium_core::sim_seam::rng_u64_from(RUN_ID_STREAM, 0);
-            let run_id = format!("{}/{}/{draw:016x}", run.schedule, run.slot);
+            let run_id = format!("{own_id}/{}/{draw:016x}", run.slot);
             let (answer, mut answered) = tokio::sync::mpsc::channel(1);
             pending.pin().insert(run_id.clone(), PendingRun { principal, answer });
             let _clear = ClearRun { pending, run_id: run_id.clone() };
             let event = Event::default().event("run").data(json!({
                 "run_id":        run_id,
-                "schedule":      run.schedule.as_ref(),
+                "schedule":      own_id.as_ref(),
                 "slot":          run.slot,
                 "kind":          kind_name(run.kind),
                 "first_slot":    run.covers().start(),
@@ -146,6 +156,7 @@ pub(super) async fn gw_schedule_run(
     let (status_tx, status_rx) = tokio::sync::mpsc::unbounded_channel::<&'static str>();
     let options = LoopOptions {
         stand_down_on_stall: true,
+        client_principal: Some(scope),
         on_status: Some(Arc::new(move |reason| {
             let _ = status_tx.send(reason);
         })),

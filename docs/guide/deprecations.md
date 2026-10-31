@@ -2204,8 +2204,9 @@ upgraded; rename a protected kind that collides.
 
 An SDK agent can now run declared recurring work: `GET /gateway/schedules/run?toml=<one [[schedule]]>` makes the node
 a candidate in the schedule's holder band while the stream is open and hands the client each run, answered with
-`POST /gateway/schedules/ack` ([feature page](../features/recurring-work.md)). Both routes need the new scope
-`schedule:run`; a scoped token without it is refused `403` naming it, and `mesh:serve` does not open them. A unit
+`POST /gateway/schedules/ack` ([feature page](../features/recurring-work.md)). A client's schedule runs under `{id}~{principal}` — its
+principal's, so it reaches no application's schedule and no other principal's, and its runs' `operation_id` is
+`sched/{id}~{principal}/{slot}`. Both routes need the new scope `schedule:run`; a scoped token without it is refused `403` naming it, and `mesh:serve` does not open them. A unit
 still cannot carry a schedule: `POST /gateway/units/declare` answers `422 schedule section` as before, and its
 `detail` now names the run stream instead of saying no route runs one. (`sched.run`, the rule behind declared
 recurring work, is itself in no release yet: its reasons `unacknowledged` — a run handed to a client that never

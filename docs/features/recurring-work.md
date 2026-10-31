@@ -80,13 +80,20 @@ the gap decided as run once or skipped, the run naming the decision its parent) 
   node that ever ran the schedule, kept for good, and no route clears one.
 - A holder whose work always overruns re-holds every tick and never hands over; the trace says `work_overran` each
   time. The warm-up is a delay, not a convergence check.
+- **A client's schedule is its principal's.** The gateway runs it under `{id}~{principal}` — the principal as the
+  gateway derives it from the caller's credential, never from the request, percent-encoded (`schedule::client_scoped_id`)
+  — so its ring, advertisements, `sched/` entries and trace are its own. A client cannot reach an application's
+  `run_schedule` of the same id (an application id cannot hold `~`), nor another principal's. **Clients that share a
+  principal share a namespace**: on an open gateway every client is `anonymous`, and every client presenting one bearer
+  or one scoped token is one principal. The client sees its own id in each run's `schedule`; the run's `operation_id`
+  is the scoped key `sched/{id}~{principal}/{slot}`, so two principals' runs of one slot are two effects.
 - **Through the gateway, a run the client never acknowledged is not a run.** The stream closed or the client never
   answered: the run is traced `unacknowledged` (or `work_overran` past its period), the slot is not recorded, and
   the node withdraws its holding, so the next holder decides the slot as one not yet run — on time, or as a missed
   run under the policy. A client that ran the work and lost its answer can run the slot twice: the key makes that
   one effect at a destination that deduplicates, as for two holders. A client that stays connected and stalls — its
   run overruns the period — makes its node **stand down**: candidacy and holding withdrawn for ten periods (at least
-  twice the warm-up, `stood_down`), so another node's client takes the slots. A stream whose node runs nothing says
+  twice the warm-up, `stood_down`; `schedule::stand_down_ms`), so another node's client takes the slots. A stream whose node runs nothing says
   why in a `status` event (`not_eligible` for a node outside `holders`); `onStatus` / `on_status` surface it. A unit
   cannot carry a schedule
   (`POST /gateway/units/declare` refuses one, 422, naming the route).

@@ -64,7 +64,7 @@ export interface ScheduleRun {
   /** When the slot started, Unix ms. */
   slotStartMs: number;
   /**
-   * The run's idempotency key, `sched/{id}/{slot}`: carry it on every effect the run causes, with content that depends
+   * The run's idempotency key, `sched/{id}~{principal}/{slot}` (the schedule scoped by this client's principal, Y12): carry it on every effect the run causes, with content that depends
    * on the run alone, so two holders running one slot (a partition) make one effect at a destination that deduplicates.
    */
   operationId: string;
