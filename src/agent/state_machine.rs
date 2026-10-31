@@ -511,13 +511,17 @@ impl AgentStateMachine {
         if self.policy.read().require_approval_for.contains(&tool.to_string()) {
             self.await_approval(tool).await?;
         }
+        // One grant, one commit at this agent: the request is marked consumed, so the same tool and arguments ask
+        // again rather than re-reading this grant (#673's review, finding 3). At the doors a grant is single-use
+        // too, claimed by each door's preflight (the second PR). The marker is on disk **before** the commit
+        // (external review 2026-10-31, R3): a provider with no door has nothing else to remember a use by, so a
+        // `consumed` the disk will not take refuses the invocation by name, leaves the grant un-consumed, and a
+        // retry after the disk is repaired consumes once. A commit refused after this leaves the request consumed
+        // and the agent asking again — the safe side.
+        self.consume_grant(&request).await.map_err(|e| PolicyViolation::GrantNotPresented(format!("{tool}: the grant's consumption was not recorded durably, so the call does not run: {e}")))?;
         // The guards that do not concern the grant run as for any invocation; the grant gate above is passed by
         // taking the grant-required path, so the plain transition's refusal is bypassed here deliberately.
         self.commit_invoking_granted(tool).await?;
-        // One grant, one commit at this agent: the request is marked consumed, so the same tool and arguments ask
-        // again rather than re-reading this grant (#673's review, finding 3). At the doors a grant is single-use
-        // too, claimed by each door's preflight (the second PR).
-        self.consume_grant(&request);
         Ok(Some(presented))
     }
 
@@ -683,14 +687,15 @@ impl AgentStateMachine {
         }
     }
 
-    /// The grant's request is consumed by the commit it admitted (X3): a marker beside it, so a later call with the
-    /// same tool and arguments asks again.
+    /// The grant's request is consumed by the commit it admits (X3): a marker beside it, so a later call with the
+    /// same tool and arguments asks again. On disk before the commit, or `Err` and no commit (R3): a lost `consumed`
+    /// does not fail safe — the un-consumed request is re-honoured, its grant re-read and the tool admitted again.
     #[cfg(all(feature = "gateway", feature = "tls"))]
-    fn consume_grant(&self, request: &str) {
-        self.write_kv(&format!("{}/consumed", self.grant_key(request)), b"1".to_vec());
+    async fn consume_grant(&self, request: &str) -> Result<(), String> {
+        write_owned_kv_durable(&self.ctx, &format!("{}/consumed", self.grant_key(request)), b"1".to_vec()).await
     }
     #[cfg(not(all(feature = "gateway", feature = "tls")))]
-    fn consume_grant(&self, _request: &str) {}
+    async fn consume_grant(&self, _request: &str) -> Result<(), String> { Ok(()) }
 
     /// One KV write from the state machine: applied, **appended to the WAL** when the node persists (the request must
     /// survive this node's restart — #673's review, finding 4), then gossiped.
@@ -882,10 +887,10 @@ pub(crate) fn render_arguments_under(arguments: &serde_json::Value, class: Optio
 /// One KV write under a route-owned namespace, made synchronously: applied, **handed to the WAL** when the node
 /// persists, then gossiped. The hand-off is `append_try` — the **buffered** rung at most: a full queue or a poisoned
 /// writer drops the record and counts it (`dropped_appends`), and nothing here is told. The state machine's own
-/// writes (a grant's request, its `consumed` marker) go through it; losing one of those fails safe — the agent asks
-/// again, and the door's `used` marker is the single-use truth. The doors' `used/{door}` markers go through
-/// [`write_owned_kv_durable`] instead (external review 2026-10-31, R3): a record that must survive this node's
-/// restart (#673's review, finding 4) is not one a counter may stand in for.
+/// write of a grant's request goes through it: losing the request to a crash fails safe — the agent asks again.
+/// The `consumed` marker and the doors' `used/{door}` markers go through [`write_owned_kv_durable`] instead
+/// (external review 2026-10-31, R3): a lost `consumed` would re-honour the grant, and a record that must survive
+/// this node's restart (#673's review, finding 4) is not one a counter may stand in for.
 #[cfg(all(feature = "gateway", feature = "tls"))]
 pub(crate) fn write_owned_kv(ctx: &Arc<super::TaskCtx>, key: &str, value: Vec<u8>) {
     let update = make_gossip_update(&ctx.node_id, ctx.default_ttl, Arc::from(key), Bytes::from(value), false, &ctx.hlc);
@@ -905,9 +910,9 @@ pub(crate) fn write_owned_kv(ctx: &Arc<super::TaskCtx>, key: &str, value: Vec<u8
 /// The durable form of [`write_owned_kv`], for a record the caller must not proceed without — a door's single-use
 /// marker. On a node that persists it is the receipt path's write (`kv_set_requiring_sync`: on the WAL and
 /// fsynced before it is applied or gossiped) and `Err` names why the record is **not** on disk — the writer gone,
-/// its queue closed, the append or the sync failed — so the caller can refuse. A node with no `[persistence]` has
-/// no disk to reach: the write is in memory, as every write there is, and `Ok` says only that (stated on the
-/// feature page).
+/// its queue closed, the append or the sync failed — so the caller can refuse. Under `Async`/`Os` this is a per-call
+/// `fdatasync` the node's `sync_mode` would not otherwise make. A node with no `[persistence]` has no disk to
+/// reach: the write is in memory, as every write there is, and `Ok` says only that (`grants.md` § A restart re-waits).
 #[cfg(all(feature = "gateway", feature = "tls"))]
 pub(crate) async fn write_owned_kv_durable(ctx: &Arc<super::TaskCtx>, key: &str, value: Vec<u8>) -> Result<(), String> {
     if ctx.wal.get().is_none() {

@@ -104,7 +104,7 @@ has no row for this feature. The tests: in [`src/mandate/grant.rs`](../../src/ma
 - **One grant, one commit at the agent, one call at each door.** The request a grant answered is marked consumed by
   the commit it admitted, so the same tool and arguments ask again; and each enforcement point — the gateway's
   preflight, the provider's — admits a grant **once**: the authority's claim is atomic across concurrent presentations,
-  the marker under the request (`…/used/{door}`) is on the WAL and fsynced **before the work runs** — a marker the disk will not take refuses the call by name, *grant use not recorded durably* (external review 2026-10-31, R3) — and a second presentation is **denied** `GrantUsed`
+  the marker under the request (`…/used/{door}`) is on the WAL and fsynced **before the work runs** — a marker the disk will not take refuses the call by name, *grant use not recorded durably*, and releases the claim, since nothing ran (external review 2026-10-31, R3; `deprecations.md` §77) — and a second presentation is **denied** `GrantUsed`
   naming the door. A grant admitted at a door is spent there whether or not the work completes, as a nonce is; the claim is made once
   per call at settling — after the permit's history and seats, before its record — so a refusal earlier in that
   settling (a full fleet counter) spends nothing, and a retry of the history view cannot meet its own marker.
@@ -125,13 +125,15 @@ has no row for this feature. The tests: in [`src/mandate/grant.rs`](../../src/ma
   member's is `409 not_a_member`. Member keys need the `compliance` feature (`gateway_member_keys` is empty without it),
   as the grant mode has since the first PR. A grant's checkpoint is exempt from the revocation view's start rule — a
   grant reads no freshness, its window bounds its life — so a grant issued before a node's restart is held after it.
-- **A restart re-waits.** The request and its `consumed` marker reach the WAL at the **buffered** rung at most (the
-  state machine's writes are `append_try`: a full queue or a poisoned writer drops the record and counts it, and the
-  agent is not told); the grant itself (`…/issued`) is written on the receipt path and the supervisor's answer carries
-  its `local_durability`; the door's `used/{door}` marker is on disk before the work runs (R3). Losing a request, a
-  `consumed` or an `issued` to a crash fails safe — the agent asks again, and the door marker is the single-use truth —
-  which is why those three stay buffered. The restart gates: a graceful restart's exit snapshot is taken from the
-  **store**, so it carries a record the WAL never took; the restart that keeps only the WAL
+- **A restart re-waits.** The request reaches the WAL at the **buffered** rung at most (the state machine's write is
+  `append_try`: a full queue or a poisoned writer drops the record and counts it, and the agent is not told); losing
+  it to a crash fails safe — the agent asks again. The grant (`…/issued`) is written on the receipt path and the
+  supervisor's answer carries its `local_durability`. The agent's `consumed` marker, the door's `used/{door}` marker
+  and a revocation's checkpoint and `revoked` records are **on disk before the step they admit**, or that step is
+  refused by name (R3) — a lost `consumed` would re-honour the grant, and a provider with no door has nothing else to
+  remember a use by. A node without `[persistence]` writes every one of these in memory and has never claimed a disk.
+  The restart gates: a graceful restart's exit snapshot is taken from the **store**, so it carries a record the WAL
+  never took; the restart that keeps only the WAL
   (`a_restart_that_keeps_only_the_wal_replays_the_request_the_grant_and_the_door_marker`) is the one that proves the
   WAL path (external review 2026-10-31, R2); an agent restarted mid-wait that asks
   for the same tool and arguments finds the one request, does not ask twice, and the grant issued against it before

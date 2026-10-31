@@ -430,8 +430,16 @@ async fn test_subscribe_log_receives_live_append() {
 /// B's restart replays start snapshot + WAL tail: the acknowledged record is back only if the inbound path appended it.
 #[tokio::test]
 async fn an_acknowledged_replica_still_holds_the_record_after_a_restart_that_keeps_only_the_wal() {
+    // `Async` is the gate's own mode: the inbound append is a try-send there, which is the path to prove.
+    wal_only_replica_restart(crate::SyncMode::Async).await;
+}
+#[tokio::test]
+async fn an_acknowledged_replica_still_holds_the_record_after_a_restart_that_keeps_only_the_wal_under_flush() {
+    wal_only_replica_restart(crate::SyncMode::Flush).await;
+}
+async fn wal_only_replica_restart(sync_mode: crate::SyncMode) {
     use crate::test_util::{kv_dir_under, restore_start_snapshot, sabotage_exit_snapshot};
-    use crate::{PersistenceConfig, SyncMode};
+    use crate::PersistenceConfig;
 
     let port_a = alloc_port();
     let port_b = alloc_port();
@@ -448,7 +456,7 @@ async fn an_acknowledged_replica_still_holds_the_record_after_a_restart_that_kee
         cfg.health_check_max_jitter_ms = 50;
         cfg.persistence = Some(PersistenceConfig {
             base_path: base,
-            sync_mode: SyncMode::Flush,
+            sync_mode,
             snapshot_wal_threshold: 1_000_000,
             snapshot_interval_secs: 3_600, on_unreadable: Default::default(),
         });

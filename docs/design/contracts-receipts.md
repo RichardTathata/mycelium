@@ -150,6 +150,12 @@ fsynced before the caller applied it cannot be discarded. That dependency is pin
 `durability_tests`): if either fails, persist-first is no longer admissible. Two orderings may each have a
 contract (§2.1); they may not silently share one meaning.
 
+The strong path's users, so the list is one place: `kv_set_requiring_sync` / `set_requiring_sync` (the receipt path), and
+since the external review of 2026-10-31 (R3) the grant records a step must not proceed without — the agent's `consumed`
+marker, a door's `used/{door}` marker, a revocation's checkpoint and `revoked` record — through
+`state_machine::write_owned_kv_durable` and `grants::write_record_durable`. Each is persist → apply → gossip, admissible
+only while the two regressions above hold.
+
 ## 3. Identities (PR 2 code; stated here so nothing else mints a second scheme)
 
 - **`operation_id`** — caller-generated, assigned **before dispatch**, stable across retries, worker

@@ -11,13 +11,17 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
-- **A protected call is refused when its grant-use marker cannot be made durable** (external review 2026-10-31,
-  F2 — rows R2 and R3). A door's `used/{door}` marker is now on disk, fsynced, before the work runs; a marker the disk
-  will not take refuses the call by name (*grant use not recorded durably*), where before the append was dropped and
-  counted and the call ran, so a crash could let the same grant through that door twice. The restart gate that
-  showed a grant held across a restart went through `shutdown()`, whose exit snapshot is taken from the store, and so
-  never exercised the WAL: a restart that keeps only the WAL is now a test of its own, for the grant records and for
-  the acknowledged replica. `deprecations.md` §75.
+- **A grant record the disk will not take is a refusal by name** (external review 2026-10-31, F2 — rows R2 and
+  R3; D2). A door's `used/{door}` marker, the agent's `consumed` marker and a revocation's checkpoint and `revoked`
+  records are on disk, fsynced, before the step they admit; a record the disk will not take refuses that step by name
+  (*grant use not recorded durably* at the door, `GrantNotPresented` at the agent, `503 not_durable` at
+  `/gateway/grants/revoke` and at issue), where before the append was dropped and counted and the step went ahead, so
+  a crash could admit the same grant twice, re-honour an un-consumed request, or re-arm a revoked grant. A use that
+  could not be recorded is not spent: the retry after repair runs once. Under `async`/`os` each is a per-call
+  `fdatasync`. The restart gate that showed a grant held across a restart went through `shutdown()`, whose exit
+  snapshot is taken from the store, and so never exercised the WAL: a restart that keeps only the WAL is now a test
+  of its own, for the grant records and for the acknowledged replica (under `async` and `flush`).
+  `deprecations.md` §77.
 - **`mycelium doctor` names each guarantee's row of the shared-responsibility matrix** (adopter-surface Y10, decided by
   the maintainer on #707's review).
   - **Text form:** a line for a guarantee not enforced ends with `→ matrix: <row>`, and the enforced ones are listed

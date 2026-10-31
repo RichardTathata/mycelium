@@ -1210,12 +1210,12 @@ impl Settling {
                 let marker = format!("grant/{}/{}/used/{point}", b.holder.as_str(), b.term.as_str());
                 let used = mycelium_core::ops::kv_get(ctx, &marker).is_some()
                     || !authority.claim_grant_use(b.holder.as_str(), &b.scope, b.term.as_str(), &point, envelope.not_after_ms);
-                Some((marker, used, permit.policy_revision.clone()))
+                Some((marker, used, permit.policy_revision.clone(), (b.holder.as_str().to_string(), b.scope.clone(), b.term.as_str().to_string())))
             }
             _ => None,
         };
         match grant_use {
-            Some((_, true, policy_revision)) => {
+            Some((_, true, policy_revision, _)) => {
                 if admitted && let Some(index) = history_index {
                     index.retract(&point, &envelope.actor, &envelope.attempt_id);
                 }
@@ -1224,11 +1224,16 @@ impl Settling {
                         .checking(["grant used once at each door"]),
                 ));
             }
-            Some((marker, false, policy_revision)) => {
+            Some((marker, false, policy_revision, (holder, scope, term))) => {
                 // The marker is on disk before the work runs, or the work does not run (external review
                 // 2026-10-31, F2; D2): a dropped append was counted and the call went ahead, so after a crash the
-                // door had forgotten the use. The in-memory claim stays spent either way, as a nonce is.
+                // door had forgotten the use. A use that cannot be recorded ran nothing, so it is not spent: the
+                // claim is released, and a retry once the disk is repaired runs once — the answer a restart gives
+                // too, since no marker was written.
                 if let Err(reason) = super::super::state_machine::write_owned_kv_durable(ctx, &marker, ctx.hlc.decision_now_ms().to_string().into_bytes()).await {
+                    if let Some(authority) = ctx.execution_authority.get() {
+                        authority.release_grant_use(&holder, &scope, &term, &point);
+                    }
                     if admitted && let Some(index) = history_index {
                         index.retract(&point, &envelope.actor, &envelope.attempt_id);
                     }

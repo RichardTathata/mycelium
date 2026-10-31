@@ -2242,14 +2242,37 @@ and refuses by name each schedule it cannot run (another cron, a nested schedule
 uses; an Eve agent whose `schedules/` was refused now loads, and its schedules run only when
 `runEveSchedules` is called.
 
-## 75. A protected call is refused when its grant-use marker cannot be made durable (unreleased, external review 2026-10-31, R3)
+## 77. A grant record the disk will not take is a refusal by name: the door's use marker, the agent's `consumed`, a revocation (unreleased, external review 2026-10-31, R3)
 
-A door that admits a grant writes `grant/{holder}/{term}/used/{door}` beside the request. Before this, that write was a
-fire-and-forget WAL append: a full queue or a poisoned writer dropped the record, counted it, and the call ran — so a
-node restarted after a crash had forgotten the use, and the same grant could be admitted at that door again within
-its window. Now the marker is on disk, fsynced, before the work runs, and a marker the disk will not take refuses the
-call: the decision is a denial on the record, *grant use not recorded durably at {door}: {reason}*, the in-memory claim
-is spent as it was, and the tool runs nothing. A node without `[persistence]` is unchanged — its writes are in memory
-and it has never claimed otherwise ([feature page](../features/grants.md)). **Operator note:** a node whose WAL writer
-is poisoned (`/health` reports `refusing_appends`) now refuses every grant-admitted call until a snapshot repairs it,
-where it used to run them.
+Four grant records now reach the disk **before** the step they admit, or that step is refused by name — the maintainer's
+decision D2 on finding F2: a record that cannot be made durable is never a proceed.
+
+- **The door's use marker.** A door that admits a grant writes `grant/{holder}/{term}/used/{door}` beside the request.
+  Before this, that write was a fire-and-forget WAL append: a full queue or a poisoned writer dropped the record,
+  counted it, and the call ran — so a node restarted after a crash had forgotten the use, and the same grant could be
+  admitted at that door again within its window. Now the marker is on disk, fsynced, before the work runs, and a marker
+  the disk will not take refuses the call: a denial on the record, *grant use not recorded durably at {door}: {reason}*,
+  and the tool runs nothing. Nothing ran, so the use is **not spent**: the in-memory claim is released, and the same
+  grant presented once the disk is repaired runs once — the answer a restart gives too, since no marker was written.
+- **The agent's `consumed` marker** is on disk before the commit, or the invocation is refused
+  `GrantNotPresented` naming it and the grant is left un-consumed; a retry after repair consumes once without asking
+  again. A lost `consumed` did not fail safe: the un-consumed request was re-honoured and the tool admitted again, and
+  a provider that attaches no enforcement has no door marker to remember a use by.
+- **A revocation.** `POST /gateway/grants/revoke` writes the grant's second checkpoint and its `revoked` record on the
+  same path; a record the disk will not take answers **`503 not_durable`** (the node's state, not the request's — a
+  retry is the answer) and the execution record says *failed*, where before the route answered `200` with
+  `local_durability: failed` and a restart that kept only the WAL re-armed the grant for the rest of its window. The
+  in-memory revocation still stands in this process; a restart before the disk is repaired may re-arm the grant, so the
+  operator retries the revoke once `/health` no longer reports `wal_refusing_appends`. The issue-time checkpoint is
+  on the same path: a checkpoint the disk will not take issues no grant (`503 not_durable`).
+
+The request itself stays a buffered append (losing it to a crash means the agent asks again), and `…/issued` was
+already written on the receipt path, its rung in the supervisor's answer; a lost `…/issued` leaves the request standing
+un-answered — the agent re-waits on it, `GET /gateway/grants/pending` lists it, and the supervisor's re-issue is not
+`already_answered` (that refusal needs the `issued` or `refused` record present), so the grant is issued again against
+the same request. Under `sync_mode = "async"` or `"os"` each
+of these four writes is a per-call `fdatasync` the node would not otherwise make. A node without `[persistence]` is
+unchanged — its writes are in memory and it has never claimed a disk ([feature page](../features/grants.md)).
+**Operator note:** a node whose WAL writer is poisoned (`/health`: `wal_refusing_appends`) now refuses every
+grant-admitted call, every grant-required invocation and every revoke until a snapshot repairs it, where it used to
+run them.

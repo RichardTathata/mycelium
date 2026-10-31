@@ -286,6 +286,14 @@ impl ExecutionAuthority {
         true
     }
 
+    /// Release a claim made by [`claim_grant_use`](Self::claim_grant_use) whose work never ran because the use could
+    /// not be recorded durably (external review 2026-10-31, R3): nothing ran, so the use is not spent, and a retry
+    /// after the disk is repaired runs once. A restart gives the same answer, since no marker was written.
+    pub fn release_grant_use(&self, holder: &str, scope: &str, term: &str, door: &str) {
+        let mut used = self.used_grants.lock().unwrap_or_else(|e| e.into_inner());
+        used.remove(&(holder.to_string(), scope.to_string(), term.to_string(), door.to_string()));
+    }
+
     /// Does this authority already hold a checkpoint of `authority` for `scope` at or past `seq`?
     pub fn holds_checkpoint(&self, authority: &crate::mandate::PrincipalId, scope: &str, seq: u64) -> bool {
         self.state.lock().unwrap_or_else(|e| e.into_inner()).revocations.holds(authority, scope, seq)

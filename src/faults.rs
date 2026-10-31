@@ -829,7 +829,7 @@ mod restart {
             restarted.push(format!("node {i}: {}", if back { "replayed" } else { "MISSING" }));
         }
         let all_back = restarted.iter().all(|s| s.ends_with("replayed"));
-        check(rep, &t, "a synced write is replayed from the node's own WAL after a restart", Some(all_back), restarted.join("; "));
+        check(rep, &t, "a synced write is back after a graceful restart (the exit-snapshot path; the WAL alone is proved by the WAL-only restart test)", Some(all_back), restarted.join("; "));
 
         // Unreadable state: a complete record that does not decode, appended to node 0's WAL.
         let t = crate::sim_seam::mono_instant();
