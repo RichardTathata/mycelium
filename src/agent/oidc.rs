@@ -423,6 +423,13 @@ impl OidcVerifier {
     }
 }
 
+/// JWK members the verifier never reads and so never lets decide whether a key is usable: the
+/// algorithm comes from the token header (checked against [`ALLOWED_ALGS`]), and the certificate
+/// and usage fields play no part in building a [`DecodingKey`]. Stripped from each key before it is
+/// parsed, because `jsonwebtoken`'s enums for them are closed and a value outside them would
+/// otherwise drop a key whose material is fine.
+const JWK_METADATA_IGNORED: &[&str] = &["alg", "use", "key_ops", "x5c", "x5u", "x5t", "x5t#S256"];
+
 /// A JWKS fetch that did not reach a JWKS: discovery failed, the host is denied by egress, the
 /// deadline ran out, the transport failed, the status was not 2xx, or the body was not a JWKS.
 /// Distinct from a fetch that succeeded with no keys, which is a withdrawal. The reason is logged
@@ -478,7 +485,18 @@ impl Shared {
         let keys: Vec<_> = published
             .iter()
             .filter_map(|raw| {
-                let jwk: jsonwebtoken::jwk::Jwk = serde_json::from_value(raw.clone()).ok()?;
+                // "Cannot read" means the key material. Metadata the verifier never consults —
+                // `alg` (the algorithm is pinned from the token header, never from the key), `use`,
+                // `key_ops` and the certificate fields — is stripped before parsing, so an IdP that
+                // stamps an `alg` the parser's enum lacks, or an `x5c` in a shape it does not expect,
+                // does not have a usable key withdrawn by this reader. `kty`, `kid`, `crv` and the
+                // material stay; a `kid` that is not a string is dropped below (a `kid` is how the
+                // token names the key).
+                let mut member = raw.as_object()?.clone();
+                for ignored in JWK_METADATA_IGNORED {
+                    member.remove(*ignored);
+                }
+                let jwk: jsonwebtoken::jwk::Jwk = serde_json::from_value(serde_json::Value::Object(member)).ok()?;
                 let kid = jwk.common.key_id.clone()?;
                 DecodingKey::from_jwk(&jwk).ok().map(|k| (kid, k))
             })
@@ -1086,5 +1104,35 @@ mod tests {
         let v = OidcVerifier::new(c, open_egress());
         assert!(v.verify(&token("test-kid")).await.is_none(), "no keys: the discovery answer was an error");
         assert_eq!(hits(&jwks_hits), 0, "the JWKS named by an error page is never fetched");
+    }
+
+    /// **#712 review, round 2.** "Cannot read" means the key *material*: metadata the verifier never
+    /// consults — `alg` (the algorithm is pinned from the token header), `use`, `key_ops`, `x5c`,
+    /// `x5u`, `x5t`, `x5t#S256` — must not drop a usable key, or an IdP that stamps an `alg` the
+    /// parser's enum lacks, or an `x5c` in a shape it does not expect, would have its keys withdrawn
+    /// by a reader, not by itself.
+    #[tokio::test]
+    async fn metadata_the_verifier_ignores_does_not_drop_a_usable_key() {
+        let decorated = JWKS_BODY.replacen(
+            "\"kid\":\"test-kid\"",
+            "\"kid\":\"test-kid\",\"alg\":\"ML-DSA-65\",\"x5c\":\"MIIB-not-an-array\",\"key_ops\":\"verify\",\"use\":1,\"x5t#S256\":[1]",
+            1,
+        );
+        assert_ne!(decorated, JWKS_BODY, "the fixture's kid was found");
+        let (port, n) = spawn_scripted(move |_| answer(decorated.clone())).await;
+        let v = OidcVerifier::new(stub_cfg(port), open_egress());
+        assert!(v.verify(&token("test-kid")).await.is_some(), "the RSA key verifies whatever its metadata says");
+        assert_eq!(hits(&n), 1);
+    }
+
+    /// A `kid` that is not a string is still dropped: a `kid` is how the token names the key.
+    #[tokio::test]
+    async fn a_kid_that_is_not_a_string_is_dropped() {
+        let bad_kid = JWKS_BODY.replacen("\"kid\":\"test-kid\"", "\"kid\":7", 1);
+        assert_ne!(bad_kid, JWKS_BODY);
+        let (port, _) = spawn_scripted(move |_| answer(bad_kid.clone())).await;
+        let v = OidcVerifier::new(stub_cfg(port), open_egress());
+        assert!(v.verify(&token("test-kid")).await.is_none());
+        assert!(v.verify(&token("7")).await.is_none());
     }
 }

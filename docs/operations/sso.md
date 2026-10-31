@@ -99,8 +99,9 @@ non-empty it must permit the `issuer` and `jwks_uri` hosts. The start-time check
 `issuer` and a `jwks_uri` **you configured** — either off the list and **the node refuses to start**
 naming it (since 2.20.0, `an_oidc_issuer_the_egress_policy_denies_refuses_the_start`). A `jwks_uri`
 taken from discovery is checked only when keys are fetched: off the list, the node starts, logs
-`oidc: the egress policy does not permit the JWKS host; no keys, every token refused`, and answers every
-JWT 401. Google is the common case — issuer `accounts.google.com`, keys at `www.googleapis.com` — so allow
+`oidc: the egress policy does not permit the JWKS host; the held keys are kept, none fetched`, and — holding
+no keys on a cold start — answers every JWT 401; keys already held serve for at most 24 h after the last
+successful fetch (`JWKS_MAX_STALE`), then every token is refused. Google is the common case — issuer `accounts.google.com`, keys at `www.googleapis.com` — so allow
 both, or set `jwks_uri` explicitly. Since 2.23.0 a redirect from either URL is checked against the list
 too. Network-layer egress control must allow the same hosts.
 
