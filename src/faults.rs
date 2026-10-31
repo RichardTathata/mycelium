@@ -766,6 +766,11 @@ fn check(rep: &mut ClassReport, started: &std::time::Instant, name: &str, ok: Op
 // ───────────────────────────────────────────────────────────────────────────────────── restart ──
 
 mod restart {
+    //! What this class proves: the synced write is read back after a restart through `shutdown()`, whose exit
+    //! snapshot is taken from the **store** — so a record the store held and the WAL never took is carried over by
+    //! that snapshot too. The WAL path alone is proved by the restart that keeps only the WAL (`test_util::
+    //! sabotage_exit_snapshot`, external review 2026-10-31, R2); a hard-crash restart class — the exit snapshot
+    //! denied, only the WAL replayed — is **not built** here.
     use super::*;
 
     const GUARANTEES: &[&str] = &["persist.configured", "persist.sync_mode", "persist.unreadable_refused"];

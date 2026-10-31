@@ -11,6 +11,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **A protected call is refused when its grant-use marker cannot be made durable** (external review 2026-10-31,
+  F2 — rows R2 and R3). A door's `used/{door}` marker is now on disk, fsynced, before the work runs; a marker the disk
+  will not take refuses the call by name (*grant use not recorded durably*), where before the append was dropped and
+  counted and the call ran, so a crash could let the same grant through that door twice. The restart gate that
+  showed a grant held across a restart went through `shutdown()`, whose exit snapshot is taken from the store, and so
+  never exercised the WAL: a restart that keeps only the WAL is now a test of its own, for the grant records and for
+  the acknowledged replica. `deprecations.md` §75.
 - **`mycelium doctor` names each guarantee's row of the shared-responsibility matrix** (adopter-surface Y10, decided by
   the maintainer on #707's review).
   - **Text form:** a line for a guarantee not enforced ends with `→ matrix: <row>`, and the enforced ones are listed

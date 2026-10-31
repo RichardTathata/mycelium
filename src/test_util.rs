@@ -96,3 +96,30 @@ pub async fn spawn_counting_listener(body: &'static str) -> (u16, std::sync::Arc
     });
     (port, accepted)
 }
+
+// ── A restart that keeps only the WAL (external review 2026-10-31, R2) ──────────────────────────
+
+/// Where a node's `kv/wal.bin` lives under a persistence base: `<base>/<node>/kv/`. Walked rather than spelt out so
+/// the test does not pin the directory layout.
+pub fn kv_dir_under(base: &std::path::Path) -> std::path::PathBuf {
+    fn walk(p: &std::path::Path) -> Option<std::path::PathBuf> {
+        if p.join("wal.bin").is_file() { return Some(p.to_path_buf()); }
+        std::fs::read_dir(p).ok()?.flatten().filter(|e| e.path().is_dir()).find_map(|e| walk(&e.path()))
+    }
+    walk(base).unwrap_or_else(|| panic!("no wal.bin under {}", base.display()))
+}
+
+/// Make the next exit snapshot fail without touching the WAL: the install target becomes a directory, so the rename
+/// of `snapshot.tmp` over it refuses and the WAL is **not** truncated (steps 3 and 4 of `do_snapshot`). The start
+/// snapshot is kept aside and put back by [`restore_start_snapshot`], so the restart replays start snapshot + WAL tail —
+/// a restart that keeps only what reached the WAL.
+pub fn sabotage_exit_snapshot(kv_dir: &std::path::Path) {
+    std::fs::rename(kv_dir.join("snapshot.bin"), kv_dir.join("snapshot.keep")).expect("the start snapshot is there");
+    std::fs::create_dir(kv_dir.join("snapshot.bin")).unwrap();
+}
+pub fn restore_start_snapshot(kv_dir: &std::path::Path) {
+    assert!(std::fs::metadata(kv_dir.join("wal.bin")).unwrap().len() > 0, "the exit snapshot must have failed before truncating the WAL");
+    std::fs::remove_dir(kv_dir.join("snapshot.bin")).unwrap();
+    let _ = std::fs::remove_file(kv_dir.join("snapshot.tmp"));
+    std::fs::rename(kv_dir.join("snapshot.keep"), kv_dir.join("snapshot.bin")).unwrap();
+}
