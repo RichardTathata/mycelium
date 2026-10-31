@@ -87,6 +87,63 @@ pub struct Doctor {
     pub report: Option<GuaranteeReport>,
     pub confinement: Option<ConfinementReport>,
     pub persistence: Option<Persistence>,
+    /// Each reported guarantee's row of the shared-responsibility matrix ([`matrix_row`]), by id.
+    pub matrix: BTreeMap<&'static str, &'static str>,
+}
+
+/// Each core guarantee's row of the shared-responsibility matrix (`docs/operations/shared-responsibility-matrix.md`
+/// § From a `doctor` line to its row): who holds the control a `doctor` line reports on, so an auditor goes from a
+/// state to a responsibility without the code (adopter-surface Y10). A guarantee the matrix has no row for reads
+/// `no row` with the reason. `scripts/check-pilot-kit.py` holds this table and the page's equal, cell for cell (links
+/// and emphasis stripped); `every_core_guarantee_names_its_matrix_row` holds it complete over the catalogue.
+pub const MATRIX_ROWS: &[(&str, &str)] = &[
+    ("gw.not_open", "Gateway access control (CC6)"),
+    ("gw.exposed_closed", "Gateway access control (CC6)"),
+    ("gw.token_tables", "Gateway access control (CC6)"),
+    ("gw.oidc", "Operator authentication (SSO) (CC6)"),
+    ("gw.tls", "Encryption in transit (gateway) (CC6)"),
+    ("gw.caller_profile", "Capability authorization (CC6)"),
+    ("mesh.tls", "Node authentication (CC6) · Encryption in transit (gossip) (CC6)"),
+    ("mesh.signed_writes", "Peer-identity integrity (CC6)"),
+    ("id.proofs_required", "Peer-identity integrity (CC6)"),
+    ("id.ca_key_off_node", "Key custody (CA, at-rest KMS) (CC6)"),
+    ("id.revocation_authority", "Key management — compromise (CC6)"),
+    ("ae.authorised_at_seam", "Capability authorization (CC6)"),
+    ("ae.recorded_before_dispatch", "Capability authorization (CC6) · Audit trail (CC7)"),
+    ("prov.enforcement", "Capability authorization (CC6)"),
+    ("a2a.admission", "Gateway access control (CC6)"),
+    ("authz.execution_authority", "Scoped authority over a resource (mandates) (CC6)"),
+    ("authz.durable_epochs", "Scoped authority over a resource (mandates) (CC6)"),
+    ("audit.chain", "Audit trail (CC7)"),
+    ("audit.sink", "Audit export (CC7)"),
+    ("egress.allow_list", "Egress control (Confidentiality & Availability)"),
+    ("egress.credentials", "Egress control (Confidentiality & Availability)"),
+    ("persist.configured", "Availability (Confidentiality & Availability)"),
+    ("persist.sync_mode", "Availability (Confidentiality & Availability)"),
+    ("persist.unreadable_refused", "Availability (Confidentiality & Availability)"),
+    ("at_rest.cipher", "Encryption at rest (CC6)"),
+    ("cons.safety_profile", "no row — an exclusive outcome decided once is processing integrity, a category this matrix does not cover; guide 04 is its record"),
+    ("fed.domain_enforced", "Cross-domain access (federated domains) (CC6)"),
+    ("fed.pinned", "Cross-domain access (federated domains) (CC6)"),
+    ("fed.body_bound", "Cross-domain access (federated domains) (CC6)"),
+    ("fed.partner_slots", "Cross-domain access (federated domains) (CC6)"),
+    ("fed.caller_named", "Cross-domain access (federated domains) (CC6)"),
+    ("fed.catalogue_signed", "Cross-domain access (federated domains) (CC6)"),
+    ("fed.partner_egress", "Cross-domain access (federated domains) (CC6)"),
+    ("fed.partner_posture", "Cross-domain access (federated domains) (CC6)"),
+    ("fed.non_merger", "Cross-domain access (federated domains) (CC6)"),
+    ("fed.clock_agreement", "Cross-domain access (federated domains) (CC6)"),
+    ("trace.spans_not_evidence", "Metrics / observability (CC7)"),
+    ("net.confinement", "Egress control (Confidentiality & Availability)"),
+    ("clock.sync", "Metrics / observability (CC7)"),
+];
+
+/// What a guarantee this table does not name reads — a companion's, registered at run time.
+pub const NO_MATRIX_ROW: &str = "no row (not a core guarantee: the matrix covers the core catalogue)";
+
+/// The matrix row a guarantee's `doctor` line names.
+pub fn matrix_row(id: &str) -> &'static str {
+    MATRIX_ROWS.iter().find(|(g, _)| *g == id).map(|(_, row)| *row).unwrap_or(NO_MATRIX_ROW)
 }
 
 /// Run the doctor over `config_path` (or, with none, the defaults and the environment, as
@@ -120,6 +177,7 @@ fn run_inner(config_path: Option<&Path>, attach: Option<Attach<'_>>) -> Doctor {
         report: None,
         confinement: None,
         persistence: None,
+        matrix: BTreeMap::new(),
     };
     let defaults = GossipConfig::default();
     // The file layer, parsed without the environment, so the two can be told apart below. The node
@@ -175,6 +233,7 @@ fn run_inner(config_path: Option<&Path>, attach: Option<Attach<'_>>) -> Doctor {
     {
         d.refusal = Some(refusal("profile", &e));
     }
+    d.matrix = report.entries.iter().map(|e| (e.id, matrix_row(e.id))).collect();
     d.report = Some(report);
     d
 }
@@ -330,6 +389,18 @@ impl Doctor {
             // What is met is named too, not only counted: a count says how many, not which.
             let enforced: Vec<&str> = r.entries.iter().filter(|e| state_of(&e.resolution).0 == "enforced").map(|e| e.id).collect();
             let _ = writeln!(s, "enforced: {}", if enforced.is_empty() { "none".to_string() } else { enforced.join(", ") });
+            // Who holds each enforced one, grouped by its matrix row in the order the guarantees were named.
+            let mut by_row: Vec<(&str, Vec<&str>)> = Vec::new();
+            for id in &enforced {
+                let row = matrix_row(id);
+                match by_row.iter_mut().find(|(r, _)| *r == row) {
+                    Some((_, ids)) => ids.push(id),
+                    None => by_row.push((row, vec![id])),
+                }
+            }
+            for (row, ids) in by_row {
+                let _ = writeln!(s, "  enforced → matrix: {row}: {}", ids.join(", "));
+            }
             if r.profile.as_ref().is_some_and(|p| p.name == "secure-multi-domain") && r.faces_no_partner() {
                 // `doctor` builds a node from a file, which never has an edge or a client attached: say what
                 // that means here rather than leave six `not_applicable` lines to be read as a pass. Over an
@@ -340,7 +411,7 @@ impl Doctor {
             for e in &r.entries {
                 let (state, detail) = state_of(&e.resolution);
                 if state != "enforced" {
-                    let _ = writeln!(s, "  {}: {state} — {detail} → {}", e.id, e.docs);
+                    let _ = writeln!(s, "  {}: {state} — {detail} → {} → matrix: {}", e.id, e.docs, matrix_row(e.id));
                 }
             }
         }
@@ -542,6 +613,51 @@ mod tests {
         // A named-token table is enforced only where `compliance` is built (v2.18.1).
         #[cfg(feature = "compliance")]
         assert!(named.contains(&"gw.token_tables"), "{line}");
+    }
+
+    /// Every core guarantee names its row of the shared-responsibility matrix, once, and the table names nothing the
+    /// catalogue lacks (adopter-surface Y10: `doctor` names the row; the page's copy is held equal by
+    /// `scripts/check-pilot-kit.py`).
+    #[test]
+    fn every_core_guarantee_names_its_matrix_row() {
+        let core: Vec<&str> = crate::agent::guarantee::core_guarantees().iter().map(|g| g.id).collect();
+        let named: Vec<&str> = MATRIX_ROWS.iter().map(|(id, _)| *id).collect();
+        for id in &core {
+            assert_eq!(named.iter().filter(|n| *n == id).count(), 1, "`{id}` must have exactly one matrix row");
+        }
+        for id in &named {
+            assert!(core.contains(id), "the matrix table names `{id}`, which is not a core guarantee");
+        }
+        assert!(MATRIX_ROWS.iter().all(|(_, row)| !row.is_empty()));
+        assert_eq!(matrix_row("companion.something"), NO_MATRIX_ROW);
+    }
+
+    /// Each guarantee line `doctor` prints names its matrix row: a line for a guarantee not enforced ends with it, and
+    /// every enforced one is listed under exactly one `enforced → matrix:` line naming its row. The JSON form carries
+    /// the same row for every reported guarantee.
+    #[tokio::test]
+    async fn doctor_names_each_guarantees_matrix_row() {
+        let port = crate::test_util::alloc_port();
+        let http = crate::test_util::alloc_port();
+        let path = write_cfg("matrix-rows", &format!(
+            "bind_port = {port}\nhttp_port = {http}\n[[gateway_named_tokens]]\nname = \"a\"\ntoken = \"a-token\"\nscopes = [\"kv:read\"]\n"));
+        let d = run(Some(&path));
+        let text = d.render();
+        let report = d.report.as_ref().expect("a report");
+        for e in &report.entries {
+            let row = matrix_row(e.id);
+            if state_of(&e.resolution).0 == "enforced" {
+                let lines: Vec<&str> = text.lines().filter(|l| l.starts_with("  enforced → matrix: ")
+                    && l.rsplit_once(": ").is_some_and(|(_, ids)| ids.split(", ").any(|i| i == e.id))).collect();
+                assert_eq!(lines.len(), 1, "`{}` is enforced and listed under one matrix line: {text}", e.id);
+                assert!(lines[0].starts_with(&format!("  enforced → matrix: {row}: ")), "{}", lines[0]);
+            } else {
+                let line = text.lines().find(|l| l.starts_with(&format!("  {}: ", e.id)))
+                    .unwrap_or_else(|| panic!("a line for `{}`: {text}", e.id));
+                assert!(line.ends_with(&format!(" → matrix: {row}")), "{line}");
+            }
+            assert_eq!(d.matrix.get(e.id), Some(&row), "the JSON form's row for `{}`", e.id);
+        }
     }
 
     /// A secret is shown as `set`, never its value — in the text and in the JSON form.

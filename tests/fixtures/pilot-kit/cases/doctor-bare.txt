@@ -1,0 +1,125 @@
+mycelium doctor — 2.38.0
+configuration: bare.toml
+build features: gateway, tls, compliance, consensus
+profile: dev rev 1 (none set: dev requires nothing)
+start(): would start
+guarantees: not_applicable 25 · not_configured 11 · not_in_build 1 · not_verifiable_here 2
+enforced: none
+  gw.not_open: not_applicable — no `http_port`: this node runs no gateway → docs/operations/rbac.md → matrix: Gateway access control (CC6)
+  gw.exposed_closed: not_applicable — no `http_port`: this node runs no gateway → docs/operations/production-readiness.md → matrix: Gateway access control (CC6)
+  gw.token_tables: not_applicable — no `http_port`: this node runs no gateway → docs/operations/rbac.md → matrix: Gateway access control (CC6)
+  gw.oidc: not_applicable — no `http_port`: this node runs no gateway → docs/operations/sso.md → matrix: Operator authentication (SSO) (CC6)
+  gw.tls: not_applicable — no `http_port`: this node runs no gateway → docs/operations/gateway-tls.md → matrix: Encryption in transit (gateway) (CC6)
+  gw.caller_profile: not_applicable — no `http_port`: this node runs no gateway → docs/guide/20-authorising-actions.md → matrix: Capability authorization (CC6)
+  mesh.tls: not_configured — [tls] → docs/guide/09-security.md → matrix: Node authentication (CC6) · Encryption in transit (gossip) (CC6)
+  mesh.signed_writes: not_configured — [tls] — nothing is signed without it → docs/guide/deprecations.md → matrix: Peer-identity integrity (CC6)
+  id.proofs_required: not_configured — [tls] — proofs ride on the TLS identity; the flag is inert without it → docs/design/identity-authentication.md → matrix: Peer-identity integrity (CC6)
+  id.ca_key_off_node: not_configured — [tls] → docs/operations/cert-rotation.md → matrix: Key custody (CA, at-rest KMS) (CC6)
+  id.revocation_authority: not_configured — [tls] → docs/design/revocation-authority.md → matrix: Key management — compromise (CC6)
+  ae.authorised_at_seam: not_applicable — no `http_port`: this node runs no gateway → docs/guide/20-authorising-actions.md → matrix: Capability authorization (CC6)
+  ae.recorded_before_dispatch: not_applicable — no `http_port`: this node runs no gateway → docs/guide/20-authorising-actions.md → matrix: Capability authorization (CC6) · Audit trail (CC7)
+  prov.enforcement: not_configured — with_provider_enforcement (off: nothing is checked at this provider, whatever the gateway does) → docs/guide/20-authorising-actions.md → matrix: Capability authorization (CC6)
+  a2a.admission: not_applicable — no `/a2a` in this build (`a2a` feature off) → docs/operations/production-readiness.md → matrix: Gateway access control (CC6)
+  authz.execution_authority: not_applicable — no `http_port`: this node runs no gateway → docs/guide/21-mandates.md → matrix: Scoped authority over a resource (mandates) (CC6)
+  authz.durable_epochs: not_applicable — no execution authority attached → docs/guide/21-mandates.md → matrix: Scoped authority over a resource (mandates) (CC6)
+  audit.chain: not_applicable — no `http_port`: this node runs no gateway → docs/operations/audit.md → matrix: Audit trail (CC7)
+  audit.sink: not_applicable — no `http_port`: this node runs no gateway → docs/operations/audit.md → matrix: Audit export (CC7)
+  egress.allow_list: not_configured — egress.allow_hosts (empty allows all) → docs/operations/crown-jewel.md → matrix: Egress control (Confidentiality & Availability)
+  egress.credentials: not_configured — egress_credentials (no binding configured) → docs/operations/crown-jewel.md → matrix: Egress control (Confidentiality & Availability)
+  persist.configured: not_configured — [persistence] → docs/operations/deployment.md → matrix: Availability (Confidentiality & Availability)
+  persist.sync_mode: not_applicable — no `[persistence]` configured → docs/design/contracts-receipts.md → matrix: Availability (Confidentiality & Availability)
+  persist.unreadable_refused: not_applicable — no `[persistence]` configured → docs/operations/deployment.md → matrix: Availability (Confidentiality & Availability)
+  at_rest.cipher: not_applicable — no `[persistence]` configured → docs/operations/crown-jewel.md → matrix: Encryption at rest (CC6)
+  cons.safety_profile: not_configured — consensus_require_electorate (off: a lock or an election on the whole cluster or an undeclared group runs as before, counted) → docs/design/consensus-electorate.md → matrix: no row — an exclusive outcome decided once is processing integrity, a category this matrix does not cover; guide 04 is its record
+  fed.domain_enforced: not_configured — domain_profile = "enforced" (open: SWIM may run, and its datagrams are unauthenticated UDP) → docs/design/federated-domains.md → matrix: Cross-domain access (federated domains) (CC6)
+  fed.pinned: not_applicable — no federation client attached: this node calls no partner → docs/operations/federation.md → matrix: Cross-domain access (federated domains) (CC6)
+  fed.body_bound: not_applicable — no federation edge attached: this node serves no partner → docs/operations/federation.md → matrix: Cross-domain access (federated domains) (CC6)
+  fed.partner_slots: not_applicable — no federation edge attached: this node serves no partner → docs/operations/federation.md → matrix: Cross-domain access (federated domains) (CC6)
+  fed.caller_named: not_applicable — no federation client attached: this node calls no partner → docs/operations/federation.md → matrix: Cross-domain access (federated domains) (CC6)
+  fed.catalogue_signed: not_applicable — no federation edge or client attached: this node faces no partner → docs/operations/federation.md → matrix: Cross-domain access (federated domains) (CC6)
+  fed.partner_egress: not_applicable — no federation client attached: this node calls no partner → docs/operations/federation.md → matrix: Cross-domain access (federated domains) (CC6)
+  trace.spans_not_evidence: not_in_build — otel → docs/features/span-export.md → matrix: Metrics / observability (CC7)
+  net.confinement: not_verifiable_here — the reference deployment's test (scripts/test-confined-fleet.sh) or the network's own telemetry — a node cannot observe its own network policy → docs/design/confined-fleet.md → matrix: Egress control (Confidentiality & Availability)
+  clock.sync: not_verifiable_here — the deployment's time-sync monitoring; a node cannot verify its own clock against real time (closure plan C11) → docs/threat-model.md → matrix: Metrics / observability (CC7)
+  fed.partner_posture: not_applicable — no federation edge or client attached: this node faces no partner → docs/operations/federation.md → matrix: Cross-domain access (federated domains) (CC6)
+  fed.non_merger: not_applicable — no federation edge or client attached: this node faces no partner → docs/design/federated-domains.md → matrix: Cross-domain access (federated domains) (CC6)
+  fed.clock_agreement: not_applicable — no federation edge or client attached: this node faces no partner → docs/operations/federation.md → matrix: Cross-domain access (federated domains) (CC6)
+confinement: unmet: egress_allow_list, identity_proofs_required, audit_sink, action_evaluator, evidence_journal, ca_key_off_node
+effective configuration (77 fields):
+  bind_address = "127.0.0.1"   # default
+  bind_port = 7999   # file
+  bootstrap_peers = []   # default
+  bulk_fetch_timeout_secs = 30   # default
+  cluster_name = unset   # default
+  consensus_electorate = unset   # default
+  consensus_require_electorate = false   # default
+  control_max_staleness_ms = 30000   # default
+  control_min_peers_heard = 1   # default
+  default_ttl = 5   # default
+  domain_profile = "open"   # default
+  egress.allow_hosts = []   # default
+  egress_credentials = []   # default
+  emergent_detectors_enabled = false   # default
+  epidemic_extra_peers = 3   # default
+  gateway_allow_unauthenticated = false   # default
+  gateway_auth_token = unset   # default
+  gateway_caller_profile = "secure"   # default
+  gateway_cors_origins = []   # default
+  gateway_identity_issuer = unset   # default
+  gateway_named_tokens = []   # default
+  gateway_scoped_tokens = []   # default
+  gateway_tls = unset   # default
+  gossip_channel_capacity = 1024   # default
+  gossip_fanout = 0   # default
+  gossip_shards = 12   # default
+  group_aware_forwarding = true   # default
+  handshake_timeout_ms = 10000   # default
+  health_check_interval_secs = 10   # default
+  health_check_max_jitter_ms = 0   # default
+  http_addr = "127.0.0.1"   # default
+  http_port = unset   # default
+  inbound_idle_timeout_secs = 300   # default
+  intern_keys = true   # default
+  intern_max_keys = 0   # default
+  kv_require_signed_frames = false   # default
+  locality_path = []   # default
+  max_active_connections = 0   # default
+  max_clock_drift_ms = 300000   # default
+  max_concurrent_bulk_handlers = 64   # default
+  max_connections = 1024   # default
+  max_connections_per_source = 0   # default
+  max_forwarding_peers = 9223372036854775807   # default
+  max_inbound_frames_per_sec = 0   # default
+  max_peers = 9223372036854775807   # default
+  max_seen_entries = 100000   # default
+  max_store_entries = 0   # default
+  membership_cooldown_secs = unset   # default
+  oidc = unset   # default
+  peer_eviction_intervals = 3   # default
+  peer_min_rate_bytes_per_sec = 1024   # default
+  peer_read_stall_timeout_ms = 60000   # default
+  peer_write_stall_timeout_ms = 1140000   # default
+  persistence = unset   # default
+  ping_peer_sample_size = 20   # default
+  profile = unset   # default
+  propagation_window_secs = 60   # default
+  protected_rpc_kinds = []   # default
+  rate_aggregate_threshold_fps = 0   # default
+  rate_observation_enabled = false   # default
+  reconnect_backoff_secs = 5   # default
+  require_identity_proofs = true   # default
+  signal_ordered_delivery = false   # default
+  signal_reorder_max_depth = 64   # default
+  signal_reorder_max_hold_ms = 500   # default
+  signal_window_secs = 600   # default
+  swim_failure_detector = true   # default
+  swim_gossip_updates = 12   # default
+  swim_indirect_probes = 3   # default
+  swim_probe_interval_ms = 500   # default
+  swim_probe_timeout_ms = 300   # default
+  swim_suspicion_timeout_ms = 4000   # default
+  swim_udp_port = unset   # default
+  tcp_accept_backlog = 1024   # default
+  tls = unset   # default
+  writer_channel_depth = 1024   # default
+  writer_idle_timeout_secs = 30   # default

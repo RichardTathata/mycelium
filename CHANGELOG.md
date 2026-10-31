@@ -11,6 +11,20 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **`mycelium doctor` names each guarantee's row of the shared-responsibility matrix** (adopter-surface Y10, decided by
+  the maintainer on #707's review).
+  - **Text form:** a line for a guarantee not enforced ends with `→ matrix: <row>`, and the enforced ones are listed
+    under one `  enforced → matrix: <row>: <ids>` line per row. A guarantee the matrix has no row for reads `no row`
+    with the reason.
+  - **JSON form:** it gains `matrix` (guarantee id → row); the schema id is unchanged, because the field is added.
+  - **API:** the public struct `mycelium::doctor::Doctor` gained a public field, `matrix`; an exhaustive struct literal
+    or destructure of `Doctor` breaks (`doctor::run`/`run_attached` build it, and are unaffected). `MATRIX_ROWS`,
+    `NO_MATRIX_ROW` and `matrix_row` are new public items in `mycelium::doctor`.
+  - **Where the rows come from:** `MATRIX_ROWS` in `src/doctor.rs`, which `scripts/check-pilot-kit.py` holds equal to
+    `docs/operations/shared-responsibility-matrix.md` § *From a `doctor` line to its row*.
+  - **What to check:** a script matching a whole `doctor` line exactly (`^  <id>: <state> — … → <docs>$`) now sees the
+    row after the docs link. The `start():`, `profile:`, `guarantees:` and `enforced:` lines are unchanged.
+
 - **Directories the TLS module creates for keys and certificates are `0700`, and certificates are written `0644`**,
   on unix, whatever the umask — a node's `auto_cert_dir` when it creates it, and `tls ca` / `tls issue`'s `--out` when
   it does not exist yet; a wider certificate is narrowed when rewritten. Under a permissive umask (`000`, `002`) the
@@ -65,6 +79,28 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   no client held decided with their reason, one key per slot to two clients under a partition, the refusals and the
   scope), both SDKs' live suites and `mycelium-ts/tests/eve.test.ts`, each seen failing under a planted fault.
   Upgrade notes: `deprecations.md` §73.
+- **The pilot kit** (`docs/plans/adopter-surface.md` Y10; [`docs/operations/pilot-kit/`](docs/operations/pilot-kit/README.md)).
+  The kit is everything a pilot needs on its first day, so that the counterparty is the only piece missing.
+  - **The walk.** The README has six steps:
+    - step 0 is the `one-hour` job's path;
+    - then the two-domain scaffold, pointed at a checkout until the next MINOR;
+    - a call across the edge each way;
+    - `doctor` on all four nodes;
+    - `mycelium test --faults` over the kit's own declaration (`units/`, `faults.toml`);
+    - and a report from those two outputs alone.
+  - **The report.** `report.py` fills `report-template.md` with one section per guarantee a fault class exercised,
+    split by whether the class's own fleet enforced it. Each section gives its state on each node and in the class's
+    fleet, the matrix row its `doctor` line names, and a line for the counterparty to write. The report says the
+    cross-edge call feeds nothing into it.
+  - **CI.** The README's `bash pilot` blocks each source `env.sh`, and run unchanged, each in a fresh shell, in CI's
+    `Scaffold` job.
+  - **The runbook.** `customer-pilot.md` now opens by walking the scaffold with the kit.
+  - **The matrix.** The shared-responsibility matrix gains *From a `doctor` line to its row*, mapping every guarantee
+    id in the catalogue to its row.
+  - **The gate.** `scripts/check-pilot-kit.py` (in `make check`) holds that table complete, checks that the report has
+    a section per exercised guarantee over a checked-in fixture of real output, and checks that the proof page keeps
+    the named-deployment line open. That page now says the kit is not the deployment.
+
 - **An Eve agent directory, unchanged, on a fleet** (`docs/plans/adopter-surface.md` Y6, D24;
   `examples/eve_weather/`, CI job `eve-fleet`). This is a demonstration, not a compatibility promise.
   - **The loader:** `mycelium-ts` gains `loadEveAgent`, which reads an Eve `agent/` directory installed beside the one

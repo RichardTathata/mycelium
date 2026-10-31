@@ -1,0 +1,11 @@
+# The node configuration `mycelium test --faults` builds the kit's fleet from. The classes that restart a node and the
+# grant need `[persistence]` and `[tls]`; the run puts both under a temporary directory it removes, so nothing here is
+# written. The fleet runs under `dev` whatever a node file declares: a profile is `doctor`'s to check, not this run's.
+profile = "dev"
+bind_address = "127.0.0.1"
+
+[tls]
+auto_cert_dir = "data/faults-tls"
+
+[persistence]
+base_path = "data/faults-persist"
