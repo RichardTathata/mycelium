@@ -2241,3 +2241,15 @@ and refuses by name each schedule it cannot run (another cron, a nested schedule
 **Migration:** give a token that runs schedules `schedule:run`, and set `gateway_identity_issuer` on every gateway it
 uses; an Eve agent whose `schedules/` was refused now loads, and its schedules run only when
 `runEveSchedules` is called.
+
+## 75. A protected call is refused when its grant-use marker cannot be made durable (unreleased, external review 2026-10-31, R3)
+
+A door that admits a grant writes `grant/{holder}/{term}/used/{door}` beside the request. Before this, that write was a
+fire-and-forget WAL append: a full queue or a poisoned writer dropped the record, counted it, and the call ran — so a
+node restarted after a crash had forgotten the use, and the same grant could be admitted at that door again within
+its window. Now the marker is on disk, fsynced, before the work runs, and a marker the disk will not take refuses the
+call: the decision is a denial on the record, *grant use not recorded durably at {door}: {reason}*, the in-memory claim
+is spent as it was, and the tool runs nothing. A node without `[persistence]` is unchanged — its writes are in memory
+and it has never claimed otherwise ([feature page](../features/grants.md)). **Operator note:** a node whose WAL writer
+is poisoned (`/health` reports `refusing_appends`) now refuses every grant-admitted call until a snapshot repairs it,
+where it used to run them.

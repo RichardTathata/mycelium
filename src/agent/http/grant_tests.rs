@@ -891,3 +891,85 @@ async fn issue_pending(a: Arc<GossipAgent>, http_port: u16, agent_principal: Str
     assert_eq!(status, 200, "{body}");
     request
 }
+
+use crate::test_util::{kv_dir_under, restore_start_snapshot, sabotage_exit_snapshot};
+
+/// **A restart that keeps only the WAL replays the request, the grant and the door's marker** (external review
+/// 2026-10-31, R2). Every restart gate before this one — the test above, `test --faults restart`, the replica gate —
+/// went through `shutdown()`, whose exit snapshot is taken from the **store**: a record the store held and the WAL
+/// never took was carried over by that snapshot, so those gates proved the exit-snapshot path and not the WAL (with
+/// the WAL append removed from `write_owned_kv`, all of them pass). Here the exit snapshot is made to fail, the start
+/// snapshot is put back, and the restart replays start snapshot + WAL tail: each record is back only if it reached
+/// the WAL. Seen failing with that same plant.
+#[tokio::test]
+async fn a_restart_that_keeps_only_the_wal_replays_the_request_the_grant_and_the_door_marker() {
+    let (http_port, gossip_port) = (alloc_port(), alloc_port());
+    let opts = Opts { gossip_port: Some(gossip_port), persist: true, ..Opts::default() };
+    let dir = std::env::temp_dir().join(format!("x3-grant-{gossip_port}"));
+    let _ = std::fs::remove_dir_all(&dir);
+    let (a, _j, ran) = node_with(http_port, opts.clone()).await;
+    let agent_principal = crate::agent::gateway_caller::node_principal(a.node_id());
+    let prefix = format!("grant/{agent_principal}/");
+    let args = serde_json::json!({"env": "prod", "replicas": 3});
+    let sm = a.agent_state_machine(policy(20_000));
+    sm.transition(ExecutionState::Planning).await.unwrap();
+    let (mandate, request) = granted(&a, http_port, &sm, &args).await;
+    assert!(call_deploy(&a, None, &mandate, &args).await.is_ok(), "one execution under the grant");
+    assert_eq!(ran.load(Ordering::SeqCst), 1);
+    let held = |a: &GossipAgent| -> Vec<String> {
+        let mut keys: Vec<String> = crate::store::scan_kv_prefix(&a.task_ctx.kv_state, &prefix).into_iter().map(|(k, _)| k.to_string()).collect();
+        keys.sort();
+        keys
+    };
+    let before = held(&a);
+    for want in [request.as_str(), "/issued", "/consumed", "/used/provider"] {
+        assert!(before.iter().any(|k| k.ends_with(want)), "the node holds {want}: {before:?}");
+    }
+    // The crash: the exit snapshot fails, so only the WAL carries the records across.
+    let kv_dir = kv_dir_under(&dir.join("persist"));
+    sabotage_exit_snapshot(&kv_dir);
+    a.shutdown().await;
+    drop(sm);
+    drop(a);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    restore_start_snapshot(&kv_dir);
+    let (a, _j, _ran) = node_with(http_port, opts).await;
+    let after = held(&a);
+    for k in &before {
+        assert!(after.contains(k), "{k} did not come back from the WAL alone; after the restart: {after:?}");
+    }
+    a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// **A grant's use is on disk before the work runs, or the work does not run** (external review 2026-10-31, F2;
+/// decision D2). The WAL writer is poisoned, so no append reaches the disk; a protected call under a valid grant is
+/// then **refused by name** — before this, the marker's append was dropped and counted and the call ran, so after a
+/// crash the door had forgotten the use. The refusal is a decision on the record; the in-memory claim is spent (a
+/// second presentation is `GrantUsed`); the tool ran nothing. Seen failing with the marker's write back on
+/// `append_try`: the call succeeded.
+#[tokio::test]
+async fn a_protected_call_is_refused_when_its_grant_use_cannot_be_made_durable() {
+    let (http_port, gossip_port) = (alloc_port(), alloc_port());
+    let opts = Opts { gossip_port: Some(gossip_port), persist: true, ..Opts::default() };
+    let dir = std::env::temp_dir().join(format!("x3-grant-{gossip_port}"));
+    let _ = std::fs::remove_dir_all(&dir);
+    let (a, journal, ran) = node_with(http_port, opts).await;
+    let args = serde_json::json!({"env": "prod", "replicas": 3});
+    let sm = a.agent_state_machine(policy(20_000));
+    sm.transition(ExecutionState::Planning).await.unwrap();
+    let (mandate, _request) = granted(&a, http_port, &sm, &args).await;
+    // The disk goes away: every append is refused from here.
+    a.task_ctx.wal.get().expect("the node persists").poison_for_test("r3: the disk is gone").await.unwrap();
+    let err = call_deploy(&a, None, &mandate, &args).await.expect_err("a use that cannot be recorded durably does not run");
+    assert!(err.contains("not recorded durably"), "the refusal names the reason: {err}");
+    assert_eq!(ran.load(Ordering::SeqCst), 0, "the tool ran nothing");
+    let denied = records(&journal).into_iter().filter(|r| r.reason.contains("not recorded durably")).count();
+    assert_eq!(denied, 1, "the refusal is a decision on the record");
+    // The claim was spent at the door: the same grant presented again is used, not retried.
+    let again = call_deploy(&a, None, &mandate, &args).await.expect_err("spent");
+    assert!(again.contains("used") || again.contains("not recorded durably"), "{again}");
+    assert_eq!(ran.load(Ordering::SeqCst), 0);
+    a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -1224,8 +1224,19 @@ impl Settling {
                         .checking(["grant used once at each door"]),
                 ));
             }
-            Some((marker, false, _)) => {
-                super::super::state_machine::write_owned_kv(ctx, &marker, ctx.hlc.decision_now_ms().to_string().into_bytes());
+            Some((marker, false, policy_revision)) => {
+                // The marker is on disk before the work runs, or the work does not run (external review
+                // 2026-10-31, F2; D2): a dropped append was counted and the call went ahead, so after a crash the
+                // door had forgotten the use. The in-memory claim stays spent either way, as a nonce is.
+                if let Err(reason) = super::super::state_machine::write_owned_kv_durable(ctx, &marker, ctx.hlc.decision_now_ms().to_string().into_bytes()).await {
+                    if admitted && let Some(index) = history_index {
+                        index.retract(&point, &envelope.actor, &envelope.attempt_id);
+                    }
+                    outcome = Err(ae::PreflightRefusal::Denied(
+                        ae::Decision::deny(format!("grant use not recorded durably at {point}: {reason}"), policy_revision)
+                            .checking(["grant use recorded durably before the work"]),
+                    ));
+                }
             }
             None => {}
         }

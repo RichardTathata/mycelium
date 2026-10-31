@@ -423,3 +423,66 @@ async fn test_subscribe_log_receives_live_append() {
     a.shutdown().await;
 }
 
+
+/// **The replica gate, through a restart that keeps only the WAL** (external review 2026-10-31, R2). The gate above
+/// restarts B through `shutdown()`, whose exit snapshot is taken from the store — so it proved the exit-snapshot path.
+/// Here B's exit snapshot is made to fail (`test_util::sabotage_exit_snapshot`), the start snapshot is put back, and
+/// B's restart replays start snapshot + WAL tail: the acknowledged record is back only if the inbound path appended it.
+#[tokio::test]
+async fn an_acknowledged_replica_still_holds_the_record_after_a_restart_that_keeps_only_the_wal() {
+    use crate::test_util::{kv_dir_under, restore_start_snapshot, sabotage_exit_snapshot};
+    use crate::{PersistenceConfig, SyncMode};
+
+    let port_a = alloc_port();
+    let port_b = alloc_port();
+    let id_a = NodeId::new("127.0.0.1", port_a).unwrap();
+    let id_b = NodeId::new("127.0.0.1", port_b).unwrap();
+    let base_a = std::env::temp_dir().join(format!("myc-rsw-a-{port_a}"));
+    let base_b = std::env::temp_dir().join(format!("myc-rsw-b-{port_b}"));
+    let _ = std::fs::remove_dir_all(&base_a);
+    let _ = std::fs::remove_dir_all(&base_b);
+    let mk = |port: u16, id: NodeId, peer: NodeId, base: std::path::PathBuf| {
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = port;
+        cfg.bootstrap_peers = vec![peer];
+        cfg.health_check_max_jitter_ms = 50;
+        cfg.persistence = Some(PersistenceConfig {
+            base_path: base,
+            sync_mode: SyncMode::Flush,
+            snapshot_wal_threshold: 1_000_000,
+            snapshot_interval_secs: 3_600, on_unreadable: Default::default(),
+        });
+        GossipAgent::new(id, cfg)
+    };
+    let a = mk(port_a, id_a.clone(), id_b.clone(), base_a.clone());
+    let b1 = mk(port_b, id_b.clone(), id_a.clone(), base_b.clone());
+    a.start().await.unwrap();
+    b1.start().await.unwrap();
+    for _ in 0..300 {
+        if !a.peers().is_empty() && !b1.peers().is_empty() { break; }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let first = a.set_with_replica_sync("rs/wal-only", b"v".to_vec(), Duration::from_secs(10)).await.expect("local write");
+    assert!(first.replica_sync.persisted_by.contains(&id_b), "B must acknowledge first; missing={:?}", first.replica_sync.missing);
+
+    let kv_dir = kv_dir_under(&base_b);
+    sabotage_exit_snapshot(&kv_dir);
+    b1.shutdown().await;
+    drop(b1);
+    restore_start_snapshot(&kv_dir);
+    // The record is in B's WAL as bytes, or it is nowhere B's restart can find it.
+    let wal = std::fs::read(kv_dir.join("wal.bin")).unwrap();
+    assert!(wal.windows(b"rs/wal-only".len()).any(|w| w == b"rs/wal-only"), "the inbound path appended the acknowledged record to B's WAL");
+    // A is gone before B comes back, so nothing can re-gossip or anti-entropy the record to B: what B holds, it replayed.
+    a.shutdown().await;
+    drop(a);
+    let b2 = mk(port_b, id_b.clone(), id_a.clone(), base_b.clone());
+    b2.start().await.unwrap();
+    assert_eq!(
+        b2.kv().get("rs/wal-only"), Some(Bytes::from_static(b"v")),
+        "the restarted peer must have replayed the acknowledged record from its own WAL, with no exit snapshot and no peer to carry it",
+    );
+    b2.shutdown().await;
+    let _ = std::fs::remove_dir_all(&base_a);
+    let _ = std::fs::remove_dir_all(&base_b);
+}
