@@ -1,0 +1,124 @@
+mycelium doctor — 2.38.0
+configuration: nodes/kitchen-gw.toml
+build features: gateway, tls, compliance, a2a, consensus
+profile: secure-multi-domain rev 1
+start(): would start
+guarantees: enforced 28 · not_configured 5 · not_in_build 1 · not_verifiable_here 5
+enforced: gw.not_open, gw.exposed_closed, gw.token_tables, gw.tls, gw.caller_profile, mesh.tls, mesh.signed_writes, id.proofs_required, id.ca_key_off_node, ae.authorised_at_seam, ae.recorded_before_dispatch, prov.enforcement, a2a.admission, authz.execution_authority, authz.durable_epochs, audit.chain, egress.allow_list, persist.configured, persist.sync_mode, persist.unreadable_refused, cons.safety_profile, fed.domain_enforced, fed.pinned, fed.body_bound, fed.partner_slots, fed.caller_named, fed.catalogue_signed, fed.partner_egress
+  enforced → matrix: Gateway access control (CC6): gw.not_open, gw.exposed_closed, gw.token_tables, a2a.admission
+  enforced → matrix: Encryption in transit (gateway) (CC6): gw.tls
+  enforced → matrix: Capability authorization (CC6): gw.caller_profile, ae.authorised_at_seam, prov.enforcement
+  enforced → matrix: Node authentication (CC6) · Encryption in transit (gossip) (CC6): mesh.tls
+  enforced → matrix: Peer-identity integrity (CC6): mesh.signed_writes, id.proofs_required
+  enforced → matrix: Key custody (CA, at-rest KMS) (CC6): id.ca_key_off_node
+  enforced → matrix: Capability authorization (CC6) · Audit trail (CC7): ae.recorded_before_dispatch
+  enforced → matrix: Scoped authority over a resource (mandates) (CC6): authz.execution_authority, authz.durable_epochs
+  enforced → matrix: Audit trail (CC7): audit.chain
+  enforced → matrix: Egress control (Confidentiality & Availability): egress.allow_list
+  enforced → matrix: Availability (Confidentiality & Availability): persist.configured, persist.sync_mode, persist.unreadable_refused
+  enforced → matrix: no row — an exclusive outcome decided once is processing integrity, a category this matrix does not cover; guide 04 is its record: cons.safety_profile
+  enforced → matrix: Cross-domain access (federated domains) (CC6): fed.domain_enforced, fed.pinned, fed.body_bound, fed.partner_slots, fed.caller_named, fed.catalogue_signed, fed.partner_egress
+  gw.oidc: not_configured — [oidc] → docs/operations/sso.md → matrix: Operator authentication (SSO) (CC6)
+  id.revocation_authority: not_configured — the node's certificate is judged once its identity loads (start()) → docs/design/revocation-authority.md → matrix: Key management — compromise (CC6)
+  audit.sink: not_configured — with_audit_sink → docs/operations/audit.md → matrix: Audit export (CC7)
+  egress.credentials: not_configured — egress_credentials (no binding configured) → docs/operations/crown-jewel.md → matrix: Egress control (Confidentiality & Availability)
+  at_rest.cipher: not_configured — with_data_at_rest_cipher (plaintext WAL and snapshot) → docs/operations/crown-jewel.md → matrix: Encryption at rest (CC6)
+  trace.spans_not_evidence: not_in_build — otel → docs/features/span-export.md → matrix: Metrics / observability (CC7)
+  net.confinement: not_verifiable_here — the reference deployment's test (scripts/test-confined-fleet.sh) or the network's own telemetry — a node cannot observe its own network policy → docs/design/confined-fleet.md → matrix: Egress control (Confidentiality & Availability)
+  clock.sync: not_verifiable_here — the deployment's time-sync monitoring; a node cannot verify its own clock against real time (closure plan C11) → docs/threat-model.md → matrix: Metrics / observability (CC7)
+  fed.partner_posture: not_verifiable_here — the partner's guarantee report; nothing this node checks makes the partner honest → docs/operations/federation.md → matrix: Cross-domain access (federated domains) (CC6)
+  fed.non_merger: not_verifiable_here — a fact about both domains — the two-mesh suite (`make test-federation`) shows it for its topology; a node sees only its own admissions → docs/design/federated-domains.md → matrix: Cross-domain access (federated domains) (CC6)
+  fed.clock_agreement: not_verifiable_here — both domains' time-sync monitoring; a credential's window is wall-clock across the edge (`federation::edge` module doc) → docs/operations/federation.md → matrix: Cross-domain access (federated domains) (CC6)
+confinement: unmet: audit_sink
+persistence: data/kitchen-gw/kv — exists
+effective configuration (90 fields):
+  bind_address = "127.0.0.1"   # default
+  bind_port = 7971   # file
+  bootstrap_peers = []   # default
+  bulk_fetch_timeout_secs = 30   # default
+  cluster_name = "kitchen.example"   # file
+  consensus_electorate = unset   # default
+  consensus_require_electorate = true   # file
+  control_max_staleness_ms = 30000   # default
+  control_min_peers_heard = 1   # default
+  default_ttl = 5   # default
+  domain_profile = "enforced"   # file
+  egress.allow_hosts = ["127.0.0.1"]   # file
+  egress_credentials = []   # default
+  emergent_detectors_enabled = false   # default
+  epidemic_extra_peers = 3   # default
+  gateway_allow_unauthenticated = false   # default
+  gateway_auth_token = unset   # default
+  gateway_caller_profile = "secure"   # default
+  gateway_cors_origins = []   # default
+  gateway_identity_issuer = "kitchen"   # file
+  gateway_named_tokens[0].name = "planner"   # env
+  gateway_named_tokens[0].scopes = ["federation:invoke","federation:read","fleet:read"]   # env
+  gateway_named_tokens[0].token = set   # env
+  gateway_named_tokens[1].name = "operator"   # env
+  gateway_named_tokens[1].scopes = ["fleet:read"]   # env
+  gateway_named_tokens[1].token = set   # env
+  gateway_scoped_tokens = []   # default
+  gateway_tls.cert_pem_path = unset   # default
+  gateway_tls.key_pem_path = unset   # default
+  gossip_channel_capacity = 1024   # default
+  gossip_fanout = 0   # default
+  gossip_shards = 12   # default
+  group_aware_forwarding = true   # default
+  handshake_timeout_ms = 10000   # default
+  health_check_interval_secs = 10   # default
+  health_check_max_jitter_ms = 0   # default
+  http_addr = "127.0.0.1"   # default
+  http_port = 8471   # file
+  inbound_idle_timeout_secs = 300   # default
+  intern_keys = true   # default
+  intern_max_keys = 0   # default
+  kv_require_signed_frames = false   # default
+  locality_path = []   # default
+  max_active_connections = 0   # default
+  max_clock_drift_ms = 300000   # default
+  max_concurrent_bulk_handlers = 64   # default
+  max_connections = 1024   # default
+  max_connections_per_source = 0   # default
+  max_forwarding_peers = 9223372036854775807   # default
+  max_inbound_frames_per_sec = 0   # default
+  max_peers = 9223372036854775807   # default
+  max_seen_entries = 100000   # default
+  max_store_entries = 0   # default
+  membership_cooldown_secs = unset   # default
+  oidc = unset   # default
+  peer_eviction_intervals = 3   # default
+  peer_min_rate_bytes_per_sec = 1024   # default
+  peer_read_stall_timeout_ms = 60000   # default
+  peer_write_stall_timeout_ms = 1140000   # default
+  persistence.base_path = "data/kitchen-gw/kv"   # file
+  persistence.on_unreadable = "refuse"   # file
+  persistence.snapshot_interval_secs = 300   # file
+  persistence.snapshot_wal_threshold = 10000   # file
+  persistence.sync_mode = "Flush"   # file
+  ping_peer_sample_size = 20   # default
+  profile = "secure-multi-domain"   # file
+  propagation_window_secs = 60   # default
+  protected_rpc_kinds = []   # default
+  rate_aggregate_threshold_fps = 0   # default
+  rate_observation_enabled = false   # default
+  reconnect_backoff_secs = 5   # default
+  require_identity_proofs = true   # default
+  signal_ordered_delivery = false   # default
+  signal_reorder_max_depth = 64   # default
+  signal_reorder_max_hold_ms = 500   # default
+  signal_window_secs = 600   # default
+  swim_failure_detector = false   # file
+  swim_gossip_updates = 12   # default
+  swim_indirect_probes = 3   # default
+  swim_probe_interval_ms = 500   # default
+  swim_probe_timeout_ms = 300   # default
+  swim_suspicion_timeout_ms = 4000   # default
+  swim_udp_port = unset   # default
+  tcp_accept_backlog = 1024   # default
+  tls.auto_cert_dir = "certs/kitchen-gw"   # file
+  tls.ca_cert_pem = unset   # default
+  tls.cert_pem = "certs/kitchen-gw/127_0_0_1_7971.cert.pem"   # file
+  tls.key_pem = "certs/kitchen-gw/127_0_0_1_7971.key.pem"   # file
+  writer_channel_depth = 1024   # default
+  writer_idle_timeout_secs = 30   # default

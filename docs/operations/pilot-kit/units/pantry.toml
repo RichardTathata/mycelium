@@ -1,0 +1,34 @@
+# The food bank's provider, as the kit declares it for `mycelium test --faults` — not a file of the scaffold, which
+# has no `units/`. The classes build their own in-process fleet from it: what the provider offers, the mandate it holds
+# over its stock, and the rules its policy decides by. The reservation's grant rule is what the `grant` class drives on
+# that fleet; the scaffold's own `pantry/reserve`, served by its program, answers without a grant.
+principal = "pantry"
+
+[[capability]]
+ns       = "pantry"
+name     = "stock"
+ttl_secs = 10
+  [capability.attrs]
+  store = "main-hall"
+
+[[mandate]]
+holder     = "pantry"
+scope      = "main-hall"
+operations = ["tools/call:tool:pantry.stock"]
+
+[[rule]]
+actor           = "*"
+operation       = "tools/call"
+resource        = "tool:pantry.stock"
+requires_values = { store = "main-hall" }
+
+[[rule]]
+actor          = "pantry"
+operation      = "tools/call"
+resource       = "tool:pantry.reserve"
+requires_grant = true
+
+[[rule]]
+actor     = "steward"
+operation = "grant.issue"
+resource  = "tool:pantry.reserve"

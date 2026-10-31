@@ -6,7 +6,10 @@
 and whether it would refuse, from a configuration file and the environment alone. It runs the node's own preflight and
 profile check and takes the same [guarantee report](../guide/00-concepts.md#guarantee-report) over a node that is built and
 never started, so it binds no port, creates no directory and attaches nothing. The text form counts the guarantees by
-state, names the enforced ones on an `enforced:` line, and lists each one not enforced with its reason. It also prints the
+state, names the enforced ones on an `enforced:` line, and lists each one not enforced with its reason. Every guarantee
+line also names its row of the [shared-responsibility matrix](../operations/shared-responsibility-matrix.md#from-a-doctor-line-to-its-row)
+(`→ matrix: …`; the enforced ones grouped under one `enforced → matrix:` line per row), or `no row` with the reason, so
+a state leads to who holds the control; the JSON form carries the same row per guarantee as `matrix`. It also prints the
 [effective configuration](../guide/00-concepts.md#effective-configuration) — every field as loaded, after defaults,
 file and environment, with its source named; a tuning
 field at its auto value prints that value, the node derives the running one — and shows a secret as `set` or
@@ -37,6 +40,9 @@ This feature is turned on in code.
 - [`preflight`](../../src/agent/lifecycle.rs) and [`profile_check`](../../src/agent/lifecycle.rs) — `start()`'s own
   refusal chain and profile check, extracted so `doctor` calls them rather than copies them.
 - [`effective_fields`](../../src/doctor.rs) — the per-field source, by comparing the three layers.
+- [`MATRIX_ROWS`](../../src/doctor.rs) and [`matrix_row`](../../src/doctor.rs) — each core guarantee's row of the
+  shared-responsibility matrix, which every guarantee line names; `scripts/check-pilot-kit.py` holds it equal to the
+  matrix page's table.
 - [`persistence`](../reference/configuration.md#the-fields) — the one field `doctor` inspects on disk, read-only.
 - `doctor_names_the_refusal_start_would_give`, in [`src/doctor.rs`](../../src/doctor.rs): runs `doctor` and
   `start()` over the same configuration under `secure-single-domain` and compares the words.
@@ -49,7 +55,8 @@ has no row for this feature. The end-to-end runs are tests in [`src/doctor.rs`](
 `a_table_this_build_cannot_enforce_is_a_refusal_naming_the_feature` (a token table in a build without `compliance`),
 `a_missing_persistence_directory_is_reported_and_not_created`, `the_effective_configuration_names_each_fields_source`,
 `a_secret_is_shown_as_set_and_never_its_value`, `a_credential_bindings_source_names_are_redacted` and
-`every_top_level_field_is_in_the_configuration_reference_table`, and
+`every_top_level_field_is_in_the_configuration_reference_table`, `every_core_guarantee_names_its_matrix_row` and
+`doctor_names_each_guarantees_matrix_row` (each line names its matrix row), and
 `the_doctor_over_an_attached_node_reads_its_attachments_and_starts_refusal` (the doctor over a program's attachments). The command itself is documented in
 [diagnostics § Before you start](../operations/diagnostics.md#before-you-start-mycelium-doctor).
 

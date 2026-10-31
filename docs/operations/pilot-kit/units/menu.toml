@@ -1,0 +1,8 @@
+# The community kitchen's provider, as the kit declares it for `mycelium test --faults` (the scaffold has no
+# `units/`): today's menu, offered on the classes' own in-process fleet.
+principal = "menu"
+
+[[capability]]
+ns       = "menu"
+name     = "today"
+ttl_secs = 10
