@@ -1,6 +1,6 @@
 # The external code security review of 2026-10-31 — verification and repairs
 
-**Status:** agreed with the maintainer on 2026-10-31, rev 0.3 (rev 0.2 takes the reviewer's two qualifications of the verification, 2026-10-31: F4 is P1 regardless of token lifetime, and F3's window is unmeasured; rev 0.3 takes the independent review of this plan's PR, #711: the journal consumers re-enumerated, R6's exit restated, R2 led by the poisoned writer, the raw routes enumerated). Nine rows; R1, R2+R3 and R4 started. The review is vendored at
+**Status:** agreed with the maintainer on 2026-10-31, rev 0.4 (rev 0.2 takes the reviewer's two qualifications of the verification, 2026-10-31: F4 is P1 regardless of token lifetime, and F3's window is unmeasured; rev 0.3 takes the independent review of this plan's PR, #711: the journal consumers re-enumerated, R6's exit restated, R2 led by the poisoned writer, the raw routes enumerated; rev 0.4 records R4 delivered, #712, with the all-unparsable decision). Nine rows; R1 and R2+R3 started; R4 delivered (#712). The review is vendored at
 [`external/2026-10-31-code-security-review.md`](external/2026-10-31-code-security-review.md); it examined commit
 `d656f50c` (main after Y11, #708). Every finding was verified independently before this plan was written (§2), under
 the [verification policy](../wiki/dev/testing/verification-policy.md): three read-only agents re-ran or re-derived
@@ -114,6 +114,19 @@ keeps the old keys for at most `JWKS_MAX_STALE` (default 24 h), after which `pla
 **Exit:** two tests — a valid empty JWKS refuses the old `kid` on the next verify; keys older than the ceiling are
 refused — each seen failing first.
 
+**As delivered** *(rev 0.4, #712)*. `fetch_keys` (`src/agent/oidc.rs`) returns `Result<Vec<_>, FetchFailed>`: `Ok` is
+what the issuer published, every usable key and possibly none; `Err` is a fetch that did not reach a JWKS —
+unreachable, timed out, egress-denied, **non-2xx** (`error_for_status`, new) or not a JWKS. `Ok` replaces the cache,
+an empty set included; `Err` keeps the keys and marks the attempt failed. `JWKS_MAX_STALE` (24 h) is the ceiling:
+`CachedKeys::past_ceiling` makes `plan()` know no `kid` and `usable()` hand out no keys once the last success is
+older than it, so a verify is a fetch or a refusal, never `UseAndRefresh`; the fetch task warns each time it fails
+past the ceiling. The short retry back-off now applies only while no fetch has **ever** succeeded — a successful
+empty set is a withdrawal to honour, retried on the cooldown, not a blip. **Decided:** a well-formed JWKS whose keys
+all lack a `kid` or are of a kind the verifier cannot build is `Ok(empty)`, not `Err` — the published set is the
+authority on which keys sign, so a key the issuer no longer publishes must not verify whatever else it publishes;
+the warn log names how many it published and how many were usable. `JWKS_MAX_STALE` stays a constant: it becomes an
+`[oidc]` field when a deployment asks for a different ceiling, not before. **Not built:** nothing of the row.
+
 ### R5 · The gateway's handshake and header-read bounds *(F5)*
 
 **What:** `serve_https` wraps `acceptor.accept` in a timeout (reusing `handshake_timeout_ms`), acquires a semaphore
@@ -170,4 +183,4 @@ Filled as rows close: each row's promises quoted beside the code and test that d
 
 | Row | Delivered | PR |
 |---|---|---|
-| — | — | — |
+| R4 | *a typed result* — `fetch_keys` → `Result<Vec<_>, FetchFailed>` (`src/agent/oidc.rs`); *a successful empty set replaces the cache with nothing* — the fetch task's `Ok(keys)` arm, `a_successful_empty_jwks_withdraws_the_keys` (failed on the old code: the withdrawn key still verified); *a failure keeps the old keys for at most `JWKS_MAX_STALE`, after which `plan()` refuses rather than `UseAndRefresh`* — `CachedKeys::past_ceiling`/`usable`, `keys_older_than_the_stale_ceiling_are_refused` (failed on the old code: keys of any age verified); a non-2xx answer is a failure — `a_non_2xx_jwks_is_a_failure_not_a_withdrawal` (passes on the old code, where a 503's empty body read as a failure; fails with `error_for_status` planted out); a replace-rotation withdraws the old key — `a_rotated_key_is_accepted_after_the_cooldown`'s new last assertions; *`sso.md` states both* — § `jwks_uri`; `deprecations.md` §75 | #712 |
