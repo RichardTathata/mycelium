@@ -55,6 +55,7 @@ import httpx
 from httpx_sse import aconnect_sse
 
 from ._pool import ClientPool, base_url, path_segment, whole_seconds
+from ._causal import with_causal
 
 #: The node's bound on a re-assertion or lease period (``MAX_TIMER_PERIOD_SECS``): past it, the
 #: gateway answers 400 ``timer_out_of_range``.
@@ -832,6 +833,8 @@ class MyceliumAgent:
         payload:     bytes = b"",
         *,
         scope:       str = "cluster",
+        correlation: Optional[str] = None,
+        parent:      Optional[str] = None,
     ) -> bool:
         """Emit a signal into the mesh.
 
@@ -840,16 +843,20 @@ class MyceliumAgent:
             payload: Raw bytes payload.
             scope:   ``"cluster"`` (every node; default), ``"group:NAME"``, or
                      ``"node:IP:PORT"``. ``"system"`` still works as a deprecated alias.
+            correlation: The run this work belongs to, sent as ``_meta.correlation`` (adopter-surface Y11): read only
+                     when an exposure rule on the node selects this door, onto that door's decision record.
+            parent:  The hash of the record this work depends on, sent as ``_meta.parent``; work naming an unresolved
+                     effect is held by an exposure rule that selects this door.
 
         Returns:
             ``True`` if the signal was queued; ``False`` if the gossip shard
             was full (local delivery still occurred).
         """
-        body = {
+        body = with_causal({
             "kind":        kind,
             "scope":       scope,
             "payload_b64": base64.b64encode(payload).decode(),
-        }
+        }, correlation, parent)
         with self._pool.sync() as c:
             resp = c.post("/gateway/signal/emit", json=body)
             _raise_if_protected(resp)
@@ -1328,6 +1335,9 @@ class MyceliumAgent:
         target:  str,
         kind:    str,
         payload: bytes = b"",
+        *,
+        correlation: Optional[str] = None,
+        parent:      Optional[str] = None,
     ) -> None:
         """Deliver a mailbox event to a target node.
 
@@ -1340,12 +1350,16 @@ class MyceliumAgent:
             target:  Target node ID (``"IP:PORT"``).
             kind:    Event kind string.
             payload: Raw bytes payload.
+            correlation: The run this work belongs to, sent as ``_meta.correlation`` (adopter-surface Y11): read only
+                     when an exposure rule on the node selects this door, onto that door's decision record.
+            parent:  The hash of the record this work depends on, sent as ``_meta.parent``; work naming an unresolved
+                     effect is held by an exposure rule that selects this door.
         """
-        body = {
+        body = with_causal({
             "target":      target,
             "kind":        kind,
             "payload_b64": base64.b64encode(payload).decode(),
-        }
+        }, correlation, parent)
         with self._pool.sync() as c:
             resp = c.post("/gateway/mailbox/deliver", json=body)
             _raise_if_protected(resp)
@@ -1548,20 +1562,23 @@ class MyceliumAgent:
         payload:      bytes = b"",
         *,
         timeout_secs: float = 5,
+        correlation:  Optional[str] = None,
+        parent:       Optional[str] = None,
     ) -> str:
         """Send ``payload`` to ``target`` and wait for an explicit ACK.
 
         Returns ``"acknowledged"`` or ``"timeout"``.
         The receiver calls ``rpc_respond`` to acknowledge. ``timeout_secs`` is sent in whole seconds,
-        a fraction rounded up, never below 1 (0.2.10; the route refused a fraction 422).
+        a fraction rounded up, never below 1 (0.2.10; the route refused a fraction 422). ``correlation`` and
+        ``parent`` ride in ``_meta`` (adopter-surface Y11), read only when an exposure rule selects this door.
         """
         secs = whole_seconds(timeout_secs)
-        body = {
+        body = with_causal({
             "target":       target,
             "kind":         kind,
             "payload_b64":  base64.b64encode(payload).decode(),
             "timeout_secs": secs,
-        }
+        }, correlation, parent)
         with self._pool.sync(timeout=secs + 5.0) as c:  # the server parks for timeout_secs
             resp = c.post("/gateway/overlay/emit_reliable", json=body)
             _raise_if_protected(resp)
@@ -1589,19 +1606,23 @@ class MyceliumAgent:
         name:      str,
         key:       str,
         payload:   bytes = b"",
+        *,
+        correlation: Optional[str] = None,
+        parent:      Optional[str] = None,
     ) -> str:
         """Emit ``kind`` signal to the consistent-hash owner for ``key``.
 
         Returns the owner node-id string.
-        Raises :class:`KeyError` when no providers match the filter.
+        Raises :class:`KeyError` when no providers match the filter. ``correlation`` and ``parent`` ride in
+        ``_meta`` (adopter-surface Y11), read only when an exposure rule selects this door.
         """
-        body = {
+        body = with_causal({
             "kind":        kind,
             "ns":          ns,
             "name":        name,
             "shard_key":   key,
             "payload_b64": base64.b64encode(payload).decode(),
-        }
+        }, correlation, parent)
         with self._pool.sync() as c:
             r = c.post("/gateway/shard/emit", json=body)
             _raise_if_protected(r)

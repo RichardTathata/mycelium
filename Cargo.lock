@@ -2415,6 +2415,7 @@ dependencies = [
  "libc",
  "metrics",
  "metrics-exporter-prometheus",
+ "mycelium-blackboard",
  "mycelium-core",
  "mycelium-effects",
  "mycelium-sim",

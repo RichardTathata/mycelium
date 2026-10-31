@@ -56,6 +56,7 @@ pub(super) async fn signal_sse_handler(
 /// `payload_b64` is the base64-encoded signal payload.
 pub(super) async fn gw_signal_emit(
     State(ctx): State<Arc<HttpCtx>>,
+    caller: Option<axum::Extension<crate::agent::ResolvedPrincipal>>,
     Json(body):  Json<serde_json::Value>,
 ) -> impl IntoResponse {
     use base64::Engine as _;
@@ -109,8 +110,20 @@ pub(super) async fn gw_signal_emit(
         }))).into_response();
     }
 
+    // Adopter-surface Y11: decided only when an exposure rule selects `signal.emit` on this kind; untouched otherwise.
+    let caller = caller.map(|axum::Extension(c)| c);
+    let door = crate::agent::door::decide(
+        &ctx.agent_ctx, crate::agent::door::DoorActor::Caller(caller.as_ref()), crate::agent::door::OP_SIGNAL_EMIT,
+        &crate::agent::door::signal_resource(&kind), &body, "gateway:signal/emit",
+    ).await;
+    let pass = match door {
+        Ok(p) => p,
+        Err(r) => return crate::agent::door::refusal_response(&r),
+    };
     // Same code path as GossipAgent::emit — local delivery + gossip fan-out
     let ok = super::helpers::emit_signal(&ctx.agent_ctx, kind, scope, payload);
+    // `false` is a full gossip queue with local delivery done: not nothing, and not known to have reached the fleet.
+    pass.finish(if ok { crate::agent::door::DoorOutcome::Completed } else { crate::agent::door::DoorOutcome::Unknown }).await;
     Json(json!({ "ok": ok })).into_response()
 }
 

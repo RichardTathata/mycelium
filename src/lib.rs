@@ -263,6 +263,9 @@ pub use agent::causal;
 /// The causal exposure policy (adopter-surface Y5, D18): new dependent work held while an actor's unresolved closure
 /// is past a threshold — its size, or its oldest record's age — never the work that resolves it; shadow first.
 pub use agent::exposure;
+/// Exposure at the take, claim and emit doors (adopter-surface Y11): a tuple take, a blackboard claim and the four emit
+/// doors decided by the evaluator and the exposure gate when an exposure rule selects them, untouched otherwise.
+pub use agent::door;
 /// `mycelium declare` — a project's declaration sent to a gateway, once or kept current (adopter-surface X10).
 #[cfg(feature = "gateway")]
 pub mod declare;

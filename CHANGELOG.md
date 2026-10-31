@@ -79,7 +79,28 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `src/agent/http/schedule_run_tests.rs` (runs received and acknowledged, a run never acknowledged, slots missed while
   no client held decided with their reason, one key per slot to two clients under a partition, the refusals and the
   scope), both SDKs' live suites and `mycelium-ts/tests/eve.test.ts`, each seen failing under a planted fault.
-  Upgrade notes: `deprecations.md` §73.
+  Upgrade notes: `deprecations.md` §74.
+- **Exposure at the take, claim and emit doors — opt-in** (`docs/plans/adopter-surface.md` Y11, D29;
+  `docs/features/exposure-policy.md`): a tuple take (`tuple.take`, `tuple.take_by_key`), a blackboard claim
+  (`bb.claim`) and the four emit doors (`signal.emit`, `mailbox.deliver`, `overlay.emit_reliable`, `shard.emit`) run the
+  gateway's decision — the action evaluator, then Y5's exposure gate — **only when an exposure rule selects their
+  operation**, and are untouched otherwise: no decision, no record, no clock read. Each is reached two ways: a Rust verb
+  that takes the causal fields (`TupleSpace::{take_in, take_by_key_in}`, `Blackboard::claim_in`,
+  `GossipAgent::emit_in`, `ServiceHandle::{deliver_event_in, emit_reliable_in, emit_sharded_in}`, its actor the node)
+  and its gateway route, which reads the body's `_meta` (its actor the caller). Work naming an unresolved effect is held
+  on an enforcing rung and counted in shadow; independent work passes. The fields go on the door's own decision record
+  only (`mycelium::door`), so X4's *a signal is not governed work* now reads *not unless an exposure rule selects it*
+  (`scripts/causal-doors.txt`, `ruled`). A raw `/gateway/rpc/call`, `/gateway/scatter` or
+  `/gateway/overlay/emit_reliable` of a companion's take or claim kind runs that door's decision
+  (`GossipAgent::register_door_kind`) at a gateway node that hosts the companion — through one without it the call
+  reaches the provider undecided; `emit_ordered_in` and `emit_async_in` complete the emit verbs; on the shadow
+  rung a selected door admits what the evaluator refuses, the refusal recorded. A door asking under an
+  `EXEMPT_OPERATIONS` name is refused by name. Never decided: the plain verbs and a hosted WASM component's
+  `mesh.emit`. Both SDKs'
+  take, claim and emit verbs send `correlation` and `parent` in `_meta`. Rule `ae.exposure` revision 2. **Not built,
+  stated:** carrying the lineage onward through the signal frame or the tuple WAL; deciding these doors whenever an
+  evaluator is attached without a selecting rule. `deprecations.md` §73: `TupleError`, `BlackboardError` and
+  `ShardError` gained `Refused`; a `*`-operation exposure rule now selects these doors.
 - **The pilot kit** (`docs/plans/adopter-surface.md` Y10; [`docs/operations/pilot-kit/`](docs/operations/pilot-kit/README.md)).
   The kit is everything a pilot needs on its first day, so that the counterparty is the only piece missing.
   - **The walk.** The README has six steps:
