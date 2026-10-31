@@ -204,6 +204,32 @@ pub const BUILTIN_PROTECTED_RPC_KINDS: &[&str] = &[
 pub fn is_protected_kind(cfg: &GossipConfig, kind: &str) -> bool {
     BUILTIN_PROTECTED_RPC_KINDS.contains(&kind) || cfg.protected_rpc_kinds.iter().any(|k| k == kind)
 }
+
+/// The gateway scope a **companion-namespaced** RPC kind needs on a raw route (external review 2026-10-31, F1;
+/// plan row R1, decision D1). The companions serve their operations as RPC kinds of the shape
+/// `{family}.{namespace}.{op}` — `blackboard.{ns}.post`, `tuple.{ns}.take`, `wiki.{group}.ingest` — and their own
+/// routes gate each operation behind a family scope (`board:write`, `tuple:write`, `wiki:write`; the read verbs
+/// behind `:read`). The raw routes (`rpc/call`, `scatter`, `signal/emit`, `mailbox/deliver`, `shard/emit`,
+/// `overlay/emit_reliable`) carried the same kinds under `mesh:write` alone, so a `mesh:write` holder posted to a
+/// board it had no `board:write` for. The gateway's auth layer asks this for the kind in a raw route's body and
+/// refuses the request `403 insufficient scope` naming the family scope the caller lacks.
+///
+/// The mapping is by family prefix and the kind's last segment: the read operations — `read` and `depth` for a
+/// board, `depth` for a tuple space, `access` for a wiki — need the `:read` scope; **every other kind under the
+/// prefix needs the `:write` scope**, an unknown or malformed one included, so a new write verb is covered before
+/// anyone lists it. Each companion's own tests diff the operations it serves against this table. `None` for a
+/// kind outside the three families. Ungated, as [`is_protected_kind`] is, so a companion's test can call it in any
+/// build.
+pub fn companion_kind_scope(kind: &str) -> Option<&'static str> {
+    let (family, rest) = kind.split_once('.')?;
+    let op = rest.rsplit_once('.').map(|(_, op)| op).unwrap_or("");
+    Some(match family {
+        "blackboard" => if matches!(op, "read" | "depth") { "board:read" } else { "board:write" },
+        "tuple"      => if op == "depth" { "tuple:read" } else { "tuple:write" },
+        "wiki"       => if op == "access" { "wiki:read" } else { "wiki:write" },
+        _ => return None,
+    })
+}
 #[cfg(all(feature = "gateway", feature = "tls"))]
 pub use action_evaluator::{
     preflight, preflight_with_history, ActionEnvelope, ActionEvaluator, ActionMapping, AeEvidence, AeReference,

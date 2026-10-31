@@ -2241,3 +2241,21 @@ and refuses by name each schedule it cannot run (another cron, a nested schedule
 **Migration:** give a token that runs schedules `schedule:run`, and set `gateway_identity_issuer` on every gateway it
 uses; an Eve agent whose `schedules/` was refused now loads, and its schedules run only when
 `runEveSchedules` is called.
+
+## 75. A companion's RPC kind on a raw mesh route needs the companion's family scope (unreleased, external review 2026-10-31 F1, plan row R1)
+
+The gateway's raw routes — `POST /gateway/rpc/call`, `scatter`, `signal/emit`, `mailbox/deliver`, `shard/emit` and
+`overlay/emit_reliable` — take an RPC kind from the request body. A companion serves its operations as kinds of the
+form `blackboard.{ns}.{op}`, `tuple.{ns}.{op}` and `wiki.{group}.{op}`, and its own routes gate each behind a family
+scope (`board:write`, `tuple:write`, `wiki:write`; the read verbs behind `:read`). The raw routes carried the same
+kinds to the same handlers under the route's own scope alone, so a `mesh:write` holder with no `board:write` could
+post to a board through `rpc/call` where `/gateway/bb/post` refused it. Now a companion's kind on a raw route is
+refused `403 {"error": "insufficient scope", "required_scope": "board:write", "kind": "blackboard.board.post"}`
+unless the token also holds the family scope the companion's route would require — the read verbs (`read`,
+`depth` for a board; `depth` for a tuple space; `access` for a wiki) need `:read`, and every other verb under the
+prefix, an unknown one included, needs `:write` ([`rbac.md`](../operations/rbac.md)). The route's own scope is
+still required; an open gateway, which gates no scope on the companion's routes either, is unchanged; a build
+without `compliance` gates no scope anywhere. **Migration:** a scoped token that reached a companion through the
+raw routes under `mesh:write` (or `consensus:write` on `overlay/emit_reliable`) alone now needs the companion's
+scope too — add `board:write`, `tuple:write` or `wiki:write` (or the `:read` form) to it. A token used only on the
+companion's own routes is unaffected.

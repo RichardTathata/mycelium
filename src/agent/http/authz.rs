@@ -53,10 +53,11 @@ pub(super) async fn gateway_auth(
     // granted for the request (item 7: never more than the credential holds, never more than
     // the route needs).
     #[cfg(feature = "compliance")]
-    let required_scope_for_route: &'static str = request
-        .extensions()
-        .get::<MatchedPath>()
-        .map(|m| required_scope(request.method(), m.as_str()))
+    let matched_path: Option<String> = request.extensions().get::<MatchedPath>().map(|m| m.as_str().to_owned());
+    #[cfg(feature = "compliance")]
+    let required_scope_for_route: &'static str = matched_path
+        .as_deref()
+        .map(|m| required_scope(request.method(), m))
         .unwrap_or("admin");
     #[cfg(feature = "compliance")]
     let required: Option<&'static str> = Some(required_scope_for_route);
@@ -98,6 +99,15 @@ pub(super) async fn gateway_auth(
             Json(json!({"error": "insufficient scope", "required_scope": required_scope_for_route})),
         ).into_response();
     }
+
+    // External review 2026-10-31 F1 (plan R1, D1): a raw route carrying a companion's kind is a second door to that
+    // companion's operation, and it needs the scope the companion's own door needs. Decided here, with the
+    // credential's whole scope set in hand, and nowhere else — a handler sees only the scopes the route granted.
+    #[cfg(feature = "compliance")]
+    let request = match companion_kind_gate(matched_path.as_deref(), request, &scopes).await {
+        Ok(request) => request,
+        Err(refused) => return refused,
+    };
 
     // Item 7: the resolved principal and the authority granted for this request travel to the
     // dispatch site as a request extension. Constructed here and nowhere else.
@@ -260,6 +270,70 @@ pub(super) fn resolve_token(cfg: &crate::config::GossipConfig, issuer: &str, pre
 #[cfg(feature = "compliance")]
 pub(super) fn scope_admits(scopes: &[String], required: &str) -> bool {
     scopes.iter().any(|s| s == "*" || s == required)
+}
+
+/// The raw routes that take an RPC kind from the request body, and the body field that names it. The kind is read
+/// from the field the handler reads — `method` on the two call routes, `kind` on the four emit routes — never
+/// from whichever the body happens to carry, so a body naming both cannot show the gate one kind and the
+/// handler another.
+#[cfg(feature = "compliance")]
+pub(super) const RAW_KIND_ROUTES: &[(&str, &str)] = &[
+    ("/gateway/rpc/call",              "method"),
+    ("/gateway/scatter",               "method"),
+    ("/gateway/signal/emit",           "kind"),
+    ("/gateway/mailbox/deliver",       "kind"),
+    ("/gateway/shard/emit",            "kind"),
+    ("/gateway/overlay/emit_reliable", "kind"),
+];
+
+/// As much of a raw route's body as the gate reads to find its kind: axum's default body limit, which the handler's
+/// `Json` extractor holds the body to as well, so a body this gate cannot read is one the handler would refuse.
+#[cfg(feature = "compliance")]
+const RAW_BODY_PEEK_LIMIT: usize = 2 * 1024 * 1024;
+
+/// **External review 2026-10-31, F1 (plan row R1, decision D1).** A companion serves its operations as RPC kinds —
+/// `blackboard.{ns}.post`, `tuple.{ns}.put`, `wiki.{group}.ingest` — and its own gateway routes gate each behind a
+/// family scope (`board:write`, `tuple:write`, `wiki:write`; the read verbs behind `:read`). The raw routes carried
+/// the same kinds to the same handlers under `mesh:write` alone, so a `mesh:write` holder with no `board:write`
+/// posted to a board (seen: `bb/post` 403, `rpc/call blackboard.board.post` 200 and the fact on the board). On a
+/// raw route in [`RAW_KIND_ROUTES`], the kind the handler would read is mapped by [`companion_kind_scope`] and the
+/// request is refused `403 insufficient scope` naming that scope when the credential lacks it — the route's own
+/// scope having already been checked, so `mesh:write` (or `consensus:write` on the overlay route) is still
+/// required too. Open gateways never reach here (no scope model exists; the companion's own routes are open too),
+/// and a build without `compliance` gates no scope anywhere.
+///
+/// The body is read here and handed back to the handler unchanged; an unreadable or non-JSON body passes through
+/// for the handler to refuse as it always did.
+#[cfg(feature = "compliance")]
+async fn companion_kind_gate(matched: Option<&str>, request: Request, scopes: &[String]) -> Result<Request, Response> {
+    let Some(field) = matched.and_then(|p| RAW_KIND_ROUTES.iter().find(|(route, _)| *route == p)).map(|(_, f)| *f) else {
+        return Ok(request);
+    };
+    let (parts, body) = request.into_parts();
+    let bytes = match axum::body::to_bytes(body, RAW_BODY_PEEK_LIMIT).await {
+        Ok(bytes) => bytes,
+        Err(_) => return Err((StatusCode::PAYLOAD_TOO_LARGE, Json(json!({"error": "payload too large"}))).into_response()),
+    };
+    let kind = serde_json::from_slice::<serde_json::Value>(&bytes)
+        .ok()
+        .and_then(|v| v.get(field).and_then(|k| k.as_str()).map(str::to_owned));
+    if let Some(kind) = kind
+        && let Some(scope) = crate::agent::companion_kind_scope(&kind)
+        && !scope_admits(scopes, scope)
+    {
+        warn!(kind, required_scope = scope, "gateway: a companion's kind refused on a raw route without its family scope");
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(json!({
+                "ok": false,
+                "error": "insufficient scope",
+                "required_scope": scope,
+                "kind": kind,
+                "message": format!("`{kind}` is a companion's operation; a raw route carries it only for a caller holding `{scope}`, as the companion's own route requires"),
+            })),
+        ).into_response());
+    }
+    Ok(Request::from_parts(parts, axum::body::Body::from(bytes)))
 }
 
 /// The OAuth2 scope a gateway route requires, keyed on its matched-path pattern

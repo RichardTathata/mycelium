@@ -566,6 +566,10 @@ impl<S: WikiStore + 'static> Wiki<S> {
         let broker = tokio::spawn(async move {
             let mut rx = me.agent.service().rpc_rx(format!("wiki.{}.access", me.cfg.group));
             while let Some(req) = rx.recv().await {
+                // `sender()` is the node that sent the request. Through the gateway's raw routes that is the
+                // gateway node itself, whatever client asked it to, so membership says nothing about the client;
+                // the gateway refuses a client without `wiki:read` before it sends (external review 2026-10-31
+                // F1, `mycelium::companion_kind_scope`), and this handler judges the node as it always did.
                 let requester = req.sender().to_string();
                 let granted = me.membership.permits(&requester);
                 let reply = AccessReply { granted, location: granted.then(|| me.store.location()) };
@@ -581,6 +585,8 @@ impl<S: WikiStore + 'static> Wiki<S> {
             tokio::spawn(async move {
                 let mut rx = me.agent.service().rpc_rx(format!("wiki.{}.ingest", me.cfg.group));
                 while let Some(req) = rx.recv().await {
+                    // As for `access`: the gateway refuses a client without `wiki:write` on the raw routes
+                    // before this node's membership is asked (external review 2026-10-31 F1).
                     let requester = req.sender().to_string();
                     let reply = if !me.membership.permits(&requester) {
                         IngestReply { ok: false, error: Some("membership denied".into()), summary: None }
@@ -853,6 +859,24 @@ mod tests {
     use std::sync::Weak;
     use mycelium::{GossipAgent, GossipConfig, NodeId};
     use crate::fs::FsStore;
+
+    /// External review 2026-10-31, F1 (plan row R1): every kind this wiki serves (`wiki.{group}.{op}`) is mapped by
+    /// the gateway's raw-route gate (`mycelium::companion_kind_scope`) to the scope the wiki's own routes require —
+    /// `access` to `wiki:read`, the rest to `wiki:write`. The operations are read from this file, not listed twice.
+    #[test]
+    fn every_served_operation_maps_to_the_wikis_own_scope() {
+        let src = include_str!("agent.rs");
+        let ops: std::collections::BTreeSet<&str> = src
+            .match_indices("\"wiki.{}.")
+            .filter_map(|(i, m)| { let rest = &src[i + m.len()..]; Some(&rest[..rest.find('"')?]) })
+            .collect();
+        assert!(ops.len() >= 2, "the scan found too few operations: {ops:?}");
+        for op in ops {
+            let kind = format!("wiki.council.{op}");
+            let expected = if op == "access" { "wiki:read" } else { "wiki:write" };
+            assert_eq!(mycelium::companion_kind_scope(&kind), Some(expected), "{kind}");
+        }
+    }
 
     fn free_port() -> u16 {
         std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
