@@ -861,8 +861,9 @@ mod tests {
     use crate::fs::FsStore;
 
     /// External review 2026-10-31, F1 (plan row R1): every kind this wiki serves (`wiki.{group}.{op}`) is mapped by
-    /// the gateway's raw-route gate (`mycelium::companion_kind_scope`) to the scope the wiki's own routes require —
-    /// `access` to `wiki:read`, the rest to `wiki:write`. The operations are read from this file, not listed twice.
+    /// the gateway's raw-route gate (`mycelium::companion_kind_scope`) to the scope the wiki's own routes require.
+    /// The operations are read from this file's `"wiki.{}.op"` literals, not listed a second time; which verb is a
+    /// read (`access`) is this test's own statement, matching the wiki's route table.
     #[test]
     fn every_served_operation_maps_to_the_wikis_own_scope() {
         let src = include_str!("agent.rs");

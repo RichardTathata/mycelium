@@ -619,9 +619,12 @@ fn parse_complete_keyed_req(p: &Bytes) -> Option<(u64, Arc<str>, Arc<str>, Bytes
 }
 
 /// External review 2026-10-31, F1 (plan row R1): every operation this space serves as an RPC kind is mapped by the
-/// gateway's raw-route gate (`mycelium::companion_kind_scope`) to the scope the space's own route requires —
-/// `depth` to `tuple:read`, the rest to `tuple:write`. The operations are read from this crate's source, not listed
-/// twice, so a verb added to `serve_*` or `rpc_call` here is checked against the table without anyone remembering to.
+/// gateway's raw-route gate (`mycelium::companion_kind_scope`) to the scope the space's own route requires. The
+/// operations are read from this crate's source — the literal in each `rpc_kind(…, "op")` call, which every
+/// `rpc_rx` registration and `rpc_call` here carries — rather than listed a second time, so a verb registered or
+/// called here is checked against the table without anyone remembering to. Which verb is a read (`depth`) is this
+/// test's own statement, matching the space's route table in `http.rs`; a new read verb needs adding here and in the
+/// core table both.
 #[cfg(test)]
 mod raw_route_scope_tests {
     fn ops_in(src: &str) -> Vec<String> {

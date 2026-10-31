@@ -70,22 +70,40 @@ tests where one exists.
 
 ### R1 · Companion kinds carry their scope on the raw routes *(F1)*
 
-**What:** every raw route that takes an RPC kind from the request — `/gateway/rpc/call` and `/gateway/scatter`
-under `mesh:write`; `/gateway/overlay/emit_reliable`, already under `consensus:write`; `mailbox/deliver` and
-`shard/emit`, enumerated and stated — of a companion-namespaced kind requires that companion's family scope (D1); a `mesh:write`-only caller is refused 403 naming the scope the
-operation needs. The wiki handlers that gate on `req.sender()` get the same treatment at the route. `rbac.md` says
+**What:** every gateway door that carries an RPC kind, **in the body or the path** — `/gateway/rpc/call` and
+`/gateway/scatter` under `mesh:write`; `/gateway/overlay/emit_reliable`, already under `consensus:write`;
+`mailbox/deliver` and `shard/emit`, enumerated and stated; and, from #714's review, the two signal streams
+(`/gateway/signal/sse/{kind}`, `/signals/{kind}`) under `mesh:read` and the serve stream (`/gateway/rpc/serve/{kind}`)
+under `mesh:serve` — of a companion-namespaced kind requires that companion's family scope (D1): in a body, the
+kind's own verb's; on a signal stream, the family's `:read` (a tap receives every frame); on the serve stream, the
+family's `:write` (serving is answering). A caller without it is refused 403 naming the scope. The wiki handlers that gate on `req.sender()` get the same treatment at the route. `rbac.md` says
 which scope each companion kind needs on the raw routes, and `confined-fleet.md` names the companion kinds where it
 tells operators to list protected work.
 
 **Exit:** the verifier's probe as a test — a `mesh:write`-only token: 403 on `bb/post`, 403 on `rpc/call` of
 `blackboard.*.post`, 403 on `tuple.*.put`, 403 on `scatter` of either; a `board:write` token succeeds on
-`bb/post` and on `rpc/call` of the board kind — pinned in `tests/exposure_doors.rs`' raw-route loop; the wiki
-ingest kind refused under `mesh:write` on a gateway that is a group member.
+`bb/post` and on `rpc/call` of the board kind — pinned in `src/agent/http/http_tests.rs` (every door, every family,
+both verbs) and the companions' `tests/raw_route_scope.rs` (end to end), not in `tests/exposure_doors.rs`, because
+CI runs `tests/` under `tls,a2a` and never `compliance`, so a scope test there would never execute; the wiki
+ingest kind refused under `mesh:write` (the gate decides before dispatch, so a group-member gateway is not a
+separate case); and, from the review: `mesh:read` alone refused the signal streams for a board kind naming
+`board:read`, `mesh:read` + `board:read` receiving the frame; `mesh:serve` alone refused the serve stream for a
+board kind naming `board:write`, with `board:write` a stream.
 
 **Not built, stated:** a provider-side scope check inside the companions (the route is the door; a member's direct
-`rpc_call` is not a client).
+`rpc_call` is not a client); and `cap:write`'s half of the serve finding — a `cap:write` client can advertise any
+capability, a companion's `{ns}.primary` role included, which is that scope's meaning; what it is then sent is
+gated at the serve door, so a client without the family's `:write` cannot be sent a companion's requests.
 
-**As delivered** *(rev 0.4)*. The gate is one function in the auth layer, `companion_kind_gate`
+**As delivered** *(rev 0.4; the path doors from #714's review)*. **The path doors:** `PATH_KIND_ROUTES` in
+`authz.rs` — the two signal streams (`:read`) and the serve stream (`:write`), the kind read percent-decoded as the
+handler's `Path` reads it; `companion_kind_family` and `companion_family_scope` in `src/agent/mod.rs`; tested by
+`the_signal_streams_and_the_serve_stream_need_a_companion_kinds_family_scope` (both streams × four kinds, the
+write scope not the read scope, a percent-encoded kind, an ordinary kind, the frame received under `board:read`;
+the serve stream × three kinds, `board:read` not serving, `mesh:serve` still required), seen failing first with
+`PATH_KIND_ROUTES` empty. The gate decides before the handler's extractor
+(`the_raw_route_gate_decides_before_the_handlers_extractor`: a `text/plain` body naming a board kind is 403 where
+the handler would have said 415). The gate is one function in the auth layer, `companion_kind_gate`
 (`src/agent/http/authz.rs`), run after the route's own scope check with the credential's whole scope set in hand —
 a handler sees only the scopes the route granted, so it could not have decided this. It reads the kind from the
 body field the handler reads (`method` on `rpc/call` and `scatter`, `kind` on `signal/emit`, `mailbox/deliver`,
@@ -203,4 +221,4 @@ Filled as rows close: each row's promises quoted beside the code and test that d
 
 | Row | Delivered | PR |
 |---|---|---|
-| R1 | *every raw route that takes an RPC kind … requires that companion's family scope* — `companion_kind_gate` (`authz.rs`), `companion_kind_scope` (`agent/mod.rs`), six routes; *refused 403 naming the scope* — the refusal body; *the wiki handlers … the same treatment at the route* — the gate, and the handlers' comments; *`rbac.md` says which scope* — the `mesh:write`, `board:*`, `tuple:*`, `wiki:*` rows; *`confined-fleet.md` names the companion kinds* — § the raw routes; `deprecations.md` §75. Exit: the three tests named in the row, each seen failing first. Not built: a scope check inside the companions. | #714 |
+| R1 | *every raw route that takes an RPC kind … requires that companion's family scope* — `companion_kind_gate` (`authz.rs`), `companion_kind_scope` (`agent/mod.rs`), six routes; *refused 403 naming the scope* — the refusal body; *the wiki handlers … the same treatment at the route* — the gate, and the handlers' comments; *`rbac.md` says which scope* — the `mesh:write`, `board:*`, `tuple:*`, `wiki:*` rows; *`confined-fleet.md` names the companion kinds* — § the raw routes; *the signal streams … `:read`; the serve stream … `:write`* — `PATH_KIND_ROUTES`, `companion_kind_family`; `deprecations.md` §76; `rbac.md`'s `mesh:read`/`mesh:write`, `mesh:serve` and `cap:write` rows. Exit: the four tests named in the row, each seen failing first. Not built: a scope check inside the companions; `cap:write` advertising a companion role. | #714 |

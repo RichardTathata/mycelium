@@ -221,14 +221,39 @@ pub fn is_protected_kind(cfg: &GossipConfig, kind: &str) -> bool {
 /// kind outside the three families. Ungated, as [`is_protected_kind`] is, so a companion's test can call it in any
 /// build.
 pub fn companion_kind_scope(kind: &str) -> Option<&'static str> {
-    let (family, rest) = kind.split_once('.')?;
-    let op = rest.rsplit_once('.').map(|(_, op)| op).unwrap_or("");
-    Some(match family {
-        "blackboard" => if matches!(op, "read" | "depth") { "board:read" } else { "board:write" },
-        "tuple"      => if op == "depth" { "tuple:read" } else { "tuple:write" },
-        "wiki"       => if op == "access" { "wiki:read" } else { "wiki:write" },
-        _ => return None,
-    })
+    let family = companion_kind_family(kind)?;
+    let op = kind.rsplit_once('.').map(|(_, op)| op).unwrap_or("");
+    let read = match family {
+        "board" => matches!(op, "read" | "depth"),
+        "tuple" => op == "depth",
+        _       => op == "access",
+    };
+    Some(companion_family_scope(family, read))
+}
+
+/// The scope family a companion-namespaced kind belongs to — `board` for `blackboard.*`, `tuple` for `tuple.*`,
+/// `wiki` for `wiki.*` — or `None` for a kind outside the three. The doors that carry a kind in the **path** ask
+/// this rather than [`companion_kind_scope`], because what they do with the kind fixes the verb: observing a
+/// companion's request frames on a signal stream is a read of its contents whatever the frames' verb, and serving a
+/// companion's kind on `rpc/serve` is answering its operations, a write whatever the verb.
+pub fn companion_kind_family(kind: &str) -> Option<&'static str> {
+    match kind.split_once('.')?.0 {
+        "blackboard" => Some("board"),
+        "tuple"      => Some("tuple"),
+        "wiki"       => Some("wiki"),
+        _            => None,
+    }
+}
+
+/// `{family}:read` or `{family}:write` for a family [`companion_kind_family`] returns, as the static strings the
+/// scope table uses.
+pub fn companion_family_scope(family: &str, read: bool) -> &'static str {
+    match (family, read) {
+        ("board", true)  => "board:read",  ("board", false) => "board:write",
+        ("tuple", true)  => "tuple:read",  ("tuple", false) => "tuple:write",
+        ("wiki",  true)  => "wiki:read",   ("wiki",  false) => "wiki:write",
+        _ => "admin",
+    }
 }
 #[cfg(all(feature = "gateway", feature = "tls"))]
 pub use action_evaluator::{

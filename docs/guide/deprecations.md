@@ -2242,7 +2242,7 @@ and refuses by name each schedule it cannot run (another cron, a nested schedule
 uses; an Eve agent whose `schedules/` was refused now loads, and its schedules run only when
 `runEveSchedules` is called.
 
-## 75. A companion's RPC kind on a raw mesh route needs the companion's family scope (unreleased, external review 2026-10-31 F1, plan row R1)
+## 76. A companion's RPC kind at a gateway door — in a raw route's body, or the path of a signal or serve stream — needs the companion's family scope (unreleased, external review 2026-10-31 F1, plan row R1)
 
 The gateway's raw routes — `POST /gateway/rpc/call`, `scatter`, `signal/emit`, `mailbox/deliver`, `shard/emit` and
 `overlay/emit_reliable` — take an RPC kind from the request body. A companion serves its operations as kinds of the
@@ -2259,3 +2259,21 @@ without `compliance` gates no scope anywhere. **Migration:** a scoped token that
 raw routes under `mesh:write` (or `consensus:write` on `overlay/emit_reliable`) alone now needs the companion's
 scope too — add `board:write`, `tuple:write` or `wiki:write` (or the `:read` form) to it. A token used only on the
 companion's own routes is unaffected.
+
+The two doors that take the kind from the **path** are gated the same way, with the verb fixed by what the door
+does (#714's review): `GET /gateway/signal/sse/{kind}` and `GET /signals/{kind}` register a tap on the handler table
+a companion's `rpc_rx` registers on and receive every frame of the kind, payload included, so observing a
+companion's kind needs the family's `:read` whatever the kind's own verb — a `mesh:read` token read each board
+post's contents where `/gateway/bb/read` refused it; and `GET /gateway/rpc/serve/{kind}` answers the kind's requests
+in the provider's place, so serving a companion's kind needs the family's `:write` as well as `mesh:serve` — a
+`mesh:serve` token served `blackboard.other.post` on a node hosting no board. A declared skill naming a companion
+kind reaches the serve door and is gated the same. The path is read percent-decoded, as the handler reads it. **Not
+built:** a client with `cap:write` can still advertise any capability, a companion's `{ns}.primary` role included —
+that is what `cap:write` means — so a client holding `cap:write`, `mesh:serve` and the family's `:write` can stand
+in for a companion's primary; a client without the family scope cannot be sent its requests.
+
+The gate reads the body before the handler's `Json` extractor, so a request naming a companion's kind is refused
+`403` even where the handler would have answered `415` for its content type or `400` for a missing field; a body
+the gate cannot read as JSON passes through to the handler's own refusal, and one over the 2 MiB limit answers
+`413` as before. (This section is §76 because the plan's two sibling PRs, #712 and #713, carried a §75 on their
+branches when this one was pushed; the number was taken, not resolved by overwriting.)
