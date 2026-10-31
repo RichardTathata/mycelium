@@ -148,10 +148,11 @@ const JWKS_REFRESH_COOLDOWN: Duration = Duration::from_secs(30);
 /// refused. A verify whose `kid` is already cached never waits for a fetch at all.
 const JWKS_FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// While the verifier holds **no keys at all** (a cold start, or no fetch has ever succeeded), a
-/// failed fetch is retried after this, not after [`JWKS_REFRESH_COOLDOWN`]: an IdP that blipped as
-/// the node started would otherwise have every token refused for 30 s after it recovered. Two
-/// seconds still caps the retries an unauthenticated client can cause at one per back-off.
+/// While **no fetch has ever succeeded** (a cold start), a failed fetch is retried after this, not
+/// after [`JWKS_REFRESH_COOLDOWN`]: an IdP that blipped as the node started would otherwise have
+/// every token refused for 30 s after it recovered. Two seconds still caps the retries an
+/// unauthenticated client can cause at one per back-off. After a success — an empty set included,
+/// which is a withdrawal to honour, not a blip — a failed fetch is retried on the cooldown.
 const JWKS_EMPTY_RETRY_BACKOFF: Duration = Duration::from_secs(2);
 
 /// How long the keys of the last **successful** fetch stay usable while every later fetch fails.
@@ -161,9 +162,11 @@ const JWKS_EMPTY_RETRY_BACKOFF: Duration = Duration::from_secs(2);
 /// verifying against keys of any age for as long as it ran: a key the issuer had withdrawn — a
 /// compromised one, say — kept minting fresh-dated tokens here, and nothing in the node said how
 /// old its trust was (external review 2026-10-31, F4). A day is longer than any IdP outage a
-/// deployment rides out without noticing, and shorter than a rotation cycle, so the ceiling is
-/// reached only when the fetch has been failing for a day — which the warn log says each time.
-/// A constant for now; the row says when it becomes a setting.
+/// deployment rides out without noticing, and shorter than a rotation cycle. The ceiling is
+/// measured from the last **successful** fetch, whether or not anything was asked in between: a
+/// node that saw no token for a day refreshes on the first one (the TTL), and if that one fetch
+/// fails, that token and every token until a fetch succeeds are refused — fail-closed, and the
+/// warn log says so each time. A constant for now; the row says when it becomes a setting.
 const JWKS_MAX_STALE: Duration = Duration::from_secs(24 * 3600);
 
 /// The verifier's timing, one place: the constants in production, shorter values in tests.
@@ -260,9 +263,10 @@ struct Shared {
     cfg:    OidcConfig,
     http:   reqwest::Client,
     /// The node's outbound allow-list (`report.egress`, plan §8): discovery and the JWKS fetch are
-    /// outbound calls the substrate chooses, and a host the policy denies is never dialled — the
-    /// verifier then holds no keys and refuses every token. `start()` refuses the contradiction
-    /// first, so this is the runtime's belt to that brace.
+    /// outbound calls the substrate chooses, and a host the policy denies is never dialled — that
+    /// is a failed fetch: the verifier keeps the keys it holds for at most [`JWKS_MAX_STALE`] after
+    /// its last success (none, on a cold start), then refuses every token. `start()` refuses the
+    /// contradiction first, so this is the runtime's belt to that brace.
     egress: crate::config::EgressPolicy,
     limits: Limits,
     /// Lock-order row 17. A plain `std::sync` lock: read to plan and to clone keys, written only to
@@ -281,7 +285,8 @@ struct Shared {
 /// A token whose `kid` is cached never waits for the network; a fetch happens on a cold cache, an
 /// unknown `kid` or TTL expiry — single-flight, in a detached task (a cancelled verify does not
 /// cancel it), the forced and retried ones at most once per [`JWKS_REFRESH_COOLDOWN`] (once per
-/// [`JWKS_EMPTY_RETRY_BACKOFF`] while no keys are held), each within [`JWKS_FETCH_TIMEOUT`].
+/// [`JWKS_EMPTY_RETRY_BACKOFF`] while no fetch has ever succeeded), each within
+/// [`JWKS_FETCH_TIMEOUT`].
 pub(crate) struct OidcVerifier {
     shared: std::sync::Arc<Shared>,
 }
@@ -449,32 +454,44 @@ impl Shared {
             Ok(r) => r,
             Err(e) => { tracing::warn!("oidc: JWKS fetch failed: {e}"); return Err(FetchFailed); }
         };
-        // A non-2xx answer is a failure whatever its body says: a 503 page, or a well-formed empty
-        // set under an error status, must not read as the issuer withdrawing its keys.
-        let response = match response.error_for_status() {
-            Ok(r) => r,
-            Err(e) => { tracing::warn!("oidc: JWKS fetch answered an error status: {e}"); return Err(FetchFailed); }
-        };
-        let jwks: jsonwebtoken::jwk::JwkSet = match response.json().await {
-            Ok(j) => j,
+        // A success is a 2xx. Anything else is a failure whatever its body says: a 503 page, or a
+        // well-formed empty set under a 300 or a 404, must not read as the issuer withdrawing its
+        // keys (`error_for_status` would pass a 3xx through).
+        let status = response.status();
+        if !status.is_success() {
+            tracing::warn!(%status, "oidc: JWKS fetch answered a non-2xx status; the held keys are kept");
+            return Err(FetchFailed);
+        }
+        // The set is read key by key, not as one `JwkSet`: `jsonwebtoken`'s JWK enums are closed, so
+        // one key of a kind it does not know (a post-quantum `alg`, an ES512/P-521 key, a `crv` it
+        // lacks) would fail the whole set — and an IdP that adds such a key beside its RS256 keys
+        // would never be refreshed again, which the ceiling would turn into a day-later lock-out
+        // against a healthy IdP. A key that does not parse is dropped like one that does not build.
+        let published: Vec<serde_json::Value> = match response.json::<serde_json::Value>().await {
+            Ok(serde_json::Value::Object(mut doc)) => match doc.remove("keys") {
+                Some(serde_json::Value::Array(keys)) => keys,
+                _ => { tracing::warn!("oidc: JWKS parse failed: no `keys` array"); return Err(FetchFailed); }
+            },
+            Ok(_) => { tracing::warn!("oidc: JWKS parse failed: not an object"); return Err(FetchFailed); }
             Err(e) => { tracing::warn!("oidc: JWKS parse failed: {e}"); return Err(FetchFailed); }
         };
-        let published = jwks.keys.len();
-        let keys: Vec<_> = jwks
-            .keys
+        let keys: Vec<_> = published
             .iter()
-            .filter_map(|jwk| {
+            .filter_map(|raw| {
+                let jwk: jsonwebtoken::jwk::Jwk = serde_json::from_value(raw.clone()).ok()?;
                 let kid = jwk.common.key_id.clone()?;
-                DecodingKey::from_jwk(jwk).ok().map(|k| (kid, k))
+                DecodingKey::from_jwk(&jwk).ok().map(|k| (kid, k))
             })
             .collect();
         // The published set is authoritative even when none of it is usable here (a key without a
-        // `kid`, or of a kind this verifier does not build): a key the issuer no longer publishes
-        // must not verify, whatever else it publishes. Say so, since every token is now refused.
+        // `kid`, of a kind this verifier does not build, or of a shape its parser does not read):
+        // a key the issuer no longer publishes must not verify, whatever else it publishes. Say so,
+        // since every token is then refused.
+        let published = published.len();
         if keys.is_empty() {
             tracing::warn!(published, "oidc: the JWKS holds no usable key; the held keys are withdrawn and every OIDC token is refused");
         } else if keys.len() < published {
-            tracing::warn!(published, usable = keys.len(), "oidc: some published keys are not usable here (no `kid`, or an unsupported kind)");
+            tracing::warn!(published, usable = keys.len(), "oidc: some published keys are not usable here (no `kid`, or a kind this verifier does not read)");
         }
         Ok(keys)
     }
@@ -490,6 +507,11 @@ impl Shared {
             return None;
         }
         let doc: serde_json::Value = match self.http.get(&disco).timeout(remaining()?).send().await {
+            // Read only from a 2xx: an error page naming a `jwks_uri` is not the issuer's word.
+            Ok(r) if !r.status().is_success() => {
+                tracing::warn!(status = %r.status(), "oidc: discovery answered a non-2xx status");
+                return None;
+            }
             Ok(r) => r.json().await.ok()?,
             Err(e) => { tracing::warn!("oidc: discovery failed: {e}"); return None; }
         };
@@ -1018,5 +1040,51 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(2500)).await;
         assert!(v.verify(&token("test-kid")).await.is_none(), "past the ceiling: refused, however well the kid is known");
         assert!(hits(&n) >= 3, "and a fetch was tried for it");
+    }
+
+    /// **#712 review, finding 1.** One key the JWK parser cannot read — a post-quantum `alg`, an
+    /// ES512/P-521 key, a `kty` or `crv` outside jsonwebtoken's enums — must not turn the whole set
+    /// into a failed fetch: the keys that do parse are the issuer's published set. Before, the set
+    /// failed as a whole, so an IdP that added such a key beside its RS256 keys was never refreshed
+    /// again, and the ceiling turned that into a day-later lock-out against a healthy IdP.
+    #[tokio::test]
+    async fn a_key_the_parser_cannot_read_is_dropped_not_the_whole_set() {
+        let mixed = JWKS_BODY.replacen(
+            "{\"keys\":[",
+            "{\"keys\":[{\"kty\":\"AKP\",\"alg\":\"ML-DSA-65\",\"kid\":\"pq-1\",\"pub\":\"AAAA\"},{\"kty\":\"EC\",\"crv\":\"secp256k1\",\"kid\":\"k256\",\"x\":\"AA\",\"y\":\"AA\"},",
+            1,
+        );
+        assert_ne!(mixed, JWKS_BODY, "the fixture's keys array was found");
+        let (port, n) = spawn_scripted(move |_| answer(mixed.clone())).await;
+        let v = OidcVerifier::new(stub_cfg(port), open_egress());
+        assert!(v.verify(&token("test-kid")).await.is_some(), "the RSA key beside the unreadable ones verifies");
+        assert_eq!(hits(&n), 1);
+        assert!(v.verify(&token("pq-1")).await.is_none(), "the unreadable key verifies nothing");
+    }
+
+    /// **#712 review, finding 2.** A success is a 2xx: a `300` carrying a well-formed empty set is a
+    /// failed fetch that keeps the keys, not a withdrawal (`error_for_status` refuses 4xx/5xx only).
+    #[tokio::test]
+    async fn a_3xx_jwks_is_a_failure_not_a_withdrawal() {
+        let (port, n) = spawn_scripted(|i| if i == 0 { answer(JWKS_BODY) } else { status(300, r#"{"keys":[]}"#) }).await;
+        let v = OidcVerifier::with_limits(stub_cfg(port), open_egress(), limits(|l| l.refresh_cooldown = Duration::ZERO));
+        assert!(v.verify(&token("test-kid")).await.is_some());
+        assert!(v.verify(&token("unknown")).await.is_none(), "forces a refresh, which answers 300");
+        assert_eq!(hits(&n), 2);
+        assert!(v.verify(&token("test-kid")).await.is_some(), "a 300 is not a success: the previous keys are kept");
+    }
+
+    /// **#712 review, finding 2, the sibling.** The discovery document is read only from a 2xx: a
+    /// `503` whose body names a `jwks_uri` does not lead to a fetch.
+    #[tokio::test]
+    async fn a_non_2xx_discovery_document_is_not_read() {
+        let (jwks_port, jwks_hits) = spawn_scripted(|_| answer(JWKS_BODY)).await;
+        let doc = format!(r#"{{"jwks_uri":"http://127.0.0.1:{jwks_port}/jwks"}}"#);
+        let (disco_port, _) = spawn_scripted(move |_| status(503, doc.clone())).await;
+        let mut c = cfg();
+        c.issuer = format!("http://127.0.0.1:{disco_port}");
+        let v = OidcVerifier::new(c, open_egress());
+        assert!(v.verify(&token("test-kid")).await.is_none(), "no keys: the discovery answer was an error");
+        assert_eq!(hits(&jwks_hits), 0, "the JWKS named by an error page is never fetched");
     }
 }

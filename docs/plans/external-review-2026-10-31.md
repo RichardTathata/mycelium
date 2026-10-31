@@ -121,10 +121,15 @@ an empty set included; `Err` keeps the keys and marks the attempt failed. `JWKS_
 `CachedKeys::past_ceiling` makes `plan()` know no `kid` and `usable()` hand out no keys once the last success is
 older than it, so a verify is a fetch or a refusal, never `UseAndRefresh`; the fetch task warns each time it fails
 past the ceiling. The short retry back-off now applies only while no fetch has **ever** succeeded — a successful
-empty set is a withdrawal to honour, retried on the cooldown, not a blip. **Decided:** a well-formed JWKS whose keys
-all lack a `kid` or are of a kind the verifier cannot build is `Ok(empty)`, not `Err` — the published set is the
+empty set is a withdrawal to honour, retried on the cooldown, not a blip. **Decided:** the JWKS is read key by key, and a
+key the verifier cannot **read** (a post-quantum `alg`, an ES512/P-521 key, a `crv` outside `jsonwebtoken`'s enums
+— one such key used to fail the whole set as a `JwkSet`) is dropped exactly like one it cannot **build** or that
+lacks a `kid`; a well-formed 2xx JWKS with no usable key is `Ok(empty)`, not `Err` — the published set is the
 authority on which keys sign, so a key the issuer no longer publishes must not verify whatever else it publishes;
-the warn log names how many it published and how many were usable. `JWKS_MAX_STALE` stays a constant: it becomes an
+the warn log names how many it published and how many were usable (#712's review, finding 1). A success is a
+**2xx** (`status().is_success()`, not `error_for_status`, which passes a 3xx), for the JWKS and the discovery
+document alike (finding 2). The ceiling counts from the last successful fetch whether or not anything was asked in
+between; a quiet node's first token after a day is refused if that one fetch fails (finding 4, fail-closed). `JWKS_MAX_STALE` stays a constant: it becomes an
 `[oidc]` field when a deployment asks for a different ceiling, not before. **Not built:** nothing of the row.
 
 ### R5 · The gateway's handshake and header-read bounds *(F5)*
@@ -183,4 +188,4 @@ Filled as rows close: each row's promises quoted beside the code and test that d
 
 | Row | Delivered | PR |
 |---|---|---|
-| R4 | *a typed result* — `fetch_keys` → `Result<Vec<_>, FetchFailed>` (`src/agent/oidc.rs`); *a successful empty set replaces the cache with nothing* — the fetch task's `Ok(keys)` arm, `a_successful_empty_jwks_withdraws_the_keys` (failed on the old code: the withdrawn key still verified); *a failure keeps the old keys for at most `JWKS_MAX_STALE`, after which `plan()` refuses rather than `UseAndRefresh`* — `CachedKeys::past_ceiling`/`usable`, `keys_older_than_the_stale_ceiling_are_refused` (failed on the old code: keys of any age verified); a non-2xx answer is a failure — `a_non_2xx_jwks_is_a_failure_not_a_withdrawal` (passes on the old code, where a 503's empty body read as a failure; fails with `error_for_status` planted out); a replace-rotation withdraws the old key — `a_rotated_key_is_accepted_after_the_cooldown`'s new last assertions; *`sso.md` states both* — § `jwks_uri`; `deprecations.md` §75 | #712 |
+| R4 | *a typed result* — `fetch_keys` → `Result<Vec<_>, FetchFailed>` (`src/agent/oidc.rs`); *a successful empty set replaces the cache with nothing* — the fetch task's `Ok(keys)` arm, `a_successful_empty_jwks_withdraws_the_keys` (failed on the old code: the withdrawn key still verified); *a failure keeps the old keys for at most `JWKS_MAX_STALE`, after which `plan()` refuses rather than `UseAndRefresh`* — `CachedKeys::past_ceiling`/`usable`, `keys_older_than_the_stale_ceiling_are_refused` (failed on the old code: keys of any age verified); a non-2xx answer is a failure — `a_non_2xx_jwks_is_a_failure_not_a_withdrawal` (passes on the old code, where a 503's empty body read as a failure; fails with `error_for_status` planted out); a replace-rotation withdraws the old key — `a_rotated_key_is_accepted_after_the_cooldown`'s new last assertions (a pin, not a proof: a non-empty fetch already replaced the cache before this row); a key the parser cannot read is dropped, not the set — `a_key_the_parser_cannot_read_is_dropped_not_the_whole_set` (failed first: the set failed as a whole); a 3xx is a failure — `a_3xx_jwks_is_a_failure_not_a_withdrawal` (failed first); the discovery document only from a 2xx — `a_non_2xx_discovery_document_is_not_read` (failed first); *`sso.md` states both* — § `jwks_uri`; `deprecations.md` §75 | #712 |

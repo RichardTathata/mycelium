@@ -66,10 +66,15 @@ cfg.oidc = Some(mycelium::OidcConfig {
   the same 30 s spacing — except while no fetch has **ever succeeded** (an IdP
   unreachable at start), when the retry comes after **2 s**
   (`JWKS_EMPTY_RETRY_BACKOFF`), so a node does not refuse every token for 30 s after
-  the IdP recovers. Kept keys have a ceiling: **24 h** after the last successful
-  fetch (`JWKS_MAX_STALE`) every token is refused until a fetch succeeds again, so
-  an outage cannot leave a node trusting keys of any age; the fetch keeps being
-  retried on its spacing and each failure is logged. A token whose `kid` is already cached
+  the IdP recovers. Kept keys have a ceiling: **24 h since the last successful
+  fetch** (`JWKS_MAX_STALE`), whether or not any token was seen in between — a
+  node quiet over a weekend refreshes on its first token, and if that one fetch
+  fails, that token and every token until a fetch succeeds are refused — so an
+  outage cannot leave a node trusting keys of any age; the fetch keeps being
+  retried on its spacing and each failure is logged. The JWKS is read **key by
+  key**: a key of a kind the verifier cannot read or build (a post-quantum `alg`,
+  an ES512/P-521 key) is dropped with a warning naming how many were published
+  and how many usable, and the rest are the set. A token whose `kid` is already cached
   **never waits for the IdP** (past the TTL it is checked against the cached keys
   while they refresh in the background). Requests that do need a fetch share one
   (single-flight), and that fetch — discovery and the JWKS request together — has
