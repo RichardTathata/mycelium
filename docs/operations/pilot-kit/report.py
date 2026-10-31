@@ -33,6 +33,11 @@ def die(msg):
     sys.exit(2)
 
 
+def fill(text, values):
+    """The template's `{{name}}`s filled in one pass, so a `{{…}}` inside a value (a reason, a detail) stays as it is."""
+    return re.sub(r"\{\{([a-z_]+)\}\}", lambda m: values[m.group(1)] if m.group(1) in values else m.group(0), text)
+
+
 def cell(text):
     """A value safe inside a Markdown table cell."""
     return str(text).replace("|", "\\|").replace("\n", " ")
@@ -41,9 +46,11 @@ def cell(text):
 def parse_doctor(path):
     """One node's doctor text: its configuration, profile, start() verdict, every guarantee's state and row."""
     try:
-        text = pathlib.Path(path).read_text()
+        text = pathlib.Path(path).read_text(encoding="utf-8")
     except OSError as e:
         die(f"{path}: {e.strerror or e}")
+    except UnicodeDecodeError as e:
+        die(f"{path}: not text `doctor` printed ({e.reason} at byte {e.start})")
     node = {"file": str(path), "states": {}, "detail": {}, "row": {}}
     for line in text.splitlines():
         if line.startswith("configuration: "):
@@ -84,10 +91,10 @@ def parse_doctor(path):
 
 def load_faults(path):
     try:
-        faults = json.loads(pathlib.Path(path).read_text())
+        faults = json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
     except OSError as e:
         die(f"{path}: {e.strerror or e}")
-    except ValueError as e:
+    except ValueError as e:   # UnicodeDecodeError is one
         die(f"{path}: not JSON ({e})")
     if not isinstance(faults, dict) or not isinstance(faults.get("classes"), list):
         die(f"{path}: not `test --faults --format json` output (no `classes` list)")
@@ -95,12 +102,15 @@ def load_faults(path):
         if not isinstance(c, dict) or not isinstance(c.get("class"), str) or not isinstance(c.get("state"), dict) \
                 or not isinstance(c["state"].get("state"), str):
             die(f"{path}: a class without its `class` and `state`")
+        for key in ("checks", "exercised"):
+            if not isinstance(c.get(key, []), list):
+                die(f"{path}: class `{c['class']}` has a `{key}` that is not a list")
         for k in c.get("checks", []):
             if not isinstance(k, dict) or "ok" not in k or k["ok"] not in (True, False, None):
                 die(f"{path}: class `{c['class']}` has a check without `ok`")
         for e in c.get("exercised", []):
-            if not isinstance(e, dict) or not {"id", "kind", "state"} <= e.keys():
-                die(f"{path}: class `{c['class']}` lists an exercised entry without `id`, `kind` and `state`")
+            if not isinstance(e, dict) or not all(isinstance(e.get(k), str) for k in ("id", "kind", "state")):
+                die(f"{path}: class `{c['class']}` lists an exercised entry without a string `id`, `kind` and `state`")
     return faults["classes"]
 
 
@@ -165,20 +175,17 @@ def main():
             ok = sum(1 for k in checks if k["ok"] is True)
             note = f" ({e['detail']})" if e.get("detail") else ""
             under.append(f"`{c['class']}` {state(c)}, {ok} of {len(checks)} checks held; in its fleet {e['state']}{note}")
-        return (section.replace("{{id}}", gid)
-                .replace("{{promise}}", g["promise"] if g else "*not in this repository's guarantee catalogue*")
-                .replace("{{nodes}}", "; ".join(per_node))
-                .replace("{{faults}}", "; ".join(under))
-                .replace("{{matrix}}", row(gid)))
+        return fill(section, {"id": gid,
+                              "promise": g["promise"] if g else "*not in this repository's guarantee catalogue*",
+                              "nodes": "; ".join(per_node), "faults": "; ".join(under), "matrix": row(gid)})
 
     enforced_ids = sorted(g for g, xs in exercised.items() if any(e["state"] == "enforced" for _, e in xs))
     other_ids = sorted(g for g in exercised if g not in enforced_ids)
     domains = sorted({n.get("domain", n["node"]) for n in nodes})
-    out = (head.replace("{{domains}}", " · ".join(domains)).replace("{{date}}", a.date)
-           .replace("{{fleet}}", "\n".join(fleet)).replace("{{node_count}}", str(len(nodes)))
-           .replace("{{classes}}", "\n".join(runs))
-           .replace("{{enforced_sections}}", "".join(render(g) for g in enforced_ids) or "*none*\n")
-           .replace("{{other_sections}}", "".join(render(g) for g in other_ids) or "*none*\n"))
+    out = fill(head, {"domains": " · ".join(domains), "date": a.date, "fleet": "\n".join(fleet),
+                      "node_count": str(len(nodes)), "classes": "\n".join(runs),
+                      "enforced_sections": "".join(render(g) for g in enforced_ids) or "*none*\n",
+                      "other_sections": "".join(render(g) for g in other_ids) or "*none*\n"})
 
     reported = sorted({gid for n in nodes for gid in n["states"]})
     unex = ["| Guarantee | On each node | Who holds it |", "|---|---|---|"]
@@ -192,7 +199,7 @@ def main():
             ext.append(f"| `{gid}` | {where} | {cell(remedy)} |")
         elif gid not in exercised:
             unex.append(f"| `{gid}` | {cell('; '.join(f'{k} {v}' for k, v in states.items()))} | {cell(row(gid))} |")
-    out += tail.replace("{{unexercised}}", "\n".join(unex)).replace("{{external}}", "\n".join(ext))
+    out += fill(tail, {"unexercised": "\n".join(unex), "external": "\n".join(ext)})
     sys.stdout.write(out)
 
 

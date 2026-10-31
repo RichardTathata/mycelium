@@ -66,6 +66,13 @@ def report_cases(doctors, faults):
 
     no_state = json.loads(json.dumps(data)); no_state["classes"][0].pop("state")
     no_ok = json.loads(json.dumps(data)); no_ok["classes"][0]["checks"][0].pop("ok")
+    ex_int = json.loads(json.dumps(data)); ex_int["classes"][0]["exercised"] = 5
+    ex_id = json.loads(json.dumps(data)); ex_id["classes"][0]["exercised"][0]["id"] = 7
+
+    def write_bytes(name, body):
+        p = tmp / name
+        p.write_bytes(body)
+        return p
     same_stem = tmp / "elsewhere"; same_stem.mkdir()
     (same_stem / "doctor-x.txt").write_text(pathlib.Path(doctors[0]).read_text())
     no_file = pathlib.Path(doctors[0]).read_text().replace(
@@ -81,6 +88,9 @@ def report_cases(doctors, faults):
         "one doctor file given twice": ["--doctor", doctors[0], doctors[0], "--faults", faults],
         "two configurations with the same stem": ["--doctor", doctors[0], same_stem / "doctor-x.txt", "--faults", faults],
         "doctor run without a configuration file": ["--doctor", write("no-file.txt", no_file), "--faults", faults],
+        "a doctor file that is not UTF-8": ["--doctor", write_bytes("latin1.txt", b"configuration: caf\xe9\n"), "--faults", faults],
+        "a class whose exercised is not a list": ["--doctor", *doctors, "--faults", write("ex-int.json", ex_int)],
+        "an exercised id that is not a string": ["--doctor", *doctors, "--faults", write("ex-id.json", ex_id)],
     }
     for what, args in refused.items():
         r = report(*args)
@@ -106,6 +116,15 @@ def report_cases(doctors, faults):
     r = report("--doctor", write("piped/doctor-kitchen-1.txt", piped), *[d for d in doctors if d != src], "--faults", faults)
     if r.returncode != 0 or "a node \\| cannot verify" not in r.stdout:
         fails.append("report: a `|` in a doctor reason is not escaped inside its table cell")
+    # A `{{…}}` inside a value is text, not a placeholder: the template is filled in one pass. A placeholder filled
+    # after the sections (`{{other_sections}}`) inside an enforced section's text is what a chained fill expanded.
+    braced = json.loads(json.dumps(data))
+    entry = next(e for c in braced["classes"] for e in c.get("exercised", [])
+                 if e.get("kind") == "guarantee" and e["state"] == "enforced")
+    entry["detail"] = "seen {{other_sections}} here"
+    r = report("--doctor", *doctors, "--faults", write("braced.json", braced))
+    if r.returncode != 0 or "seen {{other_sections}} here" not in r.stdout:
+        fails.append("report: a `{{…}}` inside a run's text was expanded as a placeholder")
     return fails
 
 
@@ -208,6 +227,21 @@ def main():
         if not rest or first != enforced_in_fleet or second != exercised - enforced_in_fleet:
             fails.append(f"report: the sections are not split by the state the class's fleet resolved them in "
                          f"(enforced {sorted(first)}, the rest {sorted(second)})")
+        # Each section's "Who holds it" is the row the fixture's doctor lines name for that id.
+        named = {}
+        for d in doctors:
+            for line in pathlib.Path(d).read_text().splitlines():
+                if m := re.match(r"^  enforced → matrix: (.*): ([a-z0-9_., ]+)$", line):
+                    for gid in m.group(2).split(", "):
+                        named.setdefault(gid.strip(), set()).add(m.group(1))
+                elif m := re.match(r"^  ([a-z0-9_]+\.[a-z0-9_.]+): [a-z_]+ — .* → matrix: (.*)$", line):
+                    named.setdefault(m.group(1), set()).add(m.group(2))
+        for gid, body in re.findall(r"^### `([^`]+)`\n(.*?)(?=^### |^## )", report, re.M | re.S):
+            got = re.search(r"^\*\*Who holds it\*\* \(.*?\): (.*)$", body, re.M)
+            want = " · ".join(sorted(named.get(gid, set())))
+            if not got or got.group(1).strip() != want:
+                fails.append(f"report: `{gid}`'s section names {got.group(1).strip() if got else 'no row'!r}, "
+                             f"not the row its doctor lines name ({want!r})")
         if "feeds nothing into this report" not in report:
             fails.append("report: it does not say the cross-edge call feeds nothing into it")
         for d in doctors:

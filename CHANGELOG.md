@@ -17,6 +17,9 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     under one `  enforced → matrix: <row>: <ids>` line per row. A guarantee the matrix has no row for reads `no row`
     with the reason.
   - **JSON form:** it gains `matrix` (guarantee id → row); the schema id is unchanged, because the field is added.
+  - **API:** the public struct `mycelium::doctor::Doctor` gained a public field, `matrix`; an exhaustive struct literal
+    or destructure of `Doctor` breaks (`doctor::run`/`run_attached` build it, and are unaffected). `MATRIX_ROWS`,
+    `NO_MATRIX_ROW` and `matrix_row` are new public items in `mycelium::doctor`.
   - **Where the rows come from:** `MATRIX_ROWS` in `src/doctor.rs`, which `scripts/check-pilot-kit.py` holds equal to
     `docs/operations/shared-responsibility-matrix.md` § *From a `doctor` line to its row*.
   - **What to check:** a script matching a whole `doctor` line exactly (`^  <id>: <state> — … → <docs>$`) now sees the

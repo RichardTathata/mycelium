@@ -35,8 +35,8 @@ evidence for it.
 
 ## Guarantees a class touched where its fleet did not enforce them
 
-A class lists these as exercised, but its own fleet resolved each as `not_applicable` or `not_configured` (its fleet
-runs under `dev`, without a gateway). The class passing is not evidence for the guarantee as configured; the state on
+A class lists these as exercised, but its own fleet resolved each as `not_applicable`, `not_configured` or
+`not_in_build` (its fleet runs under `dev`, without a gateway). The class passing is not evidence for the guarantee as configured; the state on
 the scaffold's nodes is `doctor`'s.
 
 {{other_sections}}

@@ -38,7 +38,7 @@ this kit assumes. If one fails there, stop and fix it there: everything below ne
 
 - A machine with `bash`, `git`, `python3` 3.10 or later and a Rust toolchain (1.96 or later: `rustup` installs one).
   Linux and macOS both work. Ports 7961, 7962, 7971, 7972, 8461 and 8471 on loopback must be free.
-- A checkout of the repository's `main`. The kit is on `main` from the release after v2.38.3. **Until the next MINOR
+- A checkout of the repository's `main`. The kit is on `main` once #707 merges. **Until the next MINOR
   release, the two-domain scaffold builds only against a checkout**: `secure-multi-domain` and the doctor it runs are
   newer than every published tag (v2.38.2 and v2.38.3 are security PATCHes without them). So the walk builds
   `mycelium` from the checkout and points the scaffold at it, as CI does:
@@ -164,8 +164,8 @@ grep -c '^### ' pilot-report.md
 `pilot-report.md` has these parts:
 - **The fleet** as `doctor` read it, and the classes as they ran.
 - **The exercised guarantees, in two groups.** First, those a class exercised where its own fleet enforced them; the
-  class's checks are evidence for these. Then those a class touched where its fleet read them `not_applicable` or
-  `not_configured`; the class passing is not evidence for these. Each section gives:
+  class's checks are evidence for these. Then those a class touched where its fleet read them `not_applicable`,
+  `not_configured` or `not_in_build`; the class passing is not evidence for these. Each section gives:
   - the guarantee's promise;
   - its state on each node, with `doctor`'s reason where it is not enforced;
   - its state in the class's fleet;
