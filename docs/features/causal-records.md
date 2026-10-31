@@ -88,9 +88,12 @@ its chain back with `mycelium explain --correlation`. The tests: in
   starts governed work and how the fields travel through it: `record+fwd` (`/mcp`), `record` (`/a2a` on either
   generation's `_meta`, the LLM doors, the federation call, the provider check, the public `preflight`), `bytes` (a
   member's `rpc_call`, `bulk_call`, `scatter_gather`: the application bytes pass unaltered and the provider reads an
-  `mcp.invoke` payload), `refused` (`/gateway/rpc/call`, `scatter`: protected kinds), `none` (signal, mailbox, shard
-  and overlay emits: no record is written for them). Each row names the test that shows it, or states the gap: the
-  LLM stream door, the federation call, the routed public door, `bulk_call` and `scatter_gather` are listed untested.
+  `mcp.invoke` payload), and `ruled` (adopter-surface Y11: the tuple take and keyed take, the blackboard claim and
+  the signal, mailbox, shard and reliable-overlay emits — by their `*_in` Rust verbs and their gateway routes — and
+  `/gateway/rpc/call` and `scatter` for a companion's take or claim kind, which also refuse protected kinds: each runs
+  the preflight and records the fields only when an exposure rule selects its operation, and is untouched otherwise —
+  [exposure policy](exposure-policy.md)). Each row names the test that shows it, or states the gap: the LLM stream
+  door, the federation call, the routed public door, `bulk_call` and `scatter_gather` are listed untested.
   A door the scanner finds without a row fails the gate; a planted one fails its self-test by name.
 - The replay bundle carries `decisions.jsonl` as bytes, so the two fields ride through it by construction; the
   comparison ignores them. `POST /gateway/kv` echoes the fields on its receipt, and the SDKs carry them on every

@@ -58,7 +58,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and its gateway route, which reads the body's `_meta` (its actor the caller). Work naming an unresolved effect is held
   on an enforcing rung and counted in shadow; independent work passes. The fields go on the door's own decision record
   only (`mycelium::door`), so X4's *a signal is not governed work* now reads *not unless an exposure rule selects it*
-  (`scripts/causal-doors.txt`, `ruled`). A door asking under an `EXEMPT_OPERATIONS` name is refused by name. Both SDKs'
+  (`scripts/causal-doors.txt`, `ruled`). A raw `/gateway/rpc/call`, `/gateway/scatter` or
+  `/gateway/overlay/emit_reliable` of a companion's take or claim kind runs that door's decision
+  (`GossipAgent::register_door_kind`); `emit_ordered_in` and `emit_async_in` complete the emit verbs; on the shadow
+  rung a selected door admits what the evaluator refuses, the refusal recorded. A door asking under an
+  `EXEMPT_OPERATIONS` name is refused by name. Never decided: the plain verbs and a hosted WASM component's
+  `mesh.emit`. Both SDKs'
   take, claim and emit verbs send `correlation` and `parent` in `_meta`. Rule `ae.exposure` revision 2. **Not built,
   stated:** carrying the lineage onward through the signal frame or the tuple WAL; deciding these doors whenever an
   evaluator is attached without a selecting rule. `deprecations.md` §73: `TupleError`, `BlackboardError` and

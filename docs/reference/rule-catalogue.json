@@ -110,6 +110,8 @@
       "tests": [
         "every_door_holds_work_extending_an_unresolved_closure_and_admits_independent_work",
         "in_shadow_every_door_admits_and_counts_what_it_would_hold",
+        "in_shadow_a_door_admits_what_a_default_deny_evaluator_refuses",
+        "a_raw_call_of_a_doors_kind_runs_that_doors_decision",
         "a_door_no_rule_selects_is_untouched",
         "a_compensation_is_admitted_while_a_new_dependent_call_is_held",
         "independent_work_passes_while_work_extending_the_closure_is_held",

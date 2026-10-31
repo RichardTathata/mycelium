@@ -72,6 +72,10 @@ struct Node {
 }
 
 async fn node(tag: &str, policy: Option<ExposurePolicy>) -> Node {
+    node_with(tag, policy, evaluator()).await
+}
+
+async fn node_with(tag: &str, policy: Option<ExposurePolicy>, evaluator: ReferenceEvaluator) -> Node {
     let (gossip, http) = (alloc_port(), alloc_port());
     let mut cfg = GossipConfig::default();
     cfg.bind_port = gossip;
@@ -83,7 +87,7 @@ async fn node(tag: &str, policy: Option<ExposurePolicy>) -> Node {
     std::fs::create_dir_all(&dir).unwrap();
     let journal = dir.join("evidence.log");
     agent.with_evidence_journal(EvidenceJournal::open(&journal, EvidenceProfile::Strict).unwrap());
-    agent.with_action_evaluator(Arc::new(evaluator()));
+    agent.with_action_evaluator(Arc::new(evaluator));
     if let Some(p) = policy {
         agent.with_exposure_policy(Arc::new(p));
     }
@@ -194,6 +198,24 @@ impl Node {
     }
 }
 
+/// A rule with this actor, operation and resource selector, a size threshold of one.
+fn rule(actor: &str, operation: &str, resource: &str) -> ExposurePolicy {
+    ExposurePolicy::new(vec![ExposureRule {
+        actor: actor.into(),
+        operation: operation.into(),
+        resource: resource.into(),
+        limit: ExposureLimit::new(Some(1), None, "enforcement_point").unwrap(),
+    }])
+}
+
+/// A take request as the tuple space's RPC encodes it: the stage, length-prefixed, then the park in milliseconds.
+fn take_req(stage: &str) -> Vec<u8> {
+    let mut b = (stage.len() as u16).to_le_bytes().to_vec();
+    b.extend_from_slice(stage.as_bytes());
+    b.extend_from_slice(&1000u64.to_le_bytes());
+    b
+}
+
 fn dependent() -> CausalFields {
     CausalFields { parent: Some(H.into()), correlation: None }
 }
@@ -222,6 +244,13 @@ async fn every_door_holds_work_extending_an_unresolved_closure_and_admits_indepe
         assert!(r.message.contains("exposure") && r.message.contains("size threshold is 1"), "{op}: {r}");
     }
     assert_eq!(queued(&n).await, before, "a held take took nothing");
+    // The ordered and the awaiting emit are the same door (#708's review, finding 2).
+    for (verb, r) in [
+        ("emit_ordered_in", n.agent.emit_ordered_in("k", SignalScope::Cluster, Bytes::new(), &dependent()).await),
+        ("emit_async_in", n.agent.emit_async_in("k", SignalScope::Cluster, Bytes::new(), &dependent()).await),
+    ] {
+        assert!(r.is_err(), "{verb}: work extending the closure was admitted");
+    }
     for (op, refused) in n.rust_doors(&independent()).await {
         assert!(refused.is_none(), "{op}: independent work was refused: {refused:?}");
     }
@@ -232,7 +261,7 @@ async fn every_door_holds_work_extending_an_unresolved_closure_and_admits_indepe
         assert_ne!(status, 403, "{op}: the gateway route refused independent work");
     }
     let c = n.agent.exposure_counts();
-    assert_eq!((c.held, c.independent), (14, 14), "{c:?}");
+    assert_eq!((c.held, c.independent), (16, 14), "{c:?}");
     n.agent.shutdown().await;
 }
 
@@ -246,8 +275,121 @@ async fn in_shadow_every_door_admits_and_counts_what_it_would_hold() {
     for (op, refused) in n.rust_doors(&dependent()).await {
         assert!(refused.is_none(), "{op}: the shadow rung held: {refused:?}");
     }
+    // Through the gateway routes too (#708's review, finding 7).
+    for (op, status) in n.gateway_doors(serde_json::json!({ "parent": H })).await {
+        assert_ne!(status, 403, "{op}: the shadow rung held at the route");
+    }
     let c = n.agent.exposure_counts();
-    assert_eq!((c.would_hold, c.held), (7, 0), "{c:?}");
+    assert_eq!((c.would_hold, c.held), (14, 0), "{c:?}");
+    n.agent.shutdown().await;
+}
+
+/// **The shadow rung holds nothing, whatever the evaluator says** (#708's review, finding 3): with an evaluator that
+/// permits none of the door operations, a selected door under `observe` admits — root work and dependent work alike,
+/// by verb and by route — and its record carries the evaluator's refusal and that it was admitted; on an enforcing
+/// rung the same evaluator refuses. Seen failing first with the door not admitting in shadow (`admit_in_shadow` never
+/// called): the root emit answered 403 `authority_not_established`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn in_shadow_a_door_admits_what_a_default_deny_evaluator_refuses() {
+    let deny_all = ReferenceEvaluator::new("rev-deny").with_catalogue("cat-y11", "1").map_action("tools/call", "*");
+    let n = node_with("shadow-deny", Some(policy("*")), deny_all).await;
+    n.agent.set_control_profile(Profile::Observe);
+    n.fill().await;
+    for causal in [CausalFields::default(), dependent()] {
+        for (op, refused) in n.rust_doors(&causal).await {
+            assert!(refused.is_none(), "{op}: the shadow rung refused: {refused:?}");
+        }
+    }
+    for (op, status) in n.gateway_doors(serde_json::Value::Null).await {
+        assert_ne!(status, 403, "{op}: the shadow rung refused at the route");
+    }
+    let records = n.records();
+    let shadowed = records
+        .iter()
+        .find(|r| r["enforcement_point"] == "node:signal/emit" && r["decision"] != "permit")
+        .unwrap_or_else(|| panic!("no refusal recorded at node:signal/emit: {records:?}"));
+    assert!(
+        shadowed["checked"].as_array().unwrap().iter().any(|c| c.as_str().unwrap().contains("door admits under the observe profile")),
+        "{shadowed}"
+    );
+    assert_eq!(shadowed["execution"], "attempted", "{shadowed}");
+    n.agent.set_control_profile(Profile::EnforceLocal);
+    let r = n.agent.emit_in("k", SignalScope::Cluster, Bytes::new(), &CausalFields::default()).await;
+    assert!(r.is_err(), "the enforcing rung admitted what the evaluator refused");
+    n.agent.shutdown().await;
+}
+
+/// **A raw call of a door's kind runs that door's decision** (#708's review, finding 1): `rpc/call`, `scatter` and a
+/// reliable emit of `tuple.work.take` or `blackboard.board.claim`, with a rule selecting only the take and claim
+/// operations, hold dependent work as the take and claim doors do and pass independent work; a raw call of any other
+/// kind is untouched. Seen failing first with `door::decide_raw` returning no door: the dependent raw take answered
+/// 200 and took the item.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_raw_call_of_a_doors_kind_runs_that_doors_decision() {
+    use base64::Engine as _;
+    let p = ExposurePolicy::new(
+        ["tuple.take", "bb.claim"]
+            .iter()
+            .map(|op| ExposureRule { actor: "*".into(), operation: (*op).into(), resource: "*".into(), limit: ExposureLimit::new(Some(1), None, "enforcement_point").unwrap() })
+            .collect(),
+    );
+    let n = node("raw", Some(p)).await;
+    n.agent.set_control_profile(Profile::EnforceLocal);
+    n.fill().await;
+    let me = n.agent.node_id().to_string();
+    let b64 = |b: &[u8]| base64::engine::general_purpose::STANDARD.encode(b);
+    let client = reqwest::Client::new();
+    let raw = |path: &str, kind: &str, payload: Vec<u8>, meta: serde_json::Value| {
+        let mut body = match path {
+            "/gateway/scatter" => serde_json::json!({ "targets": [me.clone()], "method": kind, "payload_b64": b64(&payload), "timeout_secs": 2 }),
+            "/gateway/overlay/emit_reliable" => serde_json::json!({ "target": me.clone(), "kind": kind, "payload_b64": b64(&payload), "timeout_secs": 2 }),
+            _ => serde_json::json!({ "target": me.clone(), "method": kind, "payload_b64": b64(&payload), "timeout_secs": 2 }),
+        };
+        body["_meta"] = meta;
+        client.post(format!("{}{path}", n.base)).json(&body).send()
+    };
+    for path in ["/gateway/rpc/call", "/gateway/scatter", "/gateway/overlay/emit_reliable"] {
+        for kind in ["tuple.work.take", "blackboard.board.claim"] {
+            let r = raw(path, kind, take_req("in"), serde_json::json!({ "parent": H })).await.unwrap();
+            assert_eq!(r.status().as_u16(), 403, "{path} {kind}: a raw dependent call of a door's kind was admitted");
+        }
+        let r = raw(path, "tuple.work.take", take_req("in"), serde_json::json!({ "parent": OTHER })).await.unwrap();
+        assert_ne!(r.status().as_u16(), 403, "{path}: a raw independent take was refused");
+        let r = raw(path, "some.other.kind", Vec::new(), serde_json::json!({ "parent": H })).await.unwrap();
+        assert_ne!(r.status().as_u16(), 403, "{path}: a raw call of a kind no door serves was decided");
+    }
+    assert_eq!(n.agent.exposure_counts().held, 6);
+    n.agent.shutdown().await;
+}
+
+/// **A rule selects by actor and by resource** (#708's review, finding 7). A rule naming the anonymous caller as its
+/// actor holds a route's dependent emit and not this node's own verb, whose actor is `node:{id}`; a rule naming one
+/// stage, `tuple:work/in`, holds a take there and not one on another stage, nor an emit. Seen failing first with the
+/// selection reading the operation alone: the node's verb and the other stage were held.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_rule_selects_a_door_by_actor_and_by_resource() {
+    let n = node("actor", Some(rule(mycelium::PRINCIPAL_ANONYMOUS, "signal.emit", "*"))).await;
+    n.agent.set_control_profile(Profile::EnforceLocal);
+    let route = reqwest::Client::new()
+        .post(format!("{}/gateway/signal/emit", n.base))
+        .json(&serde_json::json!({ "kind": "k", "_meta": { "parent": H } }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(route.status().as_u16(), 403, "the anonymous caller's dependent emit was admitted");
+    assert!(n.agent.emit_in("k", SignalScope::Cluster, Bytes::new(), &dependent()).await.is_ok(), "the node's own verb was held by a rule on another actor");
+    assert!(!n.records().iter().any(|r| r["enforcement_point"] == "node:signal/emit"), "the unselected verb was decided: {:?}", n.records());
+    n.agent.shutdown().await;
+
+    let n = node("resource", Some(rule("*", "*", "tuple:work/in"))).await;
+    n.agent.set_control_profile(Profile::EnforceLocal);
+    n.ts.put("other", Bytes::from_static(b"x")).await.unwrap();
+    assert!(matches!(n.ts.take_in("in", Duration::from_secs(1), &dependent()).await, Err(TupleError::Refused(_))), "the named stage's take was admitted");
+    assert!(n.ts.take_in("other", Duration::from_secs(1), &dependent()).await.is_ok(), "another stage's take was held");
+    assert!(n.agent.emit_in("k", SignalScope::Cluster, Bytes::new(), &dependent()).await.is_ok(), "an emit was held by a rule on a stage");
+    let records = n.records();
+    assert!(records.iter().any(|r| r["resource"] == "tuple:work/in"), "the selected take was not decided: {records:?}");
+    assert!(!records.iter().any(|r| r["resource"] == "tuple:work/other" || r["resource"] == "signal:k"), "an unselected door was decided: {records:?}");
     n.agent.shutdown().await;
 }
 

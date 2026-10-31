@@ -73,9 +73,26 @@ the fields.
 - **At the take, claim and emit doors, opt-in** (Y11, the plan's D29). A tuple take, a blackboard claim and the four
   emit doors are decided only when a rule selects their operation; otherwise they are untouched — no decision, no
   record, no clock read, and a malformed `_meta` is not read. A rule whose operation is `*` selects them too. Their
-  causal fields go on the door's own decision record only (`node:{door}` for a Rust verb, its actor the node;
-  `gateway:{door}` for a route, its actor the caller), never onward: a signal frame and a tuple's WAL record carry no
-  field for them. A door asking under an `EXEMPT_OPERATIONS` name is refused by name.
+  causal fields go on the door's own decision record only (`node:{door}` for a Rust verb, its actor the node,
+  `node:{id}`; `gateway:{door}` for a route, its actor the caller), never onward: a signal frame and a tuple's WAL
+  record carry no field for them. A door asking under an `EXEMPT_OPERATIONS` name is refused by name.
+  - **Which verbs are doors.** The `*_in` verbs — `emit_in`, `emit_ordered_in`, `emit_async_in` on the agent;
+    `deliver_event_in`, `emit_reliable_in`, `emit_sharded_in` on the service handle; `take_in` and `take_by_key_in` on
+    the tuple space; `claim_in` on the board — and the seven gateway routes. A raw gateway call of a companion's take
+    or claim kind (`/gateway/rpc/call`, `/gateway/scatter`, `/gateway/overlay/emit_reliable` of `tuple.{ns}.take`,
+    `tuple.{ns}.take_by_key`, `blackboard.{ns}.claim`) runs that door's decision, selected or untouched exactly as the
+    door is. **Never decided:** the plain verbs (`emit`, `emit_ordered`, `emit_async`, `deliver_event`,
+    `emit_reliable`, `emit_sharded`, `take`, `take_by_key`, `claim`, a member's own `rpc_call`, `scatter_gather` and
+    `bulk_call`), a hosted WASM component's `mesh.emit`, and a remote worker's take or claim where the primary serves it:
+    a door is decided on the node the work starts on.
+  - **The resources a rule selects on:** `tuple:{ns}/{stage}` for a take (a raw call whose payload names no stage is
+    decided on `tuple:{ns}/`), `bb:{ns}` for a claim (a predicate names no single resource), `signal:{kind}` for the
+    four emits.
+  - **On the shadow rung a selected door holds nothing,** whatever the evaluator says: a refusal the evaluator decides
+    is recorded as decided, with what the exposure gate would have done, and the door admits — its record's execution
+    `attempted`, then the door's own outcome. A malformed `_meta` is still refused. Only a permit is counted.
+  - **A parked take is decided before it waits,** so its check-then-act window is the park time.
+  - Not built: the SDKs raise a door's 403 as their verbs' ordinary error and do not surface its `reason`.
 - **The omission limit.** A call with neither `_meta.parent` nor `_meta.correlation` is a root and is never held: the
   policy bounds causal extension as each envelope declares it, so it binds only callers that propagate their lineage.
   A cap on what an actor does whatever it declares is row K2's history rules.

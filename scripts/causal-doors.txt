@@ -37,15 +37,15 @@ src/agent/provider_enforcement.rs::check             | record     | the_causal_f
 src/agent/http/grants.rs::decide_grant               | record     | issuing_is_an_action_the_evaluator_decides_and_the_namespace_is_route_owned  # the issue decision's record, behind `gw_grant_decide` and the `grant` fault class; the route's body carries no `_meta`, so the fields are never set here (X3)
 src/agent/http/grants.rs::revoke_grant               | record     | a_revoked_grant_is_refused_at_every_door_and_stops_admitted_work  # the revoke decision's record, behind `gw_grant_revoke`; the route's body carries no `_meta`, so the fields are never set here (X3, second PR)
 # ── the raw doors (scanned: the handlers and verbs named)
-src/agent/http/mesh.rs::gw_rpc_call                  | refused    | a_members_direct_call_carries_the_fields_in_its_own_bytes_and_the_gateway_s_raw_door_refuses_the_kind
+src/agent/http/mesh.rs::gw_rpc_call                  | ruled      | a_raw_call_of_a_doors_kind_runs_that_doors_decision  # refuses protected kinds (a_members_direct_call_carries_the_fields_in_its_own_bytes_and_the_gateway_s_raw_door_refuses_the_kind); a companion's door kind runs that door's decision (Y11)
 src/agent/service_handle.rs::rpc_call                | bytes      | a_members_direct_call_carries_the_fields_in_its_own_bytes_and_the_gateway_s_raw_door_refuses_the_kind
 src/agent/service_handle.rs::bulk_call               | bytes      | -  # the bulk transport stages the bytes unaltered; no test with the fields
 src/agent/service_handle.rs::scatter_gather          | bytes      | -  # fan-out of rpc_call; no test with the fields
-src/agent/http/mesh.rs::gw_scatter                   | refused    | -  # refuses protected kinds as gw_rpc_call does; no causal test
+src/agent/http/mesh.rs::gw_scatter                   | ruled      | a_raw_call_of_a_doors_kind_runs_that_doors_decision  # refuses protected kinds as gw_rpc_call does; a companion's door kind runs that door's decision once (Y11)
 src/agent/http/signals.rs::gw_signal_emit            | ruled      | every_door_holds_work_extending_an_unresolved_closure_and_admits_independent_work  # not governed work unless an exposure rule selects `signal.emit` (Y11)
 src/agent/http/mesh.rs::gw_mailbox_deliver           | ruled      | every_door_holds_work_extending_an_unresolved_closure_and_admits_independent_work  # `mailbox.deliver`
 src/agent/http/mesh.rs::gw_shard_emit                | ruled      | every_door_holds_work_extending_an_unresolved_closure_and_admits_independent_work  # `shard.emit`
-src/agent/http/overlay.rs::gw_overlay_emit_reliable  | ruled      | every_door_holds_work_extending_an_unresolved_closure_and_admits_independent_work  # `overlay.emit_reliable`
+src/agent/http/overlay.rs::gw_overlay_emit_reliable  | ruled      | every_door_holds_work_extending_an_unresolved_closure_and_admits_independent_work  # `overlay.emit_reliable`, and a companion's door kind's own decision (a_raw_call_of_a_doors_kind_runs_that_doors_decision)
 # ── the take, claim and emit doors (adopter-surface Y11; scanned: the preflight call in `door::decide`, the verbs named)
 src/agent/door.rs::decide                            | ruled      | a_door_no_rule_selects_is_untouched  # every Y11 door decides here; selected, its record carries the fields (a_selected_door_records_the_causal_fields_under_its_own_point)
 src/agent/door.rs::emit_in                           | ruled      | every_door_holds_work_extending_an_unresolved_closure_and_admits_independent_work
@@ -58,3 +58,9 @@ mycelium-tuple-space/src/http.rs::gw_take            | ruled      | every_door_h
 mycelium-tuple-space/src/http.rs::gw_take_by_key     | ruled      | every_door_holds_work_extending_an_unresolved_closure_and_admits_independent_work
 mycelium-blackboard/src/lib.rs::claim_in             | ruled      | every_door_holds_work_extending_an_unresolved_closure_and_admits_independent_work
 mycelium-blackboard/src/http.rs::gw_claim            | ruled      | every_door_holds_work_extending_an_unresolved_closure_and_admits_independent_work
+src/agent/door.rs::decide_raw                        | ruled      | a_raw_call_of_a_doors_kind_runs_that_doors_decision  # a raw call of a registered door kind
+src/agent/door.rs::exposure_door                     | ruled      | every_door_holds_work_extending_an_unresolved_closure_and_admits_independent_work  # the companions' route entry
+src/agent/door.rs::exposure_door_as_node             | ruled      | every_door_holds_work_extending_an_unresolved_closure_and_admits_independent_work  # the companions' Rust-verb entry
+src/agent/door.rs::emit_ordered_in                   | ruled      | every_door_holds_work_extending_an_unresolved_closure_and_admits_independent_work
+src/agent/door.rs::emit_async_in                     | ruled      | every_door_holds_work_extending_an_unresolved_closure_and_admits_independent_work
+mycelium-tuple-space/src/http.rs::take_door          | ruled      | every_door_holds_work_extending_an_unresolved_closure_and_admits_independent_work  # the take routes' shared decision

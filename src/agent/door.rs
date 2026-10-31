@@ -15,6 +15,14 @@
 //! *Not built, stated:* carrying lineage onward; and enforcement at these doors whenever an evaluator is attached
 //! without a rule selecting them.
 //!
+//! **Never decided, stated** (#708's review, finding 2): the plain verbs — `MeshHandle::{emit, emit_ordered,
+//! emit_async}`, `ServiceHandle::{deliver_event, emit_reliable, emit_sharded, rpc_call, scatter_gather, bulk_call}`,
+//! `TupleSpace::{take, take_by_key}`, `Blackboard::claim` — and a hosted WASM component's `mesh.emit`
+//! (`mycelium-wasm-host`), and a remote worker's take or claim where the primary serves it: each door is decided at the
+//! node the work starts on, by its `*_in` verb or its gateway route. A raw gateway call of a companion's registered door
+//! kind (`rpc/call`, `scatter`, `overlay/emit_reliable`) runs that door's decision ([`decide_raw`]). A parked take is
+//! decided before it waits, so its check-then-act window is the park time.
+//!
 //! **The doors' operations** are [`DOOR_OPERATIONS`]. None may be an [`EXEMPT_OPERATIONS`] name, and a door asking
 //! under an exempt name is refused by name ([`DoorRefusal::EXEMPT_NAME`]) — the companions' side of Y5's collision
 //! refusal (`protected_rpc_kinds` at start): a door named as a reconciler's move would pass every rule unheld.
@@ -42,7 +50,8 @@ pub const OP_SHARD_EMIT: &str = "shard.emit";
 pub const DOOR_OPERATIONS: &[&str] =
     &[OP_TUPLE_TAKE, OP_TUPLE_TAKE_BY_KEY, OP_BB_CLAIM, OP_SIGNAL_EMIT, OP_MAILBOX_DELIVER, OP_OVERLAY_EMIT_RELIABLE, OP_SHARD_EMIT];
 
-/// The resource a take or claim door names: `tuple:{ns}/{stage}`, `bb:{ns}/{kind}`.
+/// The resource a take door names: `tuple:{ns}/{stage}` (`space_resource("tuple", ns, stage)`). A claim door names
+/// its board alone, `bb:{ns}`: a predicate names no single resource.
 pub fn space_resource(space: &str, ns: &str, name: &str) -> String {
     format!("{space}:{ns}/{name}")
 }
@@ -51,6 +60,10 @@ pub fn space_resource(space: &str, ns: &str, name: &str) -> String {
 pub fn signal_resource(kind: &str) -> String {
     format!("signal:{kind}")
 }
+
+/// How a companion names the resource of a raw call of its door's kind, from the call's payload (`tuple:{ns}/{stage}`
+/// from a take request) — [`GossipAgent::register_door_kind`](crate::GossipAgent::register_door_kind).
+pub type DoorKindResource = Arc<dyn Fn(&[u8]) -> String + Send + Sync>;
 
 /// Why a door refused: the gateway's machine-readable reason (`action_denied`, `not_established`,
 /// `request_malformed`, …, or [`EXEMPT_NAME`](Self::EXEMPT_NAME)) and the sentence. Nothing was taken or emitted.
@@ -143,13 +156,13 @@ pub(crate) enum DoorActor<'a> {
     Never(std::marker::PhantomData<&'a ()>),
 }
 
-/// Whether an exposure rule selects this request — the opt-in. No clock, no draw: an attached policy, the profile's
-/// rung and the rules' patterns only.
+/// Whether an exposure policy could select anything on this node: one is attached and the profile is not `legacy`.
+/// No clock, no draw, no allocation — what an unselected door pays. `Some(shadow)`: the rung does not enforce.
 #[cfg(all(feature = "gateway", feature = "tls"))]
-fn selected(ctx: &super::TaskCtx, actor: &str, operation: &str, resource: &str) -> bool {
-    let Some(policy) = ctx.exposure_policy.get() else { return false };
+fn live(ctx: &super::TaskCtx) -> Option<(&super::exposure::ExposurePolicy, bool)> {
+    let policy = ctx.exposure_policy.get()?;
     let profile = crate::control::Profile::from_u8(ctx.control_profile.load(std::sync::atomic::Ordering::Acquire));
-    profile != crate::control::Profile::Legacy && !policy.selecting(actor, operation, resource).is_empty()
+    (profile != crate::control::Profile::Legacy).then(|| (policy.as_ref(), !profile.enforces()))
 }
 
 /// Decide one door. `params` is the request's payload as the gateway reads it (`_meta` under it).
@@ -171,17 +184,24 @@ pub(crate) async fn decide(
     }
     #[cfg(all(feature = "gateway", feature = "tls"))]
     {
-        use super::http::{ae_preflight, Preflight};
-        let node = super::ResolvedPrincipal::node(&ctx.node_id);
+        use super::http::{ae_preflight_door, Preflight};
+        // The opt-in, before anything is built: no policy, or `legacy`, and the door is untouched.
+        let Some((policy, shadow)) = live(ctx) else { return Ok(DoorPass::untouched()) };
+        let node;
         let caller = match actor {
             DoorActor::Caller(c) => c,
-            DoorActor::Node => Some(&node),
+            DoorActor::Node => {
+                node = super::ResolvedPrincipal::node(&ctx.node_id);
+                Some(&node)
+            }
         };
         let principal = caller.map_or(super::gateway_caller::PRINCIPAL_ANONYMOUS, |c| c.principal());
-        if !selected(ctx, principal, operation, resource) {
+        if policy.selecting(principal, operation, resource).is_empty() {
             return Ok(DoorPass::untouched());
         }
-        match ae_preflight(ctx, caller, operation, resource, &serde_json::json!({}), params, enforcement_point).await {
+        // Selected: the evaluator and the exposure gate decide. On the shadow rung the door admits what the evaluator
+        // refuses, the refusal recorded (#708's review, finding 3) — `observe` holds nothing.
+        match ae_preflight_door(ctx, caller, operation, resource, params, enforcement_point, shadow).await {
             Preflight::Inert => Ok(DoorPass::untouched()),
             p @ Preflight::Proceed { .. } => Ok(DoorPass { decided: Some((Arc::clone(ctx), p)) }),
             Preflight::Refuse(r) => Err(DoorRefusal { reason: r.reason().to_string(), message: r.to_string() }),
@@ -207,7 +227,48 @@ pub(crate) fn point(gateway: bool, door: &str) -> String {
     if gateway { format!("gateway:{door}") } else { format!("node:{door}") }
 }
 
+/// The door a raw call of `kind` reaches (#708's review, finding 1): its operation and resource, when a companion
+/// registered the kind. `None` for every other kind, and in a build without `gateway` and `tls`.
+#[cfg(feature = "gateway")]
+pub(crate) fn door_kind(ctx: &super::TaskCtx, kind: &str, payload: &[u8]) -> Option<(&'static str, String)> {
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    {
+        let kinds = ctx.door_kinds.pin();
+        let (operation, resource_of) = kinds.get(kind)?;
+        Some((*operation, resource_of(payload)))
+    }
+    #[cfg(not(all(feature = "gateway", feature = "tls")))]
+    {
+        let _ = (ctx, kind, payload);
+        None
+    }
+}
+
+/// A raw door — `POST /gateway/rpc/call`, `/gateway/scatter`, `/gateway/overlay/emit_reliable` — of a registered door
+/// kind runs that door's decision, selected or untouched exactly as the door is (#708's review, finding 1). `Ok(None)`:
+/// not a door's kind.
+#[cfg(feature = "gateway")]
+pub(crate) async fn decide_raw(
+    ctx: &Arc<super::TaskCtx>, caller: Option<&super::ResolvedPrincipal>, kind: &str, payload: &[u8], params: &serde_json::Value,
+    enforcement_point: &str,
+) -> Result<Option<DoorPass>, DoorRefusal> {
+    let Some((operation, resource)) = door_kind(ctx, kind, payload) else { return Ok(None) };
+    decide(ctx, DoorActor::Caller(caller), operation, &resource, params, enforcement_point).await.map(Some)
+}
+
 impl crate::GossipAgent {
+    /// **A companion's door kind** (adopter-surface Y11): the RPC kind its take or claim door serves, decided under
+    /// `operation` on the resource `resource_of` reads from a call's payload. A raw call of the kind — `POST
+    /// /gateway/rpc/call`, `/gateway/scatter`, `/gateway/overlay/emit_reliable` — then runs that door's decision,
+    /// selected or untouched exactly as the door is. `TupleSpace` and `Blackboard` register theirs; a member's own
+    /// `ServiceHandle::rpc_call` of the kind is not decided. A no-op without `gateway` and `tls`.
+    pub fn register_door_kind(&self, kind: impl Into<Arc<str>>, operation: &'static str, resource_of: DoorKindResource) {
+        #[cfg(all(feature = "gateway", feature = "tls"))]
+        self.task_ctx.door_kinds.pin().insert(kind.into(), (operation, resource_of));
+        #[cfg(not(all(feature = "gateway", feature = "tls")))]
+        let _ = (kind.into(), operation, resource_of);
+    }
+
     /// **A take, claim or emit door, decided** (adopter-surface Y11) — for a door this node's own code opens, its
     /// actor this node (`node:{id}`): untouched (an empty [`DoorPass`]) unless an exposure rule selects `operation` on
     /// `resource`; selected, the action evaluator and the exposure gate decide on `causal`, recorded under
@@ -239,6 +300,28 @@ impl crate::GossipAgent {
         let kind: Arc<str> = kind.into();
         let pass = self.exposure_door_as_node(OP_SIGNAL_EMIT, &signal_resource(&kind), causal, "signal/emit").await?;
         let ok = self.mesh().emit(kind, scope, payload.into());
+        pass.finish(if ok { DoorOutcome::Completed } else { DoorOutcome::Unknown }).await;
+        Ok(ok)
+    }
+
+    /// [`MeshHandle::emit_ordered`](crate::MeshHandle::emit_ordered) through the emit door, as [`emit_in`](Self::emit_in).
+    pub async fn emit_ordered_in(
+        &self, kind: impl Into<Arc<str>>, scope: crate::SignalScope, payload: impl Into<bytes::Bytes>, causal: &CausalFields,
+    ) -> Result<bool, DoorRefusal> {
+        let kind: Arc<str> = kind.into();
+        let pass = self.exposure_door_as_node(OP_SIGNAL_EMIT, &signal_resource(&kind), causal, "signal/emit").await?;
+        let ok = self.mesh().emit_ordered(kind, scope, payload.into());
+        pass.finish(if ok { DoorOutcome::Completed } else { DoorOutcome::Unknown }).await;
+        Ok(ok)
+    }
+
+    /// [`MeshHandle::emit_async`](crate::MeshHandle::emit_async) through the emit door, as [`emit_in`](Self::emit_in).
+    pub async fn emit_async_in(
+        &self, kind: impl Into<Arc<str>>, scope: crate::SignalScope, payload: impl Into<bytes::Bytes>, causal: &CausalFields,
+    ) -> Result<bool, DoorRefusal> {
+        let kind: Arc<str> = kind.into();
+        let pass = self.exposure_door_as_node(OP_SIGNAL_EMIT, &signal_resource(&kind), causal, "signal/emit").await?;
+        let ok = self.mesh().emit_async(kind, scope, payload.into()).await;
         pass.finish(if ok { DoorOutcome::Completed } else { DoorOutcome::Unknown }).await;
         Ok(ok)
     }

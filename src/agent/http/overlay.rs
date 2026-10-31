@@ -899,22 +899,20 @@ pub(super) async fn gw_overlay_emit_reliable(
         Ok(p) => p,
         Err(r) => return crate::agent::door::refusal_response(&r),
     };
-    use crate::agent::door::DoorOutcome;
-    match gateway_caller::gateway_rpc_call(&ctx.agent_ctx, caller.as_ref(), target, kind, payload, timeout).await {
-        Ok(_) => {
-            pass.finish(DoorOutcome::Completed).await;
-            Json(json!({ "ack": "acknowledged" })).into_response()
-        }
-        Err(GatewayDispatchError::Rpc(super::rpc::RpcError::Timeout)) => {
-            pass.finish(DoorOutcome::Unknown).await;
-            Json(json!({ "ack": "timeout" })).into_response()
-        }
-        Err(e) => {
-            pass.finish(match e {
-                GatewayDispatchError::Rpc(_) => DoorOutcome::Unknown,
-                _ => DoorOutcome::Nothing,
-            }).await;
-            dispatch_refused(e)
-        }
+    // #708's review, finding 1: a reliable emit of a companion's door kind runs that door's decision as well.
+    let kind_door = match crate::agent::door::decide_raw(&ctx.agent_ctx, caller.as_ref(), &kind, &payload, &params, "gateway:overlay/emit_reliable").await {
+        Ok(p) => p,
+        Err(r) => return crate::agent::door::refusal_response(&r),
+    };
+    let dispatched = gateway_caller::gateway_rpc_call(&ctx.agent_ctx, caller.as_ref(), target, kind, payload, timeout).await;
+    let outcome = super::mesh::door_outcome(&dispatched);
+    pass.finish(outcome).await;
+    if let Some(p) = kind_door {
+        p.finish(outcome).await;
+    }
+    match dispatched {
+        Ok(_) => Json(json!({ "ack": "acknowledged" })).into_response(),
+        Err(GatewayDispatchError::Rpc(super::rpc::RpcError::Timeout)) => Json(json!({ "ack": "timeout" })).into_response(),
+        Err(e) => dispatch_refused(e),
     }
 }

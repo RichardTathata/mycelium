@@ -824,6 +824,10 @@ pub(crate) struct TaskCtx {
     /// What the exposure policy judged, held and would have held (Y5).
     #[cfg(all(feature = "gateway", feature = "tls"))]
     pub(crate) exposure_counters: exposure::ExposureCounters,
+    /// The RPC kinds a companion's take or claim door serves (adopter-surface Y11), set via
+    /// [`GossipAgent::register_door_kind`]: a raw `rpc/call`, `scatter` or reliable emit of one runs that door's decision.
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    pub(crate) door_kinds: papaya::HashMap<Arc<str>, (&'static str, door::DoorKindResource)>,
     /// Whether this node's fleet-tally heartbeat is running (row K2) — started by its first permit under a
     /// [`HistoryScope::FleetTally`] rule, stopped at shutdown.
     #[cfg(all(feature = "gateway", feature = "tls"))]
@@ -1438,6 +1442,8 @@ impl GossipAgent {
             exposure_source: std::sync::OnceLock::new(),
             #[cfg(all(feature = "gateway", feature = "tls"))]
             exposure_counters: exposure::ExposureCounters::default(),
+            #[cfg(all(feature = "gateway", feature = "tls"))]
+            door_kinds: papaya::HashMap::new(),
             #[cfg(all(feature = "gateway", feature = "tls"))]
             ae_tally_heartbeat: std::sync::atomic::AtomicBool::new(false),
             #[cfg(all(feature = "gateway", feature = "tls"))]
