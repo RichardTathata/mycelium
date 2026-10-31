@@ -459,10 +459,16 @@ impl SpawnError {
     }
 }
 
+/// The longest a stalled client stream's node stands down, whatever the period: ten minutes, so a daily or weekly
+/// schedule is not stood down for days.
+pub const MAX_STAND_DOWN_MS: u64 = 600_000;
+
 /// How long a stalled client stream's node stands down: ten periods, and at least twice the warm-up, so a peer's
-/// candidacy is heard, warms up and holds before this node is a candidate again.
+/// candidacy is heard, warms up and holds before this node is a candidate again — at most [`MAX_STAND_DOWN_MS`]. It
+/// stands down only while another candidate is in its view; the sole candidate keeps holding, so a late answer costs
+/// that one slot.
 pub fn stand_down_ms(period_ms: u64) -> u64 {
-    (10 * period_ms).max(2 * warm_up_ms(period_ms))
+    (10 * period_ms).max(2 * warm_up_ms(period_ms)).min(MAX_STAND_DOWN_MS)
 }
 
 /// The schedule loop, on the node `ctx` belongs to: [`GossipAgent::run_schedule`]'s body, shared with the gateway's
@@ -581,14 +587,18 @@ impl Runner {
     {
         let s = self.schedule.clone();
         if let Some(until) = self.stood_down_until_ns {
-            if mycelium_core::sim_seam::mono_now_ns() < until {
+            // Only while another candidate is in view: alone, standing down would run nothing at all.
+            let others = self.caps.resolve(&CapFilter::new(CANDIDATE_NS, s.id.as_ref())).iter().filter(|(n, _)| *n != self.me).count();
+            if others > 0 && mycelium_core::sim_seam::mono_now_ns() < until {
                 self.candidacy = None;
                 self.holding = None;
                 return self.say(OutcomeKind::NoAction, "stood_down", vec![InputSnapshot::new(
-                    "a run of this node's client overran its period: its candidacy is withdrawn for the stand-down",
-                    format!("stand_down_ms={}", stand_down_ms(s.period_ms)), Provenance::Local)]);
+                    "a run of this node's client overran its period while another candidate was in view: its candidacy is withdrawn for the stand-down",
+                    format!("stand_down_ms={} other_candidates={others}", stand_down_ms(s.period_ms)), Provenance::Gossiped)]);
             }
+            // Back from a stand-down: a fresh warm-up, so the peer that held meanwhile is heard before this node holds.
             self.stood_down_until_ns = None;
+            self.started_ns = mycelium_core::sim_seam::mono_now_ns();
         }
         let now = mycelium_core::sim_seam::wall_now_ms();
         let eligible = self.caps.resolve(&s.holders).iter().any(|(n, _)| *n == self.me);
@@ -722,7 +732,14 @@ impl Runner {
                 }
                 None => {
                     self.failures.fetch_add(1, Ordering::Relaxed);
-                    let then = if self.options.stand_down_on_stall {
+                    // Read only for a client's loop: an application's loop makes no read here, so a recording of one
+                    // replays draw for draw.
+                    let others = if self.options.stand_down_on_stall {
+                        self.caps.resolve(&CapFilter::new(CANDIDATE_NS, s.id.as_ref())).iter().filter(|(n, _)| *n != self.me).count()
+                    } else {
+                        0
+                    };
+                    let then = if self.options.stand_down_on_stall && others > 0 {
                         self.stood_down_until_ns = Some(mycelium_core::sim_seam::mono_now_ns()
                             .saturating_add(stand_down_ms(s.period_ms).saturating_mul(1_000_000)));
                         format!("this node stands down for {} ms, so another candidate holds", stand_down_ms(s.period_ms))

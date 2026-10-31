@@ -1902,7 +1902,9 @@
         "a_node_outside_the_band_tells_its_client_not_eligible",
         "a_client_declaring_an_applications_id_another_way_does_not_stop_it",
         "a_client_copying_an_applications_declaration_cannot_take_its_slots",
-        "two_principals_schedules_of_one_id_run_independently"
+        "two_principals_schedules_of_one_id_run_independently",
+        "a_sole_candidate_does_not_stand_down_for_one_missed_answer",
+        "one_token_through_two_gateways_sharing_an_issuer_is_one_schedule"
       ],
       "trace": {
         "partial": "every run, failure and overrun; a change to not_holder, not_eligible, warming_up, last_ahead, ignored_last_far_ahead, stood_down or declaration_mismatch, once; a tick that changes nothing records nothing"

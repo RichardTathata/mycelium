@@ -85,7 +85,10 @@ the gap decided as run once or skipped, the run naming the decision its parent) 
   — so its ring, advertisements, `sched/` entries and trace are its own. A client cannot reach an application's
   `run_schedule` of the same id (an application id cannot hold `~`), nor another principal's. **Clients that share a
   principal share a namespace**: on an open gateway every client is `anonymous`, and every client presenting one bearer
-  or one scoped token is one principal. The client sees its own id in each run's `schedule`; the run's `operation_id`
+  or one scoped token is one principal. **A static token needs a fleet-wide issuer:** its principal is
+  `token:{issuer}/{name}`, the issuer `gateway_identity_issuer` or, unset, the gateway node's own id — so the stream
+  refuses a token principal while it is unset (422 `issuer_not_fleet_wide`); set the same issuer on every gateway. OIDC
+  principals and an open gateway's `anonymous` need nothing. The client sees its own id in each run's `schedule`; the run's `operation_id`
   is the scoped key `sched/{id}~{principal}/{slot}`, so two principals' runs of one slot are two effects.
 - **Through the gateway, a run the client never acknowledged is not a run.** The stream closed or the client never
   answered: the run is traced `unacknowledged` (or `work_overran` past its period), the slot is not recorded, and
@@ -93,7 +96,11 @@ the gap decided as run once or skipped, the run naming the decision its parent) 
   run under the policy. A client that ran the work and lost its answer can run the slot twice: the key makes that
   one effect at a destination that deduplicates, as for two holders. A client that stays connected and stalls — its
   run overruns the period — makes its node **stand down**: candidacy and holding withdrawn for ten periods (at least
-  twice the warm-up, `stood_down`; `schedule::stand_down_ms`), so another node's client takes the slots. A stream whose node runs nothing says
+  twice the warm-up, at most ten minutes — `schedule::stand_down_ms`, `MAX_STAND_DOWN_MS` — `stood_down`), so another
+  node's client takes the slots; only while another candidate is in its view (the sole candidate keeps holding, so a
+  late answer costs that slot), and back from it the node warms up again before it may hold. A run's deadline is one
+  period, so a stalled daily schedule still loses that day's slot. A run id's random part comes from a non-cryptographic
+  RNG: the principal binding, not the id, is what keeps another client from answering a run. A stream whose node runs nothing says
   why in a `status` event (`not_eligible` for a node outside `holders`); `onStatus` / `on_status` surface it. A unit
   cannot carry a schedule
   (`POST /gateway/units/declare` refuses one, 422, naming the route).

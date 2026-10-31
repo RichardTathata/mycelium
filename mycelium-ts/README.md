@@ -260,9 +260,11 @@ await agent.runSchedule(
 Answer every run within one period (`runSchedule` does: resolved is done, thrown is the work's failure). A run you
 never answer — the stream closed, the process went away — is traced `unacknowledged` and its slot is not recorded, so
 the next holder decides it. A second answer, or one from another principal, throws `UnservedRunError`; a declaration
-the loader refuses, or an id the node already runs, throws `ScheduleRefusedError`. In `runSchedule` an answer that
+the loader refuses, or an id the node already runs, throws `ScheduleRefusedError`. A static-token gateway needs `gateway_identity_issuer`
+set fleet-wide, or the stream is refused (`ScheduleRefusedError`, `issuer_not_fleet_wide`). In `runSchedule` an answer that
 does not land (refused, or lost to the network) is a missed run, given to `onAckError`, and the schedule goes on. A
-client that stays connected but stalls makes its node stand down for ten periods so another node holds. `onStatus` is
+client that stays connected but stalls makes its node stand down for ten periods (at most ten minutes) so another node
+holds — only while another candidate is in view. `onStatus` is
 told why a stream hands out nothing (`not_eligible`: the node does not match `holders`; `warming_up`; `not_holder`;
 `stood_down`). A partition runs a slot on each side under one key: carry `operationId` to a destination that
 deduplicates. Values are written as TOML basic strings (`tomlBasicString`).

@@ -133,7 +133,9 @@ export function scheduleToml(decl: ScheduleDeclaration): string {
 /**
  * `value` as a TOML basic string (TOML 1.0 § String): `"` and `\\` escaped, the controls TOML forbids raw (U+0000–U+001F
  * and U+007F) as their short escape or `\\uXXXX`, every other character — a non-BMP one included — written as itself.
- * Not JSON's escaping: `JSON.stringify` leaves U+007F raw, which TOML refuses.
+ * Not JSON's escaping: `JSON.stringify` leaves U+007F raw, which TOML refuses. A lone surrogate is written raw, which
+ * no TOML reader accepts; every value it writes for the gateway is ASCII-checked server-side, so such a value is
+ * refused there either way.
  */
 export function tomlBasicString(value: string): string {
   const short: Record<string, string> = { "\b": "\\b", "\t": "\\t", "\n": "\\n", "\f": "\\f", "\r": "\\r", '"': '\\"', "\\": "\\\\" };

@@ -2229,7 +2229,8 @@ An SDK agent can now run declared recurring work: `GET /gateway/schedules/run?to
 a candidate in the schedule's holder band while the stream is open and hands the client each run, answered with
 `POST /gateway/schedules/ack` ([feature page](../features/recurring-work.md)). A client's schedule runs under `{id}~{principal}` — its
 principal's, so it reaches no application's schedule and no other principal's, and its runs' `operation_id` is
-`sched/{id}~{principal}/{slot}`. Both routes need the new scope `schedule:run`; a scoped token without it is refused `403` naming it, and `mesh:serve` does not open them. A unit
+`sched/{id}~{principal}/{slot}`. A static-token principal needs `gateway_identity_issuer` set — the same on every
+gateway — or the stream answers `422 issuer_not_fleet_wide`. Both routes need the new scope `schedule:run`; a scoped token without it is refused `403` naming it, and `mesh:serve` does not open them. A unit
 still cannot carry a schedule: `POST /gateway/units/declare` answers `422 schedule section` as before, and its
 `detail` now names the run stream instead of saying no route runs one. (`sched.run`, the rule behind declared
 recurring work, is itself in no release yet: its reasons `unacknowledged` — a run handed to a client that never
@@ -2237,5 +2238,6 @@ answered, its slot not recorded — and `stood_down` — a stalled client's node
 it, so no released consumer matches them.) In `mycelium-ts`, `loadEveAgent` now loads an Eve
 `schedules/` directory whose files' crons are a period and a phase, where it refused the directory by name before,
 and refuses by name each schedule it cannot run (another cron, a nested schedule, a key it does not read).
-**Migration:** give a token that runs schedules `schedule:run`; an Eve agent whose `schedules/` was refused now loads, and its schedules run only when
+**Migration:** give a token that runs schedules `schedule:run`, and set `gateway_identity_issuer` on every gateway it
+uses; an Eve agent whose `schedules/` was refused now loads, and its schedules run only when
 `runEveSchedules` is called.

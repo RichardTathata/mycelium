@@ -1104,7 +1104,10 @@ that stays connected and stalls makes its node stand down (`stood_down`, ten per
 and a stream that hands out nothing says why (`status`: `not_eligible`, …). A client's schedule is its principal's
 *(rev 0.18, the maintainer's decision on #709's review)*: the gateway runs it as `{id}~{principal}` (the principal it
 derived, percent-encoded; `~` is refused in every declared id), so a client reaches neither an application's
-`run_schedule` of the same id nor another principal's; clients sharing a principal share a namespace. The verbs
+`run_schedule` of the same id nor another principal's; clients sharing a principal share a namespace; a static-token principal needs a fleet-wide `gateway_identity_issuer`,
+or the stream answers 422 `issuer_not_fleet_wide` *(rev 0.18, the maintainer's decision on #709's second review)*.
+The stand-down is ten periods, at most ten minutes, only while another candidate is in view, followed by a fresh
+warm-up. The verbs
 are `scheduleRuns` / `scheduleAck` / `runSchedule` (`mycelium-ts`) and `schedule_runs` / `schedule_ack`
 (`mycelium-py`). The Eve loader reads `schedules/<name>.md` and `.ts`; `cronAsPeriod` reads a cron as a period and a
 phase in UTC when it is one, and `runEveSchedules` runs them as `<agent>.<name>`.
@@ -1115,7 +1118,9 @@ of a client's schedule (the node's loop ticks through the seams, the client's wo
 run — a client that ran the work and lost its answer runs the slot again under the same key, which only a
 deduplicating destination makes one effect, as for two holders; an Eve schedule's `to` (channels are not built) and a
 Markdown schedule's agent turn (the caller supplies `onMarkdown`); a nested Eve schedule (`billing/sweep`), refused
-by name because a schedule id is one key segment; a schedule class in `mycelium test --faults`.
+by name because a schedule id is one key segment; a schedule class in `mycelium test --faults`; a reconnect —
+`runEveSchedules` closes every schedule when one stream is lost; a cryptographic run id (the principal binding is the
+authority); a static-token principal without a fleet-wide issuer.
 
 ### Still open
 

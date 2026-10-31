@@ -294,7 +294,8 @@ async for run in agent.schedule_runs(decl):
 Answer every run within one period. A run you never answer — the stream closed, the process went away — is traced
 `unacknowledged` and its slot is not recorded, so the next holder decides it. A second answer, or one from another
 principal, raises `UnservedRunError`; a declaration the loader refuses, or an id the node already runs, raises
-`ScheduleRefusedError`. A client that stays connected but stalls makes its node stand down for ten periods so another
+`ScheduleRefusedError` — as is a static token on a gateway without a fleet-wide `gateway_identity_issuer`
+(`issuer_not_fleet_wide`). A client that stays connected but stalls makes its node stand down for ten periods so another
 node holds; `on_status` is told why a stream hands out nothing (`not_eligible`: the node does not match `holders`;
 `warming_up`; `not_holder`; `stood_down`). A partition runs a slot on each side under one key: carry `operation_id` to
 a destination that deduplicates. Values are written as TOML basic strings (`toml_basic_string`).

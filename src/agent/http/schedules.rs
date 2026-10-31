@@ -15,14 +15,26 @@
 //! namespace. The client sees its own id in `schedule`; a run's `operation_id` is the scoped key
 //! `sched/{id}~{principal}/{slot}`, so two principals' runs of one slot are two effects.
 //!
+//! **A static-token principal needs a fleet-wide issuer.** A token's principal is `token:{issuer}/{name}`, and the
+//! issuer is `gateway_identity_issuer` or, unset, the gateway node's own id — so one bearer would be a different
+//! principal, and so a different schedule, at every gateway. The stream refuses a `token:` principal while
+//! `gateway_identity_issuer` is unset (422 `issuer_not_fleet_wide`); set the same issuer on every gateway. An OIDC
+//! principal is qualified by its IdP issuer and an open gateway's `anonymous` is the same everywhere: both work as is.
+//!
+//! **A run id's random part** is drawn on the seam (`fastrand` in a shipped build), which is not a cryptographic RNG: the
+//! principal binding is what keeps another client from answering a run, and the id only keeps a client of the same
+//! principal from answering one it was not handed.
+//!
 //! **A run the client never acknowledged is not a run.** If the stream closes while a run is handed out, or the client
 //! never answers, the run is traced `unacknowledged` (or `work_overran` past its period), the slot is not recorded,
 //! and this node withdraws its holding: the next holder — another client's node, or this one when a client comes
 //! back — decides the slot as one not yet run, on time or as a missed run under the policy, traced with its reason.
 //! Closing the stream ends the loop and withdraws the candidacy. **A client that stays connected and stalls** — its run
 //! overruns the period — makes this node **stand down**: the holding and the candidacy are withdrawn for
-//! [`stand_down_ms`](crate::schedule::stand_down_ms) (ten periods, at least twice the warm-up), so another node's
-//! candidate holds the slots in the meantime.
+//! [`stand_down_ms`](crate::schedule::stand_down_ms) (ten periods, at least twice the warm-up, at most ten minutes), so
+//! another node's candidate holds the slots in the meantime — only while another candidate is in its view: the sole
+//! candidate keeps holding, and a late answer costs that slot. Back from a stand-down, the node warms up again before
+//! it may hold.
 //!
 //! **What the client is told.** Besides its runs, the stream sends a `status` event each time what the loop says when it
 //! runs nothing changes — `not_eligible` (this node does not match `holders`), `warming_up`, `not_holder`,
@@ -93,7 +105,8 @@ impl Drop for ClearRun {
 /// "operation_id"}`, and a `status` (`{"schedule", "reason"}`) each time what it says when it runs nothing changes.
 /// Answer each run with `POST /gateway/schedules/ack`. Refused: an unreadable query or TOML, or a section other than
 /// `[[schedule]]` (400, naming it); not exactly one `[[schedule]]`, or a declaration the unit-file loader refuses
-/// (422, by name); an id this node already runs (409 `schedule_running`). Scope `schedule:run`.
+/// (422, by name); a static-token principal while `gateway_identity_issuer` is unset (422 `issuer_not_fleet_wide`); an
+/// id this node already runs (409 `schedule_running`). Scope `schedule:run`.
 pub(super) async fn gw_schedule_run(
     State(ctx): State<Arc<HttpCtx>>,
     caller: Option<Extension<ResolvedPrincipal>>,
@@ -113,6 +126,16 @@ pub(super) async fn gw_schedule_run(
     let principal: Arc<str> = Arc::from(
         caller.map(|Extension(c)| c.principal).unwrap_or_else(|| gateway_caller::PRINCIPAL_ANONYMOUS.to_string()).as_str(),
     );
+    // A static token's principal carries this gateway's issuer: without a fleet-wide one it names the caller
+    // differently at every gateway, and one bearer would be one schedule per gateway.
+    if principal.starts_with("token:") && ctx.agent_ctx.config.gateway_identity_issuer.is_none() {
+        return (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({
+            "error": "issuer_not_fleet_wide",
+            "reason": "issuer_not_fleet_wide",
+            "detail": "a static-token principal is qualified by this gateway's issuer, which is unset (this node's own id): \
+                       set the same gateway_identity_issuer on every gateway, or use OIDC, so one credential is one schedule fleet-wide",
+        }))).into_response();
+    }
     let scope = Arc::clone(&principal);
     // The stream's channel: one event at a time, so a run is handed out only once the one before it has been taken.
     let (tx, rx) = tokio::sync::mpsc::channel::<Event>(1);

@@ -265,6 +265,7 @@ async fn the_stream_needs_schedule_run_and_a_run_is_answered_by_its_own_principa
     cfg.bind_port = gossip_port;
     cfg.http_port = Some(http_port);
     cfg.http_addr = "127.0.0.1".to_string();
+    cfg.gateway_identity_issuer = Some("fleet.example".into());
     cfg.gateway_scoped_tokens = vec![
         crate::GatewayToken { token: "sched-1".into(), scopes: vec!["schedule:run".into()] },
         crate::GatewayToken { token: "sched-2".into(), scopes: vec!["schedule:run".into()] },
@@ -375,14 +376,20 @@ async fn two_clients_under_a_partition_are_handed_one_key_per_slot() {
 }
 
 /// The 409 is the loop's own check, so two streams racing for one id under one principal are told `schedule_running`,
-/// never `invalid schedule`; and an application's `run_schedule` of the same id is no conflict at all (its id space is
-/// not a client's).
-#[tokio::test]
+/// never `invalid schedule`: both are started together on a multi-thread runtime, past a barrier, so their handlers run
+/// at once; and an application's `run_schedule` of the same id is no conflict at all (its id space is not a client's).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_id_the_node_already_runs_is_a_409_from_the_loops_own_check() {
     let (agent, _sink, base, _band) = node(vec![], alloc_port()).await;
     let _app = agent.run_schedule(&app_decl("app", 60, ("ledger", "closer")), |_run| async { Ok(()) }).unwrap();
     let toml = schedule_toml("app", 60, "skip");
-    let (one, two) = tokio::join!(Stream::open(&base, &toml), Stream::open(&base, &toml));
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let racer = |base: String, toml: String, barrier: Arc<tokio::sync::Barrier>| tokio::spawn(async move {
+        barrier.wait().await;
+        Stream::open(&base, &toml).await
+    });
+    let (one, two) = (racer(base.clone(), toml.clone(), Arc::clone(&barrier)), racer(base.clone(), toml.clone(), Arc::clone(&barrier)));
+    let (one, two) = (one.await.unwrap(), two.await.unwrap());
     let mut statuses = [one.status().as_u16(), two.status().as_u16()];
     statuses.sort();
     assert_eq!(statuses, [200, 409], "one stream runs the id, the racer is told it is running");
@@ -541,6 +548,7 @@ async fn two_principals_schedules_of_one_id_run_independently() {
     cfg.bind_port = gossip_port;
     cfg.http_port = Some(http_port);
     cfg.http_addr = "127.0.0.1".to_string();
+    cfg.gateway_identity_issuer = Some("fleet.example".into());
     cfg.gateway_scoped_tokens = vec![
         crate::GatewayToken { token: "sched-1".into(), scopes: vec!["schedule:run".into()] },
         crate::GatewayToken { token: "sched-2".into(), scopes: vec!["schedule:run".into()] },
@@ -580,4 +588,117 @@ fn a_client_scoped_id_is_one_segment_no_application_id_can_be() {
     // Injective: a principal holding the separator or an escape cannot alias another.
     assert_ne!(client_scoped_id("a", "b~c"), client_scoped_id("a~b", "c"));
     assert_ne!(client_scoped_id("a", "%41"), client_scoped_id("a", "A"));
+}
+
+/// **The sole candidate keeps holding.** One node, one client: a run it does not answer overruns its period, and with
+/// no other candidate in view the node does not stand down — the next slot is handed out at once, so a late answer
+/// costs that one slot.
+#[tokio::test]
+async fn a_sole_candidate_does_not_stand_down_for_one_missed_answer() {
+    let (agent, sink, base, _band) = node(vec![], alloc_port()).await;
+    let mut s = open(&base, &schedule_toml("close", 1, "skip")).await;
+    let first = s.run(15_000).await.expect("a run");
+    let started = std::time::Instant::now();
+    let next = s.run(5_000).await.expect("the next slot is handed out though the first was never answered");
+    assert!(next["slot"].as_u64().unwrap() > first["slot"].as_u64().unwrap());
+    assert!(started.elapsed() < Duration::from_secs(4), "within a slot or two: {:?}", started.elapsed());
+    assert_eq!(traced(&sink, RUN_RULE, "stood_down"), 0, "alone, the node never stands down");
+    assert!(traced(&sink, RUN_RULE, "work_overran") >= 1, "the unanswered run overran");
+    drop(s);
+    agent.shutdown().await;
+}
+
+/// The stand-down is capped in absolute time, so a daily or weekly schedule is not stood down for days.
+#[test]
+fn the_stand_down_is_ten_periods_at_most_ten_minutes() {
+    use crate::schedule::{stand_down_ms, MAX_STAND_DOWN_MS};
+    assert_eq!(stand_down_ms(1_000), 10_000);
+    assert_eq!(stand_down_ms(30_000), 300_000);
+    assert_eq!(stand_down_ms(86_400_000), MAX_STAND_DOWN_MS);
+    assert_eq!(MAX_STAND_DOWN_MS, 600_000);
+}
+
+/// **A static-token principal needs a fleet-wide issuer**: without `gateway_identity_issuer` the stream is refused by
+/// name, since the token's principal would name this gateway and one bearer would be one schedule per gateway.
+#[cfg(feature = "compliance")]
+#[tokio::test]
+async fn a_static_token_without_a_fleet_issuer_is_refused_by_name() {
+    use axum::http::header::AUTHORIZATION;
+    let gossip_port = alloc_port();
+    let http_port = alloc_port();
+    let mut cfg = GossipConfig::default();
+    cfg.bind_port = gossip_port;
+    cfg.http_port = Some(http_port);
+    cfg.http_addr = "127.0.0.1".to_string();
+    cfg.gateway_named_tokens = vec![crate::GatewayNamedToken { name: "worker".into(), token: "secret".into(), scopes: vec!["schedule:run".into()] }];
+    let agent = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", gossip_port).unwrap(), cfg));
+    agent.start().await.unwrap();
+    let r = reqwest::Client::new().get(format!("http://127.0.0.1:{http_port}/gateway/schedules/run"))
+        .query(&[("toml", schedule_toml("close", 1, "skip"))]).header(AUTHORIZATION, "Bearer secret").send().await.unwrap();
+    assert_eq!(r.status(), 422);
+    let v: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(v["reason"], "issuer_not_fleet_wide", "{v}");
+    agent.shutdown().await;
+}
+
+/// **The reviewer's probe E: one token through two gateways is one schedule** when they share a
+/// `gateway_identity_issuer`. Two connected nodes, each with the named token `worker`, a client on each: each slot is
+/// handed once, to one client, under one key.
+#[cfg(feature = "compliance")]
+#[tokio::test]
+async fn one_token_through_two_gateways_sharing_an_issuer_is_one_schedule() {
+    use axum::http::header::AUTHORIZATION;
+    use std::collections::BTreeMap;
+    let gossip = [alloc_port(), alloc_port()];
+    let http = [alloc_port(), alloc_port()];
+    let ids: Vec<NodeId> = gossip.iter().map(|p| NodeId::new("127.0.0.1", *p).unwrap()).collect();
+    let mut agents = Vec::new();
+    for i in 0..2 {
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = gossip[i];
+        cfg.http_port = Some(http[i]);
+        cfg.http_addr = "127.0.0.1".to_string();
+        cfg.bootstrap_peers = vec![ids[1 - i].clone()];
+        cfg.gateway_identity_issuer = Some("fleet.example".into());
+        cfg.gateway_named_tokens = vec![crate::GatewayNamedToken { name: "worker".into(), token: "secret".into(), scopes: vec!["schedule:run".into()] }];
+        let agent = Arc::new(GossipAgent::new(ids[i].clone(), cfg));
+        agent.start().await.unwrap();
+        agents.push(agent);
+    }
+    let _bands: Vec<_> = agents.iter().map(|a| a.capabilities().advertise_capability(Capability::new("ledger", "closer"), Duration::from_secs(1))).collect();
+    let toml = schedule_toml("close", 1, "skip");
+    let handed: Arc<std::sync::Mutex<Vec<(usize, u64, String)>>> = Arc::default();
+    let mut readers = Vec::new();
+    for (i, port) in http.iter().enumerate() {
+        let base = format!("http://127.0.0.1:{port}");
+        let resp = reqwest::Client::new().get(format!("{base}/gateway/schedules/run")).query(&[("toml", &toml)])
+            .header(AUTHORIZATION, "Bearer secret").send().await.unwrap();
+        assert_eq!(resp.status(), 200);
+        let mut s = Stream { resp, buf: String::new() };
+        let handed = Arc::clone(&handed);
+        readers.push(tokio::spawn(async move {
+            while let Some(run) = s.run(60_000).await {
+                handed.lock().unwrap().push((i, run["slot"].as_u64().unwrap(), run["operation_id"].as_str().unwrap().to_string()));
+                reqwest::Client::new().post(format!("{base}/gateway/schedules/ack")).header(AUTHORIZATION, "Bearer secret")
+                    .json(&serde_json::json!({"run_id": run["run_id"], "ok": true})).send().await.unwrap();
+            }
+        }));
+    }
+    // Once the two nodes see each other's candidacy (the warm-up is a delay, not a convergence check), judge the slots.
+    let scoped_id = client_scoped_id("close", "token:fleet.example/worker");
+    let candidates = |a: &GossipAgent| a.capabilities().resolve(&CapFilter::new(CANDIDATE_NS, scoped_id.clone())).len();
+    assert!(poll_until(|| candidates(&agents[0]) == 2 && candidates(&agents[1]) == 2, 30_000).await, "one ring: both candidates on it");
+    let from = handed.lock().unwrap().len();
+    assert!(poll_until(|| handed.lock().unwrap().len() >= from + 5, 20_000).await, "the slots run");
+    let after: Vec<(usize, u64, String)> = handed.lock().unwrap()[from..].to_vec();
+    let mut per_slot: BTreeMap<u64, Vec<&(usize, u64, String)>> = BTreeMap::new();
+    for h in &after { per_slot.entry(h.1).or_default().push(h); }
+    // A slot at the very edge of convergence may still be handed on both sides; every later one is handed once.
+    let twice = per_slot.values().filter(|v| v.len() > 1).count();
+    assert!(twice <= 1, "each slot handed once: {per_slot:?}");
+    for h in &after {
+        assert_eq!(h.2, format!("sched/{scoped_id}/{}", h.1), "one key per slot, the same at both gateways: {after:?}");
+    }
+    for r in readers { r.abort(); }
+    for a in agents { a.shutdown().await; }
 }
