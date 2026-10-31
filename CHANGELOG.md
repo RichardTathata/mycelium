@@ -11,6 +11,15 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **A successful empty JWKS withdraws the IdP's signing keys, and keys the IdP has not confirmed for 24 h are
+  refused** (external review 2026-10-31, F4; `docs/plans/external-review-2026-10-31.md` R4). The OIDC verifier read
+  a fetch that returned no keys as a failed fetch and kept the keys it held, so a key the issuer had withdrawn went
+  on verifying tokens; and nothing bounded how old kept keys could get while fetches failed. A fetch that succeeds
+  is now authoritative — the cache becomes what it returned, an empty set included — and a fetch that fails
+  (unreachable, timed out, **non-2xx**, egress-denied, not a JWKS) keeps the previous keys for at most
+  `JWKS_MAX_STALE` (24 h) after the last success, after which every token is refused until a fetch succeeds.
+  `docs/operations/sso.md` § `jwks_uri`; `deprecations.md` §75.
+
 - **`mycelium doctor` names each guarantee's row of the shared-responsibility matrix** (adopter-surface Y10, decided by
   the maintainer on #707's review).
   - **Text form:** a line for a guarantee not enforced ends with `→ matrix: <row>`, and the enforced ones are listed
