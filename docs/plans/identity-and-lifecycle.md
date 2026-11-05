@@ -1,7 +1,8 @@
 # Identity and lifecycle — keyed principals, signed decisions, cancellation under a per-call mandate, and the developer surface
 
-**Status:** proposed 2026-10-31, **rev 0.6** — not yet agreed with the maintainer. Four independent adversarial reviews
-on one day (§6): rev 0.1 against the decisions, rev 0.3 against the mechanisms, rev 0.4 and rev 0.5 each against five
+**Status:** proposed 2026-10-31, **rev 0.7** — not yet agreed with the maintainer. Five independent adversarial reviews —
+four on one day, the fifth on the merged document (#715's thread, 2026-11-05; the thread, this paragraph and the *Revised
+from* column are the record of all five): rev 0.1 against the decisions, rev 0.3 against the mechanisms, rev 0.4 and rev 0.5 each against five
 premises, both with the verdict *not yet buildable*. Every premise failure sat in wave 1 (I0–I4) or in the developer
 identity (D7); none in I3, I5, N3, N5, N6 — the reviewer named those buildable. **Rev 0.6 is a split, not a rewrite
 (D8):** wave 1a holds the rows a plan can close — I0 narrowed to this node's own unit, I1 narrowed to service principals
@@ -9,7 +10,15 @@ holding an Ed25519 key, I3, I5 — and wave 1b holds three **spikes** whose code
 premises the reviews could not: a `call:` mandate carried with its first checkpoint (I4), a certificate reload without a
 restart (I2), and an OS-presence signer from a signed bundle (the developer identity, now its own row I7). Wave 1b's
 rows are written *after* their spike, from what ran. Every stated fact the fourth review contradicted is corrected in
-place. It comes out of a comparative reading of [Orca](https://github.com/stablyai/orca) (`981ad63b`, 2026-10-31) and
+place. **Rev 0.7** takes the fifth review: `cn` carries a per-process instance id, without which two processes under one
+certificate still collide (H1); `identity:write` exists and is `compliance`-gated (M1); the `sys/` tripwire counts only the
+families it lists, so `sys/client-cert/` needs no exemption and its fold judges by signature and issuance, never by KV
+time (M2); a provider without `compliance` refuses `ot` by name and the envelope's 8 KiB cap is stated (M3); the index entry
+rewritten (M4); S-cancel's questions gain the gossip-latency bound and the unbounded drain classes (M5); Q5 un-cited — the
+digest vectors exist, the signature vector is new (L1); `max_drain_secs`/`grant_retention_secs` marked new and
+`cancellable`'s window restated as the 2.38 refusal (L2, L3); the shared `TrustedExternalIssuers` handle named as an API
+change (L4); a client key's revocation given a home — supersession by re-issue (L5); E4 cites the thread (L6); paths
+corrected (L7). D7's and N5's external facts are the spike's and E6's walk's to verify, not a review's. It comes out of a comparative reading of [Orca](https://github.com/stablyai/orca) (`981ad63b`, 2026-10-31) and
 [Eve](https://github.com/vercel/eve) (`1.0.0-rc.1`, 2026-10-31) against `main` at `9cbd3b82` (v2.38.3 plus Y1–Y8 and
 Y10–Y12 merged). Rows close on evidence (verification policy rule 2).
 
@@ -41,7 +50,7 @@ code by the four reviews):
 | Found | Already ships | Still missing |
 |---|---|---|
 | An organisation running interactive fleets needs a person to approve, stop and resume an agent's work | the grant (X3): routes, SSE stream, SDK verbs; the Ops Console (Y3), read-only; the authority-lapse sweep that stops running work registered under an **established** mandate within its drain bound (C9) | any surface that shows a pending grant to a person; a cancel that stops work (*not carried* on six rows of [`adapter-contract.md`](../reference/adapter-contract.md), *not applicable* on two); `admit_after` registers only established, mandate-bearing work, and a mandate is established by reading its issuer's checkpoint **from the KV** — an unknown standing is never read as established ([`gateway_authority.rs`](../../src/agent/gateway_authority.rs) `feed_grant_checkpoint`, [`authority.rs`](../../src/mandate/authority.rs) `RevocationStanding::Unknown`) |
-| An SDK or Eve agent never runs *under* a grant | the grant, verified at three doors; possession verified for any principal whose key is in `TrustedExternalIssuers` | a grant *issued* to a client: `decide_grant` and `revoke_grant` refuse a `/` in the agent and every `token:` principal carries one (`token:{issuer}/{name}`, the issuer this gateway's node id unless `gateway_identity_issuer` is set); `revoke_grant` derives the evaluator's resource from a `node:` holder; `is_member_agent` parses a `NodeId`; every certificate reader is **Ed25519-only** (`ed25519_key_from_cert_der`, `cert_identity`, [`tls.rs`](../../mycelium-core/src/tls.rs)); `sys/` is refused on the raw KV routes and every `sys/` family is tied to a node-id segment (`SELF_OWNED_SYS_PREFIXES`, [`connection.rs`](../../mycelium-core/src/connection.rs)), so **no door publishes a record for a principal that is not a node**; `TrustedExternalIssuers` is an immutable value at three holders; **the published binary attaches neither an `ActionEvaluator`, an `ExecutionAuthority` nor an evidence journal** |
+| An SDK or Eve agent never runs *under* a grant | the grant, verified at three doors; possession verified for any principal whose key is in `TrustedExternalIssuers` | a grant *issued* to a client: `decide_grant` and `revoke_grant` refuse a `/` in the agent and every `token:` principal carries one (`token:{issuer}/{name}`, the issuer this gateway's node id unless `gateway_identity_issuer` is set); `revoke_grant` derives the evaluator's resource from a `node:` holder; `is_member_agent` parses a `NodeId`; every certificate reader is **Ed25519-only** (`ed25519_key_from_cert_der`, `cert_identity`, [`tls.rs`](../../mycelium-core/src/tls.rs)); `sys/` is refused on the raw KV routes, and the fifteen `sys/` families `SELF_OWNED_SYS_PREFIXES` lists ([`connection.rs`](../../mycelium-core/src/connection.rs)) are tied to a node-id segment (eight others — `sys/govern/`, `sys/membership/`, `sys/rate/`, `sys/quorum/`, `sys/health/`, `sys/config/`, `sys/capauthz/`, `sys/topology-override/` — are not, and a family the array omits is never counted), so **no door publishes a record for a principal that is not a node**, though any member's own `kv().set` can write one (detection, not prevention); `TrustedExternalIssuers` is an immutable value at three holders; **the published binary attaches neither an `ActionEvaluator`, an `ExecutionAuthority` nor an evidence journal** |
 | A provider trusts the gateway's assertion of who called | the caller envelope, signed by the gateway's key naming the principal; row E's `sn`; `ReplayWindows` failing closed on eviction because envelope ids are ordered | the client's own signature over fields it can know, with a replay bound that fails closed and a canonical form both SDKs reproduce byte for byte |
 | A coding agent needs the fleet's operations as tools | `doctor`, `rules`, `test --faults` and `wire-check` each with `--format json` and a `schema`; `explain --closure`'s `mycelium.closure/1`; `declare --watch`; three `init` templates; the pilot kit | `--format json` for `explain`, `declare`, `tls`; an MCP server over the node's operations; a local fleet per worktree; an agent guide the binary serves |
 
@@ -50,10 +59,10 @@ code by the four reviews):
 Each option was weighed for soundness, not for the size of the change (the maintainer's instruction, 2026-10-31). The
 *revised* column records what a review found and what changed.
 
-| Id | Decision (rev 0.6) | Why | Revised from |
+| Id | Decision (rev 0.7) | Why | Revised from |
 |---|---|---|---|
 | **D1** | **Every acting principal is keyed by a certificate the fleet CA issues off-node.** In wave 1a the holder is a **service** — a process holding an Ed25519 key (the Eve supervisor, an SDK agent): `mycelium tls issue --client <name>` issues a certificate whose **SAN** is `mycelium-client://<issuer>/<name>` *(new scheme)*; **both mTLS verifiers refuse a certificate carrying that scheme** (a pre-row-Q node certificate naming no URI stays admitted, as `refuse_if_revoked` deliberately does today); a **gateway door** *(new, I1)* publishes the record under `sys/client-cert/` with a stated tripwire exemption; `TrustedExternalIssuers` becomes a shared source at all three holders. `gateway_identity_issuer` is required for a client's **call** to be admitted (a start-time check is impossible: records arrive by gossip). A keyed principal may hold a grant and, where the evaluator names it, issue one. `oidc:` key-less in wave 1 (D6); `federation:` exempt by design. **The developer's key is not a fleet certificate in this plan** — it is I7's question, settled by spike. | the one trust path every provider already has; a gateway publishing a key re-opens rebinding. | rev 0.5's SAN refusal cut off every pre-row-Q node; its "start refusal" could not be decided at start; its developer key could not be verified by any Ed25519 reader. |
-| **D1′** | **The envelope stays at v1 with optional `cs` and `cn`.** `cs` covers the operation, the resource, the arguments' digest over the **canonical form** — `serde_json`'s compact, key-sorted encoding, as `admit_after` digests today — with **one cross-language test vector** (closing Q5's open item for this field), the client's `issued_at` and `cn`; verified before the nonce cache. `cn` is `(issued_at, counter)` per **(principal, certificate key)** — two processes under one certificate collide on a millisecond otherwise; the cache fails closed with the **eviction-only floor** `ReplayWindow::admit` uses (a delayed envelope inside the window is admitted; refused only past 65 536 later ones or the freshness horizon), so a gateway reordering two honest envelopes trips nothing. Freshness runs on the client's own clock under the existing drift bound — stated. | the floor rule exists and is proven; a last-seen floor would refuse reordering. | rev 0.5 read as a last-seen floor and keyed the cache by principal alone. |
+| **D1′** | **The envelope stays at v1 with optional `cs` and `cn`.** `cs` covers the operation, the resource, the arguments' digest over the **canonical form** — `serde_json`'s compact, key-sorted encoding, as `admit_after` digests today — — the digest already has a cross-language vector (`arguments_digest_golden_vector`, [`gateway_authority.rs`](../../src/agent/gateway_authority.rs); `a2a.py`'s `sort_keys` form; `a2a.ts`'s `canonicalJson`), and **one new vector pins the signature** — the client's `issued_at` and `cn`; verified before the nonce cache. `cn` is `(issued_at, instance, counter)`: `instance` a random 64-bit id the process draws once at start (through the seam), `counter` monotonic in the process; the cache keyed per **(principal, certificate key)**. Two processes under one certificate share both and no counter, so without `instance` their `(t, 5)` and `(t, 5)` are one key and the second is `Replayed` — the gateway's own `n` is a per-process HLC and never collides, which is what `instance` restores for a client. The cache fails closed with the **eviction-only floor** `ReplayWindows::admit` uses (a delayed envelope inside the window is admitted; refused only past 65 536 later ones or the freshness horizon), so a gateway reordering two honest envelopes trips nothing. Freshness runs on the client's own clock under the existing drift bound — stated; a client whose wall clock steps back behind the eviction floor is refused `Replayed` until its clock passes it (the gateway's HLC cannot step back; a client's clock can) — stated. | the floor rule exists and is proven; a last-seen floor would refuse reordering. | rev 0.5 read as a last-seen floor and keyed the cache by principal alone; rev 0.6 keyed the counter by certificate, which two processes under one certificate share (#715 H1), and cited Q5, which is about artifact signing (L1). |
 | **D2** | **A cancellable call runs under a `call:`-scoped mandate the admitting gateway holds; cancel is its revocation — the row is written after the spike S-cancel.** What is decided: `call:` is a scope prefix; holder = `established_by` = the gateway; a revoked term is `Refused`; memory bounded; the issuer down ⇒ the term expires. What the spike settles: **how the provider establishes a mandate that outruns its checkpoint** — carried inside the envelope beside the mandate (as `PresentedMandate` carries grant + proof) or a bounded wait — and the latency each costs. | the one shape the provider can establish; the one premise a document cannot settle. | revs 0.1–0.5. |
 | **D3** | **A decision's actor is the principal whose key signed it**; the signed bytes name the node the decision is addressed to; delivered elsewhere it is refused `not_addressed_here` *(new reason; `not_this_node` was a retired name on this route)*. The route admits **either** `grant:issue` on the bearer or `grant:relay` with a signed body — a one-of-two shape `required_scope` does not have today, stated. | — | the scope shape and the retired word. |
 | **D4** | **CA succession is a pre-committed successor, acted on once and persisted — the row is written after the spike S-succeed.** Decided: `ca-commit.pem`, `tls commit`, a successor-signed record with the window's end inside it, act-once-persist, the KV shadow counted. Settled by spike: **whether a node on `cert_pem` can take a successor-issued certificate without a restart** (no reload path exists; `generate_rotation_after` needs `ca-key.pem`, which the secure profile forbids) — if not, the exit is one restart per node inside the window, and the row says so. | — | rev 0.5's exit "without a node restart" had no path. |
@@ -93,7 +102,10 @@ rules; the issuing rule (`requires_grant`, its issuer) must therefore be declare
 the scaffolds already do. A fleet-wide rule set is a later row.
 
 **Depends on:** nothing. **Enumerate:** `grep -rn "with_action_evaluator\|with_execution_authority\|with_provider_enforcement\|with_evidence_journal\|ExecutionAuthority::new" src examples tests`,
-the faults builder, the operation map in `action_evaluator.rs`, `load_from_file`'s unknown-key handling in `config.rs`.
+the faults builder, the operation map in `action_evaluator.rs`, `GossipConfig::load_from_file` in
+[`mycelium-core/src/config.rs`](../../mycelium-core/src/config.rs) (tolerant — `#[serde(default)]`, no
+`deny_unknown_fields` — which is why an older binary ignores the table silently; `OidcNotInBuild` there is the refusal to
+copy) and the unit loader in [`src/capability_config.rs`](../../src/capability_config.rs), which does deny unknown keys.
 **Exit:** the binary over the `governed-call` scaffold refuses a call no rule permits at its gateway door and a call
 under a revoked grant at its provider door, both journaled; `no_evaluator` never appears; a second unit's rule in the
 same directory does not admit at this node; an unmapped door, an empty directory, an undeclared unit, and a build
@@ -106,19 +118,29 @@ configuration (private); a gate spanning more than one `ResourceAuthority`.
 - `mycelium tls issue --client <name>` *(new flag)*: an Ed25519 certificate with SAN `mycelium-client://<issuer>/<name>`;
   the key held by the service's process (environment variable or file; **an agent's shell inherits either**, so a key an
   agent can reach is an agent's key). Both mTLS verifiers refuse the scheme (seen failing first). Revocation of a client
-  key is **its re-issue**: the existing rule has the newer certificate of the same subject sign the revocation.
-- **`POST /gateway/identity/client-cert`** *(new door, scope `identity:write` — new)*: the gateway verifies the chain
-  against the CA anchor and publishes `sys/client-cert/{principal-hex}/{key-hex}` *(new namespace; the gateway's node
-  as its `SELF_OWNED_SYS_PREFIXES` owner segment is **not** present, so the tripwire gains a stated exemption for this
-  family, keyed by the publishing gateway's signature on the record)*; a client-cert fold beside the node one; a
-  revoked client key refused inside the counting window.
+  key is **its re-issue, by supersession**: the revocation ledger is node-keyed (`sys/revocation/{node}/`;
+  `counted_revoker_of` and `refuse_if_revoked` judge a *node's* standing), so a client has no entry there; instead the
+  client-cert fold keeps, per principal, the certificate with the latest CA-signed `notBefore`, and a key an older
+  certificate carries is refused from the moment the fold reads the newer record. The bound is gossip latency, not a
+  counting window; a client arm of `sys/revocation/` is the alternative, the maintainer's to prefer.
+- **`POST /gateway/identity/client-cert`** *(new door, under `identity:write` — an existing scope, `compliance`-gated at
+  `/gateway/identity/revoke`; this door is gated the same, and a token already holding the scope for revocation gains it
+  at the upgrade — §5)*: the gateway verifies the chain
+  against the CA anchor and publishes `sys/client-cert/{principal-hex}/{key-hex}` *(new namespace, absent from
+  `SELF_OWNED_SYS_PREFIXES` and therefore never counted by the tripwire — no exemption is needed; any member's own
+  `kv().set` can write it, and the raw KV route's `sys/` refusal does not bind a member, so the fold judges by the
+  record's signature and the certificate's CA issuance — `judge_cert`'s shape,
+  [`revocation.rs`](../../src/agent/revocation.rs) — never by KV LWW time: a stale-but-genuine record carried by
+  anti-entropy cannot re-admit a superseded key)*; a client-cert fold beside the node one; a superseded client key
+  refused once the newer record is read.
 - `TrustedExternalIssuers` shared at `ExecutionAuthority`, `ProviderBudget`, `MembershipAuthorities` (the last never
-  entitles a client); a lock-order row.
+  entitles a client) — held by value with no setter at all three today, so the shared handle changes
+  `ExecutionAuthority::new`'s signature (§5); a lock-order row.
 - A `token:` principal with a certificate on record and no `cs`: counted (`gateway_actions_unsigned{kind}` *(new)*),
   then refused; a key-less principal: D6's window. A client's call at a gateway without `gateway_identity_issuer` is
   refused by name at call time.
-- `cs`/`cn` (D1′): `frame_with_context_at` writes them; `verify` checks `cs` before the cache; the canonical form and
-  one vector under `tests/fixtures/cs/` *(new)*, checked by Rust, jest and pytest.
+- `cs`/`cn` (D1′): `frame_with_context_at` writes them; `verify` checks `cs` before the cache; the signature vector under
+  `tests/fixtures/cs/` *(new)* beside the existing digest vectors, checked by Rust, jest and pytest.
 - `grant/` keys: `node:` literal, client principals hex, readers decode by prefix (`pending()`, the stream's `rsplit`,
   the faults reader, `decide_grant`/`revoke_grant`'s `/` check, `is_member_agent`, the checkpoint and request keys).
   **The resource a client-held grant's decisions evaluate against** (`revoke_grant` derives `tool:{tool}@{node}` from a
@@ -129,7 +151,7 @@ configuration (private); a gate spanning more than one `ResourceAuthority`.
 
 **Depends on:** I0. **Enumerate:** both verifiers and `verify_member_cert` (which must **not** apply the scheme refusal
 — the client fold checks the chain), `grep -rn "fn verify_client_cert\|fn verify_server_cert\|fn verify_member_cert\|refuse_if_revoked" mycelium-core/src/tls.rs`;
-possession; the envelope; `gateway_identity_issuer`; every `grant/` reader and writer (`grep -rn '"grant/\|grant_checkpoint_key\|is_member_agent\|unreadable_grant\|rsplit' src`);
+possession; the envelope and `ReplayWindows`; `gateway_identity_issuer`; every `grant/` reader and writer (`grep -rn '"grant/\|grant_checkpoint_key\|is_member_agent\|unreadable_grant\|rsplit' src`);
 the three holders; `SELF_OWNED_SYS_PREFIXES`, `OWNED_KV_PREFIXES` and `refuse_protected_key`; the folds and `judge_cert`;
 `arguments_digest` and `admit_after`'s digest; both SDKs' A2A clients; the lock-order table.
 
@@ -137,8 +159,8 @@ the three holders; `SELF_OWNED_SYS_PREFIXES`, `OWNED_KV_PREFIXES` and `refuse_pr
 Y6's weather tool called through `/mcp` **under** a grant held by the example's `token:fleet/forecaster` on a
 three-node fleet of published binaries (I0) with `gateway_identity_issuer = "fleet"`, refused without one, surviving a
 restart; a foreign-key `cs` refused; a replayed `cn` refused and a reordered honest pair admitted; two processes under
-one certificate not colliding; the cross-language vector green in all three suites; a revoked client key refused inside
-the window; `revoke_grant` on a client holder evaluating `tool:{tool}@{provider}`; a pre-upgrade `grant/node:…` record
+one certificate not colliding (distinct `instance`); the cross-language vector green in all three suites; a superseded client key refused once the newer record
+is read; `revoke_grant` on a client holder evaluating `tool:{tool}@{provider}`; a pre-upgrade `grant/node:…` record
 read unchanged. **Not built, stated:** OIDC (I5); the developer's keystore key (I7); M-of-N; an un-upgraded node's
 reading of `sys/client-cert/` (shown against the previous binary).
 
@@ -155,9 +177,14 @@ Cedar re-pin with a refusal case. **Not built, stated:** M-of-N; an `oidc:` deci
 #### I5 · OIDC by token exchange (D6)
 
 **What:** RFC 8693 exchange at the IdP for `aud = mycelium:<domain>` bound to `cn`; the assertion in `ot` *(new)*;
-the provider validates it against the issuer's JWKS; a gateway-audience token is never forwarded; `doctor` reports
+the provider validates it against the issuer's JWKS — the verifier is `#[cfg(feature = "compliance")]`, so a provider
+built without it refuses a call carrying `ot` by name (`ot_not_in_build` *(new)*, the v2.18.1 class) rather than running
+it unverified; the envelope is capped at `MAX_ENVELOPE_BYTES` (8 KiB under a `u16` prefix), so an assertion beside `m`
+and `cs` can exceed it and the producer refuses the call by name (`envelope_too_large` *(new)*, counted) — whether the
+cap rises is the maintainer's; a gateway-audience token is never forwarded; `doctor` reports
 `id.oidc_exchange` *(new)*. **Depends on:** I1. **Exit:** an OIDC user's call verified at the provider; a replay
-refused; a gateway-audience token refused by name; a member's forged `ot` refused by the JWKS. **Not built, stated:** an
+refused; a gateway-audience token refused by name; a provider without `compliance` refusing `ot` by name; an oversized
+envelope refused by name; a member's forged `ot` refused by the JWKS. **Not built, stated:** an
 IdP without exchange (the client certificate is the path); a decision signed by an assertion.
 
 ### Wave 1b — three spikes, then the rows they settle (D8)
@@ -168,7 +195,7 @@ note and goes through the standing review as any row does. No spike ships.
 
 | Spike | Question only code can answer | Done when |
 |---|---|---|
-| **S-cancel** | A `call:` mandate minted at admission reaches the provider before its checkpoint gossips. Carry the first checkpoint **inside the envelope** beside the mandate, through `assess` and `admit_after` to `begin`; measure the added bytes and the admission latency against today's grant path; show a revoked term read `Refused`. | a call registered with `begin` without a KV round-trip, or the bounded wait's cost measured; the memory-reclamation hook shown on 10⁵ calls |
+| **S-cancel** | A `call:` mandate minted at admission reaches the provider before its checkpoint gossips. Carry the first checkpoint **inside the envelope** beside the mandate, through `assess` and `admit_after` to `begin`; measure the added bytes and the admission latency against today's grant path; show a revoked term read `Refused`; and two bounds the row must state: a term revoked between the gateway's framing and the provider's `admit_after` carries a checkpoint that predates the revocation, so the provider registers the work and stops it only when the revoking checkpoint arrives — the cancel's effect is gossip latency plus the drain bound; and `drain_bound` is `Unbounded` for the unenforced and unconfirmable classes ([`authority.rs`](../../src/mandate/authority.rs)), where a cancel writes `Refused` and stops nothing — the cancel receipt names the drain class it hit, or answers `DeliveryUnknown`. | a call registered with `begin` without a KV round-trip, or the bounded wait's cost measured; the memory-reclamation hook shown on 10⁵ calls |
 | **S-succeed** | A node on `cert_pem` (secure profile, no CA key) takes a certificate issued under a successor CA **without a restart**: a reload path through `activate`, a two-root `RootCertStore`, `verify_member_cert` across the window. | the handshake succeeds under the new root on a live node, or the spike records that a restart is required and why |
 | **S-presence** | `dev` signs with a Secure Enclave P-256 key from a **team-signed bundle**, verified by one P-256-aware verifier; the negative probe (`interactionNotAllowed` fails), `kSecAttrTokenIDSecureEnclave`, `biometryCurrentSet`, a fresh context per approval; and whether the release pipeline can produce such a bundle at all. | a signature produced only after the prompt and verified; the pipeline question answered yes or no; if no, I7 falls back to `tty` everywhere, graded |
 
@@ -177,9 +204,10 @@ note and goes through the standing review as any row does. No spike ships.
 Decided (D2): scope prefix; holder = the gateway; second mandate slot; `Refused` on revoke; `is_entitled`'s `call:`
 arm; incremental feeder; in-memory reclamation with a lock-order row; a cancel-forward RPC kind *(new)*; A2A
 `tasks/cancel` revokes before it removes (`handle_tasks_cancel` is sync — the revocation is spawned, stated); MCP
-`notifications/cancelled` *(new handler)* with a bounded id → term table; retention `max_drain_secs` + the sweep
-ceiling for `call:`, `grant_retention_secs` (default 7 days) for `grant/`; `cancellable` is read as a plain allowance by
-a ≤ 2.37 reader, so it is declared only on an upgraded fleet. **From the spike:** how establishment happens and what it
+`notifications/cancelled` *(new handler)* with a bounded id → term table; retention `max_drain_secs` *(new)* + the sweep
+ceiling for `call:`, `grant_retention_secs` *(new, default 7 days)* for `grant/`; a `cancellable` key is **refused by
+name by a 2.38 reader** (`RuleDecl` and `MandateDecl` deny unknown keys, `deprecations.md` §58–§65) and read as a plain
+allowance by a ≤ 2.37 one, so it is declared only on an upgraded fleet. **From the spike:** how establishment happens and what it
 costs; the exit list of rev 0.5 then stands, with the soak.
 
 #### I2 · CA succession by a pre-committed successor — *written after S-succeed*
@@ -258,7 +286,7 @@ supplied*.
 | **E1** | **The Eve supervisor** — an Eve agent on Slack/Teams cards consuming N1's tools, signing with its own client certificate (I1; `signed_with = service`) | I1, I3, N1, Y6 | the flow against a local Eve channel in CI; the card *run when supplied* |
 | **E2** | Re-pin Y6 to Eve 1.0.0 | Eve 1.0.0 | `eve-fleet` green |
 | **E3** | Y12's *not built* names Eve's position | — | the sentence |
-| **E4** | The wiki comparison record and the plan's four reviews as a dated example of rule 4 applied to a plan, with D8 as the lesson | — | the dated entry |
+| **E4** | The wiki comparison record and the plan's five reviews — recorded in #715's thread, this plan's status paragraph and the *Revised from* column, nowhere else today — as a dated example of rule 4 applied to a plan, with D8 as the lesson | — | the dated entry |
 | **E5** | An Orca plugin — N7 | — | — |
 | **E6** | `examples/orca_worktree/` — the walk in a `--features sim` test build with the consent recorded (after I7; before it, with a service principal deciding), the Orca run recorded | N1, N4, N7 | the `sim` walk green in CI |
 
@@ -278,10 +306,13 @@ Any time:                                      E2, E3, E4
   refuses the start by name; **an older binary ignores the table silently** — upgrade before relying on it.
 - **I1:** `cs`/`cn` optional under `v: 1`, safe both ways; a certificate-holding principal's unsigned action counted then
   refused; **key-less principals lose action scopes at the refusal release** (`oidc:`, `anonymous`, the legacy token;
-  `/mcp`, KV, `/a2a`); `identity:write` is a new scope; `sys/client-cert/` ignored by an un-upgraded node (shown); a
+  `/mcp`, KV, `/a2a`); `identity:write` is an existing scope, so a token holding it for `/gateway/identity/revoke` gains the client-cert
+  door at the upgrade — reissue narrower tokens first; `ExecutionAuthority::new` takes the shared `TrustedExternalIssuers`
+  handle (a caller breaks); `sys/client-cert/` ignored by an un-upgraded node (shown); a
   `mycelium-client://` certificate refused at the mesh from this release; pre-row-Q node certificates unaffected.
 - **I3:** an unsigned decision body counted then refused; `grant:relay` inert at an un-upgraded gateway.
-- **I5:** `ot` optional; the provider's egress list must admit the issuer.
+- **I5:** `ot` optional; the provider's egress list must admit the issuer; a provider without `compliance` refuses a call
+  carrying `ot` by name; an envelope past 8 KiB is refused by name.
 - **I2, I4, I7:** written with their rows.
 - **N4:** three configuration files written into the worktree, merged.
 - Wire **v12** unchanged throughout: every field is payload (`cs`, `cn`, `ot` park in `x` at an older provider).
@@ -289,8 +320,8 @@ Any time:                                      E2, E3, E4
 ## 6 · Verification
 
 1. **Wave 1a goes to the independent review as a buildable document**; the reviewer is asked whether any premise of
-   I0, I1, I3 or I5 fails against the code, and whether the one-of-two scope shape, the client-cert door's tripwire
-   exemption, and the canonical-form vector are specified enough to build.
+   I0, I1, I3 or I5 fails against the code, and whether the one-of-two scope shape, the client-cert fold's
+   judgment by signature and issuance, and the signature vector are specified enough to build.
 2. **Wave 1b's rows are not reviewed until their spike's note exists**; the note is reviewed with the row.
 3. Every row: the fail-first test, the enumeration, the review before merge, the feature page and registry entry, the
    CHANGELOG and upgrade note.
