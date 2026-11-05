@@ -21,7 +21,7 @@ change (L4); a client key's revocation given a home — supersession by re-issue
 corrected (L7). Its confirming round found five more on the new text, taken in the same revision: the `cn` cache is a new
 window type with a per-instance floor, since `ReplayWindow`'s `(u64, u64)` key cannot hold an instance and a counter
 (N1); supersession keyed on the certificate's serial — its `issued_ms`, `notBefore` being fixed — as a high-water mark
-kept in memory and the journal, so an overwrite or a restart cannot lower it (N2); `ot` refused as `not_in_build` and an
+kept in memory and the journal, so an overwrite or a restart under `[persistence]` cannot lower it (N2, with its journal budget stated, N6); `ot` refused as `not_in_build` and an
 oversized envelope as the existing `caller_context_too_large` (N3); a clock step-back refused `stale`, `Replayed` only
 under a floor (N4); the SDKs' `instance` drawn outside the seam (N5). D7's and N5's external facts are the spike's and E6's walk's to verify, not a review's. It comes out of a comparative reading of [Orca](https://github.com/stablyai/orca) (`981ad63b`, 2026-10-31) and
 [Eve](https://github.com/vercel/eve) (`1.0.0-rc.1`, 2026-10-31) against `main` at `9cbd3b82` (v2.38.3 plus Y1–Y8 and
@@ -129,10 +129,13 @@ configuration (private); a gate spanning more than one `ResourceAuthority`.
   serial, which is its `issued_ms` (`CertIdentity.issued_ms`; every certificate this tree issues shares one fixed
   `notBefore`, so that field orders nothing) — **in memory and in the node-local journal**, the ledger's own pattern
   (`merge_anchors_seen`, the counted revocations kept across a restart), and a certificate at or below the mark is
-  refused for good: a later overwrite of the newer record, by LWW or anti-entropy, cannot lower it. Two certificates
+  refused for good: a later overwrite of the newer record, by LWW or anti-entropy, cannot lower it. The journal half
+  holds only under `[persistence]` and within a budget — the ledger's is 64 records per node and 65 536 in all, a
+  node past it *saturated*, and a failed append keeps the fact in this process only — so the client arm gets its own
+  line in that budget, one record per supersession per principal, and the exit says *under `[persistence]`*. Two certificates
   of one principal in one millisecond tie-break on the greater key hex, stated. The bound is gossip latency, not a
   counting window; a client arm of `sys/revocation/` is the alternative, the maintainer's to prefer — it would inherit
-  the ledger's memory for free, which is the argument for it.
+  the ledger's memory under the same `[persistence]` and budget, which is the argument for it.
 - **`POST /gateway/identity/client-cert`** *(new door, under `identity:write` — an existing scope, `compliance`-gated at
   `/gateway/identity/revoke`; this door is gated the same, and a token already holding the scope for revocation gains it
   at the upgrade — §5)*: the gateway verifies the chain
@@ -143,7 +146,7 @@ configuration (private); a gate spanning more than one `ResourceAuthority`.
   [`revocation.rs`](../../src/agent/revocation.rs) — never by KV LWW time: a stale-but-genuine record carried by
   anti-entropy, or a member's overwrite of the newer record with garbage, cannot re-admit a superseded key once the
   mark has risen)*; a client-cert fold beside the node one; a superseded client key refused once the newer record is
-  read, and still refused after that record is overwritten and after a restart.
+  read, and still refused after that record is overwritten and, under `[persistence]`, after a restart.
 - `TrustedExternalIssuers` shared at `ExecutionAuthority`, `ProviderBudget`, `MembershipAuthorities` (the last never
   entitles a client) — held by value with no setter at all three today, so the shared handle changes
   `ExecutionAuthority::new`'s signature (§5); a lock-order row.
@@ -171,7 +174,7 @@ Y6's weather tool called through `/mcp` **under** a grant held by the example's 
 three-node fleet of published binaries (I0) with `gateway_identity_issuer = "fleet"`, refused without one, surviving a
 restart; a foreign-key `cs` refused; a replayed `cn` refused and a reordered honest pair admitted; two processes under
 one certificate not colliding (distinct `instance`); the cross-language vector green in all three suites; a superseded client key refused once the newer record
-is read, still refused after the record is overwritten and after a restart; `revoke_grant` on a client holder evaluating `tool:{tool}@{provider}`; a pre-upgrade `grant/node:…` record
+is read, still refused after the record is overwritten and, under `[persistence]`, after a restart; `revoke_grant` on a client holder evaluating `tool:{tool}@{provider}`; a pre-upgrade `grant/node:…` record
 read unchanged. **Not built, stated:** OIDC (I5); the developer's keystore key (I7); M-of-N; an un-upgraded node's
 reading of `sys/client-cert/` (shown against the previous binary).
 
