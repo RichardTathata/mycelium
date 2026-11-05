@@ -18,7 +18,12 @@ rewritten (M4); S-cancel's questions gain the gossip-latency bound and the unbou
 digest vectors exist, the signature vector is new (L1); `max_drain_secs`/`grant_retention_secs` marked new and
 `cancellable`'s window restated as the 2.38 refusal (L2, L3); the shared `TrustedExternalIssuers` handle named as an API
 change (L4); a client key's revocation given a home — supersession by re-issue (L5); E4 cites the thread (L6); paths
-corrected (L7). D7's and N5's external facts are the spike's and E6's walk's to verify, not a review's. It comes out of a comparative reading of [Orca](https://github.com/stablyai/orca) (`981ad63b`, 2026-10-31) and
+corrected (L7). Its confirming round found five more on the new text, taken in the same revision: the `cn` cache is a new
+window type with a per-instance floor, since `ReplayWindow`'s `(u64, u64)` key cannot hold an instance and a counter
+(N1); supersession keyed on the certificate's serial — its `issued_ms`, `notBefore` being fixed — as a high-water mark
+kept in memory and the journal, so an overwrite or a restart cannot lower it (N2); `ot` refused as `not_in_build` and an
+oversized envelope as the existing `caller_context_too_large` (N3); a clock step-back refused `stale`, `Replayed` only
+under a floor (N4); the SDKs' `instance` drawn outside the seam (N5). D7's and N5's external facts are the spike's and E6's walk's to verify, not a review's. It comes out of a comparative reading of [Orca](https://github.com/stablyai/orca) (`981ad63b`, 2026-10-31) and
 [Eve](https://github.com/vercel/eve) (`1.0.0-rc.1`, 2026-10-31) against `main` at `9cbd3b82` (v2.38.3 plus Y1–Y8 and
 Y10–Y12 merged). Rows close on evidence (verification policy rule 2).
 
@@ -62,7 +67,7 @@ Each option was weighed for soundness, not for the size of the change (the maint
 | Id | Decision (rev 0.7) | Why | Revised from |
 |---|---|---|---|
 | **D1** | **Every acting principal is keyed by a certificate the fleet CA issues off-node.** In wave 1a the holder is a **service** — a process holding an Ed25519 key (the Eve supervisor, an SDK agent): `mycelium tls issue --client <name>` issues a certificate whose **SAN** is `mycelium-client://<issuer>/<name>` *(new scheme)*; **both mTLS verifiers refuse a certificate carrying that scheme** (a pre-row-Q node certificate naming no URI stays admitted, as `refuse_if_revoked` deliberately does today); a **gateway door** *(new, I1)* publishes the record under `sys/client-cert/` with a stated tripwire exemption; `TrustedExternalIssuers` becomes a shared source at all three holders. `gateway_identity_issuer` is required for a client's **call** to be admitted (a start-time check is impossible: records arrive by gossip). A keyed principal may hold a grant and, where the evaluator names it, issue one. `oidc:` key-less in wave 1 (D6); `federation:` exempt by design. **The developer's key is not a fleet certificate in this plan** — it is I7's question, settled by spike. | the one trust path every provider already has; a gateway publishing a key re-opens rebinding. | rev 0.5's SAN refusal cut off every pre-row-Q node; its "start refusal" could not be decided at start; its developer key could not be verified by any Ed25519 reader. |
-| **D1′** | **The envelope stays at v1 with optional `cs` and `cn`.** `cs` covers the operation, the resource, the arguments' digest over the **canonical form** — `serde_json`'s compact, key-sorted encoding, as `admit_after` digests today — — the digest already has a cross-language vector (`arguments_digest_golden_vector`, [`gateway_authority.rs`](../../src/agent/gateway_authority.rs); `a2a.py`'s `sort_keys` form; `a2a.ts`'s `canonicalJson`), and **one new vector pins the signature** — the client's `issued_at` and `cn`; verified before the nonce cache. `cn` is `(issued_at, instance, counter)`: `instance` a random 64-bit id the process draws once at start (through the seam), `counter` monotonic in the process; the cache keyed per **(principal, certificate key)**. Two processes under one certificate share both and no counter, so without `instance` their `(t, 5)` and `(t, 5)` are one key and the second is `Replayed` — the gateway's own `n` is a per-process HLC and never collides, which is what `instance` restores for a client. The cache fails closed with the **eviction-only floor** `ReplayWindows::admit` uses (a delayed envelope inside the window is admitted; refused only past 65 536 later ones or the freshness horizon), so a gateway reordering two honest envelopes trips nothing. Freshness runs on the client's own clock under the existing drift bound — stated; a client whose wall clock steps back behind the eviction floor is refused `Replayed` until its clock passes it (the gateway's HLC cannot step back; a client's clock can) — stated. | the floor rule exists and is proven; a last-seen floor would refuse reordering. | rev 0.5 read as a last-seen floor and keyed the cache by principal alone; rev 0.6 keyed the counter by certificate, which two processes under one certificate share (#715 H1), and cited Q5, which is about artifact signing (L1). |
+| **D1′** | **The envelope stays at v1 with optional `cs` and `cn`.** `cs` covers the operation, the resource, the arguments' digest over the **canonical form** — `serde_json`'s compact, key-sorted encoding, as `admit_after` digests today — — the digest already has a cross-language vector (`arguments_digest_golden_vector`, [`gateway_authority.rs`](../../src/agent/gateway_authority.rs); `a2a.py`'s `sort_keys` form; `a2a.ts`'s `canonicalJson`), and **one new vector pins the signature** — the client's `issued_at` and `cn`; verified before the nonce cache. `cn` is `(issued_at, instance, counter)`: `instance` a random 64-bit id the process draws once at start (through the seam), `counter` monotonic in the process; the Rust client draws `instance` through the seam, the SDKs from `os.urandom` / `crypto.randomBytes` outside the replay claim, and a `sim` replay takes a recorded envelope's `instance` from the recording. Two processes under one certificate share the principal and the key and no counter, so without `instance` their `(t, 5)` and `(t, 5)` are one key and the second is `Replayed` — the gateway's own `n` is a per-process HLC and never collides, which is what `instance` restores for a client. **The cache is a new window type** *(new)* keyed per **(principal, certificate key)** with entries `(issued_at, instance, counter)` and an **eviction-only floor per instance**: `ReplayWindow`'s own key is `(u64, u64)` fed from the gateway's `n`, and a lexicographic floor over `(t, instance, counter)` would order honest processes by their random id, so the existing window cannot carry `cn` — the new one keeps its *rule* (a delayed envelope inside the window is admitted; refused only past 65 536 later ones of the same instance or the freshness horizon), so a gateway reordering two honest envelopes trips nothing. Freshness runs on the client's own clock under the existing drift bound — stated; a client whose wall clock steps back is refused `stale` past the freshness horizon, and `Replayed` only while a floor raised by sustained eviction sits above the stepped-back time (no floor exists until an eviction, and `prune` clears it) — stated. | the floor *rule* exists and is proven at `ReplayWindows::admit`; the window for `cn` is new because the existing key shape cannot hold an instance and a counter without ordering by the random id; a last-seen floor would refuse reordering. | rev 0.5 read as a last-seen floor and keyed the cache by principal alone; rev 0.6 keyed the counter by certificate, which two processes under one certificate share (#715 H1), and cited Q5, which is about artifact signing (L1). |
 | **D2** | **A cancellable call runs under a `call:`-scoped mandate the admitting gateway holds; cancel is its revocation — the row is written after the spike S-cancel.** What is decided: `call:` is a scope prefix; holder = `established_by` = the gateway; a revoked term is `Refused`; memory bounded; the issuer down ⇒ the term expires. What the spike settles: **how the provider establishes a mandate that outruns its checkpoint** — carried inside the envelope beside the mandate (as `PresentedMandate` carries grant + proof) or a bounded wait — and the latency each costs. | the one shape the provider can establish; the one premise a document cannot settle. | revs 0.1–0.5. |
 | **D3** | **A decision's actor is the principal whose key signed it**; the signed bytes name the node the decision is addressed to; delivered elsewhere it is refused `not_addressed_here` *(new reason; `not_this_node` was a retired name on this route)*. The route admits **either** `grant:issue` on the bearer or `grant:relay` with a signed body — a one-of-two shape `required_scope` does not have today, stated. | — | the scope shape and the retired word. |
 | **D4** | **CA succession is a pre-committed successor, acted on once and persisted — the row is written after the spike S-succeed.** Decided: `ca-commit.pem`, `tls commit`, a successor-signed record with the window's end inside it, act-once-persist, the KV shadow counted. Settled by spike: **whether a node on `cert_pem` can take a successor-issued certificate without a restart** (no reload path exists; `generate_rotation_after` needs `ca-key.pem`, which the secure profile forbids) — if not, the exit is one restart per node inside the window, and the row says so. | — | rev 0.5's exit "without a node restart" had no path. |
@@ -120,9 +125,14 @@ configuration (private); a gate spanning more than one `ResourceAuthority`.
   agent can reach is an agent's key). Both mTLS verifiers refuse the scheme (seen failing first). Revocation of a client
   key is **its re-issue, by supersession**: the revocation ledger is node-keyed (`sys/revocation/{node}/`;
   `counted_revoker_of` and `refuse_if_revoked` judge a *node's* standing), so a client has no entry there; instead the
-  client-cert fold keeps, per principal, the certificate with the latest CA-signed `notBefore`, and a key an older
-  certificate carries is refused from the moment the fold reads the newer record. The bound is gossip latency, not a
-  counting window; a client arm of `sys/revocation/` is the alternative, the maintainer's to prefer.
+  client-cert fold keeps, per principal, a **high-water mark of the newest verified issuance** — the certificate's
+  serial, which is its `issued_ms` (`CertIdentity.issued_ms`; every certificate this tree issues shares one fixed
+  `notBefore`, so that field orders nothing) — **in memory and in the node-local journal**, the ledger's own pattern
+  (`merge_anchors_seen`, the counted revocations kept across a restart), and a certificate at or below the mark is
+  refused for good: a later overwrite of the newer record, by LWW or anti-entropy, cannot lower it. Two certificates
+  of one principal in one millisecond tie-break on the greater key hex, stated. The bound is gossip latency, not a
+  counting window; a client arm of `sys/revocation/` is the alternative, the maintainer's to prefer — it would inherit
+  the ledger's memory for free, which is the argument for it.
 - **`POST /gateway/identity/client-cert`** *(new door, under `identity:write` — an existing scope, `compliance`-gated at
   `/gateway/identity/revoke`; this door is gated the same, and a token already holding the scope for revocation gains it
   at the upgrade — §5)*: the gateway verifies the chain
@@ -131,8 +141,9 @@ configuration (private); a gate spanning more than one `ResourceAuthority`.
   `kv().set` can write it, and the raw KV route's `sys/` refusal does not bind a member, so the fold judges by the
   record's signature and the certificate's CA issuance — `judge_cert`'s shape,
   [`revocation.rs`](../../src/agent/revocation.rs) — never by KV LWW time: a stale-but-genuine record carried by
-  anti-entropy cannot re-admit a superseded key)*; a client-cert fold beside the node one; a superseded client key
-  refused once the newer record is read.
+  anti-entropy, or a member's overwrite of the newer record with garbage, cannot re-admit a superseded key once the
+  mark has risen)*; a client-cert fold beside the node one; a superseded client key refused once the newer record is
+  read, and still refused after that record is overwritten and after a restart.
 - `TrustedExternalIssuers` shared at `ExecutionAuthority`, `ProviderBudget`, `MembershipAuthorities` (the last never
   entitles a client) — held by value with no setter at all three today, so the shared handle changes
   `ExecutionAuthority::new`'s signature (§5); a lock-order row.
@@ -160,7 +171,7 @@ Y6's weather tool called through `/mcp` **under** a grant held by the example's 
 three-node fleet of published binaries (I0) with `gateway_identity_issuer = "fleet"`, refused without one, surviving a
 restart; a foreign-key `cs` refused; a replayed `cn` refused and a reordered honest pair admitted; two processes under
 one certificate not colliding (distinct `instance`); the cross-language vector green in all three suites; a superseded client key refused once the newer record
-is read; `revoke_grant` on a client holder evaluating `tool:{tool}@{provider}`; a pre-upgrade `grant/node:…` record
+is read, still refused after the record is overwritten and after a restart; `revoke_grant` on a client holder evaluating `tool:{tool}@{provider}`; a pre-upgrade `grant/node:…` record
 read unchanged. **Not built, stated:** OIDC (I5); the developer's keystore key (I7); M-of-N; an un-upgraded node's
 reading of `sys/client-cert/` (shown against the previous binary).
 
@@ -178,13 +189,15 @@ Cedar re-pin with a refusal case. **Not built, stated:** M-of-N; an `oidc:` deci
 
 **What:** RFC 8693 exchange at the IdP for `aud = mycelium:<domain>` bound to `cn`; the assertion in `ot` *(new)*;
 the provider validates it against the issuer's JWKS — the verifier is `#[cfg(feature = "compliance")]`, so a provider
-built without it refuses a call carrying `ot` by name (`ot_not_in_build` *(new)*, the v2.18.1 class) rather than running
-it unverified; the envelope is capped at `MAX_ENVELOPE_BYTES` (8 KiB under a `u16` prefix), so an assertion beside `m`
-and `cs` can exceed it and the producer refuses the call by name (`envelope_too_large` *(new)*, counted) — whether the
-cap rises is the maintainer's; a gateway-audience token is never forwarded; `doctor` reports
+built without it refuses a call carrying `ot` at call time as `not_in_build` naming `compliance` — the response error
+`govern.rs` already answers for a feature the build lacks, not v2.18.1's start-time refusal — rather than running it
+unverified; the envelope is capped at `MAX_ENVELOPE_BYTES` (8 KiB under a `u16` prefix), so an assertion beside `m` and
+`cs` can exceed it and the producer's existing refusal answers — `GatewayDispatchError::ContextTooLarge`,
+`caller_context_too_large`, counted in `mycelium_gateway_caller_refusals_total` — whether the cap rises is the
+maintainer's; a gateway-audience token is never forwarded; `doctor` reports
 `id.oidc_exchange` *(new)*. **Depends on:** I1. **Exit:** an OIDC user's call verified at the provider; a replay
-refused; a gateway-audience token refused by name; a provider without `compliance` refusing `ot` by name; an oversized
-envelope refused by name; a member's forged `ot` refused by the JWKS. **Not built, stated:** an
+refused; a gateway-audience token refused by name; a provider without `compliance` refusing `ot` as `not_in_build`; an
+oversized envelope refused `caller_context_too_large`; a member's forged `ot` refused by the JWKS. **Not built, stated:** an
 IdP without exchange (the client certificate is the path); a decision signed by an assertion.
 
 ### Wave 1b — three spikes, then the rows they settle (D8)
@@ -312,7 +325,7 @@ Any time:                                      E2, E3, E4
   `mycelium-client://` certificate refused at the mesh from this release; pre-row-Q node certificates unaffected.
 - **I3:** an unsigned decision body counted then refused; `grant:relay` inert at an un-upgraded gateway.
 - **I5:** `ot` optional; the provider's egress list must admit the issuer; a provider without `compliance` refuses a call
-  carrying `ot` by name; an envelope past 8 KiB is refused by name.
+  carrying `ot` as `not_in_build`; an envelope past 8 KiB is refused `caller_context_too_large`, as today.
 - **I2, I4, I7:** written with their rows.
 - **N4:** three configuration files written into the worktree, merged.
 - Wire **v12** unchanged throughout: every field is payload (`cs`, `cn`, `ot` park in `x` at an older provider).
