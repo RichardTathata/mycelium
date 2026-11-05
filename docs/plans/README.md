@@ -187,6 +187,25 @@ measures it on a tagged release (§1.1, D19). What
 the comparison proposed that already ships is tabled in its §1; a task lifecycle, a context selector, schedules and a
 dashboard are deferred in §6 with the question each must answer first.
 
+[`identity-and-lifecycle.md`](identity-and-lifecycle.md) — **identity and lifecycle** (proposed 2026-10-31, rev 0.6; not yet
+agreed; reviewed four times the same day — rev 0.1 against the decisions, rev 0.3 against the mechanisms, rev 0.4 and
+rev 0.5 each against five premises, *not yet buildable* — every premise failure in wave 1 or the developer identity).
+Eight decision ids D1–D8: client certificates for services under `sys/client-cert/` via a gateway door, the
+`mycelium-client://` scheme refused at the handshake (D1), `cs`/`cn` with a canonical form and an eviction-only floor
+(D1′), a `call:` mandate the gateway holds (D2), signed decisions on a one-of-two-scope route (D3), a pre-committed CA
+successor (D4), a relay scope (D5), key-less principals lose action scopes with OIDC token exchange (D6), OS-presence
+consent graded on the record (D7), and **D8 — the split**: wave 1a (I0 this unit's rules only, I1 services, I3, I5) is
+built from the plan; wave 1b's rows (I4 cancellation, I2 succession, I7 the developer identity) are written after three
+spikes — S-cancel, S-succeed, S-presence — whose code settles what four reviews could not. Wave 2 N3/N5/N4/N1/N6/N7,
+E6; `main` at `9cbd3b82`. From a comparative reading of Orca and Eve against `main` at `d656f50c`: every acting principal is keyed by
+a certificate the fleet CA issues off-node (D1), the envelope gains optional fields under version 1 with the client's
+signature binding the call (D1′), a cancellable call runs under a per-call mandate and cancel is its revocation (D2), a
+decision's actor is the principal whose key signed it (D3), CA succession by a pre-committed successor (D4), a relay
+scope for carried decisions (D5) — and two waves: identity (the authority attached from configuration I0, client
+certificates I1, CA succession I2, signed decisions I3, cancellation I4) and the developer surface (one `schema` field
+across the CLI, the agent guide the binary serves, `mycelium dev --isolate`, `mycelium mcp`, `mycelium watch`), with
+the Eve supervisor example and the Y6 re-pin.
+
 [`boundary-h.md`](boundary-h.md) — **Boundary H, a colluding population of admitted members** (proposed
 2026-09-24, rev 0.1, not adopted). It implements threat model revision 3's §5 Boundary H in four phases:
 - prerequisites: issuer binding, signed mandate grants, and the knowledge layer's own deferred PRs;
