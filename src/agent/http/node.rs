@@ -40,6 +40,7 @@ pub(super) async fn health_handler(State(ctx): State<Arc<HttpCtx>>) -> impl Into
                 "wal_refusing_appends": reason.is_some(),
                 "reason": reason,
                 "dropped_appends": wal.dropped_appends(),
+                "inbound_in_flight": wal.inbound_in_flight(),
             })
         }
     };

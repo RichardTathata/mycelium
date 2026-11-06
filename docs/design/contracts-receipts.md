@@ -86,7 +86,13 @@ taken:
   no table to size or expire. The same conclusion §9a reached for the prepared write.
 - **No per-entry durability tracking.** Records append in order to one file, so a single
   `fdatasync` (`WalHandle::sync`, added for this) establishes durability for **everything already
-  appended**.
+  appended**. *Already appended* is the condition, and the store holding a record does not imply it:
+  the inbound path applies, then appends. Two holes followed and are closed by declining the claim,
+  not by tracking entries — an append the writer dropped (the Phase-C audit, `dropped_appends`), and a
+  record between its apply and its append when the question arrives (external review 2026-10-31, F3;
+  `WalHandle::inbound_in_flight`, `src/agent/replica_sync.rs`). Both are one number for the node, so
+  a busy or degraded peer answers *not established* for any record, never *persisted* for the wrong
+  one.
 
 The verb moved up a layer to get there. `set_with_min_acks` is an extension trait on `KvHandle`,
 which holds only `CoreCtx` — and core knows nothing about RPC, deliberately. "Consistency as a
