@@ -574,7 +574,7 @@ pub(crate) fn bulk_roots_from_pem(path: &std::path::Path) -> Result<rustls::Root
     let refuse = |why: String| crate::error::GossipError::InvalidField { field: "gateway_tls.bulk_ca_pem_path", reason: why };
     let pem = std::fs::read(path).map_err(|e| refuse(format!("{}: {e}", path.display())))?;
     let mut roots = rustls::RootCertStore::empty();
-    for cert in rustls_pemfile::certs(&mut std::io::Cursor::new(&pem)) {
+    for cert in <rustls::pki_types::CertificateDer as rustls::pki_types::pem::PemObject>::pem_slice_iter(&pem) {
         let cert = cert.map_err(|e| refuse(format!("{}: {e}", path.display())))?;
         roots.add(cert).map_err(|e| refuse(format!("{}: {e}", path.display())))?;
     }
@@ -606,7 +606,7 @@ pub(crate) fn check_bulk_trust(cfg: &crate::config::GossipConfig, node: &NodeId)
             let pem = std::fs::read(cert_path).map_err(|e| GossipError::InvalidField {
                 field: "gateway_tls", reason: format!("{}: {e}", cert_path.display()),
             })?;
-            let chain: Vec<rustls::pki_types::CertificateDer<'static>> = rustls_pemfile::certs(&mut std::io::Cursor::new(&pem))
+            let chain: Vec<rustls::pki_types::CertificateDer<'static>> = <rustls::pki_types::CertificateDer as rustls::pki_types::pem::PemObject>::pem_slice_iter(&pem)
                 .collect::<Result<_, _>>()
                 .map_err(|e| GossipError::InvalidField { field: "gateway_tls", reason: format!("{}: {e}", cert_path.display()) })?;
             let Some((leaf, intermediates)) = chain.split_first() else {
@@ -1305,7 +1305,7 @@ mod tests {
         let (ca, cert, _) = operator_pki(&dir, "op");
         let provider = Arc::new(rustls::crypto::ring::default_provider());
         let operator = rustls::client::WebPkiServerVerifier::builder_with_provider(Arc::new(bulk_roots_from_pem(&ca).unwrap()), Arc::clone(&provider)).build().unwrap();
-        let leaf = rustls_pemfile::certs(&mut std::io::Cursor::new(std::fs::read(&cert).unwrap())).next().unwrap().unwrap();
+        let leaf = <rustls::pki_types::CertificateDer as rustls::pki_types::pem::PemObject>::pem_slice_iter(&std::fs::read(&cert).unwrap()).next().unwrap().unwrap();
         let name = rustls::pki_types::ServerName::IpAddress(std::net::IpAddr::from([127, 0, 0, 1]).into());
         let now = rustls::pki_types::UnixTime::now();
         let check = |fleet_err: rustls::Error| BulkServerVerifier {
