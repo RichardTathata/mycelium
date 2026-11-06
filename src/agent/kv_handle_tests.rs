@@ -494,3 +494,165 @@ async fn wal_only_replica_restart(sync_mode: crate::SyncMode) {
     let _ = std::fs::remove_dir_all(&base_a);
     let _ = std::fs::remove_dir_all(&base_b);
 }
+
+/// **A replica-sync answer covers the apply-to-append window** (external review 2026-10-31, F3; row R8). The receive
+/// path applies an inbound record to the store and then hands it to the WAL. B is paused between the two — the
+/// interleaving the review's probe drove — and asked about the record: it holds the value, has dropped no append and its
+/// WAL syncs, so before R8 it answered `Persisted` for a record a crash at that moment would lose. It must answer
+/// `Failed` until the append has been made, then `Persisted`.
+#[tokio::test]
+async fn a_record_applied_but_not_appended_is_not_reported_persisted() {
+    apply_to_append_window(crate::SyncMode::Async).await;
+}
+#[tokio::test]
+async fn a_record_applied_but_not_appended_is_not_reported_persisted_under_flush() {
+    apply_to_append_window(crate::SyncMode::Flush).await;
+}
+async fn apply_to_append_window(sync_mode: crate::SyncMode) {
+    use crate::agent::replica_sync::{answer, Answer, Query};
+    use crate::PersistenceConfig;
+    use mycelium_core::receipt::{AttemptId, OperationId};
+
+    let port_a = alloc_port();
+    let port_b = alloc_port();
+    let id_a = NodeId::new("127.0.0.1", port_a).unwrap();
+    let id_b = NodeId::new("127.0.0.1", port_b).unwrap();
+    let base_a = std::env::temp_dir().join(format!("myc-r8-a-{port_a}"));
+    let base_b = std::env::temp_dir().join(format!("myc-r8-b-{port_b}"));
+    let _ = std::fs::remove_dir_all(&base_a);
+    let _ = std::fs::remove_dir_all(&base_b);
+    let mk = |port: u16, id: NodeId, peer: NodeId, base: std::path::PathBuf| {
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = port;
+        cfg.bootstrap_peers = vec![peer];
+        cfg.health_check_max_jitter_ms = 50;
+        cfg.persistence = Some(PersistenceConfig {
+            base_path: base,
+            sync_mode,
+            snapshot_wal_threshold: 1_000_000,
+            snapshot_interval_secs: 3_600, on_unreadable: Default::default(),
+        });
+        GossipAgent::new(id, cfg)
+    };
+    let a = mk(port_a, id_a.clone(), id_b.clone(), base_a.clone());
+    let b = mk(port_b, id_b.clone(), id_a.clone(), base_b.clone());
+    a.start().await.unwrap();
+    b.start().await.unwrap();
+    for _ in 0..300 {
+        if !a.peers().is_empty() && !b.peers().is_empty() { break; }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    let key = "r8/window";
+    let pause = b.service().ctx.wal.get().expect("B has a WAL").pause_inbound_after_apply(key);
+
+    let a_ctx = Arc::clone(&a.service().ctx);
+    let op = OperationId::generate(a.node_id());
+    let attempt = AttemptId::fresh(&op);
+    let receipt = mycelium_core::ops::kv_set_with_receipt(
+        &a_ctx, op, attempt, Arc::from(key), Bytes::from_static(b"v"), None,
+    ).await.expect("local write");
+    tokio::time::timeout(Duration::from_secs(10), pause.reached())
+        .await
+        .expect("B applied the record and reached the pause before its append");
+
+    let q = Query { stamp: receipt.stamp, content_hash: receipt.content_hash, key: Arc::from(key) };
+    let b_ctx = Arc::clone(&b.service().ctx);
+    assert_eq!(
+        b.kv().get(key), Some(Bytes::from_static(b"v")),
+        "the pause sits after the apply: B's store holds the value",
+    );
+    assert_eq!(
+        answer(&b_ctx, &q).await, Answer::Failed,
+        "a record applied but not yet handed to the WAL must not be reported persisted",
+    );
+    // Not asserted through the origin's `collect` here: A's query would reach B over the very
+    // connection whose receive task is paused, so B could not answer whatever its state, and the
+    // assertion held with the fix removed (R8's review round 1). The receipt is built only from
+    // `answer()` — `persisted_by` names exactly the peers whose `answer()` returned `Persisted`
+    // (`collect`'s doc) — so the direct call above is the receipt's claim.
+
+    pause.release();
+    let mut last = Answer::Failed;
+    for _ in 0..200 {
+        last = answer(&b_ctx, &q).await;
+        if last == Answer::Persisted { break; }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(last, Answer::Persisted, "once the append has been made the answer is `Persisted`");
+    // Not `inbound_in_flight() == 0` here: B keeps receiving the fleet's own records (heartbeats,
+    // advertisements), so the count is non-zero again whenever one is in flight — under `flush` each
+    // waits on an fsync. `Persisted` above already read it as zero.
+    assert_eq!(b_ctx.wal.get().unwrap().dropped_appends(), 0, "a completed append is not a dropped one");
+
+    a.shutdown().await;
+    b.shutdown().await;
+    let _ = std::fs::remove_dir_all(&base_a);
+    let _ = std::fs::remove_dir_all(&base_b);
+}
+
+/// **The answer reads the in-flight count before the dropped-append count** (R8's review round 1). An inbound
+/// record's window that closes without its append counts a dropped append and *then* releases the in-flight count. An
+/// answer that loaded the dropped count first could see none, then — the window closing in between — see nothing in
+/// flight, and answer `Persisted` for the record that was dropped. B holds a record whose window is open (applied, not
+/// appended); the answer is paused between its two loads; the window is abandoned in that gap.
+#[tokio::test]
+async fn an_append_dropped_between_the_answers_two_reads_is_not_reported_persisted() {
+    use crate::agent::replica_sync::{answer, Answer, Query};
+    use crate::PersistenceConfig;
+    use mycelium_core::receipt::content_hash;
+
+    let port = alloc_port();
+    let id = NodeId::new("127.0.0.1", port).unwrap();
+    let base = std::env::temp_dir().join(format!("myc-r8-order-{port}"));
+    let _ = std::fs::remove_dir_all(&base);
+    let mut cfg = GossipConfig::default();
+    cfg.bind_port = port;
+    cfg.persistence = Some(PersistenceConfig {
+        base_path: base.clone(),
+        sync_mode: crate::SyncMode::Async,
+        snapshot_wal_threshold: 1_000_000,
+        snapshot_interval_secs: 3_600, on_unreadable: Default::default(),
+    });
+    let b = GossipAgent::new(id, cfg);
+    b.start().await.unwrap();
+    let ctx = Arc::clone(&b.service().ctx);
+    let wal = Arc::clone(ctx.wal.get().expect("a WAL"));
+
+    // A peer's record, applied as the receive path applies it: the window opened first.
+    let peer = NodeId::new("127.0.0.1", alloc_port()).unwrap();
+    let key = "r8/order";
+    let window = wal.begin_inbound();
+    let upd = mycelium_core::framing::make_gossip_update(
+        &peer, 4, Arc::from(key), Bytes::from_static(b"v"), false, &ctx.hlc,
+    );
+    mycelium_core::store::apply_and_notify(&ctx.kv_state, &upd);
+    let q = Query { stamp: upd.timestamp, content_hash: content_hash(key, b"v", false), key: Arc::from(key) };
+
+    let pause = wal.pause_answer_between_counts();
+    let asking = tokio::spawn({
+        let ctx = Arc::clone(&ctx);
+        async move { answer(&ctx, &q).await }
+    });
+    // Either the answer reaches the gap between its two loads, or it has already declined (it read the
+    // in-flight count first, which is the fix). In the gap, the window closes without its append.
+    let mut window = Some(window);
+    for _ in 0..1000 {
+        if asking.is_finished() { break; }
+        tokio::select! {
+            _ = pause.reached() => {
+                drop(window.take());
+                pause.release();
+                break;
+            }
+            _ = tokio::time::sleep(Duration::from_millis(5)) => {}
+        }
+    }
+    drop(window);
+    let got = asking.await.unwrap();
+    assert_eq!(wal.dropped_appends(), 1, "the abandoned window counted a dropped append");
+    assert_eq!(got, Answer::Failed, "a record whose append was dropped must not be reported persisted");
+
+    b.shutdown().await;
+    let _ = std::fs::remove_dir_all(&base);
+}

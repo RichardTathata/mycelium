@@ -49,6 +49,24 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     and seventeen more packages from `Cargo.lock`; the tests now name the reqwest `stream` feature they had been getting
     through it.
 
+### Fixed
+
+- **A replica-sync answer no longer reports a record persisted while it sits between its apply and its append**
+  (external review 2026-10-31, F3; `docs/plans/external-review-2026-10-31.md` R8, decision D3). The receive path
+  applies an inbound record to the store and then hands it to the WAL. A `sys.replica-sync.v1` query landing between
+  the two found the value, saw no dropped append — that counter is bumped after the apply — synced a WAL the record
+  had not yet entered, and answered `Persisted`; the origin's receipt then named a peer that a crash at that moment
+  would have lost the record on. Reproduced by the review's probe and again before the fix (both sync modes answered
+  `Persisted` with the receive path paused after the apply). Every inbound record — a `Data` frame, a `SignedData`
+  frame, an anti-entropy entry, now one helper — is counted from before its apply until it is on the WAL writer's
+  channel (`WalHandle::begin_inbound`, `append_inbound`, `inbound_in_flight`; `/health` `persistence.inbound_in_flight`,
+  gauge `gossip_wal_inbound_in_flight`), and the answer is `Failed` while the count is non-zero — read before the
+  dropped-append count, since an abandoned window (a cancelled connection task, a panic) counts its drop and then
+  releases the count. Enqueue is enough: the answer's WAL sync rides the same channel behind the record. The
+  count is one number for the node, so a peer that is receiving answers `Failed` for any record while any inbound
+  record is in flight, and the origin asks it again on its next round. A node's own local writes are not covered
+  (a receipt never asks a node about its own write). `src/agent/replica_sync.rs` module doc; `deprecations.md` §81.
+
 ## [2.39.0] — 2026-11-06
 
 Wire **v12** unchanged (`PREV = 11`). Upgrade notes: `docs/guide/deprecations.md` §66–§77. Companions on their own
