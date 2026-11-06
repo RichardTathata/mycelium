@@ -547,6 +547,19 @@ pub struct SystemStats {
     /// `writer_idle_timeout_secs`; a burst names sockets that connect and never speak.
     pub inbound_connections_timed_out: u64,
 
+    /// Cumulative gateway connections (`http_port`) closed because the TLS handshake, or the request's preface,
+    /// did not arrive within `handshake_timeout_ms` (external review 2026-10-31, R5). Each returned its
+    /// `gateway_max_connections` permit. A burst names sockets that connect to the gateway and never speak.
+    pub gateway_connections_timed_out: u64,
+
+    /// Cumulative times the gateway's accept loop found every `gateway_max_connections` permit held and stopped
+    /// accepting until one returned (R5). Rising means the cap is reached: long-lived streams, a flood, or a cap
+    /// below the load — and while it is reached `/health` and `/ready` wait with every other request.
+    pub gateway_connection_cap_waits: u64,
+
+    /// Gateway connections open at this moment, each holding a `gateway_max_connections` permit (R5).
+    pub gateway_connections_open: u64,
+
     /// Cumulative inbound gossip connections closed because a frame **in progress** stalled — no byte
     /// for `peer_read_stall_timeout_ms`, or below `peer_min_rate_bytes_per_sec` (1 KiB/s by default) over the frame
     /// (#602's review, finding 1). Counted apart from

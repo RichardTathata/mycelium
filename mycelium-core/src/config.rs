@@ -1115,7 +1115,15 @@ pub struct GossipConfig {
     /// socket forever. 30 s comfortably exceeds the 10 s default health-check
     /// interval, so actively-pinged (fan-out) writers stay warm while idle ones close.
     pub writer_idle_timeout_secs: u64,
-    /// Milliseconds a gossip connection may take to become useful, in both directions (row B,
+    /// Milliseconds a connection may take to become useful. **The gateway** (`http_port`; external review
+    /// 2026-10-31, row R5) reads it three ways: the TLS handshake under `gateway_tls` within this bound; then
+    /// the request's preface within it — on HTTP/1 the first byte, on HTTP/2 the 24-byte preface and the
+    /// next frame's header; and on HTTP/2, the keep-alive PING's interval and timeout, **each at least 1 s**
+    /// whatever this says. A miss closes the connection and returns its `gateway_max_connections` permit.
+    /// At the 600 000 ms maximum a silent client holds a permit up to 20 min — 10 for the handshake, 10 for
+    /// the preface — and an HTTP/2 client that stops answering up to 20 min past its last activity (an
+    /// interval, then a timeout); an HTTP/1 client between requests 30 s whatever this says (hyper's
+    /// header-read bound). **A gossip connection**, in both directions (row B,
     /// post-360 hardening, 2026-10-10). **Inbound:** the TLS handshake, then the first byte of the
     /// first frame, must each arrive within this bound, or the socket is closed and its
     /// `max_connections` permit returned — before this bound `max_connections` idle sockets that never
@@ -1446,6 +1454,21 @@ pub struct GossipConfig {
     /// `GOSSIP_GATEWAY_CORS_ORIGINS` (comma-separated; blank = none).
     #[serde(default)]
     pub gateway_cors_origins: Vec<String>,
+
+    /// Maximum number of connections the **gateway** (`http_port`) serves at once — its own bound,
+    /// separate from the gossip listener's `max_connections` (external review 2026-10-31, F5, row R5).
+    /// A connection takes a permit when it is accepted and returns it when it closes; at the bound the
+    /// gateway stops accepting, so a further connection waits in the listen backlog until one closes. A
+    /// connection in its TLS handshake (under `gateway_tls`) or before its preface — on HTTP/2 the
+    /// 24-byte preface and the next frame's header — holds its permit at most `handshake_timeout_ms`; an
+    /// HTTP/1 connection between requests at most 30 s (hyper's header-read bound); an HTTP/2 connection
+    /// with no request until a keep-alive PING goes unanswered — the PING's interval and timeout are each
+    /// `handshake_timeout_ms`, at least 1 s, so a dead HTTP/2 peer holds its permit at most
+    /// max(2 × `handshake_timeout_ms`, 2 s) past its last activity. A connection that **keeps talking** holds its permit, as on
+    /// the gossip listener, and so does a long-running stream: enough of them fill the cap, and then
+    /// `/health` and `/ready` wait with every other request (no slot is reserved for them). Validated
+    /// `1..=65535`. Default `1024`. Env: `GOSSIP_GATEWAY_MAX_CONNECTIONS`.
+    pub gateway_max_connections: usize,
 
     /// OAuth2-style scoped gateway tokens (`compliance` feature).
     ///
@@ -1911,6 +1934,7 @@ impl Default for GossipConfig {
             gateway_auth_token:            None,
             gateway_allow_unauthenticated: false,
             gateway_cors_origins:          Vec::new(),
+            gateway_max_connections:       1024,
             gateway_scoped_tokens:         Vec::new(),
             gateway_named_tokens:          Vec::new(),
             gateway_identity_issuer:       None,
@@ -2342,6 +2366,13 @@ impl GossipConfig {
                 }
             })?;
         }
+        if self.gateway_max_connections == 0 || self.gateway_max_connections > 65535 {
+            return Err(GossipError::InvalidField {
+                field:  "gateway_max_connections",
+                reason: format!("must be in 1..=65535 (each connection consumes one fd), got {}",
+                                self.gateway_max_connections),
+            });
+        }
         if !self.gateway_cors_origins.is_empty() && self.http_port.is_none() {
             return Err(GossipError::InvalidField {
                 field:  "gateway_cors_origins",
@@ -2433,7 +2464,7 @@ impl GossipConfig {
     /// Fields that can be overridden include (the full list, with each variable's field, is
     /// `docs/reference/configuration.md`): `GOSSIP_BIND_ADDRESS`, `GOSSIP_BIND_PORT`,
     /// `GOSSIP_PROPAGATION_WINDOW_SECS`, `GOSSIP_HEALTH_CHECK_INTERVAL_SECS`,
-    /// `GOSSIP_DEFAULT_TTL`, `GOSSIP_MAX_CONNECTIONS`, `GOSSIP_WRITER_CHANNEL_DEPTH`,
+    /// `GOSSIP_DEFAULT_TTL`, `GOSSIP_MAX_CONNECTIONS`, `GOSSIP_GATEWAY_MAX_CONNECTIONS`, `GOSSIP_WRITER_CHANNEL_DEPTH`,
     /// `GOSSIP_MAX_FORWARDING_PEERS`, `GOSSIP_RECONNECT_BACKOFF_SECS`,
     /// `GOSSIP_GOSSIP_CHANNEL_CAPACITY`, `GOSSIP_MAX_SEEN_ENTRIES`,
     /// `GOSSIP_PEER_EVICTION_INTERVALS`, `GOSSIP_GOSSIP_SHARDS`,
@@ -2702,6 +2733,9 @@ impl GossipConfig {
         if let Ok(v) = env::var("GOSSIP_GATEWAY_CORS_ORIGINS") {
             self.gateway_cors_origins =
                 v.split(',').map(str::trim).filter(|o| !o.is_empty()).map(String::from).collect();
+        }
+        if let Ok(v) = env::var("GOSSIP_GATEWAY_MAX_CONNECTIONS") {
+            self.gateway_max_connections = v.parse().map_err(GossipError::Parse)?;
         }
         if let Ok(v) = env::var("GOSSIP_GATEWAY_ALLOW_UNAUTHENTICATED") {
             // Strict, unlike the diagnostic toggles above: this one waives a security refusal, so a
