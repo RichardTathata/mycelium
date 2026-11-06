@@ -2344,8 +2344,10 @@ async fn every_governance_write_route_audits_its_change() {
     // `let gateway = gateway.route(`, a call split across lines); `/govern` alone is the read route. Scope-map and
     // doc lines carry `/gateway/govern/`, not a bare `"/govern/`. The routes are mounted in `mod.rs` only: a family
     // file with a `.route(` of its own would be a second router, so none may have one.
-    let families: [(&str, &str); 15] = [
+    let families: [(&str, &str); 16] = [
         ("authz.rs", include_str!("authz.rs")), ("caps.rs", include_str!("caps.rs")),
+        // The accept loop (external review R5): it serves the router built in mod.rs and mounts no route.
+        ("listener.rs", include_str!("listener.rs")),
         // The cross-origin read layer (Y3): a layer, not a router — its read list names `/gateway/govern`, the read route.
         ("cors.rs", include_str!("cors.rs")),
         ("compliance.rs", include_str!("compliance.rs")), ("federation_routes.rs", include_str!("federation_routes.rs")),

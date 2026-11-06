@@ -123,6 +123,7 @@ mod compliance;
 mod federation_routes;
 mod govern;
 mod kv;
+mod listener;
 #[cfg(feature = "llm")]
 mod llm_bridge;
 mod mcp_bridge;
@@ -500,20 +501,30 @@ pub(super) async fn run_http_server(
     info!(public_paths = ?PUBLIC_PATHS, companion_public_paths = ?COMPANION_PUBLIC_PATHS,
           "gateway: the paths answered without a credential (the companions' only when mounted)");
 
-    // Native gateway TLS (SOC 2 WS-A): when GossipConfig::gateway_tls is set, serve HTTPS
-    // over a hand-rolled tokio-rustls accept loop; otherwise the plain axum::serve path. The
-    // material was resolved in `prepare_gateway`, inside `start()`.
+    // One accept loop for both listeners (external review 2026-10-31, row R5): a connection cap, the TLS
+    // handshake and the request preface each under `handshake_timeout_ms`, hyper's header-read bound live.
+    // Native gateway TLS (SOC 2 WS-A) when `gateway_tls` is set; its material was resolved in
+    // `prepare_gateway`, inside `start()`.
+    let bounds = listener::Bounds {
+        max_connections: state.agent_ctx.config.gateway_max_connections,
+        preface:         Duration::from_millis(state.agent_ctx.config.handshake_timeout_ms),
+    };
     #[cfg(feature = "tls")]
-    if let Some(server_config) = prepared.server_config {
-        info!(addr = %listener.local_addr().unwrap(), "HTTPS gateway listening (native TLS)");
-        return serve_https(listener, app, server_config, shutdown_rx).await;
-    }
-
-    info!(addr = %listener.local_addr().unwrap(), "HTTP server listening");
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal(shutdown_rx))
-        .await
-        .map_err(|e| std::io::Error::other(e.to_string()))
+    let tls = prepared.server_config;
+    #[cfg(feature = "tls")]
+    let scheme = if tls.is_some() { "HTTPS gateway listening (native TLS)" } else { "HTTP server listening" };
+    #[cfg(not(feature = "tls"))]
+    let scheme = "HTTP server listening";
+    info!(addr = %listener.local_addr().unwrap(), max_connections = bounds.max_connections,
+          handshake_timeout = ?bounds.preface, "{scheme}");
+    listener::serve(
+        listener,
+        app,
+        #[cfg(feature = "tls")] tls,
+        bounds,
+        Arc::clone(&state.agent_ctx.transport_bounds),
+        shutdown_rx,
+    ).await
 }
 
 /// **The whole public surface** — every path a gateway answers with no credential, as
@@ -570,55 +581,13 @@ fn build_gateway_server_config(
     }
 }
 
-/// Hand-rolled TLS accept loop: terminate rustls per connection, then serve the axum app over
-/// the TLS stream via hyper-util (both already in-tree via axum — no new compiled crate).
-/// Stops accepting on shutdown; in-flight connections drain on their own tasks.
-#[cfg(feature = "tls")]
-async fn serve_https(
-    listener:      tokio::net::TcpListener,
-    app:           axum::Router,
-    server_config: std::sync::Arc<rustls::ServerConfig>,
-    mut shutdown_rx: watch::Receiver<bool>,
-) -> Result<(), std::io::Error> {
-    use hyper_util::rt::{TokioExecutor, TokioIo};
-    use hyper_util::server::conn::auto::Builder as ConnBuilder;
-    use hyper_util::service::TowerToHyperService;
-
-    let acceptor = tokio_rustls::TlsAcceptor::from(server_config);
-    loop {
-        tokio::select! {
-            _ = shutdown_rx.wait_for(|v| *v) => break,
-            accepted = listener.accept() => {
-                let (tcp, _peer) = match accepted {
-                    Ok(pair) => pair,
-                    Err(e)   => { warn!("gateway TLS accept error: {e}"); continue; }
-                };
-                let acceptor = acceptor.clone();
-                let app = app.clone();
-                tokio::spawn(async move {
-                    let tls_stream = match acceptor.accept(tcp).await {
-                        Ok(s)  => s,
-                        Err(_) => return, // handshake failure (no client cert needed) — drop quietly
-                    };
-                    let io  = TokioIo::new(tls_stream);
-                    let svc = TowerToHyperService::new(app);
-                    let _ = ConnBuilder::new(TokioExecutor::new())
-                        .serve_connection_with_upgrades(io, svc)
-                        .await;
-                });
-            }
-        }
-    }
-    Ok(())
-}
-
-async fn shutdown_signal(mut rx: watch::Receiver<bool>) {
-    let _ = rx.wait_for(|v| *v).await;
-}
-
 #[cfg(test)]
 #[path = "http_tests.rs"]
 mod tests;
+
+/// External review 2026-10-31, row R5: the gateway's accept bounds on both listeners.
+#[cfg(test)]
+mod listener_tests;
 
 /// Post-360 hardening row E: the gateway remainder, one test per promise.
 #[cfg(test)]

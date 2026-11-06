@@ -2347,6 +2347,56 @@ unchanged — its writes are in memory and it has never claimed a disk ([feature
 grant-admitted call, every grant-required invocation and every revoke until a snapshot repairs it, where it used to
 run them.
 
+## 78. The gateway closes a connection that does not speak within `handshake_timeout_ms`, and serves at most `gateway_max_connections` at once; `GossipConfig` gained `gateway_max_connections` (unreleased, external review 2026-10-31, R5)
+
+The gateway's listener (`http_port`) bounded nothing before this release: a socket that connected and sent nothing held
+a task and a file descriptor for as long as the client kept it open, on the plaintext listener and under
+`gateway_tls` alike, and nothing capped how many it held — the gossip listener's `max_connections` and
+`handshake_timeout_ms` never applied to it (finding F5). Now:
+
+- **A silent connection is closed.** Under `gateway_tls` the TLS handshake, and then on both listeners the request's
+  preface (on HTTP/1 its first byte; on HTTP/2 the 24-byte connection preface and the header of the frame after it),
+  must each arrive within `handshake_timeout_ms` — the gossip listener's bound, now read by the gateway too (default
+  `10_000`). A connection that misses either is closed with no answer and counted
+  (`SystemStats::gateway_connections_timed_out`, `gateway_connections_timed_out_total`). After the preface, hyper's
+  header-read bound (30 s) applies to every HTTP/1 request head — before, it was inert — and an HTTP/2 connection is
+  sent a keep-alive PING after `handshake_timeout_ms` of quiet and closed if it does not answer within
+  `handshake_timeout_ms`, each at least 1 s whatever the field says — so a dead HTTP/2 peer holds its permit at most
+  max(2 × `handshake_timeout_ms`, 2 s) past its last activity. **Who notices:** a client that opens a connection and waits more than
+  `handshake_timeout_ms` before its first request, or an HTTP/1 keep-alive connection idle for 30 s between requests, is
+  closed by the server; a client library reconnects on its next request. **A pooling client whose idle timeout is
+  longer than 30 s** (reqwest's default is 90 s; urllib3 and httpx keep connections until the server closes them) can
+  send a request on a connection at the moment the server closes it: an idempotent request is retried by most
+  clients, a **non-idempotent `POST` may surface as a connection error** the caller must decide whether to retry. Set the
+  client's pool idle timeout below 30 s to avoid the race. A deployment that raises `handshake_timeout_ms` for slow
+  gossip links raises the gateway's bound with it.
+- **A cap.** `gateway_max_connections` (default `1024`, validated `1..=65535`, env `GOSSIP_GATEWAY_MAX_CONNECTIONS`)
+  bounds the connections the gateway serves at once. At the bound it stops accepting: a further client is not refused
+  but waits in the listen backlog (a fixed 1024, not `tcp_accept_backlog`, which is the gossip listener's) until a
+  connection closes. A gateway behind a proxy that holds more than 1024 idle upstream connections should raise it, or
+  cap the proxy's pool. **Long-lived streams count:** each SSE stream (`/gateway/signals/…`, `/gateway/rpc/serve/…`,
+  the grant stream) holds a connection while it streams, so enough of them fill the cap, and then `/health` and
+  `/ready` wait with every other request — an orchestrator's probe times out and may restart the node. Size the cap
+  above the streams you expect, and watch `SystemStats::gateway_connection_cap_waits`
+  (`gateway_connection_cap_waits_total`) and `gateway_connections_open`. A slot reserved for the probes is *not
+  built*.
+- **Shutdown releases them.** A connection still in its handshake or preface is closed when the node shuts down; one
+  serving a request finishes it. **Under `gateway_tls` shutdown now waits for those**, up to the node's shutdown
+  drain bound (5 s by default), as the plaintext listener always has; before, the TLS listener returned at once and
+  left its connections running past the node's shutdown.
+- **An accept error backs off.** Out of descriptors (`EMFILE`) or any other error that is not one client's, the
+  gateway waits a second before accepting again, as it did before this release on the plaintext listener; a client's
+  aborted connection is skipped at once.
+
+**Struct literal:** `GossipConfig` gained `gateway_max_connections`, and `SystemStats` gained
+`gateway_connections_timed_out`, `gateway_connection_cap_waits` and `gateway_connections_open` — an exhaustive
+literal of either breaks; `..Default::default()` does not.
+
+**Not bounded, stated:** a connection that keeps talking holds its permit, as on the gossip listener — an HTTP/2
+client that answers PINGs and sends no request is one; a long-running stream holds its permit while it streams. There
+is no per-source cap on the gateway (`max_connections_per_source` is the gossip listener's). A reverse proxy's own
+limits remain the deployment's first bound against a flood.
+
 ## 80. A bulk call works under `gateway_tls`; an operator certificate needs `bulk_ca_pem_path` that verifies it; `max_bulk_payload_bytes` bounds a payload (unreleased, external review 2026-10-31, R7)
 
 **What changed.** A `bulk_call` between nodes whose gateways serve TLS used to time out: the responder fetched the
