@@ -160,7 +160,7 @@ future contributor needs so they don't re-litigate a settled choice — lives he
 
 ## Proposed — not yet started
 
-[`external-review-2026-10-31.md`](external-review-2026-10-31.md) — **the external code security review of 2026-10-31** (agreed with the maintainer 2026-10-31, rev 0.6; nine rows, R1–R4 delivered — #714, #713, #712 — and R5–R9 open): the review's seven findings, all verified true at `d656f50c` — three contradict a claim the repository makes — plus the two the verification added (the grant restart gate proves the exit snapshot, not the WAL; the audit warnings are accepted nowhere in the open); R1–R4 before the next MINOR. The review itself is vendored at [`external/2026-10-31-code-security-review.md`](external/2026-10-31-code-security-review.md).
+[`external-review-2026-10-31.md`](external-review-2026-10-31.md) — **the external code security review of 2026-10-31** (agreed with the maintainer 2026-10-31, rev 0.7; nine rows, R1–R4 released in v2.39.0 — #714, #713, #712 — and R5–R9 open): the review's seven findings, all verified true at `d656f50c` — three contradict a claim the repository makes — plus the two the verification added (the grant restart gate proves the exit snapshot, not the WAL; the audit warnings are accepted nowhere in the open); R1–R4 before the next MINOR (done, v2.39.0). The review itself is vendored at [`external/2026-10-31-code-security-review.md`](external/2026-10-31-code-security-review.md).
 
 [`feature-pages.md`](feature-pages.md) — **feature pages** (proposed, rev 0.2; agreed with the maintainer
 2026-10-19, not started; begins after v2.36.0). One short page per feature: what it is, when to use it, the settings
@@ -168,7 +168,7 @@ that turn it on, its example, its guarantees and *not built* items, and links to
 code. Kept true by a CI gate over a checked-in feature registry, a pass in `/doc-coverage`, and a fifth
 verification-policy rule.
 
-[`adopter-surface.md`](adopter-surface.md) — **the adopter surface** (agreed with the maintainer 2026-10-23, rev 0.19; X0, X1, X2 and X10 released in v2.37.0, X3–X9 and X11 in v2.38.0 — the first wave delivered; of the second (Y1–Y12), every row but Y9 delivered on `main` by 2026-10-31, awaiting the next MINOR, and Y9 paused by the maintainer until a cloud credential is held;
+[`adopter-surface.md`](adopter-surface.md) — **the adopter surface** (agreed with the maintainer 2026-10-23, rev 0.20; X0, X1, X2 and X10 released in v2.37.0, X3–X9 and X11 in v2.38.0 — the first wave delivered; of the second (Y1–Y12), every row but Y9 released in v2.39.0 (2026-11-06), and Y9 paused by the maintainer until a cloud credential is held;
 sequenced after feature-pages F2). From a comparison against Eve, the OpenAI Agents SDK, LangGraph, Mastra and
 Temporal, checked against the code: twelve rows for what is missing — the node published as a binary and an image, `mycelium
 doctor` and `init` (Rust and Python templates), a default-deny

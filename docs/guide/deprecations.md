@@ -2063,7 +2063,7 @@ long and an exhaustive `match` on `Class` needs a `Grant` arm. `wire-check` gain
 rule that requires a grant with no rule admitting anyone to `grant.issue` on its resource (`*` for the operation or
 the resource counts; a `@<node>` suffix on either side is not matched — the reading `test --faults grant` shares).
 
-## 66. A third guarantee profile, `secure-multi-domain`; ten `fed.*` guarantees in every report; `GuaranteeReport::unresolved` lists only what applies (unreleased, adopter-surface Y7)
+## 66. A third guarantee profile, `secure-multi-domain`; ten `fed.*` guarantees in every report; `GuaranteeReport::unresolved` lists only what applies (2.39.0, adopter-surface Y7)
 
 `profile = "secure-multi-domain"` is new: `start()` refuses a node unless the twenty guarantees `secure-single-domain`
 rev 5 requires hold and the seven federation facts too — `fed.domain_enforced` (`domain_profile = "enforced"`), and
@@ -2086,7 +2086,7 @@ them; attach them before `start()`. Under `dev` and `secure-single-domain` a lat
 federating domain, then select it; read each node's `GET /gateway/guarantees` after attaching its edge and clients,
 because `mycelium doctor` builds a node from a file and cannot see them.
 
-## 67. The `ops_console` example is a static page; its server and `/api` proxy are gone; `GossipConfig` gained `gateway_cors_origins` (unreleased, adopter-surface Y3)
+## 67. The `ops_console` example is a static page; its server and `/api` proxy are gone; `GossipConfig` gained `gateway_cors_origins` (2.39.0, adopter-surface Y3)
 
 `cargo run --example ops_console` no longer exists: the Ops Console is `examples/ops_console/index.html`, a page you
 serve with any static file host and open in a browser. Its `:8099` server and its `/api?host=…&path=…` proxy, which
@@ -2109,7 +2109,7 @@ unknown key only if it denies unknown keys — `GossipConfig` does not, so an ol
 cross-origin read. **Migration:** serve `examples/ops_console/` (for example
 `python3 -m http.server 8099 --directory examples/ops_console`) and add its origin to each node you point it at.
 
-## 68. A unit file's `[[schedule]]` is refused by readers before this release; `NodeCapabilityConfig` gained `schedules`; `sched/` is an owned namespace and the `schedule` capability namespace reserved (unreleased, adopter-surface Y2)
+## 68. A unit file's `[[schedule]]` is refused by readers before this release; `NodeCapabilityConfig` gained `schedules`; `sched/` is an owned namespace and the `schedule` capability namespace reserved (2.39.0, adopter-surface Y2)
 
 The unit file gained `[[schedule]]` — declared recurring work, run by the embedding application with
 `GossipAgent::run_schedule` ([unit file § schedule](../reference/unit-file.md#schedule)). Every reader refuses an
@@ -2125,7 +2125,7 @@ is unaffected). **Migration:** declare `[[schedule]]` only in units read by this
 writing `sched/` keys through the KV routes, or advertising a capability in the `schedule` namespace, moves them
 elsewhere.
 
-## 69. `mycelium tls issue` refuses to replace a node key it issued before; `--force` replaces it; `tls ca` and `tls pin` are new (unreleased, adopter-surface Y8)
+## 69. `mycelium tls issue` refuses to replace a node key it issued before; `--force` replaces it; `tls ca` and `tls pin` are new (2.39.0, adopter-surface Y8)
 
 `mycelium tls issue --ca-dir <ca> --node <ip:port> --out <dir>` used to write over `<dir>/<node>.key.pem` silently.
 A key already issued is an identity in use — a node runs on it, a federation partner pins its gateway's key — so
@@ -2140,7 +2140,7 @@ certificate to copy back from a node, never a key to delete), and `mycelium tls 
 pin, refusing a CA certificate and a file that carries a private key. `mycelium::doctor::Doctor` gained `attached`
 (`run_attached` is new), so an exhaustive struct literal breaks; nothing outside the crate builds one.
 
-## 70. A federation edge refuses a credential presented twice; `CallRefusal` gained `Replayed`, `AlreadyAnswered` and `ReplayUndecidable` (unreleased, #695's review)
+## 70. A federation edge refuses a credential presented twice; `CallRefusal` gained `Replayed`, `AlreadyAnswered` and `ReplayUndecidable` (2.39.0, #695's review)
 
 A gateway's `/a2a` now serves each federated credential **once**: the same signed bytes presented again are refused
 `-32003` (`Replayed`), and while a partner's window is full a credential expiring no later than the oldest one it had
@@ -2163,7 +2163,7 @@ on `CallRefusal` already needed a `_` arm (it is `#[non_exhaustive]`), which mus
 `federation_replays_refused` and `federation_replays_undecidable`. **Migration:** mint a credential per request;
 upgrade partners' clients.
 
-## 71. A directory the TLS module creates for keys and certificates is `0700`; every certificate it writes is `0644` (unreleased, #695's confirmation round)
+## 71. A directory the TLS module creates for keys and certificates is `0700`; every certificate it writes is `0644` (2.39.0, #695's confirmation round)
 
 On unix, `auto_cert_dir` when a node creates it at start, `mycelium tls ca --out` and `mycelium tls issue --out` when
 the directory does not exist yet, are now created `0700` whatever the umask (they were left to the umask, `0755` under
@@ -2179,7 +2179,7 @@ is created by the node and then read by a *different* user — already unable to
 now cannot list the directory either. **Migration:** create the directory yourself with the mode you need before the
 first start, or read it as the node's user.
 
-## 72. A `[[rule]]` may carry an `exposure` table, refused by readers before this release; `RuleDecl` gained `exposure`; `sys/ae-exposure/` is a self-owned namespace; a `protected_rpc_kinds` entry named as an exempt operation refuses the start (unreleased, adopter-surface Y5)
+## 72. A `[[rule]]` may carry an `exposure` table, refused by readers before this release; `RuleDecl` gained `exposure`; `sys/ae-exposure/` is a self-owned namespace; a `protected_rpc_kinds` entry named as an exempt operation refuses the start (2.39.0, adopter-surface Y5)
 
 A `[[rule]]` with an `exposure` table is an **exposure rule** — it holds work that extends an unresolved closure while
 that closure is past a threshold ([feature page](../features/exposure-policy.md)). Every reader refuses an unknown key
@@ -2200,7 +2200,7 @@ those are the operations the policy never holds. **Migration:** declare `exposur
 release's tools; build `RuleDecl` literals with `exposure: None`; use `enforcement_point` until every node is
 upgraded; rename a protected kind that collides.
 
-## 73. A take, claim or emit door is decided when an exposure rule selects it; `TupleError`, `BlackboardError` and `ShardError` gained `Refused` (unreleased, adopter-surface Y11)
+## 73. A take, claim or emit door is decided when an exposure rule selects it; `TupleError`, `BlackboardError` and `ShardError` gained `Refused` (2.39.0, adopter-surface Y11)
 
 A tuple take, a blackboard claim and the four emit doors — `/gateway/tuple/take`, `/gateway/tuple/take_by_key`,
 `/gateway/bb/claim`, `/gateway/signal/emit`, `/gateway/mailbox/deliver`, `/gateway/overlay/emit_reliable`,
@@ -2223,7 +2223,7 @@ component's `mesh.emit`. `TupleError`,
 names its operation (`tools/call`, `skill.invoke`, …) rather than `*`, or the evaluator permits the door operations it
 should admit.
 
-## 74. A client runs a `[[schedule]]` through the gateway (`GET /gateway/schedules/run`, scope `schedule:run`); `units/declare`'s schedule refusal names it; `sched.run` gained the reason `unacknowledged`; the Eve loader loads `schedules/` (unreleased, adopter-surface Y12)
+## 74. A client runs a `[[schedule]]` through the gateway (`GET /gateway/schedules/run`, scope `schedule:run`); `units/declare`'s schedule refusal names it; `sched.run` gained the reason `unacknowledged`; the Eve loader loads `schedules/` (2.39.0, adopter-surface Y12)
 
 An SDK agent can now run declared recurring work: `GET /gateway/schedules/run?toml=<one [[schedule]]>` makes the node
 a candidate in the schedule's holder band while the stream is open and hands the client each run, answered with
@@ -2242,7 +2242,7 @@ and refuses by name each schedule it cannot run (another cron, a nested schedule
 uses; an Eve agent whose `schedules/` was refused now loads, and its schedules run only when
 `runEveSchedules` is called.
 
-## 75. A successful empty JWKS withdraws the IdP's keys, and keys the IdP has not confirmed for 24 h are refused (unreleased, external review 2026-10-31 F4)
+## 75. A successful empty JWKS withdraws the IdP's keys, and keys the IdP has not confirmed for 24 h are refused (2.39.0, external review 2026-10-31 F4)
 
 The OIDC verifier read a JWKS fetch that came back with **no keys** as a **failed** fetch and kept the keys it held,
 so an issuer that withdrew every key — a compromised one among them — saw the node go on accepting tokens signed under
@@ -2258,7 +2258,7 @@ stale keys. **Migration:** none for a healthy IdP. If your IdP publishes an empt
 briefly), tokens are refused during that window; if an outage of more than a day must not lock operators out, keep a
 static-token principal for them (`rbac.md`).
 
-## 76. A companion's RPC kind at a gateway door — in a raw route's body, or the path of a signal, mailbox or serve stream — needs the companion's family scope (unreleased, external review 2026-10-31 F1, plan row R1)
+## 76. A companion's RPC kind at a gateway door — in a raw route's body, or the path of a signal, mailbox or serve stream — needs the companion's family scope (2.39.0, external review 2026-10-31 F1, plan row R1)
 
 The gateway's raw routes — `POST /gateway/rpc/call`, `scatter`, `signal/emit`, `mailbox/deliver`, `shard/emit` and
 `overlay/emit_reliable` — take an RPC kind from the request body. A companion serves its operations as kinds of the
@@ -2277,7 +2277,7 @@ still required; an open gateway, which gates no scope on the companion's routes 
 without `compliance` gates no scope anywhere. **Migration:** a scoped token that reached a companion through the
 raw routes under `mesh:write` (or `consensus:write` on `overlay/emit_reliable`) alone now needs the companion's
 scope too — add `board:write`, `tuple:write` or `wiki:write` (or the `:read` form) to it. A token used only on the
-companion's own routes is unaffected. `mycelium-py` 0.2.14's `on_signal` (unreleased; 0.2.13 shipped with v2.38.0) raises a refused stream as the HTTP error
+companion's own routes is unaffected. `mycelium-py` 0.2.14's `on_signal` (0.2.14 ships with v2.39.0; 0.2.13 shipped with v2.38.0) raises a refused stream as the HTTP error
 (`httpx.HTTPStatusError`, or `ProtectedKindError` for a protected kind) where every earlier version surfaced any
 `403` there as httpx-sse's content-type `SSEError`; `mycelium-ts` needs nothing.
 
@@ -2302,7 +2302,7 @@ the gate cannot read as JSON passes through to the handler's own refusal, and on
 `413` as before. (This section is §76 because the plan's sibling PR #712, R4, took §75 first; R2+R3's, #713, is §77. The number
 was taken at the merge, not resolved by overwriting.)
 
-## 77. A grant record the disk will not take is a refusal by name: the door's use marker, the agent's `consumed`, a revocation (unreleased, external review 2026-10-31, R3)
+## 77. A grant record the disk will not take is a refusal by name: the door's use marker, the agent's `consumed`, a revocation (2.39.0, external review 2026-10-31, R3)
 
 Four grant records now reach the disk **before** the step they admit, or that step is refused by name — the maintainer's
 decision D2 on finding F2: a record that cannot be made durable is never a proceed.

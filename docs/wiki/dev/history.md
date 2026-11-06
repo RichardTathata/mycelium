@@ -22,7 +22,35 @@ As of 2026-06-21 all v1.x/v2.0 engineering plans were shipped. Since then, **Leg
 The three-verb operator spine — **localize** (`/fleet`) · **explain** (`/explain`) · **diagnose**
 (`/diagnose`) — is shipped, tested, and documented for both audiences.
 
-## Adopter-surface Y1: context selection — 2026-10-26 (unreleased)
+## v2.39.0 release — 2026-11-06 (tag `v2.39.0`) — the adopter surface's second wave, and the external review's first rows
+
+A **MINOR** cut on `release/v2.39.0`, tagged on the maintainer's word ("Go"). It carries the second wave of
+`docs/plans/adopter-surface.md`, every row but Y9 (paused, rev 0.19): **Y1** context selection (#683); **Y4** trace
+export as spans and the by-hash read (#684, #692); **Y7** `secure-multi-domain` with the `fed.*` family, and the two-mesh
+suite under it (#685, #691); **Y8** the two-domain scaffold (#695) and the federation replay guard its review found
+(#696); **Y3** the observing console (#693); **Y2** declared recurring work and its replay (#694, #700); **Y5** the
+causal exposure policy (#701); **Y6** the Eve loader (#706); **Y10** the pilot kit (#707); **Y11** exposure at the take,
+claim and emit doors (#708); **Y12** an SDK route for running schedules (#709). And rows R1–R4 of the external code
+security review of 2026-10-31 (`docs/plans/external-review-2026-10-31.md`): **R4** the JWKS withdrawal and the stale
+ceiling (#712); **R2+R3** a restart that keeps only the WAL, and a grant's use on disk before the work runs (#713);
+**R1** a companion's RPC kind needing its family scope at every gateway door (#714). Also the identity-and-lifecycle
+plan at rev 0.7 (#715, #716), the two security PATCHes' sections on `main` (#698, #705), wasmtime 49.0.5 (#703) and the
+TLS module's directories `0700` (#699). The companions move on their own tags: `mycelium-py` 0.2.14 (`on_signal` raises
+a refused stream as the HTTP error) and `mycelium-ts` 0.2.8 (the Eve loader, the schedule verbs); `mycelium-reason`
+0.11.0, `mycelium-guardrails` 1.1.0, `langgraph-checkpoint-mycelium` 0.3.4 and `strands-session-mycelium` 0.1.0 are
+unchanged since their tags. Wire **v12** unchanged; upgrade notes `deprecations.md` §66–§77.
+Log: `.log/2026-11-06-release-v2.39.0.md`.
+
+## The adopter surface's second wave — 2026-10-26 → 31 (released in 2.39.0)
+
+Each row through an independent adversarial review, its findings fixed with a test seen failing first or answered in the
+thread (the rounds are in the plan's §8 reviewer cells). Found on the way: a recording of a whole node could not be
+replayed by another process — two per-process seeds and a CPU-count default, found by Y2's replay (#700); a federated
+credential presented twice was served twice, found by the scaffold's README (#696); the TLS module's directories were
+created with the umask (#699). Records: the `.log/2026-10-2[6-8]-y*.md`, `.log/2026-10-30-y*.md` and
+`.log/2026-10-27-federation-replay-guard.md` entries; for the review rows, `.log/2026-10-31-*.md`.
+
+## Adopter-surface Y1: context selection — 2026-10-26 (released in 2.39.0)
 
 The second wave's first row (D14): `mycelium::knowledge::selection` returns records for a run with issuer,
 attribution, standing and the reader's verdict intact, one `VerdictClass` each (standing before verdict), ranked by the

@@ -98,7 +98,7 @@ reported as `audit_unverified`, never sealed over). Seal a checkpoint with the *
   the node.
 - **The secure posture cannot rotate** (`rotate_identity` needs the CA key). Recovery there is
   **re-issue only**: `mycelium tls issue --force` a new certificate (`--force` because it replaces the node's key and
-  every pin a partner holds for it — [deprecations § 69](../guide/deprecations.md#69-mycelium-tls-issue-refuses-to-replace-a-node-key-it-issued-before---force-replaces-it-tls-ca-and-tls-pin-are-new-unreleased-adopter-surface-y8); it is issued after every earlier one, so the
+  every pin a partner holds for it — [deprecations § 69](../guide/deprecations.md#69-mycelium-tls-issue-refuses-to-replace-a-node-key-it-issued-before---force-replaces-it-tls-ca-and-tls-pin-are-new-2390-adopter-surface-y8); it is issued after every earlier one, so the
   new key outranks them), restart the node with it, then `POST /gateway/identity/revoke` the old key.
 - **A retired key still verifies until it is revoked.** `rotate_identity` alone is hygiene.
 - **Anti-entropy** entries carry no author and no signature, so a revocation cannot reach them. (An unsigned

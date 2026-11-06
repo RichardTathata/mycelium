@@ -8,10 +8,11 @@ holds a client for the other, pinned to that gateway's key; each node's egress l
 call made at one gateway by its local caller reaches the other domain's provider carrying that caller's name, where
 the provider's own policy decides it again.
 
-**Until the next MINOR release, this project builds only against a checkout of the repository** (v2.38.2 and v2.38.3 are security PATCHes without it): `secure-multi-domain`,
-`mycelium tls ca` and the doctor this project runs are newer than every published tag, so a `Cargo.toml` pinned to one
-of them does not build. Point its `mycelium` dependency at a checkout (`mycelium = { path = "…", features = [...] }`)
-and use that checkout's `mycelium` binary, as CI does; from the next MINOR release the pin `mycelium init` writes is enough.
+**Before v2.39.0, this project built only against a checkout of the repository** (v2.38.2 and v2.38.3 are security PATCHes without it): `secure-multi-domain`,
+`mycelium tls ca` and the doctor this project runs reached a published tag with v2.39.0, so a `Cargo.toml` pinned to an
+earlier one does not build. From v2.39.0 the pin `mycelium init` writes is enough; to build against a checkout instead,
+point the `mycelium` dependency at it (`mycelium = { path = "…", features = [...] }`) and use that checkout's
+`mycelium` binary, as CI does.
 
 ```bash
 export MYCELIUM=$(command -v mycelium)   # the published binary: `tls ca`, `tls issue`, `tls pin`

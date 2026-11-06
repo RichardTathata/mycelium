@@ -518,7 +518,7 @@ the gateway writes for the call; `mycelium explain --correlation <id> <evidence.
 chain. A malformed value is refused (`request_malformed`; `400` on `set`). Substrate X4,
 `docs/features/causal-records.md`.
 
-### An Eve agent directory (unreleased)
+### An Eve agent directory (0.2.8)
 
 `loadEveAgent(dir)` reads an [Eve](https://www.npmjs.com/package/eve) `agent/` directory installed beside the one
 `eve` version the loader pins, **0.80.0**, and refuses a directory beside any other version (adopter-surface Y6). It is a

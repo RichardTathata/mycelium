@@ -26,7 +26,7 @@ need a release that carries the `grant` and `recovery` classes** — 2.38.0 or l
 with `unknown argument: test` (that release has no `test` command), and steps 1, 2, 3 and 6 run:
 
 ```sh
-TAG=v2.38.3                       # the newest release; the job reads it from the Release that triggered it
+TAG=v2.39.0                       # the newest release; the job reads it from the Release that triggered it
 REPO=RichardTathata/mycelium
 PLATFORM=linux-x86_64             # or linux-aarch64, macos-aarch64 — the tarball names the release ships
 ```
@@ -116,7 +116,7 @@ a CA minted for the run, the one-second timers the class sets — so the step se
 last lines if the class did not pass (an unknown argument, a configuration the node refuses), and the verdict is the
 report. On v2.38.1 through v2.38.3 the file also holds, from the class's own fleet, a warning that the fleet CA's key is on the node,
 and in step 5 one that decisions will not be recorded: neither is about your configuration, and both are gone from
-the next MINOR release (v2.38.2 and v2.38.3 are security PATCHes and do not carry the fix).
+v2.39.0 (v2.38.2 and v2.38.3 are security PATCHes and do not carry the fix).
 
 ```bash one-hour:4
 cd "$HOME/governed-call-py"
@@ -152,7 +152,7 @@ grep -q 'mycelium explain --closure' recovery.log
 `mycelium doctor` ([feature page](../../features/doctor.md)) runs `start()`'s own refusal chain and profile check
 over a node built and never started, counts the guarantees by state (a state with none is not printed), and lists
 what the configuration does **not** enforce — so the token table, which it does, must not appear as unmet, and some
-guarantee must be enforced. From the next MINOR release (after the v2.38.3 PATCH), a line `enforced: …` names the enforced ones too.
+guarantee must be enforced. From v2.39.0, a line `enforced: …` names the enforced ones too.
 
 ```bash one-hour:6
 cd "$HOME/governed-call-py"

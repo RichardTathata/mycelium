@@ -28,7 +28,7 @@ together, on one machine, before anything touches theirs:
 | Step | What you run | What it tells the pilot |
 |---|---|---|
 | 0 · the hour | [tutorial 7](../guide/tutorials/07-the-first-hour.md), the `one-hour` job's path from the published node | the machine, the network and the release do what the job shows; stop here if they do not |
-| 1–2 · the scaffold | `mycelium init $PILOT --template two-domains`, pointed at a checkout until the next MINOR | two fleets of two nodes, each its own domain under `secure-multi-domain`, with the kit's declaration beside them |
+| 1–2 · the scaffold | `mycelium init $PILOT --template two-domains`, pointed at a checkout as CI does, or from v2.39.0 at the tag it pins | two fleets of two nodes, each its own domain under `secure-multi-domain`, with the kit's declaration beside them |
 | 3 · the edge | `bash fleet.sh setup`, `start-all`, `connect`, `call` each way | certificates issued off-node, a pinned key each way, one call across the edge carrying the local caller's name |
 | 4 · `doctor` | `bash fleet.sh doctor <node>` on all four | what `start()` would say, one guarantee per line, under the profile; each line names its [matrix row](shared-responsibility-matrix.md#from-a-doctor-line-to-its-row), or says it has none and why |
 | 5 · the faults | `mycelium test --faults units --config faults.toml` | revocation, a restart over the WAL, a partition, a lost acknowledgement recovered and a grant across a restart, each against the declaration |
