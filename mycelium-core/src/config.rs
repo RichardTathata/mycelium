@@ -1116,9 +1116,14 @@ pub struct GossipConfig {
     /// interval, so actively-pinged (fan-out) writers stay warm while idle ones close.
     pub writer_idle_timeout_secs: u64,
     /// Milliseconds a connection may take to become useful. **The gateway** (`http_port`; external review
-    /// 2026-10-31, row R5): the TLS handshake under `gateway_tls`, then the first request's preface, must
-    /// each arrive within this bound, or the connection is closed and its `gateway_max_connections` permit
-    /// returned. **A gossip connection**, in both directions (row B,
+    /// 2026-10-31, row R5) reads it three ways: the TLS handshake under `gateway_tls` within this bound; then
+    /// the request's preface within it — on HTTP/1 the first byte, on HTTP/2 the 24-byte preface and the
+    /// next frame's header; and on HTTP/2, the keep-alive PING's interval and timeout, **each at least 1 s**
+    /// whatever this says. A miss closes the connection and returns its `gateway_max_connections` permit.
+    /// At the 600 000 ms maximum a silent client holds a permit up to 20 min — 10 for the handshake, 10 for
+    /// the preface — and an HTTP/2 client that stops answering up to 20 min past its last activity (an
+    /// interval, then a timeout); an HTTP/1 client between requests 30 s whatever this says (hyper's
+    /// header-read bound). **A gossip connection**, in both directions (row B,
     /// post-360 hardening, 2026-10-10). **Inbound:** the TLS handshake, then the first byte of the
     /// first frame, must each arrive within this bound, or the socket is closed and its
     /// `max_connections` permit returned — before this bound `max_connections` idle sockets that never

@@ -18,7 +18,8 @@
 //!    before #719's review;
 //! 4. is served by hyper with a timer, so HTTP/1's header-read bound (hyper's default, 30 s) is live for the
 //!    head of every request after that, and HTTP/2 sends a keep-alive PING after `handshake_timeout_ms` of
-//!    quiet and closes a connection that does not answer it within `handshake_timeout_ms`.
+//!    quiet and closes a connection that does not answer it within `handshake_timeout_ms` — each at least 1 s,
+//!    so a tight gossip bound does not close a live WAN client.
 //!
 //! On shutdown the loop stops accepting; a connection in its handshake is dropped, and one past it is shut
 //! down gracefully, as `axum::serve` did (a connection waiting on its preface or between requests closes at
@@ -66,6 +67,16 @@ const H2_PREFACE: &[u8; 24] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
 /// An HTTP/2 frame header (RFC 9113 §4.1): after the preface the deadline waits for one — the client's SETTINGS,
 /// which RFC 9113 §3.4 says must follow — before it hands the connection to hyper's keep-alive.
 const H2_FRAME_HEADER: usize = 9;
+
+/// The HTTP/2 keep-alive's interval and timeout for a gateway whose preface bound is `preface`: the same bound,
+/// but never under [`H2_KEEP_ALIVE_FLOOR`] — `handshake_timeout_ms` validates down to 1 ms for a fast gossip mesh,
+/// and a PING a WAN client cannot answer in time would close it while it is live (#719's review round 2, N1).
+fn h2_keep_alive(preface: Duration) -> Duration {
+    preface.max(H2_KEEP_ALIVE_FLOOR)
+}
+
+/// The least interval and timeout the gateway's HTTP/2 keep-alive uses, whatever `handshake_timeout_ms` says.
+const H2_KEEP_ALIVE_FLOOR: Duration = Duration::from_secs(1);
 
 /// How long the accept loop waits after an accept error that is not the client's (`axum::serve`'s figure).
 const ACCEPT_ERROR_BACKOFF: Duration = Duration::from_secs(1);
@@ -210,8 +221,8 @@ where
     builder.http2()
         .timer(TokioTimer::new())
         .enable_connect_protocol()
-        .keep_alive_interval(Some(preface))
-        .keep_alive_timeout(preface);
+        .keep_alive_interval(Some(h2_keep_alive(preface)))
+        .keep_alive_timeout(h2_keep_alive(preface));
     let io = TokioIo::new(PrefaceDeadline::new(io, preface, Arc::clone(counters)));
     let conn = builder.serve_connection_with_upgrades(io, TowerToHyperService::new(app));
     tokio::pin!(conn);
@@ -357,6 +368,17 @@ mod preface_tests {
         bytes.extend_from_slice(&[0xff; 9]); // any frame header, not a continuation of the preface
         p.observe(&bytes);
         assert!(p.deadline.is_none());
+    }
+
+    /// #719's review round 2, N1: `handshake_timeout_ms` validates down to 1 ms for the gossip mesh; the
+    /// gateway's PING must not follow it below a round trip a WAN client can answer in.
+    #[test]
+    fn the_http2_keep_alive_has_a_one_second_floor() {
+        assert_eq!(h2_keep_alive(Duration::from_millis(1)), H2_KEEP_ALIVE_FLOOR);
+        assert_eq!(h2_keep_alive(Duration::from_millis(50)), H2_KEEP_ALIVE_FLOOR);
+        assert_eq!(h2_keep_alive(Duration::from_millis(999)), H2_KEEP_ALIVE_FLOOR);
+        assert_eq!(h2_keep_alive(Duration::from_secs(10)), Duration::from_secs(10), "the default is unchanged");
+        assert_eq!(h2_keep_alive(Duration::from_secs(600)), Duration::from_secs(600), "and so is the maximum");
     }
 
     #[test]

@@ -193,16 +193,18 @@ impl TransportBounds {
 
     /// One gateway connection opened (it holds a permit until [`Self::gateway_connection_closed`]).
     pub fn gateway_connection_opened(&self) {
-        let _n = self.gateway_open.fetch_add(1, Ordering::Relaxed) + 1;
+        self.gateway_open.fetch_add(1, Ordering::Relaxed);
+        // Increment, not `set(n)` after the atomic: two connections opening at once could otherwise publish
+        // their values in the opposite order and leave the gauge one low (#719's review round 2, N2).
         #[cfg(feature = "metrics")]
-        metrics::gauge!("gateway_connections_open").set(_n as f64);
+        metrics::gauge!("gateway_connections_open").increment(1.0);
     }
 
     /// One gateway connection closed.
     pub fn gateway_connection_closed(&self) {
-        let _n = self.gateway_open.fetch_sub(1, Ordering::Relaxed).saturating_sub(1);
+        self.gateway_open.fetch_sub(1, Ordering::Relaxed);
         #[cfg(feature = "metrics")]
-        metrics::gauge!("gateway_connections_open").set(_n as f64);
+        metrics::gauge!("gateway_connections_open").decrement(1.0);
     }
 
     /// Counts one inbound connection closed by a handshake, first-frame or idle bound.
