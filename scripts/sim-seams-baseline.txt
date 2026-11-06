@@ -41,6 +41,7 @@
 1 src/agent/helpers.rs
 2 src/agent/http/authz.rs
 2 src/agent/http/caps.rs
+2 src/agent/http/listener.rs
 2 src/agent/http/mod.rs
 8 src/agent/http/overlay.rs
 7 src/agent/journal.rs

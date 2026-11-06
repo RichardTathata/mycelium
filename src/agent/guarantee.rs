@@ -870,7 +870,7 @@ pub(crate) fn core_guarantees() -> Vec<GuaranteeDescriptor> {
         g("gw.tls", 1, "gateway", Node,
           "the gateway serves HTTPS, so bearers and JWTs do not cross the wire in cleartext",
           "`tls`; `[gateway_tls]` (or TLS terminated by a proxy in front — not visible here)",
-          &["http::serve_https"], "docs/operations/gateway-tls.md",
+          &["http::listener::serve"], "docs/operations/gateway-tls.md",
           gateway_role,
           in_gateway_build(|c| {
               #[cfg(feature = "tls")]

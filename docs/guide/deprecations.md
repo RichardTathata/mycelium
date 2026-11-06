@@ -2346,3 +2346,31 @@ unchanged — its writes are in memory and it has never claimed a disk ([feature
 **Operator note:** a node whose WAL writer is poisoned (`/health`: `wal_refusing_appends`) now refuses every
 grant-admitted call, every grant-required invocation and every revoke until a snapshot repairs it, where it used to
 run them.
+
+## 78. The gateway closes a connection that does not speak within `handshake_timeout_ms`, and serves at most `gateway_max_connections` at once; `GossipConfig` gained `gateway_max_connections` (unreleased, external review 2026-10-31, R5)
+
+The gateway's listener (`http_port`) bounded nothing before this release: a socket that connected and sent nothing held
+a task and a file descriptor for as long as the client kept it open, on the plaintext listener and under
+`gateway_tls` alike, and nothing capped how many it held — the gossip listener's `max_connections` and
+`handshake_timeout_ms` never applied to it (finding F5). Now:
+
+- **A silent connection is closed.** Under `gateway_tls` the TLS handshake, and then on both listeners the request's
+  preface (the first bytes, from which the server tells HTTP/1 from HTTP/2), must each arrive within
+  `handshake_timeout_ms` — the gossip listener's bound, now read by the gateway too (default `10_000`). A connection
+  that misses either is closed with no answer. After the preface, hyper's header-read bound (30 s) applies to every
+  HTTP/1 request head; before, it was inert. **Who notices:** a client that opens a connection and waits more than
+  `handshake_timeout_ms` before its first request, or an HTTP/1 keep-alive connection idle for 30 s between requests, is
+  closed by the server; a client library reconnects on its next request. A deployment that raises
+  `handshake_timeout_ms` for slow gossip links raises the gateway's bound with it.
+- **A cap.** `gateway_max_connections` (default `1024`, validated `1..=65535`, env `GOSSIP_GATEWAY_MAX_CONNECTIONS`)
+  bounds the connections the gateway serves at once. At the bound it stops accepting: a further client is not refused
+  but waits in the listen backlog until a connection closes. A gateway behind a proxy that holds more than 1024 idle
+  upstream connections should raise it, or cap the proxy's pool.
+- **Shutdown releases them.** A connection still in its handshake or preface is closed when the node shuts down; one
+  serving a request finishes it, as before.
+
+**Struct literal:** `GossipConfig` gained a field — an exhaustive literal breaks; `..Default::default()` does not.
+
+**Not bounded, stated:** a connection that keeps talking holds its permit, as on the gossip listener; an HTTP/2
+connection past its preface is bounded by the cap, not by a timer; a long-running stream (an SSE route) holds its
+permit while it streams. A reverse proxy's own limits remain the deployment's first bound against a flood.

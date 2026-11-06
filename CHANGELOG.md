@@ -9,6 +9,18 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Security
+
+- **The gateway closes a connection that does not speak, and caps how many it serves** (external review 2026-10-31,
+  F5; `docs/plans/external-review-2026-10-31.md` R5). Before, a socket that connected to `http_port` and sent nothing
+  held a task and a file descriptor for as long as the client kept it open — on the plaintext listener and under
+  `gateway_tls` alike — and nothing capped how many: the gossip listener's bounds never applied to the gateway. Both
+  listeners now run one accept loop (`src/agent/http/listener.rs`): a connection takes one of
+  `gateway_max_connections` permits (new, default `1024`, `GOSSIP_GATEWAY_MAX_CONNECTIONS`) before it is accepted;
+  the TLS handshake and then the request's preface each arrive within `handshake_timeout_ms` or the connection is
+  closed; hyper's 30 s header-read bound is live for every HTTP/1 request head; shutdown closes a connection still in
+  its handshake. Upgrade note: `docs/guide/deprecations.md` §78.
+
 ## [2.39.0] — 2026-11-06
 
 Wire **v12** unchanged (`PREV = 11`). Upgrade notes: `docs/guide/deprecations.md` §66–§77. Companions on their own
