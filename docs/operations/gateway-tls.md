@@ -101,6 +101,10 @@ whose refusal is final. So an operator certificate (`cert_pem_path`) issued by t
 `ca-key.pem`, say — refuses `start()` by name; serve the node certificate (leave `cert_pem_path` and `key_pem_path`
 unset), or issue the gateway certificate from a separate operator CA and name that CA in `bulk_ca_pem_path`.
 
+**The address is taken as given.** The start check verifies the certificate for the IP the node advertises in its node
+id, exactly as written (an IPv6 address is bracketed in the fetch URL). A node advertising an unspecified address
+(`0.0.0.0` or `::`) cannot be fetched from, and is not refused for it — **not built**.
+
 **Where the trust lives.** `bulk_ca_pem_path` is a field of `gateway_tls`, so only a node with `gateway_tls` can name
 operator roots. A responder whose own gateway is plaintext trusts the fleet CA alone and cannot fetch from an
 operator-cert gateway; giving it `gateway_tls` to name the CA also makes its own tickets `https`. A trust setting
