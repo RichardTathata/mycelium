@@ -6,6 +6,12 @@ All notable changes to this crate. It versions **independently** of the Mycelium
 
 ---
 
+## [Unreleased]
+
+- **Tokio's minimum is raised to 1.53.3** (RUSTSEC-2026-0386: `AsyncFd::new` and its siblings violate I/O safety;
+  external review 2026-10-31, R9). An application whose lockfile pins Tokio below 1.53.3 must `cargo update -p tokio`.
+  No code change.
+
 ## [0.11.0] — 2026-10-26
 
 **A traced run's `run_id` is its `correlation`** (adopter-surface X4, the substrate's causal records). When a route

@@ -46,7 +46,7 @@ fastrand = "2"
 ed25519-dalek = "2"
 # `rt` only — the provisioner spawns a serve task per hosted capability (tokio::spawn +
 # JoinHandle). The embedder supplies the runtime (same one the GossipAgent runs on).
-tokio    = { version = "1.35", features = ["rt", "fs", "io-util", "net", "sync", "macros", "signal"] }  # fs + io-util: the disk stage (S1); sync: the re-probe round's semaphore and the egress proxy; net + macros: the activation egress proxy; signal: mycelium-stem's SIGHUP
+tokio    = { version = "1.53.3", features = ["rt", "fs", "io-util", "net", "sync", "macros", "signal"] }  # fs + io-util: the disk stage (S1); sync: the re-probe round's semaphore and the egress proxy; net + macros: the activation egress proxy; signal: mycelium-stem's SIGHUP
 # Resource-aware install eligibility (artifact-library §4.4): the default ResourceProbe
 # reads available memory + disk so a node never elects for an artifact it cannot fit.
 # system+disk features only — no process/network/component scanning.
@@ -122,7 +122,7 @@ required-features = ["stem"]
 # compliance feature of the node; without it a bearer is a bearer).
 mycelium = { path = "..", default-features = false, features = ["test-util", "compliance"] }
 metrics-util = "0.20.4"
-tokio = { version = "1.35", features = ["full"] }
+tokio = { version = "1.53.3", features = ["full"] }
 reqwest = { version = "0.12", features = ["json"] }
 serde_json = "1.0"
 # #644's review, finding 6: a loopback TLS upstream signed by a test CA, so the egress proxy's https

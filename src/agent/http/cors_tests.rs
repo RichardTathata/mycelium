@@ -346,7 +346,7 @@ async fn the_https_gateway_answers_a_listed_origin_the_same_way() {
     tokio::time::sleep(Duration::from_millis(150)).await;
     let ca_pem = std::fs::read(cert_dir.join("ca-cert.pem")).expect("ca-cert.pem written");
     let mut roots = rustls::RootCertStore::empty();
-    for cert in rustls_pemfile::certs(&mut std::io::Cursor::new(&ca_pem)) {
+    for cert in <rustls::pki_types::CertificateDer as rustls::pki_types::pem::PemObject>::pem_slice_iter(&ca_pem) {
         roots.add(cert.unwrap()).unwrap();
     }
     let connector = tokio_rustls::TlsConnector::from(Arc::new(
