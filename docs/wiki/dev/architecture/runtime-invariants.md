@@ -523,7 +523,7 @@ P1 defects with deterministic probes — each had shipped in every tagged releas
 (`mycelium-core/src/persistence.rs` module doc is canon; gates in its `durability_tests`).
 
 **1. Apply, then persist.** Every write site (`ops.rs` `kv_set*`/`kv_delete*`, `connection.rs`
-gossip receive + anti-entropy + quorum evidence, `mailbox.rs`, gateway `kv_write`, the agent state machine's `write_owned_kv` — a grant's request and markers —
+gossip receive + anti-entropy + quorum evidence, `mailbox.rs`, gateway `kv_write`, the agent state machine's `write_owned_kv` — a grant's request; its `consumed` marker, the doors' `used/{door}` markers and a revocation's records go **persist → apply → gossip** through `kv_set_requiring_sync` under `contracts-receipts.md` §2.2's exception since the external review of 2026-10-31 (R3) —
 and consensus's acceptor and decision writes in `src/consensus.rs`) calls
 `apply_and_notify` *before* `WalHandle::append*`. Pre-fix the async paths awaited the Flush-mode
 ack first, and the writer runs its threshold snapshot **in the same poll as the ack, with no yield**

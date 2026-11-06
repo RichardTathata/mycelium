@@ -891,3 +891,227 @@ async fn issue_pending(a: Arc<GossipAgent>, http_port: u16, agent_principal: Str
     assert_eq!(status, 200, "{body}");
     request
 }
+
+use crate::test_util::{kv_dir_under, restore_start_snapshot, sabotage_exit_snapshot};
+
+/// **A restart that keeps only the WAL replays the request, the grant and the door's marker** (external review
+/// 2026-10-31, R2). Every restart gate before this one — the test above, `test --faults restart`, the replica gate —
+/// went through `shutdown()`, whose exit snapshot is taken from the **store**: a record the store held and the WAL
+/// never took was carried over by that snapshot, so those gates proved the exit-snapshot path and not the WAL (with
+/// the WAL append removed from `write_owned_kv`, all of them pass). Here the exit snapshot is made to fail, the start
+/// snapshot is put back, and the restart replays start snapshot + WAL tail: each record is back only if it reached
+/// the WAL. Seen failing with that same plant.
+#[tokio::test]
+async fn a_restart_that_keeps_only_the_wal_replays_the_request_the_grant_and_the_door_marker() {
+    let (http_port, gossip_port) = (alloc_port(), alloc_port());
+    let opts = Opts { gossip_port: Some(gossip_port), persist: true, ..Opts::default() };
+    let dir = std::env::temp_dir().join(format!("x3-grant-{gossip_port}"));
+    let _ = std::fs::remove_dir_all(&dir);
+    let (a, _j, ran) = node_with(http_port, opts.clone()).await;
+    let agent_principal = crate::agent::gateway_caller::node_principal(a.node_id());
+    let prefix = format!("grant/{agent_principal}/");
+    let args = serde_json::json!({"env": "prod", "replicas": 3});
+    let sm = a.agent_state_machine(policy(20_000));
+    sm.transition(ExecutionState::Planning).await.unwrap();
+    let (mandate, request) = granted(&a, http_port, &sm, &args).await;
+    assert!(call_deploy(&a, None, &mandate, &args).await.is_ok(), "one execution under the grant");
+    assert_eq!(ran.load(Ordering::SeqCst), 1);
+    let held = |a: &GossipAgent| -> Vec<String> {
+        let mut keys: Vec<String> = crate::store::scan_kv_prefix(&a.task_ctx.kv_state, &prefix).into_iter().map(|(k, _)| k.to_string()).collect();
+        keys.sort();
+        keys
+    };
+    let before = held(&a);
+    for want in [request.as_str(), "/issued", "/consumed", "/used/provider"] {
+        assert!(before.iter().any(|k| k.ends_with(want)), "the node holds {want}: {before:?}");
+    }
+    // The crash: the exit snapshot fails, so only the WAL carries the records across.
+    let kv_dir = kv_dir_under(&dir.join("persist"));
+    sabotage_exit_snapshot(&kv_dir);
+    a.shutdown().await;
+    drop(sm);
+    drop(a);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    restore_start_snapshot(&kv_dir);
+    let (a, _j, _ran) = node_with(http_port, opts).await;
+    let after = held(&a);
+    for k in &before {
+        assert!(after.contains(k), "{k} did not come back from the WAL alone; after the restart: {after:?}");
+    }
+    a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// **A grant's use is on disk before the work runs, or the work does not run** (external review 2026-10-31, F2;
+/// decision D2). The WAL writer is poisoned, so no append reaches the disk; a protected call under a valid grant is
+/// then **refused by name** — before this, the marker's append was dropped and counted and the call ran, so after a
+/// crash the door had forgotten the use. The refusal is a decision on the record; the in-memory claim is spent (a
+/// second presentation is `GrantUsed`); the tool ran nothing. Seen failing with the marker's write back on
+/// `append_try`: the call succeeded.
+#[tokio::test]
+async fn a_protected_call_is_refused_when_its_grant_use_cannot_be_made_durable() {
+    let (http_port, gossip_port) = (alloc_port(), alloc_port());
+    let opts = Opts { gossip_port: Some(gossip_port), persist: true, ..Opts::default() };
+    let dir = std::env::temp_dir().join(format!("x3-grant-{gossip_port}"));
+    let _ = std::fs::remove_dir_all(&dir);
+    let (a, journal, ran) = node_with(http_port, opts).await;
+    let args = serde_json::json!({"env": "prod", "replicas": 3});
+    let sm = a.agent_state_machine(policy(20_000));
+    sm.transition(ExecutionState::Planning).await.unwrap();
+    let (mandate, _request) = granted(&a, http_port, &sm, &args).await;
+    // The disk goes away: every append is refused from here.
+    a.task_ctx.wal.get().expect("the node persists").poison_for_test("r3: the disk is gone").await.unwrap();
+    let err = call_deploy(&a, None, &mandate, &args).await.expect_err("a use that cannot be recorded durably does not run");
+    assert!(err.contains("not recorded durably"), "the refusal names the reason: {err}");
+    assert_eq!(ran.load(Ordering::SeqCst), 0, "the tool ran nothing");
+    let denied = records(&journal).into_iter().filter(|r| r.reason.contains("not recorded durably")).count();
+    assert_eq!(denied, 1, "the refusal is a decision on the record");
+    // Nothing ran, so the use is not spent: once the disk is back (a repairing snapshot un-poisons the writer), the
+    // same grant runs once — and the marker is on the WAL this time. A spent claim here would answer `GrantUsed`
+    // and make the supervisor re-issue for a tool that never ran.
+    a.task_ctx.wal.get().unwrap().trigger_snapshot().await.expect("the repairing snapshot");
+    assert!(call_deploy(&a, None, &mandate, &args).await.is_ok(), "the retry after repair runs");
+    assert_eq!(ran.load(Ordering::SeqCst), 1, "once");
+    let again = call_deploy(&a, None, &mandate, &args).await.expect_err("spent now");
+    assert!(again.contains("used"), "the use is on the record: {again}");
+    assert_eq!(ran.load(Ordering::SeqCst), 1);
+    a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// **A revocation the disk will not take is refused by name, and the retried one survives a restart that keeps only
+/// the WAL** (external review 2026-10-31, #713's review, finding 1 — the sibling of the use marker). Before this, the
+/// route answered `200 {"ok":true,"local_durability":"failed"}`, the execution record said completed, and a restart
+/// over the WAL alone had no `…/revoked`: the call under the revoked grant ran. Now: the writer poisoned, the
+/// revoke answers `503 not_durable` and its execution record says failed; the in-memory revocation still stands
+/// (the call is refused in this process); the disk repaired, the retried revoke answers `200`; after the WAL-only
+/// restart the call under the grant is refused. Seen failing with the records back on `kv_set_with_receipt`: the
+/// poisoned revoke answered `200`.
+#[tokio::test]
+async fn a_revocation_the_disk_will_not_take_is_refused_and_the_retried_one_survives_a_wal_only_restart() {
+    use crate::test_util::{kv_dir_under, restore_start_snapshot, sabotage_exit_snapshot};
+    let (http_port, gossip_port) = (alloc_port(), alloc_port());
+    let opts = Opts { gossip_port: Some(gossip_port), persist: true, ..Opts::default() };
+    let dir = std::env::temp_dir().join(format!("x3-grant-{gossip_port}"));
+    let _ = std::fs::remove_dir_all(&dir);
+    let (a, journal, ran) = node_with(http_port, opts.clone()).await;
+    let agent_principal = crate::agent::gateway_caller::node_principal(a.node_id());
+    let args = serde_json::json!({"env": "prod", "replicas": 3});
+    let sm = a.agent_state_machine(policy(60_000));
+    sm.transition(ExecutionState::Planning).await.unwrap();
+    let (mandate, request) = granted(&a, http_port, &sm, &args).await;
+    let path = format!("/gateway/grants/{agent_principal}/{request}/revoke");
+    let revoke = |reason: &str| supervisor(http_port, "alice-secret", reqwest::Method::POST, &path, Some(serde_json::json!({"reason": reason})));
+    a.task_ctx.wal.get().unwrap().poison_for_test("the disk is gone").await.unwrap();
+    let (status, body) = revoke("disk gone").await;
+    assert_eq!(status, 503, "a revocation the disk will not take is refused by name: {body}");
+    assert_eq!(body["error"], "not_durable", "{body}");
+    assert!(body["detail"].as_str().unwrap_or_default().contains("revocation not recorded durably"), "{body}");
+    let failed = records(&journal).iter().filter(|r| r.execution == crate::agent::action_evaluator::Execution::Failed).count();
+    assert_eq!(failed, 1, "the execution record says the revocation was not completed");
+    // In this process the revocation stands: the checkpoint was offered to the authority before the write.
+    let err = call_deploy(&a, None, &mandate, &args).await.expect_err("revoked here");
+    assert!(err.contains("revoked") || err.contains("checkpoint"), "{err}");
+    assert_eq!(ran.load(Ordering::SeqCst), 0);
+    // The disk is back; the operator retries, and this time the records are on the WAL.
+    a.task_ctx.wal.get().unwrap().trigger_snapshot().await.unwrap();
+    let (status, body) = revoke("retried").await;
+    assert_eq!(status, 200, "{body}");
+    let kv_dir = kv_dir_under(&dir.join("persist"));
+    sabotage_exit_snapshot(&kv_dir);
+    a.shutdown().await;
+    drop(sm);
+    drop(a);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    restore_start_snapshot(&kv_dir);
+    let (a, _j, ran) = node_with(http_port, opts).await;
+    let err = call_deploy(&a, None, &mandate, &args).await.expect_err("the revocation survived a restart that kept only the WAL");
+    assert!(err.contains("revoked") || err.contains("checkpoint") || err.contains("not established"), "{err}");
+    assert_eq!(ran.load(Ordering::SeqCst), 0, "the revoked grant ran nothing after the restart");
+    a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// **A `consumed` the disk will not take refuses the invocation and leaves the grant un-consumed** (#713's review,
+/// finding 2). A lost `consumed` does not fail safe: `await_grant` re-honours the un-consumed request and the tool
+/// is admitted again, and a provider with no door has nothing else to remember a use by. So the marker is on disk
+/// before the commit, or the agent does not invoke — refused by name — and once the disk is repaired the same call
+/// consumes once, without asking again. Seen failing with `consumed` back on `append_try`: the first call ran.
+#[tokio::test]
+async fn a_consumed_marker_the_disk_will_not_take_refuses_the_invocation_and_leaves_the_grant_unconsumed() {
+    let (http_port, gossip_port) = (alloc_port(), alloc_port());
+    let opts = Opts { gossip_port: Some(gossip_port), persist: true, ..Opts::default() };
+    let dir = std::env::temp_dir().join(format!("x3-grant-{gossip_port}"));
+    let _ = std::fs::remove_dir_all(&dir);
+    let (a, _j, _ran) = node_with(http_port, opts).await;
+    let agent_principal = crate::agent::gateway_caller::node_principal(a.node_id());
+    let prefix = format!("grant/{agent_principal}/");
+    let requests = |a: &GossipAgent| crate::store::scan_kv_prefix(&a.task_ctx.kv_state, &prefix).into_iter().filter(|(k, _)| k.matches('/').count() == 2).count();
+    let args = serde_json::json!({"env": "prod", "replicas": 3});
+    let sm = a.agent_state_machine(policy(60_000));
+    sm.transition(ExecutionState::Planning).await.unwrap();
+    // The request is written and the grant issued with the disk healthy; then the disk goes away before the agent
+    // reads its answer.
+    let (sm2, args2) = (Arc::clone(&sm), args.clone());
+    let waiting = tokio::spawn(async move { sm2.transition_invoking("deploy", &args2).await });
+    assert!(until(|| requests(&a) == 1, Duration::from_secs(5)).await);
+    waiting.abort();
+    let _ = waiting.await;
+    let request = issue_pending(Arc::clone(&a), http_port, agent_principal.clone()).await;
+    a.task_ctx.wal.get().unwrap().poison_for_test("the disk is gone").await.unwrap();
+    let err = sm.transition_invoking("deploy", &args).await.expect_err("a consumed marker the disk will not take refuses the invocation");
+    assert!(matches!(&err, PolicyViolation::GrantNotPresented(t) if t.contains("not recorded durably")), "{err}");
+    assert_eq!(sm.state(), ExecutionState::Planning, "no commit");
+    assert!(mycelium_core::ops::kv_get(&a.task_ctx, &format!("{prefix}{request}/consumed")).is_none(), "the grant is left un-consumed");
+    // The disk is back: the same call consumes the one request once and commits.
+    a.task_ctx.wal.get().unwrap().trigger_snapshot().await.unwrap();
+    sm.transition_invoking("deploy", &args).await.expect("consumed once the disk is back").expect("a grant");
+    assert_eq!(requests(&a), 1, "the agent did not ask again");
+    assert!(mycelium_core::ops::kv_get(&a.task_ctx, &format!("{prefix}{request}/consumed")).is_some());
+    assert_eq!(sm.state(), ExecutionState::Invoking { tool: "deploy".into() });
+    a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// **An answer the disk will not take is no answer** (#713's review, round 2). With the writer poisoned, a refusal
+/// answers `503 not_durable` and writes no `refused` record — the request is still pending and the agent still waits —
+/// and an issue answers `503` from its checkpoint write, with no `issued` record; the writer repaired, the refusal
+/// lands. Seen failing with `refused` back on `write_record`: `200`.
+#[tokio::test]
+async fn an_answer_the_disk_will_not_take_is_refused_and_the_request_stays_pending() {
+    let (http_port, gossip_port) = (alloc_port(), alloc_port());
+    let opts = Opts { gossip_port: Some(gossip_port), persist: true, ..Opts::default() };
+    let dir = std::env::temp_dir().join(format!("x3-grant-{gossip_port}"));
+    let _ = std::fs::remove_dir_all(&dir);
+    let (a, _j, _ran) = node_with(http_port, opts).await;
+    let agent_principal = crate::agent::gateway_caller::node_principal(a.node_id());
+    let prefix = format!("grant/{agent_principal}/");
+    let requests = |a: &GossipAgent| crate::store::scan_kv_prefix(&a.task_ctx.kv_state, &prefix).into_iter().filter(|(k, _)| k.matches('/').count() == 2).count();
+    let args = serde_json::json!({"env": "prod", "replicas": 3});
+    let sm = a.agent_state_machine(policy(60_000));
+    sm.transition(ExecutionState::Planning).await.unwrap();
+    let (sm2, args2) = (Arc::clone(&sm), args.clone());
+    let waiting = tokio::spawn(async move { sm2.transition_invoking("deploy", &args2).await });
+    assert!(until(|| requests(&a) == 1, Duration::from_secs(5)).await);
+    let request = crate::store::scan_kv_prefix(&a.task_ctx.kv_state, &prefix).into_iter().find_map(|(k, _)| k.strip_prefix(prefix.as_str()).filter(|r| !r.contains('/')).map(str::to_string)).unwrap();
+    let path = format!("/gateway/grants/{agent_principal}/{request}");
+    let decide = |decision: &str| supervisor(http_port, "alice-secret", reqwest::Method::POST, &path, Some(serde_json::json!({"decision": decision, "ttl_secs": 60, "reason": "disk"})));
+    a.task_ctx.wal.get().unwrap().poison_for_test("the disk is gone").await.unwrap();
+    let (status, body) = decide("issue").await;
+    assert_eq!(status, 503, "an issue the disk will not take: {body}");
+    assert_eq!(body["error"], "not_durable", "{body}");
+    assert!(mycelium_core::ops::kv_get(&a.task_ctx, &format!("{prefix}{request}/issued")).is_none(), "no grant stands");
+    let (status, body) = decide("refuse").await;
+    assert_eq!(status, 503, "a refusal the disk will not take: {body}");
+    assert_eq!(body["error"], "not_durable", "{body}");
+    assert!(mycelium_core::ops::kv_get(&a.task_ctx, &format!("{prefix}{request}/refused")).is_none(), "no answer stands");
+    assert!(!waiting.is_finished(), "the agent still waits on its pending request");
+    // The disk is back: the refusal lands and the agent is refused.
+    a.task_ctx.wal.get().unwrap().trigger_snapshot().await.unwrap();
+    let (status, body) = decide("refuse").await;
+    assert_eq!(status, 200, "{body}");
+    let err = waiting.await.unwrap().expect_err("refused");
+    assert!(matches!(err, PolicyViolation::GrantRefused(_)), "{err}");
+    a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
