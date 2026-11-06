@@ -21,7 +21,15 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `max_bulk_payload_bytes` (default 64 MiB) bounds both sides: `bulk_call` refuses a larger payload
   (`BulkError::PayloadTooLarge`), and a responder refuses a declared `Content-Length` over it and stops reading a body
   as soon as it passes it, where it used to collect the whole response. Also: the fetch URL brackets an IPv6 sender.
-  **Not built:** an integrity check on the payload beyond TLS, and the fetch target is still the caller's address.
+  From the PR's review: a fetch's roots are the fleet CA **and** `bulk_ca_pem_path`, so a mixed fleet verifies both;
+  `start()` also refuses an operator certificate that does not verify against `bulk_ca_pem_path` for the node's own IP;
+  a status other than 2xx is not a payload; every refusal is counted (`SystemStats::bulk_fetches_refused`,
+  `mycelium_bulk_fetches_refused_total{reason}`); the `https` fetch client pools no connections, so each fetch is a
+  fresh, revocation-checked handshake; and the node-cert gateway presents the current identity at every handshake, so
+  after `rotate_identity` it serves the new certificate (it kept the start-time one until a restart). A
+  `BulkError::Timeout` can be permanent — the docs say so. **Not built:** an integrity check on the payload beyond
+  TLS; the fetch target is still the caller's address; a typed refusal reported back; a plaintext gateway still carries
+  bulk in the clear, and a TLS-terminating proxy in front of one is bypassed for bulk.
 
 ## [2.39.0] — 2026-11-06
 

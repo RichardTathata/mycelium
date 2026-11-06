@@ -25,10 +25,21 @@ pub struct NodeTls {
     signing_key: arc_swap::ArcSwap<ed25519_dalek::SigningKey>,
     /// Server-only rustls config for the HTTP gateway (SOC 2 WS-A): same node
     /// identity cert, but built `.with_no_client_auth()` so ordinary HTTP clients
-    /// (no client cert) can connect. Built here so it rotates with the identity;
-    /// used only when `GossipConfig::gateway_tls` reuses the node cert.
+    /// (no client cert) can connect; used only when `GossipConfig::gateway_tls` reuses the node
+    /// cert. Built **once**, over a resolver that reads [`gateway_key`](Self::gateway_key) at every
+    /// handshake, so a listener holding this config presents the current identity after a rotation
+    /// (external review R7's review, finding 4: the gateway kept a one-time copy and served the old
+    /// certificate, which a bulk fetch refuses once the old key is revoked).
     #[cfg(feature = "tls")]
-    gateway_server_config: arc_swap::ArcSwap<rustls::ServerConfig>,
+    gateway_server_config: std::sync::Arc<rustls::ServerConfig>,
+    /// The gateway's current certificate and key; swapped by [`activate`](NodeTls::activate).
+    #[cfg(feature = "tls")]
+    gateway_key: std::sync::Arc<arc_swap::ArcSwap<rustls::sign::CertifiedKey>>,
+    /// The fleet's server-certificate check — the CA chain, then the removal and revocation checks —
+    /// for a client this node builds outside the mesh (the bulk fetch, R7). Fixed for the node's life:
+    /// rotation reuses the CA, and the removal and standing sets it reads are shared and live.
+    #[cfg(feature = "tls")]
+    fleet_server_verifier: std::sync::Arc<dyn rustls::client::danger::ServerCertVerifier>,
     /// Identity-anchor sink (identity-auth Phase 1b): records a directly-connected peer's
     /// CA-validated Ed25519 key. Installed once at agent start with a closure capturing the
     /// `CoreCtx` anchor maps; the outbound writer calls it after each handshake. `OnceLock` so
@@ -56,10 +67,16 @@ impl NodeTls {
     pub fn client_config(&self) -> std::sync::Arc<rustls::ClientConfig> {
         self.client_config.load_full()
     }
-    /// The current server-only rustls config for the HTTP gateway (node-cert reuse
-    /// path). Rotates with the identity via [`activate`](NodeTls::activate).
+    /// The server-only rustls config for the HTTP gateway (node-cert reuse path). One config for
+    /// the node's life: its resolver presents the identity [`activate`](NodeTls::activate) last
+    /// installed, at every handshake.
     pub fn gateway_server_config(&self) -> std::sync::Arc<rustls::ServerConfig> {
-        self.gateway_server_config.load_full()
+        std::sync::Arc::clone(&self.gateway_server_config)
+    }
+    /// The fleet's server-certificate check (CA chain, removal, revocation), for a client built
+    /// outside the mesh — the bulk fetch (external review R7).
+    pub fn fleet_server_verifier(&self) -> std::sync::Arc<dyn rustls::client::danger::ServerCertVerifier> {
+        std::sync::Arc::clone(&self.fleet_server_verifier)
     }
 
     /// Install the identity-anchor sink (identity-auth Phase 1b) — called once at agent start
@@ -95,7 +112,7 @@ impl NodeTls {
         self.signing_key.store(m.signing_key);
         self.server_config.store(m.server_config);
         self.client_config.store(m.client_config);
-        self.gateway_server_config.store(m.gateway_server_config);
+        self.gateway_key.store(m.gateway_key);
         self.node_cert.store(std::sync::Arc::new(m.node_cert_der));
     }
 
@@ -125,7 +142,7 @@ pub struct RotationMaterial {
     server_config: std::sync::Arc<rustls::ServerConfig>,
     client_config: std::sync::Arc<rustls::ClientConfig>,
     signing_key: std::sync::Arc<ed25519_dalek::SigningKey>,
-    gateway_server_config: std::sync::Arc<rustls::ServerConfig>,
+    gateway_key: std::sync::Arc<rustls::sign::CertifiedKey>,
     /// The new key's certificate, DER — published as its certificate record before the cutover.
     pub node_cert_der: Vec<u8>,
 }
@@ -451,14 +468,18 @@ mod imp {
 
         // ── 4. Build rustls configs ───────────────────────────────────────
         let cert_bytes = node_cert_der.as_ref().to_vec();
-        let (server_config, client_config, gateway_server_config, cert_verifier) =
+        let (server_config, client_config, gateway_key, cert_verifier, fleet_server_verifier) =
             build_rustls_configs(node_cert_der, &signing_key, ca_cert_der, removed, standing)?;
+        let gateway_key = Arc::new(arc_swap::ArcSwap::new(gateway_key));
+        let gateway_server_config = Arc::new(live_gateway_server_config(Arc::clone(&gateway_key)));
 
         Ok(NodeTls {
             server_config: arc_swap::ArcSwap::from_pointee(server_config),
             client_config: arc_swap::ArcSwap::from_pointee(client_config),
             signing_key: arc_swap::ArcSwap::from_pointee(signing_key),
-            gateway_server_config: arc_swap::ArcSwap::from_pointee(gateway_server_config),
+            gateway_server_config,
+            gateway_key,
+            fleet_server_verifier,
             peer_anchor_sink: std::sync::OnceLock::new(),
             node_cert: arc_swap::ArcSwap::from_pointee(cert_bytes),
             cert_verifier,
@@ -502,7 +523,7 @@ mod imp {
         let (ca_cert_der, ca_key_pair) = load_existing_ca(cfg)?;
         let node_cert_der = generate_node_cert(node_id, &signing_key, &ca_key_pair, super::issuance_after(issued_floor_ms))?;
         let cert_bytes = node_cert_der.as_ref().to_vec();
-        let (server_config, client_config, gateway_server_config, _) =
+        let (server_config, client_config, gateway_key, _, _) =
             build_rustls_configs(node_cert_der, &signing_key, ca_cert_der, removed, standing)?;
 
         Ok(super::RotationMaterial {
@@ -510,7 +531,7 @@ mod imp {
             server_config: Arc::new(server_config),
             client_config: Arc::new(client_config),
             signing_key: Arc::new(signing_key),
-            gateway_server_config: Arc::new(gateway_server_config),
+            gateway_key,
             node_cert_der: cert_bytes,
         })
     }
@@ -993,7 +1014,7 @@ mod imp {
         ca_cert_der: CertificateDer<'static>,
         removed: Arc<crate::removal::RemovedSet>,
         standing: Arc<crate::removal::KeyStanding>,
-    ) -> Result<(ServerConfig, ClientConfig, ServerConfig, Arc<dyn rustls::server::danger::ClientCertVerifier>), GossipError> {
+    ) -> Result<(ServerConfig, ClientConfig, Arc<rustls::sign::CertifiedKey>, Arc<dyn rustls::server::danger::ClientCertVerifier>, Arc<dyn rustls::client::danger::ServerCertVerifier>), GossipError> {
         use ed25519_dalek::pkcs8::EncodePrivateKey;
 
         ensure_crypto_provider();
@@ -1035,25 +1056,47 @@ mod imp {
         server_config.session_storage = Arc::new(rustls::server::NoServerSessionStorage {});
         server_config.send_tls13_tickets = 0;
 
-        // Gateway server config: SAME node cert/key, but NO client-cert demand, so
-        // ordinary HTTP clients can connect (the node-cert-reuse gateway-TLS path).
-        let gateway_server_config = ServerConfig::builder()
-            .with_no_client_auth()
-            .with_single_cert(vec![node_cert_der.clone()], key_der.clone_key())
-            .map_err(|e| GossipError::InvalidField { field: "gateway_tls", reason: format!("gateway TLS: build server config: {e}") })?;
+        // The gateway's certificate: SAME node cert/key, served with NO client-cert demand so
+        // ordinary HTTP clients can connect (the node-cert-reuse gateway-TLS path). A key, not a
+        // config: the gateway's one config resolves the current key at every handshake.
+        let gateway_signer = rustls::crypto::ring::default_provider()
+            .key_provider
+            .load_private_key(key_der.clone_key())
+            .map_err(|e| GossipError::InvalidField { field: "gateway_tls", reason: format!("gateway TLS: load key: {e}") })?;
+        let gateway_key = Arc::new(rustls::sign::CertifiedKey::new(vec![node_cert_der.clone()], gateway_signer));
 
         // Client config: present node cert, verify server against CA
         let server_verifier = rustls::client::WebPkiServerVerifier::builder(Arc::clone(&root_store))
             .build()
             .map_err(|e| GossipError::InvalidField { field: "tls", reason: format!("TLS: build server verifier: {e}") })?;
+        let fleet_server_verifier: Arc<dyn rustls::client::danger::ServerCertVerifier> =
+            Arc::new(RemovalAwareServerVerifier { inner: server_verifier, removed, standing });
         let mut client_config = ClientConfig::builder()
             .dangerous()
-            .with_custom_certificate_verifier(Arc::new(RemovalAwareServerVerifier { inner: server_verifier, removed, standing }))
+            .with_custom_certificate_verifier(Arc::clone(&fleet_server_verifier))
             .with_client_auth_cert(vec![node_cert_der], key_der)
             .map_err(|e| GossipError::InvalidField { field: "tls", reason: format!("TLS: build client config: {e}") })?;
         client_config.resumption = rustls::client::Resumption::disabled();
 
-        Ok((server_config, client_config, gateway_server_config, chain_verifier))
+        Ok((server_config, client_config, gateway_key, chain_verifier, fleet_server_verifier))
+    }
+
+    /// The gateway's server config on the node-cert path: no client-cert demand, and a certificate
+    /// resolved from `key` at every handshake (so a rotation is presented at once).
+    pub(super) fn live_gateway_server_config(key: Arc<arc_swap::ArcSwap<rustls::sign::CertifiedKey>>) -> ServerConfig {
+        ServerConfig::builder()
+            .with_no_client_auth()
+            .with_cert_resolver(Arc::new(LiveGatewayCert(key)))
+    }
+
+    /// Presents the node's current gateway certificate.
+    #[derive(Debug)]
+    struct LiveGatewayCert(Arc<arc_swap::ArcSwap<rustls::sign::CertifiedKey>>);
+
+    impl rustls::server::ResolvesServerCert for LiveGatewayCert {
+        fn resolve(&self, _hello: rustls::server::ClientHello<'_>) -> Option<Arc<rustls::sign::CertifiedKey>> {
+            Some(self.0.load_full())
+        }
     }
 
     /// Refuse a certificate whose identity key belongs to a removed member (closure plan C5).
@@ -1821,7 +1864,7 @@ mod ca_race_tests {
         let legacy = legacy_cert(&cfg, &nc, &k0);
         assert!(super::cert_identity(legacy.as_ref()).is_some_and(|id| id.node_uris.is_empty()), "the certificate names no node");
         let ca_der = load_or_create_ca(&cfg).unwrap().0;
-        let (_, thief, _, _) = super::imp::build_rustls_configs(legacy, &k0, ca_der, Arc::new(RemovedSet::default()), Default::default()).unwrap();
+        let (_, thief, _, _, _) = super::imp::build_rustls_configs(legacy, &k0, ca_der, Arc::new(RemovedSet::default()), Default::default()).unwrap();
         let thief = Arc::new(thief);
 
         b_standing.set(&other, NodeStanding { anchored: Some([[2u8; 32]].into_iter().collect()), revoked: [k0_pub].into_iter().collect(), counted: Default::default() });

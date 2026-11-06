@@ -18010,3 +18010,39 @@ fn a_companion_kind_maps_to_its_familys_scope_and_an_unknown_verb_to_write() {
         assert_eq!(companion_kind_scope(kind), scope, "{kind}");
     }
 }
+
+/// **R7's review, finding 4: a bulk call after rotate-and-revoke.** C's gateway kept a one-time copy
+/// of its TLS config and went on presenting the old certificate after `rotate_identity`; once the old
+/// key is revoked, B's bulk fetch from C verifies that certificate and refuses it, so every bulk call
+/// from C timed out until C restarted. The gateway now resolves the current identity at every
+/// handshake.
+#[cfg(all(feature = "tls", feature = "compliance"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_bulk_call_after_rotate_and_revoke_presents_the_new_certificate() {
+    let gateway = |cfg: &mut GossipConfig, _: &NodeId| {
+        cfg.http_port = Some(alloc_port());
+        cfg.http_addr = "127.0.0.1".to_string();
+        cfg.gateway_tls = Some(crate::GatewayTlsConfig::default());
+    };
+    let (a, b, c, nb, nc, dir) = three_signed_nodes_tweaked("bulk-rotate", false, gateway, gateway).await;
+    let _serve = b.service().bulk_serve("echo-bulk", |_s, p| async move { p });
+    let payload = Bytes::from(vec![4u8; 30_000]);
+    let before = c.service().bulk_call(nb.clone(), "echo-bulk", payload.clone(), Duration::from_secs(10)).await;
+    let k0 = c.task_ctx.tls.get().unwrap().verifying_key_bytes();
+    let k1 = c.rotate_identity_on_compromise(Duration::from_millis(500)).await.unwrap();
+    let seen = revocation_seen(&b, &nc, k0, k1).await;
+    // What B's handshake refuses is a *counted* revocation (`refuse_if_revoked`), which can land after
+    // the key set changes: wait for it, or the old certificate would still verify and prove nothing.
+    let mut counted = false;
+    for _ in 0..400 {
+        if b.task_ctx.key_standing.is_counted_revoked(&nc, &k0) { counted = true; break; }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    let after = c.service().bulk_call(nb, "echo-bulk", payload.clone(), Duration::from_secs(10)).await;
+    a.shutdown().await; b.shutdown().await; c.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(before, Ok(payload.clone()), "the control: a bulk call before the rotation");
+    assert!(seen, "B saw C's old key revoked and its new key held");
+    assert!(counted, "B counts the revocation, so its handshake refuses C's old certificate");
+    assert_eq!(after, Ok(payload), "after rotate-and-revoke, C's gateway presents its new certificate and B fetches");
+}

@@ -139,7 +139,7 @@ impl GossipAgent {
         // gateways are verified with, and a named file must hold some. Refused by name, here, where
         // `mycelium doctor` runs the same chain.
         #[cfg(all(feature = "gateway", feature = "tls"))]
-        super::bulk::check_bulk_trust(&self.config)?;
+        super::bulk::check_bulk_trust(&self.config, &self.node_id)?;
         // A build without `gateway` runs no HTTP server, so a gateway setting would be accepted and
         // ignored — and `http_port` is still advertised as the bulk-transfer port, which nothing
         // serves (realignment repairs R8, found by A2's configuration audit). Refused by name.

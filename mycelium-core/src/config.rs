@@ -135,10 +135,14 @@ pub const MAX_BULK_PAYLOAD_BYTES_CEILING: u64 = 16 * 1024 * 1024 * 1024;
 /// (default) to keep today's plaintext behaviour and front the gateway with a TLS-terminating
 /// proxy instead. See `docs/operations/gateway-tls.md`.
 ///
-/// Both fields `None` = **reuse the node identity cert** from [`TlsConfig`] (requires the
-/// `tls` feature and `GossipConfig::tls`). That cert carries an IP SAN, so it fits CA-pinning
-/// SDK clients and proxied setups but not hostname/browser trust; supply `cert_pem_path` +
-/// `key_pem_path` with a real hostname SAN for that.
+/// `cert_pem_path` and `key_pem_path` both `None` = **reuse the node identity cert** from
+/// [`TlsConfig`] (requires the `tls` feature and `GossipConfig::tls`); the gateway then presents the
+/// current identity at every handshake, a rotation included. That cert carries an IP SAN, so it fits
+/// CA-pinning SDK clients and proxied setups but not hostname/browser trust; supply `cert_pem_path` +
+/// `key_pem_path` with a real hostname SAN for that — read once at `start()`, not re-read (replace
+/// the files and restart to rotate an operator certificate). Three fields in all: the third,
+/// `bulk_ca_pem_path`, is the roots a bulk fetch verifies a peer's gateway with, required beside an
+/// operator certificate.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GatewayTlsConfig {
@@ -150,10 +154,12 @@ pub struct GatewayTlsConfig {
     /// (external review 2026-10-31, R7). A caller whose gateway serves TLS sends an `https` ticket,
     /// and the node that fetches the staged payload verifies the caller's gateway certificate
     /// against these roots — by the caller's IP address, which the certificate must name. `None`
-    /// on the node-cert reuse path (`cert_pem_path` unset) = the fleet CA from `[tls]`, with the
-    /// mesh's removal and revocation checks. A gateway on an operator certificate
-    /// (`cert_pem_path` set) with no `bulk_ca_pem_path` refuses `start()` by name: the fleet CA
-    /// did not sign that certificate, and a bulk fetch is never retried in plaintext.
+    /// or not, the fleet CA from `[tls]` is trusted too, with the mesh's removal and revocation
+    /// checks: a fetch's roots are the union, so a fleet mixing node-cert and operator-cert gateways
+    /// verifies both (a fleet certificate the fleet check refuses is never re-tried against these).
+    /// On a node serving a gateway (`http_port` set) on an operator certificate (`cert_pem_path`),
+    /// `start()` refuses by name without it, and refuses unless the node's own certificate verifies
+    /// against it for the node's own IP address — the address peers fetch from.
     pub bulk_ca_pem_path: Option<PathBuf>,
 }
 
@@ -1371,7 +1377,9 @@ pub struct GossipConfig {
     /// exceeds it, and abandoned as soon as the bytes read exceed it when no length is sent — the
     /// body is never collected past the cap. A `bulk_call` with a larger payload is refused before
     /// anything is staged (`BulkError::PayloadTooLarge`). Each in-flight fetch holds up to this
-    /// much in memory, so a responder's worst case is `max_concurrent_bulk_handlers` × this.
+    /// much in memory, and the fetched bytes stay held while the handler runs on them; so while
+    /// `max_concurrent_bulk_handlers` is non-zero a responder's worst case is that many × this. At
+    /// `0` (unlimited, and the limit is retunable on a live node) there is no such bound.
     ///
     /// `validate()` refuses `0` and anything above 16 GiB. Env `GOSSIP_MAX_BULK_PAYLOAD_BYTES`.
     ///
