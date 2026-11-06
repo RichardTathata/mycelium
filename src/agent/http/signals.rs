@@ -66,7 +66,9 @@ pub(super) async fn gw_signal_emit(
         Some(k) => Arc::from(k),
         None    => return (StatusCode::BAD_REQUEST, Json(json!({"error":"missing kind"}))).into_response(),
     };
-    // Closure plan C1: a raw route never carries protected work around the door that checks it.
+    // Closure plan C1: a raw route never carries protected work around the door that checks it. A companion's kind
+    // was already refused by the auth layer unless the token holds the companion's family scope (external review
+    // 2026-10-31 F1, `authz::companion_kind_gate`): a kind sent here can reach an `rpc_rx` receiver for it.
     if let Some(refused) = refuse_protected_kind(&ctx.agent_ctx.config, &kind) {
         return refused;
     }

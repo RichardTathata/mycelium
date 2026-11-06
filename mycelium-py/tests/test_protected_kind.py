@@ -153,3 +153,25 @@ def test_an_evicted_serve_stream_raises_rather_than_ending_quietly(agent):
     assert e.value.kind == "work"
     assert isinstance(e.value, ProtectedKindError)
     assert seen == ["0000000000000001"]
+
+
+def test_on_signal_raises_a_refused_stream_as_an_http_error_not_an_sse_error(agent):
+    """#714's review, round 2: a signal stream refused ``403`` — a companion's kind without the family's
+    ``:read`` (0.2.14), or a protected kind — answered as httpx-sse's content-type ``SSEError``; it raises the
+    HTTP error, and ``ProtectedKindError`` for a protected kind, as ``rpc_serve`` does."""
+    import asyncio
+    import httpx
+
+    async def first(kind):
+        gen = agent.on_signal(kind)
+        return await gen.__anext__()
+
+    _Stub.status = 403
+    _Stub.reply = {"ok": False, "error": "insufficient scope", "required_scope": "board:read", "kind": "blackboard.board.post"}
+    with pytest.raises(httpx.HTTPStatusError) as e:
+        asyncio.run(first("blackboard.board.post"))
+    assert e.value.response.status_code == 403
+    _Stub.reply = {"ok": False, "error": "protected_kind", "kind": "mcp.invoke", "message": "`mcp.invoke` is protected"}
+    with pytest.raises(ProtectedKindError) as e:
+        asyncio.run(first("mcp.invoke"))
+    assert e.value.kind == "mcp.invoke"

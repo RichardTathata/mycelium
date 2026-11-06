@@ -1,6 +1,6 @@
 # The external code security review of 2026-10-31 — verification and repairs
 
-**Status:** agreed with the maintainer on 2026-10-31, rev 0.5 (rev 0.2 takes the reviewer's two qualifications of the verification, 2026-10-31: F4 is P1 regardless of token lifetime, and F3's window is unmeasured; rev 0.3 takes the independent review of this plan's PR, #711: the journal consumers re-enumerated, R6's exit restated, R2 led by the poisoned writer, the raw routes enumerated; rev 0.4 records R4 delivered, #712, with the all-unparsable decision; rev 0.5 records R2 and R3 delivered, #713 — the restart that keeps only the WAL, and the grant records a step must not proceed without on disk before that step or the step refused by name, the use released on a durable refusal, 2026-10-31). Nine rows; R2, R3 and R4 delivered (#713, #712); R1 started. The review is vendored at
+**Status:** agreed with the maintainer on 2026-10-31, rev 0.5 (rev 0.2 takes the reviewer's two qualifications of the verification, 2026-10-31: F4 is P1 regardless of token lifetime, and F3's window is unmeasured; rev 0.3 takes the independent review of this plan's PR, #711: the journal consumers re-enumerated, R6's exit restated, R2 led by the poisoned writer, the raw routes enumerated; rev 0.4 records R4 delivered, #712, with the all-unparsable decision; rev 0.5 records R2 and R3 delivered, #713 — the restart that keeps only the WAL, and the grant records a step must not proceed without on disk before that step or the step refused by name, the use released on a durable refusal, 2026-10-31; rev 0.6 records R1 delivered, #714, 2026-11-06 — the raw routes' body doors, the three path doors, and from its second review round the replica-sync reads `snapshot` and `wal_replay` as reads and the mailbox stream). Nine rows; **R1, R2, R3 and R4 delivered** (#714, #713, #712); R5–R9 open. The review is vendored at
 [`external/2026-10-31-code-security-review.md`](external/2026-10-31-code-security-review.md); it examined commit
 `d656f50c` (main after Y11, #708). Every finding was verified independently before this plan was written (§2), under
 the [verification policy](../wiki/dev/testing/verification-policy.md): three read-only agents re-ran or re-derived
@@ -70,20 +70,82 @@ tests where one exists.
 
 ### R1 · Companion kinds carry their scope on the raw routes *(F1)*
 
-**What:** every raw route that takes an RPC kind from the request — `/gateway/rpc/call` and `/gateway/scatter`
-under `mesh:write`; `/gateway/overlay/emit_reliable`, already under `consensus:write`; `mailbox/deliver` and
-`shard/emit`, enumerated and stated — of a companion-namespaced kind requires that companion's family scope (D1); a `mesh:write`-only caller is refused 403 naming the scope the
-operation needs. The wiki handlers that gate on `req.sender()` get the same treatment at the route. `rbac.md` says
+**What:** every gateway door that carries an RPC kind, **in the body or the path** — `/gateway/rpc/call` and
+`/gateway/scatter` under `mesh:write`; `/gateway/overlay/emit_reliable`, already under `consensus:write`;
+`mailbox/deliver` and `shard/emit`, enumerated and stated; and, from #714's review, the two signal streams
+(`/gateway/signal/sse/{kind}`, `/signals/{kind}`) under `mesh:read`, the mailbox stream (`/gateway/mailbox/{kind}`,
+round 2) under `mesh:read` and the serve stream (`/gateway/rpc/serve/{kind}`) under `mesh:serve` — of a
+companion-namespaced kind requires that companion's family scope (D1): in a body, the kind's own verb's (the
+replica-sync reads `snapshot` and `wal_replay` being reads, round 2); on a signal or mailbox stream, the family's
+`:read` (a tap receives every frame; a mailbox hands on a `:write`-gated delivery); on the serve stream, the family's
+`:write` (serving is answering). A caller without it is refused 403 naming the scope. The wiki handlers that gate on `req.sender()` get the same treatment at the route. `rbac.md` says
 which scope each companion kind needs on the raw routes, and `confined-fleet.md` names the companion kinds where it
 tells operators to list protected work.
 
 **Exit:** the verifier's probe as a test — a `mesh:write`-only token: 403 on `bb/post`, 403 on `rpc/call` of
 `blackboard.*.post`, 403 on `tuple.*.put`, 403 on `scatter` of either; a `board:write` token succeeds on
-`bb/post` and on `rpc/call` of the board kind — pinned in `tests/exposure_doors.rs`' raw-route loop; the wiki
-ingest kind refused under `mesh:write` on a gateway that is a group member.
+`bb/post` and on `rpc/call` of the board kind — pinned in `src/agent/http/http_tests.rs` (every door, every family,
+both verbs) and the companions' `tests/raw_route_scope.rs` (end to end), not in `tests/exposure_doors.rs`, because
+CI runs `tests/` under `tls,a2a` and never `compliance`, so a scope test there would never execute; the wiki
+ingest kind refused under `mesh:write` (the gate decides before dispatch, so a group-member gateway is not a
+separate case); and, from the review: `mesh:read` alone refused the signal streams for a board kind naming
+`board:read`, `mesh:read` + `board:read` receiving the frame; `mesh:serve` alone refused the serve stream for a
+board kind naming `board:write`, with `board:write` a stream; and from round 2: `board:write` refused
+`blackboard.board.snapshot` on `rpc/call` naming `board:read`, `tuple:write` refused `tuple.work.wal_replay` naming
+`tuple:read`, and `mesh:read` alone refused the mailbox stream for a board kind naming `board:read`.
 
 **Not built, stated:** a provider-side scope check inside the companions (the route is the door; a member's direct
-`rpc_call` is not a client).
+`rpc_call` is not a client); and `cap:write`'s half of the serve finding — a `cap:write` client can advertise any
+capability, a companion's `{ns}.primary` role included, which is that scope's meaning; what it is then sent is
+gated at the serve door, so a client without the family's `:write` cannot be sent a companion's requests.
+
+**As delivered** *(rev 0.6; the path doors from #714's review, the mailbox stream and the replica-sync reads from
+its round 2)*. **Round 2:** `snapshot` (every fact on the board) and `wal_replay` (the space's items) are reads in
+`companion_kind_scope` and both companions' scans — a `board:write` token with no `board:read` had read the whole
+board through `rpc/call`, which the reviewer ran; the scans skip doc-comment lines; `/gateway/mailbox/{kind}` is in
+`PATH_KIND_ROUTES` under the family's `:read`; `mycelium-py` 0.2.14's `on_signal` raises a refused stream as the HTTP error
+(`test_on_signal_raises_a_refused_stream_as_an_http_error_not_an_sse_error`). Each seen failing first: the mapping
+test and the raw-route test at `snapshot`/`wal_replay`, the streams test at the mailbox door, the pytest at the
+`SSEError`. **The path doors:** `PATH_KIND_ROUTES` in
+`authz.rs` — the two signal streams and the mailbox stream (`:read`) and the serve stream (`:write`), the kind read
+percent-decoded as the handler's `Path` reads it; `companion_kind_family` and `companion_family_scope` in `src/agent/mod.rs`; tested by
+`the_signal_streams_and_the_serve_stream_need_a_companion_kinds_family_scope` (both streams × four kinds, the
+write scope not the read scope, a percent-encoded kind, an ordinary kind, the frame received under `board:read`;
+the serve stream × three kinds, `board:read` not serving, `mesh:serve` still required), seen failing first with
+`PATH_KIND_ROUTES` empty. The gate decides before the handler's extractor
+(`the_raw_route_gate_decides_before_the_handlers_extractor`: a `text/plain` body naming a board kind is 403 where
+the handler would have said 415). The gate is one function in the auth layer, `companion_kind_gate`
+(`src/agent/http/authz.rs`), run after the route's own scope check with the credential's whole scope set in hand —
+a handler sees only the scopes the route granted, so it could not have decided this. It reads the kind from the
+body field the handler reads (`method` on `rpc/call` and `scatter`, `kind` on `signal/emit`, `mailbox/deliver`,
+`shard/emit` and `overlay/emit_reliable`; `RAW_KIND_ROUTES`), maps it by `mycelium::companion_kind_scope`
+(`src/agent/mod.rs`: `blackboard.*` → `board:*`, `tuple.*` → `tuple:*`, `wiki.*` → `wiki:*`; the read verbs
+`read`/`depth`/`snapshot`, `depth`/`wal_replay`, `access` to `:read`, every other verb under the prefix — an unknown
+one included — to `:write`), and refuses `403 {"error": "insufficient scope", "required_scope": …, "kind": …}`. The six routes:
+`rpc/call`, `scatter`, `signal/emit` and `shard/emit` emit a frame of the kind that reaches the signal-handler
+table an `rpc_rx` registers on, so a companion's handler could serve it; `overlay/emit_reliable` the same under
+`consensus:write`; `mailbox/deliver` writes a `mailbox/` key and reaches no handler, gated alike so the list is C1's.
+Each companion's tests diff the operations it serves, read from its own source, against the table
+(`every_served_operation_maps_to_the_boards_own_scope`, `…_the_spaces_own_scope`, `…_the_wikis_own_scope`); the
+wiki's `access`/`ingest` handlers say why they keep judging the node (`mycelium-wiki/src/agent.rs`).
+**The exit, as met:** `mesh:write` alone — 403 on `bb/post`, 403 naming `board:write` on `rpc/call`, `scatter`
+and the four emit routes of `blackboard.board.post`, 403 naming `tuple:write` on `tuple.work.put`; `board:write`
+alone succeeds on `bb/post` and is refused the raw route naming `mesh:write`; both scopes post through `rpc/call`
+and the fact lands; `tuple:write` cannot carry the board kind; the read verb under the write scope is refused
+naming `board:read` — `a_board_write_through_a_raw_route_needs_board_write_as_the_boards_own_route_does`
+(`mycelium-blackboard/tests/raw_route_scope.rs`),
+`a_tuple_put_through_a_raw_route_needs_tuple_write_as_the_spaces_own_route_does`
+(`mycelium-tuple-space/tests/raw_route_scope.rs`, both companions' test builds now carrying `compliance`),
+`raw_routes_require_a_companion_kinds_family_scope` (`src/agent/http/http_tests.rs`: every route, every family,
+both verbs, a body naming both fields, the `*` token, an ordinary kind) and the mapping's own test in
+`src/lib_tests.rs`. The exit named `tests/exposure_doors.rs`; the pin lives beside the companions and in the
+library instead, because CI runs `tests/` under `tls,a2a` and a scope test there would never execute. Each was
+seen failing with `companion_kind_scope` returning `None` for every kind: the raw-only board post answered 504
+in the library (nothing serves it — the gate is before dispatch) and 200 at both companions, the fact on the board
+and the tuple taken. **The wiki ingest kind** is refused under `mesh:write` naming `wiki:write`
+(`wiki.council.ingest` in the library test); the exit's "on a gateway that is a group member" is not a separate
+test — the gate decides before any dispatch, so membership cannot change the answer, and `mycelium-wiki`'s test
+build carries no scope model.
 
 ### R2 · The restart gate exercises the WAL *(the verification's finding)*
 
@@ -194,3 +256,4 @@ Filled as rows close: each row's promises quoted beside the code and test that d
 | R2 | *"a grant test that restarts without the exit snapshot … and asserts the request, the grant and the `used/*` markers survive from the WAL alone"*: `a_restart_that_keeps_only_the_wal_replays_the_request_the_grant_and_the_door_marker` (`src/agent/http/grant_tests.rs`) — the exit snapshot's install target is made a directory, so its rename refuses and the WAL is not truncated (`test_util::sabotage_exit_snapshot`; the writer's ownership lock is released as usual, no drop without `shutdown()`); the start snapshot is put back and the restart replays start snapshot + WAL tail; it asserts the request, `issued`, `consumed` and `used/provider` are all back. *"the same shape for `an_acknowledged_replica_still_holds_the_record_after_restart`"*: `an_acknowledged_replica_still_holds_the_record_after_a_restart_that_keeps_only_the_wal` under `Async` (the gate's own mode, a try-send append) and `…_under_flush` (`src/agent/kv_handle_tests.rs`) — the origin is stopped before the restart and the WAL's bytes are checked for the key, so nothing but the WAL can supply it. *"`faults.rs`'s `restart` class states which path it proves"*: the module doc of `faults::restart` and the report lines of `restart` and `grant` — the exit-snapshot path; a hard-crash restart class is *not built*. **Exit met:** with the WAL append removed from `write_owned_kv`, under `tls,compliance,a2a,test-util`, the twelve older grant tests pass (the graceful restart among them) and the new one fails on the request; with every inbound append in `connection.rs` removed (three sites — a plant on the `Data` arm alone did not fail it, since a KV frame arrives through the `SignedData` arm), the older replica gate passes and the WAL-only one fails. Plants restored by copy and `touch`. | #713 |
 | R3 | *"`ae_decide` appends the `used/{door}` marker with `append_sync` and awaits it; an `Err` is a denial by name"*: `state_machine::write_owned_kv_durable` (the receipt path's `kv_set_requiring_sync` — on the WAL and fsynced before it is applied or gossiped; `Ok` in memory only on a node with no `[persistence]`, stated on the feature page) called from `ae_decide`'s grant branch (`src/agent/http/authz.rs`); `Err` → `Decision::deny("grant use not recorded durably at {door}: {reason}")`, the history permit retracted, and the claim **released** (`ExecutionAuthority::release_grant_use`): nothing ran, so the use is not spent, and a retry after repair runs once — a restart answers the same (#713's review, finding 3). *"The same for `consume_grant` and the issuing write"*: `consume_grant` is durable **before** the commit and refuses `GrantNotPresented` naming it, the grant left un-consumed (a lost `consumed` re-honoured the grant — `await_grant` re-reads the un-consumed request's `issued`; #713's review, finding 2); the issue-time checkpoint and a revocation's checkpoint and `revoked` records go through `grants::write_record_durable` and the routes answer `503 not_durable` (finding 1); `issued` and `refused` go through `write_record_durable` too (round 2), the issue guarded first by its checkpoint — a plant of `issued` back on `write_record` cannot be told from the checkpoint's refusal without a seam, so `issued` is stated durable by the same path and `refused` is the one planted; `revoked` alone is likewise stated, not shown — with the checkpoint durable, a plant of `revoked` back on `write_record` passes, because the checkpoint's refusal fires first and after the WAL-only restart the seq-2 checkpoint alone refuses the grant through `feed_grant_checkpoint` (round 4); the decide arms count `issued`/`refused` and move the pending gauge only on `Ok`, as the revoke arm does (round 4); the request stays `append_try` — losing the request fails safe, the agent asks again. **Residual, stated (§77):** at `/mcp` a use is spent at the door that admitted it — the gateway's `used/gateway` landing and the provider's write failing leaves the gateway's use spent while a direct call at the provider runs; one execution at most. *"`what-is-proven.md:64` and the comment at `state_machine.rs:881` say what rung the records reach; `grants.md:128` is corrected"*: all three, plus `runtime-invariants.md`'s write-site list, `contracts-receipts.md` §2.2's user list, guide 21, `deprecations.md` §77, the CHANGELOG and a dated `.log/` entry. **Rungs:** request — buffered (`append_try`); `issued` — receipt (acked, its rung reported); `consumed`, `used/{door}`, `checkpoint`, `revoked` — on disk before the step they admit, or that step refused. **Exit met:** `a_protected_call_is_refused_when_its_grant_use_cannot_be_made_durable` (the writer poisoned: refused by name, nothing ran, the denial on the record; the writer repaired by `trigger_snapshot`: the retry runs once and the second presentation is `GrantUsed`); `a_consumed_marker_the_disk_will_not_take_refuses_the_invocation_and_leaves_the_grant_unconsumed`; `a_revocation_the_disk_will_not_take_is_refused_and_the_retried_one_survives_a_wal_only_restart`. Plants: the use marker back on `append_try` (the call ran); the release removed (the post-repair retry answered `GrantUsed`); `consumed` back on `append_try` (the first call ran); the revocation back on `kv_set_with_receipt` (the poisoned revoke answered `200` — the pair; `revoked` alone is not shown). R2's test passes with R3 in place. | #713 |
 | R4 | *a typed result* — `fetch_keys` → `Result<Vec<_>, FetchFailed>` (`src/agent/oidc.rs`); *a successful empty set replaces the cache with nothing* — the fetch task's `Ok(keys)` arm, `a_successful_empty_jwks_withdraws_the_keys` (failed on the old code: the withdrawn key still verified); *a failure keeps the old keys for at most `JWKS_MAX_STALE`, after which `plan()` refuses rather than `UseAndRefresh`* — `CachedKeys::past_ceiling`/`usable`, `keys_older_than_the_stale_ceiling_are_refused` (failed on the old code: keys of any age verified); a non-2xx answer is a failure — `a_non_2xx_jwks_is_a_failure_not_a_withdrawal` (passes on the old code, where a 503's empty body read as a failure; fails with `error_for_status` planted out); a replace-rotation withdraws the old key — `a_rotated_key_is_accepted_after_the_cooldown`'s new last assertions (a pin, not a proof: a non-empty fetch already replaced the cache before this row); a key the parser cannot read is dropped, not the set — `a_key_the_parser_cannot_read_is_dropped_not_the_whole_set` (failed first: the set failed as a whole); a 3xx is a failure — `a_3xx_jwks_is_a_failure_not_a_withdrawal` (failed first); the discovery document only from a 2xx — `a_non_2xx_discovery_document_is_not_read` (failed first); metadata the verifier ignores does not drop a key — `metadata_the_verifier_ignores_does_not_drop_a_usable_key` (failed first: the fixture's RSA key under `"alg":"ML-DSA-65"` with a string `x5c` was dropped); a non-string `kid` stays dropped — `a_kid_that_is_not_a_string_is_dropped`; *`sso.md` states both* — § `jwks_uri`; `deprecations.md` §75 | #712 |
+| R1 | *every raw route that takes an RPC kind … requires that companion's family scope* — `companion_kind_gate` (`authz.rs`), `companion_kind_scope` (`agent/mod.rs`), six routes; *refused 403 naming the scope* — the refusal body; *the wiki handlers … the same treatment at the route* — the gate, and the handlers' comments; *`rbac.md` says which scope* — the `mesh:write`, `board:*`, `tuple:*`, `wiki:*` rows; *`confined-fleet.md` names the companion kinds* — § the raw routes; *the signal streams … `:read`; the serve stream … `:write`* — `PATH_KIND_ROUTES`, `companion_kind_family`; `deprecations.md` §76; `rbac.md`'s `mesh:read`/`mesh:write`, `mesh:serve` and `cap:write` rows. Exit: the four tests named in the row, each seen failing first. Not built: a scope check inside the companions; `cap:write` advertising a companion role. | #714 |

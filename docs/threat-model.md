@@ -457,7 +457,9 @@ embedding process it also holds the member's key (Boundary A, once per agent).
     and federation. A member can call a provider directly with `rpc_call`, and a gateway client with `mesh:write`
     could reach a provider through `/gateway/rpc/call`; providers check who is calling, not whether they may. The
     raw-route walk-around is **closed** (C1: protected kinds are refused on every raw route, and serving has its own
-    `mesh:serve` scope); the direct member path is **closed where enabled** (C2 carries the mandate to the provider; C3's
+    `mesh:serve` scope; since the external review of 2026-10-31, F1, a **companion's** kind on a raw route also needs the
+    companion's family scope — `mesh:write` alone had posted to a board its holder had no `board:write` for, the scope
+    consequence C1 left unstated); the direct member path is **closed where enabled** (C2 carries the mandate to the provider; C3's
     `with_provider_enforcement` runs the same preflight at the provider, so a direct `rpc_call` is decided where it
     runs). *Not covered:* `llm.invoke` at the provider. **Every door, tried** (C7): after a revocation, `/mcp`, `/a2a` (send and stream), the raw routes, a member's direct call and the SDK serve stream each run nothing, by the handlers' own counters (`test_c7_the_bypass_matrix_no_door_runs_revoked_work`). **Running work stops too** (C10): a periodic sweep re-checks work admitted under a mandate and cancels it when the mandate lapses (MCP handlers are dropped; `rpc_rx` loops are cooperative); SDK-served work is not cancelled. *Limits:* other resources
     apply it only when wired;

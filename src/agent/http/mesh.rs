@@ -110,7 +110,9 @@ pub(super) async fn gw_rpc_call(
         Some(m) => Arc::from(m),
         None    => return (StatusCode::BAD_REQUEST, Json(json!({"error":"missing method"}))).into_response(),
     };
-    // Closure plan C1: a raw route never carries protected work around the door that checks it.
+    // Closure plan C1: a raw route never carries protected work around the door that checks it. A companion's kind
+    // was already refused by the auth layer unless the token holds the companion's family scope (external review
+    // 2026-10-31 F1, `authz::companion_kind_gate`): a kind sent here can reach an `rpc_rx` receiver for it.
     if let Some(refused) = refuse_protected_kind(&ctx.agent_ctx.config, &method) {
         return refused;
     }
@@ -495,7 +497,9 @@ pub(super) async fn gw_scatter(
         Some(m) => Arc::from(m),
         None    => return (StatusCode::BAD_REQUEST, Json(json!({"error":"missing method"}))).into_response(),
     };
-    // Closure plan C1: a raw route never carries protected work around the door that checks it.
+    // Closure plan C1: a raw route never carries protected work around the door that checks it. A companion's kind
+    // was already refused by the auth layer unless the token holds the companion's family scope (external review
+    // 2026-10-31 F1, `authz::companion_kind_gate`): a kind sent here can reach an `rpc_rx` receiver for it.
     if let Some(refused) = refuse_protected_kind(&ctx.agent_ctx.config, &method) {
         return refused;
     }
@@ -645,7 +649,10 @@ pub(super) async fn gw_mailbox_deliver(
         Some(k) => Arc::from(k),
         None    => return (StatusCode::BAD_REQUEST, Json(json!({"error":"missing kind"}))).into_response(),
     };
-    // Closure plan C1: a raw route never carries protected work around the door that checks it.
+    // Closure plan C1: a raw route never carries protected work around the door that checks it. A companion's kind
+    // was already refused by the auth layer unless the token holds the companion's family scope (external review
+    // 2026-10-31 F1, `authz::companion_kind_gate`). A delivery writes a `mailbox/` key and reaches no handler, so a
+    // companion's kind could not reach its `rpc_rx` this way; the gate covers every kind-carrying raw route alike.
     if let Some(refused) = refuse_protected_kind(&ctx.agent_ctx.config, &kind) {
         return refused;
     }
@@ -737,7 +744,9 @@ pub(super) async fn gw_shard_emit(
         Some(k) => Arc::from(k),
         None    => return (StatusCode::BAD_REQUEST, Json(json!({"error":"missing kind"}))).into_response(),
     };
-    // Closure plan C1: a raw route never carries protected work around the door that checks it.
+    // Closure plan C1: a raw route never carries protected work around the door that checks it. A companion's kind
+    // was already refused by the auth layer unless the token holds the companion's family scope (external review
+    // 2026-10-31 F1, `authz::companion_kind_gate`): a kind sent here can reach an `rpc_rx` receiver for it.
     if let Some(refused) = refuse_protected_kind(&ctx.agent_ctx.config, &kind) {
         return refused;
     }
