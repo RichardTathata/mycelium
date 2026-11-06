@@ -535,6 +535,13 @@ inbound `Data` paths apply a record to the store and then await its WAL append, 
 store holds a record its WAL does not yet — the window invariant 1 accepts; a crash inside it loses the
 record from disk and anti-entropy re-sends it. Group-committing anti-entropy was tried in round 3 and
 removed in round 5.
+What the window must not do is make a **replica-sync** answer claim the record (external review 2026-10-31, F3;
+row R8, #720): all three inbound sites (`Data`, `SignedData`, the anti-entropy entry) now go through
+`connection::apply_inbound_then_append`, which counts the record in flight from before the apply until it is on
+the WAL's channel (`WalHandle::begin_inbound` / `append_inbound`), and `replica_sync::answer` declines while the
+count is non-zero — loading it **before** `dropped_appends`, because an abandoned window counts its drop and then
+releases the count. Enqueue is enough because the answer's `sync()` rides the same channel behind the record. The
+window itself, and invariant 1, are unchanged.
 
 **2. The snapshot merges the WAL tail before truncating.** `do_snapshot` reads `wal.bin` (every
 record since the last truncation) and folds it into the store scan under the store's own

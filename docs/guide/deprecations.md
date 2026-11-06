@@ -2451,6 +2451,30 @@ is bypassed for bulk — the ticket says `http` and names the gateway's own port
 An application serving `/bulk/{id}` from its own server (`ServiceHandle::set_bulk_serving_port`) advertises the scheme
 `gateway_tls` implies unless it calls the new `ServiceHandle::set_bulk_serving_https`.
 
+## 81. A replica-sync answer is `Failed` while an inbound record is between its apply and its append; `WalHandle` gained `begin_inbound` and `inbound_in_flight` (unreleased, external review 2026-10-31, R8)
+
+A peer asked whether it holds a record (`sys.replica-sync.v1`, behind `set_with_replica_sync`, `POST /gateway/kv` with
+`min_acks`, and both SDKs' replica-sync writes) used to answer `Persisted` from its store and a WAL sync. A record the
+receive path had applied but not yet handed to the WAL was in the store and not in the queue the sync covers, so the
+answer named a durability the peer did not have (finding F3). Now each inbound record is counted from before its apply
+until it is on the WAL writer's channel, and the answer is `Failed` while the count is non-zero. The count is visible
+as `/health`'s `persistence.inbound_in_flight` and the gauge `gossip_wal_inbound_in_flight`.
+
+**Who is affected:** a caller that counts `persisted_by` under load. The count is one number for the node, not per
+record, so a peer that is receiving a steady stream answers `Failed` for any record more often, and lands in
+`missing` until a later round — `collect` re-asks until its deadline, so a short deadline against a busy peer returns
+fewer acknowledgements than before. Nothing that was `Persisted` correctly becomes refused for good: the answer
+returns to `Persisted` once the in-flight records are appended. A window abandoned without its append counts a dropped append,
+which — as since the Phase-C audit — makes the node answer `Failed` for every record until restart (`/health`'s
+`persistence.dropped_appends` shows it). That happens only when the connection task is aborted while its append
+awaits — at shutdown, under `sync_mode = "flush"`; the read bounds wrap only the frame read, not its processing, and in
+`async`/`os` the append does not wait. Under `flush` the count is released when the record is queued, not when its
+`fdatasync` answers, so a slow disk alone does not hold it.
+
+**API:** additive only. `mycelium_core::persistence::WalHandle` gained `begin_inbound()` (returning the `#[must_use]`
+guard `InboundApply`), `append_inbound()` and `inbound_in_flight()`; `/health`'s `persistence` object gained
+`inbound_in_flight`. Wire **v12** unchanged; invariant 1 (*apply, then persist*) unchanged.
+
 ## 82. Every crate requires Tokio 1.53.3 or later; `rustls-pemfile` is no longer a dependency (unreleased, external review 2026-10-31, R9)
 
 **Tokio.** Every crate in this repository — `mycelium`, `mycelium-core`, each companion and the examples — now declares
