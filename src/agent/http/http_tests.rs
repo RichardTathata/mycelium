@@ -3118,6 +3118,9 @@ async fn raw_routes_require_a_companion_kinds_family_scope() {
         ("blackboard.board.read", "board:read", "board-write"),
         ("blackboard.board.depth", "board:read", "raw-only"),
         ("tuple.work.depth",     "tuple:read",  "tuple-write"),
+        // The replica-sync reads (#714's review, round 2): the write scope read the whole board through `snapshot`.
+        ("blackboard.board.snapshot", "board:read", "board-write"),
+        ("tuple.work.wal_replay", "tuple:read",  "tuple-write"),
         ("blackboard.board",     "board:write", "board-read"),   // a malformed kind under the prefix: the write scope
     ];
     for (kind, scope, token) in cases {
@@ -3201,6 +3204,19 @@ async fn the_signal_streams_and_the_serve_stream_need_a_companion_kinds_family_s
         assert_eq!(v["required_scope"], scope, "{why}: {v}");
         assert_eq!(v["kind"], kind, "{why}: {v}");
     };
+
+    // The mailbox stream carries a kind in its path too (#714's review, round 2): delivering a board kind into a
+    // mailbox is gated `board:write` at `mailbox/deliver`, so subscribing to it is the family's `:read`.
+    let r = get("mesh-read", "/gateway/mailbox/blackboard.board.post".into()).await.unwrap();
+    refused(r, "board:read", "blackboard.board.post", "mailbox/{kind} under mesh:read").await;
+    let r = get("board-write", "/gateway/mailbox/blackboard.board.post".into()).await.unwrap();
+    refused(r, "board:read", "blackboard.board.post", "mailbox/{kind}: board:write subscribed to a board kind").await;
+    let r = get("board-read", "/gateway/mailbox/blackboard.board.post".into()).await.unwrap();
+    assert_eq!(r.status(), 200, "mailbox/{{kind}}: board:read was refused the board kind");
+    drop(r);
+    let r = get("mesh-read", "/gateway/mailbox/repair.request".into()).await.unwrap();
+    assert_eq!(r.status(), 200, "mailbox/{{kind}}: an ordinary kind was refused");
+    drop(r);
 
     // The signal streams: a companion's kind needs the family's `:read`, whatever the kind's verb.
     for door in ["/gateway/signal/sse", "/signals"] {

@@ -622,12 +622,14 @@ fn parse_complete_keyed_req(p: &Bytes) -> Option<(u64, Arc<str>, Arc<str>, Bytes
 /// gateway's raw-route gate (`mycelium::companion_kind_scope`) to the scope the space's own route requires. The
 /// operations are read from this crate's source — the literal in each `rpc_kind(…, "op")` call, which every
 /// `rpc_rx` registration and `rpc_call` here carries — rather than listed a second time, so a verb registered or
-/// called here is checked against the table without anyone remembering to. Which verb is a read (`depth`) is this
-/// test's own statement, matching the space's route table in `http.rs`; a new read verb needs adding here and in the
-/// core table both.
+/// called here is checked against the table without anyone remembering to. Which verbs are reads (`depth`, and
+/// `wal_replay`, the replica-sync read that pages the space's items) is this test's own statement, matching the
+/// space's route table in `http.rs`; a new read verb needs adding here and in the core table both. Doc-comment lines
+/// are skipped so the scan reads code, not prose (#714's review, round 2).
 #[cfg(test)]
 mod raw_route_scope_tests {
     fn ops_in(src: &str) -> Vec<String> {
+        let src = src.lines().filter(|l| !l.trim_start().starts_with("///")).collect::<Vec<_>>().join("\n");
         src.match_indices("rpc_kind(")
             .filter_map(|(i, _)| {
                 let rest = &src[i..];
@@ -649,7 +651,7 @@ mod raw_route_scope_tests {
         assert!(ops.len() >= 10, "the scan found too few operations: {ops:?}");
         for op in &ops {
             let kind = super::rpc_kind("ns", op);
-            let expected = if op == "depth" { "tuple:read" } else { "tuple:write" };
+            let expected = if matches!(op.as_str(), "depth" | "wal_replay") { "tuple:read" } else { "tuple:write" };
             assert_eq!(mycelium::companion_kind_scope(&kind), Some(expected), "{kind}");
         }
     }

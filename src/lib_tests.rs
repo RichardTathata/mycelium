@@ -17983,9 +17983,13 @@ fn a_companion_kind_maps_to_its_familys_scope_and_an_unknown_verb_to_write() {
         ("blackboard.board.post", Some("board:write")), ("blackboard.board.claim", Some("board:write")),
         ("blackboard.board.replicate", Some("board:write")), ("blackboard.board.read", Some("board:read")),
         ("blackboard.board.depth", Some("board:read")), ("blackboard.board.new_verb", Some("board:write")),
+        // The replica-sync reads (#714's review, round 2): a snapshot is every fact on the board, a WAL page the space's
+        // items — reads, whatever the companion uses them for.
+        ("blackboard.board.snapshot", Some("board:read")), ("tuple.work.wal_replay", Some("tuple:read")),
         ("blackboard.board", Some("board:write")), ("blackboard.a.b.read", Some("board:read")),
         ("tuple.work.put", Some("tuple:write")), ("tuple.work.take_by_key", Some("tuple:write")),
         ("tuple.work.heartbeat", Some("tuple:write")), ("tuple.work.depth", Some("tuple:read")),
+        ("tuple.work.replicate", Some("tuple:write")), ("blackboard.board.replicate", Some("board:write")),
         ("wiki.council.ingest", Some("wiki:write")), ("wiki.council.access", Some("wiki:read")),
         ("mcp.invoke", None), ("echo", None), ("blackboardx.a.post", None), ("", None),
     ] {

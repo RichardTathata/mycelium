@@ -879,6 +879,14 @@ class MyceliumAgent:
         url = f"{self._base_url}/gateway/signal/sse/{path_segment(kind)}"
         async with httpx.AsyncClient(timeout=None, headers=self._pool.headers, verify=self._pool.verify) as client:
             async with aconnect_sse(client, "GET", url) as event_source:
+                resp = event_source.response
+                if resp.status_code >= 400:
+                    # A refused stream — a companion's kind without the family's `:read` (0.2.13), or a protected
+                    # kind — is raised as the HTTP error, or ProtectedKindError, rather than as httpx-sse's
+                    # content-type SSEError (#714's review, round 2), as `rpc_serve` does.
+                    await resp.aread()
+                    _raise_if_serve_refused(resp)
+                    resp.raise_for_status()
                 async for event in event_source.aiter_sse():
                     import json as _json
                     data   = _json.loads(event.data)

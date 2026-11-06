@@ -731,8 +731,10 @@ substrate prevents (the guest is foreign code in the node's process — `myceliu
   needs the companion's family scope as well as the door's own, decided in the auth layer
   (`authz::companion_kind_gate`, with the credential's whole scope set; `companion_kind_scope` and
   `companion_kind_family` in `src/agent/mod.rs`, ungated): in a raw route's body, the kind's own verb's scope
-  (`read`/`depth`/`access` → `:read`, every other verb → `:write`); in a signal stream's path, the family's `:read`
-  (a tap receives every frame); in the serve stream's path, the family's `:write` (serving is answering). A new
+  (`read`/`depth`/`snapshot`, `depth`/`wal_replay`, `access` → `:read` — the replica-sync reads included, which
+  #714's second round found under `:write`; every other verb → `:write`); in a signal stream's or the mailbox
+  stream's path, the family's `:read` (a tap receives every frame; a mailbox hands on what a `:write`-gated delivery
+  put there); in the serve stream's path, the family's `:write` (serving is answering). A new
   door that carries a kind, in the body or the path, must ask this gate too — `RAW_KIND_ROUTES` and
   `PATH_KIND_ROUTES` in `authz.rs` are the lists, and each companion's own tests diff the verbs it serves against
   the table. Two places do not: the wasm host's emit door (`confine_kind`)

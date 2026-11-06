@@ -26,3 +26,10 @@ External review 2026-10-31, finding F1; `docs/plans/external-review-2026-10-31.m
   test builds now carry `compliance`.
 - **Each companion diffs its own verbs against the core table** by reading its source for `rpc_kind(…, "op")`
   literals and `handler!("op", …)` registrations; the read/write split is the test's own statement.
+- **Round 2 (2026-11-06).** The mapping sent two pure reads to `:write`: `blackboard.{ns}.snapshot` answers every
+  fact on the board and `tuple.{ns}.wal_replay` pages the space's items — the companions' replica-sync reads, with
+  no HTTP route of their own — so a `board:write` token with no `board:read` read the whole board through
+  `rpc/call` (the reviewer ran it). Both are `:read` now, in `companion_kind_scope` and both scans, which also skip
+  doc-comment lines so they read code, not prose. `/gateway/mailbox/{kind}` was the one path door the first round's
+  list missed; it is in `PATH_KIND_ROUTES` under the family's `:read`. `mycelium-py`'s `on_signal` checks the
+  response status as `rpc_serve` does.

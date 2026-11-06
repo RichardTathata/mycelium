@@ -23,18 +23,22 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   finding F1; `docs/plans/external-review-2026-10-31.md` row R1, decision D1). `rpc/call`, `scatter`, `signal/emit`,
   `mailbox/deliver`, `shard/emit` and `overlay/emit_reliable` map a kind of the form `blackboard.{ns}.{op}`,
   `tuple.{ns}.{op}` or `wiki.{group}.{op}` to the scope the companion's own route requires (`board:*`, `tuple:*`,
-  `wiki:*`; `mycelium::companion_kind_scope`) and refuse `403 insufficient scope` naming it when the token lacks it.
+  `wiki:*`; `mycelium::companion_kind_scope` — the read verbs `read`/`depth`/`snapshot`, `depth`/`wal_replay`, `access`
+  to `:read`, every other verb to `:write`; `snapshot` and `wal_replay`, the replica-sync reads that answer a board's
+  every fact and a space's items, sat under `:write` until the review's second round, where a `board:write` token with
+  no `board:read` read the whole board) and refuse `403 insufficient scope` naming it when the token lacks it.
   Before: a `mesh:write`-only token was refused on `/gateway/bb/post` and admitted on `rpc/call` with
   `method: blackboard.board.post`, and the fact landed on the board (reproduced by the review and again before the
   fix; `a_board_write_through_a_raw_route_needs_board_write_as_the_boards_own_route_does`,
   `raw_routes_require_a_companion_kinds_family_scope`). Each companion's tests diff the operations it serves against
   the table. `deprecations.md` §76. **The doors that take the kind from the path** (#714's review): the two signal
-  streams (`/gateway/signal/sse/{kind}`, `/signals/{kind}`) need the family's `:read` — a `mesh:read` token read
-  every board post's payload where `bb/read` refused it — and the serve stream (`/gateway/rpc/serve/{kind}`) the
+  streams (`/gateway/signal/sse/{kind}`, `/signals/{kind}`) and the mailbox stream (`/gateway/mailbox/{kind}`, from
+  the review's second round) need the family's `:read` — a `mesh:read` token read every board post's payload where
+  `bb/read` refused it — and the serve stream (`/gateway/rpc/serve/{kind}`) the
   family's `:write` as well as `mesh:serve` — a `mesh:serve` token served `blackboard.other.post` on a node hosting
   no board. *Not built:* a scope check inside the companions' handlers — the route is the door, and a member's
   direct `rpc_call` is not a client; and `cap:write` still advertises any capability, a companion's primary role
-  included.
+  included. `mycelium-py` 0.2.13's `on_signal` raises a refused stream as the HTTP error rather than an `SSEError`.
 
 - **`mycelium doctor` names each guarantee's row of the shared-responsibility matrix** (adopter-surface Y10, decided by
   the maintainer on #707's review).

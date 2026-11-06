@@ -73,10 +73,12 @@ tests where one exists.
 **What:** every gateway door that carries an RPC kind, **in the body or the path** — `/gateway/rpc/call` and
 `/gateway/scatter` under `mesh:write`; `/gateway/overlay/emit_reliable`, already under `consensus:write`;
 `mailbox/deliver` and `shard/emit`, enumerated and stated; and, from #714's review, the two signal streams
-(`/gateway/signal/sse/{kind}`, `/signals/{kind}`) under `mesh:read` and the serve stream (`/gateway/rpc/serve/{kind}`)
-under `mesh:serve` — of a companion-namespaced kind requires that companion's family scope (D1): in a body, the
-kind's own verb's; on a signal stream, the family's `:read` (a tap receives every frame); on the serve stream, the
-family's `:write` (serving is answering). A caller without it is refused 403 naming the scope. The wiki handlers that gate on `req.sender()` get the same treatment at the route. `rbac.md` says
+(`/gateway/signal/sse/{kind}`, `/signals/{kind}`) under `mesh:read`, the mailbox stream (`/gateway/mailbox/{kind}`,
+round 2) under `mesh:read` and the serve stream (`/gateway/rpc/serve/{kind}`) under `mesh:serve` — of a
+companion-namespaced kind requires that companion's family scope (D1): in a body, the kind's own verb's (the
+replica-sync reads `snapshot` and `wal_replay` being reads, round 2); on a signal or mailbox stream, the family's
+`:read` (a tap receives every frame; a mailbox hands on a `:write`-gated delivery); on the serve stream, the family's
+`:write` (serving is answering). A caller without it is refused 403 naming the scope. The wiki handlers that gate on `req.sender()` get the same treatment at the route. `rbac.md` says
 which scope each companion kind needs on the raw routes, and `confined-fleet.md` names the companion kinds where it
 tells operators to list protected work.
 
@@ -88,16 +90,25 @@ CI runs `tests/` under `tls,a2a` and never `compliance`, so a scope test there w
 ingest kind refused under `mesh:write` (the gate decides before dispatch, so a group-member gateway is not a
 separate case); and, from the review: `mesh:read` alone refused the signal streams for a board kind naming
 `board:read`, `mesh:read` + `board:read` receiving the frame; `mesh:serve` alone refused the serve stream for a
-board kind naming `board:write`, with `board:write` a stream.
+board kind naming `board:write`, with `board:write` a stream; and from round 2: `board:write` refused
+`blackboard.board.snapshot` on `rpc/call` naming `board:read`, `tuple:write` refused `tuple.work.wal_replay` naming
+`tuple:read`, and `mesh:read` alone refused the mailbox stream for a board kind naming `board:read`.
 
 **Not built, stated:** a provider-side scope check inside the companions (the route is the door; a member's direct
 `rpc_call` is not a client); and `cap:write`'s half of the serve finding — a `cap:write` client can advertise any
 capability, a companion's `{ns}.primary` role included, which is that scope's meaning; what it is then sent is
 gated at the serve door, so a client without the family's `:write` cannot be sent a companion's requests.
 
-**As delivered** *(rev 0.4; the path doors from #714's review)*. **The path doors:** `PATH_KIND_ROUTES` in
-`authz.rs` — the two signal streams (`:read`) and the serve stream (`:write`), the kind read percent-decoded as the
-handler's `Path` reads it; `companion_kind_family` and `companion_family_scope` in `src/agent/mod.rs`; tested by
+**As delivered** *(rev 0.5; the path doors from #714's review, the mailbox stream and the replica-sync reads from
+its round 2)*. **Round 2:** `snapshot` (every fact on the board) and `wal_replay` (the space's items) are reads in
+`companion_kind_scope` and both companions' scans — a `board:write` token with no `board:read` had read the whole
+board through `rpc/call`, which the reviewer ran; the scans skip doc-comment lines; `/gateway/mailbox/{kind}` is in
+`PATH_KIND_ROUTES` under the family's `:read`; `mycelium-py`'s `on_signal` raises a refused stream as the HTTP error
+(`test_on_signal_raises_a_refused_stream_as_an_http_error_not_an_sse_error`). Each seen failing first: the mapping
+test and the raw-route test at `snapshot`/`wal_replay`, the streams test at the mailbox door, the pytest at the
+`SSEError`. **The path doors:** `PATH_KIND_ROUTES` in
+`authz.rs` — the two signal streams and the mailbox stream (`:read`) and the serve stream (`:write`), the kind read
+percent-decoded as the handler's `Path` reads it; `companion_kind_family` and `companion_family_scope` in `src/agent/mod.rs`; tested by
 `the_signal_streams_and_the_serve_stream_need_a_companion_kinds_family_scope` (both streams × four kinds, the
 write scope not the read scope, a percent-encoded kind, an ordinary kind, the frame received under `board:read`;
 the serve stream × three kinds, `board:read` not serving, `mesh:serve` still required), seen failing first with
@@ -109,8 +120,8 @@ a handler sees only the scopes the route granted, so it could not have decided t
 body field the handler reads (`method` on `rpc/call` and `scatter`, `kind` on `signal/emit`, `mailbox/deliver`,
 `shard/emit` and `overlay/emit_reliable`; `RAW_KIND_ROUTES`), maps it by `mycelium::companion_kind_scope`
 (`src/agent/mod.rs`: `blackboard.*` → `board:*`, `tuple.*` → `tuple:*`, `wiki.*` → `wiki:*`; the read verbs
-`read`/`depth`, `depth`, `access` to `:read`, every other verb under the prefix — an unknown one included — to
-`:write`), and refuses `403 {"error": "insufficient scope", "required_scope": …, "kind": …}`. The six routes:
+`read`/`depth`/`snapshot`, `depth`/`wal_replay`, `access` to `:read`, every other verb under the prefix — an unknown
+one included — to `:write`), and refuses `403 {"error": "insufficient scope", "required_scope": …, "kind": …}`. The six routes:
 `rpc/call`, `scatter`, `signal/emit` and `shard/emit` emit a frame of the kind that reaches the signal-handler
 table an `rpc_rx` registers on, so a companion's handler could serve it; `overlay/emit_reliable` the same under
 `consensus:write`; `mailbox/deliver` writes a `mailbox/` key and reaches no handler, gated alike so the list is C1's.

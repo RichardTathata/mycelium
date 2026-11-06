@@ -2258,7 +2258,7 @@ stale keys. **Migration:** none for a healthy IdP. If your IdP publishes an empt
 briefly), tokens are refused during that window; if an outage of more than a day must not lock operators out, keep a
 static-token principal for them (`rbac.md`).
 
-## 76. A companion's RPC kind at a gateway door — in a raw route's body, or the path of a signal or serve stream — needs the companion's family scope (unreleased, external review 2026-10-31 F1, plan row R1)
+## 76. A companion's RPC kind at a gateway door — in a raw route's body, or the path of a signal, mailbox or serve stream — needs the companion's family scope (unreleased, external review 2026-10-31 F1, plan row R1)
 
 The gateway's raw routes — `POST /gateway/rpc/call`, `scatter`, `signal/emit`, `mailbox/deliver`, `shard/emit` and
 `overlay/emit_reliable` — take an RPC kind from the request body. A companion serves its operations as kinds of the
@@ -2268,19 +2268,27 @@ kinds to the same handlers under the route's own scope alone, so a `mesh:write` 
 post to a board through `rpc/call` where `/gateway/bb/post` refused it. Now a companion's kind on a raw route is
 refused `403 {"error": "insufficient scope", "required_scope": "board:write", "kind": "blackboard.board.post"}`
 unless the token also holds the family scope the companion's route would require — the read verbs (`read`,
-`depth` for a board; `depth` for a tuple space; `access` for a wiki) need `:read`, and every other verb under the
-prefix, an unknown one included, needs `:write` ([`rbac.md`](../operations/rbac.md)). The route's own scope is
+`depth` and `snapshot` for a board; `depth` and `wal_replay` for a tuple space; `access` for a wiki) need `:read`,
+and every other verb under the prefix, an unknown one included, needs `:write` ([`rbac.md`](../operations/rbac.md)).
+`snapshot` and `wal_replay` are the companions' replica-sync reads — a snapshot answers every fact on the board,
+payloads included, and a WAL page the space's items — and were under `:write` until #714's second review round, so
+a `board:write` token with no `board:read` read the whole board through `rpc/call` where `bb/read` refused it. The route's own scope is
 still required; an open gateway, which gates no scope on the companion's routes either, is unchanged; a build
 without `compliance` gates no scope anywhere. **Migration:** a scoped token that reached a companion through the
 raw routes under `mesh:write` (or `consensus:write` on `overlay/emit_reliable`) alone now needs the companion's
 scope too — add `board:write`, `tuple:write` or `wiki:write` (or the `:read` form) to it. A token used only on the
-companion's own routes is unaffected.
+companion's own routes is unaffected. `mycelium-py` 0.2.13's `on_signal` raises a refused stream as the HTTP error
+(`httpx.HTTPStatusError`, or `ProtectedKindError` for a protected kind) where every earlier version surfaced any
+`403` there as httpx-sse's content-type `SSEError`; `mycelium-ts` needs nothing.
 
-The two doors that take the kind from the **path** are gated the same way, with the verb fixed by what the door
+The three doors that take the kind from the **path** are gated the same way, with the verb fixed by what the door
 does (#714's review): `GET /gateway/signal/sse/{kind}` and `GET /signals/{kind}` register a tap on the handler table
 a companion's `rpc_rx` registers on and receive every frame of the kind, payload included, so observing a
 companion's kind needs the family's `:read` whatever the kind's own verb — a `mesh:read` token read each board
-post's contents where `/gateway/bb/read` refused it; and `GET /gateway/rpc/serve/{kind}` answers the kind's requests
+post's contents where `/gateway/bb/read` refused it; `GET /gateway/mailbox/{kind}` hands on what `mailbox/deliver`
+put under the kind, and a delivery of a board kind is gated `board:write` there, so subscribing to it needs the
+family's `:read` (the review's second round: the one path door the first round's list missed); and
+`GET /gateway/rpc/serve/{kind}` answers the kind's requests
 in the provider's place, so serving a companion's kind needs the family's `:write` as well as `mesh:serve` — a
 `mesh:serve` token served `blackboard.other.post` on a node hosting no board. A declared skill naming a companion
 kind reaches the serve door and is gated the same. The path is read percent-decoded, as the handler reads it. **Not

@@ -214,18 +214,21 @@ pub fn is_protected_kind(cfg: &GossipConfig, kind: &str) -> bool {
 /// board it had no `board:write` for. The gateway's auth layer asks this for the kind in a raw route's body and
 /// refuses the request `403 insufficient scope` naming the family scope the caller lacks.
 ///
-/// The mapping is by family prefix and the kind's last segment: the read operations — `read` and `depth` for a
-/// board, `depth` for a tuple space, `access` for a wiki — need the `:read` scope; **every other kind under the
-/// prefix needs the `:write` scope**, an unknown or malformed one included, so a new write verb is covered before
-/// anyone lists it. Each companion's own tests diff the operations it serves against this table. `None` for a
+/// The mapping is by family prefix and the kind's last segment: the read operations — `read`, `depth` and
+/// `snapshot` for a board, `depth` and `wal_replay` for a tuple space, `access` for a wiki — need the `:read` scope;
+/// **every other kind under the prefix needs the `:write` scope**, an unknown or malformed one included, so a new
+/// write verb is covered before anyone lists it. `snapshot` and `wal_replay` are the companions' replica-sync reads
+/// (#714's review, round 2): a snapshot answers every fact on the board, payloads included, and a WAL page the
+/// space's items, so under `:write` a write-only token read the whole board; `replicate` applies what it carries at
+/// the receiver and stays a write. Each companion's own tests diff the operations it serves against this table. `None` for a
 /// kind outside the three families. Ungated, as [`is_protected_kind`] is, so a companion's test can call it in any
 /// build.
 pub fn companion_kind_scope(kind: &str) -> Option<&'static str> {
     let family = companion_kind_family(kind)?;
     let op = kind.rsplit_once('.').map(|(_, op)| op).unwrap_or("");
     let read = match family {
-        "board" => matches!(op, "read" | "depth"),
-        "tuple" => op == "depth",
+        "board" => matches!(op, "read" | "depth" | "snapshot"),
+        "tuple" => matches!(op, "depth" | "wal_replay"),
         _       => op == "access",
     };
     Some(companion_family_scope(family, read))
@@ -234,8 +237,9 @@ pub fn companion_kind_scope(kind: &str) -> Option<&'static str> {
 /// The scope family a companion-namespaced kind belongs to — `board` for `blackboard.*`, `tuple` for `tuple.*`,
 /// `wiki` for `wiki.*` — or `None` for a kind outside the three. The doors that carry a kind in the **path** ask
 /// this rather than [`companion_kind_scope`], because what they do with the kind fixes the verb: observing a
-/// companion's request frames on a signal stream is a read of its contents whatever the frames' verb, and serving a
-/// companion's kind on `rpc/serve` is answering its operations, a write whatever the verb.
+/// companion's request frames on a signal stream, or subscribing to its kind's mailbox, is a read of its contents
+/// whatever the frames' verb, and serving a companion's kind on `rpc/serve` is answering its operations, a write
+/// whatever the verb.
 pub fn companion_kind_family(kind: &str) -> Option<&'static str> {
     match kind.split_once('.')?.0 {
         "blackboard" => Some("board"),

@@ -294,13 +294,16 @@ const RAW_BODY_PEEK_LIMIT: usize = 2 * 1024 * 1024;
 /// The doors that take an RPC kind from the **path**, and the verb a companion's kind needs there whatever the kind's
 /// own verb (#714's review, findings 1 and 2): the two signal streams register a tap on the handler table an
 /// `rpc_rx` registers on and receive every frame of the kind, payload included — observing a board's `post` frames
-/// is reading the board, so `:read`; the serve stream answers the kind's requests in the provider's place — serving
-/// a board's kind is writing the board, so `:write`, and a declared skill naming a companion kind reaches this same
-/// door and is gated the same.
+/// is reading the board, so `:read`; the mailbox stream hands on what `mailbox/deliver` put under the kind, and a
+/// delivery of a board kind is gated `board:write` there, so subscribing to it is the family's `:read` (#714's
+/// review, round 2); the serve stream answers the kind's requests in the provider's place — serving a board's kind
+/// is writing the board, so `:write`, and a declared skill naming a companion kind reaches this same door and is
+/// gated the same.
 #[cfg(feature = "compliance")]
 pub(super) const PATH_KIND_ROUTES: &[(&str, bool)] = &[
     ("/gateway/signal/sse/{kind}", true),
     ("/signals/{kind}",            true),
+    ("/gateway/mailbox/{kind}",    true),
     ("/gateway/rpc/serve/{kind}",  false),
 ];
 
@@ -344,7 +347,7 @@ async fn companion_kind_gate(matched: Option<&str>, request: Request, scopes: &[
         {
             let scope = crate::agent::companion_family_scope(family, *read);
             if !scope_admits(scopes, scope) {
-                let what = if *read { "observing its request frames" } else { "serving it" };
+                let what = if *read { "observing its frames" } else { "serving it" };
                 return Err(refuse(&kind, scope, what));
             }
         }

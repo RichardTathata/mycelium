@@ -408,12 +408,15 @@ mod admission_tests {
 /// gateway's raw-route gate (`mycelium::companion_kind_scope`) to the scope the board's own route requires. The
 /// operations are read from this crate's source — the literal in each `rpc_kind(…, "op")` call and in each
 /// `handler!("op", …)` registration — rather than listed a second time, so a verb registered or called here is
-/// checked against the table without anyone remembering to. Which verbs are reads (`read`, `depth`) is this test's
-/// own statement, matching the board's route table in `http.rs`; a new read verb needs adding here and in the core
-/// table both.
+/// checked against the table without anyone remembering to. Which verbs are reads (`read`, `depth`, and `snapshot`,
+/// the replica-sync read that answers every fact) is this test's own statement, matching the board's route table in
+/// `http.rs`; a new read verb needs adding here and in the core table both. Doc-comment lines are skipped so the
+/// scan reads code, not prose (#714's review, round 2).
 #[cfg(test)]
 mod raw_route_scope_tests {
     fn ops_in(src: &str) -> Vec<String> {
+        let src = src.lines().filter(|l| !l.trim_start().starts_with("///")).collect::<Vec<_>>().join("\n");
+        let src = src.as_str();
         let registered = src.match_indices("handler!(\"").filter_map(|(i, m)| {
             let rest = &src[i + m.len()..];
             Some(rest[..rest.find('"')?].to_string())
@@ -439,7 +442,7 @@ mod raw_route_scope_tests {
         assert!(ops.len() >= 8, "the scan found too few operations: {ops:?}");
         for op in &ops {
             let kind = super::rpc_kind("ns", op);
-            let expected = if matches!(op.as_str(), "read" | "depth") { "board:read" } else { "board:write" };
+            let expected = if matches!(op.as_str(), "read" | "depth" | "snapshot") { "board:read" } else { "board:write" };
             assert_eq!(mycelium::companion_kind_scope(&kind), Some(expected), "{kind}");
         }
     }
