@@ -992,15 +992,21 @@ mod tests {
     /// journal does. On the code before the fix a reopen syncs nothing.
     #[test]
     fn reopening_a_wal_syncs_its_directory() {
-        let path = temp_wal("reopen-dir-sync");
+        let tag = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let root = std::env::temp_dir().join(format!("mbb-r6-reopen-{}-{tag}", std::process::id()));
+        let path = root.join("a").join("wal.log");
         drop(BoardStore::persistent(&path, 1).unwrap());
-        crate::wal::FS_TRACE.with(|t| t.borrow_mut().clear());
+        crate::wal::FS_DIRS.with(|t| t.borrow_mut().clear());
         let store = BoardStore::persistent(&path, 1).unwrap();
-        let trace = crate::wal::FS_TRACE.with(|t| t.borrow().clone());
-        assert!(trace.contains(&"open.parent.sync"), "{trace:?}");
-        assert!(trace.contains(&"open.mkdir.sync"), "the existing directory's holder too: {trace:?}");
+        let dirs = crate::wal::FS_DIRS.with(|t| t.borrow().clone());
+        let under: Vec<_> = dirs.iter().filter(|(_, p)| p.starts_with(&root)).cloned().collect();
+        assert_eq!(
+            under,
+            [("open.mkdir.sync", root.clone()), ("open.parent.sync", root.join("a"))],
+            "`a`'s entry in the root, then the file's in `a`, on a reopen: {dirs:?}"
+        );
         drop(store);
-        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// R6 of `docs/plans/external-review-2026-10-31.md` (the review's F7): a fresh WAL's directory

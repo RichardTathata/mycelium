@@ -218,8 +218,11 @@ async fn an_epoch_recorded_after_a_torn_tail_survives_a_restart() {
 // journal does not go through (its syncs are `std::fs`, not the sim seam); what these pin is the
 // order of the syncs, from a trace the journal reports, and that the sync runs on a real directory.
 
-fn steps(rx: &std::sync::mpsc::Receiver<&'static str>) -> Vec<&'static str> {
-    rx.try_iter().collect()
+type Steps = std::sync::mpsc::Receiver<(&'static str, PathBuf)>;
+
+/// The labels of the storage steps, in order.
+fn steps(rx: &Steps) -> Vec<&'static str> {
+    rx.try_iter().map(|(op, _)| op).collect()
 }
 
 /// **F7, the probe inverted.** On a fresh journal the directory holding the file is synced before
@@ -266,11 +269,13 @@ async fn a_journal_in_existing_unsynced_directories_syncs_their_holders() {
     let d = dir("existing-tree");
     let parent = d.join("a").join("b");
     std::fs::create_dir_all(&parent).unwrap(); // created, never synced
-    let (tx, rx) = std::sync::mpsc::channel();
+    let (tx, rx) = std::sync::mpsc::channel::<(&'static str, PathBuf)>();
     let _j = Journal::open_traced(parent.join("evidence.log"), "test/journal", tx).expect("open");
-    let trace = steps(&rx);
-    let dirs = trace.iter().filter(|o| **o == "dir.sync").count();
-    assert!(dirs >= 2, "`a` in the temp dir and `b` in `a` at least: {trace:?}");
+    let trace: Vec<_> = rx.try_iter().collect();
+    let under: Vec<&PathBuf> =
+        trace.iter().filter(|(op, p)| *op == "dir.sync" && p.starts_with(&d)).map(|(_, p)| p).collect();
+    assert_eq!(under, [&d, &d.join("a")], "`a`'s entry in the temp dir, `b`'s in `a`: {trace:?}");
+    assert_eq!(trace.last(), Some(&("parent.sync", parent.clone())), "then the file's entry in `b`");
     let _ = std::fs::remove_dir_all(&d);
 }
 

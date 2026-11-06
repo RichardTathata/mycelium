@@ -320,7 +320,7 @@ impl GossipAgent {
                 // `persist.configured: enforced`, and `secure-single-domain` let it start.
                 return Err(GossipError::InvalidField {
                     field: "persistence",
-                    reason: format!("the persistence directory {} cannot be created: {e}; a node configured to persist does not start without it", dir.display()),
+                    reason: format!("the persistence directory {} could not be prepared — a directory on its path could not be created, or its entry could not be synced: {e}; a node configured to persist does not start without it", dir.display()),
                 });
             } else {
                 let kv_state     = Arc::clone(&self.kv_state);

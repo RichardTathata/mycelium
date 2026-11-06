@@ -196,8 +196,8 @@ impl Journal {
         // do (the review's F7, plan row R6). Reopening syncs again: cheap, and it covers a file an
         // earlier version created without the sync on a machine that has not lost power since.
         if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-            mycelium_core::persistence::create_dir_all_synced_observed(parent, &mut |_| {
-                note(trace.as_ref(), "dir.sync")
+            mycelium_core::persistence::create_dir_all_synced_observed(parent, &mut |d| {
+                note(trace.as_ref(), "dir.sync", d)
             })?;
         }
         let lock = acquire_ownership(&path)?;
@@ -225,6 +225,7 @@ impl Journal {
         let mut seq = recovered.records;
 
         let (tx, mut rx) = mpsc::channel::<Msg>(QUEUE_DEPTH);
+        let file_path = path.clone(); // only a test's trace reads it
         tokio::spawn(async move {
             // After a failed append the file's end is unknown — part of a frame may be on disk —
             // and the writer must not put an acknowledged record behind it. It refuses every later
@@ -249,7 +250,7 @@ impl Journal {
                         frame.extend_from_slice(&bytes);
                         let written = write_frame(&mut file, &frame, fault.as_deref());
                         if written.is_ok() {
-                            note(trace.as_ref(), "append.sync");
+                            note(trace.as_ref(), "append.sync", &file_path);
                         }
                         match written {
                             Ok(()) => {
@@ -356,7 +357,7 @@ impl Journal {
     pub(crate) fn open_traced(
         path: impl AsRef<Path>,
         stream: &'static str,
-        trace: std::sync::mpsc::Sender<&'static str>,
+        trace: Trace,
     ) -> Result<Arc<Self>, std::io::Error> {
         Self::open_inner(path.as_ref(), stream, Hooks { fault: None, trace: Some(trace) })
     }
@@ -373,15 +374,18 @@ impl Journal {
 #[derive(Default)]
 struct Hooks {
     fault: Option<Arc<std::sync::atomic::AtomicBool>>,
-    trace: Option<std::sync::mpsc::Sender<&'static str>>,
+    trace: Option<Trace>,
 }
 
 /// Report one storage step to a test's trace, if one is attached.
-fn note(trace: Option<&std::sync::mpsc::Sender<&'static str>>, op: &'static str) {
+fn note(trace: Option<&Trace>, op: &'static str, dir: &Path) {
     if let Some(t) = trace {
-        let _ = t.send(op);
+        let _ = t.send((op, dir.to_path_buf()));
     }
 }
+
+/// A test's trace: each storage step, with the directory it synced (or the file, for an append).
+type Trace = std::sync::mpsc::Sender<(&'static str, PathBuf)>;
 
 /// Write one frame and fsync it. `fault`, set only by a test, turns this call into a short write
 /// followed by an error — the failure shape a full disk or a pulled cable produces.
@@ -413,8 +417,8 @@ fn acquire_ownership(path: &Path) -> std::io::Result<OwnershipLock> {
 ///
 /// A test's trace is told `parent.sync` from inside the sync, once it has returned — so the witness
 /// records the call itself, and removing a call fails it (#718's review, finding 1).
-fn fsync_parent(path: &Path, trace: Option<&std::sync::mpsc::Sender<&'static str>>) -> std::io::Result<()> {
-    mycelium_core::persistence::sync_parent_dir_observed(path, &mut |_| note(trace, "parent.sync"))
+fn fsync_parent(path: &Path, trace: Option<&Trace>) -> std::io::Result<()> {
+    mycelium_core::persistence::sync_parent_dir_observed(path, &mut |d| note(trace, "parent.sync", d))
 }
 
 /// Walk the file frame by frame to its last complete record. A missing file is an empty journal.

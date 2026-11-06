@@ -525,10 +525,15 @@ impl OwnershipLock {
 /// that already exists may have been left by an earlier open whose sync failed, or created by a
 /// concurrent opener that has not synced it yet, and nothing on disk says which (#718's review).
 ///
-/// A failed sync is returned, never skipped — with one exception: an ancestor that existed before
-/// the call and whose holder this process may not open for reading (`PermissionDenied`, a `0711`
-/// home directory) is passed over, because this call did not create it and cannot sync it; every
-/// directory this call created was created in a holder it could write.
+/// A failed sync is returned, naming the directory, never skipped — with one exception: an ancestor
+/// that existed before the call and whose holder this process may not open for reading
+/// (`PermissionDenied`, a `0711` home directory) or whose filesystem does not do directory fsync
+/// (`EINVAL`, `ENOTSUP` — a squashfs root under a writable data mount) is passed over, counted in
+/// [`dir_syncs_passed_over`] and logged once, because this call did not create it and cannot sync
+/// it. A directory this call created is never passed over.
+///
+/// A relative `dir` is synced up to the working directory only (`.`): the path is used as given, and
+/// what lies above the working directory is not walked.
 ///
 /// The directory holding a *file* is the caller's to sync once the file exists
 /// ([`sync_parent_dir`]). Blocking, and outside the sim seam (`std::fs`, like the node-local
@@ -541,6 +546,13 @@ pub fn create_dir_all_synced(dir: &std::path::Path) -> io::Result<Vec<PathBuf>> 
     create_dir_all_synced_observed(dir, &mut |d| synced.push(d.to_path_buf()))?;
     Ok(synced)
 }
+
+/// How many directory syncs on a pre-existing ancestor were passed over because its filesystem does
+/// not do directory fsync (`EINVAL`, `ENOTSUP`) or the process may not read it, since start.
+pub fn dir_syncs_passed_over() -> u64 {
+    DIR_SYNCS_PASSED_OVER.load(std::sync::atomic::Ordering::Relaxed)
+}
+static DIR_SYNCS_PASSED_OVER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// [`create_dir_all_synced`], reporting each directory to `observe` from inside the sync, right
 /// after it returns — how a companion's test witnesses the sync itself rather than a label beside
@@ -556,19 +568,46 @@ pub fn create_dir_all_synced_observed(
             existed.insert(d.to_path_buf());
         }
     }
-    std::fs::create_dir_all(dir)?;
+    std::fs::create_dir_all(dir)
+        .map_err(|e| io::Error::new(e.kind(), format!("creating directory {}: {e}", dir.display())))?;
     let components: Vec<&std::path::Path> =
         dir.ancestors().filter(|d| !d.as_os_str().is_empty()).collect();
     for component in components.into_iter().rev() {
         let Some(holder) = component.parent() else { continue }; // the root has no holder
         let holder = if holder.as_os_str().is_empty() { std::path::Path::new(".") } else { holder };
-        match sync_dir_blocking(holder, observe) {
-            Ok(()) => {}
-            Err(e) if e.kind() == io::ErrorKind::PermissionDenied && existed.contains(component) => {}
-            Err(e) => return Err(e),
+        if let Err(e) = sync_dir_blocking(holder, observe) {
+            if existed.contains(component) && passes_over(&e) {
+                note_passed_over(holder, &e);
+                continue;
+            }
+            return Err(io::Error::new(e.kind(), format!("syncing directory {}: {e}", holder.display())));
         }
     }
     Ok(())
+}
+
+/// The one classification of a directory sync's failure on an ancestor that existed before the call
+/// (#718's review, round 2): `PermissionDenied` — the process may not open it for reading — and
+/// `EINVAL` / `ENOTSUP` — its filesystem does not do directory fsync, a stable property of the mount
+/// (squashfs, iso9660), not a transient error. Such an ancestor is passed over, counted and logged;
+/// this call did not create its entry and cannot make it durable. Every other error refuses, and so
+/// does any error on a directory this call created or on the directory holding the file.
+fn passes_over(e: &io::Error) -> bool {
+    matches!(e.kind(), io::ErrorKind::PermissionDenied | io::ErrorKind::InvalidInput | io::ErrorKind::Unsupported)
+}
+
+fn note_passed_over(holder: &std::path::Path, e: &io::Error) {
+    static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    DIR_SYNCS_PASSED_OVER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        warn!(
+            directory = %holder.display(),
+            error = %e,
+            "persistence: an existing ancestor directory cannot be synced (its filesystem does not do directory \
+             fsync, or it is not readable); passed over — this process did not create it. Further cases are \
+             counted, not logged"
+        );
+    }
 }
 
 /// Sync the directory holding `path`, so the entry naming `path` — a file just created, renamed or
@@ -591,9 +630,20 @@ pub fn sync_parent_dir_observed(
     }
 }
 
+// Test seam: a directory whose sync answers this error kind instead of syncing — how a test stands
+// in for a filesystem without directory fsync (`EINVAL`, `ENOTSUP`), which no CI runner has.
+#[cfg(test)]
+thread_local! {
+    static DIR_SYNC_FAULT: std::cell::RefCell<Vec<(PathBuf, io::ErrorKind)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
 /// The one place a directory is synced for the helpers above; `observe` is told only once the
 /// sync has returned `Ok`.
 fn sync_dir_blocking(dir: &std::path::Path, observe: &mut dyn FnMut(&std::path::Path)) -> io::Result<()> {
+    #[cfg(test)]
+    if let Some(kind) = DIR_SYNC_FAULT.with(|f| f.borrow().iter().find(|(p, _)| p == dir).map(|(_, k)| *k)) {
+        return Err(io::Error::from(kind));
+    }
     #[cfg(unix)]
     std::fs::File::open(dir)?.sync_all()?;
     observe(dir);
@@ -1794,6 +1844,40 @@ mod durability_tests {
         let synced = create_dir_all_synced(&leaf).expect("synced");
         assert!(synced.contains(&root), "`a`'s entry in the root: {synced:?}");
         assert!(synced.contains(&root.join("a")), "`b`'s entry in `a`: {synced:?}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// #718's review round 2, finding 1: an ancestor that existed before the call, on a filesystem
+    /// that does not do directory fsync (`EINVAL` — a squashfs root under a writable data mount — or
+    /// `ENOTSUP`), is passed over and counted rather than refusing the open; the directories this
+    /// call created are still synced. On the code before the fix the open fails.
+    #[test]
+    fn an_existing_ancestor_without_directory_fsync_is_passed_over() {
+        for kind in [io::ErrorKind::InvalidInput, io::ErrorKind::Unsupported] {
+            let root = unique_dir("mkdir-nofsync");
+            std::fs::create_dir_all(root.join("a")).unwrap();
+            DIR_SYNC_FAULT.with(|f| *f.borrow_mut() = vec![(root.clone(), kind)]);
+            let before = dir_syncs_passed_over();
+            let synced = create_dir_all_synced(&root.join("a").join("b"));
+            DIR_SYNC_FAULT.with(|f| f.borrow_mut().clear());
+            let synced = synced.unwrap_or_else(|e| panic!("{kind:?} on an existing ancestor refused the open: {e}"));
+            assert!(!synced.contains(&root), "the root was not synced, it was passed over");
+            assert_eq!(synced.last(), Some(&root.join("a")), "`b`, created here, is synced in `a`");
+            assert!(dir_syncs_passed_over() > before, "the pass-over is counted");
+            std::fs::remove_dir_all(&root).ok();
+        }
+    }
+
+    /// The same errors on the holder of a directory this call **created** still refuse: that entry
+    /// is new, and nothing else will make it durable.
+    #[test]
+    fn a_created_directory_whose_holder_cannot_sync_refuses() {
+        let root = unique_dir("mkdir-nofsync-created");
+        DIR_SYNC_FAULT.with(|f| *f.borrow_mut() = vec![(root.clone(), io::ErrorKind::InvalidInput)]);
+        let r = create_dir_all_synced(&root.join("a"));
+        DIR_SYNC_FAULT.with(|f| f.borrow_mut().clear());
+        let e = r.expect_err("a new directory whose entry cannot be synced is a refusal");
+        assert!(e.to_string().contains(&root.display().to_string()), "the error names the directory: {e}");
         std::fs::remove_dir_all(&root).ok();
     }
 

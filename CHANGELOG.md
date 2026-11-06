@@ -28,8 +28,11 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   KV WAL's already was. **Not covered by this row:** the other durable writers have the same shape and are not changed
   here — the TLS key and certificate writes (`write_with_mode`, no fsync), `quarantine_unreadable`'s renames,
   `mycelium-wiki`'s `FsStore::cas_publish` and the `GitStore` writes, the reason blob store, the wasm host's artifact,
-  catalog and runtime staging, and `mycelium-effects`' SQLite store, whose `create_dir_all` error is discarded. Upgrade
-  note: `docs/guide/deprecations.md` §79.
+  catalog and runtime staging, and `mycelium-effects`' SQLite store, whose `create_dir_all` error is discarded. An
+  existing ancestor on a filesystem without directory fsync (`EINVAL`, `ENOTSUP`) or unreadable to the process is passed
+  over, logged once and counted (`dir_syncs_passed_over`), never refused. **Cost:** one directory sync per path
+  component per open, at start or when a companion opens its log — about a millisecond each on an idle disk, far more
+  on a busy one (`F_FULLFSYNC` on macOS) — and on no request path. Upgrade note: `docs/guide/deprecations.md` §79.
 
 ## [2.39.0] — 2026-11-06
 

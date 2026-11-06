@@ -2352,15 +2352,20 @@ run them.
 **What changed.** Opening the node-local journal (and so the evidence journal, the rights ledger, the revocation and
 epoch journals, the knowledge journals and the effects ledger), the tuple-space store's WAL or the blackboard's WAL now
 syncs the holder of every directory on its path — on every open, not only the directories it creates — and the
-directory holding the file, before the first record is acknowledged. An ancestor that existed before and that the
-process may not read (`PermissionDenied`) is passed over; every other failure refuses the open. A sync
+directory holding the file, before the first record is acknowledged. An ancestor that existed before the open and that
+the process may not read (`PermissionDenied`), or whose filesystem does not do directory fsync (`EINVAL`, `ENOTSUP`), is
+passed over — logged once and counted (`mycelium_core::persistence::dir_syncs_passed_over`); a directory the open
+created, the directory holding the file, and every other failure refuse the open, naming the directory. A sync
 that fails is returned from the open; it used to be skipped because it was never attempted. `start()` does the same for
 the directories it creates under `persistence.base_path`.
 
-**Who is affected.** Only a deployment whose journal or WAL directory is on a filesystem that refuses `fsync` on a
-directory — some FUSE and network filesystems answer `EINVAL`. That filesystem already refused the start-time snapshot,
-which has synced the KV directory since 2.4.4, so a node with `[persistence]` there could not start; what is new is
-that an embedder opening a journal or a companion WAL there without `[persistence]` is refused too.
+**Who is affected.** A deployment whose journal or WAL directory — the directory holding the file, or one the open
+creates — is on a filesystem that refuses `fsync` on a directory (some FUSE and network filesystems answer `EINVAL`).
+That filesystem already refused the start-time snapshot, which has synced the KV directory since 2.4.4, so a node with
+`[persistence]` there could not start; what is new is that an embedder opening a journal or a companion WAL there
+without `[persistence]` is refused too. An *ancestor* on such a filesystem — a squashfs or iso9660 root under a
+writable data mount, as embedded images have — does not refuse: it is passed over and counted. `start()`'s refusal
+now says a directory on the path could not be created or synced, naming it.
 
 **What to do.** Put the journal and the companions' WALs on local storage the node owns, as the journal's own
 assumptions already state. The new functions `mycelium::create_dir_all_synced` and `mycelium::sync_parent_dir` are what

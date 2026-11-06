@@ -158,6 +158,15 @@ pub(crate) struct WalWriter {
 #[cfg(test)]
 thread_local! {
     pub(crate) static FS_TRACE: std::cell::RefCell<Vec<&'static str>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// The directory each open-time sync synced, in order — the witness's exact holders.
+    pub(crate) static FS_DIRS: std::cell::RefCell<Vec<(&'static str, PathBuf)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Record an open-time directory sync, from inside it. Production records nothing.
+fn fs_dir(_op: &'static str, _dir: &Path) {
+    fs_trace(_op);
+    #[cfg(test)]
+    FS_DIRS.with(|t| t.borrow_mut().push((_op, _dir.to_path_buf())));
 }
 
 fn fs_trace(_op: &'static str) {
@@ -178,7 +187,7 @@ impl WalWriter {
             // Every directory on the path has its entry synced in the one above it, on every open
             // (external review 2026-10-31 F7, plan row R6; #718's review); the file's own entry is
             // synced once the file is open, below.
-            mycelium::create_dir_all_synced_observed(parent, &mut |_| fs_trace("open.mkdir.sync"))?;
+            mycelium::create_dir_all_synced_observed(parent, &mut |d| fs_dir("open.mkdir.sync", d))?;
         }
         // Ownership first, repair second, writes last — the core journal's order. A second board on
         // this path, in this process or another, is refused with `WouldBlock` naming the file.
@@ -214,7 +223,7 @@ impl WalWriter {
         // first synced record must not sit in a file a power loss can leave unnamed, and a reopen
         // covers a file an earlier open created whose sync failed. Told to the test trace from
         // inside the sync.
-        mycelium::sync_parent_dir_observed(path, &mut |_| fs_trace("open.parent.sync"))?;
+        mycelium::sync_parent_dir_observed(path, &mut |d| fs_dir("open.parent.sync", d))?;
 
         let Folded { facts, total, acked, end: offset, high_water } = fold_wal(&data).map_err(|offset| {
             io::Error::new(
