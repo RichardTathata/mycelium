@@ -148,21 +148,25 @@ pub struct WalHandle {
     /// `Some(reason)` while the writer refuses appends after a failed write (see `WriterState`),
     /// published by the writer so `/health` can say so. A `watch` channel, not a lock field.
     refusing: tokio::sync::watch::Receiver<Option<String>>,
+    /// Inbound records applied to the store and **not yet on the writer's channel** — from before
+    /// `apply_inbound` until [`WalHandle::append_inbound`] has queued the record (or counted it
+    /// dropped) in `connection.rs` (external review 2026-10-31, F3). A replica-sync answer reads it
+    /// after its store check and declines the claim while it is non-zero: the record it found may be
+    /// one not yet queued, and a WAL sync covers only what is already queued. Counted by
+    /// [`InboundApply`], so every exit — a cancelled task, a panic — drops it.
+    inbound_in_flight: Arc<std::sync::atomic::AtomicU64>,
     /// A test's pause point between an inbound record's apply and its append (see
     /// [`WalHandle::pause_inbound_after_apply`]). Test builds only; set once.
-    /// Inbound records applied to the store and **not yet handed to the writer** — between
-    /// `apply_inbound` and the return of its append call in `connection.rs` (external review
-    /// 2026-10-31, F3). A replica-sync answer reads it after its store check and declines the claim
-    /// while it is non-zero: the record it found may be the one not yet appended, and a WAL sync
-    /// covers only what is already queued. Counted by [`InboundApply`], so every exit — an append
-    /// `Err`, an early return, a cancelled task — drops it.
-    inbound_in_flight: Arc<std::sync::atomic::AtomicU64>,
     #[cfg(any(test, feature = "test-support"))]
     inbound_pause: std::sync::OnceLock<Arc<InboundPause>>,
+    /// A test's pause point between a replica-sync answer's two count loads (see
+    /// [`WalHandle::pause_answer_between_counts`]). Test builds only; set once.
+    #[cfg(any(test, feature = "test-support"))]
+    answer_pause: std::sync::OnceLock<Arc<InboundPause>>,
 }
 
-/// One inbound record between its apply and the return of its append call — see
-/// [`WalHandle::begin_inbound`]. Dropping it without [`appended`](Self::appended) (a cancelled
+/// One inbound record between its apply and the moment it is on the WAL's channel — see
+/// [`WalHandle::begin_inbound`] and [`WalHandle::append_inbound`]. Dropping it without [`appended`](Self::appended) (a cancelled
 /// task, a panic) counts a dropped append as well: the store holds a value the WAL may never
 /// receive, which is the hole `dropped_appends` already names, so the node stops claiming the
 /// replica-sync rung rather than claiming it wrongly.
@@ -173,8 +177,9 @@ pub struct InboundApply<'a> {
 }
 
 impl InboundApply<'_> {
-    /// The append call has returned (whatever it returned: a failed write is counted by the writer,
-    /// a gone writer fails the sync). The record has left the apply-to-append window.
+    /// The record is on the writer's channel, or its drop has been counted (a full queue, a gone
+    /// writer). It has left the apply-to-append window: a later write failure is the writer's to count
+    /// (it poisons, and a poisoned writer answers every `sync` with `Err`).
     pub fn appended(mut self) {
         self.appended = true;
     }
@@ -188,6 +193,8 @@ impl Drop for InboundApply<'_> {
         // Release: the append that preceded this (its enqueue) happens-before a reader that
         // observes the decrement with Acquire, so that reader's later `sync` is queued behind it.
         self.wal.inbound_in_flight.fetch_sub(1, std::sync::atomic::Ordering::Release);
+        #[cfg(feature = "metrics")]
+        metrics::gauge!("gossip_wal_inbound_in_flight").decrement(1.0);
     }
 }
 
@@ -201,7 +208,40 @@ impl WalHandle {
     /// loads [`inbound_in_flight`](Self::inbound_in_flight) sees this increment or a later value.
     pub fn begin_inbound(&self) -> InboundApply<'_> {
         self.inbound_in_flight.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        #[cfg(feature = "metrics")]
+        metrics::gauge!("gossip_wal_inbound_in_flight").increment(1.0);
         InboundApply { wal: self, appended: false }
+    }
+
+    /// Append an inbound record and close its window **as soon as the record is on the writer's
+    /// channel**, not when the writer acknowledges it.
+    ///
+    /// Why enqueue is enough: a replica-sync answer establishes durability with [`sync`](Self::sync),
+    /// which sends `WalMsg::Sync` on **this same channel**, and the writer handles `Append` and `Sync`
+    /// in one loop in channel order (`wal_writer_task`). The window's decrement is `Release` after the
+    /// send completed; an answer whose `Acquire` load sees it at zero sends its `Sync` afterwards, so
+    /// the `Sync` is queued behind the record and its `fdatasync` covers it. Holding the window until
+    /// a `flush`-mode ack added nothing but a node with a slow disk answering `Failed` (R8's review).
+    ///
+    /// `Flush`: awaits the writer's ack after closing the window; `Err` if the writer is gone or the
+    /// write failed. `Async`/`Os`: a `try_send`, its drop counted; always `Ok`. A task cancelled
+    /// while the `Flush` send waits on a full queue drops the window unclosed, which counts a dropped
+    /// append.
+    pub async fn append_inbound(&self, entry: SyncEntry, window: InboundApply<'_>) -> io::Result<()> {
+        match self.sync_mode {
+            SyncMode::Flush => {
+                let (tx, rx) = oneshot::channel();
+                let sent = self.tx.send(WalMsg::Append { entry, ack: Some(tx), force_sync: false }).await;
+                window.appended();
+                sent.map_err(|_| writer_gone())?;
+                rx.await.unwrap_or_else(|_| Err(writer_gone()))
+            }
+            SyncMode::Async | SyncMode::Os => {
+                let r = self.append(entry).await;
+                window.appended();
+                r
+            }
+        }
     }
 
     /// Inbound records applied and not yet handed to the writer. Non-zero means a replica-sync
@@ -246,6 +286,32 @@ impl WalHandle {
         });
         assert!(self.inbound_pause.set(Arc::clone(&p)).is_ok(), "one inbound pause per WAL handle");
         p
+    }
+
+    /// A replica-sync answer will wait once, between its two count loads, until
+    /// [`InboundPause::release`] — the interleaving the order of those loads exists for. Once per
+    /// handle; a second call panics. Test builds only.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn pause_answer_between_counts(&self) -> Arc<InboundPause> {
+        let p = Arc::new(InboundPause {
+            key:     String::new(),
+            fired:   std::sync::atomic::AtomicBool::new(false),
+            reached: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        });
+        assert!(self.answer_pause.set(Arc::clone(&p)).is_ok(), "one answer pause per WAL handle");
+        p
+    }
+
+    /// The answer's pause point, called by `mycelium::agent::replica_sync::answer`. Test builds only.
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn answer_pause_point(&self) {
+        if let Some(p) = self.answer_pause.get()
+            && !p.fired.swap(true, std::sync::atomic::Ordering::AcqRel)
+        {
+            p.reached.notify_one();
+            p.release.notified().await;
+        }
     }
 
     /// The pause point itself, called by the inbound path between apply and append.
@@ -412,6 +478,7 @@ impl WalHandle {
             tx, sync_mode, dropped_appends: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)), refusing,
             inbound_in_flight: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             inbound_pause: std::sync::OnceLock::new(),
+            answer_pause: std::sync::OnceLock::new(),
         }
     }
 
@@ -711,6 +778,8 @@ fn spawn_wal_writer_inner(
         inbound_in_flight: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         #[cfg(any(test, feature = "test-support"))]
         inbound_pause: std::sync::OnceLock::new(),
+        #[cfg(any(test, feature = "test-support"))]
+        answer_pause: std::sync::OnceLock::new(),
     };
 
     tokio::spawn(wal_writer_task(
@@ -1467,8 +1536,6 @@ mod durability_tests {
     /// and still answers `Ok`. That is a deliberate throughput choice, but the *replica-sync* rung
     /// rested on the implication *the store holds it, therefore its record was appended*, which the
     /// drop breaks: a peer held the value with no record and answered `Persisted` for something
-    /// replay could never restore. Both verdicts were discarded with `let _ =`, so the drop was
-    /// invisible. Phase-C audit finding.
     /// The apply-to-append window (external review 2026-10-31, F3; row R8). An inbound record is
     /// counted from before its apply until its append call returns, and every way out of that window
     /// closes it: the normal one, and a drop without `appended` — a cancelled connection task or a
@@ -1500,6 +1567,14 @@ mod durability_tests {
         assert_eq!(handle.dropped_appends(), 2, "and counts the append it never made");
     }
 
+    /// **A skipped append is counted, so the node can decline a rung it cannot establish.**
+    ///
+    /// In `Async`/`Os` an append is a `try_send` that drops on a full queue — or a departed writer —
+    /// and still answers `Ok`. That is a deliberate throughput choice, but the *replica-sync* rung
+    /// rested on the implication *the store holds it, therefore its record was appended*, which the
+    /// drop breaks: a peer held the value with no record and answered `Persisted` for something
+    /// replay could never restore. Both verdicts were discarded with `let _ =`, so the drop was
+    /// invisible. Phase-C audit finding.
     #[tokio::test]
     async fn a_skipped_append_is_counted_rather_than_silently_discarded() {
         // A writer that has gone away is a real drop path (`ChanVerdict::Closed`), not a contrivance.

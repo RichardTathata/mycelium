@@ -509,7 +509,7 @@ async fn a_record_applied_but_not_appended_is_not_reported_persisted_under_flush
     apply_to_append_window(crate::SyncMode::Flush).await;
 }
 async fn apply_to_append_window(sync_mode: crate::SyncMode) {
-    use crate::agent::replica_sync::{answer, collect, Answer, Query};
+    use crate::agent::replica_sync::{answer, Answer, Query};
     use crate::PersistenceConfig;
     use mycelium_core::receipt::{AttemptId, OperationId};
 
@@ -566,12 +566,11 @@ async fn apply_to_append_window(sync_mode: crate::SyncMode) {
         answer(&b_ctx, &q).await, Answer::Failed,
         "a record applied but not yet handed to the WAL must not be reported persisted",
     );
-    let while_paused = collect(&a_ctx, q.clone(), Duration::from_millis(500)).await;
-    assert!(
-        !while_paused.persisted_by.contains(&id_b),
-        "the origin's receipt must not count B while the record is not appended; persisted_by={:?}",
-        while_paused.persisted_by,
-    );
+    // Not asserted through the origin's `collect` here: A's query would reach B over the very
+    // connection whose receive task is paused, so B could not answer whatever its state, and the
+    // assertion held with the fix removed (R8's review round 1). The receipt is built only from
+    // `answer()` — `persisted_by` names exactly the peers whose `answer()` returned `Persisted`
+    // (`collect`'s doc) — so the direct call above is the receipt's claim.
 
     pause.release();
     let mut last = Answer::Failed;
@@ -590,4 +589,70 @@ async fn apply_to_append_window(sync_mode: crate::SyncMode) {
     b.shutdown().await;
     let _ = std::fs::remove_dir_all(&base_a);
     let _ = std::fs::remove_dir_all(&base_b);
+}
+
+/// **The answer reads the in-flight count before the dropped-append count** (R8's review round 1). An inbound
+/// record's window that closes without its append counts a dropped append and *then* releases the in-flight count. An
+/// answer that loaded the dropped count first could see none, then — the window closing in between — see nothing in
+/// flight, and answer `Persisted` for the record that was dropped. B holds a record whose window is open (applied, not
+/// appended); the answer is paused between its two loads; the window is abandoned in that gap.
+#[tokio::test]
+async fn an_append_dropped_between_the_answers_two_reads_is_not_reported_persisted() {
+    use crate::agent::replica_sync::{answer, Answer, Query};
+    use crate::PersistenceConfig;
+    use mycelium_core::receipt::content_hash;
+
+    let port = alloc_port();
+    let id = NodeId::new("127.0.0.1", port).unwrap();
+    let base = std::env::temp_dir().join(format!("myc-r8-order-{port}"));
+    let _ = std::fs::remove_dir_all(&base);
+    let mut cfg = GossipConfig::default();
+    cfg.bind_port = port;
+    cfg.persistence = Some(PersistenceConfig {
+        base_path: base.clone(),
+        sync_mode: crate::SyncMode::Async,
+        snapshot_wal_threshold: 1_000_000,
+        snapshot_interval_secs: 3_600, on_unreadable: Default::default(),
+    });
+    let b = GossipAgent::new(id, cfg);
+    b.start().await.unwrap();
+    let ctx = Arc::clone(&b.service().ctx);
+    let wal = Arc::clone(ctx.wal.get().expect("a WAL"));
+
+    // A peer's record, applied as the receive path applies it: the window opened first.
+    let peer = NodeId::new("127.0.0.1", alloc_port()).unwrap();
+    let key = "r8/order";
+    let window = wal.begin_inbound();
+    let upd = mycelium_core::framing::make_gossip_update(
+        &peer, 4, Arc::from(key), Bytes::from_static(b"v"), false, &ctx.hlc,
+    );
+    mycelium_core::store::apply_and_notify(&ctx.kv_state, &upd);
+    let q = Query { stamp: upd.timestamp, content_hash: content_hash(key, b"v", false), key: Arc::from(key) };
+
+    let pause = wal.pause_answer_between_counts();
+    let asking = tokio::spawn({
+        let ctx = Arc::clone(&ctx);
+        async move { answer(&ctx, &q).await }
+    });
+    // Either the answer reaches the gap between its two loads, or it has already declined (it read the
+    // in-flight count first, which is the fix). In the gap, the window closes without its append.
+    let mut window = Some(window);
+    for _ in 0..1000 {
+        if asking.is_finished() { break; }
+        tokio::select! {
+            _ = pause.reached() => {
+                drop(window.take());
+                pause.release();
+                break;
+            }
+            _ = tokio::time::sleep(Duration::from_millis(5)) => {}
+        }
+    }
+    drop(window);
+    let got = asking.await.unwrap();
+    assert_eq!(wal.dropped_appends(), 1, "the abandoned window counted a dropped append");
+    assert_eq!(got, Answer::Failed, "a record whose append was dropped must not be reported persisted");
+
+    b.shutdown().await;
+    let _ = std::fs::remove_dir_all(&base);
 }

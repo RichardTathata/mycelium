@@ -23,11 +23,11 @@
 //!   durability for **everything already appended**. Checking the store, then syncing, then
 //!   answering is sound without the node knowing when any particular record reached disk.
 //!
-//! **What an answer establishes, exactly.** [`Answer::Persisted`] from peer P means: at the moment
-//! P answered, P's store held this key at this exact HLC stamp with this exact content, P had
-//! **skipped no WAL append**, **no inbound record was between its apply and its append**, and P's
-//! WAL `fdatasync` returned `Ok` — so P holds the record across its own crash and restart, because
-//! replay restores it.
+//! **What an answer establishes, exactly.** [`Answer::Persisted`] from peer P means: P's store held
+//! this key at this exact HLC stamp with this exact content when P read it; after that read P found
+//! **no inbound record between its apply and the WAL's channel**, and then **no skipped WAL append**
+//! (read in that order — see [`answer`]); and the `fdatasync` P then queued behind them returned
+//! `Ok` — so P holds the record across its own crash and restart, because replay restores it.
 //!
 //! The middle clause is not decoration. The rung rested on an implication — *the store holds it,
 //! therefore its record was appended* — that the inbound path breaks: a received update is applied
@@ -43,7 +43,9 @@
 //! between the two found the value, saw no drop, synced a WAL the record had not yet entered, and
 //! answered `Persisted` for a record a crash at that moment would lose (external review 2026-10-31,
 //! F3, reproduced by its deterministic probe). Every inbound record is now counted from **before**
-//! its apply until its append call returns ([`WalHandle::begin_inbound`]), on all three inbound
+//! its apply until it is on the WAL's channel ([`WalHandle::begin_inbound`],
+//! [`WalHandle::append_inbound`] — enqueue is enough because this answer's sync rides the same
+//! channel behind it), on all three inbound
 //! sites — a `Data` frame, a `SignedData` frame, an anti-entropy entry — which share one helper in
 //! `mycelium_core::connection`; this answer reads the count after its store check and declines while
 //! it is non-zero. A window abandoned without its append (a cancelled connection task, a panic)
@@ -58,6 +60,7 @@
 //! still the rung the record names, not a promise about the disk beyond `fdatasync`.
 //!
 //! [`WalHandle::begin_inbound`]: mycelium_core::persistence::WalHandle::begin_inbound
+//! [`WalHandle::append_inbound`]: mycelium_core::persistence::WalHandle::append_inbound
 //!
 //! It does **not** mean P will hold it forever: a later write supersedes it
 //! like any other value. That is the *replica sync* rung and nothing above it — no destination
@@ -199,14 +202,22 @@ pub(crate) async fn answer(ctx: &TaskCtx, q: &Query) -> Answer {
             // append it stops claiming the rung rather than claiming it wrongly. The origin reads
             // that as `Failed`: durability not established here, which is exactly true.
             // Found by the Phase-C adversarial audit (items 1+2+7).
-            if wal.dropped_appends() > 0 {
+            //
+            // Two counts, and their order is load-bearing (R8's review round 1). In flight first:
+            // the store is read above, so this load comes after it, and an inbound record found
+            // there that is not yet on the WAL's channel is counted here (`WalHandle::begin_inbound`;
+            // a sync covers only what is already queued — external review 2026-10-31, F3). Dropped
+            // second: a window that closes without its append counts the drop **before** it
+            // releases the in-flight count (`Release`), so an `Acquire` load that sees that release
+            // at zero makes the drop visible to the load below. Read the other way round, an answer
+            // could see no drop, then — the window closing between the two loads — nothing in
+            // flight, and report `Persisted` for the record that was dropped.
+            if wal.inbound_in_flight() > 0 {
                 return Answer::Failed;
             }
-            // The store is read above, so this load comes after it: an inbound record found there
-            // whose append call has not returned is counted here (`WalHandle::begin_inbound`). A
-            // sync covers only what is already queued, so while any is in flight the answer is
-            // not established (external review 2026-10-31, F3).
-            if wal.inbound_in_flight() > 0 {
+            #[cfg(test)]
+            wal.answer_pause_point().await;
+            if wal.dropped_appends() > 0 {
                 return Answer::Failed;
             }
             match wal.sync().await {

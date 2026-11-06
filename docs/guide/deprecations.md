@@ -2353,7 +2353,8 @@ A peer asked whether it holds a record (`sys.replica-sync.v1`, behind `set_with_
 `min_acks`, and both SDKs' replica-sync writes) used to answer `Persisted` from its store and a WAL sync. A record the
 receive path had applied but not yet handed to the WAL was in the store and not in the queue the sync covers, so the
 answer named a durability the peer did not have (finding F3). Now each inbound record is counted from before its apply
-until its append call returns, and the answer is `Failed` while the count is non-zero.
+until it is on the WAL writer's channel, and the answer is `Failed` while the count is non-zero. The count is visible
+as `/health`'s `persistence.inbound_in_flight` and the gauge `gossip_wal_inbound_in_flight`.
 
 **Who is affected:** a caller that counts `persisted_by` under load. The count is one number for the node, not per
 record, so a peer that is receiving a steady stream answers `Failed` for any record more often, and lands in
@@ -2363,7 +2364,9 @@ returns to `Persisted` once the in-flight records are appended. A window abandon
 which — as since the Phase-C audit — makes the node answer `Failed` for every record until restart (`/health`'s
 `persistence.dropped_appends` shows it). That happens only when the connection task is aborted while its append
 awaits — at shutdown, under `sync_mode = "flush"`; the read bounds wrap only the frame read, not its processing, and in
-`async`/`os` the append does not wait.
+`async`/`os` the append does not wait. Under `flush` the count is released when the record is queued, not when its
+`fdatasync` answers, so a slow disk alone does not hold it.
 
 **API:** additive only. `mycelium_core::persistence::WalHandle` gained `begin_inbound()` (returning the `#[must_use]`
-guard `InboundApply`) and `inbound_in_flight()`. Wire **v12** unchanged; invariant 1 (*apply, then persist*) unchanged.
+guard `InboundApply`), `append_inbound()` and `inbound_in_flight()`; `/health`'s `persistence` object gained
+`inbound_in_flight`. Wire **v12** unchanged; invariant 1 (*apply, then persist*) unchanged.

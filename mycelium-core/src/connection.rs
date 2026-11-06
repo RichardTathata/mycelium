@@ -177,18 +177,17 @@ async fn apply_inbound_then_append(
     counter: &std::sync::atomic::AtomicU64,
     observer: Option<&InboundObserver>,
 ) {
-    // Opened before the apply, closed when the append call returns: a replica-sync answer that
+    // Opened before the apply, closed once the record is queued: a replica-sync answer that
     // finds this record in the store while it is open declines the claim (external review
     // 2026-10-31, F3; `mycelium::agent::replica_sync`). Without a WAL nothing is claimed.
+    // The window closes once the record is on the WAL's channel (`WalHandle::append_inbound` says
+    // why that is enough), not at a `flush` ack.
     let window = wal.map(|w| w.begin_inbound());
     apply_inbound(kv_state, update, origin, self_node, self_hash, counter, observer);
-    if let Some(wal) = wal {
+    if let (Some(wal), Some(window)) = (wal, window) {
         #[cfg(any(test, feature = "test-support"))]
         wal.inbound_pause_point(&update.key).await;
-        let _ = wal.append(sync_entry_from(update)).await;
-    }
-    if let Some(w) = window {
-        w.appended();
+        let _ = wal.append_inbound(sync_entry_from(update), window).await;
     }
 }
 
@@ -1297,6 +1296,45 @@ pub async fn handle_connection(
 
 #[cfg(test)]
 mod tests {
+    /// **The apply-to-append window closes when the record is on the WAL channel, not at its fsync**
+    /// (external review 2026-10-31, F3; R8's review round 1). Under `flush` an inbound append waits for
+    /// the writer's `fdatasync`; a replica-sync `sync()` sent after the record is queued is ordered
+    /// behind it on the same channel, so holding the count until the ack only made a node with a slow
+    /// disk answer `Failed`. A writer that takes the record and never acknowledges it stands in for a
+    /// slow fsync: the count must be back to zero while the append still waits.
+    #[tokio::test]
+    async fn the_inbound_window_closes_at_enqueue_not_at_the_flush_ack() {
+        use crate::persistence::{WalHandle, WalMsg};
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<WalMsg>(4);
+        let wal = std::sync::Arc::new(WalHandle::from_parts(tx, crate::config::SyncMode::Flush));
+        let kv = crate::store::KvState::new(0);
+        let hlc = crate::hlc::Hlc::with_max_drift(0);
+        let node = crate::NodeId::new("127.0.0.1", 7001).unwrap();
+        let upd = crate::framing::make_gossip_update(&node, 4, std::sync::Arc::from("k"), bytes::Bytes::from_static(b"v"), false, &hlc);
+        let counter = std::sync::atomic::AtomicU64::new(0);
+
+        let w = std::sync::Arc::clone(&wal);
+        let task = tokio::spawn(async move {
+            super::apply_inbound_then_append(Some(&w), &kv, &upd, super::Origin::Unknown, "self", 0, &counter, None).await;
+        });
+        // The writer has the record; it holds the ack, as a slow fsync would.
+        let held_ack = match rx.recv().await.expect("the record reached the writer") {
+            WalMsg::Append { ack, .. } => ack.expect("a flush append waits for its ack"),
+            _ => panic!("expected the inbound append"),
+        };
+        tokio::task::yield_now().await;
+        let mut closed = false;
+        for _ in 0..100 {
+            if wal.inbound_in_flight() == 0 { closed = true; break; }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert!(!task.is_finished(), "the append is still waiting for its fsync");
+        assert!(closed, "the window closes once the record is queued, not when the fsync answers");
+        assert_eq!(wal.dropped_appends(), 0, "a queued record is not a dropped one");
+        let _ = held_ack.send(Ok(()));
+        task.await.unwrap();
+    }
+
     use super::{counts_as_foreign_write, names_self_owned_sys_key, Origin};
     use crate::framing::GossipUpdate;
     use crate::receipt::LocalApplication::{self, AlreadyCurrent, Applied, Superseded};

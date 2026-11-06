@@ -95,4 +95,9 @@ snapshot of today.
   domain leg is carried, not re-verified — [`composed-effect.md`](../../../design/composed-effect.md) §9.
 - **`set_with_min_acks` is `#[deprecated]`** and cannot succeed on today's substrate; the verb that
   does what its name says is `GossipAgent::set_with_replica_sync`, which **asks** each peer whether
-  it holds the exact operation rather than watching gossip go by.
+  it holds the exact operation rather than watching gossip go by. A peer answers `persisted` only if,
+  after finding the exact stamp and content in its store, it has **no inbound record between its apply
+  and the WAL's channel** and has **skipped no append**, read in that order, and its `fdatasync` then
+  succeeds (`src/agent/replica_sync.rs`; the in-flight condition since R8, #720 — before it, a record
+  applied but not yet appended could be claimed). Both conditions are one number for the node, so a
+  busy or degraded peer answers *not established* for any record.
