@@ -49,6 +49,15 @@
 //! frame is one write; and a failed append **poisons** the writer, which refuses every later append
 //! by name until a reopen repairs the file. The torn-tail witnesses are in `journal_repair_tests.rs`.
 //!
+//! # A durable name (external review 2026-10-31 F7, plan row R6)
+//!
+//! A record fsynced into a file whose directory entry is not durable can survive a power loss with
+//! no name to find it by. So `open` syncs each directory it creates in the one above it, and the
+//! directory holding the file once the file exists, before the writer is spawned — on every open,
+//! not only the first. The order is witnessed in `journal_repair_tests.rs` from a trace the journal
+//! reports; the power-loss property itself needs a filesystem fault adapter the journal does not go
+//! through, and is not shown.
+//!
 //! What the scan cannot see is corruption *inside* a complete frame: there is no checksum on disk,
 //! so a frame of the right length and the wrong bytes reaches the consumer, which refuses it by name
 //! when it decodes. A journal written by a version before this repair, with an acknowledged record
@@ -57,7 +66,8 @@
 //! # Five-part statement
 //!
 //! *Guarantee:* a record this journal acknowledges with `OnDisk` is on this node's disk, fsynced,
-//! before the acknowledgement returns, **and readable after a restart**; one owner at a time; and
+//! before the acknowledgement returns, in a file whose directory entry `open` synced, **and readable after a
+//! restart**; one owner at a time; and
 //! nothing written here is gossiped. *Assumptions:* the journal directory is on durable local storage
 //! the node owns, `fsync` means what the filesystem says it means, and the OS honours its file locks.
 //! *Enforcing component:* [`Journal::open`] (ownership, repair) and [`Journal::append`] with its
@@ -170,21 +180,31 @@ impl Journal {
     /// crash mid-append (a partial length prefix, or a body shorter than its prefix claims) can
     /// never sit in front of a later acknowledged record. Only then is the writer spawned.
     pub fn open(path: impl AsRef<Path>, stream: &'static str) -> Result<Arc<Self>, std::io::Error> {
-        Self::open_inner(path.as_ref(), stream, None)
+        Self::open_inner(path.as_ref(), stream, Hooks::default())
     }
 
     fn open_inner(
         path: &Path,
         stream: &'static str,
-        fault: Option<Arc<std::sync::atomic::AtomicBool>>,
+        hooks: Hooks,
     ) -> Result<Arc<Self>, std::io::Error> {
+        let Hooks { fault, trace } = hooks;
         let path = path.to_path_buf();
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
+        // Every directory this creates has its entry synced in the one above it, and once the file
+        // exists the directory naming it is synced — on every open, before the writer is spawned, so
+        // the first record acknowledged `OnDisk` has a name that survives a power loss as its bytes
+        // do (the review's F7, plan row R6). Reopening syncs again: cheap, and it covers a file an
+        // earlier version created without the sync on a machine that has not lost power since.
+        if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+            for _ in mycelium_core::persistence::create_dir_all_synced(parent)? {
+                note(trace.as_ref(), "dir.sync");
+            }
         }
         let lock = acquire_ownership(&path)?;
         let recovered = recover(&path)?;
         let mut file = std::fs::OpenOptions::new().create(true).append(true).open(&path)?;
+        fsync_parent(&path)?;
+        note(trace.as_ref(), "parent.sync");
         if recovered.valid_end < recovered.file_len {
             // A torn tail. Nothing in it was ever acknowledged: an append is acknowledged only after
             // its whole frame is fsynced, and the scan stops at the first frame the file does not
@@ -194,6 +214,7 @@ impl Journal {
             file.set_len(recovered.valid_end)?;
             file.sync_all()?;
             fsync_parent(&path)?;
+            note(trace.as_ref(), "parent.sync");
             tracing::warn!(
                 journal = %path.display(),
                 dropped_bytes = recovered.file_len - recovered.valid_end,
@@ -228,7 +249,11 @@ impl Journal {
                         let mut frame = Vec::with_capacity(4 + bytes.len());
                         frame.extend_from_slice(&len.to_le_bytes());
                         frame.extend_from_slice(&bytes);
-                        match write_frame(&mut file, &frame, fault.as_deref()) {
+                        let written = write_frame(&mut file, &frame, fault.as_deref());
+                        if written.is_ok() {
+                            note(trace.as_ref(), "append.sync");
+                        }
+                        match written {
                             Ok(()) => {
                                 seq += 1;
                                 Ok((seq - 1, LocalDurability::OnDisk))
@@ -323,13 +348,40 @@ impl Journal {
         stream: &'static str,
         fault: Arc<std::sync::atomic::AtomicBool>,
     ) -> Result<Arc<Self>, std::io::Error> {
-        Self::open_inner(path.as_ref(), stream, Some(fault))
+        Self::open_inner(path.as_ref(), stream, Hooks { fault: Some(fault), trace: None })
+    }
+
+    /// A real journal that reports the storage steps it takes, in order, on `trace`: `dir.sync`
+    /// for each directory whose new entry `open` synced, `parent.sync` for the directory holding
+    /// the journal file, `append.sync` after each append's `sync_data`. The journal's syncs go
+    /// through `std::fs`, not the sim seam, so this is the ordering witness (R6).
+    pub(crate) fn open_traced(
+        path: impl AsRef<Path>,
+        stream: &'static str,
+        trace: std::sync::mpsc::Sender<&'static str>,
+    ) -> Result<Arc<Self>, std::io::Error> {
+        Self::open_inner(path.as_ref(), stream, Hooks { fault: None, trace: Some(trace) })
     }
 
     /// The replay-seam stream this journal records under. Production never asks a journal its
     /// stream; it names one at `open`.
     pub(crate) fn stream(&self) -> &'static str {
         self.stream
+    }
+}
+
+/// What a test can attach to a real journal: a fault for the next append, and a channel the
+/// storage steps are reported on in order. Production attaches neither.
+#[derive(Default)]
+struct Hooks {
+    fault: Option<Arc<std::sync::atomic::AtomicBool>>,
+    trace: Option<std::sync::mpsc::Sender<&'static str>>,
+}
+
+/// Report one storage step to a test's trace, if one is attached.
+fn note(trace: Option<&std::sync::mpsc::Sender<&'static str>>, op: &'static str) {
+    if let Some(t) = trace {
+        let _ = t.send(op);
     }
 }
 
@@ -358,13 +410,10 @@ fn acquire_ownership(path: &Path) -> std::io::Result<OwnershipLock> {
     OwnershipLock::acquire(path)
 }
 
-/// Fsync the directory holding `path`, so a truncation survives a crash the way the file does.
+/// Fsync the directory holding `path`, so the file's entry — created, or truncated — survives a
+/// crash the way the file does.
 fn fsync_parent(path: &Path) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() {
-        let parent = if parent.as_os_str().is_empty() { Path::new(".") } else { parent };
-        std::fs::File::open(parent)?.sync_all()?;
-    }
-    Ok(())
+    mycelium_core::persistence::sync_parent_dir(path)
 }
 
 /// Walk the file frame by frame to its last complete record. A missing file is an empty journal.

@@ -2346,3 +2346,24 @@ unchanged — its writes are in memory and it has never claimed a disk ([feature
 **Operator note:** a node whose WAL writer is poisoned (`/health`: `wal_refusing_appends`) now refuses every
 grant-admitted call, every grant-required invocation and every revoke until a snapshot repairs it, where it used to
 run them.
+
+## 79. A journal or a companion WAL whose directory cannot be synced refuses to open (unreleased, external review 2026-10-31, R6)
+
+**What changed.** Opening the node-local journal (and so the evidence journal, the rights ledger, the revocation and
+epoch journals, the knowledge journals and the effects ledger), the tuple-space store's WAL or the blackboard's WAL now
+syncs each directory it creates and the directory holding the file, before the first record is acknowledged. A sync
+that fails is returned from the open; it used to be skipped because it was never attempted. `start()` does the same for
+the directories it creates under `persistence.base_path`.
+
+**Who is affected.** Only a deployment whose journal or WAL directory is on a filesystem that refuses `fsync` on a
+directory — some FUSE and network filesystems answer `EINVAL`. That filesystem already refused the start-time snapshot,
+which has synced the KV directory since 2.4.4, so a node with `[persistence]` there could not start; what is new is
+that an embedder opening a journal or a companion WAL there without `[persistence]` is refused too.
+
+**What to do.** Put the journal and the companions' WALs on local storage the node owns, as the journal's own
+assumptions already state. The new functions `mycelium::create_dir_all_synced` and `mycelium::sync_parent_dir` are what
+these opens use, for an embedder's own log.
+
+**What this does not establish.** The power-loss property — that the file is still named after the machine loses power
+— is not observable without a filesystem fault adapter. The tests pin the order of the syncs and that each runs on a
+real directory.

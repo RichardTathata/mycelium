@@ -175,7 +175,11 @@ impl WalWriter {
         if let Some(parent) = path.parent()
             && !parent.as_os_str().is_empty()
         {
-            std::fs::create_dir_all(parent)?;
+            // Each directory created here has its entry synced in the one above it (external
+            // review 2026-10-31 F7, plan row R6); the file's own entry is synced below, on open.
+            for _ in mycelium::create_dir_all_synced(parent)? {
+                fs_trace("open.mkdir.sync");
+            }
         }
         // Ownership first, repair second, writes last — the core journal's order. A second board on
         // this path, in this process or another, is refused with `WouldBlock` naming the file.
@@ -188,6 +192,11 @@ impl WalWriter {
         if data.is_empty() {
             file.write_all(&wal_header())?;
             data.extend_from_slice(&wal_header());
+            // The header's bytes, then the entry naming the file: a fresh WAL's first synced record
+            // must not sit in a file a power loss can leave unnamed (F7, R6).
+            file.sync_all()?;
+            fsync_parent(path)?;
+            fs_trace("open.parent.sync");
         } else if data.len() < WAL_HEADER_LEN as usize || &data[..WAL_MAGIC.len()] != WAL_MAGIC {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -291,6 +300,7 @@ impl WalWriter {
         g.ops_since_sync += 1;
         if g.ops_since_sync >= self.checkpoint_every {
             g.file.sync_data()?;
+            fs_trace("append.sync");
             g.ops_since_sync = 0;
         }
         Ok(())

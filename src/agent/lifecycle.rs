@@ -13,7 +13,6 @@ use std::{
     time::Duration,
 };
 use tokio::{
-    fs as tfs,
     sync::Semaphore,
     time,
 };
@@ -304,7 +303,17 @@ impl GossipAgent {
         // Replay WAL + snapshot before any boundary/quorum warm-up reads the store.
         if let Some(ref pcfg) = self.config.persistence {
             let dir = pcfg.base_path.join(self.node_id.to_string()).join("kv");
-            if let Err(e) = tfs::create_dir_all(&dir).await {
+            // Each directory created on the way to `kv/` has its entry synced in the one above it
+            // (external review 2026-10-31 F7, plan row R6); `wal.bin`'s own entry in `kv/` is synced
+            // by the start-time snapshot below, which renames into `kv/` and syncs it before the
+            // first append.
+            let created = {
+                let dir = dir.clone();
+                tokio::task::spawn_blocking(move || mycelium_core::persistence::create_dir_all_synced(&dir))
+                    .await
+                    .unwrap_or_else(|e| Err(std::io::Error::other(format!("the directory task failed: {e}"))))
+            };
+            if let Err(e) = created {
                 // A refusal, not a warning (realignment repairs R7). This used to log and start the
                 // node **in memory**, so every write was lost on the next restart while the
                 // guarantee report — resolved from the configuration alone — still said

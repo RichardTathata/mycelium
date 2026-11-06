@@ -1151,7 +1151,11 @@ impl WalWriter {
         if let Some(parent) = path.parent()
             && !parent.as_os_str().is_empty()
         {
-            std::fs::create_dir_all(parent)?;
+            // Each directory created here has its entry synced in the one above it (external
+            // review 2026-10-31 F7, plan row R6); the file's own entry is synced below, on open.
+            for _ in mycelium::create_dir_all_synced(parent)? {
+                fs_trace("open.mkdir.sync");
+            }
         }
         // Ownership first, repair second, writes last — the core journal's order. A second store on
         // this path, in this process or another, is refused with `WouldBlock` naming the file.
@@ -1173,6 +1177,11 @@ impl WalWriter {
         if data.is_empty() {
             file.write_all(&wal_header())?;
             data.extend_from_slice(&wal_header());
+            // The header's bytes, then the entry naming the file: a fresh WAL's first synced record
+            // must not sit in a file a power loss can leave unnamed (F7, R6).
+            file.sync_all()?;
+            fsync_parent(path)?;
+            fs_trace("open.parent.sync");
         } else if data.len() < WAL_HEADER_LEN as usize
             || &data[..WAL_MAGIC.len()] != WAL_MAGIC
         {
@@ -1331,6 +1340,7 @@ impl WalWriter {
             || (force && g.ops_since_sync > 0);
         if due {
             g.file.sync_data()?;
+            fs_trace("append.sync");
             g.ops_since_sync = 0;
         }
         Ok(())
@@ -2643,6 +2653,39 @@ mod tests {
         assert!(pos("tmp.sync") < pos("rename"), "{trace:?}");
         assert!(pos("rename") < pos("dir.sync"), "the directory sync makes the rename durable: {trace:?}");
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// R6 of `docs/plans/external-review-2026-10-31.md` (the review's F7): a fresh WAL's directory
+    /// entry is synced before its first record is synced (the checkpoint), and each directory `open`
+    /// creates is synced in the one above it. On the unrepaired code neither sync runs. The
+    /// power-loss property itself is not observable without a filesystem fault adapter; this pins
+    /// the order.
+    #[tokio::test]
+    async fn a_fresh_wal_syncs_its_directories_before_the_first_record() {
+        let root = std::env::temp_dir().join(format!("mts-r6-{}-{}", std::process::id(), fastrand_tag()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("a").join("wal.log");
+        FS_TRACE.with(|t| t.borrow_mut().clear());
+        let store = TupleStore::persistent(&path, 1, 500).unwrap();
+        store.put("s", b("x")).unwrap();
+        // Appends land in the page cache; the checkpoint is where a record becomes durable.
+        store.checkpoint_if_due(true).unwrap();
+        let trace = FS_TRACE.with(|t| t.borrow().clone());
+        assert_eq!(
+            trace.iter().filter(|o| **o != "append.sync").copied().collect::<Vec<_>>(),
+            ["open.mkdir.sync", "open.parent.sync"],
+            "`a` synced in the root, then the file's entry in `a`: {trace:?}"
+        );
+        let parent = trace.iter().position(|o| *o == "open.parent.sync").unwrap();
+        let append = trace.iter().position(|o| *o == "append.sync").unwrap_or_else(|| panic!("no append.sync in {trace:?}"));
+        assert!(parent < append, "{trace:?}");
+        drop(store);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn fastrand_tag() -> u128 {
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
     }
 
     /// M2 Run-17 falsification probe (Observability): the monitoring counters

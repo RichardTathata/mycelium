@@ -518,6 +518,63 @@ impl OwnershipLock {
     }
 }
 
+/// Create `dir` and each missing ancestor, then sync the directory that holds each one created,
+/// outermost first — so a power loss cannot keep a durable file's bytes and lose the directory it
+/// lives in (external review 2026-10-31 F7, plan row R6). Returns the directories synced, in order;
+/// empty when `dir` already existed. A failed sync is returned, never skipped.
+///
+/// The directory holding a *file* is the caller's to sync once the file exists
+/// ([`sync_parent_dir`]); this covers the directories above it. Blocking, and outside the sim seam
+/// (`std::fs`, like the node-local journal): a directory's creation decides nothing a replay
+/// compares. On a platform without directory fsync (Windows) the syncs are no-ops and the list is
+/// still returned. The power-loss property itself is not observable without a filesystem fault
+/// adapter; what the callers' tests pin is that the syncs run, in order, before the first record.
+pub fn create_dir_all_synced(dir: &std::path::Path) -> io::Result<Vec<PathBuf>> {
+    let mut missing = Vec::new();
+    let mut cur = Some(dir);
+    while let Some(d) = cur {
+        if d.as_os_str().is_empty() || d.try_exists()? {
+            break;
+        }
+        missing.push(d.to_path_buf());
+        cur = d.parent();
+    }
+    std::fs::create_dir_all(dir)?;
+    let mut synced = Vec::with_capacity(missing.len());
+    for created in missing.iter().rev() {
+        let holder = match created.parent() {
+            Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+            _ => PathBuf::from("."),
+        };
+        sync_dir_blocking(&holder)?;
+        synced.push(holder);
+    }
+    Ok(synced)
+}
+
+/// Sync the directory holding `path`, so the entry naming `path` — a file just created, renamed or
+/// truncated — survives a power loss the way the file's bytes do. A no-op on a platform without
+/// directory fsync (Windows).
+pub fn sync_parent_dir(path: &std::path::Path) -> io::Result<()> {
+    match path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => sync_dir_blocking(p),
+        Some(_) => sync_dir_blocking(std::path::Path::new(".")),
+        None => Ok(()),
+    }
+}
+
+fn sync_dir_blocking(dir: &std::path::Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        std::fs::File::open(dir)?.sync_all()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = dir;
+        Ok(())
+    }
+}
+
 // ── WalWriter task ───────────────────────────────────────────────────────────
 
 #[allow(clippy::too_many_arguments)]
@@ -1695,6 +1752,27 @@ mod durability_tests {
         assert!(r2.is_err(), "an absurd length with data after it is corruption: {r2:?}");
         assert_eq!(seen, ["a/0"], "the record before it was handed over");
         std::fs::remove_dir_all(&dir).ok(); std::fs::remove_dir_all(&dir2).ok();
+    }
+
+    /// R6 (external review 2026-10-31 F7): `create_dir_all_synced` syncs the directory holding each
+    /// one it creates, outermost first, on a real directory tree; an existing directory syncs
+    /// nothing; and a sync that cannot run is an error, not a skip. The callers' ordering witnesses
+    /// (the journal's and both companions') pin that the syncs precede the first record.
+    #[test]
+    fn create_dir_all_synced_syncs_each_created_directory_outermost_first() {
+        let root = unique_dir("mkdir-synced");
+        let leaf = root.join("a").join("b").join("c");
+        let synced = create_dir_all_synced(&leaf).expect("created and synced");
+        assert!(leaf.is_dir());
+        assert_eq!(synced, [root.clone(), root.join("a"), root.join("a").join("b")]);
+        assert!(create_dir_all_synced(&leaf).expect("exists").is_empty(), "nothing created, nothing synced");
+        sync_parent_dir(&leaf.join("file")).expect("the directory naming a file syncs");
+        assert!(sync_parent_dir(&root.join("missing").join("file")).is_err(),
+            "a directory that is not there is an error, not a no-op");
+        let file = root.join("plain");
+        std::fs::write(&file, b"x").unwrap();
+        assert!(create_dir_all_synced(&file.join("under")).is_err(), "a file in the path is refused");
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[tokio::test]

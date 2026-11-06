@@ -209,3 +209,70 @@ async fn an_epoch_recorded_after_a_torn_tail_survives_a_restart() {
     assert_eq!(reopened.floor("cap/fleet"), Some(2), "the floor recorded after the torn tail survives");
     let _ = std::fs::remove_dir_all(&d);
 }
+
+// ── R6 of `docs/plans/external-review-2026-10-31.md` (the review's F7) ─────────────────────────
+//
+// A fresh journal acknowledged its first record `OnDisk` after syncing the file's bytes and never
+// the directory that names the file, so a power loss could keep the bytes and lose the name. The
+// power-loss property itself is not observable without a filesystem fault adapter, which the
+// journal does not go through (its syncs are `std::fs`, not the sim seam); what these pin is the
+// order of the syncs, from a trace the journal reports, and that the sync runs on a real directory.
+
+fn steps(rx: &std::sync::mpsc::Receiver<&'static str>) -> Vec<&'static str> {
+    rx.try_iter().collect()
+}
+
+/// **F7, the probe inverted.** On a fresh journal the directory holding the file is synced before
+/// the first append is acknowledged. On the unrepaired code the trace is `["append.sync"]`.
+#[tokio::test]
+async fn a_fresh_journal_syncs_its_directory_before_the_first_append_is_acknowledged() {
+    let d = dir("fresh-dir-sync");
+    let path = d.join("evidence.log");
+    let (tx, rx) = std::sync::mpsc::channel();
+    let j = Journal::open_traced(&path, "test/journal", tx).expect("open");
+    j.append(b"first".to_vec()).await.expect("appended");
+    let trace = steps(&rx);
+    let parent = trace.iter().position(|o| *o == "parent.sync");
+    let append = trace.iter().position(|o| *o == "append.sync");
+    assert!(
+        matches!((parent, append), (Some(p), Some(a)) if p < a),
+        "the directory entry must be synced before the first append is acknowledged: {trace:?}"
+    );
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// A journal whose directories do not exist yet: each one `open` creates has its own entry synced
+/// in the directory above it, outermost first, before the file's directory and the first append.
+/// On the unrepaired code `create_dir_all` makes them and nothing syncs any.
+#[tokio::test]
+async fn a_journal_in_new_directories_syncs_each_one_it_created() {
+    let d = dir("fresh-tree");
+    let path = d.join("a").join("b").join("evidence.log");
+    let (tx, rx) = std::sync::mpsc::channel();
+    let j = Journal::open_traced(&path, "test/journal", tx).expect("open");
+    j.append(b"first".to_vec()).await.expect("appended");
+    let trace = steps(&rx);
+    assert_eq!(
+        trace,
+        ["dir.sync", "dir.sync", "parent.sync", "append.sync"],
+        "`a` synced in the temp dir, `b` in `a`, the file in `b`, then the append"
+    );
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Reopening an existing journal syncs its directory again — cheap, and it also covers a file an
+/// earlier version created without the sync, on a machine that has not lost power since. No
+/// directory is created, so none is reported.
+#[tokio::test]
+async fn reopening_a_journal_syncs_its_directory_and_creates_none() {
+    let d = dir("reopen-dir-sync");
+    let path = d.join("evidence.log");
+    {
+        let j = Journal::open(&path, "test/journal").expect("open");
+        j.append(b"first".to_vec()).await.expect("appended");
+    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    let _j = Journal::open_traced(&path, "test/journal", tx).expect("reopen");
+    assert_eq!(steps(&rx), ["parent.sync"]);
+    let _ = std::fs::remove_dir_all(&d);
+}
