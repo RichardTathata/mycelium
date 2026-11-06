@@ -157,7 +157,7 @@ def test_an_evicted_serve_stream_raises_rather_than_ending_quietly(agent):
 
 def test_on_signal_raises_a_refused_stream_as_an_http_error_not_an_sse_error(agent):
     """#714's review, round 2: a signal stream refused ``403`` — a companion's kind without the family's
-    ``:read`` (0.2.13), or a protected kind — answered as httpx-sse's content-type ``SSEError``; it raises the
+    ``:read`` (0.2.14), or a protected kind — answered as httpx-sse's content-type ``SSEError``; it raises the
     HTTP error, and ``ProtectedKindError`` for a protected kind, as ``rpc_serve`` does."""
     import asyncio
     import httpx
