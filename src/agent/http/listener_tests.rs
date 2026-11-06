@@ -71,6 +71,8 @@ async fn a_silent_socket_is_closed_within_the_handshake_timeout_on_the_plaintext
     let mut silent = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
     assert!(closed_within(&mut silent, Duration::from_secs(3)).await,
         "a socket that connects and sends nothing must be closed within handshake_timeout_ms (300 ms)");
+    assert!(agent.system_stats().gateway_connections_timed_out >= 1,
+        "the close is counted (#719's review, finding 4)");
     agent.shutdown().await;
 }
 
@@ -102,6 +104,35 @@ async fn a_request_sent_in_time_is_served_after_the_timeout_would_have_passed() 
     agent.shutdown().await;
 }
 
+/// The HTTP/2 preface, then nothing (#719's review, finding 1): the deadline must not disarm at the preface's
+/// last byte, or one such socket holds a permit forever — with `gateway_max_connections = 1`, the gateway.
+#[tokio::test]
+async fn a_bare_http2_preface_then_silence_does_not_hold_the_only_permit() {
+    let (agent, port) = plain_gateway(300, 1).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let mut s = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+    s.write_all(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n").await.unwrap();
+    let answered = health_within(port, Duration::from_secs(5)).await;
+    assert!(answered.as_deref().is_some_and(|l| l.starts_with("HTTP/1.1 200")),
+        "a preface with no frame after it must not hold the only permit: {answered:?}");
+    assert!(closed_within(&mut s, Duration::from_secs(1)).await, "and the preface-only socket is closed");
+    agent.shutdown().await;
+}
+
+/// An HTTP/2 client that sends its preface and SETTINGS, then never answers (#719's review, finding 1): the
+/// server's keep-alive PING, derived from `handshake_timeout_ms`, finds it gone and closes the connection.
+#[tokio::test]
+async fn an_http2_client_silent_after_its_settings_is_closed_by_the_keep_alive() {
+    let (agent, port) = plain_gateway(300, 1024).await;
+    let mut s = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+    s.write_all(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n").await.unwrap();
+    // An empty SETTINGS frame: length 0, type 0x4, flags 0, stream 0.
+    s.write_all(&[0, 0, 0, 0x4, 0, 0, 0, 0, 0]).await.unwrap();
+    assert!(closed_within(&mut s, Duration::from_secs(5)).await,
+        "an HTTP/2 connection that never answers a PING is closed within the keep-alive bound");
+    agent.shutdown().await;
+}
+
 #[tokio::test]
 async fn the_gateway_serves_no_more_than_gateway_max_connections_at_once() {
     // A long preface bound, so the two silent sockets hold their permits for the whole test.
@@ -111,8 +142,11 @@ async fn the_gateway_serves_no_more_than_gateway_max_connections_at_once() {
     let silent_a = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
     let _silent_b = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
     tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(agent.system_stats().gateway_connections_open, 2, "both silent sockets hold a permit");
     assert_eq!(health_within(port, Duration::from_millis(800)).await, None,
         "with gateway_max_connections = 2 held, a third connection is not served");
+    assert!(agent.system_stats().gateway_connection_cap_waits >= 1,
+        "the accept loop's wait at the cap is counted (#719's review, finding 4)");
     drop(silent_a);
     let answered = health_within(port, Duration::from_secs(3)).await;
     assert!(answered.as_deref().is_some_and(|l| l.starts_with("HTTP/1.1 200")),
@@ -212,6 +246,7 @@ mod tls {
         let mut silent = TcpStream::connect(("127.0.0.1", gw.port)).await.unwrap();
         assert!(closed_within(&mut silent, Duration::from_secs(3)).await,
             "a socket that never sends a ClientHello must be closed within handshake_timeout_ms (300 ms)");
+        assert!(gw.agent.system_stats().gateway_connections_timed_out >= 1, "the handshake timeout is counted");
         gw.stop().await;
     }
 

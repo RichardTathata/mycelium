@@ -27,6 +27,15 @@ pub struct TransportBounds {
     /// the first frame's first byte did not arrive within `handshake_timeout_ms`, or an established connection
     /// was silent for `inbound_idle_timeout_secs`. See `SystemStats::inbound_connections_timed_out`.
     pub inbound_timed_out: AtomicU64,
+    /// Gateway connections (`http_port`) closed because the TLS handshake or the request's preface missed
+    /// `handshake_timeout_ms` (external review 2026-10-31, R5). See `SystemStats::gateway_connections_timed_out`.
+    pub gateway_timed_out: AtomicU64,
+    /// Times the gateway's accept loop found every `gateway_max_connections` permit held and stopped accepting
+    /// until one returned. See `SystemStats::gateway_connection_cap_waits`.
+    pub gateway_cap_waits: AtomicU64,
+    /// Gateway connections open now, each holding a `gateway_max_connections` permit.
+    /// See `SystemStats::gateway_connections_open`.
+    pub gateway_open: AtomicU64,
     /// Inbound gossip connections closed because a frame **in progress** stalled: no byte for
     /// `peer_read_stall_timeout_ms`, or below `peer_min_rate_bytes_per_sec` (#602's review, finding 1) —
     /// counted apart from `inbound_timed_out`, which is silence between frames.
@@ -166,6 +175,34 @@ impl TransportBounds {
         self.inbound_frames_stalled.fetch_add(1, Ordering::Relaxed);
         #[cfg(feature = "metrics")]
         metrics::counter!("gossip_inbound_frames_stalled_total").increment(1);
+    }
+
+    /// Counts one gateway connection closed by its handshake or preface deadline.
+    pub fn count_gateway_timeout(&self) {
+        self.gateway_timed_out.fetch_add(1, Ordering::Relaxed);
+        #[cfg(feature = "metrics")]
+        metrics::counter!("gateway_connections_timed_out_total").increment(1);
+    }
+
+    /// Counts one wait of the gateway's accept loop at `gateway_max_connections`.
+    pub fn count_gateway_cap_wait(&self) {
+        self.gateway_cap_waits.fetch_add(1, Ordering::Relaxed);
+        #[cfg(feature = "metrics")]
+        metrics::counter!("gateway_connection_cap_waits_total").increment(1);
+    }
+
+    /// One gateway connection opened (it holds a permit until [`Self::gateway_connection_closed`]).
+    pub fn gateway_connection_opened(&self) {
+        let _n = self.gateway_open.fetch_add(1, Ordering::Relaxed) + 1;
+        #[cfg(feature = "metrics")]
+        metrics::gauge!("gateway_connections_open").set(_n as f64);
+    }
+
+    /// One gateway connection closed.
+    pub fn gateway_connection_closed(&self) {
+        let _n = self.gateway_open.fetch_sub(1, Ordering::Relaxed).saturating_sub(1);
+        #[cfg(feature = "metrics")]
+        metrics::gauge!("gateway_connections_open").set(_n as f64);
     }
 
     /// Counts one inbound connection closed by a handshake, first-frame or idle bound.

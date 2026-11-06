@@ -522,6 +522,7 @@ pub(super) async fn run_http_server(
         app,
         #[cfg(feature = "tls")] tls,
         bounds,
+        Arc::clone(&state.agent_ctx.transport_bounds),
         shutdown_rx,
     ).await
 }

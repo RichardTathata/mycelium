@@ -18,8 +18,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   listeners now run one accept loop (`src/agent/http/listener.rs`): a connection takes one of
   `gateway_max_connections` permits (new, default `1024`, `GOSSIP_GATEWAY_MAX_CONNECTIONS`) before it is accepted;
   the TLS handshake and then the request's preface each arrive within `handshake_timeout_ms` or the connection is
-  closed; hyper's 30 s header-read bound is live for every HTTP/1 request head; shutdown closes a connection still in
-  its handshake. Upgrade note: `docs/guide/deprecations.md` §78.
+  closed (on HTTP/2, the preface and the next frame's header; then a keep-alive PING from the same bound); hyper's
+  30 s header-read bound is live for every HTTP/1 request head; an accept error that is not a client's (`EMFILE`) backs
+  off a second; shutdown closes a connection still in its handshake. **A TLS gateway's shutdown now waits on its open
+  connections** up to the node's shutdown drain bound (5 s by default), as the plaintext listener's always did. New
+  counters: `SystemStats::{gateway_connections_timed_out, gateway_connection_cap_waits, gateway_connections_open}` and
+  the matching metrics. **Long-lived streams can fill the cap, and then `/health` and `/ready` wait**; no slot is
+  reserved for them. Upgrade note: `docs/guide/deprecations.md` §78.
 
 ## [2.39.0] — 2026-11-06
 

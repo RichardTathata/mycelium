@@ -1454,11 +1454,14 @@ pub struct GossipConfig {
     /// separate from the gossip listener's `max_connections` (external review 2026-10-31, F5, row R5).
     /// A connection takes a permit when it is accepted and returns it when it closes; at the bound the
     /// gateway stops accepting, so a further connection waits in the listen backlog until one closes. A
-    /// connection cannot hold its permit by staying silent: the TLS handshake (under `gateway_tls`) and
-    /// then the first request's preface must each arrive within `handshake_timeout_ms`, and hyper's
-    /// header-read bound (30 s) covers the rest of every request head. A connection that **keeps
-    /// talking** holds its permit, as on the gossip listener. Validated `1..=65535`. Default `1024`.
-    /// Env: `GOSSIP_GATEWAY_MAX_CONNECTIONS`.
+    /// connection in its TLS handshake (under `gateway_tls`) or before its preface — on HTTP/2 the
+    /// 24-byte preface and the next frame's header — holds its permit at most `handshake_timeout_ms`; an
+    /// HTTP/1 connection between requests at most 30 s (hyper's header-read bound); an HTTP/2 connection
+    /// with no request until a keep-alive PING, sent after `handshake_timeout_ms` of quiet, goes
+    /// unanswered for `handshake_timeout_ms`. A connection that **keeps talking** holds its permit, as on
+    /// the gossip listener, and so does a long-running stream: enough of them fill the cap, and then
+    /// `/health` and `/ready` wait with every other request (no slot is reserved for them). Validated
+    /// `1..=65535`. Default `1024`. Env: `GOSSIP_GATEWAY_MAX_CONNECTIONS`.
     pub gateway_max_connections: usize,
 
     /// OAuth2-style scoped gateway tokens (`compliance` feature).
@@ -2455,7 +2458,7 @@ impl GossipConfig {
     /// Fields that can be overridden include (the full list, with each variable's field, is
     /// `docs/reference/configuration.md`): `GOSSIP_BIND_ADDRESS`, `GOSSIP_BIND_PORT`,
     /// `GOSSIP_PROPAGATION_WINDOW_SECS`, `GOSSIP_HEALTH_CHECK_INTERVAL_SECS`,
-    /// `GOSSIP_DEFAULT_TTL`, `GOSSIP_MAX_CONNECTIONS`, `GOSSIP_WRITER_CHANNEL_DEPTH`,
+    /// `GOSSIP_DEFAULT_TTL`, `GOSSIP_MAX_CONNECTIONS`, `GOSSIP_GATEWAY_MAX_CONNECTIONS`, `GOSSIP_WRITER_CHANNEL_DEPTH`,
     /// `GOSSIP_MAX_FORWARDING_PEERS`, `GOSSIP_RECONNECT_BACKOFF_SECS`,
     /// `GOSSIP_GOSSIP_CHANNEL_CAPACITY`, `GOSSIP_MAX_SEEN_ENTRIES`,
     /// `GOSSIP_PEER_EVICTION_INTERVALS`, `GOSSIP_GOSSIP_SHARDS`,
