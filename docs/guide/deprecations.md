@@ -2399,8 +2399,8 @@ limits remain the deployment's first bound against a flood.
 
 ## 82. Every crate requires Tokio 1.53.3 or later; `rustls-pemfile` is no longer a dependency (unreleased, external review 2026-10-31, R9)
 
-**Tokio.** Every crate in this repository — `mycelium`, `mycelium-core`, each companion, the examples and both
-templates — now declares `tokio = "1.53.3"` where it declared `"1.35"`. Tokio 1.52.x carries RUSTSEC-2026-0386
+**Tokio.** Every crate in this repository — `mycelium`, `mycelium-core`, each companion and the examples — now declares
+`tokio = "1.53.3"` where it declared `"1.35"`, and both templates where they declared `"1"`. Tokio 1.52.x carries RUSTSEC-2026-0386
 (`AsyncFd::new` and its siblings violate I/O safety; unsound, not a vulnerability, and nothing in this tree calls
 `AsyncFd`), and 1.52 has no patched release, so the floor is the first patched 1.53. Our own lockfiles were already
 moved; the requirement makes sure an adopter's cannot resolve below it.
@@ -2414,5 +2414,4 @@ moved; the requirement makes sure an adopter's cannot resolve below it.
 reads its gateway certificate and key, and its CA and node certificates, through `rustls-pki-types`' PEM parser, which
 `rustls` already depends on. The accepted inputs are the same (pinned by `tls::pem_parse_tests`): certificates in order
 with other sections skipped, PKCS#8, PKCS#1 and SEC1 keys by label, CRLF line endings, an encrypted key read as no key,
-a malformed section an error. An application that used `rustls-pemfile` through this crate's feature, rather than
-depending on it itself, now has to name it — or move to `rustls::pki_types::pem::PemObject`.
+a malformed section an error.
