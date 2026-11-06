@@ -1151,11 +1151,10 @@ impl WalWriter {
         if let Some(parent) = path.parent()
             && !parent.as_os_str().is_empty()
         {
-            // Each directory created here has its entry synced in the one above it (external
-            // review 2026-10-31 F7, plan row R6); the file's own entry is synced below, on open.
-            for _ in mycelium::create_dir_all_synced(parent)? {
-                fs_trace("open.mkdir.sync");
-            }
+            // Every directory on the path has its entry synced in the one above it, on every open
+            // (external review 2026-10-31 F7, plan row R6; #718's review); the file's own entry is
+            // synced once the file is open, below.
+            mycelium::create_dir_all_synced_observed(parent, &mut |_| fs_trace("open.mkdir.sync"))?;
         }
         // Ownership first, repair second, writes last — the core journal's order. A second store on
         // this path, in this process or another, is refused with `WouldBlock` naming the file.
@@ -1177,11 +1176,8 @@ impl WalWriter {
         if data.is_empty() {
             file.write_all(&wal_header())?;
             data.extend_from_slice(&wal_header());
-            // The header's bytes, then the entry naming the file: a fresh WAL's first synced record
-            // must not sit in a file a power loss can leave unnamed (F7, R6).
+            // The header's bytes; the entry naming the file is synced on every open, below.
             file.sync_all()?;
-            fsync_parent(path)?;
-            fs_trace("open.parent.sync");
         } else if data.len() < WAL_HEADER_LEN as usize
             || &data[..WAL_MAGIC.len()] != WAL_MAGIC
         {
@@ -1211,6 +1207,12 @@ impl WalWriter {
                 ));
             }
         }
+
+        // The entry naming the file, on every open (F7, R6; #718's review, finding 3): a fresh WAL's
+        // first synced record must not sit in a file a power loss can leave unnamed, and a reopen
+        // covers a file an earlier open created whose sync failed. Told to the test trace from
+        // inside the sync.
+        mycelium::sync_parent_dir_observed(path, &mut |_| fs_trace("open.parent.sync"))?;
 
         let Folded { items, total, acked, end: offset, high_water } = fold_wal(&data).map_err(|offset| {
             io::Error::new(
@@ -2672,16 +2674,31 @@ mod tests {
         // Appends land in the page cache; the checkpoint is where a record becomes durable.
         store.checkpoint_if_due(true).unwrap();
         let trace = FS_TRACE.with(|t| t.borrow().clone());
-        assert_eq!(
-            trace.iter().filter(|o| **o != "append.sync").copied().collect::<Vec<_>>(),
-            ["open.mkdir.sync", "open.parent.sync"],
-            "`a` synced in the root, then the file's entry in `a`: {trace:?}"
-        );
+        let opens: Vec<_> = trace.iter().filter(|o| **o != "append.sync").copied().collect();
+        let dirs = opens.iter().filter(|o| **o == "open.mkdir.sync").count();
+        assert!(dirs >= 2, "the root and `a` at least: {trace:?}");
+        assert_eq!(&opens[dirs..], ["open.parent.sync"], "every directory, then the file's entry in `a`: {trace:?}");
         let parent = trace.iter().position(|o| *o == "open.parent.sync").unwrap();
         let append = trace.iter().position(|o| *o == "append.sync").unwrap_or_else(|| panic!("no append.sync in {trace:?}"));
         assert!(parent < append, "{trace:?}");
         drop(store);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// #718's review, finding 3: reopening an existing WAL syncs its directory again, as the
+    /// journal does — it covers a file an earlier open created whose sync failed or that an earlier
+    /// version never synced. On the code before the fix a reopen syncs nothing.
+    #[tokio::test]
+    async fn reopening_a_wal_syncs_its_directory() {
+        let path = temp_wal("reopen-dir-sync");
+        drop(TupleStore::persistent(&path, 1, 500).unwrap());
+        FS_TRACE.with(|t| t.borrow_mut().clear());
+        let store = TupleStore::persistent(&path, 1, 500).unwrap();
+        let trace = FS_TRACE.with(|t| t.borrow().clone());
+        assert!(trace.contains(&"open.parent.sync"), "{trace:?}");
+        assert!(trace.contains(&"open.mkdir.sync"), "the existing directory's holder too: {trace:?}");
+        drop(store);
+        let _ = std::fs::remove_file(&path);
     }
 
     fn fastrand_tag() -> u128 {

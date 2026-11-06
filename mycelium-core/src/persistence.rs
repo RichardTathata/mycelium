@@ -518,61 +518,86 @@ impl OwnershipLock {
     }
 }
 
-/// Create `dir` and each missing ancestor, then sync the directory that holds each one created,
-/// outermost first — so a power loss cannot keep a durable file's bytes and lose the directory it
-/// lives in (external review 2026-10-31 F7, plan row R6). Returns the directories synced, in order;
-/// empty when `dir` already existed. A failed sync is returned, never skipped.
+/// Create `dir` and any missing ancestor, then sync the directory holding **every** component of
+/// the path, outermost first — so a power loss cannot keep a durable file's bytes and lose a
+/// directory it lives in (external review 2026-10-31 F7, plan row R6). Returns the directories
+/// synced, in order. Every call syncs every component, not only the ones it created: a directory
+/// that already exists may have been left by an earlier open whose sync failed, or created by a
+/// concurrent opener that has not synced it yet, and nothing on disk says which (#718's review).
+///
+/// A failed sync is returned, never skipped — with one exception: an ancestor that existed before
+/// the call and whose holder this process may not open for reading (`PermissionDenied`, a `0711`
+/// home directory) is passed over, because this call did not create it and cannot sync it; every
+/// directory this call created was created in a holder it could write.
 ///
 /// The directory holding a *file* is the caller's to sync once the file exists
-/// ([`sync_parent_dir`]); this covers the directories above it. Blocking, and outside the sim seam
-/// (`std::fs`, like the node-local journal): a directory's creation decides nothing a replay
-/// compares. On a platform without directory fsync (Windows) the syncs are no-ops and the list is
-/// still returned. The power-loss property itself is not observable without a filesystem fault
-/// adapter; what the callers' tests pin is that the syncs run, in order, before the first record.
+/// ([`sync_parent_dir`]). Blocking, and outside the sim seam (`std::fs`, like the node-local
+/// journal): a directory's creation decides nothing a replay compares. On a platform without
+/// directory fsync (Windows) the syncs are no-ops and the list is still returned. The power-loss
+/// property itself is not observable without a filesystem fault adapter; what the callers' tests
+/// pin is that the syncs run, in order, before the first record.
 pub fn create_dir_all_synced(dir: &std::path::Path) -> io::Result<Vec<PathBuf>> {
-    let mut missing = Vec::new();
-    let mut cur = Some(dir);
-    while let Some(d) = cur {
-        if d.as_os_str().is_empty() || d.try_exists()? {
-            break;
+    let mut synced = Vec::new();
+    create_dir_all_synced_observed(dir, &mut |d| synced.push(d.to_path_buf()))?;
+    Ok(synced)
+}
+
+/// [`create_dir_all_synced`], reporting each directory to `observe` from inside the sync, right
+/// after it returns — how a companion's test witnesses the sync itself rather than a label beside
+/// the call.
+pub fn create_dir_all_synced_observed(
+    dir: &std::path::Path,
+    observe: &mut dyn FnMut(&std::path::Path),
+) -> io::Result<()> {
+    // Which components exist before this call: only those may be passed over on `PermissionDenied`.
+    let mut existed = std::collections::HashSet::new();
+    for d in dir.ancestors() {
+        if !d.as_os_str().is_empty() && d.try_exists()? {
+            existed.insert(d.to_path_buf());
         }
-        missing.push(d.to_path_buf());
-        cur = d.parent();
     }
     std::fs::create_dir_all(dir)?;
-    let mut synced = Vec::with_capacity(missing.len());
-    for created in missing.iter().rev() {
-        let holder = match created.parent() {
-            Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
-            _ => PathBuf::from("."),
-        };
-        sync_dir_blocking(&holder)?;
-        synced.push(holder);
+    let components: Vec<&std::path::Path> =
+        dir.ancestors().filter(|d| !d.as_os_str().is_empty()).collect();
+    for component in components.into_iter().rev() {
+        let Some(holder) = component.parent() else { continue }; // the root has no holder
+        let holder = if holder.as_os_str().is_empty() { std::path::Path::new(".") } else { holder };
+        match sync_dir_blocking(holder, observe) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::PermissionDenied && existed.contains(component) => {}
+            Err(e) => return Err(e),
+        }
     }
-    Ok(synced)
+    Ok(())
 }
 
 /// Sync the directory holding `path`, so the entry naming `path` — a file just created, renamed or
 /// truncated — survives a power loss the way the file's bytes do. A no-op on a platform without
 /// directory fsync (Windows).
 pub fn sync_parent_dir(path: &std::path::Path) -> io::Result<()> {
+    sync_parent_dir_observed(path, &mut |_| {})
+}
+
+/// [`sync_parent_dir`], reporting the directory to `observe` from inside the sync, right after it
+/// returns.
+pub fn sync_parent_dir_observed(
+    path: &std::path::Path,
+    observe: &mut dyn FnMut(&std::path::Path),
+) -> io::Result<()> {
     match path.parent() {
-        Some(p) if !p.as_os_str().is_empty() => sync_dir_blocking(p),
-        Some(_) => sync_dir_blocking(std::path::Path::new(".")),
+        Some(p) if !p.as_os_str().is_empty() => sync_dir_blocking(p, observe),
+        Some(_) => sync_dir_blocking(std::path::Path::new("."), observe),
         None => Ok(()),
     }
 }
 
-fn sync_dir_blocking(dir: &std::path::Path) -> io::Result<()> {
+/// The one place a directory is synced for the helpers above; `observe` is told only once the
+/// sync has returned `Ok`.
+fn sync_dir_blocking(dir: &std::path::Path, observe: &mut dyn FnMut(&std::path::Path)) -> io::Result<()> {
     #[cfg(unix)]
-    {
-        std::fs::File::open(dir)?.sync_all()
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = dir;
-        Ok(())
-    }
+    std::fs::File::open(dir)?.sync_all()?;
+    observe(dir);
+    Ok(())
 }
 
 // ── WalWriter task ───────────────────────────────────────────────────────────
@@ -1758,14 +1783,31 @@ mod durability_tests {
     /// one it creates, outermost first, on a real directory tree; an existing directory syncs
     /// nothing; and a sync that cannot run is an error, not a skip. The callers' ordering witnesses
     /// (the journal's and both companions') pin that the syncs precede the first record.
+    /// #718's review, findings 2 and 4: a directory that already exists — left by an open whose
+    /// sync failed, or created by a concurrent opener that has not synced it yet — is synced in its
+    /// holder too, on every call. On the code before the fix an existing `a/b` synced nothing.
     #[test]
-    fn create_dir_all_synced_syncs_each_created_directory_outermost_first() {
+    fn create_dir_all_synced_syncs_the_holder_of_an_existing_unsynced_directory() {
+        let root = unique_dir("mkdir-existing");
+        let leaf = root.join("a").join("b");
+        std::fs::create_dir_all(&leaf).unwrap(); // created, never synced
+        let synced = create_dir_all_synced(&leaf).expect("synced");
+        assert!(synced.contains(&root), "`a`'s entry in the root: {synced:?}");
+        assert!(synced.contains(&root.join("a")), "`b`'s entry in `a`: {synced:?}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn create_dir_all_synced_syncs_every_component_outermost_first() {
         let root = unique_dir("mkdir-synced");
         let leaf = root.join("a").join("b").join("c");
         let synced = create_dir_all_synced(&leaf).expect("created and synced");
         assert!(leaf.is_dir());
-        assert_eq!(synced, [root.clone(), root.join("a"), root.join("a").join("b")]);
-        assert!(create_dir_all_synced(&leaf).expect("exists").is_empty(), "nothing created, nothing synced");
+        let n = synced.len();
+        assert!(n >= 3, "{synced:?}");
+        assert_eq!(&synced[n - 3..], [root.clone(), root.join("a"), root.join("a").join("b")],
+            "outermost first, ending with the leaf's holder");
+        assert_eq!(create_dir_all_synced(&leaf).expect("exists"), synced, "every call syncs every component");
         sync_parent_dir(&leaf.join("file")).expect("the directory naming a file syncs");
         assert!(sync_parent_dir(&root.join("missing").join("file")).is_err(),
             "a directory that is not there is an error, not a no-op");

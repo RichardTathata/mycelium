@@ -241,9 +241,9 @@ async fn a_fresh_journal_syncs_its_directory_before_the_first_append_is_acknowle
     let _ = std::fs::remove_dir_all(&d);
 }
 
-/// A journal whose directories do not exist yet: each one `open` creates has its own entry synced
-/// in the directory above it, outermost first, before the file's directory and the first append.
-/// On the unrepaired code `create_dir_all` makes them and nothing syncs any.
+/// A journal whose directories do not exist yet: every directory on the path has its entry synced
+/// in the one above it, before the file's directory and the first append. On the unrepaired code
+/// `create_dir_all` makes them and nothing syncs any.
 #[tokio::test]
 async fn a_journal_in_new_directories_syncs_each_one_it_created() {
     let d = dir("fresh-tree");
@@ -252,17 +252,30 @@ async fn a_journal_in_new_directories_syncs_each_one_it_created() {
     let j = Journal::open_traced(&path, "test/journal", tx).expect("open");
     j.append(b"first".to_vec()).await.expect("appended");
     let trace = steps(&rx);
-    assert_eq!(
-        trace,
-        ["dir.sync", "dir.sync", "parent.sync", "append.sync"],
-        "`a` synced in the temp dir, `b` in `a`, the file in `b`, then the append"
-    );
+    let dirs = trace.iter().filter(|o| **o == "dir.sync").count();
+    assert!(dirs >= 3, "the temp dir, `a` and `b` at least: {trace:?}");
+    assert_eq!(&trace[dirs..], ["parent.sync", "append.sync"], "every directory first: {trace:?}");
     let _ = std::fs::remove_dir_all(&d);
 }
 
-/// Reopening an existing journal syncs its directory again — cheap, and it also covers a file an
-/// earlier version created without the sync, on a machine that has not lost power since. No
-/// directory is created, so none is reported.
+/// #718's review, findings 2 and 4: directories that exist but were never synced — an earlier
+/// open's sync failed, or a concurrent opener created them and has not synced yet — are synced
+/// in their holders on this open too. On the code before the fix nothing reports `dir.sync`.
+#[tokio::test]
+async fn a_journal_in_existing_unsynced_directories_syncs_their_holders() {
+    let d = dir("existing-tree");
+    let parent = d.join("a").join("b");
+    std::fs::create_dir_all(&parent).unwrap(); // created, never synced
+    let (tx, rx) = std::sync::mpsc::channel();
+    let _j = Journal::open_traced(parent.join("evidence.log"), "test/journal", tx).expect("open");
+    let trace = steps(&rx);
+    let dirs = trace.iter().filter(|o| **o == "dir.sync").count();
+    assert!(dirs >= 2, "`a` in the temp dir and `b` in `a` at least: {trace:?}");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Reopening an existing journal syncs its directories again — cheap, and it also covers a file an
+/// earlier version created without the sync, on a machine that has not lost power since.
 #[tokio::test]
 async fn reopening_a_journal_syncs_its_directory_and_creates_none() {
     let d = dir("reopen-dir-sync");
@@ -273,6 +286,8 @@ async fn reopening_a_journal_syncs_its_directory_and_creates_none() {
     }
     let (tx, rx) = std::sync::mpsc::channel();
     let _j = Journal::open_traced(&path, "test/journal", tx).expect("reopen");
-    assert_eq!(steps(&rx), ["parent.sync"]);
+    let trace = steps(&rx);
+    assert_eq!(trace.last(), Some(&"parent.sync"), "{trace:?}");
+    assert!(trace[..trace.len() - 1].iter().all(|o| *o == "dir.sync") && trace.len() > 1, "{trace:?}");
     let _ = std::fs::remove_dir_all(&d);
 }

@@ -481,7 +481,7 @@ pub use persistence::OwnershipLock;
 /// Create a directory chain and sync each new entry, and sync the directory naming a file — the
 /// steps a companion's log takes on open so its first acknowledged record has a durable name
 /// (external review 2026-10-31 R6).
-pub use persistence::{create_dir_all_synced, sync_parent_dir};
+pub use persistence::{create_dir_all_synced, create_dir_all_synced_observed, sync_parent_dir, sync_parent_dir_observed};
 pub use locality::LocalityPreference;
 #[cfg(feature = "consensus")]
 pub use consensus::{ConsensusConfig, ConsensusListenerHandle, ConsensusResult, GroupQuorum, consensus_kind, consensus_ns, electorate_roster_mismatches, electorate_waiting_refusals};

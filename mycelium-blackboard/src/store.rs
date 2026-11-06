@@ -988,6 +988,21 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    /// #718's review, finding 3: reopening an existing WAL syncs its directory again, as the
+    /// journal does. On the code before the fix a reopen syncs nothing.
+    #[test]
+    fn reopening_a_wal_syncs_its_directory() {
+        let path = temp_wal("reopen-dir-sync");
+        drop(BoardStore::persistent(&path, 1).unwrap());
+        crate::wal::FS_TRACE.with(|t| t.borrow_mut().clear());
+        let store = BoardStore::persistent(&path, 1).unwrap();
+        let trace = crate::wal::FS_TRACE.with(|t| t.borrow().clone());
+        assert!(trace.contains(&"open.parent.sync"), "{trace:?}");
+        assert!(trace.contains(&"open.mkdir.sync"), "the existing directory's holder too: {trace:?}");
+        drop(store);
+        let _ = std::fs::remove_file(&path);
+    }
+
     /// R6 of `docs/plans/external-review-2026-10-31.md` (the review's F7): a fresh WAL's directory
     /// entry is synced before its first record is synced, and each directory `open` creates is
     /// synced in the one above it. On the unrepaired code neither sync runs. The power-loss
@@ -1003,11 +1018,10 @@ mod tests {
         let store = BoardStore::persistent(&path, 1).unwrap();
         store.post(surplus("1", "1.0"), Bytes::from("x")).unwrap();
         let trace = crate::wal::FS_TRACE.with(|t| t.borrow().clone());
-        assert_eq!(
-            trace.iter().filter(|o| **o != "append.sync").copied().collect::<Vec<_>>(),
-            ["open.mkdir.sync", "open.parent.sync"],
-            "`a` synced in the root, then the file's entry in `a`: {trace:?}"
-        );
+        let opens: Vec<_> = trace.iter().filter(|o| **o != "append.sync").copied().collect();
+        let dirs = opens.iter().filter(|o| **o == "open.mkdir.sync").count();
+        assert!(dirs >= 2, "the root and `a` at least: {trace:?}");
+        assert_eq!(&opens[dirs..], ["open.parent.sync"], "every directory, then the file's entry in `a`: {trace:?}");
         let parent = trace.iter().position(|o| *o == "open.parent.sync").unwrap();
         let append = trace.iter().position(|o| *o == "append.sync").unwrap_or_else(|| panic!("no append.sync in {trace:?}"));
         assert!(parent < append, "{trace:?}");

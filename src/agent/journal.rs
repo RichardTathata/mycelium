@@ -196,15 +196,14 @@ impl Journal {
         // do (the review's F7, plan row R6). Reopening syncs again: cheap, and it covers a file an
         // earlier version created without the sync on a machine that has not lost power since.
         if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-            for _ in mycelium_core::persistence::create_dir_all_synced(parent)? {
-                note(trace.as_ref(), "dir.sync");
-            }
+            mycelium_core::persistence::create_dir_all_synced_observed(parent, &mut |_| {
+                note(trace.as_ref(), "dir.sync")
+            })?;
         }
         let lock = acquire_ownership(&path)?;
         let recovered = recover(&path)?;
         let mut file = std::fs::OpenOptions::new().create(true).append(true).open(&path)?;
-        fsync_parent(&path)?;
-        note(trace.as_ref(), "parent.sync");
+        fsync_parent(&path, trace.as_ref())?;
         if recovered.valid_end < recovered.file_len {
             // A torn tail. Nothing in it was ever acknowledged: an append is acknowledged only after
             // its whole frame is fsynced, and the scan stops at the first frame the file does not
@@ -213,8 +212,7 @@ impl Journal {
             // returned, then every folding consumer refusing to open).
             file.set_len(recovered.valid_end)?;
             file.sync_all()?;
-            fsync_parent(&path)?;
-            note(trace.as_ref(), "parent.sync");
+            fsync_parent(&path, trace.as_ref())?;
             tracing::warn!(
                 journal = %path.display(),
                 dropped_bytes = recovered.file_len - recovered.valid_end,
@@ -412,8 +410,11 @@ fn acquire_ownership(path: &Path) -> std::io::Result<OwnershipLock> {
 
 /// Fsync the directory holding `path`, so the file's entry — created, or truncated — survives a
 /// crash the way the file does.
-fn fsync_parent(path: &Path) -> std::io::Result<()> {
-    mycelium_core::persistence::sync_parent_dir(path)
+///
+/// A test's trace is told `parent.sync` from inside the sync, once it has returned — so the witness
+/// records the call itself, and removing a call fails it (#718's review, finding 1).
+fn fsync_parent(path: &Path, trace: Option<&std::sync::mpsc::Sender<&'static str>>) -> std::io::Result<()> {
+    mycelium_core::persistence::sync_parent_dir_observed(path, &mut |_| note(trace, "parent.sync"))
 }
 
 /// Walk the file frame by frame to its last complete record. A missing file is an empty journal.

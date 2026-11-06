@@ -2351,7 +2351,9 @@ run them.
 
 **What changed.** Opening the node-local journal (and so the evidence journal, the rights ledger, the revocation and
 epoch journals, the knowledge journals and the effects ledger), the tuple-space store's WAL or the blackboard's WAL now
-syncs each directory it creates and the directory holding the file, before the first record is acknowledged. A sync
+syncs the holder of every directory on its path — on every open, not only the directories it creates — and the
+directory holding the file, before the first record is acknowledged. An ancestor that existed before and that the
+process may not read (`PermissionDenied`) is passed over; every other failure refuses the open. A sync
 that fails is returned from the open; it used to be skipped because it was never attempted. `start()` does the same for
 the directories it creates under `persistence.base_path`.
 

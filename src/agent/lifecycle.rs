@@ -303,10 +303,10 @@ impl GossipAgent {
         // Replay WAL + snapshot before any boundary/quorum warm-up reads the store.
         if let Some(ref pcfg) = self.config.persistence {
             let dir = pcfg.base_path.join(self.node_id.to_string()).join("kv");
-            // Each directory created on the way to `kv/` has its entry synced in the one above it
-            // (external review 2026-10-31 F7, plan row R6); `wal.bin`'s own entry in `kv/` is synced
-            // by the start-time snapshot below, which renames into `kv/` and syncs it before the
-            // first append.
+            // Every directory on the way to `kv/` has its entry synced in the one above it, on every
+            // start (external review 2026-10-31 F7, plan row R6; #718's review); `wal.bin`'s own
+            // entry in `kv/` is synced by the start-time snapshot below, which renames into `kv/` and
+            // syncs it before the first append.
             let created = {
                 let dir = dir.clone();
                 tokio::task::spawn_blocking(move || mycelium_core::persistence::create_dir_all_synced(&dir))

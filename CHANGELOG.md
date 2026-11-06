@@ -21,7 +21,15 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   open. `wal.bin`'s own entry was already synced by the start-time snapshot. Witnessed by the order of the syncs
   (`a_fresh_journal_syncs_its_directory_before_the_first_append_is_acknowledged` and its siblings, each seen failing
   first); the power-loss property itself is not observable without a filesystem fault adapter. New:
-  `mycelium::create_dir_all_synced`, `mycelium::sync_parent_dir`. Upgrade note: `docs/guide/deprecations.md` §79.
+  `mycelium::create_dir_all_synced`, `mycelium::sync_parent_dir` (and `_observed` forms that report each sync). Every
+  open syncs the holder of every directory on the path, not only the ones it created, so an earlier open whose sync
+  failed or a concurrent opener cannot leave an ancestor unsynced (#718's review). On a platform without directory
+  fsync (Windows) a journal's torn-tail repair no longer fails opening its directory: the sync is a no-op there, as the
+  KV WAL's already was. **Not covered by this row:** the other durable writers have the same shape and are not changed
+  here — the TLS key and certificate writes (`write_with_mode`, no fsync), `quarantine_unreadable`'s renames,
+  `mycelium-wiki`'s `FsStore::cas_publish` and the `GitStore` writes, the reason blob store, the wasm host's artifact,
+  catalog and runtime staging, and `mycelium-effects`' SQLite store, whose `create_dir_all` error is discarded. Upgrade
+  note: `docs/guide/deprecations.md` §79.
 
 ## [2.39.0] — 2026-11-06
 
