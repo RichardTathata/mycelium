@@ -23,7 +23,7 @@ metrics = ["mycelium/metrics"]
 # access. This dependency line is itself the composability proof.
 mycelium = { path = "..", default-features = false }
 
-tokio       = { version = "1.35", features = ["full"] }
+tokio       = { version = "1.53.3", features = ["full"] }
 bytes       = "1"
 parking_lot = "0.12"
 tracing     = "0.1"

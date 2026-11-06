@@ -17,7 +17,7 @@ categories = ["network-programming", "asynchronous"]
 [features]
 default = []
 # mTLS transport, Ed25519 node identity, signed KV/consensus payloads, hot rotation.
-tls = ["dep:tokio-rustls", "dep:rustls", "dep:rcgen", "dep:rustls-pemfile", "dep:ed25519-dalek", "dep:rand_core", "dep:arc-swap", "dep:ring", "dep:zeroize", "dep:webpki"]
+tls = ["dep:tokio-rustls", "dep:rustls", "dep:rcgen", "dep:ed25519-dalek", "dep:rand_core", "dep:arc-swap", "dep:ring", "dep:zeroize", "dep:webpki"]
 # Prometheus gauge/counter emission from the store/connection paths (no-op without).
 metrics = ["dep:metrics"]
 # Signed-identity surface the compliance layer builds on (audit/RBAC live upstream).
@@ -41,7 +41,7 @@ test-frame-filter = []
 [dependencies]
 # Test harness only, and optional: see the `sim` feature.
 mycelium-sim = { path = "../mycelium-sim", optional = true }
-tokio = { version = "1.35", features = ["full"] }
+tokio = { version = "1.53.3", features = ["full"] }
 fastrand = "2"
 papaya = "0.1"
 serde = { version = "1.0", features = ["derive", "rc"] }
@@ -64,7 +64,6 @@ url = "2"
 tokio-rustls   = { version = "0.26", optional = true }
 rustls         = { version = "0.23", default-features = false, features = ["ring"], optional = true }
 rcgen          = { version = "0.13", optional = true }
-rustls-pemfile = { version = "2",    optional = true }
 ed25519-dalek  = { version = "2",    features = ["rand_core", "pkcs8"], optional = true }
 rand_core      = { version = "0.6",  features = ["getrandom"],         optional = true }
 arc-swap       = { version = "1",    optional = true }

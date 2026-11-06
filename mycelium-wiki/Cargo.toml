@@ -53,7 +53,7 @@ tracing     = "0.1"
 
 # Control-plane only (Phase 2). Companion-crate contract: only Mycelium's PUBLIC API.
 mycelium    = { path = "..", default-features = false, optional = true }
-tokio       = { version = "1.35", features = ["rt", "time", "macros", "sync"], optional = true }
+tokio       = { version = "1.53.3", features = ["rt", "time", "macros", "sync"], optional = true }
 parking_lot = { version = "0.12", optional = true }
 bytes       = { version = "1", optional = true }
 async-trait = { version = "0.1", optional = true }
@@ -71,7 +71,7 @@ ed25519-dalek = "2"
 # Phase-5 work-distribution gate: the tuple space supplies council leases; test-only composition
 # (the production coupling is nil — workers and curators meet only through the store + RPC).
 mycelium-tuple-space = { path = "../mycelium-tuple-space" }
-tokio    = { version = "1.35", features = ["full"] }
+tokio    = { version = "1.53.3", features = ["full"] }
 reqwest  = { version = "0.12", features = ["json"] }
 
 [[test]]
