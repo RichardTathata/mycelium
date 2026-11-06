@@ -1008,13 +1008,24 @@ mod imp {
             .map_err(|e| GossipError::InvalidField { field: "gateway_tls", reason: format!("gateway TLS: build server config: {e}") })
     }
 
+    /// What [`build_rustls_configs`] builds: the mesh's server and client configs, the gateway's
+    /// certificate, the fleet CA's chain check on a client certificate, and the fleet's check on a
+    /// server certificate (chain, removal, revocation).
+    pub(super) type RustlsConfigs = (
+        ServerConfig,
+        ClientConfig,
+        Arc<rustls::sign::CertifiedKey>,
+        Arc<dyn rustls::server::danger::ClientCertVerifier>,
+        Arc<dyn rustls::client::danger::ServerCertVerifier>,
+    );
+
     pub(super) fn build_rustls_configs(
         node_cert_der: CertificateDer<'static>,
         signing_key: &SigningKey,
         ca_cert_der: CertificateDer<'static>,
         removed: Arc<crate::removal::RemovedSet>,
         standing: Arc<crate::removal::KeyStanding>,
-    ) -> Result<(ServerConfig, ClientConfig, Arc<rustls::sign::CertifiedKey>, Arc<dyn rustls::server::danger::ClientCertVerifier>, Arc<dyn rustls::client::danger::ServerCertVerifier>), GossipError> {
+    ) -> Result<RustlsConfigs, GossipError> {
         use ed25519_dalek::pkcs8::EncodePrivateKey;
 
         ensure_crypto_provider();
