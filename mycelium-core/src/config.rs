@@ -1462,8 +1462,9 @@ pub struct GossipConfig {
     /// connection in its TLS handshake (under `gateway_tls`) or before its preface — on HTTP/2 the
     /// 24-byte preface and the next frame's header — holds its permit at most `handshake_timeout_ms`; an
     /// HTTP/1 connection between requests at most 30 s (hyper's header-read bound); an HTTP/2 connection
-    /// with no request until a keep-alive PING, sent after `handshake_timeout_ms` of quiet, goes
-    /// unanswered for `handshake_timeout_ms`. A connection that **keeps talking** holds its permit, as on
+    /// with no request until a keep-alive PING goes unanswered — the PING's interval and timeout are each
+    /// `handshake_timeout_ms`, at least 1 s, so a dead HTTP/2 peer holds its permit at most
+    /// max(2 × `handshake_timeout_ms`, 2 s) past its last activity. A connection that **keeps talking** holds its permit, as on
     /// the gossip listener, and so does a long-running stream: enough of them fill the cap, and then
     /// `/health` and `/ready` wait with every other request (no slot is reserved for them). Validated
     /// `1..=65535`. Default `1024`. Env: `GOSSIP_GATEWAY_MAX_CONNECTIONS`.

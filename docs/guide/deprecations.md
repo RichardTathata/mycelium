@@ -2361,7 +2361,8 @@ a task and a file descriptor for as long as the client kept it open, on the plai
   (`SystemStats::gateway_connections_timed_out`, `gateway_connections_timed_out_total`). After the preface, hyper's
   header-read bound (30 s) applies to every HTTP/1 request head — before, it was inert — and an HTTP/2 connection is
   sent a keep-alive PING after `handshake_timeout_ms` of quiet and closed if it does not answer within
-  `handshake_timeout_ms`. **Who notices:** a client that opens a connection and waits more than
+  `handshake_timeout_ms`, each at least 1 s whatever the field says — so a dead HTTP/2 peer holds its permit at most
+  max(2 × `handshake_timeout_ms`, 2 s) past its last activity. **Who notices:** a client that opens a connection and waits more than
   `handshake_timeout_ms` before its first request, or an HTTP/1 keep-alive connection idle for 30 s between requests, is
   closed by the server; a client library reconnects on its next request. **A pooling client whose idle timeout is
   longer than 30 s** (reqwest's default is 90 s; urllib3 and httpx keep connections until the server closes them) can
