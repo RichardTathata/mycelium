@@ -2273,8 +2273,10 @@ decision D2 on finding F2: a record that cannot be made durable is never a proce
 - **The agent's `consumed` marker** is on disk before the commit, or the invocation is refused
   `GrantNotPresented` naming it and the grant is left un-consumed; a retry after repair consumes once without asking
   again. A lost `consumed` did not fail safe: the un-consumed request was re-honoured and the tool admitted again, and
-  a provider that attaches no enforcement has no door marker to remember a use by.
-- **A revocation.** `POST /gateway/grants/revoke` writes the grant's second checkpoint and its `revoked` record on the
+  a provider that attaches no enforcement has no door marker to remember a use by. Because the marker lands before the
+  commit, a commit refused after it — the agent's state moved during the wait, or its budget ran out — leaves the
+  request consumed and the grant spent with nothing run; the agent asks again, which is the safe side.
+- **A revocation.** `POST /gateway/grants/{agent}/{request}/revoke` writes the grant's second checkpoint and its `revoked` record on the
   same path; a record the disk will not take answers **`503 not_durable`** (the node's state, not the request's — a
   retry is the answer) and the execution record says *failed*, where before the route answered `200` with
   `local_durability: failed` and a restart that kept only the WAL re-armed the grant for the rest of its window. The
@@ -2287,6 +2289,9 @@ decision D2 on finding F2: a record that cannot be made durable is never a proce
   gateway's `used/gateway` lands and the provider's `used/provider` write fails, the gateway's use is spent (a retry
   there answers `GrantUsed`, though nothing ran) while a direct call at the provider runs: a use is spent at the door
   that admitted it, and a refusal at a later door does not give it back. One execution at most, either way.
+- **The window, by one fsync.** The door marker's `append_sync` now sits between the grant's assessment and the work,
+  so the check-then-act window every door states (*narrowed and stated, not eliminated*) is longer by one `fdatasync`;
+  a revocation landing inside it stops the work once it is registered, as before.
 
 The request itself stays a buffered append (losing it to a crash means the agent asks again). A lost `…/issued`
 leaves the request standing un-answered — the agent re-waits on it, `GET /gateway/grants/pending` lists it, and the

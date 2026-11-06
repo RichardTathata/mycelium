@@ -196,10 +196,17 @@ pub(crate) async fn decide_grant(ctx: &Arc<TaskCtx>, caller: Option<&ResolvedPri
             // shape the revoke lost; an answer that is not on disk is not an answer the agent can be held to.
             let written = write_record_durable(ctx, format!("{key}/refused"), record.to_string().into_bytes()).await;
             ae_record_execution(ctx, &preflight, if written.is_ok() { super::action_evaluator::Execution::Completed } else { super::action_evaluator::Execution::Failed }).await;
-            #[cfg(feature = "metrics")]
-            metrics::counter!("mycelium_grants_refused_total").increment(1);
-            set_pending_gauge(ctx, now_ms);
-            written.map(|receipt| GrantOutcome { receipt }).map_err(|e| GrantRefusal::door(StatusCode::SERVICE_UNAVAILABLE, "not_durable", format!("the refusal was not recorded durably, so no answer stands — the request is still pending; retry once the WAL writer is repaired: {e}")))
+            // Counted only once it stands (#713's review, round 4): a refusal the disk did not take is no refusal, and
+            // the pending set it would have left is unchanged — the revoke arm's shape.
+            match written {
+                Ok(receipt) => {
+                    #[cfg(feature = "metrics")]
+                    metrics::counter!("mycelium_grants_refused_total").increment(1);
+                    set_pending_gauge(ctx, now_ms);
+                    Ok(GrantOutcome { receipt })
+                }
+                Err(e) => Err(GrantRefusal::door(StatusCode::SERVICE_UNAVAILABLE, "not_durable", format!("the refusal was not recorded durably, so no answer stands — the request is still pending; retry once the WAL writer is repaired: {e}"))),
+            }
         }
         GrantDecision::Issue { ttl_secs } => {
             let Some(tls) = ctx.tls.get() else {
@@ -261,10 +268,17 @@ pub(crate) async fn decide_grant(ctx: &Arc<TaskCtx>, caller: Option<&ResolvedPri
             let written = write_record_durable(ctx, format!("{key}/issued"), bytes).await;
             // The execution record says what the write did (#673's review, finding 8).
             ae_record_execution(ctx, &preflight, if written.is_ok() { super::action_evaluator::Execution::Completed } else { super::action_evaluator::Execution::Failed }).await;
-            #[cfg(feature = "metrics")]
-            metrics::counter!("mycelium_grants_issued_total").increment(1);
-            set_pending_gauge(ctx, now_ms);
-            written.map(|receipt| GrantOutcome { receipt }).map_err(|e| GrantRefusal::door(StatusCode::SERVICE_UNAVAILABLE, "not_durable", format!("the grant was not recorded durably, so no grant stands — the request is still pending; retry once the WAL writer is repaired: {e}")))
+            // Counted only once it stands (#713's review, round 4): no grant stands after a refused write, so none is
+            // counted issued and the pending set is unchanged — the revoke arm's shape.
+            match written {
+                Ok(receipt) => {
+                    #[cfg(feature = "metrics")]
+                    metrics::counter!("mycelium_grants_issued_total").increment(1);
+                    set_pending_gauge(ctx, now_ms);
+                    Ok(GrantOutcome { receipt })
+                }
+                Err(e) => Err(GrantRefusal::door(StatusCode::SERVICE_UNAVAILABLE, "not_durable", format!("the grant was not recorded durably, so no grant stands — the request is still pending; retry once the WAL writer is repaired: {e}"))),
+            }
         }
     }
 }
@@ -477,8 +491,8 @@ pub(crate) async fn revoke_grant(ctx: &Arc<TaskCtx>, caller: Option<&ResolvedPri
 
 /// [`write_record`]'s durable form: the receipt path's required-sync write — on the WAL and fsynced before it is
 /// applied or gossiped — or `Err` naming why the record is not on disk. A node with no `[persistence]` writes in
-/// memory and answers `Ok` with `local_durability: buffered`, as [`write_record`] does; that node has never claimed
-/// a disk.
+/// memory and answers `Ok` with `local_durability: not_configured` — the rung `kv_set_with_receipt` reports with no
+/// WAL — as [`write_record`] does; that node has never claimed a disk.
 async fn write_record_durable(tc: &Arc<TaskCtx>, key: String, value: Vec<u8>) -> Result<serde_json::Value, String> {
     if tc.wal.get().is_none() {
         return write_record(tc, key, value).await;

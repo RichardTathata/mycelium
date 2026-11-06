@@ -24,7 +24,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   R3; D2). A door's `used/{door}` marker, the agent's `consumed` marker and a revocation's checkpoint and `revoked`
   records are on disk, fsynced, before the step they admit; a record the disk will not take refuses that step by name
   (*grant use not recorded durably* at the door, `GrantNotPresented` at the agent, `503 not_durable` at
-  `/gateway/grants/revoke` and at issue), where before the append was dropped and counted and the step went ahead, so
+  `/gateway/grants/{agent}/{request}/revoke` and at issue), where before the append was dropped and counted and the step went ahead, so
   a crash could admit the same grant twice, re-honour an un-consumed request, or re-arm a revoked grant. A use that
   could not be recorded is not spent: the retry after repair runs once. Under `async`/`os` each is a per-call
   `fdatasync`. The restart gate that showed a grant held across a restart went through `shutdown()`, whose exit
