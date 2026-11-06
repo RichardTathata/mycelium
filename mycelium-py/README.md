@@ -237,6 +237,13 @@ and `tasks/cancel`: the task as the node holds it, readable and cancellable by t
 cancel ends the task's record and stops no work — a task runs inside its request — and a terminal task raises
 `A2aError` (adopter-surface X7, the adapter contract).
 
+### A refused signal stream is an error you can catch (0.2.14)
+
+`on_signal` checks the response before it reads events, as `rpc_serve` has since 0.2.12: a stream the gateway refuses
+raises `httpx.HTTPStatusError` — a companion's kind (`blackboard.*`, `tuple.*`, `wiki.*`) needs the family's `:read`
+on the signal streams from the release after v2.38.3 — and a protected kind raises `ProtectedKindError`. Earlier
+versions surfaced any `403` there as httpx-sse's content-type `SSEError`.
+
 ### The causal fields (0.2.13)
 
 Every verb that starts governed work takes `correlation=` (the run's id, one key segment) and `parent=` (the content

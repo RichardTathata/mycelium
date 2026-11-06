@@ -103,7 +103,7 @@ gated at the serve door, so a client without the family's `:write` cannot be sen
 its round 2)*. **Round 2:** `snapshot` (every fact on the board) and `wal_replay` (the space's items) are reads in
 `companion_kind_scope` and both companions' scans — a `board:write` token with no `board:read` had read the whole
 board through `rpc/call`, which the reviewer ran; the scans skip doc-comment lines; `/gateway/mailbox/{kind}` is in
-`PATH_KIND_ROUTES` under the family's `:read`; `mycelium-py`'s `on_signal` raises a refused stream as the HTTP error
+`PATH_KIND_ROUTES` under the family's `:read`; `mycelium-py` 0.2.14's `on_signal` raises a refused stream as the HTTP error
 (`test_on_signal_raises_a_refused_stream_as_an_http_error_not_an_sse_error`). Each seen failing first: the mapping
 test and the raw-route test at `snapshot`/`wal_replay`, the streams test at the mailbox door, the pytest at the
 `SSEError`. **The path doors:** `PATH_KIND_ROUTES` in

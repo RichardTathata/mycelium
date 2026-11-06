@@ -38,7 +38,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   family's `:write` as well as `mesh:serve` — a `mesh:serve` token served `blackboard.other.post` on a node hosting
   no board. *Not built:* a scope check inside the companions' handlers — the route is the door, and a member's
   direct `rpc_call` is not a client; and `cap:write` still advertises any capability, a companion's primary role
-  included. `mycelium-py` 0.2.13's `on_signal` raises a refused stream as the HTTP error rather than an `SSEError`.
+  included. `mycelium-py` 0.2.14's `on_signal` raises a refused stream as the HTTP error rather than an `SSEError`.
 
 - **`mycelium doctor` names each guarantee's row of the shared-responsibility matrix** (adopter-surface Y10, decided by
   the maintainer on #707's review).

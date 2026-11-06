@@ -881,7 +881,7 @@ class MyceliumAgent:
             async with aconnect_sse(client, "GET", url) as event_source:
                 resp = event_source.response
                 if resp.status_code >= 400:
-                    # A refused stream — a companion's kind without the family's `:read` (0.2.13), or a protected
+                    # A refused stream — a companion's kind without the family's `:read` (0.2.14), or a protected
                     # kind — is raised as the HTTP error, or ProtectedKindError, rather than as httpx-sse's
                     # content-type SSEError (#714's review, round 2), as `rpc_serve` does.
                     await resp.aread()

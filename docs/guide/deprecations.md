@@ -2277,7 +2277,7 @@ still required; an open gateway, which gates no scope on the companion's routes 
 without `compliance` gates no scope anywhere. **Migration:** a scoped token that reached a companion through the
 raw routes under `mesh:write` (or `consensus:write` on `overlay/emit_reliable`) alone now needs the companion's
 scope too — add `board:write`, `tuple:write` or `wiki:write` (or the `:read` form) to it. A token used only on the
-companion's own routes is unaffected. `mycelium-py` 0.2.13's `on_signal` raises a refused stream as the HTTP error
+companion's own routes is unaffected. `mycelium-py` 0.2.14's `on_signal` (unreleased; 0.2.13 shipped with v2.38.0) raises a refused stream as the HTTP error
 (`httpx.HTTPStatusError`, or `ProtectedKindError` for a protected kind) where every earlier version surfaced any
 `403` there as httpx-sse's content-type `SSEError`; `mycelium-ts` needs nothing.
 
