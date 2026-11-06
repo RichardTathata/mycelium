@@ -2214,6 +2214,11 @@ descriptors its share needs.
   not seen in the 39 CI runs before it. The test's spawned task sleeps 100 ms before writing B's opaque pheromone and
   emitting `BOUNDARY_OPAQUE`; if `group_propose` has not reached its opacity subscription by then, it waits its 2 s
   phase 1 at quorum 2 — the shape of a fixed sleep standing in for a readiness poll (CLAUDE.md's consensus-test rule).
+- `provisioner::tests::a_long_guest_call_does_not_block_another_task_on_a_current_thread_runtime` (`mycelium-wasm-host`)
+  — *"the call was too short to show anything: 298.426749ms"*, on #716's CI (run 42131289429, the WASM-host job,
+  2026-11-05), a docs-only branch; failed on its retry too, and passed on `main`'s next run. The test's 300 ms floor is
+  a guess at how long the spin guest takes to burn a 3 × 10⁹ fuel budget, and a fast runner came in 1.6 ms under it — a
+  floor on the guest's speed, not on the heartbeat gap the test is about.
 
 **Open next:**
 - each delivered row's *not built* list, in its §3.5 block and below — for K2: signed tally entries (a forgery under a

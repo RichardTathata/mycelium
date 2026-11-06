@@ -9,6 +9,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.39.0] — 2026-11-06
+
+Wire **v12** unchanged (`PREV = 11`). Upgrade notes: `docs/guide/deprecations.md` §66–§77. Companions on their own
+tags: `mycelium-py` 0.2.14 (`on_signal` raises a refused stream as the HTTP error) and `mycelium-ts` 0.2.8 (the Eve
+loader, `loadEveAgent` / `serveEveTools` / `declareEveAgent`, and the schedule verbs `scheduleRuns` / `scheduleAck` /
+`runSchedule`); `mycelium-reason` 0.11.0, `mycelium-guardrails` 1.1.0, `langgraph-checkpoint-mycelium` 0.3.4 and
+`strands-session-mycelium` 0.1.0 stay on their tags: no package code changed since (`strands-session-mycelium` gained a README section and a bearer test in #676, `mycelium-guardrails` an example).
+
 ### Changed
 
 - **A successful empty JWKS withdraws the IdP's signing keys, and keys the IdP has not confirmed for 24 h are
@@ -145,7 +153,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   The kit is everything a pilot needs on its first day, so that the counterparty is the only piece missing.
   - **The walk.** The README has six steps:
     - step 0 is the `one-hour` job's path;
-    - then the two-domain scaffold, pointed at a checkout until the next MINOR;
+    - then the two-domain scaffold, pointed at a checkout (from this release, at the tag it pins);
     - a call across the edge each way;
     - `doctor` on all four nodes;
     - `mycelium test --faults` over the kit's own declaration (`units/`, `faults.toml`);

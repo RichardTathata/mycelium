@@ -134,7 +134,7 @@ the *wire version* claim honest (state whether it changed — a wrong wire-compa
 upgraders). **Also:** `docs/operations/what-is-proven.md` (re-date the header and each table's *State on* column; replace every
 `Unreleased` on the page with the version being cut; move any line whose
 gate now runs in CI from the third table to the first, and add a row for anything new that is
-claimed but not gated) · the GitHub description (`gh repo edit --description "$(sed -n '/<!-- sentence -->/{n;p;}' docs/positioning.md | sed 's/^\*\*//; s/\*\*$//')"`)
+claimed but not gated) · the GitHub description — the hero sentence and the one description's first sentence, set at v2.37.0 and re-set only when `docs/positioning.md` changes (the full sentence from `sed -n '/<!-- sentence -->/{n;p;}' docs/positioning.md` is 324 characters, under GitHub's 350, but the hero is what the page leads with)
 and the two `Cargo.toml` `description` fields, which `scripts/check-positioning.sh` cannot gate
 because they live outside the doors it reads. **The published artefacts** need no anchor: the Release workflow (§ 7)
 names them by the tag, and `docs/guide/installation.md`'s download block reads `MYCELIUM_RELEASE_TAG`, already in this
