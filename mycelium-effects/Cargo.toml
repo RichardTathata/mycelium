@@ -41,11 +41,11 @@ bytes = { version = "1", optional = true }
 # engine and no system library is a hidden dependency. Quarantined to this crate: core carries no
 # database, and `-p` builds of the substrate never pay for it.
 rusqlite = { version = "0.32", features = ["bundled"] }
-tokio    = { version = "1.35", features = ["rt", "time"] }
+tokio    = { version = "1.53.3", features = ["rt", "time"] }
 tracing  = "0.1"
 
 [dev-dependencies]
-tokio = { version = "1.35", features = ["full"] }
+tokio = { version = "1.53.3", features = ["full"] }
 # test-only: the bind-verified, process-unique port allocator for a live agent in the recovery test.
 mycelium = { path = "..", default-features = false, features = ["test-util"] }
 bytes = "1"

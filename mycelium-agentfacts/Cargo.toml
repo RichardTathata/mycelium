@@ -27,5 +27,5 @@ axum          = "0.8"
 # test-only: the bind-verified, process-unique port allocator (retires the free_port TOCTOU
 # flake class). Cargo unions this with the normal `mycelium` dep (tls,gateway) for the test target.
 mycelium = { path = "..", default-features = false, features = ["test-util"] }
-tokio   = { version = "1.35", features = ["full"] }
+tokio   = { version = "1.53.3", features = ["full"] }
 reqwest = { version = "0.12", features = ["json"] }

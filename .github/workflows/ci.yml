@@ -205,6 +205,8 @@ jobs:
       # the 2026-07-11 restructure left this only in a comment (2026-07-21
       # wiki-lint finding; `make check` had it all along).
       - run: cargo clippy -p mycelium-core --lib --tests -- -D warnings
+      # The core's TLS module and its tests: no other line linted them (R9's review found three errors here).
+      - run: cargo clippy -p mycelium-core --lib --tests --features tls -- -D warnings
       - run: cargo clippy -p mycelium-sim --all-targets -- -D warnings
       # The seams' OTHER arm. `mycelium-sim` is the harness; the code that ROUTES through it lives
       # in `mycelium-core` behind `--features sim`, and until now nothing linted that arm — the Test
@@ -1077,9 +1079,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: taiki-e/install-action@cargo-audit
       # Fails on a vulnerability and, since R9 of the external review (2026-11-06), on any warning — unmaintained,
-      # unsound, yanked — that `.cargo/audit.toml` does not name with a date and a reason (`--deny warnings`). The file is
-      # read from the directory the job runs in (the root), so it governs every lockfile below. A newly published
-      # advisory therefore turns this job red without a code change; accept it in that file, in the open, or fix it.
+      # unsound, yanked (`--deny warnings`) — unless the lockfile's line below names it with a date and a reason. The
+      # root and fuzz lockfiles accept nothing. A newly published advisory therefore turns this job red without a code
+      # change; accept it here, per lockfile and in the open, or fix it.
       # Every tracked lockfile, by discovery — not the root one only. Until 2026-10-16 this ran
       # `cargo audit` on `Cargo.lock` alone, and `examples/conway-gpu/Cargo.lock` sat on five
       # advisories (rustls, h2) that no job could see (#625's review, finding 3).
@@ -1090,7 +1092,13 @@ jobs:
           while IFS= read -r -d '' lock; do
             echo "::group::cargo audit -f $lock"
             audited=$((audited + 1)); [ "$lock" = "Cargo.lock" ] && root=1
-            cargo audit --deny warnings -f "$lock" || { status=1; echo "::error file=$lock::cargo audit failed for $lock (an advisory, or the audit could not run)"; }
+            ignore=()
+            case "$lock" in
+              # 2026-11-06 — `paste` 1.0.15, unmaintained (no defect advisory). Only in the excluded GPU demo crate, through
+              # `metal` (wgpu's Metal backend): a build-time procedural macro, in no shipped build. Remove when wgpu drops it.
+              examples/conway-gpu/Cargo.lock) ignore=(--ignore RUSTSEC-2024-0436) ;;
+            esac
+            cargo audit --deny warnings "${ignore[@]}" -f "$lock" || { status=1; echo "::error file=$lock::cargo audit failed for $lock (an advisory, or the audit could not run)"; }
             echo "::endgroup::"
           done < <(git ls-files -z '*Cargo.lock')
           if [ "$root" -ne 1 ]; then echo "::error::the root Cargo.lock was not audited ($audited lockfile(s) found)"; exit 1; fi

@@ -14,7 +14,7 @@ description  = "Tests that run against `mycelium` built without the `gateway` fe
 
 [dev-dependencies]
 mycelium = { path = "..", default-features = false }
-tokio    = { version = "1.35", features = ["full"] }
+tokio    = { version = "1.53.3", features = ["full"] }
 
 [lints.clippy]
 # The workspace's own pattern for building a `GossipConfig` (the root crate allows it too): start from

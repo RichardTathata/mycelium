@@ -175,6 +175,7 @@ check:
 	cargo clippy --lib --no-default-features -- -D warnings
 	cargo clippy --lib --no-default-features --features metrics -- -D warnings  # metrics without gateway: a half-live `emergent` (row J)
 	cargo clippy -p mycelium-core --lib --tests -- -D warnings
+	cargo clippy -p mycelium-core --lib --tests --features tls -- -D warnings  # the core's TLS module and its tests (R9's review: no line linted them)
 	cargo clippy -p mycelium-sim --all-targets -- -D warnings   # the replay harness (item 6)
 	cargo clippy -p mycelium-core --lib --tests --features sim -- -D warnings  # the seams' OTHER arm
 	cargo build --examples --features tls,metrics,a2a,llm       # CI builds these; `--lib --tests` does not

@@ -1210,8 +1210,11 @@ mod imp {
     }
 
     /// Every `CERTIFICATE` section of a PEM document, in order; any other section (a key, a CRL) and any text between
-    /// sections is skipped. A malformed section is an error. (R9 of the external review: one place that parses PEM, so the
-    /// parser can be replaced without a second reading of the same bytes disagreeing with the first.)
+    /// sections is skipped. A malformed section is an error. With [`pem_private_key`] this is where the node's TLS module
+    /// reads the gateway's certificate and key and the CA and node certificates (`pem_cert_to_der`), so the parser behind
+    /// them is chosen once (R9 of the external review). It is not the only PEM reader in the tree:
+    /// `load_key_from_pkcs8_pem` reads a node's own key more strictly (PKCS#8 only), and `rcgen` and `reqwest` parse PEM
+    /// themselves — unifying them is *not built*.
     pub(crate) fn pem_certs(pem: &[u8]) -> Result<Vec<CertificateDer<'static>>, String> {
         use rustls::pki_types::pem::PemObject;
         CertificateDer::pem_slice_iter(pem).collect::<Result<_, _>>().map_err(|e| e.to_string())
@@ -1391,8 +1394,6 @@ mod key_extract_tests {
     }
 }
 
-/// The shared-CA race (federation suite: "b1 sees its one peer"): nodes that share `auto_cert_dir`
-/// and start together must all end up with **one** CA.
 #[cfg(test)]
 #[cfg(feature = "tls")]
 mod pem_parse_tests {
@@ -1458,6 +1459,43 @@ mod pem_parse_tests {
         }
     }
 
+    /// A key section that does not decode is an error naming the parse — not "no private key", which would send an
+    /// operator looking for a missing file instead of a corrupt one. Seen failing with `pem_private_key` mapping every
+    /// error to `Ok(None)` (the review's plant on #721).
+    #[test]
+    fn a_malformed_key_section_is_an_error_naming_the_parse() {
+        let doc = "-----BEGIN PRIVATE KEY-----\n!!!not base64!!!\n-----END PRIVATE KEY-----\n";
+        let err = pem_private_key(doc.as_bytes()).expect_err("a malformed key section is an error");
+        assert!(!err.is_empty());
+        let cert = section("CERTIFICATE", b"c");
+        let refused = super::imp::gateway_server_config_from_pem(&cert, doc).expect_err("refused");
+        assert!(refused.to_string().contains("parse key PEM"), "{refused}");
+    }
+
+    /// A PEM file written on Windows (CRLF line endings) reads as the same certificate and key.
+    #[test]
+    fn crlf_line_endings_parse_as_the_same_certificate_and_key() {
+        let lf = format!("{}{}", section("CERTIFICATE", b"a certificate body"), section("PRIVATE KEY", b"a key body"));
+        let crlf = lf.replace('\n', "\r\n");
+        let certs = pem_certs(crlf.as_bytes()).unwrap();
+        assert_eq!(certs.len(), 1);
+        assert_eq!(certs[0].as_ref(), b"a certificate body");
+        match pem_private_key(crlf.as_bytes()).unwrap() {
+            Some(PrivateKeyDer::Pkcs8(k)) => assert_eq!(k.secret_pkcs8_der(), b"a key body"),
+            other => panic!("CRLF key: {other:?}"),
+        }
+    }
+
+    /// An encrypted PKCS#8 key is not a key the node can use; it reads as "no private key", and the gateway says so.
+    #[test]
+    fn an_encrypted_private_key_reads_as_no_private_key() {
+        let doc = section("ENCRYPTED PRIVATE KEY", b"ciphertext");
+        assert!(pem_private_key(doc.as_bytes()).unwrap().is_none());
+        let cert = section("CERTIFICATE", b"c");
+        let refused = super::imp::gateway_server_config_from_pem(&cert, &doc).expect_err("refused");
+        assert!(refused.to_string().contains("contained no private key"), "{refused}");
+    }
+
     #[test]
     fn a_document_with_no_private_key_yields_none() {
         assert!(pem_private_key(b"").unwrap().is_none());
@@ -1465,6 +1503,8 @@ mod pem_parse_tests {
     }
 }
 
+/// The shared-CA race (federation suite: "b1 sees its one peer"): nodes that share `auto_cert_dir`
+/// and start together must all end up with **one** CA.
 #[cfg(test)]
 #[cfg(feature = "tls")]
 mod ca_race_tests {
@@ -1728,7 +1768,7 @@ mod ca_race_tests {
         for (door, msg) in [
             ("tls ca", super::imp::mint_ca(&dir).expect_err("a lost certificate").to_string()),
             ("tls issue", super::imp::issue_node_cert(&dir, &NodeId::new("127.0.0.1", 9409).unwrap(), &out).expect_err("no certificate").to_string()),
-            ("a node start", load_or_create_ca(&TlsConfig { auto_cert_dir: dir.clone(), ..TlsConfig::default() }).err().expect("refused").to_string()),
+            ("a node start", load_or_create_ca(&TlsConfig { auto_cert_dir: dir.clone(), ..TlsConfig::default() }).expect_err("refused").to_string()),
         ] {
             assert!(msg.contains("missing") && msg.contains("copy"), "{door}: {msg}");
             assert!(!msg.contains("interrupted") && !msg.contains("remove"), "{door} must not advise deleting the key: {msg}");
@@ -1753,7 +1793,7 @@ mod ca_race_tests {
         std::fs::rename(&staged.key, dir.join("ca-key.pem")).unwrap(); // … and the process dies here
         let said = super::imp::mint_ca(&dir).expect_err("a half-published CA").to_string();
         assert!(said.contains("interrupted") && said.contains(".cert.tmp-"), "{said}");
-        let at_start = load_or_create_ca(&TlsConfig { auto_cert_dir: dir.clone(), ..TlsConfig::default() }).err().expect("refused").to_string();
+        let at_start = load_or_create_ca(&TlsConfig { auto_cert_dir: dir.clone(), ..TlsConfig::default() }).expect_err("refused").to_string();
         assert!(at_start.contains("interrupted"), "{at_start}");
         let _ = std::fs::remove_dir_all(&dir);
     }

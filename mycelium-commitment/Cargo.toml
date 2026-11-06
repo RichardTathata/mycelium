@@ -21,11 +21,11 @@ serde         = { version = "1.0", features = ["derive"] }
 serde_json    = "1.0"
 # The close record names each offer by the SHA-256 of its encoding (post-360 row H, #609's review).
 sha2          = "0.10"
-tokio         = { version = "1.35", features = ["rt"] }
+tokio         = { version = "1.53.3", features = ["rt"] }
 
 [dev-dependencies]
 # `sim`: the tests record a linearizable award under the replay kernel (CN2); `test-util`: the
 # bind-verified port allocator.
 mycelium = { path = "..", default-features = false, features = ["test-util", "sim"] }
 mycelium-sim = { path = "../mycelium-sim" }
-tokio = { version = "1.35", features = ["full"] }
+tokio = { version = "1.53.3", features = ["full"] }

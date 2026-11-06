@@ -2346,3 +2346,23 @@ unchanged — its writes are in memory and it has never claimed a disk ([feature
 **Operator note:** a node whose WAL writer is poisoned (`/health`: `wal_refusing_appends`) now refuses every
 grant-admitted call, every grant-required invocation and every revoke until a snapshot repairs it, where it used to
 run them.
+
+## 82. Every crate requires Tokio 1.53.3 or later; `rustls-pemfile` is no longer a dependency (unreleased, external review 2026-10-31, R9)
+
+**Tokio.** Every crate in this repository — `mycelium`, `mycelium-core`, each companion, the examples and both
+templates — now declares `tokio = "1.53.3"` where it declared `"1.35"`. Tokio 1.52.x carries RUSTSEC-2026-0386
+(`AsyncFd::new` and its siblings violate I/O safety; unsound, not a vulnerability, and nothing in this tree calls
+`AsyncFd`), and 1.52 has no patched release, so the floor is the first patched 1.53. Our own lockfiles were already
+moved; the requirement makes sure an adopter's cannot resolve below it.
+
+- **Who is affected:** an application whose `Cargo.lock` holds Tokio below 1.53.3, or which pins Tokio with `=1.52.x`
+  or `<1.53`. Cargo refuses to resolve until it moves.
+- **What to do:** `cargo update -p tokio` (to 1.53.3 or later), or relax the pin. Tokio 1.53 needs Rust 1.71; this
+  workspace's `rust-version` stays 1.89, so no toolchain change follows.
+
+**`rustls-pemfile`.** The `tls` feature no longer brings `rustls-pemfile` (RUSTSEC-2025-0134, unmaintained); the node
+reads its gateway certificate and key, and its CA and node certificates, through `rustls-pki-types`' PEM parser, which
+`rustls` already depends on. The accepted inputs are the same (pinned by `tls::pem_parse_tests`): certificates in order
+with other sections skipped, PKCS#8, PKCS#1 and SEC1 keys by label, CRLF line endings, an encrypted key read as no key,
+a malformed section an error. An application that used `rustls-pemfile` through this crate's feature, rather than
+depending on it itself, now has to name it — or move to `rustls::pki_types::pem::PemObject`.
