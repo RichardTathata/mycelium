@@ -200,8 +200,8 @@ impl Drop for InboundApply<'_> {
 
 impl WalHandle {
     /// Open the apply-to-append window for one inbound record. Take it **before** the record is
-    /// applied to the store and hold it until the append call returns; then call
-    /// [`InboundApply::appended`].
+    /// applied to the store and hold it until the record is on the WAL's channel —
+    /// [`append_inbound`](Self::append_inbound) closes it then ([`InboundApply::appended`]).
     ///
     /// The increment is sequenced before the store write, and the store publishes that write with
     /// release semantics, so a reader that finds the record in the store (an acquire read) and then
@@ -1537,7 +1537,8 @@ mod durability_tests {
     /// rested on the implication *the store holds it, therefore its record was appended*, which the
     /// drop breaks: a peer held the value with no record and answered `Persisted` for something
     /// The apply-to-append window (external review 2026-10-31, F3; row R8). An inbound record is
-    /// counted from before its apply until its append call returns, and every way out of that window
+    /// counted from before its apply until it is enqueued on the WAL's channel (`append_inbound` closes
+    /// it), and every way out of that window
     /// closes it: the normal one, and a drop without `appended` — a cancelled connection task or a
     /// panic — which also counts a dropped append, because the store then holds a value the WAL may
     /// never receive.
