@@ -37,6 +37,9 @@ cfg.gateway_tls = Some(GatewayTlsConfig::default());
 cfg.gateway_tls = Some(GatewayTlsConfig {
     cert_pem_path: Some("/etc/mycelium/gateway-cert.pem".into()),
     key_pem_path:  Some("/etc/mycelium/gateway-key.pem".into()),
+    // Required with an operator cert (R7): the CA that signs the fleet's gateway certificates,
+    // which a bulk fetch from a peer's gateway is verified against.
+    bulk_ca_pem_path: Some("/etc/mycelium/gateway-ca.pem".into()),
 });
 ```
 
@@ -56,6 +59,26 @@ the node reports ready. A port already in use, or an unreadable `cert_pem_path` 
 `start()` with `InvalidField { field: "gateway", .. }` naming the address and the cause, rather than
 leaving a dead listener behind a node that answers `/ready`. Free the port or fix the paths and start
 again.
+
+**Bulk transfers are covered (since R7 of the external review of 2026-10-31).** A `bulk_call` stages its payload
+on the caller's gateway and the responder fetches it from there. A caller whose gateway serves TLS says so on its
+ticket, and the responder fetches over `https`, verifying the caller's gateway certificate **by the caller's IP
+address** against:
+
+- the fleet CA from `[tls]`, with the mesh's removal and revocation checks, on the node-cert path (both fields
+  `None`); or
+- `bulk_ca_pem_path`, the CA that signs the fleet's operator certificates. Each such certificate must then carry
+  its node's **IP SAN** as well as any hostname — the fetch is addressed to the IP the caller's frames came from.
+
+A gateway on an operator certificate with no `bulk_ca_pem_path` **refuses to start** by name
+(`InvalidField { field: "gateway_tls.bulk_ca_pem_path" }`), as does a `bulk_ca_pem_path` that cannot be read or holds
+no certificate. A fetch whose certificate does not verify fetches nothing and the call times out: a bulk fetch is
+never retried in plaintext. A caller with a plaintext gateway still sends a plaintext ticket, fetched over plaintext —
+before R7 every bulk call to or from a TLS gateway timed out. `max_bulk_payload_bytes` (default 64 MiB) bounds the
+payload on both sides: a caller refuses to stage more, and a responder refuses a declared `Content-Length` over it and
+abandons a body as soon as it passes it. **Not built:** an integrity check on the payload beyond TLS (no per-payload
+signature); the fetch target is still the address the caller's frames came from. A responder older than R7 drops an
+`https` ticket, so the call times out until the responder is upgraded.
 
 **Behaviour.** The listener terminates rustls (ring provider) per connection and serves the axum app
 over the TLS stream. On shutdown it stops accepting; in-flight connections drain. A handshake from a

@@ -1422,10 +1422,13 @@ impl GossipAgent {
             acceptor_records: std::sync::Mutex::new(()),
             core: Arc::clone(&core_ctx),
             schedules_running: Arc::new(papaya::HashMap::new()),
-            bulk_transport:  Arc::new(bulk::BulkTransport::new(
+            bulk_transport:  Arc::new(bulk::BulkTransport::with_limits(
                 config.http_port.unwrap_or(0),
                 std::time::Duration::from_secs(config.bulk_fetch_timeout_secs),
                 config.max_concurrent_bulk_handlers,
+                // The caller's scheme, carried on its tickets (R7): its gateway serves TLS.
+                config.gateway_tls.is_some(),
+                config.max_bulk_payload_bytes,
             )),
             rpc_pending: Arc::clone(&rpc_pending),
             rpc_reply_sender_mismatches,

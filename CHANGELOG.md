@@ -9,6 +9,20 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **A bulk call works under native gateway TLS, and a bulk payload is bounded** (external review 2026-10-31 F6, plan
+  row R7; `docs/guide/deprecations.md` §80). A caller whose gateway serves TLS now marks its `invoke.bulk` ticket
+  `https`, and the responder fetches the staged payload over TLS, verifying the caller's gateway certificate by its IP
+  address against the fleet CA (with the mesh's removal and revocation checks) or the new
+  `gateway_tls.bulk_ca_pem_path`; before, it fetched over `http://` and every such call timed out. A certificate that
+  does not verify fetches nothing, and a fetch is never retried in plaintext. A gateway on an operator certificate with
+  no `bulk_ca_pem_path` refuses `start()` by name. A plaintext caller's ticket is byte-for-byte the old layout. The new
+  `max_bulk_payload_bytes` (default 64 MiB) bounds both sides: `bulk_call` refuses a larger payload
+  (`BulkError::PayloadTooLarge`), and a responder refuses a declared `Content-Length` over it and stops reading a body
+  as soon as it passes it, where it used to collect the whole response. Also: the fetch URL brackets an IPv6 sender.
+  **Not built:** an integrity check on the payload beyond TLS, and the fetch target is still the caller's address.
+
 ## [2.39.0] — 2026-11-06
 
 Wire **v12** unchanged (`PREV = 11`). Upgrade notes: `docs/guide/deprecations.md` §66–§77. Companions on their own

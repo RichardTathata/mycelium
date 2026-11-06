@@ -2346,3 +2346,35 @@ unchanged — its writes are in memory and it has never claimed a disk ([feature
 **Operator note:** a node whose WAL writer is poisoned (`/health`: `wal_refusing_appends`) now refuses every
 grant-admitted call, every grant-required invocation and every revoke until a snapshot repairs it, where it used to
 run them.
+
+## 80. A bulk call works under `gateway_tls`; an operator certificate needs `bulk_ca_pem_path`; `max_bulk_payload_bytes` bounds a payload (unreleased, external review 2026-10-31, R7)
+
+**What changed.** A `bulk_call` between nodes whose gateways serve TLS used to time out: the responder fetched the
+staged payload over `http://` from a listener that speaks only TLS (F6). Now a caller whose gateway serves TLS marks its
+ticket `https`, and the responder fetches over TLS, verifying the caller's gateway certificate by its IP address
+against the fleet CA (the node-cert path) or `gateway_tls.bulk_ca_pem_path`. A fetch whose certificate does not verify
+fetches nothing; it is never retried in plaintext. A caller with a plaintext gateway sends the same ticket bytes it
+sent before. A new `GossipConfig::max_bulk_payload_bytes` (default 64 MiB, env `GOSSIP_MAX_BULK_PAYLOAD_BYTES`) bounds
+the payload: `bulk_call` refuses a larger one with the new `BulkError::PayloadTooLarge`, and a responder refuses a
+declared `Content-Length` over it and abandons a body as soon as it passes it, where it used to collect the whole
+response.
+
+**Who is affected.**
+- A gateway on an **operator certificate** (`gateway_tls.cert_pem_path` set): `start()` now refuses with
+  `InvalidField { field: "gateway_tls.bulk_ca_pem_path" }` until `bulk_ca_pem_path` names the CA that signs the
+  fleet's gateway certificates — even on a node that makes no bulk call, because it cannot know whether a peer will.
+  Each of those certificates must carry its node's IP SAN, since the fetch is addressed by IP.
+- A rolling upgrade under `gateway_tls`: a responder older than this release drops an `https` ticket (its kind reads as
+  invalid UTF-8), so a bulk call from an upgraded caller to an older responder times out — as every such call did
+  before. Upgrade the responders, or the whole fleet; a plaintext fleet is unaffected.
+- A bulk payload over 64 MiB: raise `max_bulk_payload_bytes` on **both** the caller and the responder. A responder
+  holds up to this much per in-flight fetch, `max_concurrent_bulk_handlers` (64) of them at most.
+- Code that matches `BulkError` exhaustively: it is `#[non_exhaustive]`, so a `_` arm already covers
+  `PayloadTooLarge`. Code that builds a `GatewayTlsConfig` with an exhaustive struct literal: add
+  `bulk_ca_pem_path` or `..Default::default()`. `GossipConfig` gained `max_bulk_payload_bytes` (the
+  `Default`-and-assign pattern is unaffected).
+
+**Not built.** An integrity check on the payload beyond TLS (no per-payload signature), and the fetch target is still
+the address the caller's frames came from. An application serving `/bulk/{id}` from its own server
+(`ServiceHandle::set_bulk_serving_port`) advertises the scheme `gateway_tls` implies unless it calls the new
+`ServiceHandle::set_bulk_serving_https`.

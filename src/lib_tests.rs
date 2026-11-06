@@ -8229,12 +8229,26 @@ async fn a_gateway_that_cannot_come_up_fails_the_start() {
     cfg.gateway_tls = Some(crate::GatewayTlsConfig {
         cert_pem_path: Some("/nonexistent/gateway.cert.pem".into()),
         key_pem_path: Some("/nonexistent/gateway.key.pem".into()),
+        // R7: an operator certificate needs bulk roots, or start() refuses before reading the cert.
+        bulk_ca_pem_path: Some(bulk_ca_for_test()),
     });
     let b = GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg);
     let e = b.start().await.expect_err("an unreadable gateway certificate must fail the start");
     assert!(e.to_string().contains("gateway"), "{e}");
     assert!(!b.is_ready(), "a node whose gateway did not come up is not ready");
     b.shutdown().await;
+}
+
+/// A CA certificate in a temporary PEM file, for a `gateway_tls.bulk_ca_pem_path` (R7).
+#[cfg(all(feature = "gateway", feature = "tls"))]
+fn bulk_ca_for_test() -> std::path::PathBuf {
+    let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519).unwrap();
+    let mut p = rcgen::CertificateParams::new(vec![]).unwrap();
+    p.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+    let ca = p.self_signed(&key).unwrap();
+    let path = std::env::temp_dir().join(format!("bulk-ca-{}-{}.pem", std::process::id(), alloc_port()));
+    std::fs::write(&path, ca.pem()).unwrap();
+    path
 }
 
 /// `audit.sink` (plan §8): an audit sink attached to a node with no `[tls]` would receive nothing —

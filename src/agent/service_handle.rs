@@ -167,6 +167,14 @@ impl ServiceHandle {
         self.ctx.bulk_transport.set_http_port(port);
     }
 
+    /// Whether the server behind [`set_bulk_serving_port`](Self::set_bulk_serving_port) serves
+    /// `https` (external review R7). The default follows `GossipConfig::gateway_tls`; an application
+    /// serving `/bulk/{id}` from its own TLS server sets it, and its tickets then tell the responder to
+    /// fetch over TLS, verifying the server's certificate by this node's IP address.
+    pub fn set_bulk_serving_https(&self, https: bool) {
+        self.ctx.bulk_transport.set_https(https);
+    }
+
     /// Registers a handler for incoming bulk calls of a given `kind`.
     ///
     /// Spawns a background task. The returned [`BulkServeHandle`] cancels the
