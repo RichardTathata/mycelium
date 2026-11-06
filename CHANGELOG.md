@@ -11,6 +11,21 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Security
 
+- **The gateway closes a connection that does not speak, and caps how many it serves** (external review 2026-10-31,
+  F5; `docs/plans/external-review-2026-10-31.md` R5). Before, a socket that connected to `http_port` and sent nothing
+  held a task and a file descriptor for as long as the client kept it open — on the plaintext listener and under
+  `gateway_tls` alike — and nothing capped how many: the gossip listener's bounds never applied to the gateway. Both
+  listeners now run one accept loop (`src/agent/http/listener.rs`): a connection takes one of
+  `gateway_max_connections` permits (new, default `1024`, `GOSSIP_GATEWAY_MAX_CONNECTIONS`) before it is accepted;
+  the TLS handshake and then the request's preface each arrive within `handshake_timeout_ms` or the connection is
+  closed (on HTTP/2, the preface and the next frame's header; then a keep-alive PING whose interval and timeout are the same bound, each at least 1 s); hyper's
+  30 s header-read bound is live for every HTTP/1 request head; an accept error that is not a client's (`EMFILE`) backs
+  off a second; shutdown closes a connection still in its handshake. **A TLS gateway's shutdown now waits on its open
+  connections** up to the node's shutdown drain bound (5 s by default), as the plaintext listener's always did. New
+  counters: `SystemStats::{gateway_connections_timed_out, gateway_connection_cap_waits, gateway_connections_open}` and
+  the matching metrics. **Long-lived streams can fill the cap, and then `/health` and `/ready` wait**; no slot is
+  reserved for them. Upgrade note: `docs/guide/deprecations.md` §78.
+
 - **The dependency audit fails on a warning nobody accepted** (`docs/plans/external-review-2026-10-31.md` R9). CI's
   `audit` job runs `cargo audit --deny warnings` on every tracked lockfile, so an unmaintained, unsound or yanked
   advisory fails it unless that lockfile's line in the job names it with a date and a reason. The root and fuzz

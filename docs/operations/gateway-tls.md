@@ -23,6 +23,13 @@ ordinary HTTPS clients (curl, browsers) connect normally. **The SDKs through `my
 a gateway serving only HTTPS is reached only through something on the client's side that originates TLS (a
 service-mesh sidecar, a local proxy). Check your SDK's README for a `scheme` option before relying on it.
 
+**What the gateway itself bounds** (since the release after 2.39.0, external review 2026-10-31 R5; both options'
+listener): a connection must finish its TLS handshake, then send its first request's preface, each within
+`handshake_timeout_ms` (default 10 s), or it is closed; at most `gateway_max_connections` (default 1024) are served
+at once, and a further client waits in the listen backlog. A connection that keeps talking holds its slot, so an
+exposed gateway still wants a per-source or rate limit in front of it — a proxy's, a load balancer's, or a firewall's
+([configuration § the fields](../reference/configuration.md), [deprecations §78](../guide/deprecations.md)).
+
 ```rust
 use mycelium::{GossipConfig, GatewayTlsConfig, TlsConfig};
 

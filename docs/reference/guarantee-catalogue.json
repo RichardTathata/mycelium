@@ -60,7 +60,7 @@
       "promise": "the gateway serves HTTPS, so bearers and JWTs do not cross the wire in cleartext",
       "needs": "`tls`; `[gateway_tls]` (or TLS terminated by a proxy in front — not visible here)",
       "enforcement_points": [
-        "http::serve_https"
+        "http::listener::serve"
       ],
       "docs": "docs/operations/gateway-tls.md"
     },

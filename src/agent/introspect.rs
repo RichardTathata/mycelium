@@ -215,6 +215,12 @@ impl GossipAgent {
             rpc_reply_sender_mismatches: self.task_ctx.rpc_reply_sender_mismatches.load(Ordering::Relaxed),
             inbound_connections_timed_out:
                 self.task_ctx.transport_bounds.inbound_timed_out.load(Ordering::Relaxed),
+            gateway_connections_timed_out:
+                self.task_ctx.transport_bounds.gateway_timed_out.load(Ordering::Relaxed),
+            gateway_connection_cap_waits:
+                self.task_ctx.transport_bounds.gateway_cap_waits.load(Ordering::Relaxed),
+            gateway_connections_open:
+                self.task_ctx.transport_bounds.gateway_open.load(Ordering::Relaxed),
             inbound_frames_stalled:
                 self.task_ctx.transport_bounds.inbound_frames_stalled.load(Ordering::Relaxed),
             inbound_per_source_refused:
