@@ -36,13 +36,13 @@ this kit assumes. If one fails there, stop and fix it there: everything below ne
 
 ## 1 · What you need
 
-- A machine with `bash`, `git`, `python3` 3.10 or later and a Rust toolchain (1.96 or later: `rustup` installs one).
+- A machine with `bash`, `git`, `python3` 3.10 or later and a Rust toolchain (the crates' `rust-version` is 1.89 and CI builds the kit on 1.96; `rustup` installs one).
   Linux and macOS both work. Ports 7961, 7962, 7971, 7972, 8461 and 8471 on loopback must be free.
 - A checkout of the repository's `main` (the kit is on `main` since #707, and in every tag from v2.39.0). **The walk
   builds `mycelium` from the checkout and points the scaffold at it, as CI does**, so the kit and the node it runs are
   one code. Before v2.39.0 no published tag had `secure-multi-domain` or the doctor the kit runs (v2.38.2 and v2.38.3
   are security PATCHes without them); from v2.39.0 the tag the scaffold pins builds it too, and step 2's `sed` line
-  can be skipped:
+  can be skipped on a checkout of that tag (on a later `main`, keep it, so the kit and the node stay one code):
 
 ```bash
 git clone --branch main https://github.com/RichardTathata/mycelium && cd mycelium

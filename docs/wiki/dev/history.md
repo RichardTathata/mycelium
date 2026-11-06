@@ -37,8 +37,8 @@ ceiling (#712); **R2+R3** a restart that keeps only the WAL, and a grant's use o
 plan at rev 0.7 (#715, #716), the two security PATCHes' sections on `main` (#698, #705), wasmtime 49.0.5 (#703) and the
 TLS module's directories `0700` (#699). The companions move on their own tags: `mycelium-py` 0.2.14 (`on_signal` raises
 a refused stream as the HTTP error) and `mycelium-ts` 0.2.8 (the Eve loader, the schedule verbs); `mycelium-reason`
-0.11.0, `mycelium-guardrails` 1.1.0, `langgraph-checkpoint-mycelium` 0.3.4 and `strands-session-mycelium` 0.1.0 are
-unchanged since their tags. Wire **v12** unchanged; upgrade notes `deprecations.md` §66–§77.
+0.11.0, `mycelium-guardrails` 1.1.0, `langgraph-checkpoint-mycelium` 0.3.4 and `strands-session-mycelium` 0.1.0 stay on their tags:
+no package code changed since (`strands-session-mycelium` gained a README section and a bearer test in #676, `mycelium-guardrails` an example). Wire **v12** unchanged; upgrade notes `deprecations.md` §66–§77.
 Log: `.log/2026-11-06-release-v2.39.0.md`.
 
 ## The adopter surface's second wave — 2026-10-26 → 31 (released in 2.39.0)
