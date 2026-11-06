@@ -970,15 +970,12 @@ mod imp {
         key_pem: &str,
     ) -> Result<ServerConfig, GossipError> {
         ensure_crypto_provider();
-        let mut cert_cursor = std::io::Cursor::new(cert_pem.as_bytes());
-        let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut cert_cursor)
-            .collect::<Result<_, _>>()
+        let certs = pem_certs(cert_pem.as_bytes())
             .map_err(|e| GossipError::InvalidField { field: "gateway_tls", reason: format!("gateway TLS: parse cert PEM: {e}") })?;
         if certs.is_empty() {
             return Err(GossipError::InvalidField { field: "gateway_tls", reason: "gateway TLS: cert PEM contained no certificates".into() });
         }
-        let mut key_cursor = std::io::Cursor::new(key_pem.as_bytes());
-        let key = rustls_pemfile::private_key(&mut key_cursor)
+        let key = pem_private_key(key_pem.as_bytes())
             .map_err(|e| GossipError::InvalidField { field: "gateway_tls", reason: format!("gateway TLS: parse key PEM: {e}") })?
             .ok_or_else(|| GossipError::InvalidField { field: "gateway_tls", reason: "gateway TLS: key PEM contained no private key".into() })?;
         ServerConfig::builder()
@@ -1212,11 +1209,31 @@ mod imp {
         }
     }
 
+    /// Every `CERTIFICATE` section of a PEM document, in order; any other section (a key, a CRL) and any text between
+    /// sections is skipped. A malformed section is an error. With [`pem_private_key`] this is where the node's TLS module
+    /// reads the gateway's certificate and key and the CA and node certificates (`pem_cert_to_der`), so the parser behind
+    /// them is chosen once (R9 of the external review). It is not the only PEM reader in the tree:
+    /// `load_key_from_pkcs8_pem` reads a node's own key more strictly (PKCS#8 only), and `rcgen` and `reqwest` parse PEM
+    /// themselves — unifying them is *not built*.
+    pub(crate) fn pem_certs(pem: &[u8]) -> Result<Vec<CertificateDer<'static>>, String> {
+        use rustls::pki_types::pem::PemObject;
+        CertificateDer::pem_slice_iter(pem).collect::<Result<_, _>>().map_err(|e| e.to_string())
+    }
+
+    /// The first private key of a PEM document — PKCS#8 (`PRIVATE KEY`), PKCS#1 (`RSA PRIVATE KEY`) or SEC1
+    /// (`EC PRIVATE KEY`), whichever comes first; `None` when it holds none. A malformed section is an error.
+    pub(crate) fn pem_private_key(pem: &[u8]) -> Result<Option<PrivateKeyDer<'static>>, String> {
+        use rustls::pki_types::pem::{self, PemObject};
+        match PrivateKeyDer::from_pem_slice(pem) {
+            Ok(key) => Ok(Some(key)),
+            Err(pem::Error::NoItemsFound) => Ok(None),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
     pub(crate) fn pem_cert_to_der(pem: &str) -> Result<CertificateDer<'static>, GossipError> {
-        let mut cursor = std::io::Cursor::new(pem.as_bytes());
         let certs: Vec<CertificateDer<'static>> =
-            rustls_pemfile::certs(&mut cursor)
-                .collect::<Result<_, _>>()
+            pem_certs(pem.as_bytes())
                 .map_err(|e| GossipError::InvalidField { field: "tls", reason: format!("TLS: parse CA cert PEM: {e}") })?;
         certs
             .into_iter()
@@ -1374,6 +1391,115 @@ mod key_extract_tests {
         let p256 = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
         let cert = cert_with_planted_serial(&p256, planted);
         assert_eq!(ed25519_key_from_cert_der(&cert), None);
+    }
+}
+
+#[cfg(test)]
+#[cfg(feature = "tls")]
+mod pem_parse_tests {
+    //! The PEM readers' behaviour, pinned across the parser they sit on (R9: `rustls-pemfile` → `rustls-pki-types`).
+    //! Each case passed on `rustls-pemfile` before the swap and passes on `rustls-pki-types` after it.
+    use super::imp::{pem_certs, pem_private_key};
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    use rustls::pki_types::PrivateKeyDer;
+
+    fn section(label: &str, der: &[u8]) -> String {
+        let b64 = STANDARD.encode(der);
+        let body: Vec<&str> = b64.as_bytes().chunks(64).map(|c| std::str::from_utf8(c).unwrap()).collect();
+        format!("-----BEGIN {label}-----\n{}\n-----END {label}-----\n", body.join("\n"))
+    }
+
+    #[test]
+    fn several_certificates_come_back_in_order_and_other_sections_are_skipped() {
+        let doc = format!(
+            "a comment before\n{}{}text between\n{}{}",
+            section("CERTIFICATE", b"first"),
+            section("PRIVATE KEY", b"not a cert"),
+            section("X509 CRL", b"a crl"),
+            section("CERTIFICATE", b"second"),
+        );
+        let certs = pem_certs(doc.as_bytes()).unwrap();
+        let ders: Vec<&[u8]> = certs.iter().map(|c| c.as_ref()).collect();
+        assert_eq!(ders, vec![&b"first"[..], &b"second"[..]]);
+    }
+
+    #[test]
+    fn a_document_with_no_certificate_yields_none_and_garbage_is_not_an_error() {
+        assert!(pem_certs(b"").unwrap().is_empty());
+        assert!(pem_certs(b"no pem here at all\n").unwrap().is_empty());
+        assert!(pem_certs(section("PRIVATE KEY", b"k").as_bytes()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_malformed_certificate_section_is_an_error() {
+        let doc = "-----BEGIN CERTIFICATE-----\n!!!not base64!!!\n-----END CERTIFICATE-----\n";
+        assert!(pem_certs(doc.as_bytes()).is_err());
+        let unterminated = "-----BEGIN CERTIFICATE-----\nAAAA\n";
+        assert!(pem_certs(unterminated.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn each_private_key_form_is_read_by_its_label_and_the_first_one_wins() {
+        match pem_private_key(section("PRIVATE KEY", b"pkcs8").as_bytes()).unwrap() {
+            Some(PrivateKeyDer::Pkcs8(k)) => assert_eq!(k.secret_pkcs8_der(), b"pkcs8"),
+            other => panic!("PKCS#8: {other:?}"),
+        }
+        match pem_private_key(section("RSA PRIVATE KEY", b"pkcs1").as_bytes()).unwrap() {
+            Some(PrivateKeyDer::Pkcs1(k)) => assert_eq!(k.secret_pkcs1_der(), b"pkcs1"),
+            other => panic!("PKCS#1: {other:?}"),
+        }
+        match pem_private_key(section("EC PRIVATE KEY", b"sec1").as_bytes()).unwrap() {
+            Some(PrivateKeyDer::Sec1(k)) => assert_eq!(k.secret_sec1_der(), b"sec1"),
+            other => panic!("SEC1: {other:?}"),
+        }
+        let both = format!("{}{}{}", section("CERTIFICATE", b"c"), section("EC PRIVATE KEY", b"one"), section("PRIVATE KEY", b"two"));
+        match pem_private_key(both.as_bytes()).unwrap() {
+            Some(PrivateKeyDer::Sec1(k)) => assert_eq!(k.secret_sec1_der(), b"one"),
+            other => panic!("first key: {other:?}"),
+        }
+    }
+
+    /// A key section that does not decode is an error naming the parse — not "no private key", which would send an
+    /// operator looking for a missing file instead of a corrupt one. Seen failing with `pem_private_key` mapping every
+    /// error to `Ok(None)` (the review's plant on #721).
+    #[test]
+    fn a_malformed_key_section_is_an_error_naming_the_parse() {
+        let doc = "-----BEGIN PRIVATE KEY-----\n!!!not base64!!!\n-----END PRIVATE KEY-----\n";
+        let err = pem_private_key(doc.as_bytes()).expect_err("a malformed key section is an error");
+        assert!(!err.is_empty());
+        let cert = section("CERTIFICATE", b"c");
+        let refused = super::imp::gateway_server_config_from_pem(&cert, doc).expect_err("refused");
+        assert!(refused.to_string().contains("parse key PEM"), "{refused}");
+    }
+
+    /// A PEM file written on Windows (CRLF line endings) reads as the same certificate and key.
+    #[test]
+    fn crlf_line_endings_parse_as_the_same_certificate_and_key() {
+        let lf = format!("{}{}", section("CERTIFICATE", b"a certificate body"), section("PRIVATE KEY", b"a key body"));
+        let crlf = lf.replace('\n', "\r\n");
+        let certs = pem_certs(crlf.as_bytes()).unwrap();
+        assert_eq!(certs.len(), 1);
+        assert_eq!(certs[0].as_ref(), b"a certificate body");
+        match pem_private_key(crlf.as_bytes()).unwrap() {
+            Some(PrivateKeyDer::Pkcs8(k)) => assert_eq!(k.secret_pkcs8_der(), b"a key body"),
+            other => panic!("CRLF key: {other:?}"),
+        }
+    }
+
+    /// An encrypted PKCS#8 key is not a key the node can use; it reads as "no private key", and the gateway says so.
+    #[test]
+    fn an_encrypted_private_key_reads_as_no_private_key() {
+        let doc = section("ENCRYPTED PRIVATE KEY", b"ciphertext");
+        assert!(pem_private_key(doc.as_bytes()).unwrap().is_none());
+        let cert = section("CERTIFICATE", b"c");
+        let refused = super::imp::gateway_server_config_from_pem(&cert, &doc).expect_err("refused");
+        assert!(refused.to_string().contains("contained no private key"), "{refused}");
+    }
+
+    #[test]
+    fn a_document_with_no_private_key_yields_none() {
+        assert!(pem_private_key(b"").unwrap().is_none());
+        assert!(pem_private_key(section("CERTIFICATE", b"c").as_bytes()).unwrap().is_none());
     }
 }
 
@@ -1642,7 +1768,7 @@ mod ca_race_tests {
         for (door, msg) in [
             ("tls ca", super::imp::mint_ca(&dir).expect_err("a lost certificate").to_string()),
             ("tls issue", super::imp::issue_node_cert(&dir, &NodeId::new("127.0.0.1", 9409).unwrap(), &out).expect_err("no certificate").to_string()),
-            ("a node start", load_or_create_ca(&TlsConfig { auto_cert_dir: dir.clone(), ..TlsConfig::default() }).err().expect("refused").to_string()),
+            ("a node start", load_or_create_ca(&TlsConfig { auto_cert_dir: dir.clone(), ..TlsConfig::default() }).expect_err("refused").to_string()),
         ] {
             assert!(msg.contains("missing") && msg.contains("copy"), "{door}: {msg}");
             assert!(!msg.contains("interrupted") && !msg.contains("remove"), "{door} must not advise deleting the key: {msg}");
@@ -1667,7 +1793,7 @@ mod ca_race_tests {
         std::fs::rename(&staged.key, dir.join("ca-key.pem")).unwrap(); // … and the process dies here
         let said = super::imp::mint_ca(&dir).expect_err("a half-published CA").to_string();
         assert!(said.contains("interrupted") && said.contains(".cert.tmp-"), "{said}");
-        let at_start = load_or_create_ca(&TlsConfig { auto_cert_dir: dir.clone(), ..TlsConfig::default() }).err().expect("refused").to_string();
+        let at_start = load_or_create_ca(&TlsConfig { auto_cert_dir: dir.clone(), ..TlsConfig::default() }).expect_err("refused").to_string();
         assert!(at_start.contains("interrupted"), "{at_start}");
         let _ = std::fs::remove_dir_all(&dir);
     }

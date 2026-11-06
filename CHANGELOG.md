@@ -26,6 +26,29 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the matching metrics. **Long-lived streams can fill the cap, and then `/health` and `/ready` wait**; no slot is
   reserved for them. Upgrade note: `docs/guide/deprecations.md` §78.
 
+- **The dependency audit fails on a warning nobody accepted** (`docs/plans/external-review-2026-10-31.md` R9). CI's
+  `audit` job runs `cargo audit --deny warnings` on every tracked lockfile, so an unmaintained, unsound or yanked
+  advisory fails it unless that lockfile's line in the job names it with a date and a reason. The root and fuzz
+  lockfiles accept nothing; the conway-gpu line accepts `paste` RUSTSEC-2024-0436 (unmaintained, only in that excluded
+  GPU demo crate, through `metal`). A newly published advisory now turns the job red without a code change, as a
+  vulnerability already did. The Clippy job and `make check` gain `cargo clippy -p mycelium-core --lib --tests
+  --features tls`, a line no gate ran (it found three errors in the core's TLS tests, fixed).
+  - **Tokio 1.52.3 → 1.53.3** in all three lockfiles, and **every manifest now requires `tokio = "1.53.3"`**, so an
+    adopter's lockfile cannot stay on 1.52.x (RUSTSEC-2026-0386: `AsyncFd::new` and its siblings violate I/O safety;
+    unsound, not a vulnerability; nothing in the tree calls `AsyncFd`). Upgrade note `deprecations.md` §82.
+  - **`rustls-pemfile` removed** (RUSTSEC-2025-0134, unmaintained): the TLS module's PEM readers — the gateway's
+    certificate and key, the CA certificate and the node certificate (`pem_cert_to_der`) — go through two helpers on
+    `rustls-pki-types`' `PemObject`, which `rustls` already depends on. `tls::pem_parse_tests` pins the behaviour:
+    several certificates in order, other sections and text skipped, PKCS#1 / PKCS#8 / SEC1 keys by label, the first key
+    winning, CRLF line endings, an encrypted key read as no key, a malformed certificate or key section an error naming
+    the parse. The first five cases passed on `rustls-pemfile` before the swap. *Not built:* one PEM reader for the whole
+    tree — `load_key_from_pkcs8_pem` still reads a node's own key more strictly (PKCS#8 only), and `rcgen` and `reqwest`
+    parse PEM themselves.
+  - **`async-openai` removed** from the root crate's dev-dependencies: nothing has used it since `llm_agent` became a
+    browser demo, and with it go `backoff` (RUSTSEC-2025-0012) and `instant` (RUSTSEC-2024-0384), both unmaintained,
+    and seventeen more packages from `Cargo.lock`; the tests now name the reqwest `stream` feature they had been getting
+    through it.
+
 ### Fixed
 
 - **A replica-sync answer no longer reports a record persisted while it sits between its apply and its append**

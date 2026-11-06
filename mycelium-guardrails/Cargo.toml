@@ -27,7 +27,7 @@ metrics-export = ["mycelium/metrics"]
 # This dependency line is itself the composability proof.
 mycelium = { path = "..", default-features = false }
 
-tokio   = { version = "1.35", features = ["rt", "time", "sync"] }
+tokio   = { version = "1.53.3", features = ["rt", "time", "sync"] }
 tracing = "0.1"
 # Operator-visible tripwires through the `metrics` facade (Run-39 floor fix): the Tier-C gate
 # emits denial/admit counters. Tiny, unconditional (like wasm-host); a no-op without a recorder,
@@ -38,7 +38,7 @@ metrics = "0.24"
 # test-only: the bind-verified, process-unique port allocator (retires the free_port TOCTOU
 # flake class). Cargo unions this with the normal `mycelium` dep for the test target only.
 mycelium = { path = "..", default-features = false, features = ["test-util"] }
-tokio    = { version = "1.35", features = ["full"] }
+tokio    = { version = "1.53.3", features = ["full"] }
 tempfile = "3"
 
 [[test]]

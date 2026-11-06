@@ -20,7 +20,7 @@ path = "src/main.rs"
 [dependencies]
 mycelium  = { path = "../.." }
 bytes     = "1"
-tokio     = { version = "1.35", features = ["full"] }
+tokio     = { version = "1.53.3", features = ["full"] }
 wgpu      = "22"
 bytemuck  = { version = "1", features = ["derive"] }
 libc      = "0.2"

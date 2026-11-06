@@ -33,7 +33,7 @@ gateway = ["dep:axum", "dep:tower-http", "dep:tokio-stream", "dep:futures-util",
 fuzz-internals = []
 # Enables mTLS on the gossip TCP port, keypair-backed node identity, and
 # consensus payload signing. Adds tokio-rustls, rcgen, and ed25519-dalek.
-tls = ["mycelium-core/tls", "dep:tokio-rustls", "dep:rustls", "dep:rcgen", "dep:rustls-pemfile", "dep:ed25519-dalek", "dep:rand_core", "dep:arc-swap", "dep:webpki", "reqwest?/rustls-tls-manual-roots"]
+tls = ["mycelium-core/tls", "dep:tokio-rustls", "dep:rustls", "dep:rcgen", "dep:ed25519-dalek", "dep:rand_core", "dep:arc-swap", "dep:webpki", "reqwest?/rustls-tls-manual-roots"]
 # Enables OTEL span export from SkillRunner (opentelemetry-otlp gRPC).
 otel = ["dep:opentelemetry", "dep:opentelemetry-otlp", "dep:tracing-opentelemetry", "dep:opentelemetry_sdk"]
 # Exposes a Prometheus /metrics endpoint on the gateway HTTP port.
@@ -77,7 +77,7 @@ mycelium-core = { path = "mycelium-core" }
 mycelium-sim  = { path = "mycelium-sim", optional = true }   # the recorded-run path in the node binary (`sim`)
 
 # Core
-tokio = { version = "1.35", features = ["full"] }
+tokio = { version = "1.53.3", features = ["full"] }
 fastrand = "2"
 # Constant-time bearer comparison in the gateway's `resolve_token` (already in the tree under ed25519-dalek).
 subtle = "2"
@@ -131,7 +131,6 @@ reqwest      = { version = "0.12", features = ["json"], optional = true }
 tokio-rustls   = { version = "0.26", optional = true }
 rustls         = { version = "0.23", default-features = false, features = ["ring"], optional = true }
 rcgen          = { version = "0.13", optional = true }
-rustls-pemfile = { version = "2",    optional = true }
 # X.509 reading for the federation edge's SPKI pins (`federation::pinning`). This is the parser
 # rustls already uses — it is in the tree via `rustls`, so declaring it adds no new compiled crate,
 # and reading the SPKI with the same code that validates chains is the point: the alternative was a
@@ -179,14 +178,17 @@ mycelium-blackboard = { path = "mycelium-blackboard", features = ["gateway"] }
 # Companion crate, consumed by examples/composed_commit (composed-effect.md §9's demonstration):
 # a tool handler that commits at a destination with the composition built from its caller.
 mycelium-effects = { path = "mycelium-effects", features = ["envelope"] }
-tokio        = { version = "1.35", features = ["full", "test-util"] }
+tokio        = { version = "1.53.3", features = ["full", "test-util"] }
 criterion    = { version = "0.5", features = ["async_tokio"] }
 libc         = "0.2"
 # GPU deps (wgpu/pollster/bytemuck) were here only for the conway_gpu demo, which
 # dragged the whole GPU toolchain into every `cargo test` / `clippy --tests` build.
 # That demo now lives in its own excluded crate: examples/conway-gpu/.
-async-openai = "0.28"
 proptest     = "1"
+# The tests read streamed responses (`Response::bytes_stream`, the SSE routes' tests). Until R9 the `stream` feature came
+# in unasked through `async-openai`, an unused dev-dependency removed with its two unmaintained transitive crates; named
+# here so a test's needs are the test's own.
+reqwest      = { version = "0.12", features = ["json", "stream"] }
 
 # The node binary. Its logging setup is `tracing-subscriber`, which only the `cli` feature brings, so without `cli`
 # (e.g. `--no-default-features`) the binary is skipped rather than failing to compile.
