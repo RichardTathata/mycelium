@@ -88,8 +88,23 @@ the new certificate at once.
 A fetch whose certificate does not verify fetches nothing, and a fetch is never retried in plaintext; nor is a status
 other than 2xx, or a payload over `max_bulk_payload_bytes` (default 64 MiB), handed to the handler. Each such refusal
 is logged with its reason and counted (`SystemStats::bulk_fetches_refused`, `mycelium_bulk_fetches_refused_total{reason}`)
-— the caller sees only its `Timeout`. The `https` fetch client keeps no idle connections, so every fetch is a fresh
-handshake checked against the live removal and revocation sets (the reason the mesh turned resumption off).
+— the caller sees only its `Timeout`. The `https` fetch client keeps no idle connections and resumes no TLS session, so
+every fetch is a full handshake checked against the live removal and revocation sets (the reason the mesh turned
+resumption off). **The cost** is one TCP connection and one full TLS handshake per fetch; bulk is for payloads large
+enough that this is small beside the transfer. Both bulk fetch clients **ignore `HTTP_PROXY`, `HTTPS_PROXY` and
+`ALL_PROXY`**: a fetch goes straight to the address the caller's mesh frames came from, and a proxy would put a third
+party between two members.
+
+**A gateway certificate from the fleet CA must be a mesh certificate.** A responder judges a certificate the fleet CA
+issued by the mesh's own check, which accepts only a mesh certificate (an Ed25519 identity key, names it can read) and
+whose refusal is final. So an operator certificate (`cert_pem_path`) issued by the fleet CA — an ECDSA leaf from
+`ca-key.pem`, say — refuses `start()` by name; serve the node certificate (leave `cert_pem_path` and `key_pem_path`
+unset), or issue the gateway certificate from a separate operator CA and name that CA in `bulk_ca_pem_path`.
+
+**Where the trust lives.** `bulk_ca_pem_path` is a field of `gateway_tls`, so only a node with `gateway_tls` can name
+operator roots. A responder whose own gateway is plaintext trusts the fleet CA alone and cannot fetch from an
+operator-cert gateway; giving it `gateway_tls` to name the CA also makes its own tickets `https`. A trust setting
+separate from the node's own gateway is **not built**.
 
 **Not covered:**
 - **A plaintext gateway still carries bulk payloads in the clear.** Without `gateway_tls` the caller's ticket says

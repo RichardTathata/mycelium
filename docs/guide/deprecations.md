@@ -2419,11 +2419,17 @@ restart, which a bulk fetch refuses once the old key is revoked).
   `start()` now refuses with `InvalidField { field: "gateway_tls.bulk_ca_pem_path" }` unless `bulk_ca_pem_path`
   names a CA **and the node's own certificate verifies against it for the node's own IP address** — even on a node that
   makes no bulk call, because it cannot know whether a peer will fetch from it. Each operator certificate must carry
-  its node's IP SAN. A node without `http_port` is unaffected (its gateway table is ignored).
+  its node's IP SAN. An operator certificate issued by the **fleet** CA is refused too unless it is a mesh certificate
+  (an Ed25519 identity key): a responder judges it by the mesh's check, which would refuse every fetch from it. A node
+  without `http_port` is unaffected (its gateway table is ignored).
 - A fleet mixing node-cert and operator-cert gateways: every node that fetches from an operator-cert gateway sets
   `bulk_ca_pem_path` to that CA (on a node-cert node, beside the default fields). A node without `gateway_tls` has no
   place to name it and trusts only the fleet CA, so it cannot fetch from an operator-cert gateway — it refuses, logs and
-  counts each such ticket, and the caller times out.
+  counts each such ticket, and the caller times out. Setting `gateway_tls` on it to name the CA also makes its own
+  tickets `https`; a trust setting apart from the node's own gateway is not built.
+- A bulk fetch is one TCP connection and one full TLS handshake (no pooling, no resumption), and both bulk fetch
+  clients ignore `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` — a deployment that routed bulk through a proxy by the
+  environment now goes direct.
 - A rolling upgrade under `gateway_tls`: a responder older than this release drops an `https` ticket (its kind reads as
   invalid UTF-8), so a bulk call from an upgraded caller to an older responder times out — as every such call did
   before. Upgrade the responders, or the whole fleet; a plaintext fleet is unaffected.

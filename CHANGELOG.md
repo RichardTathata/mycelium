@@ -67,7 +67,9 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `mycelium_bulk_fetches_refused_total{reason}`); the `https` fetch client pools no connections, so each fetch is a
   fresh, revocation-checked handshake; and the node-cert gateway presents the current identity at every handshake, so
   after `rotate_identity` it serves the new certificate (it kept the start-time one until a restart). A
-  `BulkError::Timeout` can be permanent — the docs say so. **Not built:** an integrity check on the payload beyond
+  `BulkError::Timeout` can be permanent — the docs say so. From its second round: an operator certificate issued by the
+  fleet CA that is not a mesh certificate refuses `start()` (every fetch from it would have been refused); the bulk
+  clients resume no TLS session and ignore environment proxies. **Not built:** an integrity check on the payload beyond
   TLS; the fetch target is still the caller's address; a typed refusal reported back; a plaintext gateway still carries
   bulk in the clear, and a TLS-terminating proxy in front of one is bypassed for bulk.
 

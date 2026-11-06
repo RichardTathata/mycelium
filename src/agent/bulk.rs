@@ -231,7 +231,12 @@ impl BulkTransport {
             #[cfg(feature = "gateway")]
             // A peer's redirect is not a peer (realignment repairs R3): the URL is built from the
             // sender's address, and a 3xx could point the fetch anywhere the node can reach.
+            // No environment proxy (R7's review round 2, finding 10): a bulk fetch goes to the address
+            // the caller's mesh frames came from, and an `HTTP(S)_PROXY` would put a third party
+            // between two members — one that sees a plaintext payload, and in front of which an
+            // `https` fetch would verify the proxy's tunnel target, not change who carries it.
             client: crate::agent::egress_client::without_redirects()
+                .no_proxy()
                 .timeout(_fetch_timeout)
                 .build()
                 .expect("reqwest::Client build should never fail with valid config"),
@@ -279,6 +284,7 @@ impl BulkTransport {
         // turned it off), every https fetch is a full handshake against the live removal and
         // standing sets.
         let client = crate::agent::egress_client::without_redirects()
+            .no_proxy()
             .timeout(self.fetch_timeout)
             .pool_max_idle_per_host(0)
             .use_preconfigured_tls(tls)
@@ -618,7 +624,31 @@ pub(crate) fn check_bulk_trust(cfg: &crate::config::GossipConfig, node: &NodeId)
             let ip = node.to_socket_addr().ip();
             let now = rustls::pki_types::UnixTime::since_unix_epoch(Duration::from_millis(crate::sim_seam::wall_now_ms()));
             use rustls::client::danger::ServerCertVerifier;
-            verifier.verify_server_cert(leaf, intermediates, &rustls::pki_types::ServerName::IpAddress(ip.into()), &[], now)
+            let name = rustls::pki_types::ServerName::IpAddress(ip.into());
+            // R7's review round 2, N1: a certificate the **fleet** CA issued is judged by the fleet's
+            // check at the responder, which refuses any certificate that is not a mesh certificate
+            // (an Ed25519 identity key, names it can read) — and that refusal is final, never
+            // re-tried against `bulk_ca_pem_path`. Such a gateway would start and have every fetch
+            // from it refused; it is refused here instead.
+            if let Some(fleet_ca) = fleet_ca_path(cfg)
+                && fleet_ca.exists()
+                && let Ok(fleet_roots) = bulk_roots_from_pem(&fleet_ca)
+                && let Ok(fleet) = rustls::client::WebPkiServerVerifier::builder_with_provider(
+                    Arc::new(fleet_roots), Arc::new(rustls::crypto::ring::default_provider()),
+                ).build()
+                && chains(fleet.verify_server_cert(leaf, intermediates, &name, &[], now))
+                && (mycelium_core::tls::ed25519_key_from_cert_der(leaf.as_ref()).is_none()
+                    || mycelium_core::tls::cert_identity(leaf.as_ref()).is_none())
+            {
+                return Err(refuse(format!(
+                    "this node's gateway certificate ({}) was issued by the fleet CA ({}) but is not a mesh certificate \
+                     (an Ed25519 identity key): a responder judges a fleet-issued certificate by the mesh's check, which \
+                     refuses it, so every bulk fetch from this node would fail. Serve the node certificate instead (leave \
+                     cert_pem_path and key_pem_path unset), or issue the gateway certificate from a separate operator CA",
+                    cert_path.display(), fleet_ca.display(),
+                )));
+            }
+            verifier.verify_server_cert(leaf, intermediates, &name, &[], now)
                 .map(|_| ())
                 .map_err(|e| refuse(format!(
                     "this node's gateway certificate ({}) does not verify against {} for {ip}, the address peers fetch \
@@ -635,6 +665,28 @@ pub(crate) fn check_bulk_trust(cfg: &crate::config::GossipConfig, node: &NodeId)
              certificates (each must name its node's IP address)".into(),
         )),
         (None, None) => Ok(()),
+    }
+}
+
+/// The fleet CA certificate's path, as `[tls]` resolves it (`ca_cert_pem`, else
+/// `{auto_cert_dir}/ca-cert.pem`). `None` without `[tls]`.
+#[cfg(all(feature = "gateway", feature = "tls"))]
+fn fleet_ca_path(cfg: &crate::config::GossipConfig) -> Option<std::path::PathBuf> {
+    let tls = cfg.tls.as_ref()?;
+    Some(tls.ca_cert_pem.clone().unwrap_or_else(|| tls.auto_cert_dir.join("ca-cert.pem")))
+}
+
+/// Whether a verification shows the certificate chains to the roots — it verified, or failed only on
+/// the name or its dates.
+#[cfg(all(feature = "gateway", feature = "tls"))]
+fn chains(r: Result<rustls::client::danger::ServerCertVerified, rustls::Error>) -> bool {
+    use rustls::CertificateError as C;
+    match r {
+        Ok(_) => true,
+        Err(rustls::Error::InvalidCertificate(e)) => matches!(e,
+            C::NotValidForName | C::NotValidForNameContext { .. } | C::Expired | C::ExpiredContext { .. }
+            | C::NotValidYet | C::NotValidYetContext { .. }),
+        Err(_) => false,
     }
 }
 
@@ -659,21 +711,32 @@ pub(crate) fn install_bulk_trust(ctx: &TaskCtx, cfg: &crate::config::GossipConfi
     if fleet.is_none() && operator.is_none() {
         return Ok(());
     }
+    let client = bulk_tls_client_config(fleet, operator).map_err(|e| refuse(e.to_string()))?;
+    ctx.bulk_transport.install_tls_trust(client).map_err(|e| GossipError::InvalidField {
+        field: "gateway_tls",
+        reason: format!("the bulk https client could not be built: {e}"),
+    })
+}
+
+/// The bulk fetch's TLS client configuration over the union of `fleet` and `operator`.
+#[cfg(all(feature = "gateway", feature = "tls"))]
+pub(crate) fn bulk_tls_client_config(
+    fleet:    Option<Arc<dyn rustls::client::danger::ServerCertVerifier>>,
+    operator: Option<Arc<rustls::client::WebPkiServerVerifier>>,
+) -> Result<rustls::ClientConfig, rustls::Error> {
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
     let verifier = Arc::new(BulkServerVerifier { fleet, operator, provider: Arc::clone(&provider) });
     let mut client = rustls::ClientConfig::builder_with_provider(provider)
-        .with_safe_default_protocol_versions()
-        .map_err(|e| refuse(e.to_string()))?
+        .with_safe_default_protocol_versions()?
         .dangerous()
         .with_custom_certificate_verifier(verifier)
         .with_no_client_auth();
     // No session resumption, as on the mesh: a resumed TLS 1.3 session runs no certificate verifier,
     // so a fetch after the caller's key was revoked would be admitted on the session its old
-    // certificate opened. With the pool off too (`install_tls_trust`), every fetch verifies afresh.
+    // certificate opened. With the pool off too (`install_tls_trust`), every fetch verifies afresh —
+    // at the cost of a full TCP and TLS handshake per fetch.
     client.resumption = rustls::client::Resumption::disabled();
-    ctx.bulk_transport.install_tls_trust(client).map_err(|e| GossipError::InvalidField {
-        field: "gateway_tls",
-        reason: format!("the bulk https client could not be built: {e}"),
-    })
+    Ok(client)
 }
 
 /// A peer's gateway certificate is accepted when the fleet's check accepts it, or — only when the
@@ -1316,5 +1379,79 @@ mod tests {
         assert!(check(rustls::Error::General("mycelium: this identity has been removed from the mesh".into())).is_err(),
             "a removal or revocation refusal is final, whatever bulk_ca_pem_path would say");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **Round 2, N1:** a gateway certificate issued by the *fleet* CA that is not a mesh certificate
+    /// (an ECDSA leaf with an IP SAN) is refused at start, by name. A responder judges a fleet-issued
+    /// certificate by the mesh's check, which refuses it for good; before, the node started and every
+    /// fetch from it was refused, the caller seeing only its timeout.
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    #[tokio::test]
+    async fn a_fleet_issued_gateway_certificate_that_is_not_a_mesh_certificate_refuses_the_start() {
+        let dir = std::env::temp_dir().join(format!("bulk-fleetop-{}-{}", std::process::id(), alloc_port()));
+        let mesh = dir.join("mesh");
+        std::fs::create_dir_all(&mesh).unwrap();
+        // The fleet CA, minted where the node will load it from.
+        let ca_key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519).unwrap();
+        let mut ca_p = rcgen::CertificateParams::new(vec![]).unwrap();
+        ca_p.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        let ca = ca_p.self_signed(&ca_key).unwrap();
+        std::fs::write(mesh.join("ca-cert.pem"), ca.pem()).unwrap();
+        std::fs::write(mesh.join("ca-key.pem"), ca_key.serialize_pem()).unwrap();
+        // An operator-shaped leaf from that CA: ECDSA, an IP SAN, no identity key.
+        let leaf_key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+        let mut leaf_p = rcgen::CertificateParams::new(vec![]).unwrap();
+        leaf_p.subject_alt_names = vec![rcgen::SanType::IpAddress("127.0.0.1".parse().unwrap())];
+        let leaf = leaf_p.signed_by(&leaf_key, &ca, &ca_key).unwrap();
+        let (cert, key) = (dir.join("gw.pem"), dir.join("gw.key"));
+        std::fs::write(&cert, leaf.pem()).unwrap();
+        std::fs::write(&key, leaf_key.serialize_pem()).unwrap();
+        let (id, cfg) = tls_node(&dir, vec![], true, crate::GatewayTlsConfig {
+            cert_pem_path: Some(cert), key_pem_path: Some(key), bulk_ca_pem_path: Some(mesh.join("ca-cert.pem")),
+        });
+        let a = GossipAgent::new(id, cfg);
+        let got = a.start().await;
+        a.shutdown().await;
+        let _ = std::fs::remove_dir_all(&dir);
+        match got {
+            Err(crate::GossipError::InvalidField { field: "gateway_tls.bulk_ca_pem_path", reason }) => {
+                assert!(reason.contains("not a mesh certificate"), "{reason}");
+            }
+            other => panic!("a fleet-issued, non-mesh gateway certificate must refuse the start, got {other:?}"),
+        }
+    }
+
+    /// **Round 2, N2: no fetch rides an earlier handshake.** A client that has fetched once from a
+    /// caller fetches again after the caller's key is judged revoked — here the responder's view is
+    /// the caller's own standing set, which its fleet check reads, with the key marked revoked by a
+    /// counted revocation and no rotation. The second fetch must be refused: with connection pooling
+    /// on, it rode the first connection; with session resumption on, it resumed the first session;
+    /// neither runs the verifier.
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_fetch_after_the_callers_key_is_revoked_is_refused_on_a_client_that_fetched_before() {
+        let dir = std::env::temp_dir().join(format!("bulk-revoke-{}-{}", std::process::id(), alloc_port()));
+        let (id, cfg) = tls_node(&dir, vec![], true, crate::GatewayTlsConfig::default());
+        let port = cfg.http_port.unwrap();
+        let c = Arc::new(GossipAgent::new(id.clone(), cfg));
+        c.start().await.unwrap();
+        let tls = Arc::clone(c.task_ctx.tls.get().unwrap());
+        let responder = BulkTransport::with_limits(0, Duration::from_secs(5), 1, false, 1 << 20);
+        responder.install_tls_trust(bulk_tls_client_config(Some(tls.fleet_server_verifier()), None).unwrap()).unwrap();
+        let payload = Bytes::from_static(b"staged payload");
+        let _staged = c.task_ctx.bulk_transport.stage(7, payload.clone());
+        let url = format!("https://127.0.0.1:{port}/bulk/{:016x}", 7u64);
+        let first = responder.fetch(&url, true).await;
+        let key = tls.verifying_key_bytes();
+        c.task_ctx.key_standing.set(&id, mycelium_core::removal::NodeStanding {
+            anchored: None,
+            revoked: [key].into_iter().collect(),
+            counted: [key].into_iter().collect(),
+        });
+        let second = responder.fetch(&url, true).await;
+        c.shutdown().await;
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(first.ok(), Some(payload), "the control: the first fetch verifies and succeeds");
+        assert!(second.is_err(), "the caller's key is revoked: the second fetch must not ride the first handshake, got {second:?}");
     }
 }
