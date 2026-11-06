@@ -549,7 +549,7 @@ async fn test_gateway_serves_native_tls() {
     // Build a rustls client that trusts the cluster CA the node just generated.
     let ca_pem = std::fs::read(cert_dir.join("ca-cert.pem")).expect("ca-cert.pem written");
     let mut roots = rustls::RootCertStore::empty();
-    for c in rustls_pemfile::certs(&mut std::io::Cursor::new(&ca_pem)) {
+    for c in <rustls::pki_types::CertificateDer as rustls::pki_types::pem::PemObject>::pem_slice_iter(&ca_pem) {
         roots.add(c.unwrap()).unwrap();
     }
     let client_config = rustls::ClientConfig::builder()

@@ -970,15 +970,12 @@ mod imp {
         key_pem: &str,
     ) -> Result<ServerConfig, GossipError> {
         ensure_crypto_provider();
-        let mut cert_cursor = std::io::Cursor::new(cert_pem.as_bytes());
-        let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut cert_cursor)
-            .collect::<Result<_, _>>()
+        let certs = pem_certs(cert_pem.as_bytes())
             .map_err(|e| GossipError::InvalidField { field: "gateway_tls", reason: format!("gateway TLS: parse cert PEM: {e}") })?;
         if certs.is_empty() {
             return Err(GossipError::InvalidField { field: "gateway_tls", reason: "gateway TLS: cert PEM contained no certificates".into() });
         }
-        let mut key_cursor = std::io::Cursor::new(key_pem.as_bytes());
-        let key = rustls_pemfile::private_key(&mut key_cursor)
+        let key = pem_private_key(key_pem.as_bytes())
             .map_err(|e| GossipError::InvalidField { field: "gateway_tls", reason: format!("gateway TLS: parse key PEM: {e}") })?
             .ok_or_else(|| GossipError::InvalidField { field: "gateway_tls", reason: "gateway TLS: key PEM contained no private key".into() })?;
         ServerConfig::builder()
@@ -1212,11 +1209,28 @@ mod imp {
         }
     }
 
+    /// Every `CERTIFICATE` section of a PEM document, in order; any other section (a key, a CRL) and any text between
+    /// sections is skipped. A malformed section is an error. (R9 of the external review: one place that parses PEM, so the
+    /// parser can be replaced without a second reading of the same bytes disagreeing with the first.)
+    pub(crate) fn pem_certs(pem: &[u8]) -> Result<Vec<CertificateDer<'static>>, String> {
+        use rustls::pki_types::pem::PemObject;
+        CertificateDer::pem_slice_iter(pem).collect::<Result<_, _>>().map_err(|e| e.to_string())
+    }
+
+    /// The first private key of a PEM document — PKCS#8 (`PRIVATE KEY`), PKCS#1 (`RSA PRIVATE KEY`) or SEC1
+    /// (`EC PRIVATE KEY`), whichever comes first; `None` when it holds none. A malformed section is an error.
+    pub(crate) fn pem_private_key(pem: &[u8]) -> Result<Option<PrivateKeyDer<'static>>, String> {
+        use rustls::pki_types::pem::{self, PemObject};
+        match PrivateKeyDer::from_pem_slice(pem) {
+            Ok(key) => Ok(Some(key)),
+            Err(pem::Error::NoItemsFound) => Ok(None),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
     pub(crate) fn pem_cert_to_der(pem: &str) -> Result<CertificateDer<'static>, GossipError> {
-        let mut cursor = std::io::Cursor::new(pem.as_bytes());
         let certs: Vec<CertificateDer<'static>> =
-            rustls_pemfile::certs(&mut cursor)
-                .collect::<Result<_, _>>()
+            pem_certs(pem.as_bytes())
                 .map_err(|e| GossipError::InvalidField { field: "tls", reason: format!("TLS: parse CA cert PEM: {e}") })?;
         certs
             .into_iter()
@@ -1379,6 +1393,78 @@ mod key_extract_tests {
 
 /// The shared-CA race (federation suite: "b1 sees its one peer"): nodes that share `auto_cert_dir`
 /// and start together must all end up with **one** CA.
+#[cfg(test)]
+#[cfg(feature = "tls")]
+mod pem_parse_tests {
+    //! The PEM readers' behaviour, pinned across the parser they sit on (R9: `rustls-pemfile` → `rustls-pki-types`).
+    //! Each case passed on `rustls-pemfile` before the swap and passes on `rustls-pki-types` after it.
+    use super::imp::{pem_certs, pem_private_key};
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    use rustls::pki_types::PrivateKeyDer;
+
+    fn section(label: &str, der: &[u8]) -> String {
+        let b64 = STANDARD.encode(der);
+        let body: Vec<&str> = b64.as_bytes().chunks(64).map(|c| std::str::from_utf8(c).unwrap()).collect();
+        format!("-----BEGIN {label}-----\n{}\n-----END {label}-----\n", body.join("\n"))
+    }
+
+    #[test]
+    fn several_certificates_come_back_in_order_and_other_sections_are_skipped() {
+        let doc = format!(
+            "a comment before\n{}{}text between\n{}{}",
+            section("CERTIFICATE", b"first"),
+            section("PRIVATE KEY", b"not a cert"),
+            section("X509 CRL", b"a crl"),
+            section("CERTIFICATE", b"second"),
+        );
+        let certs = pem_certs(doc.as_bytes()).unwrap();
+        let ders: Vec<&[u8]> = certs.iter().map(|c| c.as_ref()).collect();
+        assert_eq!(ders, vec![&b"first"[..], &b"second"[..]]);
+    }
+
+    #[test]
+    fn a_document_with_no_certificate_yields_none_and_garbage_is_not_an_error() {
+        assert!(pem_certs(b"").unwrap().is_empty());
+        assert!(pem_certs(b"no pem here at all\n").unwrap().is_empty());
+        assert!(pem_certs(section("PRIVATE KEY", b"k").as_bytes()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_malformed_certificate_section_is_an_error() {
+        let doc = "-----BEGIN CERTIFICATE-----\n!!!not base64!!!\n-----END CERTIFICATE-----\n";
+        assert!(pem_certs(doc.as_bytes()).is_err());
+        let unterminated = "-----BEGIN CERTIFICATE-----\nAAAA\n";
+        assert!(pem_certs(unterminated.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn each_private_key_form_is_read_by_its_label_and_the_first_one_wins() {
+        match pem_private_key(section("PRIVATE KEY", b"pkcs8").as_bytes()).unwrap() {
+            Some(PrivateKeyDer::Pkcs8(k)) => assert_eq!(k.secret_pkcs8_der(), b"pkcs8"),
+            other => panic!("PKCS#8: {other:?}"),
+        }
+        match pem_private_key(section("RSA PRIVATE KEY", b"pkcs1").as_bytes()).unwrap() {
+            Some(PrivateKeyDer::Pkcs1(k)) => assert_eq!(k.secret_pkcs1_der(), b"pkcs1"),
+            other => panic!("PKCS#1: {other:?}"),
+        }
+        match pem_private_key(section("EC PRIVATE KEY", b"sec1").as_bytes()).unwrap() {
+            Some(PrivateKeyDer::Sec1(k)) => assert_eq!(k.secret_sec1_der(), b"sec1"),
+            other => panic!("SEC1: {other:?}"),
+        }
+        let both = format!("{}{}{}", section("CERTIFICATE", b"c"), section("EC PRIVATE KEY", b"one"), section("PRIVATE KEY", b"two"));
+        match pem_private_key(both.as_bytes()).unwrap() {
+            Some(PrivateKeyDer::Sec1(k)) => assert_eq!(k.secret_sec1_der(), b"one"),
+            other => panic!("first key: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_document_with_no_private_key_yields_none() {
+        assert!(pem_private_key(b"").unwrap().is_none());
+        assert!(pem_private_key(section("CERTIFICATE", b"c").as_bytes()).unwrap().is_none());
+    }
+}
+
 #[cfg(test)]
 #[cfg(feature = "tls")]
 mod ca_race_tests {

@@ -9,6 +9,24 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Security
+
+- **The dependency audit fails on a warning nobody accepted** (`docs/plans/external-review-2026-10-31.md` R9). CI's
+  `audit` job runs `cargo audit --deny warnings` on every tracked lockfile, so an unmaintained, unsound or yanked
+  advisory fails it unless `.cargo/audit.toml` names it with a date and a reason; the one named is `paste`
+  RUSTSEC-2024-0436 (unmaintained, only in the excluded `examples/conway-gpu` crate). A newly published advisory now
+  turns the job red without a code change, as a vulnerability already did.
+  - **Tokio 1.52.3 → 1.53.3** in all three lockfiles, for RUSTSEC-2026-0386 (`AsyncFd::new` and its siblings violate
+    I/O safety; unsound, not a vulnerability; no direct `AsyncFd` use in the tree). A lockfile change only.
+  - **`rustls-pemfile` removed** (RUSTSEC-2025-0134, unmaintained): the three PEM readers under `tls` — the gateway's
+    certificate and key, the CA certificate — read through `rustls-pki-types`' `PemObject`, which `rustls` already
+    depends on. The behaviour is pinned by `tls::pem_parse_tests` (several certificates in order, other sections and
+    text skipped, PKCS#1 / PKCS#8 / SEC1 keys by label, the first key winning, a malformed section an error), which
+    passed on `rustls-pemfile` before the swap and pass after it.
+  - **`async-openai` removed** from the root crate's dev-dependencies: nothing has used it since `llm_agent` became a
+    browser demo, and with it go `backoff` (RUSTSEC-2025-0012) and `instant` (RUSTSEC-2024-0384), both unmaintained,
+    and seventeen more packages from `Cargo.lock`; the tests now name the reqwest `stream` feature they had been getting through it.
+
 ## [2.39.0] — 2026-11-06
 
 Wire **v12** unchanged (`PREV = 11`). Upgrade notes: `docs/guide/deprecations.md` §66–§77. Companions on their own
