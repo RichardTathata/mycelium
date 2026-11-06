@@ -2396,3 +2396,22 @@ literal of either breaks; `..Default::default()` does not.
 client that answers PINGs and sends no request is one; a long-running stream holds its permit while it streams. There
 is no per-source cap on the gateway (`max_connections_per_source` is the gossip listener's). A reverse proxy's own
 limits remain the deployment's first bound against a flood.
+
+## 82. Every crate requires Tokio 1.53.3 or later; `rustls-pemfile` is no longer a dependency (unreleased, external review 2026-10-31, R9)
+
+**Tokio.** Every crate in this repository — `mycelium`, `mycelium-core`, each companion and the examples — now declares
+`tokio = "1.53.3"` where it declared `"1.35"`, and both templates where they declared `"1"`. Tokio 1.52.x carries RUSTSEC-2026-0386
+(`AsyncFd::new` and its siblings violate I/O safety; unsound, not a vulnerability, and nothing in this tree calls
+`AsyncFd`), and 1.52 has no patched release, so the floor is the first patched 1.53. Our own lockfiles were already
+moved; the requirement makes sure an adopter's cannot resolve below it.
+
+- **Who is affected:** an application whose `Cargo.lock` holds Tokio below 1.53.3, or which pins Tokio with `=1.52.x`
+  or `<1.53`. Cargo refuses to resolve until it moves.
+- **What to do:** `cargo update -p tokio` (to 1.53.3 or later), or relax the pin. Tokio 1.53 needs Rust 1.71; this
+  workspace's `rust-version` stays 1.89, so no toolchain change follows.
+
+**`rustls-pemfile`.** The `tls` feature no longer brings `rustls-pemfile` (RUSTSEC-2025-0134, unmaintained); the node
+reads its gateway certificate and key, and its CA and node certificates, through `rustls-pki-types`' PEM parser, which
+`rustls` already depends on. The accepted inputs are the same (pinned by `tls::pem_parse_tests`): certificates in order
+with other sections skipped, PKCS#8, PKCS#1 and SEC1 keys by label, CRLF line endings, an encrypted key read as no key,
+a malformed section an error.

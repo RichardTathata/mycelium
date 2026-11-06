@@ -290,8 +290,10 @@ this page is the index + the gate.
   `read_frame` accepts both for rolling upgrades. A mixed-version cluster during upgrade is supported;
   a two-version jump is not. → procedure: [deployment.md § Rolling upgrades](deployment.md#rolling-upgrades);
   policy: `mycelium-core/src/framing.rs` (top).
-- ☐ **`cargo audit` clean** — CI gates it (fails on vulnerabilities; unmaintained advisories surface as
-  warnings). Re-run against your locked build.
+- ☐ **`cargo audit` clean** — CI gates it with `--deny warnings` on every tracked lockfile: a vulnerability, or an
+  unmaintained, unsound or yanked advisory, fails the job unless the job names it with a date and a reason (today one:
+  `paste` RUSTSEC-2024-0436, only in the excluded `examples/conway-gpu` crate, ignored on that lockfile's line in
+  `.github/workflows/ci.yml`). Re-run against your locked build.
 - ☐ **Feature set pinned** — you build exactly the features you run (`tls` / `metrics` / `a2a` / `llm`
   / `compliance` / `gateway`), and `--no-default-features` still builds if you embed the minimal core.
 

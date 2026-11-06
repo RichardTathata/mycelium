@@ -208,7 +208,7 @@ mod tls {
             wait_listening(port).await;
             let ca_pem = std::fs::read(cert_dir.join("ca-cert.pem")).expect("ca-cert.pem written");
             let mut roots = rustls::RootCertStore::empty();
-            for c in rustls_pemfile::certs(&mut std::io::Cursor::new(&ca_pem)) {
+            for c in <rustls::pki_types::CertificateDer as rustls::pki_types::pem::PemObject>::pem_slice_iter(&ca_pem) {
                 roots.add(c.unwrap()).unwrap();
             }
             let client = rustls::ClientConfig::builder().with_root_certificates(roots).with_no_client_auth();

@@ -32,3 +32,7 @@ crate on every PR — the "Conway GPU demo (compile)" job — but the window its
 - Metal on macOS; other platforms via wgpu's Vulkan/DX12 backends (untested here).
 - The CPU sibling ([`conway.rs`](../conway.rs), 16×16, terminal-rendered) is the 30-second
   version — start there if you just want the concept.
+- **One audit warning is accepted for this example only:** RUSTSEC-2024-0436 (`paste`, unmaintained), reached only
+  through `metal`, wgpu's Metal backend. CI's `audit` job carries `--ignore RUSTSEC-2024-0436` on this lockfile's line
+  and accepts nothing on the others. To reproduce: `cargo audit --deny warnings --ignore RUSTSEC-2024-0436 -f
+  examples/conway-gpu/Cargo.lock` from the repository root.
