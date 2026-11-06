@@ -599,6 +599,8 @@ fn passes_over(e: &io::Error) -> bool {
 fn note_passed_over(holder: &std::path::Path, e: &io::Error) {
     static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     DIR_SYNCS_PASSED_OVER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    #[cfg(feature = "metrics")]
+    metrics::counter!("gossip_dir_syncs_passed_over_total").increment(1);
     if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
         warn!(
             directory = %holder.display(),

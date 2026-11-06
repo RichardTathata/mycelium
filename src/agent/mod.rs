@@ -595,6 +595,14 @@ pub struct SystemStats {
     /// from eviction (subscribed or queried). Non-zero means this node subscribes to or queries more
     /// kinds than [`SIGNAL_LOG_MAX_KINDS`](mycelium_core::signal::SIGNAL_LOG_MAX_KINDS).
     pub signal_log_kinds_refused: u64,
+
+    /// Directory syncs passed over on a pre-existing ancestor of a journal, a companion WAL or the
+    /// `[persistence]` directory, since the process started — the ancestor's filesystem does not do
+    /// directory fsync (`EINVAL`, `ENOTSUP`) or the process may not read it (external review
+    /// 2026-10-31 R6; [`dir_syncs_passed_over`](crate::dir_syncs_passed_over),
+    /// `gossip_dir_syncs_passed_over_total`). Process-wide, not per node. Non-zero means an entry
+    /// above the data directory may not survive a power loss; the first case is logged by name.
+    pub dir_syncs_passed_over: u64,
 }
 
 /// The in-flight RPC/bulk correlation map: nonce → (the node the call was sent to, the waiting
