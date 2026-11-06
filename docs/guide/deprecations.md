@@ -2346,3 +2346,24 @@ unchanged — its writes are in memory and it has never claimed a disk ([feature
 **Operator note:** a node whose WAL writer is poisoned (`/health`: `wal_refusing_appends`) now refuses every
 grant-admitted call, every grant-required invocation and every revoke until a snapshot repairs it, where it used to
 run them.
+
+## 81. A replica-sync answer is `Failed` while an inbound record is between its apply and its append; `WalHandle` gained `begin_inbound` and `inbound_in_flight` (unreleased, external review 2026-10-31, R8)
+
+A peer asked whether it holds a record (`sys.replica-sync.v1`, behind `set_with_replica_sync`, `POST /gateway/kv` with
+`min_acks`, and both SDKs' replica-sync writes) used to answer `Persisted` from its store and a WAL sync. A record the
+receive path had applied but not yet handed to the WAL was in the store and not in the queue the sync covers, so the
+answer named a durability the peer did not have (finding F3). Now each inbound record is counted from before its apply
+until its append call returns, and the answer is `Failed` while the count is non-zero.
+
+**Who is affected:** a caller that counts `persisted_by` under load. The count is one number for the node, not per
+record, so a peer that is receiving a steady stream answers `Failed` for any record more often, and lands in
+`missing` until a later round — `collect` re-asks until its deadline, so a short deadline against a busy peer returns
+fewer acknowledgements than before. Nothing that was `Persisted` correctly becomes refused for good: the answer
+returns to `Persisted` once the in-flight records are appended. A window abandoned without its append counts a dropped append,
+which — as since the Phase-C audit — makes the node answer `Failed` for every record until restart (`/health`'s
+`persistence.dropped_appends` shows it). That happens only when the connection task is aborted while its append
+awaits — at shutdown, under `sync_mode = "flush"`; the read bounds wrap only the frame read, not its processing, and in
+`async`/`os` the append does not wait.
+
+**API:** additive only. `mycelium_core::persistence::WalHandle` gained `begin_inbound()` (returning the `#[must_use]`
+guard `InboundApply`) and `inbound_in_flight()`. Wire **v12** unchanged; invariant 1 (*apply, then persist*) unchanged.

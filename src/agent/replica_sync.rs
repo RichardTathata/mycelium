@@ -25,8 +25,9 @@
 //!
 //! **What an answer establishes, exactly.** [`Answer::Persisted`] from peer P means: at the moment
 //! P answered, P's store held this key at this exact HLC stamp with this exact content, P had
-//! **skipped no WAL append**, and P's WAL `fdatasync` returned `Ok` — so P holds the record across
-//! its own crash and restart, because replay restores it.
+//! **skipped no WAL append**, **no inbound record was between its apply and its append**, and P's
+//! WAL `fdatasync` returned `Ok` — so P holds the record across its own crash and restart, because
+//! replay restores it.
 //!
 //! The middle clause is not decoration. The rung rested on an implication — *the store holds it,
 //! therefore its record was appended* — that the inbound path breaks: a received update is applied
@@ -35,7 +36,30 @@
 //! with no record and answered `Persisted` for something replay could never restore. It now declines
 //! the claim instead, because it cannot tell whether *this* record was the one it dropped — and
 //! per-entry durability tracking is exactly what the contracts record declined (§1a).
-//! Found by the Phase-C adversarial audit (items 1+2+7). It does **not** mean P will hold it forever: a later write supersedes it
+//! Found by the Phase-C adversarial audit (items 1+2+7).
+//!
+//! **The apply-to-append window.** The dropped-append counter is bumped *after* the apply, so it
+//! cannot close the window before the append is made: a query arriving while the receive path sits
+//! between the two found the value, saw no drop, synced a WAL the record had not yet entered, and
+//! answered `Persisted` for a record a crash at that moment would lose (external review 2026-10-31,
+//! F3, reproduced by its deterministic probe). Every inbound record is now counted from **before**
+//! its apply until its append call returns ([`WalHandle::begin_inbound`]), on all three inbound
+//! sites — a `Data` frame, a `SignedData` frame, an anti-entropy entry — which share one helper in
+//! `mycelium_core::connection`; this answer reads the count after its store check and declines while
+//! it is non-zero. A window abandoned without its append (a cancelled connection task, a panic)
+//! counts a dropped append as well. Invariant 1 (*apply, then persist*) is unchanged — the plan's
+//! decision D3.
+//!
+//! What the count does **not** do: it is one number for the node, not per record, so a node that is
+//! receiving answers `Failed` for *any* record while *any* inbound record is in flight, and a busy
+//! peer is asked again on the origin's next round more often (`collect` retries until its deadline).
+//! It covers the inbound path only — a node's own local writes also apply before they append, but a
+//! receipt never asks a node about its own write (the origin is never queried). And `Persisted` is
+//! still the rung the record names, not a promise about the disk beyond `fdatasync`.
+//!
+//! [`WalHandle::begin_inbound`]: mycelium_core::persistence::WalHandle::begin_inbound
+//!
+//! It does **not** mean P will hold it forever: a later write supersedes it
 //! like any other value. That is the *replica sync* rung and nothing above it — no destination
 //! commit, no claim about any other peer (`docs/design/contracts-receipts.md` §2.1).
 //!
@@ -176,6 +200,13 @@ pub(crate) async fn answer(ctx: &TaskCtx, q: &Query) -> Answer {
             // that as `Failed`: durability not established here, which is exactly true.
             // Found by the Phase-C adversarial audit (items 1+2+7).
             if wal.dropped_appends() > 0 {
+                return Answer::Failed;
+            }
+            // The store is read above, so this load comes after it: an inbound record found there
+            // whose append call has not returned is counted here (`WalHandle::begin_inbound`). A
+            // sync covers only what is already queued, so while any is in flight the answer is
+            // not established (external review 2026-10-31, F3).
+            if wal.inbound_in_flight() > 0 {
                 return Answer::Failed;
             }
             match wal.sync().await {

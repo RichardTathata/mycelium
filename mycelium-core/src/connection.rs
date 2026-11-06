@@ -162,6 +162,36 @@ fn apply_inbound(
     }
 }
 
+/// One inbound record: [`apply_inbound`], then hand it to the WAL (persistence.rs durability
+/// invariant 1 — apply, then persist, never the reverse). The three inbound sites — a `Data` frame,
+/// a `SignedData` frame and an anti-entropy `StateResponse` entry — all go through here, so the
+/// window between the apply and the append is one place.
+#[allow(clippy::too_many_arguments)]
+async fn apply_inbound_then_append(
+    wal: Option<&std::sync::Arc<crate::persistence::WalHandle>>,
+    kv_state: &crate::store::KvState,
+    update: &GossipUpdate,
+    origin: Origin,
+    self_node: &str,
+    self_hash: u64,
+    counter: &std::sync::atomic::AtomicU64,
+    observer: Option<&InboundObserver>,
+) {
+    // Opened before the apply, closed when the append call returns: a replica-sync answer that
+    // finds this record in the store while it is open declines the claim (external review
+    // 2026-10-31, F3; `mycelium::agent::replica_sync`). Without a WAL nothing is claimed.
+    let window = wal.map(|w| w.begin_inbound());
+    apply_inbound(kv_state, update, origin, self_node, self_hash, counter, observer);
+    if let Some(wal) = wal {
+        #[cfg(any(test, feature = "test-support"))]
+        wal.inbound_pause_point(&update.key).await;
+        let _ = wal.append(sync_entry_from(update)).await;
+    }
+    if let Some(w) = window {
+        w.appended();
+    }
+}
+
 /// Shared state threaded into every inbound connection handler.
 #[derive(Clone)]
 pub struct ConnContext {
@@ -836,10 +866,7 @@ pub async fn handle_connection(
                     };
                     // Apply (running the `sys/` tripwire), then persist (persistence.rs durability
                     // invariant 1). An anti-entropy entry names no writer: `Origin::Unknown`.
-                    apply_inbound(&kv_state, &update, Origin::Unknown, &node_id_str, self_hash, &sys_violations, inbound_observer.as_ref());
-                    if let Some(ref wal) = wal {
-                        let _ = wal.append(sync_entry_from(&update)).await;
-                    }
+                    apply_inbound_then_append(wal.as_ref(), &kv_state, &update, Origin::Unknown, &node_id_str, self_hash, &sys_violations, inbound_observer.as_ref()).await;
                 }
                 #[cfg(feature = "metrics")]
                 metrics::counter!("gossip_anti_entropy_rounds_total").increment(1);
@@ -1035,10 +1062,7 @@ pub async fn handle_connection(
                 if intern_keys { update.key = intern_key(update.key, intern_max_keys); }
                 // Apply (running the `sys/` tripwire), then persist (persistence.rs durability
                 // invariant 1). A gossip frame carries its originator's hash.
-                apply_inbound(&kv_state, &update, Origin::Sender(update.sender), &node_id_str, self_hash, &sys_violations, inbound_observer.as_ref());
-                if let Some(ref wal) = wal {
-                    let _ = wal.append(sync_entry_from(&update)).await;
-                }
+                apply_inbound_then_append(wal.as_ref(), &kv_state, &update, Origin::Sender(update.sender), &node_id_str, self_hash, &sys_violations, inbound_observer.as_ref()).await;
                 #[cfg(feature = "metrics")]
                 metrics::counter!("gossip_messages_received_total").increment(1);
 
@@ -1232,10 +1256,7 @@ pub async fn handle_connection(
                 if intern_keys { update.key = intern_key(update.key, intern_max_keys); }
                 // Apply (running the `sys/` tripwire), then persist (persistence.rs durability
                 // invariant 1). A gossip frame carries its originator's hash.
-                apply_inbound(&kv_state, &update, Origin::Sender(update.sender), &node_id_str, self_hash, &sys_violations, inbound_observer.as_ref());
-                if let Some(ref wal) = wal {
-                    let _ = wal.append(sync_entry_from(&update)).await;
-                }
+                apply_inbound_then_append(wal.as_ref(), &kv_state, &update, Origin::Sender(update.sender), &node_id_str, self_hash, &sys_violations, inbound_observer.as_ref()).await;
                 #[cfg(feature = "metrics")]
                 metrics::counter!("gossip_messages_received_total").increment(1);
 
