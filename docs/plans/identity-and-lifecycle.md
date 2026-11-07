@@ -248,16 +248,19 @@ mandate, the `Unknown` binding is refused (`src/agent/action_evaluator.rs:2106�
 - **On the wire:** +360 B on the presented mandate (612 → 972 B) against the 8 192 B envelope cap. The checkpoint's
   signature serialises as a JSON array; base64 would bring it to about 180 B. The full envelope was not measured.
 - **At the provider:** the same `assess` cost as today's grant path. Carried: 114.6 / 113.8 / 136.4 µs mean / p50 /
-  p99. Grant path: 116.1 / 115.0 / 138.8 µs. That is release, 20 000 calls interleaved, three repetitions within 1.5 µs
-  of each other (note S2). What the 1.2–1.5 µs gap consists of is **not measured**. The local KV read above is outside both
+  p99. Grant path: 116.1 / 115.0 / 138.8 µs. That is release, 20 000 calls interleaved, three repetitions'
+  means within 1.5 µs of each other (their p99s spread 136.4–143.9 µs) (note S2). What the 1.2–1.5 µs gap consists of is **not measured**. The local KV read above is outside both
   figures.
 - **At the gateway:** three signatures per call (the mandate, its first checkpoint, the possession proof), 38.7 µs mean.
-  The durable write of each call's first checkpoint (exit 7) **is not measured**. It adds an fsync per admission, where
+  The durable write of each call's first checkpoint (exit 11) **is not measured**. It adds an fsync per admission, where
   today a grant's checkpoint is written once, at issue. Exit 11 measures it.
 
 **The two bounds the row states.**
 1. **A term revoked between the gateway's framing and the provider's `admit_after`** is admitted and registered,
-   because its carried checkpoint predates the revocation. It stops when the revoking checkpoint arrives.
+   because its carried checkpoint predates the revocation. It stops when the revoking checkpoint arrives. **This is
+   the design, not yet what the spike's code does** (N1, N2): a revocation that lands between the preflight and
+   `admit_after` today runs the call unregistered, and one written between the KV read and the window's insert is
+   never offered.
    - The cancel's effect is **the gossip latency + the sweep interval (*F* / 20, clamped to 100 ms–5 s) + the class's
      `drain_bound`**.
    - Measured on loopback, n = 20: **41.7 ms p50, 43.4 ms p95** from the revoking write to the call ending, with *F* =
@@ -280,11 +283,11 @@ mandate, the `Unknown` binding is refused (`src/agent/action_evaluator.rs:2106�
   would grow without bound. Keying reclaim on the checkpoint's own window would need a format change, and would still
   hold every fleet call until it expired.
 - **The race survives it:** a node that admits a call after its revocation was written reads its own KV copy at
-  admission, so the race of bound 1 still closes.
+  admission, so the race of bound 1 closes once N2 is settled (not yet: N1, N2).
 - **A second mandate on one scope** with a later window moves the scope's expiry to the later end, so the scope is
   never reclaimed while that mandate still runs (note S7′).
 - **How it is reclaimed:** from an expiry queue, at most **1 024 scopes per sweep**. On 10⁵ windows, an idle sweep holds
-  row 43 for under 2 µs and the worst reclaiming sweep for 571 µs; 98 sweeps drain 10⁵ in 44.5 ms in total (note S5,
+  row 43 for under 2 µs and the worst reclaiming sweep for 571 µs; 98 sweeps drain 10⁵ in 51.0 ms in total, through `sweep()` (note S5,
   S6). The first version scanned every window on every sweep and held row 43 for 130 ms.
 
 **Three findings the row handles.**
@@ -323,7 +326,7 @@ the review to confirm.
   - The preflight finds the mandate `Established` and admits the call. If the revoking checkpoint lands before
     `admit_after`, `admit_after`'s second assessment reads `Refused`. It then returns `work: None`, and the handler runs
     with nothing registered, so nothing can stop it (`src/agent/provider_enforcement.rs:329–343` on `main`).
-  - `main` has the same shape for grants today. A separate PR fixes it there.
+  - `main` has the same shape for grants today. The PR fixing `admit_after` for grants was opened 2026-11-07.
   - **Exit needed:** `admit_after` refuses a call whose mandate the preflight found `Established` and it does not. It
     never admits it unregistered. Shown with the revoking checkpoint offered between the two assessments, for a
     `call:` mandate and for a grant.
@@ -336,7 +339,7 @@ the review to confirm.
     interval.
 - **N3: the holder check is against the wrong principal.**
   - At the provider, `assess` compares the mandate's holder with `principal`: the verified **client** principal for a
-    gateway-dispatched call (`src/agent/provider_enforcement.rs:254`, passed at `:278`, `:287` and assessed at `:330` on `main`). D2's holder is the **gateway**.
+    gateway-dispatched call (`src/agent/provider_enforcement.rs:254`, passed to `admit_after` at `:278`, `:283` (the deferred, `Settle` path) and `:287`, and assessed at `:330` on `main`). D2's holder is the **gateway**.
   - **Exit needed:** a `call:` mandate's holder is compared with the gateway that signed the call's envelope, not with
     the client it acts for. A `call:` mandate whose holder is any other gateway is `Unknown`. A client presenting the
     gateway's `call:` mandate as its own is refused.
@@ -357,7 +360,7 @@ the review to confirm.
    checkpoint for it, and the work is registered (`running_count`). The same call with the checkpoint stripped is
    `Unknown`: not registered where the rule admits without a mandate, refused where it requires one. Seen failing first:
    before the row, the stripped form is the only form.
-2. **The holder and the second slot.** The `call:` mandate's holder is the admitting gateway. A client's call carries it
+2. **The holder and the second slot.** The holder rule is N3's to settle, and this item takes N3's resolution. A client's call carries it
    in the second mandate slot beside the client's own grant, and both are assessed. A `call:` mandate presented by any
    principal other than its holder is `Unknown`.
 3. **Entitlement, negatively.** Only a gateway configured to mint `call:` mandates is entitled for the `call:` prefix. A
@@ -383,8 +386,8 @@ the review to confirm.
     from a measurement on the shipped code. D2's *"a lock-order row"* is met by row 43's entry: the windows live inside
     `AuthorityState`, so no new lock is added.
 11. **Durability.** The first and the revoking checkpoint are on disk before the call is admitted or the cancel
-    acknowledged, and the fsync's added admission latency is measured. A WAL-only restart between a cancel and its
-    sweep still stops the work, or refuses it.
+    acknowledged, and the fsync's added admission latency is measured. After a WAL-only restart, a revoked `call:`
+    re-presented inside its window is refused (N5).
 12. **Retention.**
     - `max_drain_secs` caps how long a cancelled `call:`'s records are kept past its stop, and the sweep ceiling applies
       to `call:` work.
