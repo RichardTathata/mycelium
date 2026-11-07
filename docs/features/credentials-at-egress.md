@@ -46,7 +46,8 @@ credential is `a_redirect_off_the_bound_host_drops_the_credential`, in
   bound host, refused elsewhere, dropped on a redirect that leaves it, counted per binding.
 - **Not built:** a secret a component or an unconfined activation command reads itself; a value an upstream echoes
   back transformed; a proxy the gate's own client is configured with; a placeholder in a query string or a body; and
-  the credentials that keep their own paths — `[[serve]]`'s `api_key`, federation, object-store and git
+  the credentials that keep their own paths — `[[serve]]`'s `api_key`, SkillRunner's own LLM key (its config's
+  `api_key`), federation, object-store and git
   ([guide 9 § Credentials attached at egress](../guide/09-security.md#credentials-attached-at-egress)).
 - **Evidence:** the ledger row
   [a credential is attached at egress only where its binding says](../operations/what-is-proven.md#credential-attached-egress-only-where-binding).

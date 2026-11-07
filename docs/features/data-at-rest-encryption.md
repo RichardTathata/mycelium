@@ -5,8 +5,8 @@
 A node with [persistence](persistence.md) can encrypt what it writes to disk — every WAL record and every snapshot —
 through a cipher the operator supplies over their own KMS or keyring. The substrate hands the cipher opaque bytes and
 stores what it returns; it does not encrypt the store in memory or the gossip wire, which is the
-[mesh's mTLS](mesh-mtls.md). A record that does not decrypt is unreadable state, so a wrong or missing key refuses the
-start rather than replaying nothing.
+[mesh's mTLS](mesh-mtls.md). A record that does not decrypt is unreadable state, so under `on_unreadable = "refuse"`,
+the default, a wrong or missing key refuses the start rather than replaying nothing.
 
 ## When to use it, and when not
 
@@ -23,7 +23,9 @@ This feature is turned on in code.
 - [`DataAtRestCipher`](../../mycelium-core/src/persistence.rs): implement `encrypt` and `decrypt` over an
   authenticated cipher, so `decrypt` returns `None` on tamper.
 - [`with_data_at_rest_cipher`](../../src/agent/mod.rs): attach it before `start()`; an attach after `start()` is
-  rejected and counted, because the WAL writer already runs without it.
+  rejected and counted, because the WAL writer already runs without it. Adding a cipher to a node whose store is
+  already plaintext on disk is the same offline migration as rotating the key (decrypt-old, encrypt-new): with an
+  authenticated cipher the plaintext records do not decrypt, so the node would refuse to start over them.
 - The snippet in [crown jewel § Attach a cipher](../operations/crown-jewel.md#attach-a-cipher) is not run as written;
   the test below runs the same calls with a test cipher.
 - `test_ws3_data_at_rest_cipher_encrypts_wal_and_round_trips`, in [`src/lib_tests.rs`](../../src/lib_tests.rs):
@@ -41,7 +43,7 @@ end-to-end run is the test in [`src/lib_tests.rs`](../../src/lib_tests.rs):
 
 - **Guarantee:** [`at_rest.cipher`](../reference/guarantee-catalogue.md#at_rest.cipher) — the WAL and snapshot are
   encrypted at rest.
-- **Not built:** in-place key rotation; encryption of the store in memory; only the KV WAL and snapshot pass through it —
+- **Not built:** in-place key rotation, or encrypting an existing plaintext store in place; encryption of the store in memory; only the KV WAL and snapshot pass through it —
   the node-local journals (the evidence journal among them), the companion WALs and the node's identity key do not
   (protect `tls` key material separately); the strength is the operator's cipher's — the
   substrate's own test cipher is XOR, illustrative only.

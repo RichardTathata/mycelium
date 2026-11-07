@@ -133,7 +133,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Feature pages for identity, transport, egress and durability** (F3, second of five PRs): mesh mTLS and signed
   writes, node identity, the egress allow-list, credentials attached at egress, the confined fleet, persistence,
   data-at-rest encryption, consensus and electorates, destination commit, replay bundles and durability receipts.
-  `crown-jewel.md` § 1 no longer says a record that does not decrypt is skipped: a wrong key refuses the start.
+  `crown-jewel.md` § 1 and `DataAtRestCipher`'s doc no longer say a record that does not decrypt is skipped: under
+  `on_unreadable = "refuse"`, the default, a wrong key refuses the start.
 
 ## [2.39.0] — 2026-11-06
 
