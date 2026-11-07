@@ -105,7 +105,8 @@ The wiki has a genuinely different operational model: a **node-independent store
 **curator**. (Feature `control-plane`; the data plane is Mycelium-agnostic.)
 
 - **The store is the record of record — and it is NOT gossiped KV.** The corpus lives in a pluggable
-  external store (`WikiStore`; `FsStore` = a shared filesystem mount, `S3Store` = a bucket). Only the
+  external store (`WikiStore`; `FsStore` = a shared filesystem mount, `GitStore` = a git checkout; no object-store
+  implementation ships, though the trait admits one). Only the
   *evaporating proposal queue* is in KV. **This is the load-bearing operational fact:** failover
   transfers *nothing* — a promoted curator resumes against the **same** store. If the store is on
   node-local disk and that node dies, the curated corpus is **gone**. Provision a genuinely

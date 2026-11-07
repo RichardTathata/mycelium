@@ -49,7 +49,9 @@ CASES = ['baseline', 'example-baseline',
          'example-for-none-feature', 'example-row-tight', 'example-absent-from-index', 'example-missing', 'example-row-without-status',
          'see-without-index-link', 'none-without-sentence', 'parser-guard-matrix',
          # (i) the page links its ids
-         'concept-not-linked', 'guarantee-not-linked', 'crate-not-linked']
+         'concept-not-linked', 'guarantee-not-linked', 'crate-not-linked',
+         # (j) the capability map and the front page list every page
+         'page-not-on-map', 'page-not-on-front-page', 'parser-guard-front-page']
 if sys.argv[1:] == ['--list']:
     for c in CASES:
         print(f'@@case-list@@ {SUITE}::{c}')
@@ -67,6 +69,7 @@ spec.loader.exec_module(module)
 original_read = Path.read_text
 original_entries = module.feature_entries
 original_exists = module.page_exists
+original_resolve = module.resolve
 ROOT = module.ROOT
 FLEET = 'docs/features/fleet-history-limits.md'
 ROUTING = 'docs/features/inference-routing.md'
@@ -128,8 +131,11 @@ def run(edits=None, pages=None, dirs=()):
 
     def exists(root, page):
         return page in (pages or {}) or original_exists(root, page)
+
+    def resolve(root, rel, url):  # a planted page is a link target too
+        return (None, None) if url.split('#')[0] in (pages or {}) else original_resolve(root, rel, url)
     with patch.object(Path, 'read_text', read), patch.object(module, 'feature_entries', entries), \
-            patch.object(module, 'page_exists', exists):
+            patch.object(module, 'page_exists', exists), patch.object(module, 'resolve', resolve):
         return module.check(ROOT)
 
 
@@ -149,7 +155,10 @@ def with_example(page_edits=(), reg_edits=(), other=None):
     for old, new in page_edits:
         assert old in page, old
         page = page.replace(old, new, 1)
-    edits = {REG: [('# The feature registry', EXAMPLE_ENTRY + '# The feature registry'), *reg_edits]}
+    edits = {REG: [('# The feature registry', EXAMPLE_ENTRY + '# The feature registry'), *reg_edits],
+             'docs/capabilities.md': [(', [skills](features/skills.md)',
+                                       f', [planted](features/{PLANTED}), [skills](features/skills.md)')],
+             'docs/features/README.md': [('| [Skills](skills.md) |', f'| [Planted]({PLANTED}) | planted | none |\n| [Skills](skills.md) |')]}
     edits.update(other or {})
     return edits, {PLANTED: page}
 
@@ -563,6 +572,13 @@ fails('does not link crate:mycelium-commitment', edits, pages)
 case('guarantee-not-linked')
 fails('does not link guarantee:ae.authorised_at_seam',
       {ROUTING: [('[`ae.authorised_at_seam`](../reference/guarantee-catalogue.md#ae.authorised_at_seam) and ', '')]})
+
+case('page-not-on-map')
+fails('no row lists the page skills.md', {'docs/capabilities.md': [('[skills](features/skills.md), ', '')]})
+case('page-not-on-front-page')
+fails('"The pages" has no row for skills.md', {'docs/features/README.md': [('| [Skills](skills.md) |', '| Skills |')]})
+case('parser-guard-front-page')
+fails('no "## The pages" section', {'docs/features/README.md': [('\n## The pages\n', '\n## Pages\n')]})
 
 POSITIVE = {'baseline', 'example-baseline', 'executed-baseline', 'fenced-unit-heading', 'fenced-page-heading',
             'glob-workspace-member', 'descriptor-in-comment',

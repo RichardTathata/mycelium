@@ -807,6 +807,33 @@ def pages_checked(root, reg, errors):
     return rows, tests
 
 
+def check_indexes(root, reg, errors):
+    """(j) F3's exit: every page is listed by a row of the capability map's table and by the front page's
+    "The pages" table, so a reader reaches it from either."""
+    def table_text(rel, heading=None):
+        try:
+            text = (root / rel).read_text(encoding='utf-8')
+        except OSError as e:
+            errors.append(f'{rel}: cannot be read: {e}')
+            return ''
+        if heading is not None:
+            start = text.find(f'\n{heading}\n')
+            if start < 0:
+                errors.append(f'{rel}: no "{heading}" section (the parser or the page changed)')
+                return ''
+            nxt = text.find('\n## ', start + 1)
+            text = text[start:nxt if nxt >= 0 else len(text)]
+        return '\n'.join(line for line in text.splitlines() if line.startswith('| '))
+    cap_map = table_text('docs/capabilities.md')
+    front = table_text(f'{FEATURES}/README.md', '## The pages')
+    for feature in real_pages(reg):
+        page = feature['page']
+        if f'(features/{page})' not in cap_map:
+            errors.append(f'docs/capabilities.md: no row lists the page {page}: add it to the row of its capability')
+        if f']({page})' not in front:
+            errors.append(f'{FEATURES}/README.md: "The pages" has no row for {page}')
+
+
 def check(root):
     errors = []
     try:
@@ -820,6 +847,7 @@ def check(root):
     check_anchored_rows(root, errors)
     rows, _ = pages_checked(root, reg, errors)
     check_examples(reg, rows, errors)
+    check_indexes(root, reg, errors)
     return errors
 
 

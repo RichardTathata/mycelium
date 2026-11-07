@@ -1,6 +1,6 @@
 //! `FsStore` — the filesystem-directory reference implementation of [`WikiStore`]. Trivial,
 //! dependency-light, Docker-free, CI-testable; the shape an on-site datacentre's shared directory (or,
-//! swapped for `S3Store`, a bucket) takes. Layout, per group:
+//! were an `S3Store` built, a bucket) takes. Layout, per group:
 //!
 //! ```text
 //! {root}/{group}/pages/{page-path}/manifest.v{N}.json     (Manifest, version N)
