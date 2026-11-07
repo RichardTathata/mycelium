@@ -48,10 +48,6 @@ impl LlmHandle {
             .map_err(|e| prompt::PromptSkillError::LlmError(e.to_string()))?;
         kv_set(&self.ctx, Arc::from(kv_key.as_str()), Bytes::from(bytes));
 
-        // 2. Advertise capability — presence heartbeat, evaporates when node dies.
-        let cap_handle = CapabilitiesHandle { ctx: Arc::clone(&self.ctx) }
-            .advertise_capability(Capability::new(ns, name), Duration::from_secs(30));
-
         // 3. Register backend in the shared registry.
         let skill_id = format!("{}/{}", ns, name);
         self.ctx.llm_skills.pin().insert(skill_id.clone(), Arc::clone(&backend));
@@ -64,6 +60,13 @@ impl LlmHandle {
         if !self.ctx.llm_dispatch_spawned.swap(true, std::sync::atomic::Ordering::AcqRel) {
             llm::spawn_llm_dispatch_loop(&self.ctx, Arc::clone(&self.ctx.llm_skills));
         }
+
+        // 2. Advertise capability — presence heartbeat, evaporates when node dies. Last of the
+        // three, so the backend and the `llm.invoke` receiver exist before any caller can resolve
+        // the skill (a request delivered before a receiver exists is dropped — the `bulk_serve`
+        // window, CI run 42371240189).
+        let cap_handle = CapabilitiesHandle { ctx: Arc::clone(&self.ctx) }
+            .advertise_capability(Capability::new(ns, name), Duration::from_secs(30));
 
         // 5. Create cancellation channel for this skill's registry entry.
         // The removal is conditional on Arc identity: if the skill was

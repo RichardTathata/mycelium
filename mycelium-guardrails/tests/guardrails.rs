@@ -216,3 +216,35 @@ async fn tier_c_denies_unauthorized_caller_and_seals_the_denial() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// **A call made as soon as `guarded_rpc_serve` returns is served.** The loop registered its
+/// receiver inside the task it spawned, so a request delivered before that task first ran found no
+/// receiver and was dropped — the caller's only answer its timeout (the `bulk_serve` window, CI run
+/// 42371240189, in this crate). A current-thread runtime makes it certain: the spawned task cannot
+/// run before this caller's self-addressed request is delivered, which `rpc_call` does without a
+/// yield. The provider authorizes itself, so the request reaches the handler.
+#[tokio::test(flavor = "current_thread")]
+async fn a_call_made_as_soon_as_guarded_rpc_serve_returns_is_served() {
+    let dir = cert_dir("ready");
+    let agent = {
+        let mut started = None;
+        for _ in 0..16 {
+            if let Some(a) = try_start(free_port(), vec![], &dir).await {
+                started = Some(a);
+                break;
+            }
+        }
+        started.expect("the agent starts")
+    };
+    let applied = apply(Policy::new().authorized_callers([agent.node_id().to_string()]), &agent).await;
+    let _guard = guarded_rpc_serve(&applied, "guarded.ready", |agent, req| async move {
+        agent.service().rpc_respond(&req, req.payload());
+    });
+    let reply = agent
+        .service()
+        .rpc_call(agent.node_id().clone(), "guarded.ready", b"now".to_vec(), Duration::from_secs(3))
+        .await;
+    assert_eq!(reply.ok().as_deref(), Some(&b"now"[..]), "guarded_rpc_serve's receiver is registered when it returns");
+    agent.shutdown_with_timeout(Duration::from_secs(5)).await;
+    let _ = std::fs::remove_dir_all(&dir);
+}

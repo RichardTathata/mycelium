@@ -188,8 +188,8 @@ measures it on a tagged release (§1.1, D19). What
 the comparison proposed that already ships is tabled in its §1; a task lifecycle, a context selector, schedules and a
 dashboard are deferred in §6 with the question each must answer first.
 
-[`identity-and-lifecycle.md`](identity-and-lifecycle.md) — **identity and lifecycle** (proposed 2026-10-31, rev 0.7;
-not yet agreed; reviewed five times — rev 0.1 against the decisions, rev 0.3 against the mechanisms, rev 0.4 and
+[`identity-and-lifecycle.md`](identity-and-lifecycle.md) — **identity and lifecycle** (proposed 2026-10-31; **agreed
+with the maintainer 2026-11-07**, rev 0.8; work begins with I0 and the three spikes, §4; reviewed five times — rev 0.1 against the decisions, rev 0.3 against the mechanisms, rev 0.4 and
 rev 0.5 each against five premises, every premise failure in wave 1 or the developer identity; the fifth, on the merged
 document in #715's thread, corrected thirteen stated facts in place). From a comparative reading of Orca and Eve against
 `main` at `9cbd3b82`. Eight decisions D1–D8: every acting principal keyed by a certificate the fleet CA issues off-node,

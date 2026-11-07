@@ -65,8 +65,8 @@ mod tests {
 
         // Register an "echo-scatter" responder on node-b
         let responder = Arc::clone(&agent_b);
+        let mut rx = responder.service().rpc_rx("echo-scatter"); // registered before the spawn: the call below cannot outrun it
         tokio::spawn(async move {
-            let mut rx = responder.service().rpc_rx("echo-scatter");
             while let Some(req) = rx.recv().await {
                 responder.service().rpc_respond(&req, req.payload());
             }
