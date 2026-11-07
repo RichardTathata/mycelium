@@ -121,3 +121,14 @@ suite is `scripts/test-check-feature-pages.py`.
 | [Gateway TLS](gateway-tls.md) | The gateway serves HTTPS with the node identity's certificate or an operator's | Constrain actions |
 | [Gateway caller identity](gateway-caller-identity.md) | A provider sees the client behind a gateway call, qualified by its issuer and signed by the gateway | Constrain actions |
 | [A2A interoperability](a2a.md) | An AgentCard and `/a2a` task dispatch in the 1.0 and 0.3 shapes, every send through the same doors | Run tools and reasoning |
+| [Mesh mTLS and signed writes](mesh-mtls.md) | Gossip between nodes the fleet CA certified, every KV write frame signed by its writer | Discover participants and signal |
+| [Node identity, proofs and revocation](node-identity.md) | One sealed identity record per node, rotation and revocation every verifier honours, an operator's removal of a member | Discover participants and signal |
+| [Egress allow-list](egress-allow-list.md) | A hostname list on the substrate's own outbound calls, every redirect hop included | Constrain actions |
+| [Credentials attached at egress](credentials-at-egress.md) | A secret attached at the node's gate only for the host its binding names; the caller holds a placeholder | Constrain actions |
+| [Confined fleet](confined-fleet.md) | A deployment where agent pods reach nothing but their gateway, so every act passes a door that records it | Constrain actions |
+| [Persistence](persistence.md) | The KV store and acceptor memory on disk, what an acknowledgement means per sync mode, and refusals over unreadable state | Inspect outcomes and reproduce |
+| [Data-at-rest encryption](data-at-rest-encryption.md) | The WAL and snapshots encrypted through an operator's cipher; a wrong key refuses the start | Inspect outcomes and reproduce |
+| [Consensus, electorates, locks and leadership](consensus-electorates.md) | Quorum agreement per slot, and exclusive outcomes decided only by an electorate pinned at genesis | Coordinate work |
+| [Destination commit](destination-commit.md) | `mycelium-effects`: one effect, once, at a destination you own, keyed by `operation_id` | Inspect outcomes and reproduce |
+| [Replay bundles](replay.md) | A recorded run replayed decision for decision, a divergence named where it first departs | Inspect outcomes and reproduce |
+| [Durability receipts](durability-receipts.md) | What an acknowledgement proves, by rung and nothing above it; a timeout is unknown, never a negative | Inspect outcomes and reproduce |

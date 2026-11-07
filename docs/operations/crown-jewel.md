@@ -36,8 +36,11 @@ agent.start().await?;
 ### Operating rules
 
 - **Key stability.** The key must be available and identical across restarts, or
-  the node cannot replay its own WAL/snapshot (records fail to decrypt and are
-  skipped — silent data loss on restart). Source it from a KMS/HSM, not a local file.
+  the node cannot replay its own WAL/snapshot: a record that does not decrypt is
+  unreadable state, so under `persistence.on_unreadable = "refuse"` (the default) `start()`
+  refuses by name; under `"quarantine"` the node moves the files aside as
+  `<name>.unreadable-N`, keeping them, and starts empty, and replicated state comes back from
+  peers by anti-entropy. Source it from a KMS/HSM, not a local file.
 - **Use a real AEAD.** The hook hands you opaque bytes; use an authenticated
   cipher (e.g. AES-GCM / ChaCha20-Poly1305) so `decrypt` can return `None` on
   tamper. (The substrate's own test cipher is XOR — illustrative only, never
