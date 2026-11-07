@@ -31,7 +31,11 @@ This feature is turned on in code or by the stem's flags. `object_store` (on `my
   [`LibrarianConfig`](../../mycelium-wasm-host/src/librarian.rs).
 - [`MeshArtifactSource`](../../mycelium-wasm-host/src/mesh_source.rs): pull from whoever serves the content address.
 - [`artifact_router`](../../mycelium-wasm-host/src/gateway.rs) (`gateway`): `POST /gateway/artifacts/publish`, under
-  `artifact:publish`, mounted only where `[hosts].trusted_publishers` is non-empty.
+  `artifact:publish`; `mycelium-stem` mounts it when its `[hosts].trusted_publishers` is non-empty, served on its
+  `http_port`.
+  The scope is checked only in a build with `compliance`; the published `mycelium-stem` is built without it
+  (`stem,gateway,llm,object_store`), so there any valid bearer reaches the route — the line's provenance is still
+  checked against the trusted publishers before it is written.
 - `reconciles_manifest_to_catalogue_scoped_to_its_own_signer`, in
   [`mycelium-wasm-host/src/librarian.rs`](../../mycelium-wasm-host/src/librarian.rs).
 
@@ -51,7 +55,8 @@ as two signed, content-addressed artifacts; it needs Ollama, so it is a manual r
 - **Not built:** a real S3 or GCS bucket in CI — `s3://` is proved against S3Mock and `gs://` only against a real bucket
   when one is configured ([artifacts § Object stores](../operations/artifacts.md#object-stores-what-ci-proves-and-what-it-does-not));
   redirects inside `object_store`'s own client are outside the egress check; a librarian reconciles only its own
-  signer's entries.
+  signer's entries — scoped to the key, not the node, so a librarian on another node holding the same key with a
+  different manifest tombstones what this one lists.
 - **Evidence:** the ledger rows
   [a signed catalogue line reaches a second node](../operations/what-is-proven.md#signed-catalogue-line-reaches-second-node)
   and [models pulled from S3 or GCS](../operations/what-is-proven.md#models-pulled-from-s3-gcs) (not yet shown).

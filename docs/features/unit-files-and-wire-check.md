@@ -4,7 +4,8 @@
 
 A [unit file](../guide/00-concepts.md#unit-file) is one TOML file per deployable unit, declaring what it offers, needs,
 groups and hosts, its [lanes](../guide/00-concepts.md#lane), the authority it expects and the rules it carries. One loader
-reads it for three consumers: `mycelium wire-check`, the stem, and an SDK agent's `POST /gateway/units/declare`.
+reads it for five consumers: `mycelium wire-check`, the stem, an SDK agent's `POST /gateway/units/declare`,
+`mycelium declare` and `mycelium test --faults`.
 [`wire-check`](../guide/00-concepts.md#wire-check) is a pure function over a directory of unit files that applies the
 mesh's own match rule and names, by kind, everything that could not bind — so a deployment is checked before anything
 runs. Its answer is *would bind*, never *is bound*; the runtime keeps the last word, and a

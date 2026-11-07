@@ -7,7 +7,8 @@ pulled by content address. A component reaches the node only through the imports
 confined emit, a log — never the node's own handles: its KV lives under `comp/{node}/{namespace}/…`, a subtree it cannot
 leave, and it may emit only kinds under `comp/{namespace}/…` (or kinds the host listed for it) and never a protected
 RPC kind, because an emit from inside the process would reach that kind's handlers past the door that checks
-authority. Each instance has a memory cap and a wall-clock deadline per call; fuel is metered by who signed the entry;
+authority. Each instance has a memory cap and a wall-clock deadline per call; where `fuel_per_call` or
+`operator_fuel_per_call` is set, fuel is metered by who signed the entry, and with neither set nothing is metered;
 and guest code runs on a blocking thread, never on the node's async workers.
 
 ## When to use it, and when not
@@ -19,13 +20,16 @@ and guest code runs on a blocking thread, never on the node's async workers.
 
 ## Turn it on
 
-This feature is turned on in code, or by a [stem](stem.md) with `"wasm-component"` in `[hosts].kinds`; `wasmtime` is
+This feature is turned on in code, or by a [stem](stem.md) with `"wasm-component"` in `[hosts].kinds` — though, a known
+gap fixed by a separate PR, a stem with `[hosts]` runs components whatever `kinds` says; `wasmtime` is
 confined to this crate and never enters `mycelium` or `mycelium-core`.
 
 - `[hosts]` ([unit-file § hosts](../reference/unit-file.md#hosts)): `fuel_per_call` for entries an agent signed,
   `operator_fuel_per_call` for the operator's own keys, and `call_deadline_ms` (default 5 s) for every call.
 - In code, [`WasmHost::new`](../../mycelium-wasm-host/src/host.rs) and a [`HostState`](../../mycelium-wasm-host/src/host.rs)
-  per component, with [`with_emit_kinds`](../../mycelium-wasm-host/src/host.rs) for further kinds (not settable from a
+  per component, with [`with_protected_kinds`](../../mycelium-wasm-host/src/host.rs) for the node's own
+  `protected_rpc_kinds` — only the built-in protected kinds are refused without it; the provisioner's runtime passes the
+  node's list — and [`with_emit_kinds`](../../mycelium-wasm-host/src/host.rs) for further kinds (not settable from a
   unit file) and a memory cap of `DEFAULT_MEMORY_LIMIT_BYTES` (256 MiB) unless set.
 - The world is [`mycelium-wasm-host/wit/host.wit`](../../mycelium-wasm-host/wit/host.wit).
 - `a_component_cannot_emit_a_protected_kind_but_can_emit_in_its_own_namespace`, in

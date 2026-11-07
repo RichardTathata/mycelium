@@ -25,12 +25,19 @@ Sign entries where the key is, with the `mycelium-artifact` binary, and list the
   [`mycelium-wasm-host/src/bin/mycelium-artifact.rs`](../../mycelium-wasm-host/src/bin/mycelium-artifact.rs): sign a
   description into a library's manifest, list it, verify it, and co-sign a proposal as a reviewer.
 - `[hosts].trusted_publishers` ([unit-file § hosts](../reference/unit-file.md#hosts)), `ed25519:<hex>` keys; in code,
-  [`require_provenance`](../../mycelium-wasm-host/src/provisioner.rs).
+  [`require_provenance`](../../mycelium-wasm-host/src/provisioner.rs) — without it a provisioner checks only that the
+  bytes match their content address, not who signed them.
+- In code, [`refresh_catalog`](../../mycelium-wasm-host/src/provisioner.rs) each round: a provisioner's catalogue is a
+  snapshot taken at construction, so entries gossiped later are unseen until it is refreshed (a stem does this every
+  tick).
 - [`InstallableEntry::signed_by`](../../mycelium-wasm-host/src/catalog.rs) and
   [`verify_provenance`](../../mycelium-wasm-host/src/catalog.rs) for code that signs or checks one itself.
-- `POST /gateway/artifacts/publish` announces an already-signed line to a running cluster, under `artifact:publish`,
-  on a stem built with `gateway` whose `[hosts]` names trusted publishers
+- `POST /gateway/artifacts/publish` announces an already-signed line to a running cluster, on a stem built with
+  `gateway`, with an `http_port`, whose `[hosts]` names trusted publishers, under `artifact:publish`
   ([artifacts § Publishing through a gateway](../operations/artifacts.md#publishing-through-a-gateway-a3)).
+  The scope is checked only in a build with `compliance`; the published `mycelium-stem` is built without it
+  (`stem,gateway,llm,object_store`), so there any valid bearer reaches the route — the line's provenance is still
+  checked against the trusted publishers before it is written.
 - `require_provenance_refuses_unsigned_but_installs_trusted_signed`, in
   [`mycelium-wasm-host/src/provisioner.rs`](../../mycelium-wasm-host/src/provisioner.rs).
 
@@ -44,8 +51,8 @@ provenance and pulls it over the mesh. CI runs it.
 ## What it guarantees, and what it does not
 
 - **Rule:** [`prov.provenance`](../reference/rule-catalogue.md#provprovenance) — `signed_by_trusted_publisher`, or
-  refused `signature_invalid` or `publisher_untrusted`; `no_trust_list_configured` only where unsigned entries were
-  accepted on purpose.
+  refused `not_signed_by_trusted_publisher` (an invalid signature and an untrusted publisher are one answer), rev 2;
+  `no_trust_list_configured` only where unsigned entries were accepted on purpose.
 - **Not built:** signing proves who published an entry, not that the component is safe — the publisher keys are the
   posture to review; there is no revocation of a published entry beyond removing it from the manifest; a gateway
   publish is refused when the signer is a key a librarian on that node manages (409).

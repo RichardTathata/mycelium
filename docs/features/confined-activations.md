@@ -35,19 +35,25 @@ Add the table to each `[[activation]]` in the unit file; a stem registers the gu
 ## See it work
 
 No runnable example exists: the [example index](../../examples/README.md#the-capability-matrix) has no row for confined
-activations. The end-to-end run is a test in [`mycelium-wasm-host/src/activation.rs`](../../mycelium-wasm-host/src/activation.rs):
+activations. The run inside a stem is `a_confined_activation_runs_in_a_stem_and_the_stem_says_which_applies`, in
+[`mycelium-wasm-host/src/stem.rs`](../../mycelium-wasm-host/src/stem.rs); the backends themselves are hook-level tests in
+[`mycelium-wasm-host/src/activation.rs`](../../mycelium-wasm-host/src/activation.rs), such as
 `a_confined_activation_reaches_only_its_declared_tcp_ports`, run by CI on Linux (Landlock and seccomp) and on macOS
 (Seatbelt).
 
 ## What it guarantees, and what it does not
 
-- **Guarantee:** `stem.activation_confined`, registered by the stem, not in the core catalogue — `enforced` when every
+- **Guarantee:** `stem.activation_confined`, not in the core catalogue, registered by the `mycelium-stem` binary before
+  its node starts. `Stem::start` does not register it, and takes an agent already started, so code that embeds a stem
+  registers `confinement_guarantee(&units)` with `register_guarantee` itself, before `start()`. It is `enforced` when every
   `[[activation]]` names a profile this node can apply, `not_configured` when one is unconfined or names one it cannot,
   `not_applicable` with none (`confinement_guarantee` in
   [`mycelium-wasm-host/src/activation_sandbox.rs`](../../mycelium-wasm-host/src/activation_sandbox.rs)).
 - **Rules:** a profile that cannot be applied is [`prov.activation`](../reference/rule-catalogue.md#provactivation)'s
-  `confinement_unavailable` or `confinement_failed`, and a re-probe whose declared path was replaced is
-  [`prov.probe`](../reference/rule-catalogue.md#provprobe)'s `confinement_changed`.
+  `confinement_unavailable` or `confinement_failed`. A re-probe re-resolves a declared path that was replaced, and the
+  install stays live; a re-resolution that is refused — a planted symlink among them — is
+  [`prov.probe`](../reference/rule-catalogue.md#provprobe)'s `confinement_failed`, and `confinement_changed` means a
+  declared path changed around every one of the re-probe's attempts (two), so its verdict is not trusted.
 - **Not built:** resource limits; limits by address or path; the OpenShell backend (decided *skip for now*,
   2026-10-17); under Landlock no DNS, so a name resolves only through `/etc/hosts`. Confinement narrows what a command
   reaches; it does not make an untrusted command safe.

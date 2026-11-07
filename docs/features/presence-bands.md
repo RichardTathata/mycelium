@@ -31,7 +31,8 @@ floor.
 - A stem advertises `prov-shed/{ns}:{name}:{hash}` for each band it supervises with a ceiling; a provider that does not
   (registered in code, or a stem without this band) keeps its place once seen unmarked for two advertise intervals.
 - `exactly_the_surplus_above_a_ceiling_withdraws`, in
-  [`mycelium-wasm-host/src/provisioner.rs`](../../mycelium-wasm-host/src/provisioner.rs).
+  [`mycelium-wasm-host/src/provisioner.rs`](../../mycelium-wasm-host/src/provisioner.rs), checks the ceiling's ranking
+  alone — the shed view, for every band size and ceiling, withdraws exactly the surplus — not a running band.
 
 ## See it work
 
@@ -43,12 +44,16 @@ provider goes is `the_stem_fleet_fills_a_presence_floor_and_reheals`, in
 
 ## What it guarantees, and what it does not
 
-- **Rules:** [`prov.presence_floor`](../reference/rule-catalogue.md#provpresence_floor) — `below_floor` makes this node a
-  candidate, or `floor_met`; [`prov.shed`](../reference/rule-catalogue.md#provshed) — `above_ceiling` withdraws the
+- **Rules:** [`prov.presence_floor`](../reference/rule-catalogue.md#provpresence_floor) — `below_floor` starts an install
+  here, `floor_met`, deferred `self_election_declined`, or refused `already_hosted`, `provenance_rejected`, `ineligible`,
+  `no_loadable_candidate` or `rights_refused`, rev 2; [`prov.shed`](../reference/rule-catalogue.md#provshed) — `above_ceiling` withdraws the
   hosts ranked beyond it, rev 2 (rev 1 drew per host, and every host could withdraw at once).
 - **Not built:** a cardinality guarantee — a count sits outside the band while installs and withdrawals settle, and a
   wrong view of the providers costs at most its own wrong entries; a fleet-wide band — each host fills only the bands
-  it declares; placement — which host fills a gap is the self-election's roll.
+  it declares; placement — which host fills a gap is the self-election's roll. **Known gap, fixed by a separate PR:**
+  the floor picks the cheapest loadable entry before it checks provenance and eligibility, so any member that gossips
+  a smaller untrusted line for the band's capability makes the floor refuse `provenance_rejected` every round, and the
+  floor is never filled.
 - **Evidence:** the ledger row
   [every artifact-shaped co-op demo reaches the same outcome as stem nodes](../operations/what-is-proven.md#coop-demos-same-outcome-as-stems).
 
