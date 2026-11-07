@@ -29,7 +29,8 @@ depends on [persistence](persistence.md) and its sync mode.
   [`retry_requiring_sync`](../../mycelium-core/src/kv_handle.rs) reuse the prior receipt's stamp, so the retry ranks
   as the same operation, and refuse different content under its id as a `Conflict`;
   [`prepare_write`](../../mycelium-core/src/kv_handle.rs) then [`commit_prepared`](../../mycelium-core/src/kv_handle.rs)
-  mint the identity before anything is sent, so it survives the caller's own restart. Calling `set_with_receipt`
+  (or `commit_prepared_requiring_sync`) mint the identity before anything is sent, so it survives the caller's own
+  restart if the caller persists the prepared token. Calling `set_with_receipt`
   again is not a retry: it ticks a fresh stamp and the write ranks differently.
 - [`set_with_replica_sync`](../../src/agent/kv_quorum_ext.rs): rung 3 — which peers have persisted the record,
   with the ones that did not answer kept apart as missing.

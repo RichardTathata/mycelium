@@ -8,7 +8,7 @@ values. A lock, a lease and a leadership are one decision record over it, leader
 exclusive outcome — a lock, a leader, a consistent write, an award — an electorate makes it safe against a roster a
 node cannot see: a group pinned by member identity at genesis, decided only by the members it names, changed only by
 a migration that terminates. An electorate member must have `[persistence]` for its acceptor memory: without it the
-membership is refused by name.
+member's adoption, declaration, proposal and genesis answer are refused by name (`409 persistence_required`).
 
 ## When to use it, and when not
 

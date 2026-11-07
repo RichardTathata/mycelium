@@ -29,7 +29,7 @@ certificate where the CA key is. The two-domain scaffold's
 - With the CA key off the node, a node cannot rotate in place: [`rotate_identity`](../../src/agent/mod.rs) re-signs
   with the CA key, which it then does not hold. The compromise flow is re-issue — `mycelium tls issue --force` a new
   certificate where the CA key is, restart the node with it — then
-  [`revoke_identity_key`](../../src/agent/mod.rs) on the old key (or `POST /gateway/identity/revoke`), signed by the
+  [`revoke_identity_key`](../../src/agent/mod.rs) on the old key (or `POST /gateway/identity/revoke`, in a build with `compliance`), signed by the
   new current key. `rotate_identity` is for the development posture, where the CA key is on the node
   ([cert rotation § Compromise remediation](../operations/cert-rotation.md#compromise-remediation--rotate-and-revoke-soc-2-ws-b)).
 - [`with_membership_authorities`](../../src/agent/membership_ops.rs) and
