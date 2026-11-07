@@ -50,7 +50,8 @@ it reads the diff and the code. Tell it its final message *is* the report.
    features, companion-registered guarantees, workspace crates) and checks only that a page's links, settings and
    tests exist. **A configuration field, an HTTP route or an SDK verb has no id**, so you are the only check: find
    the feature it belongs to through its concept or crate id in the registry and check that page covers it, or
-   report that no page does.
+   report that no page does. Before F3 closes, a field, route or verb whose feature is at `page = "todo"` or
+   belongs to no feature is reported but is not a blocking finding; after F3 closes, it is a finding.
 
 ## The report and what to do with it
 

@@ -6,8 +6,8 @@ rounds and a confirmation), and the template revised from them (§4.1). **F2 is 
 registry and the gate, each check shown failing with a planted fault (§4.2). **F3 is in progress.** **F4 is half
 delivered** (§4.3): the fifth rule and the `/doc-coverage` pass are written; the pass runs once F3's pages land.
 Rev 0.2 answered the independent review of PR #649; rev 0.3 recorded what the pilots taught; rev 0.4 records the
-decision on each (§4.1); rev 0.5 records F2 and its decisions (P3, P5); rev 0.6 records F2 delivered after its
-review rounds (#655, §4.2); rev 0.7 records F4's first half (§4.3) and the decision from its review that, after F3
+decision on each (§4.1); rev 0.5 records F2 and its decisions (P3, P5); rev 0.6 records F2's third review round,
+the confirmation, and its fixes (#655, §4.2); rev 0.7 records F4's first half (§4.3) and the decision from its review that, after F3
 closes, a new feature lands with its page in the same PR (`page = "todo"` stays only for entries that predate
 F3's close).
 
