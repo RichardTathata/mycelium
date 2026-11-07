@@ -241,58 +241,63 @@ ids = ["cargo:mycelium/a2a", "guarantee:a2a.admission", "rule:a2a.admission", "c
 
 [[feature]]
 name = "Mesh mTLS and signed writes"
-page = "todo"
-planned = "mesh-mtls"
+page = "mesh-mtls.md"
+example = "none"
+example_watch = ["mtls", "signed_writes"]
 ids = ["cargo:mycelium/tls", "cargo:mycelium-core/tls", "guarantee:mesh.tls", "guarantee:mesh.signed_writes"]
 
 [[feature]]
 name = "Node identity, proofs and revocation"
-page = "todo"
-planned = "node-identity"
+page = "node-identity.md"
+example = "identity_one_record"
 ids = ["guarantee:id.proofs_required", "guarantee:id.ca_key_off_node", "guarantee:id.revocation_authority"]
 
 [[feature]]
 name = "Egress allow-list"
-page = "todo"
-planned = "egress-allow-list"
+page = "egress-allow-list.md"
+example = "none"
+example_watch = ["egress_allow", "allow_list"]
 ids = ["guarantee:egress.allow_list", "concept:egress-allow-list"]
 
 [[feature]]
 name = "Credentials attached at egress"
-page = "todo"
-planned = "credentials-at-egress"
+page = "credentials-at-egress.md"
+example = "none"
+example_watch = ["credential_binding", "egress_credentials"]
 ids = ["guarantee:egress.credentials", "concept:credential-binding"]
 
 [[feature]]
 name = "Confined fleet (agent pods reach only their gateway)"
-page = "todo"
-planned = "confined-fleet"
+page = "confined-fleet.md"
+example = "confined_fleet_node"
 ids = ["guarantee:net.confinement"]
 
 # Durability and agreement
 
 [[feature]]
 name = "Persistence"
-page = "todo"
-planned = "persistence"
+page = "persistence.md"
+example = "none"
+example_watch = ["persistence_mode", "wal_"]
 ids = ["guarantee:persist.configured", "guarantee:persist.sync_mode", "guarantee:persist.unreadable_refused"]
 
 [[feature]]
 name = "Data-at-rest encryption"
-page = "todo"
-planned = "data-at-rest-encryption"
+page = "data-at-rest-encryption.md"
+example = "none"
+example_watch = ["at_rest", "data_at_rest"]
 ids = ["guarantee:at_rest.cipher"]
 
 [[feature]]
 name = "Consensus, electorates, locks and leadership"
-page = "todo"
-planned = "consensus-electorates"
+page = "consensus-electorates.md"
+example = "coordination_integrity"
 ids = ["cargo:mycelium/consensus", "guarantee:cons.safety_profile", "rule:cons.acceptor_memory", "concept:consensus"]
 
 [[feature]]
 name = "Destination commit (exactly-once effects)"
-page = "todo"
-planned = "destination-commit"
+page = "destination-commit.md"
+example = "destination_commit"
 ids = ["concept:destination-commit", "cargo:mycelium-effects/tuple-space", "cargo:mycelium-effects/envelope",
        "cargo:mycelium-effects/metrics", "crate:mycelium-effects"]
 
@@ -306,8 +311,8 @@ links = ["concept:destination-commit", "concept:causal-records"]
 
 [[feature]]
 name = "Replay bundles"
-page = "todo"
-planned = "replay"
+page = "replay.md"
+example = "replay_a_bundle"
 # `sim` is listed among the plan's build features; it is mapped here because it is also what makes the node
 # binary record a replay bundle (v2.16.0), which a reader turns on.
 ids = ["concept:bundle", "cargo:mycelium/sim", "cargo:mycelium-core/sim", "concept:seam", "crate:mycelium-sim"]
@@ -505,8 +510,8 @@ ids = ["concept:award", "crate:mycelium-commitment"]
 
 [[feature]]
 name = "Durability receipts"
-page = "todo"
-planned = "durability-receipts"
+page = "durability-receipts.md"
+example = "receipt_ladder"
 ids = ["concept:receipt", "concept:operation-id", "concept:delivery-unknown", "concept:buffered"]
 
 [[feature]]

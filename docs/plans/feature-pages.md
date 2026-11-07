@@ -1,6 +1,6 @@
 # Feature pages — one short, checked entry page per feature
 
-**Status:** in progress, rev 0.7 (F3's first PR: eleven pages and P4's anchors, 2026-11-07). Agreed with the maintainer on 2026-10-19; work began after v2.36.0 shipped.
+**Status:** in progress, rev 0.8 (F3's second PR: eleven pages, 2026-11-07; rev 0.7, its first: eleven pages and P4's anchors). Agreed with the maintainer on 2026-10-19; work began after v2.36.0 shipped.
 **F1 is delivered** (PR #654): the template and three pilot pages, each independently reviewed against the code (two
 rounds and a confirmation), and the template revised from them (§4.1). **F2 is delivered** (PR #655): the feature
 registry and the gate, each check shown failing with a planted fault (§4.2). F3 is next. Rev 0.2 answered the
@@ -58,7 +58,7 @@ Three mechanisms keep the pages true, each covering a different kind of check.
 |---|---|---|
 | F1 — *delivered (#654): the template ([`docs/features/README.md`](../features/README.md), [`_template.md`](../features/_template.md)), revised from the pilots (§4.1), and the three pilots — [activation egress proxy](../features/activation-egress-proxy.md), [inference routing](../features/inference-routing.md) and [fleet-wide history limits](../features/fleet-history-limits.md) — each independently reviewed against the code (two rounds and a confirmation)* | The template and three pilot pages: the activation egress proxy (rows L and M), fleet-wide history limits (K2) and inference routing (R) | Each pilot page has an independent review against the code, and the template is revised from what the pilots show. |
 | F2 — *delivered (#655): [`docs/features/registry.toml`](../features/registry.toml), [`scripts/check-feature-pages.py`](../../scripts/check-feature-pages.py) and its mutation suite [`scripts/test-check-feature-pages.py`](../../scripts/test-check-feature-pages.py); evidence in §4.2* | The feature registry and the gate (F-G) | The gate fails on an unmapped id, on a page with a missing section, on a dead link or setting, and on an example absent from the index. Each of these is shown failing with a planted fault. |
-| F3 — *in progress: 55 pages in five PRs by capability-map row; the first (authority and the gateway, 11 pages, with P4's anchors) is this plan's rev 0.7* | The remaining pages, an estimated 30 to 40 | The gate is green and every capability-map row lists its pages. The map's maintainer note names the feature pages and the registry. |
+| F3 — *in progress: 55 pages in five PRs by capability-map row; the first (authority and the gateway, 11 pages, with P4's anchors) is this plan's rev 0.7; the second (identity, transport, egress and durability, 11 pages) rev 0.8* | The remaining pages, an estimated 30 to 40 | The gate is green and every capability-map row lists its pages. The map's maintainer note names the feature pages and the registry. |
 | F4 | The `/doc-coverage` pass (F-S) and the fifth rule (F-P) | The pass has been run once and its findings closed. The policy page, CLAUDE.md and `/adversarial-review` all state the rule, and "four rules" reads "five" wherever it appears. |
 
 **Not in scope:** rewriting the guide chapters or runbooks the pages link to.
