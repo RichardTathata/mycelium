@@ -160,40 +160,41 @@ links = ["concept:decision-trace", "concept:causal-records", "cargo:mycelium/ote
 
 [[feature]]
 name = "Authorising actions (the action evaluator)"
-page = "todo"
-planned = "action-authorisation"
+page = "action-authorisation.md"
+example = "mcp_tool_authority"
 ids = ["rule:ae.preflight", "guarantee:ae.authorised_at_seam", "guarantee:ae.recorded_before_dispatch",
        "concept:enforcement-point", "concept:indeterminate", "concept:action-envelope", "concept:evaluator", "concept:policy-revision"]
 
 [[feature]]
 name = "Evidence journal"
-page = "todo"
-planned = "evidence-journal"
+page = "evidence-journal.md"
+example = "none"
+example_watch = ["evidence_journal"]
 ids = ["concept:evidence-journal"]
 
 [[feature]]
 name = "Provider enforcement"
-page = "todo"
-planned = "provider-enforcement"
+page = "provider-enforcement.md"
+example = "authority_drain"
 ids = ["guarantee:prov.enforcement", "rule:provider.enforcement"]
 
 [[feature]]
 name = "Mandates and authority drain"
-page = "todo"
-planned = "mandates"
+page = "mandates.md"
+example = "curator_handover"
 ids = ["concept:mandate", "concept:continuation", "guarantee:authz.execution_authority",
        "guarantee:authz.durable_epochs", "concept:strict-eligibility"]
 
 [[feature]]
 name = "Audit trail and audit export"
-page = "todo"
-planned = "audit-trail"
+page = "audit-trail.md"
+example = "auditor_questions"
 ids = ["guarantee:audit.chain", "guarantee:audit.sink", "cargo:mycelium/compliance", "cargo:mycelium-core/compliance"]
 
 [[feature]]
 name = "Guardrails"
-page = "todo"
-planned = "guardrails"
+page = "guardrails.md"
+example = "guardrail_fleet"
 ids = ["cargo:mycelium-guardrails/compliance", "cargo:mycelium-guardrails/gateway",
        "cargo:mycelium-guardrails/metrics-export", "crate:mycelium-guardrails"]
 
@@ -201,35 +202,39 @@ ids = ["cargo:mycelium-guardrails/compliance", "cargo:mycelium-guardrails/gatewa
 
 [[feature]]
 name = "The HTTP gateway and its credentials"
-page = "todo"
-planned = "http-gateway"
+page = "http-gateway.md"
+example = "none"
+example_watch = ["http_gateway"]
 ids = ["cargo:mycelium/gateway", "guarantee:gw.not_open", "guarantee:gw.exposed_closed", "guarantee:gw.token_tables",
        "rule:gateway.auth"]
 links = ["cargo:mycelium/compliance"]  # the token tables need it
 
 [[feature]]
 name = "Single sign-on at the gateway (OIDC)"
-page = "todo"
-planned = "gateway-sso"
+page = "gateway-sso.md"
+example = "none"
+example_watch = ["oidc", "sso"]
 ids = ["guarantee:gw.oidc"]
 links = ["cargo:mycelium/compliance"]  # `[oidc]` needs it
 
 [[feature]]
 name = "Gateway TLS"
-page = "todo"
-planned = "gateway-tls"
+page = "gateway-tls.md"
+example = "none"
+example_watch = ["gateway_tls", "native_tls"]
 ids = ["guarantee:gw.tls"]
 
 [[feature]]
 name = "Gateway caller identity"
-page = "todo"
-planned = "gateway-caller-identity"
+page = "gateway-caller-identity.md"
+example = "none"
+example_watch = ["caller_identity", "gateway_caller"]
 ids = ["concept:gateway-caller", "guarantee:gw.caller_profile"]
 
 [[feature]]
 name = "A2A interoperability"
-page = "todo"
-planned = "a2a"
+page = "a2a.md"
+example = "a2a_skill_authority"
 ids = ["cargo:mycelium/a2a", "guarantee:a2a.admission", "rule:a2a.admission", "concept:a2a-agent-card"]
 
 # Identity, transport and egress

@@ -43,7 +43,7 @@ This feature is turned on in code.
 - [`MATRIX_ROWS`](../../src/doctor.rs) and [`matrix_row`](../../src/doctor.rs) — each core guarantee's row of the
   shared-responsibility matrix, which every guarantee line names; `scripts/check-pilot-kit.py` holds it equal to the
   matrix page's table.
-- [`persistence`](../reference/configuration.md#the-fields) — the one field `doctor` inspects on disk, read-only.
+- [`persistence`](../reference/configuration.md#persistence) — the one field `doctor` inspects on disk, read-only.
 - `doctor_names_the_refusal_start_would_give`, in [`src/doctor.rs`](../../src/doctor.rs): runs `doctor` and
   `start()` over the same configuration under `secure-single-domain` and compares the words.
 

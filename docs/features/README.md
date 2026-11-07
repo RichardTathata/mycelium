@@ -22,7 +22,7 @@ Every page has these six sections, in this order, with these headings. Copy
    fixed sentence "This feature is turned on in code", then lists one item per line: the item's name in
    backticks, linked to the file that defines it, whose last path segment is a `fn`, `struct`, `enum`, `trait` or
    `const` in the linked file. A configuration field the feature reads is its own line, `name` in backticks linked
-   to [`configuration.md#the-fields`](../reference/configuration.md#the-fields). The section ends with the test that
+   to its row, `configuration.md#<field>`. The section ends with the test that
    runs that code: its name in backticks, a `fn <name>` in the linked file (checked pre-push), listed by CI's test
    universe and matched by no entry of `scripts/test-coverage-exceptions.txt` (checked in CI). A test that reads
    the page is preferred; a test that runs a hand-kept copy is recorded as such.
@@ -36,9 +36,10 @@ Every page has these six sections, in this order, with these headings. Copy
 5. **What it guarantees, and what it does not.** The guarantee and rule ids, each linked to where it is
    catalogued, the plan rows whose *not built* items apply, and the
    [what-is-proven](../operations/what-is-proven.md) ledger. A guarantee id a companion registers (such as
-   `stem.*`) is not in the guarantee catalogue: link it to where its states are described. Until the catalogues, the
-   ledger, the configuration table and the plans have per-entry anchors, link the table and name the row beside the
-   link.
+   `stem.*`) is not in the guarantee catalogue: link it to where its states are described. Link one entry by its
+   anchor: a guarantee as `guarantee-catalogue.md#<id>`, a rule by its heading, a ledger row by its `<a id>`, a
+   configuration field as `configuration.md#<field>` (plan P4). The plans' rows have no anchors of their own: link
+   the section and name the row beside the link.
 6. **Go deeper.** The guide chapter, the operations runbook, the design record and the code. Where a slot has
    nothing, say so: "no design record; the plan row is the record", or no runbook, naming what covers the ground
    instead.
@@ -80,7 +81,10 @@ recognises the markers above this way:
   file; its last path segment must be a `fn`, `struct`, `enum`, `trait`, `const`, `type` or `static` there, and a
   CamelCase qualifier (`Rule::` in `Rule::at_most`) a type there.
 - **A configuration field** is a backticked name linked to `configuration.md`; it must have a `| name |` row in the
-  field table.
+  field table, and the link must point at that row, `configuration.md#<name>`.
+- **A catalogue entry** is a backticked id in a link to the guarantee or rule catalogue: one id per link, pointing at
+  that entry (`guarantee-catalogue.md#<id>`, or the rule's heading). Every row of the configuration table and of the
+  what-is-proven ledger must carry its own `<a id>`, so a row added without one fails.
 - **A test** is a backticked snake_case name (a module path allowed), not itself a link, in *Turn it on*'s last
   item or anywhere in *See it work*. Its paragraph or list item must link its `.rs` file, it must be a `#[test]`
   `fn` there, and it must not be excepted by `scripts/test-coverage-exceptions.txt`. In CI the `test-coverage` job
@@ -101,8 +105,19 @@ suite is `scripts/test-check-feature-pages.py`.
 | [Activation egress proxy](activation-egress-proxy.md) | An activation command reaches hosts by name through a proxy its stem runs, with credentials attached at the proxy | Acquire and adapt capabilities |
 | [Fleet-wide history limits](fleet-history-limits.md) | A history-limited rule counts an actor's calls across the fleet, exactly by consensus seats or approximately by a gossiped tally | Constrain actions |
 | [Causal records](causal-records.md) | A request's `correlation` and `parent`, carried in its payload into every record its work produces; `mycelium explain --correlation` renders one run as one chain and `--closure` the dependency closure of one record, holes named and never filled | Constrain actions with authority and evidence |
-| [Declare](declare.md) | `mycelium declare`: a project's units and skills sent to a gateway once, or kept current under `--watch` as the files change — `wire-check` first, the previous declaration kept when it refuses | Discover participants and signal (the first step) |
-| [Init](init.md) | `mycelium init`: a scaffold written from a template the binary embeds — a Rust fleet with one call governed at the provider, or a Python agent against the published node — pinned to the binary's release | Discover participants and signal (the first step) |
-| [Doctor](doctor.md) | `mycelium doctor`: what `start()` would print and whether it would refuse, from the configuration and the environment, without a node; the effective configuration with each field's source | Discover participants and signal (the first step) |
-| [Published node](published-node.md) | Every `v*` tag publishes the three binaries for three platforms with sums, and a multi-arch image; a developer starts a node without a toolchain | Discover participants and signal (the first step) |
+| [Declare](declare.md) | `mycelium declare`: a project's units and skills sent to a gateway once, or kept current under `--watch` as the files change — `wire-check` first, the previous declaration kept when it refuses | Start from the published node |
+| [Init](init.md) | `mycelium init`: a scaffold written from a template the binary embeds — a Rust fleet with one call governed at the provider, or a Python agent against the published node — pinned to the binary's release | Start from the published node |
+| [Doctor](doctor.md) | `mycelium doctor`: what `start()` would print and whether it would refuse, from the configuration and the environment, without a node; the effective configuration with each field's source | Start from the published node |
+| [Published node](published-node.md) | Every `v*` tag publishes the three binaries for three platforms with sums, and a multi-arch image; a developer starts a node without a toolchain | Start from the published node |
 | [Inference routing as policy](inference-routing.md) | The action evaluator decides each routed model call on its destination, locality and data class | Constrain actions; Run tools and reasoning |
+| [Authorising actions](action-authorisation.md) | An enforcement point asks a replaceable evaluator — permit, deny or indeterminate — before the work runs, and records the decision first | Constrain actions |
+| [Evidence journal](evidence-journal.md) | The node-local, fsynced, never-gossiped record of each decision; only a hash-bearing reference enters the audit chain | Constrain actions |
+| [Provider enforcement](provider-enforcement.md) | A protected call is checked where it runs, whichever door it came through; fails closed without an evaluator | Constrain actions |
+| [Mandates and authority drain](mandates.md) | One appointment checked at the resource; a newer epoch stops the old holder's writes and running work, across restarts | Constrain actions |
+| [Audit trail and audit export](audit-trail.md) | Governance actions sealed into a per-node hash chain, mirrored to a SIEM or WORM sink, pruned behind a signed checkpoint | Constrain actions |
+| [Guardrails](guardrails.md) | One declared policy compiled onto a node, each clause labelled with its strength; off-list callers refused at the provider and the denial sealed | Constrain actions |
+| [The HTTP gateway and its credentials](http-gateway.md) | The node's HTTP edge, closed by a bearer, token tables or SSO; an exposed open gateway refuses to start | Constrain actions |
+| [Single sign-on at the gateway](gateway-sso.md) | An IdP's JWT as a gateway bearer, its groups mapped to scopes | Constrain actions |
+| [Gateway TLS](gateway-tls.md) | The gateway serves HTTPS with the node identity's certificate or an operator's | Constrain actions |
+| [Gateway caller identity](gateway-caller-identity.md) | A provider sees the client behind a gateway call, qualified by its issuer and signed by the gateway | Constrain actions |
+| [A2A interoperability](a2a.md) | An AgentCard and `/a2a` task dispatch in the 1.0 and 0.3 shapes, every send through the same doors | Run tools and reasoning |

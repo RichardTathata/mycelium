@@ -111,6 +111,26 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   record is in flight, and the origin asks it again on its next round. A node's own local writes are not covered
   (a receipt never asks a node about its own write). `src/agent/replica_sync.rs` module doc; `deprecations.md` §81.
 
+### Changed
+
+- **The generated guarantee catalogue's rows carry an anchor** (`docs/plans/feature-pages.md` P4): each descriptor row
+  of `catalogue_markdown`'s output (`mycelium::guarantee`, public) begins `<a id="<id>"></a>` before the backticked id,
+  so a consumer that parses the first cell of that table now meets the anchor first. The JSON half is unchanged.
+- **The `provider.enforcement` rule says what the check refuses** (rule revision 2): its outcomes add the preflight's
+  not-recorded refusal, `caller_context_refused`, `malformed_call`, `resource_unnamed`, `resource_not_here`,
+  `resource_not_served` and the no-action `not_protected`, and its summary no longer says that with enforcement off
+  nothing is checked — an attached cohort budget still verifies the caller context and admits by cohort. The
+  guarantee report's `prov.enforcement` line says the same. No behaviour changed.
+
+### Documentation
+
+- **Feature pages for authority and the gateway** (`docs/plans/feature-pages.md` F3, first of five PRs): eleven pages
+  under `docs/features/` — authorising actions, the evidence journal, provider enforcement, mandates and authority
+  drain, the audit trail, guardrails, the HTTP gateway and its credentials, single sign-on, gateway TLS, gateway caller
+  identity and A2A — each registered and gated by `scripts/check-feature-pages.py`, and listed on the capability map.
+  **Per-entry anchors (P4):** the generated guarantee catalogue gives each descriptor row `<a id="<id>">`, and the
+  configuration field table and the what-is-proven ledger give each row an `<a id>`, so a page links one entry.
+
 ## [2.39.0] — 2026-11-06
 
 Wire **v12** unchanged (`PREV = 11`). Upgrade notes: `docs/guide/deprecations.md` §66–§77. Companions on their own

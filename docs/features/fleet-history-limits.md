@@ -29,19 +29,19 @@ This feature is turned on in code.
   of the electorate, or of the cluster when none is declared, and a node votes only while it runs a consensus
   listener. The proposer counts its own vote; the `mycelium` binary starts a listener, an embedding application
   starts its own ([guide 04 § API](../guide/04-consensus.md#api)).
-- [`control_max_staleness_ms`](../reference/configuration.md#the-fields): how fresh a peer's heartbeat must be for
+- [`control_max_staleness_ms`](../reference/configuration.md#control_max_staleness_ms): how fresh a peer's heartbeat must be for
   the tally's coverage.
-- [`control_min_peers_heard`](../reference/configuration.md#the-fields): how many peers this node must have heard
+- [`control_min_peers_heard`](../reference/configuration.md#control_min_peers_heard): how many peers this node must have heard
   from before a tally is established.
-- [`max_clock_drift_ms`](../reference/configuration.md#the-fields): a heartbeat dated further ahead than this is
+- [`max_clock_drift_ms`](../reference/configuration.md#max_clock_drift_ms): a heartbeat dated further ahead than this is
   unknown coverage.
-- [`tls`](../reference/configuration.md#the-fields): without it this node can verify no member, so a non-peer inside
+- [`tls`](../reference/configuration.md#tls): without it this node can verify no member, so a non-peer inside
   the horizon makes the tally `Indeterminate`.
-- [`require_identity_proofs`](../reference/configuration.md#the-fields): with it off, a fabricated node id's tally
+- [`require_identity_proofs`](../reference/configuration.md#require_identity_proofs): with it off, a fabricated node id's tally
   entries can count.
-- [`consensus_require_electorate`](../reference/configuration.md#the-fields): a seat outside a declared electorate is
+- [`consensus_require_electorate`](../reference/configuration.md#consensus_require_electorate): a seat outside a declared electorate is
   refused.
-- [`consensus_electorate`](../reference/configuration.md#the-fields): must agree with the fleet's `exclusive_default`
+- [`consensus_electorate`](../reference/configuration.md#consensus_electorate): must agree with the fleet's `exclusive_default`
   electorate, or every claim is refused. The electorate itself is declared at `/gateway/govern/electorate`, not in
   configuration.
 - `a_saturating_actor_gets_its_limit_each_short_window`, in
@@ -61,7 +61,7 @@ has no row for this feature. The end-to-end runs are tests in
 
 - **Rule:** [`ae.preflight`](../reference/rule-catalogue.md#aepreflight), whose inputs include the fleet counter's
   seats and the fleet tally.
-- **Guarantees:** [`ae.authorised_at_seam` and `ae.recorded_before_dispatch`](../reference/guarantee-catalogue.md#the-descriptors)
+- **Guarantees:** [`ae.authorised_at_seam`](../reference/guarantee-catalogue.md#ae.authorised_at_seam) and [`ae.recorded_before_dispatch`](../reference/guarantee-catalogue.md#ae.recorded_before_dispatch)
   cover each decision. No guarantee id is specific to the fleet scopes.
 - **Contract:** the nine `fleet_*` cases and `PolicyClause::AllowAtMostAcross` in
   [`ae_contract.rs`](../../src/agent/ae_contract.rs), which a replacement evaluator must pass or decline

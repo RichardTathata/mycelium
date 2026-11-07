@@ -161,9 +161,9 @@ has no row for this feature. The tests: in [`src/mandate/grant.rs`](../../src/ma
 - **The `grant` fault class** ([`run`](../../src/faults/grant.rs); `mycelium test --faults grant <units-dir> --config
   <node.toml>`, one of the [fault classes](../guide/00-concepts.md#test-faults)) — adopter-surface X3's exit on the
   declaration's own fleet, and the one-hour job's step 4. It exercises
-  [`persist.configured`](../reference/guarantee-catalogue.md) and [`mesh.tls`](../reference/guarantee-catalogue.md) (the
+  [`persist.configured`](../reference/guarantee-catalogue.md#persist.configured) and [`mesh.tls`](../reference/guarantee-catalogue.md#mesh.tls) (the
   grant replayed from the WAL, the identity that signs it) and the decision point
-  [`ae.preflight`](../reference/rule-catalogue.md) (who may issue). The first
+  [`ae.preflight`](../reference/rule-catalogue.md#aepreflight) (who may issue). The first
   `[[rule]]` with `requires_grant = true` ([unit file](../reference/unit-file.md#rule)) is read as a **selector**: its
   resource names the tool the agent's policy requires a grant for (the default-deny the class shows is the state
   machine's own check, `require_grant_for`), its actor the agent's unit; the actor of a rule admitting `grant.issue` on

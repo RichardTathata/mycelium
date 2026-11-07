@@ -35,7 +35,7 @@ This feature is turned on in code.
   ([`decide_grant`](../../src/agent/http/grants.rs)), the fleet having no gateway port.
 - `replay` needs the binary built with the `sim` Cargo feature (`cargo build --bin mycelium --features cli,sim`); on
   any other it reads `not_in_build` naming `sim`. `revoke` needs `tls` and `compliance` in the build and a `[tls]`
-  table; `restart` needs [`persistence`](../reference/configuration.md#the-fields); `policy-diff` needs `gateway` and
+  table; `restart` needs [`persistence`](../reference/configuration.md#persistence); `policy-diff` needs `gateway` and
   `tls` and `--against <units-dir>`, the proposed revision; `recovery` needs `[persistence]` and a `gateway` + `tls`
   build; `grant` needs `[tls]`, `[persistence]`, a `compliance` build (the member keys a grant's checkpoint is verified
   against) and a declaration with a grant-required rule and a rule admitting someone to `grant.issue` on it — without
@@ -64,14 +64,14 @@ tests are in [`src/faults.rs`](../../src/faults.rs): `a_declaration_wire_check_r
 ## What it guarantees, and what it does not
 
 - It adds no guarantee of its own; it exercises the ones in the guarantee catalogue —
-  [`persist.unreadable_refused`](../reference/guarantee-catalogue.md) and
-  [`persist.configured`](../reference/guarantee-catalogue.md) (`restart`), [`mesh.tls`](../reference/guarantee-catalogue.md)
-  and [`mesh.signed_writes`](../reference/guarantee-catalogue.md) (`revoke`),
-  [`id.revocation_authority`](../reference/guarantee-catalogue.md) (`revoke`; it reads `not_configured` under the
-  development posture, the CA key being on the node), [`mesh.tls`](../reference/guarantee-catalogue.md) and
-  [`persist.sync_mode`](../reference/guarantee-catalogue.md) (`grant`, `recovery`) — and the decision points in the rule catalogue:
-  [`membership.governed`](../reference/rule-catalogue.md) (`partition`, `replay`), [`kv.expiry`](../reference/rule-catalogue.md)
-  and [`cap.match`](../reference/rule-catalogue.md) (`partition`), [`ae.preflight`](../reference/rule-catalogue.md)
+  [`persist.unreadable_refused`](../reference/guarantee-catalogue.md#persist.unreadable_refused) and
+  [`persist.configured`](../reference/guarantee-catalogue.md#persist.configured) (`restart`), [`mesh.tls`](../reference/guarantee-catalogue.md#mesh.tls)
+  and [`mesh.signed_writes`](../reference/guarantee-catalogue.md#mesh.signed_writes) (`revoke`),
+  [`id.revocation_authority`](../reference/guarantee-catalogue.md#id.revocation_authority) (`revoke`; it reads `not_configured` under the
+  development posture, the CA key being on the node), [`mesh.tls`](../reference/guarantee-catalogue.md#mesh.tls) and
+  [`persist.sync_mode`](../reference/guarantee-catalogue.md#persist.sync_mode) (`grant`, `recovery`) — and the decision points in the rule catalogue:
+  [`membership.governed`](../reference/rule-catalogue.md#membershipgoverned) (`partition`, `replay`), [`kv.expiry`](../reference/rule-catalogue.md#kvexpiry)
+  and [`cap.match`](../reference/rule-catalogue.md#capmatch) (`partition`), [`ae.preflight`](../reference/rule-catalogue.md#aepreflight)
   (`policy-diff`, `grant` — who may issue, decided at `gateway:grants/issue`). Each is reported with its resolution on
   the fleet's node; an id that does not resolve `enforced` is listed as not exercised, with the reason the node gives.
 - **It never runs an activation.** A unit's `[[activation]]` commands are counted and reported `not_applicable`;
@@ -113,7 +113,7 @@ tests are in [`src/faults.rs`](../../src/faults.rs): `a_declaration_wire_check_r
   recorded into the corpus and replayed with the destination reached zero times.
 - **Found by it, and fixed:** a governed member that went dark held the floor — its group entry is written once
   and withdrawn only by a graceful shutdown, so no survivor rolled to re-fill; the governor now counts a member only
-  if it is this node or in its peer table ([`membership.governed`](../reference/rule-catalogue.md) revision 2), and
+  if it is this node or in its peer table ([`membership.governed`](../reference/rule-catalogue.md#membershipgoverned) revision 2), and
   with no peer at all reads the roster as written (a node restarting over persisted entries, or isolated, is not a
   fleet of one). The stale entry stays in the KV until the node returns: the fleet snapshot's group size, the
   `/gateway/mesh/group` members and the group-conflict diagnosis (`group_status`, the P-series detectors) still

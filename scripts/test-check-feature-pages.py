@@ -24,6 +24,7 @@ CASES = ['baseline', 'example-baseline',
          'private-unit-field', 'parser-guard-unit-code', 'unit-heading-without-key',
          'unit-subtable-gone', 'stale-registry-id', 'stale-link', 'mapped-twice', 'exclusion-without-reason',
          'unknown-registry-key', 'unknown-top-level-key', 'list-key-not-a-list', 'name-not-a-string',
+         'watch-not-a-list', 'id-not-a-string', 'reason-not-a-string',
          'feature-without-page', 'todo-without-planned', 'planned-names-existing-page',
          # (b) pages and the registry
          'page-not-in-registry', 'registry-page-missing', 'two-features-one-page', 'subdirectory',
@@ -35,6 +36,10 @@ CASES = ['baseline', 'example-baseline',
          'absent-fn', 'absent-qualifier', 'dead-code-item-link', 'in-code-without-item',
          # (f) configuration fields
          'missing-config-row', 'parser-guard-fields',
+         # P4: a link names one entry and points at its anchor; the hand-kept rows carry theirs
+         'config-link-to-another-field', 'config-link-to-the-table', 'guarantee-link-to-another-entry',
+         'rule-link-to-another-entry', 'catalogue-link-naming-two-ids', 'config-row-without-anchor',
+         'ledger-row-without-anchor', 'ledger-anchor-twice',
          # (g) tests
          'absent-test', 'absent-test-in-first-paragraph', 'short-test-absent', 'not-a-test', 'none-names-no-test', 'test-without-file',
          'excepted-test', 'in-code-without-test', 'test-not-executed', 'script-key-not-a-run', 'test-in-wrong-target', 'integration-test-in-wrong-binary',
@@ -82,7 +87,7 @@ A page the mutation suite plants, so the gate's example branch runs.
 
 ## Turn it on
 
-- [`tls`](../reference/configuration.md#the-fields).
+- [`tls`](../reference/configuration.md#tls).
 
 ## See it work
 
@@ -170,8 +175,8 @@ case('nested-test-module')
 passes({'mycelium-wasm-host/src/rules.rs': [('\n];\n', '\n];\n\n#[cfg(test)]\nmod outer {\n    #[cfg(test)]\n    mod inner {}\n'
                                                  '    fn planted() { let _ = GuaranteeDescriptor::new(PLANTED_ID, 1); }\n}\n')]})
 case('turn-on-name-without-file')
-edits, pages = with_example([('- [`tls`](../reference/configuration.md#the-fields).\n',
-                              '- [`tls`](../reference/configuration.md#the-fields).\n- Then set `planted_setting_name` as well.\n')])
+edits, pages = with_example([('- [`tls`](../reference/configuration.md#tls).\n',
+                              '- [`tls`](../reference/configuration.md#tls).\n- Then set `planted_setting_name` as well.\n')])
 passes(edits, pages)
 case('crate-linked')
 edits, pages = with_example([('A page the mutation suite plants', 'A page about `mycelium-commitment` the mutation suite plants')],
@@ -307,20 +312,28 @@ fails('has an unknown key `link`',
 case('unknown-top-level-key')
 fails('unknown top-level key `planted`', {REG: [('# The feature registry', 'planted = 1\n# The feature registry')]})
 case('list-key-not-a-list')
-fails('feature "Evidence journal": `links` must be a list of strings',
-      {REG: [('name = "Evidence journal"\npage = "todo"\n', 'name = "Evidence journal"\npage = "todo"\nlinks = "concept:planted"\n')]})
+fails('feature "Published node": `links` must be a list of strings',
+      {REG: [('name = "Published node"\npage = "published-node.md"\n', 'name = "Published node"\npage = "published-node.md"\nlinks = "concept:planted"\n')]})
 case('name-not-a-string')
 fails('`name` must be a string',
-      {REG: [('name = "Evidence journal"\n', 'name = 1\n')]})
+      {REG: [('name = "Published node"\n', 'name = 1\n')]})
+case('watch-not-a-list')
+fails('feature "Published node": `example_watch` must be a list of strings',
+      {REG: [('example_watch = ["published_node", "release_artefact"]', 'example_watch = "published_node"')]})
+case('id-not-a-string')
+fails('feature "Published node": `ids` must be a list of strings',
+      {REG: [('ids = ["concept:published-node"]', 'ids = ["concept:published-node", 1]')]})
+case('reason-not-a-string')
+fails('`reason` must be a string', {REG: [('reason = "An external prerequisite', 'reason = 1\nwhy = "An external prerequisite')]})
 case('todo-without-planned')
-fails('feature "Authorising actions (the action evaluator)" is "todo" but names no `planned` page',
-      {REG: [('page = "todo"\nplanned = "action-authorisation"\n', 'page = "todo"\n')]})
+fails('feature "Published node" is "todo" but names no `planned` page',
+      {REG: [('page = "published-node.md"\n', 'page = "todo"\n')]})
 case('planned-names-existing-page')
 fails('names `planned` page "inference-routing", which is already the page of "Inference routing as policy"',
-      {REG: [('planned = "action-authorisation"\n', 'planned = "inference-routing"\n')]})
+      {REG: [('page = "published-node.md"\n', 'page = "todo"\nplanned = "inference-routing"\n')]})
 case('feature-without-page')
-fails('feature "Evidence journal" names no page',
-      {REG: [('name = "Evidence journal"\npage = "todo"\n', 'name = "Evidence journal"\n')]})
+fails('feature "Published node" names no page',
+      {REG: [('name = "Published node"\npage = "published-node.md"\n', 'name = "Published node"\n')]})
 
 # (b)
 case('page-not-in-registry')
@@ -375,6 +388,31 @@ fails('names the configuration field `control_min_peers_seen`, which has no row'
       {FLEET: [('[`control_min_peers_heard`]', '[`control_min_peers_seen`]')]})
 case('parser-guard-fields')
 fails('no field rows found under "## The fields"', {'docs/reference/configuration.md': [('\n## The fields\n', '\n## Fields\n')]})
+
+# P4
+case('config-link-to-another-field')
+fails('links the configuration field `max_clock_drift_ms` to #tls',
+      {FLEET: [('(../reference/configuration.md#max_clock_drift_ms)', '(../reference/configuration.md#tls)')]})
+case('config-link-to-the-table')
+fails('links the configuration field `max_clock_drift_ms` to #the-fields',
+      {FLEET: [('(../reference/configuration.md#max_clock_drift_ms)', '(../reference/configuration.md#the-fields)')]})
+case('guarantee-link-to-another-entry')
+fails('links the guarantee `ae.authorised_at_seam` to #gw.tls',
+      {ROUTING: [('[`ae.authorised_at_seam`](../reference/guarantee-catalogue.md#ae.authorised_at_seam)',
+                  '[`ae.authorised_at_seam`](../reference/guarantee-catalogue.md#gw.tls)')]})
+case('rule-link-to-another-entry')
+fails('links the rule `ae.preflight` to #gatewayauth',
+      {ROUTING: [('(../reference/rule-catalogue.md#aepreflight)', '(../reference/rule-catalogue.md#gatewayauth)')]})
+case('catalogue-link-naming-two-ids')
+fails('one link to the guarantee catalogue names 2 ids',
+      {ROUTING: [('[`ae.authorised_at_seam`](../reference/guarantee-catalogue.md#ae.authorised_at_seam) and [`ae.recorded_before_dispatch`](../reference/guarantee-catalogue.md#ae.recorded_before_dispatch)',
+                  '[`ae.authorised_at_seam` and `ae.recorded_before_dispatch`](../reference/guarantee-catalogue.md#ae.authorised_at_seam)')]})
+case('config-row-without-anchor')
+fails('the field row `bind_address` carries no', {'docs/reference/configuration.md': [('<a id="bind_address"></a>', '')]})
+case('ledger-row-without-anchor')
+fails('a ledger row carries no <a id>', {'docs/operations/what-is-proven.md': [('<a id="hot-path-cost"></a>', '')]})
+case('ledger-anchor-twice')
+fails('the anchor `hot-path-cost` is also line', {'docs/operations/what-is-proven.md': [('<a id="gateway-overhead"></a>', '<a id="hot-path-cost"></a>')]})
 
 # (g)
 case('absent-test')
@@ -524,7 +562,7 @@ edits, pages = with_example(reg_edits=[('ids = ["concept:award", "crate:mycelium
 fails('does not link crate:mycelium-commitment', edits, pages)
 case('guarantee-not-linked')
 fails('does not link guarantee:ae.authorised_at_seam',
-      {ROUTING: [('[`ae.authorised_at_seam` and `ae.recorded_before_dispatch`]', '[`ae.recorded_before_dispatch`]')]})
+      {ROUTING: [('[`ae.authorised_at_seam`](../reference/guarantee-catalogue.md#ae.authorised_at_seam) and ', '')]})
 
 POSITIVE = {'baseline', 'example-baseline', 'executed-baseline', 'fenced-unit-heading', 'fenced-page-heading',
             'glob-workspace-member', 'descriptor-in-comment',

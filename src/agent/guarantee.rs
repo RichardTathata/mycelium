@@ -1012,7 +1012,7 @@ pub(crate) fn core_guarantees() -> Vec<GuaranteeDescriptor> {
           always,
           |c| {
               #[cfg(all(feature = "gateway", feature = "tls"))]
-              { if c.provider_enforcement.load(std::sync::atomic::Ordering::Acquire) { Resolution::Enforced } else { Resolution::NotConfigured { missing: "with_provider_enforcement (off: nothing is checked at this provider, whatever the gateway does)" } } }
+              { if c.provider_enforcement.load(std::sync::atomic::Ordering::Acquire) { Resolution::Enforced } else { Resolution::NotConfigured { missing: "with_provider_enforcement (off: no authority is checked at this provider, whatever the gateway does; an attached cohort budget still admits by cohort)" } } }
               #[cfg(not(all(feature = "gateway", feature = "tls")))]
               { let _ = c; Resolution::NotInBuild { feature: "gateway + tls" } }
           }),
@@ -1298,7 +1298,8 @@ pub fn catalogue_markdown(matrix: &[(&str, GuaranteeReport)]) -> String {
     out.push_str("## The descriptors\n\n| Id | Rev | Subsystem | Kind | Promise | Needs | Enforcement points | Docs |\n|---|---|---|---|---|---|---|---|\n");
     let esc = |t: &str| t.replace('|', "\\|");
     for d in &descs {
-        out.push_str(&format!("| `{}` | {} | {} | {:?} | {} | {} | {} | `{}` |\n", d.id, d.revision, d.subsystem, d.kind, esc(d.promise), esc(d.needs),
+        // Each row carries `<a id="<id>">`, so a page can link one guarantee (feature-pages plan P4).
+        out.push_str(&format!("| <a id=\"{}\"></a>`{}` | {} | {} | {:?} | {} | {} | {} | `{}` |\n", d.id, d.id, d.revision, d.subsystem, d.kind, esc(d.promise), esc(d.needs),
             d.enforcement_points.iter().map(|e| format!("`{}`", esc(e))).collect::<Vec<_>>().join(", "), d.docs));
     }
     out.push_str("\n## The state matrix\n\nEach guarantee's resolution on an **unstarted** node (nothing attached) under the reference configurations, in the build the generator ran under (`compliance,a2a`, which implies `gateway` + `tls`). A column is a configuration, a cell is the state the report would log at `start()`; what is missing or not applicable is on the report itself, not here.\n\n");
