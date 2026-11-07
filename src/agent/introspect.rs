@@ -234,6 +234,7 @@ impl GossipAgent {
             signal_client_evictions:  self.task_ctx.signal_handlers.client_evictions(),
             signal_log_kinds_evicted: self.task_ctx.signal_handlers.log_kinds_evicted(),
             signal_log_kinds_refused: self.task_ctx.signal_handlers.log_kinds_refused(),
+            dir_syncs_passed_over: mycelium_core::persistence::dir_syncs_passed_over(),
         }
     }
 

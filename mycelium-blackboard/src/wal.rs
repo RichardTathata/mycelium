@@ -158,6 +158,15 @@ pub(crate) struct WalWriter {
 #[cfg(test)]
 thread_local! {
     pub(crate) static FS_TRACE: std::cell::RefCell<Vec<&'static str>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// The directory each open-time sync synced, in order — the witness's exact holders.
+    pub(crate) static FS_DIRS: std::cell::RefCell<Vec<(&'static str, PathBuf)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Record an open-time directory sync, from inside it. Production records nothing.
+fn fs_dir(_op: &'static str, _dir: &Path) {
+    fs_trace(_op);
+    #[cfg(test)]
+    FS_DIRS.with(|t| t.borrow_mut().push((_op, _dir.to_path_buf())));
 }
 
 fn fs_trace(_op: &'static str) {
@@ -175,7 +184,10 @@ impl WalWriter {
         if let Some(parent) = path.parent()
             && !parent.as_os_str().is_empty()
         {
-            std::fs::create_dir_all(parent)?;
+            // Every directory on the path has its entry synced in the one above it, on every open
+            // (external review 2026-10-31 F7, plan row R6; #718's review); the file's own entry is
+            // synced once the file is open, below.
+            mycelium::create_dir_all_synced_observed(parent, &mut |d| fs_dir("open.mkdir.sync", d))?;
         }
         // Ownership first, repair second, writes last — the core journal's order. A second board on
         // this path, in this process or another, is refused with `WouldBlock` naming the file.
@@ -188,6 +200,8 @@ impl WalWriter {
         if data.is_empty() {
             file.write_all(&wal_header())?;
             data.extend_from_slice(&wal_header());
+            // The header's bytes; the entry naming the file is synced on every open, below.
+            file.sync_all()?;
         } else if data.len() < WAL_HEADER_LEN as usize || &data[..WAL_MAGIC.len()] != WAL_MAGIC {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -205,6 +219,12 @@ impl WalWriter {
 
         // Replay. Post adds a fact; Claim/Release are runtime-only (a claimed-unacked fact
         // re-queues as claimable — at-least-once); Ack is the sole terminal.
+        // The entry naming the file, on every open (F7, R6; #718's review, finding 3): a fresh WAL's
+        // first synced record must not sit in a file a power loss can leave unnamed, and a reopen
+        // covers a file an earlier open created whose sync failed. Told to the test trace from
+        // inside the sync.
+        mycelium::sync_parent_dir_observed(path, &mut |d| fs_dir("open.parent.sync", d))?;
+
         let Folded { facts, total, acked, end: offset, high_water } = fold_wal(&data).map_err(|offset| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -291,6 +311,7 @@ impl WalWriter {
         g.ops_since_sync += 1;
         if g.ops_since_sync >= self.checkpoint_every {
             g.file.sync_data()?;
+            fs_trace("append.sync");
             g.ops_since_sync = 0;
         }
         Ok(())

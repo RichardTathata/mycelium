@@ -2397,6 +2397,40 @@ client that answers PINGs and sends no request is one; a long-running stream hol
 is no per-source cap on the gateway (`max_connections_per_source` is the gossip listener's). A reverse proxy's own
 limits remain the deployment's first bound against a flood.
 
+## 79. A journal or a companion WAL whose directory cannot be synced refuses to open (unreleased, external review 2026-10-31, R6)
+
+**What changed.** Opening the node-local journal (and so the evidence journal, the rights ledger, the revocation and
+epoch journals, the knowledge journals and the effects ledger), the tuple-space store's WAL or the blackboard's WAL now
+syncs the holder of every directory on its path — on every open, not only the directories it creates — and the
+directory holding the file, before the first record is acknowledged. An ancestor that existed before the open and that
+the process may not read (`PermissionDenied`), or whose filesystem does not do directory fsync (`EINVAL`, `ENOTSUP`), is
+passed over — logged once and counted: `mycelium::dir_syncs_passed_over()`, `SystemStats::dir_syncs_passed_over`, and
+with `metrics` the counter `gossip_dir_syncs_passed_over_total`; a directory the open
+created, the directory holding the file, and every other failure refuse the open, naming the directory. A sync
+that fails is returned from the open; it used to be skipped because it was never attempted. `start()` syncs every
+component of the path to `kv/` under `persistence.base_path` on every start, under the same rule. `SystemStats` gained
+the field `dir_syncs_passed_over` (an exhaustive struct literal breaks).
+
+**Who is affected.** A deployment whose journal or WAL directory — the directory holding the file, or one the open
+creates — is on a filesystem that refuses `fsync` on a directory (some FUSE and network filesystems answer `EINVAL`).
+That filesystem already refused the start-time snapshot, which has synced the KV directory since 2.4.4, so a node with
+`[persistence]` there could not start; what is new is that an embedder opening a journal or a companion WAL there
+without `[persistence]` is refused too. An *ancestor* on such a filesystem — a squashfs or iso9660 root under a
+writable data mount, as embedded images have — does not refuse: it is passed over and counted. The pass-over can also
+apply to a directory on the data filesystem itself, if that filesystem answers `EINVAL` or `ENOTSUP` only sometimes (a
+FUSE daemon), but only to a directory that existed before the open — in practice one created before this release; a
+directory an open creates is never passed over. A non-zero count on a node whose ancestors are all on one writable
+filesystem is that case: read the `warn` line, which names the directory. `start()`'s refusal
+now says a directory on the path could not be created or synced, naming it.
+
+**What to do.** Put the journal and the companions' WALs on local storage the node owns, as the journal's own
+assumptions already state. The new functions `mycelium::create_dir_all_synced` and `mycelium::sync_parent_dir` are what
+these opens use, for an embedder's own log.
+
+**What this does not establish.** The power-loss property — that the file is still named after the machine loses power
+— is not observable without a filesystem fault adapter. The tests pin the order of the syncs and that each runs on a
+real directory.
+
 ## 80. A bulk call works under `gateway_tls`; an operator certificate needs `bulk_ca_pem_path` that verifies it; `max_bulk_payload_bytes` bounds a payload (unreleased, external review 2026-10-31, R7)
 
 **What changed.** A `bulk_call` between nodes whose gateways serve TLS used to time out: the responder fetched the

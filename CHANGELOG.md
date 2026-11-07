@@ -51,6 +51,29 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A fresh journal's first acknowledged record has a durable name** (external review 2026-10-31 F7,
+  `docs/plans/external-review-2026-10-31.md` R6). The node-local journal — the evidence journal, the rights ledger, the
+  revocation and epoch journals, the knowledge layer's two journals and the effects ledger all open through it — the
+  tuple-space store's WAL and the blackboard's WAL synced a new file's bytes and never the directory naming it, so a
+  power loss could keep the record and lose the file; directories created on the way were not synced either, nor were
+  the ones `start()` creates for `[persistence]`. Each now syncs every directory it creates in the one above it, and
+  the directory holding the file once it exists, before the first record is acknowledged; a failed sync refuses the
+  open. `wal.bin`'s own entry was already synced by the start-time snapshot. Witnessed by the order of the syncs
+  (`a_fresh_journal_syncs_its_directory_before_the_first_append_is_acknowledged` and its siblings, each seen failing
+  first); the power-loss property itself is not observable without a filesystem fault adapter. New:
+  `mycelium::create_dir_all_synced`, `mycelium::sync_parent_dir` (and `_observed` forms that report each sync). Every
+  open syncs the holder of every directory on the path, not only the ones it created, so an earlier open whose sync
+  failed or a concurrent opener cannot leave an ancestor unsynced (#718's review). On a platform without directory
+  fsync (Windows) a journal's torn-tail repair no longer fails opening its directory: the sync is a no-op there, as the
+  KV WAL's already was. **Not covered by this row:** the other durable writers have the same shape and are not changed
+  here — the TLS key and certificate writes (`write_with_mode`, no fsync), `quarantine_unreadable`'s renames,
+  `mycelium-wiki`'s `FsStore::cas_publish` and the `GitStore` writes, the reason blob store, the wasm host's artifact,
+  catalog and runtime staging, and `mycelium-effects`' SQLite store, whose `create_dir_all` error is discarded. An
+  existing ancestor on a filesystem without directory fsync (`EINVAL`, `ENOTSUP`) or unreadable to the process is passed
+  over, logged once and counted (`dir_syncs_passed_over`), never refused. **Cost:** one directory sync per path
+  component per open, at start or when a companion opens its log — about a millisecond each on an idle disk, far more
+  on a busy one (`F_FULLFSYNC` on macOS) — and on no request path. Upgrade note: `docs/guide/deprecations.md` §79.
+
 - **A bulk call works under native gateway TLS, and a bulk payload is bounded** (external review 2026-10-31 F6, plan
   row R7; `docs/guide/deprecations.md` §80). A caller whose gateway serves TLS now marks its `invoke.bulk` ticket
   `https`, and the responder fetches the staged payload over TLS, verifying the caller's gateway certificate by its IP

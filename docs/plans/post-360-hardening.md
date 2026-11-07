@@ -2219,6 +2219,12 @@ descriptors its share needs.
   2026-11-05), a docs-only branch; failed on its retry too, and passed on `main`'s next run. The test's 300 ms floor is
   a guess at how long the spin guest takes to burn a 3 × 10⁹ fuel budget, and a fast runner came in 1.6 ms under it — a
   floor on the guest's speed, not on the heartbeat gap the test is about.
+- `agent::lock_lifecycle_api_tests::row13_a_release_ends_an_adopted_recommit` (`src/agent/lock_lifecycle_api_tests.rs:105`)
+  — *"the re-commit is the top"*, once under the strict `compliance,a2a` lib run on #718's CI (run 42250860966,
+  attempt 2, 2026-11-06); attempts 1 and 3 of the same head passed. Its node has no persistence, so #718's directory
+  syncs do not run in it. `deliver` emits the higher-ballot `COMMIT` and a probe `COMMIT` back to back and waits only
+  for the probe to apply, so on a multi-threaded runtime the probe can land first and the assertion read the slot
+  before the re-commit — the shape of a readiness signal that is not the event under test.
 
 **Open next:**
 - each delivered row's *not built* list, in its §3.5 block and below — for K2: signed tally entries (a forgery under a
