@@ -102,9 +102,12 @@ where
     let allow: Vec<Arc<str>> = applied.authorized_callers().to_vec();
     let kind = kind.into();
     let handler = Arc::new(handler);
+    // Registered before the spawn: a request that arrives once this returns finds the receiver.
+    // Registered inside the task, it existed only once the task first ran, and a request delivered
+    // before then was dropped (the `bulk_serve` window, CI run 42371240189).
+    let mut rx = agent.service().rpc_rx(kind);
 
     let task = tokio::spawn(async move {
-        let mut rx = agent.service().rpc_rx(Arc::clone(&kind));
         while let Some(req) = rx.recv().await {
             match decide(&agent, &req, &allow) {
                 CallerVerdict::Admitted => {

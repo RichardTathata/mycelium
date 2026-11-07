@@ -1381,9 +1381,10 @@ fn init_node_routes(agent: Arc<GossipAgent>) -> axum::Router {
     });
 
     // Register an echo-scatter responder so scatter_gather works from peers.
+    // Registered before the spawn, so a peer's request that arrives first is not dropped.
     let sc_agent = Arc::clone(&agent);
+    let mut rx = sc_agent.mesh().signal_rx("echo-scatter");
     tokio::spawn(async move {
-        let mut rx = sc_agent.mesh().signal_rx("echo-scatter");
         while let Some(req) = rx.recv().await {
             let req = mycelium::RpcRequest::from(req);
             sc_agent.service().rpc_respond(&req, req.payload());
