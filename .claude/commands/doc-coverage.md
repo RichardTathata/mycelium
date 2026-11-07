@@ -109,9 +109,11 @@ agent for all of them if the pages are few), with these four questions verbatim:
    items it still writes *not built*, and the limits the page names, must agree. A row that has since delivered
    an item the page still calls a limit, or recorded a new one the page omits, is a finding.
 4. **Which features merged since the baseline lack a page?** From the CHANGELOG entries and merged PRs since the
-   baseline (`git log --merges <baseline>..`), list every feature added or changed. A finding, naming the PR, is:
+   baseline (`git log --first-parent --oneline <baseline>..origin/main` — main's own history, so a squash-merged PR
+   is listed and a branch's internal merges are not), list every feature added or changed. A finding, naming the PR, is:
    a feature whose registry entry the PR left at `page = "todo"` after F3 closed, or added at `todo` after F3
-   closed (`git log -S'page = "todo"' -- docs/features/registry.toml`); any `todo` entry left once F3 is marked
+   closed (`git log -G'page = "todo"' -- docs/features/registry.toml`, which also catches a PR that swaps one `todo` for
+   another); any `todo` entry left once F3 is marked
    delivered; a feature whose page the PR that changed it did not update, with no stated reason the page stayed
    true (a miss of the policy's rule 5); and a feature with no id in the gate's seven sources — a configuration
    field, a route, an SDK verb — that no page covers.
