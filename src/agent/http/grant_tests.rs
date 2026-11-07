@@ -1218,3 +1218,48 @@ async fn spike_s_cancel_end_to_end_over_two_nodes() {
 fn scan_kv_prefix_has(n: &GossipAgent, needle: &str) -> bool {
     crate::store::scan_kv_prefix(&n.task_ctx.kv_state, "").iter().any(|(k, _)| k.contains(needle))
 }
+
+/// SPIKE S-cancel, #731's review H2 — **the leak, on the unfixed spike code** (this commit is `e8e58b2e` plus this
+/// test, exactly the variant whose counts the note records as "before"). One node B, its feeder live; N `call:`
+/// checkpoints (signed by B) in B's KV under the key family the feeder watches; B assesses none of their calls. The
+/// feeder offers them all and nothing reclaims them; one checkpoint offered directly and one more feeder pass add to
+/// them. Asserted, not printed.
+#[tokio::test]
+async fn spike_s_cancel_reclamation_leaks_with_the_feeder_running() {
+    use crate::mandate::authority::{RevocationCheckpoint, SignedRevocationCheckpoint};
+    use crate::mandate::grant::CALL_SCOPE_PREFIX;
+    use crate::mandate::TermId;
+    const N: usize = 2_000;
+    let (b, _jb, _ran) = node_with(alloc_port(), Opts::default()).await;
+    let issuer = crate::agent::gateway_caller::node_principal(b.node_id());
+    let key = b.task_ctx.tls.get().unwrap().signing_key();
+    let authority = Arc::clone(b.task_ctx.execution_authority.get().unwrap());
+    let cp = |id: &str, seq: u64, revoked: &[&str]| {
+        let c = RevocationCheckpoint { authority: PrincipalId::new(&issuer).unwrap(), scope: format!("{CALL_SCOPE_PREFIX}{id}"), seq,
+            issued_at_ms: b.task_ctx.hlc.decision_now_ms(), revoked: revoked.iter().map(|t| TermId::new(t).unwrap()).collect() };
+        SignedRevocationCheckpoint { signature: mycelium_core::tls::sign_bytes(&key, &c.canonical_bytes()).to_vec(), checkpoint: c }
+    };
+    assert_eq!(authority.view_sizes(), (0, 0, 0));
+    for i in 0..N {
+        let id = format!("fleet{i}");
+        let revoked: Vec<&str> = if i % 2 == 0 { vec![id.as_str()] } else { vec![] };
+        let _ = b.kv().set(format!("grant/{issuer}/{id}/checkpoint"), serde_json::to_vec(&cp(&id, 1 + (i % 2) as u64, &revoked)).unwrap());
+    }
+    assert!(until(|| authority.view_sizes().0 >= N, Duration::from_secs(20)).await, "the feeder offered every fleet checkpoint");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(authority.view_sizes(), (N, N, 0), "held, with no window to reclaim them by");
+    let far = b.task_ctx.hlc.decision_now_ms() + 10_000_000_000;
+    authority.sweep(far);
+    assert_eq!(authority.view_sizes(), (N, N, 0), "a far-future sweep reclaims none of them");
+    let own = cp("own1", 1, &[]);
+    let _ = authority.offer_checkpoint(&own, b.task_ctx.hlc.decision_now_ms(), &crate::agent::gateway_member_keys(&b.task_ctx));
+    let _ = b.kv().set(format!("grant/{issuer}/own1/checkpoint"), serde_json::to_vec(&own).unwrap());
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    authority.sweep(far);
+    assert_eq!(authority.view_sizes(), (N + 1, N + 1, 0), "one offered directly: held, not reclaimed");
+    let _ = b.kv().set(format!("grant/{issuer}/wake/checkpoint"), serde_json::to_vec(&cp("wake", 1, &[])).unwrap());
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    authority.sweep(far);
+    assert_eq!(authority.view_sizes(), (N + 2, N + 2, 0), "the feeder woken again: one more, still not reclaimed");
+    b.shutdown().await;
+}
