@@ -91,8 +91,11 @@ has its six sections, its links and anchors resolve, its settings exist in the r
 real items and its named tests are run by CI. **The gate does not read prose.** This pass makes the judgement
 it cannot, under the same adversarial rule: open the code, not the page's own account of it.
 
-Step 0's diff gate applies: re-audit a page only when the page, a doc it links or the code it names changed
-since the last pass, and carry the rest. Give the pages to the Step 3 auditors with their clusters (or one
+Step 0's diff gate applies to later passes: re-audit a page only when the page, a doc it links or the code it
+names changed since the last pass, and carry the rest. **The first feature-pages pass is exempt from Step 0's
+no-diff stop**: it audits every page, and its baseline for question 4 is F2's merge (#655, `6d41eee8`,
+2026-10-23), when the registry began. Each later pass's baseline is the previous pass's date, recorded in the
+section below. Give the pages to the Step 3 auditors with their clusters (or one
 agent for all of them if the pages are few), with these four questions verbatim:
 
 1. **Is the description still true of the code?** Open the code *What it is* and *Turn it on* point at. A page
@@ -105,10 +108,13 @@ agent for all of them if the pages are few), with these four questions verbatim:
 3. **Do the *not built* links match the plan?** For each plan row *What it guarantees* names, open the row: the
    items it still writes *not built*, and the limits the page names, must agree. A row that has since delivered
    an item the page still calls a limit, or recorded a new one the page omits, is a finding.
-4. **Which features merged since the last pass lack a page?** From the CHANGELOG entries and merged PRs since the
-   last pass (`git log --merges --since=<date>`), list every feature added or changed. Each one with no registry
-   entry, whose entry is still `page = "todo"` with no reason, or whose page the PR that changed it did not
-   update (a miss of the policy's rule 5, which the PR's review should have caught) is a finding. Name the PR.
+4. **Which features merged since the baseline lack a page?** From the CHANGELOG entries and merged PRs since the
+   baseline (`git log --merges <baseline>..`), list every feature added or changed. A finding, naming the PR, is:
+   a feature whose registry entry the PR left at `page = "todo"` after F3 closed, or added at `todo` after F3
+   closed (`git log -S'page = "todo"' -- docs/features/registry.toml`); any `todo` entry left once F3 is marked
+   delivered; a feature whose page the PR that changed it did not update, with no stated reason the page stayed
+   true (a miss of the policy's rule 5); and a feature with no id in the gate's seven sources — a configuration
+   field, a route, an SDK verb — that no page covers.
 
 A guide snippet that no test runs, which a page records per the template, is a gap in the guide; it is
 audited here, not on the feature page. **Fix vs report** holds: a wrong page is fixed by editing it (verify

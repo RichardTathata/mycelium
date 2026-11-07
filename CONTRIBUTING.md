@@ -99,7 +99,9 @@ A change is verified against the surface it touches, not its own description —
 evidence that produced them, in [`docs/wiki/dev/testing/verification-policy.md`](docs/wiki/dev/testing/verification-policy.md):
 enumerate every entry point to an invariant before fixing it; close a plan row only on quoted evidence;
 CI discovers tests rather than listing them; an independent adversarial review before merge; a feature's
-page under [`docs/features/`](docs/features/README.md) and its registry entry change with the feature. The PR
+page under [`docs/features/`](docs/features/README.md) and its registry entry change with the feature (unless the
+PR says why the page stays true, or the entry is a `todo` that predates F3's close; the gate sees only its seven id
+sources, so a configuration field, route or SDK verb is the reviewer's to check). The PR
 template asks for each.
 
 ### Adding a test or an example so CI runs it

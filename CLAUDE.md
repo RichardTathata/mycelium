@@ -81,9 +81,12 @@ the evidence).
    the surfaces the change touches and tries to break them (`/adversarial-review`); its findings are fixed or
    answered in the PR.
 5. **A feature's page changes with the feature.** A PR that adds or changes a feature adds or updates its page
-   under `docs/features/` and its entry in `docs/features/registry.toml` (`scripts/check-feature-pages.py`, in
-   `make check`), and the independent reviewer checks both — the gate checks links, settings and tests; the
-   reviewer checks that the page is still true of the code.
+   under `docs/features/` and its entry in `docs/features/registry.toml`, and the independent reviewer checks both.
+   Exceptions, stated in the PR: a change that leaves the page true (the PR says why); an entry at `page = "todo"`
+   that predates F3's close (`docs/plans/feature-pages.md`) needs only its entry — after F3, a new feature lands with
+   its page. `scripts/check-feature-pages.py` (in `make check`) sees only its seven id sources (glossary, guarantee
+   and rule catalogues, unit-file keys, Cargo features, companion guarantees, crates); for a configuration field, a
+   route or an SDK verb the reviewer is the only check.
 
 ## Where to read what
 

@@ -41,26 +41,33 @@ an auditor enumerated surfaces from the code instead of the description:
    change touches and tries to break them: siblings, other doors, the plan row's promises, literal execution of
    every instruction the PR adds. `/adversarial-review` is the procedure; its findings are fixed or answered in
    the PR before merge.
-5. **A feature's page changes with the feature.** A PR that adds or changes a feature — a setting, a unit-file
-   key, a Cargo feature, a guarantee or rule id, a public verb or route — adds or updates its page under
-   [`docs/features/`](../../../features/README.md) and its entry in
-   [`registry.toml`](../../../features/registry.toml), and the independent reviewer of rule 4 checks both. The
-   gate checks that the page's links, settings and tests exist; the reviewer checks that what the page says is
-   still true of the code. A feature whose entry is still `page = "todo"` (the
-   [feature-pages plan](../../../plans/feature-pages.md)'s row F3) needs its registry entry, and a page once F3
-   has written one. The gap it closes is the plan's §1: the pieces of a feature were scattered across the
+5. **A feature's page changes with the feature.** A PR that adds or changes a feature adds or updates its page
+   under [`docs/features/`](../../../features/README.md) and its entry in
+   [`registry.toml`](../../../features/registry.toml), and the independent reviewer of rule 4 checks both. Two
+   exceptions, each stated in the PR: a change that leaves the page true needs no edit, and the PR says why; and
+   an entry still at `page = "todo"` needs only its registry entry — which holds only for entries that predate the
+   close of the [feature-pages plan](../../../plans/feature-pages.md)'s row F3. After F3 closes, a new feature lands
+   with its page in the same PR. **What the gate can see:** `scripts/check-feature-pages.py` reads ids from seven
+   sources — the concepts glossary, the guarantee and rule catalogues, the unit-file keys, every workspace crate's
+   Cargo features, the guarantees a companion registers in code, and the workspace crates. A configuration field,
+   an HTTP route or an SDK verb has no id of its own, so a PR adding one passes the gate untouched: **for those the
+   reviewer is the only check**, finding the feature's page through its concept or crate id, or flagging that it
+   has none. The gap the rule closes is the plan's §1: the pieces of a feature were scattered across the
    reference, the guide and the runbooks, and nothing checked that one page gathered them or still agreed with
    the code.
 
 ## Where it is enforced
 
 - `CLAUDE.md` § Verification policy — every session reads it.
-- `.github/pull_request_template.md` — the enumeration, the plan-row evidence and the review link are fields.
+- `.github/pull_request_template.md` — the enumeration, the plan-row evidence, the review link and (field 5) the
+  feature page are fields.
 - `RELEASING.md` § 5b — no release while a delivery row marked merged lacks its evidence.
 - **Rule 5:** `scripts/check-feature-pages.py` (in `make check` through `check-positioning.sh`, and in CI) fails on
-  an id no registry entry maps and on a page whose sections, links, settings, code items or named tests do not
-  check out; `/adversarial-review`'s check 7 asks the reviewer whether the page is still true; the
-  `/doc-coverage` feature-pages pass audits every page's prose against the code between PRs.
+  an id from its seven sources that no registry entry maps, and on a page whose sections, links, settings, code
+  items or named tests do not check out; `/adversarial-review`'s check 7 asks the reviewer whether the page is still
+  true, and is the only check for a setting, route or verb; the `/doc-coverage` feature-pages pass (its Step 4b)
+  audits pages' prose against the code between PRs. That pass is **operator-run and has not run yet**: its first run
+  audits every page, and each later run the pages, their sources or the code they name changed since the last.
 - **The record: the `test-coverage` CI job** (`scripts/ci-test-coverage.py`). After every test job finishes,
   it reads this run's own job logs and fails unless every test it knows of **executed** — passed or failed;
   not skipped, ignored, filtered out, or in a step that did not run. It knows a test if any log names it
@@ -174,3 +181,9 @@ an auditor enumerated surfaces from the code instead of the description:
 
 That nothing is missed: an enumeration is only as complete as the grep behind it, which is why rule 1 asks for
 the grep in the PR — so the reviewer of rule 4 can see what was *not* searched.
+
+That every feature has a checked page. Rule 5's gate sees only ids from its seven sources; a configuration field,
+a route or an SDK verb added without one is caught only if the reviewer notices it. The gate checks that a page's
+links, settings and tests exist, not that its prose is true — that is the reviewer at the PR and the
+`/doc-coverage` pass between PRs, and the pass is run by an operator, not by CI. Until F3 closes, a feature may be
+at `page = "todo"` with no page at all.

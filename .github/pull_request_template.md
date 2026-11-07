@@ -28,9 +28,12 @@ explicit file list.
 **4 · Adversarial review.** Link to the independent review (`/adversarial-review`) and how each finding was
 fixed or answered.
 
-**5 · Feature page.** If this adds or changes a feature (a setting, a unit-file key, a Cargo feature, a
-guarantee or rule id, a public verb or route): its page under `docs/features/` and its entry in
-`docs/features/registry.toml`, added or updated here — or why the change leaves the page true.
+**5 · Feature page.** If this adds or changes a feature: its page under `docs/features/` and its entry in
+`docs/features/registry.toml`, added or updated here. Or one of the two exceptions, said here: why the change
+leaves the page true; or the entry is at `page = "todo"` and predates F3's close (after F3, a new feature lands
+with its page). `check-feature-pages.py` sees glossary concepts, guarantee and rule ids, unit-file keys, Cargo
+features, companion guarantees and crates; a configuration field, route or SDK verb it does not see — name the
+page that covers it.
 
 ## Fail-first
 
