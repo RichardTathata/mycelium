@@ -1,60 +1,138 @@
 # Spike S-presence — 2026-11-07
 
 The spike row of [`identity-and-lifecycle.md`](../identity-and-lifecycle.md) wave 1b, for I7 and decision D7. The
-throwaway code and its raw outputs are on branch `spike-s-presence` (commit `42ed4197`, `spikes/s-presence/`): two
-Swift probes (`probe.swift` on the Security framework, `blob.swift` on CryptoKit) and a Rust verifier crate pinned to
-the lockfile's `ring` 0.17.14, `rcgen` 0.13.2 and `rustls-webpki` 0.103.16, built offline. No spike ships.
+throwaway code is on branch `spike-s-presence` under `spikes/s-presence/`, and no spike ships. The code:
 
-**Machine:** macOS 26.6.2 (25G83), Apple M2 Max, Touch ID enrolled. `security find-identity -v -p codesigning` reports
-**0 valid identities** and no provisioning profile is installed, so every probe ran **ad-hoc signed**
-(`flags=0x20002(adhoc,linker-signed)`). That is the signature `cargo build` puts on every Apple-silicon binary,
-including what `release.yml`'s `macos` job ships. **No Touch ID prompt was shown:** every signing call that needed
-presence ran with `LAContext.interactionNotAllowed = true`.
+- `probe.swift`, on the Security framework;
+- `blob.swift`, on CryptoKit;
+- `verify/`, a Rust crate pinned to the lockfile's `ring` 0.17.14, `rcgen` 0.13.2 and `rustls-webpki` 0.103.16, built
+  offline;
+- `run.sh`, which rebuilds all of it and records every command with its output;
+- `keys.sh`, the key-surface counts.
+
+**Every result below is quoted from `run.sh.out`.** That log was made by `run.sh` from commit `3bdb8b0c`'s sources on
+a clean tree (the log's first line says so), and it is committed beside them, with `keys.txt`, at `64fb5096`.
+
+**This spike's *done when* is not met.** The row asks for "a signature produced only after the prompt and verified".
+No prompt was raised, so no such signature exists. See *What it could not do*.
+
+## The machine, as recorded
+
+From `run.sh.out` lines 3–55:
+
+- **`sw_vers`:** macOS 26.6.2, build 25G83.
+- **`uname -m`:** arm64. The machine is an Apple M2 Max.
+- **`security find-identity -v -p codesigning`:** `0 valid identities found`.
+- **`ls -la ~/Library/MobileDevice/Provisioning Profiles`:** no such directory.
+- **`swiftc --version`:** Swift 6.3.3 from the Command Line Tools. Xcode is not installed.
+- **`codesign -dv` on both probe binaries:** `flags=0x20002(adhoc,linker-signed)`, `Signature=adhoc`,
+  `TeamIdentifier=not set`.
+
+Touch ID is enrolled (`bioutil -r`). That was run once by hand and is not in the log.
+
+**What ran is `swiftc` binaries only.** No `cargo build` binary touched the Secure Enclave. The Rust crate only verified
+signatures the Swift probes printed. Rust and `swiftc` produce the same ad-hoc, linker-signed code signature on Apple
+silicon, which is why the results are expected to carry over to a Rust `dev`. But "a `cargo build` binary reaches the
+Enclave" was **not run**.
+
+**No mode the runner calls can raise a prompt.**
+- Every signature over a presence-gated key is made under `LAContext.interactionNotAllowed = true`. That includes
+  `tamper`, fixed after #729's review (M2).
+- The other signatures are over keys with no presence flag.
+- `run.sh` never calls `blob sign-interactive`.
 
 ## What ran and what it measured
 
-| # | Question | Result |
+| # | Question | Result, with its `run.sh.out` lines |
 |---|---|---|
-| 1 | Does a plain (ad-hoc) binary reach the Secure Enclave? | **Yes, for a key not stored in the keychain.** `SecKeyCreateRandomKey` with `kSecAttrTokenIDSecureEnclave` and `kSecAttrIsPermanent = false` creates a P-256 key. Its `kSecAttrTokenID` reads back `com.apple.setoken` (`kSecAttrTokenIDSecureEnclave`), and it signs (71-byte DER). |
-| 2 | The negative probe: does a presence-gated key refuse to sign without interaction? | **Yes.** An ephemeral key with `[.privateKeyUsage, .biometryCurrentSet]`, bound at creation to a context with `interactionNotAllowed`, fails `SecKeyCreateSignature` with `com.apple.LocalAuthentication -1004 "User interaction required."`. |
-| 3 | A key stored in the keychain, which D7 assumed: data-protection keychain, or the legacy file keychain | **Refused, both:** `OSStatus -34018` (`errSecMissingEntitlement`, "failed to add key to keychain"). Storing a Secure Enclave key needs a `keychain-access-groups` entitlement, which needs a provisioning profile, which needs an Apple Developer team. |
-| 4 | Persisting without the keychain: CryptoKit `SecureEnclave.P256.Signing.PrivateKey(accessControl:)` with `[.privateKeyUsage, .biometryCurrentSet]`, its `dataRepresentation` written to a file | **Works ad-hoc.** The 569-byte blob is the key wrapped by this device's Secure Enclave. It restores **in a new process**, and signing there with an `interactionNotAllowed` context fails with `-1004` (the error carries `BiometryDatabaseHash`: the key is bound to the enrolled set). A blob with one byte flipped is accepted at construction, but signing with it fails (`CryptoTokenKit -3`, "unable to sign digest"). |
-| 5 | One P-256-aware verifier | **Yes, with nothing new in the tree.** Both probes' signatures (non-presence keys) verify under `ring::signature::ECDSA_P256_SHA256_ASN1` on the 65-byte X9.63 point. `ring` is already a direct dependency of `mycelium-core` under `tls`. A flipped message byte is refused. |
-| 6 | Can the fleet CA certify a Secure Enclave key? | **Yes.** `rcgen` 0.13's public `PublicKeyData` trait, implemented over the bare point with `PKCS_ECDSA_P256_SHA256`, lets an **Ed25519** CA (made as `mycelium tls` makes one) issue a client-auth leaf over the Secure Enclave key, with no private half. `webpki` verifies the chain Ed25519 CA → P-256 leaf, verifies the Secure Enclave signature against the leaf's key, and refuses it presented as Ed25519 (`UnsupportedSignatureAlgorithmForPublicKeyContext`). |
-| 7 | What a second algorithm costs the fleet's verifiers | Measured by grep: **37** non-test functions in `src/`, `mycelium-core/src/` and `mycelium-*/src/` take a verifying key as `&[u8; 32]` or `&[[u8; 32]]`. That covers audit, consensus, revocation, `NodeTls::verify_bytes`, knowledge, federation, agentfacts and commitment. `ed25519_key_from_cert_der` (`mycelium-core/src/tls.rs:960`) returns `None` for a P-256 leaf. `verify_member_cert`'s chain check is a `WebPkiClientVerifier` built on `ring`'s default algorithms, which include ECDSA P-256, so the chain alone would likely pass; the removal and standing wrapper in front of it (`RemovalAwareClientVerifier`) was not run against a P-256 leaf. A P-256 member certificate would at best have chain standing and no key in the fleet's model. |
-| 8 | Can the release pipeline produce a team-signed bundle? | **No, as it stands.** `release.yml`'s `macos` job runs `cargo build --release` and tars the binaries. It has no `codesign`, no notarization, no `.app` wrapper (a provisioning profile is embedded in a bundle, `Contents/embedded.provisionprofile`), and no signing secret. Adding one needs an Apple Developer Program membership, a signing certificate and profile with the entitlement, and those as CI secrets. |
+| 1 | Does an ad-hoc binary reach the Secure Enclave? | **Yes, for a key not stored in the keychain** (`./probe`, :58–72). `SecKeyCreateRandomKey` with `kSecAttrTokenIDSecureEnclave` and `kSecAttrIsPermanent = false` creates a P-256 key. `kSecAttrTokenID` reads back `com.apple.setoken`, and the key signs (71-byte DER). |
+| 2 | The negative probe on an ephemeral presence-gated key | **Signing fails.** The key has `[.privateKeyUsage, .biometryCurrentSet]` and is bound at creation to an `interactionNotAllowed` context. Signing returns `com.apple.LocalAuthentication -1004 "User interaction required."` (:58–72, lines `2.*`). |
+| 3 | Storing the key in the keychain, as D7 assumed (data-protection keychain, and the legacy file keychain) | **Refused, both** (lines `3.*`, `4.*`): `OSStatus -34018`, "failed to add key to keychain". That is `errSecMissingEntitlement`. **Inferred, not run:** storing a Secure Enclave key needs a `keychain-access-groups` entitlement, which needs a provisioning profile, which needs an Apple Developer team. Whether a free personal team suffices is not known. Because no key was stored, **the keychain-side negative probe never ran**: `probe.swift`'s lookup-and-sign section had nothing to look up. |
+| 4 | Persisting without the keychain: CryptoKit `SecureEnclave.P256.Signing.PrivateKey(accessControl:)` with `[.privateKeyUsage, .biometryCurrentSet]`, its `dataRepresentation` written to a file | **The blob restores in a new process, and signing there still needs presence.** `./blob create` writes a 569-byte blob (:75–79), file mode `-rw-r--r--`, owner `serenity` (:81–83). A later `./blob sign-noninteractive` process restores it and fails `-1004` (:85–90). The error's `UserInfo` carries a `BiometryDatabaseHash` field; reading that as "bound to the enrolled set" is an **inference** from the field's name. A blob with one byte flipped is accepted at construction and refused at signing (`CryptoTokenKit -3`, "unable to sign digest") (:92–95, :105–108). |
+| 5 | One P-256-aware verifier | **Yes, with nothing new in the tree** (:111–133). The signatures of both no-presence keys (the probe's key 1, and `./blob nopresence`) verify under `ring::signature::ECDSA_P256_SHA256_ASN1`, on the 65-byte X9.63 point. A flipped message byte is refused. `ring` is already a direct dependency of `mycelium-core` under `tls`. |
+| 6 | Can the fleet CA certify a Secure Enclave key? | **Yes** (same lines). `rcgen` 0.13's public `PublicKeyData` trait, implemented over the bare point with `PKCS_ECDSA_P256_SHA256`, lets an **Ed25519** CA issue a client-auth leaf over the Enclave key without its private half. `webpki` verifies the chain Ed25519 CA → P-256 leaf and verifies the Enclave signature against the leaf's key. It refuses that signature presented as Ed25519 (`UnsupportedSignatureAlgorithmForPublicKeyContext`). The repository already does the same at `src/agent/bulk.rs:1395–1405`, where a test's Ed25519 CA issues an operator's ECDSA P-256 leaf. |
+| 7 | Would the mesh accept a P-256 member certificate? | **No, read from the code, not run.** `refuse_if_removed` fails closed on any certificate without an Ed25519 key (`mycelium-core/src/tls.rs:1119–1121`: "a mesh certificate must carry an Ed25519 identity key"). The client verifier calls it after the chain check (`:1196`). A P-256 leaf is therefore refused at the handshake. A Secure Enclave key can be a fleet-certified *consent* key, never a mesh identity. |
+| 8 | What a second algorithm costs the fleet's verifiers | From `keys.sh` / `keys.txt`, tree `3bdb8b0c`, non-test code in `src/`, `mycelium-core/src/` and `mycelium-*/src/`:<br>**72** fn parameters typed `&[u8; 32]` or `&[[u8; 32]]` (keys and hashes together);<br>**39** of those named `key`, `keys`, `verifying_key(s)` or `pub_key_bytes`;<br>**1** fn parameter typed `[u8; 64]`, the Ed25519 signature width;<br>**21** `[u8; 64]` mentions in all;<br>**12** `VerifyingKey::from_bytes` decodes;<br>**12** `Signature::from_bytes` / `from_slice`.<br>The per-line patterns miss a signature that spans lines, so 72 and 39 are floors. The note's first version said "37", from an uncommitted grep. It is replaced by these. |
+| 9 | Can the release pipeline produce a team-signed bundle? | **No, as it stands** (read from `.github/workflows/release.yml`). The `macos` job runs `cargo build --release` and tars the binaries. It has no `codesign`, no notarization, no `.app` wrapper (a provisioning profile is embedded in a bundle, `Contents/embedded.provisionprofile`), and no signing secret. |
+
+## The main input to I7: presence is not attested to the verifier
+
+**A verifier holding only the public key cannot tell what kind of key signed.** It sees the same thing from:
+
+- a `biometryCurrentSet` Enclave key;
+- an Enclave key with no presence flag;
+- a software P-256 key.
+
+Rows 5 and 6 verify the no-presence keys exactly as a presence key would verify. So an `os_presence(...)` grade on a
+record is **self-asserted by whatever enrolled the key**. Two cases make that concrete:
+
+- A same-user process that controls enrolment can enrol a silent key.
+- A developer who wants unattended approvals can do the same.
+
+The Secure Enclave offers no attestation a verifier can check. A team-signed `dev` would change **who can use** a
+keychain-stored key, restricting it to the team's access group. It would **not**, by itself, let the verifier check
+that the key requires presence. The grade would still rest on trusting the enrolling binary.
+
+The blob path adds a second, smaller gap.
+- Any process running as the same user can read the blob (mode `-rw-r--r--` as written here) and ask the Enclave for a
+  signature.
+- It cannot produce one without the user's finger.
+- But it chooses the prompt text (`localizedReason`, under its own process name), so the presence proves a person was
+  there, not what they were shown.
+
+I7's row has to grade the record by what a verifier can actually check. That makes `os_presence` an enrolment claim,
+not a verified property, unless the row adds something that binds the key's ACL to the record. This spike found no such
+mechanism.
 
 ## What it could not do
 
-- **The positive path:** "a signature produced only after the prompt and verified", the row's *done when*. A prompt
-  needs a person at the sensor, and a spike agent must not raise one. `blob.swift` has a `sign-interactive` mode for
-  the maintainer: `swiftc -O blob.swift -o blob && ./blob create k.blob && ./blob sign-interactive k.blob > out.txt`,
-  then `cargo run --offline --manifest-path verify/Cargo.toml -- out.txt` (from `spikes/s-presence/` on the spike
-  branch). It uses a fresh `LAContext` per approval.
-- **Anything needing a team identity:** a keychain-stored key bound to an access group, an `.app` bundle with an
-  embedded profile, notarization, and whether Gatekeeper passes a quarantined (browser-downloaded) ad-hoc tarball.
-  This machine has none of those, and the spike did not obtain any.
-- **`biometryCurrentSet` re-enrolment:** that adding a finger invalidates the key. It needs a person changing the
-  enrolled set.
-- **Windows**, whose grade D7 sets at `tty` until shown otherwise. Not run.
+**Not met, and needing a person:**
+- **The positive path:** a signature produced only after the prompt. `blob.swift`'s `sign-interactive` mode is for the
+  maintainer. It makes a fresh `LAContext` per approval. From `spikes/s-presence/`:
+  `swiftc -O blob.swift -o blob && ./blob create k.blob && ./blob sign-interactive k.blob > out.txt`, then
+  `cargo run --offline --manifest-path verify/Cargo.toml -- out.txt`. `create` and `sign-interactive` are unchanged by
+  #729's M2 fix.
+- **A fresh `LAContext` per approval:** written into `sign-interactive`, never exercised.
+- **`biometryCurrentSet` invalidating the key when a finger is added**, and its passcode leg. The access control has no
+  `.devicePasscode` flag, so a typed password should not satisfy it. That is untested.
 
-## What it means for I7 (the row is written from this, not by it)
+**Not built:**
+- **The Rust↔CryptoKit bridge.** `dataRepresentation` exists only in CryptoKit, which is Swift-only. The C Security API
+  has no equivalent wrapped-key export. A Rust `dev` therefore needs a Swift shim or a helper binary, and that puts Swift
+  into `dev`'s build and into the release's `macos` job.
+- **D7's "the enrolled public key compared on every use".** No probe compared a stored public key on use.
 
-1. **The premise changes.** D7 says a Secure Enclave key is "reachable only from a team-signed bundle with a
-   provisioning profile". That holds for a key **stored in the keychain**. It does not hold for a key whose
-   Enclave-wrapped blob is kept in a file: an ad-hoc `cargo build` binary creates one, restores it in a later process,
-   and the Enclave still demands presence to sign.
-2. **The blob path is presence-bound but not process-bound.** Any process running as the same user can read the blob
-   and ask the Enclave for a signature. It cannot produce one without the user's finger, but it chooses what the prompt
-   says (`localizedReason`, under its own process name). A keychain key in a team access group is usable only by the
-   team-signed app. So on the blob path, D7's rule ("a check no co-resident process can satisfy") holds for the
-   *presence* and not for *what was presented*. The row must grade the record accordingly, for example
-   `os_presence(macos, unbound)` against `os_presence(macos)` once a team-signed `dev` exists.
-3. **The signer question.** Wiring a P-256 fleet certificate through the verifiers means changing the 37 `[u8; 32]`
-   sites and `ed25519_key_from_cert_der`. The narrower choice is a P-256 key the fleet CA certifies (finding 6), read
-   by **one** P-256 verifier at the one place a consent record is checked. `ring`, already in the tree, is that
-   verifier. The spike supports the narrower choice. It does not decide it.
-4. **The pipeline question, answered:** **no**, a team-signed bundle cannot be produced today, and it would need the
-   maintainer's Apple Developer team. **Yes**, an unbound grade can ship with no pipeline change. So I7 does not have to
-   fall back to `tty` on macOS. It can grade `os_presence(macos, unbound)` now and lift to `os_presence(macos)` when a
-   team identity exists.
+**Needing a team identity**, none of which this machine has and none of which the spike obtained:
+- a keychain-stored key in an access group;
+- an `.app` bundle with an embedded profile;
+- notarization;
+- whether Gatekeeper passes a quarantined (browser-downloaded) ad-hoc tarball.
+
+**Untested or inferred:**
+- **Where the blob would live, and its file mode.** Here it was a scratch path, at mode 0644.
+- **Device binding** (the blob is useless on another Mac): inferred from Apple's documentation, not tested.
+- **User binding:** not tested with a second macOS user.
+- **The lifecycle consequence**, inferred from the device binding: a lost blob, a new Mac, or an invalidated enrolment
+  loses the key, so re-enrolment is a required flow for I7.
+
+**Not run:**
+- **Windows**, whose grade D7 sets at `tty` until shown otherwise.
+
+## What it means for I7
+
+The row is written from this note, not by it.
+
+1. **D7's premise holds only for keychain keys.** D7 says a Secure Enclave key is "reachable only from a team-signed
+   bundle with a provisioning profile". That holds for a key **stored in the keychain** (row 3). An ad-hoc `swiftc`
+   binary reached the Enclave and its presence gate through a CryptoKit blob (rows 1, 2, 4).
+2. **Presence is self-asserted** (the section above), on the blob path and largely on a team-signed path too. That is
+   the main thing the row must state and grade.
+3. **The signer.** A P-256 key cannot be a mesh identity (row 7). Wiring P-256 through every verifier means the surface
+   in row 8. The narrower choice is a fleet-certified P-256 *consent* key read by one verifier where a consent record is
+   checked, and `ring` is already in the tree. The spike supports that choice; it does not decide it.
+4. **The pipeline question, answered: no.** A team-signed bundle cannot be produced today, and producing one would need
+   the maintainer's Apple Developer team. A blob-path `dev` needs no signing change, but it does need the Swift bridge,
+   which is not built.
+5. **A proposed revision of D7, for the maintainer.** This is a proposal, not a spike result. D7 says that without a
+   bundle, I7 falls back to `tty`. One alternative is a blob-path grade such as `os_presence(macos, unbound)`. Given
+   point 2, the row should first decide whether any `os_presence` grade is worth having when a verifier cannot check it.
