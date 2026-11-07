@@ -1693,7 +1693,7 @@
     },
     {
       "id": "provider.enforcement",
-      "revision": 2,
+      "revision": 3,
       "subsystem": "mycelium::agent::provider_enforcement",
       "responsibilities": [
         "authority"
@@ -1725,7 +1725,8 @@
             "resource_unnamed",
             "resource_not_here",
             "resource_not_served",
-            "at_capacity"
+            "at_capacity",
+            "mandate_lapsed_before_run"
           ]
         },
         {
@@ -1749,7 +1750,8 @@
       "symbol": "provider_enforcement::check",
       "docs": "docs/guide/20-authorising-actions.md",
       "tests": [
-        "test_c7_the_bypass_matrix_no_door_runs_revoked_work"
+        "test_c7_the_bypass_matrix_no_door_runs_revoked_work",
+        "a_grant_revoked_between_the_preflight_and_the_registration_refuses_the_call"
       ],
       "trace": "catalogue_only",
       "summary": "Authority where the work happens: a protected call is checked at the provider whichever door it came through; with enforcement on and no evaluator it is refused (`no_evaluator`); with it off no authority is checked, though an attached cohort budget still verifies the caller context and admits by cohort (`caller_context_refused`, `at_capacity`)."

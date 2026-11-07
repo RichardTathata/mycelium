@@ -126,14 +126,14 @@ pub static RULES: &[RuleDescriptor] = &[
         summary: "Hold new work that extends an unresolved closure — its parent an unresolved effect's record, or its run that effect's — while that closure is past a threshold, its size or its oldest record's age, each on its own; work that names no unresolved effect passes; never a probe, a compensation, a protective shed or a rescue from zero; shadow under `observe`, held under the enforcing profiles, untouched under `legacy`; a closure that cannot be read is not established, never empty.",
     },
     RuleDescriptor {
-        id: "provider.enforcement", revision: 2, subsystem: "mycelium::agent::provider_enforcement", responsibilities: &[Authority],
+        id: "provider.enforcement", revision: 3, subsystem: "mycelium::agent::provider_enforcement", responsibilities: &[Authority],
         trigger: "a protected RPC kind arriving at a provider with enforcement on, or with a cohort budget attached",
         inputs: &[Input { source: "the node's evaluator and execution authority; the carried mandate; the verified caller context; the cohort budget, if attached", scope: "this node", freshness: "the decision clock" }],
-        outcomes: &[Outcome { kind: Action, reasons: &["permit"] }, Outcome { kind: Refusal, reasons: &["deny", "indeterminate", "not_recorded", "no_evaluator", "caller_context_refused", "malformed_call", "resource_unnamed", "resource_not_here", "resource_not_served", "at_capacity"] }, Outcome { kind: NoAction, reasons: &["enforcement_off", "not_protected"] }],
+        outcomes: &[Outcome { kind: Action, reasons: &["permit"] }, Outcome { kind: Refusal, reasons: &["deny", "indeterminate", "not_recorded", "no_evaluator", "caller_context_refused", "malformed_call", "resource_unnamed", "resource_not_here", "resource_not_served", "at_capacity", "mandate_lapsed_before_run"] }, Outcome { kind: NoAction, reasons: &["enforcement_off", "not_protected"] }],
         effects: &["the evidence journal; the handler never runs on a refusal"],
         guards: &[Guard::Authority, Guard::ResourceBudget], may_trigger: &[], may_inhibit: &[], depends_on: &[],
         symbol: "provider_enforcement::check", docs: "docs/guide/20-authorising-actions.md",
-        tests: &["test_c7_the_bypass_matrix_no_door_runs_revoked_work"], trace: CatalogueOnly,
+        tests: &["test_c7_the_bypass_matrix_no_door_runs_revoked_work", "a_grant_revoked_between_the_preflight_and_the_registration_refuses_the_call"], trace: CatalogueOnly,
         summary: "Authority where the work happens: a protected call is checked at the provider whichever door it came through; with enforcement on and no evaluator it is refused (`no_evaluator`); with it off no authority is checked, though an attached cohort budget still verifies the caller context and admits by cohort (`caller_context_refused`, `at_capacity`).",
     },
     RuleDescriptor {

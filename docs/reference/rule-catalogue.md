@@ -530,7 +530,7 @@ Withdrawal removes the install and tombstones its advertisement; restart ≡ pro
 
 ## `provider.enforcement`
 
-rev 2 · `mycelium::agent::provider_enforcement` · Authority · trace: catalogue only
+rev 3 · `mycelium::agent::provider_enforcement` · Authority · trace: catalogue only
 
 Authority where the work happens: a protected call is checked at the provider whichever door it came through; with enforcement on and no evaluator it is refused (`no_evaluator`); with it off no authority is checked, though an attached cohort budget still verifies the caller context and admits by cohort (`caller_context_refused`, `at_capacity`).
 
@@ -539,11 +539,11 @@ Authority where the work happens: a protected call is checked at the provider wh
   - `the node's evaluator and execution authority; the carried mandate; the verified caller context; the cohort budget, if attached` — scope: this node; freshness: the decision clock
 - **Outcomes:**
   - Action: `permit`
-  - Refusal: `deny`, `indeterminate`, `not_recorded`, `no_evaluator`, `caller_context_refused`, `malformed_call`, `resource_unnamed`, `resource_not_here`, `resource_not_served`, `at_capacity`
+  - Refusal: `deny`, `indeterminate`, `not_recorded`, `no_evaluator`, `caller_context_refused`, `malformed_call`, `resource_unnamed`, `resource_not_here`, `resource_not_served`, `at_capacity`, `mandate_lapsed_before_run`
   - NoAction: `enforcement_off`, `not_protected`
 - **Effects:** the evidence journal; the handler never runs on a refusal
 - **Guards:** Authority, ResourceBudget
-- **Code:** `provider_enforcement::check` · **Docs:** docs/guide/20-authorising-actions.md · **Tests:** `test_c7_the_bypass_matrix_no_door_runs_revoked_work`
+- **Code:** `provider_enforcement::check` · **Docs:** docs/guide/20-authorising-actions.md · **Tests:** `test_c7_the_bypass_matrix_no_door_runs_revoked_work`, `a_grant_revoked_between_the_preflight_and_the_registration_refuses_the_call`
 
 ## `sched.missed`
 
