@@ -3,7 +3,7 @@
 ## What it is
 
 Under `tls` each node has an identity key, published with its key history and a proof in one sealed KV record, and
-peers reject an identity entry they cannot authenticate (on by default). A node rotates to a fresh key and revokes an
+peers reject an identity entry they cannot authenticate (on by default). A node moves to a fresh key and revokes the
 old one; a revocation counts only when a newer certificate the fleet CA issued for that node signs it, and once it
 gossips every verifier of the node's keys — KV writes, consensus, the audit chain, caller envelopes, the handshake —
 refuses the revoked key. An operator can remove a member outright, naming every key it held. All of it rests on the
@@ -26,8 +26,12 @@ certificate where the CA key is. The two-domain scaffold's
   re-admits only a pre-2.3.0 node, and is inert without `[tls]`.
 - [`tls`](../reference/configuration.md#tls) with `cert_pem` and `key_pem` from `mycelium tls issue`: no `ca-key.pem`
   in the node's directory, and a certificate naming the node by URI, which revocation authority needs.
-- [`rotate_identity`](../../src/agent/mod.rs) then [`revoke_identity_key`](../../src/agent/mod.rs): the compromise
-  flow, signed by the new current key.
+- With the CA key off the node, a node cannot rotate in place: [`rotate_identity`](../../src/agent/mod.rs) re-signs
+  with the CA key, which it then does not hold. The compromise flow is re-issue — `mycelium tls issue --force` a new
+  certificate where the CA key is, restart the node with it — then
+  [`revoke_identity_key`](../../src/agent/mod.rs) on the old key (or `POST /gateway/identity/revoke`), signed by the
+  new current key. `rotate_identity` is for the development posture, where the CA key is on the node
+  ([cert rotation § Compromise remediation](../operations/cert-rotation.md#compromise-remediation--rotate-and-revoke-soc-2-ws-b)).
 - [`with_membership_authorities`](../../src/agent/membership_ops.rs) and
   [`offer_member_removal`](../../src/agent/membership_ops.rs): an operator's signed
   [`MemberRemoval`](../../src/membership.rs), refused at the handshake once seen.
@@ -46,7 +50,8 @@ which needs two processes and lives in the Docker suites.
 - **Guarantees:** [`id.proofs_required`](../reference/guarantee-catalogue.md#id.proofs_required),
   [`id.ca_key_off_node`](../reference/guarantee-catalogue.md#id.ca_key_off_node) and
   [`id.revocation_authority`](../reference/guarantee-catalogue.md#id.revocation_authority).
-- **Not built:** the CA key cannot be rotated, and its compromise is recovered by re-issue only; a node whose
+- **Not built:** rotation in place under the off-node posture (recovery is re-issue); the CA key cannot be rotated,
+  and its compromise is recovered by re-issue only; a node whose
   certificate predates row Q has no standing to revoke until it is re-issued; a removed member's gateway tokens are a
   separate revocation ([cert rotation § Removing a member](../operations/cert-rotation.md#removing-a-member-an-operators-authority-c5)).
 - **Evidence:** the ledger rows

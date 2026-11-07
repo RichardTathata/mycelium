@@ -6,8 +6,8 @@
 at a resource you own. The substrate never provides it — only a destination can say whether an effect happened there
 — so the `mycelium-effects` crate supplies a reference destination over SQLite whose dedup row, keyed by the caller's
 `operation_id`, commits in the same transaction as the business change. A retry with the same content is `Replayed`
-and applies nothing; different content under the same id is a `Conflict`; a deadline passed is `DeliveryUnknown`,
-never "nothing happened".
+and applies nothing; different content under the same id is a `Conflict`; applied through `apply_within`, a deadline
+passed is `DeliveryUnknown`, never "nothing happened".
 
 ## When to use it, and when not
 
@@ -20,11 +20,14 @@ never "nothing happened".
 
 This feature is turned on in code, from the `mycelium-effects` crate. Its features: `tuple-space` for a consumer that
 commits each item's effect before acknowledging it; `envelope` for building a composed effect from the gateway's
-action envelope (it pulls in `gateway` and `tls`); `metrics` for a Prometheus counter of refusals.
+action envelope (it pulls in `gateway` and `tls`); `metrics` for a Prometheus counter of refusals; and `sim`, the replay
+seams for the external-effect reconciler, which belongs to the [side-effect contract](side-effects.md).
 
 - [`EffectDestination`](../../mycelium-effects/src/lib.rs): the trait — `apply`, and `apply_composed`, which refuses
   an effect whose attribution or authority leg fails, at the destination.
 - [`SqliteDestination`](../../mycelium-effects/src/sqlite.rs): the reference destination; `open` it on a file.
+- [`apply_within`](../../mycelium-effects/src/lib.rs): apply with a deadline, an overrun answered `DeliveryUnknown`;
+  `apply` alone waits for the destination.
 - [`TupleConsumer`](../../mycelium-effects/src/tuple_consumer.rs): under `tuple-space`, a worker that dies between the
   effect and the acknowledgement is re-delivered, and the second apply is `Replayed`.
 - [`Counting`](../../mycelium-effects/src/counting.rs): wraps a destination and counts its refusals by kind.

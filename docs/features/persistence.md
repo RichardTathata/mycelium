@@ -6,7 +6,7 @@ With a `[persistence]` table a node keeps its KV store and its consensus accepto
 log and a periodic snapshot, and a restart recovers both. A write is applied to the store and then handed to the
 log, never the reverse. What a write's acknowledgement means is the sync mode: under `Flush` the record is
 `fdatasync`ed first, while the other modes buffer. Consensus commits and leases are synced in every mode. A node
-refuses to start over persisted state it cannot read, and a failed append stops the writer until a snapshot has
+refuses to start over persisted state it cannot read (under `on_unreadable = "refuse"`, the default), and a failed append stops the writer until a snapshot has
 repaired the log, so an acknowledged record never sits behind a torn one.
 
 ## When to use it, and when not

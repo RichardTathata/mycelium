@@ -5,7 +5,7 @@
 A [receipt](../guide/00-concepts.md#receipt) says what a write's acknowledgement proves, by rung, and nothing above
 it: local application, local sync, replica sync, and destination commit, which only a destination can give. Every
 receipt is keyed by a caller-minted [`operation_id`](../guide/00-concepts.md#operation-id), stable across retries,
-with an attempt id per try; the same id with different content is a conflict. A timeout answers
+with an attempt id per try; a retry through a retry verb with different content under the same id is a conflict. A timeout answers
 [`DeliveryUnknown`](../guide/00-concepts.md#delivery-unknown) — the rungs reached so far, then unknown, never a
 negative. Local sync has four states, and [`Buffered`](../guide/00-concepts.md#buffered) — survives a process crash,
 lost to a power failure — is a different claim from on-disk, not a weaker one.
@@ -24,8 +24,13 @@ depends on [persistence](persistence.md) and its sync mode.
 - [`set_with_receipt`](../../mycelium-core/src/kv_handle.rs): the write and its [`WriteReceipt`](../../mycelium-core/src/receipt.rs),
   whose [`LocalDurability`](../../mycelium-core/src/receipt.rs) is the rung-2 state.
 - [`set_requiring_sync`](../../mycelium-core/src/kv_handle.rs): the one write the substrate refuses unless it is
-  synced; [`prepare_write`](../../mycelium-core/src/kv_handle.rs) and
-  [`commit_prepared`](../../mycelium-core/src/kv_handle.rs) separate identity from sending, for a retry.
+  synced.
+- Retrying: [`retry_with_receipt`](../../mycelium-core/src/kv_handle.rs) and
+  [`retry_requiring_sync`](../../mycelium-core/src/kv_handle.rs) reuse the prior receipt's stamp, so the retry ranks
+  as the same operation, and refuse different content under its id as a `Conflict`;
+  [`prepare_write`](../../mycelium-core/src/kv_handle.rs) then [`commit_prepared`](../../mycelium-core/src/kv_handle.rs)
+  mint the identity before anything is sent, so it survives the caller's own restart. Calling `set_with_receipt`
+  again is not a retry: it ticks a fresh stamp and the write ranks differently.
 - [`set_with_replica_sync`](../../src/agent/kv_quorum_ext.rs): rung 3 — which peers have persisted the record,
   with the ones that did not answer kept apart as missing.
 - [`persistence`](../reference/configuration.md#persistence): without it rung 2 is `NotConfigured`.
@@ -44,8 +49,10 @@ what it proves, run in CI.
 - **Not built:** a receipt never proves that a lower rung implies a higher one, that an operation did not happen,
   that a silent peer refused, or that the business effect landed
   ([guide 18 § What a receipt never proves](../guide/18-contracts-and-receipts.md#what-a-receipt-never-proves)).
-  Rung 3's window between a peer applying a record and its WAL holding it is row R8 of the
-  [external review plan](../plans/external-review-2026-10-31.md).
+  Rung 3 since row R8 of the [external review plan](../plans/external-review-2026-10-31.md) counts a record a peer
+  has applied but not yet handed to its WAL as not persisted; what R8 left is no per-record tracking (a busy peer
+  answers `Failed` for any record while any inbound record is in flight, and is asked again) and the same
+  apply-to-append window for a node's own local writes.
 - **Evidence:** the ledger row
   [an acknowledgement names its rung and nothing above it](../operations/what-is-proven.md#ack-names-its-rung).
 

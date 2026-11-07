@@ -7,7 +7,8 @@ group, and commits it once a quorum accepts, with a prepare phase so two concurr
 values. A lock, a lease and a leadership are one decision record over it, leadership leased by default. For an
 exclusive outcome — a lock, a leader, a consistent write, an award — an electorate makes it safe against a roster a
 node cannot see: a group pinned by member identity at genesis, decided only by the members it names, changed only by
-a migration that terminates. An electorate member keeps its acceptor memory on disk across restarts.
+a migration that terminates. An electorate member must have `[persistence]` for its acceptor memory: without it the
+membership is refused by name.
 
 ## When to use it, and when not
 
@@ -25,26 +26,34 @@ This feature is turned on in code: `consensus` is a default feature of `mycelium
   not vote.
 - [`cluster_propose`](../../src/agent/consensus_handle.rs), [`group_propose`](../../src/agent/consensus_handle.rs) and
   [`elect_leader`](../../src/agent/consensus_handle.rs); [`LockService`](../../src/agent/lock_service.rs) for locks.
-- [`declare_electorate`](../../src/agent/electorate.rs): pin a group's members; mark one `exclusive_default` for the
-  cluster-scoped exclusive verbs.
+- Form the group first — every member joins it ([`join_group`](../../mycelium-core/src/mesh_handle.rs), or a
+  membership intent) — then [`declare_electorate`](../../src/agent/electorate.rs) from a
+  member: it reads the roster as that node sees it and proposes a genesis every named member must decide. Mark one
+  `exclusive_default` for the cluster-scoped exclusive verbs.
 - [`consensus_require_electorate`](../reference/configuration.md#consensus_require_electorate): refuse a
   safety-sensitive proposal outside an electorate.
 - [`persistence`](../reference/configuration.md#persistence): required on an electorate member.
-- `a_safety_sensitive_proposal_is_decided_only_by_an_electorate_group`, in [`src/lib_tests.rs`](../../src/lib_tests.rs).
+- `a_safety_sensitive_proposal_is_decided_only_by_an_electorate_group`, in [`src/lib_tests.rs`](../../src/lib_tests.rs):
+  a leadership outside an electorate is refused, then the group is joined, declared and decides.
 
 ## See it work
 
 The [example index](../../examples/README.md#the-capability-matrix) lists
 [`coordination_integrity`](../../examples/README.md#the-capability-matrix): what a successful election means, and what
 it does not, run in CI. [`consensus`](../../examples/README.md#the-capability-matrix) (co-op) and
-[`distributed_lock`](../../examples/README.md#the-capability-matrix) are the other two.
+[`distributed_lock`](../../examples/README.md#the-capability-matrix) are the other two. None of the three declares an
+electorate; the electorate's run is the test named above, `a_safety_sensitive_proposal_is_decided_only_by_an_electorate_group`,
+in [`src/lib_tests.rs`](../../src/lib_tests.rs).
 
 ## What it guarantees, and what it does not
 
 - **Guarantee:** [`cons.safety_profile`](../reference/guarantee-catalogue.md#cons.safety_profile) — an exclusive
   outcome is decided only by an electorate group.
-- **Rule:** [`cons.acceptor_memory`](../reference/rule-catalogue.md#consacceptor_memory) — an electorate member keeps
-  its promises across a restart; a forgotten promise withholds the slot.
+- **Rule:** [`cons.acceptor_memory`](../reference/rule-catalogue.md#consacceptor_memory) — detection, not
+  prevention: an electorate member without `[persistence]` is refused, one restarted over an empty store is warned
+  once its genesis is known, and a forgotten promise withholds the slot only when a peer's copy of this node's record
+  arrives before the next higher ballot. A member restarted over an empty or older store is otherwise not detected
+  ([what-is-proven § disaster recovery](../operations/what-is-proven.md#disaster-recovery-electorate-lost-majority)).
 - **Not built:** leadership is not an exclusive grant that stays true — exclusivity is enforced at the resource, by
   refusing a stale fencing token; single-decree safety is not a proof of the whole protocol; an electorate's
   members cannot change except by migration, and a group that lost its majority stays stopped.

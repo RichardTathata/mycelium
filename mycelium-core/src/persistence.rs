@@ -69,8 +69,9 @@ pub trait DataAtRestCipher: Send + Sync {
     /// per snapshot. The returned ciphertext is length-framed verbatim on disk.
     fn encrypt(&self, plaintext: &[u8]) -> Vec<u8>;
     /// Decrypt a blob read from disk. Return `None` on authentication or format
-    /// failure — the record is then treated as corrupt and skipped, exactly as a
-    /// truncated/garbled plaintext record would be.
+    /// failure — the record is then corrupt, exactly as a garbled plaintext record
+    /// would be: replay stops there and the node refuses to start, unless
+    /// `persistence.on_unreadable = "quarantine"` moves the files aside.
     fn decrypt(&self, ciphertext: &[u8]) -> Option<Vec<u8>>;
 }
 
@@ -526,7 +527,8 @@ where
         match crate::sim_seam::fs_read(&snapshot_path, SNAP_FILE).await {
             Ok(raw) => {
                 // Decrypt the snapshot blob if a cipher is configured; a decrypt
-                // failure is treated like a corrupt snapshot (skipped).
+                // failure is a corrupt snapshot: an `InvalidData` error, which refuses
+                // the start (or quarantines, under `on_unreadable = "quarantine"`).
                 let decrypted = match cipher {
                     Some(c) => c.decrypt(&raw),
                     None    => Some(raw.to_vec()),

@@ -24,7 +24,8 @@ Set the list in the configuration; an empty list (the default) allows all. The t
 - [`egress`](../reference/configuration.md#egress): `allow_hosts`, each an exact host or a `.suffix` that matches the
   host and any subdomain, case-insensitive.
 - A companion type built outside an agent is gated only when built with the policy: `HttpLibrarySource` and
-  `OllamaProbe` take `.with_egress(policy)`, and so does `FederationClient`
+  `OllamaProbe` take `.with_egress(policy)`, and so does `FederationClient`; an `OpenAiBackend` follows no redirect
+  unless built `.with_egress(policy)`, which re-checks each hop (a stem's `[[serve]]` builds it so)
   ([crown jewel § Coverage](../operations/crown-jewel.md#coverage)).
 - [`redirect_policy`](../../src/agent/egress_client.rs): the redirect check every gated client uses.
 - `a_redirect_is_checked_like_a_destination`, in [`mycelium-core/src/config.rs`](../../mycelium-core/src/config.rs).
