@@ -39,7 +39,7 @@ pub struct NodeTls {
     /// for a client this node builds outside the mesh (the bulk fetch, R7). Fixed for the node's life:
     /// rotation reuses the CA, and the removal and standing sets it reads are shared and live.
     #[cfg(feature = "tls")]
-    fleet_server_verifier: std::sync::Arc<dyn rustls::client::danger::ServerCertVerifier>,
+    fleet_server_verifier: arc_swap::ArcSwap<std::sync::Arc<dyn rustls::client::danger::ServerCertVerifier>>,
     /// Identity-anchor sink (identity-auth Phase 1b): records a directly-connected peer's
     /// CA-validated Ed25519 key. Installed once at agent start with a closure capturing the
     /// `CoreCtx` anchor maps; the outbound writer calls it after each handshake. `OnceLock` so
@@ -54,7 +54,7 @@ pub struct NodeTls {
     /// The fleet CA's chain check, without the removal check — what a certificate record is judged
     /// by (`verify_member_cert`). Fixed for the node's life: rotation reuses the CA.
     #[cfg(feature = "tls")]
-    cert_verifier: std::sync::Arc<dyn rustls::server::danger::ClientCertVerifier>,
+    cert_verifier: arc_swap::ArcSwap<std::sync::Arc<dyn rustls::server::danger::ClientCertVerifier>>,
 }
 
 #[cfg(feature = "tls")]
@@ -76,7 +76,7 @@ impl NodeTls {
     /// The fleet's server-certificate check (CA chain, removal, revocation), for a client built
     /// outside the mesh — the bulk fetch (external review R7).
     pub fn fleet_server_verifier(&self) -> std::sync::Arc<dyn rustls::client::danger::ServerCertVerifier> {
-        std::sync::Arc::clone(&self.fleet_server_verifier)
+        std::sync::Arc::clone(&self.fleet_server_verifier.load())
     }
 
     /// Install the identity-anchor sink (identity-auth Phase 1b) — called once at agent start
@@ -114,6 +114,11 @@ impl NodeTls {
         self.client_config.store(m.client_config);
         self.gateway_key.store(m.gateway_key);
         self.node_cert.store(std::sync::Arc::new(m.node_cert_der));
+        // SPIKE S-succeed: a re-root swaps the chain checks too.
+        if let Some((chain, fleet)) = m.verifiers {
+            self.cert_verifier.store(std::sync::Arc::new(chain));
+            self.fleet_server_verifier.store(std::sync::Arc::new(fleet));
+        }
     }
 
     /// This node's current certificate, DER (post-360 plan row Q: the node's certificate record).
@@ -130,7 +135,7 @@ impl NodeTls {
         let now = rustls::pki_types::UnixTime::since_unix_epoch(std::time::Duration::from_millis(
             crate::sim_seam::wall_now_ms(),
         ));
-        self.cert_verifier.verify_client_cert(&cert, &[], now).is_ok()
+        self.cert_verifier.load().verify_client_cert(&cert, &[], now).is_ok()
     }
 }
 
@@ -145,6 +150,8 @@ pub struct RotationMaterial {
     gateway_key: std::sync::Arc<rustls::sign::CertifiedKey>,
     /// The new key's certificate, DER — published as its certificate record before the cutover.
     pub node_cert_der: Vec<u8>,
+    /// SPIKE S-succeed: new chain checks (a re-root), or `None` for a same-CA rotation.
+    verifiers: Option<(std::sync::Arc<dyn rustls::server::danger::ClientCertVerifier>, std::sync::Arc<dyn rustls::client::danger::ServerCertVerifier>)>,
 }
 
 /// What a node certificate says about whose key it is (post-360 plan row Q): its Ed25519 key, the
@@ -479,10 +486,10 @@ mod imp {
             signing_key: arc_swap::ArcSwap::from_pointee(signing_key),
             gateway_server_config,
             gateway_key,
-            fleet_server_verifier,
+            fleet_server_verifier: arc_swap::ArcSwap::from_pointee(fleet_server_verifier),
             peer_anchor_sink: std::sync::OnceLock::new(),
             node_cert: arc_swap::ArcSwap::from_pointee(cert_bytes),
-            cert_verifier,
+            cert_verifier: arc_swap::ArcSwap::from_pointee(cert_verifier),
         })
     }
 
@@ -533,7 +540,47 @@ mod imp {
             signing_key: Arc::new(signing_key),
             gateway_key,
             node_cert_der: cert_bytes,
+            verifiers: None,
         })
+    }
+
+    /// SPIKE S-succeed: rotation material from a **pre-issued** certificate and key (no CA key), with a
+    /// root store of every given CA certificate — the re-root a `cert_pem` node needs to take a
+    /// successor-issued certificate live.
+    pub fn reroot_material(
+        cert_pem: &Path,
+        key_pem: &Path,
+        roots: &[&Path],
+        removed: Arc<crate::removal::RemovedSet>,
+        standing: Arc<crate::removal::KeyStanding>,
+    ) -> Result<super::RotationMaterial, GossipError> {
+        let signing_key = load_key_from_pkcs8_pem(key_pem)?;
+        let verifying_key = signing_key.verifying_key().to_bytes();
+        let read = |p: &Path| fs::read_to_string(p).map_err(|e| GossipError::InvalidField { field: "tls", reason: format!("read {p:?}: {e}") });
+        let node_cert_der = pem_cert_to_der(&read(cert_pem)?)?;
+        let roots = roots.iter().map(|p| pem_cert_to_der(&read(p)?)).collect::<Result<Vec<_>, _>>()?;
+        let cert_bytes = node_cert_der.as_ref().to_vec();
+        let (server_config, client_config, gateway_key, chain, fleet) =
+            build_rustls_configs_roots(node_cert_der, &signing_key, &roots, removed, standing)?;
+        Ok(super::RotationMaterial {
+            verifying_key,
+            server_config: Arc::new(server_config),
+            client_config: Arc::new(client_config),
+            signing_key: Arc::new(signing_key),
+            gateway_key,
+            node_cert_der: cert_bytes,
+            verifiers: Some((chain, fleet)),
+        })
+    }
+
+    /// SPIKE S-succeed: issue a certificate for an **existing** key under the CA in `ca_dir`, issued
+    /// after `floor_ms` — the successor CA re-issuing a node's current key.
+    pub fn issue_node_cert_for_key(ca_dir: &Path, node_id: &NodeId, key_pem: &Path, out: &Path, floor_ms: u64) -> Result<(), GossipError> {
+        let ca_cfg = TlsConfig { auto_cert_dir: ca_dir.to_path_buf(), ..TlsConfig::default() };
+        let (_, ca_key_pair) = load_existing_ca(&ca_cfg)?;
+        let key = load_key_from_pkcs8_pem(key_pem)?;
+        let der = generate_node_cert(node_id, &key, &ca_key_pair, super::issuance_after(floor_ms))?;
+        write_public(out, cert_der_to_pem(der.as_ref()).as_bytes()).map_err(|e| GossipError::InvalidField { field: "tls", reason: format!("write {out:?}: {e}") })
     }
 
     /// **Mint a fleet CA** in `ca_dir` (`ca-cert.pem` + `ca-key.pem`), for the issuer's host that then runs
@@ -1023,6 +1070,17 @@ mod imp {
         removed: Arc<crate::removal::RemovedSet>,
         standing: Arc<crate::removal::KeyStanding>,
     ) -> Result<RustlsConfigs, GossipError> {
+        build_rustls_configs_roots(node_cert_der, signing_key, &[ca_cert_der], removed, standing)
+    }
+
+    /// SPIKE S-succeed: [`build_rustls_configs`] over a root store of several CA certificates.
+    pub(super) fn build_rustls_configs_roots(
+        node_cert_der: CertificateDer<'static>,
+        signing_key: &SigningKey,
+        roots: &[CertificateDer<'static>],
+        removed: Arc<crate::removal::RemovedSet>,
+        standing: Arc<crate::removal::KeyStanding>,
+    ) -> Result<RustlsConfigs, GossipError> {
         use ed25519_dalek::pkcs8::EncodePrivateKey;
 
         ensure_crypto_provider();
@@ -1036,9 +1094,11 @@ mod imp {
 
         // Build root store from CA cert
         let mut root_store = RootCertStore::empty();
-        root_store
-            .add(ca_cert_der.clone())
-            .map_err(|e| GossipError::InvalidField { field: "tls", reason: format!("TLS: add CA to root store: {e}") })?;
+        for ca_cert_der in roots {
+            root_store
+                .add(ca_cert_der.clone())
+                .map_err(|e| GossipError::InvalidField { field: "tls", reason: format!("TLS: add CA to root store: {e}") })?;
+        }
         let root_store = Arc::new(root_store);
 
         // Server config: require client cert verified against CA
@@ -1324,7 +1384,7 @@ mod imp {
 }
 
 #[cfg(feature = "tls")]
-pub use imp::{ed25519_key_from_cert_der, gateway_server_config_from_pem, generate_rotation, generate_rotation_after, issue_node_cert, load_or_generate, mint_ca, sign_bytes, verify_bytes, writable_by_others};
+pub use imp::{ed25519_key_from_cert_der, gateway_server_config_from_pem, generate_rotation, generate_rotation_after, issue_node_cert, issue_node_cert_for_key, load_or_generate, reroot_material, mint_ca, sign_bytes, verify_bytes, writable_by_others};
 
 #[cfg(all(test, feature = "tls"))]
 mod key_extract_tests {

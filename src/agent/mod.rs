@@ -2332,6 +2332,19 @@ impl GossipAgent {
     /// **Compromise caveat:** the old key remains accepted (retained-key
     /// verification, WS5 option B) so historical signatures stay valid; rotating
     /// away from a *compromised* key needs explicit revocation on top.
+    /// SPIKE S-succeed (throwaway): re-root a live node onto `cert`/`key` and a root store of `roots`,
+    /// with no CA key and no restart. The certificate record is published first, as rotation does.
+    #[cfg(feature = "tls")]
+    pub fn spike_reroot(&self, cert: &std::path::Path, key: &std::path::Path, roots: &[&std::path::Path]) -> Result<(), crate::error::GossipError> {
+        let tls = self.task_ctx.tls.get().ok_or(crate::error::GossipError::InvalidField { field: "tls", reason: "spike: no tls".into() })?;
+        let m = crate::tls::reroot_material(cert, key, roots, Arc::clone(&self.task_ctx.removed), Arc::clone(&self.task_ctx.key_standing))?;
+        let path = revocation::cert_record_key(&self.node_id, &m.verifying_key);
+        let _ = self.kv().set(path.clone(), Bytes::from(m.node_cert_der.clone()));
+        self.task_ctx.identity_ledger.own(path, m.node_cert_der.clone());
+        tls.activate(m);
+        Ok(())
+    }
+
     pub async fn rotate_identity(
         &self,
         propagation: std::time::Duration,
@@ -2737,3 +2750,6 @@ impl GossipAgent {
     /// The store, for crate tests that need tombstones (`kv().get` hides them).
     pub(crate) fn kv_state_for_tests(&self) -> &Arc<KvState> { &self.kv_state }
 }
+
+#[cfg(all(test, feature = "tls"))]
+mod spike_s_succeed_tests;
