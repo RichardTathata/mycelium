@@ -95,10 +95,11 @@ subsequent runs reuse the layer cache and are fast.
 
 ### Verification policy
 
-A change is verified against the surface it touches, not its own description — four rules, with the
+A change is verified against the surface it touches, not its own description — five rules, with the
 evidence that produced them, in [`docs/wiki/dev/testing/verification-policy.md`](docs/wiki/dev/testing/verification-policy.md):
 enumerate every entry point to an invariant before fixing it; close a plan row only on quoted evidence;
-CI discovers tests rather than listing them; an independent adversarial review before merge. The PR
+CI discovers tests rather than listing them; an independent adversarial review before merge; a feature's
+page under [`docs/features/`](docs/features/README.md) and its registry entry change with the feature. The PR
 template asks for each.
 
 ### Adding a test or an example so CI runs it

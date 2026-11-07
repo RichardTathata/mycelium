@@ -1,4 +1,4 @@
-Run the **independent adversarial review** of a pull request — rule 4 of the verification policy
+Run the **independent adversarial review** of a pull request — rule 4 of the verification policy, and the reviewer's half of rule 5
 (`CLAUDE.md` § Verification policy; `docs/wiki/dev/testing/verification-policy.md`). The argument is a PR
 number or a branch; with none, the current branch against `main`.
 
@@ -39,6 +39,13 @@ it reads the diff and the code. Tell it its final message *is* the report.
 6. **Break it.** Try at least three concrete inputs or sequences the author did not test — boundary values,
    the empty case, a concurrent or repeated call, the build without the feature, a restart in the middle — and
    say what happens, from the code or by running it.
+7. **The feature page** (rule 5). If the diff adds or changes a feature — a setting, a unit-file key, a Cargo
+   feature, a guarantee or rule id, a public verb or route — find its entry in `docs/features/registry.toml` and
+   its page under `docs/features/`. A feature the diff adds with no registry entry, or changes while leaving its
+   page untouched, is a finding unless the page is still true. Read the page against the code: a *What it is*,
+   *Turn it on* or *What it guarantees* the change has made untrue is a finding, because
+   `scripts/check-feature-pages.py` checks only that the page's links, settings and tests exist. A feature still
+   at `page = "todo"` needs its registry entry, not a page.
 
 ## The report and what to do with it
 

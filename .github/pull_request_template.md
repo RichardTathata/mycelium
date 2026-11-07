@@ -28,6 +28,10 @@ explicit file list.
 **4 · Adversarial review.** Link to the independent review (`/adversarial-review`) and how each finding was
 fixed or answered.
 
+**5 · Feature page.** If this adds or changes a feature (a setting, a unit-file key, a Cargo feature, a
+guarantee or rule id, a public verb or route): its page under `docs/features/` and its entry in
+`docs/features/registry.toml`, added or updated here — or why the change leaves the page true.
+
 ## Fail-first
 
 The test that failed before the fix, and its failure output.

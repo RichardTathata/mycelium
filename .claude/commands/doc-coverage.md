@@ -83,6 +83,40 @@ invents an API is worse than the gap). But if a "gap" turns out to be **the code
 the docs would describe**, stop and report it as a *code* gap, don't paper the docs over it. Verify
 every anchor you add (the em-dash/`?`→`--` slug trap is real).
 
+## Step 4b — The feature-pages pass
+
+The pages under `docs/features/` (one per feature; template and rules in `docs/features/README.md`) have a
+gate, `scripts/check-feature-pages.py` (in `make check` and CI): every registry id maps to a page, every page
+has its six sections, its links and anchors resolve, its settings exist in the reference, its code items name
+real items and its named tests are run by CI. **The gate does not read prose.** This pass makes the judgement
+it cannot, under the same adversarial rule: open the code, not the page's own account of it.
+
+Step 0's diff gate applies: re-audit a page only when the page, a doc it links or the code it names changed
+since the last pass, and carry the rest. Give the pages to the Step 3 auditors with their clusters (or one
+agent for all of them if the pages are few), with these four questions verbatim:
+
+1. **Is the description still true of the code?** Open the code *What it is* and *Turn it on* point at. A page
+   that states a default, a refusal, a scope, a bound or a setting's effect the code no longer has is **Thin**;
+   a page whose feature has changed shape under it (a renamed setting, a removed verb) is **Missing**.
+2. **Does the example demonstrate the feature, or merely run?** Open the example-index row or the end-to-end
+   test *See it work* names. It demonstrates the feature only if it would fail, or print something different,
+   with the feature off or broken — an example that starts a node which happens to have the feature, or a test
+   that asserts only that a call returned, is **Thin**.
+3. **Do the *not built* links match the plan?** For each plan row *What it guarantees* names, open the row: the
+   items it still writes *not built*, and the limits the page names, must agree. A row that has since delivered
+   an item the page still calls a limit, or recorded a new one the page omits, is a finding.
+4. **Which features merged since the last pass lack a page?** From the CHANGELOG entries and merged PRs since the
+   last pass (`git log --merges --since=<date>`), list every feature added or changed. Each one with no registry
+   entry, whose entry is still `page = "todo"` with no reason, or whose page the PR that changed it did not
+   update (a miss of the policy's rule 5, which the PR's review should have caught) is a finding. Name the PR.
+
+A guide snippet that no test runs, which a page records per the template, is a gap in the guide; it is
+audited here, not on the feature page. **Fix vs report** holds: a wrong page is fixed by editing it (verify
+against the code first, then run the gate), and a page that is wrong because the code lacks what it should
+describe is a code gap, reported. Record every page's verdict (Clear / Thin / Missing) with the date in a
+`## Feature pages` section of `docs/analysis/doc-coverage.md`, and a page found wrong after a Clear verdict
+goes in Step 5's calibration list like any other cell.
+
 ## Step 5 — Calibration (the discipline that makes it compound)
 
 Keep a `## Calibration` section in `doc-coverage.md`: whenever a cell marked **Clear** in a prior run
@@ -94,7 +128,7 @@ reality. A cell with repeated calibration hits deserves structural skepticism, n
 ## Step 6 — Persist & report
 
 Refresh `docs/analysis/doc-coverage.md`: the current filled-in matrix, the ranked gaps + their fixes
-(with commit refs once fixed), the calibration section, and a dated changelog entry at the top
+(with commit refs once fixed), the feature-pages section (Step 4b), the calibration section, and a dated changelog entry at the top
 naming what moved since the last run. Lead the user-facing report with the **floor + the Tier-1
 count**, then the table. If a new top-level analysis artifact or wiki section seems warranted, propose
 it — never add one unprompted.
