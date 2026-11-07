@@ -9,7 +9,7 @@ blobdir="${1:?usage: run.sh <dir for the key blobs>}"
 [ -d "$blobdir" ] || { echo "no such directory: $blobdir"; exit 2; }
 guard() { "$@" & local p=$!; for i in {1..30}; do kill -0 $p 2>/dev/null || break; sleep 1; done; kill $p 2>/dev/null && echo "KILLED after 30s"; wait $p; echo "exit=$?"; }
 step() { print -r -- "\$ $*"; guard "$@"; print; }
-print "# commit $(git rev-parse --short HEAD) $(git status --porcelain -- . | grep -q . && echo '(dirty)' || echo '(clean)')"
+print "# commit $(git rev-parse --short HEAD) $(git status --porcelain --untracked-files=no -- . | grep -q . && echo '(dirty)' || echo '(clean)')"
 print "# machine state"
 step sw_vers
 step uname -m
@@ -36,6 +36,6 @@ v="${CARGO_TARGET_DIR:-verify/target}/debug/s-presence-verify"
 print "# the probe's key 1 (no presence flag): its pub/sig/msg lines from this run"
 grep -E '^1\.(pub_x963_hex|sig_der_hex|msg_hex)' "$0.out" > "$blobdir/probe1.txt" 2>/dev/null
 step "$v" "$blobdir/probe1.txt" "1."
-print "# the blob nopresence key: the lines `blob nopresence` printed in this run"
+print '# the blob nopresence key: the lines blob nopresence printed in this run'
 grep -A6 '^\$ ./blob nopresence' "$0.out" | grep -E '^(pub_x963_hex|sig_der_hex|msg_hex)' > "$blobdir/blob0.txt"
 step "$v" "$blobdir/blob0.txt" ""
