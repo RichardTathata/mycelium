@@ -260,20 +260,19 @@ pub(super) fn spawn_llm_dispatch_loop(
     let ctx_clone = Arc::clone(ctx);
     let shutdown  = ctx.shutdown_tx.subscribe();
     let registry  = Arc::clone(&registry);
+    // Registered here, not in the task: the skill is advertised before the task first runs, and an
+    // `llm.invoke` delivered before a receiver exists is dropped (the `bulk_serve` window, CI run 42371240189).
+    let rx = ctx.signal_handlers.register_with_capacity(Arc::from(signal_kind::LLM_INVOKE), 64);
 
-    ctx.spawn_task(run_llm_dispatch(ctx_clone, registry, shutdown));
+    ctx.spawn_task(run_llm_dispatch(ctx_clone, registry, rx, shutdown));
 }
 
 async fn run_llm_dispatch(
     ctx:      Arc<TaskCtx>,
     registry: LlmSkillRegistry,
+    mut rx:   tokio::sync::mpsc::Receiver<crate::signal::Signal>,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) {
-    let mut rx = ctx.signal_handlers.register_with_capacity(
-        std::sync::Arc::from(signal_kind::LLM_INVOKE),
-        64,
-    );
-
     loop {
         tokio::select! {
             biased;
@@ -445,6 +444,27 @@ mod tests {
         assert_eq!(r.output, "echo: hello world");
         assert_eq!(r.model_used, "echo");
         assert_eq!(r.tokens_used, 0);
+    }
+
+    /// **The dispatch loop's `llm.invoke` receiver exists when `register_prompt_skill` returns.** It
+    /// was registered inside the task the call spawned, after the skill's advertisement was under way,
+    /// so an `llm.invoke` delivered before that task first ran found no receiver and was dropped — the
+    /// caller's only answer its timeout. The `bulk_serve` window (CI run 42371240189) at another door. A current-thread
+    /// runtime makes it certain: nothing spawned runs before this test's next await. The probe is
+    /// `register_client`, which a node refuses (`None`) exactly when an in-process receiver serves the kind.
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_llm_invoke_receiver_exists_when_a_prompt_skill_is_registered() {
+        let port = crate::test_util::alloc_port();
+        let mut cfg = crate::GossipConfig::default();
+        cfg.bind_port = port;
+        let agent = Arc::new(crate::GossipAgent::new(crate::NodeId::new("127.0.0.1", port).unwrap(), cfg));
+        agent.start().await.unwrap();
+        let _skill = agent.llm().register_prompt_skill("ns", "echo", PromptTemplate {
+            system: "".into(), user_template: "{{input}}".into(), max_tokens: 32, temperature: 0.0, metadata: Default::default(),
+        }, Arc::new(EchoBackend)).await.unwrap();
+        let probe = agent.task_ctx.signal_handlers.register_client(Arc::from(signal_kind::LLM_INVOKE), 1);
+        assert!(probe.is_none(), "an in-process llm.invoke receiver is registered when registration returns");
+        agent.shutdown().await;
     }
 
     #[test]

@@ -51,6 +51,20 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A bulk call made as soon as `bulk_serve` returns is served** (a flake, root-caused: CI run 42371240189, the strict
+  `compliance,a2a` lib run, `a_bulk_call_completes_between_two_plaintext_gateways` — `Err(Timeout)`). `bulk_serve`
+  registered its `invoke.bulk` receiver inside the task it spawned, so a ticket delivered before that task first ran
+  found no receiver and was dropped; the ticket is sent once, and the caller's only answer was its own timeout. A real
+  caller hits it the same way: any peer that calls once it sees the provider. The receiver is now registered before
+  `bulk_serve` returns (`bulk_serve_rx`). Two doors had the same shape and are fixed the same way: the LLM dispatch
+  loop's `llm.invoke` receiver, registered after `register_prompt_skill` had started advertising the skill, and the
+  `sys.explain` responder's, registered after `start()` returned. Each regression seen failing first:
+  `a_ticket_sent_as_soon_as_bulk_serve_returns_is_served`, `the_llm_invoke_receiver_exists_when_a_prompt_skill_is_registered`,
+  `the_explain_receiver_exists_when_start_returns`. The same change in two companions: `mycelium-guardrails`'
+  `guarded_rpc_serve` (its own changelog), and `mycelium-wiki`'s curator, whose store-access broker and bulk-ingest
+  responder were registered after the curator ad went out (no regression test there: the curatorship is reached only
+  through an election, which yields, so no test holds the window open without a plant). No API change.
+
 - **A fresh journal's first acknowledged record has a durable name** (external review 2026-10-31 F7,
   `docs/plans/external-review-2026-10-31.md` R6). The node-local journal — the evidence journal, the rights ledger, the
   revocation and epoch journals, the knowledge layer's two journals and the effects ledger all open through it — the

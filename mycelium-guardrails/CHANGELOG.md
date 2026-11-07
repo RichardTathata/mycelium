@@ -8,6 +8,11 @@ All notable changes to this crate. It versions **independently** of the Mycelium
 
 ## [Unreleased]
 
+- **A call made as soon as `guarded_rpc_serve` returns is served.** The loop registered its receiver inside the task it
+  spawned, so a request delivered before that task first ran found no receiver and was dropped, and the caller timed
+  out. The receiver is now registered before the spawn. Seen failing first:
+  `a_call_made_as_soon_as_guarded_rpc_serve_returns_is_served` (`tests/guardrails.rs`). No API change.
+
 - **Tokio's minimum is raised to 1.53.3** (RUSTSEC-2026-0386: `AsyncFd::new` and its siblings violate I/O safety;
   external review 2026-10-31, R9). An application whose lockfile pins Tokio below 1.53.3 must `cargo update -p tokio`.
   No code change.

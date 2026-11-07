@@ -562,9 +562,12 @@ impl<S: WikiStore + 'static> Wiki<S> {
         });
         // The access broker: answer store-access requests, gated on membership. Point-to-point RPC so a
         // grant (and, for a real object store, its scoped credential) never floods the cluster.
+        // Each responder's receiver is registered before its task is spawned: the curator ad above is
+        // already out, and a request delivered before a task first ran found no receiver and was
+        // dropped (the `bulk_serve` window, CI run 42371240189).
         let me = Arc::clone(self);
+        let mut rx = me.agent.service().rpc_rx(format!("wiki.{}.access", me.cfg.group));
         let broker = tokio::spawn(async move {
-            let mut rx = me.agent.service().rpc_rx(format!("wiki.{}.access", me.cfg.group));
             while let Some(req) = rx.recv().await {
                 // `sender()` is the node that sent the request. Through the gateway's raw routes that is the
                 // gateway node itself, whatever client asked it to, so membership says nothing about the client;
@@ -582,8 +585,8 @@ impl<S: WikiStore + 'static> Wiki<S> {
         // the summary. Membership-gated like store access (the same permits() as the broker).
         let ingest_task = self.batch_source.is_some().then(|| {
             let me = Arc::clone(self);
+            let mut rx = me.agent.service().rpc_rx(format!("wiki.{}.ingest", me.cfg.group));
             tokio::spawn(async move {
-                let mut rx = me.agent.service().rpc_rx(format!("wiki.{}.ingest", me.cfg.group));
                 while let Some(req) = rx.recv().await {
                     // As for `access`: the gateway refuses a client without `wiki:write` on the raw routes
                     // before this node's membership is asked (external review 2026-10-31 F1).
