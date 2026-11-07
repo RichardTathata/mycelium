@@ -103,16 +103,8 @@ async fn spike_s_succeed_a_cert_pem_node_re_roots_live() {
     assert!(!ta.verify_member_cert(&der(&b2)), "before: A does not know CA2");
 
     // ── 1. B takes its CA2 certificate live, trusting both roots. A trusts CA1 only.
-    let t = Instant::now();
-    let m = crate::tls::reroot_material(&b2, &nb.key, &[&r1, &r2], Arc::clone(&b.task_ctx.removed), Arc::clone(&b.task_ctx.key_standing)).unwrap();
-    let material_cost = t.elapsed();
-    let t = Instant::now();
-    tb.activate(m);
-    let activate_cost = t.elapsed();
-    let t = Instant::now();
-    b.spike_reroot(&b2, &nb.key, &[&r1, &r2]).unwrap(); // the whole call, as the note's first figure timed it
-    let reroot_cost = t.elapsed();
-    eprintln!("SPIKE S-succeed: L2 — reroot_material {material_cost:?}; activate {activate_cost:?}; whole spike_reroot (material, certificate-record write, activate) {reroot_cost:?}");
+    let [material_cost, record_cost, activate_cost, reroot_cost] = b.spike_reroot(&b2, &nb.key, &[&r1, &r2]).unwrap();
+    eprintln!("SPIKE S-succeed: L2 — one spike_reroot call: material {material_cost:?}; certificate-record write {record_cost:?}; activate {activate_cost:?}; whole {reroot_cost:?}");
     let before = handshake(tb.client_config(), ta.server_config());
     eprintln!("SPIKE S-succeed: B (CA2 cert) dialling A (CA1 only): {before:?}");
     assert!(before.as_ref().is_err_and(|e| e.starts_with("server refused")), "before A re-roots, A refuses B's CA2 cert: {before:?}");

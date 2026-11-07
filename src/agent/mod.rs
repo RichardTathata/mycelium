@@ -2335,14 +2335,21 @@ impl GossipAgent {
     /// SPIKE S-succeed (throwaway): re-root a live node onto `cert`/`key` and a root store of `roots`,
     /// with no CA key and no restart. The certificate record is published first, as rotation does.
     #[cfg(feature = "tls")]
-    pub fn spike_reroot(&self, cert: &std::path::Path, key: &std::path::Path, roots: &[&std::path::Path]) -> Result<(), crate::error::GossipError> {
+    /// Returns the call's timings: (material, certificate-record write, activate, whole), one call.
+    pub fn spike_reroot(&self, cert: &std::path::Path, key: &std::path::Path, roots: &[&std::path::Path]) -> Result<[std::time::Duration; 4], crate::error::GossipError> {
+        let start = std::time::Instant::now();
         let tls = self.task_ctx.tls.get().ok_or(crate::error::GossipError::InvalidField { field: "tls", reason: "spike: no tls".into() })?;
         let m = crate::tls::reroot_material(cert, key, roots, Arc::clone(&self.task_ctx.removed), Arc::clone(&self.task_ctx.key_standing))?;
+        let material = start.elapsed();
+        let t = std::time::Instant::now();
         let path = revocation::cert_record_key(&self.node_id, &m.verifying_key);
         let _ = self.kv().set(path.clone(), Bytes::from(m.node_cert_der.clone()));
         self.task_ctx.identity_ledger.own(path, m.node_cert_der.clone());
+        let record = t.elapsed();
+        let t = std::time::Instant::now();
         tls.activate(m);
-        Ok(())
+        let activate = t.elapsed();
+        Ok([material, record, activate, start.elapsed()])
     }
 
     pub async fn rotate_identity(
