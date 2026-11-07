@@ -53,6 +53,8 @@ pub(crate) struct DeclaredAuthority {
     pub(crate) evaluator: Arc<dyn ActionEvaluator>,
     pub(crate) authority: Arc<ExecutionAuthority>,
     pub(crate) journal: PathBuf,
+    /// Where the execution authority's epochs are journaled: `<persistence>/<node>/authority/epochs.journal`.
+    pub(crate) epochs: PathBuf,
     /// Every door mapped, as `(enforcement point, operation)`.
     pub(crate) doors: Vec<(String, String)>,
 }
@@ -91,6 +93,21 @@ pub(crate) fn check_doors(evaluator: &dyn ActionEvaluator, doors: &[(String, Str
     }
 }
 
+/// What can be told about the journal's path without opening it — the doctor's check, and `start()`'s before it binds:
+/// not a directory, and if it exists a file this process may write. A path whose parent does not exist yet is not
+/// refused (the journal creates it). Its one `symlink_metadata` is start-time configuration I/O, outside the replay
+/// seams like the unit loader's reads, and recorded in `scripts/sim-seams-baseline.txt`.
+fn check_journal_path(path: &std::path::Path) -> Result<(), GossipError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(m) if m.is_dir() => Err(refused(format!("journal {}: is a directory", path.display()))),
+        Ok(m) if !m.is_file() => Err(refused(format!("journal {}: is not a regular file", path.display()))),
+        Ok(m) if m.permissions().readonly() => Err(refused(format!("journal {}: is read-only", path.display()))),
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(refused(format!("journal {}: {e}", path.display()))),
+    }
+}
+
 /// The policy revision: the unit's principal and its rules as parsed, hashed — a changed rule is a new revision, so a
 /// grant bound to the old one is not admitted under the new rules; a comment or a reordered key in the file is not.
 fn revision(bytes: &[u8]) -> String {
@@ -103,6 +120,14 @@ fn revision(bytes: &[u8]) -> String {
 /// Read `[authority]`'s declaration and build this node's authority from it, refusing by name what cannot be
 /// built. Pure over files: no port, no journal opened.
 pub(crate) fn plan(cfg: &GossipConfig, node: &NodeId, auth: &AuthorityConfig) -> Result<DeclaredAuthority, GossipError> {
+    // A grant's request, its answer and each door's use marker are KV records the WAL keeps, and the epochs are a
+    // node-local journal under the persistence directory: without `[persistence]` a restart forgets which grants
+    // were used, and a used grant would admit again.
+    let Some(persistence) = &cfg.persistence else {
+        return Err(refused("[authority] needs [persistence]: a grant's request, its answer and each door's use marker are kept by the WAL, and the execution authority's epochs under the persistence directory; without it a restart forgets which grants were used"));
+    };
+    check_journal_path(&auth.journal)?;
+    let epochs = persistence.base_path.join(node.to_string()).join("authority").join("epochs.journal");
     let dir = &auth.declarations;
     let units = crate::faults::load_units(dir).map_err(|e| refused(format!("declarations: {e}")))?;
     if units.is_empty() {
@@ -143,7 +168,10 @@ pub(crate) fn plan(cfg: &GossipConfig, node: &NodeId, auth: &AuthorityConfig) ->
     for r in &unit.config.rules {
         let built = r.to_rule().map_err(|e| refused(format!("unit {}: [[rule]] {} {} {}: {e}", unit.name, r.actor, r.operation, r.resource)))?;
         let mut forms = vec![built.clone()];
-        if r.resource.starts_with("tool:") && !r.resource.contains('@') {
+        // The doors present a tool or a skill at the node that serves it (`tool:<name>@<node>`,
+        // `skill:<ns>/<name>@<node>`); a bare one in the unit is qualified to this node — the only node a declaration
+        // can place this unit's rules on. A tool or skill on another node is not admitted here.
+        if (r.resource.starts_with("tool:") || r.resource.starts_with("skill:")) && !r.resource.contains('@') {
             let mut at_node = built;
             at_node.resource = format!("{}@{node}", r.resource);
             forms.push(at_node);
@@ -204,28 +232,43 @@ pub(crate) fn plan(cfg: &GossipConfig, node: &NodeId, auth: &AuthorityConfig) ->
         evaluator: Arc::new(ev),
         authority,
         journal: auth.journal.clone(),
+        epochs,
         doors,
     })
 }
 
-/// Attach a planned authority to `agent`: the journal first (opened `Strict` here when `open_journal`; the doctor
-/// passes `false` and opens nothing), then the evaluator, the execution authority and provider enforcement.
-pub(crate) fn attach(agent: &super::GossipAgent, planned: &DeclaredAuthority, open_journal: bool) -> Result<(), GossipError> {
-    if open_journal {
-        let journal = super::evidence_journal::EvidenceJournal::open(&planned.journal, super::evidence_journal::EvidenceProfile::Strict)
-            .map_err(|e| refused(format!("journal {}: {e}", planned.journal.display())))?;
-        agent.with_evidence_journal(journal);
-    }
+/// Attach a planned authority to a node about to start: the journal opened `Strict` first, the durable epochs opened
+/// and given to the execution authority, then the evaluator, the authority and provider enforcement. Marks the node's
+/// attachments as the table's, so a retried `start()` does not read them as code's.
+pub(crate) fn attach(agent: &super::GossipAgent, planned: &DeclaredAuthority) -> Result<(), GossipError> {
+    let journal = super::evidence_journal::EvidenceJournal::open(&planned.journal, super::evidence_journal::EvidenceProfile::Strict)
+        .map_err(|e| refused(format!("journal {}: {e}", planned.journal.display())))?;
+    let epochs = crate::mandate::authority::DurableEpochs::open(&planned.epochs).map_err(|e| refused(format!("epochs {}: {e:?}", planned.epochs.display())))?;
+    planned.authority.with_durable_epochs(epochs);
+    agent.with_evidence_journal(journal);
     agent.with_action_evaluator(Arc::clone(&planned.evaluator));
     agent.with_execution_authority(Arc::clone(&planned.authority));
     agent.with_provider_enforcement();
+    agent.task_ctx.declared_attached.store(true, std::sync::atomic::Ordering::Release);
     tracing::info!(
         unit = %planned.unit_file,
         principal = %planned.principal,
         rules = planned.rules,
         doors = planned.doors.len(),
         journal = %planned.journal.display(),
+        epochs = %planned.epochs.display(),
         "[authority]: this node's evaluator, execution authority, provider enforcement and evidence journal, from its declaration"
     );
     Ok(())
+}
+
+/// The doctor's view of a planned authority: the evaluator, the execution authority and provider enforcement set on
+/// a node that never starts, in memory only — no journal or epochs opened, no sweep spawned, no reader started
+/// (`with_execution_authority` would spawn and `mark_started`). The journal and the epochs read as `start()` would
+/// leave them (`guarantee.rs`), the journal's path checked by [`plan`].
+pub(crate) fn attach_for_report(agent: &super::GossipAgent, planned: &DeclaredAuthority) {
+    let _ = agent.task_ctx.action_evaluator.set(Arc::clone(&planned.evaluator));
+    let _ = agent.task_ctx.execution_authority.set(Arc::clone(&planned.authority));
+    agent.task_ctx.provider_enforcement.store(true, std::sync::atomic::Ordering::Release);
+    agent.task_ctx.declared_attached.store(true, std::sync::atomic::Ordering::Release);
 }

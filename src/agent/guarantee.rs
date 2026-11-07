@@ -1060,7 +1060,13 @@ pub(crate) fn core_guarantees() -> Vec<GuaranteeDescriptor> {
           },
           |c| {
               #[cfg(all(feature = "gateway", feature = "tls"))]
-              { match c.execution_authority.get() { Some(a) if a.has_durable_epochs() => Resolution::Enforced, _ => Resolution::NotConfigured { missing: "ExecutionAuthority::with_durable_epochs (epochs are in memory only)" } } }
+              {
+                  // A node never started (the doctor) with `[authority]`: `start()` opens the epochs under the
+                  // persistence directory before the boundary, or refuses.
+                  #[cfg(feature = "compliance")]
+                  if c.declared_authority.get().is_some() && !c.started.load(std::sync::atomic::Ordering::Acquire) { return Resolution::Enforced; }
+                  match c.execution_authority.get() { Some(a) if a.has_durable_epochs() => Resolution::Enforced, _ => Resolution::NotConfigured { missing: "ExecutionAuthority::with_durable_epochs (epochs are in memory only)" } }
+              }
               #[cfg(not(all(feature = "gateway", feature = "tls")))]
               { let _ = c; Resolution::NotInBuild { feature: "gateway + tls" } }
           }),

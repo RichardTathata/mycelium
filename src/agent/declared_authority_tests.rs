@@ -15,22 +15,16 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-/// The scaffold's unit, as `mycelium init` writes it.
+/// The scaffold's unit and configuration, as `mycelium init` writes them.
 const PURCHASER: &str = include_str!("../../templates/governed-call/units/purchaser.toml");
-/// The treasurer, as this gateway names it: a named token's principal is `token:{issuer}/{name}`.
-const TREASURER: &str = "token:gw/treasurer";
+const NODE_TOML: &str = include_str!("../../templates/governed-call/node.toml");
+/// The scaffold's gateway issuer (`gateway_identity_issuer` in its node.toml): a named token's principal is
+/// `token:{issuer}/{name}`.
+const ISSUER: &str = "governed-call";
 
-/// The scaffold's unit as the doors can decide it: the issuer written as its gateway principal (a rule's actor is
-/// matched exactly, and the scaffold's bare `treasurer` is no principal a gateway presents), and the treasurer
-/// allowed to revoke what they issue (the scaffold declares no `grant.revoke` rule).
-fn purchaser_at_the_gateway() -> String {
-    let unit = PURCHASER.replace("actor     = \"treasurer\"", &format!("actor     = \"{TREASURER}\""));
-    assert!(unit.contains(TREASURER), "the scaffold's issuer rule changed shape; update this test");
-    format!("{unit}\n[[rule]]\nactor     = \"{TREASURER}\"\noperation = \"grant.revoke\"\nresource  = \"tool:purchase.approve\"\n")
-}
-
-/// A second unit in the same directory whose rule would admit the call the purchaser's rule refuses.
-const OTHER: &str = "principal = \"auditor\"\n\n[[rule]]\nactor     = \"*\"\noperation = \"tools/call\"\nresource  = \"tool:purchase.place\"\n";
+/// A second unit in the same directory whose rule would admit the call the purchaser's rule refuses — on any resource,
+/// so it would admit at this node's door if it were loaded.
+const OTHER: &str = "principal = \"auditor\"\n\n[[rule]]\nactor     = \"*\"\noperation = \"tools/call\"\nresource  = \"*\"\n";
 
 fn scratch(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("i0-{tag}-{}", alloc_port()));
@@ -69,7 +63,8 @@ fn config(dir: &Path, http_port: u16, auth: Option<AuthorityConfig>) -> (NodeId,
     cfg.bind_port = port;
     cfg.http_port = Some(http_port);
     cfg.tls = Some(TlsConfig { auto_cert_dir: dir.join("tls"), ..Default::default() });
-    cfg.gateway_identity_issuer = Some("gw".into());
+    cfg.persistence = Some(persistence(dir));
+    cfg.gateway_identity_issuer = Some(ISSUER.into());
     cfg.gateway_named_tokens = vec![
         GatewayNamedToken { name: "alice".into(), token: "alice-secret".into(), scopes: vec!["mcp:invoke".into()] },
         GatewayNamedToken { name: "treasurer".into(), token: "treasurer-secret".into(), scopes: vec!["grant:read".into(), "grant:issue".into()] },
@@ -78,11 +73,13 @@ fn config(dir: &Path, http_port: u16, auth: Option<AuthorityConfig>) -> (NodeId,
     (id, cfg)
 }
 
-/// Start the node and register the scaffold's two tools, counting their runs.
-async fn node(dir: &Path, http_port: u16, auth: AuthorityConfig) -> (Arc<GossipAgent>, Arc<AtomicUsize>) {
-    let (id, cfg) = config(dir, http_port, Some(auth));
-    let a = Arc::new(GossipAgent::new(id, cfg));
-    a.start().await.expect("the node starts from its declaration");
+fn persistence(dir: &Path) -> crate::config::PersistenceConfig {
+    use crate::config::{OnUnreadable, PersistenceConfig, SyncMode};
+    PersistenceConfig { base_path: dir.join("persist"), sync_mode: SyncMode::Flush, snapshot_wal_threshold: 1_000, snapshot_interval_secs: 3_600, on_unreadable: OnUnreadable::Refuse }
+}
+
+/// Register the scaffold's two tools on a started node, counting their runs.
+async fn tools(a: &Arc<GossipAgent>) -> Arc<AtomicUsize> {
     let ran = Arc::new(AtomicUsize::new(0));
     for tool in ["purchase.place", "purchase.approve"] {
         let ran = Arc::clone(&ran);
@@ -96,6 +93,15 @@ async fn node(dir: &Path, http_port: u16, auth: AuthorityConfig) -> (Arc<GossipA
         std::mem::forget(handle);
     }
     tokio::time::sleep(Duration::from_millis(100)).await;
+    ran
+}
+
+/// Start the node and register the scaffold's two tools, counting their runs.
+async fn node(dir: &Path, http_port: u16, auth: AuthorityConfig) -> (Arc<GossipAgent>, Arc<AtomicUsize>) {
+    let (id, cfg) = config(dir, http_port, Some(auth));
+    let a = Arc::new(GossipAgent::new(id, cfg));
+    a.start().await.expect("the node starts from its declaration");
+    let ran = tools(&a).await;
     (a, ran)
 }
 
@@ -154,14 +160,15 @@ async fn the_gateway_door_decides_by_this_units_rules_and_records_each_decision(
     a.shutdown().await;
 }
 
-/// **The provider door refuses a call under a revoked grant.** The purchaser's `purchase.approve` waits for the
-/// treasurer's grant; the treasurer issues it at this gateway, then revokes it; a member's direct call presenting the
-/// grant is refused `revoked` at the provider and the tool does not run. The refusal is on the record.
+/// **The provider door refuses a call under a revoked grant**, over the scaffold's unit as `mycelium init` writes it.
+/// The purchaser's `purchase.approve` waits for the treasurer's grant; the treasurer issues it at this gateway, then
+/// revokes it; a member's direct call presenting the grant is refused `revoked` at the provider and the tool does not
+/// run. The refusal is on the record. Seen failing first with the scaffold as it was (a bare `treasurer`, no
+/// `grant.revoke` rule): the issue was refused at the grant door.
 #[tokio::test]
 async fn the_provider_door_refuses_a_call_under_a_revoked_grant() {
     let dir = scratch("provider");
-    let body = purchaser_at_the_gateway();
-    let declarations = units(&dir, &[("purchaser", body.as_str())]);
+    let declarations = units(&dir, &[("purchaser", PURCHASER)]);
     let http_port = alloc_port();
     let auth = authority(&dir, declarations, "purchaser");
     let journal = auth.journal.clone();
@@ -241,15 +248,161 @@ async fn each_unbuildable_declaration_refuses_the_start_by_name() {
         let text = refusal(cfg, id).await;
         assert!(text.contains(words), "case {name}: {text}");
     }
-    // An evaluator attached in code beside the table: one source of authority per node.
-    let (id, cfg) = config(&dir, http_port, Some(authority(&dir, units(&dir.join("attached"), &[("purchaser", PURCHASER)]), "purchaser")));
-    let a = GossipAgent::new(id, cfg);
-    a.with_action_evaluator(Arc::new(crate::ReferenceEvaluator::new("code")));
-    let text = a.start().await.expect_err("refused").to_string();
-    assert!(text.contains("already attached in code"), "{text}");
-    // The advisory tier is refused by `validate()`, before the declaration is read.
+    // The advisory tier and a zero skew are refused by `validate()`, before the declaration is read.
     let (id, cfg) = config(&dir, http_port, Some(AuthorityConfig { tier: AuthorityTier::Advisory, ..authority(&dir, dir.join("never-read"), "purchaser") }));
     assert!(refusal(cfg, id).await.contains("advisory"));
+    let (id, cfg) = config(&dir, http_port, Some(AuthorityConfig { skew_ms: 0, ..authority(&dir, units(&dir.join("skew"), &[("purchaser", PURCHASER)]), "purchaser") }));
+    let text = refusal(cfg, id).await;
+    assert!(text.contains("skew_ms"), "case skew: {text}");
+    // Without `[persistence]`: a restart would forget which grants were used.
+    let (id, mut cfg) = config(&dir, http_port, Some(authority(&dir, units(&dir.join("unpersisted"), &[("purchaser", PURCHASER)]), "purchaser")));
+    cfg.persistence = None;
+    let text = refusal(cfg, id).await;
+    assert!(text.contains("needs [persistence]"), "case persistence: {text}");
+}
+
+/// **One source of authority per node** (#733's review, finding 1): any of the evaluator, the execution authority or
+/// the evidence journal attached in code beside the table refuses the start, naming it — the code's would be the live
+/// one and the table's journal would record nothing. Seen failing first with the check made evaluator-only: the
+/// code's execution authority and journal started beside the table.
+#[tokio::test]
+async fn an_authority_attached_in_code_beside_the_table_refuses_the_start() {
+    use crate::agent::gateway_authority::ExecutionAuthority;
+    use crate::mandate::authority::{ClockModel, ExecutionGate, FreshnessPolicy, ResourceTier};
+    use crate::mandate::grant::{EntitlementTable, GrantVerifier};
+    let dir = scratch("attached");
+    let http_port = alloc_port();
+    let declarations = units(&dir, &[("purchaser", PURCHASER)]);
+    let gate = || ExecutionGate::strict(crate::mandate::ResourceAuthority::new("code", 1), ResourceTier::Serialised, ClockModel { skew_ms: 100 }, FreshnessPolicy { freshness_ms: 120_000, interval_ms: 30_000, delivery_ms: 10_000 }).unwrap();
+    for what in ["evaluator", "authority", "journal"] {
+        let (id, cfg) = config(&dir, http_port, Some(authority(&dir, declarations.clone(), "purchaser")));
+        let a = GossipAgent::new(id, cfg);
+        match what {
+            "evaluator" => a.with_action_evaluator(Arc::new(crate::ReferenceEvaluator::new("code"))),
+            "authority" => a.with_execution_authority(Arc::new(ExecutionAuthority::new(gate(), GrantVerifier::new(EntitlementTable::new()), crate::knowledge::issuer::TrustedExternalIssuers::new()))),
+            _ => a.with_evidence_journal(crate::EvidenceJournal::open(dir.join(format!("code-{}.log", alloc_port())), crate::EvidenceProfile::Strict).unwrap()),
+        }
+        let text = a.start().await.expect_err("refused").to_string();
+        assert!(text.contains("already attached in code"), "{what}: {text}");
+    }
+}
+
+/// **A retried `start()` is not refused by the table's own attachments**: the one-source check runs on every
+/// `preflight()`, and once the table has attached, a second `preflight()` — what a retried `start()` runs first —
+/// reads the attachments as the table's. (A whole `start()` cannot be retried past persistence, which keeps its
+/// directory's ownership lock; that predates this table.)
+#[tokio::test]
+async fn a_second_preflight_reads_the_tables_attachments_as_its_own() {
+    let dir = scratch("retry");
+    let (id, cfg) = config(&dir, alloc_port(), Some(authority(&dir, units(&dir, &[("purchaser", PURCHASER)]), "purchaser")));
+    let a = GossipAgent::new(id, cfg);
+    a.preflight().expect("planned");
+    let planned = a.task_ctx.declared_authority.get().cloned().expect("a plan");
+    super::declared_authority::attach(&a, &planned).expect("attached");
+    a.preflight().expect("the table's own attachments are not a second source");
+    assert!(Arc::ptr_eq(a.task_ctx.execution_authority.get().unwrap(), &planned.authority), "the table's authority is the live one");
+}
+
+/// **The table meets the secure profile's authority requirements** (#733's review, finding 2): with `[authority]` in
+/// place of code attachments, a node configured as `a_node_providing_every_requirement_starts_under_the_secure_profile`
+/// configures it passes `secure-single-domain`'s check and starts — `authz.durable_epochs` among them, the epochs
+/// journaled under the persistence directory. Seen failing first with the durable epochs not attached: the check named
+/// `authz.durable_epochs` unmet.
+#[cfg(feature = "a2a")]
+#[tokio::test]
+async fn the_table_meets_the_secure_profiles_authority_requirements() {
+    use crate::agent::guarantee::{check, Resolution, SECURE_SINGLE_DOMAIN};
+    let port = alloc_port();
+    let root = scratch("secure");
+    let cert_dir = root.join("tls");
+    let id = NodeId::new("127.0.0.1", port).unwrap();
+    let ca_dir = root.join("issuer");
+    {
+        let issuer_port = alloc_port();
+        let mut icfg = GossipConfig::auto();
+        icfg.bind_port = issuer_port;
+        icfg.tls = Some(TlsConfig { auto_cert_dir: ca_dir.clone(), ..Default::default() });
+        let issuer = GossipAgent::new(NodeId::new("127.0.0.1", issuer_port).unwrap(), icfg);
+        issuer.start().await.expect("the issuer node mints the fleet CA");
+        issuer.shutdown().await;
+    }
+    let (cert_pem, key_pem) = crate::issue_node_cert(&ca_dir, &id, &cert_dir).expect("a node certificate issued off-node");
+    std::fs::copy(ca_dir.join("ca-cert.pem"), cert_dir.join("ca-cert.pem")).unwrap();
+    let mut cfg = GossipConfig::default();
+    cfg.bind_port = port;
+    cfg.http_port = Some(alloc_port());
+    cfg.http_addr = "127.0.0.1".to_string();
+    cfg.tls = Some(TlsConfig { auto_cert_dir: cert_dir.clone(), cert_pem: Some(cert_pem), key_pem: Some(key_pem), ca_cert_pem: None });
+    cfg.gateway_tls = Some(crate::GatewayTlsConfig::default());
+    cfg.gateway_auth_token = Some("s3cret".into());
+    cfg.require_identity_proofs = true;
+    cfg.egress.allow_hosts = vec!["idp.coop.example".into()];
+    cfg.persistence = Some(persistence(&root));
+    cfg.consensus_require_electorate = true;
+    cfg.profile = Some("secure-single-domain".into());
+    cfg.authority = Some(authority(&root, units(&root, &[("purchaser", PURCHASER)]), "purchaser"));
+    let a = GossipAgent::new(id.clone(), cfg);
+    a.start().await.expect("the profile admits the node: every authority requirement is met by the table");
+    let r = a.guarantee_report();
+    check(&r, &SECURE_SINGLE_DOMAIN).expect("the secure profile's check passes");
+    assert!(matches!(r.entry("authz.durable_epochs").unwrap().resolution, Resolution::Enforced));
+    assert!(root.join("persist").join(id.to_string()).join("authority").join("epochs.journal").exists(), "the epochs are journaled under the persistence directory");
+    a.shutdown().await;
+}
+
+/// **A skill rule admits at this node** (#733's review, finding 5): a bare `skill:<ns>/<name>` is qualified to this
+/// node, as a tool is — the door presents `skill:<ns>/<name>@<node>`. A skill on another node is not admitted.
+#[test]
+fn a_bare_skill_resource_is_qualified_to_this_node() {
+    let dir = scratch("skill");
+    let unit = "principal = \"dispatcher\"\n\n[[rule]]\nactor     = \"*\"\noperation = \"skill.invoke\"\nresource  = \"skill:depot/dispatch\"\n";
+    let (id, cfg) = config(&dir, alloc_port(), None);
+    let auth = authority(&dir, units(&dir, &[("dispatcher", unit)]), "dispatcher");
+    let planned = super::declared_authority::plan(&cfg, &id, &auth).expect("planned");
+    let decide = |resource: String| {
+        let env = crate::ActionEnvelope::builder("token:governed-call/alice", id.clone(), "skill.invoke", resource)
+            .identities("op-1", "op-1/1")
+            .validity(1_000, u64::MAX)
+            .mapping(planned.evaluator.mapping("skill.invoke", "*"))
+            .build();
+        planned.evaluator.evaluate(&env).verdict
+    };
+    assert_eq!(decide(format!("skill:depot/dispatch@{id}")), crate::Verdict::Permit, "the skill at this node");
+    assert_ne!(decide("skill:depot/dispatch@127.0.0.1:1".to_string()), crate::Verdict::Permit, "not at another node");
+}
+
+/// **The binary's configuration path, over the scaffold** (#733's review, the scaffold): the scaffold's `node.toml`
+/// with a gateway, its tokens, `[persistence]` and `[authority]` appended, loaded by `GossipConfig::load_from_file` and
+/// `validate()` as `mycelium -c` loads it, then started — the call no rule permits is refused at the gateway door and
+/// the one the scaffold's rule admits runs. The binary itself is not run here: CI's binary tests build without
+/// `compliance`, which the table needs.
+#[tokio::test]
+async fn the_scaffolds_node_toml_with_an_authority_table_loads_and_decides_through_the_config_path() {
+    let dir = scratch("toml");
+    let declarations = units(&dir, &[("purchaser", PURCHASER)]);
+    let (port, http_port) = (alloc_port(), alloc_port());
+    let node_toml = NODE_TOML
+        .replace("bind_port = 7946", &format!("bind_port = {port}\nhttp_port = {http_port}"))
+        .replace("auto_cert_dir = \"data/tls\"", &format!("auto_cert_dir = \"{}\"", dir.join("tls").display()));
+    assert!(node_toml.contains(&format!("bind_port = {port}")) && node_toml.contains(&dir.join("tls").display().to_string()), "the scaffold's node.toml changed shape; update this test");
+    let toml = format!(
+        "{node_toml}\n[[gateway_named_tokens]]\nname = \"alice\"\ntoken = \"alice-secret\"\nscopes = [\"mcp:invoke\"]\n\n[persistence]\nbase_path = \"{}\"\nsync_mode = \"Flush\"\n\n[authority]\ndeclarations = \"{}\"\nunit = \"purchaser\"\njournal = \"{}\"\n",
+        dir.join("persist").display(),
+        declarations.display(),
+        dir.join("evidence.log").display()
+    );
+    let path = dir.join("node.toml");
+    std::fs::write(&path, toml).unwrap();
+    let cfg = GossipConfig::load_from_file(&path).expect("the binary's loader reads it");
+    cfg.validate().expect("and validate() admits it");
+    let a = Arc::new(GossipAgent::new(NodeId::new(&cfg.bind_address, cfg.bind_port).unwrap(), cfg));
+    a.start().await.expect("the node starts from its configuration file alone");
+    let ran = tools(&a).await;
+    assert!(mcp_call(http_port, "purchase.place", serde_json::json!({"ledger": "capital"})).await.is_err());
+    assert_eq!(ran.load(Ordering::SeqCst), 0);
+    assert!(mcp_call(http_port, "purchase.place", serde_json::json!({"ledger": "petty-cash"})).await.is_ok());
+    assert_eq!(ran.load(Ordering::SeqCst), 1);
+    a.shutdown().await;
 }
 
 /// **A door the evaluator leaves unmapped refuses the start by name** — the check `start()` runs over every door

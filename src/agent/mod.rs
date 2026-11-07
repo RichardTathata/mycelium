@@ -965,6 +965,10 @@ pub(crate) struct TaskCtx {
     /// the journal opened there — and by `mycelium doctor` without the journal. Absent: no `[authority]`.
     #[cfg(feature = "compliance")]
     pub(crate) declared_authority: std::sync::OnceLock<Arc<declared_authority::DeclaredAuthority>>,
+    /// Whether the evaluator, execution authority and journal now attached are `[authority]`'s (I0): `preflight()`
+    /// refuses any of them attached otherwise — one source of authority per node.
+    #[cfg(feature = "compliance")]
+    pub(crate) declared_attached: std::sync::atomic::AtomicBool,
     /// Closure plan C5: the membership authorities this node takes removals from.
     #[cfg(feature = "tls")]
     pub(crate) membership: std::sync::OnceLock<Arc<crate::membership::MembershipAuthorities>>,
@@ -1576,6 +1580,8 @@ impl GossipAgent {
             provider_enforcement: std::sync::atomic::AtomicBool::new(false),
             #[cfg(feature = "compliance")]
             declared_authority: std::sync::OnceLock::new(),
+            #[cfg(feature = "compliance")]
+            declared_attached: std::sync::atomic::AtomicBool::new(false),
             #[cfg(feature = "tls")]
             membership: std::sync::OnceLock::new(),
             #[cfg(feature = "tls")]
@@ -1695,13 +1701,7 @@ impl GossipAgent {
             "with_action_evaluator: this build has no audit chain (`compliance` is off), so gateway \
              decisions will be enforced but NOT recorded"
         );
-        // `[authority]` attaches the evaluator before `start()` opens its journal only in the doctor, which opens no
-        // file: the node itself attaches the journal first.
-        #[cfg(feature = "compliance")]
-        let declared = self.task_ctx.declared_authority.get().is_some();
-        #[cfg(not(feature = "compliance"))]
-        let declared = false;
-        if self.task_ctx.evidence_journal.get().is_none() && !declared {
+        if self.task_ctx.evidence_journal.get().is_none() {
             tracing::warn!(
                 "with_action_evaluator: no evidence journal is attached (see with_evidence_journal), \
                  so gateway decisions will be enforced but NOT recorded"

@@ -1948,6 +1948,24 @@ impl Rule {
     }
 
     fn matches(&self, env: &ActionEnvelope) -> bool {
+        self.matches_with(env, true)
+    }
+
+    /// Whether a **prohibition** applies: as [`matches`](Self::matches) but without the argument values, so a value
+    /// that is present and different does not let the request fall through to the allowances. A prohibition naming a
+    /// value refuses every request its actor, operation and resource select unless that value is present *and equal*
+    /// (a deny) — anything else decides `Indeterminate` (fail-closed, as it was while the reference evaluator selected
+    /// no arguments; `"Capital"` against a prohibited `"capital"` is still refused).
+    fn selects_for_prohibition(&self, env: &ActionEnvelope) -> bool {
+        self.matches_with(env, false)
+    }
+
+    /// Whether every value this rule names is present in the request and equal.
+    fn values_equal(&self, env: &ActionEnvelope) -> bool {
+        self.requires_values.iter().all(|(n, v)| env.selected_arguments.get(n) == Some(v))
+    }
+
+    fn matches_with(&self, env: &ActionEnvelope, values: bool) -> bool {
         let any = |pat: &str, v: &str| pat == "*" || pat == v;
         // A rule scoped to a mandate is about *that* scope: a binding for another scope is a
         // different appointment, so the rule simply does not apply. (A binding the fence refused
@@ -1969,9 +1987,9 @@ impl Rule {
             // A declared value that is present but different means this rule is not the one; a
             // value that is *absent* still matches here, so `unestablished` can report it as a
             // missing fact rather than the rule silently falling through.
-            && self.requires_values.iter().all(|(n, v)| {
+            && (!values || self.requires_values.iter().all(|(n, v)| {
                 env.selected_arguments.get(n).map(|have| have == v).unwrap_or(true)
-            })
+            }))
             // Row R: a class or locality that is established and different means this rule is not
             // the one; one that is *not established* still matches, so `unestablished` reports it —
             // the same reading as an absent argument value above.
@@ -2045,7 +2063,7 @@ impl ActionEvaluator for ReferenceEvaluator {
     fn fleet_counters(&self, env: &ActionEnvelope) -> Vec<FleetCounter> {
         // The rule that would decide: a matching prohibition decides first and counts nothing; then the first
         // matching allowance — the same order `evaluate_with_history` takes.
-        if self.prohibitions.iter().any(|r| r.matches(env)) {
+        if self.prohibitions.iter().any(|r| r.selects_for_prohibition(env)) {
             return Vec::new();
         }
         match self.allowances.iter().find(|r| r.matches(env)).and_then(|a| a.limit.map(|l| (a, l))) {
@@ -2180,8 +2198,16 @@ impl ActionEvaluator for ReferenceEvaluator {
             };
         }
 
-        if let Some(p) = self.prohibitions.iter().find(|r| r.matches(env)) {
-            let missing = unestablished(p);
+        if let Some(p) = self.prohibitions.iter().find(|r| r.selects_for_prohibition(env)) {
+            let mut missing = unestablished(p);
+            if missing.is_empty() && !p.values_equal(env) {
+                missing = p
+                    .requires_values
+                    .iter()
+                    .filter(|(n, v)| env.selected_arguments.get(n).is_some_and(|have| have != v))
+                    .map(|(n, _)| format!("argument value differs from a prohibition's: {n} (a prohibition never falls through on a value)"))
+                    .collect();
+            }
             if !missing.is_empty() {
                 return Decision {
                     verdict: Verdict::Indeterminate,
@@ -2641,6 +2667,29 @@ mod tests {
                 "{ex:?} is not a completed effect",
             );
         }
+    }
+
+    /// **A prohibition naming a value stays fail-closed** now that the reference evaluator selects the arguments its
+    /// rules test (identity-and-lifecycle I0, #733's review): a value that is present and *different* — `"Capital"`
+    /// against a prohibited `"capital"` — is refused, never let through to the allowances; only an equal value is a
+    /// definite deny. Seen failing first: with exact matching on prohibitions, `"Capital"` was permitted.
+    #[test]
+    fn a_prohibition_naming_a_value_refuses_a_different_value_rather_than_falling_through() {
+        let mut no = Rule::new("*", "tools/call", "tool:pay");
+        no.requires_values = vec![("ledger".into(), serde_json::json!("capital"))];
+        let ev = ReferenceEvaluator::new("rev-1").map_action("tools/call", "*").prohibit(no).allow(Rule::new("*", "tools/call", "tool:pay"));
+        assert_eq!(ev.security_relevant_arguments(), vec!["ledger".to_string()], "the prohibition's argument is selected");
+        let with = |ledger: &str| {
+            let mut env = envelope("alice", "tools/call", "tool:pay");
+            env.selected_arguments.insert("ledger".into(), serde_json::json!(ledger));
+            ev.evaluate(&env)
+        };
+        assert_eq!(with("capital").verdict, Verdict::Deny, "an equal value is a definite deny");
+        let near = with("Capital");
+        assert_eq!(near.verdict, Verdict::Indeterminate, "a different value is refused, not permitted: {near:?}");
+        assert!(near.errors.iter().any(|e| e.contains("differs from a prohibition")), "{near:?}");
+        let absent = ev.evaluate(&envelope("alice", "tools/call", "tool:pay"));
+        assert_eq!(absent.verdict, Verdict::Indeterminate, "an absent value is not established: {absent:?}");
     }
 
     fn envelope(actor: &str, operation: &str, resource: &str) -> ActionEnvelope {

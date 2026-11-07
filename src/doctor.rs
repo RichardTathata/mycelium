@@ -226,14 +226,14 @@ fn run_inner(config_path: Option<&Path>, attach: Option<Attach<'_>>) -> Doctor {
     if let Err(e) = agent.preflight() {
         d.refusal = Some(refusal("preflight", &e));
     }
-    // `[authority]` (identity-and-lifecycle I0): what `start()` would attach from the declaration, attached here
-    // without the journal, which the doctor does not open — the report reads the journal as `start()` would leave it.
+    // `[authority]` (identity-and-lifecycle I0): what `start()` would attach from the declaration, set here in memory —
+    // no journal or epochs opened, no task spawned; `preflight()` has checked the journal's path. The report reads the
+    // journal and the epochs as `start()` would leave them.
     #[cfg(feature = "compliance")]
     if let Some(planned) = agent.task_ctx.declared_authority.get().cloned()
-        && agent.task_ctx.action_evaluator.get().is_none()
-        && let Err(e) = crate::agent::declared_authority::attach(&agent, &planned, false)
+        && !agent.task_ctx.declared_attached.load(std::sync::atomic::Ordering::Acquire)
     {
-        d.refusal = Some(refusal("preflight", &e));
+        crate::agent::declared_authority::attach_for_report(&agent, &planned);
     }
     let report = agent.guarantee_report();
     d.confinement = Some(agent.confinement_report());
@@ -554,9 +554,11 @@ mod tests {
     }
 
     /// Identity-and-lifecycle I0: over a configuration with `[authority]` the doctor reports what `start()` would
-    /// attach — the evaluator, the provider's enforcement, the execution authority, and the journal — and opens no
-    /// journal. Seen failing first: with `attach` skipped in the doctor, every `ae.*` and `prov.enforcement` read
-    /// `not_configured`.
+    /// attach — the evaluator, the provider's enforcement, the execution authority with its durable epochs, and the
+    /// journal — and opens neither the journal nor the epochs. A journal path `start()` could not open is the refusal
+    /// `start()` would give (#733's review, finding 4). Seen failing first: with `attach` skipped in the doctor, every
+    /// `ae.*` and `prov.enforcement` read `not_configured`; without the path check, a directory as the journal read
+    /// `enforced`.
     #[cfg(feature = "compliance")]
     #[tokio::test]
     async fn the_doctor_reports_what_authority_would_attach_and_opens_no_journal() {
@@ -566,29 +568,32 @@ mod tests {
         std::fs::create_dir_all(dir.join("units")).unwrap();
         std::fs::write(dir.join("units/purchaser.toml"), include_str!("../templates/governed-call/units/purchaser.toml")).unwrap();
         let journal = dir.join("evidence.log");
-        let path = write_cfg(
-            "authority",
-            &format!("bind_port = {port}
-http_port = {}
-[tls]
-auto_cert_dir = \"{}\"
-[authority]
-declarations = \"{}\"
-unit = \"purchaser\"
-journal = \"{}\"
-",
-                crate::test_util::alloc_port(), dir.join("tls").display(), dir.join("units").display(), journal.display()),
-        );
+        let body = |journal: &std::path::Path| {
+            format!(
+                "bind_port = {port}\nhttp_port = {}\n[tls]\nauto_cert_dir = \"{}\"\n[persistence]\nbase_path = \"{}\"\n[authority]\ndeclarations = \"{}\"\nunit = \"purchaser\"\njournal = \"{}\"\n",
+                crate::test_util::alloc_port(),
+                dir.join("tls").display(),
+                dir.join("persist").display(),
+                dir.join("units").display(),
+                journal.display()
+            )
+        };
+        let path = write_cfg("authority", &body(&journal));
         let d = run(Some(&path));
         if std::env::var_os("GOSSIP_PROFILE").is_none() {
             assert!(d.refusal.is_none(), "{:?}", d.refusal);
         }
         let report = d.report.clone().expect("a report");
-        for id in ["ae.authorised_at_seam", "ae.recorded_before_dispatch", "prov.enforcement", "authz.execution_authority"] {
+        for id in ["ae.authorised_at_seam", "ae.recorded_before_dispatch", "prov.enforcement", "authz.execution_authority", "authz.durable_epochs"] {
             let e = report.entries.iter().find(|e| e.id == id).unwrap_or_else(|| panic!("{id} reported"));
             assert!(matches!(e.resolution, Resolution::Enforced), "{id}: {:?}", e.resolution);
         }
         assert!(!journal.exists(), "the doctor opens no journal");
+        assert!(!dir.join("persist").exists(), "and no epochs: nothing under the persistence directory");
+        // A journal path that is a directory: `start()` could not open it, so the doctor says so.
+        std::fs::create_dir_all(dir.join("journal-dir")).unwrap();
+        let r = run(Some(&write_cfg("authority-dir", &body(&dir.join("journal-dir"))))).refusal.expect("an unopenable journal is refused");
+        assert!(r.reason.contains("is a directory"), "{}", r.reason);
         // An undeclared unit is the refusal `start()` would give, at the same stage.
         let bad = write_cfg("authority-bad", &std::fs::read_to_string(&path).unwrap().replace("unit = \"purchaser\"", "unit = \"nobody\""));
         let r = run(Some(&bad)).refusal.expect("refused");

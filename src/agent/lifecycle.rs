@@ -98,21 +98,33 @@ impl GossipAgent {
         }
         // With it: the declaration is read and this node's authority built and checked here — every refusal by
         // name, before a port is bound — and attached by `start()` (the journal opened there) or by the doctor.
+        // One source of authority per node, checked on every call — so a retried `start()` is checked too: any of the
+        // three attached in code beside the table is refused, since the code's would be the live one and the table's
+        // journal would record nothing (#733's review, finding 1).
         #[cfg(feature = "compliance")]
-        if let Some(auth) = &self.config.authority
-            && self.task_ctx.declared_authority.get().is_none()
-        {
-            if self.task_ctx.action_evaluator.get().is_some() {
-                return Err(GossipError::InvalidField {
-                    field: "authority",
-                    reason: "an action evaluator is already attached in code (with_action_evaluator); [authority] \
-                             attaches this node's evaluator from its declaration, and a node has one source of \
-                             authority. Remove the table, or the attachment"
-                        .into(),
-                });
+        if let Some(auth) = &self.config.authority {
+            if !self.task_ctx.declared_attached.load(Ordering::Acquire) {
+                for (what, attached) in [
+                    ("an action evaluator (with_action_evaluator)", self.task_ctx.action_evaluator.get().is_some()),
+                    ("an execution authority (with_execution_authority)", self.task_ctx.execution_authority.get().is_some()),
+                    ("an evidence journal (with_evidence_journal)", self.task_ctx.evidence_journal.get().is_some()),
+                ] {
+                    if attached {
+                        return Err(GossipError::InvalidField {
+                            field: "authority",
+                            reason: format!(
+                                "{what} is already attached in code; [authority] attaches this node's evaluator, \
+                                 execution authority and evidence journal from its declaration, and a node has one \
+                                 source of authority. Remove the table, or the attachment"
+                            ),
+                        });
+                    }
+                }
             }
-            let planned = super::declared_authority::plan(&self.config, &self.node_id, auth)?;
-            let _ = self.task_ctx.declared_authority.set(Arc::new(planned));
+            if self.task_ctx.declared_authority.get().is_none() {
+                let planned = super::declared_authority::plan(&self.config, &self.node_id, auth)?;
+                let _ = self.task_ctx.declared_authority.set(Arc::new(planned));
+            }
         }
         // The identity provider is an outbound the substrate chooses (`report.egress`, plan §8): an
         // `[oidc]` table whose issuer or JWKS host a non-empty `egress.allow_hosts` does not permit
@@ -304,9 +316,9 @@ impl GossipAgent {
         // `[authority]`'s plan, attached before the boundary: the journal opened first (identity-and-lifecycle I0).
         #[cfg(feature = "compliance")]
         if let Some(planned) = self.task_ctx.declared_authority.get().cloned()
-            && self.task_ctx.action_evaluator.get().is_none()
+            && !self.task_ctx.declared_attached.load(Ordering::Acquire)
         {
-            super::declared_authority::attach(self, &planned, true)?;
+            super::declared_authority::attach(self, &planned)?;
         }
         // The lifecycle boundary (plan G13): every attachment is in and the configuration is what it
         // is. Resolve every registered guarantee against this node and say so, once, before traffic.

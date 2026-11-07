@@ -1755,8 +1755,9 @@ pub struct AuthorityConfig {
     #[serde(default = "default_authority_freshness_ms")]
     pub freshness_ms: u64,
     /// The clock model's skew *s*, ms: how far an issuing authority's clock may stand from this node's. The strict
-    /// gate needs *F* > 4*s* and *F*/4 + *F*/12 ≤ *F* − 4*s* (so *s* ≤ *F*/12); `start()` refuses a pair that breaks
-    /// either. Default 1 000. Distinct from `max_clock_drift_ms`, the transport's tolerance for a peer's HLC.
+    /// gate needs *F* > 4*s* and *F*/4 + *F*/12 ≤ *F* − 4*s* — that is, 4*s* ≤ 2*F*/3, so *s* ≤ *F*/6; `start()` refuses
+    /// a pair that breaks it, and `validate()` refuses 0. The gate's guarantee assumes issuers really are within it.
+    /// Default 1 000. Distinct from `max_clock_drift_ms`, the transport's tolerance for a peer's HLC.
     #[serde(default = "default_authority_skew_ms")]
     pub skew_ms: u64,
     /// The entitlement rule: whose grants this node's execution authority verifies — `node` (default:
@@ -2246,6 +2247,12 @@ impl GossipConfig {
             }
             if auth.freshness_ms == 0 {
                 return Err(GossipError::InvalidField { field: "authority", reason: "freshness_ms must be > 0: a zero bound fails every check closed".into() });
+            }
+            if auth.skew_ms == 0 {
+                return Err(GossipError::InvalidField {
+                    field: "authority",
+                    reason: "skew_ms must be > 0: no two clocks agree exactly, and a zero bound would claim the gate's window holds when it does not".into(),
+                });
             }
         }
         if let Some(g) = &self.consensus_electorate

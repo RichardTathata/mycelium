@@ -60,8 +60,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   execution authority (`scope`, `tier`, `freshness_ms`, `entitle_grants`), opens the journal and attaches all four
   before the lifecycle boundary. Refused at start by name: an empty or unreadable directory, no unit or two with that
   principal, a rule that does not build, an exposure rule (not attached by the table), a gate the strict profile
-  refuses, an evaluator already attached in code, a journal that does not open, and a build without `compliance`.
-  `mycelium doctor` attaches all but the journal and reports them as `start()` would. `GossipConfig` gained
+  refuses, an evaluator, an execution authority or a journal already attached in code, a journal path that cannot be
+  opened, a zero `skew_ms`, no `[persistence]`, and a build without `compliance`. The execution authority's epochs are
+  journaled under the persistence directory (`authz.durable_epochs`), so `secure-single-domain` can be met from the
+  table. A bare `tool:` or `skill:` resource is qualified to this node. `mycelium doctor` sets all but the journal and
+  the epochs in memory, opens neither and spawns nothing, and reports them as `start()` would. The `governed-call`
+  scaffold fixes its gateway issuer (`gateway_identity_issuer = "governed-call"`), names the treasurer as
+  `token:governed-call/treasurer` and declares their `grant.revoke`. `GossipConfig` gained
   `authority`; `deprecations.md` §83; feature page `docs/features/declared-authority.md`.
 
 ### Fixed
@@ -71,7 +76,11 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   with `requires_values` read *argument value not available* at a live door — `Indeterminate`, never a permit. It now
   names every `requires_values` key of its rules. Found by identity-and-lifecycle I0: the `governed-call` scaffold's own
   petty-cash rule could not admit its call at the gateway (`the_gateway_door_decides_by_this_units_rules_and_records_each_decision`,
-  seen failing first). An application that relied on such a rule never permitting now sees it decide.
+  seen failing first). An application that relied on such a rule never permitting now sees it decide. **Prohibitions
+  stay fail-closed:** a prohibition naming a value refuses every request its actor, operation and resource select
+  unless the value is present and equal (a deny) — a present but different value (`"Capital"` against a prohibited
+  `"capital"`) decides `Indeterminate`, never falling through to an allowance, as it did while no argument was selected
+  (`a_prohibition_naming_a_value_refuses_a_different_value_rather_than_falling_through`, seen failing first).
 - **A bulk call made as soon as `bulk_serve` returns is served** (a flake: CI run 42371240189, the strict
   `compliance,a2a` lib run, `a_bulk_call_completes_between_two_plaintext_gateways` — `Err(Timeout)`). `bulk_serve`
   registered its `invoke.bulk` receiver inside the task it spawned, so a ticket delivered before that task first ran

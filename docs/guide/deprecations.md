@@ -2535,10 +2535,15 @@ and evidence journal from the unit its `unit` names (`docs/features/declared-aut
 changes.
 
 - **Who is affected:** a node that sets the table — its doors, which enforced nothing, now refuse what its unit's
-  rules do not permit; a build without `compliance` refuses the start by name. **An older binary ignores the table
+  rules do not permit. The start is refused by name without `compliance`, without `[persistence]` (a grant's use
+  markers and the epochs live there), with `skew_ms = 0`, with a journal path that cannot be opened, and with an
+  evaluator, an execution authority or an evidence journal attached in code beside the table. **An older binary ignores the table
   silently** (configuration tables are tolerant), so upgrade every node before relying on it. A Rust caller that
   builds `GossipConfig` with an exhaustive struct literal: the new field breaks it; `..Default::default()` is
   unaffected.
+- **The `governed-call` scaffold:** its `node.toml` now sets `gateway_identity_issuer = "governed-call"` and its
+  unit names the treasurer `token:governed-call/treasurer` with a `grant.revoke` rule. A project scaffolded earlier
+  keeps the bare `treasurer`, which no gateway principal matches: rename the actor to match your gateway's issuer.
 - **What to do:** declare, in this node's unit, every rule its doors should admit — including the issuing rule
   (`grant.issue`, and `grant.revoke` if its issuer revokes) in every unit whose gateway may issue — with each actor as
   the door presents it (`token:<issuer>/<name>` for a named token, `node:<id>` for a node). Do not attach an evaluator
