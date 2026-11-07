@@ -1,11 +1,16 @@
 # Feature pages — one short, checked entry page per feature
 
-**Status:** in progress, rev 0.8 (F3's second PR: eleven pages, 2026-11-07; rev 0.7, its first: eleven pages and P4's anchors, gated; F3's count is the registry's 55, not the estimated 30 to 40). Agreed with the maintainer on 2026-10-19; work began after v2.36.0 shipped.
+**Status:** in progress, rev 0.9 (2026-11-07: F3's second PR — eleven pages; rev 0.8: F3's first PR — eleven pages and P4's anchors, gated; F3's count is the registry's 55, not the estimated 30 to 40; rev 0.7, the same day: F4's rule and skill change delivered, the pass pending — §4.3). Agreed with the maintainer on 2026-10-19; work began after v2.36.0 shipped.
 **F1 is delivered** (PR #654): the template and three pilot pages, each independently reviewed against the code (two
 rounds and a confirmation), and the template revised from them (§4.1). **F2 is delivered** (PR #655): the feature
-registry and the gate, each check shown failing with a planted fault (§4.2). F3 is next. Rev 0.2 answered the
-independent review of PR #649; rev 0.3 recorded what the pilots taught; rev 0.4 records the decision on each (§4.1);
-rev 0.5 records F2 and its decisions (P3, P5).
+registry and the gate, each check shown failing with a planted fault (§4.2). **F3 is in progress.** **F4 is half
+delivered** (§4.3): the fifth rule and the `/doc-coverage` pass are written; the pass runs once F3's pages land.
+Rev 0.2 answered the independent review of PR #649; rev 0.3 recorded what the pilots taught; rev 0.4 records the
+decision on each (§4.1); rev 0.5 records F2 and its decisions (P3, P5); rev 0.6 records F2's third review round,
+the confirmation, and its fixes (#655, §4.2); rev 0.7 records F4's first half (§4.3) and the decision from its review that, after F3
+closes, a new feature lands with its page in the same PR (`page = "todo"` stays only for entries that predate
+F3's close). Rev 0.8 records F3's first PR: eleven pages, P4's anchors and the gate's checks on them (§4.1 P4), and the
+registry's count of 55 in place of the estimate. Rev 0.9 records F3's second PR: eleven pages for identity, transport, egress and durability.
 
 ## 1 · The gap
 
@@ -58,8 +63,8 @@ Three mechanisms keep the pages true, each covering a different kind of check.
 |---|---|---|
 | F1 — *delivered (#654): the template ([`docs/features/README.md`](../features/README.md), [`_template.md`](../features/_template.md)), revised from the pilots (§4.1), and the three pilots — [activation egress proxy](../features/activation-egress-proxy.md), [inference routing](../features/inference-routing.md) and [fleet-wide history limits](../features/fleet-history-limits.md) — each independently reviewed against the code (two rounds and a confirmation)* | The template and three pilot pages: the activation egress proxy (rows L and M), fleet-wide history limits (K2) and inference routing (R) | Each pilot page has an independent review against the code, and the template is revised from what the pilots show. |
 | F2 — *delivered (#655): [`docs/features/registry.toml`](../features/registry.toml), [`scripts/check-feature-pages.py`](../../scripts/check-feature-pages.py) and its mutation suite [`scripts/test-check-feature-pages.py`](../../scripts/test-check-feature-pages.py); evidence in §4.2* | The feature registry and the gate (F-G) | The gate fails on an unmapped id, on a page with a missing section, on a dead link or setting, and on an example absent from the index. Each of these is shown failing with a planted fault. |
-| F3 — *in progress: 55 pages in five PRs by capability-map row; the first (authority and the gateway, 11 pages, with P4's anchors) is this plan's rev 0.7; the second (identity, transport, egress and durability, 11 pages) rev 0.8* | The remaining pages: 55. The plan estimated 30 to 40 before the registry existed; F2's seven sources, with the glossary rows and the crates its review added, left 55 features with `page = "todo"`, so the estimate is replaced by the registry's count (rev 0.7) | The gate is green and every capability-map row lists its pages. The map's maintainer note names the feature pages and the registry. |
-| F4 | The `/doc-coverage` pass (F-S) and the fifth rule (F-P) | The pass has been run once and its findings closed. The policy page, CLAUDE.md and `/adversarial-review` all state the rule, and "four rules" reads "five" wherever it appears. |
+| F3 — *in progress: 55 pages in five PRs by capability-map row; the first (authority and the gateway, 11 pages, with P4's anchors) is this plan's rev 0.8; the second (identity, transport, egress and durability, 11 pages) rev 0.9* | The remaining pages: 55. The plan estimated 30 to 40 before the registry existed; F2's seven sources, with the glossary rows and the crates its review added, left 55 features with `page = "todo"`, so the estimate is replaced by the registry's count (rev 0.8) | The gate is green and every capability-map row lists its pages. The map's maintainer note names the feature pages and the registry. |
+| F4 — *in progress: the fifth rule (F-P) and the skill's feature-pages pass (F-S, Step 4b of [`/doc-coverage`](../../.claude/commands/doc-coverage.md)) delivered 2026-11-07; the pass itself runs once F3's pages land, and the row closes when its findings are closed* | The `/doc-coverage` pass (F-S) and the fifth rule (F-P) | The pass has been run once and its findings closed. The policy page, CLAUDE.md and `/adversarial-review` all state the rule, and "four rules" reads "five" wherever it appears. |
 
 **Not in scope:** rewriting the guide chapters or runbooks the pages link to.
 
@@ -151,3 +156,13 @@ test seams, is excluded.
 **Links to re-point at release.** The K2 page links `deprecations.md` §55 and §56 by their headings' anchors, which
 carry *unreleased*; the release that renames the headings must re-point those links in
 `docs/features/fleet-history-limits.md` (the gate fails on the stale anchor until it does).
+
+### 4.3 · F4's first half, on evidence
+
+| Promise (quoted) | Delivered by |
+|---|---|
+| F-P: *"A fifth verification-policy rule, in `verification-policy.md`, in CLAUDE.md's summary of it, and in the `/adversarial-review` checks"* | `docs/wiki/dev/testing/verification-policy.md` § The five rules, rule 5, and § Where it is enforced; `CLAUDE.md` § Verification policy, rule 5; `.claude/commands/adversarial-review.md` check 7. Also the PR template's field 5, `CONTRIBUTING.md`, `docs/wiki/AGENTS.md` and `docs/wiki/dev/testing/testing.md`. |
+| F-P: *"A PR that adds or changes a feature adds or updates its page and its registry entry, and the independent reviewer checks both"* | the rule's text in each of those places, with the same two exceptions: a page the change leaves true (the PR says why), and a `todo` entry that predates F3's close. The gate sees only its seven id sources (`SOURCES`, `scripts/check-feature-pages.py`), so for a configuration field, a route or an SDK verb the reviewer is the only check — stated in the rule, check 7, the template and the policy page's *What it does not promise*. |
+| F-S: *"`/doc-coverage` gains a feature-pages pass … whether the description is still true of the code, whether the example demonstrates the feature rather than merely running, whether the* not built *links match the plan, and which features merged since the last pass lack a page"* | `.claude/commands/doc-coverage.md` Step 4b, its four questions; the first pass's baseline is F2's merge (#655), and it is exempt from Step 0's no-diff stop. *"The skill is read before it is changed"*: read in full first. *"`/wiki-lint` gains no feature-pages pass"*: unchanged. |
+| F4 exit: *"The pass has been run once and its findings closed"* | **not built yet** — the pass runs once F3's pages land, and F4 closes then. |
+| F4 exit: *"The policy page, CLAUDE.md and `/adversarial-review` all state the rule, and 'four rules' reads 'five' wherever it appears"* | the three, above. A case-insensitive grep for *four rules*, *4 rules* and *four verification*: every statement of the current policy updated; the v2.26.0 release entries (`CLAUDE.md`, `ROADMAP.md`, `docs/wiki/wiki.md`), `CHANGELOG.md` and the 2026-10-06 log left as dated records; the knowledge layer's, the detectors' and the UI example contract's "four rules" are other rule sets (#724). |

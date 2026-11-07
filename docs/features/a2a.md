@@ -12,7 +12,7 @@ identity that created it.
 ## When to use it, and when not
 
 - **Use it when** an agent built on an A2A client (Strands Agents' `a2a-sdk`, LangChain over A2A) should reach the
-  fleet's skills without a Mycelium SDK, from a node you build or `skillrunner`.
+  fleet's skills without a Mycelium SDK, from a node you build with `a2a`.
 - **Not when** the route must be closed by a bearer: `/a2a` admits an anonymous caller and drops a bearer's scopes,
   so it is gated by an evaluator that denies anonymous principals, not by a token.
 
@@ -20,7 +20,8 @@ identity that created it.
 
 This feature is turned on in code: build with `a2a` (it implies `gateway`), give the node an `http_port`, and mount
 the routes. The published `mycelium` binary is built with `a2a` but does not mount them (below); the `skillrunner`
-binary does, when its node has an `http_port`.
+binary mounts them when built with `--features a2a` and its node has an `http_port` — its default features exclude
+`a2a`, and it is not published.
 
 - [`with_a2a`](../../src/agent/mod.rs): mounts the card and `/a2a` on the gateway; without it nothing is served.
 - [`http_port`](../reference/configuration.md#http_port): the gateway that serves them.
@@ -45,7 +46,7 @@ is a manual run with a real model.
 - **Guarantee:** [`a2a.admission`](../reference/guarantee-catalogue.md#a2a.admission) — `/a2a` is not anonymous skill
   dispatch, which holds only with an evaluator that denies anonymous principals.
 - **Not built:** the published `mycelium` binary does not mount `/a2a` — `src/main.rs` never calls `with_a2a` — so
-  an A2A client needs a node built with it or `skillrunner`; the card is public on a credentialed node; the pre-0.2
+  an A2A client needs a node built with it (or `skillrunner` built with `--features a2a`); the card is public on a credentialed node; the pre-0.2
   methods and the old card path, announced in 2.35.0 for one release
   ([deprecations §46](../guide/deprecations.md#46-a-current-a2a-client-reaches-a2a-the-card-at-agent-cardjson-the-10-and-03-methods-a-skill-in-metadataskillid-2350-post-360-plan-row-n)),
   are still served; push notifications are not served.

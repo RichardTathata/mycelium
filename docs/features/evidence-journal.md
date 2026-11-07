@@ -22,8 +22,9 @@ This feature is turned on in code, in a build with `gateway` and `tls`.
 - [`EvidenceJournal::open`](../../src/agent/evidence_journal.rs): open or create the journal at a path, with a
   failure profile.
 - [`EvidenceProfile`](../../src/agent/evidence_journal.rs): `Strict` refuses a dispatch whose decision could not be
-  recorded; `Lenient` lets it proceed without the journal record, and under `compliance` the chain's reference says
-  the evidence was never established.
+  recorded; `Lenient` lets it proceed without an acknowledged record, and under `compliance` the chain's reference
+  says which: `Unknown` when the journal did not acknowledge in time (the record may exist), `NotEstablished` when
+  it reported a failure or its queue was full.
 - [`with_evidence_journal`](../../src/agent/mod.rs): attach it before `start()`; a second journal is ignored with a
   warning.
 - [`read_evidence_journal_from`](../../src/agent/evidence_journal.rs): a bounded page from a cursor, the exporter's
@@ -45,7 +46,8 @@ gateway call. Reading one record back by its hash is
 ## What it guarantees, and what it does not
 
 - **Guarantee:** [`ae.recorded_before_dispatch`](../reference/guarantee-catalogue.md#ae.recorded_before_dispatch) —
-  every decision journalled, fsynced, before dispatch.
+  every decision journalled, fsynced, before dispatch. The promise holds under `EvidenceProfile::Strict`; under
+  `Lenient` a dispatch proceeds without the acknowledged record.
 - **Not built:** evidence does not survive the loss of the node's disk (the journal is node-local by design), and the
   chain's reference proves a record matches its hash, not that every decision was exported — a gap is visible to
   the consumer, as [audit § 10](../operations/audit.md#10-evidence-export--what-a-gap-looks-like-to-the-consumer)
