@@ -1,0 +1,14 @@
+# probe 1 (SecKey, ephemeral, no presence flag)
+ring.verify	Ok("ok")
+ring.verify_tampered_msg	Err(Unspecified)
+rcgen.issue_over_se_key	ok der_len=357
+webpki.chain_ed25519_ca_to_p256_leaf	Ok("ok")
+webpki.verify_se_signature	Ok("ok")
+webpki.verify_se_signature_as_ed25519	Err(UnsupportedSignatureAlgorithmForPublicKeyContext(UnsupportedSignatureAlgorithmForPublicKeyContext { signature_algorithm_id: [6, 3, 43, 101, 112], public_key_algorithm_id: [6, 7, 42, 134, 72, 206, 61, 2, 1, 6, 8, 42, 134, 72, 206, 61, 3, 1, 7] }))
+# probe 2 (CryptoKit blob, restored in the same run, no presence flag)
+ring.verify	Ok("ok")
+ring.verify_tampered_msg	Err(Unspecified)
+rcgen.issue_over_se_key	ok der_len=357
+webpki.chain_ed25519_ca_to_p256_leaf	Ok("ok")
+webpki.verify_se_signature	Ok("ok")
+webpki.verify_se_signature_as_ed25519	Err(UnsupportedSignatureAlgorithmForPublicKeyContext(UnsupportedSignatureAlgorithmForPublicKeyContext { signature_algorithm_id: [6, 3, 43, 101, 112], public_key_algorithm_id: [6, 7, 42, 134, 72, 206, 61, 2, 1, 6, 8, 42, 134, 72, 206, 61, 3, 1, 7] }))

@@ -1,0 +1,19 @@
+# create (biometryCurrentSet)
+se.isAvailable	true
+create	ok blob_len=569
+pub_x963_hex	04cdcf83f6e88a2532db22658a9626851e9bb6705e9ac06402b9af38438966cdb900c40335443da83f4ae96fd22a2fe9f3ef560b17e8b65e08c2d78e2614d2fad4
+# restore + sign in a new process, non-interactive
+restore_in_new_process	ok
+sign_noninteractive	FAILED (expected): Error Domain=com.apple.LocalAuthentication Code=-1004 "User interaction is required." UserInfo={MechanismTree=(1), BiometryType=1, BiometryDatabaseHash={length = 32, bytes = 0x085d9115 15fc2f16 815e6d31 24e85af1 ... 53660390 cfc5673c }, NSDebugDescription=User interaction is required., AvailableMechanisms=(
+    1
+), NSLocalizedDescription=User interaction required.}
+# tampered blob
+tampered_blob	ACCEPTED (unexpected)
+# no-presence key, blob round trip
+roundtrip_sign	ok
+pub_x963_hex	040ad2ea626219b31e47fc3e870c86004bd37071e3783c23eb1bc1b0280ab911c169aafb67a7850808239dacf368b04ff2d959dda5183a50d2b8205ba6095692c9
+pub_spki_der_hex	3059301306072a8648ce3d020106082a8648ce3d030107034200040ad2ea626219b31e47fc3e870c86004bd37071e3783c23eb1bc1b0280ab911c169aafb67a7850808239dacf368b04ff2d959dda5183a50d2b8205ba6095692c9
+sig_der_hex	304402204c8625bf51e01c3beff81af45475eee93c738ea80e59728d412f82ef350d6d1602206fe72c26539a7652cab16f6b91cf66371661b8f0dca36b0e6ecf8ae828e040c4
+msg_hex	6d7963656c69756d207370696b6520732d70726573656e6365
+tampered_blob_construct	accepted (validation is deferred)
+tampered_blob_sign	refused: Error Domain=CryptoTokenKit Code=-3 "<sepk:p256(u) kid=99595c27110952b6>: unable to sign digest" UserInfo={NSDebugDescription=<sepk:p256(u) kid=99595c27110952b6>: unable to sign digest, AKSError=-536362989}

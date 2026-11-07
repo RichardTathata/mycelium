@@ -1,0 +1,13 @@
+[package]
+name = "s-presence-verify"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+ring  = "=0.17.14"
+rcgen = { version = "=0.13.2", default-features = false, features = ["crypto", "ring", "pem"] }
+webpki = { package = "rustls-webpki", version = "=0.103.16", default-features = false, features = ["ring", "std"] }
+rustls-pki-types = "1"
