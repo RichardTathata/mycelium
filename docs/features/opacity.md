@@ -6,7 +6,8 @@
 watches how full the node's inbound channel for a kind is; past a threshold it writes a pheromone under
 `sys/load/{node}/{kind}` and emits a boundary-opaque signal, and once the fill falls a full hysteresis below the
 threshold it clears both. Other nodes read the trail and route around a busy node on their own — no coordinator, no
-message to the dispatcher, no failure detector. A stale mark stops reading as opaque, and an Individual-scoped signal is
+message to the dispatcher, no failure detector. A reader passes the age past which a peer's mark no longer counts
+(`is_node_opaque`'s `max_age`); this node's own `is_opaque` reads its mark unaged. An Individual-scoped signal is
 delivered to an opaque node regardless.
 
 ## When to use it, and when not
@@ -41,8 +42,9 @@ dispatcher reads the trail and routes around the busy one, and the depot rejoins
 ## What it guarantees, and what it does not
 
 - No guarantee or rule id of its own: the governor's spacing is the control contract's
-  ([adaptive stability](adaptive-stability.md)), and skipping an opaque provider is
-  [`cap.match`](../reference/rule-catalogue.md#capmatch)'s `opaque_skipped`.
+  ([adaptive stability](adaptive-stability.md)). Resolution does not skip an opaque provider —
+  [`cap.match`](../reference/rule-catalogue.md#capmatch) does not consult opacity — so routing around one is the
+  reader's own choice, made with `is_node_opaque` or `peer_load`.
 - **Not built:** the pheromone is self-reported, so a node can under- or over-report; the trail is as fresh as gossip;
   a reader's routing is a hint it may ignore. Opacity is not inhibition: forwarding never stops
   ([signal mesh](signal-mesh.md)).

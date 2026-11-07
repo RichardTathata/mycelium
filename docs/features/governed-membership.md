@@ -7,7 +7,9 @@ as a unit file's `[[group]]`. A group can be governed: an operator publishes an 
 between `min` and `max` members, drain these nodes — and each candidate node runs a membership governor that decides
 for itself whether to join or leave, spacing and settling its moves, so the group holds the band without a controller
 choosing who. The intent lives in gossip for a window; if the operator goes away the band still holds until it
-evaporates. A governed group's membership moves only through its governor or the governance route.
+evaporates. Over HTTP, a governed group's membership moves only through `/gateway/govern/group`: the plain
+`/gateway/mesh/group` routes refuse it (403 `governed_group`). In code, `mesh().join_group` and `leave_group` do not
+check, and the governor never rolls an electorate group.
 
 ## When to use it, and when not
 
@@ -43,9 +45,13 @@ goes offline, and a member is killed; the governors self-elect and heal the coun
 
 - **Rule:** [`membership.governed`](../reference/rule-catalogue.md#membershipgoverned) — `join` or `leave`; deferred as
   `view_not_confident` (under an enforcing control profile), `settling` or `spacing`; otherwise `hold`.
+- **Held at the gateway:** a governed group's filter cannot be redefined through `units/declare`, nor its membership
+  changed through `/gateway/mesh/group` (both 403 `governed_group`).
 - **Not built:** the band is a target the governors reach, not an invariant at every instant — a count can sit
   outside it while moves settle; a group is self-joined by filter, so a node that matches and misbehaves is not kept
-  out; a governed group's filter cannot be redefined through `units/declare` (403 `governed_group`).
+  out; in-process `join_group` and `leave_group`, and raw `grp/` writes, are not checked against governance; the
+  governor's eligibility reads `cap/` without freshness, so a dead node can stay eligible — a known gap fixed by a
+  separate PR.
 - **Evidence:** the [what-is-proven](../operations/what-is-proven.md) ledger's
   [hysteresis row](../operations/what-is-proven.md#hysteresis-control-loops-load-bearing), within scenario C's bounded
   sense.
