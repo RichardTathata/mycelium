@@ -1,16 +1,17 @@
-# tree 3bdb8b0c
-1. fn parameters typed &[u8; 32] or &[[u8; 32]] (verifying keys and hashes)	72	grep -rnE --include='*.rs' 'fn [A-Za-z_0-9]+(<[^>]*>)?\([^)]*: *&\[?\[u8; *32\]' <roots> | <non-test>
-2. fn parameters typed &[u8; 64] or [u8; 64] (Ed25519 signatures)	1	grep -rnE --include='*.rs' 'fn [A-Za-z_0-9]+(<[^>]*>)?\([^)]*: *&?\[u8; *64\]' <roots> | <non-test>
-3. every [u8; 32] mention (keys, but also hashes)	412	grep -rnE --include='*.rs' '\[u8; *32\]' <roots> | <non-test>
-4. every [u8; 64] mention	21	grep -rnE --include='*.rs' '\[u8; *64\]' <roots> | <non-test>
-5. VerifyingKey::from_bytes (ed25519-dalek key decode)	12	grep -rnE --include='*.rs' 'VerifyingKey::from_bytes' <roots> | <non-test>
-6. Signature::from_bytes / from_slice	12	grep -rnE --include='*.rs' 'Signature::from_(bytes|slice)' <roots> | <non-test>
-7. as 1, but only parameters named key/keys/verifying_key(s)/pub_key_bytes	39	grep -rnE --include='*.rs' 'fn [A-Za-z_0-9]+(<[^>]*>)?\([^)]*(keys?|verifying_keys?|pub_key_bytes) *: *&\[?\[u8; *32\]' <roots> | <non-test>
+# roots: mycelium-agentfacts/src mycelium-blackboard/src mycelium-commitment/src mycelium-core/src mycelium-effects/src mycelium-gateway-free-tests/src mycelium-guardrails/src mycelium-py/src mycelium-reason/src mycelium-sim/src mycelium-ts/src mycelium-tuple-space/src mycelium-wasm-host/src mycelium-wiki/src src 
+# tree 64fb5096
+1. fn parameters typed &[u8; 32] or &[[u8; 32]] (verifying keys and hashes)	66	grep -rnE --include='*.rs' 'fn [A-Za-z_0-9]+(<[^>]*>)?\([^)]*: *&\[?\[u8; *32\]' <roots> | <non-test> | cut -d: -f1,2 | sort -u
+2. fn parameters typed &[u8; 64] or [u8; 64] (Ed25519 signatures)	1	grep -rnE --include='*.rs' 'fn [A-Za-z_0-9]+(<[^>]*>)?\([^)]*: *&?\[u8; *64\]' <roots> | <non-test> | cut -d: -f1,2 | sort -u
+3. every [u8; 32] mention (keys, but also hashes)	366	grep -rnE --include='*.rs' '\[u8; *32\]' <roots> | <non-test> | cut -d: -f1,2 | sort -u
+4. every [u8; 64] mention	18	grep -rnE --include='*.rs' '\[u8; *64\]' <roots> | <non-test> | cut -d: -f1,2 | sort -u
+5. VerifyingKey::from_bytes (ed25519-dalek key decode)	11	grep -rnE --include='*.rs' 'VerifyingKey::from_bytes' <roots> | <non-test> | cut -d: -f1,2 | sort -u
+6. Signature::from_bytes / from_slice	11	grep -rnE --include='*.rs' 'Signature::from_(bytes|slice)' <roots> | <non-test> | cut -d: -f1,2 | sort -u
+7. as 1, but only parameters named key/keys/verifying_key(s)/pub_key_bytes	33	grep -rnE --include='*.rs' 'fn [A-Za-z_0-9]+(<[^>]*>)?\([^)]*(keys?|verifying_keys?|pub_key_bytes) *: *&\[?\[u8; *32\]' <roots> | <non-test> | cut -d: -f1,2 | sort -u
 # files with count 1, by file
-  10 mycelium-core/src/removal.rs
    7 src/agent/revocation.rs
    7 src/agent/audit.rs
    5 src/consensus.rs
+   5 mycelium-core/src/removal.rs
    4 src/agent/transparency.rs
    4 mycelium-commitment/src/lib.rs
    3 src/agent/gateway_caller.rs
@@ -21,7 +22,6 @@
    2 src/agent/helpers.rs
    2 src/agent/gateway_authority.rs
    2 src/agent/fault_probes.rs
-   2 mycelium-core/src/tls.rs
    2 mycelium-agentfacts/src/crdt.rs
    1 src/knowledge.rs
    1 src/federation/client.rs
@@ -35,3 +35,4 @@
    1 mycelium-wasm-host/src/provisioner.rs
    1 mycelium-sim/src/seams.rs
    1 mycelium-guardrails/src/verify.rs
+   1 mycelium-core/src/tls.rs

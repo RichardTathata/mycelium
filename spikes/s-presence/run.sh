@@ -13,6 +13,8 @@ print "# commit $(git rev-parse --short HEAD) $(git status --porcelain --untrack
 print "# machine state"
 step sw_vers
 step uname -m
+step sysctl -n machdep.cpu.brand_string
+step xcode-select -p
 step security find-identity -v -p codesigning
 step ls -la "$HOME/Library/MobileDevice/Provisioning Profiles"
 step swiftc --version
