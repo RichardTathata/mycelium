@@ -36,7 +36,7 @@ Sign entries where the key is, with the `mycelium-artifact` binary, and list the
   `gateway`, with an `http_port`, whose `[hosts]` names trusted publishers, under `artifact:publish`
   ([artifacts § Publishing through a gateway](../operations/artifacts.md#publishing-through-a-gateway-a3)).
   The scope is checked only in a build with `compliance`; the published `mycelium-stem` is built without it
-  (`stem,gateway,llm,object_store`), so there any valid bearer reaches the route — the line's provenance is still
+  (`stem,gateway,llm,object_store`), so there any valid bearer reaches the route (or anyone, on an open gateway with no token model) — the line's provenance is still
   checked against the trusted publishers before it is written.
 - `require_provenance_refuses_unsigned_but_installs_trusted_signed`, in
   [`mycelium-wasm-host/src/provisioner.rs`](../../mycelium-wasm-host/src/provisioner.rs).
@@ -52,7 +52,7 @@ provenance and pulls it over the mesh. CI runs it.
 
 - **Rule:** [`prov.provenance`](../reference/rule-catalogue.md#provprovenance) — `signed_by_trusted_publisher`, or
   refused `not_signed_by_trusted_publisher` (an invalid signature and an untrusted publisher are one answer), rev 2;
-  `no_trust_list_configured` only where unsigned entries were accepted on purpose.
+  `no_trust_list_configured` only where unsigned entries were accepted on purpose. These are the rule's described answers; a trace records a refused line as `provenance_rejected` under the calling rule (`prov.demand_response` or `prov.presence_floor`).
 - **Not built:** signing proves who published an entry, not that the component is safe — the publisher keys are the
   posture to review; there is no revocation of a published entry beyond removing it from the manifest; a gateway
   publish is refused when the signer is a key a librarian on that node manages (409).
