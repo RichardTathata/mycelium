@@ -112,6 +112,27 @@ struct AuthorityState {
     call_expiry: std::collections::BTreeSet<(u64, crate::mandate::PrincipalId, String)>,
 }
 
+impl AuthorityState {
+    /// SPIKE S-cancel, #731's confirm round (M1's edge): keep a `call:` scope until the **latest** window any mandate in
+    /// it has been admitted under — a second mandate on one scope with a later end moves the scope's expiry, never
+    /// leaving it reclaimed while that mandate still runs.
+    fn keep_call_window(&mut self, authority: &crate::mandate::PrincipalId, scope: &str, until: u64) {
+        let k = (authority.clone(), scope.to_string());
+        match self.call_windows.get(&k).copied() {
+            Some(held) if held >= until => {}
+            Some(held) => {
+                self.call_expiry.remove(&(held, k.0.clone(), k.1.clone()));
+                self.call_expiry.insert((until, k.0.clone(), k.1.clone()));
+                self.call_windows.insert(k, until);
+            }
+            None => {
+                self.call_expiry.insert((until, k.0.clone(), k.1.clone()));
+                self.call_windows.insert(k, until);
+            }
+        }
+    }
+}
+
 /// SPIKE S-cancel, review M1: the most `call:` scopes one sweep reclaims, bounding how long it holds row 43.
 pub const RECLAIM_PER_SWEEP: usize = 1_024;
 
@@ -629,7 +650,7 @@ impl ExecutionAuthority {
             }
             return match st.revocations.grant_standing(&m.established_by, &m.scope, &m.term) {
                 RevocationStanding::NotRevoked => {
-                    if st.call_windows.insert((m.established_by.clone(), m.scope.clone()), m.valid_until_ms).is_none() { st.call_expiry.insert((m.valid_until_ms, m.established_by.clone(), m.scope.clone())); }
+                    st.keep_call_window(&m.established_by, &m.scope, m.valid_until_ms);
                     Assessment {
                         binding: Some(
                             MandateBinding::established(m.holder.clone(), m.term.clone(), m.scope.clone(), m.epoch)
@@ -639,7 +660,7 @@ impl ExecutionAuthority {
                     }
                 }
                 RevocationStanding::Revoked => {
-                    if st.call_windows.insert((m.established_by.clone(), m.scope.clone()), m.valid_until_ms).is_none() { st.call_expiry.insert((m.valid_until_ms, m.established_by.clone(), m.scope.clone())); }
+                    st.keep_call_window(&m.established_by, &m.scope, m.valid_until_ms);
                     refused(MandateRefusal::Revoked { term: m.term.as_str().to_string() })
                 }
                 RevocationStanding::Unknown => unknown("the call's checkpoint has not reached this verifier".into()),
@@ -1209,5 +1230,23 @@ mod spike_s_cancel {
             }
             println!("S6 n={n}: idle sweep {idle_us:.1} µs; reclaim in {sweeps} sweeps of ≤{RECLAIM_PER_SWEEP}, worst {worst_us:.1} µs, total {:.1} ms", total_us / 1e3);
         }
+    }
+
+    /// **#731's confirm round, M1's edge: a second mandate on one scope with a later window keeps the scope until the
+    /// later end.**
+    #[test]
+    fn s7_a_later_mandate_on_one_scope_keeps_the_later_expiry() {
+        let (ak, hk) = keys();
+        let p = provider(&ak, &hk);
+        let early = mint(&ak, &hk, 77, 1_000, 10_000, true);
+        let mut late = mint(&ak, &hk, 77, 1_000, 30_000, true);
+        // The same scope and term, a later window: re-signed.
+        late.grant.signature = mycelium_core::tls::sign_bytes(&ak, &late.grant.mandate.canonical_bytes()).to_vec();
+        assert_eq!(state(&p.assess(CALLER, OP, RES, &DIGEST, Some(&early), 2_000, &none())), Some(MandateState::Established));
+        assert_eq!(state(&p.assess(CALLER, OP, RES, &DIGEST, Some(&late), 2_000, &none())), Some(MandateState::Established));
+        assert_eq!(p.reclaim_calls(10_001), 0, "kept past the first window: the second mandate's runs to 30 000");
+        assert_eq!(p.view_sizes(), (1, 1, 1));
+        assert_eq!(p.reclaim_calls(30_001), 1);
+        assert_eq!(p.view_sizes(), (0, 0, 0));
     }
 }

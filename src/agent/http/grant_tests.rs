@@ -1263,14 +1263,16 @@ async fn spike_s_cancel_reclamation_with_the_feeder_running() {
         b.kv().set(format!("grant/{issuer}/{id}/checkpoint"), serde_json::to_vec(&cp(&id, 1 + (i % 2) as u64, &revoked)).unwrap());
     }
     // The feeder runs on each checkpoint write; wait for it to settle.
-    let settled = until(|| authority.view_sizes().0 >= before.0 + N || authority.view_sizes() == before, Duration::from_secs(20)).await;
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    // The feeder runs on each checkpoint write; give it time to have offered everything it would.
+    tokio::time::sleep(Duration::from_millis(1_500)).await;
     let fed = authority.view_sizes();
+    assert_eq!(fed, (0, 0, 0), "the feeder offers no call: checkpoint for a scope this node did not admit");
     // Every window long past: a sweep at the far future reclaims whatever it can.
     let far = b.task_ctx.hlc.decision_now_ms() + 10_000_000_000;
     authority.sweep(far);
     let swept = authority.view_sizes();
-    println!("H2 feeder, {N} fleet calls this node assessed none of: before {before:?}; after the feeder {fed:?} (settled={settled}); after a far-future sweep {swept:?}");
+    assert_eq!(swept, (0, 0, 0));
+    println!("H2 feeder, {N} fleet calls this node assessed none of: before {before:?}; after the feeder {fed:?}; after a far-future sweep {swept:?}");
     // One call this node does admit: assessed with its checkpoint carried (so it gets a window), its checkpoint also
     // in the KV; reclaimed past its window; then the feeder woken by another write.
     let own = cp("own1", 1, &[]);
@@ -1289,16 +1291,19 @@ async fn spike_s_cancel_reclamation_with_the_feeder_running() {
         let proof = mycelium_core::tls::sign_bytes(&key, &possession_message(&grant.mandate, &possession_request(op, res, &digest)));
         let p = PresentedMandate { grant, possession: base64::engine::general_purpose::STANDARD.encode(proof), checkpoint: Some(own.clone()) };
         let a = authority.assess(&issuer, op, res, &digest, Some(&p), now, &crate::agent::gateway_member_keys(&b.task_ctx));
-        println!("H2 own call assessed: {:?}; sizes {:?}", a.binding.map(|x| x.state), authority.view_sizes());
+        assert_eq!(a.binding.map(|x| x.state), Some(crate::agent::action_evaluator::MandateState::Established));
+        assert_eq!(authority.view_sizes(), (1, 1, 1), "the admitted call's scope, and only it");
     }
     b.kv().set(format!("grant/{issuer}/own1/checkpoint"), serde_json::to_vec(&own).unwrap());
     tokio::time::sleep(Duration::from_millis(300)).await;
     authority.sweep(far);
     let after_own = authority.view_sizes();
+    assert_eq!(after_own, (0, 0, 0), "reclaimed past its window");
     b.kv().set(format!("grant/{issuer}/wake/checkpoint"), serde_json::to_vec(&cp("wake", 1, &[])).unwrap());
     tokio::time::sleep(Duration::from_millis(500)).await;
     authority.sweep(far);
     let after_wake = authority.view_sizes();
+    assert_eq!(after_wake, (0, 0, 0), "the feeder woken again does not bring the reclaimed scope back");
     println!("H2 own call: after its reclaiming sweep {after_own:?}; after the feeder is woken again and another sweep {after_wake:?}");
     b.shutdown().await;
 }
