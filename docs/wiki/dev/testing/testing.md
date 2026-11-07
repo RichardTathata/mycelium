@@ -5,7 +5,8 @@
 
 **Read first: [verification-policy.md](verification-policy.md)** — a change is verified against the surface
 it touches, not its own description: enumerate every entry point before fixing, close plan rows on quoted
-evidence, CI discovers tests, an independent adversarial review before merge (adopted 2026-10-06).
+evidence, CI discovers tests, an independent adversarial review before merge (adopted 2026-10-06), and a
+feature's page changes with the feature (rule 5, 2026-11-07).
 
 ## Run the full feature matrix before pushing
 

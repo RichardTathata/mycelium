@@ -22,6 +22,20 @@ As of 2026-06-21 all v1.x/v2.0 engineering plans were shipped. Since then, **Leg
 The three-verb operator spine — **localize** (`/fleet`) · **explain** (`/explain`) · **diagnose**
 (`/diagnose`) — is shipped, tested, and documented for both audiences.
 
+## The external review's R5–R9 — 2026-11-06 → 07 (#718–#722, unreleased)
+
+The rest of the external code security review of 2026-10-31 (`docs/plans/external-review-2026-10-31.md`, rev 0.8),
+each row closed on evidence in the plan's §5. **R5** (#719): the gateway closes a connection that does not speak within
+`handshake_timeout_ms`, through its TLS handshake and its preface, and serves at most `gateway_max_connections` at once;
+one accept loop for both listeners (`src/agent/http/listener.rs`). **R6** (#718): a node-local journal, both companion
+WALs and `start()`'s `kv/` chain sync every directory entry on the way before the first acknowledged record; an
+ancestor without directory fsync is passed over and counted (`dir_syncs_passed_over`). **R7** (#722): `bulk_call`
+works under `gateway_tls`, verified against the fleet check or `bulk_ca_pem_path`; `max_bulk_payload_bytes` bounds both
+sides. **R8** (#720): a replica-sync answer is `Failed` while an inbound record sits between its apply and its WAL
+enqueue. **R9** (#721): the audit job denies every warning not accepted on its lockfile's own line; `rustls-pemfile`
+and `async-openai` are out of the tree; Tokio 1.53.3 is every manifest's floor. Upgrade notes `deprecations.md`
+§78–§82. Record: [`.log/2026-11-07-external-review-r5-r9.md`](.log/2026-11-07-external-review-r5-r9.md).
+
 ## v2.39.0 release — 2026-11-06 (tag `v2.39.0`) — the adopter surface's second wave, and the external review's first rows
 
 A **MINOR** cut on `release/v2.39.0`, tagged on the maintainer's word ("Go"). It carries the second wave of
