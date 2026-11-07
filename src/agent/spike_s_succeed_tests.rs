@@ -39,6 +39,10 @@ fn node(base: &Path, name: &str, ca_dir: &Path, trust: &Path, boot: Vec<NodeId>)
     cfg.bind_port = port;
     cfg.bootstrap_peers = boot;
     cfg.health_check_max_jitter_ms = 1;
+    // SPIKE M1: the join timing under a lower handshake bound (`SPIKE_HS_MS`, default main's 10 000).
+    if let Some(ms) = std::env::var("SPIKE_HS_MS").ok().and_then(|v| v.parse().ok()) { cfg.handshake_timeout_ms = ms; }
+    // SPIKE M1: and under a shorter health-check (anti-entropy) tick (`SPIKE_HC_S`, default main's 10).
+    if let Some(v) = std::env::var("SPIKE_HC_S").ok().and_then(|v| v.parse().ok()) { cfg.health_check_interval_secs = v; }
     cfg.tls = Some(crate::TlsConfig {
         cert_pem: Some(cert.clone()), key_pem: Some(key.clone()), ca_cert_pem: Some(trust.to_path_buf()),
         auto_cert_dir: base.join(format!("{name}-node")),
@@ -100,8 +104,15 @@ async fn spike_s_succeed_a_cert_pem_node_re_roots_live() {
 
     // ── 1. B takes its CA2 certificate live, trusting both roots. A trusts CA1 only.
     let t = Instant::now();
-    b.spike_reroot(&b2, &nb.key, &[&r1, &r2]).unwrap();
+    let m = crate::tls::reroot_material(&b2, &nb.key, &[&r1, &r2], Arc::clone(&b.task_ctx.removed), Arc::clone(&b.task_ctx.key_standing)).unwrap();
+    let material_cost = t.elapsed();
+    let t = Instant::now();
+    tb.activate(m);
+    let activate_cost = t.elapsed();
+    let t = Instant::now();
+    b.spike_reroot(&b2, &nb.key, &[&r1, &r2]).unwrap(); // the whole call, as the note's first figure timed it
     let reroot_cost = t.elapsed();
+    eprintln!("SPIKE S-succeed: L2 — reroot_material {material_cost:?}; activate {activate_cost:?}; whole spike_reroot (material, certificate-record write, activate) {reroot_cost:?}");
     let before = handshake(tb.client_config(), ta.server_config());
     eprintln!("SPIKE S-succeed: B (CA2 cert) dialling A (CA1 only): {before:?}");
     assert!(before.as_ref().is_err_and(|e| e.starts_with("server refused")), "before A re-roots, A refuses B's CA2 cert: {before:?}");
@@ -131,6 +142,27 @@ async fn spike_s_succeed_a_cert_pem_node_re_roots_live() {
     crate::tls::issue_node_cert_for_key(&ca2, &na.id, &na.key, &a2, mycelium_core::sim_seam::wall_now_ms()).unwrap();
     a.spike_reroot(&a2, &na.key, &[&r2]).unwrap();
     assert_eq!(handshake(tb.client_config(), ta.server_config()), Ok(()), "B (CA2) → A (CA2 only)");
+    // L5: a socket session in which A presents its own successor certificate — a fresh node G that trusts
+    // only CA2 (so it can verify only A's new certificate) dials A; A's write reaches G.
+    let ng = node(&base, "g", &ca2, &r2, vec![na.id.clone()]);
+    let g = Arc::new(GossipAgent::new(ng.id.clone(), ng.cfg.clone()));
+    g.start().await.unwrap();
+    let _ = a.kv().set("spike/from-a-after-narrow".to_string(), bytes::Bytes::from_static(b"1"));
+    let g_join = until("L5: A's write reaches G (CA2 trust only) over a session presenting A's CA2 certificate", 20,
+        || g.kv().get("spike/from-a-after-narrow").is_some()).await;
+    eprintln!("SPIKE S-succeed: L5 — G (trusts CA2 only) received A's write in {g_join:?}: A presented its successor certificate on a socket");
+    // M2: F trusts BOTH roots but holds an old-root (CA1) certificate — isolates A's narrowed accept side.
+    let nf = node(&base, "f", &ca1, &r1, vec![na.id.clone()]);
+    let f = Arc::new(GossipAgent::new(nf.id.clone(), nf.cfg.clone()));
+    f.start().await.unwrap();
+    f.spike_reroot(&nf.cert, &nf.key, &[&r1, &r2]).unwrap(); // F widens; keeps its CA1 certificate
+    let tf = f.task_ctx.tls.get().unwrap();
+    let f_to_a = handshake(tf.client_config(), ta.server_config());
+    let a_to_f = handshake(ta.client_config(), tf.server_config());
+    eprintln!("SPIKE S-succeed: M2 — F (two roots, CA1 cert) → A (CA2 only): {f_to_a:?}; A → F: {a_to_f:?}");
+    assert!(f_to_a.as_ref().is_err_and(|e| e.starts_with("server refused")), "A's narrowed accept side refuses an old-root certificate: {f_to_a:?}");
+    assert!(a_to_f.as_ref().is_err_and(|e| e.starts_with("client refused")), "A's narrowed dial side refuses an old-root server certificate: {a_to_f:?}");
+    let _ = f.kv().set("spike/from-f".to_string(), bytes::Bytes::from_static(b"1"));
     let nd = node(&base, "d", &ca1, &r1, vec![na.id.clone()]);
     let d = Arc::new(GossipAgent::new(nd.id.clone(), nd.cfg.clone()));
     d.start().await.unwrap();
@@ -142,9 +174,10 @@ async fn spike_s_succeed_a_cert_pem_node_re_roots_live() {
     let _ = d.kv().set("spike/from-d".to_string(), bytes::Bytes::from_static(b"1"));
     tokio::time::sleep(Duration::from_secs(3)).await;
     assert!(a.kv().get("spike/from-d").is_none(), "D's write never reaches A");
+    assert!(a.kv().get("spike/from-f").is_none(), "F's write never reaches A");
     eprintln!("SPIKE S-succeed: membership believes D? {} (a belief, not a session)", a.peers().contains(&nd.id));
 
-    eprintln!("SPIKE S-succeed: reroot (material + activate) {reroot_cost:?}; C joined live A in {joined:?}; A connected {:?}", a.connected_peers());
-    for n in [&a, &b, &c, &d, &e] { n.shutdown().await; }
+    eprintln!("SPIKE S-succeed: SUMMARY hs_ms={} hc_s={} control_join={control:?} c_join={joined:?} g_join={g_join:?} b_carried={carried:?} reroot_whole={reroot_cost:?}", na.cfg.handshake_timeout_ms, na.cfg.health_check_interval_secs);
+    for n in [&a, &b, &c, &d, &e, &f, &g] { n.shutdown().await; }
     let _ = std::fs::remove_dir_all(&base);
 }
