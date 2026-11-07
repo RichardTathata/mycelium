@@ -45,8 +45,17 @@ fn usage() -> ! {
     std::process::exit(2)
 }
 
+/// The stem's log filter: `RUST_LOG`'s directives when it holds any valid one, as `EnvFilter` reads
+/// them, otherwise INFO. The stem once set a fixed INFO level, so `RUST_LOG` did nothing (found beside
+/// the review of #730; the node binary's `log_filter` is the same reading).
+fn log_filter(rust_log: Option<&str>) -> tracing_subscriber::EnvFilter {
+    tracing_subscriber::EnvFilter::builder()
+        .with_default_directive(tracing_subscriber::filter::LevelFilter::INFO.into())
+        .parse_lossy(rust_log.unwrap_or(""))
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tracing_subscriber::fmt().with_max_level(tracing::Level::INFO).init();
+    tracing_subscriber::fmt().with_env_filter(log_filter(std::env::var("RUST_LOG").ok().as_deref())).init();
 
     let mut units_path: Option<String> = None;
     let mut config_path: Option<String> = None;
@@ -287,3 +296,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     })
 }
 
+
+#[cfg(test)]
+mod log_filter_tests {
+    use super::log_filter;
+    use tracing_subscriber::filter::LevelFilter;
+
+    /// **`RUST_LOG` is read** (found beside the review of #730): the stem set a fixed INFO level, so
+    /// `RUST_LOG=mycelium_wasm_host=debug` did nothing. Unset, empty or holding no valid directive,
+    /// INFO stands; set, its directives decide, as `EnvFilter` always has them.
+    #[test]
+    fn the_stems_log_filter_reads_rust_log_and_keeps_info_when_unset() {
+        let hint = |rust_log| log_filter(rust_log).max_level_hint();
+        assert_eq!(hint(None), Some(LevelFilter::INFO));
+        assert_eq!(hint(Some("")), Some(LevelFilter::INFO));
+        assert_eq!(hint(Some("mycelium_wasm_host=lolwut")), Some(LevelFilter::INFO), "an invalid RUST_LOG keeps the default");
+        assert_eq!(hint(Some("mycelium_wasm_host=debug")), Some(LevelFilter::DEBUG), "RUST_LOG ignored");
+        assert_eq!(hint(Some("warn")), Some(LevelFilter::WARN), "RUST_LOG ignored");
+    }
+}

@@ -51,6 +51,24 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A crashed provider's advertisement is skipped by every reader of `cap/` and `req/`** (the independent review of
+  #730). An advertisement is never tombstoned when its provider dies; it evaporates at its readers, which skip an entry
+  older than three refresh intervals (`CapEntry::is_fresh` / `ReqEntry::is_fresh`, rule `kv.expiry`). Seven readers
+  decoded with `Capability::decode` or `CapFilter::decode` and never asked, so a dead node stayed live to them
+  indefinitely: `/a2a tasks/send` could route to it and the agent card listed its skill (`resolve_providers`,
+  `card_skill_ids`); the membership governor counted it eligible, inflating `eligible_non_members` and lowering every
+  live node's `join_p` (`resolve_eligible`); the gateway's provider lookup — `GET /gateway/cap/resolve`,
+  `shard/owner`, `shard/emit`, `llm/call` and `llm/stream` — resolved and routed to it
+  (`resolve_cap_providers`, which said so in its doc comment); `GET /gateway/demand` counted its providers and
+  requirers; and the provider-side preflight read this node's own stale entry, restored from persisted state, as a
+  skill it serves (`advertises`). Each now reads through the resolver's own path (`resolve_filter_against_kv`, or
+  `scan_fresh_caps` where the key's segments are wanted). No API change; a caller sees fewer providers, never more.
+
+- **The `mycelium` node binary and `mycelium-stem` read `RUST_LOG`** (the independent review of #730). Each set a
+  fixed maximum level, so `RUST_LOG=mycelium=debug` did nothing. Each now builds an `EnvFilter` from `RUST_LOG`, as
+  `skillrunner` does; unset, empty or holding no valid directive, the default stands — INFO for the node and the stem,
+  WARN for `mycelium test`. `mycelium-wasm-host`'s optional `tracing-subscriber` gains its `env-filter` feature.
+
 - **A fresh journal's first acknowledged record has a durable name** (external review 2026-10-31 F7,
   `docs/plans/external-review-2026-10-31.md` R6). The node-local journal — the evidence journal, the rights ledger, the
   revocation and epoch journals, the knowledge layer's two journals and the effects ledger all open through it — the

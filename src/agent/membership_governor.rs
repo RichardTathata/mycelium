@@ -15,7 +15,7 @@
 
 use mycelium_core::decision::{DecisionRecord, InputSnapshot, OutcomeKind, Provenance, ViewStatus};
 use crate::agent::{GossipAgent, TaskCtx};
-use crate::capability::{Capability, CapFilter, CapabilityGroupDef};
+use crate::capability::{CapFilter, CapabilityGroupDef};
 use crate::node_id::NodeId;
 use mycelium_core::kv_handle::KvHandle;
 use serde::{Deserialize, Serialize};
@@ -26,7 +26,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tracing::debug;
 
-use super::capability_ops::{is_cap_locality_key, parse_cap_key_or_warn, scan_prefix_kv};
+use super::capability_ops::scan_prefix_kv;
 
 /// `sys/govern/membership/{group}` — one fleet intent per governed group.
 pub const MEMBERSHIP_PREFIX: &str = "sys/govern/membership/";
@@ -116,21 +116,12 @@ pub fn decide(am_member: bool, is_drain: bool, join_p: f64, leave_p: f64, roll: 
     MembershipAction::Hold
 }
 
-/// Nodes whose gossiped capabilities match `filter` — the eligible set for a group.
+/// Nodes whose *fresh* gossiped capabilities match `filter` — the eligible set for a group. A crashed
+/// node's ad is never tombstoned; once it is older than three refresh intervals it is skipped here as
+/// at every resolver, so a dead node does not stay eligible, inflate `eligible_non_members` and lower
+/// every live node's `join_p` (rule `kv.expiry`; the review of #730).
 fn resolve_eligible(kv_state: &crate::store::KvState, filter: &CapFilter) -> HashSet<NodeId> {
-    let mut set = HashSet::new();
-    for (key, bytes) in scan_prefix_kv(kv_state, "cap/") {
-        if is_cap_locality_key(&key) {
-            continue;
-        }
-        let Some((node, _ns, _name)) = parse_cap_key_or_warn("cap/", &key) else { continue };
-        if let Some(cap) = Capability::decode(&bytes)
-            && filter.matches(&cap)
-        {
-            set.insert(node);
-        }
-    }
-    set
+    super::capability_ops::resolve_filter_against_kv(kv_state, filter).into_iter().map(|(node, _)| node).collect()
 }
 
 /// The members of `members` this node can count: itself, and every node in its peer table. A node it has evicted
@@ -413,6 +404,28 @@ impl GossipAgent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **A dead node is not eligible.** Its `cap/` entry is never tombstoned; it evaporates at the
+    /// reader (`CapEntry::is_fresh`, rule `kv.expiry`). `resolve_eligible` never asked, so a crashed
+    /// node stayed eligible indefinitely, inflating `eligible_non_members` and lowering every live
+    /// node's `join_p` (the review of #730).
+    #[test]
+    fn a_node_whose_advertisement_has_gone_stale_is_not_eligible() {
+        use crate::capability::{CapEntry, Capability};
+        use crate::framing::make_gossip_update_stamped;
+        use crate::store::{apply_and_notify, KvState};
+        let kv = KvState::new(0);
+        let writer = NodeId::new("127.0.0.1", 9999).unwrap();
+        let now = mycelium_core::sim_seam::wall_now_ms();
+        for (port, written_ms) in [(9001u16, now), (9002, now - 60_000)] {
+            let entry = CapEntry { capability: Capability::new("compute", "gpu"), refresh_interval_ms: 1_000 };
+            let key = format!("cap/127.0.0.1:{port}/compute/gpu");
+            apply_and_notify(&kv, &make_gossip_update_stamped(&writer, 5, std::sync::Arc::from(key.as_str()),
+                entry.encode(), false, crate::hlc::pack(written_ms, 0)));
+        }
+        let eligible = resolve_eligible(&kv, &CapFilter::new("compute", "gpu"));
+        assert_eq!(eligible, HashSet::from([NodeId::new("127.0.0.1", 9001).unwrap()]), "a stale node counted eligible");
+    }
 
     /// **The class mapping is a tested fact** (item 4 PR 4a). A join into an empty group is a
     /// rescue; a join below `min` is a deficit fill; a leave over `max` is routine scale-down — the

@@ -229,7 +229,7 @@
         {
           "source": "`cap/` advertisements as gossiped",
           "scope": "the fleet as this node sees it",
-          "freshness": "as gossiped; TTL-bounded"
+          "freshness": "as gossiped; an entry older than three refresh intervals is skipped by every reader (`CapEntry::is_fresh`), a crashed provider's ad never being tombstoned"
         }
       ],
       "outcomes": [
@@ -263,7 +263,10 @@
       "tests": [
         "filter_matches_capability",
         "constraint_matches_eq_ne",
-        "constraint_matches_ordering"
+        "constraint_matches_ordering",
+        "a_stale_provider_is_neither_routed_to_nor_listed_on_the_card",
+        "a_node_whose_advertisement_has_gone_stale_is_not_eligible",
+        "the_gateways_readers_skip_a_stale_advertisement_and_a_stale_requirement"
       ],
       "trace": "catalogue_only",
       "summary": "The one matching rule, shared by the resolver and the offline check: namespace, name, schema id, typed attribute constraints; opacity skips, it does not unmatch."

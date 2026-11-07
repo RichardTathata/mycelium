@@ -54,7 +54,6 @@ use super::gateway_caller::{self, GatewayDispatchError, ResolvedPrincipal};
 use axum::Extension;
 use crate::capability::CapFilter;
 use crate::store::scan_kv_prefix;
-use super::capability_ops::{is_cap_locality_key, parse_cap_key_or_warn};
 
 // ── Wire types ────────────────────────────────────────────────────────────────
 
@@ -611,21 +610,14 @@ fn resolve_skill(ctx: &TaskCtx, skill_id: &str) -> Result<crate::node_id::NodeId
     providers.into_iter().next().map(|(n, _)| n).ok_or_else(|| "skill not found".into())
 }
 
+/// The providers `tasks/send` may route to: every *fresh* advertisement matching `filter` — the
+/// capability resolver's reading, so a crashed provider's ad, never tombstoned, is skipped once it is
+/// older than three refresh intervals (rule `kv.expiry`; the review of #730).
 fn resolve_providers(
     ctx:    &TaskCtx,
     filter: &CapFilter,
 ) -> Vec<(crate::node_id::NodeId, crate::capability::Capability)> {
-    use crate::capability::Capability;
-    let mut out = Vec::new();
-    for (key, bytes) in scan_kv_prefix(&ctx.kv_state, "cap/") {
-        if is_cap_locality_key(&key) { continue; }
-        let Some((node_id, _ns, _name)) = parse_cap_key_or_warn("cap/", &key) else { continue };
-        let Some(cap) = Capability::decode(&bytes) else { continue };
-        if filter.matches(&cap) {
-            out.push((node_id, cap));
-        }
-    }
-    out
+    super::capability_ops::resolve_filter_against_kv(&ctx.kv_state, filter)
 }
 
 /// Builds a human/LLM-readable description for a skill from its gossiped
@@ -704,17 +696,14 @@ fn not_an_a2a_skill(kv: &crate::store::KvState, ns: &str, name: &str) -> Option<
     None
 }
 
-/// The skill ids an agent card lists: every advertised capability that is not infrastructure, once.
+/// The skill ids an agent card lists: every *freshly* advertised capability that is not
+/// infrastructure, once — a skill whose only providers have crashed leaves the card when their ads
+/// go stale, as it stops resolving for `tasks/send` (rule `kv.expiry`; the review of #730).
 fn card_skill_ids(kv: &crate::store::KvState) -> std::collections::HashSet<String> {
     let mut skill_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for (key, bytes) in scan_kv_prefix(kv, "cap/") {
-        if is_cap_locality_key(&key) { continue; }
-        let Some((_node_id, ns, name)) = parse_cap_key_or_warn("cap/", &key) else { continue };
+    for (_node_id, ns, name, _cap) in super::capability_ops::scan_fresh_caps(kv) {
         if not_an_a2a_skill(kv, &ns, &name).is_some() { continue; }
-        use crate::capability::Capability;
-        if Capability::decode(&bytes).is_some() {
-            skill_ids.insert(format!("{}/{}", ns, name));
-        }
+        skill_ids.insert(format!("{}/{}", ns, name));
     }
     skill_ids
 }
@@ -1856,6 +1845,35 @@ mod tests {
             assert!(resolve_skill(&ctx, id).is_err(), "{id} resolved");
         }
         assert!(resolve_skill(&ctx, "llm/qwen3").unwrap_err().contains("/gateway/llm/call"));
+    }
+
+    /// **A crashed provider's advertisement is never tombstoned** — it evaporates at its readers,
+    /// which skip an entry older than three refresh intervals (`CapEntry::is_fresh`, rule `kv.expiry`).
+    /// `/a2a` decoded `cap/` with `Capability::decode` and never asked, so `tasks/send` could route to
+    /// a dead node and the card listed its skill indefinitely (the review of #730).
+    #[test]
+    fn a_stale_provider_is_neither_routed_to_nor_listed_on_the_card() {
+        use crate::capability::{CapEntry, Capability};
+        use crate::framing::make_gossip_update_stamped;
+        use crate::store::apply_and_notify;
+        let ctx = make_ctx();
+        let now = mycelium_core::sim_seam::wall_now_ms();
+        let seed = |node: &str, ns: &str, name: &str, written_ms: u64| {
+            let entry = CapEntry { capability: Capability::new(ns, name), refresh_interval_ms: 1_000 };
+            let key = format!("cap/{node}/{ns}/{name}");
+            apply_and_notify(&ctx.kv_state, &make_gossip_update_stamped(&ctx.node_id, 5, std::sync::Arc::from(key.as_str()),
+                entry.encode(), false, crate::hlc::pack(written_ms, 0)));
+        };
+        seed("127.0.0.1:9001", "demo", "echo", now);           // live
+        seed("127.0.0.1:9002", "demo", "echo", now - 60_000);  // crashed a minute ago: 60 s > 3 × 1 s
+        seed("127.0.0.1:9003", "demo", "dead", now - 60_000);  // its only provider crashed
+
+        let providers: Vec<String> = resolve_providers(&ctx, &CapFilter::new("demo", "echo"))
+            .into_iter().map(|(n, _)| n.to_string()).collect();
+        assert_eq!(providers, vec!["127.0.0.1:9001".to_string()], "a stale provider was routed to");
+        assert!(resolve_skill(&ctx, "demo/dead").is_err(), "tasks/send resolved a skill whose only provider is stale");
+        let ids = card_skill_ids(&ctx.kv_state);
+        assert_eq!(ids, std::collections::HashSet::from(["demo/echo".to_string()]), "the card lists a dead skill: {ids:?}");
     }
 
     #[test]

@@ -4,13 +4,23 @@ use mycelium::error::GossipError;
 use std::path::PathBuf;
 use std::{error::Error, sync::Arc};
 
+/// The node binary's log filter: `RUST_LOG`'s directives when it holds any valid one, as `EnvFilter`
+/// reads them (skillrunner's reading), otherwise `default` — INFO for the node, WARN for `mycelium test`.
+/// The binary once set a fixed maximum level, so `RUST_LOG=mycelium=debug` did nothing (the review of #730).
+fn log_filter(default: tracing::Level, rust_log: Option<&str>) -> tracing_subscriber::EnvFilter {
+    tracing_subscriber::EnvFilter::builder()
+        .with_default_directive(tracing_subscriber::filter::LevelFilter::from_level(default).into())
+        .parse_lossy(rust_log.unwrap_or(""))
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     // `mycelium doctor` prints its report on stdout — JSON when asked — so its log lines go to stderr;
     // the node keeps its logs on stdout as before (#665's review, D1). `mycelium test` likewise, and at
     // WARN: its fleet's nodes would otherwise print every start-up block over the report.
     let command = std::env::args().nth(1);
     let (doctor, test) = (command.as_deref() == Some("doctor"), command.as_deref() == Some("test"));
-    let logs = tracing_subscriber::fmt().with_max_level(if test { tracing::Level::WARN } else { tracing::Level::INFO });
+    let default = if test { tracing::Level::WARN } else { tracing::Level::INFO };
+    let logs = tracing_subscriber::fmt().with_env_filter(log_filter(default, std::env::var("RUST_LOG").ok().as_deref()));
     if doctor || test { logs.with_writer(std::io::stderr).init(); } else { logs.init(); }
 
     // `mycelium wire-check <units-dir> …` — the offline check over a directory of unit files
@@ -1126,5 +1136,26 @@ mod version_tests {
         let v = line.strip_prefix("mycelium ").expect("the crate name, a space, the version");
         assert_eq!(v.split('.').count(), 3, "three dotted components: {v}");
         assert!(v.split('.').all(|c| !c.is_empty() && c.chars().all(|ch| ch.is_ascii_digit() || ch == '-' || ch.is_ascii_alphanumeric())), "{v}");
+    }
+}
+
+#[cfg(test)]
+mod log_filter_tests {
+    use super::log_filter;
+    use tracing_subscriber::filter::LevelFilter;
+
+    /// **`RUST_LOG` is read** (the review of #730): the node binary set a fixed maximum level, so
+    /// `RUST_LOG=mycelium=debug` did nothing. Unset or empty, the default stands (INFO for the node,
+    /// WARN for `mycelium test`), as it is when `RUST_LOG` holds no valid directive; set, its directives
+    /// decide, as `EnvFilter` always has them (skillrunner's reading).
+    #[test]
+    fn the_log_filter_reads_rust_log_and_keeps_the_default_when_unset() {
+        let hint = |default, rust_log| log_filter(default, rust_log).max_level_hint();
+        assert_eq!(hint(tracing::Level::INFO, None), Some(LevelFilter::INFO));
+        assert_eq!(hint(tracing::Level::INFO, Some("")), Some(LevelFilter::INFO));
+        assert_eq!(hint(tracing::Level::WARN, None), Some(LevelFilter::WARN));
+        assert_eq!(hint(tracing::Level::INFO, Some("mycelium=debug")), Some(LevelFilter::DEBUG), "RUST_LOG ignored");
+        assert_eq!(hint(tracing::Level::INFO, Some("error")), Some(LevelFilter::ERROR), "RUST_LOG ignored");
+        assert_eq!(hint(tracing::Level::INFO, Some("mycelium=lolwut")), Some(LevelFilter::INFO), "an invalid RUST_LOG keeps the default");
     }
 }

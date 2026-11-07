@@ -65,11 +65,11 @@ pub static RULES: &[RuleDescriptor] = &[
     RuleDescriptor {
         id: "cap.match", revision: 1, subsystem: "mycelium::capability", responsibilities: &[Response],
         trigger: "a resolve, a demand, the offline check, a group filter",
-        inputs: &[Input { source: "`cap/` advertisements as gossiped", scope: "the fleet as this node sees it", freshness: "as gossiped; TTL-bounded" }],
+        inputs: &[Input { source: "`cap/` advertisements as gossiped", scope: "the fleet as this node sees it", freshness: "as gossiped; an entry older than three refresh intervals is skipped by every reader (`CapEntry::is_fresh`), a crashed provider's ad never being tombstoned" }],
         outcomes: &[Outcome { kind: Action, reasons: &["matched"] }, Outcome { kind: NoAction, reasons: &["ns_or_name_differs", "schema_id_differs", "constraint_unmet", "opaque_skipped"] }],
         effects: &[], guards: &[], may_trigger: &["prov.demand_response"], may_inhibit: &[], depends_on: &["kv.propagation"],
         symbol: "capability::CapFilter::matches", docs: "docs/guide/02-capabilities.md",
-        tests: &["filter_matches_capability", "constraint_matches_eq_ne", "constraint_matches_ordering"], trace: CatalogueOnly,
+        tests: &["filter_matches_capability", "constraint_matches_eq_ne", "constraint_matches_ordering", "a_stale_provider_is_neither_routed_to_nor_listed_on_the_card", "a_node_whose_advertisement_has_gone_stale_is_not_eligible", "the_gateways_readers_skip_a_stale_advertisement_and_a_stale_requirement"], trace: CatalogueOnly,
         summary: "The one matching rule, shared by the resolver and the offline check: namespace, name, schema id, typed attribute constraints; opacity skips, it does not unmatch.",
     },
     RuleDescriptor {

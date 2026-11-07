@@ -233,6 +233,29 @@ pub(super) fn resolve_filter_against_kv(
     out
 }
 
+/// Every *fresh* `cap/` advertisement in this view, with the node, namespace and name its key names:
+/// the locality entry skipped, a legacy bare `Capability` read through [`decode_cap_entry`], and an
+/// entry older than three refresh intervals left out (`CapEntry::is_fresh`) — a crashed provider's ad
+/// is never tombstoned, so this is where it evaporates (rule `kv.expiry`). For a reader that needs
+/// the key's segments rather than a filter; [`resolve_filter_against_kv`] is the filtered one.
+#[cfg(any(feature = "a2a", all(feature = "gateway", feature = "tls")))] // its readers: the A2A card, the provider preflight
+pub(super) fn scan_fresh_caps(kv_state: &crate::store::KvState) -> Vec<(NodeId, Arc<str>, Arc<str>, Capability)> {
+    let now_ms = age_now_ms();
+    let mut out = Vec::new();
+    for (key, bytes, hlc_ts) in scan_prefix_kv_with_ts(kv_state, "cap/") {
+        if is_cap_locality_key(&key) { continue; }
+        let Some((node_id, ns, name)) = parse_cap_key_or_warn("cap/", &key) else { continue };
+        let Some(entry) = decode_cap_entry(&bytes) else {
+            warn!(key = %key, "malformed Capability — peer sent bytes that did not decode");
+            continue;
+        };
+        if entry.is_fresh(hlc_ts, now_ms) {
+            out.push((node_id, ns, name, entry.capability));
+        }
+    }
+    out
+}
+
 // (wiring_snapshot, locality helpers, and gcap key parsing live in
 // `super::wiring`.) Below: helpers that remain co-located with their
 // callers in this module.

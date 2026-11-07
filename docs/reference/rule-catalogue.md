@@ -104,13 +104,13 @@ The one matching rule, shared by the resolver and the offline check: namespace, 
 
 - **Trigger:** a resolve, a demand, the offline check, a group filter
 - **Reads:**
-  - `cap/` advertisements as gossiped — scope: the fleet as this node sees it; freshness: as gossiped; TTL-bounded
+  - `cap/` advertisements as gossiped — scope: the fleet as this node sees it; freshness: as gossiped; an entry older than three refresh intervals is skipped by every reader (`CapEntry::is_fresh`), a crashed provider's ad never being tombstoned
 - **Outcomes:**
   - Action: `matched`
   - NoAction: `ns_or_name_differs`, `schema_id_differs`, `constraint_unmet`, `opaque_skipped`
 - **May trigger:** [`prov.demand_response`](#provdemand_response)
 - **Depends on:** [`kv.propagation`](#kvpropagation)
-- **Code:** `capability::CapFilter::matches` · **Docs:** docs/guide/02-capabilities.md · **Tests:** `filter_matches_capability`, `constraint_matches_eq_ne`, `constraint_matches_ordering`
+- **Code:** `capability::CapFilter::matches` · **Docs:** docs/guide/02-capabilities.md · **Tests:** `filter_matches_capability`, `constraint_matches_eq_ne`, `constraint_matches_ordering`, `a_stale_provider_is_neither_routed_to_nor_listed_on_the_card`, `a_node_whose_advertisement_has_gone_stale_is_not_eligible`, `the_gateways_readers_skip_a_stale_advertisement_and_a_stale_requirement`
 
 ## `cons.acceptor_memory`
 
