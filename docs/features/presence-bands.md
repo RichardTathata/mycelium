@@ -52,8 +52,9 @@ provider goes is `the_stem_fleet_fills_a_presence_floor_and_reheals`, in
   wrong view of the providers costs at most its own wrong entries; a fleet-wide band — each host fills only the bands
   it declares; placement — which host fills a gap is the self-election's roll. **Known gap, fixed by a separate PR:**
   the floor picks the cheapest loadable entry before it checks provenance and eligibility, so any member that gossips
-  a smaller untrusted line for the band's capability makes the floor refuse `provenance_rejected` every round, and the
-  floor is never filled.
+  a line for the band's capability that is no larger (ties included) and that this host refuses — untrusted (`provenance_rejected`),
+  not runnable here (`ineligible`) or already hosted — makes the floor refuse every round, and the floor is never filled on
+  any host that sees the same catalogue.
 - **Evidence:** the ledger row
   [every artifact-shaped co-op demo reaches the same outcome as stem nodes](../operations/what-is-proven.md#coop-demos-same-outcome-as-stems).
 

@@ -30,7 +30,8 @@ which CI's wire-check reads, is a `[hosts]` table.
 - On the needing side, a unit file's `[[requirement]]`, or
   [`declare_requirement`](../../src/agent/capability_handle.rs) in code.
 - In code, [`Provisioner::new`](../../mycelium-wasm-host/src/provisioner.rs) and
-  [`provision_round`](../../mycelium-wasm-host/src/provisioner.rs);
+  [`provision_round`](../../mycelium-wasm-host/src/provisioner.rs), with
+  [`refresh_catalog`](../../mycelium-wasm-host/src/provisioner.rs) before each round (the catalogue is a snapshot taken at construction);
   [`with_install_rights`](../../mycelium-wasm-host/src/provisioner.rs) adds an allocation each install takes from,
   refused only under the `EnforceAllocated` control profile ([adaptive stability](adaptive-stability.md)).
 - `wasm_component_full_lifecycle_install_invoke_shed_reinstall`, in

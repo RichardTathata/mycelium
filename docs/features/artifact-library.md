@@ -34,7 +34,7 @@ This feature is turned on in code or by the stem's flags. `object_store` (on `my
   `artifact:publish`; `mycelium-stem` mounts it when its `[hosts].trusted_publishers` is non-empty, served on its
   `http_port`.
   The scope is checked only in a build with `compliance`; the published `mycelium-stem` is built without it
-  (`stem,gateway,llm,object_store`), so there any valid bearer reaches the route — the line's provenance is still
+  (`stem,gateway,llm,object_store`), so there any valid bearer reaches the route (or anyone, on an open gateway with no token model) — the line's provenance is still
   checked against the trusted publishers before it is written.
 - `reconciles_manifest_to_catalogue_scoped_to_its_own_signer`, in
   [`mycelium-wasm-host/src/librarian.rs`](../../mycelium-wasm-host/src/librarian.rs).
