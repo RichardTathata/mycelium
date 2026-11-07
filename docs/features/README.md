@@ -133,3 +133,14 @@ suite is `scripts/test-check-feature-pages.py`.
 | [Destination commit](destination-commit.md) | `mycelium-effects`: one effect, once, at a destination you own, keyed by `operation_id` | Inspect outcomes and reproduce |
 | [Replay bundles](replay.md) | A recorded run replayed decision for decision, a divergence named where it first departs | Inspect outcomes and reproduce |
 | [Durability receipts](durability-receipts.md) | What an acknowledgement proves, by rung and nothing above it; a timeout is unknown, never a negative | Inspect outcomes and reproduce |
+| [Gossip KV](gossip-kv.md) | Every node's replica of one store, writes gossiped and merged by last-writer-wins on a hybrid logical clock | Discover participants and signal |
+| [Signal mesh](signal-mesh.md) | Scoped, ephemeral events forwarded unconditionally; a node's boundary decides what it acts on | Discover participants and signal |
+| [Capability discovery](capability-discovery.md) | Providers advertise what they do, readers resolve by filter, and a stale advertisement evaporates | Discover participants and signal |
+| [The mailbox](mailbox.md) | Events delivered to one node in HLC order through the KV, deleted once handed over | Discover participants and signal |
+| [Groups and governed membership](governed-membership.md) | A group joined by filter, held in a band by an evaporating intent and self-electing governors | Coordinate work |
+| [Opacity and stigmergic routing](opacity.md) | A node reports its own saturation as a pheromone, and others route around it | Coordinate by meaning |
+| [Intents](intents.md) | Desired state published as soft state that each node reconciles and that evaporates | Coordinate by meaning |
+| [Adaptive stability](adaptive-stability.md) | Governors deciding through one control contract, enforced as far as the node's control profile says | Constrain actions |
+| [The guarantee report and profiles](guarantee-report.md) | What a node enforces and why not the rest; a profile that refuses the start when it is unmet | Constrain actions |
+| [The rule catalogue and the decision trace](rule-catalogue-and-decision-trace.md) | Every decision point described by id, and a bounded trace of what the instrumented ones decided | Inspect outcomes and reproduce |
+| [Metrics and tracing](metrics-and-tracing.md) | Prometheus metrics on the gateway, logs through `tracing`, OTLP spans under `otel` | Inspect outcomes and reproduce |

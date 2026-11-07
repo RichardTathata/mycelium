@@ -330,38 +330,38 @@ ids = ["concept:bundle", "cargo:mycelium/sim", "cargo:mycelium-core/sim", "conce
 
 [[feature]]
 name = "Gossip KV"
-page = "todo"
-planned = "gossip-kv"
+page = "gossip-kv.md"
+example = "hello_mesh"
 ids = ["rule:kv.propagation", "rule:kv.expiry"]
 
 [[feature]]
 name = "Signal mesh: admission, forwarding, suppression"
-page = "todo"
-planned = "signal-mesh"
+page = "signal-mesh.md"
+example = "mailbox_llm"
 ids = ["rule:signal.admission", "rule:signal.forwarding", "rule:signal.suppression", "concept:signal", "concept:boundary"]
 
 [[feature]]
 name = "Capability discovery"
-page = "todo"
-planned = "capability-discovery"
+page = "capability-discovery.md"
+example = "hello_capability"
 ids = ["rule:cap.match", "concept:capability"]
 
 [[feature]]
 name = "Groups and governed membership"
-page = "todo"
-planned = "governed-membership"
+page = "governed-membership.md"
+example = "elastic_intent"
 ids = ["unit:[[group]]", "rule:membership.governed", "concept:group"]
 
 [[feature]]
 name = "Adaptive stability (governors and profiles)"
-page = "todo"
-planned = "adaptive-stability"
+page = "adaptive-stability.md"
+example = "control_envelope_viz"
 ids = ["concept:governor", "concept:allocated-right"]
 
 [[feature]]
 name = "Metrics and tracing"
-page = "todo"
-planned = "metrics-and-tracing"
+page = "metrics-and-tracing.md"
+example = "observed_fleet"
 ids = ["cargo:mycelium/metrics", "cargo:mycelium-core/metrics", "cargo:mycelium/otel",
        "cargo:mycelium-tuple-space/metrics", "cargo:mycelium-blackboard/metrics", "cargo:mycelium-wiki/metrics"]
 
@@ -537,32 +537,34 @@ ids = ["concept:mcp-tool"]
 
 [[feature]]
 name = "The mailbox (durable, ordered delivery)"
-page = "todo"
-planned = "mailbox"
+page = "mailbox.md"
+example = "mailbox_llm"
 ids = ["concept:mailbox"]
 
 [[feature]]
 name = "Opacity and stigmergic routing"
-page = "todo"
-planned = "opacity"
+page = "opacity.md"
+example = "stigmergy"
 ids = ["concept:opacity"]
 
 [[feature]]
 name = "Intents (evaporating desired state)"
-page = "todo"
-planned = "intents"
+page = "intents.md"
+example = "elastic_intent"
 ids = ["concept:intent"]
 
 [[feature]]
 name = "Guarantee report and profiles"
-page = "todo"
-planned = "guarantee-report"
+page = "guarantee-report.md"
+example = "none"
+example_watch = ["guarantee_report"]
 ids = ["concept:guarantee-report"]
 
 [[feature]]
 name = "Rule catalogue and decision trace"
-page = "todo"
-planned = "rule-catalogue-and-decision-trace"
+page = "rule-catalogue-and-decision-trace.md"
+example = "none"
+example_watch = ["decision_trace", "rule_catalogue"]
 ids = ["concept:rule-catalogue", "concept:decision-trace"]
 
 # ------------------------------------------------------------------------------------------- exclusions

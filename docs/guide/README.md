@@ -79,7 +79,7 @@ The library is built in three layers, each complete and useful on its own:
 
 ```mermaid
 graph TD
-    A["Layer I — Gossip KV<br/>Eventual-consistent shared state<br/>LWW · HLC · anti-entropy · TTL"] --> B
+    A["Layer I — Gossip KV<br/>Eventual-consistent shared state<br/>LWW · HLC · anti-entropy · tombstones"] --> B
     B["Layer II — Signal Mesh<br/>Ephemeral scoped events<br/>Admission boundaries · opacity composition"] --> C
     C["Layer III — Consensus<br/>Epidemic group voting<br/>consistent_set · append · distributed_lock"]
     D["Capability System<br/>Broker-less service discovery<br/>advertise · resolve · demand · locality ranking"] --> E

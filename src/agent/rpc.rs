@@ -567,8 +567,8 @@ mod tests {
         let node_b = agent_b.node_id().clone();
 
         let responder = Arc::clone(&agent_b);
+        let mut rx = responder.service().rpc_rx("echo"); // registered before the spawn: the call below cannot outrun it
         tokio::spawn(async move {
-            let mut rx = responder.service().rpc_rx("echo");
             if let Some(req) = rx.recv().await {
                 responder.service().rpc_respond(&req, req.payload());
             }
@@ -700,8 +700,8 @@ mod tests {
         let node_b = agent_b.node_id().clone();
 
         let responder = Arc::clone(&agent_b);
+        let mut rx = responder.service().rpc_rx("tagged"); // registered before the spawn: the call below cannot outrun it
         tokio::spawn(async move {
-            let mut rx = responder.service().rpc_rx("tagged");
             while let Some(req) = rx.recv().await {
                 responder.service().rpc_respond(&req, req.payload());
             }

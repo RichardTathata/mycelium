@@ -72,6 +72,40 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   names every `requires_values` key of its rules. Found by identity-and-lifecycle I0: the `governed-call` scaffold's own
   petty-cash rule could not admit its call at the gateway (`the_gateway_door_decides_by_this_units_rules_and_records_each_decision`,
   seen failing first). An application that relied on such a rule never permitting now sees it decide.
+- **A bulk call made as soon as `bulk_serve` returns is served** (a flake: CI run 42371240189, the strict
+  `compliance,a2a` lib run, `a_bulk_call_completes_between_two_plaintext_gateways` — `Err(Timeout)`). `bulk_serve`
+  registered its `invoke.bulk` receiver inside the task it spawned, so a ticket delivered before that task first ran
+  found no receiver and was dropped; the ticket is sent once, and the caller's only answer was its own timeout. The
+  window is shown sufficient for CI's failure by a plant (a late registration reproduces CI's exact error), not
+  observed in CI's log. A real caller meets it the same way: any peer that calls once it sees the provider. The
+  receiver is now registered before `bulk_serve` returns (`bulk_serve_rx`). The same shape, fixed the same way — each
+  receiver registered before its task is spawned and before the capability naming it is advertised: the LLM dispatch
+  loop's `llm.invoke` (registered inside its task, after `register_prompt_skill` had handed the skill's ad off; the ad
+  is now the last step), the `sys.explain` responder (registered inside a task `start()` spawned), the `skillrunner`
+  binary's `skill.invoke` (registered after its ad), `mycelium-guardrails`' `guarded_rpc_serve` (its own changelog),
+  `mycelium-wiki`'s curator broker and bulk-ingest responder (registered after the curator ad; no regression test —
+  the curatorship is reached only through an election, which yields), and `examples/three_node_demo.rs`'s
+  `echo-scatter` responder. Regressions, each seen failing first:
+  `a_ticket_sent_as_soon_as_bulk_serve_returns_is_served`, `the_llm_invoke_receiver_exists_when_a_prompt_skill_is_registered`,
+  `the_llm_invoke_receiver_exists_before_the_skill_is_advertised`, `the_explain_receiver_exists_when_start_returns`.
+  No API change.
+- **The `kv.expiry` rule describes code that exists** (rule revision 2; `docs/plans/feature-pages.md` F3). Revision 1
+  cited `store::Store::flush_expired` and the tests `flush_expired`, `is_expired` and `default_ttl_secs`, none of which
+  is the KV expiry it described: the store holds no per-entry TTL, and `set` takes none. The rule now cites what does
+  the work — the reader-side `CapEntry::is_fresh` / `ReqEntry::is_fresh` (an advertisement older than three refresh
+  intervals, or that far in the future, is skipped, never deleted) and `store::sweep_stale_tombstones` — with
+  `cap_entry_freshness`, `future_stamped_entry_is_quarantined_not_fresh` and `tombstone_gc_sweep_unpacks_hlc_timestamps`.
+  The id is kept, because recorded traces and fault reports name it. Three `cap/` readers do not apply `is_fresh` yet
+  (the A2A provider resolution and card, the membership governor's eligibility); the rule says so, and a separate PR
+  fixes them. Guide 01 no longer says every key has a time-to-live or that `set` takes one; the mailbox module doc
+  no longer reads the gossip hop count (`default_ttl`) as a five-minute lifetime, since an undelivered event has no
+  expiry; and the same claim is gone from the concepts glossary, the cookbook, the Python SDK's README, guide 5,
+  guide 9's audit-retention note (SkillRunner's records have no lifetime of their own) and the guide index.
+- **Three more rule entries describe the code** (#730's review). `signal.suppression` (rev 2): a suppressed kind's
+  signals are dropped at delivery and counted, never held and released, and its tests are the four
+  `test_suppress_*` cases rather than two function names. `cap.match` (rev 2): matching does not consult opacity, so
+  `opaque_skipped` is gone. `kv.propagation` (rev 2): its refusals add a TLS node's unsigned and bare-signed frames,
+  and its tests replace a SWIM test with the KV propagation, LWW and signed-frame tests.
 
 - **A fresh journal's first acknowledged record has a durable name** (external review 2026-10-31 F7,
   `docs/plans/external-review-2026-10-31.md` R6). The node-local journal — the evidence journal, the rights ledger, the
@@ -157,6 +191,9 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   data-at-rest encryption, consensus and electorates, destination commit, replay bundles and durability receipts.
   `crown-jewel.md` § 1 and `DataAtRestCipher`'s doc no longer say a record that does not decrypt is skipped: under
   `on_unreadable = "refuse"`, the default, a wrong key refuses the start.
+- **Feature pages for discovery, signals and coordination** (F3, third of five PRs): gossip KV, the signal mesh,
+  capability discovery, the mailbox, groups and governed membership, opacity, intents, adaptive stability, the
+  guarantee report and profiles, the rule catalogue and the decision trace, and metrics and tracing.
 
 ## [2.39.0] — 2026-11-06
 

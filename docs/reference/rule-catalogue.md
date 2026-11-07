@@ -9,12 +9,12 @@ Schema `mycelium.rules/1` · 32 rules.
 | [`a2a.admission`](#a2aadmission) | Admission, Authority | catalogue only | An absent credential is anonymous and a present bearer's scopes are dropped: a bearer does not gate this route, an evaluator does. |
 | [`ae.exposure`](#aeexposure) | Authority | catalogue only | Hold new work that extends an unresolved closure — its parent an unresolved effect's record, or its run that effect's — while that closure is past a threshold, its size or its oldest record's age, each on its own; work that names no unresolved effect passes; never a probe, a compensation, a protective shed or a rescue from zero; shadow under `observe`, held under the enforcing profiles, untouched under `legacy`; a closure that cannot be read is not established, never empty. |
 | [`ae.preflight`](#aepreflight) | Authority | catalogue only | Permit, deny or indeterminate, recorded before the work runs; a refused mandate denies before policy runs, so a policy engine cannot launder a revocation. A history limit counts at the scope its rule names: this point, a consensus counter (exact; a seat claimed before admission) or the gossiped tally (approximate, and not established when its coverage is not); a fleet limit past 1 024 seats or a 24-hour window is not established. |
-| [`cap.match`](#capmatch) | Response | catalogue only | The one matching rule, shared by the resolver and the offline check: namespace, name, schema id, typed attribute constraints; opacity skips, it does not unmatch. |
+| [`cap.match`](#capmatch) | Response | catalogue only | The one matching rule, shared by the resolver and the offline check: namespace, name, schema id, typed attribute constraints. Matching does not consult opacity: a caller that wants to route around a busy provider reads its trail itself (`is_node_opaque`, `peer_load`). |
 | [`cons.acceptor_memory`](#consacceptor_memory) | Response | catalogue only | An electorate member must keep its promises across a restart: no `[persistence]` is refused by name at every door, an empty store is warned once its genesis is known, and a peer's copy of this node's own record above its memory withholds the slot until the next start — detection, never prevention, and only of a copy that arrives before the next higher ballot. |
 | [`gateway.auth`](#gatewayauth) | Authority | catalogue only | Deny by default under `compliance`: a route needs its scope; with no credential model the gateway is open — on loopback only, since a non-loopback one refuses to start unless `gateway_allow_unauthenticated` waives it — and a table the build cannot enforce refuses to start. |
 | [`host.emit_admission`](#hostemit_admission) | Admission, Authority | catalogue only | A component emits only under `comp/{namespace}/…` or a kind the host listed for it, and never a protected RPC kind — an emit from inside the process would reach that kind's handlers unframed, past the door that checks authority. |
-| [`kv.expiry`](#kvexpiry) | Propagation | catalogue only | An advertisement its writer stopped refreshing leaves the view after its TTL; a stale view is possible in between. |
-| [`kv.propagation`](#kvpropagation) | Propagation | catalogue only | Every update converges by last-writer-wins on the HLC; propagation is unconditional and never taught a higher-layer law (detection, not prevention). |
+| [`kv.expiry`](#kvexpiry) | Propagation | catalogue only | No entry carries a TTL. A capability or requirement advertisement its writer stopped refreshing stays in the store until it is overwritten or tombstoned; the readers that apply `is_fresh` — resolve, watch, wiring, demand, coverage gaps and role concentration — skip it once it is older than three refresh intervals (or that far in the future). Three `cap/` readers do not yet: the A2A provider resolution and card, and the membership governor's eligibility, a known gap fixed by a separate PR. A tombstone is collected by the GC sweep once it is older than `default_ttl × propagation_window_secs × 10` seconds, on the wall clock, not the seam. A stale view is possible in between. The id predates this scope — freshness at the reader plus tombstone collection — and is kept because recorded traces and fault reports name it. |
+| [`kv.propagation`](#kvpropagation) | Propagation | catalogue only | Every update converges by last-writer-wins on the HLC; propagation is unconditional and never taught a higher-layer law (detection, not prevention). A TLS node refuses an unsigned KV write frame and one signed in the bare pre-2.33 form, a self-authenticating identity or certificate record excepted (`mesh.signed_writes`); anti-entropy state replies are not authenticated. |
 | [`membership.governed`](#membershipgoverned) | Response | instrumented | This node rolls to join or leave a governed group against the intent's band — after spacing and settling, and (under an enforcing profile) only on a confident view. |
 | [`prov.activation`](#provactivation) | Response | instrumented | After placement the declared command hands the blob to its local runtime — confined when the unit names a profile, which a node that cannot apply it refuses by name rather than run unconfined, as it refuses one whose egress proxy is not running; a failure is an install failure at stage `activation`, retried next round. |
 | [`prov.activation_egress`](#provactivation_egress) | Authority | catalogue only | An activation's command reaches another host only through its proxy: a listed host by name, a credential attached by the node's gate where its binding authorises; anything else is refused with the proxy's marker, logged and counted per activation by reason (`mycelium_activation_egress_total{activation, event}`) — not recorded in the decision trace. |
@@ -37,7 +37,7 @@ Schema `mycelium.rules/1` · 32 rules.
 | [`sched.run`](#schedrun) | Response | partial — every run, failure and overrun; a change to not_holder, not_eligible, warming_up, last_ahead, ignored_last_far_ahead, stood_down or declaration_mismatch, once; a tick that changes nothing records nothing | After a warm-up, the rendezvous winner among the live candidates that declare the same period and phase holds and runs the slot due, under the key `sched/{id}/{slot}`, within one period; a partition has a holder on each side, and only a destination that deduplicates makes that one effect — the voluntary singleton, not a lock. |
 | [`signal.admission`](#signaladmission) | Admission | partial — refusals and sheds only; an admitted signal is the hot path and records nothing | Admission is scoped (Cluster · Group · Individual) and shed under load — except Individual and the boundary transitions; shedding happens before the sender is recorded. |
 | [`signal.forwarding`](#signalforwarding) | Propagation | catalogue only | Forwarding is unconditional (flood fallback); only admission is scoped, and a frame addressed to this node terminates here. |
-| [`signal.suppression`](#signalsuppression) | Admission | catalogue only | A kind can be held until a time; held signals are released on flush. Suppression never changes forwarding. |
+| [`signal.suppression`](#signalsuppression) | Admission | catalogue only | A kind can be suppressed until a time: until then its signals are dropped at delivery, not held, while quorum counting and the last-signal time still see them. Suppression never changes forwarding. |
 
 ## `a2a.admission`
 
@@ -98,16 +98,16 @@ Permit, deny or indeterminate, recorded before the work runs; a refused mandate 
 
 ## `cap.match`
 
-rev 1 · `mycelium::capability` · Response · trace: catalogue only
+rev 2 · `mycelium::capability` · Response · trace: catalogue only
 
-The one matching rule, shared by the resolver and the offline check: namespace, name, schema id, typed attribute constraints; opacity skips, it does not unmatch.
+The one matching rule, shared by the resolver and the offline check: namespace, name, schema id, typed attribute constraints. Matching does not consult opacity: a caller that wants to route around a busy provider reads its trail itself (`is_node_opaque`, `peer_load`).
 
 - **Trigger:** a resolve, a demand, the offline check, a group filter
 - **Reads:**
-  - `cap/` advertisements as gossiped — scope: the fleet as this node sees it; freshness: as gossiped; TTL-bounded
+  - `cap/` advertisements as gossiped — scope: the fleet as this node sees it; freshness: as gossiped; the readers that apply `CapEntry::is_fresh` skip an entry older than three refresh intervals
 - **Outcomes:**
   - Action: `matched`
-  - NoAction: `ns_or_name_differs`, `schema_id_differs`, `constraint_unmet`, `opaque_skipped`
+  - NoAction: `ns_or_name_differs`, `schema_id_differs`, `constraint_unmet`
 - **May trigger:** [`prov.demand_response`](#provdemand_response)
 - **Depends on:** [`kv.propagation`](#kvpropagation)
 - **Code:** `capability::CapFilter::matches` · **Docs:** docs/guide/02-capabilities.md · **Tests:** `filter_matches_capability`, `constraint_matches_eq_ne`, `constraint_matches_ordering`
@@ -167,26 +167,26 @@ A component emits only under `comp/{namespace}/…` or a kind the host listed fo
 
 ## `kv.expiry`
 
-rev 1 · `mycelium-core::store` · Propagation · trace: catalogue only
+rev 2 · `mycelium::capability / mycelium-core::store` · Propagation · trace: catalogue only
 
-An advertisement its writer stopped refreshing leaves the view after its TTL; a stale view is possible in between.
+No entry carries a TTL. A capability or requirement advertisement its writer stopped refreshing stays in the store until it is overwritten or tombstoned; the readers that apply `is_fresh` — resolve, watch, wiring, demand, coverage gaps and role concentration — skip it once it is older than three refresh intervals (or that far in the future). Three `cap/` readers do not yet: the A2A provider resolution and card, and the membership governor's eligibility, a known gap fixed by a separate PR. A tombstone is collected by the GC sweep once it is older than `default_ttl × propagation_window_secs × 10` seconds, on the wall clock, not the seam. A stale view is possible in between. The id predates this scope — freshness at the reader plus tombstone collection — and is kept because recorded traces and fault reports name it.
 
-- **Trigger:** the GC tick, and every read
+- **Trigger:** a read of a capability or requirement advertisement (resolve, watch, wiring, demand, coverage gaps, role concentration); the GC tick
 - **Reads:**
   - `the LWW store and its HLC` — scope: this node; freshness: local, atomic
-  - `the entry's TTL and the wall clock through the seam` — scope: this node; freshness: the decision clock
+  - `the entry's HLC stamp, its refresh interval and the wall clock (a reader's through the seam; the GC tick's read directly)` — scope: this node; freshness: the decision clock
 - **Outcomes:**
-  - Action: `expired`
-  - NoAction: `live`, `no_ttl`
-- **Effects:** the entry removed; a tombstone where the writer deleted
+  - Action: `stale_skipped`, `tombstone_collected`
+  - NoAction: `fresh`, `tombstone_in_window`
+- **Effects:** a stale advertisement skipped by the reader, never deleted from the store; a tombstone older than the window removed
 - **May trigger:** [`prov.presence_floor`](#provpresence_floor)
-- **Code:** `store::Store::flush_expired` · **Docs:** docs/guide/01-gossip-kv.md · **Tests:** `flush_expired`, `is_expired`, `default_ttl_secs`
+- **Code:** `capability::CapEntry::is_fresh / ReqEntry::is_fresh / store::sweep_stale_tombstones` · **Docs:** docs/guide/02-capabilities.md · **Tests:** `cap_entry_freshness`, `future_stamped_entry_is_quarantined_not_fresh`, `tombstone_gc_sweep_unpacks_hlc_timestamps`
 
 ## `kv.propagation`
 
-rev 1 · `mycelium-core::store / connection` · Propagation · trace: catalogue only
+rev 2 · `mycelium-core::store / connection` · Propagation · trace: catalogue only
 
-Every update converges by last-writer-wins on the HLC; propagation is unconditional and never taught a higher-layer law (detection, not prevention).
+Every update converges by last-writer-wins on the HLC; propagation is unconditional and never taught a higher-layer law (detection, not prevention). A TLS node refuses an unsigned KV write frame and one signed in the bare pre-2.33 form, a self-authenticating identity or certificate record excepted (`mesh.signed_writes`); anti-entropy state replies are not authenticated.
 
 - **Trigger:** a local write, an incoming update, an anti-entropy round
 - **Reads:**
@@ -195,11 +195,11 @@ Every update converges by last-writer-wins on the HLC; propagation is unconditio
 - **Outcomes:**
   - Action: `applied_newer`, `forwarded`
   - NoAction: `older_or_equal`, `seen`
-  - Refusal: `frame_too_large`, `signature_invalid`, `sender_removed`
-- **Effects:** the store (LWW by HLC), the WAL after it, the gossip shards
+  - Refusal: `frame_too_large`, `signature_invalid`, `sender_removed`, `unsigned_frame`, `bare_signature`
+- **Effects:** the store (LWW by HLC), the WAL after it, the gossip shards; a refused frame dropped without tearing down the connection, an unsigned one counted (`mycelium_kv_unsigned_frames_total`)
 - **Guards:** Provenance
 - **May trigger:** [`signal.admission`](#signaladmission)
-- **Code:** `store::apply_and_notify / connection::handle_connection` · **Docs:** docs/guide/01-gossip-kv.md · **Tests:** `gossip_spreads_membership_for_discovery`, `codec_matches_golden_wire_bytes`
+- **Code:** `store::apply_and_notify / connection::handle_connection` · **Docs:** docs/guide/01-gossip-kv.md · **Tests:** `test_two_node_propagation`, `lww_equal_timestamp_concurrent_data_converges`, `an_unsigned_data_frame_is_refused_whatever_the_setting_says`, `a_bare_2_32_kv_signature_is_refused`, `codec_matches_golden_wire_bytes`
 
 ## `membership.governed`
 
@@ -623,17 +623,17 @@ Forwarding is unconditional (flood fallback); only admission is scoped, and a fr
 
 ## `signal.suppression`
 
-rev 1 · `mycelium-core::signal` · Admission · trace: catalogue only
+rev 2 · `mycelium-core::signal` · Admission · trace: catalogue only
 
-A kind can be held until a time; held signals are released on flush. Suppression never changes forwarding.
+A kind can be suppressed until a time: until then its signals are dropped at delivery, not held, while quorum counting and the last-signal time still see them. Suppression never changes forwarding.
 
-- **Trigger:** an admitted signal of a suppressed kind
+- **Trigger:** a signal delivered to this node of a kind it has suppressed until a time
 - **Reads:**
   - `the suppression table` — scope: this node; freshness: local
 - **Outcomes:**
-  - Deferral: `suppressed_until`
-  - Action: `delivered`, `released_on_flush`
-- **Effects:** held signals delivered on flush
+  - Refusal: `suppressed`
+  - Action: `delivered`
+- **Effects:** a suppressed signal is dropped before its handlers, never held or delivered later, and counted (`gossip_signals_rejected_total`); the sender log and last-signal time still record it
 - **Guards:** Cooldown
 - **Depends on:** [`signal.admission`](#signaladmission)
-- **Code:** `signal::SignalHandlers::deliver / flush_expired` · **Docs:** docs/guide/03-signals.md · **Tests:** `is_suppressed`, `is_suppressed_at`, `flush_expired_delivers_held_signals`
+- **Code:** `signal::SignalHandlers::deliver / SuppressionTable::is_suppressed_at` · **Docs:** docs/guide/03-signals.md · **Tests:** `test_suppress_blocks_delivery`, `test_suppress_allows_after_expiry`, `test_unsuppress_lifts_early`, `test_suppress_still_updates_last_signal`

@@ -707,7 +707,8 @@ impl GossipAgent {
             self.spawn_task(super::emergent::run_emergent_detectors(ctx, srx));
             let ctx = Arc::clone(&self.task_ctx);
             let srx = self.shutdown_tx.subscribe();
-            self.spawn_task(super::emergent::run_explain_responder(ctx, srx));
+            let rx  = super::emergent::explain_rx(&self.task_ctx);
+            self.spawn_task(super::emergent::run_explain_responder(ctx, rx, srx));
         }
         // M10.2 (WS-C) live timing reconfiguration — the TimingIntent reconciler. Inert until an
         // intent is published; an evaporated intent self-heals to the static baseline.
