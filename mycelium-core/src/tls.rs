@@ -1452,7 +1452,9 @@ mod key_extract_tests {
 #[cfg(feature = "tls")]
 mod pem_parse_tests {
     //! The PEM readers' behaviour, pinned across the parser they sit on (R9: `rustls-pemfile` → `rustls-pki-types`).
-    //! Each case passed on `rustls-pemfile` before the swap and passes on `rustls-pki-types` after it.
+    //! Five of the eight cases passed on `rustls-pemfile` before the swap; the other three (a malformed key section is an
+    //! error naming the parse, CRLF line endings, an encrypted key reads as no key) were added after it, in #721's review.
+    //! All eight pass on `rustls-pki-types`.
     use super::imp::{pem_certs, pem_private_key};
     use base64::{engine::general_purpose::STANDARD, Engine};
     use rustls::pki_types::PrivateKeyDer;
