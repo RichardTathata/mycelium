@@ -1,6 +1,6 @@
 # Identity and lifecycle — keyed principals, signed decisions, cancellation under a per-call mandate, and the developer surface
 
-**Status:** **agreed with the maintainer on 2026-11-07**, rev 0.10 (rev 0.10 takes #731's review: S-cancel re-measured and its reclamation fixed for the feeder, and I4's exit given an item for every D2 decision; rev 0.9 writes row I4 from spike S-cancel's note, `docs/plans/spikes/2026-11-07-s-cancel.md`; rev 0.8 records the agreement, the text then rev 0.7's); proposed 2026-10-31. Work starts in §4's order: wave 1a's I0 and wave 1b's spikes in parallel. Five independent adversarial reviews —
+**Status:** **agreed with the maintainer on 2026-11-07**, rev 0.10 (row I4 is **not yet buildable: N1–N5 open**, the round-2 review's questions, which I4's build PR must settle; rev 0.10 takes #731's review and its confirm round: S-cancel re-measured, its reclamation fixed for the feeder, and I4's exit given an item for every D2 decision; rev 0.9 writes row I4 from spike S-cancel's note, `docs/plans/spikes/2026-11-07-s-cancel.md`; rev 0.8 records the agreement, the text then rev 0.7's); proposed 2026-10-31. Work starts in §4's order: wave 1a's I0 and wave 1b's spikes in parallel. Five independent adversarial reviews —
 four on one day, the fifth on the merged document (#715's thread, 2026-11-05; the thread, this paragraph and the *Revised
 from* column are the record of all five): rev 0.1 against the decisions, rev 0.3 against the mechanisms, rev 0.4 and rev 0.5 each against five
 premises, both with the verdict *not yet buildable*. Every premise failure sat in wave 1 (I0–I4) or in the developer
@@ -215,7 +215,7 @@ note and goes through the standing review as any row does. No spike ships.
 | **S-succeed** | A node on `cert_pem` (secure profile, no CA key) takes a certificate issued under a successor CA **without a restart**: a reload path through `activate`, a two-root `RootCertStore`, `verify_member_cert` across the window. | the handshake succeeds under the new root on a live node, or the spike records that a restart is required and why |
 | **S-presence** | `dev` signs with a Secure Enclave P-256 key from a **team-signed bundle**, verified by one P-256-aware verifier; the negative probe (`interactionNotAllowed` fails), `kSecAttrTokenIDSecureEnclave`, `biometryCurrentSet`, a fresh context per approval; and whether the release pipeline can produce such a bundle at all. | a signature produced only after the prompt and verified; the pipeline question answered yes or no; if no, I7 falls back to `tty` everywhere, graded |
 
-#### I4 · Cancellation under a `call:`-scoped mandate — *written after S-cancel*
+#### I4 · Cancellation under a `call:`-scoped mandate — *written from S-cancel ([note](spikes/2026-11-07-s-cancel.md), 2026-11-07; evidence at tag `spike/s-cancel-2026-11-07-r2`) — **not yet buildable: N1–N5 open***
 
 Decided (D2): scope prefix; holder = the gateway; second mandate slot; `Refused` on revoke; `is_entitled`'s `call:`
 arm; incremental feeder; in-memory reclamation with a lock-order row; a cancel-forward RPC kind *(new)*; A2A
@@ -226,17 +226,18 @@ name by a 2.38 reader** (`RuleDecl` and `MandateDecl` deny unknown keys, `deprec
 allowance by a ≤ 2.37 one, so it is declared only on an upgraded fleet.
 
 **From the spike** ([S-cancel's note](spikes/2026-11-07-s-cancel.md), 2026-11-07). The evidence is the tag
-`spike/s-cancel-2026-11-07` (commit `deb00a80`, never merged). Its numbers supersede the first version's, which #731's
-review corrected.
+`spike/s-cancel-2026-11-07-r2` (never merged), and the leak's reproduction is at `spike/s-cancel-leak-2026-11-07`. Its
+numbers supersede the first version's, which #731's review corrected.
 
 **Establishment.** The admitting gateway carries the mandate's **first revocation checkpoint inside the envelope,
 beside the mandate**, as `PresentedMandate` carries a grant and its proof.
 - Once the mandate has verified (issued, entitled, current, possessed), the provider offers the carried checkpoint and
   its own KV copy of the call's checkpoint. It offers them only for the mandate's own authority and scope.
 - A provider that has never seen the checkpoint then establishes the mandate, and `admit_after` registers the work with
-  `begin`. There is no KV read and no wait (note S1, S7).
+  `begin`. There is no network round trip and no wait (note S1, S7). There is one **local** read: the provider's own
+  KV copy of the call's checkpoint (`local_call_checkpoint`, a `kv_get` and a parse), done outside the S2 measurement.
 
-**The bounded wait is rejected.** One hop is fast on loopback, 0.42 ms at p50 and 0.50 ms at p95 (n = 100, note S6′).
+**The bounded wait is rejected.** One hop is fast on loopback, 0.43 ms at p50 and 0.48 ms at p95 (n = 100, note S6′).
 The reason for rejecting it is that **under a partition it has no bound**.
 
 **Without either, the outcome depends on the rule.** Where a rule admits the call without a mandate, the call is not
@@ -246,10 +247,11 @@ mandate, the `Unknown` binding is refused (`src/agent/action_evaluator.rs:2106�
 **What it costs.**
 - **On the wire:** +360 B on the presented mandate (612 → 972 B) against the 8 192 B envelope cap. The checkpoint's
   signature serialises as a JSON array; base64 would bring it to about 180 B. The full envelope was not measured.
-- **At the provider:** the same `assess` cost as today's grant path. Carried: 114.1 / 112.2 / 141.4 µs mean / p50 /
-  p99. Grant path: 115.1 / 113.6 / 143.5 µs. That is release, 20 000 calls interleaved, three repetitions agreeing to
-  within 1 µs (note S2).
-- **At the gateway:** three signatures per call (the mandate, its first checkpoint, the possession proof), 38.0 µs mean.
+- **At the provider:** the same `assess` cost as today's grant path. Carried: 114.6 / 113.8 / 136.4 µs mean / p50 /
+  p99. Grant path: 116.1 / 115.0 / 138.8 µs. That is release, 20 000 calls interleaved, three repetitions within 1.5 µs
+  of each other (note S2). What the 1.2–1.5 µs gap consists of is **not measured**. The local KV read above is outside both
+  figures.
+- **At the gateway:** three signatures per call (the mandate, its first checkpoint, the possession proof), 38.7 µs mean.
   The durable write of each call's first checkpoint (exit 7) **is not measured**. It adds an fsync per admission, where
   today a grant's checkpoint is written once, at issue. Exit 11 measures it.
 
@@ -258,7 +260,7 @@ mandate, the `Unknown` binding is refused (`src/agent/action_evaluator.rs:2106�
    because its carried checkpoint predates the revocation. It stops when the revoking checkpoint arrives.
    - The cancel's effect is **the gossip latency + the sweep interval (*F* / 20, clamped to 100 ms–5 s) + the class's
      `drain_bound`**.
-   - Measured on loopback, n = 20: **42.1 ms p50, 45.2 ms p95** from the revoking write to the call ending, with *F* =
+   - Measured on loopback, n = 20: **41.7 ms p50, 43.4 ms p95** from the revoking write to the call ending, with *F* =
      2 s (a 100 ms sweep) and a handler that stops at once (note S7).
    - A carried stale checkpoint cannot un-revoke (note S3).
    - **The bound holds only while the revoking checkpoint can arrive.** Under a partition, or for a class with an
@@ -279,8 +281,10 @@ mandate, the `Unknown` binding is refused (`src/agent/action_evaluator.rs:2106�
   hold every fleet call until it expired.
 - **The race survives it:** a node that admits a call after its revocation was written reads its own KV copy at
   admission, so the race of bound 1 still closes.
+- **A second mandate on one scope** with a later window moves the scope's expiry to the later end, so the scope is
+  never reclaimed while that mandate still runs (note S7′).
 - **How it is reclaimed:** from an expiry queue, at most **1 024 scopes per sweep**. On 10⁵ windows, an idle sweep holds
-  row 43 for under 2 µs and the worst reclaiming sweep for 643 µs; 98 sweeps drain 10⁵ in 47.6 ms in total (note S5,
+  row 43 for under 2 µs and the worst reclaiming sweep for 571 µs; 98 sweeps drain 10⁵ in 44.5 ms in total (note S5,
   S6). The first version scanned every window on every sweep and held row 43 for 130 ms.
 
 **Three findings the row handles.**
@@ -313,6 +317,40 @@ mandate, the `Unknown` binding is refused (`src/agent/action_evaluator.rs:2106�
 repository: the plan entered the tree at rev 0.6 (#715, one commit), and a `git log --all -S` search confirms it is not
 in #715's thread. The exit below is written from D2 and the note. **The soak is stated here for the first time**, for
 the review to confirm.
+
+**Open before build (round-2 review).** The build PR settles each of these questions, with the exit beside it.
+- **N1 (high): a revocation landing between the preflight and `admit_after` runs the call unregistered.**
+  - The preflight finds the mandate `Established` and admits the call. If the revoking checkpoint lands before
+    `admit_after`, `admit_after`'s second assessment reads `Refused`. It then returns `work: None`, and the handler runs
+    with nothing registered, so nothing can stop it (`src/agent/provider_enforcement.rs:329–343` on `main`).
+  - `main` has the same shape for grants today. A separate PR fixes it there.
+  - **Exit needed:** `admit_after` refuses a call whose mandate the preflight found `Established` and it does not. It
+    never admits it unregistered. Shown with the revoking checkpoint offered between the two assessments, for a
+    `call:` mandate and for a grant.
+- **N2: the window must exist before the KV copy is read.**
+  - The KV copy is read before the call's window is inserted. A revocation written to the KV between that read and the
+    insert is skipped by the feeder, which offers only scopes this node admitted. So it never reaches the authority, and
+    the work runs unrevoked.
+  - **Exit needed:** at every door that admits under `call:` (the gateway's preflight, the provider's `admit_after`), the
+    scope is admitted (its window inserted) **before** the KV copy is read. Shown with the revocation written in that
+    interval.
+- **N3: the holder check is against the wrong principal.**
+  - At the provider, `assess` compares the mandate's holder with `principal`: the verified **client** principal for a
+    gateway-dispatched call (`src/agent/provider_enforcement.rs:254`, passed at `:278`, `:287` and assessed at `:330` on `main`). D2's holder is the **gateway**.
+  - **Exit needed:** a `call:` mandate's holder is compared with the gateway that signed the call's envelope, not with
+    the client it acts for. A `call:` mandate whose holder is any other gateway is `Unknown`. A client presenting the
+    gateway's `call:` mandate as its own is refused.
+- **N4: with two slots, revoking either mandate must stop the work.**
+  - A client's call runs under its own grant in one slot and the gateway's `call:` mandate in the other. The work is
+    registered under one mandate today.
+  - **Exit needed:** work admitted under both is registered under both. Revoking the client's grant stops it, and so
+    does cancelling the `call:` term, each within its bound.
+- **N5: exit 11's restart clause, and `call:` retention.**
+  - The window table is in memory. After a restart, a revoked `call:` re-presented inside its window is refused only if
+    the revoking checkpoint is still in the node's KV. What keeps it there, and for how long, is not stated.
+  - **Exit needed:** after a WAL-only restart, a revoked `call:` re-presented inside its window is refused. The `call:`
+    key family's records are kept at least until the mandate's window plus `max_drain_secs`, and collected afterwards,
+    each shown by a test.
 
 **Exit.** Each item is a test or a run. Every D2 decision has an item or is marked *not built*.
 1. **Establishment.** A `call:` mandate minted at the gateway's admission is established at a provider that holds no
@@ -364,7 +402,10 @@ the review to confirm.
     - A 2.38 reader refuses a `cancellable` key by name.
     - The ≤ 2.37 reader, which reads a `cancellable` key as a plain allowance, is **not built as a test**: no 2.37
       binary runs in CI. The upgrade note says to declare it only on an upgraded fleet.
-16. **The measurement.** S-cancel's figures are re-run on I4's shipped code and dated on
+16. **The incremental feeder.** The `call:` feeder offers only the checkpoint whose key was written, not a rescan of
+    the key family. Its cost per write is measured independent of how many `call:` checkpoints the KV holds (10², 10⁴).
+    Today's grant feeder rescans `grant/` on every write (`feed_grant_checkpoints`), and the spike kept that shape.
+17. **The measurement.** S-cancel's figures are re-run on I4's shipped code and dated on
     [`what-is-proven.md`](../operations/what-is-proven.md) (§6.4). That covers the provider's `assess`, the gateway's
     mint with its durable write, the bytes, and bound 1 with its n. The spike's row there is replaced by the shipped
     one.
