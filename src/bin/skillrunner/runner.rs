@@ -25,13 +25,13 @@ pub(crate) struct SkillRunner {
 }
 
 impl SkillRunner {
-    pub(crate) async fn run(self) {
+    /// Serve `skill.invoke` from `rx`, registered by the caller before it advertised the skill.
+    pub(crate) async fn run(self, mut rx: mycelium::RpcRequestRx) {
         let max_conc = self.skill.capability.policy.as_ref()
             .and_then(|p| p.max_concurrent)
             .unwrap_or(usize::MAX);
         let sem = Arc::new(Semaphore::new(max_conc));
 
-        let mut rx = self.agent.service().rpc_rx("skill.invoke");
         let runner = Arc::new(self);
 
         while let Some(req) = rx.recv().await {

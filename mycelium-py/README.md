@@ -367,7 +367,8 @@ agent.set_with_min_acks("key", b"value", min_acks=0)
 #### `deliver_event(target, kind, payload)`
 
 Delivers a mailbox event to `target`'s mailbox at key
-`mailbox/{target}/{kind}/{hlc_ts}`. Gossiped to all peers; at-least-once within the TTL.
+`mailbox/{target}/{kind}/{hlc_ts}`. Gossiped to all peers; at-least-once — the event stays in the KV until it is
+delivered.
 
 ```python
 agent.deliver_event("127.0.0.1:57001", "task.result", b"done")

@@ -686,13 +686,20 @@ pub fn narrate(events: &[Event]) -> Vec<String> {
     }).collect()
 }
 
+/// The `sys.explain` receiver [`run_explain_responder`] reads, registered before it is spawned.
+pub(crate) fn explain_rx(ctx: &TaskCtx) -> tokio::sync::mpsc::Receiver<crate::signal::Signal> {
+    ctx.signal_handlers.register(Arc::from(EXPLAIN_RPC_KIND))
+}
+
 /// Serve `sys.explain` requests: reply with **this** node's ring since the requested cursor.
 /// Registered as a background task (only under `emergent_detectors_enabled` — RT4 zero-overhead-off).
+/// `rx` is [`explain_rx`], registered by `start()` before it spawns this task, so a request that
+/// arrives once `start()` has returned finds a receiver.
 pub async fn run_explain_responder(
     ctx: Arc<TaskCtx>,
+    mut rx: tokio::sync::mpsc::Receiver<crate::signal::Signal>,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) {
-    let mut rx = ctx.signal_handlers.register(Arc::from(EXPLAIN_RPC_KIND));
     loop {
         tokio::select! {
             maybe = rx.recv() => {
@@ -1308,6 +1315,23 @@ mod tests {
     use bytes::Bytes;
     use mycelium_core::hlc::Hlc;
     use crate::node_id::NodeId;
+
+    /// **The `sys.explain` receiver exists when `start()` returns.** It was registered inside the
+    /// responder task `start()` spawns, so a peer's request delivered before that task first ran was
+    /// dropped and its fan-out read this node as silent. The `bulk_serve` window (CI run 42371240189).
+    /// The probe is `register_client`, refused (`None`) exactly when an in-process receiver serves the kind.
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_explain_receiver_exists_when_start_returns() {
+        let port = crate::test_util::alloc_port();
+        let mut cfg = crate::GossipConfig::default();
+        cfg.bind_port = port;
+        cfg.emergent_detectors_enabled = true;
+        let agent = crate::GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg);
+        agent.start().await.unwrap();
+        let probe = agent.task_ctx.signal_handlers.register_client(Arc::from(EXPLAIN_RPC_KIND), 1);
+        assert!(probe.is_none(), "an in-process sys.explain receiver is registered when start() returns");
+        agent.shutdown().await;
+    }
 
     fn seed_intent(kv: &KvState, hlc: &Hlc, group: &str, min: usize, max: Option<usize>, now: u64) {
         let mut intent = MembershipIntent::new(group, min, max);

@@ -407,8 +407,8 @@ let template = PromptTemplate {
     metadata: Default::default(),
 };
 
-// Advertises cap `llm/chat` (a 30 s presence TTL, refreshed); the template is configuration
-// in `prompts/llm/chat`, written without a TTL.
+// Advertises cap `llm/chat` (refreshed every 30 s; readers drop it after three missed refreshes); the template
+// is configuration in `prompts/llm/chat`, an ordinary key.
 let _handle = agent.llm().register_prompt_skill("llm", "chat", template, std::sync::Arc::new(backend)).await?;
 // Drop _handle to retract the capability and stop the dispatch loop.
 ```
