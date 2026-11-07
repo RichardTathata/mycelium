@@ -49,7 +49,7 @@ goes offline, and a member is killed; the governors self-elect and heal the coun
   changed through `/gateway/mesh/group` (both 403 `governed_group`).
 - **Not built:** the band is a target the governors reach, not an invariant at every instant — a count can sit
   outside it while moves settle; a group is self-joined by filter, so a node that matches and misbehaves is not kept
-  out; in-process `join_group` and `leave_group`, and raw `grp/` writes, are not checked against governance; the
+  out; in-process `join_group` and `leave_group`, and in-process or gossiped `grp/` writes (the HTTP KV routes refuse `grp/`, 403 `protected_key`), are not checked against governance; the
   governor's eligibility reads `cap/` without freshness, so a dead node can stay eligible — a known gap fixed by a
   separate PR.
 - **Evidence:** the [what-is-proven](../operations/what-is-proven.md) ledger's
