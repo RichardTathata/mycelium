@@ -275,7 +275,7 @@ Filled as rows close: each row's promises quoted beside the code and test that d
   - the TLS key and certificate writes, `write_with_mode` (`mycelium-core/src/tls.rs:749`): a write with no fsync of
     the file or its directory;
   - `quarantine_unreadable` (`mycelium-core/src/persistence.rs:651`): renames with no directory sync;
-  - `mycelium-wiki`'s `FsStore::cas_publish` (`mycelium-wiki/src/fs.rs:165`, a temp write and rename) and the
+  - `mycelium-wiki`'s `FsStore::cas_publish` (`mycelium-wiki/src/fs.rs:165`, a temp write published by hard link) and the
     `GitStore` writes (`mycelium-wiki/src/git_store.rs:749`, `:880`, `:890`): no fsync;
   - the reason blob store (`mycelium-reason/src/blob.rs:111–114`, stated there: complete-or-absent, not crash-durable, no
     fsync);
