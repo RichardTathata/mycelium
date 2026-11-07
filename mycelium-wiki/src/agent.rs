@@ -526,6 +526,12 @@ impl<S: WikiStore + 'static> Wiki<S> {
             self.watch_and_promote();
             return;
         }
+        // The responders' receivers are registered before the curator ad goes out: a node that
+        // resolves the new curator and asks at once finds them (a request delivered before a
+        // receiver exists is dropped — the `bulk_serve` window, CI run 42371240189).
+        let access_rx = self.agent.service().rpc_rx(format!("wiki.{}.access", self.cfg.group));
+        let ingest_rx = self.batch_source.is_some()
+            .then(|| self.agent.service().rpc_rx(format!("wiki.{}.ingest", self.cfg.group)));
         let reg = self.agent.capabilities().advertise_capability(
             Capability::new("wiki", format!("{}.curator", self.cfg.group)),
             self.cfg.cap_refresh,
@@ -563,8 +569,8 @@ impl<S: WikiStore + 'static> Wiki<S> {
         // The access broker: answer store-access requests, gated on membership. Point-to-point RPC so a
         // grant (and, for a real object store, its scoped credential) never floods the cluster.
         let me = Arc::clone(self);
+        let mut rx = access_rx;
         let broker = tokio::spawn(async move {
-            let mut rx = me.agent.service().rpc_rx(format!("wiki.{}.access", me.cfg.group));
             while let Some(req) = rx.recv().await {
                 // `sender()` is the node that sent the request. Through the gateway's raw routes that is the
                 // gateway node itself, whatever client asked it to, so membership says nothing about the client;
@@ -580,10 +586,9 @@ impl<S: WikiStore + 'static> Wiki<S> {
         // The bulk-ingest responder (Phase 4) — served only when a batch source is configured.
         // Workers submit a claim-check *reference*; the curator fetches + applies + replies with
         // the summary. Membership-gated like store access (the same permits() as the broker).
-        let ingest_task = self.batch_source.is_some().then(|| {
+        let ingest_task = ingest_rx.map(|mut rx| {
             let me = Arc::clone(self);
             tokio::spawn(async move {
-                let mut rx = me.agent.service().rpc_rx(format!("wiki.{}.ingest", me.cfg.group));
                 while let Some(req) = rx.recv().await {
                     // As for `access`: the gateway refuses a client without `wiki:write` on the raw routes
                     // before this node's membership is asked (external review 2026-10-31 F1).

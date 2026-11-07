@@ -16,7 +16,7 @@ use tokio::task::JoinSet;
 use super::TaskCtx;
 use super::bulk::{BulkError, bulk_call_ctx};
 #[cfg(feature = "gateway")]
-use super::bulk::{BulkServeHandle, bulk_serve_task};
+use super::bulk::{BulkServeHandle, bulk_serve_rx, bulk_serve_task};
 use super::capability_ops::resolve_filter_against_kv;
 use super::helpers::emit_signal_async;
 use super::mailbox::{deliver_event_ctx, open_mailbox_ctx, MailboxHandle, MeshEvent};
@@ -188,8 +188,9 @@ impl ServiceHandle {
 
     /// Registers a handler for incoming bulk calls of a given `kind`.
     ///
-    /// Spawns a background task. The returned [`BulkServeHandle`] cancels the
-    /// task when dropped.
+    /// Spawns a background task. The handler's receiver is registered before this returns, so a
+    /// ticket that arrives as soon as it has returned is served. The returned [`BulkServeHandle`]
+    /// cancels the task when dropped.
     #[cfg(feature = "gateway")]
     pub fn bulk_serve<F, Fut>(
         &self,
@@ -205,7 +206,8 @@ impl ServiceHandle {
         let shutdown_rx = self.ctx.shutdown_tx.subscribe();
         let kind: Arc<str> = kind.into();
         let handler = Arc::new(handler);
-        tokio::spawn(bulk_serve_task(ctx, kind, handler, cancel_rx, shutdown_rx));
+        let rx = bulk_serve_rx(&self.ctx);
+        tokio::spawn(bulk_serve_task(ctx, kind, handler, rx, cancel_rx, shutdown_rx));
         BulkServeHandle { _cancel: cancel_tx }
     }
 

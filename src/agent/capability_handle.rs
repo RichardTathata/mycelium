@@ -102,6 +102,8 @@ impl CapabilitiesHandle {
         self.ctx.spawn_task(run_kv_persist_task(
             Arc::clone(&ctx.core), cancel_rx, shutdown_rx, kv_key, interval, payload_fn, None,
         ));
+        #[cfg(test)]
+        on_advertise::run(&self.ctx);
         CapabilityReg { _retract: cancel_tx }
     }
 
@@ -653,4 +655,28 @@ impl CapabilitiesHandle {
     pub fn suggest_leader(&self, group: &str, kind: &str, max_age: Duration) -> NodeId {
         super::helpers::suggest_leader_ctx(&self.ctx, group, kind, max_age)
     }
+}
+
+/// Test-only hook run at the moment a capability's advertisement is handed to its persist task —
+/// what a test needs to see what a caller resolving the ad at once would find (keyed by node).
+#[cfg(test)]
+pub(crate) mod on_advertise {
+    use super::TaskCtx;
+    use std::sync::Arc;
+
+    pub(crate) type Hook = Arc<dyn Fn(&TaskCtx) + Send + Sync>;
+    static HOOKS: std::sync::LazyLock<papaya::HashMap<String, Hook>> = std::sync::LazyLock::new(papaya::HashMap::new);
+
+    pub(crate) fn run(ctx: &TaskCtx) {
+        let hook = HOOKS.pin().get(&ctx.node_id.to_string()).cloned();
+        if let Some(hook) = hook {
+            hook(ctx);
+        }
+    }
+
+    #[cfg(feature = "llm")] // its one user is the `llm` build's ordering test
+    pub(crate) fn set(node: &crate::node_id::NodeId, hook: Hook) { HOOKS.pin().insert(node.to_string(), hook); }
+
+    #[cfg(feature = "llm")] // its one user is the `llm` build's ordering test
+    pub(crate) fn clear(node: &crate::node_id::NodeId) { HOOKS.pin().remove(&node.to_string()); }
 }
