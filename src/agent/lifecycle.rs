@@ -83,6 +83,37 @@ impl GossipAgent {
                 });
             }
         }
+        // `[authority]` (identity-and-lifecycle I0) in a build that cannot attach what it describes: the same class.
+        // Without `compliance` the table would be accepted and every door would enforce nothing.
+        #[cfg(not(feature = "compliance"))]
+        if self.config.authority.is_some() {
+            return Err(GossipError::InvalidField {
+                field: "authority",
+                reason: "an [authority] table is enforced only in a build with the `compliance` feature (the \
+                         evaluator, execution authority, provider enforcement and evidence journal it attaches); \
+                         this build would ignore it and every door would enforce nothing. Build with \
+                         `--features compliance`, or remove the table"
+                    .into(),
+            });
+        }
+        // With it: the declaration is read and this node's authority built and checked here — every refusal by
+        // name, before a port is bound — and attached by `start()` (the journal opened there) or by the doctor.
+        #[cfg(feature = "compliance")]
+        if let Some(auth) = &self.config.authority
+            && self.task_ctx.declared_authority.get().is_none()
+        {
+            if self.task_ctx.action_evaluator.get().is_some() {
+                return Err(GossipError::InvalidField {
+                    field: "authority",
+                    reason: "an action evaluator is already attached in code (with_action_evaluator); [authority] \
+                             attaches this node's evaluator from its declaration, and a node has one source of \
+                             authority. Remove the table, or the attachment"
+                        .into(),
+                });
+            }
+            let planned = super::declared_authority::plan(&self.config, &self.node_id, auth)?;
+            let _ = self.task_ctx.declared_authority.set(Arc::new(planned));
+        }
         // The identity provider is an outbound the substrate chooses (`report.egress`, plan §8): an
         // `[oidc]` table whose issuer or JWKS host a non-empty `egress.allow_hosts` does not permit
         // is a contradiction — the gateway would hold no keys and refuse every token — refused by
@@ -270,6 +301,13 @@ impl GossipAgent {
     /// Binds the TCP listener(s) and launches background loops.
     pub async fn start(&self) -> Result<(), GossipError> {
         self.preflight()?;
+        // `[authority]`'s plan, attached before the boundary: the journal opened first (identity-and-lifecycle I0).
+        #[cfg(feature = "compliance")]
+        if let Some(planned) = self.task_ctx.declared_authority.get().cloned()
+            && self.task_ctx.action_evaluator.get().is_none()
+        {
+            super::declared_authority::attach(self, &planned, true)?;
+        }
         // The lifecycle boundary (plan G13): every attachment is in and the configuration is what it
         // is. Resolve every registered guarantee against this node and say so, once, before traffic.
         self.task_ctx.started.store(true, std::sync::atomic::Ordering::Release);

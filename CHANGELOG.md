@@ -49,7 +49,29 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     and seventeen more packages from `Cargo.lock`; the tests now name the reqwest `stream` feature they had been getting
     through it.
 
+### Added
+
+- **`[authority]`: a node's evaluator, execution authority, provider enforcement and evidence journal from its
+  declaration** (`docs/plans/identity-and-lifecycle.md` I0). A node built from a configuration file — the `mycelium`
+  binary — could attach none of these, so every door it served enforced nothing. With the table set, `start()` reads
+  the unit whose `principal` is `unit` from `declarations`, builds the reference evaluator from **that unit's**
+  `[[rule]]`s only (each as written, a bare `tool:<name>` also at this node, a grant-requiring rule on the unit's own
+  principal also for `node:<id>`), maps every door this build serves (an unmapped door refuses the start), builds the
+  execution authority (`scope`, `tier`, `freshness_ms`, `entitle_grants`), opens the journal and attaches all four
+  before the lifecycle boundary. Refused at start by name: an empty or unreadable directory, no unit or two with that
+  principal, a rule that does not build, an exposure rule (not attached by the table), a gate the strict profile
+  refuses, an evaluator already attached in code, a journal that does not open, and a build without `compliance`.
+  `mycelium doctor` attaches all but the journal and reports them as `start()` would. `GossipConfig` gained
+  `authority`; `deprecations.md` §83; feature page `docs/features/declared-authority.md`.
+
 ### Fixed
+
+- **The reference evaluator selects the arguments its rules test.** `ReferenceEvaluator` kept the trait's default
+  `security_relevant_arguments` (none), so an enforcement point lifted no argument into the envelope and every rule
+  with `requires_values` read *argument value not available* at a live door — `Indeterminate`, never a permit. It now
+  names every `requires_values` key of its rules. Found by identity-and-lifecycle I0: the `governed-call` scaffold's own
+  petty-cash rule could not admit its call at the gateway (`the_gateway_door_decides_by_this_units_rules_and_records_each_decision`,
+  seen failing first). An application that relied on such a rule never permitting now sees it decide.
 
 - **A fresh journal's first acknowledged record has a durable name** (external review 2026-10-31 F7,
   `docs/plans/external-review-2026-10-31.md` R6). The node-local journal — the evidence journal, the rights ledger, the

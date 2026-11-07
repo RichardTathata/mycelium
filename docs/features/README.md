@@ -111,6 +111,7 @@ suite is `scripts/test-check-feature-pages.py`.
 | [Published node](published-node.md) | Every `v*` tag publishes the three binaries for three platforms with sums, and a multi-arch image; a developer starts a node without a toolchain | Start from the published node |
 | [Inference routing as policy](inference-routing.md) | The action evaluator decides each routed model call on its destination, locality and data class | Constrain actions; Run tools and reasoning |
 | [Authorising actions](action-authorisation.md) | An enforcement point asks a replaceable evaluator — permit, deny or indeterminate — before the work runs, and records the decision first | Constrain actions |
+| [Authority from the declaration](declared-authority.md) | `[authority]`: the evaluator, execution authority, provider enforcement and evidence journal built from this node's unit at `start()`, for a node started from a file | Constrain actions |
 | [Evidence journal](evidence-journal.md) | The node-local, fsynced, never-gossiped record of each decision; only a hash-bearing reference enters the audit chain | Constrain actions |
 | [Provider enforcement](provider-enforcement.md) | A protected call is checked where it runs, whichever door it came through; fails closed without an evaluator | Constrain actions |
 | [Mandates and authority drain](mandates.md) | One appointment checked at the resource; a newer epoch stops the old holder's writes and running work, across restarts | Constrain actions |

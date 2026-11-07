@@ -2527,3 +2527,20 @@ reads its gateway certificate and key, and its CA and node certificates, through
 `rustls` already depends on. The accepted inputs are the same (pinned by `tls::pem_parse_tests`): certificates in order
 with other sections skipped, PKCS#8, PKCS#1 and SEC1 keys by label, CRLF line endings, an encrypted key read as no key,
 a malformed section an error.
+
+## 83. `[authority]` attaches this node's authority from its declaration; `GossipConfig` gained `authority` (unreleased, identity-and-lifecycle I0)
+
+A node configured with an `[authority]` table takes its action evaluator, execution authority, provider enforcement
+and evidence journal from the unit its `unit` names (`docs/features/declared-authority.md`). Without the table nothing
+changes.
+
+- **Who is affected:** a node that sets the table — its doors, which enforced nothing, now refuse what its unit's
+  rules do not permit; a build without `compliance` refuses the start by name. **An older binary ignores the table
+  silently** (configuration tables are tolerant), so upgrade every node before relying on it. A Rust caller that
+  builds `GossipConfig` with an exhaustive struct literal: the new field breaks it; `..Default::default()` is
+  unaffected.
+- **What to do:** declare, in this node's unit, every rule its doors should admit — including the issuing rule
+  (`grant.issue`, and `grant.revoke` if its issuer revokes) in every unit whose gateway may issue — with each actor as
+  the door presents it (`token:<issuer>/<name>` for a named token, `node:<id>` for a node). Do not attach an evaluator
+  in code as well: `start()` refuses one source of authority beside another.
+

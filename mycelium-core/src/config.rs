@@ -1695,6 +1695,17 @@ pub struct GossipConfig {
     #[serde(default)]
     pub egress_credentials: Vec<CredentialBinding>,
 
+    /// `[authority]` — this node's evaluator, execution authority and evidence journal built from its
+    /// declaration (identity-and-lifecycle I0). `None` (default): nothing is attached from configuration,
+    /// and an embedder attaches in code (`with_action_evaluator`, …) as before. When set, `start()` loads
+    /// the unit named by `unit` from `declarations`, builds the reference evaluator from **that unit's**
+    /// `[[rule]]`s only, opens the journal, and attaches the evaluator, an execution authority, provider
+    /// enforcement and the journal before the lifecycle boundary. A build without `compliance` refuses
+    /// the start by name; **an older binary ignores the table silently** (this struct is tolerant, as
+    /// every table here is). See [`AuthorityConfig`].
+    #[serde(default)]
+    pub authority: Option<AuthorityConfig>,
+
     /// Generic-OIDC SSO config for the gateway (WS4, `compliance` feature).
     /// `None` (default) = no OIDC; gateway auth uses bearer tokens / scoped
     /// tokens only. When set, a presented JWT is validated against the IdP's
@@ -1719,6 +1730,71 @@ pub struct GossipConfig {
     /// (`GossipAgent::start()`), rather than accept the table and run plaintext.
     pub tls: Option<TlsConfig>,
 }
+
+/// `[authority]` (identity-and-lifecycle I0): where this node's authority comes from — its declaration.
+///
+/// Unknown keys are refused (`deny_unknown_fields`), so a misspelt field fails the load by name rather
+/// than leaving a default in place.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuthorityConfig {
+    /// The declaration directory: every `*.toml` in it is a unit file (`mycelium wire-check`'s input).
+    pub declarations: PathBuf,
+    /// The unit that is this node's — matched on its `principal`, the join key of the unit format. Only
+    /// its `[[rule]]`s are loaded: a declaration carries no placement, so another unit's rule cannot be
+    /// qualified to the node it runs on.
+    pub unit: String,
+    /// The evidence journal's path (node-local, append-only, fsynced; opened `Strict` at `start()`).
+    pub journal: PathBuf,
+    /// The execution gate's resource tier: `serialised` (default) or `transactional`. `advisory` is
+    /// refused by `validate()` — it is detection only, not admissible in the strict profile.
+    #[serde(default)]
+    pub tier: AuthorityTier,
+    /// The freshness bound *F*, ms: the oldest revocation view present authority may rest on. The
+    /// checkpoint interval is *F*/4 and the delivery bound *F*/12. Default 120 000.
+    #[serde(default = "default_authority_freshness_ms")]
+    pub freshness_ms: u64,
+    /// The clock model's skew *s*, ms: how far an issuing authority's clock may stand from this node's. The strict
+    /// gate needs *F* > 4*s* and *F*/4 + *F*/12 ≤ *F* − 4*s* (so *s* ≤ *F*/12); `start()` refuses a pair that breaks
+    /// either. Default 1 000. Distinct from `max_clock_drift_ms`, the transport's tolerance for a peer's HLC.
+    #[serde(default = "default_authority_skew_ms")]
+    pub skew_ms: u64,
+    /// The entitlement rule: whose grants this node's execution authority verifies — `node` (default:
+    /// grants issued for this node's own principal) or `fleet` (grants from any fleet member, for an
+    /// agent on this node granted at another node's gateway).
+    #[serde(default)]
+    pub entitle_grants: GrantEntitlement,
+    /// The scope of the resource the gate guards. Default: the unit's name.
+    #[serde(default)]
+    pub scope: Option<String>,
+}
+
+/// `[authority].tier` — an execution gate's resource tier (`ResourceTier` in `mycelium::mandate`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AuthorityTier {
+    /// A single owner orders check and effect.
+    #[default]
+    Serialised,
+    /// A transaction the check sits inside.
+    Transactional,
+    /// Detection only — refused by `validate()`.
+    Advisory,
+}
+
+/// `[authority].entitle_grants` — whose grants the execution authority verifies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GrantEntitlement {
+    /// Grants issued for this node's own principal.
+    #[default]
+    Node,
+    /// Grants from any fleet member.
+    Fleet,
+}
+
+fn default_authority_freshness_ms() -> u64 { 120_000 }
+fn default_authority_skew_ms() -> u64 { 1_000 }
 
 fn default_control_max_staleness_ms() -> u64 { 30_000 }
 fn default_control_min_peers_heard() -> usize { 1 }
@@ -1987,6 +2063,7 @@ impl Default for GossipConfig {
             egress:                        EgressPolicy::default(),
             egress_credentials:            Vec::new(),
             oidc:                          None,
+            authority:                     None,
             tls:                           None,
         }
     }
@@ -2153,6 +2230,23 @@ impl GossipConfig {
                 field: "control_min_peers_heard",
                 reason: "must be ≥ 1: a view that heard nobody is not a view".into(),
             });
+        }
+        // `[authority]` (identity-and-lifecycle I0): what can be judged from the table alone. The rest — the
+        // directory, the unit, its rules, the operation map, the gate's parameters — is judged at `start()`,
+        // which reads the declaration (`GossipAgent::preflight`).
+        if let Some(auth) = &self.authority {
+            if auth.unit.trim().is_empty() {
+                return Err(GossipError::InvalidField { field: "authority", reason: "`unit` is empty: name the unit (its `principal`) that is this node's".into() });
+            }
+            if auth.tier == AuthorityTier::Advisory {
+                return Err(GossipError::InvalidField {
+                    field: "authority",
+                    reason: "tier = \"advisory\" is detection only and is not admissible in the strict profile the gate runs; use \"serialised\" or \"transactional\"".into(),
+                });
+            }
+            if auth.freshness_ms == 0 {
+                return Err(GossipError::InvalidField { field: "authority", reason: "freshness_ms must be > 0: a zero bound fails every check closed".into() });
+            }
         }
         if let Some(g) = &self.consensus_electorate
             && (g.is_empty() || g.contains('/')) {

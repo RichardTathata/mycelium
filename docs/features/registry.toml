@@ -166,6 +166,15 @@ ids = ["rule:ae.preflight", "guarantee:ae.authorised_at_seam", "guarantee:ae.rec
        "concept:enforcement-point", "concept:indeterminate", "concept:action-envelope", "concept:evaluator", "concept:policy-revision"]
 
 [[feature]]
+name = "Authority from the declaration"
+page = "declared-authority.md"
+example = "none"
+example_watch = ["declared_authority"]
+ids = []
+links = ["rule:ae.preflight", "guarantee:ae.authorised_at_seam", "guarantee:ae.recorded_before_dispatch",
+         "guarantee:prov.enforcement", "guarantee:authz.execution_authority"]
+
+[[feature]]
 name = "Evidence journal"
 page = "evidence-journal.md"
 example = "none"

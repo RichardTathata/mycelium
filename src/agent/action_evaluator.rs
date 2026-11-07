@@ -2069,6 +2069,22 @@ impl ActionEvaluator for ReferenceEvaluator {
         self.evaluate_with_history(env, &History::Unavailable("evaluated without a history".into()))
     }
 
+    /// The argument names its rules test (`requires_values`), so an enforcement point lifts exactly those into the
+    /// envelope. Without this the trait's default selected none, and every rule testing a value read *argument value
+    /// not available* at a live door — decided `Indeterminate`, never a permit (identity-and-lifecycle I0 found it:
+    /// the `governed-call` scaffold's own rule could not admit at the gateway).
+    fn security_relevant_arguments(&self) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .prohibitions
+            .iter()
+            .chain(self.allowances.iter())
+            .flat_map(|r| r.requires_values.iter().map(|(name, _)| name.clone()))
+            .collect();
+        names.sort();
+        names.dedup();
+        names
+    }
+
     fn mapping(&self, operation: &str, resource: &str) -> ActionMapping {
         let (catalogue, revision) = self
             .catalogue

@@ -171,6 +171,30 @@ pub(crate) use authz::{ae_preflight_routed, TEST_RECORD_PAUSE_MS};
 #[cfg(all(feature = "gateway", feature = "tls", feature = "a2a"))]
 pub(crate) use authz::ENFORCEMENT_POINT_A2A;
 
+/// Every door this build serves that asks the action evaluator, with the operation it asks under: `(enforcement
+/// point, operation)` (identity-and-lifecycle I0). `[authority]` maps each operation, so none of this node's doors
+/// is refused *unmapped* before a rule is read, and refuses the start naming any door its evaluator leaves
+/// unmapped. The provider's protected kinds are added by the caller from the configuration (`protected_rpc_kinds`).
+/// Not listed: the take, claim and emit doors (adopter-surface Y11), which ask only when an exposure rule selects
+/// the request — and `[authority]` attaches no exposure policy.
+#[cfg(all(feature = "gateway", feature = "tls"))]
+#[cfg_attr(not(feature = "compliance"), allow(dead_code))]
+pub(crate) fn evaluated_doors() -> Vec<(&'static str, &'static str)> {
+    #[allow(unused_mut)]
+    let mut doors = vec![
+        (authz::ENFORCEMENT_POINT_MCP, "tools/call"),
+        (grants::ENFORCEMENT_POINT_GRANT_ISSUE, "grant.issue"),
+        (grants::ENFORCEMENT_POINT_GRANT_ISSUE, "grant.refuse"),
+        (grants::ENFORCEMENT_POINT_GRANT_ISSUE, "grant.revoke"),
+        (authz::ENFORCEMENT_POINT_FEDERATION, "federation.call"),
+    ];
+    #[cfg(feature = "llm")]
+    doors.extend([(authz::ENFORCEMENT_POINT_LLM_CALL, super::signal_kind::LLM_INVOKE), (authz::ENFORCEMENT_POINT_LLM_STREAM, super::signal_kind::LLM_INVOKE)]);
+    #[cfg(feature = "a2a")]
+    doors.push((authz::ENFORCEMENT_POINT_A2A, "skill.invoke"));
+    doors
+}
+
 // The protected-kind list (`BUILTIN_PROTECTED_RPC_KINDS`) and its predicate live ungated in
 // `agent/mod.rs` since the wasm host began refusing them at a component's `mesh.emit` (a build
 // without the gateway has that door too).

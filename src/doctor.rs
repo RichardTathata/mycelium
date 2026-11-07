@@ -226,6 +226,15 @@ fn run_inner(config_path: Option<&Path>, attach: Option<Attach<'_>>) -> Doctor {
     if let Err(e) = agent.preflight() {
         d.refusal = Some(refusal("preflight", &e));
     }
+    // `[authority]` (identity-and-lifecycle I0): what `start()` would attach from the declaration, attached here
+    // without the journal, which the doctor does not open — the report reads the journal as `start()` would leave it.
+    #[cfg(feature = "compliance")]
+    if let Some(planned) = agent.task_ctx.declared_authority.get().cloned()
+        && agent.task_ctx.action_evaluator.get().is_none()
+        && let Err(e) = crate::agent::declared_authority::attach(&agent, &planned, false)
+    {
+        d.refusal = Some(refusal("preflight", &e));
+    }
     let report = agent.guarantee_report();
     d.confinement = Some(agent.confinement_report());
     if d.refusal.is_none()
@@ -542,6 +551,49 @@ mod tests {
         assert_eq!(r.field, "gateway_scoped_tokens");
         assert!(r.reason.contains("`compliance` feature"), "{}", r.reason);
         assert!(d.report.is_some(), "the report is still taken after a preflight refusal");
+    }
+
+    /// Identity-and-lifecycle I0: over a configuration with `[authority]` the doctor reports what `start()` would
+    /// attach — the evaluator, the provider's enforcement, the execution authority, and the journal — and opens no
+    /// journal. Seen failing first: with `attach` skipped in the doctor, every `ae.*` and `prov.enforcement` read
+    /// `not_configured`.
+    #[cfg(feature = "compliance")]
+    #[tokio::test]
+    async fn the_doctor_reports_what_authority_would_attach_and_opens_no_journal() {
+        let port = crate::test_util::alloc_port();
+        let dir = std::env::temp_dir().join(format!("mycelium-doctor-authority-{port}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("units")).unwrap();
+        std::fs::write(dir.join("units/purchaser.toml"), include_str!("../templates/governed-call/units/purchaser.toml")).unwrap();
+        let journal = dir.join("evidence.log");
+        let path = write_cfg(
+            "authority",
+            &format!("bind_port = {port}
+http_port = {}
+[tls]
+auto_cert_dir = \"{}\"
+[authority]
+declarations = \"{}\"
+unit = \"purchaser\"
+journal = \"{}\"
+",
+                crate::test_util::alloc_port(), dir.join("tls").display(), dir.join("units").display(), journal.display()),
+        );
+        let d = run(Some(&path));
+        if std::env::var_os("GOSSIP_PROFILE").is_none() {
+            assert!(d.refusal.is_none(), "{:?}", d.refusal);
+        }
+        let report = d.report.clone().expect("a report");
+        for id in ["ae.authorised_at_seam", "ae.recorded_before_dispatch", "prov.enforcement", "authz.execution_authority"] {
+            let e = report.entries.iter().find(|e| e.id == id).unwrap_or_else(|| panic!("{id} reported"));
+            assert!(matches!(e.resolution, Resolution::Enforced), "{id}: {:?}", e.resolution);
+        }
+        assert!(!journal.exists(), "the doctor opens no journal");
+        // An undeclared unit is the refusal `start()` would give, at the same stage.
+        let bad = write_cfg("authority-bad", &std::fs::read_to_string(&path).unwrap().replace("unit = \"purchaser\"", "unit = \"nobody\""));
+        let r = run(Some(&bad)).refusal.expect("refused");
+        assert_eq!((r.stage, r.field.as_str()), ("preflight", "authority"), "{r:?}");
+        assert!(r.reason.contains("no unit in"), "{}", r.reason);
     }
 
     /// X1's third exit: a persistence directory that does not exist is reported, not created.
