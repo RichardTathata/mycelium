@@ -64,7 +64,7 @@ its chain back with `mycelium explain --correlation`. The tests: in
   preflight and reads `_meta` only for a companion's take or claim kind, at a gateway node that hosts that companion and
   when an exposure rule selects the door (adopter-surface Y11) — through a gateway without the companion such a call
   passes undecided. The record that carries the fields is the one
-  [`ae.recorded_before_dispatch`](../reference/guarantee-catalogue.md) requires before the dispatch runs.
+  [`ae.recorded_before_dispatch`](../reference/guarantee-catalogue.md#ae.recorded_before_dispatch) requires before the dispatch runs.
 - The closure is **authoritative over the evidence journal and best-effort over the decision trace**: the journal
   never drops a record; the sink does, counted, and the reader prints those counts beside any hole. A hole is named —
   a journal not given, a record pruned or crypto-shredded, a dropped decision — and never filled. A closure over

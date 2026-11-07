@@ -62,7 +62,7 @@ the gap decided as run once or skipped, the run naming the decision its parent) 
 
 ## What it guarantees, and what it does not
 
-- The rules are [`sched.run` and `sched.missed`](../reference/rule-catalogue.md): the rendezvous winner among the
+- The rules are [`sched.run`](../reference/rule-catalogue.md#schedrun) and [`sched.missed`](../reference/rule-catalogue.md#schedmissed): the rendezvous winner among the
   live candidates runs the slot due; a gap is skipped, run late (at most 64, each under its own key) or run once.
 - One effect per slot **only at a destination that deduplicates** on the run's key, with content that depends on
   the key alone: two holders send it twice.

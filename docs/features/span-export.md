@@ -57,7 +57,7 @@ is a hand-kept copy; no test reads it.
   `mycelium.reason`, schema `mycelium.span/1`; a new key is a new schema. An evidence record's `reason` is the
   evaluator's prose, which may name a subject, so its span has none; its outcome is the verdict or the execution
   state. The guarantee report states this as
-  [`trace.spans_not_evidence`](../reference/guarantee-catalogue.md) — `enforced` in an `otel` build, by the type,
+  [`trace.spans_not_evidence`](../reference/guarantee-catalogue.md#trace.spans_not_evidence) — `enforced` in an `otel` build, by the type,
   whether or not anything is sent, and `not_in_build` without it.
 - The hash is the record's content hash — a journal frame's body, a trace line without its newline — the one a
   `parent` names and `mycelium explain --closure` resolves. The same record always exports as the same span, ids

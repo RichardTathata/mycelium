@@ -63,7 +63,7 @@ the fields.
 
 ## What it guarantees, and what it does not
 
-- The rule is [`ae.exposure`](../reference/rule-catalogue.md): a selected, permitted call that extends an unresolved
+- The rule is [`ae.exposure`](../reference/rule-catalogue.md#aeexposure): a selected, permitted call that extends an unresolved
   closure is held when that closure holds `max_unresolved` effects or its oldest is older than `max_oldest_age_ms`,
   each threshold on its own; the hold is a deny naming the threshold, recorded before nothing is dispatched.
 - **Only dependent work.** A request extends a closure when its `parent` is an unresolved effect's prepared record or

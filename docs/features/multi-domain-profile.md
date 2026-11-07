@@ -24,15 +24,15 @@ partner. No side is required: a member of a federating domain need not face a pa
 
 This feature is turned on in code.
 
-- [`profile`](../reference/configuration.md#the-fields): `"secure-multi-domain"`, or `GOSSIP_PROFILE`.
-- [`domain_profile`](../reference/configuration.md#the-fields): `"enforced"` on every member, with SWIM off and `[tls]`.
+- [`profile`](../reference/configuration.md#profile): `"secure-multi-domain"`, or `GOSSIP_PROFILE`.
+- [`domain_profile`](../reference/configuration.md#domain_profile): `"enforced"` on every member, with SWIM off and `[tls]`.
 - [`with_federation_edge`](../../src/agent/mod.rs): the edge, built with `FederationEdge::new` and a
   `CallPolicy` that sets `require_body_binding` and `max_in_flight_per_partner`.
 - [`with_signing_key`](../../src/federation/edge.rs): the edge signs the catalogue it serves.
 - [`with_federation_clients`](../../src/agent/mod.rs): one client per partner, each with its pins and the partner's key.
 - [`with_tls_pins`](../../src/federation/client.rs): the partner's TLS key pinned from the trust bundle.
 - [`with_partner_key`](../../src/federation/client.rs): a catalogue is relied on only once it verifies under it.
-- [`egress`](../reference/configuration.md#the-fields): `allow_hosts` names every partner endpoint's host.
+- [`egress`](../reference/configuration.md#egress): `allow_hosts` names every partner endpoint's host.
 - [`SECURE_MULTI_DOMAIN`](../../src/agent/guarantee.rs): the required set, rev 1. Attach the edge and the clients
   **before** `start()`: under this profile — and only this one — one attached after it is ignored with a warning, and
   counted.
@@ -64,10 +64,10 @@ rendering of the family is `doctor_prints_the_federation_family_under_the_multi_
 
 ## What it guarantees, and what it does not
 
-- **Required, on this node:** [`fed.domain_enforced`, `fed.pinned`, `fed.body_bound`, `fed.partner_slots`,
-  `fed.caller_named`, `fed.catalogue_signed` and `fed.partner_egress`](../reference/guarantee-catalogue.md#the-descriptors),
+- **Required, on this node:** [`fed.domain_enforced`](../reference/guarantee-catalogue.md#fed.domain_enforced), [`fed.pinned`](../reference/guarantee-catalogue.md#fed.pinned), [`fed.body_bound`](../reference/guarantee-catalogue.md#fed.body_bound), [`fed.partner_slots`](../reference/guarantee-catalogue.md#fed.partner_slots),
+  [`fed.caller_named`](../reference/guarantee-catalogue.md#fed.caller_named), [`fed.catalogue_signed`](../reference/guarantee-catalogue.md#fed.catalogue_signed) and [`fed.partner_egress`](../reference/guarantee-catalogue.md#fed.partner_egress),
   with the twenty of `secure-single-domain` rev 5.
-- **Listed, never counted:** [`fed.partner_posture`, `fed.non_merger` and `fed.clock_agreement`](../reference/guarantee-catalogue.md#the-descriptors).
+- **Listed, never counted:** [`fed.partner_posture`](../reference/guarantee-catalogue.md#fed.partner_posture), [`fed.non_merger`](../reference/guarantee-catalogue.md#fed.non_merger) and [`fed.clock_agreement`](../reference/guarantee-catalogue.md#fed.clock_agreement).
   Nothing this node checks makes the partner honest.
 - `fed.caller_named` is `gw.not_open`'s check restated for the federation routes; `fed.partner_egress` holds for a
   `.suffix` entry, which admits every host under it, so name the partner's host exactly to confine calls to it.

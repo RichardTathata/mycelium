@@ -14,7 +14,7 @@ node's evidence journal.
 - **Use it when** a provider must not rely on every caller having passed a gateway: members can reach it directly,
   or more than one gateway fronts it.
 - **Not when** the node has no action evaluator to attach: enforcement then fails closed and refuses every protected
-  call.
+  call with `no_evaluator`.
 
 ## Turn it on
 
@@ -25,7 +25,8 @@ This feature is turned on in code, in a build with `gateway` and `tls`.
 - [`with_action_evaluator`](../../src/agent/mod.rs): the evaluator that decides ([authorising actions](action-authorisation.md)).
 - [`with_execution_authority`](../../src/agent/mod.rs): verifies a presented mandate at this node
   ([mandates](mandates.md)).
-- [`with_cohort_budget`](../../src/agent/mod.rs): optionally, caps a declared population together at this provider.
+- [`with_cohort_budget`](../../src/agent/mod.rs): optionally, caps a declared population together at this provider;
+  it applies with enforcement off too.
 - [`protected_rpc_kinds`](../reference/configuration.md#protected_rpc_kinds): further kinds to treat as protected.
 - `test_c7_the_bypass_matrix_no_door_runs_revoked_work`, in [`src/lib_tests.rs`](../../src/lib_tests.rs): after a
   revocation, no door runs the work, counted by the handlers themselves.
@@ -39,12 +40,16 @@ confirmed stop, checked against the class's bound. CI runs it.
 
 ## What it guarantees, and what it does not
 
-- **Rule:** [`provider.enforcement`](../reference/rule-catalogue.md#providerenforcement) — permit, deny,
-  `no_evaluator` or `at_capacity`; with enforcement off nothing is checked.
+- **Rule:** [`provider.enforcement`](../reference/rule-catalogue.md#providerenforcement) — a permit, or a refusal:
+  the action preflight's (a deny, authority not established, evidence not recorded), `no_evaluator`, `caller_context_refused`, `malformed_call` (a tool call that is
+  not JSON or names no tool), `resource_unnamed`, `resource_not_here`, `resource_not_served` or `at_capacity`. With
+  enforcement off no authority is checked; an attached cohort budget still verifies the caller context and admits by
+  cohort.
 - **Guarantee:** [`prov.enforcement`](../reference/guarantee-catalogue.md#prov.enforcement).
 - **Not built:** the check-then-act window between the check and the effect is narrowed and stated, not eliminated
   ([what-is-proven § the check-then-act window](../operations/what-is-proven.md#check-then-act-window)); a provider
-  that attaches no evaluator enforces nothing.
+  that does not turn enforcement on checks no authority, whatever the gateway did, and one that turns it on with no
+  evaluator refuses every protected call (`no_evaluator`).
 - **Evidence:** the ledger rows [after a revocation every door runs nothing](../operations/what-is-proven.md#revocation-every-door-runs-nothing)
   and [running work stops](../operations/what-is-proven.md#running-work-stops).
 

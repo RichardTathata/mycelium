@@ -25,8 +25,8 @@ the command.
   table and, inside it, [`[activation.confine.egress]`](../reference/unit-file.md#activationconfineegress) with
   `hosts` and, for credentials, `credentials`.
 - On the node, declare each binding in
-  [`egress_credentials`](../reference/configuration.md#the-fields), and keep each host permitted by
-  [`egress`](../reference/configuration.md#the-fields) (`allow_hosts`); a binding's fields are in
+  [`egress_credentials`](../reference/configuration.md#egress_credentials), and keep each host permitted by
+  [`egress`](../reference/configuration.md#egress) (`allow_hosts`); a binding's fields are in
   [crown-jewel.md § Credentials attached at egress](../operations/crown-jewel.md#credentials-attached-at-egress-post-360-plan-row-l-2350).
   A stem built without feature `gateway` or `llm` has no egress gate and refuses a `credentials` entry at start.
 - To change the list live, send `mycelium-stem` a `SIGHUP` after replacing its unit file, or call
@@ -56,7 +56,7 @@ the tests and where they run.
   stated in [unit-file.md § `[activation.confine]`](../reference/unit-file.md#activationconfine) and
   [§ `[activation.confine.egress]`](../reference/unit-file.md#activationconfineegress). Under Landlock (Linux) the
   proxy's port is open on any address, so `stem.activation_egress` reads `not_configured` there. The node's own
-  [`egress.credentials` and `egress.allow_list`](../reference/guarantee-catalogue.md#the-descriptors) apply
+  [`egress.credentials`](../reference/guarantee-catalogue.md#egress.credentials) and [`egress.allow_list`](../reference/guarantee-catalogue.md#egress.allow_list) apply
   through the proxy.
 - **Not built:** the *Not built* paragraph of
   [unit-file.md § `[activation.confine.egress]`](../reference/unit-file.md#activationconfineegress), and rows L and M

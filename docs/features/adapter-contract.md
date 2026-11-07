@@ -49,9 +49,9 @@ holds every companion README to its limits section.
 ## What it guarantees, and what it does not
 
 - It adds no guarantee. The doors' rows name the ids their doors resolve — the MCP door and the native embedding
-  [`prov.enforcement`](../reference/guarantee-catalogue.md), the A2A door [`a2a.admission`](../reference/guarantee-catalogue.md),
-  all three and `mycelium-reason` [`ae.authorised_at_seam`](../reference/guarantee-catalogue.md) and
-  [`ae.recorded_before_dispatch`](../reference/guarantee-catalogue.md); an adapter outside the node registers none,
+  [`prov.enforcement`](../reference/guarantee-catalogue.md#prov.enforcement), the A2A door [`a2a.admission`](../reference/guarantee-catalogue.md#a2a.admission),
+  all three and `mycelium-reason` [`ae.authorised_at_seam`](../reference/guarantee-catalogue.md#ae.authorised_at_seam) and
+  [`ae.recorded_before_dispatch`](../reference/guarantee-catalogue.md#ae.recorded_before_dispatch); an adapter outside the node registers none,
   and what it carries is what the doors it calls carry.
 - A *carried* cell is a test CI ran, in the target its file belongs to; a cell with no test is refused by the gate,
   and a planted cell naming a test that did not run fails CI's `test-coverage` job.

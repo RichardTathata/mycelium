@@ -36,7 +36,7 @@ This feature is turned on in code.
   [`claim_retry`](../../src/effects/external.rs), [`claim_probe`](../../src/effects/external.rs),
   [`claim_compensation`](../../src/effects/external.rs) and [`claim_leave`](../../src/effects/external.rs) — each
   move's check and change in one step under the ledger's lock, so two moves racing on one record cannot both send.
-- [`persistence`](../reference/configuration.md#the-fields) — the class needs `[persistence]` and a `gateway` + `tls`
+- [`persistence`](../reference/configuration.md#persistence) — the class needs `[persistence]` and a `gateway` + `tls`
   build (from a checkout, `cargo build --bin mycelium --features cli,tls`; the published binary has both); it reads `not_configured` or `not_in_build` otherwise, and fails the run only when asked for by name.
 - `the_recovery_class_recovers_the_closure_by_class_and_leaves_independent_work`, in
   [`src/faults.rs`](../../src/faults.rs): the live form against a persisted three-node fleet, every check held.
@@ -56,7 +56,7 @@ check made again on the replay.
 ## What it guarantees, and what it does not
 
 - **Probe before retry, one effect.** The restarted node's WAL replays a write made before the crash
-  ([`persist.configured`](../reference/guarantee-catalogue.md), [`persist.sync_mode`](../reference/guarantee-catalogue.md)),
+  ([`persist.configured`](../reference/guarantee-catalogue.md#persist.configured), [`persist.sync_mode`](../reference/guarantee-catalogue.md#persist.sync_mode)),
   its ledger — a journal, folded at open — finds the record *unknown*, a retry without a probe is refused by name, the
   probe finds the effect done, and the destination was **reached once** for it (it deduplicates, so the class counts
   the sends that reached it, not only the applications) — the contract's own rule, run after a crash.
@@ -67,7 +67,7 @@ check made again on the replay.
 - **Recovery by class, each as a new record:** an idempotent dependent is probed and *resumed* by one retry (of two
   concurrent retries one is refused before anything is sent); a compensatable dependent is probed and never retried;
   a committed dependent whose premise did not happen is *compensated* under the evaluator's permit
-  ([`ae.preflight`](../reference/rule-catalogue.md); the reconciler records the permit's decision before the
+  ([`ae.preflight`](../reference/rule-catalogue.md#aepreflight); the reconciler records the permit's decision before the
   compensation is sent — its own ordering, not the gateway's guarantee, which a fleet with no gateway resolves
   `not_applicable` and the class does not list); an irreversible dependent is *left*, unresolved and escalated. The
   rule is the contract's: *unknown + idempotent → probe, then retry if not done; unknown + compensatable → probe,

@@ -27,7 +27,7 @@ before.
 - [`ActionEvaluator`](../../src/agent/action_evaluator.rs): the trait a policy engine implements;
   [`ReferenceEvaluator`](../../src/agent/action_evaluator.rs) is the in-tree one.
 - [`with_evidence_journal`](../../src/agent/mod.rs): where each decision is recorded; without it an evaluator
-  enforces and records nothing ([evidence journal](evidence-journal.md)).
+  enforces and keeps no record of its decisions ([evidence journal](evidence-journal.md)).
 - [`set_deployed_policy_revision`](../../src/agent/mod.rs): the revision the operator reports as deployed; until it is
   set the stale-policy check does not fire.
 - [`preflight`](../../src/agent/action_evaluator.rs): the seam's checks for an enforcement point that is not this
