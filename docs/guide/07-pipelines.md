@@ -60,7 +60,7 @@ Three properties make this the canonical form:
 
 **Why one gossip substrate underneath.** The tuple space is a companion crate
 built entirely on Mycelium's public API: its primary is discovered by
-capability advertisement, its failure is detected by the same TTL evaporation
+capability advertisement, its failure is detected the same way, by its advertisement going stale (older than three refresh intervals, skipped by the readers that check freshness)
 as any pheromone, and a mirror promotes itself through the same emergent
 election as every other role. Work distribution composes from the substrate's
 existing primitives — no queue infrastructure, no registry, no coordinator.
