@@ -1,6 +1,6 @@
 # Identity and lifecycle — keyed principals, signed decisions, cancellation under a per-call mandate, and the developer surface
 
-**Status:** **agreed with the maintainer on 2026-11-07**, rev 0.9 (rev 0.9 writes row I2 from spike S-succeed's note, `spikes/2026-11-07-s-succeed.md`, and #732's review: a `cert_pem` node re-roots live, the trust set and the successor certificate persist under `succession/`, every cached judgment is re-judged when the roots change, and old-CA records lose standing (decided in the confirm round); rev 0.8 records the agreement, its text rev 0.7's); proposed 2026-10-31. Work starts in §4's order: wave 1a's I0 and wave 1b's spikes in parallel. Five independent adversarial reviews —
+**Status:** **agreed with the maintainer on 2026-11-07**, rev 0.9 (row I2 is **not yet buildable: R1–R4 open**, the round-3 review's questions, which I2's build PR must settle; rev 0.9 writes row I2 from spike S-succeed's note, `spikes/2026-11-07-s-succeed.md`, and #732's review: a `cert_pem` node re-roots live, the trust set and the successor certificate persist under `succession/`, every cached judgment is re-judged when the roots change, and old-CA records lose standing (decided in the confirm round); rev 0.8 records the agreement, its text rev 0.7's); proposed 2026-10-31. Work starts in §4's order: wave 1a's I0 and wave 1b's spikes in parallel. Five independent adversarial reviews —
 four on one day, the fifth on the merged document (#715's thread, 2026-11-05; the thread, this paragraph and the *Revised
 from* column are the record of all five): rev 0.1 against the decisions, rev 0.3 against the mechanisms, rev 0.4 and rev 0.5 each against five
 premises, both with the verdict *not yet buildable*. Every premise failure sat in wave 1 (I0–I4) or in the developer
@@ -226,7 +226,7 @@ name by a 2.38 reader** (`RuleDecl` and `MandateDecl` deny unknown keys, `deprec
 allowance by a ≤ 2.37 one, so it is declared only on an upgraded fleet. **From the spike:** how establishment happens and what it
 costs; the exit list of rev 0.5 then stands, with the soak.
 
-#### I2 · CA succession by a pre-committed successor — *written from S-succeed ([note](spikes/2026-11-07-s-succeed.md), 2026-11-07; evidence at tag `spike/s-succeed-2026-11-07-r2`)*
+#### I2 · CA succession by a pre-committed successor — *written from S-succeed ([note](spikes/2026-11-07-s-succeed.md), 2026-11-07; evidence at tag `spike/s-succeed-2026-11-07-r2`) — **not yet buildable: R1–R4 open***
 
 Decided (D4): `ca-commit.pem`, `tls commit`, `tls succeed`, the successor-signed record with its window end, act-once
 and persist, a **gateway door** *(new)* that publishes the record (as I1's does), the shadow counted, the offline node
@@ -328,6 +328,32 @@ under the successor; `rotate_identity` still cannot run on the off-node posture.
   - **What it costs, and the answer.** Signatures made earlier by a key anchored only by an old-CA record would stop
     verifying. So `tls succeed` re-issues under the successor **every unrevoked key** in the node's history, not only
     its current one, from their public keys on the issuer's host. A revoked key is not re-issued, and it stays refused.
+
+**Open before build (round-3 review).** The build PR settles each of these questions, with the exit beside it.
+- **R1 (high): a node left with no anchor becomes legacy, and its revoked keys verify again.** A node with no verifying
+  certificate record is judged from `peer_keys` as before row Q, and no revocation of its keys counts
+  (`src/agent/revocation.rs:12-16`, `:601`). Loss of standing that removes a node's last anchor therefore re-admits its
+  revoked keys. **Exit needed:** after narrowing, a node whose every old-CA record lost standing is never judged
+  legacy. Its revoked keys stay refused at the signature check and the handshake, on a long-running node and a
+  restarted one.
+- **R2 (high): the re-issued serials must keep the original order.** They must be distinct, in the original issuance
+  order, with the current key last, or an old key can revoke the current one. Rank is the key's **first** issuance,
+  carried in the serial (`revocation.rs:19-24`, `mycelium-core/src/tls.rs:916`). **Exit needed:** after re-issue, for
+  every pair of a node's keys, the later-issued key still outranks the earlier. An old key's revocation of the current
+  key does not count. No two re-issued keys are siblings unless they were before.
+- **R3 (medium-high): two sources go missing.**
+  - The off-node issuer has no source for which keys are revoked, so it cannot tell which to re-issue.
+  - A revocation record's trailer carries the revoker's and the revoked key's old-CA certificates, which stop
+    verifying after narrowing (`revocation.rs:36-38`).
+
+  **Exit needed:** the issuer's source of revoked keys named and tested: a revoked key is not re-issued, and an
+  unrevoked one is. A revocation counted before narrowing is still counted after it, on a long-running node and a
+  restarted one, and one first seen after narrowing is judged by a stated rule.
+- **R4 (medium): pruning `anchors_seen` by what the store now holds reopens demotion by hiding.** `anchors_seen` exists
+  so that hiding a node's certificate record does not demote it (`revocation.rs:263-266`). Pruning an anchor because its
+  record is no longer readable lets a member that hides the re-issued record demote the node. So an anchor must keep its
+  certificate or the certificate's digest. **Exit needed:** after narrowing, hiding or overwriting a node's re-issued
+  record does not remove its anchor, and an anchor is removed only when its kept certificate fails the new roots.
 
 **Depends on:** S-succeed (done); the gateway door after I1's.
 
