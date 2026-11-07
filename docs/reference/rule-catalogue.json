@@ -1693,15 +1693,15 @@
     },
     {
       "id": "provider.enforcement",
-      "revision": 1,
+      "revision": 2,
       "subsystem": "mycelium::agent::provider_enforcement",
       "responsibilities": [
         "authority"
       ],
-      "trigger": "a protected RPC kind arriving at a provider with enforcement on",
+      "trigger": "a protected RPC kind arriving at a provider with enforcement on, or with a cohort budget attached",
       "inputs": [
         {
-          "source": "the node's evaluator and execution authority; the carried mandate",
+          "source": "the node's evaluator and execution authority; the carried mandate; the verified caller context; the cohort budget, if attached",
           "scope": "this node",
           "freshness": "the decision clock"
         }
@@ -1717,14 +1717,22 @@
           "kind": "refusal",
           "reasons": [
             "deny",
+            "indeterminate",
+            "not_recorded",
             "no_evaluator",
+            "caller_context_refused",
+            "malformed_call",
+            "resource_unnamed",
+            "resource_not_here",
+            "resource_not_served",
             "at_capacity"
           ]
         },
         {
           "kind": "no_action",
           "reasons": [
-            "enforcement_off"
+            "enforcement_off",
+            "not_protected"
           ]
         }
       ],
@@ -1744,7 +1752,7 @@
         "test_c7_the_bypass_matrix_no_door_runs_revoked_work"
       ],
       "trace": "catalogue_only",
-      "summary": "Authority where the work happens: a protected call is checked at the provider whichever door it came through; with enforcement on and no evaluator it is refused, with it off nothing is checked."
+      "summary": "Authority where the work happens: a protected call is checked at the provider whichever door it came through; with enforcement on and no evaluator it is refused (`no_evaluator`); with it off no authority is checked, though an attached cohort budget still verifies the caller context and admits by cohort (`caller_context_refused`, `at_capacity`)."
     },
     {
       "id": "sched.missed",

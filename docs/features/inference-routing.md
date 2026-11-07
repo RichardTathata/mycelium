@@ -49,7 +49,7 @@ names it and where it runs.
 
 - **Rule:** [`ae.preflight`](../reference/rule-catalogue.md#aepreflight), whose inputs include the routing door's
   destination, locality and data class.
-- **Guarantees:** [`ae.authorised_at_seam` and `ae.recorded_before_dispatch`](../reference/guarantee-catalogue.md#the-descriptors)
+- **Guarantees:** [`ae.authorised_at_seam`](../reference/guarantee-catalogue.md#ae.authorised_at_seam) and [`ae.recorded_before_dispatch`](../reference/guarantee-catalogue.md#ae.recorded_before_dispatch)
   cover each candidate's decision, which is its own evidence record. No guarantee id is specific to routing.
 - **Contract:** the five `route_*` cases and `PolicyClause::ForbidClassAt` in
   [`ae_contract.rs`](../../src/agent/ae_contract.rs), which a replacement evaluator must pass or decline

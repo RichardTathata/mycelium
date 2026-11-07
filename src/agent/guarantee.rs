@@ -1012,7 +1012,7 @@ pub(crate) fn core_guarantees() -> Vec<GuaranteeDescriptor> {
           always,
           |c| {
               #[cfg(all(feature = "gateway", feature = "tls"))]
-              { if c.provider_enforcement.load(std::sync::atomic::Ordering::Acquire) { Resolution::Enforced } else { Resolution::NotConfigured { missing: "with_provider_enforcement (off: nothing is checked at this provider, whatever the gateway does)" } } }
+              { if c.provider_enforcement.load(std::sync::atomic::Ordering::Acquire) { Resolution::Enforced } else { Resolution::NotConfigured { missing: "with_provider_enforcement (off: no authority is checked at this provider, whatever the gateway does; an attached cohort budget still admits by cohort)" } } }
               #[cfg(not(all(feature = "gateway", feature = "tls")))]
               { let _ = c; Resolution::NotInBuild { feature: "gateway + tls" } }
           }),

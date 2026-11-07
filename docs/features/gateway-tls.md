@@ -11,8 +11,8 @@ node cannot see.
 ## When to use it, and when not
 
 - **Use it when** a gateway is reached off the host, and there is no proxy in front to terminate TLS.
-- **Not when** the client is an SDK release that builds only `http://` URLs: check the SDK's README for a scheme
-  option first ([gateway TLS § Option 2](../operations/gateway-tls.md#option-2--native-gateway-tls-gossipconfiggateway_tls-2026-07-22)).
+- **Not when** a TLS-terminating proxy already fronts the gateway, or clients must present certificates: the gateway
+  serves server-side TLS only.
 
 ## Turn it on
 
@@ -26,6 +26,9 @@ empty `[gateway_tls]`, which reuses the node identity's certificate.
 - [`handshake_timeout_ms`](../reference/configuration.md#handshake_timeout_ms) and
   [`gateway_max_connections`](../reference/configuration.md#gateway_max_connections): the listener's bounds, the same
   for plaintext and HTTPS.
+- Both SDKs reach it with a `scheme` of `"https"`: the Python agent's
+  [`agent.py`](../../mycelium-py/src/mycelium/agent.py) and the TypeScript agent's
+  [`agent.ts`](../../mycelium-ts/src/agent.ts); verification stays on.
 - `test_gateway_serves_native_tls`, in [`src/agent/http/http_tests.rs`](../../src/agent/http/http_tests.rs): a rustls
   client trusting the generated CA gets `/health` 200, and a plaintext client fails.
 

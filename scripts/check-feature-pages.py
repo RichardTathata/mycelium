@@ -379,6 +379,13 @@ def registry(root):
     return tomllib.loads(read(root, REGISTRY))
 
 
+def strs(entry, key):
+    """An entry's list of strings under `key`: what check_shape admits. A value of the wrong type, or an item that is
+    not a string, is check_shape's error, so every other reader skips it rather than crash on it."""
+    value = entry.get(key, [])
+    return [v for v in value if isinstance(v, str)] if isinstance(value, list) else []
+
+
 def check_shape(reg, errors):
     """Refuse a key outside the known set, and a value of the wrong type: a typo must not drop a check."""
     for key in sorted(set(reg) - {'feature', 'exclusion'}):
@@ -406,14 +413,14 @@ def check_registry(root, reg, ids, errors):
     owner = {}
     for kind, entries in (('feature', reg.get('feature', [])), ('exclusion', reg.get('exclusion', []))):
         for entry in entries:
-            label = entry.get('name') or entry.get('reason', '')[:50]
-            if kind == 'exclusion' and not entry.get('reason', '').strip():
+            label = entry.get('name') or str(entry.get('reason', ''))[:50]
+            if kind == 'exclusion' and not str(entry.get('reason', '')).strip():
                 errors.append(f'{REGISTRY}: an exclusion has no reason: {entry.get("ids")}')
             if kind == 'feature' and not entry.get('page'):
                 errors.append(f'{REGISTRY}: feature "{label}" names no page (a page, or "todo")')
             if kind == 'feature' and entry.get('page') == 'todo' and not entry.get('planned'):
                 errors.append(f'{REGISTRY}: feature "{label}" is "todo" but names no `planned` page')
-            for i in entry.get('ids', []):
+            for i in strs(entry, 'ids'):
                 if i in owner:
                     errors.append(f'{REGISTRY}: {i} is mapped twice ({owner[i]}; {kind} "{label}")')
                 owner[i] = f'{kind} "{label}"'
@@ -430,7 +437,7 @@ def check_registry(root, reg, ids, errors):
     for i in sorted(owner.keys() - known):
         errors.append(f'{REGISTRY}: {i} is mapped but no source has it (renamed or removed?)')
     for f in reg.get('feature', []):
-        for i in f.get('links', []):
+        for i in strs(f, 'links'):
             if i not in known:
                 errors.append(f'{REGISTRY}: feature "{f.get("name")}" links {i}, which no source has')
     named = {}
@@ -588,6 +595,41 @@ def file_of(root, rel, url):
         return None
 
 
+def catalogue_anchor(cat, i):
+    """An entry's anchor: a guarantee's `<a id>` is its id; a rule's is its heading's slug."""
+    return i if cat == 'guarantee' else re.sub(r'[^\w\- ]', '', i.lower())
+
+
+LEDGER = 'docs/operations/what-is-proven.md'
+
+
+def check_anchored_rows(root, errors):
+    """P4: the two hand-kept tables a page links one row of give every row its anchor — each field row of
+    configuration.md § The fields `<a id="<field>">`, each row of the what-is-proven ledger an `<a id>` of its own."""
+    table = read(root, 'docs/reference/configuration.md')
+    m = re.search(r'^## The fields\n(.*?)(?=^## |\Z)', table, re.M | re.S)
+    for line in (m.group(1) if m else '').splitlines():
+        row = re.match(r'^\| ([A-Za-z0-9_.\[\]]+) \|', line)
+        if row and row.group(1) != 'field' and f'<a id="{row.group(1)}"></a>' not in line:
+            errors.append(f'docs/reference/configuration.md: the field row `{row.group(1)}` carries no '
+                          f'<a id="{row.group(1)}"> (plan P4: a page links one field by it)')
+    seen = {}
+    in_tables = False
+    for n, line in enumerate(read(root, LEDGER).splitlines(), 1):
+        if line.startswith('## '):
+            in_tables = True
+        cells = table_cells(line) if in_tables else None
+        if not cells or set(line.replace('|', '').strip()) <= set('-: ') or (cells and cells[0] in ('Claim', 'Gap')):
+            continue
+        a = re.match(r'<a id="([^"]+)"></a>', cells[0])
+        if not a:
+            errors.append(f'{LEDGER}:{n}: a ledger row carries no <a id> in its first cell (plan P4)')
+        elif a.group(1) in seen:
+            errors.append(f'{LEDGER}:{n}: the anchor `{a.group(1)}` is also line {seen[a.group(1)]}\'s')
+        else:
+            seen[a.group(1)] = n
+
+
 def check_page(root, feature, rows, fields, patterns, errors, tests_named):
     page = feature['page']
     rel = f'{FEATURES}/{page}'
@@ -656,6 +698,25 @@ def check_page(root, feature, rows, fields, patterns, errors, tests_named):
         if field and url.partition('#')[0].endswith('reference/configuration.md') and field.group(1) not in fields:
             errors.append(f'{rel}: names the configuration field `{field.group(1)}`, which has no row in '
                           f'configuration.md § The fields')
+        # P4: the link points at the field's own row, not the table or another field's
+        elif field and url.partition('#')[0].endswith('reference/configuration.md') and url.partition('#')[2] != field.group(1):
+            errors.append(f'{rel}: links the configuration field `{field.group(1)}` to '
+                          f'#{url.partition("#")[2] or "(no anchor)"}; link its row, configuration.md#{field.group(1)}')
+
+    # P4: a link that names a catalogue entry points at that entry's anchor
+    for m in LINK.finditer(text):
+        label, url = m.group(1), m.group(2)
+        path, _, anchor = url.partition('#')
+        for cat in ('guarantee', 'rule'):
+            if not path.endswith(f'reference/{cat}-catalogue.md'):
+                continue
+            named = re.findall(r'`([^`]+)`', label)
+            if len(named) > 1:
+                errors.append(f'{rel}: one link to the {cat} catalogue names {len(named)} ids ({", ".join(named)}); '
+                              f'give each its own link to its entry')
+            elif named and anchor != catalogue_anchor(cat, named[0]):
+                errors.append(f'{rel}: links the {cat} `{named[0]}` to #{anchor or "(no anchor)"}; link its entry, '
+                              f'{cat}-catalogue.md#{catalogue_anchor(cat, named[0])}')
 
     # (h) the example
     see = body.get('See it work', '').lstrip()
@@ -679,8 +740,7 @@ def check_page(root, feature, rows, fields, patterns, errors, tests_named):
             errors.append(f'{rel}: See it work does not link the example index')
 
     # (i) every id the registry gives this page
-    # A key of the wrong type is check_shape's error; skip it here rather than crash on it.
-    for i in [i for k in ('ids', 'links') if isinstance(feature.get(k, []), list) for i in feature.get(k, [])]:
+    for i in strs(feature, 'ids') + strs(feature, 'links'):
         if not links_id(root, text, i):
             errors.append(f'{rel}: does not link {i}, which the registry gives it')
 
@@ -689,7 +749,7 @@ def watched(feature):
     """The example names that would be a row for this feature: the page's name in snake case, and any
     `example_watch` the registry lists."""
     stem = Path(feature['page']).stem.replace('-', '_') if feature.get('page') not in (None, 'todo') else feature.get('planned', '').replace('-', '_')
-    return [w for w in [stem] + feature.get('example_watch', []) if w]
+    return [w for w in [stem] + strs(feature, 'example_watch') if w]
 
 
 def check_examples(reg, rows, errors):
@@ -757,6 +817,7 @@ def check(root):
     ids = source_ids(root, errors)
     check_registry(root, reg, ids, errors)
     check_links(root, errors)
+    check_anchored_rows(root, errors)
     rows, _ = pages_checked(root, reg, errors)
     check_examples(reg, rows, errors)
     return errors
@@ -900,10 +961,10 @@ def counts(root):
     reg = registry(root)
     out = {s: {'page': 0, 'todo': 0, 'excluded': 0} for s in SOURCES}
     for f in reg.get('feature', []):
-        for i in f.get('ids', []):
+        for i in strs(f, 'ids'):
             out[i.split(':', 1)[0]]['todo' if f.get('page') == 'todo' else 'page'] += 1
     for e in reg.get('exclusion', []):
-        for i in e.get('ids', []):
+        for i in strs(e, 'ids'):
             out[i.split(':', 1)[0]]['excluded'] += 1
     return out
 

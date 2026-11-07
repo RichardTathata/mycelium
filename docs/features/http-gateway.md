@@ -2,7 +2,7 @@
 
 ## What it is
 
-The gateway is a node's HTTP edge: the KV, mesh, consensus, MCP and A2A routes that SDK clients, browsers and
+The gateway is a node's HTTP edge: the KV, mesh, consensus and MCP routes (and A2A where it is mounted) that SDK clients, browsers and
 external frameworks reach, served from `http_port` in a build with the `gateway` feature. Once a credential model is
 configured — a shared bearer, or under `compliance` scoped or named tokens with a per-route scope floor, or
 [single sign-on](gateway-sso.md) — every non-public route needs it. With none the gateway is open, which it may be
@@ -40,8 +40,9 @@ two-domains job starts, sets a gateway on loopback.
 No runnable example exists for the gateway on its own: the [example index](../../examples/README.md#the-capability-matrix)'s
 examples use it as their edge. The end-to-end run of the credential model is a test in
 [`src/agent/http/gateway_caller_tests.rs`](../../src/agent/http/gateway_caller_tests.rs):
-`named_tokens_alone_still_close_the_gateway` — no bearer is refused 401, and a named token resolves to its own
-principal.
+`named_tokens_alone_still_close_the_gateway` — with only a named-token table, no bearer and an unknown bearer are
+refused 401, a named token is admitted to what its scopes allow, and a read token's write is refused 403. That a
+token resolves to its own principal is `token_identities_are_qualified_by_the_issuing_gateway`, in the same file.
 
 ## What it guarantees, and what it does not
 

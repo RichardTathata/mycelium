@@ -46,7 +46,9 @@ edited, and can you erase one person, each answered by running the mechanism. CI
 - **Not built:** the chain is per node and proves a record was not edited, not that a node recorded everything it
   did; the sink's mirror copy can be dropped under back-pressure; full verification from genesis after pruning is
   offline, against the exported archive ([audit § 5](../operations/audit.md#5-retention--checkpoint-export-prune-soc-2-ws-d)).
-- **Evidence:** the [what-is-proven](../operations/what-is-proven.md) ledger has no row for the chain on its own; the
+- **Evidence:** the ledger row
+  [persisted state is repaired before the first acknowledged append](../operations/what-is-proven.md#persisted-state-repaired-before-first-acknowledged),
+  which includes the audit chain's head recovered, verified, from the persisted stream at restart; the
   [guarantee-report row](../operations/what-is-proven.md#node-says-which-guarantees-enforces-why) covers how a node
   reports these two.
 

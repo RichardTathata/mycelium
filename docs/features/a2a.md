@@ -12,16 +12,18 @@ identity that created it.
 ## When to use it, and when not
 
 - **Use it when** an agent built on an A2A client (Strands Agents' `a2a-sdk`, LangChain over A2A) should reach the
-  fleet's skills without a Mycelium SDK.
+  fleet's skills without a Mycelium SDK, from a node you build or `skillrunner`.
 - **Not when** the route must be closed by a bearer: `/a2a` admits an anonymous caller and drops a bearer's scopes,
   so it is gated by an evaluator that denies anonymous principals, not by a token.
 
 ## Turn it on
 
-This feature is turned on in code: build with `a2a` (it implies `gateway`; the published node has it) and give the
-node an `http_port`.
+This feature is turned on in code: build with `a2a` (it implies `gateway`), give the node an `http_port`, and mount
+the routes. The published `mycelium` binary is built with `a2a` but does not mount them (below); the `skillrunner`
+binary does, when its node has an `http_port`.
 
-- [`http_port`](../reference/configuration.md#http_port): the gateway that serves the card and `/a2a`.
+- [`with_a2a`](../../src/agent/mod.rs): mounts the card and `/a2a` on the gateway; without it nothing is served.
+- [`http_port`](../reference/configuration.md#http_port): the gateway that serves them.
 - [`with_a2a_default_skill`](../../src/agent/mod.rs): the skill a message that names none reaches; without one such a
   message is refused `-32602`.
 - [`with_action_evaluator`](../../src/agent/mod.rs): what decides each send; deny anonymous principals here to close
@@ -33,7 +35,7 @@ node an `http_port`.
 The [example index](../../examples/README.md#the-capability-matrix) lists
 [`a2a_skill_authority`](../../examples/README.md#the-capability-matrix): an evaluator deciding which skills an A2A
 caller may run, at the door that matters most because a bearer does not gate it. CI runs it, and CI's `a2a-sdk` job
-drives the published client library against a node. [`a2a_langchain`](../../examples/README.md#the-capability-matrix)
+drives the published client library against an example node built with `a2a`. [`a2a_langchain`](../../examples/README.md#the-capability-matrix)
 is a manual run with a real model.
 
 ## What it guarantees, and what it does not
@@ -42,8 +44,11 @@ is a manual run with a real model.
   present bearer's scopes are dropped; the action preflight decides the rest.
 - **Guarantee:** [`a2a.admission`](../reference/guarantee-catalogue.md#a2a.admission) — `/a2a` is not anonymous skill
   dispatch, which holds only with an evaluator that denies anonymous principals.
-- **Not built:** the card is public on a credentialed node; the pre-0.2 methods are served for one release
-  ([deprecations §46](../guide/deprecations.md#46-a-current-a2a-client-reaches-a2a-the-card-at-agent-cardjson-the-10-and-03-methods-a-skill-in-metadataskillid-2350-post-360-plan-row-n)); push notifications are not served.
+- **Not built:** the published `mycelium` binary does not mount `/a2a` — `src/main.rs` never calls `with_a2a` — so
+  an A2A client needs a node built with it or `skillrunner`; the card is public on a credentialed node; the pre-0.2
+  methods and the old card path, announced in 2.35.0 for one release
+  ([deprecations §46](../guide/deprecations.md#46-a-current-a2a-client-reaches-a2a-the-card-at-agent-cardjson-the-10-and-03-methods-a-skill-in-metadataskillid-2350-post-360-plan-row-n)),
+  are still served; push notifications are not served.
 - **Evidence:** the ledger row
   [an unmodified A2A client reaches a node's skills](../operations/what-is-proven.md#unmodified-a2a-client-reaches-node-s).
 
