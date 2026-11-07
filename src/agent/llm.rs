@@ -467,6 +467,34 @@ mod tests {
         agent.shutdown().await;
     }
 
+    /// **The `llm.invoke` receiver exists before the skill is advertised.** The advertisement is
+    /// handed to a task that may run on another worker at once, and a peer that resolves it can call
+    /// before `register_prompt_skill` returns. Registration advertised first and registered the
+    /// receiver after, so such a call found none and was dropped. The hook runs at the moment the
+    /// ad is handed off and probes with `register_client` (refused exactly when an in-process
+    /// receiver serves the kind).
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_llm_invoke_receiver_exists_before_the_skill_is_advertised() {
+        let port = crate::test_util::alloc_port();
+        let id = crate::NodeId::new("127.0.0.1", port).unwrap();
+        let mut cfg = crate::GossipConfig::default();
+        cfg.bind_port = port;
+        let agent = Arc::new(crate::GossipAgent::new(id.clone(), cfg));
+        agent.start().await.unwrap();
+        let seen = Arc::new(std::sync::Mutex::new(Vec::<bool>::new()));
+        let record = Arc::clone(&seen);
+        crate::agent::capability_handle::on_advertise::set(&id, Arc::new(move |ctx| {
+            let served = ctx.signal_handlers.register_client(Arc::from(signal_kind::LLM_INVOKE), 1).is_none();
+            record.lock().unwrap().push(served);
+        }));
+        let _skill = agent.llm().register_prompt_skill("ns", "first", PromptTemplate {
+            system: "".into(), user_template: "{{input}}".into(), max_tokens: 32, temperature: 0.0, metadata: Default::default(),
+        }, Arc::new(EchoBackend)).await.unwrap();
+        crate::agent::capability_handle::on_advertise::clear(&id);
+        assert_eq!(*seen.lock().unwrap(), vec![true], "the skill is advertised once, with its receiver already registered");
+        agent.shutdown().await;
+    }
+
     #[test]
     fn echo_backend_no_model_param() {
         // Compile-time: LlmBackend::complete takes no `model` argument.

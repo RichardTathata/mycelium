@@ -2193,35 +2193,45 @@ b_upstream=0`). Bounded in time — the flood's sockets are released at their pr
 a later activation's command can be refused `fd_budget` meanwhile. Not built: holding back, per joined proxy, the
 descriptors its share needs.
 
-**Known flake, closed (R7, #722; root-caused 2026-11-07): a product window, not a test race.**
+**Known flake, closed (R7, #722, fixed by #727, 2026-11-07): a product window, shown sufficient by a plant.**
 `agent::bulk::tests::a_bulk_call_completes_between_two_plaintext_gateways` failed once on CI run 42371240189 (job
 128411960663, the strict `compliance,a2a` lib run, 1704 tests in parallel) with `Err(Timeout)`, and passed on isolated
 retry. `bulk_serve` (`src/agent/service_handle.rs`) spawned `bulk_serve_task`, which registered its `invoke.bulk`
 receiver as its first act — so until the runtime first ran that task, a ticket reaching the node found no receiver
 and `deliver_to_handlers` dropped it. A ticket is sent once, so the caller waited out its 10 s. The test calls
-`bulk_call` straight after `bulk_serve` returns, and under load the ticket crossed the mesh before `b`'s task was
-scheduled. Any peer that calls as soon as it learns of a provider meets the same window. Not reproduced unplanted: 0 in
-240 runs of the test at 24 parallel processes on macOS. With a 300 ms `std::thread::sleep` planted ahead of the old
-registration, both pair tests (plaintext and TLS) fail with CI's exact `Err(Timeout)`. With the same plant on the fixed
-code (the sleep at the task's start, after registration), both pass. Fixed by registering the receiver in `bulk_serve`
-before the spawn (`bulk_serve_rx`). The regression `a_ticket_sent_as_soon_as_bulk_serve_returns_is_served`
-(current-thread runtime, a self-call, so the spawned task cannot run first) failed on the unfixed code. Enumerated
-(`grep` for `signal_handlers.register*` in `src/`, `mycelium-core/src/`, `mycelium-*/src/`): two more receivers were
-registered inside a task their caller had already spawned. One is the LLM dispatch loop (`spawn_llm_dispatch_loop`,
-registered after `register_prompt_skill` had begun advertising the skill). The other is the `sys.explain` responder
-(`run_explain_responder`, registered after `start()` returned). Both are now registered before the spawn, and each has a
-regression seen failing first that probes with `register_client` (refused exactly when an in-process receiver serves
-the kind): `the_llm_invoke_receiver_exists_when_a_prompt_skill_is_registered` and
-`the_explain_receiver_exists_when_start_returns`. The companions' `rpc_rx`/`signal_rx` sites, searched the same way,
-held two more. `mycelium-guardrails`' `guarded_rpc_serve` has a self-call regression on a current-thread runtime,
-`a_call_made_as_soon_as_guarded_rpc_serve_returns_is_served`, which timed out on the unfixed code. The other is
-`mycelium-wiki`'s curator (`become_curator`): its store-access broker and bulk-ingest responder registered after the
-curator ad went out. That one is fixed the same way, with **no regression test**: the curatorship is reached only
-through an election, which yields, so a test cannot hold the window open without a plant. Three lib tests had the same
-race (a responder registering inside its spawn, `scatter.rs`, `rpc.rs` ×2) and now register before the spawn. Every
-other site registers before it spawns, or inside the function that awaits the receiver. `examples/` and the crates'
-`tests/` directories were not searched. After the fix, 0 in 240 runs of the whole `agent::bulk` module at 24 parallel
-processes.
+`bulk_call` straight after `bulk_serve` returns, and any peer that calls as soon as it learns of a provider meets the
+same window. **What is shown and what is not:** CI's log does not show the ticket arriving before the task ran — the
+run records no tracing for it. The window is shown to be *sufficient* for CI's failure, not observed causing it: not
+reproduced unplanted (0 in 240 runs of the test at 24 parallel processes on macOS); with a 300 ms
+`std::thread::sleep` planted ahead of the old registration, both pair tests (plaintext and TLS) fail with CI's exact
+`Err(Timeout)`, and with the same plant on the fixed code (the sleep at the task's start, after registration) both
+pass. Fixed by registering the receiver in `bulk_serve` before the spawn (`bulk_serve_rx`). The regression
+`a_ticket_sent_as_soon_as_bulk_serve_returns_is_served` (current-thread runtime, a self-call, so the spawned task
+cannot run first) failed on the unfixed code.
+
+Enumerated (`grep` for `signal_handlers.register*`, `rpc_rx` and `signal_rx` in `src/`, `mycelium-core/src/`,
+`mycelium-*/src/`, `examples/` and every `tests/`), and fixed the same way — each receiver now registered before its
+task is spawned **and before the capability that names it is advertised**:
+- the LLM dispatch loop (`spawn_llm_dispatch_loop`), which registered inside the task it spawned, after
+  `register_prompt_skill` had already handed the skill's ad to its persist task. The receiver is registered before the
+  spawn, and the ad is now the last of the registration's steps. Two regressions, each seen failing first:
+  `the_llm_invoke_receiver_exists_when_a_prompt_skill_is_registered` (a `register_client` probe, refused exactly when
+  an in-process receiver serves the kind) and `the_llm_invoke_receiver_exists_before_the_skill_is_advertised` (the same
+  probe from a test-only hook run as the ad is handed off, `capability_handle::on_advertise`; `[false]` on the old order);
+- the `sys.explain` responder (`run_explain_responder`), which registered inside a task `start()` spawned: probe
+  regression `the_explain_receiver_exists_when_start_returns`, seen failing first;
+- `mycelium-guardrails`' `guarded_rpc_serve`: self-call regression
+  `a_call_made_as_soon_as_guarded_rpc_serve_returns_is_served`, which timed out on the unfixed code;
+- `mycelium-wiki`'s curator (`become_curator`): the store-access broker's and bulk-ingest responder's receivers are
+  registered before the curator ad. **No regression test**: the curatorship is reached only through an election, which
+  yields, so a test cannot hold the window open without a plant;
+- the `skillrunner` binary: `skill.invoke` is registered before the skill is advertised and handed to
+  `SkillRunner::run` (it registered inside `run()`, after the ad). No regression test (a binary);
+- `examples/three_node_demo.rs`'s `echo-scatter` responder, the one such site in `examples/` or any `tests/`;
+- three lib-test responders (`scatter.rs`, `rpc.rs` ×2).
+
+Every other site registers before it spawns, or inside the function that awaits the receiver. After the fix, 0 in 240
+runs of the whole `agent::bulk` module at 24 parallel processes.
 
 **Known flakes, open (seen during the v2.36.0 work, 2026-10-19; not yet investigated):**
 - `overlay_consistent::tests::distributed_lock_grants_single_holder_under_race` — 0 winners (a liveness timeout), never
