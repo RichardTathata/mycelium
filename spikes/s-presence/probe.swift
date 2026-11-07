@@ -93,7 +93,7 @@ for (k, t) in [(k3, tag), (k4, tag4)] {
     if t == tag { q[kSecUseDataProtectionKeychain as String] = true }
     var item: CFTypeRef?
     let st = SecItemCopyMatching(q as CFDictionary, &item)
-    out("probe[\(t.hasSuffix(tag4.suffix(8)) ? 4 : 3)].lookup", st)
+    out("probe[\(t == tag ? 3 : 4)].lookup", st)
     if st == errSecSuccess {
         let key = item as! SecKey
         var e: Unmanaged<CFError>?

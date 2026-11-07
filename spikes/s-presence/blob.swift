@@ -51,7 +51,8 @@ case "tamper":
     do {
         var blob = try Data(contentsOf: URL(fileURLWithPath: path))
         blob[blob.count / 2] ^= 0xff
-        let k = try SecureEnclave.P256.Signing.PrivateKey(dataRepresentation: blob)
+        let ctx = LAContext(); ctx.interactionNotAllowed = true   // never prompts, whatever key the blob holds
+        let k = try SecureEnclave.P256.Signing.PrivateKey(dataRepresentation: blob, authenticationContext: ctx)
         out("tampered_blob_construct", "accepted (validation is deferred)")
         do { _ = try k.signature(for: msg); out("tampered_blob_sign", "SIGNED (defect)") }
         catch { out("tampered_blob_sign", "refused: \(error)") }
