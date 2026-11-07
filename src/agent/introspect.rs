@@ -200,6 +200,7 @@ impl GossipAgent {
                 self.kv_state.individual_flood_fallbacks.load(Ordering::Relaxed),
             task_count:           self.task_handles_lock().len(),
             active_bulk_handlers: self.task_ctx.bulk_transport.active_handlers.load(Ordering::Relaxed),
+            bulk_fetches_refused: self.task_ctx.bulk_transport.fetches_refused.load(Ordering::Relaxed),
             commit_conflicts:     self.task_ctx.commit_conflicts.load(Ordering::Relaxed),
             consensus_decided_floor_anomalies:
                 self.task_ctx.decided_floor_anomaly_slots.pin().len() as u64

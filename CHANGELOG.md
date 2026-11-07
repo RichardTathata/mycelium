@@ -74,6 +74,27 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   component per open, at start or when a companion opens its log — about a millisecond each on an idle disk, far more
   on a busy one (`F_FULLFSYNC` on macOS) — and on no request path. Upgrade note: `docs/guide/deprecations.md` §79.
 
+- **A bulk call works under native gateway TLS, and a bulk payload is bounded** (external review 2026-10-31 F6, plan
+  row R7; `docs/guide/deprecations.md` §80). A caller whose gateway serves TLS now marks its `invoke.bulk` ticket
+  `https`, and the responder fetches the staged payload over TLS, verifying the caller's gateway certificate by its IP
+  address against the fleet CA (with the mesh's removal and revocation checks) or the new
+  `gateway_tls.bulk_ca_pem_path`; before, it fetched over `http://` and every such call timed out. A certificate that
+  does not verify fetches nothing, and a fetch is never retried in plaintext. A gateway on an operator certificate with
+  no `bulk_ca_pem_path` refuses `start()` by name. A plaintext caller's ticket is byte-for-byte the old layout. The new
+  `max_bulk_payload_bytes` (default 64 MiB) bounds both sides: `bulk_call` refuses a larger payload
+  (`BulkError::PayloadTooLarge`), and a responder refuses a declared `Content-Length` over it and stops reading a body
+  as soon as it passes it, where it used to collect the whole response. Also: the fetch URL brackets an IPv6 sender.
+  From the PR's review: a fetch's roots are the fleet CA **and** `bulk_ca_pem_path`, so a mixed fleet verifies both;
+  `start()` also refuses an operator certificate that does not verify against `bulk_ca_pem_path` for the node's own IP;
+  a status other than 2xx is not a payload; every refusal is counted (`SystemStats::bulk_fetches_refused`,
+  `mycelium_bulk_fetches_refused_total{reason}`); the `https` fetch client pools no connections, so each fetch is a
+  fresh, revocation-checked handshake; and the node-cert gateway presents the current identity at every handshake, so
+  after `rotate_identity` it serves the new certificate (it kept the start-time one until a restart). A
+  `BulkError::Timeout` can be permanent — the docs say so. From its second round: an operator certificate issued by the
+  fleet CA that is not a mesh certificate refuses `start()` (every fetch from it would have been refused); the bulk
+  clients resume no TLS session and ignore environment proxies. **Not built:** an integrity check on the payload beyond
+  TLS; the fetch target is still the caller's address; a typed refusal reported back; a plaintext gateway still carries
+  bulk in the clear, and a TLS-terminating proxy in front of one is bypassed for bulk.
 - **A replica-sync answer no longer reports a record persisted while it sits between its apply and its append**
   (external review 2026-10-31, F3; `docs/plans/external-review-2026-10-31.md` R8, decision D3). The receive path
   applies an inbound record to the store and then hands it to the WAL. A `sys.replica-sync.v1` query landing between

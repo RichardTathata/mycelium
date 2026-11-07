@@ -2431,6 +2431,60 @@ these opens use, for an embedder's own log.
 — is not observable without a filesystem fault adapter. The tests pin the order of the syncs and that each runs on a
 real directory.
 
+## 80. A bulk call works under `gateway_tls`; an operator certificate needs `bulk_ca_pem_path` that verifies it; `max_bulk_payload_bytes` bounds a payload (unreleased, external review 2026-10-31, R7)
+
+**What changed.** A `bulk_call` between nodes whose gateways serve TLS used to time out: the responder fetched the
+staged payload over `http://` from a listener that speaks only TLS (F6). Now a caller whose gateway serves TLS marks its
+ticket `https`, and the responder fetches over TLS, verifying the caller's gateway certificate by the caller's IP
+address against the union of the fleet CA (with the mesh's removal and revocation checks) and
+`gateway_tls.bulk_ca_pem_path`. A fetch whose certificate does not verify fetches nothing; it is never retried in
+plaintext. A caller with a plaintext gateway sends the same ticket bytes it sent before. A new
+`GossipConfig::max_bulk_payload_bytes` (default 64 MiB, env `GOSSIP_MAX_BULK_PAYLOAD_BYTES`) bounds the payload:
+`bulk_call` refuses a larger one with the new `BulkError::PayloadTooLarge`, and a responder refuses a declared
+`Content-Length` over it and abandons a body as soon as it passes it, where it used to collect the whole response. A
+responder also refuses a status other than 2xx (a redirect, a `204`), whose body it used to hand the handler as the
+payload. Every refusal is counted: `SystemStats::bulk_fetches_refused` (a new field) and
+`mycelium_bulk_fetches_refused_total{reason}`. The node-cert gateway now presents the current identity at every
+handshake, so after `rotate_identity` it serves the new certificate at once (it used to keep the start-time one until a
+restart, which a bulk fetch refuses once the old key is revoked).
+
+**Who is affected.**
+- A node that serves a gateway (`http_port` set) on an **operator certificate** (`gateway_tls.cert_pem_path` set):
+  `start()` now refuses with `InvalidField { field: "gateway_tls.bulk_ca_pem_path" }` unless `bulk_ca_pem_path`
+  names a CA **and the node's own certificate verifies against it for the node's own IP address** — even on a node that
+  makes no bulk call, because it cannot know whether a peer will fetch from it. Each operator certificate must carry
+  its node's IP SAN. An operator certificate issued by the **fleet** CA is refused too unless it is a mesh certificate
+  (an Ed25519 identity key): a responder judges it by the mesh's check, which would refuse every fetch from it. A node
+  without `http_port` is unaffected (its gateway table is ignored).
+- A fleet mixing node-cert and operator-cert gateways: every node that fetches from an operator-cert gateway sets
+  `bulk_ca_pem_path` to that CA (on a node-cert node, beside the default fields). A node without `gateway_tls` has no
+  place to name it and trusts only the fleet CA, so it cannot fetch from an operator-cert gateway — it refuses, logs and
+  counts each such ticket, and the caller times out. Setting `gateway_tls` on it to name the CA also makes its own
+  tickets `https`; a trust setting apart from the node's own gateway is not built.
+- A bulk fetch is one TCP connection and one full TLS handshake (no pooling, no resumption), and both bulk fetch
+  clients ignore `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` — a deployment that routed bulk through a proxy by the
+  environment now goes direct.
+- A rolling upgrade under `gateway_tls`: a responder older than this release drops an `https` ticket (its kind reads as
+  invalid UTF-8), so a bulk call from an upgraded caller to an older responder times out — as every such call did
+  before. Upgrade the responders, or the whole fleet; a plaintext fleet is unaffected.
+- A bulk payload over 64 MiB: raise `max_bulk_payload_bytes` on **both** the caller and the responder. A responder
+  holds up to this much per in-flight fetch, and keeps it while the handler runs; while `max_concurrent_bulk_handlers`
+  (64) is non-zero that bounds the total, and at `0` (unlimited) nothing does.
+- A `BulkError::Timeout` can now be permanent: a responder that refuses the fetch sends nothing back. Do not retry it
+  blindly; read the responder's `bulk_fetches_refused` and its log (`docs/guide/error-handling.md`).
+- Code that matches `BulkError` exhaustively: it is `#[non_exhaustive]`, so a `_` arm already covers
+  `PayloadTooLarge`. Code that builds a `GatewayTlsConfig` with an exhaustive struct literal: add
+  `bulk_ca_pem_path` or `..Default::default()`. `GossipConfig` gained `max_bulk_payload_bytes` and `SystemStats`
+  gained `bulk_fetches_refused` (an exhaustive literal or destructure breaks; the `Default`-and-assign pattern is
+  unaffected).
+
+**Not built.** An integrity check on the payload beyond TLS (no per-payload signature); the fetch target is still the
+address the caller's frames came from; a typed refusal reported back to the caller (a new reply on the wire). A
+plaintext gateway still carries bulk payloads in the clear, and a TLS-terminating proxy in front of a plaintext gateway
+is bypassed for bulk — the ticket says `http` and names the gateway's own port ([gateway-tls.md](../operations/gateway-tls.md)).
+An application serving `/bulk/{id}` from its own server (`ServiceHandle::set_bulk_serving_port`) advertises the scheme
+`gateway_tls` implies unless it calls the new `ServiceHandle::set_bulk_serving_https`.
+
 ## 81. A replica-sync answer is `Failed` while an inbound record is between its apply and its append; `WalHandle` gained `begin_inbound` and `inbound_in_flight` (unreleased, external review 2026-10-31, R8)
 
 A peer asked whether it holds a record (`sys.replica-sync.v1`, behind `set_with_replica_sync`, `POST /gateway/kv` with

@@ -38,7 +38,7 @@ async fn a_tls_table_this_build_cannot_enforce_refuses_to_start() {
             "tls" => cfg.tls = Some(TlsConfig { auto_cert_dir: std::env::temp_dir().join(format!("tls-{port}")), ..Default::default() }),
             _ => {
                 cfg.http_port = Some(free_port());
-                cfg.gateway_tls = Some(GatewayTlsConfig { cert_pem_path: Some("c.pem".into()), key_pem_path: Some("k.pem".into()) });
+                cfg.gateway_tls = Some(GatewayTlsConfig { cert_pem_path: Some("c.pem".into()), key_pem_path: Some("k.pem".into()), ..Default::default() });
             }
         }
         let agent = GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg);

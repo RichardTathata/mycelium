@@ -144,7 +144,18 @@ impl ServiceHandle {
     /// Sends a large payload to `target` via HTTP staging rather than the signal mesh.
     ///
     /// Stages the payload locally and sends a lightweight ticket over the mesh;
-    /// the target fetches the actual bytes directly from this node's HTTP server.
+    /// the target fetches the actual bytes directly from this node's HTTP server (over `https` when
+    /// this node's gateway serves TLS, verified by this node's IP address).
+    ///
+    /// # Errors
+    ///
+    /// - [`BulkError::NoHttpPort`] — this node serves no `/bulk/{id}`.
+    /// - [`BulkError::PayloadTooLarge`] — over this node's `max_bulk_payload_bytes`; nothing sent.
+    /// - [`BulkError::Timeout`] — no `bulk.result` before `timeout`. **It can be permanent:** a
+    ///   responder that refuses the fetch (a payload over *its* cap, this node's certificate not
+    ///   verifying there, no roots for an `https` ticket, a responder too old for one) sends nothing
+    ///   back, so a retry is not always right; the responder logs and counts the reason
+    ///   (`SystemStats::bulk_fetches_refused`). A typed refusal reported back is not built.
     pub async fn bulk_call(
         &self,
         target:  NodeId,
@@ -165,6 +176,14 @@ impl ServiceHandle {
     /// Overrides the HTTP port used when advertising staged bulk payloads.
     pub fn set_bulk_serving_port(&self, port: u16) {
         self.ctx.bulk_transport.set_http_port(port);
+    }
+
+    /// Whether the server behind [`set_bulk_serving_port`](Self::set_bulk_serving_port) serves
+    /// `https` (external review R7). The default follows `GossipConfig::gateway_tls`; an application
+    /// serving `/bulk/{id}` from its own TLS server sets it, and its tickets then tell the responder to
+    /// fetch over TLS, verifying the server's certificate by this node's IP address.
+    pub fn set_bulk_serving_https(&self, https: bool) {
+        self.ctx.bulk_transport.set_https(https);
     }
 
     /// Registers a handler for incoming bulk calls of a given `kind`.

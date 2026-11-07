@@ -121,6 +121,11 @@ impl Default for TlsConfig {
     }
 }
 
+/// `GossipConfig::max_bulk_payload_bytes`' default: 64 MiB.
+pub const DEFAULT_MAX_BULK_PAYLOAD_BYTES: u64 = 64 * 1024 * 1024;
+/// The largest `GossipConfig::max_bulk_payload_bytes` `validate()` accepts: 16 GiB.
+pub const MAX_BULK_PAYLOAD_BYTES_CEILING: u64 = 16 * 1024 * 1024 * 1024;
+
 /// Native TLS for the embedded HTTP **gateway** (SOC 2 audit-gap WS-A, 2026-07-22).
 ///
 /// Distinct from [`TlsConfig`], which is the mutually-authenticated **gossip** transport.
@@ -130,10 +135,14 @@ impl Default for TlsConfig {
 /// (default) to keep today's plaintext behaviour and front the gateway with a TLS-terminating
 /// proxy instead. See `docs/operations/gateway-tls.md`.
 ///
-/// Both fields `None` = **reuse the node identity cert** from [`TlsConfig`] (requires the
-/// `tls` feature and `GossipConfig::tls`). That cert carries an IP SAN, so it fits CA-pinning
-/// SDK clients and proxied setups but not hostname/browser trust; supply `cert_pem_path` +
-/// `key_pem_path` with a real hostname SAN for that.
+/// `cert_pem_path` and `key_pem_path` both `None` = **reuse the node identity cert** from
+/// [`TlsConfig`] (requires the `tls` feature and `GossipConfig::tls`); the gateway then presents the
+/// current identity at every handshake, a rotation included. That cert carries an IP SAN, so it fits
+/// CA-pinning SDK clients and proxied setups but not hostname/browser trust; supply `cert_pem_path` +
+/// `key_pem_path` with a real hostname SAN for that — read once at `start()`, not re-read (replace
+/// the files and restart to rotate an operator certificate). Three fields in all: the third,
+/// `bulk_ca_pem_path`, is the roots a bulk fetch verifies a peer's gateway with, required beside an
+/// operator certificate.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GatewayTlsConfig {
@@ -141,6 +150,17 @@ pub struct GatewayTlsConfig {
     pub cert_pem_path: Option<PathBuf>,
     /// Private key (PEM, PKCS8). Required iff `cert_pem_path` is `Some`.
     pub key_pem_path: Option<PathBuf>,
+    /// The CA certificate(s) (PEM) a **bulk fetch** trusts for a peer's gateway certificate
+    /// (external review 2026-10-31, R7). A caller whose gateway serves TLS sends an `https` ticket,
+    /// and the node that fetches the staged payload verifies the caller's gateway certificate
+    /// against these roots — by the caller's IP address, which the certificate must name. `None`
+    /// or not, the fleet CA from `[tls]` is trusted too, with the mesh's removal and revocation
+    /// checks: a fetch's roots are the union, so a fleet mixing node-cert and operator-cert gateways
+    /// verifies both (a fleet certificate the fleet check refuses is never re-tried against these).
+    /// On a node serving a gateway (`http_port` set) on an operator certificate (`cert_pem_path`),
+    /// `start()` refuses by name without it, and refuses unless the node's own certificate verifies
+    /// against it for the node's own IP address — the address peers fetch from.
+    pub bulk_ca_pem_path: Option<PathBuf>,
 }
 
 /// How the HTTP gateway identifies the **originating client** to the provider it dispatches
@@ -1360,6 +1380,20 @@ pub struct GossipConfig {
     /// Default: `64`.
     pub max_concurrent_bulk_handlers: usize,
 
+    /// The largest bulk payload this node stages as a caller or fetches as a responder, in bytes
+    /// (external review 2026-10-31, R7). A fetch is refused when the peer's `Content-Length`
+    /// exceeds it, and abandoned as soon as the bytes read exceed it when no length is sent — the
+    /// body is never collected past the cap. A `bulk_call` with a larger payload is refused before
+    /// anything is staged (`BulkError::PayloadTooLarge`). Each in-flight fetch holds up to this
+    /// much in memory, and the fetched bytes stay held while the handler runs on them; so while
+    /// `max_concurrent_bulk_handlers` is non-zero a responder's worst case is that many × this. At
+    /// `0` (unlimited, and the limit is retunable on a live node) there is no such bound.
+    ///
+    /// `validate()` refuses `0` and anything above 16 GiB. Env `GOSSIP_MAX_BULK_PAYLOAD_BYTES`.
+    ///
+    /// Default: `67_108_864` (64 MiB).
+    pub max_bulk_payload_bytes: u64,
+
     /// Maximum number of gossip frames accepted per second from a single peer.
     ///
     /// Frames that exceed this rate are silently dropped and a warning is logged.
@@ -1927,6 +1961,7 @@ impl Default for GossipConfig {
             persistence:             None,
             bulk_fetch_timeout_secs:       30,
             max_concurrent_bulk_handlers:  64,
+            max_bulk_payload_bytes:        DEFAULT_MAX_BULK_PAYLOAD_BYTES,
             max_inbound_frames_per_sec:    0,
             rate_observation_enabled:      false,
             rate_aggregate_threshold_fps:  0,
@@ -2097,6 +2132,16 @@ impl GossipConfig {
     /// Called automatically by `GossipAgent::start` and [`load_from_file`](Self::load_from_file).
     /// Call manually after mutating fields directly to catch errors early.
     pub fn validate(&self) -> Result<(), GossipError> {
+        if self.max_bulk_payload_bytes == 0 || self.max_bulk_payload_bytes > MAX_BULK_PAYLOAD_BYTES_CEILING {
+            return Err(GossipError::InvalidField {
+                field: "max_bulk_payload_bytes",
+                reason: format!(
+                    "{}: must be in 1..={MAX_BULK_PAYLOAD_BYTES_CEILING} (16 GiB): 0 would refuse every bulk call, and a \
+                     responder holds up to this much in memory per in-flight fetch",
+                    self.max_bulk_payload_bytes
+                ),
+            });
+        }
         if self.control_max_staleness_ms == 0 {
             return Err(GossipError::InvalidField {
                 field: "control_max_staleness_ms",
@@ -2636,6 +2681,9 @@ impl GossipConfig {
         }
         if let Ok(v) = env::var("GOSSIP_MAX_CONCURRENT_BULK_HANDLERS") {
             self.max_concurrent_bulk_handlers = v.parse().map_err(GossipError::Parse)?;
+        }
+        if let Ok(v) = env::var("GOSSIP_MAX_BULK_PAYLOAD_BYTES") {
+            self.max_bulk_payload_bytes = v.parse().map_err(GossipError::Parse)?;
         }
         if let Ok(v) = env::var("GOSSIP_MAX_INBOUND_FRAMES_PER_SEC") {
             self.max_inbound_frames_per_sec = v.parse().map_err(GossipError::Parse)?;
@@ -3681,6 +3729,33 @@ mod tests {
         let mut cfg = GossipConfig::default();
         cfg.apply_env_overrides().expect("apply_env_overrides must not fail");
         assert_eq!(cfg.max_seen_entries, 12345);
+    }
+
+    /// R7: the bulk payload cap is bounded at both ends and read from the environment.
+    #[test]
+    fn max_bulk_payload_bytes_is_bounded_and_env_settable() {
+        let mut cfg = GossipConfig::default();
+        assert_eq!(cfg.max_bulk_payload_bytes, DEFAULT_MAX_BULK_PAYLOAD_BYTES);
+        assert!(cfg.validate().is_ok());
+        for bad in [0, MAX_BULK_PAYLOAD_BYTES_CEILING + 1] {
+            cfg.max_bulk_payload_bytes = bad;
+            match cfg.validate() {
+                Err(GossipError::InvalidField { field: "max_bulk_payload_bytes", .. }) => {}
+                other => panic!("{bad}: expected a refusal naming max_bulk_payload_bytes, got {other:?}"),
+            }
+        }
+        cfg.max_bulk_payload_bytes = MAX_BULK_PAYLOAD_BYTES_CEILING;
+        assert!(cfg.validate().is_ok(), "the ceiling itself is accepted");
+
+        let _lock = env_test_lock();
+        let var = "GOSSIP_MAX_BULK_PAYLOAD_BYTES";
+        let _guard = EnvGuard(&_lock, var, std::env::var(var).ok());
+        set_test_env(&_lock, var, Some("1048576"));
+        let mut cfg = GossipConfig::default();
+        cfg.apply_env_overrides().expect("a number parses");
+        assert_eq!(cfg.max_bulk_payload_bytes, 1_048_576);
+        set_test_env(&_lock, var, Some("lots"));
+        assert!(GossipConfig::default().apply_env_overrides().is_err(), "a non-number is refused");
     }
 
     #[test]
