@@ -36,7 +36,7 @@ use mycelium::{GossipConfig, GatewayTlsConfig, TlsConfig};
 let mut cfg = GossipConfig::default();
 cfg.http_port = Some(9443);
 
-// (a) Reuse the node identity cert — both fields None. Requires `tls`.
+// (a) Reuse the node identity cert — all three fields None. Requires `tls`.
 cfg.tls = Some(TlsConfig::default());
 cfg.gateway_tls = Some(GatewayTlsConfig::default());
 
@@ -54,7 +54,7 @@ cfg.gateway_tls = Some(GatewayTlsConfig {
 
 | Mode | Cert used | Trust story |
 |---|---|---|
-| Both fields `None` (default) | The node identity cert (from `tls`), served with no client-cert demand | Carries an **IP SAN** only — fits **CA-pinning clients** and proxied setups, **not** hostname/browser trust. Requires `GossipConfig::tls` (else startup errors). Rotates automatically with the node identity (hot cert rotation). |
+| `cert_pem_path` and `key_pem_path` `None` (default; `bulk_ca_pem_path` optional, operator roots a bulk fetch trusts beside the fleet CA) | The node identity cert (from `tls`), served with no client-cert demand | Carries an **IP SAN** only — fits **CA-pinning clients** and proxied setups, **not** hostname/browser trust. Requires `GossipConfig::tls` (else startup errors). Rotates automatically with the node identity (hot cert rotation). |
 | `cert_pem_path` + `key_pem_path` | Your PEM cert chain + PKCS8 key | Use a cert with a real **DNS SAN** for browser/hostname clients. Both fields must be set together. You own its rotation. |
 
 **Feature gate.** Native gateway TLS needs the `tls` feature (which `compliance` implies). A

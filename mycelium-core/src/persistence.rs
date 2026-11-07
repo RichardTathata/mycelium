@@ -2058,10 +2058,11 @@ mod durability_tests {
         std::fs::remove_dir_all(&dir).ok(); std::fs::remove_dir_all(&dir2).ok();
     }
 
-    /// R6 (external review 2026-10-31 F7): `create_dir_all_synced` syncs the directory holding each
-    /// one it creates, outermost first, on a real directory tree; an existing directory syncs
-    /// nothing; and a sync that cannot run is an error, not a skip. The callers' ordering witnesses
-    /// (the journal's and both companions') pin that the syncs precede the first record.
+    /// R6 (external review 2026-10-31 F7): `create_dir_all_synced` syncs the holder of every directory
+    /// on the path, outermost first, on a real directory tree — the ones it creates and the ones that
+    /// already exist, every call; a missing directory or a file in the path is an error, not a skip. The
+    /// callers' ordering witnesses (the journal's and both companions') pin that the syncs precede the
+    /// first record.
     /// #718's review, findings 2 and 4: a directory that already exists — left by an open whose
     /// sync failed, or created by a concurrent opener that has not synced it yet — is synced in its
     /// holder too, on every call. On the code before the fix an existing `a/b` synced nothing.
