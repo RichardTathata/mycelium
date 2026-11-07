@@ -1,4 +1,4 @@
-Run the **independent adversarial review** of a pull request — rule 4 of the verification policy
+Run the **independent adversarial review** of a pull request — rule 4 of the verification policy, and the reviewer's half of rule 5
 (`CLAUDE.md` § Verification policy; `docs/wiki/dev/testing/verification-policy.md`). The argument is a PR
 number or a branch; with none, the current branch against `main`.
 
@@ -39,6 +39,19 @@ it reads the diff and the code. Tell it its final message *is* the report.
 6. **Break it.** Try at least three concrete inputs or sequences the author did not test — boundary values,
    the empty case, a concurrent or repeated call, the build without the feature, a restart in the middle — and
    say what happens, from the code or by running it.
+7. **The feature page** (rule 5). If the diff adds or changes a feature, find its entry in
+   `docs/features/registry.toml` and its page under `docs/features/`. The obligation: the PR adds or updates both,
+   with two exceptions it must state — why the change leaves the page true, or that the entry is at
+   `page = "todo"` and predates the close of `docs/plans/feature-pages.md`'s row F3 (after F3 closes, a new feature
+   lands with its page in the same PR). A missing update without a stated exception is a finding, and so is a
+   stated exception that does not hold. Read the page against the code: a *What it is*, *Turn it on* or *What it
+   guarantees* the change has made untrue is a finding. `scripts/check-feature-pages.py` covers only ids from its
+   seven sources (`SOURCES` in the script: glossary concepts, guarantee and rule catalogue ids, unit-file keys, Cargo
+   features, companion-registered guarantees, workspace crates) and checks only that a page's links, settings and
+   tests exist. **A configuration field, an HTTP route or an SDK verb has no id**, so you are the only check: find
+   the feature it belongs to through its concept or crate id in the registry and check that page covers it, or
+   report that no page does. Before F3 closes, a field, route or verb whose feature is at `page = "todo"` or
+   belongs to no feature is reported but is not a blocking finding; after F3 closes, it is a finding.
 
 ## The report and what to do with it
 

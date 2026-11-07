@@ -162,8 +162,9 @@ future contributor needs so they don't re-litigate a settled choice — lives he
 
 [`external-review-2026-10-31.md`](external-review-2026-10-31.md) — **the external code security review of 2026-10-31** (agreed with the maintainer 2026-10-31, rev 0.8; nine rows, R1–R4 released in v2.39.0 — #714, #713, #712 — and R5–R9 delivered on `main`, unreleased — #719, #718, #722, #720, #721, closed on evidence in §5): the review's seven findings, all verified true at `d656f50c` — three contradict a claim the repository makes — plus the two the verification added (the grant restart gate proves the exit snapshot, not the WAL; the audit warnings are accepted nowhere in the open); R1–R4 before the next MINOR (done, v2.39.0); the rest after it (done, on `main`). The review itself is vendored at [`external/2026-10-31-code-security-review.md`](external/2026-10-31-code-security-review.md).
 
-[`feature-pages.md`](feature-pages.md) — **feature pages** (proposed, rev 0.2; agreed with the maintainer
-2026-10-19, not started; begins after v2.36.0). One short page per feature: what it is, when to use it, the settings
+[`feature-pages.md`](feature-pages.md) — **feature pages** (in progress, rev 0.7; agreed with the maintainer
+2026-10-19; F1 delivered #654, F2 #655, F4's fifth rule and `/doc-coverage` pass written 2026-11-07; open: F3's
+remaining pages, then the pass run once). One short page per feature: what it is, when to use it, the settings
 that turn it on, its example, its guarantees and *not built* items, and links to the guide, runbook, design and
 code. Kept true by a CI gate over a checked-in feature registry, a pass in `/doc-coverage`, and a fifth
 verification-policy rule.
