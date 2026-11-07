@@ -1005,12 +1005,14 @@ pub(crate) async fn ae_decide(
             if let Some(p) = &presented {
                 super::gateway_authority::feed_grant_checkpoint(ctx, authority, &p.grant.mandate, now_ms);
             }
-            authority.assess(
+            let local = presented.as_ref().and_then(|p| super::gateway_authority::local_call_checkpoint(ctx, &p.grant.mandate));
+            authority.assess_with_local(
                 &actor,
                 operation,
                 resource,
                 &arguments_digest,
                 presented.as_ref(),
+                local.as_ref(),
                 now_ms,
                 &super::gateway_member_keys(ctx),
             )

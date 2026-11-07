@@ -1145,17 +1145,25 @@ async fn spike_s_cancel_end_to_end_over_two_nodes() {
     let knows = |x: &GossipAgent, n: &NodeId| x.task_ctx.peer_keys.pin().get(n).is_some_and(|k| !k.is_empty());
     assert!(until(|| knows(&a, b.node_id()) && knows(&b, a.node_id()), Duration::from_secs(15)).await, "keys learned");
 
-    // Gossip latency A → B for one KV write, twenty samples: what a bounded wait for a checkpoint would cost.
+    // Gossip latency A → B for one KV write (review H1): B subscribes to the key before A writes it, and the sample is
+    // the time from A's `set` returning to B's subscription waking — no poll interval in the measurement (the wake is
+    // a tokio task's, resolution µs). 100 samples, 300 B values.
+    let pctl = |v: &mut Vec<f64>| { v.sort_by(|x, y| x.partial_cmp(y).unwrap()); (v[0], v[v.len() / 2], v[v.len() * 95 / 100], v[v.len() - 1]) };
     let mut gossip_ms = Vec::new();
-    for i in 0..20 {
+    for i in 0..100 {
         let key = format!("spike/lat/{i}");
-        let t = std::time::Instant::now();
+        let mut rx = b.kv().subscribe_prefix(key.clone());
+        rx.borrow_and_update();
         a.kv().set(key.clone(), vec![1u8; 300]);
-        assert!(until(|| mycelium_core::ops::kv_get(&b.task_ctx, &key).is_some(), Duration::from_secs(10)).await);
+        let t = std::time::Instant::now();
+        loop {
+            tokio::time::timeout(Duration::from_secs(10), rx.changed()).await.expect("visible at B").unwrap();
+            if mycelium_core::ops::kv_get(&b.task_ctx, &key).is_some() { break; }
+        }
         gossip_ms.push(t.elapsed().as_secs_f64() * 1e3);
     }
-    gossip_ms.sort_by(|x, y| x.partial_cmp(y).unwrap());
-    println!("S6 gossip A→B, 20 writes (ms): min {:.1} p50 {:.1} max {:.1}", gossip_ms[0], gossip_ms[10], gossip_ms[19]);
+    let (g0, g50, g95, gmax) = pctl(&mut gossip_ms);
+    println!("S6 gossip A→B, n=100 writes, timed by B's subscription waking (ms): min {g0:.2} p50 {g50:.2} p95 {g95:.2} max {gmax:.2}");
 
     let key = a.task_ctx.tls.get().unwrap().signing_key();
     let resource = format!("tool:deploy@{}", b.node_id());
@@ -1184,12 +1192,18 @@ async fn spike_s_cancel_end_to_end_over_two_nodes() {
     let authority_b = Arc::clone(b.task_ctx.execution_authority.get().unwrap());
     let payload = serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "deploy", "arguments": args}}).to_string();
 
-    for (id, carry) in [("cx1", true), ("cx0", false)] {
+    // The carried call twenty times (cx0..cx19), then the uncarried call once (nx0). Registration polled every 1 ms
+    // (review H1: the resolution is stated, not the old 25 ms poll).
+    let (mut reg_samples, mut stop_samples) = (Vec::new(), Vec::new());
+    let runs: Vec<(String, bool)> = (0..20).map(|i| (format!("cx{i}"), true)).chain([("nx0".to_string(), false)]).collect();
+    for (id, carry) in runs {
+        let id = id.as_str();
         let (mandate, revoking) = mint(id, carry);
         let (a2, target, pl, res, m2) = (Arc::clone(&a), b.node_id().clone(), payload.clone(), resource.clone(), mandate.clone());
         let sent = std::time::Instant::now();
         let call = tokio::spawn(async move { a2.service().rpc_call_with_mandate(target, "mcp.invoke", pl.into_bytes(), &m2, &res, Duration::from_secs(10)).await });
-        let registered = until(|| authority_b.running_count() == 1, Duration::from_millis(2_000)).await;
+        let ab = Arc::clone(&authority_b);
+        let registered = poll_1ms(move || ab.running_count() == 1, Duration::from_millis(2_000)).await;
         let reg_ms = sent.elapsed().as_secs_f64() * 1e3;
         assert!(!scan_kv_prefix_has(&b, &format!("{CALL_SCOPE_PREFIX}{id}")), "no checkpoint for the call is in B's KV");
         // A revokes: the revoking checkpoint where a grant's travels, gossiped to B, fed to B's authority by its feeder.
@@ -1197,8 +1211,9 @@ async fn spike_s_cancel_end_to_end_over_two_nodes() {
         a.kv().set(format!("grant/{a_principal}/{id}/checkpoint"), serde_json::to_vec(&revoking).unwrap());
         let reply = call.await.unwrap();
         let stop_ms = revoked_at.elapsed().as_secs_f64() * 1e3;
+        if carry { reg_samples.push(reg_ms); stop_samples.push(stop_ms); }
         let text = match &reply { Ok(b) => String::from_utf8_lossy(b).into_owned(), Err(e) => e.to_string() };
-        println!("S7 carry={carry}: registered at B={registered} ({reg_ms:.1} ms after send); revocation → call ended {stop_ms:.1} ms later; ran_b={}; reply: {}", ran_b.load(Ordering::SeqCst), &text[..text.len().min(160)]);
+        if !carry || id == "cx0" { println!("S7 carry={carry}: registered at B={registered} ({reg_ms:.1} ms after send); revocation → call ended {stop_ms:.1} ms later; ran_b={}; reply: {}", ran_b.load(Ordering::SeqCst), &text[..text.len().min(160)]); }
         if carry {
             assert!(registered, "the carried checkpoint established the mandate at B and the work was registered");
             assert!(stop_ms < 2_500.0, "stopped by the revocation, not run to completion: {stop_ms} ms");
@@ -1206,8 +1221,11 @@ async fn spike_s_cancel_end_to_end_over_two_nodes() {
         } else {
             assert!(!registered, "without the checkpoint B could not establish the mandate, so nothing was registered");
         }
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        tokio::time::sleep(Duration::from_millis(150)).await;
     }
+    let (r0, r50, r95, rmax) = pctl(&mut reg_samples);
+    let (s0, s50, s95, smax) = pctl(&mut stop_samples);
+    println!("S7 carried, n={} (ms, 1 ms poll): send → registered at B min {r0:.1} p50 {r50:.1} p95 {r95:.1} max {rmax:.1}; revoking write → call ended min {s0:.1} p50 {s50:.1} p95 {s95:.1} max {smax:.1} (sweep {} ms)", reg_samples.len(), authority_b.sweep_interval_ms());
     println!("S7 tool completions at B: {} (the uncarried call ran to completion)", ran_b.load(Ordering::SeqCst));
     a.shutdown().await;
     b.shutdown().await;
@@ -1217,4 +1235,80 @@ async fn spike_s_cancel_end_to_end_over_two_nodes() {
 /// Is any key in `n`'s KV containing `needle`?
 fn scan_kv_prefix_has(n: &GossipAgent, needle: &str) -> bool {
     crate::store::scan_kv_prefix(&n.task_ctx.kv_state, "").iter().any(|(k, _)| k.contains(needle))
+}
+
+/// SPIKE S-cancel, review H2: **does reclamation hold with the feeder running?** One node B, its feeder live; N `call:`
+/// checkpoints (signed by B, so they verify) land in B's KV under the key family the feeder watches, as gossip would
+/// put them; B assesses **none** of those calls. Then one call B *does* assess, reclaimed past its window, and the
+/// feeder woken again. Prints the view's sizes at each step. Run with `--nocapture --test-threads=1`.
+#[tokio::test]
+async fn spike_s_cancel_reclamation_with_the_feeder_running() {
+    use crate::mandate::authority::{RevocationCheckpoint, SignedRevocationCheckpoint};
+    use crate::mandate::grant::CALL_SCOPE_PREFIX;
+    use crate::mandate::TermId;
+    const N: usize = 2_000;
+    let (b, _jb, _ran) = node_with(alloc_port(), Opts { fleet_grants: true, ..Opts::default() }).await;
+    let issuer = crate::agent::gateway_caller::node_principal(b.node_id());
+    let key = b.task_ctx.tls.get().unwrap().signing_key();
+    let authority = Arc::clone(b.task_ctx.execution_authority.get().unwrap());
+    let cp = |id: &str, seq: u64, revoked: &[&str]| {
+        let c = RevocationCheckpoint { authority: PrincipalId::new(&issuer).unwrap(), scope: format!("{CALL_SCOPE_PREFIX}{id}"), seq,
+            issued_at_ms: b.task_ctx.hlc.decision_now_ms(), revoked: revoked.iter().map(|t| TermId::new(t).unwrap()).collect() };
+        SignedRevocationCheckpoint { signature: mycelium_core::tls::sign_bytes(&key, &c.canonical_bytes()).to_vec(), checkpoint: c }
+    };
+    let before = authority.view_sizes();
+    for i in 0..N {
+        let id = format!("fleet{i}");
+        let revoked: Vec<&str> = if i % 2 == 0 { vec![id.as_str()] } else { vec![] };
+        b.kv().set(format!("grant/{issuer}/{id}/checkpoint"), serde_json::to_vec(&cp(&id, 1 + (i % 2) as u64, &revoked)).unwrap());
+    }
+    // The feeder runs on each checkpoint write; wait for it to settle.
+    let settled = until(|| authority.view_sizes().0 >= before.0 + N || authority.view_sizes() == before, Duration::from_secs(20)).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let fed = authority.view_sizes();
+    // Every window long past: a sweep at the far future reclaims whatever it can.
+    let far = b.task_ctx.hlc.decision_now_ms() + 10_000_000_000;
+    authority.sweep(far);
+    let swept = authority.view_sizes();
+    println!("H2 feeder, {N} fleet calls this node assessed none of: before {before:?}; after the feeder {fed:?} (settled={settled}); after a far-future sweep {swept:?}");
+    // One call this node does admit: assessed with its checkpoint carried (so it gets a window), its checkpoint also
+    // in the KV; reclaimed past its window; then the feeder woken by another write.
+    let own = cp("own1", 1, &[]);
+    {
+        use crate::agent::gateway_authority::{mandate_operation, possession_request, PresentedMandate};
+        use crate::mandate::grant::{possession_message, SignedMandateGrant};
+        use base64::Engine as _;
+        let (op, res, digest) = ("tools/call", "tool:deploy@x", [3u8; 32]);
+        let now = b.task_ctx.hlc.decision_now_ms();
+        let m = crate::mandate::Mandate {
+            holder: PrincipalId::new(&issuer).unwrap(), established_by: PrincipalId::new(&issuer).unwrap(), purpose: "own".into(),
+            scope: format!("{CALL_SCOPE_PREFIX}own1"), operations: vec![mandate_operation(op, res)], epoch: 1,
+            term: TermId::new("own1").unwrap(), valid_from_ms: now, valid_until_ms: now + 60_000,
+        };
+        let grant = SignedMandateGrant { signature: mycelium_core::tls::sign_bytes(&key, &m.canonical_bytes()).to_vec(), mandate: m };
+        let proof = mycelium_core::tls::sign_bytes(&key, &possession_message(&grant.mandate, &possession_request(op, res, &digest)));
+        let p = PresentedMandate { grant, possession: base64::engine::general_purpose::STANDARD.encode(proof), checkpoint: Some(own.clone()) };
+        let a = authority.assess(&issuer, op, res, &digest, Some(&p), now, &crate::agent::gateway_member_keys(&b.task_ctx));
+        println!("H2 own call assessed: {:?}; sizes {:?}", a.binding.map(|x| x.state), authority.view_sizes());
+    }
+    b.kv().set(format!("grant/{issuer}/own1/checkpoint"), serde_json::to_vec(&own).unwrap());
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    authority.sweep(far);
+    let after_own = authority.view_sizes();
+    b.kv().set(format!("grant/{issuer}/wake/checkpoint"), serde_json::to_vec(&cp("wake", 1, &[])).unwrap());
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    authority.sweep(far);
+    let after_wake = authority.view_sizes();
+    println!("H2 own call: after its reclaiming sweep {after_own:?}; after the feeder is woken again and another sweep {after_wake:?}");
+    b.shutdown().await;
+}
+
+/// SPIKE S-cancel: `cond` polled every 1 ms until `within` (review H1: the resolution stated).
+async fn poll_1ms(cond: impl Fn() -> bool, within: Duration) -> bool {
+    let deadline = std::time::Instant::now() + within;
+    while std::time::Instant::now() < deadline {
+        if cond() { return true; }
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    cond()
 }
