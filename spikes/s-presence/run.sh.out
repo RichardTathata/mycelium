@@ -1,4 +1,4 @@
-# commit 3bdb8b0c (clean)
+# commit 13b574ff (clean)
 # machine state
 $ sw_vers
 ProductName:		macOS
@@ -8,6 +8,14 @@ exit=0
 
 $ uname -m
 arm64
+exit=0
+
+$ sysctl -n machdep.cpu.brand_string
+Apple M2 Max
+exit=0
+
+$ xcode-select -p
+/Library/Developer/CommandLineTools
 exit=0
 
 $ security find-identity -v -p codesigning
@@ -59,52 +67,52 @@ $ ./probe
 1.create_ephemeral_no_presence	ok
 1.token_id	com.apple.setoken
 1.token_is_secure_enclave	true
-1.sign	ok len=71
-1.pub_x963_hex	04884051f0cff52a858dfa61890a87396947fdb7003a9e030e955aea061e08990a979553cc59f501e3065d54cdecafdf7e9815739ff939e7ec1edaefeaf3c88134
-1.sig_der_hex	304502210099a96968a020ec90fc9de163d88ccff0dde54f5f222642f72d46fa2e9d898c94022012a186ed553ee8d09cf698496fc08c2383a657897110979e0f53bd6e2031a4ac
+1.sign	ok len=72
+1.pub_x963_hex	044d856894429f31c74714b106d721a9752ef288ccdd30fb043f71c7068d93d4b51a4ee719d785317c01b50326a1e437e7c9f0b49b113ef911604a6369ee5fa201
+1.sig_der_hex	3046022100b4e3e4ef462755ab2aea2af77b24f5fb6723897142018ffa444559179497e6b5022100c31d8290169bb221982f04fc45e249914c0a618f2f926314eaa1238f9cb19d61
 1.msg_hex	6d7963656c69756d207370696b6520732d70726573656e6365
 2.create_ephemeral_biometryCurrentSet	ok
 2.token_id	com.apple.setoken
 2.sign_noninteractive	FAILED (expected): com.apple.LocalAuthentication -1004 User interaction required.
 2.canEvaluate_biometry	true
-3.create_permanent_dataprotection_biometryCurrentSet	NSOSStatusErrorDomain -34018 The operation couldn’t be completed. (OSStatus error -34018 - failed to add key to keychain: <SecKeyRef:('com.apple.setoken') 0x95c8001c0>)
-4.create_permanent_legacy_biometryCurrentSet	NSOSStatusErrorDomain -34018 The operation couldn’t be completed. (OSStatus error -34018 - failed to add key to keychain: <SecKeyRef:('com.apple.setoken') 0x95c8001c0>)
+3.create_permanent_dataprotection_biometryCurrentSet	NSOSStatusErrorDomain -34018 The operation couldn’t be completed. (OSStatus error -34018 - failed to add key to keychain: <SecKeyRef:('com.apple.setoken') 0x7b2c58e40>)
+4.create_permanent_legacy_biometryCurrentSet	NSOSStatusErrorDomain -34018 The operation couldn’t be completed. (OSStatus error -34018 - failed to add key to keychain: <SecKeyRef:('com.apple.setoken') 0x7b2c59040>)
 exit=0
 
 # blob (CryptoKit)
-$ ./blob create /private/tmp/claude-501/-Volumes-Scratch-Mycelium/6b355905-6f39-41c8-91a7-4d842c4aadde/scratchpad/s-presence/run4/k.blob
+$ ./blob create /private/tmp/claude-501/-Volumes-Scratch-Mycelium/6b355905-6f39-41c8-91a7-4d842c4aadde/scratchpad/s-presence/run6/k.blob
 se.isAvailable	true
 create	ok blob_len=569
-pub_x963_hex	047515429553df9b5aa89bc181f02b59cd8f09f7cb2396bee6bbe3b5aa2139769c09d50b06b954a037459482ca09d82df1c2dfbb449a9894984a69b2dac980b291
+pub_x963_hex	04c2e7ac3a17798751ca73f799d14324471c29530ff89006ad06bc8042a2e092141618a4bc5facbcea38e1daad9999ac875fd4d3cc98f13248687078fa1bbfdfe5
 exit=0
 
-$ stat -f %N mode=%Sp size=%z owner=%Su /private/tmp/claude-501/-Volumes-Scratch-Mycelium/6b355905-6f39-41c8-91a7-4d842c4aadde/scratchpad/s-presence/run4/k.blob
-/private/tmp/claude-501/-Volumes-Scratch-Mycelium/6b355905-6f39-41c8-91a7-4d842c4aadde/scratchpad/s-presence/run4/k.blob mode=-rw-r--r-- size=569 owner=serenity
+$ stat -f %N mode=%Sp size=%z owner=%Su /private/tmp/claude-501/-Volumes-Scratch-Mycelium/6b355905-6f39-41c8-91a7-4d842c4aadde/scratchpad/s-presence/run6/k.blob
+/private/tmp/claude-501/-Volumes-Scratch-Mycelium/6b355905-6f39-41c8-91a7-4d842c4aadde/scratchpad/s-presence/run6/k.blob mode=-rw-r--r-- size=569 owner=serenity
 exit=0
 
-$ ./blob sign-noninteractive /private/tmp/claude-501/-Volumes-Scratch-Mycelium/6b355905-6f39-41c8-91a7-4d842c4aadde/scratchpad/s-presence/run4/k.blob
+$ ./blob sign-noninteractive /private/tmp/claude-501/-Volumes-Scratch-Mycelium/6b355905-6f39-41c8-91a7-4d842c4aadde/scratchpad/s-presence/run6/k.blob
 restore_in_new_process	ok
 sign_noninteractive	FAILED (expected): Error Domain=com.apple.LocalAuthentication Code=-1004 "User interaction is required." UserInfo={MechanismTree=(1), BiometryType=1, BiometryDatabaseHash={length = 32, bytes = 0x085d9115 15fc2f16 815e6d31 24e85af1 ... 53660390 cfc5673c }, NSDebugDescription=User interaction is required., AvailableMechanisms=(
     1
 ), NSLocalizedDescription=User interaction required.}
 exit=0
 
-$ ./blob tamper /private/tmp/claude-501/-Volumes-Scratch-Mycelium/6b355905-6f39-41c8-91a7-4d842c4aadde/scratchpad/s-presence/run4/k.blob
+$ ./blob tamper /private/tmp/claude-501/-Volumes-Scratch-Mycelium/6b355905-6f39-41c8-91a7-4d842c4aadde/scratchpad/s-presence/run6/k.blob
 tampered_blob_construct	accepted (validation is deferred)
-tampered_blob_sign	refused: Error Domain=CryptoTokenKit Code=-3 "<sepk:p256(u) kid=f5ba26ad89f069c5>: unable to sign digest" UserInfo={NSDebugDescription=<sepk:p256(u) kid=f5ba26ad89f069c5>: unable to sign digest, AKSError=-536362989}
+tampered_blob_sign	refused: Error Domain=CryptoTokenKit Code=-3 "<sepk:p256(u) kid=7cfef3c9dbefb8f7>: unable to sign digest" UserInfo={NSDebugDescription=<sepk:p256(u) kid=7cfef3c9dbefb8f7>: unable to sign digest, AKSError=-536362989}
 exit=0
 
-$ ./blob nopresence /private/tmp/claude-501/-Volumes-Scratch-Mycelium/6b355905-6f39-41c8-91a7-4d842c4aadde/scratchpad/s-presence/run4/k0.blob
+$ ./blob nopresence /private/tmp/claude-501/-Volumes-Scratch-Mycelium/6b355905-6f39-41c8-91a7-4d842c4aadde/scratchpad/s-presence/run6/k0.blob
 roundtrip_sign	ok
-pub_x963_hex	04a7bff7ff6de1c8d99f63960cd3d1b0192bb43ac1a8ed7d22359737b992e2a1c417a4b5def92e5df5a41a2542535d6bda24dc5b4eab1b362edd937d4914efcf16
-pub_spki_der_hex	3059301306072a8648ce3d020106082a8648ce3d03010703420004a7bff7ff6de1c8d99f63960cd3d1b0192bb43ac1a8ed7d22359737b992e2a1c417a4b5def92e5df5a41a2542535d6bda24dc5b4eab1b362edd937d4914efcf16
-sig_der_hex	3044022025de9dfb9e21e6a1b40103d488c1af057571fd8b8b3206702f38a47cee8aa5a002201792dfe64a494ed6034a2c976a9da69de2d1526a3f769d20422631b5d1c086fd
+pub_x963_hex	0495ede61192b1f9d98043cea3baff3e79251459cd495fa7181dbe483c3a295eb9470aa6c474dc8570a1fb3de6633f63b862e920e93087a70d8f0fac86e8169689
+pub_spki_der_hex	3059301306072a8648ce3d020106082a8648ce3d0301070342000495ede61192b1f9d98043cea3baff3e79251459cd495fa7181dbe483c3a295eb9470aa6c474dc8570a1fb3de6633f63b862e920e93087a70d8f0fac86e8169689
+sig_der_hex	30440220303359e6263c03d2681b510107bbc52d74672e94443cb84681966f72b230190e0220639b5553b539556c703f5433ead99d51176daed2c1bffe3928176c9111bc0ea7
 msg_hex	6d7963656c69756d207370696b6520732d70726573656e6365
 exit=0
 
-$ ./blob tamper /private/tmp/claude-501/-Volumes-Scratch-Mycelium/6b355905-6f39-41c8-91a7-4d842c4aadde/scratchpad/s-presence/run4/k0.blob
+$ ./blob tamper /private/tmp/claude-501/-Volumes-Scratch-Mycelium/6b355905-6f39-41c8-91a7-4d842c4aadde/scratchpad/s-presence/run6/k0.blob
 tampered_blob_construct	accepted (validation is deferred)
-tampered_blob_sign	refused: Error Domain=CryptoTokenKit Code=-3 "<sepk:p256(u) kid=d6140facbe63e547>: unable to sign digest" UserInfo={NSDebugDescription=<sepk:p256(u) kid=d6140facbe63e547>: unable to sign digest, AKSError=-536362989}
+tampered_blob_sign	refused: Error Domain=CryptoTokenKit Code=-3 "<sepk:p256(u) kid=4131cd762c6de6ab>: unable to sign digest" UserInfo={NSDebugDescription=<sepk:p256(u) kid=4131cd762c6de6ab>: unable to sign digest, AKSError=-536362989}
 exit=0
 
 # verify (Rust: ring, rcgen, webpki at the lockfile's versions, offline)
@@ -112,7 +120,7 @@ $ cargo build --offline -q --manifest-path verify/Cargo.toml
 exit=0
 
 # the probe's key 1 (no presence flag): its pub/sig/msg lines from this run
-$ /Volumes/Scratch/mycelium-wt/target-spike-s-presence/debug/s-presence-verify /private/tmp/claude-501/-Volumes-Scratch-Mycelium/6b355905-6f39-41c8-91a7-4d842c4aadde/scratchpad/s-presence/run4/probe1.txt 1.
+$ /Volumes/Scratch/mycelium-wt/target-spike-s-presence/debug/s-presence-verify /private/tmp/claude-501/-Volumes-Scratch-Mycelium/6b355905-6f39-41c8-91a7-4d842c4aadde/scratchpad/s-presence/run6/probe1.txt 1.
 ring.verify	Ok("ok")
 ring.verify_tampered_msg	Err(Unspecified)
 rcgen.issue_over_se_key	ok der_len=357
@@ -122,7 +130,7 @@ webpki.verify_se_signature_as_ed25519	Err(UnsupportedSignatureAlgorithmForPublic
 exit=0
 
 # the blob nopresence key: the lines blob nopresence printed in this run
-$ /Volumes/Scratch/mycelium-wt/target-spike-s-presence/debug/s-presence-verify /private/tmp/claude-501/-Volumes-Scratch-Mycelium/6b355905-6f39-41c8-91a7-4d842c4aadde/scratchpad/s-presence/run4/blob0.txt 
+$ /Volumes/Scratch/mycelium-wt/target-spike-s-presence/debug/s-presence-verify /private/tmp/claude-501/-Volumes-Scratch-Mycelium/6b355905-6f39-41c8-91a7-4d842c4aadde/scratchpad/s-presence/run6/blob0.txt 
 ring.verify	Ok("ok")
 ring.verify_tampered_msg	Err(Unspecified)
 rcgen.issue_over_se_key	ok der_len=357
