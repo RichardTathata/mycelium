@@ -9,7 +9,7 @@ blobdir="${1:?usage: run.sh <dir for the key blobs>}"
 [ -d "$blobdir" ] || { echo "no such directory: $blobdir"; exit 2; }
 guard() { "$@" & local p=$!; for i in {1..30}; do kill -0 $p 2>/dev/null || break; sleep 1; done; kill $p 2>/dev/null && echo "KILLED after 30s"; wait $p; echo "exit=$?"; }
 step() { print -r -- "\$ $*"; guard "$@"; print; }
-print "# commit $(git rev-parse --short HEAD) $(git status --porcelain --untracked-files=no -- . | grep -q . && echo '(dirty)' || echo '(clean)')"
+print "# commit $(git rev-parse --short HEAD) $(git status --porcelain --untracked-files=no -- . ':!run.sh.out' | grep -q . && echo '(dirty)' || echo '(clean)')"
 print "# machine state"
 step sw_vers
 step uname -m
