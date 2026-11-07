@@ -5,9 +5,10 @@
 A [capability](../guide/00-concepts.md#capability) is a node saying "I provide `ns/name`", with a schema id and typed
 attributes, written under `cap/` and refreshed on an interval. Any node resolves a filter against what it has seen,
 by one matching rule shared with the offline check: namespace, name, schema id and attribute constraints. There is no
-registry to ask: an advertisement its writer stops refreshing is discarded by every reader once it is older than three
-refresh intervals, so a crashed provider evaporates from resolution on its own. An opaque provider is skipped, not
-unmatched.
+registry to ask: an advertisement its writer stops refreshing is discarded by `resolve`, the watch and the other
+readers that apply freshness once it is older than three refresh intervals, so a crashed provider evaporates from
+resolution on its own. Resolution does not consult opacity: a caller that wants to route around a busy provider
+reads its trail ([opacity](opacity.md)).
 
 ## When to use it, and when not
 
@@ -26,7 +27,8 @@ This feature is turned on in code, on the agent's [`capabilities`](../../src/age
 - [`declare_requirement`](../../src/agent/capability_handle.rs): publish an unmet need, which a stem's
   demand-driven provisioning can answer.
 - A unit file's `[[capability]]` declares the same advertisement for `wire-check` and a stem.
-- `test_advertise_persistent_late_joiner_discovers_capability`, in [`src/lib_tests.rs`](../../src/lib_tests.rs).
+- `test_wsd_capability_authz_routes_around_unauthorized_advertiser`, in [`src/lib_tests.rs`](../../src/lib_tests.rs):
+  a second node resolves both providers' advertisements across the mesh before a policy narrows them.
 
 ## See it work
 
@@ -38,10 +40,14 @@ CI compiles it and checks its declaration, and does not run it. That a retired a
 ## What it guarantees, and what it does not
 
 - **Rule:** [`cap.match`](../reference/rule-catalogue.md#capmatch) — matched, or `ns_or_name_differs`,
-  `schema_id_differs`, `constraint_unmet`, `opaque_skipped`.
+  `schema_id_differs`, `constraint_unmet` (rule revision 2: revision 1 also listed `opaque_skipped`, which no matcher
+  does).
+- **Held:** a capability name is one key segment at every door.
 - **Not built:** an advertisement is a claim, not proof the provider serves it or is authorised to — authority is
   checked where the work runs ([provider enforcement](provider-enforcement.md)); resolution is per node and can
-  differ between nodes while gossip settles. A capability name is one key segment at every door.
+  differ between nodes while gossip settles; three `cap/` readers do not apply freshness yet — the A2A provider
+  resolution, the A2A card's skill list and the membership governor's eligibility — a known gap fixed by a separate
+  PR.
 - **Evidence:** the ledger row
   [a capability name is one key segment at every door](../operations/what-is-proven.md#capability-name-key-segment-door).
 

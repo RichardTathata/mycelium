@@ -17,9 +17,11 @@ last", not just "physically last".
 **Freshness at the reader, not a TTL in the store.** A key has no time-to-live:
 an entry stays until it is overwritten or deleted. State that should lapse is
 refreshed by its writer and judged by its reader — a capability advertisement
-older than three refresh intervals is skipped by every reader
-(`CapEntry::is_fresh`) — and a delete is a tombstone the GC sweep collects once
-it is older than the propagation window. So heartbeats and advertisements
+older than three refresh intervals is skipped by the readers that check freshness
+(`CapEntry::is_fresh`: resolve, watch, wiring, demand; three readers do not yet,
+a known gap fixed by a separate PR) — and a delete is a tombstone the GC sweep collects once
+it is older than `default_ttl × propagation_window_secs × 10` seconds (about 50
+minutes at the defaults). So heartbeats and advertisements
 self-clean without a garbage-collection job; a key nobody refreshes and nobody
 deletes stays.
 
@@ -188,7 +190,8 @@ stays behind your writes (`mycelium_core::persistence`'s `replay` and `spawn_wal
 **The KV ring as pipeline buffer.** The fluid pipeline example
 ([07-pipelines.md](07-pipelines.md)) uses `scan_prefix("pipeline/stage-a/")`
 as a distributed work queue. Each item is a KV entry; the coordinator writes a
-claim key for each item it routes and the worker deletes it when the item is done. No
+claim key for each item it routes and deletes it again if the call fails, so the
+item is retried; the worker deletes it once the item is done. No
 separate queue infrastructure needed.
 
 **When NOT to use KV for events.** KV is durable-ish shared state. For

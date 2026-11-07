@@ -395,7 +395,7 @@ KV-backed durable event delivery. Events survive crashes and are delivered in HL
 // Sender (any node)
 agent.deliver_event(&target_id, "task.result", result_bytes);
 
-// Receiver — events delivered at-least-once within TTL, tombstoned after delivery
+// Receiver — events delivered at-least-once (they stay in the KV until delivered), tombstoned after delivery
 let (handle, mut rx) = agent.open_mailbox("task.result", 64);
 while let Some(event) = rx.recv().await {
     process(&event.payload);

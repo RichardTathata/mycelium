@@ -4,10 +4,10 @@
 
 A [governor](../guide/00-concepts.md#governor) is a node-local loop that holds something to a published intent with no
 coordinator: membership by self-election, tuning parameters a node has not pinned, timing as a set, opacity at the
-boundary. Every governor decides through one control contract: a move is classified by its cost, and on a view the
-node cannot trust — too few peers heard, too stale — speculative moves are held while protection and rescue never
-are; spacing and settling keep a loop from chasing its own last change. How much of this binds is the node's control
-profile, a ladder from `Legacy` to `EnforceAllocated`, whose top rung backs ceilings with
+boundary. The membership, tuning and opacity governors decide through one control contract (the timing governor
+does not): a move is classified by its cost, and on a view the node cannot trust — too few peers heard, too stale —
+speculative moves are held while protection and rescue never are; spacing and settling keep a loop from chasing its
+own last change. How much of the contract binds is the node's control profile, a ladder from `Legacy` to `EnforceAllocated`, whose top rung backs ceilings with
 [allocated rights](../guide/00-concepts.md#allocated-right) in a node-local, fsynced ledger.
 
 ## When to use it, and when not
@@ -20,14 +20,16 @@ profile, a ladder from `Legacy` to `EnforceAllocated`, whose top rung backs ceil
 ## Turn it on
 
 This feature is turned on in code. Every governor runs under `Legacy`, the default, until a profile is set; under
-`Legacy` the control contract is not consulted.
+`Legacy` the control contract is not consulted, though the membership governor keeps its own cooldown and hysteresis
+— its spacing and settling — as before.
 
 - [`set_control_profile`](../../src/agent/control_profile.rs) with a [`Profile`](../../src/control.rs): `Legacy`,
   `Observe` (evaluated and counted, nothing held), `EnforceLocal` or `EnforceAllocated`.
 - [`control_max_staleness_ms`](../reference/configuration.md#control_max_staleness_ms) and
   [`control_min_peers_heard`](../reference/configuration.md#control_min_peers_heard): the confidence bound a view
   must meet.
-- [`govern_timing`](../../src/agent/introspect.rs) with a [`TimingIntent`](../../src/agent/timing_governor.rs), and
+- [`govern_timing`](../../src/agent/introspect.rs)`(health_check_interval_secs, reconnect_backoff_secs, target)`,
+  which publishes a [`TimingIntent`](../../src/agent/timing_governor.rs), and
   [`publish_membership_intent`](../../src/agent/membership_governor.rs) for a group
   ([governed membership](governed-membership.md)).
 - [`RightsLedger`](../../src/control/ledger.rs): the node-local rights journal `EnforceAllocated` consults, through a
@@ -43,7 +45,8 @@ CI runs, shows the membership governor holding a band.
 
 ## What it guarantees, and what it does not
 
-- No guarantee id: the profile is reported on every governor's snapshot (`GovernorSnapshot.profile`), not in the
+- No guarantee id: the profile is read with `control_profile()` and on the tuning governor's snapshot
+  (`GovernorSnapshot.profile`), not in the
   [guarantee catalogue](../reference/guarantee-catalogue.md); the membership governor's decision is
   [`membership.governed`](governed-membership.md)'s rule and the install-rights admission is the stem's.
 - **Not built:** `EnforceLocal` is not a hard bound; the ledger is node-local, not a cluster-wide allocator; units

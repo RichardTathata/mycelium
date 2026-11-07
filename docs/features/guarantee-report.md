@@ -30,7 +30,7 @@ The report is always on. A profile is a setting; the two-domain scaffold's
   or a late registration is refused by name.
 - `mycelium doctor` prints the same report without starting a node ([doctor](doctor.md)).
 - `a_node_providing_every_requirement_starts_under_the_secure_profile`, in [`src/lib_tests.rs`](../../src/lib_tests.rs):
-  under rev 2 of `secure-single-domain`, the node starts, its report says so, and its gateway refuses an
+  under `secure-single-domain` (revision 5 today), the node starts, its report says so, and its gateway refuses an
   unauthenticated request.
 
 ## See it work

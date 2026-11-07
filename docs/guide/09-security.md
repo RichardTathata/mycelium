@@ -500,9 +500,10 @@ version it can't decode simply drops it — it doesn't crash or corrupt its stat
 is regression-gated: `decode_wire_v11_*`). Operator procedure:
 [operations/deployment.md § Rolling upgrades](../operations/deployment.md#rolling-upgrades).
 
-**Audit TTL.** SkillRunner audit records use the default KV TTL (24 h for
-cross-node visibility). For regulatory retention (e.g. 7-year HIPAA
-requirement), configure a WAL-backed audit sink or hook the audit records
+**Audit retention.** SkillRunner audit records are ordinary KV entries with no
+lifetime of their own (a KV entry has no TTL): they stay until overwritten or
+deleted, and are lost with every replica. For regulatory retention (e.g. 7-year
+HIPAA requirement), configure a WAL-backed audit sink or hook the audit records
 into an external SIEM via a scan loop.
 
 → Next: [10-language-bridges.md](10-language-bridges.md) — calling Mycelium from Python and TypeScript.

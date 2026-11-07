@@ -57,8 +57,17 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the work — the reader-side `CapEntry::is_fresh` / `ReqEntry::is_fresh` (an advertisement older than three refresh
   intervals, or that far in the future, is skipped, never deleted) and `store::sweep_stale_tombstones` — with
   `cap_entry_freshness`, `future_stamped_entry_is_quarantined_not_fresh` and `tombstone_gc_sweep_unpacks_hlc_timestamps`.
-  Guide 01 no longer says every key has a time-to-live or that `set` takes one, and the mailbox module doc no longer
-  reads the gossip hop count (`default_ttl`) as a five-minute lifetime: an undelivered event has no expiry.
+  The id is kept, because recorded traces and fault reports name it. Three `cap/` readers do not apply `is_fresh` yet
+  (the A2A provider resolution and card, the membership governor's eligibility); the rule says so, and a separate PR
+  fixes them. Guide 01 no longer says every key has a time-to-live or that `set` takes one; the mailbox module doc
+  no longer reads the gossip hop count (`default_ttl`) as a five-minute lifetime, since an undelivered event has no
+  expiry; and the same claim is gone from the concepts glossary, the cookbook, the Python SDK's README, guide 5,
+  guide 9's audit-retention note (SkillRunner's records have no lifetime of their own) and the guide index.
+- **Three more rule entries describe the code** (#730's review). `signal.suppression` (rev 2): a suppressed kind's
+  signals are dropped at delivery and counted, never held and released, and its tests are the four
+  `test_suppress_*` cases rather than two function names. `cap.match` (rev 2): matching does not consult opacity, so
+  `opaque_skipped` is gone. `kv.propagation` (rev 2): its refusals add a TLS node's unsigned and bare-signed frames,
+  and its tests replace a SWIM test with the KV propagation, LWW and signed-frame tests.
 
 - **A fresh journal's first acknowledged record has a durable name** (external review 2026-10-31 F7,
   `docs/plans/external-review-2026-10-31.md` R6). The node-local journal — the evidence journal, the rights ledger, the

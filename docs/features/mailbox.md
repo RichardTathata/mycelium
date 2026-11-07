@@ -38,7 +38,8 @@ answered, run in CI. That a dropped gateway stream loses only what it had handed
 
 - No guarantee or rule id: the mailbox registers nothing in the
   [guarantee catalogue](../reference/guarantee-catalogue.md) or the rule catalogue.
-- **Not built:** exactly-once delivery — an in-process receiver dropped with events queued loses them, because the
+- **Not built:** an authenticated sender — the event's `sender` is written into the value by whoever delivered it and is
+  not checked against the writer, so a handler should not authorise on it; exactly-once delivery — an in-process receiver dropped with events queued loses them, because the
   event was deleted when it entered the channel; events carry no expiry of their own, so an event for a node that never returns stays in every replica until it is
   deleted; delivery is to a node, not to an identity that moves.
 - **Evidence:** the [what-is-proven](../operations/what-is-proven.md) ledger has no row for the mailbox; the row E

@@ -15,8 +15,8 @@ and counted, so a trace is a prefix plus its drop counts.
 - **Use it when** you need to know why a node did what it did — why a stem installed, why a governor moved, why a
   signal was shed — from the node's own record rather than from its logs.
 - **Not when** you want every decision point traced: most rules are catalogue only; the trace covers the stem
-  provisioner, the membership governor and signal admission's refusals and sheds, and the catalogue says which per
-  rule.
+  provisioner, the membership governor, signal admission's refusals and sheds, and a schedule's runs and missed runs
+  (`sched.run`, `sched.missed`), and the catalogue says which per rule.
 
 ## Turn it on
 
@@ -26,10 +26,10 @@ This feature is turned on in code; the catalogue needs nothing.
   whole fleet's, the stem host's rules included, is the checked-in [rule catalogue](../reference/rule-catalogue.md).
 - [`DecisionSink`](../../mycelium-core/src/decision.rs): the bounded sink, by records and bytes.
 - [`with_decision_trace`](../../src/agent/mod.rs): attach a sink to a node before `start()` (the membership governor,
-  signal admission); a stem takes `--trace-dir`, a provisioner [`with_decision_trace`](../../mycelium-wasm-host/src/provisioner.rs).
+  signal admission, a schedule's decisions); a stem takes `--trace-dir`, a provisioner [`with_decision_trace`](../../mycelium-wasm-host/src/provisioner.rs).
 - `mycelium explain <decisions.jsonl> [--catalogue …]`: a trace rendered as what each decision point decided.
-- A run recorded with `GOSSIP_RECORD_BUNDLE_DIR` carries the trace into its bundle as `decisions.jsonl` beside
-  `coverage.json` ([replay bundles](replay.md)).
+- A run recorded with `GOSSIP_RECORD_BUNDLE_DIR` — only in a binary built with `sim` — carries the trace into its
+  bundle as `decisions.jsonl` beside `coverage.json` ([replay bundles](replay.md)).
 - `admission_records_refusals_and_sheds_only_and_changes_no_delivery`, in
   [`mycelium-core/src/ops.rs`](../../mycelium-core/src/ops.rs): with a sink and without, the same delivery; a shed and
   a refusal recorded with their reasons, an admitted signal recording nothing.

@@ -27,12 +27,13 @@ two-domains job starts, sets the listening address.
 - [`bootstrap_peers`](../reference/configuration.md#bootstrap_peers): the peers it dials first.
 - [`default_ttl`](../reference/configuration.md#default_ttl): how many hops an update is forwarded, not how long an
   entry lives — an entry has no lifetime of its own.
-- [`propagation_window_secs`](../reference/configuration.md#propagation_window_secs): with `default_ttl`, how long a
-  tombstone is kept before the sweep collects it.
+- [`propagation_window_secs`](../reference/configuration.md#propagation_window_secs): a tombstone is collected once it
+  is older than `default_ttl × propagation_window_secs × 10` seconds — about 50 minutes at the defaults — measured on
+  the wall clock by the GC tick, not through the replay seam.
 - [`KvHandle`](../../mycelium-core/src/kv_handle.rs), from `agent.kv()`: `set`, `get`, `delete`, `scan_prefix`,
   `subscribe` and `subscribe_prefix`; the receipt methods are [durability receipts](durability-receipts.md).
-- `test_lww_convergence_two_concurrent_writers`, in [`src/lib_tests.rs`](../../src/lib_tests.rs): two concurrent
-  writers through the full gossip path converge on one value.
+- `lww_equal_timestamp_concurrent_data_converges`, in [`mycelium-core/src/store.rs`](../../mycelium-core/src/store.rs):
+  two writes with the same timestamp, applied in either order, leave the same value.
 
 ## See it work
 
@@ -44,17 +45,21 @@ local replica, in a browser.
 ## What it guarantees, and what it does not
 
 - **Rule:** [`kv.propagation`](../reference/rule-catalogue.md#kvpropagation) — every update converges by
-  last-writer-wins; a frame too large, a bad signature or a removed sender is refused.
+  last-writer-wins; a frame too large, a bad signature or a removed sender is refused, and a TLS node refuses an
+  unsigned KV write frame or one in the bare pre-2.33 signature form (rule revision 2;
+  [`mesh.signed_writes`](mesh-mtls.md)).
 - **Rule:** [`kv.expiry`](../reference/rule-catalogue.md#kvexpiry) — no entry carries a TTL. A capability or
-  requirement advertisement its writer stopped refreshing is skipped by every reader once it is older than three
-  refresh intervals ([`CapEntry::is_fresh`](../../src/capability.rs)) and stays in the store until overwritten or
-  tombstoned; a tombstone is collected by the sweep once it is older than the window (rule revision 2; revision 1
-  cited a function and tests the tree does not have).
+  requirement advertisement its writer stopped refreshing stays in the store until overwritten or tombstoned; the
+  readers that apply [`CapEntry::is_fresh`](../../src/capability.rs) — resolve, watch, wiring, demand, coverage gaps
+  and role concentration — skip it once it is older than three refresh intervals. Three `cap/` readers do not yet:
+  the A2A provider resolution, the A2A card's skill list and the membership governor's eligibility, a known gap fixed
+  by a separate PR. A tombstone is collected by the sweep (rule revision 2; revision 1 cited a function and tests the
+  tree does not have).
 - **Not built:** agreement between writers; authenticated anti-entropy (a state reply's entries carry no author, the
   [mesh mTLS](mesh-mtls.md) page's limit); the store enforces no ownership of a namespace — the doors do, and the
   `sys/` tripwire counts rather than refuses.
-- **Evidence:** the [what-is-proven](../operations/what-is-proven.md) ledger's
-  [100-node row](../operations/what-is-proven.md#100-node-cluster) and its
+- **Evidence:** the ledger rows [a TLS node refuses unsigned KV frames](../operations/what-is-proven.md#tls-node-refuses-unsigned-kv-frames),
+  [the 100-node cluster](../operations/what-is-proven.md#100-node-cluster) and the
   [hot-path costs](../operations/what-is-proven.md#hot-path-cost).
 
 ## Go deeper

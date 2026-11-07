@@ -4,10 +4,11 @@
 
 Layer II: a [signal](../guide/00-concepts.md#signal) is an ephemeral event of a kind, addressed to a scope — the whole
 cluster, a group, or one node — that spreads epidemically through the mesh. Forwarding is unconditional: every node
-relays a signal with hops left whether or not it acts on it, and only a frame addressed to this node terminates here.
+relays a signal with hops left whether or not it acts on it; the two carve-outs are a frame addressed to this node,
+which terminates here, and a removed member's frames, dropped at the connection.
 What a node acts on is decided by its [boundary](../guide/00-concepts.md#boundary), the groups it has joined:
 admission is scoped, and under load a node sheds group and cluster signals before they reach its handlers, never an
-individual one. A node can suppress a kind for a while, holding it until the hold ends.
+individual one. A node can suppress a kind for a while: until then its signals are dropped at delivery, not held.
 
 ## When to use it, and when not
 
@@ -26,7 +27,8 @@ This feature is turned on in code: every node has it, from [`mesh`](../../src/ag
 - [`join_group`](../../mycelium-core/src/mesh_handle.rs) and [`leave_group`](../../mycelium-core/src/mesh_handle.rs):
   change this node's boundary.
 - [`suppress`](../../mycelium-core/src/mesh_handle.rs) and [`unsuppress`](../../mycelium-core/src/mesh_handle.rs):
-  hold a kind for a duration; held signals are delivered when the hold ends.
+  drop a kind's signals at delivery for a duration — counted, never delivered later — while the sender log and the
+  last-signal time still record them, so quorum counting sees them.
 - [`default_ttl`](../reference/configuration.md#default_ttl): how many hops a signal is forwarded.
 - `test_signal_two_node_propagation`, in [`src/lib_tests.rs`](../../src/lib_tests.rs).
 
@@ -42,14 +44,15 @@ is `forwarding_is_unconditional_through_non_member_relay`, in [`src/lib_tests.rs
 - **Rules:** [`signal.admission`](../reference/rule-catalogue.md#signaladmission) — admitted, `scope_not_admitted`,
   or `shed_under_load` (never Individual, never a boundary transition);
   [`signal.forwarding`](../reference/rule-catalogue.md#signalforwarding) — forwarded, or `ttl_exhausted`,
-  `terminates_here`, `seen`; [`signal.suppression`](../reference/rule-catalogue.md#signalsuppression) — held until a
-  time, released on flush, never changing forwarding.
+  `terminates_here`, `seen`; [`signal.suppression`](../reference/rule-catalogue.md#signalsuppression) — `suppressed` (dropped) or
+  `delivered`, rev 2 (rev 1 described a hold the code does not have), never changing forwarding.
 - **Not built:** delivery guarantees — a signal can be shed, dropped by a full receiver or missed by a node that was
   down; a boundary is self-imposed, so it does not stop a node acting on what it relays (a
-  [guardrail](guardrails.md)'s Tier A); a signal's content is not authenticated beyond the frame's sender.
-- **Evidence:** the [what-is-proven](../operations/what-is-proven.md) ledger's
-  [hot-path costs](../operations/what-is-proven.md#hot-path-cost) give the signal fan-out; no row covers admission on
-  its own.
+  [guardrail](guardrails.md)'s Tier A); a signal's `sender` field is not signed, so a handler should not authorise on
+  it.
+- **Evidence:** the ledger rows
+  [one stalled subscriber does not veto its kind, and the signal log is bounded](../operations/what-is-proven.md#silent-slow-stalled-peers-closed-stalled)
+  and the [hot-path costs](../operations/what-is-proven.md#hot-path-cost), which give the signal fan-out.
 
 ## Go deeper
 

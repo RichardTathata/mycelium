@@ -23,8 +23,9 @@ This feature is turned on in code; the governor that reads each intent must run 
 - [`publish_membership_intent`](../../src/agent/membership_governor.rs): a group's band
   ([governed membership](governed-membership.md)).
 - [`publish_tuning_intent`](../../src/agent/tuning_governor.rs): a value for a parameter a node has not pinned.
-- [`govern_timing`](../../src/agent/introspect.rs) with a [`TimingIntent`](../../src/agent/timing_governor.rs): a node's
-  timing set in one pass; it refuses an intent that would govern nothing.
+- [`govern_timing`](../../src/agent/introspect.rs)`(health_check_interval_secs, reconnect_backoff_secs, target)`, which
+  publishes a [`TimingIntent`](../../src/agent/timing_governor.rs): a node's timing set in one pass; it refuses an
+  intent that would govern nothing.
 - Over HTTP, `POST /gateway/govern/membership`, `/govern/tuning` and `/govern/timing`, under `govern:write`.
 - [`FleetIntent`](../../src/agent/intent.rs): the shared transport — publish, freshness and evaporation, node
   targeting — that each governor's own policy sits on.
