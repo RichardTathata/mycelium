@@ -1,0 +1,18 @@
+$  cargo test -q --lib --features tls spike_s_succeed -- --nocapture
+# started 2026-11-07T19:07:01Z
+
+running 1 test
+SPIKE S-succeed: control — a fresh CA1 node's first write reached A in 9.991917791s
+SPIKE S-succeed: L2 — one spike_reroot call: material 970.875µs; certificate-record write 228.875µs; activate 26.125µs; whole 1.225958ms
+SPIKE S-succeed: B (CA2 cert) dialling A (CA1 only): Err("server refused: invalid peer certificate: BadSignature")
+SPIKE S-succeed: A (CA1 only) dialling B (CA2 cert): Err("client refused: invalid peer certificate: BadSignature")
+SPIKE S-succeed: B's post-cutover write reached A in 27.167875ms
+SPIKE S-succeed: L5 — G (trusts CA2 only) received A's write in 27.759875ms: A presented its successor certificate on a socket
+SPIKE S-succeed: M2 — F (two roots, CA1 cert) → A (CA2 only): Err("server refused: invalid peer certificate: BadSignature"); A → F: Err("client refused: invalid peer certificate: BadSignature")
+SPIKE S-succeed: D (CA1) → A (CA2 only): Err("client refused: invalid peer certificate: BadSignature"); A → D: Err("client refused: invalid peer certificate: BadSignature")
+SPIKE S-succeed: membership believes D? true (a belief, not a session)
+SPIKE S-succeed: SUMMARY hs_ms=10000 hc_s=10 control_join=9.991917791s c_join=9.940182209s g_join=27.759875ms b_carried=27.167875ms reroot_whole=1.225958ms
+.
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1488 filtered out; finished in 23.13s
+
+# exit 0
