@@ -135,6 +135,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   data-at-rest encryption, consensus and electorates, destination commit, replay bundles and durability receipts.
   `crown-jewel.md` § 1 and `DataAtRestCipher`'s doc no longer say a record that does not decrypt is skipped: under
   `on_unreadable = "refuse"`, the default, a wrong key refuses the start.
+- **Feature pages for discovery, signals and coordination** (F3, third of five PRs): gossip KV, the signal mesh,
+  capability discovery, the mailbox, groups and governed membership, opacity, intents, adaptive stability, the
+  guarantee report and profiles, the rule catalogue and the decision trace, and metrics and tracing. Two catalogue and
+  module-doc claims the code does not bear out are recorded on the pages for the `/doc-coverage` pass: `kv.expiry`'s
+  code and tests (`store::Store::flush_expired`, `is_expired`) do not exist, and guide 01's "every key has a
+  time-to-live" and the mailbox module's "default TTL: 5 minutes" read the gossip hop count as a time.
 
 ## [2.39.0] — 2026-11-06
 

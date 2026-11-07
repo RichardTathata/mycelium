@@ -27,7 +27,7 @@ This feature is turned on in code: `consensus` is a default feature of `mycelium
 - [`cluster_propose`](../../src/agent/consensus_handle.rs), [`group_propose`](../../src/agent/consensus_handle.rs) and
   [`elect_leader`](../../src/agent/consensus_handle.rs); [`LockService`](../../src/agent/lock_service.rs) for locks.
 - Form the group first — every member joins it ([`join_group`](../../mycelium-core/src/mesh_handle.rs), or a
-  membership intent) — then [`declare_electorate`](../../src/agent/electorate.rs) from a
+  [membership intent](governed-membership.md)) — then [`declare_electorate`](../../src/agent/electorate.rs) from a
   member: it reads the roster as that node sees it and proposes a genesis every named member must decide. Mark one
   `exclusive_default` for the cluster-scoped exclusive verbs.
 - [`consensus_require_electorate`](../reference/configuration.md#consensus_require_electorate): refuse a
