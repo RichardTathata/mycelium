@@ -143,3 +143,14 @@ suite is `scripts/test-check-feature-pages.py`.
 | [The guarantee report and profiles](guarantee-report.md) | What a node enforces and why not the rest; a profile that refuses the start when it is unmet | Constrain actions |
 | [The rule catalogue and the decision trace](rule-catalogue-and-decision-trace.md) | Every decision point described by id, and a bounded trace of what the instrumented ones decided | Inspect outcomes and reproduce |
 | [Metrics and tracing](metrics-and-tracing.md) | Prometheus metrics on the gateway, logs through `tracing`, OTLP spans under `otel` | Inspect outcomes and reproduce |
+| [The stem node](stem.md) | A generic node that declares from its unit file and, with `[hosts]`, installs signed artifacts as demand or a band calls for them | Acquire and adapt capabilities |
+| [Demand-driven provisioning](demand-provisioning.md) | Hosts self-elect to install what an unmet requirement needs, within budget and from trusted publishers; restart is provisioning | Acquire and adapt capabilities |
+| [The signed catalogue](signed-catalogue.md) | Gossiped, signed catalogue entries; a host installs only what a key it trusts signed, the bytes checked against their content address | Acquire and adapt capabilities |
+| [The artifact library and publishing](artifact-library.md) | Bytes and a signed manifest in a directory, over HTTP or in an object store, served by a librarian and pulled over the mesh | Acquire and adapt capabilities |
+| [Presence bands](presence-bands.md) | A floor and a ceiling of live providers, independent of demand, supervised by each stem that declares them | Acquire and adapt capabilities |
+| [Shadow acceptance](shadow-acceptance.md) | A proposed entry loads only into a shadow lane until a listed reviewer co-signs it | Acquire and adapt capabilities |
+| [Declared activation](declared-activation.md) | A placed blob handed to a native runtime by the operator's command, its capability gated on a probe | Acquire and adapt capabilities |
+| [Confined activations](confined-activations.md) | An activation's command and probe run under Seatbelt or Landlock and seccomp, or refused by name | Acquire and adapt capabilities |
+| [Serving a model as a skill](model-serving.md) | `[[serve]]`: a routable prompt skill registered while its install is live, retracted when it goes | Acquire and adapt capabilities |
+| [Hosted WASM components](hosted-components.md) | Components sandboxed in-process with a confined KV and emit, a memory cap, a deadline and fuel by publisher | Acquire and adapt capabilities |
+| [Unit files and wire-check](unit-files-and-wire-check.md) | One declaration per unit, read by the check, the stem and the gateway; `wire-check` names what could not bind | Acquire and adapt capabilities |

@@ -360,70 +360,71 @@ ids = ["cargo:mycelium/metrics", "cargo:mycelium-core/metrics", "cargo:mycelium/
 
 [[feature]]
 name = "The stem node"
-page = "todo"
-planned = "stem"
+page = "stem.md"
+example = "first_stem_fleet"
 ids = ["concept:stem", "cargo:mycelium-wasm-host/stem"]
 
 [[feature]]
 name = "Demand-driven provisioning"
-page = "todo"
-planned = "demand-provisioning"
+page = "demand-provisioning.md"
+example = "provisioning"
 ids = ["concept:provisioner", "concept:self-election", "concept:runtime-kind", "unit:[hosts]", "concept:requirement", "concept:demand",
        "rule:prov.demand_response", "rule:prov.self_election", "rule:prov.install", "rule:prov.advertise",
        "rule:prov.withdraw", "rule:prov.health_pass", "rule:prov.eligible", "rule:prov.rights_admission"]
 
 [[feature]]
 name = "Signed catalogue"
-page = "todo"
-planned = "signed-catalogue"
+page = "signed-catalogue.md"
+example = "catalog"
 ids = ["concept:catalogue", "rule:prov.provenance"]
 
 [[feature]]
 name = "Artifact library and publishing"
-page = "todo"
-planned = "artifact-library"
+page = "artifact-library.md"
+example = "model_deploy"
 ids = ["concept:library", "cargo:mycelium-wasm-host/object_store", "cargo:mycelium-wasm-host/gateway", "concept:artifact"]
 
 [[feature]]
 name = "Presence bands (floors and ceilings)"
-page = "todo"
-planned = "presence-bands"
+page = "presence-bands.md"
+example = "first_stem_fleet"
 ids = ["unit:[[presence]]", "concept:presence", "rule:prov.presence_floor", "rule:prov.shed"]
 
 [[feature]]
 name = "Shadow acceptance (proposed, shadow, accept)"
-page = "todo"
-planned = "shadow-acceptance"
+page = "shadow-acceptance.md"
+example = "provisioning"
 ids = ["concept:shadow", "concept:incumbent", "rule:prov.loadable", "rule:prov.promotion"]
 
 [[feature]]
 name = "Declared activation"
-page = "todo"
-planned = "declared-activation"
+page = "declared-activation.md"
+example = "model_deploy"
 ids = ["unit:[[activation]]", "concept:activation", "rule:prov.activation", "rule:prov.probe"]
 
 [[feature]]
 name = "Confined activations"
-page = "todo"
-planned = "confined-activations"
+page = "confined-activations.md"
+example = "none"
+example_watch = ["confined_activation", "activation_confine"]
 ids = ["unit:[activation.confine]", "companion-guarantee:stem.activation_confined"]
 
 [[feature]]
 name = "Serving a model as a skill"
-page = "todo"
-planned = "model-serving"
+page = "model-serving.md"
+example = "reheal_deploy"
 ids = ["unit:[[serve]]", "concept:serve", "cargo:mycelium-wasm-host/llm"]
 
 [[feature]]
 name = "Hosted WASM components"
-page = "todo"
-planned = "hosted-components"
+page = "hosted-components.md"
+example = "mcp_toolgrowth"
 ids = ["rule:host.emit_admission", "crate:mycelium-wasm-host"]
 
 [[feature]]
 name = "Unit files and wire-check"
-page = "todo"
-planned = "unit-files-and-wire-check"
+page = "unit-files-and-wire-check.md"
+example = "compare_stem_observations"
 # [[lane]], [[mandate]] and [[rule]] are read by wire-check's overlay; at runtime a stem logs them and an SDK
 # agent reports them in `not_enforced` (unit-file.md § Who reads which section). The page says so.
 ids = ["concept:unit-file", "concept:wire-check", "concept:wiring-report", "concept:lane", "unit:[[lane]]",
