@@ -13,7 +13,7 @@ Schema `mycelium.rules/1` · 32 rules.
 | [`cons.acceptor_memory`](#consacceptor_memory) | Response | catalogue only | An electorate member must keep its promises across a restart: no `[persistence]` is refused by name at every door, an empty store is warned once its genesis is known, and a peer's copy of this node's own record above its memory withholds the slot until the next start — detection, never prevention, and only of a copy that arrives before the next higher ballot. |
 | [`gateway.auth`](#gatewayauth) | Authority | catalogue only | Deny by default under `compliance`: a route needs its scope; with no credential model the gateway is open — on loopback only, since a non-loopback one refuses to start unless `gateway_allow_unauthenticated` waives it — and a table the build cannot enforce refuses to start. |
 | [`host.emit_admission`](#hostemit_admission) | Admission, Authority | catalogue only | A component emits only under `comp/{namespace}/…` or a kind the host listed for it, and never a protected RPC kind — an emit from inside the process would reach that kind's handlers unframed, past the door that checks authority. |
-| [`kv.expiry`](#kvexpiry) | Propagation | catalogue only | An advertisement its writer stopped refreshing leaves the view after its TTL; a stale view is possible in between. |
+| [`kv.expiry`](#kvexpiry) | Propagation | catalogue only | No entry carries a TTL. A capability or requirement advertisement its writer stopped refreshing is skipped by every reader once it is older than three refresh intervals (or that far in the future), and stays in the store until it is overwritten or tombstoned; a tombstone is collected by the GC sweep once it is older than the window. A stale view is possible in between. |
 | [`kv.propagation`](#kvpropagation) | Propagation | catalogue only | Every update converges by last-writer-wins on the HLC; propagation is unconditional and never taught a higher-layer law (detection, not prevention). |
 | [`membership.governed`](#membershipgoverned) | Response | instrumented | This node rolls to join or leave a governed group against the intent's band — after spacing and settling, and (under an enforcing profile) only on a confident view. |
 | [`prov.activation`](#provactivation) | Response | instrumented | After placement the declared command hands the blob to its local runtime — confined when the unit names a profile, which a node that cannot apply it refuses by name rather than run unconfined, as it refuses one whose egress proxy is not running; a failure is an install failure at stage `activation`, retried next round. |
@@ -167,20 +167,20 @@ A component emits only under `comp/{namespace}/…` or a kind the host listed fo
 
 ## `kv.expiry`
 
-rev 1 · `mycelium-core::store` · Propagation · trace: catalogue only
+rev 2 · `mycelium::capability / mycelium-core::store` · Propagation · trace: catalogue only
 
-An advertisement its writer stopped refreshing leaves the view after its TTL; a stale view is possible in between.
+No entry carries a TTL. A capability or requirement advertisement its writer stopped refreshing is skipped by every reader once it is older than three refresh intervals (or that far in the future), and stays in the store until it is overwritten or tombstoned; a tombstone is collected by the GC sweep once it is older than the window. A stale view is possible in between.
 
-- **Trigger:** the GC tick, and every read
+- **Trigger:** a read of a capability or requirement advertisement (resolve, watch, demand); the GC tick
 - **Reads:**
   - `the LWW store and its HLC` — scope: this node; freshness: local, atomic
-  - `the entry's TTL and the wall clock through the seam` — scope: this node; freshness: the decision clock
+  - `the entry's HLC stamp, its refresh interval and the wall clock through the seam` — scope: this node; freshness: the decision clock
 - **Outcomes:**
-  - Action: `expired`
-  - NoAction: `live`, `no_ttl`
-- **Effects:** the entry removed; a tombstone where the writer deleted
+  - Action: `stale_skipped`, `tombstone_collected`
+  - NoAction: `fresh`, `tombstone_in_window`
+- **Effects:** a stale advertisement skipped by the reader, never deleted from the store; a tombstone older than the window removed
 - **May trigger:** [`prov.presence_floor`](#provpresence_floor)
-- **Code:** `store::Store::flush_expired` · **Docs:** docs/guide/01-gossip-kv.md · **Tests:** `flush_expired`, `is_expired`, `default_ttl_secs`
+- **Code:** `capability::CapEntry::is_fresh / ReqEntry::is_fresh / store::sweep_stale_tombstones` · **Docs:** docs/guide/02-capabilities.md · **Tests:** `cap_entry_freshness`, `future_stamped_entry_is_quarantined_not_fresh`, `tombstone_gc_sweep_unpacks_hlc_timestamps`
 
 ## `kv.propagation`
 

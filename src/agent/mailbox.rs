@@ -9,10 +9,11 @@
 //!
 //! ## Delivery guarantees
 //!
-//! - **At-least-once** within the gossip TTL window. Events stored in KV
+//! - **At-least-once** while the event is in the KV. Events stored in KV
 //!   propagate to all live nodes via anti-entropy; a crashed target node
-//!   will receive pending events on reconnect as long as they have not
-//!   yet expired (default TTL: 5 minutes).
+//!   receives its pending events on reconnect. An event has no expiry of its
+//!   own: the `default_ttl` its write carries is the gossip hop count, not a
+//!   lifetime, so an undelivered event stays until it is delivered and deleted.
 //! - **Causal order** within the watcher task: entries are sorted by their
 //!   HLC key before delivery, so causal happens-before is preserved.
 //! - **Tombstone-on-delivery**: entries are deleted from the KV store

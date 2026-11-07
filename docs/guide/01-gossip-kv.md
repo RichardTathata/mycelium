@@ -14,9 +14,14 @@ counter. Under clock skew the HLC guarantees that any write *after* observing
 a remote value has a strictly greater timestamp — so "last write" is "causally
 last", not just "physically last".
 
-**TTL-native cleanup.** Every key has a time-to-live. Expired keys are
-purged on read and during anti-entropy sync. This means heartbeats, capability
-advertisements, and work claims self-clean without a garbage-collection job.
+**Freshness at the reader, not a TTL in the store.** A key has no time-to-live:
+an entry stays until it is overwritten or deleted. State that should lapse is
+refreshed by its writer and judged by its reader — a capability advertisement
+older than three refresh intervals is skipped by every reader
+(`CapEntry::is_fresh`) — and a delete is a tombstone the GC sweep collects once
+it is older than the propagation window. So heartbeats and advertisements
+self-clean without a garbage-collection job; a key nobody refreshes and nobody
+deletes stays.
 
 ```mermaid
 sequenceDiagram
@@ -136,10 +141,14 @@ prefix. The KV store is shared across all layers; the namespace table in
 keys should use application-specific prefixes (`app/`, `pipeline/`, `jobs/`).
 Avoid `sys/`, `cap/`, `grp/`, `consensus/` — those are library-owned.
 
-**TTL sizing.** The `set` family accepts an optional TTL. Leave it `None` for
-durable state. For ephemeral state (heartbeats, work claims, presence) use a
-TTL that is comfortably longer than your refresh interval — 3–5× is a good
-rule of thumb. Too short and a slow node loses its claim before it finishes.
+**Refresh intervals, not TTLs.** `set` takes a key and a value, nothing else.
+For ephemeral state (heartbeats, work claims, presence) have the writer refresh
+and the reader judge age: the capability API does this with its refresh
+interval (a reader drops an advertisement after three missed refreshes); for
+your own keys, write a timestamp in the value and compare it on read, or delete
+the key when you are done. Too short an interval and a slow node looks gone
+before it finishes. (`default_ttl` in the configuration is how many hops an
+update is forwarded, not a lifetime.)
 
 **`scan_prefix` for bulk reads.** Rather than reading keys one by one, use:
 
@@ -178,8 +187,8 @@ stays behind your writes (`mycelium_core::persistence`'s `replay` and `spawn_wal
 
 **The KV ring as pipeline buffer.** The fluid pipeline example
 ([07-pipelines.md](07-pipelines.md)) uses `scan_prefix("pipeline/stage-a/")`
-as a distributed work queue. Each item is a KV entry; workers claim items by
-writing a claim key with a short TTL; the coordinator drains and routes. No
+as a distributed work queue. Each item is a KV entry; the coordinator writes a
+claim key for each item it routes and the worker deletes it when the item is done. No
 separate queue infrastructure needed.
 
 **When NOT to use KV for events.** KV is durable-ish shared state. For

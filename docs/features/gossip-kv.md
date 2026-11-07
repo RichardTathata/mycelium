@@ -26,7 +26,7 @@ two-domains job starts, sets the listening address.
   where the node gossips.
 - [`bootstrap_peers`](../reference/configuration.md#bootstrap_peers): the peers it dials first.
 - [`default_ttl`](../reference/configuration.md#default_ttl): how many hops an update is forwarded, not how long an
-  entry lives.
+  entry lives — an entry has no lifetime of its own.
 - [`propagation_window_secs`](../reference/configuration.md#propagation_window_secs): with `default_ttl`, how long a
   tombstone is kept before the sweep collects it.
 - [`KvHandle`](../../mycelium-core/src/kv_handle.rs), from `agent.kv()`: `set`, `get`, `delete`, `scan_prefix`,
@@ -45,11 +45,11 @@ local replica, in a browser.
 
 - **Rule:** [`kv.propagation`](../reference/rule-catalogue.md#kvpropagation) — every update converges by
   last-writer-wins; a frame too large, a bad signature or a removed sender is refused.
-- **Rule:** [`kv.expiry`](../reference/rule-catalogue.md#kvexpiry). Its catalogue entry names code and tests the tree
-  does not have (`store::Store::flush_expired`, `is_expired`): the store holds no per-entry TTL, and `set` takes none.
-  What removes a stale advertisement is the reader, which discards a capability entry older than three refresh
-  intervals ([`CapEntry::is_fresh`](../../src/capability.rs)); what removes a delete is the tombstone sweep. Recorded for
-  the `/doc-coverage` pass, with guide 01's "every key has a time-to-live".
+- **Rule:** [`kv.expiry`](../reference/rule-catalogue.md#kvexpiry) — no entry carries a TTL. A capability or
+  requirement advertisement its writer stopped refreshing is skipped by every reader once it is older than three
+  refresh intervals ([`CapEntry::is_fresh`](../../src/capability.rs)) and stays in the store until overwritten or
+  tombstoned; a tombstone is collected by the sweep once it is older than the window (rule revision 2; revision 1
+  cited a function and tests the tree does not have).
 - **Not built:** agreement between writers; authenticated anti-entropy (a state reply's entries carry no author, the
   [mesh mTLS](mesh-mtls.md) page's limit); the store enforces no ownership of a namespace — the doors do, and the
   `sys/` tripwire counts rather than refuses.

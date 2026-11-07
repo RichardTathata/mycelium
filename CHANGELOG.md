@@ -51,6 +51,15 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The `kv.expiry` rule describes code that exists** (rule revision 2; `docs/plans/feature-pages.md` F3). Revision 1
+  cited `store::Store::flush_expired` and the tests `flush_expired`, `is_expired` and `default_ttl_secs`, none of which
+  is the KV expiry it described: the store holds no per-entry TTL, and `set` takes none. The rule now cites what does
+  the work — the reader-side `CapEntry::is_fresh` / `ReqEntry::is_fresh` (an advertisement older than three refresh
+  intervals, or that far in the future, is skipped, never deleted) and `store::sweep_stale_tombstones` — with
+  `cap_entry_freshness`, `future_stamped_entry_is_quarantined_not_fresh` and `tombstone_gc_sweep_unpacks_hlc_timestamps`.
+  Guide 01 no longer says every key has a time-to-live or that `set` takes one, and the mailbox module doc no longer
+  reads the gossip hop count (`default_ttl`) as a five-minute lifetime: an undelivered event has no expiry.
+
 - **A fresh journal's first acknowledged record has a durable name** (external review 2026-10-31 F7,
   `docs/plans/external-review-2026-10-31.md` R6). The node-local journal — the evidence journal, the rights ledger, the
   revocation and epoch journals, the knowledge layer's two journals and the effects ledger all open through it — the
@@ -137,10 +146,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `on_unreadable = "refuse"`, the default, a wrong key refuses the start.
 - **Feature pages for discovery, signals and coordination** (F3, third of five PRs): gossip KV, the signal mesh,
   capability discovery, the mailbox, groups and governed membership, opacity, intents, adaptive stability, the
-  guarantee report and profiles, the rule catalogue and the decision trace, and metrics and tracing. Two catalogue and
-  module-doc claims the code does not bear out are recorded on the pages for the `/doc-coverage` pass: `kv.expiry`'s
-  code and tests (`store::Store::flush_expired`, `is_expired`) do not exist, and guide 01's "every key has a
-  time-to-live" and the mailbox module's "default TTL: 5 minutes" read the gossip hop count as a time.
+  guarantee report and profiles, the rule catalogue and the decision trace, and metrics and tracing.
 
 ## [2.39.0] — 2026-11-06
 

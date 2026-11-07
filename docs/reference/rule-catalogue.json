@@ -442,12 +442,12 @@
     },
     {
       "id": "kv.expiry",
-      "revision": 1,
-      "subsystem": "mycelium-core::store",
+      "revision": 2,
+      "subsystem": "mycelium::capability / mycelium-core::store",
       "responsibilities": [
         "propagation"
       ],
-      "trigger": "the GC tick, and every read",
+      "trigger": "a read of a capability or requirement advertisement (resolve, watch, demand); the GC tick",
       "inputs": [
         {
           "source": "the LWW store and its HLC",
@@ -455,7 +455,7 @@
           "freshness": "local, atomic"
         },
         {
-          "source": "the entry's TTL and the wall clock through the seam",
+          "source": "the entry's HLC stamp, its refresh interval and the wall clock through the seam",
           "scope": "this node",
           "freshness": "the decision clock"
         }
@@ -464,19 +464,20 @@
         {
           "kind": "action",
           "reasons": [
-            "expired"
+            "stale_skipped",
+            "tombstone_collected"
           ]
         },
         {
           "kind": "no_action",
           "reasons": [
-            "live",
-            "no_ttl"
+            "fresh",
+            "tombstone_in_window"
           ]
         }
       ],
       "effects": [
-        "the entry removed; a tombstone where the writer deleted"
+        "a stale advertisement skipped by the reader, never deleted from the store; a tombstone older than the window removed"
       ],
       "guards": [],
       "may_trigger": [
@@ -484,15 +485,15 @@
       ],
       "may_inhibit": [],
       "depends_on": [],
-      "symbol": "store::Store::flush_expired",
-      "docs": "docs/guide/01-gossip-kv.md",
+      "symbol": "capability::CapEntry::is_fresh / ReqEntry::is_fresh / store::sweep_stale_tombstones",
+      "docs": "docs/guide/02-capabilities.md",
       "tests": [
-        "flush_expired",
-        "is_expired",
-        "default_ttl_secs"
+        "cap_entry_freshness",
+        "future_stamped_entry_is_quarantined_not_fresh",
+        "tombstone_gc_sweep_unpacks_hlc_timestamps"
       ],
       "trace": "catalogue_only",
-      "summary": "An advertisement its writer stopped refreshing leaves the view after its TTL; a stale view is possible in between."
+      "summary": "No entry carries a TTL. A capability or requirement advertisement its writer stopped refreshing is skipped by every reader once it is older than three refresh intervals (or that far in the future), and stays in the store until it is overwritten or tombstoned; a tombstone is collected by the GC sweep once it is older than the window. A stale view is possible in between."
     },
     {
       "id": "kv.propagation",

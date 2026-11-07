@@ -51,8 +51,8 @@ fails when a descriptor moves and the checked-in catalogue does not.
   with drop counts); a whole agent's replay decision for decision beyond what the scheduler seam covers
   ([what-is-proven § a persisted node's recording](../operations/what-is-proven.md#persisted-node-s-recording-replays-decision)).
   An absent trace in a bundle reads *trace unavailable*, never *no decisions*. A catalogue entry's code and test
-  citations are checked by review, not by the gate: `kv.expiry`'s cite code the tree does not have
-  ([gossip KV](gossip-kv.md)).
+  citations are checked by review, not by a gate: `kv.expiry` cited a function and tests the tree did not have until
+  its revision 2 ([gossip KV](gossip-kv.md)).
 - **Evidence:** the ledger row
   [a live node's recording replays decision for decision](../operations/what-is-proven.md#live-node-s-recording-replays-decision).
 
