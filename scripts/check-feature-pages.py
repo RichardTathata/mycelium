@@ -679,7 +679,8 @@ def check_page(root, feature, rows, fields, patterns, errors, tests_named):
             errors.append(f'{rel}: See it work does not link the example index')
 
     # (i) every id the registry gives this page
-    for i in feature.get('ids', []) + feature.get('links', []):
+    # A key of the wrong type is check_shape's error; skip it here rather than crash on it.
+    for i in [i for k in ('ids', 'links') if isinstance(feature.get(k, []), list) for i in feature.get(k, [])]:
         if not links_id(root, text, i):
             errors.append(f'{rel}: does not link {i}, which the registry gives it')
 

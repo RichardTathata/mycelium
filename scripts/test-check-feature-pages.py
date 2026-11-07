@@ -307,20 +307,20 @@ fails('has an unknown key `link`',
 case('unknown-top-level-key')
 fails('unknown top-level key `planted`', {REG: [('# The feature registry', 'planted = 1\n# The feature registry')]})
 case('list-key-not-a-list')
-fails('feature "Evidence journal": `links` must be a list of strings',
-      {REG: [('name = "Evidence journal"\npage = "todo"\n', 'name = "Evidence journal"\npage = "todo"\nlinks = "concept:planted"\n')]})
+fails('feature "Published node": `links` must be a list of strings',
+      {REG: [('name = "Published node"\npage = "published-node.md"\n', 'name = "Published node"\npage = "published-node.md"\nlinks = "concept:planted"\n')]})
 case('name-not-a-string')
 fails('`name` must be a string',
-      {REG: [('name = "Evidence journal"\n', 'name = 1\n')]})
+      {REG: [('name = "Published node"\n', 'name = 1\n')]})
 case('todo-without-planned')
-fails('feature "Authorising actions (the action evaluator)" is "todo" but names no `planned` page',
-      {REG: [('page = "todo"\nplanned = "action-authorisation"\n', 'page = "todo"\n')]})
+fails('feature "Published node" is "todo" but names no `planned` page',
+      {REG: [('page = "published-node.md"\n', 'page = "todo"\n')]})
 case('planned-names-existing-page')
 fails('names `planned` page "inference-routing", which is already the page of "Inference routing as policy"',
-      {REG: [('planned = "action-authorisation"\n', 'planned = "inference-routing"\n')]})
+      {REG: [('page = "published-node.md"\n', 'page = "todo"\nplanned = "inference-routing"\n')]})
 case('feature-without-page')
-fails('feature "Evidence journal" names no page',
-      {REG: [('name = "Evidence journal"\npage = "todo"\n', 'name = "Evidence journal"\n')]})
+fails('feature "Published node" names no page',
+      {REG: [('name = "Published node"\npage = "published-node.md"\n', 'name = "Published node"\n')]})
 
 # (b)
 case('page-not-in-registry')

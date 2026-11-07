@@ -17,7 +17,7 @@
 configuration or unit file that a test loads. No snippet of the page's own.
 For a feature enabled in code, open with "This feature is turned on in code", then one item per line: its name in
 backticks linked to the file that defines it, the last path segment a fn, struct, enum, trait or const there. A
-configuration field is its own line, `name` in backticks linked to ../reference/configuration.md#the-fields. End
+configuration field is its own line, `name` in backticks linked to ../reference/configuration.md#<field>. End
 with the test that runs that code: its name in backticks, a `fn <name>` in the linked file, listed by CI's test
 universe and matched by no entry of scripts/test-coverage-exceptions.txt; say so if it runs a hand-kept copy
 rather than reading the page. A guide snippet that no test runs is recorded as such; the gap goes to the
@@ -34,7 +34,8 @@ of scripts/test-coverage-exceptions.txt. The registry records `example: none`. -
 
 <!-- Guarantee and rule ids, each linked to where it is catalogued (a companion-registered id, such as stem.*, to
 where its states are described); the plan rows' *not built* items; the ../operations/what-is-proven.md ledger.
-Without a per-entry anchor, link the table and name the row beside the link. One short clause per headline limit,
+Link one entry by its anchor: guarantee-catalogue.md#<id>, a rule's heading, a ledger row's <a id>,
+configuration.md#<field>. A plan row has none: link its section and name the row. One short clause per headline limit,
 linked to where it is stated in full. Evidence status stays in the ledger. -->
 
 ## Go deeper
