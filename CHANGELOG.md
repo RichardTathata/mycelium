@@ -51,6 +51,25 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A stem runs only the artifact kinds its `[hosts].kinds` declares** (an independent review of #736, defect A).
+  `Provisioner::new` registers the WASM-component runtime unconditionally and `Stem::start` read `kinds` only to add
+  the blob runtime, so a stem whose unit said `kinds = ["blob"]` still installed and ran any third-party WASM
+  component a trusted catalogue line named — while `mycelium wire-check` and `docs/reference/unit-file.md` treated it
+  as unable to. A fuel policy (`fuel_per_call` / `operator_fuel_per_call`) re-registered the runtime too. The stem
+  now calls `Provisioner::restrict_kinds` with the declared kinds: the registered runtimes are exactly those,
+  `set_fuel_policy` and `register_runtime` leave an undeclared kind unregistered, and an entry of an undeclared kind
+  is refused at `prov.eligible` with the new reason `kind_not_declared` (rule revision 3; counted under
+  `mycelium_artifact_ineligible_skips_total{reason="kind_not_declared"}`). An empty or absent `kinds` hosts nothing,
+  as the reference already said, and the stem warns at start. A provisioner built in code without `restrict_kinds`
+  is unchanged. Upgrade note: `docs/guide/deprecations.md` §84.
+- **A cheaper bad catalogue line no longer stalls a presence floor** (an independent review of #736, defect B). The
+  floor chose the cheapest loadable entry for its capability and only then checked provenance and eligibility, so a
+  smaller line — unsigned, signed by an untrusted key, or of a kind this node has no runtime for — gossiped under
+  `installable/` by any member won every round, was refused every round, and the valid entry was never reached. The
+  floor now takes the cheapest entry that passes provenance and eligibility, as the demand path already did
+  (`prov.presence_floor` revision 2). The shadow, promotion and demand paths iterate every entry and did not have
+  this shape.
+
 - **A bulk call made as soon as `bulk_serve` returns is served** (a flake: CI run 42371240189, the strict
   `compliance,a2a` lib run, `a_bulk_call_completes_between_two_plaintext_gateways` — `Err(Timeout)`). `bulk_serve`
   registered its `invoke.bulk` receiver inside the task it spawned, so a ticket delivered before that task first ran

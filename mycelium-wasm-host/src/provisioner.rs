@@ -144,13 +144,19 @@ pub struct SupervisionPolicy {
 /// invariants** ([`supervise`](Self::supervise)) call for — both are just "desired state" the node
 /// reconciles locally, the same resolve-and-pull path. The
 /// [`WasmComponent`](ArtifactKind::WasmComponent) runtime is registered automatically; add more
-/// kinds via [`register_runtime`](Self::register_runtime).
+/// kinds via [`register_runtime`](Self::register_runtime), and declare exactly which kinds may run
+/// with [`restrict_kinds`](Self::restrict_kinds) (a stem passes its `[hosts].kinds`).
 pub struct Provisioner {
     agent:        Arc<GossipAgent>,
     catalog:      InstallableCatalog,
     source:       Arc<dyn ArtifactSource + Send + Sync>,
     /// Install dispatch: one runtime per [`ArtifactKind`] this node can host.
     runtimes:     HashMap<ArtifactKind, Arc<dyn ArtifactRuntime>>,
+    /// The kinds this node declared it may run ([`restrict_kinds`](Self::restrict_kinds) — a stem's
+    /// `[hosts].kinds`). `Some` ⇒ the registered runtimes are a subset of these, kept so by every
+    /// registration, and an entry of any other kind is refused by name (`kind_not_declared`).
+    /// `None` ⇒ undeclared: whatever runtimes are registered, as before.
+    declared_kinds: Option<Vec<ArtifactKind>>,
     /// Probability of self-electing to satisfy an unmet requirement on a given round (herd
     /// damping). `1.0` = always (fine for a single provisioner); lower it when many nodes run one.
     self_elect_p: f64,
@@ -269,6 +275,7 @@ impl Provisioner {
             catalog,
             source,
             runtimes,
+            declared_kinds: None,
             self_elect_p,
             trace: None,
             rounds: 0,
@@ -293,7 +300,13 @@ impl Provisioner {
     /// classification is the entry's verified `signer`, so pair this with
     /// [`require_provenance`](Self::require_provenance): without it a signer is a claim. Replaces
     /// the WASM runtime; installs already live keep the budget they were given.
+    ///
+    /// Under [`restrict_kinds`](Self::restrict_kinds) without `wasm-component`, there is no WASM
+    /// runtime to replace and none is registered.
     pub fn set_fuel_policy(&mut self, policy: FuelPolicy) {
+        if !self.kind_declared(ArtifactKind::WasmComponent) {
+            return;
+        }
         self.runtimes.insert(
             ArtifactKind::WasmComponent,
             Arc::new(
@@ -395,8 +408,32 @@ impl Provisioner {
 
     /// Register a runtime for an additional [`ArtifactKind`] (e.g. a blob/model runtime). A node
     /// only ever self-elects for kinds it has a runtime for — eligibility is node-local truth.
+    ///
+    /// Under [`restrict_kinds`](Self::restrict_kinds), a runtime for a kind not declared is not
+    /// registered (and a warning names it): the declaration is what this node may run.
     pub fn register_runtime(&mut self, runtime: Arc<dyn ArtifactRuntime>) {
-        self.runtimes.insert(runtime.kind(), runtime);
+        let kind = runtime.kind();
+        if !self.kind_declared(kind) {
+            tracing::warn!(?kind, "a runtime for a kind this node did not declare is not registered");
+            return;
+        }
+        self.runtimes.insert(kind, runtime);
+    }
+
+    /// Declare the artifact kinds this node may run — a stem's `[hosts].kinds` (#736's review, defect
+    /// A). Every registered runtime of another kind is dropped (the WASM-component runtime
+    /// [`new`](Self::new) registers included), later registrations of another kind are refused, and an
+    /// entry of another kind is refused at eligibility with reason `kind_not_declared`. An empty list
+    /// runs nothing. Not called ⇒ every registered runtime runs, as before.
+    pub fn restrict_kinds(&mut self, kinds: impl IntoIterator<Item = ArtifactKind>) {
+        let kinds: Vec<ArtifactKind> = kinds.into_iter().collect();
+        self.runtimes.retain(|k, _| kinds.contains(k));
+        self.declared_kinds = Some(kinds);
+    }
+
+    /// Is `kind` one this node may run (always, when no kinds were declared)?
+    fn kind_declared(&self, kind: ArtifactKind) -> bool {
+        self.declared_kinds.as_ref().is_none_or(|d| d.contains(&kind))
     }
 
     /// Replace the catalogue this provisioner resolves against — the gossiped catalogue is a
@@ -536,6 +573,14 @@ impl Provisioner {
             tracing::warn!(name = %entry.provides.name,
                 "an entry providing llm-meta/… is not installed: a model's metadata ad is its serving node's own");
             return Err("reserved_namespace");
+        }
+        if !self.kind_declared(entry.kind) {
+            self.ineligible.fetch_add(1, Ordering::Relaxed);
+            metrics::counter!("mycelium_artifact_ineligible_skips_total", "reason" => "kind_not_declared")
+                .increment(1);
+            tracing::debug!(ns = %entry.provides.namespace, name = %entry.provides.name,
+                kind = ?entry.kind, "kind not declared in [hosts].kinds — not electing");
+            return Err("kind_not_declared");
         }
         let Some(runtime) = self.runtimes.get(&entry.kind) else {
             self.ineligible.fetch_add(1, Ordering::Relaxed);
@@ -682,7 +727,7 @@ impl Provisioner {
         if shadow {
             entry.provides.name = Arc::from(shadow_name(&entry.provides.name));
         }
-        let Some(runtime) = self.runtimes.get(&entry.kind).map(Arc::clone) else {
+        let Some(runtime) = self.runtimes.get(&entry.kind).filter(|_| self.kind_declared(entry.kind)).map(Arc::clone) else {
             return StartOutcome::NoRuntime; // eligible() screens this; belt-and-braces for direct callers
         };
 
@@ -1055,36 +1100,51 @@ impl Provisioner {
                 }
                 continue; // invariant already satisfied across the fleet
             }
-            // Resolve the catalog for an artifact that would satisfy the invariant — a loadable
-            // one (D20: a proposal keeps no floor).
-            let Some(entry) = self
+            // Resolve the catalog for an artifact that would satisfy the invariant: a loadable one (D20: a
+            // proposal keeps no floor) that passes provenance and eligibility, the cheapest of those. The
+            // checks come before the choice, as on the demand path — a cheaper line that fails them (unsigned,
+            // an untrusted signer, a kind with no runtime here), gossiped by any member, would otherwise win
+            // every round and be refused every round, and the valid entry would never be reached (#736's review).
+            let mut candidates: Vec<InstallableEntry> = self
                 .catalog
                 .entries()
                 .iter()
                 .filter(|e| policy.filter.matches(&e.provides) && self.loadable(e))
-                .min_by_key(|e| (e.size_bytes, e.est_install_secs))
                 .cloned()
-            else {
+                .collect();
+            if candidates.is_empty() {
                 if let Some(t) = self.round_trace() {
                     t.record("prov.presence_floor", OutcomeKind::Refusal, "no_loadable_candidate", target, inputs(), None);
                 }
                 continue; // nothing loadable in the catalog provides it
-            };
-            let refused = if self.is_hosted(&entry.artifact) {
-                Some("already_hosted")
-            } else if !self.provenance_ok(&entry) {
-                Some("provenance_rejected")
-            } else if !self.eligible_traced(&entry, &target) {
-                Some("ineligible")
-            } else {
-                None
-            };
-            if let Some(reason) = refused {
+            }
+            // One install per floor here at a time: any candidate reserved or live on this node answers it.
+            if candidates.iter().any(|e| self.is_hosted(&e.artifact)) {
+                if let Some(t) = self.round_trace() {
+                    t.record("prov.presence_floor", OutcomeKind::Refusal, "already_hosted", target, inputs(), None);
+                }
+                continue;
+            }
+            candidates.retain(|e| self.provenance_ok(e));
+            candidates.sort_by_key(|e| (e.size_bytes, e.est_install_secs));
+            // Eligibility has side effects (counters, a `prov.eligible` record) and is evaluated once per
+            // candidate tried, cheapest first, stopping at the first that passes.
+            let mut chosen = None;
+            let mut any_tried = false;
+            for e in candidates {
+                any_tried = true;
+                if self.eligible_traced(&e, &target) {
+                    chosen = Some(e);
+                    break;
+                }
+            }
+            let Some(entry) = chosen else {
+                let reason = if any_tried { "ineligible" } else { "provenance_rejected" };
                 if let Some(t) = self.round_trace() {
                     t.record("prov.presence_floor", OutcomeKind::Refusal, reason, target, inputs(), None);
                 }
-                continue; // already reserved/hosted here, or fails policy
-            }
+                continue; // fails policy
+            };
             if !self.self_elects_traced(&target) {
                 if let Some(t) = self.round_trace() {
                     t.record("prov.presence_floor", OutcomeKind::Deferral, "self_election_declined", target, inputs(), None);
@@ -1604,6 +1664,89 @@ mod tests {
             prov.hosted_count(),
             prov.installing_count()
         );
+    }
+
+    /// #736's review, defect A, at the runtime map: once kinds are declared, neither a fuel policy nor
+    /// a direct registration puts back a runtime for a kind outside them (the eligibility refusal is
+    /// `a_blob_only_stem_never_installs_a_wasm_component`, in `stem.rs`). Seen failing first with the
+    /// guard in `set_fuel_policy` removed: the WASM runtime was back.
+    #[tokio::test]
+    async fn declared_kinds_hold_against_a_fuel_policy_and_a_registration() {
+        let agent = live_agent().await;
+        let host = Arc::new(WasmHost::new().expect("engine"));
+        let mut prov = Provisioner::new(Arc::clone(&agent), Arc::clone(&host), InstallableCatalog::new(), Arc::new(InMemorySource::new()), 1.0);
+        assert!(prov.runtimes.contains_key(&ArtifactKind::WasmComponent), "registered by new()");
+        prov.restrict_kinds([ArtifactKind::Blob]);
+        assert!(prov.runtimes.is_empty(), "the undeclared WASM runtime is dropped");
+        prov.set_fuel_policy(FuelPolicy { operator_publishers: Vec::new(), agent_budget: Some(1_000_000), operator_budget: None });
+        assert!(!prov.runtimes.contains_key(&ArtifactKind::WasmComponent), "a fuel policy does not re-register it");
+        prov.register_runtime(Arc::new(WasmComponentRuntime::new(host)));
+        assert!(!prov.runtimes.contains_key(&ArtifactKind::WasmComponent), "nor does a registration");
+        prov.register_runtime(Arc::new(crate::runtime::BlobRuntime::new(std::env::temp_dir())));
+        assert!(prov.runtimes.contains_key(&ArtifactKind::Blob), "a declared kind registers");
+        let entry = InstallableEntry::new(Capability::new("text", "echo"), ArtifactId::of(ECHO_COMPONENT));
+        assert_eq!(prov.eligibility(&entry), Err("kind_not_declared"));
+        agent.shutdown().await;
+    }
+
+    /// #736's review, defect B: the presence floor chose the cheapest loadable entry **before** checking
+    /// provenance and eligibility, so a smaller line for the same capability — unsigned, signed by a key
+    /// this node does not trust, or of a kind it has no runtime for, gossiped under `installable/` by any
+    /// member — won every round, was refused every round, and the valid entry was never reached. The
+    /// floor now picks the cheapest entry that passes both, as the demand path does. Seen failing first:
+    /// each case started nothing and recorded `provenance_rejected` or `ineligible`.
+    #[tokio::test]
+    async fn a_cheaper_bad_entry_does_not_stall_the_presence_floor() {
+        use ed25519_dalek::SigningKey;
+        let trusted = SigningKey::from_bytes(&[42u8; 32]);
+        let stranger = SigningKey::from_bytes(&[43u8; 32]);
+        for case in ["unsigned", "untrusted signer", "kind with no runtime"] {
+            // A node per case: a withdrawn install's tombstone need not have cleared the next case's view.
+            let agent = live_agent().await;
+            let host = Arc::new(WasmHost::new().expect("engine"));
+            let mut source = InMemorySource::new();
+            let good = source.insert(ECHO_COMPONENT.to_vec());
+            let bad = source.insert(b"a cheaper line".to_vec());
+            let cheap = InstallableEntry::new(Capability::new("text", "echo"), bad).with_cost(1, 1);
+            let cheap = match case {
+                "unsigned" => cheap,
+                "untrusted signer" => cheap.signed_by(&stranger),
+                _ => cheap.with_kind(ArtifactKind::Blob).signed_by(&trusted),
+            };
+            let mut catalog = InstallableCatalog::new();
+            catalog.add(cheap);
+            catalog.add(
+                InstallableEntry::new(Capability::new("text", "echo"), good)
+                    .with_cost(ECHO_COMPONENT.len() as u64, 1)
+                    .signed_by(&trusted),
+            );
+            let mut prov = Provisioner::new(Arc::clone(&agent), host, catalog, Arc::new(source), 1.0);
+            prov.require_provenance(vec![trusted.verifying_key().to_bytes()]);
+            prov.supervise(CapFilter::new("text", "echo"), 1);
+            let sink = Arc::new(mycelium::decision::DecisionSink::default());
+            prov.with_decision_trace(Arc::clone(&sink));
+            assert_eq!(prov.provision_round(), 1, "{case}: the floor reaches the valid entry: {:?}",
+                sink.snapshot().iter().map(|r| (r.rule.clone(), r.reason.clone())).collect::<Vec<_>>());
+            wait_live(&prov, 1).await;
+            assert!(prov.is_hosted(&good) && !prov.is_hosted(&bad), "{case}: the valid entry is the one installed");
+            assert!(sink.snapshot().iter().any(|r| r.rule == "prov.presence_floor" && r.reason == "below_floor"), "{case}");
+            agent.shutdown().await;
+        }
+        // Only bad entries: the floor refuses by the reason the best of them failed on.
+        let agent = live_agent().await;
+        let host = Arc::new(WasmHost::new().expect("engine"));
+        let mut source = InMemorySource::new();
+        let bad = source.insert(ECHO_COMPONENT.to_vec());
+        let mut catalog = InstallableCatalog::new();
+        catalog.add(InstallableEntry::new(Capability::new("text", "echo"), bad).signed_by(&stranger));
+        let mut prov = Provisioner::new(Arc::clone(&agent), host, catalog, Arc::new(source), 1.0);
+        prov.require_provenance(vec![trusted.verifying_key().to_bytes()]);
+        prov.supervise(CapFilter::new("text", "echo"), 1);
+        let sink = Arc::new(mycelium::decision::DecisionSink::default());
+        prov.with_decision_trace(Arc::clone(&sink));
+        assert_eq!(prov.provision_round(), 0);
+        assert!(sink.snapshot().iter().any(|r| r.rule == "prov.presence_floor" && r.reason == "provenance_rejected"));
+        agent.shutdown().await;
     }
 
     // ── Item 4 PR 4c: the provisioner against the rights ledger ──────────────────────────────

@@ -2527,3 +2527,18 @@ reads its gateway certificate and key, and its CA and node certificates, through
 `rustls` already depends on. The accepted inputs are the same (pinned by `tls::pem_parse_tests`): certificates in order
 with other sections skipped, PKCS#8, PKCS#1 and SEC1 keys by label, CRLF line endings, an encrypted key read as no key,
 a malformed section an error.
+
+## 84. A stem runs only the artifact kinds `[hosts].kinds` declares; `Provisioner` gained `restrict_kinds` (unreleased, review of #736, defect A)
+
+Before, every stem registered the WASM-component runtime whatever its unit said: `kinds` decided only whether the
+blob runtime was added. A stem declaring `kinds = ["blob"]` therefore installed and ran a WASM component whenever a
+`[[presence]]` floor or unmet demand named one and its catalogue line passed provenance. `mycelium wire-check` and the
+unit-file reference already read such a stem as unable to host components; the stem now agrees with them.
+
+- **Who is affected:** a stem whose `[hosts].kinds` omits `"wasm-component"` (including an empty or absent `kinds`)
+  and which nevertheless hosted components. After the upgrade it refuses them: each round records `prov.eligible`
+  refused with reason `kind_not_declared`, and `mycelium_artifact_ineligible_skips_total{reason="kind_not_declared"}`
+  rises. A stem with an empty `kinds` hosts nothing and warns at start.
+- **What to do:** add `"wasm-component"` to `[hosts].kinds` on every stem that is meant to host components; then
+  `mycelium wire-check` also counts it as a host for them. Code that builds a `Provisioner` directly is unaffected
+  unless it calls the new `Provisioner::restrict_kinds`.

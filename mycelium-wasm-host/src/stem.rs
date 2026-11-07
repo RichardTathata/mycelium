@@ -399,6 +399,18 @@ impl Stem {
                 if let Some(sink) = opts.trace.clone() {
                     prov.with_decision_trace(sink);
                 }
+                // `[hosts].kinds` is what this stem may run — exactly (#736's review, defect A): the
+                // WASM-component runtime `Provisioner::new` registers goes unless it is declared, as
+                // `wire-check` and the unit-file reference already read it.
+                let kinds = h
+                    .kinds
+                    .iter()
+                    .map(|k| crate::tools::kind_from_name(k).ok_or_else(|| StemError(format!("hosts.kinds: unknown artifact kind {k:?}"))))
+                    .collect::<Result<Vec<_>, _>>()?;
+                if kinds.is_empty() {
+                    tracing::warn!("[hosts] kinds is empty: this stem hosts no artifact kind and installs nothing");
+                }
+                prov.restrict_kinds(kinds);
                 if h.kinds.iter().any(|k| k == "blob") {
                     let root = h.placement_root.clone().unwrap_or_else(|| "artifacts".into());
                     let mut blob = BlobRuntime::new(root);
@@ -1100,6 +1112,72 @@ mod tests {
             stage_dir: None,
             max_stage_bytes: crate::DEFAULT_MAX_STAGE_BYTES,
         }
+    }
+
+    /// #736's review, defect A: `[hosts].kinds` is what this stem may run, and nothing else. A stem
+    /// declaring only `blob` still registered the WASM-component runtime (`Provisioner::new` adds it, and
+    /// a fuel policy re-added it), so it installed and ran a third-party component that `wire-check` and
+    /// the unit-file reference say it cannot host. Now the declared kinds are the registered runtimes
+    /// exactly, and the refusal is recorded by name (`prov.eligible` → `kind_not_declared`). Seen failing
+    /// first: the component installed beside the blob and no such record was made.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_blob_only_stem_never_installs_a_wasm_component() {
+        let lib_dir = scratch("kinds-lib");
+        let lib = Arc::new(FsLibrarySource::open(&lib_dir).unwrap());
+        let key = SigningKey::from_bytes(&[11u8; 32]);
+        let blob = lib.store(b"a data pack").unwrap();
+        let component = lib.store(ECHO_COMPONENT).unwrap();
+        Manifest::from_entries(vec![
+            InstallableEntry::new(Capability::new("data", "pack"), blob)
+                .with_kind(crate::artifact::ArtifactKind::Blob)
+                .with_cost(11, 1)
+                .signed_by(&key),
+            InstallableEntry::new(Capability::new("route", "optimize"), component)
+                .with_cost(ECHO_COMPONENT.len() as u64, 1)
+                .signed_by(&key),
+        ])
+        .save(&lib_dir.join(MANIFEST_FILE))
+        .unwrap();
+        let seed = agent(alloc_port(), None).await;
+        let _librarian = spawn_librarian(
+            Arc::clone(&seed),
+            Arc::clone(&lib) as Arc<_>,
+            LibrarianConfig {
+                manifest_path: lib_dir.join(MANIFEST_FILE),
+                publisher:     key.verifying_key().to_bytes(),
+                sync_interval: Duration::from_millis(200),
+                manifest_source: None,
+            },
+        );
+        let publisher_hex: String = key.verifying_key().to_bytes().iter().map(|b| format!("{b:02x}")).collect();
+        // `fuel_per_call` too: the fuel policy used to re-register the WASM runtime it meters.
+        let units = NodeCapabilityConfig::from_toml_str(&format!(
+            "principal=\"stem\"\n[hosts]\nkinds=[\"blob\"]\ntrusted_publishers=[\"ed25519:{publisher_hex}\"]\n\
+             fuel_per_call=100000000\nplacement_root=\"{}\"\n\
+             [[presence]]\nns=\"data\"\nname=\"pack\"\nmin_providers=1\n\
+             [[presence]]\nns=\"route\"\nname=\"optimize\"\nmin_providers=1\n",
+            lib_dir.join("placed").display()
+        ))
+        .unwrap();
+        let node = agent(alloc_port(), Some(seed.node_id().to_socket_addr().port())).await;
+        let sink = Arc::new(mycelium::decision::DecisionSink::default());
+        let opts = StemOptions { trace: Some(Arc::clone(&sink)), ..stem_opts(&lib_dir) };
+        let stem = Stem::start(Arc::clone(&node), &units, opts).unwrap();
+        let refused = || {
+            sink.snapshot().iter().any(|r| {
+                r.rule == "prov.eligible" && r.reason == "kind_not_declared" && r.target.as_deref() == Some("route/optimize")
+            })
+        };
+        assert!(wait_until(30, || stem.hosted_count() >= 1 && refused()).await,
+            "the blob is hosted and the component refused by name (hosted={})", stem.hosted_count());
+        // A few more rounds: the component is never installed, and this node never provides it.
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert_eq!(stem.hosted_count(), 1, "only the blob");
+        let optimize = CapFilter::new("route", "optimize");
+        assert!(!node.capabilities().resolve(&optimize).iter().any(|(n, _)| n == node.node_id()));
+        stem.stop().await;
+        node.shutdown().await;
+        seed.shutdown().await;
     }
 
     /// X2 (the model demos' gap): a unit's `[[activation]]` hands a placed blob to the local
