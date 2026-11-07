@@ -48,6 +48,8 @@ struct Opts {
     /// `/a2a` mounted.
     #[cfg_attr(not(feature = "a2a"), allow(dead_code))]
     a2a: bool,
+    /// SPIKE S-cancel: another member principal allowed to call this node's tool without a grant.
+    allow_member: Option<String>,
 }
 
 async fn node_with(http_port: u16, opts: Opts) -> (Arc<GossipAgent>, std::path::PathBuf, Arc<AtomicUsize>) {
@@ -100,7 +102,8 @@ async fn node_with(http_port: u16, opts: Opts) -> (Arc<GossipAgent>, std::path::
             .map_action("grant.revoke", "*")
             .allow(Rule::new(SUPERVISOR, "grant.revoke", &tool))
             .allow(Rule::new(SUPERVISOR, "grant.issue", "*"))
-            .allow(Rule::new(SUPERVISOR, "grant.revoke", "*")),
+            .allow(Rule::new(SUPERVISOR, "grant.revoke", "*"))
+            .allow(Rule::new(opts.allow_member.as_deref().unwrap_or("node:none"), "tools/call", &tool)),
     ));
     let mut entitlements = EntitlementTable::new();
     entitlements.entitle_grants(PrincipalId::new(&node_principal).unwrap());
@@ -1114,4 +1117,104 @@ async fn an_answer_the_disk_will_not_take_is_refused_and_the_request_stays_pendi
     assert!(matches!(err, PolicyViolation::GrantRefused(_)), "{err}");
     a.shutdown().await;
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// SPIKE S-cancel (identity-and-lifecycle wave 1b), end to end over two TLS nodes: throwaway, never merged. Node A
+/// stands in for the admitting gateway: it mints a `call:` mandate (holder and issuer A), its possession proof and its
+/// first checkpoint, and calls B's slow tool directly — B, the provider, has never seen the checkpoint in any KV.
+/// Carried in the envelope, the mandate is established at B and the work is registered; A then revokes by writing the
+/// revoking checkpoint where a grant's travels (`grant/{holder}/{term}/checkpoint`), and B's sweep stops the call.
+/// Without the carried checkpoint the same call is not registered, and the revocation cannot stop it. Also: KV gossip
+/// latency A → B, the cost of a bounded wait. Run with `--nocapture --test-threads=1`.
+#[tokio::test]
+async fn spike_s_cancel_end_to_end_over_two_nodes() {
+    use crate::agent::gateway_authority::{mandate_operation, possession_request, PresentedMandate};
+    use crate::mandate::authority::{RevocationCheckpoint, SignedRevocationCheckpoint};
+    use crate::mandate::grant::{possession_message, SignedMandateGrant, CALL_SCOPE_PREFIX};
+    use crate::mandate::{Mandate, TermId};
+    use base64::Engine as _;
+    let (http_a, http_b) = (alloc_port(), alloc_port());
+    let cert_dir = std::env::temp_dir().join(format!("spike-s-cancel-{http_a}"));
+    let _ = std::fs::remove_dir_all(&cert_dir);
+    let (a, _ja, _ran_a) = node_with(http_a, Opts { cert_dir: Some(cert_dir.clone()), ..Opts::default() }).await;
+    let a_principal = crate::agent::gateway_caller::node_principal(a.node_id());
+    let (b, _jb, ran_b) = node_with(http_b, Opts {
+        cert_dir: Some(cert_dir.clone()), bootstrap: vec![a.node_id().clone()], fleet_grants: true,
+        freshness_ms: Some(2_000), slow_ms: 3_000, allow_member: Some(a_principal.clone()), ..Opts::default()
+    }).await;
+    let knows = |x: &GossipAgent, n: &NodeId| x.task_ctx.peer_keys.pin().get(n).is_some_and(|k| !k.is_empty());
+    assert!(until(|| knows(&a, b.node_id()) && knows(&b, a.node_id()), Duration::from_secs(15)).await, "keys learned");
+
+    // Gossip latency A → B for one KV write, twenty samples: what a bounded wait for a checkpoint would cost.
+    let mut gossip_ms = Vec::new();
+    for i in 0..20 {
+        let key = format!("spike/lat/{i}");
+        let t = std::time::Instant::now();
+        a.kv().set(key.clone(), vec![1u8; 300]);
+        assert!(until(|| mycelium_core::ops::kv_get(&b.task_ctx, &key).is_some(), Duration::from_secs(10)).await);
+        gossip_ms.push(t.elapsed().as_secs_f64() * 1e3);
+    }
+    gossip_ms.sort_by(|x, y| x.partial_cmp(y).unwrap());
+    println!("S6 gossip A→B, 20 writes (ms): min {:.1} p50 {:.1} max {:.1}", gossip_ms[0], gossip_ms[10], gossip_ms[19]);
+
+    let key = a.task_ctx.tls.get().unwrap().signing_key();
+    let resource = format!("tool:deploy@{}", b.node_id());
+    let args = serde_json::json!({"env": "prod"});
+    let digest = crate::agent::gateway_authority::arguments_digest(&args);
+    let now = a.task_ctx.hlc.decision_now_ms();
+    let mint = |id: &str, carry: bool| {
+        let scope = format!("{CALL_SCOPE_PREFIX}{id}");
+        let m = Mandate {
+            holder: PrincipalId::new(&a_principal).unwrap(), established_by: PrincipalId::new(&a_principal).unwrap(),
+            purpose: format!("call {id}"), scope: scope.clone(), operations: vec![mandate_operation("tools/call", &resource)],
+            epoch: 1, term: TermId::new(id).unwrap(), valid_from_ms: now, valid_until_ms: now + 60_000,
+        };
+        let grant = SignedMandateGrant { signature: mycelium_core::tls::sign_bytes(&key, &m.canonical_bytes()).to_vec(), mandate: m };
+        let proof = mycelium_core::tls::sign_bytes(&key, &possession_message(&grant.mandate, &possession_request("tools/call", &resource, &digest)));
+        let cp = |seq: u64, revoked: &[&str]| {
+            let c = RevocationCheckpoint { authority: PrincipalId::new(&a_principal).unwrap(), scope: scope.clone(), seq,
+                issued_at_ms: a.task_ctx.hlc.decision_now_ms(), revoked: revoked.iter().map(|t| TermId::new(t).unwrap()).collect() };
+            SignedRevocationCheckpoint { signature: mycelium_core::tls::sign_bytes(&key, &c.canonical_bytes()).to_vec(), checkpoint: c }
+        };
+        let first = cp(1, &[]);
+        let revoking = cp(2, &[id]);
+        let p = PresentedMandate { grant, possession: base64::engine::general_purpose::STANDARD.encode(proof), checkpoint: carry.then_some(first) };
+        (serde_json::to_value(&p).unwrap(), revoking)
+    };
+    let authority_b = Arc::clone(b.task_ctx.execution_authority.get().unwrap());
+    let payload = serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "deploy", "arguments": args}}).to_string();
+
+    for (id, carry) in [("cx1", true), ("cx0", false)] {
+        let (mandate, revoking) = mint(id, carry);
+        let (a2, target, pl, res, m2) = (Arc::clone(&a), b.node_id().clone(), payload.clone(), resource.clone(), mandate.clone());
+        let sent = std::time::Instant::now();
+        let call = tokio::spawn(async move { a2.service().rpc_call_with_mandate(target, "mcp.invoke", pl.into_bytes(), &m2, &res, Duration::from_secs(10)).await });
+        let registered = until(|| authority_b.running_count() == 1, Duration::from_millis(2_000)).await;
+        let reg_ms = sent.elapsed().as_secs_f64() * 1e3;
+        assert!(!scan_kv_prefix_has(&b, &format!("{CALL_SCOPE_PREFIX}{id}")), "no checkpoint for the call is in B's KV");
+        // A revokes: the revoking checkpoint where a grant's travels, gossiped to B, fed to B's authority by its feeder.
+        let revoked_at = std::time::Instant::now();
+        a.kv().set(format!("grant/{a_principal}/{id}/checkpoint"), serde_json::to_vec(&revoking).unwrap());
+        let reply = call.await.unwrap();
+        let stop_ms = revoked_at.elapsed().as_secs_f64() * 1e3;
+        let text = match &reply { Ok(b) => String::from_utf8_lossy(b).into_owned(), Err(e) => e.to_string() };
+        println!("S7 carry={carry}: registered at B={registered} ({reg_ms:.1} ms after send); revocation → call ended {stop_ms:.1} ms later; ran_b={}; reply: {}", ran_b.load(Ordering::SeqCst), &text[..text.len().min(160)]);
+        if carry {
+            assert!(registered, "the carried checkpoint established the mandate at B and the work was registered");
+            assert!(stop_ms < 2_500.0, "stopped by the revocation, not run to completion: {stop_ms} ms");
+            assert_eq!(ran_b.load(Ordering::SeqCst), 0);
+        } else {
+            assert!(!registered, "without the checkpoint B could not establish the mandate, so nothing was registered");
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+    println!("S7 tool completions at B: {} (the uncarried call ran to completion)", ran_b.load(Ordering::SeqCst));
+    a.shutdown().await;
+    b.shutdown().await;
+    let _ = std::fs::remove_dir_all(&cert_dir);
+}
+
+/// Is any key in `n`'s KV containing `needle`?
+fn scan_kv_prefix_has(n: &GossipAgent, needle: &str) -> bool {
+    crate::store::scan_kv_prefix(&n.task_ctx.kv_state, "").iter().any(|(k, _)| k.contains(needle))
 }

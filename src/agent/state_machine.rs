@@ -642,7 +642,7 @@ impl AgentStateMachine {
                 let resource = format!("tool:{tool}@{}", self.ctx.node_id);
                 let request_bytes = possession_request("tools/call", &resource, &digest);
                 let proof = mycelium_core::tls::sign_bytes(&tls.signing_key(), &possession_message(&grant.mandate, &request_bytes));
-                let presented = PresentedMandate { grant, possession: base64::Engine::encode(&base64::engine::general_purpose::STANDARD, proof) };
+                let presented = PresentedMandate { grant, possession: base64::Engine::encode(&base64::engine::general_purpose::STANDARD, proof), checkpoint: None };
                 // Verified here, by this node's own authority, before the transition commits.
                 let Some(authority) = self.ctx.execution_authority.get() else {
                     return Err(PolicyViolation::GrantRefused(format!("{tool}: no execution authority is attached to verify the grant")));

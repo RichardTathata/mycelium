@@ -278,7 +278,10 @@ impl RevocationView {
         // own window bounds its life — so a view started after the grant was issued (a restarted node, a node that
         // joined later) must still be able to hold it, or every grant issued before a restart is refused after it.
         // Sequence and signature still apply.
-        let grant_scope = c.scope.starts_with(crate::mandate::grant::GRANT_SCOPE_PREFIX);
+        let grant_scope = c.scope.starts_with(crate::mandate::grant::GRANT_SCOPE_PREFIX)
+            // SPIKE S-cancel: a `call:` checkpoint is a grant's in this respect — one checkpoint at admission, the next
+            // only to revoke, its life bounded by the mandate's own window.
+            || c.scope.starts_with(crate::mandate::grant::CALL_SCOPE_PREFIX);
         if !grant_scope
             && let Some(t0) = self.started_at_ms
             && c.issued_at_ms.saturating_add(2 * clock.skew_ms) < t0
@@ -330,6 +333,20 @@ impl RevocationView {
     /// revoke, so freshness does not apply: a revocation seen is `Revoked`, a scope with a checkpoint is
     /// `NotRevoked`, and a scope this view has never heard of is `Unknown` — a grant whose issuer's checkpoint has
     /// not reached this verifier is not established. Revocation reaches a verifier when its checkpoint does.
+    /// SPIKE S-cancel: forget everything held for `(authority, scope)` — the memory-reclamation hook for a `call:`
+    /// scope whose mandate's window has passed. Returns whether anything was held.
+    pub fn forget(&mut self, authority: &PrincipalId, scope: &str) -> bool {
+        let key = (authority.clone(), scope.to_string());
+        let a = self.newest.remove(&key).is_some();
+        let b = self.revoked.remove(&key).is_some();
+        a || b
+    }
+
+    /// SPIKE S-cancel: how many `(authority, scope)` entries the view holds — newest checkpoints, revoked sets.
+    pub fn sizes(&self) -> (usize, usize) {
+        (self.newest.len(), self.revoked.len())
+    }
+
     pub fn grant_standing(&self, authority: &PrincipalId, scope: &str, term: &TermId) -> RevocationStanding {
         let key = (authority.clone(), scope.to_string());
         if self.revoked.get(&key).is_some_and(|r| r.contains(term)) {

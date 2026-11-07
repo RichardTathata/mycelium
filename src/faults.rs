@@ -1218,7 +1218,7 @@ mod revoke {
         let grant = SignedMandateGrant { signature: sign(&authority_key, &mandate.canonical_bytes()), mandate };
         let digest = [7u8; 32];
         let proof = sign(&holder_key, &possession_message(&grant.mandate, &possession_request(&operation, &resource, &digest)));
-        let presented = PresentedMandate { grant, possession: base64_encode(&proof) };
+        let presented = PresentedMandate { grant, possession: base64_encode(&proof), checkpoint: None };
         let established = authority.assess(&holder_name, &operation, &resource, &digest, Some(&presented), now + 2_000, &members);
         let was_established = matches!(established.binding.as_ref().map(|b| &b.state), Some(MandateState::Established));
         let c1 = RevocationCheckpoint { authority: authority_id, scope: decl.scope.clone(), seq: 2, issued_at_ms: now + 3_000, revoked: std::iter::once(term).collect() };

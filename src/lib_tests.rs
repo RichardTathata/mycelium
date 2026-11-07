@@ -14015,7 +14015,7 @@ async fn test_boundary_h_a1_gateway_establishes_mandates_end_to_end() {
         &holder_key,
         &possession_message(&grant.mandate, &possession_request("skill.invoke", &resource, &digest)),
     );
-    let presented = PresentedMandate { grant, possession: base64::engine::general_purpose::STANDARD.encode(proof) };
+    let presented = PresentedMandate { grant, possession: base64::engine::general_purpose::STANDARD.encode(proof), checkpoint: None };
 
     let send = |meta: Option<serde_json::Value>| {
         let mut params = serde_json::json!({
@@ -14233,6 +14233,7 @@ async fn test_c3_provider_enforcement_decides_direct_member_calls() {
     let presented = serde_json::to_value(PresentedMandate {
         grant,
         possession: base64::engine::general_purpose::STANDARD.encode(proof),
+        checkpoint: None,
     })
     .unwrap();
     let r = reply(agent.service().rpc_call_with_mandate(me.clone(), "mcp.invoke", payload.clone(), &presented, &tool, Duration::from_secs(5)).await.unwrap());
@@ -14373,7 +14374,7 @@ async fn test_c10_running_work_stops_when_its_authority_lapses() {
     let present = |op: &str, res: &str, arguments: &serde_json::Value| {
         let digest = crate::agent::action_evaluator::arguments_digest(&serde_json::to_vec(arguments).unwrap());
         let proof = agent.sign_with_identity(&possession_message(&grant.mandate, &possession_request(op, res, &digest))).unwrap();
-        serde_json::to_value(PresentedMandate { grant: grant.clone(), possession: base64::engine::general_purpose::STANDARD.encode(proof) }).unwrap()
+        serde_json::to_value(PresentedMandate { grant: grant.clone(), possession: base64::engine::general_purpose::STANDARD.encode(proof), checkpoint: None }).unwrap()
     };
 
     let tool_args = serde_json::json!({});
@@ -14534,7 +14535,7 @@ async fn test_c11_a_quiet_gateway_still_sees_a_mandate_expire() {
 
     let grant = SignedMandateGrant { signature: mycelium_core::tls::sign_bytes(&authority_key, &mandate.canonical_bytes()).to_vec(), mandate };
     let proof = mycelium_core::tls::sign_bytes(&holder_key, &possession_message(&grant.mandate, &possession_request("skill.invoke", &resource, &digest)));
-    let presented = PresentedMandate { grant, possession: base64::engine::general_purpose::STANDARD.encode(proof) };
+    let presented = PresentedMandate { grant, possession: base64::engine::general_purpose::STANDARD.encode(proof), checkpoint: None };
 
     // A node that has heard nothing for an hour.
     agent.task_ctx.hlc.force_state_for_tests(mycelium_core::hlc::pack(an_hour_ago, 0));
@@ -14735,11 +14736,11 @@ async fn test_c7_the_bypass_matrix_no_door_runs_revoked_work() {
     let digest_of = |v: &serde_json::Value| crate::agent::action_evaluator::arguments_digest(&serde_json::to_vec(v).unwrap());
     let client_mandate = |op: &str, res: &str, args: &serde_json::Value| {
         let proof = mycelium_core::tls::sign_bytes(&holder_key, &possession_message(&client_grant.mandate, &possession_request(op, res, &digest_of(args))));
-        serde_json::to_value(PresentedMandate { grant: client_grant.clone(), possession: base64::engine::general_purpose::STANDARD.encode(proof) }).unwrap()
+        serde_json::to_value(PresentedMandate { grant: client_grant.clone(), possession: base64::engine::general_purpose::STANDARD.encode(proof), checkpoint: None }).unwrap()
     };
     let member_mandate = |op: &str, res: &str, args: &serde_json::Value| {
         let proof = agent.sign_with_identity(&possession_message(&member_grant.mandate, &possession_request(op, res, &digest_of(args)))).unwrap();
-        serde_json::to_value(PresentedMandate { grant: member_grant.clone(), possession: base64::engine::general_purpose::STANDARD.encode(proof) }).unwrap()
+        serde_json::to_value(PresentedMandate { grant: member_grant.clone(), possession: base64::engine::general_purpose::STANDARD.encode(proof), checkpoint: None }).unwrap()
     };
 
     let http = reqwest::Client::new();

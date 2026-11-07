@@ -85,7 +85,7 @@ async fn an_operator_can_build_attach_and_use_an_execution_authority() {
     let grant = SignedMandateGrant { signature: sign(&authority_key, &mandate.canonical_bytes()), mandate };
     let digest = [5u8; 32];
     let proof = sign(&holder_key, &possession_message(&grant.mandate, &possession_request(op, res, &digest)));
-    let presented = PresentedMandate { grant, possession: base64::engine::general_purpose::STANDARD.encode(proof) };
+    let presented = PresentedMandate { grant, possession: base64::engine::general_purpose::STANDARD.encode(proof), checkpoint: None };
 
     let a = authority.assess(CALLER, op, res, &digest, Some(&presented), t + 2_000, &no_members);
     assert_eq!(a.binding.map(|b| b.state), Some(MandateState::Established));

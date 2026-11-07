@@ -226,6 +226,11 @@ pub enum MandateRefusal {
     GrantUsed {
         door: String,
     },
+    /// SPIKE S-cancel: a `call:`-scoped mandate whose term its issuing gateway revoked — the cancel (D2: a revoked
+    /// term is `Refused`, not `Unknown`).
+    Revoked {
+        term: String,
+    },
 }
 
 impl std::fmt::Display for MandateRefusal {
@@ -248,6 +253,8 @@ impl std::fmt::Display for MandateRefusal {
                 write!(f, "the grant is bound to policy revision {bound:?}, the call was decided under {decided:?}"),
             Self::GrantUsed { door } =>
                 write!(f, "the grant was already used at {door}: a grant admits one call at each door"),
+            Self::Revoked { term } =>
+                write!(f, "the call's mandate (term {term:?}) is revoked: the call was cancelled"),
         }
     }
 }

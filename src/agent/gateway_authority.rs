@@ -59,6 +59,10 @@ pub struct PresentedMandate {
     /// Base64 of the holder's signature over
     /// `possession_message(grant, possession_request(operation, resource, arguments_digest))`.
     pub possession: String,
+    /// SPIKE S-cancel: the mandate's first revocation checkpoint, carried beside it so a provider can establish a
+    /// `call:` mandate before the checkpoint gossips. Absent on every mandate today.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint: Option<SignedRevocationCheckpoint>,
 }
 
 /// The resource as a grant names it: everything before the resolved provider's `@`.
@@ -100,6 +104,9 @@ struct AuthorityState {
     gate: ExecutionGate,
     verifier: GrantVerifier,
     revocations: RevocationView,
+    /// SPIKE S-cancel: each `call:` scope the view holds, with its mandate's `valid_until_ms` — what the sweep
+    /// reclaims once the window has passed.
+    call_windows: std::collections::HashMap<(crate::mandate::PrincipalId, String), u64>,
 }
 
 /// A gateway's execution authority: attached with `GossipAgent::with_execution_authority`.
@@ -260,7 +267,7 @@ impl ExecutionAuthority {
     /// holders on the configured-external path.
     pub fn new(gate: ExecutionGate, verifier: GrantVerifier, external: TrustedExternalIssuers) -> Self {
         Self {
-            state: Mutex::new(AuthorityState { gate, verifier, revocations: RevocationView::new() }),
+            state: Mutex::new(AuthorityState { gate, verifier, revocations: RevocationView::new(), call_windows: std::collections::HashMap::new() }),
             external,
             durable: std::sync::OnceLock::new(),
             running: Mutex::new(std::collections::HashMap::new()),
@@ -292,6 +299,28 @@ impl ExecutionAuthority {
     pub fn release_grant_use(&self, holder: &str, scope: &str, term: &str, door: &str) {
         let mut used = self.used_grants.lock().unwrap_or_else(|e| e.into_inner());
         used.remove(&(holder.to_string(), scope.to_string(), term.to_string(), door.to_string()));
+    }
+
+    /// SPIKE S-cancel: **the memory-reclamation hook** — forget every `call:` scope whose mandate's window has passed:
+    /// its checkpoints and its revoked set. Kept until the window ends, not until the work ends, so a revoked `call:`
+    /// mandate presented again with its first checkpoint still reads revoked (a replay inside the window). Returns how
+    /// many scopes were reclaimed.
+    pub fn reclaim_calls(&self, now_ms: u64) -> usize {
+        let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let st = &mut *st;
+        let expired: Vec<_> = st.call_windows.iter().filter(|(_, until)| **until < now_ms).map(|(k, _)| k.clone()).collect();
+        for k in &expired {
+            st.revocations.forget(&k.0, &k.1);
+            st.call_windows.remove(k);
+        }
+        expired.len()
+    }
+
+    /// SPIKE S-cancel: the view's sizes — `(newest checkpoints, revoked sets, call windows)`.
+    pub fn view_sizes(&self) -> (usize, usize, usize) {
+        let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let (a, b) = st.revocations.sizes();
+        (a, b, st.call_windows.len())
     }
 
     /// Does this authority already hold a checkpoint of `authority` for `scope` at or past `seq`?
@@ -333,6 +362,7 @@ impl ExecutionAuthority {
         use std::sync::atomic::Ordering;
         // The single-use claims of grants whose window has passed (the marker on the WAL keeps the durable half).
         self.used_grants.lock().unwrap_or_else(|e| e.into_inner()).retain(|_, until| *until > now_ms);
+        self.reclaim_calls(now_ms);
         // Snapshot under row 48, check under row 43, cancel under row 48: never both at once.
         let snapshot: Vec<(u64, AuthorizedWork)> = self
             .running
@@ -351,7 +381,7 @@ impl ExecutionAuthority {
                     // own window and its issuer's checkpoint for the grant's scope — not by the resource gate, whose
                     // scope and epoch rules a grant's own scope would fail at the first sweep (a defect of the first PR,
                     // unobserved because no granted handler ran longer than one sweep interval).
-                    Some(m) if m.is_grant() => {
+                    Some(m) if m.is_grant() || m.is_call() => {
                         now_ms > w.not_after_ms
                             || matches!(st.revocations.grant_standing(&m.established_by, &m.scope, &m.term), RevocationStanding::Revoked)
                     }
@@ -497,6 +527,17 @@ impl ExecutionAuthority {
             }
         }
 
+        // SPIKE S-cancel: a `call:` mandate's first checkpoint, carried beside it, offered before the standing is read —
+        // only for the mandate's own authority and scope, so a carried checkpoint can speak for nothing else.
+        if m.is_call()
+            && let Some(cp) = &p.checkpoint
+            && cp.checkpoint.authority == m.established_by
+            && cp.checkpoint.scope == m.scope
+            && !self.holds_checkpoint(&cp.checkpoint.authority, &cp.checkpoint.scope, cp.checkpoint.seq)
+        {
+            let _ = self.offer_checkpoint(cp, now_ms, members);
+        }
+
         let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let st = &mut *st;
         match st.verifier.check(&p.grant, &request, Some(&proof), now_ms, members, &self.external) {
@@ -530,6 +571,31 @@ impl ExecutionAuthority {
                 },
                 RevocationStanding::Revoked => unknown(GRANT_REVOKED.into()),
                 RevocationStanding::Unknown => unknown("the grant's issuer's checkpoint has not reached this verifier".into()),
+            };
+        }
+
+        // SPIKE S-cancel: a `call:` mandate is judged as a grant is — its window and its issuer's checkpoint for its own
+        // scope — and a revoked term is `Refused`, not `Unknown` (D2).
+        if m.is_call() {
+            if !m.permits(&mandate_operation(operation, resource)) {
+                return refused(MandateRefusal::NotEnumerated { operation: mandate_operation(operation, resource) });
+            }
+            return match st.revocations.grant_standing(&m.established_by, &m.scope, &m.term) {
+                RevocationStanding::NotRevoked => {
+                    st.call_windows.insert((m.established_by.clone(), m.scope.clone()), m.valid_until_ms);
+                    Assessment {
+                        binding: Some(
+                            MandateBinding::established(m.holder.clone(), m.term.clone(), m.scope.clone(), m.epoch)
+                                .with_facts(Some(digest_hex), None),
+                        ),
+                        valid_until_ms: Some(m.valid_until_ms),
+                    }
+                }
+                RevocationStanding::Revoked => {
+                    st.call_windows.insert((m.established_by.clone(), m.scope.clone()), m.valid_until_ms);
+                    refused(MandateRefusal::Revoked { term: m.term.as_str().to_string() })
+                }
+                RevocationStanding::Unknown => unknown("the call's checkpoint has not reached this verifier".into()),
             };
         }
 
@@ -615,7 +681,7 @@ pub(crate) mod tests {
     pub(crate) fn present(authority: &SigningKey, holder: &SigningKey, m: Mandate, digest: &[u8; 32]) -> PresentedMandate {
         let grant = SignedMandateGrant { signature: mycelium_core::tls::sign_bytes(authority, &m.canonical_bytes()).to_vec(), mandate: m };
         let proof = mycelium_core::tls::sign_bytes(holder, &possession_message(&grant.mandate, &possession_request(OP, RES, digest)));
-        PresentedMandate { grant, possession: base64::engine::general_purpose::STANDARD.encode(proof) }
+        PresentedMandate { grant, possession: base64::engine::general_purpose::STANDARD.encode(proof), checkpoint: None }
     }
 
     pub(crate) fn checkpoint(authority: &SigningKey, seq: u64, at: u64, revoked: &[&str]) -> SignedRevocationCheckpoint {
@@ -772,7 +838,7 @@ pub(crate) mod tests {
             };
             let signature = crate::tls::sign_bytes(&authority_key, &m.canonical_bytes()).to_vec();
             let possession = crate::tls::sign_bytes(&holder, &possession_message(&m, &possession_request(OP, RES, &digest)));
-            PresentedMandate { grant: SignedMandateGrant { mandate: m, signature }, possession: base64::engine::general_purpose::STANDARD.encode(possession) }
+            PresentedMandate { grant: SignedMandateGrant { mandate: m, signature }, possession: base64::engine::general_purpose::STANDARD.encode(possession), checkpoint: None }
         };
         // A fresh checkpoint from the issuing authority, so revocation standing is known.
         let checkpoint = |seq: u64, revoked: &[&str], at: u64, scope: &str| {
@@ -800,7 +866,7 @@ pub(crate) mod tests {
         // Other arguments: refused by name, before anything else.
         let other = [10u8; 32];
         let possession = crate::tls::sign_bytes(&holder, &possession_message(&g1.grant.mandate, &possession_request(OP, RES, &other)));
-        let g1_other = PresentedMandate { grant: g1.grant.clone(), possession: base64::engine::general_purpose::STANDARD.encode(possession) };
+        let g1_other = PresentedMandate { grant: g1.grant.clone(), possession: base64::engine::general_purpose::STANDARD.encode(possession), checkpoint: None };
         assert!(matches!(a.assess(CALLER, OP, RES, &other, Some(&g1_other), 5_000, &members).binding.unwrap().state,
             MandateState::Refused(MandateRefusal::BoundToOtherArguments { .. })));
         // Past the window on the clock passed in (the HLC is not consulted here at all).
@@ -811,5 +877,247 @@ pub(crate) mod tests {
         assert!(matches!(a.assess(CALLER, OP, RES, &digest, Some(&g1), 6_000, &members).binding.unwrap().state,
             MandateState::Unknown(ref why) if why.contains("revoked")));
         assert_eq!(a.assess(CALLER, OP, RES, &digest, Some(&g2), 6_000, &members).binding.unwrap().state, MandateState::Established, "the other grant stands");
+    }
+}
+
+/// SPIKE S-cancel (identity-and-lifecycle wave 1b): throwaway measurements, never merged. Run with
+/// `cargo test --lib --features tls,compliance,a2a spike_s_cancel -- --nocapture --test-threads=1`.
+#[cfg(test)]
+mod spike_s_cancel {
+    use super::*;
+    use super::tests::{external, keys, CALLER, OP, RES};
+    use crate::agent::action_evaluator::MandateState;
+    use crate::knowledge::issuer::MemberKeys;
+    use crate::mandate::authority::{ClockModel, Continuation, DrainBound, FreshnessPolicy, ResourceTier, RevocationCheckpoint, StopContract};
+    use crate::mandate::grant::{possession_message, EntitlementTable, CALL_SCOPE_PREFIX};
+    use crate::mandate::{Mandate, PrincipalId, ResourceAuthority, TermId};
+    use crate::node_id::NodeId;
+    use ed25519_dalek::SigningKey;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use std::time::Instant;
+    use base64::Engine as _;
+    use crate::mandate::grant::GRANT_SCOPE_PREFIX;
+
+    const ISSUER: &str = "operator:acme";
+    const DIGEST: [u8; 32] = [7u8; 32];
+
+    fn none() -> HashMap<NodeId, MemberKeys> { HashMap::new() }
+
+    /// A provider's authority entitling `call:` scopes from the issuer — an empty revocation view.
+    fn provider(ak: &SigningKey, hk: &SigningKey) -> Arc<ExecutionAuthority> {
+        let mut t = EntitlementTable::new();
+        t.entitle(CALL_SCOPE_PREFIX, PrincipalId::new(ISSUER).unwrap());
+        t.entitle_grants(PrincipalId::new(ISSUER).unwrap());
+        let gate = ExecutionGate::strict(
+            ResourceAuthority::new("depot", 1), ResourceTier::Serialised, ClockModel { skew_ms: 100 },
+            FreshnessPolicy { freshness_ms: 60_000, interval_ms: 20_000, delivery_ms: 5_000 },
+        ).unwrap();
+        Arc::new(ExecutionAuthority::new(gate, GrantVerifier::new(t), external(ak, hk)))
+    }
+
+    fn checkpoint(ak: &SigningKey, scope: &str, seq: u64, at: u64, revoked: &[&str]) -> SignedRevocationCheckpoint {
+        let c = RevocationCheckpoint {
+            authority: PrincipalId::new(ISSUER).unwrap(), scope: scope.into(), seq, issued_at_ms: at,
+            revoked: revoked.iter().map(|t| TermId::new(t).unwrap()).collect(),
+        };
+        SignedRevocationCheckpoint { signature: mycelium_core::tls::sign_bytes(ak, &c.canonical_bytes()).to_vec(), checkpoint: c }
+    }
+
+    /// What the admitting gateway mints for one call: the `call:` mandate, its possession proof and — when `carry` —
+    /// its first checkpoint (seq 1, nothing revoked) beside it.
+    fn mint(ak: &SigningKey, hk: &SigningKey, id: u64, at: u64, until: u64, carry: bool) -> PresentedMandate {
+        let scope = format!("{CALL_SCOPE_PREFIX}{id}");
+        let m = Mandate {
+            holder: PrincipalId::new(CALLER).unwrap(), established_by: PrincipalId::new(ISSUER).unwrap(),
+            purpose: format!("call {id} admitted at the gateway"), scope: scope.clone(),
+            operations: vec![mandate_operation(OP, RES)], epoch: 1, term: TermId::new(&format!("c{id}")).unwrap(),
+            valid_from_ms: at, valid_until_ms: until,
+        };
+        let grant = SignedMandateGrant { signature: mycelium_core::tls::sign_bytes(ak, &m.canonical_bytes()).to_vec(), mandate: m };
+        let proof = mycelium_core::tls::sign_bytes(hk, &possession_message(&grant.mandate, &possession_request(OP, RES, &DIGEST)));
+        PresentedMandate {
+            grant, possession: base64::engine::general_purpose::STANDARD.encode(proof),
+            checkpoint: carry.then(|| checkpoint(ak, &scope, 1, at, &[])),
+        }
+    }
+
+    fn state(a: &Assessment) -> Option<MandateState> { a.binding.as_ref().map(|b| b.state.clone()) }
+
+    fn pct(mut v: Vec<f64>) -> (f64, f64, f64) {
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let mean = v.iter().sum::<f64>() / v.len() as f64;
+        (mean, v[v.len() / 2], v[v.len() * 99 / 100])
+    }
+
+    fn rss_kib() -> u64 {
+        let out = std::process::Command::new("ps").args(["-o", "rss=", "-p", &std::process::id().to_string()]).output().unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().parse().unwrap_or(0)
+    }
+
+    /// **Q1: a `call:` mandate is established at a provider that has never seen its checkpoint, and its work is
+    /// registered with `begin`, with no KV read.** Without the carried checkpoint the same mandate is `Unknown`.
+    #[test]
+    fn s1_established_from_the_carried_checkpoint_and_registered() {
+        let (ak, hk) = keys();
+        let p = provider(&ak, &hk);
+        let bare = mint(&ak, &hk, 1, 1_000, 60_000, false);
+        let a = p.assess(CALLER, OP, RES, &DIGEST, Some(&bare), 2_000, &none());
+        assert!(matches!(state(&a), Some(MandateState::Unknown(ref why)) if why.contains("checkpoint")), "{a:?}");
+        let carried = mint(&ak, &hk, 2, 1_000, 60_000, true);
+        let a = p.assess(CALLER, OP, RES, &DIGEST, Some(&carried), 2_000, &none());
+        assert_eq!(state(&a), Some(MandateState::Established), "{a:?}");
+        let guard = p.begin(AuthorizedWork::new(mandate_operation(OP, RES), Some(carried.grant.mandate.clone()), 60_000), Arc::new(|| 2_000));
+        assert_eq!(p.running_count(), 1);
+        // A checkpoint carried for another scope speaks for nothing: the bare mandate is still unknown.
+        let mut forged = mint(&ak, &hk, 3, 1_000, 60_000, false);
+        forged.checkpoint = Some(checkpoint(&ak, "call:999", 1, 1_000, &[]));
+        assert!(matches!(state(&p.assess(CALLER, OP, RES, &DIGEST, Some(&forged), 2_000, &none())), Some(MandateState::Unknown(_))));
+        drop(guard);
+        assert_eq!(p.running_count(), 0);
+        println!("S1: bare=Unknown, carried=Established, begin registered 1, cross-scope checkpoint ignored");
+    }
+
+    /// **Q2: the bytes the checkpoint adds, and the admission latency against today's grant path.**
+    #[test]
+    fn s2_bytes_and_latency() {
+        let (ak, hk) = keys();
+        let bare = mint(&ak, &hk, 10, 1_000, 60_000, false);
+        let carried = mint(&ak, &hk, 10, 1_000, 60_000, true);
+        let b0 = serde_json::to_vec(&bare).unwrap().len();
+        let b1 = serde_json::to_vec(&carried).unwrap().len();
+        let cp_alone = serde_json::to_vec(carried.checkpoint.as_ref().unwrap()).unwrap().len();
+        println!("S2 bytes: presented mandate {b0} B bare, {b1} B carried (+{} B; checkpoint JSON alone {cp_alone} B); envelope cap {} B", b1 - b0, super::super::gateway_caller::MAX_ENVELOPE_BYTES);
+
+        const N: u64 = 20_000;
+        // Carried: a fresh call each time — the provider verifies the grant, the possession proof and the checkpoint.
+        let p = provider(&ak, &hk);
+        let calls: Vec<_> = (0..N).map(|i| mint(&ak, &hk, 100 + i, 1_000, 60_000, true)).collect();
+        let mut carried_us = Vec::with_capacity(N as usize);
+        for c in &calls {
+            let t = Instant::now();
+            let a = p.assess(CALLER, OP, RES, &DIGEST, Some(c), 2_000, &none());
+            carried_us.push(t.elapsed().as_secs_f64() * 1e6);
+            assert_eq!(state(&a), Some(MandateState::Established));
+        }
+        // Today's grant path, at the provider: the checkpoint read from the KV (here: its bytes, already local) and
+        // parsed, offered, then the grant assessed — the same three signatures, plus the parse.
+        let q = provider(&ak, &hk);
+        let digest_hex = super::super::action_evaluator::hex32(&DIGEST);
+        let grants: Vec<(PresentedMandate, Vec<u8>)> = (0..N).map(|i| {
+            let request = format!("r{i}");
+            let m = Mandate {
+                holder: PrincipalId::new(CALLER).unwrap(), established_by: PrincipalId::new(ISSUER).unwrap(),
+                purpose: format!("grant issued for request {request}"), scope: format!("{GRANT_SCOPE_PREFIX}{request}"),
+                operations: Mandate::grant_operations(mandate_operation(OP, RES), &digest_hex, None), epoch: 1,
+                term: TermId::new(&request).unwrap(), valid_from_ms: 1_000, valid_until_ms: 60_000,
+            };
+            let grant = SignedMandateGrant { signature: mycelium_core::tls::sign_bytes(&ak, &m.canonical_bytes()).to_vec(), mandate: m };
+            let proof = mycelium_core::tls::sign_bytes(&hk, &possession_message(&grant.mandate, &possession_request(OP, RES, &DIGEST)));
+            let cp = serde_json::to_vec(&checkpoint(&ak, &grant.mandate.scope, 1, 1_000, &[])).unwrap();
+            (PresentedMandate { grant, possession: base64::engine::general_purpose::STANDARD.encode(proof), checkpoint: None }, cp)
+        }).collect();
+        let mut grant_us = Vec::with_capacity(N as usize);
+        for (g, cp) in &grants {
+            let t = Instant::now();
+            let signed: SignedRevocationCheckpoint = serde_json::from_slice(cp).unwrap();
+            let _ = q.offer_checkpoint(&signed, 2_000, &none());
+            let a = q.assess(CALLER, OP, RES, &DIGEST, Some(g), 2_000, &none());
+            grant_us.push(t.elapsed().as_secs_f64() * 1e6);
+            assert_eq!(state(&a), Some(MandateState::Established));
+        }
+        // And the carried path once the checkpoint is held (a second presentation): the verification is skipped.
+        let mut held_us = Vec::with_capacity(N as usize);
+        for c in &calls {
+            let t = Instant::now();
+            let _ = p.assess(CALLER, OP, RES, &DIGEST, Some(c), 2_000, &none());
+            held_us.push(t.elapsed().as_secs_f64() * 1e6);
+        }
+        let (cm, c50, c99) = pct(carried_us);
+        let (gm, g50, g99) = pct(grant_us);
+        let (hm, h50, h99) = pct(held_us);
+        println!("S2 latency over {N} calls (µs, mean/p50/p99): carried {cm:.1}/{c50:.1}/{c99:.1}; today's grant path (KV bytes parsed + offered + assessed) {gm:.1}/{g50:.1}/{g99:.1}; carried, checkpoint already held {hm:.1}/{h50:.1}/{h99:.1}");
+    }
+
+    /// **Q3: a revoked term reads `Refused`; and the first bound — a term revoked between the gateway's framing and the
+    /// provider's admission carries a checkpoint that predates the revocation, so the work is registered and stopped
+    /// only when the revoking checkpoint arrives.**
+    #[test]
+    fn s3_revoked_is_refused_and_the_race_is_stopped_by_the_sweep() {
+        let (ak, hk) = keys();
+        let p = provider(&ak, &hk);
+        // Revoked before admission, the revoking checkpoint already here: Refused by name.
+        let c = mint(&ak, &hk, 20, 1_000, 60_000, true);
+        let _ = p.offer_checkpoint(&checkpoint(&ak, "call:20", 2, 1_500, &["c20"]), 1_500, &none());
+        assert!(matches!(state(&p.assess(CALLER, OP, RES, &DIGEST, Some(&c), 2_000, &none())),
+            Some(MandateState::Refused(MandateRefusal::Revoked { ref term })) if term == "c20"));
+        // The race: framed with seq 1, revoked (seq 2) after framing, admitted before seq 2 arrives.
+        let r = mint(&ak, &hk, 21, 1_000, 60_000, true);
+        assert_eq!(state(&p.assess(CALLER, OP, RES, &DIGEST, Some(&r), 2_000, &none())), Some(MandateState::Established));
+        let g = p.begin(AuthorizedWork::new(mandate_operation(OP, RES), Some(r.grant.mandate.clone()), 60_000), Arc::new(|| 3_000));
+        assert_eq!(p.sweep(2_100), 0, "registered, and nothing has revoked it here yet");
+        let _ = p.offer_checkpoint(&checkpoint(&ak, "call:21", 2, 1_800, &["c21"]), 2_200, &none());
+        assert_eq!(p.sweep(2_200), 1, "the revoking checkpoint's arrival stops it at the next sweep");
+        assert!(g.is_cancelled());
+        // The stale carried checkpoint cannot un-revoke: presented again, the call is refused.
+        assert!(matches!(state(&p.assess(CALLER, OP, RES, &DIGEST, Some(&r), 2_300, &none())), Some(MandateState::Refused(MandateRefusal::Revoked { .. }))));
+        drop(g);
+        println!("S3: revoked term = Refused(Revoked); a stale carried checkpoint admits, the revoking one stops at the next sweep (interval {} ms), and cannot be un-revoked by re-presenting seq 1", p.sweep_interval_ms());
+    }
+
+    /// **The second bound: `drain_bound` is `Unbounded` for the unenforced and unconfirmable classes** — a cancel writes
+    /// `Refused` and stops nothing the resource can confirm.
+    #[test]
+    fn s4_unbounded_classes() {
+        let clock = ClockModel { skew_ms: 100 };
+        let unconfirmable = StopContract { continuation: Continuation::ReauthorizeAt { interval_ms: 500 }, cancellation_latency_ms: Some(50), confirmation_latency_ms: None };
+        let unenforced = StopContract { continuation: Continuation::RunToCompletion { max_duration_ms: 5_000, enforced: false }, cancellation_latency_ms: Some(50), confirmation_latency_ms: Some(10) };
+        let bounded = StopContract { continuation: Continuation::ReauthorizeAt { interval_ms: 500 }, cancellation_latency_ms: Some(50), confirmation_latency_ms: Some(10) };
+        println!("S4: unconfirmable {:?}; unenforced {:?}; reauthorize-every-500 {:?}",
+            unconfirmable.drain_bound(clock, 1_000), unenforced.drain_bound(clock, 1_000), bounded.drain_bound(clock, 1_000));
+        assert!(matches!(unconfirmable.drain_bound(clock, 1_000), DrainBound::Unbounded(_)));
+        assert!(matches!(unenforced.drain_bound(clock, 1_000), DrainBound::Unbounded(_)));
+        assert_eq!(bounded.drain_bound(clock, 1_000), DrainBound::Bounded(660));
+    }
+
+    /// **The memory-reclamation hook on 10⁵ calls.** Each call holds a checkpoint and a window entry until its window
+    /// passes; the sweep's `reclaim_calls` forgets them. Half are revoked, so the revoked sets are counted too.
+    #[test]
+    fn s5_reclamation_on_100k_calls() {
+        let (ak, hk) = keys();
+        let p = provider(&ak, &hk);
+        const N: u64 = 100_000;
+        let calls: Vec<_> = (0..N).map(|i| mint(&ak, &hk, 1_000_000 + i, 1_000, 10_000, true)).collect();
+        let rss0 = rss_kib();
+        let t = Instant::now();
+        for (i, c) in calls.iter().enumerate() {
+            assert_eq!(state(&p.assess(CALLER, OP, RES, &DIGEST, Some(c), 2_000, &none())), Some(MandateState::Established));
+            let g = p.begin(AuthorizedWork::new(mandate_operation(OP, RES), Some(c.grant.mandate.clone()), 10_000), Arc::new(|| 2_000));
+            if i % 2 == 0 {
+                let scope = &c.grant.mandate.scope;
+                let _ = p.offer_checkpoint(&checkpoint(&ak, scope, 2, 1_500, &[c.grant.mandate.term.as_str()]), 2_000, &none());
+            }
+            drop(g);
+        }
+        let admit = t.elapsed();
+        let held = p.view_sizes();
+        let rss1 = rss_kib();
+        assert_eq!(p.running_count(), 0);
+        // Every offered checkpoint opens a revoked-set entry for its scope, empty or not: one per call, not one per
+        // revoked call.
+        assert_eq!(held, (N as usize, N as usize, N as usize));
+        // Inside the window nothing is reclaimed: a revoked call re-presented with its first checkpoint stays revoked.
+        assert_eq!(p.reclaim_calls(9_999), 0);
+        assert!(matches!(state(&p.assess(CALLER, OP, RES, &DIGEST, Some(&calls[0]), 9_999, &none())), Some(MandateState::Refused(MandateRefusal::Revoked { .. }))));
+        let t = Instant::now();
+        let reclaimed = p.sweep(10_001);
+        let _ = reclaimed;
+        let sweep = t.elapsed();
+        let after = p.view_sizes();
+        let rss2 = rss_kib();
+        assert_eq!(after, (0, 0, 0));
+        // After the window: re-presented, refused as out of window — reclaiming lost nothing a caller could exploit.
+        assert!(matches!(state(&p.assess(CALLER, OP, RES, &DIGEST, Some(&calls[0]), 10_001, &none())), Some(MandateState::Refused(MandateRefusal::OutOfWindow { .. }))));
+        println!("S5: {N} calls admitted+registered+dropped in {admit:?} ({:.1} µs/call); held {held:?}; reclaimed by one sweep in {sweep:?}, after {after:?}; RSS KiB before {rss0}, held {rss1} (+{}), after reclaim {rss2}", admit.as_secs_f64() * 1e6 / N as f64, rss1.saturating_sub(rss0));
     }
 }

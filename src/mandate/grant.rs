@@ -50,6 +50,9 @@ use crate::knowledge::IssuerId;
 /// or policy revision differ ([`crate::mandate::MandateRefusal::BoundToOtherArguments`], `BoundToOtherPolicy`).
 /// The `Mandate` type and its canonical bytes are unchanged, so every existing mandate and signature stands.
 pub const GRANT_SCOPE_PREFIX: &str = "grant:";
+
+/// SPIKE S-cancel: the scope prefix of a `call:`-scoped mandate a gateway mints at admission (D2).
+pub const CALL_SCOPE_PREFIX: &str = "call:";
 const BOUND_ARGS: &str = "bound:args:";
 const BOUND_POLICY: &str = "bound:policy:";
 
@@ -66,6 +69,11 @@ impl Mandate {
     /// Is this mandate a grant (scope `grant:…`)?
     pub fn is_grant(&self) -> bool {
         self.scope.starts_with(GRANT_SCOPE_PREFIX)
+    }
+
+    /// SPIKE S-cancel: a `call:`-scoped mandate (D2) — one call, held by the admitting gateway.
+    pub fn is_call(&self) -> bool {
+        self.scope.starts_with(CALL_SCOPE_PREFIX)
     }
 
     /// A grant's binding, when its signed operations carry one. `None` for a mandate that is not a grant, or a
@@ -173,6 +181,10 @@ impl EntitlementTable {
             || (scope.starts_with(GRANT_SCOPE_PREFIX)
                 && (self.scopes.get(GRANT_SCOPE_PREFIX).is_some_and(|a| a.contains(authority))
                     || (self.fleet_grants && authority.as_str().starts_with("node:"))))
+            // SPIKE S-cancel: a `call:` scope, entitled as a grant is.
+            || (scope.starts_with(CALL_SCOPE_PREFIX)
+                && (self.scopes.get(CALL_SCOPE_PREFIX).is_some_and(|a| a.contains(authority))
+                    || (self.fleet_grants && authority.as_str().starts_with("node:"))))
     }
 
     /// Entitle `authority` to issue grants (every scope under `grant:`) — the issuing gateway node, as a rule.
@@ -272,7 +284,7 @@ impl GrantVerifier {
 
         // A grant's scope is its own, one appointment by construction: the per-scope epoch and conflict bookkeeping
         // would only grow with every grant issued, so it is not kept for them (adopter-surface X3).
-        if !m.is_grant() {
+        if !m.is_grant() && !m.is_call() {
             let digest = m.digest();
             let entry = self.highest.entry(m.scope.clone()).or_insert((m.epoch, BTreeSet::new()));
             if m.epoch > entry.0 {
