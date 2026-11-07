@@ -17,7 +17,7 @@ catch-all error to discover what went wrong.
 | [`ReceiptError`](#receipterror) | `KvHandle::set_with_receipt`, `set_requiring_sync`, `retry_with_receipt`, `GossipAgent::set_with_replica_sync` | Depends on variant — and one variant is *neither* |
 | [`ScatterError`](#scattererror) | `ServiceHandle::scatter_gather` | Yes — retry or reduce `min_ok` |
 | [`SchemaError`](#schemaerror) | `SchemaHandle::publish_schema`, `seed_schemas_from_dir` | Depends on variant |
-| [`BulkError`](#bulkerror) | `ServiceHandle::bulk_call` | Yes — retry |
+| [`BulkError`](#bulkerror) | `ServiceHandle::bulk_call` | Depends on variant — a `Timeout` can be permanent |
 | [`ShardError`](#sharderror) | `ServiceHandle::emit_sharded` | Yes — wait for providers |
 
 Feature-gated extras: `PromptSkillError` (`llm` feature), `LlmError` (`llm`),
@@ -257,18 +257,33 @@ is only returned when the input itself is malformed.
 ## `BulkError`
 
 ```rust
+#[non_exhaustive]
 pub enum BulkError {
-    Timeout,      // target did not fetch staged payload before deadline
-    NoHttpPort,   // caller has no http_port configured in GossipConfig
+    Timeout,                                 // no bulk.result before the deadline
+    NoHttpPort,                              // caller has no http_port configured in GossipConfig
+    PayloadTooLarge { limit: u64, len: u64 }, // over this node's max_bulk_payload_bytes; nothing sent
 }
 ```
 
 **When you see it:** `ServiceHandle::bulk_call`.
 
 **Recoverability:**
-- `Timeout` — retry; the target node may have been slow to connect.
+- `Timeout` — **not always transient, so a retry is not always right.** The responder sends a
+  `bulk.result` only when its handler ran; every reason it did not reaches the caller as this one
+  timeout. Transient: the responder was slow, its handler limit was full, the network dropped the
+  ticket. **Permanent until something changes:** the payload is over the *responder's*
+  `max_bulk_payload_bytes`; the caller's gateway certificate does not verify at the responder
+  (another CA, no IP SAN for the caller's address, a revoked key); the responder has no roots for an
+  `https` ticket; the responder predates R7 and drops an `https` ticket; the caller's
+  `/bulk/{id}` answers something other than 2xx. The responder logs each with its reason and counts
+  it (`SystemStats::bulk_fetches_refused`, `mycelium_bulk_fetches_refused_total{reason}`) — look
+  there before retrying a call that keeps timing out. A typed refusal sent back to the caller is
+  **not built**: it would be a new reply on the wire (external review R7, `deprecations.md` §80).
 - `NoHttpPort` — configuration error; set `GossipConfig::http_port` before
   starting the agent. This will always fail until the config is fixed.
+- `PayloadTooLarge` — the payload is over the caller's own `max_bulk_payload_bytes`; nothing was
+  staged or sent. Raise the cap on the caller **and** the responder, or send less. Retrying the
+  same payload always fails.
 
 ---
 

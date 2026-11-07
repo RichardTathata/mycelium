@@ -438,6 +438,12 @@ pub struct SystemStats {
     /// at the configured ceiling means the semaphore is dropping requests — raise
     /// `max_concurrent_bulk_handlers` or reduce the bulk call rate.
     pub active_bulk_handlers: u64,
+    /// Bulk tickets this node did not hand to its `bulk_serve` handler, every reason (external
+    /// review R7): an `https` ticket with no roots to verify the caller by, a payload over
+    /// `max_bulk_payload_bytes`, a status other than 2xx, or a transport failure — the TLS
+    /// verification of a caller's certificate included. Only the caller's timeout reports any of
+    /// these to the caller; by reason, `mycelium_bulk_fetches_refused_total{reason}`.
+    pub bulk_fetches_refused: u64,
     /// Cumulative commit-conflict detections by this node's consensus listener.
     ///
     /// Incremented when a `COMMIT` arrives carrying a **different** value for a
@@ -1435,10 +1441,13 @@ impl GossipAgent {
             acceptor_records: std::sync::Mutex::new(()),
             core: Arc::clone(&core_ctx),
             schedules_running: Arc::new(papaya::HashMap::new()),
-            bulk_transport:  Arc::new(bulk::BulkTransport::new(
+            bulk_transport:  Arc::new(bulk::BulkTransport::with_limits(
                 config.http_port.unwrap_or(0),
                 std::time::Duration::from_secs(config.bulk_fetch_timeout_secs),
                 config.max_concurrent_bulk_handlers,
+                // The caller's scheme, carried on its tickets (R7): its gateway serves TLS.
+                config.gateway_tls.is_some(),
+                config.max_bulk_payload_bytes,
             )),
             rpc_pending: Arc::clone(&rpc_pending),
             rpc_reply_sender_mismatches,

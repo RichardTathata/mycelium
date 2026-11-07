@@ -44,6 +44,9 @@ cfg.gateway_tls = Some(GatewayTlsConfig::default());
 cfg.gateway_tls = Some(GatewayTlsConfig {
     cert_pem_path: Some("/etc/mycelium/gateway-cert.pem".into()),
     key_pem_path:  Some("/etc/mycelium/gateway-key.pem".into()),
+    // Required with an operator cert (R7): the CA that signs the fleet's gateway certificates,
+    // which a bulk fetch from a peer's gateway is verified against.
+    bulk_ca_pem_path: Some("/etc/mycelium/gateway-ca.pem".into()),
 });
 ```
 
@@ -63,6 +66,60 @@ the node reports ready. A port already in use, or an unreadable `cert_pem_path` 
 `start()` with `InvalidField { field: "gateway", .. }` naming the address and the cause, rather than
 leaving a dead listener behind a node that answers `/ready`. Free the port or fix the paths and start
 again.
+
+**Bulk transfers are covered under native gateway TLS (since R7 of the external review of 2026-10-31).** A
+`bulk_call` stages its payload on the caller's gateway and the responder fetches it from there. A caller whose
+gateway serves TLS says so on its ticket, and the responder fetches over `https`, verifying the caller's gateway
+certificate **by the caller's IP address** — the address its frames came from — against the union of two root sets:
+
+- the fleet CA from `[tls]`, with the mesh's removal and revocation checks (a node-cert gateway's certificate);
+- `bulk_ca_pem_path`, when set: the CA that signs the fleet's operator certificates. A fleet certificate the fleet
+  check refuses (removed, revoked, expired) is never re-tried against these.
+
+So a fleet may mix node-cert and operator-cert gateways, provided every node that fetches from an operator-cert
+gateway names its CA in `bulk_ca_pem_path`. On a node serving a gateway (`http_port` set) on an operator certificate,
+`start()` refuses by name (`InvalidField { field: "gateway_tls.bulk_ca_pem_path" }`) unless `bulk_ca_pem_path` is set
+**and the node's own certificate verifies against it for the node's own IP address**: each operator certificate must
+carry its node's **IP SAN** as well as any hostname. A `bulk_ca_pem_path` that cannot be read or holds no certificate
+is refused the same way. The operator certificate is read once at `start()`; to rotate it, replace the files and
+restart. The node-cert gateway presents the current identity at every handshake, so after `rotate_identity` it serves
+the new certificate at once.
+
+A fetch whose certificate does not verify fetches nothing, and a fetch is never retried in plaintext; nor is a status
+other than 2xx, or a payload over `max_bulk_payload_bytes` (default 64 MiB), handed to the handler. Each such refusal
+is logged with its reason and counted (`SystemStats::bulk_fetches_refused`, `mycelium_bulk_fetches_refused_total{reason}`)
+— the caller sees only its `Timeout`. The `https` fetch client keeps no idle connections and resumes no TLS session, so
+every fetch is a full handshake checked against the live removal and revocation sets (the reason the mesh turned
+resumption off). **The cost** is one TCP connection and one full TLS handshake per fetch; bulk is for payloads large
+enough that this is small beside the transfer. Both bulk fetch clients **ignore `HTTP_PROXY`, `HTTPS_PROXY` and
+`ALL_PROXY`**: a fetch goes straight to the address the caller's mesh frames came from, and a proxy would put a third
+party between two members.
+
+**A gateway certificate from the fleet CA must be a mesh certificate.** A responder judges a certificate the fleet CA
+issued by the mesh's own check, which accepts only a mesh certificate (an Ed25519 identity key, names it can read) and
+whose refusal is final. So an operator certificate (`cert_pem_path`) issued by the fleet CA — an ECDSA leaf from
+`ca-key.pem`, say — refuses `start()` by name; serve the node certificate (leave `cert_pem_path` and `key_pem_path`
+unset), or issue the gateway certificate from a separate operator CA and name that CA in `bulk_ca_pem_path`.
+
+**The address is taken as given.** The start check verifies the certificate for the IP the node advertises in its node
+id, exactly as written (an IPv6 address is bracketed in the fetch URL). A node advertising an unspecified address
+(`0.0.0.0` or `::`) cannot be fetched from, and is not refused for it — **not built**.
+
+**Where the trust lives.** `bulk_ca_pem_path` is a field of `gateway_tls`, so only a node with `gateway_tls` can name
+operator roots. A responder whose own gateway is plaintext trusts the fleet CA alone and cannot fetch from an
+operator-cert gateway; giving it `gateway_tls` to name the CA also makes its own tickets `https`. A trust setting
+separate from the node's own gateway is **not built**.
+
+**Not covered:**
+- **A plaintext gateway still carries bulk payloads in the clear.** Without `gateway_tls` the caller's ticket says
+  `http`, and the payload crosses the network unencrypted whatever `[tls]` does for the mesh.
+- **A TLS-terminating proxy in front of a plaintext gateway is bypassed for bulk.** The ticket names the gateway's own
+  `http_port` and the scheme `http`, and the responder fetches from the caller's IP directly, not through the proxy.
+  Under a proxy, bulk payloads are plaintext between nodes; use native gateway TLS where bulk matters.
+- An integrity check on the payload beyond TLS (no per-payload signature); the fetch target is still the address the
+  caller's frames came from.
+- A responder older than R7 drops an `https` ticket, so a call to it times out until it is upgraded — as every bulk call
+  to or from a TLS gateway did before R7.
 
 **Behaviour.** The listener terminates rustls (ring provider) per connection and serves the axum app
 over the TLS stream. On shutdown it stops accepting; in-flight connections drain. A handshake from a

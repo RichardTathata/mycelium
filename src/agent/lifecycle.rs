@@ -134,6 +134,12 @@ impl GossipAgent {
                     .into(),
             });
         }
+        // External review R7: a bulk fetch from a TLS gateway verifies it, and is never retried in
+        // plaintext — so a gateway on an operator certificate must name the roots its peers'
+        // gateways are verified with, and a named file must hold some. Refused by name, here, where
+        // `mycelium doctor` runs the same chain.
+        #[cfg(all(feature = "gateway", feature = "tls"))]
+        super::bulk::check_bulk_trust(&self.config, &self.node_id)?;
         // A build without `gateway` runs no HTTP server, so a gateway setting would be accepted and
         // ignored — and `http_port` is still advertised as the bulk-transfer port, which nothing
         // serves (realignment repairs R8, found by A2's configuration audit). Refused by name.
@@ -550,6 +556,10 @@ impl GossipAgent {
                 Err(e) => return Err(e),
             }
         }
+        // The bulk https client (R7), once the identity is: on the node-cert path it verifies a peer's
+        // gateway with the fleet's own client configuration.
+        #[cfg(all(feature = "gateway", feature = "tls"))]
+        super::bulk::install_bulk_trust(&self.task_ctx, &self.config)?;
         // After the TLS identity is installed (#624's review, finding 1): a write before it leaves
         // unsigned, and every TLS peer refuses an unsigned frame since row F2 — the locality entry then
         // arrived by anti-entropy only. The only writes above are the two self-authenticating records
