@@ -425,14 +425,24 @@ impl Provisioner {
     /// [`new`](Self::new) registers included), later registrations of another kind are refused, and an
     /// entry of another kind is refused at eligibility with reason `kind_not_declared`. An empty list
     /// runs nothing. Not called ⇒ every registered runtime runs, as before.
+    ///
+    /// Call it once, before the first [`provision_round`](Self::provision_round) and before
+    /// registering runtimes:
+    /// - **A later, wider call does not bring a runtime back.** It replaces the declared set, but a
+    ///   runtime this call dropped — the WASM runtime [`new`](Self::new) registers, say — stays
+    ///   dropped until it is registered again ([`register_runtime`](Self::register_runtime), or
+    ///   [`set_fuel_policy`](Self::set_fuel_policy) for the WASM one).
+    /// - **A call after installs does not withdraw them.** An install already live of a kind now
+    ///   undeclared keeps serving until it is withdrawn; only new installs are refused.
     pub fn restrict_kinds(&mut self, kinds: impl IntoIterator<Item = ArtifactKind>) {
         let kinds: Vec<ArtifactKind> = kinds.into_iter().collect();
         self.runtimes.retain(|k, _| kinds.contains(k));
         self.declared_kinds = Some(kinds);
     }
 
-    /// Is `kind` one this node may run (always, when no kinds were declared)?
-    fn kind_declared(&self, kind: ArtifactKind) -> bool {
+    /// Is `kind` one this node may run (always, when no kinds were declared)? The stem stages over the
+    /// mesh only the kinds this answers yes for.
+    pub(crate) fn kind_declared(&self, kind: ArtifactKind) -> bool {
         self.declared_kinds.as_ref().is_none_or(|d| d.contains(&kind))
     }
 

@@ -484,10 +484,17 @@ impl Stem {
                         }
                         prov.refresh_catalog(InstallableCatalog::from_kv(&kv));
                         if let Some(m) = &mesh {
-                            // Stage every catalogue entry once (idempotent: a staged id is a size
-                            // check, no request) — a component whole, a blob in ranges, each
-                            // bounded by the entry's size hint and the stage's ceiling.
-                            let wanted: Vec<_> = prov.catalog().entries().iter().map(|e| (e.artifact, e.size_bytes)).collect();
+                            // Stage every catalogue entry of a kind this stem declares, once (idempotent:
+                            // a staged id is a size check, no request) — a component whole, a blob in
+                            // ranges, each bounded by the entry's size hint and the stage's ceiling. A
+                            // kind it cannot run is neither pulled nor re-served (#738's review).
+                            let wanted: Vec<_> = prov
+                                .catalog()
+                                .entries()
+                                .iter()
+                                .filter(|e| prov.kind_declared(e.kind))
+                                .map(|e| (e.artifact, e.size_bytes))
+                                .collect();
                             backoff.retain(|id| wanted.iter().any(|(w, _)| w == id));
                             for (id, size_hint) in wanted {
                                 if !backoff.due(&id, ticks) {
@@ -1112,6 +1119,65 @@ mod tests {
             stage_dir: None,
             max_stage_bytes: crate::DEFAULT_MAX_STAGE_BYTES,
         }
+    }
+
+    /// #738's review, finding 7: a mesh-sourced stem staged every catalogue entry, whatever its kind,
+    /// and then re-served it as a cache holder, so a blob-only stem pulled and offered WASM components it
+    /// can never run. Staging now follows the declared kinds. Seen failing first: the component's bytes
+    /// were in the blob-only stem's stage.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_mesh_stem_stages_only_the_kinds_it_declares() {
+        let lib_dir = scratch("kinds-stage-lib");
+        let lib = Arc::new(FsLibrarySource::open(&lib_dir).unwrap());
+        let key = SigningKey::from_bytes(&[12u8; 32]);
+        let blob = lib.store(b"a data pack to stage").unwrap();
+        let component = lib.store(ECHO_COMPONENT).unwrap();
+        Manifest::from_entries(vec![
+            InstallableEntry::new(Capability::new("data", "pack"), blob)
+                .with_kind(crate::artifact::ArtifactKind::Blob)
+                .with_cost(20, 1)
+                .signed_by(&key),
+            InstallableEntry::new(Capability::new("route", "optimize"), component)
+                .with_cost(ECHO_COMPONENT.len() as u64, 1)
+                .signed_by(&key),
+        ])
+        .save(&lib_dir.join(MANIFEST_FILE))
+        .unwrap();
+        let seed = agent(alloc_port(), None).await;
+        let _librarian = spawn_librarian(
+            Arc::clone(&seed),
+            Arc::clone(&lib) as Arc<_>,
+            LibrarianConfig {
+                manifest_path: lib_dir.join(MANIFEST_FILE),
+                publisher:     key.verifying_key().to_bytes(),
+                sync_interval: Duration::from_millis(200),
+                manifest_source: None,
+            },
+        );
+        let publisher_hex: String = key.verifying_key().to_bytes().iter().map(|b| format!("{b:02x}")).collect();
+        let stage_dir = scratch("kinds-stage");
+        let units = NodeCapabilityConfig::from_toml_str(&format!(
+            "principal=\"stem\"\n[hosts]\nkinds=[\"blob\"]\ntrusted_publishers=[\"ed25519:{publisher_hex}\"]\nplacement_root=\"{}\"\n\
+             [[presence]]\nns=\"data\"\nname=\"pack\"\nmin_providers=1\n",
+            scratch("kinds-stage-placed").display()
+        ))
+        .unwrap();
+        let opts = StemOptions {
+            source: StemSource::Mesh { timeout: Duration::from_secs(5) },
+            stage_dir: Some(stage_dir.clone()),
+            ..stem_opts(&lib_dir)
+        };
+        let node = agent(alloc_port(), Some(seed.node_id().to_socket_addr().port())).await;
+        let stem = Stem::start(Arc::clone(&node), &units, opts).unwrap();
+        assert!(wait_until(60, || stem.hosted_count() == 1).await, "the blob is pulled over the mesh and hosted");
+        // A few more ticks: every entry the stem would stage has had its turn.
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let staged = FsLibrarySource::open(&stage_dir).unwrap().list().unwrap();
+        assert!(staged.contains(&blob), "the declared kind is staged: {staged:?}");
+        assert!(!staged.contains(&component), "a kind this stem cannot run is not staged: {staged:?}");
+        stem.stop().await;
+        node.shutdown().await;
+        seed.shutdown().await;
     }
 
     /// #736's review, defect A: `[hosts].kinds` is what this stem may run, and nothing else. A stem

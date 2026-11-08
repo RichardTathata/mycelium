@@ -2536,9 +2536,18 @@ blob runtime was added. A stem declaring `kinds = ["blob"]` therefore installed 
 unit-file reference already read such a stem as unable to host components; the stem now agrees with them.
 
 - **Who is affected:** a stem whose `[hosts].kinds` omits `"wasm-component"` (including an empty or absent `kinds`)
-  and which nevertheless hosted components. After the upgrade it refuses them: each round records `prov.eligible`
-  refused with reason `kind_not_declared`, and `mycelium_artifact_ineligible_skips_total{reason="kind_not_declared"}`
-  rises. A stem with an empty `kinds` hosts nothing and warns at start.
+  and which nevertheless hosted components. After the upgrade it refuses them. The refusal is reached only where the
+  stem would have acted — below a `[[presence]]` floor, or with demand unmet — and is seen there in two ways: a
+  `prov.eligible` record refused with reason `kind_not_declared`, when a decision trace is attached (`--trace-dir`);
+  and `mycelium_artifact_ineligible_skips_total{reason="kind_not_declared"}` rising, in a build with `metrics`. A stem
+  with an empty `kinds` hosts nothing and warns at start. A mesh-sourced stem no longer stages, or re-serves to peers,
+  the bytes of a kind it does not declare.
 - **What to do:** add `"wasm-component"` to `[hosts].kinds` on every stem that is meant to host components; then
   `mycelium wire-check` also counts it as a host for them. Code that builds a `Provisioner` directly is unaffected
   unless it calls the new `Provisioner::restrict_kinds`.
+
+The same release fixes a presence floor that any member could stall with a cheaper bad line (`prov.presence_floor`
+rev 3). What it leaves open: a trusted publisher's line naming an artifact this host already hosts for something else
+holds the floor at `already_hosted`, as does any member's such line on a host with `accept_unsigned = true`; and a
+trusted line whose install always fails is chosen again every round (feeding an install's failure back into the choice
+is not built).

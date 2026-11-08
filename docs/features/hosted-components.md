@@ -20,9 +20,9 @@ and guest code runs on a blocking thread, never on the node's async workers.
 
 ## Turn it on
 
-This feature is turned on in code, or by a [stem](stem.md) with `"wasm-component"` in `[hosts].kinds` — though, a known
-gap fixed by a separate PR, a stem with `[hosts]` runs components whatever `kinds` says; `wasmtime` is
-confined to this crate and never enters `mycelium` or `mycelium-core`.
+This feature is turned on in code, or by a [stem](stem.md) with `"wasm-component"` in `[hosts].kinds` — a stem without it
+neither installs nor stages a component (`kind_not_declared`); `wasmtime` is confined to this crate and never enters
+`mycelium` or `mycelium-core`.
 
 - `[hosts]` ([unit-file § hosts](../reference/unit-file.md#hosts)): `fuel_per_call` for entries an agent signed,
   `operator_fuel_per_call` for the operator's own keys, and `call_deadline_ms` (default 5 s) for every call.

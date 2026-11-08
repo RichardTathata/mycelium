@@ -55,12 +55,12 @@ same way.
   [`prov.advertise`](../reference/rule-catalogue.md#provadvertise),
   [`prov.health_pass`](../reference/rule-catalogue.md#provhealth_pass) and
   [`prov.withdraw`](../reference/rule-catalogue.md#provwithdraw). An unmet requirement is a reason to consider an
-  install, never an instruction; an entry providing a model's `llm-meta` ad is never installed.
+  install, never an instruction; an entry providing a model's `llm-meta` ad is never installed; a stem runs only the
+  kinds its `[hosts].kinds` declares, and refuses an entry of any other kind at `prov.eligible` as `kind_not_declared`
+  (rev 3) — an empty `kinds` installs nothing.
 - **Not built:** an exact count — self-election overshoots and corrects in later rounds; placement by anything but
   eligibility and the roll; install rights that bind under `Legacy`, `Observe` or `EnforceLocal` (they count what they
-  would refuse); anything but WASM components and blobs. **Known gap, fixed by a separate PR:** `[hosts].kinds` does
-  not keep components out — the provisioner always registers the component runtime and the stem reads `kinds` only to
-  add the blob runtime, so a `kinds = ["blob"]` stem still installs third-party WASM components.
+  would refuse); anything but WASM components and blobs.
 - **Evidence:** the ledger row
   [every artifact-shaped co-op demo reaches the same outcome as stem nodes](../operations/what-is-proven.md#coop-demos-same-outcome-as-stems).
 
