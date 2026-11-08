@@ -552,7 +552,11 @@ impl ClientReplayWindows {
 /// kind (`tools/call`, `skill.invoke`). Counted now; refused at the refusal release (`deprecations.md` §87).
 #[derive(Default)]
 pub(crate) struct UnsignedActions {
+    /// At the gateway's doors — they exist only with `gateway` (a `tls` build without it, such as `mycelium-wiki`'s
+    /// `execution-authority`, counts only at the provider).
+    #[cfg(feature = "gateway")]
     pub(crate) tools_call: AtomicU64,
+    #[cfg(feature = "gateway")]
     pub(crate) skill_invoke: AtomicU64,
     /// The same, counted where the call runs: a provider receiving an unsigned `mcp.invoke` or `skill.invoke` for a
     /// principal whose certificate it holds — what a gateway that strips `cs` leaves behind (#742's review, item 4).
@@ -562,6 +566,7 @@ pub(crate) struct UnsignedActions {
 #[cfg(feature = "tls")]
 impl UnsignedActions {
     /// Count one, for `kind`.
+    #[cfg(feature = "gateway")]
     pub(crate) fn note(&self, kind: &'static str) {
         match kind {
             "tools/call" => self.tools_call.fetch_add(1, Ordering::Relaxed),
