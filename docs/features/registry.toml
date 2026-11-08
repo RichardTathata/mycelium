@@ -434,14 +434,14 @@ ids = ["concept:unit-file", "concept:wire-check", "concept:wiring-report", "conc
 
 [[feature]]
 name = "LLM prompt skills"
-page = "todo"
-planned = "llm-prompt-skills"
+page = "llm-prompt-skills.md"
+example = "mailbox_llm"
 ids = ["cargo:mycelium/llm"]
 
 [[feature]]
 name = "The reason router"
-page = "todo"
-planned = "reason-router"
+page = "reason-router.md"
+example = "fleet_reasoning"
 ids = ["cargo:mycelium-reason/llm", "cargo:mycelium-reason/gateway", "cargo:mycelium-reason/compliance",
        "cargo:mycelium-reason/ollama", "crate:mycelium-reason"]
 
@@ -455,26 +455,26 @@ links = ["concept:assessment"]
 
 [[feature]]
 name = "Knowledge layer"
-page = "todo"
-planned = "knowledge-layer"
+page = "knowledge-layer.md"
+example = "knowledge_layer"
 ids = ["cargo:mycelium-reason/knowledge", "concept:assessment"]
 
 [[feature]]
 name = "Tuple space"
-page = "todo"
-planned = "tuple-space"
+page = "tuple-space.md"
+example = "llm_pipeline"
 ids = ["cargo:mycelium-tuple-space/gateway", "crate:mycelium-tuple-space"]
 
 [[feature]]
 name = "Blackboard"
-page = "todo"
-planned = "blackboard"
+page = "blackboard.md"
+example = "microgrid"
 ids = ["cargo:mycelium-blackboard/gateway", "crate:mycelium-blackboard"]
 
 [[feature]]
 name = "Wiki substrate (git store, mirror, curator)"
-page = "todo"
-planned = "wiki-substrate"
+page = "wiki-substrate.md"
+example = "wiki_chat"
 ids = ["cargo:mycelium-wiki/control-plane", "cargo:mycelium-wiki/gateway", "cargo:mycelium-wiki/llm",
        "cargo:mycelium-wiki/git-mirror", "cargo:mycelium-wiki/git-store", "cargo:mycelium-wiki/execution-authority", "crate:mycelium-wiki"]
 
@@ -493,20 +493,20 @@ links = ["concept:domain", "concept:guarantee-report"]
 
 [[feature]]
 name = "Federated domains"
-page = "todo"
-planned = "federation"
+page = "federation.md"
+example = "federated_domains"
 ids = ["concept:domain"]
 
 [[feature]]
 name = "AgentFacts (public discovery across domains)"
-page = "todo"
-planned = "agentfacts"
+page = "agentfacts.md"
+example = "federation_facts"
 ids = ["concept:agentfacts", "crate:mycelium-agentfacts"]
 
 [[feature]]
 name = "The contract net (commitments)"
-page = "todo"
-planned = "contract-net"
+page = "contract-net.md"
+example = "redistribution_cn"
 ids = ["concept:award", "crate:mycelium-commitment"]
 
 [[feature]]
@@ -517,14 +517,14 @@ ids = ["concept:receipt", "concept:operation-id", "concept:delivery-unknown", "c
 
 [[feature]]
 name = "Skills"
-page = "todo"
-planned = "skills"
+page = "skills.md"
+example = "community"
 ids = ["concept:skill"]
 
 [[feature]]
 name = "MCP tools"
-page = "todo"
-planned = "mcp-tools"
+page = "mcp-tools.md"
+example = "three_node_demo"
 ids = ["concept:mcp-tool"]
 
 [[feature]]

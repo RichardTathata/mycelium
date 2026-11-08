@@ -76,8 +76,8 @@ location; one outside the allowlist is denied.
   already tombstoned → unrecoverable). Now each section is an independent CAS slot: a stale-based write
   returns `WikiError::Conflict`, the curator re-reads + re-reconciles, and different sections don't
   contend. `FsStore` implements the CAS with immutable versioned objects published by atomic `hard_link`
-  (no lock files → **no stale-lock deadlock**); `S3Store`'s conditional `PUT`/`If-Match` is the same
-  contract. The ring's eventual-single *election* is now liveness/efficiency, **not** a correctness
+  (no lock files → **no stale-lock deadlock**); an object store's conditional `PUT`/`If-Match` would be the
+  same contract (no `S3Store` is built). The ring's eventual-single *election* is now liveness/efficiency, **not** a correctness
   dependency — a partition running two curators is safe (that is what keeps the write path
   coordinator-free, no distributed lock).
 - **The store CAS is at-least-once/never-lose, *not* store-level exactly-once** — the important nuance a
