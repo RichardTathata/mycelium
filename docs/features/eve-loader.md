@@ -8,7 +8,9 @@ beside any other. Each slot of the directory has a status. The instructions and 
 skills, each `defineTool` module an MCP tool served for a node to bridge, and each schedule a `[[schedule]]` the gateway
 runs. Every slot the loader does not load — hooks, a sandbox, memory, channels, subagents — is refused by name, never
 skipped, so an agent that relied on one does not seem to work without it. On the fleet the tool is reached through
-`/mcp`, so the fleet's evaluator decides each call and records it. This is a demonstration, not a compatibility promise.
+`/mcp`, so a node with an [action evaluator](action-authorisation.md) decides each call, and one with an
+[evidence journal](evidence-journal.md) records it — attached in code (`with_action_evaluator`,
+`with_evidence_journal`), as the example's node does; the published node attaches neither. This is a demonstration, not a compatibility promise.
 
 ## When to use it, and when not
 
@@ -21,14 +23,20 @@ skipped, so an agent that relied on one does not seem to work without it. On the
 
 From TypeScript, with `mycelium-ts` (`import … from "mycelium-ts"`), against a node's gateway:
 
-- `loadEveAgent(dir)` in [`mycelium-ts/src/eve.ts`](../../mycelium-ts/src/eve.ts): read the directory, refusing what
-  does not map with one `EveRefusedError` naming every slot.
+- `loadEveAgent(dir)` in [`mycelium-ts/src/eve.ts`](../../mycelium-ts/src/eve.ts): read the directory. The slots that
+  do not map are refused together, one `EveRefusedError` naming every one; what is found later, inside a slot that
+  does map, is refused in its own `EveRefusedError` — a key of `agent.ts` other than `model`, a skill whose name is
+  not one key segment, a tool or a schedule that cannot be carried — so a directory may take more than one run to
+  hear every refusal.
 - `serveEveTools(agent)`: the tools as an MCP server, which a node bridges with `connect_mcp_server`
   ([MCP tools](mcp-tools.md)).
-- `declareEveAgent(agent, { mycelium, prompts })`: the unit, and the instructions and skills as prompt skills, through
-  the gateway.
-- `runEveSchedules(agent, mycelium)`: its schedules through the gateway's schedule route ([recurring work](recurring-work.md)),
-  each cron read only when it is a period and a phase.
+- `declareEveAgent(agent, { mycelium, prompts })`: the unit through `POST /gateway/units/declare` (`cap:write`), and
+  the instructions and skills as prompt skills through `PUT /gateway/prompts/{agent}/{skill}` (`llm:write`) — scopes
+  checked only on a node built with `compliance` (the published node is; without it any valid bearer declares).
+- `runEveSchedules(agent, mycelium, { onMarkdown })`: its schedules through the gateway's schedule route
+  ([recurring work](recurring-work.md), `schedule:run`), each cron read only when it is a period and a phase. A
+  Markdown schedule's prompt goes to `onMarkdown`; without one it refuses every Markdown schedule before opening a
+  stream.
 - The slot table is `EVE_SLOTS` in the same file; `mycelium-ts/tests/eve.test.ts` holds it equal to the example's
   README and checks that every slot not loaded is refused by name (jest titles, so not in the form a Rust test takes).
 

@@ -49,7 +49,8 @@ answered, run in CI. That a dropped gateway stream loses only what it had handed
 
 - **Guide:** [03, signals and boundaries](../guide/03-signals.md), whose example delivers through a mailbox.
 - **Runbook:** no runbook of its own; the gateway routes and their scopes (`mesh:read`, `mesh:write`, and a companion's
-  family scope for its kinds) are in [rbac § 2](../operations/rbac.md#2-scope-vocabulary-gateway-acls).
+  family scope for its kinds — each checked only in a build with `compliance`, which the published node has; without it
+  any valid bearer reaches the routes) are in [rbac § 2](../operations/rbac.md#2-scope-vocabulary-gateway-acls).
 - **Design:** no design record; row E of the [post-360 plan](../plans/post-360-hardening.md) is the record of the
   gateway stream's delete-after-hand-off.
 - **Code:** [`src/agent/mailbox.rs`](../../src/agent/mailbox.rs) and the mailbox routes in

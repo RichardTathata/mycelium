@@ -3,12 +3,13 @@
 ## What it is
 
 The Ops Console is a static page that reads a fleet's nodes from the operator's browser. Each node listed answers the
-page directly, and the page merges the answers itself: there is no console server, no proxy, and nothing polling the
-fleet. Its tabs read only routes the nodes already have — `/stats`, `/gateway/fleet`, `/gateway/diagnose`,
-`/gateway/guarantees`, `/gateway/govern`, `/gateway/tuple/overview`, `/gateway/audit`, `/gateway/kv/keys`, `/metrics` —
-and each node's panel carries one state: `ok`, `blocked`, `unauthorized`, `absent` or `error`. A browser reads
-another origin only if that origin allows it, so each node lists the page's origin. The rule it keeps: a panel that
-would need a process polling every node gets a new route on a node instead.
+page directly, and the page merges the answers itself: there is no console server and no proxy. While it is open the
+page re-reads every listed node every 2.5 s (`?once` reads one snapshot); closed, nothing reads the fleet for it. Its
+tabs read only routes the nodes already have — `/stats`, `/gateway/fleet`, `/gateway/diagnose`, `/gateway/guarantees`,
+`/gateway/govern`, `/gateway/tuple/overview`, `/gateway/audit` (on a node built with `compliance`),
+`/gateway/kv/keys`, `/metrics` (with `metrics`) — and `/gateway/kv?key=ui%2F…` for a showcase's own link, and each node's panel carries one state: `ok`, `blocked`, `unauthorized`, `absent` or `error`. A browser reads
+another origin only if that origin allows it, so each node lists the page's origin. The rule it keeps (D16, D28): a panel
+that would need a server-side process polling every node and holding the result gets a new route on a node instead.
 
 ## When to use it, and when not
 
@@ -41,7 +42,7 @@ reads `ok` and that a page served from an origin the nodes do not list reads `bl
 ## What it guarantees, and what it does not
 
 - No guarantee or rule id of its own; what a tab shows is each node's own answer, under that route's scope.
-- **Not built:** a server, a proxy or polling, by decision (D16, D28); history; a write of any kind; telling an
+- **Not built:** a server, a proxy or a server-side poller, by decision (D16, D28); history; a write of any kind; telling an
   unreachable node from one that does not list the page's origin — both read `blocked`.
 - **Evidence:** the [what-is-proven](../operations/what-is-proven.md) ledger has no row for the console on its own.
 

@@ -27,8 +27,12 @@ This feature is turned on in code, through `agent.service()`.
   with [`rpc_respond`](../../src/agent/service_handle.rs); [`rpc_call_with_mandate`](../../src/agent/service_handle.rs)
   carries a [mandate](mandates.md) the provider can verify, and returns `ContextTooLarge` when the envelope would not
   fit.
-- [`scatter_gather`](../../src/agent/service_handle.rs): the targets, the kind, the payload, a timeout and `min_ok`.
-- [`bulk_call`](../../src/agent/service_handle.rs) and [`bulk_serve`](../../src/agent/service_handle.rs): the caller
+- [`scatter_gather`](../../src/agent/service_handle.rs): the targets, the kind, the payload, a timeout and `min_ok`. Any
+  reply counts toward `min_ok`, a provider's refusal body included, and a target listed twice is called twice and can
+  count twice; with `min_ok = 0` it returns at the first reply, or, if none comes, `Ok` of nothing once every call has
+  timed out.
+- [`bulk_call`](../../src/agent/service_handle.rs) and [`bulk_serve`](../../src/agent/service_handle.rs) (`bulk_serve`
+  needs `gateway`): the caller
   needs an `http_port`, or `NoHttpPort`; a payload over
   [`max_bulk_payload_bytes`](../reference/configuration.md#max_bulk_payload_bytes) (64 MiB by default) is refused before
   it is staged, and a responder refuses a fetch over its own cap. Under
@@ -38,16 +42,25 @@ This feature is turned on in code, through `agent.service()`.
   calls `set_bulk_serving_port`, `set_bulk_serving_https` and `bulk_staging_get`.
 - Over HTTP: `POST /gateway/rpc/call` and `POST /gateway/scatter` under `mesh:write`, and an SDK provider's serve stream
   `GET /gateway/rpc/serve/{kind}` with `POST /gateway/rpc/respond` under `mesh:serve` — scopes checked only in a build
-  with `compliance` (the published node has it). The raw routes refuse a protected kind — `mcp.invoke`, `skill.invoke`,
-  `llm.invoke` and any the node adds — `403 protected_kind`, so those go through the doors that decide them. Neither SDK
-  has a bulk verb.
+  with `compliance` (the published node has it). On the two call routes:
+  - a protected kind — `mcp.invoke`, `skill.invoke`, `llm.invoke` and any listed in `protected_rpc_kinds` — is refused
+    `403 protected_kind` in every build, so those go through the doors that decide them;
+  - a companion's kind (`tuple.…`, `blackboard.…`, `wiki.…`) needs that companion's family scope as well (external
+    review R1, under `compliance`);
+  - a companion's door kind — a tuple take, a board claim — runs that door's
+    [exposure](exposure-policy.md) decision first, when this node hosts the companion (row Y11).
+
+  The serve stream refuses the built-in protected kinds and the reply kinds `rpc.result` and `bulk.result`
+  (`403 protected_kind`), and any kind a receiver on this node already serves (`403 served_in_process`); a kind the
+  operator added to `protected_rpc_kinds` can still be served there. Neither SDK has a bulk verb.
 - `test_rpc_round_trip`, in [`src/agent/rpc.rs`](../../src/agent/rpc.rs).
 
 ## See it work
 
 No runnable example exists: the [example index](../../examples/README.md#the-capability-matrix) has no row for service
 calls on their own; every example that calls a provider uses them. The end-to-end runs are tests:
-`scatter_gather_insufficient_replies`, in [`src/agent/scatter.rs`](../../src/agent/scatter.rs), and
+`scatter_gather_two_of_two`, in [`src/agent/scatter.rs`](../../src/agent/scatter.rs) (a provider's reply gathered, its
+payload and its node checked), and
 `a_bulk_call_completes_between_two_gateway_tls_nodes` and `a_bulk_call_over_the_cap_is_refused_before_it_is_staged`, in
 [`src/agent/bulk.rs`](../../src/agent/bulk.rs).
 
@@ -55,8 +68,9 @@ calls on their own; every example that calls a provider uses them. The end-to-en
 
 - No guarantee or rule id of its own: a protected kind's call is decided by
   [`ae.preflight`](../reference/rule-catalogue.md#aepreflight) at a gateway and by
-  [`provider.enforcement`](../reference/rule-catalogue.md#providerenforcement) at a provider that turns it on, and a
-  provider withdrawn by a revocation answers with a refusal body rather than an `RpcError`.
+  [`provider.enforcement`](../reference/rule-catalogue.md#providerenforcement) at a provider that turns it on. A
+  provider's refusal — authority not established, or `withdrawn` when its serve loop ends with a check still in flight
+  (not a revocation) — is a reply body, not an `RpcError`.
 - **Not built:** a typed refusal for a bulk fetch — a responder that refuses (over its cap, a certificate that does not
   verify, no roots for an `https` ticket, too old for one) sends nothing back, so the caller sees `Timeout`, which can
   be permanent, and the responder counts it (`bulk_fetches_refused`); an integrity check on a bulk payload beyond TLS; a

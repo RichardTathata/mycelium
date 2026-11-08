@@ -32,7 +32,7 @@ and `--executed` attributes a test in a `src/bin/` target to that binary. What t
 prose is still true, whether the example demonstrates the feature — is `/doc-coverage` Step 4b's pass, recorded in
 [`doc-coverage.md` § Feature pages](../../analysis/doc-coverage.md#feature-pages) with the next pass's baseline. Its
 first run's lesson: a CI ✓ in the example index says the example ran, not that it checks anything — two cited
-examples assert nothing — and a scope named on a page holds only in a `compliance` build, which the published stem is not.
+examples (`knowledge_layer`, `federated_domains`) assert nothing — and a scope named on a page holds only in a `compliance` build, which the published stem is not.
 
 
 **Teaching the current surfaces.** [The developer tutorial sequence](../../guide/tutorials/README.md)

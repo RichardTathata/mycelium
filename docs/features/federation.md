@@ -47,8 +47,9 @@ published node mounts neither `/a2a` nor an edge.
 The [example index](../../examples/README.md#the-capability-matrix) lists
 [`federated_domains`](../../examples/README.md#the-capability-matrix): the lifecycle in one process — descriptors,
 trust, the filtered catalogue, a call, a revocation. CI runs it, and
-[`federation_trust_is_not_transitive`](../../examples/README.md#the-capability-matrix); both print each decision and
-assert none, so the checks are the tests, `three_domains_compose_without_trust_composing` in
+[`federation_trust_is_not_transitive`](../../examples/README.md#the-capability-matrix). The second panics on any wrong
+outcome — trust arriving through a third domain, a grant re-exported — so CI fails if it breaks; [`federated_domains`](../../examples/README.md#the-capability-matrix)
+prints each decision and asserts none, so its checks are the tests, `three_domains_compose_without_trust_composing` in
 [`src/lib_tests.rs`](../../src/lib_tests.rs) among them. The two-mesh Docker suite,
 `make test-federation`, cuts the link at the network layer and asserts the meshes never merge.
 
@@ -58,6 +59,10 @@ assert none, so the checks are the tests, `three_domains_compose_without_trust_c
   [`fed.non_merger`](../reference/guarantee-catalogue.md#fed.non_merger) and
   [`fed.catalogue_signed`](../reference/guarantee-catalogue.md#fed.catalogue_signed); under the default `dev` profile a
   node reports them and refuses nothing.
+- **A credential is one call** (#696): `/a2a` serves the same signed bytes once per gateway, held in memory until
+  they expire, so a replayed credential is refused under any profile — per gateway, and forgotten at a restart. A door
+  built on `FederationEdge::authorize` alone is replay-blind and must claim the credential itself
+  ([federation § A credential is one call](../operations/federation.md#a-credential-is-one-call-replays)).
 - **Not built:** a per-partner cap across gateways — the cap is per gateway, so N gateways allow N × cap, and it bounds
   concurrency, not rate; streaming under a federated credential (calls are unary); `CallPolicy::require_body_binding`
   defaults to `false`, which gives no integrity guarantee against an active attacker; a pool with health memory — retire

@@ -20,9 +20,9 @@ concern). WHY is usually shared Dev+Ops.
 ## Changelog
 
 - **2026-11-08 (feature-pages pass 1)** — Step 4b's first run, over all 73 pages (F4; baseline #655, `6d41eee8`).
-  **59 Clear, 14 Thin, 3 Missing**, every one fixed in the same PR: three features with no page (service calls —
+  **50 Clear, 23 Thin, 3 Missing** (after #739's review re-marked nine), every one fixed in the same PR: three features with no page (service calls —
   RPC, scatter-gather and bulk; the Eve loader; the Ops Console) now have one; scope claims without `compliance` on
-  six pages; four Q2 findings (an example that relies on a feature without showing it, two that assert nothing);
+  seven pages; four Q2 findings (an example that relies on a feature without showing it, two that assert nothing);
   two Q3 findings (rows Y4 and Y7); a page saying the ledger had no row while one existed, and four pages citing none
   that had one. Also the cookbook's service-layer snippets, which called methods `GossipAgent` lacks. Section
   [Feature pages](#feature-pages).
@@ -932,7 +932,10 @@ Step 4b's pass over `docs/features/` (plan `feature-pages.md` F-S, F4). **Last p
 audits every page and is exempt from Step 0's no-diff stop; its question-4 baseline is F2's merge (#655, `6d41eee8`,
 2026-10-23). **The next pass's baseline is 2026-11-08.**
 
-**Method, as run.** One auditor (the pass's author, without sub-agents), the four questions verbatim, the pages in
+**Method, as run, and its limit.** One auditor did all 73 pages — the author of F3's pages, in a session that could
+not spawn the Step 3 auditors Step 4b assigns them to — so the pass is **not independent of the pages' author**; the
+compensating check is the PR's independent adversarial review (#739), whose findings are folded in below. The four
+questions verbatim, the pages in
 the registry's order, against `origin/main` at `842c1653` (#737). For each page:
 
 - **Q1** — the code each page's *What it is* and *Turn it on* point at, opened, with the defect classes F3's reviews
@@ -951,17 +954,20 @@ the registry's order, against `origin/main` at `842c1653` (#737). For each page:
   `gateway_max_connections`, `max_bulk_payload_bytes`); the gateway routes added (the grant, record and schedule
   routes, each on a page); and the merged features with no id in the gate's seven sources.
 
-**Result: 59 Clear, 14 Thin, 3 Missing** (76 pages after the three written here), every finding fixed in the pass's
-PR. **Not done by this pass:** a test that a page's prose is true — the gate still reads no prose, and the next pass
-re-reads only the pages whose code or linked docs changed.
+**Result: 50 Clear, 23 Thin, 3 Missing** (76 pages after the three written here), every finding fixed in the pass's
+PR. The first draft read 59 / 14 / 3: eight pages it marked Clear while fixing their ledger links, and the mailbox,
+were re-marked Thin by #739's review. **Not done by this pass:** a test that a page's prose is true — the gate still reads no prose, and the next pass
+re-reads only the pages whose code or linked docs changed. **For the next pass:** #699 (the TLS module's directories
+`0700`) changed behaviour no page states — the key-file modes sit on no page either; whether that warrants one is
+the next pass's Q4.
 
 **Answered rather than fixed:**
 - **PRs that change pages' code, open when the pass began** — #735 (a provider refuses a call whose mandate was
   revoked between preflight and registration) merged during the pass and updated its two pages (`grants.md`,
   `provider-enforcement.md`), which the pass re-read after merging it. #734 (stale advertisements skipped by every
   reader; RUST_LOG) and #738 (a stem runs only its declared kinds; a cheaper bad line cannot stall a floor) are open, so
-  the pages describe `main`. #734 updates its pages. **#738 does not**: `demand-provisioning.md`, `hosted-components.md` and `presence-bands.md` state
-  its two defects as known gaps *fixed by a separate PR*, and must lose those sentences in #738 (rule 5).
+  the pages describe `main`. Both update their pages: #738 (after this pass's first draft read it) removes the known-gap sentences that
+  `demand-provisioning.md`, `hosted-components.md` and `presence-bands.md` carried for its two defects.
 - **P1's test form is Rust-only.** A feature turned on from an SDK (the Eve loader) cannot end *Turn it on* with a
   backticked Rust test; the page names its jest file and its CI job instead.
 - **A guide snippet that did not compile:** the cookbook's service-layer reference called `agent.rpc_call`,
@@ -972,14 +978,14 @@ re-reads only the pages whose code or linked docs changed.
 |---|---|---|
 | [a2a](../features/a2a.md) | Clear | — |
 | [action-authorisation](../features/action-authorisation.md) | Clear | — |
-| [activation-egress-proxy](../features/activation-egress-proxy.md) | Clear | a ledger row named in prose, or not linked, now linked by its anchor (P4) |
+| [activation-egress-proxy](../features/activation-egress-proxy.md) | **Thin** → fixed | a ledger row named in prose, or not linked, now linked by its anchor (P4); marked Clear in the first draft, re-marked by #739's review |
 | [adapter-contract](../features/adapter-contract.md) | Clear | — |
 | [adaptive-stability](../features/adaptive-stability.md) | **Thin** → fixed | Q2 — the CI-run example (`elastic_intent`) runs under the default profile and shows no ladder; now names `under_legacy_the_breakers_are_not_consulted_and_under_observe_they_only_count` |
 | [agentfacts](../features/agentfacts.md) | Clear | — |
 | [artifact-library](../features/artifact-library.md) | Clear | — |
 | [audit-trail](../features/audit-trail.md) | Clear | — |
 | [blackboard](../features/blackboard.md) | Clear | — |
-| [capability-discovery](../features/capability-discovery.md) | Clear | a ledger row named in prose, or not linked, now linked by its anchor (P4) |
+| [capability-discovery](../features/capability-discovery.md) | **Thin** → fixed | a ledger row named in prose, or not linked, now linked by its anchor (P4); marked Clear in the first draft, re-marked by #739's review |
 | [causal-records](../features/causal-records.md) | Clear | — |
 | [confined-activations](../features/confined-activations.md) | Clear | — |
 | [confined-fleet](../features/confined-fleet.md) | Clear | — |
@@ -998,8 +1004,8 @@ re-reads only the pages whose code or linked docs changed.
 | [eve-loader](../features/eve-loader.md) | **Missing** → written | Q4 — `mycelium-ts`'s Eve loader (#706, Y6; schedules in #709, Y12) had no page and no id in the gate's sources. Page written |
 | [evidence-journal](../features/evidence-journal.md) | Clear | — |
 | [exposure-policy](../features/exposure-policy.md) | **Thin** → fixed | Q3 — "the ledger has no row for it yet" while the row `new-dependent-work-held-while-actor` exists (2.39.0); now linked |
-| [federation](../features/federation.md) | **Thin** → fixed | Q2 — `federated_domains` and `federation_trust_is_not_transitive` assert nothing; now said, with the test that checks |
-| [fleet-history-limits](../features/fleet-history-limits.md) | Clear | a ledger row named in prose, or not linked, now linked by its anchor (P4) |
+| [federation](../features/federation.md) | **Thin** → fixed | Q2 — `federated_domains` asserts nothing (`federation_trust_is_not_transitive` panics on a wrong outcome, and the page now says which); now said, with the test that checks |
+| [fleet-history-limits](../features/fleet-history-limits.md) | **Thin** → fixed | a ledger row named in prose, or not linked, now linked by its anchor (P4); marked Clear in the first draft, re-marked by #739's review |
 | [gateway-caller-identity](../features/gateway-caller-identity.md) | Clear | — |
 | [gateway-sso](../features/gateway-sso.md) | Clear | — |
 | [gateway-tls](../features/gateway-tls.md) | Clear | — |
@@ -1015,10 +1021,10 @@ re-reads only the pages whose code or linked docs changed.
 | [intents](../features/intents.md) | **Thin** → fixed | `govern:write` stated without `compliance` (only the audit was said to need it); fixed |
 | [knowledge-layer](../features/knowledge-layer.md) | **Thin** → fixed | Q2 — `knowledge_layer` prints each verdict and asserts none, so CI passes a regression; the page said "CI runs it"; now says so and names the semantic gate as the check |
 | [llm-prompt-skills](../features/llm-prompt-skills.md) | Clear | — |
-| [mailbox](../features/mailbox.md) | Clear | — |
+| [mailbox](../features/mailbox.md) | **Thin** → fixed | `mesh:read`/`mesh:write` stated without `compliance` — missed by the pass's own sweep, found by #739's review (calibration) |
 | [mandates](../features/mandates.md) | Clear | — |
 | [mcp-tools](../features/mcp-tools.md) | Clear | — |
-| [mesh-mtls](../features/mesh-mtls.md) | Clear | a ledger row named in prose, or not linked, now linked by its anchor (P4) |
+| [mesh-mtls](../features/mesh-mtls.md) | **Thin** → fixed | a ledger row named in prose, or not linked, now linked by its anchor (P4); marked Clear in the first draft, re-marked by #739's review |
 | [metrics-and-tracing](../features/metrics-and-tracing.md) | Clear | — |
 | [model-serving](../features/model-serving.md) | **Thin** → fixed | `llm:invoke` stated without `compliance`, on the one binary that lacks it — the published `mycelium-stem`, where any valid bearer calls a served skill; fixed |
 | [multi-domain-profile](../features/multi-domain-profile.md) | **Thin** → fixed | Q3 — omitted row Y7's unexercised items (`fed.partner_slots` never filled, no electorate declared); no ledger row cited while `two-domains-under-secure-multi-domain` exists; both fixed |
@@ -1028,15 +1034,15 @@ re-reads only the pages whose code or linked docs changed.
 | [persistence](../features/persistence.md) | Clear | — |
 | [presence-bands](../features/presence-bands.md) | Clear | — |
 | [provider-enforcement](../features/provider-enforcement.md) | Clear | — |
-| [published-node](../features/published-node.md) | Clear | a ledger row named in prose, or not linked, now linked by its anchor (P4) |
+| [published-node](../features/published-node.md) | **Thin** → fixed | a ledger row named in prose, or not linked, now linked by its anchor (P4); marked Clear in the first draft, re-marked by #739's review |
 | [reason-router](../features/reason-router.md) | Clear | — |
 | [recurring-work](../features/recurring-work.md) | **Thin** → fixed | no ledger row cited while `declared-recurring-work-runs-once-per` exists; `schedule:run` stated without `compliance`; both fixed |
 | [replay](../features/replay.md) | Clear | — |
 | [rule-catalogue-and-decision-trace](../features/rule-catalogue-and-decision-trace.md) | Clear | — |
-| [selective-recovery](../features/selective-recovery.md) | Clear | a ledger row named in prose, or not linked, now linked by its anchor (P4) |
+| [selective-recovery](../features/selective-recovery.md) | **Thin** → fixed | a ledger row named in prose, or not linked, now linked by its anchor (P4); marked Clear in the first draft, re-marked by #739's review |
 | [service-calls](../features/service-calls.md) | **Missing** → written | Q4 — RPC, scatter-gather and bulk had no page; #722 (R7: bulk under `gateway_tls`, `max_bulk_payload_bytes`) and #727 (the serve loops' receivers) changed them. Page written |
 | [shadow-acceptance](../features/shadow-acceptance.md) | Clear | — |
-| [side-effects](../features/side-effects.md) | Clear | a ledger row named in prose, or not linked, now linked by its anchor (P4) |
+| [side-effects](../features/side-effects.md) | **Thin** → fixed | a ledger row named in prose, or not linked, now linked by its anchor (P4); marked Clear in the first draft, re-marked by #739's review |
 | [signal-mesh](../features/signal-mesh.md) | **Thin** → fixed | Q2 — `mailbox_llm` relies on the mesh, it does not show scope (an Individual request reaches its target whatever the boundaries say); now names `test_group_signal_only_reaches_members` |
 | [signed-catalogue](../features/signed-catalogue.md) | Clear | — |
 | [skills](../features/skills.md) | Clear | — |
@@ -1045,7 +1051,7 @@ re-reads only the pages whose code or linked docs changed.
 | [test-faults](../features/test-faults.md) | **Thin** → fixed | no ledger row cited while `declaration-s-fleet-survives-faults-substrate` exists; fixed |
 | [tuple-space](../features/tuple-space.md) | Clear | — |
 | [unit-files-and-wire-check](../features/unit-files-and-wire-check.md) | Clear | — |
-| [wiki-substrate](../features/wiki-substrate.md) | Clear | a ledger row named in prose, or not linked, now linked by its anchor (P4) |
+| [wiki-substrate](../features/wiki-substrate.md) | **Thin** → fixed | a ledger row named in prose, or not linked, now linked by its anchor (P4); marked Clear in the first draft, re-marked by #739's review |
 
 
 ## Calibration
@@ -1054,6 +1060,10 @@ Prior `Clear` cells later found Thin/Missing — the ledger that scores this aud
 doc analogue of `ratings.md`'s calibration ledger). A cell with repeated hits deserves structural
 skepticism, not a re-asserted ✓.
 
+- **2026-11-08 (feature-pages pass 1) — mailbox page** read `Clear` in the pass's own first draft while it named
+  `mesh:read`/`mesh:write` with no `compliance` note — the very class the pass swept for, on a page whose scopes sat in
+  *Go deeper* where the sweep's grep was not read against (found by #739's independent review). A later pass sweeps every section of a page, not only the ones
+  that state its settings.
 - **2026-09-26 (run 17) — Security · HOW·Dev** read `Clear` in runs 13–16 while `09-security.md`'s
   first `TlsConfig` literal used `key_path`/`cert_path`, fields that do not exist (`cert_pem`/`key_pem`)
   — did not compile. **Third hit of the config-literal class** (2026-07-11 wire constant; 2026-09-05
