@@ -322,6 +322,8 @@ async fn a_missed_run_is_a_decision_in_the_trace_with_its_reason() {
         assert!(policy_input.value.contains(&format!("first={}", first + 1)), "{policy:?}: the gap is named: {}", policy_input.value);
         assert!(m.inputs.iter().any(|i| i.source.contains("sched/{id}/last") && i.value == first.to_string()), "{policy:?}: the last run is an input: {m:?}");
         let records = sink.snapshot();
+        // #740's review: the schedule's records carry their rules' catalogued revisions.
+        crate::rules::assert_catalogued_revisions(&records, &[RUN_RULE, MISSED_RULE]);
         let m_seq = records.iter().find(|r| r.rule == MISSED_RULE).map(|r| r.seq).unwrap();
         match run_reason {
             Some(rr) => {

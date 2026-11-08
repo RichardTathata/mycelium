@@ -893,6 +893,8 @@ async fn test_membership_governor_with_a_decision_trace_decides_as_without_and_s
 
     let records: Vec<_> = sinks.iter().flat_map(|s| s.snapshot()).collect();
     assert!(records.iter().all(|r| r.rule == "membership.governed" && r.target.as_deref() == Some("pool")), "{records:?}");
+    // #740's review: the governor's records carry the catalogued revision.
+    crate::rules::assert_catalogued_revisions(&records, &["membership.governed"]);
     let joins = records.iter().filter(|r| r.outcome == OutcomeKind::Action && r.reason == "join").count();
     assert!(joins >= 2, "at least min join actions across the fleet: {records:?}");
     assert_eq!(sinks.iter().map(|s| s.dropped()).sum::<u64>(), 0);
@@ -5096,6 +5098,21 @@ async fn test_signal_group_admitted_when_member() {
     }
     let sig = got.expect("member should receive group signal");
     assert_eq!(sig.scope, SignalScope::Group(Arc::from("nlp")));
+}
+
+/// #740's review, finding 1: `signal.admission` is recorded by `mycelium-core` (`ops.rs`), which cannot see
+/// `rules::RULES`, so its revision is written by hand. Driven through an agent with a trace attached: a
+/// signal to a group this node is not in is refused, and the record carries the catalogued revision. Seen
+/// failing first with the literal in `ops.rs` set wrong.
+#[tokio::test]
+async fn a_signal_admission_record_carries_its_catalogued_revision() {
+    let agent = make_agent();
+    let sink = Arc::new(mycelium_core::decision::DecisionSink::default());
+    agent.with_decision_trace(Arc::clone(&sink));
+    let _ = agent.mesh().emit("task", SignalScope::Group(Arc::from("not-mine")), b"refused".to_vec());
+    let records = sink.snapshot();
+    assert!(records.iter().any(|r| r.rule == "signal.admission" && r.reason == "scope_not_admitted"), "{records:?}");
+    crate::rules::assert_catalogued_revisions(&records, &["signal.admission"]);
 }
 
 #[tokio::test]

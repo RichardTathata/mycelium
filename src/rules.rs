@@ -197,3 +197,32 @@ pub static RULES: &[RuleDescriptor] = &[
         summary: "A gap is decided, not replayed: skipped, run late each under its own key (at most 64), or run once for the gap under its newest slot's key; a schedule with no recorded run starts at the slot due.",
     },
 ];
+
+/// #740's review, finding 1: the root crate's recorders write their rule's revision by hand
+/// (`schedule.rs`, `membership_governor.rs`, and `mycelium-core`'s `ops.rs`, which cannot see this
+/// table), so nothing tied a record to its descriptor. A test that drives a recorder hands the records
+/// here: every record must carry its descriptor's revision, and each rule in `drove` must have been
+/// recorded at least once, so a test that drove nothing does not pass.
+#[cfg(test)]
+pub(crate) fn assert_catalogued_revisions(records: &[mycelium_core::decision::DecisionRecord], drove: &[&str]) {
+    for id in drove {
+        assert!(records.iter().any(|r| r.rule == *id), "no {id} record: the test drove nothing for it: {records:?}");
+    }
+    for r in records {
+        let d = RULES.iter().find(|d| d.id == r.rule).unwrap_or_else(|| panic!("{} is recorded but not in rules::RULES", r.rule));
+        assert_eq!(r.rule_revision, d.revision, "a {} record carries its descriptor's revision", r.rule);
+    }
+}
+
+#[cfg(test)]
+mod catalogue_tests {
+    /// This crate's descriptors pass the structural checks on their own — revision 0 refused among them
+    /// (#740's review, finding 3). Relations into another crate are external here; the full gate is
+    /// `mycelium-wasm-host`'s `rule_catalogue` test.
+    #[test]
+    fn the_root_catalogue_is_structurally_sound() {
+        if let Err(errs) = mycelium_core::rule::Catalogue::gather_partial(&[super::RULES]) {
+            panic!("{}", errs.iter().map(|e| e.to_string()).collect::<Vec<_>>().join("\n"));
+        }
+    }
+}

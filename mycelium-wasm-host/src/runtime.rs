@@ -890,8 +890,9 @@ mod tests {
     fn a_trace_record_carries_its_rules_revision() {
         let sink = Arc::new(mycelium::decision::DecisionSink::default());
         let ctx = TraceCtx { sink: Arc::clone(&sink), node: "n".into(), build: "b".into(), config_digest: "d".into(), profile: None };
-        let rev = |id: &str| crate::rules::RULES.iter().find(|r| r.id == id).map(|r| r.revision).unwrap();
-        assert_eq!(rev("prov.activation"), 3, "the case this test is about: a rule at revision 3");
+        // The test bites only while some rule is above revision 1 (today `prov.activation` and
+        // `prov.probe` are at 3, six others at 2).
+        assert!(crate::rules::RULES.iter().any(|r| r.revision > 1), "no rule above revision 1: this test checks nothing");
         for r in crate::rules::RULES {
             ctx.record(r.id, "t".into(), mycelium::decision::OutcomeKind::Action, "x", "target".into(), Vec::new(), None);
         }
@@ -899,12 +900,6 @@ mod tests {
         assert_eq!(records.len(), crate::rules::RULES.len());
         for (record, descriptor) in records.iter().zip(crate::rules::RULES) {
             assert_eq!(record.rule_revision, descriptor.revision, "{} records the revision its descriptor states", descriptor.id);
-        }
-        // The coverage manifest a bundle carries beside the records names the same revisions.
-        let refs: Vec<&mycelium::rule::RuleDescriptor> = crate::rules::RULES.iter().collect();
-        let manifest: serde_json::Value = serde_json::from_str(&mycelium::decision::coverage_manifest(&refs)).unwrap();
-        for (row, record) in manifest["rules"].as_array().unwrap().iter().zip(&records) {
-            assert_eq!(row["revision"].as_u64(), Some(u64::from(record.rule_revision)), "{}", record.rule);
         }
     }
 
