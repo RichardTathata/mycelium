@@ -212,7 +212,16 @@ pub(super) fn resolve_filter_against_kv(
     kv_state: &crate::store::KvState,
     filter:   &CapFilter,
 ) -> Vec<(NodeId, Capability)> {
-    let now_ms = age_now_ms();
+    resolve_filter_at(kv_state, filter, age_now_ms())
+}
+
+/// [`resolve_filter_against_kv`] at a `now_ms` the caller read: a pass that resolves several filters reads the
+/// clock once, so a recording holds one wall read per pass rather than one per filter.
+pub(super) fn resolve_filter_at(
+    kv_state: &crate::store::KvState,
+    filter:   &CapFilter,
+    now_ms:   u64,
+) -> Vec<(NodeId, Capability)> {
     let mut out = Vec::new();
     for (key, bytes, hlc_ts) in scan_prefix_kv_with_ts(kv_state, "cap/") {
         if is_cap_locality_key(&key) { continue; }
@@ -265,14 +274,24 @@ fn own_entry_live(entry: &CapEntry, hlc_ts: u64, now_ms: u64) -> bool {
     now_ms.saturating_sub(crate::hlc::physical_ms(hlc_ts)) <= 3u64.saturating_mul(entry.refresh_interval_ms)
 }
 
-/// This node's own capabilities that have not aged out ([`own_entry_live`]): the group projection's input.
+/// This node's own capabilities that have not aged out ([`own_entry_live`]) — the one reading of a node's own
+/// entries: the group projection, the governor's own eligibility, `CapabilityHandle::own_advertised` (agent facts).
+/// The clock is read only when there is an entry to judge, so a node advertising nothing adds no read to a recording.
 pub(super) fn own_live_caps(kv_state: &crate::store::KvState, own: &NodeId) -> Vec<Capability> {
-    let now_ms = age_now_ms();
+    own_live_caps_with(kv_state, own, None)
+}
+
+/// [`own_live_caps`] at a `now_ms` the caller already read (one read per governor pass).
+pub(super) fn own_live_caps_at(kv_state: &crate::store::KvState, own: &NodeId, now_ms: u64) -> Vec<Capability> {
+    own_live_caps_with(kv_state, own, Some(now_ms))
+}
+
+fn own_live_caps_with(kv_state: &crate::store::KvState, own: &NodeId, mut now_ms: Option<u64>) -> Vec<Capability> {
     let mut out = Vec::new();
     for (key, bytes, hlc_ts) in scan_prefix_kv_with_ts(kv_state, &format!("cap/{own}/")) {
         if is_cap_locality_key(&key) { continue; }
         match decode_cap_entry(&bytes) {
-            Some(entry) if own_entry_live(&entry, hlc_ts, now_ms) => out.push(entry.capability),
+            Some(entry) if own_entry_live(&entry, hlc_ts, *now_ms.get_or_insert_with(age_now_ms)) => out.push(entry.capability),
             Some(_) => {}
             None => warn!(key = %key, "malformed own Capability — local cap/ entry did not decode"),
         }

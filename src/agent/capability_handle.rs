@@ -109,6 +109,15 @@ impl CapabilitiesHandle {
 
     // ── Resolution ───────────────────────────────────────────────────────────
 
+    /// This node's own advertised capabilities that it has not stopped refreshing. A node judges its own entries
+    /// on staleness only (rule `kv.expiry`): one written more than three refresh intervals ago — read back from
+    /// persisted state after a restart, say — is left out, and one stamped ahead of this node's wall clock (its HLC
+    /// ahead) is kept, as the node keeps serving it. [`resolve`](Self::resolve) judges every entry, this node's
+    /// included, both ways.
+    pub fn own_advertised(&self) -> Vec<Capability> {
+        super::capability_ops::own_live_caps(&self.ctx.kv_state, &self.ctx.node_id)
+    }
+
     /// Snapshot scan: returns every live capability in the local KV view matching `filter`.
     pub fn resolve(&self, filter: &CapFilter) -> Vec<(NodeId, Capability)> {
         self.resolve_for_caller(filter, &CallerContext::unrestricted())

@@ -20,7 +20,7 @@
 
 
 use base64::Engine as _;
-use mycelium::{CapFilter, GossipAgent};
+use mycelium::GossipAgent;
 use serde::Serialize;
 use serde_json::{json, Value};
 
@@ -99,28 +99,18 @@ pub struct FactsOptions {
 impl AgentFacts {
     /// Build from a node's live substrate state (public API only). `None` if the node has no `tls`
     /// identity — AgentFacts are self-certified and require one. `capabilities` are this node's own
-    /// advertised `cap/{self}/…` entries that the resolver still reads as fresh (a stale one, or one that
+    /// advertised `cap/{self}/…` entries it has not stopped refreshing (a stale one, or one that
     /// doesn't decode as a [`Capability`](mycelium::Capability), e.g. a locality key, is skipped); they are sorted for a
     /// deterministic document.
     pub fn from_agent(agent: &GossipAgent, opts: &FactsOptions) -> Option<Self> {
         let identity_pubkey = agent.identity_public_key()?;
         let node_id = agent.node_id().to_string();
 
-        // This node's own advertisements, as the resolver reads them: one it stopped refreshing (read back from
-        // persisted state after a restart) has evaporated and is not certified (#734's review, finding 3).
-        let mut pairs = std::collections::BTreeSet::new();
-        for (key, _) in agent.kv().scan_prefix(&format!("cap/{node_id}/")) {
-            let mut seg = key.splitn(4, '/').skip(2);
-            if let (Some(ns), Some(name)) = (seg.next(), seg.next()) {
-                pairs.insert((ns.to_string(), name.to_string()));
-            }
-        }
-        let own = agent.node_id();
-        let fresh = pairs.iter().flat_map(|(ns, name)| agent.capabilities().resolve(&CapFilter::new(ns.as_str(), name.as_str())))
-            .filter(|(node, _)| node == own)
-            .map(|(_, cap)| cap);
+        // This node's own advertisements as the node judges them (`own_advertised`, staleness only): one it stopped
+        // refreshing (read back from persisted state after a restart) is not certified, and one its HLC stamped
+        // ahead of its wall clock is, since it serves it (#734's review, finding 3, and confirm round, C).
         let mut capabilities = Vec::new();
-        for cap in fresh {
+        for cap in agent.capabilities().own_advertised() {
             capabilities.push(CapabilityFact {
                 namespace:     cap.namespace.to_string(),
                 name:          cap.name.to_string(),
@@ -310,6 +300,24 @@ mod tests {
         let names: Vec<&str> = facts.capabilities.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(names, vec!["summarize"], "a stale own advertisement was certified");
 
+        agent.shutdown_with_timeout(Duration::from_secs(5)).await;
+        let _ = std::fs::remove_dir_all(&cert_dir);
+    }
+
+    /// **An own advertisement stamped ahead is certified** (#734's confirm round, C): the facts judge this node's own
+    /// entries as the node serves them — staleness only. With its HLC ahead of its wall clock, the symmetric
+    /// `is_fresh` left out a skill the node was serving.
+    #[tokio::test]
+    async fn an_own_advertisement_stamped_ahead_is_certified() {
+        let (agent, cert_dir) = tls_agent().await;
+        let me = agent.node_id().clone();
+        let ahead = mycelium::CapEntry { capability: Capability::new("nlp", "ahead"), refresh_interval_ms: 1_000 };
+        let written = mycelium::sim_seam::wall_now_ms() + 60_000;
+        mycelium_core::store::apply_and_notify(&agent.kv().core().kv_state, &mycelium_core::framing::make_gossip_update_stamped(
+            &me, 5, Arc::from(format!("cap/{me}/nlp/ahead").as_str()), ahead.encode(), false, mycelium::hlc::pack(written, 0)));
+        let facts = AgentFacts::from_agent(&agent, &FactsOptions::default()).expect("a tls identity");
+        let names: Vec<&str> = facts.capabilities.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["ahead"], "an own advertisement stamped ahead was left out");
         agent.shutdown_with_timeout(Duration::from_secs(5)).await;
         let _ = std::fs::remove_dir_all(&cert_dir);
     }

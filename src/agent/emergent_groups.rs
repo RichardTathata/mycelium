@@ -127,10 +127,9 @@ pub(crate) async fn watch_capability_group_definitions(
 /// can actually hold against the otherwise-unconditional cap-match auto-join. When the intent
 /// evaporates the group drops out of this set and reverts to emergent (un-bounded) membership.
 /// Electorate groups (P2) are in it for good: their membership moves only by a decided step.
-fn governor_owned_groups(ctx: &Arc<TaskCtx>, own: &NodeId) -> AHashSet<Arc<str>> {
+fn governor_owned_groups(ctx: &Arc<TaskCtx>, own: &NodeId, now: u64) -> AHashSet<Arc<str>> {
     use super::membership_governor::{MembershipIntent, MEMBERSHIP_INTENT_TTL_MS, MEMBERSHIP_PREFIX};
     let mut set = AHashSet::new();
-    let now = now_ms();
     for (_key, bytes) in scan_prefix_kv(&ctx.kv_state, MEMBERSHIP_PREFIX) {
         let Ok(intent) = mycelium_core::serde_fixint::from_slice::<MembershipIntent>(&bytes) else {
             continue;
@@ -157,8 +156,8 @@ fn governor_owned_groups(ctx: &Arc<TaskCtx>, own: &NodeId) -> AHashSet<Arc<str>>
 /// This node's own capabilities, for the group projection: those it has not stopped refreshing. A node
 /// restarted over persisted `cap/` entries it no longer advertises would otherwise join the groups they match and
 /// project a fresh `gcap/` that demand and wiring count (#734's review, finding 3).
-fn own_capabilities(kv_state: &crate::store::KvState, own: &NodeId) -> Vec<Capability> {
-    super::capability_ops::own_live_caps(kv_state, own)
+fn own_capabilities(kv_state: &crate::store::KvState, own: &NodeId, now_ms: u64) -> Vec<Capability> {
+    super::capability_ops::own_live_caps_at(kv_state, own, now_ms)
 }
 
 fn reconcile_emergent_groups(
@@ -171,8 +170,6 @@ fn reconcile_emergent_groups(
     // provides decision; we project everything the def specifies, regardless
     // of whether we hold the same direct capability ourselves — the def is
     // the group's collective assertion, not a per-member echo of its own caps).
-    let own_caps = own_capabilities(&ctx.kv_state, own);
-
     // Current cap-group definitions, keyed by group name.
     let mut defs: AHashMap<Arc<str>, CapabilityGroupDef> = AHashMap::new();
     for (key, bytes) in scan_prefix_kv(&ctx.kv_state, "cap-group/") {
@@ -194,7 +191,11 @@ fn reconcile_emergent_groups(
     }
 
     // Compute want_joined: every group whose filter is satisfied by at least
-    // one of our own capabilities.
+    // one of our own capabilities. One wall reading serves the pass — the own entries' staleness here and the
+    // intents' below — taken where the pass always took it, so a recording holds the reads it held before own
+    // entries were judged (#734's confirm round: a second read in this event-driven pass diverged a replay).
+    let now = now_ms();
+    let own_caps = own_capabilities(&ctx.kv_state, own, now);
     let mut want_joined: AHashSet<Arc<str>> = AHashSet::new();
     for (group, def) in &defs {
         if own_caps.iter().any(|c| def.filter.matches(c)) {
@@ -205,7 +206,7 @@ fn reconcile_emergent_groups(
     // Defer to the MembershipGovernor for any group under a live membership intent: drop it from
     // want_joined (don't auto-join) — and below, exclude it from the leave sweep (don't auto-leave).
     // The governor alone then drives that group's membership toward the intent's [min, max] / drain.
-    let governor_owned = governor_owned_groups(ctx, own);
+    let governor_owned = governor_owned_groups(ctx, own, now);
     want_joined.retain(|g| !governor_owned.contains(g.as_ref()));
 
     // Join newly-matching groups; spawn one consolidated membership task per
@@ -486,7 +487,7 @@ mod tests {
             apply_and_notify(&kv, &make_gossip_update_stamped(&own, 5, Arc::from(key.as_str()),
                 entry.encode(), false, crate::hlc::pack(written_ms, 0)));
         }
-        let mut names: Vec<String> = own_capabilities(&kv, &own).into_iter().map(|c| c.name.to_string()).collect();
+        let mut names: Vec<String> = own_capabilities(&kv, &own, now).into_iter().map(|c| c.name.to_string()).collect();
         names.sort();
         assert_eq!(names, vec!["ahead".to_string(), "live".to_string()], "a stale own ad was projected");
     }

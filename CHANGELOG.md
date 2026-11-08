@@ -66,9 +66,19 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   it had stopped refreshing — restored from persisted state after a restart — as live: the provider-side preflight
   served the skill (`advertises`), the group projection joined the groups it matched and projected a fresh `gcap/`
   that demand and wiring count (`emergent_groups`), and `mycelium-agentfacts` certified it; the `llm_agent` example's
-  dashboard showed a crashed node's ads. A node's check of its own entry judges staleness only, so a clock that reads
-  its own stamp as ahead does not refuse its own skill, and `advertises` reads its one key rather than scanning the
-  fleet's. Rules `kv.expiry`, `cap.match` and `membership.governed` are at revision 3. No API change; a caller sees
+  dashboard showed a crashed node's ads. A node judges its **own** entries on staleness only, at every reader of them —
+  the preflight, the group projection, its own eligibility in the membership governor and its agent facts — so a
+  clock that reads its own stamp as ahead does not refuse its own skill, drop it from a group, judge itself
+  ineligible or leave it out of its facts; a peer's entry is judged both ways. The cost, stated in `kv.expiry`: an own
+  entry stamped far ahead and persisted before a clock correction stays live until the wall clock catches up. New:
+  `CapabilityHandle::own_advertised()`, that reading for a companion (agent facts uses it). `advertises` reads its one
+  key rather than scanning the fleet's. The new readers add no clock read a recording lacks where they can: the group
+  projection judges its own entries with the one wall reading its pass already took (for the membership intents), an
+  own-entry check reads the clock only when there is an entry, and the governor reads it once per pass, on its timer
+  — so the checked-in replay corpus (`y2-schedule-run`, the faults recordings) replays as recorded and was not
+  re-recorded. The first form read the clock again in every group-projection pass, an event-driven task, which
+  diverged `schedule_replay` at its eighth choice and, under load, `decision_trace_replay`. Rules `kv.expiry` (revision 4),
+  `cap.match` and `membership.governed` (revision 3). No API change; a caller sees
   fewer providers, never more, except `/gateway/demand`'s group contributors. Not changed: an advertisement with a
   refresh interval of 0, possible through the Rust API, reads as stale to every reader at once.
 
