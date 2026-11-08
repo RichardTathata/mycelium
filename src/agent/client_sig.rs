@@ -245,9 +245,9 @@ impl std::fmt::Display for UnsafeInteger {
 
 impl std::error::Error for UnsafeInteger {}
 
-/// Does `value` hold, at any depth, an integral number outside ±(2^53 − 1)? An integer literal is judged exactly; a
-/// float is judged by its value, so `1e16` counts too — as it does in Python and TypeScript, which cannot tell the two
-/// apart.
+/// Does `value` hold, at any depth, a number whose magnitude is 2^53 or more, float or not (`1e16`, `6.022e23`)? An
+/// integer literal is judged exactly; a float by its value — every double of that magnitude is an integer, and
+/// JavaScript cannot tell `1e16` from `10000000000000000`, so the three languages draw the line in the same place.
 pub fn holds_unsafe_integer(value: &serde_json::Value) -> bool {
     use serde_json::Value;
     match value {

@@ -2663,9 +2663,10 @@ them at its receive boundary.
 - **The arguments' digest is RFC 8785 (JCS)**, in all three languages: ECMAScript's number and string forms, members
   sorted by UTF-16 code units. A signer that hashes another encoding is refused `client_signature_invalid` on any
   float written in exponent form. The mandate and grant `arguments_digest` is unchanged.
-- **Large integers:** a signed call whose arguments hold an integral number outside ±(2^53 − 1) is refused, by every
-  signer and by the provider (`client_signature_unsafe_integer`), because the canonical form cannot bind it exactly.
-  Send large ids as strings.
+- **Large numbers:** a signed call whose arguments hold any number whose magnitude is 2^53 or more, float or not (e.g.
+  `6.022e23`), is refused by every signer and by the provider (`client_signature_unsafe_integer`): send it as a string.
+  The canonical form cannot bind such a number exactly, and the rule covers floats because JavaScript cannot tell
+  `1e16` from `10000000000000000`.
 - **Refusal codes:** `client_key_unknown` (no certificate for the key here yet; retry once its record arrives),
   `client_key_superseded` (final), `client_signature_invalid`, `client_signature_unbound`, `client_signature_malformed`,
   and `client_instances_exhausted` (more than 1,024 processes signing under one key inside the window; answered, not
