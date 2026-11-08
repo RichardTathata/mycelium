@@ -97,12 +97,13 @@ pub(crate) fn check_doors(evaluator: &dyn ActionEvaluator, doors: &[(String, Str
 /// `start()`'s before it binds (#733's review, confirm round): an existing path must be a regular file this process
 /// can open for append (opened and closed, never written — a 0644 file of another user fails here, which `readonly()`
 /// alone did not see); a missing one's nearest existing ancestor must be a directory this process can create a file
-/// in (a probe file created and removed). `what` names the journal in the refusal. These calls are start-time
+/// in (a probe file created and removed). `what` names the journal in the refusal. Paths are followed through symlinks, as the journal
+/// will be opened. These calls are start-time
 /// configuration I/O, outside the replay seams like the unit loader's reads, recorded in
 /// `scripts/sim-seams-baseline.txt` and in `docs/design/replay-nondeterminism-inventory.md` §2.
 fn check_writable(what: &str, path: &std::path::Path) -> Result<(), GossipError> {
     let fail = |why: String| refused(format!("{what} {}: {why}", path.display()));
-    match std::fs::symlink_metadata(path) {
+    match std::fs::metadata(path) {
         Ok(m) if m.is_dir() => return Err(fail("is a directory".into())),
         Ok(m) if !m.is_file() => return Err(fail("is not a regular file".into())),
         Ok(_) => {
@@ -114,7 +115,7 @@ fn check_writable(what: &str, path: &std::path::Path) -> Result<(), GossipError>
     let mut dir = path.parent();
     while let Some(d) = dir {
         let d = if d.as_os_str().is_empty() { std::path::Path::new(".") } else { d };
-        match std::fs::symlink_metadata(d) {
+        match std::fs::metadata(d) {
             Ok(m) if m.is_dir() => {
                 let probe = d.join(format!(".mycelium-authority-probe-{}", std::process::id()));
                 return match std::fs::OpenOptions::new().write(true).create_new(true).open(&probe) {

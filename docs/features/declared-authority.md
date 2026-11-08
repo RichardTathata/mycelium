@@ -46,7 +46,7 @@ treasurer issues a grant at the gateway and revokes it, and the provider door re
   [`authz.execution_authority`](../reference/guarantee-catalogue.md#authz.execution_authority) and
   [`authz.durable_epochs`](../reference/guarantee-catalogue.md#authz.durable_epochs), so a node under
   `secure-single-domain` can meet the profile's authority requirements from the table. `mycelium doctor` reports them
-  as `start()` would leave them: it checks that the journal and the epochs could be opened for writing, reads an existing epochs journal, and opens neither.
+  as `start()` would leave them: it checks that the journal and the epochs could be opened for writing, reads an existing epochs journal, and opens neither. For a path that does not exist yet the check creates and removes a probe file (`.mycelium-authority-probe-<pid>`) in its nearest existing directory; a probe left behind by a crash refuses a later check whose process has the same id, until it is removed.
 - **One source of authority:** an evaluator, an execution authority or an evidence journal attached in code beside
   the table refuses the start.
 - **Rule:** [`ae.preflight`](../reference/rule-catalogue.md#aepreflight) decides at every door this build serves; the

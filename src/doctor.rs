@@ -433,7 +433,7 @@ impl Doctor {
                 s,
                 "persistence: {} — {}{}",
                 p.base_path.display(),
-                if !p.exists { "absent (doctor creates nothing; start() would)" } else if !p.is_dir { "exists and is not a directory (start() would refuse)" } else { "exists" },
+                if !p.exists { "absent (doctor creates nothing it keeps — a probe file is created and removed to test writability; start() would)" } else if !p.is_dir { "exists and is not a directory (start() would refuse)" } else { "exists" },
                 match p.mode_readonly { Some(true) => ", read-only by its mode bits", _ => "" }
             );
         }

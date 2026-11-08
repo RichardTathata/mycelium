@@ -405,6 +405,23 @@ async fn the_scaffolds_node_toml_with_an_authority_table_loads_and_decides_throu
     a.shutdown().await;
 }
 
+/// **A symlinked journal is judged as the journal will open it** (#733's final confirm): the path check follows the
+/// link, as `EvidenceJournal::open` does, so a journal path that is a symlink to a writable file starts — it is not
+/// refused as "not a regular file". Seen failing first with the check on the link itself (`symlink_metadata`).
+#[cfg(unix)]
+#[tokio::test]
+async fn a_symlinked_journal_path_is_judged_by_its_target() {
+    let dir = scratch("symlink");
+    let target = dir.join("real-evidence.log");
+    std::fs::write(&target, b"").unwrap();
+    let link = dir.join("evidence-link.log");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+    let (id, cfg) = config(&dir, alloc_port(), Some(AuthorityConfig { journal: link, ..authority(&dir, units(&dir, &[("purchaser", PURCHASER)]), "purchaser") }));
+    let a = GossipAgent::new(id, cfg);
+    a.start().await.expect("a symlink to a writable journal starts");
+    a.shutdown().await;
+}
+
 /// **A door the evaluator leaves unmapped refuses the start by name** — the check `start()` runs over every door
 /// this build serves, shown on an evaluator missing one door's mapping.
 #[test]
