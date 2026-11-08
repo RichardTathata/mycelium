@@ -610,7 +610,12 @@ pub(crate) enum Preflight {
     /// [`ae_record_execution`]. `journal_sha256` is the decision record's content hash when the journal
     /// established it — what a door forwards as the `parent` of the work it starts (adopter-surface X4), so
     /// the provider's record cites this decision and a closure can be computed across the two journals.
-    Proceed { evidence: Box<super::action_evaluator::AeEvidence>, journal_sha256: Option<String> },
+    ///
+    /// `mandate_established`: the envelope this permit was decided on carried a mandate binding the enforcement point
+    /// found **established** (and the door enforces rather than observes). A door that registers the work afterwards
+    /// re-assesses the mandate, and when this is `true` a re-assessment that is no longer established refuses the
+    /// call (the provider's `mandate_lapsed_before_run`): the revocation is known before the handler runs.
+    Proceed { evidence: Box<super::action_evaluator::AeEvidence>, journal_sha256: Option<String>, mandate_established: bool },
     /// Refused. Nothing is dispatched.
     Refuse(super::action_evaluator::PreflightRefusal),
 }
@@ -1422,9 +1427,12 @@ impl Settling {
                 for (slot, env, window_ms) in to_release {
                     super::fleet_history::release_after_window(ctx, slot, env, window_ms);
                 }
-                Preflight::Proceed { evidence: Box::new(evidence), journal_sha256 }
+                let mandate_established = envelope.mandate.as_ref().is_some_and(|b| b.state == ae::MandateState::Established);
+                Preflight::Proceed { evidence: Box::new(evidence), journal_sha256, mandate_established }
             }
-            Err(_) if shadow_admit => Preflight::Proceed { evidence: Box::new(evidence), journal_sha256 },
+            // The shadow rung observes: what it admits was refused, so no later re-assessment refuses it either. (The
+            // provider has no shadow rung; this is a gateway door's.)
+            Err(_) if shadow_admit => Preflight::Proceed { evidence: Box::new(evidence), journal_sha256, mandate_established: false },
             Err(refusal) => {
                 warn!(actor = %envelope.actor, %operation, %resource,
                       "AE preflight refused: {refusal}");
@@ -1491,12 +1499,22 @@ pub(crate) async fn ae_record_execution(
 ) {
     let Preflight::Proceed { evidence: decided, .. } = preflight else { return };
     if let Err(e) = ae_record(ctx, &decided.as_execution(execution)).await {
-        // The effect has happened. The evidence for it has not.
-        warn!(
-            operation_id = %decided.operation_id,
-            attempt_id = %decided.attempt_id,
-            "AE: the execution record could not be established: {e}"
-        );
+        // Whatever the outcome was has happened; the evidence for it has not. For `Execution::None` the outcome is
+        // that nothing ran: the journal is left holding the permit's `Attempted` with no record saying otherwise.
+        if execution == super::action_evaluator::Execution::None {
+            warn!(
+                operation_id = %decided.operation_id,
+                attempt_id = %decided.attempt_id,
+                "AE: nothing ran after this permit, and the record saying so could not be established \
+                 (the journal holds the permit's `attempted` alone): {e}"
+            );
+        } else {
+            warn!(
+                operation_id = %decided.operation_id,
+                attempt_id = %decided.attempt_id,
+                "AE: the dispatch has happened, and its execution record could not be established: {e}"
+            );
+        }
     }
 }
 

@@ -72,6 +72,9 @@ This feature is turned on in code.
   [`src/agent/http/grant_tests.rs`](../../src/agent/http/grant_tests.rs): a slow call under a grant stopped by the
   revocation within the drain bound, a second grant revoked before use refused at the doors, a bystander's revocation
   refused by policy.
+- `a_grant_revoked_between_the_preflight_and_the_registration_refuses_the_call`, in
+  [`src/agent/http/grant_tests.rs`](../../src/agent/http/grant_tests.rs): a call held after the provider's preflight
+  while its grant is revoked is refused by name (mandate lapsed before run), and the tool does not run.
 
 ## See it work
 
@@ -117,7 +120,10 @@ has no row for this feature. The tests: in [`src/mandate/grant.rs`](../../src/ma
   term, offers it to its own authority — whose sweep judges work under a grant by that standing and its window, not by
   the resource gate, and stops it within the drain bound (sweep interval plus the handler's own stop) — and writes it
   beside the grant, where every node's authority is fed it; a revoked grant is refused at every door as
-  *not established — revoked*, the AE vocabulary for revocation. Revoking is an action the evaluator decides
+  *not established — revoked*, the AE vocabulary for revocation; one that lands at a provider after its preflight
+  permitted and before the work is registered is refused as not established, `mandate_lapsed_before_run`
+  (`deprecations.md` §84), not run
+  out of the sweep's reach. Revoking is an action the evaluator decides
   (`grant.revoke`); a node that did not issue the grant answers `409 not_the_issuer`.
 - **Across nodes.** A supervisor at any gateway issues for an agent on a member node whose key the gateway holds; the
   grant and its checkpoint travel in the KV, the agent's node feeds its authority the checkpoint before it assesses —
