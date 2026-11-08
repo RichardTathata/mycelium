@@ -31,7 +31,7 @@ the embedding application or, through the gateway, by an SDK agent.
   `operation_id`, the key an effect it causes carries.
 - [`decide`](../../src/schedule.rs) — one tick's decision, pure.
 - An SDK agent: `GET /gateway/schedules/run?toml=<one [[schedule]]>` ([`src/agent/http/schedules.rs`](../../src/agent/http/schedules.rs),
-  scope `schedule:run`) makes the node the client is connected to a candidate in the band while the stream is open,
+  scope `schedule:run`, checked only in a build with `compliance` — the published node has it) makes the node the client is connected to a candidate in the band while the stream is open,
   and hands the client each run it decides as a `run` event — the slot, the kind and `operation_id`; the client
   answers each with `POST /gateway/schedules/ack` within one period. The verbs are `scheduleRuns` / `scheduleAck` /
   `runSchedule` in [`mycelium-ts`](../../mycelium-ts/README.md) and `schedule_runs` / `schedule_ack` in
@@ -113,6 +113,7 @@ the gap decided as run once or skipped, the run naming the decision its parent) 
   that overruns its deadline, then the gap's run and the on-time run) is replayed decision for decision in another
   process by `tests/schedule_replay.rs`, run in CI. `run_late`, `skip` and a failed run are covered by unit tests,
   not a recording.
+- **Evidence:** the ledger row [declared recurring work runs once per slot across a partition](../operations/what-is-proven.md#declared-recurring-work-runs-once-per).
 
 ## Go deeper
 

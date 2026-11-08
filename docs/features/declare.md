@@ -26,7 +26,8 @@ This feature is turned on in code.
   reads, compares, checks and declares; `heartbeat` keeps the handles alive within their lease; `retract` drops them.
 - [`run`](../../src/declare.rs) — the command: once, or polled until Ctrl-C, which retracts.
 - The token is `--token` or `MYCELIUM_GATEWAY_TOKEN`; the routes need `cap:write` for units and `llm:write` for
-  skills ([rbac](../operations/rbac.md)).
+  skills ([rbac](../operations/rbac.md)) on a gateway built with `compliance` — the published node is; a node built
+  without it checks no scope, so any valid bearer declares.
 - The flags: `--gateway <url>` (default `http://127.0.0.1:8300`), `--token <bearer>` (else `MYCELIUM_GATEWAY_TOKEN`),
   `--watch`, `--poll-ms <n>` (how often the files are read), `--interval-secs <n>` (the heartbeat), `--lease-secs <n>`
   (the lease a declaration is held under). `--poll-ms` at or above a third of the lease is refused: the declaration

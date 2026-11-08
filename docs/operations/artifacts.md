@@ -120,7 +120,7 @@ run is recorded yet; this page will carry the dates when they are.
   facade (visible on `/metrics` when the `metrics` feature's recorder is installed):
   `mycelium_artifact_installs_{started,completed}_total`,
   `mycelium_artifact_installs_failed_total{stage=fetch|verify|place|activation|resources|host}`,
-  `mycelium_artifact_ineligible_skips_total{reason=no_runtime|budget|memory|disk}` (the
+  `mycelium_artifact_ineligible_skips_total{reason=kind_not_declared|no_runtime|budget|memory|disk}` (the
   resource-election tripwire — a storm here means the fleet can't fit an artifact),
   `mycelium_artifact_probe_withdrawals_total`, and
   `mycelium_artifact_librarian_{published,tombstoned}_total`.

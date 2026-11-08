@@ -41,7 +41,9 @@ This feature is turned on in code. Every governor runs under `Legacy`, the defau
 The [example index](../../examples/README.md#the-capability-matrix) lists
 [`control_envelope_viz`](../../examples/README.md#the-capability-matrix): the same trace under hold and would-hold, in a
 browser; CI compiles it and does not run it. [`elastic_intent`](../../examples/README.md#the-capability-matrix), which
-CI runs, shows the membership governor holding a band.
+CI runs, shows the membership governor holding a band under the default profile, not the ladder. That the ladder
+changes what a breaker does is `under_legacy_the_breakers_are_not_consulted_and_under_observe_they_only_count`, in
+[`src/control/scenario_c.rs`](../../src/control/scenario_c.rs).
 
 ## What it guarantees, and what it does not
 

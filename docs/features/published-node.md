@@ -44,7 +44,7 @@ download block a reader copies is [installation § The published node](../guide/
   and a downloaded node reports its own guarantees as any node does.
 - **Not built:** no signing of the binaries or the image (Sigstore or GPG); no Windows build; no package-manager
   formula; reproducible builds are not claimed — the [what-is-proven](../operations/what-is-proven.md) ledger's
-  third table names binary provenance.
+  third table names [binary provenance](../operations/what-is-proven.md#binary-provenance).
 - The plan row is [`adopter-surface.md`](../plans/adopter-surface.md) X0.
 
 ## Go deeper

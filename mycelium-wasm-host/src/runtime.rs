@@ -891,7 +891,7 @@ mod tests {
         let sink = Arc::new(mycelium::decision::DecisionSink::default());
         let ctx = TraceCtx { sink: Arc::clone(&sink), node: "n".into(), build: "b".into(), config_digest: "d".into(), profile: None };
         // The test bites only while some rule is above revision 1 (today `prov.activation` and
-        // `prov.probe` are at 3, six others at 2).
+        // `prov.probe`, `prov.eligible` and `prov.presence_floor` are at 3, four others at 2).
         assert!(crate::rules::RULES.iter().any(|r| r.revision > 1), "no rule above revision 1: this test checks nothing");
         for r in crate::rules::RULES {
             ctx.record(r.id, "t".into(), mycelium::decision::OutcomeKind::Action, "x", "target".into(), Vec::new(), None);
