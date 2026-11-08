@@ -71,6 +71,21 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A wasm-host decision record names its rule's real revision** (#738's adversarial review, finding 8). `TraceCtx::record`
+  stamped `rule_revision = 1` on every record the stem provisioner, the install task and the activation hook made, so a
+  record for `prov.activation` or `prov.probe` (revision 3), or `prov.shed` (revision 2), said 1. A replay comparison
+  could not see a rule change, a bundle's `coverage.json` — which reads the descriptors — disagreed with its own
+  `decisions.jsonl`, and an exported span's `mycelium.rule_revision` was wrong. Each record now takes the revision from
+  `mycelium_wasm_host::rules::RULES`. Seen failing first: `a_trace_record_carries_its_rules_revision`. The catalogue's
+  structural check now refuses a descriptor at revision 0 (`CatalogueError::ZeroRevision`, the value a record of an
+  uncatalogued rule carries), and the root crate's hand-written revisions — `sched.run`, `sched.missed`,
+  `membership.governed`, `signal.admission` — are each compared with `mycelium::rules::RULES` by a test that drives the
+  recorder. **Upgrade note:** a stem trace recorded before this release, or a span dashboard keyed on
+  `mycelium.rule_revision`, names revision 1 for every wasm-host rule; records from this release name the descriptor's
+  revision (2 or 3 for eight rules), so comparing a pre-upgrade trace with a post-upgrade replay reports a revision
+  difference at each of those rules, and a dashboard filter on `rule_revision = 1` stops matching them. No checked-in
+  corpus is affected.
+
 - **A crashed provider's advertisement is skipped by every reader of `cap/` and `req/`** (the independent review of
   #730). An advertisement is never tombstoned when its provider dies; it evaporates at its readers, which skip an entry
   older than three refresh intervals (`CapEntry::is_fresh` / `ReqEntry::is_fresh`, rule `kv.expiry`). Five readers

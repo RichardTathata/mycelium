@@ -44,6 +44,18 @@ fn the_catalogue_is_structurally_sound_and_every_named_test_exists() {
     assert!(missing.is_empty(), "tests named by a descriptor that do not exist in the tree:\n{}", missing.join("\n"));
 }
 
+/// #740's review, finding 3: revision 0 is the sentinel `TraceCtx::record` stamps for a rule it cannot find,
+/// so the gate refuses a descriptor at 0. Planted: this crate's first descriptor, at revision 0.
+#[test]
+fn the_gate_refuses_a_descriptor_at_revision_zero() {
+    let planted = mycelium::rule::RuleDescriptor { revision: 0, ..mycelium_wasm_host::rules::RULES[0] };
+    let mut set: Vec<mycelium::rule::RuleDescriptor> = mycelium_wasm_host::rules::RULES.to_vec();
+    set[0] = planted;
+    let set: &'static [mycelium::rule::RuleDescriptor] = Box::leak(set.into_boxed_slice());
+    let errs = Catalogue::gather(&[mycelium::rules::RULES, set]).expect_err("a descriptor at revision 0 is refused");
+    assert!(errs.iter().any(|e| e.to_string().contains("revision 0")), "{errs:?}");
+}
+
 #[test]
 fn the_checked_in_catalogue_is_current() {
     let cat = Catalogue::gather(&[mycelium::rules::RULES, mycelium_wasm_host::rules::RULES]).expect("sound");

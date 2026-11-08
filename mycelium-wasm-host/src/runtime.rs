@@ -126,12 +126,17 @@ pub struct TraceCtx {
 
 impl TraceCtx {
     /// One record, from values the caller already has. `trigger` names the round or the install
-    /// token; a dropped record is the sink's counter to report, never the caller's problem.
+    /// token; a dropped record is the sink's counter to report, never the caller's problem. The
+    /// record carries `rule`'s revision as [`rules::RULES`](crate::rules::RULES) states it, so the
+    /// trace, a bundle's `coverage.json` and the exported span agree; a rule the table does not name
+    /// is recorded at revision 0, which no descriptor uses.
     #[allow(clippy::too_many_arguments)]
     pub fn record(&self, rule: &str, trigger: String, outcome: mycelium::decision::OutcomeKind, reason: &str, target: String,
                   inputs: Vec<mycelium::decision::InputSnapshot>, effect: Option<String>) {
         use mycelium::decision::{DecisionRecord, ViewStatus};
-        let mut r = DecisionRecord::new(rule, 1, trigger, outcome, reason)
+        let revision = crate::rules::RULES.iter().find(|d| d.id == rule).map_or(0, |d| d.revision);
+        debug_assert!(revision != 0, "{rule} is recorded by the wasm host but is not in rules::RULES");
+        let mut r = DecisionRecord::new(rule, revision, trigger, outcome, reason)
             .node(self.node.as_str(), 0)
             .build(self.build.as_str())
             .config_digest(self.config_digest.as_str())
@@ -874,6 +879,28 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// #738's review, finding 8: every record `TraceCtx` made carried `rule_revision` 1, whatever the
+    /// rule's descriptor said, so a replay comparison could not see a rule change, a bundle's
+    /// `coverage.json` (which reads the descriptors) disagreed with its own records, and the exported
+    /// spans named the wrong revision. A record now carries its rule's revision from `rules::RULES`.
+    /// Seen failing first: the first rule above revision 1 in the table, `prov.promotion` (2), recorded 1.
+    #[test]
+    fn a_trace_record_carries_its_rules_revision() {
+        let sink = Arc::new(mycelium::decision::DecisionSink::default());
+        let ctx = TraceCtx { sink: Arc::clone(&sink), node: "n".into(), build: "b".into(), config_digest: "d".into(), profile: None };
+        // The test bites only while some rule is above revision 1 (today `prov.activation` and
+        // `prov.probe`, `prov.eligible` and `prov.presence_floor` are at 3, four others at 2).
+        assert!(crate::rules::RULES.iter().any(|r| r.revision > 1), "no rule above revision 1: this test checks nothing");
+        for r in crate::rules::RULES {
+            ctx.record(r.id, "t".into(), mycelium::decision::OutcomeKind::Action, "x", "target".into(), Vec::new(), None);
+        }
+        let records = sink.snapshot();
+        assert_eq!(records.len(), crate::rules::RULES.len());
+        for (record, descriptor) in records.iter().zip(crate::rules::RULES) {
+            assert_eq!(record.rule_revision, descriptor.revision, "{} records the revision its descriptor states", descriptor.id);
+        }
     }
 
     /// Unstarted agent — the blob runtime never touches the mesh; `RuntimeCtx` just needs one.

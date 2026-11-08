@@ -177,6 +177,9 @@ pub enum CatalogueError {
     Incomplete(String),
     /// A reason code that is not `snake_case` ASCII.
     MalformedReason(String, String),
+    /// A rule at revision 0. Revisions start at 1; a recorder that cannot find its rule stamps 0
+    /// (`mycelium-wasm-host`'s `TraceCtx::record`), so 0 must never name a real descriptor.
+    ZeroRevision(String),
 }
 
 impl std::fmt::Display for CatalogueError {
@@ -188,12 +191,13 @@ impl std::fmt::Display for CatalogueError {
             CatalogueError::MissingTests(r) => write!(f, "rule `{r}`: names no behavioural test"),
             CatalogueError::Incomplete(r) => write!(f, "rule `{r}`: no responsibility or no summary"),
             CatalogueError::MalformedReason(r, c) => write!(f, "rule `{r}`: reason `{c}` is not snake_case"),
+            CatalogueError::ZeroRevision(r) => write!(f, "rule `{r}`: revision 0 (revisions start at 1; 0 marks a record whose rule is not catalogued)"),
         }
     }
 }
 
 /// The structural checks a catalogue must pass: unique ids, every relation naming a registered rule,
-/// typed reasons on every outcome, at least one test, a responsibility and a summary. These prevent
+/// typed reasons on every outcome, at least one test, a responsibility and a summary, a revision of at least 1. These prevent
 /// drift in *structure*; whether a description is true is the named test's job.
 pub fn check(rules: &[&RuleDescriptor]) -> Vec<CatalogueError> {
     let mut errs = Vec::new();
@@ -218,6 +222,9 @@ pub fn check(rules: &[&RuleDescriptor]) -> Vec<CatalogueError> {
         }
         if r.tests.is_empty() {
             errs.push(CatalogueError::MissingTests(r.id.into()));
+        }
+        if r.revision == 0 {
+            errs.push(CatalogueError::ZeroRevision(r.id.into()));
         }
         for (field, ids) in [("may_trigger", r.may_trigger), ("may_inhibit", r.may_inhibit), ("depends_on", r.depends_on)] {
             for to in ids {
@@ -329,7 +336,8 @@ mod tests {
     const OK: &[Outcome] = &[Outcome { kind: OutcomeKind::Action, reasons: &["done"] }];
 
     /// The structural checks: a duplicate id, a dangling relation, an outcome without reasons, a rule
-    /// without a test, and a reason that is not snake_case are each a named error.
+    /// without a test, a reason that is not snake_case and a rule at revision 0 (#740's review: the
+    /// sentinel a recorder stamps for an uncatalogued rule) are each a named error.
     #[test]
     fn the_structural_checks_name_each_defect() {
         static A: RuleDescriptor = r("a.one", &[], OK, &["t_a"]);
@@ -338,13 +346,15 @@ mod tests {
         static C: RuleDescriptor = r("c.one", &[], &[Outcome { kind: OutcomeKind::Refusal, reasons: &[] }], &["t_c"]);
         static D: RuleDescriptor = r("d.one", &[], OK, &[]);
         static E: RuleDescriptor = r("e.one", &[], &[Outcome { kind: OutcomeKind::Action, reasons: &["Not-Snake"] }], &["t_e"]);
-        let errs = check(&[&A, &A2, &B, &C, &D, &E]);
+        static F: RuleDescriptor = RuleDescriptor { revision: 0, ..r("f.one", &[], OK, &["t_f"]) };
+        let errs = check(&[&A, &A2, &B, &C, &D, &E, &F]);
         assert!(errs.contains(&CatalogueError::DuplicateId("a.one".into())));
         assert!(errs.contains(&CatalogueError::UnknownReference("b.one".into(), "depends_on", "ghost.id".into())));
         assert!(errs.contains(&CatalogueError::MissingReasons("c.one".into())));
         assert!(errs.contains(&CatalogueError::MissingTests("d.one".into())));
         assert!(errs.contains(&CatalogueError::MalformedReason("e.one".into(), "Not-Snake".into())));
-        assert_eq!(errs.len(), 5, "{errs:?}");
+        assert!(errs.contains(&CatalogueError::ZeroRevision("f.one".into())));
+        assert_eq!(errs.len(), 6, "{errs:?}");
     }
 
     /// A partial gather keeps a relation into another crate as an external reference and still refuses
@@ -357,6 +367,8 @@ mod tests {
         assert!(Catalogue::gather(&[std::slice::from_ref(&X)]).is_err(), "the full gate still refuses");
         static D: RuleDescriptor = r("d.one", &[], OK, &[]);
         assert!(Catalogue::gather_partial(&[std::slice::from_ref(&D)]).is_err(), "no test is a hard error");
+        static Z: RuleDescriptor = RuleDescriptor { revision: 0, ..r("z.one", &[], OK, &["t"]) };
+        assert!(Catalogue::gather_partial(&[std::slice::from_ref(&Z)]).is_err(), "revision 0 is a hard error");
     }
 
     /// A clean set gathers, sorts by id, and renders with its schema and one section per rule.

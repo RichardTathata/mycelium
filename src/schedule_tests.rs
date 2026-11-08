@@ -322,6 +322,8 @@ async fn a_missed_run_is_a_decision_in_the_trace_with_its_reason() {
         assert!(policy_input.value.contains(&format!("first={}", first + 1)), "{policy:?}: the gap is named: {}", policy_input.value);
         assert!(m.inputs.iter().any(|i| i.source.contains("sched/{id}/last") && i.value == first.to_string()), "{policy:?}: the last run is an input: {m:?}");
         let records = sink.snapshot();
+        // #740's review: the schedule's records carry their rules' catalogued revisions.
+        crate::rules::assert_catalogued_revisions(&records, &[RUN_RULE, MISSED_RULE]);
         let m_seq = records.iter().find(|r| r.rule == MISSED_RULE).map(|r| r.seq).unwrap();
         match run_reason {
             Some(rr) => {
@@ -358,6 +360,8 @@ async fn a_run_recorded_ahead_of_this_clock_is_said_and_runs_nothing_until_reach
     assert_eq!(h.runs(), runs, "nothing runs while the recorded run is ahead of the clock");
     assert_eq!(traced(&sink, RUN_RULE, "last_ahead"), 1, "said once, not every tick");
     assert_eq!(fleet_last(&a.task_ctx.kv_state, &s, Some(now_slot)).0, Some(now_slot + 10), "`last` is not lowered");
+    // #740's confirm round: every `sched.run` site carries the catalogued revision, this one included.
+    crate::rules::assert_catalogued_revisions(&sink.snapshot(), &[RUN_RULE]);
     drop(h);
     a.shutdown().await;
 }
@@ -376,6 +380,8 @@ async fn a_run_recorded_too_far_ahead_is_left_out_said_once_and_the_schedule_run
     assert!(poll_until(|| h.runs() >= 2, 15_000).await, "the schedule runs past a year-ahead entry");
     assert_eq!(traced(&sink, RUN_RULE, "ignored_last_far_ahead"), 1, "said once");
     assert_eq!(traced(&sink, RUN_RULE, "last_ahead"), 0);
+    // #740's confirm round: every `sched.run` site carries the catalogued revision, this one included.
+    crate::rules::assert_catalogued_revisions(&sink.snapshot(), &[RUN_RULE]);
     drop(h);
     a.shutdown().await;
 }

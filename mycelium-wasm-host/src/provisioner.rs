@@ -3325,7 +3325,9 @@ mod tests {
         assert_eq!(round2, ["already_hosted", "all_healthy"], "{on_records:?}");
         assert_eq!(sink.dropped(), 0);
         let one = sink.snapshot().remove(0);
-        assert_eq!(one.rule_revision, 1);
+        // The record names its rule's revision as the catalogue states it (#738's review, finding 8).
+        let catalogued = crate::rules::RULES.iter().find(|d| d.id == one.rule).map(|d| d.revision);
+        assert_eq!(Some(one.rule_revision), catalogued, "{}", one.rule);
         assert!(one.trigger.starts_with("round 1") && !one.build.is_empty() && one.at_ms.is_none());
         assert!(one.config_digest.as_deref().is_some_and(|d| !d.is_empty()), "stamped with the configuration digest");
         assert_eq!(one.outcome, OutcomeKind::Action);
