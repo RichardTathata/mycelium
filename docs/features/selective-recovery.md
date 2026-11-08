@@ -19,7 +19,7 @@ the [causal records](../guide/00-concepts.md#causal-records) and their closure r
   this fleet does when an acknowledgement is lost, work has started on it elsewhere, and a node restarts in between.
 - **Not when** the question is a real provider or more than one destination: the class's destination is one mock in
   the test's own process, the closure is read offline from journal files, and nothing weighs a closure's size
-  ([what-is-proven.md](../operations/what-is-proven.md), *Selective recovery*; the plan's §6).
+  ([what-is-proven § a lost acknowledgement is recovered without a second effect](../operations/what-is-proven.md#lost-acknowledgement-recovered-without-second-effect); the plan's §6).
 
 ## Turn it on
 

@@ -360,12 +360,12 @@ Layer 3 delivers the service primitives used by the language bridges and the MCP
 
 ```rust
 // Caller
-let reply = agent.rpc_call(target, "echo", payload, Duration::from_secs(5)).await?;
+let reply = agent.service().rpc_call(target, "echo", payload, Duration::from_secs(5)).await?;
 
 // Responder
-let mut rx = agent.rpc_rx("echo");
+let mut rx = agent.service().rpc_rx("echo");
 while let Some(req) = rx.recv().await {
-    agent.rpc_respond(&req, req.payload());
+    agent.service().rpc_respond(&req, req.payload());
 }
 ```
 
@@ -376,7 +376,7 @@ HTTP endpoint and sends only a lightweight ticket over the mesh:
 
 ```rust
 // Set http_port in GossipConfig so the target can fetch the staged bytes
-let reply = agent.bulk_call(target, "process", large_bytes, Duration::from_secs(30)).await?;
+let reply = agent.service().bulk_call(target, "process", large_bytes, Duration::from_secs(30)).await?;
 ```
 
 #### Scatter-Gather
@@ -384,7 +384,7 @@ let reply = agent.bulk_call(target, "process", large_bytes, Duration::from_secs(
 Fan out an identical request to multiple targets concurrently; return as soon as `min_ok` replies arrive:
 
 ```rust
-let results = agent.scatter_gather(targets, "vote", payload, Duration::from_secs(5), 2).await?;
+let results = agent.service().scatter_gather(targets, "vote", payload, Duration::from_secs(5), 2).await?;
 ```
 
 #### Actor/Event Mailboxes
@@ -393,10 +393,10 @@ KV-backed durable event delivery. Events survive crashes and are delivered in HL
 
 ```rust
 // Sender (any node)
-agent.deliver_event(&target_id, "task.result", result_bytes);
+agent.service().deliver_event(&target_id, "task.result", result_bytes);
 
 // Receiver — events delivered at-least-once (they stay in the KV until delivered), tombstoned after delivery
-let (handle, mut rx) = agent.open_mailbox("task.result", 64);
+let (handle, mut rx) = agent.service().open_mailbox("task.result", 64);
 while let Some(event) = rx.recv().await {
     process(&event.payload);
 }

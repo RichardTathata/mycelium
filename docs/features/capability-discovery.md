@@ -48,8 +48,9 @@ CI compiles it and checks its declaration, and does not run it. That a retired a
   differ between nodes while gossip settles; three `cap/` readers do not apply freshness yet — the A2A provider
   resolution, the A2A card's skill list and the membership governor's eligibility — a known gap fixed by a separate
   PR.
-- **Evidence:** the ledger row
-  [a capability name is one key segment at every door](../operations/what-is-proven.md#capability-name-key-segment-door).
+- **Evidence:** the ledger rows
+  [a capability name is one key segment at every door](../operations/what-is-proven.md#capability-name-key-segment-door)
+  and [a node that shuts down withdraws its soft state at its peers](../operations/what-is-proven.md#node-shuts-down-withdraws-soft-state).
 
 ## Go deeper
 

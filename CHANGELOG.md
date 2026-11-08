@@ -200,6 +200,15 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   fails on a page that no row of the capability map, or of the front page's *The pages* table, lists; the ten pages
   that predated F3 gained their front-page rows. P7 decided: no glossary entry per feature. The companions runbook and
   three `mycelium-wiki` doc comments no longer describe an object-store `WikiStore` as existing; none ships.
+- **The first feature-pages pass; F4 closed** (`docs/plans/feature-pages.md` F4; `/doc-coverage` Step 4b): every page
+  audited against the code, its example's assertions, its plan rows and what merged since #655 — 50 Clear, 23 Thin,
+  3 Missing, recorded in `docs/analysis/doc-coverage.md` § Feature pages, and all of them fixed here. Three pages for
+  features that had none: service calls (RPC, scatter-gather and bulk), the Eve loader and the Ops Console. Seven pages
+  now say their scopes are checked only under `compliance` — on the published `mycelium-stem`, which lacks it, a
+  served skill is called by any valid bearer. Four *See it work* sections now name what checks the feature, where the
+  example relied on it or asserted nothing; rows Y4's and Y7's limits carried; ledger rows linked from the pages they
+  prove. The cookbook's service-layer snippets called methods `GossipAgent` does not have (`agent.rpc_call` and
+  four more); they go through `agent.service()`.
 
 ## [2.39.0] — 2026-11-06
 

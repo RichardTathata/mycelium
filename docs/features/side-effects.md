@@ -23,7 +23,7 @@ commit](../guide/00-concepts.md#destination-commit) one rung outward.
   transaction as the effect — the [destination commit](../guide/18-contracts-and-receipts.md#rung-4-in-practice-mycelium-effects)
   already resolves a lost answer by replaying. **The headline limit:** the reference destinations are the SQLite one
   and an HTTP shape whose test harness loses responses; no real provider has been run against it
-  ([what-is-proven.md](../operations/what-is-proven.md), *An external side-effect at a real provider*).
+  ([what-is-proven § an external side-effect at a real provider](../operations/what-is-proven.md#external-side-effect-real-provider)).
 
 ## Turn it on
 

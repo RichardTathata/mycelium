@@ -44,6 +44,7 @@ its own, and many of its examples run on a TLS mesh. The end-to-end run is a tes
   writable under the writer's own signature unless identity proofs are required; a holder of the fleet CA key can
   mint any identity ([what-is-proven § the compromised CA key](../operations/what-is-proven.md#recovery-from-compromised-fleet-ca-key)).
 - **Evidence:** the ledger rows
+  [KV writes are signed under their own domain](../operations/what-is-proven.md#kv-writes-signed-under-their-own),
   [a TLS node refuses unsigned KV frames](../operations/what-is-proven.md#tls-node-refuses-unsigned-kv-frames) and
   [a revoked key stops verifying](../operations/what-is-proven.md#key-node-has-revoked-stops-verifying).
 

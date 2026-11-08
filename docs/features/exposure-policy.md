@@ -143,7 +143,7 @@ the fields.
   - **an operator route that resolves an `Unresolved` record** — such a record is terminal, a compensation takes only a committed effect, so it holds the work that names it for good.
   - **the limit of declared lineage** — a caller that omits `_meta.parent` (or names only a descendant in another run) is not held: the policy bounds causal extension as each envelope declares it, and per-actor caps are row K2's history rules.
   - **unsigned tally entries** — row K2's limit: a member can write another's summary, counted by the `sys/` tripwire at the owner; for an owner in view its next tick overwrites the forgery, but a forged summary for an owner **out of view** that marks it `departed` holds the digests it lists fleet-wide until the 24-hour history horizon collects it; and without `[tls]` one under an id this node cannot rule out is read the same way.
-- The [what-is-proven](../operations/what-is-proven.md) ledger has no row for it yet.
+- **Evidence:** the ledger row [new dependent work is held while an actor's unresolved closure is past its bound](../operations/what-is-proven.md#new-dependent-work-held-while-actor).
 
 ## Go deeper
 

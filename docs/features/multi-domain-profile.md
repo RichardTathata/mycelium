@@ -81,6 +81,9 @@ rendering of the family is `doctor_prints_the_federation_family_under_the_multi_
   ([federation § Starting under `secure-multi-domain`](../operations/federation.md#starting-under-secure-multi-domain)).
   **Not its consumer:** that is a bare `FederationClient`, not a node, so the client side's `fed.pinned`,
   `fed.caller_named` and `fed.partner_egress` as a node's facts are not shown there.
+  **Not exercised there either** (plan row Y7): `fed.partner_slots` is configured and reported but never filled — the
+  skill answers at once, so four slots would need a slow provider — and no electorate is declared, so the consensus
+  leg shows the refusal outside one, not a decision inside one.
 - **Both sides run under it, in the two-domain scaffold** (Y8): each gateway runs an edge and holds a client for the
   other, and its own `GET /gateway/guarantees` reads all seven `fed.*` node facts `enforced` while it runs —
   `fed.pinned`, `fed.caller_named` and `fed.partner_egress` among them (CI job `Scaffold`). Four processes on one host,
@@ -93,6 +96,7 @@ rendering of the family is `doctor_prints_the_federation_family_under_the_multi_
 - `mycelium doctor <file>` cannot report the edge's or the clients' facts; `doctor::run_attached` can, over the
   program's own attachments, and the scaffold's `doctor` is that. The upgrade
   notes are [deprecations § 66](../guide/deprecations.md#66-a-third-guarantee-profile-secure-multi-domain-ten-fed-guarantees-in-every-report-guaranteereportunresolved-lists-only-what-applies-2390-adopter-surface-y7).
+- **Evidence:** the ledger row [two domains under `secure-multi-domain` call each other across a pinned edge](../operations/what-is-proven.md#two-domains-under-secure-multi-domain).
 
 ## Go deeper
 

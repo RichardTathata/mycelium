@@ -5,7 +5,8 @@
 A read-only **dashboard over any gateway-enabled Mycelium nodes' existing routes**, in one place — so you
 can watch a fleet (a demo, a showcase, or a real one) without modifying it. It is **a static page**: it
 runs in your browser, reads each node you list **directly**, and merges their answers itself. There is no
-console server and no proxy, and nothing polls the fleet for it. It is an example, **not a product** and
+console server and no proxy, and no process polls the fleet for it — the open page itself re-reads every listed
+node every 2.5 s (`&once` for a single snapshot), and nothing reads the fleet once it is closed. It is an example, **not a product** and
 not a control plane: the library-not-platform line holds — a cluster is emergent from reachability + CA
 admission, there is no central runtime, and a customer forks this or points Grafana at `/metrics`.
 

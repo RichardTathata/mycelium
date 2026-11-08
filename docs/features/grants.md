@@ -39,7 +39,9 @@ This feature is turned on in code.
   `grant.revoke` on `tool:{tool}@{agent node}`, the caller as the actor; a `503 not_durable` on revoke means the supervisor
   owes a retry — until the retried revoke is on disk the revocation holds only in this process, and any restart re-arms the
   grant, `deprecations.md` §77): a client holding `grant:issue` is not thereby
-  an approver of everything, and a gateway with no evaluator answers nothing. A grant is issued for an agent on this
+  an approver of everything, and a gateway with no evaluator answers nothing. The two scopes are checked only in a build
+  with `compliance` (the published node has it); without it any valid bearer reaches the routes and the evaluator
+  alone decides. A grant is issued for an agent on this
   node or on a fleet member this node holds the key of; the agent's node decides whether that issuer may
   ([`entitle_grants_from_fleet`](../../src/mandate/grant.rs)). [`gw_grants_stream`](../../src/agent/http/grants.rs) —
   `GET /gateway/grants/stream` (`grant:read`): the open requests as they come, `grant_request` once each (the standing
@@ -213,6 +215,7 @@ has no row for this feature. The tests: in [`src/mandate/grant.rs`](../../src/ma
   never reclaimed (no retention row yet). An operator UI is the adopter's.
 - Metrics: `mycelium_grants_requested_total`, `_verified_total`, `_expired_total`, `_issued_total`, `_refused_total`,
   `_revoked_total` and the gauge `mycelium_grants_pending` (moved on every request and answer, not only when polled).
+- **Evidence:** the ledger row [a grant is default-deny and holds across a restart](../operations/what-is-proven.md#grant-default-deny-holds-across-restart).
 
 ## Go deeper
 
