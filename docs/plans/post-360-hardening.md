@@ -2234,6 +2234,10 @@ Every other site registers before it spawns, or inside the function that awaits 
 runs of the whole `agent::bulk` module at 24 parallel processes.
 
 **Known flakes, open (seen during the v2.36.0 work, 2026-10-19; not yet investigated):**
+- `lib_tests::a_drop_needs_a_retirement_elsewhere_and_a_forced_drop_that_races_a_retirement_is_a_detected_conflict` (P2's
+  migration) — panicked at its `group_propose` on `g2` once, in the `tls,metrics,a2a,llm,test-frame-filter` lib run
+  while `make check` loaded the same machine (#741, 2026-11-08); passed 3 of 3 alone. The branch touches no consensus
+  or electorate code.
 - `mycelium-wasm-host` `stem_shutdown` — "the stem never bound its port" at its 30 s bind deadline, 2 of 11 runs under
   load average 4–5 (#738's review, 2026-11-08); the binary run by hand binds in 0.16–0.3 s, 15 of 15. Load-sensitive
   wall-clock bound, stdout and stderr discarded so a failure leaves no log; named in no CI step of its own.

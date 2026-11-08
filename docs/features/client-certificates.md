@@ -60,7 +60,11 @@ way. `a_newer_certificate_supersedes_the_older_key_and_an_overwrite_cannot_lower
 - **Republished by its publisher.** The gateway that published a record writes it again when it is missing or
   overwritten, so a node that joins later, or restarts without `[persistence]`, still reads the newer certificate.
   Under `[persistence]` the publisher keeps its records across its own restart. A record whose publishing gateway
-  is gone for good, and which every remaining node has lost, is not restored.
+  is gone for good, and which every remaining node has lost, is not restored. It leaves alone a certificate for the
+  same key that the CA issued at or after its own, and journals a record only when it changes, within the budget.
+- **Cost:** a refresh scans the records once and checks each certificate's chain once while it is cached (4,096
+  certificates). Past that many crafted certificates the cache churns and every chain is checked again. The refresh
+  runs in the identity watcher's loop, so a large one delays the revocation fold; moving it off is a follow-up.
 - **Not built:**
   - a client's call signed by its key (`cs`/`cn`), and its cross-language vectors;
   - refusing an unsigned action from a principal with a certificate on record;

@@ -395,3 +395,80 @@ async fn a_node_joining_later_reads_a_tombstoned_newer_record_back() {
     assert_eq!(standing, ClientKeyStanding::Superseded, "ROLLED BACK: a node joining later read K1 as current");
     assert_eq!(k2_at_b, ClientKeyStanding::Current);
 }
+
+/// **Publishing the same certificate again does not grow the journal** (#741's confirm round, N1). Fifty identical
+/// publishes leave `identity/client-certs.journal` the size the first one left it. Seen failing first: each publish
+/// appended a `Published` entry outside the journal's budget.
+#[tokio::test]
+async fn repeated_identical_publishes_leave_the_journal_bounded() {
+    let dir = fresh("journal-bounded");
+    let port = alloc_port();
+    let a = started(config(&dir, port, true), port).await;
+    let journal = dir.join("persist").join("identity").join("client-certs.journal");
+    let (der, _) = issue(&dir, "forecaster", "k1");
+    a.publish_client_cert(&der).unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let after_one = std::fs::metadata(&journal).unwrap().len();
+    for _ in 0..50 {
+        let _ = a.publish_client_cert(&der);
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let after_fifty = std::fs::metadata(&journal).unwrap().len();
+    a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(after_fifty, after_one, "UNBOUNDED: fifty identical publishes grew the journal from {after_one} to {after_fifty} bytes");
+}
+
+/// **Two gateways holding different certificates for one key do not rewrite each other** (#741's confirm round, N2).
+/// The CA certified one key twice; this gateway published the earlier certificate, and the later one is written over
+/// its record. A valid certificate for the same key with issuance at or above this gateway's own is left alone; an
+/// earlier one is still rewritten (the plant). Seen failing first: the later certificate was replaced by this
+/// gateway's earlier bytes, which another gateway would replace again, forever.
+#[tokio::test]
+async fn a_later_certificate_for_the_same_key_is_not_rewritten_by_the_publisher() {
+    let dir = fresh("republish-same-key");
+    let port = alloc_port();
+    let a = started(config(&dir, port, false), port).await;
+    let now = mycelium_core::sim_seam::wall_now_ms();
+    let (early, key) = fleet_cert_with_serial(&dir, "forecaster", 71, (now - 2_000).to_be_bytes().to_vec());
+    let (late, _) = fleet_cert_with_serial(&dir, "forecaster", 71, (now - 1_000).to_be_bytes().to_vec());
+    let (earlier, _) = fleet_cert_with_serial(&dir, "forecaster", 71, (now - 3_000).to_be_bytes().to_vec());
+    a.publish_client_cert(&early).unwrap();
+    let path: Arc<str> = Arc::from(client_cert_key(PRINCIPAL, &key).as_str());
+    let _ = super::helpers::kv_set(&a.task_ctx, Arc::clone(&path), bytes::Bytes::from(late.clone()));
+    let left = super::client_cert::republish_own(&a.task_ctx);
+    let kept = a.kv().get(&path).map(|b| b.to_vec());
+    let _ = super::helpers::kv_set(&a.task_ctx, Arc::clone(&path), bytes::Bytes::from(earlier));
+    let rewritten = super::client_cert::republish_own(&a.task_ctx);
+    let restored = a.kv().get(&path).map(|b| b.to_vec());
+    a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!((left, kept), (0, Some(late)), "FIGHT: the publisher rewrote a later certificate for the same key");
+    assert_eq!((rewritten, restored), (1, Some(early)), "plant: an earlier certificate for the key is rewritten");
+}
+
+/// **On load the journal keeps the newest published record per principal, whatever order the appends landed in**
+/// (#741's confirm round, N3). Appends are spawned, so K2's `Published` entry can land before K1's: after a restart
+/// the gateway republishes K2, not K1. Seen failing first: the last entry won, and K1 was the record it held.
+#[tokio::test]
+async fn the_journal_keeps_the_newest_published_record_whatever_the_append_order() {
+    let dir = fresh("journal-order");
+    let port = alloc_port();
+    // The fleet CA minted before the node's first start, so the certificates below are the node's CA's.
+    crate::mint_ca(&dir.join("certs")).unwrap();
+    let (k1_der, k1) = issue(&dir, "forecaster", "k1");
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    let (k2_der, k2) = issue(&dir, "forecaster", "k2");
+    {
+        let identity = dir.join("persist").join("identity");
+        std::fs::create_dir_all(&identity).unwrap();
+        let j = super::journal::Journal::open(identity.join("client-certs.journal"), "test").unwrap();
+        j.append(super::client_cert::published_entry_for_test(PRINCIPAL, &client_cert_key(PRINCIPAL, &k2), &k2_der)).await.unwrap();
+        j.append(super::client_cert::published_entry_for_test(PRINCIPAL, &client_cert_key(PRINCIPAL, &k1), &k1_der)).await.unwrap();
+    }
+    let a = started(config(&dir, port, true), port).await;
+    let held = a.task_ctx.client_certs.published_path_for_test(PRINCIPAL);
+    a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(held, Some(client_cert_key(PRINCIPAL, &k2)), "OUT OF ORDER: the journal's last entry, not its newest, was kept (k1 = {})", client_cert_key(PRINCIPAL, &k1));
+}

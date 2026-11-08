@@ -41,8 +41,9 @@
 //!
 //! ## Republishing
 //!
-//! The gateway that published a record keeps it (in memory, and journaled under `[persistence]`) and writes it again
-//! when it is missing or overwritten, unless the principal's mark has risen past it — so a node that joins later, or
+//! The gateway that published a record keeps it (in memory, and journaled under `[persistence]` only when it changes,
+//! inside the same budget as the marks) and writes it again when it is missing or overwritten — but not over a valid
+//! certificate for the same key issued at or after its own — unless the principal's mark has risen past it — so a node that joins later, or
 //! restarts without `[persistence]`, still reads the newer certificate. A record whose publisher is gone for good and
 //! which every remaining node has lost is not restored.
 //!
@@ -174,15 +175,19 @@ impl ClientCertLedger {
             match mycelium_core::serde_fixint::from_slice::<JournalEntry>(&bytes) {
                 Ok(JournalEntry::Raised { principal, mark }) => {
                     self.raise_in_memory(&principal, mark);
-                    self.journaled.pin().update_or_insert(principal, |n| n + 1, 1);
-                    self.journaled_total.fetch_add(1, Ordering::Relaxed);
+                    self.count_journaled(&principal);
                 }
                 Ok(JournalEntry::Saturated { principal }) => {
                     self.saturated.pin().insert(principal);
                 }
-                // Appended in publish order, and the door publishes only above the mark: the last one is the newest.
+                // Spawned appends can land out of order, so the newest by (issuance, key) is kept, not the last.
                 Ok(JournalEntry::Published { principal, path, der }) => {
-                    self.published.pin().insert(principal, (path, der));
+                    self.count_journaled(&principal);
+                    let Some(m) = published_mark(&der) else { continue };
+                    self.published.pin().compute(principal, |existing| match existing {
+                        Some((_, (_, held))) if published_mark(held).is_some_and(|h| h >= m) => papaya::Operation::Abort(()),
+                        _ => papaya::Operation::Insert((path.clone(), der.clone())),
+                    });
                 }
                 Err(_) => tracing::warn!(journal = %path.display(), "client-cert journal: an entry did not decode; skipped"),
             }
@@ -225,11 +230,14 @@ impl ClientCertLedger {
         });
     }
 
-    /// Raise `principal`'s mark to `to`, journaling the rise when there is room (and a journal).
-    fn raise(&self, principal: &str, to: Mark) {
-        if !self.raise_in_memory(principal, to) {
-            return;
-        }
+    fn count_journaled(&self, principal: &str) {
+        self.journaled.pin().update_or_insert(principal.to_string(), |n| n + 1, 1);
+        self.journaled_total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Journal `entry` for `principal` within the budget — [`JOURNAL_PER_PRINCIPAL`] records per principal,
+    /// [`JOURNAL_TOTAL`] in all, `Raised` and `Published` alike. Past it the principal is saturated (recorded once).
+    fn journal_within_budget(&self, principal: &str, entry: JournalEntry) {
         if self.journal.load().is_none() {
             return;
         }
@@ -242,15 +250,47 @@ impl ClientCertLedger {
             }
             return;
         }
-        self.journaled.pin().update_or_insert(principal.to_string(), |n| n + 1, 1);
-        self.journaled_total.fetch_add(1, Ordering::Relaxed);
-        self.append(JournalEntry::Raised { principal: principal.to_string(), mark: to });
+        self.count_journaled(principal);
+        self.append(entry);
+    }
+
+    /// Raise `principal`'s mark to `to`, journaling the rise when there is room (and a journal).
+    fn raise(&self, principal: &str, to: Mark) {
+        if self.raise_in_memory(principal, to) {
+            self.journal_within_budget(principal, JournalEntry::Raised { principal: principal.to_string(), mark: to });
+        }
+    }
+
+    /// Hold `(path, der)` as `principal`'s published record and journal it — only when it is newer than the one held
+    /// (by issuance, then key), so publishing the same certificate again changes nothing and appends nothing.
+    fn hold_published(&self, principal: &str, path: String, der: Vec<u8>) {
+        let Some(m) = published_mark(&der) else { return };
+        let mut changed = false;
+        self.published.pin().compute(principal.to_string(), |existing| match existing {
+            Some((_, (_, held))) if published_mark(held).is_some_and(|h| h >= m) => {
+                changed = false;
+                papaya::Operation::Abort(())
+            }
+            _ => {
+                changed = true;
+                papaya::Operation::Insert((path.clone(), der.clone()))
+            }
+        });
+        if changed {
+            self.journal_within_budget(principal, JournalEntry::Published { principal: principal.to_string(), path, der });
+        }
     }
 
     /// `principal`'s current mark, if any record of it has been read.
     pub(crate) fn mark(&self, principal: &str) -> Option<Mark> {
         self.marks.pin().get(principal).copied()
     }
+}
+
+/// A held record's order: its certificate's issuance and key, read without the chain (the door checked it).
+fn published_mark(der: &[u8]) -> Option<Mark> {
+    let id = mycelium_core::tls::client_identity(der)?;
+    Some(Mark { issued: id.issued_ms?, key: id.key })
 }
 
 fn skew_ms(ctx: &TaskCtx) -> u64 {
@@ -393,13 +433,26 @@ fn refresh_once(ctx: &TaskCtx) {
 /// Republish each record this gateway published that is missing from the store or holds other bytes, unless the
 /// principal's mark has since risen past it (another gateway published a newer one). Returns how many.
 pub(crate) fn republish_own(ctx: &TaskCtx) -> usize {
+    let Some(tls) = ctx.tls.get() else { return 0 };
     let mut n = 0;
     for (principal, (path, der)) in ctx.client_certs.published.pin().iter() {
         let key = path.rsplit('/').next().and_then(parse_hex32);
         if ctx.client_certs.mark(principal).is_some_and(|m| Some(m.key) != key) {
             continue;
         }
-        if mycelium_core::ops::kv_get(ctx, path).as_deref() != Some(der.as_slice()) {
+        let Some(own) = published_mark(der) else { continue };
+        let stored = mycelium_core::ops::kv_get(ctx, path);
+        if stored.as_deref() == Some(der.as_slice()) {
+            continue;
+        }
+        // Another valid certificate for the same key, issued at or after ours (the CA certified the key twice), is left
+        // alone: comparing bytes would have two gateways rewrite each other forever.
+        if let Some(stored) = stored
+            && facts(&ctx.client_certs, tls, &stored).is_some_and(|f| &f.principal == principal && Some(f.key) == key && f.issued.is_some_and(|i| i >= own.issued))
+        {
+            continue;
+        }
+        {
             let _ = super::helpers::kv_set(ctx, Arc::from(path.as_str()), bytes::Bytes::from(der.clone()));
             n += 1;
         }
@@ -477,10 +530,20 @@ pub fn publish(ctx: &Arc<TaskCtx>, der: &[u8]) -> Result<Published, PublishRefus
     let path = client_cert_key(&principal, &id.key);
     let _ = super::helpers::kv_set(ctx, Arc::from(path.as_str()), bytes::Bytes::copy_from_slice(der));
     ctx.client_certs.raise(&principal, Mark { issued, key: id.key });
-    ctx.client_certs.published.pin().insert(principal.clone(), (path.clone(), der.to_vec()));
-    // Within the principal's journal budget: a saturated principal's record is republished in this process only.
-    if !ctx.client_certs.saturated.pin().contains(&principal) {
-        ctx.client_certs.append(JournalEntry::Published { principal: principal.clone(), path, der: der.to_vec() });
-    }
+    ctx.client_certs.hold_published(&principal, path, der.to_vec());
     Ok(Published { principal, key: id.key, issued_ms: issued })
+}
+
+/// A `Published` journal entry, encoded as the ledger writes it (tests build a journal by hand).
+#[cfg(test)]
+pub(crate) fn published_entry_for_test(principal: &str, path: &str, der: &[u8]) -> Vec<u8> {
+    mycelium_core::serde_fixint::to_vec(&JournalEntry::Published { principal: principal.into(), path: path.into(), der: der.to_vec() }).unwrap()
+}
+
+#[cfg(test)]
+impl ClientCertLedger {
+    /// The record path this gateway holds as `principal`'s published record.
+    pub(crate) fn published_path_for_test(&self, principal: &str) -> Option<String> {
+        self.published.pin().get(principal).map(|(p, _)| p.clone())
+    }
 }
