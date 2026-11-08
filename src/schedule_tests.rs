@@ -360,6 +360,8 @@ async fn a_run_recorded_ahead_of_this_clock_is_said_and_runs_nothing_until_reach
     assert_eq!(h.runs(), runs, "nothing runs while the recorded run is ahead of the clock");
     assert_eq!(traced(&sink, RUN_RULE, "last_ahead"), 1, "said once, not every tick");
     assert_eq!(fleet_last(&a.task_ctx.kv_state, &s, Some(now_slot)).0, Some(now_slot + 10), "`last` is not lowered");
+    // #740's confirm round: every `sched.run` site carries the catalogued revision, this one included.
+    crate::rules::assert_catalogued_revisions(&sink.snapshot(), &[RUN_RULE]);
     drop(h);
     a.shutdown().await;
 }
@@ -378,6 +380,8 @@ async fn a_run_recorded_too_far_ahead_is_left_out_said_once_and_the_schedule_run
     assert!(poll_until(|| h.runs() >= 2, 15_000).await, "the schedule runs past a year-ahead entry");
     assert_eq!(traced(&sink, RUN_RULE, "ignored_last_far_ahead"), 1, "said once");
     assert_eq!(traced(&sink, RUN_RULE, "last_ahead"), 0);
+    // #740's confirm round: every `sched.run` site carries the catalogued revision, this one included.
+    crate::rules::assert_catalogued_revisions(&sink.snapshot(), &[RUN_RULE]);
     drop(h);
     a.shutdown().await;
 }
