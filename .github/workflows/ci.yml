@@ -665,6 +665,18 @@ jobs:
           grep -q 'correlation=run-1' chain.log
           n=$(grep -c '^\[captured\]' chain.log); [ "$n" -ge 2 ] || { echo "expected at least two captured records, got $n"; exit 1; }
           "$BIN" doctor node.toml | tee doctor.log; grep -q 'start(): would start' doctor.log
+          # Identity-and-lifecycle I0: the scaffold's node.toml with `[persistence]` and `[authority]` — this node's
+          # evaluator, execution authority and journal from its own unit. The doctor reads it as start() would, and the
+          # binary started over it logs the attach before it serves (the bare binary serves no tool of its own, so the
+          # doors' decisions are the lib tests'; here the start is what is shown).
+          { cat node.toml; printf '\n[persistence]\nbase_path = "data/authority-persist"\n\n[authority]\ndeclarations = "units"\nunit = "purchaser"\njournal = "data/authority/evidence.log"\n'; } > authority.toml
+          "$BIN" doctor authority.toml | tee doctor-authority.log
+          grep -q 'start(): would start' doctor-authority.log
+          "$BIN" -c authority.toml > authority-start.log 2>&1 & pid=$!
+          for _ in $(seq 1 60); do grep -q "\[authority\]: this node's evaluator" authority-start.log && break; sleep 0.5; done
+          kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true
+          grep -q "\[authority\]: this node's evaluator" authority-start.log || { cat authority-start.log; exit 1; }
+          test -f data/authority/evidence.log
           printf 'Say hello to {{input}} in a pirate voice.\n' > skills/demo/greeting.md
           CARGO_TARGET_DIR="$REPO/target" cargo run | tee run2.log
           grep -q 'answered: echo: Say hello to the new joiner in a pirate voice' run2.log

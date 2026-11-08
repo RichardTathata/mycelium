@@ -64,6 +64,35 @@ pub(crate) mod gateway_authority;
 /// Closure plan C3: the action preflight, mandates included, at the provider's receive boundary.
 #[cfg(all(feature = "gateway", feature = "tls"))]
 pub(crate) mod provider_enforcement;
+/// Identity-and-lifecycle I0: `[authority]` — this node's evaluator, execution authority, provider enforcement and
+/// evidence journal, built from its declaration at `start()`.
+#[cfg(feature = "compliance")]
+pub(crate) mod declared_authority;
+#[cfg(all(test, feature = "compliance"))]
+mod declared_authority_tests;
+/// `[authority]` in a build that cannot attach what it describes refuses the start by name (I0).
+#[cfg(all(test, not(feature = "compliance")))]
+mod authority_not_in_build_tests {
+    #[tokio::test]
+    async fn an_authority_table_without_compliance_refuses_the_start_by_name() {
+        let port = crate::test_util::alloc_port();
+        let mut cfg = crate::GossipConfig::default();
+        cfg.bind_port = port;
+        cfg.authority = Some(crate::config::AuthorityConfig {
+            declarations: "units".into(),
+            unit: "purchaser".into(),
+            journal: "evidence.log".into(),
+            tier: Default::default(),
+            freshness_ms: 120_000,
+            skew_ms: 1_000,
+            entitle_grants: Default::default(),
+            scope: None,
+        });
+        let a = crate::GossipAgent::new(crate::NodeId::new("127.0.0.1", port).unwrap(), cfg);
+        let e = a.start().await.expect_err("refused").to_string();
+        assert!(e.contains("authority") && e.contains("compliance"), "{e}");
+    }
+}
 /// AE4's contract fixtures: what the seam requires of *any* evaluator behind it, stated once so a
 /// replacement evaluator is held to the same bar as the reference one. Same gate as the seam.
 #[cfg(all(feature = "gateway", feature = "tls"))]
@@ -932,6 +961,14 @@ pub(crate) struct TaskCtx {
     /// work it receives, set via `with_provider_enforcement`. Off = today's behaviour.
     #[cfg(all(feature = "gateway", feature = "tls"))]
     pub(crate) provider_enforcement: std::sync::atomic::AtomicBool,
+    /// `[authority]`'s plan (identity-and-lifecycle I0): built and checked by `preflight()`, attached by `start()` —
+    /// the journal opened there — and by `mycelium doctor` without the journal. Absent: no `[authority]`.
+    #[cfg(feature = "compliance")]
+    pub(crate) declared_authority: std::sync::OnceLock<Arc<declared_authority::DeclaredAuthority>>,
+    /// Whether the evaluator, execution authority and journal now attached are `[authority]`'s (I0): `preflight()`
+    /// refuses any of them attached otherwise — one source of authority per node.
+    #[cfg(feature = "compliance")]
+    pub(crate) declared_attached: std::sync::atomic::AtomicBool,
     /// Closure plan C5: the membership authorities this node takes removals from.
     #[cfg(feature = "tls")]
     pub(crate) membership: std::sync::OnceLock<Arc<crate::membership::MembershipAuthorities>>,
@@ -1541,6 +1578,10 @@ impl GossipAgent {
             execution_authority: std::sync::OnceLock::new(),
             #[cfg(all(feature = "gateway", feature = "tls"))]
             provider_enforcement: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(feature = "compliance")]
+            declared_authority: std::sync::OnceLock::new(),
+            #[cfg(feature = "compliance")]
+            declared_attached: std::sync::atomic::AtomicBool::new(false),
             #[cfg(feature = "tls")]
             membership: std::sync::OnceLock::new(),
             #[cfg(feature = "tls")]

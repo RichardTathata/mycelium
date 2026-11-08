@@ -49,7 +49,44 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     and seventeen more packages from `Cargo.lock`; the tests now name the reqwest `stream` feature they had been getting
     through it.
 
+### Added
+
+- **`[authority]`: a node's evaluator, execution authority, provider enforcement and evidence journal from its
+  declaration** (`docs/plans/identity-and-lifecycle.md` I0). A node built from a configuration file — the `mycelium`
+  binary — could attach none of these, so every door it served enforced nothing. With the table set, `start()` reads
+  the unit whose `principal` is `unit` from `declarations`, builds the reference evaluator from **that unit's**
+  `[[rule]]`s only (each as written, a bare `tool:<name>` also at this node, a grant-requiring rule on the unit's own
+  principal also for `node:<id>`), maps every door this build serves (an unmapped door refuses the start), builds the
+  execution authority (`scope`, `tier`, `freshness_ms`, `entitle_grants`), opens the journal and attaches all four
+  before the lifecycle boundary. Refused at start by name: an empty or unreadable directory, no unit or two with that
+  principal, a rule that does not build, an exposure rule (not attached by the table), a gate the strict profile
+  refuses, an evaluator, an execution authority or a journal already attached in code, a journal path that cannot be
+  opened, a zero `skew_ms`, no `[persistence]`, and a build without `compliance`. The execution authority's epochs are
+  journaled under the persistence directory (`authz.durable_epochs`), so `secure-single-domain` can be met from the
+  table. A bare `tool:` or `skill:` resource is qualified to this node. `mycelium doctor` sets all but the journal and
+  the epochs in memory, opens neither and spawns nothing, and reports them as `start()` would. The `governed-call`
+  scaffold fixes its gateway issuer (`gateway_identity_issuer = "governed-call"`), names the treasurer as
+  `token:governed-call/treasurer` and declares their `grant.revoke`. `GossipConfig` gained
+  `authority`; `deprecations.md` §83; feature page `docs/features/declared-authority.md`.
+
 ### Fixed
+
+- **The reference evaluator selects the arguments its rules test.** `ReferenceEvaluator` kept the trait's default
+  `security_relevant_arguments` (none), so an enforcement point lifted no argument into the envelope and every rule
+  with `requires_values` read *argument value not available* at a live door — `Indeterminate`, never a permit. It now
+  names every `requires_values` key of its rules. Found by identity-and-lifecycle I0: the `governed-call` scaffold's own
+  petty-cash rule could not admit its call at the gateway (`the_gateway_door_decides_by_this_units_rules_and_records_each_decision`,
+  seen failing first). An application that relied on such a rule never permitting now sees it decide. **A
+  prohibition naming a value now decides on it too:** the value present and equal denies; absent, it is not
+  established and decides `Indeterminate` (fail-closed); present and different (`"Capital"` against a prohibited
+  `"capital"`, `over_ceiling = false` against `over_ceiling = true`), the prohibition does not apply and the allowances
+  decide — the rule's literal meaning. While no argument was selected, every request a value-naming prohibition's
+  actor, operation and resource selected decided `Indeterminate`, so an application that relied on that blanket
+  refusal now sees the allowances decide (`a_prohibition_whose_value_is_present_and_equal_denies`,
+  `…_is_absent_is_indeterminate`, `…_is_present_and_different_does_not_apply`). At a live door the values are the
+  caller's own top-level `arguments`, so a rule is only as strong as the argument it names: one on a value the effect
+  itself uses (a ledger) holds, while a prohibition on a flag the caller asserts (`over_ceiling`) holds nothing unless
+  the caller cannot set it.
 
 - **A stem runs only the artifact kinds its `[hosts].kinds` declares** (an independent review of #736, defect A).
   `Provisioner::new` registers the WASM-component runtime unconditionally and `Stem::start` read `kinds` only to add

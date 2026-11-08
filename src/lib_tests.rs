@@ -275,6 +275,10 @@ fn spawn_handler_with(
         execution_authority: std::sync::OnceLock::new(),
         #[cfg(all(feature = "gateway", feature = "tls"))]
         provider_enforcement: std::sync::atomic::AtomicBool::new(false),
+        #[cfg(feature = "compliance")]
+        declared_authority: std::sync::OnceLock::new(),
+        #[cfg(feature = "compliance")]
+        declared_attached: std::sync::atomic::AtomicBool::new(false),
         #[cfg(feature = "tls")]
         membership: std::sync::OnceLock::new(),
         #[cfg(feature = "tls")]
@@ -4353,6 +4357,10 @@ async fn test_subscribe_notified_via_gossip() {
         execution_authority: std::sync::OnceLock::new(),
         #[cfg(all(feature = "gateway", feature = "tls"))]
         provider_enforcement: std::sync::atomic::AtomicBool::new(false),
+        #[cfg(feature = "compliance")]
+        declared_authority: std::sync::OnceLock::new(),
+        #[cfg(feature = "compliance")]
+        declared_attached: std::sync::atomic::AtomicBool::new(false),
         #[cfg(feature = "tls")]
         membership: std::sync::OnceLock::new(),
         #[cfg(feature = "tls")]
