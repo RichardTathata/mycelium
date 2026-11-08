@@ -190,6 +190,9 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Feature pages for discovery, signals and coordination** (F3, third of five PRs): gossip KV, the signal mesh,
   capability discovery, the mailbox, groups and governed membership, opacity, intents, adaptive stability, the
   guarantee report and profiles, the rule catalogue and the decision trace, and metrics and tracing.
+- **Feature pages for acquiring and adapting capabilities** (F3, fourth of five PRs): the stem node, demand-driven
+  provisioning, the signed catalogue, the artifact library, presence bands, shadow acceptance, declared activation,
+  confined activations, serving a model as a skill, hosted WASM components, and unit files with `wire-check`.
 
 ## [2.39.0] — 2026-11-06
 
