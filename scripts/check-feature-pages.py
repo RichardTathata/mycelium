@@ -807,6 +807,48 @@ def pages_checked(root, reg, errors):
     return rows, tests
 
 
+def check_indexes(root, reg, errors):
+    """(j) F3's exit: every page is listed by a row of the capability map's table and by the front page's
+    "The pages" table, so a reader reaches it from either."""
+    def table_text(rel, heading=None):
+        try:
+            text = (root / rel).read_text(encoding='utf-8')
+        except OSError as e:
+            errors.append(f'{rel}: cannot be read: {e}')
+            return ''
+        if heading is not None:
+            start = text.find(f'\n{heading}\n')
+            if start < 0:
+                errors.append(f'{rel}: no "{heading}" section (the parser or the page changed)')
+                return ''
+            nxt = text.find('\n## ', start + 1)
+            text = text[start:nxt if nxt >= 0 else len(text)]
+        return [line for line in text.splitlines() if line.startswith('| ')]
+
+    def column(rows, n):
+        """The n-th cell of each row (a `|` inside a code span does not split it)."""
+        cells = []
+        for line in rows:
+            spans = re.findall(r'`[^`\n]*`', line)
+            masked = re.sub(r'`[^`\n]*`', '\0', line.strip().strip('|'))
+            parts = masked.split('|')
+            it = iter(spans)
+            parts = [re.sub('\0', lambda _: next(it), part) for part in parts]
+            if len(parts) > n:
+                cells.append(parts[n])
+        return cells
+    # The map lists a capability's pages in its mechanisms column (the second); the front page names one page per row
+    # in its first. A link elsewhere in a row — another row's description, a starting point — does not list the page.
+    cap_map = '\n'.join(column(table_text('docs/capabilities.md'), 1))
+    front = column(table_text(f'{FEATURES}/README.md', '## The pages'), 0)
+    for feature in real_pages(reg):
+        page = feature['page']
+        if f'(features/{page})' not in cap_map:
+            errors.append(f'docs/capabilities.md: no row lists the page {page} in its mechanisms column: add it to the row of its capability')
+        if not any(re.fullmatch(rf'\s*\[[^\]]+\]\({re.escape(page)}\)\s*', cell) for cell in front):
+            errors.append(f'{FEATURES}/README.md: "The pages" has no row for {page} (its first cell the page\'s link)')
+
+
 def check(root):
     errors = []
     try:
@@ -820,6 +862,7 @@ def check(root):
     check_anchored_rows(root, errors)
     rows, _ = pages_checked(root, reg, errors)
     check_examples(reg, rows, errors)
+    check_indexes(root, reg, errors)
     return errors
 
 
@@ -903,7 +946,32 @@ def crate_of(root, rel):
     return None, rel
 
 
-def executed_in(key, test, crate, within):
+def bin_of(root, rel):
+    """(target, binary) of the binary target a crate's `src/bin/` file belongs to, or None: a `[[bin]]` whose `path` is
+    the file, or `…/main.rs` whose directory holds it, and cargo's auto-discovered `src/bin/<name>.rs` and
+    `src/bin/<name>/main.rs`. A test in one runs under `Running unittests <path> (deps/<name>-…)`, not the library's
+    target. A `[[bin]]` at `src/main.rs` matches that file alone: its directory is the library's too."""
+    path = Path(rel)
+    for parent in path.parents:
+        manifest = root / parent / 'Cargo.toml'
+        if not manifest.is_file():
+            continue
+        within = path.relative_to(parent).as_posix()
+        bins = [(b.get('path'), b.get('name')) for b in tomllib.loads(manifest.read_text()).get('bin', [])
+                if b.get('path') and b.get('name')]
+        parts = Path(within).parts
+        if len(parts) >= 3 and parts[:2] == ('src', 'bin'):
+            bins.append((f'src/bin/{parts[2]}/main.rs', parts[2]) if len(parts) > 3 else (within, Path(within).stem))
+        for bpath, name in bins:
+            folder = Path(bpath).parent.as_posix()
+            if within == bpath or (Path(bpath).name == 'main.rs' and folder != 'src'
+                                   and within.startswith(folder + '/')):
+                return bpath, name.replace('-', '_')
+        return None
+    return None
+
+
+def executed_in(key, test, crate, within, binary_target=None):
     """Did this executed key run `test` in the target its file belongs to? An integration file `tests/<stem>.rs` is
     its own binary `<stem>`; a `src/` file is the crate's library or binaries, under the crate's name. A module
     path is not derived from the file: `#[path]` attributes make it differ (fleet_history_tests.rs runs as
@@ -928,6 +996,8 @@ def executed_in(key, test, crate, within):
     if within.startswith('tests/'):
         stem = Path(within).stem
         return target == f'tests/{stem}.rs' and binary == stem
+    if binary_target is not None:
+        return (target, binary) == binary_target
     if within.startswith('src/'):
         return target.startswith('src/') and binary == crate
     return True
@@ -950,8 +1020,8 @@ def check_executed(root, logs):
         return [f'{logs}: no executed test in the logs (the fetch failed, or the log format changed)']
     errors = []
     for rel, test, files in named_test_list(root):
-        places = [crate_of(root, f) for f in files if f]
-        if not any(executed_in(key, test, crate, within) for key in executed for crate, within in places):
+        places = [(*crate_of(root, f), bin_of(root, f)) for f in files if f]
+        if not any(executed_in(key, test, crate, within, b) for key in executed for crate, within, b in places):
             errors.append(f'{rel}: names the test `{test}` (in {", ".join(f for f in files if f)}), which no job of this '
                           f'run executed in that file\'s target')
     return errors

@@ -49,8 +49,8 @@ envelope under which the rejected variant could still be built later.
 
 ## The decision — git is a projection the curator emits, not the substrate writes through
 
-Keep the system of record exactly as shipped: the airtight per-object-CAS `WikiStore` (`FsStore` /
-`S3Store`), dumb, erasable, read directly by agents. Add a **change sink** on the curator: after each
+Keep the system of record exactly as shipped: the airtight per-object-CAS `WikiStore` (`FsStore`; an
+`S3Store` was designed and is not built), dumb, erasable, read directly by agents. Add a **change sink** on the curator: after each
 drain round lands, the curator notifies an injected `ChangeSink`; the shipped `GitMirror` sink renders
 the touched pages as pure markdown into a local git worktree, makes **one commit per applied round**
 (a real, reviewable unit with proposal provenance in the message), and optionally pushes to an

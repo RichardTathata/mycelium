@@ -202,6 +202,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Feature pages for acquiring and adapting capabilities** (F3, fourth of five PRs): the stem node, demand-driven
   provisioning, the signed catalogue, the artifact library, presence bands, shadow acceptance, declared activation,
   confined activations, serving a model as a skill, hosted WASM components, and unit files with `wire-check`.
+- **Feature pages for tools, reasoning, companions and domains; F3 closed** (F3, fifth of five PRs): skills, LLM
+  prompt skills, MCP tools, the reason router, the tuple space, the blackboard, the contract net, federated domains,
+  AgentFacts, the knowledge layer and the wiki substrate — every feature in the registry now has a page. The gate also
+  fails on a page that no row of the capability map, or of the front page's *The pages* table, lists; the ten pages
+  that predated F3 gained their front-page rows. P7 decided: no glossary entry per feature. The companions runbook and
+  three `mycelium-wiki` doc comments no longer describe an object-store `WikiStore` as existing; none ships.
 
 ## [2.39.0] — 2026-11-06
 
