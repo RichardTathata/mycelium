@@ -51,6 +51,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A wasm-host decision record names its rule's real revision** (#738's adversarial review, finding 8). `TraceCtx::record`
+  stamped `rule_revision = 1` on every record the stem provisioner, the install task and the activation hook made, so a
+  record for `prov.activation` or `prov.probe` (revision 3), or `prov.shed` (revision 2), said 1. A replay comparison
+  could not see a rule change, a bundle's `coverage.json` — which reads the descriptors — disagreed with its own
+  `decisions.jsonl`, and an exported span's `mycelium.rule_revision` was wrong. Each record now takes the revision from
+  `mycelium_wasm_host::rules::RULES`. Seen failing first: `a_trace_record_carries_its_rules_revision`.
+
 - **A provider refuses a call whose mandate was revoked between its preflight and its registration** (the
   check-then-act window at the provider, `docs/design/authority-at-execution.md` §9). With provider enforcement on,
   `provider_enforcement::admit_after` re-assesses a presented mandate after the preflight has permitted, to register the
