@@ -22,6 +22,7 @@ from .agent import (
     SupersededError,
 )
 from .a2a import A2aClient, arguments_digest, mandate_request_bytes
+from .client_sig import ClientSigner, a2a_binding, client_signature_message, mcp_binding
 from .artifacts import Artifacts, ArtifactError
 from .federation import Federation, FederationError, DeliveryUnknown
 from .prompt_skill import PromptTemplate, PromptSkillClient
@@ -60,6 +61,10 @@ __all__ = [
     "KvReceipt",
     "A2aClient",
     "arguments_digest",
+    "ClientSigner",
+    "a2a_binding",
+    "client_signature_message",
+    "mcp_binding",
     "mandate_request_bytes",
     "Artifacts",
     "ArtifactError",

@@ -190,6 +190,8 @@ pub(super) async fn gw_llm_call(
         timeout,
         gateway_caller::presented_mandate(&params),
         Some(&resource),
+        // The LLM doors bind no client signature (identity-and-lifecycle I1 binds `tools/call` and `skill.invoke`).
+        None,
     ).await;
     #[cfg(feature = "tls")]
     {
@@ -320,6 +322,8 @@ pub(super) async fn llm_stream_event(
         timeout,
         gateway_caller::presented_mandate(&params),
         Some(&resource),
+        // The LLM doors bind no client signature (identity-and-lifecycle I1 binds `tools/call` and `skill.invoke`).
+        None,
     ).await;
     #[cfg(feature = "tls")]
     {

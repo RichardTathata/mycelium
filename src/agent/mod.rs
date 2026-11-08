@@ -184,6 +184,10 @@ pub(crate) mod revocation;
 /// Identity-and-lifecycle I1: client certificates for services — which of a client principal's keys is current.
 #[cfg(feature = "tls")]
 pub(crate) mod client_cert;
+/// Identity-and-lifecycle I1 (D1′): a client's own signature on a gateway call — `cs` and `cn`.
+pub(crate) mod client_sig;
+#[cfg(all(test, feature = "tls", feature = "gateway"))]
+mod client_sig_tests;
 #[cfg(all(test, feature = "tls"))]
 mod client_cert_tests;
 #[cfg(feature = "compliance")]
@@ -989,6 +993,11 @@ pub(crate) struct TaskCtx {
     /// Post-360 row E: each gateway's recent caller-envelope ids, checked once per received request
     /// (`gateway_caller::verify_received`), so a captured envelope is not served twice.
     pub(crate) caller_replay: gateway_caller::ReplayWindows,
+    /// Identity-and-lifecycle I1: every client key's recent `cn`s, as this provider has received them.
+    pub(crate) client_replay: client_sig::ClientReplayWindows,
+    /// Identity-and-lifecycle I1: calls by a principal with a client certificate on record that carried no `cs`.
+    #[cfg(feature = "tls")]
+    pub(crate) unsigned_actions: client_sig::UnsignedActions,
     /// A `correlation` or `parent` carried where it is never read — a header at an HTTP door, or a field in the caller
     /// envelope (adopter-surface X4): counted **by door**, the record's field left empty. `GET /stats`
     /// `causal_fields_misplaced` is the map; lock-free (papaya), no lock-order row.
@@ -1598,6 +1607,9 @@ impl GossipAgent {
             #[cfg(feature = "tls")]
             client_certs: Arc::new(client_cert::ClientCertLedger::default()),
             caller_replay: Default::default(),
+            client_replay: Default::default(),
+            #[cfg(feature = "tls")]
+            unsigned_actions: Default::default(),
             causal_misplaced: papaya::HashMap::new(),
             #[cfg(feature = "a2a")]
             a2a_mounted: AtomicBool::new(false),

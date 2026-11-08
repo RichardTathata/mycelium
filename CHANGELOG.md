@@ -51,6 +51,18 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **A client's own signature on a gateway call** (`docs/plans/identity-and-lifecycle.md` I1, second half, PR 1 of
+  3; decision D1′). A service with a client certificate signs each `tools/call` or A2A send with its key
+  (`ClientSigner` in Rust, Python and TypeScript) and sends `params._meta.cs` and `cn`. The gateway carries both in
+  the caller envelope. The provider checks them at its receive boundary, before any cache: the signature over the
+  principal, operation, resource and arguments' digest; that the key is the principal's current client key; the
+  issue time; and that each `cn` is seen once per process, under a new window keyed by principal, key and instance.
+  The tool's handler sees the verified signature (`GatewayCaller::client_signed`). One vector,
+  `tests/fixtures/cs/vector.json`, is checked in Rust, jest and pytest. A signed call at a gateway without
+  `gateway_identity_issuer` is refused by name. An unsigned call from a principal with a certificate on record is
+  counted (`gateway_actions_unsigned{kind}`), not yet refused. A client certificate may not be named `legacy`.
+  Upgrade note: `deprecations.md` §87.
+
 - **Client certificates for services** (`docs/plans/identity-and-lifecycle.md` I1, first half). `mycelium tls issue
   --client <name> --issuer <issuer>` has the fleet CA issue a service's key a certificate naming
   `mycelium-client://{issuer}/{name}`, for the gateway principal `token:{issuer}/{name}`. Both mesh verifiers refuse

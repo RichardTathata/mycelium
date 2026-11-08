@@ -1,0 +1,30 @@
+{
+  "_doc": "The client-signature vector (identity-and-lifecycle I1, D1'): Rust (src/agent/client_sig_tests.rs), jest (mycelium-ts/tests/client_sig.test.ts) and pytest (mycelium-py/tests/test_client_sig.py) each rebuild message_hex from the inputs and check signature_b64 under verifying_key_b64; Ed25519 is deterministic, so the signature is pinned too.",
+  "seed_hex": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+  "principal": "token:fleet/forecaster",
+  "operation": "tools/call",
+  "resource": "tool:weather.forecast@10.0.0.1:57000",
+  "arguments": {
+    "city": "Lyon",
+    "days": 3
+  },
+  "arguments_canonical": "{\"city\":\"Lyon\",\"days\":3}",
+  "arguments_digest_hex": "c74a2b58148ec8b68e232ab0eeaeae86ea4520429e4b75b990ec1418abd489db",
+  "issued_at_ms": 1767225600000,
+  "instance_hex": "0123456789abcdef",
+  "counter": 5,
+  "message_hex": "6d7963656c69756d2e676174657761792f636c69656e742d7369676e61747572652f3116000000746f6b656e3a666c6565742f666f72656361737465720a000000746f6f6c732f63616c6c15000000746f6f6c3a776561746865722e666f726563617374c74a2b58148ec8b68e232ab0eeaeae86ea4520429e4b75b990ec1418abd489db00a8da769b010000efcdab89674523010500000000000000",
+  "verifying_key_b64": "ebVWLo/mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ=",
+  "signature_b64": "VXuVkR2pCh4oh2lq9zolHJGz2IxfP6s1kiNIULYXHeZP2xjOswQp8kgZbZTVkLbjJDoGUl8B0u1q/1GvbJ3HDg==",
+  "meta": {
+    "cs": {
+      "k": "ebVWLo/mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ=",
+      "sig": "VXuVkR2pCh4oh2lq9zolHJGz2IxfP6s1kiNIULYXHeZP2xjOswQp8kgZbZTVkLbjJDoGUl8B0u1q/1GvbJ3HDg=="
+    },
+    "cn": {
+      "t": 1767225600000,
+      "i": "0123456789abcdef",
+      "c": 5
+    }
+  }
+}

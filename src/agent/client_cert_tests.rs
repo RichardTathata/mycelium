@@ -194,6 +194,8 @@ async fn the_client_cert_door_is_identity_write_and_publishes_what_it_judged() {
     let http_port = alloc_port();
     let mut cfg = config(&dir, port, false);
     cfg.http_port = Some(http_port);
+    // The door publishes only this gateway's own issuer's certificates (#741's review, item 7).
+    cfg.gateway_identity_issuer = Some("fleet".into());
     cfg.gateway_scoped_tokens = vec![
         crate::GatewayToken { token: "ops".into(), scopes: vec!["identity:write".into()] },
         crate::GatewayToken { token: "reader".into(), scopes: vec!["kv:read".into()] },
@@ -493,4 +495,58 @@ async fn a_far_future_certificate_for_the_same_key_is_rewritten_by_the_publisher
     a.shutdown().await;
     let _ = std::fs::remove_dir_all(&dir);
     assert_eq!((rewritten, stored), (1, Some(own)), "BLOCKED: a far-future same-key certificate kept the publisher from restoring its record");
+}
+
+/// **The door publishes only its own issuer's certificates, and the audit names the bearer who published** (#741's
+/// review, item 7). A gateway whose `gateway_identity_issuer` is `fleet` refuses a certificate issued for `other`
+/// (`422 issuer_mismatch`); a gateway with no issuer set publishes none (`409 gateway_identity_issuer_unset`); and
+/// the sealed record of a publication names the bearer's principal beside the certificate's. Seen failing first: the
+/// foreign issuer's certificate was published, and the audit detail named only the certificate's principal.
+#[cfg(feature = "compliance")]
+#[tokio::test]
+async fn the_client_cert_door_checks_its_issuer_and_audits_the_bearer() {
+    use axum::http::header::AUTHORIZATION;
+    let door = |dir: &Path, issuer: Option<&str>| {
+        let port = alloc_port();
+        let http_port = alloc_port();
+        let mut cfg = config(dir, port, false);
+        cfg.http_port = Some(http_port);
+        cfg.gateway_identity_issuer = issuer.map(str::to_string);
+        cfg.gateway_named_tokens = vec![crate::GatewayNamedToken { name: "ops".into(), token: "ops".into(), scopes: vec!["identity:write".into()] }];
+        (cfg, port, http_port)
+    };
+    let post = |http_port: u16, pem: String| async move {
+        let r = reqwest::Client::new().post(format!("http://127.0.0.1:{http_port}/gateway/identity/client-cert"))
+            .header(AUTHORIZATION, "Bearer ops").json(&serde_json::json!({"cert_pem": pem})).send().await.unwrap();
+        (r.status().as_u16(), r.json::<serde_json::Value>().await.unwrap_or_default())
+    };
+    let dir = fresh("door-issuer");
+    let (cfg, port, http_port) = door(&dir, Some("fleet"));
+    let a = started(cfg, port).await;
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    let pem_of = |issuer: &str, out: &str| {
+        let (cert, _) = crate::issue_client_cert(&dir.join("certs"), issuer, "forecaster", &dir.join(out)).unwrap();
+        std::fs::read_to_string(cert).unwrap()
+    };
+    let foreign = post(http_port, pem_of("other", "other")).await;
+    let ours = post(http_port, pem_of("fleet", "fleet")).await;
+    let id = a.node_id().clone();
+    let detail = a.audit_stream(&id).into_iter().filter(|r| r.record.target == "identity/client-cert")
+        .filter_map(|r| r.record.detail).collect::<Vec<_>>();
+    a.shutdown().await;
+
+    let dir2 = fresh("door-no-issuer");
+    let (cfg2, port2, http2) = door(&dir2, None);
+    let b = started(cfg2, port2).await;
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    let (cert, _) = crate::issue_client_cert(&dir2.join("certs"), "fleet", "forecaster", &dir2.join("c")).unwrap();
+    let unset = post(http2, std::fs::read_to_string(cert).unwrap()).await;
+    b.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&dir2);
+
+    assert_eq!((foreign.0, foreign.1["reason"].as_str()), (422, Some("issuer_mismatch")), "PUBLISHED another issuer's certificate: {foreign:?}");
+    assert_eq!(ours.0, 200, "{ours:?}");
+    assert!(detail.iter().any(|d| d.contains("\"by\":\"token:fleet/ops\"")), "UNNAMED: the audit does not name the publishing bearer: {detail:?}");
+    assert_eq!((unset.0, unset.1["reason"].as_str()), (409, Some("gateway_identity_issuer_unset")), "{unset:?}");
 }

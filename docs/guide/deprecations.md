@@ -2643,3 +2643,28 @@ node.
 
 Wire **v12** unchanged. What I1 leaves for later (`cs`/`cn`, the SDK clients, client-held grants) is listed on the
 [feature page](../features/client-certificates.md).
+
+## 87. A client's own signature on a call: `cs`/`cn` in `params._meta`; an unsigned call from a certificate holder is counted (unreleased, identity-and-lifecycle I1, second half)
+
+A service holding a client certificate can sign a `tools/call` or an A2A send with its key and send
+`params._meta.cs` and `params._meta.cn`. The gateway carries both in the caller envelope, and the provider checks
+them at its receive boundary.
+
+- **Who is affected:** nothing changes for a call without `cs`/`cn`. Such a call from a principal whose client
+  certificate is on record is counted in `gateway_actions_unsigned{kind}` (`mycelium_gateway_actions_unsigned_total`
+  under `metrics`) and still served. A later release will refuse it; sign calls before then.
+- **A signed call needs `gateway_identity_issuer` set** on the gateway it goes through. Without it the gateway refuses
+  the call with `-32602`, reason `gateway_identity_issuer_unset`.
+- **Mixed versions:** an older provider keeps `cs`/`cn` among the envelope's unknown fields and checks nothing, so
+  upgrade providers before relying on the check. An older gateway drops `_meta.cs`/`cn` and sends the call unsigned.
+- **Code:** `CallerError` gained `ClientSignature` and `ClientReplayed`. It is `#[non_exhaustive]`, and a `_` arm must
+  fail closed. `GatewayCaller` gained `client_signed`. `mycelium_core::tls` gained `RESERVED_CLIENT_NAMES`.
+- **The publishing door checks its issuer:** `POST /gateway/identity/client-cert` now answers `409
+  gateway_identity_issuer_unset` on a gateway without `gateway_identity_issuer`, and `422 issuer_mismatch` for a
+  certificate issued for another issuer. Set the issuer on the gateway you publish through. The sealed audit record
+  of a publication now names the publishing bearer (`by`) beside the certificate's principal.
+- **Reserved name:** `mycelium tls issue --client legacy` is refused, and a certificate naming `legacy` is no client
+  identity: `token:{issuer}/legacy` is the legacy `gateway_auth_token`'s principal.
+- **Python:** signing needs `pip install 'mycelium-py[sign]'`, which adds `cryptography`.
+
+Wire **v12** unchanged: `cs` and `cn` are payload.

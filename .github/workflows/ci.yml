@@ -959,7 +959,7 @@ jobs:
             fi
             sleep 1
           done
-      - run: pip install './mycelium-py[typed]' ./langgraph-checkpoint-mycelium ./strands-session-mycelium pytest pytest-asyncio langgraph httpx-sse
+      - run: pip install './mycelium-py[typed,sign]' ./langgraph-checkpoint-mycelium ./strands-session-mycelium pytest pytest-asyncio langgraph httpx-sse
       # By directory, never by file (verification policy rule 3): a named list left five node-free test files
       # out of CI until 2026-10-06. The live gateway suite skips itself here (no MYCELIUM_TEST_HOST) and runs in
       # its own step below against a plain node.
@@ -1302,7 +1302,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install './mycelium-py[typed]' ./langgraph-checkpoint-mycelium ./strands-session-mycelium pytest pytest-asyncio langgraph httpx-sse
+      - run: pip install './mycelium-py[typed,sign]' ./langgraph-checkpoint-mycelium ./strands-session-mycelium pytest pytest-asyncio langgraph httpx-sse
       - name: List every test
         run: |
           echo "@@test-universe@@ begin rust-python"
