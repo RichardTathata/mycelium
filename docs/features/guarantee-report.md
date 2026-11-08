@@ -25,7 +25,8 @@ The report is always on. A profile is a setting; the two-domain scaffold's
 
 - [`profile`](../reference/configuration.md#profile): `dev` (unset), `secure-single-domain` or `secure-multi-domain`,
   or `GOSSIP_PROFILE`; an unknown name is refused by `validate()`, and an unmet required guarantee refuses `start()`.
-- [`guarantee_report`](../../src/agent/mod.rs) in code, and `GET /gateway/guarantees` under `fleet:read`.
+- [`guarantee_report`](../../src/agent/mod.rs) in code, and `GET /gateway/guarantees` under `fleet:read` — a scope
+  checked only in a build with `compliance` (the published node has it; without it any valid bearer reads the report).
 - [`register_guarantee`](../../src/agent/mod.rs): a companion's own guarantee, before `start()`; a duplicate, a core id
   or a late registration is refused by name.
 - `mycelium doctor` prints the same report without starting a node ([doctor](doctor.md)).

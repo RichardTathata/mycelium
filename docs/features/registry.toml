@@ -528,6 +528,24 @@ example = "three_node_demo"
 ids = ["concept:mcp-tool"]
 
 [[feature]]
+name = "Service calls: RPC, scatter-gather and bulk"
+page = "service-calls.md"
+example = "none"
+ids = []
+
+[[feature]]
+name = "The Eve loader"
+page = "eve-loader.md"
+example = "eve_fleet_node"
+ids = []
+
+[[feature]]
+name = "The Ops Console"
+page = "ops-console.md"
+example = "ops_console"
+ids = []
+
+[[feature]]
 name = "The mailbox (durable, ordered delivery)"
 page = "mailbox.md"
 example = "mailbox_llm"

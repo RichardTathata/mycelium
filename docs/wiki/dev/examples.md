@@ -26,6 +26,13 @@ are refused. `scripts/check-feature-pages.py` (run by
 (the front-doors resolver, which now reads `<a id>` too), code items, configuration rows, named tests and
 example; its mutation suite is `scripts/test-check-feature-pages.py`, and CI's `test-coverage` job runs it with
 `--executed` so a page cannot name a test no job ran. A wiki page is not a source; the registry is.
+**Since F3 and F4 (2026-11-07/08)** every registry entry has a page (no `todo` left), the gate also refuses a page
+that no row of the capability map's mechanisms column, or no first cell of the front page's *The pages* table, lists,
+and `--executed` attributes a test in a `src/bin/` target to that binary. What the gate cannot read — whether the
+prose is still true, whether the example demonstrates the feature — is `/doc-coverage` Step 4b's pass, recorded in
+[`doc-coverage.md` § Feature pages](../../analysis/doc-coverage.md#feature-pages) with the next pass's baseline. Its
+first run's lesson: a CI ✓ in the example index says the example ran, not that it checks anything — two cited
+examples assert nothing — and a scope named on a page holds only in a `compliance` build, which the published stem is not.
 
 
 **Teaching the current surfaces.** [The developer tutorial sequence](../../guide/tutorials/README.md)

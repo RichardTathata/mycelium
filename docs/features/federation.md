@@ -47,7 +47,9 @@ published node mounts neither `/a2a` nor an edge.
 The [example index](../../examples/README.md#the-capability-matrix) lists
 [`federated_domains`](../../examples/README.md#the-capability-matrix): the lifecycle in one process — descriptors,
 trust, the filtered catalogue, a call, a revocation. CI runs it, and
-[`federation_trust_is_not_transitive`](../../examples/README.md#the-capability-matrix). The two-mesh Docker suite,
+[`federation_trust_is_not_transitive`](../../examples/README.md#the-capability-matrix); both print each decision and
+assert none, so the checks are the tests, `three_domains_compose_without_trust_composing` in
+[`src/lib_tests.rs`](../../src/lib_tests.rs) among them. The two-mesh Docker suite,
 `make test-federation`, cuts the link at the network layer and asserts the meshes never merge.
 
 ## What it guarantees, and what it does not
