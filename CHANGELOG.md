@@ -76,11 +76,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   with `requires_values` read *argument value not available* at a live door — `Indeterminate`, never a permit. It now
   names every `requires_values` key of its rules. Found by identity-and-lifecycle I0: the `governed-call` scaffold's own
   petty-cash rule could not admit its call at the gateway (`the_gateway_door_decides_by_this_units_rules_and_records_each_decision`,
-  seen failing first). An application that relied on such a rule never permitting now sees it decide. **Prohibitions
-  stay fail-closed:** a prohibition naming a value refuses every request its actor, operation and resource select
-  unless the value is present and equal (a deny) — a present but different value (`"Capital"` against a prohibited
-  `"capital"`) decides `Indeterminate`, never falling through to an allowance, as it did while no argument was selected
-  (`a_prohibition_naming_a_value_refuses_a_different_value_rather_than_falling_through`, seen failing first).
+  seen failing first). An application that relied on such a rule never permitting now sees it decide. **A
+  prohibition naming a value now decides on it too:** the value present and equal denies; absent, it is not
+  established and decides `Indeterminate` (fail-closed); present and different (`"Capital"` against a prohibited
+  `"capital"`, `over_ceiling = false` against `over_ceiling = true`), the prohibition does not apply and the allowances
+  decide — the rule's literal meaning. While no argument was selected, every request a value-naming prohibition's
+  actor, operation and resource selected decided `Indeterminate`, so an application that relied on that blanket
+  refusal now sees the allowances decide (`a_prohibition_whose_value_is_present_and_equal_denies`,
+  `…_is_absent_is_indeterminate`, `…_is_present_and_different_does_not_apply`).
 
 - **A provider refuses a call whose mandate was revoked between its preflight and its registration** (the
   check-then-act window at the provider, `docs/design/authority-at-execution.md` §9). With provider enforcement on,
