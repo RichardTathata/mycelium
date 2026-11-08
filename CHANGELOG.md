@@ -49,6 +49,26 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     and seventeen more packages from `Cargo.lock`; the tests now name the reqwest `stream` feature they had been getting
     through it.
 
+### Added
+
+- **`[authority]`: a node's evaluator, execution authority, provider enforcement and evidence journal from its
+  declaration** (`docs/plans/identity-and-lifecycle.md` I0). A node built from a configuration file — the `mycelium`
+  binary — could attach none of these, so every door it served enforced nothing. With the table set, `start()` reads
+  the unit whose `principal` is `unit` from `declarations`, builds the reference evaluator from **that unit's**
+  `[[rule]]`s only (each as written, a bare `tool:<name>` also at this node, a grant-requiring rule on the unit's own
+  principal also for `node:<id>`), maps every door this build serves (an unmapped door refuses the start), builds the
+  execution authority (`scope`, `tier`, `freshness_ms`, `entitle_grants`), opens the journal and attaches all four
+  before the lifecycle boundary. Refused at start by name: an empty or unreadable directory, no unit or two with that
+  principal, a rule that does not build, an exposure rule (not attached by the table), a gate the strict profile
+  refuses, an evaluator, an execution authority or a journal already attached in code, a journal path that cannot be
+  opened, a zero `skew_ms`, no `[persistence]`, and a build without `compliance`. The execution authority's epochs are
+  journaled under the persistence directory (`authz.durable_epochs`), so `secure-single-domain` can be met from the
+  table. A bare `tool:` or `skill:` resource is qualified to this node. `mycelium doctor` sets all but the journal and
+  the epochs in memory, opens neither and spawns nothing, and reports them as `start()` would. The `governed-call`
+  scaffold fixes its gateway issuer (`gateway_identity_issuer = "governed-call"`), names the treasurer as
+  `token:governed-call/treasurer` and declares their `grant.revoke`. `GossipConfig` gained
+  `authority`; `deprecations.md` §83; feature page `docs/features/declared-authority.md`.
+
 ### Fixed
 
 - **A wasm-host decision record names its rule's real revision** (#738's adversarial review, finding 8). `TraceCtx::record`
@@ -65,6 +85,64 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   revision (2 or 3 for eight rules), so comparing a pre-upgrade trace with a post-upgrade replay reports a revision
   difference at each of those rules, and a dashboard filter on `rule_revision = 1` stops matching them. No checked-in
   corpus is affected.
+
+- **A crashed provider's advertisement is skipped by every reader of `cap/` and `req/`** (the independent review of
+  #730). An advertisement is never tombstoned when its provider dies; it evaporates at its readers, which skip an entry
+  older than three refresh intervals (`CapEntry::is_fresh` / `ReqEntry::is_fresh`, rule `kv.expiry`). Five readers
+  decoded with `Capability::decode` or `CapFilter::decode` and never asked, so a dead node stayed live to them
+  indefinitely: `/a2a tasks/send` could route to it and the agent card listed its skill (`resolve_providers`,
+  `card_skill_ids`); the membership governor counted it eligible, inflating `eligible_non_members` and lowering every
+  live node's `join_p` (`resolve_eligible`); the gateway's provider lookup — `GET /gateway/cap/resolve`,
+  `shard/owner`, `shard/emit`, `llm/call` and `llm/stream` — resolved and routed to it
+  (`resolve_cap_providers`, which said so in its doc comment); and `GET /gateway/demand` counted its providers and
+  requirers. Each now reads through the resolver's own path (`resolve_filter_against_kv`, or `scan_fresh_caps` where
+  the key's segments are wanted). `GET /gateway/demand` now returns `demand()`'s own counts (`demand_snapshot`), so
+  it also counts a group's contributors (`gcap/`), each node once. Three readers of a node's **own** entries read one
+  it had stopped refreshing — restored from persisted state after a restart — as live: the provider-side preflight
+  served the skill (`advertises`), the group projection joined the groups it matched and projected a fresh `gcap/`
+  that demand and wiring count (`emergent_groups`), and `mycelium-agentfacts` certified it; the `llm_agent` example's
+  dashboard showed a crashed node's ads. A node judges its **own** entries on staleness only, at every reader of them —
+  the preflight, the group projection, its own eligibility in the membership governor and its agent facts — so a
+  clock that reads its own stamp as ahead does not refuse its own skill, drop it from a group, judge itself
+  ineligible or leave it out of its facts; a peer's entry is judged both ways. The cost, stated in `kv.expiry`: an own
+  entry stamped far ahead and persisted before a clock correction stays live until the wall clock catches up. New:
+  `CapabilitiesHandle::own_advertised()`, that reading for a companion (agent facts uses it). `advertises` reads its one
+  key rather than scanning the fleet's. The new readers add no clock read a recording lacks where they can: the group
+  projection judges its own entries with the one wall reading its pass already took (for the membership intents), an
+  own-entry check reads the clock only when there is an entry, and the governor reads it once per pass, on its timer
+  — so the checked-in replay corpus (`y2-schedule-run`, the faults recordings) replays as recorded and was not
+  re-recorded. The first form read the clock again in every group-projection pass, an event-driven task, which
+  diverged `schedule_replay` at its eighth choice and, under load, `decision_trace_replay`. Rules `kv.expiry` (revision 4),
+  `cap.match` and `membership.governed` (revision 3). One additive method (`own_advertised`), no other API change; a caller sees
+  fewer providers, never more, except `/gateway/demand`'s group contributors. Not changed: an advertisement with a
+  refresh interval of 0, possible through the Rust API, reads as stale to every reader at once.
+
+- **The `mycelium` node binary and `mycelium-stem` read `RUST_LOG`** (the independent review of #730). Each set a
+  fixed maximum level, so `RUST_LOG=mycelium=debug` did nothing. Each now builds an `EnvFilter` from `RUST_LOG`;
+  unset, empty or holding no valid directive, the default stands — INFO for the node and the stem, WARN for
+  `mycelium test`. **A valid `RUST_LOG` replaces the default rather than adding to it:** a target it does not name is
+  off, so `RUST_LOG=mycelium_core=debug` hides the node's own INFO start-up lines and a typo that parses as a target
+  (`RUST_LOG=inf`) silences everything — write `RUST_LOG=info,mycelium_core=debug`. (`skillrunner` differs: it pins
+  `skillrunner=info` and `mycelium=warn` over `RUST_LOG`, so `RUST_LOG` changes only its other targets; its reference
+  page's troubleshooting example said otherwise and is corrected.) `mycelium-wasm-host`'s optional
+  `tracing-subscriber` gains its `env-filter` feature.
+
+- **The reference evaluator selects the arguments its rules test.** `ReferenceEvaluator` kept the trait's default
+  `security_relevant_arguments` (none), so an enforcement point lifted no argument into the envelope and every rule
+  with `requires_values` read *argument value not available* at a live door — `Indeterminate`, never a permit. It now
+  names every `requires_values` key of its rules. Found by identity-and-lifecycle I0: the `governed-call` scaffold's own
+  petty-cash rule could not admit its call at the gateway (`the_gateway_door_decides_by_this_units_rules_and_records_each_decision`,
+  seen failing first). An application that relied on such a rule never permitting now sees it decide. **A
+  prohibition naming a value now decides on it too:** the value present and equal denies; absent, it is not
+  established and decides `Indeterminate` (fail-closed); present and different (`"Capital"` against a prohibited
+  `"capital"`, `over_ceiling = false` against `over_ceiling = true`), the prohibition does not apply and the allowances
+  decide — the rule's literal meaning. While no argument was selected, every request a value-naming prohibition's
+  actor, operation and resource selected decided `Indeterminate`, so an application that relied on that blanket
+  refusal now sees the allowances decide (`a_prohibition_whose_value_is_present_and_equal_denies`,
+  `…_is_absent_is_indeterminate`, `…_is_present_and_different_does_not_apply`). At a live door the values are the
+  caller's own top-level `arguments`, so a rule is only as strong as the argument it names: one on a value the effect
+  itself uses (a ledger) holds, while a prohibition on a flag the caller asserts (`over_ceiling`) holds nothing unless
+  the caller cannot set it.
 
 - **A stem runs only the artifact kinds its `[hosts].kinds` declares** (an independent review of #736, defect A).
   `Provisioner::new` registers the WASM-component runtime unconditionally and `Stem::start` read `kinds` only to add

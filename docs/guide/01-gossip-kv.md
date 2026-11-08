@@ -17,9 +17,9 @@ last", not just "physically last".
 **Freshness at the reader, not a TTL in the store.** A key has no time-to-live:
 an entry stays until it is overwritten or deleted. State that should lapse is
 refreshed by its writer and judged by its reader — a capability advertisement
-older than three refresh intervals is skipped by the readers that check freshness
-(`CapEntry::is_fresh`: resolve, watch, wiring, demand; three readers do not yet,
-a known gap fixed by a separate PR) — and a delete is a tombstone the GC sweep collects once
+older than three refresh intervals is skipped by every reader
+(`CapEntry::is_fresh`: resolve, watch, wiring, demand, the A2A card, the governor,
+the gateway's lookups) — and a delete is a tombstone the GC sweep collects once
 it is older than `default_ttl × propagation_window_secs × 10` seconds (about 50
 minutes at the defaults). So heartbeats and advertisements
 self-clean without a garbage-collection job; a key nobody refreshes and nobody

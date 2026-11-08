@@ -223,7 +223,7 @@ pub(crate) fn opaque_freshness_ms(cfg: &crate::config::GossipConfig) -> u64 {
 /// `BOUNDARY_TRANSPARENT` is emitted when it goes. Ageing them here — tried 2026-10-09 and caught by
 /// the adversarial review of #584 — made `is_overloaded()`, `SelfDegraded` and the deferral hook
 /// read the node as transparent after two health intervals while the requirement still held it
-/// opaque, disagreeing with `CapabilityHandle::is_opaque`. The one mark that is a stamp with no
+/// opaque, disagreeing with `CapabilitiesHandle::is_opaque`. The one mark that is a stamp with no
 /// owner to lower it is the snapshot's, which [`defer_snapshot_on_self_opacity`] ages alone.
 ///
 /// Encapsulates the Layer I prefix scan here in Layer II (opacity.rs) so that
@@ -519,7 +519,7 @@ mod tests {
     /// a requirement declared unmet (`capability_ops.rs`, stamped once) and the governor's own mark
     /// (written on `GoOpaque`, never re-stamped on `Hold`) read as transparent after two health
     /// intervals, so `is_overloaded()`, `SelfDegraded` and the deferral hook disagreed with
-    /// `CapabilityHandle::is_opaque` while the requirement still held the node opaque and no
+    /// `CapabilitiesHandle::is_opaque` while the requirement still held the node opaque and no
     /// `BOUNDARY_TRANSPARENT` had been emitted. Only the `persistence` mark is a stamp that can go
     /// stale without a transition; the other kinds keep transition semantics. Seen failing first:
     /// a requirement mark an hour old read as transparent.

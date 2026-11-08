@@ -219,7 +219,7 @@
     },
     {
       "id": "cap.match",
-      "revision": 2,
+      "revision": 3,
       "subsystem": "mycelium::capability",
       "responsibilities": [
         "response"
@@ -229,7 +229,7 @@
         {
           "source": "`cap/` advertisements as gossiped",
           "scope": "the fleet as this node sees it",
-          "freshness": "as gossiped; the readers that apply `CapEntry::is_fresh` skip an entry older than three refresh intervals"
+          "freshness": "as gossiped; every reader skips an entry older than three refresh intervals (`CapEntry::is_fresh`, rule `kv.expiry`) — revision 3"
         }
       ],
       "outcomes": [
@@ -441,12 +441,12 @@
     },
     {
       "id": "kv.expiry",
-      "revision": 2,
+      "revision": 4,
       "subsystem": "mycelium::capability / mycelium-core::store",
       "responsibilities": [
         "propagation"
       ],
-      "trigger": "a read of a capability or requirement advertisement (resolve, watch, wiring, demand, coverage gaps, role concentration); the GC tick",
+      "trigger": "a read of a capability or requirement advertisement (resolve, watch, wiring, demand, coverage gaps, role concentration, the A2A routing and card, group eligibility and projection, the gateway's resolve, demand, shard and LLM lookups, the provider preflight, agent facts); the GC tick",
       "inputs": [
         {
           "source": "the LWW store and its HLC",
@@ -489,10 +489,16 @@
       "tests": [
         "cap_entry_freshness",
         "future_stamped_entry_is_quarantined_not_fresh",
-        "tombstone_gc_sweep_unpacks_hlc_timestamps"
+        "tombstone_gc_sweep_unpacks_hlc_timestamps",
+        "a_stale_provider_is_neither_routed_to_nor_listed_on_the_card",
+        "the_gateways_readers_skip_a_stale_advertisement_and_a_stale_requirement",
+        "a_stale_own_advertisement_is_not_served",
+        "a_stale_own_advertisement_is_not_projected_into_a_group",
+        "an_own_advertisement_stamped_ahead_is_still_served",
+        "a_node_whose_own_stamp_runs_ahead_is_still_eligible"
       ],
       "trace": "catalogue_only",
-      "summary": "No entry carries a TTL. A capability or requirement advertisement its writer stopped refreshing stays in the store until it is overwritten or tombstoned; the readers that apply `is_fresh` — resolve, watch, wiring, demand, coverage gaps and role concentration — skip it once it is older than three refresh intervals (or that far in the future). Three `cap/` readers do not yet: the A2A provider resolution and card, and the membership governor's eligibility, a known gap fixed by a separate PR. A tombstone is collected by the GC sweep once it is older than `default_ttl × propagation_window_secs × 10` seconds, on the wall clock, not the seam. A stale view is possible in between. The id predates this scope — freshness at the reader plus tombstone collection — and is kept because recorded traces and fault reports name it."
+      "summary": "No entry carries a TTL. A capability or requirement advertisement its writer stopped refreshing stays in the store until it is overwritten or tombstoned; every reader skips it once it is older than three refresh intervals (or that far in the future) — revision 3, which brought the A2A routing and card, the membership governor's eligibility, the gateway's lookups, the group projection and agent facts to it. A node judges its **own** entries on staleness only, at every reader of them — the provider preflight, the group projection, its own eligibility and its agent facts (revision 4) — so a clock that reads its own stamp as ahead neither refuses its own skill, drops it from a group, judges itself ineligible nor leaves it out of its facts; a peer's entry is judged both ways. The cost: an own entry stamped far ahead and persisted before a clock correction stays live until the wall clock catches up with its stamp. A tombstone is collected by the GC sweep once it is older than `default_ttl × propagation_window_secs × 10` seconds, on the wall clock, not the seam. A stale view is possible in between. The id predates this scope — freshness at the reader plus tombstone collection — and is kept because recorded traces and fault reports name it."
     },
     {
       "id": "kv.propagation",
@@ -565,7 +571,7 @@
     },
     {
       "id": "membership.governed",
-      "revision": 2,
+      "revision": 3,
       "subsystem": "mycelium::membership_governor",
       "responsibilities": [
         "response"
@@ -576,6 +582,11 @@
           "source": "the governed group's roster and floor (`grp/`, `sys/`), less the members this node has evicted (its peer table) — revision 2, adopter-surface X6",
           "scope": "the group as this node sees it",
           "freshness": "as gossiped; the confidence bound applies"
+        },
+        {
+          "source": "the eligible set: the nodes whose `cap/` advertisements match the group's filter — revision 3, fresh ones only (`CapEntry::is_fresh`), so a crashed node is not counted eligible; this node's own judged on staleness only (rule `kv.expiry`)",
+          "scope": "the fleet as this node sees it",
+          "freshness": "as gossiped; three refresh intervals"
         },
         {
           "source": "ViewConfidence (peers heard, staleness)",
@@ -625,7 +636,9 @@
       "tests": [
         "a_membership_decision_classifies_by_cost_not_by_verb",
         "a_stale_membership_intent_stops_declaring_a_floor",
-        "healthy_membership_in_bounds_does_not_trip"
+        "healthy_membership_in_bounds_does_not_trip",
+        "a_node_whose_advertisement_has_gone_stale_is_not_eligible",
+        "a_node_whose_own_stamp_runs_ahead_is_still_eligible"
       ],
       "trace": "instrumented",
       "summary": "This node rolls to join or leave a governed group against the intent's band — after spacing and settling, and (under an enforcing profile) only on a confident view."

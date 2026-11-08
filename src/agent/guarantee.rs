@@ -1000,7 +1000,12 @@ pub(crate) fn core_guarantees() -> Vec<GuaranteeDescriptor> {
               #[cfg(all(feature = "gateway", feature = "tls"))]
               {
                   if c.action_evaluator.get().is_none() { return Resolution::NotConfigured { missing: "with_action_evaluator (nothing decides, so nothing is recorded)" }; }
-                  if c.evidence_journal.get().is_some() { Resolution::Enforced } else { Resolution::NotConfigured { missing: "with_evidence_journal (the evaluator enforces and records nothing)" } }
+                  if c.evidence_journal.get().is_some() { return Resolution::Enforced; }
+                  // A node never started (the doctor) with `[authority]`: `start()` opens the declared journal before
+                  // the boundary, or refuses — so the journal is what this node would run with.
+                  #[cfg(feature = "compliance")]
+                  if c.declared_authority.get().is_some() && !c.started.load(std::sync::atomic::Ordering::Acquire) { return Resolution::Enforced; }
+                  Resolution::NotConfigured { missing: "with_evidence_journal (the evaluator enforces and records nothing)" }
               }
               #[cfg(not(all(feature = "gateway", feature = "tls")))]
               { let _ = c; Resolution::NotInBuild { feature: "gateway + tls" } }
@@ -1055,7 +1060,13 @@ pub(crate) fn core_guarantees() -> Vec<GuaranteeDescriptor> {
           },
           |c| {
               #[cfg(all(feature = "gateway", feature = "tls"))]
-              { match c.execution_authority.get() { Some(a) if a.has_durable_epochs() => Resolution::Enforced, _ => Resolution::NotConfigured { missing: "ExecutionAuthority::with_durable_epochs (epochs are in memory only)" } } }
+              {
+                  // A node never started (the doctor) with `[authority]`: `start()` opens the epochs under the
+                  // persistence directory before the boundary, or refuses.
+                  #[cfg(feature = "compliance")]
+                  if c.declared_authority.get().is_some() && !c.started.load(std::sync::atomic::Ordering::Acquire) { return Resolution::Enforced; }
+                  match c.execution_authority.get() { Some(a) if a.has_durable_epochs() => Resolution::Enforced, _ => Resolution::NotConfigured { missing: "ExecutionAuthority::with_durable_epochs (epochs are in memory only)" } }
+              }
               #[cfg(not(all(feature = "gateway", feature = "tls")))]
               { let _ = c; Resolution::NotInBuild { feature: "gateway + tls" } }
           }),

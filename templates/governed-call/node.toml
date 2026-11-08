@@ -6,6 +6,9 @@
 profile = "dev"
 bind_address = "127.0.0.1"
 bind_port = 7946            # node B runs on bind_port + 1 and bootstraps to this node
+# The issuer of this gateway's token principals (`token:governed-call/<name>`), fixed so the unit's rules can name
+# them; without it the issuer is the node's id and changes with its port.
+gateway_identity_issuer = "governed-call"
 
 # The node identity: provider-side enforcement is built with `tls`, and it is what makes a calling member's identity
 # authentic rather than asserted. Both nodes share

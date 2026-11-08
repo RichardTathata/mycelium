@@ -226,6 +226,15 @@ fn run_inner(config_path: Option<&Path>, attach: Option<Attach<'_>>) -> Doctor {
     if let Err(e) = agent.preflight() {
         d.refusal = Some(refusal("preflight", &e));
     }
+    // `[authority]` (identity-and-lifecycle I0): what `start()` would attach from the declaration, set here in memory —
+    // no journal or epochs opened, no task spawned; `preflight()` has checked the journal's path. The report reads the
+    // journal and the epochs as `start()` would leave them.
+    #[cfg(feature = "compliance")]
+    if let Some(planned) = agent.task_ctx.declared_authority.get().cloned()
+        && !agent.task_ctx.declared_attached.load(std::sync::atomic::Ordering::Acquire)
+    {
+        crate::agent::declared_authority::attach_for_report(&agent, &planned);
+    }
     let report = agent.guarantee_report();
     d.confinement = Some(agent.confinement_report());
     if d.refusal.is_none()
@@ -424,7 +433,7 @@ impl Doctor {
                 s,
                 "persistence: {} — {}{}",
                 p.base_path.display(),
-                if !p.exists { "absent (doctor creates nothing; start() would)" } else if !p.is_dir { "exists and is not a directory (start() would refuse)" } else { "exists" },
+                if !p.exists { "absent (doctor creates nothing it keeps — a probe file is created and removed to test writability; start() would)" } else if !p.is_dir { "exists and is not a directory (start() would refuse)" } else { "exists" },
                 match p.mode_readonly { Some(true) => ", read-only by its mode bits", _ => "" }
             );
         }
@@ -542,6 +551,78 @@ mod tests {
         assert_eq!(r.field, "gateway_scoped_tokens");
         assert!(r.reason.contains("`compliance` feature"), "{}", r.reason);
         assert!(d.report.is_some(), "the report is still taken after a preflight refusal");
+    }
+
+    /// Identity-and-lifecycle I0: over a configuration with `[authority]` the doctor reports what `start()` would
+    /// attach — the evaluator, the provider's enforcement, the execution authority with its durable epochs, and the
+    /// journal — and opens neither the journal nor the epochs. A journal path `start()` could not open is the refusal
+    /// `start()` would give (#733's review, finding 4). Seen failing first: with `attach` skipped in the doctor, every
+    /// `ae.*` and `prov.enforcement` read `not_configured`; without the path check, a directory as the journal read
+    /// `enforced`.
+    #[cfg(feature = "compliance")]
+    #[tokio::test]
+    async fn the_doctor_reports_what_authority_would_attach_and_opens_no_journal() {
+        let port = crate::test_util::alloc_port();
+        let dir = std::env::temp_dir().join(format!("mycelium-doctor-authority-{port}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("units")).unwrap();
+        std::fs::write(dir.join("units/purchaser.toml"), include_str!("../templates/governed-call/units/purchaser.toml")).unwrap();
+        let journal = dir.join("evidence.log");
+        let body = |journal: &std::path::Path| {
+            format!(
+                "bind_port = {port}\nhttp_port = {}\n[tls]\nauto_cert_dir = \"{}\"\n[persistence]\nbase_path = \"{}\"\n[authority]\ndeclarations = \"{}\"\nunit = \"purchaser\"\njournal = \"{}\"\n",
+                crate::test_util::alloc_port(),
+                dir.join("tls").display(),
+                dir.join("persist").display(),
+                dir.join("units").display(),
+                journal.display()
+            )
+        };
+        let path = write_cfg("authority", &body(&journal));
+        let d = run(Some(&path));
+        if std::env::var_os("GOSSIP_PROFILE").is_none() {
+            assert!(d.refusal.is_none(), "{:?}", d.refusal);
+        }
+        let report = d.report.clone().expect("a report");
+        for id in ["ae.authorised_at_seam", "ae.recorded_before_dispatch", "prov.enforcement", "authz.execution_authority", "authz.durable_epochs"] {
+            let e = report.entries.iter().find(|e| e.id == id).unwrap_or_else(|| panic!("{id} reported"));
+            assert!(matches!(e.resolution, Resolution::Enforced), "{id}: {:?}", e.resolution);
+        }
+        assert!(!journal.exists(), "the doctor opens no journal");
+        assert!(!dir.join("persist").exists(), "and no epochs: nothing under the persistence directory");
+        // A journal path that is a directory: `start()` could not open it, so the doctor says so.
+        std::fs::create_dir_all(dir.join("journal-dir")).unwrap();
+        let r = run(Some(&write_cfg("authority-dir", &body(&dir.join("journal-dir"))))).refusal.expect("an unopenable journal is refused");
+        assert!(r.reason.contains("is a directory"), "{}", r.reason);
+        // A journal that does not exist yet under a directory this process cannot write — `start()` could not create
+        // it, so neither does the doctor say it would (`readonly()` on the file alone saw nothing to refuse).
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let locked = dir.join("locked");
+            std::fs::create_dir_all(&locked).unwrap();
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
+            let r = run(Some(&write_cfg("authority-locked", &body(&locked.join("sub").join("evidence.log"))))).refusal.expect("an unwritable parent is refused");
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+            assert!(r.reason.contains("cannot hold it"), "{}", r.reason);
+        }
+        // An epochs journal that exists and does not read: `start()` would refuse to open it, so `authz.durable_epochs`
+        // is not reported enforced.
+        let node = std::fs::read_to_string(&path).unwrap();
+        let bound: u16 = node.lines().find_map(|l| l.strip_prefix("bind_port = ")).unwrap().trim().parse().unwrap();
+        let epochs = dir.join("persist").join(format!("127.0.0.1:{bound}")).join("authority").join("epochs.journal");
+        std::fs::create_dir_all(epochs.parent().unwrap()).unwrap();
+        let j = crate::agent::journal::Journal::open(&epochs, "mandate/epochs").unwrap();
+        j.append(b"not an epoch entry".to_vec()).await.unwrap();
+        drop(j);
+        let r = run(Some(&path)).refusal.expect("an unreadable epochs journal is refused");
+        assert!(r.reason.contains("epochs") && r.reason.contains("does not read"), "{}", r.reason);
+        std::fs::remove_dir_all(dir.join("persist")).unwrap();
+        // An undeclared unit is the refusal `start()` would give, at the same stage.
+        let bad = write_cfg("authority-bad", &std::fs::read_to_string(&path).unwrap().replace("unit = \"purchaser\"", "unit = \"nobody\""));
+        let r = run(Some(&bad)).refusal.expect("refused");
+        assert_eq!((r.stage, r.field.as_str()), ("preflight", "authority"), "{r:?}");
+        assert!(r.reason.contains("no unit in"), "{}", r.reason);
     }
 
     /// X1's third exit: a persistence directory that does not exist is reported, not created.

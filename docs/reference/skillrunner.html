@@ -1007,7 +1007,8 @@ cd examples/community &amp;&amp; ./start.sh
       <li>Check <code>bootstrap_peers</code> in the caller's config points at the skill's <code>bind_port</code></li>
       <li>Wait one TTL interval (default 60 s) for gossip to converge, or lower <code>ttl_secs</code></li>
     </ul>
-    <pre>RUST_LOG=mycelium=debug ./skillrunner --skill my.skill.toml<div class="lang-tag">sh</div></pre>
+    <p>skillrunner pins <code>skillrunner=info</code> and <code>mycelium=warn</code> over <code>RUST_LOG</code>, so <code>RUST_LOG=mycelium=debug</code> does not raise them; to watch the mesh, run the caller's node with <code>RUST_LOG=info,mycelium=debug</code>.</p>
+    <pre>RUST_LOG=info,mycelium=debug mycelium --config caller.toml<div class="lang-tag">sh</div></pre>
   </div>
 
   <div class="trouble">

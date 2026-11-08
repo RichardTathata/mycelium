@@ -15,7 +15,7 @@
 
 use mycelium_core::decision::{DecisionRecord, InputSnapshot, OutcomeKind, Provenance, ViewStatus};
 use crate::agent::{GossipAgent, TaskCtx};
-use crate::capability::{Capability, CapFilter, CapabilityGroupDef};
+use crate::capability::{CapFilter, CapabilityGroupDef};
 use crate::node_id::NodeId;
 use mycelium_core::kv_handle::KvHandle;
 use serde::{Deserialize, Serialize};
@@ -26,7 +26,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tracing::debug;
 
-use super::capability_ops::{is_cap_locality_key, parse_cap_key_or_warn, scan_prefix_kv};
+use super::capability_ops::scan_prefix_kv;
 
 /// `sys/govern/membership/{group}` — one fleet intent per governed group.
 pub const MEMBERSHIP_PREFIX: &str = "sys/govern/membership/";
@@ -116,21 +116,19 @@ pub fn decide(am_member: bool, is_drain: bool, join_p: f64, leave_p: f64, roll: 
     MembershipAction::Hold
 }
 
-/// Nodes whose gossiped capabilities match `filter` — the eligible set for a group.
-fn resolve_eligible(kv_state: &crate::store::KvState, filter: &CapFilter) -> HashSet<NodeId> {
-    let mut set = HashSet::new();
-    for (key, bytes) in scan_prefix_kv(kv_state, "cap/") {
-        if is_cap_locality_key(&key) {
-            continue;
-        }
-        let Some((node, _ns, _name)) = parse_cap_key_or_warn("cap/", &key) else { continue };
-        if let Some(cap) = Capability::decode(&bytes)
-            && filter.matches(&cap)
-        {
-            set.insert(node);
-        }
+/// The eligible set for a group, and whether this node is in it. A peer counts when its `cap/` advertisement matching
+/// `filter` is fresh (`CapEntry::is_fresh`): a crashed node's ad is never tombstoned, and counting it inflated
+/// `eligible_non_members` and lowered every live node's `join_p` (the review of #730). This node judges its own
+/// entries as it serves them — staleness only (`capability_ops::own_live_caps`) — so a node whose HLC runs ahead
+/// does not judge itself ineligible while it serves the skill (#734's confirm round). One `now_ms` per pass.
+fn eligible_set(kv_state: &crate::store::KvState, filter: &CapFilter, me: &NodeId, now_ms: u64) -> (HashSet<NodeId>, bool) {
+    let mut eligible: HashSet<NodeId> = super::capability_ops::resolve_filter_at(kv_state, filter, now_ms)
+        .into_iter().map(|(node, _)| node).filter(|node| node != me).collect();
+    let am = super::capability_ops::own_live_caps_at(kv_state, me, now_ms).iter().any(|c| filter.matches(c));
+    if am {
+        eligible.insert(me.clone());
     }
-    set
+    (eligible, am)
 }
 
 /// The members of `members` this node can count: itself, and every node in its peer table. A node it has evicted
@@ -212,6 +210,7 @@ fn converge(ctx: &Arc<TaskCtx>, kv: &KvHandle, spec: &ControlSpec, groups: &mut 
     let now_ms = mycelium_core::sim_seam::mono_now_ns() / 1_000_000;
     // The node's profile, read once per pass. `Legacy` — the default — consults nothing.
     let profile = Profile::from_u8(ctx.control_profile.load(Ordering::Relaxed));
+    let mut wall_now_ms: Option<u64> = None;
     for (key, _) in scan_prefix_kv(&ctx.kv_state, MEMBERSHIP_PREFIX) {
         let Some(intent) =
             super::intent::read_fresh_intent::<MembershipIntent>(kv, &key, me, MEMBERSHIP_INTENT_TTL_MS)
@@ -233,7 +232,9 @@ fn converge(ctx: &Arc<TaskCtx>, kv: &KvHandle, spec: &ControlSpec, groups: &mut 
         let Some(def) = kv.get(&format!("cap-group/{group}")).and_then(|b| CapabilityGroupDef::decode(&b))
         else { continue };
 
-        let eligible = resolve_eligible(&ctx.kv_state, &def.filter);
+        // The wall clock through the seam, read once per pass and only when a group is decided on.
+        let wall_now = *wall_now_ms.get_or_insert_with(super::capability_ops::now_ms);
+        let (eligible, am_eligible) = eligible_set(&ctx.kv_state, &def.filter, me, wall_now);
         // A member whose node this node has evicted is dark: its `grp/` entry still says member (nothing
         // re-asserts or withdraws it — a crash sends no departure), its node says nothing. Counted, it held the
         // floor with a node that was gone, and no survivor ever rolled to fill it (adopter-surface X6, found by
@@ -281,7 +282,6 @@ fn converge(ctx: &Arc<TaskCtx>, kv: &KvHandle, spec: &ControlSpec, groups: &mut 
             state.pending_join = None;
         }
 
-        let am_eligible = eligible.contains(me);
         let is_drain = intent.drain.iter().any(|d| d == me);
         let eligible_non_members = eligible.difference(&members).count();
 
@@ -413,6 +413,58 @@ impl GossipAgent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **A dead node is not eligible.** Its `cap/` entry is never tombstoned; it evaporates at the
+    /// reader (`CapEntry::is_fresh`, rule `kv.expiry`). `resolve_eligible` never asked, so a crashed
+    /// node stayed eligible indefinitely, inflating `eligible_non_members` and lowering every live
+    /// node's `join_p` (the review of #730).
+    #[test]
+    fn a_node_whose_advertisement_has_gone_stale_is_not_eligible() {
+        use crate::capability::{CapEntry, Capability};
+        use crate::framing::make_gossip_update_stamped;
+        use crate::store::{apply_and_notify, KvState};
+        let kv = KvState::new(0);
+        let writer = NodeId::new("127.0.0.1", 9999).unwrap();
+        let now = mycelium_core::sim_seam::wall_now_ms();
+        for (port, written_ms) in [(9001u16, now), (9002, now - 60_000)] {
+            let entry = CapEntry { capability: Capability::new("compute", "gpu"), refresh_interval_ms: 1_000 };
+            let key = format!("cap/127.0.0.1:{port}/compute/gpu");
+            apply_and_notify(&kv, &make_gossip_update_stamped(&writer, 5, std::sync::Arc::from(key.as_str()),
+                entry.encode(), false, crate::hlc::pack(written_ms, 0)));
+        }
+        let (eligible, _) = eligible_set(&kv, &CapFilter::new("compute", "gpu"), &writer, now);
+        assert_eq!(eligible, HashSet::from([NodeId::new("127.0.0.1", 9001).unwrap()]), "a stale node counted eligible");
+    }
+
+    /// **This node judges its own eligibility as it serves its own skill** (#734's confirm round, C): staleness
+    /// only. With its HLC ahead of its wall clock, its own advertisement reads as future-stamped to the symmetric
+    /// `is_fresh`, so it served the skill and judged itself ineligible. A peer's ad stamped that far ahead is still
+    /// quarantined; one this node stopped refreshing is still not eligible.
+    #[test]
+    fn a_node_whose_own_stamp_runs_ahead_is_still_eligible() {
+        use crate::capability::{CapEntry, Capability};
+        use crate::framing::make_gossip_update_stamped;
+        use crate::store::{apply_and_notify, KvState};
+        let kv = KvState::new(0);
+        let me = NodeId::new("127.0.0.1", 9001).unwrap();
+        let now = mycelium_core::sim_seam::wall_now_ms();
+        for (port, written_ms) in [(9001u16, now + 60_000), (9002, now + 60_000), (9003, now)] {
+            let entry = CapEntry { capability: Capability::new("compute", "gpu"), refresh_interval_ms: 1_000 };
+            let key = format!("cap/127.0.0.1:{port}/compute/gpu");
+            apply_and_notify(&kv, &make_gossip_update_stamped(&me, 5, std::sync::Arc::from(key.as_str()),
+                entry.encode(), false, crate::hlc::pack(written_ms, 0)));
+        }
+        let (eligible, am_eligible) = eligible_set(&kv, &CapFilter::new("compute", "gpu"), &me, now);
+        assert!(am_eligible, "this node judged itself ineligible with its own stamp ahead");
+        assert_eq!(eligible, HashSet::from([me.clone(), NodeId::new("127.0.0.1", 9003).unwrap()]), "a peer stamped ahead was counted");
+
+        let gone = KvState::new(0);
+        let entry = CapEntry { capability: Capability::new("compute", "gpu"), refresh_interval_ms: 1_000 };
+        apply_and_notify(&gone, &make_gossip_update_stamped(&me, 5, std::sync::Arc::from(format!("cap/{me}/compute/gpu").as_str()),
+            entry.encode(), false, crate::hlc::pack(now - 60_000, 0)));
+        let (eligible, am_eligible) = eligible_set(&gone, &CapFilter::new("compute", "gpu"), &me, now);
+        assert!(!am_eligible && eligible.is_empty(), "an own ad this node stopped refreshing counted eligible");
+    }
 
     /// **The class mapping is a tested fact** (item 4 PR 4a). A join into an empty group is a
     /// rescue; a join below `min` is a deficit fill; a leave over `max` is routine scale-down — the
