@@ -2528,7 +2528,7 @@ reads its gateway certificate and key, and its CA and node certificates, through
 with other sections skipped, PKCS#8, PKCS#1 and SEC1 keys by label, CRLF line endings, an encrypted key read as no key,
 a malformed section an error.
 
-## 84. A stem runs only the artifact kinds `[hosts].kinds` declares; `Provisioner` gained `restrict_kinds` (unreleased, review of #736, defect A)
+## 85. A stem runs only the artifact kinds `[hosts].kinds` declares; `Provisioner` gained `restrict_kinds` (unreleased, review of #736, defect A)
 
 Before, every stem registered the WASM-component runtime whatever its unit said: `kinds` decided only whether the
 blob runtime was added. A stem declaring `kinds = ["blob"]` therefore installed and ran a WASM component whenever a
