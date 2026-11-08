@@ -24,7 +24,7 @@ Schema `mycelium.rules/1` · 32 rules.
 | [`prov.health_pass`](#provhealth_pass) | Response | instrumented | A live install whose probe fails this round is withdrawn; restart ≡ provisioning brings it back. |
 | [`prov.install`](#provinstall) | Response | instrumented | Fetch, verify, place and host the artifact under an install token; a superseded token tears its install down rather than advertising it. |
 | [`prov.loadable`](#provloadable) | Authority | catalogue only | A proposed entry loads live only once a listed reviewer has accepted it; until then it may load into the shadow lane only (D20). |
-| [`prov.presence_floor`](#provpresence_floor) | Response | instrumented | Fewer live providers than the declared floor, as this node sees it, makes this node a candidate installer of the cheapest loadable entry that passes provenance and eligibility (rev 2; rev 1 chose the cheapest before checking, so a cheaper bad line any member gossiped stalled the floor). |
+| [`prov.presence_floor`](#provpresence_floor) | Response | instrumented | Fewer live providers than the declared floor, as this node sees it, makes this node a candidate installer of the cheapest loadable entry that passes provenance and eligibility (rev 3; earlier revisions chose the cheapest before checking, so a cheaper bad line any member gossiped stalled the floor). |
 | [`prov.probe`](#provprobe) | Response | instrumented | The probe gates the capability: a failing initial probe is an activation error (nothing advertised); a later failure flips the health flag the next health pass withdraws on. A confined re-probe re-resolves a profile whose declared path was replaced, every check repeated, and runs under the fresh one; only a refused re-resolution (`confinement_*`), or a path that changed under every attempt (`confinement_changed`), withdraws. Recorded under the install's token; a re-probe records only a change of verdict. |
 | [`prov.promotion`](#provpromotion) | Response | instrumented | A shadow install whose entry a listed reviewer has since accepted, or whose entry has left the catalogue, is withdrawn from the shadow lane (D20); it does not replace a live provider. |
 | [`prov.provenance`](#provprovenance) | Authority | catalogue only | An entry is a candidate only if a trusted publisher signed it; an empty trust list trusts everything, which the report says. |
@@ -379,9 +379,9 @@ A proposed entry loads live only once a listed reviewer has accepted it; until t
 
 ## `prov.presence_floor`
 
-rev 2 · `mycelium-wasm-host::provisioner` · Response · trace: instrumented
+rev 3 · `mycelium-wasm-host::provisioner` · Response · trace: instrumented
 
-Fewer live providers than the declared floor, as this node sees it, makes this node a candidate installer of the cheapest loadable entry that passes provenance and eligibility (rev 2; rev 1 chose the cheapest before checking, so a cheaper bad line any member gossiped stalled the floor).
+Fewer live providers than the declared floor, as this node sees it, makes this node a candidate installer of the cheapest loadable entry that passes provenance and eligibility (rev 3; earlier revisions chose the cheapest before checking, so a cheaper bad line any member gossiped stalled the floor).
 
 - **Trigger:** every provisioning round, per `[[presence]]` declaration
 - **Reads:**

@@ -64,10 +64,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   is unchanged. Upgrade note: `docs/guide/deprecations.md` §84.
 - **A cheaper bad catalogue line no longer stalls a presence floor** (an independent review of #736, defect B). The
   floor chose the cheapest loadable entry for its capability and only then checked provenance and eligibility, so a
-  smaller line — unsigned, signed by an untrusted key, or of a kind this node has no runtime for — gossiped under
-  `installable/` by any member won every round, was refused every round, and the valid entry was never reached. The
-  floor now takes the cheapest entry that passes provenance and eligibility, as the demand path already did
-  (`prov.presence_floor` revision 2). The shadow, promotion and demand paths iterate every entry and did not have
+  line no larger (ties included) — unsigned, signed by an untrusted key, of a kind this node has no runtime for, or naming
+  an artifact this node already hosts for something else — gossiped under `installable/` by any member won every round,
+  was refused every round, and the valid entry was never reached. The floor now keeps the trusted candidates, refuses
+  `already_hosted` only when one of those is reserved or live here, and takes the cheapest that passes eligibility, as
+  the demand path already did
+  (`prov.presence_floor` revision 3). The shadow, promotion and demand paths iterate every entry and did not have
   this shape.
 
 - **A bulk call made as soon as `bulk_serve` returns is served** (a flake: CI run 42371240189, the strict

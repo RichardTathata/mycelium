@@ -60,7 +60,7 @@ pub static RULES: &[RuleDescriptor] = &[
         summary: "A requirement with demanding nodes and no provider, as this node sees it, makes this node a candidate installer; an observed unmet requirement is not an instruction to install.",
     },
     RuleDescriptor {
-        id: "prov.presence_floor", revision: 2, subsystem: "mycelium-wasm-host::provisioner", responsibilities: &[Response],
+        id: "prov.presence_floor", revision: 3, subsystem: "mycelium-wasm-host::provisioner", responsibilities: &[Response],
         trigger: "every provisioning round, per `[[presence]]` declaration",
         inputs: &[DEMAND, HOSTED, CATALOG, UNIT],
         outcomes: &[
@@ -74,7 +74,7 @@ pub static RULES: &[RuleDescriptor] = &[
         depends_on: &["prov.provenance", "prov.loadable", "prov.eligible", "prov.self_election"],
         symbol: "provisioner::Provisioner::provision_round", docs: "docs/reference/unit-file.md",
         tests: &["the_stem_fleet_fills_a_presence_floor_and_reheals", "a_cheaper_bad_entry_does_not_stall_the_presence_floor"], trace: Instrumented,
-        summary: "Fewer live providers than the declared floor, as this node sees it, makes this node a candidate installer of the cheapest loadable entry that passes provenance and eligibility (rev 2; rev 1 chose the cheapest before checking, so a cheaper bad line any member gossiped stalled the floor).",
+        summary: "Fewer live providers than the declared floor, as this node sees it, makes this node a candidate installer of the cheapest loadable entry that passes provenance and eligibility (rev 3; earlier revisions chose the cheapest before checking, so a cheaper bad line any member gossiped stalled the floor).",
     },
     RuleDescriptor {
         id: "prov.shed", revision: 2, subsystem: "mycelium-wasm-host::provisioner", responsibilities: &[Response],

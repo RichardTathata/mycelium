@@ -1118,32 +1118,37 @@ impl Provisioner {
                 }
                 continue; // nothing loadable in the catalog provides it
             }
-            // One install per floor here at a time: any candidate reserved or live on this node answers it.
+            candidates.retain(|e| self.provenance_ok(e));
+            if candidates.is_empty() {
+                if let Some(t) = self.round_trace() {
+                    t.record("prov.presence_floor", OutcomeKind::Refusal, "provenance_rejected", target, inputs(), None);
+                }
+                continue; // nothing a trusted publisher signed provides it
+            }
+            // One install per floor here at a time: a trusted candidate reserved or live on this node
+            // answers it. Read after provenance, so a line nobody trusted — naming an artifact this node
+            // hosts for something else — cannot hold the floor at `already_hosted` either.
             if candidates.iter().any(|e| self.is_hosted(&e.artifact)) {
                 if let Some(t) = self.round_trace() {
                     t.record("prov.presence_floor", OutcomeKind::Refusal, "already_hosted", target, inputs(), None);
                 }
                 continue;
             }
-            candidates.retain(|e| self.provenance_ok(e));
             candidates.sort_by_key(|e| (e.size_bytes, e.est_install_secs));
             // Eligibility has side effects (counters, a `prov.eligible` record) and is evaluated once per
             // candidate tried, cheapest first, stopping at the first that passes.
             let mut chosen = None;
-            let mut any_tried = false;
             for e in candidates {
-                any_tried = true;
                 if self.eligible_traced(&e, &target) {
                     chosen = Some(e);
                     break;
                 }
             }
             let Some(entry) = chosen else {
-                let reason = if any_tried { "ineligible" } else { "provenance_rejected" };
                 if let Some(t) = self.round_trace() {
-                    t.record("prov.presence_floor", OutcomeKind::Refusal, reason, target, inputs(), None);
+                    t.record("prov.presence_floor", OutcomeKind::Refusal, "ineligible", target, inputs(), None);
                 }
-                continue; // fails policy
+                continue; // nothing trusted provides it in a form this node can host
             };
             if !self.self_elects_traced(&target) {
                 if let Some(t) = self.round_trace() {
@@ -1693,14 +1698,17 @@ mod tests {
     /// provenance and eligibility, so a smaller line for the same capability — unsigned, signed by a key
     /// this node does not trust, or of a kind it has no runtime for, gossiped under `installable/` by any
     /// member — won every round, was refused every round, and the valid entry was never reached. The
-    /// floor now picks the cheapest entry that passes both, as the demand path does. Seen failing first:
-    /// each case started nothing and recorded `provenance_rejected` or `ineligible`.
+    /// floor now picks the cheapest entry that passes both, as the demand path does. A line of the same
+    /// size (a tie) is the same case, and so is an untrusted line naming an artifact this node already
+    /// hosts for something else, which held the floor at `already_hosted`. Seen failing first: the
+    /// unsigned case started nothing and recorded `provenance_rejected`; the hosted-artifact case failed
+    /// again (`already_hosted`) against a first fix that read the hosted check before provenance.
     #[tokio::test]
     async fn a_cheaper_bad_entry_does_not_stall_the_presence_floor() {
         use ed25519_dalek::SigningKey;
         let trusted = SigningKey::from_bytes(&[42u8; 32]);
         let stranger = SigningKey::from_bytes(&[43u8; 32]);
-        for case in ["unsigned", "untrusted signer", "kind with no runtime"] {
+        for case in ["unsigned", "unsigned, same size", "untrusted signer", "kind with no runtime", "untrusted, naming a hosted artifact"] {
             // A node per case: a withdrawn install's tombstone need not have cleared the next case's view.
             let agent = live_agent().await;
             let host = Arc::new(WasmHost::new().expect("engine"));
@@ -1710,6 +1718,8 @@ mod tests {
             let cheap = InstallableEntry::new(Capability::new("text", "echo"), bad).with_cost(1, 1);
             let cheap = match case {
                 "unsigned" => cheap,
+                "unsigned, same size" => cheap.with_cost(ECHO_COMPONENT.len() as u64, 1),
+                "untrusted, naming a hosted artifact" => cheap.signed_by(&stranger),
                 "untrusted signer" => cheap.signed_by(&stranger),
                 _ => cheap.with_kind(ArtifactKind::Blob).signed_by(&trusted),
             };
@@ -1723,12 +1733,23 @@ mod tests {
             let mut prov = Provisioner::new(Arc::clone(&agent), host, catalog, Arc::new(source), 1.0);
             prov.require_provenance(vec![trusted.verifying_key().to_bytes()]);
             prov.supervise(CapFilter::new("text", "echo"), 1);
+            if case == "untrusted, naming a hosted artifact" {
+                // This node already holds `bad`, as something else (a reservation stands in for it).
+                prov.hosted.lock().unwrap().insert(bad, HostedState::Installing { token: 0, reserved: Default::default() });
+            }
             let sink = Arc::new(mycelium::decision::DecisionSink::default());
             prov.with_decision_trace(Arc::clone(&sink));
             assert_eq!(prov.provision_round(), 1, "{case}: the floor reaches the valid entry: {:?}",
                 sink.snapshot().iter().map(|r| (r.rule.clone(), r.reason.clone())).collect::<Vec<_>>());
-            wait_live(&prov, 1).await;
-            assert!(prov.is_hosted(&good) && !prov.is_hosted(&bad), "{case}: the valid entry is the one installed");
+            let held = usize::from(case == "untrusted, naming a hosted artifact");
+            for _ in 0..200 {
+                if prov.hosted_count() == 1 && prov.installing_count() == held {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            assert_eq!((prov.hosted_count(), prov.installing_count()), (1, held), "{case}: the valid entry went live");
+            assert!(prov.hosted_artifact_for(&CapFilter::new("text", "echo")) == Some(good), "{case}: the valid entry is the one installed");
             assert!(sink.snapshot().iter().any(|r| r.rule == "prov.presence_floor" && r.reason == "below_floor"), "{case}");
             agent.shutdown().await;
         }

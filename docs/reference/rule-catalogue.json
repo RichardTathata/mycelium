@@ -1189,7 +1189,7 @@
     },
     {
       "id": "prov.presence_floor",
-      "revision": 2,
+      "revision": 3,
       "subsystem": "mycelium-wasm-host::provisioner",
       "responsibilities": [
         "response"
@@ -1271,7 +1271,7 @@
         "a_cheaper_bad_entry_does_not_stall_the_presence_floor"
       ],
       "trace": "instrumented",
-      "summary": "Fewer live providers than the declared floor, as this node sees it, makes this node a candidate installer of the cheapest loadable entry that passes provenance and eligibility (rev 2; rev 1 chose the cheapest before checking, so a cheaper bad line any member gossiped stalled the floor)."
+      "summary": "Fewer live providers than the declared floor, as this node sees it, makes this node a candidate installer of the cheapest loadable entry that passes provenance and eligibility (rev 3; earlier revisions chose the cheapest before checking, so a cheaper bad line any member gossiped stalled the floor)."
     },
     {
       "id": "prov.probe",
