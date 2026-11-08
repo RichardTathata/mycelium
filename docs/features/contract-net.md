@@ -7,7 +7,8 @@ requirement with its terms and deadline; participants offer against it — a wil
 declarer closes the requirement at or after the deadline, naming every offer it holds, and awards it once, by a
 deterministic lowest-participant rule over the offers the close names; the awardee reports what happened, or that it
 does not know; and anyone may assess whether the requirement was met. An [award](../guide/00-concepts.md#award) is a
-receipt-bearing write, a second award is refused rather than written over the first, and offers, closes, awards and
+receipt-bearing write; a second award a node sees is refused rather than written over the first — between racing
+declarers that holds only on the linearizable commit; and offers, closes, awards and
 assessments are signed when their author holds a key — an unsigned one verifies as `false`, never true by absence. No
 component assigns another participant's obligation: an award only records an offer the participant made.
 
@@ -31,7 +32,8 @@ This feature is turned on in code, from the `mycelium-commitment` crate.
   resolver you supply — where a forged offer must not be a candidate.
 - [`commit_award_linearizable`](../../mycelium-commitment/src/lib.rs) where two declarers may race: a consensus round on
   the award's slot, so exactly one commits; [`commit_award_under_mandate`](../../mycelium-commitment/src/lib.rs) checks the
-  declarer's [mandate](mandates.md) before any write.
+  acceptor's [mandate](mandates.md) — the awarded participant's own, authorising `accept` at the requirement's
+  installed epoch — before any write, then commits linearizably.
 - `one_award_per_requirement_with_a_receipt_and_a_second_is_refused_not_overwritten`, in
   [`mycelium-commitment/src/lib.rs`](../../mycelium-commitment/src/lib.rs).
 
@@ -45,8 +47,10 @@ for by drivers, each awarded exactly once, reported, and assessed by a food-bank
 
 - No guarantee or rule id of its own: the award's durability is the rung its
   [durability receipt](durability-receipts.md) names, and no more.
-- **Not built:** a single award between racing declarers on the plain path — two declarers racing `award` can both
-  win; only the linearizable commit refuses the second; when an offer was really made — the declarer's close decides
+- **Not built:** a single award between racing declarers on the plain path — two declarers racing `award` both commit
+  and last-writer-wins keeps one; only the linearizable commit refuses the second; protection on the plain path from
+  forgery — any member can append a close or write an award, and the unverified readers (`close_of`, `award_of`) can be
+  steered by one; use the `_verified` path with the declarer's key pinned; when an offer was really made — the declarer's close decides
   which offers were in time, and `closed_at_ms` is its own claim; protection of the checked path from deletion — a
   member who deletes a named, signed offer removes it from the candidates; participant identity — a signature proves the
   key, not whose it is; exactly-once work, which is the destination's ([destination commit](destination-commit.md)).

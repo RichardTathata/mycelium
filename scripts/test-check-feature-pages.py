@@ -51,7 +51,8 @@ CASES = ['baseline', 'example-baseline',
          # (i) the page links its ids
          'concept-not-linked', 'guarantee-not-linked', 'crate-not-linked',
          # (j) the capability map and the front page list every page
-         'page-not-on-map', 'page-not-on-front-page', 'parser-guard-front-page']
+         'page-not-on-map', 'page-not-on-front-page', 'parser-guard-front-page',
+         'map-link-in-another-column', 'front-page-link-in-another-row']
 if sys.argv[1:] == ['--list']:
     for c in CASES:
         print(f'@@case-list@@ {SUITE}::{c}')
@@ -577,6 +578,15 @@ case('page-not-on-map')
 fails('no row lists the page skills.md', {'docs/capabilities.md': [('[skills](features/skills.md), ', '')]})
 case('page-not-on-front-page')
 fails('"The pages" has no row for skills.md', {'docs/features/README.md': [('| [Skills](skills.md) |', '| Skills |')]})
+case('map-link-in-another-column')  # a substring check passed this: the link is in the row, not where it lists pages
+fails('no row lists the page skills.md in its mechanisms column',
+      {'docs/capabilities.md': [('[skills](features/skills.md), ', ''),
+                                ('| [Chat](../examples/chat/README.md)', '| [skills](features/skills.md), [Chat](../examples/chat/README.md)')]})
+case('front-page-link-in-another-row')  # likewise: another row's description links the page
+fails('"The pages" has no row for skills.md',
+      {'docs/features/README.md': [('| [Skills](skills.md) |', '| Skills |'),
+                                   ('| [LLM prompt skills](llm-prompt-skills.md) | A model-backed',
+                                    '| [LLM prompt skills](llm-prompt-skills.md) | Beside [skills](skills.md), a model-backed')]})
 case('parser-guard-front-page')
 fails('no "## The pages" section', {'docs/features/README.md': [('\n## The pages\n', '\n## Pages\n')]})
 

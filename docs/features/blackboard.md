@@ -14,7 +14,8 @@ optional write-ahead log and failover with no coordinator.
 
 - **Use it when** agents should take up work by what it is — a surplus here, a deficit there — and each fact must be
   acted on by one of them.
-- **Not when** facts must expire: a fact lives until it is claimed and acked, so an undrained board grows without bound;
+- **Not when** facts must expire: a fact lives until it is claimed and acked, so an undrained board grows without bound
+  unless `BoardConfig::high_watermark` is set (by default it is not), which then refuses a `post` as `Backpressure`;
   and not when the work is a staged pipeline, which the [tuple space](tuple-space.md) fits better.
 
 ## Turn it on
@@ -29,8 +30,11 @@ This feature is turned on in code, from the `mycelium-blackboard` crate; its `ga
   [`release`](../../mycelium-blackboard/src/lib.rs), with a [`Predicate`](../../mycelium-blackboard/src/lib.rs) built
   from `eq` and `present`.
 - [`http_router`](../../mycelium-blackboard/src/http.rs) (`gateway`): the routes under `board:read` and `board:write`; a
-  raw route's `blackboard.{ns}.{op}` kind needs the family scope.
-- `claim_timeout_secs` (default 300) re-queues an in-flight claim; it is not eviction
+  raw route's `blackboard.{ns}.{op}` kind needs the family scope. Scopes are checked only where the node is built with
+  `compliance`: the crate depends on `mycelium` without default features, so the scope wall is your build's, and
+  without it any valid bearer reaches the routes ([what-is-proven](../operations/what-is-proven.md#companion-s-rpc-kind-needs-family)).
+- `high_watermark` (default none) refuses a `post` above that many available facts, counted in `BoardStats::rejected`;
+  `claim_timeout_secs` (default 300) re-queues an in-flight claim; neither is eviction
   ([companions § mycelium-blackboard](../operations/companions.md#mycelium-blackboard--shared-fact-pool)).
 - `two_claims_over_one_finite_fact_exactly_one_wins`, in [`mycelium-blackboard/src/store.rs`](../../mycelium-blackboard/src/store.rs).
 

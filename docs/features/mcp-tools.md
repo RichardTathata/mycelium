@@ -26,7 +26,9 @@ This feature is turned on in code; `/mcp` needs `gateway` and an `http_port`.
   [`register_mcp_tool_with_call`](../../src/agent/mcp_handle.rs) give the handler the verified caller or the whole call.
 - [`connect_mcp_server`](../../src/agent/mcp_handle.rs) (`gateway`): bridge an external MCP server's tools; its URL and
   every redirect are checked against the [egress allow-list](egress-allow-list.md).
-- `/mcp` under `mcp:invoke`, with an [action evaluator](action-authorisation.md) to decide which tools a caller may run.
+- `/mcp` under `mcp:invoke` — a scope checked only in a build with `compliance` (the published node has it); without it
+  any valid bearer reaches `/mcp` — with an [action evaluator](action-authorisation.md) to decide which tools a caller
+  may run.
 - `test_mcp_tools_call_round_trip`, in [`src/agent/http/http_tests.rs`](../../src/agent/http/http_tests.rs).
 
 ## See it work

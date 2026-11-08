@@ -2,12 +2,15 @@
 
 ## What it is
 
-The knowledge layer keeps what a fleet knows as signed, immutable records of four kinds — claims, observations,
+The knowledge layer keeps what a fleet knows as immutable records of four kinds — claims, observations,
 [assessments](../guide/00-concepts.md#assessment) and acceptance decisions — joined by six link kinds. A record's id is
-derived from its content and names its issuer, so there is no edit, only a further record. A reader resolves a
-question by its own policy: only assessments count as evidence, an issuer's own record never supports itself, two
-issuers in one control group are one voice, and a record whose issuer's key was revoked, or which was retracted,
-stops counting. Competing statements survive side by side — heads live in the gossip medium and records in an
+derived from its content and names its issuer, so there is no edit, only a further record. A record received from
+anyone else is verified on the way in (`put_signed`): its signature checked against a key from the reader's own view,
+never the record's. A reader resolves a question by its own policy: only assessments count as evidence, an issuer's
+own record never supports itself, two issuers in one control group are one voice, and a retracted record stops
+counting. Attribution — and a record dropping out when its issuer's key is revoked — holds for verified records; an
+unchecked one (stored with `put`) still counts under the default `ReaderPolicy` (`UncheckedRule::Count`) unless the
+reader sets `UncheckedRule::Exclude`. Competing statements survive side by side — heads live in the gossip medium and records in an
 authorised store, so a later write cannot erase an earlier one — and `Conflicted` is a real answer.
 
 ## When to use it, and when not
@@ -25,7 +28,10 @@ This feature is turned on in code, in a build with `tls` (`mycelium::knowledge` 
 - [`KnowledgeRecord`](../../src/knowledge.rs), with its [`RecordKind`](../../src/knowledge.rs) and
   [`LinkKind`](../../src/knowledge.rs).
 - [`classify`](../../src/knowledge/resolution.rs) with a [`ReaderPolicy`](../../src/knowledge/resolution.rs): a reader's
-  verdict on a question.
+  verdict on a question; set its `unchecked` to `Exclude`, a variant of [`UncheckedRule`](../../src/knowledge/resolution.rs), so that
+  only verified records count; nothing sets it for you.
+- `put_signed` on the [`KnowledgeStore`](../../src/knowledge/store.rs) or the `DurableKnowledgeStore` for any record
+  from another node; `put` keeps one unverified.
 - [`DurableKnowledgeStore`](../../src/knowledge/durable.rs): the records on the node-local journal; the semantic gate is
   [`src/knowledge/gate.rs`](../../src/knowledge/gate.rs).
 - [`observations`](../../mycelium-reason/src/knowledge.rs) (`mycelium-reason`, `knowledge`): trace events as observation
@@ -43,9 +49,10 @@ and a competing statement survives. CI runs it, and `make gate-knowledge` runs t
 ## What it guarantees, and what it does not
 
 - No guarantee or rule id of its own: the knowledge layer registers nothing in the
-  [guarantee catalogue](../reference/guarantee-catalogue.md); a record signed by a key revoked after it was stored stops
-  counting ([node identity](node-identity.md) for revocation).
-- **Not built:** evidence that resolving this way improves outcomes — a research question, not a deliverable;
+  [guarantee catalogue](../reference/guarantee-catalogue.md); a verified record whose key is revoked after it was stored
+  stops counting ([node identity](node-identity.md) for revocation).
+- **Not built:** attribution for records stored with `put` — the default reader policy counts them; evidence that
+  resolving this way improves outcomes — a research question, not a deliverable;
   protection against a dishonest issuer beyond attribution; last-writer-wins, deliberately
   ([guide 23 § What this does not establish](../guide/23-knowledge.md#what-this-does-not-establish)).
 - **Evidence:** the [what-is-proven](../operations/what-is-proven.md) ledger has no row for the knowledge layer; its CI

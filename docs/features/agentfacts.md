@@ -21,12 +21,13 @@ fails verification: detection, not prevention.
 ## Turn it on
 
 This feature is turned on in code, from the `mycelium-agentfacts` crate, on a node with a `tls` identity — without one
-the route answers `503`.
+`agent-facts.json` answers `503`; `domain.json` is served either way, listing the board's verified fields.
 
 - [`agent_facts_router`](../../mycelium-agentfacts/src/http.rs) with [`FactsOptions`](../../mycelium-agentfacts/src/lib.rs)
   (`endpoints`, `locality`, `ttl_secs`, an optional `revocation` head), mounted with `with_http_routes` before `start()`.
   The routes sit outside the `/gateway` scope wall: no token reaches them and none is needed.
-- [`publish_field`](../../mycelium-agentfacts/src/crdt.rs) to add a signed field to the domain board;
+- [`publish_field`](../../mycelium-agentfacts/src/crdt.rs) to add a signed field to the domain board — republish it within
+  `ttl_secs`, or it drops off the board as stale;
   [`read_verified_fields`](../../mycelium-agentfacts/src/crdt.rs) and [`domain_facts`](../../mycelium-agentfacts/src/crdt.rs)
   to read it verified.
 - On the fetching side, [`SignedFacts::verify`](../../mycelium-agentfacts/src/lib.rs); [`claim`](../../mycelium-agentfacts/src/knowledge.rs)

@@ -28,7 +28,9 @@ This feature is turned on in code, from the `mycelium-tuple-space` crate; its `g
   [`complete`](../../mycelium-tuple-space/src/lib.rs) and [`ack`](../../mycelium-tuple-space/src/lib.rs); keyed:
   [`put_keyed`](../../mycelium-tuple-space/src/lib.rs) and [`take_by_key`](../../mycelium-tuple-space/src/lib.rs).
 - [`http_router`](../../mycelium-tuple-space/src/http.rs) (`gateway`): the routes, under `tuple:read` and
-  `tuple:write`; a raw route's `tuple.{ns}.{op}` kind needs the family scope.
+  `tuple:write`; a raw route's `tuple.{ns}.{op}` kind needs the family scope. Scopes are checked only where the node is built with
+  `compliance`: the crate depends on `mycelium` without default features, so the scope wall is your build's, and
+  without it any valid bearer reaches the routes ([what-is-proven](../operations/what-is-proven.md#companion-s-rpc-kind-needs-family)).
 - Settings to size: `worker_timeout_secs` (default 300), `high_watermark` (500), `mirror_payload_limit` (1 MiB) and
   `cap_refresh` (10 s) ([companions § mycelium-tuple-space](../operations/companions.md#mycelium-tuple-space--staged-pull-pipelines)).
 - `rpc_roundtrip_two_nodes`, in [`mycelium-tuple-space/tests/rpc_roundtrip.rs`](../../mycelium-tuple-space/tests/rpc_roundtrip.rs).

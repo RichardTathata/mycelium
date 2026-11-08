@@ -30,12 +30,17 @@ every commit.
   (`Auto`, `Curator` or `Reader`), `cap_refresh` (2 s), and a store.
 - [`FsStore`](../../mycelium-wiki/src/fs.rs) or [`GitStore::open`](../../mycelium-wiki/src/git_store.rs)
   (`git-store`): put the store where it outlives any node.
-- [`GitMirror`](../../mycelium-wiki/src/sink.rs) (`git-mirror`): a best-effort projection, one commit per applied round,
-  its push checked against the egress allow-list.
-- [`ExecutionGateAuthority`](../../mycelium-wiki/src/execution.rs) (`execution-authority`): every commit and push
-  re-checks the curator's mandate window, epoch and revocation standing.
+- [`GitMirror`](../../mycelium-wiki/src/sink.rs) (`git-mirror`): a best-effort projection, one commit per applied round;
+  its push is checked against its own `GitMirrorConfig.egress`, not the node's list, and that is unset by default —
+  set it, or a non-local remote is not restricted.
+- [`ExecutionGateAuthority`](../../mycelium-wiki/src/execution.rs) (`execution-authority`), passed to the store as its
+  authority — `GitStoreConfig.authority`, or [`FsStore::with_authority`](../../mycelium-wiki/src/fs.rs): every commit
+  and push then re-checks the curator's mandate window, epoch and revocation standing. Built and not passed, it checks
+  nothing.
 - The routes `/gateway/wiki/read` and `query` under `wiki:read`, `propose` and the bulk `ingest` under `wiki:write`
-  (`gateway`, mounted with `with_http_routes`).
+  (`gateway`, mounted with `with_http_routes`). Scopes are checked only where the node is built with
+  `compliance`: the crate depends on `mycelium` without default features, so the scope wall is your build's, and
+  without it any valid bearer reaches the routes ([what-is-proven](../operations/what-is-proven.md#companion-s-rpc-kind-needs-family)).
 - `curator_elects_applies_and_fails_over_against_the_same_store`, in
   [`mycelium-wiki/tests/failover.rs`](../../mycelium-wiki/tests/failover.rs).
 

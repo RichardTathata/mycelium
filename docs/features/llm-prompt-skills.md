@@ -17,12 +17,15 @@ protected kind, so the gateway's LLM doors run the action preflight before a cal
 
 ## Turn it on
 
-This feature is turned on in code: build with `llm` (the published node has it).
+This feature is turned on in code: build with `llm`. The published node is built with it and can call a prompt skill
+another node hosts, over `/gateway/llm/call`, but it hosts none — its binary never registers one — so the hosting node
+is your own code.
 
 - [`register_prompt_skill`](../../src/agent/llm_handle.rs) with a `PromptTemplate` and a backend: the template is
   written, the `llm.invoke` receiver registered, and the capability advertised last; dropping the handle retracts it.
 - [`call_prompt_skill`](../../src/agent/llm_handle.rs) from any node; over HTTP, `POST /gateway/llm/call` under
-  `llm:invoke`.
+  `llm:invoke` — a scope checked only in a build with `compliance` (the published node has it); without it any valid
+  bearer reaches the route.
 - [`update_prompt`](../../src/agent/llm_handle.rs): replace the template; the next call reads it.
 - `OpenAiBackend::new` follows no redirect; build it `.with_egress(policy)` to gate its endpoint, or
   `.with_credentials(gate)` to have the node attach its key ([credentials at egress](credentials-at-egress.md)).

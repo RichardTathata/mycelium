@@ -112,7 +112,8 @@ pub trait WikiStore: Send + Sync {
     /// **Batch write of whole pages** (council-substrate P6.1), applied in slice order. `label` is
     /// provenance for stores that record it (a commit message fragment); others ignore it.
     ///
-    /// The default is the plain per-page loop — `FsStore`/`S3Store` semantics unchanged, and an
+    /// The default is the plain per-page loop — `FsStore` semantics unchanged (and any store's that keeps
+    /// the default), and an
     /// error may leave a prefix applied (each page that did apply is a complete page; a retry
     /// re-applies idempotently). A store with a cheaper or atomic batch primitive overrides it:
     /// `GitStore` lands the whole batch as **one commit** (the deployment's per-meeting boundary
@@ -152,7 +153,8 @@ pub trait WikiStore: Send + Sync {
     }
 
     /// **Bring this store's local view up to date with its shared backing** (council-substrate
-    /// P6.3). Default: no-op — `FsStore`/`S3Store` are inherently shared, so a promoted curator
+    /// P6.3). Default: no-op — a store on shared backing (`FsStore` on a shared mount; an object store,
+    /// were one built) is inherently shared, so a promoted curator
     /// already sees the truth. A store with node-local state (`GitStore`: a per-node clone)
     /// overrides it (fetch + adopt the remote head). The curator calls this **at promotion, before
     /// serving** — and refuses the curatorship on failure, because a knowingly-stale curator is

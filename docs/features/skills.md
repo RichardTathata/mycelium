@@ -5,10 +5,12 @@
 A [skill](../guide/00-concepts.md#skill) is a capability with a handler behind it, reached over the mesh as an RPC of
 kind `skill.invoke`. The `skillrunner` binary turns a `.skill.toml` manifest into one: a node that joins the mesh,
 advertises its capability, answers each invocation by running its prompt against an OpenAI-compatible model, and
-writes an audit record — into the node's signed, hash-chained trail in a build with `compliance` and `[tls]`, as a plain
-unsigned `audit/` entry otherwise. A skill can call other skills by name: the ones it lists in `tools` are resolved
+writes an audit record — into the node's signed, hash-chained trail in a build with `compliance` and `[tls]`; in a
+`compliance` build without `[tls]` the record is not written, only warned about; and as a plain unsigned `audit/` entry
+in a build without `compliance`. A skill can call other skills by name: the ones it lists in `tools` are resolved
 against live advertisements when it runs, never by address. `skill.invoke` is a protected kind, so a gateway's action
-evaluator, and a provider with enforcement on, decide each call.
+evaluator decides a call that comes through that gateway; `skillrunner` itself attaches no evaluator and no provider
+enforcement, so a call reaching it another way is not decided there.
 
 ## When to use it, and when not
 
@@ -43,8 +45,10 @@ regressions a live run once found.
 - No guarantee or rule id of its own: `skill.invoke` is protected, so its calls are
   [`ae.preflight`](../reference/rule-catalogue.md#aepreflight)'s at a gateway and
   [`provider.enforcement`](../reference/rule-catalogue.md#providerenforcement)'s at a provider that turns it on.
-- **Not built:** a published `skillrunner` binary; credentials at egress for its model — the endpoint is checked against
-  the egress allow-list, but the `api_key` sits in the manifest; long audit retention on its own — its records are
+- **Not built:** a published `skillrunner` binary; configuration beyond the manifest — `skillrunner` starts from
+  `GossipConfig::default()` and reads no `GOSSIP_*` overrides, and the manifest has no egress list, gateway token,
+  `http_addr` or evaluator, so its egress allows every host, its gateway and `/a2a` take no credential and listen on
+  the default loopback address only, and it runs no provider enforcement; credentials at egress for its model — the `api_key` sits in the manifest; long audit retention on its own — its records are
   ordinary KV entries, so retention needs an audit sink or an export ([audit](../operations/audit.md)).
 - **Evidence:** the [what-is-proven](../operations/what-is-proven.md) ledger has no row for skills on their own.
 

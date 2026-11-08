@@ -823,15 +823,30 @@ def check_indexes(root, reg, errors):
                 return ''
             nxt = text.find('\n## ', start + 1)
             text = text[start:nxt if nxt >= 0 else len(text)]
-        return '\n'.join(line for line in text.splitlines() if line.startswith('| '))
-    cap_map = table_text('docs/capabilities.md')
-    front = table_text(f'{FEATURES}/README.md', '## The pages')
+        return [line for line in text.splitlines() if line.startswith('| ')]
+
+    def column(rows, n):
+        """The n-th cell of each row (a `|` inside a code span does not split it)."""
+        cells = []
+        for line in rows:
+            spans = re.findall(r'`[^`\n]*`', line)
+            masked = re.sub(r'`[^`\n]*`', '\0', line.strip().strip('|'))
+            parts = masked.split('|')
+            it = iter(spans)
+            parts = [re.sub('\0', lambda _: next(it), part) for part in parts]
+            if len(parts) > n:
+                cells.append(parts[n])
+        return cells
+    # The map lists a capability's pages in its mechanisms column (the second); the front page names one page per row
+    # in its first. A link elsewhere in a row — another row's description, a starting point — does not list the page.
+    cap_map = '\n'.join(column(table_text('docs/capabilities.md'), 1))
+    front = column(table_text(f'{FEATURES}/README.md', '## The pages'), 0)
     for feature in real_pages(reg):
         page = feature['page']
         if f'(features/{page})' not in cap_map:
-            errors.append(f'docs/capabilities.md: no row lists the page {page}: add it to the row of its capability')
-        if f']({page})' not in front:
-            errors.append(f'{FEATURES}/README.md: "The pages" has no row for {page}')
+            errors.append(f'docs/capabilities.md: no row lists the page {page} in its mechanisms column: add it to the row of its capability')
+        if not any(re.fullmatch(rf'\s*\[[^\]]+\]\({re.escape(page)}\)\s*', cell) for cell in front):
+            errors.append(f'{FEATURES}/README.md: "The pages" has no row for {page} (its first cell the page\'s link)')
 
 
 def check(root):

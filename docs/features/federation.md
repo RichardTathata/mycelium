@@ -7,7 +7,8 @@ without merging: a partner's nodes never enter your membership, your `cap/`, `gr
 your anti-entropy or a quorum, and there is no `federation/` key prefix — a CI sweep enforces its absence. Each side
 holds a bilateral trust bundle naming the other's key. The provider's federation edge publishes a signed catalogue
 filtered per partner — what that partner may see is what it is granted — and authorises each call on `/a2a` against
-its policy, with a credential bound to the caller, the export and the body as received. The consumer's
+its policy, with a credential bound to the caller and the export — and to the body as received only where the
+provider's `CallPolicy::require_body_binding` is set, which it is not by default. The consumer's
 `FederationClient` fetches the catalogue, meters its slots per partner, and turns a silent gateway into
 `DeliveryUnknown`, or a failover where the export is repeatable.
 
@@ -23,16 +24,20 @@ its policy, with a credential bound to the caller, the export and the body as re
 This feature is turned on in code: the provider side needs `tls` and `a2a`, the consumer side `gateway` and `tls`. The
 published node mounts neither `/a2a` nor an edge.
 
-- `domain_profile = DomainProfile::Enforced` (or `GOSSIP_DOMAIN_PROFILE=enforced`) on every node of a federating
-  domain: `validate()` then requires TLS.
+- [`domain_profile`](../reference/configuration.md#domain_profile) `= DomainProfile::Enforced` (or
+  `GOSSIP_DOMAIN_PROFILE=enforced`) on every node of a federating domain: `validate()` then requires
+  [`tls`](../reference/configuration.md#tls) and refuses
+  [`swim_failure_detector`](../reference/configuration.md#swim_failure_detector), which is on by default — set it
+  `false`, or the node does not start.
 - [`FederationEdge::new`](../../src/federation/edge.rs) with this domain, its exports (A2A skill ids), a `DomainPolicy`,
   a `TrustBundle` and a `CallPolicy`; `.with_signing_key` to sign the catalogue; then `with_a2a().with_federation_edge(edge)`
-  before `start()`. `CallPolicy::max_in_flight_per_partner` caps a partner's concurrent calls; `require_body_binding`
-  refuses a credential that does not bind the body.
+  before `start()`. `CallPolicy::max_in_flight_per_partner` caps a partner's concurrent calls; set
+  `require_body_binding` (default `false`) to refuse a credential that does not bind the body.
 - [`FederationClient::new`](../../src/federation/client.rs) on the consumer, with `.with_partner_key` to refuse an
   unsigned or misaddressed catalogue and `.with_tls_pins` to refuse an endpoint that is not the partner's.
-- `with_federation_clients` exposes the client to SDKs under `federation:read` and `federation:invoke`; the credential
-  names the local caller, never the node.
+- `with_federation_clients` exposes the client to SDKs under `federation:read` and `federation:invoke` — scopes checked
+  only in a build with `compliance`; without it any valid bearer reaches those routes. The credential names the local
+  caller, never the node.
 - To have `start()` refuse a node whose side of the edge is loose, run it under the
   [multi-domain profile](multi-domain-profile.md).
 - `three_domains_compose_without_trust_composing`, in [`src/lib_tests.rs`](../../src/lib_tests.rs).
