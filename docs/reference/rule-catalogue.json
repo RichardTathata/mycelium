@@ -1199,7 +1199,7 @@
     },
     {
       "id": "prov.presence_floor",
-      "revision": 1,
+      "revision": 2,
       "subsystem": "mycelium-wasm-host::provisioner",
       "responsibilities": [
         "response"
@@ -1246,7 +1246,8 @@
             "already_hosted",
             "provenance_rejected",
             "ineligible",
-            "no_loadable_candidate"
+            "no_loadable_candidate",
+            "rights_refused"
           ]
         },
         {
@@ -1365,7 +1366,7 @@
     },
     {
       "id": "prov.promotion",
-      "revision": 1,
+      "revision": 2,
       "subsystem": "mycelium-wasm-host::provisioner",
       "responsibilities": [
         "response"
@@ -1398,13 +1399,12 @@
         {
           "kind": "no_action",
           "reasons": [
-            "still_proposed",
-            "no_shadow_installs"
+            "still_proposed"
           ]
         }
       ],
       "effects": [
-        "withdraw() of the `{name}.shadow` install once the entry is accepted, so the live rule reinstalls it"
+        "withdraw() of the `{name}.shadow` install once the entry is accepted or has left the catalogue (both recorded `accepted_withdraw_shadow`); the accepted entry is installed live only where the demand pass finds demand unmet"
       ],
       "guards": [
         "provenance"
@@ -1422,11 +1422,11 @@
         "a_proposed_entry_loads_only_into_the_shadow_lane_until_a_listed_reviewer_accepts_it"
       ],
       "trace": "instrumented",
-      "summary": "A shadow install whose entry a listed reviewer has since accepted is withdrawn from the shadow lane (D20)."
+      "summary": "A shadow install whose entry a listed reviewer has since accepted, or whose entry has left the catalogue, is withdrawn from the shadow lane (D20); it does not replace a live provider."
     },
     {
       "id": "prov.provenance",
-      "revision": 1,
+      "revision": 2,
       "subsystem": "mycelium-wasm-host::provisioner",
       "responsibilities": [
         "authority"
@@ -1455,8 +1455,7 @@
         {
           "kind": "refusal",
           "reasons": [
-            "signature_invalid",
-            "publisher_untrusted"
+            "not_signed_by_trusted_publisher"
           ]
         }
       ],
@@ -1481,7 +1480,7 @@
     },
     {
       "id": "prov.rights_admission",
-      "revision": 1,
+      "revision": 2,
       "subsystem": "mycelium-wasm-host::provisioner",
       "responsibilities": [
         "authority"
@@ -1501,27 +1500,14 @@
       ],
       "outcomes": [
         {
-          "kind": "action",
-          "reasons": [
-            "admitted"
-          ]
-        },
-        {
           "kind": "refusal",
           "reasons": [
             "allocation_exhausted"
           ]
-        },
-        {
-          "kind": "no_action",
-          "reasons": [
-            "would_refuse_shadow_mode",
-            "no_rights_configured"
-          ]
         }
       ],
       "effects": [
-        "the ledger's admit record and published head",
+        "the ledger's rejection record and published head",
         "`mycelium_artifact_installs_refused_by_rights_total`"
       ],
       "guards": [
@@ -1539,7 +1525,7 @@
         "an_install_is_refused_and_recorded_when_the_node_holds_no_rights"
       ],
       "trace": "instrumented",
-      "summary": "An install takes a right from this node's allocation first; under the enforcing profile a node with none left refuses, and records that it did."
+      "summary": "An install takes a right from this node's allocation first; under `EnforceAllocated` a node with none left, or whose ledger is busy at that instant, refuses and records `allocation_exhausted`; under any other profile it admits, counts what it would have refused, and records no decision. An admission is not recorded."
     },
     {
       "id": "prov.self_election",
@@ -1711,7 +1697,7 @@
     },
     {
       "id": "provider.enforcement",
-      "revision": 2,
+      "revision": 3,
       "subsystem": "mycelium::agent::provider_enforcement",
       "responsibilities": [
         "authority"
@@ -1743,7 +1729,8 @@
             "resource_unnamed",
             "resource_not_here",
             "resource_not_served",
-            "at_capacity"
+            "at_capacity",
+            "mandate_lapsed_before_run"
           ]
         },
         {
@@ -1767,10 +1754,12 @@
       "symbol": "provider_enforcement::check",
       "docs": "docs/guide/20-authorising-actions.md",
       "tests": [
-        "test_c7_the_bypass_matrix_no_door_runs_revoked_work"
+        "test_c7_the_bypass_matrix_no_door_runs_revoked_work",
+        "a_grant_revoked_between_the_preflight_and_the_registration_refuses_the_call",
+        "a_permit_the_cohort_budget_refuses_is_recorded_as_nothing_ran"
       ],
       "trace": "catalogue_only",
-      "summary": "Authority where the work happens: a protected call is checked at the provider whichever door it came through; with enforcement on and no evaluator it is refused (`no_evaluator`); with it off no authority is checked, though an attached cohort budget still verifies the caller context and admits by cohort (`caller_context_refused`, `at_capacity`)."
+      "summary": "Authority where the work happens: a protected call is checked at the provider whichever door it came through; with enforcement on and no evaluator it is refused (`no_evaluator`); with it off no authority is checked, though an attached cohort budget still verifies the caller context and admits by cohort (`caller_context_refused`, `at_capacity`). `mandate_lapsed_before_run` is the wire `detail` of a refusal whose reason is `authority_not_established`: a permit decided on an established mandate whose re-assessment at registration no longer finds it established."
     },
     {
       "id": "sched.missed",

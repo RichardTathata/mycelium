@@ -255,7 +255,7 @@ pub(crate) async fn check(ctx: &Arc<TaskCtx>, req: &RpcRequest, already_verified
         None => (gateway_caller::node_principal(req.sender()), Vec::new(), None, None),
     };
     if !enforcing {
-        return Checked::Done(admit_after(ctx, &principal, None));
+        return Checked::Done(admit_after(ctx, &principal, None).await);
     }
     let me = ctx.node_id.to_string();
     let payload = req.payload();
@@ -273,18 +273,44 @@ pub(crate) async fn check(ctx: &Arc<TaskCtx>, req: &RpcRequest, already_verified
     let params = if meta.is_empty() { Value::Null } else { json!({ "_meta": meta }) };
     let decided =
         super::http::ae_decide(ctx, Some(&resolved), &operation, &resource, &arguments, &params, ENFORCEMENT_POINT_PROVIDER, None).await;
-    let call = AdmittedCall { principal, mandate, operation, resource, arguments };
+    let call = AdmittedCall { principal, mandate, operation, resource, arguments, established_at_preflight: false, permit: None };
     match decided {
-        super::http::Decided::Done(p) => Checked::Done(refusal_of(p).and_then(|()| admit_after(ctx, &call.principal, Some(&call)))),
+        super::http::Decided::Done(p) => Checked::Done(after_preflight(ctx, call, p).await),
         super::http::Decided::Settle(settling) if settling.will_claim() => {
             let ctx = Arc::clone(ctx);
-            Checked::Waiting(Box::pin(async move {
-                refusal_of(settling.finish().await)?;
-                admit_after(&ctx, &call.principal, Some(&call))
-            }))
+            Checked::Waiting(Box::pin(async move { after_preflight(&ctx, call, settling.finish().await).await }))
         }
-        super::http::Decided::Settle(settling) => {
-            Checked::Done(refusal_of(settling.finish().await).and_then(|()| admit_after(ctx, &call.principal, Some(&call))))
+        super::http::Decided::Settle(settling) => Checked::Done(after_preflight(ctx, call, settling.finish().await).await),
+    }
+}
+
+/// The preflight has decided: a refusal is the provider's; a permit goes on to [`admit_after`], carrying whether it was
+/// decided on an established mandate and the permit itself (its record is the one an execution record cites).
+async fn after_preflight(ctx: &Arc<TaskCtx>, mut call: AdmittedCall, p: super::http::Preflight) -> Result<Admission, ProviderRefusal> {
+    call.established_at_preflight = refusal_of(&p)?;
+    call.permit = Some(p);
+    #[cfg(test)]
+    test_hooks::before_admit_after(ctx).await;
+    admit_after(ctx, &call.principal, Some(&call)).await
+}
+
+/// Test hook: hold a call between its preflight and [`admit_after`], so a test can land a revocation in the window.
+#[cfg(test)]
+pub(crate) mod test_hooks {
+    use std::sync::Arc;
+
+    /// `(reached, resume)`: `reached` is notified when a call arrives at the window, which then waits for `resume`.
+    pub(crate) type Pause = (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>);
+
+    /// Per node, one call.
+    pub(crate) static PAUSE: std::sync::LazyLock<papaya::HashMap<String, Pause>> =
+        std::sync::LazyLock::new(papaya::HashMap::new);
+
+    pub(super) async fn before_admit_after(ctx: &super::TaskCtx) {
+        let taken = PAUSE.pin().remove(&ctx.node_id.to_string()).cloned();
+        if let Some((reached, resume)) = taken {
+            reached.notify_one();
+            resume.notified().await;
         }
     }
 }
@@ -296,10 +322,15 @@ struct AdmittedCall {
     operation: String,
     resource: String,
     arguments: Value,
+    /// The preflight's permit was decided on this call's mandate found **established** (`Preflight::Proceed`'s
+    /// `mandate_established`), so a re-assessment that no longer finds it established refuses the call.
+    established_at_preflight: bool,
+    /// The preflight's permit, once decided: what an execution record for this call is derived from.
+    permit: Option<super::http::Preflight>,
 }
 
-/// A preflight's refusal as the provider's.
-fn refusal_of(p: super::http::Preflight) -> Result<(), ProviderRefusal> {
+/// A preflight's refusal as the provider's; on admission, whether the permit was decided on an established mandate.
+fn refusal_of(p: &super::http::Preflight) -> Result<bool, ProviderRefusal> {
     match p {
         super::http::Preflight::Refuse(refusal) => Err(ProviderRefusal {
             reason: refusal.reason().to_string(),
@@ -307,19 +338,25 @@ fn refusal_of(p: super::http::Preflight) -> Result<(), ProviderRefusal> {
             code: refusal.json_rpc_code(),
             data: refusal.error_data(),
         }),
-        // `Inert` cannot happen here (an evaluator is attached), and `Proceed` is admission.
-        _ => Ok(()),
+        super::http::Preflight::Proceed { mandate_established, .. } => Ok(*mandate_established),
+        // `Inert` cannot happen here (an evaluator is attached).
+        super::http::Preflight::Inert => Ok(false),
     }
 }
 
 /// After the policy admitted the call (or with enforcement off): the running-work registration and the cohort slot.
-fn admit_after(ctx: &Arc<TaskCtx>, principal: &str, call: Option<&AdmittedCall>) -> Result<Admission, ProviderRefusal> {
+async fn admit_after(ctx: &Arc<TaskCtx>, principal: &str, call: Option<&AdmittedCall>) -> Result<Admission, ProviderRefusal> {
     let mut work = None;
     // C10: work acting under an **established** mandate is registered as running, so the
     // authority's sweep can stop it if the mandate lapses while it runs. Asking the authority
     // again duplicates one assessment the preflight made; the evidence record does not carry
     // the binding, and registering work under a mandate that is not established would cancel
     // work the policy admitted without one.
+    //
+    // But a permit decided **on** an established mandate (`established_at_preflight`) is not one the policy
+    // admitted without it: if the mandate is no longer established here — a revocation that landed between the
+    // preflight and this re-assessment — the call is refused, not run unregistered where no sweep could stop it.
+    let mut lapsed: Option<String> = call.filter(|c| c.established_at_preflight).map(|_| "the mandate could not be re-assessed".to_string());
     if let Some(call) = call
         && let (Some(m), Some(authority)) = (&call.mandate, ctx.execution_authority.get())
         && let Ok(presented) = serde_json::from_value::<super::gateway_authority::PresentedMandate>(m.clone())
@@ -328,7 +365,16 @@ fn admit_after(ctx: &Arc<TaskCtx>, principal: &str, call: Option<&AdmittedCall>)
         let now = ctx.hlc.decision_now_ms();
         super::gateway_authority::feed_grant_checkpoint(ctx, authority, &presented.grant.mandate, now);
         let assessed = authority.assess(principal, &call.operation, &call.resource, &digest, Some(&presented), now, &super::gateway_member_keys(ctx));
-        if assessed.binding.is_some_and(|b| b.state == super::action_evaluator::MandateState::Established) {
+        let state = assessed.binding.map(|b| b.state);
+        if let Some(why) = lapsed.as_mut() {
+            *why = match &state {
+                Some(super::action_evaluator::MandateState::Established) => String::new(),
+                Some(super::action_evaluator::MandateState::Refused(r)) => format!("refused: {r}"),
+                Some(super::action_evaluator::MandateState::Unknown(w)) => format!("not established: {w}"),
+                None => "no longer found".to_string(),
+            };
+        }
+        if state == Some(super::action_evaluator::MandateState::Established) {
             let g = &presented.grant.mandate;
             let clock_ctx = Arc::clone(ctx);
             work = Some(authority.begin(
@@ -341,14 +387,45 @@ fn admit_after(ctx: &Arc<TaskCtx>, principal: &str, call: Option<&AdmittedCall>)
             ));
         }
     }
+    if let Some(why) = lapsed.filter(|w| !w.is_empty()) {
+        #[cfg(feature = "metrics")]
+        metrics::counter!("mycelium_provider_mandate_lapsed_total").increment(1);
+        // The permit's record says `Attempted`; this one, citing the same attempt, says nothing ran.
+        if let Some(permit) = call.and_then(|c| c.permit.as_ref()) {
+            super::http::ae_record_execution(ctx, permit, super::action_evaluator::Execution::None).await;
+        }
+        // Classified as *authority not established* — the family a revoked mandate refused at the preflight is in, so a
+        // client reads the same revocation the same way whichever side of the preflight it landed on; `detail` names it.
+        return Err(ProviderRefusal {
+            reason: "authority_not_established".into(),
+            message: format!("authority not established: the call's mandate was established at the provider's preflight and is no longer ({why}); nothing ran (mandate_lapsed_before_run)"),
+            code: -32031,
+            data: json!({ "reason": "authority_not_established", "detail": "mandate_lapsed_before_run", "found": why }),
+        });
+    }
 
     // C4: a place in every cohort the verified principal belongs to, or a refusal. Taken only after
     // the policy admitted the call, so a refused call never holds budget.
     let slot = match ctx.cohort_budget.get() {
-        Some(b) => Some(b.admit(principal, ctx.hlc.decision_now_ms())?),
+        Some(b) => match b.admit(principal, ctx.hlc.decision_now_ms()) {
+            Ok(slot) => Some(slot),
+            Err(refusal) => {
+                // After a permit, the permit's record says `Attempted`; this one says nothing ran.
+                if let Some(permit) = call.and_then(|c| c.permit.as_ref()) {
+                    super::http::ae_record_execution(ctx, permit, super::action_evaluator::Execution::None).await;
+                }
+                return Err(refusal);
+            }
+        },
         None => None,
     };
     Ok(Admission { _slot: slot, work })
+}
+
+/// Test hook: take one place in the cohort budget for `principal`, as an in-flight call would (`grant_tests`).
+#[cfg(all(test, feature = "compliance"))]
+pub(crate) fn test_hold_place(ctx: &TaskCtx, principal: &str) -> Option<CohortSlot> {
+    ctx.cohort_budget.get()?.admit(principal, ctx.hlc.decision_now_ms()).ok()
 }
 
 /// How many deferred checks a serve loop holds at once (#642's review, N2). Full, it stops draining its channel, so

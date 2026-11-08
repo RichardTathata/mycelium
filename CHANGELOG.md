@@ -71,14 +71,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   clock that reads its own stamp as ahead does not refuse its own skill, drop it from a group, judge itself
   ineligible or leave it out of its facts; a peer's entry is judged both ways. The cost, stated in `kv.expiry`: an own
   entry stamped far ahead and persisted before a clock correction stays live until the wall clock catches up. New:
-  `CapabilityHandle::own_advertised()`, that reading for a companion (agent facts uses it). `advertises` reads its one
+  `CapabilitiesHandle::own_advertised()`, that reading for a companion (agent facts uses it). `advertises` reads its one
   key rather than scanning the fleet's. The new readers add no clock read a recording lacks where they can: the group
   projection judges its own entries with the one wall reading its pass already took (for the membership intents), an
   own-entry check reads the clock only when there is an entry, and the governor reads it once per pass, on its timer
   — so the checked-in replay corpus (`y2-schedule-run`, the faults recordings) replays as recorded and was not
   re-recorded. The first form read the clock again in every group-projection pass, an event-driven task, which
   diverged `schedule_replay` at its eighth choice and, under load, `decision_trace_replay`. Rules `kv.expiry` (revision 4),
-  `cap.match` and `membership.governed` (revision 3). No API change; a caller sees
+  `cap.match` and `membership.governed` (revision 3). One additive method (`own_advertised`), no other API change; a caller sees
   fewer providers, never more, except `/gateway/demand`'s group contributors. Not changed: an advertisement with a
   refresh interval of 0, possible through the Rust API, reads as stale to every reader at once.
 
@@ -91,6 +91,24 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `skillrunner=info` and `mycelium=warn` over `RUST_LOG`, so `RUST_LOG` changes only its other targets; its reference
   page's troubleshooting example said otherwise and is corrected.) `mycelium-wasm-host`'s optional
   `tracing-subscriber` gains its `env-filter` feature.
+
+- **A provider refuses a call whose mandate was revoked between its preflight and its registration** (the
+  check-then-act window at the provider, `docs/design/authority-at-execution.md` §9). With provider enforcement on,
+  `provider_enforcement::admit_after` re-assesses a presented mandate after the preflight has permitted, to register the
+  work with the execution authority so its sweep can stop it. A revocation that landed between the two made that
+  re-assessment not established, and the call then ran **unregistered**: the revocation was already known at this
+  node, and no sweep could stop the work. Now a permit decided on a mandate the preflight found established
+  (`Preflight::Proceed` carries `mandate_established`) is refused when the re-assessment no longer finds it established,
+  and the handler does not run: *authority not established* (JSON-RPC `-32031`, `data.reason`
+  `authority_not_established`, as a revocation refused at the preflight is, so both SDKs classify it alike) with
+  `data.detail` `mandate_lapsed_before_run`; the provider's evidence journal records that nothing ran
+  (`Execution::None`) beside the permit, as it now does after a permit the cohort budget refuses
+  (`at_capacity`). A call the policy admitted **without** an established mandate is unchanged
+  (registering it would cancel work the policy admitted without one); the provider has no shadow rung. Under a seat
+  claim the window this closes can be a consensus round long. The window is narrower, not gone: a revocation after the
+  registration is the sweep's, as before. `a_grant_revoked_between_the_preflight_and_the_registration_refuses_the_call` holds the call in
+  the window with a test hook; seen failing with the refusal removed (the tool ran). Upgrade note:
+  `docs/guide/deprecations.md` §84.
 
 - **A bulk call made as soon as `bulk_serve` returns is served** (a flake: CI run 42371240189, the strict
   `compliance,a2a` lib run, `a_bulk_call_completes_between_two_plaintext_gateways` — `Err(Timeout)`). `bulk_serve`
@@ -214,6 +232,15 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Feature pages for discovery, signals and coordination** (F3, third of five PRs): gossip KV, the signal mesh,
   capability discovery, the mailbox, groups and governed membership, opacity, intents, adaptive stability, the
   guarantee report and profiles, the rule catalogue and the decision trace, and metrics and tracing.
+- **Feature pages for acquiring and adapting capabilities** (F3, fourth of five PRs): the stem node, demand-driven
+  provisioning, the signed catalogue, the artifact library, presence bands, shadow acceptance, declared activation,
+  confined activations, serving a model as a skill, hosted WASM components, and unit files with `wire-check`.
+- **Feature pages for tools, reasoning, companions and domains; F3 closed** (F3, fifth of five PRs): skills, LLM
+  prompt skills, MCP tools, the reason router, the tuple space, the blackboard, the contract net, federated domains,
+  AgentFacts, the knowledge layer and the wiki substrate — every feature in the registry now has a page. The gate also
+  fails on a page that no row of the capability map, or of the front page's *The pages* table, lists; the ten pages
+  that predated F3 gained their front-page rows. P7 decided: no glossary entry per feature. The companions runbook and
+  three `mycelium-wiki` doc comments no longer describe an object-store `WikiStore` as existing; none ships.
 
 ## [2.39.0] — 2026-11-06
 

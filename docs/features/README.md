@@ -143,3 +143,35 @@ suite is `scripts/test-check-feature-pages.py`.
 | [The guarantee report and profiles](guarantee-report.md) | What a node enforces and why not the rest; a profile that refuses the start when it is unmet | Constrain actions |
 | [The rule catalogue and the decision trace](rule-catalogue-and-decision-trace.md) | Every decision point described by id, and a bounded trace of what the instrumented ones decided | Inspect outcomes and reproduce |
 | [Metrics and tracing](metrics-and-tracing.md) | Prometheus metrics on the gateway, logs through `tracing`, OTLP spans under `otel` | Inspect outcomes and reproduce |
+| [The stem node](stem.md) | A generic node that declares from its unit file and, with `[hosts]`, installs signed artifacts as demand or a band calls for them | Acquire and adapt capabilities |
+| [Demand-driven provisioning](demand-provisioning.md) | Hosts self-elect to install what an unmet requirement needs, within budget and from trusted publishers; restart is provisioning | Acquire and adapt capabilities |
+| [The signed catalogue](signed-catalogue.md) | Gossiped, signed catalogue entries; a host installs only what a key it trusts signed, the bytes checked against their content address | Acquire and adapt capabilities |
+| [The artifact library and publishing](artifact-library.md) | Bytes and a signed manifest in a directory, over HTTP or in an object store, served by a librarian and pulled over the mesh | Acquire and adapt capabilities |
+| [Presence bands](presence-bands.md) | A floor and a ceiling of live providers, independent of demand, supervised by each stem that declares them | Acquire and adapt capabilities |
+| [Shadow acceptance](shadow-acceptance.md) | A proposed entry loads only into a shadow lane until a listed reviewer co-signs it | Acquire and adapt capabilities |
+| [Declared activation](declared-activation.md) | A placed blob handed to a native runtime by the operator's command, its capability gated on a probe | Acquire and adapt capabilities |
+| [Confined activations](confined-activations.md) | An activation's command and probe run under Seatbelt or Landlock and seccomp, or refused by name | Acquire and adapt capabilities |
+| [Serving a model as a skill](model-serving.md) | `[[serve]]`: a routable prompt skill registered while its install is live, retracted when it goes | Acquire and adapt capabilities |
+| [Hosted WASM components](hosted-components.md) | Components sandboxed in-process with a confined KV and emit, a memory cap, a deadline and fuel by publisher | Acquire and adapt capabilities |
+| [Unit files and wire-check](unit-files-and-wire-check.md) | One declaration per unit, read by the check, the stem and the gateway; `wire-check` names what could not bind | Acquire and adapt capabilities |
+| [Skills](skills.md) | `skillrunner`: an agent role defined by a `.skill.toml` manifest, a node others reach by capability as `skill.invoke` | Run tools and reasoning |
+| [LLM prompt skills](llm-prompt-skills.md) | A model-backed capability hosted on any node, its prompt template a KV key read fresh on every call | Run tools and reasoning |
+| [MCP tools](mcp-tools.md) | Tools registered with a schema and discovered fleet-wide, served to outside clients at `/mcp`, external servers bridged in | Run tools and reasoning |
+| [The reason router](reason-router.md) | `mycelium-reason`: model calls routed to a healthy server with failover, an OpenAI-compatible façade, traces and the checkpointer's blob store | Run tools and reasoning |
+| [The tuple space](tuple-space.md) | `mycelium-tuple-space`: stage lanes workers pull from when ready, an atomic advance, at-least-once with failover | Coordinate work |
+| [The blackboard](blackboard.md) | `mycelium-blackboard`: facts posted with attributes and claimed by predicate, exactly one claimer per fact | Coordinate work |
+| [The contract net](contract-net.md) | `mycelium-commitment`: announce, offer, close, award once with a receipt, report and assess — signed records, no dispatcher | Coordinate work |
+| [Federated domains](federation.md) | Two domains calling each other's exports without merging, through a signed per-partner catalogue and a body-bound credential on `/a2a` | Connect trust domains |
+| [AgentFacts](agentfacts.md) | `mycelium-agentfacts`: a node's self-signed public facts at `/.well-known/`, verified by the fetcher against the key they embed | Connect trust domains |
+| [The knowledge layer](knowledge-layer.md) | Signed, immutable claims, observations, assessments and decisions, resolved by a reader's policy; competing statements kept | Maintain knowledge and disagreement |
+| [The wiki substrate](wiki-substrate.md) | `mycelium-wiki`: a group's curated canon in a store it does not own, written through one elected curator | Maintain knowledge and disagreement |
+| [The adapter contract](adapter-contract.md) | One table of what each runtime adapter carries — persistence, cancellation, tracing, identity, grants, enforcement, receipts — each cell naming its test | Start from the published node |
+| [Grants](grants.md) | Default-deny approval for one call, bound to the tool, the arguments' digest and the agent, checked at every door | Constrain actions |
+| [The causal exposure policy](exposure-policy.md) | New work that would extend an unresolved closure held while the closure is past a threshold | Constrain actions |
+| [The side-effect contract](side-effects.md) | An external destination's class declared before execution; a lost answer probed before at most one retry | Inspect outcomes and reproduce |
+| [Selective recovery](selective-recovery.md) | One unknown effect's dependency closure read across the fleet and each member recovered by its class | Inspect outcomes and reproduce |
+| [Fault classes against a declaration](test-faults.md) | `mycelium test --faults`: seven fault classes run against an in-process fleet built from a project's unit files | Start from the published node; Inspect outcomes and reproduce |
+| [Span export](span-export.md) | A record's identity and outcome sent to an OpenTelemetry collector as a span, never its inputs — not an evidence path | Inspect outcomes and reproduce |
+| [Recurring work](recurring-work.md) | A `[[schedule]]` run once per period by one self-elected holder, its runs keyed so two holders' runs of a slot are one | Coordinate work |
+| [Context selection](context-selection.md) | Knowledge records selected for a run, each with its issuer, standing and the reader's verdict, never blended | Maintain knowledge and disagreement |
+| [The multi-domain profile](multi-domain-profile.md) | `secure-multi-domain`: `start()` refuses unless the single-domain guarantees and the federation family hold | Connect trust domains |

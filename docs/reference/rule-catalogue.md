@@ -26,13 +26,13 @@ Schema `mycelium.rules/1` · 32 rules.
 | [`prov.loadable`](#provloadable) | Authority | catalogue only | A proposed entry loads live only once a listed reviewer has accepted it; until then it may load into the shadow lane only (D20). |
 | [`prov.presence_floor`](#provpresence_floor) | Response | instrumented | Fewer live providers than the declared floor, as this node sees it, makes this node a candidate installer of the cheapest loadable entry. |
 | [`prov.probe`](#provprobe) | Response | instrumented | The probe gates the capability: a failing initial probe is an activation error (nothing advertised); a later failure flips the health flag the next health pass withdraws on. A confined re-probe re-resolves a profile whose declared path was replaced, every check repeated, and runs under the fresh one; only a refused re-resolution (`confinement_*`), or a path that changed under every attempt (`confinement_changed`), withdraws. Recorded under the install's token; a re-probe records only a change of verdict. |
-| [`prov.promotion`](#provpromotion) | Response | instrumented | A shadow install whose entry a listed reviewer has since accepted is withdrawn from the shadow lane (D20). |
+| [`prov.promotion`](#provpromotion) | Response | instrumented | A shadow install whose entry a listed reviewer has since accepted, or whose entry has left the catalogue, is withdrawn from the shadow lane (D20); it does not replace a live provider. |
 | [`prov.provenance`](#provprovenance) | Authority | catalogue only | An entry is a candidate only if a trusted publisher signed it; an empty trust list trusts everything, which the report says. |
-| [`prov.rights_admission`](#provrights_admission) | Authority | instrumented | An install takes a right from this node's allocation first; under the enforcing profile a node with none left refuses, and records that it did. |
+| [`prov.rights_admission`](#provrights_admission) | Authority | instrumented | An install takes a right from this node's allocation first; under `EnforceAllocated` a node with none left, or whose ledger is busy at that instant, refuses and records `allocation_exhausted`; under any other profile it admits, counts what it would have refused, and records no decision. An admission is not recorded. |
 | [`prov.self_election`](#provself_election) | Response | instrumented | Herd damping: a candidate acts this round with probability p, drawn after the guards so a decline costs nothing. Replay-covered since the draw went through the seam. |
 | [`prov.shed`](#provshed) | Response | instrumented | More live providers than the declared ceiling withdraws the hosts ranked beyond it by the band's rendezvous order, among the providers that advertise they will act on it (`prov-shed`; rev 2; rev 1 drew per host, and every host could withdraw at once). |
 | [`prov.withdraw`](#provwithdraw) | Propagation, Response | catalogue only | Withdrawal removes the install and tombstones its advertisement; restart ≡ provisioning is how it comes back. |
-| [`provider.enforcement`](#providerenforcement) | Authority | catalogue only | Authority where the work happens: a protected call is checked at the provider whichever door it came through; with enforcement on and no evaluator it is refused (`no_evaluator`); with it off no authority is checked, though an attached cohort budget still verifies the caller context and admits by cohort (`caller_context_refused`, `at_capacity`). |
+| [`provider.enforcement`](#providerenforcement) | Authority | catalogue only | Authority where the work happens: a protected call is checked at the provider whichever door it came through; with enforcement on and no evaluator it is refused (`no_evaluator`); with it off no authority is checked, though an attached cohort budget still verifies the caller context and admits by cohort (`caller_context_refused`, `at_capacity`). `mandate_lapsed_before_run` is the wire `detail` of a refusal whose reason is `authority_not_established`: a permit decided on an established mandate whose re-assessment at registration no longer finds it established. |
 | [`sched.missed`](#schedmissed) | Response | instrumented | A gap is decided, not replayed: skipped, run late each under its own key (at most 64), or run once for the gap under its newest slot's key; a schedule with no recorded run starts at the slot due. |
 | [`sched.run`](#schedrun) | Response | partial — every run, failure and overrun; a change to not_holder, not_eligible, warming_up, last_ahead, ignored_last_far_ahead, stood_down or declaration_mismatch, once; a tick that changes nothing records nothing | After a warm-up, the rendezvous winner among the live candidates that declare the same period and phase holds and runs the slot due, under the key `sched/{id}/{slot}`, within one period; a partition has a holder on each side, and only a destination that deduplicates makes that one effect — the voluntary singleton, not a lock. |
 | [`signal.admission`](#signaladmission) | Admission | partial — refusals and sheds only; an admitted signal is the hot path and records nothing | Admission is scoped (Cluster · Group · Individual) and shed under load — except Individual and the boundary transitions; shedding happens before the sender is recorded. |
@@ -380,7 +380,7 @@ A proposed entry loads live only once a listed reviewer has accepted it; until t
 
 ## `prov.presence_floor`
 
-rev 1 · `mycelium-wasm-host::provisioner` · Response · trace: instrumented
+rev 2 · `mycelium-wasm-host::provisioner` · Response · trace: instrumented
 
 Fewer live providers than the declared floor, as this node sees it, makes this node a candidate installer of the cheapest loadable entry.
 
@@ -393,7 +393,7 @@ Fewer live providers than the declared floor, as this node sees it, makes this n
 - **Outcomes:**
   - Action: `below_floor`
   - Deferral: `self_election_declined`
-  - Refusal: `already_hosted`, `provenance_rejected`, `ineligible`, `no_loadable_candidate`
+  - Refusal: `already_hosted`, `provenance_rejected`, `ineligible`, `no_loadable_candidate`, `rights_refused`
   - NoAction: `floor_met`
 - **Effects:** start_install of the smallest loadable candidate
 - **Guards:** Provenance, ResourceBudget
@@ -424,9 +424,9 @@ The probe gates the capability: a failing initial probe is an activation error (
 
 ## `prov.promotion`
 
-rev 1 · `mycelium-wasm-host::provisioner` · Response · trace: instrumented
+rev 2 · `mycelium-wasm-host::provisioner` · Response · trace: instrumented
 
-A shadow install whose entry a listed reviewer has since accepted is withdrawn from the shadow lane (D20).
+A shadow install whose entry a listed reviewer has since accepted, or whose entry has left the catalogue, is withdrawn from the shadow lane (D20); it does not replace a live provider.
 
 - **Trigger:** every provisioning round, after the health pass
 - **Reads:**
@@ -435,8 +435,8 @@ A shadow install whose entry a listed reviewer has since accepted is withdrawn f
   - the unit file (`[hosts]`, `[[presence]]`, `[[activation]]`) — scope: this node; freshness: read at start
 - **Outcomes:**
   - Action: `accepted_withdraw_shadow`
-  - NoAction: `still_proposed`, `no_shadow_installs`
-- **Effects:** withdraw() of the `{name}.shadow` install once the entry is accepted, so the live rule reinstalls it
+  - NoAction: `still_proposed`
+- **Effects:** withdraw() of the `{name}.shadow` install once the entry is accepted or has left the catalogue (both recorded `accepted_withdraw_shadow`); the accepted entry is installed live only where the demand pass finds demand unmet
 - **Guards:** Provenance
 - **May trigger:** [`prov.demand_response`](#provdemand_response)
 - **Depends on:** [`prov.loadable`](#provloadable)
@@ -444,7 +444,7 @@ A shadow install whose entry a listed reviewer has since accepted is withdrawn f
 
 ## `prov.provenance`
 
-rev 1 · `mycelium-wasm-host::provisioner` · Authority · trace: catalogue only
+rev 2 · `mycelium-wasm-host::provisioner` · Authority · trace: catalogue only
 
 An entry is a candidate only if a trusted publisher signed it; an empty trust list trusts everything, which the report says.
 
@@ -454,26 +454,24 @@ An entry is a candidate only if a trusted publisher signed it; an empty trust li
   - `[hosts].trusted_publishers` — scope: this node; freshness: read at start
 - **Outcomes:**
   - Action: `signed_by_trusted_publisher`, `no_trust_list_configured`
-  - Refusal: `signature_invalid`, `publisher_untrusted`
+  - Refusal: `not_signed_by_trusted_publisher`
 - **Guards:** Provenance
 - **May inhibit:** [`prov.demand_response`](#provdemand_response), [`prov.presence_floor`](#provpresence_floor)
 - **Code:** `provisioner::Provisioner::provenance_ok` · **Docs:** docs/operations/artifacts.md · **Tests:** `a_proposal_round_trips_as_v2_and_its_signature_is_its_own`, `the_stem_fleet_fills_a_presence_floor_and_reheals`
 
 ## `prov.rights_admission`
 
-rev 1 · `mycelium-wasm-host::provisioner` · Authority · trace: instrumented
+rev 2 · `mycelium-wasm-host::provisioner` · Authority · trace: instrumented
 
-An install takes a right from this node's allocation first; under the enforcing profile a node with none left refuses, and records that it did.
+An install takes a right from this node's allocation first; under `EnforceAllocated` a node with none left, or whose ledger is busy at that instant, refuses and records `allocation_exhausted`; under any other profile it admits, counts what it would have refused, and records no decision. An admission is not recorded.
 
 - **Trigger:** an install about to start, when install rights are configured
 - **Reads:**
   - `InstallRights::ledger (lock-order row 37)` — scope: this node's allocation; freshness: local; the head is published after
   - `Provisioner::hosted (lock-order row 21)` — scope: this node; freshness: local, atomic
 - **Outcomes:**
-  - Action: `admitted`
   - Refusal: `allocation_exhausted`
-  - NoAction: `would_refuse_shadow_mode`, `no_rights_configured`
-- **Effects:** the ledger's admit record and published head · `mycelium_artifact_installs_refused_by_rights_total`
+- **Effects:** the ledger's rejection record and published head · `mycelium_artifact_installs_refused_by_rights_total`
 - **Guards:** Authority, ResourceBudget
 - **May inhibit:** [`prov.install`](#provinstall)
 - **Code:** `provisioner::Provisioner::admit_install` · **Docs:** docs/guide/22-stability-and-control.md · **Tests:** `an_install_is_refused_and_recorded_when_the_node_holds_no_rights`
@@ -531,20 +529,20 @@ Withdrawal removes the install and tombstones its advertisement; restart ≡ pro
 
 ## `provider.enforcement`
 
-rev 2 · `mycelium::agent::provider_enforcement` · Authority · trace: catalogue only
+rev 3 · `mycelium::agent::provider_enforcement` · Authority · trace: catalogue only
 
-Authority where the work happens: a protected call is checked at the provider whichever door it came through; with enforcement on and no evaluator it is refused (`no_evaluator`); with it off no authority is checked, though an attached cohort budget still verifies the caller context and admits by cohort (`caller_context_refused`, `at_capacity`).
+Authority where the work happens: a protected call is checked at the provider whichever door it came through; with enforcement on and no evaluator it is refused (`no_evaluator`); with it off no authority is checked, though an attached cohort budget still verifies the caller context and admits by cohort (`caller_context_refused`, `at_capacity`). `mandate_lapsed_before_run` is the wire `detail` of a refusal whose reason is `authority_not_established`: a permit decided on an established mandate whose re-assessment at registration no longer finds it established.
 
 - **Trigger:** a protected RPC kind arriving at a provider with enforcement on, or with a cohort budget attached
 - **Reads:**
   - `the node's evaluator and execution authority; the carried mandate; the verified caller context; the cohort budget, if attached` — scope: this node; freshness: the decision clock
 - **Outcomes:**
   - Action: `permit`
-  - Refusal: `deny`, `indeterminate`, `not_recorded`, `no_evaluator`, `caller_context_refused`, `malformed_call`, `resource_unnamed`, `resource_not_here`, `resource_not_served`, `at_capacity`
+  - Refusal: `deny`, `indeterminate`, `not_recorded`, `no_evaluator`, `caller_context_refused`, `malformed_call`, `resource_unnamed`, `resource_not_here`, `resource_not_served`, `at_capacity`, `mandate_lapsed_before_run`
   - NoAction: `enforcement_off`, `not_protected`
 - **Effects:** the evidence journal; the handler never runs on a refusal
 - **Guards:** Authority, ResourceBudget
-- **Code:** `provider_enforcement::check` · **Docs:** docs/guide/20-authorising-actions.md · **Tests:** `test_c7_the_bypass_matrix_no_door_runs_revoked_work`
+- **Code:** `provider_enforcement::check` · **Docs:** docs/guide/20-authorising-actions.md · **Tests:** `test_c7_the_bypass_matrix_no_door_runs_revoked_work`, `a_grant_revoked_between_the_preflight_and_the_registration_refuses_the_call`, `a_permit_the_cohort_budget_refuses_is_recorded_as_nothing_ran`
 
 ## `sched.missed`
 

@@ -275,7 +275,7 @@ fn own_entry_live(entry: &CapEntry, hlc_ts: u64, now_ms: u64) -> bool {
 }
 
 /// This node's own capabilities that have not aged out ([`own_entry_live`]) — the one reading of a node's own
-/// entries: the group projection, the governor's own eligibility, `CapabilityHandle::own_advertised` (agent facts).
+/// entries: the group projection, the governor's own eligibility, `CapabilitiesHandle::own_advertised` (agent facts).
 /// The clock is read only when there is an entry to judge, so a node advertising nothing adds no read to a recording.
 pub(super) fn own_live_caps(kv_state: &crate::store::KvState, own: &NodeId) -> Vec<Capability> {
     own_live_caps_with(kv_state, own, None)
