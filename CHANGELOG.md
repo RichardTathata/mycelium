@@ -51,6 +51,32 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A stem runs only the artifact kinds its `[hosts].kinds` declares** (an independent review of #736, defect A).
+  `Provisioner::new` registers the WASM-component runtime unconditionally and `Stem::start` read `kinds` only to add
+  the blob runtime, so a stem whose unit said `kinds = ["blob"]` still installed and ran any third-party WASM
+  component a trusted catalogue line named — while `mycelium wire-check` and `docs/reference/unit-file.md` treated it
+  as unable to. A fuel policy (`fuel_per_call` / `operator_fuel_per_call`) re-registered the runtime too. The stem
+  now calls `Provisioner::restrict_kinds` with the declared kinds: the registered runtimes are exactly those,
+  `set_fuel_policy` and `register_runtime` leave an undeclared kind unregistered, and an entry of an undeclared kind
+  is refused at `prov.eligible` with the new reason `kind_not_declared` (rule revision 3; counted under
+  `mycelium_artifact_ineligible_skips_total{reason="kind_not_declared"}`). An empty or absent `kinds` hosts nothing,
+  as the reference already said, and the stem warns at start. A mesh-sourced stem also staged every catalogue entry
+  whatever its kind, and re-served the bytes to peers as a cache holder; it now stages only the kinds it declares (bytes staged before the upgrade stay and are still served until `<placement_root>/stage` is cleared, §85). A
+  provisioner built in code without `restrict_kinds` is unchanged. Upgrade note: `docs/guide/deprecations.md` §85.
+- **A cheaper bad catalogue line no longer stalls a presence floor** (an independent review of #736, defect B). The
+  floor chose the cheapest loadable entry for its capability and only then checked provenance and eligibility, so a
+  line no larger (ties included) — unsigned, signed by an untrusted key, or naming an artifact this node already hosts
+  for something else — gossiped under `installable/` by any member won every round, was refused every round, and the
+  valid entry was never reached. A line of a kind this node has no runtime for stalled it the same way, but only when a
+  trusted publisher had signed it. The floor now keeps the trusted candidates, refuses `already_hosted` only when one of
+  those is reserved or live here, and takes the cheapest that passes eligibility, as the demand path already did
+  (`prov.presence_floor` revision 3). The shadow, promotion and demand paths iterate every entry and did not have
+  this shape. **Still open:** a trusted publisher's line naming an artifact this node hosts for something else holds
+  the floor at `already_hosted`, and so does any member's such line on a host with `accept_unsigned = true` (every line
+  passes provenance there); a trusted line whose install always fails is chosen again every round — feeding an install's
+  failure back into the choice is not built. The ineligible-skips counter now counts every ineligible line the floor
+  tries, so it rises steadily on a healthy fleet whose floors see cheaper ineligible lines (`docs/operations/metrics.md`).
+
 - **A provider refuses a call whose mandate was revoked between its preflight and its registration** (the
   check-then-act window at the provider, `docs/design/authority-at-execution.md` §9). With provider enforcement on,
   `provider_enforcement::admit_after` re-assesses a presented mandate after the preflight has permitted, to register the
