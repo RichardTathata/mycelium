@@ -202,6 +202,10 @@ pub struct GatewayCaller {
     /// and counted for one release (`GET /stats` `caller_envelopes_without_id`), unprotected against
     /// replay inside the freshness window.
     pub envelope_id: Option<u64>,
+    /// The client's own signature on this call (`cs`/`cn`, identity-and-lifecycle I1, D1′), verified: by the
+    /// principal's **current** client key, over the operation, resource and arguments this provider acts on, fresh,
+    /// and not seen before. `None` when the call carried none.
+    pub client_signed: Option<Box<super::client_sig::ClientSigned>>,
 }
 
 /// How a [`GatewayCaller`] was attested.
@@ -276,6 +280,13 @@ pub enum CallerError {
     /// `sys/caller-context-id/` marker, or this node itself): one of its envelopes with the id
     /// stripped — a replay reaching for the pre-row-E path. Dropped without an answer.
     IdStripped,
+    /// The client's own signature (`cs`/`cn`, identity-and-lifecycle I1) was refused: malformed, not bound to a call
+    /// this provider can read, not verifying over this call, or by a key that is not the principal's current one.
+    /// The code names which.
+    ClientSignature(&'static str),
+    /// The client's `cn` was already received inside the freshness window, or sits at or below its instance's floor,
+    /// or the key has too many instances in flight. A replay: dropped without an answer.
+    ClientReplayed,
 }
 
 impl CallerError {
@@ -294,6 +305,8 @@ impl CallerError {
             CallerError::Replayed { .. } => "replayed",
             CallerError::Misaddressed { .. } => "misaddressed",
             CallerError::IdStripped => "id_stripped",
+            CallerError::ClientSignature(code) => code,
+            CallerError::ClientReplayed => "client_replayed",
         }
     }
 
@@ -301,7 +314,7 @@ impl CallerError {
     /// replay in any of its shapes. A refusal sent back under a captured request's correlation nonce
     /// could reach its gateway before the real answer.
     pub fn unanswered(&self) -> bool {
-        matches!(self, CallerError::Replayed { .. } | CallerError::Misaddressed { .. } | CallerError::IdStripped)
+        matches!(self, CallerError::Replayed { .. } | CallerError::Misaddressed { .. } | CallerError::IdStripped | CallerError::ClientReplayed)
     }
 }
 
@@ -333,6 +346,8 @@ impl std::fmt::Display for CallerError {
             CallerError::Missing => f.write_str(
                 "caller context missing from a node that promises one on every RPC (a raw gateway emission is not the node's action)",
             ),
+            CallerError::ClientSignature(code) => write!(f, "the client's signature on this call was refused: {code}"),
+            CallerError::ClientReplayed => f.write_str("the client's signature was already received (a replay of cn)"),
         }
     }
 }
@@ -598,7 +613,7 @@ pub(crate) async fn gateway_rpc_call(
     payload: Bytes,
     timeout: Duration,
 ) -> Result<Bytes, GatewayDispatchError> {
-    gateway_rpc_call_with_mandate(ctx, caller, target, kind, payload, timeout, None, None).await
+    gateway_rpc_call_with_mandate(ctx, caller, target, kind, payload, timeout, None, None, None).await
 }
 
 /// [`gateway_rpc_call`], carrying the mandate the caller presented to the provider (closure plan C2).
@@ -614,6 +629,7 @@ pub(crate) async fn gateway_rpc_call_with_mandate(
     timeout: Duration,
     mandate: Option<&serde_json::Value>,
     resource: Option<&str>,
+    client: Option<&(super::client_sig::ClientSignature, super::client_sig::ClientNonce)>,
 ) -> Result<Bytes, GatewayDispatchError> {
     use crate::config::GatewayCallerProfile;
     match ctx.config.gateway_caller_profile {
@@ -631,7 +647,9 @@ pub(crate) async fn gateway_rpc_call_with_mandate(
                 refused("provider_without_caller_context");
                 return Err(GatewayDispatchError::ProviderWithoutContext(target));
             }
-            let Some(framed) = frame_with_context_and_mandate(ctx, &target, &caller.principal, &caller.scopes, payload, mandate, resource) else {
+            let Some(framed) = frame_with_client_signature_at(
+                ctx, &target, &caller.principal, &caller.scopes, payload, mandate, resource, client, ctx.hlc.decision_now_ms(),
+            ) else {
                 refused("caller_context_too_large");
                 return Err(GatewayDispatchError::ContextTooLarge);
             };
@@ -695,6 +713,13 @@ struct Envelope {
     /// `sig`; a provider that keeps a replay window requires this one whenever `n` is present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     sn: Option<String>,
+    /// The client's own signature (identity-and-lifecycle I1, D1′), carried as the client sent it. Outside the
+    /// gateway's signature: it authenticates itself. An older provider keeps it in `x` and reads nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cs: Option<super::client_sig::ClientSignature>,
+    /// The client's `(issued_at, instance, counter)`, beside `cs`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cn: Option<super::client_sig::ClientNonce>,
     /// Fields this version does not define, kept so a verifier can see them: a `correlation` or `parent` placed here
     /// (adopter-surface X4) sits outside every signature and is never read — counted, and the record's field stays
     /// empty. Never produced by this crate; absent on the wire when empty, so the envelope's bytes are unchanged.
@@ -738,6 +763,23 @@ pub(crate) fn frame_with_context_at(
     resource: Option<&str>,
     issued_at_ms: u64,
 ) -> Option<Bytes> {
+    frame_with_client_signature_at(ctx, target, principal, scopes, app, mandate, resource, None, issued_at_ms)
+}
+
+/// [`frame_with_context_at`], carrying the client's own signature (`cs`/`cn`, identity-and-lifecycle I1) as the
+/// client sent it — the one place an envelope is built.
+#[allow(clippy::too_many_arguments)] // the envelope's fields, each one
+pub(crate) fn frame_with_client_signature_at(
+    ctx: &TaskCtx,
+    target: &NodeId,
+    principal: &str,
+    scopes: &[String],
+    app: Bytes,
+    mandate: Option<&serde_json::Value>,
+    resource: Option<&str>,
+    client: Option<&(super::client_sig::ClientSignature, super::client_sig::ClientNonce)>,
+    issued_at_ms: u64,
+) -> Option<Bytes> {
     let via = ctx.node_id.to_string();
     let id = ctx.hlc.tick();
     let to = target.to_string();
@@ -755,6 +797,8 @@ pub(crate) fn frame_with_context_at(
         n: Some(id),
         o: Some(to),
         sn,
+        cs: client.map(|c| c.0.clone()),
+        cn: client.map(|c| c.1.clone()),
         x: Default::default(),
     };
     let env_bytes = serde_json::to_vec(&env).ok()?;
@@ -1090,7 +1134,28 @@ pub(crate) fn verify(ctx: &TaskCtx, req: &RpcRequest) -> Result<Option<GatewayCa
         return Err(CallerError::Stale { issued_at_ms: env.t, now_ms });
     }
 
+    // Identity-and-lifecycle I1 (D1′): the client's own signature, checked before any cache — the binding, the
+    // signature, the key's standing, then its issue time on the envelope's window. Both or neither.
+    let client_signed = match (&env.cs, &env.cn) {
+        (None, None) => None,
+        #[cfg(not(feature = "tls"))]
+        (Some(_), Some(_)) => return Err(CallerError::ClientSignature("client_signature_unverifiable")),
+        #[cfg(feature = "tls")]
+        (Some(cs), Some(cn)) => {
+            let signed = super::client_sig::check(ctx, &env.p, req.kind(), &req.payload(), env.r.as_deref(), cs, cn)
+                .map_err(|r| CallerError::ClientSignature(r.code()))?;
+            if now_ms.saturating_sub(signed.issued_at_ms) > CALLER_CONTEXT_MAX_AGE_MS.saturating_add(drift)
+                || signed.issued_at_ms.saturating_sub(now_ms) > ahead_bound
+            {
+                return Err(CallerError::Stale { issued_at_ms: signed.issued_at_ms, now_ms });
+            }
+            Some(Box::new(signed))
+        }
+        _ => return Err(CallerError::ClientSignature("client_signature_malformed")),
+    };
+
     Ok(Some(GatewayCaller {
+        client_signed,
         misplaced_causal: env.x.contains_key("correlation") || env.x.contains_key("parent"),
         principal: env.p,
         via,
@@ -1115,6 +1180,24 @@ pub(crate) fn verify_received(ctx: &TaskCtx, req: &RpcRequest) -> Result<Option<
     })?;
     if let Some(c) = &verified {
         ctx.caller_replay.admit(c, ctx.hlc.decision_now_ms(), ctx.config.max_clock_drift_ms)?;
+        // Identity-and-lifecycle I1: the client's `cn`, once per (principal, key, instance).
+        #[cfg(feature = "tls")]
+        if let Some(signed) = &c.client_signed {
+            let horizon = ctx.hlc.decision_now_ms().saturating_sub(CALLER_CONTEXT_MAX_AGE_MS.saturating_add(ctx.config.max_clock_drift_ms));
+            let current = ctx.client_certs.mark(&c.principal).map(|m| m.key);
+            match ctx.client_replay.admit(&c.principal, signed, current, horizon) {
+                Ok(()) => {}
+                Err(super::client_sig::ClientReplay::Replayed) => return Err(CallerError::ClientReplayed),
+                Err(super::client_sig::ClientReplay::TooManyInstances) => {
+                    return Err(CallerError::ClientSignature("client_instances_exhausted"));
+                }
+            }
+        } else if (req.kind().as_ref() == crate::signal::signal_kind::MCP_INVOKE || req.kind().as_ref() == "skill.invoke")
+            && ctx.client_certs.mark(&c.principal).is_some()
+        {
+            // #742's review, item 4: an unsigned call for a certificate holder, counted where it runs too.
+            ctx.unsigned_actions.note_at_provider(req.kind());
+        }
         // X4: counted here, once per request, after the envelope verified — a forged one moves nothing.
         if c.misplaced_causal {
             ctx.note_misplaced_causal("caller_envelope");
@@ -1652,6 +1735,7 @@ mod tests {
         let g1 = NodeId::new("127.0.0.1", 9001).unwrap();
         let g2 = NodeId::new("127.0.0.1", 9002).unwrap();
         let mk = |via: &NodeId, p: String| GatewayCaller {
+            client_signed: None,
             misplaced_causal: false,
             principal: p, via: via.clone(), scopes: vec![], issued_at_ms: 0,
             attestation: CallerAttestation::UnauthenticatedMesh, mandate: None, resource: None, envelope_id: None,
@@ -1696,7 +1780,7 @@ mod tests {
         let unsigned = serde_json::to_vec(&Envelope {
             v: 1, p: "oidc:idp/mallory".into(), via: a.node_id().to_string(), s: vec![], t: 0, k: None, sig: None,
             m: None,
-            r: None, n: None, o: None, sn: None, x: Default::default(),
+            r: None, n: None, o: None, sn: None, cs: None, cn: None, x: Default::default(),
         }).unwrap();
         let req = request_from(a.node_id(), "k", raw_frame(&unsigned, b""));
         assert_eq!(verify(&a.task_ctx, &req), Err(CallerError::Unsigned));
@@ -1712,7 +1796,7 @@ mod tests {
                 k: Some(base64::engine::general_purpose::STANDARD.encode(rogue.verifying_key().to_bytes())),
                 sig: Some(base64::engine::general_purpose::STANDARD.encode(sig)),
                 m: None,
-                r: None, n: None, o: None, sn: None, x: Default::default(),
+                r: None, n: None, o: None, sn: None, cs: None, cn: None, x: Default::default(),
             }).unwrap();
             let req = request_from(a.node_id(), "k", raw_frame(&forged, b"payload"));
             assert_eq!(verify(&a.task_ctx, &req), Err(CallerError::UnknownSigner));
@@ -1787,7 +1871,7 @@ mod tests {
         let env = serde_json::to_vec(&Envelope {
             v: 1, p: "oidc:idp/admin".into(), via: a.node_id().to_string(), s: vec![], t: 0, k: None, sig: None,
             m: None,
-            r: None, n: None, o: None, sn: None, x: Default::default(),
+            r: None, n: None, o: None, sn: None, cs: None, cn: None, x: Default::default(),
         }).unwrap();
         let bytes = raw_frame(&env, br#"{"prompt":"review/echo","input":"unverified call","context":{}}"#);
         let req = request_from(a.node_id(), "llm.invoke", bytes.clone());
@@ -1924,6 +2008,7 @@ mod tests {
         let w = ReplayWindows::default();
         let (gone, live) = (NodeId::new("127.0.0.1", 9611).unwrap(), NodeId::new("127.0.0.1", 9612).unwrap());
         let caller = |via: &NodeId, t: u64, id: u64| GatewayCaller {
+            client_signed: None,
             misplaced_causal: false,
             principal: "p".into(), via: via.clone(), scopes: vec![], issued_at_ms: t,
             attestation: CallerAttestation::Signed { signer: [1u8; 32] }, mandate: None, resource: None, envelope_id: Some(id),
@@ -1947,6 +2032,7 @@ mod tests {
         let w = ReplayWindows::default();
         let via = NodeId::new("127.0.0.1", 9601).unwrap();
         let caller = |t: u64, id: u64| GatewayCaller {
+            client_signed: None,
             misplaced_causal: false,
             principal: "oidc:idp/alice".into(), via: via.clone(), scopes: vec![], issued_at_ms: t,
             attestation: CallerAttestation::Signed { signer: [1u8; 32] }, mandate: None, resource: None, envelope_id: Some(id),

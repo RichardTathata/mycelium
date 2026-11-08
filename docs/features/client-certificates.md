@@ -12,8 +12,10 @@ every node that reads it.
 
 - **Use it when** a service acting through a gateway needs a key that the fleet CA vouches for, with an issuer the
   fleet fixes (`gateway_identity_issuer`).
-- **Not when** you need a call *signed* by that key: the `cs`/`cn` signature, the SDK `tools/call` clients and grants
-  held by a client principal are not built yet ([identity and lifecycle § I1](../plans/identity-and-lifecycle.md#i1--client-certificates-for-services-d1-d1)).
+- **Use it to sign a call:** the service signs each `tools/call` or A2A send with that key, and the provider checks
+  that the call is the one signed and the key is the principal's current one.
+- **Not when** you need a grant held by the service, or the SDKs to sign for you: client-held grants and the SDK
+  `tools/call` clients are not built yet ([identity and lifecycle § I1](../plans/identity-and-lifecycle.md#i1--client-certificates-for-services-d1-d1)).
 
 ## Turn it on
 
@@ -29,7 +31,14 @@ every node that reads it.
 - [`persistence`](../reference/configuration.md#persistence): keeps a supersession across a restart.
 - `POST /gateway/identity/client-cert`, under `identity:write`, in a build with `compliance`
   ([`gw_identity_client_cert`](../../src/agent/http/compliance.rs)). It publishes the certificate as
-  `sys/client-cert/{principal-hex}/{key-hex}` ([`CLIENT_CERT_PREFIX`](../../src/agent/client_cert.rs)).
+  `sys/client-cert/{principal-hex}/{key-hex}` ([`CLIENT_CERT_PREFIX`](../../src/agent/client_cert.rs)). It publishes
+  only certificates for its own `gateway_identity_issuer`, and its audit record names the bearer who published.
+- Sign each call with a `ClientSigner` (Rust [`ClientSigner`](../../src/agent/client_sig.rs), Python
+  `mycelium.ClientSigner`, TypeScript `ClientSigner`) and send what it returns as `params._meta.cs` and
+  `params._meta.cn`. A signed call needs the gateway's `gateway_identity_issuer` set, or the door refuses it
+  (`gateway_identity_issuer_unset`). Python needs `pip install 'mycelium-py[sign]'`.
+- `the_mcp_door_carries_a_client_signature_counts_an_unsigned_one_and_needs_an_issuer`, in
+  [`src/agent/client_sig_tests.rs`](../../src/agent/client_sig_tests.rs), runs a signed call through `/mcp`.
 - `the_client_cert_door_is_identity_write_and_publishes_what_it_judged`, in
   [`src/agent/client_cert_tests.rs`](../../src/agent/client_cert_tests.rs), runs the door.
 
@@ -54,6 +63,31 @@ way. `a_newer_certificate_supersedes_the_older_key_and_an_overwrite_cannot_lower
   The gateway that publishes them spends two (the new mark and the record it republishes), so about 32. A principal past the budget keeps its newest mark only in this process. Without
   `[persistence]`, a restart forgets the mark until the newer record is read again.
 - **Two certificates in one millisecond:** the greater key wins.
+- **A signed call:** the provider checks the signature at its receive boundary, before any cache. The key must be the
+  principal's current one, so a superseded or unknown key is refused. The signature must
+  cover this call's operation, resource and arguments (`client_signature_invalid`). The issue time must be inside
+  the caller envelope's freshness window. Each `cn` is admitted once per process: a replay is dropped unanswered, a
+  reordered pair is admitted, and two processes under one certificate never collide. A kind whose call the provider
+  cannot read refuses a signature (`client_signature_unbound`); `tools/call` and `skill.invoke` bind.
+- **One signature, every provider of the tool.** The signature names the resource before `@`, not the provider the
+  gateway resolved, and each provider keeps its own `cn` window. So one signed call presented to N providers of the
+  same tool runs once at each. Binding the provider would need the client to know which one the gateway will pick, and
+  it does not.
+- **The `cn` window is in memory.** A provider that restarts forgets it, so a call captured before the restart can
+  replay once after it, inside the freshness window.
+- **Refusals:** `client_key_unknown` means this node has not read the key's certificate yet and is worth retrying;
+  `client_key_superseded` is final. More than 1,024 processes signing under one key inside the window are answered
+  `client_instances_exhausted`. The arguments' digest is RFC 8785 (JCS), the same in Rust, Python and TypeScript.
+- **Large numbers go as strings.** Any number whose magnitude is 2^53 or more, float or not (e.g. `6.022e23`), is
+  refused: send it as a string. RFC 8785 writes such a number as the nearest double, so the signature could not tell
+  it from its neighbour. The rule covers floats because JavaScript cannot tell `1e16` from `10000000000000000`: every
+  double of that magnitude is an integer. Every signer refuses such arguments, and the provider refuses the call
+  (`client_signature_unsafe_integer`).
+- **An unsigned call** from a principal with a certificate on record is counted at the `/mcp` and `/a2a` doors and at
+  the provider that runs it (`gateway_actions_unsigned`, `provider_actions_unsigned` on `/stats`), not refused yet
+  ([`deprecations.md` §87](../guide/deprecations.md)). The gateway's signature does not cover `cs`/`cn`, so a relay
+  that strips them makes the call unsigned. The LLM doors refuse a signature (`client_signature_unbound`).
+- **Reserved name:** no client certificate may be named `legacy`, the legacy token's principal.
 - **Ordering is the issuing host's clock.** The issuance is the serial, in ms, from the clock of the host that ran
   `mycelium tls issue`. A host whose clock runs behind can issue a certificate that orders below the one it
   replaces, and the door refuses it as superseded. A certificate without a readable issuance (a serial longer than
@@ -67,12 +101,10 @@ way. `a_newer_certificate_supersedes_the_older_key_and_an_overwrite_cannot_lower
   certificates). Past that many crafted certificates the cache churns and every chain is checked again. The refresh
   runs in the identity watcher's loop, so a large one delays the revocation fold; moving it off is a follow-up.
 - **Not built:**
-  - a client's call signed by its key (`cs`/`cn`), and its cross-language vectors;
-  - refusing an unsigned action from a principal with a certificate on record;
-  - the SDK `tools/call` clients;
+  - refusing an unsigned action from a principal with a certificate on record (counted now);
+  - the SDK `tools/call` clients, and `cs`/`cn` in both A2A clients;
   - grants held by a client principal, and `POST /gateway/grants/request`;
   - a shared `TrustedExternalIssuers`;
-  - refusing at call time a client's call to a gateway without `gateway_identity_issuer`;
   - the three-node fleet exit run;
   - an un-upgraded node's reading of `sys/client-cert/`, which was not shown against the previous binary.
 
@@ -86,4 +118,5 @@ way. `a_newer_certificate_supersedes_the_older_key_and_an_overwrite_cannot_lower
   [gateway caller identity](gateway-caller-identity.md).
 - **Code:** `refuse_if_client`, `client_identity` and `issue_client_cert` in
   [`mycelium-core/src/tls.rs`](../../mycelium-core/src/tls.rs); the fold in
-  [`src/agent/client_cert.rs`](../../src/agent/client_cert.rs).
+  [`src/agent/client_cert.rs`](../../src/agent/client_cert.rs); the signature in
+  [`src/agent/client_sig.rs`](../../src/agent/client_sig.rs) and its vector in `tests/fixtures/cs/vector.json`.

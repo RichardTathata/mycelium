@@ -578,10 +578,9 @@ fn jsonrpc_error(id: Option<Value>, code: i32, message: &str) -> Value {
 /// authority that was never established call for opposite responses, and neither is legible from a
 /// prose message without parsing English.
 ///
-/// Its only call site is the AE preflight's refusal branch, which is itself `cfg`'d on
-/// `gateway` + `tls` — so in an `a2a`-without-`tls` build (CI's Demo smoke) this is dead, and
-/// the gate must say so rather than leave a standing warning.
-#[cfg(all(feature = "gateway", feature = "tls"))]
+/// Its call sites are the AE preflight's refusal branch (`gateway` + `tls`) and the client-signature door's refusal
+/// (identity-and-lifecycle I1), which runs in every `a2a` build — so it is not gated further (CI's Demo smoke builds
+/// `a2a` without `tls`).
 fn jsonrpc_error_with_data(
     id: Option<Value>,
     code: i32,
@@ -852,6 +851,13 @@ async fn dispatch_send(
     // a 30 s cap made every such composition fail with -32603 while the
     // pipeline was still working. Clients enforce their own HTTP timeouts.
     let timeout = Duration::from_secs(120);
+    // Identity-and-lifecycle I1: the client's own signature, carried to the provider, which checks it.
+    let client_signed = match super::client_sig::at_door(&state.task_ctx, caller.map(|c| c.principal()), params, "skill.invoke") {
+        super::client_sig::AtDoor::Proceed(signed) => signed,
+        super::client_sig::AtDoor::Refuse { reason, message } => {
+            return Err(jsonrpc_error_with_data(id, -32602, &message, json!({ "reason": reason })));
+        }
+    };
     // AE slice: the same evaluator preflight the MCP edge runs. `/a2a` is the *other* route a
     // foreign agent acts through, so leaving it unguarded would mean the enforcement point could be
     // walked around by choosing a different door — and the evidence would still have said
@@ -893,6 +899,7 @@ async fn dispatch_send(
         &state.task_ctx, caller, target,
         "skill.invoke".into(), Bytes::from(text.into_bytes()), timeout, gateway_caller::presented_mandate(params),
         Some(&resource_claim),
+        client_signed.as_ref(),
     ).await;
 
     // A timeout is *unknown*, never a negative — a long-running skill may well have completed.
@@ -1194,6 +1201,16 @@ pub(crate) async fn tasks_send_subscribe(
             })
         };
 
+        // Identity-and-lifecycle I1: as on the unary send.
+        let client_signed = match super::client_sig::at_door(&state.task_ctx, caller.as_ref().map(|c| c.principal()), &req.meta, "skill.invoke") {
+            super::client_sig::AtDoor::Proceed(signed) => signed,
+            super::client_sig::AtDoor::Refuse { message, .. } => {
+                working.abort();
+                grants.abort();
+                send_all(stream_events(&id, &req, Step::Failed { error: Some(message), detail: None })).await;
+                return;
+            }
+        };
         #[cfg(all(feature = "gateway", feature = "tls"))]
         let preflight = super::http::ae_preflight(
             &state.task_ctx,
@@ -1228,6 +1245,7 @@ pub(crate) async fn tasks_send_subscribe(
             &state.task_ctx, caller.as_ref(), target,
             "skill.invoke".into(), Bytes::from(req.text.clone().into_bytes()), timeout, mandate,
             Some(&resource_claim),
+            client_signed.as_ref(),
         ).await;
 
         #[cfg(all(feature = "gateway", feature = "tls"))]

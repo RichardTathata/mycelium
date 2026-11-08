@@ -131,6 +131,13 @@ pub(super) async fn gw_llm_call(
     use crate::signal::signal_kind;
 
     if let Some(refused) = refuse_prompt_name(&body.ns, &body.name) { return refused; }
+    // Identity-and-lifecycle I1: this door binds no client signature; one sent here is refused, never dropped.
+    if crate::agent::client_sig::carries_client_signature(&serde_json::json!({ "_meta": body.meta })) {
+        return (StatusCode::BAD_REQUEST, axum::Json(serde_json::json!({
+            "error": "client_signature_unbound", "reason": "client_signature_unbound",
+            "detail": "the LLM doors bind no client signature (cs/cn): send the call unsigned",
+        }))).into_response();
+    }
     let timeout = gateway_rpc_timeout_ms(body.timeout_ms);
     let filter  = CapFilter::new(body.ns.as_str(), body.name.as_str());
     let providers = resolve_cap_providers(&ctx.agent_ctx.kv_state, &filter);
@@ -190,6 +197,8 @@ pub(super) async fn gw_llm_call(
         timeout,
         gateway_caller::presented_mandate(&params),
         Some(&resource),
+        // The LLM doors bind no client signature (identity-and-lifecycle I1 binds `tools/call` and `skill.invoke`).
+        None,
     ).await;
     #[cfg(feature = "tls")]
     {
@@ -257,6 +266,11 @@ pub(super) async fn gw_llm_stream(
     let providers = resolve_cap_providers(&ctx.agent_ctx.kv_state, &filter);
 
     let event = match providers.into_iter().next() {
+        // Identity-and-lifecycle I1: this door binds no client signature; one sent here is refused, never dropped.
+        _ if crate::agent::client_sig::carries_client_signature(&serde_json::json!({ "_meta": body.meta })) => {
+            let data = serde_json::json!({"type":"error","error":"client_signature_unbound"}).to_string();
+            Event::default().data(data)
+        }
         // Post-360 row E: the stream's own error channel, as for every other refusal here.
         _ if crate::agent::prompt::prompt_key(&body.ns, &body.name).is_err() => {
             let data = serde_json::json!({"type":"error","error":"invalid_prompt_name"}).to_string();
@@ -320,6 +334,8 @@ pub(super) async fn llm_stream_event(
         timeout,
         gateway_caller::presented_mandate(&params),
         Some(&resource),
+        // The LLM doors bind no client signature (identity-and-lifecycle I1 binds `tools/call` and `skill.invoke`).
+        None,
     ).await;
     #[cfg(feature = "tls")]
     {

@@ -211,6 +211,24 @@ pub(super) async fn stats_handler(State(ctx): State<Arc<HttpCtx>>) -> impl IntoR
         body["caller_envelopes_without_id"] = json!(r.without_id.load(std::sync::atomic::Ordering::Relaxed));
         body["caller_envelopes_replayed"] = json!(r.replayed.load(std::sync::atomic::Ordering::Relaxed));
     }
+    // Identity-and-lifecycle I1: client signatures' `cn`s dropped as replays, and new instances refused at the cap.
+    #[cfg(feature = "tls")]
+    {
+        let c = &ctx.agent_ctx.client_replay;
+        body["client_signatures_replayed"] = json!(c.replayed.load(std::sync::atomic::Ordering::Relaxed));
+        body["client_instances_refused"] = json!(c.instances_refused.load(std::sync::atomic::Ordering::Relaxed));
+    }
+    // Identity-and-lifecycle I1: unsigned calls from a principal with a client certificate on record — at this
+    // gateway's doors, by kind, and received at this node as a provider.
+    #[cfg(feature = "tls")]
+    {
+        let u = &ctx.agent_ctx.unsigned_actions;
+        body["gateway_actions_unsigned"] = json!({
+            "tools/call": u.tools_call.load(std::sync::atomic::Ordering::Relaxed),
+            "skill.invoke": u.skill_invoke.load(std::sync::atomic::Ordering::Relaxed),
+        });
+        body["provider_actions_unsigned"] = json!(u.at_provider.load(std::sync::atomic::Ordering::Relaxed));
+    }
     // #695's review: federated credentials refused at this gateway's edge as replayed, and as
     // undecidable (the partner's window full). Zero without an edge.
     #[cfg(feature = "tls")]

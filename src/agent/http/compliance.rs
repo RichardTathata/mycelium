@@ -164,6 +164,7 @@ pub(super) async fn gw_identity_revoke(
 #[cfg(feature = "compliance")]
 pub(super) async fn gw_identity_client_cert(
     State(ctx): State<Arc<HttpCtx>>,
+    caller: Option<Extension<ResolvedPrincipal>>,
     Json(body):  Json<serde_json::Value>,
 ) -> Response {
     use rustls::pki_types::pem::PemObject;
@@ -173,9 +174,20 @@ pub(super) async fn gw_identity_client_cert(
     let Ok(der) = rustls::pki_types::CertificateDer::from_pem_slice(pem.as_bytes()) else {
         return (StatusCode::BAD_REQUEST, Json(json!({"error": "cert_pem holds no PEM certificate"}))).into_response();
     };
+    // #741's review, item 7: this door publishes only its own issuer's certificates — the issuer is what qualifies this
+    // gateway's principals, so a certificate for another issuer names no principal this gateway serves.
+    let Some(issuer) = ctx.agent_ctx.config.gateway_identity_issuer.as_deref() else {
+        let why = "gateway_identity_issuer_unset";
+        return (StatusCode::CONFLICT, Json(json!({"error": "set gateway_identity_issuer: this gateway's principals are qualified by its node id, which no client certificate names", "reason": why}))).into_response();
+    };
+    if mycelium_core::tls::client_identity(der.as_ref()).is_some_and(|id| id.issuer != issuer) {
+        return (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({"error": format!("the certificate names another issuer than this gateway's ({issuer})"), "reason": "issuer_mismatch"}))).into_response();
+    }
     match super::client_cert::publish(&ctx.agent_ctx, der.as_ref()) {
         Ok(p) => {
-            audit_govern(&ctx.agent_ctx, "identity/client-cert", json!({"principal": p.principal, "key": hex32(&p.key)}).to_string());
+            // The bearer who published, beside the principal published for (#741's review, item 7).
+            let by = caller.as_ref().map(|Extension(c)| c.principal().to_string());
+            audit_govern(&ctx.agent_ctx, "identity/client-cert", json!({"principal": p.principal, "key": hex32(&p.key), "by": by}).to_string());
             Json(json!({"ok": true, "principal": p.principal, "key": hex32(&p.key), "issued_ms": p.issued_ms})).into_response()
         }
         Err(e) => {

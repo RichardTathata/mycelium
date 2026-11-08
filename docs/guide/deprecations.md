@@ -2643,3 +2643,46 @@ node.
 
 Wire **v12** unchanged. What I1 leaves for later (`cs`/`cn`, the SDK clients, client-held grants) is listed on the
 [feature page](../features/client-certificates.md).
+
+## 87. A client's own signature on a call: `cs`/`cn` in `params._meta`; an unsigned call from a certificate holder is counted (unreleased, identity-and-lifecycle I1, second half)
+
+A service holding a client certificate can sign a `tools/call` or an A2A send with its key and send
+`params._meta.cs` and `params._meta.cn`. The gateway carries both in the caller envelope, and the provider checks
+them at its receive boundary.
+
+- **Who is affected:** nothing changes for a call without `cs`/`cn`. Such a call from a principal whose client
+  certificate is on record is counted and still served. It is counted at the `/mcp` `tools/call` door and at both
+  `/a2a` doors (`gateway_actions_unsigned` on `/stats`, `mycelium_gateway_actions_unsigned_total{kind}` under
+  `metrics`), and again at the provider that runs an `mcp.invoke` or `skill.invoke` (`provider_actions_unsigned`,
+  `mycelium_provider_actions_unsigned_total`). The KV routes, the raw RPC routes and `ServiceHandle::gateway_rpc_call`
+  count nothing. A later release will refuse an unsigned call; sign calls before then.
+- **`_meta.cs` and `_meta.cn` are reserved.** An MCP or A2A client that already sends either key for its own purpose
+  is now refused with `-32602` `request_malformed`, because both must parse as a client signature and travel
+  together. The LLM doors bind no signature: `/gateway/llm/call` answers `400 client_signature_unbound` and
+  `/gateway/llm/stream` an error event of that name, rather than dropping the signature.
+- **The arguments' digest is RFC 8785 (JCS)**, in all three languages: ECMAScript's number and string forms, members
+  sorted by UTF-16 code units. A signer that hashes another encoding is refused `client_signature_invalid` on any
+  float written in exponent form. The mandate and grant `arguments_digest` is unchanged.
+- **Large numbers:** a signed call whose arguments hold any number whose magnitude is 2^53 or more, float or not (e.g.
+  `6.022e23`), is refused by every signer and by the provider (`client_signature_unsafe_integer`): send it as a string.
+  The canonical form cannot bind such a number exactly, and the rule covers floats because JavaScript cannot tell
+  `1e16` from `10000000000000000`.
+- **Refusal codes:** `client_key_unknown` (no certificate for the key here yet; retry once its record arrives),
+  `client_key_superseded` (final), `client_signature_invalid`, `client_signature_unbound`, `client_signature_malformed`,
+  and `client_instances_exhausted` (more than 1,024 processes signing under one key inside the window; answered, not
+  dropped). A replayed `cn` is dropped without an answer, and is counted (`client_signatures_replayed` on `/stats`).
+- **A signed call needs `gateway_identity_issuer` set** on the gateway it goes through. Without it the gateway refuses
+  the call with `-32602`, reason `gateway_identity_issuer_unset`.
+- **Mixed versions:** an older provider keeps `cs`/`cn` among the envelope's unknown fields and checks nothing, so
+  upgrade providers before relying on the check. An older gateway drops `_meta.cs`/`cn` and sends the call unsigned.
+- **Code:** `CallerError` gained `ClientSignature` and `ClientReplayed`. It is `#[non_exhaustive]`, and a `_` arm must
+  fail closed. `GatewayCaller` gained `client_signed`. `mycelium_core::tls` gained `RESERVED_CLIENT_NAMES`.
+- **The publishing door checks its issuer:** `POST /gateway/identity/client-cert` now answers `409
+  gateway_identity_issuer_unset` on a gateway without `gateway_identity_issuer`, and `422 issuer_mismatch` for a
+  certificate issued for another issuer. Set the issuer on the gateway you publish through. The sealed audit record
+  of a publication now names the publishing bearer (`by`) beside the certificate's principal.
+- **Reserved name:** `mycelium tls issue --client legacy` is refused, and a certificate naming `legacy` is no client
+  identity: `token:{issuer}/legacy` is the legacy `gateway_auth_token`'s principal.
+- **Python:** signing needs `pip install 'mycelium-py[sign]'`, which adds `cryptography`.
+
+Wire **v12** unchanged: `cs` and `cn` are payload.

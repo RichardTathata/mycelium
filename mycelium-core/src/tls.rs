@@ -216,10 +216,15 @@ impl ClientIdentity {
     }
 }
 
+/// Client names no certificate may carry, because the gateway already gives `token:{issuer}/{name}` to another
+/// credential: `legacy` is the legacy `gateway_auth_token`'s principal (#741's review, item 7). A positional token
+/// (`#{i}`) cannot collide: `#` is not a segment character.
+pub const RESERVED_CLIENT_NAMES: &[&str] = &["legacy"];
+
 /// Read a client certificate's [`ClientIdentity`]: exactly one `mycelium-client://{issuer}/{name}` URI
-/// with two valid segments, and no `mycelium://` (node) URI — a certificate naming both is no client's
-/// and no node's. `None` otherwise. Says nothing about who issued it: judge the chain with
-/// [`NodeTls::verify_member_cert`] first. Never panics.
+/// with two valid segments, a name not in [`RESERVED_CLIENT_NAMES`], and no `mycelium://` (node) URI — a
+/// certificate naming both is no client's and no node's. `None` otherwise. Says nothing about who issued it: judge
+/// the chain with [`NodeTls::verify_member_cert`] first. Never panics.
 #[cfg(feature = "tls")]
 pub fn client_identity(der: &[u8]) -> Option<ClientIdentity> {
     let id = cert_identity(der)?;
@@ -232,7 +237,7 @@ pub fn client_identity(der: &[u8]) -> Option<ClientIdentity> {
         return None;
     }
     let (issuer, name) = only.split_once('/')?;
-    if !valid_client_segment(issuer) || !valid_client_segment(name) {
+    if !valid_client_segment(issuer) || !valid_client_segment(name) || RESERVED_CLIENT_NAMES.contains(&name) {
         return None;
     }
     Some(ClientIdentity { issuer: issuer.to_string(), name: name.to_string(), key: id.key, issued_ms: id.issued_ms })
@@ -1019,6 +1024,11 @@ mod imp {
         if !super::valid_client_segment(issuer) || !super::valid_client_segment(name) {
             return Err(err(format!(
                 "TLS: a client principal's issuer and name are each 1-128 of A-Z a-z 0-9 - _ . (got {issuer:?} / {name:?})"
+            )));
+        }
+        if super::RESERVED_CLIENT_NAMES.contains(&name) {
+            return Err(err(format!(
+                "TLS: the client name {name:?} is reserved: token:{issuer}/{name} is already another credential's principal"
             )));
         }
         let pkcs8 = signing_key.to_pkcs8_der().map_err(|e| err(format!("TLS: encode client key: {e}")))?;
@@ -2357,5 +2367,31 @@ mod ca_race_tests {
         let id = super::client_identity(ok.as_ref()).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!((id.issuer.as_str(), id.name.as_str(), id.issued_ms), ("fleet.example", "svc_1-a", Some(7)));
+    }
+
+    /// **A client named `legacy` is refused** (#741's review, item 7): `token:{issuer}/legacy` is the legacy
+    /// `gateway_auth_token`'s principal, so a client certificate naming it would be read as that credential's holder.
+    /// Refused at issue, and a CA-minted certificate naming it is no client identity. Seen failing first: both
+    /// accepted.
+    #[test]
+    fn a_client_named_legacy_is_refused_at_issue_and_read_as_no_client() {
+        let dir = fresh_dir("client-legacy");
+        let cfg = TlsConfig { auto_cert_dir: dir.clone(), ..TlsConfig::default() };
+        let (_, ca_key) = load_or_create_ca(&cfg).unwrap();
+        let k = ed25519_dalek::SigningKey::from_bytes(&[44u8; 32]);
+        let issued = super::imp::generate_client_cert("fleet", "legacy", &k, &ca_key, 1);
+        let minted = {
+            let kp = rcgen::KeyPair::try_from(ed25519_dalek::pkcs8::EncodePrivateKey::to_pkcs8_der(&k).unwrap().as_bytes()).unwrap();
+            let mut p = rcgen::CertificateParams::new(vec![]).unwrap();
+            p.subject_alt_names = vec![rcgen::SanType::URI(rcgen::Ia5String::try_from(super::client_uri("fleet", "legacy")).unwrap())];
+            p.serial_number = Some(rcgen::SerialNumber::from(2u64));
+            let mut ca_params = rcgen::CertificateParams::new(vec![]).unwrap();
+            ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+            let ca = ca_params.self_signed(&ca_key).unwrap();
+            p.signed_by(&kp, &ca, &ca_key).unwrap().der().to_vec()
+        };
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(issued.is_err(), "ISSUED: a client certificate naming `legacy`");
+        assert_eq!(super::client_identity(&minted), None, "READ: a certificate naming `legacy` as a client identity");
     }
 }

@@ -126,6 +126,20 @@ pub(super) async fn mcp_handler(
                 }
             };
 
+            // Identity-and-lifecycle I1: the client's own signature, read here and carried to the provider, which checks
+            // it; a signed call needs this gateway's issuer set; an unsigned one from a certificate holder is counted.
+            let client_signed = match crate::agent::client_sig::at_door(
+                &ctx.agent_ctx, caller.as_ref().map(|c| c.principal()), &req["params"], "tools/call",
+            ) {
+                crate::agent::client_sig::AtDoor::Proceed(signed) => signed,
+                crate::agent::client_sig::AtDoor::Refuse { reason, message } => {
+                    return Json(json!({
+                        "jsonrpc": "2.0", "id": id,
+                        "error": {"code": -32602, "message": message, "data": {"reason": reason}},
+                    })).into_response();
+                }
+            };
+
             // AE slice: the evaluator preflight, between the auth layer and the dispatch. Inert
             // unless an evaluator is attached (`with_action_evaluator`); with one, a call whose
             // authority the policy does not establish never reaches the provider *through this
@@ -179,6 +193,7 @@ pub(super) async fn mcp_handler(
                 mcp_dispatch_timeout(&ctx.agent_ctx.node_id),
                 gateway_caller::presented_mandate(&req["params"]),
                 Some(&resource_claim),
+                client_signed.as_ref(),
             ).await;
 
             // What this gateway actually observed. A timeout is **unknown**, never a negative: the

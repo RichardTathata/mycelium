@@ -1,0 +1,115 @@
+{
+  "_doc": "The client-signature vector (identity-and-lifecycle I1, D1'): Rust (src/agent/client_sig_tests.rs), jest (mycelium-ts/tests/client_sig.test.ts) and pytest (mycelium-py/tests/test_client_sig.py) each rebuild message_hex from the inputs and check signature_b64 under verifying_key_b64; Ed25519 is deterministic, so the signature is pinned too.",
+  "seed_hex": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+  "principal": "token:fleet/forecaster",
+  "operation": "tools/call",
+  "resource": "tool:weather.forecast@10.0.0.1:57000",
+  "arguments": {
+    "city": "Lyon",
+    "days": 3
+  },
+  "arguments_canonical": "{\"city\":\"Lyon\",\"days\":3}",
+  "arguments_digest_hex": "c74a2b58148ec8b68e232ab0eeaeae86ea4520429e4b75b990ec1418abd489db",
+  "issued_at_ms": 1767225600000,
+  "instance_hex": "0123456789abcdef",
+  "counter": 5,
+  "message_hex": "6d7963656c69756d2e676174657761792f636c69656e742d7369676e61747572652f3116000000746f6b656e3a666c6565742f666f72656361737465720a000000746f6f6c732f63616c6c15000000746f6f6c3a776561746865722e666f726563617374c74a2b58148ec8b68e232ab0eeaeae86ea4520429e4b75b990ec1418abd489db00a8da769b010000efcdab89674523010500000000000000",
+  "verifying_key_b64": "ebVWLo/mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ=",
+  "signature_b64": "VXuVkR2pCh4oh2lq9zolHJGz2IxfP6s1kiNIULYXHeZP2xjOswQp8kgZbZTVkLbjJDoGUl8B0u1q/1GvbJ3HDg==",
+  "meta": {
+    "cs": {
+      "k": "ebVWLo/mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ=",
+      "sig": "VXuVkR2pCh4oh2lq9zolHJGz2IxfP6s1kiNIULYXHeZP2xjOswQp8kgZbZTVkLbjJDoGUl8B0u1q/1GvbJ3HDg=="
+    },
+    "cn": {
+      "t": 1767225600000,
+      "i": "0123456789abcdef",
+      "c": 5
+    }
+  },
+  "_doc_canonical": "canonical_cases: the arguments' canonical form is RFC 8785 (JCS) — ECMAScript number and string forms, members sorted by UTF-16 code units; each case gives the canonical text and its SHA-256, checked in Rust, jest and pytest.",
+  "canonical_cases": [
+    {
+      "arguments": {
+        "tolerance": 0.00001
+      },
+      "canonical": "{\"tolerance\":0.00001}",
+      "digest_hex": "f4ee9650d8adc7d23dad33467d463420b083daadd86d31e1fd4e6d70a1364884"
+    },
+    {
+      "arguments": {
+        "big": 10000000000000000
+      },
+      "canonical": "{\"big\":10000000000000000}",
+      "digest_hex": "0cd075ad12f3acd7fbadd467d1195c0e4958130953e0ede34185666e76dabc56"
+    },
+    {
+      "arguments": {
+        "huge": 1e+21
+      },
+      "canonical": "{\"huge\":1e+21}",
+      "digest_hex": "bd4f9c72b218b69f323c61def5febdaca9576b48e615c0c0e14ed45d8b780cd4"
+    },
+    {
+      "arguments": {
+        "tiny": 1e-7,
+        "small": 0.000001
+      },
+      "canonical": "{\"small\":0.000001,\"tiny\":1e-7}",
+      "digest_hex": "7cb56a86662f2deb41aa608e40e8fdba12a85ca197bf19e43a16ee8f00fc41c9"
+    },
+    {
+      "arguments": {
+        "pi": 3.141592653589793,
+        "neg": -2.5,
+        "third": 0.3333333333333333,
+        "max": 1.7976931348623157e+308
+      },
+      "canonical": "{\"max\":1.7976931348623157e+308,\"neg\":-2.5,\"pi\":3.141592653589793,\"third\":0.3333333333333333}",
+      "digest_hex": "85c710f649927152a5c4b6d33006a3c50df7e1b45eeb9621bae971941178b820"
+    },
+    {
+      "arguments": {
+        "city": "Zürich",
+        "sprout": "🌱",
+        "cjk": "東京",
+        "ctl": "\u0001\n\"\\ "
+      },
+      "canonical": "{\"city\":\"Zürich\",\"cjk\":\"東京\",\"ctl\":\"\\u0001\\n\\\"\\\\ \",\"sprout\":\"🌱\"}",
+      "digest_hex": "60272242a77a7cab68b417c74eab61e09115503a80f48308d268130b123c09c6"
+    },
+    {
+      "arguments": {
+        "b": {
+          "z": 1,
+          "a": [
+            {
+              "y": true,
+              "x": null
+            }
+          ]
+        },
+        "a": "x",
+        "": 1,
+        "😀": 2
+      },
+      "canonical": "{\"a\":\"x\",\"b\":{\"a\":[{\"x\":null,\"y\":true}],\"z\":1},\"😀\":2,\"\":1}",
+      "digest_hex": "0141c4f464a9e7ed084691ac716168ccdcd51ab35ab36f42c9c5dc14b12352b8"
+    }
+  ],
+  "_doc_integers": "unsafe_integer_cases and safe_integer_cases are raw JSON texts, parsed by each language itself: a signed call whose arguments hold an integral number outside +-(2^53 - 1) is refused by every signer and by the provider (client_signature_unsafe_integer), because RFC 8785 writes it as the nearest double; send large ids as strings.",
+  "unsafe_integer_cases": [
+    "{\"id\":9007199254740993}",
+    "{\"id\":9007199254740992}",
+    "{\"n\":-9007199254740992}",
+    "{\"x\":[1,{\"y\":18446744073709551615}]}",
+    "{\"f\":1e16}",
+    "{\"avogadro\":6.022e23}"
+  ],
+  "safe_integer_cases": [
+    "{\"id\":9007199254740991}",
+    "{\"n\":-9007199254740991}",
+    "{\"id\":\"9007199254740993\"}",
+    "{\"f\":0.5,\"g\":1e-21}"
+  ]
+}

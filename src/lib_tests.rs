@@ -286,6 +286,10 @@ fn spawn_handler_with(
         #[cfg(feature = "tls")]
         client_certs: Arc::new(crate::agent::client_cert::ClientCertLedger::default()),
         caller_replay: Default::default(),
+        #[cfg(feature = "tls")]
+        client_replay: Default::default(),
+        #[cfg(feature = "tls")]
+        unsigned_actions: Default::default(),
         causal_misplaced: Default::default(),
         #[cfg(feature = "a2a")]
         a2a_mounted: std::sync::atomic::AtomicBool::new(false),
@@ -4372,6 +4376,10 @@ async fn test_subscribe_notified_via_gossip() {
         #[cfg(feature = "tls")]
         client_certs: Arc::new(crate::agent::client_cert::ClientCertLedger::default()),
         caller_replay: Default::default(),
+        #[cfg(feature = "tls")]
+        client_replay: Default::default(),
+        #[cfg(feature = "tls")]
+        unsigned_actions: Default::default(),
         causal_misplaced: Default::default(),
         #[cfg(feature = "a2a")]
         a2a_mounted: std::sync::atomic::AtomicBool::new(false),

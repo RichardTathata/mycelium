@@ -329,6 +329,16 @@ pub use mycelium_core::tls::{client_identity, client_uri, issue_client_cert, val
 /// certificate, or unknown — and the record path a client certificate is published under.
 #[cfg(feature = "tls")]
 pub use agent::client_cert::{client_cert_key, ClientKeyStanding, PublishRefusal as ClientCertRefusal, Published as ClientCertPublished, CLIENT_CERT_PREFIX};
+/// Identity-and-lifecycle I1 (D1′): a client's own signature on a gateway call. A service signs each `tools/call` or
+/// A2A send with its client certificate's key ([`ClientSigner`]) and sends `cs`/`cn` in `params._meta`; the provider
+/// checks it at its receive boundary. [`client_signature_message`] is the published format the SDKs compute too.
+pub use agent::client_sig::{
+    client_arguments_digest, client_signature_message, door_binding_a2a, door_binding_mcp, holds_unsafe_integer, ClientNonce, ClientSignature,
+    UnsafeInteger,
+    ClientSigned, CLIENT_SIGNATURE_TAG,
+};
+#[cfg(feature = "tls")]
+pub use agent::client_sig::ClientSigner;
 /// The replay seams' install point, re-exported under `sim` so a **companion** on the public API
 /// can record and replay its own runs under the kernel (item 6; first used by CN2).
 /// Re-exported in every build, not only under `sim`: a companion routes its draws and clocks through
