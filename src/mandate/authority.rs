@@ -568,8 +568,22 @@ pub struct DurableEpochs {
 impl DurableEpochs {
     /// Open (or create) the journal at `path` and read the floors it holds.
     pub fn open(path: impl AsRef<std::path::Path>) -> Result<std::sync::Arc<Self>, crate::knowledge::durable::DurableOpenError> {
-        use crate::knowledge::durable::DurableOpenError;
         let path = path.as_ref();
+        let floors = Self::read_floors(path)?;
+        let journal = crate::agent::journal::Journal::open(path, EPOCHS_STREAM).map_err(crate::knowledge::durable::DurableOpenError::Io)?;
+        Ok(std::sync::Arc::new(Self { journal, floors: std::sync::Mutex::new(floors) }))
+    }
+
+    /// Whether the journal at `path` would open: every entry it holds decodes at a known version. Reads only — the
+    /// journal is not opened for writing (`mycelium doctor`'s check of `[authority]`'s epochs, identity-and-lifecycle
+    /// I0). A missing journal is fine: `open` creates it.
+    #[cfg_attr(not(feature = "compliance"), allow(dead_code))]
+    pub(crate) fn check(path: &std::path::Path) -> Result<(), crate::knowledge::durable::DurableOpenError> {
+        Self::read_floors(path).map(drop)
+    }
+
+    fn read_floors(path: &std::path::Path) -> Result<BTreeMap<String, u64>, crate::knowledge::durable::DurableOpenError> {
+        use crate::knowledge::durable::DurableOpenError;
         let entries = match crate::agent::journal::read_journal(path) {
             Ok(e) => e,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
@@ -585,8 +599,7 @@ impl DurableEpochs {
             let f: &mut u64 = floors.entry(e.scope).or_insert(0);
             *f = (*f).max(e.epoch);
         }
-        let journal = crate::agent::journal::Journal::open(path, EPOCHS_STREAM).map_err(DurableOpenError::Io)?;
-        Ok(std::sync::Arc::new(Self { journal, floors: std::sync::Mutex::new(floors) }))
+        Ok(floors)
     }
 
     /// The highest epoch ever installed for `scope`, if any was recorded.

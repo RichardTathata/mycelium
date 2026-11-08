@@ -201,7 +201,7 @@ requires_mandate = "depot-remit"
 ```
 
 ```toml
-# templates/governed-call-py/units/purchaser.toml — a tool that waits for a grant, and who may issue one
+# templates/governed-call-py/units/purchaser.toml — a tool that waits for a grant, and who may issue and revoke one
 [[rule]]
 actor          = "purchaser"
 operation      = "tools/call"
@@ -209,8 +209,13 @@ resource       = "tool:purchase.approve"
 requires_grant = true
 
 [[rule]]
-actor     = "treasurer"
+actor     = "token:governed-call/treasurer"
 operation = "grant.issue"
+resource  = "tool:purchase.approve"
+
+[[rule]]
+actor     = "token:governed-call/treasurer"
+operation = "grant.revoke"
 resource  = "tool:purchase.approve"
 ```
 

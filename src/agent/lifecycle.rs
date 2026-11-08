@@ -83,6 +83,49 @@ impl GossipAgent {
                 });
             }
         }
+        // `[authority]` (identity-and-lifecycle I0) in a build that cannot attach what it describes: the same class.
+        // Without `compliance` the table would be accepted and every door would enforce nothing.
+        #[cfg(not(feature = "compliance"))]
+        if self.config.authority.is_some() {
+            return Err(GossipError::InvalidField {
+                field: "authority",
+                reason: "an [authority] table is enforced only in a build with the `compliance` feature (the \
+                         evaluator, execution authority, provider enforcement and evidence journal it attaches); \
+                         this build would ignore it and every door would enforce nothing. Build with \
+                         `--features compliance`, or remove the table"
+                    .into(),
+            });
+        }
+        // With it: the declaration is read and this node's authority built and checked here — every refusal by
+        // name, before a port is bound — and attached by `start()` (the journal opened there) or by the doctor.
+        // One source of authority per node, checked on every call — so a retried `start()` is checked too: any of the
+        // three attached in code beside the table is refused, since the code's would be the live one and the table's
+        // journal would record nothing (#733's review, finding 1).
+        #[cfg(feature = "compliance")]
+        if let Some(auth) = &self.config.authority {
+            if !self.task_ctx.declared_attached.load(Ordering::Acquire) {
+                for (what, attached) in [
+                    ("an action evaluator (with_action_evaluator)", self.task_ctx.action_evaluator.get().is_some()),
+                    ("an execution authority (with_execution_authority)", self.task_ctx.execution_authority.get().is_some()),
+                    ("an evidence journal (with_evidence_journal)", self.task_ctx.evidence_journal.get().is_some()),
+                ] {
+                    if attached {
+                        return Err(GossipError::InvalidField {
+                            field: "authority",
+                            reason: format!(
+                                "{what} is already attached in code; [authority] attaches this node's evaluator, \
+                                 execution authority and evidence journal from its declaration, and a node has one \
+                                 source of authority. Remove the table, or the attachment"
+                            ),
+                        });
+                    }
+                }
+            }
+            if self.task_ctx.declared_authority.get().is_none() {
+                let planned = super::declared_authority::plan(&self.config, &self.node_id, auth)?;
+                let _ = self.task_ctx.declared_authority.set(Arc::new(planned));
+            }
+        }
         // The identity provider is an outbound the substrate chooses (`report.egress`, plan §8): an
         // `[oidc]` table whose issuer or JWKS host a non-empty `egress.allow_hosts` does not permit
         // is a contradiction — the gateway would hold no keys and refuse every token — refused by
@@ -270,6 +313,13 @@ impl GossipAgent {
     /// Binds the TCP listener(s) and launches background loops.
     pub async fn start(&self) -> Result<(), GossipError> {
         self.preflight()?;
+        // `[authority]`'s plan, attached before the boundary: the journal opened first (identity-and-lifecycle I0).
+        #[cfg(feature = "compliance")]
+        if let Some(planned) = self.task_ctx.declared_authority.get().cloned()
+            && !self.task_ctx.declared_attached.load(Ordering::Acquire)
+        {
+            super::declared_authority::attach(self, &planned)?;
+        }
         // The lifecycle boundary (plan G13): every attachment is in and the configuration is what it
         // is. Resolve every registered guarantee against this node and say so, once, before traffic.
         self.task_ctx.started.store(true, std::sync::atomic::Ordering::Release);

@@ -7,6 +7,9 @@ profile = "dev"
 bind_address = "127.0.0.1"
 bind_port = 7950
 http_port = 8300            # the gateway; http_addr stays 127.0.0.1, so only this host reaches it
+# The issuer of this gateway's token principals (`token:governed-call/<name>`), fixed so the unit's rules can name
+# them; without it the issuer is the node's id.
+gateway_identity_issuer = "governed-call"
 
 [[gateway_named_tokens]]
 name   = "alice"

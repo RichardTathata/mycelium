@@ -473,7 +473,7 @@ pub use mesh_manifest::{
     GroupManifest, GroupStatus, MeshManifest, MeshMeta, MeshStatus,
     manifest_keys, semver_gt,
 };
-pub use config::{CredentialBinding, CredentialForm, credential_placeholder, credential_placeholders_in, CREDENTIAL_PLACEHOLDER_MARKER, DomainProfile, EgressPolicy, PROFILE_NAMES, GatewayCallerProfile, GatewayNamedToken, GatewayToken, GatewayTlsConfig, GossipConfig, GroupTopologyPolicy, PersistenceConfig, SyncMode, TlsConfig, TopologyEnforcement};
+pub use config::{AuthorityConfig, AuthorityTier, GrantEntitlement, CredentialBinding, CredentialForm, credential_placeholder, credential_placeholders_in, CREDENTIAL_PLACEHOLDER_MARKER, DomainProfile, EgressPolicy, PROFILE_NAMES, GatewayCallerProfile, GatewayNamedToken, GatewayToken, GatewayTlsConfig, GossipConfig, GroupTopologyPolicy, PersistenceConfig, SyncMode, TlsConfig, TopologyEnforcement};
 pub use persistence::DataAtRestCipher;
 /// Exclusive ownership of a persistence file (`<file>.lock`), the lock the KV WAL and the node-local
 /// journal hold — re-exported so a companion's own log is refused to a second owner the same way.

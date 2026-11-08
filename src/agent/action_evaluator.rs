@@ -2069,6 +2069,22 @@ impl ActionEvaluator for ReferenceEvaluator {
         self.evaluate_with_history(env, &History::Unavailable("evaluated without a history".into()))
     }
 
+    /// The argument names its rules test (`requires_values`), so an enforcement point lifts exactly those into the
+    /// envelope. Without this the trait's default selected none, and every rule testing a value read *argument value
+    /// not available* at a live door — decided `Indeterminate`, never a permit (identity-and-lifecycle I0 found it:
+    /// the `governed-call` scaffold's own rule could not admit at the gateway).
+    fn security_relevant_arguments(&self) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .prohibitions
+            .iter()
+            .chain(self.allowances.iter())
+            .flat_map(|r| r.requires_values.iter().map(|(name, _)| name.clone()))
+            .collect();
+        names.sort();
+        names.dedup();
+        names
+    }
+
     fn mapping(&self, operation: &str, resource: &str) -> ActionMapping {
         let (catalogue, revision) = self
             .catalogue
@@ -2164,6 +2180,9 @@ impl ActionEvaluator for ReferenceEvaluator {
             };
         }
 
+        // A prohibition naming a value applies only when the value is equal — and decides `Indeterminate` when it
+        // is absent (`matches` lets an absent value through so `unestablished` reports it); a different value is
+        // not this prohibition, and the allowances decide (identity-and-lifecycle I0, #733).
         if let Some(p) = self.prohibitions.iter().find(|r| r.matches(env)) {
             let missing = unestablished(p);
             if !missing.is_empty() {
@@ -2624,6 +2643,53 @@ mod tests {
                 !r.states_a_composed_effect(),
                 "{ex:?} is not a completed effect",
             );
+        }
+    }
+
+    /// A prohibition on `ledger = "capital"` beside an allowance for any `tool:pay` call: the three readings of a
+    /// prohibition's named value, now that the reference evaluator selects the arguments its rules test
+    /// (identity-and-lifecycle I0).
+    fn ledger_prohibited() -> ReferenceEvaluator {
+        let mut no = Rule::new("*", "tools/call", "tool:pay");
+        no.requires_values = vec![("ledger".into(), serde_json::json!("capital"))];
+        ReferenceEvaluator::new("rev-1").map_action("tools/call", "*").prohibit(no).allow(Rule::new("*", "tools/call", "tool:pay"))
+    }
+
+    fn with_ledger(ev: &ReferenceEvaluator, ledger: Option<&str>) -> Decision {
+        let mut env = envelope("alice", "tools/call", "tool:pay");
+        if let Some(l) = ledger {
+            env.selected_arguments.insert("ledger".into(), serde_json::json!(l));
+        }
+        ev.evaluate(&env)
+    }
+
+    /// **A prohibition's value present and equal: a definite deny.**
+    #[test]
+    fn a_prohibition_whose_value_is_present_and_equal_denies() {
+        let ev = ledger_prohibited();
+        assert_eq!(ev.security_relevant_arguments(), vec!["ledger".to_string()], "the prohibition's argument is selected");
+        assert_eq!(with_ledger(&ev, Some("capital")).verdict, Verdict::Deny);
+    }
+
+    /// **A prohibition's value absent: not established, fail-closed** — `Indeterminate`, never a permit.
+    #[test]
+    fn a_prohibition_whose_value_is_absent_is_indeterminate() {
+        let d = with_ledger(&ledger_prohibited(), None);
+        assert_eq!(d.verdict, Verdict::Indeterminate, "{d:?}");
+        assert!(d.errors.iter().any(|e| e.contains("argument value not available: ledger")), "{d:?}");
+    }
+
+    /// **A prohibition's value present and different: the prohibition does not apply**, and the request is decided by
+    /// the allowances — the rule's literal meaning (`"Capital"` is not `"capital"`). A deny rule such as
+    /// `over_ceiling = true` must not refuse an order whose `over_ceiling` is `false` (the co-op's
+    /// `procurement_authority` demo). Seen failing first: with a different value read as fail-closed, the
+    /// petty-cash and the `"Capital"` calls were `Indeterminate`.
+    #[test]
+    fn a_prohibition_whose_value_is_present_and_different_does_not_apply() {
+        let ev = ledger_prohibited();
+        for other in ["petty-cash", "Capital"] {
+            let d = with_ledger(&ev, Some(other));
+            assert_eq!(d.verdict, Verdict::Permit, "{other}: the allowance decides: {d:?}");
         }
     }
 
