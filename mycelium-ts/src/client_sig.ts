@@ -48,8 +48,27 @@ export function clientSignatureMessage(
   return out;
 }
 
-/** What a `tools/call` of `name` signs: `["tools/call", "tool:{name}", digest(arguments)]`. */
+/**
+ * Does `value` hold, at any depth, an integral number outside ±(2^53 − 1)? RFC 8785 writes it as the nearest double,
+ * so a signature could not tell it from its neighbour: such a call is refused, at the signer and the provider. Send
+ * large ids as strings.
+ */
+export function holdsUnsafeInteger(value: unknown): boolean {
+  if (typeof value === "bigint") return value > BigInt(Number.MAX_SAFE_INTEGER) || value < -BigInt(Number.MAX_SAFE_INTEGER);
+  if (typeof value === "number") return Number.isInteger(value) && !Number.isSafeInteger(value);
+  if (Array.isArray(value)) return value.some(holdsUnsafeInteger);
+  if (value !== null && typeof value === "object") return Object.values(value as Record<string, unknown>).some(holdsUnsafeInteger);
+  return false;
+}
+
+/**
+ * What a `tools/call` of `name` signs: `["tools/call", "tool:{name}", digest(arguments)]`. Throws for arguments holding
+ * an integer outside ±(2^53 − 1) ({@link holdsUnsafeInteger}).
+ */
 export function mcpBinding(name: string, args: unknown): [string, string, Uint8Array] {
+  if (holdsUnsafeInteger(args)) {
+    throw new Error("an integer outside ±(2^53 - 1) cannot be bound exactly by a client signature: send it as a string");
+  }
   return ["tools/call", `tool:${name}`, argumentsDigest(args)];
 }
 
@@ -75,6 +94,12 @@ export class ClientSigner {
     if (this.key.asymmetricKeyType !== "ed25519") throw new Error("a client certificate's key is Ed25519");
     this.raw = createPublicKey(this.key).export({ format: "der", type: "spki" }).subarray(-32);
     this.instance = opts?.instance ?? randomBytes(8).readBigUInt64BE();
+  }
+
+  /** Sign a `tools/call` of `name` ({@link mcpBinding}, which refuses an unsafe integer). */
+  signToolsCall(name: string, args: unknown): { cs: ClientSignature; cn: ClientNonce } {
+    const [op, res, digest] = mcpBinding(name, args);
+    return this.sign(op, res, digest);
   }
 
   /** Sign one call; returns `{cs, cn}` to merge into `params._meta`. Each call takes the next counter unless given. */

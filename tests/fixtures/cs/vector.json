@@ -96,5 +96,19 @@
       "canonical": "{\"a\":\"x\",\"b\":{\"a\":[{\"x\":null,\"y\":true}],\"z\":1},\"😀\":2,\"\":1}",
       "digest_hex": "0141c4f464a9e7ed084691ac716168ccdcd51ab35ab36f42c9c5dc14b12352b8"
     }
+  ],
+  "_doc_integers": "unsafe_integer_cases and safe_integer_cases are raw JSON texts, parsed by each language itself: a signed call whose arguments hold an integral number outside +-(2^53 - 1) is refused by every signer and by the provider (client_signature_unsafe_integer), because RFC 8785 writes it as the nearest double; send large ids as strings.",
+  "unsafe_integer_cases": [
+    "{\"id\":9007199254740993}",
+    "{\"id\":9007199254740992}",
+    "{\"n\":-9007199254740992}",
+    "{\"x\":[1,{\"y\":18446744073709551615}]}",
+    "{\"f\":1e16}"
+  ],
+  "safe_integer_cases": [
+    "{\"id\":9007199254740991}",
+    "{\"n\":-9007199254740991}",
+    "{\"id\":\"9007199254740993\"}",
+    "{\"f\":0.5,\"g\":1e-21}"
   ]
 }

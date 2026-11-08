@@ -220,8 +220,50 @@ fn es_number(x: f64) -> String {
 /// What a door signs as for one call: the operation, the resource and the arguments the provider will act on. A
 /// `tools/call` is `("tools/call", "tool:{name}", arguments)`; an A2A send is `("skill.invoke", "skill:{id}",
 /// {"text": message})`.
-pub fn door_binding_mcp(name: &str, arguments: &serde_json::Value) -> (String, String, [u8; 32]) {
-    ("tools/call".into(), format!("tool:{name}"), client_arguments_digest(arguments))
+///
+/// Refuses ([`UnsafeInteger`]) arguments holding an integer outside ±(2^53 − 1): RFC 8785 writes it as the nearest
+/// double, so `9007199254740993` and `9007199254740992` would digest the same while the tool receives the exact
+/// integer, and a relay could swap one for the other under a signature that still verifies (#742's confirm round).
+/// Send large ids as strings.
+pub fn door_binding_mcp(name: &str, arguments: &serde_json::Value) -> Result<(String, String, [u8; 32]), UnsafeInteger> {
+    if holds_unsafe_integer(arguments) {
+        return Err(UnsafeInteger);
+    }
+    Ok(("tools/call".into(), format!("tool:{name}"), client_arguments_digest(arguments)))
+}
+
+/// A signed call's arguments held an integral number outside ±(2^53 − 1), which the canonical form cannot bind
+/// exactly. Send it as a string.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UnsafeInteger;
+
+impl std::fmt::Display for UnsafeInteger {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("an integer outside ±(2^53 - 1) cannot be bound exactly by a client signature: send it as a string")
+    }
+}
+
+impl std::error::Error for UnsafeInteger {}
+
+/// Does `value` hold, at any depth, an integral number outside ±(2^53 − 1)? An integer literal is judged exactly; a
+/// float is judged by its value, so `1e16` counts too — as it does in Python and TypeScript, which cannot tell the two
+/// apart.
+pub fn holds_unsafe_integer(value: &serde_json::Value) -> bool {
+    use serde_json::Value;
+    match value {
+        Value::Number(n) => {
+            if let Some(u) = n.as_u64() {
+                u > MAX_SAFE_INTEGER
+            } else if let Some(i) = n.as_i64() {
+                i.unsigned_abs() > MAX_SAFE_INTEGER
+            } else {
+                n.as_f64().is_some_and(|f| f.fract() == 0.0 && f.abs() > MAX_SAFE_INTEGER as f64)
+            }
+        }
+        Value::Array(items) => items.iter().any(holds_unsafe_integer),
+        Value::Object(map) => map.values().any(holds_unsafe_integer),
+        _ => false,
+    }
 }
 
 /// [`door_binding_mcp`] for an A2A send of `text` to `skill_id`.
@@ -280,6 +322,13 @@ impl ClientSigner {
         self.sign_at(operation, resource, arguments_digest, mycelium_core::sim_seam::wall_now_ms())
     }
 
+    /// Sign a `tools/call` of `name` with `arguments` ([`door_binding_mcp`]); refuses arguments holding an integer
+    /// outside ±(2^53 − 1) — send large ids as strings.
+    pub fn sign_tools_call(&self, name: &str, arguments: &serde_json::Value) -> Result<(ClientSignature, ClientNonce), UnsafeInteger> {
+        let (op, res, d) = door_binding_mcp(name, arguments)?;
+        Ok(self.sign(&op, &res, &d))
+    }
+
     /// `{"cs": …, "cn": …}`, to merge into `params._meta`.
     pub fn meta(signed: &(ClientSignature, ClientNonce)) -> serde_json::Value {
         serde_json::json!({ "cs": signed.0, "cn": signed.1 })
@@ -327,6 +376,8 @@ pub(crate) enum ClientSigRefusal {
     Malformed,
     /// The provider cannot read the operation, resource or arguments of this kind, so it cannot check the binding.
     Unbound,
+    /// The arguments hold an integer outside ±(2^53 − 1), which the canonical form cannot bind exactly.
+    UnsafeInteger,
     /// The signature does not verify over this call's operation, resource and arguments.
     BadSignature,
     /// `k` has no verified certificate under the principal here: never issued, another fleet's, or issued so recently
@@ -342,6 +393,7 @@ impl ClientSigRefusal {
         match self {
             Self::Malformed => "client_signature_malformed",
             Self::Unbound => "client_signature_unbound",
+            Self::UnsafeInteger => "client_signature_unsafe_integer",
             Self::BadSignature => "client_signature_invalid",
             Self::KeyUnknown => "client_key_unknown",
             Self::KeySuperseded => "client_key_superseded",
@@ -353,23 +405,24 @@ impl ClientSigRefusal {
 /// The operation, resource and arguments digest a provider acts on for a request of `kind`, read from its payload
 /// (and, for a skill, the envelope's resource claim, which names the skill): `None` for a kind whose binding this
 /// tree does not read.
-pub(crate) fn binding_of(kind: &str, payload: &[u8], resource_claim: Option<&str>) -> Option<(String, String, [u8; 32])> {
+pub(crate) fn binding_of(kind: &str, payload: &[u8], resource_claim: Option<&str>) -> Result<(String, String, [u8; 32]), ClientSigRefusal> {
+    let unbound = ClientSigRefusal::Unbound;
     if kind == crate::signal::signal_kind::MCP_INVOKE {
-        let v: serde_json::Value = serde_json::from_slice(payload).ok()?;
-        let name = v["params"]["name"].as_str()?;
-        let (op, res, d) = door_binding_mcp(name, &v["params"]["arguments"]);
+        let v: serde_json::Value = serde_json::from_slice(payload).map_err(|_| unbound)?;
+        let name = v["params"]["name"].as_str().ok_or(unbound)?;
+        let (op, res, d) = door_binding_mcp(name, &v["params"]["arguments"]).map_err(|_| ClientSigRefusal::UnsafeInteger)?;
         // The envelope's claim, where present, must name the same tool.
         if resource_claim.is_some_and(|r| r.split('@').next() != Some(res.as_str())) {
-            return None;
+            return Err(unbound);
         }
-        return Some((op, res, d));
+        return Ok((op, res, d));
     }
     if kind == "skill.invoke" {
-        let skill = resource_claim?.split('@').next()?.strip_prefix("skill:")?;
-        let text = std::str::from_utf8(payload).ok()?;
-        return Some(door_binding_a2a(skill, text));
+        let skill = resource_claim.and_then(|r| r.split('@').next()).and_then(|r| r.strip_prefix("skill:")).ok_or(unbound)?;
+        let text = std::str::from_utf8(payload).map_err(|_| unbound)?;
+        return Ok(door_binding_a2a(skill, text));
     }
-    None
+    Err(unbound)
 }
 
 /// Check `cs`/`cn` for a call made as `principal`: the binding read from the request, the signature, and the key's
@@ -389,7 +442,7 @@ pub(crate) fn check(
     let key: [u8; 32] = b64.decode(&cs.k).ok().and_then(|v| v.try_into().ok()).ok_or(ClientSigRefusal::Malformed)?;
     let sig: [u8; 64] = b64.decode(&cs.sig).ok().and_then(|v| v.try_into().ok()).ok_or(ClientSigRefusal::Malformed)?;
     let instance = cn.instance().ok_or(ClientSigRefusal::Malformed)?;
-    let (op, res, d) = binding_of(kind, payload, resource_claim).ok_or(ClientSigRefusal::Unbound)?;
+    let (op, res, d) = binding_of(kind, payload, resource_claim)?;
     let msg = client_signature_message(principal, &op, &res, &d, cn.t, instance, cn.c);
     if !crate::tls::verify_bytes(&key, &msg, &sig) {
         return Err(ClientSigRefusal::BadSignature);

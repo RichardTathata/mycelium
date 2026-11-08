@@ -81,7 +81,7 @@ fn signed_request(a: &GossipAgent, kind: &str, arguments: &serde_json::Value, si
 }
 
 fn sign(signer: &ClientSigner, arguments: &serde_json::Value) -> (ClientSignature, ClientNonce) {
-    let (op, res, d) = door_binding_mcp(TOOL, arguments);
+    let (op, res, d) = door_binding_mcp(TOOL, arguments).expect("safe arguments");
     signer.sign(&op, &res, &d)
 }
 
@@ -97,7 +97,7 @@ fn the_client_signature_vector_is_the_same_in_every_language() {
     let seed: [u8; 32] = (0..32).map(|i| u8::from_str_radix(&v["seed_hex"].as_str().unwrap()[2 * i..2 * i + 2], 16).unwrap()).collect::<Vec<_>>().try_into().unwrap();
     let key = ed25519_dalek::SigningKey::from_bytes(&seed);
     assert_eq!(serde_json::to_string(&v["arguments"]).unwrap(), v["arguments_canonical"].as_str().unwrap());
-    let (op, res, d) = door_binding_mcp("weather.forecast", &v["arguments"]);
+    let (op, res, d) = door_binding_mcp("weather.forecast", &v["arguments"]).unwrap();
     assert_eq!((op.as_str(), hex(&d)), (v["operation"].as_str().unwrap(), v["arguments_digest_hex"].as_str().unwrap().to_string()));
     assert_eq!(res, "tool:weather.forecast");
     let instance = u64::from_str_radix(v["instance_hex"].as_str().unwrap(), 16).unwrap();
@@ -179,7 +179,7 @@ async fn a_replayed_cn_is_dropped_and_reordered_and_concurrent_honest_calls_are_
     let k1 = issue_and_publish(&a, &dir, "forecaster", "k1");
     let args = serde_json::json!({"city": "Lyon", "days": 3});
     let kind = crate::signal::signal_kind::MCP_INVOKE;
-    let (op, res, d) = door_binding_mcp(TOOL, &args);
+    let (op, res, d) = door_binding_mcp(TOOL, &args).unwrap();
     let t = mycelium_core::sim_seam::wall_now_ms();
     let p1 = ClientSigner::with_instance(k1.clone(), PRINCIPAL, 0x1111);
     let first = p1.sign_at(&op, &res, &d, t);
@@ -459,4 +459,39 @@ async fn both_a2a_doors_carry_a_client_signature_and_the_skill_sees_it() {
     assert_eq!(*seen.lock(), vec![true, true], "UNSIGNED: the skill did not see the signature on both doors");
     assert!(refused.contains("failed") && refused.contains("gateway_identity_issuer"), "the stream's refusal: {refused}");
     assert!(seen_b.lock().is_empty(), "nothing ran at the issuer-less gateway");
+}
+
+/// **An integer outside ±(2^53 − 1) is refused at the signer and at the provider** (#742's confirm round, finding 1).
+/// RFC 8785 writes `9007199254740993` as `9007199254740992`, so the digest cannot tell them apart while the tool
+/// receives the exact integer. Every signer refuses such arguments, and the provider refuses a call carrying them by
+/// name, `client_signature_unsafe_integer` — the vector's integer cases, as jest and pytest check them. Seen failing
+/// first with the check planted out: the provider verified a signature over `{"id":9007199254740992}` for a call whose
+/// tool received `9007199254740993`.
+#[tokio::test]
+async fn an_integer_beyond_2_53_is_refused_at_the_signer_and_at_the_provider() {
+    let v: serde_json::Value = serde_json::from_str(include_str!("../../tests/fixtures/cs/vector.json")).unwrap();
+    for text in v["unsafe_integer_cases"].as_array().unwrap() {
+        let args: serde_json::Value = serde_json::from_str(text.as_str().unwrap()).unwrap();
+        assert_eq!(door_binding_mcp(TOOL, &args).err(), Some(super::client_sig::UnsafeInteger), "SIGNED: {text}");
+    }
+    for text in v["safe_integer_cases"].as_array().unwrap() {
+        let args: serde_json::Value = serde_json::from_str(text.as_str().unwrap()).unwrap();
+        assert!(door_binding_mcp(TOOL, &args).is_ok(), "refused a safe case: {text}");
+    }
+
+    let dir = fresh("unsafe-int");
+    let a = started(config(&dir, alloc_port(), Some("fleet"))).await;
+    let k1 = issue_and_publish(&a, &dir, "forecaster", "k1");
+    // A relay's swap: signed over the neighbour (they digest alike), sent with the exact large id.
+    let sent: serde_json::Value = serde_json::from_str(r#"{"id":9007199254740993}"#).unwrap();
+    let neighbour: serde_json::Value = serde_json::from_str(r#"{"id":9007199254740992}"#).unwrap();
+    assert_eq!(super::client_sig::client_arguments_digest(&sent), super::client_sig::client_arguments_digest(&neighbour), "the two digest alike");
+    let signer = ClientSigner::new(k1, PRINCIPAL);
+    let signed = signer.sign("tools/call", &format!("tool:{TOOL}"), &super::client_sig::client_arguments_digest(&neighbour));
+    let verified = gateway_caller::verify_received(&a.task_ctx, &signed_request(&a, crate::signal::signal_kind::MCP_INVOKE, &sent, &signed));
+    let at_signer = signer.sign_tools_call(TOOL, &sent);
+    a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(verified.err(), Some(CallerError::ClientSignature("client_signature_unsafe_integer")), "SWAPPED: a large id bound inexactly verified");
+    assert!(at_signer.is_err(), "the signer refuses it");
 }

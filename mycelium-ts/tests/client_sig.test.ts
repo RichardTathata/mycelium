@@ -37,3 +37,9 @@ test("the canonical arguments are the same in every language", () => {
     expect(hex(argumentsDigest(c.arguments))).toBe(c.digest_hex);
   }
 });
+
+test("an integer beyond 2^53 is refused by the signer", () => {
+  // #742's confirm round, finding 1: RFC 8785 cannot bind such an integer exactly; send large ids as strings.
+  for (const text of V.unsafe_integer_cases) expect(() => mcpBinding("weather.forecast", JSON.parse(text))).toThrow(/2\^53/);
+  for (const text of V.safe_integer_cases) expect(() => mcpBinding("weather.forecast", JSON.parse(text))).not.toThrow();
+});

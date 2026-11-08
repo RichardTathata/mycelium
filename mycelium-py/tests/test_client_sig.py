@@ -45,3 +45,16 @@ def test_the_canonical_arguments_are_the_same_in_every_language():
     for case in VECTOR["canonical_cases"]:
         assert canonical_json(case["arguments"]) == case["canonical"], case["arguments"]
         assert client_arguments_digest(case["arguments"]).hex() == case["digest_hex"], case["arguments"]
+
+
+def test_an_integer_beyond_2_53_is_refused_by_the_signer():
+    # #742's confirm round, finding 1: RFC 8785 cannot bind such an integer exactly; send large ids as strings.
+    import pytest
+
+    from mycelium.client_sig import mcp_binding
+
+    for text in VECTOR["unsafe_integer_cases"]:
+        with pytest.raises(ValueError):
+            mcp_binding("weather.forecast", json.loads(text))
+    for text in VECTOR["safe_integer_cases"]:
+        mcp_binding("weather.forecast", json.loads(text))

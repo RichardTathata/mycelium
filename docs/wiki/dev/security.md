@@ -436,7 +436,7 @@ member-writable, like `sys/identity-cert/`.
 **A client's own signature** (I1, D1′): a call through `/mcp` or `/a2a` may carry `params._meta.cs`/`cn`, signed by the
 principal's client key over the principal, operation, resource, arguments' digest and `cn`; the gateway carries it
 outside its own signature and the **provider** checks it in `gateway_caller::verify` — binding, signature, the key's
-standing (current, by the client-cert fold), freshness — and admits each `cn` once per `(principal, key, instance)`
+standing (current, by the client-cert fold), freshness — and admits each `cn` once per principal → key → instance
 (`client_sig.rs`). A relay that strips `cs` makes the call unsigned, which is counted, not yet refused.
 
 > **`sys/identity` authentication — partially closed (WS-E, in progress).** `sys/identity/{node}`

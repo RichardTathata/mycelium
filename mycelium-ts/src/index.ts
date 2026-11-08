@@ -90,4 +90,4 @@ export {
   type LoadOptions,
   type RunSchedulesOptions,
 } from "./eve";
-export { ClientSigner, a2aBinding, clientSignatureMessage, mcpBinding, type ClientNonce, type ClientSignature } from "./client_sig";
+export { ClientSigner, a2aBinding, clientSignatureMessage, holdsUnsafeInteger, mcpBinding, type ClientNonce, type ClientSignature } from "./client_sig";

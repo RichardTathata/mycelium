@@ -78,6 +78,9 @@ way. `a_newer_certificate_supersedes_the_older_key_and_an_overwrite_cannot_lower
 - **Refusals:** `client_key_unknown` means this node has not read the key's certificate yet and is worth retrying;
   `client_key_superseded` is final. More than 1,024 processes signing under one key inside the window are answered
   `client_instances_exhausted`. The arguments' digest is RFC 8785 (JCS), the same in Rust, Python and TypeScript.
+- **Large ids go as strings.** RFC 8785 writes an integer outside ±(2^53 − 1) as the nearest double, so the signature
+  could not tell it from its neighbour. Every signer refuses such arguments, and the provider refuses the call
+  (`client_signature_unsafe_integer`). An integral float like `1e16` counts too.
 - **An unsigned call** from a principal with a certificate on record is counted at the `/mcp` and `/a2a` doors and at
   the provider that runs it (`gateway_actions_unsigned`, `provider_actions_unsigned` on `/stats`), not refused yet
   ([`deprecations.md` §87](../guide/deprecations.md)). The gateway's signature does not cover `cs`/`cn`, so a relay

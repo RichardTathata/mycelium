@@ -111,8 +111,28 @@ def client_arguments_digest(arguments: Any) -> bytes:
     return hashlib.sha256(canonical_json(arguments).encode("utf-8")).digest()
 
 
+def holds_unsafe_integer(value: Any) -> bool:
+    """Does ``value`` hold, at any depth, an integral number outside ±(2**53 - 1)? RFC 8785 writes it as the nearest
+    double, so a signature could not tell it from its neighbour: such a call is refused, at the signer and the
+    provider. Send large ids as strings."""
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, int):
+        return abs(value) > _MAX_SAFE_INTEGER
+    if isinstance(value, float):
+        return value.is_integer() and abs(value) > _MAX_SAFE_INTEGER
+    if isinstance(value, (list, tuple)):
+        return any(holds_unsafe_integer(v) for v in value)
+    if isinstance(value, dict):
+        return any(holds_unsafe_integer(v) for v in value.values())
+    return False
+
+
 def mcp_binding(name: str, arguments: Dict[str, Any]) -> Tuple[str, str, bytes]:
-    """What a ``tools/call`` of ``name`` signs: ``("tools/call", "tool:{name}", digest(arguments))``."""
+    """What a ``tools/call`` of ``name`` signs: ``("tools/call", "tool:{name}", digest(arguments))``. Raises
+    ``ValueError`` for arguments holding an integer outside ±(2**53 - 1) (:func:`holds_unsafe_integer`)."""
+    if holds_unsafe_integer(arguments):
+        raise ValueError("an integer outside +-(2^53 - 1) cannot be bound exactly by a client signature: send it as a string")
     return "tools/call", f"tool:{name}", client_arguments_digest(arguments)
 
 
@@ -146,6 +166,11 @@ class ClientSigner:
         self.principal = principal
         self.instance = instance if instance is not None else int.from_bytes(os.urandom(8), "big")
         self._counter = 0
+
+    def sign_tools_call(self, name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        """Sign a ``tools/call`` of ``name`` (:func:`mcp_binding`, which refuses an unsafe integer)."""
+        op, res, digest = mcp_binding(name, arguments)
+        return self.sign(op, res, digest)
 
     def sign(self, operation: str, resource: str, digest: bytes, *, issued_at_ms: Optional[int] = None,
              counter: Optional[int] = None) -> Dict[str, Any]:

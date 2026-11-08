@@ -333,7 +333,8 @@ pub use agent::client_cert::{client_cert_key, ClientKeyStanding, PublishRefusal 
 /// A2A send with its client certificate's key ([`ClientSigner`]) and sends `cs`/`cn` in `params._meta`; the provider
 /// checks it at its receive boundary. [`client_signature_message`] is the published format the SDKs compute too.
 pub use agent::client_sig::{
-    client_arguments_digest, client_signature_message, door_binding_a2a, door_binding_mcp, ClientNonce, ClientSignature,
+    client_arguments_digest, client_signature_message, door_binding_a2a, door_binding_mcp, holds_unsafe_integer, ClientNonce, ClientSignature,
+    UnsafeInteger,
     ClientSigned, CLIENT_SIGNATURE_TAG,
 };
 #[cfg(feature = "tls")]
