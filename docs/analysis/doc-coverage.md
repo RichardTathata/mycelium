@@ -956,10 +956,11 @@ PR. **Not done by this pass:** a test that a page's prose is true — the gate s
 re-reads only the pages whose code or linked docs changed.
 
 **Answered rather than fixed:**
-- **Open PRs that change pages' code** — #734 (stale advertisements skipped by every reader; RUST_LOG), #735 (a
-  provider refuses a call whose mandate was revoked between preflight and registration) and #738 (a stem runs only its
-  declared kinds; a cheaper bad line cannot stall a floor) are not merged, so the pages describe `main`. #734 and #735
-  update their pages. **#738 does not**: `demand-provisioning.md`, `hosted-components.md` and `presence-bands.md` state
+- **PRs that change pages' code, open when the pass began** — #735 (a provider refuses a call whose mandate was
+  revoked between preflight and registration) merged during the pass and updated its two pages (`grants.md`,
+  `provider-enforcement.md`), which the pass re-read after merging it. #734 (stale advertisements skipped by every
+  reader; RUST_LOG) and #738 (a stem runs only its declared kinds; a cheaper bad line cannot stall a floor) are open, so
+  the pages describe `main`. #734 updates its pages. **#738 does not**: `demand-provisioning.md`, `hosted-components.md` and `presence-bands.md` state
   its two defects as known gaps *fixed by a separate PR*, and must lose those sentences in #738 (rule 5).
 - **P1's test form is Rust-only.** A feature turned on from an SDK (the Eve loader) cannot end *Turn it on* with a
   backticked Rust test; the page names its jest file and its CI job instead.
