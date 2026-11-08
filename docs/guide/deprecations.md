@@ -2651,8 +2651,22 @@ A service holding a client certificate can sign a `tools/call` or an A2A send wi
 them at its receive boundary.
 
 - **Who is affected:** nothing changes for a call without `cs`/`cn`. Such a call from a principal whose client
-  certificate is on record is counted in `gateway_actions_unsigned{kind}` (`mycelium_gateway_actions_unsigned_total`
-  under `metrics`) and still served. A later release will refuse it; sign calls before then.
+  certificate is on record is counted and still served. It is counted at the `/mcp` `tools/call` door and at both
+  `/a2a` doors (`gateway_actions_unsigned` on `/stats`, `mycelium_gateway_actions_unsigned_total{kind}` under
+  `metrics`), and again at the provider that runs an `mcp.invoke` or `skill.invoke` (`provider_actions_unsigned`,
+  `mycelium_provider_actions_unsigned_total`). The KV routes, the raw RPC routes and `ServiceHandle::gateway_rpc_call`
+  count nothing. A later release will refuse an unsigned call; sign calls before then.
+- **`_meta.cs` and `_meta.cn` are reserved.** An MCP or A2A client that already sends either key for its own purpose
+  is now refused with `-32602` `request_malformed`, because both must parse as a client signature and travel
+  together. The LLM doors bind no signature: `/gateway/llm/call` answers `400 client_signature_unbound` and
+  `/gateway/llm/stream` an error event of that name, rather than dropping the signature.
+- **The arguments' digest is RFC 8785 (JCS)**, in all three languages: ECMAScript's number and string forms, members
+  sorted by UTF-16 code units. A signer that hashes another encoding is refused `client_signature_invalid` on any
+  float written in exponent form. The mandate and grant `arguments_digest` is unchanged.
+- **Refusal codes:** `client_key_unknown` (no certificate for the key here yet; retry once its record arrives),
+  `client_key_superseded` (final), `client_signature_invalid`, `client_signature_unbound`, `client_signature_malformed`,
+  and `client_instances_exhausted` (more than 1,024 processes signing under one key inside the window; answered, not
+  dropped). A replayed `cn` is dropped without an answer, and is counted (`client_signatures_replayed` on `/stats`).
 - **A signed call needs `gateway_identity_issuer` set** on the gateway it goes through. Without it the gateway refuses
   the call with `-32602`, reason `gateway_identity_issuer_unset`.
 - **Mixed versions:** an older provider keeps `cs`/`cn` among the envelope's unknown fields and checks nothing, so

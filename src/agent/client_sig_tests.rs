@@ -113,6 +113,23 @@ fn the_client_signature_vector_is_the_same_in_every_language() {
     assert_eq!(meta.1.instance(), Some(instance));
 }
 
+/// **The arguments' canonical form is the same in every language** (#742's review, finding 1): RFC 8785 — exponent-form
+/// floats (`0.00001`, `1e16`, `1e21`, `1e-7`), the largest double, non-ASCII text and control characters, and keys
+/// sorted by UTF-16 code units at every depth. jest and pytest check the same cases. Seen failing first with the digest
+/// over `serde_json`'s own encoding: `{"huge":1e21}` digested `{"huge":1e21}`, not `{"huge":1e+21}`.
+#[test]
+fn the_canonical_arguments_are_the_same_in_every_language() {
+    let v: serde_json::Value = serde_json::from_str(include_str!("../../tests/fixtures/cs/vector.json")).unwrap();
+    let hex = |b: &[u8]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
+    let cases = v["canonical_cases"].as_array().unwrap();
+    assert!(cases.len() >= 7);
+    for c in cases {
+        let args = &c["arguments"];
+        assert_eq!(super::client_sig::canonical_json(args), c["canonical"].as_str().unwrap(), "canonical form of {args}");
+        assert_eq!(hex(&super::client_sig::client_arguments_digest(args)), c["digest_hex"].as_str().unwrap(), "DIVERGED: the digest of {args}");
+    }
+}
+
 /// **A client-signed call verifies at the provider and names its key**; a call signed by a key with no certificate
 /// on record, by a superseded key, over other arguments, or for a kind whose call the provider cannot read, is refused
 /// by name. Seen failing first, each with its check planted out in `client_sig::check` (the standing, the signature,
@@ -144,10 +161,10 @@ async fn the_provider_checks_the_client_signature_binding_signature_and_key_stan
     let _ = std::fs::remove_dir_all(&dir);
 
     assert_eq!(ok_key, Some(k1.verifying_key().to_bytes()), "a signed call verified, naming its key: {ok:?}");
-    assert_eq!(foreign.err(), Some(CallerError::ClientSignature("client_key_not_current")), "FORGED: a key with no certificate on record");
+    assert_eq!(foreign.err(), Some(CallerError::ClientSignature("client_key_unknown")), "FORGED: a key with no certificate on record");
     assert_eq!(tampered.err(), Some(CallerError::ClientSignature("client_signature_invalid")), "TAMPERED: a signature over other arguments");
     assert_eq!(unbound.err(), Some(CallerError::ClientSignature("client_signature_unbound")), "UNBOUND: a kind the provider cannot read");
-    assert_eq!(superseded.err(), Some(CallerError::ClientSignature("client_key_not_current")), "SUPERSEDED: an older key after a newer certificate");
+    assert_eq!(superseded.err(), Some(CallerError::ClientSignature("client_key_superseded")), "SUPERSEDED: an older key after a newer certificate");
 }
 
 /// **A replayed `cn` is dropped, a reordered honest pair is admitted, and two processes under one certificate do not
@@ -225,6 +242,8 @@ async fn the_mcp_door_carries_a_client_signature_counts_an_unsigned_one_and_need
     let signed: serde_json::Value = call(Some(ClientSigner::meta(&sign(&signer, &args)))).await.unwrap().json().await.unwrap();
     let unsigned: serde_json::Value = call(None).await.unwrap().json().await.unwrap();
     let counted = a.task_ctx.unsigned_actions.tools_call.load(Ordering::Relaxed);
+    let stats: serde_json::Value = client.get(format!("http://127.0.0.1:{http_port}/stats")).header(AUTHORIZATION, "Bearer fc-secret")
+        .send().await.unwrap().json().await.unwrap_or_default();
     a.shutdown().await;
 
     // A second gateway, the same tool and principal, no issuer.
@@ -256,7 +275,188 @@ async fn the_mcp_door_carries_a_client_signature_counts_an_unsigned_one_and_need
     assert!(unsigned.get("result").is_some(), "the unsigned call ran (counted, not yet refused): {unsigned}");
     assert_eq!(*saw_signed.lock(), vec![true, false], "the tool saw the signed call's verified signature, and none on the other");
     assert_eq!(counted, 1, "UNCOUNTED: the unsigned call from a certificate holder was not counted");
+    assert_eq!(stats["gateway_actions_unsigned"]["tools/call"], 1, "the count is on /stats: {stats}");
+    assert_eq!(stats["provider_actions_unsigned"], 1, "and counted where it ran: {stats}");
     assert_eq!(refused["error"]["data"]["reason"], "gateway_identity_issuer_unset", "DISPATCHED: a signed call at an issuer-less gateway: {refused}");
     assert_eq!(ran_b.load(Ordering::SeqCst), 0, "nothing ran at the issuer-less gateway");
     assert_eq!(ran.load(Ordering::SeqCst), 2);
+}
+
+/// **The 1,025th instance of a key is refused with an answer, not dropped as a replay, and an instance's floor refuses
+/// what lies at or below it** (#742's review, finding 2). A per-invocation signer (a CLI, a cron job) draws an instance
+/// per call; past 1 024 inside the window the provider answers `client_instances_exhausted` — not unanswered, so the
+/// caller is told — and counts it. Past 65 536 entries one instance's oldest is evicted and becomes its floor. Seen
+/// failing first with the cap mapped to `ClientReplayed`: the 1,025th was dropped without an answer.
+#[tokio::test]
+async fn the_instance_cap_is_answered_and_the_eviction_floor_refuses_at_or_below_it() {
+    use super::client_sig::{ClientReplay, ClientReplayWindows, ClientSigned, CLIENT_INSTANCES_PER_KEY, CLIENT_WINDOW_PER_INSTANCE};
+    let w = ClientReplayWindows::default();
+    let key = [9u8; 32];
+    let s = |instance: u64, t: u64, counter: u64| ClientSigned { key, issued_at_ms: t, instance, counter };
+    for c in 0..=CLIENT_WINDOW_PER_INSTANCE as u64 {
+        assert_eq!(w.admit("p", &s(1, 1_000, c), Some(key), 0), Ok(()));
+    }
+    assert_eq!(w.admit("p", &s(1, 1_000, 0), Some(key), 0), Err(ClientReplay::Replayed), "the evicted oldest is the floor");
+    assert_eq!(w.admit("p", &s(1, 999, 70_000), Some(key), 0), Err(ClientReplay::Replayed), "below the floor");
+    assert_eq!(w.admit("p", &s(1, 1_001, 0), Some(key), 0), Ok(()), "above the floor");
+
+    let dir = fresh("cap");
+    let a = started(config(&dir, alloc_port(), Some("fleet"))).await;
+    let k1 = issue_and_publish(&a, &dir, "forecaster", "k1");
+    let kb = k1.verifying_key().to_bytes();
+    let now = a.task_ctx.hlc.decision_now_ms();
+    for i in 0..CLIENT_INSTANCES_PER_KEY as u64 {
+        a.task_ctx.client_replay.admit(PRINCIPAL, &ClientSigned { key: kb, issued_at_ms: now, instance: 10_000 + i, counter: 0 }, Some(kb), 0).unwrap();
+    }
+    let args = serde_json::json!({"city": "Lyon"});
+    let one_more = gateway_caller::verify_received(&a.task_ctx, &signed_request(&a, crate::signal::signal_kind::MCP_INVOKE, &args, &sign(&ClientSigner::with_instance(k1, PRINCIPAL, 1), &args)));
+    let refused = a.task_ctx.client_replay.instances_refused.load(std::sync::atomic::Ordering::Relaxed);
+    a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+    let err = one_more.unwrap_err();
+    assert_eq!(err, CallerError::ClientSignature("client_instances_exhausted"), "DROPPED: the 1,025th instance was answered as a replay");
+    assert!(!err.unanswered(), "the cap is answered");
+    assert_eq!(refused, 1);
+}
+
+/// **A superseded key's windows go when its successor signs** (#742's review, item 7): a principal holds only its
+/// current key's windows (and a racing predecessor's), so `by_principal` is bounded by the principals, not by every key
+/// they ever held. Seen failing first: both keys' windows stayed.
+#[test]
+fn a_principals_superseded_key_windows_are_dropped_when_its_successor_signs() {
+    use super::client_sig::{ClientReplayWindows, ClientSigned};
+    let w = ClientReplayWindows::default();
+    let (k1, k2) = ([1u8; 32], [2u8; 32]);
+    w.admit("p", &ClientSigned { key: k1, issued_at_ms: 10, instance: 1, counter: 0 }, Some(k1), 0).unwrap();
+    // K2 is current; a call K1 signed earlier still lands — both kept while they race.
+    w.admit("p", &ClientSigned { key: k1, issued_at_ms: 11, instance: 1, counter: 1 }, Some(k2), 0).unwrap();
+    w.admit("p", &ClientSigned { key: k2, issued_at_ms: 12, instance: 2, counter: 0 }, Some(k2), 0).unwrap();
+    assert_eq!(w.keys_held("p"), 1, "GROWN: the superseded key's windows were kept");
+}
+
+/// **An unsigned call for a certificate holder is counted where it runs** (#742's review, item 4): a gateway that strips
+/// `cs` leaves a trace at the provider. Seen failing first: the provider counted nothing.
+#[tokio::test]
+async fn an_unsigned_call_for_a_certificate_holder_is_counted_at_the_provider() {
+    let dir = fresh("unsigned-provider");
+    let a = started(config(&dir, alloc_port(), Some("fleet"))).await;
+    let _k1 = issue_and_publish(&a, &dir, "forecaster", "k1");
+    let args = serde_json::json!({"city": "Lyon"});
+    let framed = gateway_caller::frame_with_context_at(&a.task_ctx, a.node_id(), PRINCIPAL, &[], tool_payload(&args), None, None, a.task_ctx.hlc.decision_now_ms()).unwrap();
+    let ok = gateway_caller::verify_received(&a.task_ctx, &request_from(a.node_id(), crate::signal::signal_kind::MCP_INVOKE, framed));
+    let counted = a.task_ctx.unsigned_actions.at_provider.load(std::sync::atomic::Ordering::Relaxed);
+    a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(ok.is_ok(), "served: counted, not refused: {ok:?}");
+    assert_eq!(counted, 1, "UNCOUNTED at the provider");
+}
+
+/// **The LLM doors refuse a client signature rather than drop it** (#742's review, item 4): `/gateway/llm/call` answers
+/// `400 client_signature_unbound`, `/gateway/llm/stream` its error event. Seen failing first: the call went on to
+/// resolve a provider (`404 no_provider`) with the signature dropped.
+#[cfg(feature = "llm")]
+#[tokio::test]
+async fn the_llm_doors_refuse_a_client_signature_rather_than_drop_it() {
+    let dir = fresh("llm");
+    let (port, http_port) = (alloc_port(), alloc_port());
+    let mut cfg = config(&dir, port, Some("fleet"));
+    cfg.http_port = Some(http_port);
+    let a = started(cfg).await;
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    let signed = ClientSigner::meta(&ClientSigner::new(ed25519_dalek::SigningKey::from_bytes(&[3u8; 32]), PRINCIPAL).sign("x", "y", &[0u8; 32]));
+    let body = serde_json::json!({"ns": "demo", "name": "hello", "input": "hi", "_meta": signed});
+    let client = reqwest::Client::new();
+    let call = client.post(format!("http://127.0.0.1:{http_port}/gateway/llm/call")).json(&body).send().await.unwrap();
+    let call_status = call.status().as_u16();
+    let call_body: serde_json::Value = call.json().await.unwrap_or_default();
+    let stream = client.post(format!("http://127.0.0.1:{http_port}/gateway/llm/stream")).json(&body).send().await.unwrap().text().await.unwrap();
+    a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!((call_status, call_body["reason"].as_str()), (400, Some("client_signature_unbound")), "DROPPED at /llm/call: {call_body}");
+    assert!(stream.contains("client_signature_unbound"), "DROPPED at /llm/stream: {stream}");
+}
+
+/// **Both `/a2a` doors carry a client signature, and the skill sees it verified** (#742's review, finding 5):
+/// `tasks/send` and `tasks/sendSubscribe` signed over `("skill.invoke", "skill:depot/dispatch", {"text": …})` reach the
+/// skill with the signature verified at its receive boundary (the `skill.invoke` binding); at a gateway without an
+/// issuer the stream answers a failed task naming it. Seen failing first with `None` planted at each door's dispatch: the
+/// skill saw no signature on either path.
+#[cfg(all(feature = "compliance", feature = "a2a"))]
+#[tokio::test]
+async fn both_a2a_doors_carry_a_client_signature_and_the_skill_sees_it() {
+    use crate::capability::Capability;
+    let a2a_node = |dir: &Path, issuer: Option<&str>| {
+        let (port, http_port) = (alloc_port(), alloc_port());
+        let mut cfg = config(dir, port, issuer);
+        cfg.http_port = Some(http_port);
+        cfg.gateway_named_tokens = vec![GatewayNamedToken { name: "forecaster".into(), token: "fc-secret".into(), scopes: vec!["kv:read".into()] }];
+        let a = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg).with_a2a());
+        (a, http_port)
+    };
+    let serve = |a: &Arc<GossipAgent>, seen: Arc<parking_lot::Mutex<Vec<bool>>>| {
+        let (a, seen) = (Arc::clone(a), seen);
+        let mut rx = a.service().rpc_rx("skill.invoke");
+        tokio::spawn(async move {
+            while let Some(req) = rx.recv().await {
+                let signed = a.gateway_caller(&req).ok().flatten().is_some_and(|c| c.client_signed.is_some());
+                seen.lock().push(signed);
+                a.service().rpc_respond(&req, b"dispatched".to_vec());
+            }
+        });
+    };
+    let until_advertised = |a: &Arc<GossipAgent>| {
+        let key = format!("cap/{}/depot/dispatch", a.node_id());
+        let a = Arc::clone(a);
+        async move {
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            while a.kv().get(&key).is_none() {
+                assert!(std::time::Instant::now() < deadline, "{key} never written");
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }
+    };
+    let client = reqwest::Client::new();
+    let post = |http_port: u16, method: &'static str, params: serde_json::Value| {
+        client.post(format!("http://127.0.0.1:{http_port}/a2a")).bearer_auth("fc-secret")
+            .json(&serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": params})).send()
+    };
+    let params = |id: &str, meta: serde_json::Value| serde_json::json!({
+        "id": id, "skillId": "depot/dispatch", "message": {"role": "user", "parts": [{"type": "text", "text": "go"}]}, "_meta": meta,
+    });
+
+    let dir = fresh("a2a");
+    let (a, http_port) = a2a_node(&dir, Some("fleet"));
+    a.start().await.unwrap();
+    let _cap = a.capabilities().advertise_capability(Capability::new("depot", "dispatch"), Duration::from_secs(30));
+    let seen = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    serve(&a, Arc::clone(&seen));
+    until_advertised(&a).await;
+    let k1 = issue_and_publish(&a, &dir, "forecaster", "k1");
+    let signer = ClientSigner::new(k1, PRINCIPAL);
+    let meta = || {
+        let (op, res, d) = super::client_sig::door_binding_a2a("depot/dispatch", "go");
+        ClientSigner::meta(&signer.sign(&op, &res, &d))
+    };
+    let sent: serde_json::Value = post(http_port, "tasks/send", params("t-send", meta())).await.unwrap().json().await.unwrap();
+    let streamed = post(http_port, "tasks/sendSubscribe", params("t-stream", meta())).await.unwrap().text().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    a.shutdown().await;
+
+    let dir2 = fresh("a2a-no-issuer");
+    let (b, http2) = a2a_node(&dir2, None);
+    b.start().await.unwrap();
+    let _cap_b = b.capabilities().advertise_capability(Capability::new("depot", "dispatch"), Duration::from_secs(30));
+    let seen_b = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    serve(&b, Arc::clone(&seen_b));
+    until_advertised(&b).await;
+    let refused = post(http2, "tasks/sendSubscribe", params("t-refused", meta())).await.unwrap().text().await.unwrap();
+    b.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&dir2);
+
+    assert_eq!(sent["result"]["status"]["state"], "completed", "{sent}");
+    assert!(streamed.contains("completed"), "{streamed}");
+    assert_eq!(*seen.lock(), vec![true, true], "UNSIGNED: the skill did not see the signature on both doors");
+    assert!(refused.contains("failed") && refused.contains("gateway_identity_issuer"), "the stream's refusal: {refused}");
+    assert!(seen_b.lock().is_empty(), "nothing ran at the issuer-less gateway");
 }

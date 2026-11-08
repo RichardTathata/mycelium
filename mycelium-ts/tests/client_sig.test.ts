@@ -5,6 +5,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { ClientSigner, clientSignatureMessage, mcpBinding } from "../src/client_sig";
+import { argumentsDigest } from "../src/a2a";
 
 const V = JSON.parse(readFileSync(join(__dirname, "..", "..", "tests", "fixtures", "cs", "vector.json"), "utf8"));
 const hex = (b: Uint8Array) => Buffer.from(b).toString("hex");
@@ -28,4 +29,11 @@ test("each call takes the next counter and processes draw different instances", 
   const d = new Uint8Array(32);
   expect([0, 1, 2].map(() => a.sign("tools/call", "tool:x", d).cn.c)).toEqual([0, 1, 2]);
   expect(a.instance).not.toBe(b.instance);
+});
+
+test("the canonical arguments are the same in every language", () => {
+  // #742's review, finding 1: RFC 8785, as the gateway and the Python SDK compute it.
+  for (const c of V.canonical_cases) {
+    expect(hex(argumentsDigest(c.arguments))).toBe(c.digest_hex);
+  }
 });

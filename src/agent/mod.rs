@@ -994,6 +994,7 @@ pub(crate) struct TaskCtx {
     /// (`gateway_caller::verify_received`), so a captured envelope is not served twice.
     pub(crate) caller_replay: gateway_caller::ReplayWindows,
     /// Identity-and-lifecycle I1: every client key's recent `cn`s, as this provider has received them.
+    #[cfg(feature = "tls")]
     pub(crate) client_replay: client_sig::ClientReplayWindows,
     /// Identity-and-lifecycle I1: calls by a principal with a client certificate on record that carried no `cs`.
     #[cfg(feature = "tls")]
@@ -1607,6 +1608,7 @@ impl GossipAgent {
             #[cfg(feature = "tls")]
             client_certs: Arc::new(client_cert::ClientCertLedger::default()),
             caller_replay: Default::default(),
+            #[cfg(feature = "tls")]
             client_replay: Default::default(),
             #[cfg(feature = "tls")]
             unsigned_actions: Default::default(),

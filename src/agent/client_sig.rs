@@ -29,15 +29,18 @@
 //! makes the call unsigned, which a gateway counts (`gateway_actions_unsigned{kind}`) and, at the refusal release,
 //! refuses.
 
+#[cfg(feature = "tls")]
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 
 /// Domain tag of the signed message.
 pub const CLIENT_SIGNATURE_TAG: &[u8] = b"mycelium.gateway/client-signature/1";
+#[cfg(feature = "tls")]
 /// The most `(t, c)` entries one instance keeps inside the freshness window; past it the oldest is evicted and
 /// becomes that instance's floor (refused at or below), as the caller envelope's window does.
 pub(crate) const CLIENT_WINDOW_PER_INSTANCE: usize = 65_536;
+#[cfg(feature = "tls")]
 /// The most instances one `(principal, key)` keeps inside the freshness window. A new instance past it is refused
 /// (counted): only the key's holder can mint instances, so this bounds the memory a stolen key can take.
 pub(crate) const CLIENT_INSTANCES_PER_KEY: usize = 1_024;
@@ -98,10 +101,120 @@ pub fn client_signature_message(
     out
 }
 
-/// SHA-256 of the arguments' canonical form (`serde_json`'s compact, key-sorted encoding).
+/// SHA-256 of the arguments' canonical form: [`canonical_json`], RFC 8785 (JCS), which the three languages reproduce
+/// byte for byte — `serde_json`'s own encoding writes numbers as ryu does (`1e-5`, `1e16`), Python's `json.dumps` as
+/// `1e-05` and `1e+16`, JavaScript's as `1e+21` (#742's review, finding 1).
 pub fn client_arguments_digest(arguments: &serde_json::Value) -> [u8; 32] {
     use sha2::Digest as _;
-    sha2::Sha256::digest(serde_json::to_vec(arguments).unwrap_or_default()).into()
+    sha2::Sha256::digest(canonical_json(arguments).as_bytes()).into()
+}
+
+/// A JSON value in the JSON Canonicalization Scheme (RFC 8785): no whitespace; object members sorted by their names'
+/// UTF-16 code units; strings escaped as ECMAScript's `JSON.stringify` escapes them (`"`, `\\`, the short forms
+/// `\b \f \n \r \t`, other controls as `\u00xx`, everything else literal); numbers as ECMAScript's
+/// `Number.prototype.toString` writes the IEEE-754 double. An integer beyond ±2^53 is written as the double it rounds
+/// to, as a JavaScript client would have parsed it.
+pub fn canonical_json(value: &serde_json::Value) -> String {
+    let mut out = String::new();
+    write_jcs(value, &mut out);
+    out
+}
+
+fn write_jcs(value: &serde_json::Value, out: &mut String) {
+    use serde_json::Value;
+    match value {
+        Value::Null => out.push_str("null"),
+        Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
+        Value::Number(n) => out.push_str(&jcs_number(n)),
+        Value::String(s) => jcs_string(s, out),
+        Value::Array(items) => {
+            out.push('[');
+            for (i, v) in items.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                write_jcs(v, out);
+            }
+            out.push(']');
+        }
+        Value::Object(map) => {
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort_by(|a, b| a.encode_utf16().cmp(b.encode_utf16()));
+            out.push('{');
+            for (i, k) in keys.into_iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                jcs_string(k, out);
+                out.push(':');
+                write_jcs(&map[k], out);
+            }
+            out.push('}');
+        }
+    }
+}
+
+fn jcs_string(s: &str, out: &mut String) {
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\u{08}' => out.push_str("\\b"),
+            '\u{0c}' => out.push_str("\\f"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+}
+
+const MAX_SAFE_INTEGER: u64 = (1 << 53) - 1;
+
+fn jcs_number(n: &serde_json::Number) -> String {
+    if let Some(u) = n.as_u64()
+        && u <= MAX_SAFE_INTEGER
+    {
+        return u.to_string();
+    }
+    if let Some(i) = n.as_i64()
+        && i.unsigned_abs() <= MAX_SAFE_INTEGER
+    {
+        return i.to_string();
+    }
+    es_number(n.as_f64().unwrap_or(f64::NAN))
+}
+
+/// ECMAScript's `Number::toString` for a finite double, from the shortest round-trip digits.
+fn es_number(x: f64) -> String {
+    if x == 0.0 || !x.is_finite() {
+        // JSON has no NaN or infinity; -0 is written "0".
+        return "0".into();
+    }
+    let sign = if x < 0.0 { "-" } else { "" };
+    // `{:e}` writes the shortest digits that round-trip: `d[.ddd]e[-]x`.
+    let sci = format!("{:e}", x.abs());
+    let (mantissa, exp) = sci.split_once('e').unwrap_or((&sci, "0"));
+    let digits: String = mantissa.chars().filter(|c| c.is_ascii_digit()).collect();
+    let digits = digits.trim_end_matches('0');
+    let digits = if digits.is_empty() { "0" } else { digits };
+    let k = digits.len() as i64;
+    let n = exp.parse::<i64>().unwrap_or(0) + 1;
+    let body = if k <= n && n <= 21 {
+        format!("{digits}{}", "0".repeat((n - k) as usize))
+    } else if 0 < n && n <= 21 {
+        format!("{}.{}", &digits[..n as usize], &digits[n as usize..])
+    } else if -6 < n && n <= 0 {
+        format!("0.{}{digits}", "0".repeat((-n) as usize))
+    } else {
+        let e = n - 1;
+        let e = if e < 0 { format!("-{}", -e) } else { format!("+{e}") };
+        if k == 1 { format!("{digits}e{e}") } else { format!("{}.{}e{e}", &digits[..1], &digits[1..]) }
+    };
+    format!("{sign}{body}")
 }
 
 /// What a door signs as for one call: the operation, the resource and the arguments the provider will act on. A
@@ -216,8 +329,11 @@ pub(crate) enum ClientSigRefusal {
     Unbound,
     /// The signature does not verify over this call's operation, resource and arguments.
     BadSignature,
-    /// `k` is not the principal's current client key: superseded, never issued, or not a certificate of this fleet.
-    KeyNotCurrent,
+    /// `k` has no verified certificate under the principal here: never issued, another fleet's, or issued so recently
+    /// that its record has not reached this node yet — **retriable** while the record travels.
+    KeyUnknown,
+    /// `k` is a superseded key: a newer certificate for the principal has been read here. Final.
+    KeySuperseded,
 }
 
 #[cfg(feature = "tls")]
@@ -227,7 +343,8 @@ impl ClientSigRefusal {
             Self::Malformed => "client_signature_malformed",
             Self::Unbound => "client_signature_unbound",
             Self::BadSignature => "client_signature_invalid",
-            Self::KeyNotCurrent => "client_key_not_current",
+            Self::KeyUnknown => "client_key_unknown",
+            Self::KeySuperseded => "client_key_superseded",
         }
     }
 }
@@ -278,12 +395,15 @@ pub(crate) fn check(
         return Err(ClientSigRefusal::BadSignature);
     }
     // After the signature, so a forgery answers as one.
-    if super::client_cert::client_key_standing(ctx, principal, &key) != super::client_cert::ClientKeyStanding::Current {
-        return Err(ClientSigRefusal::KeyNotCurrent);
+    match super::client_cert::client_key_standing(ctx, principal, &key) {
+        super::client_cert::ClientKeyStanding::Current => {}
+        super::client_cert::ClientKeyStanding::Superseded => return Err(ClientSigRefusal::KeySuperseded),
+        _ => return Err(ClientSigRefusal::KeyUnknown),
     }
     Ok(ClientSigned { key, issued_at_ms: cn.t, instance, counter: cn.c })
 }
 
+#[cfg(feature = "tls")]
 /// One instance's `(t, c)` entries inside the freshness window, and the floor an eviction left.
 #[derive(Default)]
 struct InstanceWindow {
@@ -291,49 +411,64 @@ struct InstanceWindow {
     floor: Option<(u64, u64)>,
 }
 
-/// One client key's instances and their windows, behind one leaf lock (lock-order row 76).
-type KeyWindow = std::sync::Arc<parking_lot::Mutex<std::collections::HashMap<u64, InstanceWindow>>>;
+#[cfg(feature = "tls")]
+/// One principal's client keys, each with its instances and their windows, behind one leaf lock (lock-order row 76).
+type PrincipalWindow = std::sync::Arc<parking_lot::Mutex<std::collections::HashMap<[u8; 32], std::collections::HashMap<u64, InstanceWindow>>>>;
 
-/// Every client key's recent `cn`s, as one provider has received them: keyed by `(principal, key)`, then by
+#[cfg(feature = "tls")]
+/// Every client principal's recent `cn`s, as one provider has received them: keyed by principal, then by key, then by
 /// instance, each instance with **its own** eviction-only floor — a floor over `(t, instance, counter)` would order
 /// honest processes by their random id. The window's rule is the caller envelope's: a delayed `cn` inside the window
 /// is admitted, so a gateway reordering two honest calls trips nothing; one is refused only when seen before, at or
 /// below its instance's floor (raised past [`CLIENT_WINDOW_PER_INSTANCE`] later ones), or past the freshness horizon
-/// (refused before this, by `verify`).
+/// (refused before this, by `verify`). **In memory only**: a provider that restarts forgets every `cn`, so a call
+/// captured before the restart replays once after it, inside the freshness window (stated).
+///
+/// Bounded: a principal enters only through a signature by its current key, and each admission drops the principal's
+/// keys that are neither the signing key nor its current one — so a principal holds its current key's windows, and
+/// briefly a racing predecessor's (#742's review, item 7).
 #[derive(Default)]
 pub(crate) struct ClientReplayWindows {
-    by_key: papaya::HashMap<(String, [u8; 32]), KeyWindow>,
-    /// `cn`s dropped as replays.
+    by_principal: papaya::HashMap<String, PrincipalWindow>,
+    /// `cn`s dropped as replays. `GET /stats` `client_signatures_replayed`.
     pub(crate) replayed: AtomicU64,
     /// New instances refused because the key already had [`CLIENT_INSTANCES_PER_KEY`] inside the window.
+    /// `GET /stats` `client_instances_refused`.
     pub(crate) instances_refused: AtomicU64,
 }
 
+#[cfg(feature = "tls")]
 /// Why a `cn` was not admitted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ClientReplay {
-    /// Seen before, or at or below its instance's floor.
+    /// Seen before, or at or below its instance's floor: a replay, dropped unanswered.
     Replayed,
-    /// The key already has [`CLIENT_INSTANCES_PER_KEY`] instances inside the window.
+    /// The key already has [`CLIENT_INSTANCES_PER_KEY`] instances inside the window: not a replay, refused with an
+    /// answer (`client_instances_exhausted`) so a signer that draws an instance per invocation is told, not left to
+    /// time out.
     TooManyInstances,
 }
 
+#[cfg(feature = "tls")]
 impl ClientReplayWindows {
     /// Admit `signed` for `principal` once, at `horizon` (entries issued before it are forgotten: `verify` refuses
-    /// them as stale).
-    pub(crate) fn admit(&self, principal: &str, signed: &ClientSigned, horizon: u64) -> Result<(), ClientReplay> {
-        let id = (principal.to_string(), signed.key);
-        let window = std::sync::Arc::clone(self.by_key.pin().get_or_insert_with(id, Default::default));
-        let mut w = window.lock();
-        w.retain(|_, iw| {
-            while iw.seen.first().is_some_and(|&(t, _)| t < horizon) {
-                iw.seen.pop_first();
-            }
-            if iw.floor.is_some_and(|(t, _)| t < horizon) {
-                iw.floor = None;
-            }
-            !iw.seen.is_empty() || iw.floor.is_some()
+    /// them as stale). `current` is the principal's current key as this node reads it now.
+    pub(crate) fn admit(&self, principal: &str, signed: &ClientSigned, current: Option<[u8; 32]>, horizon: u64) -> Result<(), ClientReplay> {
+        let window = std::sync::Arc::clone(self.by_principal.pin().get_or_insert_with(principal.to_string(), Default::default));
+        let mut keys = window.lock();
+        keys.retain(|k, instances| {
+            instances.retain(|_, iw| {
+                while iw.seen.first().is_some_and(|&(t, _)| t < horizon) {
+                    iw.seen.pop_first();
+                }
+                if iw.floor.is_some_and(|(t, _)| t < horizon) {
+                    iw.floor = None;
+                }
+                !iw.seen.is_empty() || iw.floor.is_some()
+            });
+            *k == signed.key || (Some(*k) == current && !instances.is_empty())
         });
+        let w = keys.entry(signed.key).or_default();
         if !w.contains_key(&signed.instance) && w.len() >= CLIENT_INSTANCES_PER_KEY {
             self.instances_refused.fetch_add(1, Ordering::Relaxed);
             return Err(ClientReplay::TooManyInstances);
@@ -351,6 +486,12 @@ impl ClientReplayWindows {
         }
         Ok(())
     }
+
+    /// How many keys `principal` holds windows for (tests).
+    #[cfg(test)]
+    pub(crate) fn keys_held(&self, principal: &str) -> usize {
+        self.by_principal.pin().get(principal).map_or(0, |w| w.lock().len())
+    }
 }
 
 #[cfg(feature = "tls")]
@@ -360,6 +501,9 @@ impl ClientReplayWindows {
 pub(crate) struct UnsignedActions {
     pub(crate) tools_call: AtomicU64,
     pub(crate) skill_invoke: AtomicU64,
+    /// The same, counted where the call runs: a provider receiving an unsigned `mcp.invoke` or `skill.invoke` for a
+    /// principal whose certificate it holds — what a gateway that strips `cs` leaves behind (#742's review, item 4).
+    pub(crate) at_provider: AtomicU64,
 }
 
 #[cfg(feature = "tls")]
@@ -373,6 +517,14 @@ impl UnsignedActions {
         #[cfg(feature = "metrics")]
         metrics::counter!("mycelium_gateway_actions_unsigned_total", "kind" => kind).increment(1);
         tracing::warn!(kind, "a call from a principal with a client certificate on record carried no client signature (cs)");
+    }
+
+    /// Count one received at this provider.
+    pub(crate) fn note_at_provider(&self, kind: &str) {
+        self.at_provider.fetch_add(1, Ordering::Relaxed);
+        #[cfg(feature = "metrics")]
+        metrics::counter!("mycelium_provider_actions_unsigned_total", "kind" => kind.to_string()).increment(1);
+        let _ = kind;
     }
 }
 
@@ -412,4 +564,11 @@ pub(crate) fn at_door(ctx: &super::TaskCtx, principal: Option<&str>, params: &se
             AtDoor::Proceed(None)
         }
     }
+}
+
+/// Does `params._meta` carry `cs` or `cn`? A door that binds no client signature (the LLM doors) refuses such a call
+/// rather than drop the signature silently (#742's review, item 4).
+#[cfg(feature = "llm")]
+pub(crate) fn carries_client_signature(params: &serde_json::Value) -> bool {
+    params.get("_meta").is_some_and(|m| m.get("cs").is_some_and(|v| !v.is_null()) || m.get("cn").is_some_and(|v| !v.is_null()))
 }

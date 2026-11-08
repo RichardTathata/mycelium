@@ -36,3 +36,12 @@ def test_each_call_takes_the_next_counter_and_processes_draw_different_instances
     d = bytes(32)
     assert [a.sign("tools/call", "tool:x", d)["cn"]["c"] for _ in range(3)] == [0, 1, 2]
     assert a.instance != b.instance
+
+
+def test_the_canonical_arguments_are_the_same_in_every_language():
+    # #742's review, finding 1: RFC 8785, as the gateway and the TypeScript SDK compute it.
+    from mycelium.client_sig import canonical_json, client_arguments_digest
+
+    for case in VECTOR["canonical_cases"]:
+        assert canonical_json(case["arguments"]) == case["canonical"], case["arguments"]
+        assert client_arguments_digest(case["arguments"]).hex() == case["digest_hex"], case["arguments"]

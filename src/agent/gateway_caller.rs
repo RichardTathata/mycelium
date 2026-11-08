@@ -1181,11 +1181,22 @@ pub(crate) fn verify_received(ctx: &TaskCtx, req: &RpcRequest) -> Result<Option<
     if let Some(c) = &verified {
         ctx.caller_replay.admit(c, ctx.hlc.decision_now_ms(), ctx.config.max_clock_drift_ms)?;
         // Identity-and-lifecycle I1: the client's `cn`, once per (principal, key, instance).
+        #[cfg(feature = "tls")]
         if let Some(signed) = &c.client_signed {
             let horizon = ctx.hlc.decision_now_ms().saturating_sub(CALLER_CONTEXT_MAX_AGE_MS.saturating_add(ctx.config.max_clock_drift_ms));
-            if ctx.client_replay.admit(&c.principal, signed, horizon).is_err() {
-                return Err(CallerError::ClientReplayed);
+            let current = ctx.client_certs.mark(&c.principal).map(|m| m.key);
+            match ctx.client_replay.admit(&c.principal, signed, current, horizon) {
+                Ok(()) => {}
+                Err(super::client_sig::ClientReplay::Replayed) => return Err(CallerError::ClientReplayed),
+                Err(super::client_sig::ClientReplay::TooManyInstances) => {
+                    return Err(CallerError::ClientSignature("client_instances_exhausted"));
+                }
             }
+        } else if (req.kind().as_ref() == crate::signal::signal_kind::MCP_INVOKE || req.kind().as_ref() == "skill.invoke")
+            && ctx.client_certs.mark(&c.principal).is_some()
+        {
+            // #742's review, item 4: an unsigned call for a certificate holder, counted where it runs too.
+            ctx.unsigned_actions.note_at_provider(req.kind());
         }
         // X4: counted here, once per request, after the envelope verified — a forged one moves nothing.
         if c.misplaced_causal {

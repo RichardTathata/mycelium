@@ -60,8 +60,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   The tool's handler sees the verified signature (`GatewayCaller::client_signed`). One vector,
   `tests/fixtures/cs/vector.json`, is checked in Rust, jest and pytest. A signed call at a gateway without
   `gateway_identity_issuer` is refused by name. An unsigned call from a principal with a certificate on record is
-  counted (`gateway_actions_unsigned{kind}`), not yet refused. A client certificate may not be named `legacy`.
-  Upgrade note: `deprecations.md` §87.
+  counted at the `/mcp` and `/a2a` doors and at the provider (`gateway_actions_unsigned`,
+  `provider_actions_unsigned` on `/stats`), not yet refused; the LLM doors refuse a signature rather than drop it.
+  The signed arguments' digest is RFC 8785 (JCS) in all three languages. A client certificate may not be named
+  `legacy`. Upgrade note: `deprecations.md` §87.
 
 - **Client certificates for services** (`docs/plans/identity-and-lifecycle.md` I1, first half). `mycelium tls issue
   --client <name> --issuer <issuer>` has the fleet CA issue a service's key a certificate naming

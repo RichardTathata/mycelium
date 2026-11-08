@@ -64,14 +64,24 @@ way. `a_newer_certificate_supersedes_the_older_key_and_an_overwrite_cannot_lower
   `[persistence]`, a restart forgets the mark until the newer record is read again.
 - **Two certificates in one millisecond:** the greater key wins.
 - **A signed call:** the provider checks the signature at its receive boundary, before any cache. The key must be the
-  principal's current one, so a superseded or unknown key is refused (`client_key_not_current`). The signature must
+  principal's current one, so a superseded or unknown key is refused. The signature must
   cover this call's operation, resource and arguments (`client_signature_invalid`). The issue time must be inside
   the caller envelope's freshness window. Each `cn` is admitted once per process: a replay is dropped unanswered, a
   reordered pair is admitted, and two processes under one certificate never collide. A kind whose call the provider
   cannot read refuses a signature (`client_signature_unbound`); `tools/call` and `skill.invoke` bind.
-- **An unsigned call** from a principal with a certificate on record is counted (`gateway_actions_unsigned{kind}`),
-  not refused yet ([`deprecations.md` §87](../guide/deprecations.md)). The gateway's signature does not cover
-  `cs`/`cn`, so a relay that strips them makes the call unsigned.
+- **One signature, every provider of the tool.** The signature names the resource before `@`, not the provider the
+  gateway resolved, and each provider keeps its own `cn` window. So one signed call presented to N providers of the
+  same tool runs once at each. Binding the provider would need the client to know which one the gateway will pick, and
+  it does not.
+- **The `cn` window is in memory.** A provider that restarts forgets it, so a call captured before the restart can
+  replay once after it, inside the freshness window.
+- **Refusals:** `client_key_unknown` means this node has not read the key's certificate yet and is worth retrying;
+  `client_key_superseded` is final. More than 1,024 processes signing under one key inside the window are answered
+  `client_instances_exhausted`. The arguments' digest is RFC 8785 (JCS), the same in Rust, Python and TypeScript.
+- **An unsigned call** from a principal with a certificate on record is counted at the `/mcp` and `/a2a` doors and at
+  the provider that runs it (`gateway_actions_unsigned`, `provider_actions_unsigned` on `/stats`), not refused yet
+  ([`deprecations.md` §87](../guide/deprecations.md)). The gateway's signature does not cover `cs`/`cn`, so a relay
+  that strips them makes the call unsigned. The LLM doors refuse a signature (`client_signature_unbound`).
 - **Reserved name:** no client certificate may be named `legacy`, the legacy token's principal.
 - **Ordering is the issuing host's clock.** The issuance is the serial, in ms, from the clock of the host that ran
   `mycelium tls issue`. A host whose clock runs behind can issue a certificate that orders below the one it
