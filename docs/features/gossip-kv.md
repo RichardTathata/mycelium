@@ -49,12 +49,16 @@ local replica, in a browser.
   unsigned KV write frame or one in the bare pre-2.33 signature form (rule revision 2;
   [`mesh.signed_writes`](mesh-mtls.md)).
 - **Rule:** [`kv.expiry`](../reference/rule-catalogue.md#kvexpiry) — no entry carries a TTL. A capability or
-  requirement advertisement its writer stopped refreshing stays in the store until overwritten or tombstoned; the
-  readers that apply [`CapEntry::is_fresh`](../../src/capability.rs) — resolve, watch, wiring, demand, coverage gaps
-  and role concentration — skip it once it is older than three refresh intervals. Three `cap/` readers do not yet:
-  the A2A provider resolution, the A2A card's skill list and the membership governor's eligibility, a known gap fixed
-  by a separate PR. A tombstone is collected by the sweep (rule revision 2; revision 1 cited a function and tests the
-  tree does not have).
+  requirement advertisement its writer stopped refreshing stays in the store until overwritten or tombstoned; every
+  reader skips it once it is older than three refresh intervals ([`CapEntry::is_fresh`](../../src/capability.rs)) —
+  resolve, watch, wiring, demand, coverage gaps, role concentration, the A2A provider resolution and card, the
+  membership governor's eligibility, the gateway's resolve, demand, shard and LLM lookups, the group projection and
+  agent facts (rule revision 3; until it, the A2A, governor and gateway readers did not). A node judges its **own**
+  entries on staleness only — the provider preflight, the group projection, its own eligibility and its agent facts
+  (revision 4) — so a clock that reads its own stamp as ahead does not cost it its own skill; a peer's entry is judged
+  both ways. An own entry stamped far ahead and persisted before a clock correction therefore stays live until the
+  wall clock catches up with its stamp. A
+  tombstone is collected by the sweep (revision 2 replaced a function and tests the tree does not have).
 - **Not built:** agreement between writers; authenticated anti-entropy (a state reply's entries carry no author, the
   [mesh mTLS](mesh-mtls.md) page's limit); the store enforces no ownership of a namespace — the doors do, and the
   `sys/` tripwire counts rather than refuses.

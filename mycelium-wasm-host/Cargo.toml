@@ -71,7 +71,7 @@ getrandom      = "0.2"
 # The stem node binary (design-time-tooling.md §13, R1/R2): a node that declares from its unit
 # file and provisions what the declarations call for. Opt-in so the library carries no logging
 # subscriber.
-tracing-subscriber = { version = "0.3", optional = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
 object_store = { version = "0.14", features = ["aws", "gcp"], optional = true }
 # A3: the gateway publish route (`POST /gateway/artifacts/publish`), merged into the node's
 # gateway via `with_http_routes` — the same seam every companion uses.

@@ -601,14 +601,11 @@ fn derive(
     Ok((kind.to_string(), resource.to_string(), json!({ "payload_b64": b64 })))
 }
 
-/// Does this node advertise capability `ns/name`?
+/// Does this node advertise capability `ns/name`, not aged out? An own entry it stopped refreshing — read back
+/// from persisted state after a restart, say — has (rule `kv.expiry`; the review of #730); a stamp its clock reads
+/// as ahead has not (#734's review). One key read (`capability_ops::own_cap_live`).
 fn advertises(ctx: &TaskCtx, ns: &str, name: &str) -> bool {
-    crate::store::scan_kv_prefix(&ctx.kv_state, "cap/").into_iter().any(|(key, _)| {
-        !super::capability_ops::is_cap_locality_key(&key)
-            && super::capability_ops::parse_cap_key_or_warn("cap/", &key).is_some_and(|(node, n, m)| {
-                node == ctx.node_id && n.as_ref() == ns && m.as_ref() == name
-            })
-    })
+    super::capability_ops::own_cap_live(&ctx.kv_state, &ctx.node_id, ns, name)
 }
 
 #[cfg(test)]
@@ -620,6 +617,48 @@ mod tests {
     use bytes::Bytes;
     use ed25519_dalek::SigningKey;
     use std::time::Duration;
+
+    /// **This node's own advertisement, gone stale, is not served.** A node restarted over persisted
+    /// `cap/` entries it no longer refreshes reads its old skill back; the advertisement has evaporated
+    /// (`CapEntry::is_fresh`, rule `kv.expiry`), so the skill is `resource_not_served` — the same answer
+    /// every other reader of `cap/` gives (the review of #730). Seen failing first: `advertises` checked
+    /// only that the key existed.
+    #[test]
+    fn a_stale_own_advertisement_is_not_served() {
+        use crate::capability::{CapEntry, Capability};
+        use crate::framing::make_gossip_update_stamped;
+        use crate::store::apply_and_notify;
+        let agent = GossipAgent::new(NodeId::new("127.0.0.1", 9001).unwrap(), GossipConfig::default());
+        let ctx = &agent.task_ctx;
+        let now = mycelium_core::sim_seam::wall_now_ms();
+        for (name, written_ms) in [("live", now), ("gone", now - 60_000)] {
+            let entry = CapEntry { capability: Capability::new("demo", name), refresh_interval_ms: 1_000 };
+            let key = format!("cap/{}/demo/{name}", ctx.node_id);
+            apply_and_notify(&ctx.kv_state, &make_gossip_update_stamped(&ctx.node_id, 5, Arc::from(key.as_str()),
+                entry.encode(), false, crate::hlc::pack(written_ms, 0)));
+        }
+        assert!(advertises(ctx, "demo", "live"));
+        assert!(!advertises(ctx, "demo", "gone"), "a stale own advertisement read as served");
+    }
+
+    /// **A node whose HLC runs ahead still serves its own skill** (#734's review, finding 5). Its own stamp can
+    /// sit more than three refresh intervals ahead of its wall clock — a peer ahead within the drift bound, or
+    /// the wall clock stepped back — and the symmetric `is_fresh` would read its own advertisement as
+    /// quarantined and refuse the skill `resource_not_served`. The own-key check judges staleness only.
+    #[test]
+    fn an_own_advertisement_stamped_ahead_is_still_served() {
+        use crate::capability::{CapEntry, Capability};
+        use crate::framing::make_gossip_update_stamped;
+        use crate::store::apply_and_notify;
+        let agent = GossipAgent::new(NodeId::new("127.0.0.1", 9002).unwrap(), GossipConfig::default());
+        let ctx = &agent.task_ctx;
+        let ahead = mycelium_core::sim_seam::wall_now_ms() + 60_000;
+        let entry = CapEntry { capability: Capability::new("demo", "ahead"), refresh_interval_ms: 1_000 };
+        let key = format!("cap/{}/demo/ahead", ctx.node_id);
+        apply_and_notify(&ctx.kv_state, &make_gossip_update_stamped(&ctx.node_id, 5, Arc::from(key.as_str()),
+            entry.encode(), false, crate::hlc::pack(ahead, 0)));
+        assert!(advertises(ctx, "demo", "ahead"), "an own advertisement stamped ahead was refused");
+    }
 
     /// **Closure plan C4: a declared cohort is capped together, through a real serve loop.**
     ///

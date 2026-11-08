@@ -5,7 +5,7 @@
 In a build with `metrics`, the gateway serves Prometheus metrics at `/metrics` on its HTTP port: the gossip hot path,
 the emergent diagnosis, the governors, the artifact library, guardrails, reason routing, and the counters each
 companion adds under its own `metrics` feature. Logs go through `tracing`; the `mycelium` and `mycelium-stem` binaries log at INFO
-and do not read `RUST_LOG` today (only `skillrunner` does — a separate PR adds it). In a build with
+unless `RUST_LOG` says otherwise. In a build with
 `otel`, the skill runner exports a span per invocation over OTLP, and the substrate's span export turns records into
 spans that carry a record's hash, never its content ([span export](span-export.md)). The node's `/stats` and
 `system_stats()` give the same counts without a scraper.
@@ -25,9 +25,13 @@ node has it) and give the node an [`http_port`](../reference/configuration.md#ht
 - `metrics` on a companion — `mycelium-tuple-space`, `mycelium-blackboard` or `mycelium-wiki` — adds its families, and
   forwards `mycelium/metrics`.
 - [`cluster_name`](../reference/configuration.md#cluster_name): a label on every series, nothing more.
-- Logs: the `mycelium` binary logs at INFO (WARN under `mycelium test`) and `mycelium-stem` at INFO, both ignoring
-  `RUST_LOG`; `skillrunner` reads
-  `RUST_LOG`; an application that embeds the library installs its own subscriber.
+- Logs: the `mycelium` binary logs at INFO (WARN under `mycelium test`) and `mycelium-stem` at INFO, unless `RUST_LOG`
+  holds a valid directive. A valid `RUST_LOG` **replaces** the default rather than adding to it: every target it does
+  not name is off, so `RUST_LOG=mycelium_core=debug` hides the node's own INFO lines (write
+  `RUST_LOG=info,mycelium_core=debug` to keep them), and a typo that parses as a target name (`RUST_LOG=inf`) silences
+  everything; a `RUST_LOG` with no valid directive keeps the default. `skillrunner` reads `RUST_LOG` but pins
+  `skillrunner=info` and `mycelium=warn` over it, so it changes only other targets. An application that embeds the
+  library installs its own subscriber.
 - `the_connected_peer_gauge_counts_live_writers`, in [`src/lib_tests.rs`](../../src/lib_tests.rs): a series read from
   `/metrics` against the node's own writer map.
 

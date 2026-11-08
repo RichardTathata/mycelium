@@ -5,9 +5,9 @@
 A [capability](../guide/00-concepts.md#capability) is a node saying "I provide `ns/name`", with a schema id and typed
 attributes, written under `cap/` and refreshed on an interval. Any node resolves a filter against what it has seen,
 by one matching rule shared with the offline check: namespace, name, schema id and attribute constraints. There is no
-registry to ask: an advertisement its writer stops refreshing is discarded by `resolve`, the watch and the other
-readers that apply freshness once it is older than three refresh intervals, so a crashed provider evaporates from
-resolution on its own. Resolution does not consult opacity: a caller that wants to route around a busy provider
+registry to ask: an advertisement its writer stops refreshing is discarded by every reader — `resolve`, the watch,
+the A2A card, the gateway's lookups — once it is older than three refresh intervals, so a crashed provider evaporates
+from resolution on its own. Resolution does not consult opacity: a caller that wants to route around a busy provider
 reads its trail ([opacity](opacity.md)).
 
 ## When to use it, and when not
@@ -40,14 +40,15 @@ CI compiles it and checks its declaration, and does not run it. That a retired a
 ## What it guarantees, and what it does not
 
 - **Rule:** [`cap.match`](../reference/rule-catalogue.md#capmatch) — matched, or `ns_or_name_differs`,
-  `schema_id_differs`, `constraint_unmet` (rule revision 2: revision 1 also listed `opaque_skipped`, which no matcher
-  does).
+  `schema_id_differs`, `constraint_unmet` (revision 2 removed `opaque_skipped`, which no matcher does); every reader
+  skips an advertisement older than three refresh intervals (revision 3, rule
+  [`kv.expiry`](../reference/rule-catalogue.md#kvexpiry)), so a crashed provider is not resolved, routed to, listed
+  on the A2A card or counted eligible.
 - **Held:** a capability name is one key segment at every door.
 - **Not built:** an advertisement is a claim, not proof the provider serves it or is authorised to — authority is
   checked where the work runs ([provider enforcement](provider-enforcement.md)); resolution is per node and can
-  differ between nodes while gossip settles; three `cap/` readers do not apply freshness yet — the A2A provider
-  resolution, the A2A card's skill list and the membership governor's eligibility — a known gap fixed by a separate
-  PR.
+  differ between nodes while gossip settles, and a crashed provider stays resolvable for up to three refresh
+  intervals; an advertisement with a refresh interval of 0 (possible through the Rust API) reads as stale at once.
 - **Evidence:** the ledger rows
   [a capability name is one key segment at every door](../operations/what-is-proven.md#capability-name-key-segment-door)
   and [a node that shuts down withdraws its soft state at its peers](../operations/what-is-proven.md#node-shuts-down-withdraws-soft-state).
