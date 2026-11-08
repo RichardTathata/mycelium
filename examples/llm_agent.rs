@@ -923,17 +923,24 @@ fn capvalue_to_json(v: &CapValue) -> Value {
 }
 
 fn caps_for_node(reporter: &GossipAgent, target: &NodeId) -> Vec<Value> {
+    // The target's advertisements as the resolver reads them, so a crashed node's stale ads are not shown.
     let prefix = format!("cap/{target}/");
-    reporter.kv().scan_prefix(&prefix).into_iter().filter_map(|(_, v)| {
-        let cap = Capability::decode(&v)?;
-        Some(json!({
+    let pairs: std::collections::BTreeSet<(String, String)> = reporter.kv().scan_prefix(&prefix).into_iter()
+        .filter_map(|(k, _)| {
+            let mut seg = k.splitn(4, '/').skip(2);
+            Some((seg.next()?.to_string(), seg.next()?.to_string()))
+        })
+        .collect();
+    pairs.iter().flat_map(|(ns, name)| reporter.capabilities().resolve(&mycelium::CapFilter::new(ns.as_str(), name.as_str())))
+        .filter(|(node, _)| node == target)
+        .map(|(_, cap)| json!({
             "ns":   cap.namespace,
             "name": cap.name,
             "attrs": cap.attributes.iter()
                 .map(|(k, v)| (k.as_ref().to_string(), capvalue_to_json(v)))
                 .collect::<serde_json::Map<_, _>>(),
         }))
-    }).collect()
+        .collect()
 }
 
 fn tools_for_node(reporter: &GossipAgent, target: &NodeId) -> Vec<String> {

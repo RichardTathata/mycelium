@@ -364,7 +364,7 @@ pub(super) async fn gw_cap_resolve(
     Query(q):   Query<ResolveQuery>,
     State(ctx): State<Arc<HttpCtx>>,
 ) -> impl IntoResponse {
-    use crate::capability::{CallerContext, CapFilter, Capability};
+    use crate::capability::{CallerContext, CapFilter};
 
     let filter     = CapFilter::new(q.ns.as_str(), q.name.as_str());
     let caller_ctx = match q.caller_id {
@@ -373,13 +373,8 @@ pub(super) async fn gw_cap_resolve(
     };
 
     let mut results = Vec::new();
-    for (key, bytes) in crate::store::scan_kv_prefix(&ctx.agent_ctx.kv_state, "cap/") {
-        if super::capability_ops::is_cap_locality_key(&key) { continue; }
-        let Some((node_id, _ns, _name)) =
-            super::capability_ops::parse_cap_key_or_warn("cap/", &key)
-            else { continue };
-        let Some(cap) = Capability::decode(&bytes) else { continue };
-        if filter.matches(&cap) && caller_ctx.can_see(&cap) {
+    for (node_id, cap) in resolve_cap_providers(&ctx.agent_ctx.kv_state, &filter) {
+        if caller_ctx.can_see(&cap) {
             let attrs: serde_json::Map<String, serde_json::Value> = cap.attributes.iter()
                 .map(|(k, v)| (k.as_ref().to_string(), capvalue_to_json(v)))
                 .collect();
@@ -418,28 +413,8 @@ pub(super) async fn gw_demand(
 ) -> impl IntoResponse {
     use crate::capability::CapFilter;
 
-    let filter   = CapFilter::new(q.ns.as_str(), q.name.as_str());
-    let kv       = &ctx.agent_ctx.kv_state;
-
-    let providers = crate::store::scan_kv_prefix(kv, "cap/")
-        .into_iter()
-        .filter(|(k, v)| {
-            if super::capability_ops::is_cap_locality_key(k) { return false; }
-            crate::capability::Capability::decode(v)
-                .map(|c| filter.matches(&c))
-                .unwrap_or(false)
-        })
-        .count();
-
-    let requirers = crate::store::scan_kv_prefix(kv, "req/")
-        .into_iter()
-        .filter(|(_, v)| {
-            crate::capability::CapFilter::decode(v)
-                .map(|f| f.namespace == filter.namespace && f.name == filter.name)
-                .unwrap_or(false)
-        })
-        .count();
-
+    let filter = CapFilter::new(q.ns.as_str(), q.name.as_str());
+    let (providers, requirers) = demand_counts(&ctx.agent_ctx.kv_state, &filter);
     let pressure = (requirers as f64) / (providers.max(1) as f64);
 
     Json(json!({
@@ -451,24 +426,75 @@ pub(super) async fn gw_demand(
     })).into_response()
 }
 
-/// Shared helper: scan `cap/` KV and return providers matching `filter`.
-/// Mirrors the scan in `gw_cap_resolve` (no freshness check — same as the HTTP resolve endpoint).
+/// `GET /gateway/demand`'s two counts for `filter`: the nodes that provide it and the nodes that require it.
+/// They are `demand()`'s own (`demand_snapshot`): fresh entries only, a crashed node's `cap/` or `req/` entry
+/// skipped once older than three refresh intervals (rule `kv.expiry`; the review of #730), and the providers
+/// counting a group's contributors (`gcap/`), each node once (#734's review, finding 6).
+fn demand_counts(kv: &crate::store::KvState, filter: &crate::capability::CapFilter) -> (usize, usize) {
+    let status = crate::agent::demand::demand_snapshot(kv, filter);
+    (status.providers.len(), status.demanding_nodes.len())
+}
+
+/// The gateway's provider lookup — `GET /gateway/cap/resolve`, `shard/owner`, `shard/emit`,
+/// `llm/call`, `llm/stream`: every *fresh* advertisement matching `filter`, the capability
+/// resolver's own reading. It once skipped the freshness check, so a crashed provider's ad, never
+/// tombstoned, was resolved and routed to indefinitely (rule `kv.expiry`; the review of #730).
 pub(super) fn resolve_cap_providers(
     kv_state: &crate::store::KvState,
     filter:   &crate::capability::CapFilter,
 ) -> Vec<(crate::node_id::NodeId, crate::capability::Capability)> {
-    use crate::capability::Capability;
-    use crate::store::scan_kv_prefix;
-    use super::capability_ops::{is_cap_locality_key, parse_cap_key_or_warn};
+    super::capability_ops::resolve_filter_against_kv(kv_state, filter)
+}
 
-    let mut out = Vec::new();
-    for (key, bytes) in scan_kv_prefix(kv_state, "cap/") {
-        if is_cap_locality_key(&key) { continue; }
-        let Some((node_id, _ns, _name)) = parse_cap_key_or_warn("cap/", &key) else { continue };
-        let Some(cap) = Capability::decode(&bytes) else { continue };
-        if filter.matches(&cap) {
-            out.push((node_id, cap));
-        }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::capability::{CapEntry, CapFilter, Capability, ReqEntry};
+    use crate::framing::make_gossip_update_stamped;
+    use crate::node_id::NodeId;
+    use crate::store::{apply_and_notify, KvState};
+    use std::sync::Arc;
+
+    fn seed(kv: &KvState, key: &str, value: bytes::Bytes, written_ms: u64) {
+        let writer = NodeId::new("127.0.0.1", 9999).unwrap();
+        apply_and_notify(kv, &make_gossip_update_stamped(&writer, 5, Arc::from(key), value, false, crate::hlc::pack(written_ms, 0)));
     }
-    out
+
+    /// **A crashed provider's advertisement, and a crashed requirer's declaration, are skipped.** Neither is
+    /// tombstoned; each evaporates at its readers after three refresh intervals (`CapEntry::is_fresh`,
+    /// `ReqEntry::is_fresh`, rule `kv.expiry`). The gateway's resolve, its demand counts and the provider
+    /// lookup behind `shard/*` and `llm/*` decoded with `Capability::decode` /
+    /// `CapFilter::decode` and never asked, so they routed to and counted dead nodes (the review of #730).
+    #[test]
+    fn the_gateways_readers_skip_a_stale_advertisement_and_a_stale_requirement() {
+        let kv = KvState::new(0);
+        let now = mycelium_core::sim_seam::wall_now_ms();
+        let cap = CapEntry { capability: Capability::new("compute", "gpu"), refresh_interval_ms: 1_000 }.encode();
+        let req = ReqEntry { filter: CapFilter::new("compute", "gpu"), refresh_interval_ms: 1_000 }.encode();
+        seed(&kv, "cap/127.0.0.1:9001/compute/gpu", cap.clone(), now);
+        seed(&kv, "cap/127.0.0.1:9002/compute/gpu", cap, now - 60_000);
+        seed(&kv, "req/127.0.0.1:9003/compute/gpu", req.clone(), now);
+        seed(&kv, "req/127.0.0.1:9004/compute/gpu", req, now - 60_000);
+        let filter = CapFilter::new("compute", "gpu");
+
+        let providers: Vec<String> = resolve_cap_providers(&kv, &filter).into_iter().map(|(n, _)| n.to_string()).collect();
+        assert_eq!(providers, vec!["127.0.0.1:9001".to_string()], "a stale provider resolved");
+        assert_eq!(demand_counts(&kv, &filter), (1, 1), "a stale provider or requirer counted");
+    }
+
+    /// **`GET /gateway/demand` agrees with `demand()`** (#734's review, finding 6): it counted `cap/` providers
+    /// only, while `demand_snapshot` also counts a group's contributors (`gcap/`) and dedupes by node.
+    #[test]
+    fn the_gateways_demand_counts_group_contributors_as_demand_snapshot_does() {
+        let kv = KvState::new(0);
+        let now = mycelium_core::sim_seam::wall_now_ms();
+        let cap = CapEntry { capability: Capability::new("compute", "gpu"), refresh_interval_ms: 1_000 }.encode();
+        seed(&kv, "cap/127.0.0.1:9001/compute/gpu", cap.clone(), now);
+        seed(&kv, "gcap/pool/compute/gpu/127.0.0.1:9005", cap.clone(), now);
+        seed(&kv, "gcap/pool/compute/gpu/127.0.0.1:9001", cap, now); // the same node: counted once
+        let filter = CapFilter::new("compute", "gpu");
+        let snap = crate::agent::demand::demand_snapshot(&kv, &filter);
+        assert_eq!(demand_counts(&kv, &filter), (snap.providers.len(), snap.demanding_nodes.len()));
+        assert_eq!(demand_counts(&kv, &filter), (2, 0), "a group contributor was not counted");
+    }
 }

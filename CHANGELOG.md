@@ -71,6 +71,47 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A crashed provider's advertisement is skipped by every reader of `cap/` and `req/`** (the independent review of
+  #730). An advertisement is never tombstoned when its provider dies; it evaporates at its readers, which skip an entry
+  older than three refresh intervals (`CapEntry::is_fresh` / `ReqEntry::is_fresh`, rule `kv.expiry`). Five readers
+  decoded with `Capability::decode` or `CapFilter::decode` and never asked, so a dead node stayed live to them
+  indefinitely: `/a2a tasks/send` could route to it and the agent card listed its skill (`resolve_providers`,
+  `card_skill_ids`); the membership governor counted it eligible, inflating `eligible_non_members` and lowering every
+  live node's `join_p` (`resolve_eligible`); the gateway's provider lookup — `GET /gateway/cap/resolve`,
+  `shard/owner`, `shard/emit`, `llm/call` and `llm/stream` — resolved and routed to it
+  (`resolve_cap_providers`, which said so in its doc comment); and `GET /gateway/demand` counted its providers and
+  requirers. Each now reads through the resolver's own path (`resolve_filter_against_kv`, or `scan_fresh_caps` where
+  the key's segments are wanted). `GET /gateway/demand` now returns `demand()`'s own counts (`demand_snapshot`), so
+  it also counts a group's contributors (`gcap/`), each node once. Three readers of a node's **own** entries read one
+  it had stopped refreshing — restored from persisted state after a restart — as live: the provider-side preflight
+  served the skill (`advertises`), the group projection joined the groups it matched and projected a fresh `gcap/`
+  that demand and wiring count (`emergent_groups`), and `mycelium-agentfacts` certified it; the `llm_agent` example's
+  dashboard showed a crashed node's ads. A node judges its **own** entries on staleness only, at every reader of them —
+  the preflight, the group projection, its own eligibility in the membership governor and its agent facts — so a
+  clock that reads its own stamp as ahead does not refuse its own skill, drop it from a group, judge itself
+  ineligible or leave it out of its facts; a peer's entry is judged both ways. The cost, stated in `kv.expiry`: an own
+  entry stamped far ahead and persisted before a clock correction stays live until the wall clock catches up. New:
+  `CapabilitiesHandle::own_advertised()`, that reading for a companion (agent facts uses it). `advertises` reads its one
+  key rather than scanning the fleet's. The new readers add no clock read a recording lacks where they can: the group
+  projection judges its own entries with the one wall reading its pass already took (for the membership intents), an
+  own-entry check reads the clock only when there is an entry, and the governor reads it once per pass, on its timer
+  — so the checked-in replay corpus (`y2-schedule-run`, the faults recordings) replays as recorded and was not
+  re-recorded. The first form read the clock again in every group-projection pass, an event-driven task, which
+  diverged `schedule_replay` at its eighth choice and, under load, `decision_trace_replay`. Rules `kv.expiry` (revision 4),
+  `cap.match` and `membership.governed` (revision 3). One additive method (`own_advertised`), no other API change; a caller sees
+  fewer providers, never more, except `/gateway/demand`'s group contributors. Not changed: an advertisement with a
+  refresh interval of 0, possible through the Rust API, reads as stale to every reader at once.
+
+- **The `mycelium` node binary and `mycelium-stem` read `RUST_LOG`** (the independent review of #730). Each set a
+  fixed maximum level, so `RUST_LOG=mycelium=debug` did nothing. Each now builds an `EnvFilter` from `RUST_LOG`;
+  unset, empty or holding no valid directive, the default stands — INFO for the node and the stem, WARN for
+  `mycelium test`. **A valid `RUST_LOG` replaces the default rather than adding to it:** a target it does not name is
+  off, so `RUST_LOG=mycelium_core=debug` hides the node's own INFO start-up lines and a typo that parses as a target
+  (`RUST_LOG=inf`) silences everything — write `RUST_LOG=info,mycelium_core=debug`. (`skillrunner` differs: it pins
+  `skillrunner=info` and `mycelium=warn` over `RUST_LOG`, so `RUST_LOG` changes only its other targets; its reference
+  page's troubleshooting example said otherwise and is corrected.) `mycelium-wasm-host`'s optional
+  `tracing-subscriber` gains its `env-filter` feature.
+
 - **The reference evaluator selects the arguments its rules test.** `ReferenceEvaluator` kept the trait's default
   `security_relevant_arguments` (none), so an enforcement point lifted no argument into the envelope and every rule
   with `requires_values` read *argument value not available* at a live door — `Indeterminate`, never a permit. It now

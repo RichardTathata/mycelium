@@ -20,7 +20,7 @@
 
 
 use base64::Engine as _;
-use mycelium::{Capability, GossipAgent};
+use mycelium::GossipAgent;
 use serde::Serialize;
 use serde_json::{json, Value};
 
@@ -99,15 +99,18 @@ pub struct FactsOptions {
 impl AgentFacts {
     /// Build from a node's live substrate state (public API only). `None` if the node has no `tls`
     /// identity — AgentFacts are self-certified and require one. `capabilities` are this node's own
-    /// advertised `cap/{self}/…` entries (entries that don't decode as a [`Capability`], e.g.
-    /// locality keys, are skipped); they are sorted for a deterministic document.
+    /// advertised `cap/{self}/…` entries it has not stopped refreshing (a stale one, or one that
+    /// doesn't decode as a [`Capability`](mycelium::Capability), e.g. a locality key, is skipped); they are sorted for a
+    /// deterministic document.
     pub fn from_agent(agent: &GossipAgent, opts: &FactsOptions) -> Option<Self> {
         let identity_pubkey = agent.identity_public_key()?;
         let node_id = agent.node_id().to_string();
 
+        // This node's own advertisements as the node judges them (`own_advertised`, staleness only): one it stopped
+        // refreshing (read back from persisted state after a restart) is not certified, and one its HLC stamped
+        // ahead of its wall clock is, since it serves it (#734's review, finding 3, and confirm round, C).
         let mut capabilities = Vec::new();
-        for (_key, bytes) in agent.kv().scan_prefix(&format!("cap/{node_id}/")) {
-            let Some(cap) = Capability::decode(&bytes) else { continue };
+        for cap in agent.capabilities().own_advertised() {
             capabilities.push(CapabilityFact {
                 namespace:     cap.namespace.to_string(),
                 name:          cap.name.to_string(),
@@ -267,6 +270,56 @@ mod tests {
         let agent = Arc::new(GossipAgent::new(id, cfg));
         agent.start().await.unwrap();
         (agent, cert_dir)
+    }
+
+    /// **A stale own advertisement is not reported** (#734's review, finding 3). A node restarted over persisted
+    /// `cap/` entries it no longer refreshes would certify a capability it does not serve: the facts read every
+    /// `cap/{self}/…` entry and never asked whether it had evaporated (three refresh intervals).
+    #[tokio::test]
+    async fn a_stale_own_advertisement_is_left_out_of_the_facts() {
+        let (agent, cert_dir) = tls_agent().await;
+        let _reg = agent.capabilities().advertise_capability(Capability::new("nlp", "summarize"), Duration::from_secs(5));
+        let me = agent.node_id().clone();
+        let stale = mycelium::CapEntry { capability: Capability::new("nlp", "gone"), refresh_interval_ms: 1_000 };
+        let written = mycelium::sim_seam::wall_now_ms() - 60_000;
+        mycelium_core::store::apply_and_notify(&agent.kv().core().kv_state, &mycelium_core::framing::make_gossip_update_stamped(
+            &me, 5, Arc::from(format!("cap/{me}/nlp/gone").as_str()), stale.encode(), false, mycelium::hlc::pack(written, 0)));
+
+        let opts = FactsOptions::default();
+        let mut facts = None;
+        for _ in 0..100 {
+            if let Some(f) = AgentFacts::from_agent(&agent, &opts)
+                && f.capabilities.iter().any(|c| c.name == "summarize")
+            {
+                facts = Some(f);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let facts = facts.expect("facts built with the advertised capability");
+        let names: Vec<&str> = facts.capabilities.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["summarize"], "a stale own advertisement was certified");
+
+        agent.shutdown_with_timeout(Duration::from_secs(5)).await;
+        let _ = std::fs::remove_dir_all(&cert_dir);
+    }
+
+    /// **An own advertisement stamped ahead is certified** (#734's confirm round, C): the facts judge this node's own
+    /// entries as the node serves them — staleness only. With its HLC ahead of its wall clock, the symmetric
+    /// `is_fresh` left out a skill the node was serving.
+    #[tokio::test]
+    async fn an_own_advertisement_stamped_ahead_is_certified() {
+        let (agent, cert_dir) = tls_agent().await;
+        let me = agent.node_id().clone();
+        let ahead = mycelium::CapEntry { capability: Capability::new("nlp", "ahead"), refresh_interval_ms: 1_000 };
+        let written = mycelium::sim_seam::wall_now_ms() + 60_000;
+        mycelium_core::store::apply_and_notify(&agent.kv().core().kv_state, &mycelium_core::framing::make_gossip_update_stamped(
+            &me, 5, Arc::from(format!("cap/{me}/nlp/ahead").as_str()), ahead.encode(), false, mycelium::hlc::pack(written, 0)));
+        let facts = AgentFacts::from_agent(&agent, &FactsOptions::default()).expect("a tls identity");
+        let names: Vec<&str> = facts.capabilities.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["ahead"], "an own advertisement stamped ahead was left out");
+        agent.shutdown_with_timeout(Duration::from_secs(5)).await;
+        let _ = std::fs::remove_dir_all(&cert_dir);
     }
 
     #[tokio::test]
