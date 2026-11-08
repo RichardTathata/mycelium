@@ -43,7 +43,7 @@ CASES = ['baseline', 'example-baseline',
          # (g) tests
          'absent-test', 'absent-test-in-first-paragraph', 'short-test-absent', 'not-a-test', 'none-names-no-test', 'test-without-file',
          'excepted-test', 'in-code-without-test', 'test-not-executed', 'script-key-not-a-run', 'test-in-wrong-target', 'integration-test-in-wrong-binary',
-         'executed-baseline', 'adapter-test-not-executed', 'adapter-executed-baseline',
+         'executed-baseline', 'bin-test-executed', 'bin-test-in-library-target', 'adapter-test-not-executed', 'adapter-executed-baseline',
          'adapter-row-missing', 'adapter-carried-without-test', 'adapter-test-not-in-file', 'adapter-cell-vocabulary',
          # (h) examples
          'example-for-none-feature', 'example-row-tight', 'example-absent-from-index', 'example-missing', 'example-row-without-status',
@@ -485,7 +485,11 @@ def log_for(entries):
             lines.append(f'  ✓ {test} (3 ms)')
             continue
         crate, within = module.crate_of(ROOT, file)
-        if within.startswith('tests/'):
+        binary_target = module.bin_of(ROOT, file)
+        if binary_target is not None:  # a `src/bin/` test runs under its binary's own target, as the Test job logs it
+            target, binary = binary_target if right else ('src/lib.rs', crate)
+            lines.append(f'\x1b[1m\x1b[92m     Running\x1b[0m unittests {target} (target/debug/deps/{binary}-9fc7d549f7049e34)')
+        elif within.startswith('tests/'):
             stem = Path(within).stem
             binary = stem if right else 'some_other_binary'
             lines.append(f'     Running {within} (target/debug/deps/{binary}-0123abcd)')
@@ -521,6 +525,20 @@ with tempfile.TemporaryDirectory() as logs:
     log.write_text(log_for([(t, files[0], not same(n, integration[0])) for n in named for _, t, files in [n]]))
     errors = module.check_executed(ROOT, logs)
     assert any(f'`{integration[0][1]}`' in e for e in errors), errors
+    # A test in a binary target, in the real log's form (run 42433278380's Test job): the gate once required every
+    # `src/` test to run under the crate's name, so `parse_minimal` — executed under `skillrunner` — read as never run.
+    case('bin-test-executed')
+    snippet = ('2026-11-08T01:39:21.4094408Z \x1b[1m\x1b[92m     Running\x1b[0m unittests src/bin/skillrunner/main.rs '
+               '(target/debug/deps/skillrunner-9fc7d549f7049e34)\n'
+               '2026-11-08T01:39:21.4128470Z test config::tests::parse_minimal ... ok\n')
+    others = [(t, files[0], True) for _, t, files in named if t != 'parse_minimal']
+    log.write_text(log_for(others) + snippet)
+    assert module.check_executed(ROOT, logs) == [], module.check_executed(ROOT, logs)
+    case('bin-test-in-library-target')
+    log.write_text(log_for(others) + snippet.replace('unittests src/bin/skillrunner/main.rs', 'unittests src/lib.rs')
+                   .replace('deps/skillrunner-', 'deps/mycelium-'))
+    errors = module.check_executed(ROOT, logs)
+    assert any('`parse_minimal`' in e for e in errors), errors
     case('executed-baseline')
     log.write_text(log_for([(t, files[0], True) for _, t, files in named]))
     assert module.check_executed(ROOT, logs) == [], module.check_executed(ROOT, logs)
@@ -590,7 +608,7 @@ fails('"The pages" has no row for skills.md',
 case('parser-guard-front-page')
 fails('no "## The pages" section', {'docs/features/README.md': [('\n## The pages\n', '\n## Pages\n')]})
 
-POSITIVE = {'baseline', 'example-baseline', 'executed-baseline', 'fenced-unit-heading', 'fenced-page-heading',
+POSITIVE = {'baseline', 'example-baseline', 'executed-baseline', 'bin-test-executed', 'fenced-unit-heading', 'fenced-page-heading',
             'glob-workspace-member', 'descriptor-in-comment',
             'external-link', 'descriptor-in-test-file', 'nested-test-module', 'turn-on-name-without-file',
             'crate-linked'}
