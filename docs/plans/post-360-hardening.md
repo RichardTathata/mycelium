@@ -2234,6 +2234,9 @@ Every other site registers before it spawns, or inside the function that awaits 
 runs of the whole `agent::bulk` module at 24 parallel processes.
 
 **Known flakes, open (seen during the v2.36.0 work, 2026-10-19; not yet investigated):**
+- `mycelium-wasm-host` `stem_shutdown` — "the stem never bound its port" at its 30 s bind deadline, 2 of 11 runs under
+  load average 4–5 (#738's review, 2026-11-08); the binary run by hand binds in 0.16–0.3 s, 15 of 15. Load-sensitive
+  wall-clock bound, stdout and stderr discarded so a failure leaves no log; named in no CI step of its own.
 - `overlay_consistent::tests::distributed_lock_grants_single_holder_under_race` — 0 winners (a liveness timeout), never
   2; failed 4 of 256 runs on `main` under 32-process load.
 - the Strands fleet demo — `IncompleteSession`: `msg/3` was missing when its count arrived, a race in the demo; passed

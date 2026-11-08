@@ -61,7 +61,8 @@ transaction, or does neither. [`wiki_council_viz`](../../examples/README.md#the-
   sections in `FsStore`; a metric or endpoint naming the curator; a mirror that is current to the write — read the
   store, not the mirror ([companions § mycelium-wiki](../operations/companions.md#mycelium-wiki--durable-curated-canon)).
 - **Evidence:** the [what-is-proven](../operations/what-is-proven.md) ledger has no row for the wiki on its own; the
-  council-scale measurements are in [`plans/council-substrate-hardening.md`](../plans/council-substrate-hardening.md).
+  council-scale measurement is the row [ten councils writing one git store concurrently](../operations/what-is-proven.md#ten-councils-writing-git-store-concurrently),
+  from [`plans/council-substrate-hardening.md`](../plans/council-substrate-hardening.md).
 
 ## Go deeper
 

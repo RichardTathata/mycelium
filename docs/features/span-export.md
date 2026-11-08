@@ -94,7 +94,10 @@ is a hand-kept copy; no test reads it.
 - **Not built** (the plan row is [`adopter-surface.md`](../plans/adopter-surface.md) Y4): an SDK verb for the
   by-hash read; an export loop in the `mycelium` binary or a configuration section for an endpoint — the embedder
   drives the collector; a durable collector cursor; the collector's OTLP client is not the node's egress-gated one,
-  so the endpoint is the embedder's to allow. No span store is read by anything in this repository.
+  so the endpoint is the embedder's to allow; `never_existed` for a decision (not knowable: a sink the route was never
+  given); a repair at an earlier open of the evidence journal (the answer is scoped to this open); and `mycelium-stem`
+  registering its provisioner's sink (a stem built with `compliance` can call `with_decision_record_source`; the
+  binary does not). No span store is read by anything in this repository.
 
 ## Go deeper
 

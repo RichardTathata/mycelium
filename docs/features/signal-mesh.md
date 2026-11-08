@@ -36,8 +36,11 @@ This feature is turned on in code: every node has it, from [`mesh`](../../src/ag
 
 The [example index](../../examples/README.md#the-capability-matrix) lists
 [`mailbox_llm`](../../examples/README.md#the-capability-matrix), guide 3's example: an Individual-scoped request reaches
-one provider through the mesh, whose boundary admits it. CI runs it. That forwarding does not depend on membership
-is `forwarding_is_unconditional_through_non_member_relay`, in [`src/lib_tests.rs`](../../src/lib_tests.rs).
+one provider through the mesh, whose boundary admits it. CI runs it; it relies on the mesh rather than showing scope,
+since an Individual request reaches its target whatever the boundaries say. What scope and admission do are tests in
+[`src/lib_tests.rs`](../../src/lib_tests.rs): `test_group_signal_only_reaches_members` (a Group signal fires on its
+members' handlers and not on a non-member's), and `forwarding_is_unconditional_through_non_member_relay` (forwarding
+does not depend on membership).
 
 ## What it guarantees, and what it does not
 

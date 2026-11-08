@@ -62,8 +62,8 @@ the tests and where they run.
   [unit-file.md § `[activation.confine.egress]`](../reference/unit-file.md#activationconfineegress), and rows L and M
   of the [post-360 plan](../plans/post-360-hardening.md#33--the-batch), each closed on evidence in
   [§3.5](../plans/post-360-hardening.md#35--delivered-rows-2320-onward--each-promise-beside-its-evidence).
-- **Evidence:** the activation egress row of
-  [what-is-proven § Proven in CI on every merge](../operations/what-is-proven.md#proven-in-ci-on-every-merge).
+- **Evidence:** the ledger row
+  [an activation command reaches other hosts only through its stem's egress proxy](../operations/what-is-proven.md#activation-command-reaches-other-hosts-only).
 
 ## Go deeper
 

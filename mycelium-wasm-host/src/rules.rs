@@ -60,7 +60,7 @@ pub static RULES: &[RuleDescriptor] = &[
         summary: "A requirement with demanding nodes and no provider, as this node sees it, makes this node a candidate installer; an observed unmet requirement is not an instruction to install.",
     },
     RuleDescriptor {
-        id: "prov.presence_floor", revision: 2, subsystem: "mycelium-wasm-host::provisioner", responsibilities: &[Response],
+        id: "prov.presence_floor", revision: 3, subsystem: "mycelium-wasm-host::provisioner", responsibilities: &[Response],
         trigger: "every provisioning round, per `[[presence]]` declaration",
         inputs: &[DEMAND, HOSTED, CATALOG, UNIT],
         outcomes: &[
@@ -69,12 +69,12 @@ pub static RULES: &[RuleDescriptor] = &[
             Outcome { kind: Refusal, reasons: &["already_hosted", "provenance_rejected", "ineligible", "no_loadable_candidate", "rights_refused"] },
             Outcome { kind: NoAction, reasons: &["floor_met"] },
         ],
-        effects: &["start_install of the smallest loadable candidate"],
+        effects: &["start_install of the smallest loadable candidate that passes provenance and eligibility"],
         guards: &[Guard::Provenance, Guard::ResourceBudget], may_trigger: &["prov.install"], may_inhibit: &[],
         depends_on: &["prov.provenance", "prov.loadable", "prov.eligible", "prov.self_election"],
         symbol: "provisioner::Provisioner::provision_round", docs: "docs/reference/unit-file.md",
-        tests: &["the_stem_fleet_fills_a_presence_floor_and_reheals"], trace: Instrumented,
-        summary: "Fewer live providers than the declared floor, as this node sees it, makes this node a candidate installer of the cheapest loadable entry.",
+        tests: &["the_stem_fleet_fills_a_presence_floor_and_reheals", "a_cheaper_bad_entry_does_not_stall_the_presence_floor"], trace: Instrumented,
+        summary: "Fewer live providers than the declared floor, as this node sees it, makes this node a candidate installer of the cheapest loadable entry that passes provenance and eligibility (rev 3; earlier revisions chose the cheapest before checking, so a cheaper bad line any member gossiped stalled the floor).",
     },
     RuleDescriptor {
         id: "prov.shed", revision: 2, subsystem: "mycelium-wasm-host::provisioner", responsibilities: &[Response],
@@ -107,14 +107,14 @@ pub static RULES: &[RuleDescriptor] = &[
         summary: "A proposed entry loads live only once a listed reviewer has accepted it; until then it may load into the shadow lane only (D20).",
     },
     RuleDescriptor {
-        id: "prov.eligible", revision: 2, subsystem: "mycelium-wasm-host::provisioner", responsibilities: &[Response],
+        id: "prov.eligible", revision: 3, subsystem: "mycelium-wasm-host::provisioner", responsibilities: &[Response],
         trigger: "a candidate entry that passed provenance",
         inputs: &[CATALOG, UNIT, PROBE, HOSTED],
-        outcomes: &[Outcome { kind: Action, reasons: &["eligible"] }, Outcome { kind: Refusal, reasons: &["reserved_namespace", "no_runtime", "budget", "memory", "disk"] }],
+        outcomes: &[Outcome { kind: Action, reasons: &["eligible"] }, Outcome { kind: Refusal, reasons: &["reserved_namespace", "kind_not_declared", "no_runtime", "budget", "memory", "disk"] }],
         effects: &["`mycelium_artifact_ineligible_skips_total{reason}`"], guards: &[Guard::ResourceBudget], may_trigger: &[], may_inhibit: &["prov.demand_response", "prov.presence_floor"], depends_on: &["prov.provenance"],
         symbol: "provisioner::Provisioner::eligible", docs: "docs/operations/capability-lifecycle.md",
-        tests: &["the_stem_fleet_fills_a_presence_floor_and_reheals", "an_entry_providing_a_model_metadata_ad_is_never_installed"], trace: Instrumented,
-        summary: "An entry providing an `llm-meta` ad is never hosted (a model's metadata is its serving node's own, post-360 row R); otherwise this node hosts the entry's kind, has install budget left, and has memory and disk headroom for it. The check has side effects (counters) and is never re-evaluated for a record.",
+        tests: &["the_stem_fleet_fills_a_presence_floor_and_reheals", "an_entry_providing_a_model_metadata_ad_is_never_installed", "a_blob_only_stem_never_installs_a_wasm_component", "declared_kinds_hold_against_a_fuel_policy_and_a_registration"], trace: Instrumented,
+        summary: "An entry providing an `llm-meta` ad is never hosted (a model's metadata is its serving node's own, post-360 row R); an entry of a kind outside `[hosts].kinds` is refused by name (rev 3); otherwise this node hosts the entry's kind, has install budget left, and has memory and disk headroom for it. The check has side effects (counters) and is never re-evaluated for a record.",
     },
     RuleDescriptor {
         id: "prov.rights_admission", revision: 2, subsystem: "mycelium-wasm-host::provisioner", responsibilities: &[Authority],

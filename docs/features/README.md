@@ -137,6 +137,9 @@ suite is `scripts/test-check-feature-pages.py`.
 | [Signal mesh](signal-mesh.md) | Scoped, ephemeral events forwarded unconditionally; a node's boundary decides what it acts on | Discover participants and signal |
 | [Capability discovery](capability-discovery.md) | Providers advertise what they do, readers resolve by filter, and a stale advertisement evaporates | Discover participants and signal |
 | [The mailbox](mailbox.md) | Events delivered to one node in HLC order through the KV, deleted once handed over | Discover participants and signal |
+| [Service calls: RPC, scatter-gather and bulk](service-calls.md) | One node calling another by kind and waiting for the answer: one target, several, or a payload too large for a frame, fetched over HTTP(S) | Discover participants and signal |
+| [The Eve loader](eve-loader.md) | `mycelium-ts` runs an Eve agent directory unchanged on a fleet: what maps is loaded, every other slot refused by name | Run tools and reasoning |
+| [The Ops Console](ops-console.md) | A static page reading each listed node directly, from the browser: no server, no proxy, no polling | Inspect outcomes and reproduce |
 | [Groups and governed membership](governed-membership.md) | A group joined by filter, held in a band by an evaporating intent and self-electing governors | Coordinate work |
 | [Opacity and stigmergic routing](opacity.md) | A node reports its own saturation as a pheromone, and others route around it | Coordinate by meaning |
 | [Intents](intents.md) | Desired state published as soft state that each node reconciles and that evaporates | Coordinate by meaning |
