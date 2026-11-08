@@ -198,6 +198,15 @@ pub static RULES: &[RuleDescriptor] = &[
     },
 ];
 
+/// A rule's catalogued revision, for a recorder in this crate to stamp on its record — so a descriptor's bump
+/// reaches its records (#740: `membership.governed` was bumped to 3 in #734 while its recorder still wrote 2).
+/// A rule not in [`RULES`] answers 0, which the catalogue refuses for any descriptor, and trips in a debug build.
+pub(crate) fn catalogued_revision(id: &str) -> u32 {
+    let revision = RULES.iter().find(|d| d.id == id).map_or(0, |d| d.revision);
+    debug_assert!(revision != 0, "rule `{id}` is not in the catalogue");
+    revision
+}
+
 /// #740's review, finding 1: the root crate's recorders write their rule's revision by hand
 /// (`schedule.rs`, `membership_governor.rs`, and `mycelium-core`'s `ops.rs`, which cannot see this
 /// table), so nothing tied a record to its descriptor. A test that drives a recorder hands the records

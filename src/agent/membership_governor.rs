@@ -256,7 +256,7 @@ fn converge(ctx: &Arc<TaskCtx>, kv: &KvHandle, spec: &ControlSpec, groups: &mut 
         // only when a sink is attached, never under a lock, never a draw or a clock of their own.
         let trace = |outcome: OutcomeKind, reason: &str, view: ViewStatus, extra: Option<InputSnapshot>| {
             if let Some(sink) = ctx.decision_sink() {
-                let mut r = DecisionRecord::new("membership.governed", 2, "governor tick", outcome, reason)
+                let mut r = DecisionRecord::new("membership.governed", crate::rules::catalogued_revision("membership.governed"), "governor tick", outcome, reason)
                     .node(me.to_string(), 0)
                     .target(group.to_string())
                     .view(view)

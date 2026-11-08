@@ -569,7 +569,7 @@ impl Runner {
     /// A `sched.run` record of a tick that runs nothing, once per change of what it says.
     fn say(&mut self, outcome: OutcomeKind, reason: &'static str, inputs: Vec<InputSnapshot>) {
         if self.was != Some(reason) {
-            let mut rec = DecisionRecord::new(RUN_RULE, 1, "schedule tick", outcome, reason)
+            let mut rec = DecisionRecord::new(RUN_RULE, crate::rules::catalogued_revision(RUN_RULE), "schedule tick", outcome, reason)
                 .node(self.me.to_string(), 0).target(self.schedule.id.to_string()).view(ViewStatus::Unknown).no_parent().no_effect();
             for i in inputs { rec = rec.input(i); }
             self.record(rec);
@@ -648,7 +648,7 @@ impl Runner {
         let (last, ignored) = fleet_last(&self.ctx.kv_state, &s, s.slot_at(now));
         if ignored != self.ignored {
             if ignored > 0 {
-                self.record(DecisionRecord::new(RUN_RULE, 1, "schedule tick", OutcomeKind::NoAction, "ignored_last_far_ahead")
+                self.record(DecisionRecord::new(RUN_RULE, crate::rules::catalogued_revision(RUN_RULE), "schedule tick", OutcomeKind::NoAction, "ignored_last_far_ahead")
                     .node(self.me.to_string(), 0).target(s.id.to_string()).view(ViewStatus::Unknown).no_parent().no_effect()
                     .input(InputSnapshot::new("`sched/{id}/last/{node}` entries more than MAX_AHEAD_SLOTS past this node's slot, left out",
                         format!("ignored={ignored} max_ahead={MAX_AHEAD_SLOTS} slot={}", s.slot_at(now).map_or("none".into(), |x| x.to_string())), Provenance::Gossiped))
@@ -679,7 +679,7 @@ impl Runner {
         self.was = Some("ran");
 
         let parent = tick.missed.as_ref().and_then(|m| {
-            let rec = DecisionRecord::new(MISSED_RULE, 1, "a gap between the last run and the slot due", m.outcome, m.reason)
+            let rec = DecisionRecord::new(MISSED_RULE, crate::rules::catalogued_revision(MISSED_RULE), "a gap between the last run and the slot due", m.outcome, m.reason)
                 .node(self.me.to_string(), 0).target(s.id.to_string()).view(ViewStatus::Unknown).no_parent()
                 .input(last_input.clone()).input(clock(tick.slot))
                 .input(InputSnapshot::new("the schedule's missed-run policy", format!("{:?} first={} last={} skipped={} cap={MAX_CATCH_UP}", s.on_missed, m.first, m.last, m.skipped), Provenance::Local));
@@ -702,7 +702,7 @@ impl Runner {
                 Some(Err(RunFailure::Unacknowledged(_))) => (OutcomeKind::Deferral, "unacknowledged"),
                 None => (OutcomeKind::Deferral, "work_overran"),
             };
-            let mut rec = DecisionRecord::new(RUN_RULE, 1, "schedule tick", kind_out, reason_out)
+            let mut rec = DecisionRecord::new(RUN_RULE, crate::rules::catalogued_revision(RUN_RULE), "schedule tick", kind_out, reason_out)
                 .node(self.me.to_string(), 0).target(s.id.to_string()).view(ViewStatus::Unknown)
                 .input(view.clone()).input(last_input.clone()).input(clock(tick.slot));
             rec = match parent { Some(p) => rec.parent(p), None => rec.no_parent() };
