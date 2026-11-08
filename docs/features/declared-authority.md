@@ -46,7 +46,7 @@ treasurer issues a grant at the gateway and revokes it, and the provider door re
   [`authz.execution_authority`](../reference/guarantee-catalogue.md#authz.execution_authority) and
   [`authz.durable_epochs`](../reference/guarantee-catalogue.md#authz.durable_epochs), so a node under
   `secure-single-domain` can meet the profile's authority requirements from the table. `mycelium doctor` reports them
-  as `start()` would leave them: it checks the journal's path and opens neither the journal nor the epochs.
+  as `start()` would leave them: it checks that the journal and the epochs could be opened for writing, reads an existing epochs journal, and opens neither.
 - **One source of authority:** an evaluator, an execution authority or an evidence journal attached in code beside
   the table refuses the start.
 - **Rule:** [`ae.preflight`](../reference/rule-catalogue.md#aepreflight) decides at every door this build serves; the
@@ -56,6 +56,8 @@ treasurer issues a grant at the gateway and revokes it, and the provider door re
 - **This node only:** a bare `tool:<name>` or `skill:<ns>/<name>` is qualified to this node, so the gateway admits
   only the tools and skills this node serves.
 - **The clock:** the gate's guarantee assumes every issuing authority's clock is within `skew_ms` of this node's.
+- **Epochs:** no route or setting installs a newer epoch on a table-only node, so its gate stays at the first epoch;
+  an embedder installs one in code.
 - **Not built:**
   - other units' rules;
   - the Cedar evaluator from configuration;

@@ -93,19 +93,45 @@ pub(crate) fn check_doors(evaluator: &dyn ActionEvaluator, doors: &[(String, Str
     }
 }
 
-/// What can be told about the journal's path without opening it — the doctor's check, and `start()`'s before it binds:
-/// not a directory, and if it exists a file this process may write. A path whose parent does not exist yet is not
-/// refused (the journal creates it). Its one `symlink_metadata` is start-time configuration I/O, outside the replay
-/// seams like the unit loader's reads, and recorded in `scripts/sim-seams-baseline.txt`.
-fn check_journal_path(path: &std::path::Path) -> Result<(), GossipError> {
+/// Whether a journal at `path` could be opened for writing as `start()` would open it — the doctor's check, and
+/// `start()`'s before it binds (#733's review, confirm round): an existing path must be a regular file this process
+/// can open for append (opened and closed, never written — a 0644 file of another user fails here, which `readonly()`
+/// alone did not see); a missing one's nearest existing ancestor must be a directory this process can create a file
+/// in (a probe file created and removed). `what` names the journal in the refusal. These calls are start-time
+/// configuration I/O, outside the replay seams like the unit loader's reads, recorded in
+/// `scripts/sim-seams-baseline.txt` and in `docs/design/replay-nondeterminism-inventory.md` §2.
+fn check_writable(what: &str, path: &std::path::Path) -> Result<(), GossipError> {
+    let fail = |why: String| refused(format!("{what} {}: {why}", path.display()));
     match std::fs::symlink_metadata(path) {
-        Ok(m) if m.is_dir() => Err(refused(format!("journal {}: is a directory", path.display()))),
-        Ok(m) if !m.is_file() => Err(refused(format!("journal {}: is not a regular file", path.display()))),
-        Ok(m) if m.permissions().readonly() => Err(refused(format!("journal {}: is read-only", path.display()))),
-        Ok(_) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(refused(format!("journal {}: {e}", path.display()))),
+        Ok(m) if m.is_dir() => return Err(fail("is a directory".into())),
+        Ok(m) if !m.is_file() => return Err(fail("is not a regular file".into())),
+        Ok(_) => {
+            return std::fs::OpenOptions::new().append(true).open(path).map(drop).map_err(|e| fail(format!("cannot be opened for writing: {e}")));
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(fail(e.to_string())),
     }
+    let mut dir = path.parent();
+    while let Some(d) = dir {
+        let d = if d.as_os_str().is_empty() { std::path::Path::new(".") } else { d };
+        match std::fs::symlink_metadata(d) {
+            Ok(m) if m.is_dir() => {
+                let probe = d.join(format!(".mycelium-authority-probe-{}", std::process::id()));
+                return match std::fs::OpenOptions::new().write(true).create_new(true).open(&probe) {
+                    Ok(f) => {
+                        drop(f);
+                        let _ = std::fs::remove_file(&probe);
+                        Ok(())
+                    }
+                    Err(e) => Err(fail(format!("{} cannot hold it: {e}", d.display()))),
+                };
+            }
+            Ok(_) => return Err(fail(format!("{} is not a directory", d.display()))),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => dir = d.parent(),
+            Err(e) => return Err(fail(format!("{}: {e}", d.display()))),
+        }
+    }
+    Ok(())
 }
 
 /// The policy revision: the unit's principal and its rules as parsed, hashed — a changed rule is a new revision, so a
@@ -126,8 +152,12 @@ pub(crate) fn plan(cfg: &GossipConfig, node: &NodeId, auth: &AuthorityConfig) ->
     let Some(persistence) = &cfg.persistence else {
         return Err(refused("[authority] needs [persistence]: a grant's request, its answer and each door's use marker are kept by the WAL, and the execution authority's epochs under the persistence directory; without it a restart forgets which grants were used"));
     };
-    check_journal_path(&auth.journal)?;
+    check_writable("journal", &auth.journal)?;
     let epochs = persistence.base_path.join(node.to_string()).join("authority").join("epochs.journal");
+    check_writable("epochs", &epochs)?;
+    // An existing epochs journal must read: `DurableEpochs::open` refuses an unreadable one at `start()`, and the doctor
+    // reports `authz.durable_epochs` only once this has held.
+    crate::mandate::authority::DurableEpochs::check(&epochs).map_err(|e| refused(format!("epochs {}: does not read: {e:?}", epochs.display())))?;
     let dir = &auth.declarations;
     let units = crate::faults::load_units(dir).map_err(|e| refused(format!("declarations: {e}")))?;
     if units.is_empty() {

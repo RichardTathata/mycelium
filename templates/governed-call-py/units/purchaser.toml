@@ -34,7 +34,15 @@ operation      = "tools/call"
 resource       = "tool:purchase.approve"
 requires_grant = true
 
+# The treasurer as a gateway presents them: a named token's principal is `token:<issuer>/<name>`, and node.toml sets
+# the issuer (`gateway_identity_issuer = "governed-call"`). A rule's actor is matched exactly.
 [[rule]]
-actor     = "treasurer"
+actor     = "token:governed-call/treasurer"
 operation = "grant.issue"
+resource  = "tool:purchase.approve"
+
+# The treasurer may revoke what they issue: without this rule nobody can.
+[[rule]]
+actor     = "token:governed-call/treasurer"
+operation = "grant.revoke"
 resource  = "tool:purchase.approve"

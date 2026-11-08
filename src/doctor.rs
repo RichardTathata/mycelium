@@ -594,6 +594,30 @@ mod tests {
         std::fs::create_dir_all(dir.join("journal-dir")).unwrap();
         let r = run(Some(&write_cfg("authority-dir", &body(&dir.join("journal-dir"))))).refusal.expect("an unopenable journal is refused");
         assert!(r.reason.contains("is a directory"), "{}", r.reason);
+        // A journal that does not exist yet under a directory this process cannot write — `start()` could not create
+        // it, so neither does the doctor say it would (`readonly()` on the file alone saw nothing to refuse).
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let locked = dir.join("locked");
+            std::fs::create_dir_all(&locked).unwrap();
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
+            let r = run(Some(&write_cfg("authority-locked", &body(&locked.join("sub").join("evidence.log"))))).refusal.expect("an unwritable parent is refused");
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+            assert!(r.reason.contains("cannot hold it"), "{}", r.reason);
+        }
+        // An epochs journal that exists and does not read: `start()` would refuse to open it, so `authz.durable_epochs`
+        // is not reported enforced.
+        let node = std::fs::read_to_string(&path).unwrap();
+        let bound: u16 = node.lines().find_map(|l| l.strip_prefix("bind_port = ")).unwrap().trim().parse().unwrap();
+        let epochs = dir.join("persist").join(format!("127.0.0.1:{bound}")).join("authority").join("epochs.journal");
+        std::fs::create_dir_all(epochs.parent().unwrap()).unwrap();
+        let j = crate::agent::journal::Journal::open(&epochs, "mandate/epochs").unwrap();
+        j.append(b"not an epoch entry".to_vec()).await.unwrap();
+        drop(j);
+        let r = run(Some(&path)).refusal.expect("an unreadable epochs journal is refused");
+        assert!(r.reason.contains("epochs") && r.reason.contains("does not read"), "{}", r.reason);
+        std::fs::remove_dir_all(dir.join("persist")).unwrap();
         // An undeclared unit is the refusal `start()` would give, at the same stage.
         let bad = write_cfg("authority-bad", &std::fs::read_to_string(&path).unwrap().replace("unit = \"purchaser\"", "unit = \"nobody\""));
         let r = run(Some(&bad)).refusal.expect("refused");

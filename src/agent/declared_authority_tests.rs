@@ -374,8 +374,8 @@ fn a_bare_skill_resource_is_qualified_to_this_node() {
 /// **The binary's configuration path, over the scaffold** (#733's review, the scaffold): the scaffold's `node.toml`
 /// with a gateway, its tokens, `[persistence]` and `[authority]` appended, loaded by `GossipConfig::load_from_file` and
 /// `validate()` as `mycelium -c` loads it, then started — the call no rule permits is refused at the gateway door and
-/// the one the scaffold's rule admits runs. The binary itself is not run here: CI's binary tests build without
-/// `compliance`, which the table needs.
+/// the one the scaffold's rule admits runs. The binary itself is started over the same file by CI's scaffold job (which
+/// builds it with `compliance`); the bare binary serves no tool, so the doors' decisions are shown here.
 #[tokio::test]
 async fn the_scaffolds_node_toml_with_an_authority_table_loads_and_decides_through_the_config_path() {
     let dir = scratch("toml");
