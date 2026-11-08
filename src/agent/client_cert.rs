@@ -31,8 +31,9 @@
 //! ## Restart and budget
 //!
 //! The mark is kept in memory and, under `[persistence]`, appended to a node-local journal
-//! (`identity/client-certs.journal`), one record per supersession per principal — the revocation
-//! ledger's pattern, with its own line in the budget: [`JOURNAL_PER_PRINCIPAL`] per principal and
+//! (`identity/client-certs.journal`), one record per supersession per principal — two at the gateway that
+//! published it, which also journals the record it republishes, so about 32 supersessions there — the revocation
+//! ledger's pattern, with its own line in the budget: [`JOURNAL_PER_PRINCIPAL`] records per principal and
 //! [`JOURNAL_TOTAL`] in all. A principal past its budget is **saturated**: its mark still rises in this
 //! process, but after a restart it trusts only the newest record it can see (stated, as the ledger's
 //! saturated node trusts only its newest anchored key). Without `[persistence]` the mark lives only in
@@ -65,9 +66,10 @@ use super::TaskCtx;
 
 /// KV namespace of client certificate records: `sys/client-cert/{principal-hex}/{key-hex}`.
 pub const CLIENT_CERT_PREFIX: &str = "sys/client-cert/";
-/// Supersessions journaled per principal before the principal is saturated.
+/// Journal records (`Raised` and `Published`) per principal before the principal is saturated: 64 supersessions at
+/// a node that only reads records, about 32 at the gateway that publishes them.
 pub(crate) const JOURNAL_PER_PRINCIPAL: usize = 64;
-/// Supersessions journaled in all before every further principal is saturated.
+/// Journal records in all before every further principal is saturated.
 pub(crate) const JOURNAL_TOTAL: usize = 65_536;
 /// Distinct certificates whose parse and chain verdict are cached; past it the cache is cleared, never grown.
 const CERT_CACHE_MAX: usize = 4_096;
@@ -445,10 +447,11 @@ pub(crate) fn republish_own(ctx: &TaskCtx) -> usize {
         if stored.as_deref() == Some(der.as_slice()) {
             continue;
         }
-        // Another valid certificate for the same key, issued at or after ours (the CA certified the key twice), is left
-        // alone: comparing bytes would have two gateways rewrite each other forever.
+        // Another certificate for the same key that the fold would count, issued at or after ours (the CA certified the
+        // key twice), is left alone: comparing bytes would have two gateways rewrite each other forever. The fold's own
+        // judgment, skew bound included, so a far-future certificate planted at the path does not stop the restore.
         if let Some(stored) = stored
-            && facts(&ctx.client_certs, tls, &stored).is_some_and(|f| &f.principal == principal && Some(f.key) == key && f.issued.is_some_and(|i| i >= own.issued))
+            && judge(ctx, tls, principal, &stored, key).is_some_and(|m| m.issued >= own.issued)
         {
             continue;
         }

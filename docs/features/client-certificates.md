@@ -49,8 +49,9 @@ way. `a_newer_certificate_supersedes_the_older_key_and_an_overwrite_cannot_lower
   path names, and it was not issued later than the wall clock plus the skew bound. A record's KV write time never
   counts. Per principal the node keeps the newest issuance it has read, and only that key is current. A later
   overwrite or tombstone of the newer record cannot bring the older key back.
-- **Across a restart:** under `[persistence]` the newest issuance is journaled, within a budget of 64 supersessions
-  per principal and 65,536 in all. A principal past the budget keeps its newest mark only in this process. Without
+- **Across a restart:** under `[persistence]` the newest issuance is journaled, within a budget of 64 journal records
+  per principal and 65,536 in all. A node that only reads records spends one record per supersession, so about 64.
+  The gateway that publishes them spends two (the new mark and the record it republishes), so about 32. A principal past the budget keeps its newest mark only in this process. Without
   `[persistence]`, a restart forgets the mark until the newer record is read again.
 - **Two certificates in one millisecond:** the greater key wins.
 - **Ordering is the issuing host's clock.** The issuance is the serial, in ms, from the clock of the host that ran

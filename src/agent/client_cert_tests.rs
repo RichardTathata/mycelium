@@ -472,3 +472,25 @@ async fn the_journal_keeps_the_newest_published_record_whatever_the_append_order
     let _ = std::fs::remove_dir_all(&dir);
     assert_eq!(held, Some(client_cert_key(PRINCIPAL, &k2)), "OUT OF ORDER: the journal's last entry, not its newest, was kept (k1 = {})", client_cert_key(PRINCIPAL, &k1));
 }
+
+/// **A far-future certificate for the same key does not stop the publisher restoring its record** (#741's final
+/// confirm). A CA holder writes a same-key certificate issued an hour ahead at the record's path. The skip test is
+/// the fold's judgment, skew bound included, so the far-future certificate does not count and the publisher's own is
+/// written back. Seen failing first: the skip test read only the chain and the names, and left the planted record.
+#[tokio::test]
+async fn a_far_future_certificate_for_the_same_key_is_rewritten_by_the_publisher() {
+    let dir = fresh("republish-future");
+    let port = alloc_port();
+    let a = started(config(&dir, port, false), port).await;
+    let now = mycelium_core::sim_seam::wall_now_ms();
+    let (own, key) = fleet_cert_with_serial(&dir, "forecaster", 72, (now - 1_000).to_be_bytes().to_vec());
+    let (ahead, _) = fleet_cert_with_serial(&dir, "forecaster", 72, (now + 3_600_000).to_be_bytes().to_vec());
+    a.publish_client_cert(&own).unwrap();
+    let path: Arc<str> = Arc::from(client_cert_key(PRINCIPAL, &key).as_str());
+    let _ = super::helpers::kv_set(&a.task_ctx, Arc::clone(&path), bytes::Bytes::from(ahead));
+    let rewritten = super::client_cert::republish_own(&a.task_ctx);
+    let stored = a.kv().get(&path).map(|b| b.to_vec());
+    a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!((rewritten, stored), (1, Some(own)), "BLOCKED: a far-future same-key certificate kept the publisher from restoring its record");
+}
