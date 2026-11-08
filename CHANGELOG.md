@@ -61,7 +61,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   is refused at `prov.eligible` with the new reason `kind_not_declared` (rule revision 3; counted under
   `mycelium_artifact_ineligible_skips_total{reason="kind_not_declared"}`). An empty or absent `kinds` hosts nothing,
   as the reference already said, and the stem warns at start. A mesh-sourced stem also staged every catalogue entry
-  whatever its kind, and re-served the bytes to peers as a cache holder; it now stages only the kinds it declares. A
+  whatever its kind, and re-served the bytes to peers as a cache holder; it now stages only the kinds it declares (bytes staged before the upgrade stay and are still served until `<placement_root>/stage` is cleared, §85). A
   provisioner built in code without `restrict_kinds` is unchanged. Upgrade note: `docs/guide/deprecations.md` §85.
 - **A cheaper bad catalogue line no longer stalls a presence floor** (an independent review of #736, defect B). The
   floor chose the cheapest loadable entry for its capability and only then checked provenance and eligibility, so a

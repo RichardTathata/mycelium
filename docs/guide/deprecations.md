@@ -2579,7 +2579,8 @@ unit-file reference already read such a stem as unable to host components; the s
   `prov.eligible` record refused with reason `kind_not_declared`, when a decision trace is attached (`--trace-dir`);
   and `mycelium_artifact_ineligible_skips_total{reason="kind_not_declared"}` rising, in a build with `metrics`. A stem
   with an empty `kinds` hosts nothing and warns at start. A mesh-sourced stem no longer stages, or re-serves to peers,
-  the bytes of a kind it does not declare.
+  the bytes of a kind it does not declare. Bytes it staged before the upgrade stay under `<placement_root>/stage`,
+  which nothing prunes, and are still served to peers: clear that directory once after upgrading a blob-only stem.
 - **What to do:** add `"wasm-component"` to `[hosts].kinds` on every stem that is meant to host components; then
   `mycelium wire-check` also counts it as a host for them. Code that builds a `Provisioner` directly is unaffected
   unless it calls the new `Provisioner::restrict_kinds`.
