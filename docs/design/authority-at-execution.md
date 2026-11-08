@@ -280,6 +280,11 @@ stopped a handler already running when its mandate lapsed. Revocation stopped ne
 **The mechanism.** `StopContract`'s `ReauthorizeAt` continuation, made real:
 - **Registration.** When the provider check (§8) admits a call acting under an **established** mandate, the
   node's `ExecutionAuthority` registers it as running (`begin`) and returns a `WorkGuard`.
+  Registration re-assesses the mandate; if the preflight's permit was decided on an established mandate and the
+  re-assessment no longer finds it established (a revocation, expiry or new epoch in between), the call is refused
+  as authority not established (`detail` `mandate_lapsed_before_run`), nothing runs, and the provider's journal
+  records `execution: none` beside the permit. Before 2026-11-07 it ran unregistered, out of the sweep's reach.
+  `a_grant_revoked_between_the_preflight_and_the_registration_refuses_the_call` is the gate.
 - **The sweep.** The agent sweeps running work every `sweep_interval_ms()` (*F*/20, within 100 ms and 5 s), re-running
   A1's check on each item. One sweep catches expiry, revocation, a stale revocation view and a superseded epoch alike.
   The first failed check **cancels** the work.
