@@ -39,13 +39,26 @@
 //! this process, so after a restart a hidden newer record lets an older key back until the newer one is
 //! read again — the exit is stated *under `[persistence]`*.
 //!
+//! ## Republishing
+//!
+//! The gateway that published a record keeps it (in memory, and journaled under `[persistence]`) and writes it again
+//! when it is missing or overwritten, unless the principal's mark has risen past it — so a node that joins later, or
+//! restarts without `[persistence]`, still reads the newer certificate. A record whose publisher is gone for good and
+//! which every remaining node has lost is not restored.
+//!
+//! ## Cost
+//!
+//! `refresh` scans the prefix once, grouped by principal, and checks each distinct certificate's chain once while it
+//! is cached by digest; it is single-flight. A certificate whose serial carries no readable issuance is never counted.
+//!
 //! Lock-free (papaya and atomics): no lock-order row.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use super::TaskCtx;
 
@@ -55,6 +68,8 @@ pub const CLIENT_CERT_PREFIX: &str = "sys/client-cert/";
 pub(crate) const JOURNAL_PER_PRINCIPAL: usize = 64;
 /// Supersessions journaled in all before every further principal is saturated.
 pub(crate) const JOURNAL_TOTAL: usize = 65_536;
+/// Distinct certificates whose parse and chain verdict are cached; past it the cache is cleared, never grown.
+const CERT_CACHE_MAX: usize = 4_096;
 /// The skew a certificate's issuance may run ahead of this node's wall clock when `max_clock_drift_ms` is 0.
 const DEFAULT_SKEW_MS: u64 = 300_000;
 
@@ -89,11 +104,21 @@ pub(crate) struct Mark {
     pub(crate) key: [u8; 32],
 }
 
-/// One journal record: a principal's mark rose to this, or the principal was saturated.
+/// One journal record: a principal's mark rose to this, the principal was saturated, or this gateway published a
+/// record it republishes.
 #[derive(Serialize, Deserialize)]
 enum JournalEntry {
     Raised { principal: String, mark: Mark },
     Saturated { principal: String },
+    Published { principal: String, path: String, der: Vec<u8> },
+}
+
+/// What one certificate says, once its chain is checked: cached by its digest.
+#[derive(Clone)]
+struct Facts {
+    principal: String,
+    key: [u8; 32],
+    issued: Option<u64>,
 }
 
 /// Where a client key stands for a principal.
@@ -112,6 +137,13 @@ pub enum ClientKeyStanding {
 #[derive(Default)]
 pub(crate) struct ClientCertLedger {
     marks: papaya::HashMap<String, Mark>,
+    /// The parse and chain verdict per distinct certificate (by SHA-256), bounded by [`CERT_CACHE_MAX`].
+    cert_cache: papaya::HashMap<[u8; 32], Option<Facts>>,
+    /// The records this gateway published, newest per principal, `(path, der)`: republished when missing or
+    /// overwritten, as `revocation.rs` republishes a node's own records.
+    published: papaya::HashMap<String, (String, Vec<u8>)>,
+    running: AtomicBool,
+    again: AtomicBool,
     journal: arc_swap::ArcSwapOption<super::journal::Journal>,
     journaled: papaya::HashMap<String, usize>,
     journaled_total: AtomicUsize,
@@ -120,6 +152,12 @@ pub(crate) struct ClientCertLedger {
     pub(crate) future: AtomicU64,
     /// Supersessions the journal could not take (full, or this node without `[persistence]` never counts).
     pub(crate) journal_refused: AtomicU64,
+    /// Store scans the folds made (one per `refresh`, one per single-principal fold).
+    pub(crate) scans: AtomicU64,
+    /// CA chain checks run (once per distinct certificate while it is cached).
+    pub(crate) chain_checks: AtomicU64,
+    /// Records ignored because their certificate carried no readable issuance.
+    pub(crate) no_issuance: AtomicU64,
 }
 
 impl std::fmt::Debug for ClientCertLedger {
@@ -141,6 +179,10 @@ impl ClientCertLedger {
                 }
                 Ok(JournalEntry::Saturated { principal }) => {
                     self.saturated.pin().insert(principal);
+                }
+                // Appended in publish order, and the door publishes only above the mark: the last one is the newest.
+                Ok(JournalEntry::Published { principal, path, der }) => {
+                    self.published.pin().insert(principal, (path, der));
                 }
                 Err(_) => tracing::warn!(journal = %path.display(), "client-cert journal: an entry did not decode; skipped"),
             }
@@ -222,21 +264,45 @@ fn skew_ms(ctx: &TaskCtx) -> u64 {
 /// `principal` and `expect` (the key its path names), issued no later than the wall clock plus the skew
 /// bound. `Some(mark)` for one that counts.
 pub(crate) fn judge(ctx: &TaskCtx, tls: &mycelium_core::tls::NodeTls, principal: &str, der: &[u8], expect: Option<[u8; 32]>) -> Option<Mark> {
-    let id = mycelium_core::tls::client_identity(der)?;
-    if id.principal() != principal || expect.is_some_and(|k| k != id.key) {
+    let f = facts(&ctx.client_certs, tls, der)?;
+    if f.principal != principal || expect.is_some_and(|k| k != f.key) {
         return None;
     }
-    // The chain first, so only a certificate the fleet CA issued is counted as issued in the future.
-    if !tls.verify_member_cert(der) {
+    // No readable issuance (a serial longer than 8 bytes, or zero): it cannot be ordered, so it never counts.
+    let Some(issued) = f.issued else {
+        ctx.client_certs.no_issuance.fetch_add(1, Ordering::Relaxed);
+        tracing::warn!(%principal, "client certificate with no readable issuance in its serial: ignored");
         return None;
-    }
-    let issued = id.issued_ms.unwrap_or(0);
+    };
+    // Time-dependent, so checked on every judgment rather than cached.
     if issued > mycelium_core::sim_seam::wall_now_ms().saturating_add(skew_ms(ctx)) {
         ctx.client_certs.future.fetch_add(1, Ordering::Relaxed);
         tracing::warn!(%principal, issued_ms = issued, "client certificate issued in the future beyond the skew bound: ignored");
         return None;
     }
-    Some(Mark { issued, key: id.key })
+    Some(Mark { issued, key: f.key })
+}
+
+/// The parse and the CA chain check of `der`, once per distinct certificate (a member can write one certificate under
+/// many paths, or many principals' worth of foreign ones): cached by digest, the cache cleared when full. Only a
+/// client certificate the fleet CA issued has facts.
+fn facts(ledger: &ClientCertLedger, tls: &mycelium_core::tls::NodeTls, der: &[u8]) -> Option<Facts> {
+    let digest: [u8; 32] = Sha256::digest(der).into();
+    if let Some(hit) = ledger.cert_cache.pin().get(&digest) {
+        return hit.clone();
+    }
+    let found = mycelium_core::tls::client_identity(der)
+        .filter(|_| {
+            ledger.chain_checks.fetch_add(1, Ordering::Relaxed);
+            tls.verify_member_cert(der)
+        })
+        .map(|id| Facts { principal: id.principal(), key: id.key, issued: id.issued_ms });
+    let cache = ledger.cert_cache.pin();
+    if cache.len() >= CERT_CACHE_MAX {
+        cache.clear();
+    }
+    cache.insert(digest, found.clone());
+    found
 }
 
 /// Fold one principal's records: judge each, raise the mark to the newest that counts, and return the
@@ -245,8 +311,9 @@ fn fold(ctx: &TaskCtx, tls: &mycelium_core::tls::NodeTls, principal: &str) -> Ha
     let prefix = format!("{CLIENT_CERT_PREFIX}{}/", hex(principal.as_bytes()));
     let mut seen: HashMap<[u8; 32], u64> = HashMap::new();
     // Every record is judged: a cap here would let a member's junk records, sorted ahead of the newer genuine one,
-    // keep it from ever raising the mark. Junk is cheap to refuse — `client_identity` and the path check come before
-    // the chain — and a genuine record exists only once per certificate the CA issued, its path fixed by its key.
+    // keep it from ever raising the mark. Each distinct certificate's chain is checked once (`facts`, by digest), so
+    // a fold costs one scan of the principal's records and a chain check per certificate not yet seen.
+    ctx.client_certs.scans.fetch_add(1, Ordering::Relaxed);
     for (path, der) in mycelium_core::store::scan_kv_prefix(&ctx.kv_state, &prefix) {
         let Some(expect) = path.rsplit('/').next().and_then(parse_hex32) else { continue };
         if let Some(m) = judge(ctx, tls, principal, &der, Some(expect)) {
@@ -278,21 +345,69 @@ pub fn client_key_standing(ctx: &TaskCtx, principal: &str, key: &[u8; 32]) -> Cl
     }
 }
 
-/// Re-fold every principal with a record in the store — run when a record under [`CLIENT_CERT_PREFIX`]
-/// changes, so a newer certificate raises the mark when it arrives rather than when its key is next
-/// asked about (a newer record overwritten before anyone asked would otherwise never raise it).
+/// Re-fold every principal with a record in the store, then republish this gateway's own records — run when a
+/// record under [`CLIENT_CERT_PREFIX`] changes, at start and periodically, so a newer certificate raises the mark
+/// when it arrives rather than when its key is next asked about. **One** scan of the prefix, grouped by principal,
+/// whatever the number of principals; each distinct certificate's chain checked once while cached. Single-flight: a
+/// call while one runs makes that one run again (the revocation fold's `running` / `again`).
 pub(crate) fn refresh(ctx: &TaskCtx) {
+    let ledger = &ctx.client_certs;
+    loop {
+        if ledger.running.swap(true, Ordering::AcqRel) {
+            ledger.again.store(true, Ordering::Release);
+            return;
+        }
+        loop {
+            ledger.again.store(false, Ordering::Release);
+            refresh_once(ctx);
+            if !ledger.again.load(Ordering::Acquire) {
+                break;
+            }
+        }
+        ledger.running.store(false, Ordering::Release);
+        if !ledger.again.swap(false, Ordering::AcqRel) {
+            return;
+        }
+    }
+}
+
+fn refresh_once(ctx: &TaskCtx) {
     let Some(tls) = ctx.tls.get() else { return };
-    let mut principals: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    for (path, _) in mycelium_core::store::scan_kv_prefix(&ctx.kv_state, CLIENT_CERT_PREFIX) {
+    ctx.client_certs.scans.fetch_add(1, Ordering::Relaxed);
+    let mut newest: std::collections::BTreeMap<String, Mark> = std::collections::BTreeMap::new();
+    for (path, der) in mycelium_core::store::scan_kv_prefix(&ctx.kv_state, CLIENT_CERT_PREFIX) {
         let Some(rest) = path.strip_prefix(CLIENT_CERT_PREFIX) else { continue };
-        let Some((phex, _)) = rest.split_once('/') else { continue };
-        let Some(principal) = decode_principal_hex(phex) else { continue };
-        principals.insert(principal);
+        let Some((phex, khex)) = rest.split_once('/') else { continue };
+        let (Some(principal), Some(expect)) = (decode_principal_hex(phex), parse_hex32(khex)) else { continue };
+        if let Some(m) = judge(ctx, tls, &principal, &der, Some(expect)) {
+            let e = newest.entry(principal).or_insert(m);
+            *e = (*e).max(m);
+        }
     }
-    for p in principals {
-        fold(ctx, tls, &p);
+    for (principal, mark) in newest {
+        ctx.client_certs.raise(&principal, mark);
     }
+    republish_own(ctx);
+}
+
+/// Republish each record this gateway published that is missing from the store or holds other bytes, unless the
+/// principal's mark has since risen past it (another gateway published a newer one). Returns how many.
+pub(crate) fn republish_own(ctx: &TaskCtx) -> usize {
+    let mut n = 0;
+    for (principal, (path, der)) in ctx.client_certs.published.pin().iter() {
+        let key = path.rsplit('/').next().and_then(parse_hex32);
+        if ctx.client_certs.mark(principal).is_some_and(|m| Some(m.key) != key) {
+            continue;
+        }
+        if mycelium_core::ops::kv_get(ctx, path).as_deref() != Some(der.as_slice()) {
+            let _ = super::helpers::kv_set(ctx, Arc::from(path.as_str()), bytes::Bytes::from(der.clone()));
+            n += 1;
+        }
+    }
+    if n > 0 {
+        tracing::warn!(records = n, "republished client certificate records this gateway published (missing or overwritten)");
+    }
+    n
 }
 
 fn decode_principal_hex(s: &str) -> Option<String> {
@@ -314,6 +429,9 @@ pub enum PublishRefusal {
     NotIssuedByTheFleetCa,
     /// Its issuance is past the wall clock plus the skew bound.
     IssuedInTheFuture,
+    /// Its serial carries no issuance this tree can read (longer than 8 bytes, or zero), as a certificate from
+    /// general PKI tooling has: it could not be ordered against the principal's other certificates.
+    NoReadableIssuance,
     /// A newer certificate for the principal has already been read: publishing this one would change nothing.
     Superseded,
 }
@@ -325,6 +443,7 @@ impl std::fmt::Display for PublishRefusal {
             Self::NotAClientCertificate => "not_a_client_certificate",
             Self::NotIssuedByTheFleetCa => "not_issued_by_the_fleet_ca",
             Self::IssuedInTheFuture => "issued_in_the_future",
+            Self::NoReadableIssuance => "no_readable_issuance",
             Self::Superseded => "superseded",
         })
     }
@@ -344,12 +463,12 @@ pub fn publish(ctx: &Arc<TaskCtx>, der: &[u8]) -> Result<Published, PublishRefus
     let Some(tls) = ctx.tls.get() else { return Err(PublishRefusal::NoTls) };
     let id = mycelium_core::tls::client_identity(der).ok_or(PublishRefusal::NotAClientCertificate)?;
     let principal = id.principal();
-    let issued = id.issued_ms.unwrap_or(0);
-    if issued > mycelium_core::sim_seam::wall_now_ms().saturating_add(skew_ms(ctx)) {
-        return Err(PublishRefusal::IssuedInTheFuture);
-    }
     if !tls.verify_member_cert(der) {
         return Err(PublishRefusal::NotIssuedByTheFleetCa);
+    }
+    let issued = id.issued_ms.ok_or(PublishRefusal::NoReadableIssuance)?;
+    if issued > mycelium_core::sim_seam::wall_now_ms().saturating_add(skew_ms(ctx)) {
+        return Err(PublishRefusal::IssuedInTheFuture);
     }
     fold(ctx, tls, &principal);
     if ctx.client_certs.mark(&principal).is_some_and(|m| m > Mark { issued, key: id.key }) {
@@ -358,5 +477,10 @@ pub fn publish(ctx: &Arc<TaskCtx>, der: &[u8]) -> Result<Published, PublishRefus
     let path = client_cert_key(&principal, &id.key);
     let _ = super::helpers::kv_set(ctx, Arc::from(path.as_str()), bytes::Bytes::copy_from_slice(der));
     ctx.client_certs.raise(&principal, Mark { issued, key: id.key });
+    ctx.client_certs.published.pin().insert(principal.clone(), (path.clone(), der.to_vec()));
+    // Within the principal's journal budget: a saturated principal's record is republished in this process only.
+    if !ctx.client_certs.saturated.pin().contains(&principal) {
+        ctx.client_certs.append(JournalEntry::Published { principal: principal.clone(), path, der: der.to_vec() });
+    }
     Ok(Published { principal, key: id.key, issued_ms: issued })
 }

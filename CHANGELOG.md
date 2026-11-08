@@ -59,7 +59,9 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   against the CA anchor and publishes it under `sys/client-cert/{principal-hex}/{key-hex}`. A key is retired by issuing
   the principal a newer certificate: each node keeps the newest verified issuance per principal and journals it under
   `[persistence]` (`identity/client-certs.journal`). A superseded key stays superseded after the newer record is
-  overwritten or tombstoned, and after a restart. `GossipAgent::client_key_standing` answers *current*, *superseded*
+  overwritten or tombstoned, and after a restart; the publishing gateway republishes its records, so a node that
+  joins later reads the newer one. A certificate whose serial carries no readable issuance (as `openssl` writes) is
+  refused by name. **Upgrade every node before issuing a client certificate:** an older node admits one at the mesh. `GossipAgent::client_key_standing` answers *current*, *superseded*
   or *unknown*. Not in this change: the `cs`/`cn` call signature, the SDK `tools/call` clients and grants held by a
   client principal (the feature page lists them). Upgrade note: `deprecations.md` §86.
 

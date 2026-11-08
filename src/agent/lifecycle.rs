@@ -1137,6 +1137,8 @@ impl GossipAgent {
                 }
                 super::revocation::republish_own(&ctx, &ctx.identity_ledger);
                 super::revocation::refresh(&ctx);
+                // Identity-and-lifecycle I1: re-judge client certificates and republish this gateway's own records.
+                super::client_cert::refresh(&ctx);
             }
         });
     }

@@ -153,10 +153,13 @@ async fn a_supersession_survives_a_restart_under_persistence_with_the_newer_reco
         let (k1_der, k1) = issue(&dir, "forecaster", "k1");
         a.publish_client_cert(&k1_der).unwrap();
         tokio::time::sleep(Duration::from_millis(5)).await;
+        // K2's record written by another member (not through this node's door), so this node does not republish it
+        // and its tombstone stands: what holds K1 superseded across the restart is the journal's mark alone.
         let (k2_der, k2) = issue(&dir, "forecaster", "k2");
-        a.publish_client_cert(&k2_der).unwrap();
+        let k2_path: Arc<str> = Arc::from(client_cert_key(PRINCIPAL, &k2).as_str());
+        let _ = super::helpers::kv_set(&a.task_ctx, Arc::clone(&k2_path), bytes::Bytes::from(k2_der));
         assert_eq!(a.client_key_standing(PRINCIPAL, &k1), ClientKeyStanding::Superseded);
-        let _ = super::helpers::kv_delete(&a.task_ctx, Arc::from(client_cert_key(PRINCIPAL, &k2).as_str()));
+        let _ = super::helpers::kv_delete(&a.task_ctx, k2_path);
         tokio::time::sleep(Duration::from_millis(200)).await;
         a.shutdown().await;
         (k1, k2)
@@ -247,4 +250,148 @@ async fn junk_records_sorted_ahead_cannot_hide_a_newer_certificate() {
     a.shutdown().await;
     let _ = std::fs::remove_dir_all(&dir);
     assert_eq!(k1_standing, ClientKeyStanding::Superseded, "HIDDEN: junk records kept K2 from superseding K1");
+}
+
+/// A client certificate for `token:fleet/{name}` signed by the CA in `dir/certs`, with the serial `serial` as given —
+/// the shape general PKI tooling produces (`openssl` writes a random 20-byte serial), not `mycelium tls issue`'s.
+fn fleet_cert_with_serial(dir: &Path, name: &str, key_seed: u8, serial: Vec<u8>) -> (Vec<u8>, [u8; 32]) {
+    use ed25519_dalek::pkcs8::EncodePrivateKey;
+    let ca_pem = std::fs::read_to_string(dir.join("certs").join("ca-key.pem")).unwrap();
+    let ca_key = rcgen::KeyPair::from_pem(&ca_pem).unwrap();
+    let mut ca_params = rcgen::CertificateParams::new(vec![]).unwrap();
+    ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+    ca_params.not_before = rcgen::date_time_ymd(2024, 1, 1);
+    ca_params.not_after = rcgen::date_time_ymd(2099, 1, 1);
+    let ca = ca_params.self_signed(&ca_key).unwrap();
+    let sk = ed25519_dalek::SigningKey::from_bytes(&[key_seed; 32]);
+    let kp = rcgen::KeyPair::try_from(sk.to_pkcs8_der().unwrap().as_bytes()).unwrap();
+    let mut p = rcgen::CertificateParams::new(vec![]).unwrap();
+    p.subject_alt_names = vec![rcgen::SanType::URI(rcgen::Ia5String::try_from(crate::client_uri("fleet", name)).unwrap())];
+    p.serial_number = Some(rcgen::SerialNumber::from_slice(&serial));
+    p.not_before = rcgen::date_time_ymd(2024, 1, 1);
+    p.not_after = rcgen::date_time_ymd(2099, 1, 1);
+    (p.signed_by(&kp, &ca, &ca_key).unwrap().der().to_vec(), sk.verifying_key().to_bytes())
+}
+
+/// **A client certificate whose serial carries no readable issuance is refused by name, at the door and as a
+/// record** (#741's review, finding 2). A 20-byte serial — what `openssl` writes — reads as no issuance, and was
+/// taken as issuance 0: a re-issue then tied with its predecessor and broke on key hex, so half the time the newer
+/// certificate was refused `superseded`. The plant: the same key under an 8-byte serial is accepted. Seen failing
+/// first: the long-serial certificate was published, and its record read as current.
+#[tokio::test]
+async fn a_client_certificate_with_no_readable_issuance_is_refused_by_name() {
+    let dir = fresh("no-issuance");
+    let port = alloc_port();
+    let a = started(config(&dir, port, false), port).await;
+    let mut long = vec![0x5a; 20];
+    long[0] = 0x3c;
+    let (long_der, long_key) = fleet_cert_with_serial(&dir, "forecaster", 51, long);
+    assert!(crate::client_identity(&long_der).is_some_and(|id| id.issued_ms.is_none()), "a 20-byte serial reads as no issuance");
+    let door = a.publish_client_cert(&long_der);
+    let _ = super::helpers::kv_set(&a.task_ctx, Arc::from(client_cert_key(PRINCIPAL, &long_key).as_str()), bytes::Bytes::from(long_der));
+    let as_record = a.client_key_standing(PRINCIPAL, &long_key);
+    let (ok_der, ok_key) = fleet_cert_with_serial(&dir, "other", 52, 1_700_000_000_000u64.to_be_bytes().to_vec());
+    let plant = a.publish_client_cert(&ok_der).map(|p| p.key);
+    a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(door.err(), Some(PublishRefusal::NoReadableIssuance), "ADMITTED at the door: a certificate with no readable issuance");
+    assert_eq!(as_record, ClientKeyStanding::Unknown, "ADMITTED as a record: a certificate with no readable issuance read as current");
+    assert_eq!(plant, Ok(ok_key), "plant: an 8-byte serial is accepted");
+}
+
+/// **A certificate issued in the future is refused at the door and ignored as a record.** Its serial is an hour past
+/// this node's clock, beyond the 300 s skew bound: `issued_in_the_future` at the door, unknown as a record, counted.
+#[tokio::test]
+async fn a_certificate_issued_in_the_future_is_refused_at_the_door_and_ignored_as_a_record() {
+    let dir = fresh("future");
+    let port = alloc_port();
+    let a = started(config(&dir, port, false), port).await;
+    let ahead = mycelium_core::sim_seam::wall_now_ms() + 3_600_000;
+    let (der, key) = fleet_cert_with_serial(&dir, "forecaster", 53, ahead.to_be_bytes().to_vec());
+    let door = a.publish_client_cert(&der);
+    let _ = super::helpers::kv_set(&a.task_ctx, Arc::from(client_cert_key(PRINCIPAL, &key).as_str()), bytes::Bytes::from(der));
+    let before = a.task_ctx.client_certs.future.load(std::sync::atomic::Ordering::Relaxed);
+    let standing = a.client_key_standing(PRINCIPAL, &key);
+    let counted = a.task_ctx.client_certs.future.load(std::sync::atomic::Ordering::Relaxed) > before;
+    a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(door.err(), Some(PublishRefusal::IssuedInTheFuture));
+    assert_eq!(standing, ClientKeyStanding::Unknown);
+    assert!(counted, "the record's future issuance is counted");
+}
+
+/// **Many junk principals cost one store scan per refresh and one chain check per distinct certificate** (#741's
+/// review, finding 3). A member writes 150 principals' self-consistent client certificates from a CA that is not the
+/// fleet's. `refresh` scans the store once — not once per principal — and a second refresh runs no chain check
+/// again, the verdicts cached by the certificate's digest. Seen failing first: one refresh made 151 scans, and the
+/// second ran 150 chain checks again.
+#[tokio::test]
+async fn many_junk_principals_cost_one_scan_and_one_chain_check_per_certificate() {
+    use std::sync::atomic::Ordering::Relaxed;
+    let dir = fresh("junk-principals");
+    let port = alloc_port();
+    let a = started(config(&dir, port, false), port).await;
+    let foreign = fresh("junk-principals-ca");
+    crate::mint_ca(&foreign.join("certs")).unwrap();
+    for i in 0..150u8 {
+        let (der, key) = fleet_cert_with_serial(&foreign, &format!("junk-{i}"), i.wrapping_add(60), vec![1, i]);
+        let principal = format!("token:fleet/junk-{i}");
+        let _ = super::helpers::kv_set(&a.task_ctx, Arc::from(client_cert_key(&principal, &key).as_str()), bytes::Bytes::from(der));
+    }
+    // Let the watcher's folds settle, then measure two refreshes of our own.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let ledger = &a.task_ctx.client_certs;
+    let s0 = ledger.scans.load(Relaxed);
+    super::client_cert::refresh(&a.task_ctx);
+    let scans = ledger.scans.load(Relaxed) - s0;
+    let c1 = ledger.chain_checks.load(Relaxed);
+    super::client_cert::refresh(&a.task_ctx);
+    let rechecked = ledger.chain_checks.load(Relaxed) - c1;
+    a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&foreign);
+    assert_eq!(scans, 1, "COST: one refresh scanned the store {scans} times");
+    assert_eq!(rechecked, 0, "COST: a second refresh re-ran {rechecked} chain checks");
+}
+
+/// **The publishing gateway republishes its record, so a node that joins later reads the newer certificate**
+/// (#741's review, finding 4). A publishes K1 then K2 and K2's record is tombstoned; B joins afterwards, with no
+/// memory of K2. A republishes K2's record, so B reads it and K1 is superseded at B as well. Seen failing first:
+/// nothing republished, B read K1's record and the tombstone, and K1 stayed current at B.
+#[tokio::test]
+async fn a_node_joining_later_reads_a_tombstoned_newer_record_back() {
+    let dir = fresh("republish");
+    let (pa, pb) = (alloc_port(), alloc_port());
+    let mut ca = config(&dir, pa, false);
+    ca.reconnect_backoff_secs = 1;
+    let a = started(ca, pa).await;
+    let (k1_der, k1) = issue(&dir, "forecaster", "k1");
+    a.publish_client_cert(&k1_der).unwrap();
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    let (k2_der, k2) = issue(&dir, "forecaster", "k2");
+    a.publish_client_cert(&k2_der).unwrap();
+    let _ = super::helpers::kv_delete(&a.task_ctx, Arc::from(client_cert_key(PRINCIPAL, &k2).as_str()));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let mut cb = config(&dir, pb, false);
+    cb.bootstrap_peers = vec![NodeId::new("127.0.0.1", pa).unwrap()];
+    cb.reconnect_backoff_secs = 1;
+    let b = started(cb, pb).await;
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let mut standing = ClientKeyStanding::Unknown;
+    while std::time::Instant::now() < deadline {
+        if b.kv().get(&client_cert_key(PRINCIPAL, &k1)).is_some() {
+            standing = b.client_key_standing(PRINCIPAL, &k1);
+            if standing == ClientKeyStanding::Superseded {
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let k2_at_b = b.client_key_standing(PRINCIPAL, &k2);
+    a.shutdown().await;
+    b.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(standing, ClientKeyStanding::Superseded, "ROLLED BACK: a node joining later read K1 as current");
+    assert_eq!(k2_at_b, ClientKeyStanding::Current);
 }
