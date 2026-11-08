@@ -152,6 +152,43 @@ pub(super) async fn gw_identity_revoke(
     }
 }
 
+/// `POST /gateway/identity/client-cert` (scope `identity:write`, `compliance`) — identity-and-lifecycle I1.
+///
+/// Publishes a service's **client certificate** (`mycelium tls issue --client <name> --issuer <issuer>`) as its
+/// principal's record, `sys/client-cert/{principal-hex}/{key-hex}`. Body: `{ "cert_pem": "<PEM>" }`. The
+/// gateway judges it first — a client certificate (one `mycelium-client://{issuer}/{name}`, no node name),
+/// issued by the fleet CA and valid now, its issuance no later than the wall clock plus the skew bound — and
+/// refuses one older than the principal's newest already read (`409 superseded`: publishing it would change
+/// nothing). Publishing a newer certificate **supersedes** the principal's earlier key at every node that
+/// reads the record. Audited as a governance write. `{ "principal", "key", "issued_ms" }` on success.
+#[cfg(feature = "compliance")]
+pub(super) async fn gw_identity_client_cert(
+    State(ctx): State<Arc<HttpCtx>>,
+    Json(body):  Json<serde_json::Value>,
+) -> Response {
+    use rustls::pki_types::pem::PemObject;
+    let Some(pem) = body["cert_pem"].as_str() else {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": "missing cert_pem (one PEM certificate)"}))).into_response();
+    };
+    let Ok(der) = rustls::pki_types::CertificateDer::from_pem_slice(pem.as_bytes()) else {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": "cert_pem holds no PEM certificate"}))).into_response();
+    };
+    match super::client_cert::publish(&ctx.agent_ctx, der.as_ref()) {
+        Ok(p) => {
+            audit_govern(&ctx.agent_ctx, "identity/client-cert", json!({"principal": p.principal, "key": hex32(&p.key)}).to_string());
+            Json(json!({"ok": true, "principal": p.principal, "key": hex32(&p.key), "issued_ms": p.issued_ms})).into_response()
+        }
+        Err(e) => {
+            let status = match e {
+                super::client_cert::PublishRefusal::NoTls => StatusCode::CONFLICT,
+                super::client_cert::PublishRefusal::Superseded => StatusCode::CONFLICT,
+                _ => StatusCode::UNPROCESSABLE_ENTITY,
+            };
+            (status, Json(json!({"error": e.to_string(), "reason": e.to_string()}))).into_response()
+        }
+    }
+}
+
 #[cfg(feature = "compliance")]
 pub(super) async fn gw_transparency(
     State(ctx): State<Arc<HttpCtx>>,

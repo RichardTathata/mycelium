@@ -562,6 +562,15 @@ impl GossipAgent {
                                 reason: format!("the revocation journal {} cannot be opened: {e}", path.display()),
                             });
                         }
+                        // Identity-and-lifecycle I1: the client principals' supersession marks, read before any
+                        // client key is judged, so a key superseded while this node was down stays refused.
+                        let path = p.base_path.join("identity").join("client-certs.journal");
+                        if let Err(e) = self.task_ctx.client_certs.open_journal(&path) {
+                            return Err(crate::error::GossipError::InvalidField {
+                                field: "persistence",
+                                reason: format!("the client-certificate journal {} cannot be opened: {e}", path.display()),
+                            });
+                        }
                     }
                     // A node starting with a key its own records show revoked — a key file restored
                     // from a backup, or `key_pem` reloading a key a rotation retired — would re-issue a
@@ -608,6 +617,8 @@ impl GossipAgent {
                     // key), then fold again.
                     super::revocation::adopt_own_revocations(&self.task_ctx);
                     super::revocation::refresh(&self.task_ctx);
+                    // Identity-and-lifecycle I1: fold the client certificate records already in the store.
+                    super::client_cert::refresh(&self.task_ctx);
                     // Watch for future identity publications from peers.
                     self.start_identity_watcher();
                     self.start_identity_maintenance();
@@ -1126,6 +1137,8 @@ impl GossipAgent {
                 }
                 super::revocation::republish_own(&ctx, &ctx.identity_ledger);
                 super::revocation::refresh(&ctx);
+                // Identity-and-lifecycle I1: re-judge client certificates and republish this gateway's own records.
+                super::client_cert::refresh(&ctx);
             }
         });
     }
@@ -1147,6 +1160,9 @@ impl GossipAgent {
         // revocation arriving refolds key standing; and a change to this node's own records republishes
         // them if they were overwritten or tombstoned.
         let mut rev_rx  = kv_subscribe_prefix(&self.task_ctx, Arc::<str>::from(super::revocation::REVOCATION_PREFIX));
+        // Identity-and-lifecycle I1: a client certificate record arriving raises its principal's mark at once, so a
+        // newer record overwritten before anyone asks about its key still supersedes the older key.
+        let mut client_rx = kv_subscribe_prefix(&self.task_ctx, Arc::<str>::from(super::client_cert::CLIENT_CERT_PREFIX));
         let shutdown_rx = self.shutdown_tx.subscribe();
         let peer_keys   = Arc::clone(&self.task_ctx.peer_keys);
         let anchor_keys = Arc::clone(&self.task_ctx.peer_anchor_keys);
@@ -1165,6 +1181,11 @@ impl GossipAgent {
                         if res.is_err() { break; }
                         super::revocation::republish_own(&ctx, &ctx.identity_ledger);
                         super::revocation::refresh(&ctx);
+                        continue;
+                    }
+                    res = client_rx.changed() => {
+                        if res.is_err() { break; }
+                        super::client_cert::refresh(&ctx);
                         continue;
                     }
                 }
@@ -1353,6 +1374,8 @@ impl GossipAgent {
         // directory in this process can own it.
         #[cfg(feature = "tls")]
         self.task_ctx.identity_ledger.close_journal();
+        #[cfg(feature = "tls")]
+        self.task_ctx.client_certs.close_journal();
     }
 
     /// Signals all background tasks to stop and waits for them to exit.

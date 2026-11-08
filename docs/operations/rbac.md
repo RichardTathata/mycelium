@@ -81,7 +81,7 @@ scope **or** `"*"`. Unmapped routes require `admin` (deny-by-default).
 | `mcp:invoke` | `POST /mcp` — the MCP JSON-RPC bridge (`initialize`, `tools/list`, `tools/call`) |
 | `llm:read` / `llm:write` / `llm:invoke` | prompt get/list / prompt put,delete / llm call,stream |
 | `audit:read` / `transparency:read` | audit-trail query, and a record by its hash (`GET /gateway/records/{decision,evidence}/{sha256}` — the record a span names, its bytes and its verification, `audit.md` §3a) / revocation transparency log |
-| `identity:write` | key revocation (`POST /gateway/identity/revoke`) |
+| `identity:write` | key revocation (`POST /gateway/identity/revoke`); publishing a service's client certificate (`POST /gateway/identity/client-cert`, since I1) |
 | `federation:read` / `federation:invoke` | federation's **consumer** side (item 2 row 11): `GET /gateway/federation/domain`, `/partners`, `/catalog/{domain}` / `POST /gateway/federation/connect`, `/call`. Split because they are different powers — reading which partners exist is operator information; `connect` and `call` spend this domain's credential on a partner's gateway, under the caller's own name |
 | `*` | everything (the legacy `gateway_auth_token` is equivalent) |
 | `llm:read` / `llm:write` / `llm:invoke` (companion) | `mycelium-reason`: trace, blob GET, `/v1/models` / blob PUT / `/reason/route`, `/reason/v1/chat/completions` — both routed **as the client** since 0.8.0 (the provider's `request_principal` is the bearer's principal under the secure profile) and behind the action evaluator (`403 policy`), as `/gateway/llm/call` is |

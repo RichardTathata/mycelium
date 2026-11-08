@@ -123,6 +123,7 @@ suite is `scripts/test-check-feature-pages.py`.
 | [Gateway caller identity](gateway-caller-identity.md) | A provider sees the client behind a gateway call, qualified by its issuer and signed by the gateway | Constrain actions |
 | [A2A interoperability](a2a.md) | An AgentCard and `/a2a` task dispatch in the 1.0 and 0.3 shapes, every send through the same doors | Run tools and reasoning |
 | [Mesh mTLS and signed writes](mesh-mtls.md) | Gossip between nodes the fleet CA certified, every KV write frame signed by its writer | Discover participants and signal |
+| [Client certificates for services](client-certificates.md) | A fleet-CA certificate for a service's key, naming `mycelium-client://{issuer}/{name}` for the principal `token:{issuer}/{name}`; refused at the mesh, published at the gateway, retired by issuing a newer one | Discover participants and signal |
 | [Node identity, proofs and revocation](node-identity.md) | One sealed identity record per node, rotation and revocation every verifier honours, an operator's removal of a member | Discover participants and signal |
 | [Egress allow-list](egress-allow-list.md) | A hostname list on the substrate's own outbound calls, every redirect hop included | Constrain actions |
 | [Credentials attached at egress](credentials-at-egress.md) | A secret attached at the node's gate only for the host its binding names; the caller holds a placeholder | Constrain actions |

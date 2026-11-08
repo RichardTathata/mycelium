@@ -725,7 +725,7 @@ fn explain_cli(args: Vec<String>) -> i32 {
 /// gateway that serves this certificate's key. An operator hands the partner this line, never the key
 /// (adopter-surface Y8). Exits 2 on usage or a file that is not one PEM certificate.
 fn tls_cli(args: Vec<String>) -> i32 {
-    const USAGE: &str = "Usage: mycelium tls ca --out <dir>\n       mycelium tls issue --ca-dir <dir> --node <ip:port> --out <dir> [--force]\n       mycelium tls pin <cert.pem>";
+    const USAGE: &str = "Usage: mycelium tls ca --out <dir>\n       mycelium tls issue --ca-dir <dir> --node <ip:port> --out <dir> [--force]\n       mycelium tls issue --ca-dir <dir> --client <name> --issuer <issuer> --out <dir> [--force]\n       mycelium tls pin <cert.pem>";
     let mut it = args.into_iter();
     match it.next().as_deref() {
         Some("issue") => {}
@@ -734,16 +734,29 @@ fn tls_cli(args: Vec<String>) -> i32 {
         _ => { eprintln!("{USAGE}"); return 2; }
     }
     let (mut ca_dir, mut node, mut out): (Option<String>, Option<String>, Option<String>) = (None, None, None);
+    let (mut client, mut issuer): (Option<String>, Option<String>) = (None, None);
     let mut force = false;
     while let Some(a) = it.next() {
         match a.as_str() {
             "--force" => force = true,
             "--ca-dir" => ca_dir = it.next(),
             "--node" => node = it.next(),
+            "--client" => client = it.next(),
+            "--issuer" => issuer = it.next(),
             "--out" => out = it.next(),
             "-h" | "--help" => { eprintln!("{USAGE}"); return 0; }
             _ => { eprintln!("{USAGE}"); return 2; }
         }
+    }
+    // Identity-and-lifecycle I1: a client certificate for a service's process — `--client` and `--issuer` instead of
+    // `--node`, never both.
+    match (&node, &client, &issuer) {
+        (None, Some(name), Some(iss)) => {
+            let (Some(ca_dir), Some(out)) = (ca_dir, out) else { eprintln!("{USAGE}"); return 2; };
+            return tls_issue_client(&ca_dir, iss, name, &out, force);
+        }
+        (Some(_), None, None) => {}
+        _ => { eprintln!("{USAGE}"); return 2; }
     }
     let (Some(ca_dir), Some(node), Some(out)) = (ca_dir, node, out) else { eprintln!("{USAGE}"); return 2; };
     #[cfg(feature = "tls")]
@@ -777,6 +790,45 @@ fn tls_cli(args: Vec<String>) -> i32 {
     #[cfg(not(feature = "tls"))]
     {
         let _ = (ca_dir, node, out, force);
+        eprintln!("mycelium tls issue needs a binary built with the `tls` feature");
+        2
+    }
+}
+
+/// `mycelium tls issue --ca-dir <dir> --client <name> --issuer <issuer> --out <dir> [--force]` — issue a **client
+/// certificate** (identity-and-lifecycle I1) for the gateway principal `token:{issuer}/{name}`, where `issuer` is the
+/// fleet's `gateway_identity_issuer`. Writes `<out>/client-{issuer}-{name}.cert.pem` and `.key.pem`: the key goes to
+/// the service's process (an environment variable or a file — an agent's shell inherits either), the certificate to
+/// `POST /gateway/identity/client-cert`. Issuing again supersedes the earlier key, so replacing a key file takes
+/// `--force`. Exits 2 on usage or a CA that does not load.
+fn tls_issue_client(ca_dir: &str, issuer: &str, name: &str, out: &str, force: bool) -> i32 {
+    #[cfg(feature = "tls")]
+    {
+        if !mycelium::valid_client_segment(issuer) || !mycelium::valid_client_segment(name) {
+            eprintln!("--issuer and --client are each 1-128 of A-Z a-z 0-9 - _ . (got {issuer:?} and {name:?})");
+            return 2;
+        }
+        let existing = std::path::Path::new(out).join(format!("client-{issuer}-{name}.key.pem"));
+        if existing.exists() && !force {
+            eprintln!(
+                "{} exists: issuing over it replaces this service's key, and once the new certificate is published the old \
+                 key is superseded at every node; pass --force to issue anyway",
+                existing.display()
+            );
+            return 2;
+        }
+        match mycelium::issue_client_cert(std::path::Path::new(ca_dir), issuer, name, std::path::Path::new(out)) {
+            Ok((cert, key)) => {
+                println!("issued {} and {}", cert.display(), key.display());
+                println!("principal token:{issuer}/{name}: give the key to the service's process only, and publish the certificate with POST /gateway/identity/client-cert");
+                0
+            }
+            Err(e) => { eprintln!("{e}"); 2 }
+        }
+    }
+    #[cfg(not(feature = "tls"))]
+    {
+        let _ = (ca_dir, issuer, name, out, force);
         eprintln!("mycelium tls issue needs a binary built with the `tls` feature");
         2
     }

@@ -283,6 +283,8 @@ fn spawn_handler_with(
         membership: std::sync::OnceLock::new(),
         #[cfg(feature = "tls")]
         identity_ledger: Arc::new(crate::agent::revocation::IdentityLedger::default()),
+        #[cfg(feature = "tls")]
+        client_certs: Arc::new(crate::agent::client_cert::ClientCertLedger::default()),
         caller_replay: Default::default(),
         causal_misplaced: Default::default(),
         #[cfg(feature = "a2a")]
@@ -4367,6 +4369,8 @@ async fn test_subscribe_notified_via_gossip() {
         membership: std::sync::OnceLock::new(),
         #[cfg(feature = "tls")]
         identity_ledger: Arc::new(crate::agent::revocation::IdentityLedger::default()),
+        #[cfg(feature = "tls")]
+        client_certs: Arc::new(crate::agent::client_cert::ClientCertLedger::default()),
         caller_replay: Default::default(),
         causal_misplaced: Default::default(),
         #[cfg(feature = "a2a")]

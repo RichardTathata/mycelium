@@ -108,7 +108,7 @@ use super::{
 #[cfg(feature = "consensus")]
 use super::{consensus_handle, migration};
 #[cfg(feature = "compliance")]
-use super::{audit, revocation, transparency};
+use super::{audit, client_cert, revocation, transparency};
 #[cfg(all(feature = "gateway", feature = "tls"))]
 use super::{action_evaluator, evidence_journal, federation_http, fleet_history, gateway_authority, gateway_member_keys, provider_enforcement};
 
@@ -450,6 +450,9 @@ pub(super) async fn run_http_server(
     // cluster-wide exclusion already exist; this is the missing trigger surface.
     #[cfg(feature = "compliance")]
     let gateway = gateway.route("/identity/revoke", post(gw_identity_revoke));
+    // Identity-and-lifecycle I1: publish a service's client certificate (its principal's newest key).
+    #[cfg(feature = "compliance")]
+    let gateway = gateway.route("/identity/client-cert", post(gw_identity_client_cert));
 
     // Apply auth middleware to all gateway routes in one shot.
     let gateway = gateway

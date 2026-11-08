@@ -51,6 +51,20 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Client certificates for services** (`docs/plans/identity-and-lifecycle.md` I1, first half). `mycelium tls issue
+  --client <name> --issuer <issuer>` has the fleet CA issue a service's key a certificate naming
+  `mycelium-client://{issuer}/{name}`, for the gateway principal `token:{issuer}/{name}`. Both mesh verifiers refuse
+  that scheme, so a service's key never joins the transport; node certificates, including pre-row-Q ones that name no
+  node, are still admitted. `POST /gateway/identity/client-cert` (`identity:write`, `compliance`) judges a certificate
+  against the CA anchor and publishes it under `sys/client-cert/{principal-hex}/{key-hex}`. A key is retired by issuing
+  the principal a newer certificate: each node keeps the newest verified issuance per principal and journals it under
+  `[persistence]` (`identity/client-certs.journal`). A superseded key stays superseded after the newer record is
+  overwritten or tombstoned, and after a restart; the publishing gateway republishes its records, so a node that
+  joins later reads the newer one. A certificate whose serial carries no readable issuance (as `openssl` writes) is
+  refused by name. **Upgrade every node before issuing a client certificate:** an older node admits one at the mesh. `GossipAgent::client_key_standing` answers *current*, *superseded*
+  or *unknown*. Not in this change: the `cs`/`cn` call signature, the SDK `tools/call` clients and grants held by a
+  client principal (the feature page lists them). Upgrade note: `deprecations.md` §86.
+
 - **`[authority]`: a node's evaluator, execution authority, provider enforcement and evidence journal from its
   declaration** (`docs/plans/identity-and-lifecycle.md` I0). A node built from a configuration file — the `mycelium`
   binary — could attach none of these, so every door it served enforced nothing. With the table set, `start()` reads

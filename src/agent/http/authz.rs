@@ -448,6 +448,7 @@ pub(super) fn required_scope(method: &axum::http::Method, matched_path: &str) ->
         "/gateway/records/evidence/{sha256}" => "audit:read",
         "/gateway/transparency"        => "transparency:read",
         "/gateway/identity/revoke"     => "identity:write",
+        "/gateway/identity/client-cert" => "identity:write",
         // WS-C governance (intent publish + effective-state snapshot)
         "/gateway/govern"              => "govern:read",
         "/gateway/govern/tuning"       => "govern:write",
@@ -1708,6 +1709,8 @@ pub(super) fn refuse_protected_key(key: &str) -> Option<axum::response::Response
     warn!(key, "gateway: an owned KV key refused on a raw KV route");
     let door = if key.starts_with("sys/govern/") {
         "governance intents are published through /gateway/govern/{tuning,timing,membership} (govern:write)"
+    } else if key.starts_with("sys/client-cert/") {
+        "a client certificate is published through /gateway/identity/client-cert (identity:write)"
     } else if key.starts_with("sys/topology-override/") {
         "the topology override is set through POST /gateway/govern/topology-override (govern:write)"
     } else if key.starts_with("grp/") {

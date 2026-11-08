@@ -103,6 +103,7 @@
 //! | `sys/audit-checkpoint/{node}/{seq}` | WS-D audit — signed mid-chain boundary enabling export-then-prune retention (`compliance`) |
 //! | `sys/revocation/{node}/{key-hex}[/{revoker-hex}]` | WS-D — signed key revocation; post-360 row Q: keyed `(revoked, revoker)`, the v1 bytes then a trailer carrying the certificates it rests on; counts only when signed by an anchored key issued after the revoked one's; honoured by every verifier of a node's key (`tls`) |
 //! | `sys/identity-cert/{node}/{key-hex}` | post-360 row Q — a node's **certificate record**: the DER of a CA-issued certificate naming the node by `mycelium://<node>`, issuance (ms) in the serial; the only source of key standing (`tls`) |
+//! | `sys/client-cert/{principal-hex}/{key-hex}` | identity-and-lifecycle I1 — a service's **client certificate**: the DER of a CA-issued certificate naming `mycelium-client://{issuer}/{name}` for the principal `token:{issuer}/{name}`, issuance (ms) in the serial; published by `POST /gateway/identity/client-cert`, judged by the certificate, never by write time; the newest supersedes (`tls`) |
 //! | `sys/capauthz/{ns}/{name}`          | Gossip-level capability-authz policy (`required_roles`; resolve-time enforcement) (`compliance`) |
 //! | `sys/config/{param}`               | `ClusterTuner` advisory config (WS-C M9) — a fleet recommendation a node may adopt, today `writer_channel_depth` (u64 LE), written only when it changes (`src/agent/cluster_tuner.rs`, `CONFIG_PREFIX`) |
 //! | `sys/govern/timing`                 | Timing governor — the fleet timing intent (evaporating soft state; local-wins), written through `POST /gateway/govern/timing` (`src/agent/timing_governor.rs`, `TIMING_INTENT_KEY`) |
@@ -318,6 +319,16 @@ pub use mycelium_core::{config, error, hlc, signal};
 /// the `chmod` that closes it.
 #[cfg(feature = "tls")]
 pub use mycelium_core::tls::{issue_node_cert, mint_ca, writable_by_others as tls_writable_by_others};
+/// Identity-and-lifecycle I1: a **client certificate** for a service's process (`mycelium tls issue --client`),
+/// naming `mycelium-client://{issuer}/{name}` for the gateway principal `token:{issuer}/{name}`. Refused at the
+/// mesh by both verifiers; published by `POST /gateway/identity/client-cert`; a newer one supersedes the older
+/// key ([`client_key_standing`]).
+#[cfg(feature = "tls")]
+pub use mycelium_core::tls::{client_identity, client_uri, issue_client_cert, valid_client_segment, ClientIdentity, CLIENT_URI_SCHEME};
+/// Identity-and-lifecycle I1: where a client principal's key stands — current, superseded by a newer
+/// certificate, or unknown — and the record path a client certificate is published under.
+#[cfg(feature = "tls")]
+pub use agent::client_cert::{client_cert_key, ClientKeyStanding, PublishRefusal as ClientCertRefusal, Published as ClientCertPublished, CLIENT_CERT_PREFIX};
 /// The replay seams' install point, re-exported under `sim` so a **companion** on the public API
 /// can record and replay its own runs under the kernel (item 6; first used by CN2).
 /// Re-exported in every build, not only under `sim`: a companion routes its draws and clocks through
