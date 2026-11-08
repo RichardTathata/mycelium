@@ -133,8 +133,8 @@ pub static RULES: &[RuleDescriptor] = &[
         effects: &["the evidence journal; the handler never runs on a refusal"],
         guards: &[Guard::Authority, Guard::ResourceBudget], may_trigger: &[], may_inhibit: &[], depends_on: &[],
         symbol: "provider_enforcement::check", docs: "docs/guide/20-authorising-actions.md",
-        tests: &["test_c7_the_bypass_matrix_no_door_runs_revoked_work", "a_grant_revoked_between_the_preflight_and_the_registration_refuses_the_call"], trace: CatalogueOnly,
-        summary: "Authority where the work happens: a protected call is checked at the provider whichever door it came through; with enforcement on and no evaluator it is refused (`no_evaluator`); with it off no authority is checked, though an attached cohort budget still verifies the caller context and admits by cohort (`caller_context_refused`, `at_capacity`).",
+        tests: &["test_c7_the_bypass_matrix_no_door_runs_revoked_work", "a_grant_revoked_between_the_preflight_and_the_registration_refuses_the_call", "a_permit_the_cohort_budget_refuses_is_recorded_as_nothing_ran"], trace: CatalogueOnly,
+        summary: "Authority where the work happens: a protected call is checked at the provider whichever door it came through; with enforcement on and no evaluator it is refused (`no_evaluator`); with it off no authority is checked, though an attached cohort budget still verifies the caller context and admits by cohort (`caller_context_refused`, `at_capacity`). `mandate_lapsed_before_run` is the wire `detail` of a refusal whose reason is `authority_not_established`: a permit decided on an established mandate whose re-assessment at registration no longer finds it established.",
     },
     RuleDescriptor {
         id: "cons.acceptor_memory", revision: 1, subsystem: "mycelium::agent::acceptor_guard", responsibilities: &[Response],

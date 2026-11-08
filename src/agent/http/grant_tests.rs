@@ -501,6 +501,37 @@ async fn a_grant_revoked_between_the_preflight_and_the_registration_refuses_the_
     a.shutdown().await;
 }
 
+/// **A permit the cohort budget then refuses is on the record as nothing ran** (#735's confirm round). The provider's
+/// preflight permits a call under a grant; the budget's one undeclared place is held, so `admit_after` refuses
+/// `at_capacity`. The provider's journal holds the permit (`Attempted`) and, for the same attempt, `Execution::None`.
+/// Seen failing first: before the record, the journal held the permit alone, `Attempted` for work that never ran.
+#[tokio::test]
+async fn a_permit_the_cohort_budget_refuses_is_recorded_as_nothing_ran() {
+    use crate::knowledge::cohort::CohortView;
+    use crate::knowledge::cohort_budget::CohortBudget;
+    let http_port = alloc_port();
+    let (a, journal, ran) = node(http_port).await;
+    a.with_cohort_budget(CohortBudget::new(1, 1), CohortView::trusting([]), TrustedExternalIssuers::new());
+    let sm = a.agent_state_machine(policy(10_000));
+    sm.transition(ExecutionState::Planning).await.unwrap();
+    let args = serde_json::json!({"env": "prod", "replicas": 3});
+    let (mandate, _request) = granted(&a, http_port, &sm, &args).await;
+    let agent_principal = crate::agent::gateway_caller::node_principal(a.node_id());
+    let _held = crate::agent::provider_enforcement::test_hold_place(&a.task_ctx, &agent_principal).expect("the one place");
+    let err = call_deploy(&a, None, &mandate, &args).await.expect_err("the budget is full");
+    assert!(err.contains("at_capacity"), "{err}");
+    assert_eq!(ran.load(Ordering::SeqCst), 0, "the tool did not run");
+    let evidence = records(&journal);
+    let at_provider = |e: &&AeEvidence| e.enforcement_point == crate::agent::provider_enforcement::ENFORCEMENT_POINT_PROVIDER;
+    let permit = evidence.iter().filter(at_provider)
+        .find(|e| e.kind == crate::agent::action_evaluator::RecordKind::Decided && e.execution == crate::agent::action_evaluator::Execution::Attempted)
+        .expect("the provider's permit");
+    assert!(evidence.iter().filter(at_provider).any(|e| e.kind == crate::agent::action_evaluator::RecordKind::Execution
+        && e.execution == crate::agent::action_evaluator::Execution::None && e.attempt_id == permit.attempt_id),
+        "an execution record for the permit's attempt saying nothing ran: {:?}", evidence.iter().map(|e| (&e.enforcement_point, e.kind, e.execution)).collect::<Vec<_>>());
+    a.shutdown().await;
+}
+
 /// **A grant is issued at one node for an agent on another, and revoked there** (the second PR). Node A is the
 /// supervisor's gateway; node B runs the agent, entitles grants from the fleet, and trusts A's key as a member's.
 /// B's agent asks; A's pending list shows the request by gossip; the supervisor issues at A; B's wait reads A's

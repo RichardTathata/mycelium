@@ -407,10 +407,25 @@ async fn admit_after(ctx: &Arc<TaskCtx>, principal: &str, call: Option<&Admitted
     // C4: a place in every cohort the verified principal belongs to, or a refusal. Taken only after
     // the policy admitted the call, so a refused call never holds budget.
     let slot = match ctx.cohort_budget.get() {
-        Some(b) => Some(b.admit(principal, ctx.hlc.decision_now_ms())?),
+        Some(b) => match b.admit(principal, ctx.hlc.decision_now_ms()) {
+            Ok(slot) => Some(slot),
+            Err(refusal) => {
+                // After a permit, the permit's record says `Attempted`; this one says nothing ran.
+                if let Some(permit) = call.and_then(|c| c.permit.as_ref()) {
+                    super::http::ae_record_execution(ctx, permit, super::action_evaluator::Execution::None).await;
+                }
+                return Err(refusal);
+            }
+        },
         None => None,
     };
     Ok(Admission { _slot: slot, work })
+}
+
+/// Test hook: take one place in the cohort budget for `principal`, as an in-flight call would (`grant_tests`).
+#[cfg(all(test, feature = "compliance"))]
+pub(crate) fn test_hold_place(ctx: &TaskCtx, principal: &str) -> Option<CohortSlot> {
+    ctx.cohort_budget.get()?.admit(principal, ctx.hlc.decision_now_ms()).ok()
 }
 
 /// How many deferred checks a serve loop holds at once (#642's review, N2). Full, it stops draining its channel, so

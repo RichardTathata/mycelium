@@ -2546,7 +2546,13 @@ the work. Now the call is refused.
   "data": {…the same…}}`. `detail` names this window; `found` names what the re-assessment found
   (`not established: … revoked`, `refused: …`). The handler does not run.
 - **On the record:** the provider's evidence journal holds the preflight's permit (`execution: attempted`) and, for the
-  same attempt, an execution record saying nothing ran (`execution: none`).
+  same attempt, an execution record saying nothing ran (`execution: none`). The same record now follows a permit the
+  cohort budget then refuses (`at_capacity`). The rule catalogue's outcome `mandate_lapsed_before_run`
+  (`provider.enforcement`) is this wire `detail`, under the reason `authority_not_established`.
+- **Not built:** two other refusals can follow a permit on the deferred-check path (a check settling a seat claim) and
+  still leave the permit's `attempted` alone in the journal — `withdrawn` (the serve loop ended while the check was in
+  flight, its task aborted) and the *authority not established* answer to a check whose task panicked. Neither has the
+  permit in hand where the refusal is made.
 - **Who is affected:** a caller whose mandate is revoked or expires within the moment between a provider's preflight
   and the handler. It used to get the tool's answer; it now gets this refusal. A grant presented this way is spent at
   the provider's door (its use marker was written by the preflight), as for any refusal after the claim. **Under a seat

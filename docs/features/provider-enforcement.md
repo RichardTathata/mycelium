@@ -46,7 +46,9 @@ confirmed stop, checked against the class's bound. CI runs it.
   preflight permitted on an established mandate and the re-assessment that registers the work no longer finds it
   established — a revocation in between refuses the call rather than running it unregistered; it answers as
   *authority not established*, `data.detail` `mandate_lapsed_before_run`, and the evidence journal records that
-  nothing ran, `execution: none`, beside the permit; under a seat claim that window can be a consensus round long). With
+  nothing ran, `execution: none`, beside the permit, as it does after an `at_capacity` refusal of a permit; under a
+  seat claim that window can be a consensus round long). The catalogue's `mandate_lapsed_before_run` is the wire
+  `detail` under the reason `authority_not_established`. With
   enforcement off no authority is checked; an attached cohort budget still verifies the caller context and admits by
   cohort.
 - **Guarantee:** [`prov.enforcement`](../reference/guarantee-catalogue.md#prov.enforcement).
@@ -55,6 +57,9 @@ confirmed stop, checked against the class's bound. CI runs it.
   before the work is registered refuses it, one after is the sweep's to stop; a provider
   that does not turn enforcement on checks no authority, whatever the gateway did, and one that turns it on with no
   evaluator refuses every protected call (`no_evaluator`).
+- **Not built:** on the deferred-check path (a check settling a seat claim), a `withdrawn` refusal (the serve loop
+  ended with the check in flight) and the *authority not established* answer to a check whose task panicked can follow
+  a permit, and leave its `execution: attempted` alone in the journal: neither has the permit where it is made.
 - **Evidence:** the ledger rows [after a revocation every door runs nothing](../operations/what-is-proven.md#revocation-every-door-runs-nothing)
   and [running work stops](../operations/what-is-proven.md#running-work-stops).
 

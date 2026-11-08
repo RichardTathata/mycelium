@@ -61,7 +61,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and the handler does not run: *authority not established* (JSON-RPC `-32031`, `data.reason`
   `authority_not_established`, as a revocation refused at the preflight is, so both SDKs classify it alike) with
   `data.detail` `mandate_lapsed_before_run`; the provider's evidence journal records that nothing ran
-  (`Execution::None`) beside the permit. A call the policy admitted **without** an established mandate is unchanged
+  (`Execution::None`) beside the permit, as it now does after a permit the cohort budget refuses
+  (`at_capacity`). A call the policy admitted **without** an established mandate is unchanged
   (registering it would cancel work the policy admitted without one); the provider has no shadow rung. Under a seat
   claim the window this closes can be a consensus round long. The window is narrower, not gone: a revocation after the
   registration is the sweep's, as before. `a_grant_revoked_between_the_preflight_and_the_registration_refuses_the_call` holds the call in

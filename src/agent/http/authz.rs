@@ -1499,12 +1499,22 @@ pub(crate) async fn ae_record_execution(
 ) {
     let Preflight::Proceed { evidence: decided, .. } = preflight else { return };
     if let Err(e) = ae_record(ctx, &decided.as_execution(execution)).await {
-        // The effect has happened. The evidence for it has not.
-        warn!(
-            operation_id = %decided.operation_id,
-            attempt_id = %decided.attempt_id,
-            "AE: the execution record could not be established: {e}"
-        );
+        // Whatever the outcome was has happened; the evidence for it has not. For `Execution::None` the outcome is
+        // that nothing ran: the journal is left holding the permit's `Attempted` with no record saying otherwise.
+        if execution == super::action_evaluator::Execution::None {
+            warn!(
+                operation_id = %decided.operation_id,
+                attempt_id = %decided.attempt_id,
+                "AE: nothing ran after this permit, and the record saying so could not be established \
+                 (the journal holds the permit's `attempted` alone): {e}"
+            );
+        } else {
+            warn!(
+                operation_id = %decided.operation_id,
+                attempt_id = %decided.attempt_id,
+                "AE: the dispatch has happened, and its execution record could not be established: {e}"
+            );
+        }
     }
 }
 

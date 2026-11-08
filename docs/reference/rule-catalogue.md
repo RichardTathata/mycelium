@@ -32,7 +32,7 @@ Schema `mycelium.rules/1` · 32 rules.
 | [`prov.self_election`](#provself_election) | Response | instrumented | Herd damping: a candidate acts this round with probability p, drawn after the guards so a decline costs nothing. Replay-covered since the draw went through the seam. |
 | [`prov.shed`](#provshed) | Response | instrumented | More live providers than the declared ceiling withdraws the hosts ranked beyond it by the band's rendezvous order, among the providers that advertise they will act on it (`prov-shed`; rev 2; rev 1 drew per host, and every host could withdraw at once). |
 | [`prov.withdraw`](#provwithdraw) | Propagation, Response | catalogue only | Withdrawal removes the install and tombstones its advertisement; restart ≡ provisioning is how it comes back. |
-| [`provider.enforcement`](#providerenforcement) | Authority | catalogue only | Authority where the work happens: a protected call is checked at the provider whichever door it came through; with enforcement on and no evaluator it is refused (`no_evaluator`); with it off no authority is checked, though an attached cohort budget still verifies the caller context and admits by cohort (`caller_context_refused`, `at_capacity`). |
+| [`provider.enforcement`](#providerenforcement) | Authority | catalogue only | Authority where the work happens: a protected call is checked at the provider whichever door it came through; with enforcement on and no evaluator it is refused (`no_evaluator`); with it off no authority is checked, though an attached cohort budget still verifies the caller context and admits by cohort (`caller_context_refused`, `at_capacity`). `mandate_lapsed_before_run` is the wire `detail` of a refusal whose reason is `authority_not_established`: a permit decided on an established mandate whose re-assessment at registration no longer finds it established. |
 | [`sched.missed`](#schedmissed) | Response | instrumented | A gap is decided, not replayed: skipped, run late each under its own key (at most 64), or run once for the gap under its newest slot's key; a schedule with no recorded run starts at the slot due. |
 | [`sched.run`](#schedrun) | Response | partial — every run, failure and overrun; a change to not_holder, not_eligible, warming_up, last_ahead, ignored_last_far_ahead, stood_down or declaration_mismatch, once; a tick that changes nothing records nothing | After a warm-up, the rendezvous winner among the live candidates that declare the same period and phase holds and runs the slot due, under the key `sched/{id}/{slot}`, within one period; a partition has a holder on each side, and only a destination that deduplicates makes that one effect — the voluntary singleton, not a lock. |
 | [`signal.admission`](#signaladmission) | Admission | partial — refusals and sheds only; an admitted signal is the hot path and records nothing | Admission is scoped (Cluster · Group · Individual) and shed under load — except Individual and the boundary transitions; shedding happens before the sender is recorded. |
@@ -530,7 +530,7 @@ Withdrawal removes the install and tombstones its advertisement; restart ≡ pro
 
 rev 3 · `mycelium::agent::provider_enforcement` · Authority · trace: catalogue only
 
-Authority where the work happens: a protected call is checked at the provider whichever door it came through; with enforcement on and no evaluator it is refused (`no_evaluator`); with it off no authority is checked, though an attached cohort budget still verifies the caller context and admits by cohort (`caller_context_refused`, `at_capacity`).
+Authority where the work happens: a protected call is checked at the provider whichever door it came through; with enforcement on and no evaluator it is refused (`no_evaluator`); with it off no authority is checked, though an attached cohort budget still verifies the caller context and admits by cohort (`caller_context_refused`, `at_capacity`). `mandate_lapsed_before_run` is the wire `detail` of a refusal whose reason is `authority_not_established`: a permit decided on an established mandate whose re-assessment at registration no longer finds it established.
 
 - **Trigger:** a protected RPC kind arriving at a provider with enforcement on, or with a cohort budget attached
 - **Reads:**
@@ -541,7 +541,7 @@ Authority where the work happens: a protected call is checked at the provider wh
   - NoAction: `enforcement_off`, `not_protected`
 - **Effects:** the evidence journal; the handler never runs on a refusal
 - **Guards:** Authority, ResourceBudget
-- **Code:** `provider_enforcement::check` · **Docs:** docs/guide/20-authorising-actions.md · **Tests:** `test_c7_the_bypass_matrix_no_door_runs_revoked_work`, `a_grant_revoked_between_the_preflight_and_the_registration_refuses_the_call`
+- **Code:** `provider_enforcement::check` · **Docs:** docs/guide/20-authorising-actions.md · **Tests:** `test_c7_the_bypass_matrix_no_door_runs_revoked_work`, `a_grant_revoked_between_the_preflight_and_the_registration_refuses_the_call`, `a_permit_the_cohort_budget_refuses_is_recorded_as_nothing_ran`
 
 ## `sched.missed`
 
