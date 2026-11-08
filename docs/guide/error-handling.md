@@ -154,6 +154,14 @@ pub enum RpcError {
 unreachable. Retry against the same node, or resolve a different provider via
 `capabilities().resolve(...)` and retry there.
 
+**A provider's refusal is a reply, not an `RpcError`.** With provider enforcement on, a refused protected call
+answers with a body naming its `reason` (`{"error", "reason", "data"}`, or a JSON-RPC error on an MCP tool call); the
+reasons are the [`provider.enforcement`](../reference/rule-catalogue.md#providerenforcement) rule's. One of them,
+an *authority not established* refusal (JSON-RPC `-32031`, `data.reason` `authority_not_established`) whose
+`data.detail` is **`mandate_lapsed_before_run`**: the preflight permitted the call on an established mandate, and the
+mandate was revoked, expired or superseded before the work was registered, so nothing ran. Not retryable with the
+same mandate — obtain a current one ([deprecations §84](deprecations.md#84-a-provider-refuses-a-call-whose-mandate-was-revoked-after-its-preflight-and-before-its-registration-authority-not-established-mandate_lapsed_before_run-unreleased)).
+
 ---
 
 ## `QuorumError`

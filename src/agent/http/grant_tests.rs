@@ -454,6 +454,84 @@ async fn a_revoked_grant_is_refused_at_every_door_and_stops_admitted_work() {
     a.shutdown().await;
 }
 
+/// **A grant revoked between the provider's preflight and its registration refuses the call** (the check-then-act
+/// window at the provider, `admit_after`). The provider's preflight finds the grant established and permits; the call
+/// is held there by a test hook while the supervisor revokes; then the re-assessment that registers the running work
+/// finds the grant revoked. The call is refused as authority not established, `detail` `mandate_lapsed_before_run`, the
+/// tool does not run, and the provider's journal records that nothing ran (`Execution::None`). Seen failing
+/// first: with the refusal taken out (the code before this fix), the re-assessment's non-established answer only
+/// skipped the registration, and the tool ran unregistered under the revoked grant, where no sweep could stop it.
+#[tokio::test]
+async fn a_grant_revoked_between_the_preflight_and_the_registration_refuses_the_call() {
+    use crate::agent::provider_enforcement::test_hooks::PAUSE;
+    let http_port = alloc_port();
+    let (a, journal, ran) = node(http_port).await;
+    let sm = a.agent_state_machine(policy(10_000));
+    sm.transition(ExecutionState::Planning).await.unwrap();
+    let agent_principal = crate::agent::gateway_caller::node_principal(a.node_id());
+    let args = serde_json::json!({"env": "prod", "replicas": 3});
+    let (mandate, request) = granted(&a, http_port, &sm, &args).await;
+    let (reached, resume) = (Arc::new(tokio::sync::Notify::new()), Arc::new(tokio::sync::Notify::new()));
+    PAUSE.pin().insert(a.node_id().to_string(), (Arc::clone(&reached), Arc::clone(&resume)));
+    let (a2, m2, args2) = (Arc::clone(&a), mandate.clone(), args.clone());
+    let call = tokio::spawn(async move { call_deploy(&a2, None, &m2, &args2).await });
+    // The preflight has permitted (the hook sits after it); the grant is revoked in the window.
+    tokio::time::timeout(Duration::from_secs(10), reached.notified()).await.expect("the call reached the window after its preflight");
+    let (status, body) = supervisor(http_port, "alice-secret", reqwest::Method::POST, &format!("/gateway/grants/{agent_principal}/{request}/revoke"), Some(serde_json::json!({"reason": "freeze"}))).await;
+    assert_eq!(status, 200, "{body}");
+    resume.notify_one();
+    let outcome = call.await.unwrap();
+    let err = outcome.expect_err("the call under the revoked grant is refused, not run unregistered");
+    // The shape: the JSON-RPC error a client classifies — *authority not established*, the family a revocation refused
+    // at the preflight is in (both SDKs read `data.reason`), with the window named in `detail`.
+    let error: serde_json::Value = serde_json::from_str(&err).unwrap_or_else(|_| panic!("a JSON-RPC error object: {err}"));
+    assert_eq!(error["code"], -32031, "{error}");
+    assert_eq!(error["data"]["reason"], "authority_not_established", "{error}");
+    assert_eq!(error["data"]["detail"], "mandate_lapsed_before_run", "{error}");
+    assert!(error["data"]["found"].as_str().is_some_and(|f| f.contains("revoked")), "what the re-assessment found: {error}");
+    assert_eq!(ran.load(Ordering::SeqCst), 0, "the tool did not run");
+    // The provider's journal: the permit (`Attempted`), then an execution record for the same attempt saying nothing ran.
+    let evidence = records(&journal);
+    let at_provider = |e: &&AeEvidence| e.enforcement_point == crate::agent::provider_enforcement::ENFORCEMENT_POINT_PROVIDER;
+    let none = evidence.iter().filter(at_provider)
+        .find(|e| e.kind == crate::agent::action_evaluator::RecordKind::Execution && e.execution == crate::agent::action_evaluator::Execution::None)
+        .unwrap_or_else(|| panic!("an execution record saying nothing ran: {:?}", evidence.iter().map(|e| (&e.enforcement_point, e.kind, e.execution)).collect::<Vec<_>>()));
+    assert!(evidence.iter().filter(at_provider).any(|e| e.kind == crate::agent::action_evaluator::RecordKind::Decided
+        && e.attempt_id == none.attempt_id && e.execution == crate::agent::action_evaluator::Execution::Attempted), "it cites the permit's attempt");
+    a.shutdown().await;
+}
+
+/// **A permit the cohort budget then refuses is on the record as nothing ran** (#735's confirm round). The provider's
+/// preflight permits a call under a grant; the budget's one undeclared place is held, so `admit_after` refuses
+/// `at_capacity`. The provider's journal holds the permit (`Attempted`) and, for the same attempt, `Execution::None`.
+/// Seen failing first: before the record, the journal held the permit alone, `Attempted` for work that never ran.
+#[tokio::test]
+async fn a_permit_the_cohort_budget_refuses_is_recorded_as_nothing_ran() {
+    use crate::knowledge::cohort::CohortView;
+    use crate::knowledge::cohort_budget::CohortBudget;
+    let http_port = alloc_port();
+    let (a, journal, ran) = node(http_port).await;
+    a.with_cohort_budget(CohortBudget::new(1, 1), CohortView::trusting([]), TrustedExternalIssuers::new());
+    let sm = a.agent_state_machine(policy(10_000));
+    sm.transition(ExecutionState::Planning).await.unwrap();
+    let args = serde_json::json!({"env": "prod", "replicas": 3});
+    let (mandate, _request) = granted(&a, http_port, &sm, &args).await;
+    let agent_principal = crate::agent::gateway_caller::node_principal(a.node_id());
+    let _held = crate::agent::provider_enforcement::test_hold_place(&a.task_ctx, &agent_principal).expect("the one place");
+    let err = call_deploy(&a, None, &mandate, &args).await.expect_err("the budget is full");
+    assert!(err.contains("at_capacity"), "{err}");
+    assert_eq!(ran.load(Ordering::SeqCst), 0, "the tool did not run");
+    let evidence = records(&journal);
+    let at_provider = |e: &&AeEvidence| e.enforcement_point == crate::agent::provider_enforcement::ENFORCEMENT_POINT_PROVIDER;
+    let permit = evidence.iter().filter(at_provider)
+        .find(|e| e.kind == crate::agent::action_evaluator::RecordKind::Decided && e.execution == crate::agent::action_evaluator::Execution::Attempted)
+        .expect("the provider's permit");
+    assert!(evidence.iter().filter(at_provider).any(|e| e.kind == crate::agent::action_evaluator::RecordKind::Execution
+        && e.execution == crate::agent::action_evaluator::Execution::None && e.attempt_id == permit.attempt_id),
+        "an execution record for the permit's attempt saying nothing ran: {:?}", evidence.iter().map(|e| (&e.enforcement_point, e.kind, e.execution)).collect::<Vec<_>>());
+    a.shutdown().await;
+}
+
 /// **A grant is issued at one node for an agent on another, and revoked there** (the second PR). Node A is the
 /// supervisor's gateway; node B runs the agent, entitles grants from the fleet, and trusts A's key as a member's.
 /// B's agent asks; A's pending list shows the request by gossip; the supervisor issues at A; B's wait reads A's
