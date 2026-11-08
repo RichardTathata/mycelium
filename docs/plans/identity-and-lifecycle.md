@@ -1,6 +1,6 @@
 # Identity and lifecycle — keyed principals, signed decisions, cancellation under a per-call mandate, and the developer surface
 
-**Status:** **agreed with the maintainer on 2026-11-07**, rev 0.8 (rev 0.8 records the agreement; the text is rev 0.7's, unchanged); proposed 2026-10-31. Work starts in §4's order: wave 1a's I0 and wave 1b's spikes in parallel. Five independent adversarial reviews —
+**Status:** **agreed with the maintainer on 2026-11-07**, rev 0.9 (row I2 is **not yet buildable: R1–R4 open**, the round-3 review's questions, which I2's build PR must settle; rev 0.9 writes row I2 from spike S-succeed's note, `spikes/2026-11-07-s-succeed.md`, and #732's review: a `cert_pem` node re-roots live, the trust set and the successor certificate persist under `succession/`, every cached judgment is re-judged when the roots change, and old-CA records lose standing (decided in the confirm round); rev 0.8 records the agreement, its text rev 0.7's); proposed 2026-10-31. Work starts in §4's order: wave 1a's I0 and wave 1b's spikes in parallel. Five independent adversarial reviews —
 four on one day, the fifth on the merged document (#715's thread, 2026-11-05; the thread, this paragraph and the *Revised
 from* column are the record of all five): rev 0.1 against the decisions, rev 0.3 against the mechanisms, rev 0.4 and rev 0.5 each against five
 premises, both with the verdict *not yet buildable*. Every premise failure sat in wave 1 (I0–I4) or in the developer
@@ -226,12 +226,192 @@ name by a 2.38 reader** (`RuleDecl` and `MandateDecl` deny unknown keys, `deprec
 allowance by a ≤ 2.37 one, so it is declared only on an upgraded fleet. **From the spike:** how establishment happens and what it
 costs; the exit list of rev 0.5 then stands, with the soak.
 
-#### I2 · CA succession by a pre-committed successor — *written after S-succeed*
+#### I2 · CA succession by a pre-committed successor — *written from S-succeed ([note](spikes/2026-11-07-s-succeed.md), 2026-11-07; evidence at tag `spike/s-succeed-2026-11-07-r2`) — **not yet buildable: R1–R4 open***
 
 Decided (D4): `ca-commit.pem`, `tls commit`, `tls succeed`, the successor-signed record with its window end, act-once
 and persist, a **gateway door** *(new)* that publishes the record (as I1's does), the shadow counted, the offline node
 cut off and counted, `secure-single-domain` rev 6 / `secure-multi-domain` rev 2 requiring `id.ca_succession_committed`.
-**From the spike:** whether a live node re-roots without a restart, and which key file rotation uses after succession.
+
+**From the spike:** a node on `cert_pem` with no CA key **re-roots live, without a restart**. Two live nodes (A, B)
+stayed up through widen, cut over and narrow. A fresh node holding a successor certificate joined live A, and A, once
+cut over, presented its own successor certificate on a socket to a node that trusts only the successor. Building the
+material took 0.97–1.14 ms, `activate` 23–26 µs and the whole call 1.23–1.40 ms, and an existing session carried the next
+write in 25–29 ms.
+A new node's first write reached A in the same time as a control join. Measured: that time tracks
+`health_check_interval_secs` and not `handshake_timeout_ms`. Inferred, not measured: the mechanism is the anti-entropy pull
+on a tick, and whose tick it is has not been attributed. The note gives each figure with its run.
+
+`main` has no such path:
+- `cert_verifier` and `fleet_server_verifier` are fixed for the node's life;
+- `RotationMaterial` comes only from `generate_rotation_after`, which needs `ca-key.pem`;
+- `build_rustls_configs` builds a store of one root;
+- `pem_cert_to_der` reads only the first certificate of `ca_cert_pem`.
+
+The re-root does **not** survive a restart. The node's identity key after succession is its **current** key, re-issued
+under the successor; `rotate_identity` still cannot run on the off-node posture.
+
+**What:**
+- **The reload path.** `cert_verifier` and `fleet_server_verifier` become swappable, and `activate` swaps them when the
+  material carries new ones; a same-CA rotation carries none and behaves as today. Rotation material can be built from
+  a pre-issued certificate and key over a **set** of roots (the spike's `reroot_material` and
+  `build_rustls_configs_roots`), with no CA key.
+- **Every cached judgment of a certificate is re-judged when the roots change.** Three readers judge a certificate record
+  against the roots, and only one does so afresh:
+  - the KV arm's `certificate_record_proves_itself` (`connection.rs`) calls `verify_member_cert` each time;
+  - the revocation fold's `cert_facts` (`revocation.rs`) caches each verdict by the certificate's hash, cleared only at
+    4,096 entries;
+  - `merge_anchors_seen` keeps every anchor it has merged for good.
+
+  Under today's code a change of roots therefore leaves a long-running node judging by the old roots while a restarted
+  one judges by the new, and the KV arm can disagree with the fold on the same node. Concretely: a node that judged a
+  successor-issued record before it widened keeps it unanchored, and one that judged an old-CA record before it
+  narrowed keeps it anchored. I2 clears `cert_facts` on every activation that changes the roots, removes from
+  `anchors_seen` every anchor whose only record no longer verifies, and re-folds every node. A long-running node then
+  judges as a restarted one does. Until that is built, the disagreement is the stated state.
+- **The cutover order is the protocol: widen, cut over, narrow.** Every node widens its trust to the old and successor
+  roots before **any** node presents a successor certificate. A node that cuts over early loses new handshakes with
+  every peer still on the old root, in both directions, while its existing sessions hide that until the next reconnect
+  (note, step 1). `tls succeed` acts on the successor-signed record once per phase:
+  - **Widen:** at once, on reading the record. The node persists the widened phase and its trust set **before** it
+    publishes that it has widened (D4's shadow), so a node that says it has widened does so after a restart too.
+  - **Cut over:** at the record's window start, whether or not every node has reported widening. Holding would let one
+    offline node stall the fleet; proceeding cuts it off. A member not reported widened by then is counted and named. A
+    node with **no successor certificate** in `succession/` when the window starts does not cut over and does not
+    narrow. It stays widened, presenting its old-root certificate, is counted (`ca_succession_uncut`) and named, and is
+    cut off by its peers when they narrow.
+  - **Narrow:** at the window's end. A node still on the old root is cut off and counted, which is D4's offline node. A
+    node that was offline through widening and returns inside the window widens on reading the record at start; one
+    that returns after the window's end stays cut off and is counted. **The operator's recovery for it:**
+    1. On the issuer's host, issue the node a certificate under the successor (`mycelium tls issue` against the
+       successor's directory).
+    2. Point its `cert_pem`, `key_pem` and `ca_cert_pem` at the successor's files, and remove its `succession/`
+       directory.
+    3. Restart it. It starts on the successor alone, as a node issued after the succession would.
+- **Where the successor certificate lives, and the trust set.** The node never writes the operator's `cert_pem`,
+  `key_pem` or `ca_cert_pem`: they may be on a read-only mount, and configuration is not state. Succession state lives
+  in the node's own directory (`auto_cert_dir`, `succession/`): the phase, the successor's root, and the successor-issued
+  certificate. The certificate reaches the node **by operator copy only**: the issuer's host writes it, and the
+  operator copies it into the node's `succession/`. D4's gateway door publishes the successor-signed **record**, not
+  certificates. The node reads the copied file and records it, with its directory synced (R6's `sync_parent_dir`) before the cutover is
+  recorded. At start, the persisted phase decides:
+  - **Widened:** the roots are `ca_cert_pem` and the successor.
+  - **Cut over:** the same roots, presenting the successor certificate.
+  - **Narrowed:** the successor's root only, presenting the successor certificate.
+
+  A node restarted in any phase comes back in that phase. **End state:** after narrowing, the operator replaces
+  `cert_pem` and `ca_cert_pem` with the successor's files at leisure. Until they match, the node warns at start naming
+  both files and still starts on the persisted state.
+- **No silent root drop.** A `ca_cert_pem` holding more than one certificate is refused by name, because
+  `pem_cert_to_der` silently keeps only the first today. The refusal applies to `ca_cert_pem` only, not `cert_pem` (a
+  chain) and not the on-node CA's `ca-cert.pem`. It is a behaviour change with an upgrade note (§5 and `deprecations.md`):
+  no deployment can rely on a second certificate there today, since it was ignored.
+- **A distinct successor subject.** `tls ca` mints a CA whose subject names the fleet and its generation, and
+  `generate_node_cert` issues under **that** subject. Today it rebuilds the signing CA from fixed parameters, which
+  carry rcgen's default subject, so a node certificate's issuer name always reads the default. Its comment says rustls
+  chains by the SubjectKeyIdentifier; the spike's refusals say otherwise. Across two same-named CAs the refusal reads
+  `BadSignature`, not `UnknownIssuer`, because the issuer is found by **name** and only then fails its signature (note,
+  finding 3). The comment is corrected with the change. A CA already deployed keeps its name.
+- **The re-issue of the current key, and of every unrevoked earlier one.** On the issuer's host, `tls succeed`
+  re-issues each node's **current** public key under the successor, issued after that node's newest issuance (row Q's
+  floor), and every unrevoked earlier key in its history (the decision below), each from its public key. The successor record is written at the
+  same path as the old one, `cert_record_key(node, key)`, and replaces it under LWW. That the node's identity history,
+  revocation standing and `anchors_seen` rank are unchanged by the overwrite is **asserted, not measured**; the exit
+  tests it.
+- **Old-CA records after the window narrows: decided, loss of standing.** Once a node trusts only the successor,
+  certificate records issued under the old CA no longer verify, and the anchors they gave are removed (above).
+  - **Why not the retired-roots rule.** Bounded safely, it needs the set of records merged before narrowing, identical
+    on every node and persisted: `anchors_seen` is in memory only (`revocation.rs`, "kept for the process's life"), so a
+    restarted node would hold a different set from a long-running one, and exits 2 and 9 could not both pass. Unbounded,
+    a holder of the old CA's key can mint a record backdated to before the window's end.
+  - **Why loss of standing holds.** It fails closed. A revoked old key that loses its anchor is refused at the
+    handshake, because no node trusts the old root, and at every signature check, because the key is not anchored.
+  - **What it costs, and the answer.** Signatures made earlier by a key anchored only by an old-CA record would stop
+    verifying. So `tls succeed` re-issues under the successor **every unrevoked key** in the node's history, not only
+    its current one, from their public keys on the issuer's host. A revoked key is not re-issued, and it stays refused.
+
+**Open before build (round-3 review).** The build PR settles each of these questions, with the exit beside it.
+- **R1 (high): a node left with no anchor becomes legacy, and its revoked keys verify again.** A node with no verifying
+  certificate record is judged from `peer_keys` as before row Q, and no revocation of its keys counts
+  (`src/agent/revocation.rs:12-16`, `:601`). Loss of standing that removes a node's last anchor therefore re-admits its
+  revoked keys. **Exit needed:** after narrowing, a node whose every old-CA record lost standing is never judged
+  legacy. Its revoked keys stay refused at the signature check and the handshake, on a long-running node and a
+  restarted one.
+- **R2 (high): the re-issued serials must keep the original order.** They must be distinct, in the original issuance
+  order, with the current key last, or an old key can revoke the current one. Rank is the key's **first** issuance,
+  carried in the serial (`revocation.rs:19-24`, `mycelium-core/src/tls.rs:916`). **Exit needed:** after re-issue, for
+  every pair of a node's keys, the later-issued key still outranks the earlier. An old key's revocation of the current
+  key does not count. No two re-issued keys are siblings unless they were before.
+- **R3 (medium-high): two sources go missing.**
+  - The off-node issuer has no source for which keys are revoked, so it cannot tell which to re-issue.
+  - A revocation record's trailer carries the revoker's and the revoked key's old-CA certificates, which stop
+    verifying after narrowing (`revocation.rs:36-38`).
+
+  **Exit needed:** the issuer's source of revoked keys named and tested: a revoked key is not re-issued, and an
+  unrevoked one is. A revocation counted before narrowing is still counted after it, on a long-running node and a
+  restarted one, and one first seen after narrowing is judged by a stated rule.
+- **R4 (medium): pruning `anchors_seen` by what the store now holds reopens demotion by hiding.** `anchors_seen` exists
+  so that hiding a node's certificate record does not demote it (`revocation.rs:263-266`). Pruning an anchor because its
+  record is no longer readable lets a member that hides the re-issued record demote the node. So an anchor must keep its
+  certificate or the certificate's digest. **Exit needed:** after narrowing, hiding or overwriting a node's re-issued
+  record does not remove its anchor, and an anchor is removed only when its kept certificate fails the new roots.
+
+**Depends on:** S-succeed (done); the gateway door after I1's.
+
+**Enumerate:**
+- `grep -n "cert_verifier\|fleet_server_verifier\|fn activate\|fn build_rustls_configs\|fn pem_cert_to_der\|fn load_ca_cert_only\|fn generate_ca\|fn generate_node_cert\|fn verify_member_cert" mycelium-core/src/tls.rs`;
+- every reader of a certificate record and its caches: `grep -rn "verify_member_cert\|fn cert_facts\|cert_cache\|merge_anchors_seen\|anchors_seen" --include='*.rs' src mycelium-core/src`, covering the KV arm in `connection.rs` and the folds, the cache and the anchors in `revocation.rs`;
+- `fleet_server_verifier()` (the bulk fetch, `src/agent/bulk.rs`);
+- the accept side (`tls_accept`, `src/agent/tasks.rs`) and the dial side (`mycelium-core/src/writer.rs`);
+- the guarantee report's `id.*` descriptors;
+- `mycelium tls` in `src/main.rs`.
+
+**Exit:**
+1. **Live, no restart.** A live node on `cert_pem` with no `ca-key.pem` widens, cuts over and narrows, with a KV write
+   crossing the mesh as proof of each session (the spike's steps, as a CI test). At each phase, a handshake is shown in
+   each direction. Two refusals are included:
+   - after narrowing, a peer that **trusts both roots but holds an old-root certificate** is refused by the narrowed
+     node's accept side, and that node, dialling, refuses it (spike M2);
+   - the narrowed node presents its own successor certificate on a socket to a peer that trusts only the successor.
+2. **Restart in each phase.** A node restarted in each phase comes back in it, from `succession/`. The operator's
+   `cert_pem` and `ca_cert_pem` are unwritten: on a read-only mount the start still succeeds, and a mismatch is warned
+   by name.
+3. **Widening reported.** A node reports widening only after persisting it. A fault injected between the persist and
+   the report restarts the node widened, and it then reports. A fault injected before the persist reports nothing,
+   and the node restarts unwidened.
+4. **The cutover proceeds** at the window start with a member unreported, which is counted and named. A node with no
+   successor certificate at the window start stays widened, presenting its old-root certificate, is counted
+   (`ca_succession_uncut`), and is cut off when its peers narrow.
+5. **Offline nodes.** A node offline through widening that returns inside the window widens. One that returns after it
+   is cut off and counted, and the operator's recovery (re-issue under the successor, the files pointed at the
+   successor, `succession/` removed, a restart) brings it back.
+6. **The record.** A succession record not signed by the committed successor is refused. A stale or replayed record is
+   refused by act-once. The gateway door publishes the record, refuses a malformed one, and accepts no certificate.
+7. **Distinct subject.** Two CAs minted by `tls ca` have distinct subjects. A node certificate's issuer name is its CA's,
+   and a refusal across the two CAs reads `UnknownIssuer`.
+8. **The re-issued certificates.** The node's current key is re-issued after its newest issuance, every unrevoked
+   earlier key is re-issued, and no revoked key is. After the
+   overwrite of `cert_record_key(node, key)`, the identity history, the revocation standing and the `anchors_seen` rank
+   are as before, which is measured. `rotate_identity` is still refused on the off-node posture.
+9. **Caches re-judged.** After each change of roots, a long-running node and a freshly restarted one agree on every
+   node's anchors and revocation count, and the KV arm agrees with the fold.
+10. **Old-CA records lose standing.** Before narrowing, an old-CA record verifies. After it, the record no longer
+    verifies and its anchor is gone, on a long-running node and a restarted one alike. A revoked old key is refused at
+    the handshake and at a signature check. A signature by an unrevoked earlier key still verifies, through its
+    re-issued record.
+11. **The other verifiers.** The bulk fetch and the node-certificate gateway work under the successor after cutover.
+12. **Removal and revocation.** A removed member and a revoked key are refused under either root during the window.
+13. **The profile.** Under the secure profile, `id.ca_succession_committed` is reported, with rev 6 and rev 2. A
+    node under `secure-single-domain` rev 6 with no commitment (`ca-commit.pem`) refuses to start, naming
+    `id.ca_succession_committed`.
+14. **No silent drop.** A multi-certificate `ca_cert_pem` is refused by name, with its upgrade note; a chain in
+    `cert_pem` is unaffected.
+
+**Not built, stated:**
+- a successor issued as an intermediate under the old root;
+- a mixed-version fleet mid-succession: every member is upgraded before `tls commit`, because an old binary cannot widen
+  live;
+- a `[gateway_tls]` gateway on its own certificate, which is outside the fleet CA and unchanged;
+- rotation in place on the off-node posture.
 
 #### I7 · The developer's identity — *written after S-presence* (D7)
 
@@ -329,7 +509,12 @@ Any time:                                      E2, E3, E4
 - **I3:** an unsigned decision body counted then refused; `grant:relay` inert at an un-upgraded gateway.
 - **I5:** `ot` optional; the provider's egress list must admit the issuer; a provider without `compliance` refuses a call
   carrying `ot` as `not_in_build`; an envelope past 8 KiB is refused `caller_context_too_large`, as today.
-- **I2, I4, I7:** written with their rows.
+- **I2:** a `ca_cert_pem` holding more than one certificate is refused by name at start. **Before upgrading, an operator
+  whose `ca_cert_pem` holds an extra certificate removes it**, keeping only the fleet CA's: the extra certificate was
+  ignored before, so removing it changes nothing. Only `ca_cert_pem` is affected, not `cert_pem` or the on-node CA, and
+  the upgrade note says so (`deprecations.md`). The successor-issued certificate and the phase live under
+  `auto_cert_dir/succession/`, and the operator's files are never written. Every member is upgraded before `tls commit`.
+- **I4, I7:** written with their rows.
 - **N4:** three configuration files written into the worktree, merged.
 - Wire **v12** unchanged throughout: every field is payload (`cs`, `cn`, `ot` park in `x` at an older provider).
 

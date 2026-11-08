@@ -195,8 +195,8 @@ is the boolean "skip me" a governor derives from it; the written entry is the
 
 **Mailbox vs. Signal vs. RPC vs. Bulk vs. Scatter.** The service patterns, by
 shape: **Signal** = fire-and-forget event. **RPC** = request/reply to one
-provider. **Mailbox** = durable, HLC-ordered event delivery (survives a restart
-within the TTL window). **Bulk** = large payloads over HTTP staging, not the
+provider. **Mailbox** = durable, HLC-ordered event delivery (an event stays in the KV
+until delivered, so it survives the target's restart). **Bulk** = large payloads over HTTP staging, not the
 signal mesh. **Scatter** = query many providers, aggregate replies. →
 [`mailbox_llm`](../../examples/coop/src/bin/mailbox_llm.rs).
 

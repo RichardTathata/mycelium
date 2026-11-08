@@ -4,9 +4,12 @@ use mycelium::error::GossipError;
 use std::path::PathBuf;
 use std::{error::Error, sync::Arc};
 
-/// The node binary's log filter: `RUST_LOG`'s directives when it holds any valid one, as `EnvFilter`
-/// reads them (skillrunner's reading), otherwise `default` — INFO for the node, WARN for `mycelium test`.
-/// The binary once set a fixed maximum level, so `RUST_LOG=mycelium=debug` did nothing (the review of #730).
+/// The node binary's log filter: `RUST_LOG`'s directives when it holds any valid one, otherwise `default` —
+/// INFO for the node, WARN for `mycelium test`. A valid `RUST_LOG` **replaces** the default rather than adding to
+/// it, as `EnvFilter` reads one: a target it does not name is off, so `RUST_LOG=mycelium_core=debug` hides the
+/// node's own INFO lines and a typo that parses as a target (`RUST_LOG=inf`) silences everything; name the default
+/// too (`info,mycelium_core=debug`). The binary once set a fixed maximum level, so `RUST_LOG` did nothing (the
+/// review of #730).
 fn log_filter(default: tracing::Level, rust_log: Option<&str>) -> tracing_subscriber::EnvFilter {
     tracing_subscriber::EnvFilter::builder()
         .with_default_directive(tracing_subscriber::filter::LevelFilter::from_level(default).into())
@@ -1147,7 +1150,7 @@ mod log_filter_tests {
     /// **`RUST_LOG` is read** (the review of #730): the node binary set a fixed maximum level, so
     /// `RUST_LOG=mycelium=debug` did nothing. Unset or empty, the default stands (INFO for the node,
     /// WARN for `mycelium test`), as it is when `RUST_LOG` holds no valid directive; set, its directives
-    /// decide, as `EnvFilter` always has them (skillrunner's reading).
+    /// decide alone.
     #[test]
     fn the_log_filter_reads_rust_log_and_keeps_the_default_when_unset() {
         let hint = |default, rust_log| log_filter(default, rust_log).max_level_hint();
@@ -1157,5 +1160,39 @@ mod log_filter_tests {
         assert_eq!(hint(tracing::Level::INFO, Some("mycelium=debug")), Some(LevelFilter::DEBUG), "RUST_LOG ignored");
         assert_eq!(hint(tracing::Level::INFO, Some("error")), Some(LevelFilter::ERROR), "RUST_LOG ignored");
         assert_eq!(hint(tracing::Level::INFO, Some("mycelium=lolwut")), Some(LevelFilter::INFO), "an invalid RUST_LOG keeps the default");
+    }
+
+    /// **A valid `RUST_LOG` replaces the default; it does not add to it** (#734's review, finding 4) — the
+    /// behaviour the docs state. A directive naming one target turns every other target off, the node's own
+    /// INFO lines included; naming the default too keeps them.
+    #[test]
+    fn a_target_specific_rust_log_turns_every_other_target_off() {
+        use std::io::Write;
+        use std::sync::{Arc, Mutex};
+        #[derive(Clone, Default)]
+        struct Buf(Arc<Mutex<Vec<u8>>>);
+        impl Write for Buf {
+            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> { self.0.lock().unwrap().extend_from_slice(b); Ok(b.len()) }
+            fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+        }
+        let logged = |rust_log: &str| {
+            let buf = Buf::default();
+            let sink = buf.clone();
+            let subscriber = tracing_subscriber::fmt()
+                .with_env_filter(log_filter(tracing::Level::INFO, Some(rust_log)))
+                .with_writer(move || sink.clone())
+                .finish();
+            tracing::subscriber::with_default(subscriber, || {
+                tracing::info!(target: "mycelium", "node-info-line");
+                tracing::debug!(target: "mycelium_core", "core-debug-line");
+            });
+            String::from_utf8(buf.0.lock().unwrap().clone()).unwrap()
+        };
+        let only_core = logged("mycelium_core=debug");
+        assert!(only_core.contains("core-debug-line"));
+        assert!(!only_core.contains("node-info-line"), "a target-specific RUST_LOG kept the default: {only_core}");
+        let with_default = logged("info,mycelium_core=debug");
+        assert!(with_default.contains("core-debug-line") && with_default.contains("node-info-line"), "{with_default}");
+        assert!(logged("inf").is_empty(), "a typo that parses as a target silences everything");
     }
 }

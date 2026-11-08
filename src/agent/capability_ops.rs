@@ -238,7 +238,7 @@ pub(super) fn resolve_filter_against_kv(
 /// entry older than three refresh intervals left out (`CapEntry::is_fresh`) — a crashed provider's ad
 /// is never tombstoned, so this is where it evaporates (rule `kv.expiry`). For a reader that needs
 /// the key's segments rather than a filter; [`resolve_filter_against_kv`] is the filtered one.
-#[cfg(any(feature = "a2a", all(feature = "gateway", feature = "tls")))] // its readers: the A2A card, the provider preflight
+#[cfg(feature = "a2a")] // its reader: the A2A card
 pub(super) fn scan_fresh_caps(kv_state: &crate::store::KvState) -> Vec<(NodeId, Arc<str>, Arc<str>, Capability)> {
     let now_ms = age_now_ms();
     let mut out = Vec::new();
@@ -254,6 +254,41 @@ pub(super) fn scan_fresh_caps(kv_state: &crate::store::KvState) -> Vec<(NodeId, 
         }
     }
     out
+}
+
+/// Whether this node's **own** entry has not aged out: written no more than three refresh intervals ago. A
+/// node reading its own advertisement judges staleness only, not a stamp ahead of its wall clock — its HLC can
+/// run ahead (a peer ahead within the drift bound, the wall clock stepped back), and the symmetric
+/// `CapEntry::is_fresh` would then quarantine its own skill (#734's review, finding 5). An entry it stopped
+/// refreshing — read back from persisted state after a restart — has aged out.
+fn own_entry_live(entry: &CapEntry, hlc_ts: u64, now_ms: u64) -> bool {
+    now_ms.saturating_sub(crate::hlc::physical_ms(hlc_ts)) <= 3u64.saturating_mul(entry.refresh_interval_ms)
+}
+
+/// This node's own capabilities that have not aged out ([`own_entry_live`]): the group projection's input.
+pub(super) fn own_live_caps(kv_state: &crate::store::KvState, own: &NodeId) -> Vec<Capability> {
+    let now_ms = age_now_ms();
+    let mut out = Vec::new();
+    for (key, bytes, hlc_ts) in scan_prefix_kv_with_ts(kv_state, &format!("cap/{own}/")) {
+        if is_cap_locality_key(&key) { continue; }
+        match decode_cap_entry(&bytes) {
+            Some(entry) if own_entry_live(&entry, hlc_ts, now_ms) => out.push(entry.capability),
+            Some(_) => {}
+            None => warn!(key = %key, "malformed own Capability — local cap/ entry did not decode"),
+        }
+    }
+    out
+}
+
+/// Does this node advertise `ns/name`, not aged out? One read of `cap/{own}/{ns}/{name}` — the provider
+/// preflight's check, per `skill.invoke`, so it scans nothing else and warns about no peer's entry.
+#[cfg(all(feature = "gateway", feature = "tls"))]
+pub(super) fn own_cap_live(kv_state: &crate::store::KvState, own: &NodeId, ns: &str, name: &str) -> bool {
+    let key = format!("cap/{own}/{ns}/{name}");
+    let store = kv_state.store.pin();
+    let Some(stored) = store.get(key.as_str()) else { return false };
+    let Some(bytes) = stored.data.as_ref() else { return false };
+    decode_cap_entry(bytes).is_some_and(|entry| own_entry_live(&entry, stored.timestamp, age_now_ms()))
 }
 
 // (wiring_snapshot, locality helpers, and gcap key parsing live in

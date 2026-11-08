@@ -313,7 +313,11 @@ them; each showcase links back with a **⚙ Ops Console** button.
 
 ## Logs & tracing
 
-Mycelium uses `tracing`. Set `RUST_LOG=mycelium=info` (or `debug`). Build with
+Mycelium uses `tracing`. The `mycelium` and `mycelium-stem` binaries log at INFO by default and read `RUST_LOG`;
+a valid `RUST_LOG` **replaces** that default rather than adding to it, so every target it does not name is off —
+`RUST_LOG=mycelium=debug` hides `mycelium_core`'s and every dependency's lines, and `RUST_LOG=inf` (a typo that parses
+as a target) silences everything. Name the default too: `RUST_LOG=info,mycelium=debug`. A `RUST_LOG` with no valid
+directive keeps the default. `skillrunner` pins `skillrunner=info` and `mycelium=warn` over `RUST_LOG`. Build with
 `--features otel` and configure `[skill.otel]` for Jaeger/Grafana spans per
 invocation. Failure paths log with actionable context — the tripwire warnings
 above, `SignedData from unknown signer`, `Individual-scoped frame dropped`, etc.,

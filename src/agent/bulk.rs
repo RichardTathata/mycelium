@@ -457,12 +457,23 @@ pub(crate) async fn bulk_call_ctx(
     }
 }
 
-/// Background task that handles incoming `INVOKE_BULK` signals for a given kind.
+/// The `INVOKE_BULK` receiver a `bulk_serve` reads, registered by the caller before it spawns
+/// [`bulk_serve_task`]: a ticket that arrives once `bulk_serve` has returned finds it. Registered
+/// inside the task, it existed only once the task first ran, and a ticket delivered before then had
+/// no receiver and was dropped — the caller's only answer its own `Timeout` (CI run 42371240189).
+#[cfg(feature = "gateway")]
+pub(super) fn bulk_serve_rx(ctx: &TaskCtx) -> tokio::sync::mpsc::Receiver<Signal> {
+    ctx.signal_handlers.register_with_capacity(Arc::from(signal_kind::INVOKE_BULK), 256)
+}
+
+/// Background task that handles incoming `INVOKE_BULK` signals for a given kind, read from `rx`
+/// ([`bulk_serve_rx`], registered before this task is spawned).
 #[cfg(feature = "gateway")]
 pub(super) async fn bulk_serve_task<F, Fut>(
     ctx:         Arc<TaskCtx>,
     kind:        Arc<str>,
     handler:     Arc<F>,
+    mut rx:          tokio::sync::mpsc::Receiver<Signal>,
     mut cancel_rx:   oneshot::Receiver<()>,
     mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
 )
@@ -470,11 +481,6 @@ where
     F: Fn(NodeId, Bytes) -> Fut + Send + Sync + 'static,
     Fut: std::future::Future<Output = Bytes> + Send + 'static,
 {
-    let mut rx = ctx.signal_handlers.register_with_capacity(
-        Arc::from(signal_kind::INVOKE_BULK),
-        256,
-    );
-
     loop {
         tokio::select! { biased;
             _ = &mut cancel_rx => break,
@@ -917,6 +923,31 @@ mod tests {
         assert_eq!(got, Ok(payload));
         a.shutdown().await;
         b.shutdown().await;
+    }
+
+    /// **A ticket that arrives as soon as `bulk_serve` returns is served.** `bulk_serve` registered
+    /// its `invoke.bulk` receiver inside the task it spawned, so until that task first ran a ticket
+    /// found no receiver and was dropped — no retry, the caller's only answer its own `Timeout`. The
+    /// plaintext pair test above failed that way once under CI load (run 42371240189, the strict
+    /// `compliance,a2a` lib run): its ticket crossed the mesh before `b`'s serve task was scheduled.
+    /// A current-thread runtime makes the window certain rather than likely: the spawned task cannot
+    /// run before this caller's `emit_signal` delivers its own ticket locally, without a yield.
+    #[cfg(feature = "gateway")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_ticket_sent_as_soon_as_bulk_serve_returns_is_served() {
+        let port = alloc_port();
+        let id   = NodeId::new("127.0.0.1", port).unwrap();
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = port;
+        cfg.http_port = Some(alloc_port());
+        cfg.http_addr = "127.0.0.1".to_string();
+        let agent = Arc::new(GossipAgent::new(id.clone(), cfg));
+        agent.start().await.unwrap();
+        let _serve = agent.service().bulk_serve("echo-bulk", |_s, p| async move { p });
+        let payload = Bytes::from_static(b"served");
+        let got = agent.service().bulk_call(id, "echo-bulk", payload.clone(), Duration::from_secs(5)).await;
+        assert_eq!(got, Ok(payload), "bulk_serve's receiver is registered when it returns");
+        agent.shutdown().await;
     }
 
     /// **F6, the exit's first half: a `gateway_tls` node completes a `bulk_call`.** Before R7 the

@@ -426,25 +426,13 @@ pub(super) async fn gw_demand(
     })).into_response()
 }
 
-/// `GET /gateway/demand`'s two counts for `filter`: the `cap/` providers that match it and the `req/`
-/// entries that name its namespace and name.
-/// Both count *fresh* entries only: a crashed node's `cap/` or `req/` entry is never tombstoned and is
-/// skipped once older than three refresh intervals (`CapEntry::is_fresh`, `ReqEntry::is_fresh`, rule
-/// `kv.expiry`; the review of #730).
+/// `GET /gateway/demand`'s two counts for `filter`: the nodes that provide it and the nodes that require it.
+/// They are `demand()`'s own (`demand_snapshot`): fresh entries only, a crashed node's `cap/` or `req/` entry
+/// skipped once older than three refresh intervals (rule `kv.expiry`; the review of #730), and the providers
+/// counting a group's contributors (`gcap/`), each node once (#734's review, finding 6).
 fn demand_counts(kv: &crate::store::KvState, filter: &crate::capability::CapFilter) -> (usize, usize) {
-    use crate::capability::{CapFilter, ReqEntry};
-    let providers = super::capability_ops::resolve_filter_against_kv(kv, filter).len();
-    let now = super::capability_ops::now_ms();
-    let requirers = super::capability_ops::scan_prefix_kv_with_ts(kv, "req/")
-        .into_iter()
-        .filter(|(_, v, hlc_ts)| {
-            ReqEntry::decode(v)
-                .or_else(|| CapFilter::decode(v).map(|f| ReqEntry { filter: f, refresh_interval_ms: 60_000 }))
-                .is_some_and(|r| r.is_fresh(*hlc_ts, now)
-                    && r.filter.namespace == filter.namespace && r.filter.name == filter.name)
-        })
-        .count();
-    (providers, requirers)
+    let status = crate::agent::demand::demand_snapshot(kv, filter);
+    (status.providers.len(), status.demanding_nodes.len())
 }
 
 /// The gateway's provider lookup — `GET /gateway/cap/resolve`, `shard/owner`, `shard/emit`,
@@ -492,5 +480,21 @@ mod tests {
         let providers: Vec<String> = resolve_cap_providers(&kv, &filter).into_iter().map(|(n, _)| n.to_string()).collect();
         assert_eq!(providers, vec!["127.0.0.1:9001".to_string()], "a stale provider resolved");
         assert_eq!(demand_counts(&kv, &filter), (1, 1), "a stale provider or requirer counted");
+    }
+
+    /// **`GET /gateway/demand` agrees with `demand()`** (#734's review, finding 6): it counted `cap/` providers
+    /// only, while `demand_snapshot` also counts a group's contributors (`gcap/`) and dedupes by node.
+    #[test]
+    fn the_gateways_demand_counts_group_contributors_as_demand_snapshot_does() {
+        let kv = KvState::new(0);
+        let now = mycelium_core::sim_seam::wall_now_ms();
+        let cap = CapEntry { capability: Capability::new("compute", "gpu"), refresh_interval_ms: 1_000 }.encode();
+        seed(&kv, "cap/127.0.0.1:9001/compute/gpu", cap.clone(), now);
+        seed(&kv, "gcap/pool/compute/gpu/127.0.0.1:9005", cap.clone(), now);
+        seed(&kv, "gcap/pool/compute/gpu/127.0.0.1:9001", cap, now); // the same node: counted once
+        let filter = CapFilter::new("compute", "gpu");
+        let snap = crate::agent::demand::demand_snapshot(&kv, &filter);
+        assert_eq!(demand_counts(&kv, &filter), (snap.providers.len(), snap.demanding_nodes.len()));
+        assert_eq!(demand_counts(&kv, &filter), (2, 0), "a group contributor was not counted");
     }
 }

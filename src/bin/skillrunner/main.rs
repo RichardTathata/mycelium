@@ -116,6 +116,10 @@ async fn run(sf: Arc<SkillFile>) -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
+    // Register the invocation receiver before the ad goes out: a caller that resolves this skill
+    // the moment it is advertised finds a receiver (a request delivered before one exists is dropped).
+    let invoke_rx = agent.service().rpc_rx("skill.invoke");
+
     // Advertise capability on the mesh
     let cap = build_capability(&sf);
     let refresh = Duration::from_secs(sf.capability.ttl_secs);
@@ -159,7 +163,7 @@ async fn run(sf: Arc<SkillFile>) -> Result<(), Box<dyn std::error::Error>> {
         #[cfg(feature = "otel")]
         otel:   otel_provider,
     };
-    skill_runner.run().await;
+    skill_runner.run(invoke_rx).await;
 
     Ok(())
 }

@@ -39,7 +39,7 @@ use tracing::warn;
 
 use super::TaskCtx;
 use super::capability_ops::{
-    await_shutdown, is_cap_locality_key, now_ms, scan_prefix_kv,
+    await_shutdown, now_ms, scan_prefix_kv,
     subscribe_prefix_on_kv, WATCHER_DEBOUNCE_WINDOW,
 };
 use super::wiring::wiring_snapshot;
@@ -154,6 +154,13 @@ fn governor_owned_groups(ctx: &Arc<TaskCtx>, own: &NodeId) -> AHashSet<Arc<str>>
 /// One reconciliation pass: snapshot own caps + every `cap-group/` def, decide
 /// which groups we should be in, and update both `grp/{group}/{self}`
 /// membership and `gcap/{group}/{ns}/{name}/{self}` projections accordingly.
+/// This node's own capabilities, for the group projection: those it has not stopped refreshing. A node
+/// restarted over persisted `cap/` entries it no longer advertises would otherwise join the groups they match and
+/// project a fresh `gcap/` that demand and wiring count (#734's review, finding 3).
+fn own_capabilities(kv_state: &crate::store::KvState, own: &NodeId) -> Vec<Capability> {
+    super::capability_ops::own_live_caps(kv_state, own)
+}
+
 fn reconcile_emergent_groups(
     ctx:         &Arc<TaskCtx>,
     own:         &NodeId,
@@ -164,17 +171,7 @@ fn reconcile_emergent_groups(
     // provides decision; we project everything the def specifies, regardless
     // of whether we hold the same direct capability ourselves — the def is
     // the group's collective assertion, not a per-member echo of its own caps).
-    let mut own_caps: Vec<Capability> = Vec::new();
-    let own_prefix = format!("cap/{}/", own);
-    for (key, bytes) in scan_prefix_kv(&ctx.kv_state, &own_prefix) {
-        if is_cap_locality_key(&key) { continue; }
-        let cap = CapEntry::decode(&bytes).map(|e| e.capability)
-            .or_else(|| Capability::decode(&bytes));
-        match cap {
-            Some(cap) => own_caps.push(cap),
-            None      => warn!(key = %key, "malformed own Capability — local cap/ entry did not decode"),
-        }
-    }
+    let own_caps = own_capabilities(&ctx.kv_state, own);
 
     // Current cap-group definitions, keyed by group name.
     let mut defs: AHashMap<Arc<str>, CapabilityGroupDef> = AHashMap::new();
@@ -465,5 +462,32 @@ pub(crate) fn emit_membership(ctx: &TaskCtx, own: &NodeId, group: &Arc<str>, lea
         ctx.signal_boundary.write().groups.remove(group);
     } else {
         ctx.signal_boundary.write().groups.insert(Arc::clone(group));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::framing::make_gossip_update_stamped;
+    use crate::store::{apply_and_notify, KvState};
+
+    /// **A stale own advertisement is not projected into a group** (#734's review, finding 3). A node restarted
+    /// over persisted `cap/` entries it no longer refreshes read them back as its own capabilities, so it joined
+    /// the groups they match and projected a *fresh* `gcap/` that demand and wiring count. Its own check judges
+    /// staleness only: an entry stamped ahead (its HLC ahead of the wall clock) is still its own.
+    #[test]
+    fn a_stale_own_advertisement_is_not_projected_into_a_group() {
+        let kv = KvState::new(0);
+        let own = NodeId::new("127.0.0.1", 9001).unwrap();
+        let now = mycelium_core::sim_seam::wall_now_ms();
+        for (name, written_ms) in [("live", now), ("ahead", now + 60_000), ("gone", now - 60_000)] {
+            let entry = CapEntry { capability: Capability::new("demo", name), refresh_interval_ms: 1_000 };
+            let key = format!("cap/{own}/demo/{name}");
+            apply_and_notify(&kv, &make_gossip_update_stamped(&own, 5, Arc::from(key.as_str()),
+                entry.encode(), false, crate::hlc::pack(written_ms, 0)));
+        }
+        let mut names: Vec<String> = own_capabilities(&kv, &own).into_iter().map(|c| c.name.to_string()).collect();
+        names.sort();
+        assert_eq!(names, vec!["ahead".to_string(), "live".to_string()], "a stale own ad was projected");
     }
 }

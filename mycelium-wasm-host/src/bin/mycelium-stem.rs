@@ -45,9 +45,10 @@ fn usage() -> ! {
     std::process::exit(2)
 }
 
-/// The stem's log filter: `RUST_LOG`'s directives when it holds any valid one, as `EnvFilter` reads
-/// them, otherwise INFO. The stem once set a fixed INFO level, so `RUST_LOG` did nothing (found beside
-/// the review of #730; the node binary's `log_filter` is the same reading).
+/// The stem's log filter: `RUST_LOG`'s directives when it holds any valid one, otherwise INFO. A valid
+/// `RUST_LOG` replaces INFO rather than adding to it — a target it does not name is off — so name the default
+/// too (`info,mycelium_wasm_host=debug`). The stem once set a fixed INFO level, so `RUST_LOG` did nothing (found
+/// beside the review of #730; the node binary's `log_filter` is the same reading).
 fn log_filter(rust_log: Option<&str>) -> tracing_subscriber::EnvFilter {
     tracing_subscriber::EnvFilter::builder()
         .with_default_directive(tracing_subscriber::filter::LevelFilter::INFO.into())
@@ -304,7 +305,7 @@ mod log_filter_tests {
 
     /// **`RUST_LOG` is read** (found beside the review of #730): the stem set a fixed INFO level, so
     /// `RUST_LOG=mycelium_wasm_host=debug` did nothing. Unset, empty or holding no valid directive,
-    /// INFO stands; set, its directives decide, as `EnvFilter` always has them.
+    /// INFO stands; set, its directives decide alone.
     #[test]
     fn the_stems_log_filter_reads_rust_log_and_keeps_info_when_unset() {
         let hint = |rust_log| log_filter(rust_log).max_level_hint();
