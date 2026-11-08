@@ -943,7 +943,7 @@
     },
     {
       "id": "prov.eligible",
-      "revision": 2,
+      "revision": 3,
       "subsystem": "mycelium-wasm-host::provisioner",
       "responsibilities": [
         "response"
@@ -982,6 +982,7 @@
           "kind": "refusal",
           "reasons": [
             "reserved_namespace",
+            "kind_not_declared",
             "no_runtime",
             "budget",
             "memory",
@@ -1007,10 +1008,12 @@
       "docs": "docs/operations/capability-lifecycle.md",
       "tests": [
         "the_stem_fleet_fills_a_presence_floor_and_reheals",
-        "an_entry_providing_a_model_metadata_ad_is_never_installed"
+        "an_entry_providing_a_model_metadata_ad_is_never_installed",
+        "a_blob_only_stem_never_installs_a_wasm_component",
+        "declared_kinds_hold_against_a_fuel_policy_and_a_registration"
       ],
       "trace": "instrumented",
-      "summary": "An entry providing an `llm-meta` ad is never hosted (a model's metadata is its serving node's own, post-360 row R); otherwise this node hosts the entry's kind, has install budget left, and has memory and disk headroom for it. The check has side effects (counters) and is never re-evaluated for a record."
+      "summary": "An entry providing an `llm-meta` ad is never hosted (a model's metadata is its serving node's own, post-360 row R); an entry of a kind outside `[hosts].kinds` is refused by name (rev 3); otherwise this node hosts the entry's kind, has install budget left, and has memory and disk headroom for it. The check has side effects (counters) and is never re-evaluated for a record."
     },
     {
       "id": "prov.health_pass",
@@ -1199,7 +1202,7 @@
     },
     {
       "id": "prov.presence_floor",
-      "revision": 2,
+      "revision": 3,
       "subsystem": "mycelium-wasm-host::provisioner",
       "responsibilities": [
         "response"
@@ -1258,7 +1261,7 @@
         }
       ],
       "effects": [
-        "start_install of the smallest loadable candidate"
+        "start_install of the smallest loadable candidate that passes provenance and eligibility"
       ],
       "guards": [
         "provenance",
@@ -1277,10 +1280,11 @@
       "symbol": "provisioner::Provisioner::provision_round",
       "docs": "docs/reference/unit-file.md",
       "tests": [
-        "the_stem_fleet_fills_a_presence_floor_and_reheals"
+        "the_stem_fleet_fills_a_presence_floor_and_reheals",
+        "a_cheaper_bad_entry_does_not_stall_the_presence_floor"
       ],
       "trace": "instrumented",
-      "summary": "Fewer live providers than the declared floor, as this node sees it, makes this node a candidate installer of the cheapest loadable entry."
+      "summary": "Fewer live providers than the declared floor, as this node sees it, makes this node a candidate installer of the cheapest loadable entry that passes provenance and eligibility (rev 3; earlier revisions chose the cheapest before checking, so a cheaper bad line any member gossiped stalled the floor)."
     },
     {
       "id": "prov.probe",

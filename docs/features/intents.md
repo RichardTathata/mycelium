@@ -26,7 +26,8 @@ This feature is turned on in code; the governor that reads each intent must run 
 - [`govern_timing`](../../src/agent/introspect.rs)`(health_check_interval_secs, reconnect_backoff_secs, target)`, which
   publishes a [`TimingIntent`](../../src/agent/timing_governor.rs): a node's timing set in one pass; it refuses an
   intent that would govern nothing.
-- Over HTTP, `POST /gateway/govern/membership`, `/govern/tuning` and `/govern/timing`, under `govern:write`.
+- Over HTTP, `POST /gateway/govern/membership`, `/govern/tuning` and `/govern/timing`, under `govern:write` — a scope
+  checked only in a build with `compliance` (the published node has it); without it any valid bearer writes an intent.
 - [`FleetIntent`](../../src/agent/intent.rs): the shared transport — publish, freshness and evaporation, node
   targeting — that each governor's own policy sits on.
 - `test_governor_node_targeted_intent`, in [`src/lib_tests.rs`](../../src/lib_tests.rs): a node-targeted intent is

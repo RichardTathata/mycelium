@@ -5,7 +5,7 @@
 A [presence band](../guide/00-concepts.md#presence) keeps a capability live across the fleet whether or not anyone is
 asking for it: at least `min_providers` (the floor) and, if declared, at most `max_providers` (the ceiling). Each stem
 that declares the band in its own unit file supervises it; the band is not published to the fleet, so a host that does
-not declare it does not fill it. Below the floor, hosts self-elect to install the cheapest loadable entry. Above the
+not declare it does not fill it. Below the floor, hosts self-elect to install the cheapest loadable entry that passes provenance and eligibility. Above the
 ceiling, the hosts ranked beyond it by the band's rendezvous order withdraw — every host with the same view agrees
 which — among the providers that advertise they will shed. The band is a target the fleet converges to, not a count it
 guarantees at every moment.
@@ -46,15 +46,16 @@ provider goes is `the_stem_fleet_fills_a_presence_floor_and_reheals`, in
 
 - **Rules:** [`prov.presence_floor`](../reference/rule-catalogue.md#provpresence_floor) — `below_floor` starts an install
   here, `floor_met`, deferred `self_election_declined`, or refused `already_hosted`, `provenance_rejected`, `ineligible`,
-  `no_loadable_candidate` or `rights_refused`, rev 2; [`prov.shed`](../reference/rule-catalogue.md#provshed) — `above_ceiling` withdraws the
+  `no_loadable_candidate` or `rights_refused`, rev 3 (earlier revisions chose the cheapest line before checking it, so a
+  cheaper line any member gossiped stalled the floor); [`prov.shed`](../reference/rule-catalogue.md#provshed) — `above_ceiling` withdraws the
   hosts ranked beyond it, rev 2 (rev 1 drew per host, and every host could withdraw at once).
 - **Not built:** a cardinality guarantee — a count sits outside the band while installs and withdrawals settle, and a
   wrong view of the providers costs at most its own wrong entries; a fleet-wide band — each host fills only the bands
-  it declares; placement — which host fills a gap is the self-election's roll. **Known gap, fixed by a separate PR:**
-  the floor picks the cheapest loadable entry before it checks provenance and eligibility, so any member that gossips
-  a line for the band's capability that is no larger (ties included) and that this host refuses — untrusted (`provenance_rejected`),
-  not runnable here (`ineligible`) or already hosted — makes the floor refuse every round, and the floor is never filled on
-  any host that sees the same catalogue.
+  it declares; placement — which host fills a gap is the self-election's roll; feeding an install's failure back into
+  the choice — a trusted line whose install always fails is chosen again every round, and the floor is not filled here.
+  Two lines still hold a floor at `already_hosted`: a line signed by a trusted publisher that names an artifact this host
+  already hosts for something else, and — on a host with `accept_unsigned = true`, where every line passes provenance —
+  any member's line that does the same.
 - **Evidence:** the ledger row
   [every artifact-shaped co-op demo reaches the same outcome as stem nodes](../operations/what-is-proven.md#coop-demos-same-outcome-as-stems).
 

@@ -75,8 +75,8 @@ has no row for this feature. The end-to-end runs are tests in
   non-peer inside the horizon cannot be verified and the tally reads `Indeterminate`; a seat's release marker is not
   checked against its owner. The tally is detection, not prevention, and the exact count holds to within the nodes'
   wall-clock skew.
-- **Evidence:** the fleet history row of
-  [what-is-proven § Proven in CI on every merge](../operations/what-is-proven.md#proven-in-ci-on-every-merge).
+- **Evidence:** the ledger row
+  [a history limit can count across the fleet](../operations/what-is-proven.md#history-limit-can-count-across-fleet).
 
 ## Go deeper
 

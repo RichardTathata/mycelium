@@ -44,7 +44,8 @@ This feature is turned on in code, in a build with `tls` (`mycelium::knowledge` 
 The [example index](../../examples/README.md#the-capability-matrix) lists
 [`knowledge_layer`](../../examples/README.md#the-capability-matrix): claims and observations arrive, an assessment
 judges them, a reader resolves by its policy, a basis is retracted and the correction reaches what was built on it,
-and a competing statement survives. CI runs it, and `make gate-knowledge` runs the semantic gate in its own step.
+and a competing statement survives. CI runs it, but it prints each verdict and asserts none, so a regression changes
+its output without failing CI; the check is the semantic gate, `make gate-knowledge`, which CI runs in its own step.
 
 ## What it guarantees, and what it does not
 

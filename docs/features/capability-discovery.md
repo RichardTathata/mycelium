@@ -49,8 +49,9 @@ CI compiles it and checks its declaration, and does not run it. That a retired a
   checked where the work runs ([provider enforcement](provider-enforcement.md)); resolution is per node and can
   differ between nodes while gossip settles, and a crashed provider stays resolvable for up to three refresh
   intervals; an advertisement with a refresh interval of 0 (possible through the Rust API) reads as stale at once.
-- **Evidence:** the ledger row
-  [a capability name is one key segment at every door](../operations/what-is-proven.md#capability-name-key-segment-door).
+- **Evidence:** the ledger rows
+  [a capability name is one key segment at every door](../operations/what-is-proven.md#capability-name-key-segment-door)
+  and [a node that shuts down withdraws its soft state at its peers](../operations/what-is-proven.md#node-shuts-down-withdraws-soft-state).
 
 ## Go deeper
 

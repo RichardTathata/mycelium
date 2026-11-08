@@ -220,7 +220,7 @@ Present only for a unit that runs a provisioner. These are the provisioner's own
 
 | Field | Type | Default | Meaning |
 |---|---|---|---|
-| `kinds` | array of strings | empty | Artifact kinds this host can run: `"wasm-component"`, `"blob"`. Any other is refused. |
+| `kinds` | array of strings | empty | Artifact kinds this host can run: `"wasm-component"`, `"blob"`. Any other is refused. A stem registers a runtime for exactly these kinds and refuses an entry of any other (`prov.eligible`, reason `kind_not_declared`); empty hosts nothing, and the stem warns at start. |
 | `install_budget_bytes` | integer | absent (no budget) | The most this host installs, in bytes. |
 | `headroom` | float | absent (the provisioner's `0.8`) | Fraction of available resources an install may use. Refused outside `(0, 1]`. |
 | `trusted_publishers` | array of strings | empty | Publisher keys, `ed25519:<64 hex>`, whose entries this host installs. **Empty is refused** (`hosts.trusted_publishers`): with no key, any entry any peer gossips installs here with no provenance. To run that way on purpose, set `accept_unsigned = true`. A stem refuses a key in any other form. |

@@ -127,10 +127,10 @@ tests are in [`src/faults.rs`](../../src/faults.rs): `a_declaration_wire_check_r
   whatever the fleet's size; `restart` replays the fleet's own WAL, not the regression floor's golden fixtures under
   `tests/fixtures/persistence/`, which CI replays on their own; `partition`'s cut is a dropped runtime on wall time,
   not a seam.
-- **Not built, stated:** a two-sided partition (the Docker suites', D6 — `--faults two-sided` says so); a load class (V1 on the
-  [proof page](../operations/what-is-proven.md)); the verifiers an in-process fleet cannot reach from outside the
+- **Not built, stated:** a two-sided partition (the Docker suites', D6 — `--faults two-sided` says so); a load class ([V1 on the proof page](../operations/what-is-proven.md#v1-nightly-scale-runner)); the verifiers an in-process fleet cannot reach from outside the
   node (consensus, caller envelopes, knowledge records — the suite's); a provider-side run of the call set. The plan
   row is [`adopter-surface.md`](../plans/adopter-surface.md) X6.
+- **Evidence:** the ledger row [a declaration's fleet survives the faults the substrate claims to handle](../operations/what-is-proven.md#declaration-s-fleet-survives-faults-substrate).
 
 ## Go deeper
 

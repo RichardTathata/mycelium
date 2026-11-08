@@ -24,7 +24,8 @@ which CI's wire-check reads, declares one.
 - `[[serve]]` ([unit-file § serve](../reference/unit-file.md#serve)): `ns` (default `llm`), `name`, `endpoint`, `model`,
   `while_live` (refused when it names the skill itself), one of `api_key`, `api_key_env` (an unset variable refuses the
   start) or `credential` ([credentials at egress](credentials-at-egress.md)), and `max_tokens`, `temperature`.
-- Call it through `POST /gateway/llm/call` (`llm:invoke`) or the reason router (`/gateway/reason/route`,
+- Call it through `POST /gateway/llm/call` (`llm:invoke` — a scope checked only in a build with `compliance`, which the
+  published `mycelium-stem` is built without, so there any valid bearer calls it) or the reason router (`/gateway/reason/route`,
   `/gateway/reason/v1/chat/completions`).
 - `a_served_skill_follows_the_install_it_waits_for`, in [`mycelium-wasm-host/src/stem.rs`](../../mycelium-wasm-host/src/stem.rs):
   the skill appears when the install it waits for does and is retracted when it goes.
