@@ -934,7 +934,7 @@ audits every page and is exempt from Step 0's no-diff stop; its question-4 basel
 
 **Method, as run, and its limit.** One auditor did all 73 pages — the author of F3's pages, in a session that could
 not spawn the Step 3 auditors Step 4b assigns them to — so the pass is **not independent of the pages' author**; the
-compensating check is the PR's independent adversarial review (#739), whose findings are folded in below. The four
+compensating check is the PR's independent adversarial review (#739), which spot-checked about fifteen of the Clear pages, not every one; its findings are folded in below. The four
 questions verbatim, the pages in
 the registry's order, against `origin/main` at `842c1653` (#737). For each page:
 

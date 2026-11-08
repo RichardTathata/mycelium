@@ -31,10 +31,10 @@ From TypeScript, with `mycelium-ts` (`import … from "mycelium-ts"`), against a
 - `serveEveTools(agent)`: the tools as an MCP server, which a node bridges with `connect_mcp_server`
   ([MCP tools](mcp-tools.md)).
 - `declareEveAgent(agent, { mycelium, prompts })`: the unit through `POST /gateway/units/declare` (`cap:write`), and
-  the instructions and skills as prompt skills through `PUT /gateway/prompts/{agent}/{skill}` (`llm:write`) — scopes
+  the instructions and skills as prompt skills through `PUT /gateway/prompts/{agent}/{skill}` (`llm:write`; the route exists on a node built with `llm`) — scopes
   checked only on a node built with `compliance` (the published node is; without it any valid bearer declares).
 - `runEveSchedules(agent, mycelium, { onMarkdown })`: its schedules through the gateway's schedule route
-  ([recurring work](recurring-work.md), `schedule:run`), each cron read only when it is a period and a phase. A
+  ([recurring work](recurring-work.md), `schedule:run`, checked only on a node built with `compliance`), each cron read only when it is a period and a phase. A
   Markdown schedule's prompt goes to `onMarkdown`; without one it refuses every Markdown schedule before opening a
   stream.
 - The slot table is `EVE_SLOTS` in the same file; `mycelium-ts/tests/eve.test.ts` holds it equal to the example's
