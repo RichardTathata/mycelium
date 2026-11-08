@@ -175,6 +175,14 @@ links = ["rule:ae.preflight", "guarantee:ae.authorised_at_seam", "guarantee:ae.r
          "guarantee:prov.enforcement", "guarantee:authz.execution_authority"]
 
 [[feature]]
+name = "Client certificates for services"
+page = "client-certificates.md"
+example = "none"
+example_watch = ["client_cert"]
+ids = []
+links = []
+
+[[feature]]
 name = "Evidence journal"
 page = "evidence-journal.md"
 example = "none"

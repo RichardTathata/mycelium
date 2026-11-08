@@ -2611,3 +2611,27 @@ rev 3). What it leaves open: a trusted publisher's line naming an artifact this 
 holds the floor at `already_hosted`, as does any member's such line on a host with `accept_unsigned = true`; and a
 trusted line whose install always fails is chosen again every round (feeding an install's failure back into the choice
 is not built).
+
+## 86. A `mycelium-client://` certificate is refused at the mesh; `sys/client-cert/` and `POST /gateway/identity/client-cert` are new (unreleased, identity-and-lifecycle I1)
+
+A certificate naming `mycelium-client://{issuer}/{name}` is a **client certificate**. `mycelium tls issue --client
+<name> --issuer <issuer>` issues one for a service's key. Both mesh verifiers now refuse one, from a dialling peer and
+from a peer that serves it. Before, the fleet CA issued no such certificate, and a CA holder could mint one that a node
+admitted as a mesh member. A mesh certificate whose names cannot be read is now refused too, where before it reached
+the removal and revocation checks. Node certificates are unaffected, including a pre-row-Q certificate that names no
+node.
+
+- **Who is affected:** a token that holds `identity:write` for `POST /gateway/identity/revoke` gains the new door
+  `POST /gateway/identity/client-cert` at the upgrade. The scope is an existing one. Reissue narrower tokens first if
+  a revoking operator should not also publish client certificates.
+- **The new namespace:** `sys/client-cert/{principal-hex}/{key-hex}` holds a client certificate's DER. An
+  un-upgraded node stores and gossips the record and does nothing with it. A node judges a record by the certificate
+  it holds, never by its write time. The raw KV routes refuse it `403 protected_key` and name the door.
+- **Code:** `GossipAgent` gained `client_key_standing` and `publish_client_cert`, and the crate re-exports
+  `issue_client_cert`, `client_identity`, `ClientIdentity`, `ClientKeyStanding` and `CLIENT_CERT_PREFIX` under `tls`.
+  All are additions, so nothing breaks.
+- **Under `[persistence]`:** a node writes `identity/client-certs.journal` beside `identity/revocations.journal`. A
+  journal that cannot be opened refuses the start by name, as the revocation journal does.
+
+Wire **v12** unchanged. What I1 leaves for later (`cs`/`cn`, the SDK clients, client-held grants) is listed on the
+[feature page](../features/client-certificates.md).

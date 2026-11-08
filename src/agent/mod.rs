@@ -181,6 +181,11 @@ pub(crate) mod audit;
 /// row Q); issued under `compliance`.
 #[cfg(feature = "tls")]
 pub(crate) mod revocation;
+/// Identity-and-lifecycle I1: client certificates for services — which of a client principal's keys is current.
+#[cfg(feature = "tls")]
+pub(crate) mod client_cert;
+#[cfg(all(test, feature = "tls"))]
+mod client_cert_tests;
 #[cfg(feature = "compliance")]
 mod knowledge_keys;
 /// Closure plan C5: applying member removals at the agent.
@@ -977,6 +982,10 @@ pub(crate) struct TaskCtx {
     /// (`revocation::IdentityLedger`, lock-free).
     #[cfg(feature = "tls")]
     pub(crate) identity_ledger: Arc<revocation::IdentityLedger>,
+    /// Identity-and-lifecycle I1: each client principal's newest verified certificate (its high-water mark), and
+    /// the journal of supersessions under `[persistence]` (`client_cert::ClientCertLedger`, lock-free).
+    #[cfg(feature = "tls")]
+    pub(crate) client_certs: Arc<client_cert::ClientCertLedger>,
     /// Post-360 row E: each gateway's recent caller-envelope ids, checked once per received request
     /// (`gateway_caller::verify_received`), so a captured envelope is not served twice.
     pub(crate) caller_replay: gateway_caller::ReplayWindows,
@@ -1586,6 +1595,8 @@ impl GossipAgent {
             membership: std::sync::OnceLock::new(),
             #[cfg(feature = "tls")]
             identity_ledger: Arc::new(revocation::IdentityLedger::default()),
+            #[cfg(feature = "tls")]
+            client_certs: Arc::new(client_cert::ClientCertLedger::default()),
             caller_replay: Default::default(),
             causal_misplaced: papaya::HashMap::new(),
             #[cfg(feature = "a2a")]
@@ -2300,6 +2311,21 @@ impl GossipAgent {
 /// Hot certificate / identity rotation (WS5; `tls` feature).
 #[cfg(feature = "tls")]
 impl GossipAgent {
+    /// Where a **client** principal's key stands at this node (identity-and-lifecycle I1): `Current` when the
+    /// principal's newest verified client certificate (`sys/client-cert/`) is for `key`, `Superseded` when a newer
+    /// one has been read, `Unknown` when no verified certificate names `key` for `principal` (or this node has no
+    /// `[tls]`). Folds the principal's records first. `principal` is `token:{issuer}/{name}`.
+    pub fn client_key_standing(&self, principal: &str, key: &[u8; 32]) -> client_cert::ClientKeyStanding {
+        client_cert::client_key_standing(&self.task_ctx, principal, key)
+    }
+
+    /// Publish a client certificate (DER) as its principal's record — what `POST /gateway/identity/client-cert`
+    /// does, for an embedder. Judged first: a client certificate the fleet CA issued, not issued in the future,
+    /// not older than the principal's newest already read.
+    pub fn publish_client_cert(&self, der: &[u8]) -> Result<client_cert::Published, client_cert::PublishRefusal> {
+        client_cert::publish(&self.task_ctx, der)
+    }
+
     /// Sign `msg` with this node's Ed25519 **identity** key — the same key behind TLS and gossip
     /// `SignedData`. `None` if no `tls` identity is configured. Public so companion crates (e.g.
     /// WS-F AgentFacts emission) can **self-certify** documents under the node identity without

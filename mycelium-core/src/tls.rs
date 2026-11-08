@@ -172,6 +172,72 @@ pub fn node_uri(node: &crate::node_id::NodeId) -> String {
     format!("mycelium://{node}")
 }
 
+/// The scheme a **client** certificate names its principal by (identity-and-lifecycle I1, D1):
+/// `mycelium-client://{issuer}/{name}` — the gateway principal `token:{issuer}/{name}`. A client
+/// certificate is issued by the fleet CA to a service's process (`mycelium tls issue --client`), never
+/// to a node: both mesh verifiers refuse a certificate naming this scheme, so a client key cannot join
+/// the mesh, and `NodeTls::verify_member_cert` (the chain alone) still accepts it, so the client-cert
+/// fold can judge its issuance.
+pub const CLIENT_URI_SCHEME: &str = "mycelium-client://";
+
+/// The URI a client certificate names its principal by: `mycelium-client://{issuer}/{name}`.
+pub fn client_uri(issuer: &str, name: &str) -> String {
+    format!("{CLIENT_URI_SCHEME}{issuer}/{name}")
+}
+
+/// Whether `s` may be one segment of a client principal (its issuer or its name): 1–128 bytes of ASCII
+/// letters, digits, `-`, `_` and `.`, and not `.` or `..` — so a principal is exactly two segments and
+/// prints the same in a URI, a file name and a KV key.
+pub fn valid_client_segment(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 128
+        && s != "."
+        && s != ".."
+        && s.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+}
+
+/// What a client certificate says about whose key it is (identity-and-lifecycle I1).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClientIdentity {
+    /// The gateway identity issuer the principal is qualified by (`gateway_identity_issuer`).
+    pub issuer: String,
+    /// The service's name under that issuer.
+    pub name: String,
+    /// The certificate's Ed25519 key — the key the service signs with.
+    pub key: [u8; 32],
+    /// The issuance time carried in the serial (ms since the epoch), as for a node certificate.
+    pub issued_ms: Option<u64>,
+}
+
+impl ClientIdentity {
+    /// The gateway principal this certificate's key speaks for: `token:{issuer}/{name}`.
+    pub fn principal(&self) -> String {
+        format!("token:{}/{}", self.issuer, self.name)
+    }
+}
+
+/// Read a client certificate's [`ClientIdentity`]: exactly one `mycelium-client://{issuer}/{name}` URI
+/// with two valid segments, and no `mycelium://` (node) URI — a certificate naming both is no client's
+/// and no node's. `None` otherwise. Says nothing about who issued it: judge the chain with
+/// [`NodeTls::verify_member_cert`] first. Never panics.
+#[cfg(feature = "tls")]
+pub fn client_identity(der: &[u8]) -> Option<ClientIdentity> {
+    let id = cert_identity(der)?;
+    if id.node_uris.iter().any(|u| u.starts_with("mycelium://")) {
+        return None;
+    }
+    let mut clients = id.node_uris.iter().filter_map(|u| u.strip_prefix(CLIENT_URI_SCHEME));
+    let only = clients.next()?;
+    if clients.next().is_some() {
+        return None;
+    }
+    let (issuer, name) = only.split_once('/')?;
+    if !valid_client_segment(issuer) || !valid_client_segment(name) {
+        return None;
+    }
+    Some(ClientIdentity { issuer: issuer.to_string(), name: name.to_string(), key: id.key, issued_ms: id.issued_ms })
+}
+
 /// Read a certificate's [`CertIdentity`]. The key is read by the X.509 parser rustls uses
 /// (`ed25519_key_from_cert_der`); the serial and the subject alternative names by a minimal,
 /// bounds-checked DER walk of the `TBSCertificate` (the parser exposes neither). `None` for anything
@@ -938,6 +1004,74 @@ mod imp {
         Ok(CertificateDer::from(node_cert.der().to_vec()))
     }
 
+    /// A **client** certificate for the principal `token:{issuer}/{name}` (identity-and-lifecycle I1, D1): the
+    /// key's certificate, signed by the fleet CA exactly as a node's is, naming `mycelium-client://{issuer}/{name}`
+    /// and nothing else — no IP, no `mycelium://` URI — and dated in its serial like a node's.
+    pub(super) fn generate_client_cert(
+        issuer: &str,
+        name: &str,
+        signing_key: &SigningKey,
+        ca_key_pair: &KeyPair,
+        issued_ms: u64,
+    ) -> Result<CertificateDer<'static>, GossipError> {
+        use ed25519_dalek::pkcs8::EncodePrivateKey;
+        let err = |reason: String| GossipError::InvalidField { field: "tls", reason };
+        if !super::valid_client_segment(issuer) || !super::valid_client_segment(name) {
+            return Err(err(format!(
+                "TLS: a client principal's issuer and name are each 1-128 of A-Z a-z 0-9 - _ . (got {issuer:?} / {name:?})"
+            )));
+        }
+        let pkcs8 = signing_key.to_pkcs8_der().map_err(|e| err(format!("TLS: encode client key: {e}")))?;
+        let client_key_pair = KeyPair::try_from(pkcs8.as_bytes()).map_err(|e| err(format!("TLS: rcgen client key: {e}")))?;
+        let mut params = CertificateParams::new(vec![]).map_err(|e| err(format!("TLS: client cert params: {e}")))?;
+        let uri = rcgen::Ia5String::try_from(super::client_uri(issuer, name)).map_err(|e| err(format!("TLS: client URI: {e}")))?;
+        params.subject_alt_names = vec![SanType::URI(uri)];
+        params.serial_number = Some(rcgen::SerialNumber::from(issued_ms));
+        params.not_before = rcgen::date_time_ymd(2024, 1, 1);
+        params.not_after  = rcgen::date_time_ymd(2099, 1, 1);
+        let mut ca_params = CertificateParams::new(vec![]).map_err(|e| err(format!("TLS: CA params for signing: {e}")))?;
+        ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        ca_params.not_before = rcgen::date_time_ymd(2024, 1, 1);
+        ca_params.not_after  = rcgen::date_time_ymd(2099, 1, 1);
+        let signing_ca = ca_params.self_signed(ca_key_pair).map_err(|e| err(format!("TLS: reconstruct CA for signing: {e}")))?;
+        let cert = params
+            .signed_by(&client_key_pair, &signing_ca, ca_key_pair)
+            .map_err(|e| err(format!("TLS: sign client cert: {e}")))?;
+        Ok(CertificateDer::from(cert.der().to_vec()))
+    }
+
+    /// **Issue a client certificate off-node** (identity-and-lifecycle I1): loads the CA from `ca_dir` (never mints
+    /// one), generates a fresh Ed25519 key for the principal `token:{issuer}/{name}`, and writes
+    /// `client-{issuer}-{name}.cert.pem` and `client-{issuer}-{name}.key.pem` (PKCS#8, `0600`) under `out_dir`.
+    /// The key goes to the service's process — an environment variable or a file; an agent's shell inherits either,
+    /// so a key an agent can reach is that agent's key. The certificate goes to a gateway's
+    /// `POST /gateway/identity/client-cert`, which publishes it. Issuing again for the same principal **supersedes**
+    /// the earlier key: its serial is later, and the client-cert fold refuses the older one once the newer is read.
+    /// Returns the two paths.
+    pub fn issue_client_cert(ca_dir: &Path, issuer: &str, name: &str, out_dir: &Path) -> Result<(std::path::PathBuf, std::path::PathBuf), GossipError> {
+        use base64::{engine::general_purpose::STANDARD, Engine};
+        use ed25519_dalek::pkcs8::EncodePrivateKey;
+        let err = |reason: String| GossipError::InvalidField { field: "tls", reason };
+        let ca_cfg = TlsConfig { auto_cert_dir: ca_dir.to_path_buf(), ..TlsConfig::default() };
+        let (_ca_cert_der, ca_key_pair) = load_existing_ca(&ca_cfg)?;
+        let signing_key = generate_key()?;
+        let cert_der = generate_client_cert(issuer, name, &signing_key, &ca_key_pair, super::issuance_after(0))?;
+        create_private_dir(out_dir).map_err(|e| err(format!("TLS: create {out_dir:?}: {e}")))?;
+        let cert_path = out_dir.join(format!("client-{issuer}-{name}.cert.pem"));
+        let key_path = out_dir.join(format!("client-{issuer}-{name}.key.pem"));
+        let pkcs8 = signing_key.to_pkcs8_der().map_err(|e| err(format!("TLS: encode client key: {e}")))?;
+        let b64 = STANDARD.encode(pkcs8.as_bytes());
+        let mut key_pem = String::from("-----BEGIN PRIVATE KEY-----\n");
+        for chunk in b64.as_bytes().chunks(64) {
+            key_pem.push_str(std::str::from_utf8(chunk).expect("base64 is ascii"));
+            key_pem.push('\n');
+        }
+        key_pem.push_str("-----END PRIVATE KEY-----\n");
+        write_public(&cert_path, cert_der_to_pem(cert_der.as_ref()).as_bytes()).map_err(|e| err(format!("TLS: write {cert_path:?}: {e}")))?;
+        write_private(&key_path, key_pem.as_bytes()).map_err(|e| err(format!("TLS: write {key_path:?}: {e}")))?;
+        Ok((cert_path, key_path))
+    }
+
     /// Extract the Ed25519 public key from a node cert's `SubjectPublicKeyInfo` (audit 2026-07-15,
     /// identity-authentication Phase 1a — `docs/design/identity-authentication.md`), read from its
     /// **structural position** by the X.509 parser rustls itself uses (post-360 plan row F, 2.33.0).
@@ -1125,6 +1259,22 @@ mod imp {
         Ok(())
     }
 
+    /// Refuse a **client** certificate at the mesh (identity-and-lifecycle I1, D1): one whose names include a
+    /// `mycelium-client://` URI. A client certificate is the fleet CA's too, so the chain check alone admits it;
+    /// this keeps a service's key — which its agent's shell can reach — off the transport. Fails closed: a
+    /// certificate whose names this node cannot read is refused (every certificate this tree issues is readable,
+    /// node or client, before row Q or after). Run after the CA chain check, in both verifiers, never in
+    /// `verify_member_cert`, which the client-cert fold uses to judge a client certificate's issuance.
+    pub(super) fn refuse_if_client(end_entity: &CertificateDer<'_>) -> Result<(), rustls::Error> {
+        let Some(id) = super::cert_identity(end_entity.as_ref()) else {
+            return Err(rustls::Error::General("mycelium: a mesh certificate whose names this node cannot read".into()));
+        };
+        if id.node_uris.iter().any(|u| u.starts_with(super::CLIENT_URI_SCHEME)) {
+            return Err(rustls::Error::General("mycelium: a client certificate cannot join the mesh".into()));
+        }
+        Ok(())
+    }
+
     /// Refuse a certificate whose key has been revoked by its owner (post-360 plan row Q's follow-up,
     /// `docs/design/revocation-authority.md`): a key its node has revoked by a revocation this node
     /// **counted** — one judged against the key while it was anchored for that node (a CA-issued
@@ -1195,6 +1345,7 @@ mod imp {
         ) -> Result<rustls::server::danger::ClientCertVerified, rustls::Error> {
             let verified = self.inner.verify_client_cert(end_entity, intermediates, now)?;
             refuse_if_removed(&self.removed, end_entity)?;
+            refuse_if_client(end_entity)?;
             refuse_if_revoked(&self.standing, end_entity)?;
             Ok(verified)
         }
@@ -1239,6 +1390,7 @@ mod imp {
         ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
             let verified = self.inner.verify_server_cert(end_entity, intermediates, server_name, ocsp_response, now)?;
             refuse_if_removed(&self.removed, end_entity)?;
+            refuse_if_client(end_entity)?;
             refuse_if_revoked(&self.standing, end_entity)?;
             Ok(verified)
         }
@@ -1324,7 +1476,7 @@ mod imp {
 }
 
 #[cfg(feature = "tls")]
-pub use imp::{ed25519_key_from_cert_der, gateway_server_config_from_pem, generate_rotation, generate_rotation_after, issue_node_cert, load_or_generate, mint_ca, sign_bytes, verify_bytes, writable_by_others};
+pub use imp::{ed25519_key_from_cert_der, gateway_server_config_from_pem, generate_rotation, generate_rotation_after, issue_client_cert, issue_node_cert, load_or_generate, mint_ca, sign_bytes, verify_bytes, writable_by_others};
 
 #[cfg(all(test, feature = "tls"))]
 mod key_extract_tests {
@@ -2117,5 +2269,93 @@ mod ca_race_tests {
         let _ = std::fs::remove_dir_all(&dir);
         assert!(after.as_ref().is_err_and(|e| e.starts_with("server refused") && e.contains("removed")),
             "RESUMED: a removed member reconnected on its cached session: {after:?}");
+    }
+
+    /// **A client certificate is refused at the mesh, both ways** (identity-and-lifecycle I1, D1). The fleet CA
+    /// issues a service's key a certificate naming `mycelium-client://{issuer}/{name}`; the chain check admits it,
+    /// so without the scheme refusal a service's key — which its agent's shell can reach — would be a connected
+    /// peer. Refused by B's server when the client dials, and by B's dialling client when the client serves. The
+    /// plants: a node certificate, and a pre-row-Q certificate naming no node, are still admitted both ways, and
+    /// `verify_member_cert` (the chain alone, which the client-cert fold uses) still accepts the client
+    /// certificate. Seen failing first: both handshakes completed.
+    #[test]
+    fn a_client_certificate_is_refused_at_the_mesh_both_ways() {
+        use crate::node_id::NodeId;
+        use crate::removal::RemovedSet;
+        let dir = fresh_dir("client-cert-mesh");
+        let cfg = TlsConfig { auto_cert_dir: dir.clone(), ..TlsConfig::default() };
+        let (nb, nc, nl) = (
+            NodeId::new("127.0.0.1", 9541).unwrap(),
+            NodeId::new("127.0.0.1", 9542).unwrap(),
+            NodeId::new("127.0.0.1", 9543).unwrap(),
+        );
+        let b = super::imp::load_or_generate(&cfg, &nb, Arc::new(RemovedSet::default()), Default::default()).unwrap();
+        let c = super::imp::load_or_generate(&cfg, &nc, Arc::new(RemovedSet::default()), Default::default()).unwrap();
+        let (ca_der, ca_key) = load_or_create_ca(&cfg).unwrap();
+
+        let client_key = ed25519_dalek::SigningKey::from_bytes(&[41u8; 32]);
+        let client_cert = super::imp::generate_client_cert("fleet", "forecaster", &client_key, &ca_key, 1_700_000_000_000).unwrap();
+        let id = super::client_identity(client_cert.as_ref()).expect("a client certificate reads as one");
+        assert_eq!((id.principal(), id.key), ("token:fleet/forecaster".to_string(), client_key.verifying_key().to_bytes()));
+        assert!(b.verify_member_cert(client_cert.as_ref()), "the chain check alone still accepts a client certificate");
+        let (client_server, client_client, _, _, _) =
+            super::imp::build_rustls_configs(client_cert, &client_key, ca_der.clone(), Arc::new(RemovedSet::default()), Default::default()).unwrap();
+
+        let legacy_key = ed25519_dalek::SigningKey::from_bytes(&[42u8; 32]);
+        let legacy = legacy_cert(&cfg, &nl, &legacy_key);
+        let (_, legacy_client, _, _, _) =
+            super::imp::build_rustls_configs(legacy, &legacy_key, ca_der, Arc::new(RemovedSet::default()), Default::default()).unwrap();
+        assert_eq!(handshake(c.client_config(), b.server_config()), Ok(()), "plant: a node certificate dials B");
+        assert_eq!(handshake(Arc::new(legacy_client), b.server_config()), Ok(()), "plant: a pre-row-Q certificate naming no node dials B");
+
+        let dialled = handshake(Arc::new(client_client), b.server_config());
+        // As a server, an issued client certificate already fails the name check (it carries no IP); a CA holder can
+        // mint one that names an IP as well, which is the case the scheme refusal itself must catch.
+        let with_ip = {
+            let kp = rcgen::KeyPair::try_from(ed25519_dalek::pkcs8::EncodePrivateKey::to_pkcs8_der(&client_key).unwrap().as_bytes()).unwrap();
+            let mut p = rcgen::CertificateParams::new(vec![]).unwrap();
+            p.subject_alt_names = vec![
+                rcgen::SanType::IpAddress("127.0.0.1".parse().unwrap()),
+                rcgen::SanType::URI(rcgen::Ia5String::try_from(super::client_uri("fleet", "forecaster")).unwrap()),
+            ];
+            p.not_before = rcgen::date_time_ymd(2024, 1, 1);
+            p.not_after = rcgen::date_time_ymd(2099, 1, 1);
+            let mut ca_params = rcgen::CertificateParams::new(vec![]).unwrap();
+            ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+            ca_params.not_before = rcgen::date_time_ymd(2024, 1, 1);
+            ca_params.not_after = rcgen::date_time_ymd(2099, 1, 1);
+            let ca = ca_params.self_signed(&ca_key).unwrap();
+            rustls::pki_types::CertificateDer::from(p.signed_by(&kp, &ca, &ca_key).unwrap().der().to_vec())
+        };
+        let (with_ip_server, _, _, _, _) =
+            super::imp::build_rustls_configs(with_ip, &client_key, load_or_create_ca(&cfg).unwrap().0, Arc::new(RemovedSet::default()), Default::default()).unwrap();
+        let _ = client_server;
+        let served = handshake(b.client_config(), Arc::new(with_ip_server));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(dialled.as_ref().is_err_and(|e| e.starts_with("server refused") && e.contains("client certificate")),
+            "ADMITTED: a client certificate dialled the mesh: {dialled:?}");
+        assert!(served.as_ref().is_err_and(|e| e.starts_with("client refused") && e.contains("client certificate")),
+            "ADMITTED: B dialled a peer serving a client certificate: {served:?}");
+    }
+
+    /// A client certificate's names are read exactly: one `mycelium-client://{issuer}/{name}`, two valid segments,
+    /// no `mycelium://` beside it. A node certificate is no client's; a segment with `/`, a space, or empty is
+    /// refused at issue.
+    #[test]
+    fn a_client_identity_is_read_exactly_and_bad_segments_are_refused_at_issue() {
+        use crate::node_id::NodeId;
+        let dir = fresh_dir("client-cert-identity");
+        let cfg = TlsConfig { auto_cert_dir: dir.clone(), ..TlsConfig::default() };
+        let (_, ca_key) = load_or_create_ca(&cfg).unwrap();
+        let k = ed25519_dalek::SigningKey::from_bytes(&[43u8; 32]);
+        let node = super::imp::generate_node_cert(&NodeId::new("127.0.0.1", 9544).unwrap(), &k, &ca_key, 1).unwrap();
+        assert_eq!(super::client_identity(node.as_ref()), None, "a node certificate is no client's");
+        for (issuer, name) in [("fleet", ""), ("", "x"), ("fleet", "a/b"), ("fleet", "a b"), ("..", "x"), ("fleet", &"n".repeat(129))] {
+            assert!(super::imp::generate_client_cert(issuer, name, &k, &ca_key, 1).is_err(), "{issuer:?}/{name:?} refused at issue");
+        }
+        let ok = super::imp::generate_client_cert("fleet.example", "svc_1-a", &k, &ca_key, 7).unwrap();
+        let id = super::client_identity(ok.as_ref()).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!((id.issuer.as_str(), id.name.as_str(), id.issued_ms), ("fleet.example", "svc_1-a", Some(7)));
     }
 }

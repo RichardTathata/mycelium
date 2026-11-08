@@ -425,6 +425,14 @@ revoked by its owner by a revocation this node counted (`refuse_if_revoked`, `my
 revocation (a node may revoke a key that is not its own) and never a provisional one (a rotated node must connect). **The mesh resumes no TLS session**: a resumed TLS 1.3 session re-runs
 no certificate verifier, so any check placed in a verifier — the removal ledger since C5, revocation now — is skipped
 on a reconnect that resumes. Put a new admission check in the verifier *and* keep resumption off.
+**Client certificates are not mesh certificates** (identity-and-lifecycle I1): a certificate naming
+`mycelium-client://{issuer}/{name}` is a service's (`mycelium tls issue --client`), refused by both verifiers after the
+chain and removal checks (`refuse_if_client`); `verify_member_cert` — the chain alone — still accepts it, because the
+client-cert fold (`src/agent/client_cert.rs`) judges its issuance there. A client has no revocation ledger entry: a newer
+certificate for the principal **supersedes** the older key, by a per-principal high-water mark that only rises
+(journaled under `[persistence]`, `identity/client-certs.journal`), so an overwrite of the newer record cannot bring the
+older key back. A record counts by the certificate it holds, never by its KV write time — `sys/client-cert/` is
+member-writable, like `sys/identity-cert/`.
 
 > **`sys/identity` authentication — partially closed (WS-E, in progress).** `sys/identity/{node}`
 > is a plain Layer-I KV value with **no signature**, and `merge_peer_keys` **accumulates** any key
