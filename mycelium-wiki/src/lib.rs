@@ -29,8 +29,8 @@
 //!   [`Manifest`] (order, written last), [`Page`], [`Predicate`] (structured attribute filter, not
 //!   similarity search), and stable opaque [`mint_section_id`];
 //! - [`FsStore`] — a filesystem-directory reference implementation (immutable versioned objects,
-//!   atomic hard-link CAS publish, manifest-authoritative reads). An `S3Store` is a parallel impl
-//!   (its conditional `PUT`/`If-Match` is the same CAS contract).
+//!   atomic hard-link CAS publish, manifest-authoritative reads). An `S3Store` would be a parallel impl
+//!   (its conditional `PUT`/`If-Match` is the same CAS contract); none is built.
 
 #![deny(unsafe_code)]
 

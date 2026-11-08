@@ -215,8 +215,8 @@ regenerated; hooks/CI stay for human edits; the E1 DPIA note.
 - **`GitMirror` — not used here.** Git is truth, so there is nothing to mirror. It stays in the
   crate as the answer for store-as-truth deployments — and building it produced the envelope that
   justifies Phase 1, so it was the road *to* this design, not a dead end.
-- **`FsStore` / `S3Store` — unchanged**, the general-purpose data plane for every other wiki
-  deployment.
+- **`FsStore` — unchanged** (and an `S3Store`, which this record anticipated and which is not built), the
+  general-purpose data plane for every other wiki deployment.
 - **The KV-native wiki variant — stays dead**, reconfirmed: this corpus (146k files per large
   council) is the strongest counterexample to putting a corpus in gossiped KV.
 
