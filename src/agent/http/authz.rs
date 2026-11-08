@@ -1430,7 +1430,8 @@ impl Settling {
                 let mandate_established = envelope.mandate.as_ref().is_some_and(|b| b.state == ae::MandateState::Established);
                 Preflight::Proceed { evidence: Box::new(evidence), journal_sha256, mandate_established }
             }
-            // The shadow rung observes: what it admits was refused, so no later re-assessment refuses it either.
+            // The shadow rung observes: what it admits was refused, so no later re-assessment refuses it either. (The
+            // provider has no shadow rung; this is a gateway door's.)
             Err(_) if shadow_admit => Preflight::Proceed { evidence: Box::new(evidence), journal_sha256, mandate_established: false },
             Err(refusal) => {
                 warn!(actor = %envelope.actor, %operation, %resource,

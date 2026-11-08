@@ -119,7 +119,8 @@ has no row for this feature. The tests: in [`src/mandate/grant.rs`](../../src/ma
   the resource gate, and stops it within the drain bound (sweep interval plus the handler's own stop) — and writes it
   beside the grant, where every node's authority is fed it; a revoked grant is refused at every door as
   *not established — revoked*, the AE vocabulary for revocation; one that lands at a provider after its preflight
-  permitted and before the work is registered is refused `mandate_lapsed_before_run` (`deprecations.md` §83), not run
+  permitted and before the work is registered is refused as not established, `mandate_lapsed_before_run`
+  (`deprecations.md` §84), not run
   out of the sweep's reach. Revoking is an action the evaluator decides
   (`grant.revoke`); a node that did not issue the grant answers `409 not_the_issuer`.
 - **Across nodes.** A supervisor at any gateway issues for an agent on a member node whose key the gateway holds; the

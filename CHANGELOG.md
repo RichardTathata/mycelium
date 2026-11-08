@@ -57,13 +57,16 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   work with the execution authority so its sweep can stop it. A revocation that landed between the two made that
   re-assessment not established, and the call then ran **unregistered**: the revocation was already known at this
   node, and no sweep could stop the work. Now a permit decided on a mandate the preflight found established
-  (`Preflight::Proceed` carries `mandate_established`) is refused `mandate_lapsed_before_run` (JSON-RPC `-32031`) when
-  the re-assessment no longer finds it established, and the handler does not run. A call the policy admitted
-  **without** an established mandate is unchanged (registering it would cancel work the policy admitted without one),
-  and so is a door on the shadow rung. The window is narrower, not gone: a revocation after the registration is the
-  sweep's, as before. `a_grant_revoked_between_the_preflight_and_the_registration_refuses_the_call` holds the call in
+  (`Preflight::Proceed` carries `mandate_established`) is refused when the re-assessment no longer finds it established,
+  and the handler does not run: *authority not established* (JSON-RPC `-32031`, `data.reason`
+  `authority_not_established`, as a revocation refused at the preflight is, so both SDKs classify it alike) with
+  `data.detail` `mandate_lapsed_before_run`; the provider's evidence journal records that nothing ran
+  (`Execution::None`) beside the permit. A call the policy admitted **without** an established mandate is unchanged
+  (registering it would cancel work the policy admitted without one); the provider has no shadow rung. Under a seat
+  claim the window this closes can be a consensus round long. The window is narrower, not gone: a revocation after the
+  registration is the sweep's, as before. `a_grant_revoked_between_the_preflight_and_the_registration_refuses_the_call` holds the call in
   the window with a test hook; seen failing with the refusal removed (the tool ran). Upgrade note:
-  `docs/guide/deprecations.md` §83.
+  `docs/guide/deprecations.md` §84.
 
 - **A bulk call made as soon as `bulk_serve` returns is served** (a flake: CI run 42371240189, the strict
   `compliance,a2a` lib run, `a_bulk_call_completes_between_two_plaintext_gateways` — `Err(Timeout)`). `bulk_serve`

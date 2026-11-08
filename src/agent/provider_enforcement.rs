@@ -255,7 +255,7 @@ pub(crate) async fn check(ctx: &Arc<TaskCtx>, req: &RpcRequest, already_verified
         None => (gateway_caller::node_principal(req.sender()), Vec::new(), None, None),
     };
     if !enforcing {
-        return Checked::Done(admit_after(ctx, &principal, None));
+        return Checked::Done(admit_after(ctx, &principal, None).await);
     }
     let me = ctx.node_id.to_string();
     let payload = req.payload();
@@ -273,36 +273,25 @@ pub(crate) async fn check(ctx: &Arc<TaskCtx>, req: &RpcRequest, already_verified
     let params = if meta.is_empty() { Value::Null } else { json!({ "_meta": meta }) };
     let decided =
         super::http::ae_decide(ctx, Some(&resolved), &operation, &resource, &arguments, &params, ENFORCEMENT_POINT_PROVIDER, None).await;
-    let mut call = AdmittedCall { principal, mandate, operation, resource, arguments, established_at_preflight: false };
+    let call = AdmittedCall { principal, mandate, operation, resource, arguments, established_at_preflight: false, permit: None };
     match decided {
-        super::http::Decided::Done(p) => Checked::Done(match refusal_of(p) {
-            Ok(established) => {
-                call.established_at_preflight = established;
-                #[cfg(test)]
-                test_hooks::before_admit_after(ctx).await;
-                admit_after(ctx, &call.principal, Some(&call))
-            }
-            Err(refusal) => Err(refusal),
-        }),
+        super::http::Decided::Done(p) => Checked::Done(after_preflight(ctx, call, p).await),
         super::http::Decided::Settle(settling) if settling.will_claim() => {
             let ctx = Arc::clone(ctx);
-            Checked::Waiting(Box::pin(async move {
-                call.established_at_preflight = refusal_of(settling.finish().await)?;
-                #[cfg(test)]
-                test_hooks::before_admit_after(&ctx).await;
-                admit_after(&ctx, &call.principal, Some(&call))
-            }))
+            Checked::Waiting(Box::pin(async move { after_preflight(&ctx, call, settling.finish().await).await }))
         }
-        super::http::Decided::Settle(settling) => Checked::Done(match refusal_of(settling.finish().await) {
-            Ok(established) => {
-                call.established_at_preflight = established;
-                #[cfg(test)]
-                test_hooks::before_admit_after(ctx).await;
-                admit_after(ctx, &call.principal, Some(&call))
-            }
-            Err(refusal) => Err(refusal),
-        }),
+        super::http::Decided::Settle(settling) => Checked::Done(after_preflight(ctx, call, settling.finish().await).await),
     }
+}
+
+/// The preflight has decided: a refusal is the provider's; a permit goes on to [`admit_after`], carrying whether it was
+/// decided on an established mandate and the permit itself (its record is the one an execution record cites).
+async fn after_preflight(ctx: &Arc<TaskCtx>, mut call: AdmittedCall, p: super::http::Preflight) -> Result<Admission, ProviderRefusal> {
+    call.established_at_preflight = refusal_of(&p)?;
+    call.permit = Some(p);
+    #[cfg(test)]
+    test_hooks::before_admit_after(ctx).await;
+    admit_after(ctx, &call.principal, Some(&call)).await
 }
 
 /// Test hook: hold a call between its preflight and [`admit_after`], so a test can land a revocation in the window.
@@ -336,10 +325,12 @@ struct AdmittedCall {
     /// The preflight's permit was decided on this call's mandate found **established** (`Preflight::Proceed`'s
     /// `mandate_established`), so a re-assessment that no longer finds it established refuses the call.
     established_at_preflight: bool,
+    /// The preflight's permit, once decided: what an execution record for this call is derived from.
+    permit: Option<super::http::Preflight>,
 }
 
 /// A preflight's refusal as the provider's; on admission, whether the permit was decided on an established mandate.
-fn refusal_of(p: super::http::Preflight) -> Result<bool, ProviderRefusal> {
+fn refusal_of(p: &super::http::Preflight) -> Result<bool, ProviderRefusal> {
     match p {
         super::http::Preflight::Refuse(refusal) => Err(ProviderRefusal {
             reason: refusal.reason().to_string(),
@@ -347,14 +338,14 @@ fn refusal_of(p: super::http::Preflight) -> Result<bool, ProviderRefusal> {
             code: refusal.json_rpc_code(),
             data: refusal.error_data(),
         }),
-        super::http::Preflight::Proceed { mandate_established, .. } => Ok(mandate_established),
+        super::http::Preflight::Proceed { mandate_established, .. } => Ok(*mandate_established),
         // `Inert` cannot happen here (an evaluator is attached).
         super::http::Preflight::Inert => Ok(false),
     }
 }
 
 /// After the policy admitted the call (or with enforcement off): the running-work registration and the cohort slot.
-fn admit_after(ctx: &Arc<TaskCtx>, principal: &str, call: Option<&AdmittedCall>) -> Result<Admission, ProviderRefusal> {
+async fn admit_after(ctx: &Arc<TaskCtx>, principal: &str, call: Option<&AdmittedCall>) -> Result<Admission, ProviderRefusal> {
     let mut work = None;
     // C10: work acting under an **established** mandate is registered as running, so the
     // authority's sweep can stop it if the mandate lapses while it runs. Asking the authority
@@ -399,11 +390,17 @@ fn admit_after(ctx: &Arc<TaskCtx>, principal: &str, call: Option<&AdmittedCall>)
     if let Some(why) = lapsed.filter(|w| !w.is_empty()) {
         #[cfg(feature = "metrics")]
         metrics::counter!("mycelium_provider_mandate_lapsed_total").increment(1);
+        // The permit's record says `Attempted`; this one, citing the same attempt, says nothing ran.
+        if let Some(permit) = call.and_then(|c| c.permit.as_ref()) {
+            super::http::ae_record_execution(ctx, permit, super::action_evaluator::Execution::None).await;
+        }
+        // Classified as *authority not established* — the family a revoked mandate refused at the preflight is in, so a
+        // client reads the same revocation the same way whichever side of the preflight it landed on; `detail` names it.
         return Err(ProviderRefusal {
-            reason: "mandate_lapsed_before_run".into(),
-            message: format!("the call's mandate was established at the provider's preflight and is no longer ({why}); nothing ran"),
+            reason: "authority_not_established".into(),
+            message: format!("authority not established: the call's mandate was established at the provider's preflight and is no longer ({why}); nothing ran (mandate_lapsed_before_run)"),
             code: -32031,
-            data: json!({ "reason": "mandate_lapsed_before_run", "detail": why }),
+            data: json!({ "reason": "authority_not_established", "detail": "mandate_lapsed_before_run", "found": why }),
         });
     }
 

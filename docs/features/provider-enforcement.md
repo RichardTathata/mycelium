@@ -44,7 +44,9 @@ confirmed stop, checked against the class's bound. CI runs it.
   the action preflight's (a deny, authority not established, evidence not recorded), `no_evaluator`, `caller_context_refused`, `malformed_call` (a tool call that is
   not JSON or names no tool), `resource_unnamed`, `resource_not_here`, `resource_not_served`, `at_capacity` or `mandate_lapsed_before_run` (the
   preflight permitted on an established mandate and the re-assessment that registers the work no longer finds it
-  established — a revocation in between refuses the call rather than running it unregistered). With
+  established — a revocation in between refuses the call rather than running it unregistered; it answers as
+  *authority not established*, `data.detail` `mandate_lapsed_before_run`, and the evidence journal records that
+  nothing ran, `execution: none`, beside the permit; under a seat claim that window can be a consensus round long). With
   enforcement off no authority is checked; an attached cohort budget still verifies the caller context and admits by
   cohort.
 - **Guarantee:** [`prov.enforcement`](../reference/guarantee-catalogue.md#prov.enforcement).

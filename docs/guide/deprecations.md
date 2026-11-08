@@ -2336,7 +2336,7 @@ decision D2 on finding F2: a record that cannot be made durable is never a proce
 - **The window, by one fsync.** The door marker's `append_sync` now sits between the grant's assessment and the work,
   so the check-then-act window every door states (*narrowed and stated, not eliminated*) is longer by one `fdatasync`;
   a revocation landing inside it stops the work once it is registered, as before — and, at the provider, one landing
-  before the work is registered refuses the call (§83).
+  before the work is registered refuses the call (§84).
 
 The request itself stays a buffered append (losing it to a crash means the agent asks again). A lost `…/issued`
 leaves the request standing un-answered — the agent re-waits on it, `GET /gateway/grants/pending` lists it, and the
@@ -2529,7 +2529,7 @@ reads its gateway certificate and key, and its CA and node certificates, through
 with other sections skipped, PKCS#8, PKCS#1 and SEC1 keys by label, CRLF line endings, an encrypted key read as no key,
 a malformed section an error.
 
-## 83. A provider refuses a call whose mandate was revoked after its preflight and before its registration: `mandate_lapsed_before_run` (unreleased)
+## 84. A provider refuses a call whose mandate was revoked after its preflight and before its registration: *authority not established*, `mandate_lapsed_before_run` (unreleased)
 
 With provider enforcement on, a protected call presented under a mandate (a grant, or any scoped mandate the node's
 execution authority verifies) is decided by the provider's preflight, then registered as running work so the
@@ -2538,17 +2538,24 @@ revocation (or an expiry, or a superseding epoch) that landed between the two ma
 established*, and the call **ran unregistered**: the node already knew the mandate was revoked, and no sweep could stop
 the work. Now the call is refused.
 
-- **What a caller sees:** on a member's direct call or the SDK serve stream, a reply body
-  `{"error": …, "reason": "mandate_lapsed_before_run", "data": {"reason": "mandate_lapsed_before_run", "detail": …}}`;
-  on an MCP tool call, a JSON-RPC error with code **`-32031`** (the *authority not established* code) and the same
-  `data`. The handler does not run. `detail` names what the re-assessment found (`not established: … revoked`,
-  `refused: …`).
+- **What a caller sees:** an *authority not established* refusal, the family a revocation refused at the preflight is
+  in, so both SDKs classify it the same way whichever side of the preflight the revocation landed (`authorityNotEstablished`
+  / `authority_not_established`). On an MCP tool call, a JSON-RPC error with code **`-32031`** and
+  `data: {"reason": "authority_not_established", "detail": "mandate_lapsed_before_run", "found": …}`; on a member's
+  direct call of another kind or the SDK serve stream, a reply body `{"error": …, "reason": "authority_not_established",
+  "data": {…the same…}}`. `detail` names this window; `found` names what the re-assessment found
+  (`not established: … revoked`, `refused: …`). The handler does not run.
+- **On the record:** the provider's evidence journal holds the preflight's permit (`execution: attempted`) and, for the
+  same attempt, an execution record saying nothing ran (`execution: none`).
 - **Who is affected:** a caller whose mandate is revoked or expires within the moment between a provider's preflight
   and the handler. It used to get the tool's answer; it now gets this refusal. A grant presented this way is spent at
-  the provider's door (its use marker was written by the preflight), as for any refusal after the claim.
+  the provider's door (its use marker was written by the preflight), as for any refusal after the claim. **Under a seat
+  claim** (a fleet-consensus counter the evaluator names, post-360 row K2) the preflight's decision and the
+  registration are a consensus round apart — the claim settles between them — so the window this refusal closes can be
+  that long, and a revocation landing anywhere in it is refused here.
 - **Not affected:** a call the policy admitted without an established mandate (none presented, or one the preflight
-  found not established and the policy permitted anyway) — it still runs, unregistered, as before; and a door on the
-  shadow rung, which observes rather than enforces.
+  found not established and the policy permitted anyway) — it still runs, unregistered, as before. The provider has no
+  shadow rung, so there is no observe-only provider whose answer changes.
 - **What to do:** treat it as *authority not established*: obtain a current mandate (ask for a new grant) and call
   again. Do not retry with the same mandate.
 - **Counted:** `mycelium_provider_mandate_lapsed_total` (feature `metrics`).
