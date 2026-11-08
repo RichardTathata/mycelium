@@ -83,7 +83,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   decide — the rule's literal meaning. While no argument was selected, every request a value-naming prohibition's
   actor, operation and resource selected decided `Indeterminate`, so an application that relied on that blanket
   refusal now sees the allowances decide (`a_prohibition_whose_value_is_present_and_equal_denies`,
-  `…_is_absent_is_indeterminate`, `…_is_present_and_different_does_not_apply`).
+  `…_is_absent_is_indeterminate`, `…_is_present_and_different_does_not_apply`). At a live door the values are the
+  caller's own top-level `arguments`, so a rule is only as strong as the argument it names: one on a value the effect
+  itself uses (a ledger) holds, while a prohibition on a flag the caller asserts (`over_ceiling`) holds nothing unless
+  the caller cannot set it.
 
 - **A provider refuses a call whose mandate was revoked between its preflight and its registration** (the
   check-then-act window at the provider, `docs/design/authority-at-execution.md` §9). With provider enforcement on,
