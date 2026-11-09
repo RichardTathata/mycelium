@@ -596,28 +596,20 @@ impl AgentStateMachine {
                     let p = self.policy.read();
                     (p.grant_arguments_class.clone(), p.grant_renderable_classes.clone())
                 };
-                let rendering = render_arguments_under(arguments, class.as_deref(), &renderable);
-                let record = serde_json::json!({
-                    "schema": "mycelium.grant-request/1",
-                    "request": request,
-                    "agent": agent,
-                    "node": self.ctx.node_id.to_string(),
-                    "tool": tool,
-                    "operation": "tools/call",
-                    "resource": format!("tool:{tool}@{}", self.ctx.node_id),
-                    "arguments_digest": digest_hex,
-                    "arguments": rendering,
-                    "arguments_class": class,
-                    "policy_revision": self.ctx.deployed_policy_revision.load_full().map(|r| (*r).clone()),
-                    "requested_at_ms": now_ms,
-                    "expires_at_ms": expires_at_ms,
+                let record = grant_request_record(&self.ctx, &GrantRequestFacts {
+                    request: &request,
+                    agent: &agent,
+                    node: &self.ctx.node_id,
+                    tool,
+                    arguments,
+                    digest_hex: &digest_hex,
+                    class: class.as_deref(),
+                    renderable: &renderable,
+                    now_ms,
+                    expires_at_ms,
                 });
                 self.write_kv(&self.grant_key(&request), record.to_string().into_bytes());
-                #[cfg(feature = "metrics")]
-                {
-                    metrics::counter!("mycelium_grants_requested_total").increment(1);
-                    metrics::gauge!("mycelium_grants_pending").set(pending_grants(&self.ctx, now_ms) as f64);
-                }
+                count_grant_requested(&self.ctx, now_ms);
                 (request, expires_at_ms)
             }
         };
@@ -852,6 +844,58 @@ pub(crate) fn pending_grants(ctx: &TaskCtx, now_ms: u64) -> usize {
         k.matches('/').count() == 2 && !answered.contains(k.as_ref())
             && serde_json::from_slice::<serde_json::Value>(v).ok().and_then(|r| r["expires_at_ms"].as_u64()).is_some_and(|e| e > now_ms)
     }).count()
+}
+
+/// What a grant request says — one shape for the agent's door and a client's (`POST /gateway/grants/request`,
+/// identity-and-lifecycle I1; #743's review, item 7).
+#[cfg(all(feature = "gateway", feature = "tls"))]
+pub(crate) struct GrantRequestFacts<'a> {
+    pub(crate) request: &'a str,
+    /// The holder's principal.
+    pub(crate) agent: &'a str,
+    /// The node the tool runs on: the agent's own, or a client's resolved provider.
+    pub(crate) node: &'a crate::node_id::NodeId,
+    pub(crate) tool: &'a str,
+    pub(crate) arguments: &'a serde_json::Value,
+    pub(crate) digest_hex: &'a str,
+    /// The arguments' data class, and the classes rendered into the gossiped record ([`render_arguments_under`]).
+    pub(crate) class: Option<&'a str>,
+    pub(crate) renderable: &'a [String],
+    pub(crate) now_ms: u64,
+    pub(crate) expires_at_ms: u64,
+}
+
+/// The request record (`mycelium.grant-request/1`) a supervisor's door reads: the resource is `tool:{tool}@{node}`,
+/// the arguments rendered under the data-class policy and the 16 KiB cap, the digest beside them.
+#[cfg(all(feature = "gateway", feature = "tls"))]
+pub(crate) fn grant_request_record(ctx: &TaskCtx, f: &GrantRequestFacts<'_>) -> serde_json::Value {
+    serde_json::json!({
+        "schema": "mycelium.grant-request/1",
+        "request": f.request,
+        "agent": f.agent,
+        "node": f.node.to_string(),
+        "tool": f.tool,
+        "operation": "tools/call",
+        "resource": format!("tool:{}@{}", f.tool, f.node),
+        "arguments_digest": f.digest_hex,
+        "arguments": render_arguments_under(f.arguments, f.class, f.renderable),
+        "arguments_class": f.class,
+        "policy_revision": ctx.deployed_policy_revision.load_full().map(|r| (*r).clone()),
+        "requested_at_ms": f.now_ms,
+        "expires_at_ms": f.expires_at_ms,
+    })
+}
+
+/// A request written: `mycelium_grants_requested_total` and the pending gauge.
+#[cfg(all(feature = "gateway", feature = "tls"))]
+pub(crate) fn count_grant_requested(ctx: &TaskCtx, now_ms: u64) {
+    #[cfg(feature = "metrics")]
+    {
+        metrics::counter!("mycelium_grants_requested_total").increment(1);
+        metrics::gauge!("mycelium_grants_pending").set(pending_grants(ctx, now_ms) as f64);
+    }
+    #[cfg(not(feature = "metrics"))]
+    let _ = (ctx, now_ms);
 }
 
 #[cfg(all(feature = "gateway", feature = "tls"))]

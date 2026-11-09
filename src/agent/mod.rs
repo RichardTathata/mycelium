@@ -1986,14 +1986,14 @@ impl GossipAgent {
             });
         }
         // Identity-and-lifecycle I1: the authority verifies a client holder's possession by the client's current key, so
-        // its external issuers are fed each one — those on record now, and each as the fold raises it.
-        {
-            let sink = authority.external_issuers();
-            self.task_ctx.client_key_sinks.pin().insert(sink.id(), sink);
-            client_cert::feed_client_keys(&self.task_ctx);
-        }
+        // its external issuers are fed each one — those on record now, and each as the fold raises it. Only the
+        // authority attached is fed (#743's review, item 9): one refused as a second is not registered.
+        let sink = authority.external_issuers();
         if self.task_ctx.execution_authority.set(authority).is_err() {
             tracing::warn!("with_execution_authority: an execution authority is already attached; ignoring");
+        } else {
+            self.task_ctx.client_key_sinks.pin().insert(sink.id(), sink);
+            client_cert::feed_client_keys(&self.task_ctx);
         }
     }
 

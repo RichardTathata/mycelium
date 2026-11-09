@@ -158,6 +158,22 @@ pub(crate) fn grant_holder_from_segment(segment: &str) -> Option<String> {
     (!holder.starts_with("node:") && !holder.is_empty()).then_some(holder)
 }
 
+/// The holder a supervisor's door names in its `{agent}` path segment, as `(key segment, principal)`: the key
+/// segment as [`grant_holder_segment`] writes it, **or the principal itself** — the request record's `agent`, which
+/// the SDKs' `grant_decide` / `grant_revoke` put in the path (percent-encoded, so a client principal's `/` stays in
+/// one segment; #743's review, item 2). A client principal holds a `:`, which no hex segment does, so the two
+/// readings never meet. `None` for neither.
+pub(crate) fn grant_holder_from_path(agent: &str) -> Option<(String, String)> {
+    if agent.starts_with("node:") {
+        return grant_holder_from_segment(agent).map(|p| (agent.to_string(), p));
+    }
+    if agent.contains(':') {
+        let segment = grant_holder_segment(agent);
+        return (grant_holder_from_segment(&segment).as_deref() == Some(agent)).then(|| (segment, agent.to_string()));
+    }
+    grant_holder_from_segment(agent).map(|p| (agent.to_string(), p))
+}
+
 /// **Feed one grant's checkpoint from the KV into `authority`** (adopter-surface X3, second PR): the issuing node
 /// writes the grant's revocation checkpoint beside the grant — the first at issue (nothing revoked), the next to
 /// revoke — and it travels by gossip; a verifier that has not seen it holds the grant `Unknown`. Offering is
@@ -697,6 +713,53 @@ pub(crate) mod tests {
         let a = auth.assess(CALLER, OP, RES, &DIGEST, Some(&present(&ak, &hk, mandate(1, 50_000), &DIGEST)), 2_000, &none());
         assert_eq!(state(&a), Some(MandateState::Established));
         assert_eq!(a.valid_until_ms, Some(50_000));
+    }
+
+    /// An authority whose shared set trusts nothing by configuration — the holder's key arrives as a client key.
+    fn client_authority(ak: &SigningKey) -> ExecutionAuthority {
+        let auth = authority(ak, &SigningKey::from_bytes(&[99u8; 32]));
+        let set = auth.external_issuers();
+        set.untrust(&IssuerId::new(CALLER).unwrap());
+        auth
+    }
+
+    /// **A client key proves possession, and nothing else** (identity-and-lifecycle I1; #743's review, items 3 and 4).
+    /// The holder's key fed as a client key establishes its grant; a second issuance supersedes it, and a proof by the
+    /// old key is refused at the authority — **whatever order the feeds arrive in** (an older issuance fed after the
+    /// newer is not written back). The same key fed as a client key for the grant's *authority* signs no checkpoint
+    /// and establishes no grant: a client is never an issuer. Seen failing first, one build per plant: the set's
+    /// replacement ignoring issuance (*SUPERSEDED*: the old key, fed last, verified), and `verify_signed_by` reading
+    /// client keys (*ISSUER*: the client-signed checkpoint was accepted).
+    #[test]
+    fn a_client_key_proves_possession_only_and_a_superseded_one_never_returns() {
+        let (ak, old) = keys();
+        let new = SigningKey::from_bytes(&[77u8; 32]);
+        let auth = client_authority(&ak);
+        let set = auth.external_issuers();
+        let holder = IssuerId::new(CALLER).unwrap();
+        auth.offer_checkpoint(&checkpoint(&ak, 1, 1_000, &[]), 1_000, &none());
+        set.set_client_key(holder.clone(), 10, old.verifying_key().to_bytes()).unwrap();
+        let a = auth.assess(CALLER, OP, RES, &DIGEST, Some(&present(&ak, &old, mandate(1, 50_000), &DIGEST)), 2_000, &none());
+        assert_eq!(state(&a), Some(MandateState::Established), "the client key proves possession");
+        // The newer issuance, then the older fed late (a feed that read the marks before the fold raised them).
+        set.set_client_key(holder.clone(), 20, new.verifying_key().to_bytes()).unwrap();
+        set.set_client_key(holder, 10, old.verifying_key().to_bytes()).unwrap();
+        let by_old = auth.assess(CALLER, OP, RES, &DIGEST, Some(&present(&ak, &old, mandate(1, 50_000), &DIGEST)), 2_000, &none());
+        let by_new = auth.assess(CALLER, OP, RES, &DIGEST, Some(&present(&ak, &new, mandate(1, 50_000), &DIGEST)), 2_000, &none());
+        assert!(matches!(state(&by_old), Some(MandateState::Unknown(_))), "SUPERSEDED: a proof by the superseded key: {by_old:?}");
+        assert_eq!(state(&by_new), Some(MandateState::Established));
+
+        // A client key for the authority's own id: no checkpoint, no grant.
+        let rogue = SigningKey::from_bytes(&[78u8; 32]);
+        let auth = client_authority(&ak);
+        let set = auth.external_issuers();
+        set.untrust(&IssuerId::new("operator:acme").unwrap());
+        set.set_client_key(IssuerId::new("operator:acme").unwrap(), 1, rogue.verifying_key().to_bytes()).unwrap();
+        set.set_client_key(IssuerId::new(CALLER).unwrap(), 1, old.verifying_key().to_bytes()).unwrap();
+        let offered = auth.offer_checkpoint(&checkpoint(&rogue, 1, 1_000, &[]), 1_000, &none());
+        assert!(!matches!(offered, CheckpointOffer::Accepted), "ISSUER: a client key signed a mandate authority's checkpoint: {offered:?}");
+        let a = auth.assess(CALLER, OP, RES, &DIGEST, Some(&present(&rogue, &old, mandate(1, 50_000), &DIGEST)), 2_000, &none());
+        assert!(matches!(state(&a), Some(MandateState::Unknown(_))), "ISSUER: a client key established a grant as its authority: {a:?}");
     }
 
     /// **The holder must be the caller.** Someone else's grant is not established for you.

@@ -119,8 +119,9 @@ impl MembershipAuthorities {
         if !self.authorities.contains(&r.authority) {
             return Err(RemovalOffer::UntrustedAuthority);
         }
-        // The configured keys alone: a client key fed to a shared set never entitles a removal.
-        let external = self.external.read().configured_only();
+        // A snapshot, so no other lock is taken under this one; `verify_signed_by` reads configured keys only, so a client
+        // key fed to the shared set never entitles a removal.
+        let external = self.external.read().clone();
         match verify_signed_by(&r.authority, &r.canonical_bytes(), &signed.signature, members, &external) {
             Authenticity::Current { .. } => Ok(()),
             Authenticity::Revoked { .. } => Err(RemovalOffer::Unverifiable(UnverifiableReason::BadSignature)),
@@ -172,7 +173,8 @@ mod tests {
     /// other holders, and the client-certificate fold feeds client principals' keys into it — but a removal signed by
     /// a client key, even for a principal listed as an authority, does not verify, and one signed by the same
     /// authority's configured key does. The set is shared: a key configured after the authorities were built counts.
-    /// Seen failing first with the full set read instead of the configured keys: the client-signed removal verified.
+    /// Seen failing first with the full set read instead of the configured keys: the client-signed removal verified
+    /// (and again, after #743's review, with `verify_signed_by` reading client keys).
     #[test]
     fn a_client_key_in_a_shared_set_never_entitles_a_removal() {
         use crate::knowledge::issuer::SharedExternalIssuers;
@@ -183,7 +185,7 @@ mod tests {
         let auth = MembershipAuthorities::new([authority.clone()], shared.clone());
         let members: HashMap<NodeId, MemberKeys> = HashMap::new();
         let node = NodeId::new("127.0.0.1", 7102).unwrap();
-        shared.set_client_key(authority.clone(), client.verifying_key().to_bytes()).unwrap();
+        shared.set_client_key(authority.clone(), 1, client.verifying_key().to_bytes()).unwrap();
         assert!(matches!(auth.verify(&signed(&client, "token:fleet/ops", &node), &members), Err(RemovalOffer::Unverifiable(_))),
             "ENTITLED: a client key verified a removal");
         shared.trust(authority, op.verifying_key().to_bytes()).unwrap();

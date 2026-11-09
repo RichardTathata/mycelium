@@ -566,7 +566,7 @@ pub(crate) fn feed_client_keys(ctx: &TaskCtx) {
     for (principal, mark) in marks {
         let Some(issuer) = crate::knowledge::IssuerId::new(&principal) else { continue };
         for sink in &sinks {
-            let _ = sink.set_client_key(issuer.clone(), mark.key);
+            let _ = sink.set_client_key(issuer.clone(), mark.issued, mark.key);
         }
     }
 }

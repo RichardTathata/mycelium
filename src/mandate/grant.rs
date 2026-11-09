@@ -52,6 +52,7 @@ use crate::knowledge::IssuerId;
 pub const GRANT_SCOPE_PREFIX: &str = "grant:";
 const BOUND_ARGS: &str = "bound:args:";
 const BOUND_POLICY: &str = "bound:policy:";
+const BOUND_RESOURCE: &str = "bound:resource:";
 
 /// What a grant is bound to, read from its signed operations.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -78,6 +79,20 @@ impl Mandate {
         let arguments_digest = self.operations.iter().find_map(|o| o.strip_prefix(BOUND_ARGS))?.to_string();
         let policy_revision = self.operations.iter().find_map(|o| o.strip_prefix(BOUND_POLICY)).map(str::to_string);
         Some(GrantBinding { arguments_digest, policy_revision })
+    }
+
+    /// The resource the issuer evaluated the grant against (`bound:resource:{resource}`, identity-and-lifecycle I1;
+    /// #743's review), when its signed operations carry one — what a revocation evaluates against, so revoking needs
+    /// neither the request record nor a live provider. Carried and signed; not checked against a call's resource.
+    pub fn grant_resource(&self) -> Option<&str> {
+        self.is_grant().then(|| self.operations.iter().find_map(|o| o.strip_prefix(BOUND_RESOURCE))).flatten()
+    }
+
+    /// [`grant_operations`](Self::grant_operations), with the resource the issuer evaluated signed beside them.
+    pub fn grant_operations_on(permitted: impl Into<String>, arguments_digest_hex: &str, policy_revision: Option<&str>, resource: &str) -> Vec<String> {
+        let mut ops = Self::grant_operations(permitted, arguments_digest_hex, policy_revision);
+        ops.push(format!("{BOUND_RESOURCE}{resource}"));
+        ops
     }
 
     /// The operations of a grant: the one call it permits, and its binding as signed entries.
@@ -289,8 +304,12 @@ impl GrantVerifier {
 
         let Some(proof) = possession else { return GrantVerdict::WrongHolder };
         let Some(holder) = IssuerId::new(m.holder.as_str()) else { return GrantVerdict::WrongHolder };
-        match verify_signed_by(&holder, &possession_message(m, request), proof, members, external) {
+        let message = possession_message(m, request);
+        match verify_signed_by(&holder, &message, proof, members, external) {
             Authenticity::Current { .. } => GrantVerdict::Valid,
+            // A client holder (identity-and-lifecycle I1) proves possession by its current client key — the one place a
+            // client key is read.
+            _ if !holder.claims_member_namespace() && external.verify_client(&holder, &message, proof) => GrantVerdict::Valid,
             _ => GrantVerdict::WrongHolder,
         }
     }

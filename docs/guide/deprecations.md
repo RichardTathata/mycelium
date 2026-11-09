@@ -2697,16 +2697,28 @@ possession proof signed by its client key.
   and an existing record is read unchanged. One held by a client is keyed `grant/{hex(principal)}/{request}`, because
   the principal holds a `/`. A script that reads `grant/` keys and splits on `/` should decode a segment that does not
   start with `node:` as hex.
+- **The decision and revocation doors take the principal too.** `POST /gateway/grants/{agent}/{request}` and its
+  `/revoke` accept a node principal, a client principal (the pending row's `agent`, percent-encoded as the SDKs send
+  it) or a client's hex segment. Nothing changes for a node-held grant.
 - **A token holding `mcp:invoke` gains the request door.** Only a principal with a client certificate on record is
   served (`409 not_a_client_holder` otherwise). The door writes a pending request; nothing runs until a supervisor
-  issues it.
-- **A revocation of a client-held grant** evaluates against the tool's provider, `tool:{tool}@{provider}`, resolved
-  from `tools/` as `/mcp` resolves it. A grant held by a node keeps evaluating against the agent's node.
+  issues it. A request for the same tool and arguments while one stands answers that one (`"reused": true`); past 16
+  standing requests per principal the door answers `429 too_many_pending`. A request id written here names its gateway
+  (`{hlc}-{node}`), so a script should not assume an id is 16 hex digits. Each request counts in
+  `mycelium_grants_requested_total` and is sealed into the audit chain where the build keeps one.
+- **An issued grant signs the resource it was evaluated against** as a fourth operation, `bound:resource:{resource}`
+  (`Mandate::grant_resource`, `Mandate::grant_operations_on`), node-held grants included. A reader that lists a grant's
+  operations sees one more entry, which no call can name. A revocation evaluates that resource — for a client,
+  `tool:{tool}@{provider}`, the provider resolved when the request was written — so revoking needs no live provider. A
+  grant issued before this, held by a node, keeps evaluating against the agent's node. The revoke door now also
+  refuses (`409 unreadable_grant`) an `…/issued` record this node's identity did not sign.
 - **Code:** `ExecutionAuthority::new`, `GossipAgent::with_cohort_budget` and `GossipAgent::with_membership_authorities`
   take `impl Into<SharedExternalIssuers>`. A caller that passes a `TrustedExternalIssuers` keeps compiling.
-  `TrustedExternalIssuers` gained `set_client_key`, `client_key` and `configured_only`. A clone of a
-  `SharedExternalIssuers` is the same set. An attached execution authority's set is fed each client principal's current
-  key. The membership authorities read configured keys only, so a client key never entitles a removal.
+  `TrustedExternalIssuers` gained `set_client_key(issuer, issued, key)` (it replaces a held key only with a newer
+  issuance), `client_key` and `verify_client`. A clone of a `SharedExternalIssuers` is the same set. An attached
+  execution authority's set is fed each client principal's current key. A client key verifies a grant holder's
+  possession proof and nothing else: `verify_signed_by` reads configured keys only, so no mandate, checkpoint, cohort
+  declaration, head, record or removal verifies under one.
 - **The digest a grant binds** is still the mandate `arguments_digest`, which differs across languages for floats in
   exponent form. That defect is open as `identity-and-lifecycle.md` §9 O1.
 

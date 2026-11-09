@@ -140,16 +140,17 @@ pub(super) async fn gw_grant_decide(
 /// signed by this node's identity; the answer and the grant's first checkpoint are written under the request.
 pub(crate) async fn decide_grant(ctx: &Arc<TaskCtx>, caller: Option<&ResolvedPrincipal>, agent: &str, request: &str, decision: GrantDecision) -> Result<GrantOutcome, GrantRefusal> {
     let issuer = caller.map(|c| c.principal.clone()).unwrap_or_else(|| gateway_caller::PRINCIPAL_ANONYMOUS.to_string());
-    if agent.contains('/') || request.contains('/') || agent.is_empty() || request.is_empty() {
-        return Err(GrantRefusal::door(StatusCode::BAD_REQUEST, "bad_request", "agent and request are each one key segment"));
+    if request.contains('/') || agent.is_empty() || request.is_empty() {
+        return Err(GrantRefusal::door(StatusCode::BAD_REQUEST, "bad_request", "the agent is named and the request is one key segment"));
     }
     // A grant is issued for an agent on this node, or on a fleet member this node knows the identity key of (adopter-
     // surface X3, second PR): the grant and its checkpoint travel to the agent's node in the KV, where its authority is
     // fed them, and that node's entitlement table decides whether this node may issue (`entitle_grants_from_fleet`).
     // A principal that is no member's is refused by name.
-    // Identity-and-lifecycle I1: the segment names the holder — a node principal as written, a client principal in hex.
-    let Some(holder_principal) = super::gateway_authority::grant_holder_from_segment(agent) else {
-        return Err(GrantRefusal::door(StatusCode::BAD_REQUEST, "bad_request", format!("{agent} is neither a node principal nor a client principal's hex segment")));
+    // Identity-and-lifecycle I1: the path names the holder — a node principal as written, a client principal as itself
+    // (the record's `agent`, as the SDKs send it) or as its hex key segment.
+    let Some((segment, holder_principal)) = super::gateway_authority::grant_holder_from_path(agent) else {
+        return Err(GrantRefusal::door(StatusCode::BAD_REQUEST, "bad_request", format!("{agent} is neither a node principal, a client principal nor a client principal's hex segment")));
     };
     let is_client = !holder_principal.starts_with("node:");
     if is_client {
@@ -157,10 +158,10 @@ pub(crate) async fn decide_grant(ctx: &Arc<TaskCtx>, caller: Option<&ResolvedPri
         if ctx.client_certs.mark(&holder_principal).is_none() {
             return Err(GrantRefusal::door(StatusCode::CONFLICT, "not_a_member", format!("{holder_principal} has no client certificate on record here; a grant held by a client is issued only to a principal whose current key this node knows")));
         }
-    } else if agent != gateway_caller::node_principal(&ctx.node_id) && !is_member_agent(ctx, agent) {
+    } else if holder_principal != gateway_caller::node_principal(&ctx.node_id) && !is_member_agent(ctx, &holder_principal) {
         return Err(GrantRefusal::door(StatusCode::CONFLICT, "not_a_member", format!("{agent} is neither this node's agent nor a fleet member whose identity key this node holds; a grant is issued for an agent on a member node")));
     }
-    let key = format!("grant/{agent}/{request}");
+    let key = format!("grant/{segment}/{request}");
     let Some(bytes) = mycelium_core::ops::kv_get(ctx, &key) else {
         return Err(GrantRefusal::door(StatusCode::NOT_FOUND, "unknown_request", format!("no grant request at {key}")));
     };
@@ -186,7 +187,8 @@ pub(crate) async fn decide_grant(ctx: &Arc<TaskCtx>, caller: Option<&ResolvedPri
         GrantDecision::Issue { .. } => "grant.issue",
         GrantDecision::Refuse { .. } => "grant.refuse",
     };
-    let arguments = json!({ "tool": tool, "agent": agent, "arguments_digest": digest, "request": request });
+    // The evaluator sees the holder's principal, a client's as a node's (#743's review, item 8), never its key segment.
+    let arguments = json!({ "tool": tool, "agent": holder_principal, "arguments_digest": digest, "request": request });
     let preflight = ae_preflight(ctx, caller, operation, resource, &arguments, &json!({}), ENFORCEMENT_POINT_GRANT_ISSUE).await;
     let policy_revision: Option<String> = match &preflight {
         Preflight::Refuse(r) => {
@@ -232,7 +234,9 @@ pub(crate) async fn decide_grant(ctx: &Arc<TaskCtx>, caller: Option<&ResolvedPri
                 established_by,
                 purpose: format!("grant issued by {issuer} for request {request}"),
                 scope: format!("{GRANT_SCOPE_PREFIX}{request}"),
-                operations: Mandate::grant_operations(format!("tools/call:tool:{tool}"), digest, policy_revision.as_deref()),
+                // The resource this decision evaluated is signed beside the binding: the revocation evaluates the same
+                // one, with no request record or live provider to read (#743's review, item 1).
+                operations: Mandate::grant_operations_on(format!("tools/call:tool:{tool}"), digest, policy_revision.as_deref(), resource),
                 epoch: 1,
                 term,
                 valid_from_ms: now_ms,
@@ -376,6 +380,11 @@ fn tool_provider(ctx: &TaskCtx, tool: &str) -> Option<crate::node_id::NodeId> {
     crate::store::scan_kv_prefix(&ctx.kv_state, &prefix).into_iter().find_map(|(key, _)| key.strip_prefix(&prefix)?.parse().ok())
 }
 
+/// The most requests one client principal may have standing unanswered at once: past it the door refuses by name
+/// (`429 too_many_pending`) rather than write another fsynced record and wake every supervisor's stream (#743's
+/// review, item 5). A request for the same tool and arguments is the standing one, answered again, not counted twice.
+pub(crate) const MAX_PENDING_GRANT_REQUESTS_PER_CLIENT: usize = 16;
+
 #[derive(serde::Deserialize)]
 pub(super) struct GrantRequestBody {
     /// The tool the grant is for.
@@ -383,6 +392,10 @@ pub(super) struct GrantRequestBody {
     /// The call's arguments; the grant binds their digest.
     #[serde(default)]
     arguments: serde_json::Value,
+    /// The arguments' data class, in the operator's vocabulary. A classified argument set is **withheld** from the
+    /// gossiped record (a client has no agent policy listing renderable classes); the grant binds the digest either way.
+    #[serde(default)]
+    arguments_class: Option<String>,
     /// How long the request stands unanswered; default 60 s, at most 600 s.
     #[serde(default)]
     window_secs: Option<u64>,
@@ -391,9 +404,14 @@ pub(super) struct GrantRequestBody {
 /// `POST /gateway/grants/request` (`mcp:invoke`) — a **client principal asks for a grant** (identity-and-lifecycle
 /// I1). The caller — a principal with a client certificate on record here, whose key can prove possession — names a
 /// tool and the call's arguments; the gateway resolves the tool's provider and writes the request under
-/// `grant/{hex(principal)}/{request}`, the shape a node agent's state machine writes, where a supervisor's
-/// `GET /gateway/grants/pending` and `POST /gateway/grants/{agent}/{request}` find it. Answers the request id and
-/// key; `GET /gateway/grants/request/{request}` reads the answer.
+/// `grant/{hex(principal)}/{request}`, in the record shape a node agent's state machine writes
+/// ([`grant_request_record`](super::super::state_machine::grant_request_record)), where a supervisor's
+/// `GET /gateway/grants/pending` and `POST /gateway/grants/{agent}/{request}` find it. A request standing for the
+/// same tool and arguments is answered again (`"reused": true`), as the agent's door waits on its own; past
+/// [`MAX_PENDING_GRANT_REQUESTS_PER_CLIENT`] standing requests the door refuses. The request is sealed into the audit
+/// chain where the build keeps one (`compliance`). Answers the request id and key; `GET
+/// /gateway/grants/request/{request}` reads the answer. The request id names this node, so two gateways serving one
+/// client never write one key.
 pub(super) async fn gw_grant_request(
     State(ctx): State<Arc<HttpCtx>>,
     caller: Option<Extension<ResolvedPrincipal>>,
@@ -409,36 +427,66 @@ pub(super) async fn gw_grant_request(
     if body.tool.is_empty() || body.tool.contains('/') {
         return refused(StatusCode::BAD_REQUEST, "bad_request", "tool is one key segment");
     }
+    let now_ms = tc.hlc.decision_now_ms();
+    let segment = super::gateway_authority::grant_holder_segment(&principal);
+    let prefix = format!("grant/{segment}/");
+    let digest = super::action_evaluator::hex32(&super::gateway_authority::arguments_digest(&body.arguments));
+    // The caller's standing requests: unanswered and unexpired. One for the same tool and digest is the answer.
+    let entries = crate::store::scan_kv_prefix(&tc.kv_state, &prefix);
+    let answered: std::collections::HashSet<&str> = entries.iter().filter_map(|(k, _)| k.strip_suffix("/issued").or_else(|| k.strip_suffix("/refused"))).collect();
+    let standing: Vec<serde_json::Value> = entries
+        .iter()
+        .filter(|(k, _)| k.strip_prefix(prefix.as_str()).is_some_and(|rest| !rest.contains('/')) && !answered.contains(k.as_ref()))
+        .filter_map(|(k, v)| serde_json::from_slice::<serde_json::Value>(v).ok().map(|mut r| { r["key"] = json!(k.as_ref()); r }))
+        .filter(|r| r["expires_at_ms"].as_u64().is_some_and(|e| e > now_ms))
+        .collect();
+    if let Some(r) = standing.iter().find(|r| r["tool"] == body.tool.as_str() && r["arguments_digest"] == digest.as_str()) {
+        return Json(json!({ "ok": true, "reused": true, "request": r["request"], "key": r["key"], "resource": r["resource"], "arguments_digest": digest, "expires_at_ms": r["expires_at_ms"] })).into_response();
+    }
+    if standing.len() >= MAX_PENDING_GRANT_REQUESTS_PER_CLIENT {
+        return refused(StatusCode::TOO_MANY_REQUESTS, "too_many_pending", format!("{principal} has {} grant requests standing unanswered, the most one client may (MAX_PENDING_GRANT_REQUESTS_PER_CLIENT); wait for an answer or an expiry", standing.len()));
+    }
     let Some(provider) = tool_provider(tc, &body.tool) else {
         return refused(StatusCode::NOT_FOUND, "no_provider", format!("no node provides {}", body.tool));
     };
-    let now_ms = tc.hlc.decision_now_ms();
     let window_ms = body.window_secs.unwrap_or(60).clamp(1, 600) * 1_000;
-    let request = format!("{:016x}", tc.hlc.tick());
-    let segment = super::gateway_authority::grant_holder_segment(&principal);
-    let key = format!("grant/{segment}/{request}");
-    let digest = super::action_evaluator::hex32(&super::gateway_authority::arguments_digest(&body.arguments));
-    let shown = serde_json::to_vec(&body.arguments).map_or(0, |b| b.len());
-    let record = json!({
-        "schema": "mycelium.grant-request/1",
-        "request": request,
-        "agent": principal,
-        "node": provider.to_string(),
-        "tool": body.tool,
-        "operation": "tools/call",
-        "resource": format!("tool:{}@{provider}", body.tool),
-        "arguments_digest": digest,
-        "arguments": if shown <= 4_096 { body.arguments.clone() } else { json!(format!("({shown} bytes, not shown)")) },
-        "requested_at_ms": now_ms,
-        "expires_at_ms": now_ms + window_ms,
+    // The id names the writer: two gateways serving one client tick their own clocks, and the key does not name them.
+    let request = format!("{:016x}-{}", tc.hlc.tick(), tc.node_id);
+    let key = format!("{prefix}{request}");
+    let record = super::super::state_machine::grant_request_record(tc, &super::super::state_machine::GrantRequestFacts {
+        request: &request,
+        agent: &principal,
+        node: &provider,
+        tool: &body.tool,
+        arguments: &body.arguments,
+        digest_hex: &digest,
+        class: body.arguments_class.as_deref(),
+        renderable: &[],
+        now_ms,
+        expires_at_ms: now_ms + window_ms,
     });
     match write_record_durable(tc, key.clone(), record.to_string().into_bytes()).await {
         Ok(_) => {
-            set_pending_gauge(tc, now_ms);
-            Json(json!({ "ok": true, "request": request, "key": key, "resource": record["resource"], "arguments_digest": digest, "expires_at_ms": now_ms + window_ms })).into_response()
+            super::super::state_machine::count_grant_requested(tc, now_ms);
+            audit_request(tc, &principal, &key, &record);
+            Json(json!({ "ok": true, "reused": false, "request": request, "key": key, "resource": record["resource"], "arguments_digest": digest, "expires_at_ms": now_ms + window_ms })).into_response()
         }
         Err(e) => refused(StatusCode::SERVICE_UNAVAILABLE, "not_durable", format!("the request was not recorded durably: {e}")),
     }
+}
+
+/// A client's grant request, sealed into the audit chain (`Write` on its key, the caller as the principal, the tool,
+/// digest and resource as the detail). A seal that fails is warned about; a build without `compliance` keeps no chain.
+fn audit_request(ctx: &Arc<TaskCtx>, principal: &str, key: &str, record: &serde_json::Value) {
+    #[cfg(feature = "compliance")]
+    {
+        let detail = json!({ "tool": record["tool"], "resource": record["resource"], "arguments_digest": record["arguments_digest"], "expires_at_ms": record["expires_at_ms"] }).to_string();
+        if let Err(e) = super::audit::seal_and_write(ctx, super::audit::AuditAction::Write, principal, key, super::audit::AuditOutcome::Success, Some(detail)) {
+            warn!(key, "a client's grant request was recorded but not audited: {e}");
+        }
+    }
+    #[cfg(not(feature = "compliance"))]
+    let _ = (ctx, principal, key, record);
 }
 
 /// `GET /gateway/grants/request/{request}` (`mcp:invoke`) — the caller's own request and its answer: `pending`,
@@ -518,10 +566,13 @@ pub(super) async fn gw_grant_revoke(
 /// names who and why.
 pub(crate) async fn revoke_grant(ctx: &Arc<TaskCtx>, caller: Option<&ResolvedPrincipal>, agent: &str, request: &str, reason: Option<String>) -> Result<GrantOutcome, GrantRefusal> {
     let issuer = caller.map(|c| c.principal.clone()).unwrap_or_else(|| gateway_caller::PRINCIPAL_ANONYMOUS.to_string());
-    if agent.contains('/') || request.contains('/') || agent.is_empty() || request.is_empty() {
-        return Err(GrantRefusal::door(StatusCode::BAD_REQUEST, "bad_request", "agent and request are each one key segment"));
+    if request.contains('/') || agent.is_empty() || request.is_empty() {
+        return Err(GrantRefusal::door(StatusCode::BAD_REQUEST, "bad_request", "the agent is named and the request is one key segment"));
     }
-    let key = format!("grant/{agent}/{request}");
+    let Some((segment, holder_principal)) = super::gateway_authority::grant_holder_from_path(agent) else {
+        return Err(GrantRefusal::door(StatusCode::BAD_REQUEST, "bad_request", format!("{agent} is neither a node principal, a client principal nor a client principal's hex segment")));
+    };
+    let key = format!("grant/{segment}/{request}");
     let Some(bytes) = mycelium_core::ops::kv_get(ctx, &format!("{key}/issued")) else {
         return Err(GrantRefusal::door(StatusCode::NOT_FOUND, "not_issued", format!("no grant was issued at {key}")));
     };
@@ -533,6 +584,17 @@ pub(crate) async fn revoke_grant(ctx: &Arc<TaskCtx>, caller: Option<&ResolvedPri
     if grant.mandate.established_by.as_str() != this_node {
         return Err(GrantRefusal::door(StatusCode::CONFLICT, "not_the_issuer", format!("the grant was issued by {}; revoke it at that node — only the issuer's key signs the checkpoint that revokes it", grant.mandate.established_by.as_str())));
     }
+    // The record is this node's own signature, or it is not this node's grant: a record any member overwrote under the
+    // key is not one this node revokes or reads its resource from (#743's review, item 1).
+    let Some(tls) = ctx.tls.get() else {
+        return Err(GrantRefusal::door(StatusCode::FORBIDDEN, "no_identity", "revoking a grant needs this node's identity ([tls]) to sign the checkpoint"));
+    };
+    if !mycelium_core::tls::verify_bytes(&tls.signing_key().verifying_key().to_bytes(), &grant.mandate.canonical_bytes(), &grant.signature) {
+        return Err(GrantRefusal::door(StatusCode::CONFLICT, "unreadable_grant", format!("{key}/issued is not signed by this node's identity")));
+    }
+    if grant.mandate.holder.as_str() != holder_principal {
+        return Err(GrantRefusal::door(StatusCode::CONFLICT, "unreadable_grant", format!("{key}/issued is held by {}, not {holder_principal}", grant.mandate.holder.as_str())));
+    }
     if mycelium_core::ops::kv_get(ctx, &format!("{key}/revoked")).is_some() {
         return Err(GrantRefusal::door(StatusCode::CONFLICT, "already_revoked", format!("{key} was already revoked")));
     }
@@ -541,18 +603,16 @@ pub(crate) async fn revoke_grant(ctx: &Arc<TaskCtx>, caller: Option<&ResolvedPri
     let Some(tool) = grant.mandate.operations.iter().find_map(|op| op.strip_prefix("tools/call:tool:").map(str::to_string)) else {
         return Err(GrantRefusal::door(StatusCode::CONFLICT, "unreadable_grant", "the grant enumerates no tool call"));
     };
-    // The resource the decision evaluates against: a node holder's own node (the agent runs the tool there, as
-    // before); for a client holder (identity-and-lifecycle I1), the provider of the tool, resolved from `tools/` as
-    // `/mcp` resolves it — the node the grant's calls go to.
-    let resource = match grant.mandate.holder.as_str().strip_prefix("node:") {
-        Some(agent_node) => format!("tool:{tool}@{agent_node}"),
-        None => match tool_provider(ctx, &tool) {
-            Some(provider) => format!("tool:{tool}@{provider}"),
-            None => return Err(GrantRefusal::door(StatusCode::CONFLICT, "no_provider", format!("no node provides {tool}, so the grant's resource cannot be named"))),
-        },
+    // The resource the decision evaluates against is the one the issue evaluated, signed into the grant
+    // (`bound:resource:`) — never a live re-scan, so a revocation needs no provider (#743's review, item 1). A grant
+    // issued before that binding names a node holder, whose own node the agent ran the tool on, as before.
+    let resource = match (grant.mandate.grant_resource(), grant.mandate.holder.as_str().strip_prefix("node:")) {
+        (Some(r), _) => r.to_string(),
+        (None, Some(agent_node)) => format!("tool:{tool}@{agent_node}"),
+        (None, None) => return Err(GrantRefusal::door(StatusCode::CONFLICT, "unreadable_grant", "the grant names no resource and its holder is not a node principal")),
     };
     let now_ms = ctx.hlc.decision_now_ms();
-    let arguments = json!({ "tool": tool, "agent": agent, "request": request });
+    let arguments = json!({ "tool": tool, "agent": holder_principal, "request": request });
     let preflight = ae_preflight(ctx, caller, "grant.revoke", &resource, &arguments, &json!({}), ENFORCEMENT_POINT_GRANT_ISSUE).await;
     match &preflight {
         Preflight::Refuse(r) => {
@@ -563,9 +623,6 @@ pub(crate) async fn revoke_grant(ctx: &Arc<TaskCtx>, caller: Option<&ResolvedPri
             return Err(GrantRefusal::door(StatusCode::FORBIDDEN, "no_evaluator", "no action evaluator is attached: nothing can decide who may revoke, so no answer is written"));
         }
     }
-    let Some(tls) = ctx.tls.get() else {
-        return Err(GrantRefusal::door(StatusCode::FORBIDDEN, "no_identity", "revoking a grant needs this node's identity ([tls]) to sign the checkpoint"));
-    };
     // The next checkpoint for the grant's scope: the issue wrote sequence 1 with nothing revoked; this is 2, naming the
     // term. A later revocation of the same grant is refused above, so the sequence is these two.
     let checkpoint = crate::mandate::authority::RevocationCheckpoint {

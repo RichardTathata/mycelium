@@ -212,10 +212,12 @@ impl std::error::Error for ExternalIssuerError {}
 #[derive(Clone, Debug, Default)]
 pub struct TrustedExternalIssuers {
     keys: BTreeMap<IssuerId, Vec<[u8; 32]>>,
-    /// Client principals' current keys (identity-and-lifecycle I1): fed by the node's client-certificate fold, one
-    /// key per principal, replaced when a newer certificate supersedes it. Not configuration — a reader that must
-    /// never trust a client (the membership authorities) reads [`Self::configured_only`].
-    clients: BTreeMap<IssuerId, [u8; 32]>,
+    /// Client principals' current keys (identity-and-lifecycle I1), each with its certificate's issuance: fed by the
+    /// node's client-certificate fold, one key per principal, replaced only by a newer issuance. Not configuration,
+    /// and never an issuer's key: [`verify_signed_by`] does not read them, so a client key verifies no mandate,
+    /// checkpoint, cohort declaration, head, record or removal — only a grant holder's possession proof
+    /// ([`Self::verify_client`], read by `GrantVerifier::check`).
+    clients: BTreeMap<IssuerId, (u64, [u8; 32])>,
 }
 
 impl TrustedExternalIssuers {
@@ -246,24 +248,32 @@ impl TrustedExternalIssuers {
         self.keys.get(issuer).map(Vec::as_slice)
     }
 
-    /// Trust `key` as `issuer`'s **current client key** (identity-and-lifecycle I1), replacing any earlier one: a
-    /// client principal has one current key, its newest verified certificate's. Refuses the member namespace.
-    pub fn set_client_key(&mut self, issuer: IssuerId, key: [u8; 32]) -> Result<(), ExternalIssuerError> {
+    /// Record `key` as `issuer`'s **current client key** (identity-and-lifecycle I1), from a certificate issued at
+    /// `issued`: it replaces the one held only if it is newer by the fold's own order (issuance, then key), so feeds
+    /// that interleave can never write a superseded key back. Returns whether it was recorded. Refuses the member
+    /// namespace.
+    pub fn set_client_key(&mut self, issuer: IssuerId, issued: u64, key: [u8; 32]) -> Result<bool, ExternalIssuerError> {
         if issuer.claims_member_namespace() {
             return Err(ExternalIssuerError::MemberNamespace);
         }
-        self.clients.insert(issuer, key);
-        Ok(())
+        match self.clients.get(&issuer) {
+            Some(held) if *held >= (issued, key) => Ok(false),
+            _ => {
+                self.clients.insert(issuer, (issued, key));
+                Ok(true)
+            }
+        }
     }
 
     /// `issuer`'s current client key, if the fold has fed one.
     pub fn client_key(&self, issuer: &IssuerId) -> Option<[u8; 32]> {
-        self.clients.get(issuer).copied()
+        self.clients.get(issuer).map(|(_, k)| *k)
     }
 
-    /// The configured issuers alone, without any client key — for a reader that must never trust a client.
-    pub fn configured_only(&self) -> Self {
-        Self { keys: self.keys.clone(), clients: BTreeMap::new() }
+    /// Does `signature` over `bytes` verify under `holder`'s **current client key**? The one reader of client keys:
+    /// a grant holder's possession proof. A member-namespace holder never has one.
+    pub fn verify_client(&self, holder: &IssuerId, bytes: &[u8], signature: &[u8]) -> bool {
+        self.client_key(holder).is_some_and(|k| mycelium_core::tls::verify_bytes(&k, bytes, signature))
     }
 }
 
@@ -297,12 +307,13 @@ impl SharedExternalIssuers {
         self.0.write().untrust(issuer)
     }
 
-    /// [`TrustedExternalIssuers::set_client_key`], on the shared set; a key already current is not rewritten.
-    pub fn set_client_key(&self, issuer: IssuerId, key: [u8; 32]) -> Result<(), ExternalIssuerError> {
-        if self.0.read().client_key(&issuer) == Some(key) {
-            return Ok(());
+    /// [`TrustedExternalIssuers::set_client_key`], on the shared set: decided under the write lock, so it is
+    /// monotonic whatever order concurrent feeds arrive in; a key already current takes only the read lock.
+    pub fn set_client_key(&self, issuer: IssuerId, issued: u64, key: [u8; 32]) -> Result<bool, ExternalIssuerError> {
+        if self.0.read().clients.get(&issuer).is_some_and(|held| *held >= (issued, key)) {
+            return Ok(false);
         }
-        self.0.write().set_client_key(issuer, key)
+        self.0.write().set_client_key(issuer, issued, key)
     }
 
     /// Whether `self` and `other` are one set (a clone of the same handle).
@@ -370,12 +381,11 @@ pub fn verify_signed_by(
         };
     }
 
-    let configured = external.keys_for(issuer);
-    let client = external.client_key(issuer);
-    if configured.is_none() && client.is_none() {
+    // Configured keys only: a client key is never an issuer's (it verifies a possession proof, nothing else).
+    let Some(configured) = external.keys_for(issuer) else {
         return Authenticity::Unverifiable(UnverifiableReason::UntrustedExternal);
-    }
-    for key in configured.unwrap_or_default().iter().chain(client.as_ref()) {
+    };
+    for key in configured {
         if verifies(key) {
             return Authenticity::Current { path: IssuerPath::External, key: *key };
         }

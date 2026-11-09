@@ -50,16 +50,30 @@ This feature is turned on in code.
   `grantRevoke` / `grantsStream`).
 - [`gw_grant_request`](../../src/agent/http/grants.rs) and [`gw_grant_request_status`](../../src/agent/http/grants.rs) —
   a grant **held by a client principal** (identity-and-lifecycle I1): a service with a client certificate on record
-  asks with `POST /gateway/grants/request` (`mcp:invoke`, `{"tool", "arguments", "window_secs"}`) and reads the
-  answer at `GET /gateway/grants/request/{request}` (`pending`, `issued` with the signed grant, `refused`, `revoked`,
-  `expired`). The request lands under `grant/{hex(principal)}/{request}` — a node principal is written as it is, a
-  client's principal in hex ([`grant_holder_segment`](../../src/agent/gateway_authority.rs)) — so the supervisor's
-  pending list and decision door serve both. The client proves possession with its client-certificate key: an
-  execution authority attached to the node is fed each client principal's current key
-  ([`SharedExternalIssuers`](../../src/knowledge/issuer.rs)). A revocation evaluates against the tool's provider,
-  `tool:{tool}@{provider}`. A principal without a certificate on record is refused (`not_a_client_holder`,
-  `not_a_member`). `a_grant_held_by_a_client_principal_is_requested_issued_presented_and_revoked`, in
-  [`src/agent/client_grant_tests.rs`](../../src/agent/client_grant_tests.rs).
+  asks with `POST /gateway/grants/request` (`mcp:invoke`, `{"tool", "arguments", "arguments_class", "window_secs"}`)
+  and reads the answer at `GET /gateway/grants/request/{request}` (`pending`, `issued` with the signed grant,
+  `refused`, `revoked`, `expired`). The request lands under `grant/{hex(principal)}/{request}` — a node principal is
+  written as it is, a client's principal in hex ([`grant_holder_segment`](../../src/agent/gateway_authority.rs)) — in
+  the record shape the agent's door writes ([`grant_request_record`](../../src/agent/state_machine.rs): a classified
+  argument set is withheld, since a client has no policy listing renderable classes), so the supervisor's pending
+  list, stream and decision door serve both; the decision and revocation doors take the row's `agent` — the
+  principal, percent-encoded as the SDKs send it — or the hex segment. A request standing for the same tool and
+  arguments is answered again (`"reused": true`); past `MAX_PENDING_GRANT_REQUESTS_PER_CLIENT` (16) standing requests
+  the door refuses `429 too_many_pending`; each request written is counted (`mycelium_grants_requested_total`) and
+  sealed into the audit chain where the build has one (`compliance`); its id names the gateway that wrote it. The
+  client proves possession with its client-certificate key: an execution authority attached to the node is fed each
+  client principal's current key, replaced only by a newer issuance
+  ([`SharedExternalIssuers`](../../src/knowledge/issuer.rs)). A client key verifies a possession proof and nothing
+  else — no mandate, checkpoint, cohort declaration or removal (`verify_signed_by` reads configured keys only). The
+  issue signs the resource it evaluated into the grant (`bound:resource:{resource}`,
+  [`grant_resource`](../../src/mandate/grant.rs)), and the revocation evaluates that one — `tool:{tool}@{provider}`
+  for a client, the provider resolved at request time — so revoking needs no live provider; the resource is carried,
+  not checked against a call's. A principal without a certificate on record is refused (`not_a_client_holder`,
+  `not_a_member`). The tests are in [`src/agent/client_grant_tests.rs`](../../src/agent/client_grant_tests.rs):
+  `a_grant_held_by_a_client_principal_is_requested_issued_presented_and_revoked`,
+  `a_client_grant_is_revoked_against_its_issued_resource_with_the_provider_gone` (two nodes),
+  `a_possession_proof_by_a_superseded_client_key_is_refused` and
+  `the_request_door_reuses_a_standing_request_bounds_them_and_withholds_a_classified_rendering`.
 - [`AgentPolicy`](../../src/agent/state_machine.rs) — its `grant_arguments_class` and `grant_renderable_classes`: the
   rendering under the data-class policy. The arguments' class by name, in the operator's vocabulary (as row R's `DataClass` names it), and
   the classes whose arguments may be rendered into the gossiped request; a class not listed is **withheld** — the record
@@ -219,11 +233,11 @@ has no row for this feature. The tests: in [`src/mandate/grant.rs`](../../src/ma
   (declared or principal-sourced): a first cut, stated. **Not built, by the plan row** ([`adopter-surface.md`](../plans/adopter-surface.md) X3, after the fourth
   PR): retention of `grant/` records; a per-issuer entitlement finer than `entitle_grants_from_fleet`; a per-call class
   for the rendering; the gateway and provider doors driven on a declaration's fleet (the `grant` class drives the state
-  machine's door and the issuing door — the door tests drive the rest). **The doors a node-held grant reaches:** a grant's holder is the agent's node, so
-  it is presented on the node's own call (a member's direct call, the provider's door) — a bearer client presenting a
-  node's grant at `/mcp` is refused as not the holder's. **The gateway's claim (`used/gateway`) is code with no
-  reachable caller today:** only a `node:` principal can hold a grant, so no client presents one at `/mcp`; the claim
-  runs in the one preflight both doors share and is exercised at the provider's tag. Grant records under `grant/` are
+  machine's door and the issuing door — the door tests drive the rest). **The doors a node-held grant reaches:** a node-held grant's holder is the agent's
+  node, so it is presented on the node's own call (a member's direct call, the provider's door) — a bearer client
+  presenting a node's grant at `/mcp` is refused as not the holder's. A grant **held by a client** is presented at
+  `/mcp` by that client, so the gateway's claim (`used/gateway`) has its caller since identity-and-lifecycle I1
+  (`a_grant_held_by_a_client_principal_is_requested_issued_presented_and_revoked`). Grant records under `grant/` are
   never reclaimed (no retention row yet). An operator UI is the adopter's.
 - Metrics: `mycelium_grants_requested_total`, `_verified_total`, `_expired_total`, `_issued_total`, `_refused_total`,
   `_revoked_total` and the gauge `mycelium_grants_pending` (moved on every request and answer, not only when polled).

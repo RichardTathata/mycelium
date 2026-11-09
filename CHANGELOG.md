@@ -55,11 +55,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   a client certificate on record asks for a grant at `POST /gateway/grants/request` (`mcp:invoke`), reads the answer at
   `GET /gateway/grants/request/{request}`, and presents it at `/mcp` with a possession proof signed by its client key.
   The request is keyed `grant/{hex(principal)}/{request}`; node-held grants keep their keys. The supervisor's existing
-  pending, decision and revocation doors serve both, and a client-held grant's revocation evaluates against the tool's
-  provider. The external issuers an execution authority, a cohort budget and the membership authorities read are now a
-  shared set, `SharedExternalIssuers`. The node's client-certificate fold feeds each client's current key into every
-  attached execution authority. The membership authorities never read a client key. Upgrade note: `deprecations.md`
-  §88.
+  pending, decision and revocation doors serve both, and take the row's principal as the SDKs send it. A standing
+  request is reused, at most 16 stand per principal, and each is counted and audited. An issued grant signs the
+  resource it was evaluated against (`bound:resource:`), and its revocation evaluates that one, so revoking needs no
+  live provider. The external issuers an execution authority, a cohort budget and the membership authorities read are
+  now a shared set, `SharedExternalIssuers`. The node's client-certificate fold feeds each client's current key into
+  every attached execution authority, replaced only by a newer issuance. A client key verifies a possession proof and
+  nothing else. Upgrade note: `deprecations.md` §88.
 
 - **A client's own signature on a gateway call** (`docs/plans/identity-and-lifecycle.md` I1, second half, PR 1 of
   3; decision D1′). A service with a client certificate signs each `tools/call` or A2A send with its key

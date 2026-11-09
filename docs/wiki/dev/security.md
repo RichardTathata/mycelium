@@ -440,8 +440,11 @@ standing (current, by the client-cert fold), freshness — and admits each `cn` 
 (`client_sig.rs`). A relay that strips `cs` makes the call unsigned, which is counted, not yet refused.
 **A client can hold a grant** (I1, second half): the request is keyed `grant/{hex(principal)}/{request}` (a node
 holder stays literal), and the client proves possession with its certificate key, which the client-certificate fold
-feeds into every attached execution authority's `SharedExternalIssuers` (one per principal, replaced on supersession).
-The membership authorities read the same type's configured keys only: a client key never entitles a removal.
+feeds into every attached execution authority's `SharedExternalIssuers` (one per principal, replaced only by a newer
+issuance, so interleaved feeds cannot restore a superseded key). **A client key is never an issuer's:**
+`verify_signed_by` reads configured keys only, and the one reader of client keys is `GrantVerifier::check`'s
+possession step (`verify_client`) — so no mandate, checkpoint, cohort declaration, head, record or removal verifies
+under one. The issue signs the resource it evaluated into the grant (`bound:resource:`); the revocation evaluates that.
 
 > **`sys/identity` authentication — partially closed (WS-E, in progress).** `sys/identity/{node}`
 > is a plain Layer-I KV value with **no signature**, and `merge_peer_keys` **accumulates** any key
