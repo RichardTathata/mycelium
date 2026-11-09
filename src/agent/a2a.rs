@@ -912,13 +912,21 @@ async fn dispatch_send(
     // A timeout is *unknown*, never a negative — a long-running skill may well have completed.
     #[cfg(all(feature = "gateway", feature = "tls"))]
     {
-        // The same mapping the MCP edge uses — a skill reply is raw output, not JSON-RPC, so there
-        // is no error envelope to inspect.
-        let observed = super::http::observed_execution(&dispatched);
+        // The mapping the MCP edge uses, with the provider's refusal read as `failed` (#745's review, O4): a reply that
+        // arrived is a completed RPC, and a refusal inside it is no effect that ran. A skill reply is otherwise raw
+        // output, with no error envelope to inspect.
+        let mut observed = super::http::observed_execution(&dispatched);
+        if observed == super::action_evaluator::Execution::Completed && dispatched.as_ref().is_ok_and(|r| provider_refusal(r).is_some()) {
+            observed = super::action_evaluator::Execution::Failed;
+        }
         super::http::ae_record_execution(&state.task_ctx, &preflight, observed).await;
     }
 
     match dispatched {
+        Ok(reply) if let Some((reason, message)) = provider_refusal(&reply) => {
+            warn!("A2A send refused by the provider for skill {}: {message}", skill_id);
+            Err(jsonrpc_error_with_data(id, -32003, &format!("the provider refused the call: {message}"), json!({ "reason": reason })))
+        }
         Ok(reply) => {
             let task = completed_task(req.task_id.clone(), reply);
             reservation.complete(task.clone());
@@ -933,6 +941,15 @@ async fn dispatch_send(
             Err(jsonrpc_error(id, e.json_rpc_code(), &e.to_string()))
         }
     }
+}
+
+/// **The provider refused, and said so** (#745's review, O4): the provider's refusal bodies — a caller-context refusal
+/// at its receive boundary and a provider-enforcement refusal — are a JSON object with a string `error` and a string
+/// `reason`. A skill's reply is its raw output, unframed, so the shape is the only signal: a skill whose output is
+/// exactly such an object is read as refused (stated). `/mcp` reads a JSON-RPC `error` instead (`reply_reports_failure`).
+fn provider_refusal(reply: &[u8]) -> Option<(String, String)> {
+    let v: Value = serde_json::from_slice(reply).ok()?;
+    Some((v.get("reason")?.as_str()?.to_string(), v.get("error")?.as_str()?.to_string()))
 }
 
 /// The code a send answers for a skill it cannot resolve: `-32001` before 0.3, as it always has been;
@@ -1267,7 +1284,11 @@ pub(crate) async fn tasks_send_subscribe(
 
         #[cfg(all(feature = "gateway", feature = "tls"))]
         {
-            let observed = super::http::observed_execution(&dispatched);
+            // As on the unary send: the provider's refusal is no effect that ran (#745's review, O4).
+            let mut observed = super::http::observed_execution(&dispatched);
+            if observed == super::action_evaluator::Execution::Completed && dispatched.as_ref().is_ok_and(|r| provider_refusal(r).is_some()) {
+                observed = super::action_evaluator::Execution::Failed;
+            }
             super::http::ae_record_execution(&state.task_ctx, &preflight, observed).await;
         }
 
@@ -1276,6 +1297,10 @@ pub(crate) async fn tasks_send_subscribe(
         grants.abort();
 
         match dispatched {
+            Ok(reply) if let Some((reason, message)) = provider_refusal(&reply) => {
+                warn!("A2A streamed send refused by the provider for skill {}: {message}", skill_id);
+                send_all(stream_events(&id, &req, Step::Failed { error: Some(reason), detail: Some(message) })).await;
+            }
             Ok(reply) => {
                 let task = completed_task(req.task_id.clone(), reply);
                 reservation.complete(task.clone());

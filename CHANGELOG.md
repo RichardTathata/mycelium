@@ -146,6 +146,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A grant the provider refused before running is given back** (I1, #745's review). The gateway's fold of client
+  certificates can lead the provider's, so the provider answered `client_key_unknown` after the gateway had claimed the
+  grant, and the retry was refused as already used. A `client_key_*`, `client_signature_*` or `stale` answer now
+  releases the claim. The door also checks the signature's issue time on the provider's window.
+- **A provider's refusal is a refusal at `/a2a`, and its reason reaches the caller.** `tasks/send` and the stream
+  answered a provider's refusal as a `completed` task, and the evidence journal recorded `completed`. A tool's
+  `-32022` refusal now carries `data.reason`. A gateway without `[tls]` answers `client_signature_unverifiable`, and a
+  name holding `@` binds at the provider. Upgrade note: `deprecations.md` §90.
 - **A call refused for its client signature no longer spends the grant it presents.** The gateway claimed a grant's
   use in its preflight before the provider checked `cs`. `/mcp` and both `/a2a` doors now check the signature and the
   key's standing first (`cn` stays the provider's). Upgrade note: `deprecations.md` §90.

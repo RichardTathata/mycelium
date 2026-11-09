@@ -619,9 +619,58 @@ pub(crate) enum Preflight {
     /// found **established** (and the door enforces rather than observes). A door that registers the work afterwards
     /// re-assesses the mandate, and when this is `true` a re-assessment that is no longer established refuses the
     /// call (the provider's `mandate_lapsed_before_run`): the revocation is known before the handler runs.
-    Proceed { evidence: Box<super::action_evaluator::AeEvidence>, journal_sha256: Option<String>, mandate_established: bool },
+    ///
+    /// `grant_claim`: the grant use this permit claimed at this door, when it presented one — released by
+    /// [`release_grant_claim_after`] if the provider then refuses the call before anything runs.
+    Proceed { evidence: Box<super::action_evaluator::AeEvidence>, journal_sha256: Option<String>, mandate_established: bool, grant_claim: Option<GrantClaim> },
     /// Refused. Nothing is dispatched.
     Refuse(super::action_evaluator::PreflightRefusal),
+}
+
+/// A grant use a door claimed (adopter-surface X3): the authority's in-memory claim and the durable marker.
+#[cfg(all(feature = "gateway", feature = "tls"))]
+#[derive(Clone, Debug)]
+pub(crate) struct GrantClaim {
+    holder: String,
+    scope: String,
+    term: String,
+    point: String,
+    marker: String,
+}
+
+/// The provider's refusals that are answered **before anything runs**: the receive boundary's check of the caller
+/// context refused the call, so no handler, no provider preflight and no effect ran (identity-and-lifecycle I1, #745's
+/// review). The reply is the provider's caller-context refusal: a tool's serve loop answers it as JSON-RPC (`-32022`,
+/// the reason in `data.reason`), `rpc_rx` as a body (`{"error": "caller context refused: …", "reason": …}`).
+#[cfg(all(feature = "gateway", feature = "tls"))]
+fn pre_execution_refusal(bytes: &[u8]) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+    let reason = if v["error"]["code"] == -32022 {
+        v["error"]["data"]["reason"].as_str()?
+    } else if v["error"].as_str().is_some_and(|e| e.starts_with("caller context refused")) {
+        v["reason"].as_str()?
+    } else {
+        return None;
+    };
+    (reason.starts_with("client_signature_") || reason.starts_with("client_key_") || reason == "stale").then(|| reason.to_string())
+}
+
+/// **Give back a grant's use the provider never spent** (identity-and-lifecycle I1, #745's review). The gateway claims
+/// a grant's use before it dispatches — the marker on disk before the work can run (R2) — and a provider whose fold of
+/// client certificates lags the gateway's answers `client_key_unknown`; a retry was then refused `GrantUsed` although
+/// nothing ran. When the reply is one of [`pre_execution_refusal`]'s, the marker is tombstoned and then the in-memory
+/// claim released, so the grant admits the retry once. Sound against R2: the marker guards *work that may have run*,
+/// and none did; a crash before the tombstone is durable leaves the grant spent — the safe side. **Trusts the
+/// provider's answer**: a provider that ran the call and answered a refusal could have it run twice, which a provider
+/// able to run calls at will could do anyway. A timeout, a tool error or any other reply leaves the grant spent.
+#[cfg(all(feature = "gateway", feature = "tls"))]
+pub(crate) async fn release_grant_claim_after(ctx: &Arc<TaskCtx>, preflight: &Preflight, dispatched: &Result<Bytes, GatewayDispatchError>) -> Option<String> {
+    let Preflight::Proceed { grant_claim: Some(c), .. } = preflight else { return None };
+    let reason = pre_execution_refusal(dispatched.as_ref().ok()?)?;
+    let authority = ctx.execution_authority.get()?;
+    mycelium_core::ops::kv_delete_async(ctx, Arc::from(c.marker.as_str())).await;
+    authority.release_grant_use(&c.holder, &c.scope, &c.term, &c.point);
+    Some(reason)
 }
 
 /// The MCP tool-call route, as it is named in every piece of evidence it produces.
@@ -779,6 +828,8 @@ impl crate::GossipAgent {
         #[cfg(feature = "tls")]
         {
             use super::action_evaluator::Execution;
+            // As at `/mcp`: a provider's refusal before anything ran gives the grant's use back.
+            let _ = release_grant_claim_after(&self.task_ctx, &preflight.inner, dispatched).await;
             let mut observed = observed_execution(dispatched);
             if observed == Execution::Completed && dispatched.as_ref().is_ok_and(|b| reply_reports_failure(b)) {
                 observed = Execution::Failed;
@@ -1334,6 +1385,7 @@ impl Settling {
             }
             _ => None,
         };
+        let mut claimed: Option<GrantClaim> = None;
         match grant_use {
             Some((_, true, policy_revision, _)) => {
                 if admitted && let Some(index) = history_index {
@@ -1361,6 +1413,8 @@ impl Settling {
                         ae::Decision::deny(format!("grant use not recorded durably at {point}: {reason}"), policy_revision)
                             .checking(["grant use recorded durably before the work"]),
                     ));
+                } else {
+                    claimed = Some(GrantClaim { holder, scope, term, point: point.clone(), marker });
                 }
             }
             None => {}
@@ -1432,11 +1486,11 @@ impl Settling {
                     super::fleet_history::release_after_window(ctx, slot, env, window_ms);
                 }
                 let mandate_established = envelope.mandate.as_ref().is_some_and(|b| b.state == ae::MandateState::Established);
-                Preflight::Proceed { evidence: Box::new(evidence), journal_sha256, mandate_established }
+                Preflight::Proceed { evidence: Box::new(evidence), journal_sha256, mandate_established, grant_claim: claimed }
             }
             // The shadow rung observes: what it admits was refused, so no later re-assessment refuses it either. (The
             // provider has no shadow rung; this is a gateway door's.)
-            Err(_) if shadow_admit => Preflight::Proceed { evidence: Box::new(evidence), journal_sha256, mandate_established: false },
+            Err(_) if shadow_admit => Preflight::Proceed { evidence: Box::new(evidence), journal_sha256, mandate_established: false, grant_claim: None },
             Err(refusal) => {
                 warn!(actor = %envelope.actor, %operation, %resource,
                       "AE preflight refused: {refusal}");

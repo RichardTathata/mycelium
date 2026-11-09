@@ -2790,6 +2790,17 @@ preflight.
   reads the same reason in `data.reason`.
 - **A grant presented on such a call is no longer spent.** The preflight that claims a grant's use does not run.
 - **`cn` is still the provider's.** The gateway does not keep a replay window: a replayed `cn` passes the door and is
-  dropped at the provider, as before.
+  dropped at the provider, as before. The door does check the issue time on the provider's window and answers `stale`.
+- **A grant the provider refused before running is given back.** When the provider answers `client_key_*`,
+  `client_signature_*` or `stale`, the gateway tombstones the grant's `…/used/{door}` marker and releases its claim, so
+  the same grant admits a retry. Before, the retry was refused as already used.
+- **The provider's refusal carries its reason.** A tool's caller-context refusal (`-32022`) now has `data.reason`. At
+  `/a2a` a provider's refusal is a JSON-RPC error (`-32003`, `data.reason`) on `tasks/send` and a failed task on a
+  stream. Before, both answered a `completed` task with the refusal as its artifact. The evidence journal now records
+  `failed` for it, where it recorded `completed`.
+- **A gateway built with `tls` but started without `[tls]`** refuses a signed call as `client_signature_unverifiable`,
+  where it answered `client_key_unknown`.
+- **A tool or skill whose name holds `@`** now binds at the provider. The claim is read up to its last `@`; it was
+  refused as `client_signature_unbound`.
 
 Wire **v12** unchanged; no API change.

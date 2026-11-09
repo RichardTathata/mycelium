@@ -213,6 +213,12 @@ pub(super) async fn mcp_handler(
             // What this gateway actually observed. A timeout is **unknown**, never a negative: the
             // call may well have run (item 1's rule, and the hot invariant). A dispatch the gateway
             // itself refused before sending is the one case where nothing ran and it can say so.
+            // A provider that refused before anything ran (its fold of client certificates behind this gateway's, a
+            // signature it judged stale) did not spend the grant this door claimed: the use is given back.
+            #[cfg(all(feature = "gateway", feature = "tls"))]
+            if let Some(reason) = release_grant_claim_after(&ctx.agent_ctx, &preflight, &dispatched).await {
+                tracing::debug!(tool = %name, reason, "the provider refused before running: the grant's use at this door is released");
+            }
             #[cfg(all(feature = "gateway", feature = "tls"))]
             {
                 use super::action_evaluator::Execution;

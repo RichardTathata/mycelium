@@ -58,6 +58,32 @@ CI runs exactly this in the `eve-fleet` job.
    - The class drives the agent state machine's own door on the declaration's own in-process fleet. It does not call
      Eve's `execute`. The grant is on the tool's name, which is the same at every door.
 
+## The tool under a service's own grant
+
+[`run_client_grant.mjs`](run_client_grant.mjs) runs the same tool on a fleet whose gateway is the `mycelium` binary,
+with `[authority]` over a unit that makes `get_weather` grant-required for `token:fleet/forecaster`. A service with
+that principal holds a client certificate (`mycelium tls issue --client forecaster --issuer fleet`), and calls through
+`mycelium-ts`'s `McpClient` with a `ClientSigner`, so every call carries its own signature and a grant is presented
+with a possession proof. Identity-and-lifecycle row I1's exit.
+
+```sh
+cargo build --bin mycelium --features cli,tls,compliance,a2a,llm,metrics   # the release's NODE_FEATURES
+node examples/eve_weather/run_client_grant.mjs                             # ends with CLIENT GRANT OK
+```
+
+It shows, each with the refusal's reason checked:
+- the call refused without a grant;
+- run under one;
+- the same grant refused a second time;
+- a foreign key's signature refused;
+- a grant held across the gateway's restart;
+- a revoked grant refused;
+- the older key refused after a newer certificate.
+
+A call the provider refuses because its copy of the certificate has not arrived yet (`client_key_unknown`) is retried
+under the same grant: nothing ran, so the gateway gives the use back. CI's `eve-fleet` job runs it. The run with release
+builds is on [what is proven](../../docs/operations/what-is-proven.md#client-grant-three-node-fleet).
+
 ## How each slot of an Eve agent directory lands
 
 Every slot of Eve 0.80.0's agent directory, from its reference `docs/reference/agent-files.md`. A slot the loader does

@@ -96,7 +96,8 @@ way. `a_newer_certificate_supersedes_the_older_key_and_an_overwrite_cannot_lower
   it does not.
 - **The `cn` window is in memory.** A provider that restarts forgets it, so a call captured before the restart can
   replay once after it, inside the freshness window.
-- **Refusals:** `client_key_unknown` means this node has not read the key's certificate yet and is worth retrying;
+- **Refusals:** `client_key_unknown` means this node has not read the key's certificate yet and is worth retrying (under
+  a grant too, which the gateway gives back);
   `client_key_superseded` is final. More than 1,024 processes signing under one key inside the window are answered
   `client_instances_exhausted`. The arguments' digest is RFC 8785 (JCS), the same in Rust, Python and TypeScript.
 - **Large numbers go as strings.** Any number whose magnitude is 2^53 or more, float or not (e.g. `6.022e23`), is
@@ -109,11 +110,35 @@ way. `a_newer_certificate_supersedes_the_older_key_and_an_overwrite_cannot_lower
   ([`deprecations.md` §87](../guide/deprecations.md)). The gateway's signature does not cover `cs`/`cn`, so a relay
   that strips them makes the call unsigned. The LLM doors refuse a signature (`client_signature_unbound`).
 - **The gateway checks the signature before it claims a grant's use.** At `/mcp` and both `/a2a` doors the gateway
-  verifies `cs` over the call's binding and the key's standing before its preflight runs, so a call refused
-  `client_signature_invalid`, `client_key_unknown` or `client_key_superseded` there leaves a grant it presents unspent
-  (`a_signed_call_presenting_a_client_grant_runs_at_mcp`; `both_a2a_doors_carry_a_client_signature_and_the_skill_sees_it`
-  for the A2A doors). It does not check `cn`: the replay window is the provider's, which checks everything again. A
-  call the provider then refuses, or that times out, has spent the grant at the gateway.
+  checks, before its preflight runs:
+  - `cs` over the call's binding;
+  - the key's standing;
+  - the issue time on the provider's window (`stale`).
+
+  So a call refused there leaves a grant it presents unspent
+  (`a_signed_call_presenting_a_client_grant_runs_at_mcp`, `both_a2a_doors_carry_a_client_signature_and_the_skill_sees_it`,
+  `the_door_refuses_a_stale_an_unsafe_and_an_unverifiable_signature_by_name`). It does not check `cn`: the replay
+  window is the provider's, which checks everything again.
+- **A grant the provider refused before running is given back.** The gateway's fold of client certificates can lead
+  the provider's. When the provider answers `client_key_*`, `client_signature_*` or `stale`, nothing ran: its receive
+  boundary refused the call before any handler. The gateway then tombstones its `…/used/{door}` marker and releases its
+  claim, so `client_key_unknown` is retriable under the same grant (`a_grant_the_provider_refused_before_running_is_given_back`).
+  The release trusts the provider's answer: a provider that ran the call and answered a refusal could have it run
+  twice, which a provider able to run calls at will could do anyway. A tool's own error, a timeout, or any other answer
+  leaves the grant spent.
+- **Refusal reasons reach the caller.** At `/mcp` a provider's caller-context refusal is `-32022` with the reason in
+  `data.reason`. At `/a2a` it is a JSON-RPC error naming the reason, or a failed task on a stream. The evidence journal
+  records it `failed`, not `completed` (`a_providers_refusal_reaches_an_mcp_client_as_json_rpc_with_its_reason`,
+  `a_providers_refusal_is_a_failed_task_at_both_a2a_doors_and_on_the_record`). A skill's reply is its raw output, so a
+  skill whose output is exactly `{"error": "…", "reason": "…"}` is read as refused.
+- **A gateway with no identity.** A build with `tls` and no `[tls]` holds no CA anchor, so it judges no client key: a
+  signed call is refused `client_signature_unverifiable`.
+- **A name holding `@`.** The provider reads the tool or skill from the claim up to its last `@`, so `weather@v2`
+  binds. The signed message itself names the resource up to its first `@`, in all three languages, so two tools named
+  `a@x` and `a@y` share a signature. Name tools without `@` where that matters.
+- **After a peer restarts, its first calls can time out.** A gateway restarted gracefully can dispatch calls that time
+  out until the provider writes towards it again (`/stats` reports both peers throughout). A timed-out call has spent
+  the grant it presents. See [identity and lifecycle §9 O2](../plans/identity-and-lifecycle.md#9--open-items-tracked).
 - **A possession proof that does not verify is `WrongHolder`**, whether the key is wrong or the client's digest of the
   arguments differs (the O1 float case): the gateway sees only the proof.
 - **Reserved name:** no client certificate may be named `legacy`, the legacy token's principal.
@@ -129,11 +154,7 @@ way. `a_newer_certificate_supersedes_the_older_key_and_an_overwrite_cannot_lower
 - **Cost:** a refresh scans the records once and checks each certificate's chain once while it is cached (4,096
   certificates). Past that many crafted certificates the cache churns and every chain is checked again. The refresh
   runs in the identity watcher's loop, so a large one delays the revocation fold; moving it off is a follow-up.
-- **Not built:**
-  - refusing an unsigned action from a principal with a certificate on record (counted now);
-  - an un-upgraded node's reading of `sys/client-cert/`, which was not shown against the previous binary.
-
-  All are listed under
+- **Not built:** refusing an unsigned action from a principal with a certificate on record (counted now), listed under
   [identity and lifecycle § I1](../plans/identity-and-lifecycle.md#i1--client-certificates-for-services-d1-d1).
 
 ## Go deeper

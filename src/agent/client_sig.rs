@@ -385,6 +385,13 @@ pub(crate) enum ClientSigRefusal {
     KeyUnknown,
     /// `k` is a superseded key: a newer certificate for the principal has been read here. Final.
     KeySuperseded,
+    /// The issue time is outside the caller envelope's window: a clock skewed past the drift bound, or a held call.
+    /// Built by the gateway's door only (the provider answers `CallerError::Stale`).
+    #[cfg_attr(not(feature = "gateway"), allow(dead_code))]
+    Stale,
+    /// This node has no identity (`[tls]` unset in a build with `tls`), so it holds no CA anchor and judges no client
+    /// certificate: the signature cannot be checked here, rather than its key being unknown (#745's review).
+    Unverifiable,
 }
 
 #[cfg(feature = "tls")]
@@ -397,6 +404,8 @@ impl ClientSigRefusal {
             Self::BadSignature => "client_signature_invalid",
             Self::KeyUnknown => "client_key_unknown",
             Self::KeySuperseded => "client_key_superseded",
+            Self::Stale => "stale",
+            Self::Unverifiable => "client_signature_unverifiable",
         }
     }
 }
@@ -412,13 +421,15 @@ pub(crate) fn binding_of(kind: &str, payload: &[u8], resource_claim: Option<&str
         let name = v["params"]["name"].as_str().ok_or(unbound)?;
         let (op, res, d) = door_binding_mcp(name, &v["params"]["arguments"]).map_err(|_| ClientSigRefusal::UnsafeInteger)?;
         // The envelope's claim, where present, must name the same tool.
-        if resource_claim.is_some_and(|r| r.split('@').next() != Some(res.as_str())) {
+        // The claim is `{resource}@{provider}`: the provider is after the **last** `@`, so a name holding one still binds
+        // (#745's review).
+        if resource_claim.is_some_and(|r| r.rsplit_once('@').map_or(r, |(head, _)| head) != res.as_str()) {
             return Err(unbound);
         }
         return Ok((op, res, d));
     }
     if kind == "skill.invoke" {
-        let skill = resource_claim.and_then(|r| r.split('@').next()).and_then(|r| r.strip_prefix("skill:")).ok_or(unbound)?;
+        let skill = resource_claim.map(|r| r.rsplit_once('@').map_or(r, |(head, _)| head)).and_then(|r| r.strip_prefix("skill:")).ok_or(unbound)?;
         let text = std::str::from_utf8(payload).map_err(|_| unbound)?;
         return Ok(door_binding_a2a(skill, text));
     }
@@ -449,6 +460,9 @@ fn check_bound(ctx: &super::TaskCtx, principal: &str, binding: &(String, String,
     let key: [u8; 32] = b64.decode(&cs.k).ok().and_then(|v| v.try_into().ok()).ok_or(ClientSigRefusal::Malformed)?;
     let sig: [u8; 64] = b64.decode(&cs.sig).ok().and_then(|v| v.try_into().ok()).ok_or(ClientSigRefusal::Malformed)?;
     let instance = cn.instance().ok_or(ClientSigRefusal::Malformed)?;
+    if ctx.tls.get().is_none() {
+        return Err(ClientSigRefusal::Unverifiable);
+    }
     let (op, res, d) = binding;
     let msg = client_signature_message(principal, op, res, d, cn.t, instance, cn.c);
     if !crate::tls::verify_bytes(&key, &msg, &sig) {
@@ -478,7 +492,12 @@ pub(crate) fn check_at_door(
 ) -> Result<(), ClientSigRefusal> {
     let Some(principal) = principal else { return Ok(()) };
     let binding = binding.map_err(|_| ClientSigRefusal::UnsafeInteger)?;
-    check_bound(ctx, principal, &binding, &signed.0, &signed.1).map(|_| ())
+    let checked = check_bound(ctx, principal, &binding, &signed.0, &signed.1)?;
+    // The issue time on the provider's window: a skewed clock is refused here, before a grant is spent.
+    if !super::gateway_caller::client_issue_time_fresh(ctx, checked.issued_at_ms, ctx.hlc.decision_now_ms()) {
+        return Err(ClientSigRefusal::Stale);
+    }
+    Ok(())
 }
 
 #[cfg(feature = "tls")]

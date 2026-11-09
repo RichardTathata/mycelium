@@ -1423,7 +1423,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.96.0
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --example eve_fleet_node --features compliance,llm
-      - run: cargo build --bin mycelium --features cli,tls,compliance,llm
+      # The release's NODE_FEATURES (release.yml), so the exit run's gateway is the binary as it ships, in debug.
+      - run: cargo build --bin mycelium --features cli,tls,compliance,a2a,llm,metrics
       - uses: actions/setup-node@v4
         with:
           node-version: 24
@@ -1439,7 +1440,8 @@ jobs:
       # `[authority]`, called under a grant held by the service `token:fleet/forecaster` (its client certificate from
       # `mycelium tls issue --client`), signed with `cs`/`cn` through mycelium-ts's McpClient: refused without a grant,
       # run under one, the grant across the gateway's restart, a foreign key, a revoked grant and a superseded key
-      # refused. The debug builds here; the release builds' run is the dated row on what-is-proven.md.
+      # refused. Debug builds of the release's features here; the local release builds' run is the dated row on
+      # what-is-proven.md.
       - run: node examples/eve_weather/run_client_grant.mjs | tee "$RUNNER_TEMP/client-grant.log"
       - run: grep -q '^CLIENT GRANT OK$' "$RUNNER_TEMP/client-grant.log"
 

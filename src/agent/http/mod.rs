@@ -163,7 +163,7 @@ use signals::*;
 // The public surface of this module, unchanged: what `agent/mod.rs`, `a2a.rs` and `provider_enforcement.rs` name.
 pub use authz::{GatewayPreflight, GatewayRefusal};
 #[cfg(all(feature = "gateway", feature = "tls"))]
-pub(crate) use authz::{ae_decide, ae_preflight, ae_preflight_door, ae_record_execution, observed_execution, Decided, Preflight};
+pub(crate) use authz::{ae_decide, ae_preflight, ae_preflight_door, ae_record_execution, observed_execution, release_grant_claim_after, Decided, Preflight};
 #[cfg(all(test, feature = "gateway", feature = "tls"))]
 pub(crate) use authz::TEST_HISTORY_REFUSES_ADMIT;
 #[cfg(all(test, feature = "gateway", feature = "tls", feature = "consensus"))]

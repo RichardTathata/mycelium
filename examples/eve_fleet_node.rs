@@ -74,6 +74,11 @@ async fn node() {
     cfg.bind_port = port;
     cfg.reconnect_backoff_secs = 1;
     cfg.health_check_interval_secs = 1;
+    // A writer idle bound for the measurement of a peer restart's window (identity-and-lifecycle §9 O2); the default
+    // otherwise.
+    if let Ok(secs) = std::env::var("WRITER_IDLE_TIMEOUT_SECS") {
+        cfg.writer_idle_timeout_secs = secs.parse().expect("WRITER_IDLE_TIMEOUT_SECS");
+    }
     cfg.tls = Some(TlsConfig { auto_cert_dir: cert_dir, ..Default::default() });
     cfg.bootstrap_peers = std::env::var("PEERS")
         .unwrap_or_default()

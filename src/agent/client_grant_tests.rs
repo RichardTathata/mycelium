@@ -504,3 +504,56 @@ async fn a_signed_call_presenting_a_client_grant_runs_at_mcp() {
     assert!(called.get("result").is_some(), "UNSPENT: the honest call under the same grant was refused: {called}");
     assert_eq!(ran_after, 1, "once");
 }
+
+fn describe(p: &crate::agent::http::Preflight) -> String {
+    match p {
+        crate::agent::http::Preflight::Proceed { evidence, grant_claim, .. } => format!("proceed ({}; claim {grant_claim:?})", evidence.reason),
+        crate::agent::http::Preflight::Refuse(r) => format!("refuse ({r})"),
+        crate::agent::http::Preflight::Inert => "inert".into(),
+    }
+}
+
+/// **A grant the provider refused before running is given back** (I1's PR 4, #745's review, item 1). The gateway's
+/// fold of client certificates can lead the provider's: the gateway judges the key current, claims the grant's use
+/// and dispatches, and the provider answers `client_key_unknown` — before anything ran. That answer, `stale`, and the
+/// other `client_signature_*` / `client_key_*` refusals tombstone the gateway's marker and release its claim, so the
+/// retry is admitted once; any other reply leaves the grant spent. Driven at the preflight: the permit claims the
+/// grant; the provider's `client_key_unknown` body releases it (the marker gone, a second permit admitted); a tool's
+/// answer does not (the third refused `GrantUsed`). Seen failing first with the release doing nothing (the second
+/// permit refused: the grant used at the gateway).
+#[tokio::test]
+async fn a_grant_the_provider_refused_before_running_is_given_back() {
+    use crate::agent::http::{ae_preflight, release_grant_claim_after, Preflight};
+    let dir = scratch("release");
+    let http_port = alloc_port();
+    let (a, _ran) = started(&dir, http_port).await;
+    let key = forecaster_key(&a, &dir);
+    let args = serde_json::json!({"city": "Lille"});
+    let (asked, grant) = ask_and_issue(http_port, &args).await;
+    let resource = asked["resource"].as_str().unwrap().to_string();
+    let params = serde_json::json!({"_meta": presented(&grant, &resource, &args, &key)});
+    let caller = crate::agent::gateway_caller::ResolvedPrincipal { principal: FORECASTER.into(), scopes: vec!["mcp:invoke".into()] };
+    let ctx = std::sync::Arc::clone(&a.task_ctx);
+    let permit = || ae_preflight(&ctx, Some(&caller), "tools/call", &resource, &args, &params, "gateway:mcp/tools/call");
+    let marker = format!("grant/{}/{}/used/gateway", crate::agent::gateway_authority::grant_holder_segment(FORECASTER), grant.mandate.term.as_str());
+
+    let first = permit().await;
+    let used_markers: Vec<String> = crate::store::scan_kv_prefix(&ctx.kv_state, "grant/").into_iter().map(|(k, _)| k.to_string()).filter(|k| k.contains("/used/")).collect();
+    let claimed = matches!(&first, Preflight::Proceed { grant_claim: Some(_), .. }) && mycelium_core::ops::kv_get(&ctx, &marker).is_some();
+    // The provider's refusal as a tool's serve loop answers it.
+    let refused_body = bytes::Bytes::from(serde_json::json!({"jsonrpc": "2.0", "id": 1, "error": {"code": -32022, "message": "caller context refused: the client's signature on this call was refused: client_key_unknown", "data": {"reason": "client_key_unknown"}}}).to_string());
+    let released = release_grant_claim_after(&ctx, &first, &Ok(refused_body)).await;
+    let marker_gone = mycelium_core::ops::kv_get(&ctx, &marker).is_none();
+    let second = permit().await;
+    let kept = release_grant_claim_after(&ctx, &second, &Ok(bytes::Bytes::from_static(br#"{"jsonrpc":"2.0","id":1,"result":{"content":[]}}"#))).await;
+    let third = permit().await;
+    a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert!(claimed, "the first permit claimed the grant at the gateway, its marker on disk: {}; markers {:?}", describe(&first), used_markers);
+    assert_eq!(released.as_deref(), Some("client_key_unknown"));
+    assert!(marker_gone, "the marker was tombstoned");
+    assert!(matches!(second, Preflight::Proceed { .. }), "RELEASED: the retry under the same grant was refused");
+    assert_eq!(kept, None, "a tool's answer gives nothing back");
+    assert!(matches!(third, Preflight::Refuse(_)), "the grant is spent after a call that ran");
+}

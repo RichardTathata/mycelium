@@ -175,7 +175,9 @@ where
                 let response = json!({
                     "jsonrpc": "2.0",
                     "id": rpc_req["id"],
-                    "error": {"code": -32022, "message": format!("caller context refused: {e}")},
+                    // The reason travels too (#745's review): a client tells `client_key_unknown` (retry) from
+                    // `client_key_superseded` (final), and the gateway gives back a grant's use refused before running.
+                    "error": {"code": -32022, "message": format!("caller context refused: {e}"), "data": {"reason": e.code()}},
                 });
                 rpc_respond_ctx(&ctx, &req, Bytes::from(response.to_string().into_bytes()));
                 continue;
@@ -404,7 +406,9 @@ pub(super) async fn run_mcp_client_task(
                 let response = json!({
                     "jsonrpc": "2.0",
                     "id": rpc_req["id"],
-                    "error": {"code": -32022, "message": format!("caller context refused: {e}")},
+                    // The reason travels too (#745's review): a client tells `client_key_unknown` (retry) from
+                    // `client_key_superseded` (final), and the gateway gives back a grant's use refused before running.
+                    "error": {"code": -32022, "message": format!("caller context refused: {e}"), "data": {"reason": e.code()}},
                 });
                 rpc_respond_ctx(&ctx, &req, Bytes::from(response.to_string().into_bytes()));
                 continue;

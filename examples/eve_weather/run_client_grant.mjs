@@ -36,6 +36,8 @@ const target = process.env.CARGO_TARGET_DIR ?? path.join(repo, "target");
 const profile = process.env.EVE_PROFILE ?? "debug";
 const nodeBin = path.resolve(repo, process.env.EVE_FLEET_NODE ?? path.join(target, profile, "examples", "eve_fleet_node"));
 const myceliumBin = path.resolve(repo, process.env.MYCELIUM_BIN ?? path.join(target, profile, "mycelium"));
+// The member node's binary: the same by default; another release's to show an older node on the fleet.
+const memberBin = path.resolve(repo, process.env.MYCELIUM_MEMBER_BIN ?? myceliumBin);
 const base = Number(process.env.CLIENT_GRANT_BASE_PORT ?? 9550);
 const work = fs.mkdtempSync(path.join(os.tmpdir(), "client-grant-"));
 const children = new Map();
@@ -110,7 +112,7 @@ function nodeToml(i, { authority }) {
 const configs = { 1: nodeToml(1, { authority: true }), 2: nodeToml(2, { authority: false }) };
 
 function startBinary(i) {
-  const child = spawn(myceliumBin, ["-c", configs[i]], { env: { ...process.env, RUST_LOG: process.env.RUST_LOG ?? "warn" }, stdio: ["ignore", "pipe", "pipe"] });
+  const child = spawn(i === 2 ? memberBin : myceliumBin, ["-c", configs[i]], { env: { ...process.env, RUST_LOG: process.env.RUST_LOG ?? "warn" }, stdio: ["ignore", "pipe", "pipe"] });
   const log = fs.createWriteStream(path.join(work, `node-${i}.log`), { flags: "a" });
   child.stdout.pipe(log);
   child.stderr.pipe(log);
@@ -130,7 +132,9 @@ async function meshed() {
     await at1.set(key, Buffer.from(String(Date.now())));
     return (await at3.get(key)) !== null;
   }, 120_000);
-  // And back: the provider's reply travels on its own writer to the gateway.
+  // And back: the provider's reply travels on its own writer to the gateway. CLIENT_GRANT_NO_BACK_PROBE=1 skips it, to
+  // measure O2 (plan §9) with the provider's writer left as it is.
+  if (process.env.CLIENT_GRANT_NO_BACK_PROBE === "1") return;
   await until(`a write at node 3 reaching node 1 (${key}/back)`, async () => {
     await at3.set(`${key}/back`, Buffer.from(String(Date.now())));
     return (await at1.get(`${key}/back`)) !== null;
@@ -147,7 +151,9 @@ const eve = spawn(nodeBin, [], {
   env: {
     ...process.env, NAME: "eve-3", DATA_DIR: path.join(work, "node-3"), CA_DIR: ca, PORT: String(node(3).gossip),
     HTTP_PORT: String(node(3).http), PEERS: `127.0.0.1:${node(1).gossip}`, PROVIDER: provider, EVE_MCP_URL: server.url,
-    TOKENS: "forecaster:forecaster-token:mcp:invoke,prober:prober-token:kv:read+kv:write", RUST_LOG: process.env.RUST_LOG ?? "warn",
+    TOKENS: "forecaster:forecaster-token:mcp:invoke,prober:prober-token:kv:read+kv:write",
+    ...(process.env.PROVIDER_WRITER_IDLE_TIMEOUT_SECS ? { WRITER_IDLE_TIMEOUT_SECS: process.env.PROVIDER_WRITER_IDLE_TIMEOUT_SECS } : {}),
+    RUST_LOG: process.env.RUST_LOG ?? "warn",
   },
   stdio: ["ignore", "pipe", "pipe"],
 });
@@ -185,7 +191,6 @@ async function publish(cert) {
 }
 const first = issueClient(false);
 const published = await publish(first.cert);
-await sleep(2_000); // the record gossips to the provider, which checks `cs` at its receive boundary
 const signer = new sdk.ClientSigner(first.key, "token:fleet/forecaster");
 const mcp = new sdk.McpClient(gw, { token: "forecaster-token", signer });
 const supervisor = new sdk.MyceliumAgent("127.0.0.1", node(1).http, 30_000, { token: "treasurer-token" });
@@ -196,6 +201,24 @@ async function refusal(call) {
   fail("the call was not refused");
 }
 const reason = (e) => e?.data?.reason ?? e?.reason ?? e?.message;
+function expectReason(e, want, what) {
+  if (reason(e) !== want) fail(`${what}: expected ${want}, got ${reason(e)} (${e?.message})`);
+}
+// The provider checks `cs` at its receive boundary against its own fold of client certificates, which can lag the
+// gateway's: it answers `client_key_unknown`, before anything ran, and the gateway gives the grant's use back — so the
+// call is retried, under the same grant, until the record has reached the provider. Counted on the summary.
+measured.key_unknown_retries = 0;
+async function callRetrying(client, name, args, opts) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await client.callTool(name, args, opts);
+    } catch (e) {
+      if (reason(e) !== "client_key_unknown" || attempt >= 100) throw e;
+      measured.key_unknown_retries++;
+      await sleep(50);
+    }
+  }
+}
 async function issued(args) {
   const asked = await mcp.requestGrant("get_weather", args);
   await until(`request ${asked.request} pending at the supervisor`, async () => (await supervisor.grantsPending()).some((r) => r.request === asked.request));
@@ -209,13 +232,16 @@ const text = (result) => result?.content?.[0]?.text ?? JSON.stringify(result);
 // ── Without a grant, refused; under the forecaster's grant, it runs ─────────
 const leeds = { city: "Leeds" };
 const without = await timed("refused_without_a_grant_ms", () => refusal(() => mcp.callTool("get_weather", leeds)));
+expectReason(without, "authority_not_established", "without a grant");
 console.log(`without a grant: REFUSED — ${reason(without)}`);
 const g1 = await timed("request_issue_read_ms", () => issued(leeds));
-const ran = await timed("granted_call_ms", () => mcp.callTool("get_weather", leeds, { grant: g1.grant }));
+const ran = await timed("granted_call_ms", () => callRetrying(mcp, "get_weather", leeds, { grant: g1.grant }));
 if (!text(ran).includes("Sunny")) fail(`the granted call: ${JSON.stringify(ran)}`);
 console.log(`under token:fleet/forecaster's grant: PERMITTED — ${text(ran)}`);
 const again = await refusal(() => mcp.callTool("get_weather", leeds, { grant: g1.grant }));
-console.log(`the same grant again: REFUSED — ${reason(again)}`);
+expectReason(again, "action_denied", "the same grant again");
+if (!String(again.message).includes("already used")) fail(`the same grant again: ${again.message}`);
+console.log(`the same grant again: REFUSED — ${reason(again)}, already used at the gateway`);
 
 // ── A foreign key's signature, refused at the gateway's own check ───────────
 const foreign = new sdk.ClientSigner(generateKeyPairSync("ed25519").privateKey.export({ format: "pem", type: "pkcs8" }), "token:fleet/forecaster");
@@ -235,7 +261,9 @@ startBinary(1);
 await readyAt(1);
 await until("node 1 lists get_weather after its restart", async () => (await plain.listTools()).some((t) => t.name === "get_weather"));
 await meshed();
-const afterRestart = await mcp.callTool("get_weather", paris, { grant: g2.grant });
+// CLIENT_GRANT_SETTLE_MS: a wait after the probes, to measure O2's window (plan §9).
+await sleep(Number(process.env.CLIENT_GRANT_SETTLE_MS ?? 0));
+const afterRestart = await callRetrying(mcp, "get_weather", paris, { grant: g2.grant });
 measured.steps.restart_to_granted_call_ms = Date.now() - restarted;
 if (!text(afterRestart).includes("Sunny")) fail(`the grant after the restart: ${JSON.stringify(afterRestart)}`);
 console.log(`a grant issued before the gateway's restart, presented after it: PERMITTED — ${text(afterRestart)}`);
@@ -245,14 +273,14 @@ const york = { city: "York" };
 const g3 = await issued(york);
 await supervisor.grantRevoke(g3.row.agent, g3.row.request, { reason: "exit run" });
 const revoked = await refusal(() => mcp.callTool("get_weather", york, { grant: g3.grant }));
-if (!String(revoked.message).includes("revoked") && !JSON.stringify(revoked.data ?? {}).includes("revoked")) fail(`the revoked grant: ${revoked.message}`);
-console.log(`a revoked grant: REFUSED — ${revoked.message.slice(0, 120)}`);
+expectReason(revoked, "authority_not_established", "a revoked grant");
+if (!JSON.stringify(revoked.data ?? {}).includes("revoked")) fail(`the revoked grant names no revocation: ${JSON.stringify(revoked.data)}`);
+console.log(`a revoked grant: REFUSED — ${reason(revoked)}, the grant's term revoked`);
 
 // ── A newer certificate supersedes the older key ─────────────────────────────
-await sleep(5);
+await sleep(5); // the serial is the issue time in ms: a second certificate in the same ms would tie
 const second = issueClient(true);
 await publish(second.cert);
-await sleep(2_000);
 const superseded = await refusal(() => mcp.callTool("get_weather", leeds));
 if (reason(superseded) !== "client_key_superseded") fail(`the superseded key: ${reason(superseded)}`);
 console.log(`the older key after a newer certificate: REFUSED — ${reason(superseded)}`);
@@ -263,7 +291,7 @@ await until("request 4 pending", async () => (await supervisor.grantsPending()).
 const row4 = (await supervisor.grantsPending()).find((r) => r.request === asked4.request);
 await supervisor.grantDecide(row4.agent, row4.request, "issue");
 const g4 = await newMcp.waitForGrant(asked4.request, { timeoutMs: 30_000 });
-const ranNew = await newMcp.callTool("get_weather", madrid, { grant: g4.grant });
+const ranNew = await callRetrying(newMcp, "get_weather", madrid, { grant: g4.grant });
 if (!text(ranNew).includes("Sunny")) fail(`the current key's call: ${JSON.stringify(ranNew)}`);
 console.log(`the current key, under its own grant: PERMITTED — ${text(ranNew)}`);
 
