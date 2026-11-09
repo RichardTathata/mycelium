@@ -44,7 +44,9 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 
 use super::action_evaluator::MandateBinding;
-use crate::knowledge::issuer::{MemberKeySource, TrustedExternalIssuers};
+use crate::knowledge::issuer::{MemberKeySource, SharedExternalIssuers};
+#[cfg(test)]
+use crate::knowledge::issuer::TrustedExternalIssuers;
 use crate::mandate::authority::{
     AuthorizedWork, CheckpointOffer, ExecutionDenial, ExecutionGate, RevocationView, SignedRevocationCheckpoint,
 };
@@ -105,7 +107,8 @@ struct AuthorityState {
 /// A gateway's execution authority: attached with `GossipAgent::with_execution_authority`.
 pub struct ExecutionAuthority {
     state: Mutex<AuthorityState>,
-    external: TrustedExternalIssuers,
+    /// Shared (identity-and-lifecycle I1): the node's client-certificate fold feeds client holders' current keys here.
+    external: SharedExternalIssuers,
     /// Closure plan C8: installed epochs that survive a restart, if attached.
     durable: std::sync::OnceLock<std::sync::Arc<crate::mandate::authority::DurableEpochs>>,
     /// Closure plan C10, lock-order row 48: work admitted under a mandate and still running. Leaf:
@@ -124,9 +127,51 @@ pub struct ExecutionAuthority {
 /// standing as final (adopter-surface X3, second PR).
 pub(crate) const GRANT_REVOKED: &str = "the grant is revoked";
 
-/// The key a grant's checkpoints are written under by the issuing gateway: `grant/{agent}/{request}/checkpoint`.
+/// The key a grant's checkpoints are written under by the issuing gateway: `grant/{holder segment}/{request}/checkpoint`.
 pub(crate) fn grant_checkpoint_key(grant: &crate::mandate::Mandate) -> String {
-    format!("grant/{}/{}/checkpoint", grant.holder.as_str(), grant.term.as_str())
+    format!("grant/{}/{}/checkpoint", grant_holder_segment(grant.holder.as_str()), grant.term.as_str())
+}
+
+/// A grant holder as one `grant/` key segment (identity-and-lifecycle I1): a node principal (`node:{ip}:{port}`) is
+/// written as it is, as every grant before I1 was; any other principal — a client's `token:{issuer}/{name}`, which
+/// holds a `/` — as the lowercase hex of its bytes. The two never collide: hex has no `:`.
+pub(crate) fn grant_holder_segment(holder: &str) -> String {
+    if holder.starts_with("node:") {
+        holder.to_string()
+    } else {
+        holder.bytes().map(|b| format!("{b:02x}")).collect()
+    }
+}
+
+/// The holder a `grant/` key segment names ([`grant_holder_segment`]'s inverse): `None` for a segment that is
+/// neither a node principal nor the canonical hex of a UTF-8 principal.
+pub(crate) fn grant_holder_from_segment(segment: &str) -> Option<String> {
+    if segment.starts_with("node:") {
+        return (!segment.contains('/')).then(|| segment.to_string());
+    }
+    if segment.is_empty() || !segment.len().is_multiple_of(2) || !segment.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
+        return None;
+    }
+    let bytes: Option<Vec<u8>> = (0..segment.len()).step_by(2).map(|i| u8::from_str_radix(&segment[i..i + 2], 16).ok()).collect();
+    let holder = String::from_utf8(bytes?).ok()?;
+    // A node principal hex-encoded is not canonical: it is written literally.
+    (!holder.starts_with("node:") && !holder.is_empty()).then_some(holder)
+}
+
+/// The holder a supervisor's door names in its `{agent}` path segment, as `(key segment, principal)`: the key
+/// segment as [`grant_holder_segment`] writes it, **or the principal itself** — the request record's `agent`, which
+/// the SDKs' `grant_decide` / `grant_revoke` put in the path (percent-encoded, so a client principal's `/` stays in
+/// one segment; #743's review, item 2). A client principal holds a `:`, which no hex segment does, so the two
+/// readings never meet. `None` for neither.
+pub(crate) fn grant_holder_from_path(agent: &str) -> Option<(String, String)> {
+    if agent.starts_with("node:") {
+        return grant_holder_from_segment(agent).map(|p| (agent.to_string(), p));
+    }
+    if agent.contains(':') {
+        let segment = grant_holder_segment(agent);
+        return (grant_holder_from_segment(&segment).as_deref() == Some(agent)).then(|| (segment, agent.to_string()));
+    }
+    grant_holder_from_segment(agent).map(|p| (agent.to_string(), p))
 }
 
 /// **Feed one grant's checkpoint from the KV into `authority`** (adopter-surface X3, second PR): the issuing node
@@ -258,7 +303,11 @@ pub struct Assessment {
 impl ExecutionAuthority {
     /// An authority over `gate` (A1) and `verifier` (P2), trusting `external` for authorities and
     /// holders on the configured-external path.
-    pub fn new(gate: ExecutionGate, verifier: GrantVerifier, external: TrustedExternalIssuers) -> Self {
+    ///
+    /// `external` is a [`TrustedExternalIssuers`] or a [`SharedExternalIssuers`]; attached to a node, the authority's set
+    /// is fed each client principal's current key (identity-and-lifecycle I1), so a grant held by a client verifies.
+    pub fn new(gate: ExecutionGate, verifier: GrantVerifier, external: impl Into<SharedExternalIssuers>) -> Self {
+        let external = external.into();
         Self {
             state: Mutex::new(AuthorityState { gate, verifier, revocations: RevocationView::new() }),
             external,
@@ -428,6 +477,12 @@ impl ExecutionAuthority {
         Ok(self.install_epoch(epoch))
     }
 
+    /// The authority's external issuers — the handle the node's client-certificate fold feeds (identity-and-lifecycle
+    /// I1). A clone is the same set.
+    pub fn external_issuers(&self) -> SharedExternalIssuers {
+        self.external.clone()
+    }
+
     /// Offer a revocation checkpoint, at `now_ms`.
     pub fn offer_checkpoint(
         &self,
@@ -435,10 +490,12 @@ impl ExecutionAuthority {
         now_ms: u64,
         members: &impl MemberKeySource,
     ) -> CheckpointOffer {
+        // A snapshot, taken before the state lock: the shared set's lock is never held with another (lock-order row 77).
+        let external = self.external.read().clone();
         let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let st = &mut *st;
         let (policy, clock) = (st.gate.freshness(), st.gate.clock());
-        st.revocations.offer(signed, &policy, clock, now_ms, members, &self.external)
+        st.revocations.offer(signed, &policy, clock, now_ms, members, &external)
     }
 
     /// Install a later epoch at the protected resource. Never goes backwards.
@@ -497,9 +554,10 @@ impl ExecutionAuthority {
             }
         }
 
+        let external = self.external.read().clone();
         let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let st = &mut *st;
-        match st.verifier.check(&p.grant, &request, Some(&proof), now_ms, members, &self.external) {
+        match st.verifier.check(&p.grant, &request, Some(&proof), now_ms, members, &external) {
             GrantVerdict::Valid => {}
             GrantVerdict::Superseded { held } => {
                 return refused(MandateRefusal::Superseded { installed: held, presented: m.epoch });
@@ -655,6 +713,53 @@ pub(crate) mod tests {
         let a = auth.assess(CALLER, OP, RES, &DIGEST, Some(&present(&ak, &hk, mandate(1, 50_000), &DIGEST)), 2_000, &none());
         assert_eq!(state(&a), Some(MandateState::Established));
         assert_eq!(a.valid_until_ms, Some(50_000));
+    }
+
+    /// An authority whose shared set trusts nothing by configuration — the holder's key arrives as a client key.
+    fn client_authority(ak: &SigningKey) -> ExecutionAuthority {
+        let auth = authority(ak, &SigningKey::from_bytes(&[99u8; 32]));
+        let set = auth.external_issuers();
+        set.untrust(&IssuerId::new(CALLER).unwrap());
+        auth
+    }
+
+    /// **A client key proves possession, and nothing else** (identity-and-lifecycle I1; #743's review, items 3 and 4).
+    /// The holder's key fed as a client key establishes its grant; a second issuance supersedes it, and a proof by the
+    /// old key is refused at the authority — **whatever order the feeds arrive in** (an older issuance fed after the
+    /// newer is not written back). The same key fed as a client key for the grant's *authority* signs no checkpoint
+    /// and establishes no grant: a client is never an issuer. Seen failing first, one build per plant: the set's
+    /// replacement ignoring issuance (*SUPERSEDED*: the old key, fed last, verified), and `verify_signed_by` reading
+    /// client keys (*ISSUER*: the client-signed checkpoint was accepted).
+    #[test]
+    fn a_client_key_proves_possession_only_and_a_superseded_one_never_returns() {
+        let (ak, old) = keys();
+        let new = SigningKey::from_bytes(&[77u8; 32]);
+        let auth = client_authority(&ak);
+        let set = auth.external_issuers();
+        let holder = IssuerId::new(CALLER).unwrap();
+        auth.offer_checkpoint(&checkpoint(&ak, 1, 1_000, &[]), 1_000, &none());
+        set.set_client_key(holder.clone(), 10, old.verifying_key().to_bytes()).unwrap();
+        let a = auth.assess(CALLER, OP, RES, &DIGEST, Some(&present(&ak, &old, mandate(1, 50_000), &DIGEST)), 2_000, &none());
+        assert_eq!(state(&a), Some(MandateState::Established), "the client key proves possession");
+        // The newer issuance, then the older fed late (a feed that read the marks before the fold raised them).
+        set.set_client_key(holder.clone(), 20, new.verifying_key().to_bytes()).unwrap();
+        set.set_client_key(holder, 10, old.verifying_key().to_bytes()).unwrap();
+        let by_old = auth.assess(CALLER, OP, RES, &DIGEST, Some(&present(&ak, &old, mandate(1, 50_000), &DIGEST)), 2_000, &none());
+        let by_new = auth.assess(CALLER, OP, RES, &DIGEST, Some(&present(&ak, &new, mandate(1, 50_000), &DIGEST)), 2_000, &none());
+        assert!(matches!(state(&by_old), Some(MandateState::Unknown(_))), "SUPERSEDED: a proof by the superseded key: {by_old:?}");
+        assert_eq!(state(&by_new), Some(MandateState::Established));
+
+        // A client key for the authority's own id: no checkpoint, no grant.
+        let rogue = SigningKey::from_bytes(&[78u8; 32]);
+        let auth = client_authority(&ak);
+        let set = auth.external_issuers();
+        set.untrust(&IssuerId::new("operator:acme").unwrap());
+        set.set_client_key(IssuerId::new("operator:acme").unwrap(), 1, rogue.verifying_key().to_bytes()).unwrap();
+        set.set_client_key(IssuerId::new(CALLER).unwrap(), 1, old.verifying_key().to_bytes()).unwrap();
+        let offered = auth.offer_checkpoint(&checkpoint(&rogue, 1, 1_000, &[]), 1_000, &none());
+        assert!(!matches!(offered, CheckpointOffer::Accepted), "ISSUER: a client key signed a mandate authority's checkpoint: {offered:?}");
+        let a = auth.assess(CALLER, OP, RES, &DIGEST, Some(&present(&rogue, &old, mandate(1, 50_000), &DIGEST)), 2_000, &none());
+        assert!(matches!(state(&a), Some(MandateState::Unknown(_))), "ISSUER: a client key established a grant as its authority: {a:?}");
     }
 
     /// **The holder must be the caller.** Someone else's grant is not established for you.

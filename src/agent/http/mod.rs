@@ -129,7 +129,7 @@ mod llm_bridge;
 mod mcp_bridge;
 /// The supervisor's door for grants (adopter-surface X3): a grant is signed by the node's identity and decided by the preflight.
 #[cfg(feature = "tls")]
-mod grants;
+pub(crate) mod grants;
 #[cfg(all(feature = "tls", feature = "compliance"))]
 pub(crate) use grants::{decide_grant, GrantDecision, GrantRefusal};
 #[cfg(all(test, feature = "tls", feature = "consensus"))]
@@ -395,6 +395,8 @@ pub(super) async fn run_http_server(
     let gateway = gateway
         .route("/grants/pending",           get(grants::gw_grants_pending))
         .route("/grants/stream",            get(grants::gw_grants_stream))
+        .route("/grants/request",           post(grants::gw_grant_request))
+        .route("/grants/request/{request}", get(grants::gw_grant_request_status))
         .route("/grants/{agent}/{request}", post(grants::gw_grant_decide))
         .route("/grants/{agent}/{request}/revoke", post(grants::gw_grant_revoke));
 

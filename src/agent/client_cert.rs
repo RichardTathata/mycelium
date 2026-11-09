@@ -139,7 +139,7 @@ pub enum ClientKeyStanding {
 /// What this node keeps between client-cert folds. Lock-free (papaya and atomics).
 #[derive(Default)]
 pub(crate) struct ClientCertLedger {
-    marks: papaya::HashMap<String, Mark>,
+    pub(super) marks: papaya::HashMap<String, Mark>,
     /// The parse and chain verdict per distinct certificate (by SHA-256), bounded by [`CERT_CACHE_MAX`].
     cert_cache: papaya::HashMap<[u8; 32], Option<Facts>>,
     /// The records this gateway published, newest per principal, `(path, der)`: republished when missing or
@@ -365,6 +365,7 @@ fn fold(ctx: &TaskCtx, tls: &mycelium_core::tls::NodeTls, principal: &str) -> Ha
     }
     if let Some(newest) = seen.iter().map(|(k, at)| Mark { issued: *at, key: *k }).max() {
         ctx.client_certs.raise(principal, newest);
+        feed_client_keys(ctx);
     }
     seen
 }
@@ -430,6 +431,7 @@ fn refresh_once(ctx: &TaskCtx) {
         ctx.client_certs.raise(&principal, mark);
     }
     republish_own(ctx);
+    feed_client_keys(ctx);
 }
 
 /// Republish each record this gateway published that is missing from the store or holds other bytes, unless the
@@ -533,6 +535,7 @@ pub fn publish(ctx: &Arc<TaskCtx>, der: &[u8]) -> Result<Published, PublishRefus
     let path = client_cert_key(&principal, &id.key);
     let _ = super::helpers::kv_set(ctx, Arc::from(path.as_str()), bytes::Bytes::copy_from_slice(der));
     ctx.client_certs.raise(&principal, Mark { issued, key: id.key });
+    feed_client_keys(ctx);
     ctx.client_certs.hold_published(&principal, path, der.to_vec());
     Ok(Published { principal, key: id.key, issued_ms: issued })
 }
@@ -548,5 +551,22 @@ impl ClientCertLedger {
     /// The record path this gateway holds as `principal`'s published record.
     pub(crate) fn published_path_for_test(&self, principal: &str) -> Option<String> {
         self.published.pin().get(principal).map(|(p, _)| p.clone())
+    }
+}
+
+/// Feed every client principal's current key — the fold's marks — to each registered external-issuer set
+/// (identity-and-lifecycle I1): an execution authority then verifies a client holder's possession proof by it. A
+/// superseded key is replaced, never kept beside its successor. Run after each fold and when an authority attaches.
+pub(crate) fn feed_client_keys(ctx: &TaskCtx) {
+    let sinks: Vec<crate::knowledge::issuer::SharedExternalIssuers> = ctx.client_key_sinks.pin().values().cloned().collect();
+    if sinks.is_empty() {
+        return;
+    }
+    let marks: Vec<(String, Mark)> = ctx.client_certs.marks.pin().iter().map(|(p, m)| (p.clone(), *m)).collect();
+    for (principal, mark) in marks {
+        let Some(issuer) = crate::knowledge::IssuerId::new(&principal) else { continue };
+        for sink in &sinks {
+            let _ = sink.set_client_key(issuer.clone(), mark.issued, mark.key);
+        }
     }
 }
