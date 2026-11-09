@@ -229,7 +229,7 @@ check-full: check
 	cargo test  --features tls,a2a --test '*'           # every root integration test, by discovery (rule 3)
 	cargo test  --features tls,a2a --bins                # the skillrunner binary's unit tests
 	cargo test  --features tls,a2a --doc                 # the crate's doctests (cargo will not mix --doc with other targets)
-	cargo test  -p mycelium-wasm-host --features stem,gateway,llm   # rule_catalogue, signed-entry gateway, provisioner gateway, [[serve]]
+	cargo test  -p mycelium-wasm-host --features stem,gateway,llm,compliance   # rule_catalogue, signed-entry gateway, provisioner gateway, [[serve]]
 	cargo test  -p mycelium-effects --features tuple-space,envelope --test '*'
 	python3 -m pytest -q langgraph-checkpoint-mycelium/tests mycelium-py/tests strands-session-mycelium/tests   # the live suites skip without a node
 

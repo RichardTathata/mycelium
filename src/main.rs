@@ -90,6 +90,9 @@ async fn run(config: GossipConfig, trace: Option<Arc<mycelium::decision::Decisio
     let interactive = std::env::args().any(|a| a == "-i" || a == "--interactive");
     let shutdown = if interactive { None } else { Some(mycelium::shutdown::ShutdownSignal::install()?) };
 
+    // `gateway_a2a = true` (a build with `a2a`, as the published binary is) mounts the card and `/a2a` inside `start()`,
+    // as `with_a2a()` would here — so an embedder, the stem and this binary honour the one switch the same way, and a
+    // build without `a2a` refuses it there by name.
     agent.start().await?;
     // The node votes. A node that never started a listener answered every quorum it was asked to join
     // with silence, so a fleet of `mycelium` binaries timed out on each consistent write, lock and

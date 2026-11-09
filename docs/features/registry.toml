@@ -379,7 +379,7 @@ ids = ["cargo:mycelium/metrics", "cargo:mycelium-core/metrics", "cargo:mycelium/
 name = "The stem node"
 page = "stem.md"
 example = "first_stem_fleet"
-ids = ["concept:stem", "cargo:mycelium-wasm-host/stem"]
+ids = ["concept:stem", "cargo:mycelium-wasm-host/stem", "cargo:mycelium-wasm-host/compliance"]
 
 [[feature]]
 name = "Demand-driven provisioning"

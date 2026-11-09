@@ -380,7 +380,9 @@ jobs:
       # claimed "gated in CI" since v2.20.0), `gateway` (signed entries across two nodes), the provisioner's
       # gateway tests and the stem's `[[serve]]` tests — ran in no step until 2026-10-06: no wasm-host step
       # enabled those features without a name filter.
-      - run: ./scripts/ci-retest.sh -p mycelium-wasm-host --features stem,gateway,llm
+      # `compliance`: the published stem's set (release.yml's STEM_FEATURES) — `tests/stem_compliance.rs` starts the
+      # binary with a token table and an `[authority]` table.
+      - run: ./scripts/ci-retest.sh -p mycelium-wasm-host --features stem,gateway,llm,compliance
       # #641's review, round 4 (N1): a write root's filesystem mounted a second time (a bind mount). The test
       # mounts, so it runs alone, as root, in a mount namespace of its own; its guard makes a failure to
       # mount a failure rather than a skip. The binary is the one the first step built.
@@ -425,6 +427,19 @@ jobs:
       - run: cargo test -p mycelium-wasm-host --lib a_large_blob_stages_to_disk_within_a_memory_bound -- --ignored
       # The stem node binary (design-time-tooling.md §13): opt-in feature, so check it explicitly.
       - run: cargo check -p mycelium-wasm-host --bin mycelium-stem --bin mycelium-artifact --features stem
+      # And with the published set (release.yml's STEM_FEATURES), linted, so a release build is not the first to compile it.
+      - run: cargo clippy -p mycelium-wasm-host --bin mycelium-stem --bin mycelium-artifact --features stem,gateway,llm,object_store,compliance -- -D warnings
+      # The published set, run: a stem built with release.yml's STEM_FEATURES by `cargo build` — no dev-dependencies, so
+      # nothing turns `compliance` on that the set does not — starts with a token table and `[authority]`, refuses an
+      # anonymous request and reads the authority guarantees enforced (#749's review, finding 2: the test-built stem
+      # always has `compliance`).
+      - name: The published stem's feature set takes a token table and [authority]
+        run: |
+          set -euo pipefail
+          features=$(sed -n 's/^  STEM_FEATURES: *//p' .github/workflows/release.yml)
+          test -n "$features"
+          cargo build -p mycelium-wasm-host --bin mycelium-stem --features "$features"
+          scripts/check-release-stem.sh target/debug/mycelium-stem
       - run: cargo clippy -p mycelium-wasm-host --all-targets -- -D warnings
 
   wasm-host-macos:

@@ -12,14 +12,15 @@
 #
 # Built by .github/workflows/release.yml, natively on an amd64 and an arm64 runner (no QEMU), the two runtime
 # images merged into one multi-arch manifest. The feature sets are the full ones: a config that names `[tls]`,
-# a token table, `[oidc]` or `[gateway_tls]` refuses to start in a build without the feature (v2.18.1), so a
-# published node must carry them all. `--locked` refuses a Cargo.lock that does not match the manifests.
+# a token table, `[oidc]`, `[gateway_tls]` or `[authority]` refuses to start in a build without the feature
+# (v2.18.1), so a published node — and a published stem, through `mycelium-wasm-host`'s `compliance` — must carry
+# them all. `--locked` refuses a Cargo.lock that does not match the manifests.
 #
 #   docker buildx build -f docker/Dockerfile.node --target export  --output type=local,dest=dist .
 #   docker buildx build -f docker/Dockerfile.node --target runtime -t mycelium:dev .
 
 ARG NODE_FEATURES=cli,tls,compliance,a2a,llm,metrics
-ARG STEM_FEATURES=stem,gateway,llm,object_store
+ARG STEM_FEATURES=stem,gateway,llm,object_store,compliance
 
 FROM rust:1.96-slim-bookworm AS builder
 ARG NODE_FEATURES

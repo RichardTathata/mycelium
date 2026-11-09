@@ -15307,6 +15307,94 @@ async fn a2a_is_anonymous_dispatch_whatever_bearer_is_configured() {
     }
 }
 
+/// `gateway_a2a = true` mounts the card and `/a2a` at `start()`, as `with_a2a()` does, so a node built from
+/// configuration alone in a build with `a2a` — the published `mycelium` binary — serves A2A without code (the published
+/// stem has no `a2a`, and refuses the switch: `the_a2a_switch_in_a_build_without_a2a_refuses_the_start`). A node that does not
+/// set it serves neither. The mount is seen before `start()` binds, so the start-time warning and the guarantee
+/// report (and `mycelium doctor`, which never starts) read it: `a2a.admission` is applicable, not configured without
+/// an evaluator. Seen failing first: the field parsed and nothing was mounted (the card answered 404).
+#[cfg(feature = "a2a")]
+#[tokio::test]
+async fn the_a2a_switch_mounts_the_card_and_a2a_at_start() {
+    use crate::agent::guarantee::Resolution;
+    let start = |a2a: bool| async move {
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = alloc_port();
+        cfg.http_port = Some(alloc_port());
+        cfg.gateway_a2a = a2a;
+        let http_port = cfg.http_port.unwrap();
+        let agent = GossipAgent::new(NodeId::new("127.0.0.1", cfg.bind_port).unwrap(), cfg);
+        (agent, http_port)
+    };
+    let http = reqwest::Client::new();
+    let card_status = |port: u16| {
+        let http = http.clone();
+        async move {
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            loop {
+                match http.get(format!("http://127.0.0.1:{port}/.well-known/agent-card.json")).send().await {
+                    Ok(r) => return r.status().as_u16(),
+                    Err(e) => {
+                        assert!(std::time::Instant::now() < deadline, "the gateway never answered: {e}");
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                }
+            }
+        }
+    };
+
+    let (on, on_port) = start(true).await;
+    assert!(on.a2a_dispatch_is_anonymous(), "the switch counts before start(): the warning and the doctor read it");
+    let e = on.guarantee_report().entry("a2a.admission").cloned().expect("a2a.admission");
+    assert!(matches!(e.resolution, Resolution::NotConfigured { .. }), "applicable, and open without an evaluator: {:?}", e.resolution);
+    on.start().await.expect("starts");
+    assert_eq!(card_status(on_port).await, 200, "the card is served");
+    let r = http.post(format!("http://127.0.0.1:{on_port}/a2a"))
+        .json(&serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "GetTask", "params": {"id": "none"}}))
+        .send().await.unwrap();
+    assert_eq!(r.status(), 200, "/a2a answers as JSON-RPC");
+    let v: serde_json::Value = r.json().await.unwrap();
+    assert!(v["error"].is_object() && v["jsonrpc"] == "2.0", "a JSON-RPC answer from /a2a: {v}");
+    on.shutdown().await;
+
+    let (off, off_port) = start(false).await;
+    assert!(!off.a2a_dispatch_is_anonymous());
+    let e = off.guarantee_report().entry("a2a.admission").cloned().expect("a2a.admission");
+    assert!(matches!(e.resolution, Resolution::NotApplicable { .. }), "{:?}", e.resolution);
+    off.start().await.expect("starts");
+    assert_eq!(card_status(off_port).await, 404, "off by default: no card");
+    off.shutdown().await;
+}
+
+/// The switch and `with_a2a()` together mount one router — the second is a no-op, not a second merge of the
+/// same paths (which axum refuses by panicking).
+#[cfg(feature = "a2a")]
+#[tokio::test]
+async fn the_a2a_switch_beside_with_a2a_mounts_once() {
+    let mut cfg = GossipConfig::default();
+    cfg.bind_port = alloc_port();
+    cfg.http_port = Some(alloc_port());
+    cfg.gateway_a2a = true;
+    let agent = GossipAgent::new(NodeId::new("127.0.0.1", cfg.bind_port).unwrap(), cfg).with_a2a().with_a2a();
+    agent.start().await.expect("starts with one /a2a router");
+    agent.shutdown().await;
+}
+
+/// `gateway_a2a` in a build without `a2a` refuses the start by name — the v2.18.1 class: a setting whose code
+/// this build compiled out is never accepted and ignored. Runs in the default-feature lib run (no `a2a`).
+#[cfg(all(feature = "gateway", not(feature = "a2a")))]
+#[tokio::test]
+async fn the_a2a_switch_in_a_build_without_a2a_refuses_the_start() {
+    let mut cfg = GossipConfig::default();
+    cfg.bind_port = alloc_port();
+    cfg.http_port = Some(alloc_port());
+    cfg.gateway_a2a = true;
+    let agent = GossipAgent::new(NodeId::new("127.0.0.1", cfg.bind_port).unwrap(), cfg);
+    let err = agent.start().await.expect_err("refused: this build has no /a2a to mount");
+    assert!(matches!(err, GossipError::InvalidField { field: "gateway_a2a", .. }), "{err}");
+    assert!(err.to_string().contains("`a2a` feature"), "{err}");
+}
+
 /// Plan I3's acceptance: a node that provides every guarantee `secure-single-domain` requires starts
 /// under it, its report says so, and its gateway refuses an unauthenticated request. Under rev 2 the
 /// node's certificate is issued off-node first, so the same report shows `id.ca_key_off_node`

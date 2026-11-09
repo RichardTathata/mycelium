@@ -696,6 +696,29 @@ mod tests {
         assert!(named.contains(&"gw.token_tables"), "{line}");
     }
 
+    /// `gateway_a2a` read as `start()` reads it, though the doctor mounts nothing: in an `a2a` build `a2a.admission` is
+    /// applicable (open, with no evaluator); in a build without `a2a` the doctor gives `start()`'s refusal, naming the
+    /// field.
+    #[cfg(feature = "gateway")]
+    #[tokio::test]
+    async fn doctor_reads_the_a2a_switch_as_start_does() {
+        let port = crate::test_util::alloc_port();
+        let http = crate::test_util::alloc_port();
+        let path = write_cfg("a2a-switch", &format!("bind_port = {port}\nhttp_port = {http}\ngateway_a2a = true\n"));
+        let d = run(Some(&path));
+        #[cfg(feature = "a2a")]
+        {
+            assert!(d.refusal.is_none(), "{:?}", d.refusal);
+            let e = d.report.as_ref().expect("a report").entry("a2a.admission").expect("a2a.admission");
+            assert_eq!(state_of(&e.resolution).0, "not_configured", "{:?}", e.resolution);
+        }
+        #[cfg(not(feature = "a2a"))]
+        {
+            let r = d.refusal.expect("refused, as start() refuses");
+            assert_eq!((r.stage, r.field.as_str()), ("preflight", "gateway_a2a"), "{r:?}");
+        }
+    }
+
     /// Every core guarantee names its row of the shared-responsibility matrix, once, and the table names nothing the
     /// catalogue lacks (adopter-surface Y10: `doctor` names the row; the page's copy is held equal by
     /// `scripts/check-pilot-kit.py`).

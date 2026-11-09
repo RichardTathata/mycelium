@@ -35,9 +35,10 @@ Sign entries where the key is, with the `mycelium-artifact` binary, and list the
 - `POST /gateway/artifacts/publish` announces an already-signed line to a running cluster, on a stem built with
   `gateway`, with an `http_port`, whose `[hosts]` names trusted publishers, under `artifact:publish`
   ([artifacts § Publishing through a gateway](../operations/artifacts.md#publishing-through-a-gateway-a3)).
-  The scope is checked only in a build with `compliance`; the published `mycelium-stem` is built without it
-  (`stem,gateway,llm,object_store`), so there any valid bearer reaches the route (or anyone, on an open gateway with no token model) — the line's provenance is still
-  checked against the trusted publishers before it is written.
+  The scope is checked only in a build with `compliance`, which the published `mycelium-stem` carries
+  (`stem,gateway,llm,object_store,compliance`, since the release after 2.39.0); a stem built without it admits any
+  valid bearer (or anyone, on an open gateway with no token model) — either way the line's provenance is still checked
+  against the trusted publishers before it is written.
 - `require_provenance_refuses_unsigned_but_installs_trusted_signed`, in
   [`mycelium-wasm-host/src/provisioner.rs`](../../mycelium-wasm-host/src/provisioner.rs).
 

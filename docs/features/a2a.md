@@ -18,18 +18,26 @@ identity that created it.
 
 ## Turn it on
 
-This feature is turned on in code: build with `a2a` (it implies `gateway`), give the node an `http_port`, and mount
-the routes. The published `mycelium` binary is built with `a2a` but does not mount them (below); the `skillrunner`
-binary mounts them when built with `--features a2a` and its node has an `http_port` — its default features exclude
-`a2a`, and it is not published.
+Build with `a2a` (it implies `gateway`), give the node an `http_port`, and mount the routes — from configuration with
+`gateway_a2a = true`, or in code with `with_a2a`. The published `mycelium` binary is built with `a2a` and serves A2A
+only when its configuration sets the switch; off by default. The published `mycelium-stem` is built without `a2a`, so
+it refuses the switch at start. The `skillrunner` binary mounts the routes when built with `--features a2a` and its
+node has an `http_port` — its default features exclude `a2a`, and it is not published.
 
-- [`with_a2a`](../../src/agent/mod.rs): mounts the card and `/a2a` on the gateway; without it nothing is served.
+- [`gateway_a2a`](../reference/configuration.md#gateway_a2a) (`GOSSIP_GATEWAY_A2A`): `start()` mounts the card and
+  `/a2a` as `with_a2a` does, once. Off by default; `validate()` refuses it without an `http_port`, and a build without
+  `a2a` refuses it at start by name rather than accept it and serve nothing. `mycelium doctor` reads it as `start()`
+  would: the warning below, and `a2a.admission` applicable.
+- [`with_a2a`](../../src/agent/mod.rs): the same mount in code; beside the switch, or called twice, it mounts nothing
+  more.
 - [`http_port`](../reference/configuration.md#http_port): the gateway that serves them.
 - [`with_a2a_default_skill`](../../src/agent/mod.rs): the skill a message that names none reaches; without one such a
   message is refused `-32602`.
-- [`with_action_evaluator`](../../src/agent/mod.rs): what decides each send; deny anonymous principals here to close
-  the route ([authorising actions](action-authorisation.md)).
-- `a2a_is_anonymous_dispatch_whatever_bearer_is_configured`, in [`src/lib_tests.rs`](../../src/lib_tests.rs).
+- [`with_action_evaluator`](../../src/agent/mod.rs), or [`[authority]`](declared-authority.md) for a node built from
+  configuration: what decides each send; deny anonymous principals there to close the route
+  ([authorising actions](action-authorisation.md)). Mounted without one, `start()` warns once.
+- `a2a_is_anonymous_dispatch_whatever_bearer_is_configured`, `the_a2a_switch_mounts_the_card_and_a2a_at_start` and
+  `the_a2a_switch_in_a_build_without_a2a_refuses_the_start`, in [`src/lib_tests.rs`](../../src/lib_tests.rs).
 
 ## See it work
 
@@ -45,8 +53,9 @@ is a manual run with a real model.
   present bearer's scopes are dropped; the action preflight decides the rest.
 - **Guarantee:** [`a2a.admission`](../reference/guarantee-catalogue.md#a2a.admission) — `/a2a` is not anonymous skill
   dispatch, which holds only with an evaluator that denies anonymous principals.
-- **Not built:** the published `mycelium` binary does not mount `/a2a` — `src/main.rs` never calls `with_a2a` — so
-  an A2A client needs a node built with it (or `skillrunner` built with `--features a2a`); the card is public on a credentialed node; the pre-0.2
+- **Not built:** a default skill from configuration — `with_a2a_default_skill` is code only, so on a node served by
+  the switch a message that names no `metadata.skillId` (what a stock `a2a-sdk` client sends) is refused `-32602`;
+  `/a2a` on the published stem (built without `a2a`); the card is public on a credentialed node; the pre-0.2
   methods and the old card path, announced in 2.35.0 for one release
   ([deprecations §46](../guide/deprecations.md#46-a-current-a2a-client-reaches-a2a-the-card-at-agent-cardjson-the-10-and-03-methods-a-skill-in-metadataskillid-2350-post-360-plan-row-n)),
   are still served; push notifications are not served.

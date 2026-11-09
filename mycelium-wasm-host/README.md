@@ -56,11 +56,12 @@ landed.
 | `gateway` | `POST /gateway/artifacts/publish` (scope `artifact:publish`), mounted by the stem when its `[hosts]` names trusted publishers |
 | `llm` | `[[serve]]`: a stem registers a routable model skill while a local install is live; without it a stem with a `[[serve]]` section refuses to start |
 | `object_store` | `ObjectStoreFetcher`: a library in `s3://`, `gs://`, `az://`, `https://` or `file://` for `mycelium-artifact` and the librarian API |
+| `compliance` | mycelium's `compliance` (with its `gateway` and `tls`): a stem takes named and scoped gateway tokens, `[oidc]` and `[authority]` — each refused at start without it — the gateway checks each route's scope (`artifact:publish` included), and `[tls]` lets the stem join an mTLS fleet |
 
 ```bash
-# or the published `mycelium-stem` (built with stem,gateway,llm,object_store; in every release tarball and in the
+# or the published `mycelium-stem` (built with stem,gateway,llm,object_store,compliance; in every release tarball and in the
 # image ghcr.io/richardtathata/mycelium — docs/guide/installation.md § The published node)
-cargo build -p mycelium-wasm-host --features stem,gateway,llm --bin mycelium-stem
+cargo build -p mycelium-wasm-host --features stem,gateway,llm,object_store,compliance --bin mycelium-stem
 mycelium-stem --units examples/units/model_deploy/model-host.toml --library /lib \
               --host 172.40.0.42 -p 57000 -r 172.40.0.40:57000
 ```

@@ -456,3 +456,84 @@ fn an_unknown_key_in_the_table_is_refused_at_load() {
     let auth = cfg.authority.unwrap();
     assert_eq!((auth.tier, auth.freshness_ms, auth.skew_ms, auth.entitle_grants, auth.scope), (AuthorityTier::Serialised, 120_000, 1_000, GrantEntitlement::Node, None));
 }
+
+/// The warnings logged while `f` runs on this thread: a minimal subscriber, so the test needs no logging crate.
+#[cfg(feature = "a2a")]
+fn warnings_during(f: impl FnOnce()) -> Vec<String> {
+    use std::sync::Mutex;
+    use tracing::field::{Field, Visit};
+    struct Capture(Arc<Mutex<Vec<String>>>);
+    struct Message(String);
+    impl Visit for Message {
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            if field.name() == "message" {
+                self.0 = format!("{value:?}");
+            }
+        }
+    }
+    impl tracing::Subscriber for Capture {
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool { true }
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id { tracing::span::Id::from_u64(1) }
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn event(&self, e: &tracing::Event<'_>) {
+            if *e.metadata().level() == tracing::Level::WARN {
+                let mut m = Message(String::new());
+                e.record(&mut m);
+                self.0.lock().unwrap().push(m.0);
+            }
+        }
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    tracing::subscriber::with_default(Capture(Arc::clone(&seen)), f);
+    let out = seen.lock().unwrap().clone();
+    #[allow(clippy::let_and_return)] // the guard must drop before `seen` does
+    out
+}
+
+/// **`/a2a` with `[authority]` is not reported open** (#749's review, finding 1): the table's evaluator is attached by
+/// `start()` after `preflight()` has logged its warnings, so a planned declaration counts as the evaluator — what
+/// `start()` attaches before the boundary, and what `mycelium doctor` sets in memory. Neither the preflight `start()`
+/// runs nor the doctor warns "NO action evaluator"; without the table both do. Seen failing first: both warned.
+#[cfg(feature = "a2a")]
+#[tokio::test]
+async fn the_a2a_switch_with_an_authority_table_is_not_warned_open() {
+    const OPEN: &str = "NO action evaluator";
+    let dir = scratch("a2a-authority");
+    let declarations = units(&dir, &[("purchaser", PURCHASER)]);
+    let (id, mut cfg) = config(&dir, alloc_port(), Some(authority(&dir, declarations.clone(), "purchaser")));
+    cfg.gateway_a2a = true;
+    let a = GossipAgent::new(id.clone(), cfg.clone());
+    let warned = warnings_during(|| a.preflight().expect("plans"));
+    assert!(!warned.iter().any(|w| w.contains(OPEN)), "start()'s preflight with [authority]: {warned:?}");
+    assert!(!a.a2a_dispatch_is_anonymous());
+
+    let toml_path = dir.join("node.toml");
+    let body = format!(
+        "bind_port = {}\nhttp_port = {}\ngateway_a2a = true\ngateway_identity_issuer = \"{ISSUER}\"\n\
+         [[gateway_named_tokens]]\nname = \"alice\"\ntoken = \"alice-secret\"\nscopes = [\"mcp:invoke\"]\n\
+         [tls]\nauto_cert_dir = \"{tls}\"\n[persistence]\nbase_path = \"{persist}\"\n\
+         [authority]\ndeclarations = \"{decl}\"\nunit = \"purchaser\"\njournal = \"{journal}\"\n",
+        alloc_port(), alloc_port(),
+        tls = dir.join("tls").display(), persist = dir.join("persist").display(), decl = declarations.display(),
+        journal = dir.join("evidence.log").display(),
+    );
+    std::fs::write(&toml_path, &body).unwrap();
+    let mut d = None;
+    let warned = warnings_during(|| d = Some(crate::doctor::run(Some(&toml_path))));
+    let d = d.unwrap();
+    assert!(d.refusal.is_none(), "{:?}", d.refusal);
+    assert!(!warned.iter().any(|w| w.contains(OPEN)), "doctor with [authority]: {warned:?}");
+
+    // The control: without the table both say so.
+    cfg.authority = None;
+    let open = GossipAgent::new(id, cfg);
+    let warned = warnings_during(|| open.preflight().expect("preflight"));
+    assert!(warned.iter().any(|w| w.contains(OPEN)), "without an evaluator start()'s preflight warns: {warned:?}");
+    let bare = dir.join("bare.toml");
+    std::fs::write(&bare, format!("bind_port = {}\nhttp_port = {}\ngateway_a2a = true\n", alloc_port(), alloc_port())).unwrap();
+    let warned = warnings_during(|| { let _ = crate::doctor::run(Some(&bare)); });
+    assert!(warned.iter().any(|w| w.contains(OPEN)), "without an evaluator the doctor warns: {warned:?}");
+}

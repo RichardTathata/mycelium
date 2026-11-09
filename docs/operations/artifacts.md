@@ -320,9 +320,10 @@ blob past the frame cap in `artifact.fetch_range` pieces of 4 MiB (`MeshRangedFe
 cargo build -p mycelium-wasm-host --features stem,object_store --bin mycelium-artifact
 ```
 
-The stem Docker image (`docker/Dockerfile.stem`) builds the tool with `stem,gateway,llm` and
-**without** `object_store`, so its `mycelium-artifact` refuses an `s3://` library with *a store URL
-needs a build with the object_store feature*. The tool's store requests pass the egress policy read
+The stem Docker image (`docker/Dockerfile.stem`) and the published binaries build the tool with
+`stem,gateway,llm,object_store,compliance`, so their `mycelium-artifact` reads an `s3://` library; a
+build without `object_store` refuses one with *a store URL needs a build with the object_store
+feature*. The tool's store requests pass the egress policy read
 from `MYCELIUM_EGRESS_ALLOW_HOSTS` — a comma-separated host allowlist, where an entry starting with
 `.` matches that domain and its subdomains. List the store's **endpoint** host, as in the table above —
 a bucket name on the list admits nothing. Unset (or empty) allows every host, as `EgressPolicy`'s
