@@ -111,6 +111,13 @@ fn the_client_signature_vector_is_the_same_in_every_language() {
     assert_eq!(b64.encode(key.sign(&msg).to_bytes()), v["signature_b64"].as_str().unwrap());
     let meta: (ClientSignature, ClientNonce) = (serde_json::from_value(v["meta"]["cs"].clone()).unwrap(), serde_json::from_value(v["meta"]["cn"].clone()).unwrap());
     assert_eq!(meta.1.instance(), Some(instance));
+    // A name holding `@` is bound whole (#745's confirm round): `weather@v2` signs as itself, not as `weather`.
+    let c = &v["at_case"];
+    let (op2, res2, d2) = door_binding_mcp(c["name"].as_str().unwrap(), &c["arguments"]).unwrap();
+    assert_eq!((res2.as_str(), hex(&d2)), (c["resource"].as_str().unwrap(), c["arguments_digest_hex"].as_str().unwrap().to_string()));
+    let msg2 = client_signature_message(v["principal"].as_str().unwrap(), &op2, &res2, &d2, v["issued_at_ms"].as_u64().unwrap(), instance, v["counter"].as_u64().unwrap());
+    assert_eq!(hex(&msg2), c["message_hex"].as_str().unwrap(), "AT: the message cut the name at its `@`");
+    assert_eq!(b64.encode(key.sign(&msg2).to_bytes()), c["signature_b64"].as_str().unwrap());
 }
 
 /// **The arguments' canonical form is the same in every language** (#742's review, finding 1): RFC 8785 — exponent-form
@@ -380,7 +387,9 @@ async fn the_llm_doors_refuse_a_client_signature_rather_than_drop_it() {
 /// `tasks/send` and `tasks/sendSubscribe` signed over `("skill.invoke", "skill:depot/dispatch", {"text": …})` reach the
 /// skill with the signature verified at its receive boundary (the `skill.invoke` binding); at a gateway without an
 /// issuer the stream answers a failed task naming it. Seen failing first with `None` planted at each door's dispatch: the
-/// skill saw no signature on either path.
+/// skill saw no signature on either path. **A signature over other text is refused at both doors by the gateway's own
+/// check** (I1's PR 4), before the preflight — so it never reaches the skill; seen failing first with the doors' check
+/// removed (the skill received both tampered calls).
 #[cfg(all(feature = "compliance", feature = "a2a"))]
 #[tokio::test]
 async fn both_a2a_doors_carry_a_client_signature_and_the_skill_sees_it() {
@@ -439,6 +448,12 @@ async fn both_a2a_doors_carry_a_client_signature_and_the_skill_sees_it() {
     };
     let sent: serde_json::Value = post(http_port, "tasks/send", params("t-send", meta())).await.unwrap().json().await.unwrap();
     let streamed = post(http_port, "tasks/sendSubscribe", params("t-stream", meta())).await.unwrap().text().await.unwrap();
+    let tampered_meta = || {
+        let (op, res, d) = super::client_sig::door_binding_a2a("depot/dispatch", "stop");
+        ClientSigner::meta(&signer.sign(&op, &res, &d))
+    };
+    let tampered_send: serde_json::Value = post(http_port, "tasks/send", params("t-tampered", tampered_meta())).await.unwrap().json().await.unwrap();
+    let tampered_stream = post(http_port, "tasks/sendSubscribe", params("t-tampered-s", tampered_meta())).await.unwrap().text().await.unwrap();
     tokio::time::sleep(Duration::from_millis(200)).await;
     a.shutdown().await;
 
@@ -456,7 +471,9 @@ async fn both_a2a_doors_carry_a_client_signature_and_the_skill_sees_it() {
 
     assert_eq!(sent["result"]["status"]["state"], "completed", "{sent}");
     assert!(streamed.contains("completed"), "{streamed}");
-    assert_eq!(*seen.lock(), vec![true, true], "UNSIGNED: the skill did not see the signature on both doors");
+    assert_eq!(*seen.lock(), vec![true, true], "UNSIGNED or REACHED: the skill did not see the signature on both doors, or a tampered call reached it");
+    assert_eq!(tampered_send["error"]["data"]["reason"], "client_signature_invalid", "{tampered_send}");
+    assert!(tampered_stream.contains("failed") && tampered_stream.contains("client_signature_invalid"), "{tampered_stream}");
     assert!(refused.contains("failed") && refused.contains("gateway_identity_issuer"), "the stream's refusal: {refused}");
     assert!(seen_b.lock().is_empty(), "nothing ran at the issuer-less gateway");
 }
@@ -494,4 +511,190 @@ async fn an_integer_beyond_2_53_is_refused_at_the_signer_and_at_the_provider() {
     let _ = std::fs::remove_dir_all(&dir);
     assert_eq!(verified.err(), Some(CallerError::ClientSignature("client_signature_unsafe_integer")), "SWAPPED: a large id bound inexactly verified");
     assert!(at_signer.is_err(), "the signer refuses it");
+}
+
+#[cfg(feature = "compliance")]
+/// A node with one tool named `name`, no evaluator, a gateway with the forecaster's token, and the forecaster's client
+/// key published: what the door tests below call through `/mcp`.
+async fn door_node(tag: &str, name: &'static str, tls: bool) -> (Arc<GossipAgent>, u16, Option<ed25519_dalek::SigningKey>, Arc<AtomicUsize>, PathBuf) {
+    let dir = fresh(tag);
+    let (port, http_port) = (alloc_port(), alloc_port());
+    let mut cfg = config(&dir, port, Some("fleet"));
+    if !tls {
+        cfg.tls = None;
+    }
+    cfg.http_port = Some(http_port);
+    cfg.gateway_named_tokens = vec![GatewayNamedToken { name: "forecaster".into(), token: "fc-secret".into(), scopes: vec!["mcp:invoke".into()] }];
+    let a = started(cfg).await;
+    let key = tls.then(|| issue_and_publish(&a, &dir, "forecaster", "k1"));
+    let ran = Arc::new(AtomicUsize::new(0));
+    let r = Arc::clone(&ran);
+    let tool = a.mcp().register_mcp_tool(name, serde_json::json!({"type": "object"}), move |_| {
+        let r = Arc::clone(&r);
+        async move {
+            r.fetch_add(1, Ordering::SeqCst);
+            Ok(serde_json::json!("sunny"))
+        }
+    });
+    std::mem::forget(tool);
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    (a, http_port, key, ran, dir)
+}
+
+#[cfg(feature = "compliance")]
+async fn mcp_post(http_port: u16, name: &str, args: &serde_json::Value, meta: serde_json::Value) -> serde_json::Value {
+    reqwest::Client::new().post(format!("http://127.0.0.1:{http_port}/mcp")).bearer_auth("fc-secret")
+        .json(&serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": name, "arguments": args, "_meta": meta}}))
+        .send().await.unwrap().json().await.unwrap_or_default()
+}
+
+/// **A tool whose name holds an `@` binds its signature** (#745's review, item 7): the provider reads the tool from the
+/// envelope's claim `tool:{name}@{provider}` up to the **last** `@`, so `weather@v2`'s signed call runs. Seen failing
+/// first with the claim cut at the first `@` (`client_signature_unbound`).
+#[cfg(feature = "compliance")]
+#[tokio::test]
+async fn a_tool_whose_name_holds_an_at_sign_binds_its_signature() {
+    const AT: &str = "weather@v2";
+    let (a, http_port, key, ran, dir) = door_node("at-sign", AT, true).await;
+    let signer = ClientSigner::new(key.unwrap(), PRINCIPAL);
+    let args = serde_json::json!({"city": "Lyon"});
+    let (op, res, d) = door_binding_mcp(AT, &args).unwrap();
+    let answer = mcp_post(http_port, AT, &args, ClientSigner::meta(&signer.sign(&op, &res, &d))).await;
+    a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(answer.get("result").is_some(), "UNBOUND: a signed call to a tool named with an @: {answer}");
+    assert_eq!(ran.load(Ordering::SeqCst), 1);
+}
+
+/// **The door refuses what the provider would, by name and before its preflight** (I1's PR 4, #745's review, items 2
+/// and 11): a signature issued outside the caller envelope's window (`stale` — a skewed clock), arguments holding an
+/// integer outside ±(2^53 − 1) (`client_signature_unsafe_integer`), and, at a gateway with no `[tls]` in a `tls` build,
+/// any signature (`client_signature_unverifiable` — no CA anchor, so no key is judged, rather than `client_key_unknown`).
+/// Each is the gateway's own answer (`-32602`, the reason in `error.data.reason` — the provider's refusal of the same call
+/// is `-32022`), and the tool does not run. Seen failing first, one build per plant: the door's freshness check removed
+/// and the door's unsafe-integer refusal removed (each answered `-32022` by the provider), the no-identity refusal
+/// removed (`client_key_unknown`).
+#[cfg(feature = "compliance")]
+#[tokio::test]
+async fn the_door_refuses_a_stale_an_unsafe_and_an_unverifiable_signature_by_name() {
+    let (a, http_port, key, ran, dir) = door_node("door-refusals", TOOL, true).await;
+    let signer = ClientSigner::new(key.unwrap(), PRINCIPAL);
+    let args = serde_json::json!({"city": "Lyon"});
+    let (op, res, d) = door_binding_mcp(TOOL, &args).unwrap();
+    let old = mycelium_core::sim_seam::wall_now_ms() - gateway_caller::CALLER_CONTEXT_MAX_AGE_MS - a.task_ctx.config.max_clock_drift_ms - 60_000;
+    let stale = mcp_post(http_port, TOOL, &args, ClientSigner::meta(&signer.sign_at(&op, &res, &d, old))).await;
+    let big = serde_json::json!({"id": 1u64 << 60});
+    let (op2, res2, _) = door_binding_mcp(TOOL, &serde_json::json!({})).unwrap();
+    let unsafe_int = mcp_post(http_port, TOOL, &big, ClientSigner::meta(&signer.sign(&op2, &res2, &[0u8; 32]))).await;
+    let ran_here = ran.load(Ordering::SeqCst);
+    a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let (b, http_b, _, ran_b, dir_b) = door_node("door-no-tls", TOOL, false).await;
+    let unverifiable = mcp_post(http_b, TOOL, &args, ClientSigner::meta(&signer.sign(&op, &res, &d))).await;
+    b.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir_b);
+
+    // The door's answer is `-32602`; the provider's own refusal of the same call would be `-32022`.
+    assert_eq!((&stale["error"]["code"], &stale["error"]["data"]["reason"]), (&serde_json::json!(-32602), &serde_json::json!("stale")), "STALE: {stale}");
+    assert_eq!((&unsafe_int["error"]["code"], &unsafe_int["error"]["data"]["reason"]), (&serde_json::json!(-32602), &serde_json::json!("client_signature_unsafe_integer")), "UNSAFE: {unsafe_int}");
+    assert_eq!(ran_here, 0, "neither ran");
+    assert_eq!(unverifiable["error"]["data"]["reason"], "client_signature_unverifiable", "UNVERIFIABLE: {unverifiable}");
+    assert_eq!(ran_b.load(Ordering::SeqCst), 0);
+}
+
+/// **A provider's refusal reaches an `/mcp` client with its reason** (#745's review): a tool's serve loop answered a
+/// caller-context refusal `-32022` with the reason only in the message's text, so an SDK could not tell a retriable
+/// `client_key_unknown` from a final refusal, nor the gateway give back a grant's use. Staged with the provider's
+/// instance window full (a refusal only the provider makes): the answer's `data.reason` is `client_instances_exhausted`.
+/// Seen failing first with the answer as it was (no `data`).
+#[cfg(feature = "compliance")]
+#[tokio::test]
+async fn a_providers_refusal_reaches_an_mcp_client_as_json_rpc_with_its_reason() {
+    use super::client_sig::{ClientSigned, CLIENT_INSTANCES_PER_KEY};
+    let (a, http_port, key, ran, dir) = door_node("relay-refusal", TOOL, true).await;
+    let key = key.unwrap();
+    let kb = key.verifying_key().to_bytes();
+    let now = a.task_ctx.hlc.decision_now_ms();
+    for i in 0..CLIENT_INSTANCES_PER_KEY as u64 {
+        a.task_ctx.client_replay.admit(PRINCIPAL, &ClientSigned { key: kb, issued_at_ms: now, instance: 10_000 + i, counter: 0 }, Some(kb), 0).unwrap();
+    }
+    let args = serde_json::json!({"city": "Lyon"});
+    let answer = mcp_post(http_port, TOOL, &args, ClientSigner::meta(&sign(&ClientSigner::with_instance(key, PRINCIPAL, 1), &args))).await;
+    a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(answer["jsonrpc"], "2.0", "RAW: {answer}");
+    assert_eq!(answer["error"]["data"]["reason"], "client_instances_exhausted", "{answer}");
+    assert_eq!(ran.load(Ordering::SeqCst), 0);
+}
+
+/// **A provider's refusal is a failed task at both `/a2a` doors, and the journal says nothing completed** (#745's
+/// review, O4): the unary send answered `completed` with the refusal as the task's artifact, the stream likewise, and
+/// the gateway's evidence journal recorded `Execution::Completed` — an effect that never ran. Staged with the
+/// provider's instance window full, a refusal only the provider makes (`client_instances_exhausted`): the send answers
+/// a JSON-RPC error naming the reason, the stream a failed task naming it, and the journal records `failed` for both.
+/// Seen failing first with the refusal read as a reply (both answered `completed`, both recorded `completed`).
+#[cfg(all(feature = "compliance", feature = "a2a"))]
+#[tokio::test]
+async fn a_providers_refusal_is_a_failed_task_at_both_a2a_doors_and_on_the_record() {
+    use super::client_sig::{ClientSigned, CLIENT_INSTANCES_PER_KEY};
+    use crate::agent::action_evaluator::{AeEvidence, Execution};
+    use crate::{ReferenceEvaluator, Rule};
+    use crate::agent::evidence_journal::{EvidenceJournal, EvidenceProfile};
+    use crate::capability::Capability;
+    let dir = fresh("a2a-refused");
+    let (port, http_port) = (alloc_port(), alloc_port());
+    let mut cfg = config(&dir, port, Some("fleet"));
+    cfg.http_port = Some(http_port);
+    cfg.gateway_named_tokens = vec![GatewayNamedToken { name: "forecaster".into(), token: "fc-secret".into(), scopes: vec!["kv:read".into()] }];
+    let a = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg).with_a2a());
+    let journal = dir.join("evidence.log");
+    a.with_evidence_journal(EvidenceJournal::open(journal.clone(), EvidenceProfile::Strict).unwrap());
+    a.with_action_evaluator(Arc::new(ReferenceEvaluator::new("rev-a2a").with_catalogue("cat-a2a", "1").map_action("skill.invoke", "*").allow(Rule::new(PRINCIPAL, "skill.invoke", "*"))));
+    a.start().await.unwrap();
+    let _cap = a.capabilities().advertise_capability(Capability::new("depot", "dispatch"), Duration::from_secs(30));
+    let mut rx = a.service().rpc_rx("skill.invoke");
+    let ran = Arc::new(AtomicUsize::new(0));
+    let (a2, r2) = (Arc::clone(&a), Arc::clone(&ran));
+    tokio::spawn(async move {
+        while let Some(req) = rx.recv().await {
+            r2.fetch_add(1, Ordering::SeqCst);
+            a2.service().rpc_respond(&req, b"dispatched".to_vec());
+        }
+    });
+    let key = format!("cap/{}/depot/dispatch", a.node_id());
+    while a.kv().get(&key).is_none() {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let k1 = issue_and_publish(&a, &dir, "forecaster", "k1");
+    let kb = k1.verifying_key().to_bytes();
+    let now = a.task_ctx.hlc.decision_now_ms();
+    for i in 0..CLIENT_INSTANCES_PER_KEY as u64 {
+        a.task_ctx.client_replay.admit(PRINCIPAL, &ClientSigned { key: kb, issued_at_ms: now, instance: 10_000 + i, counter: 0 }, Some(kb), 0).unwrap();
+    }
+    let signer = ClientSigner::with_instance(k1, PRINCIPAL, 1);
+    let meta = || {
+        let (op, res, d) = super::client_sig::door_binding_a2a("depot/dispatch", "go");
+        ClientSigner::meta(&signer.sign(&op, &res, &d))
+    };
+    let post = |method: &'static str, id: &str, meta: serde_json::Value| {
+        reqwest::Client::new().post(format!("http://127.0.0.1:{http_port}/a2a")).bearer_auth("fc-secret")
+            .json(&serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": {
+                "id": id, "skillId": "depot/dispatch", "message": {"role": "user", "parts": [{"type": "text", "text": "go"}]}, "_meta": meta}}))
+            .send()
+    };
+    let sent: serde_json::Value = post("tasks/send", "t-refused", meta()).await.unwrap().json().await.unwrap();
+    let streamed = post("tasks/sendSubscribe", "t-refused-s", meta()).await.unwrap().text().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    a.shutdown().await;
+    let executions: Vec<Execution> = crate::read_evidence_journal(&journal).unwrap().iter()
+        .filter_map(|b| serde_json::from_slice::<AeEvidence>(b).ok())
+        .filter(|e| e.kind == crate::agent::action_evaluator::RecordKind::Execution)
+        .map(|e| e.execution).collect();
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert_eq!(sent["error"]["data"]["reason"], "client_instances_exhausted", "COMPLETED: the unary send: {sent}");
+    assert!(streamed.contains("failed") && streamed.contains("client_instances_exhausted"), "COMPLETED: the stream: {streamed}");
+    assert_eq!(ran.load(Ordering::SeqCst), 0, "the skill never ran");
+    assert_eq!(executions, vec![Execution::Failed, Execution::Failed], "RECORDED: the journal's executions");
 }

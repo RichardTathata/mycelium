@@ -69,6 +69,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **I1 closed: a service calls a tool under its own grant on a three-node fleet** (`docs/plans/identity-and-lifecycle.md`
+  I1, PR 4 of 4). `examples/eve_weather/run_client_grant.mjs` runs Eve's weather tool through the `mycelium` binary's
+  `/mcp`, with `[authority]`, under a grant held by `token:fleet/forecaster`. The call is signed with its client
+  certificate through `mycelium-ts`'s `McpClient`: refused without a grant, run under one, the grant held across the
+  gateway's restart, and a foreign key, a revoked grant and a superseded key refused. It runs in CI's `eve-fleet` job,
+  and the release builds' run is dated on `what-is-proven.md`. The plan closes I1 promise by promise and places the
+  cross-language mandate digest (§9 O1) in I3.
+
 - **The SDKs sign as a service and present its own grants** (`docs/plans/identity-and-lifecycle.md` I1, PR 3 of 4).
   `McpClient` in `mycelium-py` and `mycelium-ts` is a `tools/call` client for `/mcp`. Given a `ClientSigner`, it signs
   every call with the service's client-certificate key (`params._meta.cs`/`cn`), and so does `A2aClient` for every
@@ -137,6 +145,18 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `authority`; `deprecations.md` §83; feature page `docs/features/declared-authority.md`.
 
 ### Fixed
+
+- **A grant the provider refused before running is given back** (I1, #745's review). The gateway's fold of client
+  certificates can lead the provider's, so the provider answered `client_key_unknown` after the gateway had claimed the
+  grant, and the retry was refused as already used. A `client_key_*`, `client_signature_*` or `stale` answer now
+  releases the claim. The door also checks the signature's issue time on the provider's window.
+- **A provider's refusal is a refusal at `/a2a`, and its reason reaches the caller.** `tasks/send` and the stream
+  answered a provider's refusal as a `completed` task, and the evidence journal recorded `completed`. A tool's
+  `-32022` refusal now carries `data.reason`. A gateway without `[tls]` answers `client_signature_unverifiable`, and a
+  name holding `@` binds at the provider. Upgrade note: `deprecations.md` §91.
+- **A call refused for its client signature no longer spends the grant it presents.** The gateway claimed a grant's
+  use in its preflight before the provider checked `cs`. `/mcp` and both `/a2a` doors now check the signature and the
+  key's standing first (`cn` stays the provider's). Upgrade note: `deprecations.md` §91.
 
 - **A wasm-host decision record names its rule's real revision** (#738's adversarial review, finding 8). `TraceCtx::record`
   stamped `rule_revision = 1` on every record the stem provisioner, the install task and the activation hook made, so a

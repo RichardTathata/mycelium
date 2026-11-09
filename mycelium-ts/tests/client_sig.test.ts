@@ -43,3 +43,14 @@ test("an integer beyond 2^53 is refused by the signer", () => {
   for (const text of V.unsafe_integer_cases) expect(() => mcpBinding("weather.forecast", JSON.parse(text))).toThrow(/2\^53/);
   for (const text of V.safe_integer_cases) expect(() => mcpBinding("weather.forecast", JSON.parse(text))).not.toThrow();
 });
+
+test("a name holding an @ is bound whole", () => {
+  // #745's confirm round: the resource is signed whole, so a tool named `weather@v2` is not `weather`.
+  const c = V.at_case;
+  const [op, res, digest] = mcpBinding(c.name, c.arguments);
+  expect([res, Buffer.from(digest).toString("hex")]).toEqual([c.resource, c.arguments_digest_hex]);
+  const msg = clientSignatureMessage(V.principal, op, res, digest, BigInt(V.issued_at_ms), BigInt("0x" + V.instance_hex), BigInt(V.counter));
+  expect(Buffer.from(msg).toString("hex")).toBe(c.message_hex);
+  const signer = new ClientSigner(Buffer.from(V.seed_hex, "hex"), V.principal, { instance: BigInt("0x" + V.instance_hex) });
+  expect(signer.sign(op, res, digest, { issuedAtMs: V.issued_at_ms, counter: V.counter }).cs.sig).toBe(c.signature_b64);
+});

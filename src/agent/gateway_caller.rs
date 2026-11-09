@@ -156,6 +156,17 @@ pub(crate) const MAX_ENVELOPE_BYTES: usize = 8 * 1024;
 /// alone, and an envelope may be at most this far ahead.
 pub const CALLER_CONTEXT_MAX_AGE_MS: u64 = 300_000;
 
+/// Is a client signature's issue time inside the caller envelope's window at `now_ms` — no older than
+/// [`CALLER_CONTEXT_MAX_AGE_MS`] plus the drift bound, no further ahead than the drift bound (the age bound when there is
+/// none)? The provider's rule, read by the gateway's door as well (identity-and-lifecycle I1, #745's review) so a client
+/// with a skewed clock is refused before a grant it presents is spent.
+#[cfg(feature = "tls")]
+pub(crate) fn client_issue_time_fresh(ctx: &TaskCtx, issued_at_ms: u64, now_ms: u64) -> bool {
+    let drift = ctx.config.max_clock_drift_ms;
+    let ahead_bound = if drift == 0 { CALLER_CONTEXT_MAX_AGE_MS } else { drift };
+    now_ms.saturating_sub(issued_at_ms) <= CALLER_CONTEXT_MAX_AGE_MS.saturating_add(drift) && issued_at_ms.saturating_sub(now_ms) <= ahead_bound
+}
+
 // ── Public types ─────────────────────────────────────────────────────────────
 
 /// Who a gateway request came from, as the provider sees it after verification.
@@ -1144,9 +1155,7 @@ pub(crate) fn verify(ctx: &TaskCtx, req: &RpcRequest) -> Result<Option<GatewayCa
         (Some(cs), Some(cn)) => {
             let signed = super::client_sig::check(ctx, &env.p, req.kind(), &req.payload(), env.r.as_deref(), cs, cn)
                 .map_err(|r| CallerError::ClientSignature(r.code()))?;
-            if now_ms.saturating_sub(signed.issued_at_ms) > CALLER_CONTEXT_MAX_AGE_MS.saturating_add(drift)
-                || signed.issued_at_ms.saturating_sub(now_ms) > ahead_bound
-            {
+            if !client_issue_time_fresh(ctx, signed.issued_at_ms, now_ms) {
                 return Err(CallerError::Stale { issued_at_ms: signed.issued_at_ms, now_ms });
             }
             Some(Box::new(signed))

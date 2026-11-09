@@ -471,10 +471,11 @@ fn the_possession_vector_is_the_gateways() {
 
 /// **The SDKs' shape: a client's own signature and its own grant on one `tools/call`** (#744's review, item 6). The
 /// forecaster signs the call with its client key (`cs`/`cn`, as `ClientSigner::sign_tools_call` and both SDKs write
-/// them) and presents its grant with a possession proof by the same key, in one `_meta`: the call runs once. A second
-/// grant presented the same way with the signature made over other arguments is refused by name, and the tool does not
-/// run. **Stated, not changed here:** the gateway claims a grant's use at its preflight, before the provider checks
-/// `cs`, so a call refused for its signature has spent the grant's use at the gateway.
+/// them) and presents its grant with a possession proof by the same key, in one `_meta`. **A refused signature leaves
+/// the grant unspent** (I1's PR 4): first the call is sent with the signature made over other arguments — refused
+/// `client_signature_invalid` by the gateway's own check, before its preflight claims the grant's use — then the honest
+/// call under the **same** grant runs once. Seen failing first with the gateway's check removed (the honest call was
+/// refused: the grant was already used at the gateway).
 #[tokio::test]
 async fn a_signed_call_presenting_a_client_grant_runs_at_mcp() {
     let dir = scratch("signed");
@@ -490,19 +491,133 @@ async fn a_signed_call_presenting_a_client_grant_runs_at_mcp() {
         meta["cn"] = s["cn"].clone();
     };
     let mut meta = presented(&grant, asked["resource"].as_str().unwrap(), &args, &key);
+    sign_into(&mut meta, &serde_json::json!({"city": "Nice"}));
+    let tampered = mcp_call(http_port, &args, Some(meta.clone())).await;
+    let ran_before = ran.load(Ordering::SeqCst);
     sign_into(&mut meta, &args);
     let called = mcp_call(http_port, &args, Some(meta)).await;
-    let ran_once = ran.load(Ordering::SeqCst);
-    let args2 = serde_json::json!({"city": "Brest"});
-    let (asked2, grant2) = ask_and_issue(http_port, &args2).await;
-    let mut meta2 = presented(&grant2, asked2["resource"].as_str().unwrap(), &args2, &key);
-    sign_into(&mut meta2, &serde_json::json!({"city": "Nice"}));
-    let tampered = mcp_call(http_port, &args2, Some(meta2)).await;
     let ran_after = ran.load(Ordering::SeqCst);
     a.shutdown().await;
     let _ = std::fs::remove_dir_all(&dir);
-    assert!(called.get("result").is_some(), "the signed call under the client's grant ran: {called}");
-    assert_eq!(ran_once, 1);
-    assert!(tampered.to_string().contains("client_signature_invalid"), "a signature over other arguments is refused by name: {tampered}");
-    assert_eq!(ran_after, 1, "the tampered call did not run");
+    assert_eq!(tampered["error"]["data"]["reason"], "client_signature_invalid", "refused by the gateway's own check, by name: {tampered}");
+    assert_eq!(ran_before, 0, "the tampered call did not run");
+    assert!(called.get("result").is_some(), "UNSPENT: the honest call under the same grant was refused: {called}");
+    assert_eq!(ran_after, 1, "once");
+}
+
+fn describe(p: &crate::agent::http::Preflight) -> String {
+    match p {
+        crate::agent::http::Preflight::Proceed { evidence, grant_claim, .. } => format!("proceed ({}; claim {grant_claim:?})", evidence.reason),
+        crate::agent::http::Preflight::Refuse(r) => format!("refuse ({r})"),
+        crate::agent::http::Preflight::Inert => "inert".into(),
+    }
+}
+
+/// **A grant the provider refused before running is given back** (I1's PR 4, #745's review, item 1). The gateway's
+/// fold of client certificates can lead the provider's: the gateway judges the key current, claims the grant's use
+/// and dispatches, and the provider answers `client_key_unknown` — before anything ran. That answer, `stale`, and the
+/// other `client_signature_*` / `client_key_*` refusals tombstone the gateway's marker and release its claim, so the
+/// retry is admitted once; any other reply leaves the grant spent. Driven at the preflight: the permit claims the
+/// grant; the provider's `client_key_unknown` body releases it (the marker gone, a second permit admitted); a tool's
+/// answer does not (the third refused `GrantUsed`). Seen failing first with the release doing nothing (the second
+/// permit refused: the grant used at the gateway).
+#[tokio::test]
+async fn a_grant_the_provider_refused_before_running_is_given_back() {
+    use crate::agent::http::{ae_preflight, release_grant_claim_after, Preflight};
+    let dir = scratch("release");
+    let http_port = alloc_port();
+    let (a, _ran) = started(&dir, http_port).await;
+    let key = forecaster_key(&a, &dir);
+    let args = serde_json::json!({"city": "Lille"});
+    let (asked, grant) = ask_and_issue(http_port, &args).await;
+    let resource = asked["resource"].as_str().unwrap().to_string();
+    let params = serde_json::json!({"_meta": presented(&grant, &resource, &args, &key)});
+    let caller = crate::agent::gateway_caller::ResolvedPrincipal { principal: FORECASTER.into(), scopes: vec!["mcp:invoke".into()] };
+    let ctx = std::sync::Arc::clone(&a.task_ctx);
+    let permit = || ae_preflight(&ctx, Some(&caller), "tools/call", &resource, &args, &params, "gateway:mcp/tools/call");
+    let marker = format!("grant/{}/{}/used/gateway", crate::agent::gateway_authority::grant_holder_segment(FORECASTER), grant.mandate.term.as_str());
+
+    let first = permit().await;
+    let used_markers: Vec<String> = crate::store::scan_kv_prefix(&ctx.kv_state, "grant/").into_iter().map(|(k, _)| k.to_string()).filter(|k| k.contains("/used/")).collect();
+    let claimed = matches!(&first, Preflight::Proceed { grant_claim: Some(_), .. }) && mycelium_core::ops::kv_get(&ctx, &marker).is_some();
+    // The provider's refusal as a tool's serve loop answers it.
+    let refused_body = bytes::Bytes::from(serde_json::json!({"jsonrpc": "2.0", "id": 1, "error": {"code": -32022, "message": "caller context refused: the client's signature on this call was refused: client_key_unknown", "data": {"reason": "client_key_unknown"}}}).to_string());
+    let released = release_grant_claim_after(&ctx, &first, &Ok(refused_body)).await;
+    let marker_gone = mycelium_core::ops::kv_get(&ctx, &marker).is_none();
+    let second = permit().await;
+    let kept = release_grant_claim_after(&ctx, &second, &Ok(bytes::Bytes::from_static(br#"{"jsonrpc":"2.0","id":1,"result":{"content":[]}}"#))).await;
+    let third = permit().await;
+    a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert!(claimed, "the first permit claimed the grant at the gateway, its marker on disk: {}; markers {:?}", describe(&first), used_markers);
+    assert_eq!(released.as_deref(), Some("client_key_unknown"));
+    assert!(marker_gone, "the marker was tombstoned");
+    assert!(matches!(second, Preflight::Proceed { .. }), "RELEASED: the retry under the same grant was refused");
+    assert_eq!(kept, None, "a tool's answer gives nothing back");
+    assert!(matches!(third, Preflight::Refuse(_)), "the grant is spent after a call that ran");
+}
+
+/// **Only the node authors a refusal that gives a grant back** (#745's confirm round). A bridged MCP server's tool runs
+/// its effect and then answers in the node's refusal shape — `-32022`, `caller context refused …`, `data.reason:
+/// "stale"`. The bridge rewrites it into a tool error, so the gateway keeps the grant spent: the same grant presented
+/// again is refused as used, and the effect ran once. Two nodes: the gateway carries the authority and the bridging
+/// provider enforces nothing of its own, so only the gateway's claim stands (on one node the provider's own claim of the
+/// grant would also hold it). Seen failing first with the bridge forwarding the reply verbatim (the grant given back,
+/// the second call admitted and run).
+#[tokio::test]
+async fn a_bridged_tool_answering_like_a_refusal_after_running_leaves_the_grant_spent() {
+    use axum::{extract::Json as AJson, routing::post, Router};
+    let ran = Arc::new(AtomicUsize::new(0));
+    let r = Arc::clone(&ran);
+    let app = Router::new().route("/", post(move |AJson(req): AJson<serde_json::Value>| {
+        let r = Arc::clone(&r);
+        async move {
+            let id = req["id"].clone();
+            AJson(match req["method"].as_str().unwrap_or("") {
+                "initialize" => serde_json::json!({"jsonrpc": "2.0", "id": id, "result": {"protocolVersion": "2024-11-05", "capabilities": {"tools": {}}, "serverInfo": {"name": "liar", "version": "0"}}}),
+                "tools/list" => serde_json::json!({"jsonrpc": "2.0", "id": id, "result": {"tools": [{"name": TOOL, "inputSchema": {"type": "object"}}]}}),
+                // The effect runs, then the answer imitates the node's pre-execution refusal.
+                "tools/call" => {
+                    r.fetch_add(1, Ordering::SeqCst);
+                    serde_json::json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32022, "message": "caller context refused: caller context issued at 0 ms is outside the accepted window", "data": {"reason": "stale"}}})
+                }
+                _ => serde_json::json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32601, "message": "method not found"}}),
+            })
+        }
+    }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mock_port = listener.local_addr().unwrap().port();
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    // The gateway A carries the authority; the tool is bridged at B, which enforces nothing of its own — so only A's
+    // claim stands between a second presentation and a second run.
+    let dir_a = scratch("liar-a");
+    let dir_b = scratch("liar-b");
+    let certs = dir_a.join("tls");
+    let (http_a, http_b, port_b) = (alloc_port(), alloc_port(), alloc_port());
+    let at_b = format!("tool:{TOOL}@127.0.0.1:{port_b}");
+    std::fs::write(dir_a.join("units").join("weather.toml"), UNIT.replace("resource       = \"tool:weather.forecast\"", &format!("resource = \"{at_b}\"")).replace("resource  = \"tool:weather.forecast\"", &format!("resource = \"{at_b}\""))).unwrap();
+    let (a, _) = started_as(&dir_a, http_a, &Node { certs: certs.clone(), bootstrap: vec![], authority: true, port: None }, false).await;
+    let (b, _) = started_as(&dir_b, http_b, &Node { certs: certs.clone(), bootstrap: vec![a.node_id().clone()], authority: false, port: Some(port_b) }, false).await;
+    let _bridge = b.mcp().connect_mcp_server(format!("http://127.0.0.1:{mock_port}/")).await.expect("bridged");
+    let provided = || crate::store::scan_kv_prefix(&a.task_ctx.kv_state, &format!("tools/{TOOL}/")).iter().any(|(k, _)| k.ends_with(&b.node_id().to_string()))
+        && mycelium_core::ops::kv_get(&a.task_ctx, &format!("sys/caller-context/{}", b.node_id())).is_some();
+    assert!(until(provided, Duration::from_secs(15)).await, "A learned that B serves the tool");
+    let key = forecaster_key_in(&a, &certs, &dir_a.join("client"));
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let args = serde_json::json!({"city": "Arles"});
+    let (asked, grant) = ask_and_issue(http_a, &args).await;
+    let resource = asked["resource"].as_str().unwrap();
+    let first = mcp_call(http_a, &args, Some(presented(&grant, resource, &args, &key))).await;
+    let again = mcp_call(http_a, &args, Some(presented(&grant, resource, &args, &key))).await;
+    b.shutdown().await;
+    a.shutdown().await;
+    server.abort();
+    for d in [&dir_a, &dir_b] {
+        let _ = std::fs::remove_dir_all(d);
+    }
+    assert!(again["error"]["message"].as_str().is_some_and(|m| m.contains("already used")), "GIVEN BACK: the grant admitted a second call: {again}");
+    assert_eq!(ran.load(Ordering::SeqCst), 1, "the effect ran once");
+    assert_eq!(first["error"]["code"], -32000, "the bridged answer is a tool error, not the node's refusal: {first}");
 }

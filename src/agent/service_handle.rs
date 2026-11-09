@@ -128,6 +128,12 @@ impl ServiceHandle {
     }
 
     /// Returns a typed receiver for incoming RPC requests of `kind`.
+    ///
+    /// **An `mcp.invoke` server answers with its own bytes only.** A gateway gives a grant's use back when the provider
+    /// node refuses before running — JSON-RPC `-32022`, its message beginning `caller context refused` — so a server
+    /// that forwards another party's reply in that shape (a tool's, a bridged server's) reopens that give-back: the
+    /// effect could run under the grant twice. Rewrite such a reply into a tool error first, as the node's own bridge
+    /// does (identity-and-lifecycle I1).
     pub fn rpc_rx(&self, kind: impl Into<Arc<str>>) -> RpcRequestRx {
         RpcRequestRx {
             rx: self.ctx.signal_handlers.register(kind.into()),

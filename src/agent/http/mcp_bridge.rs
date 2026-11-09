@@ -139,6 +139,20 @@ pub(super) async fn mcp_handler(
                     })).into_response();
                 }
             };
+            // The signature checked here too, before the preflight claims a grant's use: a call refused for its
+            // signature must not spend the grant it presents (#744's review). `cn` stays the provider's.
+            #[cfg(feature = "tls")]
+            if let Some(signed) = &client_signed
+                && let Err(r) = crate::agent::client_sig::check_at_door(
+                    &ctx.agent_ctx, caller.as_ref().map(|c| c.principal()),
+                    crate::agent::client_sig::door_binding_mcp(&name, &arguments), signed,
+                )
+            {
+                return Json(json!({
+                    "jsonrpc": "2.0", "id": id,
+                    "error": {"code": -32602, "message": format!("the client's signature on this call was refused: {}", r.code()), "data": {"reason": r.code()}},
+                })).into_response();
+            }
 
             // AE slice: the evaluator preflight, between the auth layer and the dispatch. Inert
             // unless an evaluator is attached (`with_action_evaluator`); with one, a call whose
@@ -199,6 +213,12 @@ pub(super) async fn mcp_handler(
             // What this gateway actually observed. A timeout is **unknown**, never a negative: the
             // call may well have run (item 1's rule, and the hot invariant). A dispatch the gateway
             // itself refused before sending is the one case where nothing ran and it can say so.
+            // A provider that refused before anything ran (its fold of client certificates behind this gateway's, a
+            // signature it judged stale) did not spend the grant this door claimed: the use is given back.
+            #[cfg(all(feature = "gateway", feature = "tls"))]
+            if let Some(reason) = release_grant_claim_after(&ctx.agent_ctx, &preflight, &dispatched).await {
+                tracing::debug!(tool = %name, reason, "the provider refused before running: the grant's use at this door is released");
+            }
             #[cfg(all(feature = "gateway", feature = "tls"))]
             {
                 use super::action_evaluator::Execution;

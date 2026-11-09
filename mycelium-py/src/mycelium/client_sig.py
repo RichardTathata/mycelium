@@ -36,13 +36,14 @@ def client_signature_message(
     instance: int,
     counter: int,
 ) -> bytes:
-    """The bytes a client signs: the tag; the principal, the operation and the resource before ``@``, each a ``u32``
-    little-endian length and its UTF-8 bytes; the 32-byte arguments digest; then ``issued_at_ms``, ``instance`` and
-    ``counter`` as ``u64`` little-endian."""
+    """The bytes a client signs: the tag; the principal, the operation and the resource, each a ``u32`` little-endian
+    length and its UTF-8 bytes; the 32-byte arguments digest; then ``issued_at_ms``, ``instance`` and ``counter`` as
+    ``u64`` little-endian. ``resource`` is the bare resource (``tool:{name}``, ``skill:{id}``), whole: a name holding
+    ``@`` is bound in full, and no provider is named (one signature serves every provider of the tool)."""
     if len(digest) != 32:
         raise ValueError("the arguments digest is 32 bytes")
     out = bytearray(TAG)
-    for part in (principal, operation, resource.split("@", 1)[0]):
+    for part in (principal, operation, resource):
         b = part.encode("utf-8")
         out += struct.pack("<I", len(b)) + b
     out += digest
@@ -245,7 +246,8 @@ class ClientSigner:
     def sign(self, operation: str, resource: str, digest: bytes, *, issued_at_ms: Optional[int] = None,
              counter: Optional[int] = None) -> Dict[str, Any]:
         """Sign one call; returns ``{"cs": …, "cn": …}`` to merge into ``params._meta``. Each call takes the next
-        counter unless one is given."""
+        counter unless one is given. ``resource`` is the **bare** resource — ``tool:x``, never ``tool:x@node`` — as
+        :func:`mcp_binding` and :func:`a2a_binding` return it: the signature binds it whole."""
         import base64
 
         t = issued_at_ms if issued_at_ms is not None else int(time.time() * 1000)

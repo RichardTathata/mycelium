@@ -175,7 +175,9 @@ where
                 let response = json!({
                     "jsonrpc": "2.0",
                     "id": rpc_req["id"],
-                    "error": {"code": -32022, "message": format!("caller context refused: {e}")},
+                    // The reason travels too (#745's review): a client tells `client_key_unknown` (retry) from
+                    // `client_key_superseded` (final), and the gateway gives back a grant's use refused before running.
+                    "error": {"code": -32022, "message": format!("caller context refused: {e}"), "data": {"reason": e.code()}},
                 });
                 rpc_respond_ctx(&ctx, &req, Bytes::from(response.to_string().into_bytes()));
                 continue;
@@ -307,7 +309,23 @@ async fn forward_bridged(
         Err(e) => json!({"jsonrpc":"2.0","id":rpc_req["id"],
                          "error":{"code":-32000,"message":e.to_string()}}),
     };
-    rpc_respond_ctx(ctx, req, Bytes::from(response.to_string().into_bytes()));
+    rpc_respond_ctx(ctx, req, Bytes::from(as_tool_answer(response, &rpc_req["id"]).to_string().into_bytes()));
+}
+
+/// **Only the node authors a refusal** (#745's confirm round): a bridged server's reply is its own bytes, so one shaped
+/// like the node's caller-context refusal — `-32022`, or an `error` string beginning `caller context refused` — is
+/// rewritten into an ordinary tool error (`-32000`, the server's text kept in the message, no `data`). Otherwise a tool
+/// that ran its effect and answered `-32022`/`stale` would have the gateway give its grant back, and the effect run
+/// twice.
+#[cfg(feature = "gateway")]
+fn as_tool_answer(response: serde_json::Value, id: &serde_json::Value) -> serde_json::Value {
+    let node_shaped = response["error"]["code"] == -32022
+        || response["error"].as_str().is_some_and(|e| e.starts_with("caller context refused"));
+    if !node_shaped {
+        return response;
+    }
+    let said = response["error"]["message"].as_str().or(response["error"].as_str()).unwrap_or("").to_string();
+    json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32000, "message": format!("the bridged server answered an error: {said}")}})
 }
 
 pub(super) async fn await_shutdown(rx: &mut watch::Receiver<bool>) {
@@ -404,7 +422,9 @@ pub(super) async fn run_mcp_client_task(
                 let response = json!({
                     "jsonrpc": "2.0",
                     "id": rpc_req["id"],
-                    "error": {"code": -32022, "message": format!("caller context refused: {e}")},
+                    // The reason travels too (#745's review): a client tells `client_key_unknown` (retry) from
+                    // `client_key_superseded` (final), and the gateway gives back a grant's use refused before running.
+                    "error": {"code": -32022, "message": format!("caller context refused: {e}"), "data": {"reason": e.code()}},
                 });
                 rpc_respond_ctx(&ctx, &req, Bytes::from(response.to_string().into_bytes()));
                 continue;

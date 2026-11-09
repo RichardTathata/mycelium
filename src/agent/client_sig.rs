@@ -76,8 +76,9 @@ impl ClientNonce {
     }
 }
 
-/// The bytes a client signs: [`CLIENT_SIGNATURE_TAG`], then the principal, the operation and the resource before `@`,
-/// each as a `u32` little-endian length and its bytes, then the arguments' 32-byte digest, then `issued_at_ms`,
+/// The bytes a client signs: [`CLIENT_SIGNATURE_TAG`], then the principal, the operation and the resource — the bare
+/// resource, `tool:{name}` or `skill:{id}`, **whole**, so a name holding `@` is bound in full and no provider is named
+/// (#745's confirm round) — each as a `u32` little-endian length and its bytes, then the arguments' 32-byte digest, then `issued_at_ms`,
 /// `instance` and `counter` as `u64` little-endian.
 pub fn client_signature_message(
     principal: &str,
@@ -88,7 +89,6 @@ pub fn client_signature_message(
     instance: u64,
     counter: u64,
 ) -> Vec<u8> {
-    let resource = resource.split('@').next().unwrap_or(resource);
     let mut out = CLIENT_SIGNATURE_TAG.to_vec();
     for part in [principal.as_bytes(), operation.as_bytes(), resource.as_bytes()] {
         out.extend_from_slice(&(part.len() as u32).to_le_bytes());
@@ -305,6 +305,10 @@ impl ClientSigner {
 
     /// Sign one call at `issued_at_ms`. Each call takes the next counter.
     pub fn sign_at(&self, operation: &str, resource: &str, arguments_digest: &[u8; 32], issued_at_ms: u64) -> (ClientSignature, ClientNonce) {
+        debug_assert!(
+            resource.rsplit_once('@').is_none_or(|(_, tail)| tail.parse::<crate::NodeId>().is_err()),
+            "a client signature's resource is bare (`tool:x`, never `tool:x@node`): {resource}"
+        );
         use base64::Engine as _;
         use ed25519_dalek::Signer as _;
         let counter = self.counter.fetch_add(1, Ordering::Relaxed);
@@ -317,7 +321,8 @@ impl ClientSigner {
         )
     }
 
-    /// [`Self::sign_at`] on the wall clock.
+    /// [`Self::sign_at`] on the wall clock. `resource` is the **bare** resource — `tool:x`, never `tool:x@node` — as
+    /// [`door_binding_mcp`] and [`door_binding_a2a`] return it: the signature binds it whole.
     pub fn sign(&self, operation: &str, resource: &str, arguments_digest: &[u8; 32]) -> (ClientSignature, ClientNonce) {
         self.sign_at(operation, resource, arguments_digest, mycelium_core::sim_seam::wall_now_ms())
     }
@@ -385,6 +390,13 @@ pub(crate) enum ClientSigRefusal {
     KeyUnknown,
     /// `k` is a superseded key: a newer certificate for the principal has been read here. Final.
     KeySuperseded,
+    /// The issue time is outside the caller envelope's window: a clock skewed past the drift bound, or a held call.
+    /// Built by the gateway's door only (the provider answers `CallerError::Stale`).
+    #[cfg_attr(not(feature = "gateway"), allow(dead_code))]
+    Stale,
+    /// This node has no identity (`[tls]` unset in a build with `tls`), so it holds no CA anchor and judges no client
+    /// certificate: the signature cannot be checked here, rather than its key being unknown (#745's review).
+    Unverifiable,
 }
 
 #[cfg(feature = "tls")]
@@ -397,6 +409,8 @@ impl ClientSigRefusal {
             Self::BadSignature => "client_signature_invalid",
             Self::KeyUnknown => "client_key_unknown",
             Self::KeySuperseded => "client_key_superseded",
+            Self::Stale => "stale",
+            Self::Unverifiable => "client_signature_unverifiable",
         }
     }
 }
@@ -412,13 +426,15 @@ pub(crate) fn binding_of(kind: &str, payload: &[u8], resource_claim: Option<&str
         let name = v["params"]["name"].as_str().ok_or(unbound)?;
         let (op, res, d) = door_binding_mcp(name, &v["params"]["arguments"]).map_err(|_| ClientSigRefusal::UnsafeInteger)?;
         // The envelope's claim, where present, must name the same tool.
-        if resource_claim.is_some_and(|r| r.split('@').next() != Some(res.as_str())) {
+        // The claim is `{resource}@{provider}`: the provider is after the **last** `@`, so a name holding one still binds
+        // (#745's review).
+        if resource_claim.is_some_and(|r| r.rsplit_once('@').map_or(r, |(head, _)| head) != res.as_str()) {
             return Err(unbound);
         }
         return Ok((op, res, d));
     }
     if kind == "skill.invoke" {
-        let skill = resource_claim.and_then(|r| r.split('@').next()).and_then(|r| r.strip_prefix("skill:")).ok_or(unbound)?;
+        let skill = resource_claim.map(|r| r.rsplit_once('@').map_or(r, |(head, _)| head)).and_then(|r| r.strip_prefix("skill:")).ok_or(unbound)?;
         let text = std::str::from_utf8(payload).map_err(|_| unbound)?;
         return Ok(door_binding_a2a(skill, text));
     }
@@ -437,13 +453,23 @@ pub(crate) fn check(
     cs: &ClientSignature,
     cn: &ClientNonce,
 ) -> Result<ClientSigned, ClientSigRefusal> {
+    let binding = binding_of(kind, payload, resource_claim)?;
+    check_bound(ctx, principal, &binding, cs, cn)
+}
+
+/// [`check`] over a binding already read: the signature over it, then the key's standing.
+#[cfg(feature = "tls")]
+fn check_bound(ctx: &super::TaskCtx, principal: &str, binding: &(String, String, [u8; 32]), cs: &ClientSignature, cn: &ClientNonce) -> Result<ClientSigned, ClientSigRefusal> {
     use base64::Engine as _;
     let b64 = base64::engine::general_purpose::STANDARD;
     let key: [u8; 32] = b64.decode(&cs.k).ok().and_then(|v| v.try_into().ok()).ok_or(ClientSigRefusal::Malformed)?;
     let sig: [u8; 64] = b64.decode(&cs.sig).ok().and_then(|v| v.try_into().ok()).ok_or(ClientSigRefusal::Malformed)?;
     let instance = cn.instance().ok_or(ClientSigRefusal::Malformed)?;
-    let (op, res, d) = binding_of(kind, payload, resource_claim)?;
-    let msg = client_signature_message(principal, &op, &res, &d, cn.t, instance, cn.c);
+    if ctx.tls.get().is_none() {
+        return Err(ClientSigRefusal::Unverifiable);
+    }
+    let (op, res, d) = binding;
+    let msg = client_signature_message(principal, op, res, d, cn.t, instance, cn.c);
     if !crate::tls::verify_bytes(&key, &msg, &sig) {
         return Err(ClientSigRefusal::BadSignature);
     }
@@ -454,6 +480,29 @@ pub(crate) fn check(
         _ => return Err(ClientSigRefusal::KeyUnknown),
     }
     Ok(ClientSigned { key, issued_at_ms: cn.t, instance, counter: cn.c })
+}
+
+/// **The door's own check of `cs`, before it claims a grant's use** (identity-and-lifecycle I1, #744's review): the
+/// signature over the door's binding — [`door_binding_mcp`] or [`door_binding_a2a`], what the provider will bind — and
+/// the key's standing ([`client_key_standing`](super::client_cert::client_key_standing)). Not `cn`: the replay window is
+/// the provider's, which checks everything again at its receive boundary. A call this refuses never reaches the
+/// preflight, so a grant it presents is not spent. `None` principal (an unauthenticated caller): nothing to bind the
+/// signature to here, and the provider decides.
+#[cfg(all(feature = "gateway", feature = "tls"))]
+pub(crate) fn check_at_door(
+    ctx: &super::TaskCtx,
+    principal: Option<&str>,
+    binding: Result<(String, String, [u8; 32]), UnsafeInteger>,
+    signed: &(ClientSignature, ClientNonce),
+) -> Result<(), ClientSigRefusal> {
+    let Some(principal) = principal else { return Ok(()) };
+    let binding = binding.map_err(|_| ClientSigRefusal::UnsafeInteger)?;
+    let checked = check_bound(ctx, principal, &binding, &signed.0, &signed.1)?;
+    // The issue time on the provider's window: a skewed clock is refused here, before a grant is spent.
+    if !super::gateway_caller::client_issue_time_fresh(ctx, checked.issued_at_ms, ctx.hlc.decision_now_ms()) {
+        return Err(ClientSigRefusal::Stale);
+    }
+    Ok(())
 }
 
 #[cfg(feature = "tls")]
