@@ -101,8 +101,8 @@
   "request_hex": "6d7963656c69756d2e676174657761792f6d616e646174652d726571756573742f310a000000746f6f6c732f63616c6c15000000746f6f6c3a776561746865722e666f726563617374c74a2b58148ec8b68e232ab0eeaeae86ea4520429e4b75b990ec1418abd489db",
   "possession_message_hex": "6d7963656c69756d2e6d616e646174652f706f7373657373696f6e2f31b93d63bfc007fbb4e2552650dba87059a465972b988690fc022a4cf5c3bcb81c690000006d7963656c69756d2e676174657761792f6d616e646174652d726571756573742f310a000000746f6f6c732f63616c6c15000000746f6f6c3a776561746865722e666f726563617374c74a2b58148ec8b68e232ab0eeaeae86ea4520429e4b75b990ec1418abd489db",
   "possession_b64": "f7FPWqP1jxW6Sf6asxtqNH4cWLt7VPwUHo/ZsstMW8J8itO78IB9WzkfmApUBr5NTFlDT0HAG8dGW1L8PggfBQ==",
-  "_doc_mandate_digest": "mandate_digest_cases: the gateway's mandate arguments digest (serde_json, members sorted by UTF-8 bytes) of each case — serialized is serde_json::to_string of the arguments, digest_hex its SHA-256 — checked in Rust (the gateway's arguments_digest), jest (mandateArgumentsDigest) and pytest (arguments_digest). The cases put keys outside the BMP beside keys in U+E000–U+FFFF, where UTF-8 and UTF-16 order differ.",
-  "mandate_digest_cases": [
+  "_doc_legacy_digest": "legacy_digest_cases: the pre-I3 mandate digest (serde_json, members by UTF-8 bytes), accepted beside RFC 8785 for one release (identity-and-lifecycle I3); Rust's legacy_arguments_digest reproduces each. The SDKs no longer compute it.",
+  "legacy_digest_cases": [
     {
       "arguments": {
         "！": 1,
@@ -161,5 +161,141 @@
       "serialized": "{\"a\":{\"\":1,\"😀\":{\"max\":9007199254740991,\"n\":-12}},\"b\":[{\"x\":[true,null,false],\"y\":1}]}",
       "digest_hex": "f9271fe2999066919bb9f0239dfc9235175c58a9d0f3080ac2f4d148d33c8b89"
     }
-  ]
+  ],
+  "_doc_digest": "digest_cases: the mandate/grant arguments digest since identity-and-lifecycle I3 — RFC 8785 (JCS): canonical is the JCS text, digest_hex its SHA-256 — checked by the gateway's arguments_digest in Rust, mandateArgumentsDigest in jest and arguments_digest in pytest. Floats in exponent form and a key outside the BMP beside one in U+FF01 are where the pre-I3 forms disagreed.",
+  "digest_cases": [
+    {
+      "arguments": {
+        "tolerance": 1e-05
+      },
+      "canonical": "{\"tolerance\":0.00001}",
+      "digest_hex": "f4ee9650d8adc7d23dad33467d463420b083daadd86d31e1fd4e6d70a1364884"
+    },
+    {
+      "arguments": {
+        "tiny": 1e-07,
+        "scale": 2.5e-12
+      },
+      "canonical": "{\"scale\":2.5e-12,\"tiny\":1e-7}",
+      "digest_hex": "43d484ba84d7c9e893c661b07f07a17cf42cf9b8cf6e64d6448b65b61f4c7d08"
+    },
+    {
+      "arguments": {
+        "！": 1,
+        "😀": 2,
+        "a": 3
+      },
+      "canonical": "{\"a\":3,\"😀\":2,\"！\":1}",
+      "digest_hex": "8b720842e3e0b138369301fb28d74fa4ee3ef131494632cec3e680d1447b430a"
+    },
+    {
+      "arguments": {
+        "n": -12,
+        "max": 9007199254740991,
+        "f": 1.5
+      },
+      "canonical": "{\"f\":1.5,\"max\":9007199254740991,\"n\":-12}",
+      "digest_hex": "06f2342680f98d381c4287133bf14102af8476b818a8b4f707ba8c13c1852bdc"
+    }
+  ],
+  "_doc_unsafe": "unsafe_cases: arguments a mandate cannot bind — a number of magnitude 2^53 or more, integral or in exponent form — refused where the digest is taken, in all three languages; raw JSON, so each language parses it itself.",
+  "unsafe_cases": [
+    "{\"id\":9007199254740993}",
+    "{\"huge\":1e21}",
+    "{\"neg\":-9007199254740992}"
+  ],
+  "float_grant": {
+    "_doc": "A grant bound to arguments holding floats in exponent form, and the holder's possession proof for that call: admitted from every language since identity-and-lifecycle I3.",
+    "arguments": {
+      "tolerance": 1e-05,
+      "tiny": 1e-07
+    },
+    "arguments_digest_hex": "3c3a1999063d6c5d617c4c818f133eecb642cf84bc5365ed54a0d9a2069a86d3",
+    "grant": {
+      "mandate": {
+        "holder": "token:fleet/forecaster",
+        "established_by": "node:10.0.0.2:7946",
+        "purpose": "grant issued by token:fleet/trésorier for request 01a1bda0b40f0000-10.0.0.2:7946",
+        "scope": "grant:01a1bda0b40f0000-10.0.0.2:7946",
+        "operations": [
+          "tools/call:tool:weather.forecast",
+          "bound:args:3c3a1999063d6c5d617c4c818f133eecb642cf84bc5365ed54a0d9a2069a86d3",
+          "bound:policy:declared:b725310fb66dbdee",
+          "bound:resource:tool:weather.forecast@10.0.0.1:57000"
+        ],
+        "epoch": 1,
+        "term": "01a1bda0b40f0000-10.0.0.2:7946",
+        "valid_from_ms": 1767225600000,
+        "valid_until_ms": 1767225900000
+      },
+      "signature": [
+        172,
+        155,
+        160,
+        230,
+        21,
+        133,
+        13,
+        206,
+        76,
+        221,
+        70,
+        75,
+        209,
+        72,
+        231,
+        211,
+        49,
+        105,
+        24,
+        228,
+        103,
+        174,
+        85,
+        201,
+        254,
+        63,
+        148,
+        113,
+        154,
+        229,
+        246,
+        47,
+        130,
+        198,
+        79,
+        207,
+        142,
+        150,
+        143,
+        5,
+        121,
+        63,
+        172,
+        27,
+        54,
+        195,
+        152,
+        216,
+        131,
+        36,
+        64,
+        8,
+        172,
+        157,
+        190,
+        27,
+        225,
+        236,
+        251,
+        174,
+        200,
+        65,
+        94,
+        4
+      ]
+    },
+    "request_hex": "6d7963656c69756d2e676174657761792f6d616e646174652d726571756573742f310a000000746f6f6c732f63616c6c15000000746f6f6c3a776561746865722e666f7265636173743c3a1999063d6c5d617c4c818f133eecb642cf84bc5365ed54a0d9a2069a86d3",
+    "possession_b64": "OOIElD+pc1Cz5nY7Ie7RozmkZTJcPlJb6C1qUwVC0a/VZgPotuUbAAITq5Nr5Tuxq3yOhRXxMPkelFFMz/4/Bw=="
+  }
 }

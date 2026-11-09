@@ -570,6 +570,10 @@ impl AgentStateMachine {
         use crate::mandate::grant::{possession_message, SignedMandateGrant};
         let window_ms = self.policy.read().grant_window.unwrap_or(Duration::from_secs(30)).as_millis() as u64;
         let agent = super::gateway_caller::node_principal(&self.ctx.node_id);
+        // Identity-and-lifecycle I3 (§9 O1): the grant's digest is RFC 8785, which cannot bind such an integer exactly.
+        if super::client_sig::holds_unsafe_integer(arguments) {
+            return Err(PolicyViolation::GrantRefused(format!("{tool}: the arguments hold an integer outside +-(2^53 - 1), which a grant cannot bind exactly: send it as a string")));
+        }
         let digest = arguments_digest(arguments);
         let digest_hex = super::action_evaluator::hex32(&digest);
         let now_ms = self.ctx.hlc.decision_now_ms();

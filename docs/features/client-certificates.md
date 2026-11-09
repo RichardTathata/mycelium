@@ -151,8 +151,9 @@ way. `a_newer_certificate_supersedes_the_older_key_and_an_overwrite_cannot_lower
   still timed out once). A default fleet's window is inferred to be longer from the 10 s default tick; it was not measured. A
   timed-out call has spent the grant it presents. See [identity and lifecycle §9 O2](../plans/identity-and-lifecycle.md#9--open-items-tracked) and
   [issue #746](https://github.com/RichardTathata/mycelium/issues/746).
-- **A possession proof that does not verify is `WrongHolder`**, whether the key is wrong or the client's digest of the
-  arguments differs (the O1 float case): the gateway sees only the proof.
+- **A possession proof that does not verify is `WrongHolder`**, whether the key is wrong or the proof binds other
+  arguments: the gateway sees only the proof. The digest it binds is RFC 8785 in every language since
+  identity-and-lifecycle I3, so a float in exponent form no longer makes an honest proof fail.
 - **Reserved name:** no client certificate may be named `legacy`, the legacy token's principal.
 - **Ordering is the issuing host's clock.** The issuance is the serial, in ms, from the clock of the host that ran
   `mycelium tls issue`. A host whose clock runs behind can issue a certificate that orders below the one it

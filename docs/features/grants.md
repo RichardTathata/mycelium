@@ -133,6 +133,19 @@ has no row for this feature. The tests: in [`src/mandate/grant.rs`](../../src/ma
 - A grant binds one call: another argument digest is refused by name (`BoundToOtherArguments`) at the agent, the
   gateway and the provider; a decision under another policy revision is refused (`BoundToOtherPolicy`); a grant past
   its window is out of window on the wall clock, however still the node's HLC stayed.
+- **The digest it binds is RFC 8785 (JCS)** since identity-and-lifecycle I3: the gateway's `arguments_digest`, Python's
+  `arguments_digest` and TypeScript's `mandateArgumentsDigest` agree byte for byte, so a float in exponent form binds
+  from every language (`a_grant_binds_the_jcs_digest_and_a_pre_i3_grant_is_honoured_for_one_release`; the
+  possession vector's `digest_cases` and `float_grant`, checked in Rust, jest and pytest).
+  - **The window:** for one release a grant issued and a proof made before the change — bound to the older
+    `serde_json` digest (`legacy_arguments_digest`) — is still honoured. It is counted
+    (`ExecutionAuthority::legacy_digest_matches`), and the evidence record says so in `checked`. The release after
+    refuses it.
+  - **Large numbers:** arguments holding a number of magnitude 2^53 or more, `1e21` included, are refused where a
+    mandate or grant binds them: `MandateRefusal::UnsafeInteger` at the gateway and the provider, `400
+    unsafe_integer` at the request door, `GrantRefused` at the agent's door. The digest writes such a number as the
+    nearest double and cannot tell it from its neighbour, so send it as a string. A call presenting no mandate is
+    still evaluated; its evidence records the RFC 8785 digest.
 - A grant is one appointment in its own scope, so grants never conflict with each other or with the resource
   authority's appointments. Its standing is its issuer's checkpoint for the grant's scope, not the gate's freshness
   policy: the issuing node publishes the grant's first checkpoint (nothing revoked) at issue and writes it beside the

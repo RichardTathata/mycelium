@@ -2848,3 +2848,37 @@ Two changes to the published binaries, both additive.
   is unaffected.
 
 Wire **v12** unchanged.
+
+## 93. A mandate's arguments digest is RFC 8785, with a one-release window (unreleased, identity-and-lifecycle I3, §9 O1)
+
+§92 is #749's. The digest a grant binds (`bound:args:`) and a possession proof covers is now RFC 8785 (JCS) in Rust,
+Python and TypeScript. It was each language's own JSON encoding, which disagreed on floats in exponent form, so an
+honest Python or TypeScript holder could be refused.
+
+- **What changed:**
+  - `arguments_digest` (Rust, Python) and `mandateArgumentsDigest` (TypeScript) compute the RFC 8785 digest. It is the
+    same digest a client signature binds.
+  - The preflight's evidence records it (`arguments_digest`).
+  - A grant requested after the upgrade binds it.
+- **The window, one release:** a grant issued before the upgrade is still honoured, and so is a proof made over the
+  older form (`serde_json`'s encoding, now `legacy_arguments_digest`).
+  - Each such match is counted by `ExecutionAuthority::legacy_digest_matches`, and the evidence record's `checked`
+    names it.
+  - Watch the counter fall to zero. The release after refuses the older form.
+  - A grant is short-lived (at most an hour), so re-issue any older grant that still stands.
+- **Large numbers are refused where a mandate binds them.** Any number of magnitude 2^53 or more, integer or not (`1e21`
+  included), is refused:
+  - by the request door, `400 unsafe_integer`;
+  - by the agent's grant wait, `GrantRefused`;
+  - at the gateway and the provider, `MandateRefusal::UnsafeInteger`, a new variant (the enum is `#[non_exhaustive]`).
+
+  The SDKs' digest functions raise. Send such a number as a string. A call that presents no mandate is not refused.
+- **Code:**
+  - `ExecutionAuthority::assess_arguments`, `legacy_arguments_digest`, `DigestForm` and
+    `MandateBinding::legacy_digest` are new. `MandateBinding` is `#[non_exhaustive]`.
+  - `assess` takes one digest and is unchanged.
+  - `MandateRefusal` gained `UnsafeInteger`.
+  - The possession vector's `mandate_digest_cases` are now `legacy_digest_cases`, beside new `digest_cases`,
+    `unsafe_cases` and a `float_grant`.
+
+Wire **v12** unchanged.

@@ -422,8 +422,8 @@ pub use agent::guarantee::{
 };
 #[cfg(all(feature = "gateway", feature = "tls"))]
 pub use agent::gateway_authority::{
-    arguments_digest, mandate_operation, possession_request, resource_key, Assessment, ExecutionAuthority, PresentedMandate,
-    WorkGuard,
+    arguments_digest, legacy_arguments_digest, mandate_operation, possession_request, resource_key, Assessment, DigestForm,
+    ExecutionAuthority, PresentedMandate, WorkGuard,
 };
 #[cfg(all(feature = "gateway", feature = "tls"))]
 pub use agent::evidence_journal::{

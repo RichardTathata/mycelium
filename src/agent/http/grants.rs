@@ -431,6 +431,11 @@ pub(super) async fn gw_grant_request(
     if body.tool.is_empty() || body.tool.contains('/') {
         return refused(StatusCode::BAD_REQUEST, "bad_request", "tool is one key segment");
     }
+    // Identity-and-lifecycle I3 (§9 O1): the digest a grant binds is RFC 8785, which cannot bind an integer past
+    // ±(2^53 − 1) exactly; such arguments are refused here, before a grant is asked for.
+    if crate::agent::client_sig::holds_unsafe_integer(&body.arguments) {
+        return refused(StatusCode::BAD_REQUEST, "unsafe_integer", "the arguments hold an integer outside +-(2^53 - 1), which a grant cannot bind exactly: send it as a string");
+    }
     let now_ms = tc.hlc.decision_now_ms();
     let segment = super::gateway_authority::grant_holder_segment(&principal);
     let prefix = format!("grant/{segment}/");
