@@ -139,6 +139,20 @@ pub(super) async fn mcp_handler(
                     })).into_response();
                 }
             };
+            // The signature checked here too, before the preflight claims a grant's use: a call refused for its
+            // signature must not spend the grant it presents (#744's review). `cn` stays the provider's.
+            #[cfg(feature = "tls")]
+            if let Some(signed) = &client_signed
+                && let Err(r) = crate::agent::client_sig::check_at_door(
+                    &ctx.agent_ctx, caller.as_ref().map(|c| c.principal()),
+                    crate::agent::client_sig::door_binding_mcp(&name, &arguments), signed,
+                )
+            {
+                return Json(json!({
+                    "jsonrpc": "2.0", "id": id,
+                    "error": {"code": -32602, "message": format!("the client's signature on this call was refused: {}", r.code()), "data": {"reason": r.code()}},
+                })).into_response();
+            }
 
             // AE slice: the evaluator preflight, between the auth layer and the dispatch. Inert
             // unless an evaluator is attached (`with_action_evaluator`); with one, a call whose

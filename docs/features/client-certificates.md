@@ -56,7 +56,16 @@ every node that reads it.
 
 ## See it work
 
-No runnable example exists. `a_client_certificate_is_refused_at_the_mesh_both_ways`, in
+[`examples/eve_weather/run_client_grant.mjs`](../../examples/eve_weather/run_client_grant.mjs) runs a service end to
+end on three nodes, the gateway the `mycelium` binary with `[authority]`. It issues and publishes the service's
+certificate, asks for a grant on Eve's weather tool, has the treasurer issue it, calls under it through `McpClient`
+with a `ClientSigner`, restarts the gateway and calls under a second grant, revokes a third, and supersedes the key.
+The [example index](../../examples/README.md#the-capability-matrix) lists its tool's provider,
+[`eve_fleet_node`](../../examples/README.md#the-capability-matrix) ([`examples/eve_fleet_node.rs`](../../examples/eve_fleet_node.rs)). It ends with
+`CLIENT GRANT OK` (CI's `eve-fleet` job; the release builds' run is on
+[the ledger](../operations/what-is-proven.md#client-grant-three-node-fleet)).
+
+`a_client_certificate_is_refused_at_the_mesh_both_ways`, in
 [`mycelium-core/src/tls.rs`](../../mycelium-core/src/tls.rs), issues a client certificate and drives a handshake each
 way. `a_newer_certificate_supersedes_the_older_key_and_an_overwrite_cannot_lower_it`, in
 [`src/agent/client_cert_tests.rs`](../../src/agent/client_cert_tests.rs), retires a key by re-issue.
@@ -99,10 +108,12 @@ way. `a_newer_certificate_supersedes_the_older_key_and_an_overwrite_cannot_lower
   the provider that runs it (`gateway_actions_unsigned`, `provider_actions_unsigned` on `/stats`), not refused yet
   ([`deprecations.md` §87](../guide/deprecations.md)). The gateway's signature does not cover `cs`/`cn`, so a relay
   that strips them makes the call unsigned. The LLM doors refuse a signature (`client_signature_unbound`).
-- **A grant presented with a signature that fails is spent at the gateway.** The gateway claims a grant's use at its
-  preflight, before the provider checks `cs`, so a call refused `client_signature_invalid` under a grant has used the
-  grant at the gateway's door (`a_signed_call_presenting_a_client_grant_runs_at_mcp` states it). The gateway checking
-  the signature before it claims the use is listed for I1's PR 4.
+- **The gateway checks the signature before it claims a grant's use.** At `/mcp` and both `/a2a` doors the gateway
+  verifies `cs` over the call's binding and the key's standing before its preflight runs, so a call refused
+  `client_signature_invalid`, `client_key_unknown` or `client_key_superseded` there leaves a grant it presents unspent
+  (`a_signed_call_presenting_a_client_grant_runs_at_mcp`; `both_a2a_doors_carry_a_client_signature_and_the_skill_sees_it`
+  for the A2A doors). It does not check `cn`: the replay window is the provider's, which checks everything again. A
+  call the provider then refuses, or that times out, has spent the grant at the gateway.
 - **A possession proof that does not verify is `WrongHolder`**, whether the key is wrong or the client's digest of the
   arguments differs (the O1 float case): the gateway sees only the proof.
 - **Reserved name:** no client certificate may be named `legacy`, the legacy token's principal.
@@ -120,9 +131,6 @@ way. `a_newer_certificate_supersedes_the_older_key_and_an_overwrite_cannot_lower
   runs in the identity watcher's loop, so a large one delays the revocation fold; moving it off is a follow-up.
 - **Not built:**
   - refusing an unsigned action from a principal with a certificate on record (counted now);
-  - the SDK clients run against a live node (they are tested against a recording stub, and the possession vector
-    against the gateway's verifier);
-  - the three-node fleet exit run;
   - an un-upgraded node's reading of `sys/client-cert/`, which was not shown against the previous binary.
 
   All are listed under

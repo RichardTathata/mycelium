@@ -2776,3 +2776,20 @@ Wire **v12** unchanged; no Rust API change.
   3.54.1.
 
 Wire **v12** unchanged; no other API change.
+
+## 91. The gateway checks a client's signature before it spends a grant (unreleased, identity-and-lifecycle I1, PR 4)
+
+A call carrying `cs`/`cn` is now checked at the gateway's door as well as at the provider. At `/mcp`, `tasks/send` and
+`tasks/sendSubscribe` the gateway verifies the signature over the call's binding and the key's standing **before** its
+preflight.
+
+- **A refused signature is answered by the gateway.** `/mcp` and `tasks/send` answer JSON-RPC `-32602` with
+  `data.reason` set to `client_signature_invalid`, `client_key_unknown`, `client_key_superseded`,
+  `client_signature_unsafe_integer` or `client_signature_malformed`. A stream answers a failed task naming the reason.
+  Before, the provider refused, after the gateway had dispatched. A client that branched on the provider's answer
+  reads the same reason in `data.reason`.
+- **A grant presented on such a call is no longer spent.** The preflight that claims a grant's use does not run.
+- **`cn` is still the provider's.** The gateway does not keep a replay window: a replayed `cn` passes the door and is
+  dropped at the provider, as before.
+
+Wire **v12** unchanged; no API change.

@@ -858,6 +858,13 @@ async fn dispatch_send(
             return Err(jsonrpc_error_with_data(id, -32602, &message, json!({ "reason": reason })));
         }
     };
+    // Checked before the preflight claims a grant's use, as at `/mcp` (#744's review); `cn` stays the provider's.
+    #[cfg(feature = "tls")]
+    if let Some(signed) = &client_signed
+        && let Err(r) = super::client_sig::check_at_door(&state.task_ctx, caller.map(|c| c.principal()), Ok(super::client_sig::door_binding_a2a(skill_id, &req.text)), signed)
+    {
+        return Err(jsonrpc_error_with_data(id, -32602, &format!("the client's signature on this call was refused: {}", r.code()), json!({ "reason": r.code() })));
+    }
     // AE slice: the same evaluator preflight the MCP edge runs. `/a2a` is the *other* route a
     // foreign agent acts through, so leaving it unguarded would mean the enforcement point could be
     // walked around by choosing a different door — and the evidence would still have said
@@ -1211,6 +1218,16 @@ pub(crate) async fn tasks_send_subscribe(
                 return;
             }
         };
+        // Before the preflight claims a grant's use, as at `/mcp` and on the unary send (#744's review).
+        #[cfg(feature = "tls")]
+        if let Some(signed) = &client_signed
+            && let Err(r) = super::client_sig::check_at_door(&state.task_ctx, caller.as_ref().map(|c| c.principal()), Ok(super::client_sig::door_binding_a2a(&skill_id, &req.text)), signed)
+        {
+            working.abort();
+            grants.abort();
+            send_all(stream_events(&id, &req, Step::Failed { error: Some(format!("the client's signature on this call was refused: {}", r.code())), detail: None })).await;
+            return;
+        }
         #[cfg(all(feature = "gateway", feature = "tls"))]
         let preflight = super::http::ae_preflight(
             &state.task_ctx,

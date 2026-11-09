@@ -177,7 +177,7 @@ links = ["rule:ae.preflight", "guarantee:ae.authorised_at_seam", "guarantee:ae.r
 [[feature]]
 name = "Client certificates for services"
 page = "client-certificates.md"
-example = "none"
+example = "eve_fleet_node"
 example_watch = ["client_cert"]
 ids = []
 links = []

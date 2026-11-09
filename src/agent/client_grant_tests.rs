@@ -471,10 +471,11 @@ fn the_possession_vector_is_the_gateways() {
 
 /// **The SDKs' shape: a client's own signature and its own grant on one `tools/call`** (#744's review, item 6). The
 /// forecaster signs the call with its client key (`cs`/`cn`, as `ClientSigner::sign_tools_call` and both SDKs write
-/// them) and presents its grant with a possession proof by the same key, in one `_meta`: the call runs once. A second
-/// grant presented the same way with the signature made over other arguments is refused by name, and the tool does not
-/// run. **Stated, not changed here:** the gateway claims a grant's use at its preflight, before the provider checks
-/// `cs`, so a call refused for its signature has spent the grant's use at the gateway.
+/// them) and presents its grant with a possession proof by the same key, in one `_meta`. **A refused signature leaves
+/// the grant unspent** (I1's PR 4): first the call is sent with the signature made over other arguments — refused
+/// `client_signature_invalid` by the gateway's own check, before its preflight claims the grant's use — then the honest
+/// call under the **same** grant runs once. Seen failing first with the gateway's check removed (the honest call was
+/// refused: the grant was already used at the gateway).
 #[tokio::test]
 async fn a_signed_call_presenting_a_client_grant_runs_at_mcp() {
     let dir = scratch("signed");
@@ -490,19 +491,16 @@ async fn a_signed_call_presenting_a_client_grant_runs_at_mcp() {
         meta["cn"] = s["cn"].clone();
     };
     let mut meta = presented(&grant, asked["resource"].as_str().unwrap(), &args, &key);
+    sign_into(&mut meta, &serde_json::json!({"city": "Nice"}));
+    let tampered = mcp_call(http_port, &args, Some(meta.clone())).await;
+    let ran_before = ran.load(Ordering::SeqCst);
     sign_into(&mut meta, &args);
     let called = mcp_call(http_port, &args, Some(meta)).await;
-    let ran_once = ran.load(Ordering::SeqCst);
-    let args2 = serde_json::json!({"city": "Brest"});
-    let (asked2, grant2) = ask_and_issue(http_port, &args2).await;
-    let mut meta2 = presented(&grant2, asked2["resource"].as_str().unwrap(), &args2, &key);
-    sign_into(&mut meta2, &serde_json::json!({"city": "Nice"}));
-    let tampered = mcp_call(http_port, &args2, Some(meta2)).await;
     let ran_after = ran.load(Ordering::SeqCst);
     a.shutdown().await;
     let _ = std::fs::remove_dir_all(&dir);
-    assert!(called.get("result").is_some(), "the signed call under the client's grant ran: {called}");
-    assert_eq!(ran_once, 1);
-    assert!(tampered.to_string().contains("client_signature_invalid"), "a signature over other arguments is refused by name: {tampered}");
-    assert_eq!(ran_after, 1, "the tampered call did not run");
+    assert_eq!(tampered["error"]["data"]["reason"], "client_signature_invalid", "refused by the gateway's own check, by name: {tampered}");
+    assert_eq!(ran_before, 0, "the tampered call did not run");
+    assert!(called.get("result").is_some(), "UNSPENT: the honest call under the same grant was refused: {called}");
+    assert_eq!(ran_after, 1, "once");
 }

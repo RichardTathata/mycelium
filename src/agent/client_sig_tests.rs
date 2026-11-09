@@ -380,7 +380,9 @@ async fn the_llm_doors_refuse_a_client_signature_rather_than_drop_it() {
 /// `tasks/send` and `tasks/sendSubscribe` signed over `("skill.invoke", "skill:depot/dispatch", {"text": …})` reach the
 /// skill with the signature verified at its receive boundary (the `skill.invoke` binding); at a gateway without an
 /// issuer the stream answers a failed task naming it. Seen failing first with `None` planted at each door's dispatch: the
-/// skill saw no signature on either path.
+/// skill saw no signature on either path. **A signature over other text is refused at both doors by the gateway's own
+/// check** (I1's PR 4), before the preflight — so it never reaches the skill; seen failing first with the doors' check
+/// removed (the skill received both tampered calls).
 #[cfg(all(feature = "compliance", feature = "a2a"))]
 #[tokio::test]
 async fn both_a2a_doors_carry_a_client_signature_and_the_skill_sees_it() {
@@ -439,6 +441,12 @@ async fn both_a2a_doors_carry_a_client_signature_and_the_skill_sees_it() {
     };
     let sent: serde_json::Value = post(http_port, "tasks/send", params("t-send", meta())).await.unwrap().json().await.unwrap();
     let streamed = post(http_port, "tasks/sendSubscribe", params("t-stream", meta())).await.unwrap().text().await.unwrap();
+    let tampered_meta = || {
+        let (op, res, d) = super::client_sig::door_binding_a2a("depot/dispatch", "stop");
+        ClientSigner::meta(&signer.sign(&op, &res, &d))
+    };
+    let tampered_send: serde_json::Value = post(http_port, "tasks/send", params("t-tampered", tampered_meta())).await.unwrap().json().await.unwrap();
+    let tampered_stream = post(http_port, "tasks/sendSubscribe", params("t-tampered-s", tampered_meta())).await.unwrap().text().await.unwrap();
     tokio::time::sleep(Duration::from_millis(200)).await;
     a.shutdown().await;
 
@@ -456,7 +464,9 @@ async fn both_a2a_doors_carry_a_client_signature_and_the_skill_sees_it() {
 
     assert_eq!(sent["result"]["status"]["state"], "completed", "{sent}");
     assert!(streamed.contains("completed"), "{streamed}");
-    assert_eq!(*seen.lock(), vec![true, true], "UNSIGNED: the skill did not see the signature on both doors");
+    assert_eq!(*seen.lock(), vec![true, true], "UNSIGNED or REACHED: the skill did not see the signature on both doors, or a tampered call reached it");
+    assert_eq!(tampered_send["error"]["data"]["reason"], "client_signature_invalid", "{tampered_send}");
+    assert!(tampered_stream.contains("failed") && tampered_stream.contains("client_signature_invalid"), "{tampered_stream}");
     assert!(refused.contains("failed") && refused.contains("gateway_identity_issuer"), "the stream's refusal: {refused}");
     assert!(seen_b.lock().is_empty(), "nothing ran at the issuer-less gateway");
 }

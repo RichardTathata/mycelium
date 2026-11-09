@@ -437,13 +437,20 @@ pub(crate) fn check(
     cs: &ClientSignature,
     cn: &ClientNonce,
 ) -> Result<ClientSigned, ClientSigRefusal> {
+    let binding = binding_of(kind, payload, resource_claim)?;
+    check_bound(ctx, principal, &binding, cs, cn)
+}
+
+/// [`check`] over a binding already read: the signature over it, then the key's standing.
+#[cfg(feature = "tls")]
+fn check_bound(ctx: &super::TaskCtx, principal: &str, binding: &(String, String, [u8; 32]), cs: &ClientSignature, cn: &ClientNonce) -> Result<ClientSigned, ClientSigRefusal> {
     use base64::Engine as _;
     let b64 = base64::engine::general_purpose::STANDARD;
     let key: [u8; 32] = b64.decode(&cs.k).ok().and_then(|v| v.try_into().ok()).ok_or(ClientSigRefusal::Malformed)?;
     let sig: [u8; 64] = b64.decode(&cs.sig).ok().and_then(|v| v.try_into().ok()).ok_or(ClientSigRefusal::Malformed)?;
     let instance = cn.instance().ok_or(ClientSigRefusal::Malformed)?;
-    let (op, res, d) = binding_of(kind, payload, resource_claim)?;
-    let msg = client_signature_message(principal, &op, &res, &d, cn.t, instance, cn.c);
+    let (op, res, d) = binding;
+    let msg = client_signature_message(principal, op, res, d, cn.t, instance, cn.c);
     if !crate::tls::verify_bytes(&key, &msg, &sig) {
         return Err(ClientSigRefusal::BadSignature);
     }
@@ -454,6 +461,24 @@ pub(crate) fn check(
         _ => return Err(ClientSigRefusal::KeyUnknown),
     }
     Ok(ClientSigned { key, issued_at_ms: cn.t, instance, counter: cn.c })
+}
+
+/// **The door's own check of `cs`, before it claims a grant's use** (identity-and-lifecycle I1, #744's review): the
+/// signature over the door's binding — [`door_binding_mcp`] or [`door_binding_a2a`], what the provider will bind — and
+/// the key's standing ([`client_key_standing`](super::client_cert::client_key_standing)). Not `cn`: the replay window is
+/// the provider's, which checks everything again at its receive boundary. A call this refuses never reaches the
+/// preflight, so a grant it presents is not spent. `None` principal (an unauthenticated caller): nothing to bind the
+/// signature to here, and the provider decides.
+#[cfg(all(feature = "gateway", feature = "tls"))]
+pub(crate) fn check_at_door(
+    ctx: &super::TaskCtx,
+    principal: Option<&str>,
+    binding: Result<(String, String, [u8; 32]), UnsafeInteger>,
+    signed: &(ClientSignature, ClientNonce),
+) -> Result<(), ClientSigRefusal> {
+    let Some(principal) = principal else { return Ok(()) };
+    let binding = binding.map_err(|_| ClientSigRefusal::UnsafeInteger)?;
+    check_bound(ctx, principal, &binding, &signed.0, &signed.1).map(|_| ())
 }
 
 #[cfg(feature = "tls")]
