@@ -40,7 +40,7 @@ bytes = { version = "1", optional = true }
 # The reference destination. `bundled` compiles SQLite in, so CI and every developer get the same
 # engine and no system library is a hidden dependency. Quarantined to this crate: core carries no
 # database, and `-p` builds of the substrate never pay for it.
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.41", features = ["bundled"] }
 tokio    = { version = "1.53.3", features = ["rt", "time"] }
 tracing  = "0.1"
 

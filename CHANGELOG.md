@@ -11,6 +11,24 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Security
 
+- **`mycelium-effects`' bundled SQLite 3.46.0 → 3.54.1** (RUSTSEC-2026-0459, CVE-2026-119375, published 2026-10-30):
+  **`rusqlite` 0.32.1 → 0.41.0**, which brings **`libsqlite3-sys` 0.30.1 → 0.39.1**. SQLite before 3.54.0 can return
+  uninitialized page-cache memory to ordinary queries when it opens a database file together with a sibling `-wal`
+  file whose page size differs from the database's; the attacker must have written that pair of files where the
+  victim opens them (local, memory exposure). **Check whether you are affected:** only `mycelium-effects` links
+  SQLite, and only `SqliteDestination` opens a database — at the path its caller passes to `SqliteDestination::open`.
+  No shipped binary (`mycelium`, `mycelium-stem`) depends on `mycelium-effects`; the substrate's own WAL, journals and
+  ledger are not SQLite. The crate never puts a destination in WAL mode, but SQLite honours a WAL-mode header in the
+  file it opens, so **the advisory is reachable only where an adopter points `SqliteDestination` at a database file
+  (and its directory) that a less trusted local party can write**; a destination the crate itself created in a
+  directory only its process writes is not exposed. After upgrading, `grep -A1 '^name = "libsqlite3-sys"$' Cargo.lock`
+  shows `0.39.1` and `cargo audit -f Cargo.lock` no longer reports RUSTSEC-2026-0459; the other two tracked lockfiles
+  (`fuzz/`, `examples/conway-gpu/`) carry no SQLite. **Affected releases:** every release that ships
+  `mycelium-effects` with `rusqlite` 0.32 (bundled SQLite 3.46.0), through v2.39.0. No code change was needed in the
+  crate. Upgrade note: `rusqlite` is in the crate's public API (`Handler`'s `&rusqlite::Transaction`), so a crate
+  writing a handler moves to `rusqlite` 0.41 itself, and only one `libsqlite3-sys` may be in a build —
+  `docs/guide/deprecations.md` §90.
+
 - **The gateway closes a connection that does not speak, and caps how many it serves** (external review 2026-10-31,
   F5; `docs/plans/external-review-2026-10-31.md` R5). Before, a socket that connected to `http_port` and sent nothing
   held a task and a file descriptor for as long as the client kept it open — on the plaintext listener and under
