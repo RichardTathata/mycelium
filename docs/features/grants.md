@@ -59,7 +59,9 @@ This feature is turned on in code.
   list, stream and decision door serve both; the decision and revocation doors take the row's `agent` — the
   principal, percent-encoded as the SDKs send it — or the hex segment. A request standing for the same tool and
   arguments is answered again (`"reused": true`); past `MAX_PENDING_GRANT_REQUESTS_PER_CLIENT` (16) standing requests
-  the door refuses `429 too_many_pending`; each request written is counted (`mycelium_grants_requested_total`) and
+  the door refuses `429 too_many_pending` — a **soft** bound: the scan and the write are separate steps, so requests
+  racing at one gateway, or arriving at two, can each pass it and the reuse, and the gateway's rate limits are the hard
+  bound; each request written is counted (`mycelium_grants_requested_total`) and
   sealed into the audit chain where the build has one (`compliance`); its id names the gateway that wrote it. The
   client proves possession with its client-certificate key: an execution authority attached to the node is fed each
   client principal's current key, replaced only by a newer issuance
@@ -67,7 +69,8 @@ This feature is turned on in code.
   else — no mandate, checkpoint, cohort declaration or removal (`verify_signed_by` reads configured keys only). The
   issue signs the resource it evaluated into the grant (`bound:resource:{resource}`,
   [`grant_resource`](../../src/mandate/grant.rs)), and the revocation evaluates that one — `tool:{tool}@{provider}`
-  for a client, the provider resolved at request time — so revoking needs no live provider; the resource is carried,
+  for a client, the provider resolved at request time — so revoking needs no live provider — and the issuing node revokes it after a `rotate_identity` too, since the record
+  is checked against every key the node has held; the resource is carried,
   not checked against a call's. A principal without a certificate on record is refused (`not_a_client_holder`,
   `not_a_member`). The tests are in [`src/agent/client_grant_tests.rs`](../../src/agent/client_grant_tests.rs):
   `a_grant_held_by_a_client_principal_is_requested_issued_presented_and_revoked`,

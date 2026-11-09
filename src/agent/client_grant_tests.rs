@@ -303,6 +303,38 @@ async fn a_possession_proof_by_a_superseded_client_key_is_refused() {
     assert_eq!(ran.load(Ordering::SeqCst), 1);
 }
 
+/// **A grant issued before a rotation is still revoked by its issuer** (#743's review, round 2): the treasurer issues
+/// a grant, the node rotates its identity, and the revocation at the same node succeeds — the issued record verifies
+/// under a key this node held, not only its current one — and the grant presented afterwards is refused as revoked.
+/// A record under the key that no key of this node signed is refused (`409 unreadable_grant`). Seen failing first with
+/// the issued record checked against the current key only (`409 unreadable_grant` for the rotated grant), and with the
+/// check removed (the forged record was revoked).
+#[tokio::test]
+async fn a_grant_issued_before_a_rotation_is_revoked_by_its_issuer() {
+    let dir = scratch("rotate");
+    let http_port = alloc_port();
+    let (a, ran) = started(&dir, http_port).await;
+    let key = forecaster_key(&a, &dir);
+    let args = serde_json::json!({"city": "Caen"});
+    let (asked, grant) = ask_and_issue(http_port, &args).await;
+    // A second grant, its issued record overwritten by one no key of this node signed (any member can write the key).
+    let (asked2, mut forged) = ask_and_issue(http_port, &serde_json::json!({"city": "Rouen"})).await;
+    forged.signature = mycelium_core::tls::sign_bytes(&ed25519_dalek::SigningKey::from_bytes(&[5u8; 32]), &forged.mandate.canonical_bytes()).to_vec();
+    let forged_key = format!("{}/issued", asked2["key"].as_str().unwrap());
+    assert!(a.kv().set(forged_key, bytes::Bytes::from(serde_json::to_vec(&forged).unwrap())));
+    let rotated = a.rotate_identity(Duration::from_millis(50)).await;
+    let (status, revoked) = revoke(http_port, asked["request"].as_str().unwrap()).await;
+    let (fstatus, frevoked) = revoke(http_port, asked2["request"].as_str().unwrap()).await;
+    let after = mcp_call(http_port, &args, Some(presented(&grant, asked["resource"].as_str().unwrap(), &args, &key))).await;
+    a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(rotated.is_ok(), "the node rotated: {rotated:?}");
+    assert_eq!(status, 200, "ROTATED: the issuer could not revoke a grant it signed before rotating: {revoked}");
+    assert_eq!((fstatus, frevoked["error"].as_str()), (409, Some("unreadable_grant")), "a record no key of this node signed is not revoked: {frevoked}");
+    assert!(after.get("error").is_some() && after.to_string().contains("revoked"), "the revoked grant is refused as revoked: {after}");
+    assert_eq!(ran.load(Ordering::SeqCst), 0);
+}
+
 /// **The request door reuses, bounds and records** (#743's review, items 5 and 7). Asking twice for the same tool and
 /// arguments answers the standing request (`reused`), not a second; past
 /// [`MAX_PENDING_GRANT_REQUESTS_PER_CLIENT`](crate::agent::http::grants::MAX_PENDING_GRANT_REQUESTS_PER_CLIENT) standing

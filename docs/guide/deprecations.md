@@ -2703,7 +2703,8 @@ possession proof signed by its client key.
 - **A token holding `mcp:invoke` gains the request door.** Only a principal with a client certificate on record is
   served (`409 not_a_client_holder` otherwise). The door writes a pending request; nothing runs until a supervisor
   issues it. A request for the same tool and arguments while one stands answers that one (`"reused": true`); past 16
-  standing requests per principal the door answers `429 too_many_pending`. A request id written here names its gateway
+  standing requests per principal the door answers `429 too_many_pending` (a soft bound: concurrent requests can pass
+  it). A request id written here names its gateway
   (`{hlc}-{node}`), so a script should not assume an id is 16 hex digits. Each request counts in
   `mycelium_grants_requested_total` and is sealed into the audit chain where the build keeps one.
 - **An issued grant signs the resource it was evaluated against** as a fourth operation, `bound:resource:{resource}`
@@ -2711,7 +2712,8 @@ possession proof signed by its client key.
   operations sees one more entry, which no call can name. A revocation evaluates that resource — for a client,
   `tool:{tool}@{provider}`, the provider resolved when the request was written — so revoking needs no live provider. A
   grant issued before this, held by a node, keeps evaluating against the agent's node. The revoke door now also
-  refuses (`409 unreadable_grant`) an `…/issued` record this node's identity did not sign.
+  refuses (`409 unreadable_grant`) an `…/issued` record that no key this node has held signed (a grant issued before a
+  `rotate_identity` is still revoked).
 - **Code:** `ExecutionAuthority::new`, `GossipAgent::with_cohort_budget` and `GossipAgent::with_membership_authorities`
   take `impl Into<SharedExternalIssuers>`. A caller that passes a `TrustedExternalIssuers` keeps compiling.
   `TrustedExternalIssuers` gained `set_client_key(issuer, issued, key)` (it replaces a held key only with a newer

@@ -383,6 +383,10 @@ fn tool_provider(ctx: &TaskCtx, tool: &str) -> Option<crate::node_id::NodeId> {
 /// The most requests one client principal may have standing unanswered at once: past it the door refuses by name
 /// (`429 too_many_pending`) rather than write another fsynced record and wake every supervisor's stream (#743's
 /// review, item 5). A request for the same tool and arguments is the standing one, answered again, not counted twice.
+/// **A soft bound:** the scan and the write are not one step, so requests racing at one gateway — or arriving at two,
+/// whose records meet only by gossip — can each pass it, and a duplicate can be written beside the standing one. It
+/// bounds a client that waits for its answers, not one that sends in parallel; the gateway's rate limits are the
+/// hard bound.
 pub(crate) const MAX_PENDING_GRANT_REQUESTS_PER_CLIENT: usize = 16;
 
 #[derive(serde::Deserialize)]
@@ -589,8 +593,11 @@ pub(crate) async fn revoke_grant(ctx: &Arc<TaskCtx>, caller: Option<&ResolvedPri
     let Some(tls) = ctx.tls.get() else {
         return Err(GrantRefusal::door(StatusCode::FORBIDDEN, "no_identity", "revoking a grant needs this node's identity ([tls]) to sign the checkpoint"));
     };
-    if !mycelium_core::tls::verify_bytes(&tls.signing_key().verifying_key().to_bytes(), &grant.mandate.canonical_bytes(), &grant.signature) {
-        return Err(GrantRefusal::door(StatusCode::CONFLICT, "unreadable_grant", format!("{key}/issued is not signed by this node's identity")));
+    // Any key this node has held counts, not only the current one: a grant issued before a `rotate_identity` is still
+    // this node's to revoke (#743's review, round 2). Bytes no key of this node signed are refused.
+    let canonical = grant.mandate.canonical_bytes();
+    if !own_keys(ctx, tls).iter().any(|k| mycelium_core::tls::verify_bytes(k, &canonical, &grant.signature)) {
+        return Err(GrantRefusal::door(StatusCode::CONFLICT, "unreadable_grant", format!("{key}/issued is not signed by any key of this node's identity")));
     }
     if grant.mandate.holder.as_str() != holder_principal {
         return Err(GrantRefusal::door(StatusCode::CONFLICT, "unreadable_grant", format!("{key}/issued is held by {}, not {holder_principal}", grant.mandate.holder.as_str())));
@@ -666,6 +673,25 @@ pub(crate) async fn revoke_grant(ctx: &Arc<TaskCtx>, caller: Option<&ResolvedPri
         }
         Err(e) => Err(GrantRefusal::door(StatusCode::SERVICE_UNAVAILABLE, "not_durable", format!("revocation not recorded durably — it stands in this process only, and any restart before this revoke is retried re-arms the grant; retry once the WAL writer is repaired: {e}"))),
     }
+}
+
+/// Every key this node's identity has held — the current one, those its identity record carries (`peer_keys` for
+/// itself, the rotation history) and its certificate-anchored ones: the set `gateway_member_keys` holds for this node,
+/// read without the `compliance` feature that builds the rest of that map.
+fn own_keys(ctx: &TaskCtx, tls: &mycelium_core::tls::NodeTls) -> Vec<[u8; 32]> {
+    let mut keys = vec![tls.verifying_key_bytes()];
+    let mut add = |k: &[u8; 32]| {
+        if !keys.contains(k) {
+            keys.push(*k);
+        }
+    };
+    if let Some(held) = ctx.peer_keys.pin().get(&ctx.node_id) {
+        held.iter().for_each(&mut add);
+    }
+    if let Some(standing) = ctx.key_standing.get(&ctx.node_id) {
+        standing.anchored.iter().flatten().for_each(&mut add);
+    }
+    keys
 }
 
 /// [`write_record`]'s durable form: the receipt path's required-sync write — on the WAL and fsynced before it is
