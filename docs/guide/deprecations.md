@@ -2746,6 +2746,10 @@ Everything here is additive: no existing call changes what it sends unless it is
   `mandateRequestBytes` is refused for arguments with a key outside the Basic Multilingual Plane beside one in
   U+E000–U+FFFF; use `mandateArgumentsDigest` or `provePossession`. Python's `arguments_digest` was already the
   gateway's form.
+- **TypeScript's `argumentsDigest` drops what the body drops.** An `undefined`, function or symbol member is left out
+  (`null` inside an array) and `toJSON` is honoured, as `JSON.stringify` sends them. Before, `{gone: undefined}` was
+  written into the signed digest but not the body, so the call was refused `client_signature_invalid`. A digest of
+  arguments holding no such member is unchanged.
 - **`wait_for_grant` / `waitForGrant`** bound each read by the time left, and end within their timeout.
 - **Internal:** Python's `_task_params` and TypeScript's `@internal taskParams` take an optional signer last.
 - **The digest a grant binds** is the gateway's mandate `arguments_digest`, which differs across languages for floats

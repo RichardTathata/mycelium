@@ -138,3 +138,28 @@ test("a wait ends within its timeout even when a read is slow", async () => {
   await expect(mcp.waitForGrant("r-1", { timeoutMs: 400, pollMs: 100 })).rejects.toMatchObject({ state: "pending" });
   expect(Date.now() - started).toBeLessThan(1_000);
 });
+
+test("a signed call's digest is of the body the gateway receives: undefined, functions and toJSON as JSON.stringify sends them", async () => {
+  // #744's review, round 2: `cs` is JCS over the arguments; a member JSON.stringify drops is not in the body, so it is
+  // not in the digest — at the top level, nested, and as `null` inside an array — and `toJSON` is what is sent.
+  const cases: Record<string, unknown>[] = [
+    { city: "Lyon", gone: undefined },
+    { outer: { x: undefined, y: 2, f: () => 1 } },
+    { list: [undefined, 1, () => 1, { z: undefined }] },
+    { when: new Date(0) },
+  ];
+  for (const args of cases) {
+    const body = JSON.parse(JSON.stringify(args));
+    expect(hex(argumentsDigest(args))).toBe(hex(argumentsDigest(body)));
+    expect(hex(mandateArgumentsDigest(args))).toBe(hex(mandateArgumentsDigest(body)));
+  }
+  // Through the client: the signature verifies over the arguments as the body carries them.
+  const signer = new ClientSigner(HOLDER, V.principal);
+  const mcp = new McpClient("http://127.0.0.1:8300", { signer });
+  for (const args of cases) {
+    await mcp.callTool("weather.forecast", args);
+    const { body } = calls[calls.length - 1];
+    const meta = body.params._meta;
+    expect(verifies(meta.cs.k, csMessage(signer, meta, mcpBinding("weather.forecast", body.params.arguments)), meta.cs.sig)).toBe(true);
+  }
+});

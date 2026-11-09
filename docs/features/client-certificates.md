@@ -101,7 +101,8 @@ way. `a_newer_certificate_supersedes_the_older_key_and_an_overwrite_cannot_lower
   that strips them makes the call unsigned. The LLM doors refuse a signature (`client_signature_unbound`).
 - **A grant presented with a signature that fails is spent at the gateway.** The gateway claims a grant's use at its
   preflight, before the provider checks `cs`, so a call refused `client_signature_invalid` under a grant has used the
-  grant at the gateway's door (`a_signed_call_presenting_a_client_grant_runs_at_mcp` states it).
+  grant at the gateway's door (`a_signed_call_presenting_a_client_grant_runs_at_mcp` states it). The gateway checking
+  the signature before it claims the use is listed for I1's PR 4.
 - **A possession proof that does not verify is `WrongHolder`**, whether the key is wrong or the client's digest of the
   arguments differs (the O1 float case): the gateway sees only the proof.
 - **Reserved name:** no client certificate may be named `legacy`, the legacy token's principal.

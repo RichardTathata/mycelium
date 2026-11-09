@@ -28,18 +28,42 @@ export interface SendOptions {
   parent?: string;
 }
 
-function canonicalJson(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+/**
+ * `value` as `JSON.stringify` would send it, with members in `order` and no whitespace — and nothing it would leave
+ * out: an `undefined`, function or symbol member is dropped, and is `null` inside an array; `toJSON` is honoured. So a
+ * digest is of the body the gateway receives (#744's review, round 2). `undefined` for a value that sends nothing.
+ */
+function serialise(value: unknown, order: (a: string, b: string) => number): string | undefined {
+  if (value !== null && typeof value === "object" && typeof (value as { toJSON?: unknown }).toJSON === "function") {
+    value = (value as { toJSON: () => unknown }).toJSON();
+  }
+  if (value === undefined || typeof value === "function" || typeof value === "symbol") return undefined;
+  if (Array.isArray(value)) return `[${value.map((v) => serialise(v, order) ?? "null").join(",")}]`;
   if (value !== null && typeof value === "object") {
     const obj = value as Record<string, unknown>;
-    return `{${Object.keys(obj).sort().map((k) => `${JSON.stringify(k)}:${canonicalJson(obj[k])}`).join(",")}}`;
+    const members = Object.keys(obj)
+      .map((k) => [k, serialise(obj[k], order)] as const)
+      .filter((m): m is readonly [string, string] => m[1] !== undefined)
+      .sort((a, b) => order(a[0], b[0]));
+    return `{${members.map(([k, v]) => `${JSON.stringify(k)}:${v}`).join(",")}}`;
   }
   return JSON.stringify(value);
 }
 
+/** UTF-16 code-unit order — RFC 8785's. */
+function utf16Order(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+/** RFC 8785 (JCS): members by UTF-16 code units, ECMAScript number and string forms; a body that sends nothing is `null`. */
+function canonicalJson(value: unknown): string {
+  return serialise(value, utf16Order) ?? "null";
+}
+
 /**
  * SHA-256 of `args` in RFC 8785 (JCS) form: members sorted by UTF-16 code units, ECMAScript number and string forms,
- * no whitespace. This is the digest a **client signature** (`cs`) binds ({@link mcpBinding}); for `/a2a` the
+ * no whitespace, and only what `JSON.stringify` sends (an `undefined`, function or symbol member dropped, `null` in an
+ * array, `toJSON` honoured), so the digest is of the body the gateway receives. This is the digest a **client signature** (`cs`) binds ({@link mcpBinding}); for `/a2a` the
  * arguments are `{ text: message }`. A **possession proof** binds the gateway's mandate digest instead,
  * {@link mandateArgumentsDigest}: the two differ for keys outside the Basic Multilingual Plane beside keys in
  * U+E000–U+FFFF, and for floats in exponent form.
@@ -58,30 +82,6 @@ function utf8Order(a: string, b: string): number {
 }
 
 /**
- * `value` as the gateway writes it when it digests a mandate's arguments (`serde_json::to_vec` of the parsed value):
- * members sorted by their names' UTF-8 bytes, no whitespace, strings escaped as `JSON.stringify` and `serde_json` both
- * escape them. What `JSON.stringify` would leave out is left out — an `undefined`, a function or a symbol member is
- * dropped, and is `null` inside an array — so the digest is of the body the gateway receives. `undefined` for a value
- * that sends nothing.
- */
-function mandateJson(value: unknown): string | undefined {
-  if (value !== null && typeof value === "object" && typeof (value as { toJSON?: unknown }).toJSON === "function") {
-    value = (value as { toJSON: () => unknown }).toJSON();
-  }
-  if (value === undefined || typeof value === "function" || typeof value === "symbol") return undefined;
-  if (Array.isArray(value)) return `[${value.map((v) => mandateJson(v) ?? "null").join(",")}]`;
-  if (value !== null && typeof value === "object") {
-    const obj = value as Record<string, unknown>;
-    const members = Object.keys(obj)
-      .map((k) => [k, mandateJson(obj[k])] as const)
-      .filter((m): m is readonly [string, string] => m[1] !== undefined)
-      .sort((a, b) => utf8Order(a[0], b[0]));
-    return `{${members.map(([k, v]) => `${JSON.stringify(k)}:${v}`).join(",")}}`;
-  }
-  return JSON.stringify(value);
-}
-
-/**
  * SHA-256 of `args` as the gateway digests a mandate's arguments (`gateway_authority::arguments_digest`): the digest a
  * **possession proof** binds ({@link mandateRequestBytes}) and a grant's `bound:args:`. Members sorted by UTF-8 bytes;
  * numbers as `JSON.stringify` writes them, which matches the gateway for integers and for decimals not in exponent
@@ -89,7 +89,7 @@ function mandateJson(value: unknown): string | undefined {
  * as a string. Pinned by the `mandate_digest_cases` of `tests/fixtures/possession/vector.json`.
  */
 export function mandateArgumentsDigest(args: unknown): Uint8Array {
-  return new Uint8Array(createHash("sha256").update(mandateJson(args) ?? "null", "utf8").digest());
+  return new Uint8Array(createHash("sha256").update(serialise(args, utf8Order) ?? "null", "utf8").digest());
 }
 
 /**
