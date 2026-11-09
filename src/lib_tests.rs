@@ -15308,7 +15308,8 @@ async fn a2a_is_anonymous_dispatch_whatever_bearer_is_configured() {
 }
 
 /// `gateway_a2a = true` mounts the card and `/a2a` at `start()`, as `with_a2a()` does, so a node built from
-/// configuration alone — the published `mycelium` binary, the stem — serves A2A without code. A node that does not
+/// configuration alone in a build with `a2a` — the published `mycelium` binary — serves A2A without code (the published
+/// stem has no `a2a`, and refuses the switch: `the_a2a_switch_in_a_build_without_a2a_refuses_the_start`). A node that does not
 /// set it serves neither. The mount is seen before `start()` binds, so the start-time warning and the guarantee
 /// report (and `mycelium doctor`, which never starts) read it: `a2a.admission` is applicable, not configured without
 /// an evaluator. Seen failing first: the field parsed and nothing was mounted (the card answered 404).
@@ -15354,8 +15355,6 @@ async fn the_a2a_switch_mounts_the_card_and_a2a_at_start() {
     assert_eq!(r.status(), 200, "/a2a answers as JSON-RPC");
     let v: serde_json::Value = r.json().await.unwrap();
     assert!(v["error"].is_object() && v["jsonrpc"] == "2.0", "a JSON-RPC answer from /a2a: {v}");
-    // Mounted once: an embedder's `with_a2a()` beside the switch does not mount a second router.
-    assert!(on.task_ctx.a2a_mounted.load(Ordering::Acquire));
     on.shutdown().await;
 
     let (off, off_port) = start(false).await;

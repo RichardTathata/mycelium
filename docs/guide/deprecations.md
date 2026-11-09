@@ -2824,6 +2824,16 @@ Two changes to the published binaries, both additive.
   credential is `gateway_auth_token` behaves as before (that token holds every scope); the scope table is new, so a
   scoped or named token now gets only its scopes on the stem's routes (`artifact:publish` for
   `POST /gateway/artifacts/publish`). A stem built from source without `compliance` behaves as before.
+  - **`tls` comes with it.** mycelium's `compliance` implies `tls`, so the published stem now takes `[tls]` and
+    `[gateway_tls]` — it can join an mTLS fleet, where a 2.39.0 stem refused both tables at start.
+  - **An open stem gateway narrows what it grants.** With no credential model, the gateway admits an anonymous request
+    as before, but the authority it records and carries for it (`ResolvedPrincipal`, the caller context a provider
+    receives) is the route's scope under `compliance`, where it was everything (`*`) without it
+    (`http/authz.rs` `open_gateway_scopes`). A provider or evaluator that reads the caller's scopes now sees only the
+    route's; configure a credential where something downstream needs more.
+  - **`GOSSIP_GATEWAY_A2A=1` in a shared environment stops the stem.** The published stem has no `a2a`, so a
+    `gateway_a2a` it reads from the environment (or its file) refuses its start by name. Set the variable on the
+    `mycelium` node's environment only, not in one an image or a compose file shares with the stem.
 - **The node.** `gateway_a2a = true` (or `GOSSIP_GATEWAY_A2A=1`) makes `start()` mount the AgentCard and `/a2a`, as
   `with_a2a()` does. Off by default, so no node serves anything new unless it sets it. Refused by `validate()` without
   an `http_port`, and by `start()` in a build without `a2a` (`InvalidField { field: "gateway_a2a" }`); the

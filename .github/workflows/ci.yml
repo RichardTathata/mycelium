@@ -429,6 +429,17 @@ jobs:
       - run: cargo check -p mycelium-wasm-host --bin mycelium-stem --bin mycelium-artifact --features stem
       # And with the published set (release.yml's STEM_FEATURES), linted, so a release build is not the first to compile it.
       - run: cargo clippy -p mycelium-wasm-host --bin mycelium-stem --bin mycelium-artifact --features stem,gateway,llm,object_store,compliance -- -D warnings
+      # The published set, run: a stem built with release.yml's STEM_FEATURES by `cargo build` — no dev-dependencies, so
+      # nothing turns `compliance` on that the set does not — starts with a token table and `[authority]`, refuses an
+      # anonymous request and reads the authority guarantees enforced (#749's review, finding 2: the test-built stem
+      # always has `compliance`).
+      - name: The published stem's feature set takes a token table and [authority]
+        run: |
+          set -euo pipefail
+          features=$(sed -n 's/^  STEM_FEATURES: *//p' .github/workflows/release.yml)
+          test -n "$features"
+          cargo build -p mycelium-wasm-host --bin mycelium-stem --features "$features"
+          scripts/check-release-stem.sh target/debug/mycelium-stem
       - run: cargo clippy -p mycelium-wasm-host --all-targets -- -D warnings
 
   wasm-host-macos:

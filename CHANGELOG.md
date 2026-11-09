@@ -81,12 +81,15 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `mycelium-wasm-host` gains a `compliance` feature (mycelium's `compliance`, with its `gateway` and `tls`), and the
   released `mycelium-stem` is built with it (`STEM_FEATURES` in `release.yml`, `docker/Dockerfile.node`,
   `docker/Dockerfile.stem`): before, a stem's named or scoped gateway tokens, `[oidc]` and `[authority]` were each
-  refused at start, and its `artifact:publish` scope was never checked. The stem calls `start()`, so `[authority]` is
-  attached there as on the `mycelium` binary (`mycelium-wasm-host/tests/stem_compliance.rs`). `GossipConfig` gains
+  refused at start, and its `artifact:publish` scope was never checked. `compliance` brings `tls`, so the stem also
+  takes `[tls]` and can join an mTLS fleet. The stem calls `start()`, so `[authority]` is attached there as on the
+  `mycelium` binary; CI builds the stem with release.yml's set by `cargo build` (no dev-dependencies) and runs it with a
+  token table and `[authority]` (`scripts/check-release-stem.sh`). `GossipConfig` gains
   `gateway_a2a` (default `false`, `GOSSIP_GATEWAY_A2A`, strict): `start()` mounts the AgentCard and `/a2a` as
   `with_a2a()` does, so the published node, built with `a2a`, serves A2A without code; `validate()` refuses it without
   an `http_port`, a build without `a2a` refuses it at start by name, and the start-time warning, `a2a.admission` and
-  `mycelium doctor` read it before the mount. `with_a2a()` beside the switch, or called twice, mounts once (a second
+  `mycelium doctor` read it before the mount — a planned `[authority]` counts as the evaluator there, so the
+  configuration the docs recommend is not warned open. `with_a2a()` beside the switch, or called twice, mounts once (a second
   call used to panic on overlapping routes). Upgrade note: `deprecations.md` §92.
 
 - **The SDKs sign as a service and present its own grants** (`docs/plans/identity-and-lifecycle.md` I1, PR 3 of 4).

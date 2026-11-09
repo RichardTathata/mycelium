@@ -73,7 +73,9 @@ and prints the effective configuration with each field's source
 The published node is built with `cli,tls,compliance,a2a,llm,metrics`, so a configuration that names `[tls]`, a token
 table, `[oidc]`, `[gateway_tls]` or `[authority]` starts (a build without the feature refuses it by name, v2.18.1). It
 serves A2A only when the configuration sets `gateway_a2a = true` ([A2A](../features/a2a.md)). The stem is built with
-`stem,gateway,llm,object_store,compliance`, so it takes the same credential and authority tables; it has no `a2a`.
+`stem,gateway,llm,object_store,compliance`, so it takes the same credential and authority tables, and — `compliance`
+bringing `tls` — `[tls]` and `[gateway_tls]`, so it can join an mTLS fleet; it has no `a2a`, so it refuses
+`gateway_a2a`.
 Building from source stays the path for any other feature set.
 
 ## What to configure explicitly

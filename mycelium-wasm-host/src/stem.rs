@@ -17,7 +17,10 @@
 //!   starts).
 //!
 //! `[[lane]]`, `[[mandate]]` and `[[rule]]` are vocabulary for the offline check and the
-//! evaluator; a stem node does nothing with them at runtime and says so once at start.
+//! evaluator; the stem itself does nothing with them at runtime and says so once at start. The
+//! one runtime reading is the node's: with an `[authority]` table in the stem's configuration (a
+//! build with `compliance`), `GossipAgent::start()` builds the evaluator from the `[[rule]]`s of
+//! the unit it names, and the start line says that instead.
 //!
 //! **What a stem fleet is not** (plan §13): only WASM components and blobs load dynamically;
 //! the stem image is itself a direct deployment; the catalogue is the supply chain, so the
@@ -328,10 +331,21 @@ impl Stem {
             groups.push(agent.capabilities().define_capability_group(g.name.as_str(), def, opts.declare_interval));
         }
         if !units.lanes.is_empty() || !units.mandates.is_empty() || !units.rules.is_empty() {
-            tracing::info!(
-                lanes = units.lanes.len(), mandates = units.mandates.len(), rules = units.rules.len(),
-                "stem: lanes, mandates and rules are vocabulary for the check and the evaluator — nothing to do at runtime"
-            );
+            match &agent.config().authority {
+                // `[authority]`: the node's start() built its evaluator from the named unit's rules — enforced at the
+                // doors, not vocabulary. Lanes and mandates stay vocabulary either way.
+                Some(auth) => tracing::info!(
+                    lanes = units.lanes.len(), mandates = units.mandates.len(), rules = units.rules.len(),
+                    authority_unit = %auth.unit, declarations = %auth.declarations.display(),
+                    "stem: [authority] is attached — this node's evaluator enforces the named unit's [[rule]]s at its \
+                     doors; lanes and mandates are vocabulary for the check"
+                ),
+                None => tracing::info!(
+                    lanes = units.lanes.len(), mandates = units.mandates.len(), rules = units.rules.len(),
+                    "stem: lanes, mandates and rules are vocabulary for the check and the evaluator — nothing to do at \
+                     runtime without an [authority] table, which builds this node's evaluator from a unit's rules"
+                ),
+            }
         }
 
         let hosted = Arc::new(AtomicUsize::new(0));

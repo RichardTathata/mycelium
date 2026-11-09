@@ -34,7 +34,9 @@ stem-examples Docker suite runs as stems, in a path-filtered workflow (`cluster-
   ([capability lifecycle § Running a stem](../operations/capability-lifecycle.md#running-a-stem)).
 - **Credentials and authority:** with [`compliance`](../../mycelium-wasm-host/Cargo.toml) (in the published set), a
   stem's configuration takes named and scoped gateway tokens, `[oidc]` and
-  [`[authority]`](declared-authority.md); a stem built without it refuses each at start by name. The stem calls
+  [`[authority]`](declared-authority.md); a stem built without it refuses each at start by name. `compliance` brings
+  mycelium's `tls`, so the published stem also takes `[tls]` and `[gateway_tls]` and can join an mTLS fleet, which a
+  2.39.0 stem refused. The stem calls
   `GossipAgent::start()`, so `[authority]` is planned and attached there — the evaluator from the unit's `[[rule]]`s,
   the execution authority, provider enforcement and the evidence journal — as on the `mycelium` binary
   (`a_compliance_stem_starts_with_a_token_table_and_attaches_its_authority`, in

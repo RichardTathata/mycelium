@@ -1,13 +1,14 @@
-//! **The published stem's feature set takes the gateway's credential and authority tables** — a `mycelium-stem` built
-//! with `compliance` (release.yml's `STEM_FEATURES`) starts with a named-token table and an `[authority]` table, and
-//! attaches the authority as the `mycelium` binary does: the stem calls `GossipAgent::start()`, whose preflight plans
-//! `[authority]` and attaches the evaluator, the execution authority, provider enforcement and the evidence journal
-//! before the lifecycle boundary (`src/agent/lifecycle.rs`, `src/agent/declared_authority.rs`). So the gateway refuses
-//! an unauthenticated request, the token is honoured, and the guarantee report reads the seam enforced.
+//! **A stem with `compliance` takes a token table and `[authority]`, and attaches the authority as the `mycelium` binary
+//! does.** The stem calls `GossipAgent::start()`, whose preflight plans `[authority]` and whose body attaches the
+//! evaluator, the execution authority, provider enforcement and the evidence journal before the lifecycle boundary
+//! (`src/agent/lifecycle.rs`, `src/agent/declared_authority.rs`). So the gateway refuses an unauthenticated request, the
+//! token is honoured, and the guarantee report reads the seam enforced.
 //!
-//! A test build cannot show the refusal without the feature: this crate's dev-dependencies turn mycelium's
-//! `compliance` on for every target `cargo test` builds, the binary included. The refusal was seen by hand on a
-//! `cargo build` without it (the PR records it); this test pins the release set.
+//! **What this does not pin: the release feature set.** This crate's dev-dependencies turn mycelium's `compliance` on
+//! for every target `cargo test` builds, the binary included, so this passes whether or not `STEM_FEATURES` carries
+//! `compliance` — it pins the stem's startup path, not the set. The set is pinned by CI's step *The published stem's
+//! feature set takes a token table and [authority]*: a `cargo build` of the stem with release.yml's `STEM_FEATURES`,
+//! run by `scripts/check-release-stem.sh`, which fails on a stem built without `compliance`.
 #![cfg(all(unix, feature = "stem", feature = "compliance"))]
 
 use std::process::{Command, Stdio};

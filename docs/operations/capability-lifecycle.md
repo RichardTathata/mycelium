@@ -128,13 +128,16 @@ The published `mycelium-stem` (every release tarball and the image, built with `
 [installation § The published node](../guide/installation.md#the-published-node)) needs no toolchain. From source:
 
 ```sh
-cargo build -p mycelium-wasm-host --features stem,gateway,llm --bin mycelium-stem
+cargo build -p mycelium-wasm-host --features stem,gateway,llm,object_store,compliance --bin mycelium-stem   # the published set
 ```
 
 The binary needs feature `stem`. `gateway` adds the publish route `POST /gateway/artifacts/publish`;
 without it there is no route. With it, the route is mounted only when `[hosts].trusted_publishers`
-is non-empty, served only when the node's config sets `http_port`, and admits only a bearer token
-holding `artifact:publish`. `llm` is needed for `[[serve]]`: a stem built without it refuses to start
+is non-empty and served only when the node's config sets `http_port`; with `compliance` it admits only
+a bearer token holding `artifact:publish` (without it, any valid bearer). `compliance` also lets the
+stem's configuration carry a token table, `[oidc]` and `[authority]` — a build without it refuses
+each at start — and brings `tls`, so the stem takes `[tls]` and joins an mTLS fleet. `object_store`
+reads a library by URL. `llm` is needed for `[[serve]]`: a stem built without it refuses to start
 when the unit file has a `[[serve]]` section.
 
 | Flag | Default | Meaning |

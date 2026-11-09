@@ -2286,10 +2286,19 @@ impl GossipAgent {
     /// served (mounted, or `gateway_a2a` set) and no action evaluator is attached. A configured bearer does **not** change this —
     /// `/a2a` admits an absent bearer as anonymous and drops a present one's scopes
     /// (`a2a_optional_auth`). In a build without `gateway` + `tls` there cannot be an evaluator.
+    ///
+    /// A planned `[authority]` counts as the evaluator: `start()` attaches it after `preflight()` has logged this
+    /// warning and before the boundary (or refuses), and `mycelium doctor` sets it in memory — the reading
+    /// `ae.recorded_before_dispatch` takes of the declared journal (#749's review, finding 1).
     #[cfg(feature = "a2a")]
     pub(crate) fn a2a_dispatch_is_anonymous(&self) -> bool {
         #[cfg(all(feature = "gateway", feature = "tls"))]
-        let no_evaluator = self.task_ctx.action_evaluator.get().is_none();
+        #[allow(unused_mut)]
+        let mut no_evaluator = self.task_ctx.action_evaluator.get().is_none();
+        #[cfg(feature = "compliance")]
+        if self.task_ctx.declared_authority.get().is_some() {
+            no_evaluator = false;
+        }
         #[cfg(not(all(feature = "gateway", feature = "tls")))]
         let no_evaluator = true;
         self.task_ctx.a2a_served() && no_evaluator
