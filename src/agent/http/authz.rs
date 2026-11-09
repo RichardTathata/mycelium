@@ -398,6 +398,9 @@ pub(super) fn required_scope(method: &axum::http::Method, matched_path: &str) ->
         "/gateway/grants/pending"         => "grant:read",
         "/gateway/grants/stream"          => "grant:read",
         "/gateway/grants/{agent}/{request}" => "grant:issue",
+        // Identity-and-lifecycle I1: a client principal asks for a grant, and reads its answer, as a caller of tools.
+        "/gateway/grants/request"         => "mcp:invoke",
+        "/gateway/grants/request/{request}" => "mcp:invoke",
         "/gateway/grants/{agent}/{request}/revoke" => "grant:issue",
         "/gateway/shard/{ns}/{name}"      => "cap:read",
         // Layer II mesh messaging
@@ -1324,7 +1327,7 @@ impl Settling {
             (Ok(Some(permit)), Some(b), Some(authority))
                 if b.scope.starts_with(crate::mandate::grant::GRANT_SCOPE_PREFIX) && b.state == ae::MandateState::Established =>
             {
-                let marker = format!("grant/{}/{}/used/{point}", b.holder.as_str(), b.term.as_str());
+                let marker = format!("grant/{}/{}/used/{point}", super::gateway_authority::grant_holder_segment(b.holder.as_str()), b.term.as_str());
                 let used = mycelium_core::ops::kv_get(ctx, &marker).is_some()
                     || !authority.claim_grant_use(b.holder.as_str(), &b.scope, b.term.as_str(), &point, envelope.not_after_ms);
                 Some((marker, used, permit.policy_revision.clone(), (b.holder.as_str().to_string(), b.scope.clone(), b.term.as_str().to_string())))

@@ -2686,3 +2686,29 @@ them at its receive boundary.
 - **Python:** signing needs `pip install 'mycelium-py[sign]'`, which adds `cryptography`.
 
 Wire **v12** unchanged: `cs` and `cn` are payload.
+
+## 88. Grants held by a client principal; `ExecutionAuthority::new`, `with_cohort_budget` and `with_membership_authorities` take a shared issuer set (unreleased, identity-and-lifecycle I1, second half)
+
+A service with a client certificate on record can now hold a grant. It asks with `POST /gateway/grants/request`
+(`mcp:invoke`), the supervisor issues it at the existing door, and the service presents it in `_meta.mandate` with a
+possession proof signed by its client key.
+
+- **The `grant/` key names a client in hex.** A grant held by a node is keyed `grant/node:{id}/{request}` as before,
+  and an existing record is read unchanged. One held by a client is keyed `grant/{hex(principal)}/{request}`, because
+  the principal holds a `/`. A script that reads `grant/` keys and splits on `/` should decode a segment that does not
+  start with `node:` as hex.
+- **A token holding `mcp:invoke` gains the request door.** Only a principal with a client certificate on record is
+  served (`409 not_a_client_holder` otherwise). The door writes a pending request; nothing runs until a supervisor
+  issues it.
+- **A revocation of a client-held grant** evaluates against the tool's provider, `tool:{tool}@{provider}`, resolved
+  from `tools/` as `/mcp` resolves it. A grant held by a node keeps evaluating against the agent's node.
+- **Code:** `ExecutionAuthority::new`, `GossipAgent::with_cohort_budget` and `GossipAgent::with_membership_authorities`
+  take `impl Into<SharedExternalIssuers>`. A caller that passes a `TrustedExternalIssuers` keeps compiling.
+  `TrustedExternalIssuers` gained `set_client_key`, `client_key` and `configured_only`. A clone of a
+  `SharedExternalIssuers` is the same set. An attached execution authority's set is fed each client principal's current
+  key. The membership authorities read configured keys only, so a client key never entitles a removal.
+- **The digest a grant binds** is still the mandate `arguments_digest`, which differs across languages for floats in
+  exponent form. That defect is open as `identity-and-lifecycle.md` §9 O1.
+
+Wire **v12** unchanged.
+

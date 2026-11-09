@@ -147,7 +147,17 @@ pub(crate) async fn decide_grant(ctx: &Arc<TaskCtx>, caller: Option<&ResolvedPri
     // surface X3, second PR): the grant and its checkpoint travel to the agent's node in the KV, where its authority is
     // fed them, and that node's entitlement table decides whether this node may issue (`entitle_grants_from_fleet`).
     // A principal that is no member's is refused by name.
-    if agent != gateway_caller::node_principal(&ctx.node_id) && !is_member_agent(ctx, agent) {
+    // Identity-and-lifecycle I1: the segment names the holder — a node principal as written, a client principal in hex.
+    let Some(holder_principal) = super::gateway_authority::grant_holder_from_segment(agent) else {
+        return Err(GrantRefusal::door(StatusCode::BAD_REQUEST, "bad_request", format!("{agent} is neither a node principal nor a client principal's hex segment")));
+    };
+    let is_client = !holder_principal.starts_with("node:");
+    if is_client {
+        // A client holder must be able to prove possession: its certificate is on record here.
+        if ctx.client_certs.mark(&holder_principal).is_none() {
+            return Err(GrantRefusal::door(StatusCode::CONFLICT, "not_a_member", format!("{holder_principal} has no client certificate on record here; a grant held by a client is issued only to a principal whose current key this node knows")));
+        }
+    } else if agent != gateway_caller::node_principal(&ctx.node_id) && !is_member_agent(ctx, agent) {
         return Err(GrantRefusal::door(StatusCode::CONFLICT, "not_a_member", format!("{agent} is neither this node's agent nor a fleet member whose identity key this node holds; a grant is issued for an agent on a member node")));
     }
     let key = format!("grant/{agent}/{request}");
@@ -214,7 +224,7 @@ pub(crate) async fn decide_grant(ctx: &Arc<TaskCtx>, caller: Option<&ResolvedPri
             };
             let ttl_ms = ttl_secs.unwrap_or(300).min(3_600) * 1_000;
             let node_principal = gateway_caller::node_principal(&ctx.node_id);
-            let (Some(holder), Some(established_by), Some(term)) = (PrincipalId::new(agent), PrincipalId::new(&node_principal), TermId::new(request)) else {
+            let (Some(holder), Some(established_by), Some(term)) = (PrincipalId::new(&holder_principal), PrincipalId::new(&node_principal), TermId::new(request)) else {
                 return Err(GrantRefusal::door(StatusCode::CONFLICT, "unreadable_request", "the agent principal or request id is not a valid identifier"));
             };
             let mandate = Mandate {
@@ -360,6 +370,112 @@ pub(super) async fn gw_grants_stream(State(ctx): State<Arc<HttpCtx>>) -> axum::r
     Sse::new(tokio_stream::StreamExt::map(tokio_stream::wrappers::ReceiverStream::new(out), Ok::<_, std::convert::Infallible>)).keep_alive(KeepAlive::default()).into_response()
 }
 
+/// The node providing `tool`, as `/mcp` resolves it (the first `tools/{tool}/{node}` record).
+fn tool_provider(ctx: &TaskCtx, tool: &str) -> Option<crate::node_id::NodeId> {
+    let prefix = format!("tools/{tool}/");
+    crate::store::scan_kv_prefix(&ctx.kv_state, &prefix).into_iter().find_map(|(key, _)| key.strip_prefix(&prefix)?.parse().ok())
+}
+
+#[derive(serde::Deserialize)]
+pub(super) struct GrantRequestBody {
+    /// The tool the grant is for.
+    tool: String,
+    /// The call's arguments; the grant binds their digest.
+    #[serde(default)]
+    arguments: serde_json::Value,
+    /// How long the request stands unanswered; default 60 s, at most 600 s.
+    #[serde(default)]
+    window_secs: Option<u64>,
+}
+
+/// `POST /gateway/grants/request` (`mcp:invoke`) — a **client principal asks for a grant** (identity-and-lifecycle
+/// I1). The caller — a principal with a client certificate on record here, whose key can prove possession — names a
+/// tool and the call's arguments; the gateway resolves the tool's provider and writes the request under
+/// `grant/{hex(principal)}/{request}`, the shape a node agent's state machine writes, where a supervisor's
+/// `GET /gateway/grants/pending` and `POST /gateway/grants/{agent}/{request}` find it. Answers the request id and
+/// key; `GET /gateway/grants/request/{request}` reads the answer.
+pub(super) async fn gw_grant_request(
+    State(ctx): State<Arc<HttpCtx>>,
+    caller: Option<Extension<ResolvedPrincipal>>,
+    Json(body): Json<GrantRequestBody>,
+) -> axum::response::Response {
+    let tc = &ctx.agent_ctx;
+    let Some(principal) = caller.map(|Extension(c)| c.principal().to_string()) else {
+        return refused(StatusCode::UNAUTHORIZED, "no_principal", "a grant is requested by an authenticated principal");
+    };
+    if principal.starts_with("node:") || tc.client_certs.mark(&principal).is_none() {
+        return refused(StatusCode::CONFLICT, "not_a_client_holder", format!("{principal} has no client certificate on record here: a grant held by a client needs a key that proves possession (mycelium tls issue --client, then POST /gateway/identity/client-cert)"));
+    }
+    if body.tool.is_empty() || body.tool.contains('/') {
+        return refused(StatusCode::BAD_REQUEST, "bad_request", "tool is one key segment");
+    }
+    let Some(provider) = tool_provider(tc, &body.tool) else {
+        return refused(StatusCode::NOT_FOUND, "no_provider", format!("no node provides {}", body.tool));
+    };
+    let now_ms = tc.hlc.decision_now_ms();
+    let window_ms = body.window_secs.unwrap_or(60).clamp(1, 600) * 1_000;
+    let request = format!("{:016x}", tc.hlc.tick());
+    let segment = super::gateway_authority::grant_holder_segment(&principal);
+    let key = format!("grant/{segment}/{request}");
+    let digest = super::action_evaluator::hex32(&super::gateway_authority::arguments_digest(&body.arguments));
+    let shown = serde_json::to_vec(&body.arguments).map_or(0, |b| b.len());
+    let record = json!({
+        "schema": "mycelium.grant-request/1",
+        "request": request,
+        "agent": principal,
+        "node": provider.to_string(),
+        "tool": body.tool,
+        "operation": "tools/call",
+        "resource": format!("tool:{}@{provider}", body.tool),
+        "arguments_digest": digest,
+        "arguments": if shown <= 4_096 { body.arguments.clone() } else { json!(format!("({shown} bytes, not shown)")) },
+        "requested_at_ms": now_ms,
+        "expires_at_ms": now_ms + window_ms,
+    });
+    match write_record_durable(tc, key.clone(), record.to_string().into_bytes()).await {
+        Ok(_) => {
+            set_pending_gauge(tc, now_ms);
+            Json(json!({ "ok": true, "request": request, "key": key, "resource": record["resource"], "arguments_digest": digest, "expires_at_ms": now_ms + window_ms })).into_response()
+        }
+        Err(e) => refused(StatusCode::SERVICE_UNAVAILABLE, "not_durable", format!("the request was not recorded durably: {e}")),
+    }
+}
+
+/// `GET /gateway/grants/request/{request}` (`mcp:invoke`) — the caller's own request and its answer: `pending`,
+/// `issued` (with the signed grant, which the caller presents as `_meta.mandate` with its possession proof),
+/// `refused` (with the reason), `revoked`, or `expired`. Only the caller's own requests are read.
+pub(super) async fn gw_grant_request_status(
+    State(ctx): State<Arc<HttpCtx>>,
+    caller: Option<Extension<ResolvedPrincipal>>,
+    Path(request): Path<String>,
+) -> axum::response::Response {
+    let tc = &ctx.agent_ctx;
+    let Some(principal) = caller.map(|Extension(c)| c.principal().to_string()) else {
+        return refused(StatusCode::UNAUTHORIZED, "no_principal", "a grant is read by an authenticated principal");
+    };
+    if request.is_empty() || request.contains('/') {
+        return refused(StatusCode::BAD_REQUEST, "bad_request", "request is one key segment");
+    }
+    let key = format!("grant/{}/{request}", super::gateway_authority::grant_holder_segment(&principal));
+    let read = |suffix: &str| mycelium_core::ops::kv_get(tc, &format!("{key}{suffix}")).and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok());
+    let Some(rec) = read("") else {
+        return refused(StatusCode::NOT_FOUND, "unknown_request", format!("no grant request of yours at {request}"));
+    };
+    let now_ms = tc.hlc.decision_now_ms();
+    let body = if let Some(r) = read("/revoked") {
+        json!({ "ok": true, "state": "revoked", "revocation": r })
+    } else if let Some(g) = read("/issued") {
+        json!({ "ok": true, "state": "issued", "grant": g })
+    } else if let Some(r) = read("/refused") {
+        json!({ "ok": true, "state": "refused", "refusal": r })
+    } else if rec["expires_at_ms"].as_u64().is_none_or(|e| e <= now_ms) {
+        json!({ "ok": true, "state": "expired", "request": rec })
+    } else {
+        json!({ "ok": true, "state": "pending", "request": rec })
+    };
+    Json(body).into_response()
+}
+
 /// Is `agent` the principal (`node:{ip}:{port}`) of a fleet member whose identity key this node holds?
 fn is_member_agent(ctx: &TaskCtx, agent: &str) -> bool {
     agent
@@ -425,10 +541,16 @@ pub(crate) async fn revoke_grant(ctx: &Arc<TaskCtx>, caller: Option<&ResolvedPri
     let Some(tool) = grant.mandate.operations.iter().find_map(|op| op.strip_prefix("tools/call:tool:").map(str::to_string)) else {
         return Err(GrantRefusal::door(StatusCode::CONFLICT, "unreadable_grant", "the grant enumerates no tool call"));
     };
-    let Some(agent_node) = grant.mandate.holder.as_str().strip_prefix("node:") else {
-        return Err(GrantRefusal::door(StatusCode::CONFLICT, "unreadable_grant", "the grant's holder is not a node principal"));
+    // The resource the decision evaluates against: a node holder's own node (the agent runs the tool there, as
+    // before); for a client holder (identity-and-lifecycle I1), the provider of the tool, resolved from `tools/` as
+    // `/mcp` resolves it — the node the grant's calls go to.
+    let resource = match grant.mandate.holder.as_str().strip_prefix("node:") {
+        Some(agent_node) => format!("tool:{tool}@{agent_node}"),
+        None => match tool_provider(ctx, &tool) {
+            Some(provider) => format!("tool:{tool}@{provider}"),
+            None => return Err(GrantRefusal::door(StatusCode::CONFLICT, "no_provider", format!("no node provides {tool}, so the grant's resource cannot be named"))),
+        },
     };
-    let resource = format!("tool:{tool}@{agent_node}");
     let now_ms = ctx.hlc.decision_now_ms();
     let arguments = json!({ "tool": tool, "agent": agent, "request": request });
     let preflight = ae_preflight(ctx, caller, "grant.revoke", &resource, &arguments, &json!({}), ENFORCEMENT_POINT_GRANT_ISSUE).await;

@@ -188,6 +188,8 @@ pub(crate) mod client_cert;
 pub(crate) mod client_sig;
 #[cfg(all(test, feature = "tls", feature = "gateway"))]
 mod client_sig_tests;
+#[cfg(all(test, feature = "compliance"))]
+mod client_grant_tests;
 #[cfg(all(test, feature = "tls"))]
 mod client_cert_tests;
 #[cfg(feature = "compliance")]
@@ -990,6 +992,10 @@ pub(crate) struct TaskCtx {
     /// the journal of supersessions under `[persistence]` (`client_cert::ClientCertLedger`, lock-free).
     #[cfg(feature = "tls")]
     pub(crate) client_certs: Arc<client_cert::ClientCertLedger>,
+    /// Identity-and-lifecycle I1: the external-issuer sets the client-certificate fold feeds each client principal's
+    /// current key into — every attached execution authority's, by the handle's identity. Lock-free.
+    #[cfg(feature = "tls")]
+    pub(crate) client_key_sinks: papaya::HashMap<usize, crate::knowledge::issuer::SharedExternalIssuers>,
     /// Post-360 row E: each gateway's recent caller-envelope ids, checked once per received request
     /// (`gateway_caller::verify_received`), so a captured envelope is not served twice.
     pub(crate) caller_replay: gateway_caller::ReplayWindows,
@@ -1607,6 +1613,8 @@ impl GossipAgent {
             identity_ledger: Arc::new(revocation::IdentityLedger::default()),
             #[cfg(feature = "tls")]
             client_certs: Arc::new(client_cert::ClientCertLedger::default()),
+            #[cfg(feature = "tls")]
+            client_key_sinks: papaya::HashMap::new(),
             caller_replay: Default::default(),
             #[cfg(feature = "tls")]
             client_replay: Default::default(),
@@ -1905,7 +1913,7 @@ impl GossipAgent {
         &self,
         budget: Arc<crate::knowledge::cohort_budget::CohortBudget>,
         view: crate::knowledge::cohort::CohortView,
-        external: crate::knowledge::issuer::TrustedExternalIssuers,
+        external: impl Into<crate::knowledge::issuer::SharedExternalIssuers>,
     ) {
         self.note_attachment("with_cohort_budget");
         let b = Arc::new(provider_enforcement::ProviderBudget::new(budget, view, external));
@@ -1976,6 +1984,13 @@ impl GossipAgent {
                     gateway_authority::feed_grant_checkpoints(&ctx, &authority);
                 }
             });
+        }
+        // Identity-and-lifecycle I1: the authority verifies a client holder's possession by the client's current key, so
+        // its external issuers are fed each one — those on record now, and each as the fold raises it.
+        {
+            let sink = authority.external_issuers();
+            self.task_ctx.client_key_sinks.pin().insert(sink.id(), sink);
+            client_cert::feed_client_keys(&self.task_ctx);
         }
         if self.task_ctx.execution_authority.set(authority).is_err() {
             tracing::warn!("with_execution_authority: an execution authority is already attached; ignoring");

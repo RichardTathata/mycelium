@@ -395,6 +395,8 @@ pub(super) async fn run_http_server(
     let gateway = gateway
         .route("/grants/pending",           get(grants::gw_grants_pending))
         .route("/grants/stream",            get(grants::gw_grants_stream))
+        .route("/grants/request",           post(grants::gw_grant_request))
+        .route("/grants/request/{request}", get(grants::gw_grant_request_status))
         .route("/grants/{agent}/{request}", post(grants::gw_grant_decide))
         .route("/grants/{agent}/{request}/revoke", post(grants::gw_grant_revoke));
 

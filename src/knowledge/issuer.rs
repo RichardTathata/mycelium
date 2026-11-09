@@ -212,6 +212,10 @@ impl std::error::Error for ExternalIssuerError {}
 #[derive(Clone, Debug, Default)]
 pub struct TrustedExternalIssuers {
     keys: BTreeMap<IssuerId, Vec<[u8; 32]>>,
+    /// Client principals' current keys (identity-and-lifecycle I1): fed by the node's client-certificate fold, one
+    /// key per principal, replaced when a newer certificate supersedes it. Not configuration — a reader that must
+    /// never trust a client (the membership authorities) reads [`Self::configured_only`].
+    clients: BTreeMap<IssuerId, [u8; 32]>,
 }
 
 impl TrustedExternalIssuers {
@@ -240,6 +244,77 @@ impl TrustedExternalIssuers {
 
     fn keys_for(&self, issuer: &IssuerId) -> Option<&[[u8; 32]]> {
         self.keys.get(issuer).map(Vec::as_slice)
+    }
+
+    /// Trust `key` as `issuer`'s **current client key** (identity-and-lifecycle I1), replacing any earlier one: a
+    /// client principal has one current key, its newest verified certificate's. Refuses the member namespace.
+    pub fn set_client_key(&mut self, issuer: IssuerId, key: [u8; 32]) -> Result<(), ExternalIssuerError> {
+        if issuer.claims_member_namespace() {
+            return Err(ExternalIssuerError::MemberNamespace);
+        }
+        self.clients.insert(issuer, key);
+        Ok(())
+    }
+
+    /// `issuer`'s current client key, if the fold has fed one.
+    pub fn client_key(&self, issuer: &IssuerId) -> Option<[u8; 32]> {
+        self.clients.get(issuer).copied()
+    }
+
+    /// The configured issuers alone, without any client key — for a reader that must never trust a client.
+    pub fn configured_only(&self) -> Self {
+        Self { keys: self.keys.clone(), clients: BTreeMap::new() }
+    }
+}
+
+/// **One set of external issuers, shared** (identity-and-lifecycle I1): the execution authority, the provider's
+/// cohort budget and the membership authorities each hold one of these, and a clone is the same set — so the node's
+/// client-certificate fold can feed a client principal's current key to an authority built before the client's
+/// certificate was published. Converts from a [`TrustedExternalIssuers`], so an embedder that built one keeps
+/// compiling. One leaf lock (lock-order row 77), held only for a verification or an update; never across `await`.
+#[derive(Clone, Debug, Default)]
+pub struct SharedExternalIssuers(std::sync::Arc<parking_lot::RwLock<TrustedExternalIssuers>>);
+
+impl From<TrustedExternalIssuers> for SharedExternalIssuers {
+    fn from(issuers: TrustedExternalIssuers) -> Self {
+        Self(std::sync::Arc::new(parking_lot::RwLock::new(issuers)))
+    }
+}
+
+impl SharedExternalIssuers {
+    /// Read the set, for one verification.
+    pub fn read(&self) -> parking_lot::RwLockReadGuard<'_, TrustedExternalIssuers> {
+        self.0.read()
+    }
+
+    /// [`TrustedExternalIssuers::trust`], on the shared set.
+    pub fn trust(&self, issuer: IssuerId, key: [u8; 32]) -> Result<(), ExternalIssuerError> {
+        self.0.write().trust(issuer, key)
+    }
+
+    /// [`TrustedExternalIssuers::untrust`], on the shared set.
+    pub fn untrust(&self, issuer: &IssuerId) {
+        self.0.write().untrust(issuer)
+    }
+
+    /// [`TrustedExternalIssuers::set_client_key`], on the shared set; a key already current is not rewritten.
+    pub fn set_client_key(&self, issuer: IssuerId, key: [u8; 32]) -> Result<(), ExternalIssuerError> {
+        if self.0.read().client_key(&issuer) == Some(key) {
+            return Ok(());
+        }
+        self.0.write().set_client_key(issuer, key)
+    }
+
+    /// Whether `self` and `other` are one set (a clone of the same handle).
+    pub fn same_set(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0)
+    }
+
+    /// The handle's identity, for a registry of handles (the node's client-key sinks, registered at the gateway's
+    /// execution authority).
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    pub(crate) fn id(&self) -> usize {
+        std::sync::Arc::as_ptr(&self.0) as usize
     }
 }
 
@@ -295,10 +370,12 @@ pub fn verify_signed_by(
         };
     }
 
-    let Some(keys) = external.keys_for(issuer) else {
+    let configured = external.keys_for(issuer);
+    let client = external.client_key(issuer);
+    if configured.is_none() && client.is_none() {
         return Authenticity::Unverifiable(UnverifiableReason::UntrustedExternal);
-    };
-    for key in keys {
+    }
+    for key in configured.unwrap_or_default().iter().chain(client.as_ref()) {
         if verifies(key) {
             return Authenticity::Current { path: IssuerPath::External, key: *key };
         }

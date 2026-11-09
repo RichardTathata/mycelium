@@ -14,8 +14,10 @@ every node that reads it.
   fleet fixes (`gateway_identity_issuer`).
 - **Use it to sign a call:** the service signs each `tools/call` or A2A send with that key, and the provider checks
   that the call is the one signed and the key is the principal's current one.
-- **Not when** you need a grant held by the service, or the SDKs to sign for you: client-held grants and the SDK
-  `tools/call` clients are not built yet ([identity and lifecycle § I1](../plans/identity-and-lifecycle.md#i1--client-certificates-for-services-d1-d1)).
+- **Use it to hold a grant:** the service asks for one at `POST /gateway/grants/request` and proves possession with
+  that key ([grants](grants.md)).
+- **Not when** you need the SDKs to sign or prove possession for you: the SDK `tools/call` clients and grant verbs are
+  not built yet ([identity and lifecycle § I1](../plans/identity-and-lifecycle.md#i1--client-certificates-for-services-d1-d1)).
 
 ## Turn it on
 
@@ -103,8 +105,6 @@ way. `a_newer_certificate_supersedes_the_older_key_and_an_overwrite_cannot_lower
 - **Not built:**
   - refusing an unsigned action from a principal with a certificate on record (counted now);
   - the SDK `tools/call` clients, and `cs`/`cn` in both A2A clients;
-  - grants held by a client principal, and `POST /gateway/grants/request`;
-  - a shared `TrustedExternalIssuers`;
   - the three-node fleet exit run;
   - an un-upgraded node's reading of `sys/client-cert/`, which was not shown against the previous binary.
 

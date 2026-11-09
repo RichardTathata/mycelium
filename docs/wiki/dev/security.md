@@ -438,6 +438,10 @@ principal's client key over the principal, operation, resource, arguments' diges
 outside its own signature and the **provider** checks it in `gateway_caller::verify` — binding, signature, the key's
 standing (current, by the client-cert fold), freshness — and admits each `cn` once per principal → key → instance
 (`client_sig.rs`). A relay that strips `cs` makes the call unsigned, which is counted, not yet refused.
+**A client can hold a grant** (I1, second half): the request is keyed `grant/{hex(principal)}/{request}` (a node
+holder stays literal), and the client proves possession with its certificate key, which the client-certificate fold
+feeds into every attached execution authority's `SharedExternalIssuers` (one per principal, replaced on supersession).
+The membership authorities read the same type's configured keys only: a client key never entitles a removal.
 
 > **`sys/identity` authentication — partially closed (WS-E, in progress).** `sys/identity/{node}`
 > is a plain Layer-I KV value with **no signature**, and `merge_peer_keys` **accumulates** any key

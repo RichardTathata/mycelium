@@ -48,6 +48,18 @@ This feature is turned on in code.
   ones first, as a backlog) and `grant_answered` when one this stream reported is issued, refused or revoked. The SDKs'
   verbs are `grants_pending` / `grant_decide` / `grant_revoke` and `grants_stream` (`grantsPending` / `grantDecide` /
   `grantRevoke` / `grantsStream`).
+- [`gw_grant_request`](../../src/agent/http/grants.rs) and [`gw_grant_request_status`](../../src/agent/http/grants.rs) —
+  a grant **held by a client principal** (identity-and-lifecycle I1): a service with a client certificate on record
+  asks with `POST /gateway/grants/request` (`mcp:invoke`, `{"tool", "arguments", "window_secs"}`) and reads the
+  answer at `GET /gateway/grants/request/{request}` (`pending`, `issued` with the signed grant, `refused`, `revoked`,
+  `expired`). The request lands under `grant/{hex(principal)}/{request}` — a node principal is written as it is, a
+  client's principal in hex ([`grant_holder_segment`](../../src/agent/gateway_authority.rs)) — so the supervisor's
+  pending list and decision door serve both. The client proves possession with its client-certificate key: an
+  execution authority attached to the node is fed each client principal's current key
+  ([`SharedExternalIssuers`](../../src/knowledge/issuer.rs)). A revocation evaluates against the tool's provider,
+  `tool:{tool}@{provider}`. A principal without a certificate on record is refused (`not_a_client_holder`,
+  `not_a_member`). `a_grant_held_by_a_client_principal_is_requested_issued_presented_and_revoked`, in
+  [`src/agent/client_grant_tests.rs`](../../src/agent/client_grant_tests.rs).
 - [`AgentPolicy`](../../src/agent/state_machine.rs) — its `grant_arguments_class` and `grant_renderable_classes`: the
   rendering under the data-class policy. The arguments' class by name, in the operator's vocabulary (as row R's `DataClass` names it), and
   the classes whose arguments may be rendered into the gossiped request; a class not listed is **withheld** — the record

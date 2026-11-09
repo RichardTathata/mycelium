@@ -52,7 +52,9 @@ use super::rpc::RpcRequest;
 use super::TaskCtx;
 use crate::knowledge::cohort::{CohortOffer, CohortView, SignedCohortDeclaration};
 use crate::knowledge::cohort_budget::{CohortBudget, CohortSlot};
-use crate::knowledge::issuer::{MemberKeySource, TrustedExternalIssuers};
+use crate::knowledge::issuer::{MemberKeySource, SharedExternalIssuers};
+#[cfg(test)]
+use crate::knowledge::issuer::TrustedExternalIssuers;
 use crate::knowledge::IssuerId;
 use crate::node_id::NodeId;
 
@@ -98,7 +100,8 @@ pub(crate) struct ProviderBudget {
     /// Lock-order row 45: read to place a caller (µs), written to offer a declaration. The budget's
     /// own `in_flight` lock (row 42) is taken **under** a read of this one, never the reverse.
     view: RwLock<CohortView>,
-    external: TrustedExternalIssuers,
+    /// Shared (identity-and-lifecycle I1). Not fed client keys: a cohort's authorities are the operator's.
+    external: SharedExternalIssuers,
     refusals: AtomicU64,
     /// Lock-order row 46: admissions for requests streamed to an SDK agent, released by
     /// `/gateway/rpc/respond` or after `PARKED_TTL_MS`. Leaf.
@@ -106,11 +109,11 @@ pub(crate) struct ProviderBudget {
 }
 
 impl ProviderBudget {
-    pub(crate) fn new(budget: Arc<CohortBudget>, view: CohortView, external: TrustedExternalIssuers) -> Self {
+    pub(crate) fn new(budget: Arc<CohortBudget>, view: CohortView, external: impl Into<SharedExternalIssuers>) -> Self {
         Self {
             budget,
             view: RwLock::new(view),
-            external,
+            external: external.into(),
             refusals: AtomicU64::new(0),
             parked: Mutex::new(HashMap::new()),
         }
@@ -118,7 +121,9 @@ impl ProviderBudget {
 
     /// Offer a signed cohort declaration to this provider's view.
     pub(crate) fn offer(&self, signed: &SignedCohortDeclaration, members: &impl MemberKeySource) -> CohortOffer {
-        self.view.write().unwrap_or_else(|e| e.into_inner()).offer(signed, members, &self.external)
+        // A snapshot before the view's lock: the shared set's lock is never held with another (lock-order row 77).
+        let external = self.external.read().clone();
+        self.view.write().unwrap_or_else(|e| e.into_inner()).offer(signed, members, &external)
     }
 
     /// Calls refused for want of room since the budget was attached.

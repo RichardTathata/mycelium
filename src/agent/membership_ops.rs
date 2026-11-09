@@ -8,7 +8,6 @@ use std::sync::Arc;
 use bytes::Bytes;
 
 use super::{GossipAgent, TaskCtx};
-use crate::knowledge::issuer::TrustedExternalIssuers;
 use crate::knowledge::IssuerId;
 use crate::membership::{MembershipAuthorities, RemovalOffer, SignedMemberRemoval};
 use crate::node_id::NodeId;
@@ -66,7 +65,7 @@ impl GossipAgent {
     pub fn with_membership_authorities(
         &self,
         authorities: impl IntoIterator<Item = IssuerId>,
-        external: TrustedExternalIssuers,
+        external: impl Into<crate::knowledge::issuer::SharedExternalIssuers>,
     ) {
         let auth = Arc::new(MembershipAuthorities::new(authorities, external));
         if self.task_ctx.membership.set(Arc::clone(&auth)).is_err() {

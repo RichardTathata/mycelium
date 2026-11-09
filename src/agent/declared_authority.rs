@@ -30,7 +30,8 @@
 //! as the scaffolds do. A rule's actor is matched exactly: an issuer at this gateway is a gateway principal
 //! (`token:<issuer>/<name>`, `oidc:<issuer>/<subject>`), so the rule names it so. **Not built:** other units'
 //! rules; the Cedar evaluator from configuration (private); a gate spanning more than one `ResourceAuthority`;
-//! mandate authorities' keys (`TrustedExternalIssuers` is empty — row I1 makes it a shared source).
+//! mandate authorities' keys (the authority's `SharedExternalIssuers` holds no configured key; since I1 it is fed each
+//! client principal's current key, so a grant held by a client verifies).
 
 use std::path::PathBuf;
 use std::sync::Arc;
