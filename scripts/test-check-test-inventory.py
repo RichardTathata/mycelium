@@ -60,7 +60,7 @@ def write(path, text):
     return apply
 
 
-WASM = "./scripts/ci-retest.sh -p mycelium-wasm-host --features stem,gateway,llm"
+WASM = "./scripts/ci-retest.sh -p mycelium-wasm-host --features stem,gateway,llm,compliance"
 MUTATIONS = {
     # library unit tests and their features
     "all --lib steps removed": regex(CI, r"^.*cargo test --lib.*\n|^.*ci-retest\.sh --lib.*\n", ""),

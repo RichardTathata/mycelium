@@ -131,7 +131,8 @@ Every `v*` tag publishes the three binaries for Linux x86_64, Linux aarch64 and 
 the multi-arch image `ghcr.io/richardtathata/mycelium` (`.github/workflows/release.yml`; the image is
 `docker/Dockerfile.node` — `docker/Dockerfile` is the demo). The published node is the full feature set
 (`cli,tls,compliance,a2a,llm,metrics`) because a configuration naming a table the build lacks refuses to start; the
-stem is `stem,gateway,llm,object_store`. Linux binaries are bookworm-built (glibc 2.36, `libssl3`). The workflow refuses
+stem is `stem,gateway,llm,object_store,compliance` (`mycelium-wasm-host`'s `compliance` passes through to mycelium's, so a
+stem takes a token table, `[oidc]` and `[authority]` — `start()` attaches the authority, as for the node). Linux binaries are bookworm-built (glibc 2.36, `libssl3`). The workflow refuses
 a tag whose version differs from `Cargo.toml`'s, smokes each Linux tarball in a clean container (`mycelium --version`
 equal to the tag, `wire-check` over the fixtures), and creates the Release from the annotated tag's message if
 RELEASING § 8 has not. The sums are integrity, not provenance: nothing signs a binary (`what-is-proven.md`, third

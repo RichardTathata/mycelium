@@ -71,8 +71,10 @@ and prints the effective configuration with each field's source
 ([diagnostics § Before you start](../operations/diagnostics.md#before-you-start-mycelium-doctor)).
 
 The published node is built with `cli,tls,compliance,a2a,llm,metrics`, so a configuration that names `[tls]`, a token
-table, `[oidc]` or `[gateway_tls]` starts (a build without the feature refuses it by name, v2.18.1). The stem is built
-with `stem,gateway,llm,object_store`. Building from source stays the path for any other feature set.
+table, `[oidc]`, `[gateway_tls]` or `[authority]` starts (a build without the feature refuses it by name, v2.18.1). It
+serves A2A only when the configuration sets `gateway_a2a = true` ([A2A](../features/a2a.md)). The stem is built with
+`stem,gateway,llm,object_store,compliance`, so it takes the same credential and authority tables; it has no `a2a`.
+Building from source stays the path for any other feature set.
 
 ## What to configure explicitly
 

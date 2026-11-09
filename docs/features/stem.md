@@ -8,7 +8,8 @@ application-specific at deploy time. It advertises every `[[capability]]` the fi
 artifacts — WASM components and blobs — when the fleet's demand or a presence band calls for them, and withdraws them
 when it no longer does. A stem fleet is many stems from one image, each holding only its own file. `[[lane]]`,
 `[[mandate]]` and `[[rule]]` are vocabulary for the offline check and the evaluator; a stem does nothing with them at
-runtime and says so once at start.
+runtime and says so once at start — unless its configuration's `[authority]` names its unit, when `start()` builds the
+evaluator from that unit's `[[rule]]`s (below).
 
 ## When to use it, and when not
 
@@ -21,7 +22,9 @@ runtime and says so once at start.
 ## Turn it on
 
 Run the `mycelium-stem` binary — published in every release tarball and the image, built with
-`stem,gateway,llm,object_store` — with a unit file; from source, build `mycelium-wasm-host` with its `stem` feature.
+`stem,gateway,llm,object_store,compliance` — with a unit file; from source, build `mycelium-wasm-host` with its `stem`
+feature.
+
 The co-op's provisioning declarations, such as
 [`examples/units/provisioning/provider-a.toml`](../../examples/units/provisioning/provider-a.toml), are among those the
 stem-examples Docker suite runs as stems, in a path-filtered workflow (`cluster-suites.yml`).
@@ -29,6 +32,13 @@ stem-examples Docker suite runs as stems, in a path-filtered workflow (`cluster-
 - `mycelium-stem --units <file>`, with `--library` (a directory or object-store URL; without it, artifacts are pulled
   over the mesh), `--config`, `--peers`, `--tick-ms`, `--self-elect` and `--trace-dir`
   ([capability lifecycle § Running a stem](../operations/capability-lifecycle.md#running-a-stem)).
+- **Credentials and authority:** with [`compliance`](../../mycelium-wasm-host/Cargo.toml) (in the published set), a
+  stem's configuration takes named and scoped gateway tokens, `[oidc]` and
+  [`[authority]`](declared-authority.md); a stem built without it refuses each at start by name. The stem calls
+  `GossipAgent::start()`, so `[authority]` is planned and attached there — the evaluator from the unit's `[[rule]]`s,
+  the execution authority, provider enforcement and the evidence journal — as on the `mycelium` binary
+  (`a_compliance_stem_starts_with_a_token_table_and_attaches_its_authority`, in
+  [`mycelium-wasm-host/tests/stem_compliance.rs`](../../mycelium-wasm-host/tests/stem_compliance.rs)).
 - The `[hosts]` table ([unit-file § hosts](../reference/unit-file.md#hosts)) is what makes a stem install anything;
   without it, it only declares ([demand-driven provisioning](demand-provisioning.md)).
 - In code, [`Stem::start`](../../mycelium-wasm-host/src/stem.rs) with [`StemOptions`](../../mycelium-wasm-host/src/stem.rs).

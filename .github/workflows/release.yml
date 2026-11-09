@@ -23,6 +23,7 @@ on:
     paths:
       - '.github/workflows/release.yml'
       - 'docker/Dockerfile.node'
+      - 'mycelium-wasm-host/Cargo.toml'
       - 'src/main.rs'
       - 'mycelium-wasm-host/src/bin/mycelium-stem.rs'
       - 'mycelium-wasm-host/src/bin/mycelium-artifact.rs'
@@ -45,7 +46,9 @@ env:
   # ghcr.io refuses an uppercase path; this is the repository's owner and name, lowercased.
   IMAGE: ghcr.io/richardtathata/mycelium
   NODE_FEATURES: cli,tls,compliance,a2a,llm,metrics
-  STEM_FEATURES: stem,gateway,llm,object_store
+  # `compliance` so a published stem takes a token table, `[oidc]` and `[authority]`, which a build without it
+  # refuses at start (as NODE_FEATURES carries it for the node).
+  STEM_FEATURES: stem,gateway,llm,object_store,compliance
 
 jobs:
   version:

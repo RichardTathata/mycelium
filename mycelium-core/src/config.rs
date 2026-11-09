@@ -1475,6 +1475,19 @@ pub struct GossipConfig {
     #[serde(default)]
     pub gateway_allow_unauthenticated: bool,
 
+    /// **Serve the Agent-to-Agent protocol, opt-in**: mount the AgentCard
+    /// (`/.well-known/agent-card.json`) and `POST /a2a` on this node's gateway at `start()`, as an
+    /// embedder's `with_a2a()` does — the switch for a node built from configuration alone, such as
+    /// the published `mycelium` binary. Default `false`: nothing A2A is served. It needs a build
+    /// with mycelium's `a2a` feature — `start()` refuses it by name in one without (it would be
+    /// accepted and ignored) — and an `http_port`, which `validate()` requires. `/a2a` admits an
+    /// absent bearer as anonymous and drops a present one's scopes, so a token does not gate it: only
+    /// an action evaluator does (`[authority]`, or `with_action_evaluator` in code), and `start()`
+    /// warns when it is mounted without one (guarantee `a2a.admission`). Set via
+    /// `GOSSIP_GATEWAY_A2A` (`true`/`false`/`1`/`0`/`yes`/`no`; any other value is refused).
+    #[serde(default)]
+    pub gateway_a2a: bool,
+
     /// **Cross-origin reads from a browser, opt-in** (adopter-surface Y3, D28). The exact origins
     /// (`scheme://host[:port]`, `http` or `https`, no path) a browser page may read this gateway's
     /// **read-only routes** from — the list is `CORS_READ_PATHS` in the gateway (`src/agent/http/cors.rs`)
@@ -2045,6 +2058,7 @@ impl Default for GossipConfig {
             emergent_detectors_enabled:    false,
             gateway_auth_token:            None,
             gateway_allow_unauthenticated: false,
+            gateway_a2a:                   false,
             gateway_cors_origins:          Vec::new(),
             gateway_max_connections:       1024,
             gateway_scoped_tokens:         Vec::new(),
@@ -2519,6 +2533,12 @@ impl GossipConfig {
                                 self.gateway_max_connections),
             });
         }
+        if self.gateway_a2a && self.http_port.is_none() {
+            return Err(GossipError::InvalidField {
+                field:  "gateway_a2a",
+                reason: "set without http_port: there is no gateway to serve /a2a and its card on".into(),
+            });
+        }
         if !self.gateway_cors_origins.is_empty() && self.http_port.is_none() {
             return Err(GossipError::InvalidField {
                 field:  "gateway_cors_origins",
@@ -2623,6 +2643,7 @@ impl GossipConfig {
     /// `GOSSIP_MAX_STORE_ENTRIES`, `GOSSIP_MAX_CLOCK_DRIFT_MS`,
     /// `GOSSIP_EPIDEMIC_EXTRA_PEERS`,
     /// `GOSSIP_GATEWAY_AUTH_TOKEN`, `GOSSIP_GATEWAY_ALLOW_UNAUTHENTICATED` (strict boolean),
+    /// `GOSSIP_GATEWAY_A2A` (strict boolean),
     /// `GOSSIP_GATEWAY_CORS_ORIGINS` (comma-separated exact origins; blank = none),
     /// `GOSSIP_REQUIRE_IDENTITY_PROOFS` (strict boolean — it can only weaken a `true` default).
     pub fn apply_env_overrides(&mut self) -> Result<(), GossipError> {
@@ -2895,6 +2916,18 @@ impl GossipConfig {
                 other => return Err(GossipError::InvalidField {
                     field:  "gateway_allow_unauthenticated",
                     reason: format!("GOSSIP_GATEWAY_ALLOW_UNAUTHENTICATED={other:?} is not one of true/false/1/0/yes/no"),
+                }),
+            };
+        }
+        if let Ok(v) = env::var("GOSSIP_GATEWAY_A2A") {
+            // Strict: it opens a surface that admits an anonymous caller, so a typo must not be read
+            // as either answer.
+            self.gateway_a2a = match v.trim() {
+                "1" | "true" | "TRUE" | "yes" => true,
+                "0" | "false" | "FALSE" | "no" => false,
+                other => return Err(GossipError::InvalidField {
+                    field:  "gateway_a2a",
+                    reason: format!("GOSSIP_GATEWAY_A2A={other:?} is not one of true/false/1/0/yes/no"),
                 }),
             };
         }
@@ -3644,6 +3677,32 @@ mod tests {
         set_test_env(&_lock, var, Some("ture"));
         let err = GossipConfig::default().apply_env_overrides().expect_err("a typo refuses");
         assert!(matches!(err, GossipError::InvalidField { field: "gateway_allow_unauthenticated", .. }), "{err}");
+    }
+
+    /// The A2A switch is off by default, a strict boolean from the environment (it opens a surface an
+    /// anonymous caller reaches), and refused by `validate()` with no gateway to serve it on.
+    #[test]
+    fn the_a2a_switch_is_off_by_default_strict_from_the_environment_and_needs_a_gateway() {
+        let _lock = env_test_lock();
+        let var = "GOSSIP_GATEWAY_A2A";
+        let _guard = EnvGuard(&_lock, var, std::env::var(var).ok());
+        assert!(!GossipConfig::default().gateway_a2a, "off by default");
+        for (v, want) in [("1", true), ("true", true), ("yes", true), ("0", false), ("false", false), ("no", false)] {
+            set_test_env(&_lock, var, Some(v));
+            let mut cfg = GossipConfig::default();
+            cfg.apply_env_overrides().expect("a boolean applies");
+            assert_eq!(cfg.gateway_a2a, want, "{v}");
+        }
+        set_test_env(&_lock, var, Some("on"));
+        let err = GossipConfig::default().apply_env_overrides().expect_err("a typo refuses");
+        assert!(matches!(err, GossipError::InvalidField { field: "gateway_a2a", .. }), "{err}");
+        let mut cfg = GossipConfig { gateway_a2a: true, ..GossipConfig::default() };
+        let err = cfg.validate().expect_err("no gateway, nothing to serve /a2a on");
+        assert!(matches!(err, GossipError::InvalidField { field: "gateway_a2a", .. }), "{err}");
+        cfg.http_port = Some(9051);
+        cfg.validate().expect("with a gateway it validates");
+        let parsed: GossipConfig = toml::from_str("http_port = 9051\ngateway_a2a = true\n").expect("parses");
+        assert!(parsed.gateway_a2a, "the TOML key is the field's name");
     }
 
     /// Y3 (D28): cross-origin reads are off by default, set from the environment as a list, and an

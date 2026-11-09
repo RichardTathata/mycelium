@@ -83,6 +83,16 @@ impl GossipAgent {
                 });
             }
         }
+        // `gateway_a2a` in a build without `a2a`: the same class — the switch would be accepted and `/a2a` never served.
+        #[cfg(not(feature = "a2a"))]
+        if self.config.gateway_a2a {
+            return Err(GossipError::InvalidField {
+                field: "gateway_a2a",
+                reason: "`/a2a` and its card are served only by a build with the `a2a` feature; this build would \
+                         accept the switch and serve nothing. Build with `--features a2a`, or remove the setting"
+                    .into(),
+            });
+        }
         // `[authority]` (identity-and-lifecycle I0) in a build that cannot attach what it describes: the same class.
         // Without `compliance` the table would be accepted and every door would enforce nothing.
         #[cfg(not(feature = "compliance"))]
@@ -219,7 +229,8 @@ impl GossipAgent {
                     "start: /a2a is mounted with NO action evaluator. A gateway bearer does not gate \
                      this route (an absent bearer is anonymous, a present one's scopes are dropped), \
                      so an ANONYMOUS caller reaches skill dispatch. Attach an evaluator \
-                     (`with_action_evaluator`) or do not expose this node beyond a trusted network."
+                     (`[authority]`, or `with_action_evaluator` in code) or do not expose this node beyond a \
+                     trusted network."
                 );
             }
         }
@@ -313,6 +324,13 @@ impl GossipAgent {
     /// Binds the TCP listener(s) and launches background loops.
     pub async fn start(&self) -> Result<(), GossipError> {
         self.preflight()?;
+        // `gateway_a2a`: the card and `/a2a`, mounted as `with_a2a()` mounts them — before the boundary, so the
+        // routes are merged into the gateway this start builds. Once: beside `with_a2a()`, or on a retried start,
+        // nothing more is mounted. The warning and the report have already read the switch (`a2a_served`).
+        #[cfg(feature = "a2a")]
+        if self.config.gateway_a2a {
+            self.mount_a2a();
+        }
         // `[authority]`'s plan, attached before the boundary: the journal opened first (identity-and-lifecycle I0).
         #[cfg(feature = "compliance")]
         if let Some(planned) = self.task_ctx.declared_authority.get().cloned()

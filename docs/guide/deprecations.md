@@ -2812,3 +2812,29 @@ preflight.
   A skill's output that merely has `error` and `reason` stays its output.
 
 Wire **v12** unchanged; no API change.
+
+## 92. The published stem is built with `compliance`; `gateway_a2a` serves A2A from configuration; `GossipConfig` gained `gateway_a2a` (unreleased)
+
+Two changes to the published binaries, both additive.
+
+- **The stem.** `mycelium-wasm-host` gains a `compliance` feature that turns on mycelium's (and so its `gateway` and
+  `tls`), and the published `mycelium-stem` is built with `stem,gateway,llm,object_store,compliance`. A stem
+  configuration with `gateway_named_tokens`, `gateway_scoped_tokens`, `[oidc]` or `[authority]` now starts, where a
+  2.39.0 stem refused each by name; `[authority]` is attached by `start()` as on the `mycelium` binary. A stem whose only
+  credential is `gateway_auth_token` behaves as before (that token holds every scope); the scope table is new, so a
+  scoped or named token now gets only its scopes on the stem's routes (`artifact:publish` for
+  `POST /gateway/artifacts/publish`). A stem built from source without `compliance` behaves as before.
+- **The node.** `gateway_a2a = true` (or `GOSSIP_GATEWAY_A2A=1`) makes `start()` mount the AgentCard and `/a2a`, as
+  `with_a2a()` does. Off by default, so no node serves anything new unless it sets it. Refused by `validate()` without
+  an `http_port`, and by `start()` in a build without `a2a` (`InvalidField { field: "gateway_a2a" }`); the
+  environment value is strict (`1/true/TRUE/yes`, `0/false/FALSE/no`). `/a2a` admits an anonymous caller — a token
+  does not gate it — so set `[authority]` with rules that deny anonymous principals, or the node warns at start and
+  `a2a.admission` reads `not_configured` (`secure-single-domain` then refuses it). **An older binary ignores the key
+  silently**, as `GossipConfig`'s other keys are read: check `curl http://<gateway>/.well-known/agent-card.json` after
+  rolling it out.
+- **`with_a2a()` mounts once.** A second call, or a call beside `gateway_a2a`, now mounts nothing more; before, a
+  second call panicked on overlapping routes.
+- **Compiler:** `GossipConfig` gained a public field, so an exhaustive struct literal breaks; `..Default::default()`
+  is unaffected.
+
+Wire **v12** unchanged.

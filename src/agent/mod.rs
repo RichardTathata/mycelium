@@ -1063,6 +1063,14 @@ pub(crate) struct TaskCtx {
 }
 
 impl TaskCtx {
+    /// Whether this node serves `/a2a`: mounted in code (`with_a2a`), or to be mounted by `start()` because the
+    /// configuration sets `gateway_a2a`. Read by the start-time warning and the guarantee report before
+    /// `start()` mounts, so `mycelium doctor` — which never starts — says what `start()` would.
+    #[cfg(feature = "a2a")]
+    pub(crate) fn a2a_served(&self) -> bool {
+        self.a2a_mounted.load(Ordering::Acquire) || self.config.gateway_a2a
+    }
+
     /// X4: a causal field carried where it is never read — counted against the door that saw it, once per request.
     pub(crate) fn note_misplaced_causal(&self, door: &'static str) {
         self.causal_misplaced.pin().get_or_insert_with(door, Default::default).fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -2218,8 +2226,19 @@ impl GossipAgent {
     ///
     /// That is fine on a trusted LAN and is not fine on an untrusted network, so this warns when it
     /// mounts into the second configuration rather than leaving it to be discovered.
+    ///
+    /// The same mount is made by `start()` when the configuration sets
+    /// [`gateway_a2a`](crate::GossipConfig::gateway_a2a) — the switch for a node built from configuration
+    /// alone. Either way it is mounted once: a second call, or this call beside the switch, mounts nothing more.
     #[cfg(feature = "a2a")]
     pub fn with_a2a(self) -> Self {
+        self.mount_a2a();
+        self
+    }
+
+    /// The mount behind [`with_a2a`](Self::with_a2a) and `gateway_a2a`: once per node.
+    #[cfg(feature = "a2a")]
+    pub(crate) fn mount_a2a(&self) {
         // An open surface is a deployment decision; it must not be an accident. `/a2a` has no scope
         // floor and a bearer does not gate it, so without an evaluator an anonymous caller reaches
         // skill dispatch. Verified by probe (2026-09-25): `tasks/send` from an unauthenticated
@@ -2228,14 +2247,16 @@ impl GossipAgent {
         // `a2a_dispatch_is_anonymous`, not here: an evaluator attached after this call counts, and
         // the attach-time predicate once required *no bearer* too, so a node with a bearer and no
         // evaluator — the exact exposed case — got no warning (I1 audit, 2026-10-02).
-        self.task_ctx.a2a_mounted.store(true, Ordering::Release);
+        // Once: a second router with the same paths would make axum's merge panic (overlapping routes).
+        if self.task_ctx.a2a_mounted.swap(true, Ordering::AcqRel) {
+            return;
+        }
 
         let ctx   = Arc::clone(&self.task_ctx);
         let tasks = Arc::new(papaya::HashMap::<String, a2a::A2aTask>::new());
         a2a::spawn_cleanup(Arc::clone(&tasks), self.task_ctx.shutdown_tx.subscribe());
         let router = a2a::a2a_router_full(ctx, tasks);
         self.with_http_routes(router);
-        self
     }
 
     /// The skill an A2A message reaches when it names none (plan row N). A standard A2A client — the
@@ -2262,7 +2283,7 @@ impl GossipAgent {
 
 impl GossipAgent {
     /// Whether an anonymous caller to `/a2a` reaches skill dispatch on this node: the route is
-    /// mounted and no action evaluator is attached. A configured bearer does **not** change this —
+    /// served (mounted, or `gateway_a2a` set) and no action evaluator is attached. A configured bearer does **not** change this —
     /// `/a2a` admits an absent bearer as anonymous and drops a present one's scopes
     /// (`a2a_optional_auth`). In a build without `gateway` + `tls` there cannot be an evaluator.
     #[cfg(feature = "a2a")]
@@ -2271,7 +2292,7 @@ impl GossipAgent {
         let no_evaluator = self.task_ctx.action_evaluator.get().is_none();
         #[cfg(not(all(feature = "gateway", feature = "tls")))]
         let no_evaluator = true;
-        self.task_ctx.a2a_mounted.load(Ordering::Acquire) && no_evaluator
+        self.task_ctx.a2a_served() && no_evaluator
     }
 
     /// **Every registered guarantee, resolved against this node as built and configured** — the

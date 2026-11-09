@@ -124,7 +124,7 @@ reports lanes, mandates and rules as `not_enforced`.
 
 ### Running a stem
 
-The published `mycelium-stem` (every release tarball and the image, built with `stem,gateway,llm,object_store`;
+The published `mycelium-stem` (every release tarball and the image, built with `stem,gateway,llm,object_store,compliance`, so it takes a token table, `[oidc]` and `[authority]`;
 [installation § The published node](../guide/installation.md#the-published-node)) needs no toolchain. From source:
 
 ```sh

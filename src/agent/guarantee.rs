@@ -1027,7 +1027,7 @@ pub(crate) fn core_guarantees() -> Vec<GuaranteeDescriptor> {
           &["http::a2a_optional_auth", "a2a preflight"], "docs/operations/production-readiness.md",
           |c| {
               #[cfg(feature = "a2a")]
-              { if c.a2a_mounted.load(std::sync::atomic::Ordering::Acquire) { None } else { Some("`/a2a` is not mounted (`with_a2a` not called)") } }
+              { if c.a2a_served() { None } else { Some("`/a2a` is not mounted (`gateway_a2a` unset and `with_a2a` not called)") } }
               #[cfg(not(feature = "a2a"))]
               { let _ = c; Some("no `/a2a` in this build (`a2a` feature off)") }
           },

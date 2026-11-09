@@ -103,6 +103,11 @@ object_store = ["dep:object_store"]
 gateway = ["mycelium/gateway", "dep:axum", "dep:serde", "dep:serde_json"]
 # X2: `[[serve]]` — a stem bridges a live local install into a routable prompt skill (core's llm).
 llm = ["mycelium/llm"]
+# The gateway's credential and authority tables on a stem: named and scoped tokens, `[oidc]` and `[authority]`, each
+# refused at start in a build without mycelium's `compliance` (v2.18.1's class; I0 for `[authority]`). The published
+# stem carries it (release.yml's STEM_FEATURES). mycelium's `compliance` implies its `gateway` and `tls`, so a stem
+# built with it also takes `[tls]` and `[gateway_tls]`.
+compliance = ["gateway", "mycelium/compliance"]
 
 [[bin]]
 name              = "mycelium-stem"

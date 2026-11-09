@@ -12,7 +12,7 @@ behind the tags again.
 ## When to use it, and when not
 
 - **Use it when** you run the node from an SDK, a container or a host without a Rust toolchain, with the published
-  feature set (`cli,tls,compliance,a2a,llm,metrics` for the node; `stem,gateway,llm,object_store` for the stem).
+  feature set (`cli,tls,compliance,a2a,llm,metrics` for the node; `stem,gateway,llm,object_store,compliance` for the stem).
 - **Not when** you need another feature set, a platform not listed (Windows, Linux older than glibc 2.36), or a
   signed artefact: the sums are integrity, not provenance, and the build from a pinned tag is the path
   ([installation § Pin the source](../guide/installation.md#pin-the-source)).
