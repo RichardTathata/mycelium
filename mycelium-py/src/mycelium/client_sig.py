@@ -246,7 +246,8 @@ class ClientSigner:
     def sign(self, operation: str, resource: str, digest: bytes, *, issued_at_ms: Optional[int] = None,
              counter: Optional[int] = None) -> Dict[str, Any]:
         """Sign one call; returns ``{"cs": …, "cn": …}`` to merge into ``params._meta``. Each call takes the next
-        counter unless one is given."""
+        counter unless one is given. ``resource`` is the **bare** resource — ``tool:x``, never ``tool:x@node`` — as
+        :func:`mcp_binding` and :func:`a2a_binding` return it: the signature binds it whole."""
         import base64
 
         t = issued_at_ms if issued_at_ms is not None else int(time.time() * 1000)

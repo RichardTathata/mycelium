@@ -277,6 +277,12 @@ try {
   measured.o2_timeouts++;
   console.log("the first call after the restart timed out (O2, #746): presenting the second grant issued before the restart");
   afterRestart = await callRetrying(mcp, "get_weather", lyon, { grant: g2b.grant });
+  // O2's cost, observed: the timed-out call spent its grant at the gateway, so presenting it again is refused as used.
+  const spent = await refusal(() => mcp.callTool("get_weather", paris, { grant: g2.grant }));
+  expectReason(spent, "action_denied", "the grant of the call that timed out");
+  if (!String(spent.message).includes("already used")) fail(`the timed-out call's grant: ${spent.message}`);
+  console.log("the grant of the call that timed out, presented again: REFUSED — already used (O2's cost)");
+  measured.o2_grants_spent = (measured.o2_grants_spent ?? 0) + 1;
 }
 measured.steps.restart_to_granted_call_ms = Date.now() - restarted;
 if (!text(afterRestart).includes("Sunny")) fail(`the grant after the restart: ${JSON.stringify(afterRestart)}`);

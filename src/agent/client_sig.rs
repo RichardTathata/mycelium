@@ -305,6 +305,10 @@ impl ClientSigner {
 
     /// Sign one call at `issued_at_ms`. Each call takes the next counter.
     pub fn sign_at(&self, operation: &str, resource: &str, arguments_digest: &[u8; 32], issued_at_ms: u64) -> (ClientSignature, ClientNonce) {
+        debug_assert!(
+            resource.rsplit_once('@').is_none_or(|(_, tail)| tail.parse::<crate::NodeId>().is_err()),
+            "a client signature's resource is bare (`tool:x`, never `tool:x@node`): {resource}"
+        );
         use base64::Engine as _;
         use ed25519_dalek::Signer as _;
         let counter = self.counter.fetch_add(1, Ordering::Relaxed);
@@ -317,7 +321,8 @@ impl ClientSigner {
         )
     }
 
-    /// [`Self::sign_at`] on the wall clock.
+    /// [`Self::sign_at`] on the wall clock. `resource` is the **bare** resource — `tool:x`, never `tool:x@node` — as
+    /// [`door_binding_mcp`] and [`door_binding_a2a`] return it: the signature binds it whole.
     pub fn sign(&self, operation: &str, resource: &str, arguments_digest: &[u8; 32]) -> (ClientSignature, ClientNonce) {
         self.sign_at(operation, resource, arguments_digest, mycelium_core::sim_seam::wall_now_ms())
     }

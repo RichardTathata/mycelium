@@ -196,7 +196,11 @@ export class ClientSigner {
     return { grant, possession: proof.toString("base64") };
   }
 
-  /** Sign one call; returns `{cs, cn}` to merge into `params._meta`. Each call takes the next counter unless given. */
+  /**
+   * Sign one call; returns `{cs, cn}` to merge into `params._meta`. Each call takes the next counter unless given.
+   * `resource` is the **bare** resource — `tool:x`, never `tool:x@node` — as {@link mcpBinding} and {@link a2aBinding}
+   * return it: the signature binds it whole.
+   */
   sign(operation: string, resource: string, digest: Uint8Array, opts?: { issuedAtMs?: number; counter?: number }): { cs: ClientSignature; cn: ClientNonce } {
     const t = opts?.issuedAtMs ?? Date.now();
     let c: bigint;
