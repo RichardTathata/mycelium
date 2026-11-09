@@ -180,11 +180,12 @@ class McpClient:
             data = resp.json()
         return data if isinstance(data, dict) else {}
 
-    def grant_status(self, request: str) -> Dict[str, Any]:
+    def grant_status(self, request: str, *, timeout_secs: Optional[float] = None) -> Dict[str, Any]:
         """``GET /gateway/grants/request/{request}`` (``mcp:invoke``): the caller's own request and its answer —
         ``state`` is ``pending``, ``issued`` (with ``grant``, to pass to :meth:`call_tool`), ``refused`` (with
         ``refusal``), ``revoked`` or ``expired``. Another principal's request is ``404 unknown_request``."""
-        with self._pool.sync() as c:
+        kwargs = {} if timeout_secs is None else {"timeout": timeout_secs}
+        with self._pool.sync(**kwargs) as c:
             resp = c.get(f"/gateway/grants/request/{path_segment(request)}")
             resp.raise_for_status()
             data = resp.json()
@@ -192,16 +193,30 @@ class McpClient:
 
     def wait_for_grant(self, request: str, *, timeout_secs: float = 60.0, poll_secs: float = 0.5) -> Dict[str, Any]:
         """Poll :meth:`grant_status` until the request is answered; return the ``issued`` answer, or raise
-        :class:`GrantNotIssuedError` naming the state it ended in (``pending`` when ``timeout_secs`` passed first)."""
+        :class:`GrantNotIssuedError` naming the state it ended in (``pending`` when ``timeout_secs`` passed first).
+        Each read and each pause is bounded by the time left, so the wait ends within ``timeout_secs``; a read the
+        deadline cuts short is ``pending`` with the last answer seen."""
+        import httpx
+
         deadline = time.monotonic() + timeout_secs
+        answer: Dict[str, Any] = {}
         while True:
-            answer = self.grant_status(request)
+            left = deadline - time.monotonic()
+            if left <= 0:
+                raise GrantNotIssuedError("pending", answer)
+            bound = min(left, self._timeout)
+            try:
+                answer = self.grant_status(request, timeout_secs=bound)
+            except httpx.TimeoutException:
+                if bound < self._timeout:  # cut short by the deadline, not the client's own timeout
+                    raise GrantNotIssuedError("pending", answer) from None
+                raise
             state = answer.get("state", "")
             if state == "issued":
                 return answer
-            if state != "pending" or time.monotonic() >= deadline:
+            if state != "pending":
                 raise GrantNotIssuedError(state, answer)
-            time.sleep(poll_secs)
+            time.sleep(max(0.0, min(poll_secs, deadline - time.monotonic())))
 
     def close(self) -> None:
         """Close the underlying HTTP client."""

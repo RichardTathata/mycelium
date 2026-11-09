@@ -525,8 +525,21 @@ await mcp.callTool("weather.forecast", { city: "Lyon" }, { grant: answer.grant }
 
 `waitForGrant` throws `GrantNotIssuedError` naming the state a request ended in. `signer.provePossession(grant,
 operation, resource, args)` makes a `{grant, possession}` for any door (`A2aClient.send(…, { mandate })`), pinned by
-`tests/fixtures/possession/vector.json`. A float in exponent form in a grant's arguments is refused at the gateway
-(identity-and-lifecycle §9 O1): send it as a string.
+`tests/fixtures/possession/vector.json`. The proof binds the gateway's mandate digest, `mandateArgumentsDigest` —
+members by UTF-8 bytes — not the signature's JCS `argumentsDigest`; the two differ for a key outside the Basic
+Multilingual Plane beside one in U+E000–U+FFFF. A float in exponent form in a grant's arguments is refused at the
+gateway (identity-and-lifecycle §9 O1): send it as a string. `waitForGrant` ends within its timeout.
+
+**Refusals, and which to retry.** A refused `tools/call` throws `ActionRefusedError` for the evaluator's three answers
+(`.reason`: `action_denied` is final; `authority_not_established` means nobody decided — a grant not yet established,
+a revoked or used one, or a possession proof that did not verify; `evidence_not_recorded` is worth a retry) and
+`McpError` otherwise, with the provider's reason in `.data.reason`: `client_key_unknown` (the gateway has not read
+the certificate yet — retry), `client_key_superseded`, `client_signature_invalid`, `client_signature_unsafe_integer`
+(final). A replayed `cn` is dropped unanswered, so it surfaces as a timeout. The grant door refuses with an HTTP
+status, thrown as an `Error` whose message names the status and `error`: `not_a_client_holder` (publish the
+certificate first), `too_many_pending` (retry after an answer or an expiry), `not_durable` (retry), `no_provider`.
+A possession proof the gateway cannot verify is reported as `WrongHolder` inside `authority_not_established` — a
+wrong key and a digest that differs (the O1 float case) look the same to the gateway, which sees only the proof.
 
 ### The causal fields (0.2.7)
 

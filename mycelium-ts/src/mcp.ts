@@ -115,12 +115,12 @@ export class McpClient {
     return body.result;
   }
 
-  private async gateway<T>(method: "GET" | "POST", path: string, body?: unknown): Promise<T> {
+  private async gateway<T>(method: "GET" | "POST", path: string, body?: unknown, timeoutMs = this.timeoutMs): Promise<T> {
     const resp = await fetch(`${this.baseUrl}${path}`, {
       method,
       headers: body === undefined ? this.auth : { "Content-Type": "application/json", ...this.auth },
       body: body === undefined ? undefined : JSON.stringify(body),
-      signal: AbortSignal.timeout(this.timeoutMs),
+      signal: AbortSignal.timeout(timeoutMs),
     });
     const data = (await resp.json().catch(() => ({}))) as T & { error?: string; detail?: string };
     if (!resp.ok) throw new Error(`${path} responded ${resp.status}: ${data.error ?? ""} ${data.detail ?? ""}`.trim());
@@ -175,21 +175,33 @@ export class McpClient {
    * `GET /gateway/grants/request/{request}` (`mcp:invoke`): the caller's own request and its answer. Another
    * principal's request is `404 unknown_request`.
    */
-  async grantStatus(request: string): Promise<GrantStatus> {
-    return this.gateway<GrantStatus>("GET", `/gateway/grants/request/${pathSegment(request)}`);
+  async grantStatus(request: string, { timeoutMs }: { timeoutMs?: number } = {}): Promise<GrantStatus> {
+    return this.gateway<GrantStatus>("GET", `/gateway/grants/request/${pathSegment(request)}`, undefined, timeoutMs ?? this.timeoutMs);
   }
 
   /**
    * Poll {@link grantStatus} until the request is answered; resolve with the `issued` answer, or throw
-   * {@link GrantNotIssuedError} naming the state it ended in (`pending` when `timeoutMs` passed first).
+   * {@link GrantNotIssuedError} naming the state it ended in (`pending` when `timeoutMs` passed first). Each read and
+   * each pause is bounded by the time left, so the wait ends within `timeoutMs`; a read the deadline cuts short is
+   * `pending` with the last answer seen.
    */
   async waitForGrant(request: string, { timeoutMs = 60_000, pollMs = 500 }: { timeoutMs?: number; pollMs?: number } = {}): Promise<GrantStatus> {
     const deadline = Date.now() + timeoutMs;
+    let answer = { ok: false, state: "pending" } as GrantStatus;
     for (;;) {
-      const answer = await this.grantStatus(request);
+      const left = deadline - Date.now();
+      if (left <= 0) throw new GrantNotIssuedError("pending", answer);
+      const bound = Math.min(left, this.timeoutMs);
+      try {
+        answer = await this.grantStatus(request, { timeoutMs: bound });
+      } catch (e) {
+        // Cut short by the deadline, not the client's own timeout.
+        if (bound < this.timeoutMs && (e as Error).name === "TimeoutError") throw new GrantNotIssuedError("pending", answer);
+        throw e;
+      }
       if (answer.state === "issued") return answer;
-      if (answer.state !== "pending" || Date.now() >= deadline) throw new GrantNotIssuedError(answer.state, answer);
-      await new Promise((r) => setTimeout(r, pollMs));
+      if (answer.state !== "pending") throw new GrantNotIssuedError(answer.state, answer);
+      await new Promise((r) => setTimeout(r, Math.max(0, Math.min(pollMs, deadline - Date.now()))));
     }
   }
 }

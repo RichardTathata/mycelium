@@ -38,6 +38,38 @@ def test_the_possession_vector_is_rebuilt_from_its_inputs():
     _verify(VECTOR["issuer_key_b64"], mandate_canonical_bytes(mandate), base64.b64encode(bytes(VECTOR["grant"]["signature"])).decode())
 
 
+def test_the_mandate_digest_is_the_gateways_for_every_case():
+    # #744's review, item 1: members by UTF-8 bytes (a key outside the BMP beside one in U+E000-U+FFFF), non-ASCII,
+    # control characters and nesting, as serde_json writes them. Checked by the gateway's own digest in Rust.
+    import hashlib
+    for case in VECTOR["mandate_digest_cases"]:
+        assert arguments_digest(case["arguments"]).hex() == case["digest_hex"], case["serialized"]
+        assert hashlib.sha256(case["serialized"].encode()).hexdigest() == case["digest_hex"]
+    # The proof binds the gateway's digest of a case.
+    first = VECTOR["mandate_digest_cases"][0]
+    proof = ClientSigner(HOLDER, VECTOR["principal"]).prove_possession(VECTOR["grant"], "tools/call", VECTOR["resource"], first["arguments"])
+    request = mandate_request_bytes("tools/call", VECTOR["resource"], bytes.fromhex(first["digest_hex"]))
+    _verify(VECTOR["holder_key_b64"], possession_message(VECTOR["grant"]["mandate"], request), proof["possession"])
+
+
+def test_two_threads_never_sign_with_one_counter():
+    # #744's review, item 2: the counter is taken under a lock.
+    signer = ClientSigner(HOLDER, VECTOR["principal"])
+    seen: list = []
+    barrier = threading.Barrier(8)
+
+    def sign() -> None:
+        barrier.wait()
+        seen.extend(signer.sign("tools/call", "tool:x", bytes(32))["cn"]["c"] for _ in range(200))
+
+    threads = [threading.Thread(target=sign) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert sorted(seen) == list(range(1600))
+
+
 def test_the_signer_proves_possession_as_the_vector_does_and_only_for_its_own_grant():
     signer = ClientSigner(HOLDER, VECTOR["principal"])
     presented = signer.prove_possession(VECTOR["grant"], VECTOR["operation"], VECTOR["resource"], VECTOR["arguments"])
@@ -50,6 +82,7 @@ class _Stub(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     seen: list = []
     answer: dict = {}
+    delay: float = 0.0
 
     def _json(self, body: dict) -> None:
         data = json.dumps(body).encode()
@@ -61,6 +94,9 @@ class _Stub(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         _Stub.seen.append(("GET", self.path, None))
+        if _Stub.delay:
+            import time
+            time.sleep(_Stub.delay)
         self._json(_Stub.answer)
 
     def do_POST(self) -> None:  # noqa: N802
@@ -81,6 +117,7 @@ class _Stub(BaseHTTPRequestHandler):
 def stub(monkeypatch):
     monkeypatch.delenv("MYCELIUM_GATEWAY_TOKEN", raising=False)
     _Stub.seen = []
+    _Stub.delay = 0.0
     server = ThreadingHTTPServer(("127.0.0.1", 0), _Stub)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     yield f"http://127.0.0.1:{server.server_address[1]}"
@@ -144,3 +181,15 @@ def test_an_a2a_send_and_stream_are_signed_over_the_skill_and_the_text(stub):
     assert streamed["cn"]["c"] == meta["cn"]["c"] + 1, "each send takes the next counter"
     _verify(streamed["cs"]["k"], _cs_message(signer, streamed, *a2a_binding("depot/dispatch", "go")), streamed["cs"]["sig"])
     assert "_meta" not in _task_params("t", "depot/dispatch", "go", None)
+
+
+def test_a_wait_ends_within_its_timeout_even_when_a_read_is_slow(stub):
+    # #744's review, item 5: each read is bounded by the time left, so a slow read does not overshoot the wait.
+    import time
+    _Stub.answer = {"ok": True, "state": "pending"}
+    _Stub.delay = 1.5
+    started = time.monotonic()
+    with pytest.raises(GrantNotIssuedError) as e:
+        McpClient(stub, timeout_secs=10).wait_for_grant("r-1", timeout_secs=0.4, poll_secs=0.1)
+    assert e.value.state == "pending"
+    assert time.monotonic() - started < 1.0, "OVERSHOOT: the wait outlived its timeout by a whole read"

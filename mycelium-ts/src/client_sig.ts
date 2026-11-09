@@ -14,7 +14,7 @@
  * Rust tests and the Python SDK check too.
  */
 import { createHash, createPrivateKey, createPublicKey, randomBytes, sign, type KeyObject } from "node:crypto";
-import { argumentsDigest, mandateRequestBytes, type PresentedMandate } from "./a2a";
+import { argumentsDigest, mandateArgumentsDigest, mandateRequestBytes, type PresentedMandate } from "./a2a";
 
 const TAG = "mycelium.gateway/client-signature/1";
 
@@ -181,7 +181,8 @@ export class ClientSigner {
   /**
    * Present `grant` — held by this signer's principal — for one call: `{grant, possession}`, to send as
    * `params._meta.mandate`. The proof binds the grant, the operation, the resource before `@` and the call's arguments
-   * by the mandate digest ({@link argumentsDigest}), so it is good for this call alone. Throws for a grant another
+   * by the gateway's mandate digest ({@link mandateArgumentsDigest} — not the signature's JCS digest), so it is good
+   * for this call alone. Throws for a grant another
    * principal holds. The gateway's mandate digest is not RFC 8785: for a float in exponent form it differs, and the
    * call is refused (identity-and-lifecycle §9 O1) — send such a number as a string.
    */
@@ -189,7 +190,7 @@ export class ClientSigner {
     if (grant.mandate.holder !== this.principal) {
       throw new Error(`the grant is held by ${JSON.stringify(grant.mandate.holder)}, not ${JSON.stringify(this.principal)}`);
     }
-    const request = mandateRequestBytes(operation, resource, argumentsDigest(args));
+    const request = mandateRequestBytes(operation, resource, mandateArgumentsDigest(args));
     const proof = sign(null, possessionMessage(grant.mandate, request), this.key);
     return { grant, possession: proof.toString("base64") };
   }

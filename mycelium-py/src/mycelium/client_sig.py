@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import os
 import struct
+import threading
 import time
 from typing import Any, Dict, Optional, Tuple
 
@@ -212,6 +213,9 @@ class ClientSigner:
         self.principal = principal
         self.instance = instance if instance is not None else int.from_bytes(os.urandom(8), "big")
         self._counter = 0
+        # Taken under a lock, so two threads never sign with one counter — a free-threaded build has no GIL to lean on,
+        # and a repeated counter is refused at the provider as a replay.
+        self._counter_lock = threading.Lock()
 
     def sign_tools_call(self, name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
         """Sign a ``tools/call`` of ``name`` (:func:`mcp_binding`, which refuses an unsafe integer)."""
@@ -246,7 +250,8 @@ class ClientSigner:
 
         t = issued_at_ms if issued_at_ms is not None else int(time.time() * 1000)
         if counter is None:
-            counter, self._counter = self._counter, self._counter + 1
+            with self._counter_lock:
+                counter, self._counter = self._counter, self._counter + 1
         msg = client_signature_message(self.principal, operation, resource, digest, t, self.instance, counter)
         sig = self._key.sign(msg)
         return {

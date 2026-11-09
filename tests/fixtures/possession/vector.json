@@ -100,5 +100,66 @@
   "mandate_digest_hex": "b93d63bfc007fbb4e2552650dba87059a465972b988690fc022a4cf5c3bcb81c",
   "request_hex": "6d7963656c69756d2e676174657761792f6d616e646174652d726571756573742f310a000000746f6f6c732f63616c6c15000000746f6f6c3a776561746865722e666f726563617374c74a2b58148ec8b68e232ab0eeaeae86ea4520429e4b75b990ec1418abd489db",
   "possession_message_hex": "6d7963656c69756d2e6d616e646174652f706f7373657373696f6e2f31b93d63bfc007fbb4e2552650dba87059a465972b988690fc022a4cf5c3bcb81c690000006d7963656c69756d2e676174657761792f6d616e646174652d726571756573742f310a000000746f6f6c732f63616c6c15000000746f6f6c3a776561746865722e666f726563617374c74a2b58148ec8b68e232ab0eeaeae86ea4520429e4b75b990ec1418abd489db",
-  "possession_b64": "f7FPWqP1jxW6Sf6asxtqNH4cWLt7VPwUHo/ZsstMW8J8itO78IB9WzkfmApUBr5NTFlDT0HAG8dGW1L8PggfBQ=="
+  "possession_b64": "f7FPWqP1jxW6Sf6asxtqNH4cWLt7VPwUHo/ZsstMW8J8itO78IB9WzkfmApUBr5NTFlDT0HAG8dGW1L8PggfBQ==",
+  "_doc_mandate_digest": "mandate_digest_cases: the gateway's mandate arguments digest (serde_json, members sorted by UTF-8 bytes) of each case — serialized is serde_json::to_string of the arguments, digest_hex its SHA-256 — checked in Rust (the gateway's arguments_digest), jest (mandateArgumentsDigest) and pytest (arguments_digest). The cases put keys outside the BMP beside keys in U+E000–U+FFFF, where UTF-8 and UTF-16 order differ.",
+  "mandate_digest_cases": [
+    {
+      "arguments": {
+        "！": 1,
+        "😀": 2,
+        "a": 3,
+        "": 0
+      },
+      "serialized": "{\"\":0,\"a\":3,\"！\":1,\"😀\":2}",
+      "digest_hex": "84b0cdad0a1b1e68d0112c74f8250abcb8e2b49e78b050a6eef449522b8c6c30"
+    },
+    {
+      "arguments": {
+        "": "x",
+        "😀": "y",
+        "￿": "z"
+      },
+      "serialized": "{\"\":\"x\",\"￿\":\"z\",\"😀\":\"y\"}",
+      "digest_hex": "8f403b417859abced19eb0e2626ec08aeb7335efc21432d947c600ce6bd3bc3b"
+    },
+    {
+      "arguments": {
+        "é": "ü",
+        "z": "日本語",
+        "Ω": " "
+      },
+      "serialized": "{\"z\":\"日本語\",\"é\":\"ü\",\"Ω\":\" \"}",
+      "digest_hex": "11b0268169833991995687eb55fbb0b8ec691ba9e26674caa2b7a0c893678310"
+    },
+    {
+      "arguments": {
+        "c": "\u0000\u0001\b\t\n\u000b\f\r\u001f\"\\/ "
+      },
+      "serialized": "{\"c\":\"\\u0000\\u0001\\b\\t\\n\\u000b\\f\\r\\u001f\\\"\\\\/ \"}",
+      "digest_hex": "cb471a56b210f94a63f02a756fca69f943376d2cf9671dbf6d0f45528058c34b"
+    },
+    {
+      "arguments": {
+        "b": [
+          {
+            "y": 1,
+            "x": [
+              true,
+              null,
+              false
+            ]
+          }
+        ],
+        "a": {
+          "": 1,
+          "😀": {
+            "n": -12,
+            "max": 9007199254740991
+          }
+        }
+      },
+      "serialized": "{\"a\":{\"\":1,\"😀\":{\"max\":9007199254740991,\"n\":-12}},\"b\":[{\"x\":[true,null,false],\"y\":1}]}",
+      "digest_hex": "f9271fe2999066919bb9f0239dfc9235175c58a9d0f3080ac2f4d148d33c8b89"
+    }
+  ]
 }

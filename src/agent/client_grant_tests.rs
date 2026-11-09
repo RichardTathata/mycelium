@@ -461,4 +461,48 @@ fn the_possession_vector_is_the_gateways() {
     let members = std::collections::HashMap::from([(issuer_node, crate::knowledge::issuer::MemberKeys { retained: vec![issuer.verifying_key().to_bytes()], ..Default::default() })]);
     let verdict = GrantVerifier::new(table).check(&grant, &request, Some(&proof), m.valid_from_ms + 1, &members, &external);
     assert_eq!(verdict, GrantVerdict::Valid, "the gateway's verifier accepts the SDKs' proof");
+    // The digest cases (#744's review, item 1): the gateway writes each case as `serialized` — members by UTF-8 bytes —
+    // and digests that.
+    for case in v["mandate_digest_cases"].as_array().unwrap() {
+        assert_eq!(serde_json::to_string(&case["arguments"]).unwrap(), case["serialized"].as_str().unwrap(), "the gateway's form");
+        assert_eq!(hex(&crate::arguments_digest(&case["arguments"])), case["digest_hex"], "the gateway's digest of {}", case["serialized"]);
+    }
+}
+
+/// **The SDKs' shape: a client's own signature and its own grant on one `tools/call`** (#744's review, item 6). The
+/// forecaster signs the call with its client key (`cs`/`cn`, as `ClientSigner::sign_tools_call` and both SDKs write
+/// them) and presents its grant with a possession proof by the same key, in one `_meta`: the call runs once. A second
+/// grant presented the same way with the signature made over other arguments is refused by name, and the tool does not
+/// run. **Stated, not changed here:** the gateway claims a grant's use at its preflight, before the provider checks
+/// `cs`, so a call refused for its signature has spent the grant's use at the gateway.
+#[tokio::test]
+async fn a_signed_call_presenting_a_client_grant_runs_at_mcp() {
+    let dir = scratch("signed");
+    let http_port = alloc_port();
+    let (a, ran) = started(&dir, http_port).await;
+    let key = forecaster_key(&a, &dir);
+    let args = serde_json::json!({"city": "Lyon", "days": 3});
+    let (asked, grant) = ask_and_issue(http_port, &args).await;
+    let signer = crate::ClientSigner::new(key.clone(), FORECASTER);
+    let sign_into = |meta: &mut serde_json::Value, over: &serde_json::Value| {
+        let s = crate::ClientSigner::meta(&signer.sign_tools_call(TOOL, over).unwrap());
+        meta["cs"] = s["cs"].clone();
+        meta["cn"] = s["cn"].clone();
+    };
+    let mut meta = presented(&grant, asked["resource"].as_str().unwrap(), &args, &key);
+    sign_into(&mut meta, &args);
+    let called = mcp_call(http_port, &args, Some(meta)).await;
+    let ran_once = ran.load(Ordering::SeqCst);
+    let args2 = serde_json::json!({"city": "Brest"});
+    let (asked2, grant2) = ask_and_issue(http_port, &args2).await;
+    let mut meta2 = presented(&grant2, asked2["resource"].as_str().unwrap(), &args2, &key);
+    sign_into(&mut meta2, &serde_json::json!({"city": "Nice"}));
+    let tampered = mcp_call(http_port, &args2, Some(meta2)).await;
+    let ran_after = ran.load(Ordering::SeqCst);
+    a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(called.get("result").is_some(), "the signed call under the client's grant ran: {called}");
+    assert_eq!(ran_once, 1);
+    assert!(tampered.to_string().contains("client_signature_invalid"), "a signature over other arguments is refused by name: {tampered}");
+    assert_eq!(ran_after, 1, "the tampered call did not run");
 }

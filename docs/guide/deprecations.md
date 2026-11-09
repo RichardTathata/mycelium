@@ -2740,6 +2740,13 @@ Everything here is additive: no existing call changes what it sends unless it is
 - **The possession proof:** `ClientSigner.prove_possession` / `provePossession` and the functions under it
   (`mandate_canonical_bytes`, `mandate_digest`, `possession_message`; `mandateCanonicalBytes`, `mandateDigest`,
   `possessionMessage`). The SDK READMEs and `mandate_request_bytes`' docs no longer say the SDK does not sign.
+- **TypeScript's two digests.** `argumentsDigest` is the RFC 8785 (JCS) digest a client signature binds; a possession
+  proof binds the gateway's mandate digest, the new `mandateArgumentsDigest` (members by UTF-8 bytes, `undefined`
+  members dropped as `JSON.stringify` drops them). Code that built a possession proof with `argumentsDigest` and
+  `mandateRequestBytes` is refused for arguments with a key outside the Basic Multilingual Plane beside one in
+  U+E000–U+FFFF; use `mandateArgumentsDigest` or `provePossession`. Python's `arguments_digest` was already the
+  gateway's form.
+- **`wait_for_grant` / `waitForGrant`** bound each read by the time left, and end within their timeout.
 - **Internal:** Python's `_task_params` and TypeScript's `@internal taskParams` take an optional signer last.
 - **The digest a grant binds** is the gateway's mandate `arguments_digest`, which differs across languages for floats
   in exponent form (§88, `identity-and-lifecycle.md` §9 O1): send such a number as a string.

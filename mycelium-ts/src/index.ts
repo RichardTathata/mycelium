@@ -39,6 +39,7 @@ export {
   A2aError,
   ActionRefusedError,
   argumentsDigest,
+  mandateArgumentsDigest,
   mandateRequestBytes,
   PresentedMandate,
   SendOptions,
