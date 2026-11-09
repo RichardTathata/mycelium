@@ -14,8 +14,9 @@ throwaway code is on branch `spike-s-presence` under `spikes/s-presence/`, and n
 a clean tree (the log's first line says so), and it is committed beside them at `0aaa51f6`, with `keys.txt` from
 `64fb5096` (its header; the scanned sources there are identical to `main` at `6a64e8bc`).
 
-**This spike's *done when* is not met.** The row asks for "a signature produced only after the prompt and verified".
-No prompt was raised, so no such signature exists. See *What it could not do*.
+**This spike's *done when* is met, by the maintainer's run of 2026-11-09** (*The maintainer's run* below). The row asks
+for "a signature produced only after the prompt and verified". The recorded run of 2026-11-07 raised no prompt; the
+maintainer's run raised one, the maintainer approved it with Touch ID, and the signature verified.
 
 ## The machine, as recorded
 
@@ -89,17 +90,76 @@ I7's row has to grade the record by what a verifier can actually check. That mak
 not a verified property, unless the row adds something that binds the key's ACL to the record. This spike found no such
 mechanism.
 
+## The maintainer's run (2026-11-09)
+
+Run by the maintainer on the machine recorded above (Apple M2 Max, Touch ID enrolled), from a worktree of tag
+`spike/s-presence-2026-11-07` (`0aaa51f6`), in `spikes/s-presence/`:
+
+```
+swiftc -O blob.swift -o blob
+./blob create k.blob
+./blob sign-interactive k.blob > out.txt
+cargo run --offline --manifest-path verify/Cargo.toml -- out.txt
+```
+
+- **The prompt:** `sign-interactive` raised the Touch ID prompt ("approve spike S-presence test record"). The
+  maintainer touched the sensor, and only then was `out.txt` written. This is the maintainer's report: the binary has
+  no way to record that a prompt was shown, which is the self-assertion the section above describes.
+- **`create`:**
+  ```
+  se.isAvailable    true
+  create    ok blob_len=569
+  pub_x963_hex    04b88e3f3fecc1832ca459bff9abb6efdce063ef960e8afb036986d4b005c74a430c1a7320802045a985481052e6cc5c7c34da5b2d3efaeedf3b78fddfb3393a4b
+  ```
+- **`out.txt`:**
+  ```
+  sign_interactive	ok
+  pub_x963_hex	04b88e3f3fecc1832ca459bff9abb6efdce063ef960e8afb036986d4b005c74a430c1a7320802045a985481052e6cc5c7c34da5b2d3efaeedf3b78fddfb3393a4b
+  sig_der_hex	30440220136eda1b03b03f747536be26d731a4b9ad6a6c52c251d2c0d6ee245b290e508002203cbc02747ee60ce2abefec65368587c02dffbfd07b7c3bd0290461b53aff3736
+  msg_hex	6d7963656c69756d207370696b6520732d70726573656e6365
+  ```
+- **`verify`:**
+  ```
+  ring.verify    Ok("ok")
+  ring.verify_tampered_msg    Err(Unspecified)
+  rcgen.issue_over_se_key    ok der_len=357
+  webpki.chain_ed25519_ca_to_p256_leaf    Ok("ok")
+  webpki.verify_se_signature    Ok("ok")
+  webpki.verify_se_signature_as_ed25519    Err(UnsupportedSignatureAlgorithmForPublicKeyContext(…))
+  ```
+
+What it shows:
+- the Enclave key signs after a Touch ID approval, and `ring` verifies the signature, while a tampered message fails;
+- the fleet CA (Ed25519) can certify the P-256 Enclave key, and `webpki` accepts the chain and verifies the signature
+  through it;
+- the key cannot be read as an Ed25519 identity, as row 7 says.
+
+Two more `sign-interactive` runs followed, over the same `k.blob`:
+- **15:15:07, signed again.** A second Touch ID approval produced a second signature (`304402205e2d2726…`; ECDSA
+  signatures differ on every signing). The PR's reviewer verified it before it was overwritten, and all six `verify`
+  lines read as above. This is a second approval in a **second process**, not two in one.
+- **15:22:41, cancelled.** The maintainer dismissed the prompt, and `out.txt` holds no signature:
+  ```
+  sign_interactive	error: Error Domain=com.apple.LocalAuthentication Code=-2 "Canceled by user." UserInfo={NSDebugDescription=Canceled by user., NSLocalizedDescription=Authentication cancelled., BiometryType=1}
+  ```
+  The cancel leg holds: a dismissed prompt yields no signature. (`verify` then panics with `no entry found for key`,
+  because the spike's verifier does not handle an error line. That is a spike shortcut, not a result.)
+- **No password fallback.** The maintainer reports that the prompt offered no "Use Password…" option, which is
+  consistent with `[.privateKeyUsage, .biometryCurrentSet]` and no `.devicePasscode`. So the password leg cannot be
+  attempted from this prompt. Whether a passcode satisfies the key by another route was not tested.
+
+The blob was again written at mode 0644 (`-rw-r--r--`). Not run: two approvals in one process, and the
+added-fingerprint leg.
+
 ## What it could not do
 
+**Met by the maintainer's run (above):** the positive path, a signature produced only after the prompt.
+
 **Not met, and needing a person:**
-- **The positive path:** a signature produced only after the prompt. `blob.swift`'s `sign-interactive` mode is for the
-  maintainer. It makes a fresh `LAContext` per approval. From `spikes/s-presence/`:
-  `swiftc -O blob.swift -o blob && ./blob create k.blob && ./blob sign-interactive k.blob > out.txt`, then
-  `cargo run --offline --manifest-path verify/Cargo.toml -- out.txt`. `create` and `sign-interactive` are unchanged by
-  #729's M2 fix.
-- **A fresh `LAContext` per approval:** written into `sign-interactive`, never exercised.
-- **`biometryCurrentSet` invalidating the key when a finger is added**, and its passcode leg. The access control has no
-  `.devicePasscode` flag, so a typed password should not satisfy it. That is untested.
+- **A fresh `LAContext` per approval:** written into `sign-interactive` and exercised for **one** approval. Two
+  approvals in one process, each needing its own prompt, were not run.
+- **`biometryCurrentSet` invalidating the key when a finger is added.** Its passcode leg is partly answered by the
+  maintainer's run: the prompt offers no password fallback. A passcode reaching the key by another route is untested.
 
 **Not built:**
 - **The Rust↔CryptoKit bridge.** `dataRepresentation` exists only in CryptoKit, which is Swift-only. The public C Security API
