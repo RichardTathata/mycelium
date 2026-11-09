@@ -2757,3 +2757,22 @@ Everything here is additive: no existing call changes what it sends unless it is
 
 Wire **v12** unchanged; no Rust API change.
 
+
+## 90. `mycelium-effects` depends on `rusqlite` 0.41 (unreleased, RUSTSEC-2026-0459)
+
+`rusqlite` 0.32.1 → **0.41.0**, which brings `libsqlite3-sys` 0.30.1 → **0.39.1** and the bundled SQLite 3.46.0 →
+**3.54.1**, for RUSTSEC-2026-0459 (CVE-2026-119375). `rusqlite` is part of `mycelium-effects`' public API — a
+`Handler` takes a `&rusqlite::Transaction<'_>` and `SqliteDestination::open` and `committed_count` return a
+`rusqlite::Result` — so:
+
+- **A crate that writes a `Handler`, or names a `rusqlite` type it gets from this crate, needs `rusqlite = "0.41"`
+  itself.** A handler written against 0.32's `Transaction` does not type-check against 0.41's. The calls a handler
+  makes (`execute`, `execute_batch`, `query_row`, `params!`) are unchanged across the two in this crate's own use.
+- **Only one `libsqlite3-sys` may be in a build** (it declares `links = "sqlite3"`). A tree that also pulls an older
+  `libsqlite3-sys` — through another `rusqlite`, `sqlx`'s SQLite driver or `diesel` — fails to resolve until that
+  dependency moves to `libsqlite3-sys` 0.39 too.
+- **`rusqlite` 0.41 declares Rust 1.89**, the workspace's `rust-version` already.
+- **A database file is unchanged**: SQLite's file format is stable, and a destination written by 3.46.0 opens under
+  3.54.1.
+
+Wire **v12** unchanged; no other API change.
