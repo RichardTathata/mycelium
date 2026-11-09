@@ -134,17 +134,32 @@ What it shows:
   through it;
 - the key cannot be read as an Ed25519 identity, as row 7 says.
 
-The blob was again written at mode 0644 (`-rw-r--r--`). The password, cancel and added-fingerprint legs were not run.
+Two more `sign-interactive` runs followed, over the same `k.blob`:
+- **15:15:07, signed again.** A second Touch ID approval produced a second signature (`304402205e2d2726…`; ECDSA
+  signatures differ on every signing). The PR's reviewer verified it before it was overwritten, and all six `verify`
+  lines read as above. This is a second approval in a **second process**, not two in one.
+- **15:22:41, cancelled.** The maintainer dismissed the prompt, and `out.txt` holds no signature:
+  ```
+  sign_interactive	error: Error Domain=com.apple.LocalAuthentication Code=-2 "Canceled by user." UserInfo={NSDebugDescription=Canceled by user., NSLocalizedDescription=Authentication cancelled., BiometryType=1}
+  ```
+  The cancel leg holds: a dismissed prompt yields no signature. (`verify` then panics with `no entry found for key`,
+  because the spike's verifier does not handle an error line. That is a spike shortcut, not a result.)
+- **No password fallback.** The maintainer reports that the prompt offered no "Use Password…" option, which is
+  consistent with `[.privateKeyUsage, .biometryCurrentSet]` and no `.devicePasscode`. So the password leg cannot be
+  attempted from this prompt. Whether a passcode satisfies the key by another route was not tested.
+
+The blob was again written at mode 0644 (`-rw-r--r--`). Not run: two approvals in one process, and the
+added-fingerprint leg.
 
 ## What it could not do
 
-**Met by the maintainer's run (below):** the positive path, a signature produced only after the prompt.
+**Met by the maintainer's run (above):** the positive path, a signature produced only after the prompt.
 
 **Not met, and needing a person:**
 - **A fresh `LAContext` per approval:** written into `sign-interactive` and exercised for **one** approval. Two
   approvals in one process, each needing its own prompt, were not run.
-- **`biometryCurrentSet` invalidating the key when a finger is added**, and its passcode leg. The access control has no
-  `.devicePasscode` flag, so a typed password should not satisfy it. That is untested.
+- **`biometryCurrentSet` invalidating the key when a finger is added.** Its passcode leg is partly answered by the
+  maintainer's run: the prompt offers no password fallback. A passcode reaching the key by another route is untested.
 
 **Not built:**
 - **The Rust↔CryptoKit bridge.** `dataRepresentation` exists only in CryptoKit, which is Swift-only. The public C Security API
