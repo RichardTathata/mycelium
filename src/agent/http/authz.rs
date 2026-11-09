@@ -640,18 +640,17 @@ pub(crate) struct GrantClaim {
 
 /// The provider's refusals that are answered **before anything runs**: the receive boundary's check of the caller
 /// context refused the call, so no handler, no provider preflight and no effect ran (identity-and-lifecycle I1, #745's
-/// review). The reply is the provider's caller-context refusal: a tool's serve loop answers it as JSON-RPC (`-32022`,
-/// the reason in `data.reason`), `rpc_rx` as a body (`{"error": "caller context refused: …", "reason": …}`).
+/// review). The reply is a tool serve loop's caller-context refusal: JSON-RPC `-32022`, its message beginning `caller
+/// context refused`, the reason in `data.reason`. **Only the node authors it**: a tool's own answer is wrapped in
+/// `result` or answered `-32603`, and a bridged server's reply in this shape is rewritten into a tool error
+/// (`mcp::as_tool_answer`), so no tool-authored bytes reach here as one (#745's confirm round).
 #[cfg(all(feature = "gateway", feature = "tls"))]
 fn pre_execution_refusal(bytes: &[u8]) -> Option<String> {
     let v: serde_json::Value = serde_json::from_slice(bytes).ok()?;
-    let reason = if v["error"]["code"] == -32022 {
-        v["error"]["data"]["reason"].as_str()?
-    } else if v["error"].as_str().is_some_and(|e| e.starts_with("caller context refused")) {
-        v["reason"].as_str()?
-    } else {
+    if v["error"]["code"] != -32022 || !v["error"]["message"].as_str().is_some_and(|m| m.starts_with("caller context refused")) {
         return None;
-    };
+    }
+    let reason = v["error"]["data"]["reason"].as_str()?;
     (reason.starts_with("client_signature_") || reason.starts_with("client_key_") || reason == "stale").then(|| reason.to_string())
 }
 
@@ -659,7 +658,8 @@ fn pre_execution_refusal(bytes: &[u8]) -> Option<String> {
 /// a grant's use before it dispatches — the marker on disk before the work can run (R2) — and a provider whose fold of
 /// client certificates lags the gateway's answers `client_key_unknown`; a retry was then refused `GrantUsed` although
 /// nothing ran. When the reply is one of [`pre_execution_refusal`]'s, the marker is tombstoned and then the in-memory
-/// claim released, so the grant admits the retry once. Sound against R2: the marker guards *work that may have run*,
+/// claim released, so the grant admits the retry once. **At `/mcp` only**: the A2A doors' skills and an embedder's
+/// kinds answer with raw bytes the node did not author, so a refusal there spends the grant. Sound against R2: the marker guards *work that may have run*,
 /// and none did; a crash before the tombstone is durable leaves the grant spent — the safe side. **Trusts the
 /// provider's answer**: a provider that ran the call and answered a refusal could have it run twice, which a provider
 /// able to run calls at will could do anyway. A timeout, a tool error or any other reply leaves the grant spent.
@@ -828,8 +828,6 @@ impl crate::GossipAgent {
         #[cfg(feature = "tls")]
         {
             use super::action_evaluator::Execution;
-            // As at `/mcp`: a provider's refusal before anything ran gives the grant's use back.
-            let _ = release_grant_claim_after(&self.task_ctx, &preflight.inner, dispatched).await;
             let mut observed = observed_execution(dispatched);
             if observed == Execution::Completed && dispatched.as_ref().is_ok_and(|b| reply_reports_failure(b)) {
                 observed = Execution::Failed;

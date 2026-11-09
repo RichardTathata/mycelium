@@ -119,13 +119,22 @@ way. `a_newer_certificate_supersedes_the_older_key_and_an_overwrite_cannot_lower
   (`a_signed_call_presenting_a_client_grant_runs_at_mcp`, `both_a2a_doors_carry_a_client_signature_and_the_skill_sees_it`,
   `the_door_refuses_a_stale_an_unsafe_and_an_unverifiable_signature_by_name`). It does not check `cn`: the replay
   window is the provider's, which checks everything again.
-- **A grant the provider refused before running is given back.** The gateway's fold of client certificates can lead
-  the provider's. When the provider answers `client_key_*`, `client_signature_*` or `stale`, nothing ran: its receive
-  boundary refused the call before any handler. The gateway then tombstones its `…/used/{door}` marker and releases its
-  claim, so `client_key_unknown` is retriable under the same grant (`a_grant_the_provider_refused_before_running_is_given_back`).
-  The release trusts the provider's answer: a provider that ran the call and answered a refusal could have it run
-  twice, which a provider able to run calls at will could do anyway. A tool's own error, a timeout, or any other answer
-  leaves the grant spent.
+- **At `/mcp`, a grant the provider refused before running is given back.** The gateway's fold of client certificates
+  can lead the provider's. When the provider node answers `client_key_*`, `client_signature_*` or `stale`, nothing ran:
+  its tool serve loop refused the call before the handler, answering `-32022` with the reason in `data.reason`. The
+  gateway then tombstones its `…/used/{door}` marker and releases its claim, so `client_key_unknown` is retriable under
+  the same grant (`a_grant_the_provider_refused_before_running_is_given_back`).
+  - **Only the node authors such a refusal.** A native tool's answer is wrapped in `result` or answered `-32603`. A
+    bridged MCP server's reply in the node's refusal shape is rewritten into an ordinary tool error, `-32000`
+    (`a_bridged_tool_answering_like_a_refusal_after_running_leaves_the_grant_spent`). A tool that ran its effect cannot
+    have its grant given back.
+  - **Trust:** the release trusts the provider node itself. A node that ran the call and answered a refusal could have
+    it run twice, as a node able to run calls at will could anyway.
+  - **What stays spent:** a tool's own error, a timeout, and any other answer.
+  - **History limits:** a released grant's call stays counted against its history, as an attempt the permit admitted.
+  - **At `/a2a` a provider's refusal spends the grant.** A skill answers with raw output, which the node does not
+    author, so the A2A doors give nothing back. A grant is only ever for a tool call, so the case does not arise there
+    today.
 - **Refusal reasons reach the caller.** At `/mcp` a provider's caller-context refusal is `-32022` with the reason in
   `data.reason`. At `/a2a` it is a JSON-RPC error naming the reason, or a failed task on a stream. The evidence journal
   records it `failed`, not `completed` (`a_providers_refusal_reaches_an_mcp_client_as_json_rpc_with_its_reason`,
@@ -133,12 +142,15 @@ way. `a_newer_certificate_supersedes_the_older_key_and_an_overwrite_cannot_lower
   skill whose output is exactly `{"error": "…", "reason": "…"}` is read as refused.
 - **A gateway with no identity.** A build with `tls` and no `[tls]` holds no CA anchor, so it judges no client key: a
   signed call is refused `client_signature_unverifiable`.
-- **A name holding `@`.** The provider reads the tool or skill from the claim up to its last `@`, so `weather@v2`
-  binds. The signed message itself names the resource up to its first `@`, in all three languages, so two tools named
-  `a@x` and `a@y` share a signature. Name tools without `@` where that matters.
+- **A name holding `@`.** The signed message binds the bare resource whole, `tool:weather@v2`, in all three languages
+  (the cs vector's `at_case`). The provider reads the tool or skill from the envelope's claim up to its last `@`, so
+  such a name binds and is not confused with another.
 - **After a peer restarts, its first calls can time out.** A gateway restarted gracefully can dispatch calls that time
-  out until the provider writes towards it again (`/stats` reports both peers throughout). A timed-out call has spent
-  the grant it presents. See [identity and lifecycle §9 O2](../plans/identity-and-lifecycle.md#9--open-items-tracked).
+  out until the provider notices the dead connection (`/stats` reports both peers throughout): 1–2 s measured with a
+  1 s health tick, and a probe each way before calling narrows the window without closing it (five of twelve exit runs
+  still timed out once). A default fleet's window is inferred to be longer from the 10 s default tick; it was not measured. A
+  timed-out call has spent the grant it presents. See [identity and lifecycle §9 O2](../plans/identity-and-lifecycle.md#9--open-items-tracked) and
+  [issue #746](https://github.com/RichardTathata/mycelium/issues/746).
 - **A possession proof that does not verify is `WrongHolder`**, whether the key is wrong or the client's digest of the
   arguments differs (the O1 float case): the gateway sees only the proof.
 - **Reserved name:** no client certificate may be named `legacy`, the legacy token's principal.

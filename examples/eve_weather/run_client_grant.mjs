@@ -250,8 +250,14 @@ if (reason(foreignRefused) !== "client_key_unknown") fail(`a foreign key: ${reas
 console.log(`a foreign key's cs: REFUSED — ${reason(foreignRefused)}`);
 
 // ── A grant across a restart of the gateway ──────────────────────────────────
+// Two grants issued before the restart: a first call after it can time out (plan §9 O2, issue #746 — the provider's
+// reply lost until it notices the gateway's previous process is gone), and a timed-out call has spent its grant. The
+// second grant, also issued before the restart, is presented then; each such timeout is counted on the summary.
 const paris = { city: "Paris" };
+const lyon = { city: "Lyon" };
 const g2 = await issued(paris);
+const g2b = await issued(lyon);
+measured.o2_timeouts = 0;
 const restarted = Date.now();
 const gwChild = children.get(1);
 const exited = new Promise((r) => gwChild.on("exit", r));
@@ -263,7 +269,15 @@ await until("node 1 lists get_weather after its restart", async () => (await pla
 await meshed();
 // CLIENT_GRANT_SETTLE_MS: a wait after the probes, to measure O2's window (plan §9).
 await sleep(Number(process.env.CLIENT_GRANT_SETTLE_MS ?? 0));
-const afterRestart = await callRetrying(mcp, "get_weather", paris, { grant: g2.grant });
+let afterRestart;
+try {
+  afterRestart = await callRetrying(mcp, "get_weather", paris, { grant: g2.grant });
+} catch (e) {
+  if (!String(e?.message).includes("timed out")) throw e;
+  measured.o2_timeouts++;
+  console.log("the first call after the restart timed out (O2, #746): presenting the second grant issued before the restart");
+  afterRestart = await callRetrying(mcp, "get_weather", lyon, { grant: g2b.grant });
+}
 measured.steps.restart_to_granted_call_ms = Date.now() - restarted;
 if (!text(afterRestart).includes("Sunny")) fail(`the grant after the restart: ${JSON.stringify(afterRestart)}`);
 console.log(`a grant issued before the gateway's restart, presented after it: PERMITTED — ${text(afterRestart)}`);

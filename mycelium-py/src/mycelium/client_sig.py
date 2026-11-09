@@ -36,13 +36,14 @@ def client_signature_message(
     instance: int,
     counter: int,
 ) -> bytes:
-    """The bytes a client signs: the tag; the principal, the operation and the resource before ``@``, each a ``u32``
-    little-endian length and its UTF-8 bytes; the 32-byte arguments digest; then ``issued_at_ms``, ``instance`` and
-    ``counter`` as ``u64`` little-endian."""
+    """The bytes a client signs: the tag; the principal, the operation and the resource, each a ``u32`` little-endian
+    length and its UTF-8 bytes; the 32-byte arguments digest; then ``issued_at_ms``, ``instance`` and ``counter`` as
+    ``u64`` little-endian. ``resource`` is the bare resource (``tool:{name}``, ``skill:{id}``), whole: a name holding
+    ``@`` is bound in full, and no provider is named (one signature serves every provider of the tool)."""
     if len(digest) != 32:
         raise ValueError("the arguments digest is 32 bytes")
     out = bytearray(TAG)
-    for part in (principal, operation, resource.split("@", 1)[0]):
+    for part in (principal, operation, resource):
         b = part.encode("utf-8")
         out += struct.pack("<I", len(b)) + b
     out += digest

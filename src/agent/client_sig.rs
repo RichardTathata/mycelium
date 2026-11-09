@@ -76,8 +76,9 @@ impl ClientNonce {
     }
 }
 
-/// The bytes a client signs: [`CLIENT_SIGNATURE_TAG`], then the principal, the operation and the resource before `@`,
-/// each as a `u32` little-endian length and its bytes, then the arguments' 32-byte digest, then `issued_at_ms`,
+/// The bytes a client signs: [`CLIENT_SIGNATURE_TAG`], then the principal, the operation and the resource — the bare
+/// resource, `tool:{name}` or `skill:{id}`, **whole**, so a name holding `@` is bound in full and no provider is named
+/// (#745's confirm round) — each as a `u32` little-endian length and its bytes, then the arguments' 32-byte digest, then `issued_at_ms`,
 /// `instance` and `counter` as `u64` little-endian.
 pub fn client_signature_message(
     principal: &str,
@@ -88,7 +89,6 @@ pub fn client_signature_message(
     instance: u64,
     counter: u64,
 ) -> Vec<u8> {
-    let resource = resource.split('@').next().unwrap_or(resource);
     let mut out = CLIENT_SIGNATURE_TAG.to_vec();
     for part in [principal.as_bytes(), operation.as_bytes(), resource.as_bytes()] {
         out.extend_from_slice(&(part.len() as u32).to_le_bytes());

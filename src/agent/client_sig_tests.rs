@@ -111,6 +111,13 @@ fn the_client_signature_vector_is_the_same_in_every_language() {
     assert_eq!(b64.encode(key.sign(&msg).to_bytes()), v["signature_b64"].as_str().unwrap());
     let meta: (ClientSignature, ClientNonce) = (serde_json::from_value(v["meta"]["cs"].clone()).unwrap(), serde_json::from_value(v["meta"]["cn"].clone()).unwrap());
     assert_eq!(meta.1.instance(), Some(instance));
+    // A name holding `@` is bound whole (#745's confirm round): `weather@v2` signs as itself, not as `weather`.
+    let c = &v["at_case"];
+    let (op2, res2, d2) = door_binding_mcp(c["name"].as_str().unwrap(), &c["arguments"]).unwrap();
+    assert_eq!((res2.as_str(), hex(&d2)), (c["resource"].as_str().unwrap(), c["arguments_digest_hex"].as_str().unwrap().to_string()));
+    let msg2 = client_signature_message(v["principal"].as_str().unwrap(), &op2, &res2, &d2, v["issued_at_ms"].as_u64().unwrap(), instance, v["counter"].as_u64().unwrap());
+    assert_eq!(hex(&msg2), c["message_hex"].as_str().unwrap(), "AT: the message cut the name at its `@`");
+    assert_eq!(b64.encode(key.sign(&msg2).to_bytes()), c["signature_b64"].as_str().unwrap());
 }
 
 /// **The arguments' canonical form is the same in every language** (#742's review, finding 1): RFC 8785 — exponent-form

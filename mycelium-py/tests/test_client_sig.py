@@ -58,3 +58,16 @@ def test_an_integer_beyond_2_53_is_refused_by_the_signer():
             mcp_binding("weather.forecast", json.loads(text))
     for text in VECTOR["safe_integer_cases"]:
         mcp_binding("weather.forecast", json.loads(text))
+
+
+def test_a_name_holding_an_at_sign_is_bound_whole():
+    # #745's confirm round: the resource is signed whole, so a tool named `weather@v2` is not `weather`.
+    c = VECTOR["at_case"]
+    op, res, digest = mcp_binding(c["name"], c["arguments"])
+    assert (res, digest.hex()) == (c["resource"], c["arguments_digest_hex"])
+    msg = client_signature_message(VECTOR["principal"], op, res, digest, VECTOR["issued_at_ms"], int(VECTOR["instance_hex"], 16), VECTOR["counter"])
+    assert msg.hex() == c["message_hex"]
+    signer = ClientSigner(bytes.fromhex(VECTOR["seed_hex"]), VECTOR["principal"], instance=int(VECTOR["instance_hex"], 16))
+    assert signer.sign(op, res, digest, issued_at_ms=VECTOR["issued_at_ms"], counter=VECTOR["counter"])["cs"]["sig"] == c["signature_b64"]
+    _, plain, _ = mcp_binding("weather", c["arguments"])
+    assert client_signature_message(VECTOR["principal"], op, plain, digest, VECTOR["issued_at_ms"], 1, 0) != client_signature_message(VECTOR["principal"], op, res, digest, VECTOR["issued_at_ms"], 1, 0)

@@ -1,9 +1,9 @@
 {
-  "_doc": "The client-signature vector (identity-and-lifecycle I1, D1'): Rust (src/agent/client_sig_tests.rs), jest (mycelium-ts/tests/client_sig.test.ts) and pytest (mycelium-py/tests/test_client_sig.py) each rebuild message_hex from the inputs and check signature_b64 under verifying_key_b64; Ed25519 is deterministic, so the signature is pinned too.",
+  "_doc": "The client-signature vector (identity-and-lifecycle I1, D1'): Rust (src/agent/client_sig_tests.rs), jest (mycelium-ts/tests/client_sig.test.ts) and pytest (mycelium-py/tests/test_client_sig.py) each rebuild message_hex from the inputs (the resource bare and whole — no provider, no cut at `@`) and check signature_b64 under verifying_key_b64; Ed25519 is deterministic, so the signature is pinned too.",
   "seed_hex": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
   "principal": "token:fleet/forecaster",
   "operation": "tools/call",
-  "resource": "tool:weather.forecast@10.0.0.1:57000",
+  "resource": "tool:weather.forecast",
   "arguments": {
     "city": "Lyon",
     "days": 3
@@ -31,7 +31,7 @@
   "canonical_cases": [
     {
       "arguments": {
-        "tolerance": 0.00001
+        "tolerance": 1e-05
       },
       "canonical": "{\"tolerance\":0.00001}",
       "digest_hex": "f4ee9650d8adc7d23dad33467d463420b083daadd86d31e1fd4e6d70a1364884"
@@ -52,8 +52,8 @@
     },
     {
       "arguments": {
-        "tiny": 1e-7,
-        "small": 0.000001
+        "tiny": 1e-07,
+        "small": 1e-06
       },
       "canonical": "{\"small\":0.000001,\"tiny\":1e-7}",
       "digest_hex": "7cb56a86662f2deb41aa608e40e8fdba12a85ca197bf19e43a16ee8f00fc41c9"
@@ -111,5 +111,16 @@
     "{\"n\":-9007199254740991}",
     "{\"id\":\"9007199254740993\"}",
     "{\"f\":0.5,\"g\":1e-21}"
-  ]
+  ],
+  "at_case": {
+    "_doc": "A tool named with an `@`: the resource is bound whole, so `weather@v2` and `weather@v3` sign differently.",
+    "name": "weather@v2",
+    "resource": "tool:weather@v2",
+    "arguments": {
+      "city": "Lyon"
+    },
+    "arguments_digest_hex": "ac8cc520a3295a36519a59c07dc12095e7834a68d9e04be341a1044ec0f83e8f",
+    "message_hex": "6d7963656c69756d2e676174657761792f636c69656e742d7369676e61747572652f3116000000746f6b656e3a666c6565742f666f72656361737465720a000000746f6f6c732f63616c6c0f000000746f6f6c3a77656174686572407632ac8cc520a3295a36519a59c07dc12095e7834a68d9e04be341a1044ec0f83e8f00a8da769b010000efcdab89674523010500000000000000",
+    "signature_b64": "KQUXQbKe8jSNHJDrvzWRTD2us5kZzyJAxExZ8vuxB64Wl8tTiMyvdoScWieduewMqS0E1g2TpAXy6YNFJdBQCw=="
+  }
 }

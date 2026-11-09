@@ -949,7 +949,12 @@ async fn dispatch_send(
 /// exactly such an object is read as refused (stated). `/mcp` reads a JSON-RPC `error` instead (`reply_reports_failure`).
 fn provider_refusal(reply: &[u8]) -> Option<(String, String)> {
     let v: Value = serde_json::from_slice(reply).ok()?;
-    Some((v.get("reason")?.as_str()?.to_string(), v.get("error")?.as_str()?.to_string()))
+    let message = v.get("error")?.as_str()?;
+    // The node's two refusal bodies exactly (#745's confirm round): `rpc_rx`'s caller-context refusal, and the
+    // provider-enforcement refusal (`ProviderRefusal::rpc_body`: `error`, `reason` and `data`, nothing else).
+    let caller_context = message.starts_with("caller context refused") && v.as_object().is_some_and(|o| o.len() == 2);
+    let provider_enforcement = v.get("data").is_some() && v.as_object().is_some_and(|o| o.len() == 3);
+    (caller_context || provider_enforcement).then(|| (v.get("reason")?.as_str().map(str::to_string)).map(|r| (r, message.to_string()))).flatten()
 }
 
 /// The code a send answers for a skill it cannot resolve: `-32001` before 0.3, as it always has been;
@@ -1472,6 +1477,20 @@ mod tests {
     }
 
     use super::*;
+
+    /// **Only the node's refusal bodies read as a refusal** (#745's confirm round, item 5): `rpc_rx`'s caller-context
+    /// refusal and the provider-enforcement refusal, exactly; a skill's output that merely has `error` and `reason` is
+    /// its output. Seen failing first with any object holding a string `error` and `reason` read as a refusal.
+    #[test]
+    fn only_the_nodes_refusal_bodies_read_as_refusals() {
+        let caller = br#"{"error":"caller context refused: the client's signature on this call was refused: client_key_unknown","reason":"client_key_unknown"}"#;
+        let provider = br#"{"error":"authority not established","reason":"authority_not_established","data":{"checked":[]}}"#;
+        assert_eq!(provider_refusal(caller).map(|r| r.0), Some("client_key_unknown".into()));
+        assert_eq!(provider_refusal(provider).map(|r| r.0), Some("authority_not_established".into()));
+        for output in [&br#"{"error":"the forecast service is down","reason":"upstream"}"#[..], br#"{"error":"x","reason":"y","detail":1}"#, br#""caller context refused""#, b"plain text"] {
+            assert_eq!(provider_refusal(output), None, "a skill's output read as a refusal: {}", String::from_utf8_lossy(output));
+        }
+    }
     use crate::{GossipAgent, GossipConfig, NodeId};
 
     /// **The card named the gossip port.** Its `url` was built from the node's gossip address, so an A2A

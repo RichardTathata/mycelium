@@ -24,9 +24,10 @@ export interface ClientSignature { k: string; sig: string }
 export interface ClientNonce { t: number; i: string; c: number }
 
 /**
- * The bytes a client signs: the tag; the principal, the operation and the resource before `@`, each a `u32`
- * little-endian length and its UTF-8 bytes; the 32-byte arguments digest; then `issuedAtMs`, `instance` and `counter`
- * as `u64` little-endian.
+ * The bytes a client signs: the tag; the principal, the operation and the resource, each a `u32` little-endian length
+ * and its UTF-8 bytes; the 32-byte arguments digest; then `issuedAtMs`, `instance` and `counter` as `u64` little-endian.
+ * `resource` is the bare resource (`tool:{name}`, `skill:{id}`), whole: a name holding `@` is bound in full, and no
+ * provider is named (one signature serves every provider of the tool).
  */
 export function clientSignatureMessage(
   principal: string, operation: string, resource: string, digest: Uint8Array,
@@ -35,7 +36,7 @@ export function clientSignatureMessage(
   if (digest.length !== 32) throw new Error("the arguments digest is 32 bytes");
   const enc = new TextEncoder();
   const chunks: Uint8Array[] = [enc.encode(TAG)];
-  for (const part of [principal, operation, resource.split("@")[0]]) {
+  for (const part of [principal, operation, resource]) {
     const b = enc.encode(part);
     const len = new Uint8Array(4);
     new DataView(len.buffer).setUint32(0, b.length, true);

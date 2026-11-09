@@ -2791,9 +2791,15 @@ preflight.
 - **A grant presented on such a call is no longer spent.** The preflight that claims a grant's use does not run.
 - **`cn` is still the provider's.** The gateway does not keep a replay window: a replayed `cn` passes the door and is
   dropped at the provider, as before. The door does check the issue time on the provider's window and answers `stale`.
-- **A grant the provider refused before running is given back.** When the provider answers `client_key_*`,
-  `client_signature_*` or `stale`, the gateway tombstones the grant's `…/used/{door}` marker and releases its claim, so
-  the same grant admits a retry. Before, the retry was refused as already used.
+- **At `/mcp`, a grant the provider refused before running is given back.** When the provider's tool serve loop
+  answers `client_key_*`, `client_signature_*` or `stale` (`-32022`), the gateway tombstones the grant's
+  `…/used/{door}` marker and releases its claim, so the same grant admits a retry. Before, the retry was refused as
+  already used. A bridged MCP server's reply in that shape is now rewritten into a tool error (`-32000`). The A2A doors
+  and an embedder's `gateway_record_execution` give nothing back.
+- **The client signature binds the whole resource.** The signed message carried the resource up to its first `@`; it
+  now carries the bare resource whole, in Rust, Python and TypeScript (the cs vector is regenerated, with a case for a
+  name holding `@`). A signer that passed a resource with the provider appended (`tool:x@node`) must pass the bare one,
+  as `door_binding_mcp`, `mcp_binding` and `mcpBinding` return it. I1 is unreleased, so no deployed signer is affected.
 - **The provider's refusal carries its reason.** A tool's caller-context refusal (`-32022`) now has `data.reason`. At
   `/a2a` a provider's refusal is a JSON-RPC error (`-32003`, `data.reason`) on `tasks/send` and a failed task on a
   stream. Before, both answered a `completed` task with the refusal as its artifact. The evidence journal now records
@@ -2802,5 +2808,7 @@ preflight.
   where it answered `client_key_unknown`.
 - **A tool or skill whose name holds `@`** now binds at the provider. The claim is read up to its last `@`; it was
   refused as `client_signature_unbound`.
+- **A2A reads only the node's refusal bodies:** `rpc_rx`'s caller-context refusal and the provider-enforcement refusal.
+  A skill's output that merely has `error` and `reason` stays its output.
 
 Wire **v12** unchanged; no API change.
