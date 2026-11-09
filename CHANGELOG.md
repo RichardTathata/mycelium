@@ -153,10 +153,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **A provider's refusal is a refusal at `/a2a`, and its reason reaches the caller.** `tasks/send` and the stream
   answered a provider's refusal as a `completed` task, and the evidence journal recorded `completed`. A tool's
   `-32022` refusal now carries `data.reason`. A gateway without `[tls]` answers `client_signature_unverifiable`, and a
-  name holding `@` binds at the provider. Upgrade note: `deprecations.md` §90.
+  name holding `@` binds at the provider. Upgrade note: `deprecations.md` §91.
 - **A call refused for its client signature no longer spends the grant it presents.** The gateway claimed a grant's
   use in its preflight before the provider checked `cs`. `/mcp` and both `/a2a` doors now check the signature and the
-  key's standing first (`cn` stays the provider's). Upgrade note: `deprecations.md` §90.
+  key's standing first (`cn` stays the provider's). Upgrade note: `deprecations.md` §91.
 
 - **A wasm-host decision record names its rule's real revision** (#738's adversarial review, finding 8). `TraceCtx::record`
   stamped `rule_revision = 1` on every record the stem provisioner, the install task and the activation hook made, so a
