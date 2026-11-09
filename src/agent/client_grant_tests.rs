@@ -415,3 +415,50 @@ fn a_grant_holder_segment_round_trips_and_is_unambiguous() {
         assert_eq!(grant_holder_from_segment(bad), None, "{bad:?}");
     }
 }
+
+/// **The possession vector** (identity-and-lifecycle I1, the SDKs' half): a grant held by a client, as the gateway
+/// serves it, and the client's proof for one `tools/call`, pinned in `tests/fixtures/possession/vector.json`, which
+/// jest and pytest rebuild from the same inputs. Here the gateway's own functions rebuild each part — the mandate's
+/// canonical bytes and digest, the request bytes over the gateway's arguments digest, the possession message — the
+/// issuer's and the holder's signatures verify, and the gateway's `GrantVerifier`, fed the holder's key as a client
+/// key, finds the presented grant `Valid`. The vector was written by the Python SDK's implementation and is checked
+/// here by the gateway's own code; the SDKs' tests are the ones seen failing first.
+#[test]
+fn the_possession_vector_is_the_gateways() {
+    use crate::knowledge::issuer::TrustedExternalIssuers;
+    use crate::knowledge::IssuerId;
+    use crate::mandate::grant::{possession_message, EntitlementTable, GrantVerdict, GrantVerifier, SignedMandateGrant};
+    use crate::mandate::PrincipalId;
+    use base64::Engine;
+    let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/possession/vector.json")).unwrap()).unwrap();
+    let hex = |b: &[u8]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
+    let seed = |k: &str| -> [u8; 32] { (0..32).map(|i| u8::from_str_radix(&v[k].as_str().unwrap()[2 * i..2 * i + 2], 16).unwrap()).collect::<Vec<_>>().try_into().unwrap() };
+    let grant: SignedMandateGrant = serde_json::from_value(v["grant"].clone()).expect("the grant parses as the gateway's");
+    let m = &grant.mandate;
+    assert_eq!(hex(&m.canonical_bytes()), v["mandate_canonical_hex"], "the canonical bytes");
+    assert_eq!(hex(&m.digest()), v["mandate_digest_hex"]);
+    let digest = crate::arguments_digest(&v["arguments"]);
+    assert_eq!(hex(&digest), v["arguments_digest_hex"], "the gateway's arguments digest");
+    let request = crate::possession_request(v["operation"].as_str().unwrap(), v["resource"].as_str().unwrap(), &digest);
+    assert_eq!(hex(&request), v["request_hex"]);
+    let message = possession_message(m, &request);
+    assert_eq!(hex(&message), v["possession_message_hex"]);
+    let issuer = ed25519_dalek::SigningKey::from_bytes(&seed("issuer_seed_hex"));
+    let holder = ed25519_dalek::SigningKey::from_bytes(&seed("holder_seed_hex"));
+    let b64 = base64::engine::general_purpose::STANDARD;
+    assert_eq!(b64.encode(issuer.verifying_key().to_bytes()), v["issuer_key_b64"]);
+    assert_eq!(b64.encode(holder.verifying_key().to_bytes()), v["holder_key_b64"]);
+    assert!(mycelium_core::tls::verify_bytes(&issuer.verifying_key().to_bytes(), &m.canonical_bytes(), &grant.signature), "the issuer's signature");
+    assert_eq!(b64.encode(mycelium_core::tls::sign_bytes(&holder, &message)), v["possession_b64"], "the holder's proof, deterministic");
+
+    let mut table = EntitlementTable::new();
+    table.entitle_grants(PrincipalId::new(m.established_by.as_str()).unwrap());
+    let mut external = TrustedExternalIssuers::new();
+    external.set_client_key(IssuerId::new(m.holder.as_str()).unwrap(), 1, holder.verifying_key().to_bytes()).unwrap();
+    let proof = b64.decode(v["possession_b64"].as_str().unwrap()).unwrap();
+    // The issuer is a node: its key is a member's.
+    let issuer_node: NodeId = m.established_by.as_str().strip_prefix("node:").unwrap().parse().unwrap();
+    let members = std::collections::HashMap::from([(issuer_node, crate::knowledge::issuer::MemberKeys { retained: vec![issuer.verifying_key().to_bytes()], ..Default::default() })]);
+    let verdict = GrantVerifier::new(table).check(&grant, &request, Some(&proof), m.valid_from_ms + 1, &members, &external);
+    assert_eq!(verdict, GrantVerdict::Valid, "the gateway's verifier accepts the SDKs' proof");
+}

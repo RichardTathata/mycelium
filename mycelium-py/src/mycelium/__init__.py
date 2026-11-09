@@ -22,7 +22,8 @@ from .agent import (
     SupersededError,
 )
 from .a2a import A2aClient, arguments_digest, mandate_request_bytes
-from .client_sig import ClientSigner, a2a_binding, canonical_json, client_arguments_digest, client_signature_message, holds_unsafe_integer, mcp_binding
+from .client_sig import ClientSigner, a2a_binding, canonical_json, client_arguments_digest, client_signature_message, holds_unsafe_integer, mandate_canonical_bytes, mandate_digest, mcp_binding, possession_message
+from .mcp import GrantNotIssuedError, McpClient, McpError
 from .artifacts import Artifacts, ArtifactError
 from .federation import Federation, FederationError, DeliveryUnknown
 from .prompt_skill import PromptTemplate, PromptSkillClient
@@ -62,6 +63,12 @@ __all__ = [
     "A2aClient",
     "arguments_digest",
     "ClientSigner",
+    "GrantNotIssuedError",
+    "McpClient",
+    "McpError",
+    "mandate_canonical_bytes",
+    "mandate_digest",
+    "possession_message",
     "canonical_json",
     "client_arguments_digest",
     "holds_unsafe_integer",

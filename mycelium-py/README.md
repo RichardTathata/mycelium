@@ -213,24 +213,46 @@ async for sig in agent.on_signal("render-job"):
 
 A gateway with an execution authority establishes a mandate you present, so policy rules that require one
 can be satisfied. You hold a grant signed by the appointing authority, and sign a possession proof with your
-own key over the exact request bytes. The SDK computes those bytes, and does not sign:
+own key over the exact request bytes. A `ClientSigner` holding your key does it
+(`prove_possession(grant, operation, resource, arguments)`); the bytes are `mandate_request_bytes` inside
+`possession_message`, pinned by `tests/fixtures/possession/vector.json`:
 
 ```python
-from mycelium import A2aClient, arguments_digest, mandate_request_bytes
+from mycelium import A2aClient, ClientSigner
 
-request = mandate_request_bytes("skill.invoke", "skill:depot/dispatch", arguments_digest({"text": message}))
-# The holder signs mycelium::mandate::grant::possession_message(grant, request) with its own key,
-# using the Rust crate or an equivalent implementation; this SDK computes `request` and does not sign.
-client.send("depot/dispatch", message, mandate={"grant": grant, "possession": base64_signature})
+signer = ClientSigner(key_pem, "token:fleet/dispatcher")
+mandate = signer.prove_possession(grant, "skill.invoke", "skill:depot/dispatch", {"text": message})
+client.send("depot/dispatch", message, mandate=mandate)
 ```
+
+### A service's own key: signed calls and its own grants (identity-and-lifecycle I1)
+
+A service with a client certificate (`mycelium tls issue --client <name> --issuer <issuer>`, published at
+`POST /gateway/identity/client-cert`) signs every call with its key: give the clients its `ClientSigner`
+(`pip install 'mycelium-py[sign]'`). `McpClient(url, signer=…).call_tool(name, arguments)` sends a `tools/call` to
+`/mcp` with `params._meta.cs`/`cn`; `A2aClient(url, signer=…)` signs every `send` and `stream`. A tool that needs a
+grant is called under one the service holds:
+
+```python
+from mycelium import ClientSigner, McpClient
+
+mcp = McpClient("https://gw:8300", token=token, signer=ClientSigner(key_pem, "token:fleet/forecaster"))
+asked = mcp.request_grant("weather.forecast", {"city": "Lyon"})   # POST /gateway/grants/request (mcp:invoke)
+answer = mcp.wait_for_grant(asked["request"])                     # GET /gateway/grants/request/{request}
+mcp.call_tool("weather.forecast", {"city": "Lyon"}, grant=answer["grant"])   # possession proved for this call
+```
+
+`wait_for_grant` raises `GrantNotIssuedError` naming the state a request ended in (`refused`, `revoked`,
+`expired`, or `pending` on timeout). A float in exponent form in a grant's arguments is refused at the gateway
+(the mandate digest differs across languages, identity-and-lifecycle §9 O1): send it as a string.
 
 ### The supervisor's grants, and a task's lifecycle (0.2.13)
 
 `grants_pending()` reads `GET /gateway/grants/pending` (`grant:read`) — every unanswered request this node holds — the records gossip, so the fleet's, not only this node's agents' —
 oldest first — and `grant_decide(agent, request, "issue" | "refuse", ttl_secs=…, reason=…)` posts the answer to
 `POST /gateway/grants/{agent}/{request}` (`grant:issue`); issuing is itself an action the node's evaluator decides,
-so a refusal is the route's 403, and 409 `not_a_member` names an agent on no member node this gateway knows. A grant is presented by
-its holder, the agent's node — not by this client. `grant_revoke(agent, request, reason=…)` revokes at the issuing
+so a refusal is the route's 403, and 409 `not_a_member` names an agent on no member node this gateway knows. A node's
+grant is presented by its holder, the agent's node; a client's own grant by the client (above). `grant_revoke(agent, request, reason=…)` revokes at the issuing
 node, and `grants_stream()` is the requests as they come (an async iterator of `grant_request` and `grant_answered`
 events). `A2aClient.get_task(id)` and `cancel(id)` are `tasks/get`
 and `tasks/cancel`: the task as the node holds it, readable and cancellable by the identity that created it; a
@@ -785,10 +807,11 @@ The SDK is a client of one gateway; it carries what the doors it calls carry, an
 - **No cancellation of running work.** `A2aClient.cancel` reaches `tasks/cancel`, which ends a task's record and
   stops nothing (a task runs inside its request); `tools/call` has no cancel; ending a stream closes the client's
   side only, and a dropped stream is not resumed (no resume point at the gateway).
-- **Presenting a grant.** A grant's holder is the agent's node, so this SDK's client — a bearer, not the node — cannot
-  present one: the supervisor's verbs are carried, the presenting side is the node's own (adopter-surface X3).
-- **Identity is the bearer's.** The principal the gateway resolves is the token's; this SDK signs nothing, and
-  computes a mandate's request bytes without being able to prove possession of a key it does not hold.
+- **Presenting a grant.** A node's grant is presented by the node; this SDK presents only a grant its own client
+  certificate's principal holds (`McpClient.call_tool(…, grant=…)`).
+- **Identity is the bearer's.** The principal the gateway resolves is the token's; a `ClientSigner` adds the client's
+  own signature, which the provider checks against the principal's current key. The SDK clients are tested against a
+  recording stub, not a live node.
 - **A receipt names the gateway node's rung and nothing above it** — never replication, never a peer's state.
 - **Raw emissions carry no principal** (`emit`, shard emit, mailbox deliver) and cannot reach a protected kind.
 - **No session.** The SDK keeps nothing between calls; the LangGraph checkpointer and the Strands store are the

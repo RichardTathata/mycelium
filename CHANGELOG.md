@@ -51,6 +51,15 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The SDKs sign as a service and present its own grants** (`docs/plans/identity-and-lifecycle.md` I1, PR 3 of 4).
+  `McpClient` in `mycelium-py` and `mycelium-ts` is a `tools/call` client for `/mcp`. Given a `ClientSigner`, it signs
+  every call with the service's client-certificate key (`params._meta.cs`/`cn`), and so does `A2aClient` for every
+  `send` and `stream`. `request_grant` / `requestGrant` and `grant_status` / `grantStatus` (or `wait_for_grant` /
+  `waitForGrant`) ask for a grant the service holds and read the answer, and `call_tool(…, grant=…)` presents it with a
+  possession proof by the same key (`ClientSigner.prove_possession` / `provePossession`). The proof's bytes are pinned
+  by `tests/fixtures/possession/vector.json`, checked by the gateway's own verifier, jest and pytest. Upgrade note:
+  `deprecations.md` §89.
+
 - **Grants held by a client principal** (`docs/plans/identity-and-lifecycle.md` I1, second half, PR 2). A service with
   a client certificate on record asks for a grant at `POST /gateway/grants/request` (`mcp:invoke`), reads the answer at
   `GET /gateway/grants/request/{request}`, and presents it at `/mcp` with a possession proof signed by its client key.

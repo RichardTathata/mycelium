@@ -501,12 +501,32 @@ protected kind — is thrown, never reported as `"timeout"`.
 `grantsPending()` reads `GET /gateway/grants/pending` (`grant:read`) and `grantDecide(agent, request, "issue" |
 "refuse", { ttlSecs, reason })` posts the answer to `POST /gateway/grants/{agent}/{request}` (`grant:issue`);
 issuing is itself an action the node's evaluator decides, so a refusal is the route's 403, and 409 `not_a_member`
-names an agent on no member node this gateway knows. A grant is presented by its holder, the agent's node — not by this client. `grantRevoke(agent, request, {
+names an agent on no member node this gateway knows. A node's grant is presented by its holder, the agent's node; a client's own grant by the client (below). `grantRevoke(agent, request, {
 reason })` revokes at the issuing node, and `grantsStream()` is the requests as they come (an async generator of
 `grant_request`, `grant_answered` and `grant_expired` events).
 `A2aClient.getTask(id)` and `cancel(id)` are `tasks/get` and `tasks/cancel`: the task as the node holds it, readable
 and cancellable by the identity that created it; a cancel ends the task's record and stops no work — a task runs
 inside its request — and a terminal task throws (adopter-surface X7, the adapter contract).
+
+### A service's own key: signed calls and its own grants (identity-and-lifecycle I1)
+
+A service with a client certificate (`mycelium tls issue --client <name> --issuer <issuer>`, published at
+`POST /gateway/identity/client-cert`) signs every call with its key: give the clients its `ClientSigner`.
+`new McpClient(url, { signer }).callTool(name, args)` sends a `tools/call` to `/mcp` with `params._meta.cs`/`cn`;
+`new A2aClient(url, { signer })` signs every `send` and `stream`. A tool that needs a grant is called under one the
+service holds:
+
+```typescript
+const mcp = new McpClient("https://gw:8300", { token, signer: new ClientSigner(keyPem, "token:fleet/forecaster") });
+const asked = await mcp.requestGrant("weather.forecast", { city: "Lyon" });   // POST /gateway/grants/request
+const answer = await mcp.waitForGrant(asked.request);                         // GET /gateway/grants/request/{request}
+await mcp.callTool("weather.forecast", { city: "Lyon" }, { grant: answer.grant });   // possession proved for this call
+```
+
+`waitForGrant` throws `GrantNotIssuedError` naming the state a request ended in. `signer.provePossession(grant,
+operation, resource, args)` makes a `{grant, possession}` for any door (`A2aClient.send(…, { mandate })`), pinned by
+`tests/fixtures/possession/vector.json`. A float in exponent form in a grant's arguments is refused at the gateway
+(identity-and-lifecycle §9 O1): send it as a string.
 
 ### The causal fields (0.2.7)
 

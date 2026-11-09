@@ -256,8 +256,10 @@ it (C8), and `with_durable_epochs` keeps installed epochs across a restart so a 
 restore revoked authority**.
 
 **Presenting one.** A caller puts a `SignedMandateGrant` plus a possession proof in
-`params._meta.mandate` (`/mcp`) or the A2A message metadata; the SDKs build it (`mandate=` on
-`A2aClient.send`, signing over `mandate_request_bytes(...)`). The gateway verifies the grant, checks
+`params._meta.mandate` (`/mcp`) or the A2A message metadata; the SDKs build it: a `ClientSigner` signs the proof
+(`prove_possession` / `provePossession`, over `mandate_request_bytes(...)`), passed as `mandate=` to
+`A2aClient.send`, and `McpClient.call_tool(…, grant=…)` / `callTool(…, { grant })` proves and presents a grant the
+client holds. The gateway verifies the grant, checks
 freshness, and binds `MandateState::Established` into the envelope; a rule written
 `Rule::requiring_mandate("depot")` then permits. `ReferenceEvaluator::allowances_without_mandate(..)`
 lists any allowance that would let a protected operation through *without* one — it must be empty.
