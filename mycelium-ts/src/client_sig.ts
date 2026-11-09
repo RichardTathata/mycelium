@@ -7,9 +7,14 @@
  * operation, resource and arguments, and that its `cn` was not seen before. The signed bytes are
  * {@link clientSignatureMessage}, pinned by `tests/fixtures/cs/vector.json`, which the gateway's Rust tests and the
  * Python SDK check too.
+ *
+ * The same key proves **possession of a grant held by the client** (`POST /gateway/grants/request`):
+ * {@link ClientSigner.provePossession} signs {@link possessionMessage} over the grant's {@link mandateCanonicalBytes}
+ * and the call's {@link mandateRequestBytes}, pinned by `tests/fixtures/possession/vector.json`, which the gateway's
+ * Rust tests and the Python SDK check too.
  */
-import { createPrivateKey, createPublicKey, randomBytes, sign, type KeyObject } from "node:crypto";
-import { argumentsDigest } from "./a2a";
+import { createHash, createPrivateKey, createPublicKey, randomBytes, sign, type KeyObject } from "node:crypto";
+import { argumentsDigest, mandateArgumentsDigest, mandateRequestBytes, type PresentedMandate } from "./a2a";
 
 const TAG = "mycelium.gateway/client-signature/1";
 
@@ -77,6 +82,77 @@ export function a2aBinding(skillId: string, text: string): [string, string, Uint
   return ["skill.invoke", `skill:${skillId}`, argumentsDigest({ text })];
 }
 
+/** A mandate as the gateway serves it inside a grant (`Mandate`). */
+export interface Mandate {
+  holder: string;
+  established_by: string;
+  purpose: string;
+  scope: string;
+  operations: string[];
+  epoch: number;
+  term: string;
+  valid_from_ms: number;
+  valid_until_ms: number;
+}
+
+/** A grant as `GET /gateway/grants/request/{request}` serves it: the mandate and its issuer's signature bytes. */
+export interface SignedMandateGrant {
+  mandate: Mandate;
+  signature: number[];
+}
+
+function concat(chunks: Uint8Array[]): Uint8Array {
+  const out = new Uint8Array(chunks.reduce((n, c) => n + c.length, 0));
+  let off = 0;
+  for (const c of chunks) { out.set(c, off); off += c.length; }
+  return out;
+}
+
+function u32le(n: number): Uint8Array {
+  const b = new Uint8Array(4);
+  new DataView(b.buffer).setUint32(0, n, true);
+  return b;
+}
+
+function u64le(n: number | bigint): Uint8Array {
+  const b = new Uint8Array(8);
+  new DataView(b.buffer).setBigUint64(0, BigInt(n), true);
+  return b;
+}
+
+function lp(bytes: Uint8Array): Uint8Array[] {
+  return [u32le(bytes.length), bytes];
+}
+
+/**
+ * The bytes a mandate's establishing authority signs — the gateway's `Mandate::canonical_bytes`: the tag
+ * `mycelium.mandate/grant/1`, `holder`, `established_by`, `purpose` and `scope` each as a `u32` little-endian length
+ * and its UTF-8 bytes; the number of `operations` as a `u32` and each operation so; then `epoch` as a `u64`, `term`
+ * length-prefixed, `valid_from_ms` and `valid_until_ms` as `u64`, all little-endian.
+ */
+export function mandateCanonicalBytes(mandate: Mandate): Uint8Array {
+  const enc = new TextEncoder();
+  const chunks: Uint8Array[] = [...lp(enc.encode("mycelium.mandate/grant/1"))];
+  for (const f of [mandate.holder, mandate.established_by, mandate.purpose, mandate.scope]) chunks.push(...lp(enc.encode(f)));
+  chunks.push(u32le(mandate.operations.length));
+  for (const op of mandate.operations) chunks.push(...lp(enc.encode(op)));
+  chunks.push(u64le(mandate.epoch), ...lp(enc.encode(mandate.term)), u64le(mandate.valid_from_ms), u64le(mandate.valid_until_ms));
+  return concat(chunks);
+}
+
+/** SHA-256 of {@link mandateCanonicalBytes}. */
+export function mandateDigest(mandate: Mandate): Uint8Array {
+  return new Uint8Array(createHash("sha256").update(mandateCanonicalBytes(mandate)).digest());
+}
+
+/**
+ * What a grant's holder signs to prove possession for one call: the tag `mycelium.mandate/possession/1`, the grant's
+ * {@link mandateDigest}, then `request` ({@link mandateRequestBytes}) as a `u32` little-endian length and its bytes.
+ */
+export function possessionMessage(mandate: Mandate, request: Uint8Array): Uint8Array {
+  return concat([new TextEncoder().encode("mycelium.mandate/possession/1"), mandateDigest(mandate), ...lp(request)]);
+}
+
 /**
  * A service's signer: its client certificate's key and principal (`token:{issuer}/{name}`), an instance id drawn once
  * from `crypto.randomBytes`, and a counter. `key` is the PEM `mycelium tls issue --client` wrote, or the 32-byte seed.
@@ -100,6 +176,23 @@ export class ClientSigner {
   signToolsCall(name: string, args: unknown): { cs: ClientSignature; cn: ClientNonce } {
     const [op, res, digest] = mcpBinding(name, args);
     return this.sign(op, res, digest);
+  }
+
+  /**
+   * Present `grant` — held by this signer's principal — for one call: `{grant, possession}`, to send as
+   * `params._meta.mandate`. The proof binds the grant, the operation, the resource before `@` and the call's arguments
+   * by the gateway's mandate digest ({@link mandateArgumentsDigest} — not the signature's JCS digest), so it is good
+   * for this call alone. Throws for a grant another
+   * principal holds. The gateway's mandate digest is not RFC 8785: for a float in exponent form it differs, and the
+   * call is refused (identity-and-lifecycle §9 O1) — send such a number as a string.
+   */
+  provePossession(grant: SignedMandateGrant, operation: string, resource: string, args: unknown): PresentedMandate {
+    if (grant.mandate.holder !== this.principal) {
+      throw new Error(`the grant is held by ${JSON.stringify(grant.mandate.holder)}, not ${JSON.stringify(this.principal)}`);
+    }
+    const request = mandateRequestBytes(operation, resource, mandateArgumentsDigest(args));
+    const proof = sign(null, possessionMessage(grant.mandate, request), this.key);
+    return { grant, possession: proof.toString("base64") };
   }
 
   /** Sign one call; returns `{cs, cn}` to merge into `params._meta`. Each call takes the next counter unless given. */

@@ -1,0 +1,165 @@
+{
+  "_doc": "The possession vector (identity-and-lifecycle I1, a grant held by a client): Rust (src/agent/client_grant_tests.rs), jest (mycelium-ts/tests/possession.test.ts) and pytest (mycelium-py/tests/test_possession.py) each rebuild mandate_canonical_hex, request_hex and possession_message_hex from the inputs and check the signatures; Ed25519 is deterministic, so possession_b64 is pinned too. The grant is as the gateway serves it at GET /gateway/grants/request/{request}.",
+  "issuer_seed_hex": "2122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f40",
+  "issuer_key_b64": "5/FioQvsVZr+oZXk3OhLaVaNXSywlj60RsBoXisX8vA=",
+  "holder_seed_hex": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+  "holder_key_b64": "ebVWLo/mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ=",
+  "principal": "token:fleet/forecaster",
+  "operation": "tools/call",
+  "resource": "tool:weather.forecast@10.0.0.1:57000",
+  "arguments": {
+    "city": "Lyon",
+    "days": 3
+  },
+  "arguments_digest_hex": "c74a2b58148ec8b68e232ab0eeaeae86ea4520429e4b75b990ec1418abd489db",
+  "grant": {
+    "mandate": {
+      "holder": "token:fleet/forecaster",
+      "established_by": "node:10.0.0.2:7946",
+      "purpose": "grant issued by token:fleet/trésorier for request 01a1bda0b40f0000-10.0.0.2:7946",
+      "scope": "grant:01a1bda0b40f0000-10.0.0.2:7946",
+      "operations": [
+        "tools/call:tool:weather.forecast",
+        "bound:args:c74a2b58148ec8b68e232ab0eeaeae86ea4520429e4b75b990ec1418abd489db",
+        "bound:policy:declared:b725310fb66dbdee",
+        "bound:resource:tool:weather.forecast@10.0.0.1:57000"
+      ],
+      "epoch": 1,
+      "term": "01a1bda0b40f0000-10.0.0.2:7946",
+      "valid_from_ms": 1767225600000,
+      "valid_until_ms": 1767225900000
+    },
+    "signature": [
+      23,
+      160,
+      161,
+      25,
+      222,
+      96,
+      9,
+      141,
+      216,
+      213,
+      252,
+      152,
+      205,
+      86,
+      81,
+      188,
+      190,
+      38,
+      183,
+      95,
+      47,
+      151,
+      117,
+      186,
+      207,
+      176,
+      139,
+      21,
+      122,
+      21,
+      16,
+      110,
+      25,
+      15,
+      249,
+      25,
+      109,
+      6,
+      230,
+      238,
+      82,
+      81,
+      107,
+      14,
+      8,
+      29,
+      35,
+      172,
+      146,
+      27,
+      165,
+      201,
+      104,
+      235,
+      42,
+      11,
+      106,
+      136,
+      230,
+      86,
+      133,
+      88,
+      181,
+      2
+    ]
+  },
+  "mandate_canonical_hex": "180000006d7963656c69756d2e6d616e646174652f6772616e742f3116000000746f6b656e3a666c6565742f666f7265636173746572120000006e6f64653a31302e302e302e323a37393436510000006772616e742069737375656420627920746f6b656e3a666c6565742f7472c3a9736f7269657220666f72207265717565737420303161316264613062343066303030302d31302e302e302e323a37393436240000006772616e743a303161316264613062343066303030302d31302e302e302e323a373934360400000020000000746f6f6c732f63616c6c3a746f6f6c3a776561746865722e666f7265636173744b000000626f756e643a617267733a6337346132623538313438656338623638653233326162306565616561653836656134353230343239653462373562393930656331343138616264343839646226000000626f756e643a706f6c6963793a6465636c617265643a6237323533313066623636646264656533000000626f756e643a7265736f757263653a746f6f6c3a776561746865722e666f7265636173744031302e302e302e313a353730303001000000000000001e000000303161316264613062343066303030302d31302e302e302e323a3739343600a8da769b010000e03bdf769b010000",
+  "mandate_digest_hex": "b93d63bfc007fbb4e2552650dba87059a465972b988690fc022a4cf5c3bcb81c",
+  "request_hex": "6d7963656c69756d2e676174657761792f6d616e646174652d726571756573742f310a000000746f6f6c732f63616c6c15000000746f6f6c3a776561746865722e666f726563617374c74a2b58148ec8b68e232ab0eeaeae86ea4520429e4b75b990ec1418abd489db",
+  "possession_message_hex": "6d7963656c69756d2e6d616e646174652f706f7373657373696f6e2f31b93d63bfc007fbb4e2552650dba87059a465972b988690fc022a4cf5c3bcb81c690000006d7963656c69756d2e676174657761792f6d616e646174652d726571756573742f310a000000746f6f6c732f63616c6c15000000746f6f6c3a776561746865722e666f726563617374c74a2b58148ec8b68e232ab0eeaeae86ea4520429e4b75b990ec1418abd489db",
+  "possession_b64": "f7FPWqP1jxW6Sf6asxtqNH4cWLt7VPwUHo/ZsstMW8J8itO78IB9WzkfmApUBr5NTFlDT0HAG8dGW1L8PggfBQ==",
+  "_doc_mandate_digest": "mandate_digest_cases: the gateway's mandate arguments digest (serde_json, members sorted by UTF-8 bytes) of each case — serialized is serde_json::to_string of the arguments, digest_hex its SHA-256 — checked in Rust (the gateway's arguments_digest), jest (mandateArgumentsDigest) and pytest (arguments_digest). The cases put keys outside the BMP beside keys in U+E000–U+FFFF, where UTF-8 and UTF-16 order differ.",
+  "mandate_digest_cases": [
+    {
+      "arguments": {
+        "！": 1,
+        "😀": 2,
+        "a": 3,
+        "": 0
+      },
+      "serialized": "{\"\":0,\"a\":3,\"！\":1,\"😀\":2}",
+      "digest_hex": "84b0cdad0a1b1e68d0112c74f8250abcb8e2b49e78b050a6eef449522b8c6c30"
+    },
+    {
+      "arguments": {
+        "": "x",
+        "😀": "y",
+        "￿": "z"
+      },
+      "serialized": "{\"\":\"x\",\"￿\":\"z\",\"😀\":\"y\"}",
+      "digest_hex": "8f403b417859abced19eb0e2626ec08aeb7335efc21432d947c600ce6bd3bc3b"
+    },
+    {
+      "arguments": {
+        "é": "ü",
+        "z": "日本語",
+        "Ω": " "
+      },
+      "serialized": "{\"z\":\"日本語\",\"é\":\"ü\",\"Ω\":\" \"}",
+      "digest_hex": "11b0268169833991995687eb55fbb0b8ec691ba9e26674caa2b7a0c893678310"
+    },
+    {
+      "arguments": {
+        "c": "\u0000\u0001\b\t\n\u000b\f\r\u001f\"\\/ "
+      },
+      "serialized": "{\"c\":\"\\u0000\\u0001\\b\\t\\n\\u000b\\f\\r\\u001f\\\"\\\\/ \"}",
+      "digest_hex": "cb471a56b210f94a63f02a756fca69f943376d2cf9671dbf6d0f45528058c34b"
+    },
+    {
+      "arguments": {
+        "b": [
+          {
+            "y": 1,
+            "x": [
+              true,
+              null,
+              false
+            ]
+          }
+        ],
+        "a": {
+          "": 1,
+          "😀": {
+            "n": -12,
+            "max": 9007199254740991
+          }
+        }
+      },
+      "serialized": "{\"a\":{\"\":1,\"😀\":{\"max\":9007199254740991,\"n\":-12}},\"b\":[{\"x\":[true,null,false],\"y\":1}]}",
+      "digest_hex": "f9271fe2999066919bb9f0239dfc9235175c58a9d0f3080ac2f4d148d33c8b89"
+    }
+  ]
+}

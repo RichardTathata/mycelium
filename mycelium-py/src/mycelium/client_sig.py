@@ -8,12 +8,18 @@ operation, resource and arguments, and that its ``cn`` was not seen before.
 The signed bytes are :func:`client_signature_message`, pinned by the vector in ``tests/fixtures/cs/vector.json``
 that the gateway's Rust tests and the TypeScript SDK check too. Signing needs the optional ``cryptography``
 dependency (``pip install mycelium-py[sign]``); building the message does not.
+
+The same key proves **possession of a grant held by the client** (``POST /gateway/grants/request``):
+:meth:`ClientSigner.prove_possession` signs :func:`possession_message` over the grant's
+:func:`mandate_canonical_bytes` and the call's :func:`~mycelium.a2a.mandate_request_bytes`, pinned by
+``tests/fixtures/possession/vector.json``, which the gateway's Rust tests and the TypeScript SDK check too.
 """
 
 from __future__ import annotations
 
 import os
 import struct
+import threading
 import time
 from typing import Any, Dict, Optional, Tuple
 
@@ -141,6 +147,47 @@ def a2a_binding(skill_id: str, text: str) -> Tuple[str, str, bytes]:
     return "skill.invoke", f"skill:{skill_id}", client_arguments_digest({"text": text})
 
 
+def _lp(out: bytearray, b: bytes) -> None:
+    out += struct.pack("<I", len(b)) + b
+
+
+def mandate_canonical_bytes(mandate: Dict[str, Any]) -> bytes:
+    """The bytes a mandate's establishing authority signs — the gateway's ``Mandate::canonical_bytes``: the tag
+    ``mycelium.mandate/grant/1``, ``holder``, ``established_by``, ``purpose`` and ``scope`` each as a ``u32``
+    little-endian length and its UTF-8 bytes; the number of ``operations`` as a ``u32`` and each operation so; then
+    ``epoch`` as a ``u64``, ``term`` length-prefixed, ``valid_from_ms`` and ``valid_until_ms`` as ``u64``, all
+    little-endian. ``mandate`` is the ``"mandate"`` of a grant as the gateway returns it."""
+    out = bytearray()
+    _lp(out, b"mycelium.mandate/grant/1")
+    for field in ("holder", "established_by", "purpose", "scope"):
+        _lp(out, str(mandate[field]).encode("utf-8"))
+    ops = list(mandate["operations"])
+    out += struct.pack("<I", len(ops))
+    for op in ops:
+        _lp(out, str(op).encode("utf-8"))
+    out += struct.pack("<Q", int(mandate["epoch"]))
+    _lp(out, str(mandate["term"]).encode("utf-8"))
+    out += struct.pack("<QQ", int(mandate["valid_from_ms"]), int(mandate["valid_until_ms"]))
+    return bytes(out)
+
+
+def mandate_digest(mandate: Dict[str, Any]) -> bytes:
+    """SHA-256 of :func:`mandate_canonical_bytes`."""
+    import hashlib
+
+    return hashlib.sha256(mandate_canonical_bytes(mandate)).digest()
+
+
+def possession_message(mandate: Dict[str, Any], request: bytes) -> bytes:
+    """What a grant's holder signs to prove possession for one call: the tag ``mycelium.mandate/possession/1``, the
+    grant's :func:`mandate_digest`, then ``request`` (:func:`~mycelium.a2a.mandate_request_bytes`) as a ``u32``
+    little-endian length and its bytes."""
+    out = bytearray(b"mycelium.mandate/possession/1")
+    out += mandate_digest(mandate)
+    _lp(out, request)
+    return bytes(out)
+
+
 class ClientSigner:
     """A service's signer: its client certificate's Ed25519 key and principal (``token:{issuer}/{name}``), an
     instance id drawn once from ``os.urandom``, and a counter. Two processes under one certificate draw different
@@ -166,11 +213,34 @@ class ClientSigner:
         self.principal = principal
         self.instance = instance if instance is not None else int.from_bytes(os.urandom(8), "big")
         self._counter = 0
+        # Taken under a lock, so two threads never sign with one counter — a free-threaded build has no GIL to lean on,
+        # and a repeated counter is refused at the provider as a replay.
+        self._counter_lock = threading.Lock()
 
     def sign_tools_call(self, name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
         """Sign a ``tools/call`` of ``name`` (:func:`mcp_binding`, which refuses an unsafe integer)."""
         op, res, digest = mcp_binding(name, arguments)
         return self.sign(op, res, digest)
+
+    def prove_possession(self, grant: Dict[str, Any], operation: str, resource: str, arguments: Any) -> Dict[str, Any]:
+        """Present ``grant`` — held by this signer's principal — for one call: ``{"grant": grant, "possession":
+        base64}``, to send as ``params._meta.mandate``. The proof binds the grant, the operation, the resource before
+        ``@`` and the call's arguments by the gateway's mandate digest (:func:`~mycelium.a2a.arguments_digest`), so
+        it is good for this call alone. Raises ``ValueError`` for a grant another principal holds.
+
+        The mandate digest is not RFC 8785: for a float written in exponent form it differs from the gateway's, and
+        the call is refused (identity-and-lifecycle §9 O1) — send such a number as a string.
+        """
+        import base64
+
+        from .a2a import arguments_digest, mandate_request_bytes
+
+        mandate = grant["mandate"]
+        if mandate.get("holder") != self.principal:
+            raise ValueError(f"the grant is held by {mandate.get('holder')!r}, not {self.principal!r}")
+        request = mandate_request_bytes(operation, resource, arguments_digest(arguments))
+        proof = self._key.sign(possession_message(mandate, request))
+        return {"grant": grant, "possession": base64.b64encode(proof).decode()}
 
     def sign(self, operation: str, resource: str, digest: bytes, *, issued_at_ms: Optional[int] = None,
              counter: Optional[int] = None) -> Dict[str, Any]:
@@ -180,7 +250,8 @@ class ClientSigner:
 
         t = issued_at_ms if issued_at_ms is not None else int(time.time() * 1000)
         if counter is None:
-            counter, self._counter = self._counter, self._counter + 1
+            with self._counter_lock:
+                counter, self._counter = self._counter, self._counter + 1
         msg = client_signature_message(self.principal, operation, resource, digest, t, self.instance, counter)
         sig = self._key.sign(msg)
         return {

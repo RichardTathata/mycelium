@@ -25,6 +25,7 @@ from typing import Dict, Iterator, Optional
 import httpx
 
 from ._pool import ClientPool
+from .client_sig import ClientSigner, a2a_binding
 
 __all__ = ["A2aClient", "A2aError", "ActionRefusedError"]
 
@@ -133,8 +134,8 @@ def mandate_request_bytes(operation: str, resource: str, digest: bytes) -> bytes
 
     ``resource`` may include the resolved provider (``skill:ns/name@node``); only the part before
     ``@`` is bound. The holder signs ``possession_message(grant, these bytes)`` with its own key and
-    passes the grant and base64 signature as ``mandate=`` — this SDK does not sign. The format is
-    pinned by a golden vector shared with the gateway and the TypeScript SDK.
+    passes the grant and base64 signature as ``mandate=`` — :meth:`~mycelium.ClientSigner.prove_possession`
+    does both. The format is pinned by golden vectors shared with the gateway and the TypeScript SDK.
     """
     if len(digest) != 32:
         raise ValueError("the arguments digest is 32 bytes")
@@ -152,6 +153,7 @@ def _task_params(
     mandate: Optional[Dict],
     correlation: Optional[str] = None,
     parent: Optional[str] = None,
+    signer: "Optional[ClientSigner]" = None,
 ) -> Dict:
     params: Dict = {
         "id":       task_id,
@@ -168,6 +170,9 @@ def _task_params(
         meta["correlation"] = correlation
     if parent is not None:
         meta["parent"] = parent
+    # Identity-and-lifecycle I1: the client's own signature over this send — the skill and {"text": message}.
+    if signer is not None:
+        meta.update(signer.sign(*a2a_binding(skill_id, message)))
     if meta:
         params["_meta"] = meta
     return params
@@ -188,6 +193,10 @@ class A2aClient:
     ca_file:
         PEM bundle of a private fleet CA to trust for an ``https://`` base URL (verification
         stays on; the system store is used without it).
+    signer:
+        A service's :class:`~mycelium.ClientSigner` (identity-and-lifecycle I1): every ``send`` and
+        ``stream`` is then signed with its client-certificate key (``params._meta.cs``/``cn``), and the
+        provider checks it. Its principal must be the one the bearer authenticates as.
     """
 
     def __init__(
@@ -197,10 +206,12 @@ class A2aClient:
         timeout_secs: float = 30.0,
         token: Optional[str] = None,
         ca_file: Optional[str] = None,
+        signer: Optional[ClientSigner] = None,
     ) -> None:
         self._base   = base_url.rstrip("/")
         self._timeout = timeout_secs
         self._pool   = ClientPool(self._base, timeout_secs, token=token, ca_file=ca_file)
+        self.signer  = signer
 
     # ── Discovery ─────────────────────────────────────────────────────────────
 
@@ -274,7 +285,7 @@ class A2aClient:
             "jsonrpc": "2.0",
             "id":      1,
             "method":  "tasks/send",
-            "params":  _task_params(tid, skill_id, message, mandate, correlation, parent),
+            "params":  _task_params(tid, skill_id, message, mandate, correlation, parent, self.signer),
         }
         with self._pool.sync(timeout=timeout + 5.0) as c:  # network headroom
             resp = c.post("/a2a", json=payload)
@@ -359,7 +370,7 @@ class A2aClient:
             "jsonrpc": "2.0",
             "id":      1,
             "method":  "tasks/sendSubscribe",
-            "params":  _task_params(tid, skill_id, message, mandate, correlation, parent),
+            "params":  _task_params(tid, skill_id, message, mandate, correlation, parent, self.signer),
         }
         with httpx.stream(
             "POST",

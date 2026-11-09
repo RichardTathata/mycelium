@@ -1,11 +1,12 @@
 import { createHash } from "node:crypto";
 import { authHeaders, resolveToken, type AuthOptions } from "./auth";
+import { a2aBinding, type ClientSigner } from "./client_sig";
 
 /**
  * A presented mandate (Boundary H, A1 at the gateway): a grant signed by its establishing authority,
  * and the holder's base64 possession proof. Sent as `params._meta.mandate`; a gateway with an
- * execution authority establishes it for the call. This SDK does not sign — see
- * {@link mandateRequestBytes} for exactly what the holder signs.
+ * execution authority establishes it for the call. {@link ClientSigner.provePossession} makes one for a grant a client
+ * holds; {@link mandateRequestBytes} is exactly what the holder signs.
  */
 export interface PresentedMandate {
   grant: unknown;
@@ -27,21 +28,68 @@ export interface SendOptions {
   parent?: string;
 }
 
-function canonicalJson(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+/**
+ * `value` as `JSON.stringify` would send it, with members in `order` and no whitespace — and nothing it would leave
+ * out: an `undefined`, function or symbol member is dropped, and is `null` inside an array; `toJSON` is honoured. So a
+ * digest is of the body the gateway receives (#744's review, round 2). `undefined` for a value that sends nothing.
+ */
+function serialise(value: unknown, order: (a: string, b: string) => number): string | undefined {
+  if (value !== null && typeof value === "object" && typeof (value as { toJSON?: unknown }).toJSON === "function") {
+    value = (value as { toJSON: () => unknown }).toJSON();
+  }
+  if (value === undefined || typeof value === "function" || typeof value === "symbol") return undefined;
+  if (Array.isArray(value)) return `[${value.map((v) => serialise(v, order) ?? "null").join(",")}]`;
   if (value !== null && typeof value === "object") {
     const obj = value as Record<string, unknown>;
-    return `{${Object.keys(obj).sort().map((k) => `${JSON.stringify(k)}:${canonicalJson(obj[k])}`).join(",")}}`;
+    const members = Object.keys(obj)
+      .map((k) => [k, serialise(obj[k], order)] as const)
+      .filter((m): m is readonly [string, string] => m[1] !== undefined)
+      .sort((a, b) => order(a[0], b[0]));
+    return `{${members.map(([k, v]) => `${JSON.stringify(k)}:${v}`).join(",")}}`;
   }
   return JSON.stringify(value);
 }
 
+/** UTF-16 code-unit order — RFC 8785's. */
+function utf16Order(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+/** RFC 8785 (JCS): members by UTF-16 code units, ECMAScript number and string forms; a body that sends nothing is `null`. */
+function canonicalJson(value: unknown): string {
+  return serialise(value, utf16Order) ?? "null";
+}
+
 /**
- * SHA-256 of `args` as the gateway canonicalises them: sorted keys, no whitespace, UTF-8. For `/a2a`
- * the arguments are `{ text: message }`.
+ * SHA-256 of `args` in RFC 8785 (JCS) form: members sorted by UTF-16 code units, ECMAScript number and string forms,
+ * no whitespace, and only what `JSON.stringify` sends (an `undefined`, function or symbol member dropped, `null` in an
+ * array, `toJSON` honoured), so the digest is of the body the gateway receives. This is the digest a **client signature** (`cs`) binds ({@link mcpBinding}); for `/a2a` the
+ * arguments are `{ text: message }`. A **possession proof** binds the gateway's mandate digest instead,
+ * {@link mandateArgumentsDigest}: the two differ for keys outside the Basic Multilingual Plane beside keys in
+ * U+E000–U+FFFF, and for floats in exponent form.
  */
 export function argumentsDigest(args: unknown): Uint8Array {
   return new Uint8Array(createHash("sha256").update(canonicalJson(args), "utf8").digest());
+}
+
+const utf8 = new TextEncoder();
+
+/** Compare two strings by their UTF-8 bytes — the order of the gateway's `BTreeMap<String, _>`. */
+function utf8Order(a: string, b: string): number {
+  const x = utf8.encode(a), y = utf8.encode(b);
+  for (let i = 0; i < Math.min(x.length, y.length); i++) if (x[i] !== y[i]) return x[i] - y[i];
+  return x.length - y.length;
+}
+
+/**
+ * SHA-256 of `args` as the gateway digests a mandate's arguments (`gateway_authority::arguments_digest`): the digest a
+ * **possession proof** binds ({@link mandateRequestBytes}) and a grant's `bound:args:`. Members sorted by UTF-8 bytes;
+ * numbers as `JSON.stringify` writes them, which matches the gateway for integers and for decimals not in exponent
+ * form — a float the gateway writes in exponent form differs (identity-and-lifecycle §9 O1), so send such a number
+ * as a string. Pinned by the `mandate_digest_cases` of `tests/fixtures/possession/vector.json`.
+ */
+export function mandateArgumentsDigest(args: unknown): Uint8Array {
+  return new Uint8Array(createHash("sha256").update(serialise(args, utf8Order) ?? "null", "utf8").digest());
 }
 
 /**
@@ -65,8 +113,11 @@ export function mandateRequestBytes(operation: string, resource: string, digest:
   return out;
 }
 
-/** @internal The `params` of a task request, with `_meta.mandate` when one is presented. */
-export function taskParams(taskId: string, skillId: string, message: string, opts?: SendOptions): Record<string, unknown> {
+/**
+ * @internal The `params` of a task request, with `_meta.mandate` when one is presented and the client's own
+ * signature (`_meta.cs`/`cn`, over the skill and `{text: message}`) when a signer is given.
+ */
+export function taskParams(taskId: string, skillId: string, message: string, opts?: SendOptions, signer?: ClientSigner): Record<string, unknown> {
   const params: Record<string, unknown> = {
     id:      taskId,
     skillId,
@@ -76,6 +127,7 @@ export function taskParams(taskId: string, skillId: string, message: string, opt
   if (opts?.mandate) meta.mandate = opts.mandate;
   if (opts?.correlation !== undefined) meta.correlation = opts.correlation;
   if (opts?.parent !== undefined) meta.parent = opts.parent;
+  if (signer) Object.assign(meta, signer.sign(...a2aBinding(skillId, message)));
   if (Object.keys(meta).length > 0) params._meta = meta;
   return params;
 }
@@ -244,12 +296,19 @@ export class A2aClient {
   private readonly baseUrl: string;
   private readonly auth: Record<string, string>;
   private readonly timeoutMs: number;
+  /**
+   * A service's {@link ClientSigner} (identity-and-lifecycle I1): every `send` and `stream` is then signed with its
+   * client-certificate key (`params._meta.cs`/`cn`), and the provider checks it. Its principal must be the one the
+   * bearer authenticates as.
+   */
+  readonly signer?: ClientSigner;
 
   // A full URL is taken here, so the scheme is in it; only the bearer applies.
-  constructor(agentCardUrl: string, { timeoutMs = 30_000, token }: { timeoutMs?: number } & Pick<AuthOptions, "token"> = {}) {
+  constructor(agentCardUrl: string, { timeoutMs = 30_000, token, signer }: { timeoutMs?: number; signer?: ClientSigner } & Pick<AuthOptions, "token"> = {}) {
     this.baseUrl   = agentCardUrl.replace(/\/$/, "");
     this.timeoutMs = timeoutMs;
     this.auth      = authHeaders(resolveToken(token));
+    this.signer    = signer;
   }
 
   // ── Discovery ───────────────────────────────────────────────────────────
@@ -280,7 +339,7 @@ export class A2aClient {
       jsonrpc: "2.0",
       id:      1,
       method:  "tasks/send",
-      params:  taskParams(taskId, skillId, message, opts),
+      params:  taskParams(taskId, skillId, message, opts, this.signer),
     };
 
     const resp = await fetch(`${this.baseUrl}/a2a`, {
@@ -355,7 +414,7 @@ export class A2aClient {
       jsonrpc: "2.0",
       id:      1,
       method:  "tasks/sendSubscribe",
-      params:  taskParams(taskId, skillId, message, opts),
+      params:  taskParams(taskId, skillId, message, opts, this.signer),
     };
 
     const resp = await fetch(`${this.baseUrl}/a2a`, {

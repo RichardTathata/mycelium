@@ -501,12 +501,45 @@ protected kind — is thrown, never reported as `"timeout"`.
 `grantsPending()` reads `GET /gateway/grants/pending` (`grant:read`) and `grantDecide(agent, request, "issue" |
 "refuse", { ttlSecs, reason })` posts the answer to `POST /gateway/grants/{agent}/{request}` (`grant:issue`);
 issuing is itself an action the node's evaluator decides, so a refusal is the route's 403, and 409 `not_a_member`
-names an agent on no member node this gateway knows. A grant is presented by its holder, the agent's node — not by this client. `grantRevoke(agent, request, {
+names an agent on no member node this gateway knows. A node's grant is presented by its holder, the agent's node; a client's own grant by the client (below). `grantRevoke(agent, request, {
 reason })` revokes at the issuing node, and `grantsStream()` is the requests as they come (an async generator of
 `grant_request`, `grant_answered` and `grant_expired` events).
 `A2aClient.getTask(id)` and `cancel(id)` are `tasks/get` and `tasks/cancel`: the task as the node holds it, readable
 and cancellable by the identity that created it; a cancel ends the task's record and stops no work — a task runs
 inside its request — and a terminal task throws (adopter-surface X7, the adapter contract).
+
+### A service's own key: signed calls and its own grants (identity-and-lifecycle I1)
+
+A service with a client certificate (`mycelium tls issue --client <name> --issuer <issuer>`, published at
+`POST /gateway/identity/client-cert`) signs every call with its key: give the clients its `ClientSigner`.
+`new McpClient(url, { signer }).callTool(name, args)` sends a `tools/call` to `/mcp` with `params._meta.cs`/`cn`;
+`new A2aClient(url, { signer })` signs every `send` and `stream`. A tool that needs a grant is called under one the
+service holds:
+
+```typescript
+const mcp = new McpClient("https://gw:8300", { token, signer: new ClientSigner(keyPem, "token:fleet/forecaster") });
+const asked = await mcp.requestGrant("weather.forecast", { city: "Lyon" });   // POST /gateway/grants/request
+const answer = await mcp.waitForGrant(asked.request);                         // GET /gateway/grants/request/{request}
+await mcp.callTool("weather.forecast", { city: "Lyon" }, { grant: answer.grant });   // possession proved for this call
+```
+
+`waitForGrant` throws `GrantNotIssuedError` naming the state a request ended in. `signer.provePossession(grant,
+operation, resource, args)` makes a `{grant, possession}` for any door (`A2aClient.send(…, { mandate })`), pinned by
+`tests/fixtures/possession/vector.json`. The proof binds the gateway's mandate digest, `mandateArgumentsDigest` —
+members by UTF-8 bytes — not the signature's JCS `argumentsDigest`; the two differ for a key outside the Basic
+Multilingual Plane beside one in U+E000–U+FFFF. A float in exponent form in a grant's arguments is refused at the
+gateway (identity-and-lifecycle §9 O1): send it as a string. `waitForGrant` ends within its timeout.
+
+**Refusals, and which to retry.** A refused `tools/call` throws `ActionRefusedError` for the evaluator's three answers
+(`.reason`: `action_denied` is final; `authority_not_established` means nobody decided — a grant not yet established,
+a revoked or used one, or a possession proof that did not verify; `evidence_not_recorded` is worth a retry) and
+`McpError` otherwise, with the provider's reason in `.data.reason`: `client_key_unknown` (the gateway has not read
+the certificate yet — retry), `client_key_superseded`, `client_signature_invalid`, `client_signature_unsafe_integer`
+(final). A replayed `cn` is dropped unanswered, so it surfaces as a timeout. The grant door refuses with an HTTP
+status, thrown as an `Error` whose message names the status and `error`: `not_a_client_holder` (publish the
+certificate first), `too_many_pending` (retry after an answer or an expiry), `not_durable` (retry), `no_provider`.
+A possession proof the gateway cannot verify is reported as `WrongHolder` inside `authority_not_established` — a
+wrong key and a digest that differs (the O1 float case) look the same to the gateway, which sees only the proof.
 
 ### The causal fields (0.2.7)
 

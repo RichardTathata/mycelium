@@ -445,6 +445,9 @@ issuance, so interleaved feeds cannot restore a superseded key). **A client key 
 `verify_signed_by` reads configured keys only, and the one reader of client keys is `GrantVerifier::check`'s
 possession step (`verify_client`) — so no mandate, checkpoint, cohort declaration, head, record or removal verifies
 under one. The issue signs the resource it evaluated into the grant (`bound:resource:`); the revocation evaluates that.
+The SDKs sign and prove possession as the service (I1, PR 3): `McpClient` and `A2aClient` with a `ClientSigner`; the
+possession proof's bytes are pinned by `tests/fixtures/possession/vector.json`, which the gateway's own `GrantVerifier`
+accepts in `the_possession_vector_is_the_gateways`.
 
 > **`sys/identity` authentication — partially closed (WS-E, in progress).** `sys/identity/{node}`
 > is a plain Layer-I KV value with **no signature**, and `merge_peer_keys` **accumulates** any key

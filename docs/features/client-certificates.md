@@ -16,8 +16,8 @@ every node that reads it.
   that the call is the one signed and the key is the principal's current one.
 - **Use it to hold a grant:** the service asks for one at `POST /gateway/grants/request` and proves possession with
   that key ([grants](grants.md)).
-- **Not when** you need the SDKs to sign or prove possession for you: the SDK `tools/call` clients and grant verbs are
-  not built yet ([identity and lifecycle § I1](../plans/identity-and-lifecycle.md#i1--client-certificates-for-services-d1-d1)).
+- **Not when** the caller is a node's own agent: a node signs with its identity key, and its grants are held by the
+  node ([grants](grants.md)).
 
 ## Turn it on
 
@@ -39,6 +39,16 @@ every node that reads it.
   `mycelium.ClientSigner`, TypeScript `ClientSigner`) and send what it returns as `params._meta.cs` and
   `params._meta.cn`. A signed call needs the gateway's `gateway_identity_issuer` set, or the door refuses it
   (`gateway_identity_issuer_unset`). Python needs `pip install 'mycelium-py[sign]'`.
+- From the SDKs, give the clients the signer and they sign every call: Python `McpClient(url, signer=…)` and
+  `A2aClient(url, signer=…)`, TypeScript `new McpClient(url, { signer })` and `new A2aClient(url, { signer })`.
+  `McpClient.call_tool` / `callTool` sends a `tools/call` to `/mcp`; `A2aClient`'s `send` and `stream` sign over the
+  skill and `{"text": message}`. A grant the service holds is asked for with `request_grant` / `requestGrant`, read
+  with `grant_status` / `grantStatus` (or waited for with `wait_for_grant` / `waitForGrant`), and presented with
+  `call_tool(…, grant=…)` / `callTool(…, { grant })`, which proves possession with the same key
+  (`ClientSigner.prove_possession` / `provePossession`, over the grant's canonical bytes — the vector
+  `tests/fixtures/possession/vector.json`, checked in Rust, jest and pytest; the proof binds the gateway's mandate
+  digest — members by UTF-8 bytes, TypeScript `mandateArgumentsDigest` — not the signature's JCS digest)
+  ([`mcp.py`](../../mycelium-py/src/mycelium/mcp.py), [`mcp.ts`](../../mycelium-ts/src/mcp.ts)).
 - `the_mcp_door_carries_a_client_signature_counts_an_unsigned_one_and_needs_an_issuer`, in
   [`src/agent/client_sig_tests.rs`](../../src/agent/client_sig_tests.rs), runs a signed call through `/mcp`.
 - `the_client_cert_door_is_identity_write_and_publishes_what_it_judged`, in
@@ -89,6 +99,12 @@ way. `a_newer_certificate_supersedes_the_older_key_and_an_overwrite_cannot_lower
   the provider that runs it (`gateway_actions_unsigned`, `provider_actions_unsigned` on `/stats`), not refused yet
   ([`deprecations.md` §87](../guide/deprecations.md)). The gateway's signature does not cover `cs`/`cn`, so a relay
   that strips them makes the call unsigned. The LLM doors refuse a signature (`client_signature_unbound`).
+- **A grant presented with a signature that fails is spent at the gateway.** The gateway claims a grant's use at its
+  preflight, before the provider checks `cs`, so a call refused `client_signature_invalid` under a grant has used the
+  grant at the gateway's door (`a_signed_call_presenting_a_client_grant_runs_at_mcp` states it). The gateway checking
+  the signature before it claims the use is listed for I1's PR 4.
+- **A possession proof that does not verify is `WrongHolder`**, whether the key is wrong or the client's digest of the
+  arguments differs (the O1 float case): the gateway sees only the proof.
 - **Reserved name:** no client certificate may be named `legacy`, the legacy token's principal.
 - **Ordering is the issuing host's clock.** The issuance is the serial, in ms, from the clock of the host that ran
   `mycelium tls issue`. A host whose clock runs behind can issue a certificate that orders below the one it
@@ -104,7 +120,8 @@ way. `a_newer_certificate_supersedes_the_older_key_and_an_overwrite_cannot_lower
   runs in the identity watcher's loop, so a large one delays the revocation fold; moving it off is a follow-up.
 - **Not built:**
   - refusing an unsigned action from a principal with a certificate on record (counted now);
-  - the SDK `tools/call` clients, and `cs`/`cn` in both A2A clients;
+  - the SDK clients run against a live node (they are tested against a recording stub, and the possession vector
+    against the gateway's verifier);
   - the three-node fleet exit run;
   - an un-upgraded node's reading of `sys/client-cert/`, which was not shown against the previous binary.
 
@@ -119,4 +136,7 @@ way. `a_newer_certificate_supersedes_the_older_key_and_an_overwrite_cannot_lower
 - **Code:** `refuse_if_client`, `client_identity` and `issue_client_cert` in
   [`mycelium-core/src/tls.rs`](../../mycelium-core/src/tls.rs); the fold in
   [`src/agent/client_cert.rs`](../../src/agent/client_cert.rs); the signature in
-  [`src/agent/client_sig.rs`](../../src/agent/client_sig.rs) and its vector in `tests/fixtures/cs/vector.json`.
+  [`src/agent/client_sig.rs`](../../src/agent/client_sig.rs) and its vector in `tests/fixtures/cs/vector.json`; the
+  SDKs' clients in [`mycelium-py/src/mycelium/mcp.py`](../../mycelium-py/src/mycelium/mcp.py) and
+  [`mycelium-ts/src/mcp.ts`](../../mycelium-ts/src/mcp.ts), the possession proof beside the signer, its vector in
+  `tests/fixtures/possession/vector.json`.

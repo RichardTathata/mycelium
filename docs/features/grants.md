@@ -72,7 +72,9 @@ This feature is turned on in code.
   for a client, the provider resolved at request time — so revoking needs no live provider — and the issuing node revokes it after a `rotate_identity` too, since the record
   is checked against every key the node has held; the resource is carried,
   not checked against a call's. A principal without a certificate on record is refused (`not_a_client_holder`,
-  `not_a_member`). The tests are in [`src/agent/client_grant_tests.rs`](../../src/agent/client_grant_tests.rs):
+  `not_a_member`). From the SDKs: `McpClient.request_grant` / `requestGrant`, `grant_status` / `grantStatus`,
+  `wait_for_grant` / `waitForGrant`, and `call_tool(…, grant=…)` / `callTool(…, { grant })`, which proves possession
+  with the client's key ([client certificates](client-certificates.md)). The tests are in [`src/agent/client_grant_tests.rs`](../../src/agent/client_grant_tests.rs):
   `a_grant_held_by_a_client_principal_is_requested_issued_presented_and_revoked`,
   `a_client_grant_is_revoked_against_its_issued_resource_with_the_provider_gone` (two nodes),
   `a_possession_proof_by_a_superseded_client_key_is_refused` and
