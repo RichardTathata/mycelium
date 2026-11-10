@@ -184,6 +184,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The Eve and Strands fleet nodes print `ready` only once they trust every other member's key** (an example
+  flake, no library change). A node was ready once the gateway saw the provider's tool and caller-context marker;
+  nothing waited for the provider to trust the gateway's key, so a first call that beat the gateway's handshake or
+  certificate record to the provider was refused `-32022 unknown_signer` (the Eve fleet job, twice in about 40 runs).
+  `examples/eve_fleet_node.rs` takes `FLEET`, every member's gossip address, and waits for
+  `trusted_identity_keys` of each; `examples/strands_fleet_node.rs` does the same over `PROVIDERS`.
 - **A grant the provider refused before running is given back** (I1, #745's review). The gateway's fold of client
   certificates can lead the provider's, so the provider answered `client_key_unknown` after the gateway had claimed the
   grant, and the retry was refused as already used. A `client_key_*`, `client_signature_*` or `stale` answer now

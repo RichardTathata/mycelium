@@ -151,6 +151,8 @@ const eve = spawn(nodeBin, [], {
   env: {
     ...process.env, NAME: "eve-3", DATA_DIR: path.join(work, "node-3"), CA_DIR: ca, PORT: String(node(3).gossip),
     HTTP_PORT: String(node(3).http), PEERS: `127.0.0.1:${node(1).gossip}`, PROVIDER: provider, EVE_MCP_URL: server.url,
+    // Ready only once it trusts a key for the gateway and the member, so it can verify the gateway's caller context.
+    FLEET: [1, 2, 3].map((i) => `127.0.0.1:${node(i).gossip}`).join(","),
     TOKENS: "forecaster:forecaster-token:mcp:invoke,prober:prober-token:kv:read+kv:write",
     ...(process.env.PROVIDER_WRITER_IDLE_TIMEOUT_SECS ? { WRITER_IDLE_TIMEOUT_SECS: process.env.PROVIDER_WRITER_IDLE_TIMEOUT_SECS } : {}),
     RUST_LOG: process.env.RUST_LOG ?? "warn",

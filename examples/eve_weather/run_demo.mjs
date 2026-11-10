@@ -77,6 +77,9 @@ const tokens = [
 const ca = process.env.EVE_FLEET_CA ?? path.join(work, "ca");
 if (!process.env.EVE_FLEET_CA) execFileSync(nodeBin, ["ca-init", ca], { stdio: "inherit" });
 const provider = `127.0.0.1:${node(3).gossip}`;
+// Every member's gossip address: a node is ready only once it trusts a key for each of the others, so the provider
+// can verify the gateway's signature on the first call (eve_fleet_node.rs).
+const fleet = [1, 2, 3].map((i) => `127.0.0.1:${node(i).gossip}`).join(",");
 const ready = [];
 for (const i of [1, 2, 3]) {
   const env = {
@@ -89,6 +92,7 @@ for (const i of [1, 2, 3]) {
     PEERS: i === 1 ? "" : `127.0.0.1:${node(1).gossip}`,
     TOKENS: tokens,
     PROVIDER: provider,
+    FLEET: fleet,
     ...(i === 3 ? { EVE_MCP_URL: server.url } : {}),
     RUST_LOG: process.env.RUST_LOG ?? "warn",
   };
