@@ -332,17 +332,32 @@ async fn node() {
     let _cap = agent.capabilities().advertise_capability(Capability::new(ns, skill_name), Duration::from_secs(30));
 
     // Ready when a send dispatches anywhere in the fleet: every skill advertised and every member's caller-context
-    // marker here (the gateway refuses to route to a node whose marker it cannot see).
+    // marker here (the gateway refuses to route to a node whose marker it cannot see)…
     let mut keys = vec![];
+    let mut members = vec![];
     for provided in env("PROVIDERS").split(',') {
         let (skill, provider) = provided.split_once('@').unwrap();
         keys.push(format!("cap/{provider}/{skill}"));
         keys.push(format!("sys/caller-context/{provider}"));
+        members.push(provider.parse::<NodeId>().expect("PROVIDERS is skill@host:port,…"));
     }
     for key in keys {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
         while agent.kv().get(&key).is_none() {
             assert!(tokio::time::Instant::now() < deadline, "{key} never reached {name}");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+    // …and when this node trusts a key for every other member. Those facts are this gateway's view of each provider,
+    // not a provider's view of this gateway: a provider verifies the caller context against the keys it trusts for
+    // the gateway that signed it, and learns that key from its own connection to it or from its identity and
+    // certificate records, any of which can arrive after the gateway has seen the provider's marker — a call sent
+    // then is refused `unknown_signer` (the Eve fleet's flake, `examples/eve_fleet_node.rs`). Every node waiting for
+    // every other's key makes each node a provider that knows its callers. One deadline for every member.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    for member in members.into_iter().filter(|m| m != &me) {
+        while agent.trusted_identity_keys(&member).is_empty() {
+            assert!(tokio::time::Instant::now() < deadline, "{name} never learned a key it trusts for {member}");
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
     }

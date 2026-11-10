@@ -5,7 +5,9 @@
 //!
 //! Every node is a fleet member with a gateway, the action evaluator, an evidence journal and named tokens. The node
 //! given `EVE_MCP_URL` bridges the loader's MCP server (`connect_mcp_server`), so the Eve tool is served from it; the
-//! others reach the tool by discovery, as any member reaches a tool another node serves.
+//! others reach the tool by discovery, as any member reaches a tool another node serves. A node prints `ready` once
+//! the tool and the provider's caller-context marker have reached it and it trusts a key for every other member named
+//! in `FLEET` (every member's gossip address, comma-separated) — so the provider can verify the gateway's first call.
 //!
 //! ```bash
 //! cargo build --example eve_fleet_node --features compliance,llm
@@ -142,6 +144,25 @@ async fn node() {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
         while agent.kv().get(&key).is_none() {
             assert!(tokio::time::Instant::now() < deadline, "{key} never reached {name}");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+    // …and when this node trusts a key for every other member of the fleet (`FLEET`, every member's gossip address).
+    // The two facts above are the gateway's view of the provider; they say nothing of the provider's view of the
+    // gateway. The provider verifies a call's caller context against the keys it trusts for the gateway that signed it
+    // (`trusted_identity_keys`, the set its envelope check reads), and it learns that key from its own connection to
+    // the gateway or from the gateway's identity and certificate records — any of which can arrive after the gateway
+    // has seen the provider's tool and marker. A call sent in that window is refused `unknown_signer`, before anything
+    // runs (at `/mcp` a grant it presented is given back).
+    // One deadline for every member, inside the driver's 120 s bound on the whole fleet.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    for member in env("FLEET").split(',').filter(|m| !m.is_empty()) {
+        let member: NodeId = member.parse().expect("FLEET is host:port,…");
+        if member == me {
+            continue;
+        }
+        while agent.trusted_identity_keys(&member).is_empty() {
+            assert!(tokio::time::Instant::now() < deadline, "{name} never learned a key it trusts for {member}");
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
     }

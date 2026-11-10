@@ -120,10 +120,12 @@ way. `a_newer_certificate_supersedes_the_older_key_and_an_overwrite_cannot_lower
   `the_door_refuses_a_stale_an_unsafe_and_an_unverifiable_signature_by_name`). It does not check `cn`: the replay
   window is the provider's, which checks everything again.
 - **At `/mcp`, a grant the provider refused before running is given back.** The gateway's fold of client certificates
-  can lead the provider's. When the provider node answers `client_key_*`, `client_signature_*` or `stale`, nothing ran:
-  its tool serve loop refused the call before the handler, answering `-32022` with the reason in `data.reason`. The
-  gateway then tombstones its `…/used/{door}` marker and releases its claim, so `client_key_unknown` is retriable under
-  the same grant (`a_grant_the_provider_refused_before_running_is_given_back`).
+  can lead the provider's. When the provider node answers `client_key_*`, `client_signature_*`, `stale` or
+  `unknown_signer`, nothing ran: its tool serve loop refused the call before the handler, answering `-32022` with the
+  reason in `data.reason`. The gateway then tombstones its `…/used/{door}` marker and releases its claim, so
+  `client_key_unknown`, and a provider's `unknown_signer` for a gateway key it has not learned yet, are retriable under
+  the same grant (`a_grant_the_provider_refused_before_running_is_given_back`,
+  `a_provider_that_does_not_yet_trust_the_gateway_gives_the_grant_back`).
   - **Only the node authors such a refusal.** A native tool's answer is wrapped in `result` or answered `-32603`. A
     bridged MCP server's reply in the node's refusal shape is rewritten into an ordinary tool error, `-32000`
     (`a_bridged_tool_answering_like_a_refusal_after_running_leaves_the_grant_spent`). A tool that ran its effect cannot

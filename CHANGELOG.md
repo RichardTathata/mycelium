@@ -184,6 +184,19 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A provider's `unknown_signer` gives a grant back at `/mcp`** (#752's review). A provider that has just joined may
+  not yet trust a key for the gateway, and refuses its caller context `-32022 unknown_signer` at its receive boundary,
+  before anything runs. The gateway kept the grant the call presented spent, so the retry was refused as already used.
+  `unknown_signer` is now one of the refusals that release the claim, as `client_key_unknown` is
+  (`a_provider_that_does_not_yet_trust_the_gateway_gives_the_grant_back`, seen failing first). A bridged server cannot
+  forge it: its `-32022` replies are rewritten into tool errors. The gateway does not retry for the caller, and the
+  provider does not fetch the gateway's certificate on the refusal; both are not built (#753).
+- **The Eve and Strands fleet nodes print `ready` only once they trust every other member's key** (an example
+  flake). A node was ready once the gateway saw the provider's tool and caller-context marker;
+  nothing waited for the provider to trust the gateway's key, so a first call that beat the gateway's handshake or
+  certificate record to the provider was refused `-32022 unknown_signer` (the Eve fleet job, once, in run 42752640837).
+  `examples/eve_fleet_node.rs` takes `FLEET`, every member's gossip address, and waits for
+  `trusted_identity_keys` of each; `examples/strands_fleet_node.rs` does the same over `PROVIDERS`.
 - **A grant the provider refused before running is given back** (I1, #745's review). The gateway's fold of client
   certificates can lead the provider's, so the provider answered `client_key_unknown` after the gateway had claimed the
   grant, and the retry was refused as already used. A `client_key_*`, `client_signature_*` or `stale` answer now

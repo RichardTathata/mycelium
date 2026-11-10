@@ -47,6 +47,14 @@ one of three questions. The end-to-end run is a test in
 - **Not built:** the gateway attests who its client is; it does not authenticate the client beyond the credential it
   presented, and the presented mandate rides beside the context, carried, not verified, until the provider verifies
   it ([rbac § 7](../operations/rbac.md#7-gateway-caller-identity--who-a-provider-sees-behind-a-gateway-call)).
+- **Not built: the first call to a newly joined provider can be refused.** The provider verifies the envelope against
+  the keys it trusts for the gateway, learned from its own connection to the gateway or the gateway's certificate
+  record. Either can arrive after the gateway sees the provider's tool and caller-context marker, so the gateway's
+  first call can be refused `-32022 unknown_signer` at the provider's receive boundary, before anything runs. At
+  `/mcp` that refusal gives back a grant the call presented, so a retry under the same grant is safe
+  (`a_provider_that_does_not_yet_trust_the_gateway_gives_the_grant_back`). Neither the retry nor an immediate fetch
+  of the sender's certificate by the provider is built: the caller retries
+  ([issue #753](https://github.com/RichardTathata/mycelium/issues/753)).
 - **Evidence:** the ledger row
   [a gateway caller envelope is served once, at its provider](../operations/what-is-proven.md#gateway-caller-envelope-served-once-provider).
 
