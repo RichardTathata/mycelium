@@ -79,3 +79,16 @@ def test_rfc_8785_writes_every_sampled_double_as_ecmascript_does():
     fx = json.loads((Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "cs" / "es_numbers.json").read_text())
     wrong = [c for c in fx["cases"] if canonical_json(struct.unpack(">d", bytes.fromhex(c[0]))[0]) != c[1]]
     assert not wrong, wrong[:3]
+
+
+def test_the_decision_vector_is_the_same_in_every_language():
+    # Identity-and-lifecycle I3: the grant-decision signature, pinned for Rust, jest and pytest.
+    from mycelium.client_sig import grant_decision_message
+    v = json.loads((Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "decision" / "vector.json").read_text())
+    signer = ClientSigner(bytes.fromhex(v["seed_hex"]), v["decider"])
+    for case in v["cases"]:
+        msg = grant_decision_message(v["decider"], v["node"], v["agent"], case["request"], case["decision"], case["ttl_secs"], case["reason"], v["t"])
+        assert msg.hex() == case["message_hex"], case
+        signed = signer.sign_grant_decision(v["node"], v["agent"], case["request"], case["decision"],
+                                            ttl_secs=case["ttl_secs"], reason=case["reason"], issued_at_ms=v["t"])
+        assert signed == case["signed"], case

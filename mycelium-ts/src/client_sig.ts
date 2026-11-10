@@ -54,6 +54,38 @@ export function clientSignatureMessage(
   return out;
 }
 
+const GRANT_DECISION_TAG = "mycelium.gateway/grant-decision/1";
+
+/** A decision's signature, sent as the decision body's `signed` field (identity-and-lifecycle I3). */
+export interface SignedDecision { decider: string; node: string; agent: string; request: string; t: number; k: string; sig: string }
+
+/**
+ * The bytes a decider signs to answer a grant request (identity-and-lifecycle I3): the tag; the decider, the addressed
+ * node, the request's holder (a principal), the request id, the decision (`issue`, `refuse` or `revoke`), an issue's
+ * `ttlSecs` in decimal (empty when absent) and the reason (empty when absent), each a `u32` little-endian length and
+ * its UTF-8 bytes; then `issuedAtMs` as a `u64` little-endian. Pinned by `tests/fixtures/decision/vector.json`.
+ */
+export function grantDecisionMessage(
+  decider: string, node: string, agent: string, request: string, decision: string,
+  ttlSecs: number | undefined, reason: string | undefined, issuedAtMs: bigint,
+): Uint8Array {
+  const enc = new TextEncoder();
+  const chunks: Uint8Array[] = [enc.encode(GRANT_DECISION_TAG)];
+  for (const part of [decider, node, agent, request, decision, ttlSecs === undefined ? "" : String(Math.trunc(ttlSecs)), reason ?? ""]) {
+    const b = enc.encode(part);
+    const len = new Uint8Array(4);
+    new DataView(len.buffer).setUint32(0, b.length, true);
+    chunks.push(len, b);
+  }
+  const t = new Uint8Array(8);
+  new DataView(t.buffer).setBigUint64(0, issuedAtMs, true);
+  chunks.push(t);
+  const out = new Uint8Array(chunks.reduce((n, c) => n + c.length, 0));
+  let off = 0;
+  for (const c of chunks) { out.set(c, off); off += c.length; }
+  return out;
+}
+
 /**
  * Does `value` hold, at any depth, an integral number outside ±(2^53 − 1)? RFC 8785 writes it as the nearest double,
  * so a signature could not tell it from its neighbour: such a call is refused, at the signer and the provider. Send
@@ -193,6 +225,22 @@ export class ClientSigner {
     const request = mandateRequestBytes(operation, resource, mandateArgumentsDigest(args));
     const proof = sign(null, possessionMessage(grant.mandate, request), this.key);
     return { grant, possession: proof.toString("base64") };
+  }
+
+  /**
+   * Sign an answer to the grant request `request` held by `agent` (a principal, as the pending list's `agent` names
+   * it), addressed to the node `node` (its id, as `GET /health` reports it): `decision` is `"issue"` (with `ttlSecs`),
+   * `"refuse"` or `"revoke"` (with `reason`). Returns the decision body's `signed` field; the node it is addressed to
+   * records this signer as the decision's actor, whoever carries it (identity-and-lifecycle I3).
+   */
+  signGrantDecision(
+    node: string, agent: string, request: string, decision: "issue" | "refuse" | "revoke",
+    opts?: { ttlSecs?: number; reason?: string; issuedAtMs?: number },
+  ): SignedDecision {
+    if (!["issue", "refuse", "revoke"].includes(decision)) throw new Error('decision must be "issue", "refuse" or "revoke"');
+    const t = opts?.issuedAtMs ?? Date.now();
+    const msg = grantDecisionMessage(this.principal, node, agent, request, decision, opts?.ttlSecs, opts?.reason, BigInt(t));
+    return { decider: this.principal, node, agent, request, t, k: this.raw.toString("base64"), sig: sign(null, msg, this.key).toString("base64") };
   }
 
   /**

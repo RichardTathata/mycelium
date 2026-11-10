@@ -1162,6 +1162,12 @@ pub struct AeEvidence {
     /// construction.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supersedes: Option<String>,
+    /// **A signed grant decision, as it was presented** (identity-and-lifecycle I3, D3): the decider's
+    /// `SignedDecision` — key, signature and the signed fields — with the decision's terms and the bearer that carried
+    /// it (`relayed_by`). Kept so the record can be re-verified afterwards (`SignedDecision::verify_signature` over
+    /// these fields, the key judged against the decider's `sys/client-cert/` records). `None` on every other record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signed_decision: Option<serde_json::Value>,
     /// The caller's correlation identity, stable across retries.
     pub operation_id: String,
     /// This dispatch's identity.
@@ -1271,6 +1277,7 @@ impl AeEvidence {
             origin_domain: None,
             // A record is an original until something says otherwise.
             supersedes: None,
+            signed_decision: None,
             operation_id: envelope.operation_id.clone(),
             attempt_id: envelope.attempt_id.clone(),
             arguments_digest: hex32(&envelope.arguments_digest),

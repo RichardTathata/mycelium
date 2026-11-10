@@ -734,8 +734,18 @@ class MyceliumAgent:
         *,
         ttl_secs: Optional[int] = None,
         reason: Optional[str] = None,
+        signer: Optional[Any] = None,
+        node: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """``POST /gateway/grants/{agent}/{request}`` (``grant:issue``): answer a pending request.
+        """``POST /gateway/grants/{agent}/{request}`` (``grant:issue``, or ``grant:relay`` with ``signer``): answer a
+        pending request.
+
+        With ``signer`` (a :class:`~mycelium.ClientSigner` for a principal holding a client certificate and
+        ``grant:issue`` at the node), the decision is signed (identity-and-lifecycle I3): the node records the signer
+        as its actor, so this client's own bearer needs only ``grant:relay``. It is addressed to ``node`` — the node
+        whose gateway this client talks to, read from ``GET /health`` when not given; ``agent`` is then the holder's
+        principal, as the pending list's ``agent`` names it. A signed decision is refused 403 ``not_the_decider``
+        (another key), ``decision_retargeted``, ``decider_lacks_scope`` or ``stale``, and 409 ``not_addressed_here``.
 
         ``decision`` is ``"issue"`` or ``"refuse"``; ``ttl_secs`` bounds an issued grant (default 300, at most
         3 600); ``reason`` is shown to the agent on a refusal. Issuing is itself an action the node's evaluator
@@ -751,6 +761,12 @@ class MyceliumAgent:
             body["ttl_secs"] = ttl_secs
         if reason is not None:
             body["reason"] = reason
+        if signer is not None:
+            body["signed"] = signer.sign_grant_decision(
+                node if node is not None else self.node_id, agent, request, decision,
+                ttl_secs=ttl_secs if decision == "issue" else None,
+                reason=reason if decision == "refuse" else None,
+            )
         with self._pool.sync() as c:
             resp = c.post(f"/gateway/grants/{path_segment(agent)}/{path_segment(request)}", json=body)
             resp.raise_for_status()
@@ -776,16 +792,20 @@ class MyceliumAgent:
                         data["event"] = event.event or "grant_request"
                         yield data
 
-    def grant_revoke(self, agent: str, request: str, *, reason: Optional[str] = None) -> Dict[str, Any]:
-        """``POST /gateway/grants/{agent}/{request}/revoke`` (``grant:issue``): revoke an issued grant, at the node
-        that issued it (409 ``not_the_issuer`` elsewhere; 404 ``not_issued``; 409 ``already_revoked``). Revoking is an
-        action the node's evaluator decides (``grant.revoke``), so a supervisor the policy does not permit is answered
-        403. The grant is refused at every door afterwards, and work running under it is stopped. Returns the route's
-        answer: the revocation record's ``key``, ``operation_id`` and ``local_durability``.
+    def grant_revoke(self, agent: str, request: str, *, reason: Optional[str] = None, signer: Optional[Any] = None,
+                     node: Optional[str] = None) -> Dict[str, Any]:
+        """``POST /gateway/grants/{agent}/{request}/revoke`` (``grant:issue``, or ``grant:relay`` with ``signer``):
+        revoke an issued grant, at the node that issued it (409 ``not_the_issuer`` elsewhere; 404 ``not_issued``; 409
+        ``already_revoked``). Revoking is an action the node's evaluator decides (``grant.revoke``), so a supervisor the
+        policy does not permit is answered 403. The grant is refused at every door afterwards, and work running under it
+        is stopped. ``signer`` and ``node`` sign the revocation as :meth:`grant_decide` signs a decision. Returns the
+        route's answer: the revocation record's ``key``, ``operation_id`` and ``local_durability``.
         """
         body: Dict[str, Any] = {}
         if reason is not None:
             body["reason"] = reason
+        if signer is not None:
+            body["signed"] = signer.sign_grant_decision(node if node is not None else self.node_id, agent, request, "revoke", reason=reason)
         with self._pool.sync() as c:
             resp = c.post(f"/gateway/grants/{path_segment(agent)}/{path_segment(request)}/revoke", json=body)
             resp.raise_for_status()

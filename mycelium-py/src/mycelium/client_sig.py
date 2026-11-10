@@ -51,6 +51,33 @@ def client_signature_message(
     return bytes(out)
 
 
+GRANT_DECISION_TAG = b"mycelium.gateway/grant-decision/1"
+
+
+def grant_decision_message(
+    decider: str,
+    node: str,
+    agent: str,
+    request: str,
+    decision: str,
+    ttl_secs: Optional[int],
+    reason: Optional[str],
+    issued_at_ms: int,
+) -> bytes:
+    """The bytes a decider signs to answer a grant request (identity-and-lifecycle I3): the tag; the decider, the
+    addressed node, the request's holder (a principal), the request id, the decision (``issue``, ``refuse`` or
+    ``revoke``), an issue's ``ttl_secs`` in decimal (empty when absent) and the reason (empty when absent), each a
+    ``u32`` little-endian length and its UTF-8 bytes; then ``issued_at_ms`` as a ``u64`` little-endian. Pinned by
+    ``tests/fixtures/decision/vector.json``."""
+    out = bytearray(GRANT_DECISION_TAG)
+    ttl = "" if ttl_secs is None else str(int(ttl_secs))
+    for part in (decider, node, agent, request, decision, ttl, reason or ""):
+        b = part.encode("utf-8")
+        out += struct.pack("<I", len(b)) + b
+    out += struct.pack("<Q", issued_at_ms)
+    return bytes(out)
+
+
 _MAX_SAFE_INTEGER = 2**53 - 1
 
 
@@ -241,6 +268,30 @@ class ClientSigner:
         request = mandate_request_bytes(operation, resource, arguments_digest(arguments))
         proof = self._key.sign(possession_message(mandate, request))
         return {"grant": grant, "possession": base64.b64encode(proof).decode()}
+
+    def sign_grant_decision(self, node: str, agent: str, request: str, decision: str, *,
+                            ttl_secs: Optional[int] = None, reason: Optional[str] = None,
+                            issued_at_ms: Optional[int] = None) -> Dict[str, Any]:
+        """Sign an answer to the grant request ``request`` held by ``agent`` (a principal, as the pending list's
+        ``agent`` names it), addressed to the node ``node`` (its id, as ``GET /health`` reports it): ``decision`` is
+        ``"issue"`` (with ``ttl_secs``), ``"refuse"`` or ``"revoke"`` (with ``reason``). Returns the decision body's
+        ``signed`` field; the node it is addressed to records this signer as the decision's actor, whoever carries it
+        (identity-and-lifecycle I3)."""
+        import base64
+
+        if decision not in ("issue", "refuse", "revoke"):
+            raise ValueError('decision must be "issue", "refuse" or "revoke"')
+        t = issued_at_ms if issued_at_ms is not None else int(time.time() * 1000)
+        msg = grant_decision_message(self.principal, node, agent, request, decision, ttl_secs, reason, t)
+        return {
+            "decider": self.principal,
+            "node": node,
+            "agent": agent,
+            "request": request,
+            "t": t,
+            "k": base64.b64encode(self._raw).decode(),
+            "sig": base64.b64encode(self._key.sign(msg)).decode(),
+        }
 
     def sign(self, operation: str, resource: str, digest: bytes, *, issued_at_ms: Optional[int] = None,
              counter: Optional[int] = None) -> Dict[str, Any]:

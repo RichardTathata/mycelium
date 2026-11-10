@@ -1,0 +1,90 @@
+{
+  "_doc": "Identity-and-lifecycle I3: a decider's signature over a grant decision (grant_decision_message). The key is the Ed25519 seed 0x07 x 32; Ed25519 is deterministic, so each signature is reproduced exactly. Checked by Rust (the_decision_vector_is_the_same_in_every_language), jest and pytest.",
+  "seed_hex": "0707070707070707070707070707070707070707070707070707070707070707",
+  "decider": "token:fleet/treasurer",
+  "node": "127.0.0.1:7946",
+  "agent": "token:fleet/forecaster",
+  "t": 1794000000123,
+  "cases": [
+    {
+      "request": "01a1c24caa180000-127.0.0.1:7946",
+      "decision": "issue",
+      "ttl_secs": 600,
+      "reason": null,
+      "message_hex": "6d7963656c69756d2e676174657761792f6772616e742d6465636973696f6e2f3115000000746f6b656e3a666c6565742f7472656173757265720e0000003132372e302e302e313a3739343616000000746f6b656e3a666c6565742f666f72656361737465721f000000303161316332346361613138303030302d3132372e302e302e313a3739343605000000697373756503000000363030000000007b94bbb2a1010000",
+      "signed": {
+        "decider": "token:fleet/treasurer",
+        "node": "127.0.0.1:7946",
+        "agent": "token:fleet/forecaster",
+        "request": "01a1c24caa180000-127.0.0.1:7946",
+        "t": 1794000000123,
+        "k": "6kpsY+KcUgq+9VB7Ey7F+ZVHdq6+vnuSQh7qaRRG0iw=",
+        "sig": "9L1HNoyhLHZQDAQr0UkZOcEmrHUNi7mHB4Qz7GXVhRM3HsePp001s0nBCj5PfLyWdpDR+s2f7hzOVaw/o+rNAA=="
+      }
+    },
+    {
+      "request": "01a1c24caa180000-127.0.0.1:7946",
+      "decision": "issue",
+      "ttl_secs": null,
+      "reason": null,
+      "message_hex": "6d7963656c69756d2e676174657761792f6772616e742d6465636973696f6e2f3115000000746f6b656e3a666c6565742f7472656173757265720e0000003132372e302e302e313a3739343616000000746f6b656e3a666c6565742f666f72656361737465721f000000303161316332346361613138303030302d3132372e302e302e313a3739343605000000697373756500000000000000007b94bbb2a1010000",
+      "signed": {
+        "decider": "token:fleet/treasurer",
+        "node": "127.0.0.1:7946",
+        "agent": "token:fleet/forecaster",
+        "request": "01a1c24caa180000-127.0.0.1:7946",
+        "t": 1794000000123,
+        "k": "6kpsY+KcUgq+9VB7Ey7F+ZVHdq6+vnuSQh7qaRRG0iw=",
+        "sig": "jDbaUVF/P2z66oUEN+qRVI1k1sjXNFl1s9LLsKWk5l7RdlKrdjrtLpBDHz2LUM12LVBcOY8JXgYMegC7rm5hBQ=="
+      }
+    },
+    {
+      "request": "01a1c24caa180001-127.0.0.1:7946",
+      "decision": "refuse",
+      "ttl_secs": null,
+      "reason": "not this season",
+      "message_hex": "6d7963656c69756d2e676174657761792f6772616e742d6465636973696f6e2f3115000000746f6b656e3a666c6565742f7472656173757265720e0000003132372e302e302e313a3739343616000000746f6b656e3a666c6565742f666f72656361737465721f000000303161316332346361613138303030312d3132372e302e302e313a3739343606000000726566757365000000000f0000006e6f74207468697320736561736f6e7b94bbb2a1010000",
+      "signed": {
+        "decider": "token:fleet/treasurer",
+        "node": "127.0.0.1:7946",
+        "agent": "token:fleet/forecaster",
+        "request": "01a1c24caa180001-127.0.0.1:7946",
+        "t": 1794000000123,
+        "k": "6kpsY+KcUgq+9VB7Ey7F+ZVHdq6+vnuSQh7qaRRG0iw=",
+        "sig": "hkfCZsWn6U1ZltwPuEU021w9wEIhfUjlhumckz0WkWYhw7MkOM5+7lv2gMDrp+dhh9ZXeftHCsR2jpD7ZuPBBQ=="
+      }
+    },
+    {
+      "request": "01a1c24caa180002-127.0.0.1:7946",
+      "decision": "revoke",
+      "ttl_secs": null,
+      "reason": "élan 😀",
+      "message_hex": "6d7963656c69756d2e676174657761792f6772616e742d6465636973696f6e2f3115000000746f6b656e3a666c6565742f7472656173757265720e0000003132372e302e302e313a3739343616000000746f6b656e3a666c6565742f666f72656361737465721f000000303161316332346361613138303030322d3132372e302e302e313a37393436060000007265766f6b65000000000a000000c3a96c616e20f09f98807b94bbb2a1010000",
+      "signed": {
+        "decider": "token:fleet/treasurer",
+        "node": "127.0.0.1:7946",
+        "agent": "token:fleet/forecaster",
+        "request": "01a1c24caa180002-127.0.0.1:7946",
+        "t": 1794000000123,
+        "k": "6kpsY+KcUgq+9VB7Ey7F+ZVHdq6+vnuSQh7qaRRG0iw=",
+        "sig": "yLNWHdkmggtgZC0TT3ut+jos6EhFyojEHaXFcwEPM/WpiuVhWLVLoNSNgFU9QM7m/vlp2sd8ajRnU7snXGjoBg=="
+      }
+    },
+    {
+      "request": "01a1c24caa180003-127.0.0.1:7946",
+      "decision": "revoke",
+      "ttl_secs": null,
+      "reason": null,
+      "message_hex": "6d7963656c69756d2e676174657761792f6772616e742d6465636973696f6e2f3115000000746f6b656e3a666c6565742f7472656173757265720e0000003132372e302e302e313a3739343616000000746f6b656e3a666c6565742f666f72656361737465721f000000303161316332346361613138303030332d3132372e302e302e313a37393436060000007265766f6b6500000000000000007b94bbb2a1010000",
+      "signed": {
+        "decider": "token:fleet/treasurer",
+        "node": "127.0.0.1:7946",
+        "agent": "token:fleet/forecaster",
+        "request": "01a1c24caa180003-127.0.0.1:7946",
+        "t": 1794000000123,
+        "k": "6kpsY+KcUgq+9VB7Ey7F+ZVHdq6+vnuSQh7qaRRG0iw=",
+        "sig": "fPP/yAfLlVlXZkaNqv1s7QlKiwhAeKrtef/lM/nBTPPqC5HdVT4y9e0Xb7TVnu4YhI9mw8fUQDCfVsXeJOguAQ=="
+      }
+    }
+  ]
+}

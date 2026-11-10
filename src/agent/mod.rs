@@ -186,6 +186,8 @@ pub(crate) mod revocation;
 pub(crate) mod client_cert;
 /// Identity-and-lifecycle I1 (D1′): a client's own signature on a gateway call — `cs` and `cn`.
 pub(crate) mod client_sig;
+/// Identity-and-lifecycle I3 (D3, D5): a supervisor's signed answer to a grant request, carried under `grant:relay`.
+pub(crate) mod grant_decision;
 #[cfg(all(test, feature = "tls", feature = "gateway"))]
 mod client_sig_tests;
 #[cfg(all(test, feature = "compliance"))]
@@ -1005,6 +1007,11 @@ pub(crate) struct TaskCtx {
     /// Identity-and-lifecycle I1: calls by a principal with a client certificate on record that carried no `cs`.
     #[cfg(feature = "tls")]
     pub(crate) unsigned_actions: client_sig::UnsignedActions,
+    /// Identity-and-lifecycle I3 (#754's review, finding 1): the grant requests a decision route is answering on this
+    /// node now, one claim per request key, so concurrent copies of one decision are answered once. A papaya set, no
+    /// lock (no lock-order row).
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    pub(crate) grant_decisions_in_flight: papaya::HashSet<String>,
     /// A `correlation` or `parent` carried where it is never read — a header at an HTTP door, or a field in the caller
     /// envelope (adopter-surface X4): counted **by door**, the record's field left empty. `GET /stats`
     /// `causal_fields_misplaced` is the map; lock-free (papaya), no lock-order row.
@@ -1628,6 +1635,8 @@ impl GossipAgent {
             client_replay: Default::default(),
             #[cfg(feature = "tls")]
             unsigned_actions: Default::default(),
+            #[cfg(all(feature = "gateway", feature = "tls"))]
+            grant_decisions_in_flight: papaya::HashSet::new(),
             causal_misplaced: papaya::HashMap::new(),
             #[cfg(feature = "a2a")]
             a2a_mounted: AtomicBool::new(false),

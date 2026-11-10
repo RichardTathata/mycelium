@@ -34,6 +34,11 @@ resource  = "tool:weather.forecast"
 actor     = "token:fleet/treasurer"
 operation = "grant.revoke"
 resource  = "tool:weather.forecast"
+
+[[rule]]
+actor     = "token:fleet/treasurer"
+operation = "grant.refuse"
+resource  = "tool:weather.forecast"
 "#;
 
 fn scratch(tag: &str) -> PathBuf {
@@ -70,6 +75,8 @@ fn config(dir: &Path, http_port: u16, n: &Node) -> (NodeId, GossipConfig) {
         GatewayNamedToken { name: "forecaster".into(), token: "fc-secret".into(), scopes: vec!["mcp:invoke".into()] },
         GatewayNamedToken { name: "nobody".into(), token: "nobody-secret".into(), scopes: vec!["mcp:invoke".into()] },
         GatewayNamedToken { name: "treasurer".into(), token: "treasurer-secret".into(), scopes: vec!["grant:read".into(), "grant:issue".into()] },
+        // Identity-and-lifecycle I3: a relay carries a decision someone else signed, and decides nothing itself.
+        GatewayNamedToken { name: "relay".into(), token: "relay-secret".into(), scopes: vec!["grant:read".into(), "grant:relay".into()] },
     ];
     cfg.authority = n.authority.then(|| AuthorityConfig {
         declarations: dir.join("units"),
@@ -90,8 +97,13 @@ fn forecaster_key(a: &GossipAgent, dir: &Path) -> ed25519_dalek::SigningKey {
 }
 
 fn forecaster_key_in(a: &GossipAgent, certs: &Path, out: &Path) -> ed25519_dalek::SigningKey {
+    client_key_in(a, certs, out, "forecaster")
+}
+
+/// Issue `name`'s client certificate from the node's CA (into `out`), publish it, return its key.
+fn client_key_in(a: &GossipAgent, certs: &Path, out: &Path, name: &str) -> ed25519_dalek::SigningKey {
     use ed25519_dalek::pkcs8::DecodePrivateKey;
-    let (cert, key) = crate::issue_client_cert(certs, ISSUER, "forecaster", out).unwrap();
+    let (cert, key) = crate::issue_client_cert(certs, ISSUER, name, out).unwrap();
     let der = rustls::pki_types::CertificateDer::from_pem_file(&cert).unwrap();
     a.publish_client_cert(der.as_ref()).expect("published");
     let der = rustls::pki_types::PrivatePkcs8KeyDer::from_pem_file(&key).unwrap();
@@ -763,4 +775,319 @@ async fn a_provider_that_does_not_yet_trust_the_gateway_gives_the_grant_back() {
     assert!(trusted, "B trusts A's key again after its fold");
     assert!(again.get("result").is_some(), "SPENT: the retry under the same grant was refused: {again}");
     assert_eq!(ran_again, 1, "the tool ran once");
+}
+
+/// **A signed decision is the decider's, wherever it is carried** (identity-and-lifecycle I3, D3 and D5). The
+/// treasurer, holding a client certificate and `grant:issue`, signs its answers; a relay holding only `grant:relay`
+/// carries them. Under `grant:relay` an unsigned body is refused (`decision_unsigned`); a signed one presented for
+/// another request is refused (`decision_retargeted`); one addressed to another node is refused (`not_addressed_here`);
+/// one signed with a key that is not the named decider's is refused (`not_the_decider`); one signed by a principal
+/// without `grant:issue` here is refused (`decider_lacks_scope`); a token holding neither scope is refused naming both.
+/// The honest relayed issue succeeds with the **treasurer** as the actor: the grant's purpose and the evidence record
+/// name the signer, the relay is named beside it, and the grant runs; the relayed signed revocation revokes it. An
+/// unsigned decision by the treasurer's own bearer still succeeds this release and is counted
+/// (`grant_decisions_unsigned`). Seen failing first, one build per plant: listed in the PR.
+#[tokio::test]
+async fn a_signed_decision_relayed_under_grant_relay_is_the_signers() {
+    use crate::agent::action_evaluator::{AeEvidence, RecordKind};
+    let dir = scratch("decide");
+    let http_port = alloc_port();
+    let (a, ran) = started(&dir, http_port).await;
+    let fc_key = forecaster_key(&a, &dir);
+    let treasurer_key = client_key_in(&a, &dir.join("tls"), &dir.join("client-treasurer"), "treasurer");
+    const TREASURER: &str = "token:fleet/treasurer";
+    let node = a.node_id().to_string();
+    let ask = |args: serde_json::Value| http(http_port, "fc-secret", reqwest::Method::POST, "/gateway/grants/request", Some(serde_json::json!({"tool": TOOL, "arguments": args})));
+    let (args1, args2, args3) = (serde_json::json!({"city": "Lyon"}), serde_json::json!({"city": "Metz"}), serde_json::json!({"city": "Brest"}));
+    let (_, r1) = ask(args1.clone()).await;
+    let (_, r2) = ask(args2.clone()).await;
+    let (_, r3) = ask(args3.clone()).await;
+    let (req1, req2, req3) = (r1["request"].as_str().unwrap().to_string(), r2["request"].as_str().unwrap().to_string(), r3["request"].as_str().unwrap().to_string());
+    let sign = |key: &ed25519_dalek::SigningKey, decider: &str, node: &str, request: &str, decision: &str, ttl: Option<u64>, reason: Option<&str>| {
+        crate::sign_grant_decision(key, decider, node, FORECASTER, request, decision, ttl, reason, mycelium_core::sim_seam::wall_now_ms())
+    };
+    let decide = |bearer: &'static str, request: String, body: serde_json::Value| async move {
+        http(http_port, bearer, reqwest::Method::POST, &format!("/gateway/grants/{}/{}", segment(FORECASTER), segment(&request)), Some(body)).await
+    };
+    let issue_signed = |s: crate::SignedDecision| serde_json::json!({"decision": "issue", "ttl_secs": 600, "signed": s});
+
+    let unsigned = decide("relay-secret", req1.clone(), serde_json::json!({"decision": "issue", "ttl_secs": 600})).await;
+    let retargeted = decide("relay-secret", req2.clone(), issue_signed(sign(&treasurer_key, TREASURER, &node, &req1, "issue", Some(600), None))).await;
+    let elsewhere = decide("relay-secret", req1.clone(), issue_signed(sign(&treasurer_key, TREASURER, "127.0.0.1:1", &req1, "issue", Some(600), None))).await;
+    let foreign = decide("relay-secret", req1.clone(), issue_signed(sign(&fc_key, TREASURER, &node, &req1, "issue", Some(600), None))).await;
+    let no_scope = decide("relay-secret", req1.clone(), issue_signed(sign(&fc_key, FORECASTER, &node, &req1, "issue", Some(600), None))).await;
+    let other_terms = decide("relay-secret", req1.clone(), issue_signed(sign(&treasurer_key, TREASURER, &node, &req1, "issue", Some(60), None))).await;
+    let neither = decide("fc-secret", req1.clone(), issue_signed(sign(&treasurer_key, TREASURER, &node, &req1, "issue", Some(600), None))).await;
+    let honest = decide("relay-secret", req1.clone(), issue_signed(sign(&treasurer_key, TREASURER, &node, &req1, "issue", Some(600), None))).await;
+    let (_, read) = http(http_port, "fc-secret", reqwest::Method::GET, &format!("/gateway/grants/request/{}", segment(&req1)), None).await;
+    let grant: Option<crate::mandate::grant::SignedMandateGrant> = serde_json::from_value(read["grant"].clone()).ok();
+    let called = match &grant {
+        Some(g) => mcp_call(http_port, &args1, Some(presented(g, r1["resource"].as_str().unwrap(), &args1, &fc_key))).await,
+        None => serde_json::json!({"error": format!("no grant: {read}")}),
+    };
+    // The second request: issued signed, then revoked signed, both relayed.
+    let _ = decide("relay-secret", req2.clone(), issue_signed(sign(&treasurer_key, TREASURER, &node, &req2, "issue", Some(600), None))).await;
+    let revoked = http(http_port, "relay-secret", reqwest::Method::POST, &format!("/gateway/grants/{}/{}/revoke", segment(FORECASTER), segment(&req2)),
+        Some(serde_json::json!({"reason": "season over", "signed": sign(&treasurer_key, TREASURER, &node, &req2, "revoke", None, Some("season over"))}))).await;
+    let revocation: serde_json::Value = mycelium_core::ops::kv_get(&a.task_ctx, &format!("grant/{}/{req2}/revoked", crate::agent::gateway_authority::grant_holder_segment(FORECASTER)))
+        .and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    // The treasurer's own bearer, unsigned: admitted this release, and counted.
+    let own = decide("treasurer-secret", req3.clone(), serde_json::json!({"decision": "issue", "ttl_secs": 60})).await;
+    let (_, stats) = http(http_port, "treasurer-secret", reqwest::Method::GET, "/stats", None).await;
+    a.shutdown().await;
+    let journal: Vec<AeEvidence> = crate::read_evidence_journal(&dir.join("evidence.log")).unwrap().iter().filter_map(|b| serde_json::from_slice(b).ok()).collect();
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let code = |r: &(u16, serde_json::Value)| (r.0, r.1["error"].as_str().map(str::to_string));
+    assert_eq!(code(&unsigned), (403, Some("decision_unsigned".into())), "UNSIGNED: {}", unsigned.1);
+    assert_eq!(code(&retargeted), (403, Some("decision_retargeted".into())), "RETARGET: {}", retargeted.1);
+    assert_eq!(code(&elsewhere), (409, Some("not_addressed_here".into())), "ADDRESSED: {}", elsewhere.1);
+    assert_eq!(code(&foreign), (403, Some("not_the_decider".into())), "FOREIGN: {}", foreign.1);
+    assert_eq!(code(&no_scope), (403, Some("decider_lacks_scope".into())), "DECIDER_SCOPE: {}", no_scope.1);
+    assert_eq!(code(&other_terms), (403, Some("not_the_decider".into())), "TERMS: a body whose terms differ from the signed ones: {}", other_terms.1);
+    assert_eq!((neither.0, neither.1["or_scope"].as_str()), (403, Some("grant:relay")), "NEITHER: {}", neither.1);
+    assert_eq!(honest.0, 200, "RELAY: the relayed signed issue: {}", honest.1);
+    let grant = grant.expect("a grant was issued");
+    assert!(grant.mandate.purpose.contains(TREASURER) && grant.mandate.purpose.contains("token:fleet/relay"), "PURPOSE: {}", grant.mandate.purpose);
+    assert!(called.get("result").is_some(), "the relayed grant runs: {called}");
+    assert_eq!(ran.load(Ordering::SeqCst), 1);
+    let issue_record = journal.iter().find(|r| r.kind == RecordKind::Decided && r.operation == "grant.issue" && r.subject == TREASURER);
+    assert!(issue_record.is_some(), "JOURNAL: the decision's actor is the signer: {:?}", journal.iter().filter(|r| r.operation == "grant.issue").map(|r| &r.subject).collect::<Vec<_>>());
+    assert!(!journal.iter().any(|r| r.operation == "grant.issue" && r.subject == "token:fleet/relay"), "the relay is never the actor");
+    assert_eq!(revoked.0, 200, "REVOKE: {}", revoked.1);
+    assert_eq!((revocation["issuer"].as_str(), revocation["relayed_by"].as_str()), (Some(TREASURER), Some("token:fleet/relay")), "{revocation}");
+    assert_eq!(own.0, 200, "{}", own.1);
+    assert_eq!(stats["grant_decisions_unsigned"].as_u64(), Some(1), "COUNTED: {stats}");
+}
+
+// ── #754's review: signed decisions, the edges ─────────────────────────────────────────────────────────────────────
+
+const DECIDER: &str = "token:fleet/treasurer";
+
+/// A treasurer-signed decision on the forecaster's request `request`, at `t`.
+fn signed_at(key: &ed25519_dalek::SigningKey, node: &str, request: &str, decision: &str, ttl: Option<u64>, reason: Option<&str>, t: u64) -> crate::SignedDecision {
+    crate::sign_grant_decision(key, DECIDER, node, FORECASTER, request, decision, ttl, reason, t)
+}
+
+async fn post_decision(http_port: u16, bearer: &str, request: &str, body: serde_json::Value) -> (u16, serde_json::Value) {
+    http(http_port, bearer, reqwest::Method::POST, &format!("/gateway/grants/{}/{}", segment(FORECASTER), segment(request)), Some(body)).await
+}
+
+async fn post_revoke(http_port: u16, bearer: &str, request: &str, body: serde_json::Value) -> (u16, serde_json::Value) {
+    http(http_port, bearer, reqwest::Method::POST, &format!("/gateway/grants/{}/{}/revoke", segment(FORECASTER), segment(request)), Some(body)).await
+}
+
+fn code(r: &(u16, serde_json::Value)) -> (u16, Option<String>) {
+    (r.0, r.1["error"].as_str().map(str::to_string))
+}
+
+/// A started node with the forecaster's and the treasurer's certificates, and `n` requests by the forecaster.
+async fn decision_fleet(tag: &str, n: usize) -> (PathBuf, u16, Arc<GossipAgent>, Arc<AtomicUsize>, ed25519_dalek::SigningKey, Vec<String>) {
+    let dir = scratch(tag);
+    let http_port = alloc_port();
+    let (a, ran) = started(&dir, http_port).await;
+    let _ = forecaster_key(&a, &dir);
+    let treasurer = client_key_in(&a, &dir.join("tls"), &dir.join("client-treasurer"), "treasurer");
+    let mut requests = Vec::new();
+    for i in 0..n {
+        let (status, asked) = http(http_port, "fc-secret", reqwest::Method::POST, "/gateway/grants/request", Some(serde_json::json!({"tool": TOOL, "arguments": {"city": "Lyon", "n": i}}))).await;
+        assert_eq!(status, 200, "{asked}");
+        requests.push(asked["request"].as_str().unwrap().to_string());
+    }
+    (dir, http_port, a, ran, treasurer, requests)
+}
+
+fn journal_of(dir: &Path) -> Vec<crate::agent::action_evaluator::AeEvidence> {
+    crate::read_evidence_journal(&dir.join("evidence.log")).unwrap().iter().filter_map(|b| serde_json::from_slice(b).ok()).collect()
+}
+
+/// **Concurrent copies of one decision are answered once** (#754's review, finding 1). Sixteen copies of one signed
+/// issue, sixteen of one unsigned issue and sixteen of one signed revocation, each batch sent at once: in each, exactly
+/// one is answered `200`, the rest `already_answered` / `already_revoked`, or `409 decision_in_flight` while the first
+/// is still writing; one grant is signed per request, one `Decided` record written per answer, the unsigned decision
+/// counted once; and the request's checkpoint ends at the revocation's sequence. Seen failing first: before the claim
+/// every copy was answered `200`, each a separately signed grant with its own evidence record.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_copies_of_one_decision_are_answered_once() {
+    use crate::agent::action_evaluator::RecordKind;
+    let (dir, http_port, a, _ran, treasurer, requests) = decision_fleet("concurrent", 2).await;
+    let node = a.node_id().to_string();
+    let now = mycelium_core::sim_seam::wall_now_ms();
+    let n = 16;
+    let issue = serde_json::json!({"decision": "issue", "ttl_secs": 600, "signed": signed_at(&treasurer, &node, &requests[0], "issue", Some(600), None, now)});
+    let signed_issues = futures_util::future::join_all((0..n).map(|_| post_decision(http_port, "relay-secret", &requests[0], issue.clone()))).await;
+    let unsigned_issues = futures_util::future::join_all((0..n).map(|_| post_decision(http_port, "treasurer-secret", &requests[1], serde_json::json!({"decision": "issue", "ttl_secs": 60})))).await;
+    let revoke = serde_json::json!({"reason": "season over", "signed": signed_at(&treasurer, &node, &requests[0], "revoke", None, Some("season over"), now)});
+    let revokes = futures_util::future::join_all((0..n).map(|_| post_revoke(http_port, "relay-secret", &requests[0], revoke.clone()))).await;
+    let (_, stats) = http(http_port, "treasurer-secret", reqwest::Method::GET, "/stats", None).await;
+    let checkpoint: serde_json::Value = mycelium_core::ops::kv_get(&a.task_ctx, &format!("grant/{}/{}/checkpoint", crate::agent::gateway_authority::grant_holder_segment(FORECASTER), requests[0]))
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default();
+    a.shutdown().await;
+    let journal = journal_of(&dir);
+    let _ = std::fs::remove_dir_all(&dir);
+    for (name, batch, done) in [("SIGNED", &signed_issues, "already_answered"), ("UNSIGNED", &unsigned_issues, "already_answered"), ("REVOKE", &revokes, "already_revoked")] {
+        let ok = batch.iter().filter(|r| r.0 == 200).count();
+        let others: Vec<_> = batch.iter().filter(|r| r.0 != 200).map(code).collect();
+        assert_eq!(ok, 1, "{name}: {ok} of {n} answered 200; the rest {others:?}");
+        assert!(others.iter().all(|c| c == &(409, Some(done.into())) || c == &(409, Some("decision_in_flight".into()))), "{name}: {others:?}");
+    }
+    let decided = |op: &str| journal.iter().filter(|r| r.kind == RecordKind::Decided && r.operation == op && r.subject == DECIDER).count();
+    assert_eq!((decided("grant.issue"), decided("grant.revoke")), (2, 1), "EVIDENCE: one Decided record per answer");
+    assert_eq!(stats["grant_decisions_unsigned"].as_u64(), Some(1), "COUNTED once: {stats}");
+    assert_eq!(checkpoint["checkpoint"]["seq"].as_u64(), Some(2), "CHECKPOINT: the revocation's sequence stands: {checkpoint}");
+}
+
+/// **The window a signed decision is fresh in** (#754's review, findings 2 and 7): `CALLER_CONTEXT_MAX_AGE_MS`
+/// (300 s) plus `max_clock_drift_ms` into the past, `max_clock_drift_ms` into the future — 600 s and 300 s at the
+/// default drift. Just inside each edge is admitted; just past each is refused `stale`. A body whose key is not base64
+/// is refused `400 decision_signature_malformed`.
+#[tokio::test]
+async fn a_signed_decision_is_fresh_inside_its_window_and_refused_stale_or_malformed_outside() {
+    let (dir, http_port, a, _ran, treasurer, requests) = decision_fleet("stale", 5).await;
+    let node = a.node_id().to_string();
+    let drift = a.task_ctx.config.max_clock_drift_ms;
+    let (past, ahead) = (crate::agent::gateway_caller::CALLER_CONTEXT_MAX_AGE_MS + drift, if drift == 0 { crate::agent::gateway_caller::CALLER_CONTEXT_MAX_AGE_MS } else { drift });
+    let now = mycelium_core::sim_seam::wall_now_ms();
+    let at = |request: &str, t: u64| serde_json::json!({"decision": "issue", "ttl_secs": 600, "signed": signed_at(&treasurer, &node, request, "issue", Some(600), None, t)});
+    let too_old = post_decision(http_port, "relay-secret", &requests[0], at(&requests[0], now - past - 5_000)).await;
+    let too_new = post_decision(http_port, "relay-secret", &requests[1], at(&requests[1], now + ahead + 5_000)).await;
+    let old_inside = post_decision(http_port, "relay-secret", &requests[2], at(&requests[2], now - past + 5_000)).await;
+    let new_inside = post_decision(http_port, "relay-secret", &requests[3], at(&requests[3], now + ahead - 5_000)).await;
+    let mut bad = at(&requests[4], now);
+    bad["signed"]["k"] = serde_json::json!("not base64!");
+    let malformed = post_decision(http_port, "relay-secret", &requests[4], bad).await;
+    a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(code(&too_old), (403, Some("stale".into())), "STALE_PAST: {}", too_old.1);
+    assert_eq!(code(&too_new), (403, Some("stale".into())), "STALE_FUTURE: {}", too_new.1);
+    assert_eq!(old_inside.0, 200, "{}", old_inside.1);
+    assert_eq!(new_inside.0, 200, "{}", new_inside.1);
+    assert_eq!(code(&malformed), (400, Some("decision_signature_malformed".into())), "{}", malformed.1);
+}
+
+/// **A decider's superseded key is not the decider's** (#754's review, finding 7): after a newer certificate for the
+/// treasurer, a decision signed with the older key is refused `not_the_decider`, and the newer key's is admitted.
+#[tokio::test]
+async fn a_decision_signed_with_a_superseded_key_is_not_the_deciders() {
+    let (dir, http_port, a, _ran, older, requests) = decision_fleet("superseded", 2).await;
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let newer = client_key_in(&a, &dir.join("tls"), &dir.join("client-treasurer-2"), "treasurer");
+    let node = a.node_id().to_string();
+    let now = mycelium_core::sim_seam::wall_now_ms();
+    let by = |key: &ed25519_dalek::SigningKey, request: &str| serde_json::json!({"decision": "issue", "ttl_secs": 600, "signed": signed_at(key, &node, request, "issue", Some(600), None, now)});
+    let by_older = post_decision(http_port, "relay-secret", &requests[0], by(&older, &requests[0])).await;
+    let by_newer = post_decision(http_port, "relay-secret", &requests[1], by(&newer, &requests[1])).await;
+    a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(code(&by_older), (403, Some("not_the_decider".into())), "SUPERSEDED: {}", by_older.1);
+    assert!(by_older.1["detail"].as_str().unwrap_or_default().contains("newer certificate"), "{}", by_older.1);
+    assert_eq!(by_newer.0, 200, "{}", by_newer.1);
+}
+
+/// **A signed refusal, replays one at a time, and the evidence kept** (#754's review, findings 4 and 7). A signed
+/// refusal is answered and its record keeps the signed body and the relay; repeated, it is `already_answered`. A signed
+/// issue, repeated, is `already_answered`; its revocation, repeated, `already_revoked`; the old issue after the
+/// revocation, `already_answered`. Each `Decided` record of a signed decision carries `signed_decision` — the body,
+/// the terms and `relayed_by` — and its signature re-verifies from the record alone. Seen failing first with the body
+/// dropped after verification (the records said only `"signed": true`).
+#[tokio::test]
+async fn a_signed_refusal_and_replays_one_at_a_time_are_answered_once_and_the_evidence_kept() {
+    use crate::agent::action_evaluator::RecordKind;
+    let (dir, http_port, a, _ran, treasurer, requests) = decision_fleet("replay", 2).await;
+    let node = a.node_id().to_string();
+    let now = mycelium_core::sim_seam::wall_now_ms();
+    let refuse = serde_json::json!({"decision": "refuse", "reason": "not this season", "signed": signed_at(&treasurer, &node, &requests[0], "refuse", None, Some("not this season"), now)});
+    let refused = post_decision(http_port, "relay-secret", &requests[0], refuse.clone()).await;
+    let refused_again = post_decision(http_port, "relay-secret", &requests[0], refuse).await;
+    let issue = serde_json::json!({"decision": "issue", "ttl_secs": 600, "signed": signed_at(&treasurer, &node, &requests[1], "issue", Some(600), None, now)});
+    let issued = post_decision(http_port, "relay-secret", &requests[1], issue.clone()).await;
+    let issued_again = post_decision(http_port, "relay-secret", &requests[1], issue.clone()).await;
+    let revoke = serde_json::json!({"reason": "season over", "signed": signed_at(&treasurer, &node, &requests[1], "revoke", None, Some("season over"), now)});
+    let revoked = post_revoke(http_port, "relay-secret", &requests[1], revoke.clone()).await;
+    let revoked_again = post_revoke(http_port, "relay-secret", &requests[1], revoke).await;
+    let issued_after = post_decision(http_port, "relay-secret", &requests[1], issue).await;
+    let segment_hex = crate::agent::gateway_authority::grant_holder_segment(FORECASTER);
+    let record = |key: String| -> serde_json::Value { mycelium_core::ops::kv_get(&a.task_ctx, &key).and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default() };
+    let refusal = record(format!("grant/{segment_hex}/{}/refused", requests[0]));
+    let revocation = record(format!("grant/{segment_hex}/{}/revoked", requests[1]));
+    a.shutdown().await;
+    let journal = journal_of(&dir);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(refused.0, 200, "{}", refused.1);
+    assert_eq!(code(&refused_again), (409, Some("already_answered".into())));
+    assert_eq!(issued.0, 200, "{}", issued.1);
+    assert_eq!(code(&issued_again), (409, Some("already_answered".into())));
+    assert_eq!(revoked.0, 200, "{}", revoked.1);
+    assert_eq!(code(&revoked_again), (409, Some("already_revoked".into())));
+    assert_eq!(code(&issued_after), (409, Some("already_answered".into())));
+    for (name, rec) in [("refusal", &refusal), ("revocation", &revocation)] {
+        assert_eq!(rec["relayed_by"].as_str(), Some("token:fleet/relay"), "{name}: {rec}");
+        let signed: Result<crate::SignedDecision, _> = serde_json::from_value(rec["signed"].clone());
+        assert!(signed.is_ok(), "KEPT: the {name} record keeps the signed body: {rec}");
+    }
+    for op in ["grant.refuse", "grant.issue", "grant.revoke"] {
+        let r = journal.iter().find(|r| r.kind == RecordKind::Decided && r.operation == op && r.subject == DECIDER).unwrap_or_else(|| panic!("no Decided {op}"));
+        let kept = r.signed_decision.clone().unwrap_or_default();
+        assert_eq!(kept["relayed_by"].as_str(), Some("token:fleet/relay"), "EVIDENCE: {op}: {kept}");
+        let signed: crate::SignedDecision = serde_json::from_value(kept["signed"].clone()).unwrap_or_else(|e| panic!("EVIDENCE: {op}: {e}: {kept}"));
+        let decision = kept["decision"].as_str().unwrap();
+        assert!(signed.verify_signature(decision, kept["ttl_secs"].as_u64(), kept["reason"].as_str()), "RE-VERIFY: {op}: {kept}");
+    }
+}
+
+/// **A signed decision needs `gateway_identity_issuer`** (#754's review, finding 5), as I1's doors refuse a signed call
+/// without it: this gateway's principals would be qualified by its node id, which no client certificate names.
+#[tokio::test]
+async fn a_signed_decision_at_a_gateway_without_an_identity_issuer_is_refused_by_name() {
+    let dir = scratch("no-issuer");
+    let http_port = alloc_port();
+    let (id, mut cfg) = config(&dir, http_port, &Node { certs: dir.join("tls"), bootstrap: vec![], authority: true, port: None });
+    cfg.gateway_identity_issuer = None;
+    let a = Arc::new(GossipAgent::new(id, cfg));
+    a.start().await.expect("starts");
+    let key = ed25519_dalek::SigningKey::from_bytes(&[9u8; 32]);
+    let body = serde_json::json!({"decision": "issue", "signed": signed_at(&key, &a.node_id().to_string(), "r1", "issue", None, None, mycelium_core::sim_seam::wall_now_ms())});
+    let answer = post_decision(http_port, "relay-secret", "r1", body).await;
+    a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(code(&answer), (409, Some("gateway_identity_issuer_unset".into())), "ISSUER: {}", answer.1);
+}
+
+/// **A node without an identity cannot judge a decider's key** (#754's review, finding 7): `decision_unverifiable`
+/// where `[tls]` is unset — checked on the verifier directly, since such a node signs no grant to decide on.
+#[test]
+fn a_node_without_an_identity_cannot_verify_a_signed_decision() {
+    let a = GossipAgent::new(NodeId::new("127.0.0.1", alloc_port()).unwrap(), GossipConfig::default());
+    let key = ed25519_dalek::SigningKey::from_bytes(&[9u8; 32]);
+    let signed = signed_at(&key, &a.node_id().to_string(), "r1", "issue", None, None, 1);
+    let got = crate::agent::grant_decision::verify(&a.task_ctx, &signed, FORECASTER, "r1", "issue", None, None, 1);
+    assert_eq!(got.map_err(|e| e.code()), Err("decision_unverifiable"));
+}
+
+/// **An issue never lowers a later checkpoint** (#754's review, finding 1's open question). Before the claim, a stale
+/// concurrent copy of an issue could write the first checkpoint (sequence 1) after a revocation wrote the second, and
+/// the KV keeps the later write. With the claim no route reaches that order, so it is posed directly: a revocation's
+/// checkpoint placed beside a pending request, then the issue — refused `already_revoked`, the checkpoint unchanged.
+/// Seen failing first with the guard removed (the issue answered and the checkpoint lowered to 1).
+#[tokio::test]
+async fn an_issue_never_lowers_a_later_checkpoint() {
+    let (dir, http_port, a, _ran, treasurer, requests) = decision_fleet("monotonic", 2).await;
+    let node = a.node_id().to_string();
+    let now = mycelium_core::sim_seam::wall_now_ms();
+    let issue = |request: &str| serde_json::json!({"decision": "issue", "ttl_secs": 600, "signed": signed_at(&treasurer, &node, request, "issue", Some(600), None, now)});
+    let _ = post_decision(http_port, "relay-secret", &requests[0], issue(&requests[0])).await;
+    let revoke = serde_json::json!({"reason": "r", "signed": signed_at(&treasurer, &node, &requests[0], "revoke", None, Some("r"), now)});
+    let revoked = post_revoke(http_port, "relay-secret", &requests[0], revoke).await;
+    let segment_hex = crate::agent::gateway_authority::grant_holder_segment(FORECASTER);
+    let later = mycelium_core::ops::kv_get(&a.task_ctx, &format!("grant/{segment_hex}/{}/checkpoint", requests[0])).unwrap();
+    let beside = format!("grant/{segment_hex}/{}/checkpoint", requests[1]);
+    assert!(a.kv().set(beside.clone(), later));
+    let answer = post_decision(http_port, "relay-secret", &requests[1], issue(&requests[1])).await;
+    let held: serde_json::Value = mycelium_core::ops::kv_get(&a.task_ctx, &beside).and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(revoked.0, 200, "{}", revoked.1);
+    assert_eq!(code(&answer), (409, Some("already_revoked".into())), "MONOTONIC: {}", answer.1);
+    assert_eq!(held["checkpoint"]["seq"].as_u64(), Some(2), "the later checkpoint stands: {held}");
 }

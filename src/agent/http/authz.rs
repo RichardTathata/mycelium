@@ -92,13 +92,21 @@ pub(super) async fn gateway_auth(
         ).into_response();
     };
 
+    // Identity-and-lifecycle I3 (D3): a route may admit a second scope — the decision routes take `grant:issue` on the
+    // bearer **or** `grant:relay`, under which the handler requires a decision a decider signed. The scope granted is
+    // the one that admitted the request, so the handler can tell which.
     #[cfg(feature = "compliance")]
-    if !scope_admits(&scopes, required_scope_for_route) {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(json!({"error": "insufficient scope", "required_scope": required_scope_for_route})),
-        ).into_response();
-    }
+    let route_scope: &'static str = if scope_admits(&scopes, required_scope_for_route) {
+        required_scope_for_route
+    } else if let Some(alt) = matched_path.as_deref().and_then(alternative_scope).filter(|alt| scope_admits(&scopes, alt)) {
+        alt
+    } else {
+        let mut body = json!({"error": "insufficient scope", "required_scope": required_scope_for_route});
+        if let Some(alt) = matched_path.as_deref().and_then(alternative_scope) {
+            body["or_scope"] = json!(alt);
+        }
+        return (StatusCode::FORBIDDEN, Json(body)).into_response();
+    };
 
     // External review 2026-10-31 F1 (plan R1, D1): a raw route carrying a companion's kind is a second door to that
     // companion's operation, and it needs the scope the companion's own door needs. Decided here, with the
@@ -111,6 +119,8 @@ pub(super) async fn gateway_auth(
 
     // Item 7: the resolved principal and the authority granted for this request travel to the
     // dispatch site as a request extension. Constructed here and nowhere else.
+    #[cfg(feature = "compliance")]
+    let required: Option<&'static str> = required.map(|_| route_scope);
     let granted = match required {
         Some(_) => gateway_caller::granted_scopes(&scopes, required),
         // Without compliance the token is authenticated but not scope-gated: what it holds.
@@ -371,6 +381,16 @@ async fn companion_kind_gate(matched: Option<&str>, request: Request, scopes: &[
         return Err(refuse(&kind, scope, "sending it on a raw route"));
     }
     Ok(Request::from_parts(parts, axum::body::Body::from(bytes)))
+}
+
+/// The second scope a route admits besides [`required_scope`]'s, if any (identity-and-lifecycle I3, D3): the decision
+/// routes take `grant:issue` on the bearer or `grant:relay` — a relay, which must carry a decision a decider signed.
+#[cfg(feature = "compliance")]
+pub(super) fn alternative_scope(matched_path: &str) -> Option<&'static str> {
+    match matched_path {
+        "/gateway/grants/{agent}/{request}" | "/gateway/grants/{agent}/{request}/revoke" => Some("grant:relay"),
+        _ => None,
+    }
 }
 
 /// The OAuth2 scope a gateway route requires, keyed on its matched-path pattern
@@ -935,6 +955,9 @@ pub(crate) struct Settling {
     /// Adopter-surface Y11: a take, claim or emit door on the shadow rung admits what the evaluator refused, recording
     /// the refusal and that it was admitted ([`Settling::admit_in_shadow`]).
     shadow_admit: bool,
+    /// Identity-and-lifecycle I3 (#754's review, finding 4): a signed grant decision as presented, for the record's
+    /// `signed_decision`. Read only at the grant decision point, whose `params` the route builds itself.
+    signed_decision: Option<serde_json::Value>,
 }
 
 /// Test hook: the per-actor history admission refused at these nodes, as if the history changed on every try — the
@@ -1264,6 +1287,9 @@ pub(crate) async fn ae_decide(
             _ => None,
         },
         shadow_admit: false,
+        signed_decision: (enforcement_point == super::grants::ENFORCEMENT_POINT_GRANT_ISSUE)
+            .then(|| params["_meta"]["signed_decision"].clone())
+            .filter(serde_json::Value::is_object),
     }))
 }
 
@@ -1309,7 +1335,7 @@ impl Settling {
     /// Claim the permit's seats and record the decision: the rest of [`ae_preflight`].
     pub(crate) async fn finish(self) -> Preflight {
         use super::action_evaluator as ae;
-        let Settling { ctx, envelope, counters, mut outcome, history, admitted, point, enforcement_point, route, exposure_shadow, shadow_admit } = self;
+        let Settling { ctx, envelope, counters, mut outcome, history, admitted, point, enforcement_point, route, exposure_shadow, shadow_admit, signed_decision } = self;
         let ctx = &ctx;
         let enforcement_point = enforcement_point.as_str();
         let (operation, resource) = (envelope.operation.clone(), envelope.resource.clone());
@@ -1457,6 +1483,7 @@ impl Settling {
         }
 
         let mut evidence = ae::AeEvidence::for_decision(&envelope, &decision, execution, enforcement_point);
+        evidence.signed_decision = signed_decision;
         if let Some(h) = &history {
             // The history this decision read, as a decision input: a replay finds the attempts in the journal. With
             // a fleet scope, the counters' state and coverage, and the seats the permit claimed (row K2).

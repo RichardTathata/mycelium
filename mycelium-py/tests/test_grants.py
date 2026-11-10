@@ -41,6 +41,9 @@ class _Stub(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
+        if self.path == "/health":
+            self._json({"status": "ok", "node_id": "127.0.0.1:7946"})
+            return
         self._json({"ok": True, "pending": PENDING, "now_ms": 1})
 
     def do_POST(self) -> None:  # noqa: N802
@@ -122,3 +125,26 @@ def test_a_bad_decision_is_refused_before_it_is_sent_and_a_refusal_surfaces(stub
         agent.grant_decide("node:other", "r1", "issue")
     assert e.value.response.status_code == 409
     assert e.value.response.json()["error"] in ("not_a_member",)
+
+
+def test_a_signed_decision_and_revocation_carry_the_signers_signature_addressed_to_the_node(stub):
+    # Identity-and-lifecycle I3: with a signer, the body carries `signed` over exactly this decision, addressed to
+    # the node `GET /health` names (read once), so a bearer holding only `grant:relay` can carry it.
+    import base64
+
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
+    from mycelium import ClientSigner
+    from mycelium.client_sig import grant_decision_message
+
+    signer = ClientSigner(bytes([7] * 32), "token:fleet/treasurer")
+    agent = MyceliumAgent("127.0.0.1", stub, token="relay")
+    agent.grant_decide("token:fleet/forecaster", "r1", "issue", ttl_secs=120, signer=signer)
+    agent.grant_revoke("token:fleet/forecaster", "r1", reason="season over", signer=signer)
+    posts = [b for m, _, b, _ in _Stub.seen if m == "POST"]
+    assert [p for m, p, *_ in _Stub.seen if m == "GET"] == ["/health"], "the node is read once"
+    for body, decision, ttl, reason in [(posts[0], "issue", 120, None), (posts[1], "revoke", None, "season over")]:
+        s = body["signed"]
+        assert (s["decider"], s["node"], s["agent"], s["request"]) == ("token:fleet/treasurer", "127.0.0.1:7946", "token:fleet/forecaster", "r1")
+        msg = grant_decision_message(s["decider"], s["node"], s["agent"], s["request"], decision, ttl, reason, s["t"])
+        Ed25519PublicKey.from_public_bytes(base64.b64decode(s["k"])).verify(base64.b64decode(s["sig"]), msg)
