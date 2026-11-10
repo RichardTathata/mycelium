@@ -76,11 +76,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     must be signed, and the relay decides nothing itself.
   - New refusals: `not_the_decider`, `decision_retargeted`, `not_addressed_here`, `decider_lacks_scope` and
     `decision_unsigned`.
-  - The evidence record's `subject`, the grant's `purpose` and the answer records name the signer, and the relay
-    beside it.
+  - The evidence record's `subject` names the signer, and its `signed_decision` keeps the signed body and the relay,
+    so the decision re-verifies afterwards. The grant's `purpose` and the answer records name both.
+  - One decision per request at a time on a node: concurrent copies of one decision are answered once.
   - The SDK verbs `grant_decide` / `grantDecide` and `grant_revoke` / `grantRevoke` sign when given a `signer`.
   - A cross-language vector pins the signed message in Rust, jest and pytest.
-  - An unsigned decision is still admitted under `grant:issue`, and counted (`/stats` `grant_decisions_unsigned`).
+  - An unsigned decision is still admitted under `grant:issue`, and counted once answered (`/stats`
+    `grant_decisions_unsigned`, `mycelium_gateway_decisions_unsigned_total`).
 
   Upgrade note: `deprecations.md` §95.
 

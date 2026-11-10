@@ -955,6 +955,9 @@ pub(crate) struct Settling {
     /// Adopter-surface Y11: a take, claim or emit door on the shadow rung admits what the evaluator refused, recording
     /// the refusal and that it was admitted ([`Settling::admit_in_shadow`]).
     shadow_admit: bool,
+    /// Identity-and-lifecycle I3 (#754's review, finding 4): a signed grant decision as presented, for the record's
+    /// `signed_decision`. Read only at the grant decision point, whose `params` the route builds itself.
+    signed_decision: Option<serde_json::Value>,
 }
 
 /// Test hook: the per-actor history admission refused at these nodes, as if the history changed on every try — the
@@ -1284,6 +1287,9 @@ pub(crate) async fn ae_decide(
             _ => None,
         },
         shadow_admit: false,
+        signed_decision: (enforcement_point == super::grants::ENFORCEMENT_POINT_GRANT_ISSUE)
+            .then(|| params["_meta"]["signed_decision"].clone())
+            .filter(serde_json::Value::is_object),
     }))
 }
 
@@ -1329,7 +1335,7 @@ impl Settling {
     /// Claim the permit's seats and record the decision: the rest of [`ae_preflight`].
     pub(crate) async fn finish(self) -> Preflight {
         use super::action_evaluator as ae;
-        let Settling { ctx, envelope, counters, mut outcome, history, admitted, point, enforcement_point, route, exposure_shadow, shadow_admit } = self;
+        let Settling { ctx, envelope, counters, mut outcome, history, admitted, point, enforcement_point, route, exposure_shadow, shadow_admit, signed_decision } = self;
         let ctx = &ctx;
         let enforcement_point = enforcement_point.as_str();
         let (operation, resource) = (envelope.operation.clone(), envelope.resource.clone());
@@ -1477,6 +1483,7 @@ impl Settling {
         }
 
         let mut evidence = ae::AeEvidence::for_decision(&envelope, &decision, execution, enforcement_point);
+        evidence.signed_decision = signed_decision;
         if let Some(h) = &history {
             // The history this decision read, as a decision input: a replay finds the attempts in the journal. With
             // a fleet scope, the counters' state and coverage, and the seats the permit claimed (row K2).

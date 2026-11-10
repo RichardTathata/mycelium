@@ -646,6 +646,16 @@ impl UnsignedActions {
         tracing::warn!(kind, "a call from a principal with a client certificate on record carried no client signature (cs)");
     }
 
+    /// Count one grant decision answered under `grant:issue` with no decider's signature (identity-and-lifecycle I3):
+    /// `decision` is `issue`, `refuse` or `revoke`. Counted once it is answered, never for an attempt refused first.
+    #[cfg(feature = "gateway")]
+    pub(crate) fn note_decision(&self, decision: &'static str) {
+        self.decisions.fetch_add(1, Ordering::Relaxed);
+        #[cfg(feature = "metrics")]
+        metrics::counter!("mycelium_gateway_decisions_unsigned_total", "decision" => decision).increment(1);
+        tracing::warn!(decision, "a grant decision was answered with no decider's signature (signed)");
+    }
+
     /// Count one received at this provider.
     pub(crate) fn note_at_provider(&self, kind: &str) {
         self.at_provider.fetch_add(1, Ordering::Relaxed);

@@ -33,9 +33,10 @@ This feature is turned on in code.
   no arguments to bind.
 - [`gw_grants_pending`](../../src/agent/http/grants.rs), [`gw_grant_decide`](../../src/agent/http/grants.rs) and
   [`gw_grant_revoke`](../../src/agent/http/grants.rs) — the supervisor's door: `GET /gateway/grants/pending`
-  (`grant:read`), `POST /gateway/grants/{agent}/{request}` (`grant:issue`) with `{"decision": "issue"|"refuse",
-  "ttl_secs", "reason"}`, and `POST /gateway/grants/{agent}/{request}/revoke` (`grant:issue`) with `{"reason"}` at the
-  node that issued. Issuing, refusing and revoking are actions the evaluator sees (`grant.issue` · `grant.refuse` ·
+  (`grant:read`), `POST /gateway/grants/{agent}/{request}` (`grant:issue`, or `grant:relay` with `signed`) with
+  `{"decision": "issue"|"refuse", "ttl_secs", "reason", "signed"?}`, and `POST /gateway/grants/{agent}/{request}/revoke`
+  (`grant:issue`, or `grant:relay` with `signed`) with `{"reason", "signed"?}` at the node that issued (signed decisions
+  below). Issuing, refusing and revoking are actions the evaluator sees (`grant.issue` · `grant.refuse` ·
   `grant.revoke` on `tool:{tool}@{agent node}`, the caller as the actor; a `503 not_durable` on revoke means the supervisor
   owes a retry — until the retried revoke is on disk the revocation holds only in this process, and any restart re-arms the
   grant, `deprecations.md` §77): a client holding `grant:issue` is not thereby
@@ -87,23 +88,45 @@ This feature is turned on in code.
   - What is checked, in order: the signature under the key it carries, and that key the decider's current client key
     on record here, else `403 not_the_decider` (a different body's terms also fail here, since they are signed); the
     signed holder and request the route's path, else `403 decision_retargeted`; the signed node this one, else
-    `409 not_addressed_here`; the decider's clock inside the caller envelope's window, else `403 stale`; the decider
+    `409 not_addressed_here`; the decider's clock inside the caller envelope's window — at most
+    `CALLER_CONTEXT_MAX_AGE_MS` (300 s) plus `max_clock_drift_ms` into the past and `max_clock_drift_ms` into the
+    future (`max_clock_drift_ms` defaults to 300 s, so 600 s and 300 s; set to 0, 300 s each way) — else `403 stale`;
+    the decider
     holding `grant:issue` at this gateway — a named token of the gateway's issuer whose principal it is — else
     `403 decider_lacks_scope`. An unsigned body under `grant:relay` alone is `403 decision_unsigned`; a token holding
-    neither scope is `403 insufficient scope`, naming both (`required_scope`, `or_scope`).
+    neither scope is `403 insufficient scope`, naming both (`required_scope`, `or_scope`). At a gateway without
+    `gateway_identity_issuer` a signed decision is `409 gateway_identity_issuer_unset`, as I1's doors refuse a signed
+    call.
+  - **One answer per request** (#754's review): a decision takes a claim on its request at this node before it reads
+    the request and holds it until the answer is written, so concurrent copies of one decision — signed or not, issue or
+    revoke — are answered once; the rest `409 decision_in_flight` while it runs, `already_answered` or
+    `already_revoked` after (`concurrent_copies_of_one_decision_are_answered_once`). An issue never writes a checkpoint
+    below one already written, so a revocation's stands. **Not serialised:** two gateways answering one request at
+    once — each signs its own grant, and the KV keeps the later write.
   - The evaluator then decides with the decider as the actor, as for any decision, and the evidence record's
-    `subject` is the decider. The grant's `purpose` names the decider and the relay; a refusal's or revocation's
-    record carries `"signed": true` and `relayed_by`.
-  - An unsigned decision under `grant:issue` is still the bearer's own this release, counted on `/stats`
-    (`grant_decisions_unsigned`); a later release refuses it (`deprecations.md` §95).
-  - A replay of a signed decision inside its window finds the request already answered, or the grant already revoked,
-    so no nonce cache is kept.
+    `subject` is the decider. The grant's `purpose` names the decider and the relay.
+  - **What is kept, and what re-verifies it** (#754's review): the evidence record's `signed_decision` holds the signed
+    body (the decider, node, holder, request, clock, key and signature), the decision's terms and `relayed_by`; a
+    refusal's or revocation's record holds the body as `signed` and `relayed_by`. `SignedDecision::verify_signature`
+    re-checks the signature from those fields alone; whether its key was the decider's current client key at `t` is read
+    from the decider's `sys/client-cert/` records. The evidence journal is node-local and append-only; the KV records
+    are writable by any member, so the journal is the record to trust.
+  - An unsigned decision under `grant:issue` is still the bearer's own this release. It is counted once **answered**
+    (issued, refused or revoked; never an attempt refused first) on `/stats` (`grant_decisions_unsigned`) and as
+    `mycelium_gateway_decisions_unsigned_total{decision}`; a later release refuses it (`deprecations.md` §95).
+  - A replay of a signed decision inside its window finds the request already answered, or the grant already revoked
+    (one at a time or concurrent, above), so no nonce cache is kept.
   - From the SDKs: `grant_decide(…, signer=…)` / `grantDecide(…, { signer })` and `grant_revoke(…, signer=…)` /
     `grantRevoke(…, { signer })`; the node is read from `GET /health` unless given. `ClientSigner.sign_grant_decision`
     / `signGrantDecision` sign alone. `tests/fixtures/decision/vector.json` pins the message and the signature in Rust,
     jest and pytest.
-  - The test: `a_signed_decision_relayed_under_grant_relay_is_the_signers`, in
-    [`src/agent/client_grant_tests.rs`](../../src/agent/client_grant_tests.rs).
+  - The tests, in [`src/agent/client_grant_tests.rs`](../../src/agent/client_grant_tests.rs):
+    `a_signed_decision_relayed_under_grant_relay_is_the_signers`, `concurrent_copies_of_one_decision_are_answered_once`,
+    `a_signed_decision_is_fresh_inside_its_window_and_refused_stale_or_malformed_outside`,
+    `a_decision_signed_with_a_superseded_key_is_not_the_deciders`,
+    `a_signed_refusal_and_replays_one_at_a_time_are_answered_once_and_the_evidence_kept`,
+    `a_signed_decision_at_a_gateway_without_an_identity_issuer_is_refused_by_name`,
+    `an_issue_never_lowers_a_later_checkpoint` and `a_node_without_an_identity_cannot_verify_a_signed_decision`.
   - **Not built:** M-of-N decisions; an `oidc:` decider (key-less); a decider whose scopes come from anything but this
     gateway's named tokens (OIDC groups, positional tokens); a relay at an un-upgraded gateway, which refuses
     `grant:relay` as an insufficient scope and so admits nothing.

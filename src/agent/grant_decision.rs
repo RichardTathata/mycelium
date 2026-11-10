@@ -8,7 +8,8 @@
 //! key the decider's current client key here (`client_cert::client_key_standing`) — else `not_the_decider`; the
 //! holder and request the same as the route's path — else `decision_retargeted`; the addressed node itself — else
 //! `not_addressed_here`; the clock inside the caller envelope's window — else `stale`. A replay of a signed decision
-//! inside its window finds the request already answered or already revoked, so no nonce cache is kept.
+//! inside its window finds the request already answered or already revoked, so no nonce cache is kept: the decision
+//! routes take one claim per request on this node (`http/grants.rs`), so concurrent copies are answered once.
 
 use serde::{Deserialize, Serialize};
 
@@ -61,6 +62,26 @@ pub fn grant_decision_message(
     out
 }
 
+impl SignedDecision {
+    /// Whether `sig` is a signature under `k` over this decision — the signed fields and the decision's terms — for
+    /// re-verifying a record afterwards (an evidence record's `signed_decision`, a refusal's or revocation's
+    /// `signed`). It checks the signature only: whether `k` was the decider's current client key at `t` is read from
+    /// the decider's `sys/client-cert/` records.
+    #[cfg(feature = "tls")]
+    pub fn verify_signature(&self, decision: &str, ttl_secs: Option<u64>, reason: Option<&str>) -> bool {
+        use base64::Engine as _;
+        let b64 = base64::engine::general_purpose::STANDARD;
+        let (Some(key), Some(sig)) = (
+            b64.decode(&self.k).ok().and_then(|v| <[u8; 32]>::try_from(v).ok()),
+            b64.decode(&self.sig).ok().and_then(|v| <[u8; 64]>::try_from(v).ok()),
+        ) else {
+            return false;
+        };
+        let msg = grant_decision_message(&self.decider, &self.node, &self.agent, &self.request, decision, ttl_secs, reason, self.t);
+        crate::tls::verify_bytes(&key, &msg, &sig)
+    }
+}
+
 /// Sign a decision with `key` as `decider`, at `issued_at_ms`.
 #[cfg(feature = "tls")]
 #[allow(clippy::too_many_arguments)]
@@ -111,6 +132,9 @@ pub(crate) enum DecisionRefusal {
     Unsigned,
     /// This node has no identity (`[tls]` unset), so it judges no client certificate.
     Unverifiable,
+    /// This gateway has no `gateway_identity_issuer`: its principals are qualified by its node id, which no client
+    /// certificate names, so no decider can be one of them (as I1's doors refuse a signed call).
+    IssuerUnset,
 }
 
 #[cfg(all(feature = "gateway", feature = "tls"))]
@@ -125,6 +149,7 @@ impl DecisionRefusal {
             Self::DeciderLacksScope => "decider_lacks_scope",
             Self::Unsigned => "decision_unsigned",
             Self::Unverifiable => "decision_unverifiable",
+            Self::IssuerUnset => "gateway_identity_issuer_unset",
         }
     }
 
@@ -132,7 +157,7 @@ impl DecisionRefusal {
         use axum::http::StatusCode;
         match self {
             Self::Malformed => StatusCode::BAD_REQUEST,
-            Self::NotAddressedHere(_) => StatusCode::CONFLICT,
+            Self::NotAddressedHere(_) | Self::IssuerUnset => StatusCode::CONFLICT,
             _ => StatusCode::FORBIDDEN,
         }
     }
@@ -147,6 +172,7 @@ impl DecisionRefusal {
             Self::DeciderLacksScope => "the decider holds no grant:issue at this gateway".into(),
             Self::Unsigned => "a bearer holding only grant:relay carries a decision a decider signed (`signed`)".into(),
             Self::Unverifiable => "this node has no identity ([tls]) and cannot judge a client certificate".into(),
+            Self::IssuerUnset => "a signed decision needs this gateway's gateway_identity_issuer set: without it principals are qualified by the node id, which no client certificate names".into(),
         }
     }
 }

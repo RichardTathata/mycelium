@@ -73,23 +73,64 @@ pub(super) struct GrantDecisionBody {
     signed: Option<crate::agent::grant_decision::SignedDecision>,
 }
 
-/// Who a decision route's answer is decided by (identity-and-lifecycle I3, D3, D5), and who carried it.
+/// A signed decision as it was presented, with the bearer that carried it (identity-and-lifecycle I3): kept on the
+/// answer's record and on the evidence record (`signed_decision`), so the decision can be re-verified afterwards
+/// (`SignedDecision::verify_signature`) — #754's review, finding 4.
+pub(crate) struct Relayed {
+    pub(crate) signed: crate::agent::grant_decision::SignedDecision,
+    pub(crate) relay: String,
+    pub(crate) decision: &'static str,
+    pub(crate) ttl_secs: Option<u64>,
+    pub(crate) reason: Option<String>,
+}
+
+impl Relayed {
+    /// The evidence record's `signed_decision`: the body, the decision's terms and the relay.
+    fn evidence(&self) -> serde_json::Value {
+        json!({ "signed": self.signed, "decision": self.decision, "ttl_secs": self.ttl_secs, "reason": self.reason, "relayed_by": self.relay })
+    }
+
+    /// The preflight's `params`: the signed decision for the evidence record, read at this enforcement point only.
+    fn params(relayed: Option<&Relayed>) -> serde_json::Value {
+        relayed.map_or_else(|| json!({}), |r| json!({ "_meta": { "signed_decision": r.evidence() } }))
+    }
+
+    /// Mark an answer's record: the signed body and the relay.
+    fn mark(relayed: Option<&Relayed>, record: &mut serde_json::Value) {
+        if let Some(r) = relayed {
+            record["signed"] = json!(r.signed);
+            record["relayed_by"] = json!(r.relay);
+        }
+    }
+}
+
+/// Who answers a decision route's request (identity-and-lifecycle I3, D3, D5).
+struct DecisionActor {
+    /// The actor the evaluator decides with: the decider of a signed body, the bearer of an unsigned one.
+    caller: Option<ResolvedPrincipal>,
+    /// The signed body and its relay, when signed.
+    relayed: Option<Relayed>,
+    /// An unsigned decision under `grant:issue`: counted once it is answered (#754's review, finding 3).
+    unsigned: bool,
+}
+
+/// Who a decision route's answer is decided by, and who carried it.
 ///
 /// A body carrying `signed` is the decider's: verified ([`grant_decision::verify`](crate::agent::grant_decision::verify)),
 /// the decider holding `grant:issue` at this gateway, and the decider the actor — the bearer, which needs only
-/// `grant:relay`, is named as the relay. A body without `signed` is the bearer's own, under `grant:issue`, and counted
-/// (`/stats` `grant_decisions_unsigned`); under `grant:relay` alone it is refused `decision_unsigned`.
+/// `grant:relay`, is named as the relay. A body without `signed` is the bearer's own, under `grant:issue`; under
+/// `grant:relay` alone it is refused `decision_unsigned`.
 #[allow(clippy::too_many_arguments)]
 fn decision_actor(
     ctx: &Arc<TaskCtx>,
     caller: Option<&ResolvedPrincipal>,
     agent: &str,
     request: &str,
-    decision: &str,
+    decision: &'static str,
     ttl_secs: Option<u64>,
     reason: Option<&str>,
     signed: Option<&crate::agent::grant_decision::SignedDecision>,
-) -> Result<(Option<ResolvedPrincipal>, Option<String>), Box<axum::response::Response>> {
+) -> Result<DecisionActor, Box<axum::response::Response>> {
     use crate::agent::grant_decision::{self as gd, DecisionRefusal};
     let refuse = |r: DecisionRefusal| Box::new(refused(r.status(), r.code(), r.detail()));
     // Under `compliance` the route granted the scope that admitted the request: `grant:issue` or `grant:relay`.
@@ -101,9 +142,12 @@ fn decision_actor(
         if relay_only {
             return Err(refuse(DecisionRefusal::Unsigned));
         }
-        ctx.unsigned_actions.decisions.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        return Ok((caller.cloned(), None));
+        return Ok(DecisionActor { caller: caller.cloned(), relayed: None, unsigned: true });
     };
+    // As I1's doors refuse a signed call (#754's review, finding 5): without an issuer no decider is a principal here.
+    if ctx.config.gateway_identity_issuer.is_none() {
+        return Err(refuse(DecisionRefusal::IssuerUnset));
+    }
     // The holder the path names, as a principal: what the decider signed.
     let Some((_, holder)) = super::gateway_authority::grant_holder_from_path(agent) else {
         return Err(Box::new(refused(StatusCode::BAD_REQUEST, "bad_request", format!("{agent} is neither a node principal, a client principal nor a client principal's hex segment"))));
@@ -113,7 +157,42 @@ fn decision_actor(
         return Err(refuse(DecisionRefusal::DeciderLacksScope));
     }
     let relay = caller.map(|c| c.principal.clone()).unwrap_or_else(|| gateway_caller::PRINCIPAL_ANONYMOUS.to_string());
-    Ok((Some(ResolvedPrincipal { principal: signed.decider.clone(), scopes: vec!["grant:issue".to_string()] }), Some(relay)))
+    Ok(DecisionActor {
+        caller: Some(ResolvedPrincipal { principal: signed.decider.clone(), scopes: vec!["grant:issue".to_string()] }),
+        relayed: Some(Relayed { signed: signed.clone(), relay, decision, ttl_secs, reason: reason.map(str::to_string) }),
+        unsigned: false,
+    })
+}
+
+/// One decision at a time per request on this node (#754's review, finding 1): held from before the request is read
+/// until its answer is written (or refused), so a concurrent copy of a decision — signed or not, issue or revoke — is
+/// answered `409 decision_in_flight` while this one runs and `already_answered` / `already_revoked` after it. Two
+/// gateways answering one request at once are not serialised by it (each would sign its own grant), stated.
+struct DecisionClaim<'a> {
+    ctx: &'a TaskCtx,
+    key: String,
+}
+
+impl<'a> DecisionClaim<'a> {
+    fn take(ctx: &'a TaskCtx, key: &str) -> Result<Self, GrantRefusal> {
+        if ctx.grant_decisions_in_flight.pin().insert(key.to_string()) {
+            Ok(Self { ctx, key: key.to_string() })
+        } else {
+            Err(GrantRefusal::door(StatusCode::CONFLICT, "decision_in_flight", format!("another decision on {key} is being answered at this node; retry: it will answer already_answered or already_revoked once that one is written")))
+        }
+    }
+}
+
+impl Drop for DecisionClaim<'_> {
+    fn drop(&mut self) {
+        self.ctx.grant_decisions_in_flight.pin().remove(&self.key);
+    }
+}
+
+/// The sequence of the checkpoint written beside a grant, if one is (`…/checkpoint`).
+fn checkpoint_seq_held(ctx: &TaskCtx, key: &str) -> Option<u64> {
+    let bytes = mycelium_core::ops::kv_get(ctx, &format!("{key}/checkpoint"))?;
+    serde_json::from_slice::<crate::mandate::authority::SignedRevocationCheckpoint>(&bytes).ok().map(|c| c.checkpoint.seq)
 }
 
 /// Whether `decider` holds `grant:issue` at this gateway: a named token of this gateway's issuer whose principal it is
@@ -187,18 +266,23 @@ pub(super) async fn gw_grant_decide(
     Json(body): Json<GrantDecisionBody>,
 ) -> axum::response::Response {
     let caller = caller.map(|Extension(c)| c);
-    let (ttl, reason) = match body.decision.as_str() {
-        "issue" => (body.ttl_secs, None),
-        "refuse" => (None, body.reason.clone()),
+    let (decision_word, ttl, reason): (&'static str, _, _) = match body.decision.as_str() {
+        "issue" => ("issue", body.ttl_secs, None),
+        "refuse" => ("refuse", None, body.reason.clone()),
         other => return refused(StatusCode::BAD_REQUEST, "bad_request", format!("decision must be \"issue\" or \"refuse\", not {other:?}")),
     };
-    let (actor, relayed_by) = match decision_actor(&ctx.agent_ctx, caller.as_ref(), &agent, &request, &body.decision, ttl, reason.as_deref(), body.signed.as_ref()) {
+    let actor = match decision_actor(&ctx.agent_ctx, caller.as_ref(), &agent, &request, decision_word, ttl, reason.as_deref(), body.signed.as_ref()) {
         Ok(a) => a,
         Err(refusal) => return *refusal,
     };
-    let decision = if body.decision == "issue" { GrantDecision::Issue { ttl_secs: ttl } } else { GrantDecision::Refuse { reason } };
-    match decide_grant(&ctx.agent_ctx, actor.as_ref(), relayed_by.as_deref(), &agent, &request, decision).await {
-        Ok(outcome) => Json(outcome.receipt).into_response(),
+    let decision = if decision_word == "issue" { GrantDecision::Issue { ttl_secs: ttl } } else { GrantDecision::Refuse { reason } };
+    match decide_grant(&ctx.agent_ctx, actor.caller.as_ref(), actor.relayed.as_ref(), &agent, &request, decision).await {
+        Ok(outcome) => {
+            if actor.unsigned {
+                ctx.agent_ctx.unsigned_actions.note_decision(decision_word);
+            }
+            Json(outcome.receipt).into_response()
+        }
         Err(refusal) => refusal.into_response(),
     }
 }
@@ -208,8 +292,9 @@ pub(super) async fn gw_grant_decide(
 /// gateway port). Issuing and refusing are actions the evaluator decides with the caller as the actor; the grant is
 /// signed by this node's identity; the answer and the grant's first checkpoint are written under the request.
 ///
-/// `relayed_by` names the bearer that carried a decision `caller` signed (identity-and-lifecycle I3), on the record.
-pub(crate) async fn decide_grant(ctx: &Arc<TaskCtx>, caller: Option<&ResolvedPrincipal>, relayed_by: Option<&str>, agent: &str, request: &str, decision: GrantDecision) -> Result<GrantOutcome, GrantRefusal> {
+/// `relayed` is the decision `caller` signed and the bearer that carried it (identity-and-lifecycle I3), kept on the
+/// records. One decision per request at a time on this node ([`DecisionClaim`]).
+pub(crate) async fn decide_grant(ctx: &Arc<TaskCtx>, caller: Option<&ResolvedPrincipal>, relayed: Option<&Relayed>, agent: &str, request: &str, decision: GrantDecision) -> Result<GrantOutcome, GrantRefusal> {
     let issuer = caller.map(|c| c.principal.clone()).unwrap_or_else(|| gateway_caller::PRINCIPAL_ANONYMOUS.to_string());
     if request.contains('/') || agent.is_empty() || request.is_empty() {
         return Err(GrantRefusal::door(StatusCode::BAD_REQUEST, "bad_request", "the agent is named and the request is one key segment"));
@@ -233,6 +318,8 @@ pub(crate) async fn decide_grant(ctx: &Arc<TaskCtx>, caller: Option<&ResolvedPri
         return Err(GrantRefusal::door(StatusCode::CONFLICT, "not_a_member", format!("{agent} is neither this node's agent nor a fleet member whose identity key this node holds; a grant is issued for an agent on a member node")));
     }
     let key = format!("grant/{segment}/{request}");
+    // Before the answer is read, held until it is written (#754's review, finding 1).
+    let _claim = DecisionClaim::take(ctx, &key)?;
     let Some(bytes) = mycelium_core::ops::kv_get(ctx, &key) else {
         return Err(GrantRefusal::door(StatusCode::NOT_FOUND, "unknown_request", format!("no grant request at {key}")));
     };
@@ -260,7 +347,7 @@ pub(crate) async fn decide_grant(ctx: &Arc<TaskCtx>, caller: Option<&ResolvedPri
     };
     // The evaluator sees the holder's principal, a client's as a node's (#743's review, item 8), never its key segment.
     let arguments = json!({ "tool": tool, "agent": holder_principal, "arguments_digest": digest, "request": request });
-    let preflight = ae_preflight(ctx, caller, operation, resource, &arguments, &json!({}), ENFORCEMENT_POINT_GRANT_ISSUE).await;
+    let preflight = ae_preflight(ctx, caller, operation, resource, &arguments, &Relayed::params(relayed), ENFORCEMENT_POINT_GRANT_ISSUE).await;
     let policy_revision: Option<String> = match &preflight {
         Preflight::Refuse(r) => {
             return Err(GrantRefusal::Policy { reason: r.reason(), detail: r.to_string(), data: r.error_data() });
@@ -275,10 +362,7 @@ pub(crate) async fn decide_grant(ctx: &Arc<TaskCtx>, caller: Option<&ResolvedPri
     match decision {
         GrantDecision::Refuse { reason } => {
             let mut record = json!({ "schema": "mycelium.grant-refusal/1", "request": request, "issuer": issuer, "reason": reason.unwrap_or_default(), "at_ms": now_ms });
-            if let Some(relay) = relayed_by {
-                record["signed"] = json!(true);
-                record["relayed_by"] = json!(relay);
-            }
+            Relayed::mark(relayed, &mut record);
             // On disk or `503 not_durable` (#713's review, round 2): a `200` carrying `local_durability: failed` is the
             // shape the revoke lost; an answer that is not on disk is not an answer the agent can be held to.
             let written = write_record_durable(ctx, format!("{key}/refused"), record.to_string().into_bytes()).await;
@@ -307,8 +391,8 @@ pub(crate) async fn decide_grant(ctx: &Arc<TaskCtx>, caller: Option<&ResolvedPri
             let mandate = Mandate {
                 holder,
                 established_by,
-                purpose: match relayed_by {
-                    Some(relay) => format!("grant issued by {issuer} (signed, relayed by {relay}) for request {request}"),
+                purpose: match relayed {
+                    Some(r) => format!("grant issued by {issuer} (signed, relayed by {}) for request {request}", r.relay),
                     None => format!("grant issued by {issuer} for request {request}"),
                 },
                 scope: format!("{GRANT_SCOPE_PREFIX}{request}"),
@@ -339,6 +423,12 @@ pub(crate) async fn decide_grant(ctx: &Arc<TaskCtx>, caller: Option<&ResolvedPri
             };
             if let Some(authority) = ctx.execution_authority.get() {
                 let _ = authority.offer_checkpoint(&signed_checkpoint, now_ms, &gateway_member_keys(ctx));
+            }
+            // Never below one already written (#754's review, finding 1): a later checkpoint — a revocation's — stands.
+            // Under the claim, and with revocation only at this node after the grant is read, an issue reaching here
+            // finds none or its own earlier attempt's; this refuses the impossible case rather than lowering it.
+            if checkpoint_seq_held(ctx, &key).is_some_and(|held| held > signed_checkpoint.checkpoint.seq) {
+                return Err(GrantRefusal::door(StatusCode::CONFLICT, "already_revoked", format!("{key} carries a later checkpoint than an issue writes")));
             }
             // The checkpoint is on disk before the grant is: a grant whose first checkpoint a restart cannot find is
             // not established at a verifier (external review 2026-10-31, R3 — the sibling of the use marker).
@@ -646,12 +736,17 @@ pub(super) async fn gw_grant_revoke(
 ) -> axum::response::Response {
     let caller = caller.map(|Extension(c)| c);
     let body = body.map(|Json(b)| b).unwrap_or_default();
-    let (actor, relayed_by) = match decision_actor(&ctx.agent_ctx, caller.as_ref(), &agent, &request, "revoke", None, body.reason.as_deref(), body.signed.as_ref()) {
+    let actor = match decision_actor(&ctx.agent_ctx, caller.as_ref(), &agent, &request, "revoke", None, body.reason.as_deref(), body.signed.as_ref()) {
         Ok(a) => a,
         Err(refusal) => return *refusal,
     };
-    match revoke_grant(&ctx.agent_ctx, actor.as_ref(), relayed_by.as_deref(), &agent, &request, body.reason).await {
-        Ok(outcome) => Json(outcome.receipt).into_response(),
+    match revoke_grant(&ctx.agent_ctx, actor.caller.as_ref(), actor.relayed.as_ref(), &agent, &request, body.reason).await {
+        Ok(outcome) => {
+            if actor.unsigned {
+                ctx.agent_ctx.unsigned_actions.note_decision("revoke");
+            }
+            Json(outcome.receipt).into_response()
+        }
         Err(refusal) => refusal.into_response(),
     }
 }
@@ -660,7 +755,7 @@ pub(super) async fn gw_grant_revoke(
 /// route (the `grant` fault class). The next checkpoint for the grant's scope names the term, is offered to this
 /// node's authority (whose sweep stops work running under the grant) and written beside the grant; `…/revoked`
 /// names who and why.
-pub(crate) async fn revoke_grant(ctx: &Arc<TaskCtx>, caller: Option<&ResolvedPrincipal>, relayed_by: Option<&str>, agent: &str, request: &str, reason: Option<String>) -> Result<GrantOutcome, GrantRefusal> {
+pub(crate) async fn revoke_grant(ctx: &Arc<TaskCtx>, caller: Option<&ResolvedPrincipal>, relayed: Option<&Relayed>, agent: &str, request: &str, reason: Option<String>) -> Result<GrantOutcome, GrantRefusal> {
     let issuer = caller.map(|c| c.principal.clone()).unwrap_or_else(|| gateway_caller::PRINCIPAL_ANONYMOUS.to_string());
     if request.contains('/') || agent.is_empty() || request.is_empty() {
         return Err(GrantRefusal::door(StatusCode::BAD_REQUEST, "bad_request", "the agent is named and the request is one key segment"));
@@ -669,6 +764,8 @@ pub(crate) async fn revoke_grant(ctx: &Arc<TaskCtx>, caller: Option<&ResolvedPri
         return Err(GrantRefusal::door(StatusCode::BAD_REQUEST, "bad_request", format!("{agent} is neither a node principal, a client principal nor a client principal's hex segment")));
     };
     let key = format!("grant/{segment}/{request}");
+    // Before the grant is read, held until the revocation is written (#754's review, finding 1).
+    let _claim = DecisionClaim::take(ctx, &key)?;
     let Some(bytes) = mycelium_core::ops::kv_get(ctx, &format!("{key}/issued")) else {
         return Err(GrantRefusal::door(StatusCode::NOT_FOUND, "not_issued", format!("no grant was issued at {key}")));
     };
@@ -712,7 +809,7 @@ pub(crate) async fn revoke_grant(ctx: &Arc<TaskCtx>, caller: Option<&ResolvedPri
     };
     let now_ms = ctx.hlc.decision_now_ms();
     let arguments = json!({ "tool": tool, "agent": holder_principal, "request": request });
-    let preflight = ae_preflight(ctx, caller, "grant.revoke", &resource, &arguments, &json!({}), ENFORCEMENT_POINT_GRANT_ISSUE).await;
+    let preflight = ae_preflight(ctx, caller, "grant.revoke", &resource, &arguments, &Relayed::params(relayed), ENFORCEMENT_POINT_GRANT_ISSUE).await;
     match &preflight {
         Preflight::Refuse(r) => {
             return Err(GrantRefusal::Policy { reason: r.reason(), detail: r.to_string(), data: r.error_data() });
@@ -752,10 +849,7 @@ pub(crate) async fn revoke_grant(ctx: &Arc<TaskCtx>, caller: Option<&ResolvedPri
     // `/health` no longer reports `wal_refusing_appends`. `503` because the refusal is the node's state, not the
     // request's, and a retry is the answer.
     let mut record = json!({ "schema": "mycelium.grant-revocation/1", "request": request, "issuer": issuer, "reason": reason.unwrap_or_default(), "at_ms": now_ms, "checkpoint_seq": 2 });
-    if let Some(relay) = relayed_by {
-        record["signed"] = json!(true);
-        record["relayed_by"] = json!(relay);
-    }
+    Relayed::mark(relayed, &mut record);
     let written = match write_record_durable(ctx, format!("{key}/checkpoint"), cp).await {
         Ok(_) => write_record_durable(ctx, format!("{key}/revoked"), record.to_string().into_bytes()).await,
         Err(e) => Err(e),

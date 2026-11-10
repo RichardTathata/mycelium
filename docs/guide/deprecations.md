@@ -2963,13 +2963,20 @@ the signer as the decision's actor. A client carrying a signed decision needs on
   - `POST /gateway/grants/{agent}/{request}` and `.../revoke` admit `grant:issue` on the bearer **or** `grant:relay`.
     A token holding neither is refused `403 insufficient scope`, whose body now also names `or_scope`.
   - A body may carry `signed`. When it does, the decider is the actor: the evaluator decides with it, and the evidence
-    record's `subject` names it. The grant's `purpose` names the decider and the relay. A refusal's or revocation's
-    record gains `"signed": true` and `relayed_by`.
+    record's `subject` names it, and its new `signed_decision` field keeps the signed body, the terms and
+    `relayed_by`. The grant's `purpose` names the decider and the relay. A refusal's or revocation's record gains
+    `signed` (the body) and `relayed_by`.
+  - One decision per request at a time on a node: a concurrent copy is answered `409 decision_in_flight`, then
+    `already_answered` or `already_revoked`. Before this, concurrent copies of one decision were each answered.
+  - A signed decision is fresh for `CALLER_CONTEXT_MAX_AGE_MS` (300 s) plus `max_clock_drift_ms` into the past, and
+    `max_clock_drift_ms` into the future: 600 s and 300 s at the default drift.
   - New refusals: `403 not_the_decider`, `403 decision_retargeted`, `409 not_addressed_here`, `403 stale`,
-    `403 decider_lacks_scope`, `403 decision_unsigned`, `400 decision_signature_malformed` and
-    `403 decision_unverifiable`.
+    `403 decider_lacks_scope`, `403 decision_unsigned`, `400 decision_signature_malformed`, `403 decision_unverifiable`,
+    `409 gateway_identity_issuer_unset` and `409 decision_in_flight`.
+  - `AeEvidence` gained `signed_decision` (`#[non_exhaustive]`, so only a struct literal elsewhere would break).
 - **Unsigned decisions, counted now and refused later:** an unsigned body under `grant:issue` is still decided as the
-  bearer's own, and counted on `GET /stats` as `grant_decisions_unsigned`.
+  bearer's own. It is counted once answered (issued, refused or revoked) on `GET /stats` as
+  `grant_decisions_unsigned`, and as `mycelium_gateway_decisions_unsigned_total{decision}`.
   - Watch the counter, and give each supervisor a client certificate (`mycelium tls issue --client`) and a signing
     SDK (`signer=` / `{ signer }`) before the refusal release.
   - The refusal is tracked as the identity plan's §9 O6.

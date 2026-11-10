@@ -386,10 +386,14 @@ checkpoint from the issuer naming the term. The decision record carries the gran
 
 ```text
 GET  /gateway/grants/pending                      grant:read   — the open requests, oldest first
-POST /gateway/grants/{agent}/{request}            grant:issue  — {"decision": "issue"|"refuse", "ttl_secs", "reason"}
-POST /gateway/grants/{agent}/{request}/revoke     grant:issue  — {"reason"}, at the node that issued
+POST /gateway/grants/{agent}/{request}            grant:issue or grant:relay — {"decision": "issue"|"refuse", "ttl_secs", "reason", "signed"?}
+POST /gateway/grants/{agent}/{request}/revoke     grant:issue or grant:relay — {"reason", "signed"?}, at the node that issued
 GET  /gateway/grants/stream                       grant:read   — SSE: grant_request once each, grant_answered on issue · refuse · revoke, grant_expired on a lapse
 ```
+
+`signed` is a supervisor's own signature over its answer (identity-and-lifecycle I3): the node records the signer as
+the actor, and a client carrying it needs only `grant:relay` — under which an unsigned body is refused. See
+[grants](../features/grants.md) for what is checked and what is kept.
 
 The raw KV routes refuse the `grant/` namespace: an answer is written through the door that decides it.
 

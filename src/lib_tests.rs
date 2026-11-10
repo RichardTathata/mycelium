@@ -292,6 +292,8 @@ fn spawn_handler_with(
         client_replay: Default::default(),
         #[cfg(feature = "tls")]
         unsigned_actions: Default::default(),
+        #[cfg(all(feature = "gateway", feature = "tls"))]
+        grant_decisions_in_flight: papaya::HashSet::new(),
         causal_misplaced: Default::default(),
         #[cfg(feature = "a2a")]
         a2a_mounted: std::sync::atomic::AtomicBool::new(false),
@@ -4384,6 +4386,8 @@ async fn test_subscribe_notified_via_gossip() {
         client_replay: Default::default(),
         #[cfg(feature = "tls")]
         unsigned_actions: Default::default(),
+        #[cfg(all(feature = "gateway", feature = "tls"))]
+        grant_decisions_in_flight: papaya::HashSet::new(),
         causal_misplaced: Default::default(),
         #[cfg(feature = "a2a")]
         a2a_mounted: std::sync::atomic::AtomicBool::new(false),
