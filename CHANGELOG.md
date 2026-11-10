@@ -69,6 +69,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **I3 closed: signed decisions, on evidence** (`docs/plans/identity-and-lifecycle.md` I3, PR 3 of 3). The plan
+  closes I3 promise by promise across #750, #754 and this PR. One promise is moved: the private Cedar adapter's re-pin
+  waits for the release that carries I3, because it pins by release tag (§9 O7). Also in this PR:
+  - the SDK decide and revoke docstrings name `decision_in_flight` and `gateway_identity_issuer_unset`;
+  - an issue refused by the later-checkpoint guard records a `Failed` execution beside its decision;
+  - the grants page says what a re-verifier of a signed decision must compare beside the signature.
+
 - **Signed grant decisions, carried under `grant:relay`** (`docs/plans/identity-and-lifecycle.md` I3, PR 2, D3 and
   D5). A supervisor holding a client certificate signs its answer to a grant request (issue, refuse or revoke). The
   node it is addressed to records the signer as the decision's actor, wherever the signed body is carried.

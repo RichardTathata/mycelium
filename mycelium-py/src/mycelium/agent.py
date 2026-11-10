@@ -744,15 +744,28 @@ class MyceliumAgent:
         ``grant:issue`` at the node), the decision is signed (identity-and-lifecycle I3): the node records the signer
         as its actor, so this client's own bearer needs only ``grant:relay``. It is addressed to ``node`` — the node
         whose gateway this client talks to, read from ``GET /health`` when not given; ``agent`` is then the holder's
-        principal, as the pending list's ``agent`` names it. A signed decision is refused 403 ``not_the_decider``
-        (another key), ``decision_retargeted``, ``decider_lacks_scope`` or ``stale``, and 409 ``not_addressed_here``.
+        principal, as the pending list's ``agent`` names it.
 
         ``decision`` is ``"issue"`` or ``"refuse"``; ``ttl_secs`` bounds an issued grant (default 300, at most
         3 600); ``reason`` is shown to the agent on a refusal. Issuing is itself an action the node's evaluator
-        decides (D22), so a supervisor the policy does not permit is answered 403 — raised by ``raise_for_status``
-        as an :class:`httpx.HTTPStatusError`, as is 409 ``not_a_member`` for an agent on a node this gateway holds no key of, 409
-        ``already_answered``, 410 ``expired`` and 404 ``unknown_request``. Returns the route's answer: the record's
-        ``key``, the write's ``operation_id`` and ``local_durability``.
+        decides (D22). Returns the route's answer: the record's ``key``, the write's ``operation_id`` and
+        ``local_durability``. Every refusal is raised by ``raise_for_status`` as an :class:`httpx.HTTPStatusError`,
+        its body's ``error`` naming it:
+
+        - the scope: 403 ``insufficient scope`` (neither ``grant:issue`` nor ``grant:relay``);
+        - the request: 400 ``bad_request``; 404 ``unknown_request``; 409 ``not_a_member`` (an agent on no member
+          node this gateway knows); 409 ``unreadable_request``; 409 ``already_answered``; 410 ``expired``; 409
+          ``decision_in_flight`` while another decision on the request is being answered at that node — retry, and it
+          answers ``already_answered`` once that one is written;
+        - a signed decision: 400 ``decision_signature_malformed``; 403 ``not_the_decider`` (another key, a superseded
+          one, or terms the signature does not cover); 403 ``decision_retargeted``; 409 ``not_addressed_here``; 403
+          ``stale``; 403 ``decider_lacks_scope``; 403 ``decision_unverifiable`` (the node has no identity); 409
+          ``gateway_identity_issuer_unset``; and, unsigned under ``grant:relay`` alone, 403 ``decision_unsigned``;
+        - the policy: 403 with the evaluator's reason (the actor — the decider of a signed decision — is not
+          permitted), or 403 ``no_evaluator`` (no evaluator attached);
+        - the answer: 403 ``no_identity`` (the node cannot sign a grant); 409 ``already_revoked`` (a later checkpoint
+          stands beside the request); 503 ``not_durable`` (the answer is not on disk; the request is still pending —
+          retry); 500 ``serialise``.
         """
         if decision not in ("issue", "refuse"):
             raise ValueError('decision must be "issue" or "refuse"')
@@ -795,11 +808,21 @@ class MyceliumAgent:
     def grant_revoke(self, agent: str, request: str, *, reason: Optional[str] = None, signer: Optional[Any] = None,
                      node: Optional[str] = None) -> Dict[str, Any]:
         """``POST /gateway/grants/{agent}/{request}/revoke`` (``grant:issue``, or ``grant:relay`` with ``signer``):
-        revoke an issued grant, at the node that issued it (409 ``not_the_issuer`` elsewhere; 404 ``not_issued``; 409
-        ``already_revoked``). Revoking is an action the node's evaluator decides (``grant.revoke``), so a supervisor the
-        policy does not permit is answered 403. The grant is refused at every door afterwards, and work running under it
-        is stopped. ``signer`` and ``node`` sign the revocation as :meth:`grant_decide` signs a decision. Returns the
-        route's answer: the revocation record's ``key``, ``operation_id`` and ``local_durability``.
+        revoke an issued grant, at the node that issued it. Revoking is an action the node's evaluator decides
+        (``grant.revoke``). The grant is refused at every door afterwards, and work running under it is stopped.
+        ``signer`` and ``node`` sign the revocation as :meth:`grant_decide` signs a decision. Returns the route's
+        answer: the revocation record's ``key``, ``operation_id`` and ``local_durability``. Every refusal is raised by
+        ``raise_for_status`` as an :class:`httpx.HTTPStatusError`, its body's ``error`` naming it:
+
+        - the scope: 403 ``insufficient scope``;
+        - the grant: 400 ``bad_request``; 404 ``not_issued``; 409 ``unreadable_grant``; 409 ``not_the_issuer``
+          (revoke at the node that issued it); 409 ``already_revoked``; 409 ``decision_in_flight`` while another
+          decision on the grant is being answered at that node — retry, and it answers ``already_revoked`` once that
+          one is written;
+        - a signed revocation: the signed-decision refusals :meth:`grant_decide` lists;
+        - the policy: 403 with the evaluator's reason, or 403 ``no_evaluator``;
+        - the answer: 403 ``no_identity`` (the node cannot sign the revoking checkpoint); 503 ``not_durable`` (the
+          revocation stands in this process only — retry); 500 ``serialise``.
         """
         body: Dict[str, Any] = {}
         if reason is not None:

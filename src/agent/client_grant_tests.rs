@@ -77,6 +77,8 @@ fn config(dir: &Path, http_port: u16, n: &Node) -> (NodeId, GossipConfig) {
         GatewayNamedToken { name: "treasurer".into(), token: "treasurer-secret".into(), scopes: vec!["grant:read".into(), "grant:issue".into()] },
         // Identity-and-lifecycle I3: a relay carries a decision someone else signed, and decides nothing itself.
         GatewayNamedToken { name: "relay".into(), token: "relay-secret".into(), scopes: vec!["grant:read".into(), "grant:relay".into()] },
+        // #756's review, M2: a decider holding `grant:issue` whom no rule of the unit permits to issue.
+        GatewayNamedToken { name: "auditor".into(), token: "auditor-secret".into(), scopes: vec!["grant:read".into(), "grant:issue".into()] },
     ];
     cfg.authority = n.authority.then(|| AuthorityConfig {
         declarations: dir.join("units"),
@@ -1069,7 +1071,10 @@ fn a_node_without_an_identity_cannot_verify_a_signed_decision() {
 /// concurrent copy of an issue could write the first checkpoint (sequence 1) after a revocation wrote the second, and
 /// the KV keeps the later write. With the claim no route reaches that order, so it is posed directly: a revocation's
 /// checkpoint placed beside a pending request, then the issue — refused `already_revoked`, the checkpoint unchanged.
-/// Seen failing first with the guard removed (the issue answered and the checkpoint lowered to 1).
+/// Seen failing first with the guard removed (the issue answered and the checkpoint lowered to 1). The refused issue's
+/// `Decided` record is followed by its execution, `None` — nothing ran: the guard stands before the checkpoint is
+/// offered or written (#754's confirm round, residual b; #756's review, M1 and L5) — seen failing first with the guard
+/// returning without one, and again with it recording `Failed`.
 #[tokio::test]
 async fn an_issue_never_lowers_a_later_checkpoint() {
     let (dir, http_port, a, _ran, treasurer, requests) = decision_fleet("monotonic", 2).await;
@@ -1086,8 +1091,80 @@ async fn an_issue_never_lowers_a_later_checkpoint() {
     let answer = post_decision(http_port, "relay-secret", &requests[1], issue(&requests[1])).await;
     let held: serde_json::Value = mycelium_core::ops::kv_get(&a.task_ctx, &beside).and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
     a.shutdown().await;
+    let journal = journal_of(&dir);
     let _ = std::fs::remove_dir_all(&dir);
+    use crate::agent::action_evaluator::{Execution, RecordKind};
+    // The refused issue's own decision: the `Decided` record whose signed body names the second request.
+    let second = journal
+        .iter()
+        .find(|r| r.kind == RecordKind::Decided && r.operation == "grant.issue" && r.signed_decision.as_ref().is_some_and(|d| d["signed"]["request"] == requests[1].as_str()))
+        .map(|r| r.operation_id.clone())
+        .expect("the refused issue was decided");
+    let executions: Vec<Execution> = journal.iter().filter(|r| r.kind == RecordKind::Execution && r.operation_id == second).map(|r| r.execution).collect();
+    assert_eq!(executions, vec![Execution::None], "RECORDED: the refused issue's execution, nothing ran");
     assert_eq!(revoked.0, 200, "{}", revoked.1);
     assert_eq!(code(&answer), (409, Some("already_revoked".into())), "MONOTONIC: {}", answer.1);
     assert_eq!(held["checkpoint"]["seq"].as_u64(), Some(2), "the later checkpoint stands: {held}");
+}
+
+
+/// **A relay cannot launder a decider the policy refuses** (#756's review, M2; the substrate half of §9 O7's refusal
+/// case). The auditor holds a client certificate and `grant:issue`, so every door check passes, but no rule of the
+/// unit permits it to issue. Its signed issue, carried by the relay, is refused by policy (`403`, the evaluator's
+/// reason) and recorded `Decided` with the **auditor** — not the relay — as the subject, and no grant is written. A
+/// unit's rules are allowances, so an actor no rule names is `Indeterminate` (authority not established), never a
+/// permit; a deny would need a rule that prohibits, which the unit format has not. Seen failing first with the relay
+/// used as the actor (the record's subject the relay).
+#[tokio::test]
+async fn a_relayed_signed_decision_the_policy_refuses_is_refused_with_the_decider_as_subject() {
+    use crate::agent::action_evaluator::{DecisionKind, RecordKind};
+    let (dir, http_port, a, _ran, _treasurer, requests) = decision_fleet("laundered", 1).await;
+    let auditor = client_key_in(&a, &dir.join("tls"), &dir.join("client-auditor"), "auditor");
+    const AUDITOR: &str = "token:fleet/auditor";
+    let node = a.node_id().to_string();
+    let signed = crate::sign_grant_decision(&auditor, AUDITOR, &node, FORECASTER, &requests[0], "issue", Some(600), None, mycelium_core::sim_seam::wall_now_ms());
+    let answer = post_decision(http_port, "relay-secret", &requests[0], serde_json::json!({"decision": "issue", "ttl_secs": 600, "signed": signed})).await;
+    let issued = mycelium_core::ops::kv_get(&a.task_ctx, &format!("grant/{}/{}/issued", crate::agent::gateway_authority::grant_holder_segment(FORECASTER), requests[0]));
+    a.shutdown().await;
+    let journal = journal_of(&dir);
+    let _ = std::fs::remove_dir_all(&dir);
+    let door_codes = ["not_the_decider", "decision_retargeted", "not_addressed_here", "stale", "decider_lacks_scope", "decision_unsigned", "decision_in_flight"];
+    assert_eq!(answer.0, 403, "{}", answer.1);
+    assert!(!door_codes.contains(&answer.1["error"].as_str().unwrap_or_default()), "POLICY: a door refusal, not the evaluator's: {}", answer.1);
+    assert!(issued.is_none(), "no grant was written");
+    let decided: Vec<_> = journal.iter().filter(|r| r.kind == RecordKind::Decided && r.operation == "grant.issue").collect();
+    assert_eq!(decided.len(), 1, "{decided:?}");
+    assert_eq!((decided[0].subject.as_str(), decided[0].decision), (AUDITOR, DecisionKind::Indeterminate), "SUBJECT: the decider is the actor refused");
+}
+
+/// **Every return after a permit records an execution** (#756's review, L1). A node with an execution authority and
+/// no identity (`[tls]` unset) decides an issue — the evaluator permits the treasurer — and cannot sign it: `403
+/// no_identity`, and the decision's execution is recorded `None`, nothing ran. Seen failing first with the return
+/// recording nothing.
+#[tokio::test]
+async fn an_issue_the_node_cannot_sign_records_that_nothing_ran() {
+    use crate::agent::action_evaluator::{Execution, RecordKind};
+    let dir = scratch("no-identity");
+    let http_port = alloc_port();
+    let (id, mut cfg) = config(&dir, http_port, &Node { certs: dir.join("tls"), bootstrap: vec![], authority: true, port: None });
+    cfg.tls = None;
+    let a = Arc::new(GossipAgent::new(id, cfg));
+    a.start().await.expect("a node with an authority and no identity starts");
+    let agent = crate::agent::gateway_caller::node_principal(a.node_id());
+    let request = "0000000000000001";
+    let record = serde_json::json!({
+        "request": request, "agent": agent, "tool": TOOL,
+        "arguments_digest": crate::agent::action_evaluator::hex32(&crate::arguments_digest(&serde_json::json!({"city": "Lyon"}))),
+        "resource": format!("tool:{TOOL}@{}", a.node_id()),
+        "expires_at_ms": mycelium_core::sim_seam::wall_now_ms() + 60_000,
+    });
+    assert!(a.kv().set(format!("grant/{agent}/{request}"), bytes::Bytes::from(serde_json::to_vec(&record).unwrap())));
+    let answer = http(http_port, "treasurer-secret", reqwest::Method::POST, &format!("/gateway/grants/{}/{request}", segment(&agent)), Some(serde_json::json!({"decision": "issue", "ttl_secs": 60}))).await;
+    a.shutdown().await;
+    let journal = journal_of(&dir);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(code(&answer), (403, Some("no_identity".into())), "{}", answer.1);
+    let decided = journal.iter().find(|r| r.kind == RecordKind::Decided && r.operation == "grant.issue").map(|r| r.operation_id.clone()).expect("the issue was decided");
+    let executions: Vec<Execution> = journal.iter().filter(|r| r.kind == RecordKind::Execution && r.operation_id == decided).map(|r| r.execution).collect();
+    assert_eq!(executions, vec![Execution::None], "RECORDED: nothing ran");
 }
