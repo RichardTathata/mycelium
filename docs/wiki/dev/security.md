@@ -324,7 +324,8 @@ parses into a `SendRequest` and runs `dispatch_send` (unary) or `tasks_send_subs
 edge, the reservation and owner rule, `ae_preflight`, the mandate to the provider, the evidence record — so the C7
 bypass matrix tries all six send names and the federated refusals (unary only; no get or cancel across the edge) are
 asserted in every generation's name. A standard client sends no skill: `metadata.skillId` names one, else the
-embedder's `with_a2a_default_skill`, else `-32602`. The default is a name, not a grant — it runs the same doors. A
+embedder's `with_a2a_default_skill` (or the configuration's `gateway_a2a_default_skill`, refused at start beside a
+different code default), else `-32602`. The default is a name, not a grant — it runs the same doors. A
 `taskId` is refused, so a 1.0 client cannot address another identity's task through a send. The real `a2a-sdk` drives
 a node in CI (`a2a-sdk` job, `tests/a2a-sdk/`). Not moved yet: the SDKs' `A2aClient`.
 [`.log/2026-10-17-a2a-current-spec.md`](.log/2026-10-17-a2a-current-spec.md).

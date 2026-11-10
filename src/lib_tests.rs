@@ -15395,6 +15395,133 @@ async fn the_a2a_switch_in_a_build_without_a2a_refuses_the_start() {
     assert!(err.to_string().contains("`a2a` feature"), "{err}");
 }
 
+/// `gateway_a2a_default_skill` does from configuration what `with_a2a_default_skill` does in code: on a node served
+/// by the switch, a message that names no `metadata.skillId` — what a stock `a2a-sdk` client sends — reaches the
+/// named skill through `start()`, and the card says where such a message goes. A message that names a skill still
+/// reaches that one. Seen failing first: the field parsed and the message was refused `-32602`.
+#[cfg(feature = "a2a")]
+#[tokio::test]
+async fn the_a2a_default_skill_field_reaches_its_skill_through_start() {
+    use crate::capability::Capability;
+    use std::sync::atomic::AtomicUsize;
+    let mut cfg = GossipConfig::default();
+    cfg.bind_port = alloc_port();
+    cfg.http_port = Some(alloc_port());
+    cfg.gateway_a2a = true;
+    cfg.gateway_a2a_default_skill = Some("depot/dispatch".into());
+    let http_port = cfg.http_port.unwrap();
+    let agent = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", cfg.bind_port).unwrap(), cfg));
+    agent.start().await.expect("starts");
+    let _reg = agent.capabilities().advertise_capability(Capability::new("depot", "dispatch"), Duration::from_secs(30));
+    let ran = Arc::new(AtomicUsize::new(0));
+    {
+        let (agent, ran) = (Arc::clone(&agent), Arc::clone(&ran));
+        let mut rx = agent.service().rpc_rx("skill.invoke");
+        tokio::spawn(async move {
+            while let Some(req) = rx.recv().await {
+                ran.fetch_add(1, Ordering::SeqCst);
+                agent.service().rpc_respond(&req, b"dispatched".to_vec());
+            }
+        });
+    }
+    let key = format!("cap/{}/depot/dispatch", agent.node_id());
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while agent.kv().get(&key).is_none() {
+        assert!(std::time::Instant::now() < deadline, "{key} was never written");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let http = reqwest::Client::new();
+    let base = format!("http://127.0.0.1:{http_port}");
+    let send = |message: serde_json::Value| {
+        let (http, url) = (http.clone(), format!("{base}/a2a"));
+        async move {
+            let r = http.post(&url)
+                .json(&serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "SendMessage", "params": {"message": message}}))
+                .send().await.unwrap();
+            assert_eq!(r.status(), 200, "answered as JSON-RPC");
+            r.json::<serde_json::Value>().await.unwrap()
+        }
+    };
+    // As a stock client sends it: no skill named.
+    let v = send(serde_json::json!({"messageId": "m1", "role": "ROLE_USER", "parts": [{"text": "go"}]})).await;
+    let task = &v["result"]["task"];
+    assert_eq!(task["status"]["state"], "TASK_STATE_COMPLETED", "reached the default skill: {v}");
+    assert_eq!(task["artifacts"][0]["parts"][0]["text"], "dispatched", "{v}");
+    assert_eq!(ran.load(Ordering::SeqCst), 1, "the default skill's provider ran");
+    // A named skill still wins over the default: one nobody serves is not found, and the default does not run.
+    let v = send(serde_json::json!({"messageId": "m2", "role": "ROLE_USER", "parts": [{"text": "go"}],
+                                    "metadata": {"skillId": "depot/absent"}})).await;
+    assert_ne!(v["result"]["task"]["status"]["state"], "TASK_STATE_COMPLETED", "the named skill, not the default: {v}");
+    assert_eq!(ran.load(Ordering::SeqCst), 1, "the default did not run for a named skill");
+    // The card states the default.
+    let card: serde_json::Value =
+        http.get(format!("{base}/.well-known/agent-card.json")).send().await.unwrap().json().await.unwrap();
+    assert!(card["description"].as_str().unwrap().contains("goes to depot/dispatch"), "{card}");
+    agent.shutdown().await;
+}
+
+/// `gateway_a2a_default_skill` is refused at start by name where it would be accepted and do nothing, or would not
+/// be a skill: with `/a2a` not served (neither `gateway_a2a` nor `with_a2a()`), with a value that is not
+/// `"ns/name"` of one key segment each (`capability_name_problem`, as `with_a2a_default_skill` checks), and beside a
+/// different default set in code. The same default in code and configuration starts, and so does the field beside
+/// `with_a2a()` alone. Seen failing first: every refused case started.
+#[cfg(feature = "a2a")]
+#[tokio::test]
+async fn the_a2a_default_skill_field_is_refused_by_name_where_it_would_do_nothing() {
+    let node = |a2a: bool, skill: &str, code: Option<(&str, &str)>, mount: bool| {
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = alloc_port();
+        cfg.http_port = Some(alloc_port());
+        cfg.gateway_a2a = a2a;
+        cfg.gateway_a2a_default_skill = Some(skill.into());
+        let mut agent = GossipAgent::new(NodeId::new("127.0.0.1", cfg.bind_port).unwrap(), cfg);
+        if mount {
+            agent = agent.with_a2a();
+        }
+        if let Some((ns, name)) = code {
+            agent = agent.with_a2a_default_skill(ns, name);
+        }
+        agent
+    };
+    let refused = |agent: GossipAgent, says: &'static str| async move {
+        let err = agent.start().await.expect_err("refused at start");
+        assert!(matches!(err, GossipError::InvalidField { field: "gateway_a2a_default_skill", .. }), "{err}");
+        assert!(err.to_string().contains(says), "{says:?} in {err}");
+    };
+    refused(node(false, "depot/dispatch", None, false), "not served").await;
+    for bad in ["", "depot", "depot/", "/dispatch", "depot/a/b", "locality/self", " depot/dispatch", "depot/dispatch ", "depot /dispatch"] {
+        refused(node(true, bad, None, false), "not a skill name").await;
+    }
+    // In code, a name with surrounding whitespace is ignored with a warning, as the other bad names are: it would be
+    // accepted and every message without a skill would then fail to resolve.
+    for (ns, name) in [(" depot", "dispatch"), ("depot", "dispatch "), ("depot\t", "dispatch")] {
+        let agent = GossipAgent::new(NodeId::new("127.0.0.1", 0).unwrap(), GossipConfig::default()).with_a2a_default_skill(ns, name);
+        assert!(agent.task_ctx.a2a_default_skill.get().is_none(), "{ns:?}/{name:?} is not a skill name");
+    }
+    refused(node(true, "depot/dispatch", Some(("depot", "other")), false), "with_a2a_default_skill").await;
+
+    for agent in [node(true, "depot/dispatch", Some(("depot", "dispatch")), false), node(false, "depot/dispatch", None, true)] {
+        agent.start().await.expect("the same default twice, or the field beside with_a2a(), starts");
+        assert_eq!(agent.task_ctx.a2a_default_skill.get().map(String::as_str), Some("depot/dispatch"));
+        agent.shutdown().await;
+    }
+}
+
+/// `gateway_a2a_default_skill` in a build without `a2a` refuses the start by name — the v2.18.1 class, as
+/// `gateway_a2a` is. Runs in the default-feature lib run (no `a2a`). Seen failing first: the start succeeded.
+#[cfg(all(feature = "gateway", not(feature = "a2a")))]
+#[tokio::test]
+async fn the_a2a_default_skill_in_a_build_without_a2a_refuses_the_start() {
+    let mut cfg = GossipConfig::default();
+    cfg.bind_port = alloc_port();
+    cfg.http_port = Some(alloc_port());
+    cfg.gateway_a2a_default_skill = Some("depot/dispatch".into());
+    let agent = GossipAgent::new(NodeId::new("127.0.0.1", cfg.bind_port).unwrap(), cfg);
+    let err = agent.start().await.expect_err("refused: this build has no /a2a for a default skill");
+    assert!(matches!(err, GossipError::InvalidField { field: "gateway_a2a_default_skill", .. }), "{err}");
+    assert!(err.to_string().contains("`a2a` feature"), "{err}");
+}
+
 /// Plan I3's acceptance: a node that provides every guarantee `secure-single-domain` requires starts
 /// under it, its report says so, and its gateway refuses an unauthenticated request. Under rev 2 the
 /// node's certificate is issued off-node first, so the same report shows `id.ca_key_off_node`
