@@ -222,6 +222,14 @@ variant (design record [`../design/wiki-concurrent-edit.md`](../design/wiki-conc
 started only if a no-external-store deployment needs it. Research-track work (Paper 1's three-arm
 experiment) is tracked in [`docs/wiki/domain/publications.md`](../wiki/domain/publications.md).
 
+## Recurring — reviewed monthly
+
+[`rust-ecosystem-watch.md`](rust-ecosystem-watch.md) — **the Rust ecosystem watch** (started 2026-11-10): a register,
+read once a month, of upstream Rust work Mycelium could inherit or offer — build provenance, the official MCP SDK,
+telemetry correlated with the evidence, WASI 0.3, post-quantum TLS, async memory, build speed. Each row states where
+Mycelium is (`file:line`), what adopting it buys and costs, and its state (`watch` · `spike` · `plan` · `adopted` ·
+`declined`); a review log records every month, including the ones where nothing changed.
+
 ## Research track — in progress
 
 | Doc | Status |
