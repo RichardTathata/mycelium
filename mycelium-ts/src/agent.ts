@@ -4,6 +4,7 @@ import { Federation } from "./federation";
 import { Artifacts } from "./artifacts";
 import { authHeaders, baseUrl, resolveToken, type AuthOptions } from "./auth";
 import { pathSegment, wholeSeconds, withCausal } from "./wire";
+import type { ClientSigner } from "./client_sig";
 import {
   KvReceipt,
   CausalOptions,
@@ -482,7 +483,13 @@ export class MyceliumAgent {
   }
 
   /**
-   * `POST /gateway/grants/{agent}/{request}` (`grant:issue`): answer a pending request. `decision` is `"issue"` or
+   * `POST /gateway/grants/{agent}/{request}` (`grant:issue`, or `grant:relay` with `signer`): answer a pending
+   * request. With `signer` — a {@link ClientSigner} for a principal holding a client certificate and `grant:issue` at
+   * the node — the decision is signed (identity-and-lifecycle I3): the node records the signer as its actor, so this
+   * client's own bearer needs only `grant:relay`. It is addressed to `node`, read from `GET /health` when not given;
+   * `agent` is then the holder's principal, as the pending list names it. A signed decision is refused 403
+   * `not_the_decider`, `decision_retargeted`, `decider_lacks_scope` or `stale`, and 409 `not_addressed_here`.
+   * `decision` is `"issue"` or
    * `"refuse"`; `ttlSecs` bounds an issued grant (default 300, at most 3 600); `reason` is shown to the agent on a
    * refusal. Issuing is itself an action the node's evaluator decides (D22), so a supervisor the policy does not
    * permit is answered 403; 409 `not_a_member` for an agent on no member node, 409 `already_answered`, 410 `expired`
@@ -493,13 +500,20 @@ export class MyceliumAgent {
     agent: string,
     request: string,
     decision: "issue" | "refuse",
-    options: { ttlSecs?: number; reason?: string } = {},
+    options: { ttlSecs?: number; reason?: string; signer?: ClientSigner; node?: string } = {},
   ): Promise<GrantAnswer> {
     if (decision !== "issue" && decision !== "refuse") throw new Error('decision must be "issue" or "refuse"');
+    const signed = options.signer
+      ? options.signer.signGrantDecision(options.node ?? (await this.nodeId), agent, request, decision, {
+          ttlSecs: decision === "issue" ? options.ttlSecs : undefined,
+          reason: decision === "refuse" ? options.reason : undefined,
+        })
+      : undefined;
     return (await this._post(`/gateway/grants/${pathSegment(agent)}/${pathSegment(request)}`, {
       decision,
       ...(options.ttlSecs !== undefined ? { ttl_secs: options.ttlSecs } : {}),
       ...(options.reason !== undefined ? { reason: options.reason } : {}),
+      ...(signed ? { signed } : {}),
     })) as GrantAnswer;
   }
 
@@ -519,14 +533,19 @@ export class MyceliumAgent {
   }
 
   /**
-   * `POST /gateway/grants/{agent}/{request}/revoke` (`grant:issue`): revoke an issued grant, at the node that issued
+   * `POST /gateway/grants/{agent}/{request}/revoke` (`grant:issue`, or `grant:relay` with `signer`, signed as
+   * {@link grantDecide} signs): revoke an issued grant, at the node that issued
    * it (409 `not_the_issuer` elsewhere; 404 `not_issued`; 409 `already_revoked`). Revoking is an action the node's
    * evaluator decides (`grant.revoke`). The grant is refused at every door afterwards, and work running under it is
    * stopped. Returns the route's answer: the revocation record's key, operation id and local durability.
    */
-  async grantRevoke(agent: string, request: string, options: { reason?: string } = {}): Promise<GrantAnswer> {
+  async grantRevoke(agent: string, request: string, options: { reason?: string; signer?: ClientSigner; node?: string } = {}): Promise<GrantAnswer> {
+    const signed = options.signer
+      ? options.signer.signGrantDecision(options.node ?? (await this.nodeId), agent, request, "revoke", { reason: options.reason })
+      : undefined;
     return (await this._post(`/gateway/grants/${pathSegment(agent)}/${pathSegment(request)}/revoke`, {
       ...(options.reason !== undefined ? { reason: options.reason } : {}),
+      ...(signed ? { signed } : {}),
     })) as GrantAnswer;
   }
 

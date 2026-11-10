@@ -261,7 +261,7 @@ pub(super) fn run(rep: &mut ClassReport, base: &GossipConfig, units: &[Unit], di
     let (stranger_refused, stranger_text) = if anyone {
         (true, format!("the declaration admits anyone (`*`) to grant.issue on {}, so {STRANGER} is not refused — stated, not exercised", rule.resource))
     } else {
-        let stranger = fleet.on(i, decide_grant(&a.task_ctx, Some(&supervisor(STRANGER)), &agent_principal, &request, GrantDecision::Issue { ttl_secs: Some(600) }));
+        let stranger = fleet.on(i, decide_grant(&a.task_ctx, Some(&supervisor(STRANGER)), None, &agent_principal, &request, GrantDecision::Issue { ttl_secs: Some(600) }));
         let text = match &stranger {
             Err(GrantRefusal::Policy { reason, detail, .. }) => format!("{STRANGER}'s issue refused by the evaluator ({reason}: {detail})"),
             Err(other) => format!("{STRANGER}'s issue refused at the door, not by the evaluator ({other})"),
@@ -269,7 +269,7 @@ pub(super) fn run(rep: &mut ClassReport, base: &GossipConfig, units: &[Unit], di
         };
         (matches!(&stranger, Err(GrantRefusal::Policy { .. })) && !marker(&a, &request, "issued"), text)
     };
-    let issued = fleet.on(i, decide_grant(&a.task_ctx, Some(&supervisor(&issuer)), &agent_principal, &request, GrantDecision::Issue { ttl_secs: Some(600) }));
+    let issued = fleet.on(i, decide_grant(&a.task_ctx, Some(&supervisor(&issuer)), None, &agent_principal, &request, GrantDecision::Issue { ttl_secs: Some(600) }));
     let issued_text = match &issued {
         Ok(o) => format!("written at {} ({})", o.receipt["key"].as_str().unwrap_or("?"), o.receipt["local_durability"].as_str().unwrap_or("?")),
         Err(e) => format!("REFUSED — {e}"),
@@ -308,7 +308,7 @@ pub(super) fn run(rep: &mut ClassReport, base: &GossipConfig, units: &[Unit], di
     // The agent is stopped before it can read the answer; the issuer answers the standing request.
     waiting.abort();
     let _ = fleet.on(i, waiting);
-    let issued_b = fleet.on(i, decide_grant(&a.task_ctx, Some(&supervisor(&issuer)), &agent_principal, &request_b, GrantDecision::Issue { ttl_secs: Some(600) }));
+    let issued_b = fleet.on(i, decide_grant(&a.task_ctx, Some(&supervisor(&issuer)), None, &agent_principal, &request_b, GrantDecision::Issue { ttl_secs: Some(600) }));
     let issued_b_text = match &issued_b {
         Ok(o) => format!("written ({})", o.receipt["local_durability"].as_str().unwrap_or("?")),
         Err(e) => format!("REFUSED — {e}"),

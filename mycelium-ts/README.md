@@ -503,7 +503,11 @@ protected kind — is thrown, never reported as `"timeout"`.
 issuing is itself an action the node's evaluator decides, so a refusal is the route's 403, and 409 `not_a_member`
 names an agent on no member node this gateway knows. A node's grant is presented by its holder, the agent's node; a client's own grant by the client (below). `grantRevoke(agent, request, {
 reason })` revokes at the issuing node, and `grantsStream()` is the requests as they come (an async generator of
-`grant_request`, `grant_answered` and `grant_expired` events).
+`grant_request`, `grant_answered` and `grant_expired` events). Pass `{ signer }` (a `ClientSigner`) to either verb and
+the decision is signed (identity-and-lifecycle I3): the node records the signer as its actor, so the client's own
+bearer needs only `grant:relay`; the addressed node is read from `GET /health` unless `node` is given, and `agent` is
+the holder's principal as the pending list names it. A signed decision is refused 403 `not_the_decider`,
+`decision_retargeted`, `decider_lacks_scope` or `stale`, and 409 `not_addressed_here`.
 `A2aClient.getTask(id)` and `cancel(id)` are `tasks/get` and `tasks/cancel`: the task as the node holds it, readable
 and cancellable by the identity that created it; a cancel ends the task's record and stops no work — a task runs
 inside its request — and a terminal task throws (adopter-surface X7, the adapter contract).

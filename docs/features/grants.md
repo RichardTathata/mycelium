@@ -79,6 +79,34 @@ This feature is turned on in code.
   `a_client_grant_is_revoked_against_its_issued_resource_with_the_provider_gone` (two nodes),
   `a_possession_proof_by_a_superseded_client_key_is_refused` and
   `the_request_door_reuses_a_standing_request_bounds_them_and_withholds_a_classified_rendering`.
+- **Signed decisions** (identity-and-lifecycle I3, D3 and D5): a supervisor holding a client certificate signs its
+  answer — issue, refuse or revoke — and the node it is addressed to records **the signer** as the decision's actor,
+  whoever carries it. The decision routes admit `grant:issue` on the bearer **or** `grant:relay`; under `grant:relay`
+  the body must carry `signed` ([`SignedDecision`](../../src/agent/grant_decision.rs), over
+  [`grant_decision_message`](../../src/agent/grant_decision.rs)), and the relay decides nothing itself.
+  - What is checked, in order: the signature under the key it carries, and that key the decider's current client key
+    on record here, else `403 not_the_decider` (a different body's terms also fail here, since they are signed); the
+    signed holder and request the route's path, else `403 decision_retargeted`; the signed node this one, else
+    `409 not_addressed_here`; the decider's clock inside the caller envelope's window, else `403 stale`; the decider
+    holding `grant:issue` at this gateway — a named token of the gateway's issuer whose principal it is — else
+    `403 decider_lacks_scope`. An unsigned body under `grant:relay` alone is `403 decision_unsigned`; a token holding
+    neither scope is `403 insufficient scope`, naming both (`required_scope`, `or_scope`).
+  - The evaluator then decides with the decider as the actor, as for any decision, and the evidence record's
+    `subject` is the decider. The grant's `purpose` names the decider and the relay; a refusal's or revocation's
+    record carries `"signed": true` and `relayed_by`.
+  - An unsigned decision under `grant:issue` is still the bearer's own this release, counted on `/stats`
+    (`grant_decisions_unsigned`); a later release refuses it (`deprecations.md` §95).
+  - A replay of a signed decision inside its window finds the request already answered, or the grant already revoked,
+    so no nonce cache is kept.
+  - From the SDKs: `grant_decide(…, signer=…)` / `grantDecide(…, { signer })` and `grant_revoke(…, signer=…)` /
+    `grantRevoke(…, { signer })`; the node is read from `GET /health` unless given. `ClientSigner.sign_grant_decision`
+    / `signGrantDecision` sign alone. `tests/fixtures/decision/vector.json` pins the message and the signature in Rust,
+    jest and pytest.
+  - The test: `a_signed_decision_relayed_under_grant_relay_is_the_signers`, in
+    [`src/agent/client_grant_tests.rs`](../../src/agent/client_grant_tests.rs).
+  - **Not built:** M-of-N decisions; an `oidc:` decider (key-less); a decider whose scopes come from anything but this
+    gateway's named tokens (OIDC groups, positional tokens); a relay at an un-upgraded gateway, which refuses
+    `grant:relay` as an insufficient scope and so admits nothing.
 - [`AgentPolicy`](../../src/agent/state_machine.rs) — its `grant_arguments_class` and `grant_renderable_classes`: the
   rendering under the data-class policy. The arguments' class by name, in the operator's vocabulary (as row R's `DataClass` names it), and
   the classes whose arguments may be rendered into the gossiped request; a class not listed is **withheld** — the record

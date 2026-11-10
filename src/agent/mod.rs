@@ -186,6 +186,8 @@ pub(crate) mod revocation;
 pub(crate) mod client_cert;
 /// Identity-and-lifecycle I1 (D1′): a client's own signature on a gateway call — `cs` and `cn`.
 pub(crate) mod client_sig;
+/// Identity-and-lifecycle I3 (D3, D5): a supervisor's signed answer to a grant request, carried under `grant:relay`.
+pub(crate) mod grant_decision;
 #[cfg(all(test, feature = "tls", feature = "gateway"))]
 mod client_sig_tests;
 #[cfg(all(test, feature = "compliance"))]

@@ -68,6 +68,70 @@ pub(super) struct GrantDecisionBody {
     /// A refusal's reason, shown to the agent.
     #[serde(default)]
     reason: Option<String>,
+    /// The decider's signature over this decision (identity-and-lifecycle I3, D3): required under `grant:relay`.
+    #[serde(default)]
+    signed: Option<crate::agent::grant_decision::SignedDecision>,
+}
+
+/// Who a decision route's answer is decided by (identity-and-lifecycle I3, D3, D5), and who carried it.
+///
+/// A body carrying `signed` is the decider's: verified ([`grant_decision::verify`](crate::agent::grant_decision::verify)),
+/// the decider holding `grant:issue` at this gateway, and the decider the actor — the bearer, which needs only
+/// `grant:relay`, is named as the relay. A body without `signed` is the bearer's own, under `grant:issue`, and counted
+/// (`/stats` `grant_decisions_unsigned`); under `grant:relay` alone it is refused `decision_unsigned`.
+#[allow(clippy::too_many_arguments)]
+fn decision_actor(
+    ctx: &Arc<TaskCtx>,
+    caller: Option<&ResolvedPrincipal>,
+    agent: &str,
+    request: &str,
+    decision: &str,
+    ttl_secs: Option<u64>,
+    reason: Option<&str>,
+    signed: Option<&crate::agent::grant_decision::SignedDecision>,
+) -> Result<(Option<ResolvedPrincipal>, Option<String>), Box<axum::response::Response>> {
+    use crate::agent::grant_decision::{self as gd, DecisionRefusal};
+    let refuse = |r: DecisionRefusal| Box::new(refused(r.status(), r.code(), r.detail()));
+    // Under `compliance` the route granted the scope that admitted the request: `grant:issue` or `grant:relay`.
+    #[cfg(feature = "compliance")]
+    let relay_only = caller.is_none_or(|c| !c.scopes.iter().any(|s| s == "grant:issue" || s == "*"));
+    #[cfg(not(feature = "compliance"))]
+    let relay_only = false;
+    let Some(signed) = signed else {
+        if relay_only {
+            return Err(refuse(DecisionRefusal::Unsigned));
+        }
+        ctx.unsigned_actions.decisions.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        return Ok((caller.cloned(), None));
+    };
+    // The holder the path names, as a principal: what the decider signed.
+    let Some((_, holder)) = super::gateway_authority::grant_holder_from_path(agent) else {
+        return Err(Box::new(refused(StatusCode::BAD_REQUEST, "bad_request", format!("{agent} is neither a node principal, a client principal nor a client principal's hex segment"))));
+    };
+    gd::verify(ctx, signed, &holder, request, decision, ttl_secs, reason, ctx.hlc.decision_now_ms()).map_err(refuse)?;
+    if !decider_holds_grant_issue(ctx, &signed.decider) {
+        return Err(refuse(DecisionRefusal::DeciderLacksScope));
+    }
+    let relay = caller.map(|c| c.principal.clone()).unwrap_or_else(|| gateway_caller::PRINCIPAL_ANONYMOUS.to_string());
+    Ok((Some(ResolvedPrincipal { principal: signed.decider.clone(), scopes: vec!["grant:issue".to_string()] }), Some(relay)))
+}
+
+/// Whether `decider` holds `grant:issue` at this gateway: a named token of this gateway's issuer whose principal it is
+/// and whose scopes admit it. A gateway without `compliance` has no scope model, so every decider holds it there.
+fn decider_holds_grant_issue(ctx: &TaskCtx, decider: &str) -> bool {
+    #[cfg(feature = "compliance")]
+    {
+        let issuer = super::gateway_identity_issuer(ctx);
+        ctx.config
+            .gateway_named_tokens
+            .iter()
+            .any(|t| gateway_caller::named_token_principal(&issuer, &t.name) == decider && t.scopes.iter().any(|s| s == "grant:issue" || s == "*"))
+    }
+    #[cfg(not(feature = "compliance"))]
+    {
+        let _ = (ctx, decider);
+        true
+    }
 }
 
 /// What a supervisor answers a request with.
@@ -123,12 +187,17 @@ pub(super) async fn gw_grant_decide(
     Json(body): Json<GrantDecisionBody>,
 ) -> axum::response::Response {
     let caller = caller.map(|Extension(c)| c);
-    let decision = match body.decision.as_str() {
-        "issue" => GrantDecision::Issue { ttl_secs: body.ttl_secs },
-        "refuse" => GrantDecision::Refuse { reason: body.reason },
+    let (ttl, reason) = match body.decision.as_str() {
+        "issue" => (body.ttl_secs, None),
+        "refuse" => (None, body.reason.clone()),
         other => return refused(StatusCode::BAD_REQUEST, "bad_request", format!("decision must be \"issue\" or \"refuse\", not {other:?}")),
     };
-    match decide_grant(&ctx.agent_ctx, caller.as_ref(), &agent, &request, decision).await {
+    let (actor, relayed_by) = match decision_actor(&ctx.agent_ctx, caller.as_ref(), &agent, &request, &body.decision, ttl, reason.as_deref(), body.signed.as_ref()) {
+        Ok(a) => a,
+        Err(refusal) => return *refusal,
+    };
+    let decision = if body.decision == "issue" { GrantDecision::Issue { ttl_secs: ttl } } else { GrantDecision::Refuse { reason } };
+    match decide_grant(&ctx.agent_ctx, actor.as_ref(), relayed_by.as_deref(), &agent, &request, decision).await {
         Ok(outcome) => Json(outcome.receipt).into_response(),
         Err(refusal) => refusal.into_response(),
     }
@@ -138,7 +207,9 @@ pub(super) async fn gw_grant_decide(
 /// without the route (adopter-surface X3, fourth PR: the `grant` fault class plays the supervisor on a fleet with no
 /// gateway port). Issuing and refusing are actions the evaluator decides with the caller as the actor; the grant is
 /// signed by this node's identity; the answer and the grant's first checkpoint are written under the request.
-pub(crate) async fn decide_grant(ctx: &Arc<TaskCtx>, caller: Option<&ResolvedPrincipal>, agent: &str, request: &str, decision: GrantDecision) -> Result<GrantOutcome, GrantRefusal> {
+///
+/// `relayed_by` names the bearer that carried a decision `caller` signed (identity-and-lifecycle I3), on the record.
+pub(crate) async fn decide_grant(ctx: &Arc<TaskCtx>, caller: Option<&ResolvedPrincipal>, relayed_by: Option<&str>, agent: &str, request: &str, decision: GrantDecision) -> Result<GrantOutcome, GrantRefusal> {
     let issuer = caller.map(|c| c.principal.clone()).unwrap_or_else(|| gateway_caller::PRINCIPAL_ANONYMOUS.to_string());
     if request.contains('/') || agent.is_empty() || request.is_empty() {
         return Err(GrantRefusal::door(StatusCode::BAD_REQUEST, "bad_request", "the agent is named and the request is one key segment"));
@@ -203,7 +274,11 @@ pub(crate) async fn decide_grant(ctx: &Arc<TaskCtx>, caller: Option<&ResolvedPri
     };
     match decision {
         GrantDecision::Refuse { reason } => {
-            let record = json!({ "schema": "mycelium.grant-refusal/1", "request": request, "issuer": issuer, "reason": reason.unwrap_or_default(), "at_ms": now_ms });
+            let mut record = json!({ "schema": "mycelium.grant-refusal/1", "request": request, "issuer": issuer, "reason": reason.unwrap_or_default(), "at_ms": now_ms });
+            if let Some(relay) = relayed_by {
+                record["signed"] = json!(true);
+                record["relayed_by"] = json!(relay);
+            }
             // On disk or `503 not_durable` (#713's review, round 2): a `200` carrying `local_durability: failed` is the
             // shape the revoke lost; an answer that is not on disk is not an answer the agent can be held to.
             let written = write_record_durable(ctx, format!("{key}/refused"), record.to_string().into_bytes()).await;
@@ -232,7 +307,10 @@ pub(crate) async fn decide_grant(ctx: &Arc<TaskCtx>, caller: Option<&ResolvedPri
             let mandate = Mandate {
                 holder,
                 established_by,
-                purpose: format!("grant issued by {issuer} for request {request}"),
+                purpose: match relayed_by {
+                    Some(relay) => format!("grant issued by {issuer} (signed, relayed by {relay}) for request {request}"),
+                    None => format!("grant issued by {issuer} for request {request}"),
+                },
                 scope: format!("{GRANT_SCOPE_PREFIX}{request}"),
                 // The resource this decision evaluated is signed beside the binding: the revocation evaluates the same
                 // one, with no request record or live provider to read (#743's review, item 1).
@@ -548,6 +626,9 @@ pub(super) struct GrantRevokeBody {
     /// Why, shown on the record.
     #[serde(default)]
     reason: Option<String>,
+    /// The decider's signature over this revocation (identity-and-lifecycle I3, D3): required under `grant:relay`.
+    #[serde(default)]
+    signed: Option<crate::agent::grant_decision::SignedDecision>,
 }
 
 /// `POST /gateway/grants/{agent}/{request}/revoke` (`grant:issue`) — revoke an issued grant (adopter-surface X3,
@@ -565,7 +646,11 @@ pub(super) async fn gw_grant_revoke(
 ) -> axum::response::Response {
     let caller = caller.map(|Extension(c)| c);
     let body = body.map(|Json(b)| b).unwrap_or_default();
-    match revoke_grant(&ctx.agent_ctx, caller.as_ref(), &agent, &request, body.reason).await {
+    let (actor, relayed_by) = match decision_actor(&ctx.agent_ctx, caller.as_ref(), &agent, &request, "revoke", None, body.reason.as_deref(), body.signed.as_ref()) {
+        Ok(a) => a,
+        Err(refusal) => return *refusal,
+    };
+    match revoke_grant(&ctx.agent_ctx, actor.as_ref(), relayed_by.as_deref(), &agent, &request, body.reason).await {
         Ok(outcome) => Json(outcome.receipt).into_response(),
         Err(refusal) => refusal.into_response(),
     }
@@ -575,7 +660,7 @@ pub(super) async fn gw_grant_revoke(
 /// route (the `grant` fault class). The next checkpoint for the grant's scope names the term, is offered to this
 /// node's authority (whose sweep stops work running under the grant) and written beside the grant; `…/revoked`
 /// names who and why.
-pub(crate) async fn revoke_grant(ctx: &Arc<TaskCtx>, caller: Option<&ResolvedPrincipal>, agent: &str, request: &str, reason: Option<String>) -> Result<GrantOutcome, GrantRefusal> {
+pub(crate) async fn revoke_grant(ctx: &Arc<TaskCtx>, caller: Option<&ResolvedPrincipal>, relayed_by: Option<&str>, agent: &str, request: &str, reason: Option<String>) -> Result<GrantOutcome, GrantRefusal> {
     let issuer = caller.map(|c| c.principal.clone()).unwrap_or_else(|| gateway_caller::PRINCIPAL_ANONYMOUS.to_string());
     if request.contains('/') || agent.is_empty() || request.is_empty() {
         return Err(GrantRefusal::door(StatusCode::BAD_REQUEST, "bad_request", "the agent is named and the request is one key segment"));
@@ -666,7 +751,11 @@ pub(crate) async fn revoke_grant(ctx: &Arc<TaskCtx>, caller: Option<&ResolvedPri
     // itself: **any** restart before the revoke is retried re-arms the grant, so the supervisor owes a retry, once
     // `/health` no longer reports `wal_refusing_appends`. `503` because the refusal is the node's state, not the
     // request's, and a retry is the answer.
-    let record = json!({ "schema": "mycelium.grant-revocation/1", "request": request, "issuer": issuer, "reason": reason.unwrap_or_default(), "at_ms": now_ms, "checkpoint_seq": 2 });
+    let mut record = json!({ "schema": "mycelium.grant-revocation/1", "request": request, "issuer": issuer, "reason": reason.unwrap_or_default(), "at_ms": now_ms, "checkpoint_seq": 2 });
+    if let Some(relay) = relayed_by {
+        record["signed"] = json!(true);
+        record["relayed_by"] = json!(relay);
+    }
     let written = match write_record_durable(ctx, format!("{key}/checkpoint"), cp).await {
         Ok(_) => write_record_durable(ctx, format!("{key}/revoked"), record.to_string().into_bytes()).await,
         Err(e) => Err(e),

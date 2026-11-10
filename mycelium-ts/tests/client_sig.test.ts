@@ -5,7 +5,7 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { ClientSigner, clientSignatureMessage, mcpBinding } from "../src/client_sig";
+import { ClientSigner, clientSignatureMessage, grantDecisionMessage, mcpBinding } from "../src/client_sig";
 import { argumentsDigest } from "../src/a2a";
 
 const V = JSON.parse(readFileSync(join(__dirname, "..", "..", "tests", "fixtures", "cs", "vector.json"), "utf8"));
@@ -65,5 +65,17 @@ test("RFC 8785 writes every sampled double as ECMAScript does, through the diges
     const x = buf.readDoubleBE(0);
     const expected = createHash("sha256").update(`{"x":${want}}`, "utf8").digest("hex");
     expect([bits, Buffer.from(argumentsDigest({ x })).toString("hex")]).toEqual([bits, expected]);
+  }
+});
+
+test("the decision vector is the same in every language", () => {
+  // Identity-and-lifecycle I3: the grant-decision signature, pinned for Rust, jest and pytest.
+  const v = JSON.parse(readFileSync(join(__dirname, "..", "..", "tests", "fixtures", "decision", "vector.json"), "utf8"));
+  const signer = new ClientSigner(Buffer.from(v.seed_hex, "hex"), v.decider);
+  for (const c of v.cases) {
+    const msg = grantDecisionMessage(v.decider, v.node, v.agent, c.request, c.decision, c.ttl_secs ?? undefined, c.reason ?? undefined, BigInt(v.t));
+    expect(Buffer.from(msg).toString("hex")).toBe(c.message_hex);
+    const signed = signer.signGrantDecision(v.node, v.agent, c.request, c.decision, { ttlSecs: c.ttl_secs ?? undefined, reason: c.reason ?? undefined, issuedAtMs: v.t });
+    expect(signed).toEqual(c.signed);
   }
 });

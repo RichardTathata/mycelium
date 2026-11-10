@@ -227,6 +227,8 @@ pub(super) async fn stats_handler(State(ctx): State<Arc<HttpCtx>>) -> impl IntoR
             "tools/call": u.tools_call.load(std::sync::atomic::Ordering::Relaxed),
             "skill.invoke": u.skill_invoke.load(std::sync::atomic::Ordering::Relaxed),
         });
+        // Identity-and-lifecycle I3: grant decisions answered under `grant:issue` with no decider's signature.
+        body["grant_decisions_unsigned"] = json!(u.decisions.load(std::sync::atomic::Ordering::Relaxed));
         body["provider_actions_unsigned"] = json!(u.at_provider.load(std::sync::atomic::Ordering::Relaxed));
     }
     // Identity-and-lifecycle I3 (§9 O1): mandates established on the pre-I3 arguments digest, at this gateway's doors

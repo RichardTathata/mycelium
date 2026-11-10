@@ -24,6 +24,9 @@ beforeAll(() => {
     if (url.endsWith("/gateway/grants/stream")) {
       return new Response(sse, { status: 200, headers: { "content-type": "text/event-stream" } });
     }
+    if (url.endsWith("/health")) {
+      return new Response(JSON.stringify({ status: "ok", node_id: "127.0.0.1:7946" }), { status: 200, headers: { "content-type": "application/json" } });
+    }
     const body = url.endsWith("/gateway/grants/pending")
       ? { ok: true, pending, now_ms: 1 }
       : { ok: true, key: "grant/a/r1", operation_id: "op-1", local_durability: "on_disk" };
@@ -83,4 +86,25 @@ test("a bad decision is refused before it is sent, and the gateway's refusal sur
   expect(calls).toHaveLength(0);
   status = 409;
   await expect(agent.grantDecide("node:other", "r1", "issue")).rejects.toThrow(/409|not_a_member/);
+});
+
+test("a signed decision and revocation carry the signer's signature, addressed to the node", async () => {
+  // Identity-and-lifecycle I3: with a signer, the body carries `signed` over exactly this decision, addressed to the
+  // node `GET /health` names (read once), so a bearer holding only `grant:relay` can carry it.
+  const { ClientSigner, grantDecisionMessage } = await import("../src/client_sig");
+  const { createPublicKey, verify } = await import("node:crypto");
+  const signer = new ClientSigner(new Uint8Array(32).fill(7), "token:fleet/treasurer");
+  const agent = new MyceliumAgent("127.0.0.1", 8300, 5, { token: "relay" });
+  await agent.grantDecide("token:fleet/forecaster", "r1", "issue", { ttlSecs: 120, signer });
+  await agent.grantRevoke("token:fleet/forecaster", "r1", { reason: "season over", signer });
+  expect(calls.filter((c) => c.method === "GET").map((c) => c.url.split("8300")[1])).toEqual(["/health"]);
+  const posts = calls.filter((c) => c.method === "POST").map((c) => c.body as { signed: { decider: string; node: string; agent: string; request: string; t: number; k: string; sig: string } });
+  const expected: [string, number | undefined, string | undefined][] = [["issue", 120, undefined], ["revoke", undefined, "season over"]];
+  posts.forEach(({ signed: s }, i) => {
+    const [decision, ttl, reason] = expected[i];
+    expect([s.decider, s.node, s.agent, s.request]).toEqual(["token:fleet/treasurer", "127.0.0.1:7946", "token:fleet/forecaster", "r1"]);
+    const msg = grantDecisionMessage(s.decider, s.node, s.agent, s.request, decision, ttl, reason, BigInt(s.t));
+    const key = createPublicKey({ key: Buffer.concat([Buffer.from("302a300506032b6570032100", "hex"), Buffer.from(s.k, "base64")]), format: "der", type: "spki" });
+    expect(verify(null, msg, key, Buffer.from(s.sig, "base64"))).toBe(true);
+  });
 });

@@ -2954,4 +2954,38 @@ skill (the evaluator, mandates, evidence).
 - **Compiler:** `GossipConfig` gained a public field, so an exhaustive struct literal breaks; `..Default::default()`
   is unaffected.
 
+## 95. Grant decisions may be signed and relayed under `grant:relay`; an unsigned decision is counted (unreleased, identity-and-lifecycle I3, PR 2)
+
+§94 is #751's. A supervisor holding a client certificate can sign its answer to a grant request, and the node records
+the signer as the decision's actor. A client carrying a signed decision needs only the new `grant:relay` scope.
+
+- **What changed:**
+  - `POST /gateway/grants/{agent}/{request}` and `.../revoke` admit `grant:issue` on the bearer **or** `grant:relay`.
+    A token holding neither is refused `403 insufficient scope`, whose body now also names `or_scope`.
+  - A body may carry `signed`. When it does, the decider is the actor: the evaluator decides with it, and the evidence
+    record's `subject` names it. The grant's `purpose` names the decider and the relay. A refusal's or revocation's
+    record gains `"signed": true` and `relayed_by`.
+  - New refusals: `403 not_the_decider`, `403 decision_retargeted`, `409 not_addressed_here`, `403 stale`,
+    `403 decider_lacks_scope`, `403 decision_unsigned`, `400 decision_signature_malformed` and
+    `403 decision_unverifiable`.
+- **Unsigned decisions, counted now and refused later:** an unsigned body under `grant:issue` is still decided as the
+  bearer's own, and counted on `GET /stats` as `grant_decisions_unsigned`.
+  - Watch the counter, and give each supervisor a client certificate (`mycelium tls issue --client`) and a signing
+    SDK (`signer=` / `{ signer }`) before the refusal release.
+  - The refusal is tracked as the identity plan's §9 O6.
+- **Who may decide:** a signed decision's decider must hold `grant:issue` at the node it is addressed to, as a named
+  token (`gateway_named_tokens`) of that gateway's issuer. A decider known only through OIDC or a positional token
+  cannot sign a decision here.
+- **Rolling upgrades:** an un-upgraded gateway refuses `grant:relay` at the route (`insufficient scope`), so a relay
+  admits nothing there. A signed body sent with a `grant:issue` bearer to an un-upgraded gateway has its `signed` field
+  ignored, and is decided as the bearer's. Upgrade the gateways before supervisors start relaying.
+- **Code:**
+  - `SignedDecision`, `grant_decision_message`, `sign_grant_decision`, `GRANT_DECISION_TAG` and
+    `ClientSigner::sign_grant_decision` are new.
+  - Python: `grant_decision_message` and `ClientSigner.sign_grant_decision`, plus `signer=` / `node=` on
+    `grant_decide` and `grant_revoke`.
+  - TypeScript: `grantDecisionMessage`, `ClientSigner.signGrantDecision` and the `SignedDecision` type, plus
+    `{ signer, node }` on `grantDecide` and `grantRevoke`.
+  - `tests/fixtures/decision/vector.json` pins the message.
+
 Wire **v12** unchanged.

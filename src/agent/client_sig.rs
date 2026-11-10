@@ -342,6 +342,14 @@ impl ClientSigner {
         Ok(self.sign(&op, &res, &d))
     }
 
+    /// Sign an answer to the grant request `request` held by `agent`, addressed to the node `node` (its id, as
+    /// `GET /health` reports it): `decision` is `issue` (with `ttl_secs`), `refuse` or `revoke` (with `reason`).
+    /// Send the result as the decision body's `signed` field (identity-and-lifecycle I3).
+    #[allow(clippy::too_many_arguments)]
+    pub fn sign_grant_decision(&self, node: &str, agent: &str, request: &str, decision: &str, ttl_secs: Option<u64>, reason: Option<&str>) -> super::grant_decision::SignedDecision {
+        super::grant_decision::sign_grant_decision(&self.key, &self.principal, node, agent, request, decision, ttl_secs, reason, mycelium_core::sim_seam::wall_now_ms())
+    }
+
     /// `{"cs": …, "cn": …}`, to merge into `params._meta`.
     pub fn meta(signed: &(ClientSignature, ClientNonce)) -> serde_json::Value {
         serde_json::json!({ "cs": signed.0, "cn": signed.1 })
@@ -615,6 +623,10 @@ pub(crate) struct UnsignedActions {
     pub(crate) tools_call: AtomicU64,
     #[cfg(feature = "gateway")]
     pub(crate) skill_invoke: AtomicU64,
+    /// Grant decisions (issue, refuse, revoke) answered under `grant:issue` with no decider's signature
+    /// (identity-and-lifecycle I3): counted now, refused at the refusal release (`deprecations.md` §95).
+    #[cfg(feature = "gateway")]
+    pub(crate) decisions: AtomicU64,
     /// The same, counted where the call runs: a provider receiving an unsigned `mcp.invoke` or `skill.invoke` for a
     /// principal whose certificate it holds — what a gateway that strips `cs` leaves behind (#742's review, item 4).
     pub(crate) at_provider: AtomicU64,

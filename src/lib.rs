@@ -339,6 +339,13 @@ pub use agent::client_sig::{
 };
 #[cfg(feature = "tls")]
 pub use agent::client_sig::ClientSigner;
+/// Identity-and-lifecycle I3 (D3, D5): a supervisor's signed answer to a grant request. A decider holding a client
+/// certificate signs it ([`ClientSigner::sign_grant_decision`]) and sends it as the decision body's `signed` field;
+/// the node it is addressed to records the decider as the actor. [`grant_decision_message`] is the published format
+/// the SDKs compute too.
+pub use agent::grant_decision::{grant_decision_message, SignedDecision, GRANT_DECISION_TAG};
+#[cfg(feature = "tls")]
+pub use agent::grant_decision::sign_grant_decision;
 /// The replay seams' install point, re-exported under `sim` so a **companion** on the public API
 /// can record and replay its own runs under the kernel (item 6; first used by CN2).
 /// Re-exported in every build, not only under `sim`: a companion routes its draws and clocks through

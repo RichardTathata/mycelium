@@ -22,7 +22,7 @@ from .agent import (
     SupersededError,
 )
 from .a2a import A2aClient, arguments_digest, mandate_request_bytes
-from .client_sig import ClientSigner, a2a_binding, canonical_json, client_arguments_digest, client_signature_message, holds_unsafe_integer, mandate_canonical_bytes, mandate_digest, mcp_binding, possession_message
+from .client_sig import ClientSigner, a2a_binding, canonical_json, client_arguments_digest, client_signature_message, grant_decision_message, holds_unsafe_integer, mandate_canonical_bytes, mandate_digest, mcp_binding, possession_message
 from .mcp import GrantNotIssuedError, McpClient, McpError
 from .artifacts import Artifacts, ArtifactError
 from .federation import Federation, FederationError, DeliveryUnknown
@@ -74,6 +74,7 @@ __all__ = [
     "holds_unsafe_integer",
     "a2a_binding",
     "client_signature_message",
+    "grant_decision_message",
     "mcp_binding",
     "mandate_request_bytes",
     "Artifacts",
