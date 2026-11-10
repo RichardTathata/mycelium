@@ -380,12 +380,24 @@ pub(crate) async fn decide_grant(ctx: &Arc<TaskCtx>, caller: Option<&ResolvedPri
             }
         }
         GrantDecision::Issue { ttl_secs } => {
+            // Never below a checkpoint already written (#754's review, finding 1): a later one — a revocation's —
+            // stands. Checked before the first checkpoint is offered or written (#756's review, L5), so a refused issue
+            // has run nothing: its execution is `None` (M1). Under the claim, and with revocation only at this node
+            // after the grant is read, an issue reaching here finds none or its own earlier attempt's; this refuses the
+            // impossible case rather than lowering it.
+            if checkpoint_seq_held(ctx, &key).is_some_and(|held| held > 1) {
+                ae_record_execution(ctx, &preflight, super::action_evaluator::Execution::None).await;
+                return Err(GrantRefusal::door(StatusCode::CONFLICT, "already_revoked", format!("{key} carries a later checkpoint than an issue writes")));
+            }
+            // Every return after the permit records an execution (#756's review, L1): `None` where nothing ran.
             let Some(tls) = ctx.tls.get() else {
+                ae_record_execution(ctx, &preflight, super::action_evaluator::Execution::None).await;
                 return Err(GrantRefusal::door(StatusCode::FORBIDDEN, "no_identity", "issuing a grant needs this node's identity ([tls]) to sign it"));
             };
             let ttl_ms = ttl_secs.unwrap_or(300).min(3_600) * 1_000;
             let node_principal = gateway_caller::node_principal(&ctx.node_id);
             let (Some(holder), Some(established_by), Some(term)) = (PrincipalId::new(&holder_principal), PrincipalId::new(&node_principal), TermId::new(request)) else {
+                ae_record_execution(ctx, &preflight, super::action_evaluator::Execution::None).await;
                 return Err(GrantRefusal::door(StatusCode::CONFLICT, "unreadable_request", "the agent principal or request id is not a valid identifier"));
             };
             let mandate = Mandate {
@@ -424,15 +436,6 @@ pub(crate) async fn decide_grant(ctx: &Arc<TaskCtx>, caller: Option<&ResolvedPri
             if let Some(authority) = ctx.execution_authority.get() {
                 let _ = authority.offer_checkpoint(&signed_checkpoint, now_ms, &gateway_member_keys(ctx));
             }
-            // Never below one already written (#754's review, finding 1): a later checkpoint — a revocation's — stands.
-            // Under the claim, and with revocation only at this node after the grant is read, an issue reaching here
-            // finds none or its own earlier attempt's; this refuses the impossible case rather than lowering it.
-            if checkpoint_seq_held(ctx, &key).is_some_and(|held| held > signed_checkpoint.checkpoint.seq) {
-                // The decision is on the record already; its execution is too, as the checkpoint write's refusal
-                // below records one (#754's confirm round, residual b).
-                ae_record_execution(ctx, &preflight, super::action_evaluator::Execution::Failed).await;
-                return Err(GrantRefusal::door(StatusCode::CONFLICT, "already_revoked", format!("{key} carries a later checkpoint than an issue writes")));
-            }
             // The checkpoint is on disk before the grant is: a grant whose first checkpoint a restart cannot find is
             // not established at a verifier (external review 2026-10-31, R3 — the sibling of the use marker).
             match serde_json::to_vec(&signed_checkpoint) {
@@ -442,11 +445,19 @@ pub(crate) async fn decide_grant(ctx: &Arc<TaskCtx>, caller: Option<&ResolvedPri
                         return Err(GrantRefusal::door(StatusCode::SERVICE_UNAVAILABLE, "not_durable", format!("the grant's checkpoint was not recorded durably, so no grant is issued: {e}")));
                     }
                 }
-                Err(e) => return Err(GrantRefusal::door(StatusCode::INTERNAL_SERVER_ERROR, "serialise", e.to_string())),
+                Err(e) => {
+                    // Nothing written yet (the checkpoint was only offered in memory, as a grant never issued names).
+                    ae_record_execution(ctx, &preflight, super::action_evaluator::Execution::None).await;
+                    return Err(GrantRefusal::door(StatusCode::INTERNAL_SERVER_ERROR, "serialise", e.to_string()));
+                }
             }
             let bytes = match serde_json::to_vec(&grant) {
                 Ok(b) => b,
-                Err(e) => return Err(GrantRefusal::door(StatusCode::INTERNAL_SERVER_ERROR, "serialise", e.to_string())),
+                Err(e) => {
+                    // The checkpoint is on disk already, the grant is not: a partial write.
+                    ae_record_execution(ctx, &preflight, super::action_evaluator::Execution::Failed).await;
+                    return Err(GrantRefusal::door(StatusCode::INTERNAL_SERVER_ERROR, "serialise", e.to_string()));
+                }
             };
             // On disk or `503 not_durable` (#713's review, round 2), by the path the checkpoint above took — the
             // checkpoint guards this write: a writer that refuses appends refuses it first, and no grant is issued.
@@ -842,7 +853,11 @@ pub(crate) async fn revoke_grant(ctx: &Arc<TaskCtx>, caller: Option<&ResolvedPri
     }
     let cp = match serde_json::to_vec(&signed_checkpoint) {
         Ok(b) => b,
-        Err(e) => return Err(GrantRefusal::door(StatusCode::INTERNAL_SERVER_ERROR, "serialise", e.to_string())),
+        Err(e) => {
+            // The revocation already stands in this process (offered and swept above); its record is not written.
+            ae_record_execution(ctx, &preflight, super::action_evaluator::Execution::Failed).await;
+            return Err(GrantRefusal::door(StatusCode::INTERNAL_SERVER_ERROR, "serialise", e.to_string()));
+        }
     };
     // Both records on disk, or the route refuses by name (external review 2026-10-31, R3 — the sibling of the use
     // marker: a `200` with `local_durability: failed` was answered before, and a restart that kept only the WAL

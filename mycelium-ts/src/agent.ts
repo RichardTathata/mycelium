@@ -487,17 +487,25 @@ export class MyceliumAgent {
    * request. With `signer` — a {@link ClientSigner} for a principal holding a client certificate and `grant:issue` at
    * the node — the decision is signed (identity-and-lifecycle I3): the node records the signer as its actor, so this
    * client's own bearer needs only `grant:relay`. It is addressed to `node`, read from `GET /health` when not given;
-   * `agent` is then the holder's principal, as the pending list names it. A signed decision is refused 403
-   * `not_the_decider`, `decision_retargeted`, `decider_lacks_scope` or `stale`, and 409 `not_addressed_here` or
-   * `gateway_identity_issuer_unset` (the gateway has no `gateway_identity_issuer`, so no decider is a principal
-   * there). Signed or not, a decision on a request another decision is still answering at that node is refused 409
-   * `decision_in_flight`: retry, and it answers `already_answered` once that one is written.
-   * `decision` is `"issue"` or
-   * `"refuse"`; `ttlSecs` bounds an issued grant (default 300, at most 3 600); `reason` is shown to the agent on a
-   * refusal. Issuing is itself an action the node's evaluator decides (D22), so a supervisor the policy does not
-   * permit is answered 403; 409 `not_a_member` for an agent on no member node, 409 `already_answered`, 410 `expired`
-   * and 404 `unknown_request` surface as thrown errors. Returns the route's answer: the record's `key`, the write's
-   * `operation_id` and `local_durability`.
+   * `agent` is then the holder's principal, as the pending list names it.
+   *
+   * `decision` is `"issue"` or `"refuse"`; `ttlSecs` bounds an issued grant (default 300, at most 3 600); `reason` is
+   * shown to the agent on a refusal. Issuing is itself an action the node's evaluator decides (D22). Returns the
+   * route's answer: the record's `key`, the write's `operation_id` and `local_durability`. Every refusal is thrown,
+   * its body's `error` naming it:
+   * - the scope: 403 `insufficient scope` (neither `grant:issue` nor `grant:relay`);
+   * - the request: 400 `bad_request`; 404 `unknown_request`; 409 `not_a_member` (an agent on no member node this
+   *   gateway knows); 409 `unreadable_request`; 409 `already_answered`; 410 `expired`; 409 `decision_in_flight` while
+   *   another decision on the request is being answered at that node — retry, and it answers `already_answered` once
+   *   that one is written;
+   * - a signed decision: 400 `decision_signature_malformed`; 403 `not_the_decider` (another key, a superseded one,
+   *   or terms the signature does not cover); 403 `decision_retargeted`; 409 `not_addressed_here`; 403 `stale`; 403
+   *   `decider_lacks_scope`; 403 `decision_unverifiable` (the node has no identity); 409
+   *   `gateway_identity_issuer_unset`; and, unsigned under `grant:relay` alone, 403 `decision_unsigned`;
+   * - the policy: 403 with the evaluator's reason (the actor — the decider of a signed decision — is not permitted),
+   *   or 403 `no_evaluator`;
+   * - the answer: 403 `no_identity` (the node cannot sign a grant); 409 `already_revoked` (a later checkpoint stands
+   *   beside the request); 503 `not_durable` (not on disk; the request is still pending — retry); 500 `serialise`.
    */
   async grantDecide(
     agent: string,
@@ -537,12 +545,18 @@ export class MyceliumAgent {
 
   /**
    * `POST /gateway/grants/{agent}/{request}/revoke` (`grant:issue`, or `grant:relay` with `signer`, signed as
-   * {@link grantDecide} signs, and refused as it lists; 409 `decision_in_flight` while another decision on the grant
-   * is being answered at that node — retry, and it answers `already_revoked` once that one is written): revoke an
-   * issued grant, at the node that issued
-   * it (409 `not_the_issuer` elsewhere; 404 `not_issued`; 409 `already_revoked`). Revoking is an action the node's
+   * {@link grantDecide} signs): revoke an issued grant, at the node that issued it. Revoking is an action the node's
    * evaluator decides (`grant.revoke`). The grant is refused at every door afterwards, and work running under it is
-   * stopped. Returns the route's answer: the revocation record's key, operation id and local durability.
+   * stopped. Returns the route's answer: the revocation record's key, operation id and local durability. Every refusal
+   * is thrown, its body's `error` naming it:
+   * - the scope: 403 `insufficient scope`;
+   * - the grant: 400 `bad_request`; 404 `not_issued`; 409 `unreadable_grant`; 409 `not_the_issuer` (revoke at the
+   *   node that issued it); 409 `already_revoked`; 409 `decision_in_flight` while another decision on the grant is
+   *   being answered at that node — retry, and it answers `already_revoked` once that one is written;
+   * - a signed revocation: the signed-decision refusals {@link grantDecide} lists;
+   * - the policy: 403 with the evaluator's reason, or 403 `no_evaluator`;
+   * - the answer: 403 `no_identity` (the node cannot sign the revoking checkpoint); 503 `not_durable` (the revocation
+   *   stands in this process only — retry); 500 `serialise`.
    */
   async grantRevoke(agent: string, request: string, options: { reason?: string; signer?: ClientSigner; node?: string } = {}): Promise<GrantAnswer> {
     const signed = options.signer

@@ -110,9 +110,18 @@ This feature is turned on in code.
     refusal's or revocation's record holds the body as `signed` and `relayed_by`. `SignedDecision::verify_signature`
     re-checks the signature from those fields alone; whether its key was the decider's current client key at `t` is read
     from the decider's `sys/client-cert/` records. **`verify_signature` checks the signature only**, so a re-verifier
-    must also compare the signed `request`, `agent` and `node` with the record it is reading: the request and holder
-    its path names (`grant/{holder}/{request}/…`, or the evidence record's request) and the node that wrote it — a
-    validly signed decision for another request or another node is not this record's. The evidence journal is node-local and append-only; the KV records
+    must also check that the signature is this record's:
+    - pass `verify_signature` the record's **own** decision and terms — a refusal record's `refuse` and `reason`, a
+      revocation record's `revoke` and `reason`, the evidence record's `decision`, `ttl_secs` and `reason` — never the
+      ones inside `signed_decision` alone;
+    - compare `signed.decider` with the record's actor: a refusal's or revocation's `issuer`, the evidence record's
+      `subject`;
+    - compare the signed `request`, `agent` and `node` with the record: the request and holder its path names
+      (`grant/{holder}/{request}/…`) and the node that wrote it.
+
+    A record naming another actor, request or node than its signed body, or whose terms the signature does not cover,
+    is not re-verified — a valid signed refusal copied into a forged `…/refused` naming another issuer fails the second
+    comparison. The evidence journal is node-local and append-only; the KV records
     are writable by any member, so the journal is the record to trust.
   - An unsigned decision under `grant:issue` is still the bearer's own this release. It is counted once **answered**
     (issued, refused or revoked; never an attempt refused first) on `/stats` (`grant_decisions_unsigned`) and as
