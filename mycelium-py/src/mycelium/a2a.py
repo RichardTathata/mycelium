@@ -16,7 +16,6 @@ Usage::
 
 from __future__ import annotations
 
-import hashlib
 import json
 import struct
 import uuid
@@ -120,13 +119,20 @@ def _raise_for_error(error: Dict) -> None:
 
 
 def arguments_digest(arguments: Dict) -> bytes:
-    """SHA-256 of ``arguments`` as the gateway canonicalises them: sorted keys, no whitespace, UTF-8.
+    """SHA-256 of ``arguments`` as the gateway digests a mandate's arguments: RFC 8785 (JCS), since
+    identity-and-lifecycle I3 (§9 O1) — :func:`~mycelium.client_sig.canonical_json`, the form Rust, Python and
+    TypeScript reproduce byte for byte, so a float in exponent form binds. It was ``json.dumps(sort_keys=True)``, which
+    wrote ``1e-05`` where the gateway wrote ``1e-5``, and a Python holder with such a float was refused.
 
-    For ``/a2a`` the arguments are ``{"text": message}``. This is the digest a mandate holder's
-    possession proof binds to (Boundary H, A1 at the gateway).
+    For ``/a2a`` the arguments are ``{"text": message}``. This is the digest a mandate holder's possession proof binds
+    to and a grant's ``bound:args:`` (Boundary H, A1 at the gateway). Raises ``ValueError`` for arguments holding an
+    integer outside ±(2**53 - 1), which no digest binds exactly: send it as a string.
     """
-    canonical = json.dumps(arguments, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-    return hashlib.sha256(canonical.encode("utf-8")).digest()
+    from .client_sig import client_arguments_digest, holds_unsafe_integer
+
+    if holds_unsafe_integer(arguments):
+        raise ValueError("an integer outside +-(2^53 - 1) cannot be bound exactly by a mandate: send it as a string")
+    return client_arguments_digest(arguments)
 
 
 def mandate_request_bytes(operation: str, resource: str, digest: bytes) -> bytes:

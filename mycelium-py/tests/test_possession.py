@@ -38,18 +38,21 @@ def test_the_possession_vector_is_rebuilt_from_its_inputs():
     _verify(VECTOR["issuer_key_b64"], mandate_canonical_bytes(mandate), base64.b64encode(bytes(VECTOR["grant"]["signature"])).decode())
 
 
-def test_the_mandate_digest_is_the_gateways_for_every_case():
-    # #744's review, item 1: members by UTF-8 bytes (a key outside the BMP beside one in U+E000-U+FFFF), non-ASCII,
-    # control characters and nesting, as serde_json writes them. Checked by the gateway's own digest in Rust.
+def test_the_mandate_digest_is_rfc_8785_and_a_float_grant_is_admitted():
+    # Identity-and-lifecycle I3 (section 9 O1): the digest is RFC 8785 - floats in exponent form, a key outside the BMP -
+    # as the gateway's own arguments_digest computes it in Rust; an unsafe integer is refused; and the proof for a
+    # grant bound to floats is the one the vector pins, which the gateway's verifier accepts.
     import hashlib
-    for case in VECTOR["mandate_digest_cases"]:
-        assert arguments_digest(case["arguments"]).hex() == case["digest_hex"], case["serialized"]
-        assert hashlib.sha256(case["serialized"].encode()).hexdigest() == case["digest_hex"]
-    # The proof binds the gateway's digest of a case.
-    first = VECTOR["mandate_digest_cases"][0]
-    proof = ClientSigner(HOLDER, VECTOR["principal"]).prove_possession(VECTOR["grant"], "tools/call", VECTOR["resource"], first["arguments"])
-    request = mandate_request_bytes("tools/call", VECTOR["resource"], bytes.fromhex(first["digest_hex"]))
-    _verify(VECTOR["holder_key_b64"], possession_message(VECTOR["grant"]["mandate"], request), proof["possession"])
+    for case in VECTOR["digest_cases"]:
+        assert arguments_digest(case["arguments"]).hex() == case["digest_hex"], case["canonical"]
+        assert hashlib.sha256(case["canonical"].encode()).hexdigest() == case["digest_hex"]
+    for raw in VECTOR["unsafe_cases"]:
+        with pytest.raises(ValueError, match="2\\^53"):
+            arguments_digest(json.loads(raw))
+    f = VECTOR["float_grant"]
+    assert arguments_digest(f["arguments"]).hex() == f["arguments_digest_hex"]
+    proof = ClientSigner(HOLDER, VECTOR["principal"]).prove_possession(f["grant"], VECTOR["operation"], VECTOR["resource"], f["arguments"])
+    assert proof["possession"] == f["possession_b64"]
 
 
 def test_two_threads_never_sign_with_one_counter():

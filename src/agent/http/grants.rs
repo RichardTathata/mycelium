@@ -431,6 +431,11 @@ pub(super) async fn gw_grant_request(
     if body.tool.is_empty() || body.tool.contains('/') {
         return refused(StatusCode::BAD_REQUEST, "bad_request", "tool is one key segment");
     }
+    // Identity-and-lifecycle I3 (§9 O1): the digest a grant binds is RFC 8785, which cannot bind an integer past
+    // ±(2^53 − 1) exactly; such arguments are refused here, before a grant is asked for.
+    if crate::agent::client_sig::holds_unsafe_integer(&body.arguments) {
+        return refused(StatusCode::BAD_REQUEST, "unsafe_integer", "the arguments hold an integer outside +-(2^53 - 1), which a grant cannot bind exactly: send it as a string");
+    }
     let now_ms = tc.hlc.decision_now_ms();
     let segment = super::gateway_authority::grant_holder_segment(&principal);
     let prefix = format!("grant/{segment}/");
@@ -444,8 +449,10 @@ pub(super) async fn gw_grant_request(
         .filter_map(|(k, v)| serde_json::from_slice::<serde_json::Value>(v).ok().map(|mut r| { r["key"] = json!(k.as_ref()); r }))
         .filter(|r| r["expires_at_ms"].as_u64().is_some_and(|e| e > now_ms))
         .collect();
-    if let Some(r) = standing.iter().find(|r| r["tool"] == body.tool.as_str() && r["arguments_digest"] == digest.as_str()) {
-        return Json(json!({ "ok": true, "reused": true, "request": r["request"], "key": r["key"], "resource": r["resource"], "arguments_digest": digest, "expires_at_ms": r["expires_at_ms"] })).into_response();
+    // A request asked before identity-and-lifecycle I3 recorded the legacy digest form: for the window it is the same
+    // request (`deprecations.md` §93), and its answer names the digest its grant will bind.
+    if let Some(r) = standing.iter().find(|r| r["tool"] == body.tool.as_str() && super::gateway_authority::recorded_digest_matches(&r["arguments_digest"], &body.arguments)) {
+        return Json(json!({ "ok": true, "reused": true, "request": r["request"], "key": r["key"], "resource": r["resource"], "arguments_digest": r["arguments_digest"], "expires_at_ms": r["expires_at_ms"] })).into_response();
     }
     if standing.len() >= MAX_PENDING_GRANT_REQUESTS_PER_CLIENT {
         return refused(StatusCode::TOO_MANY_REQUESTS, "too_many_pending", format!("{principal} has {} grant requests standing unanswered, the most one client may (MAX_PENDING_GRANT_REQUESTS_PER_CLIENT); wait for an answer or an expiry", standing.len()));

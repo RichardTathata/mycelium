@@ -229,6 +229,16 @@ pub(super) async fn stats_handler(State(ctx): State<Arc<HttpCtx>>) -> impl IntoR
         });
         body["provider_actions_unsigned"] = json!(u.at_provider.load(std::sync::atomic::Ordering::Relaxed));
     }
+    // Identity-and-lifecycle I3 (§9 O1): mandates established on the pre-I3 arguments digest, at this gateway's doors
+    // and at this node as a provider — the one-release window (`deprecations.md` §93). Zero without an execution
+    // authority; in memory, so zero again after a restart (the evidence record's `checked` is the durable record).
+    #[cfg(feature = "tls")]
+    {
+        let a = ctx.agent_ctx.execution_authority.get();
+        body["legacy_digest_matches"] = json!(a.map_or(0, |a| a.legacy_digest_matches()));
+        body["provider_legacy_digest_matches"] = json!(a.map_or(0, |a| a.legacy_digest_matches_at_provider()));
+        body["agent_legacy_digest_matches"] = json!(a.map_or(0, |a| a.legacy_digest_matches_at_agent()));
+    }
     // #695's review: federated credentials refused at this gateway's edge as replayed, and as
     // undecidable (the partner's window full). Zero without an edge.
     #[cfg(feature = "tls")]

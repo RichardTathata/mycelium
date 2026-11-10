@@ -2,6 +2,7 @@
  * The client-signature vector (identity-and-lifecycle I1, D1′), shared with the gateway's Rust tests and the Python
  * SDK: the message rebuilt from its inputs, and the signature the seed's key makes over it.
  */
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { ClientSigner, clientSignatureMessage, mcpBinding } from "../src/client_sig";
@@ -53,4 +54,16 @@ test("a name holding an @ is bound whole", () => {
   expect(Buffer.from(msg).toString("hex")).toBe(c.message_hex);
   const signer = new ClientSigner(Buffer.from(V.seed_hex, "hex"), V.principal, { instance: BigInt("0x" + V.instance_hex) });
   expect(signer.sign(op, res, digest, { issuedAtMs: V.issued_at_ms, counter: V.counter }).cs.sig).toBe(c.signature_b64);
+});
+
+test("RFC 8785 writes every sampled double as ECMAScript does, through the digest", () => {
+  // #750's review, item 1: the shared fixture; here through the digest a signature and a mandate bind.
+  const fx = JSON.parse(readFileSync(join(__dirname, "..", "..", "tests", "fixtures", "cs", "es_numbers.json"), "utf8"));
+  const buf = Buffer.alloc(8);
+  for (const [bits, want] of fx.cases as [string, string][]) {
+    buf.write(bits, "hex");
+    const x = buf.readDoubleBE(0);
+    const expected = createHash("sha256").update(`{"x":${want}}`, "utf8").digest("hex");
+    expect([bits, Buffer.from(argumentsDigest({ x })).toString("hex")]).toEqual([bits, expected]);
+  }
 });

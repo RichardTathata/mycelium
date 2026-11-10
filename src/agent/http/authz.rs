@@ -1043,14 +1043,13 @@ pub(crate) async fn ae_decide(
         Some(c) => (c.principal.clone(), c.scopes.clone()),
         None => (gateway_caller::PRINCIPAL_ANONYMOUS.to_string(), Vec::new()),
     };
-    // Canonical arguments: serde_json's object serialization is key-ordered for `Map` in its
-    // default (BTreeMap) configuration, so the digest is stable for equal arguments.
-    let canonical = serde_json::to_vec(arguments).unwrap_or_default();
+    // Canonical arguments: RFC 8785 (JCS) since identity-and-lifecycle I3 (§9 O1), the form Rust, Python and
+    // TypeScript reproduce byte for byte; a presented mandate is also tried against the pre-I3 form for one release.
     // `decision_now_ms`, not `current()`: this value decides whether a mandate has expired and
     // whether a checkpoint is stale. `current()` never reads the wall clock, so on a node whose
     // gossip has gone quiet — the partition case — it freezes and both checks fail OPEN.
     let now_ms = ctx.hlc.decision_now_ms();
-    let arguments_digest = ae::arguments_digest(&canonical);
+    let arguments_digest = super::gateway_authority::arguments_digest(arguments);
 
     // Boundary H A1: with an execution authority attached, a presented grant
     // (`params._meta.mandate`) becomes a real mandate finding for this call — checked against the
@@ -1063,15 +1062,22 @@ pub(crate) async fn ae_decide(
             if let Some(p) = &presented {
                 super::gateway_authority::feed_grant_checkpoint(ctx, authority, &p.grant.mandate, now_ms);
             }
-            authority.assess(
+            let at = if enforcement_point == crate::agent::provider_enforcement::ENFORCEMENT_POINT_PROVIDER {
+                super::gateway_authority::CountAt::Provider
+            } else {
+                super::gateway_authority::CountAt::Gateway
+            };
+            let (assessment, _form) = authority.assess_arguments_at(
+                at,
                 &actor,
                 operation,
                 resource,
-                &arguments_digest,
+                arguments,
                 presented.as_ref(),
                 now_ms,
                 &super::gateway_member_keys(ctx),
-            )
+            );
+            assessment
         }
         None => super::gateway_authority::Assessment { binding: None, valid_until_ms: None },
     };

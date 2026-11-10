@@ -184,6 +184,9 @@ pub struct MandateBinding {
     /// A grant's bound policy revision, read from its signed operations: the preflight refuses a decision made
     /// under another (X3). `None` for a mandate that is not a grant or binds no revision.
     pub bound_policy_revision: Option<String>,
+    /// The mandate was established on the arguments' **pre-I3 digest** (`serde_json`'s encoding), accepted for one
+    /// release beside RFC 8785 (identity-and-lifecycle I3, §9 O1); the evidence record says so in `checked`.
+    pub legacy_digest: bool,
 }
 
 impl MandateBinding {
@@ -194,7 +197,13 @@ impl MandateBinding {
         scope: impl Into<String>,
         epoch: u64,
     ) -> Self {
-        Self { holder, term, scope: scope.into(), epoch, state: MandateState::Established, digest: None, bound_policy_revision: None }
+        Self { holder, term, scope: scope.into(), epoch, state: MandateState::Established, digest: None, bound_policy_revision: None, legacy_digest: false }
+    }
+
+    /// Established on the pre-I3 digest form (identity-and-lifecycle I3, §9 O1).
+    pub fn with_legacy_digest(mut self) -> Self {
+        self.legacy_digest = true;
+        self
     }
 
     /// The mandate's digest and, for a grant, its bound policy revision (X3).
@@ -212,7 +221,7 @@ impl MandateBinding {
         epoch: u64,
         refusal: MandateRefusal,
     ) -> Self {
-        Self { holder, term, scope: scope.into(), epoch, state: MandateState::Refused(refusal), digest: None, bound_policy_revision: None }
+        Self { holder, term, scope: scope.into(), epoch, state: MandateState::Refused(refusal), digest: None, bound_policy_revision: None, legacy_digest: false }
     }
 
     /// A binding the enforcement point could **not** check — authority not established.
@@ -223,7 +232,7 @@ impl MandateBinding {
         epoch: u64,
         why: impl Into<String>,
     ) -> Self {
-        Self { holder, term, scope: scope.into(), epoch, state: MandateState::Unknown(why.into()), digest: None, bound_policy_revision: None }
+        Self { holder, term, scope: scope.into(), epoch, state: MandateState::Unknown(why.into()), digest: None, bound_policy_revision: None, legacy_digest: false }
     }
 }
 
@@ -1265,7 +1274,13 @@ impl AeEvidence {
             operation_id: envelope.operation_id.clone(),
             attempt_id: envelope.attempt_id.clone(),
             arguments_digest: hex32(&envelope.arguments_digest),
-            checked: decision.checked.clone(),
+            checked: {
+                let mut checked = decision.checked.clone();
+                if envelope.mandate.as_ref().is_some_and(|b| b.legacy_digest) {
+                    checked.push(LEGACY_DIGEST_CHECKED.to_string());
+                }
+                checked
+            },
             reason: decision.reason.clone(),
             // Set by the enforcement point when the decision read a history (`with_history`).
             history: None,
@@ -2419,6 +2434,10 @@ fn fleet_limit(a: &Rule, limit: HistoryLimit, view: &HistoryView, rev: &str, lim
 
 // ── Assembling an envelope at the gateway ────────────────────────────────────
 
+/// What an evidence record's `checked` says of a mandate established on the pre-I3 digest form (identity-and-lifecycle
+/// I3, §9 O1): accepted for one release, refused after it.
+pub const LEGACY_DIGEST_CHECKED: &str = "the mandate's arguments digest matched the pre-I3 serde_json form, accepted for one release (identity-and-lifecycle I3)";
+
 /// `sha256` of the canonical arguments — the binding a decision is made against.
 ///
 /// Available only where `sha2` is (the `tls` feature, which the AE profile needs anyway for
@@ -2463,6 +2482,29 @@ mod tests {
         assert_eq!(MappingKind::Mapped.label(), "mapped");
         assert_eq!(MappingKind::Unmapped.label(), "unmapped");
         assert_eq!(MappingKind::Ambiguous.label(), "ambiguous");
+    }
+
+    /// **A mandate established on the pre-I3 digest is named on its record** (identity-and-lifecycle I3, §9 O1): the
+    /// evidence's `checked` carries [`LEGACY_DIGEST_CHECKED`] for such a binding and not for another. Seen failing first
+    /// with the note left out.
+    #[test]
+    fn a_mandate_on_the_legacy_digest_is_named_on_its_record() {
+        let binding = |legacy: bool| {
+            let b = MandateBinding::established(principal("depot-dispatcher"), term("t"), "depot", 1);
+            if legacy { b.with_legacy_digest() } else { b }
+        };
+        let record = |legacy: bool| {
+            let env = ActionEnvelope::builder("oidc:idp/dispatcher", node(), "tools/call", "tool:reroute@node-1")
+                .identities("op-1", "op-1/1")
+                .arguments_digest(digest_of(b"{}"))
+                .mapping(ActionMapping::mapped("cat", "1"))
+                .validity(1_000, 61_000)
+                .mandate(binding(legacy))
+                .build();
+            AeEvidence::for_decision(&env, &Decision::permit("ok", "rev"), Execution::Attempted, "gateway")
+        };
+        assert!(record(true).checked.iter().any(|c| c == LEGACY_DIGEST_CHECKED), "LEGACY: the record does not say so");
+        assert!(!record(false).checked.iter().any(|c| c == LEGACY_DIGEST_CHECKED));
     }
 
     /// An unknown verdict counts as `indeterminate`, never as `permit`. The counter inherits the
@@ -3122,6 +3164,7 @@ mod tests {
                 state,
                 digest: None,
                 bound_policy_revision: None,
+                legacy_digest: false,
             })
             .build()
     }

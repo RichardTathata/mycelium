@@ -7,7 +7,7 @@ import base64
 import json
 from pathlib import Path
 
-from mycelium.client_sig import ClientSigner, client_signature_message, mcp_binding
+from mycelium.client_sig import ClientSigner, canonical_json, client_signature_message, mcp_binding
 
 VECTOR = json.loads((Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "cs" / "vector.json").read_text())
 
@@ -71,3 +71,11 @@ def test_a_name_holding_an_at_sign_is_bound_whole():
     assert signer.sign(op, res, digest, issued_at_ms=VECTOR["issued_at_ms"], counter=VECTOR["counter"])["cs"]["sig"] == c["signature_b64"]
     _, plain, _ = mcp_binding("weather", c["arguments"])
     assert client_signature_message(VECTOR["principal"], op, plain, digest, VECTOR["issued_at_ms"], 1, 0) != client_signature_message(VECTOR["principal"], op, res, digest, VECTOR["issued_at_ms"], 1, 0)
+
+
+def test_rfc_8785_writes_every_sampled_double_as_ecmascript_does():
+    # #750's review, item 1: the shared fixture of ECMAScript's Number::toString, ties included.
+    import struct
+    fx = json.loads((Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "cs" / "es_numbers.json").read_text())
+    wrong = [c for c in fx["cases"] if canonical_json(struct.unpack(">d", bytes.fromhex(c[0]))[0]) != c[1]]
+    assert not wrong, wrong[:3]

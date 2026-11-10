@@ -243,9 +243,11 @@ mcp.call_tool("weather.forecast", {"city": "Lyon"}, grant=answer["grant"])   # p
 ```
 
 `wait_for_grant` raises `GrantNotIssuedError` naming the state a request ended in (`refused`, `revoked`,
-`expired`, or `pending` on timeout), and ends within its timeout. A float in exponent form in a grant's arguments is
-refused at the gateway (the mandate digest differs across languages, identity-and-lifecycle §9 O1): send it as a
-string.
+`expired`, or `pending` on timeout), and ends within its timeout. A grant binds the arguments' RFC 8785 digest — the
+same in Python, TypeScript and the gateway since identity-and-lifecycle I3 — so a float in exponent form binds. A
+number of magnitude 2**53 or more cannot be bound exactly: `arguments_digest` raises `ValueError`, the request door
+answers `400 unsafe_integer`, and a call presenting a grant over it is refused at the gateway and the provider
+(`MandateRefusal::UnsafeInteger`); send it as a string.
 
 **Refusals, and which to retry.** A refused `tools/call` raises `ActionRefusedError` for the evaluator's three answers
 (`.reason`: `action_denied` is final; `authority_not_established` means nobody decided — a grant not yet established,
@@ -256,7 +258,7 @@ the certificate yet — retry), `client_key_superseded`, `client_signature_inval
 status, raised as `httpx.HTTPStatusError` whose JSON body names `error`: `not_a_client_holder` (publish the
 certificate first), `too_many_pending` (retry after an answer or an expiry), `not_durable` (retry), `no_provider`.
 A possession proof the gateway cannot verify is reported as `WrongHolder` inside `authority_not_established` — a
-wrong key and a digest that differs (the O1 float case) look the same to the gateway, which sees only the proof.
+wrong key and a proof over other arguments look the same to the gateway, which sees only the proof.
 
 ### The supervisor's grants, and a task's lifecycle (0.2.13)
 

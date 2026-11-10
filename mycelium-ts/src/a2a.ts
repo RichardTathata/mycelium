@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { authHeaders, resolveToken, type AuthOptions } from "./auth";
-import { a2aBinding, type ClientSigner } from "./client_sig";
+import { a2aBinding, holdsUnsafeInteger, type ClientSigner } from "./client_sig";
 
 /**
  * A presented mandate (Boundary H, A1 at the gateway): a grant signed by its establishing authority,
@@ -63,33 +63,27 @@ function canonicalJson(value: unknown): string {
 /**
  * SHA-256 of `args` in RFC 8785 (JCS) form: members sorted by UTF-16 code units, ECMAScript number and string forms,
  * no whitespace, and only what `JSON.stringify` sends (an `undefined`, function or symbol member dropped, `null` in an
- * array, `toJSON` honoured), so the digest is of the body the gateway receives. This is the digest a **client signature** (`cs`) binds ({@link mcpBinding}); for `/a2a` the
- * arguments are `{ text: message }`. A **possession proof** binds the gateway's mandate digest instead,
- * {@link mandateArgumentsDigest}: the two differ for keys outside the Basic Multilingual Plane beside keys in
- * U+E000–U+FFFF, and for floats in exponent form.
+ * array, `toJSON` honoured), so the digest is of the body the gateway receives. This is the digest a **client
+ * signature** (`cs`) binds ({@link mcpBinding}); for `/a2a` the arguments are `{ text: message }`. A possession proof
+ * binds the same digest since identity-and-lifecycle I3 ({@link mandateArgumentsDigest}, which also refuses an unsafe
+ * integer).
  */
 export function argumentsDigest(args: unknown): Uint8Array {
   return new Uint8Array(createHash("sha256").update(canonicalJson(args), "utf8").digest());
 }
 
-const utf8 = new TextEncoder();
-
-/** Compare two strings by their UTF-8 bytes — the order of the gateway's `BTreeMap<String, _>`. */
-function utf8Order(a: string, b: string): number {
-  const x = utf8.encode(a), y = utf8.encode(b);
-  for (let i = 0; i < Math.min(x.length, y.length); i++) if (x[i] !== y[i]) return x[i] - y[i];
-  return x.length - y.length;
-}
-
 /**
  * SHA-256 of `args` as the gateway digests a mandate's arguments (`gateway_authority::arguments_digest`): the digest a
- * **possession proof** binds ({@link mandateRequestBytes}) and a grant's `bound:args:`. Members sorted by UTF-8 bytes;
- * numbers as `JSON.stringify` writes them, which matches the gateway for integers and for decimals not in exponent
- * form — a float the gateway writes in exponent form differs (identity-and-lifecycle §9 O1), so send such a number
- * as a string. Pinned by the `mandate_digest_cases` of `tests/fixtures/possession/vector.json`.
+ * **possession proof** binds ({@link mandateRequestBytes}) and a grant's `bound:args:`. Since identity-and-lifecycle
+ * I3 (§9 O1) it is RFC 8785 — the same as {@link argumentsDigest} — so a float in exponent form binds in every
+ * language. Throws for arguments holding an integer outside ±(2^53 − 1), which no digest binds exactly: send it as a
+ * string. Pinned by the `digest_cases` of `tests/fixtures/possession/vector.json`.
  */
 export function mandateArgumentsDigest(args: unknown): Uint8Array {
-  return new Uint8Array(createHash("sha256").update(serialise(args, utf8Order) ?? "null", "utf8").digest());
+  if (holdsUnsafeInteger(args)) {
+    throw new Error("an integer outside ±(2^53 - 1) cannot be bound exactly by a mandate: send it as a string");
+  }
+  return argumentsDigest(args);
 }
 
 /**

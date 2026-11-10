@@ -60,20 +60,21 @@ test("the possession vector is rebuilt from its inputs", () => {
   expect(verifies(V.issuer_key_b64, mandateCanonicalBytes(GRANT.mandate), Buffer.from(GRANT.signature).toString("base64"))).toBe(true);
 });
 
-test("the mandate digest is the gateway's for every case, and the signature's digest stays JCS", () => {
-  // #744's review, item 1: members by UTF-8 bytes (a key outside the BMP beside one in U+E000–U+FFFF), non-ASCII,
-  // control characters and nesting, as serde_json writes them — checked by the gateway's own digest in Rust.
-  for (const c of V.mandate_digest_cases) expect([c.serialized, hex(mandateArgumentsDigest(c.arguments))]).toEqual([c.serialized, c.digest_hex]);
-  // The two orders differ on the first case, so the call signature's JCS digest is not the mandate's.
-  const first = V.mandate_digest_cases[0];
-  expect(hex(argumentsDigest(first.arguments))).not.toBe(first.digest_hex);
+test("the mandate digest is RFC 8785, an unsafe integer is refused, and a float grant is admitted", () => {
+  // Identity-and-lifecycle I3 (section 9 O1): floats in exponent form and a key outside the BMP, as the gateway's own
+  // arguments_digest computes them in Rust; the mandate digest is the signature's now.
+  for (const c of V.digest_cases) {
+    expect([c.canonical, hex(mandateArgumentsDigest(c.arguments))]).toEqual([c.canonical, c.digest_hex]);
+    expect(hex(argumentsDigest(c.arguments))).toBe(c.digest_hex);
+  }
+  for (const raw of V.unsafe_cases) expect(() => mandateArgumentsDigest(JSON.parse(raw))).toThrow(/2\^53/);
   // What JSON.stringify leaves out of the body is left out of the digest.
   expect(hex(mandateArgumentsDigest({ a: undefined, b: 1, f: () => 1 }))).toBe(hex(mandateArgumentsDigest({ b: 1 })));
   expect(hex(mandateArgumentsDigest({ l: [undefined, 1] }))).toBe(hex(mandateArgumentsDigest({ l: [null, 1] })));
-  // The proof binds the gateway's digest of the case, not the signature's.
-  const proof = new ClientSigner(HOLDER, V.principal).provePossession(GRANT, "tools/call", V.resource, first.arguments);
-  const request = mandateRequestBytes("tools/call", V.resource, Buffer.from(first.digest_hex, "hex"));
-  expect(verifies(V.holder_key_b64, possessionMessage(GRANT.mandate, request), proof.possession)).toBe(true);
+  // The proof for a grant bound to floats is the one the vector pins.
+  const f = V.float_grant;
+  expect(hex(mandateArgumentsDigest(f.arguments))).toBe(f.arguments_digest_hex);
+  expect(new ClientSigner(HOLDER, V.principal).provePossession(f.grant, V.operation, V.resource, f.arguments).possession).toBe(f.possession_b64);
 });
 
 test("the signer proves possession as the vector does, and only for its own grant", () => {

@@ -227,10 +227,9 @@ class ClientSigner:
         """Present ``grant`` — held by this signer's principal — for one call: ``{"grant": grant, "possession":
         base64}``, to send as ``params._meta.mandate``. The proof binds the grant, the operation, the resource before
         ``@`` and the call's arguments by the gateway's mandate digest (:func:`~mycelium.a2a.arguments_digest`), so
-        it is good for this call alone. Raises ``ValueError`` for a grant another principal holds.
-
-        The mandate digest is not RFC 8785: for a float written in exponent form it differs from the gateway's, and
-        the call is refused (identity-and-lifecycle §9 O1) — send such a number as a string.
+        it is good for this call alone. Raises ``ValueError`` for a grant another principal holds, and for arguments
+        holding an integer outside ±(2**53 - 1), which the RFC 8785 digest cannot bind exactly (identity-and-lifecycle
+        I3) — send such a number as a string.
         """
         import base64
 

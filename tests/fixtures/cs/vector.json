@@ -95,6 +95,14 @@
       },
       "canonical": "{\"a\":\"x\",\"b\":{\"a\":[{\"x\":null,\"y\":true}],\"z\":1},\"😀\":2,\"\":1}",
       "digest_hex": "0141c4f464a9e7ed084691ac716168ccdcd51ab35ab36f42c9c5dc14b12352b8"
+    },
+    {
+      "arguments": {
+        "tie": 1000000000000000.2,
+        "near": 1658206780088562.2
+      },
+      "canonical": "{\"near\":1658206780088562.2,\"tie\":1000000000000000.2}",
+      "digest_hex": "610ddfe321f7f0ccc4f638f59ae8a15f1d15c52ac9335f0bdb61b1613fe99157"
     }
   ],
   "_doc_integers": "unsafe_integer_cases and safe_integer_cases are raw JSON texts, parsed by each language itself: a signed call whose arguments hold an integral number outside +-(2^53 - 1) is refused by every signer and by the provider (client_signature_unsafe_integer), because RFC 8785 writes it as the nearest double; send large ids as strings.",

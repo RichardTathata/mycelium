@@ -570,6 +570,10 @@ impl AgentStateMachine {
         use crate::mandate::grant::{possession_message, SignedMandateGrant};
         let window_ms = self.policy.read().grant_window.unwrap_or(Duration::from_secs(30)).as_millis() as u64;
         let agent = super::gateway_caller::node_principal(&self.ctx.node_id);
+        // Identity-and-lifecycle I3 (§9 O1): the grant's digest is RFC 8785, which cannot bind such an integer exactly.
+        if super::client_sig::holds_unsafe_integer(arguments) {
+            return Err(PolicyViolation::GrantRefused(format!("{tool}: the arguments hold an integer outside +-(2^53 - 1), which a grant cannot bind exactly: send it as a string")));
+        }
         let digest = arguments_digest(arguments);
         let digest_hex = super::action_evaluator::hex32(&digest);
         let now_ms = self.ctx.hlc.decision_now_ms();
@@ -582,7 +586,12 @@ impl AgentStateMachine {
             let rest = key.strip_prefix(prefix.as_str())?;
             if rest.contains('/') || consumed.contains(rest) { return None; }
             let v: serde_json::Value = serde_json::from_slice(bytes).ok()?;
-            (v["tool"] == tool && v["arguments_digest"] == digest_hex.as_str() && v["expires_at_ms"].as_u64()? > now_ms).then(|| rest.to_string())
+            // A request asked before identity-and-lifecycle I3 recorded the legacy digest form: the same request for
+            // the window (`deprecations.md` §93).
+            (v["tool"] == tool
+                && super::gateway_authority::recorded_digest_matches(&v["arguments_digest"], arguments)
+                && v["expires_at_ms"].as_u64()? > now_ms)
+                .then(|| rest.to_string())
         });
         let (request, expires_at_ms) = match existing {
             Some(r) => {
@@ -643,7 +652,11 @@ impl AgentStateMachine {
                 // The grant's checkpoint, written beside it by the issuing node — this one or another — so the
                 // standing is known here before the grant is assessed (adopter-surface X3, second PR).
                 super::gateway_authority::feed_grant_checkpoint(&self.ctx, authority, &presented.grant.mandate, now);
-                let assessment = authority.assess(&agent, "tools/call", &resource, &digest, Some(&presented), now, &super::gateway_member_keys(&self.ctx));
+                // From the arguments, so a grant from a request asked before identity-and-lifecycle I3 (bound to the
+                // legacy digest) is established for the window. A legacy match is counted here, at its own point: a
+                // provider without `with_provider_enforcement` never assesses the call, and this wait writes no
+                // evidence record, so without it an operator could see zero while legacy grants run (#750's round 2).
+                let (assessment, _form) = authority.assess_arguments_at(super::gateway_authority::CountAt::Agent, &agent, "tools/call", &resource, arguments, Some(&presented), now, &super::gateway_member_keys(&self.ctx));
                 match assessment.binding.map(|b| b.state) {
                     Some(super::action_evaluator::MandateState::Established) => {
                         #[cfg(feature = "metrics")]

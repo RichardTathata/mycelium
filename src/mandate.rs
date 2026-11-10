@@ -226,6 +226,10 @@ pub enum MandateRefusal {
     GrantUsed {
         door: String,
     },
+    /// The call's arguments hold an integer outside ±(2^53 − 1) (identity-and-lifecycle I3, §9 O1): the arguments'
+    /// digest is RFC 8785 (JCS), which writes such a number as the nearest double, so a mandate cannot bind it
+    /// exactly — two neighbouring ids would digest alike. Send large ids as strings.
+    UnsafeInteger,
 }
 
 impl std::fmt::Display for MandateRefusal {
@@ -248,6 +252,8 @@ impl std::fmt::Display for MandateRefusal {
                 write!(f, "the grant is bound to policy revision {bound:?}, the call was decided under {decided:?}"),
             Self::GrantUsed { door } =>
                 write!(f, "the grant was already used at {door}: a grant admits one call at each door"),
+            Self::UnsafeInteger =>
+                write!(f, "the arguments hold an integer outside +-(2^53 - 1), which a mandate cannot bind exactly: send it as a string"),
         }
     }
 }

@@ -366,10 +366,10 @@ async fn admit_after(ctx: &Arc<TaskCtx>, principal: &str, call: Option<&Admitted
         && let (Some(m), Some(authority)) = (&call.mandate, ctx.execution_authority.get())
         && let Ok(presented) = serde_json::from_value::<super::gateway_authority::PresentedMandate>(m.clone())
     {
-        let digest = super::action_evaluator::arguments_digest(&serde_json::to_vec(&call.arguments).unwrap_or_default());
         let now = ctx.hlc.decision_now_ms();
         super::gateway_authority::feed_grant_checkpoint(ctx, authority, &presented.grant.mandate, now);
-        let assessed = authority.assess(principal, &call.operation, &call.resource, &digest, Some(&presented), now, &super::gateway_member_keys(ctx));
+        // Both digest forms, as the preflight assessed them (identity-and-lifecycle I3, §9 O1).
+        let assessed = authority.reassess_arguments(principal, &call.operation, &call.resource, &call.arguments, Some(&presented), now, &super::gateway_member_keys(ctx));
         let state = assessed.binding.map(|b| b.state);
         if let Some(why) = lapsed.as_mut() {
             *why = match &state {

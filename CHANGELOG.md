@@ -69,6 +69,17 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **A mandate's arguments digest is RFC 8785 in every language** (`docs/plans/identity-and-lifecycle.md` I3, PR 1, §9
+  O1). The digest a grant binds and a possession proof covers is now the JCS digest in Rust, Python and TypeScript, so a
+  float in exponent form binds from any of them.
+  - Rust writes a number's digits as ECMAScript does, a tie going to the even digit (from `ryu`). Before, it rounded a
+    tie up, which also changed the client signature's `cs` for such numbers.
+  - For one release a grant, proof or standing request on the older `serde_json` digest is still honoured. Each match
+    is counted per enforcement point on `/stats` and in metrics, and named on its evidence record.
+  - A number of magnitude 2^53 or more is refused where a mandate binds it.
+
+  Upgrade note: `deprecations.md` §93. Upgrade verifiers before binders.
+
 - **I1 closed: a service calls a tool under its own grant on a three-node fleet** (`docs/plans/identity-and-lifecycle.md`
   I1, PR 4 of 4). `examples/eve_weather/run_client_grant.mjs` runs Eve's weather tool through the `mycelium` binary's
   `/mcp`, with `[authority]`, under a grant held by `token:fleet/forecaster`. The call is signed with its client

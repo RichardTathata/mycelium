@@ -182,10 +182,9 @@ export class ClientSigner {
   /**
    * Present `grant` — held by this signer's principal — for one call: `{grant, possession}`, to send as
    * `params._meta.mandate`. The proof binds the grant, the operation, the resource before `@` and the call's arguments
-   * by the gateway's mandate digest ({@link mandateArgumentsDigest} — not the signature's JCS digest), so it is good
-   * for this call alone. Throws for a grant another
-   * principal holds. The gateway's mandate digest is not RFC 8785: for a float in exponent form it differs, and the
-   * call is refused (identity-and-lifecycle §9 O1) — send such a number as a string.
+   * by the gateway's mandate digest ({@link mandateArgumentsDigest}, RFC 8785 since identity-and-lifecycle I3), so it is
+   * good for this call alone. Throws for a grant another principal holds, and for arguments holding an integer outside
+   * ±(2^53 − 1), which that digest cannot bind exactly — send such a number as a string.
    */
   provePossession(grant: SignedMandateGrant, operation: string, resource: string, args: unknown): PresentedMandate {
     if (grant.mandate.holder !== this.principal) {

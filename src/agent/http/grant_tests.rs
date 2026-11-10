@@ -1193,3 +1193,57 @@ async fn an_answer_the_disk_will_not_take_is_refused_and_the_request_stays_pendi
     a.shutdown().await;
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// **The agent's wait takes a request asked before identity-and-lifecycle I3 as its own** (#750's review, item 4). A
+/// standing request recorded with the legacy digest — as a pre-I3 node wrote it, for arguments whose two forms differ
+/// — is the request the agent waits on when it asks again, not a second one; the grant issued on it (bound to the
+/// legacy digest) verifies at the agent's node and runs once at the provider, where the match is counted as the
+/// provider's. Seen failing first with the wait's lookup matching the RFC 8785 digest only: a second request written,
+/// and the agent's wait ran out.
+#[tokio::test]
+async fn the_agents_wait_reuses_a_request_asked_before_i3() {
+    let http_port = alloc_port();
+    let (a, _journal, ran) = node(http_port).await;
+    let agent_principal = crate::agent::gateway_caller::node_principal(a.node_id());
+    let prefix = format!("grant/{agent_principal}/");
+    let requests = |a: &GossipAgent| crate::store::scan_kv_prefix(&a.task_ctx.kv_state, &prefix).into_iter().filter(|(k, _)| k.matches('/').count() == 2).collect::<Vec<_>>();
+    let args = serde_json::json!({"\u{ff01}": "prod", "\u{1F600}": 3});
+    let legacy = crate::agent::action_evaluator::hex32(&crate::legacy_arguments_digest(&args));
+    assert_ne!(legacy, crate::agent::action_evaluator::hex32(&crate::arguments_digest(&args)), "the two forms differ");
+    let sm = a.agent_state_machine(policy(2_000));
+    sm.transition(ExecutionState::Planning).await.unwrap();
+    let (sm2, args2) = (Arc::clone(&sm), args.clone());
+    let waiting = tokio::spawn(async move { sm2.transition_invoking("deploy", &args2).await });
+    assert!(until(|| requests(&a).len() == 1, Duration::from_secs(5)).await);
+    waiting.abort();
+    let _ = waiting.await;
+    // The record as a pre-I3 node wrote it: the legacy digest.
+    let (key, bytes) = requests(&a).remove(0);
+    let mut record: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    record["arguments_digest"] = serde_json::json!(legacy);
+    assert!(a.kv().set(key.to_string(), bytes::Bytes::from(serde_json::to_vec(&record).unwrap())));
+    drop(sm);
+    let sm = a.agent_state_machine(policy(2_000));
+    sm.transition(ExecutionState::Planning).await.unwrap();
+    let issuing = tokio::spawn(issue_pending(Arc::clone(&a), http_port, agent_principal.clone()));
+    let waited = sm.transition_invoking("deploy", &args).await;
+    let _ = issuing.await;
+    let written = requests(&a).len();
+    let called = match &waited {
+        Ok(Some(mandate)) => call_deploy(&a, None, mandate, &args).await,
+        other => Err(format!("{other:?}")),
+    };
+    let authority = a.task_ctx.execution_authority.get().cloned();
+    a.shutdown().await;
+    assert_eq!(written, 1, "REUSE: the wait wrote a second request rather than waiting on the pre-I3 one");
+    assert!(called.is_ok(), "the grant bound to the legacy digest: {called:?}");
+    assert_eq!(ran.load(Ordering::SeqCst), 1);
+    let authority = authority.unwrap();
+    // Counted where it was assessed: the agent's wait (its own point, so a fleet whose providers run without
+    // provider enforcement still sees the match — #750's round 2, item 2) and the provider; no gateway door was used.
+    assert_eq!(
+        (authority.legacy_digest_matches(), authority.legacy_digest_matches_at_provider(), authority.legacy_digest_matches_at_agent()),
+        (0, 1, 1),
+        "AGENT: counted at the agent's wait and the provider"
+    );
+}

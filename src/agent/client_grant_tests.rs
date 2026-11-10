@@ -461,12 +461,33 @@ fn the_possession_vector_is_the_gateways() {
     let members = std::collections::HashMap::from([(issuer_node, crate::knowledge::issuer::MemberKeys { retained: vec![issuer.verifying_key().to_bytes()], ..Default::default() })]);
     let verdict = GrantVerifier::new(table).check(&grant, &request, Some(&proof), m.valid_from_ms + 1, &members, &external);
     assert_eq!(verdict, GrantVerdict::Valid, "the gateway's verifier accepts the SDKs' proof");
-    // The digest cases (#744's review, item 1): the gateway writes each case as `serialized` — members by UTF-8 bytes —
-    // and digests that.
-    for case in v["mandate_digest_cases"].as_array().unwrap() {
-        assert_eq!(serde_json::to_string(&case["arguments"]).unwrap(), case["serialized"].as_str().unwrap(), "the gateway's form");
-        assert_eq!(hex(&crate::arguments_digest(&case["arguments"])), case["digest_hex"], "the gateway's digest of {}", case["serialized"]);
+    // Identity-and-lifecycle I3 (§9 O1): the digest is RFC 8785 — each case's canonical text and digest, as jest and
+    // pytest compute them; the pre-I3 `serde_json` form, accepted for one release, reproduced by the legacy digest; and
+    // arguments no digest binds exactly, refused.
+    for case in v["digest_cases"].as_array().unwrap() {
+        assert_eq!(crate::agent::client_sig::canonical_json(&case["arguments"]), case["canonical"].as_str().unwrap(), "the canonical form");
+        assert_eq!(hex(&crate::arguments_digest(&case["arguments"])), case["digest_hex"], "JCS: the gateway's digest of {}", case["canonical"]);
     }
+    for case in v["legacy_digest_cases"].as_array().unwrap() {
+        assert_eq!(serde_json::to_string(&case["arguments"]).unwrap(), case["serialized"].as_str().unwrap(), "the pre-I3 form");
+        assert_eq!(hex(&crate::agent::gateway_authority::legacy_arguments_digest(&case["arguments"])), case["digest_hex"]);
+    }
+    for raw in v["unsafe_cases"].as_array().unwrap() {
+        let parsed: serde_json::Value = serde_json::from_str(raw.as_str().unwrap()).unwrap();
+        assert!(crate::holds_unsafe_integer(&parsed), "{raw} is refused where the digest is taken");
+    }
+    // A grant bound to floats in exponent form, and the holder's proof the SDKs make for it: the gateway's verifier
+    // finds it valid, and its digest is the gateway's.
+    let f = &v["float_grant"];
+    let float_grant: SignedMandateGrant = serde_json::from_value(f["grant"].clone()).unwrap();
+    let float_digest = crate::arguments_digest(&f["arguments"]);
+    assert_eq!(hex(&float_digest), f["arguments_digest_hex"], "FLOAT: the gateway's digest of the floats");
+    let float_request = crate::possession_request(v["operation"].as_str().unwrap(), v["resource"].as_str().unwrap(), &float_digest);
+    assert_eq!(hex(&float_request), f["request_hex"]);
+    let float_proof = b64.decode(f["possession_b64"].as_str().unwrap()).unwrap();
+    let mut table = EntitlementTable::new();
+    table.entitle_grants(PrincipalId::new(m.established_by.as_str()).unwrap());
+    assert_eq!(GrantVerifier::new(table).check(&float_grant, &float_request, Some(&float_proof), m.valid_from_ms + 1, &members, &external), GrantVerdict::Valid, "the float grant's proof");
 }
 
 /// **The SDKs' shape: a client's own signature and its own grant on one `tools/call`** (#744's review, item 6). The
@@ -620,4 +641,72 @@ async fn a_bridged_tool_answering_like_a_refusal_after_running_leaves_the_grant_
     assert!(again["error"]["message"].as_str().is_some_and(|m| m.contains("already used")), "GIVEN BACK: the grant admitted a second call: {again}");
     assert_eq!(ran.load(Ordering::SeqCst), 1, "the effect ran once");
     assert_eq!(first["error"]["code"], -32000, "the bridged answer is a tool error, not the node's refusal: {first}");
+}
+
+
+/// **The request door refuses arguments no digest binds** (identity-and-lifecycle I3, §9 O1): a number of magnitude
+/// 2^53 or more — an integer past ±(2^53 − 1), or a float such as `1e21` — is refused `400 unsafe_integer` before a
+/// grant is asked for, since the grant's RFC 8785 digest writes it as the nearest double. A float in exponent form
+/// below that bound is accepted. Seen failing first with the door's check removed (the request was written).
+#[tokio::test]
+async fn the_request_door_refuses_an_unsafe_integer_and_accepts_an_exponent_form_float() {
+    let dir = scratch("unsafe");
+    let http_port = alloc_port();
+    let (a, _ran) = started(&dir, http_port).await;
+    let _key = forecaster_key(&a, &dir);
+    let ask = |args: serde_json::Value| http(http_port, "fc-secret", reqwest::Method::POST, "/gateway/grants/request", Some(serde_json::json!({"tool": TOOL, "arguments": args})));
+    let (big_status, big) = ask(serde_json::json!({"id": 9_007_199_254_740_993u64})).await;
+    let (huge_status, huge) = ask(serde_json::json!({"huge": 1e21})).await;
+    let (float_status, float) = ask(serde_json::json!({"tolerance": 0.00001})).await;
+    a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!((big_status, big["error"].as_str()), (400, Some("unsafe_integer")), "UNSAFE: {big}");
+    assert_eq!((huge_status, huge["error"].as_str()), (400, Some("unsafe_integer")), "{huge}");
+    assert_eq!(float_status, 200, "an exponent-form float is asked for: {float}");
+    assert_eq!(float["arguments_digest"], crate::agent::action_evaluator::hex32(&crate::arguments_digest(&serde_json::json!({"tolerance": 0.00001}))));
+}
+
+/// **A request asked before identity-and-lifecycle I3 is the same request for the window, and its grant runs**
+/// (#750's review, items 2 and 4). A standing request recorded with the legacy digest — as a pre-I3 gateway wrote it,
+/// for arguments whose two forms differ — is reused when the client asks again; the grant issued on it binds the
+/// legacy digest, and a client proving possession over the RFC 8785 digest runs the call under it (either digest of
+/// the call's own arguments binds exactly them). The match is counted on `/stats`, once at the door and once at
+/// the provider (this node is both). Seen failing first, one build per plant: the reuse matching the RFC 8785 digest only (a second request
+/// written), and the binding and the proof required to share one form (the call refused, bound to other arguments).
+#[tokio::test]
+async fn a_request_asked_before_i3_is_reused_and_its_grant_runs_counted_on_stats() {
+    use crate::agent::action_evaluator::hex32;
+    let dir = scratch("legacy");
+    let http_port = alloc_port();
+    let (a, ran) = started(&dir, http_port).await;
+    let key = forecaster_key(&a, &dir);
+    let args = serde_json::json!({"\u{ff01}": 1, "\u{1F600}": 2});
+    let legacy = hex32(&crate::legacy_arguments_digest(&args));
+    assert_ne!(legacy, hex32(&crate::arguments_digest(&args)), "the case is one where the two forms differ");
+    let ask = || http(http_port, "fc-secret", reqwest::Method::POST, "/gateway/grants/request", Some(serde_json::json!({"tool": TOOL, "arguments": args})));
+    let (status, first) = ask().await;
+    assert_eq!(status, 200, "{first}");
+    // The record as a pre-I3 gateway wrote it: the legacy digest.
+    let request_key = first["key"].as_str().unwrap().to_string();
+    let mut record: serde_json::Value = serde_json::from_slice(&mycelium_core::ops::kv_get(&a.task_ctx, &request_key).unwrap()).unwrap();
+    record["arguments_digest"] = serde_json::json!(legacy);
+    assert!(a.kv().set(request_key.clone(), bytes::Bytes::from(serde_json::to_vec(&record).unwrap())));
+    let (_, again) = ask().await;
+    let request = again["request"].as_str().unwrap_or_default().to_string();
+    let (issue_status, issued) = http(http_port, "treasurer-secret", reqwest::Method::POST, &format!("/gateway/grants/{}/{}", segment(FORECASTER), segment(&request)), Some(serde_json::json!({"decision": "issue"}))).await;
+    let (_, read) = http(http_port, "fc-secret", reqwest::Method::GET, &format!("/gateway/grants/request/{}", segment(&request)), None).await;
+    let called = match serde_json::from_value::<crate::mandate::grant::SignedMandateGrant>(read["grant"].clone()) {
+        Ok(grant) => mcp_call(http_port, &args, Some(presented(&grant, first["resource"].as_str().unwrap(), &args, &key))).await,
+        Err(e) => serde_json::json!({"error": format!("no grant: {e}: {read}")}),
+    };
+    let (_, stats) = http(http_port, "treasurer-secret", reqwest::Method::GET, "/stats", None).await;
+    a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!((again["reused"].as_bool(), &again["request"]), (Some(true), &first["request"]), "REUSE: the pre-I3 request was not reused: {again}");
+    assert_eq!(again["arguments_digest"], legacy.as_str(), "the answer names the digest the grant will bind: {again}");
+    assert_eq!(issue_status, 200, "{issued}");
+    assert!(called.get("result").is_some(), "PAIRING: the grant bound to the legacy digest, proved over RFC 8785, did not run: {called}");
+    assert_eq!(ran.load(Ordering::SeqCst), 1);
+    // This node is the gateway and, with provider enforcement, the provider: one call, counted once at each point.
+    assert_eq!((stats["legacy_digest_matches"].as_u64(), stats["provider_legacy_digest_matches"].as_u64()), (Some(1), Some(1)), "STATS: {stats}");
 }

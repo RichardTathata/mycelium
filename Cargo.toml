@@ -121,6 +121,9 @@ hyper-util   = { version = "0.1",  features = ["server-auto", "tokio", "service"
 tower-service = { version = "0.3", optional = true }
 # JSON / HTTP utilities used beyond just the gateway
 serde_json   = "1.0"
+# The shortest round-trip digits of a double, ties to even, as ECMAScript's Number::toString chooses them (RFC 8785's
+# number form; identity-and-lifecycle I3). Already in the tree through serde_json; Apache-2.0 OR BSL-1.0.
+ryu          = "1"
 base64       = "0.22"
 # HTTP client — used by MCP client bridge, bulk transport, and capability probes.
 # Optional: enabled by the "gateway" feature. Bare-metal / no-std builds that
