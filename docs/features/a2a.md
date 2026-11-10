@@ -20,7 +20,8 @@ identity that created it.
 
 Build with `a2a` (it implies `gateway`), give the node an `http_port`, and mount the routes — from configuration with
 `gateway_a2a = true`, or in code with `with_a2a`. The published `mycelium` binary is built with `a2a` and serves A2A
-only when its configuration sets the switch; off by default. The published `mycelium-stem` is built without `a2a`, so
+only when its configuration sets the switch; off by default. A stock `a2a-sdk` client names no skill, so such a node
+names its default with `gateway_a2a_default_skill`. The published `mycelium-stem` is built without `a2a`, so
 it refuses the switch at start. The `skillrunner` binary mounts the routes when built with `--features a2a` and its
 node has an `http_port` — its default features exclude `a2a`, and it is not published.
 
@@ -31,13 +32,21 @@ node has an `http_port` — its default features exclude `a2a`, and it is not pu
 - [`with_a2a`](../../src/agent/mod.rs): the same mount in code; beside the switch, or called twice, it mounts nothing
   more.
 - [`http_port`](../reference/configuration.md#http_port): the gateway that serves them.
-- [`with_a2a_default_skill`](../../src/agent/mod.rs): the skill a message that names none reaches; without one such a
-  message is refused `-32602`.
+- [`gateway_a2a_default_skill`](../reference/configuration.md#gateway_a2a_default_skill)
+  (`GOSSIP_GATEWAY_A2A_DEFAULT_SKILL`): the skill (`"ns/name"`) a message that names no `metadata.skillId` reaches —
+  what a stock `a2a-sdk` client sends; without a default such a message is refused `-32602`. A message that names a
+  skill still reaches that one, and the card states the default. `start()` refuses it by name where `/a2a` is not
+  served (neither `gateway_a2a` nor `with_a2a`), where `ns` or `name` is not one key segment, beside a different
+  default set in code, and in a build without `a2a`; `mycelium doctor` says the same.
+- [`with_a2a_default_skill`](../../src/agent/mod.rs): the same default in code. Beside the field it must name the same
+  skill, or the start is refused.
 - [`with_action_evaluator`](../../src/agent/mod.rs), or [`[authority]`](declared-authority.md) for a node built from
   configuration: what decides each send; deny anonymous principals there to close the route
   ([authorising actions](action-authorisation.md)). Mounted without one, `start()` warns once.
-- `a2a_is_anonymous_dispatch_whatever_bearer_is_configured`, `the_a2a_switch_mounts_the_card_and_a2a_at_start` and
-  `the_a2a_switch_in_a_build_without_a2a_refuses_the_start`, in [`src/lib_tests.rs`](../../src/lib_tests.rs).
+- `a2a_is_anonymous_dispatch_whatever_bearer_is_configured`, `the_a2a_switch_mounts_the_card_and_a2a_at_start`,
+  `the_a2a_switch_in_a_build_without_a2a_refuses_the_start`, `the_a2a_default_skill_field_reaches_its_skill_through_start`,
+  `the_a2a_default_skill_field_is_refused_by_name_where_it_would_do_nothing` and
+  `the_a2a_default_skill_in_a_build_without_a2a_refuses_the_start`, in [`src/lib_tests.rs`](../../src/lib_tests.rs).
 
 ## See it work
 
@@ -53,9 +62,8 @@ is a manual run with a real model.
   present bearer's scopes are dropped; the action preflight decides the rest.
 - **Guarantee:** [`a2a.admission`](../reference/guarantee-catalogue.md#a2a.admission) — `/a2a` is not anonymous skill
   dispatch, which holds only with an evaluator that denies anonymous principals.
-- **Not built:** a default skill from configuration — `with_a2a_default_skill` is code only, so on a node served by
-  the switch a message that names no `metadata.skillId` (what a stock `a2a-sdk` client sends) is refused `-32602`;
-  `/a2a` on the published stem (built without `a2a`); the card is public on a credentialed node; the pre-0.2
+- **Not built:** `/a2a` on the published stem — it is built without `a2a` by decision (2026-11-09), so it refuses
+  `gateway_a2a` and `gateway_a2a_default_skill` at start; the card is public on a credentialed node; the pre-0.2
   methods and the old card path, announced in 2.35.0 for one release
   ([deprecations §46](../guide/deprecations.md#46-a-current-a2a-client-reaches-a2a-the-card-at-agent-cardjson-the-10-and-03-methods-a-skill-in-metadataskillid-2350-post-360-plan-row-n)),
   are still served; push notifications are not served.

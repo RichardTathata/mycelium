@@ -93,6 +93,52 @@ impl GossipAgent {
                     .into(),
             });
         }
+        // `gateway_a2a_default_skill` in a build without `a2a`: the same class — a default skill for a route never served.
+        #[cfg(not(feature = "a2a"))]
+        if self.config.gateway_a2a_default_skill.is_some() {
+            return Err(GossipError::InvalidField {
+                field: "gateway_a2a_default_skill",
+                reason: "a default `/a2a` skill is used only by a build with the `a2a` feature; this build would \
+                         accept it and serve nothing. Build with `--features a2a`, or remove the setting"
+                    .into(),
+            });
+        }
+        // With it: refused by name wherever it would be accepted and do nothing, or would not name a skill — not
+        // `"ns/name"` of one key segment each (the rule `with_a2a_default_skill` applies); `/a2a` not served (neither
+        // the switch nor `with_a2a()`); a different default already set in code (one default per node; the code's would
+        // silently win). The same default in both is accepted, and so is a retried start, which set it last time.
+        #[cfg(feature = "a2a")]
+        if let Some(skill) = &self.config.gateway_a2a_default_skill {
+            let problem = match skill.split_once('/') {
+                None => Some("it is not \"ns/name\""),
+                Some((ns, name)) => crate::capability::capability_name_problem(ns, name),
+            };
+            if let Some(problem) = problem {
+                return Err(GossipError::InvalidField {
+                    field: "gateway_a2a_default_skill",
+                    reason: format!("{skill:?} is not a skill name: {problem}"),
+                });
+            }
+            if !self.task_ctx.a2a_served() {
+                return Err(GossipError::InvalidField {
+                    field: "gateway_a2a_default_skill",
+                    reason: "set, but `/a2a` is not served on this node, so no message would reach it: set \
+                             `gateway_a2a = true` (or call `with_a2a()`), or remove the setting"
+                        .into(),
+                });
+            }
+            if let Some(code) = self.task_ctx.a2a_default_skill.get()
+                && code != skill
+            {
+                return Err(GossipError::InvalidField {
+                    field: "gateway_a2a_default_skill",
+                    reason: format!(
+                        "names {skill}, but `with_a2a_default_skill` already set {code} in code; a node has one \
+                         default skill. Remove one, or make them the same"
+                    ),
+                });
+            }
+        }
         // `[authority]` (identity-and-lifecycle I0) in a build that cannot attach what it describes: the same class.
         // Without `compliance` the table would be accepted and every door would enforce nothing.
         #[cfg(not(feature = "compliance"))]
@@ -330,6 +376,12 @@ impl GossipAgent {
         #[cfg(feature = "a2a")]
         if self.config.gateway_a2a {
             self.mount_a2a();
+        }
+        // `gateway_a2a_default_skill`, checked by `preflight()`: equal to any default set in code, so this sets it or
+        // finds it set.
+        #[cfg(feature = "a2a")]
+        if let Some(skill) = &self.config.gateway_a2a_default_skill {
+            let _ = self.task_ctx.a2a_default_skill.set(skill.clone());
         }
         // `[authority]`'s plan, attached before the boundary: the journal opened first (identity-and-lifecycle I0).
         #[cfg(feature = "compliance")]

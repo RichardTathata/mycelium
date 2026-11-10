@@ -2268,6 +2268,10 @@ impl GossipAgent {
     /// `namespace`/`name` must each be one key segment (`capability_name_problem`); one that is not,
     /// or a second call, is ignored with a warning and the first setting kept. The default is a name,
     /// not a grant: the call runs the same doors as a named skill — the evaluator, mandates, evidence.
+    ///
+    /// The same default from configuration is
+    /// [`gateway_a2a_default_skill`](crate::GossipConfig::gateway_a2a_default_skill); beside this call it must name
+    /// the same skill, or `start()` refuses it by name rather than let one silently win.
     #[cfg(feature = "a2a")]
     pub fn with_a2a_default_skill(self, namespace: &str, name: &str) -> Self {
         if let Some(problem) = crate::capability::capability_name_problem(namespace, name) {

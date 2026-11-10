@@ -88,6 +88,15 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and the release builds' run is dated on `what-is-proven.md`. The plan closes I1 promise by promise and places the
   cross-language mandate digest (§9 O1) in I3.
 
+- **A stock A2A client reaches a node served from configuration.** `GossipConfig` gains `gateway_a2a_default_skill`
+  (`"ns/name"`, default unset, `GOSSIP_GATEWAY_A2A_DEFAULT_SKILL`, a blank value refused): the skill an `/a2a` message
+  that names no `metadata.skillId` reaches, as `with_a2a_default_skill` sets it in code — what an unmodified `a2a-sdk`
+  client sends, which a node served by `gateway_a2a` refused `-32602`. A message that names a skill still reaches that
+  skill, and the card states the default. `start()` refuses it by name (`preflight`, so `mycelium doctor` says the same)
+  where `/a2a` is not served (neither `gateway_a2a` nor `with_a2a()`), where `ns` or `name` is not one key segment
+  (`capability_name_problem`), beside a different default set in code (the same one is accepted), and in a build without
+  `a2a`. The published stem stays without `a2a`, by decision. Upgrade note: `deprecations.md` §94.
+
 - **The published stem takes a token table and `[authority]`; the published node serves A2A on opt-in.**
   `mycelium-wasm-host` gains a `compliance` feature (mycelium's `compliance`, with its `gateway` and `tls`), and the
   released `mycelium-stem` is built with it (`STEM_FEATURES` in `release.yml`, `docker/Dockerfile.node`,

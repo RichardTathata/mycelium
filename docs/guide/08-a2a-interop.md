@@ -165,6 +165,16 @@ let agent = GossipAgent::new(node_id, cfg)
     .with_a2a_default_skill("depot", "dispatch");   // a message naming no skill goes here
 ```
 
+A node built from configuration alone — the published `mycelium` binary — says the same in its file:
+
+```toml
+gateway_a2a = true
+gateway_a2a_default_skill = "depot/dispatch"   # or GOSSIP_GATEWAY_A2A_DEFAULT_SKILL
+```
+
+`start()` refuses the field by name where `/a2a` is not served, where `ns` or `name` is not one key segment, and
+beside a different default set in code ([configuration](../reference/configuration.md#gateway_a2a_default_skill)).
+
 A message can still name a skill, in `metadata.skillId` (the message's or the request's); without a default,
 one that names none is refused `-32602`. The first part is the skill's input — its text, or its `data`
 re-serialised as compact JSON (keys in sorted order; an integer beyond 64 bits, or a decimal, goes through an `f64`

@@ -1488,6 +1488,19 @@ pub struct GossipConfig {
     #[serde(default)]
     pub gateway_a2a: bool,
 
+    /// **The skill an `/a2a` message that names none reaches**, from configuration: `"ns/name"`, as
+    /// an embedder's `with_a2a_default_skill(ns, name)` sets it in code. A stock A2A client (the
+    /// `a2a-sdk`, Strands Agents) sends a message and never `metadata.skillId`; without a default such
+    /// a message is refused `-32602`. A message that names a skill still reaches that skill. Default
+    /// unset. `ns` and `name` must each be one key segment, as a capability's are; `start()` refuses
+    /// by name a value that is not, one set where `/a2a` is not served (neither `gateway_a2a` nor
+    /// `with_a2a()`), one beside a different default set in code, and any value in a build without
+    /// mycelium's `a2a` feature — it would be accepted and do nothing. The default is a name, not a
+    /// grant: the call runs the same doors as a named skill. Set via `GOSSIP_GATEWAY_A2A_DEFAULT_SKILL`
+    /// (trimmed; a blank value is refused rather than read as unset).
+    #[serde(default)]
+    pub gateway_a2a_default_skill: Option<String>,
+
     /// **Cross-origin reads from a browser, opt-in** (adopter-surface Y3, D28). The exact origins
     /// (`scheme://host[:port]`, `http` or `https`, no path) a browser page may read this gateway's
     /// **read-only routes** from — the list is `CORS_READ_PATHS` in the gateway (`src/agent/http/cors.rs`)
@@ -2059,6 +2072,7 @@ impl Default for GossipConfig {
             gateway_auth_token:            None,
             gateway_allow_unauthenticated: false,
             gateway_a2a:                   false,
+            gateway_a2a_default_skill:     None,
             gateway_cors_origins:          Vec::new(),
             gateway_max_connections:       1024,
             gateway_scoped_tokens:         Vec::new(),
@@ -2644,6 +2658,7 @@ impl GossipConfig {
     /// `GOSSIP_EPIDEMIC_EXTRA_PEERS`,
     /// `GOSSIP_GATEWAY_AUTH_TOKEN`, `GOSSIP_GATEWAY_ALLOW_UNAUTHENTICATED` (strict boolean),
     /// `GOSSIP_GATEWAY_A2A` (strict boolean),
+    /// `GOSSIP_GATEWAY_A2A_DEFAULT_SKILL` (`ns/name`; a blank value is refused),
     /// `GOSSIP_GATEWAY_CORS_ORIGINS` (comma-separated exact origins; blank = none),
     /// `GOSSIP_REQUIRE_IDENTITY_PROOFS` (strict boolean — it can only weaken a `true` default).
     pub fn apply_env_overrides(&mut self) -> Result<(), GossipError> {
@@ -2930,6 +2945,19 @@ impl GossipConfig {
                     reason: format!("GOSSIP_GATEWAY_A2A={other:?} is not one of true/false/1/0/yes/no"),
                 }),
             };
+        }
+        if let Ok(v) = env::var("GOSSIP_GATEWAY_A2A_DEFAULT_SKILL") {
+            // Strict: a blank is refused, never read as unset — the operator meant to name a skill, and a stock
+            // client would otherwise go on being refused with nothing to say why. Its shape is `start()`'s to
+            // refuse (`capability_name_problem`, in the crate that owns skill names).
+            let v = v.trim();
+            if v.is_empty() {
+                return Err(GossipError::InvalidField {
+                    field:  "gateway_a2a_default_skill",
+                    reason: "GOSSIP_GATEWAY_A2A_DEFAULT_SKILL is set but blank: name a skill as \"ns/name\", or unset it".into(),
+                });
+            }
+            self.gateway_a2a_default_skill = Some(v.to_string());
         }
         Ok(())
     }
@@ -3703,6 +3731,31 @@ mod tests {
         cfg.validate().expect("with a gateway it validates");
         let parsed: GossipConfig = toml::from_str("http_port = 9051\ngateway_a2a = true\n").expect("parses");
         assert!(parsed.gateway_a2a, "the TOML key is the field's name");
+    }
+
+    /// The A2A default skill is unset by default, read from the environment trimmed, and a blank
+    /// value is refused rather than read as unset (a typo must not quietly leave a stock client refused).
+    /// Its shape and the switch it needs are `start()`'s to refuse (`preflight`, src/lib_tests.rs).
+    #[test]
+    fn the_a2a_default_skill_is_unset_by_default_and_strict_from_the_environment() {
+        let _lock = env_test_lock();
+        let var = "GOSSIP_GATEWAY_A2A_DEFAULT_SKILL";
+        let _guard = EnvGuard(&_lock, var, std::env::var(var).ok());
+        set_test_env(&_lock, var, None);
+        assert_eq!(GossipConfig::default().gateway_a2a_default_skill, None, "unset by default");
+        set_test_env(&_lock, var, Some(" depot/dispatch "));
+        let mut cfg = GossipConfig::default();
+        cfg.apply_env_overrides().expect("a skill name applies");
+        assert_eq!(cfg.gateway_a2a_default_skill.as_deref(), Some("depot/dispatch"), "trimmed");
+        for blank in ["", "   "] {
+            set_test_env(&_lock, var, Some(blank));
+            let err = GossipConfig::default().apply_env_overrides().expect_err("a blank refuses");
+            assert!(matches!(err, GossipError::InvalidField { field: "gateway_a2a_default_skill", .. }), "{err}");
+        }
+        let parsed: GossipConfig =
+            toml::from_str("http_port = 9051\ngateway_a2a = true\ngateway_a2a_default_skill = \"depot/dispatch\"\n")
+                .expect("parses");
+        assert_eq!(parsed.gateway_a2a_default_skill.as_deref(), Some("depot/dispatch"), "the TOML key is the field's name");
     }
 
     /// Y3 (D28): cross-origin reads are off by default, set from the environment as a list, and an

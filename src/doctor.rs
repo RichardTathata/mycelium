@@ -719,6 +719,33 @@ mod tests {
         }
     }
 
+    /// `gateway_a2a_default_skill` read as `start()` reads it: shown among the effective fields, from the file; refused
+    /// at `preflight` naming the field where `/a2a` is not served (an `a2a` build) or cannot be (a build without it);
+    /// beside the switch, accepted in an `a2a` build.
+    #[cfg(feature = "gateway")]
+    #[tokio::test]
+    async fn doctor_reads_the_a2a_default_skill_as_start_does() {
+        let (port, http) = (crate::test_util::alloc_port(), crate::test_util::alloc_port());
+        let lone = write_cfg("a2a-default-lone", &format!(
+            "bind_port = {port}\nhttp_port = {http}\ngateway_a2a_default_skill = \"depot/dispatch\"\n"));
+        let d = run(Some(&lone));
+        let f = d.effective.iter().find(|f| f.key == "gateway_a2a_default_skill").expect("an effective field");
+        assert_eq!(f.value, serde_json::json!("depot/dispatch"), "{f:?}");
+        if std::env::var_os("GOSSIP_GATEWAY_A2A_DEFAULT_SKILL").is_none() {
+            assert_eq!(f.source, Source::File, "{f:?}");
+        }
+        let r = d.refusal.expect("refused, as start() refuses");
+        assert_eq!((r.stage, r.field.as_str()), ("preflight", "gateway_a2a_default_skill"), "{r:?}");
+
+        let paired = write_cfg("a2a-default-paired", &format!(
+            "bind_port = {port}\nhttp_port = {http}\ngateway_a2a = true\ngateway_a2a_default_skill = \"depot/dispatch\"\n"));
+        let d = run(Some(&paired));
+        #[cfg(feature = "a2a")]
+        assert!(d.refusal.is_none(), "{:?}", d.refusal);
+        #[cfg(not(feature = "a2a"))]
+        assert_eq!(d.refusal.map(|r| r.field), Some("gateway_a2a".to_string()), "the switch is refused first");
+    }
+
     /// Every core guarantee names its row of the shared-responsibility matrix, once, and the table names nothing the
     /// catalogue lacks (adopter-surface Y10: `doctor` names the row; the page's copy is held equal by
     /// `scripts/check-pilot-kit.py`).
