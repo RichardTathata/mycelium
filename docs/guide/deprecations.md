@@ -2792,7 +2792,7 @@ preflight.
 - **`cn` is still the provider's.** The gateway does not keep a replay window: a replayed `cn` passes the door and is
   dropped at the provider, as before. The door does check the issue time on the provider's window and answers `stale`.
 - **At `/mcp`, a grant the provider refused before running is given back.** When the provider's tool serve loop
-  answers `client_key_*`, `client_signature_*` or `stale` (`-32022`), the gateway tombstones the grant's
+  answers `client_key_*`, `client_signature_*`, `stale` or `unknown_signer` (`-32022`), the gateway tombstones the grant's
   `…/used/{door}` marker and releases its claim, so the same grant admits a retry. Before, the retry was refused as
   already used. A bridged MCP server's reply in that shape is now rewritten into a tool error (`-32000`). The A2A doors
   and an embedder's `gateway_record_execution` give nothing back.

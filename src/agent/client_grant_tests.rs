@@ -643,7 +643,6 @@ async fn a_bridged_tool_answering_like_a_refusal_after_running_leaves_the_grant_
     assert_eq!(first["error"]["code"], -32000, "the bridged answer is a tool error, not the node's refusal: {first}");
 }
 
-
 /// **The request door refuses arguments no digest binds** (identity-and-lifecycle I3, §9 O1): a number of magnitude
 /// 2^53 or more — an integer past ±(2^53 − 1), or a float such as `1e21` — is refused `400 unsafe_integer` before a
 /// grant is asked for, since the grant's RFC 8785 digest writes it as the nearest double. A float in exponent form
@@ -709,4 +708,59 @@ async fn a_request_asked_before_i3_is_reused_and_its_grant_runs_counted_on_stats
     assert_eq!(ran.load(Ordering::SeqCst), 1);
     // This node is the gateway and, with provider enforcement, the provider: one call, counted once at each point.
     assert_eq!((stats["legacy_digest_matches"].as_u64(), stats["provider_legacy_digest_matches"].as_u64()), (Some(1), Some(1)), "STATS: {stats}");
+}
+
+/// **A provider that does not yet trust the gateway's key gives the grant back** (#752's review, item 1). A provider
+/// that has just joined may not yet hold a key for the gateway — its own handshake to it, or the gateway's certificate
+/// record, has not arrived — and refuses the gateway's caller context `unknown_signer` at its receive boundary,
+/// before anything runs (`gateway_caller::verify`). That refusal gives the gateway's claim of a single-use grant
+/// back, as `client_key_unknown` does, so the same grant runs once the provider has learned the key. Two nodes: the
+/// gateway A carries the authority; B serves the tool natively and enforces nothing of its own. The plant: B's
+/// standing for A anchored to no key, so `trusted_keys(A)` is empty at B; B's own fold of the store restores it.
+/// Seen failing first with `unknown_signer` absent from `pre_execution_refusal` (the retry refused: the grant already
+/// used at the gateway).
+#[tokio::test]
+async fn a_provider_that_does_not_yet_trust_the_gateway_gives_the_grant_back() {
+    let dir_a = scratch("signer-a");
+    let dir_b = scratch("signer-b");
+    let certs = dir_a.join("tls");
+    let (http_a, http_b, port_b) = (alloc_port(), alloc_port(), alloc_port());
+    let at_b = format!("tool:{TOOL}@127.0.0.1:{port_b}");
+    std::fs::write(dir_a.join("units").join("weather.toml"), UNIT.replace("resource       = \"tool:weather.forecast\"", &format!("resource = \"{at_b}\"")).replace("resource  = \"tool:weather.forecast\"", &format!("resource = \"{at_b}\""))).unwrap();
+    let (a, _) = started_as(&dir_a, http_a, &Node { certs: certs.clone(), bootstrap: vec![], authority: true, port: None }, false).await;
+    let (b, ran) = started_as(&dir_b, http_b, &Node { certs: certs.clone(), bootstrap: vec![a.node_id().clone()], authority: false, port: Some(port_b) }, true).await;
+    let a_id = a.node_id().clone();
+    let provided = || crate::store::scan_kv_prefix(&a.task_ctx.kv_state, &format!("tools/{TOOL}/")).iter().any(|(k, _)| k.ends_with(&b.node_id().to_string()))
+        && mycelium_core::ops::kv_get(&a.task_ctx, &format!("sys/caller-context/{}", b.node_id())).is_some();
+    assert!(until(provided, Duration::from_secs(15)).await, "A learned that B serves the tool");
+    // B's standing for A anchored, by its certificate record, before the plant (so the restore below re-derives it).
+    let anchored = || b.task_ctx.key_standing.get(&a_id).is_some_and(|s| s.anchored.as_ref().is_some_and(|k| !k.is_empty()));
+    assert!(until(anchored, Duration::from_secs(15)).await, "B anchored A's key from its certificate record");
+    let key = forecaster_key_in(&a, &certs, &dir_a.join("client"));
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let args = serde_json::json!({"city": "Nancy"});
+    let (asked, grant) = ask_and_issue(http_a, &args).await;
+    let resource = asked["resource"].as_str().unwrap().to_string();
+
+    // The plant: B holds no key it trusts for A.
+    b.task_ctx.key_standing.set(&a_id, mycelium_core::removal::NodeStanding { anchored: Some(Default::default()), revoked: Default::default(), counted: Default::default() });
+    let untrusted = b.trusted_identity_keys(&a_id).is_empty();
+    let first = mcp_call(http_a, &args, Some(presented(&grant, &resource, &args, &key))).await;
+    let ran_first = ran.load(Ordering::SeqCst);
+    // B learns A's key: its own fold of the store re-anchors it.
+    crate::agent::revocation::refresh(&b.task_ctx);
+    let trusted = !b.trusted_identity_keys(&a_id).is_empty();
+    let again = mcp_call(http_a, &args, Some(presented(&grant, &resource, &args, &key))).await;
+    let ran_again = ran.load(Ordering::SeqCst);
+    b.shutdown().await;
+    a.shutdown().await;
+    for d in [&dir_a, &dir_b] {
+        let _ = std::fs::remove_dir_all(d);
+    }
+    assert!(untrusted, "the plant: B trusts no key for A");
+    assert!(first.to_string().contains("unknown_signer"), "the provider refused the gateway's caller context, by name: {first}");
+    assert_eq!(ran_first, 0, "nothing ran");
+    assert!(trusted, "B trusts A's key again after its fold");
+    assert!(again.get("result").is_some(), "SPENT: the retry under the same grant was refused: {again}");
+    assert_eq!(ran_again, 1, "the tool ran once");
 }

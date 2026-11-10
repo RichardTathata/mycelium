@@ -643,7 +643,10 @@ pub(crate) struct GrantClaim {
 /// review). The reply is a tool serve loop's caller-context refusal: JSON-RPC `-32022`, its message beginning `caller
 /// context refused`, the reason in `data.reason`. **Only the node authors it**: a tool's own answer is wrapped in
 /// `result` or answered `-32603`, and a bridged server's reply in this shape is rewritten into a tool error
-/// (`mcp::as_tool_answer`), so no tool-authored bytes reach here as one (#745's confirm round).
+/// (`mcp::as_tool_answer`), so no tool-authored bytes reach here as one (#745's confirm round). `unknown_signer`
+/// (#752's review): the provider does not yet trust a key for this gateway — its handshake to it or the gateway's
+/// certificate record has not arrived — and `gateway_caller::verify` refuses before any dispatch, so a retry under
+/// the same grant is safe once it has.
 #[cfg(all(feature = "gateway", feature = "tls"))]
 fn pre_execution_refusal(bytes: &[u8]) -> Option<String> {
     let v: serde_json::Value = serde_json::from_slice(bytes).ok()?;
@@ -651,7 +654,8 @@ fn pre_execution_refusal(bytes: &[u8]) -> Option<String> {
         return None;
     }
     let reason = v["error"]["data"]["reason"].as_str()?;
-    (reason.starts_with("client_signature_") || reason.starts_with("client_key_") || reason == "stale").then(|| reason.to_string())
+    (reason.starts_with("client_signature_") || reason.starts_with("client_key_") || reason == "stale" || reason == "unknown_signer")
+        .then(|| reason.to_string())
 }
 
 /// **Give back a grant's use the provider never spent** (identity-and-lifecycle I1, #745's review). The gateway claims

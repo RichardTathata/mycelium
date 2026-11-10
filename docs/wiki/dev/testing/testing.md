@@ -451,12 +451,17 @@ stale), and the client-deadline section below has the third. Before trusting a r
 **And poll it in both directions.** The tool ad and the caller-context marker are the *gateway's* view of the
 provider; a call also needs the *provider's* view of the gateway. Under `tls` the provider verifies the envelope's
 signer against `trusted_keys(gateway)` (`src/agent/gateway_caller.rs` `verifying_keys_for`; the public read is
-`GossipAgent::trusted_identity_keys`), which it learns from its own outbound handshake to the gateway
-(`mycelium-core/src/writer.rs`, `record_anchor`) or from the gateway's `sys/identity-cert/` record
-(`src/agent/revocation.rs`, `refresh`). Neither is a precondition of the gateway seeing the provider's records — those
-can reach the gateway through a third member while the provider's own writer to it is still in reconnect backoff —
-so a call sent in that window is refused `-32022 unknown_signer`. The Eve fleet job failed this way twice in about 40
-runs (2026-11); a provider made to learn keys late reproduced it 3/3. The nodes of `examples/eve_fleet_node.rs` and
+`GossipAgent::trusted_identity_keys`). It learns that key from at least three sources, and this list is the ones
+seen, not a proof there are no others: its own outbound handshake to the gateway (`mycelium-core/src/writer.rs`,
+`record_anchor`); the gateway's sealed `sys/identity-signed/` record (with the legacy `sys/identity/` and
+`sys/identity-proof/` pair), validated by the identity watcher and the start-up prewarm (`src/agent/lifecycle.rs`,
+`start_identity_watcher` / `prewarm_peer_keys` → `identity_resync`) into `peer_keys`; and the gateway's
+`sys/identity-cert/` record, folded into `key_standing` (`src/agent/revocation.rs`, `refresh`) — which, once it
+anchors the gateway, is the only one that counts. None is a precondition of the gateway seeing the provider's records —
+those can reach the gateway through a third member while the provider's own writer to it is still in reconnect
+backoff — so a call sent in that window is refused `-32022 unknown_signer`, before anything runs (at `/mcp` it gives
+back a grant it presented, since #752). The Eve fleet job failed this way once, in run 42752640837 (2026-11-10); a
+provider made to learn keys late reproduced it 3/3. The nodes of `examples/eve_fleet_node.rs` and
 `examples/strands_fleet_node.rs` now print `ready` only once `trusted_identity_keys` is non-empty for every other member.
 
 The dual of that rule: **verify a new concurrency regression test against the broken code

@@ -151,14 +151,16 @@ async fn node() {
     // The two facts above are the gateway's view of the provider; they say nothing of the provider's view of the
     // gateway. The provider verifies a call's caller context against the keys it trusts for the gateway that signed it
     // (`trusted_identity_keys`, the set its envelope check reads), and it learns that key from its own connection to
-    // the gateway or from the gateway's certificate record — either of which can arrive after the gateway has seen
-    // the provider's tool and marker. A call sent in that window is refused `unknown_signer`.
+    // the gateway or from the gateway's identity and certificate records — any of which can arrive after the gateway
+    // has seen the provider's tool and marker. A call sent in that window is refused `unknown_signer`, before anything
+    // runs (at `/mcp` a grant it presented is given back).
+    // One deadline for every member, inside the driver's 120 s bound on the whole fleet.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
     for member in env("FLEET").split(',').filter(|m| !m.is_empty()) {
         let member: NodeId = member.parse().expect("FLEET is host:port,…");
         if member == me {
             continue;
         }
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
         while agent.trusted_identity_keys(&member).is_empty() {
             assert!(tokio::time::Instant::now() < deadline, "{name} never learned a key it trusts for {member}");
             tokio::time::sleep(Duration::from_millis(100)).await;
