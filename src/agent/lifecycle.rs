@@ -104,14 +104,15 @@ impl GossipAgent {
             });
         }
         // With it: refused by name wherever it would be accepted and do nothing, or would not name a skill — not
-        // `"ns/name"` of one key segment each (the rule `with_a2a_default_skill` applies); `/a2a` not served (neither
+        // `"ns/name"` of one key segment each, with no surrounding whitespace (the rule `with_a2a_default_skill` applies,
+        // `a2a_default_skill_problem` — not trimmed here, so a TOML value cannot start and then match nothing); `/a2a` not served (neither
         // the switch nor `with_a2a()`); a different default already set in code (one default per node; the code's would
         // silently win). The same default in both is accepted, and so is a retried start, which set it last time.
         #[cfg(feature = "a2a")]
         if let Some(skill) = &self.config.gateway_a2a_default_skill {
             let problem = match skill.split_once('/') {
                 None => Some("it is not \"ns/name\""),
-                Some((ns, name)) => crate::capability::capability_name_problem(ns, name),
+                Some((ns, name)) => super::a2a_default_skill_problem(ns, name),
             };
             if let Some(problem) = problem {
                 return Err(GossipError::InvalidField {

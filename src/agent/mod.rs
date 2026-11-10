@@ -2265,7 +2265,8 @@ impl GossipAgent {
     /// message's or the request's) still reaches that skill; one that names none reaches this one, and
     /// without it is refused `-32602` naming `metadata.skillId`. The card states which.
     ///
-    /// `namespace`/`name` must each be one key segment (`capability_name_problem`); one that is not,
+    /// `namespace`/`name` must each be one key segment (`capability_name_problem`) with no leading or trailing
+    /// whitespace (`a2a_default_skill_problem`); one that is not,
     /// or a second call, is ignored with a warning and the first setting kept. The default is a name,
     /// not a grant: the call runs the same doors as a named skill — the evaluator, mandates, evidence.
     ///
@@ -2274,7 +2275,7 @@ impl GossipAgent {
     /// the same skill, or `start()` refuses it by name rather than let one silently win.
     #[cfg(feature = "a2a")]
     pub fn with_a2a_default_skill(self, namespace: &str, name: &str) -> Self {
-        if let Some(problem) = crate::capability::capability_name_problem(namespace, name) {
+        if let Some(problem) = a2a_default_skill_problem(namespace, name) {
             tracing::warn!(namespace, name, problem, "with_a2a_default_skill: not a skill name; no default set");
             return self;
         }
@@ -2283,6 +2284,20 @@ impl GossipAgent {
         }
         self
     }
+}
+
+/// Why `namespace`/`name` cannot be `/a2a`'s default skill, or `None` when they can: a capability name
+/// (`capability_name_problem`), with no leading or trailing whitespace in either segment — such a name would be
+/// accepted and no advertised skill would ever match it, so every message without a skill would fail to resolve.
+/// Shared by `with_a2a_default_skill` and the `gateway_a2a_default_skill` check in `preflight()`.
+#[cfg(feature = "a2a")]
+pub(crate) fn a2a_default_skill_problem(namespace: &str, name: &str) -> Option<&'static str> {
+    crate::capability::capability_name_problem(namespace, name).or_else(|| {
+        [namespace, name]
+            .iter()
+            .any(|s| s.trim() != *s)
+            .then_some("ns and name must have no leading or trailing whitespace")
+    })
 }
 
 impl GossipAgent {

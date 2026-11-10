@@ -36,8 +36,11 @@ node has an `http_port` — its default features exclude `a2a`, and it is not pu
   (`GOSSIP_GATEWAY_A2A_DEFAULT_SKILL`): the skill (`"ns/name"`) a message that names no `metadata.skillId` reaches —
   what a stock `a2a-sdk` client sends; without a default such a message is refused `-32602`. A message that names a
   skill still reaches that one, and the card states the default. `start()` refuses it by name where `/a2a` is not
-  served (neither `gateway_a2a` nor `with_a2a`), where `ns` or `name` is not one key segment, beside a different
-  default set in code, and in a build without `a2a`; `mycelium doctor` says the same.
+  served (neither `gateway_a2a` nor `with_a2a`), where `ns` or `name` is not one key segment or is padded with whitespace, beside a different
+  default set in code, and in a build without `a2a`; `mycelium doctor` says the same. The card names the default
+  whether or not a provider serves that skill; a message sent to it while none does is refused as an unserved named
+  skill would be. `mycelium doctor` builds the node from its file alone, so a node that mounts `/a2a` in code
+  (`with_a2a`) and sets only the field is reported "not served" there, though its `start()` accepts it.
 - [`with_a2a_default_skill`](../../src/agent/mod.rs): the same default in code. Beside the field it must name the same
   skill, or the start is refused.
 - [`with_action_evaluator`](../../src/agent/mod.rs), or [`[authority]`](declared-authority.md) for a node built from
@@ -53,7 +56,8 @@ node has an `http_port` — its default features exclude `a2a`, and it is not pu
 The [example index](../../examples/README.md#the-capability-matrix) lists
 [`a2a_skill_authority`](../../examples/README.md#the-capability-matrix): an evaluator deciding which skills an A2A
 caller may run, at the door that matters most because a bearer does not gate it. CI runs it, and CI's `a2a-sdk` job
-drives the published client library against an example node built with `a2a`. [`a2a_langchain`](../../examples/README.md#the-capability-matrix)
+drives the published client library against an example node built with `a2a` that mounts `/a2a` and names its
+default skill from configuration ([`a2a_sdk_node.rs`](../../examples/a2a_sdk_node.rs)). [`a2a_langchain`](../../examples/README.md#the-capability-matrix)
 is a manual run with a real model.
 
 ## What it guarantees, and what it does not

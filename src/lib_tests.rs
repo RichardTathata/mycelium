@@ -15489,8 +15489,14 @@ async fn the_a2a_default_skill_field_is_refused_by_name_where_it_would_do_nothin
         assert!(err.to_string().contains(says), "{says:?} in {err}");
     };
     refused(node(false, "depot/dispatch", None, false), "not served").await;
-    for bad in ["", "depot", "depot/", "/dispatch", "depot/a/b", "locality/self"] {
+    for bad in ["", "depot", "depot/", "/dispatch", "depot/a/b", "locality/self", " depot/dispatch", "depot/dispatch ", "depot /dispatch"] {
         refused(node(true, bad, None, false), "not a skill name").await;
+    }
+    // In code, a name with surrounding whitespace is ignored with a warning, as the other bad names are: it would be
+    // accepted and every message without a skill would then fail to resolve.
+    for (ns, name) in [(" depot", "dispatch"), ("depot", "dispatch "), ("depot\t", "dispatch")] {
+        let agent = GossipAgent::new(NodeId::new("127.0.0.1", 0).unwrap(), GossipConfig::default()).with_a2a_default_skill(ns, name);
+        assert!(agent.task_ctx.a2a_default_skill.get().is_none(), "{ns:?}/{name:?} is not a skill name");
     }
     refused(node(true, "depot/dispatch", Some(("depot", "other")), false), "with_a2a_default_skill").await;
 

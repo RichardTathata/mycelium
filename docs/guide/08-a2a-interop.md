@@ -168,11 +168,12 @@ let agent = GossipAgent::new(node_id, cfg)
 A node built from configuration alone — the published `mycelium` binary — says the same in its file:
 
 ```toml
+http_port = 9001                               # the gateway that serves /a2a (gateway_a2a needs one)
 gateway_a2a = true
 gateway_a2a_default_skill = "depot/dispatch"   # or GOSSIP_GATEWAY_A2A_DEFAULT_SKILL
 ```
 
-`start()` refuses the field by name where `/a2a` is not served, where `ns` or `name` is not one key segment, and
+`start()` refuses the field by name where `/a2a` is not served, where `ns` or `name` is not one key segment (or is padded with whitespace), and
 beside a different default set in code ([configuration](../reference/configuration.md#gateway_a2a_default_skill)).
 
 A message can still name a skill, in `metadata.skillId` (the message's or the request's); without a default,

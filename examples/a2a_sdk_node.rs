@@ -1,8 +1,10 @@
 //! A loopback node an unmodified A2A client can use — the node half of the `a2a-sdk` CI test
 //! (post-360 plan row N; the test is `tests/a2a-sdk/`, run by the `a2a-sdk` CI job).
 //!
-//! `/a2a` is mounted (`with_a2a`), one skill is served (`depot/dispatch`, answering
-//! `dispatched: <text>`) and declared the default (`with_a2a_default_skill`), because a standard
+//! `/a2a` is mounted and its default skill named **from configuration** (`gateway_a2a`,
+//! `gateway_a2a_default_skill`), as on the published `mycelium` binary — the code path
+//! (`with_a2a`, `with_a2a_default_skill`) is covered by the library's tests. One skill is served
+//! (`depot/dispatch`, answering `dispatched: <text>`) and is the default, because a standard
 //! client — `a2a-sdk`, Strands Agents — sends a message and never a skill. The gossip port is `PORT`
 //! (default 7311) and the gateway `PORT + 1`. It prints `ready http=<port>` once a send can be
 //! dispatched — the skill advertised and the node's caller-context marker written, without which the
@@ -27,13 +29,11 @@ async fn main() {
     let mut cfg = GossipConfig::default();
     cfg.bind_port = gossip;
     cfg.http_port = Some(gossip + 1);
+    cfg.gateway_a2a = true;
+    cfg.gateway_a2a_default_skill = Some("depot/dispatch".into());
     let token = std::env::var("A2A_TOKEN").unwrap_or_else(|_| "a2a-sdk-test".into());
     cfg.gateway_scoped_tokens = vec![mycelium::GatewayToken { token, scopes: vec!["kv:read".into()] }];
-    let agent = Arc::new(
-        GossipAgent::new(NodeId::new("127.0.0.1", gossip).expect("node id"), cfg)
-            .with_a2a()
-            .with_a2a_default_skill("depot", "dispatch"),
-    );
+    let agent = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", gossip).expect("node id"), cfg));
     agent.start().await.expect("start");
 
     let mut rx = agent.service().rpc_rx("skill.invoke");

@@ -2939,13 +2939,16 @@ skill (the evaluator, mandates, evidence).
 - **Refused by name at start** (`InvalidField { field: "gateway_a2a_default_skill" }`, from `preflight`, so `mycelium
   doctor` reports it too): where `/a2a` is not served — neither `gateway_a2a = true` nor `with_a2a()` — since it would
   be accepted and reach nothing; a value whose `ns` or `name` is not one key segment (empty, holding a `/`, or the
-  reserved `locality/self` — `capability_name_problem`, the rule `with_a2a_default_skill` applies); a different default
+  reserved `locality/self` — `capability_name_problem`) or has leading or trailing whitespace (a file value is not
+  trimmed: `"depot/dispatch "` would start and then match no skill) — the rule `with_a2a_default_skill` applies; a different default
   already set in code by `with_a2a_default_skill` (the same one is accepted — one default per node, and the code's
   would otherwise silently win); and any value in a build without `a2a`. The published `mycelium-stem` is built without
   `a2a` by decision, so it refuses the key: keep `GOSSIP_GATEWAY_A2A_DEFAULT_SKILL`, like `GOSSIP_GATEWAY_A2A`, out of
   an environment the stem shares.
 - **The environment value** is trimmed, and a blank one is refused rather than read as unset.
-- **`with_a2a_default_skill` is unchanged:** in code, a bad name or a second call is still ignored with a warning.
+- **`with_a2a_default_skill` refuses one more name:** a `namespace` or `name` with leading or trailing whitespace is
+  now ignored with a warning, as its other bad names are (before, it was set and then matched no skill). A second call
+  is still ignored with a warning.
 - **An older binary ignores the key silently**: after rolling it out, check that
   `curl http://<gateway>/.well-known/agent-card.json` describes the default (`… goes to ns/name`).
 - **Compiler:** `GossipConfig` gained a public field, so an exhaustive struct literal breaks; `..Default::default()`
