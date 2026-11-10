@@ -112,8 +112,9 @@ This feature is turned on in code.
     from the decider's `sys/client-cert/` records. **`verify_signature` checks the signature only**, so a re-verifier
     must also check that the signature is this record's:
     - pass `verify_signature` the record's **own** decision and terms — a refusal record's `refuse` and `reason`, a
-      revocation record's `revoke` and `reason`, the evidence record's `decision`, `ttl_secs` and `reason` — never the
-      ones inside `signed_decision` alone;
+      revocation record's `revoke` and `reason`; for an evidence record, the decision its own `operation` names
+      (`grant.issue`, `grant.refuse`, `grant.revoke`) — the record's fact, not the body's — with the `ttl_secs` and
+      `reason` kept beside the body in `signed_decision`;
     - compare `signed.decider` with the record's actor: a refusal's or revocation's `issuer`, the evidence record's
       `subject`;
     - compare the signed `request`, `agent` and `node` with the record: the request and holder its path names
