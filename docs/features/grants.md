@@ -109,7 +109,10 @@ This feature is turned on in code.
     body (the decider, node, holder, request, clock, key and signature), the decision's terms and `relayed_by`; a
     refusal's or revocation's record holds the body as `signed` and `relayed_by`. `SignedDecision::verify_signature`
     re-checks the signature from those fields alone; whether its key was the decider's current client key at `t` is read
-    from the decider's `sys/client-cert/` records. The evidence journal is node-local and append-only; the KV records
+    from the decider's `sys/client-cert/` records. **`verify_signature` checks the signature only**, so a re-verifier
+    must also compare the signed `request`, `agent` and `node` with the record it is reading: the request and holder
+    its path names (`grant/{holder}/{request}/…`, or the evidence record's request) and the node that wrote it — a
+    validly signed decision for another request or another node is not this record's. The evidence journal is node-local and append-only; the KV records
     are writable by any member, so the journal is the record to trust.
   - An unsigned decision under `grant:issue` is still the bearer's own this release. It is counted once **answered**
     (issued, refused or revoked; never an attempt refused first) on `/stats` (`grant_decisions_unsigned`) and as

@@ -2968,6 +2968,8 @@ the signer as the decision's actor. A client carrying a signed decision needs on
     `signed` (the body) and `relayed_by`.
   - One decision per request at a time on a node: a concurrent copy is answered `409 decision_in_flight`, then
     `already_answered` or `already_revoked`. Before this, concurrent copies of one decision were each answered.
+    An issue that would write a checkpoint below one already written is refused `409 already_revoked`, and its
+    `Decided` record is followed by a `Failed` execution.
   - A signed decision is fresh for `CALLER_CONTEXT_MAX_AGE_MS` (300 s) plus `max_clock_drift_ms` into the past, and
     `max_clock_drift_ms` into the future: 600 s and 300 s at the default drift.
   - New refusals: `403 not_the_decider`, `403 decision_retargeted`, `409 not_addressed_here`, `403 stale`,

@@ -1069,7 +1069,9 @@ fn a_node_without_an_identity_cannot_verify_a_signed_decision() {
 /// concurrent copy of an issue could write the first checkpoint (sequence 1) after a revocation wrote the second, and
 /// the KV keeps the later write. With the claim no route reaches that order, so it is posed directly: a revocation's
 /// checkpoint placed beside a pending request, then the issue — refused `already_revoked`, the checkpoint unchanged.
-/// Seen failing first with the guard removed (the issue answered and the checkpoint lowered to 1).
+/// Seen failing first with the guard removed (the issue answered and the checkpoint lowered to 1). The refused issue's
+/// `Decided` record is followed by a `Failed` execution, as the sibling checkpoint-write refusal's is (#754's confirm
+/// round, residual b) — seen failing first with the guard returning without one.
 #[tokio::test]
 async fn an_issue_never_lowers_a_later_checkpoint() {
     let (dir, http_port, a, _ran, treasurer, requests) = decision_fleet("monotonic", 2).await;
@@ -1086,7 +1088,12 @@ async fn an_issue_never_lowers_a_later_checkpoint() {
     let answer = post_decision(http_port, "relay-secret", &requests[1], issue(&requests[1])).await;
     let held: serde_json::Value = mycelium_core::ops::kv_get(&a.task_ctx, &beside).and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
     a.shutdown().await;
+    let journal = journal_of(&dir);
     let _ = std::fs::remove_dir_all(&dir);
+    use crate::agent::action_evaluator::{Execution, RecordKind};
+    let issues = |kind: RecordKind| journal.iter().filter(|r| r.kind == kind && r.operation == "grant.issue").map(|r| r.execution).collect::<Vec<_>>();
+    assert_eq!(issues(RecordKind::Decided).len(), 2, "two issues decided");
+    assert_eq!(issues(RecordKind::Execution), vec![Execution::Completed, Execution::Failed], "RECORDED: each decided issue's execution: {:?}", issues(RecordKind::Execution));
     assert_eq!(revoked.0, 200, "{}", revoked.1);
     assert_eq!(code(&answer), (409, Some("already_revoked".into())), "MONOTONIC: {}", answer.1);
     assert_eq!(held["checkpoint"]["seq"].as_u64(), Some(2), "the later checkpoint stands: {held}");

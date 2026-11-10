@@ -745,7 +745,10 @@ class MyceliumAgent:
         as its actor, so this client's own bearer needs only ``grant:relay``. It is addressed to ``node`` — the node
         whose gateway this client talks to, read from ``GET /health`` when not given; ``agent`` is then the holder's
         principal, as the pending list's ``agent`` names it. A signed decision is refused 403 ``not_the_decider``
-        (another key), ``decision_retargeted``, ``decider_lacks_scope`` or ``stale``, and 409 ``not_addressed_here``.
+        (another key), ``decision_retargeted``, ``decider_lacks_scope`` or ``stale``, and 409 ``not_addressed_here``
+        or ``gateway_identity_issuer_unset`` (the gateway has no ``gateway_identity_issuer``, so no decider is a
+        principal there). Signed or not, a decision on a request another decision is still answering at that node is
+        refused 409 ``decision_in_flight``: retry, and it answers ``already_answered`` once that one is written.
 
         ``decision`` is ``"issue"`` or ``"refuse"``; ``ttl_secs`` bounds an issued grant (default 300, at most
         3 600); ``reason`` is shown to the agent on a refusal. Issuing is itself an action the node's evaluator
@@ -798,7 +801,9 @@ class MyceliumAgent:
         revoke an issued grant, at the node that issued it (409 ``not_the_issuer`` elsewhere; 404 ``not_issued``; 409
         ``already_revoked``). Revoking is an action the node's evaluator decides (``grant.revoke``), so a supervisor the
         policy does not permit is answered 403. The grant is refused at every door afterwards, and work running under it
-        is stopped. ``signer`` and ``node`` sign the revocation as :meth:`grant_decide` signs a decision. Returns the
+        is stopped. ``signer`` and ``node`` sign the revocation as :meth:`grant_decide` signs a decision, and are
+        refused as it lists. A revocation of a grant another decision is still answering at that node is refused 409
+        ``decision_in_flight``: retry, and it answers ``already_revoked`` once that one is written. Returns the
         route's answer: the revocation record's ``key``, ``operation_id`` and ``local_durability``.
         """
         body: Dict[str, Any] = {}

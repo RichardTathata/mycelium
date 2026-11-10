@@ -488,7 +488,10 @@ export class MyceliumAgent {
    * the node — the decision is signed (identity-and-lifecycle I3): the node records the signer as its actor, so this
    * client's own bearer needs only `grant:relay`. It is addressed to `node`, read from `GET /health` when not given;
    * `agent` is then the holder's principal, as the pending list names it. A signed decision is refused 403
-   * `not_the_decider`, `decision_retargeted`, `decider_lacks_scope` or `stale`, and 409 `not_addressed_here`.
+   * `not_the_decider`, `decision_retargeted`, `decider_lacks_scope` or `stale`, and 409 `not_addressed_here` or
+   * `gateway_identity_issuer_unset` (the gateway has no `gateway_identity_issuer`, so no decider is a principal
+   * there). Signed or not, a decision on a request another decision is still answering at that node is refused 409
+   * `decision_in_flight`: retry, and it answers `already_answered` once that one is written.
    * `decision` is `"issue"` or
    * `"refuse"`; `ttlSecs` bounds an issued grant (default 300, at most 3 600); `reason` is shown to the agent on a
    * refusal. Issuing is itself an action the node's evaluator decides (D22), so a supervisor the policy does not
@@ -534,7 +537,9 @@ export class MyceliumAgent {
 
   /**
    * `POST /gateway/grants/{agent}/{request}/revoke` (`grant:issue`, or `grant:relay` with `signer`, signed as
-   * {@link grantDecide} signs): revoke an issued grant, at the node that issued
+   * {@link grantDecide} signs, and refused as it lists; 409 `decision_in_flight` while another decision on the grant
+   * is being answered at that node — retry, and it answers `already_revoked` once that one is written): revoke an
+   * issued grant, at the node that issued
    * it (409 `not_the_issuer` elsewhere; 404 `not_issued`; 409 `already_revoked`). Revoking is an action the node's
    * evaluator decides (`grant.revoke`). The grant is refused at every door afterwards, and work running under it is
    * stopped. Returns the route's answer: the revocation record's key, operation id and local durability.

@@ -428,6 +428,9 @@ pub(crate) async fn decide_grant(ctx: &Arc<TaskCtx>, caller: Option<&ResolvedPri
             // Under the claim, and with revocation only at this node after the grant is read, an issue reaching here
             // finds none or its own earlier attempt's; this refuses the impossible case rather than lowering it.
             if checkpoint_seq_held(ctx, &key).is_some_and(|held| held > signed_checkpoint.checkpoint.seq) {
+                // The decision is on the record already; its execution is too, as the checkpoint write's refusal
+                // below records one (#754's confirm round, residual b).
+                ae_record_execution(ctx, &preflight, super::action_evaluator::Execution::Failed).await;
                 return Err(GrantRefusal::door(StatusCode::CONFLICT, "already_revoked", format!("{key} carries a later checkpoint than an issue writes")));
             }
             // The checkpoint is on disk before the grant is: a grant whose first checkpoint a restart cannot find is
