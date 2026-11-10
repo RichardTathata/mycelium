@@ -196,6 +196,14 @@
       },
       "canonical": "{\"f\":1.5,\"max\":9007199254740991,\"n\":-12}",
       "digest_hex": "06f2342680f98d381c4287133bf14102af8476b818a8b4f707ba8c13c1852bdc"
+    },
+    {
+      "arguments": {
+        "tie": 1000000000000000.2,
+        "near": 1658206780088562.2
+      },
+      "canonical": "{\"near\":1658206780088562.2,\"tie\":1000000000000000.2}",
+      "digest_hex": "610ddfe321f7f0ccc4f638f59ae8a15f1d15c52ac9335f0bdb61b1613fe99157"
     }
   ],
   "_doc_unsafe": "unsafe_cases: arguments a mandate cannot bind — a number of magnitude 2^53 or more, integral or in exponent form — refused where the digest is taken, in all three languages; raw JSON, so each language parses it itself.",

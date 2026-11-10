@@ -107,6 +107,13 @@ pub enum DigestForm {
     Legacy,
 }
 
+/// Whether a recorded `arguments_digest` (hex) is one of these arguments' digest forms — a standing grant request
+/// asked before identity-and-lifecycle I3 carries the legacy form, and is the same request for the window (#750's
+/// review, item 4). Read by the request door's reuse and the agent's wait.
+pub(crate) fn recorded_digest_matches(recorded: &serde_json::Value, arguments: &serde_json::Value) -> bool {
+    digest_forms(arguments).iter().any(|(_, d)| recorded == hex32(d).as_str())
+}
+
 /// The digests a verifier tries, JCS first and the legacy form only where it differs.
 fn digest_forms(arguments: &serde_json::Value) -> Vec<(DigestForm, [u8; 32])> {
     let jcs = arguments_digest(arguments);
@@ -153,8 +160,10 @@ pub struct ExecutionAuthority {
     /// and door — the single-use claim's atomic half (the marker under the request in the KV is its durable half).
     /// Leaf, µs.
     used_grants: Mutex<std::collections::HashMap<(String, String, String, String), u64>>,
-    /// Mandates established on the pre-I3 digest form (identity-and-lifecycle I3, §9 O1).
+    /// Mandates established on the pre-I3 digest form (identity-and-lifecycle I3, §9 O1), at this node's gateway doors
+    /// and at it as a provider — two counters, so a call a node assesses at both is not one number counted twice.
     legacy_digest_matches: std::sync::atomic::AtomicU64,
+    legacy_digest_matches_at_provider: std::sync::atomic::AtomicU64,
 }
 
 /// The words `assess` gives a revoked grant's standing — read by the agent's wait, which treats this one unknown
@@ -351,6 +360,7 @@ impl ExecutionAuthority {
             stops: Mutex::new(std::collections::VecDeque::new()),
             used_grants: Mutex::new(std::collections::HashMap::new()),
             legacy_digest_matches: std::sync::atomic::AtomicU64::new(0),
+            legacy_digest_matches_at_provider: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -558,7 +568,7 @@ impl ExecutionAuthority {
 
     /// **Assess one call from its arguments** (identity-and-lifecycle I3, §9 O1): the binding and the possession proof
     /// are tried against the RFC 8785 digest ([`arguments_digest`]) and, for one release, the pre-I3 `serde_json` digest
-    /// ([`legacy_arguments_digest`]) — the form that matched is returned, and a legacy match counted
+    /// ([`legacy_arguments_digest`]) — the form that matched is returned, and a legacy match counted as a gateway door's
     /// ([`legacy_digest_matches`](Self::legacy_digest_matches)). Arguments holding an integer outside ±(2^53 − 1) are
     /// refused by name ([`MandateRefusal::UnsafeInteger`]) when a mandate is presented, since no digest binds them
     /// exactly.
@@ -573,10 +583,31 @@ impl ExecutionAuthority {
         now_ms: u64,
         members: &impl MemberKeySource,
     ) -> (Assessment, Option<DigestForm>) {
+        self.assess_arguments_at(false, caller, operation, resource, arguments, presented, now_ms, members)
+    }
+
+    /// [`assess_arguments`](Self::assess_arguments) at an enforcement point: `at_provider` counts a legacy match as this
+    /// node's as a provider ([`legacy_digest_matches_at_provider`](Self::legacy_digest_matches_at_provider)).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn assess_arguments_at(
+        &self,
+        at_provider: bool,
+        caller: &str,
+        operation: &str,
+        resource: &str,
+        arguments: &serde_json::Value,
+        presented: Option<&PresentedMandate>,
+        now_ms: u64,
+        members: &impl MemberKeySource,
+    ) -> (Assessment, Option<DigestForm>) {
         let unsafe_integer = super::client_sig::holds_unsafe_integer(arguments);
         let (assessment, form) = self.assess_digests(caller, operation, resource, &digest_forms(arguments), unsafe_integer, presented, now_ms, members);
         if form == Some(DigestForm::Legacy) {
-            self.legacy_digest_matches.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let counter = if at_provider { &self.legacy_digest_matches_at_provider } else { &self.legacy_digest_matches };
+            counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            #[cfg(feature = "metrics")]
+            metrics::counter!("mycelium_legacy_digest_matches_total", "point" => if at_provider { "provider" } else { "gateway" })
+                .increment(1);
             let mut assessment = assessment;
             assessment.binding = assessment.binding.map(MandateBinding::with_legacy_digest);
             return (assessment, form);
@@ -601,10 +632,19 @@ impl ExecutionAuthority {
         self.assess_digests(caller, operation, resource, &digest_forms(arguments), unsafe_integer, presented, now_ms, members).0
     }
 
-    /// Mandates established on the pre-I3 digest form ([`legacy_arguments_digest`]) since this authority was built —
-    /// what an operator watches fall to zero before the release that refuses that form.
+    /// Mandates established on the pre-I3 digest form ([`legacy_arguments_digest`]) at this node's gateway doors since
+    /// this authority was built — what an operator watches fall to zero before the release that refuses that form.
+    /// In memory: it starts at zero when the node restarts. The durable record of each match is its evidence record's
+    /// `checked` field ([`LEGACY_DIGEST_CHECKED`](super::action_evaluator::LEGACY_DIGEST_CHECKED)). `GET /stats`
+    /// `legacy_digest_matches`; `mycelium_legacy_digest_matches_total{point="gateway"}`.
     pub fn legacy_digest_matches(&self) -> u64 {
         self.legacy_digest_matches.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// [`legacy_digest_matches`](Self::legacy_digest_matches) at this node as a provider (`with_provider_enforcement`):
+    /// `GET /stats` `provider_legacy_digest_matches`; `mycelium_legacy_digest_matches_total{point="provider"}`.
+    pub fn legacy_digest_matches_at_provider(&self) -> u64 {
+        self.legacy_digest_matches_at_provider.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -651,29 +691,34 @@ impl ExecutionAuthority {
         }
         // Adopter-surface X3: a grant's arguments binding is checked first, so a grant presented for other arguments
         // is refused **by name** rather than as a possession mismatch (the proof covers this call's digest, which the
-        // bound one is not). Refusing on an as-yet-unverified binding is fail-closed: nothing is granted by it. Each
-        // digest form is a candidate only where a grant's binding names it (I3's window: JCS, then the legacy form).
+        // bound one is not). Refusing on an as-yet-unverified binding is fail-closed: nothing is granted by it. In I3's
+        // window the binding may name either form, and the proof may be over either, independently: each digest is
+        // computed here from this call's own arguments, so either pairing binds exactly these arguments — and an
+        // un-upgraded binder (proving over the legacy form) can present a grant an upgraded door asked for (bound to
+        // RFC 8785), and an upgraded one a grant from a request asked for before the upgrade (#750's review, item 4).
         let grant_binding = m.grant_binding();
-        let candidates: Vec<(DigestForm, [u8; 32])> = digests
-            .iter()
-            .filter(|(_, d)| grant_binding.as_ref().is_none_or(|b| b.arguments_digest == hex32(d)))
-            .copied()
-            .collect();
-        if candidates.is_empty() {
-            let (bound, presented) = (grant_binding.map(|b| b.arguments_digest).unwrap_or_default(), hex32(&digests[0].1));
-            return (refused(MandateRefusal::BoundToOtherArguments { bound, presented }), None);
-        }
+        let bound_form = match &grant_binding {
+            Some(b) => match digests.iter().find(|(_, d)| b.arguments_digest == hex32(d)) {
+                Some((form, _)) => Some(*form),
+                None => {
+                    let (bound, presented) = (b.arguments_digest.clone(), hex32(&digests[0].1));
+                    return (refused(MandateRefusal::BoundToOtherArguments { bound, presented }), None);
+                }
+            },
+            None => None,
+        };
 
         let external = self.external.read().clone();
         let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let st = &mut *st;
-        // The possession proof over each candidate digest in turn: the first that verifies is the form matched.
+        // The possession proof over each digest form in turn: the first that verifies. The form matched is the legacy
+        // one if either the binding or the proof used it.
         let mut matched: Option<DigestForm> = None;
         let mut first: Option<GrantVerdict> = None;
-        for (form, digest) in &candidates {
+        for (form, digest) in digests {
             match st.verifier.check(&p.grant, &possession_request(operation, resource, digest), Some(&proof), now_ms, members, &external) {
                 GrantVerdict::Valid => {
-                    matched = Some(*form);
+                    matched = Some(if bound_form == Some(DigestForm::Legacy) { DigestForm::Legacy } else { *form });
                     break;
                 }
                 other => {
@@ -967,11 +1012,6 @@ pub(crate) mod tests {
         );
     }
 
-    /// X3: a grant is one appointment for one call. Its binding is read from its signed operations: the matching
-    /// digest is established (with the grant's digest and bound revision on the finding), another digest is refused
-    /// by name, a revoked term is not established, and the window is read on the clock the caller passes — a grant
-    /// past its `valid_until_ms` is out of window however still the HLC stayed. The resource gate's epoch rule does
-    /// not apply: two grants at epoch 1 are both established.
     /// **The arguments' digest is RFC 8785, and for one release the pre-I3 form is accepted beside it**
     /// (identity-and-lifecycle I3, §9 O1). Arguments whose keys the two forms order differently:
     /// a grant bound to the RFC 8785 digest, proved over it, is established on the new form; a grant issued before
@@ -1027,6 +1067,10 @@ pub(crate) mod tests {
         assert_eq!((state(&old), old_form), (Some(MandateState::Established), Some(DigestForm::Legacy)), "WINDOW: the pre-I3 grant: {old:?}");
         assert!(old.binding.as_ref().unwrap().legacy_digest, "the binding says it matched the legacy form");
         assert_eq!(a.legacy_digest_matches(), 1, "counted");
+        // The same call assessed again at this node as a provider is counted there, not at the doors a second time.
+        let (at_provider, form) = a.assess_arguments_at(true, CALLER, OP, RES, &args, Some(&grant("old", &legacy)), 6_000, &members);
+        assert_eq!((state(&at_provider), form), (Some(MandateState::Established), Some(DigestForm::Legacy)));
+        assert_eq!((a.legacy_digest_matches(), a.legacy_digest_matches_at_provider()), (1, 1), "COUNT: one per point");
         let other = serde_json::json!({"tolerance": 0.5});
         let (refused, _) = a.assess_arguments(CALLER, OP, RES, &other, Some(&grant("other", &jcs)), 6_000, &members);
         assert!(matches!(state(&refused), Some(MandateState::Refused(MandateRefusal::BoundToOtherArguments { .. }))), "{refused:?}");
@@ -1035,6 +1079,11 @@ pub(crate) mod tests {
         assert_eq!(state(&unsafe_int), Some(MandateState::Refused(MandateRefusal::UnsafeInteger)), "UNSAFE: {unsafe_int:?}");
     }
 
+    /// X3: a grant is one appointment for one call. Its binding is read from its signed operations: the matching
+    /// digest is established (with the grant's digest and bound revision on the finding), another digest is refused
+    /// by name, a revoked term is not established, and the window is read on the clock the caller passes — a grant
+    /// past its `valid_until_ms` is out of window however still the HLC stayed. The resource gate's epoch rule does
+    /// not apply: two grants at epoch 1 are both established.
     #[test]
     fn a_grant_is_bound_to_its_arguments_and_expires_on_the_wall_clock() {
         use crate::mandate::grant::GRANT_SCOPE_PREFIX;

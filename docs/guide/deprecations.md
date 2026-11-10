@@ -2860,25 +2860,58 @@ honest Python or TypeScript holder could be refused.
     same digest a client signature binds.
   - The preflight's evidence records it (`arguments_digest`).
   - A grant requested after the upgrade binds it.
-- **The window, one release:** a grant issued before the upgrade is still honoured, and so is a proof made over the
-  older form (`serde_json`'s encoding, now `legacy_arguments_digest`).
-  - Each such match is counted by `ExecutionAuthority::legacy_digest_matches`, and the evidence record's `checked`
-    names it.
-  - Watch the counter fall to zero. The release after refuses the older form.
+  - Rust now writes a number's digits as ECMAScript does, a tie going to the even digit: `1000000000000000.25` is
+    `…000.2`, where Rust wrote `…000.3` and Python and TypeScript `…000.2`. This also changes the canonical form a
+    client signature (`cs`) covers, for those numbers only: a Rust signer's `cs` over such a number verified at a
+    Python or TypeScript peer only after this change, and an un-upgraded Rust verifier refuses an upgraded signer's.
+- **The window, one release:** the older form (`serde_json`'s encoding, now `legacy_arguments_digest`) is still
+  honoured, so a grant issued, a proof made or a request asked before the upgrade keeps working.
+  - A grant may be bound to either form and its proof made over either, in any pairing. Both digests are computed
+    from the call's own arguments, so either binds exactly them.
+  - A standing request recorded with the older form is reused by the request door and by the agent's wait, so asking
+    again does not write a second request.
+  - Each match is counted at the point that assessed it. `GET /stats` has `legacy_digest_matches` for this gateway's
+    doors and `provider_legacy_digest_matches` for this node as a provider. With `metrics` there is also
+    `mycelium_legacy_digest_matches_total{point="gateway"|"provider"}`. A call assessed at both points on one node
+    counts once at each.
+  - The counters are in memory and start from zero when a node restarts. The durable record is the evidence record's
+    `checked`, which names every match (`action_evaluator::LEGACY_DIGEST_CHECKED`). Read the journal to find a match
+    from before a restart.
+  - Watch the counters fall to zero. The release after refuses the older form (the identity plan's §9 O5).
   - A grant is short-lived (at most an hour), so re-issue any older grant that still stands.
-- **Large numbers are refused where a mandate binds them.** Any number of magnitude 2^53 or more, integer or not (`1e21`
-  included), is refused:
+- **Upgrade order: verifiers before binders.**
+  - Verifiers first: every gateway and every provider, meaning any node that assesses a presented mandate.
+  - Binders after: the agents and SDK clients that ask for grants and make possession proofs.
+  - Why this order: an un-upgraded verifier computes only the older digest. Where the two forms differ (non-ASCII
+    keys outside the Basic Multilingual Plane, some floats), it refuses an upgraded binder's grant or proof as
+    `BoundToOtherArguments` or as a possession mismatch. Where the forms agree, which is most arguments, nothing
+    changes in either order.
+  - An upgraded verifier accepts both forms, so with the verifiers upgraded first, no honest call is refused.
+- **Large numbers are refused where a mandate binds them, deliberately** (the maintainer's decision, 2026-11-09). This
+  departs from plain RFC 8785, which serialises any finite double (`1e21` as `1e+21`): the digest refuses such a number
+  rather than bind a value that a reader may hold as a different integer. Any number of magnitude 2^53 or more, integer
+  or not (`1e21` included), is refused:
   - by the request door, `400 unsafe_integer`;
   - by the agent's grant wait, `GrantRefused`;
   - at the gateway and the provider, `MandateRefusal::UnsafeInteger`, a new variant (the enum is `#[non_exhaustive]`).
 
-  The SDKs' digest functions raise. Send such a number as a string. A call that presents no mandate is not refused.
+  The SDKs' digest functions raise. Send such a number as a string. Each door names the refusal its own way:
+  `unsafe_integer` is the request door's code (`POST /gateway/grants/request`) and appears nowhere else.
+- **Evidence for a call without a mandate:** such a call is not refused for a large number. Its evidence record's
+  `arguments_digest` is now the RFC 8785 digest, with two consequences:
+  - For a number of magnitude 2^53 or more, it identifies the arguments only up to the nearest double.
+  - Where the two forms differ, it is not the digest a pre-upgrade record holds for the same arguments, so an
+    exporter joining records across the upgrade by digest does not match them.
+  
+  The older form is not recorded beside it.
 - **Code:**
-  - `ExecutionAuthority::assess_arguments`, `legacy_arguments_digest`, `DigestForm` and
-    `MandateBinding::legacy_digest` are new. `MandateBinding` is `#[non_exhaustive]`.
+  - `ExecutionAuthority::assess_arguments`, `legacy_digest_matches`, `legacy_digest_matches_at_provider`,
+    `legacy_arguments_digest`, `DigestForm` and `MandateBinding::legacy_digest` are new. `MandateBinding` is `#[non_exhaustive]`.
   - `assess` takes one digest and is unchanged.
   - `MandateRefusal` gained `UnsafeInteger`.
   - The possession vector's `mandate_digest_cases` are now `legacy_digest_cases`, beside new `digest_cases`,
-    `unsafe_cases` and a `float_grant`.
+    `unsafe_cases` and a `float_grant`. Both vectors gained a tie case, and `tests/fixtures/cs/es_numbers.json` holds
+    606 doubles as ECMAScript writes them.
+  - `ryu` (already in the tree through `serde_json`) is now a direct dependency.
 
 Wire **v12** unchanged.

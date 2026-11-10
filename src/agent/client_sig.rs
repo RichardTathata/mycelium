@@ -195,14 +195,22 @@ fn es_number(x: f64) -> String {
         return "0".into();
     }
     let sign = if x < 0.0 { "-" } else { "" };
-    // `{:e}` writes the shortest digits that round-trip: `d[.ddd]e[-]x`.
-    let sci = format!("{:e}", x.abs());
-    let (mantissa, exp) = sci.split_once('e').unwrap_or((&sci, "0"));
-    let digits: String = mantissa.chars().filter(|c| c.is_ascii_digit()).collect();
-    let digits = digits.trim_end_matches('0');
+    // The digits: the shortest that round-trip, and of those the closest, a tie going to the even digit — what
+    // ECMAScript's `Number::toString` chooses and Python's `repr` with it. `ryu` chooses them so (it is what `ryu-js`
+    // and `serde_jcs` build on); `{:e}` rounds a tie up, so `1000000000000000.25` came out `…000.3` where JavaScript
+    // and Python write `…000.2` (#750's review: 1 220 of 299 896 sampled doubles differed). `ryu` writes `d.ddd`,
+    // `ddd.d` or `de±x`; only its digits and their decimal point are read.
+    let mut buf = ryu::Buffer::new();
+    let text = buf.format_finite(x.abs());
+    let (mantissa, exp) = text.split_once('e').unwrap_or((text, "0"));
+    let (int_part, frac_part) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+    let all = format!("{int_part}{frac_part}");
+    let leading = all.len() - all.trim_start_matches('0').len();
+    let digits = all.trim_start_matches('0').trim_end_matches('0');
     let digits = if digits.is_empty() { "0" } else { digits };
     let k = digits.len() as i64;
-    let n = exp.parse::<i64>().unwrap_or(0) + 1;
+    // `n` is where the decimal point falls after the digits' first: the value is 0.d₁d₂… × 10ⁿ.
+    let n = int_part.len() as i64 - leading as i64 + exp.parse::<i64>().unwrap_or(0);
     let body = if k <= n && n <= 21 {
         format!("{digits}{}", "0".repeat((n - k) as usize))
     } else if 0 < n && n <= 21 {

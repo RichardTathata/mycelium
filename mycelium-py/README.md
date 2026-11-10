@@ -244,9 +244,10 @@ mcp.call_tool("weather.forecast", {"city": "Lyon"}, grant=answer["grant"])   # p
 
 `wait_for_grant` raises `GrantNotIssuedError` naming the state a request ended in (`refused`, `revoked`,
 `expired`, or `pending` on timeout), and ends within its timeout. A grant binds the arguments' RFC 8785 digest — the
-same in Python, TypeScript and the gateway since identity-and-lifecycle I3 — so a float in exponent form binds. An
-integer outside ±(2**53 - 1) cannot be bound exactly: `arguments_digest` raises `ValueError` and the gateway refuses
-it (`unsafe_integer`); send it as a string.
+same in Python, TypeScript and the gateway since identity-and-lifecycle I3 — so a float in exponent form binds. A
+number of magnitude 2**53 or more cannot be bound exactly: `arguments_digest` raises `ValueError`, the request door
+answers `400 unsafe_integer`, and a call presenting a grant over it is refused at the gateway and the provider
+(`MandateRefusal::UnsafeInteger`); send it as a string.
 
 **Refusals, and which to retry.** A refused `tools/call` raises `ActionRefusedError` for the evaluator's three answers
 (`.reason`: `action_denied` is final; `authority_not_established` means nobody decided — a grant not yet established,

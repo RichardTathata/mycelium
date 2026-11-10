@@ -586,7 +586,12 @@ impl AgentStateMachine {
             let rest = key.strip_prefix(prefix.as_str())?;
             if rest.contains('/') || consumed.contains(rest) { return None; }
             let v: serde_json::Value = serde_json::from_slice(bytes).ok()?;
-            (v["tool"] == tool && v["arguments_digest"] == digest_hex.as_str() && v["expires_at_ms"].as_u64()? > now_ms).then(|| rest.to_string())
+            // A request asked before identity-and-lifecycle I3 recorded the legacy digest form: the same request for
+            // the window (`deprecations.md` §93).
+            (v["tool"] == tool
+                && super::gateway_authority::recorded_digest_matches(&v["arguments_digest"], arguments)
+                && v["expires_at_ms"].as_u64()? > now_ms)
+                .then(|| rest.to_string())
         });
         let (request, expires_at_ms) = match existing {
             Some(r) => {
@@ -647,7 +652,9 @@ impl AgentStateMachine {
                 // The grant's checkpoint, written beside it by the issuing node — this one or another — so the
                 // standing is known here before the grant is assessed (adopter-surface X3, second PR).
                 super::gateway_authority::feed_grant_checkpoint(&self.ctx, authority, &presented.grant.mandate, now);
-                let assessment = authority.assess(&agent, "tools/call", &resource, &digest, Some(&presented), now, &super::gateway_member_keys(&self.ctx));
+                // From the arguments, so a grant from a request asked before identity-and-lifecycle I3 (bound to the
+                // legacy digest) is established for the window; not counted — the door the call goes through counts it.
+                let assessment = authority.reassess_arguments(&agent, "tools/call", &resource, arguments, Some(&presented), now, &super::gateway_member_keys(&self.ctx));
                 match assessment.binding.map(|b| b.state) {
                     Some(super::action_evaluator::MandateState::Established) => {
                         #[cfg(feature = "metrics")]

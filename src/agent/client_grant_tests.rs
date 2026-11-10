@@ -665,3 +665,48 @@ async fn the_request_door_refuses_an_unsafe_integer_and_accepts_an_exponent_form
     assert_eq!(float_status, 200, "an exponent-form float is asked for: {float}");
     assert_eq!(float["arguments_digest"], crate::agent::action_evaluator::hex32(&crate::arguments_digest(&serde_json::json!({"tolerance": 0.00001}))));
 }
+
+/// **A request asked before identity-and-lifecycle I3 is the same request for the window, and its grant runs**
+/// (#750's review, items 2 and 4). A standing request recorded with the legacy digest — as a pre-I3 gateway wrote it,
+/// for arguments whose two forms differ — is reused when the client asks again; the grant issued on it binds the
+/// legacy digest, and a client proving possession over the RFC 8785 digest runs the call under it (either digest of
+/// the call's own arguments binds exactly them). The match is counted on `/stats`, once at the door and once at
+/// the provider (this node is both). Seen failing first, one build per plant: the reuse matching the RFC 8785 digest only (a second request
+/// written), and the binding and the proof required to share one form (the call refused, bound to other arguments).
+#[tokio::test]
+async fn a_request_asked_before_i3_is_reused_and_its_grant_runs_counted_on_stats() {
+    use crate::agent::action_evaluator::hex32;
+    let dir = scratch("legacy");
+    let http_port = alloc_port();
+    let (a, ran) = started(&dir, http_port).await;
+    let key = forecaster_key(&a, &dir);
+    let args = serde_json::json!({"\u{ff01}": 1, "\u{1F600}": 2});
+    let legacy = hex32(&crate::legacy_arguments_digest(&args));
+    assert_ne!(legacy, hex32(&crate::arguments_digest(&args)), "the case is one where the two forms differ");
+    let ask = || http(http_port, "fc-secret", reqwest::Method::POST, "/gateway/grants/request", Some(serde_json::json!({"tool": TOOL, "arguments": args})));
+    let (status, first) = ask().await;
+    assert_eq!(status, 200, "{first}");
+    // The record as a pre-I3 gateway wrote it: the legacy digest.
+    let request_key = first["key"].as_str().unwrap().to_string();
+    let mut record: serde_json::Value = serde_json::from_slice(&mycelium_core::ops::kv_get(&a.task_ctx, &request_key).unwrap()).unwrap();
+    record["arguments_digest"] = serde_json::json!(legacy);
+    assert!(a.kv().set(request_key.clone(), bytes::Bytes::from(serde_json::to_vec(&record).unwrap())));
+    let (_, again) = ask().await;
+    let request = again["request"].as_str().unwrap_or_default().to_string();
+    let (issue_status, issued) = http(http_port, "treasurer-secret", reqwest::Method::POST, &format!("/gateway/grants/{}/{}", segment(FORECASTER), segment(&request)), Some(serde_json::json!({"decision": "issue"}))).await;
+    let (_, read) = http(http_port, "fc-secret", reqwest::Method::GET, &format!("/gateway/grants/request/{}", segment(&request)), None).await;
+    let called = match serde_json::from_value::<crate::mandate::grant::SignedMandateGrant>(read["grant"].clone()) {
+        Ok(grant) => mcp_call(http_port, &args, Some(presented(&grant, first["resource"].as_str().unwrap(), &args, &key))).await,
+        Err(e) => serde_json::json!({"error": format!("no grant: {e}: {read}")}),
+    };
+    let (_, stats) = http(http_port, "treasurer-secret", reqwest::Method::GET, "/stats", None).await;
+    a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!((again["reused"].as_bool(), &again["request"]), (Some(true), &first["request"]), "REUSE: the pre-I3 request was not reused: {again}");
+    assert_eq!(again["arguments_digest"], legacy.as_str(), "the answer names the digest the grant will bind: {again}");
+    assert_eq!(issue_status, 200, "{issued}");
+    assert!(called.get("result").is_some(), "PAIRING: the grant bound to the legacy digest, proved over RFC 8785, did not run: {called}");
+    assert_eq!(ran.load(Ordering::SeqCst), 1);
+    // This node is the gateway and, with provider enforcement, the provider: one call, counted once at each point.
+    assert_eq!((stats["legacy_digest_matches"].as_u64(), stats["provider_legacy_digest_matches"].as_u64()), (Some(1), Some(1)), "STATS: {stats}");
+}

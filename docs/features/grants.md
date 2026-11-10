@@ -137,15 +137,25 @@ has no row for this feature. The tests: in [`src/mandate/grant.rs`](../../src/ma
   `arguments_digest` and TypeScript's `mandateArgumentsDigest` agree byte for byte, so a float in exponent form binds
   from every language (`a_grant_binds_the_jcs_digest_and_a_pre_i3_grant_is_honoured_for_one_release`; the
   possession vector's `digest_cases` and `float_grant`, checked in Rust, jest and pytest).
-  - **The window:** for one release a grant issued and a proof made before the change — bound to the older
-    `serde_json` digest (`legacy_arguments_digest`) — is still honoured. It is counted
-    (`ExecutionAuthority::legacy_digest_matches`), and the evidence record says so in `checked`. The release after
-    refuses it.
+  - **Numbers as ECMAScript writes them, ties included:** the Rust digits come from `ryu` — the shortest that
+    round-trip, a tie to the even digit — so `1000000000000000.25` is `1000000000000000.2` in all three languages
+    (`rfc_8785_writes_every_sampled_double_as_ecmascript_does`, over `tests/fixtures/cs/es_numbers.json`, in Rust,
+    jest and pytest). Until #750's review Rust rounded a tie up.
+  - **The window:** for one release a grant bound to, or a proof made over, the older `serde_json` digest
+    (`legacy_arguments_digest`) is still honoured — either pairing of the two, since both are computed from the call's
+    own arguments — and a standing request asked before the change is reused by the request door and the agent's
+    wait (`a_request_asked_before_i3_is_reused_and_its_grant_runs_counted_on_stats`). Each match is counted per
+    enforcement point — `GET /stats` `legacy_digest_matches` (this gateway's doors) and
+    `provider_legacy_digest_matches` (this node as a provider), `mycelium_legacy_digest_matches_total{point}` — in
+    memory, so from zero after a restart; the durable record is the evidence record's `checked`
+    (`action_evaluator::LEGACY_DIGEST_CHECKED`). The release after refuses the older form (§9 O5 of the identity plan).
   - **Large numbers:** arguments holding a number of magnitude 2^53 or more, `1e21` included, are refused where a
-    mandate or grant binds them: `MandateRefusal::UnsafeInteger` at the gateway and the provider, `400
-    unsafe_integer` at the request door, `GrantRefused` at the agent's door. The digest writes such a number as the
-    nearest double and cannot tell it from its neighbour, so send it as a string. A call presenting no mandate is
-    still evaluated; its evidence records the RFC 8785 digest.
+    mandate or grant binds them. This is deliberate (the maintainer's decision, 2026-11-09) and departs from plain RFC
+    8785, which would write `1e21` as `1e+21`. Each door names the refusal differently: `400 unsafe_integer` at the request door
+    (`POST /gateway/grants/request`) only; `GrantRefused` at the agent's wait; `MandateRefusal::UnsafeInteger` at the
+    gateway's and the provider's assessment. The digest writes such a number as the nearest double and cannot tell it
+    from its neighbour, so send it as a string. A call presenting no mandate is still evaluated; its evidence records
+    the RFC 8785 digest, which for such a number identifies the arguments only up to that double.
 - A grant is one appointment in its own scope, so grants never conflict with each other or with the resource
   authority's appointments. Its standing is its issuer's checkpoint for the grant's scope, not the gate's freshness
   policy: the issuing node publishes the grant's first checkpoint (nothing revoked) at issue and writes it beside the

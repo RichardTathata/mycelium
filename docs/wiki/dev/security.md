@@ -450,7 +450,11 @@ possession proof's bytes are pinned by `tests/fixtures/possession/vector.json`, 
 accepts in `the_possession_vector_is_the_gateways`. The gateway checks a client's signature (and the key's standing, not `cn`) before
 its preflight claims a grant's use, at `/mcp` and both `/a2a` doors (I1, PR 4), so a refused signature spends nothing. Since I3's PR 1 the mandate/grant arguments digest is RFC 8785 in every language,
 with a one-release window for the pre-I3 `serde_json` form (counted, named on the record) and a number of magnitude 2^53
-or more refused wherever a mandate binds it.
+or more refused wherever a mandate binds it. Rust's canonical numbers are ECMAScript's, ties to even, from `ryu`. Before
+#750's review, `{:e}` rounded a tie up, so 1 220 of 299 896 sampled doubles were written differently in Rust than in
+Python and TypeScript, in `cs` too. `tests/fixtures/cs/es_numbers.json` pins 606 of them in all three suites. In the
+window, a grant's binding and its proof may each be in either digest form: both are computed from the call's own
+arguments, so either pairing binds exactly them.
 
 > **`sys/identity` authentication — partially closed (WS-E, in progress).** `sys/identity/{node}`
 > is a plain Layer-I KV value with **no signature**, and `merge_peer_keys` **accumulates** any key

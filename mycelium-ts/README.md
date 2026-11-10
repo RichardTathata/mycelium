@@ -527,8 +527,9 @@ await mcp.callTool("weather.forecast", { city: "Lyon" }, { grant: answer.grant }
 operation, resource, args)` makes a `{grant, possession}` for any door (`A2aClient.send(…, { mandate })`), pinned by
 `tests/fixtures/possession/vector.json`. The proof binds the gateway's mandate digest, `mandateArgumentsDigest`, which
 is RFC 8785 — the same as the signature's `argumentsDigest` since identity-and-lifecycle I3 — so a float in exponent
-form binds. An integer outside ±(2^53 − 1) cannot be bound exactly: `mandateArgumentsDigest` throws and the gateway
-refuses it (`unsafe_integer`); send it as a string. `waitForGrant` ends within its timeout.
+form binds. A number of magnitude 2^53 or more cannot be bound exactly: `mandateArgumentsDigest` throws, the request
+door answers `400 unsafe_integer`, and a call presenting a grant over it is refused at the gateway and the provider
+(`MandateRefusal::UnsafeInteger`); send it as a string. `waitForGrant` ends within its timeout.
 
 **Refusals, and which to retry.** A refused `tools/call` throws `ActionRefusedError` for the evaluator's three answers
 (`.reason`: `action_denied` is final; `authority_not_established` means nobody decided — a grant not yet established,

@@ -698,3 +698,21 @@ async fn a_providers_refusal_is_a_failed_task_at_both_a2a_doors_and_on_the_recor
     assert_eq!(ran.load(Ordering::SeqCst), 0, "the skill never ran");
     assert_eq!(executions, vec![Execution::Failed, Execution::Failed], "RECORDED: the journal's executions");
 }
+
+/// **RFC 8785's numbers are ECMAScript's, ties included** (#750's review, item 1): every double in
+/// `tests/fixtures/cs/es_numbers.json` — Node's `String(x)` of a fixed-seed sample, led by 300 doubles whose last digit
+/// is a tie — is written as ECMAScript writes it. jest and pytest read the same file. Seen failing first with the
+/// former digit choice (`{:e}`, a tie rounded up: `1658206780088562.3` where ECMAScript writes `…562.2`).
+#[test]
+fn rfc_8785_writes_every_sampled_double_as_ecmascript_does() {
+    let fx: serde_json::Value = serde_json::from_str(include_str!("../../tests/fixtures/cs/es_numbers.json")).unwrap();
+    let mut wrong = Vec::new();
+    for case in fx["cases"].as_array().unwrap() {
+        let x = f64::from_bits(u64::from_str_radix(case[0].as_str().unwrap(), 16).unwrap());
+        let got = super::client_sig::canonical_json(&serde_json::json!(x));
+        if got != case[1].as_str().unwrap() {
+            wrong.push(format!("{x:?}: {got} (ECMAScript {})", case[1]));
+        }
+    }
+    assert!(wrong.is_empty(), "TIES: {} of {} differ, e.g. {:?}", wrong.len(), fx["cases"].as_array().unwrap().len(), &wrong[..wrong.len().min(3)]);
+}
