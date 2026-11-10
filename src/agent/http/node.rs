@@ -237,6 +237,7 @@ pub(super) async fn stats_handler(State(ctx): State<Arc<HttpCtx>>) -> impl IntoR
         let a = ctx.agent_ctx.execution_authority.get();
         body["legacy_digest_matches"] = json!(a.map_or(0, |a| a.legacy_digest_matches()));
         body["provider_legacy_digest_matches"] = json!(a.map_or(0, |a| a.legacy_digest_matches_at_provider()));
+        body["agent_legacy_digest_matches"] = json!(a.map_or(0, |a| a.legacy_digest_matches_at_agent()));
     }
     // #695's review: federated credentials refused at this gateway's edge as replayed, and as
     // undecidable (the partner's window full). Zero without an edge.

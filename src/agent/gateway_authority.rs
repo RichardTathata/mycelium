@@ -114,6 +114,15 @@ pub(crate) fn recorded_digest_matches(recorded: &serde_json::Value, arguments: &
     digest_forms(arguments).iter().any(|(_, d)| recorded == hex32(d).as_str())
 }
 
+/// Where a legacy-digest match is counted (identity-and-lifecycle I3's window, `deprecations.md` §93): a gateway door,
+/// this node as a provider, or this node's agent verifying the grant its own wait read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CountAt {
+    Gateway,
+    Provider,
+    Agent,
+}
+
 /// The digests a verifier tries, JCS first and the legacy form only where it differs.
 fn digest_forms(arguments: &serde_json::Value) -> Vec<(DigestForm, [u8; 32])> {
     let jcs = arguments_digest(arguments);
@@ -164,6 +173,7 @@ pub struct ExecutionAuthority {
     /// and at it as a provider — two counters, so a call a node assesses at both is not one number counted twice.
     legacy_digest_matches: std::sync::atomic::AtomicU64,
     legacy_digest_matches_at_provider: std::sync::atomic::AtomicU64,
+    legacy_digest_matches_at_agent: std::sync::atomic::AtomicU64,
 }
 
 /// The words `assess` gives a revoked grant's standing — read by the agent's wait, which treats this one unknown
@@ -361,6 +371,7 @@ impl ExecutionAuthority {
             used_grants: Mutex::new(std::collections::HashMap::new()),
             legacy_digest_matches: std::sync::atomic::AtomicU64::new(0),
             legacy_digest_matches_at_provider: std::sync::atomic::AtomicU64::new(0),
+            legacy_digest_matches_at_agent: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -583,15 +594,14 @@ impl ExecutionAuthority {
         now_ms: u64,
         members: &impl MemberKeySource,
     ) -> (Assessment, Option<DigestForm>) {
-        self.assess_arguments_at(false, caller, operation, resource, arguments, presented, now_ms, members)
+        self.assess_arguments_at(CountAt::Gateway, caller, operation, resource, arguments, presented, now_ms, members)
     }
 
-    /// [`assess_arguments`](Self::assess_arguments) at an enforcement point: `at_provider` counts a legacy match as this
-    /// node's as a provider ([`legacy_digest_matches_at_provider`](Self::legacy_digest_matches_at_provider)).
+    /// [`assess_arguments`](Self::assess_arguments) at a point, which counts a legacy match as its own.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn assess_arguments_at(
         &self,
-        at_provider: bool,
+        at: CountAt,
         caller: &str,
         operation: &str,
         resource: &str,
@@ -603,11 +613,16 @@ impl ExecutionAuthority {
         let unsafe_integer = super::client_sig::holds_unsafe_integer(arguments);
         let (assessment, form) = self.assess_digests(caller, operation, resource, &digest_forms(arguments), unsafe_integer, presented, now_ms, members);
         if form == Some(DigestForm::Legacy) {
-            let counter = if at_provider { &self.legacy_digest_matches_at_provider } else { &self.legacy_digest_matches };
+            let (counter, point) = match at {
+                CountAt::Gateway => (&self.legacy_digest_matches, "gateway"),
+                CountAt::Provider => (&self.legacy_digest_matches_at_provider, "provider"),
+                CountAt::Agent => (&self.legacy_digest_matches_at_agent, "agent"),
+            };
             counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             #[cfg(feature = "metrics")]
-            metrics::counter!("mycelium_legacy_digest_matches_total", "point" => if at_provider { "provider" } else { "gateway" })
-                .increment(1);
+            metrics::counter!("mycelium_legacy_digest_matches_total", "point" => point).increment(1);
+            #[cfg(not(feature = "metrics"))]
+            let _ = point;
             let mut assessment = assessment;
             assessment.binding = assessment.binding.map(MandateBinding::with_legacy_digest);
             return (assessment, form);
@@ -645,6 +660,14 @@ impl ExecutionAuthority {
     /// `GET /stats` `provider_legacy_digest_matches`; `mycelium_legacy_digest_matches_total{point="provider"}`.
     pub fn legacy_digest_matches_at_provider(&self) -> u64 {
         self.legacy_digest_matches_at_provider.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// [`legacy_digest_matches`](Self::legacy_digest_matches) at this node's agent, verifying a grant its own wait read
+    /// (`AgentStateMachine::transition_invoking`) — counted there because a provider without `with_provider_enforcement`
+    /// never assesses the call, and the agent's wait writes no evidence record: `GET /stats`
+    /// `agent_legacy_digest_matches`; `mycelium_legacy_digest_matches_total{point="agent"}`.
+    pub fn legacy_digest_matches_at_agent(&self) -> u64 {
+        self.legacy_digest_matches_at_agent.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1068,7 +1091,7 @@ pub(crate) mod tests {
         assert!(old.binding.as_ref().unwrap().legacy_digest, "the binding says it matched the legacy form");
         assert_eq!(a.legacy_digest_matches(), 1, "counted");
         // The same call assessed again at this node as a provider is counted there, not at the doors a second time.
-        let (at_provider, form) = a.assess_arguments_at(true, CALLER, OP, RES, &args, Some(&grant("old", &legacy)), 6_000, &members);
+        let (at_provider, form) = a.assess_arguments_at(CountAt::Provider, CALLER, OP, RES, &args, Some(&grant("old", &legacy)), 6_000, &members);
         assert_eq!((state(&at_provider), form), (Some(MandateState::Established), Some(DigestForm::Legacy)));
         assert_eq!((a.legacy_digest_matches(), a.legacy_digest_matches_at_provider()), (1, 1), "COUNT: one per point");
         let other = serde_json::json!({"tolerance": 0.5});

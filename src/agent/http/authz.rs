@@ -1062,9 +1062,13 @@ pub(crate) async fn ae_decide(
             if let Some(p) = &presented {
                 super::gateway_authority::feed_grant_checkpoint(ctx, authority, &p.grant.mandate, now_ms);
             }
-            let at_provider = enforcement_point == crate::agent::provider_enforcement::ENFORCEMENT_POINT_PROVIDER;
+            let at = if enforcement_point == crate::agent::provider_enforcement::ENFORCEMENT_POINT_PROVIDER {
+                super::gateway_authority::CountAt::Provider
+            } else {
+                super::gateway_authority::CountAt::Gateway
+            };
             let (assessment, _form) = authority.assess_arguments_at(
-                at_provider,
+                at,
                 &actor,
                 operation,
                 resource,

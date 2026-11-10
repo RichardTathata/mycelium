@@ -2870,13 +2870,23 @@ honest Python or TypeScript holder could be refused.
     from the call's own arguments, so either binds exactly them.
   - A standing request recorded with the older form is reused by the request door and by the agent's wait, so asking
     again does not write a second request.
-  - Each match is counted at the point that assessed it. `GET /stats` has `legacy_digest_matches` for this gateway's
-    doors and `provider_legacy_digest_matches` for this node as a provider. With `metrics` there is also
-    `mycelium_legacy_digest_matches_total{point="gateway"|"provider"}`. A call assessed at both points on one node
-    counts once at each.
-  - The counters are in memory and start from zero when a node restarts. The durable record is the evidence record's
-    `checked`, which names every match (`action_evaluator::LEGACY_DIGEST_CHECKED`). Read the journal to find a match
-    from before a restart.
+  - A pre-I3 grant now also admits the integer/float twin of its arguments. RFC 8785 writes `5` and `5.0` the same
+    (`5`), and so does `serde_json` for an integer. So the RFC 8785 digest of `{"n":5.0}` equals the older digest of
+    `{"n":5}`, and a grant bound to the latter admits the former. Under RFC 8785 the twin is the same call anyway, so
+    this matters only to a tool that tells `5` from `5.0`.
+  - Each match is counted at the point that assessed it. `GET /stats` has three counters:
+    - `legacy_digest_matches`, for this gateway's doors;
+    - `provider_legacy_digest_matches`, for this node as a provider;
+    - `agent_legacy_digest_matches`, for this node's agent verifying a grant its own wait read.
+
+    With `metrics` there is also `mycelium_legacy_digest_matches_total{point="gateway"|"provider"|"agent"}`. A call
+    assessed at more than one point counts once at each. The agent's point is there because a node-held grant goes to
+    its provider directly, and a provider without `with_provider_enforcement` never assesses it. Without that point,
+    such a grant could run while both other counters stayed at zero.
+  - The counters are in memory and start from zero when a node restarts. The evidence record's `checked` names every
+    match at a gateway door or a provider (`action_evaluator::LEGACY_DIGEST_CHECKED`), and it is the durable record.
+    Read the journal to find a match from before a restart. The agent's wait writes no evidence record, so its matches
+    are on its counter only.
   - Watch the counters fall to zero. The release after refuses the older form (the identity plan's §9 O5).
   - A grant is short-lived (at most an hour), so re-issue any older grant that still stands.
 - **Upgrade order: verifiers before binders.**
@@ -2906,7 +2916,8 @@ honest Python or TypeScript holder could be refused.
   The older form is not recorded beside it.
 - **Code:**
   - `ExecutionAuthority::assess_arguments`, `legacy_digest_matches`, `legacy_digest_matches_at_provider`,
-    `legacy_arguments_digest`, `DigestForm` and `MandateBinding::legacy_digest` are new. `MandateBinding` is `#[non_exhaustive]`.
+    `legacy_digest_matches_at_agent`, `legacy_arguments_digest`, `DigestForm` and `MandateBinding::legacy_digest` are
+    new. `MandateBinding` is `#[non_exhaustive]`.
   - `assess` takes one digest and is unchanged.
   - `MandateRefusal` gained `UnsafeInteger`.
   - The possession vector's `mandate_digest_cases` are now `legacy_digest_cases`, beside new `digest_cases`,

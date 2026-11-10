@@ -1239,5 +1239,11 @@ async fn the_agents_wait_reuses_a_request_asked_before_i3() {
     assert!(called.is_ok(), "the grant bound to the legacy digest: {called:?}");
     assert_eq!(ran.load(Ordering::SeqCst), 1);
     let authority = authority.unwrap();
-    assert_eq!((authority.legacy_digest_matches(), authority.legacy_digest_matches_at_provider()), (0, 1), "counted at the provider");
+    // Counted where it was assessed: the agent's wait (its own point, so a fleet whose providers run without
+    // provider enforcement still sees the match — #750's round 2, item 2) and the provider; no gateway door was used.
+    assert_eq!(
+        (authority.legacy_digest_matches(), authority.legacy_digest_matches_at_provider(), authority.legacy_digest_matches_at_agent()),
+        (0, 1, 1),
+        "AGENT: counted at the agent's wait and the provider"
+    );
 }

@@ -653,8 +653,10 @@ impl AgentStateMachine {
                 // standing is known here before the grant is assessed (adopter-surface X3, second PR).
                 super::gateway_authority::feed_grant_checkpoint(&self.ctx, authority, &presented.grant.mandate, now);
                 // From the arguments, so a grant from a request asked before identity-and-lifecycle I3 (bound to the
-                // legacy digest) is established for the window; not counted — the door the call goes through counts it.
-                let assessment = authority.reassess_arguments(&agent, "tools/call", &resource, arguments, Some(&presented), now, &super::gateway_member_keys(&self.ctx));
+                // legacy digest) is established for the window. A legacy match is counted here, at its own point: a
+                // provider without `with_provider_enforcement` never assesses the call, and this wait writes no
+                // evidence record, so without it an operator could see zero while legacy grants run (#750's round 2).
+                let (assessment, _form) = authority.assess_arguments_at(super::gateway_authority::CountAt::Agent, &agent, "tools/call", &resource, arguments, Some(&presented), now, &super::gateway_member_keys(&self.ctx));
                 match assessment.binding.map(|b| b.state) {
                     Some(super::action_evaluator::MandateState::Established) => {
                         #[cfg(feature = "metrics")]

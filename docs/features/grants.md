@@ -145,9 +145,10 @@ has no row for this feature. The tests: in [`src/mandate/grant.rs`](../../src/ma
     (`legacy_arguments_digest`) is still honoured — either pairing of the two, since both are computed from the call's
     own arguments — and a standing request asked before the change is reused by the request door and the agent's
     wait (`a_request_asked_before_i3_is_reused_and_its_grant_runs_counted_on_stats`). Each match is counted per
-    enforcement point — `GET /stats` `legacy_digest_matches` (this gateway's doors) and
-    `provider_legacy_digest_matches` (this node as a provider), `mycelium_legacy_digest_matches_total{point}` — in
-    memory, so from zero after a restart; the durable record is the evidence record's `checked`
+    enforcement point — `GET /stats` `legacy_digest_matches` (this gateway's doors),
+    `provider_legacy_digest_matches` (this node as a provider) and `agent_legacy_digest_matches` (this node's agent
+    verifying the grant its wait read), `mycelium_legacy_digest_matches_total{point}` — in memory, so from zero after a
+    restart; the durable record of a door's or a provider's match is the evidence record's `checked`
     (`action_evaluator::LEGACY_DIGEST_CHECKED`). The release after refuses the older form (§9 O5 of the identity plan).
   - **Large numbers:** arguments holding a number of magnitude 2^53 or more, `1e21` included, are refused where a
     mandate or grant binds them. This is deliberate (the maintainer's decision, 2026-11-09) and departs from plain RFC
