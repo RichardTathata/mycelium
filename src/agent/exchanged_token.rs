@@ -148,7 +148,7 @@ pub(crate) fn check(verifier: &OidcVerifier, ot: &str, principal: &str, signer: 
 /// `at+jwt`, with or without the `application/` prefix, in any case. Anything else — `dpop+jwt`, `logout+jwt`, … — is
 /// another kind of token.
 fn is_access_token_typ(typ: &str) -> bool {
-    let t = typ.strip_prefix("application/").unwrap_or(typ);
+    let t = typ.get(..12).filter(|p| p.eq_ignore_ascii_case("application/")).map_or(typ, |_| &typ[12..]);
     t.eq_ignore_ascii_case("JWT") || t.eq_ignore_ascii_case("at+jwt")
 }
 

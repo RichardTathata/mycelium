@@ -3038,8 +3038,11 @@ provider's half. The gateway's exchange is I5's PR 2.
 - **The replay window is in memory** and is empty after a restart. It is one window per provider, keyed by the
   token's `(iss, jti)` whichever gateway carries it. It holds at most 262 144 token ids, 65 536 of them per gateway
   and 16 384 per principal, and refuses past any bound (`ot_provider_window_full`, `ot_window_full`,
-  `ot_principal_window_full`). That is a ceiling of about 109 OIDC calls a second per gateway, and 436 per provider,
-  at the default lifetime and drift. A gateway that leaves frees its share as its entries expire.
+  `ot_principal_window_full`). That is a ceiling of about 109 OIDC calls a second per gateway, 436 per provider and
+  27 per principal (counted across every gateway it calls through), at the default lifetime and drift. A gateway that
+  leaves frees its share as its entries expire. **Four gateways at their share fill the provider's window**, and every
+  other gateway's OIDC users are then refused `ot_provider_window_full` until entries expire; the gateways' rate limits
+  are the bound against that.
 - **Code:**
   - `CallerError` gained `ExchangedToken(&'static str)` (it is `#[non_exhaustive]`).
   - `GatewayCaller` gained a `pub(crate)` field.

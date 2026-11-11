@@ -450,11 +450,22 @@ async fn the_first_failing_check_names_the_refusal() {
     keys_held(&a).await;
     let key = node_key(&a);
     let other_key = ed25519_dalek::SigningKey::from_bytes(&[9u8; 32]).verifying_key().to_bytes();
-    let mint_typ = |c: &serde_json::Value, typ: Option<&str>| {
+    let mint_kid_typ = |c: &serde_json::Value, kid: &str, typ: Option<&str>| {
         let mut header = Header::new(Algorithm::RS256);
-        header.kid = Some("test-kid".into());
+        header.kid = Some(kid.into());
         header.typ = typ.map(str::to_string);
         encode(&header, c, &EncodingKey::from_rsa_pem(TEST_PRIV.as_bytes()).unwrap()).unwrap()
+    };
+    let mint_typ = |c: &serde_json::Value, typ: Option<&str>| mint_kid_typ(c, "test-kid", typ);
+    // A token's payload replaced under its signature, with the replacement's own defect (#759's confirm round, N3).
+    let resigned_as = |kid: &str, edit: &dyn Fn(&mut serde_json::Value)| {
+        use base64::Engine as _;
+        let honest = mint_kid_typ(&claims(&key), kid, None);
+        let parts: Vec<&str> = honest.split('.').collect();
+        let mut c = claims(&key);
+        edit(&mut c);
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(serde_json::to_vec(&c).unwrap());
+        format!("{}.{}.{}", parts[0], payload, parts[2])
     };
     let with = |edit: &dyn Fn(&mut serde_json::Value)| {
         let mut c = claims(&key);
@@ -465,6 +476,9 @@ async fn the_first_failing_check_names_the_refusal() {
         c.as_object_mut().unwrap().remove(k);
     };
     let cases: Vec<(&str, String, &str)> = vec![
+        ("TYPE BEFORE KEYS", mint_kid_typ(&claims(&key), "another-kid", Some("dpop+jwt")), "ot_wrong_type"),
+        ("KEYS BEFORE SIGNATURE", resigned_as("another-kid", &|c| c["sub"] = "mallory".into()), "ot_keys_unavailable"),
+        ("SIGNATURE BEFORE ISSUER", resigned_as("test-kid", &|c| c["iss"] = "https://other.example".into()), "ot_signature_invalid"),
         ("ISSUER BEFORE AUDIENCE", with(&|c| { c["iss"] = "https://other.example".into(); c["aud"] = "x".into(); }), "ot_wrong_issuer"),
         ("AUDIENCE BEFORE CLIENT", with(&|c| { c["aud"] = "x".into(); c["azp"] = "x".into(); }), "ot_wrong_audience"),
         ("CLIENT BEFORE BINDING", with(&|c| { c["azp"] = "x".into(); drop_claim(c, "cnf"); }), "ot_wrong_client"),
@@ -487,6 +501,7 @@ async fn the_first_failing_check_names_the_refusal() {
     let accepted: Vec<_> = [
         mint_typ(&claims(&key), Some("at+jwt")),
         mint_typ(&claims(&key), Some("application/at+jwt")),
+        mint_typ(&claims(&key), Some("APPLICATION/AT+JWT")),
         mint_typ(&claims(&key), None),
         with(&|c| c["nbf"] = now_s().into()),
     ]
@@ -508,7 +523,7 @@ async fn the_first_failing_check_names_the_refusal() {
     for ((name, _, want), (_, got)) in cases.iter().zip(got) {
         assert_eq!(got, Some(*want), "{name}");
     }
-    assert_eq!(accepted, [None, None, None, None], "at+jwt, application/at+jwt, no typ, and nbf now are accepted");
+    assert_eq!(accepted, [None, None, None, None, None], "at+jwt, application/at+jwt in either case, no typ, and nbf now are accepted");
     assert_eq!(bad_so, Some("ot_signature_malformed"), "SO");
 }
 
@@ -649,4 +664,24 @@ fn an_oidc_literal_with_default_is_the_minimal_table() {
     let literal = crate::OidcConfig { issuer: ISSUER.into(), audience: "mycelium-cluster".into(), ..Default::default() };
     let parsed: crate::OidcConfig = toml::from_str(&format!("issuer = \"{ISSUER}\"\naudience = \"mycelium-cluster\"\n")).unwrap();
     assert_eq!(literal, parsed);
+}
+
+/// **`mycelium doctor` fetches nothing** (#759's confirm round, N2). Doctor runs `preflight()` on a node it never starts;
+/// the verifier is built there, and its keys are fetched only by `start()`. Seen failing first: with `warm()` in
+/// `preflight()`, the JWKS was fetched.
+#[tokio::test]
+async fn preflight_builds_the_verifier_and_fetches_nothing() {
+    let (port, hits) = crate::test_util::spawn_counting_listener(JWKS).await;
+    let node_port = crate::test_util::alloc_port();
+    let dir = std::env::temp_dir().join(format!("i5-ot-{node_port}"));
+    let mut cfg = GossipConfig::default();
+    cfg.bind_port = node_port;
+    cfg.tls = Some(crate::TlsConfig { auto_cert_dir: dir.clone(), ..Default::default() });
+    cfg.oidc = Some(oidc_table(port));
+    let a = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", node_port).unwrap(), cfg));
+    let _cleanup = Provider(Arc::clone(&a), dir);
+    a.preflight().expect("preflight");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(a.task_ctx.oidc_verifier.get().is_some(), "the verifier is built");
+    assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0, "NO FETCH before start()");
 }

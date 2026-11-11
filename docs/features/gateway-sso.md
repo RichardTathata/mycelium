@@ -90,7 +90,8 @@ The tests, each refusal seen failing first, are in
 `the_header_and_audience_shapes_are_refused_or_accepted_by_name`, `a_token_in_an_unsigned_envelope_is_unverifiable`,
 `a_verify_off_a_runtime_refuses_rather_than_panics`, `the_thumbprint_is_rfc_8037s`,
 `the_window_is_one_across_gateways_and_frees_a_departed_ones`,
-`two_concurrent_admissions_of_one_token_admit_it_once` and `an_oidc_literal_with_default_is_the_minimal_table`. A build without `compliance` is
+`two_concurrent_admissions_of_one_token_admit_it_once`, `an_oidc_literal_with_default_is_the_minimal_table` and
+`preflight_builds_the_verifier_and_fetches_nothing`. A build without `compliance` is
 tested by `a_build_without_compliance_refuses_an_exchanged_token`, in
 [`src/agent/gateway_caller.rs`](../../src/agent/gateway_caller.rs).
 
@@ -112,7 +113,10 @@ The refusal of an issuer the egress policy denies is `an_oidc_issuer_the_egress_
 - **At the provider (I5, PR 1):** an exchanged token bound to the envelope's signer, for its principal, by the gateway's
   client, admitted once per provider, whichever gateway carries it, while unexpired. **Not built:** the gateway's exchange (I5's PR 2); a token bound
   to its call; the exchanging gateway reusing its own token, refused once per provider by `jti`; four principals at
-  their bound filling a gateway's share (rate limits are the hard bound); a window that survives a restart (an id
+  their bound filling a gateway's share, or four gateways at theirs filling the provider's window (262 144 ids, about
+  436 calls a second at the defaults), after which every other gateway's OIDC users are refused
+  `ot_provider_window_full` until entries expire (rate limits are the hard bound); the per-principal bound (16 384)
+  counts across gateways; a window that survives a restart (an id
   presented before one can be presented once more after it, only in an envelope signed by the bound gateway).
 - **Not built:** a key host found by discovery is not checked at start; the first tokens under a rotated key may be
   refused for up to the refresh cooldown (30 s). A token is a route credential: what
