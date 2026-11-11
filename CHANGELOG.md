@@ -11,6 +11,17 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Security
 
+- **`rustix` 1.1.4 / 1.1.5 → 1.1.6** (RUSTSEC-2026-0486, an unsoundness advisory, dated 2026-10-27): `rustix::fs`'s
+  extended-attribute functions (`getxattr`, `listxattr` and their `l`/`f` forms) marked unwritten bytes initialized
+  when given a zero-length buffer. **Affected releases:** every release whose lockfile carries `rustix` 1.0–1.1.5,
+  through v2.39.0 (1.1.4). **Not reachable here:** `mycelium-wasm-host` uses `rustix::fs` directly (`openat`,
+  `readlinkat`, `statat`, `fstat`), but none of the xattr functions, and no crate that pulls `rustix` in mentions them
+  (`git grep -i xattr -- '*.rs'` finds nothing). Bumped in all three tracked lockfiles (the root, `fuzz/`,
+  `examples/conway-gpu/`), because CI's audit denies warnings and was failing every PR; the two sub-lockfiles also
+  pick up `mycelium`'s `ryu` edge, stale since #750, and Cargo re-resolves some Windows-only `windows-sys` edges
+  between the two versions already locked. No API change. **Check:** `grep -A1 '^name = "rustix"$' Cargo.lock` shows
+  `1.1.6`, and `cargo audit -f Cargo.lock` no longer reports RUSTSEC-2026-0486.
+
 - **`mycelium-effects`' bundled SQLite 3.46.0 → 3.54.1** (RUSTSEC-2026-0459, CVE-2026-119375, published 2026-10-30):
   **`rusqlite` 0.32.1 → 0.41.0**, which brings **`libsqlite3-sys` 0.30.1 → 0.39.1**. SQLite before 3.54.0 can return
   uninitialized page-cache memory to ordinary queries when it opens a database file together with a sibling `-wal`
