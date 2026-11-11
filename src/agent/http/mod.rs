@@ -314,11 +314,11 @@ pub(super) async fn run_http_server(
     let prometheus = prometheus_handle(ctx.config.cluster_name.as_deref());
 
     #[cfg(feature = "compliance")]
-    let oidc = ctx
-        .config
-        .oidc
-        .clone()
-        .map(|c| Arc::new(super::oidc::OidcVerifier::new(c, ctx.config.egress.clone())));
+    // The node's one verifier, set at `start()` (#759's review, M2: a node that is gateway and provider fetches its
+    // IdP's keys once); a gateway run without `start()` (a test's) builds its own.
+    let oidc = ctx.oidc_verifier.get().cloned().or_else(|| {
+        ctx.config.oidc.clone().map(|c| Arc::new(super::oidc::OidcVerifier::new(c, ctx.config.egress.clone())))
+    });
 
     let state = Arc::new(HttpCtx {
         agent_ctx:    ctx,

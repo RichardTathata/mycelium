@@ -205,6 +205,11 @@ pub(crate) mod transparency;
 pub(crate) mod capauthz;
 #[cfg(feature = "compliance")]
 pub(crate) mod oidc;
+/// Identity-and-lifecycle I5 (D6): an OIDC user's exchanged token, verified at the provider.
+#[cfg(feature = "compliance")]
+pub(crate) mod exchanged_token;
+#[cfg(all(test, feature = "compliance"))]
+mod exchanged_token_tests;
 /// The one place an outbound HTTP client is built — redirects re-checked against the egress
 /// policy on every hop, or not followed at all (realignment repairs R3).
 #[cfg(feature = "gateway")]
@@ -1012,6 +1017,14 @@ pub(crate) struct TaskCtx {
     /// lock (no lock-order row).
     #[cfg(all(feature = "gateway", feature = "tls"))]
     pub(crate) grant_decisions_in_flight: papaya::HashSet<String>,
+    /// Identity-and-lifecycle I5: the node's one OIDC verifier, set at `start()` from `[oidc]` — its issuer, JWKS cache
+    /// and fetcher, shared by the gateway (bearers) and, when `[oidc]` names an `exchange_audience`, the provider
+    /// (exchanged tokens; #759's review, M2). Without an `exchange_audience`, an envelope's `ot` is not read.
+    #[cfg(feature = "compliance")]
+    pub(crate) oidc_verifier: std::sync::OnceLock<Arc<oidc::OidcVerifier>>,
+    /// I5: the exchanged tokens this provider has admitted, once each by `(iss, jti)` across gateways, while unexpired.
+    #[cfg(feature = "compliance")]
+    pub(crate) exchanged_token_replay: exchanged_token::OtReplayWindows,
     /// A `correlation` or `parent` carried where it is never read — a header at an HTTP door, or a field in the caller
     /// envelope (adopter-surface X4): counted **by door**, the record's field left empty. `GET /stats`
     /// `causal_fields_misplaced` is the map; lock-free (papaya), no lock-order row.
@@ -1637,6 +1650,10 @@ impl GossipAgent {
             unsigned_actions: Default::default(),
             #[cfg(all(feature = "gateway", feature = "tls"))]
             grant_decisions_in_flight: papaya::HashSet::new(),
+            #[cfg(feature = "compliance")]
+            oidc_verifier: std::sync::OnceLock::new(),
+            #[cfg(feature = "compliance")]
+            exchanged_token_replay: Default::default(),
             causal_misplaced: papaya::HashMap::new(),
             #[cfg(feature = "a2a")]
             a2a_mounted: AtomicBool::new(false),

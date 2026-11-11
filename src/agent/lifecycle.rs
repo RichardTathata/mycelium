@@ -202,6 +202,29 @@ impl GossipAgent {
                 }
             }
         }
+        // Identity-and-lifecycle I5: the node's one OIDC verifier (#759's review, M2) — its gateway validates bearers
+        // with it and, when `[oidc]` names an `exchange_audience`, its provider verifies exchanged tokens with it, one
+        // JWKS cache and one fetcher between them. A verifying node fetches the keys now, so they are held before the
+        // first exchanged token arrives; one that arrives while none is held is refused, retriable (`ot_keys_unavailable`).
+        // Built here, fetched in `start()`: `mycelium doctor` runs this on a node it never starts, and fetches nothing
+        // (#759's confirm round, N2).
+        #[cfg(feature = "compliance")]
+        if let Some(oidc) = &self.config.oidc
+            && self.task_ctx.oidc_verifier.get().is_none()
+        {
+            let verifier = Arc::new(super::oidc::OidcVerifier::new(oidc.clone(), self.config.egress.clone()));
+            if oidc.exchange_audience.is_some() {
+                // #759's review, L1: no gateway in this release exchanges a user's token, so every `oidc:` action this
+                // node serves is refused `ot_required` until its gateways run the release that does (I5's PR 2).
+                tracing::warn!(
+                    exchange_audience = oidc.exchange_audience.as_deref().unwrap_or_default(),
+                    "oidc: this node verifies exchanged tokens, and no gateway in this release exchanges one; every \
+                     action by an OIDC user (oidc: principal) on this node is refused ot_required until its gateways \
+                     exchange tokens (identity-and-lifecycle I5, deprecations.md §96)"
+                );
+            }
+            let _ = self.task_ctx.oidc_verifier.set(verifier);
+        }
         // Credential bindings (post-360 plan row L): each value read once, here, into the gate. A value
         // that cannot be read refuses the start by name (never by value); a build without the gate's
         // HTTP client refuses every binding, rather than accept it and attach nothing.
@@ -371,6 +394,14 @@ impl GossipAgent {
     /// Binds the TCP listener(s) and launches background loops.
     pub async fn start(&self) -> Result<(), GossipError> {
         self.preflight()?;
+        // I5: a verifying node fetches its IdP's keys now, so they are held before the first exchanged token arrives —
+        // here, not in `preflight()`, which `mycelium doctor` runs without starting the node (#759's confirm round, N2).
+        #[cfg(feature = "compliance")]
+        if let Some(v) = self.task_ctx.oidc_verifier.get()
+            && v.config().exchange_audience.is_some()
+        {
+            v.warm();
+        }
         // `gateway_a2a`: the card and `/a2a`, mounted as `with_a2a()` mounts them — before the boundary, so the
         // routes are merged into the gateway this start builds. Once: beside `with_a2a()`, or on a retried start,
         // nothing more is mounted. The warning and the report have already read the switch (`a2a_served`).

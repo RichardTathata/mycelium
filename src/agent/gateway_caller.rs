@@ -137,6 +137,34 @@ const DOMAIN_SEP: &[u8] = b"mycelium:gateway-caller:v1\n";
 /// for every provider that keeps a replay window.
 #[cfg(feature = "tls")]
 const DOMAIN_SEP_ID: &[u8] = b"mycelium:gateway-caller:v2\n";
+/// Domain separator for `so`, the gateway's signature over an envelope's exchanged token (identity-and-lifecycle I5).
+#[cfg(feature = "tls")]
+const DOMAIN_SEP_OT: &[u8] = b"mycelium:gateway-caller-ot:v1\n";
+
+/// The bytes `so` signs: [`DOMAIN_SEP_OT`], the envelope id `n` (`u64` little-endian), the target `o` (a `u32`
+/// little-endian length and its bytes), and the exchanged token's SHA-256.
+#[cfg(feature = "tls")]
+fn ot_signed_message(n: u64, o: &str, ot: &str) -> Vec<u8> {
+    use sha2::Digest as _;
+    let mut out = DOMAIN_SEP_OT.to_vec();
+    out.extend_from_slice(&n.to_le_bytes());
+    out.extend_from_slice(&(o.len() as u32).to_le_bytes());
+    out.extend_from_slice(o.as_bytes());
+    out.extend_from_slice(&sha2::Sha256::digest(ot.as_bytes()));
+    out
+}
+
+/// What a provider established from an envelope's exchanged token (identity-and-lifecycle I5): the id its receive
+/// boundary admits once, and until when.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ExchangedToken {
+    /// The token's issuer.
+    pub(crate) iss: String,
+    /// Its id.
+    pub(crate) jti: String,
+    /// Its expiry, in ms since the epoch.
+    pub(crate) exp_ms: u64,
+}
 /// The most envelope ids a provider keeps per gateway inside the freshness window. Past it the
 /// oldest is evicted and becomes the window's floor: an envelope at or below the floor is refused
 /// (it might be a replay of one forgotten), so the bound fails closed. Ids are kept for the
@@ -217,6 +245,9 @@ pub struct GatewayCaller {
     /// principal's **current** client key, over the operation, resource and arguments this provider acts on, fresh,
     /// and not seen before. `None` when the call carried none.
     pub client_signed: Option<Box<super::client_sig::ClientSigned>>,
+    /// The OIDC user's exchanged token, verified (identity-and-lifecycle I5): its id, admitted once at the receive
+    /// boundary. `None` when the envelope carries none, or this node does not verify them.
+    pub(crate) exchanged: Option<Box<ExchangedToken>>,
 }
 
 /// How a [`GatewayCaller`] was attested.
@@ -298,6 +329,10 @@ pub enum CallerError {
     /// The client's `cn` was already received inside the freshness window, or sits at or below its instance's floor,
     /// or the key has too many instances in flight. A replay: dropped without an answer.
     ClientReplayed,
+    /// The OIDC user's exchanged token (`ot`, identity-and-lifecycle I5) was refused, or an `oidc:` principal's action
+    /// carried none at a provider that verifies them. The code names which (`ot_*`, or `not_in_build` where the build
+    /// lacks `compliance`).
+    ExchangedToken(&'static str),
 }
 
 impl CallerError {
@@ -318,6 +353,7 @@ impl CallerError {
             CallerError::IdStripped => "id_stripped",
             CallerError::ClientSignature(code) => code,
             CallerError::ClientReplayed => "client_replayed",
+            CallerError::ExchangedToken(code) => code,
         }
     }
 
@@ -359,6 +395,10 @@ impl std::fmt::Display for CallerError {
             ),
             CallerError::ClientSignature(code) => write!(f, "the client's signature on this call was refused: {code}"),
             CallerError::ClientReplayed => f.write_str("the client's signature was already received (a replay of cn)"),
+            CallerError::ExchangedToken("not_in_build") => {
+                f.write_str("the call carries an exchanged OIDC token, and this node is built without `compliance`, which verifies it: not_in_build")
+            }
+            CallerError::ExchangedToken(code) => write!(f, "the OIDC user's exchanged token was refused: {code}"),
         }
     }
 }
@@ -731,6 +771,14 @@ struct Envelope {
     /// The client's `(issued_at, instance, counter)`, beside `cs`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     cn: Option<super::client_sig::ClientNonce>,
+    /// The OIDC user's **exchanged token** (identity-and-lifecycle I5): an RFC 8693 assertion for `oidc.exchange_audience`,
+    /// DPoP-bound to the gateway's node key. An older provider keeps it in `x` and reads nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ot: Option<String>,
+    /// base64 Ed25519 signature over `n`, `o` and the `ot`'s SHA-256 ([`ot_signed_message`]), **added** beside `sn`
+    /// when `ot` is present, so a relay cannot swap one user's token into another's envelope (#757's confirm round, N3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    so: Option<String>,
     /// Fields this version does not define, kept so a verifier can see them: a `correlation` or `parent` placed here
     /// (adopter-surface X4) sits outside every signature and is never read — counted, and the record's field stays
     /// empty. Never produced by this crate; absent on the wire when empty, so the envelope's bytes are unchanged.
@@ -791,10 +839,30 @@ pub(crate) fn frame_with_client_signature_at(
     client: Option<&(super::client_sig::ClientSignature, super::client_sig::ClientNonce)>,
     issued_at_ms: u64,
 ) -> Option<Bytes> {
+    frame_envelope_at(ctx, target, principal, scopes, app, mandate, resource, client, None, issued_at_ms)
+}
+
+/// [`frame_with_client_signature_at`], carrying an OIDC user's exchanged token (`ot`, identity-and-lifecycle I5) under
+/// the gateway's added signature `so` — the one place an envelope is built. `None` when the envelope would exceed
+/// [`MAX_ENVELOPE_BYTES`]: the producer refuses (`caller_context_too_large`), never truncates.
+#[allow(clippy::too_many_arguments)] // the envelope's fields, each one
+pub(crate) fn frame_envelope_at(
+    ctx: &TaskCtx,
+    target: &NodeId,
+    principal: &str,
+    scopes: &[String],
+    app: Bytes,
+    mandate: Option<&serde_json::Value>,
+    resource: Option<&str>,
+    client: Option<&(super::client_sig::ClientSignature, super::client_sig::ClientNonce)>,
+    ot: Option<&str>,
+    issued_at_ms: u64,
+) -> Option<Bytes> {
     let via = ctx.node_id.to_string();
     let id = ctx.hlc.tick();
     let to = target.to_string();
     let (k, sig, sn) = attest(ctx, principal, &via, scopes, issued_at_ms, id, &to, &app);
+    let so = ot.and_then(|ot| sign_ot(ctx, id, &to, ot));
     let env = Envelope {
         v: CALLER_CONTEXT_VERSION,
         p: principal.to_string(),
@@ -810,6 +878,8 @@ pub(crate) fn frame_with_client_signature_at(
         sn,
         cs: client.map(|c| c.0.clone()),
         cn: client.map(|c| c.1.clone()),
+        so,
+        ot: ot.map(str::to_string),
         x: Default::default(),
     };
     let env_bytes = serde_json::to_vec(&env).ok()?;
@@ -859,6 +929,20 @@ fn attest(
     let sig_id = crate::tls::sign_bytes(&sk, &signed_message_with_id(principal, via, scopes, issued_at_ms, id, to, &d));
     let b64 = base64::engine::general_purpose::STANDARD;
     (Some(b64.encode(signer)), Some(b64.encode(sig)), Some(b64.encode(sig_id)))
+}
+
+/// `so`: the node key's signature over an envelope's exchanged token ([`ot_signed_message`]), base64. `None` without
+/// an identity, which a verifying provider refuses (`ot_unsigned`).
+#[cfg(feature = "tls")]
+fn sign_ot(ctx: &TaskCtx, id: u64, to: &str, ot: &str) -> Option<String> {
+    use base64::Engine as _;
+    let tls = ctx.tls.get()?;
+    Some(base64::engine::general_purpose::STANDARD.encode(crate::tls::sign_bytes(&tls.signing_key(), &ot_signed_message(id, to, ot))))
+}
+
+#[cfg(not(feature = "tls"))]
+fn sign_ot(_ctx: &TaskCtx, _id: u64, _to: &str, _ot: &str) -> Option<String> {
+    None
 }
 
 #[cfg(not(feature = "tls"))]
@@ -1047,6 +1131,12 @@ fn verifying_keys_for(ctx: &TaskCtx, node: &NodeId) -> Vec<[u8; 32]> {
 /// `Ok(None)`: no context — the sender acts for itself. `Ok(Some(_))`: a verified context.
 /// `Err(_)`: a context was present and must be **refused**; never treat the call as the node's.
 pub(crate) fn verify(ctx: &TaskCtx, req: &RpcRequest) -> Result<Option<GatewayCaller>, CallerError> {
+    verify_at(ctx, req, ctx.hlc.decision_now_ms())
+}
+
+/// [`verify`] at `now_ms`: every clock comparison it makes — the envelope's freshness, an exchanged token's `iat`,
+/// `nbf` and `exp` — reads this one instant, which [`verify_received`] then admits at (#759's review, M1).
+fn verify_at(ctx: &TaskCtx, req: &RpcRequest, now_ms: u64) -> Result<Option<GatewayCaller>, CallerError> {
     // Closure plan C5: a removed member is refused before any serve path, whatever it frames.
     if ctx.removed.is_node_removed(req.sender()) {
         return Err(CallerError::Removed);
@@ -1135,7 +1225,6 @@ pub(crate) fn verify(ctx: &TaskCtx, req: &RpcRequest) -> Result<Option<GatewayCa
     // future bound, and the age bound is `CALLER_CONTEXT_MAX_AGE_MS` alone (#613's review, finding 1 —
     // an RPC frame does not make this node observe the sender's clock, so a zero tolerance refused
     // every envelope from a gateway a few ms ahead).
-    let now_ms = ctx.hlc.decision_now_ms();
     let drift = ctx.config.max_clock_drift_ms;
     // With no drift bound the future is still bounded — by the age bound, so a far-future envelope
     // (a re-dated replay on an unsigned mesh) is refused (#613's final review).
@@ -1163,7 +1252,11 @@ pub(crate) fn verify(ctx: &TaskCtx, req: &RpcRequest) -> Result<Option<GatewayCa
         _ => return Err(CallerError::ClientSignature("client_signature_malformed")),
     };
 
+    // Identity-and-lifecycle I5: the OIDC user's exchanged token, or its absence on an action.
+    let exchanged = exchanged_token_at(ctx, req, &env, &attestation, now_ms)?;
+
     Ok(Some(GatewayCaller {
+        exchanged,
         client_signed,
         misplaced_causal: env.x.contains_key("correlation") || env.x.contains_key("parent"),
         principal: env.p,
@@ -1177,22 +1270,77 @@ pub(crate) fn verify(ctx: &TaskCtx, req: &RpcRequest) -> Result<Option<GatewayCa
     }))
 }
 
+/// Identity-and-lifecycle I5: the envelope's exchanged token at this provider. A provider that verifies them — its
+/// `[oidc]` table sets `exchange_audience` — checks `so` (the gateway's signature over the token, with the key that
+/// verified the envelope) and the token ([`super::exchanged_token::check`]), and refuses an `oidc:` principal's action
+/// without one (`ot_required`). A provider that does not verify behaves as before I5. A build without `compliance`
+/// refuses any `ot` (`not_in_build`) rather than running the call unverified.
+#[allow(unused_variables)]
+fn exchanged_token_at(
+    ctx: &TaskCtx,
+    req: &RpcRequest,
+    env: &Envelope,
+    attestation: &CallerAttestation,
+    now_ms: u64,
+) -> Result<Option<Box<ExchangedToken>>, CallerError> {
+    #[cfg(not(feature = "compliance"))]
+    {
+        if env.ot.is_some() {
+            return Err(CallerError::ExchangedToken("not_in_build"));
+        }
+        Ok(None)
+    }
+    #[cfg(feature = "compliance")]
+    {
+        let Some(verifier) = ctx.oidc_verifier.get().filter(|v| v.config().exchange_audience.is_some()) else { return Ok(None) };
+        let Some(ot) = env.ot.as_deref() else {
+            if env.p.starts_with("oidc:") && super::exchanged_token::needs_exchanged_token(&ctx.config, req.kind()) {
+                return Err(CallerError::ExchangedToken("ot_required"));
+            }
+            return Ok(None);
+        };
+        // The binding is to the key that signed this envelope; on an unauthenticated mesh there is none.
+        let CallerAttestation::Signed { signer } = attestation else {
+            return Err(CallerError::ExchangedToken("ot_unverifiable"));
+        };
+        let (Some(n), Some(o), Some(so)) = (env.n, env.o.as_deref(), env.so.as_deref()) else {
+            return Err(CallerError::ExchangedToken("ot_unsigned"));
+        };
+        use base64::Engine as _;
+        let so: [u8; 64] = base64::engine::general_purpose::STANDARD
+            .decode(so)
+            .ok()
+            .and_then(|v| v.try_into().ok())
+            .ok_or(CallerError::ExchangedToken("ot_signature_malformed"))?;
+        if !crate::tls::verify_bytes(signer, &ot_signed_message(n, o, ot), &so) {
+            return Err(CallerError::BadSignature);
+        }
+        super::exchanged_token::check(verifier, ot, &env.p, signer, now_ms, ctx.config.max_clock_drift_ms)
+            .map(|t| Some(Box::new(t)))
+            .map_err(CallerError::ExchangedToken)
+    }
+}
+
 /// [`verify`] at a **receive boundary** — the one place a received request is checked against the
 /// replay window (post-360 row E). Call it exactly once per received frame (`rpc_rx`, the SDK serve
 /// stream, `llm.invoke`, the explain responder); everything that re-reads the request later calls
 /// [`verify`], which keeps no state. [`CallerError::Replayed`] must be dropped without an answer.
 pub(crate) fn verify_received(ctx: &TaskCtx, req: &RpcRequest) -> Result<Option<GatewayCaller>, CallerError> {
-    let verified = verify(ctx, req).inspect_err(|e| {
+    // One instant for the whole boundary: what verified a token unexpired is what the windows prune at (#759's review,
+    // M1 — the exchanged token's `exp` was read against the system clock and its window pruned against the HLC, which a
+    // peer can push ahead of it, so a token in its last moments was forgotten as it was admitted).
+    let now_ms = ctx.hlc.decision_now_ms();
+    let verified = verify_at(ctx, req, now_ms).inspect_err(|e| {
         if e.unanswered() {
             ctx.caller_replay.count_replay();
         }
     })?;
     if let Some(c) = &verified {
-        ctx.caller_replay.admit(c, ctx.hlc.decision_now_ms(), ctx.config.max_clock_drift_ms)?;
+        ctx.caller_replay.admit(c, now_ms, ctx.config.max_clock_drift_ms)?;
         // Identity-and-lifecycle I1: the client's `cn`, once per (principal, key, instance).
         #[cfg(feature = "tls")]
         if let Some(signed) = &c.client_signed {
-            let horizon = ctx.hlc.decision_now_ms().saturating_sub(CALLER_CONTEXT_MAX_AGE_MS.saturating_add(ctx.config.max_clock_drift_ms));
+            let horizon = now_ms.saturating_sub(CALLER_CONTEXT_MAX_AGE_MS.saturating_add(ctx.config.max_clock_drift_ms));
             let current = ctx.client_certs.mark(&c.principal).map(|m| m.key);
             match ctx.client_replay.admit(&c.principal, signed, current, horizon) {
                 Ok(()) => {}
@@ -1206,6 +1354,13 @@ pub(crate) fn verify_received(ctx: &TaskCtx, req: &RpcRequest) -> Result<Option<
         {
             // #742's review, item 4: an unsigned call for a certificate holder, counted where it runs too.
             ctx.unsigned_actions.note_at_provider(req.kind());
+        }
+        // Identity-and-lifecycle I5: an exchanged token's id, once at this provider while unexpired.
+        #[cfg(feature = "compliance")]
+        if let Some(t) = &c.exchanged {
+            ctx.exchanged_token_replay
+                .admit(&c.via, &c.principal, t, now_ms, ctx.config.max_clock_drift_ms)
+                .map_err(|r| CallerError::ExchangedToken(r.code()))?;
         }
         // X4: counted here, once per request, after the envelope verified — a forged one moves nothing.
         if c.misplaced_causal {
@@ -1469,6 +1624,25 @@ mod tests {
     /// A raw emission carries the client's bytes verbatim with the gateway as sender, so a frame the
     /// client prepended verifies as the gateway's own envelope. The pre-existing guard only caught
     /// *bare* bytes. Phase-C audit finding.
+    /// **A build without `compliance` refuses an exchanged token** (identity-and-lifecycle I5): it cannot verify one, so
+    /// a call carrying `ot` is refused `not_in_build` at call time, naming `compliance`, rather than run unverified.
+    /// Seen failing first with the refusal removed (the call admitted).
+    #[cfg(not(feature = "compliance"))]
+    #[tokio::test]
+    async fn a_build_without_compliance_refuses_an_exchanged_token() {
+        let a = agent(false);
+        a.start().await.unwrap();
+        let framed = frame_envelope_at(&a.task_ctx, a.node_id(), "oidc:idp/alice", &[], Bytes::from_static(b"{}"), None, None, None, Some("eyJ.a.b"), a.task_ctx.hlc.decision_now_ms()).unwrap();
+        let got = verify(&a.task_ctx, &request_from(a.node_id(), "mcp.invoke", framed));
+        let plain = frame_envelope_at(&a.task_ctx, a.node_id(), "oidc:idp/alice", &[], Bytes::from_static(b"{}"), None, None, None, None, a.task_ctx.hlc.decision_now_ms()).unwrap();
+        let without = verify(&a.task_ctx, &request_from(a.node_id(), "mcp.invoke", plain));
+        a.shutdown().await;
+        let err = got.expect_err("refused");
+        assert_eq!(err.code(), "not_in_build");
+        assert!(err.to_string().contains("compliance"), "{err}");
+        assert!(without.is_ok(), "a call without an ot is unchanged");
+    }
+
     #[test]
     fn a_client_supplied_caller_frame_is_detected() {
         // 8-byte nonce, then the frame magic — exactly where `split_frame` looks.
@@ -1745,6 +1919,7 @@ mod tests {
         let g2 = NodeId::new("127.0.0.1", 9002).unwrap();
         let mk = |via: &NodeId, p: String| GatewayCaller {
             client_signed: None,
+            exchanged: None,
             misplaced_causal: false,
             principal: p, via: via.clone(), scopes: vec![], issued_at_ms: 0,
             attestation: CallerAttestation::UnauthenticatedMesh, mandate: None, resource: None, envelope_id: None,
@@ -1789,7 +1964,7 @@ mod tests {
         let unsigned = serde_json::to_vec(&Envelope {
             v: 1, p: "oidc:idp/mallory".into(), via: a.node_id().to_string(), s: vec![], t: 0, k: None, sig: None,
             m: None,
-            r: None, n: None, o: None, sn: None, cs: None, cn: None, x: Default::default(),
+            r: None, n: None, o: None, sn: None, cs: None, cn: None, ot: None, so: None, x: Default::default(),
         }).unwrap();
         let req = request_from(a.node_id(), "k", raw_frame(&unsigned, b""));
         assert_eq!(verify(&a.task_ctx, &req), Err(CallerError::Unsigned));
@@ -1805,7 +1980,7 @@ mod tests {
                 k: Some(base64::engine::general_purpose::STANDARD.encode(rogue.verifying_key().to_bytes())),
                 sig: Some(base64::engine::general_purpose::STANDARD.encode(sig)),
                 m: None,
-                r: None, n: None, o: None, sn: None, cs: None, cn: None, x: Default::default(),
+                r: None, n: None, o: None, sn: None, cs: None, cn: None, ot: None, so: None, x: Default::default(),
             }).unwrap();
             let req = request_from(a.node_id(), "k", raw_frame(&forged, b"payload"));
             assert_eq!(verify(&a.task_ctx, &req), Err(CallerError::UnknownSigner));
@@ -1880,7 +2055,7 @@ mod tests {
         let env = serde_json::to_vec(&Envelope {
             v: 1, p: "oidc:idp/admin".into(), via: a.node_id().to_string(), s: vec![], t: 0, k: None, sig: None,
             m: None,
-            r: None, n: None, o: None, sn: None, cs: None, cn: None, x: Default::default(),
+            r: None, n: None, o: None, sn: None, cs: None, cn: None, ot: None, so: None, x: Default::default(),
         }).unwrap();
         let bytes = raw_frame(&env, br#"{"prompt":"review/echo","input":"unverified call","context":{}}"#);
         let req = request_from(a.node_id(), "llm.invoke", bytes.clone());
@@ -2018,6 +2193,7 @@ mod tests {
         let (gone, live) = (NodeId::new("127.0.0.1", 9611).unwrap(), NodeId::new("127.0.0.1", 9612).unwrap());
         let caller = |via: &NodeId, t: u64, id: u64| GatewayCaller {
             client_signed: None,
+            exchanged: None,
             misplaced_causal: false,
             principal: "p".into(), via: via.clone(), scopes: vec![], issued_at_ms: t,
             attestation: CallerAttestation::Signed { signer: [1u8; 32] }, mandate: None, resource: None, envelope_id: Some(id),
@@ -2042,6 +2218,7 @@ mod tests {
         let via = NodeId::new("127.0.0.1", 9601).unwrap();
         let caller = |t: u64, id: u64| GatewayCaller {
             client_signed: None,
+            exchanged: None,
             misplaced_causal: false,
             principal: "oidc:idp/alice".into(), via: via.clone(), scopes: vec![], issued_at_ms: t,
             attestation: CallerAttestation::Signed { signer: [1u8; 32] }, mandate: None, resource: None, envelope_id: Some(id),

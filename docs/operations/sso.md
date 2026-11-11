@@ -39,10 +39,19 @@ cfg.oidc = Some(mycelium::OidcConfig {
         ("auditors".into(),        vec!["audit:read".into()]),
     ]),
     jwks_uri: None, // None = discover via {issuer}/.well-known/openid-configuration
+    ..Default::default() // the exchange settings below, unset
 });
 ```
 
+`OidcConfig` implements `Default` with a TOML table's defaults (`group_claim = "groups"`, no group scopes, discovery,
+no exchange), so end every literal with `..Default::default()`; a field added later then does not break it.
+
 - **`issuer` / `audience`** are validated on every token (mismatch → 401).
+- **`exchange_audience`** (with `exchange_client_id`, and optionally `exchange_max_lifetime_secs`) makes this node
+  verify an OIDC user's **exchanged** token at its provider (identity-and-lifecycle I5; the feature page is
+  [`gateway-sso.md`](../features/gateway-sso.md)). It needs `[tls]`, and must differ from `audience`. **Do not set it
+  yet on a node that serves OIDC users:** no gateway in this release exchanges a token, so such a node refuses every
+  OIDC user's action (`ot_required`), and warns at start that it will (`deprecations.md` §96).
 - **`group_claim`** names the JWT claim holding the user's groups/roles — this is
   the main per-vendor knob (see §3).
 - **`group_scopes`** maps each IdP group to gateway scopes; a user's scopes are

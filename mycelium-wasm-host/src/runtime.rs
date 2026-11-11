@@ -870,6 +870,15 @@ mod tests {
     use mycelium::Capability;
     use std::sync::Mutex;
 
+    /// The invoke kind is the `cap.invoke/` family that a verifying provider requires an OIDC user's exchanged token for
+    /// (identity-and-lifecycle I5; the maintainer's decision of 2026-11-11 on #759's Q1). `mycelium`'s
+    /// `exchanged_token::CAP_INVOKE_PREFIX` matches this prefix; a change to the kind's shape changes both.
+    #[test]
+    fn the_invoke_kind_is_the_family_an_oidc_user_needs_an_exchanged_token_for() {
+        assert_eq!(cap_invoke_kind("text", "echo"), "cap.invoke/text/echo");
+        assert!(cap_invoke_kind("ns", "n").starts_with("cap.invoke/"));
+    }
+
     fn scratch_dir(tag: &str) -> std::path::PathBuf {
         static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let dir = std::env::temp_dir().join(format!(
