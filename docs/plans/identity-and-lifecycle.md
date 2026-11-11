@@ -1,6 +1,6 @@
 # Identity and lifecycle — keyed principals, signed decisions, cancellation under a per-call mandate, and the developer surface
 
-**Status:** **agreed with the maintainer on 2026-11-07**, rev 0.11 (rev 0.11 records the maintainer's four I5 decisions of 2026-11-11 and spike S-exchange's note, `docs/plans/spikes/2026-11-11-s-exchange.md`: the gateway exchanges under its own client credential, `oidc.exchange_audience` is an explicit setting both ends read, the envelope cap stays at 8 KiB, and "a replay refused" rests on the token's `jti` admitted once, since Keycloak binds no per-call value in a supported configuration; rows I2 and I4 are **not yet buildable**: I2's **R1–R4 open**, the round-3 review's questions, and I4's **N1–N5 open**, the round-2 review's questions, which each row's build PR must settle; rev 0.10 writes row I4 from spike S-cancel's note, `docs/plans/spikes/2026-11-07-s-cancel.md`, and takes #731's review and its confirm round: S-cancel re-measured, its reclamation fixed for the feeder, and I4's exit given an item for every D2 decision; rev 0.9 writes row I2 from spike S-succeed's note, `spikes/2026-11-07-s-succeed.md`, and #732's review: a `cert_pem` node re-roots live, the trust set and the successor certificate persist under `succession/`, every cached judgment is re-judged when the roots change, and old-CA records lose standing (decided in the confirm round); rev 0.8 records the agreement, its text rev 0.7's); proposed 2026-10-31. Work starts in §4's order: wave 1a's I0 and wave 1b's spikes in parallel. Five independent adversarial reviews —
+**Status:** **agreed with the maintainer on 2026-11-07**, rev 0.11 (rev 0.11 records the maintainer's four I5 decisions of 2026-11-11 and spike S-exchange's note, `docs/plans/spikes/2026-11-11-s-exchange.md`: the gateway exchanges under its own client credential, `oidc.exchange_audience` is an explicit setting both ends read, the envelope cap stays at 8 KiB; after #757's review, the maintainer's decision to extend the spike to sender binding, and the row rewritten to it: the exchanged token is DPoP-bound to the gateway's Ed25519 node key (Keycloak 26.8.2, default features), the provider refuses a token not bound to the key that signed its envelope, and replay rests on that and the token's `jti` admitted once; rows I2 and I4 are **not yet buildable**: I2's **R1–R4 open**, the round-3 review's questions, and I4's **N1–N5 open**, the round-2 review's questions, which each row's build PR must settle; rev 0.10 writes row I4 from spike S-cancel's note, `docs/plans/spikes/2026-11-07-s-cancel.md`, and takes #731's review and its confirm round: S-cancel re-measured, its reclamation fixed for the feeder, and I4's exit given an item for every D2 decision; rev 0.9 writes row I2 from spike S-succeed's note, `spikes/2026-11-07-s-succeed.md`, and #732's review: a `cert_pem` node re-roots live, the trust set and the successor certificate persist under `succession/`, every cached judgment is re-judged when the roots change, and old-CA records lose standing (decided in the confirm round); rev 0.8 records the agreement, its text rev 0.7's); proposed 2026-10-31. Work starts in §4's order: wave 1a's I0 and wave 1b's spikes in parallel. Five independent adversarial reviews —
 four on one day, the fifth on the merged document (#715's thread, 2026-11-05; the thread, this paragraph and the *Revised
 from* column are the record of all five): rev 0.1 against the decisions, rev 0.3 against the mechanisms, rev 0.4 and rev 0.5 each against five
 premises, both with the verdict *not yet buildable*. Every premise failure sat in wave 1 (I0–I4) or in the developer
@@ -203,49 +203,111 @@ M-of-N; an `oidc:` decider; a relay at an un-upgraded gateway.
 #### I5 · OIDC by token exchange (D6)
 
 *Settled by spike S-exchange ([note](spikes/2026-11-11-s-exchange.md), 2026-11-11; evidence at tag
-`spike/s-exchange-2026-11-11`) and the maintainer's decisions of the same day (rev 0.11).*
+`spike/s-exchange-2026-11-11-r2`) and the maintainer's decisions of the same day (rev 0.11).*
 
-**What:** RFC 8693 exchange at the IdP — **by the gateway, under its own client credential** *(decided 2026-11-11)*:
-new `[oidc]` settings for the IdP's token endpoint and the gateway's client id, the client secret read from an
-environment variable, each refused by name at start when unset; clients do not change. The audience asked for is
-**`oidc.exchange_audience`** *(new, decided)*, an explicit setting both the gateway and the provider read from their
-own `[oidc]` table — not `cluster_name`, not the federation `DomainId`. **The exchanged token is not bound to the
-call** (rev 0.11; rev 0.10 read "bound to `cn`"): the spike found no mechanism by which Keycloak, in a supported configuration, carries a
-value from the exchange request into the token — request parameters, the `claims` parameter with the claims-parameter
-mappers attached, session-note mappers and `actor_token` were each tried and ignored; only the **experimental**
-`dynamic-scopes` feature binds one (a `cn:<value>` scope, configured on the user's client too). The assertion travels in
-`ot` *(new)*; the provider validates it against the issuer's JWKS, from **its own `[oidc]` table** (issuer, JWKS,
-`exchange_audience`) — the verifier is `#[cfg(feature = "compliance")]`, so a provider built without it refuses a call
-carrying `ot` at call time as `not_in_build` naming `compliance` — the response error `govern.rs` already answers for a
-feature the build lacks, not v2.18.1's start-time refusal — rather than running it unverified. **Replay** (rev 0.11):
-the provider admits a token's `jti` once while it is unexpired, beside the envelope's own replay window, and checks
-`azp` against the gateway's client id from its `[oidc]` table; so the gateway exchanges afresh for each call (about
-4 ms at p50 on loopback in the spike). **The envelope cap stays at `MAX_ENVELOPE_BYTES` (8 KiB under a `u16` prefix)**
-*(decided 2026-11-11)*: the spike measured an envelope carrying a presented grant, a `cs` and Keycloak's 1 218 B
-exchanged token at **2 854 B** (5 338 B under the cap); the cap holds a token up to about 6.5 KiB beside a grant and `cs`,
-and past it the producer's existing refusal answers — `GatewayDispatchError::ContextTooLarge`,
-`caller_context_too_large`, counted in `mycelium_gateway_caller_refusals_total`. A gateway-audience token is never
-forwarded; `doctor` reports `id.oidc_exchange` *(new)*. **Depends on:** I1. **Exit:** an OIDC user's call verified at
-the provider; **the same exchanged token presented twice refused** (by its `jti`; rev 0.11 — the spike's reading of
-"a replay refused"); a gateway-audience token refused by name; a token whose `azp` is not the gateway's client refused;
-a provider without `compliance` refusing `ot` as `not_in_build`; an oversized envelope refused
-`caller_context_too_large`; a member's forged `ot` refused by the JWKS; the exchange's settings refused by name at start
-when unset. **Not built, stated:** an IdP without exchange (the client certificate is the path); a decision signed by
-an assertion; **a token bound to its call** (an experimental IdP feature, shown only for Keycloak 26.2.5's
-`dynamic-scopes`); **a member that copies an exchanged token out of a frame in transit and presents it before the honest
-call** — admitted once, since the token names no call (the trust boundary of a member reading a relayed envelope);
-another IdP than Keycloak (the spike ran one).
+**What:** RFC 8693 exchange at the IdP **by the gateway, under its own client credential**, the exchanged token
+**sender-bound to the gateway's node key by DPoP** (RFC 9449), and verified at the provider.
+
+- **The exchange** *(decided 2026-11-11)*: the gateway exchanges the user's gateway-audience token at
+  `[oidc] exchange_token_endpoint` *(new)* as `exchange_client_id` *(new)*, with the client secret read from the
+  environment variable `exchange_client_secret_env` names *(new; default `MYCELIUM_OIDC_EXCHANGE_SECRET`)*, for
+  `audience = exchange_audience` *(new)*. It sends a DPoP proof signed with its Ed25519 node identity key (`alg:
+  EdDSA`). Keycloak 26.8.2 accepts EdDSA and issues `cnf.jkt` equal to that key's RFC 7638 thumbprint. Clients do not
+  change. A gateway-audience token is never forwarded. The exchanged assertion travels in `ot` *(new)*, once per call.
+- **When a node exchanges, and when it verifies** (#757's review, M4). The trigger, at both ends, is
+  **`exchange_audience` set** in a node's `[oidc]` table; nothing else.
+  - A gateway with an `[oidc]` table and no `exchange_audience` behaves exactly as today: no exchange, no `ot`.
+  - A gateway with `exchange_audience` refuses to start, by name, when `exchange_token_endpoint` or
+    `exchange_client_id` is unset, or when the variable `exchange_client_secret_env` names is unset or empty
+    (`oidc_exchange_endpoint_unset`, `oidc_exchange_client_unset`, `oidc_exchange_secret_unset`).
+  - A provider with `exchange_audience` verifies `ot`, and needs `exchange_client_id` too: the `azp` it accepts.
+  - A provider-only `[oidc]` table still fills today's required `audience`. It is read only to validate bearers at a
+    gateway, so a provider-only node sets the value its gateways use. Nothing in it is new.
+- **The provider's check, in order.** The verifier is `#[cfg(feature = "compliance")]`: a provider built without it
+  refuses a call carrying `ot` at call time as `not_in_build`, naming `compliance` (the response error `govern.rs`
+  already answers for a feature the build lacks), rather than running it unverified. The checks:
+  1. The signature, against the issuer's JWKS from the provider's **own** `[oidc]` table (`issuer`, `jwks_uri` or
+     discovery). A member's forged `ot` is refused here.
+  2. `aud` contains `exchange_audience`; `azp` equals `exchange_client_id` (`ot_wrong_client`).
+  3. **Sender binding** (decided with the spike, 2026-11-11): `cnf.jkt` is present (`ot_unbound`), and equals the RFC
+     7638 thumbprint of the Ed25519 key that verified **this envelope's** gateway signature (`ot_bound_to_another_key`).
+     The envelope's signature is the proof of possession, made per call over the principal, `o`, `n`, the time and the
+     payload's digest. A member that lifts an `ot` signs its own envelope with its own key, and is refused (#757's
+     review, H1, H2).
+  4. **The subject** (M2): the envelope's `p` equals `oidc:{iss}/{sub}` of the token (`ot_subject_mismatch`).
+  5. **Lifetime and clocks** (M1): `exp`, `iat` and `nbf`, under the leeway of `max_clock_drift_ms`. A token whose
+     `exp − iat` exceeds `exchange_max_lifetime_secs` *(new, default 300, at most 3 600)* is refused
+     (`ot_lifetime_too_long`).
+  6. **Replay** (M1): the token's `(iss, jti)` is admitted **once at this provider** while it is unexpired. A token
+     without `jti` is refused (`ot_without_jti`); Entra's `uti` is not read.
+- **The replay cache** (M1):
+  - **Per provider**, in memory, keyed `(iss, jti)`, each entry held until its `exp` plus the leeway.
+  - **At most 65 536 entries per gateway**, as the envelope's replay window holds. A new token from a gateway whose
+    window is full is refused, failing closed (`ot_window_full`, counted).
+  - **After a restart the cache is empty.** A token presented before the restart can be presented once more after it,
+    while unexpired, **only in an envelope signed by the bound gateway's key**: the sender binding holds across the
+    restart. That leaves the gateway-as-attacker case below.
+- **An `oidc:` principal's action needs an `ot`** (M2). At a provider that verifies (`exchange_audience` set), an
+  envelope whose `p` is `oidc:…` and whose kind is a protected action (`mcp.invoke`, `skill.invoke`, a companion's
+  write kind) is refused without one (`ot_required`). A provider that does not verify behaves as today.
+- **The scopes** (M2) come from the envelope's `s`, as today: the gateway's mapping of the user's groups through its
+  `group_scopes`. The `ot` establishes **who** the user is, not what they may do. The provider does not re-derive scopes
+  from the token.
+- **The gateway as attacker** (M3). A gateway holding the client secret receives users' gateway-audience tokens on
+  every request. With them it can obtain an `ot` for any user who calls through it, at will, bound to its own key,
+  until that user's token expires.
+  - The binding stops a **member** acting as the user. It does not stop the **gateway** the user called through.
+  - `azp` names the client, which every gateway of the fleet may share, not a node or a call.
+  - A compromised gateway acts as every user who calls through it, as a compromised gateway does today.
+- **The envelope cap stays at `MAX_ENVELOPE_BYTES` (8 KiB under a `u16` prefix)** *(decided 2026-11-11)*.
+  - The spike measured an envelope with a presented grant, a `cs` and Keycloak's 1 309 B DPoP-bound token at **2 945 B**,
+    5 247 B under the cap.
+  - The cap holds a token of up to **6.4 KiB** beside a grant and `cs`.
+  - Past it, the producer's existing refusal answers: `GatewayDispatchError::ContextTooLarge`,
+    `caller_context_too_large`, counted in `mycelium_gateway_caller_refusals_total`.
+- **Signed with the envelope.** The gateway's signature covers the `ot`'s SHA-256: a new domain-separated signed
+  message is used when `ot` is present, so a relay cannot swap one user's token into another's envelope.
+- `doctor` reports `id.oidc_exchange` *(new)*.
+
+**Depends on:** I1.
+
+**Exit:**
+- an OIDC user's call verified at the provider;
+- the same exchanged token presented twice refused, by its `jti` (the spike's reading of "a replay refused");
+- **a token lifted into another node's envelope refused `ot_bound_to_another_key`**, and a token without `cnf`
+  refused `ot_unbound`;
+- a token whose subject is not the envelope's principal refused;
+- a token whose `azp` is not the gateway's client refused;
+- a gateway-audience token refused by name;
+- a provider without `compliance` refusing `ot` as `not_in_build`;
+- an oversized envelope refused `caller_context_too_large`;
+- a member's forged `ot` refused by the JWKS;
+- the exchange's settings refused by name at start when unset, and an existing `[oidc]` gateway without
+  `exchange_audience` unchanged;
+- an `oidc:` action without an `ot` refused at a verifying provider.
+
+**Not built, stated:**
+- an IdP without exchange (the client certificate is the path);
+- a decision signed by an assertion;
+- a token bound to its **call**: the spike found no supported mechanism, and sender binding is what is built;
+- the exchanging gateway reusing its own bound token in several envelopes until `exp` (refused at each provider by
+  `jti`, once per provider);
+- the gateway as attacker (M3);
+- the mTLS route (RFC 8705), shown viable and not chosen;
+- an IdP other than Keycloak, and Entra's `uti`;
+- the provider deriving scopes from the token.
 
 ### Wave 1b — three spikes, then the rows they settle (D8)
 
 A spike is one branch, at most two days, read-only on `main`, whose report is a dated note in `docs/plans/spikes/`
 *(new directory)* quoting what ran, what it measured and what it could not do. Its row is written afterwards from that
-note and goes through the standing review as any row does. No spike ships.
+note and goes through the standing review as any row does. No spike ships. The table below also holds **S-exchange**, a spike for wave 1a's row I5, added on the maintainer's instruction of 2026-11-11.
 
 | Spike | Question only code can answer | Done when |
 |---|---|---|
 | **S-cancel** | A `call:` mandate minted at admission reaches the provider before its checkpoint gossips. Carry the first checkpoint **inside the envelope** beside the mandate, through `assess` and `admit_after` to `begin`; measure the added bytes and the admission latency against today's grant path; show a revoked term read `Refused`; and two bounds the row must state: a term revoked between the gateway's framing and the provider's `admit_after` carries a checkpoint that predates the revocation, so the provider registers the work and stops it only when the revoking checkpoint arrives — the cancel's effect is gossip latency plus the drain bound; and `drain_bound` is `Unbounded` for the unenforced and unconfirmable classes ([`authority.rs`](../../src/mandate/authority.rs)), where a cancel writes `Refused` and stops nothing — the cancel receipt names the drain class it hit, or answers `DeliveryUnknown`. | a call registered with `begin` without a KV round-trip, or the bounded wait's cost measured; the memory-reclamation hook shown on 10⁵ calls |
 | **S-succeed** | A node on `cert_pem` (secure profile, no CA key) takes a certificate issued under a successor CA **without a restart**: a reload path through `activate`, a two-root `RootCertStore`, `verify_member_cert` across the window. | the handshake succeeds under the new root on a live node, or the spike records that a restart is required and why |
+| **S-exchange** *(wave 1a, added 2026-11-11)* | Can a per-call value be bound into a token Keycloak exchanges (RFC 8693), and failing that, can the token be **bound to the exchanging gateway** (DPoP, RFC 8705 mTLS) on a supported release; the exchanged token's size against the 8 KiB envelope cap. | a token carrying the binding on a pinned image, or the route shown not viable; the envelope measured with a grant and a `cs` — **done** ([note](spikes/2026-11-11-s-exchange.md)): no per-call binding in a supported configuration; DPoP and mTLS sender binding both viable on 26.8.2 with default features; 2 945 B |
 | **S-presence** | `dev` signs with a Secure Enclave P-256 key from a **team-signed bundle**, verified by one P-256-aware verifier; the negative probe (`interactionNotAllowed` fails), `kSecAttrTokenIDSecureEnclave`, `biometryCurrentSet`, a fresh context per approval; and whether the release pipeline can produce such a bundle at all. | a signature produced only after the prompt and verified; the pipeline question answered yes or no; if no, I7 falls back to `tty` everywhere, graded |
 
 #### I4 · Cancellation under a `call:`-scoped mandate — *written from S-cancel ([note](spikes/2026-11-07-s-cancel.md), 2026-11-07; evidence at tag `spike/s-cancel-2026-11-07-r2`) — **not yet buildable: N1–N5 open***
@@ -709,7 +771,7 @@ supplied*.
 ## 4 · Sequence and release shape
 
 ```
-Wave 1a (identity for services, one MINOR):  I0 ──> I1 ──> I3 ──> I5
+Wave 1a (identity for services, one MINOR):  I0 ──> I1 ──> I3 ──> S-exchange ──> I5
 Wave 1b (spikes, in parallel with 1a's PRs):  S-cancel ──> I4 · S-succeed ──> I2 · S-presence ──> I7   (one MINOR)
 Wave 2 (developer surface, one MINOR):        N3, N5 ──> N4 (fleet, wiring) ──> N6 ──> N1 ──> E1
                                                I7 ──> N4 (identity) ──> N7 ──> E6
@@ -731,7 +793,10 @@ Any time:                                      E2, E3, E4
 - **I5:** `ot` optional; the provider's egress list must admit the issuer; a provider without `compliance` refuses a call
   carrying `ot` as `not_in_build`; an envelope past 8 KiB is refused `caller_context_too_large`, as today. A gateway
   that exchanges needs the token endpoint, its client id and the secret's environment variable, each refused by name at
-  start when unset; a provider verifying `ot` needs its own `[oidc]` table with `exchange_audience` (rev 0.11).
+  start when unset; a provider verifying `ot` needs its own `[oidc]` table with `exchange_audience` (rev 0.11) and
+  `exchange_client_id` (the `azp` it accepts), and still fills today's required `audience`. Nothing changes for an
+  `[oidc]` table without `exchange_audience`. At a verifying provider an `oidc:` action without an `ot` is refused, so
+  upgrade the gateways and set their exchange before the providers set `exchange_audience`.
 - **I2:** a `ca_cert_pem` holding more than one certificate is refused by name at start. **Before upgrading, an operator
   whose `ca_cert_pem` holds an extra certificate removes it**, keeping only the fleet CA's: the extra certificate was
   ignored before, so removing it changes nothing. Only `ca_cert_pem` is affected, not `cert_pem` or the on-node CA, and
