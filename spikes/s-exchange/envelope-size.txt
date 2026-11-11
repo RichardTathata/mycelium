@@ -1,0 +1,8 @@
+SX envelope bare=485 +grant=1419 +grant+cs=1628 cap=8192
+SX with ot of 1218 B: 2854 B (5338 B under the cap)
+SX with ot of 1235 B: 2871 B (5321 B under the cap)
+SX with ot of 2048 B: 3684 B (4508 B under the cap)
+SX with ot of 4096 B: 5732 B (2460 B under the cap)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1805 filtered out; finished in 0.40s
+
+[exited with code 0]

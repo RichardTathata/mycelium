@@ -1168,3 +1168,38 @@ async fn an_issue_the_node_cannot_sign_records_that_nothing_ran() {
     let executions: Vec<Execution> = journal.iter().filter(|r| r.kind == RecordKind::Execution && r.operation_id == decided).map(|r| r.execution).collect();
     assert_eq!(executions, vec![Execution::None], "RECORDED: nothing ran");
 }
+
+/// **Spike S-exchange (2026-11-11), throwaway: the envelope's size with a grant, a `cs` and an exchanged token.**
+/// Frames a real envelope through the one producer — an `oidc:` principal of Keycloak's shape, `mcp:invoke`, the
+/// mandate a client presents for a grant issued on this node, and a client signature — and reports its bytes. The
+/// exchanged token is not a field yet; its cost is the bytes `,"ot":"<token>"` adds, at the sizes Keycloak 26.2.5
+/// issued in the spike (1218 B, 1235 B with one dynamic-scope value). Never merges.
+#[tokio::test]
+async fn spike_s_exchange_envelope_size() {
+    let dir = scratch("sx-size");
+    let http_port = alloc_port();
+    let (a, _ran) = started(&dir, http_port).await;
+    let key = forecaster_key(&a, &dir);
+    let args = serde_json::json!({"city": "Lyon", "days": 3});
+    let (asked, grant) = ask_and_issue(http_port, &args).await;
+    let resource = asked["resource"].as_str().unwrap().to_string();
+    let mandate = presented(&grant, &resource, &args, &key)["mandate"].clone();
+    let signer = crate::ClientSigner::new(key.clone(), FORECASTER);
+    let cs = signer.sign_tools_call(TOOL, &args).unwrap();
+    let principal = "oidc:http://127.0.0.1:18080/realms/fleet/5f1d2c7e-8a3b-4c9d-9e0f-1a2b3c4d5e6f";
+    let app = bytes::Bytes::from(serde_json::to_vec(&serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": TOOL, "arguments": args}})).unwrap());
+    let measure = |mandate: Option<&serde_json::Value>, client: Option<&(crate::ClientSignature, crate::ClientNonce)>| {
+        let framed = crate::agent::gateway_caller::frame_with_client_signature_at(&a.task_ctx, a.node_id(), principal, &["mcp:invoke".to_string()], app.clone(), mandate, Some(&resource), client, 1_794_000_000_000).expect("fits today");
+        framed.len() - 5 - 2 - app.len()
+    };
+    let bare = measure(None, None);
+    let with_grant = measure(Some(&mandate), None);
+    let with_grant_cs = measure(Some(&mandate), Some(&cs));
+    a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+    let ot = |token: usize| token + r#","ot":"""#.len();
+    println!("SX envelope bare={bare} +grant={with_grant} +grant+cs={with_grant_cs} cap={}", crate::agent::gateway_caller::MAX_ENVELOPE_BYTES);
+    for token in [1218usize, 1235, 2_048, 4_096] {
+        println!("SX with ot of {token} B: {} B ({} B under the cap)", with_grant_cs + ot(token), crate::agent::gateway_caller::MAX_ENVELOPE_BYTES as i64 - (with_grant_cs + ot(token)) as i64);
+    }
+}

@@ -1,0 +1,5 @@
+{"probe": "client_credentials_dynamic_scope", "scope": "cn:0194f2a07c1e0000-3f9a5c1d2e4b6a70-17 profile email", "status": 200}
+{"probe": "subject_with_dynamic_scope", "scope": "openid cn:0194f2a07c1e0000-3f9a5c1d2e4b6a70-17 profile email", "status": 200}
+{"probe": "exchange_keeps_subjects_dynamic_scope", "scope": "cn:0194f2a07c1e0000-3f9a5c1d2e4b6a70-17 profile email", "status": 200}
+{"probe": "exchange_new_dynamic_scope_value", "scope": "cn:another-call-0002 profile email", "status": 200}
+{"probe": "exchange_no_scope_param", "scope": "profile email", "status": 200}

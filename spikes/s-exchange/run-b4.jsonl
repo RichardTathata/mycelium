@@ -1,0 +1,4 @@
+{"probe": "subject_without_dynamic_scope", "scope": "profile email", "status": 200}
+{"bytes": 1235, "jti": "ntrtte:712ded7e-965d-45e3-a4f7-2e3393fa017a", "probe": "exchange_binds_call_value", "scope": "profile email cn:call-0003", "status": 200}
+{"bytes": 1235, "jti": "ntrtte:f941b53f-e6d1-4147-bfe8-512a120f81dc", "probe": "exchange_binds_another_call_value", "scope": "cn:call-0004 profile email", "status": 200}
+{"bytes": 1253, "jti": "ntrtte:5aff51b6-1992-4000-81dc-525909370823", "probe": "exchange_two_values", "scope": "cn:call-0006 cn:call-0005 profile email", "status": 200}

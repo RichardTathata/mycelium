@@ -1,0 +1,7 @@
+{"error": null, "name": "claims-param", "probe": "add_mapper", "status": 201}
+{"error": null, "name": "claims-param-idtoken", "probe": "add_mapper", "status": 201}
+{"error": null, "name": "session-note-cn", "probe": "add_mapper", "status": 201}
+{"error": null, "name": "session-note-cn-bare", "probe": "add_mapper", "status": 201}
+{"bytes": 1218, "extra_claims": [], "issued_token_type": "urn:ietf:params:oauth:token-type:access_token", "nonce_anywhere": false, "probe": "claims_param_access_token", "status": 200}
+{"bytes": 1031, "extra_claims": [], "issued_token_type": "urn:ietf:params:oauth:token-type:id_token", "nonce_anywhere": false, "probe": "claims_param_id_token", "status": 200}
+{"bytes": 1218, "extra_claims": [], "issued_token_type": "urn:ietf:params:oauth:token-type:access_token", "nonce_anywhere": false, "probe": "standard_claim_via_claims_param", "status": 200}
