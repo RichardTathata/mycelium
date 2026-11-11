@@ -216,16 +216,24 @@ M-of-N; an `oidc:` decider; a relay at an un-upgraded gateway.
   issued `cnf.jkt` equal to that key's RFC 7638 thumbprint.
 - **The node key signs a JWS** (#757's confirm round, N2). The DPoP proof is a JWS: the node's Ed25519 key signs
   `BASE64URL(header) "." BASE64URL(payload)`, which begins `eyJ` and is printable text with no zero byte. That cannot be
-  any message the node key signs for Mycelium:
-  - every tagged message begins with its `mycelium.` or `mycelium:` domain tag (`grep -rhoE 'b"mycelium[^"]*"' src
-    mycelium-core/src`);
-  - the four kinds still signed over **untagged** canonical bytes — role claims (`rbac.rs`), audit records and
-    checkpoints (`audit.rs`) and v1 revocation events (`revocation.rs`), as `GossipAgent::sign_with_identity`'s doc
-    says — are `serde_fixint` encodings whose first field is a `NodeId`, written as a `u64` little-endian length, so
-    their bytes 2–7 are zero for any real node id.
+  any message the node key signs for Mycelium, because every such message has one of three shapes, none of them a JWS
+  signing input (#757's second confirm round):
+  - **a raw `mycelium` tag first:** `DOMAIN_SEP`, `DOMAIN_SEP_ID`, `ID_MARKER_SEP`, `GRANT_DECISION_TAG`,
+    revocation's `V2_DOMAIN`, `possession_message`, and the identity-proof, consensus and KV tags;
+  - **a zero byte within the first eight:** the length-prefixed forms put a `u32` little-endian length before their
+    tag (grants and checkpoints, `Mandate::canonical_bytes` and `RevocationCheckpoint`, signed at `http/grants.rs`;
+    knowledge records and heads; cohort declarations; `MemberRemoval`; the federation descriptor, policy, call and
+    catalogue), so bytes 1–3 are zero. The untagged `serde_fixint` kinds whose first field is a `NodeId` — role
+    claims (`rbac.rs`), audit records and checkpoints (`audit.rs`), v1 revocation events (`revocation.rs`) — write
+    it as a `u64` little-endian length of at most about 47, so bytes 1–7 are zero. `RightsHead::canonical_bytes`
+    (`control/ledger.rs`) is the same shape with a `PrincipalId` first; whether the private RA companion signs it with
+    a node key is not visible from this repository;
+  - **`{` first:** AgentFacts' canonical JSON, which companions sign through `sign_with_identity`.
 
-  So no DPoP proof verifies as a Mycelium message, and no Mycelium signature verifies as a DPoP proof. This rests on
-  the shape of those four, not on a tag: a fifth untagged kind would have to be checked the same way. Clients do not
+  A JWS signing input is base64url text joined by `.`: it holds no zero byte and cannot begin with `{` or with a
+  `mycelium` tag, so no DPoP proof verifies as a Mycelium message, and no Mycelium signature verifies as a DPoP proof.
+  **The rule this rests on:** every message signed with the node key must keep one of those three shapes; a new signed
+  form is checked against them before it ships. Clients do not
   change. A gateway-audience token is never forwarded. The exchanged assertion travels in `ot` *(new)*, once per call.
 - **When a node exchanges, and when it verifies** (#757's review, M4). The trigger, at both ends, is
   **`exchange_audience` set** in a node's `[oidc]` table; nothing else.
