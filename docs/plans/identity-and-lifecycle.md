@@ -1,6 +1,6 @@
 # Identity and lifecycle — keyed principals, signed decisions, cancellation under a per-call mandate, and the developer surface
 
-**Status:** **agreed with the maintainer on 2026-11-07**, rev 0.10 (rows I2 and I4 are **not yet buildable**: I2's **R1–R4 open**, the round-3 review's questions, and I4's **N1–N5 open**, the round-2 review's questions, which each row's build PR must settle; rev 0.10 writes row I4 from spike S-cancel's note, `docs/plans/spikes/2026-11-07-s-cancel.md`, and takes #731's review and its confirm round: S-cancel re-measured, its reclamation fixed for the feeder, and I4's exit given an item for every D2 decision; rev 0.9 writes row I2 from spike S-succeed's note, `spikes/2026-11-07-s-succeed.md`, and #732's review: a `cert_pem` node re-roots live, the trust set and the successor certificate persist under `succession/`, every cached judgment is re-judged when the roots change, and old-CA records lose standing (decided in the confirm round); rev 0.8 records the agreement, its text rev 0.7's); proposed 2026-10-31. Work starts in §4's order: wave 1a's I0 and wave 1b's spikes in parallel. Five independent adversarial reviews —
+**Status:** **agreed with the maintainer on 2026-11-07**, rev 0.11 (rev 0.11 records the maintainer's four I5 decisions of 2026-11-11 and spike S-exchange's note, `docs/plans/spikes/2026-11-11-s-exchange.md`: the gateway exchanges under its own client credential, `oidc.exchange_audience` is an explicit setting both ends read, the envelope cap stays at 8 KiB, and "a replay refused" rests on the token's `jti` admitted once, since Keycloak binds no per-call value in a supported configuration; rows I2 and I4 are **not yet buildable**: I2's **R1–R4 open**, the round-3 review's questions, and I4's **N1–N5 open**, the round-2 review's questions, which each row's build PR must settle; rev 0.10 writes row I4 from spike S-cancel's note, `docs/plans/spikes/2026-11-07-s-cancel.md`, and takes #731's review and its confirm round: S-cancel re-measured, its reclamation fixed for the feeder, and I4's exit given an item for every D2 decision; rev 0.9 writes row I2 from spike S-succeed's note, `spikes/2026-11-07-s-succeed.md`, and #732's review: a `cert_pem` node re-roots live, the trust set and the successor certificate persist under `succession/`, every cached judgment is re-judged when the roots change, and old-CA records lose standing (decided in the confirm round); rev 0.8 records the agreement, its text rev 0.7's); proposed 2026-10-31. Work starts in §4's order: wave 1a's I0 and wave 1b's spikes in parallel. Five independent adversarial reviews —
 four on one day, the fifth on the merged document (#715's thread, 2026-11-05; the thread, this paragraph and the *Revised
 from* column are the record of all five): rev 0.1 against the decisions, rev 0.3 against the mechanisms, rev 0.4 and rev 0.5 each against five
 premises, both with the verdict *not yet buildable*. Every premise failure sat in wave 1 (I0–I4) or in the developer
@@ -202,18 +202,39 @@ M-of-N; an `oidc:` decider; a relay at an un-upgraded gateway.
 
 #### I5 · OIDC by token exchange (D6)
 
-**What:** RFC 8693 exchange at the IdP for `aud = mycelium:<domain>` bound to `cn`; the assertion in `ot` *(new)*;
-the provider validates it against the issuer's JWKS — the verifier is `#[cfg(feature = "compliance")]`, so a provider
-built without it refuses a call carrying `ot` at call time as `not_in_build` naming `compliance` — the response error
-`govern.rs` already answers for a feature the build lacks, not v2.18.1's start-time refusal — rather than running it
-unverified; the envelope is capped at `MAX_ENVELOPE_BYTES` (8 KiB under a `u16` prefix), so an assertion beside `m` and
-`cs` can exceed it and the producer's existing refusal answers — `GatewayDispatchError::ContextTooLarge`,
-`caller_context_too_large`, counted in `mycelium_gateway_caller_refusals_total` — whether the cap rises is the
-maintainer's; a gateway-audience token is never forwarded; `doctor` reports
-`id.oidc_exchange` *(new)*. **Depends on:** I1. **Exit:** an OIDC user's call verified at the provider; a replay
-refused; a gateway-audience token refused by name; a provider without `compliance` refusing `ot` as `not_in_build`; an
-oversized envelope refused `caller_context_too_large`; a member's forged `ot` refused by the JWKS. **Not built, stated:** an
-IdP without exchange (the client certificate is the path); a decision signed by an assertion.
+*Settled by spike S-exchange ([note](spikes/2026-11-11-s-exchange.md), 2026-11-11; evidence at tag
+`spike/s-exchange-2026-11-11`) and the maintainer's decisions of the same day (rev 0.11).*
+
+**What:** RFC 8693 exchange at the IdP — **by the gateway, under its own client credential** *(decided 2026-11-11)*:
+new `[oidc]` settings for the IdP's token endpoint and the gateway's client id, the client secret read from an
+environment variable, each refused by name at start when unset; clients do not change. The audience asked for is
+**`oidc.exchange_audience`** *(new, decided)*, an explicit setting both the gateway and the provider read from their
+own `[oidc]` table — not `cluster_name`, not the federation `DomainId`. **The exchanged token is not bound to the
+call** (rev 0.11; rev 0.10 read "bound to `cn`"): the spike found no mechanism by which Keycloak, in a supported configuration, carries a
+value from the exchange request into the token — request parameters, the `claims` parameter with the claims-parameter
+mappers attached, session-note mappers and `actor_token` were each tried and ignored; only the **experimental**
+`dynamic-scopes` feature binds one (a `cn:<value>` scope, configured on the user's client too). The assertion travels in
+`ot` *(new)*; the provider validates it against the issuer's JWKS, from **its own `[oidc]` table** (issuer, JWKS,
+`exchange_audience`) — the verifier is `#[cfg(feature = "compliance")]`, so a provider built without it refuses a call
+carrying `ot` at call time as `not_in_build` naming `compliance` — the response error `govern.rs` already answers for a
+feature the build lacks, not v2.18.1's start-time refusal — rather than running it unverified. **Replay** (rev 0.11):
+the provider admits a token's `jti` once while it is unexpired, beside the envelope's own replay window, and checks
+`azp` against the gateway's client id from its `[oidc]` table; so the gateway exchanges afresh for each call (about
+4 ms at p50 on loopback in the spike). **The envelope cap stays at `MAX_ENVELOPE_BYTES` (8 KiB under a `u16` prefix)**
+*(decided 2026-11-11)*: the spike measured an envelope carrying a presented grant, a `cs` and Keycloak's 1 218 B
+exchanged token at **2 854 B** (5 338 B under the cap); the cap holds a token up to about 6.5 KiB beside a grant and `cs`,
+and past it the producer's existing refusal answers — `GatewayDispatchError::ContextTooLarge`,
+`caller_context_too_large`, counted in `mycelium_gateway_caller_refusals_total`. A gateway-audience token is never
+forwarded; `doctor` reports `id.oidc_exchange` *(new)*. **Depends on:** I1. **Exit:** an OIDC user's call verified at
+the provider; **the same exchanged token presented twice refused** (by its `jti`; rev 0.11 — the spike's reading of
+"a replay refused"); a gateway-audience token refused by name; a token whose `azp` is not the gateway's client refused;
+a provider without `compliance` refusing `ot` as `not_in_build`; an oversized envelope refused
+`caller_context_too_large`; a member's forged `ot` refused by the JWKS; the exchange's settings refused by name at start
+when unset. **Not built, stated:** an IdP without exchange (the client certificate is the path); a decision signed by
+an assertion; **a token bound to its call** (an experimental IdP feature, shown only for Keycloak 26.2.5's
+`dynamic-scopes`); **a member that copies an exchanged token out of a frame in transit and presents it before the honest
+call** — admitted once, since the token names no call (the trust boundary of a member reading a relayed envelope);
+another IdP than Keycloak (the spike ran one).
 
 ### Wave 1b — three spikes, then the rows they settle (D8)
 
@@ -708,7 +729,9 @@ Any time:                                      E2, E3, E4
   `mycelium-client://` certificate refused at the mesh from this release; pre-row-Q node certificates unaffected.
 - **I3:** an unsigned decision body counted then refused; `grant:relay` inert at an un-upgraded gateway.
 - **I5:** `ot` optional; the provider's egress list must admit the issuer; a provider without `compliance` refuses a call
-  carrying `ot` as `not_in_build`; an envelope past 8 KiB is refused `caller_context_too_large`, as today.
+  carrying `ot` as `not_in_build`; an envelope past 8 KiB is refused `caller_context_too_large`, as today. A gateway
+  that exchanges needs the token endpoint, its client id and the secret's environment variable, each refused by name at
+  start when unset; a provider verifying `ot` needs its own `[oidc]` table with `exchange_audience` (rev 0.11).
 - **I2:** a `ca_cert_pem` holding more than one certificate is refused by name at start. **Before upgrading, an operator
   whose `ca_cert_pem` holds an extra certificate removes it**, keeping only the fleet CA's: the extra certificate was
   ignored before, so removing it changes nothing. Only `ca_cert_pem` is affected, not `cert_pem` or the on-node CA, and
