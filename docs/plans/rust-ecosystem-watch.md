@@ -26,7 +26,7 @@ same assessment is not redone from scratch.
 
 ## The rows
 
-Ordered by the priority proposed on 2026-11-10 (the maintainer may reorder). Each row states what Mycelium has today, what upstream offers, what
+Ordered by the priority agreed with the maintainer on 2026-11-11. Each row states what Mycelium has today, what upstream offers, what
 adopting it would buy, what it would cost or risk, and what would move it to the next state.
 
 ### W1. Build provenance for the node and its capabilities — `plan`
@@ -125,3 +125,4 @@ adopting it would buy, what it would cost or risk, and what would move it to the
 | Date | Reviewer | What changed |
 |---|---|---|
 | 2026-11-10 | maintainer + Claude | Register started from an external roadmap note, its code claims checked against `main` at `634f655f`. Two corrections to the note: OTLP export is `otel`-gated `SkillRunner` spans only, not node-wide; *dial9* unverified. Priority proposed: W1, W2, W3, W4, W5. |
+| 2026-11-11 | maintainer | Priority agreed as proposed (W1–W7 in order). |
