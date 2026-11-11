@@ -80,3 +80,4 @@ mycelium-ts/README.md               # adapter_contract.rs: the SDK README's limi
 langgraph-checkpoint-mycelium/README.md  # adapter_contract.rs: the checkpointer README's limits section
 strands-session-mycelium/README.md  # adapter_contract.rs: the Strands store README's limits section
 docs/features/adapter-contract.md   # adapter_contract.rs: the doors' limits section on the feature page
+application/          # exchanged_token.rs is_access_token_typ: the media-type prefix of a JOSE `typ` (RFC 7515 §4.1.9), not a key

@@ -86,6 +86,26 @@ impl Serialize for OidcNotInBuild {
 #[cfg(feature = "compliance")]
 fn default_group_claim() -> String { "groups".to_string() }
 
+/// The values a TOML `[oidc]` table naming only `issuer` and `audience` gets (#759's review, M3): the claim `groups`,
+/// no group scopes, discovery for the JWKS, and no exchanged-token verification. `issuer` and `audience` are empty and
+/// must be set — a literal reads `OidcConfig { issuer, audience, ..Default::default() }`, so a field added later does
+/// not break it.
+#[cfg(feature = "compliance")]
+impl Default for OidcConfig {
+    fn default() -> Self {
+        Self {
+            issuer: String::new(),
+            audience: String::new(),
+            group_claim: default_group_claim(),
+            group_scopes: HashMap::new(),
+            jwks_uri: None,
+            exchange_audience: None,
+            exchange_client_id: None,
+            exchange_max_lifetime_secs: None,
+        }
+    }
+}
+
 #[cfg(feature = "compliance")]
 impl OidcConfig {
     /// I5: the longest lifetime of an exchanged token this node accepts, in seconds.
@@ -2269,6 +2289,27 @@ impl GossipConfig {
         if let Some(oidc) = &self.oidc {
             if oidc.exchange_audience.as_deref().is_some_and(|a| a.trim().is_empty()) {
                 return Err(GossipError::InvalidField { field: "oidc.exchange_audience", reason: "set, it may not be empty".into() });
+            }
+            // #759's review, L1: the token is bound to the key that signed the envelope; a node with no identity has
+            // none to bind it to, and would refuse every exchanged token `ot_unverifiable`.
+            if oidc.exchange_audience.is_some() && self.tls.is_none() {
+                return Err(GossipError::InvalidField {
+                    field: "oidc.exchange_audience",
+                    reason: "oidc_exchange_needs_tls: an exchanged token is bound to the node key that signed its envelope, \
+                             and a node without [tls] has none, so it would refuse every one — add [tls] or remove \
+                             exchange_audience"
+                        .into(),
+                });
+            }
+            // #759's review, Q3: the exchanged audience must not be the gateway's, or a user's own gateway-audience token,
+            // forwarded unexchanged, would pass the audience check.
+            if oidc.exchange_audience.as_deref().is_some_and(|a| a == oidc.audience) {
+                return Err(GossipError::InvalidField {
+                    field: "oidc.exchange_audience",
+                    reason: "oidc_exchange_audience_is_gateway_audience: exchange_audience must differ from audience, or a \
+                             user's gateway-audience token, forwarded unexchanged, would be read as an exchanged one"
+                        .into(),
+                });
             }
             if oidc.exchange_audience.is_some() && oidc.exchange_client_id.as_deref().is_none_or(|c| c.trim().is_empty()) {
                 return Err(GossipError::InvalidField {

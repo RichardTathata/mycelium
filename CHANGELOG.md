@@ -85,15 +85,22 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (`ot`), against its own issuer and keys. The gateway's exchange is PR 2.
   - The checks, each refused by name:
     - the gateway's signature over the token (`so`);
-    - the token's signature, against the JWKS, which is fetched at start;
-    - its audience and client (`azp`);
+    - its header (`alg`, an access token's `typ`, a `kid`);
+    - the token's signature, against the JWKS, which is fetched at start by the node's one OIDC verifier (its gateway
+      uses the same keys);
+    - its issuer, audience and client (`azp`);
     - sender binding: `cnf.jkt` must be the thumbprint of the key that signed this envelope;
     - the subject: the envelope's principal;
-    - its lifetime;
-    - its `jti`, admitted once per provider.
-  - **The replay window** is bounded per gateway and per principal, and refuses rather than evicts.
-  - **An `oidc:` action without an `ot`** is refused at a verifying provider.
+    - its clocks and lifetime, at the instant its replay window admits at;
+    - its `jti`, admitted once per provider, whichever gateway carries it.
+  - **The replay window** is one per provider, bounded in all, per gateway and per principal, and refuses rather than
+    evicts.
+  - **An `oidc:` action without an `ot`** is refused at a verifying provider. The actions include a hosted
+    capability's invoke (`cap.invoke/…`).
   - **A build without `compliance`** refuses any `ot` (`not_in_build`).
+  - `validate()` refuses `exchange_audience` without `[tls]` or equal to `audience`, by name.
+  - `OidcConfig` implements `Default`.
+  - A gateway bearer's `exp` is read through the clock seam, with the same 60 s leeway.
 
   Upgrade note: `deprecations.md` §96.
 

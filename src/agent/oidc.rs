@@ -75,6 +75,21 @@ pub(crate) fn validate_token(
     keys: &[(String, DecodingKey)],
     token: &str,
 ) -> Result<VerifiedOidcPrincipal, OidcError> {
+    validate_token_at(cfg, keys, token, mycelium_core::sim_seam::wall_now_ms())
+}
+
+/// How far past its `exp` a gateway bearer is still accepted: `jsonwebtoken`'s default leeway, which this check read
+/// before it read the clock itself.
+const BEARER_EXP_LEEWAY_MS: u64 = 60_000;
+
+/// [`validate_token`] at `now_ms`, wall-clock milliseconds: `exp` is read against it, through the sim seam, rather than
+/// against the system clock inside `jsonwebtoken` (#759's review, M1 — a recording replays a bearer's expiry too).
+pub(crate) fn validate_token_at(
+    cfg: &OidcConfig,
+    keys: &[(String, DecodingKey)],
+    token: &str,
+    now_ms: u64,
+) -> Result<VerifiedOidcPrincipal, OidcError> {
     let header = decode_header(token).map_err(|_| OidcError::Malformed)?;
     if !ALLOWED_ALGS.contains(&header.alg) {
         return Err(OidcError::Malformed); // HS*/none → alg-confusion attempt
@@ -93,7 +108,8 @@ pub(crate) fn validate_token(
     let mut validation = Validation::new(header.alg);
     validation.set_issuer(&[cfg.issuer.as_str()]);
     validation.set_audience(&[cfg.audience.as_str()]);
-    validation.validate_exp = true;
+    // `exp` is required below and read against `now_ms` after the signature.
+    validation.validate_exp = false;
     // `set_issuer`/`set_audience` only validate the claim WHEN PRESENT; jsonwebtoken requires only
     // `exp` by default, so a token that simply OMITS `aud`/`iss` sails past both checks — an
     // audience/issuer-confusion bypass in shared-IdP deployments (audit 2026-07-15 pass 3). Require
@@ -102,6 +118,10 @@ pub(crate) fn validate_token(
 
     let data = decode::<RawClaims>(token, key, &validation).map_err(|_| OidcError::Invalid)?;
     let claims = data.claims;
+    let exp_ms = claims.extra.get("exp").and_then(|v| v.as_u64()).ok_or(OidcError::Invalid)?.saturating_mul(1_000);
+    if now_ms >= exp_ms.saturating_add(BEARER_EXP_LEEWAY_MS) {
+        return Err(OidcError::Invalid);
+    }
 
     let groups: Vec<String> = claims
         .extra
@@ -404,8 +424,14 @@ impl OidcVerifier {
         if self.shared.in_flight.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err() {
             return;
         }
+        // #759's review, L4: a synchronous verify (`GossipAgent::request_principal`) can run on a thread with no tokio
+        // runtime; it starts no fetch there rather than panic, and refuses with the keys it holds.
+        let Ok(rt) = tokio::runtime::Handle::try_current() else {
+            self.shared.in_flight.store(false, Ordering::Release);
+            return;
+        };
         let shared = std::sync::Arc::clone(&self.shared);
-        tokio::spawn(async move {
+        rt.spawn(async move {
             /// Clears the flag and wakes the waiters however the task ends (a panic included), so a
             /// waiter can never be left on a fetch that is not running.
             struct Done(std::sync::Arc<Shared>);
@@ -631,6 +657,21 @@ mod tests {
         let mut c = valid_claims();
         c["exp"] = json!(now() - 7200); // well beyond jsonwebtoken's default 60s leeway
         assert_eq!(validate_token(&cfg(), &keys(), &mint(c, Algorithm::RS256, "test-kid", TEST_PRIV)), Err(OidcError::Invalid));
+    }
+
+    /// **A bearer's `exp` is read at the instant it is given** (#759's review, M1): through the clock seam, not the
+    /// system clock inside `jsonwebtoken`, so a recording replays it. Within the 60 s leeway past `exp` it is accepted,
+    /// past it refused. Seen failing first: with `jsonwebtoken` reading the system clock, the instant was ignored.
+    #[test]
+    fn a_bearers_expiry_is_read_at_the_given_instant() {
+        let tok = mint(valid_claims(), Algorithm::RS256, "test-kid", TEST_PRIV);
+        let exp_ms = (now() + 3600) * 1_000;
+        assert!(validate_token_at(&cfg(), &keys(), &tok, exp_ms + 59_000).is_ok(), "inside the leeway");
+        assert_eq!(validate_token_at(&cfg(), &keys(), &tok, exp_ms + 61_000), Err(OidcError::Invalid), "past it");
+        let mut c = valid_claims();
+        c["exp"] = json!(now() - 7200);
+        let expired = mint(c, Algorithm::RS256, "test-kid", TEST_PRIV);
+        assert!(validate_token_at(&cfg(), &keys(), &expired, (now() - 7300) * 1_000).is_ok(), "unexpired at that instant");
     }
 
     #[test]

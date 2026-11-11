@@ -242,13 +242,15 @@ pub(super) async fn stats_handler(State(ctx): State<Arc<HttpCtx>>) -> impl IntoR
         body["agent_legacy_digest_matches"] = json!(a.map_or(0, |a| a.legacy_digest_matches_at_agent()));
     }
     // Identity-and-lifecycle I5: exchanged OIDC tokens refused at this provider's replay window, by reason — `replayed`
-    // (presented twice), `window_full` (a gateway's 65 536), `principal_window_full` (a principal's 16 384).
+    // (presented twice, by any gateway), `provider_window_full` (the provider's 262 144), `window_full` (a gateway's
+    // 65 536), `principal_window_full` (a principal's 16 384).
     #[cfg(feature = "compliance")]
     {
         let w = &ctx.agent_ctx.exchanged_token_replay;
         let n = |c: &std::sync::atomic::AtomicU64| c.load(std::sync::atomic::Ordering::Relaxed);
         body["exchanged_tokens_refused"] = json!({
             "replayed": n(&w.replayed),
+            "provider_window_full": n(&w.provider_full),
             "window_full": n(&w.gateway_full),
             "principal_window_full": n(&w.principal_full),
         });

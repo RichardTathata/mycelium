@@ -202,17 +202,27 @@ impl GossipAgent {
                 }
             }
         }
-        // Identity-and-lifecycle I5: a node whose `[oidc]` names an `exchange_audience` verifies exchanged tokens, against
-        // its own issuer and JWKS. The keys are fetched now, so they are held before the first token arrives; a token that
-        // arrives while none is held is refused, retriable (`ot_keys_unavailable`).
+        // Identity-and-lifecycle I5: the node's one OIDC verifier (#759's review, M2) — its gateway validates bearers
+        // with it and, when `[oidc]` names an `exchange_audience`, its provider verifies exchanged tokens with it, one
+        // JWKS cache and one fetcher between them. A verifying node fetches the keys now, so they are held before the
+        // first exchanged token arrives; one that arrives while none is held is refused, retriable (`ot_keys_unavailable`).
         #[cfg(feature = "compliance")]
         if let Some(oidc) = &self.config.oidc
-            && oidc.exchange_audience.is_some()
-            && self.task_ctx.exchanged_token_verifier.get().is_none()
+            && self.task_ctx.oidc_verifier.get().is_none()
         {
             let verifier = Arc::new(super::oidc::OidcVerifier::new(oidc.clone(), self.config.egress.clone()));
-            verifier.warm();
-            let _ = self.task_ctx.exchanged_token_verifier.set(verifier);
+            if oidc.exchange_audience.is_some() {
+                verifier.warm();
+                // #759's review, L1: no gateway in this release exchanges a user's token, so every `oidc:` action this
+                // node serves is refused `ot_required` until its gateways run the release that does (I5's PR 2).
+                tracing::warn!(
+                    exchange_audience = oidc.exchange_audience.as_deref().unwrap_or_default(),
+                    "oidc: this node verifies exchanged tokens, and no gateway in this release exchanges one; every \
+                     action by an OIDC user (oidc: principal) on this node is refused ot_required until its gateways \
+                     exchange tokens (identity-and-lifecycle I5, deprecations.md §96)"
+                );
+            }
+            let _ = self.task_ctx.oidc_verifier.set(verifier);
         }
         // Credential bindings (post-360 plan row L): each value read once, here, into the gate. A value
         // that cannot be read refuses the start by name (never by value); a build without the gate's

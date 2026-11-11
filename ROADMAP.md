@@ -2089,7 +2089,7 @@ for SOC 2 Type II controls evidence and HIPAA §164.312(a)(1) access control req
 Enterprise procurement almost universally requires SSO against the organisation's IdP
 before IT security will approve deployment. Shipped as WS4: generic-OIDC JWT validation
 at the gateway. `GossipConfig::oidc = Some(OidcConfig { issuer, audience, group_claim,
-group_scopes, jwks_uri })`; the gateway validates the bearer JWT (asymmetric-only alg
+group_scopes, jwks_uri, ..Default::default() })`; the gateway validates the bearer JWT (asymmetric-only alg
 allowlist, `iss`/`aud`/`exp`, discovery + cached JWKS) and maps IdP groups → gateway
 scopes, feeding the existing WS1 scope gate. Static token auth remains the fallback.
 **One code path** covers Entra/Okta/Auth0/Keycloak — per-vendor differences (issuer,

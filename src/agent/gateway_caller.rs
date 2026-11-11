@@ -1131,6 +1131,12 @@ fn verifying_keys_for(ctx: &TaskCtx, node: &NodeId) -> Vec<[u8; 32]> {
 /// `Ok(None)`: no context — the sender acts for itself. `Ok(Some(_))`: a verified context.
 /// `Err(_)`: a context was present and must be **refused**; never treat the call as the node's.
 pub(crate) fn verify(ctx: &TaskCtx, req: &RpcRequest) -> Result<Option<GatewayCaller>, CallerError> {
+    verify_at(ctx, req, ctx.hlc.decision_now_ms())
+}
+
+/// [`verify`] at `now_ms`: every clock comparison it makes — the envelope's freshness, an exchanged token's `iat`,
+/// `nbf` and `exp` — reads this one instant, which [`verify_received`] then admits at (#759's review, M1).
+fn verify_at(ctx: &TaskCtx, req: &RpcRequest, now_ms: u64) -> Result<Option<GatewayCaller>, CallerError> {
     // Closure plan C5: a removed member is refused before any serve path, whatever it frames.
     if ctx.removed.is_node_removed(req.sender()) {
         return Err(CallerError::Removed);
@@ -1219,7 +1225,6 @@ pub(crate) fn verify(ctx: &TaskCtx, req: &RpcRequest) -> Result<Option<GatewayCa
     // future bound, and the age bound is `CALLER_CONTEXT_MAX_AGE_MS` alone (#613's review, finding 1 —
     // an RPC frame does not make this node observe the sender's clock, so a zero tolerance refused
     // every envelope from a gateway a few ms ahead).
-    let now_ms = ctx.hlc.decision_now_ms();
     let drift = ctx.config.max_clock_drift_ms;
     // With no drift bound the future is still bounded — by the age bound, so a far-future envelope
     // (a re-dated replay on an unsigned mesh) is refused (#613's final review).
@@ -1287,7 +1292,7 @@ fn exchanged_token_at(
     }
     #[cfg(feature = "compliance")]
     {
-        let Some(verifier) = ctx.exchanged_token_verifier.get() else { return Ok(None) };
+        let Some(verifier) = ctx.oidc_verifier.get().filter(|v| v.config().exchange_audience.is_some()) else { return Ok(None) };
         let Some(ot) = env.ot.as_deref() else {
             if env.p.starts_with("oidc:") && super::exchanged_token::needs_exchanged_token(&ctx.config, req.kind()) {
                 return Err(CallerError::ExchangedToken("ot_required"));
@@ -1306,7 +1311,7 @@ fn exchanged_token_at(
             .decode(so)
             .ok()
             .and_then(|v| v.try_into().ok())
-            .ok_or_else(|| CallerError::Malformed("so is not a 64-byte signature".into()))?;
+            .ok_or(CallerError::ExchangedToken("ot_signature_malformed"))?;
         if !crate::tls::verify_bytes(signer, &ot_signed_message(n, o, ot), &so) {
             return Err(CallerError::BadSignature);
         }
@@ -1321,17 +1326,21 @@ fn exchanged_token_at(
 /// stream, `llm.invoke`, the explain responder); everything that re-reads the request later calls
 /// [`verify`], which keeps no state. [`CallerError::Replayed`] must be dropped without an answer.
 pub(crate) fn verify_received(ctx: &TaskCtx, req: &RpcRequest) -> Result<Option<GatewayCaller>, CallerError> {
-    let verified = verify(ctx, req).inspect_err(|e| {
+    // One instant for the whole boundary: what verified a token unexpired is what the windows prune at (#759's review,
+    // M1 — the exchanged token's `exp` was read against the system clock and its window pruned against the HLC, which a
+    // peer can push ahead of it, so a token in its last moments was forgotten as it was admitted).
+    let now_ms = ctx.hlc.decision_now_ms();
+    let verified = verify_at(ctx, req, now_ms).inspect_err(|e| {
         if e.unanswered() {
             ctx.caller_replay.count_replay();
         }
     })?;
     if let Some(c) = &verified {
-        ctx.caller_replay.admit(c, ctx.hlc.decision_now_ms(), ctx.config.max_clock_drift_ms)?;
+        ctx.caller_replay.admit(c, now_ms, ctx.config.max_clock_drift_ms)?;
         // Identity-and-lifecycle I1: the client's `cn`, once per (principal, key, instance).
         #[cfg(feature = "tls")]
         if let Some(signed) = &c.client_signed {
-            let horizon = ctx.hlc.decision_now_ms().saturating_sub(CALLER_CONTEXT_MAX_AGE_MS.saturating_add(ctx.config.max_clock_drift_ms));
+            let horizon = now_ms.saturating_sub(CALLER_CONTEXT_MAX_AGE_MS.saturating_add(ctx.config.max_clock_drift_ms));
             let current = ctx.client_certs.mark(&c.principal).map(|m| m.key);
             match ctx.client_replay.admit(&c.principal, signed, current, horizon) {
                 Ok(()) => {}
@@ -1350,7 +1359,7 @@ pub(crate) fn verify_received(ctx: &TaskCtx, req: &RpcRequest) -> Result<Option<
         #[cfg(feature = "compliance")]
         if let Some(t) = &c.exchanged {
             ctx.exchanged_token_replay
-                .admit(&c.via, &c.principal, t, ctx.hlc.decision_now_ms(), ctx.config.max_clock_drift_ms)
+                .admit(&c.via, &c.principal, t, now_ms, ctx.config.max_clock_drift_ms)
                 .map_err(|r| CallerError::ExchangedToken(r.code()))?;
         }
         // X4: counted here, once per request, after the envelope verified — a forged one moves nothing.

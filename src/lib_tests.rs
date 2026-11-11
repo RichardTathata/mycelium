@@ -295,7 +295,7 @@ fn spawn_handler_with(
         #[cfg(all(feature = "gateway", feature = "tls"))]
         grant_decisions_in_flight: papaya::HashSet::new(),
         #[cfg(feature = "compliance")]
-        exchanged_token_verifier: std::sync::OnceLock::new(),
+        oidc_verifier: std::sync::OnceLock::new(),
         #[cfg(feature = "compliance")]
         exchanged_token_replay: Default::default(),
         causal_misplaced: Default::default(),
@@ -4393,7 +4393,7 @@ async fn test_subscribe_notified_via_gossip() {
         #[cfg(all(feature = "gateway", feature = "tls"))]
         grant_decisions_in_flight: papaya::HashSet::new(),
         #[cfg(feature = "compliance")]
-        exchanged_token_verifier: std::sync::OnceLock::new(),
+        oidc_verifier: std::sync::OnceLock::new(),
         #[cfg(feature = "compliance")]
         exchanged_token_replay: Default::default(),
         causal_misplaced: Default::default(),

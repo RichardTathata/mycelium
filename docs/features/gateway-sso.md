@@ -43,29 +43,38 @@ so a node the list does not let reach it starts and, holding no keys, answers ev
   `exchange_audience` (`validate()` refuses `oidc_exchange_client_unset`);
 - `exchange_max_lifetime_secs` — the longest `exp − iat` accepted; default 300, in `1..=3600`.
 
-The provider fetches the issuer's keys at `start()` and refreshes them as the gateway's verifier does — the same cache
+`validate()` also refuses `exchange_audience` on a node without `[tls]` (`oidc_exchange_needs_tls`: the token binds to
+the key that signs the envelope) and equal to `audience` (`oidc_exchange_audience_is_gateway_audience`). Until the
+gateway's half ships, a node that sets it warns at start that every OIDC user's action will be refused. `OidcConfig`
+implements `Default`; write a literal with `..Default::default()`.
+
+The provider fetches the issuer's keys at `start()` and refreshes them through the node's one verifier, which its
+gateway uses for bearers too — one cache, one fetcher
 ([`OidcVerifier::keys_now`](../../src/agent/oidc.rs)): an unknown `kid` starts a refresh at most once per 30 s, keys
 past the 1 h TTL refresh in the background on use, and keys more than 24 h past their last successful fetch are not
 used. A token that arrives while no key is held is refused, retriable.
 
 Every envelope carrying an `ot` is checked at the receive boundary
-([`exchanged_token::check`](../../src/agent/exchanged_token.rs)), in this order, each refusal by name:
+([`exchanged_token::check`](../../src/agent/exchanged_token.rs)), in this order; the first failing check names the
+refusal:
 
 | Check | Refused as |
 |---|---|
-| The gateway's signature over the token, `so` | `ot_unsigned` (absent), `bad_signature`; `ot_unverifiable` on a mesh without `[tls]` |
+| The gateway's signature over the token, `so` | `ot_unsigned` (absent), `ot_signature_malformed`, `bad_signature`; `ot_unverifiable` on a mesh without `[tls]` |
+| The header: an asymmetric `alg`, an access token's `typ` (`JWT` or `at+jwt`) if any, a `kid` | `ot_malformed` (`none`, `HS*`, no `kid`), `ot_wrong_type` |
 | The keys | `ot_keys_unavailable` (none held, or the `kid` unknown: a refresh has started), retriable |
-| The token's signature, against this provider's JWKS | `ot_signature_invalid`; `ot_malformed` |
-| `iss`, `aud`, `azp` | `ot_wrong_issuer`, `ot_wrong_audience` (a gateway-audience token forwarded rather than exchanged), `ot_wrong_client` |
+| The token's signature, against this provider's JWKS | `ot_signature_invalid` |
+| `iss`, then `aud` (a string or an array), then `azp` | `ot_wrong_issuer`, `ot_wrong_audience` (a gateway-audience token forwarded rather than exchanged), `ot_wrong_client` |
 | Sender binding: `cnf.jkt` the thumbprint of the key that signed this envelope | `ot_unbound`, `ot_bound_to_another_key` |
 | The subject: the envelope's principal is `oidc:{iss}/{sub}` | `ot_subject_mismatch` |
-| `exp`, `nbf`, `iat` under `max_clock_drift_ms`; `exp − iat` | `ot_expired`, `ot_lifetime_too_long` |
-| A `jti`, admitted once while unexpired | `ot_without_jti`, `ot_replayed` |
-| The window's room: 65 536 ids per gateway, 16 384 per principal | `ot_window_full`, `ot_principal_window_full` |
+| `iat`, `exp`, `nbf` under `max_clock_drift_ms`, at the instant the window admits at; `exp − iat` | `ot_without_iat`, `ot_without_exp`, `ot_not_yet_valid`, `ot_expired`, `ot_lifetime_too_long` |
+| A `jti`, admitted once per provider, whichever gateway carries it, while unexpired | `ot_without_jti`, `ot_replayed` |
+| The window's room: 262 144 ids, 65 536 per gateway, 16 384 per principal | `ot_provider_window_full`, `ot_window_full`, `ot_principal_window_full` |
 
 An `oidc:` principal's **action** without an `ot` is refused `ot_required`: `mcp.invoke`, `skill.invoke`, `llm.invoke`,
-each kind in `protected_rpc_kinds`, and every companion kind whose scope is `:write` (every `blackboard.*`, `tuple.*`
-and `wiki.*` kind but their read operations). A build without `compliance` refuses any `ot` as `not_in_build`.
+each kind in `protected_rpc_kinds`, every companion kind whose scope is `:write` (every `blackboard.*`, `tuple.*`
+and `wiki.*` kind but their read operations), and a hosted capability's invoke, `cap.invoke/{namespace}/{name}`. The
+artifact kinds and `reason.blob.fetch` are not actions. A build without `compliance` refuses any `ot` as `not_in_build`.
 
 The tests, each refusal seen failing first, are in
 [`src/agent/exchanged_token_tests.rs`](../../src/agent/exchanged_token_tests.rs):
@@ -74,8 +83,14 @@ The tests, each refusal seen failing first, are in
 `a_token_arriving_before_any_key_is_held_is_refused_retriably`,
 `a_provider_without_an_exchange_audience_reads_no_exchanged_token`,
 `the_exchanged_token_window_is_bounded_per_principal_and_per_gateway`,
-`the_kinds_an_oidc_action_needs_an_exchanged_token_for`, `the_exchange_settings_are_refused_by_name_when_incomplete`
-and `an_envelope_too_large_with_its_exchanged_token_is_refused_by_the_producer`. A build without `compliance` is
+`the_kinds_an_oidc_action_needs_an_exchanged_token_for`, `the_exchange_settings_are_refused_by_name_when_incomplete`,
+`an_envelope_too_large_with_its_exchanged_token_is_refused_by_the_producer`,
+`a_token_is_read_against_the_instant_its_window_prunes_at`,
+`a_node_that_is_gateway_and_provider_fetches_its_keys_once`, `the_first_failing_check_names_the_refusal`,
+`the_header_and_audience_shapes_are_refused_or_accepted_by_name`, `a_token_in_an_unsigned_envelope_is_unverifiable`,
+`a_verify_off_a_runtime_refuses_rather_than_panics`, `the_thumbprint_is_rfc_8037s`,
+`the_window_is_one_across_gateways_and_frees_a_departed_ones`,
+`two_concurrent_admissions_of_one_token_admit_it_once` and `an_oidc_literal_with_default_is_the_minimal_table`. A build without `compliance` is
 tested by `a_build_without_compliance_refuses_an_exchanged_token`, in
 [`src/agent/gateway_caller.rs`](../../src/agent/gateway_caller.rs).
 
@@ -95,9 +110,9 @@ The refusal of an issuer the egress policy denies is `an_oidc_issuer_the_egress_
 - **What it refuses:** symmetric (`HS*`) and `none` algorithms outright, an unknown `kid` after one refresh, and a key
   held past a 24-hour ceiling after its last successful fetch ([sso § 4](../operations/sso.md#4-security-notes-what-the-validator-enforces)).
 - **At the provider (I5, PR 1):** an exchanged token bound to the envelope's signer, for its principal, by the gateway's
-  client, admitted once per provider while unexpired. **Not built:** the gateway's exchange (I5's PR 2); a token bound
+  client, admitted once per provider, whichever gateway carries it, while unexpired. **Not built:** the gateway's exchange (I5's PR 2); a token bound
   to its call; the exchanging gateway reusing its own token, refused once per provider by `jti`; four principals at
-  their bound filling a gateway's window (rate limits are the hard bound); a window that survives a restart (an id
+  their bound filling a gateway's share (rate limits are the hard bound); a window that survives a restart (an id
   presented before one can be presented once more after it, only in an envelope signed by the bound gateway).
 - **Not built:** a key host found by discovery is not checked at start; the first tokens under a rotated key may be
   refused for up to the refresh cooldown (30 s). A token is a route credential: what

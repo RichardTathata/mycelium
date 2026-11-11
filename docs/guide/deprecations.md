@@ -3007,11 +3007,20 @@ exchanged by the gateway at the IdP (RFC 8693) and bound to the gateway's node k
 provider's half. The gateway's exchange is I5's PR 2.
 
 - **What changed:**
-  - `[oidc]` gained `exchange_audience`, `exchange_client_id` and `exchange_max_lifetime_secs` (`OidcConfig`; an
-    exhaustive struct literal breaks).
+  - `[oidc]` gained `exchange_audience`, `exchange_client_id` and `exchange_max_lifetime_secs`. **`OidcConfig` now
+    implements `Default`**, so a literal that names every field breaks once; write
+    `OidcConfig { issuer, audience, group_scopes, ..Default::default() }` and later fields will not break it. The
+    defaults are a TOML table's: `group_claim = "groups"`, no group scopes, discovery for the JWKS, no exchange.
   - **The trigger is `exchange_audience`.** An `[oidc]` table without it is unchanged, and so is a node without one.
-  - With it, `validate()` refuses a missing `exchange_client_id` (`oidc_exchange_client_unset`) and a lifetime outside
-    `1..=3600`.
+  - With it, `validate()` refuses a missing `exchange_client_id` (`oidc_exchange_client_unset`), a lifetime outside
+    `1..=3600`, a node without `[tls]` (`oidc_exchange_needs_tls`: the token is bound to the node key that signs the
+    envelope) and an `exchange_audience` equal to `audience` (`oidc_exchange_audience_is_gateway_audience`: a user's
+    own gateway-audience token, forwarded unexchanged, would pass the audience check).
+  - A node that is both gateway and provider has **one** OIDC verifier: the gateway validates bearers with the keys
+    the provider fetched at start, and fetches nothing of its own.
+  - A gateway bearer's `exp` is now read against the node's clock seam, with the same 60 s leeway, rather than inside
+    `jsonwebtoken`. An exchanged token's `iat`, `nbf` and `exp` are read at the instant its replay window prunes at,
+    under the leeway of `max_clock_drift_ms`.
   - The caller envelope gained two optional fields, `ot` (the exchanged token) and `so` (the gateway's signature over
     it). A provider that predates them keeps them in its unknown fields and reads nothing.
   - A verifying provider refuses an envelope's `ot` by name at each check, and refuses an `oidc:` principal's action
@@ -3019,13 +3028,18 @@ provider's half. The gateway's exchange is I5's PR 2.
   - **A build without `compliance` refuses any call carrying an `ot`** (`not_in_build`) rather than run it
     unverified. Before this release no envelope carried one.
 - **Until the gateway's half ships, no gateway sends an `ot`.** So a provider that sets `exchange_audience` now
-  refuses every `oidc:` action. **Do not set it yet** on a provider that serves OIDC users.
+  refuses every `oidc:` action, and says so in a warning at start. **Do not set it yet** on a provider that serves
+  OIDC users.
+- **The actions** are the protected kinds (`mcp.invoke`, `skill.invoke`, `llm.invoke`, `protected_rpc_kinds`), the
+  companions' write kinds, and a hosted capability's invoke (`cap.invoke/{namespace}/{name}`, which runs code). The
+  artifact kinds and `reason.blob.fetch` are not.
 - **An older binary ignores `exchange_audience` silently**, because `OidcConfig` accepts unknown keys. A provider
   configured to verify before it is upgraded enforces nothing.
-- **The replay window is in memory** and is empty after a restart. It holds at most 65 536 token ids per gateway and
-  16 384 per principal within a gateway's share, and refuses past either bound (`ot_window_full`,
-  `ot_principal_window_full`). That is a ceiling of about 109 OIDC calls a second per gateway and provider at the
-  default lifetime and drift.
+- **The replay window is in memory** and is empty after a restart. It is one window per provider, keyed by the
+  token's `(iss, jti)` whichever gateway carries it. It holds at most 262 144 token ids, 65 536 of them per gateway
+  and 16 384 per principal, and refuses past any bound (`ot_provider_window_full`, `ot_window_full`,
+  `ot_principal_window_full`). That is a ceiling of about 109 OIDC calls a second per gateway, and 436 per provider,
+  at the default lifetime and drift. A gateway that leaves frees its share as its entries expire.
 - **Code:**
   - `CallerError` gained `ExchangedToken(&'static str)` (it is `#[non_exhaustive]`).
   - `GatewayCaller` gained a `pub(crate)` field.

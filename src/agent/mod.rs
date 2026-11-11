@@ -1017,11 +1017,12 @@ pub(crate) struct TaskCtx {
     /// lock (no lock-order row).
     #[cfg(all(feature = "gateway", feature = "tls"))]
     pub(crate) grant_decisions_in_flight: papaya::HashSet<String>,
-    /// Identity-and-lifecycle I5: the verifier of exchanged OIDC tokens, set at `start()` when `[oidc]` names an
-    /// `exchange_audience` — this provider's own issuer, JWKS and audience. Unset, an envelope's `ot` is not read.
+    /// Identity-and-lifecycle I5: the node's one OIDC verifier, set at `start()` from `[oidc]` — its issuer, JWKS cache
+    /// and fetcher, shared by the gateway (bearers) and, when `[oidc]` names an `exchange_audience`, the provider
+    /// (exchanged tokens; #759's review, M2). Without an `exchange_audience`, an envelope's `ot` is not read.
     #[cfg(feature = "compliance")]
-    pub(crate) exchanged_token_verifier: std::sync::OnceLock<Arc<oidc::OidcVerifier>>,
-    /// I5: the exchanged tokens this provider has admitted, per gateway, once each while unexpired.
+    pub(crate) oidc_verifier: std::sync::OnceLock<Arc<oidc::OidcVerifier>>,
+    /// I5: the exchanged tokens this provider has admitted, once each by `(iss, jti)` across gateways, while unexpired.
     #[cfg(feature = "compliance")]
     pub(crate) exchanged_token_replay: exchanged_token::OtReplayWindows,
     /// A `correlation` or `parent` carried where it is never read — a header at an HTTP door, or a field in the caller
@@ -1650,7 +1651,7 @@ impl GossipAgent {
             #[cfg(all(feature = "gateway", feature = "tls"))]
             grant_decisions_in_flight: papaya::HashSet::new(),
             #[cfg(feature = "compliance")]
-            exchanged_token_verifier: std::sync::OnceLock::new(),
+            oidc_verifier: std::sync::OnceLock::new(),
             #[cfg(feature = "compliance")]
             exchanged_token_replay: Default::default(),
             causal_misplaced: papaya::HashMap::new(),

@@ -462,8 +462,12 @@ needs only `grant:relay`, the route's second admitted scope (`authz::alternative
 `grant:issue` are counted (`grant_decisions_unsigned`) until the refusal release (the plan's §9 O6). Since I5's PR 1 a provider whose `[oidc]` sets `exchange_audience` verifies an OIDC user's **exchanged token** itself
 (`src/agent/exchanged_token.rs`). The token is DPoP-bound to the gateway's node key and checked against the key that
 signed its envelope, so a member that lifts it into an envelope of its own is refused (`ot_bound_to_another_key`). Its
-`jti` is admitted once per provider, in a window that refuses rather than evicts. The keys are the gateway verifier's
-own cache, read without waiting, and a token arriving while none is held is refused, retriable.
+`jti` is admitted once per provider, whichever gateway carries it, in one window that refuses rather than evicts. The
+keys come from the node's one OIDC verifier, which its gateway uses for bearers too, read without waiting; a token
+arriving while none is held is refused, retriable. **Lesson from #759's review:** a check and the window that remembers
+its result must read **one instant** — the token's `exp` was read against the system clock and its window pruned
+against the HLC, which a peer can push ahead, so a token in its last moments was forgotten as it was admitted and
+admitted again. `verify_received` now reads `decision_now_ms` once and passes it to every comparison.
 
 > **`sys/identity` authentication — partially closed (WS-E, in progress).** `sys/identity/{node}`
 > is a plain Layer-I KV value with **no signature**, and `merge_peer_keys` **accumulates** any key
