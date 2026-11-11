@@ -102,10 +102,11 @@ the request from its name and documentation, not by a run.
 | `SCRIPTS` | `PREVIEW` | no |
 | `CLIENT_POLICIES` | `DEFAULT` | yes |
 
-Keycloak logs only non-default features. The 26.8.2 log names the deprecated ones (`Deprecated features
+#757's confirm round found DPoP **supported since Keycloak 26.4.0**, from Keycloak's release notes, and reproduced the
+Ed25519 binding on 26.8.2 with an independent openssl probe. Keycloak logs only non-default features. The 26.8.2 log names the deprecated ones (`Deprecated features
 identity-brokering-api:v1, twitter-broker:v1 enabled by default`), and no preview or experimental feature appears in
 either phase's log (`part2/default.log`, `part2/dpop_feature.log`). **The feature table is the evidence of support, not
-a log line.** The release notes were not consulted.
+a log line.** The spike itself did not consult the release notes; the confirm round did (above).
 
 | Probe | Request | Result |
 |---|---|---|
@@ -137,7 +138,9 @@ Measured with the one producer, `frame_with_client_signature_at`, in `spike_s_ex
 | + a grant, `cs` and a 4 096 B token (computed) | 5 732 | 2 460 |
 
 With a grant and a `cs` beside it, the cap holds a token of up to **6 556 B (6.4 KiB)**: the 6 564 B left, less the 8 B
-of the `ot` field's framing. The measured tokens belong to a user with no groups or client roles. Past the cap, the
+of the `ot` field's framing. I5's row adds a signature over the `ot`, `so`, of about 96 B (64 B in base64 and its
+field; computed, not measured), which makes the DPoP-bound envelope about 3 041 B and the largest token about
+6 460 B (6.3 KiB). The measured tokens belong to a user with no groups or client roles. Past the cap, the
 producer refuses `caller_context_too_large`.
 
 ## The provider's check

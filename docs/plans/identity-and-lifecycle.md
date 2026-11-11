@@ -212,7 +212,20 @@ M-of-N; an `oidc:` decider; a relay at an un-upgraded gateway.
   `[oidc] exchange_token_endpoint` *(new)* as `exchange_client_id` *(new)*, with the client secret read from the
   environment variable `exchange_client_secret_env` names *(new; default `MYCELIUM_OIDC_EXCHANGE_SECRET`)*, for
   `audience = exchange_audience` *(new)*. It sends a DPoP proof signed with its Ed25519 node identity key (`alg:
-  EdDSA`). Keycloak 26.8.2 accepts EdDSA and issues `cnf.jkt` equal to that key's RFC 7638 thumbprint. Clients do not
+  EdDSA`). The spike ran with a generated Ed25519 key, as the node's is: Keycloak 26.8.2 accepted the EdDSA proof and
+  issued `cnf.jkt` equal to that key's RFC 7638 thumbprint.
+- **The node key signs a JWS** (#757's confirm round, N2). The DPoP proof is a JWS: the node's Ed25519 key signs
+  `BASE64URL(header) "." BASE64URL(payload)`, which begins `eyJ` and is printable text with no zero byte. That cannot be
+  any message the node key signs for Mycelium:
+  - every tagged message begins with its `mycelium.` or `mycelium:` domain tag (`grep -rhoE 'b"mycelium[^"]*"' src
+    mycelium-core/src`);
+  - the four kinds still signed over **untagged** canonical bytes — role claims (`rbac.rs`), audit records and
+    checkpoints (`audit.rs`) and v1 revocation events (`revocation.rs`), as `GossipAgent::sign_with_identity`'s doc
+    says — are `serde_fixint` encodings whose first field is a `NodeId`, written as a `u64` little-endian length, so
+    their bytes 2–7 are zero for any real node id.
+
+  So no DPoP proof verifies as a Mycelium message, and no Mycelium signature verifies as a DPoP proof. This rests on
+  the shape of those four, not on a tag: a fifth untagged kind would have to be checked the same way. Clients do not
   change. A gateway-audience token is never forwarded. The exchanged assertion travels in `ot` *(new)*, once per call.
 - **When a node exchanges, and when it verifies** (#757's review, M4). The trigger, at both ends, is
   **`exchange_audience` set** in a node's `[oidc]` table; nothing else.
@@ -242,14 +255,29 @@ M-of-N; an `oidc:` decider; a relay at an un-upgraded gateway.
      without `jti` is refused (`ot_without_jti`); Entra's `uti` is not read.
 - **The replay cache** (M1):
   - **Per provider**, in memory, keyed `(iss, jti)`, each entry held until its `exp` plus the leeway.
-  - **At most 65 536 entries per gateway**, as the envelope's replay window holds. A new token from a gateway whose
-    window is full is refused, failing closed (`ot_window_full`, counted).
+  - **At most 65 536 entries per gateway, and at most 16 384 per principal within a gateway's** (#757's confirm
+    round, N1). Unlike the envelope's replay window, which evicts and keeps a floor, this one **refuses**: an entry is
+    held until its `exp` plus the leeway, and a new token arriving while its principal's or its gateway's share is full
+    is refused, failing closed (`ot_principal_window_full`, `ot_window_full`, both counted).
+  - **That is a hard ceiling per (gateway, provider)**: 65 536 / (lifetime + drift) tokens a second. At the defaults
+    (300 s lifetime, 300 s drift) that is about **109 calls a second**; at the 3 600 s lifetime cap, about **17**. Per
+    principal it is 16 384 / (lifetime + drift): about **27 a second** at the defaults, about **4** at the cap.
+  - **Why a per-principal bound, not eviction:** evicting by `iat` would raise a floor that refuses an honest token
+    issued in the same second as an evicted one. A refusal per principal keeps one user, or one compromised account,
+    from filling a gateway's window and denying that gateway's other users. **Four principals at their bound still
+    fill it**; that denial of service is **not built** (the gateway's rate limits are the hard bound).
   - **After a restart the cache is empty.** A token presented before the restart can be presented once more after it,
     while unexpired, **only in an envelope signed by the bound gateway's key**: the sender binding holds across the
     restart. That leaves the gateway-as-attacker case below.
 - **An `oidc:` principal's action needs an `ot`** (M2). At a provider that verifies (`exchange_audience` set), an
-  envelope whose `p` is `oidc:…` and whose kind is a protected action (`mcp.invoke`, `skill.invoke`, a companion's
-  write kind) is refused without one (`ot_required`). A provider that does not verify behaves as today.
+  envelope whose `p` is `oidc:…` is refused without one (`ot_required`) when its kind is (#757's confirm round, N4):
+  - a kind `is_protected_kind` names: `mcp.invoke`, `skill.invoke`, `llm.invoke` (`BUILTIN_PROTECTED_RPC_KINDS`), and
+    each kind in the operator's `protected_rpc_kinds`;
+  - a companion kind `companion_kind_scope` gives a `:write` scope: every `blackboard.*`, `tuple.*` and `wiki.*` kind
+    except the read operations — `read`, `depth` and `snapshot` on a board, `depth` and `wal_replay` on a tuple space,
+    `access` on a wiki — an unknown verb included, as that table treats it.
+
+  Every other kind is not an action here, and needs no `ot`. A provider that does not verify behaves as today.
 - **The scopes** (M2) come from the envelope's `s`, as today: the gateway's mapping of the user's groups through its
   `group_scopes`. The `ot` establishes **who** the user is, not what they may do. The provider does not re-derive scopes
   from the token.
@@ -261,12 +289,16 @@ M-of-N; an `oidc:` decider; a relay at an un-upgraded gateway.
   - A compromised gateway acts as every user who calls through it, as a compromised gateway does today.
 - **The envelope cap stays at `MAX_ENVELOPE_BYTES` (8 KiB under a `u16` prefix)** *(decided 2026-11-11)*.
   - The spike measured an envelope with a presented grant, a `cs` and Keycloak's 1 309 B DPoP-bound token at **2 945 B**,
-    5 247 B under the cap.
-  - The cap holds a token of up to **6.4 KiB** beside a grant and `cs`.
+    5 247 B under the cap. With `so` (below) it is about 3 041 B.
+  - The cap holds a token of up to **6.4 KiB** beside a grant and `cs`, about **6.3 KiB** with `so`.
   - Past it, the producer's existing refusal answers: `GatewayDispatchError::ContextTooLarge`,
     `caller_context_too_large`, counted in `mycelium_gateway_caller_refusals_total`.
-- **Signed with the envelope.** The gateway's signature covers the `ot`'s SHA-256: a new domain-separated signed
-  message is used when `ot` is present, so a relay cannot swap one user's token into another's envelope.
+- **Signed with the envelope** (#757's confirm round, N3). When `ot` is present the gateway **adds** a signature,
+  `so` *(new)*, under the domain tag `mycelium:gateway-caller-ot:v1\n`, over the envelope's id `n`, its target `o` and
+  the `ot`'s SHA-256. A relay cannot swap one user's token into another's envelope. `sn`, the existing signature, is
+  unchanged, so a provider that predates I5 still verifies the envelope and ignores `ot` and `so`.
+  - `so` adds about 96 B (64 B of signature in base64, and its field). The spike's DPoP-bound envelope is then about
+    **3 041 B**, and the cap holds a token of up to about **6 460 B (6.3 KiB)** beside a grant, a `cs` and `so`.
 - `doctor` reports `id.oidc_exchange` *(new)*.
 
 **Depends on:** I1.
@@ -797,6 +829,14 @@ Any time:                                      E2, E3, E4
   `exchange_client_id` (the `azp` it accepts), and still fills today's required `audience`. Nothing changes for an
   `[oidc]` table without `exchange_audience`. At a verifying provider an `oidc:` action without an `ot` is refused, so
   upgrade the gateways and set their exchange before the providers set `exchange_audience`.
+  - **An older binary ignores `exchange_audience` silently** (#757's confirm round): `OidcConfig` accepts unknown keys
+    (it has no `deny_unknown_fields`). So a provider configured to verify before it is upgraded **enforces nothing**:
+    it admits an `oidc:` action as today, without an `ot`. Upgrade the provider's binary before relying on its setting.
+  - **A provider-only `[oidc]` table opens that node's own gateway door to the IdP's users.** Any `[oidc]` table counts
+    as a credential model (`gateway_credential_model`, `src/agent/guarantee.rs`), so a provider node with an HTTP gateway
+    then admits the IdP's users there with the table's `group_scopes`. Its issuer and JWKS hosts are checked against
+    `egress.allow_hosts` at start (`src/agent/lifecycle.rs`). Give a provider-only table no `group_scopes`, or no gateway
+    port, if that door should stay shut.
 - **I2:** a `ca_cert_pem` holding more than one certificate is refused by name at start. **Before upgrading, an operator
   whose `ca_cert_pem` holds an extra certificate removes it**, keeping only the fleet CA's: the extra certificate was
   ignored before, so removing it changes nothing. Only `ca_cert_pem` is affected, not `cert_pem` or the on-node CA, and
