@@ -29,7 +29,7 @@ pub use crate::config::OidcConfig;
 
 /// The asymmetric signature algorithms we accept. Symmetric (`HS*`) and `none`
 /// are deliberately excluded — accepting them is the JWT alg-confusion bypass.
-const ALLOWED_ALGS: &[Algorithm] = &[
+pub(crate) const ALLOWED_ALGS: &[Algorithm] = &[
     Algorithm::RS256, Algorithm::RS384, Algorithm::RS512,
     Algorithm::ES256, Algorithm::ES384,
     Algorithm::PS256, Algorithm::PS384, Algorithm::PS512,
@@ -331,6 +331,32 @@ impl OidcVerifier {
         validate_token(&self.shared.cfg, &keys, token).ok()
     }
 
+    /// The configuration this verifier validates against.
+    pub(crate) fn config(&self) -> &OidcConfig {
+        &self.shared.cfg
+    }
+
+    /// Identity-and-lifecycle I5: the keys a **synchronous** verify (a provider's receive boundary, which cannot await
+    /// a fetch) validates a token signed under `kid` against — the keys held now, never waiting. The plan is the same as
+    /// [`verify`](Self::verify)'s: a `kid` the held keys lack, or keys past the TTL, start the fetch in the background
+    /// (single-flight, an unknown `kid` at most once per [`JWKS_REFRESH_COOLDOWN`]), so a key the issuer rotated in is
+    /// picked up by the first token signed under it at most one cooldown late, and keys older than
+    /// [`JWKS_MAX_STALE`] since the last successful fetch are not used. `None` when no usable key is held at all — a
+    /// cold start, or keys past that ceiling: the caller refuses, retriable (`ot_keys_unavailable`).
+    pub(crate) fn keys_now(&self, kid: &str) -> Option<Vec<(String, DecodingKey)>> {
+        let (plan, keys) = self.plan(kid);
+        if plan != Plan::Use {
+            self.start_fetch();
+        }
+        (!keys.is_empty()).then_some(keys)
+    }
+
+    /// I5: start the first fetch now (a provider's `start()`), so the keys are held before the first exchanged token
+    /// arrives.
+    pub(crate) fn warm(&self) {
+        self.start_fetch();
+    }
+
     /// The cache's plan for `kid`, and the keys held now — one read guard, released on return.
     fn plan(&self, kid: &str) -> (Plan, Vec<(String, DecodingKey)>) {
         let c = self.shared.cache.read().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -564,6 +590,9 @@ mod tests {
             group_claim: "groups".into(),
             group_scopes,
             jwks_uri: None,
+            exchange_audience: None,
+            exchange_client_id: None,
+            exchange_max_lifetime_secs: None,
         }
     }
 

@@ -294,6 +294,10 @@ fn spawn_handler_with(
         unsigned_actions: Default::default(),
         #[cfg(all(feature = "gateway", feature = "tls"))]
         grant_decisions_in_flight: papaya::HashSet::new(),
+        #[cfg(feature = "compliance")]
+        exchanged_token_verifier: std::sync::OnceLock::new(),
+        #[cfg(feature = "compliance")]
+        exchanged_token_replay: Default::default(),
         causal_misplaced: Default::default(),
         #[cfg(feature = "a2a")]
         a2a_mounted: std::sync::atomic::AtomicBool::new(false),
@@ -4388,6 +4392,10 @@ async fn test_subscribe_notified_via_gossip() {
         unsigned_actions: Default::default(),
         #[cfg(all(feature = "gateway", feature = "tls"))]
         grant_decisions_in_flight: papaya::HashSet::new(),
+        #[cfg(feature = "compliance")]
+        exchanged_token_verifier: std::sync::OnceLock::new(),
+        #[cfg(feature = "compliance")]
+        exchanged_token_replay: Default::default(),
         causal_misplaced: Default::default(),
         #[cfg(feature = "a2a")]
         a2a_mounted: std::sync::atomic::AtomicBool::new(false),
@@ -15897,7 +15905,7 @@ async fn an_oidc_issuer_the_egress_policy_denies_refuses_the_start() {
     let port = alloc_port();
     let mut cfg = GossipConfig::auto();
     cfg.bind_port = port;
-    cfg.oidc = Some(crate::OidcConfig { issuer: "https://idp.example".into(), audience: "mycelium".into(), group_claim: "groups".into(), group_scopes: Default::default(), jwks_uri: None });
+    cfg.oidc = Some(crate::OidcConfig { issuer: "https://idp.example".into(), audience: "mycelium".into(), group_claim: "groups".into(), group_scopes: Default::default(), jwks_uri: None, exchange_audience: None, exchange_client_id: None, exchange_max_lifetime_secs: None });
     cfg.egress.allow_hosts = vec!["api.allowed.example".into()];
     let a = GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg.clone());
     let e = a.start().await.expect_err("an issuer the egress policy denies must refuse the start");

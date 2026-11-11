@@ -459,7 +459,11 @@ arguments, so either pairing binds exactly them. Since I3's PR 2 a grant decisio
 certificate (`src/agent/grant_decision.rs`): the node it is addressed to verifies the signature, the decider's key
 standing, the request, its own address and freshness, and records the **signer** as the actor; a client carrying it
 needs only `grant:relay`, the route's second admitted scope (`authz::alternative_scope`). Unsigned decisions under
-`grant:issue` are counted (`grant_decisions_unsigned`) until the refusal release (the plan's §9 O6).
+`grant:issue` are counted (`grant_decisions_unsigned`) until the refusal release (the plan's §9 O6). Since I5's PR 1 a provider whose `[oidc]` sets `exchange_audience` verifies an OIDC user's **exchanged token** itself
+(`src/agent/exchanged_token.rs`). The token is DPoP-bound to the gateway's node key and checked against the key that
+signed its envelope, so a member that lifts it into an envelope of its own is refused (`ot_bound_to_another_key`). Its
+`jti` is admitted once per provider, in a window that refuses rather than evicts. The keys are the gateway verifier's
+own cache, read without waiting, and a token arriving while none is held is refused, retriable.
 
 > **`sys/identity` authentication — partially closed (WS-E, in progress).** `sys/identity/{node}`
 > is a plain Layer-I KV value with **no signature**, and `merge_peer_keys` **accumulates** any key

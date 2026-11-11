@@ -202,6 +202,18 @@ impl GossipAgent {
                 }
             }
         }
+        // Identity-and-lifecycle I5: a node whose `[oidc]` names an `exchange_audience` verifies exchanged tokens, against
+        // its own issuer and JWKS. The keys are fetched now, so they are held before the first token arrives; a token that
+        // arrives while none is held is refused, retriable (`ot_keys_unavailable`).
+        #[cfg(feature = "compliance")]
+        if let Some(oidc) = &self.config.oidc
+            && oidc.exchange_audience.is_some()
+            && self.task_ctx.exchanged_token_verifier.get().is_none()
+        {
+            let verifier = Arc::new(super::oidc::OidcVerifier::new(oidc.clone(), self.config.egress.clone()));
+            verifier.warm();
+            let _ = self.task_ctx.exchanged_token_verifier.set(verifier);
+        }
         // Credential bindings (post-360 plan row L): each value read once, here, into the gate. A value
         // that cannot be read refuses the start by name (never by value); a build without the gate's
         // HTTP client refuses every binding, rather than accept it and attach nothing.

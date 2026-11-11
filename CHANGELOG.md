@@ -80,6 +80,23 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **A provider verifies an OIDC user's exchanged token** (`docs/plans/identity-and-lifecycle.md` I5, PR 1 of 2, D6).
+  A provider whose `[oidc]` table sets `exchange_audience` verifies the token a gateway carries in the caller envelope
+  (`ot`), against its own issuer and keys. The gateway's exchange is PR 2.
+  - The checks, each refused by name:
+    - the gateway's signature over the token (`so`);
+    - the token's signature, against the JWKS, which is fetched at start;
+    - its audience and client (`azp`);
+    - sender binding: `cnf.jkt` must be the thumbprint of the key that signed this envelope;
+    - the subject: the envelope's principal;
+    - its lifetime;
+    - its `jti`, admitted once per provider.
+  - **The replay window** is bounded per gateway and per principal, and refuses rather than evicts.
+  - **An `oidc:` action without an `ot`** is refused at a verifying provider.
+  - **A build without `compliance`** refuses any `ot` (`not_in_build`).
+
+  Upgrade note: `deprecations.md` §96.
+
 - **I3 closed: signed decisions, on evidence** (`docs/plans/identity-and-lifecycle.md` I3, PR 3 of 3). The plan
   closes I3 promise by promise across #750, #754 and this PR. One promise is moved: the private Cedar adapter's re-pin
   waits for the release that carries I3, because it pins by release tag (§9 O7). Also in this PR:

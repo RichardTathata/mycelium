@@ -37,7 +37,27 @@ pub struct OidcConfig {
     /// Explicit JWKS URI. If `None`, derive from `issuer` via discovery.
     #[serde(default)]
     pub jwks_uri: Option<String>,
+    /// Identity-and-lifecycle I5 (D6): the audience of a token the gateway exchanges for (RFC 8693) and a provider
+    /// checks an exchanged token (`ot`) against. **The trigger, at both ends**: set, a provider verifies every `ot` it
+    /// receives and refuses an `oidc:` principal's action without one; unset, nothing about this table changes.
+    #[serde(default)]
+    pub exchange_audience: Option<String>,
+    /// I5: the IdP client the gateway exchanges as, and the `azp` a provider accepts on an exchanged token. Required when
+    /// `exchange_audience` is set (`oidc_exchange_client_unset`).
+    #[serde(default)]
+    pub exchange_client_id: Option<String>,
+    /// I5: the longest lifetime, `exp − iat` in seconds, a provider accepts on an exchanged token. Default
+    /// [`DEFAULT_EXCHANGE_MAX_LIFETIME_SECS`] (300), at most [`EXCHANGE_MAX_LIFETIME_CEILING_SECS`] (3 600).
+    #[serde(default)]
+    pub exchange_max_lifetime_secs: Option<u64>,
 }
+
+/// I5: the default longest lifetime of an exchanged token a provider accepts, in seconds.
+#[cfg(feature = "compliance")]
+pub const DEFAULT_EXCHANGE_MAX_LIFETIME_SECS: u64 = 300;
+/// I5: the most `exchange_max_lifetime_secs` may be set to.
+#[cfg(feature = "compliance")]
+pub const EXCHANGE_MAX_LIFETIME_CEILING_SECS: u64 = 3_600;
 
 /// What an `[oidc]` table becomes in a build without `compliance`: a value that **parses** — so the
 /// table is seen rather than dropped by `GossipConfig`'s unknown-key tolerance — and that
@@ -68,6 +88,11 @@ fn default_group_claim() -> String { "groups".to_string() }
 
 #[cfg(feature = "compliance")]
 impl OidcConfig {
+    /// I5: the longest lifetime of an exchanged token this node accepts, in seconds.
+    pub fn exchange_max_lifetime(&self) -> u64 {
+        self.exchange_max_lifetime_secs.unwrap_or(DEFAULT_EXCHANGE_MAX_LIFETIME_SECS)
+    }
+
     /// Gateway scopes granted to a principal in `groups` (union, deduplicated).
     pub fn scopes_for_groups(&self, groups: &[String]) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
@@ -2238,6 +2263,30 @@ impl GossipConfig {
     /// Called automatically by `GossipAgent::start` and [`load_from_file`](Self::load_from_file).
     /// Call manually after mutating fields directly to catch errors early.
     pub fn validate(&self) -> Result<(), GossipError> {
+        // Identity-and-lifecycle I5: a node that verifies exchanged tokens names the client it accepts, and bounds their
+        // lifetime within the ceiling.
+        #[cfg(feature = "compliance")]
+        if let Some(oidc) = &self.oidc {
+            if oidc.exchange_audience.as_deref().is_some_and(|a| a.trim().is_empty()) {
+                return Err(GossipError::InvalidField { field: "oidc.exchange_audience", reason: "set, it may not be empty".into() });
+            }
+            if oidc.exchange_audience.is_some() && oidc.exchange_client_id.as_deref().is_none_or(|c| c.trim().is_empty()) {
+                return Err(GossipError::InvalidField {
+                    field: "oidc.exchange_client_id",
+                    reason: "oidc_exchange_client_unset: with exchange_audience set, the client the gateway exchanges as — \
+                             the azp a provider accepts — must be named"
+                        .into(),
+                });
+            }
+            if let Some(l) = oidc.exchange_max_lifetime_secs
+                && (l == 0 || l > EXCHANGE_MAX_LIFETIME_CEILING_SECS)
+            {
+                return Err(GossipError::InvalidField {
+                    field: "oidc.exchange_max_lifetime_secs",
+                    reason: format!("{l}: must be in 1..={EXCHANGE_MAX_LIFETIME_CEILING_SECS}"),
+                });
+            }
+        }
         if self.max_bulk_payload_bytes == 0 || self.max_bulk_payload_bytes > MAX_BULK_PAYLOAD_BYTES_CEILING {
             return Err(GossipError::InvalidField {
                 field: "max_bulk_payload_bytes",

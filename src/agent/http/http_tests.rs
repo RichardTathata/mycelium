@@ -2872,6 +2872,9 @@ async fn test_gateway_oidc_jwt_maps_groups_to_scopes() {
         group_claim: "groups".into(),
         group_scopes,
         jwks_uri: None, // exercise discovery
+        exchange_audience: None,
+        exchange_client_id: None,
+        exchange_max_lifetime_secs: None,
     });
     let agent = Arc::new(GossipAgent::new(id, cfg));
     agent.start().await.unwrap();
