@@ -11,6 +11,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Security
 
+- **`rustix` 1.1.4 / 1.1.5 → 1.1.6** (RUSTSEC-2026-0486, an unsoundness advisory, dated 2026-10-27): `rustix::fs`'s
+  extended-attribute functions marked unwritten bytes initialized when given a zero-length buffer. **Not reachable
+  here:** nothing in the workspace calls them (`git grep xattr -- '*.rs'` finds nothing); `rustix` comes in only as a
+  dependency of other crates. Bumped in the three lockfiles CI audits that carried it (the root, `fuzz/`,
+  `examples/conway-gpu/`), because the audit denies warnings and was failing every PR. No API change.
+
 - **`mycelium-effects`' bundled SQLite 3.46.0 → 3.54.1** (RUSTSEC-2026-0459, CVE-2026-119375, published 2026-10-30):
   **`rusqlite` 0.32.1 → 0.41.0**, which brings **`libsqlite3-sys` 0.30.1 → 0.39.1**. SQLite before 3.54.0 can return
   uninitialized page-cache memory to ordinary queries when it opens a database file together with a sibling `-wal`
