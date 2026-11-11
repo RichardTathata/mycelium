@@ -133,7 +133,8 @@ mock IdP: `an_oidc_users_call_is_exchanged_at_the_gateway_and_verified_at_the_pr
 `the_dpop_htu_and_the_client_credential_are_encoded_as_the_rfcs_say` and
 `an_oidc_users_a2a_call_is_exchanged_on_send_and_stream`. A grant's use given back on an exchange that failed is
 `a_grant_is_given_back_when_the_gateway_refused_before_sending`, in
-[`src/agent/client_grant_tests.rs`](../../src/agent/client_grant_tests.rs).
+[`src/agent/client_grant_tests.rs`](../../src/agent/client_grant_tests.rs), and at both `/a2a` doors
+`a2a_a_grant_is_given_back_when_the_gateway_refused_before_sending`, in [`src/lib_tests.rs`](../../src/lib_tests.rs).
 
 ## See it work
 

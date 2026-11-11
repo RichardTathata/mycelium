@@ -595,7 +595,8 @@ async fn a_grant_the_provider_refused_before_running_is_given_back() {
 
 /// **A grant's use is given back when the gateway itself refused before sending** (I5, #760's review, M2). The door
 /// claims a single-use grant, then the dispatch fails at the gateway — the IdP's exchange yields no token
-/// (`oidc_exchange_unreachable`), or the envelope is too large, or the provider has no caller context — and nothing
+/// (`oidc_exchange_unreachable`), or the envelope is too large, or the provider has no caller context, or no context
+/// reached the dispatch (`caller_context_missing`, a handler outside the auth layer) — and nothing
 /// ran. The use is released (the marker gone), and the retry is admitted once; a timeout, which may have run, leaves it
 /// spent. Seen failing first with the release reading only a provider's reply (the retry refused: the grant used).
 #[tokio::test]
@@ -618,6 +619,7 @@ async fn a_grant_is_given_back_when_the_gateway_refused_before_sending() {
         GatewayDispatchError::Exchange("oidc_exchange_unreachable"),
         GatewayDispatchError::ContextTooLarge,
         GatewayDispatchError::ProviderWithoutContext(a.node_id().clone()),
+        GatewayDispatchError::MissingContext,
     ] {
         let p = permit().await;
         let claimed = matches!(&p, Preflight::Proceed { grant_claim: Some(_), .. });
@@ -639,6 +641,7 @@ async fn a_grant_is_given_back_when_the_gateway_refused_before_sending() {
             (true, Some("oidc_exchange_unreachable".to_string())),
             (true, Some("caller_context_too_large".to_string())),
             (true, Some("provider_without_caller_context".to_string())),
+            (true, Some("caller_context_missing".to_string())),
         ],
         "RELEASED: each claimed, each given back"
     );

@@ -14149,6 +14149,152 @@ async fn test_boundary_h_a1_gateway_establishes_mandates_end_to_end() {
     let _ = std::fs::remove_dir_all(&cert_dir);
 }
 
+/// **A grant's use is given back at `/a2a` when the gateway refused before sending** (I5, #760's confirm round). Both
+/// A2A doors claim a grant's use in the preflight; a refusal the gateway authors before it sends — here
+/// `provider_without_caller_context`, the skill's only advertisement naming a node that publishes no caller-context
+/// marker; an exchange that yields no token takes the same arm — ran nothing, so the use is released, and the retry
+/// under the same single-use grant is admitted once, unary (`tasks/send`) and streamed (`tasks/sendSubscribe`) alike.
+/// (An `oidc:` principal cannot hold a grant today — possession needs a key the IdP's user has none of — so the
+/// failing-IdP case is the `/mcp` test's function-level one.) Seen failing first: the retry refused `GrantUsed`.
+#[cfg(all(feature = "compliance", feature = "a2a"))]
+#[tokio::test]
+async fn a2a_a_grant_is_given_back_when_the_gateway_refused_before_sending() {
+    use crate::agent::gateway_authority::{possession_request, ExecutionAuthority, PresentedMandate};
+    use crate::config::{GatewayNamedToken, TlsConfig};
+    use crate::knowledge::issuer::TrustedExternalIssuers;
+    use crate::knowledge::IssuerId;
+    use crate::mandate::authority::{
+        ClockModel, ExecutionGate, FreshnessPolicy, ResourceTier, RevocationCheckpoint, SignedRevocationCheckpoint,
+    };
+    use crate::mandate::grant::{possession_message, EntitlementTable, GrantVerifier, SignedMandateGrant, GRANT_SCOPE_PREFIX};
+    use crate::mandate::{Mandate, PrincipalId, ResourceAuthority, TermId};
+    use crate::{ReferenceEvaluator, Rule};
+    use base64::Engine;
+    use ed25519_dalek::SigningKey;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    const CALLER: &str = "token:gw/agent-1";
+    let authority_key = SigningKey::from_bytes(&[61u8; 32]);
+    let holder_key = SigningKey::from_bytes(&[62u8; 32]);
+    let gossip_port = alloc_port();
+    let http_port = alloc_port();
+    let cert_dir = std::env::temp_dir().join(format!("i5-a2a-grant-{http_port}"));
+    let _ = std::fs::remove_dir_all(&cert_dir);
+    let mut cfg = GossipConfig::default();
+    cfg.bind_port = gossip_port;
+    cfg.http_port = Some(http_port);
+    cfg.tls = Some(TlsConfig { auto_cert_dir: cert_dir.clone(), ..Default::default() });
+    cfg.gateway_identity_issuer = Some("gw".into());
+    cfg.gateway_named_tokens = vec![GatewayNamedToken { name: "agent-1".into(), token: "s3cret".into(), scopes: vec!["*".into()] }];
+    let agent = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", gossip_port).unwrap(), cfg).with_a2a());
+    let me = agent.node_id().clone();
+    let elsewhere = NodeId::new("127.0.0.1", 9).unwrap();
+    let at = |n: &NodeId| format!("skill:depot/dispatch@{n}");
+    agent.with_action_evaluator(Arc::new(
+        ReferenceEvaluator::new("rev-i5")
+            .with_catalogue("cat-i5", "1")
+            .map_action("skill.invoke", at(&me))
+            .map_action("skill.invoke", at(&elsewhere))
+            .allow(Rule::new("*", "skill.invoke", at(&me)).requiring_grant())
+            .allow(Rule::new("*", "skill.invoke", at(&elsewhere)).requiring_grant()),
+    ));
+    let mut entitlements = EntitlementTable::new();
+    entitlements.entitle_grants(PrincipalId::new("operator:acme").unwrap());
+    let mut external = TrustedExternalIssuers::new();
+    external.trust(IssuerId::new("operator:acme").unwrap(), authority_key.verifying_key().to_bytes()).unwrap();
+    external.trust(IssuerId::new(CALLER).unwrap(), holder_key.verifying_key().to_bytes()).unwrap();
+    let gate = ExecutionGate::strict(
+        ResourceAuthority::new("depot", 1),
+        ResourceTier::Serialised,
+        ClockModel { skew_ms: 500 },
+        FreshnessPolicy { freshness_ms: 120_000, interval_ms: 30_000, delivery_ms: 10_000 },
+    )
+    .unwrap();
+    agent.with_execution_authority(Arc::new(ExecutionAuthority::new(gate, GrantVerifier::new(entitlements), external)));
+    agent.start().await.unwrap();
+    let reached = Arc::new(AtomicUsize::new(0));
+    {
+        let (agent, reached) = (Arc::clone(&agent), Arc::clone(&reached));
+        let mut rx = agent.service().rpc_rx("skill.invoke");
+        tokio::spawn(async move {
+            while let Some(req) = rx.recv().await {
+                reached.fetch_add(1, Ordering::SeqCst);
+                agent.service().rpc_respond(&req, b"dispatched".to_vec());
+            }
+        });
+    }
+    let wall_ms = || std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+    let text = "dispatch";
+    let digest = crate::agent::action_evaluator::arguments_digest(&serde_json::to_vec(&serde_json::json!({ "text": text })).unwrap());
+    let digest_hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+    // One single-use grant per door, each in its own scope, its revocation standing known.
+    let grant = |term: &str| {
+        let scope = format!("{GRANT_SCOPE_PREFIX}{term}");
+        let c = RevocationCheckpoint { authority: PrincipalId::new("operator:acme").unwrap(), scope: scope.clone(), seq: 1, issued_at_ms: wall_ms(), revoked: Default::default() };
+        agent
+            .offer_revocation_checkpoint(&SignedRevocationCheckpoint { signature: mycelium_core::tls::sign_bytes(&authority_key, &c.canonical_bytes()).to_vec(), checkpoint: c })
+            .expect("an authority is attached");
+        let mandate = Mandate {
+            holder: PrincipalId::new(CALLER).unwrap(),
+            established_by: PrincipalId::new("operator:acme").unwrap(),
+            purpose: "dispatch once".into(),
+            scope,
+            operations: Mandate::grant_operations_on("skill.invoke:skill:depot/dispatch", &digest_hex, None, "skill:depot/dispatch"),
+            epoch: 1,
+            term: TermId::new(term).unwrap(),
+            valid_from_ms: 0,
+            valid_until_ms: wall_ms() + 600_000,
+        };
+        let grant = SignedMandateGrant { signature: mycelium_core::tls::sign_bytes(&authority_key, &mandate.canonical_bytes()).to_vec(), mandate };
+        let proof = mycelium_core::tls::sign_bytes(&holder_key, &possession_message(&grant.mandate, &possession_request("skill.invoke", &at(&me), &digest)));
+        serde_json::json!({ "mandate": PresentedMandate { grant, possession: base64::engine::general_purpose::STANDARD.encode(proof) } })
+    };
+    let (unary_grant, stream_grant) = (grant("i5-unary"), grant("i5-stream"));
+    let call = |method: &'static str, meta: serde_json::Value| async move {
+        let params = serde_json::json!({
+            "id": format!("task-{}", fastrand::u32(..)), "skillId": "depot/dispatch",
+            "message": {"role": "user", "parts": [{"type": "text", "text": text}]}, "_meta": meta,
+        });
+        reqwest::Client::new()
+            .post(format!("http://127.0.0.1:{http_port}/a2a"))
+            .bearer_auth("s3cret")
+            .json(&serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}))
+            .send()
+            .await
+            .expect("/a2a")
+            .text()
+            .await
+            .unwrap()
+    };
+    // The skill's only advertisement names a node with no caller-context marker: the gateway refuses before sending.
+    let elsewhere_ad = format!("cap/{elsewhere}/depot/dispatch");
+    mycelium_core::ops::kv_set(&agent.task_ctx, Arc::from(elsewhere_ad.as_str()), crate::capability::Capability::new("depot", "dispatch").encode());
+    let unary_refused = call("tasks/send", unary_grant.clone()).await;
+    let stream_refused = call("tasks/sendSubscribe", stream_grant.clone()).await;
+    // Now the skill is served here: the retries under the same grants are admitted, once each.
+    mycelium_core::ops::kv_delete_async(&agent.task_ctx, Arc::from(elsewhere_ad.as_str())).await;
+    let _reg = agent.capabilities().advertise_capability(crate::capability::Capability::new("depot", "dispatch"), Duration::from_secs(30));
+    let own_ad = format!("cap/{me}/depot/dispatch");
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while agent.kv().get(&own_ad).is_none() && std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let unary_retry = call("tasks/send", unary_grant.clone()).await;
+    let stream_retry = call("tasks/sendSubscribe", stream_grant.clone()).await;
+    let unary_again = call("tasks/send", unary_grant).await;
+    let stream_again = call("tasks/sendSubscribe", stream_grant).await;
+    let runs = reached.load(Ordering::SeqCst);
+    agent.shutdown().await;
+    let _ = std::fs::remove_dir_all(&cert_dir);
+    assert!(unary_refused.contains("does not enforce the gateway caller context"), "UNARY REFUSED BEFORE SENDING: {unary_refused}");
+    assert!(stream_refused.contains("provider_without_caller_context"), "STREAM REFUSED BEFORE SENDING: {stream_refused}");
+    assert!(unary_retry.contains("dispatched") || unary_retry.contains("\"completed\""), "UNARY RELEASED: the retry under the same grant: {unary_retry}");
+    assert!(stream_retry.contains("\"completed\""), "STREAM RELEASED: the retry under the same grant: {stream_retry}");
+    assert_eq!(runs, 2, "each retry ran once");
+    assert!(unary_again.contains("grant used") || unary_again.contains("GrantUsed") || unary_again.contains("\"error\""), "the unary grant spent after it ran: {unary_again}");
+    assert!(!stream_again.contains("\"completed\""), "the stream grant spent after it ran: {stream_again}");
+}
+
 /// **Closure plan C3: authority where the work happens.** One node with provider enforcement on,
 /// a policy requiring a mandate for `depot`, and its own execution authority.
 ///

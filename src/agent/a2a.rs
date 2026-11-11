@@ -908,6 +908,15 @@ async fn dispatch_send(
         Some(&resource_claim),
         client_signed.as_ref(),
     ).await;
+    // The gateway's own refusal before it sent anything (a failed exchange, an envelope too large, a provider without
+    // the caller context) ran nothing: a grant's use claimed above is given back (#760's confirm round). A reply is the
+    // skill's raw bytes, which the node did not author, so only an `Err` releases here.
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    if dispatched.is_err()
+        && let Some(reason) = super::http::release_grant_claim_after(&state.task_ctx, &preflight, &dispatched).await
+    {
+        tracing::debug!(skill = %skill_id, reason, "refused before sending: the grant's use at this door is released");
+    }
 
     // A timeout is *unknown*, never a negative — a long-running skill may well have completed.
     #[cfg(all(feature = "gateway", feature = "tls"))]
@@ -1286,6 +1295,13 @@ pub(crate) async fn tasks_send_subscribe(
             Some(&resource_claim),
             client_signed.as_ref(),
         ).await;
+        // As on the unary send: the gateway's own refusal before sending gives a claimed grant use back.
+        #[cfg(all(feature = "gateway", feature = "tls"))]
+        if dispatched.is_err()
+            && let Some(reason) = super::http::release_grant_claim_after(&state.task_ctx, &preflight, &dispatched).await
+        {
+            tracing::debug!(skill = %skill_id, reason, "refused before sending: the grant's use at this door is released");
+        }
 
         #[cfg(all(feature = "gateway", feature = "tls"))]
         {
