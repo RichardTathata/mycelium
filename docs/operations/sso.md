@@ -48,14 +48,15 @@ no exchange), so end every literal with `..Default::default()`; a field added la
 
 - **`issuer` / `audience`** are validated on every token (mismatch → 401).
 - **`exchange_audience`** (with `exchange_client_id`, and optionally `exchange_max_lifetime_secs`) makes this node
-  verify an OIDC user's **exchanged** token at its provider, and — on a node with an HTTP gateway — exchange the user's
-  token at the IdP for every action it dispatches (identity-and-lifecycle I5; the feature page is
-  [`gateway-sso.md`](../features/gateway-sso.md)). It needs `[tls]`, and must differ from `audience`. A gateway also
-  needs `exchange_token_endpoint` and the client secret in the variable `exchange_client_secret_env` names (default
-  `MYCELIUM_OIDC_EXCHANGE_SECRET`), or it refuses to start by name. Configure the IdP's client for standard token
+  **verify** an OIDC user's exchanged token at its provider; **`exchange_token_endpoint`** makes it **exchange** the
+  user's token at the IdP for every action its gateway dispatches (identity-and-lifecycle I5; the feature page is
+  [`gateway-sso.md`](../features/gateway-sso.md)). Each is independent of the HTTP port. Verifying needs `[tls]`, and
+  an audience other than `audience`. Exchanging also needs the audience, the client, an `https` endpoint (or a
+  loopback host) and the client secret in the variable `exchange_client_secret_env` names (default
+  `MYCELIUM_OIDC_EXCHANGE_SECRET`), or the start is refused by name. Configure the IdP's client for standard token
   exchange (RFC 8693) with an audience mapper to `exchange_audience`; Keycloak 26.8.2 binds the exchanged token to the
-  gateway's DPoP key with default features. Set `exchange_audience` on a provider only once its gateways exchange
-  (`deprecations.md` §96, §97).
+  gateway's DPoP key with default features. Set `exchange_audience` on a provider only once the gateways that call it
+  exchange (`deprecations.md` §96, §97).
 - **`group_claim`** names the JWT claim holding the user's groups/roles — this is
   the main per-vendor knob (see §3).
 - **`group_scopes`** maps each IdP group to gateway scopes; a user's scopes are

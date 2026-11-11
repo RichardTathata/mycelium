@@ -54,3 +54,20 @@ pub fn build_or_none(builder: reqwest::ClientBuilder) -> reqwest::Client {
         without_redirects().build().expect("a client with no options and no redirects builds")
     })
 }
+
+/// Read a response's body, at most `cap` bytes (I5, #760's review, L1): `None` when it is longer, or the transfer
+/// fails. A declared `Content-Length` past the cap is refused before anything is read; an undeclared one is read chunk
+/// by chunk and abandoned at the cap, so a peer cannot make the node buffer what it chooses.
+pub async fn read_bounded(mut response: reqwest::Response, cap: usize) -> Option<Vec<u8>> {
+    if response.content_length().is_some_and(|n| n > cap as u64) {
+        return None;
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await.ok()? {
+        if body.len() + chunk.len() > cap {
+            return None;
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Some(body)
+}

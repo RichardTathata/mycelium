@@ -190,7 +190,12 @@ pub(super) async fn a2a_optional_auth(ctx: Arc<HttpCtx>, mut request: Request, n
     let resolved = match presented {
         None => ResolvedPrincipal::anonymous(Vec::new()),
         Some(token) => match resolve_bearer(&ctx, &token).await {
-            Some((principal, _held)) => ResolvedPrincipal { principal, scopes: Vec::new(), subject_token: None },
+            Some((principal, _held)) => {
+                // I5 (#760's review, H1): an OIDC user's own bearer rides with the principal here too, so `/a2a`'s
+                // `skill.invoke` is exchanged as `/mcp`'s `mcp.invoke` is.
+                let subject_token = principal.starts_with("oidc:").then(|| gateway_caller::SubjectToken(std::sync::Arc::from(token.as_str())));
+                ResolvedPrincipal { principal, scopes: Vec::new(), subject_token }
+            }
             None => {
                 return (
                     StatusCode::UNAUTHORIZED,
@@ -684,7 +689,9 @@ fn pre_execution_refusal(bytes: &[u8]) -> Option<String> {
 /// a grant's use before it dispatches — the marker on disk before the work can run (R2) — and a provider whose fold of
 /// client certificates lags the gateway's answers `client_key_unknown`; a retry was then refused `GrantUsed` although
 /// nothing ran. When the reply is one of [`pre_execution_refusal`]'s, the marker is tombstoned and then the in-memory
-/// claim released, so the grant admits the retry once. **At `/mcp` only**: the A2A doors' skills and an embedder's
+/// claim released, so the grant admits the retry once. The gateway's own refusals before dispatch — a failed exchange,
+/// an envelope too large, a provider without the caller context — release it too, and need no trust in a provider.
+/// **At `/mcp` only**: the A2A doors' skills and an embedder's
 /// kinds answer with raw bytes the node did not author, so a refusal there spends the grant. Sound against R2: the marker guards *work that may have run*,
 /// and none did; a crash before the tombstone is durable leaves the grant spent — the safe side. **Trusts the
 /// provider's answer**: a provider that ran the call and answered a refusal could have it run twice, which a provider
@@ -692,7 +699,19 @@ fn pre_execution_refusal(bytes: &[u8]) -> Option<String> {
 #[cfg(all(feature = "gateway", feature = "tls"))]
 pub(crate) async fn release_grant_claim_after(ctx: &Arc<TaskCtx>, preflight: &Preflight, dispatched: &Result<Bytes, GatewayDispatchError>) -> Option<String> {
     let Preflight::Proceed { grant_claim: Some(c), .. } = preflight else { return None };
-    let reason = pre_execution_refusal(dispatched.as_ref().ok()?)?;
+    let reason = match dispatched {
+        Ok(reply) => pre_execution_refusal(reply)?,
+        // The gateway's own refusals before it sent anything (#760's review, M2): an exchange at the IdP that yielded no
+        // token, an envelope too large, a provider without the caller context, no context at all. This gateway knows
+        // nothing ran, so the use is given back without trusting any provider.
+        Err(
+            e @ (GatewayDispatchError::Exchange(_)
+            | GatewayDispatchError::ContextTooLarge
+            | GatewayDispatchError::ProviderWithoutContext(_)
+            | GatewayDispatchError::MissingContext),
+        ) => e.reason().to_string(),
+        Err(_) => return None,
+    };
     let authority = ctx.execution_authority.get()?;
     mycelium_core::ops::kv_delete_async(ctx, Arc::from(c.marker.as_str())).await;
     authority.release_grant_use(&c.holder, &c.scope, &c.term, &c.point);

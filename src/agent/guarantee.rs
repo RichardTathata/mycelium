@@ -868,9 +868,28 @@ pub(crate) fn core_guarantees() -> Vec<GuaranteeDescriptor> {
               { let _ = c; Resolution::NotInBuild { feature: "compliance" } }
           }),
         g("id.oidc_exchange", 1, "identity", Node,
-          "an OIDC user's action is verified where it runs: the gateway exchanges the user's token for one DPoP-bound to its node key, and the provider verifies it against its own issuer and the key that signed the envelope (identity-and-lifecycle I5)",
-          "`compliance`; `[oidc] exchange_audience` + `exchange_client_id` (a gateway also `exchange_token_endpoint` and the secret's variable); `[tls]`",
-          &["oidc_exchange::OidcExchanger", "exchanged_token::check"], "docs/features/gateway-sso.md",
+          "this gateway exchanges an OIDC user's token at the IdP for every action it dispatches for them, for one DPoP-bound to its node key (identity-and-lifecycle I5): a node exchanges iff `exchange_token_endpoint` is set",
+          "`compliance`; `[oidc] exchange_token_endpoint` + `exchange_audience` + `exchange_client_id` + the secret's variable; `[tls]`; `gateway_caller_profile = secure`",
+          &["oidc_exchange::OidcExchanger"], "docs/features/gateway-sso.md",
+          |_| None,
+          |c| {
+              #[cfg(feature = "compliance")]
+              {
+                  let set = c.config.oidc.as_ref().is_some_and(|o| o.exchange_token_endpoint.is_some());
+                  if !set { Resolution::NotConfigured { missing: "[oidc] exchange_token_endpoint" } }
+                  else if c.config.gateway_caller_profile == crate::config::GatewayCallerProfile::Legacy {
+                      Resolution::NotApplicable { because: "gateway_caller_profile = legacy frames no caller envelope, so nothing is exchanged" }
+                  }
+                  else if c.tls.get().is_none() { Resolution::NotConfigured { missing: "[tls] (the exchanged token is bound to the node key)" } }
+                  else { Resolution::Enforced }
+              }
+              #[cfg(not(feature = "compliance"))]
+              { let _ = c; Resolution::NotInBuild { feature: "compliance" } }
+          }),
+        g("id.oidc_exchanged_token", 1, "identity", Node,
+          "this provider verifies an OIDC user's exchanged token against its own issuer and the key that signed the envelope, and refuses an OIDC user's action without one (identity-and-lifecycle I5): a node verifies iff `exchange_audience` is set",
+          "`compliance`; `[oidc] exchange_audience` + `exchange_client_id`; `[tls]`",
+          &["exchanged_token::check"], "docs/features/gateway-sso.md",
           |_| None,
           |c| {
               #[cfg(feature = "compliance")]

@@ -2,7 +2,7 @@
 
 **Generated** from `core_guarantees()` (`src/agent/guarantee.rs`); do not edit. Regenerate with `UPDATE_GUARANTEE_CATALOGUE=1 cargo test --lib --features compliance,a2a the_checked_in_guarantee_catalogue_is_current`. A guarantee is a claim the startup report resolves against the node as built and configured — `enforced` · `not_configured` (the setting named) · `not_in_build` (the feature named) · `not_applicable` (the role fact named) · `not_verifiable_here` (external prerequisites, never counted). The plan is `docs/plans/guarantees-and-rule-catalogue.md`; the live report is `guarantee_report()` / `GET /gateway/guarantees`.
 
-Schema `mycelium.guarantees/1` · 40 core guarantees.
+Schema `mycelium.guarantees/1` · 41 core guarantees.
 
 ## The descriptors
 
@@ -12,7 +12,8 @@ Schema `mycelium.guarantees/1` · 40 core guarantees.
 | <a id="gw.exposed_closed"></a>`gw.exposed_closed` | 1 | gateway | NodeEnforced | a gateway bound beyond loopback requires a credential — `start()` refuses an open one unless explicitly waived; on a credentialed node `/health`, `/ready`, `/stats`, `/metrics`, `/bulk/{id}` and the A2A descriptor stay public, `/a2a` admits an anonymous caller, and a merged router's paths outside `/gateway/` are not gated | `gateway_auth_token`, or (`compliance`) a token table or `[oidc]`, on any non-loopback `http_addr`; `gateway_allow_unauthenticated` unset | `GossipAgent::start`, `guarantee::gateway_exposure` | `docs/operations/production-readiness.md` |
 | <a id="gw.token_tables"></a>`gw.token_tables` | 1 | gateway | NodeEnforced | scoped or named tokens close the gateway with a per-route scope floor | `compliance`; `gateway_scoped_tokens` / `gateway_named_tokens` | `gateway_auth`, `required_scope` | `docs/operations/rbac.md` |
 | <a id="gw.oidc"></a>`gw.oidc` | 1 | gateway | NodeEnforced | human operators authenticate to the gateway through the IdP, groups mapped to scopes | `compliance`; `[oidc]` | `gateway_auth`, `oidc::OidcVerifier` | `docs/operations/sso.md` |
-| <a id="id.oidc_exchange"></a>`id.oidc_exchange` | 1 | identity | NodeEnforced | an OIDC user's action is verified where it runs: the gateway exchanges the user's token for one DPoP-bound to its node key, and the provider verifies it against its own issuer and the key that signed the envelope (identity-and-lifecycle I5) | `compliance`; `[oidc] exchange_audience` + `exchange_client_id` (a gateway also `exchange_token_endpoint` and the secret's variable); `[tls]` | `oidc_exchange::OidcExchanger`, `exchanged_token::check` | `docs/features/gateway-sso.md` |
+| <a id="id.oidc_exchange"></a>`id.oidc_exchange` | 1 | identity | NodeEnforced | this gateway exchanges an OIDC user's token at the IdP for every action it dispatches for them, for one DPoP-bound to its node key (identity-and-lifecycle I5): a node exchanges iff `exchange_token_endpoint` is set | `compliance`; `[oidc] exchange_token_endpoint` + `exchange_audience` + `exchange_client_id` + the secret's variable; `[tls]`; `gateway_caller_profile = secure` | `oidc_exchange::OidcExchanger` | `docs/features/gateway-sso.md` |
+| <a id="id.oidc_exchanged_token"></a>`id.oidc_exchanged_token` | 1 | identity | NodeEnforced | this provider verifies an OIDC user's exchanged token against its own issuer and the key that signed the envelope, and refuses an OIDC user's action without one (identity-and-lifecycle I5): a node verifies iff `exchange_audience` is set | `compliance`; `[oidc] exchange_audience` + `exchange_client_id`; `[tls]` | `exchanged_token::check` | `docs/features/gateway-sso.md` |
 | <a id="gw.tls"></a>`gw.tls` | 1 | gateway | NodeEnforced | the gateway serves HTTPS, so bearers and JWTs do not cross the wire in cleartext | `tls`; `[gateway_tls]` (or TLS terminated by a proxy in front — not visible here) | `http::listener::serve` | `docs/operations/gateway-tls.md` |
 | <a id="gw.caller_profile"></a>`gw.caller_profile` | 1 | gateway | NodeEnforced | a provider sees the gateway's client as the caller, attested by the gateway's identity | `tls`; `[tls]`; `gateway_caller_profile = secure` (the default) | `gateway_caller::attest`, `gateway_caller::verify` | `docs/guide/20-authorising-actions.md` |
 | <a id="mesh.tls"></a>`mesh.tls` | 1 | transport | NodeEnforced | gossip is mTLS: every peer presents a certificate signed by the fleet CA | `tls`; `[tls]` | `lifecycle::start (tls init)`, `connection::handshake` | `docs/guide/09-security.md` |
@@ -60,6 +61,7 @@ Each guarantee's resolution on an **unstarted** node (nothing attached) under th
 | `gw.token_tables` | not_applicable | not_applicable | not_applicable | not_configured |
 | `gw.oidc` | not_applicable | not_applicable | not_applicable | not_configured |
 | `id.oidc_exchange` | not_configured | not_configured | not_configured | not_configured |
+| `id.oidc_exchanged_token` | not_configured | not_configured | not_configured | not_configured |
 | `gw.tls` | not_applicable | not_applicable | not_applicable | not_configured |
 | `gw.caller_profile` | not_applicable | not_applicable | not_applicable | not_configured |
 | `mesh.tls` | not_configured | not_configured | not_configured | not_configured |

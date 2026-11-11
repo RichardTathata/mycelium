@@ -1484,7 +1484,12 @@ jobs:
             sleep 2
           done
           docker logs keycloak; exit 1
-      - run: cargo test --lib --features compliance,a2a -- --exact agent::oidc_exchange_live_tests::oidc_exchange_live_an_oidc_users_call_is_verified_at_the_provider --nocapture
+      # Exactly one test, by its path: a renamed test would otherwise pass this step with none run (#760's review, L7).
+      - run: |
+          set -o pipefail
+          cargo test --lib --features compliance,a2a -- --exact agent::oidc_exchange_live_tests::oidc_exchange_live_an_oidc_users_call_is_verified_at_the_provider --nocapture \
+            | tee "$RUNNER_TEMP/oidc-live.log"
+          grep -q '^test result: ok. 1 passed; 0 failed' "$RUNNER_TEMP/oidc-live.log"
         env:
           MYCELIUM_KEYCLOAK_URL: http://127.0.0.1:18090
           MYCELIUM_OIDC_EXCHANGE_SECRET: i5-live-gateway-secret

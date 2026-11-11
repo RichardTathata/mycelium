@@ -46,20 +46,36 @@ so a node the list does not let reach it starts and, holding no keys, answers ev
 the key that signs the envelope) and equal to `audience` (`oidc_exchange_audience_is_gateway_audience`). `OidcConfig`
 implements `Default`; write a literal with `..Default::default()`.
 
-**The gateway's half (I5, PR 2).** A node with an HTTP gateway and `exchange_audience` exchanges an OIDC user's own
-bearer at the IdP (RFC 8693) for every action it dispatches for that user, under its own client credential, with a DPoP
-proof (RFC 9449, `alg: EdDSA`) signed by its node key, and carries the token as `ot`. Two more settings:
-- `exchange_token_endpoint` — the IdP's token endpoint;
+**The gateway's half (I5, PR 2).** **A node exchanges iff `exchange_token_endpoint` is set, and verifies iff
+`exchange_audience` is set** (the maintainer's decision, 2026-11-11); its HTTP port decides neither. An exchanging node
+exchanges an OIDC user's own bearer at the IdP (RFC 8693) for every action it dispatches for that user, at `/mcp` and at
+`/a2a` (send and stream), under its own client credential, with a DPoP proof (RFC 9449, `alg: EdDSA`) signed by its node
+key, and carries the token as `ot`. Two more settings:
+- `exchange_token_endpoint` — the IdP's token endpoint, `https` unless its host is loopback;
 - `exchange_client_secret_env` — the environment variable holding the gateway's client secret (default
   `MYCELIUM_OIDC_EXCHANGE_SECRET`), read once at start.
 
-The start is refused by name when the endpoint is unset (`oidc_exchange_endpoint_unset`), the client unset
-(`oidc_exchange_client_unset`), the secret's variable unset or empty (`oidc_exchange_secret_unset`), or the egress
-allow-list does not permit the endpoint. A provider-only node (no `http_port`) needs none of them. At call time an
-exchange that does not yield a token refuses the call, and nothing runs: `oidc_exchange_unreachable` (no answer within
-10 s), `oidc_exchange_refused` (the IdP's error), `oidc_exchange_malformed` (no token in its answer) — JSON-RPC
-`-32024`, HTTP 502 at the raw route. A non-OIDC principal's call, and an OIDC user's call of a kind that is not an
-action, make no exchange. `mycelium doctor` reports [`id.oidc_exchange`](../reference/guarantee-catalogue.md#id.oidc_exchange).
+With the endpoint set, the start is refused by name when the audience is unset (`oidc_exchange_audience_unset`), the
+client unset (`oidc_exchange_client_unset`), the endpoint neither https nor loopback (`oidc_exchange_endpoint_insecure`),
+the secret's variable unset or empty (`oidc_exchange_secret_unset`), or the egress allow-list does not permit the
+endpoint. Without it nothing is asked: a node may verify without exchanging, and then an OIDC user's action through its
+own gateway toward a verifying provider is refused there `ot_required`. Under `gateway_caller_profile = legacy` no
+envelope is framed, so nothing is exchanged and the settings are not demanded (the start warns they are inert).
+
+At call time an exchange that does not yield a token refuses the call, and nothing runs, so a grant use the door claimed
+is given back: `oidc_exchange_unreachable` (no answer within 10 s, or a redirect, which is never followed),
+`oidc_exchange_refused` (the IdP's error; one `use_dpop_nonce` challenge is answered with its nonce first),
+`oidc_exchange_too_large` (an answer past 64 KiB), `oidc_exchange_malformed` (no token in its answer),
+`oidc_exchange_no_subject_token` (an `oidc:` principal reached the dispatch without the user's bearer — a door that
+does not carry it) and `oidc_exchange_no_identity` (no node key to bind to, which `[tls]` being required makes
+unreachable) — JSON-RPC `-32024`, HTTP 502 at the raw route. A non-OIDC principal's call, and an OIDC user's call of a
+kind that is not an action, make no exchange. `mycelium doctor` reports the halves apart:
+[`id.oidc_exchange`](../reference/guarantee-catalogue.md#id.oidc_exchange) (this node exchanges) and
+[`id.oidc_exchanged_token`](../reference/guarantee-catalogue.md#id.oidc_exchanged_token) (this node verifies).
+
+**Each node reads "action" against its own configuration**: a kind one node lists in `protected_rpc_kinds` and its
+gateway does not is not exchanged for at the gateway and is refused `ot_required` at the provider, so list a protected
+kind on every node that dispatches or serves it.
 
 The provider fetches the issuer's keys at `start()` and refreshes them through the node's one verifier, which its
 gateway uses for bearers too — one cache, one fetcher
@@ -111,7 +127,13 @@ tested by `a_build_without_compliance_refuses_an_exchanged_token`, in
 The gateway's half is tested in [`src/agent/oidc_exchange_tests.rs`](../../src/agent/oidc_exchange_tests.rs), against a
 mock IdP: `an_oidc_users_call_is_exchanged_at_the_gateway_and_verified_at_the_provider`,
 `only_an_oidc_users_action_is_exchanged_for`, `the_exchange_settings_are_refused_by_name_at_start`,
-`an_exchange_that_yields_no_token_is_refused_by_name` and `the_dpop_proof_is_an_eddsa_jws_under_the_node_key`.
+`an_exchange_that_yields_no_token_is_refused_by_name`, `the_dpop_proof_is_an_eddsa_jws_under_the_node_key`,
+`a_node_verifies_without_exchanging_when_no_endpoint_is_set`,
+`the_exchange_follows_no_redirect_bounds_its_answer_and_answers_one_nonce_challenge`,
+`the_dpop_htu_and_the_client_credential_are_encoded_as_the_rfcs_say` and
+`an_oidc_users_a2a_call_is_exchanged_on_send_and_stream`. A grant's use given back on an exchange that failed is
+`a_grant_is_given_back_when_the_gateway_refused_before_sending`, in
+[`src/agent/client_grant_tests.rs`](../../src/agent/client_grant_tests.rs).
 
 ## See it work
 
@@ -125,7 +147,9 @@ The exchange against a real IdP is `oidc_exchange_live_an_oidc_users_call_is_ver
 [`src/agent/oidc_exchange_live_tests.rs`](../../src/agent/oidc_exchange_live_tests.rs): Keycloak 26.8.2, pinned by
 digest, in CI's `oidc-exchange-live` job; it makes its own realm, and an OIDC user's two `/mcp` calls are each exchanged
 by the gateway and verified at the provider. Without `MYCELIUM_KEYCLOAK_URL` it skips itself, and under
-`MYCELIUM_OIDC_EXCHANGE_LIVE_REQUIRED` (which that job sets) a missing Keycloak fails it.
+`MYCELIUM_OIDC_EXCHANGE_LIVE_REQUIRED` (which that job sets) a missing Keycloak fails it. **It is one node**, the gateway
+its own provider: the exchange and the verification are each real, and the hop between two nodes is the caller
+envelope's, tested apart; a two-node run against Keycloak is not shown.
 
 ## What it guarantees, and what it does not
 
@@ -135,7 +159,8 @@ by the gateway and verified at the provider. Without `MYCELIUM_KEYCLOAK_URL` it 
 - **What it refuses:** symmetric (`HS*`) and `none` algorithms outright, an unknown `kid` after one refresh, and a key
   held past a 24-hour ceiling after its last successful fetch ([sso § 4](../operations/sso.md#4-security-notes-what-the-validator-enforces)).
 - **Guarantee:** [`id.oidc_exchange`](../reference/guarantee-catalogue.md#id.oidc_exchange) — an OIDC user's action
-  is exchanged at the gateway and verified at the provider.
+  is exchanged at this gateway; [`id.oidc_exchanged_token`](../reference/guarantee-catalogue.md#id.oidc_exchanged_token)
+  — an exchanged token is verified at this provider.
 - **At the provider (I5):** an exchanged token bound to the envelope's signer, for its principal, by the gateway's
   client, admitted once per provider, whichever gateway carries it, while unexpired. **Not built:** a token bound
   to its call; the gateway as attacker (it holds the client secret and sees users' tokens, so it can act as any user

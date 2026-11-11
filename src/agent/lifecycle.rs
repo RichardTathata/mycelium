@@ -215,9 +215,10 @@ impl GossipAgent {
             let verifier = Arc::new(super::oidc::OidcVerifier::new(oidc.clone(), self.config.egress.clone()));
             let _ = self.task_ctx.oidc_verifier.set(verifier);
         }
-        // I5: a gateway with `exchange_audience` exchanges an OIDC user's token at the IdP; its endpoint, client and
-        // secret are checked here, each refused by name (`oidc_exchange_endpoint_unset`, `oidc_exchange_client_unset`,
-        // `oidc_exchange_secret_unset`), and the secret read once.
+        // I5: a node exchanges an OIDC user's token at the IdP iff `exchange_token_endpoint` is set (the maintainer's
+        // decision of 2026-11-11); its audience, client, endpoint and secret are checked here, each refused by name
+        // (`oidc_exchange_audience_unset`, `oidc_exchange_client_unset`, `oidc_exchange_endpoint_insecure`,
+        // `oidc_exchange_secret_unset`), and the secret read once. No request is made: `mycelium doctor` runs this.
         #[cfg(feature = "compliance")]
         if self.task_ctx.oidc_exchanger.get().is_none()
             && let Some(exchanger) = super::oidc_exchange::OidcExchanger::load(&self.config)?

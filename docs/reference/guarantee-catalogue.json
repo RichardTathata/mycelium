@@ -57,10 +57,21 @@
       "revision": 1,
       "subsystem": "identity",
       "kind": "node_enforced",
-      "promise": "an OIDC user's action is verified where it runs: the gateway exchanges the user's token for one DPoP-bound to its node key, and the provider verifies it against its own issuer and the key that signed the envelope (identity-and-lifecycle I5)",
-      "needs": "`compliance`; `[oidc] exchange_audience` + `exchange_client_id` (a gateway also `exchange_token_endpoint` and the secret's variable); `[tls]`",
+      "promise": "this gateway exchanges an OIDC user's token at the IdP for every action it dispatches for them, for one DPoP-bound to its node key (identity-and-lifecycle I5): a node exchanges iff `exchange_token_endpoint` is set",
+      "needs": "`compliance`; `[oidc] exchange_token_endpoint` + `exchange_audience` + `exchange_client_id` + the secret's variable; `[tls]`; `gateway_caller_profile = secure`",
       "enforcement_points": [
-        "oidc_exchange::OidcExchanger",
+        "oidc_exchange::OidcExchanger"
+      ],
+      "docs": "docs/features/gateway-sso.md"
+    },
+    {
+      "id": "id.oidc_exchanged_token",
+      "revision": 1,
+      "subsystem": "identity",
+      "kind": "node_enforced",
+      "promise": "this provider verifies an OIDC user's exchanged token against its own issuer and the key that signed the envelope, and refuses an OIDC user's action without one (identity-and-lifecycle I5): a node verifies iff `exchange_audience` is set",
+      "needs": "`compliance`; `[oidc] exchange_audience` + `exchange_client_id`; `[tls]`",
+      "enforcement_points": [
         "exchanged_token::check"
       ],
       "docs": "docs/features/gateway-sso.md"

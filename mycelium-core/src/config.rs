@@ -100,6 +100,23 @@ impl Serialize for OidcNotInBuild {
 #[cfg(feature = "compliance")]
 fn default_group_claim() -> String { "groups".to_string() }
 
+/// I5 (#760's review, L2): a token endpoint the exchange may use — `https`, or `http` to a loopback host (a test's IdP,
+/// or one on the same machine). Parsed as the client parses it.
+#[cfg(feature = "compliance")]
+pub fn exchange_endpoint_is_secure(endpoint: &str) -> bool {
+    let Ok(url) = url::Url::parse(endpoint) else { return false };
+    match url.scheme() {
+        "https" => true,
+        "http" => match url.host() {
+            Some(url::Host::Domain(d)) => d.eq_ignore_ascii_case("localhost"),
+            Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+            Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+            None => false,
+        },
+        _ => false,
+    }
+}
+
 /// The values a TOML `[oidc]` table naming only `issuer` and `audience` gets (#759's review, M3): the claim `groups`,
 /// no group scopes, discovery for the JWKS, and no exchanged-token verification. `issuer` and `audience` are empty and
 /// must be set — a literal reads `OidcConfig { issuer, audience, ..Default::default() }`, so a field added later does
@@ -2347,6 +2364,32 @@ impl GossipConfig {
                     field: "oidc.exchange_max_lifetime_secs",
                     reason: format!("{l}: must be in 1..={EXCHANGE_MAX_LIFETIME_CEILING_SECS}"),
                 });
+            }
+            // I5, the maintainer's decision of 2026-11-11 (#760's review, M1): a node **exchanges** iff
+            // `exchange_token_endpoint` is set, and **verifies** iff `exchange_audience` is. An exchanging node names the
+            // audience it asks for and the client it asks as (the client check above), and reaches the IdP over https
+            // unless the host is loopback (#760's review, L2): the request carries the client secret and the user's token.
+            if let Some(endpoint) = oidc.exchange_token_endpoint.as_deref() {
+                if endpoint.trim().is_empty() {
+                    return Err(GossipError::InvalidField { field: "oidc.exchange_token_endpoint", reason: "set, it may not be empty".into() });
+                }
+                if oidc.exchange_audience.is_none() {
+                    return Err(GossipError::InvalidField {
+                        field: "oidc.exchange_audience",
+                        reason: "oidc_exchange_audience_unset: with exchange_token_endpoint set, the audience the gateway \
+                                 asks the IdP for must be named"
+                            .into(),
+                    });
+                }
+                if !exchange_endpoint_is_secure(endpoint) {
+                    return Err(GossipError::InvalidField {
+                        field: "oidc.exchange_token_endpoint",
+                        reason: format!(
+                            "oidc_exchange_endpoint_insecure: `{endpoint}` is not https, and its host is not loopback; the \
+                             exchange carries the gateway's client secret and the user's token"
+                        ),
+                    });
+                }
             }
         }
         if self.max_bulk_payload_bytes == 0 || self.max_bulk_payload_bytes > MAX_BULK_PAYLOAD_BYTES_CEILING {
