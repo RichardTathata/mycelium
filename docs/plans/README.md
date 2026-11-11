@@ -3,7 +3,7 @@
 The front door for this directory. A plan here is one of three kinds: a **shipped
 execution record** (what was built and *why* — kept as institutional memory, not a
 to-do), a **design sketch** (rationale, possibly superseded by a build plan), or a
-**research-track** item. A `✅` status header in the file is authoritative; this
+**research-track** item — plus one **recurring register**, reviewed monthly. A `✅` status header in the file is authoritative; this
 index just routes you to the right one.
 
 **Canonical homes elsewhere:** per-milestone *design* lives in
