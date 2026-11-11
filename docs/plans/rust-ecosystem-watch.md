@@ -22,7 +22,7 @@ same assessment is not redone from scratch.
 4. Add one line to the [review log](#review-log): the date, who reviewed, and what changed. *No change* is a valid
    line, and it is what a skipped month cannot claim.
 5. Upgrades of a dependency for a security advisory are **not** this register's business: `cargo audit` in CI (the
-   `audit` job, over every tracked `Cargo.lock`, `.github/workflows/ci.yml:1113`) and the security PATCH releases
+   `audit` job, over every tracked `Cargo.lock`, `.github/workflows/ci.yml:1102`) and the security PATCH releases
    handle those.
 
 **States.** `watch`: nothing to do until upstream moves. `spike`: a dated note in [`spikes/`](spikes/) would settle
@@ -44,7 +44,7 @@ is, what adopting it would buy, what it would cost or risk, its state, and what 
   registry-hardening goal (verifiable mirroring, quarantine), *unverified* end date, see the
   [Rust project goals](https://rust-lang.github.io/rust-project-goals/).
 - **Where Mycelium is:** `.github/workflows/release.yml:15` publishes `SHA256SUMS` and says *the sums are integrity,
-  not provenance*. `cargo audit` runs over every tracked lockfile (`ci.yml:1113`). On the capability side, the
+  not provenance*. `cargo audit` runs over every tracked lockfile (`ci.yml:1102`). On the capability side, the
   artifact library already has signed manifests, fuel by publisher (D19) and proposed → shadow → accept (D20).
 - **What it buys:** a customer can check what produced the binary or image they run, from which commit, with which
   dependencies, and (for a capability) which approval admitted it. It makes the customer-control claim checkable.
@@ -112,8 +112,8 @@ is, what adopting it would buy, what it would cost or risk, its state, and what 
   external actions; portable, composable capability packages.
 - **Cost and risk:**
   - wasmtime has driven more of Mycelium's security releases than any other dependency. Its advisories are behind
-    v2.4.1, v2.18.2, v2.36.1 and v2.38.3, and behind v2.38.1 through wasmtime's `cache` feature; the MINOR v2.34.0
-    carried more (CHANGELOG).
+    v2.4.1, v2.18.2, v2.36.1 and v2.38.3, and behind v2.38.1 through wasmtime's `cache` feature; the MINORs v2.4.0,
+    v2.17.0 and v2.34.0 carried more (CHANGELOG).
   - Of v2.38.3's RUSTSEC-2026-0420, -0422, -0423 and -0424, one (-0420) affects only WASI 0.3 sockets.
   - Async components change the confinement model: streams that cross components need new answers for the fuel
     budget, the call deadline and the memory cap. This is interface and host design, not a dependency bump.
@@ -130,8 +130,8 @@ is, what adopting it would buy, what it would cost or risk, its state, and what 
 - **Where Mycelium is:**
   - `ring` is the provider Mycelium installs: `mycelium-core/Cargo.toml:65`, and `ensure_crypto_provider` at
     `mycelium-core/src/tls.rs:1122`.
-  - But `aws-lc-rs` is already compiled into both release binaries, through reqwest's rustls and through
-    `object_store` (`aws-lc-rs 1.18.1` in `Cargo.lock`).
+  - But `aws-lc-rs` is already compiled into every TLS build: the node binary through reqwest's rustls and
+    `metrics-exporter-prometheus`, the stem also through `object_store` (`aws-lc-rs 1.18.1` in `Cargo.lock`).
   - The mesh and gateway configs use the process-default provider, which a host that installs one first decides
     (`tls.rs:1120`). So an embedder that installs `aws-lc-rs` first may already negotiate the hybrid group on the
     mesh. That is an inference, not tested.
