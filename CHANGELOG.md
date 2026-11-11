@@ -80,6 +80,23 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **I5 closed: a gateway exchanges an OIDC user's token, and the provider verifies it** (`docs/plans/identity-and-lifecycle.md`
+  I5, PR 2 of 2, D6). A gateway whose `[oidc]` sets `exchange_audience` exchanges the user's own bearer at the IdP
+  (RFC 8693) under its client credential, with a DPoP proof (EdDSA) under its node key, and carries the bound token to
+  the provider, which verifies it (PR 1).
+  - **Only for an action**: the kinds a verifying provider requires an `ot` for. Every other call by an OIDC user, and
+    every call by another principal, is unchanged.
+  - New settings `exchange_token_endpoint` and `exchange_client_secret_env` (default `MYCELIUM_OIDC_EXCHANGE_SECRET`).
+    A gateway with `exchange_audience` refuses to start by name when any is missing, or when the egress allow-list
+    does not permit the endpoint.
+  - An exchange that yields no token refuses the call (`oidc_exchange_unreachable`, `oidc_exchange_refused`,
+    `oidc_exchange_malformed`; JSON-RPC `-32024`, HTTP 502), and nothing runs.
+  - `mycelium doctor` reports `id.oidc_exchange`. PR 1's start-time warning is removed.
+  - **Evidence:** against Keycloak 26.8.2 pinned by digest, in CI's new `oidc-exchange-live` job (and run locally on
+    2026-11-11).
+
+  Upgrade note: `deprecations.md` §97.
+
 - **A provider verifies an OIDC user's exchanged token** (`docs/plans/identity-and-lifecycle.md` I5, PR 1 of 2, D6).
   A provider whose `[oidc]` table sets `exchange_audience` verifies the token a gateway carries in the caller envelope
   (`ot`), against its own issuer and keys. The gateway's exchange is PR 2.

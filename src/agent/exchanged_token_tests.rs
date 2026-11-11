@@ -415,7 +415,17 @@ async fn a_token_is_read_against_the_instant_its_window_prunes_at() {
 async fn a_node_that_is_gateway_and_provider_fetches_its_keys_once() {
     let (port, hits) = crate::test_util::spawn_counting_listener(JWKS).await;
     let http_port = crate::test_util::alloc_port();
-    let a = provider_with(port, |_| {}, |c| c.http_port = Some(http_port)).await;
+    // A gateway with `exchange_audience` exchanges (I5's PR 2), so it names its token endpoint and its secret's
+    // variable (one every test process has; no test sets one); this test makes no exchange.
+    let a = provider_with(
+        port,
+        |o| {
+            o.exchange_token_endpoint = Some(format!("http://127.0.0.1:{port}/token"));
+            o.exchange_client_secret_env = Some("PATH".into());
+        },
+        |c| c.http_port = Some(http_port),
+    )
+    .await;
     keys_held(&a).await;
     let mut bearer = claims(&node_key(&a));
     bearer["aud"] = "mycelium-cluster".into();

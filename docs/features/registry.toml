@@ -231,7 +231,7 @@ name = "Single sign-on at the gateway (OIDC)"
 page = "gateway-sso.md"
 example = "none"
 example_watch = ["oidc", "sso"]
-ids = ["guarantee:gw.oidc"]
+ids = ["guarantee:gw.oidc", "guarantee:id.oidc_exchange"]
 links = ["cargo:mycelium/compliance"]  # `[oidc]` needs it
 
 [[feature]]

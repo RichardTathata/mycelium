@@ -91,6 +91,8 @@ pub(super) async fn gateway_auth(
             Json(json!({"error": "authentication required"})),
         ).into_response();
     };
+    // I5: an OIDC user's own bearer rides with the principal, for this gateway to exchange — never forwarded.
+    let subject_token = principal.starts_with("oidc:").then(|| gateway_caller::SubjectToken(std::sync::Arc::from(presented)));
 
     // Identity-and-lifecycle I3 (D3): a route may admit a second scope — the decision routes take `grant:issue` on the
     // bearer **or** `grant:relay`, under which the handler requires a decision a decider signed. The scope granted is
@@ -127,7 +129,7 @@ pub(super) async fn gateway_auth(
         None => scopes,
     };
     let mut request = request;
-    request.extensions_mut().insert(ResolvedPrincipal { principal, scopes: granted });
+    request.extensions_mut().insert(ResolvedPrincipal { principal, scopes: granted, subject_token });
 
     next.run(request).await
 }
@@ -188,7 +190,7 @@ pub(super) async fn a2a_optional_auth(ctx: Arc<HttpCtx>, mut request: Request, n
     let resolved = match presented {
         None => ResolvedPrincipal::anonymous(Vec::new()),
         Some(token) => match resolve_bearer(&ctx, &token).await {
-            Some((principal, _held)) => ResolvedPrincipal { principal, scopes: Vec::new() },
+            Some((principal, _held)) => ResolvedPrincipal { principal, scopes: Vec::new(), subject_token: None },
             None => {
                 return (
                     StatusCode::UNAUTHORIZED,
@@ -1554,7 +1556,8 @@ pub(crate) fn observed_execution(
     match dispatched {
         Ok(_) => Execution::Completed,
         Err(GatewayDispatchError::ProviderWithoutContext(_))
-        | Err(GatewayDispatchError::ContextTooLarge) => Execution::None,
+        | Err(GatewayDispatchError::ContextTooLarge)
+        | Err(GatewayDispatchError::Exchange(_)) => Execution::None,
         Err(_) => Execution::Unknown,
     }
 }
@@ -1731,6 +1734,8 @@ pub(super) fn dispatch_refused(e: GatewayDispatchError) -> Response {
     };
     let status = match e {
         GatewayDispatchError::ContextTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
+        // I5: the IdP, upstream of this gateway, did not give the exchanged token.
+        GatewayDispatchError::Exchange(_) => StatusCode::BAD_GATEWAY,
         _ => StatusCode::PRECONDITION_FAILED,
     };
     (status, Json(json!({ "ok": false, "error": e.reason(), "detail": e.to_string(), "provider": provider })))

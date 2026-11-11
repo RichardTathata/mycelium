@@ -444,7 +444,7 @@ async fn the_mcp_door_counts_into_the_fleet_counter() {
 
 /// A limited call by `actor` on `resource` at `a`'s gateway.
 async fn call_as(a: &Arc<GossipAgent>, actor: &str, resource: &str, point: &str) -> Preflight {
-    let who = super::super::gateway_caller::ResolvedPrincipal { principal: actor.to_string(), scopes: Vec::new() };
+    let who = super::super::gateway_caller::ResolvedPrincipal { principal: actor.to_string(), scopes: Vec::new(), subject_token: None };
     ae_preflight(&a.task_ctx, Some(&who), "tools/call", resource, &serde_json::json!({}), &serde_json::json!({}), point).await
 }
 

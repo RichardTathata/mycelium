@@ -53,6 +53,19 @@
       "docs": "docs/operations/sso.md"
     },
     {
+      "id": "id.oidc_exchange",
+      "revision": 1,
+      "subsystem": "identity",
+      "kind": "node_enforced",
+      "promise": "an OIDC user's action is verified where it runs: the gateway exchanges the user's token for one DPoP-bound to its node key, and the provider verifies it against its own issuer and the key that signed the envelope (identity-and-lifecycle I5)",
+      "needs": "`compliance`; `[oidc] exchange_audience` + `exchange_client_id` (a gateway also `exchange_token_endpoint` and the secret's variable); `[tls]`",
+      "enforcement_points": [
+        "oidc_exchange::OidcExchanger",
+        "exchanged_token::check"
+      ],
+      "docs": "docs/features/gateway-sso.md"
+    },
+    {
       "id": "gw.tls",
       "revision": 1,
       "subsystem": "gateway",

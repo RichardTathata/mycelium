@@ -12,9 +12,8 @@ every credential ends at the same scope gate.
 exchange the user's token at the IdP (RFC 8693) for one whose audience is `exchange_audience`, bound by DPoP to the
 gateway's node key, and carry it to the provider in the caller envelope (`ot`). A provider whose `[oidc]` table sets
 `exchange_audience` verifies that token itself, against its own issuer and keys, so an `oidc:` caller is
-authenticated where the call runs, not only at the door. **This release builds the provider's half; the gateway's
-exchange is the next PR** (I5's PR 2), so until then nothing carries an `ot` and a verifying provider refuses an
-`oidc:` action (below).
+authenticated where the call runs, not only at the door. The gateway exchanges only for an **action** — the kinds a
+verifying provider requires an `ot` for (below); every other call by an OIDC user is unchanged.
 
 ## When to use it, and when not
 
@@ -44,9 +43,23 @@ so a node the list does not let reach it starts and, holding no keys, answers ev
 - `exchange_max_lifetime_secs` — the longest `exp − iat` accepted; default 300, in `1..=3600`.
 
 `validate()` also refuses `exchange_audience` on a node without `[tls]` (`oidc_exchange_needs_tls`: the token binds to
-the key that signs the envelope) and equal to `audience` (`oidc_exchange_audience_is_gateway_audience`). Until the
-gateway's half ships, a node that sets it warns at start that every OIDC user's action will be refused. `OidcConfig`
+the key that signs the envelope) and equal to `audience` (`oidc_exchange_audience_is_gateway_audience`). `OidcConfig`
 implements `Default`; write a literal with `..Default::default()`.
+
+**The gateway's half (I5, PR 2).** A node with an HTTP gateway and `exchange_audience` exchanges an OIDC user's own
+bearer at the IdP (RFC 8693) for every action it dispatches for that user, under its own client credential, with a DPoP
+proof (RFC 9449, `alg: EdDSA`) signed by its node key, and carries the token as `ot`. Two more settings:
+- `exchange_token_endpoint` — the IdP's token endpoint;
+- `exchange_client_secret_env` — the environment variable holding the gateway's client secret (default
+  `MYCELIUM_OIDC_EXCHANGE_SECRET`), read once at start.
+
+The start is refused by name when the endpoint is unset (`oidc_exchange_endpoint_unset`), the client unset
+(`oidc_exchange_client_unset`), the secret's variable unset or empty (`oidc_exchange_secret_unset`), or the egress
+allow-list does not permit the endpoint. A provider-only node (no `http_port`) needs none of them. At call time an
+exchange that does not yield a token refuses the call, and nothing runs: `oidc_exchange_unreachable` (no answer within
+10 s), `oidc_exchange_refused` (the IdP's error), `oidc_exchange_malformed` (no token in its answer) — JSON-RPC
+`-32024`, HTTP 502 at the raw route. A non-OIDC principal's call, and an OIDC user's call of a kind that is not an
+action, make no exchange. `mycelium doctor` reports [`id.oidc_exchange`](../reference/guarantee-catalogue.md#id.oidc_exchange).
 
 The provider fetches the issuer's keys at `start()` and refreshes them through the node's one verifier, which its
 gateway uses for bearers too — one cache, one fetcher
@@ -95,6 +108,11 @@ The tests, each refusal seen failing first, are in
 tested by `a_build_without_compliance_refuses_an_exchanged_token`, in
 [`src/agent/gateway_caller.rs`](../../src/agent/gateway_caller.rs).
 
+The gateway's half is tested in [`src/agent/oidc_exchange_tests.rs`](../../src/agent/oidc_exchange_tests.rs), against a
+mock IdP: `an_oidc_users_call_is_exchanged_at_the_gateway_and_verified_at_the_provider`,
+`only_an_oidc_users_action_is_exchanged_for`, `the_exchange_settings_are_refused_by_name_at_start`,
+`an_exchange_that_yields_no_token_is_refused_by_name` and `the_dpop_proof_is_an_eddsa_jws_under_the_node_key`.
+
 ## See it work
 
 No runnable example exists: the [example index](../../examples/README.md#the-capability-matrix) has no row for SSO,
@@ -103,6 +121,12 @@ because it needs an IdP. The end-to-end run is the test in
 The refusal of an issuer the egress policy denies is `an_oidc_issuer_the_egress_policy_denies_refuses_the_start`, in
 [`src/lib_tests.rs`](../../src/lib_tests.rs).
 
+The exchange against a real IdP is `oidc_exchange_live_an_oidc_users_call_is_verified_at_the_provider`, in
+[`src/agent/oidc_exchange_live_tests.rs`](../../src/agent/oidc_exchange_live_tests.rs): Keycloak 26.8.2, pinned by
+digest, in CI's `oidc-exchange-live` job; it makes its own realm, and an OIDC user's two `/mcp` calls are each exchanged
+by the gateway and verified at the provider. Without `MYCELIUM_KEYCLOAK_URL` it skips itself, and under
+`MYCELIUM_OIDC_EXCHANGE_LIVE_REQUIRED` (which that job sets) a missing Keycloak fails it.
+
 ## What it guarantees, and what it does not
 
 - **Guarantee:** [`gw.oidc`](../reference/guarantee-catalogue.md#gw.oidc) — operators authenticate through the IdP,
@@ -110,9 +134,12 @@ The refusal of an issuer the egress policy denies is `an_oidc_issuer_the_egress_
 - **Rule:** [`gateway.auth`](../reference/rule-catalogue.md#gatewayauth), where the JWT is resolved.
 - **What it refuses:** symmetric (`HS*`) and `none` algorithms outright, an unknown `kid` after one refresh, and a key
   held past a 24-hour ceiling after its last successful fetch ([sso § 4](../operations/sso.md#4-security-notes-what-the-validator-enforces)).
-- **At the provider (I5, PR 1):** an exchanged token bound to the envelope's signer, for its principal, by the gateway's
-  client, admitted once per provider, whichever gateway carries it, while unexpired. **Not built:** the gateway's exchange (I5's PR 2); a token bound
-  to its call; the exchanging gateway reusing its own token, refused once per provider by `jti`; four principals at
+- **Guarantee:** [`id.oidc_exchange`](../reference/guarantee-catalogue.md#id.oidc_exchange) — an OIDC user's action
+  is exchanged at the gateway and verified at the provider.
+- **At the provider (I5):** an exchanged token bound to the envelope's signer, for its principal, by the gateway's
+  client, admitted once per provider, whichever gateway carries it, while unexpired. **Not built:** a token bound
+  to its call; the gateway as attacker (it holds the client secret and sees users' tokens, so it can act as any user
+  who calls through it); an IdP other than Keycloak (the live run is Keycloak 26.8.2); an IdP without exchange; the exchanging gateway reusing its own token, refused once per provider by `jti`; four principals at
   their bound filling a gateway's share, or four gateways at theirs filling the provider's window (262 144 ids, about
   436 calls a second at the defaults), after which every other gateway's OIDC users are refused
   `ot_provider_window_full` until entries expire (rate limits are the hard bound); the per-principal bound (16 384)

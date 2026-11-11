@@ -217,7 +217,7 @@ pub(super) fn run(rep: &mut ClassReport, base: &GossipConfig, units: &[Unit], di
     };
     let marker = |a: &GossipAgent, request: &str, m: &str| mycelium_core::ops::kv_get(&a.task_ctx, &format!("{prefix}{request}/{m}")).is_some();
     let policy = |window_ms: u64| AgentPolicy { require_grant_for: vec![tool.clone()], grant_window: Some(Duration::from_millis(window_ms)), ..AgentPolicy::default() };
-    let supervisor = |principal: &str| ResolvedPrincipal { principal: principal.to_string(), scopes: vec!["grant:issue".into(), "grant:read".into()] };
+    let supervisor = |principal: &str| ResolvedPrincipal { principal: principal.to_string(), scopes: vec!["grant:issue".into(), "grant:read".into()], subject_token: None };
     let a = fleet.agent(i);
 
     // ── 1. default-deny ──

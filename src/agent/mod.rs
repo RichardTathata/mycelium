@@ -210,6 +210,13 @@ pub(crate) mod oidc;
 pub(crate) mod exchanged_token;
 #[cfg(all(test, feature = "compliance"))]
 mod exchanged_token_tests;
+/// Identity-and-lifecycle I5 (D6): the gateway's token exchange at the IdP, DPoP-bound to the node key.
+#[cfg(feature = "compliance")]
+pub(crate) mod oidc_exchange;
+#[cfg(all(test, feature = "compliance"))]
+mod oidc_exchange_tests;
+#[cfg(all(test, feature = "compliance"))]
+mod oidc_exchange_live_tests;
 /// The one place an outbound HTTP client is built — redirects re-checked against the egress
 /// policy on every hop, or not followed at all (realignment repairs R3).
 #[cfg(feature = "gateway")]
@@ -1025,6 +1032,9 @@ pub(crate) struct TaskCtx {
     /// I5: the exchanged tokens this provider has admitted, once each by `(iss, jti)` across gateways, while unexpired.
     #[cfg(feature = "compliance")]
     pub(crate) exchanged_token_replay: exchanged_token::OtReplayWindows,
+    /// I5: this gateway's token exchanger, set at `start()` on a gateway whose `[oidc]` names an `exchange_audience`.
+    #[cfg(feature = "compliance")]
+    pub(crate) oidc_exchanger: std::sync::OnceLock<Arc<oidc_exchange::OidcExchanger>>,
     /// A `correlation` or `parent` carried where it is never read — a header at an HTTP door, or a field in the caller
     /// envelope (adopter-surface X4): counted **by door**, the record's field left empty. `GET /stats`
     /// `causal_fields_misplaced` is the map; lock-free (papaya), no lock-order row.
@@ -1654,6 +1664,8 @@ impl GossipAgent {
             oidc_verifier: std::sync::OnceLock::new(),
             #[cfg(feature = "compliance")]
             exchanged_token_replay: Default::default(),
+            #[cfg(feature = "compliance")]
+            oidc_exchanger: std::sync::OnceLock::new(),
             causal_misplaced: papaya::HashMap::new(),
             #[cfg(feature = "a2a")]
             a2a_mounted: AtomicBool::new(false),

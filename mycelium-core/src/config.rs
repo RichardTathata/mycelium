@@ -50,7 +50,21 @@ pub struct OidcConfig {
     /// [`DEFAULT_EXCHANGE_MAX_LIFETIME_SECS`] (300), at most [`EXCHANGE_MAX_LIFETIME_CEILING_SECS`] (3 600).
     #[serde(default)]
     pub exchange_max_lifetime_secs: Option<u64>,
+    /// I5: the IdP's token endpoint a gateway exchanges at (RFC 8693). Required on a gateway with `exchange_audience`
+    /// (`oidc_exchange_endpoint_unset` at start).
+    #[serde(default)]
+    pub exchange_token_endpoint: Option<String>,
+    /// I5: the **name** of the environment variable holding the gateway's client secret at the IdP — read once, at
+    /// `start()`, never written into configuration. Default [`DEFAULT_EXCHANGE_SECRET_ENV`]. On a gateway with
+    /// `exchange_audience`, a variable that is unset or empty refuses the start (`oidc_exchange_secret_unset`).
+    #[serde(default)]
+    pub exchange_client_secret_env: Option<String>,
 }
+
+/// I5: the environment variable a gateway reads its exchange client secret from when `exchange_client_secret_env`
+/// names none.
+#[cfg(feature = "compliance")]
+pub const DEFAULT_EXCHANGE_SECRET_ENV: &str = "MYCELIUM_OIDC_EXCHANGE_SECRET";
 
 /// I5: the default longest lifetime of an exchanged token a provider accepts, in seconds.
 #[cfg(feature = "compliance")]
@@ -102,12 +116,19 @@ impl Default for OidcConfig {
             exchange_audience: None,
             exchange_client_id: None,
             exchange_max_lifetime_secs: None,
+            exchange_token_endpoint: None,
+            exchange_client_secret_env: None,
         }
     }
 }
 
 #[cfg(feature = "compliance")]
 impl OidcConfig {
+    /// I5: the environment variable this gateway reads its exchange client secret from.
+    pub fn exchange_secret_env(&self) -> &str {
+        self.exchange_client_secret_env.as_deref().unwrap_or(DEFAULT_EXCHANGE_SECRET_ENV)
+    }
+
     /// I5: the longest lifetime of an exchanged token this node accepts, in seconds.
     pub fn exchange_max_lifetime(&self) -> u64 {
         self.exchange_max_lifetime_secs.unwrap_or(DEFAULT_EXCHANGE_MAX_LIFETIME_SECS)

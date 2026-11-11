@@ -97,6 +97,7 @@ and that a line no row covers says so and why.
 | `gw.exposed_closed` | Gateway access control (CC6) |
 | `gw.token_tables` | Gateway access control (CC6) |
 | `gw.oidc` | Operator authentication (SSO) (CC6) |
+| `id.oidc_exchange` | Operator authentication (SSO) (CC6) |
 | `gw.tls` | Encryption in transit (gateway) (CC6) |
 | `gw.caller_profile` | Capability authorization (CC6) |
 | `mesh.tls` | Node authentication (CC6) · Encryption in transit (gossip) (CC6) |

@@ -867,6 +867,22 @@ pub(crate) fn core_guarantees() -> Vec<GuaranteeDescriptor> {
               #[cfg(not(feature = "compliance"))]
               { let _ = c; Resolution::NotInBuild { feature: "compliance" } }
           }),
+        g("id.oidc_exchange", 1, "identity", Node,
+          "an OIDC user's action is verified where it runs: the gateway exchanges the user's token for one DPoP-bound to its node key, and the provider verifies it against its own issuer and the key that signed the envelope (identity-and-lifecycle I5)",
+          "`compliance`; `[oidc] exchange_audience` + `exchange_client_id` (a gateway also `exchange_token_endpoint` and the secret's variable); `[tls]`",
+          &["oidc_exchange::OidcExchanger", "exchanged_token::check"], "docs/features/gateway-sso.md",
+          |_| None,
+          |c| {
+              #[cfg(feature = "compliance")]
+              {
+                  let set = c.config.oidc.as_ref().is_some_and(|o| o.exchange_audience.is_some());
+                  if !set { Resolution::NotConfigured { missing: "[oidc] exchange_audience" } }
+                  else if c.tls.get().is_none() { Resolution::NotConfigured { missing: "[tls] (the exchanged token is bound to the node key, which signs the envelope)" } }
+                  else { Resolution::Enforced }
+              }
+              #[cfg(not(feature = "compliance"))]
+              { let _ = c; Resolution::NotInBuild { feature: "compliance" } }
+          }),
         g("gw.tls", 1, "gateway", Node,
           "the gateway serves HTTPS, so bearers and JWTs do not cross the wire in cleartext",
           "`tls`; `[gateway_tls]` (or TLS terminated by a proxy in front — not visible here)",

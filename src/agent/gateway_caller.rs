@@ -443,6 +443,22 @@ impl RequestPrincipal {
 pub struct ResolvedPrincipal {
     pub(crate) principal: String,
     pub(crate) scopes: Vec<String>,
+    /// Identity-and-lifecycle I5: an `oidc:` principal's own bearer, kept only so this gateway can exchange it at the
+    /// IdP for a token the provider verifies (`ot`). Never forwarded, never printed; `None` for every other principal.
+    pub(crate) subject_token: Option<SubjectToken>,
+}
+
+/// An OIDC user's own bearer (identity-and-lifecycle I5): what the gateway exchanges, and nothing else reads. Its
+/// `Debug` prints no token.
+#[cfg(any(feature = "gateway", test))]
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct SubjectToken(pub(crate) Arc<str>);
+
+#[cfg(any(feature = "gateway", test))]
+impl std::fmt::Debug for SubjectToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SubjectToken(..)")
+    }
 }
 
 #[cfg(any(feature = "gateway", test))]
@@ -462,13 +478,13 @@ impl ResolvedPrincipal {
 #[cfg(any(feature = "gateway", test))]
 impl ResolvedPrincipal {
     pub(crate) fn anonymous(scopes: Vec<String>) -> Self {
-        Self { principal: PRINCIPAL_ANONYMOUS.to_string(), scopes }
+        Self { principal: PRINCIPAL_ANONYMOUS.to_string(), scopes, subject_token: None }
     }
 
     /// This node as the actor of a door its own code opens (adopter-surface Y11's Rust verbs): `node:{id}`, no scopes.
     #[cfg(all(feature = "gateway", feature = "tls"))]
     pub(crate) fn node(node: &NodeId) -> Self {
-        Self { principal: node_principal(node), scopes: Vec::new() }
+        Self { principal: node_principal(node), scopes: Vec::new(), subject_token: None }
     }
 }
 
@@ -603,6 +619,10 @@ pub enum GatewayDispatchError {
     /// The resolved principal or scopes do not fit the envelope bound a receiver accepts
     /// (`MAX_ENVELOPE_BYTES`); refused before dispatch rather than truncated (review finding 4).
     ContextTooLarge,
+    /// Identity-and-lifecycle I5: an OIDC user's action needs an exchanged token, and the exchange at the IdP failed —
+    /// `oidc_exchange_unreachable`, `oidc_exchange_refused`, `oidc_exchange_malformed`, or the user's own token or this
+    /// node's identity missing. Refused before dispatch; nothing ran.
+    Exchange(&'static str),
 }
 
 #[cfg(any(feature = "gateway", test))]
@@ -614,6 +634,7 @@ impl GatewayDispatchError {
             GatewayDispatchError::MissingContext => -32020,
             GatewayDispatchError::ProviderWithoutContext(_) => -32021,
             GatewayDispatchError::ContextTooLarge => -32023,
+            GatewayDispatchError::Exchange(_) => -32024,
         }
     }
 
@@ -624,6 +645,7 @@ impl GatewayDispatchError {
             GatewayDispatchError::MissingContext => "caller_context_missing",
             GatewayDispatchError::ProviderWithoutContext(_) => "provider_without_caller_context",
             GatewayDispatchError::ContextTooLarge => "caller_context_too_large",
+            GatewayDispatchError::Exchange(reason) => reason,
         }
     }
 }
@@ -644,6 +666,9 @@ impl std::fmt::Display for GatewayDispatchError {
             GatewayDispatchError::ContextTooLarge => f.write_str(
                 "gateway caller context exceeds the envelope bound (principal or scopes too long)",
             ),
+            GatewayDispatchError::Exchange(reason) => {
+                write!(f, "the OIDC user's token could not be exchanged at the IdP for one the provider verifies: {reason}")
+            }
         }
     }
 }
@@ -698,8 +723,16 @@ pub(crate) async fn gateway_rpc_call_with_mandate(
                 refused("provider_without_caller_context");
                 return Err(GatewayDispatchError::ProviderWithoutContext(target));
             }
-            let Some(framed) = frame_with_client_signature_at(
-                ctx, &target, &caller.principal, &caller.scopes, payload, mandate, resource, client, ctx.hlc.decision_now_ms(),
+            // I5: an OIDC user's action carries a token exchanged for it, once per call; any other call is unchanged.
+            let ot = match exchanged_token_for(ctx, caller, &kind).await {
+                Ok(ot) => ot,
+                Err(reason) => {
+                    refused(reason);
+                    return Err(GatewayDispatchError::Exchange(reason));
+                }
+            };
+            let Some(framed) = frame_envelope_at(
+                ctx, &target, &caller.principal, &caller.scopes, payload, mandate, resource, client, ot.as_deref(), ctx.hlc.decision_now_ms(),
             ) else {
                 refused("caller_context_too_large");
                 return Err(GatewayDispatchError::ContextTooLarge);
@@ -709,6 +742,26 @@ pub(crate) async fn gateway_rpc_call_with_mandate(
                 .map_err(GatewayDispatchError::Rpc)
         }
     }
+}
+
+/// Identity-and-lifecycle I5: the exchanged token an OIDC user's call carries — `Some` only on a gateway that
+/// exchanges, for an `oidc:` principal, on a kind [`needs_exchanged_token`](super::exchanged_token::needs_exchanged_token)
+/// names (the maintainer's decision, 2026-11-11). The user's own bearer is what is exchanged, never what is sent.
+#[cfg(any(feature = "gateway", test))]
+#[allow(unused_variables)]
+async fn exchanged_token_for(ctx: &TaskCtx, caller: &ResolvedPrincipal, kind: &str) -> Result<Option<String>, &'static str> {
+    #[cfg(feature = "compliance")]
+    {
+        let Some(exchanger) = ctx.oidc_exchanger.get() else { return Ok(None) };
+        if !caller.principal.starts_with("oidc:") || !super::exchanged_token::needs_exchanged_token(&ctx.config, kind) {
+            return Ok(None);
+        }
+        let Some(subject) = caller.subject_token.as_ref() else { return Err("oidc_exchange_no_subject_token") };
+        let Some(tls) = ctx.tls.get() else { return Err("oidc_exchange_no_identity") };
+        exchanger.exchange(&subject.0, &tls.signing_key()).await.map(Some)
+    }
+    #[cfg(not(feature = "compliance"))]
+    Ok(None)
 }
 
 /// The mandate a caller presented in `params._meta.mandate`, if any, to carry to the provider

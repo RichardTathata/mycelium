@@ -567,7 +567,7 @@ async fn a_grant_the_provider_refused_before_running_is_given_back() {
     let (asked, grant) = ask_and_issue(http_port, &args).await;
     let resource = asked["resource"].as_str().unwrap().to_string();
     let params = serde_json::json!({"_meta": presented(&grant, &resource, &args, &key)});
-    let caller = crate::agent::gateway_caller::ResolvedPrincipal { principal: FORECASTER.into(), scopes: vec!["mcp:invoke".into()] };
+    let caller = crate::agent::gateway_caller::ResolvedPrincipal { principal: FORECASTER.into(), scopes: vec!["mcp:invoke".into()], subject_token: None };
     let ctx = std::sync::Arc::clone(&a.task_ctx);
     let permit = || ae_preflight(&ctx, Some(&caller), "tools/call", &resource, &args, &params, "gateway:mcp/tools/call");
     let marker = format!("grant/{}/{}/used/gateway", crate::agent::gateway_authority::grant_holder_segment(FORECASTER), grant.mandate.term.as_str());

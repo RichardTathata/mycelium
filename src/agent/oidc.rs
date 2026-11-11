@@ -618,7 +618,7 @@ mod tests {
             jwks_uri: None,
             exchange_audience: None,
             exchange_client_id: None,
-            exchange_max_lifetime_secs: None,
+            exchange_max_lifetime_secs: None, exchange_token_endpoint: None, exchange_client_secret_env: None,
         }
     }
 

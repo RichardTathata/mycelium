@@ -2050,11 +2050,11 @@ mod tests {
         };
         tasks.pin().insert("t1".into(), A2aTask { task, context_id: String::new(), generation: Generation::Legacy, created_at: Instant::now(), owner: Some("token:gw/a".into()), pending: None });
         let state = A2aState { task_ctx: make_ctx(), tasks };
-        let creator = ResolvedPrincipal { principal: "token:gw/a".into(), scopes: Vec::new() };
+        let creator = ResolvedPrincipal { principal: "token:gw/a".into(), scopes: Vec::new(), subject_token: None };
         let result = handle_tasks_cancel(&state, Some(&creator), None, &json!({ "id": "t1" }), None);
         assert_eq!(result["error"]["code"], -32002);
         // The owner rule comes before the state rule: another identity, or no identity, is -32004.
-        let other = ResolvedPrincipal { principal: "token:gw/b".into(), scopes: Vec::new() };
+        let other = ResolvedPrincipal { principal: "token:gw/b".into(), scopes: Vec::new(), subject_token: None };
         assert_eq!(handle_tasks_cancel(&state, Some(&other), None, &json!({ "id": "t1" }), None)["error"]["code"], -32004);
         assert_eq!(handle_tasks_cancel(&state, None, None, &json!({ "id": "t1" }), None)["error"]["code"], -32004);
         assert_eq!(handle_tasks_get(&state, None, None, &json!({ "id": "t1" }), None)["error"]["code"], -32004);
