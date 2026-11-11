@@ -1,0 +1,17 @@
+Updating the configuration and installing your custom providers, if any. Please wait.
+2026-11-11 07:29:06,590 INFO  [io.quarkus.deployment.QuarkusAugmentor] (main) Quarkus augmentation completed in 3687ms
+Running the server in development mode. DO NOT use this configuration in production.
+2026-11-11 07:29:08,964 INFO  [org.keycloak.quarkus.runtime.storage.database.liquibase.QuarkusJpaUpdaterProvider] (main) Initializing database schema. Using changelog META-INF/jpa-changelog-master.xml
+2026-11-11 07:29:10,203 INFO  [org.keycloak.quarkus.runtime.storage.infinispan.CacheManagerFactory] (main) Starting Infinispan embedded cache manager
+2026-11-11 07:29:10,240 INFO  [org.keycloak.quarkus.runtime.storage.infinispan.CacheManagerFactory] (main) JGroups JDBC_PING discovery enabled.
+2026-11-11 07:29:10,297 INFO  [org.infinispan.CONTAINER] (main) Virtual threads support enabled
+2026-11-11 07:29:10,396 INFO  [org.infinispan.CONTAINER] (main) ISPN000556: Starting user marshaller 'org.infinispan.commons.marshall.ImmutableProtoStreamMarshaller'
+2026-11-11 07:29:10,572 INFO  [org.keycloak.connections.infinispan.DefaultInfinispanConnectionProviderFactory] (main) Node name: node_983649, Site name: null
+2026-11-11 07:29:10,681 INFO  [org.keycloak.services] (main) KC-SERVICES0050: Initializing master realm
+2026-11-11 07:29:11,532 INFO  [org.keycloak.services] (main) KC-SERVICES0077: Created temporary admin user with username admin
+2026-11-11 07:29:11,611 INFO  [io.quarkus] (main) Keycloak 26.2.5 on JVM (powered by Quarkus 3.20.1) started in 4.948s. Listening on: http://0.0.0.0:8080
+2026-11-11 07:29:11,611 INFO  [io.quarkus] (main) Profile dev activated. 
+2026-11-11 07:29:11,611 INFO  [io.quarkus] (main) Installed features: [agroal, cdi, hibernate-orm, jdbc-h2, keycloak, narayana-jta, opentelemetry, reactive-routes, rest, rest-jackson, smallrye-context-propagation, vertx]
+2026-11-11 07:29:46,878 WARN  [org.keycloak.events] (executor-thread-1) type="TOKEN_EXCHANGE_ERROR", realmId="6bc4d4cf-7e65-420b-ba3e-a191fa7a5693", realmName="fleet", clientId="mycelium-gateway", userId="f0107594-8c90-4d34-8935-a4c04a000d61", sessionId="29c23352-67f3-488e-ac0e-bba86b140a6f", ipAddress="172.17.0.1", error="invalid_request", reason="Invalid scopes: cn:0194f2a07c1e0000-3f9a5c1d2e4b6a70-17", auth_method="token_exchange", grant_type="urn:ietf:params:oauth:grant-type:token-exchange", subject_token_client_id="user-app", requested_token_type="urn:ietf:params:oauth:token-type:access_token", client_auth_method="client-secret", username="alice"
+2026-11-11 08:07:03,017 INFO  [com.arjuna.ats.jbossatx] (Shutdown thread) ARJUNA032014: Stopping transaction recovery manager
+2026-11-11 08:07:03,033 INFO  [io.quarkus] (Shutdown thread) Keycloak stopped in 0.033s
