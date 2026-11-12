@@ -72,6 +72,12 @@ plant fs_pub_use         $'pub use std::{fs, io};\nfn f() { let _ = fs::remove_f
 plant fs_pub_crate_use   $'pub(crate) use tokio::{\n    fs,\n};\nfn f() { let _ = fs::create_dir_all(p); }'
 # The `fs::{self, …}` import line is itself an `fs::` site here, so this counts 2, as `self_alias` does.
 plant fs_self_group      $'use std::{fs::{self, File}, io};\nfn f() { let _ = fs::rename(a, b); }' 2
+# #765's review: `self` need not come first in the `fs::{…}` group (F2), and `fs::{self as X}` names the
+# module `X` (F3), as `time::{self as X}` does. The first and third count 2 (the import line is itself a site:
+# `fs` is in scope, or it spells `tokio::fs::`); the second only 1, since only `sfs` is in scope.
+plant fs_self_not_first  $'use std::{fs::{File, self}, io};\nfn f() { let _ = fs::read(p); }' 2
+plant fs_self_alias      $'use std::{fs::{self as sfs, File}, io};\nfn f() { let _ = sfs::read(p); }'
+plant fs_self_alias_top  $'use tokio::fs::{\n    File,\n    self as tfs2,\n};\nfn f() { let _ = tfs2::read(p); }' 2
 plant fs_module_use      $'use std::fs;\nfn f() { let _ = fs::read(p); }'
 plant fs_indented_use    $'mod imp {\n    use std::{fs, sync::Arc};\n    fn f() { let _ = fs::read(p); }\n}'
 # Negatives: no std/tokio `fs` in scope, so a bare `fs::` is a local module — and a qualified site is
