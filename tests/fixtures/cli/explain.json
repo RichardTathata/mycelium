@@ -1,0 +1,91 @@
+{
+  "counts": {
+    "inputs_truncated": 1,
+    "records": 3,
+    "targets": 2,
+    "unattributable": 1,
+    "unparsed": 1
+  },
+  "dropped": "records the sink dropped are in its counters (decisions.stats.json), not here",
+  "file": "tests/fixtures/cli/trace.jsonl",
+  "rules": [
+    {
+      "id": "prov.demand_response",
+      "summary": "Whether unmet demand starts an install."
+    },
+    {
+      "id": "prov.eligible",
+      "summary": "Whether this node can host the capability."
+    },
+    {
+      "id": "prov.presence_floor",
+      "summary": null
+    }
+  ],
+  "schema": "mycelium.explain/1",
+  "targets": [
+    {
+      "steps": [
+        {
+          "effect": null,
+          "inputs_truncated": false,
+          "node": "127.0.0.1:7002",
+          "outcome": "action",
+          "reads": [],
+          "reason": "eligible",
+          "rule": "prov.eligible",
+          "rule_revision": 1,
+          "seq": 1,
+          "trigger": "round 1",
+          "unattributable": false
+        },
+        {
+          "effect": "start_install",
+          "inputs_truncated": false,
+          "node": "127.0.0.1:7002",
+          "outcome": "action",
+          "reads": [
+            {
+              "provenance": "gossiped",
+              "source": "demand/",
+              "truncated": false,
+              "value": "providers=0 demanding=1"
+            }
+          ],
+          "reason": "unmet_demand_live",
+          "rule": "prov.demand_response",
+          "rule_revision": 1,
+          "seq": 2,
+          "trigger": "round 1",
+          "unattributable": true
+        }
+      ],
+      "target": "text/echo"
+    },
+    {
+      "steps": [
+        {
+          "effect": null,
+          "inputs_truncated": true,
+          "node": "127.0.0.1:7002",
+          "outcome": "no_action",
+          "reads": [
+            {
+              "provenance": "local",
+              "source": "the install's config",
+              "truncated": true,
+              "value": "attrs=abcdefgh"
+            }
+          ],
+          "reason": "floor_met",
+          "rule": "prov.presence_floor",
+          "rule_revision": 1,
+          "seq": 3,
+          "trigger": "round 2",
+          "unattributable": false
+        }
+      ],
+      "target": "route/optimize"
+    }
+  ]
+}

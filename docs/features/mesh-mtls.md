@@ -26,7 +26,10 @@ sets `[tls]` with a certificate issued off-node.
   which keeps the CA key off the node
   ([node identity](node-identity.md)).
 - `mycelium tls ca` and `mycelium tls issue`, in [`src/main.rs`](../../src/main.rs): make the fleet CA and issue a
-  node's certificate where the CA key is.
+  node's certificate where the CA key is. With `--format json` each, and `tls pin`, prints one document, schema
+  `mycelium.tls/1`, of paths and SPKI fingerprints only — never a key
+  ([the CLI's JSON documents](../reference/cli-json.md#mycelium-tls----format-json--myceliumtls1);
+  `each_tls_subcommand_as_json_matches_its_golden_and_carries_no_secret` in [`tests/cli_json.rs`](../../tests/cli_json.rs)).
 - `an_unsigned_data_frame_is_refused_whatever_the_setting_says`, in [`src/lib_tests.rs`](../../src/lib_tests.rs).
 
 ## See it work

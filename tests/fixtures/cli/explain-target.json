@@ -1,0 +1,45 @@
+{
+  "counts": {
+    "inputs_truncated": 1,
+    "records": 1,
+    "targets": 1,
+    "unattributable": 0,
+    "unparsed": 1
+  },
+  "dropped": "records the sink dropped are in its counters (decisions.stats.json), not here",
+  "file": "tests/fixtures/cli/trace.jsonl",
+  "rules": [
+    {
+      "id": "prov.presence_floor",
+      "summary": null
+    }
+  ],
+  "schema": "mycelium.explain/1",
+  "targets": [
+    {
+      "steps": [
+        {
+          "effect": null,
+          "inputs_truncated": true,
+          "node": "127.0.0.1:7002",
+          "outcome": "no_action",
+          "reads": [
+            {
+              "provenance": "local",
+              "source": "the install's config",
+              "truncated": true,
+              "value": "attrs=abcdefgh"
+            }
+          ],
+          "reason": "floor_met",
+          "rule": "prov.presence_floor",
+          "rule_revision": 1,
+          "seq": 3,
+          "trigger": "round 2",
+          "unattributable": false
+        }
+      ],
+      "target": "route/optimize"
+    }
+  ]
+}

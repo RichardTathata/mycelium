@@ -1,0 +1,7 @@
+{
+  "schema": "mycelium.declare/1",
+  "event": "refused",
+  "errors": 1,
+  "report": "<string>",
+  "previous_stands": false
+}

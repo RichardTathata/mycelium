@@ -27,7 +27,10 @@ This feature is turned on in code; the catalogue needs nothing.
 - [`DecisionSink`](../../mycelium-core/src/decision.rs): the bounded sink, by records and bytes.
 - [`with_decision_trace`](../../src/agent/mod.rs): attach a sink to a node before `start()` (the membership governor,
   signal admission, a schedule's decisions); a stem takes `--trace-dir`, a provisioner [`with_decision_trace`](../../mycelium-wasm-host/src/provisioner.rs).
-- `mycelium explain <decisions.jsonl> [--catalogue …]`: a trace rendered as what each decision point decided.
+- `mycelium explain <decisions.jsonl> [--catalogue …] [--format text|json]`: a trace rendered as what each decision
+  point decided; `--format json` is one document, schema `mycelium.explain/1`
+  ([the CLI's JSON documents](../reference/cli-json.md#mycelium-explain-decisionsjsonl---format-json--myceliumexplain1);
+  `explain_a_trace_as_json_matches_its_golden` in [`tests/cli_json.rs`](../../tests/cli_json.rs)).
 - A run recorded with `GOSSIP_RECORD_BUNDLE_DIR` — only in a binary built with `sim` — carries the trace into its
   bundle as `decisions.jsonl` beside `coverage.json` ([replay bundles](replay.md)).
 - `admission_records_refusals_and_sheds_only_and_changes_no_delivery`, in

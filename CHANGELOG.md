@@ -9,6 +9,18 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **N3: `--format json` for `explain`, `declare` and `tls`** (`docs/plans/identity-and-lifecycle.md` N3). Each prints one
+  JSON document on stdout, logs to stderr: `explain <trace>` as `mycelium.explain/1`; `explain --correlation` and
+  `--closure` keep the reader's `mycelium.closure/1`, with `view` `chain` or `closure`, full hashes and the closure's
+  `complete`; `declare` one `mycelium.declare/1` object per event (JSON Lines under `--watch`); `tls ca`, `tls issue`
+  (node and client) and `tls pin` as `mycelium.tls/1` — paths and SPKI fingerprints only, never a key. Goldens under
+  `tests/fixtures/cli/`, checked through the binary by `tests/cli_json.rs`; the shapes are
+  `docs/reference/cli-json.md`. `--format text`, the default, prints what each printed before. Library:
+  `decision::explain_json`, `Corpus::chain_json`/`closure_json`/`closure_json_for`, `declare::run_with` with
+  `declare::Format`, `declare::event_json`.
+
 ## [2.40.0] — 2026-11-12
 
 Wire **v12** unchanged (`PREV = 11`; the rolling-upgrade gate, 3 + 2, passes). A MINOR: **identity and lifecycle wave

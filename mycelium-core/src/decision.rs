@@ -731,14 +731,33 @@ pub fn coverage_manifest(rules: &[&crate::rule::RuleDescriptor]) -> String {
     serde_json::to_string_pretty(&Manifest { schema: "mycelium.coverage/1", record_schema: RECORD_SCHEMA, rules: rows }).unwrap_or_else(|_| "{}".into())
 }
 
-/// Render a decision trace (one JSON record per line, as [`DecisionSink::to_jsonl`] writes it) as what
-/// each target went through, in order: the round, the rule, how it ended and why, what it read and
-/// what it caused. With a catalogue document (`docs/reference/rule-catalogue.json`), each rule used is
-/// summarised once at the end. The footer says what the trace cannot: a dropped record is the sink's
-/// counter, not a line here; a decision that read gossiped or sampled inputs is unattributable under
-/// replay. Lines that do not parse are counted, never silently skipped. `target` narrows the output.
-pub fn explain(jsonl: &str, catalogue_json: Option<&str>, target: Option<&str>) -> String {
-    use std::collections::BTreeMap;
+/// The schema id of [`explain_json`]'s document (identity-and-lifecycle N3).
+pub const EXPLAIN_SCHEMA: &str = "mycelium.explain/1";
+
+/// One step of an explanation: a parsed trace record, read the way [`explain`] reads it.
+struct Step<'a> {
+    record: &'a serde_json::Value,
+    /// Read gossiped or sampled inputs: unattributable under replay.
+    unattributable: bool,
+    /// The record says its inputs were truncated.
+    truncated: bool,
+}
+
+/// A trace read once, for both renderings: the targets in first-seen order with their steps, the rules used, and what
+/// could not be read. [`explain`] and [`explain_json`] differ only in how they print this.
+struct Explained<'a> {
+    order: Vec<String>,
+    by_target: std::collections::BTreeMap<String, Vec<Step<'a>>>,
+    rules_used: std::collections::BTreeSet<String>,
+    summaries: std::collections::BTreeMap<String, String>,
+    unparsed: usize,
+}
+
+fn explain_str(v: &serde_json::Value, k: &str) -> String {
+    v.get(k).and_then(|x| x.as_str()).unwrap_or("-").to_string()
+}
+
+fn parse_trace(jsonl: &str) -> (Vec<serde_json::Value>, usize) {
     let mut records: Vec<serde_json::Value> = Vec::new();
     let mut unparsed = 0usize;
     for line in jsonl.lines().filter(|l| !l.trim().is_empty()) {
@@ -747,32 +766,58 @@ pub fn explain(jsonl: &str, catalogue_json: Option<&str>, target: Option<&str>) 
             Err(_) => unparsed += 1,
         }
     }
+    (records, unparsed)
+}
+
+fn explained<'a>(records: &'a [serde_json::Value], unparsed: usize, catalogue_json: Option<&str>, target: Option<&str>) -> Explained<'a> {
+    use std::collections::BTreeMap;
     let summaries: BTreeMap<String, String> = catalogue_json
         .and_then(|c| serde_json::from_str::<serde_json::Value>(c).ok())
         .and_then(|c| c.get("rules").and_then(|r| r.as_array()).cloned())
         .map(|rules| rules.iter().filter_map(|r| Some((r.get("id")?.as_str()?.to_string(), r.get("summary")?.as_str()?.to_string()))).collect())
         .unwrap_or_default();
-    let str_of = |v: &serde_json::Value, k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("-").to_string();
-
-    let mut order: Vec<String> = Vec::new();
-    let mut by_target: BTreeMap<String, Vec<&serde_json::Value>> = BTreeMap::new();
-    for r in &records {
-        let t = str_of(r, "target");
+    let mut e = Explained { order: Vec::new(), by_target: BTreeMap::new(), rules_used: Default::default(), summaries, unparsed };
+    for r in records {
+        let t = explain_str(r, "target");
         if let Some(want) = target && t != want { continue; }
-        if !by_target.contains_key(&t) { order.push(t.clone()); }
-        by_target.entry(t).or_default().push(r);
+        if !e.by_target.contains_key(&t) { e.order.push(t.clone()); }
+        e.rules_used.insert(explain_str(r, "rule"));
+        let unattributable = r.get("inputs").and_then(|i| i.as_array()).is_some_and(|inputs| {
+            inputs.iter().any(|i| matches!(i.get("provenance").and_then(|p| p.as_str()), Some("gossiped" | "sampled")))
+        });
+        let truncated = r.pointer("/completeness/inputs_truncated").and_then(|x| x.as_bool()).unwrap_or(false);
+        e.by_target.entry(t).or_default().push(Step { record: r, unattributable, truncated });
     }
+    e
+}
+
+impl Explained<'_> {
+    fn shown(&self) -> usize {
+        self.by_target.values().map(Vec::len).sum()
+    }
+    fn unattributable(&self) -> usize {
+        self.by_target.values().flatten().filter(|s| s.unattributable).count()
+    }
+    fn truncated(&self) -> usize {
+        self.by_target.values().flatten().filter(|s| s.truncated).count()
+    }
+}
+
+/// Render a decision trace (one JSON record per line, as [`DecisionSink::to_jsonl`] writes it) as what
+/// each target went through, in order: the round, the rule, how it ended and why, what it read and
+/// what it caused. With a catalogue document (`docs/reference/rule-catalogue.json`), each rule used is
+/// summarised once at the end. The footer says what the trace cannot: a dropped record is the sink's
+/// counter, not a line here; a decision that read gossiped or sampled inputs is unattributable under
+/// replay. Lines that do not parse are counted, never silently skipped. `target` narrows the output.
+pub fn explain(jsonl: &str, catalogue_json: Option<&str>, target: Option<&str>) -> String {
+    let (records, unparsed) = parse_trace(jsonl);
+    let e = explained(&records, unparsed, catalogue_json, target);
     let mut out = String::new();
-    let mut rules_used: BTreeMap<String, ()> = BTreeMap::new();
-    let (mut unattributable, mut truncated) = (0usize, 0usize);
-    for t in &order {
+    for t in &e.order {
         out.push_str(&format!("{t}\n"));
-        for r in &by_target[t] {
-            let rule = str_of(r, "rule");
-            rules_used.insert(rule.clone(), ());
-            let outcome = str_of(r, "outcome");
-            let reason = str_of(r, "reason");
-            let trigger = str_of(r, "trigger");
+        for step in &e.by_target[t] {
+            let r = step.record;
+            let (rule, outcome, reason, trigger) = (explain_str(r, "rule"), explain_str(r, "outcome"), explain_str(r, "reason"), explain_str(r, "trigger"));
             let mut line = format!("  {trigger} · {rule} → {outcome} {reason}");
             if let Some(effect) = r.get("effect").and_then(|e| e.as_str()) {
                 line.push_str(&format!(" ⇒ {effect}"));
@@ -784,32 +829,86 @@ pub fn explain(jsonl: &str, catalogue_json: Option<&str>, target: Option<&str>) 
                     format!("{v}{cut}")
                 }).collect();
                 line.push_str(&format!(" (reads: {})", reads.join("; ")));
-                if inputs.iter().any(|i| matches!(i.get("provenance").and_then(|p| p.as_str()), Some("gossiped" | "sampled"))) {
-                    unattributable += 1;
-                }
-            }
-            if r.pointer("/completeness/inputs_truncated").and_then(|x| x.as_bool()).unwrap_or(false) {
-                truncated += 1;
             }
             out.push_str(&line);
             out.push('\n');
         }
     }
-    if !summaries.is_empty() && !rules_used.is_empty() {
+    if !e.summaries.is_empty() && !e.rules_used.is_empty() {
         out.push_str("\nRules:\n");
-        for rule in rules_used.keys() {
-            if let Some(sum) = summaries.get(rule) {
+        for rule in &e.rules_used {
+            if let Some(sum) = e.summaries.get(rule) {
                 out.push_str(&format!("  {rule} — {sum}\n"));
             }
         }
     }
-    let shown: usize = by_target.values().map(Vec::len).sum();
     out.push_str(&format!(
-        "\n{shown} record(s) over {} target(s); {unattributable} read gossiped or sampled inputs (unattributable under replay); {truncated} with truncated inputs; {unparsed} line(s) did not parse. \
+        "\n{} record(s) over {} target(s); {} read gossiped or sampled inputs (unattributable under replay); {} with truncated inputs; {} line(s) did not parse. \
 Records the sink dropped are in its counters (decisions.stats.json), not here.\n",
-        order.len()
+        e.shown(),
+        e.order.len(),
+        e.unattributable(),
+        e.truncated(),
+        e.unparsed
     ));
     out
+}
+
+/// [`explain`] as one JSON document (`mycelium explain --format json`, identity-and-lifecycle N3), schema
+/// [`EXPLAIN_SCHEMA`]: the same targets in the same order, each step's fields as the record carries them (`null` where
+/// it carries none, where the text prints `-`), the rules used with their catalogue summaries, and the same counts. A
+/// step is the record's own fields, not the record: a reader that wants the record reads the trace.
+pub fn explain_json(jsonl: &str, catalogue_json: Option<&str>, target: Option<&str>) -> serde_json::Value {
+    use serde_json::{json, Value};
+    let (records, unparsed) = parse_trace(jsonl);
+    let e = explained(&records, unparsed, catalogue_json, target);
+    let field = |r: &Value, k: &str| r.get(k).filter(|v| !v.is_null()).cloned().unwrap_or(Value::Null);
+    let targets: Vec<Value> = e
+        .order
+        .iter()
+        .map(|t| {
+            let steps: Vec<Value> = e.by_target[t]
+                .iter()
+                .map(|s| {
+                    let r = s.record;
+                    let reads: Vec<Value> = r.get("inputs").and_then(|i| i.as_array()).into_iter().flatten().map(|i| json!({
+                        "source": field(i, "source"),
+                        "value": field(i, "value"),
+                        "provenance": field(i, "provenance"),
+                        "truncated": i.get("truncated").and_then(|x| x.as_bool()).unwrap_or(false),
+                    })).collect();
+                    json!({
+                        "seq": field(r, "seq"),
+                        "node": field(r, "node"),
+                        "rule": field(r, "rule"),
+                        "rule_revision": field(r, "rule_revision"),
+                        "trigger": field(r, "trigger"),
+                        "outcome": field(r, "outcome"),
+                        "reason": field(r, "reason"),
+                        "effect": field(r, "effect"),
+                        "reads": reads,
+                        "unattributable": s.unattributable,
+                        "inputs_truncated": s.truncated,
+                    })
+                })
+                .collect();
+            json!({ "target": t, "steps": steps })
+        })
+        .collect();
+    let rules: Vec<Value> = e.rules_used.iter().map(|id| json!({ "id": id, "summary": e.summaries.get(id) })).collect();
+    json!({
+        "schema": EXPLAIN_SCHEMA,
+        "targets": targets,
+        "rules": rules,
+        "counts": {
+            "records": e.shown(),
+            "targets": e.order.len(),
+            "unattributable": e.unattributable(),
+            "inputs_truncated": e.truncated(),
+            "unparsed": e.unparsed,
+        },
+        "dropped": "records the sink dropped are in its counters (decisions.stats.json), not here",
+    })
 }
 
 #[cfg(test)]
@@ -1010,6 +1109,39 @@ mod tests {
         assert!(text.contains("3 record(s) over 2 target(s); 1 read gossiped or sampled inputs") && text.contains("1 line(s) did not parse"), "{text}");
         let only = explain(&jsonl, None, Some("route/optimize"));
         assert!(only.starts_with("route/optimize\n") && !only.contains("text/echo"));
+    }
+
+    /// The JSON form (identity-and-lifecycle N3) is the text's explanation, field for field: the same targets in the
+    /// same order, each step's rule, outcome, reason, effect and reads, the rules used with their summaries, and the
+    /// same counts — a record that carries no effect is `null`, not the text's `-`.
+    #[test]
+    fn the_json_explanation_says_what_the_text_says() {
+        let s = DecisionSink::default();
+        s.record(DecisionRecord::new("prov.eligible", 1, "round 1", OutcomeKind::Action, "eligible").target("text/echo").no_parent().no_effect()).unwrap();
+        s.record(DecisionRecord::new("prov.demand_response", 1, "round 1", OutcomeKind::Action, "unmet_demand_live").target("text/echo")
+            .input(InputSnapshot::new("demand/", "providers=0 demanding=1", Provenance::Gossiped)).effect("start_install")).unwrap();
+        s.record(DecisionRecord::new("prov.presence_floor", 1, "round 1", OutcomeKind::NoAction, "floor_met").target("route/optimize").no_parent().no_effect()).unwrap();
+        let jsonl = s.to_jsonl() + "not json\n";
+        let catalogue = r#"{"schema":"mycelium.rules/1","rules":[{"id":"prov.eligible","summary":"Can host it."}]}"#;
+        let doc = explain_json(&jsonl, Some(catalogue), None);
+        assert_eq!(doc["schema"], EXPLAIN_SCHEMA);
+        let targets = doc["targets"].as_array().unwrap();
+        assert_eq!(targets.iter().map(|t| t["target"].as_str().unwrap()).collect::<Vec<_>>(), ["text/echo", "route/optimize"]);
+        let first = &targets[0]["steps"][0];
+        assert_eq!((first["rule"].as_str(), first["outcome"].as_str(), first["reason"].as_str()), (Some("prov.eligible"), Some("action"), Some("eligible")));
+        assert!(first["effect"].is_null() && first["reads"].as_array().unwrap().is_empty() && first["unattributable"] == false);
+        let second = &targets[0]["steps"][1];
+        assert_eq!(second["effect"], "start_install");
+        assert_eq!(second["reads"][0]["value"], "providers=0 demanding=1");
+        assert_eq!(second["reads"][0]["provenance"], "gossiped");
+        assert_eq!(second["unattributable"], true);
+        assert_eq!(doc["rules"].as_array().unwrap().len(), 3);
+        assert_eq!(doc["rules"][0], serde_json::json!({ "id": "prov.demand_response", "summary": null }));
+        assert_eq!(doc["rules"][1], serde_json::json!({ "id": "prov.eligible", "summary": "Can host it." }));
+        assert_eq!(doc["counts"], serde_json::json!({ "records": 3, "targets": 2, "unattributable": 1, "inputs_truncated": 0, "unparsed": 1 }));
+        let only = explain_json(&jsonl, None, Some("route/optimize"));
+        assert_eq!(only["targets"].as_array().unwrap().len(), 1);
+        assert_eq!(only["counts"]["records"], 1);
     }
 }
 

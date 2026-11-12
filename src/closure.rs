@@ -36,6 +36,9 @@ use crate::agent::causal::content_hash;
 /// The schema id printed at the head of each rendering.
 pub const SCHEMA: &str = "mycelium.closure/1";
 
+/// The footer both renderings carry: how records are ordered, and how far each source is to be trusted.
+const ORDER_NOTE: &str = "event time where a record has one, file order where it has none. The journal is authoritative; the trace is best-effort (its sink drops and counts). A KV receipt is not journaled and joins only by operation id.";
+
 /// The enforcement point whose records are a closure's boundary.
 const FEDERATION_EDGE: &str = "gateway:federation/call";
 
@@ -223,11 +226,10 @@ impl Corpus {
         self.records.iter().filter_map(|r| r.node.clone()).collect()
     }
 
-    /// Every record of one run, as one chain. Each line is marked *captured*, *reconstructed* or *unattributable*.
-    pub fn chain(&self, correlation: &str) -> String {
-        let mut out = String::new();
-        out.push_str(&format!("{SCHEMA} chain for correlation {correlation}\n"));
-        self.head(&mut out);
+    /// The rows of one run's chain, sorted: each record's index and its mark (`captured` when it carries the id,
+    /// `reconstructed` when it joins by operation id), and how many records of those operations carry another
+    /// correlation. [`chain`](Self::chain) and [`chain_json`](Self::chain_json) print this.
+    fn chain_rows(&self, correlation: &str) -> (Vec<(usize, &'static str)>, usize) {
         // Captured: the record carries the id. Reconstructed: a record of the same operation that does not.
         let captured: Vec<usize> =
             (0..self.records.len()).filter(|&i| self.records[i].correlation.as_deref() == Some(correlation)).collect();
@@ -243,17 +245,31 @@ impl Corpus {
                 }
             }
         }
+        self.sort_rows(&mut rows);
+        (rows, other_correlation)
+    }
+
+    /// Records in the files that carry no id at all — no correlation, no operation id, no parent.
+    fn unattributable_records(&self) -> usize {
+        self.records.iter().filter(|r| r.correlation.is_none() && r.operation_id.is_none() && r.parent.is_none()).count()
+    }
+
+    /// Every record of one run, as one chain. Each line is marked *captured*, *reconstructed* or *unattributable*.
+    pub fn chain(&self, correlation: &str) -> String {
+        let mut out = String::new();
+        out.push_str(&format!("{SCHEMA} chain for correlation {correlation}\n"));
+        self.head(&mut out);
+        let (rows, other_correlation) = self.chain_rows(correlation);
         if rows.is_empty() {
             out.push_str("  no record carries this correlation, and none joins to one by operation id\n");
             self.foot(&mut out);
             return out;
         }
-        self.sort_rows(&mut rows);
         for (i, mark) in &rows {
             out.push_str(&self.line(&self.records[*i], mark));
             out.push('\n');
         }
-        let unattributable = self.records.iter().filter(|r| r.correlation.is_none() && r.operation_id.is_none() && r.parent.is_none()).count();
+        let unattributable = self.unattributable_records();
         out.push_str(&format!(
             "\n{} record(s) in the chain ({} captured, {} reconstructed by operation id); {unattributable} record(s) in the files carry no id at all and are unattributable to any run.\n",
             rows.len(),
@@ -267,14 +283,62 @@ impl Corpus {
         out
     }
 
+    /// [`chain`](Self::chain) as one JSON document (`mycelium explain --correlation <id> --format json`,
+    /// identity-and-lifecycle N3), schema [`SCHEMA`] with `"view": "chain"`: the files read, every row of the chain
+    /// with its mark and the record's fields in full (hashes unshortened), and the same counts.
+    pub fn chain_json(&self, correlation: &str) -> Value {
+        let (rows, other_correlation) = self.chain_rows(correlation);
+        let records: Vec<Value> = rows.iter().map(|(i, mark)| self.record_json(&self.records[*i], mark, None)).collect();
+        serde_json::json!({
+            "schema": SCHEMA,
+            "view": "chain",
+            "correlation": correlation,
+            "files": self.files_json(),
+            "records": records,
+            "counts": {
+                "records": rows.len(),
+                "captured": rows.iter().filter(|(_, m)| *m == "captured").count(),
+                "reconstructed": rows.iter().filter(|(_, m)| *m == "reconstructed").count(),
+                "unattributable_in_files": self.unattributable_records(),
+                "other_correlation": other_correlation,
+            },
+            "order": ORDER_NOTE,
+        })
+    }
+
+    /// The fleet line's facts: journals given, the nodes the records name, and whether the closure is known complete —
+    /// `Some(false)` when fewer journals than the stated fleet or than the nodes named, `Some(true)` when at least the
+    /// stated fleet's, `None` when no fleet size was given and nothing shows it incomplete.
+    fn fleet_facts(&self, fleet: Option<usize>) -> (usize, BTreeSet<String>, Option<bool>) {
+        let (journals, nodes) = (self.journals(), self.nodes_named());
+        let complete = match fleet {
+            Some(n) => Some(journals >= n),
+            None if journals < nodes.len() => Some(false),
+            None => None,
+        };
+        (journals, nodes, complete)
+    }
+
+    /// Every parent cited anywhere in the files given that no file holds — the root's and the root's own parent
+    /// excepted — with how many records cite it. Over all the files, not the root's tree: a hole outside the tree may
+    /// be where the tree continues.
+    fn holes(&self, hash: &str, root_parent: Option<&String>) -> BTreeMap<String, usize> {
+        let mut holes: BTreeMap<String, usize> = BTreeMap::new();
+        for r in &self.records {
+            if let Some(p) = &r.parent && self.get(p).is_none() && p != hash && Some(p) != root_parent {
+                *holes.entry(p.clone()).or_default() += 1;
+            }
+        }
+        holes
+    }
+
     /// The dependency closure of one record: it, and every record whose parent chain reaches it, across the files
     /// given. Holes are named and never filled; a federation edge is a boundary; each record is visited once.
     pub fn closure(&self, hash: &str, fleet: Option<usize>) -> String {
         let mut out = String::new();
         out.push_str(&format!("{SCHEMA} closure of {hash}\n"));
         self.head(&mut out);
-        let nodes = self.nodes_named();
-        let journals = self.journals();
+        let (journals, nodes, _) = self.fleet_facts(fleet);
         let fleet_line = match fleet {
             Some(n) if journals < n => format!("INCOMPLETE: {journals} journal(s) given for a fleet of {n} nodes — a record on a node whose journal is not here is not in this closure.\n"),
             Some(n) => format!("{journals} journal(s) given for a fleet of {n} nodes.\n"),
@@ -308,14 +372,7 @@ impl Corpus {
             out.push_str(&self.hole_reason());
             out.push('\n');
         }
-        // Holes: every parent cited anywhere in the files given that no file holds — the root's own, printed above,
-        // excepted. Over all the files, not the root's tree: a hole outside the tree may be where the tree continues.
-        let mut holes: BTreeMap<String, usize> = BTreeMap::new();
-        for r in &self.records {
-            if let Some(p) = &r.parent && self.get(p).is_none() && p != hash && Some(p) != root_parent.as_ref() {
-                *holes.entry(p.clone()).or_default() += 1;
-            }
-        }
+        let holes = self.holes(hash, root_parent.as_ref());
         out.push_str(&format!(
             "\n{} record(s) in the closure over {} file(s); {boundaries} federation boundary(ies); {} hole(s) cited elsewhere in these files.\n",
             order.len(),
@@ -327,6 +384,96 @@ impl Corpus {
         }
         self.foot(&mut out);
         out
+    }
+
+    /// `mycelium explain --closure <given> --format json`: the argument resolved as [`closure_for`](Self::closure_for)
+    /// resolves it, then [`closure_json`](Self::closure_json).
+    pub fn closure_json_for(&self, given: &str, fleet: Option<usize>) -> Result<Value, String> {
+        self.resolve(given).map(|h| self.closure_json(&h, fleet))
+    }
+
+    /// [`closure`](Self::closure) as one JSON document (identity-and-lifecycle N3), schema [`SCHEMA`] with
+    /// `"view": "closure"`: the files read; the fleet facts (`complete` is `false` where the text says INCOMPLETE,
+    /// `true` when the stated fleet's journals are all here, `null` when the reader cannot tell); the members in render
+    /// order, each with its depth and whether it is a federation boundary; the root's missing parent and every other
+    /// hole, with what a hole may be; and the counts. A root in none of the files is `"root_found": false` with no
+    /// members, as the text says.
+    pub fn closure_json(&self, hash: &str, fleet: Option<usize>) -> Value {
+        use serde_json::json;
+        let (journals, nodes, complete) = self.fleet_facts(fleet);
+        let fleet_v = json!({ "journals": journals, "fleet": fleet, "nodes_named": nodes, "complete": complete });
+        let root = self.get(hash);
+        let order = if root.is_some() { self.visit(hash) } else { Vec::new() };
+        let root_parent = root.and_then(|r| r.parent.clone());
+        let members: Vec<Value> = order
+            .iter()
+            .map(|(depth, i)| {
+                let r = &self.records[*i];
+                let mark = if *depth == 0 && root_parent.is_none() { "captured, a root" } else { "captured" };
+                self.record_json(r, mark, Some(*depth))
+            })
+            .collect();
+        let boundaries = order.iter().filter(|(_, i)| self.records[*i].enforcement_point.as_deref() == Some(FEDERATION_EDGE)).count();
+        let holes = if root.is_some() { self.holes(hash, root_parent.as_ref()) } else { BTreeMap::new() };
+        let root_parent_missing = root_parent.as_ref().filter(|p| self.get(p).is_none());
+        json!({
+            "schema": SCHEMA,
+            "view": "closure",
+            "root": hash,
+            "root_found": root.is_some(),
+            "root_cited_by": if root.is_none() { self.records.iter().filter(|r| r.parent.as_deref() == Some(hash)).count() } else { 0 },
+            "root_parent_missing": root_parent_missing,
+            "files": self.files_json(),
+            "fleet": fleet_v,
+            "records": members,
+            "holes": holes.iter().map(|(p, n)| json!({ "hash": p, "cited_by": n })).collect::<Vec<_>>(),
+            "hole_reason": self.hole_reason(),
+            "counts": { "records": order.len(), "files": self.files.len(), "boundaries": boundaries, "holes": holes.len() },
+            "order": ORDER_NOTE,
+        })
+    }
+
+    /// The files read, for a JSON document: each one's path as given, kind, records, unparsed lines, duplicates of an
+    /// earlier file's records, and the sink's drop counters beside a trace (`null` when not given, which is not zero).
+    fn files_json(&self) -> Value {
+        Value::Array(
+            self.files
+                .iter()
+                .map(|f| {
+                    serde_json::json!({
+                        "path": f.path, "kind": f.kind.word(), "records": f.records, "unparsed": f.unparsed,
+                        "duplicates": f.duplicates, "dropped": f.dropped,
+                    })
+                })
+                .collect(),
+        )
+    }
+
+    /// One record for a JSON document: what [`line`](Self::line) prints, every field whole — the full hash, the full
+    /// parent and whether a file holds it — and `depth` in a closure.
+    fn record_json(&self, r: &Record, mark: &str, depth: Option<usize>) -> Value {
+        let mut v = serde_json::json!({
+            "mark": mark,
+            "source": r.source.word(),
+            "file": r.file,
+            "index": r.index,
+            "hash": r.hash,
+            "kind": r.kind,
+            "at_ms": r.at_ms,
+            "node": r.node,
+            "enforcement_point": r.enforcement_point,
+            "correlation": r.correlation,
+            "operation_id": r.operation_id,
+            "attempt_id": r.attempt_id,
+            "parent": r.parent,
+            "parent_held": r.parent.as_ref().map(|p| self.get(p).is_some()),
+            "summary": r.summary,
+        });
+        if let Some(d) = depth {
+            v["depth"] = serde_json::json!(d);
+            v["boundary"] = serde_json::json!(r.enforcement_point.as_deref() == Some(FEDERATION_EDGE));
+        }
+        v
     }
 
     /// The closure's members in render order, as `(depth, index)`: the root, then breadth-first every record whose
@@ -404,7 +551,7 @@ impl Corpus {
     }
 
     fn foot(&self, out: &mut String) {
-        out.push_str("Order: event time where a record has one, file order where it has none. The journal is authoritative; the trace is best-effort (its sink drops and counts). A KV receipt is not journaled and joins only by operation id.\n");
+        out.push_str(&format!("Order: {ORDER_NOTE}\n"));
     }
 
     fn sort_rows(&self, rows: &mut [(usize, &'static str)]) {
@@ -717,6 +864,48 @@ mod tests {
         let out = h.closure(&content_hash(a.as_bytes()), None);
         assert!(out.contains("1 record(s) in the closure"), "{out}");
         assert!(out.contains("the root's own parent not-even-a-hash is in none of the files given"), "{out}");
+    }
+
+    /// The JSON forms (identity-and-lifecycle N3) carry what the text does: the chain's rows with their marks and full
+    /// hashes, and its counts; the closure's members with depth and boundary, its holes, its fleet facts — `complete`
+    /// `false` where the text says INCOMPLETE — and a root in none of the files as `root_found: false`.
+    #[test]
+    fn the_json_chain_and_closure_say_what_the_text_says() {
+        let mut c = Corpus::default();
+        let root = evidence(1, "op-r", "decided", Some("run-1"), None, "gateway:mcp/tools/call");
+        let rh = content_hash(root.as_bytes());
+        let executed = evidence(1, "op-r", "execution", None, None, "gateway:mcp/tools/call");
+        let edge = evidence(4, "op-e", "decided", Some("run-1"), Some(&rh), FEDERATION_EDGE);
+        let orphan = evidence(7, "op-o", "decided", Some("run-1"), Some(&"f".repeat(64)), "provider");
+        c.add_journal("n1.log", &[root.into_bytes(), executed.into_bytes(), edge.into_bytes(), orphan.into_bytes()]);
+        c.add_trace("d.jsonl", &format!("{}\n", decision(1, None, None)), None);
+
+        let chain = c.chain_json("run-1");
+        assert_eq!((chain["schema"].as_str(), chain["view"].as_str()), (Some(SCHEMA), Some("chain")));
+        let marks: Vec<&str> = chain["records"].as_array().unwrap().iter().map(|r| r["mark"].as_str().unwrap()).collect();
+        assert_eq!(marks, ["captured", "reconstructed", "captured", "captured"], "{chain:#}");
+        assert_eq!(chain["records"][0]["hash"], rh, "the full hash, not the text's prefix");
+        assert_eq!(chain["counts"], json!({ "records": 4, "captured": 3, "reconstructed": 1, "unattributable_in_files": 1, "other_correlation": 0 }));
+        assert_eq!(chain["files"][1], json!({ "path": "d.jsonl", "kind": "trace", "records": 1, "unparsed": 0, "duplicates": 0, "dropped": null }));
+        assert!(c.chain_json("run-9")["records"].as_array().unwrap().is_empty());
+
+        let closure = c.closure_json(&rh, Some(3));
+        assert_eq!((closure["view"].as_str(), closure["root_found"].as_bool()), (Some("closure"), Some(true)));
+        assert_eq!(closure["fleet"], json!({ "journals": 1, "fleet": 3, "nodes_named": ["127.0.0.1:7001", "127.0.0.1:7002"], "complete": false }));
+        let members = closure["records"].as_array().unwrap();
+        assert_eq!(members.len(), 2, "{closure:#}");
+        assert_eq!((members[0]["mark"].as_str(), members[0]["depth"].as_u64()), (Some("captured, a root"), Some(0)));
+        assert_eq!((members[1]["depth"].as_u64(), members[1]["boundary"].as_bool()), (Some(1), Some(true)));
+        assert_eq!(members[1]["parent_held"], true);
+        assert_eq!(closure["holes"], json!([{ "hash": "f".repeat(64), "cited_by": 1 }]));
+        assert_eq!(closure["counts"], json!({ "records": 2, "files": 2, "boundaries": 1, "holes": 1 }));
+        assert_eq!(c.closure_json(&rh, Some(1))["fleet"]["complete"], true);
+        assert!(c.closure_json(&rh, None)["fleet"]["complete"] == false, "fewer journals than nodes named");
+
+        let missing = c.closure_json(&"0".repeat(64), None);
+        assert_eq!((missing["root_found"].as_bool(), missing["records"].as_array().map(Vec::len)), (Some(false), Some(0)));
+        assert_eq!(c.closure_json_for(&rh[..12], None).unwrap(), c.closure_json(&rh, None), "the prefix rule, as the text's");
+        assert!(c.closure_json_for("0123", None).is_err());
     }
 
     /// A closure read takes the prefix a chain prints: a unique prefix resolves to its record's full hash; one no

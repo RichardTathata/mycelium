@@ -30,8 +30,11 @@ This feature is turned on in code.
   without it checks no scope, so any valid bearer declares.
 - The flags: `--gateway <url>` (default `http://127.0.0.1:8300`), `--token <bearer>` (else `MYCELIUM_GATEWAY_TOKEN`),
   `--watch`, `--poll-ms <n>` (how often the files are read), `--interval-secs <n>` (the heartbeat), `--lease-secs <n>`
-  (the lease a declaration is held under). `--poll-ms` at or above a third of the lease is refused: the declaration
-  would lapse between heartbeats.
+  (the lease a declaration is held under), `--format text|json`. `--poll-ms` at or above a third of the lease is
+  refused: the declaration would lapse between heartbeats.
+- `--format json` prints one JSON object per event, schema `mycelium.declare/1` — once, a single line; under
+  `--watch`, JSON Lines: `declared`, `refused`, `rejected`, `error`, `heartbeat_lost`, `retracted`
+  ([the CLI's JSON documents](../reference/cli-json.md#mycelium-declare---format-json--myceliumdeclare1)).
 - `a_unit_edit_is_redeclared_and_the_old_handle_retracted`, in [`src/declare.rs`](../../src/declare.rs): a real
   gateway node, a unit declared, resolved over HTTP, renamed, re-declared, and the old capability gone.
 
@@ -44,7 +47,9 @@ edit reaching the fleet, a refused unit leaving the previous declaration, Ctrl-C
 `a_unit_wire_check_refuses_keeps_the_previous_declaration`,
 `a_unit_the_gateway_refuses_is_rejected_once_and_its_previous_declaration_put_back`,
 `a_lost_handle_is_declared_again_at_the_next_tick`, `a_unit_removed_from_the_directory_is_retracted`,
-`a_refused_token_is_an_error_naming_the_route` and `a_skill_file_becomes_a_prompt_template`.
+`a_refused_token_is_an_error_naming_the_route`, `a_skill_file_becomes_a_prompt_template` and
+`every_event_has_a_json_line_and_the_text_is_unchanged`; the JSON form through the binary, once, refused and watched to
+Ctrl-C, is `declare_as_json_matches_its_goldens_once_refused_and_watched` in [`tests/cli_json.rs`](../../tests/cli_json.rs).
 
 ## What it guarantees, and what it does not
 

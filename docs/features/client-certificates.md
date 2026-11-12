@@ -25,7 +25,8 @@ every node that reads it.
   fleet CA's key ([`tls_issue_client`](../../src/main.rs)). The issuer is the fleet's
   [`gateway_identity_issuer`](../reference/configuration.md#gateway_identity_issuer), which must be set explicitly
   to 1–128 of `A-Z a-z 0-9 . _ -`: its default, the node id, holds a `:` and is refused as a client issuer. Issuing
-  over an existing key file needs `--force`.
+  over an existing key file needs `--force`. `--format json` prints the principal, the two paths and the
+  certificate's SPKI SHA-256, never the key ([`mycelium.tls/1`](../reference/cli-json.md#mycelium-tls----format-json--myceliumtls1)).
 - Upgrade every node first: an older node admits a client certificate at the mesh
   ([`deprecations.md` §86](../guide/deprecations.md)).
 - [`tls`](../reference/configuration.md#tls): a node judges a client certificate against its CA anchor, so it needs

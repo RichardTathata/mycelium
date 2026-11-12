@@ -1,0 +1,37 @@
+{
+  "counts": {
+    "boundaries": 0,
+    "files": 1,
+    "holes": 0,
+    "records": 0
+  },
+  "files": [
+    {
+      "dropped": null,
+      "duplicates": 0,
+      "kind": "trace",
+      "path": "tests/fixtures/cli/records.jsonl",
+      "records": 6,
+      "unparsed": 0
+    }
+  ],
+  "fleet": {
+    "complete": false,
+    "fleet": null,
+    "journals": 0,
+    "nodes_named": [
+      "127.0.0.1:7001",
+      "127.0.0.1:7002"
+    ]
+  },
+  "hole_reason": "a journal not given, a record pruned by retention or crypto-shredded, or a decision the sink dropped (the 1 trace(s) given report 0 dropped record(s); a trace without decisions.stats.json beside it reports none, which is not zero)",
+  "holes": [],
+  "order": "event time where a record has one, file order where it has none. The journal is authoritative; the trace is best-effort (its sink drops and counts). A KV receipt is not journaled and joins only by operation id.",
+  "records": [],
+  "root": "0000000000000000000000000000000000000000000000000000000000000000",
+  "root_cited_by": 0,
+  "root_found": false,
+  "root_parent_missing": null,
+  "schema": "mycelium.closure/1",
+  "view": "closure"
+}

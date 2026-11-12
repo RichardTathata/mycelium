@@ -297,9 +297,100 @@ impl Watch {
     }
 }
 
+/// How the command prints what each tick did.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Format {
+    /// The lines a person reads.
+    #[default]
+    Text,
+    /// One JSON object per line (identity-and-lifecycle N3), schema [`DECLARE_SCHEMA`]: once, a single line; under
+    /// `--watch`, a line per event, so the stream reads as JSON Lines.
+    Json,
+}
+
+/// The schema id of each line `mycelium declare --format json` prints.
+pub const DECLARE_SCHEMA: &str = "mycelium.declare/1";
+
+/// One event of the command, as the JSON form prints it: a tick's outcome (`declared`, `refused`, `rejected`,
+/// `error`), a heartbeat that lost a declaration (`heartbeat_lost`), or the retraction at Ctrl-C (`retracted`). An
+/// unchanged tick prints nothing, as the text form prints nothing. `previous_stands` on a refusal is whether this
+/// watch holds an earlier declaration — the text's *the previous declaration stands* against *this run declared
+/// nothing*.
+pub fn event_json(event: &Event<'_>, gateway: &str) -> Option<serde_json::Value> {
+    use serde_json::json;
+    let v = match event {
+        Event::Tick(Ok(Tick::Unchanged), _) => return None,
+        Event::Tick(Ok(Tick::Declared { units, skills, not_enforced, warnings }), _) => {
+            json!({ "event": "declared", "gateway": gateway, "units": units, "skills": skills, "not_enforced": not_enforced, "warnings": warnings })
+        }
+        Event::Tick(Ok(Tick::Refused { errors, report }), held) => {
+            json!({ "event": "refused", "errors": errors, "report": report, "previous_stands": *held > 0 })
+        }
+        Event::Tick(Ok(Tick::Rejected { unit, error }), _) => json!({ "event": "rejected", "unit": unit, "error": error }),
+        Event::Tick(Err(e), _) => json!({ "event": "error", "error": e }),
+        Event::HeartbeatLost(e) => json!({ "event": "heartbeat_lost", "error": e }),
+        Event::Retracted(n) => json!({ "event": "retracted", "declarations": n }),
+    };
+    let mut v = v;
+    v.as_object_mut()?.insert("schema".into(), json!(DECLARE_SCHEMA));
+    Some(v)
+}
+
+/// What the command prints about: a tick's result with the number of declarations the watch held after it, a lost
+/// heartbeat, or the retraction of `n` declarations.
+#[derive(Debug)]
+pub enum Event<'a> {
+    Tick(&'a Result<Tick, String>, usize),
+    HeartbeatLost(&'a str),
+    Retracted(usize),
+}
+
+/// The text form of one event, as the command has always printed it.
+fn event_text(event: &Event<'_>, gateway: &str) -> Option<String> {
+    Some(match event {
+        Event::Tick(Ok(Tick::Unchanged), _) => return None,
+        Event::Tick(Ok(Tick::Refused { errors, report }), held) => format!(
+            "{report}\nrefused: wire-check found {errors} error(s); {}",
+            if *held == 0 { "this run declared nothing" } else { "the previous declaration stands" }
+        ),
+        Event::Tick(Ok(Tick::Rejected { unit, error }), _) => {
+            format!("rejected: the gateway refused unit `{unit}` — {error}; its previous declaration was put back, the others stand")
+        }
+        Event::Tick(Ok(Tick::Declared { units, skills, not_enforced, warnings }), _) => {
+            let mut out = String::new();
+            for wn in warnings {
+                out.push_str(&format!("warning: {wn}\n"));
+            }
+            out.push_str(&format!(
+                "declared {units} unit(s) and {skills} skill(s) to {gateway}{}",
+                if not_enforced.is_empty() { String::new() } else { format!("; not enforced by this node: {}", not_enforced.join(", ")) }
+            ));
+            out
+        }
+        Event::Tick(Err(e), _) => format!("declare: {e}"),
+        Event::HeartbeatLost(e) => format!("heartbeat lost a declaration, declaring again at the next tick: {e}"),
+        Event::Retracted(n) => format!("retracting {n} declaration(s)"),
+    })
+}
+
+fn print_event(event: &Event<'_>, gateway: &str, format: Format) {
+    let line = match format {
+        Format::Text => event_text(event, gateway),
+        Format::Json => event_json(event, gateway).map(|v| v.to_string()),
+    };
+    if let Some(line) = line {
+        println!("{line}");
+    }
+}
+
 /// The command: declare once, or watch until Ctrl-C, printing what each tick did. Returns the exit code: 0; 1 when
 /// the first declaration was refused by `wire-check` or by the gateway.
 pub async fn run(cfg: WatchConfig, watch: bool, poll: Duration) -> i32 {
+    run_with(cfg, watch, poll, Format::Text).await
+}
+
+/// [`run`], printing each event in `format`.
+pub async fn run_with(cfg: WatchConfig, watch: bool, poll: Duration, format: Format) -> i32 {
     let mut w = Watch::new(cfg.clone());
     // Beat within every lease window whatever the poll (#667's review, D4): the sleep is the shorter of the poll
     // and the time to the next beat. One `ctrl_c` future for the whole run, so a signal during a tick is kept.
@@ -309,33 +400,12 @@ pub async fn run(cfg: WatchConfig, watch: bool, poll: Duration) -> i32 {
     tokio::pin!(ctrl_c);
     let mut first = true;
     loop {
-        let code = match w.tick().await {
-            Ok(Tick::Unchanged) => 0,
-            Ok(Tick::Refused { errors, report }) => {
-                println!("{report}");
-                println!("refused: wire-check found {errors} error(s); {}", if w.handles().is_empty() { "this run declared nothing" } else { "the previous declaration stands" });
-                1
-            }
-            Ok(Tick::Rejected { unit, error }) => {
-                println!("rejected: the gateway refused unit `{unit}` — {error}; its previous declaration was put back, the others stand");
-                1
-            }
-            Ok(Tick::Declared { units, skills, not_enforced, warnings }) => {
-                for wn in &warnings {
-                    println!("warning: {wn}");
-                }
-                println!(
-                    "declared {units} unit(s) and {skills} skill(s) to {}{}",
-                    cfg.gateway,
-                    if not_enforced.is_empty() { String::new() } else { format!("; not enforced by this node: {}", not_enforced.join(", ")) }
-                );
-                0
-            }
-            Err(e) => {
-                println!("declare: {e}");
-                1
-            }
+        let tick = w.tick().await;
+        let code = match &tick {
+            Ok(Tick::Unchanged | Tick::Declared { .. }) => 0,
+            Ok(Tick::Refused { .. } | Tick::Rejected { .. }) | Err(_) => 1,
         };
+        print_event(&Event::Tick(&tick, w.handles().len()), &cfg.gateway, format);
         if !watch {
             return code;
         }
@@ -348,7 +418,7 @@ pub async fn run(cfg: WatchConfig, watch: bool, poll: Duration) -> i32 {
         tokio::select! {
             _ = tokio::time::sleep(wait) => {}
             _ = &mut ctrl_c => {
-                println!("retracting {} declaration(s)", w.handles().len());
+                print_event(&Event::Retracted(w.handles().len()), &cfg.gateway, format);
                 w.retract().await;
                 return 0;
             }
@@ -357,7 +427,7 @@ pub async fn run(cfg: WatchConfig, watch: bool, poll: Duration) -> i32 {
             && crate::sim_seam::mono_elapsed(&last_beat) >= every
         {
             if let Err(e) = w.heartbeat().await {
-                println!("heartbeat lost a declaration, declaring again at the next tick: {e}");
+                print_event(&Event::HeartbeatLost(&e), &cfg.gateway, format);
             }
             last_beat = crate::sim_seam::mono_instant();
         }
@@ -533,6 +603,41 @@ mod tests {
         assert!(w.handles().is_empty());
         agent.shutdown().await;
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Every event the command prints has a JSON line (identity-and-lifecycle N3) carrying the schema and the event's
+    /// facts — an unchanged tick prints nothing in either form — and the text form is the lines the command printed
+    /// before the JSON form existed.
+    #[test]
+    fn every_event_has_a_json_line_and_the_text_is_unchanged() {
+        use serde_json::json;
+        let gw = "http://127.0.0.1:8300";
+        let declared: Result<Tick, String> =
+            Ok(Tick::Declared { units: 2, skills: 1, not_enforced: vec!["mandate".into()], warnings: vec!["w1".into()] });
+        let refused: Result<Tick, String> = Ok(Tick::Refused { errors: 1, report: "error: x".into() });
+        let rejected: Result<Tick, String> = Ok(Tick::Rejected { unit: "a".into(), error: "403".into() });
+        let failed: Result<Tick, String> = Err("/gateway/units/declare: 401".into());
+        let unchanged: Result<Tick, String> = Ok(Tick::Unchanged);
+        let cases: Vec<(Event<'_>, Option<serde_json::Value>, Option<&str>)> = vec![
+            (Event::Tick(&declared, 2), Some(json!({ "schema": DECLARE_SCHEMA, "event": "declared", "gateway": gw, "units": 2, "skills": 1, "not_enforced": ["mandate"], "warnings": ["w1"] })),
+             Some("warning: w1\ndeclared 2 unit(s) and 1 skill(s) to http://127.0.0.1:8300; not enforced by this node: mandate")),
+            (Event::Tick(&refused, 0), Some(json!({ "schema": DECLARE_SCHEMA, "event": "refused", "errors": 1, "report": "error: x", "previous_stands": false })),
+             Some("error: x\nrefused: wire-check found 1 error(s); this run declared nothing")),
+            (Event::Tick(&refused, 1), Some(json!({ "schema": DECLARE_SCHEMA, "event": "refused", "errors": 1, "report": "error: x", "previous_stands": true })),
+             Some("error: x\nrefused: wire-check found 1 error(s); the previous declaration stands")),
+            (Event::Tick(&rejected, 1), Some(json!({ "schema": DECLARE_SCHEMA, "event": "rejected", "unit": "a", "error": "403" })),
+             Some("rejected: the gateway refused unit `a` — 403; its previous declaration was put back, the others stand")),
+            (Event::Tick(&failed, 0), Some(json!({ "schema": DECLARE_SCHEMA, "event": "error", "error": "/gateway/units/declare: 401" })),
+             Some("declare: /gateway/units/declare: 401")),
+            (Event::HeartbeatLost("a: 404"), Some(json!({ "schema": DECLARE_SCHEMA, "event": "heartbeat_lost", "error": "a: 404" })),
+             Some("heartbeat lost a declaration, declaring again at the next tick: a: 404")),
+            (Event::Retracted(3), Some(json!({ "schema": DECLARE_SCHEMA, "event": "retracted", "declarations": 3 })), Some("retracting 3 declaration(s)")),
+            (Event::Tick(&unchanged, 1), None, None),
+        ];
+        for (event, want_json, want_text) in cases {
+            assert_eq!(event_json(&event, gw), want_json, "{event:?}");
+            assert_eq!(event_text(&event, gw).as_deref(), want_text, "{event:?}");
+        }
     }
 
     /// The wrong token is an error naming the route and the status, not a silent nothing.
