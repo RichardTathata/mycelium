@@ -19,8 +19,8 @@ a cluster is emergent from network reachability (peer-exchange + CA admission �
 **Current release:** **v2.40.0 released 2026-11-12** (tag `v2.40.0` — a MINOR: **identity and lifecycle wave 1a** (`docs/plans/identity-and-lifecycle.md` §8, every row closed on evidence): **I0** `[authority]` — a node's evaluator, execution authority, provider enforcement and evidence journal from its declaration, so a `mycelium` binary with the `[authority]` table set enforces at its doors (without the table nothing changes, §83); **I1** client certificates for services (`mycelium tls issue --client`, `mycelium-client://` refused at the mesh, `sys/client-cert/`), a client's own `cs`/`cn` signature checked at the door and the provider, grants held by a client principal, the SDKs' `McpClient` and `ClientSigner`; **I3** the RFC 8785 arguments digest in Rust, Python and TypeScript (the older digest honoured for one release) and signed grant decisions relayed under `grant:relay`; **I5** an OIDC user's token exchanged at the gateway (RFC 8693, DPoP-bound) and verified at the provider, gated against Keycloak in CI — and **R5–R9 of the external code security review of 2026-10-31** (`docs/plans/external-review-2026-10-31.md`: the gateway closes a silent connection and caps how many it serves, a journal syncs its directory before its first acknowledged record, bulk under `gateway_tls` with a payload cap, a replica-sync answer `Failed` while a record is between apply and append, the audit failing on an unaccepted warning); the feature pages F3 and F4 (`docs/plans/feature-pages.md` — every registry feature has a page, audited); RUSTSEC-2026-0459 (SQLite, `mycelium-effects`) and -0486 (`rustix`), neither reachable from a shipped binary; the published stem built with `compliance`, and the node's `gateway_a2a` and `gateway_a2a_default_skill` serving A2A from configuration (the stem refuses `gateway_a2a`, §92); stale advertisements skipped by every reader; the Rust ecosystem watch. Companions `mycelium-py` 0.2.15, `mycelium-ts` 0.2.9, `mycelium-reason` 0.11.1, `mycelium-guardrails` 1.1.1. Wire **v12** unchanged. **Upgrade notes:** `deprecations.md` §78–§98 — the reference evaluator decides the `requires_values` rules it left `Indeterminate`, so check each (§98); `GossipConfig` gained `gateway_max_connections`, `max_bulk_payload_bytes`, `authority`, `gateway_a2a` and `gateway_a2a_default_skill`, `GatewayTlsConfig` `bulk_ca_pem_path`, and `OidcConfig` five `exchange_*` fields; Tokio 1.53.3 is every manifest's floor; `mycelium-effects` moves to `rusqlite` 0.41; `ExecutionAuthority::new` and its siblings take a shared issuer set; upgrade every node before issuing a client certificate, and verifiers before binders for the digest).
 
 **Earlier releases are not repeated here.** Each release, back to v2.0 (complete 2026-06-21, all 16 milestones), is in
-`CHANGELOG.md` and the delivery ledger [dev/history](docs/wiki/dev/history.md); each release's upgrade notes are in
-`docs/guide/deprecations.md`. At a release, **replace** the paragraph above; do not append to it (`RELEASING.md` § 6).
+`CHANGELOG.md` and the delivery ledger [dev/history](docs/wiki/dev/history.md); each release's upgrade notes and
+*Check:* lines are in `CHANGELOG.md`, and the deprecations and behaviour changes in `docs/guide/deprecations.md`. At a release, **replace** the paragraph above; do not append to it (`RELEASING.md` § 6).
 
 Wire **v12** (`PREV = 11`). Scopes are **`Cluster · Group · Individual`** (all / subset / one),
 shared by `SignalScope` and consensus (`cluster_propose` / `group_propose`). *Renamed 2026-07-10:*
@@ -170,16 +170,19 @@ is the state of play).
 - **Wave 2 (one MINOR), the developer surface:** N1 and N3–N7 (N7 the Orca plugin). N3 (`--format json`) is delivered,
   unreleased (#767); N5 needs nothing from wave 1; N4's identity half and N7 wait on I7. The examples and records
   E1–E6.
-- **Open items the plan tracks (§9):** O2, a reply to a restarted peer is lost (#746); #753, a bounded retry for
-  `unknown_signer`; O3, O5 and O6, counters that become refusals one release after they ship.
+- **Open items the plan tracks (§9):** O2, a reply to a restarted peer is lost (#746); O3, O5 and O6, counters that
+  become refusals one release after they ship. Beside them, issue #753: a bounded retry for `unknown_signer`
+  (`docs/operations/what-is-proven.md`).
 
-**Open elsewhere, none of it a code gate a commit can close alone:**
+**Open elsewhere:**
 - **Adopter surface:** Y9 is paused until a cloud credential is held; each row's stated *not built* items are in the
   plan's §8.
 - **Post-360 hardening:** the *not built* items and the known flakes, `docs/plans/post-360-hardening.md` §3.6.
-- **Contracts axis:** V1, the nightly scale runner whose self-hosted box is offline, so its criterion has never been
+- **Contracts axis, not code gates** (each needs a machine, a counterparty or a credential, not a commit): V1, the nightly scale runner whose self-hosted box is offline, so its criterion has never been
   met; AE4's four joint AWS/GCP runs, which need the counterparty; S4, real object-store buckets, which need
   credentials.
+- **Design-time tooling:** Q4, and Q5's cross-language golden vectors (`docs/plans/README.md`); the artifact
+  library's crate-naming question (`docs/design/artifact-library.md`).
 - **The Rust ecosystem watch:** `docs/plans/rust-ecosystem-watch.md`, reviewed monthly; W1 (build provenance) is
   ready to become a plan row.
 - **Research track:** the three-arm work-distribution experiment (Paper 1) and the monetary-ecology article revision
