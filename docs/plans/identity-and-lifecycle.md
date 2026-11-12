@@ -1,6 +1,6 @@
 # Identity and lifecycle — keyed principals, signed decisions, cancellation under a per-call mandate, and the developer surface
 
-**Status:** **agreed with the maintainer on 2026-11-07**, rev 0.15 (rev 0.15, 2026-11-12, writes row I7 from spike S-presence's note, `docs/plans/spikes/2026-11-07-s-presence.md`, and its maintainer's run of 2026-11-09: the four questions the stub left to the spike answered with what it settled — the fleet CA can certify a P-256 Enclave key and `ring` verifies it, the release pipeline cannot produce a signed bundle, Windows was not run so D7's `tty` stands, and presence is not attested to the verifier, so an `os_presence` grade is an enrolment claim — where the evidence and D7 disagree stated, every verifier a client key reaches enumerated, and I7 **not yet buildable: P1–P6 open**, the maintainer's; rev 0.14, 2026-11-12, records wave 1a — I0, I1, I3 and I5 — released in v2.40.0; rev 0.13, 2026-11-11, closes I5 on evidence across #757, #759 and its PR 2, with the decision that a gateway exchanges only for an action recorded on the row; rev 0.12, 2026-11-11, records #759's review on I5's provider half: the check's order restated and pinned, its clocks read at the receive boundary's instant, one OIDC verifier per node, the replay window keyed across gateways, `typ` and two start-time refusals, and the maintainer's decision that a hosted capability's invoke needs an `ot`; rev 0.11 records the maintainer's four I5 decisions of 2026-11-11 and spike S-exchange's note, `docs/plans/spikes/2026-11-11-s-exchange.md`: the gateway exchanges under its own client credential, `oidc.exchange_audience` is an explicit setting both ends read, the envelope cap stays at 8 KiB; after #757's review, the maintainer's decision to extend the spike to sender binding, and the row rewritten to it: the exchanged token is DPoP-bound to the gateway's Ed25519 node key (Keycloak 26.8.2, default features), the provider refuses a token not bound to the key that signed its envelope, and replay rests on that and the token's `jti` admitted once; rows I2 and I4 are **not yet buildable**: I2's **R1–R4 open**, the round-3 review's questions, and I4's **N1–N5 open**, the round-2 review's questions, which each row's build PR must settle; rev 0.10 writes row I4 from spike S-cancel's note, `docs/plans/spikes/2026-11-07-s-cancel.md`, and takes #731's review and its confirm round: S-cancel re-measured, its reclamation fixed for the feeder, and I4's exit given an item for every D2 decision; rev 0.9 writes row I2 from spike S-succeed's note, `spikes/2026-11-07-s-succeed.md`, and #732's review: a `cert_pem` node re-roots live, the trust set and the successor certificate persist under `succession/`, every cached judgment is re-judged when the roots change, and old-CA records lose standing (decided in the confirm round); rev 0.8 records the agreement, its text rev 0.7's); proposed 2026-10-31. Work starts in §4's order: wave 1a's I0 and wave 1b's spikes in parallel. Five independent adversarial reviews —
+**Status:** **agreed with the maintainer on 2026-11-07**, rev 0.16 (rev 0.16, 2026-11-12, takes #764's review (M1–M6, L1–L9) and records the maintainer's decisions on I7 of the same day: P2 a fleet-certified P-256 consent key verified at `grant_decision::verify` only, issued over its public key with the CA off-node; P3 the CryptoKit blob path, no signed bundle; P1 `os_presence(macos, unbound)`, an enrolment claim no verifier can check; P4 the grade on the consent record, D7's three plus `service`; P5 a residual; P6 I1's supersession with every node upgraded first — I7 **buildable on macOS**, its `tty` half waiting on P7 (the key a `tty` consent signs with); D7's *Revised from* and N7 follow; rev 0.15, 2026-11-12, writes row I7 from spike S-presence's note, `docs/plans/spikes/2026-11-07-s-presence.md`, and its maintainer's run of 2026-11-09: the four questions the stub left to the spike answered with what it settled — the fleet CA can certify a P-256 Enclave key and `ring` verifies it, the release pipeline cannot produce a signed bundle, Windows was not run so D7's `tty` stands, and presence is not attested to the verifier, so an `os_presence` grade is an enrolment claim — where the evidence and D7 disagree stated, every verifier a client key reaches enumerated, and I7 **not yet buildable: P1–P6 open**, the maintainer's; rev 0.14, 2026-11-12, records wave 1a — I0, I1, I3 and I5 — released in v2.40.0; rev 0.13, 2026-11-11, closes I5 on evidence across #757, #759 and its PR 2, with the decision that a gateway exchanges only for an action recorded on the row; rev 0.12, 2026-11-11, records #759's review on I5's provider half: the check's order restated and pinned, its clocks read at the receive boundary's instant, one OIDC verifier per node, the replay window keyed across gateways, `typ` and two start-time refusals, and the maintainer's decision that a hosted capability's invoke needs an `ot`; rev 0.11 records the maintainer's four I5 decisions of 2026-11-11 and spike S-exchange's note, `docs/plans/spikes/2026-11-11-s-exchange.md`: the gateway exchanges under its own client credential, `oidc.exchange_audience` is an explicit setting both ends read, the envelope cap stays at 8 KiB; after #757's review, the maintainer's decision to extend the spike to sender binding, and the row rewritten to it: the exchanged token is DPoP-bound to the gateway's Ed25519 node key (Keycloak 26.8.2, default features), the provider refuses a token not bound to the key that signed its envelope, and replay rests on that and the token's `jti` admitted once; rows I2 and I4 are **not yet buildable**: I2's **R1–R4 open**, the round-3 review's questions, and I4's **N1–N5 open**, the round-2 review's questions, which each row's build PR must settle; rev 0.10 writes row I4 from spike S-cancel's note, `docs/plans/spikes/2026-11-07-s-cancel.md`, and takes #731's review and its confirm round: S-cancel re-measured, its reclamation fixed for the feeder, and I4's exit given an item for every D2 decision; rev 0.9 writes row I2 from spike S-succeed's note, `spikes/2026-11-07-s-succeed.md`, and #732's review: a `cert_pem` node re-roots live, the trust set and the successor certificate persist under `succession/`, every cached judgment is re-judged when the roots change, and old-CA records lose standing (decided in the confirm round); rev 0.8 records the agreement, its text rev 0.7's); proposed 2026-10-31. Work starts in §4's order: wave 1a's I0 and wave 1b's spikes in parallel. Five independent adversarial reviews —
 four on one day, the fifth on the merged document (#715's thread, 2026-11-05; the thread, this paragraph and the *Revised
 from* column are the record of all five): rev 0.1 against the decisions, rev 0.3 against the mechanisms, rev 0.4 and rev 0.5 each against five
 premises, both with the verdict *not yet buildable*. Every premise failure sat in wave 1 (I0–I4) or in the developer
@@ -73,7 +73,7 @@ Each option was weighed for soundness, not for the size of the change (the maint
 | **D4** | **CA succession is a pre-committed successor, acted on once and persisted — the row is written after the spike S-succeed.** Decided: `ca-commit.pem`, `tls commit`, a successor-signed record with the window's end inside it, act-once-persist, the KV shadow counted. Settled by spike: **whether a node on `cert_pem` can take a successor-issued certificate without a restart** (no reload path exists; `generate_rotation_after` needs `ca-key.pem`, which the secure profile forbids) — if not, the exit is one restart per node inside the window, and the row says so. | — | rev 0.5's exit "without a node restart" had no path. |
 | **D5** | **A relay carries a signed decision under `grant:relay`**; an older gateway accepts the scope silently and it admits nothing. | — | unchanged. |
 | **D6** | **Key-less principals keep read scopes and `grant:relay` after the window and lose action scopes** — `oidc:`, `anonymous`, the legacy `*` token — at `/mcp`, the KV routes and `/a2a`; OIDC returns by **token exchange** (I5) where the IdP supports it. | — | unchanged. |
-| **D7** | **The consent primitive is an OS user-presence check whose result the repository verifies, graded on the record — the mechanism is settled by the spike S-presence (I7).** What the fourth review established from Apple's and Microsoft's documentation: a Secure Enclave key is **P-256**, reachable only from a **team-signed bundle with a provisioning profile** (a plain `cargo build` binary cannot use it, and the release pipeline builds plain binaries); the ACL cannot be read back, so the check is a negative probe (`interactionNotAllowed` must fail) plus `kSecAttrTokenIDSecureEnclave` and the enrolled public key compared on every use; `biometryCurrentSet` removes the typed-password leg; a fresh `LAContext` per approval. **Windows Hello keys are user+device scoped** — a same-user process that knows the credential name can request a signature — so Windows grades **no higher than `tty`** until shown otherwise. The grade on the record: `os_presence(macos)` · `tty` (Linux, Windows) · `recording` (a `sim` test build). | the rule "a check no co-resident process can satisfy, whose result we verify"; where none exists the record says so. | rev 0.5 assumed an Ed25519 key, a readable ACL and a Windows primitive. |
+| **D7** | **The consent primitive is an OS user-presence check whose result the repository verifies, graded on the record — the mechanism is settled by the spike S-presence (I7).** What the fourth review established from Apple's and Microsoft's documentation: a Secure Enclave key is **P-256**, reachable only from a **team-signed bundle with a provisioning profile** (a plain `cargo build` binary cannot use it, and the release pipeline builds plain binaries); the ACL cannot be read back, so the check is a negative probe (`interactionNotAllowed` must fail) plus `kSecAttrTokenIDSecureEnclave` and the enrolled public key compared on every use; `biometryCurrentSet` removes the typed-password leg; a fresh `LAContext` per approval. **Windows Hello keys are user+device scoped** — a same-user process that knows the credential name can request a signature — so Windows grades **no higher than `tty`** until shown otherwise. The grade on the record: `os_presence(macos)` · `tty` (Linux, Windows) · `recording` (a `sim` test build). | the rule "a check no co-resident process can satisfy, whose result we verify"; where none exists the record says so. | rev 0.5 assumed an Ed25519 key, a readable ACL and a Windows primitive. Rev 0.16 (the maintainer, 2026-11-12, from S-presence): the key is reached through a CryptoKit blob, not a team-signed bundle, and the macOS grade is `os_presence(macos, unbound)`, an enrolment claim no verifier can check — I7. |
 | **D8** *(rev 0.6)* | **Wave 1 is split: 1a is built from this plan; 1b's rows are written from their spikes.** Four reviews found every premise failure three levels down in `tls.rs`, `gateway_authority.rs` and `provider_enforcement.rs`, where a document cannot see; the policy says rows close on evidence, and 1b's evidence is code. A spike is a day's work on a branch, kept or discarded, whose result (what ran, what it cost, what it could not do) is quoted in the row it settles. | the maintainer's standing rule: after ~3 rounds whose findings sit in review-added mechanisms, simplify and ship. | new. |
 
 **A re-decision recorded.** [`adopter-surface.md`](adopter-surface.md) line 52 decided a task API "belongs in a companion
@@ -804,221 +804,263 @@ under the successor; `rotate_identity` still cannot run on the off-node posture.
 - a `[gateway_tls]` gateway on its own certificate, which is outside the fleet CA and unchanged;
 - rotation in place on the off-node posture.
 
-#### I7 · The developer's identity — *written from S-presence ([note](spikes/2026-11-07-s-presence.md), 2026-11-07, its done-when met by the maintainer's run of 2026-11-09; evidence at tag `spike/s-presence-2026-11-07`) — **not yet buildable: P1–P6 open*** (D7)
+#### I7 · The developer's identity — *written from S-presence ([note](spikes/2026-11-07-s-presence.md), 2026-11-07; its recorded run at tag `spike/s-presence-2026-11-07`, the positive Touch ID path in the note's maintainer's run of 2026-11-09) — **buildable on macOS (the maintainer's decisions of 2026-11-12); the `tty` half waits on P7*** (D7)
 
-Decided (D7 and the stub this row replaces): the consent primitive is an OS user-presence check, graded on the record;
-the grades are `os_presence(macos)` · `tty` (Linux, Windows) · `recording` (a `sim` test build); Windows grades **no
-higher than `tty`** until shown otherwise; the key never touches the worktree; `signed_with` *(new)* on the record; the
-prompt renders from the fleet's record by id; a bounded request queue (`busy`). D1 leaves the developer's key out of
-the fleet-certificate decision ("it is I7's question, settled by spike"). N4's identity half and N7 wait on this row;
-N4's fleet and wiring halves do not.
+**Decided before the spike** (D7 and the stub this row replaces):
+- The consent primitive is **an OS user-presence check whose result the repository verifies, graded on the record**.
+- D7's mechanics: a Secure Enclave key (`kSecAttrTokenIDSecureEnclave`), a negative probe (`interactionNotAllowed` must
+  fail), the enrolled public key compared on every use, `biometryCurrentSet`, and a fresh `LAContext` per approval.
+- D7's grades: `os_presence(macos)` · `tty` (Linux, Windows) · `recording` (a `sim` test build). Windows grades no
+  higher than `tty` until shown otherwise.
+- From the stub: the key never touches the worktree; `signed_with` *(new)* graded on the record; the prompt renders
+  from the fleet's record by id; a bounded request queue (`busy`).
+- D1 left the developer's key out of the fleet-certificate decision: "it is I7's question, settled by spike".
 
-**From the spike** ([S-presence's note](spikes/2026-11-07-s-presence.md)). The evidence is the tag
-`spike/s-presence-2026-11-07` (`0aaa51f6`, never merged): `probe.swift`, `blob.swift`, the `verify/` crate on the
-lockfile's `ring` 0.17.14, `rcgen` 0.13.2 and `rustls-webpki` 0.103.16, and `run.sh.out`, the recorded run. The
-machine: macOS 26.6.2, Apple M2 Max, Touch ID enrolled, **no code-signing identity and no provisioning profile**
-(`security find-identity`: `0 valid identities found`), both probes `adhoc,linker-signed`. **What ran is `swiftc`
-binaries only**: "No `cargo build` binary touched the Secure Enclave." The four questions the stub left to the spike,
-each with what it settled:
+N4's identity half and N7 wait on this row; N4's fleet and wiring halves do not.
 
-1. **The signer: a P-256 fleet certificate, or a locally-trusted signer with its own verifier.** What the spike
-   settled is the facts the choice rests on, not the choice:
+**From the spike** ([S-presence's note](spikes/2026-11-07-s-presence.md)). **The evidence is split.**
+- **The tag `spike/s-presence-2026-11-07`** (`0aaa51f6`, never merged) holds `probe.swift`, `blob.swift`, the
+  `verify/` crate, `keys.sh` and `run.sh.out`, the recorded run. That run raised no prompt.
+- **The positive path is in the note only.** The maintainer ran it on 2026-11-09 from a worktree of the tag, and the
+  note quotes its output. Nothing at the tag records it.
+
+The machine: macOS 26.6.2, Apple M2 Max, Touch ID enrolled. It has no code-signing identity and no provisioning
+profile (`0 valid identities found`), and both probes are `adhoc,linker-signed`. "No `cargo build` binary touched the
+Secure Enclave."
+
+The stub left the spike **three questions**: the signer, the signed bundle and Windows's grade. `signed_with` was
+already decided; the spike bears on what a grade can rest on.
+
+1. **The signer.**
    - **The fleet CA can certify an Enclave key, with nothing new in the tree.** "`rcgen` 0.13's public
      `PublicKeyData` trait, implemented over the bare point with `PKCS_ECDSA_P256_SHA256`, lets an **Ed25519** CA issue
-     a client-auth leaf over the Enclave key without its private half. `webpki` verifies the chain Ed25519 CA → P-256
-     leaf and verifies the Enclave signature against the leaf's key" (row 6; again in the maintainer's run:
-     `webpki.chain_ed25519_ca_to_p256_leaf Ok("ok")`, `webpki.verify_se_signature Ok("ok")`). One P-256 verifier is
-     `ring::signature::ECDSA_P256_SHA256_ASN1`, already a direct dependency of `mycelium-core` under `tls` (row 5).
-   - **It can never be a mesh identity.** "`refuse_if_removed` fails closed on any certificate without an Ed25519 key
-     … A Secure Enclave key can be a fleet-certified *consent* key, never a mesh identity" (row 7, read from the code,
-     not run). A client certificate is already refused at the mesh by its scheme (I1), so nothing changes there.
-   - **What "a second algorithm through every verifier" costs:** 66 fn parameters typed `&[u8; 32]` or `&[[u8; 32]]`,
-     33 of them keys; 1 parameter and 18 mentions of `[u8; 64]`; 11 `VerifyingKey::from_bytes` and 11
-     `Signature::from_bytes`/`from_slice` (row 8, an undercount by multi-line parameter lists). The client-key surface
-     is far narrower — the verifiers listed under *Enumerate* below.
-   - The note's own reading: "The narrower choice is a fleet-certified P-256 *consent* key read by one verifier where
-     a consent record is checked … The spike supports that choice; it does not decide it." **P2.**
-2. **Whether `dev` can ship as a signed bundle: no, as the pipeline stands.** "The `macos` job runs `cargo build
-   --release` and tars the binaries. It has no `codesign`, no notarization, no `.app` wrapper … and no signing secret"
-   (row 9). Producing one "would need the maintainer's Apple Developer team". **But D7's premise that a bundle is
-   needed holds only for a key stored in the keychain** (note, *What it means*, point 1): storing an Enclave key there
-   was refused `-34018` (`errSecMissingEntitlement`) from both keychains (row 3), while an ad-hoc binary reached the
-   Enclave and its presence gate through a CryptoKit `dataRepresentation` blob written to a file (rows 1, 2, 4). That
-   path needs no signing change, and does need a Rust↔CryptoKit bridge — "`dataRepresentation` exists only in
-   CryptoKit, which is Swift-only … that puts Swift into `dev`'s build and into the release's `macos` job" — which is
-   **not built**. **P3.**
-3. **Windows's grade: not settled by the spike — "Windows, whose grade D7 sets at `tty` until shown otherwise" was
-   not run.** D7's grade stands: `tty`. D7's vocabulary has no `os_presence(windows)`; this row adds none, and
-   showing Windows otherwise is *not built*.
-4. **`signed_with` graded on the record.** The spike settles what a grade can rest on: **"A verifier holding only the
-   public key cannot tell what kind of key signed"** — a `biometryCurrentSet` Enclave key, an Enclave key with no
-   presence flag and a software P-256 key verify alike (rows 5 and 6 verified the no-presence keys "exactly as a
-   presence key would verify"). So "an `os_presence(...)` grade on a record is **self-asserted by whatever enrolled
-   the key**", and no attestation of a key's access control is open to an unmanaged ad-hoc binary ("App Attest needs a
-   team-signed app and Apple's servers; Managed Device Attestation needs MDM; and neither attests the presence flag").
-   A team-signed `dev` "would change **who can use** a keychain-stored key … It would **not**, by itself, let the
-   verifier check that the key requires presence." The grade names are D7's; what an `os_presence(macos)` on the record
-   *means* is **P1**, and where the grade comes from is **P4**.
+     a client-auth leaf over the Enclave key without its private half" (row 6). The maintainer's run shows the same:
+     `webpki.chain_ed25519_ca_to_p256_leaf Ok("ok")` and `webpki.verify_se_signature Ok("ok")`.
+   - **`ring` can verify it.** `ring::signature::ECDSA_P256_SHA256_ASN1` is already a direct dependency of
+     `mycelium-core` under `tls` (row 5).
+   - **It can never be a mesh identity.** Row 7 reads this from the code; it was not run.
+     - Both mesh verifiers call `refuse_if_removed` **before** the client-scheme check (`refuse_if_client`), at
+       `mycelium-core/src/tls.rs:1357–1358` (client side) and `:1402–1403` (server side).
+     - `refuse_if_removed` fails closed on a certificate without an Ed25519 key: "a mesh certificate must carry an
+       Ed25519 identity key" (`:1264`).
+     - So a P-256 client certificate is refused for its key, and never reaches the scheme refusal.
+   - **What a second algorithm through every verifier would cost.** Row 8 counted tree `64fb5096`, before I1. The same
+     `keys.sh` at `d974fc76` gives:
+     - 73 fn parameters typed `&[u8; 32]` or `&[[u8; 32]]`, 37 of them a parameter whose **name** is `key`, `keys`,
+       `verifying_key(s)` or `pub_key_bytes`;
+     - 1 parameter typed `[u8; 64]` and 22 `[u8; 64]` mentions;
+     - 11 `VerifyingKey::from_bytes`, and 11 `Signature::from_bytes` or `from_slice`.
 
-**What the positive path showed (the maintainer's run, 2026-11-09).** `blob create`, then `blob sign-interactive`
-raised the Touch ID prompt; "only then was `out.txt` written", and `ring.verify Ok("ok")`,
-`ring.verify_tampered_msg Err(Unspecified)`. A second approval in a second process signed and verified. A dismissed
-prompt yields no signature (`com.apple.LocalAuthentication Code=-2 "Canceled by user."`). The prompt offered no "Use
-Password…" option. Without a prompt, a presence-gated key's signature fails `-1004 "User interaction required."` under
-`interactionNotAllowed` — the ephemeral key (row 2) and the restored blob in a new process (row 4) alike; a blob with a
-byte flipped is "accepted at construction and refused at signing" (`CryptoTokenKit -3`). **The prompt is the
-maintainer's report**: "the binary has no way to record that a prompt was shown."
+     These count `file:line`s, not uses: a line holding two counts once, and a parameter list spanning lines is missed.
+2. **A signed bundle: no, as the pipeline stands.** "The `macos` job runs `cargo build --release` and tars the
+   binaries. It has no `codesign`, no notarization, no `.app` wrapper … and no signing secret" (row 9).
+   - **D7's premise that a bundle is needed holds only for a key stored in the keychain.** Both keychains refused the
+     store with `-34018` (`errSecMissingEntitlement`, row 3).
+   - **An ad-hoc binary reached the Enclave regardless.** Rows 1 and 2 used an **ephemeral** key, never stored:
+     created, signed, then refused `-1004` without interaction.
+   - **Only row 4 is the blob.** CryptoKit's `dataRepresentation` was written to a file. It restored in a new process,
+     where signing still needed presence.
+   - **The bridge is missing.** "`dataRepresentation` exists only in CryptoKit, which is Swift-only." A Rust `dev`
+     therefore needs a Swift shim, which is not built.
+3. **Windows's grade: the spike did not run Windows.** D7's `tty` stands.
 
-**Where the spike's evidence and D7 disagree — stated, not resolved.**
-- D7: a Secure Enclave key is "reachable only from a **team-signed bundle with a provisioning profile**". The spike:
-  true of a keychain-stored key (row 3); an ad-hoc binary reached the Enclave through a blob (rows 1, 2, 4). → P3.
-- D7's rule: "a check no co-resident process can satisfy, **whose result we verify**". The spike: the verifier cannot
-  verify presence; the grade is an enrolment claim. And on the blob path a same-user process can read the blob and
-  ask the Enclave for a signature — "It cannot produce one without the user's finger" — while "it chooses the prompt
-  text (`localizedReason`, under its own process name), so the presence proves a person was there, not what they were
-  shown." The decided item *the prompt renders from the fleet's record by id* holds for `dev`'s own prompt only. → P1,
-  P5.
-- D7: "the ACL cannot be read back, so the check is a negative probe … plus `kSecAttrTokenIDSecureEnclave` and the
-  enrolled public key compared on every use". The spike: the keychain-side negative probe "never ran" (nothing was
-  stored); the negative probe ran on the ephemeral key and the blob; "No probe compared a stored public key on use."
-- The spike row's *done when*: "if no, I7 falls back to `tty` everywhere, graded". The pipeline answer is no, yet the
-  blob path needs no bundle (note, point 4; its point 5 proposes a grade such as `os_presence(macos, unbound)`,
-  "a proposal, not a spike result"). Whether the fallback applies is P1 and P3 together.
-- E1 names a grade `signed_with = service`, which D7's list does not have. → P4.
+**What a grade can rest on.** "A verifier holding only the public key cannot tell what kind of key signed." A
+`biometryCurrentSet` Enclave key, an Enclave key with no presence flag and a software P-256 key verify alike. So "an
+`os_presence(...)` grade on a record is **self-asserted by whatever enrolled the key**". No attestation of a key's
+access control is open to an unmanaged ad-hoc binary.
 
-**Open before build (the maintainer's).** The build PR cannot start until P1–P3 are decided; P4–P6 are settled with
-it, each with its exit.
-- **P1 (high): is any `os_presence` grade worth having when a verifier cannot check it?**
-  - *Evidence:* "presence is not attested to the verifier" (note, its main section); a same-user process that controls
-    enrolment "can enrol a silent key", and "a developer who wants unattended approvals can do the same".
-  - *The choices the evidence leaves:* `os_presence(macos)` recorded and documented as an **enrolment claim**; a
-    distinct grade naming the claim (the note's `os_presence(macos, unbound)`); or `tty` everywhere, the spike row's
-    fallback. D7 decides the names and the rule, and the rule is the one the evidence does not meet.
-  - *Exit needed:* the grade's documented meaning matches what the verifier checks, on the feature page and in the
-    record's rustdoc, and N7's card shows that meaning.
-- **P2 (high): the signer.**
-  - *Evidence:* rows 5–8 above; D1's "the developer's key is not a fleet certificate in this plan".
-  - *The choices:* (a) a fleet-certified P-256 **consent** key, read by one P-256 verifier at the places a consent
-    record is checked (the note's narrower choice); (b) P-256 through every verifier, gated (the stub's first option),
-    with row 8's surface; (c) a locally-trusted signer with its own verifier, outside the fleet CA. (a) reuses I1's
-    publication door, fold and supersession; (c) needs its own trust anchor, revocation and re-enrolment.
-  - *Exit needed:* the chosen signer's key verifies at every verifier listed under *Enumerate* that reads a
-    developer's signature, and is refused at every one that must not (the mesh, a node's identity, a removal's
-    authority, a mandate issuer's configured keys).
-- **P3 (high): the macOS path — a team-signed bundle, the blob path, or neither.**
-  - *Evidence:* row 9 (no bundle today), row 3 (a keychain key needs the entitlement), rows 1, 2, 4 (the blob path
-    works ad-hoc), the bridge not built, and "a `cargo build` binary reaches the Enclave" **not run**.
-  - *The choices:* the maintainer's Apple Developer team, with `codesign`, a profile, an `.app` wrapper and
-    notarization added to `release.yml`'s `macos` job ("Whether a free personal team suffices is not known"); the
-    blob path, with a Swift shim or helper binary in `dev`'s build and that job; or `tty` on macOS too.
-  - *Exit needed:* whichever is chosen produces a signature only after the prompt from a binary the release pipeline
-    built, not a `swiftc` probe.
-- **P4: where `signed_with` comes from, and its vocabulary.**
-  - *Evidence:* the grade is "self-asserted by whatever enrolled the key", so it can be carried by the enrolment (on
-    the certificate, or on the record the publication door writes, under the fleet CA's or the operator's authority)
-    or asserted in each signed decision; a signed decision today carries no grade (`SignedDecision`,
-    `src/agent/grant_decision.rs`), and I3's decision record names the decider and nothing about the key.
-  - *Also:* `service` (E1) beside D7's three grades; and whether a grade is ever upgraded by the signer's own claim.
-  - *Exit needed:* a decision signed by a key enrolled at one grade is recorded at that grade, and a decision body
-    claiming a higher one is refused or recorded at the enrolled grade, as decided.
-- **P5: the prompt a co-resident process chooses.**
-  - *Evidence:* the blob path gap above. A blob written 0600 in a 0700 directory ("I7 should write the blob 0600 in a
-    0700 directory either way") narrows the readers to the user's own processes; user binding across macOS users was
-    **not tested**.
-  - *The question:* whether presence that proves "a person was there, not what they were shown" is enough for a
-    consent grade, or the grade waits on a path where only `dev` can request the signature (P3's team-signed path
-    restricts **who can use** a keychain key to the team's access group).
-- **P6: re-enrolment.**
-  - *Evidence:* inferred, not tested: "a lost blob, a new Mac, or an invalidated enrolment loses the key, so
-    re-enrolment is a required flow for I7"; device binding is "inferred from Apple's documentation, not tested".
-  - *The question:* under P2 (a), I1's supersession by re-issue applies (a newer certificate raises the principal's
-    mark); under (c), the row has to build its own. Which, and whether an added fingerprint invalidating the key
-    (`biometryCurrentSet`) is a re-enrolment the developer sees by name.
+**The positive path** (the note's maintainer's run of 2026-11-09, not at the tag):
+- `blob sign-interactive` raised the Touch ID prompt, and "only then was `out.txt` written"; `ring.verify` returned
+  `Ok("ok")` and the tampered message `Err(Unspecified)`.
+- A second approval in a **second process** signed and verified.
+- A dismissed prompt yielded no signature (`Code=-2 "Canceled by user."`).
+- The prompt offered no "Use Password…".
+- "The binary has no way to record that a prompt was shown."
 
-**Evidence still to run** (needing a person or a team identity; the build PR runs what its P-answers depend on, and
-states the rest as *not run*): two approvals in one process, each with its own prompt ("written into
-`sign-interactive` and exercised for **one** approval"); the added-fingerprint leg; a passcode reaching the key by
-another route; user binding with a second macOS user; device binding; the enrolled public key compared on use; a
-`cargo build` binary reaching the Enclave; a keychain-stored key in an access group, an embedded profile,
-notarization, and whether Gatekeeper passes a quarantined ad-hoc tarball; Windows.
+**Where the evidence and D7 disagree, and what the maintainer decided (2026-11-12).** D7's text in §2 is unchanged.
+This row records the decisions that depart from it, and §2's D7 *Revised from* cell points here.
+- **D7's bundle premise.** The evidence: true of keychain keys only. **Decided (P3): the CryptoKit blob path**, with
+  no Apple Developer team. The signed bundle is not built.
+- **D7's rule, "whose result the repository verifies".** The evidence: the presence flag cannot be verified.
+  **Decided (P1): the macOS grade is `os_presence(macos, unbound)`, an enrolment claim**, documented as one that no
+  verifier can check. The rule is met for what is verified: the signature, the consent key's fleet certificate and its
+  standing. It is not met for presence, and the record and the feature page say so.
+- **D7's mechanics on the blob path.**
+  - `kSecAttrTokenIDSecureEnclave` and its read-back are the Security framework's. The blob path creates the key
+    through `SecureEnclave.P256.Signing.PrivateKey(accessControl:)`, which is Enclave-only.
+  - The negative probe ran on the ephemeral key (row 2) and on the restored blob (row 4). The keychain-side probe
+    "never ran", and it is moot on this path.
+  - "No probe compared a stored public key on use": the row builds the comparison (exit 3).
+  - A fresh `LAContext` per approval was "exercised for **one** approval" only: exit 4 runs two in one process.
 
-**What (independent of P1–P6, from the decided items):**
-- `signed_with` *(new)* on the signed decision's record (I3's): one of D7's grades, never absent on a decision a
-  developer key signed; a decision made under a service's client key (I1) carries the service grade P4 names.
-- The key, or the blob, outside the worktree: under the user's own directory, written 0600 in a 0700 directory
-  (v2.38.2's and #699's rule for private keys).
-- `dev`'s prompt renders from the fleet's record, looked up by request id (the request, the tool, the arguments'
-  digest), not from text the caller passes; a bounded request queue answering `busy` when full.
-- A `sim` test build signs under the `recording` grade, so E6's walk runs in CI without a person.
+**Decided by the maintainer (2026-11-12):**
+- **P1:** `os_presence(macos, unbound)`, recorded as an enrolment claim and stated as unverifiable by a verifier.
+- **P2 = (a):** a **fleet-certified P-256 consent key**, read by **one P-256 verifier where a consent record is
+  checked** (`grant_decision::verify`). Its reach is under *What*.
+- **P3:** the CryptoKit blob path. No Apple team, no signed bundle.
+- **P4:** the grade goes **on the consent record**, from D7's three grades plus **`service`** (E1's). `service` is
+  this row's addition, not a D7 grade.
+- **P5:** a **residual**, stated. A same-user process can read the blob and ask the Enclave for a signature. "It
+  cannot produce one without the user's finger", but "it chooses the prompt text (`localizedReason`, under its own
+  process name), so the presence proves a person was there, not what they were shown." The blob is written 0600 in a
+  0700 directory, which narrows the readers to the user's own processes and does not close the gap. User binding
+  across macOS users was not tested.
+- **P6:** re-enrolment is **I1's supersession**: a newer consent certificate for the principal raises its mark.
+  - The mixed-version caveat: an un-upgraded node reads Ed25519 keys only, so it ignores a P-256 certificate. There,
+    a principal's older Ed25519 key stays `Current` after a newer P-256 certificate.
+  - So **every node is upgraded before a consent certificate is published**, as I2's line requires every member
+    upgraded before `tls commit`.
 
-**Depends on:** S-presence (done); I1 and I3 (released in v2.40.0) — the client-certificate door, fold and
-supersession, and the signed decision this row grades; **P1–P3 decided by the maintainer**; for P3's team-signed path,
-the maintainer's Apple Developer team.
+**Open: P7, which blocks only the `tty` half.** D7 grades Linux and Windows `tty`, and P2 decided one consent-key kind.
+Nothing decides **what key a `tty` consent is signed with** on Linux and Windows. The candidates:
+- a P-256 consent key held in software, 0600 in a 0700 directory, graded `tty`;
+- the developer's service Ed25519 key (I1), which records as `service` and not `tty`.
 
-**Enumerate** — every place a client key is verified today, each of which reads an Ed25519 key of 32 bytes and a
-signature of 64, and each of which a P-256 developer key must reach (P2 (a), (b)) or deliberately not reach:
-`grep -n "fn verify_bytes\|fn ed25519_key_from_cert_der\|fn cert_identity\|fn client_identity\|fn issue_client_cert\|fn refuse_if_removed" mycelium-core/src/tls.rs`;
-`grep -rn "client_key_standing\|fn check_bound\|fn check_at_door\|client_sig::check\|grant_decision::verify\|gd::verify\|fn verify_signature\|verify_client\|set_client_key\|fn feed_client_keys\|fn judge\|fn facts\|type PrincipalWindow\|fn client_cert_key\|fn parse_hex32" --include='*.rs' src | grep -v _tests.rs`;
-`grep -n "class ClientSigner" mycelium-py/src/mycelium/client_sig.py mycelium-ts/src/client_sig.ts`. What it finds:
-- **The primitive.** `mycelium_core::tls::verify_bytes(&[u8; 32], …)` (`tls.rs:1480`): Ed25519 `verify_strict`,
-  every client-key check below calls it.
-- **Reading the key from a certificate.** `cert_identity` (`tls.rs:252`) reads its key with
-  `ed25519_key_from_cert_der` (`tls.rs:1104`), which returns `None` for any SPKI but Ed25519's; so `client_identity`
-  (`tls.rs:229`) returns `None` for a P-256 leaf, and `client_cert::facts` (`client_cert.rs:331`) and `judge`
-  (`:308`) never count it. Today a P-256 client certificate is **ignored by the fold and refused by the publication
-  door** (`client_cert::publish`, `POST /gateway/identity/client-cert`), silently at an older node — stated as an
-  upgrade fact in §5.
-- **The key's standing.** `client_cert::client_key_standing` (`client_cert.rs:376`) over the fold's `Mark { key:
-  [u8; 32] }`; the record path `client_cert_key(principal, &[u8; 32])` (`:99`) and `parse_hex32` (`:87`); the
-  journal's entries; and the public `GossipAgent::client_key_standing` (`src/agent/mod.rs:2434`) — an API change if
-  the key type widens.
-- **`client_sig`** (the call's `cs`): `check_bound` (`client_sig.rs:478`), decoding a 32-byte `k` and a 64-byte
-  `sig`, reached through `check` at the provider's receive boundary (`gateway_caller.rs:1298`) and `check_at_door` at
-  `/mcp` (`http/mcp_bridge.rs:146`) and both A2A doors (`a2a.rs:864`, `a2a.rs:1255`); and its replay window,
-  `PrincipalWindow`, keyed by `[u8; 32]` (`:534`).
-- **`grant_decision::verify`** (`grant_decision.rs:184`, the same 32/64 decode, then `client_key_standing` at `:206`),
-  reached from the decision routes (`http/grants.rs:155`); and the public `SignedDecision::verify_signature` (`:71`).
-  **This is the verifier a developer's consent reaches first.**
-- **The possession proof.** `TrustedExternalIssuers::set_client_key` / `client_key` / `verify_client`
-  (`knowledge/issuer.rs:255`, `:269`, `:275`; `clients: (u64, [u8; 32])`, `:220`), with `SharedExternalIssuers`'s
-  setter (`:312`), fed by `client_cert::feed_client_keys` (`client_cert.rs:560`) and read at `GrantVerifier::check`
+**Build work, not questions:** the Swift shim, the issue flow over a public key, and the release's `macos` job
+building the shim.
+
+**What:**
+- **The consent certificate.** The fleet CA issues a client certificate (`mycelium-client://<issuer>/<name>`, I1's
+  scheme) over the developer's P-256 Enclave public key. **The issue flow works over a public key alone, with the CA
+  off-node** (L7):
+  1. `dev` creates the Enclave key in the shim and exports its public point (X9.63, 65 bytes, as row 4 printed).
+  2. On the issuer's host, `mycelium tls issue --client <name> --public-key <file>` *(new flag)* issues the leaf over
+     that point, without its private half, as row 6 did with `rcgen`'s `PublicKeyData`.
+  3. The certificate is copied back, and `dev` publishes it through I1's door.
+
+  No private key ever reaches the issuer's host, and the CA key never reaches the developer's machine.
+- **(a)'s reach, exactly.** The P-256 key widens these:
+  - **I1's door and fold.** The key read (`cert_identity` and `client_identity` read Ed25519 only, through
+    `ed25519_key_from_cert_der`), `client_cert::facts`/`judge`, `publish`, and the record path `client_cert_key`.
+  - **Supersession.** The fold's `Mark`, and the journal's entries.
+  - **`client_key_standing`**, including the public `GossipAgent::client_key_standing`.
+  - **One P-256 verifier at `grant_decision::verify`** (and `SignedDecision::verify_signature`). The key is decoded
+    by its kind and verified with `ring`.
+
+  It does **not** widen these, by decision:
+  - `client_sig` (`check_bound`, the call's `cs`, and its replay window): a consent key decides; it does not call.
+  - The possession proof (`verify_client` at `GrantVerifier::check`, fed by `feed_client_keys`): a consent key holds
+    no grant, so `feed_client_keys` feeds no P-256 mark.
+  - The provider's checks, which see `cs` and possession only.
+
+  A consent key presented at any of them is refused or ignored: exit 6.
+- **`signed_with` on the consent record.** The signed decision body carries the grade, inside the signature, so a
+  relay cannot alter it. Today the body carries the key `k` but neither its kind nor a grade (`SignedDecision`,
+  `src/agent/grant_decision.rs`). The gateway records the grade beside the decider on I3's decision record, and
+  refuses a grade the key's kind cannot carry:
+  - `service` only from an Ed25519 client key (and a body that names no grade, which is today's);
+  - `os_presence(macos, unbound)` only from a P-256 consent key;
+  - `recording` only in a `sim` build;
+  - `tty` per P7.
+- **The shim.** A Swift helper, built by the release's `macos` job, does the following:
+  - creates the key with `[.privateKeyUsage, .biometryCurrentSet]` and no `.devicePasscode`;
+  - writes its `dataRepresentation` 0600 in a 0700 directory under the user's home, never the worktree;
+  - signs under a fresh `LAContext` per approval;
+  - compares the restored key's public point with the enrolled one before signing.
+- **The prompt.** `dev`'s prompt renders from the fleet's record, looked up by request id (the request, the tool and
+  the arguments' digest), never from text the caller passes. A bounded request queue answers `busy` when full.
+- **`recording`.** A `sim` build signs under the `recording` grade, so E6's walk runs in CI without a person.
+
+**API changes** (each with a `deprecations.md` entry, or stated unchanged):
+- **Widened under (a):**
+  - `mycelium_core::tls::CertIdentity.key` and `ClientIdentity.key` (`[u8; 32]`);
+  - `client_cert_key(principal, &[u8; 32])`;
+  - `ClientCertPublished.key` (`client_cert::Published`);
+  - `ClientKeyStanding`'s argument at `GossipAgent::client_key_standing(&str, &[u8; 32])`;
+  - `SignedDecision`, which gains the grade.
+- **Unchanged by decision:**
+  - `ClientSigned.key`, and `ClientSigner::new(ed25519_dalek::SigningKey, …)` (`client_sig.rs:304`): a consent key
+    never signs a `cs`;
+  - `TrustedExternalIssuers::set_client_key` (no P-256 mark is fed);
+  - lock-order row 76 (`ClientReplayWindows`, keyed by `[u8; 32]`).
+
+  The build PR keeps each one unchanged, or adds its entry.
+
+**Depends on:** S-presence (done); I1 and I3 (released in v2.40.0), for the client-certificate door, fold and
+supersession, and the signed decision this row grades; the maintainer's decisions of 2026-11-12; P7, for the `tty`
+half.
+
+**Enumerate:** every place a client key is verified today. Each reads an Ed25519 key of 32 bytes and a signature of
+64. The greps:
+- `grep -n "fn verify_bytes\|fn ed25519_key_from_cert_der\|fn cert_identity\|fn client_identity\|fn issue_client_cert\|fn refuse_if_removed\|refuse_if_client(" mycelium-core/src/tls.rs`;
+- `grep -rn "client_key_standing\|fn check_bound\|fn check_at_door\|client_sig::check\|grant_decision::verify\|gd::verify\|fn verify_signature\|verify_client\|set_client_key\|fn feed_client_keys\|fn judge\|fn facts\|type PrincipalWindow\|fn client_cert_key\|fn parse_hex32" --include='*.rs' src | grep -v _tests.rs`;
+- `grep -n "class ClientSigner" mycelium-py/src/mycelium/client_sig.py mycelium-ts/src/client_sig.ts`.
+
+Each entry is marked **reached** (widened under (a)) or **not reached** (refuses or ignores a consent key):
+- **The primitive.** `mycelium_core::tls::verify_bytes(&[u8; 32], …)` (`tls.rs:1480`): Ed25519 `verify_strict`.
+  Every check below calls it. It is **unchanged**, and the P-256 verifier sits beside it.
+- **The key read from a certificate** (**reached**). `cert_identity` (`tls.rs:252`) reads its key through
+  `ed25519_key_from_cert_der` (`tls.rs:1104`), which returns `None` for any other SPKI. So `client_identity`
+  (`tls.rs:229`) returns `None` for a P-256 leaf, and `client_cert::facts` (`client_cert.rs:331`) and `judge` (`:308`)
+  never count it. Today a P-256 client certificate is **ignored by the fold and refused by the publication door**
+  (`client_cert::publish`, `POST /gateway/identity/client-cert`), and silently so at an older node (§5).
+- **The key's standing** (**reached**). `client_cert::client_key_standing` (`client_cert.rs:376`) over the fold's
+  `Mark { key: [u8; 32] }`; the record path `client_cert_key` (`:99`) and `parse_hex32` (`:87`); the journal's
+  entries; and `GossipAgent::client_key_standing` (`src/agent/mod.rs:2434`).
+- **`grant_decision::verify`** (**reached**: the one P-256 verifier). `grant_decision.rs:184` does the same 32/64
+  decode, then `client_key_standing` at `:206`; it is called from the decision routes (`http/grants.rs:155`). Beside
+  it is the public `SignedDecision::verify_signature` (`:71`).
+- **`client_sig`** (**not reached**). `check_bound` (`client_sig.rs:478`) is reached through `check` at the provider's
+  receive boundary (`gateway_caller.rs:1298`), and through `check_at_door` at `/mcp` (`http/mcp_bridge.rs:146`) and at
+  both A2A doors (`a2a.rs:864`, `a2a.rs:1255`). Its replay window, `PrincipalWindow` (`:534`), is lock-order row 76.
+- **The possession proof** (**not reached**). `TrustedExternalIssuers::set_client_key`, `client_key` and
+  `verify_client` (`knowledge/issuer.rs:255`, `:269`, `:275`; `clients`, `:220`), with `SharedExternalIssuers`'s setter
+  (`:312`). They are fed by `client_cert::feed_client_keys` (`client_cert.rs:560`) and read at `GrantVerifier::check`
   (`mandate/grant.rs:312`).
-- **The provider's checks.** The possession proof again through the execution authority's `SharedExternalIssuers`:
-  the gateway's preflight (`gateway_authority.rs:742`) and the provider's re-assessment in `admit_after`
-  (`provider_enforcement.rs:353`, `reassess_arguments`); and the provider's `cs` check above (`gateway_caller.rs:1298`).
-- **The signers and the vectors.** `ClientSigner` in Rust (`client_sig.rs:304`, an `ed25519_dalek::SigningKey`),
-  Python (`client_sig.py:219`, refusing a non-Ed25519 key) and TypeScript (`client_sig.ts:193`, likewise);
-  `issue_client_cert` (`tls.rs:1061`); the vectors under `tests/fixtures/cs/`.
-- **Must not reach** (the exit's negative half): `refuse_if_removed` (`tls.rs:1255`, the mesh); `verify_signed_by`'s
-  member and configured-issuer arms (`knowledge/issuer.rs:349`, "a client key is never an issuer's"); the removal
-  authority (`src/membership.rs`, "never entitles a client"); `ProviderBudget`'s set (`provider_enforcement.rs:104`, "Not fed
-  client keys: a cohort's authorities are the operator's").
+- **The provider's checks** (**not reached**). The possession proof is checked again at the gateway's preflight
+  (`gateway_authority.rs:742`) and at the provider's re-assessment in `admit_after` (`provider_enforcement.rs:353`,
+  `reassess_arguments`); the provider's `cs` check is at `gateway_caller.rs:1298`.
+- **The signers and the vectors.**
+  - `ClientSigner` in Rust (`client_sig.rs:286`; `new` at `:304`, taking an `ed25519_dalek::SigningKey`): unchanged.
+  - Python (`client_sig.py:219`) and TypeScript (`client_sig.ts:193`), each refusing a non-Ed25519 key: unchanged.
+  - `issue_client_cert` (`tls.rs:1061`): **reached**, through the public-key issue flow.
+  - The `cs` vectors under `tests/fixtures/cs/`: unchanged. A decision vector carrying the grade is new.
+- **Never reached.**
+  - The mesh: `refuse_if_removed` (`tls.rs:1255`), which refuses for the key before `refuse_if_client` runs.
+  - `verify_signed_by`'s member and configured-issuer arms (`knowledge/issuer.rs:349`: "a client key is never an
+    issuer's").
+  - The removal authority (`src/membership.rs`: "never entitles a client").
+  - `ProviderBudget`'s set (`provider_enforcement.rs:98`, its `external` at `:104`: "Not fed client keys").
 
-**Exit** (each item a test or a run; the ones marked take P's answer):
-1. **A signature only after the prompt** (P3; on macOS only if P3 does not choose `tty`): from the binary the release pipeline built, `dev` signs a grant
-   decision only after the OS prompt is approved; a dismissed prompt yields no signature and no decision; the decision
-   verifies at `grant_decision::verify` and is recorded with its decider and `signed_with`.
-2. **The negative probe** (D7): signing without interaction (`interactionNotAllowed`) fails, on the key as `dev`
-   stores it; the enrolled public key compared on use, and a substituted key refused by name.
-3. **Every verifier, both halves** (P2): the developer key verifies at each verifier under *Enumerate* that the
-   chosen signer reaches, and is refused at the mesh, as a node identity, as a removal's authority and as a configured
-   issuer — each seen failing first where the row widens a key type.
-4. **The grade** (P1, P4): a decision is recorded with the grade P4's source gives it; a body claiming a higher grade
-   than its key's enrolment is refused or recorded at the enrolled grade, as decided; Linux and Windows record `tty`;
-   a `sim` build records `recording`.
-5. **The prompt from the record**: `dev`'s prompt names the request, the tool and the arguments' digest read from the
-   fleet's record by id; a request whose record is absent prompts nothing; the queue answers `busy` past its bound.
-6. **The key off the worktree**: the key or blob is outside the worktree, written 0600 in a 0700 directory.
-7. **Supersession** (P6): a re-enrolled developer key supersedes the old one, which is refused at
-   `grant_decision::verify` once the newer record is read, and after a restart under `[persistence]`.
-8. **Compatibility**: a P-256 developer certificate at an un-upgraded node is ignored (shown against the previous
-   binary); the cross-language vectors carry the new key type if the SDKs sign with it.
-9. **The measurement**: the probe's results re-run on the shipped code and dated on
-   [`what-is-proven.md`](../operations/what-is-proven.md) (§6.4).
+**Exit** (each item a test or a run; the ones a person runs are dated on
+[`what-is-proven.md`](../operations/what-is-proven.md)):
+1. **The issue flow.** A consent certificate is issued over a P-256 public point alone on a host holding the CA key and
+   no private consent key. `webpki` verifies the chain, and I1's door publishes it. The fold reads it, and
+   `client_key_standing` answers `Current` for its key.
+2. **A signature only after the prompt** (a person's run, on the release-built shim). `dev` signs a grant decision
+   only after Touch ID is approved, and a dismissed prompt yields no signature and no decision. The decision verifies
+   at `grant_decision::verify` and is recorded with its decider and `signed_with = os_presence(macos, unbound)`.
+3. **The negative probe and the key on use.** Signing without interaction fails (`-1004`) on the blob as `dev` stores
+   it. A blob whose restored public point differs from the enrolled certificate's is refused by name before any prompt.
+4. **A fresh `LAContext` per approval** (a person's run). Two approvals in one `dev` process each raise their own
+   prompt, and the second is not satisfied by the first. If the run cannot be made, it is stated *not run* on
+   `what-is-proven.md`, and the row does not close.
+5. **The grade.** A body claiming a grade its key's kind cannot carry is refused (each pairing under *What*), and a
+   relay altering the grade breaks the signature. Linux and Windows record `tty` per P7, and a `sim` build records
+   `recording`.
+6. **Not reached, by test.** A consent key is refused or ignored as a `cs` signer, as a possession proof (no P-256 mark
+   fed), as a provider's caller, as a configured issuer, as a removal's authority, and by `ProviderBudget`. At the mesh
+   it is refused with the reason **"a mesh certificate must carry an Ed25519 identity key"** (`refuse_if_removed`), not
+   the client-scheme refusal. Each is seen failing first where the row widens a type.
+7. **The prompt from the record.** `dev`'s prompt names the request, the tool and the arguments' digest read from the
+   fleet's record by id. A request whose record is absent prompts nothing, and the queue answers `busy` past its bound.
+8. **The key off the worktree.** The blob is outside the worktree, written 0600 in a 0700 directory.
+9. **Re-enrolment (P6).**
+   - A newer consent certificate supersedes the older key, which is then refused at `grant_decision::verify`, including
+     after a restart under `[persistence]`.
+   - A P-256 certificate newer than the principal's Ed25519 one supersedes it on an upgraded node.
+   - **Mixed versions**, shown against the previous binary: an un-upgraded node ignores the P-256 certificate and keeps
+     the older Ed25519 key `Current`. That is why every node is upgraded first (§5).
+10. **The measurement.** The probe's results are re-run on the shipped shim and dated on `what-is-proven.md` (§6.4).
 
-**Not built, stated:** a Windows presence grade (D7's `tty` stands; nothing ran on Windows) and Linux presence beyond
-`tty`, both out of scope by §7; attestation of a key's access control (none open to an unmanaged binary, by the note); M-of-N; a
-developer key as a mesh identity (refused by `refuse_if_removed`, by design).
+**Not built, stated:**
+- A team-signed bundle, a keychain-stored key, notarization (P3).
+- Attestation of a key's access control: none is open to an unmanaged binary.
+- A Windows presence grade, and Linux presence beyond `tty`: both out of scope by §7.
+- A consent key as a `cs` signer, a grant holder or a mesh identity.
+- M-of-N.
+- Not run, and kept so unless a build run makes it: the added-fingerprint leg; a passcode reaching the key by another
+  route; user binding across macOS users; device binding; and Gatekeeper on a downloaded ad-hoc tarball.
 
 ### Wave 2 — the developer surface (one MINOR)
 
@@ -1059,7 +1101,7 @@ supervisor; a fabricated body refused; CI against a node.
 One stream: grants, `declare --watch` findings, `doctor` changes. **Depends on:** N3, N4. **Exit:** the three kinds
 in a node-free test.
 
-#### N7 · The Orca plugin — *after I7*
+#### N7 · The Orca plugin — *after I7 (its P1, P3 and, off macOS, P7)*
 
 A view over routes, holding no key: `workspace.created`/`removed` (the current names) to offer `dev` via
 `terminal:send` — a command channel, which is why consent is not a terminal; a card per `grant_request` from `watch`;
@@ -1070,8 +1112,8 @@ capability**, so the plugin's HTTP is ungated and stated; **plugin notifications
 gateway**; a manifest declares `engines.orca` as a **floor**, not a pin, so the plugin names the floor it was tested at
 and the exact release of its recorded run; the catalog label for a non-official plugin is "Unverified" or
 "`<catalog> · <owner>`". **Exit:** on the recorded release, a workspace gets a dev fleet from the offer; a card within
-the stream's latency; approval only after the OS prompt with `os_presence(macos)` on the record, `tty` elsewhere and
-said so on the card; a plugin typing into `dev`'s terminal produces no signature on macOS; the Orca half *run when
+the stream's latency; approval only after the OS prompt with `os_presence(macos, unbound)` on the record (I7's P1 and P3: the blob
+path, so the terminal cannot satisfy it on macOS), `tty` elsewhere and said so on the card, with what `unbound` means; a plugin typing into `dev`'s terminal produces no signature on macOS; the Orca half *run when
 supplied*.
 
 ### Examples and documentation (no new mechanism)
@@ -1128,9 +1170,12 @@ Any time:                                      E2, E3, E4
   the upgrade note says so (`deprecations.md`). The successor-issued certificate and the phase live under
   `auto_cert_dir/succession/`, and the operator's files are never written. Every member is upgraded before `tls commit`.
 - **I4:** written with its row.
-- **I7:** written when P1–P3 are decided. Known now, from the code: an un-upgraded node's client-certificate fold reads an
-  Ed25519 key only (`ed25519_key_from_cert_der`), so it ignores a P-256 developer certificate silently and its publication
-  door refuses one; a developer certificate is refused at the mesh by its scheme, as any client certificate is.
+- **I7:** **every node is upgraded before a P-256 consent certificate is published** (P6): an un-upgraded node's
+  client-certificate fold reads an Ed25519 key only (`ed25519_key_from_cert_der`), so it ignores the certificate
+  silently, keeps the principal's older Ed25519 key `Current`, and its publication door refuses one. At the mesh a
+  consent certificate is refused by `refuse_if_removed` — it carries no Ed25519 key — before the client-scheme check
+  runs, on every version. `SignedDecision` gains the grade, and the API types (a)'s reach widens are listed in I7's
+  row, each with a `deprecations.md` entry.
 - **N4:** three configuration files written into the worktree, merged.
 - Wire **v12** unchanged throughout: every field is payload (`cs`, `cn`, `ot` park in `x` at an older provider).
 

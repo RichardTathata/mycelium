@@ -1,0 +1,18 @@
+## [2026-11-12] ingest | row I7: #764's review taken, the maintainer's decisions recorded (identity-and-lifecycle rev 0.16)
+
+`docs/plans/identity-and-lifecycle.md` row I7 after #764's adversarial review (M1–M6, L1–L9) and the maintainer's
+decisions of 2026-11-12:
+- **P2 (a):** the developer signs with a fleet-certified P-256 **consent** key, issued over its public point alone with
+  the CA off-node (`tls issue --client --public-key`, new), verified with `ring` at `grant_decision::verify` only. It
+  widens I1's door, fold, supersession and `client_key_standing`; it never reaches `client_sig`, the possession proof or
+  the provider's checks.
+- **P3:** the CryptoKit blob path through a Swift shim; no Apple team, no signed bundle.
+- **P1:** the macOS grade is `os_presence(macos, unbound)`, an enrolment claim no verifier can check (D7's *Revised
+  from* records the departure from "whose result the repository verifies").
+- **P4:** `signed_with` on the consent record, inside the signature: D7's three grades plus `service`.
+- **P5:** a same-user process choosing the prompt text is a stated residual.
+- **P6:** re-enrolment by I1's supersession; every node upgraded first (an old node keeps the Ed25519 key `Current`).
+
+Corrected facts: the mesh refuses a P-256 certificate in `refuse_if_removed` (no Ed25519 key), before the scheme check;
+`keys.sh` at `d974fc76` counts 73 / 37 lines and 22 `[u8; 64]` mentions. I7 is buildable on macOS; P7 (the key a `tty`
+consent signs with on Linux and Windows) stays open. N7 now depends on P1, P3 and P7.
