@@ -311,83 +311,114 @@ async fn a_forged_misplaced_replayed_or_tombstoned_copy_of_a_calls_checkpoint_do
     let forged = |term: &str, seq: u64| call_mint::checkpoint(&forger, &n.gateway(), &format!("call:{term}"), seq, n.now(), &[term]);
     let (refused, stale, missing) = (|| n.1.call_checkpoints_refused(), || n.1.call_checkpoints_stale(), || n.1.call_checkpoints_missing());
     let within = Duration::from_secs(30);
-    let tombstone = |term: &str| assert!(mycelium_core::ops::kv_delete(&n.0.task_ctx, Arc::from(call_checkpoint_key(&n.gateway(), term))));
+    // Every write and delete of a `call/…/checkpoint` key reaches the feeder as one key. They are counted here so
+    // each step can wait until the feeder has taken them all (`settled`) before it samples a counter: a key still
+    // queued from the step before would otherwise be read — and its bad copy counted again — after the sample, and
+    // the step would pass without its own copy being read (#775's final confirm).
+    let written = std::cell::Cell::new(0u64);
+    let put = |term: &str, cp: &SignedRevocationCheckpoint| {
+        n.write(term, cp);
+        written.set(written.get() + 1);
+    };
+    let put_raw = |term: &str, bytes: &[u8]| {
+        super::state_machine::write_owned_kv(&n.0.task_ctx, &call_checkpoint_key(&n.gateway(), term), bytes.to_vec());
+        written.set(written.get() + 1);
+    };
+    let tombstone = |term: &str| {
+        assert!(mycelium_core::ops::kv_delete(&n.0.task_ctx, Arc::from(call_checkpoint_key(&n.gateway(), term))));
+        written.set(written.get() + 1);
+    };
+    macro_rules! settled {
+        () => {
+            n.caught_up(written.get()).await
+        };
+    }
 
     // A running call, its first checkpoint read from the KV at admission.
     let c = n.mint("f1", 60_000);
-    n.write("f1", &c.checkpoint);
+    put("f1", &c.checkpoint);
     assert_eq!(n.assess(&c, n.now()), Some(MandateState::Established));
     let work = n.begin(&c);
+    settled!();
     assert_eq!((refused(), stale(), missing()), (0, 0, 0));
 
-    // Forged, at a new sequence: verified under the gateway's key, which did not sign it.
-    // Each count is compared with the count before the write, not with an exact number: the store may report one
-    // write to the feeder more than once, and a bad copy is counted at each read of it.
-    n.write("f1", &forged("f1", 2));
-    assert!(until(|| refused() >= 1, within).await, "the forged copy is counted");
+    // Forged, at a new sequence: verified under the gateway's key, which did not sign it. One write, one read by
+    // the feeder, one count — each step below is exact for the same reason: the feeder is idle when it starts.
+    put("f1", &forged("f1", 2));
+    settled!();
+    assert_eq!(refused(), 1, "the forged copy is counted");
     // Forged, at the sequence this node holds.
-    let before = refused();
-    n.write("f1", &forged("f1", 1));
-    assert!(until(|| refused() > before, within).await, "a forged copy at the held sequence is verified and counted, not skipped as old");
+    put("f1", &forged("f1", 1));
+    settled!();
+    assert_eq!(refused(), 2, "a forged copy at the held sequence is verified and counted, not skipped as old");
     // Misplaced: genuinely the gateway's, for another call.
-    let before = refused();
-    n.write("f1", &n.checkpoint("f2", 2, &["f1", "f2"]));
-    assert!(until(|| refused() > before, within).await, "the misplaced copy is counted");
+    put("f1", &n.checkpoint("f2", 2, &["f1", "f2"]));
+    settled!();
+    assert_eq!(refused(), 3, "the misplaced copy is counted");
     // Not a checkpoint at all.
-    let before = refused();
-    super::state_machine::write_owned_kv(&n.0.task_ctx, &call_checkpoint_key(&n.gateway(), "f1"), b"not a checkpoint".to_vec());
-    assert!(until(|| refused() > before, within).await, "the unparsed copy is counted");
-    // A tombstone where a verified copy was read: counted at each read that finds it — the admission's own here,
-    // and the feeder's if the store reports the delete to it.
+    put_raw("f1", b"not a checkpoint");
+    settled!();
+    assert_eq!(refused(), 4, "the unparsed copy is counted");
+    // A tombstone where a verified copy was read: counted by the feeder, to which the store reports a delete as it
+    // reports a write, and again at an admission's own read.
     tombstone("f1");
+    settled!();
+    assert_eq!(missing(), 1, "the tombstone is counted");
     assert_eq!(n.assess(&c, n.now()), Some(MandateState::Established), "and the call is still admitted, on its carried checkpoint");
-    assert!(missing() >= 1, "the tombstone is counted");
+    assert_eq!(missing(), 2, "counted at the admission's read too");
     assert!(!work.is_cancelled(), "none of them cancelled the running call");
-    assert_eq!((n.1.view_sizes(), stale()), ((1, 1, 1), 0), "nothing more is held");
+    assert_eq!((n.1.view_sizes(), refused(), stale()), ((1, 1, 1), 4, 0), "nothing more is held or counted");
 
     // At admission: a forged copy already in the KV when a new call arrives.
     let c3 = n.mint("f3", 60_000);
-    n.write("f3", &forged("f3", 2));
-    let before = refused();
+    put("f3", &forged("f3", 2));
+    settled!(); // no window for f3 yet, so the feeder read nothing
+    assert_eq!(refused(), 4);
     assert_eq!(n.assess(&c3, n.now()), Some(MandateState::Established), "a forged revocation refuses no admission");
-    assert!(refused() > before, "counted at the admission's own read");
+    assert_eq!(refused(), 5, "counted at the admission's own read");
 
     // The gateway's own revocation still moves it.
-    n.write("f1", &n.checkpoint("f1", 2, &["f1"]));
+    put("f1", &n.checkpoint("f1", 2, &["f1"]));
     assert!(until(|| work.is_cancelled(), within).await, "the gateway's own revoking checkpoint cancels the call");
     drop(work);
+    settled!();
     // The gateway's genuine first checkpoint, written back over the revoking one by another member.
-    n.write("f1", &c.checkpoint);
-    assert!(until(|| stale() >= 1, within).await, "the older copy over a newer one this node holds is counted");
+    put("f1", &c.checkpoint);
+    settled!();
+    assert_eq!(stale(), 1, "the older copy over a newer one this node holds is counted");
     assert!(matches!(n.assess(&c, n.now()), Some(MandateState::Refused(MandateRefusal::Revoked { .. }))), "and a revocation seen stays seen");
     // And a tombstone over it.
     let before = missing();
     tombstone("f1");
+    settled!();
+    assert_eq!(missing(), before + 1);
     assert!(matches!(n.assess(&c, n.now()), Some(MandateState::Refused(MandateRefusal::Revoked { .. }))));
-    assert!(missing() > before);
 
     // The residual: this node has never read f4's revocation when the first checkpoint is written back over it.
     let c4 = n.mint("f4", 60_000);
-    n.write("f4", &c4.checkpoint);
-    n.write("f4", &n.checkpoint("f4", 2, &["f4"]));
-    n.write("f4", &c4.checkpoint);
-    let counted = (refused(), stale());
+    put("f4", &c4.checkpoint);
+    put("f4", &n.checkpoint("f4", 2, &["f4"]));
+    put("f4", &c4.checkpoint);
+    settled!();
+    let counted = (refused(), stale(), missing());
     assert_eq!(n.assess(&c4, n.now()), Some(MandateState::Established), "stated: a first read of a replayed older copy is established");
-    assert_eq!((refused(), stale()), counted, "stated: and nothing here can count it");
+    assert_eq!((refused(), stale(), missing()), counted, "stated: and nothing here can count it");
 
     // The residual at a provider **already running** the call (#775's confirm round): it read the first checkpoint
     // at admission; a member writes that same checkpoint back with a later stamp than the gateway's revocation, so
     // under last-writer-wins the revocation never reaches this node and all it sees is the bytes it has verified.
     let c5 = n.mint("f5", 60_000);
-    n.write("f5", &c5.checkpoint);
+    put("f5", &c5.checkpoint);
     assert_eq!(n.assess(&c5, n.now()), Some(MandateState::Established));
     let running = n.begin(&c5);
-    let (counted, read) = ((refused(), stale()), n.reads());
-    n.write("f5", &c5.checkpoint);
-    assert!(until(|| n.reads() > read, within).await, "the feeder read the rewritten key");
+    settled!();
+    let read = n.reads();
+    put("f5", &c5.checkpoint);
+    settled!();
+    assert_eq!(n.reads(), read + 1, "the feeder read the rewritten key");
     tokio::time::sleep(Duration::from_millis(300)).await; // three sweep intervals: nothing stops it
     assert!(!running.is_cancelled(), "stated: the call keeps running");
-    assert_eq!((refused(), stale()), counted, "stated: and nothing is counted — `stale` needs a node that holds the revocation");
+    assert_eq!((refused(), stale(), missing()), counted, "stated: and nothing is counted — `stale` needs a node that holds the revocation");
     drop(running);
     n.0.shutdown().await;
 }

@@ -3171,7 +3171,7 @@ from 2.27.0 is affected. The read routes now follow the same table as the write 
   verbs raised; `mycelium-ts` 0.2.10, where these verbs threw a plain `Error` naming the status). `scan_prefix` over
   a listed owned namespace (`cap/`) raises on the first value.
 - **Who is affected:** a client, script or dashboard that reads an owned namespace through `/gateway/kv` — a value,
-  or the names of one of the nine. A client that reads its own keys is not.
+  or the names of one of the ten. A client that reads its own keys is not.
 - **Migration.** Read through the route that owns the namespace:
 
   | Namespace | Read it through | Scope |
@@ -3187,8 +3187,8 @@ from 2.27.0 is affected. The read routes now follow the same table as the write 
   | `consensus/` | `GET /consensus/{slot}` | `consensus:read` |
   | `sched/` | `GET /gateway/schedules/last?id=ID` — a gateway client's own schedule only; an application's `run_schedule` records (`sched/{id}/…`, no `~`) have no HTTP read | `schedule:run` |
 
-  A namespace with no gateway read route — `sys/client-cert/`, `mandate/`, `rights/`, `knowledge/`, `tuple/` and the
-  other companions' — is read in process, through the handle of the component that owns it. `audit/` is the
+  A namespace with no gateway read route — `sys/client-cert/`, `mandate/`, `rights/`, `call/` (§100), `knowledge/`, `tuple/` and
+  the other companions' — is read in process, through the handle of the component that owns it. `audit/` is the
   `skillrunner` binary's unsigned fallback trail in a build without `compliance`; that binary serves its count and
   ten newest records at `GET /gateway/skillrunner/invocations`, and nothing else serves it over HTTP.
 - **Check after upgrading.** With a `kv:read` token, both of these answered 200 and now answer 403 `protected_key`:

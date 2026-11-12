@@ -424,7 +424,7 @@ pub struct ExecutionAuthority {
     pub(crate) call_kv_reads: std::sync::atomic::AtomicU64,
     #[cfg(test)]
     pub(crate) call_rescans: std::sync::atomic::AtomicU64,
-    /// Test-only: written keys the feeder has taken from its queue — how a test knows it has caught up.
+    /// Test-only: written keys the feeder has taken from its queue and dealt with — how a test knows it has caught up.
     #[cfg(test)]
     pub(crate) call_keys_seen: std::sync::atomic::AtomicU64,
 }
@@ -595,11 +595,12 @@ pub(crate) async fn feed_call_checkpoints(ctx: &std::sync::Arc<super::TaskCtx>, 
         () => {{
             let mut n = 0usize;
             while let Ok(key) = feed.keys.try_recv() {
-                #[cfg(test)]
-                authority.call_keys_seen.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 if let Some((by, scope)) = call_key_scope(&key) {
                     read(&by, &scope);
                 }
+                // Counted once the key has been dealt with, so a test that waits on it waits for the read too.
+                #[cfg(test)]
+                authority.call_keys_seen.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 n += 1;
                 if n.is_multiple_of(64) {
                     tokio::task::yield_now().await;
