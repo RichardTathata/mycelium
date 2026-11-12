@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "mycelium.design/declaration/1",
   "title": "Mycelium deployment declaration",
-  "description": "The document `mycelium wire-check --format json` emits (docs/plans/design-time-tooling.md \u00a79): what a set of units declares and how it would wire, before the fleet exists. A consumer joins it to runtime records by (principal, ns, name, schema_id). A change to this shape is a new schema version; this file is the pin (W6).",
+  "description": "The document `mycelium wire-check --format json` emits (docs/plans/design-time-tooling.md \u00a79): what a set of units declares and how it would wire, before the fleet exists. A consumer joins it to runtime records by (principal, ns, name, schema_id). A change to this shape is a new schema version; this file is the pin (W6). Not a reader's validator: `additionalProperties: false` pins today's shape for the repository's own gate, while within a version a field may be added (docs/reference/cli-json.md, the additive contract) and this file moves with it.",
   "type": "object",
   "required": [
     "schema",

@@ -140,9 +140,11 @@ impl Watch {
         Ok((handle, not_enforced))
     }
 
-    async fn drop_handle(&self, handle: &str) {
+    /// Retract one handle: `Err` names the route and what the gateway said, or that it did not answer — a caller
+    /// says so rather than reporting the handle retracted (#767's review, M1).
+    async fn drop_handle(&self, handle: &str) -> Result<(), String> {
         let route = format!("/gateway/capability/{handle}");
-        let _ = self.send(&route, self.request(reqwest::Method::DELETE, &route)).await;
+        self.send(&route, self.request(reqwest::Method::DELETE, &route)).await.map(|_| ())
     }
 
     fn request(&self, method: reqwest::Method, route: &str) -> reqwest::RequestBuilder {
@@ -202,11 +204,16 @@ impl Watch {
         // provider for a moment; that window is inherent and the page says so (#667's review, Q9). If the gateway
         // refuses the new text, the previous text is declared again, so a refused edit still changes nothing.
         let mut not_enforced: Vec<String> = Vec::new();
+        // A retraction the gateway did not confirm, said in the tick's warnings: the old advert may linger until its
+        // lease or the node's restart (#767's review, M1).
+        let mut warnings = Vec::new();
         for (name, path, _) in &parsed {
             let toml = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
             let previous = self.handles.remove(name);
-            if let Some((old, _)) = &previous {
-                self.drop_handle(old).await;
+            if let Some((old, _)) = &previous
+                && let Err(e) = self.drop_handle(old).await
+            {
+                warnings.push(format!("unit `{name}`: retracting its previous handle {old} failed — {e}"));
             }
             match self.declare_unit(&toml).await {
                 Ok((handle, ne)) => {
@@ -239,12 +246,13 @@ impl Watch {
         let present: Vec<&String> = parsed.iter().map(|(n, _, _)| n).collect();
         let gone: Vec<String> = self.handles.keys().filter(|k| !present.contains(k)).cloned().collect();
         for name in gone {
-            if let Some((old, _)) = self.handles.remove(&name) {
-                self.drop_handle(&old).await;
+            if let Some((old, _)) = self.handles.remove(&name)
+                && let Err(e) = self.drop_handle(&old).await
+            {
+                warnings.push(format!("unit `{name}` is gone from the directory, and retracting its handle {old} failed — {e}"));
             }
         }
         // Skills: write each file's template; delete the template of a file that is gone.
-        let mut warnings = Vec::new();
         let mut declared_skills = Vec::with_capacity(skills.len());
         for (ns, name, path) in &skills {
             let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -289,53 +297,179 @@ impl Watch {
         Err(lost.into_iter().map(|(n, e)| format!("{n}: {e}")).collect::<Vec<_>>().join("; "))
     }
 
-    /// Retract every declaration this watch holds.
-    pub async fn retract(&mut self) {
-        for (_, (h, _)) in std::mem::take(&mut self.handles) {
-            self.drop_handle(&h).await;
+    /// Retract every declaration this watch holds, and say what each retraction did: a handle whose DELETE the
+    /// gateway did not confirm is `failed`, never counted retracted (#767's review, M1). The watch forgets every handle
+    /// either way — the node retracts a failed one when its lease lapses, or at its restart for a declaration made
+    /// once.
+    pub async fn retract(&mut self) -> Retraction {
+        let mut out = Retraction::default();
+        for (unit, (h, _)) in std::mem::take(&mut self.handles) {
+            match self.drop_handle(&h).await {
+                Ok(()) => out.retracted.push(unit),
+                Err(error) => out.failed.push(FailedRetraction { unit, handle: h, error }),
+            }
         }
+        out
+    }
+}
+
+/// What [`Watch::retract`] did, by unit name.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Retraction {
+    /// Units whose handle the gateway confirmed retracted.
+    pub retracted: Vec<String>,
+    /// Units whose retraction the gateway did not confirm.
+    pub failed: Vec<FailedRetraction>,
+}
+
+/// One retraction the gateway did not confirm.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FailedRetraction {
+    pub unit: String,
+    pub handle: String,
+    /// The route and what the gateway said, or that it did not answer.
+    pub error: String,
+}
+
+/// How the command prints what each tick did.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Format {
+    /// The lines a person reads.
+    #[default]
+    Text,
+    /// One JSON object per line (identity-and-lifecycle N3), schema [`DECLARE_SCHEMA`]: once, a single line; under
+    /// `--watch`, a line per event, so the stream reads as JSON Lines.
+    Json,
+}
+
+/// The schema id of each line `mycelium declare --format json` prints.
+pub const DECLARE_SCHEMA: &str = "mycelium.declare/1";
+
+/// One event of the command, as the JSON form prints it: a tick's outcome (`declared`, `refused`, `rejected`,
+/// `error`), a heartbeat that lost a declaration (`heartbeat_lost`), or the retraction at Ctrl-C — `retracting` before
+/// it, `retracted` after it with each unit's outcome. An
+/// unchanged tick prints nothing, as the text form prints nothing. `previous_stands` on a refusal is whether this
+/// watch holds an earlier declaration — the text's *the previous declaration stands* against *this run declared
+/// nothing*.
+pub fn event_json(event: &Event<'_>, gateway: &str) -> Option<serde_json::Value> {
+    use serde_json::json;
+    let v = match event {
+        Event::Tick(Ok(Tick::Unchanged), _) => return None,
+        Event::Tick(Ok(Tick::Declared { units, skills, not_enforced, warnings }), _) => {
+            json!({ "event": "declared", "gateway": gateway, "units": units, "skills": skills, "not_enforced": not_enforced, "warnings": warnings })
+        }
+        Event::Tick(Ok(Tick::Refused { errors, report }), held) => {
+            json!({ "event": "refused", "errors": errors, "report": report, "previous_stands": *held > 0 })
+        }
+        Event::Tick(Ok(Tick::Rejected { unit, error }), _) => json!({ "event": "rejected", "unit": unit, "error": error }),
+        Event::Tick(Err(e), _) => json!({ "event": "error", "error": e }),
+        Event::HeartbeatLost(e) => json!({ "event": "heartbeat_lost", "error": e }),
+        Event::Retracting(n) => json!({ "event": "retracting", "declarations": n }),
+        Event::Retracted(r) => json!({
+            "event": "retracted",
+            "retracted": r.retracted,
+            "failed": r.failed.iter().map(|f| json!({ "unit": f.unit, "handle": f.handle, "error": f.error })).collect::<Vec<_>>(),
+        }),
+    };
+    let mut v = v;
+    v.as_object_mut()?.insert("schema".into(), json!(DECLARE_SCHEMA));
+    Some(v)
+}
+
+/// What the command prints about: a tick's result with the number of declarations the watch held after it, a lost
+/// heartbeat, the retraction of `n` declarations about to start, or what that retraction did.
+#[derive(Debug)]
+pub enum Event<'a> {
+    Tick(&'a Result<Tick, String>, usize),
+    HeartbeatLost(&'a str),
+    Retracting(usize),
+    Retracted(&'a Retraction),
+}
+
+/// The text form of one event, as the command has always printed it.
+fn event_text(event: &Event<'_>, gateway: &str) -> Option<String> {
+    Some(match event {
+        Event::Tick(Ok(Tick::Unchanged), _) => return None,
+        Event::Tick(Ok(Tick::Refused { errors, report }), held) => format!(
+            "{report}\nrefused: wire-check found {errors} error(s); {}",
+            if *held == 0 { "this run declared nothing" } else { "the previous declaration stands" }
+        ),
+        Event::Tick(Ok(Tick::Rejected { unit, error }), _) => {
+            format!("rejected: the gateway refused unit `{unit}` — {error}; its previous declaration was put back, the others stand")
+        }
+        Event::Tick(Ok(Tick::Declared { units, skills, not_enforced, warnings }), _) => {
+            let mut out = String::new();
+            for wn in warnings {
+                out.push_str(&format!("warning: {wn}\n"));
+            }
+            out.push_str(&format!(
+                "declared {units} unit(s) and {skills} skill(s) to {gateway}{}",
+                if not_enforced.is_empty() { String::new() } else { format!("; not enforced by this node: {}", not_enforced.join(", ")) }
+            ));
+            out
+        }
+        Event::Tick(Err(e), _) => format!("declare: {e}"),
+        Event::HeartbeatLost(e) => format!("heartbeat lost a declaration, declaring again at the next tick: {e}"),
+        Event::Retracting(n) => format!("retracting {n} declaration(s)"),
+        // The text form printed nothing after a retraction that worked, and says only what did not.
+        Event::Retracted(r) if r.failed.is_empty() => return None,
+        Event::Retracted(r) => r
+            .failed
+            .iter()
+            .map(|f| format!("retracting unit `{}` (handle {}) failed — {}; the node retracts it when its lease lapses", f.unit, f.handle, f.error))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    })
+}
+
+fn print_event(event: &Event<'_>, gateway: &str, format: Format) {
+    let line = match format {
+        Format::Text => event_text(event, gateway),
+        Format::Json => event_json(event, gateway).map(|v| v.to_string()),
+    };
+    if let Some(line) = line {
+        println!("{line}");
     }
 }
 
 /// The command: declare once, or watch until Ctrl-C, printing what each tick did. Returns the exit code: 0; 1 when
-/// the first declaration was refused by `wire-check` or by the gateway.
+/// the first declaration was refused by `wire-check` or by the gateway, or when a retraction at Ctrl-C was not
+/// confirmed.
 pub async fn run(cfg: WatchConfig, watch: bool, poll: Duration) -> i32 {
+    run_with(cfg, watch, poll, Format::Text).await
+}
+
+/// Poll `f` once: `true` when it resolved on that poll — the caller must then not poll it again — `false` when it is
+/// pending, with whatever its first poll installs now installed.
+async fn ready_now<F: std::future::Future>(mut f: std::pin::Pin<&mut F>) -> bool {
+    std::future::poll_fn(|cx| std::task::Poll::Ready(f.as_mut().poll(cx).is_ready())).await
+}
+
+/// [`run`], printing each event in `format`.
+pub async fn run_with(cfg: WatchConfig, watch: bool, poll: Duration, format: Format) -> i32 {
     let mut w = Watch::new(cfg.clone());
     // Beat within every lease window whatever the poll (#667's review, D4): the sleep is the shorter of the poll
-    // and the time to the next beat. One `ctrl_c` future for the whole run, so a signal during a tick is kept.
+    // and the time to the next beat. One `ctrl_c` future for the whole run, so a signal during a tick is kept — once
+    // its handler is installed, which `ctrl_c` does on its first poll. Under `--watch` that poll is here, before the
+    // first tick's first request; it used to be the first `select!`, after the first tick printed, so a SIGINT during
+    // the first tick took the default action and nothing was retracted (#767's review, L5). Once, no handler is
+    // installed: nothing would act on it, and Ctrl-C keeps its default.
     let beat_every = cfg.lease_secs.map(|l| Duration::from_secs((l / 3).max(1)));
     let mut last_beat = crate::sim_seam::mono_instant();
     let ctrl_c = tokio::signal::ctrl_c();
     tokio::pin!(ctrl_c);
+    // The poll's answer is kept: a future that resolved on it must not be polled again (an `async fn` panics when
+    // resumed after completion), so an early `Ready` is the signal itself and the `select!` below takes it without
+    // touching the future (#767's confirm round, 1).
+    let signalled = watch && ready_now(ctrl_c.as_mut()).await;
     let mut first = true;
     loop {
-        let code = match w.tick().await {
-            Ok(Tick::Unchanged) => 0,
-            Ok(Tick::Refused { errors, report }) => {
-                println!("{report}");
-                println!("refused: wire-check found {errors} error(s); {}", if w.handles().is_empty() { "this run declared nothing" } else { "the previous declaration stands" });
-                1
-            }
-            Ok(Tick::Rejected { unit, error }) => {
-                println!("rejected: the gateway refused unit `{unit}` — {error}; its previous declaration was put back, the others stand");
-                1
-            }
-            Ok(Tick::Declared { units, skills, not_enforced, warnings }) => {
-                for wn in &warnings {
-                    println!("warning: {wn}");
-                }
-                println!(
-                    "declared {units} unit(s) and {skills} skill(s) to {}{}",
-                    cfg.gateway,
-                    if not_enforced.is_empty() { String::new() } else { format!("; not enforced by this node: {}", not_enforced.join(", ")) }
-                );
-                0
-            }
-            Err(e) => {
-                println!("declare: {e}");
-                1
-            }
+        let tick = w.tick().await;
+        let code = match &tick {
+            Ok(Tick::Unchanged | Tick::Declared { .. }) => 0,
+            Ok(Tick::Refused { .. } | Tick::Rejected { .. }) | Err(_) => 1,
         };
+        print_event(&Event::Tick(&tick, w.handles().len()), &cfg.gateway, format);
         if !watch {
             return code;
         }
@@ -347,17 +481,20 @@ pub async fn run(cfg: WatchConfig, watch: bool, poll: Duration) -> i32 {
         let wait = until_beat.map_or(poll, |u| u.min(poll));
         tokio::select! {
             _ = tokio::time::sleep(wait) => {}
-            _ = &mut ctrl_c => {
-                println!("retracting {} declaration(s)", w.handles().len());
-                w.retract().await;
-                return 0;
+            _ = async { if !signalled { let _ = (&mut ctrl_c).await; } } => {
+                // A second Ctrl-C while the retraction runs is not acted on: the handler is still installed. The
+                // retraction is bounded by the gateway's answers; what it does not confirm lapses with the lease.
+                print_event(&Event::Retracting(w.handles().len()), &cfg.gateway, format);
+                let r = w.retract().await;
+                print_event(&Event::Retracted(&r), &cfg.gateway, format);
+                return if r.failed.is_empty() { 0 } else { 1 };
             }
         }
         if let Some(every) = beat_every
             && crate::sim_seam::mono_elapsed(&last_beat) >= every
         {
             if let Err(e) = w.heartbeat().await {
-                println!("heartbeat lost a declaration, declaring again at the next tick: {e}");
+                print_event(&Event::HeartbeatLost(&e), &cfg.gateway, format);
             }
             last_beat = crate::sim_seam::mono_instant();
         }
@@ -533,6 +670,89 @@ mod tests {
         assert!(w.handles().is_empty());
         agent.shutdown().await;
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Every event the command prints has a JSON line (identity-and-lifecycle N3) carrying the schema and the event's
+    /// facts — an unchanged tick prints nothing in either form — and the text form is the lines the command printed
+    /// before the JSON form existed.
+    #[test]
+    fn every_event_has_a_json_line_and_the_text_is_unchanged() {
+        use serde_json::json;
+        let gw = "http://127.0.0.1:8300";
+        let declared: Result<Tick, String> =
+            Ok(Tick::Declared { units: 2, skills: 1, not_enforced: vec!["mandate".into()], warnings: vec!["w1".into()] });
+        let refused: Result<Tick, String> = Ok(Tick::Refused { errors: 1, report: "error: x".into() });
+        let rejected: Result<Tick, String> = Ok(Tick::Rejected { unit: "a".into(), error: "403".into() });
+        let failed: Result<Tick, String> = Err("/gateway/units/declare: 401".into());
+        let unchanged: Result<Tick, String> = Ok(Tick::Unchanged);
+        let all_retracted = Retraction { retracted: vec!["a".into()], failed: vec![] };
+        let one_failed = Retraction {
+            retracted: vec![],
+            failed: vec![FailedRetraction { unit: "a".into(), handle: "h1".into(), error: "/gateway/capability/h1: connection refused".into() }],
+        };
+        let cases: Vec<(Event<'_>, Option<serde_json::Value>, Option<&str>)> = vec![
+            (Event::Tick(&declared, 2), Some(json!({ "schema": DECLARE_SCHEMA, "event": "declared", "gateway": gw, "units": 2, "skills": 1, "not_enforced": ["mandate"], "warnings": ["w1"] })),
+             Some("warning: w1\ndeclared 2 unit(s) and 1 skill(s) to http://127.0.0.1:8300; not enforced by this node: mandate")),
+            (Event::Tick(&refused, 0), Some(json!({ "schema": DECLARE_SCHEMA, "event": "refused", "errors": 1, "report": "error: x", "previous_stands": false })),
+             Some("error: x\nrefused: wire-check found 1 error(s); this run declared nothing")),
+            (Event::Tick(&refused, 1), Some(json!({ "schema": DECLARE_SCHEMA, "event": "refused", "errors": 1, "report": "error: x", "previous_stands": true })),
+             Some("error: x\nrefused: wire-check found 1 error(s); the previous declaration stands")),
+            (Event::Tick(&rejected, 1), Some(json!({ "schema": DECLARE_SCHEMA, "event": "rejected", "unit": "a", "error": "403" })),
+             Some("rejected: the gateway refused unit `a` — 403; its previous declaration was put back, the others stand")),
+            (Event::Tick(&failed, 0), Some(json!({ "schema": DECLARE_SCHEMA, "event": "error", "error": "/gateway/units/declare: 401" })),
+             Some("declare: /gateway/units/declare: 401")),
+            (Event::HeartbeatLost("a: 404"), Some(json!({ "schema": DECLARE_SCHEMA, "event": "heartbeat_lost", "error": "a: 404" })),
+             Some("heartbeat lost a declaration, declaring again at the next tick: a: 404")),
+            (Event::Retracting(3), Some(json!({ "schema": DECLARE_SCHEMA, "event": "retracting", "declarations": 3 })), Some("retracting 3 declaration(s)")),
+            (Event::Retracted(&all_retracted), Some(json!({ "schema": DECLARE_SCHEMA, "event": "retracted", "retracted": ["a"], "failed": [] })), None),
+            (Event::Retracted(&one_failed), Some(json!({ "schema": DECLARE_SCHEMA, "event": "retracted", "retracted": [],
+                "failed": [{ "unit": "a", "handle": "h1", "error": "/gateway/capability/h1: connection refused" }] })),
+             Some("retracting unit `a` (handle h1) failed — /gateway/capability/h1: connection refused; the node retracts it when its lease lapses")),
+            (Event::Tick(&unchanged, 1), None, None),
+        ];
+        for (event, want_json, want_text) in cases {
+            assert_eq!(event_json(&event, gw), want_json, "{event:?}");
+            assert_eq!(event_text(&event, gw).as_deref(), want_text, "{event:?}");
+        }
+    }
+
+    /// A retraction the gateway does not confirm — here the node is gone — is reported failed, unit by unit, never
+    /// counted retracted (#767's review, M1). Seen failing first: `retract` discarded the DELETE's error.
+    #[tokio::test]
+    async fn a_retraction_with_the_gateway_down_is_reported_failed() {
+        let (agent, base) = gateway_node().await;
+        let dir = project("retract-down");
+        unit(&dir, "thing", "1");
+        let mut w = Watch::new(cfg(&base, &dir));
+        assert!(matches!(w.tick().await.unwrap(), Tick::Declared { units: 1, .. }));
+        agent.shutdown().await;
+        let r = w.retract().await;
+        assert!(r.retracted.is_empty(), "{r:?}");
+        assert_eq!(r.failed.len(), 1, "{r:?}");
+        assert_eq!(r.failed[0].unit, "a");
+        assert!(r.failed[0].error.contains("/gateway/capability/"), "{r:?}");
+        assert!(w.handles().is_empty(), "the watch forgets the handle either way");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The eager poll keeps its answer (#767's confirm round, 1): a future that resolves on it is reported, so the
+    /// caller never polls it again; a pending one has run to its first await and stays pollable.
+    #[tokio::test]
+    async fn the_eager_poll_reports_a_future_that_resolved_on_it() {
+        let done = async {};
+        tokio::pin!(done);
+        assert!(ready_now(done.as_mut()).await, "resolved on the one poll");
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        let started = std::sync::atomic::AtomicBool::new(false);
+        let waiting = async {
+            started.store(true, std::sync::atomic::Ordering::SeqCst);
+            let _ = rx.await;
+        };
+        tokio::pin!(waiting);
+        assert!(!ready_now(waiting.as_mut()).await, "pending");
+        assert!(started.load(std::sync::atomic::Ordering::SeqCst), "and it ran to its first await, as `ctrl_c` installs its handler");
+        tx.send(()).unwrap();
+        waiting.await;
     }
 
     /// The wrong token is an error naming the route and the status, not a silent nothing.

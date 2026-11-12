@@ -1,0 +1,7 @@
+{
+  "schema": "mycelium.rules/1",
+  "rules": [
+    { "id": "prov.eligible", "summary": "Whether this node can host the capability." },
+    { "id": "prov.demand_response", "summary": "Whether unmet demand starts an install." }
+  ]
+}

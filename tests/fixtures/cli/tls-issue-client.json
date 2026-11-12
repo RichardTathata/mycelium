@@ -1,0 +1,12 @@
+{
+  "schema": "mycelium.tls/1",
+  "command": "issue",
+  "kind": "client",
+  "principal": "token:fleet/svc",
+  "issuer": "fleet",
+  "name": "svc",
+  "cert": "${OUT}/client-fleet-svc.cert.pem",
+  "key": "${OUT}/client-fleet-svc.key.pem",
+  "spki_sha256": "<sha256>",
+  "warnings": []
+}

@@ -16,15 +16,39 @@ fn log_filter(default: tracing::Level, rust_log: Option<&str>) -> tracing_subscr
         .parse_lossy(rust_log.unwrap_or(""))
 }
 
+/// Whether `args` holds `--format json`.
+fn asks_for_json(args: &[String]) -> bool {
+    args.windows(2).any(|w| w[0] == "--format" && w[1] == "json")
+}
+
+/// `--format text|json` for `explain`, `declare` and `tls` (identity-and-lifecycle N3): `Ok(true)` for json; the flag's
+/// value is required and must be one of the two.
+fn parse_format(value: Option<String>) -> Result<bool, String> {
+    match value.as_deref() {
+        Some("json") => Ok(true),
+        Some("text") => Ok(false),
+        Some(other) => Err(format!("--format must be text or json, not `{other}`")),
+        None => Err("--format needs a value: text or json".into()),
+    }
+}
+
+/// Print one JSON document on stdout, pretty, as `doctor` and `test --faults` print theirs.
+fn print_json(v: &serde_json::Value) {
+    println!("{}", serde_json::to_string_pretty(v).unwrap_or_else(|_| v.to_string()));
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     // `mycelium doctor` prints its report on stdout — JSON when asked — so its log lines go to stderr;
     // the node keeps its logs on stdout as before (#665's review, D1). `mycelium test` likewise, and at
     // WARN: its fleet's nodes would otherwise print every start-up block over the report.
     let command = std::env::args().nth(1);
     let (doctor, test) = (command.as_deref() == Some("doctor"), command.as_deref() == Some("test"));
+    // `explain`, `declare` and `tls` with `--format json` (identity-and-lifecycle N3): stdout is the document, so the
+    // logs go to stderr there too.
+    let json_out = matches!(command.as_deref(), Some("explain" | "declare" | "tls")) && asks_for_json(&std::env::args().collect::<Vec<_>>());
     let default = if test { tracing::Level::WARN } else { tracing::Level::INFO };
     let logs = tracing_subscriber::fmt().with_env_filter(log_filter(default, std::env::var("RUST_LOG").ok().as_deref()));
-    if doctor || test { logs.with_writer(std::io::stderr).init(); } else { logs.init(); }
+    if doctor || test || json_out { logs.with_writer(std::io::stderr).init(); } else { logs.init(); }
 
     // `mycelium wire-check <units-dir> …` — the offline check over a directory of unit files
     // (docs/plans/design-time-tooling.md §4). A pure function over declarations; it starts no
@@ -340,18 +364,24 @@ fn wire_check_cli(args: Vec<String>) -> i32 {
 /// heartbeated, so a watch that dies is retracted by the node, and the poll must be shorter than a third of it.
 #[cfg(feature = "gateway")]
 fn declare_cli(args: Vec<String>) -> i32 {
-    const USAGE: &str = "Usage: mycelium declare [project-dir] [--gateway <url>] [--token <bearer>] [--watch] [--poll-ms <n>] [--interval-secs <n>] [--lease-secs <n>]";
+    const USAGE: &str = "Usage: mycelium declare [project-dir] [--gateway <url>] [--token <bearer>] [--watch] [--poll-ms <n>] [--interval-secs <n>] [--lease-secs <n>] [--format text|json]";
     let mut project = std::path::PathBuf::from(".");
     let mut gateway = "http://127.0.0.1:8300".to_string();
     let mut token = std::env::var("MYCELIUM_GATEWAY_TOKEN").ok();
     let (mut watch, mut poll_ms, mut interval_secs, mut lease_secs) = (false, 500u64, 30u64, 90u64);
     let mut it = args.into_iter();
     let mut seen_dir = false;
+    let mut format = mycelium::declare::Format::Text;
     while let Some(a) = it.next() {
         let mut value = |flag: &str| it.next().ok_or_else(|| { eprintln!("{flag} needs a value\n{USAGE}"); 2 });
         match a.as_str() {
             "-h" | "--help" => { eprintln!("{USAGE}"); return 0; }
             "--watch" => watch = true,
+            "--format" => match value("--format").map(|v| parse_format(Some(v))) {
+                Ok(Ok(json)) => format = if json { mycelium::declare::Format::Json } else { mycelium::declare::Format::Text },
+                Ok(Err(e)) => { eprintln!("{e}\n{USAGE}"); return 2; }
+                Err(c) => return c,
+            },
             "--gateway" => match value("--gateway") { Ok(v) => gateway = v, Err(c) => return c },
             "--token" => match value("--token") { Ok(v) => token = Some(v), Err(c) => return c },
             "--poll-ms" | "--interval-secs" | "--lease-secs" => {
@@ -374,7 +404,7 @@ fn declare_cli(args: Vec<String>) -> i32 {
         Ok(rt) => rt,
         Err(e) => { eprintln!("declare: {e}"); return 2; }
     };
-    rt.block_on(mycelium::declare::run(cfg, watch, std::time::Duration::from_millis(poll_ms)))
+    rt.block_on(mycelium::declare::run_with(cfg, watch, std::time::Duration::from_millis(poll_ms), format))
 }
 
 /// `mycelium init <dir> [--template <name>]`: write a template into a new or empty directory; `--list` names
@@ -653,10 +683,11 @@ fn rules_cli(args: Vec<String>) -> i32 {
 /// and decision traces; `--closure <hash> <files…> [--fleet <n>]` the dependency closure of one record
 /// (adopter-surface X4, `mycelium::closure`).
 fn explain_cli(args: Vec<String>) -> i32 {
-    const USAGE: &str = "Usage: mycelium explain <decisions.jsonl> [--catalogue <rule-catalogue.json>] [--target <target>]
-       mycelium explain --correlation <id> <evidence.log|decisions.jsonl>…
-       mycelium explain --closure <sha256 or a unique prefix of 8+> <evidence.log|decisions.jsonl>… [--fleet <nodes>]";
+    const USAGE: &str = "Usage: mycelium explain <decisions.jsonl> [--catalogue <rule-catalogue.json>] [--target <target>] [--format text|json]
+       mycelium explain --correlation <id> <evidence.log|decisions.jsonl>… [--format text|json]
+       mycelium explain --closure <sha256 or a unique prefix of 8+> <evidence.log|decisions.jsonl>… [--fleet <nodes>] [--format text|json]";
     let (mut file, mut catalogue, mut target): (Option<String>, Option<String>, Option<String>) = (None, None, None);
+    let mut json = false;
     let (mut correlation, mut closure, mut fleet): (Option<String>, Option<String>, Option<String>) = (None, None, None);
     let mut files: Vec<String> = Vec::new();
     let mut it = args.into_iter();
@@ -667,6 +698,7 @@ fn explain_cli(args: Vec<String>) -> i32 {
             "--correlation" => correlation = it.next(),
             "--closure" => closure = it.next(),
             "--fleet" => fleet = it.next(),
+            "--format" => match parse_format(it.next()) { Ok(j) => json = j, Err(e) => { eprintln!("{e}\n{USAGE}"); return 2; } },
             "-h" | "--help" => { eprintln!("{USAGE}"); return 0; }
             _ if correlation.is_some() || closure.is_some() => files.push(a),
             _ if file.is_none() => file = Some(a),
@@ -690,7 +722,12 @@ fn explain_cli(args: Vec<String>) -> i32 {
         };
         // A full hash, or the unique prefix `--correlation`'s chain prints (doc-coverage run 24, gap 1).
         match (correlation, closure) {
+            (Some(id), _) if json => print_json(&corpus.chain_json(&id)),
             (Some(id), _) => print!("{}", corpus.chain(&id)),
+            (_, Some(h)) if json => match corpus.closure_json_for(&h, fleet) {
+                Ok(doc) => print_json(&doc),
+                Err(e) => { eprintln!("--closure: {e}"); return 2; }
+            },
             (_, Some(h)) => match corpus.closure_for(&h, fleet) {
                 Ok(out) => print!("{out}"),
                 Err(e) => { eprintln!("--closure: {e}"); return 2; }
@@ -709,7 +746,13 @@ fn explain_cli(args: Vec<String>) -> i32 {
         Some(Ok(s)) => Some(s),
         Some(Err(e)) => { eprintln!("catalogue: {e}"); return 2; }
     };
-    print!("{}", mycelium::decision::explain(&jsonl, catalogue.as_deref(), target.as_deref()));
+    if json {
+        let mut doc = mycelium::decision::explain_json(&jsonl, catalogue.as_deref(), target.as_deref());
+        doc["file"] = serde_json::json!(file);
+        print_json(&doc);
+    } else {
+        print!("{}", mycelium::decision::explain(&jsonl, catalogue.as_deref(), target.as_deref()));
+    }
     0
 }
 
@@ -727,13 +770,29 @@ fn explain_cli(args: Vec<String>) -> i32 {
 /// structural position: the value a partner's federation client pins (`FederationClient::with_tls_pins`) for a
 /// gateway that serves this certificate's key. An operator hands the partner this line, never the key
 /// (adopter-surface Y8). Exits 2 on usage or a file that is not one PEM certificate.
+///
+/// Each takes `--format json` (identity-and-lifecycle N3): one document on stdout, schema `mycelium.tls/1`, naming the
+/// files written and the SHA-256 of each certificate's `SubjectPublicKeyInfo` — **paths and fingerprints only**: no key
+/// material, no certificate body. The warnings `tls_writable_by_others` gives go into the document's `warnings`
+/// rather than to stderr; a refusal is on stderr with its exit code and no document.
 fn tls_cli(args: Vec<String>) -> i32 {
-    const USAGE: &str = "Usage: mycelium tls ca --out <dir>\n       mycelium tls issue --ca-dir <dir> --node <ip:port> --out <dir> [--force]\n       mycelium tls issue --ca-dir <dir> --client <name> --issuer <issuer> --out <dir> [--force]\n       mycelium tls pin <cert.pem>";
+    const USAGE: &str = "Usage: mycelium tls ca --out <dir> [--format text|json]\n       mycelium tls issue --ca-dir <dir> --node <ip:port> --out <dir> [--force] [--format text|json]\n       mycelium tls issue --ca-dir <dir> --client <name> --issuer <issuer> --out <dir> [--force] [--format text|json]\n       mycelium tls pin <cert.pem> [--format text|json]";
+    // `--format` is the one flag every subcommand takes; read it out first, so each keeps its own parsing.
+    let mut json = false;
+    let mut rest = Vec::with_capacity(args.len());
     let mut it = args.into_iter();
+    while let Some(a) = it.next() {
+        if a == "--format" {
+            match parse_format(it.next()) { Ok(j) => json = j, Err(e) => { eprintln!("{e}\n{USAGE}"); return 2; } }
+        } else {
+            rest.push(a);
+        }
+    }
+    let mut it = rest.into_iter();
     match it.next().as_deref() {
         Some("issue") => {}
-        Some("pin") => return tls_pin(it.collect()),
-        Some("ca") => return tls_ca(it.collect()),
+        Some("pin") => return tls_pin(it.collect(), json),
+        Some("ca") => return tls_ca(it.collect(), json),
         _ => { eprintln!("{USAGE}"); return 2; }
     }
     let (mut ca_dir, mut node, mut out): (Option<String>, Option<String>, Option<String>) = (None, None, None);
@@ -756,7 +815,7 @@ fn tls_cli(args: Vec<String>) -> i32 {
     match (&node, &client, &issuer) {
         (None, Some(name), Some(iss)) => {
             let (Some(ca_dir), Some(out)) = (ca_dir, out) else { eprintln!("{USAGE}"); return 2; };
-            return tls_issue_client(&ca_dir, iss, name, &out, force);
+            return tls_issue_client(&ca_dir, iss, name, &out, force, json);
         }
         (Some(_), None, None) => {}
         _ => { eprintln!("{USAGE}"); return 2; }
@@ -778,12 +837,22 @@ fn tls_cli(args: Vec<String>) -> i32 {
         }
         match mycelium::issue_node_cert(std::path::Path::new(&ca_dir), &node_id, std::path::Path::new(&out)) {
             Ok((cert, key)) => {
+                let warnings: Vec<String> = [std::path::Path::new(&ca_dir), std::path::Path::new(&out)]
+                    .into_iter()
+                    .flat_map(mycelium::tls_writable_by_others)
+                    .collect();
+                if json {
+                    let ca_cert = std::path::Path::new(&ca_dir).join("ca-cert.pem");
+                    return tls_json(serde_json::json!({
+                        "command": "issue", "kind": "node", "node": node_id.as_str(),
+                        "cert": cert.display().to_string(), "key": key.display().to_string(),
+                        "ca_cert": ca_cert.display().to_string(), "warnings": warnings,
+                    }), &[("spki_sha256", &cert), ("ca_spki_sha256", &ca_cert)]);
+                }
                 println!("issued {} and {}", cert.display(), key.display());
                 println!("copy both to the node with {ca_dir}/ca-cert.pem (the certificate only — never ca-key.pem), and set [tls] cert_pem / key_pem");
-                for dir in [std::path::Path::new(&ca_dir), std::path::Path::new(&out)] {
-                    for said in mycelium::tls_writable_by_others(dir) {
-                        eprintln!("warning: {said}");
-                    }
+                for said in warnings {
+                    eprintln!("warning: {said}");
                 }
                 0
             }
@@ -792,7 +861,7 @@ fn tls_cli(args: Vec<String>) -> i32 {
     }
     #[cfg(not(feature = "tls"))]
     {
-        let _ = (ca_dir, node, out, force);
+        let _ = (ca_dir, node, out, force, json);
         eprintln!("mycelium tls issue needs a binary built with the `tls` feature");
         2
     }
@@ -804,7 +873,7 @@ fn tls_cli(args: Vec<String>) -> i32 {
 /// the service's process (an environment variable or a file — an agent's shell inherits either), the certificate to
 /// `POST /gateway/identity/client-cert`. Issuing again supersedes the earlier key, so replacing a key file takes
 /// `--force`. Exits 2 on usage or a CA that does not load.
-fn tls_issue_client(ca_dir: &str, issuer: &str, name: &str, out: &str, force: bool) -> i32 {
+fn tls_issue_client(ca_dir: &str, issuer: &str, name: &str, out: &str, force: bool, json: bool) -> i32 {
     #[cfg(feature = "tls")]
     {
         if !mycelium::valid_client_segment(issuer) || !mycelium::valid_client_segment(name) {
@@ -822,8 +891,21 @@ fn tls_issue_client(ca_dir: &str, issuer: &str, name: &str, out: &str, force: bo
         }
         match mycelium::issue_client_cert(std::path::Path::new(ca_dir), issuer, name, std::path::Path::new(out)) {
             Ok((cert, key)) => {
+                // The same directories `--node` checks: the CA's, and the one the key was written to (#767's review, L2).
+                let warnings: Vec<String> =
+                    [std::path::Path::new(ca_dir), std::path::Path::new(out)].into_iter().flat_map(mycelium::tls_writable_by_others).collect();
+                if json {
+                    return tls_json(serde_json::json!({
+                        "command": "issue", "kind": "client", "principal": format!("token:{issuer}/{name}"),
+                        "issuer": issuer, "name": name,
+                        "cert": cert.display().to_string(), "key": key.display().to_string(), "warnings": warnings,
+                    }), &[("spki_sha256", &cert)]);
+                }
                 println!("issued {} and {}", cert.display(), key.display());
                 println!("principal token:{issuer}/{name}: give the key to the service's process only, and publish the certificate with POST /gateway/identity/client-cert");
+                for said in warnings {
+                    eprintln!("warning: {said}");
+                }
                 0
             }
             Err(e) => { eprintln!("{e}"); 2 }
@@ -831,23 +913,30 @@ fn tls_issue_client(ca_dir: &str, issuer: &str, name: &str, out: &str, force: bo
     }
     #[cfg(not(feature = "tls"))]
     {
-        let _ = (ca_dir, issuer, name, out, force);
+        let _ = (ca_dir, issuer, name, out, force, json);
         eprintln!("mycelium tls issue needs a binary built with the `tls` feature");
         2
     }
 }
 
-fn tls_ca(args: Vec<String>) -> i32 {
+fn tls_ca(args: Vec<String>, json: bool) -> i32 {
     let ["--out", dir] = args.iter().map(String::as_str).collect::<Vec<_>>()[..] else {
-        eprintln!("Usage: mycelium tls ca --out <dir>");
+        eprintln!("Usage: mycelium tls ca --out <dir> [--format text|json]");
         return 2;
     };
     #[cfg(feature = "tls")]
     match mycelium::mint_ca(std::path::Path::new(dir)) {
         Ok(cert) => {
+            let warnings = mycelium::tls_writable_by_others(std::path::Path::new(dir));
+            if json {
+                let key = std::path::Path::new(dir).join("ca-key.pem");
+                return tls_json(serde_json::json!({
+                    "command": "ca", "cert": cert.display().to_string(), "key": key.display().to_string(), "warnings": warnings,
+                }), &[("spki_sha256", &cert)]);
+            }
             println!("minted the fleet CA: {} and {dir}/ca-key.pem", cert.display());
             println!("keep ca-key.pem on this host; a node gets ca-cert.pem only, with a certificate from `mycelium tls issue`");
-            for said in mycelium::tls_writable_by_others(std::path::Path::new(dir)) {
+            for said in warnings {
                 eprintln!("warning: {said}");
             }
             0
@@ -856,25 +945,26 @@ fn tls_ca(args: Vec<String>) -> i32 {
     }
     #[cfg(not(feature = "tls"))]
     {
-        let _ = dir;
+        let _ = (dir, json);
         eprintln!("mycelium tls ca needs a binary built with the `tls` feature");
         2
     }
 }
 
-fn tls_pin(args: Vec<String>) -> i32 {
-    let [path] = args.as_slice() else { eprintln!("Usage: mycelium tls pin <cert.pem>"); return 2; };
+fn tls_pin(args: Vec<String>, json: bool) -> i32 {
+    let [path] = args.as_slice() else { eprintln!("Usage: mycelium tls pin <cert.pem> [--format text|json]"); return 2; };
     #[cfg(feature = "tls")]
     {
-        let pem = match std::fs::read_to_string(path) { Ok(p) => p, Err(e) => { eprintln!("{path}: {e}"); return 2; } };
+        let pem = match read_cert_file(std::path::Path::new(path)) { Ok(p) => p, Err(e) => { eprintln!("{path}: {e}"); return 2; } };
         match pin_of_pem(&pem) {
+            Ok(pin) if json => { print_json(&tls_doc(serde_json::json!({ "command": "pin", "cert": path, "spki_sha256": pin }))); 0 }
             Ok(pin) => { println!("{pin}"); 0 }
             Err(e) => { eprintln!("{path}: {e}"); 2 }
         }
     }
     #[cfg(not(feature = "tls"))]
     {
-        let _ = path;
+        let _ = (path, json);
         eprintln!("mycelium tls pin needs a binary built with the `tls` feature");
         2
     }
@@ -888,17 +978,67 @@ fn pin_of_pem(pem: &str) -> Result<String, String> {
     if pem.contains("PRIVATE KEY-----") {
         return Err("the file carries a private key: pin the certificate alone, and hand the partner only the pin".into());
     }
+    let der = der_of_pem(pem)?;
+    let pin = spki_hex(&der)?;
+    if is_ca_certificate(&der).ok_or("the certificate's extensions could not be read")? {
+        return Err("a CA certificate (basicConstraints cA): pin the gateway's own certificate, which the CA issued".into());
+    }
+    Ok(pin)
+}
+
+/// A certificate file's text: the one read `tls pin` and the `--format json` fingerprints make (outside every
+/// recording — `docs/design/replay-nondeterminism-inventory.md` §2).
+#[cfg(feature = "tls")]
+fn read_cert_file(path: &std::path::Path) -> Result<String, String> {
+    std::fs::read_to_string(path).map_err(|e| e.to_string())
+}
+
+/// The DER of the one PEM certificate in `pem`.
+#[cfg(feature = "tls")]
+fn der_of_pem(pem: &str) -> Result<Vec<u8>, String> {
     let blocks: Vec<&str> = pem.split("-----BEGIN CERTIFICATE-----").skip(1).collect();
     let [block] = blocks.as_slice() else {
         return Err(format!("expected exactly one PEM certificate, found {}", blocks.len()));
     };
     let b64: String = block.split("-----END CERTIFICATE-----").next().unwrap_or("").split_whitespace().collect();
-    let der = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b64).map_err(|e| format!("the certificate is not base64: {e}"))?;
-    let pin = mycelium::federation::pinning::spki_sha256(&der).ok_or("not an X.509 certificate this build can read")?;
-    if is_ca_certificate(&der).ok_or("the certificate's extensions could not be read")? {
-        return Err("a CA certificate (basicConstraints cA): pin the gateway's own certificate, which the CA issued".into());
-    }
+    base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b64).map_err(|e| format!("the certificate is not base64: {e}"))
+}
+
+/// The hex SHA-256 of a DER certificate's `SubjectPublicKeyInfo`, read structurally — what `tls pin` prints.
+#[cfg(feature = "tls")]
+fn spki_hex(der: &[u8]) -> Result<String, String> {
+    let pin = mycelium::federation::pinning::spki_sha256(der).ok_or("not an X.509 certificate this build can read")?;
     Ok(pin.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// The schema id of every `mycelium tls … --format json` document (identity-and-lifecycle N3).
+#[cfg(feature = "tls")]
+const TLS_SCHEMA: &str = "mycelium.tls/1";
+
+/// A `tls` document: `fields` with the schema id first.
+#[cfg(feature = "tls")]
+fn tls_doc(fields: serde_json::Value) -> serde_json::Value {
+    let mut doc = serde_json::json!({ "schema": TLS_SCHEMA });
+    if let (Some(d), serde_json::Value::Object(f)) = (doc.as_object_mut(), fields) {
+        d.extend(f);
+    }
+    doc
+}
+
+/// Print a `tls` document after adding, for each `(field, certificate file)`, that certificate's SPKI SHA-256 — read
+/// back from the file just written, so the fingerprint is of what is on disk. Exit 0, or 2 when a certificate cannot be
+/// read (the files are written; the document is not printed).
+#[cfg(feature = "tls")]
+fn tls_json(fields: serde_json::Value, certs: &[(&str, &std::path::Path)]) -> i32 {
+    let mut doc = tls_doc(fields);
+    for (field, path) in certs {
+        match read_cert_file(path).and_then(|p| der_of_pem(&p)).and_then(|d| spki_hex(&d)) {
+            Ok(hex) => doc[*field] = serde_json::json!(hex),
+            Err(e) => { eprintln!("{}: {e}", path.display()); return 2; }
+        }
+    }
+    print_json(&doc);
+    0
 }
 
 /// Whether a DER certificate says `basicConstraints cA = TRUE`, read by position: Certificate → tbsCertificate →
@@ -945,7 +1085,7 @@ fn is_ca_certificate(der: &[u8]) -> Option<bool> {
 
 fn print_usage() {
     eprintln!(
-        "Usage: mycelium [OPTIONS]\n       mycelium init <dir> [--template <name>] | --list\n       mycelium declare [project-dir] [--gateway <url>] [--token <bearer>] [--watch]\n       mycelium doctor [config.toml] [--units <dir>] [--format text|json]\n       mycelium wire-check <units-dir> [--library <dir>] [--schemas <dir>] [--format text|json|dot] [--strict-deployed] [--no-authority]\n       mycelium rules [--format md|json]\n       mycelium test --faults [<class>,…] <units-dir> [--config <node.toml>] [--against <units-dir>] [--format text|json]\n       mycelium explain <decisions.jsonl> [--catalogue <rule-catalogue.json>] [--target <target>]\n       mycelium explain --correlation <id> <files…> | --closure <sha256> <files…> [--fleet <n>]\n       mycelium tls ca --out <dir> | issue --ca-dir <dir> --node <ip:port> --out <dir> [--force] | pin <cert.pem>\n\
+        "Usage: mycelium [OPTIONS]\n       mycelium init <dir> [--template <name>] | --list\n       mycelium declare [project-dir] [--gateway <url>] [--token <bearer>] [--watch] [--format text|json]\n       mycelium doctor [config.toml] [--units <dir>] [--format text|json]\n       mycelium wire-check <units-dir> [--library <dir>] [--schemas <dir>] [--format text|json|dot] [--strict-deployed] [--no-authority]\n       mycelium rules [--format md|json]\n       mycelium test --faults [<class>,…] <units-dir> [--config <node.toml>] [--against <units-dir>] [--format text|json]\n       mycelium explain <decisions.jsonl> [--catalogue <rule-catalogue.json>] [--target <target>] [--format text|json]\n       mycelium explain --correlation <id> <files…> | --closure <sha256> <files…> [--fleet <n>] [--format text|json]\n       mycelium tls ca --out <dir> | issue --ca-dir <dir> (--node <ip:port> | --client <name> --issuer <issuer>) --out <dir> [--force] | pin <cert.pem>  [--format text|json]\n\
          \n\
          Options:\n\
          -c, --config <file>      Load configuration from a TOML file\n\
@@ -1125,10 +1265,10 @@ mod tls_cli_tests {
     fn ca_issue_and_pin_are_the_issuers_three_steps() {
         use ed25519_dalek::pkcs8::DecodePrivateKey;
         let (ca, out) = (scratch("ca"), scratch("out"));
-        assert_eq!(tls_ca(vec!["--out".into(), ca.display().to_string()]), 0);
+        assert_eq!(tls_ca(vec!["--out".into(), ca.display().to_string()], false), 0);
         assert!(ca.join("ca-cert.pem").exists() && ca.join("ca-key.pem").exists());
-        assert_eq!(tls_ca(vec!["--out".into(), ca.display().to_string()]), 2, "a second CA over the first is refused");
-        assert_eq!(tls_ca(vec!["--out".into()]), 2, "usage");
+        assert_eq!(tls_ca(vec!["--out".into(), ca.display().to_string()], false), 2, "a second CA over the first is refused");
+        assert_eq!(tls_ca(vec!["--out".into()], false), 2, "usage");
         let node: mycelium::NodeId = "127.0.0.1:7961".parse().expect("node id");
         let (cert, key) = mycelium::issue_node_cert(&ca, &node, &out).expect("issued from the minted CA");
         let pin = pin_of_pem(&std::fs::read_to_string(&cert).expect("cert")).expect("a pin");
@@ -1138,7 +1278,7 @@ mod tls_cli_tests {
         let sk = ed25519_dalek::SigningKey::from_pkcs8_der(&der).expect("PKCS#8 node key");
         let from_key = mycelium::federation::pinning::ed25519_spki_sha256(&sk.verifying_key().to_bytes());
         assert_eq!(pin, from_key.iter().map(|b| format!("{b:02x}")).collect::<String>(), "the pin is the node key's");
-        assert_eq!(tls_pin(vec![cert.display().to_string()]), 0);
+        assert_eq!(tls_pin(vec![cert.display().to_string()], false), 0);
         assert!(pin_of_pem("").is_err() && pin_of_pem(&format!("{0}{0}", std::fs::read_to_string(&cert).unwrap())).is_err(),
             "no certificate, or two, is refused");
         // A CA certificate pins no gateway, and a bundle with a key is not something to hand a partner. Seen failing
@@ -1156,7 +1296,7 @@ mod tls_cli_tests {
     #[test]
     fn issuing_over_an_existing_node_key_needs_force() {
         let (ca, out) = (scratch("reissue-ca"), scratch("reissue-out"));
-        assert_eq!(tls_ca(vec!["--out".into(), ca.display().to_string()]), 0);
+        assert_eq!(tls_ca(vec!["--out".into(), ca.display().to_string()], false), 0);
         let issue = |extra: &[&str]| {
             let mut a: Vec<String> = ["issue", "--ca-dir", &ca.display().to_string(), "--node", "127.0.0.1:7962", "--out", &out.display().to_string()]
                 .iter().map(|s| s.to_string()).collect();

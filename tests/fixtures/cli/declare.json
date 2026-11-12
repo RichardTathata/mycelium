@@ -1,0 +1,9 @@
+{
+  "schema": "mycelium.declare/1",
+  "event": "declared",
+  "gateway": "${GATEWAY}",
+  "units": 1,
+  "skills": 0,
+  "not_enforced": [],
+  "warnings": []
+}

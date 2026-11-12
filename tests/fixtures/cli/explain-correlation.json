@@ -1,0 +1,110 @@
+{
+  "correlation": "run-1",
+  "counts": {
+    "captured": 4,
+    "other_correlation": 0,
+    "reconstructed": 1,
+    "records": 5,
+    "unattributable_in_files": 1
+  },
+  "files": [
+    {
+      "dropped": null,
+      "duplicates": 0,
+      "kind": "trace",
+      "path": "tests/fixtures/cli/records.jsonl",
+      "records": 6,
+      "unparsed": 0
+    }
+  ],
+  "order": "event time where a record has one, file order where it has none. The journal is authoritative; the trace is best-effort (its sink drops and counts). A KV receipt is not journaled and joins only by operation id.",
+  "records": [
+    {
+      "at_ms": 10,
+      "attempt_id": "op-r/1",
+      "correlation": "run-1",
+      "enforcement_point": "gateway:mcp/tools/call",
+      "file": "tests/fixtures/cli/records.jsonl",
+      "hash": "2b4bd91670f5598f5c6b3def6a5ad556caf30d34187dd54d9ea0cee08d5696ab",
+      "index": 0,
+      "kind": "decided",
+      "mark": "captured",
+      "node": "127.0.0.1:7001",
+      "operation_id": "op-r",
+      "parent": null,
+      "parent_held": null,
+      "source": "trace",
+      "summary": "oidc:idp/alice tools/call tool:post@n1 → permit, execution attempted, policy rev-1"
+    },
+    {
+      "at_ms": 11,
+      "attempt_id": "op-r/1",
+      "correlation": null,
+      "enforcement_point": "gateway:mcp/tools/call",
+      "file": "tests/fixtures/cli/records.jsonl",
+      "hash": "ae6d1b14d8ea37c755ccbc20785d0050c3ad09bd683fb87bb502f55051402e09",
+      "index": 1,
+      "kind": "execution",
+      "mark": "reconstructed",
+      "node": "127.0.0.1:7001",
+      "operation_id": "op-r",
+      "parent": null,
+      "parent_held": null,
+      "source": "trace",
+      "summary": "oidc:idp/alice tools/call tool:post@n1 → permit, execution attempted, policy rev-1"
+    },
+    {
+      "at_ms": 12,
+      "attempt_id": null,
+      "correlation": "run-1",
+      "enforcement_point": null,
+      "file": "tests/fixtures/cli/records.jsonl",
+      "hash": "326021ca6ef1ff0899eed2fc4ba23d229508688c083a0ada505fe5f75674a725",
+      "index": 2,
+      "kind": "signal.admission",
+      "mark": "captured",
+      "node": "127.0.0.1:7002",
+      "operation_id": null,
+      "parent": "2b4bd91670f5598f5c6b3def6a5ad556caf30d34187dd54d9ea0cee08d5696ab",
+      "parent_held": true,
+      "source": "trace",
+      "summary": "frame → action under_fill"
+    },
+    {
+      "at_ms": 13,
+      "attempt_id": "op-e/1",
+      "correlation": "run-1",
+      "enforcement_point": "gateway:federation/call",
+      "file": "tests/fixtures/cli/records.jsonl",
+      "hash": "153e8c65fba10c0cddc4de422295e2d2291090d9443730ad0a0e3e2e11ab367f",
+      "index": 3,
+      "kind": "decided",
+      "mark": "captured",
+      "node": "127.0.0.1:7001",
+      "operation_id": "op-e",
+      "parent": "2b4bd91670f5598f5c6b3def6a5ad556caf30d34187dd54d9ea0cee08d5696ab",
+      "parent_held": true,
+      "source": "trace",
+      "summary": "oidc:idp/alice tools/call tool:post@n1 → permit, execution attempted, policy rev-1"
+    },
+    {
+      "at_ms": 14,
+      "attempt_id": "op-o/1",
+      "correlation": "run-1",
+      "enforcement_point": "provider",
+      "file": "tests/fixtures/cli/records.jsonl",
+      "hash": "abf224958aa0594e6db0aed2f37fe14a2395dca1068410f6a4e3e2f7e91e8ca4",
+      "index": 4,
+      "kind": "decided",
+      "mark": "captured",
+      "node": "127.0.0.1:7001",
+      "operation_id": "op-o",
+      "parent": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "parent_held": false,
+      "source": "trace",
+      "summary": "oidc:idp/alice tools/call tool:post@n1 → permit, execution attempted, policy rev-1"
+    }
+  ],
+  "schema": "mycelium.closure/1",
+  "view": "chain"
+}

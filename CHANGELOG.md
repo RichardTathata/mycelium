@@ -9,6 +9,32 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **N3: `--format json` for `explain`, `declare` and `tls`** (`docs/plans/identity-and-lifecycle.md` N3). Each prints one
+  JSON document on stdout, logs to stderr: `explain <trace>` as `mycelium.explain/1`; `explain --correlation` and
+  `--closure` keep the reader's `mycelium.closure/1`, with `view` `chain` or `closure`, full hashes and the closure's
+  `complete`; `declare` one `mycelium.declare/1` object per event (JSON Lines under `--watch`); `tls ca`, `tls issue`
+  (node and client) and `tls pin` as `mycelium.tls/1` — paths and SPKI fingerprints only, never a key. Goldens under
+  `tests/fixtures/cli/`, checked through the binary by `tests/cli_json.rs`; the shapes are
+  `docs/reference/cli-json.md`. `--format text`, the default, prints what each printed before. Library:
+  `decision::explain_json`, `Corpus::chain_json`/`closure_json`/`closure_json_for`, `declare::run_with` with
+  `declare::Format`, `declare::event_json`. The documents are **additive-stable** (the maintainer's decision,
+  2026-11-12, for every `mycelium.*/N` id, `doctor/1`, `test-faults/1` and `closure/1` included): within `/N` fields
+  are added, never removed, renamed or retyped, readers ignore unknown fields, and a breaking change is `/N+1` with a
+  `deprecations.md` entry — `docs/reference/cli-json.md`.
+
+### Changed
+
+- **`mycelium declare` says when a retraction fails.** A DELETE the gateway did not confirm was discarded, and Ctrl-C
+  under `--watch` reported its declarations retracted before retracting them. The text form now prints each failed
+  retraction and exits 1; a tick's failed retraction of a previous handle is a warning. `Watch::retract` returns a
+  `Retraction` (it returned `()`). Under `--watch` the Ctrl-C handler is installed before the first tick's first
+  request, so a Ctrl-C during the first tick retracts rather than killing the process (#767's review, M1, L5).
+- **`mycelium explain --closure`'s text counts nodes, not journal files, as its JSON does.** Two journals of one node
+  under `--fleet 2`, or a record naming a node with no journal given, now print `INCOMPLETE` where the fleet line
+  compared the number of files (#767's confirm round).
+
 ## [2.40.0] — 2026-11-12
 
 Wire **v12** unchanged (`PREV = 11`; the rolling-upgrade gate, 3 + 2, passes). A MINOR: **identity and lifecycle wave
