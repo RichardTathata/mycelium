@@ -1,12 +1,15 @@
 # The third-party critique of 2026-11-12 — verification and the plan that answers it
 
-**Status:** proposed, awaiting the maintainer's decisions (§5), rev 0.2, 2026-11-12 (rev 0.2 takes the independent
-review of this plan's PR, #773: the use-marker row rewritten — a KV record alone cannot carry it; the lease margin
-and the fenced write restated; the drift refusal given its receiver-clock, replay and ordering cases and moved to a
-decision; the WAL checksum's downgrade case; catalogue rollback's limits; four inventory rows that had no plan row;
-§6 split into what is wrong and what is understated; every choice the review found inside a row moved to §5).
-Nothing in §4 is agreed or buildable until §5 is answered, and §4's order is the **proposed** order. Two things
-are agreed and recorded in §3: the KV read guard, in progress, and the owner-signed rule, written in #772.
+**Status:** **agreed with the maintainer on 2026-11-12**, rev 0.3 (rev 0.3, 2026-11-12, records the maintainer's
+answers to all sixteen decisions of §5, each as recommended, and marks every row of §4 *buildable*, *after wave
+1b* or *decision recorded, no row*; rev 0.2 took the independent review of this plan's PR, #773: the use-marker
+row rewritten — a KV record alone cannot carry it; the lease margin and the fenced write restated; the drift
+refusal given its receiver-clock, replay and ordering cases and moved to a decision; the WAL checksum's downgrade
+case; catalogue rollback's limits; four inventory rows that had no plan row; §6 split into what is wrong and what
+is understated; every choice the review found inside a row moved to §5). **The order is agreed (D11):** CR1 now
+(PR #774, in review); **inside wave 1b**, CR2's first PR (the use marker), CR13's counter and CR12; CR3–CR11 and
+everything else **after wave 1b**, with CR10 (the model) startable in parallel. A row is *buildable* only where
+its text needs no further decision; each row's **State** line says where one remains.
 
 The critique is vendored at
 [`external/2026-11-12-360-critique.md`](external/2026-11-12-360-critique.md), its text unchanged: the reviewer's
@@ -186,17 +189,22 @@ Recorded, not proposed. None of these is a finding to act on in §4 beyond what 
   this was written). Decided: sensitive key names hidden from the listing, every owned key's value refused, the
   log read doors as a follow-up. The reply's first addition ("do item 1 today") is in hand. This plan does not
   touch that work; CR1 records it.
-- **What is agreed about order is these two only:** CR1 and the rule, now. The rest of §4's order is the order
-  the project's first response proposed (its six items, listed in the vendored file's header) and the reviewer's
-  reply called right; the maintainer has not agreed it as a schedule (§5 D11).
+- **The order** was, at rev 0.2, agreed for two things only — CR1 and the rule, now — and proposed for the rest
+  (the six items of the project's first response, listed in the vendored file's header, which the reviewer's
+  reply called right). **Since 2026-11-12 it is agreed (D11):** CR1 now; CR2's first PR, CR13's counter and CR12
+  inside wave 1b; the rest after it; CR10 in parallel.
 
-## 4 · Proposed rows
+## 4 · The rows
 
 Each row: one PR in its own worktree, every fix written fail-first against a planted fault, an independent
 adversarial review before merge, a feature page updated where the feature changes (rule 5), and for every record
 row the forged-record test the owner-signed rule's condition (d) asks for. Sizes are rough: **S** up to a day,
-**M** a few days, **L** a week or more, counted in PRs where it is more than one. The order is the **proposed**
-priority (§3, §5 D11); tier 1 is the security work, tier 2 the smaller Layer I items, tier 3 the structure.
+**M** a few days, **L** a week or more, counted in PRs where it is more than one. The order is the **agreed**
+order (§5 D11, decided 2026-11-12); tier 1 is the security work, tier 2 the smaller Layer I items, tier 3 the structure.
+
+Each row carries a **State** line, as of 2026-11-12. *Buildable* means the row's text needs no further
+decision; *after wave 1b* is D11's schedule, and says separately whether the text is ready; *decision recorded,
+no row* means §5 answered the question and nothing is built from it.
 
 Two standing requirements of every row that reads a clock or keeps reader memory: wall time is read through
 `mycelium_core::sim_seam::wall_now_ms` (CR3, CR7's expiry, CR11, CR13), and a new `Mutex` or `RwLock` field for a
@@ -208,6 +216,8 @@ A row that moves an inventory row to *Meets* cites the verifying code and the fo
 ### Tier 1
 
 #### CR1 · The KV read guard, then the log read doors *(L19)* — in progress
+
+**State (2026-11-12):** **in progress** — the guard is PR #774, in review. The log read doors follow-up is *buildable* once #774 merges.
 
 **What:** as decided (M6): on the raw KV read routes, an owned key's value is refused and sensitive key names are
 hidden from the listing. **Follow-up, one PR:** `gw_overlay_log_scan`, `gw_overlay_log_subscribe` and
@@ -223,6 +233,8 @@ owner-signed rule and satisfies none of its rows.
 **Size:** S (the follow-up).
 
 #### CR2 · Grant records a member cannot re-arm *(A1; inventory: `used/{door}`, `consumed`, `revoked`, the request, `issued`, `checkpoint`)*
+
+**State (2026-11-12):** **the first PR (the use marker and its release) is *buildable*, inside wave 1b** (D11); concurrent admission at two gateways is stated, not prevented (D12). PRs 2–4 are *after wave 1b*, their text ready.
 
 **What:** in this order, each its own PR:
 
@@ -280,6 +292,8 @@ change, no change to an existing on-disk format.
 
 #### CR3 · An audit chain whose truncation is detected *(A2; inventory: the chain's head, `sys/audit-checkpoint/`)*
 
+**State (2026-11-12):** *after wave 1b*; the text is ready.
+
 **What:** a signed head — the node signs `(node, newest seq, newest hash)` on each append or each checkpoint
 interval, under its own domain tag — kept where a member's KV write cannot lower it: in the node's own journal,
 and gossiped as a record a verifier compares by sequence so an older genuine head does not replace a newer one.
@@ -302,6 +316,8 @@ files.
 
 #### CR4 · `cap/`, `req/` and `prov-shed` advertisements carry their node's signature *(A3; inventory: `cap/{node}/…`, `req/…`, `cap/{node}/prov-shed/…`)*
 
+**State (2026-11-12):** *after wave 1b*. Its first PR is the measurement, and the signing PRs are not buildable until that measurement is in the row.
+
 **What:** an advertisement's value carries its node's signature over `(node, ns, name, body)`; the resolvers
 (`resolve_for_caller`, `resolve_filter_at`), the demand snapshot and the shed ranking read verified records only,
 and count the rest. `filter_protected` (H3) is given its caller, so an unbacked advertisement in a protected
@@ -323,6 +339,8 @@ PR. No wire-frame change.
 **Size:** L — a measurement, then two or three PRs.
 
 #### CR5 · The remaining *Does not hold* and *Partly* rows, grouped
+
+**State (2026-11-12):** *after wave 1b*, and **not yet rows**: each group is written as a row once CR2–CR4 show the cost. CR5f is written **with I2's row** (wave 1b). CR5a's signed-`sender` part waits on D6's measurement; anti-entropy stays unsigned (D8).
 
 Not one row to build; six groups (CR5a–CR5f) to be written as rows once CR2–CR4 show the pattern's cost. Every *Does not
 hold*, *Partly* and *Bounded, not detected* row of the inventory is named in CR2–CR5 or CR7 (checked by grep for
@@ -356,6 +374,8 @@ name, on `what-is-proven.md`.
 
 #### CR6 · One door function for authorization *(L18; the critique's code area 1)*
 
+**State (2026-11-12):** *after wave 1b*; the text is ready. The route table derived from the router is the one D4 asks for before any schema.
+
 **What:** one function that owns, for a governed call, the sequence every door repeats by hand — the protected
 kind refusal, the companion-kind gate, the preflight, the grant use, the dispatch, the release on a refusal before
 dispatch, and the evidence record — and a typed proof of authorization (the reviewer's `Authorized<Scope>`) that a
@@ -376,6 +396,8 @@ no decision, only who makes the call.
 
 #### CR7 · Catalogue currency, and provenance before staging *(L15, L17, P5; inventory: `installable/…`)*
 
+**State (2026-11-12):** *after wave 1b*; the text is ready, its choices decided: a revocation refuses new installs and does not stop a running one (D9); a v1 line is refused after one release of both forms, and the library `Provisioner` refuses unsigned lines by default in that release (D13).
+
 **What:**
 
 1. **Provenance before staging**: the stem's staging loop (`stem.rs:505`–`517`) filters by `provenance_ok` before
@@ -388,7 +410,7 @@ no decision, only who makes the call.
    node-local record, or a restart forgets it** — and refuses a lower one (rollback) and an expired one; a publisher-signed revocation of an artifact hash is honoured before install.
    Withdrawal becomes a signed record, so a tombstone is not the only way to withdraw and a replay of the
    withdrawn line loses.
-4. **The library type refuses by default** (a change of a library default: §5 D13): a `Provisioner` with no
+4. **The library type refuses by default** (a change of a library default: §5 D13, decided yes): a `Provisioner` with no
    trusted publisher installs nothing unless unsigned lines are accepted by name, as the stem already requires.
 
 **Exit:** a line never signed by a trusted publisher is not staged (a counter, and no bytes on disk); a withdrawn
@@ -399,7 +421,7 @@ the same currency. Each seen failing first. The inventory row moves to *Meets*.
 
 **Does not:** adopt TUF. The reviewer's "TUF-style" is the shape (version, expiry, revocation), and this row takes
 those three; root rotation, delegated targets and threshold signing are not built and are stated. Does not
-replace a running install on a revocation — whether a revoked artifact is stopped is §5 D9. **Does not protect a
+replace a running install on a revocation — whether a revoked artifact is stopped was §5 D9 (decided: it is not). **Does not protect a
 reader that never saw the newer line:** a newly joined stem — the headline case — holds no sequence and accepts a
 replayed, unexpired line until its expiry; expiry is the only bound there, so the row's value depends on publishers
 choosing short ones. Does not stop the composition of L15 by itself: a member can still force a re-install (CR4
@@ -410,11 +432,13 @@ KV **value** change with a mixed-version rule (readers before publishers) — un
 (`mycelium-installable-v2`), and the proposal domain `mycelium-installable-proposed-v1`
 (`mycelium-wasm-host/src/catalog.rs:160`) gains its `-v2` with it, so a proposed line and its reviewer's acceptance
 carry the same currency. A new node-local record for the highest sequence seen: additive on disk. Whether and when
-a v1 line stops verifying is §5 D13. No wire-frame change.
+a v1 line stops verifying was §5 D13 (decided: after one release of both). No wire-frame change.
 
 **Size:** M — two PRs (1, 2 and 4; then 3).
 
 #### CR8 · An unconfined activation is said aloud *(L16)*
+
+**State (2026-11-12):** *after wave 1b*; the text is ready.
 
 **What:** the stem warns at start, not at info, for each activation with no `[activation.confine]`; the threat
 model gains the line the unit-file reference already has. Whether confinement becomes required is not proposed:
@@ -427,6 +451,8 @@ the command is the operator's own, from a reviewed file.
 **Size:** S.
 
 #### CR9 · The exclusive verbs refuse without an electorate, in every profile *(L11; Ph2)*
+
+**State (2026-11-12):** *after wave 1b*, and **not buildable as written**: D1 is decided — a deprecation cycle — but the single-node quickstart's answer (a declared electorate of one, `init` declaring it, or a named `dev` allowance) is to be written into this row before its first PR. The first release turns the existing counter into a start-time and per-call warning naming the release that refuses; the refusal is the release after.
 
 **What:** a safety-sensitive proposal — the families of `SAFETY_SLOT_FAMILIES` (`src/agent/electorate.rs:74`:
 `lock/`, `leader/`, `consistent/`, `capauthz/`, the electorate slots) — outside an electorate group is refused
@@ -443,12 +469,15 @@ minority's lock refused or timed out, never granted.
 **Does not:** change the non-exclusive verbs — `cluster_propose` and `group_propose` without `safety_sensitive`
 stay "coordination that says what it means". Does not build disaster recovery for a lost majority.
 
-**How it ships is §5 D1** — a MAJOR, or a deprecation cycle with the counter that exists today as its first
-release. This row is not buildable until D1 is answered.
+**How it ships was §5 D1, decided 2026-11-12: a deprecation cycle** — the counter that exists today becomes a
+start-time and per-call warning naming the release that refuses, then the refusal. The single-node quickstart's
+answer is still to be written here (the State line above).
 
 **Size:** M for the code; the examples and SDKs are most of it.
 
 #### CR10 · A model of the acceptor *(L12; Ph2; M5)*
+
+**State (2026-11-12):** ***buildable*, startable in parallel with wave 1b** (it touches no shipped code). The tool is Stateright (D2).
 
 **What:** a model, checked in CI, of the single-decree acceptor with the three things the hand-written
 interleavings cover one case at a time: **slot reuse** after a release or a lapsed lease, the **lease's
@@ -466,11 +495,13 @@ with a stated bound (nodes, slots, depth); `what-is-proven.md` gains a row sayin
 decision functions and the `row01`–`row27` tests. Not a linearizability checker over recorded histories — that is
 a separate, later row if D2 chooses it.
 
-**Tool is §5 D2.**
+**Tool was §5 D2, decided 2026-11-12: Stateright.**
 
 **Size:** L.
 
 #### CR11 · The lease's skew bound, stated where an adopter reads; a holder-side margin *(L13, L14)*
+
+**State (2026-11-12):** *after wave 1b*. The docs half is ready. The margin and its guarantee are ready; a `secure-single-domain` revision requires the guarantee when that profile next changes for another reason, not in a revision of its own (D14). No library fenced write is built (D15).
 
 **What:** docs first: the skew bound of `lock-lifecycle.md:316`–`320` in the threat model's §7 table and the
 consensus guide, and on `what-is-proven.md` (added by this PR). Then a **holder-side margin as a guarantee**:
@@ -481,7 +512,7 @@ reports `NotConfigured`. The figure is **not** `max_clock_drift_ms`, which is th
 (300 000 ms, `mycelium-core/src/hlc.rs:92`) and would lapse the default 30 s leader lease
 (`src/agent/overlay_consistent.rs:143`) at the moment it is granted. Profiles require guarantees and set no
 configuration, so "the secure profile sets it" is not available; whether a new revision of `secure-single-domain`
-*requires* the guarantee is §5 D14.
+*requires* the guarantee was §5 D14 (decided: in the next revision that changes for another reason).
 
 **Exit:** a holder with the margin reports its lock lapsed δ before a reader with a clock δ ahead would grant
 another; a margin of zero, or one at or above the lease, resolves the guarantee `NotConfigured` by name; a node
@@ -493,11 +524,13 @@ round, not a lock holder's write (`src/agent/consensus_handle.rs:466`–`470`) �
 node has stored" is local to one node, while in the skew case the two holders are on different nodes and LWW
 orders by HLC, not by token: the test could pass while the property fails. A library-provided fenced write would
 be a new verb, a gateway route and both SDKs, with the token compared where the value is decided. Whether to build
-that is §5 D15. Fencing stays the application's contract, as the threat model states.
+that was §5 D15 (decided: not built). Fencing stays the application's contract, as the threat model states.
 
 **Size:** S (docs, in part done here), then S to M for the margin and its guarantee.
 
 #### CR12 · `GossipConfig` is `#[non_exhaustive]`, with a constructor *(N4, N6)*
+
+**State (2026-11-12):** ***buildable*, inside wave 1b** (D3, D11): the next MINOR, `default()` plus assignment, no builder.
 
 **What:** `#[non_exhaustive]` on `GossipConfig` (and on the config structs that have grown in a MINOR —
 `GatewayTlsConfig`, `OidcConfig`, `TlsConfig` — enumerated first), so a new field stops being a compile break for
@@ -512,7 +545,7 @@ tell me?* entry.
 
 **Does not:** reduce the 84 fields or group them.
 
-**How it ships is §5 D3** — it is itself a source break for every downstream struct literal, once. Wave 1b's I7
+**How it ships was §5 D3, decided 2026-11-12: the next MINOR** — it is itself a source break for every downstream struct literal, once. Wave 1b's I7
 already adds a field to `GossipConfig` and says "an exhaustive literal breaks"
 (`identity-and-lifecycle.md:1708`), so landing this row in the same MINOR breaks those callers once instead of
 twice. The #773 review counted 114 literal sites in 71 files outside `mycelium-core`; the row's first step
@@ -524,7 +557,7 @@ re-counts them.
 
 #### CR13 · An inbound entry stamped beyond the drift bound: counted, then refused *(L2)*
 
-**Not buildable until §5 D16 is answered** — whether Layer I may refuse on this at all.
+**State (2026-11-12):** **step 1, the counter, is *buildable*, inside wave 1b** (D11, D16). **Step 2, the refusal, is not buildable yet**: it waits for a release of counting and for the slow-clock case to have an acceptable answer (D16), and it lands default-on with a recorded carve-out in runtime-invariants, in the same PR.
 
 **What:** in two steps, as every other refusal in this repository ships (O3, O5, O6; D1's recommendation):
 
@@ -566,6 +599,8 @@ which is what CR2's first step had to be rewritten around. Does not change the w
 
 #### CR14 · A per-record WAL checksum *(L4; the critique's code area 3, first half)*
 
+**State (2026-11-12):** *after wave 1b*; the text is ready (the all-v1-or-all-new shape is the proposal the row's PR confirms).
+
 **What:** each KV WAL record carries a checksum over its payload, verified at replay; a mismatch is `Corrupt` at
 that offset, with the existing refuse-or-quarantine behaviour.
 
@@ -601,6 +636,8 @@ of the wire only.
 
 #### CR15 · The start says what a credential does not secure *(P4)*
 
+**State (2026-11-12):** *after wave 1b*; the text is ready.
+
 **What:** one `warn!` at start when a gateway credential is configured and no evaluator is attached, naming what
 is then not checked (the seam, provider enforcement, the journal), beside the `dev`-profile warning.
 
@@ -612,6 +649,8 @@ is then not checked (the seam, provider enforcement, the journal), beside the `d
 
 #### CR16 · The positioning says "sidecar" *(Ph4; M3)*
 
+**State (2026-11-12):** *after wave 1b*; the wording is the maintainer's and is given before the PR.
+
 **What:** `docs/positioning.md` and the front doors it gates say that Python and TypeScript users run the
 reference node as a sidecar and reach it over the gateway, and that the project is a library that also ships a
 reference node. Through `scripts/check-positioning.sh`, which pins the hero and the sentence.
@@ -621,6 +660,8 @@ reference node. Through `scripts/check-positioning.sh`, which pins the hero and 
 **Size:** S. Wording is the maintainer's.
 
 #### CR17 · Limits stated where they are not *(L3, L5, L9, L10)*
+
+**State (2026-11-12):** *after wave 1b*; the text is ready. D6 and D7 decided that the relay and SWIM limits are stated here, with the quorum consequence.
 
 **What:** docs only, in the threat model: the tombstone horizon and the resurrection case with its number and its
 knob (L3); that SWIM on an ordinary `[tls]` fleet lets a host on the UDP port evict a peer, and — until CR9 lands — shrink
@@ -635,7 +676,10 @@ that above about nine nodes relays are the common path for an Individual frame (
 ### Tier 3 · Structure
 
 Lower priority; each is a refactor with no behaviour change, and each waits for the tier-1 row that touches the
-same code.
+same code. **State (2026-11-12), all of CR18–CR23:** *after wave 1b*, each after the row its last column names;
+the two unnumbered lines are *decision recorded, no row* (D5: no feature-flag restructuring now; D4: a route
+table checked against the router first, which CR6 derives, and no schema until an adopter asks for generated
+clients).
 
 | Row | What | Exit | Does not | Size |
 |---|---|---|---|---|
@@ -645,12 +689,13 @@ same code.
 | **CR21 · `TaskCtx`** *(N12, N13)* | group the 90 fields into per-subsystem structs behind the 61 cfg lines; remove the `too_many_arguments` allows that grouping removes, counted before and after | the allow count falls and the PR says by how many; the thirteen in `mycelium-core` are a separate, smaller change | promise zero allows | L |
 | **CR22 · Test sleeps and `lib_tests.rs`** *(N14–N16)* | classify the 770 `sleep(` calls into poll intervals and fixed waits; convert fixed waits in the suites behind `ci-retest.sh` first; split `lib_tests.rs` by subject | the classification checked in as a count per file; the flake tier's annotations fall | remove the flake tier | L, continuous |
 | **CR23 · Comment hygiene** *(N17)* | a comment states the invariant; the history goes to the commit and the plan. Applied to a file when a row touches it, not as a sweep; `/wiki-lint` gains a check for a comment that names a round or a review and no invariant | the marker count (7.9% today) reported at each release | a repository-wide rewrite | S, continuous |
-| *(no row)* **Feature flags** *(N1–N3)* | not proposed as a row: "make consensus unconditional and move the gateway to its own crate" is §5 D5 | — | — | — |
-| *(no row)* **An OpenAPI schema for the gateway** *(N7)* | not proposed as a row: §5 D4 | — | — | — |
+| *(no row)* **Feature flags** *(N1–N3)* | *decision recorded, no row* (D5, 2026-11-12: not now) | — | — | — |
+| *(no row)* **An OpenAPI schema for the gateway** *(N7)* | *decision recorded, no row* (D4, 2026-11-12: a route table first, in CR6) | — | — | — |
 
-## 5 · Decisions for the maintainer
+## 5 · Decisions — all sixteen decided by the maintainer, 2026-11-12
 
-Each is the maintainer's. A recommendation is given and nothing is decided here. D13–D16 are choices the first
+Each was the maintainer's, and each was answered on 2026-11-12 as recommended. The options and the argument are
+kept as the record; the **Decided** line at the end of each is what holds. D13–D16 are choices the first
 draft made inside a row; the review of #773 found them, and they are here now.
 
 - **D1 · Is a mandatory electorate a MAJOR, or a deprecation cycle?** (CR9.) It changes what
@@ -662,24 +707,29 @@ draft made inside a row; the review of #773 found them, and they are here now.
   the reviewer and the project agree on the end state, and the present behaviour is a stated limit, not a claim —
   but a lock that returns success from a minority is the kind of default that should not survive a second MINOR.
   The single-node quickstart needs its answer in the same decision.
+  **Decided 2026-11-12:** (b), a deprecation cycle. The existing counter becomes a start-time and per-call warning naming the release that refuses; the refusal is the release after. The single-node quickstart is answered in CR9's row, before its first PR.
 - **D2 · Which tool for the model?** (CR10.) Stateright (Rust, can share the pure decision functions, runs under
   `cargo test`) or TLA+ (better known, a separate language, no shared code). *Recommendation:* Stateright, for the
   shared functions and one toolchain; a short TLA+ spec later only if someone outside the project needs to read
   it.
+  **Decided 2026-11-12:** Stateright.
 - **D3 · `#[non_exhaustive]` on `GossipConfig`: when, and with what constructor?** (CR12.) It is a one-time source
   break for every downstream struct literal. *Options:* in the next MINOR with an upgrade note (the project's own
   rule lets a MINOR add fields, and each one already breaks the same callers); or held for a MAJOR.
   *Recommendation:* the next MINOR — **which is wave 1b**, so CR12 moves ahead of the rest of tier 1 in D11 — with
   `default()` plus assignment as the documented path and no builder; a builder for 84 fields is a second API to
   keep true. I7 breaks exhaustive literals in that release anyway.
+  **Decided 2026-11-12:** the next MINOR (wave 1b), with `default()` plus assignment as the documented path and no builder.
 - **D4 · An OpenAPI schema for the gateway?** (N7.) *Options:* write one by hand and gate it against the router;
   generate one (`utoipa` or similar, an annotation per handler on 76 routes); or keep golden vectors and the
   reviewer as the check. *Recommendation:* a hand-kept route table checked against the router first — the same
   derivation CR6 needs for the bypass matrix — and a schema only if an adopter asks for generated clients.
+  **Decided 2026-11-12:** a route table checked against the router first (CR6 derives it); no schema until an adopter asks for generated clients. No row.
 - **D5 · Feature flags: make consensus unconditional, move the gateway to its own crate?** (N1–N3.) The 2,346
   cfg lines and the two feature-off test crates are the cost of "embedded, pay for what you use". *Recommendation:*
   not now. Measure first which flags an adopter actually builds without; the gateway-as-a-crate move collides
   with CR6 and should follow it if it happens at all.
+  **Decided 2026-11-12:** no feature-flag restructuring now. No row.
 - **D6 · Signed signals, and end-to-end encryption for Individual scope?** (L6–L8; Ph1's second half.) Two
   separable things. **Signed signals** (the emitter signs a signal; a receiver verifies before it acts) closes
   reply forgery and the bare-`sender` row; it is a wire change (a new variant, as `SignedData` was) and a
@@ -691,11 +741,13 @@ draft made inside a row; the review of #773 found them, and they are here now.
   relayed and a relaying member can answer for the target; state relay confidentiality as a limit in the threat model
   now (CR17) and do not plan encryption until an adopter's requirement names it. Both are wire-version decisions
   and belong with the anti-entropy one (D8).
+  **Decided 2026-11-12:** measure signed RPC requests and replies first, and decide signed signals with that measurement in hand; state relay confidentiality as a limit in the threat model (CR17); no end-to-end encryption is planned.
 - **D7 · SWIM authentication?** (L5.) *Options:* a MAC under a fleet-derived key on each datagram; require SWIM
   off under `secure-single-domain` as the federation profile does; or state the limit. It is more than eviction: with the default quorum sized from the peer view (L11), a forged `Dead` may shrink a
   quorum, from outside the membership. *Recommendation:* state it now with that consequence (CR17); CR9 removes
   the consequence for the exclusive verbs; make the secure profile's requirement the next step, because turning a liveness mechanism off in a
   profile is cheap and a keyed datagram is a design of its own (key distribution, rotation with the CA).
+  **Decided 2026-11-12:** state the limit now, with the quorum consequence (CR17); then require SWIM off in the secure profile. No keyed datagram is planned.
 - **D8 · Anti-entropy entries that carry their origin's signature?** (L1.) Already recorded as "a wire change, a
   separate decision" (`what-is-proven.md`, [*Anti-entropy entries authenticated*](../operations/what-is-proven.md#anti-entropy-entries-authenticated); the inventory § *Layer I*). The owner-signed rule is the answer
   that needs no wire change **for a record whose forgery is the risk. It is not sufficient for a presence-bearing
@@ -706,12 +758,15 @@ draft made inside a row; the review of #773 found them, and they are here now.
   a receiver that refuses an unsigned overwrite of a signed record, would close it at the store — which is a
   Layer I law, and so a larger decision than a wire version. *Recommendation:* leave as recorded for now, with
   this limit stated; revisit with D6 if a wire version is cut for signals.
+  **Decided 2026-11-12:** no signed anti-entropy entries for now; the limit for presence-bearing records stays stated. Revisited if a wire version is cut for signals.
 - **D9 · Does a catalogue revocation stop a running install?** (CR7.) *Recommendation:* no in CR7 — refuse new
   installs and count the running ones — and decide stopping separately, since it is an availability decision an
   operator may not want made by a publisher's key.
+  **Decided 2026-11-12:** a catalogue revocation refuses new installs and counts the running ones; it does not stop a running install.
 - **D10 · The two one-line summaries of I1 and I5** (P3). The CHANGELOG's 2.40.0 lead and `CLAUDE.md`'s release
   paragraph say "checked" and "verified" without the condition the notes below them state. *Recommendation:* add
   *where configured* to both at the next release edit; not worth a release note of its own.
+  **Decided 2026-11-12:** *where configured* is added to both one-line summaries **at the next release edit** — not before; neither the CHANGELOG's 2.40.0 lead nor `CLAUDE.md`'s release paragraph is edited until then.
 - **D11 · Where this plan sits relative to wave 1b.** Wave 1b (I4, I2, I7) is agreed and next, and I4 and I2 each
   add security-bearing records. Only CR1 and the rule are agreed as *now*; the order of everything else is proposed. *Options:* (a) wave 1b
   first, this plan after; (b) CR1 now (in hand); CR2's first PR, CR13's counter and CR12 inside wave 1b; the rest
@@ -720,22 +775,26 @@ draft made inside a row; the review of #773 found them, and they are here now.
   CR12 belongs in the release where I7 already breaks exhaustive literals (D3). I4 and I2 are then built to the
   rule from the start — CR5f is written with I2's row, and I4's collector learns of CR2's markers — and CR3–CR11
   follow wave 1b, with CR10 (the model) startable in parallel because it touches no shipped code.
+  **Decided 2026-11-12:** (b), interleave. CR1 now (PR #774, in review). Inside wave 1b: CR2's first PR (the use marker), CR13's counter, CR12. CR3–CR11 and the rest after wave 1b; CR10 startable in parallel. Recorded in `identity-and-lifecycle.md` rev 0.19.
 - **D12 · A concurrent-admission claim for a single-use grant?** (CR2's *Does not*.) Whether one grant admitted at
   two gateways at once is to be prevented (a consensus claim per use) or stated. *Recommendation:* state it, and
   offer the `FleetConsensus` scope for the grants an adopter marks as needing it.
-
+  **Decided 2026-11-12:** concurrent admission of a single-use grant is stated, not prevented; the `FleetConsensus` scope is offered for the grants an adopter marks as needing it.
 - **D13 · Two choices inside CR7.** (i) Whether, and after how many releases, a v1 catalogue line stops
   verifying. (ii) Whether the library's `Provisioner` with no trusted publisher installs nothing by default — a
   change of a library default for anyone who builds one in code. *Recommendation:* (i) one release of both,
   counted, then refuse, as the project's other counters do; (ii) yes, in the same release as (i), with an
   upgrade note — the stem already refuses, and the library type should not be the weaker door.
+  **Decided 2026-11-12:** (i) a v1 catalogue line is refused after one release in which both forms verify, counted; (ii) the library `Provisioner` with no trusted publisher refuses unsigned lines by default, in the same release, with an upgrade note.
 - **D14 · A new revision of `secure-single-domain` that requires the lease margin?** (CR11.) A profile revision
   makes `start()` refuse on nodes that pass today. *Recommendation:* yes, in the revision that next changes for
   another reason, not a revision of its own; until then the guarantee reports `NotConfigured`.
+  **Decided 2026-11-12:** the lease margin's guarantee joins the next revision of `secure-single-domain` that changes for another reason; no revision of its own.
 - **D15 · A library-provided fenced write?** (CR11's *Does not*; L14.) A new verb with a token compared where the
   value is decided, a gateway route and both SDKs — or leave fencing as the application's contract, as stated.
   *Recommendation:* leave it; an example already shows the pattern, and a fenced verb is only sound if the
   comparison is part of the decision, which makes it a consensus feature, not a helper.
+  **Decided 2026-11-12:** no library-provided fenced write. Fencing stays the application's contract.
 - **D16 · May Layer I refuse an entry for its stamp?** (CR13.) The argument that it may: it is not a
   *higher-layer* law — it reads no prefix, no owner and no upper-layer meaning; the drift bound is Layer I's own
   contract; `hlc.rs:81`–`83` anticipates it; the size gate and the TLS unsigned-frame refusal are precedents. The
@@ -748,6 +807,7 @@ draft made inside a row; the review of #773 found them, and they are here now.
   (c) neither, and the limit stated. *Recommendation:* (b), the refusal conditional on what the counter shows
   and on the slow-clock case having an acceptable answer — and default-on only after a release of counting,
   which is itself part of this decision.
+  **Decided 2026-11-12:** (b). The counter first; the refusal default-on only after a release of counting, with a recorded carve-out in runtime-invariants, and conditional on what the counter shows and on the slow-clock case having an acceptable answer.
 
 ## 6 · Where the critique is wrong or overstated, and where it is understated
 
@@ -824,7 +884,7 @@ Said plainly, with the code. Three lists: what does not hold as written, what ho
 - **Whether a docs gate checks `what-is-proven.md` anchors**: the links added here were checked by grep.
 - **The inventory's own citations** are #772's, at `7d4c86a6`; they were not re-verified here.
 
-## 8 · Housekeeping in this PR
+## 8 · Housekeeping in #773, and in the decisions PR
 
 - The critique vendored under `external/`, its own text unchanged.
 - `what-is-proven.md` § *Not yet shown*: four rows dated 2026-11-12 for confirmed gaps that bound a claim on that
@@ -836,3 +896,6 @@ Said plainly, with the code. Three lists: what does not hold as written, what ho
 - The wiki: a `.log` entry, and a pointer from `owner-signed-records.md` to this plan as where its rows are
   grouped (CR2–CR5, CR7).
 - No release note corrected (P3). No code changed.
+- **The decisions PR (rev 0.3):** §5 marked decided, each row's State line, `identity-and-lifecycle.md` rev 0.19
+  (wave 1b also carries CR2's first PR, CR13's counter and CR12; notes under I4 and I2), the index, `CLAUDE.md`'s
+  two lines, and a wiki `.log` entry. D10's two summaries are not edited until the next release edit.
