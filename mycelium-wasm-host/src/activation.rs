@@ -683,14 +683,20 @@ mod tests {
         let open = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let other = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let (a, b) = (open.local_addr().unwrap().port(), other.local_addr().unwrap().port());
-        let tcp = |port: u16| vec!["bash".to_string(), "-c".into(), format!("exec 3<>/dev/tcp/127.0.0.1/{port}")];
-        let udp = |port: u16| vec!["bash".to_string(), "-c".into(), format!("exec 3<>/dev/udp/127.0.0.1/{port} && echo x >&3")];
+        // The system's bash on macOS, never whichever `bash` is first on `PATH`: the Seatbelt profile leaves
+        // `/opt/homebrew` out by design, so a Homebrew bash aborts loading its own libraries before it tries the
+        // port, and the test would read the profile's refusal of a library as the network's (found cutting 2.40.0).
+        let bash = if cfg!(target_os = "macos") { "/bin/bash" } else { "bash" };
+        let tcp = |port: u16| vec![bash.to_string(), "-c".into(), format!("exec 3<>/dev/tcp/127.0.0.1/{port}")];
+        let udp = |port: u16| vec![bash.to_string(), "-c".into(), format!("exec 3<>/dev/udp/127.0.0.1/{port} && echo x >&3")];
         let run = |argv: Vec<String>, connect: Vec<String>| {
             activate(confined(argv, Vec::new(), mycelium::ConfineDecl { connect, ..Default::default() }), &s.placed).0
         };
         // Unconfined, both ports open: the plant that shows the listeners answer.
         assert_eq!(super::run(&tcp(a), Duration::from_secs(5)), Ok(()));
         assert_eq!(super::run(&tcp(b), Duration::from_secs(5)), Ok(()));
+        // …and UDP goes out unconfined, so the refusal below is the profile's, not this bash's (#761's review).
+        assert_eq!(super::run(&udp(a), Duration::from_secs(5)), Ok(()));
 
         assert!(run(tcp(a), Vec::new()).is_err(), "no `connect`: no network");
         let declared = vec![format!("*:{a}")];
