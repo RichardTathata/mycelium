@@ -292,6 +292,13 @@ async fn issuing_is_an_action_the_evaluator_decides_and_the_namespace_is_route_o
     let (status, body) = supervisor(http_port, "bob-secret", reqwest::Method::POST, "/gateway/kv", Some(serde_json::json!({"key": format!("grant/{agent_principal}/{request}/issued"), "value_b64": ""}))).await;
     assert_eq!(status, 403, "{body}");
     assert_eq!(body["error"], "protected_key", "{body}");
+    // Nor a `call:` mandate's checkpoint (identity-and-lifecycle I4): the family is its issuing gateway's. The raw
+    // doors share one check (`refuse_protected_key`); this is the write.
+    let call_key = format!("call/{agent_principal}/c1/checkpoint");
+    let (status, body) = supervisor(http_port, "bob-secret", reqwest::Method::POST, "/gateway/kv", Some(serde_json::json!({"key": call_key, "value_b64": ""}))).await;
+    assert_eq!((status, body["error"].as_str()), (403, Some("protected_key")), "{body}");
+    assert!(body["message"].as_str().is_some_and(|m| m.contains("call/")), "the refusal names the family: {body}");
+    assert!(mycelium_core::ops::kv_get(&a.task_ctx, &call_key).is_none(), "nothing was written");
     // The supervisor refuses, with a reason the agent sees.
     let (status, _) = supervisor(http_port, "alice-secret", reqwest::Method::POST, &format!("/gateway/grants/{agent_principal}/{request}"), Some(serde_json::json!({"decision": "refuse", "reason": "not during the freeze"}))).await;
     assert_eq!(status, 200);

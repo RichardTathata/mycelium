@@ -230,6 +230,13 @@ pub enum MandateRefusal {
     /// digest is RFC 8785 (JCS), which writes such a number as the nearest double, so a mandate cannot bind it
     /// exactly — two neighbouring ids would digest alike. Send large ids as strings.
     UnsafeInteger,
+    /// The mandate's term is **revoked** (identity-and-lifecycle I4): its issuer's checkpoint for the mandate's
+    /// scope lists it. Read for a `call:` mandate — a cancelled call presented again inside its window. Terminal:
+    /// revocation is monotonic, so nothing a caller does makes the term current again.
+    Revoked {
+        /// The revoked term.
+        term: String,
+    },
 }
 
 impl std::fmt::Display for MandateRefusal {
@@ -252,6 +259,8 @@ impl std::fmt::Display for MandateRefusal {
                 write!(f, "the grant is bound to policy revision {bound:?}, the call was decided under {decided:?}"),
             Self::GrantUsed { door } =>
                 write!(f, "the grant was already used at {door}: a grant admits one call at each door"),
+            Self::Revoked { term } =>
+                write!(f, "the mandate's term {term:?} is revoked"),
             Self::UnsafeInteger =>
                 write!(f, "the arguments hold an integer outside +-(2^53 - 1), which a mandate cannot bind exactly: send it as a string"),
         }

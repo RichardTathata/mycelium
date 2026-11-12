@@ -394,7 +394,7 @@ pub(crate) async fn decide_grant(ctx: &Arc<TaskCtx>, caller: Option<&ResolvedPri
                 ae_record_execution(ctx, &preflight, super::action_evaluator::Execution::None).await;
                 return Err(GrantRefusal::door(StatusCode::FORBIDDEN, "no_identity", "issuing a grant needs this node's identity ([tls]) to sign it"));
             };
-            let ttl_ms = ttl_secs.unwrap_or(300).min(3_600) * 1_000;
+            let ttl_ms = ttl_secs.unwrap_or(300).min(crate::mandate::grant::GRANT_TTL_CAP_SECS) * 1_000;
             let node_principal = gateway_caller::node_principal(&ctx.node_id);
             let (Some(holder), Some(established_by), Some(term)) = (PrincipalId::new(&holder_principal), PrincipalId::new(&node_principal), TermId::new(request)) else {
                 ae_record_execution(ctx, &preflight, super::action_evaluator::Execution::None).await;

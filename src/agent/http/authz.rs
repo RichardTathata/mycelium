@@ -1791,8 +1791,7 @@ const fn hidden(prefix: &'static str) -> OwnedPrefix { OwnedPrefix { prefix, nam
 /// **A new row is classified, not defaulted.** `listed` discloses every key name under the prefix to any
 /// `kv:read` token, so choose it only for names that carry no principal, request, recipient or chain position,
 /// and add the row to the matching list in `the_read_and_write_doors_classify_by_the_one_table`
-/// (`kv_read_tests.rs`), which pins both sets and fails on a row in neither. When `call/` lands
-/// (identity-and-lifecycle I4) it needs a row here, names hidden.
+/// (`kv_read_tests.rs`), which pins both sets and fails on a row in neither.
 pub(crate) const OWNED_KV_PREFIXES: &[OwnedPrefix] = &[
     listed("sys/"), hidden("sys/audit/"), hidden("sys/audit-checkpoint/"), hidden("sys/client-cert/"),
     listed("consensus/"), listed("grp/"), hidden("audit/"), listed("cap/"), listed("req/"), listed("cap-group/"),
@@ -1801,6 +1800,7 @@ pub(crate) const OWNED_KV_PREFIXES: &[OwnedPrefix] = &[
     listed("wiki/"), listed("tuple/"), listed("facts/"), hidden("mandate/"), listed("knowledge/"), hidden("rights/"),
     listed("cn/"),
     hidden("grant/"),  // adopter-surface X3: grant requests and answers (POST /gateway/grants/{agent}/{request})
+    hidden("call/"),   // identity-and-lifecycle I4: a `call:` mandate's checkpoints, written by the gateway that issued it; no route writes or reads it; a name carries the gateway and the call's term
     hidden("sched/"),  // adopter-surface Y2: a schedule's last run, written by its holder after the work (src/schedule.rs); a client's carries its principal in the name
     listed("faults/"), // adopter-surface X6: `mycelium test --faults`'s own writes on the fleet it builds; no route writes it
 ];
@@ -1965,6 +1965,8 @@ fn protected_read_refusal(key: &str) -> axum::response::Response {
         "the governors' state, the electorates and the topology overrides in force are read through GET /gateway/govern (govern:read)"
     } else if key.starts_with("grant/") {
         "grant requests are read through GET /gateway/grants/pending and GET /gateway/grants/request/{request} (grant:read)"
+    } else if key.starts_with("call/") {
+        "`call/` holds a call: mandate's revocation checkpoints; a provider reads its own copy when it admits the call, and no route reads it"
     } else if key.starts_with("grp/") {
         "a group's roster is read through GET /gateway/mesh/group?group=G (mesh:read)"
     } else if key.starts_with("prompts/") {
@@ -2032,6 +2034,8 @@ pub(super) fn refuse_protected_key(key: &str) -> Option<axum::response::Response
         "locks are taken through /gateway/overlay/lock/acquire (consensus:write)"
     } else if key.starts_with("grant/") {
         "grant requests are written by the agent's state machine and answered through POST /gateway/grants/{agent}/{request} (grant:issue)"
+    } else if key.starts_with("call/") {
+        "`call/` holds a call: mandate's revocation checkpoints, written by the gateway that issued the mandate; a write here could hide a call's cancellation from the provider running it, and no route writes it"
     } else if key.starts_with("sched/") {
         "`sched/` is written by a schedule's holder after its work runs (`GossipAgent::run_schedule`); a forged last run would skip or repeat slots, and no route writes it"
     } else if key.starts_with("faults/") {

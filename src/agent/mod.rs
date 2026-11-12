@@ -210,6 +210,9 @@ pub(crate) mod oidc;
 pub(crate) mod exchanged_token;
 #[cfg(all(test, feature = "compliance"))]
 mod exchanged_token_tests;
+/// Identity-and-lifecycle I4: a `call:` mandate at a live provider — the KV read under the hold, the feeder.
+#[cfg(all(test, feature = "compliance"))]
+mod call_mandate_tests;
 /// Identity-and-lifecycle I5 (D6): the gateway's token exchange at the IdP, DPoP-bound to the node key.
 #[cfg(feature = "compliance")]
 pub(crate) mod oidc_exchange;
@@ -2028,6 +2031,25 @@ impl GossipAgent {
                         changed = rx.changed() => { if changed.is_err() { break; } }
                     }
                     gateway_authority::feed_grant_checkpoints(&ctx, &authority);
+                }
+            });
+        }
+        // Identity-and-lifecycle I4: a `call:` mandate's checkpoints travel in the KV too
+        // (`call/{gateway}/{term}/checkpoint`). A write under the family wakes this loop, which reads the key of each
+        // `call:` scope this node holds a window for — never the family — so a call cancelled at its gateway is known
+        // to this node's sweep, and another node's calls cost it nothing.
+        {
+            let (ctx, authority) = (Arc::clone(&self.task_ctx), Arc::clone(&authority));
+            let mut shutdown = self.task_ctx.shutdown_tx.subscribe();
+            self.task_ctx.spawn_task(async move {
+                let mut rx = mycelium_core::kv_handle::KvHandle::from_core(Arc::clone(&ctx.core))
+                    .subscribe_prefix_with_predicate(gateway_authority::CALL_KEY_PREFIX, |k: &str| k.ends_with("/checkpoint"));
+                loop {
+                    tokio::select! {
+                        _ = capability_ops::await_shutdown(&mut shutdown) => break,
+                        changed = rx.changed() => { if changed.is_err() { break; } }
+                    }
+                    gateway_authority::feed_call_checkpoints(&ctx, &authority);
                 }
             });
         }

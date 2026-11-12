@@ -3127,6 +3127,50 @@ live door — `/mcp`, `/a2a`, the provider's enforcement and `[authority]` (§83
   `a_prohibition_whose_value_is_present_and_different_does_not_apply`, and
   `the_gateway_door_decides_by_this_units_rules_and_records_each_decision`.
 
+## 99. The execution authority verifies a `call:` mandate; a `call:` mandate in the first slot is never established; the `call/` key family is owned (2.41.0, identity-and-lifecycle I4, PR 1a)
+
+A **`call:` mandate** is a gateway's cancellation handle for one call it dispatches: scope `call:{term}`, issued by the
+gateway to itself, carrying its first revocation checkpoint beside it. This release builds the **authority's half**:
+`ExecutionAuthority::assess_call` verifies one and holds its scope until its window ends, and work registered under
+it (`begin`) is cancelled by the sweep when its term is revoked. **Nothing produces or reads one at a live door yet**:
+no gateway mints one, no provider reads one from a call, and no door cancels one. Those arrive in the following
+releases of this row, so a node changes behaviour only in the ways listed here.
+
+- **Behaviour change — the first slot.** A mandate whose scope begins `call:` presented where a caller's mandate goes
+  (`params._meta.mandate`, the envelope's `m`, `ExecutionAuthority::assess` / `assess_arguments`) reads `Unknown`,
+  *"a call: mandate is not a caller's"*, whoever presents it and whatever the entitlement table says. **Who is
+  affected:** a deployment that named a scope beginning `call:` for its own mandates and entitled an authority for
+  it. Such a mandate was verified as any other; it is now never established. **Check:** `grep` your entitlements and
+  unit files (`[[mandate]]`, `requires_mandate`) for a scope beginning `call:` and rename it.
+- **Behaviour change — the `call/` key family is owned.** The raw KV routes (`POST` and `DELETE /gateway/kv`, the
+  quorum write, the overlay's consistent set) answer a key under `call/` `403 protected_key`. The family holds a
+  `call:` mandate's revocation checkpoints, which only the gateway that issued the mandate writes; a write there
+  could hide a call's cancellation from the provider running it. **Who is affected:** an application that keeps its
+  own keys under `call/` through the gateway's KV routes. **Check:** `GET /gateway/kv/keys?prefix=call/` before
+  upgrading; move such keys to another prefix.
+- **Behaviour change — `offer_checkpoint`.** A revocation checkpoint whose scope begins `call:` is kept only while the
+  authority holds that scope's window (it admitted a call there, through `assess_call`). Otherwise it answers
+  `CheckpointOffer::NotHeld` and keeps nothing. A checkpoint for any other scope is unaffected.
+- **Behaviour change — the start rule.** A `call:` checkpoint is exempt from `IssuedBeforeStart`, as a grant's is:
+  its standing reads no freshness and its mandate's window bounds its life. The exemption is `RevocationView::offer`'s,
+  so it holds in every reader of a view — `mycelium-wiki`'s execution gate too. A **standing** scope must therefore
+  not begin `call:` (or `grant:`): its checkpoints would skip the rule that keeps a replayed old checkpoint from
+  refreshing a restarted reader.
+- **Compiler:** `MandateRefusal` gained `Revoked { term }` and `CheckpointOffer` gained `NotHeld`. Both are
+  `#[non_exhaustive]`, so a `match` outside the crate already has a `_` arm; **that arm must fail closed**. Additive:
+  `PresentedCallMandate` (`#[non_exhaustive]`, built with `new`), `ExecutionAuthority::assess_call`,
+  `named_stop_records` and `view_sizes`, `NamedStop` (`#[non_exhaustive]`), `RECLAIM_PER_SWEEP`,
+  `mandate::grant::{CALL_SCOPE_PREFIX, GRANT_TTL_CAP_SECS, check_call_mandate}`, `Mandate::is_call`,
+  `RevocationView::{forget, sizes}`. `StopRecord` and `PresentedMandate` are unchanged.
+- **`GRANT_TTL_CAP_SECS` (3600)** names the cap `POST /gateway/grants/{agent}/{request}` has always applied to
+  `ttl_secs`; the door's behaviour is unchanged. `assess_call` refuses a `call:` mandate whose window is longer
+  (`OutOfWindow`).
+- **A background task:** a node with an execution authority attached subscribes to keys ending `/checkpoint` under
+  `call/`. On each such write it reads one key for each `call:` window it holds — none until a provider admits calls
+  under `call:` mandates.
+- **Code:** `src/agent/gateway_authority.rs` (`assess_call`, `feed_call_checkpoints`), `src/mandate/grant.rs`
+  (`check_call_mandate`). Tests: `gateway_authority::call_tests` and `src/agent/call_mandate_tests.rs`.
+
 Wire **v12** unchanged.
 
 ## 99. The raw KV routes read application keys only; the listing leaves nine namespaces' names out (unreleased, the kv:read decision of 2026-11-12)

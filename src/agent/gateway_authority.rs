@@ -63,6 +63,66 @@ pub struct PresentedMandate {
     pub possession: String,
 }
 
+/// What a gateway presents in a caller envelope's **second mandate slot**, `cm` (identity-and-lifecycle I4): the
+/// `call:` mandate it issued to itself for this one call — a cancellation handle, not authority a rule can require
+/// (D-1) — its possession proof, and the mandate's **first revocation checkpoint**, carried beside it so a provider
+/// that has never seen the checkpoint establishes the mandate without waiting for gossip. Assessed by
+/// [`ExecutionAuthority::assess_call`], never by [`ExecutionAuthority::assess`].
+///
+/// Self-authenticating, as a [`PresentedMandate`] is: the mandate and the checkpoint are signed by the gateway's node
+/// key, and the proof binds this call's operation, resource and RFC 8785 arguments digest. On the wire the
+/// checkpoint's signature is base64.
+#[non_exhaustive]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PresentedCallMandate {
+    /// The `call:` mandate, signed by the gateway that holds it.
+    pub grant: SignedMandateGrant,
+    /// Base64 of the gateway's signature over
+    /// `possession_message(grant, possession_request(operation, resource, arguments_digest))`.
+    pub possession: String,
+    /// The mandate's first checkpoint for its own scope. **Required**: a `call:` mandate without one cannot be
+    /// established where its checkpoint has not arrived.
+    #[serde(with = "carried_checkpoint")]
+    pub checkpoint: SignedRevocationCheckpoint,
+}
+
+impl PresentedCallMandate {
+    /// A `call:` mandate with its possession proof (raw signature bytes) and its first checkpoint.
+    pub fn new(grant: SignedMandateGrant, possession: &[u8], checkpoint: SignedRevocationCheckpoint) -> Self {
+        Self { grant, possession: base64::engine::general_purpose::STANDARD.encode(possession), checkpoint }
+    }
+}
+
+/// A carried checkpoint's wire form: `{ "checkpoint": {…}, "signature": "<base64>" }` — about half the bytes of the
+/// signature as the JSON array [`SignedRevocationCheckpoint`] derives.
+mod carried_checkpoint {
+    use super::*;
+    use crate::mandate::authority::RevocationCheckpoint;
+
+    #[derive(Serialize)]
+    struct Out<'a> {
+        checkpoint: &'a RevocationCheckpoint,
+        signature: String,
+    }
+    #[derive(Deserialize)]
+    struct In {
+        checkpoint: RevocationCheckpoint,
+        signature: String,
+    }
+
+    pub(super) fn serialize<S: serde::Serializer>(c: &SignedRevocationCheckpoint, s: S) -> Result<S::Ok, S::Error> {
+        Out { checkpoint: &c.checkpoint, signature: base64::engine::general_purpose::STANDARD.encode(&c.signature) }.serialize(s)
+    }
+
+    pub(super) fn deserialize<'de, D: serde::Deserializer<'de>>(d: D) -> Result<SignedRevocationCheckpoint, D::Error> {
+        let In { checkpoint, signature } = In::deserialize(d)?;
+        let signature = base64::engine::general_purpose::STANDARD
+            .decode(signature.as_bytes())
+            .map_err(|_| serde::de::Error::custom("the carried checkpoint's signature is not base64"))?;
+        Ok(SignedRevocationCheckpoint { checkpoint, signature })
+    }
+}
+
 /// The resource as a grant names it: everything before the resolved provider's `@`.
 pub fn resource_key(resource: &str) -> &str {
     resource.split('@').next().unwrap_or(resource)
@@ -150,6 +210,70 @@ struct AuthorityState {
     gate: ExecutionGate,
     verifier: GrantVerifier,
     revocations: RevocationView,
+    /// Identity-and-lifecycle I4: each `call:` scope this node admitted a call in, with the end of its mandate's
+    /// window. A `call:` checkpoint is kept in `revocations` only for a scope held here, and until that end — not
+    /// until the work ends — so a cancelled call presented again inside its window still reads revoked.
+    call_windows: std::collections::HashMap<(crate::mandate::PrincipalId, String), u64>,
+    /// The same windows ordered by their end, so a sweep reclaims only what has expired, at most
+    /// [`RECLAIM_PER_SWEEP`] at a time, without scanning what it holds.
+    call_expiry: std::collections::BTreeSet<(u64, crate::mandate::PrincipalId, String)>,
+}
+
+impl AuthorityState {
+    /// Hold `scope` until `until`, or until the later end if it is held already: a second mandate on one scope with
+    /// a later window moves the scope's expiry, so it is never reclaimed while that mandate can still be presented.
+    fn keep_call_window(&mut self, authority: &crate::mandate::PrincipalId, scope: &str, until: u64) {
+        let k = (authority.clone(), scope.to_string());
+        match self.call_windows.get(&k).copied() {
+            Some(held) if held >= until => {}
+            Some(held) => {
+                self.call_expiry.remove(&(held, k.0.clone(), k.1.clone()));
+                self.call_expiry.insert((until, k.0.clone(), k.1.clone()));
+                self.call_windows.insert(k, until);
+            }
+            None => {
+                self.call_expiry.insert((until, k.0.clone(), k.1.clone()));
+                self.call_windows.insert(k, until);
+            }
+        }
+    }
+
+    /// Forget up to [`RECLAIM_PER_SWEEP`] `call:` scopes whose window ended before `now_ms`: the window, the scope's
+    /// newest checkpoint and its revoked set. Past its window a `call:` mandate is refused out of window whatever
+    /// its checkpoint says, so nothing a forgotten scope held still decides anything.
+    fn reclaim_call_windows(&mut self, now_ms: u64) -> usize {
+        let mut n = 0;
+        while n < RECLAIM_PER_SWEEP {
+            let Some(first) = self.call_expiry.first().cloned() else { break };
+            if first.0 >= now_ms {
+                break;
+            }
+            self.call_expiry.remove(&first);
+            self.revocations.forget(&first.1, &first.2);
+            self.call_windows.remove(&(first.1, first.2));
+            n += 1;
+        }
+        n
+    }
+}
+
+/// The most `call:` scopes one [`ExecutionAuthority::sweep`] reclaims (identity-and-lifecycle I4), bounding how
+/// long it holds lock-order row 43 for them; the rest wait for the next sweep.
+pub const RECLAIM_PER_SWEEP: usize = 1_024;
+
+/// A stop record with the mandate whose lapse stopped the work (identity-and-lifecycle I4; the maintainer's decision
+/// of 2026-11-12, Q1), from [`ExecutionAuthority::named_stop_records`]. [`StopRecord`] itself is unchanged. A call
+/// registered under a client's grant and its gateway's `call:` mandate has two registrations, and only a cancelled
+/// one writes a record — so the record names which of the two stopped it.
+#[non_exhaustive]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NamedStop {
+    /// The scope of the mandate the work was registered under. `None`: it was registered under none.
+    pub scope: Option<String>,
+    /// That mandate's term.
+    pub term: Option<String>,
+    /// The three moments of the stop.
+    pub record: crate::mandate::authority::StopRecord,
 }
 
 /// A gateway's execution authority: attached with `GossipAgent::with_execution_authority`.
@@ -164,7 +288,7 @@ pub struct ExecutionAuthority {
     running: Mutex<std::collections::HashMap<u64, Running>>,
     next_work: std::sync::atomic::AtomicU64,
     /// Closure plan C10, lock-order row 49: stop records of cancelled work, newest last, bounded. Leaf.
-    stops: Mutex<std::collections::VecDeque<crate::mandate::authority::StopRecord>>,
+    stops: Mutex<std::collections::VecDeque<NamedStop>>,
     /// Adopter-surface X3 (second PR), lock-order row 70: the grants this authority has admitted once, by scope, term
     /// and door — the single-use claim's atomic half (the marker under the request in the KV is its durable half).
     /// Leaf, µs.
@@ -259,6 +383,50 @@ pub(crate) fn feed_grant_checkpoints(ctx: &super::TaskCtx, authority: &Execution
     }
 }
 
+/// The owned key family a `call:` mandate's records live under (identity-and-lifecycle I4):
+/// `call/{gateway segment}/{term}/…`, written by the issuing gateway.
+pub(crate) const CALL_KEY_PREFIX: &str = "call/";
+
+/// The key of a `call:` mandate's checkpoint — the first, then the revoking one:
+/// `call/{gateway segment}/{term}/checkpoint`. `gateway` is the issuing gateway's principal (`node:{id}`), written
+/// as [`grant_holder_segment`] writes a holder; `term` is the mandate's, which its scope `call:{term}` repeats.
+pub(crate) fn call_checkpoint_key(gateway: &str, term: &str) -> String {
+    format!("{CALL_KEY_PREFIX}{}/{term}/checkpoint", grant_holder_segment(gateway))
+}
+
+/// This node's own KV copy of a `call:` scope's newest checkpoint: what [`ExecutionAuthority::assess_call`] reads
+/// under its hold (`read_local`), and what the feeder offers. One key read (papaya, no lock) and a parse.
+pub(crate) fn local_call_checkpoint(ctx: &super::TaskCtx, authority: &crate::mandate::PrincipalId, scope: &str) -> Option<SignedRevocationCheckpoint> {
+    let term = scope.strip_prefix(crate::mandate::grant::CALL_SCOPE_PREFIX)?;
+    serde_json::from_slice(&mycelium_core::ops::kv_get(ctx, &call_checkpoint_key(authority.as_str(), term))?).ok()
+}
+
+/// **Offer `authority` the newest checkpoint of each `call:` scope it holds** (identity-and-lifecycle I4, exit 16) —
+/// run when a key under `call/` changes. It reads **one key per held window** and never scans the key family, so its
+/// cost follows the calls this node admitted, not the `call:` checkpoints the fleet's KV holds; a checkpoint the view
+/// holds already is not verified again. The wake is a coalescing watch that does not carry the written key, which is
+/// why every held window's key is read. Returns how many keys it read.
+pub(crate) fn feed_call_checkpoints(ctx: &super::TaskCtx, authority: &ExecutionAuthority) -> usize {
+    let held = authority.held_call_scopes();
+    if held.is_empty() {
+        return 0;
+    }
+    let now_ms = ctx.hlc.decision_now_ms();
+    let members = super::gateway_member_keys(ctx);
+    for (by, scope) in &held {
+        if let Some(signed) = local_call_checkpoint(ctx, by, scope)
+            && signed.checkpoint.authority == *by
+            && signed.checkpoint.scope == *scope
+            && !authority.holds_checkpoint(by, scope, signed.checkpoint.seq)
+        {
+            // `offer_checkpoint` keeps it only while the window is still held (row 43), so a scope reclaimed since
+            // the snapshot above plants nothing.
+            let _ = authority.offer_checkpoint(&signed, now_ms, &members);
+        }
+    }
+    held.len()
+}
+
 /// One piece of running work (closure plan C10).
 struct Running {
     work: AuthorizedWork,
@@ -317,17 +485,22 @@ impl WorkGuard {
 
 impl Drop for WorkGuard {
     fn drop(&mut self) {
-        self.authority.running.lock().unwrap_or_else(|e| e.into_inner()).remove(&self.id);
+        let was = self.authority.running.lock().unwrap_or_else(|e| e.into_inner()).remove(&self.id);
         if self.is_cancelled() {
             let at = |v: &std::sync::atomic::AtomicU64| match v.load(std::sync::atomic::Ordering::Acquire) {
                 0 => None,
                 t => Some(t),
             };
             let now = (self.now_ms)();
-            let record = crate::mandate::authority::StopRecord {
-                requested_ms: at(&self.requested_ms),
-                acknowledged_ms: at(&self.acknowledged_ms).or(Some(now)),
-                confirmed_ms: Some(now),
+            let mandate = was.and_then(|r| r.work.mandate);
+            let record = NamedStop {
+                scope: mandate.as_ref().map(|m| m.scope.clone()),
+                term: mandate.as_ref().map(|m| m.term.as_str().to_string()),
+                record: crate::mandate::authority::StopRecord {
+                    requested_ms: at(&self.requested_ms),
+                    acknowledged_ms: at(&self.acknowledged_ms).or(Some(now)),
+                    confirmed_ms: Some(now),
+                },
             };
             let mut stops = self.authority.stops.lock().unwrap_or_else(|e| e.into_inner());
             if stops.len() == STOP_RECORDS_KEPT {
@@ -362,7 +535,13 @@ impl ExecutionAuthority {
     pub fn new(gate: ExecutionGate, verifier: GrantVerifier, external: impl Into<SharedExternalIssuers>) -> Self {
         let external = external.into();
         Self {
-            state: Mutex::new(AuthorityState { gate, verifier, revocations: RevocationView::new() }),
+            state: Mutex::new(AuthorityState {
+                gate,
+                verifier,
+                revocations: RevocationView::new(),
+                call_windows: std::collections::HashMap::new(),
+                call_expiry: std::collections::BTreeSet::new(),
+            }),
             external,
             durable: std::sync::OnceLock::new(),
             running: Mutex::new(std::collections::HashMap::new()),
@@ -448,7 +627,12 @@ impl ExecutionAuthority {
             .map(|(id, r)| (*id, r.work.clone()))
             .collect();
         let denied: Vec<u64> = {
-            let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            // Identity-and-lifecycle I4: the `call:` scopes whose window has passed are forgotten under the same hold,
+            // at most `RECLAIM_PER_SWEEP` of them. Work under one is past its `not_after_ms` and is denied below
+            // by its window, whatever the view still holds.
+            st.reclaim_call_windows(now_ms);
+            let st = &*st;
             snapshot
                 .into_iter()
                 .filter(|(_, w)| match &w.mandate {
@@ -456,7 +640,8 @@ impl ExecutionAuthority {
                     // own window and its issuer's checkpoint for the grant's scope — not by the resource gate, whose
                     // scope and epoch rules a grant's own scope would fail at the first sweep (a defect of the first PR,
                     // unobserved because no granted handler ran longer than one sweep interval).
-                    Some(m) if m.is_grant() => {
+                    // A `call:` mandate's work the same way (identity-and-lifecycle I4): a cancel is its term revoked.
+                    Some(m) if m.is_grant() || m.is_call() => {
                         now_ms > w.not_after_ms
                             || matches!(st.revocations.grant_standing(&m.established_by, &m.scope, &m.term), RevocationStanding::Revoked)
                     }
@@ -489,7 +674,13 @@ impl ExecutionAuthority {
     /// Stop records of cancelled work (the newest `1024`), for measuring T_drain with
     /// [`drain_report`](crate::mandate::authority::drain_report).
     pub fn stop_records(&self) -> Vec<crate::mandate::authority::StopRecord> {
-        self.stops.lock().unwrap_or_else(|e| e.into_inner()).iter().copied().collect()
+        self.stops.lock().unwrap_or_else(|e| e.into_inner()).iter().map(|s| s.record).collect()
+    }
+
+    /// [`stop_records`](Self::stop_records), each with the scope and term of the mandate the stopped work was
+    /// registered under (identity-and-lifecycle I4): which mandate's lapse stopped it.
+    pub fn named_stop_records(&self) -> Vec<NamedStop> {
+        self.stops.lock().unwrap_or_else(|e| e.into_inner()).iter().cloned().collect()
     }
 
     /// Work currently running under this authority.
@@ -550,8 +741,143 @@ impl ExecutionAuthority {
         let external = self.external.read().clone();
         let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let st = &mut *st;
+        // Identity-and-lifecycle I4: a `call:` checkpoint is kept only for a scope this node admitted a call in and
+        // still holds the window of — checked under the same hold as the offer, so nothing is planted for a scope the
+        // sweep has reclaimed or another node's call.
+        let c = &signed.checkpoint;
+        if c.scope.starts_with(crate::mandate::grant::CALL_SCOPE_PREFIX) && !st.call_windows.contains_key(&(c.authority.clone(), c.scope.clone())) {
+            return CheckpointOffer::NotHeld;
+        }
         let (policy, clock) = (st.gate.freshness(), st.gate.clock());
         st.revocations.offer(signed, &policy, clock, now_ms, members, &external)
+    }
+
+    /// The `call:` scopes this authority holds a window for (identity-and-lifecycle I4), as `(issuing gateway,
+    /// scope)`: the calls this node admitted whose mandate's window has not been reclaimed.
+    pub(crate) fn held_call_scopes(&self) -> Vec<(crate::mandate::PrincipalId, String)> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner()).call_windows.keys().cloned().collect()
+    }
+
+    /// What the revocation view holds: `(newest checkpoints, revoked sets, call: windows)`. Each admitted `call:`
+    /// scope counts one of each until its window is reclaimed (identity-and-lifecycle I4, exit 9).
+    pub fn view_sizes(&self) -> (usize, usize, usize) {
+        let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let (newest, revoked) = st.revocations.sizes();
+        (newest, revoked, st.call_windows.len())
+    }
+
+    /// **Assess a call's `call:` mandate** (identity-and-lifecycle I4) — the envelope's second slot, `cm`. `gateway`
+    /// is the principal of the gateway whose envelope carried it, `node:{via}`, which the caller established from
+    /// the frame's verified sender. `read_local` returns this node's own KV copy of the scope's newest checkpoint
+    /// (`local_call_checkpoint`); it is called **inside** the hold, see below, so it must take no lock.
+    ///
+    /// Lock-order row 43 is taken **once**, and under that one hold, in this order:
+    ///
+    /// 1. the mandate is verified: the scope is `call:{term}`; its `established_by` and `holder` are both `gateway`
+    ///    (D-6 — no entitlement table is read); its signature; its window, no longer than `GRANT_TTL_CAP_SECS`; the
+    ///    possession proof over this call's operation, resource and **RFC 8785** arguments digest (the kind is new,
+    ///    so no pre-I3 form is accepted); the operation it enumerates;
+    /// 2. the scope's **window is inserted**;
+    /// 3. `read_local` is called;
+    /// 4. the carried checkpoint and the local copy are offered, each only if it is for this mandate's own
+    ///    authority and scope;
+    /// 5. the term is judged: `Established`, [`MandateRefusal::Revoked`], or `Unknown`.
+    ///
+    /// The order closes a race (N2): a revoking checkpoint applied to the KV before step 3 is read there; one
+    /// applied after it wakes the feeder, which offers it only for a held window and takes row 43 to ask — so it
+    /// waits for this hold and then finds the window. A mandate that does not verify plants nothing.
+    ///
+    /// Nothing here is retained across a restart (D-4): the next admission's `read_local` re-reads the KV.
+    #[allow(clippy::too_many_arguments)]
+    pub fn assess_call(
+        &self,
+        gateway: &str,
+        operation: &str,
+        resource: &str,
+        arguments: &serde_json::Value,
+        presented: &PresentedCallMandate,
+        now_ms: u64,
+        members: &impl MemberKeySource,
+        read_local: impl FnOnce(&crate::mandate::PrincipalId, &str) -> Option<SignedRevocationCheckpoint>,
+    ) -> Assessment {
+        let m = &presented.grant.mandate;
+        let digest_hex = hex32(&m.digest());
+        let unknown = |why: String| Assessment {
+            binding: Some(
+                MandateBinding::unknown(m.holder.clone(), m.term.clone(), m.scope.clone(), m.epoch, why)
+                    .with_facts(Some(digest_hex.clone()), None),
+            ),
+            valid_until_ms: Some(m.valid_until_ms),
+        };
+        let refused = |r: MandateRefusal| Assessment {
+            binding: Some(
+                MandateBinding::refused(m.holder.clone(), m.term.clone(), m.scope.clone(), m.epoch, r)
+                    .with_facts(Some(digest_hex.clone()), None),
+            ),
+            valid_until_ms: Some(m.valid_until_ms),
+        };
+        if !m.is_call() {
+            return unknown("the second mandate slot holds a mandate that is not a call: mandate".into());
+        }
+        let Ok(proof) = base64::engine::general_purpose::STANDARD.decode(presented.possession.as_bytes()) else {
+            return unknown("the possession proof is not base64".into());
+        };
+        if super::client_sig::holds_unsafe_integer(arguments) {
+            return refused(MandateRefusal::UnsafeInteger);
+        }
+        let carried = &presented.checkpoint;
+        if carried.checkpoint.authority != m.established_by || carried.checkpoint.scope != m.scope {
+            return unknown("the carried checkpoint is not for this mandate's authority and scope".into());
+        }
+        let request = possession_request(operation, resource, &arguments_digest(arguments));
+        // A snapshot, taken before the state lock: the shared set's lock is never held with another (lock-order row 77).
+        let external = self.external.read().clone();
+        let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let st = &mut *st;
+        // 1. The mandate verifies, or nothing is planted.
+        match crate::mandate::grant::check_call_mandate(&presented.grant, gateway, &request, &proof, now_ms, members, &external) {
+            GrantVerdict::Valid => {}
+            GrantVerdict::OutOfWindow => return refused(MandateRefusal::OutOfWindow { now_ms, valid_until_ms: m.valid_until_ms }),
+            GrantVerdict::NotEntitled => {
+                return unknown(format!(
+                    "a call: mandate counts only when its scope is call:{{term}} and its issuer and holder are the gateway that sent it ({gateway}); this one is issued by {} and held by {}",
+                    m.established_by.as_str(),
+                    m.holder.as_str()
+                ));
+            }
+            other => return unknown(format!("call mandate not established: {other:?}")),
+        }
+        if !m.permits(&mandate_operation(operation, resource)) {
+            return refused(MandateRefusal::NotEnumerated { operation: mandate_operation(operation, resource) });
+        }
+        // 2. The window, before the read: from here the feeder offers this scope's checkpoints.
+        st.keep_call_window(&m.established_by, &m.scope, m.valid_until_ms);
+        #[cfg(test)]
+        call_hooks::fire(self, call_hooks::Stage::BeforeLocalRead);
+        // 3. This node's own copy, read under the hold.
+        let local = read_local(&m.established_by, &m.scope);
+        #[cfg(test)]
+        call_hooks::fire(self, call_hooks::Stage::AfterLocalRead);
+        // 4. Both offered — only for this mandate's own authority and scope, so neither speaks for anything else.
+        let (policy, clock) = (st.gate.freshness(), st.gate.clock());
+        for cp in [Some(carried), local.as_ref()].into_iter().flatten() {
+            let c = &cp.checkpoint;
+            if c.authority == m.established_by && c.scope == m.scope && !st.revocations.holds(&c.authority, &c.scope, c.seq) {
+                let _ = st.revocations.offer(cp, &policy, clock, now_ms, members, &external);
+            }
+        }
+        // 5. Judged as a grant's term is: no freshness, the window bounds its life. A revoked term is refused by name.
+        match st.revocations.grant_standing(&m.established_by, &m.scope, &m.term) {
+            RevocationStanding::NotRevoked => Assessment {
+                binding: Some(
+                    MandateBinding::established(m.holder.clone(), m.term.clone(), m.scope.clone(), m.epoch)
+                        .with_facts(Some(digest_hex.clone()), None),
+                ),
+                valid_until_ms: Some(m.valid_until_ms),
+            },
+            RevocationStanding::Revoked => refused(MandateRefusal::Revoked { term: m.term.as_str().to_string() }),
+            _ => unknown("the call's checkpoint did not verify at this node".into()),
+        }
     }
 
     /// Install a later epoch at the protected resource. Never goes backwards.
@@ -702,6 +1028,13 @@ impl ExecutionAuthority {
             valid_until_ms: Some(m.valid_until_ms),
         };
 
+        // Identity-and-lifecycle I4 (D-1, N3): a `call:` mandate is a gateway's cancellation handle, assessed only in
+        // the envelope's second slot (`assess_call`). In this one it establishes nothing, whoever presents it — a
+        // client replaying a gateway's `call:` mandate as its own gains nothing, and no rule's `requires_mandate`
+        // is met by one.
+        if m.is_call() {
+            return (unknown("a call: mandate is not a caller's".into()), None);
+        }
         if m.holder.as_str() != caller {
             return (unknown(format!("the grant's holder {} is not the caller {caller}", m.holder.as_str())), None);
         }
@@ -804,6 +1137,37 @@ impl ExecutionAuthority {
         })();
         let established = assessment.binding.as_ref().is_some_and(|b| b.state == super::action_evaluator::MandateState::Established);
         (assessment, if established { matched } else { None })
+    }
+}
+
+/// Test hooks inside [`ExecutionAuthority::assess_call`]'s hold (identity-and-lifecycle I4, N2), so a test can land
+/// a revoking checkpoint between the window's insert and the local read, or just after the read.
+#[cfg(test)]
+pub(crate) mod call_hooks {
+    use std::sync::Arc;
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) enum Stage {
+        /// The window is inserted; the local copy is not yet read.
+        BeforeLocalRead,
+        /// The local copy has been read; nothing is offered yet.
+        AfterLocalRead,
+    }
+
+    pub(crate) type Hook = Arc<dyn Fn(Stage) + Send + Sync>;
+
+    /// Per authority (by address), until removed.
+    pub(crate) static HOOKS: std::sync::LazyLock<papaya::HashMap<usize, Hook>> = std::sync::LazyLock::new(papaya::HashMap::new);
+
+    pub(crate) fn key(authority: &super::ExecutionAuthority) -> usize {
+        authority as *const super::ExecutionAuthority as usize
+    }
+
+    pub(super) fn fire(authority: &super::ExecutionAuthority, stage: Stage) {
+        let hook = HOOKS.pin().get(&key(authority)).cloned();
+        if let Some(hook) = hook {
+            hook(stage);
+        }
     }
 }
 
@@ -1177,5 +1541,465 @@ pub(crate) mod tests {
         assert!(matches!(a.assess(CALLER, OP, RES, &digest, Some(&g1), 6_000, &members).binding.unwrap().state,
             MandateState::Unknown(ref why) if why.contains("revoked")));
         assert_eq!(a.assess(CALLER, OP, RES, &digest, Some(&g2), 6_000, &members).binding.unwrap().state, MandateState::Established, "the other grant stands");
+    }
+}
+
+/// **Test-only: what a gateway mints for one call** (identity-and-lifecycle I4). The gateway's own mint is the next
+/// PR's (`gateway_mint_call_mandates`, inside framing); until it lands, the tests mint here with a node key, in the
+/// shape `assess_call` verifies: scope `call:{term}`, issuer and holder the gateway, the one operation of the call, a
+/// possession proof over the RFC 8785 arguments digest, and the first checkpoint (sequence 1, nothing revoked).
+#[cfg(test)]
+pub(crate) mod call_mint {
+    use super::*;
+    use crate::mandate::authority::RevocationCheckpoint;
+    use crate::mandate::grant::{possession_message, CALL_SCOPE_PREFIX};
+    use crate::mandate::{Mandate, PrincipalId, TermId};
+    use ed25519_dalek::SigningKey;
+
+    /// One call's mandate, before it is signed.
+    pub(crate) fn mandate(gateway: &str, term: &str, operation: &str, resource: &str, from_ms: u64, until_ms: u64) -> Mandate {
+        Mandate {
+            holder: PrincipalId::new(gateway).unwrap(),
+            established_by: PrincipalId::new(gateway).unwrap(),
+            purpose: format!("call {term} dispatched by {gateway}"),
+            scope: format!("{CALL_SCOPE_PREFIX}{term}"),
+            operations: vec![mandate_operation(operation, resource)],
+            epoch: 1,
+            term: TermId::new(term).unwrap(),
+            valid_from_ms: from_ms,
+            valid_until_ms: until_ms,
+        }
+    }
+
+    /// A checkpoint of `gateway` for `scope`, signed by `key`.
+    pub(crate) fn checkpoint(key: &SigningKey, gateway: &str, scope: &str, seq: u64, at_ms: u64, revoked: &[&str]) -> SignedRevocationCheckpoint {
+        let c = RevocationCheckpoint {
+            authority: PrincipalId::new(gateway).unwrap(),
+            scope: scope.into(),
+            seq,
+            issued_at_ms: at_ms,
+            revoked: revoked.iter().map(|t| TermId::new(t).unwrap()).collect(),
+        };
+        SignedRevocationCheckpoint { signature: mycelium_core::tls::sign_bytes(key, &c.canonical_bytes()).to_vec(), checkpoint: c }
+    }
+
+    /// `m` signed by `key`, its possession proof for this call, and its first checkpoint.
+    pub(crate) fn present(key: &SigningKey, m: Mandate, operation: &str, resource: &str, arguments: &serde_json::Value) -> PresentedCallMandate {
+        let first = checkpoint(key, m.established_by.as_str(), &m.scope, 1, m.valid_from_ms, &[]);
+        let proof = mycelium_core::tls::sign_bytes(key, &possession_message(&m, &possession_request(operation, resource, &arguments_digest(arguments))));
+        let grant = SignedMandateGrant { signature: mycelium_core::tls::sign_bytes(key, &m.canonical_bytes()).to_vec(), mandate: m };
+        PresentedCallMandate::new(grant, &proof, first)
+    }
+
+    /// The whole mint for one call.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn mint(key: &SigningKey, gateway: &str, term: &str, operation: &str, resource: &str, arguments: &serde_json::Value, from_ms: u64, until_ms: u64) -> PresentedCallMandate {
+        present(key, mandate(gateway, term, operation, resource, from_ms, until_ms), operation, resource, arguments)
+    }
+}
+
+/// Identity-and-lifecycle I4 at the authority: `assess_call`, the windows, the sweep and the stop records, with no
+/// node. The node-level halves (the KV read, the feeder) are in `call_mandate_tests`.
+#[cfg(test)]
+mod call_tests {
+    use super::call_mint::{checkpoint, mandate, mint, present};
+    use super::tests::{external, keys, OP, RES};
+    use super::*;
+    use crate::agent::action_evaluator::MandateState;
+    use crate::knowledge::issuer::MemberKeys;
+    use crate::mandate::authority::{ClockModel, FreshnessPolicy, ResourceTier};
+    use crate::mandate::grant::EntitlementTable;
+    use crate::mandate::{PrincipalId, ResourceAuthority};
+    use crate::node_id::NodeId;
+    use ed25519_dalek::SigningKey;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    const GW: &str = "node:127.0.0.1:7601";
+    const OTHER_GW: &str = "node:127.0.0.1:7602";
+
+    fn gw_key() -> SigningKey {
+        SigningKey::from_bytes(&[51u8; 32])
+    }
+    fn other_key() -> SigningKey {
+        SigningKey::from_bytes(&[52u8; 32])
+    }
+    /// Both gateways are members whose keys this provider holds.
+    fn members() -> HashMap<NodeId, MemberKeys> {
+        HashMap::from([
+            (NodeId::new("127.0.0.1", 7601).unwrap(), MemberKeys { retained: vec![gw_key().verifying_key().to_bytes()], ..Default::default() }),
+            (NodeId::new("127.0.0.1", 7602).unwrap(), MemberKeys { retained: vec![other_key().verifying_key().to_bytes()], ..Default::default() }),
+        ])
+    }
+    fn args() -> serde_json::Value {
+        serde_json::json!({ "text": "restock aisle 4" })
+    }
+    /// A provider's authority. `fleet`: grants from every member are entitled — which must not reach `call:`.
+    fn provider(fleet: bool) -> Arc<ExecutionAuthority> {
+        let (ak, hk) = keys();
+        let mut t = EntitlementTable::new();
+        t.entitle("depot", PrincipalId::new("operator:acme").unwrap());
+        t.entitle_grants(PrincipalId::new("operator:acme").unwrap());
+        if fleet {
+            t.entitle_grants_from_fleet();
+        }
+        let gate = ExecutionGate::strict(
+            ResourceAuthority::new("depot", 1),
+            ResourceTier::Serialised,
+            ClockModel { skew_ms: 100 },
+            FreshnessPolicy { freshness_ms: 60_000, interval_ms: 20_000, delivery_ms: 5_000 },
+        )
+        .unwrap();
+        Arc::new(ExecutionAuthority::new(gate, GrantVerifier::new(t), external(&ak, &hk)))
+    }
+    fn state(a: &Assessment) -> Option<MandateState> {
+        a.binding.as_ref().map(|b| b.state.clone())
+    }
+    fn no_local(_: &PrincipalId, _: &str) -> Option<SignedRevocationCheckpoint> {
+        None
+    }
+    fn assess(p: &ExecutionAuthority, gateway: &str, c: &PresentedCallMandate, now: u64) -> Assessment {
+        p.assess_call(gateway, OP, RES, &args(), c, now, &members(), no_local)
+    }
+    fn begin(p: &Arc<ExecutionAuthority>, c: &PresentedCallMandate, now: u64) -> WorkGuard {
+        let m = &c.grant.mandate;
+        p.begin(AuthorizedWork::new(mandate_operation(OP, RES), Some(m.clone()), m.valid_until_ms), Arc::new(move || now))
+    }
+
+    /// **Exit 1, at the authority.** A provider that has never seen a call's checkpoint establishes its `call:`
+    /// mandate from the carried one, and the work is registered. Seen failing first: with the carried checkpoint not
+    /// offered — the stripped form, the only one before the row — the mandate is `Unknown`.
+    #[test]
+    fn a_call_mandate_is_established_from_its_carried_checkpoint_and_registered() {
+        let p = provider(false);
+        assert_eq!(p.view_sizes(), (0, 0, 0));
+        let c = mint(&gw_key(), GW, "c1", OP, RES, &args(), 1_000, 60_000);
+        let a = assess(&p, GW, &c, 2_000);
+        assert_eq!(state(&a), Some(MandateState::Established), "{a:?}");
+        assert_eq!(a.valid_until_ms, Some(60_000));
+        assert_eq!(p.view_sizes(), (1, 1, 1), "one checkpoint, one revoked-set entry and one window per admitted call");
+        let g = begin(&p, &c, 2_000);
+        assert_eq!(p.running_count(), 1);
+        drop(g);
+        assert_eq!(p.running_count(), 0);
+    }
+
+    /// **Exit 2 and N3 (c), D-1.** The same mandate in the first slot — `assess`, where a caller's mandate goes —
+    /// establishes nothing, presented by the gateway itself or by a client: a `call:` mandate is never a caller's.
+    /// Seen failing first: without the `is_call` arm in `assess_digests`, the reason is the entitlement table's
+    /// (`NotEntitled`), which an operator entitling the scope would lift.
+    #[test]
+    fn a_call_mandate_in_the_first_slot_is_not_a_callers() {
+        let (ak, hk) = keys();
+        let mut t = EntitlementTable::new();
+        // Even entitled by name and from the fleet, the first slot does not take it.
+        t.entitle("call:c2", PrincipalId::new(GW).unwrap());
+        t.entitle_grants_from_fleet();
+        let gate = ExecutionGate::strict(ResourceAuthority::new("depot", 1), ResourceTier::Serialised, ClockModel { skew_ms: 100 }, FreshnessPolicy { freshness_ms: 60_000, interval_ms: 20_000, delivery_ms: 5_000 }).unwrap();
+        let p = ExecutionAuthority::new(gate, GrantVerifier::new(t), external(&ak, &hk));
+        let c = mint(&gw_key(), GW, "c2", OP, RES, &args(), 1_000, 60_000);
+        let slot1 = PresentedMandate { grant: c.grant.clone(), possession: c.possession.clone() };
+        for caller in [GW, "token:gw/agent-1"] {
+            let (a, form) = p.assess_arguments(caller, OP, RES, &args(), Some(&slot1), 2_000, &members());
+            assert!(matches!(state(&a), Some(MandateState::Unknown(ref why)) if why == "a call: mandate is not a caller's"), "{caller}: {a:?}");
+            assert_eq!(form, None);
+        }
+        assert_eq!(p.view_sizes(), (0, 0, 0), "and nothing is held for it");
+    }
+
+    /// **Exit 3 and N3 (b), (d), D-6.** A `call:` mandate counts only when its issuer and its holder are the gateway
+    /// whose envelope carries it. From another gateway's envelope it is `Unknown`; issued by one member for another
+    /// is `Unknown`; signed by another member node in the gateway's name is `Unknown` — all with grants entitled from
+    /// the whole fleet, which does not reach `call:`. Nothing is held for any of them. Seen failing first: with
+    /// `check_call_mandate` verifying under the mandate's own `established_by` — any member an issuer, the spike's
+    /// rule — the first is `Established`.
+    #[test]
+    fn a_call_mandate_counts_only_from_the_gateway_that_issued_and_holds_it() {
+        let p = provider(true);
+        // (b) The gateway's own mandate, carried in another gateway's envelope.
+        let c = mint(&gw_key(), GW, "c3", OP, RES, &args(), 1_000, 60_000);
+        let a = assess(&p, OTHER_GW, &c, 2_000);
+        assert!(matches!(state(&a), Some(MandateState::Unknown(ref why)) if why.contains("the gateway that sent it")), "{a:?}");
+        // (d) Issued by the other member, held by the sending gateway: `established_by` is not the holder.
+        let mut m = mandate(GW, "c4", OP, RES, 1_000, 60_000);
+        m.established_by = PrincipalId::new(OTHER_GW).unwrap();
+        let first = checkpoint(&other_key(), OTHER_GW, &m.scope, 1, 1_000, &[]);
+        let proof = mycelium_core::tls::sign_bytes(&gw_key(), &crate::mandate::grant::possession_message(&m, &possession_request(OP, RES, &arguments_digest(&args()))));
+        let grant = SignedMandateGrant { signature: mycelium_core::tls::sign_bytes(&other_key(), &m.canonical_bytes()).to_vec(), mandate: m };
+        let a = assess(&p, GW, &PresentedCallMandate::new(grant, &proof, first), 2_000);
+        assert!(matches!(state(&a), Some(MandateState::Unknown(_))), "{a:?}");
+        // Signed by another member's key in the gateway's name: the signature is not the gateway's.
+        let forged = mint(&other_key(), GW, "c5", OP, RES, &args(), 1_000, 60_000);
+        let a = assess(&p, GW, &forged, 2_000);
+        assert!(matches!(state(&a), Some(MandateState::Unknown(_))), "{a:?}");
+        // A principal that is not a node's.
+        let token = mint(&gw_key(), "token:gw/agent-1", "c6", OP, RES, &args(), 1_000, 60_000);
+        assert!(matches!(state(&assess(&p, "token:gw/agent-1", &token, 2_000)), Some(MandateState::Unknown(_))));
+        // A scope that is not `call:{term}`.
+        let mut m = mandate(GW, "c7", OP, RES, 1_000, 60_000);
+        m.scope = "call:c8".into();
+        assert!(matches!(state(&assess(&p, GW, &present(&gw_key(), m, OP, RES, &args()), 2_000)), Some(MandateState::Unknown(_))));
+        assert_eq!(p.view_sizes(), (0, 0, 0), "a mandate that does not verify plants nothing");
+        // And the honest one, last, is established at the same provider.
+        assert_eq!(state(&assess(&p, GW, &c, 2_000)), Some(MandateState::Established));
+    }
+
+    /// **What else `assess_call` refuses**, each by name: another call's arguments or operation, a window past its
+    /// end or longer than the cap, an integer no digest binds, a carried checkpoint for another scope.
+    #[test]
+    fn a_call_mandate_is_bound_to_its_call_and_its_window() {
+        let p = provider(false);
+        let c = mint(&gw_key(), GW, "c10", OP, RES, &args(), 1_000, 60_000);
+        // Other arguments: the possession proof is for this call's digest.
+        let a = p.assess_call(GW, OP, RES, &serde_json::json!({ "text": "something else" }), &c, 2_000, &members(), no_local);
+        assert!(matches!(state(&a), Some(MandateState::Unknown(ref why)) if why.contains("WrongHolder")), "{a:?}");
+        // Another resource: the proof and the enumerated operation are for this one.
+        let a = p.assess_call(GW, OP, "skill:depot/other@127.0.0.1:9", &args(), &c, 2_000, &members(), no_local);
+        assert!(matches!(state(&a), Some(MandateState::Unknown(_))), "{a:?}");
+        // A mandate enumerating another operation than the one its proof is for.
+        let mut m = mandate(GW, "c11", OP, RES, 1_000, 60_000);
+        m.operations = vec!["tools/call:tool:other".into()];
+        let a = assess(&p, GW, &present(&gw_key(), m, OP, RES, &args()), 2_000);
+        assert!(matches!(state(&a), Some(MandateState::Refused(MandateRefusal::NotEnumerated { .. }))), "{a:?}");
+        // Past its window.
+        assert!(matches!(state(&assess(&p, GW, &c, 60_001)), Some(MandateState::Refused(MandateRefusal::OutOfWindow { .. }))));
+        // A window longer than the cap: a receiver would hold it that long.
+        let long = mint(&gw_key(), GW, "c12", OP, RES, &args(), 1_000, 1_000 + crate::mandate::grant::GRANT_TTL_CAP_SECS * 1_000 + 1);
+        assert!(matches!(state(&assess(&p, GW, &long, 2_000)), Some(MandateState::Refused(MandateRefusal::OutOfWindow { .. }))));
+        let at_cap = mint(&gw_key(), GW, "c13", OP, RES, &args(), 1_000, 1_000 + crate::mandate::grant::GRANT_TTL_CAP_SECS * 1_000);
+        assert_eq!(state(&assess(&p, GW, &at_cap, 2_000)), Some(MandateState::Established));
+        // An integer outside ±(2^53 − 1).
+        let big = serde_json::json!({ "id": 9_007_199_254_740_993u64 });
+        let c14 = mint(&gw_key(), GW, "c14", OP, RES, &big, 1_000, 60_000);
+        let a = p.assess_call(GW, OP, RES, &big, &c14, 2_000, &members(), no_local);
+        assert!(matches!(state(&a), Some(MandateState::Refused(MandateRefusal::UnsafeInteger))), "{a:?}");
+        // A checkpoint carried for another scope speaks for nothing, and is not offered.
+        let mut c15 = mint(&gw_key(), GW, "c15", OP, RES, &args(), 1_000, 60_000);
+        c15.checkpoint = checkpoint(&gw_key(), GW, "call:c999", 1, 1_000, &[]);
+        assert!(matches!(state(&assess(&p, GW, &c15, 2_000)), Some(MandateState::Unknown(ref why)) if why.contains("carried checkpoint")));
+        assert_eq!(p.view_sizes().2, 1, "and no window is held for it: only c13's, the one mandate established so far");
+        // A carried checkpoint the gateway did not sign: the window is held (the mandate verified), nothing else.
+        let before = p.view_sizes();
+        let mut c16 = mint(&gw_key(), GW, "c16", OP, RES, &args(), 1_000, 60_000);
+        c16.checkpoint = checkpoint(&other_key(), GW, "call:c16", 1, 1_000, &[]);
+        assert!(matches!(state(&assess(&p, GW, &c16, 2_000)), Some(MandateState::Unknown(_))));
+        assert_eq!(p.view_sizes(), (before.0, before.1, before.2 + 1));
+    }
+
+    /// **Exits 5 and 6, at the authority (bound 1).** A term whose revocation is in the provider's own KV when the
+    /// call is admitted is `Refused(Revoked)` there, by name. A call admitted before its revocation arrives is
+    /// registered, and stopped by the sweep once the revoking checkpoint is offered; its stop record names the
+    /// `call:` scope and term. Re-presented with its stale first checkpoint, it stays refused.
+    #[test]
+    fn a_revoked_term_is_refused_and_running_work_is_stopped_when_the_revocation_arrives() {
+        let p = provider(false);
+        // Already revoked in this node's KV: read under the hold, refused before anything is registered.
+        let c = mint(&gw_key(), GW, "c20", OP, RES, &args(), 1_000, 60_000);
+        let revoking = checkpoint(&gw_key(), GW, "call:c20", 2, 1_500, &["c20"]);
+        let a = p.assess_call(GW, OP, RES, &args(), &c, 2_000, &members(), |by, scope| {
+            assert_eq!((by.as_str(), scope), (GW, "call:c20"));
+            Some(revoking.clone())
+        });
+        assert!(matches!(state(&a), Some(MandateState::Refused(MandateRefusal::Revoked { ref term })) if term == "c20"), "{a:?}");
+        // The race: framed with sequence 1, admitted before the revocation reaches this node.
+        let r = mint(&gw_key(), GW, "c21", OP, RES, &args(), 1_000, 60_000);
+        assert_eq!(state(&assess(&p, GW, &r, 2_000)), Some(MandateState::Established));
+        let g = begin(&p, &r, 3_000);
+        assert_eq!(p.sweep(2_100), 0, "registered, and nothing has revoked it here yet");
+        assert!(p.named_stop_records().is_empty());
+        let offered = p.offer_checkpoint(&checkpoint(&gw_key(), GW, "call:c21", 2, 1_800, &["c21"]), 2_200, &members());
+        assert_eq!(offered, CheckpointOffer::Accepted);
+        assert_eq!(p.sweep(2_200), 1, "the revoking checkpoint's arrival stops it at the next sweep");
+        assert!(g.is_cancelled());
+        drop(g);
+        let stops = p.named_stop_records();
+        assert_eq!(stops.len(), 1);
+        assert_eq!((stops[0].scope.as_deref(), stops[0].term.as_deref()), (Some("call:c21"), Some("c21")), "the record names the mandate whose lapse stopped the work");
+        assert_eq!(p.stop_records(), vec![stops[0].record], "and `stop_records` is the same records, unchanged in shape");
+        // The stale carried checkpoint cannot un-revoke.
+        assert!(matches!(state(&assess(&p, GW, &r, 2_300)), Some(MandateState::Refused(MandateRefusal::Revoked { .. }))));
+    }
+
+    /// **N4, at the authority: a call registered under both slots.** Two `begin`s, so `running_count` is 2 for one
+    /// call; revoking the `call:` term cancels that registration alone and its record names the term; revoking the
+    /// grant cancels the other and names the grant. Seen failing first: with the sweep's arm reading `is_grant()`
+    /// only, `call:` work is judged by the resource gate and cancelled at the first sweep for its scope, revoked or
+    /// not.
+    #[test]
+    fn a_call_under_both_slots_is_registered_twice_and_each_record_names_its_mandate() {
+        let (ak, _) = keys();
+        let p = provider(false);
+        let c = mint(&gw_key(), GW, "c30", OP, RES, &args(), 1_000, 60_000);
+        assert_eq!(state(&assess(&p, GW, &c, 2_000)), Some(MandateState::Established));
+        // A client's grant, its issuer's first checkpoint held.
+        let mut grant = crate::agent::gateway_authority::tests::mandate(1, 60_000);
+        grant.scope = "grant:r30".into();
+        grant.term = crate::mandate::TermId::new("r30").unwrap();
+        let grant_cp = |seq, revoked: &[&str]| {
+            let c = crate::mandate::authority::RevocationCheckpoint {
+                authority: PrincipalId::new("operator:acme").unwrap(),
+                scope: "grant:r30".into(),
+                seq,
+                issued_at_ms: 1_000,
+                revoked: revoked.iter().map(|t| crate::mandate::TermId::new(t).unwrap()).collect(),
+            };
+            SignedRevocationCheckpoint { signature: mycelium_core::tls::sign_bytes(&ak, &c.canonical_bytes()).to_vec(), checkpoint: c }
+        };
+        assert_eq!(p.offer_checkpoint(&grant_cp(1, &[]), 2_000, &members()), CheckpointOffer::Accepted);
+        let register = |p: &Arc<ExecutionAuthority>| {
+            let under_grant = p.begin(AuthorizedWork::new(mandate_operation(OP, RES), Some(grant.clone()), 60_000), Arc::new(|| 2_000));
+            (under_grant, begin(p, &c, 2_000))
+        };
+        let (under_grant, under_call) = register(&p);
+        assert_eq!(p.running_count(), 2, "one call, two registrations");
+        assert_eq!(p.sweep(2_100), 0, "neither is revoked: `call:` work is not judged by the resource gate");
+        // The cancel: the `call:` term revoked.
+        let _ = p.offer_checkpoint(&checkpoint(&gw_key(), GW, "call:c30", 2, 2_150, &["c30"]), 2_200, &members());
+        assert_eq!(p.sweep(2_200), 1);
+        assert!(under_call.is_cancelled() && !under_grant.is_cancelled());
+        // The handler's future drops both guards; only the cancelled one writes a record.
+        drop((under_grant, under_call));
+        let stops = p.named_stop_records();
+        assert_eq!(stops.iter().map(|s| (s.scope.as_deref(), s.term.as_deref())).collect::<Vec<_>>(), vec![(Some("call:c30"), Some("c30"))]);
+        assert_eq!(p.running_count(), 0);
+        // The other way: a second call under the same grant, the grant revoked.
+        let c2 = mint(&gw_key(), GW, "c31", OP, RES, &args(), 1_000, 60_000);
+        assert_eq!(state(&assess(&p, GW, &c2, 2_300)), Some(MandateState::Established));
+        let under_grant = p.begin(AuthorizedWork::new(mandate_operation(OP, RES), Some(grant.clone()), 60_000), Arc::new(|| 2_300));
+        let under_call = begin(&p, &c2, 2_300);
+        let _ = p.offer_checkpoint(&grant_cp(2, &["r30"]), 2_400, &members());
+        assert_eq!(p.sweep(2_400), 1);
+        assert!(under_grant.is_cancelled() && !under_call.is_cancelled());
+        drop((under_grant, under_call));
+        assert_eq!(p.named_stop_records().last().map(|s| (s.scope.clone(), s.term.clone())), Some((Some("grant:r30".into()), Some("r30".into()))));
+    }
+
+    /// **Exit 9, at the authority: what is held, and until when.** A `call:` checkpoint for a scope this node
+    /// admitted no call in is not kept (`NotHeld`). An admitted scope is kept until its mandate's window ends — not
+    /// until its work ends — so a cancelled call presented again inside the window stays refused; one sweep past
+    /// the window nothing is held, and a late checkpoint for the forgotten scope is not kept either. A second
+    /// mandate on the scope with a later window moves the scope's expiry.
+    #[test]
+    fn a_call_scope_is_held_for_its_window_and_only_where_it_was_admitted() {
+        let p = provider(false);
+        // Not admitted here: nothing is kept, whatever arrives.
+        for seq in 1..=2 {
+            assert_eq!(p.offer_checkpoint(&checkpoint(&gw_key(), GW, "call:c40", seq, 1_000, &["c40"]), 2_000, &members()), CheckpointOffer::NotHeld);
+        }
+        assert_eq!(p.view_sizes(), (0, 0, 0));
+        // Admitted, run, finished, then cancelled late: still held, still refused inside the window.
+        let c = mint(&gw_key(), GW, "c41", OP, RES, &args(), 1_000, 10_000);
+        assert_eq!(state(&assess(&p, GW, &c, 2_000)), Some(MandateState::Established));
+        drop(begin(&p, &c, 2_000));
+        let _ = p.offer_checkpoint(&checkpoint(&gw_key(), GW, "call:c41", 2, 2_500, &["c41"]), 3_000, &members());
+        p.sweep(9_999);
+        assert_eq!(p.view_sizes(), (1, 1, 1), "kept until the window ends, not until the work ends");
+        assert!(matches!(state(&assess(&p, GW, &c, 9_999)), Some(MandateState::Refused(MandateRefusal::Revoked { .. }))));
+        p.sweep(10_000);
+        assert_eq!(p.view_sizes(), (1, 1, 1), "the window's last millisecond is inside it");
+        p.sweep(10_001);
+        assert_eq!(p.view_sizes(), (0, 0, 0), "one sweep past the window, nothing is held");
+        assert_eq!(p.offer_checkpoint(&checkpoint(&gw_key(), GW, "call:c41", 3, 9_000, &["c41"]), 10_002, &members()), CheckpointOffer::NotHeld);
+        assert_eq!(p.view_sizes(), (0, 0, 0), "and a checkpoint arriving late for the forgotten scope is not kept");
+        assert!(matches!(state(&assess(&p, GW, &c, 10_002)), Some(MandateState::Refused(MandateRefusal::OutOfWindow { .. }))), "past the window the mandate is refused whatever was forgotten");
+        // A second mandate on one scope with a later end moves the scope's expiry.
+        let early = mint(&gw_key(), GW, "c42", OP, RES, &args(), 1_000, 5_000);
+        let late = mint(&gw_key(), GW, "c42", OP, RES, &args(), 1_000, 8_000);
+        assert_eq!(state(&assess(&p, GW, &early, 2_000)), Some(MandateState::Established));
+        assert_eq!(state(&assess(&p, GW, &late, 2_000)), Some(MandateState::Established));
+        assert_eq!(state(&assess(&p, GW, &early, 2_000)), Some(MandateState::Established), "and the earlier end, seen again, does not move it back");
+        p.sweep(5_001);
+        assert_eq!(p.view_sizes().2, 1, "the scope is held while the later mandate can still be presented");
+        p.sweep(8_001);
+        assert_eq!(p.view_sizes(), (0, 0, 0));
+    }
+
+    /// **Exit 10: no sweep reclaims more than its cap.** `RECLAIM_PER_SWEEP` + 10 windows, all expired: the first
+    /// sweep forgets exactly the cap, the second the rest.
+    #[test]
+    fn a_sweep_reclaims_at_most_its_cap() {
+        let p = provider(false);
+        let by = PrincipalId::new(GW).unwrap();
+        {
+            let mut st = p.state.lock().unwrap();
+            for i in 0..RECLAIM_PER_SWEEP + 10 {
+                st.keep_call_window(&by, &format!("call:w{i}"), 1_000 + (i as u64 % 7));
+            }
+        }
+        assert_eq!(p.view_sizes().2, RECLAIM_PER_SWEEP + 10);
+        p.sweep(2_000);
+        assert_eq!(p.view_sizes().2, 10);
+        p.sweep(2_000);
+        assert_eq!(p.view_sizes().2, 0);
+    }
+
+    /// **Exit 11 and N5 (b): the start rule.** A reader that started after a call was minted — a restarted
+    /// provider, where no window table is persisted (D-4) — still establishes it: a `call:` checkpoint is exempt from
+    /// the start rule as a grant's is. And N5 (a) at the view: the same reader, finding the revoking checkpoint in
+    /// its KV, refuses the call. Seen failing first: under the `grant:`-only exemption the first is `Unknown`.
+    #[test]
+    fn a_call_minted_before_a_restart_is_established_after_it_and_a_revoked_one_refused() {
+        let p = provider(false);
+        p.mark_started(50_000);
+        let c = mint(&gw_key(), GW, "c50", OP, RES, &args(), 1_000, 90_000);
+        let a = assess(&p, GW, &c, 51_000);
+        assert_eq!(state(&a), Some(MandateState::Established), "{a:?}");
+        // A fresh reader again; this time its KV holds the revocation written before it restarted.
+        let q = provider(false);
+        q.mark_started(50_000);
+        let revoking = checkpoint(&gw_key(), GW, "call:c50", 2, 2_000, &["c50"]);
+        let a = q.assess_call(GW, OP, RES, &args(), &c, 51_000, &members(), |_, _| Some(revoking.clone()));
+        assert!(matches!(state(&a), Some(MandateState::Refused(MandateRefusal::Revoked { .. }))), "{a:?}");
+        // A standing scope is still under the rule.
+        let (ak, _) = keys();
+        let old = crate::agent::gateway_authority::tests::checkpoint(&ak, 1, 1_000, &[]);
+        assert!(matches!(p.offer_checkpoint(&old, 51_000, &members()), CheckpointOffer::IssuedBeforeStart { .. }));
+    }
+
+    /// **The wire shape of `cm`.** A `PresentedCallMandate` round-trips, its checkpoint's signature is base64 on
+    /// the wire, and a mandate without a checkpoint does not parse — the checkpoint is required.
+    #[test]
+    fn a_presented_call_mandate_carries_its_checkpoint_with_a_base64_signature() {
+        let c = mint(&gw_key(), GW, "c60", OP, RES, &args(), 1_000, 60_000);
+        let v = serde_json::to_value(&c).unwrap();
+        let sig = v["checkpoint"]["signature"].as_str().expect("base64, not an array");
+        assert_eq!(base64::engine::general_purpose::STANDARD.decode(sig).unwrap(), c.checkpoint.signature);
+        assert_eq!(v["checkpoint"]["checkpoint"]["scope"], "call:c60");
+        assert_eq!(serde_json::from_value::<PresentedCallMandate>(v.clone()).unwrap(), c);
+        let mut bare = v.clone();
+        bare.as_object_mut().unwrap().remove("checkpoint");
+        assert!(serde_json::from_value::<PresentedCallMandate>(bare).is_err());
+        let mut array = v;
+        array["checkpoint"]["signature"] = serde_json::json!(c.checkpoint.signature);
+        assert!(serde_json::from_value::<PresentedCallMandate>(array).is_err(), "the array form is not accepted");
+        println!("cm: {} B as JSON (its checkpoint {} B)", serde_json::to_vec(&c).unwrap().len(), serde_json::to_vec(&serde_json::to_value(&c).unwrap()["checkpoint"]).unwrap().len());
+    }
+
+    /// **Exit 10's measurement: how long a sweep holds row 43 for the `call:` windows.** 10⁵ windows, all expired:
+    /// each sweep reclaims its cap. Run in release, `--ignored --nocapture`; the figures are on the lock-order row.
+    #[test]
+    #[ignore = "a measurement: cargo test --release --lib --features compliance,a2a a_sweeps_hold_is_measured -- --ignored --nocapture"]
+    fn a_sweeps_hold_is_measured_on_100k_windows() {
+        let p = provider(false);
+        let by = PrincipalId::new(GW).unwrap();
+        const N: usize = 100_000;
+        {
+            let mut st = p.state.lock().unwrap();
+            for i in 0..N {
+                st.keep_call_window(&by, &format!("call:w{i}"), 10_000);
+            }
+        }
+        let t = std::time::Instant::now();
+        p.sweep(9_000);
+        let idle = t.elapsed();
+        let (mut sweeps, mut worst, total) = (0, std::time::Duration::ZERO, std::time::Instant::now());
+        while p.view_sizes().2 > 0 {
+            let t = std::time::Instant::now();
+            p.sweep(10_001);
+            worst = worst.max(t.elapsed());
+            sweeps += 1;
+        }
+        println!("sweep hold, {N} call: windows: idle sweep {idle:?}; {sweeps} reclaiming sweeps, worst {worst:?}, total {:?}", total.elapsed());
+        assert_eq!(sweeps, N.div_ceil(RECLAIM_PER_SWEEP));
     }
 }

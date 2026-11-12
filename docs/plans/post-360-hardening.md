@@ -2234,6 +2234,10 @@ Every other site registers before it spawns, or inside the function that awaits 
 runs of the whole `agent::bulk` module at 24 parallel processes.
 
 **Known flakes, open (seen during the v2.36.0 work, 2026-10-19; not yet investigated):**
+- `agent::exposure::tests::doors::the_shadow_profile_counts_and_holds_nothing` (Y5/Y11, the exposure policy's shadow
+  rung) — *"legacy held: … the actor's history kept changing while this decision was made on it"*, once on PR #765's
+  first CI run (run 43191033407, attempt 1, the strict `compliance,a2a` lib line, 2026-11-12); attempt 2 was green.
+  The branch touched only gate scripts and documentation.
 - `lib_tests::a_second_live_default_is_refused_by_name` (P2's migration) — *"the lock decides in the successor:
   Superseded"* at its closing `distributed_lock` (`src/lib_tests.rs`), once on `main`'s CI for the v2.40.0 release
   commit (run 43158368410, attempt 1, the strict `compliance,a2a` lib run, 2026-11-12), beside `row18` below; attempt 2

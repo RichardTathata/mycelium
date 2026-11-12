@@ -135,6 +135,7 @@
 //! | `grant/{agent}/{request}/issued`   | the signed grant (`SignedMandateGrant`, scope `grant:{request}`) written by `POST /gateway/grants/{agent}/{request}` (`grant:issue`) |
 //! | `grant/{agent}/{request}/refused`  | a supervisor's refusal, with the issuer and reason |
 //! | `grant/{agent}/{request}/checkpoint` | the issuing node's revocation checkpoint for the grant's scope — sequence 1 at issue (nothing revoked), sequence 2 at revocation (the term named); every node's authority is fed it from the KV, so a grant issued or revoked at one node is known at every other |
+//! | `call/{gateway}/{term}/checkpoint` | identity-and-lifecycle I4 — a `call:` mandate's revocation checkpoint for its scope `call:{term}`, written by the gateway that issued the mandate (`{gateway}` its `node:` principal): sequence 1 at the mint, the next to cancel the call. A provider reads its own copy when it admits the call (`ExecutionAuthority::assess_call`) and is fed it afterwards only while it holds the call's window. Route-owned: the raw KV routes refuse the prefix (`protected_key`). **No gateway writes it yet — the mint is the row's next PR** |
 //! | `grant/{agent}/{request}/consumed` | written by the agent's commit: the request's grant admitted one transition, so the same tool and arguments ask again |
 //! | `grant/{agent}/{request}/used/{door}` | written by an enforcement point (`gateway`, `provider`) that admitted a call under the grant: a grant admits one call at each door, and a second presentation there is refused `GrantUsed` (adopter-surface X3, second PR) |
 //! | `grant/{agent}/{request}/revoked`  | the revocation, with the issuer, the reason and the checkpoint's sequence, written by `POST /gateway/grants/{agent}/{request}/revoke` (`grant:issue`) at the issuing node |
@@ -432,7 +433,7 @@ pub use agent::guarantee::{
 #[cfg(all(feature = "gateway", feature = "tls"))]
 pub use agent::gateway_authority::{
     arguments_digest, legacy_arguments_digest, mandate_operation, possession_request, resource_key, Assessment, DigestForm,
-    ExecutionAuthority, PresentedMandate, WorkGuard,
+    ExecutionAuthority, NamedStop, PresentedCallMandate, PresentedMandate, WorkGuard, RECLAIM_PER_SWEEP,
 };
 #[cfg(all(feature = "gateway", feature = "tls"))]
 pub use agent::evidence_journal::{

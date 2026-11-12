@@ -12,7 +12,7 @@ fn alloc_port() -> u16 { crate::test_util::alloc_port() }
 
 /// The names the listing hides: exactly these rows, and each one's keys are owned.
 const HIDDEN: &[&str] = &["sys/audit/", "sys/audit-checkpoint/", "sys/client-cert/", "audit/", "mailbox/", "mandate/",
-                          "rights/", "grant/", "sched/"];
+                          "rights/", "grant/", "call/", "sched/"];
 
 /// The owned rows whose names the listing answers: exactly these. A row added to `OWNED_KV_PREFIXES` is in
 /// neither list until someone decides, and the test below fails on it — `listed` is a disclosure, not a default.
