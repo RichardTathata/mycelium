@@ -16,6 +16,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 const OP: &str = "skill.invoke";
+/// A mandate window no test here outlives (50 minutes, under the 3 600 s cap): for tests that count what is held,
+/// which the node's real-clock sweep must not reclaim under them on a slow host.
+const LONG_WINDOW_MS: u64 = 3_000_000;
 
 /// A started node with a TLS identity and an execution authority, and its directory, removed on drop.
 struct Node(Arc<GossipAgent>, Arc<ExecutionAuthority>, std::path::PathBuf);
@@ -193,7 +196,10 @@ async fn a_node_holds_only_the_calls_it_admitted_and_only_for_their_windows() {
     const N: usize = 2_500;
     const { assert!(N > super::gateway_authority::RECLAIM_PER_HOLD * 2) };
     let n = node(120_000).await;
-    let calls: Vec<PresentedCallMandate> = (0..N).map(|i| n.mint(&format!("r{i}"), 30_000)).collect();
+    // A window far longer than the test: the node's own sweep runs on the real clock, and on a slow host minting and
+    // admitting 2 500 calls outlasted a 30 s window — the sweep reclaimed all but 35 before the count was taken (CI,
+    // #775). The reclaim is driven by hand below, at the instant past the last window.
+    let calls: Vec<PresentedCallMandate> = (0..N).map(|i| n.mint(&format!("r{i}"), LONG_WINDOW_MS)).collect();
     for (i, c) in calls.iter().enumerate() {
         n.write(&format!("r{i}"), &c.checkpoint);
     }
@@ -237,7 +243,7 @@ async fn a_node_holds_only_the_calls_it_admitted_and_only_for_their_windows() {
 #[tokio::test]
 async fn the_call_feeder_reads_only_the_key_that_changed_and_only_for_a_window_it_holds() {
     let n = node(120_000).await;
-    let mine: Vec<PresentedCallMandate> = (0..10).map(|i| n.mint(&format!("m{i}"), 60_000)).collect();
+    let mine: Vec<PresentedCallMandate> = (0..10).map(|i| n.mint(&format!("m{i}"), LONG_WINDOW_MS)).collect();
     let now = n.now();
     let mut written = 0u64;
     for (i, c) in mine.iter().enumerate() {
@@ -335,7 +341,7 @@ async fn a_forged_misplaced_replayed_or_tombstoned_copy_of_a_calls_checkpoint_do
     }
 
     // A running call, its first checkpoint read from the KV at admission.
-    let c = n.mint("f1", 60_000);
+    let c = n.mint("f1", LONG_WINDOW_MS);
     put("f1", &c.checkpoint);
     assert_eq!(n.assess(&c, n.now()), Some(MandateState::Established));
     let work = n.begin(&c);
@@ -370,7 +376,7 @@ async fn a_forged_misplaced_replayed_or_tombstoned_copy_of_a_calls_checkpoint_do
     assert_eq!((n.1.view_sizes(), refused(), stale()), ((1, 1, 1), 4, 0), "nothing more is held or counted");
 
     // At admission: a forged copy already in the KV when a new call arrives.
-    let c3 = n.mint("f3", 60_000);
+    let c3 = n.mint("f3", LONG_WINDOW_MS);
     put("f3", &forged("f3", 2));
     settled!(); // no window for f3 yet, so the feeder read nothing
     assert_eq!(refused(), 4);
@@ -395,7 +401,7 @@ async fn a_forged_misplaced_replayed_or_tombstoned_copy_of_a_calls_checkpoint_do
     assert!(matches!(n.assess(&c, n.now()), Some(MandateState::Refused(MandateRefusal::Revoked { .. }))));
 
     // The residual: this node has never read f4's revocation when the first checkpoint is written back over it.
-    let c4 = n.mint("f4", 60_000);
+    let c4 = n.mint("f4", LONG_WINDOW_MS);
     put("f4", &c4.checkpoint);
     put("f4", &n.checkpoint("f4", 2, &["f4"]));
     put("f4", &c4.checkpoint);
@@ -407,7 +413,7 @@ async fn a_forged_misplaced_replayed_or_tombstoned_copy_of_a_calls_checkpoint_do
     // The residual at a provider **already running** the call (#775's confirm round): it read the first checkpoint
     // at admission; a member writes that same checkpoint back with a later stamp than the gateway's revocation, so
     // under last-writer-wins the revocation never reaches this node and all it sees is the bytes it has verified.
-    let c5 = n.mint("f5", 60_000);
+    let c5 = n.mint("f5", LONG_WINDOW_MS);
     put("f5", &c5.checkpoint);
     assert_eq!(n.assess(&c5, n.now()), Some(MandateState::Established));
     let running = n.begin(&c5);
