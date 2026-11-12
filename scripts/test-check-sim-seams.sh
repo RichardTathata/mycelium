@@ -60,4 +60,31 @@ plant skip_literal_field  $'fn f() -> S {\n    S {\n        #[cfg(test)]\n      
 # ends at all.
 plant skip_block_comment  $'#[cfg(test)]\nmod tests {\n    /* { */\n    fn t() {}\n}\npub fn f() { let _ = std::time::Instant::now(); }'
 plant skip_raw_string     $'#[cfg(test)]\nmod tests {\n    const R: &str = r#"a " {"#;\n}\npub fn f() { let _ = std::time::Instant::now(); }'
+# A bare `fs` inside a grouped `use std::{…}` / `use tokio::{…}` makes `fs::read(…)` a filesystem call
+# the qualified `std::fs::` / `tokio::fs::` patterns never see (2026-11-12: `mycelium-core/src/tls.rs`'s
+# `use std::{fs, path::Path, sync::Arc};` hid its TLS identity I/O, and `config.rs`'s grouped `fs` its
+# config-file read). The import line itself enables nothing and is not counted.
+plant fs_grouped_inline  $'use std::{fs, path::Path, sync::Arc};\nfn f() { let _ = fs::read(p); }'
+plant fs_grouped_lines   $'use std::{\n    collections::HashMap,\n    fs,\n    path::Path,\n};\nfn f() { let _ = fs::write(p, b); }'
+plant fs_nested_group    $'use std::{io, fs, path::{Path}};\nfn f() { let _ = fs::read_to_string(p); }'
+plant fs_nested_deeper   $'use tokio::{io::{self, BufReader}, sync::{mpsc}, fs};\nfn f() { let _ = fs::read(p); }'
+plant fs_pub_use         $'pub use std::{fs, io};\nfn f() { let _ = fs::remove_file(p); }'
+plant fs_pub_crate_use   $'pub(crate) use tokio::{\n    fs,\n};\nfn f() { let _ = fs::create_dir_all(p); }'
+# The `fs::{self, …}` import line is itself an `fs::` site here, so this counts 2, as `self_alias` does.
+plant fs_self_group      $'use std::{fs::{self, File}, io};\nfn f() { let _ = fs::rename(a, b); }' 2
+# #765's review: `self` need not come first in the `fs::{…}` group (F2), and `fs::{self as X}` names the
+# module `X` (F3), as `time::{self as X}` does. The first and third count 2 (the import line is itself a site:
+# `fs` is in scope, or it spells `tokio::fs::`); the second only 1, since only `sfs` is in scope.
+plant fs_self_not_first  $'use std::{fs::{File, self}, io};\nfn f() { let _ = fs::read(p); }' 2
+plant fs_self_alias      $'use std::{fs::{self as sfs, File}, io};\nfn f() { let _ = sfs::read(p); }'
+plant fs_self_alias_top  $'use tokio::fs::{\n    File,\n    self as tfs2,\n};\nfn f() { let _ = tfs2::read(p); }' 2
+plant fs_module_use      $'use std::fs;\nfn f() { let _ = fs::read(p); }'
+plant fs_indented_use    $'mod imp {\n    use std::{fs, sync::Arc};\n    fn f() { let _ = fs::read(p); }\n}'
+# Negatives: no std/tokio `fs` in scope, so a bare `fs::` is a local module — and a qualified site is
+# not counted twice through the alias.
+plant fs_neg_local_mod   $'use std::{fmt};\nmod fs { pub fn read() {} }\nfn f() { crate::fs::read(); self::fs::read(); }' 0
+plant fs_neg_not_top      $'use std::{sync::{fs}, io};\nfn f() { let _ = fs::read(p); }' 0
+plant fs_neg_path_only   $'use std::{fs::File, io};\nfn f() { let _ = File::open(p); }' 0
+plant fs_neg_other_crate $'use mylib::{fs, io};\nfn f() { let _ = fs::read(p); }' 0
+plant fs_no_double_count $'use std::{fs, io};\nfn f() { let _ = std::fs::read(p); }'
 exit $fail

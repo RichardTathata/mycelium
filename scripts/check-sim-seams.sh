@@ -26,9 +26,30 @@
 #   unqualified ones (`use std::time::Instant`), and `fs as <alias>` imports **plus every use of
 #   that alias** — the last because `persistence.rs` aliases `tokio::fs` to `tfs` and was otherwise
 #   invisible to this check entirely.
+#   A bare `fs` imported from `std` or `tokio` — a grouped `use std::{fs, path::Path, …}` (one line or
+#   many, nested groups beside it, `pub use`, indented inside a module), `fs::{self, …}` in such a
+#   group, `use std::fs;` — **plus every bare `fs::` call after it** is seen since 2026-11-12. Until
+#   then it was not: `mycelium-core/src/tls.rs` (`use std::{fs, path::Path, sync::Arc};`, 23
+#   production lines of TLS identity I/O) and `mycelium-core/src/config.rs` (2) counted 0 and sat
+#   outside the baseline. Only a top-level `fs` of the group counts (`use std::{sync::{fs}}` is not
+#   std's `fs`), and `crate::fs::` / `self::fs::` (a local module) never do. An `fs::{…}` group names
+#   the module wherever `self` sits in it (`{File, self}`), and `fs::{self as X}` makes `X::` counted
+#   (#765's review, F2 and F3).
 #   It does not parse Rust: a call reached through a re-export this script does not know about, or
 #   through a type alias, is invisible to it. That is a real gap, and the honest mitigation is that
-#   the baseline makes *movement* visible even when it cannot attribute it.
+#   the baseline makes *movement* visible even when it cannot attribute it. The design limits, stated
+#   (#765's review, F4):
+#   - **Whole-file scope.** An alias is read from the file's own `use` lines and applies to the whole
+#     file, not to the block that imports it — so an `fs` imported in one `mod` makes a local `fs::`
+#     in another counted (an over-count), and an alias a file inherits through `use super::*;` from
+#     another file is not seen at all (an under-count; the `http/` split's caveat, inventory §6).
+#   - **Re-exports.** `pub use std::fs;` in one module and `crate::that::fs::read(…)` in another is
+#     invisible at the call; only the `use` line is counted, in the module that holds it.
+#   - **Imported items.** `use std::fs::File;` then `File::open(…)`, or `use std::fs::read_to_string;`
+#     then `read_to_string(…)`, counts the `use` line once and no call beneath it.
+#   - **Methods that do I/O.** `Path::exists`, `Path::metadata`, `Path::canonicalize`, `Path::read_dir`
+#     and `File`'s methods are not named by the pattern; nor is `std::thread::sleep`, a host wait
+#     (recorded in the inventory where it occurs, not counted).
 #
 #   The test-item skip covers exactly the item a `#[cfg(test)]` / `#[cfg(all(test, …))]` attribute
 #   applies to — further attributes, then the header to the `;` that ends it or the `{` that opens
@@ -159,6 +180,63 @@ alias_pattern() {
     [ -z "$a" ] && continue
     extra="$extra|(^|[^:a-zA-Z_])$a::(sleep|interval|timeout|Instant)"
   done <<< "$time_aliases"
+
+  # The same gap for the filesystem (2026-11-12): a bare `fs` imported from `std` or `tokio` makes
+  # every `fs::read(…)` / `fs::write(…)` a filesystem call the qualified `std::fs::` / `tokio::fs::`
+  # patterns never see. `mycelium-core/src/tls.rs` writes `use std::{fs, path::Path, sync::Arc};`
+  # and its TLS identity I/O was invisible to this check. Read from whole `use` statements, like
+  # `time` above (one line or many, `pub use`, any indentation): `use std::fs;`, `use
+  # std::fs::{self, …}`, and `fs` or `fs::{self, …}` as a **top-level** item of a `use std::{…}` /
+  # `use tokio::{…}` group, whose nested groups are skipped by depth (`sync::{fs}` is not std's
+  # `fs`). The call-site alternation has the same left guard as `time`'s, so `std::fs::read` is not
+  # counted twice and `crate::fs::` / `self::fs::` (a local module) are not counted at all. The
+  # import line itself enables nothing and is not counted.
+  local fs_bare
+  # Prints `fs` when the module is in scope under its own name, and `X` for each `fs::{self as X}`.
+  # An `fs::{…}` group names the module when `self` appears anywhere in it (`{File, self}` as well as
+  # `{self, File}` — #765's review, F2), and `self as X` names it `X` (F3), as `time::{self as X}` does.
+  fs_bare=$(perl -0777 -ne '
+      sub fs_item {
+        my ($i) = @_;
+        return "fs" if $i eq "fs";
+        return () unless $i =~ /^fs::\{(.*)\}$/s;
+        my $g = $1;
+        my @out;
+        for my $e (split /,/, $g) {
+          $e =~ s/^ +| +$//g;
+          push @out, "fs" if $e eq "self";
+          push @out, $1 if $e =~ /^self as (\w+)$/;
+        }
+        return @out;
+      }
+      my %seen;
+      while (/\b(?:pub(?:\([^)]*\))?\s+)?use\s+([^;]*);/gs) {
+        my $u = $1;
+        $u =~ s/\s+/ /g;
+        $u =~ s/ *(::|[{},]) */$1/g;
+        $u =~ s/^:://;
+        next unless $u =~ /^(?:std|tokio)::(.*)$/s;
+        my $rest = $1;
+        my @items;
+        if ($rest =~ /^\{(.*)\}$/s) {
+          my ($g, $depth, $item) = ($1, 0, "");
+          for my $c (split //, $g) {
+            if ($c eq "," && $depth == 0) { push @items, $item; $item = ""; next }
+            $depth++ if $c eq "{";
+            $depth-- if $c eq "}";
+            $item .= $c;
+          }
+          push @items, $item;
+        } else {
+          @items = ($rest);
+        }
+        $seen{$_} = 1 for map { fs_item($_) } @items;
+      }
+      print "$_\n" for sort keys %seen;' "$file" 2>/dev/null || true)
+  while IFS= read -r a; do
+    [ -z "$a" ] && continue
+    extra="$extra|(^|[^:a-zA-Z_])$a::"
+  done <<< "$fs_bare"
   printf '%s' "$extra"
 }
 
