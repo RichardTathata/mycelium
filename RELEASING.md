@@ -125,8 +125,9 @@ source unbuilt, and S5 with half its promise, and both were found only by an aud
 ## 6. Update the version-state anchors
 
 `ROADMAP.md` (Status line) · `docs/wiki/wiki.md` (Version state) · `docs/wiki/dev/history.md`
-(a dated release section) · `CLAUDE.md` (the on-ramp line **and** the *Active work* paragraph's open list for the
-plan being released — v2.21.0 moved the line and left the paragraph saying its four items were open; wiki-lint
+(a dated release section) · `CLAUDE.md` (**replace** the *Current release* paragraph with this release's — never append: earlier releases
+live in `CHANGELOG.md` and `dev/history.md`, and the file loads into every session — **and** update the *Active work*
+list for the plan being released — v2.21.0 moved the line and left the paragraph saying its four items were open; wiki-lint
 2026-10-03) · `docs/plans/README.md` (the released plan's entry: its *Next:* sentence) · **`docs/guide/building-on-mycelium.md`
 (the install snippet's `tag = "…"` pins) and `docs/guide/installation.md` (`MYCELIUM_RELEASE_TAG`)** — an integrator copies that block, and it was one release
 behind within hours of v2.15.1 because nothing in this step named it; wiki-lint 2026-09-26). Keep
