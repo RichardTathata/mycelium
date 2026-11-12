@@ -57,14 +57,18 @@ it reads the diff and the code. Tell it its final message *is* the report.
    admitted member can write or tombstone any key. For every KV record the change reads to make a decision —
    authority, admission, cancellation, retention, audit — give the grep that found the reads, and say which of
    these holds, citing the code: (a) the record carries a signature under the key of the principal its key path
-   names; (b) the reader verifies it, and that the body's identifying fields equal the key's, before use; (c) a
-   record that fails is treated as absent — failing closed, or to a fallback the change states — and counted;
-   (d) a test writes the record as another member would (forged, replayed, tombstoned) and shows the reader is
-   not moved. Ask of each read what the reader does when the record is *deleted*: an absence that permits is a
-   finding. A decision read with (a)–(d) not all holding is a finding unless the change adds the record to that
-   page's inventory as *does not hold, stated*, or shows the record is outside the rule (availability only, or
-   soft state whose worst case is detected and bounded — the detector and the bound cited). A new row in the
-   inventory's *meets* column without the verifying `file:line` and the forged-record test is a finding.
+   names, or, where the path names no principal or names the record's subject, of the authority the reader is
+   configured to trust for it; (b) the reader verifies it, that the body's identifying fields equal the key's,
+   and that it is current (a sequence, issue time or supersession rule checked at read), before use; (c) a record
+   that fails is treated as absent, absence fails closed — or to a fallback the change names — and the failure is
+   counted; (d) a test writes the record as another member would (forged, replayed, tombstoned) and shows the
+   reader is not moved. Ask of each read what the reader does when the record is *deleted*: an absence that
+   permits is a finding. The page's inventory gives each record a **Status**. A decision read with (a)–(d) not
+   all holding is a finding unless the change adds or updates the record's row with the Status that is true of
+   it — **Partly** or **Does not hold**, naming the failing condition — or shows the record is outside the rule:
+   **Outside: availability** (the worst forgery is a refusal or a delay) or **Outside: no decision**. Soft state
+   with a bound and no detector is **Bounded, not detected**, which is a finding until the change cites the
+   detector. A row at **Meets** without the verifying `file:line` and the forged-record test is a finding.
 
 ## The report and what to do with it
 

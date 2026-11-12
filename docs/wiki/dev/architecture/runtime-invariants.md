@@ -16,6 +16,13 @@ to `apply_and_notify` — that teaches Layer I a Layer III law and inverts the d
 The same posture governs the `sys/` namespace tripwire (`sys_namespace_violations`, see
 [security](../security.md)) and the RBAC design generally.
 
+**What detection does not give a reader** (2026-11-12). The tripwires count; they do not make a record
+trustworthy to the node that reads it. The decision records under `consensus/life/{slot}/…` and the legacy
+`consensus/committed/` reading are unsigned, and a record a member plants is read — the rows are in
+[owner-signed-records](../owner-signed-records.md) § *Consensus, electorates and exclusivity*. That page's rule (a
+security-bearing record is signed by its owner and verified at read) constrains the reader and adds no write
+guard, so it leaves this posture as it is.
+
 **Epoch-leased commitments** (`ConsensusConfig::committed_lease_secs`, default `None` =
 permanent): when set, readers apply the capability-style read-side freshness convention —
 expired lease reads as not-committed and the slot reopens. Renewal = re-proposing the *same*

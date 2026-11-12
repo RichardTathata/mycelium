@@ -133,8 +133,9 @@ the suite. Scale suites: `make test-scale` (100 nodes), `test-scale-resilience`,
 - **A security-bearing record in the gossip KV is signed by its owner and verified at read** — any
   admitted member can write or tombstone any key, so a record that decides authority, admission,
   cancellation, retention or audit is never trusted for where it sits: signed under the key its path
-  names, body checked against the path, a failure read as absent and counted, a forged-record test.
-  Availability and bounded, detected soft state are outside it — the rule and the inventory of where it
+  names (or the authority the reader is configured to trust), body checked against the path and for
+  currency, a failed record read as absent and counted, **absence failing closed**, a forged-record
+  test. Availability and bounded, detected soft state are outside it — the rule and the inventory of where it
   does not hold yet: [owner-signed-records](docs/wiki/dev/owner-signed-records.md).
 - **Consensus listeners register synchronously**; multi-node consensus tests need a
   listener on every node + a structural peer-ready poll (never fixed sleeps) —

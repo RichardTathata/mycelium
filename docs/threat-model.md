@@ -342,7 +342,7 @@ embedding process it also holds the member's key (Boundary A, once per agent).
   - **A power laundered as a capability.** Any member may advertise any name under its own `cap/{node}/…`:
     `CapabilitiesHandle::advertise_capability` checks no role or mandate, and `authorized_callers` is set by the
     provider. A member holding a power no mandate gave it (a stolen credential) can offer that power to the others
-    as a service, and the credential itself never travels. *Mitigated for honest readers: H3, in force below.*
+    as a service, and the credential itself never travels. *Mitigation built, not in force: H3's filter exists and no resolve path calls it (below).*
   - **Many issuers from one member.** `IssuerId::new` accepts any non-empty string, and `KnowledgeRecord::verify`
     takes the key from its caller, so nothing binds an issuer to an admitted identity. One member can be many
     issuers, and every count below can be inflated from inside a single member. *Mitigated: P1, in force below.*
@@ -440,7 +440,10 @@ embedding process it also holds the member's key (Boundary A, once per agent).
     a protected namespace only if the advertiser presents a valid grant naming it as holder, permitting
     `serve:{ns}/{name}`, with possession bound to that advertisement. Everything else is filtered and **reported**.
     *Limits:* reader-side, so colluders using their own policy are not stopped, only exposed; the report is not yet
-    wired to metrics or audit. *Gate:* `mandate::protected::tests`.
+    wired to metrics or audit. **Not in force (corrected 2026-11-12):** `filter_protected`
+    (`src/mandate/protected.rs`) is a library function with no caller outside its own tests, so no resolve path
+    in the tree filters an unbacked advertisement; a reader gets H3 only by calling it. The inventory row is in
+    `docs/wiki/dev/owner-signed-records.md`. *Gate:* `mandate::protected::tests` (the primitive).
   - **A1, authority at execution** (#398; ADR `design/authority-at-execution.md`). `ExecutionGate::check`
     re-establishes authority at every point where work acts: admission, dequeue, retry, and re-authorisation
     checkpoints. It re-runs the resource's own `ResourceAuthority::check` and requires fresh revocation standing

@@ -599,7 +599,7 @@ Each step states its claim, its assumptions, where it is enforced, and what the 
 | # | Claim | Assumptions | Enforced at | Evidence source | Kind |
 |---|---|---|---|---|---|
 | 1 | Setup: a declared cohort under the confined profile, plus an observer | A trusted operator's declaration; an enforcing CNI | — | `ConfinementReport` and the deployment test | Replay **and** deployment |
-| 2 | A laundered power does not resolve for the observer | Observer protects the namespace | H3, the observer's resolve path | Observation plus counter | Replay |
+| 2 | A laundered power does not resolve for the observer | Observer protects the namespace | H3 — `filter_protected`, which the observer must call itself: no resolve path in the tree calls it (§17) | Observation; no counter is wired | Replay |
 | 3 | Mutual support counts once | Observer trusts the declaration | H5 in `classify` | Verdict reasons | Replay |
 | 4 | A challenge storm is visible and does not decide, within bounds | Threshold of 2 | H1 plus ingestion bounds | Verdict, and measured resource use | Replay, measured |
 | 5 | A rewritten history is proven | A retained checkpoint covers the rewritten position; the unwitnessed suffix stays unproven | H4 | `Equivocation` with two source signatures | Replay |
@@ -806,8 +806,8 @@ written. It is the starting list for the hardening plan, and it corrects two rea
 record (§16):
 
 - **H3 is a primitive, not an enforcement.** `filter_protected` (`src/mandate/protected.rs`) has no caller outside
-  its own tests at `7d4c86a6`, so no resolve path filters an unbacked advertisement. The threat model's *in force*
-  for H3 holds for a reader that calls it; none in the tree does.
+  its own tests at `7d4c86a6`, so no resolve path filters an unbacked advertisement. The threat model's H3 entry
+  and §9's step 2 are corrected to say so (2026-11-12).
 - **H4 covers a rewritten position a retained checkpoint witnesses, not a truncated tail.** The audit chain has no
   signed head, and a chain whose newest records were tombstoned verifies.
 
