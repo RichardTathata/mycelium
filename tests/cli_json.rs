@@ -504,3 +504,77 @@ mod declare {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
+/// Identity-and-lifecycle N5: `skills list` and `skills get fleet` as `mycelium.skills/1`. `${GUIDE}` in the golden is
+/// the guide's file with the binary's release tag filled in, so the document's `text` is the embedded guide, whole;
+/// the text form prints the same bytes and nothing else.
+#[test]
+fn skills_as_json_match_their_goldens_and_the_text_form_is_the_guide() {
+    let guide = std::fs::read_to_string("docs/reference/agent-skills/fleet.md")
+        .expect("the guide")
+        .replace("{{MYCELIUM_TAG}}", &format!("v{}", env!("CARGO_PKG_VERSION")));
+    assert_golden("skills-list.json", &document(&["skills", "list", "--format", "json"]), &[]);
+    assert_golden("skills-get.json", &document(&["skills", "get", "fleet", "--format", "json"]), &[("GUIDE", &guide)]);
+
+    for args in [&["skills", "get", "fleet"][..], &["skills", "get", "fleet", "--format", "text"]] {
+        let text = run(args);
+        assert!(text.status.success() && text.stderr.is_empty(), "{:?}", text);
+        assert_eq!(stdout(&text), guide, "the text form is the guide's bytes, the tag filled in");
+    }
+    assert!(!guide.contains("{{") && guide.contains(&format!("/tags/v{}.tar.gz", env!("CARGO_PKG_VERSION"))));
+    let list = run(&["skills", "list"]);
+    assert!(list.status.success() && stdout(&list).starts_with("fleet  "), "{:?}", list);
+}
+
+/// A refusal is stderr and a non-zero exit with nothing on stdout, in either format: a guide the binary does not
+/// serve (named, with the ones it does), no verb, a verb it does not have, a bad `--format`. `--help` is exit 0.
+#[test]
+fn skills_refuses_on_stderr_with_nothing_on_stdout() {
+    for args in [&["skills", "get", "nope"][..], &["skills", "get", "nope", "--format", "json"], &["skills"], &["skills", "get"],
+                 &["skills", "put", "fleet"], &["skills", "get", "fleet", "--format", "yaml"], &["skills", "list", "--format"],
+                 &["skills", "get", "fleet", "extra"], &["skills", "list", "--verbose"]] {
+        let o = run(args);
+        assert_eq!(o.status.code(), Some(2), "{args:?}");
+        assert!(o.stdout.is_empty(), "{args:?}: {}", stdout(&o));
+        assert!(!o.stderr.is_empty(), "{args:?}");
+    }
+    let unknown = run(&["skills", "get", "nope"]);
+    let err = String::from_utf8_lossy(&unknown.stderr).to_string();
+    assert!(err.contains("no guide named `nope`") && err.contains("fleet"), "{err}");
+    let help = run(&["skills", "--help"]);
+    assert!(help.status.success() && help.stdout.is_empty() && String::from_utf8_lossy(&help.stderr).contains("mycelium skills get <name>"));
+    // The node's own usage lists it, so `--help` and the guide's table name the same subcommands.
+    let usage = run(&["--help"]);
+    assert!(String::from_utf8_lossy(&usage.stderr).contains("mycelium skills list | get <name> [--format text|json]  (agent guides)"), "{}", String::from_utf8_lossy(&usage.stderr));
+    assert!(String::from_utf8_lossy(&help.stderr).contains("Not the prompt skills a node serves"), "the two senses of `skills` are told apart where the command is");
+}
+
+/// **The guide's output rule, against the binary** (#770's review, F1). The agent guide says a usage error leaves
+/// stdout empty, and that a run that finds a problem still prints its document and exits 1. `doctor --format json`
+/// over a configuration `start()` would refuse is the second: exit 1, one `mycelium.doctor/1` document on stdout
+/// carrying the refusal. A usage error of the same command is the first: exit 2, nothing on stdout.
+#[test]
+fn a_doctor_that_would_refuse_prints_its_document_and_exits_1() {
+    let dir = std::env::temp_dir().join(format!("mycelium-cli-json-doctor-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let config = dir.join("node.toml");
+    // The secure profile with nothing it requires configured: `start()` refuses, naming each unmet guarantee.
+    std::fs::write(&config, "profile = \"secure-single-domain\"\n").unwrap();
+    let o = run(&["doctor", config.to_str().unwrap(), "--format", "json"]);
+    assert_eq!(o.status.code(), Some(1), "{}", String::from_utf8_lossy(&o.stderr));
+    let doc: Value = serde_json::from_str(&stdout(&o)).unwrap_or_else(|e| panic!("stdout is not one JSON document ({e}):\n{}", stdout(&o)));
+    assert_eq!(doc["schema"], "mycelium.doctor/1");
+    assert!(doc["refusal"].is_string() || doc["refusal"].is_object(), "the document carries the refusal: {}", doc["refusal"]);
+
+    // `wire-check` likewise: a declaration with an error is exit 1 and its document, not an empty stdout.
+    let wc = run(&["wire-check", "tests/fixtures/units/unwired", "--format", "json"]);
+    assert_eq!(wc.status.code(), Some(1), "{}", String::from_utf8_lossy(&wc.stderr));
+    let doc: Value = serde_json::from_str(&stdout(&wc)).unwrap_or_else(|e| panic!("wire-check's stdout is not one JSON document ({e}):\n{}", stdout(&wc)));
+    assert_eq!(doc["schema"], "mycelium.design/declaration/1");
+
+    let usage = run(&["doctor", "--format"]);
+    assert_eq!(usage.status.code(), Some(2));
+    assert!(usage.stdout.is_empty() && !usage.stderr.is_empty(), "a usage error leaves stdout empty");
+    let _ = std::fs::remove_dir_all(&dir);
+}

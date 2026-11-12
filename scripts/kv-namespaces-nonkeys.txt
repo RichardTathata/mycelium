@@ -50,6 +50,7 @@ mycelium.test-faults/ # faults.rs SCHEMA: the test --faults report's JSON schema
 mycelium.explain/ # decision.rs EXPLAIN_SCHEMA: `explain --format json`'s schema id (identity-and-lifecycle N3)
 mycelium.declare/ # declare.rs DECLARE_SCHEMA: `declare --format json`'s schema id (identity-and-lifecycle N3)
 mycelium.tls/ # main.rs TLS_SCHEMA: `tls … --format json`'s schema id (identity-and-lifecycle N3)
+mycelium.skills/ # agent_guide.rs SCHEMA: `skills … --format json`'s schema id (identity-and-lifecycle N5)
 mycelium.ae/          # agent/action_evaluator.rs: the evidence / reference record schema ids
 mycelium.guarantees/  # agent/guarantee.rs: the guarantee-report schema id
 mycelium.federation/  # federation*.rs: the descriptor / policy / call / catalogue signing-domain tags

@@ -82,6 +82,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         // `mycelium tls issue` — a node certificate signed where the CA key is, so the node never
         // holds it (`id.ca_key_off_node`). Runs on the issuer's host, starts no node.
         Some("tls") => std::process::exit(tls_cli(std::env::args().skip(2).collect())),
+        // `mycelium skills list | get <name>` — the agent guide this binary embeds (identity-and-lifecycle N5).
+        // Pure over the embedded text; reads no file and starts no node.
+        Some("skills") => std::process::exit(skills_cli(std::env::args().skip(2).collect())),
         _ => {}
     }
 
@@ -1083,9 +1086,40 @@ fn is_ca_certificate(der: &[u8]) -> Option<bool> {
     Some(false)
 }
 
+/// `mycelium skills list | get <name> [--format text|json]` — the agent guide the binary serves
+/// (identity-and-lifecycle N5, `mycelium::agent_guide`). `get` prints the guide's Markdown as embedded, with the
+/// binary's release tag filled in; `--format json` prints one `mycelium.skills/1` document. An unknown name is
+/// refused on stderr naming the guides there are, exit 2, with nothing on stdout.
+fn skills_cli(args: Vec<String>) -> i32 {
+    use mycelium::agent_guide::{get, get_json, list_json, SKILLS};
+    const USAGE: &str = "Usage: mycelium skills list [--format text|json]\n       mycelium skills get <name> [--format text|json]\n\nAgent guides: Markdown this binary embeds for a coding agent. Not the prompt skills a node serves.";
+    let (mut words, mut json) = (Vec::new(), false);
+    let mut it = args.into_iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--format" => match parse_format(it.next()) { Ok(j) => json = j, Err(e) => { eprintln!("{e}\n{USAGE}"); return 2; } },
+            "-h" | "--help" => { eprintln!("{USAGE}"); return 0; }
+            flag if flag.starts_with('-') => { eprintln!("{USAGE}"); return 2; }
+            _ => words.push(a),
+        }
+    }
+    let names = || SKILLS.iter().map(|s| s.name).collect::<Vec<_>>().join(", ");
+    match words.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
+        ["list"] if json => print_json(&list_json()),
+        ["list"] => SKILLS.iter().for_each(|s| println!("{}  {}", s.name, s.about)),
+        ["get", name] => match get(name) {
+            Some(skill) if json => print_json(&get_json(skill)),
+            Some(skill) => print!("{}", skill.text()),
+            None => { eprintln!("no guide named `{name}`; this binary serves: {}", names()); return 2; }
+        },
+        _ => { eprintln!("{USAGE}"); return 2; }
+    }
+    0
+}
+
 fn print_usage() {
     eprintln!(
-        "Usage: mycelium [OPTIONS]\n       mycelium init <dir> [--template <name>] | --list\n       mycelium declare [project-dir] [--gateway <url>] [--token <bearer>] [--watch] [--format text|json]\n       mycelium doctor [config.toml] [--units <dir>] [--format text|json]\n       mycelium wire-check <units-dir> [--library <dir>] [--schemas <dir>] [--format text|json|dot] [--strict-deployed] [--no-authority]\n       mycelium rules [--format md|json]\n       mycelium test --faults [<class>,…] <units-dir> [--config <node.toml>] [--against <units-dir>] [--format text|json]\n       mycelium explain <decisions.jsonl> [--catalogue <rule-catalogue.json>] [--target <target>] [--format text|json]\n       mycelium explain --correlation <id> <files…> | --closure <sha256> <files…> [--fleet <n>] [--format text|json]\n       mycelium tls ca --out <dir> | issue --ca-dir <dir> (--node <ip:port> | --client <name> --issuer <issuer>) --out <dir> [--force] | pin <cert.pem>  [--format text|json]\n\
+        "Usage: mycelium [OPTIONS]\n       mycelium init <dir> [--template <name>] | --list\n       mycelium declare [project-dir] [--gateway <url>] [--token <bearer>] [--watch] [--format text|json]\n       mycelium doctor [config.toml] [--units <dir>] [--format text|json]\n       mycelium wire-check <units-dir> [--library <dir>] [--schemas <dir>] [--format text|json|dot] [--strict-deployed] [--no-authority]\n       mycelium rules [--format md|json]\n       mycelium test --faults [<class>,…] <units-dir> [--config <node.toml>] [--against <units-dir>] [--format text|json]\n       mycelium explain <decisions.jsonl> [--catalogue <rule-catalogue.json>] [--target <target>] [--format text|json]\n       mycelium explain --correlation <id> <files…> | --closure <sha256> <files…> [--fleet <n>] [--format text|json]\n       mycelium tls ca --out <dir> | issue --ca-dir <dir> (--node <ip:port> | --client <name> --issuer <issuer>) --out <dir> [--force] | pin <cert.pem>  [--format text|json]\n       mycelium skills list | get <name> [--format text|json]  (agent guides)\n\
          \n\
          Options:\n\
          -c, --config <file>      Load configuration from a TOML file\n\

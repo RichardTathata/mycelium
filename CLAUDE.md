@@ -80,6 +80,7 @@ the evidence).
 | HLC design + limits | `mycelium-core/src/hlc.rs` module doc |
 | Capability model | `src/capability.rs` |
 | Purpose / roadmap | `docs/philosophy.md` · `ROADMAP.md` |
+| The agent guide the binary serves; other agents' entry file | `mycelium skills get fleet` (source `docs/reference/agent-skills/fleet.md`) · root [`AGENTS.md`](AGENTS.md) for Codex, Cursor and Orca's workers — Claude Code reads it only where there is no `CLAUDE.md`, so this row is how a session here learns of both (gated: `src/agent_guide.rs`) |
 | Docs map (guide, operations, design, plans, publications, analysis) | `docs/README.md` |
 | Architecture, concurrency, testing lore, security, companions, history | the wiki: [`docs/wiki/`](docs/wiki/wiki.md) |
 
