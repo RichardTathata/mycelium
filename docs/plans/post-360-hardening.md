@@ -2234,6 +2234,10 @@ Every other site registers before it spawns, or inside the function that awaits 
 runs of the whole `agent::bulk` module at 24 parallel processes.
 
 **Known flakes, open (seen during the v2.36.0 work, 2026-10-19; not yet investigated):**
+- `lib_tests::a_second_live_default_is_refused_by_name` (P2's migration) — *"the lock decides in the successor:
+  Superseded"* at its closing `distributed_lock` (`src/lib_tests.rs`), once on `main`'s CI for the v2.40.0 release
+  commit (run 43158368410, attempt 1, the strict `compliance,a2a` lib run, 2026-11-12), beside `row18` below; attempt 2
+  was green. The release commit changed only versions and documentation.
 - `lib_tests::a_drop_needs_a_retirement_elsewhere_and_a_forced_drop_that_races_a_retirement_is_a_detected_conflict` (P2's
   migration) — panicked at its `group_propose` on `g2` once, in the `tls,metrics,a2a,llm,test-frame-filter` lib run
   while `make check` loaded the same machine (#741, 2026-11-08); passed 3 of 3 alone. The branch touches no consensus
@@ -2249,7 +2253,7 @@ runs of the whole `agent::bulk` module at 24 parallel processes.
 - `lock_lifecycle_tests::row02` — failed once, under machine load.
 - `lock_lifecycle_api_tests::row18_a_release_cannot_address_a_newer_decision` — *"A's release ended the newer
   leader: left None, right Some([67])"*, once on PR #672's first CI run (run 40033968663, the 187-second Test job),
-  on a branch that touches no consensus code; green on every recent `main` run (2026-10-23). The read of
+  on a branch that touches no consensus code; green on every recent `main` run (2026-10-23). Seen again on `main`'s CI for the v2.40.0 release commit (run 43158368410, attempt 1, the `test-frame-filter` lib run, 2026-11-12), with the same message; attempt 2 was green. The read of
   `leader/r18` after A's stale release found no value yet — C's decision not yet in A's view under load.
 - `a_saturating_actor_gets_its_limit_each_short_window` (K2, `FleetConsensus` seats) — *"about one admission a second
   over 4.5 s, got 2"*, once in 60 `agent::fleet_history` module runs at 6 parallel processes (2026-10-20, during #656);
