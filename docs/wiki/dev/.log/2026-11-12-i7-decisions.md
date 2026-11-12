@@ -14,5 +14,15 @@ decisions of 2026-11-12:
 - **P6:** re-enrolment by I1's supersession; every node upgraded first (an old node keeps the Ed25519 key `Current`).
 
 Corrected facts: the mesh refuses a P-256 certificate in `refuse_if_removed` (no Ed25519 key), before the scheme check;
-`keys.sh` at `d974fc76` counts 73 / 37 lines and 22 `[u8; 64]` mentions. I7 is buildable on macOS; P7 (the key a `tty`
-consent signs with on Linux and Windows) stays open. N7 now depends on P1, P3 and P7.
+`keys.sh` at `d974fc76` counts 73 / 37 lines and 22 `[u8; 64]` mentions. **P7**, decided the same day: on Linux and Windows a `tty` consent is signed by a fleet-certified
+P-256 consent key held in software (0600 in 0700; a user-only ACL on Windows), so one consent-key kind and one verifier
+everywhere; an Ed25519 service key presented as a consent key is refused. I7 is buildable. N7 depends on P1, P3 and P7.
+
+After #764's confirm round, two more decisions of the same day:
+- **H1:** a consent key lives under its own principal, `consent:{issuer}/{name}` (SAN `mycelium-consent://`), beside
+  `token:{issuer}/{name}`. Nothing supersedes across the two, and `feed_client_keys` feeds `token:` principals only.
+  This closes a superseded service key's possession proof that would have kept verifying at `verify_client`.
+- **H2:** the fleet CA writes the grade into the consent certificate (a private-OID extension) at
+  `tls issue --client --consent --public-key <spki.pem> --grade`, and a body whose grade differs is refused. This
+  revises P4. The grade set is `os_presence(macos, unbound)`, `tty`, `recording` and `service`, and the residual is that
+  the grade is what enrolment attested.
