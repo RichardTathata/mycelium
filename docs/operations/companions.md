@@ -333,7 +333,10 @@ an absent section.
   requirement's offers only **after its award is settled** (`award_of` returns it) — the award is
   planned from those offers. There is no HTTP door for it: since 2.27.0 `POST /gateway/overlay/log/{append,compact}`
   refuse a stream under `cn/` **403** `protected_stream` (the commitment net owns those streams), so
-  compaction runs in the embedding process through `agent.kv().compact_log(…)`.
+  compaction runs in the embedding process through `agent.kv().compact_log(…)`. The read routes refuse it the
+  same way (`GET /gateway/overlay/log/{scan,subscribe,group/subscribe}`,
+  [deprecations.md §101](../guide/deprecations.md)): a commitment's offers, closes, reports and assessments are
+  read in process, through this crate.
 - **Observe.** The KV heads and streams directly. No metrics.
 
 ### mycelium-effects — the transactional destination

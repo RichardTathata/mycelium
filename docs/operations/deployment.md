@@ -332,7 +332,8 @@ value); an HTTP client or an old SDK that relied on the silent default breaks at
 wire. The list is [deprecations.md](../guide/deprecations.md) (§12 for this one). Two more of this kind:
 since 2.26.0 the `/gateway/govern/*` intent routes answer **400** to a loose body (unknown field, wrong type),
 and the KV doors answer **403** `protected_key` for `sys/`/`consensus/` keys; since 2.27.0 for every owned
-namespace, with the log routes refusing `cn/`, `wiki/` and `reason/` streams (`protected_stream`) (§18, §19).
+namespace, with the log routes refusing `cn/`, `wiki/` and `reason/` streams (`protected_stream`) (§18, §19);
+the read side of both followed — the raw KV reads (§99) and the log scan and subscribes (§101).
 Since 2.29.0 a governed group's membership moves only through `/gateway/govern/group` (§20).
 
 **Consensus across 2.30.0.** An upgraded proposer runs a prepare phase that older acceptors ignore, so its

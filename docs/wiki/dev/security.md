@@ -315,10 +315,33 @@ their own (`GET /gateway/schedules/last`, `topology_overrides` on `GET /gateway/
 `GET /gateway/audit`, or its own `/gateway/skillrunner/invocations` without `compliance`). The test pins the
 listed rows as well as the hidden ones, so a new row fails until it is classified. **Limits:** public `/stats`
 counts every live key (`store_entries`); the two new reads report unsigned records
-([owner-signed-records](owner-signed-records.md)). **Open:** the log read routes (`overlay/log/scan`, `subscribe`, `group/subscribe`) still read
-a stream under `cn/`, `wiki/` or `reason/`, whose writes `OWNED_LOG_STREAMS` refuses; and `call/` needs a row, names
+([owner-signed-records](owner-signed-records.md)). **Open:** `call/` needs a row, names
 hidden, when identity-and-lifecycle I4 lands. Tests: `src/agent/http/kv_read_tests.rs`, one per door.
 [`.log/2026-11-12-kv-read-guard.md`](.log/2026-11-12-kv-read-guard.md).
+
+**The log read doors follow the write doors' table too (critique plan row CR1's follow-up, 2026-11-12;
+`deprecations.md` §101).** `GET /gateway/overlay/log/scan`, `/log/subscribe` and `/log/group/subscribe` read any
+stream under `consensus:read` — a commitment's offers, a wiki's proposals, a trace without `llm:read` — and the
+group route also proposed a claim and wrote a position under `clog/{stream}/…` for it. They refuse a stream under
+`cn/`, `wiki/` or `reason/` **403** `protected_stream` now (`refuse_owned_stream_read`), by the predicate append and
+compact use (`owned_log_stream`, over `OWNED_LOG_STREAMS`, whose rows now each carry how the stream is read): before
+the store is read, a watcher registered, a claim proposed or an event sent, so the answer is the same for a stream
+that exists and one that does not. A stream is classified as the bytes it is stored under, after the query is
+percent-decoded; a lookalike (`CN/…`, `/cn/…`, an empty name) is another stream and holds none of the owned
+entries. **The key names follow the same table** (the maintainer's decision on #777): `raw_kv_name_hidden` and
+`refuse_hidden_prefix` also consult `in_owned_stream_keyspace`, so `GET /gateway/kv/keys` leaves out every name
+under `log/{row}` and `clog/{row}` and refuses a prefix inside one — derived from `OWNED_LOG_STREAMS`, not six more
+rows of `OWNED_KV_PREFIXES`, so the two cannot drift. **A new component stream is classified only as far as this:**
+`every_log_stream_in_the_table_is_classified_for_the_log_routes` fails on a `log/{name}/…` key in `src/lib.rs`'s
+ownership table that is neither a row nor a stated application stream; nothing derives streams from the `append`
+call sites, and `check-kv-namespaces.sh` leaves the log verbs out of its call set, so a stream with no such key in that table is open until someone adds the row (the table's doc says
+so). Rule 1's enumeration found no other door that reads a stream by a name the caller chooses — no MCP tool,
+no A2A skill, no companion route — and no dependant: the companions read their streams in process and `mycelium-py`'s
+`ReasonClient.trace` reads `/gateway/reason/trace/{run_id}`. **Left open, stated, a follow-up PR:** `GET
+/consensus/{slot}` returns a component-owned slot's value under `consensus:read` — a commitment's award
+(`cn/{requirement}/award`, never in a log) and a consumer group's claim. Tests:
+`src/agent/http/log_read_tests.rs`, one per door, the table's rows pinned.
+[`.log/2026-11-12-log-read-guard.md`](.log/2026-11-12-log-read-guard.md).
 
 **`/a2a` calls only what its agent card lists (2.27.0 — #550).** The agent card
 listed every advertised capability as a skill, so an external agent was offered the fleet's plumbing — provisioning

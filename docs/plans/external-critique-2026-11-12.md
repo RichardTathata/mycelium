@@ -7,7 +7,7 @@ row rewritten — a KV record alone cannot carry it; the lease margin and the fe
 refusal given its receiver-clock, replay and ordering cases and moved to a decision; the WAL checksum's downgrade
 case; catalogue rollback's limits; four inventory rows that had no plan row; §6 split into what is wrong and what
 is understated; every choice the review found inside a row moved to §5). **The order is agreed (D11):** CR1 now
-(PR #774, in review); **inside wave 1b**, CR2's first PR (the use marker), CR13's counter and CR12; CR3–CR11 and
+(delivered: PR #774 and the log read doors' follow-up, PR #777); **inside wave 1b**, CR2's first PR (the use marker), CR13's counter and CR12; CR3–CR11 and
 everything else **after wave 1b**, with CR10 (the model) startable in parallel. A row is *buildable* only where
 its text needs no further decision; each row's **State** line says where one remains.
 
@@ -123,7 +123,7 @@ row that answers it, or the decision in §3 or §5.
 | L17 | Stems stage blobs before checking provenance | **confirmed.** The ticker stages every catalogue entry of a declared kind by its size hint (`mycelium-wasm-host/src/stem.rs:505`–`517`); `provenance_ok` runs later, inside the provision round. The hint is unsigned; the ceiling is the hint or `max_stage_bytes` (`http_source.rs:437`); the staged bytes must hash to the id. Already in the #772 inventory, same row | — | CR7 |
 | **Layer V** | | | | |
 | L18 | Protected kinds are checked by hand at 9 sites, preflight at about 10 | **confirmed, narrower.** Nine gateway handler sites (`mesh.rs:116`, `:171`, `:503`, `:656`, `:750`; `signals.rs:22`, `:72`, `:142`; `overlay.rs:886`), plus three outside the gateway (`provider_enforcement.rs:238`, `exchanged_token.rs:51`, `mycelium-wasm-host/src/confine.rs:100`). Eight handler calls of `ae_preflight` (`mcp_bridge.rs:163`; `a2a.rs:873`, `:1263`; `federation_routes.rs:113`; `grants.rs:350`, `:826`; `llm_bridge.rs:170`, `:311`), the public wrapper (`authz.rs:808`), the provider (`provider_enforcement.rs:280`) and the exposure door (`door.rs:208`). **Narrower:** each site calls one shared predicate (`is_protected_kind`, `src/agent/mod.rs:258`) and one decision function; the *call* is what is hand-wired. There is no single door function and no typed extractor. What bounds it today: the scope layer is central and deny-by-default; the C7 bypass matrix (`src/lib_tests.rs`, `test_c7_the_bypass_matrix_no_door_runs_revoked_work`) and `scripts/check-causal-doors.py` enumerate doors from hand-kept lists, not from the router | found: `git grep -n "refuse_protected_kind(\|refuse_unobservable_kind(\|refuse_unservable_kind(" -- 'src/agent/http/*.rs' ':!*_tests.rs'`; `git grep -n "ae_preflight(" -- 'src/*.rs' ':!*_tests.rs'` | CR6 |
-| L19 | Raw KV reads have no namespace guard (`kv.rs:13-25`), so `kv:read` reads grants and audit | **confirmed** on `main`: `gw_kv_get` reads the store with no guard (`src/agent/http/kv.rs:13`–`17`); `refuse_protected_key` is called on writes only. `docs/operations/rbac.md:71` says "application keys only" of both verbs, which overclaims for `GET`. **Wider:** the log scan and subscribe doors (`overlay.rs:587`, `:646`, `:714`) call no guard | — | CR1 (in progress) |
+| L19 | Raw KV reads have no namespace guard (`kv.rs:13-25`), so `kv:read` reads grants and audit | **confirmed** on `main`: `gw_kv_get` reads the store with no guard (`src/agent/http/kv.rs:13`–`17`); `refuse_protected_key` is called on writes only. `docs/operations/rbac.md:71` says "application keys only" of both verbs, which overclaims for `GET`. **Wider:** the log scan and subscribe doors (`overlay.rs:587`, `:646`, `:714`) call no guard | — | CR1 (delivered) |
 | L20 | Default TLS keeps the CA key on every node | **already stated.** True of the default `[tls]` mode (`cert_pem: None` re-signs with the CA key, `mycelium-core/src/config.rs:187`–`190`, `tls.rs:534`–`535`), warned at start unless the profile is `dev` (`src/agent/guarantee.rs:598`), stated at `threat-model.md:486`–`487`, `:547` and `what-is-proven.md` [*Recovery from a compromised fleet CA key*](../operations/what-is-proven.md#recovery-from-compromised-fleet-ca-key); the off-node mode is proven (`what-is-proven.md` — *A TLS node starts without the fleet CA's private key*) and required by `secure-single-domain` | — | none |
 
 ### 2.3 · The two conditional protections, and the defaults
@@ -215,9 +215,27 @@ A row that moves an inventory row to *Meets* cites the verifying code and the fo
 
 ### Tier 1
 
-#### CR1 · The KV read guard, then the log read doors *(L19)* — in progress
+#### CR1 · The KV read guard, then the log read doors *(L19)* — delivered
 
-**State (2026-11-12):** **in progress** — the guard is PR #774, in review. The log read doors follow-up is *buildable* once #774 merges.
+**State (2026-11-12):** **delivered** — the guard is PR #774, merged (`deprecations.md` §99); the log read doors
+follow-up is PR #777 (`deprecations.md` §101). The follow-up's exit, promise by promise:
+- *"a `consensus:read` token is refused a scan and both subscribes of `cn/…`, `wiki/…` and `reason/…`"* —
+  `a_consensus_read_token_reads_application_streams_only_at_every_log_door` (`compliance`; a `"*"` token too),
+  and one test per door: `log_scan_refuses_an_owned_stream_and_reads_an_application_stream`,
+  `log_subscribe_refuses_an_owned_stream_before_any_event`,
+  `log_group_subscribe_refuses_an_owned_stream_before_the_claim` (`src/agent/http/log_read_tests.rs`);
+- *"each seen admitted first"* — with `refuse_owned_stream_read` planted to refuse nothing, the four door tests
+  fail on a 200 (the PR lists the counts);
+- *"an application stream still reads"* — the same tests: `events` is scanned, subscribed and group-subscribed,
+  an entry delivered at each.
+- **Added by the review of #777** (the maintainer's decisions, 2026-11-12): the key *names* under `log/cn/`,
+  `log/wiki/`, `log/reason/` and their `clog/` twins are hidden from `GET /gateway/kv/keys`, derived from
+  `OWNED_LOG_STREAMS` — `the_raw_listing_hides_a_component_streams_key_names`; and a `log/{name}/…` family in
+  `src/lib.rs`'s ownership table must be a row of that table or a stated application stream —
+  `every_log_stream_in_the_table_is_classified_for_the_log_routes` (what it does not gate is in the table's doc).
+- **Not built, a follow-up PR, surveyed first:** `GET /consensus/{slot}` still returns a component-owned slot's
+  value under `consensus:read` — a commitment's award (`cn/{requirement}/award`) and a consumer group's claim.
+  This row does not close it.
 
 **What:** as decided (M6): on the raw KV read routes, an owned key's value is refused and sensitive key names are
 hidden from the listing. **Follow-up, one PR:** `gw_overlay_log_scan`, `gw_overlay_log_subscribe` and

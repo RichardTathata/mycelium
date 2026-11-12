@@ -654,6 +654,9 @@ mod cors_tests;
 /// The kv:read decision (2026-11-12): every raw KV read door refuses an owned key and hides the hidden names.
 #[cfg(test)]
 mod kv_read_tests;
+/// CR1's follow-up (2026-11-12): the log read doors refuse a component-owned stream, as append and compact do.
+#[cfg(test)]
+mod log_read_tests;
 /// Adopter-surface Y4's last promise: a record a span names, read by its hash on the node, and verified there.
 #[cfg(all(test, feature = "compliance"))]
 mod record_read_tests;

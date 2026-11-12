@@ -353,8 +353,11 @@ Scopes: `kv:read` for the GET, `kv:write` for both POSTs; `mesh:read` for the tw
 **What an SDK raises on a 403 refusal.** `protected_kind` raises `ProtectedKindError` in both SDKs.
 `protected_key` raises `ProtectedKeyError` (`.key`) and `protected_stream` `ProtectedStreamError` (`.stream`),
 each carrying the gateway's message (`mycelium-py` 0.2.7, where each is also the `httpx.HTTPStatusError` it raised
-before; `mycelium-ts` 0.2.2, where `delete()` now carries the body too). No scope fixes either refusal: use the
-route the message names ([deprecations.md §19](deprecations.md)).
+before; `mycelium-ts` 0.2.2, where `delete()` now carries the body too). The read verbs raise the same two:
+`ProtectedKeyError` from the raw KV reads and `ProtectedStreamError` from `scan_log` / `scanLog`, `subscribe_log` /
+`subscribeLog` and `subscribe_log_group` / `subscribeLogGroup`, the subscriptions before any entry (`mycelium-py`
+0.2.16, `mycelium-ts` 0.2.10). No scope fixes either refusal: use the route the message names
+([deprecations.md §19, §99, §101](deprecations.md)).
 
 **A dropped stream is not resumed — not built: the gateway has no resume point.** No SSE route
 (`/gateway/signal/sse/{kind}`, `/signals/{kind}`, `/gateway/rpc/serve/{kind}`, `/gateway/mailbox/{kind}`,

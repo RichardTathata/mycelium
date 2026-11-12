@@ -11,6 +11,7 @@ refuse a stream under ``cn/``, ``wiki/`` or ``reason/`` with ``403 protected_str
 
 from __future__ import annotations
 
+import asyncio
 import json
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -172,3 +173,48 @@ def test_schedule_last_reads_the_schedules_own_route(agent):
     assert agent.schedule_last("close") == [{"node": "10.0.0.5:9000", "slot": 7, "period_ms": 1000, "phase_ms": 0}]
     method, path, _ = _Stub.seen[-1]
     assert (method, path) == ("GET", "/gateway/schedules/last?id=close")
+
+
+# CR1's follow-up (2026-11-12, 0.2.16): the log read routes refuse a component-owned stream as append and
+# compact do, and the three read verbs raise the typed error — the subscriptions before any entry.
+LOG_READ_DOOR = "a reasoning trace is read through GET /gateway/reason/trace/{run_id} (llm:read), where mycelium-reason's routes are merged"
+
+
+async def _drain(gen) -> list:
+    return [entry async for entry in gen]
+
+
+LOG_READ_VERBS = {
+    "scan_log":            (lambda a: a.scan_log("reason/run-1/n"), "/gateway/overlay/log/scan"),
+    "subscribe_log":       (lambda a: asyncio.run(_drain(a.subscribe_log("reason/run-1/n"))), "/gateway/overlay/log/subscribe"),
+    "subscribe_log_group": (lambda a: asyncio.run(_drain(a.subscribe_log_group("reason/run-1/n", "g"))),
+                            "/gateway/overlay/log/group/subscribe"),
+}
+
+
+@pytest.mark.parametrize("verb", sorted(LOG_READ_VERBS))
+def test_every_log_read_door_raises_protected_stream_error_with_the_route(agent, verb):
+    _Stub.status = 403
+    _Stub.reply = {"ok": False, "error": "protected_stream", "message": LOG_READ_DOOR}
+    call, path = LOG_READ_VERBS[verb]
+    with pytest.raises(ProtectedStreamError) as e:
+        call(agent)
+    method, seen_path, _ = _Stub.seen[-1]
+    assert method == "GET" and seen_path.startswith(path + "?stream=reason")
+    assert e.value.stream == "reason/run-1/n"
+    assert e.value.message == LOG_READ_DOOR
+    assert "/gateway/reason/trace/" in str(e.value)
+    assert isinstance(e.value, PermissionError)
+    assert isinstance(e.value, httpx.HTTPStatusError)
+    assert e.value.response.status_code == 403
+
+
+@pytest.mark.parametrize("verb", sorted(LOG_READ_VERBS))
+def test_an_ordinary_403_on_a_log_read_is_not_mistaken_for_it(agent, verb):
+    """The plant: a scope refusal stays an HTTP error, on the subscriptions too (never an SSE content-type error)."""
+    _Stub.status = 403
+    _Stub.reply = {"error": "insufficient scope", "required_scope": "consensus:read"}
+    with pytest.raises(httpx.HTTPStatusError) as e:
+        LOG_READ_VERBS[verb][0](agent)
+    assert not isinstance(e.value, ProtectedStreamError)
+    assert e.value.response.status_code == 403

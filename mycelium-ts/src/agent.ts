@@ -175,7 +175,9 @@ export class ProtectedKeyError extends Error {
 /**
  * The gateway refused a **protected log stream** (HTTP 403 `protected_stream`): `append` and
  * `compactLog` refuse a stream under `cn/`, `wiki/` or `reason/`, which the commitment net, a wiki and
- * `mycelium-reason` write through themselves. `message` is the gateway's.
+ * `mycelium-reason` write through themselves, and `scanLog`, `subscribeLog` and `subscribeLogGroup` refuse to
+ * read one (the typed error for the read verbs: 0.2.10). `message` is the gateway's: for a read it names the
+ * route that reads the stream where there is one.
  */
 export class ProtectedStreamError extends Error {
   readonly status = 403;
@@ -205,6 +207,16 @@ export class SupersededError extends Error {
 
 /** The key or stream a write names, for the refusal that names it back. */
 type Subject = { key?: string; stream?: string };
+
+/** A log subscription refused at open for a component-owned stream: `403 protected_stream`, as the typed error. */
+function streamRefusal(stream: string): (status: number, body: unknown) => Error | undefined {
+  return (status, body) => {
+    const b = body as { error?: string; message?: string } | undefined;
+    return status === 403 && b?.error === "protected_stream"
+      ? new ProtectedStreamError(stream, String(b.message ?? "protected stream"))
+      : undefined;
+  };
+}
 
 /** One open grant request, as `GET /gateway/grants/pending` lists it (adopter-surface X3). */
 export interface PendingGrant {
@@ -280,11 +292,15 @@ export class MyceliumAgent {
     });
     // A raw KV read of an owned key (0.2.10): the typed refusal the write verbs throw, naming the route that
     // reads the namespace. Every other failure stays the error it was.
-    if (resp.status === 403 && subject?.key !== undefined) {
+    // A log read of a component-owned stream (0.2.10) is the same, as `protected_stream`.
+    if (resp.status === 403 && (subject?.key !== undefined || subject?.stream !== undefined)) {
       let body: { error?: string; message?: string } = {};
       try { body = JSON.parse(await resp.text()) ?? {}; } catch { /* not JSON: fall through */ }
-      if (body.error === "protected_key") {
+      if (body.error === "protected_key" && subject.key !== undefined) {
         throw new ProtectedKeyError(subject.key, body.message ?? "protected key");
+      }
+      if (body.error === "protected_stream" && subject.stream !== undefined) {
+        throw new ProtectedStreamError(subject.stream, body.message ?? "protected stream");
       }
     }
     if (!resp.ok) throw new Error(`GET ${path} failed: ${resp.status}`);
@@ -1116,6 +1132,7 @@ export class MyceliumAgent {
 
   /**
    * Range scan over a log stream. Returns `LogEntry[]` sorted by HLC.
+   * Throws `ProtectedStreamError` for a stream under `cn/`, `wiki/` or `reason/`.
    */
   async scanLog(
     stream: string,
@@ -1126,7 +1143,7 @@ export class MyceliumAgent {
     const params: Record<string, string> = { stream };
     if (options.fromHlc !== undefined) params.from = options.fromHlc.toString();
     if (options.toHlc !== undefined) params.to = options.toHlc.toString();
-    const data = await this._get("/gateway/overlay/log/scan", params) as Array<{
+    const data = await this._get("/gateway/overlay/log/scan", params, { stream }) as Array<{
       hlc: number | string; value_b64: string;
     }>;
     return data.map((e) => ({
@@ -1147,6 +1164,7 @@ export class MyceliumAgent {
   /**
    * Live SSE subscription. Yields entries with `hlc >= sinceHlc` (inclusive), then new ones as they
    * arrive. To resume after an entry you have handled, pass `entry.hlc + 1n`.
+   * Throws `ProtectedStreamError` for a stream under `cn/`, `wiki/` or `reason/`, before any entry.
    */
   async *subscribeLog(stream: string, options: { sinceHlc?: bigint } = {}): AsyncGenerator<LogEntry> {
     const params: Record<string, string> = { stream };
@@ -1156,19 +1174,20 @@ export class MyceliumAgent {
     yield* sseStream<LogEntry>({ url, headers: this.auth }, (data) => {
       const raw = parseLossless(data) as { hlc: number | string; value_b64: string };
       return { hlc: toBigInt(raw.hlc), value: fromb64(raw.value_b64) };
-    });
+    }, { refusal: streamRefusal(stream) });
   }
 
   /**
    * Consumer-group subscription: at most one consumer per group processes an
    * entry at a time. The offset is persisted in the gossip KV.
+   * Throws `ProtectedStreamError` for a stream under `cn/`, `wiki/` or `reason/`, before the claim is contended for.
    */
   async *subscribeLogGroup(stream: string, group: string): AsyncGenerator<LogEntry> {
     const url = this._sseUrl("/gateway/overlay/log/group/subscribe", { stream, group });
     yield* sseStream<LogEntry>({ url, headers: this.auth }, (data) => {
       const raw = parseLossless(data) as { hlc: number | string; value_b64: string };
       return { hlc: toBigInt(raw.hlc), value: fromb64(raw.value_b64) };
-    });
+    }, { refusal: streamRefusal(stream) });
   }
 
   /**
