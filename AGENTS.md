@@ -21,7 +21,7 @@ Its source is [`docs/reference/agent-skills/fleet.md`](docs/reference/agent-skil
 
 ## Changing this repository
 
-Read `CLAUDE.md` first; it applies to every agent. Some of its rules, each with its home:
+Read `CLAUDE.md` first; it applies to every agent. Some of this repository's rules, each with its home:
 
 - **Query the wiki first:** [`docs/wiki/wiki.md`](docs/wiki/wiki.md) (`CLAUDE.md`, the wiki workflow).
 - **Enumerate before fixing:** every entry point, with the grep, each tested (`CLAUDE.md`, verification rule 1).

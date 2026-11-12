@@ -97,7 +97,8 @@ Every subcommand of this binary. One not listed here is not in it. Each prints i
   stderr.
 - A usage error, or a file that does not load, is a message on stderr and a non-zero exit, with nothing on stdout.
 - A run that finds a problem still prints its document, and exits 1: `doctor` when `start()` would refuse,
-  `test --faults` when a class fails, `declare` when a tick is refused. Read the document; it names what to fix.
+  `wire-check` when it finds an error, `test --faults` when a class fails, `declare` when a tick is refused. Read the
+  document; it names what to fix.
 - Within a schema version a document only grows. Ignore a field or an event you do not know.
 - `tls` documents carry paths and fingerprints. Do not read, print or copy a key file. `doctor` shows a secret
   as `set` or `unset`.

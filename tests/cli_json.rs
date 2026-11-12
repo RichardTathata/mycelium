@@ -567,6 +567,12 @@ fn a_doctor_that_would_refuse_prints_its_document_and_exits_1() {
     assert_eq!(doc["schema"], "mycelium.doctor/1");
     assert!(doc["refusal"].is_string() || doc["refusal"].is_object(), "the document carries the refusal: {}", doc["refusal"]);
 
+    // `wire-check` likewise: a declaration with an error is exit 1 and its document, not an empty stdout.
+    let wc = run(&["wire-check", "tests/fixtures/units/unwired", "--format", "json"]);
+    assert_eq!(wc.status.code(), Some(1), "{}", String::from_utf8_lossy(&wc.stderr));
+    let doc: Value = serde_json::from_str(&stdout(&wc)).unwrap_or_else(|e| panic!("wire-check's stdout is not one JSON document ({e}):\n{}", stdout(&wc)));
+    assert_eq!(doc["schema"], "mycelium.design/declaration/1");
+
     let usage = run(&["doctor", "--format"]);
     assert_eq!(usage.status.code(), Some(2));
     assert!(usage.stdout.is_empty() && !usage.stderr.is_empty(), "a usage error leaves stdout empty");

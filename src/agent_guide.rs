@@ -161,9 +161,21 @@ mod tests {
                 } else if !rest.is_empty() {
                     out.push((step, rest.to_string()));
                 }
+            } else if let Some(action) = key.strip_prefix("uses:") {
+                // A local action's steps are in another file, which this extraction does not read.
+                assert!(!action.trim().trim_matches(|c| c == '"' || c == '\'').starts_with('.'), "a local action, whose commands are not read: `{trimmed}`");
+            } else if let Some((name, value)) = key.split_once(':') {
+                // An `env:` entry that holds a runner: a later `"$NAME" …` would run it unseen.
+                let variable = !name.is_empty() && name.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_');
+                assert!(!(variable && mentions_a_runner(value)), "an env entry that holds the binary, pip or Python: `{trimmed}`");
             }
         }
         out
+    }
+
+    /// Whether a text names the binary, pip or Python.
+    fn mentions_a_runner(text: &str) -> bool {
+        ["mycelium", "pip", "python"].iter().any(|m| text.contains(m))
     }
 
     /// A shell line as its simple commands: split at `&&`, `||`, `;` and `|` outside quotes, with the inside of
@@ -220,30 +232,52 @@ mod tests {
 
     /// The command a segment runs, when its program is one of [`RUNNERS`]: without `sudo`, `env`, `time`, `!`, `if`
     /// and the like before it, with the program's directory dropped, its own variable assignments kept, and cut at
-    /// a redirection. `None` for a pure assignment or a program in [`NOT_RUNNERS`]. **Fails** on any other program
-    /// whose segment mentions the binary, pip or Python: an unclassified line is never skipped.
-    fn command_of(segment: &str) -> Option<String> {
+    /// a redirection. `Ok(None)` for an assignment that holds no runner, or a program in [`NOT_RUNNERS`]. **`Err`**
+    /// for what could run a command unseen: a program held in a variable (`"$BIN" rules`), an assignment whose
+    /// value names a runner (`BIN=/usr/local/bin/mycelium`), a local script (`./walk.sh`, `bash scripts/step.sh`),
+    /// and any other program whose segment mentions the binary, pip or Python.
+    fn classify(segment: &str) -> Result<Option<String>, String> {
         let mut words: Vec<&str> = segment.split_whitespace().collect();
         while matches!(words.first(), Some(&("sudo" | "env" | "time" | "!" | "if" | "then" | "elif" | "else" | "while" | "do" | "{" | "("))) {
             words.remove(0);
         }
         let assignment = |w: &str| w.split_once('=').is_some_and(|(k, _)| !k.is_empty() && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'));
-        let at = words.iter().position(|w| !assignment(w))?;
-        let program = words[at].trim_matches('"').rsplit('/').next().unwrap_or("");
+        let at = words.iter().position(|w| !assignment(w)).unwrap_or(words.len());
+        let holds_a_runner = words[..at].iter().any(|w| mentions_a_runner(w.split_once('=').map_or("", |(_, v)| v)));
+        let Some(word) = words.get(at).map(|w| w.trim_matches('"')) else {
+            return if holds_a_runner { Err(format!("a variable that holds a runner, which a later line could run unseen: `{segment}`")) } else { Ok(None) };
+        };
+        let program = word.rsplit('/').next().unwrap_or("");
         if RUNNERS.contains(&program) {
             let mut out: Vec<&str> = words[..at].to_vec();
             out.push(program);
             out.extend(words[at + 1..].iter().take_while(|w| !w.starts_with('>') && !w.starts_with("2>") && !w.starts_with('<')));
-            return Some(
+            return Ok(Some(
                 out.join(" ")
                     .replace("\"$HOME/governed-call-py\"", "governed-call-py")
                     .replace("$REPO", "RichardTathata/mycelium")
                     .replace("$TAG", TAG_PLACEHOLDER),
-            );
+            ));
         }
-        let mentions = ["mycelium", "pip", "python"].iter().any(|m| segment.contains(m));
-        assert!(!mentions || NOT_RUNNERS.contains(&program), "unclassified: `{program}` in `{segment}` — a runner, or a program that only names one?");
-        None
+        if holds_a_runner {
+            return Err(format!("a variable that holds a runner, set for a program that is not one: `{segment}`"));
+        }
+        if word.starts_with('$') && word != "$()" {
+            return Err(format!("a program held in a variable, which the extraction cannot name: `{segment}`"));
+        }
+        let shell = matches!(program, "bash" | "sh" | "zsh" | "source" | ".") && words[at + 1..].iter().any(|w| !w.starts_with('-'));
+        if shell || word.starts_with("./") || word.starts_with("../") || program.ends_with(".sh") || program.ends_with(".py") {
+            return Err(format!("a script, whose commands are not read: `{segment}`"));
+        }
+        if mentions_a_runner(segment) && !NOT_RUNNERS.contains(&program) {
+            return Err(format!("unclassified: `{program}` in `{segment}` — a runner, or a program that only names one?"));
+        }
+        Ok(None)
+    }
+
+    /// [`classify`] for a workflow line, where an unclassified segment **fails** and is never skipped.
+    fn command_of(segment: &str) -> Option<String> {
+        classify(segment).unwrap_or_else(|e| panic!("{e}"))
     }
 
     /// Every command the workflow runs, in order: [`run_lines`], [`segments`], [`command_of`].
@@ -273,7 +307,9 @@ mod tests {
         out
     }
 
-    /// What each step of the workflow greps its output for (`grep -q '<pattern>' <file>`), a leading `^` dropped.
+    /// What each numbered step of the workflow greps its output for, a leading `^` dropped: `grep` with a `q` among
+    /// its short flags (`-q`, `-Eq`, `-qF`), then the pattern, then a file or nothing. **Not seen:** an output
+    /// checked another way — `grep -c`, a `[ "$got" = … ]` comparison — and a grep outside the numbered steps.
     fn workflow_expectations(yml: &str) -> BTreeMap<u32, BTreeSet<String>> {
         let mut out: BTreeMap<u32, BTreeSet<String>> = BTreeMap::new();
         for (step, line) in run_lines(yml) {
@@ -281,8 +317,14 @@ mod tests {
             segments(&line, &mut segs);
             for seg in segs {
                 let seg = seg.trim().trim_start_matches("if ").trim_start_matches("! ");
-                if let Some(rest) = seg.strip_prefix("grep -q ") {
-                    let (pattern, _file) = rest.trim().rsplit_once(' ').expect("grep -q '<pattern>' <file>");
+                let Some(mut rest) = seg.strip_prefix("grep ").map(str::trim) else { continue };
+                let mut quiet = false;
+                while let Some((flag, after)) = rest.split_once(' ').filter(|(flag, _)| flag.starts_with('-')) {
+                    quiet |= !flag.starts_with("--") && flag.contains('q');
+                    rest = after.trim();
+                }
+                if quiet && step > 0 {
+                    let pattern = if rest.ends_with('\'') || rest.ends_with('"') { rest } else { rest.rsplit_once(' ').map_or(rest, |(pattern, _file)| pattern) };
                     out.entry(step).or_default().insert(unquote(pattern).trim_start_matches('^').to_string());
                 }
             }
@@ -395,11 +437,22 @@ mod tests {
         if tags != BTreeSet::from(["sh".to_string(), "toml".to_string()]) {
             return Err(format!("a fence that is neither `sh` (compared with the workflow's commands) nor `toml` (compared with its printf): {tags:?}"));
         }
+        let mut inside = false;
+        for line in guide_md.lines() {
+            inside ^= line.trim_start().starts_with("```");
+            if !inside && (line.starts_with("    ") || line.starts_with('\t') || line.trim_start().starts_with("~~~")) {
+                return Err(format!("an indented or `~~~` code block, which the comparison does not read: {line:?}"));
+            }
+        }
         let mut guide = fenced(guide_md, "sh");
         for only in GUIDE_ONLY {
             if guide.iter().filter(|l| *l == only).count() != 1 {
                 return Err(format!("the stated difference `{only}` is not in the guide exactly once"));
             }
+        }
+        let second: Vec<String> = guide_steps(guide_md).get(&2).map(|text| fenced(text, "sh")).unwrap_or_default();
+        if second.first().map(String::as_str) != Some(GUIDE_ONLY[0]) {
+            return Err(format!("the stated difference `{}` is not the first command of step 2, before the install it is for: {second:?}", GUIDE_ONLY[0]));
         }
         guide.retain(|l| !GUIDE_ONLY.contains(&l.as_str()));
         let mut job = workflow_commands(yml);
@@ -412,10 +465,15 @@ mod tests {
         if guide != job {
             return Err(format!("the guide's ```sh lines {guide:?} are not the one-hour workflow's commands {job:?}"));
         }
+        // Inline code is read as a shell line would be, so a wrapper or an assignment before a runner hides nothing.
+        // A span the classifier refuses is not a command (`mycelium.tls/1`, `--format text|json`) and is passed over.
         for span in inline_spans(guide_md) {
-            let program = span.split_whitespace().next().unwrap_or("").rsplit('/').next().unwrap_or("");
-            if RUNNERS.contains(&program) && span.contains(' ') && !guide.contains(&span) && !INLINE_ALLOWED.contains(&span.as_str()) {
-                return Err(format!("inline `{span}` is a command outside the walk"));
+            let mut segs = Vec::new();
+            segments(&span, &mut segs);
+            for command in segs.iter().filter_map(|seg| classify(seg).ok().flatten()) {
+                if command.contains(' ') && !guide.contains(&command) && !INLINE_ALLOWED.contains(&command.as_str()) {
+                    return Err(format!("inline `{span}` is a command outside the walk"));
+                }
             }
         }
         Ok(job)
@@ -424,8 +482,11 @@ mod tests {
     /// **The row's exit: the guide's commands are the `one-hour` job's.** The guide's `sh` lines, without the one
     /// stated difference ([`GUIDE_ONLY`]), are the commands the workflow runs, without its two environment queries
     /// ([`WORKFLOW_ONLY`]), in the same order — so a step added to either side fails here until the other has it.
-    /// The guide has no fence but `sh` and `toml`, and no inline code that runs the binary, pip or Python outside
-    /// the walk and [`INLINE_ALLOWED`]: there is no place in it for a command this comparison does not see.
+    /// The guide has no fence but `sh` and `toml`, no indented or `~~~` block, and no inline code that runs the
+    /// binary, pip or Python outside the walk and [`INLINE_ALLOWED`]; the stated difference is step 2's first
+    /// command. **Not seen:** a command written in prose without backticks, and a command a workflow reaches through
+    /// a file this test does not read — a script or a local action, each of which fails the extraction by name
+    /// rather than being read.
     #[test]
     fn the_guides_commands_are_the_one_hour_jobs() {
         let job = walk_differs(FLEET, ONE_HOUR).unwrap_or_else(|e| panic!("{e}"));
@@ -471,6 +532,61 @@ mod tests {
         }
         let without_venv = FLEET.replace(GUIDE_ONLY[0], "true");
         assert!(walk_differs(&without_venv, ONE_HOUR).is_err(), "the stated difference is required, not merely allowed");
+    }
+
+    /// What a comparison over planted texts says: its `Err`, or the message it failed with.
+    fn refusal(guide_md: &str, yml: &str) -> String {
+        let (guide_md, yml) = (guide_md.to_string(), yml.to_string());
+        match std::panic::catch_unwind(move || walk_differs(&guide_md, &yml)) {
+            Ok(Ok(job)) => panic!("the plant was passed over: {job:?}"),
+            Ok(Err(e)) => e,
+            Err(panic) => panic.downcast_ref::<String>().cloned().unwrap_or_else(|| "a panic without a message".into()),
+        }
+    }
+
+    /// **The confirm round's residues, planted** (#770). In the workflow: a runner held in a variable, a program
+    /// that is a variable, a script, a local action, an `env:` entry holding a runner. In the guide: an indented
+    /// block, a `~~~` block, inline code behind a wrapper or an assignment, and the virtual-environment line moved
+    /// below the install it is for. Each fails, by name.
+    #[test]
+    fn a_command_reached_indirectly_fails_the_comparison() {
+        for (line, names) in [
+            ("BIN=/usr/local/bin/mycelium", "a variable that holds a runner"),
+            ("PY=python3 true", "a variable that holds a runner"),
+            ("\"$BIN\" rules", "a program held in a variable"),
+            ("${BIN} rules", "a program held in a variable"),
+            ("bash scripts/step.sh", "a script"),
+            ("./walk.sh", "a script"),
+            ("scripts/walk.py --all", "a script"),
+            (". ./env.sh", "a script"),
+        ] {
+            for step in [format!("      - name: planted\n        run: |\n          {line}\n"), format!("      - run: {line}\n")] {
+                let said = refusal(FLEET, &format!("{ONE_HOUR}{step}"));
+                assert!(said.contains(names), "`{line}`: {said}");
+            }
+        }
+        let said = refusal(FLEET, &format!("{ONE_HOUR}      - uses: ./.github/actions/walk\n"));
+        assert!(said.contains("a local action"), "{said}");
+        assert!(ONE_HOUR.contains("\n      PLATFORM: linux-x86_64\n"), "the job's env block, where the entry below is planted");
+        let said = refusal(FLEET, &ONE_HOUR.replace("\n      PLATFORM: linux-x86_64\n", "\n      PLATFORM: linux-x86_64\n      BIN: /usr/local/bin/mycelium\n"));
+        assert!(said.contains("an env entry that holds"), "{said}");
+
+        for (plant, names) in [
+            ("\n    mycelium rules\n", "an indented or `~~~` code block"),
+            ("\n~~~\nmycelium rules\n~~~\n", "an indented or `~~~` code block"),
+            ("\nOr `sudo mycelium rules`.\n", "inline `sudo mycelium rules`"),
+            ("\nOr `X=1 python3 other.py`.\n", "inline `X=1 python3 other.py`"),
+            ("\nOr `cd units && mycelium rules`.\n", "inline `cd units && mycelium rules`"),
+        ] {
+            let said = refusal(&format!("{FLEET}{plant}"), ONE_HOUR);
+            assert!(said.contains(names), "{plant:?}: {said}");
+        }
+        let (venv, init) = (GUIDE_ONLY[0], "mycelium init governed-call-py --template governed-call-py");
+        let pip = FLEET.lines().find(|l| l.starts_with("pip install ")).expect("the guide's install line");
+        let ordered = format!("{venv}\n{init}\n{pip}\n");
+        assert!(FLEET.contains(&ordered), "step 2's three lines, in order");
+        let said = refusal(&FLEET.replace(&ordered, &format!("{init}\n{pip}\n{venv}\n")), ONE_HOUR);
+        assert!(said.contains("is not the first command of step 2"), "{said}");
     }
 
     /// The extraction sees a command in every form a workflow can write one — the single-line `run:`, a wrapper
@@ -524,7 +640,26 @@ mod tests {
     /// a row for. The ports the guide names are the scaffold's.
     #[test]
     fn the_guides_expectations_and_configuration_are_the_one_hour_jobs() {
-        let (steps, greps, printfs) = (guide_steps(FLEET), workflow_expectations(ONE_HOUR), workflow_configuration(ONE_HOUR));
+        check_expectations(FLEET, ONE_HOUR);
+    }
+
+    /// A grep with other flags is an expectation too: `-Eq` or `-qF` added to step 3 of the real workflow fails the
+    /// comparison until the guide quotes it or [`NOT_QUOTED`] lists it. `grep -c`, which this does not read, does not.
+    #[test]
+    fn a_grep_planted_with_other_flags_fails_the_comparison() {
+        let last = "grep -q 'the route needs kv:write' run.log\n";
+        assert!(ONE_HOUR.contains(last));
+        for (grep, seen) in [("grep -Eq 'a new line' run.log", true), ("grep -qF 'a new line' run.log", true), ("if ! grep -q 'a new line' run.log; then exit 1; fi", true), ("grep -c 'a new line' run.log", false)] {
+            let yml = ONE_HOUR.replace(last, &format!("{last}          {grep}\n"));
+            let failed = std::panic::catch_unwind(move || check_expectations(FLEET, &yml)).is_err();
+            assert_eq!(failed, seen, "`{grep}`");
+        }
+        let greps = workflow_expectations("steps:\n  - name: setup\n    run: echo x | grep -Eq '^v[0-9]+$'\n  - name: \"1 · one\"\n    run: |\n      grep -qF 'a b' out.log\n      echo x | grep -q \"c d\"\n");
+        assert_eq!(greps, BTreeMap::from([(1, BTreeSet::from(["a b".to_string(), "c d".to_string()]))]), "a grep outside the numbered steps is not an expectation of the walk");
+    }
+
+    fn check_expectations(guide_md: &str, yml: &str) {
+        let (steps, greps, printfs) = (guide_steps(guide_md), workflow_expectations(yml), workflow_configuration(yml));
         assert_eq!(steps.keys().copied().collect::<Vec<_>>(), [0, 1, 2, 3, 4, 5, 6], "the walk's six steps, after its preamble");
         assert_eq!(greps.values().map(BTreeSet::len).sum::<usize>(), 16, "the workflow's greps were found: {greps:?}");
         assert_eq!(greps.keys().copied().collect::<Vec<_>>(), [3, 4, 5, 6]);
