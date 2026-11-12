@@ -160,11 +160,11 @@ future contributor needs so they don't re-litigate a settled choice — lives he
 
 ## Proposed — not yet started
 
-[`external-review-2026-10-31.md`](external-review-2026-10-31.md) — **the external code security review of 2026-10-31** (agreed with the maintainer 2026-10-31, rev 0.8; nine rows, R1–R4 released in v2.39.0 — #714, #713, #712 — and R5–R9 delivered on `main`, unreleased — #719, #718, #722, #720, #721, closed on evidence in §5): the review's seven findings, all verified true at `d656f50c` — three contradict a claim the repository makes — plus the two the verification added (the grant restart gate proves the exit snapshot, not the WAL; the audit warnings are accepted nowhere in the open); R1–R4 before the next MINOR (done, v2.39.0); the rest after it (done, on `main`). The review itself is vendored at [`external/2026-10-31-code-security-review.md`](external/2026-10-31-code-security-review.md).
+[`external-review-2026-10-31.md`](external-review-2026-10-31.md) — **the external code security review of 2026-10-31** (agreed with the maintainer 2026-10-31, rev 0.9; nine rows, every one released: R1–R4 in v2.39.0 — #714, #713, #712 — and R5–R9 in v2.40.0 — #719, #718, #722, #720, #721, closed on evidence in §5): the review's seven findings, all verified true at `d656f50c` — three contradict a claim the repository makes — plus the two the verification added (the grant restart gate proves the exit snapshot, not the WAL; the audit warnings are accepted nowhere in the open); R1–R4 before the next MINOR (done, v2.39.0); the rest after it (done, v2.40.0). The review itself is vendored at [`external/2026-10-31-code-security-review.md`](external/2026-10-31-code-security-review.md).
 
-[`feature-pages.md`](feature-pages.md) — **feature pages** (delivered, rev 0.13; agreed with the maintainer
+[`feature-pages.md`](feature-pages.md) — **feature pages** (delivered, rev 0.14; agreed with the maintainer
 2026-10-19; F1 delivered #654, F2 #655, F3 in five PRs #725–#737 (2026-11-07), F4's fifth rule and `/doc-coverage`
-pass #724 and the pass run once, its findings closed (2026-11-08)). One short page per feature: what it is, when to use it, the settings
+pass #724 and the pass run once, its findings closed (2026-11-08); F3 and F4 released in v2.40.0). One short page per feature: what it is, when to use it, the settings
 that turn it on, its example, its guarantees and *not built* items, and links to the guide, runbook, design and
 code. Kept true by a CI gate over a checked-in feature registry, a pass in `/doc-coverage`, and a fifth
 verification-policy rule.
@@ -189,7 +189,7 @@ the comparison proposed that already ships is tabled in its §1; a task lifecycl
 dashboard are deferred in §6 with the question each must answer first.
 
 [`identity-and-lifecycle.md`](identity-and-lifecycle.md) — **identity and lifecycle** (proposed 2026-10-31; **agreed
-with the maintainer 2026-11-07**, rev 0.8; work begins with I0 and the three spikes, §4; reviewed five times — rev 0.1 against the decisions, rev 0.3 against the mechanisms, rev 0.4 and
+with the maintainer 2026-11-07**, rev 0.14; **wave 1a released in v2.40.0** — I0 (#733), I1 (#741–#745), I3 (#750, #754, #756), I5 (#757, #759, #760), each closed on evidence in §8 — and wave 1b's three spikes written (S-cancel #731, S-succeed #732, S-presence #729, #747); **Next:** wave 1b's rows I4, I2, I7, then wave 2; reviewed five times — rev 0.1 against the decisions, rev 0.3 against the mechanisms, rev 0.4 and
 rev 0.5 each against five premises, every premise failure in wave 1 or the developer identity; the fifth, on the merged
 document in #715's thread, corrected thirteen stated facts in place). From a comparative reading of Orca and Eve against
 `main` at `9cbd3b82`. Eight decisions D1–D8: every acting principal keyed by a certificate the fleet CA issues off-node,

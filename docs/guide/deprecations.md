@@ -2348,7 +2348,7 @@ unchanged — its writes are in memory and it has never claimed a disk ([feature
 grant-admitted call, every grant-required invocation and every revoke until a snapshot repairs it, where it used to
 run them.
 
-## 78. The gateway closes a connection that does not speak within `handshake_timeout_ms`, and serves at most `gateway_max_connections` at once; `GossipConfig` gained `gateway_max_connections` (unreleased, external review 2026-10-31, R5)
+## 78. The gateway closes a connection that does not speak within `handshake_timeout_ms`, and serves at most `gateway_max_connections` at once; `GossipConfig` gained `gateway_max_connections` (2.40.0, external review 2026-10-31, R5)
 
 The gateway's listener (`http_port`) bounded nothing before this release: a socket that connected and sent nothing held
 a task and a file descriptor for as long as the client kept it open, on the plaintext listener and under
@@ -2398,7 +2398,7 @@ client that answers PINGs and sends no request is one; a long-running stream hol
 is no per-source cap on the gateway (`max_connections_per_source` is the gossip listener's). A reverse proxy's own
 limits remain the deployment's first bound against a flood.
 
-## 79. A journal or a companion WAL whose directory cannot be synced refuses to open (unreleased, external review 2026-10-31, R6)
+## 79. A journal or a companion WAL whose directory cannot be synced refuses to open (2.40.0, external review 2026-10-31, R6)
 
 **What changed.** Opening the node-local journal (and so the evidence journal, the rights ledger, the revocation and
 epoch journals, the knowledge journals and the effects ledger), the tuple-space store's WAL or the blackboard's WAL now
@@ -2432,7 +2432,7 @@ these opens use, for an embedder's own log.
 — is not observable without a filesystem fault adapter. The tests pin the order of the syncs and that each runs on a
 real directory.
 
-## 80. A bulk call works under `gateway_tls`; an operator certificate needs `bulk_ca_pem_path` that verifies it; `max_bulk_payload_bytes` bounds a payload (unreleased, external review 2026-10-31, R7)
+## 80. A bulk call works under `gateway_tls`; an operator certificate needs `bulk_ca_pem_path` that verifies it; `max_bulk_payload_bytes` bounds a payload (2.40.0, external review 2026-10-31, R7)
 
 **What changed.** A `bulk_call` between nodes whose gateways serve TLS used to time out: the responder fetched the
 staged payload over `http://` from a listener that speaks only TLS (F6). Now a caller whose gateway serves TLS marks its
@@ -2486,7 +2486,7 @@ is bypassed for bulk — the ticket says `http` and names the gateway's own port
 An application serving `/bulk/{id}` from its own server (`ServiceHandle::set_bulk_serving_port`) advertises the scheme
 `gateway_tls` implies unless it calls the new `ServiceHandle::set_bulk_serving_https`.
 
-## 81. A replica-sync answer is `Failed` while an inbound record is between its apply and its append; `WalHandle` gained `begin_inbound` and `inbound_in_flight` (unreleased, external review 2026-10-31, R8)
+## 81. A replica-sync answer is `Failed` while an inbound record is between its apply and its append; `WalHandle` gained `begin_inbound` and `inbound_in_flight` (2.40.0, external review 2026-10-31, R8)
 
 A peer asked whether it holds a record (`sys.replica-sync.v1`, behind `set_with_replica_sync`, `POST /gateway/kv` with
 `min_acks`, and both SDKs' replica-sync writes) used to answer `Persisted` from its store and a WAL sync. A record the
@@ -2510,7 +2510,7 @@ awaits — at shutdown, under `sync_mode = "flush"`; the read bounds wrap only t
 guard `InboundApply`), `append_inbound()` and `inbound_in_flight()`; `/health`'s `persistence` object gained
 `inbound_in_flight`. Wire **v12** unchanged; invariant 1 (*apply, then persist*) unchanged.
 
-## 82. Every crate requires Tokio 1.53.3 or later; `rustls-pemfile` is no longer a dependency (unreleased, external review 2026-10-31, R9)
+## 82. Every crate requires Tokio 1.53.3 or later; `rustls-pemfile` is no longer a dependency (2.40.0, external review 2026-10-31, R9)
 
 **Tokio.** Every crate in this repository — `mycelium`, `mycelium-core`, each companion and the examples — now declares
 `tokio = "1.53.3"` where it declared `"1.35"`, and both templates where they declared `"1"`. Tokio 1.52.x carries RUSTSEC-2026-0386
@@ -2529,7 +2529,7 @@ reads its gateway certificate and key, and its CA and node certificates, through
 with other sections skipped, PKCS#8, PKCS#1 and SEC1 keys by label, CRLF line endings, an encrypted key read as no key,
 a malformed section an error.
 
-## 83. `[authority]` attaches this node's authority from its declaration; `GossipConfig` gained `authority` (unreleased, identity-and-lifecycle I0)
+## 83. `[authority]` attaches this node's authority from its declaration; `GossipConfig` gained `authority` (2.40.0, identity-and-lifecycle I0)
 
 A node configured with an `[authority]` table takes its action evaluator, execution authority, provider enforcement
 and evidence journal from the unit its `unit` names (`docs/features/declared-authority.md`). Without the table nothing
@@ -2550,7 +2550,7 @@ changes.
   the door presents it (`token:<issuer>/<name>` for a named token, `node:<id>` for a node). Do not attach an evaluator
   in code as well: `start()` refuses one source of authority beside another.
 
-## 84. A provider refuses a call whose mandate was revoked after its preflight and before its registration: *authority not established*, `mandate_lapsed_before_run` (unreleased)
+## 84. A provider refuses a call whose mandate was revoked after its preflight and before its registration: *authority not established*, `mandate_lapsed_before_run` (2.40.0)
 
 With provider enforcement on, a protected call presented under a mandate (a grant, or any scoped mandate the node's
 execution authority verifies) is decided by the provider's preflight, then registered as running work so the
@@ -2587,7 +2587,7 @@ the work. Now the call is refused.
   again. Do not retry with the same mandate.
 - **Counted:** `mycelium_provider_mandate_lapsed_total` (feature `metrics`).
 
-## 85. A stem runs only the artifact kinds `[hosts].kinds` declares; `Provisioner` gained `restrict_kinds` (unreleased, review of #736, defect A)
+## 85. A stem runs only the artifact kinds `[hosts].kinds` declares; `Provisioner` gained `restrict_kinds` (2.40.0, review of #736, defect A)
 
 Before, every stem registered the WASM-component runtime whatever its unit said: `kinds` decided only whether the
 blob runtime was added. A stem declaring `kinds = ["blob"]` therefore installed and ran a WASM component whenever a
@@ -2612,7 +2612,7 @@ holds the floor at `already_hosted`, as does any member's such line on a host wi
 trusted line whose install always fails is chosen again every round (feeding an install's failure back into the choice
 is not built).
 
-## 86. A `mycelium-client://` certificate is refused at the mesh; `sys/client-cert/` and `POST /gateway/identity/client-cert` are new (unreleased, identity-and-lifecycle I1)
+## 86. A `mycelium-client://` certificate is refused at the mesh; `sys/client-cert/` and `POST /gateway/identity/client-cert` are new (2.40.0, identity-and-lifecycle I1)
 
 A certificate naming `mycelium-client://{issuer}/{name}` is a **client certificate**. `mycelium tls issue --client
 <name> --issuer <issuer>` issues one for a service's key. Both mesh verifiers now refuse one, from a dialling peer and
@@ -2644,7 +2644,7 @@ node.
 Wire **v12** unchanged. What I1 leaves for later (`cs`/`cn`, the SDK clients, client-held grants) is listed on the
 [feature page](../features/client-certificates.md).
 
-## 87. A client's own signature on a call: `cs`/`cn` in `params._meta`; an unsigned call from a certificate holder is counted (unreleased, identity-and-lifecycle I1, second half)
+## 87. A client's own signature on a call: `cs`/`cn` in `params._meta`; an unsigned call from a certificate holder is counted (2.40.0, identity-and-lifecycle I1, second half)
 
 A service holding a client certificate can sign a `tools/call` or an A2A send with its key and send
 `params._meta.cs` and `params._meta.cn`. The gateway carries both in the caller envelope, and the provider checks
@@ -2687,7 +2687,7 @@ them at its receive boundary.
 
 Wire **v12** unchanged: `cs` and `cn` are payload.
 
-## 88. Grants held by a client principal; `ExecutionAuthority::new`, `with_cohort_budget` and `with_membership_authorities` take a shared issuer set (unreleased, identity-and-lifecycle I1, second half)
+## 88. Grants held by a client principal; `ExecutionAuthority::new`, `with_cohort_budget` and `with_membership_authorities` take a shared issuer set (2.40.0, identity-and-lifecycle I1, second half)
 
 A service with a client certificate on record can now hold a grant. It asks with `POST /gateway/grants/request`
 (`mcp:invoke`), the supervisor issues it at the existing door, and the service presents it in `_meta.mandate` with a
@@ -2726,7 +2726,7 @@ possession proof signed by its client key.
 
 Wire **v12** unchanged.
 
-## 89. The SDKs sign as a service and present its own grants (unreleased, identity-and-lifecycle I1, the SDK half)
+## 89. The SDKs sign as a service and present its own grants (2.40.0, identity-and-lifecycle I1, the SDK half)
 
 Everything here is additive: no existing call changes what it sends unless it is given a signer.
 
@@ -2758,7 +2758,7 @@ Everything here is additive: no existing call changes what it sends unless it is
 Wire **v12** unchanged; no Rust API change.
 
 
-## 90. `mycelium-effects` depends on `rusqlite` 0.41 (unreleased, RUSTSEC-2026-0459)
+## 90. `mycelium-effects` depends on `rusqlite` 0.41 (2.40.0, RUSTSEC-2026-0459)
 
 `rusqlite` 0.32.1 → **0.41.0**, which brings `libsqlite3-sys` 0.30.1 → **0.39.1** and the bundled SQLite 3.46.0 →
 **3.54.1**, for RUSTSEC-2026-0459 (CVE-2026-119375). `rusqlite` is part of `mycelium-effects`' public API — a
@@ -2777,7 +2777,7 @@ Wire **v12** unchanged; no Rust API change.
 
 Wire **v12** unchanged; no other API change.
 
-## 91. The gateway checks a client's signature before it spends a grant (unreleased, identity-and-lifecycle I1, PR 4)
+## 91. The gateway checks a client's signature before it spends a grant (2.40.0, identity-and-lifecycle I1, PR 4)
 
 A call carrying `cs`/`cn` is now checked at the gateway's door as well as at the provider. At `/mcp`, `tasks/send` and
 `tasks/sendSubscribe` the gateway verifies the signature over the call's binding and the key's standing **before** its
@@ -2799,7 +2799,7 @@ preflight.
 - **The client signature binds the whole resource.** The signed message carried the resource up to its first `@`; it
   now carries the bare resource whole, in Rust, Python and TypeScript (the cs vector is regenerated, with a case for a
   name holding `@`). A signer that passed a resource with the provider appended (`tool:x@node`) must pass the bare one,
-  as `door_binding_mcp`, `mcp_binding` and `mcpBinding` return it. I1 is unreleased, so no deployed signer is affected.
+  as `door_binding_mcp`, `mcp_binding` and `mcpBinding` return it. I1 was first released in 2.40.0, so no deployed signer was affected.
 - **The provider's refusal carries its reason.** A tool's caller-context refusal (`-32022`) now has `data.reason`. At
   `/a2a` a provider's refusal is a JSON-RPC error (`-32003`, `data.reason`) on `tasks/send` and a failed task on a
   stream. Before, both answered a `completed` task with the refusal as its artifact. The evidence journal now records
@@ -2813,7 +2813,7 @@ preflight.
 
 Wire **v12** unchanged; no API change.
 
-## 92. The published stem is built with `compliance`; `gateway_a2a` serves A2A from configuration; `GossipConfig` gained `gateway_a2a` (unreleased)
+## 92. The published stem is built with `compliance`; `gateway_a2a` serves A2A from configuration; `GossipConfig` gained `gateway_a2a` (2.40.0)
 
 Two changes to the published binaries, both additive.
 
@@ -2849,7 +2849,7 @@ Two changes to the published binaries, both additive.
 
 Wire **v12** unchanged.
 
-## 93. A mandate's arguments digest is RFC 8785, with a one-release window (unreleased, identity-and-lifecycle I3, §9 O1)
+## 93. A mandate's arguments digest is RFC 8785, with a one-release window (2.40.0, identity-and-lifecycle I3, §9 O1)
 
 §92 is #749's. The digest a grant binds (`bound:args:`) and a possession proof covers is now RFC 8785 (JCS) in Rust,
 Python and TypeScript. It was each language's own JSON encoding, which disagreed on floats in exponent form, so an
@@ -2927,7 +2927,7 @@ honest Python or TypeScript holder could be refused.
 
 Wire **v12** unchanged.
 
-## 94. `gateway_a2a_default_skill` names the skill a message without one reaches; `GossipConfig` gained `gateway_a2a_default_skill` (unreleased)
+## 94. `gateway_a2a_default_skill` names the skill a message without one reaches; `GossipConfig` gained `gateway_a2a_default_skill` (2.40.0)
 
 `gateway_a2a_default_skill = "ns/name"` (or `GOSSIP_GATEWAY_A2A_DEFAULT_SKILL=ns/name`) is what
 `with_a2a_default_skill(ns, name)` is in code: an `/a2a` message that names no `metadata.skillId` — what an unmodified
@@ -2954,7 +2954,7 @@ skill (the evaluator, mandates, evidence).
 - **Compiler:** `GossipConfig` gained a public field, so an exhaustive struct literal breaks; `..Default::default()`
   is unaffected.
 
-## 95. Grant decisions may be signed and relayed under `grant:relay`; an unsigned decision is counted (unreleased, identity-and-lifecycle I3, PR 2)
+## 95. Grant decisions may be signed and relayed under `grant:relay`; an unsigned decision is counted (2.40.0, identity-and-lifecycle I3, PR 2)
 
 §94 is #751's. A supervisor holding a client certificate can sign its answer to a grant request, and the node records
 the signer as the decision's actor. A client carrying a signed decision needs only the new `grant:relay` scope.
@@ -3000,7 +3000,7 @@ the signer as the decision's actor. A client carrying a signed decision needs on
 
 Wire **v12** unchanged.
 
-## 96. A provider can verify an OIDC user's exchanged token; one that does refuses an `oidc:` action without it (unreleased, identity-and-lifecycle I5, PR 1)
+## 96. A provider can verify an OIDC user's exchanged token; one that does refuses an `oidc:` action without it (2.40.0, identity-and-lifecycle I5, PR 1)
 
 A provider verifies an OIDC user's token itself when its `[oidc]` table sets `exchange_audience`. The token is
 exchanged by the gateway at the IdP (RFC 8693) and bound to the gateway's node key (DPoP). This release builds the
@@ -3049,7 +3049,7 @@ provider's half; the gateway's exchange is §97.
 
 Wire **v12** unchanged.
 
-## 97. A gateway exchanges an OIDC user's token for every action it dispatches (unreleased, identity-and-lifecycle I5, PR 2)
+## 97. A gateway exchanges an OIDC user's token for every action it dispatches (2.40.0, identity-and-lifecycle I5, PR 2)
 
 A node whose `[oidc]` table sets `exchange_token_endpoint` exchanges the user's own bearer at the IdP (RFC 8693) under
 its client credential, with a DPoP proof under its node key, and carries the exchanged token to the provider (§96). It

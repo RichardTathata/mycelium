@@ -9,7 +9,72 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.40.0] — 2026-11-12
+
+Wire **v12** unchanged (`PREV = 11`; the rolling-upgrade gate, 3 + 2, passes). A MINOR: **identity and lifecycle wave
+1a** (`docs/plans/identity-and-lifecycle.md`) — I0 `[authority]`, a node's evaluator, execution authority, provider
+enforcement and evidence journal from its declaration; I1 client certificates for services, a client's own signature
+on a call and grants held by a client principal; I3 signed grant decisions relayed under `grant:relay` and the RFC 8785
+arguments digest in every language; I5 OIDC token exchange at the gateway, verified at the provider — beside **R5–R9 of
+the external code security review of 2026-10-31** (`docs/plans/external-review-2026-10-31.md`: gateway connection
+bounds, journal directory syncs, bulk under gateway TLS, an honest replica-sync answer, the audit that fails on an
+unaccepted warning), the **feature pages** F3 and F4 (`docs/plans/feature-pages.md`: every registry feature has a page,
+audited), the advisories **RUSTSEC-2026-0459** (SQLite, in `mycelium-effects`) and **-0486** (`rustix`), many fixes,
+and the **Rust ecosystem watch** register. Companions on their own tags: `mycelium-py` 0.2.15 and `mycelium-ts` 0.2.9
+(`McpClient`, `ClientSigner`, the grant request and decision verbs, signed decisions, the RFC 8785 digest),
+`mycelium-reason` 0.11.1 (Tokio's minimum), `mycelium-guardrails` 1.1.1 (`guarded_rpc_serve` registers before it
+returns; Tokio's minimum); `langgraph-checkpoint-mycelium` 0.3.4 and `strands-session-mycelium` 0.1.0 stay on their
+tags: no package code changed since.
+
+### Upgrade notes
+
+Each is a section of `docs/guide/deprecations.md`; read the ones that touch your deployment before upgrading.
+
+- **§78** — the gateway closes a connection that does not speak within `handshake_timeout_ms` and serves at most
+  `gateway_max_connections` (default 1024) at once; `GossipConfig` gained the field.
+- **§79** — a journal or a companion WAL whose directory cannot be synced refuses to open.
+- **§80** — a bulk call works under `gateway_tls`; an operator certificate needs a `bulk_ca_pem_path` that verifies it;
+  `max_bulk_payload_bytes` (64 MiB) bounds a payload.
+- **§81** — a replica-sync answer is `Failed` while an inbound record is between its apply and its append; `WalHandle`
+  gained `begin_inbound` and `inbound_in_flight`.
+- **§82** — every crate requires Tokio 1.53.3 or later; `rustls-pemfile` is no longer a dependency.
+- **§83** — `[authority]` attaches this node's authority from its declaration; `GossipConfig` gained `authority`.
+- **§84** — a provider refuses a call whose mandate was revoked between its preflight and its registration
+  (*authority not established*, `mandate_lapsed_before_run`).
+- **§85** — a stem runs only the artifact kinds `[hosts].kinds` declares; `Provisioner` gained `restrict_kinds`.
+- **§86** — a `mycelium-client://` certificate is refused at the mesh; `sys/client-cert/` and
+  `POST /gateway/identity/client-cert` are new. Upgrade every node before issuing a client certificate.
+- **§87** — a client's own signature on a call (`cs`/`cn` in `params._meta`); an unsigned call from a certificate
+  holder is counted, not yet refused.
+- **§88** — grants held by a client principal (`grant/{hex(principal)}/…` keys); `ExecutionAuthority::new`,
+  `with_cohort_budget` and `with_membership_authorities` take a shared issuer set.
+- **§89** — the SDKs sign as a service and present its own grants.
+- **§90** — `mycelium-effects` depends on `rusqlite` 0.41, which is in its public API.
+- **§91** — the gateway checks a client's signature before it spends a grant; a provider's refusal at `/a2a` is a
+  refusal, not a `completed` task.
+- **§92** — the published stem is built with `compliance`; `gateway_a2a` serves A2A from configuration; `GossipConfig`
+  gained `gateway_a2a`.
+- **§93** — a mandate's arguments digest is RFC 8785, with a one-release window for the older digest. Upgrade verifiers
+  before binders.
+- **§94** — `gateway_a2a_default_skill` names the skill a message without one reaches; `GossipConfig` gained the field.
+- **§95** — grant decisions may be signed and relayed under `grant:relay`; an unsigned decision is counted.
+- **§96** — a provider can verify an OIDC user's exchanged token, and one that does refuses an `oidc:` action without it.
+- **§97** — a gateway with `exchange_token_endpoint` exchanges an OIDC user's token for every action it dispatches.
+
+Also, without a section: a stem trace or span dashboard keyed on `mycelium.rule_revision` sees the wasm-host rules'
+real revisions (2 or 3) where it saw 1 (Fixed, below); `RUST_LOG` now replaces the node's and the stem's default
+filter rather than doing nothing.
+
 ### Security
+
+**Operator check.** Four entries below. (1) `grep -A1 '^name = "rustix"$' Cargo.lock` shows `1.1.6` and
+`grep -A1 '^name = "libsqlite3-sys"$' Cargo.lock` shows `0.39.1`; `cargo audit -f Cargo.lock` reports neither
+RUSTSEC-2026-0486 nor -0459. Neither is reachable from a shipped binary: `rustix`'s xattr functions are called nowhere,
+and only an adopter's `mycelium-effects` `SqliteDestination` opens SQLite (exposed only where a less trusted local party
+can write its database file and directory). (2) A gateway that held a silent connection open forever now closes it: open
+a TCP connection to `http_port`, send nothing, and it is closed after `handshake_timeout_ms`;
+`gateway_connections_timed_out` on `/stats` counts it. (3) CI's audit now fails on an unaccepted unmaintained, unsound
+or yanked advisory, and Tokio's floor is 1.53.3 (RUSTSEC-2026-0386, not reachable: nothing calls `AsyncFd`).
 
 - **`rustix` 1.1.4 / 1.1.5 → 1.1.6** (RUSTSEC-2026-0486, an unsoundness advisory, dated 2026-10-27): `rustix::fs`'s
   extended-attribute functions (`getxattr`, `listxattr` and their `l`/`f` forms) marked unwritten bytes initialized
@@ -547,6 +612,11 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   example relied on it or asserted nothing; rows Y4's and Y7's limits carried; ledger rows linked from the pages they
   prove. The cookbook's service-layer snippets called methods `GossipAgent` does not have (`agent.rpc_call` and
   four more); they go through `agent.service()`.
+- **The Rust ecosystem watch** (`docs/plans/rust-ecosystem-watch.md`, #755): a monthly register, not a build plan, of
+  seven upstream threads that could let Mycelium inherit work it does by hand — build provenance, the official Rust MCP
+  SDK (`rmcp`), telemetry beyond the record spans, WASI 0.3, hybrid post-quantum TLS key exchange, async traits, and
+  compile and link times — each row with where Mycelium is (`file:line`, `Cargo.lock` versions), its upstream sources
+  and what would move it, and a review log. Nothing in it is a commitment.
 
 ## [2.39.0] — 2026-11-06
 

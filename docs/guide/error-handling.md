@@ -160,7 +160,7 @@ reasons are the [`provider.enforcement`](../reference/rule-catalogue.md#provider
 an *authority not established* refusal (JSON-RPC `-32031`, `data.reason` `authority_not_established`) whose
 `data.detail` is **`mandate_lapsed_before_run`**: the preflight permitted the call on an established mandate, and the
 mandate was revoked, expired or superseded before the work was registered, so nothing ran. Not retryable with the
-same mandate — obtain a current one ([deprecations §84](deprecations.md#84-a-provider-refuses-a-call-whose-mandate-was-revoked-after-its-preflight-and-before-its-registration-authority-not-established-mandate_lapsed_before_run-unreleased)).
+same mandate — obtain a current one ([deprecations §84](deprecations.md#84-a-provider-refuses-a-call-whose-mandate-was-revoked-after-its-preflight-and-before-its-registration-authority-not-established-mandate_lapsed_before_run-2400)).
 
 ---
 

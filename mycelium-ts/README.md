@@ -512,7 +512,7 @@ the holder's principal as the pending list names it. A signed decision is refuse
 and cancellable by the identity that created it; a cancel ends the task's record and stops no work — a task runs
 inside its request — and a terminal task throws (adopter-surface X7, the adapter contract).
 
-### A service's own key: signed calls and its own grants (identity-and-lifecycle I1)
+### A service's own key: signed calls and its own grants (identity-and-lifecycle I1; 0.2.9)
 
 A service with a client certificate (`mycelium tls issue --client <name> --issuer <issuer>`, published at
 `POST /gateway/identity/client-cert`) signs every call with its key: give the clients its `ClientSigner`.
