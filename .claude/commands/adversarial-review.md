@@ -66,9 +66,10 @@ it reads the diff and the code. Tell it its final message *is* the report.
    permits is a finding. The page's inventory gives each record a **Status**. A decision read with (a)–(d) not
    all holding is a finding unless the change adds or updates the record's row with the Status that is true of
    it — **Partly** or **Does not hold**, naming the failing condition — or shows the record is outside the rule:
-   **Outside: availability** (the worst forgery is a refusal or a delay) or **Outside: no decision**. Soft state
-   with a bound and no detector is **Bounded, not detected**, which is a finding until the change cites the
-   detector. A row at **Meets** without the verifying `file:line` and the forged-record test is a finding.
+   **Outside: availability** (the worst forgery is a refusal or a delay), **Outside: no decision**, or
+   **Outside: bounded soft state** (the worst case detected and bounded, the detector and the bound cited in the
+   row). Soft state with a bound and no detector — or one detected only at the owner while another node acts on
+   it — is **Bounded, not detected**, which is a finding until the change cites the detector. A row at **Meets** without the verifying `file:line` and the forged-record test is a finding.
 
 ## The report and what to do with it
 

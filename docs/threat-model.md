@@ -384,7 +384,7 @@ embedding process it also holds the member's key (Boundary A, once per agent).
   - **Containment.** Clearance (L1–L3) bounds what each member holds. A population run as its own domain never
     enters another domain's membership, replication or quorum (Boundary D). `EgressPolicy.allow_hosts` fails closed
     on the paths the substrate chooses (Boundary C), but its default is allow-all.
-- *Boundary H mitigations in force (2026-09-24; plan [`plans/boundary-h.md`](plans/boundary-h.md), milestones M1–M2):*
+- *Boundary H mitigations in force — H3 excepted, which is built and not in force (2026-09-24; plan [`plans/boundary-h.md`](plans/boundary-h.md), milestones M1–M2):*
   Each is claimed at the strength its gate shows, with its stated limit.
   - **H2, per-issuer support** (#381). `min_supporting` counts distinct issuers, never records. *Gate:*
     `resolution::tests::one_issuer_repeating_itself_is_one_supporter`.
