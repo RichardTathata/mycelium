@@ -15,8 +15,13 @@ round-3 open questions are decided by the maintainer (2026-11-12):
 - **I1:** client certificates lose standing at narrowing; `tls succeed` re-issues each principal's current key.
 - **I7:** consent certificates follow the same rule. `tls succeed` re-issues each one over its public key alone,
   carrying the grade extension over.
-- **I4 (§9 O8, closed):** every gateway is anchored under the successor before any provider narrows, and a succession
-  window must be longer than `GRANT_TTL_CAP_SECS`, so every `call:` window is shorter.
+- **I4 (§9 O8, closed):** every gateway must be anchored under the successor before any provider narrows. This is
+  required, with an operator override (the maintainer's decision, 2026-11-12):
+  - a provider waits, widened, naming each unanchored gateway;
+  - `tls succeed --narrow --accept-unanchored <node>` publishes an audited, successor-signed acceptance;
+  - an accepted gateway's cancels fail open for at most its `call:` window.
+
+  A succession window must be longer than `GRANT_TTL_CAP_SECS`, so every `call:` window is shorter.
 
 I2 waits on the sim-seams gate fix: `mycelium-core/src/tls.rs`'s grouped `use std::{fs, …}` hides its filesystem calls
 from `scripts/check-sim-seams.sh`.
