@@ -1,6 +1,6 @@
 # Identity and lifecycle — keyed principals, signed decisions, cancellation under a per-call mandate, and the developer surface
 
-**Status:** **agreed with the maintainer on 2026-11-07**, rev 0.18 (rev 0.18, 2026-11-12, writes row I2 **buildable**. It records the maintainer's 2026-11-12 decisions on the round-3 review's R1–R4. After narrowing no node is legacy (R1, after narrowing only). A re-issued certificate carries its key's original first issuance in a successor-signed `firstIssuedMs` extension (R2). The issuer learns which keys are revoked from a new gateway inventory, `GET /gateway/identity/inventory` under `identity:read`, which it judges offline, and revocations survive succession (R3). Anchors keep their certificates, not digests, journaled, with a roots-generation cache (R4). I1's client certificates lose standing at narrowing, and `tls succeed` re-issues them. I7's consent certificates follow the same rule and are re-issued over their public key alone, with their grade. Exit 4 states I4's constraint, closing §9 O8: every gateway is anchored under the successor before any provider narrows, required, with an operator override (`tls succeed --narrow --accept-unanchored`, audited; the maintainer's decision, 2026-11-12), and a `call:` window (at most `GRANT_TTL_CAP_SECS`, 3600 s) is shorter than the succession window. Exits 15–20 are added; the drifted `tls.rs:916` citation is now `:987`; I2 depends on the sim-seams gate fix; rev 0.17, 2026-11-12, writes row I4 buildable: N1–N5 resolved, with `file:line` at `d974fc76`, and the maintainer's decisions D-1–D-6 of 2026-11-12 recorded in the row — a `call:` mandate rides a second slot, is a cancellation handle no rule's `requires_mandate` reads, is self-issued by the envelope's gateway and is assessed once at `admit_after`; `cancellable` requires it; the KV, not a window table, survives a restart, with `call:` exempt from the start rule; a retention floor for `call:` and `grant/`; N1's grant half recorded as fixed by #735; exits 1–3, 5–7, 9–16 and 18 reworded, exit 17 new; I2 dependency noted; then #766's review (H1–H3, M1–M7, L1–L8): engineering defaults, marked as such and not decisions — `call_mandate_ttl_secs` (300 s, capped at a named `GRANT_TTL_CAP_SECS` = 3600 s), `gateway_mint_call_mandates`, the mint after the preflight and inside framing, a signed `call/…/window` record for D-5's floor, `Decision.cancellable` through `Preflight::Proceed`, `PresentedCallMandate` in `cm` with `PresentedMandate` untouched, the revoked set counted in the memory bound, the cancel doors' authority, a papaya MCP table; `authority_lapsed()` and the parked SDK-serve admission under both guards (new exit 17); the two uncancellable residuals; §5's I4 line rewritten, §6 item 5 extended, §9 O8 opened for I2's side; I7 noted as not interacting; then #766's confirm round: four decision clauses restored to D-1, D-2, D-5 and D-6, and the `window` record's verification bound to its key's gateway segment; rev 0.16, 2026-11-12, takes #764's review (M1–M6, L1–L9) and records the maintainer's decisions on I7 of the same day: P2 a fleet-certified P-256 consent key verified at `grant_decision::verify` only, issued over its public key with the CA off-node; P3 the CryptoKit blob path, no signed bundle; P1 `os_presence(macos, unbound)`, an enrolment claim no verifier can check; P4 the grade on the consent record, D7's three plus `service`; P5 a residual; P6 I1's supersession with every node upgraded first; then, after #764's confirm round, H1 a consent key under its own principal `consent:{issuer}/{name}` (nothing supersedes across kinds; never fed to possession) and H2 the grade written into the consent certificate by the fleet CA, the body's grade refused when it differs (P4 revised); after the second confirm round, A consent's own authority (`gateway_consent_principals`, `signed_with` at the evaluator), B the `tty` residual stated, the grade's OID on the `2.25` UUID arc, its message encoding and the P-256 key-hex pinned; the consent issue flow over an SPKI PEM with `--grade` and a `--force` guard — I7 **buildable on macOS**, its `tty` half then waiting on P7, decided the same day: a fleet-certified P-256 consent key in software on Linux and Windows, graded `tty`, so I7 is **buildable**; D7's *Revised from* and N7 follow; rev 0.15, 2026-11-12, writes row I7 from spike S-presence's note, `docs/plans/spikes/2026-11-07-s-presence.md`, and its maintainer's run of 2026-11-09: the four questions the stub left to the spike answered with what it settled — the fleet CA can certify a P-256 Enclave key and `ring` verifies it, the release pipeline cannot produce a signed bundle, Windows was not run so D7's `tty` stands, and presence is not attested to the verifier, so an `os_presence` grade is an enrolment claim — where the evidence and D7 disagree stated, every verifier a client key reaches enumerated, and I7 **not yet buildable: P1–P6 open**, the maintainer's; rev 0.14, 2026-11-12, records wave 1a — I0, I1, I3 and I5 — released in v2.40.0; rev 0.13, 2026-11-11, closes I5 on evidence across #757, #759 and its PR 2, with the decision that a gateway exchanges only for an action recorded on the row; rev 0.12, 2026-11-11, records #759's review on I5's provider half: the check's order restated and pinned, its clocks read at the receive boundary's instant, one OIDC verifier per node, the replay window keyed across gateways, `typ` and two start-time refusals, and the maintainer's decision that a hosted capability's invoke needs an `ot`; rev 0.11 records the maintainer's four I5 decisions of 2026-11-11 and spike S-exchange's note, `docs/plans/spikes/2026-11-11-s-exchange.md`: the gateway exchanges under its own client credential, `oidc.exchange_audience` is an explicit setting both ends read, the envelope cap stays at 8 KiB; after #757's review, the maintainer's decision to extend the spike to sender binding, and the row rewritten to it: the exchanged token is DPoP-bound to the gateway's Ed25519 node key (Keycloak 26.8.2, default features), the provider refuses a token not bound to the key that signed its envelope, and replay rests on that and the token's `jti` admitted once; rows I2 and I4 are **not yet buildable**: I2's **R1–R4 open**, the round-3 review's questions, and I4's **N1–N5 open**, the round-2 review's questions, which each row's build PR must settle; rev 0.10 writes row I4 from spike S-cancel's note, `docs/plans/spikes/2026-11-07-s-cancel.md`, and takes #731's review and its confirm round: S-cancel re-measured, its reclamation fixed for the feeder, and I4's exit given an item for every D2 decision; rev 0.9 writes row I2 from spike S-succeed's note, `spikes/2026-11-07-s-succeed.md`, and #732's review: a `cert_pem` node re-roots live, the trust set and the successor certificate persist under `succession/`, every cached judgment is re-judged when the roots change, and old-CA records lose standing (decided in the confirm round); rev 0.8 records the agreement, its text rev 0.7's); proposed 2026-10-31. Work starts in §4's order: wave 1a's I0 and wave 1b's spikes in parallel. Five independent adversarial reviews —
+**Status:** **agreed with the maintainer on 2026-11-07**, rev 0.18 (rev 0.18, 2026-11-12, writes row I2 **buildable**. It records the maintainer's 2026-11-12 decisions on the round-3 review's R1–R4. After narrowing no node is legacy (R1, after narrowing only). A re-issued certificate carries its key's original first issuance in a successor-signed `firstIssuedMs` extension (R2). The issuer learns which keys are revoked from a new gateway inventory, `GET /gateway/identity/inventory` under `identity:read`, which it judges offline, and revocations survive succession (R3). Anchors keep their certificates, not digests, journaled, with a roots-generation cache (R4). I1's client certificates lose standing at narrowing, and `tls succeed` re-issues them. I7's consent certificates follow the same rule and are re-issued over their public key alone, with their grade. Exit 4 states I4's constraint, closing §9 O8: every gateway is anchored under the successor before any provider narrows, required, with an operator override (`tls succeed --narrow --accept-unanchored`, audited; the maintainer's decision, 2026-11-12), and a `call:` window (at most `GRANT_TTL_CAP_SECS`, 3600 s) is shorter than the succession window. #768's review is folded in: `legacy_closed` is derived from the roots' CA generation rather than `succession/` (H2); the rule lives in three readers (M1); the window floor is `GRANT_TTL_CAP_SECS` + 2·skew + `max_drain_secs` (M2); the generation guard covers `anchors_seen` (M3); and the client-certificate journal gains `RaisedWithCert` (M4). Engineering choices are labelled apart from the decisions. Exits 15–20 are added; the drifted `tls.rs:916` citation is now `:987`; I2 depends on the sim-seams gate fix; rev 0.17, 2026-11-12, writes row I4 buildable: N1–N5 resolved, with `file:line` at `d974fc76`, and the maintainer's decisions D-1–D-6 of 2026-11-12 recorded in the row — a `call:` mandate rides a second slot, is a cancellation handle no rule's `requires_mandate` reads, is self-issued by the envelope's gateway and is assessed once at `admit_after`; `cancellable` requires it; the KV, not a window table, survives a restart, with `call:` exempt from the start rule; a retention floor for `call:` and `grant/`; N1's grant half recorded as fixed by #735; exits 1–3, 5–7, 9–16 and 18 reworded, exit 17 new; I2 dependency noted; then #766's review (H1–H3, M1–M7, L1–L8): engineering defaults, marked as such and not decisions — `call_mandate_ttl_secs` (300 s, capped at a named `GRANT_TTL_CAP_SECS` = 3600 s), `gateway_mint_call_mandates`, the mint after the preflight and inside framing, a signed `call/…/window` record for D-5's floor, `Decision.cancellable` through `Preflight::Proceed`, `PresentedCallMandate` in `cm` with `PresentedMandate` untouched, the revoked set counted in the memory bound, the cancel doors' authority, a papaya MCP table; `authority_lapsed()` and the parked SDK-serve admission under both guards (new exit 17); the two uncancellable residuals; §5's I4 line rewritten, §6 item 5 extended, §9 O8 opened for I2's side; I7 noted as not interacting; then #766's confirm round: four decision clauses restored to D-1, D-2, D-5 and D-6, and the `window` record's verification bound to its key's gateway segment; rev 0.16, 2026-11-12, takes #764's review (M1–M6, L1–L9) and records the maintainer's decisions on I7 of the same day: P2 a fleet-certified P-256 consent key verified at `grant_decision::verify` only, issued over its public key with the CA off-node; P3 the CryptoKit blob path, no signed bundle; P1 `os_presence(macos, unbound)`, an enrolment claim no verifier can check; P4 the grade on the consent record, D7's three plus `service`; P5 a residual; P6 I1's supersession with every node upgraded first; then, after #764's confirm round, H1 a consent key under its own principal `consent:{issuer}/{name}` (nothing supersedes across kinds; never fed to possession) and H2 the grade written into the consent certificate by the fleet CA, the body's grade refused when it differs (P4 revised); after the second confirm round, A consent's own authority (`gateway_consent_principals`, `signed_with` at the evaluator), B the `tty` residual stated, the grade's OID on the `2.25` UUID arc, its message encoding and the P-256 key-hex pinned; the consent issue flow over an SPKI PEM with `--grade` and a `--force` guard — I7 **buildable on macOS**, its `tty` half then waiting on P7, decided the same day: a fleet-certified P-256 consent key in software on Linux and Windows, graded `tty`, so I7 is **buildable**; D7's *Revised from* and N7 follow; rev 0.15, 2026-11-12, writes row I7 from spike S-presence's note, `docs/plans/spikes/2026-11-07-s-presence.md`, and its maintainer's run of 2026-11-09: the four questions the stub left to the spike answered with what it settled — the fleet CA can certify a P-256 Enclave key and `ring` verifies it, the release pipeline cannot produce a signed bundle, Windows was not run so D7's `tty` stands, and presence is not attested to the verifier, so an `os_presence` grade is an enrolment claim — where the evidence and D7 disagree stated, every verifier a client key reaches enumerated, and I7 **not yet buildable: P1–P6 open**, the maintainer's; rev 0.14, 2026-11-12, records wave 1a — I0, I1, I3 and I5 — released in v2.40.0; rev 0.13, 2026-11-11, closes I5 on evidence across #757, #759 and its PR 2, with the decision that a gateway exchanges only for an action recorded on the row; rev 0.12, 2026-11-11, records #759's review on I5's provider half: the check's order restated and pinned, its clocks read at the receive boundary's instant, one OIDC verifier per node, the replay window keyed across gateways, `typ` and two start-time refusals, and the maintainer's decision that a hosted capability's invoke needs an `ot`; rev 0.11 records the maintainer's four I5 decisions of 2026-11-11 and spike S-exchange's note, `docs/plans/spikes/2026-11-11-s-exchange.md`: the gateway exchanges under its own client credential, `oidc.exchange_audience` is an explicit setting both ends read, the envelope cap stays at 8 KiB; after #757's review, the maintainer's decision to extend the spike to sender binding, and the row rewritten to it: the exchanged token is DPoP-bound to the gateway's Ed25519 node key (Keycloak 26.8.2, default features), the provider refuses a token not bound to the key that signed its envelope, and replay rests on that and the token's `jti` admitted once; rows I2 and I4 are **not yet buildable**: I2's **R1–R4 open**, the round-3 review's questions, and I4's **N1–N5 open**, the round-2 review's questions, which each row's build PR must settle; rev 0.10 writes row I4 from spike S-cancel's note, `docs/plans/spikes/2026-11-07-s-cancel.md`, and takes #731's review and its confirm round: S-cancel re-measured, its reclamation fixed for the feeder, and I4's exit given an item for every D2 decision; rev 0.9 writes row I2 from spike S-succeed's note, `spikes/2026-11-07-s-succeed.md`, and #732's review: a `cert_pem` node re-roots live, the trust set and the successor certificate persist under `succession/`, every cached judgment is re-judged when the roots change, and old-CA records lose standing (decided in the confirm round); rev 0.8 records the agreement, its text rev 0.7's); proposed 2026-10-31. Work starts in §4's order: wave 1a's I0 and wave 1b's spikes in parallel. Five independent adversarial reviews —
 four on one day, the fifth on the merged document (#715's thread, 2026-11-05; the thread, this paragraph and the *Revised
 from* column are the record of all five): rev 0.1 against the decisions, rev 0.3 against the mechanisms, rev 0.4 and rev 0.5 each against five
 premises, both with the verdict *not yet buildable*. Every premise failure sat in wave 1 (I0–I4) or in the developer
@@ -764,8 +764,11 @@ operator accepts that gateway (the maintainer's decision, 2026-11-12).
 - **The constraint.** A `call:` mandate and its checkpoints are verified against the gateway's node key
   (`gateway_member_keys`). Once the providers narrow to the successor root, a cancel signed by a gateway still anchored
   only under the old CA cannot be verified. The work then runs to its window: open, but bounded by the window.
-- **What I2 must state** (R1–R4): every gateway is anchored under the successor before any provider narrows, and a
-  `call:` window is shorter than the succession window.
+- **What I2 states, in its exit 4** (rev 0.18):
+  - every gateway is anchored under the successor before any provider narrows. This is enforced, and the operator's
+    audited acceptance of a named gateway is the one exception;
+  - a succession window is longer than `GRANT_TTL_CAP_SECS` + 2·skew + `max_drain_secs`, so every `call:` window is
+    shorter.
 - **I2's re-judging** of cached judgments drops the `call:` checkpoints held from an old-root signer. The sweep stops
   work only on `Revoked` or past the window, never on `Unknown`, so this re-judging stops nothing by itself.
 
@@ -1021,8 +1024,10 @@ under the successor; `rotate_identity` still cannot run on the off-node posture.
     - The developer copies the new certificate back and `dev` publishes it through I1's door, as at enrolment.
     - The inventory (R3) carries consent certificates with the other `sys/client-cert/` records.
 
-**Resolved (round-3 review's questions; decided by the maintainer 2026-11-12).** Each question as it was asked, what
-the code at v2.40.0 shows, and the decision. The exits named are below.
+**Resolved (round-3 review's questions; decided by the maintainer 2026-11-12).** For each question: what was asked,
+what the code at v2.40.0 shows, **the decision**, and the **engineering choices** made to build it. The engineering
+choices are labelled as such, as I4's row labels its defaults: they are not decisions, and the build PR may change one
+by saying so. The exits named are below.
 
 - **R1 (high): a node left with no anchor becomes legacy, and its revoked keys verify again.**
   - **What the code shows.** Partly right. The legacy fallback is real:
@@ -1035,19 +1040,41 @@ the code at v2.40.0 shows, and the decision. The exits named are below.
     journal (`revocation.rs:714-719`), and because `KeyStanding::is_distrusted` reads `revoked` whatever `anchored`
     says (`mycelium-core/src/removal.rs:153-156`). Without `[persistence]`, a restart loses both. The rebuilt fold then
     counts nothing whose trailer holds only old-CA certificates, and a revoked key in `peer_keys` verifies again.
-  - **Decided: after narrowing, no node is legacy.** The rule applies after narrowing only, not across the whole
-    secure profile: that would close `deprecations.md` §39's window and is its own decision.
-    - `KeyStanding` gains a flag, `legacy_closed`. It is set from the persisted `succession/` phase at start, before
-      the first fold, and live at the narrow step.
-    - With the flag set, a node with no standing or with `anchored: None` has **no** trusted key.
-    - The rule reaches every reader of standing: `trusted_keys`, `retain_trusted`'s `is_empty()` fast path
-      (`context.rs:319`), `is_distrusted`, the identity-frame check (`connection.rs:334`), the KV arm (`:1189`),
-      `membership_ops.rs:47`, `knowledge_keys.rs:69` and `http/grants.rs:900`. `history_keys`, which only verifies,
-      keeps its rule.
-    - Every certificate `tls succeed` issues names its node by URI, so after narrowing no legitimate node is legacy.
-      A node first seen after narrowing trusts none of its keys until its successor record is judged. That record
-      proves itself (`certificate_record_proves_itself`, `connection.rs:358`) and its owner publishes it at start.
-    - Lock-free: an `AtomicBool`, no lock-order row.
+  - **Decision (the maintainer, 2026-11-12): a node that trusts only successor roots has no legacy class.** The rule
+    covers a narrowed node, a node recovered by the procedure above, and a node first started on the successor's
+    files. It does not reach a fleet that has never succeeded: closing `deprecations.md` §39's window across the
+    secure profile is its own decision.
+  - **Where the rule comes from (#768's H2).** The rule is derived from the **roots**, not from `succession/`. The
+    recovery procedure deletes `succession/`, and a node installed after the succession never had it, so a flag kept
+    there would reopen R1 on exactly those nodes.
+    - Every CA certificate carries a **generation**. `tls ca` mints generation 0. `tls commit` mints the successor at
+      its predecessor's generation plus one. A CA certificate without the extension, which covers every pre-I2 CA, is
+      generation 0.
+    - `KeyStanding`'s `legacy_closed` is computed whenever the root set is built, at start and at each `activate`:
+      true when **every** root the node trusts is generation 1 or later.
+    - **The phases.** A widened node trusts generation n and n+1, so it is not closed. A narrowed node, a recovered
+      node and a node started on the successor's files trust generation n+1 alone, so they are closed. Nothing has to
+      survive in `succession/`.
+  - **Where the rule lives (#768's M1).** In exactly three places:
+    - `CoreCtx::trusted_keys` (`context.rs:277`): with the flag set, a node with no standing or with `anchored: None`
+      has no trusted key;
+    - `KeyStanding::is_distrusted` (`removal.rs:153`): true for a node with no standing;
+    - `retain_trusted`'s `is_empty()` fast path (`context.rs:319`): it also reads the flag.
+
+    The readers of those three follow them: the identity-frame check (`connection.rs:329`), the KV arm
+    (`connection.rs:1189`), and `knowledge_keys.rs:69`. **Two key collectors keep their full sets**, because they
+    gather keys rather than judge them: `membership_ops.rs:47`, a removal names every key a member held, and
+    `http/grants.rs:900`, `own_keys`. `history_keys`, which only verifies, keeps its rule. **The own-key exception
+    survives** (`context.rs:321-324`): a node always trusts its own current key for itself.
+  - **The transient refusal, stated.** Between a node's closing and its re-fold of a peer whose successor record it has
+    not yet judged, that peer's signatures are refused. This lasts from narrowing until the record is judged, or from
+    start until the first fold. The record proves itself (`certificate_record_proves_itself`, `connection.rs:358`), and
+    its owner publishes it at start and republishes it, so the refusal ends when the record arrives. It fails closed.
+  - **Engineering choices.**
+    - The generation is a non-critical extension on the CA certificate, `caGeneration` (a DER `INTEGER`), under a
+      **`2.25` UUID OID** (ITU-T X.667). The build PR draws the UUID once and pins it in a golden with the encoding, as
+      I7 pins its grade (#768's L2). It is read by the same DER extension reader in `cert_identity` that I7 adds.
+    - The flag is an `AtomicBool` on `KeyStanding`. It needs no lock-order row.
   - **Exit 15.**
 - **R2 (high): the re-issued serials must keep the original order.**
   - **What the code shows.** Confirmed. Rank is a key's lowest `issued_ms` (`merge_anchors_seen`,
@@ -1058,18 +1085,34 @@ the code at v2.40.0 shows, and the decision. The exits named are below.
     Ordering the serials is not enough. The successor record replaces the old one at the same path. Mid-propagation,
     or with a record hidden, a node can see an old key S's successor record next to the current key P's old record.
     Every successor serial is later than every old one, so S then outranks P, and a thief's revocation of P counts and
-    stays counted. Serial order also cannot meet exit 8: after narrowing a key's rank would become its successor serial.
-  - **Decided: the rank is carried in the certificate.**
-    - `tls succeed` writes a non-critical extension under a Mycelium private OID, `firstIssuedMs`: the key's original
-      first issuance, its lowest over the old-CA certificates in the inventory (R3). The successor signs it, so it is
-      trusted as far as the successor is.
-    - `cert_identity` parses it into a new public field, `CertIdentity.first_issued_ms`. `generate_node_cert` and the
-      re-issue take it as an optional argument.
+    stays counted. Serial order also cannot meet exit 8: after narrowing, a key's rank would become its successor
+    serial.
+  - **Decision (the maintainer, 2026-11-12): the rank is carried in the certificate.** Each successor certificate
+    carries its key's original first issuance, `firstIssuedMs`, signed by the successor and trusted as far as the
+    successor is.
+    - `cert_identity` parses it into a new public field, `CertIdentity.first_issued_ms`.
     - `judge_cert` and `cert_facts` rank by `first_issued_ms.unwrap_or(issued)`, read only from a certificate that
-      `verify_member_cert` has passed. A certificate whose `first_issued_ms` is later than its serial is refused.
-    - As a second safeguard, the serials still keep the order: base is the node's newest issuance plus one, plus an
-      order index, and no later than now. Keys issued in one millisecond get one `firstIssuedMs` and stay siblings.
-    - `own_newest_issuance` (`revocation.rs:827`) still reads the serial, so a later rotation outranks every key.
+      `verify_member_cert` has passed.
+    - A certificate whose `first_issued_ms` is later than its serial is refused.
+  - **Its dependence on the inventory, stated (#768's L1).** `firstIssuedMs` is the lowest issuance **in the
+    inventory** (R3). An old certificate missing from every inventory gives a rank later than the true one. That is
+    a key ranked too high, the same completeness the revocation source rests on.
+    - **What catches it.** A widened node holds both records and keeps the lower rank. A node that holds a verified
+      old certificate issued earlier than a successor certificate's `firstIssuedMs` for the same key counts it
+      (`ca_succession_rank_mismatch`) and names the key. That is detection, not prevention.
+    - **After narrowing** the carried rank stands.
+  - **Engineering choices.**
+    - The extension is non-critical, a DER `INTEGER` of milliseconds, under its own **`2.25` UUID OID**. The OID and
+      encoding are pinned in a golden (#768's L2) and written with rcgen's `CustomExtension`.
+    - `generate_node_cert` and the re-issue take `firstIssuedMs` as an optional argument.
+    - **The serial base (#768's L3).** It is `issuance_after(newest)` (`tls.rs:166-168`), which takes the
+      **larger** of the issuer's wall clock and the node's newest issuance plus one. So the order wins, and "no later
+      than now" is not a rule. Each key's serial is the base plus its order index, so the serials keep the order as a
+      second safeguard. `tls succeed` refuses, naming the node, when the last serial would exceed the issuer's clock
+      plus the skew bound, because a receiver ignores a certificate that far in the future (`judge_cert`). The
+      operator reruns it later.
+    - Keys issued in one millisecond get one `firstIssuedMs` and stay siblings. `own_newest_issuance`
+      (`revocation.rs:827`) still reads the serial, so a later rotation outranks every key.
     - `tls succeed` refuses, naming the node, when the current key is not the strict maximum rank.
   - **Exit 16.**
 - **R3 (medium-high): two sources go missing.**
@@ -1077,52 +1120,96 @@ the code at v2.40.0 shows, and the decision. The exits named are below.
     - `mycelium tls` has `issue`, `ca` and `pin` and reads no node state (`src/main.rs:730-865`);
     - the gateway has no read of identity records, only `/identity/revoke` and `/identity/client-cert`
       (`src/agent/http/mod.rs:454,457`);
-    - `/gateway/transparency` (`:449`) gives heads and inclusion proofs. Those cannot show a key is **not** revoked, and
-      they are computed from the fold's `counted`, not the journal (`src/agent/transparency.rs:120`).
+    - `/gateway/transparency` (`:449`) gives heads and inclusion proofs. Those cannot show a key is **not** revoked,
+      and they are computed from the fold's `counted`, not the journal (`src/agent/transparency.rs:120`).
 
     The second is narrower than stated. The fold anchors a revoker from the store's records (stratum 1a,
     `revocation.rs:530-537`), not only from a record's trailer. So once the revoker's successor record is present and
     R2's rank holds, an old revocation still counts after narrowing. A revoked key that is not re-issued is
     unanchored: its revocation counts provisionally (`:600-628`), and the key is distrusted anyway.
-  - **Decided: a gateway inventory, judged offline by the issuer.**
-    - **The route.** A new route, `GET /gateway/identity/inventory`, under a new scope, `identity:read`, gated by
-      `compliance`. It returns raw bytes per node, never a verdict: its certificate records, its kept anchors (R4),
-      its revocation records from the store and the journal, and the `sys/client-cert/` records.
-    - **The issuer's run.** `mycelium tls succeed --inventory a.json [--inventory b.json …]` re-judges the whole union
-      against the old `ca-cert.pem`. It uses a pure function extracted from `fold_node`, over certificates,
-      revocations, roots and time, with no `TaskCtx`, so the node's fold and the issuer's are one rule. It re-issues
-      each key no inventory shows revoked, each with its `firstIssuedMs`, and each client principal's current key.
-    - **Trusted for completeness only, stated.** A revocation hidden from every inventory gets its key re-issued. That
-      key's revocation record still counts wherever it is held, under R2's preserved rank, and every node's journal
-      still counts it.
-    - **Decided: revocations survive succession (M2).** A counted revocation stays counted, through the journal and
-      `counted_ever`. One not yet counted, including one first seen after narrowing, is judged by today's rule against
-      the successor anchors: its trailer's old-CA certificates give nothing, and it counts when its signer has a
-      successor anchor that outranks the revoked key, or provisionally when the revoked key is unanchored.
+  - **Decision (the maintainer, 2026-11-12): a gateway inventory, judged offline by the issuer.**
+    - **The route.** A new route, `GET /gateway/identity/inventory`, under a new scope, `identity:read`. It returns raw
+      bytes, never a verdict.
+    - **The issuer's run.** `mycelium tls succeed --inventory …` re-judges the union of inventories against the old
+      CA with the fold's own rule. It re-issues each key no inventory shows revoked, and each client and consent
+      principal's current key.
+    - **Trusted for completeness only, stated.** A revocation hidden from every inventory gets its key re-issued.
+      That key's revocation record still counts wherever it is held, under R2's preserved rank, and every node's
+      journal still counts it.
+  - **Decision (the maintainer, 2026-11-12): revocations survive succession (M2).**
+    - A counted revocation stays counted, through the journal and `counted_ever`.
+    - One not yet counted, including one first seen after narrowing, is judged by today's rule against the successor
+      anchors. Its trailer's old-CA certificates give nothing. It counts when its signer has a successor anchor that
+      outranks the revoked key, or provisionally when the revoked key is unanchored.
+  - **Engineering choices.**
+    - The route is `compliance`-gated.
+    - **Its contents, per node:** the certificate records, the kept anchors (R4), the revocation records from the
+      store and the journal, and the `sys/client-cert/` records, consent principals included.
+    - **The judging function.** The issuer's judgement is a pure function extracted from `fold_node`, over
+      certificates, revocations, roots and time, with no `TaskCtx`. The node's fold and the issuer's are one code
+      path.
+    - **Bounds and paging (#768's L9).**
+      - A page holds at most 64 nodes or 4 MiB, whichever comes first, and carries a `next` cursor: the last node id,
+        and the last record path when one node's records span pages.
+      - The route does **not** apply the fold's per-node caps, because the inventory must be complete. It returns what
+        the store and the journal hold.
+      - `tls succeed` follows every cursor. It refuses an inventory that ends on a truncated page or whose pages
+        disagree on a node, naming the node.
   - **Exit 17.**
 - **R4 (medium): pruning `anchors_seen` by what the store now holds reopens demotion by hiding.**
   - **What the code shows.** Confirmed, and it applies to rev 0.9's own text. `anchors_seen` keeps a key and a rank,
-    with no certificate, in memory only (`revocation.rs:263-266`). The prune rev 0.9 described removed an anchor "whose
-    only record no longer verifies": that is a lookup in the store, so hiding the record demotes. **Keeping a digest is
-    not enough** (rev 0.9 offered "its certificate or the certificate's digest"): a digest cannot be re-judged against
-    new roots once the record is gone. A digest-only anchor would either survive narrowing, which breaks loss of
-    standing, or drop when its record is hidden, which is R4 itself. The cache clear has a race of its own: a fold
-    across `activate` inserts an old-roots verdict after the clear (`cache.clear()`, `revocation.rs:418`;
+    with no certificate, in memory only (`revocation.rs:263-266`). The prune rev 0.9 described removed an anchor
+    "whose only record no longer verifies". That is a lookup in the store, so hiding the record demotes the node.
+    **Keeping a digest is not enough** (rev 0.9 offered "its certificate or the certificate's digest"): a digest cannot
+    be re-judged against new roots once the record is gone. A digest-only anchor would either survive narrowing, which
+    breaks loss of standing, or drop when its record is hidden, which is R4 itself. A cache clear has a race of its
+    own: a fold across `activate` inserts an old-roots verdict after the clear (`cache.clear()`, `revocation.rs:418`;
     `client_cert.rs:344`).
-  - **Decided: kept certificates, journaled, with a roots-generation cache.**
-    - **What an anchor keeps.** `anchors_seen` holds, per key, its rank and at most two certificates, one per issuer.
-      It is capped at `MAX_CERTS_PER_NODE` keys per node, newest first, the fold's own truncation.
-    - **A change of roots.** Each kept certificate is re-judged. One that fails is dropped, a key with none left is
-      dropped, and the rank is recomputed from what remains. A node's entry stays when it is empty.
-    - **The journal.** A kept certificate is journaled in the identity journal as `JournalEntry::Anchor { node, der }`,
-      on its own budget line (I1's pattern). It is held in memory first and then handed to the journal, the "store,
-      then WAL" order. The append is awaited before the Narrowed phase is persisted, so a restarted node re-judges the
-      same set.
-    - **The cache.** The caches carry the roots generation described under *Every cached judgment*, above.
+  - **Decision (the maintainer, 2026-11-12): kept certificates, journaled, with a roots-generation cache.** An anchor
+    keeps its certificate. It is removed only when that certificate fails the current roots, never because its record
+    left the store.
+  - **The generation guard covers `anchors_seen` (#768's M3).**
+    - **The ordering.** `activate` swaps the verifiers **before** it bumps the roots generation, a `Release` store. A
+      reader loads the generation with `Acquire` **before** it loads a verifier. A reader that sees the new generation
+      therefore sees the new verifier, and a reader that sees the old one tags what it judged with the old generation.
+    - **The fold.** The re-judge of kept certificates runs **inside** the single-flight fold (`refresh`'s `running` /
+      `again`, `revocation.rs:662-681`). Each fold reads the generation when it starts. A fold that finds it moved at
+      its end **merges nothing** and runs again. `activate` sets `again`, so a fold already running re-runs.
+    - **Every kept certificate carries the generation it was judged under.** A fold re-judges every kept certificate
+      tagged with an older generation, so a merge that slipped past the check is re-judged by the next fold rather than
+      kept.
+    - The same applies to `cert_facts`, to I1's `cert_cache` and to the client marks.
+  - **Engineering choices.**
+    - `anchors_seen` holds, per key, its rank and at most two certificates, one per issuer. It is capped at
+      `MAX_CERTS_PER_NODE` keys per node, newest first, the fold's own truncation.
+    - On a change of roots, a certificate that fails is dropped, a key with none left is dropped, and the rank is
+      recomputed from what remains. A node's entry stays when it is empty.
+    - A kept certificate is journaled in the identity journal as `JournalEntry::Anchor { node, der }`, on its own
+      budget line (I1's pattern). It is held in memory first and then handed to the journal, the "store, then WAL"
+      order. The append is awaited before the Narrowed phase is persisted.
     - Lock-free: papaya, `ArcSwap` and atomics, so no lock-order row. A build that puts the succession phase or the
-      swappable verifiers behind a `Mutex` adds a row to `docs/wiki/dev/concurrency/lock-order.md`. The decided shape is
-      an `AtomicU8` phase, made act-once by `compare_exchange`.
+      swappable verifiers behind a `Mutex` adds a row to `docs/wiki/dev/concurrency/lock-order.md`. The phase is an
+      `AtomicU8`, made act-once by `compare_exchange`.
   - **Exit 18.**
+- **I1's client marks (#768's M4): the journal record gains the certificate.** `client_cert.rs`'s `JournalEntry::Raised`
+  holds the mark (an issuance and a key) and no certificate, so a mark restored at start could not be re-judged
+  against new roots.
+  - **The choice.** A new variant, `JournalEntry::RaisedWithCert { principal, mark, der }`, is appended in place of
+    `Raised` from this release on.
+  - **Why not read a restored mark without a certificate as `Unknown`.** That would drop every client principal's
+    standing on every restart, outside any succession, until its record was read again. That is a behaviour change to
+    I1 for a case only a succession needs. It would also let a hidden record turn a restart into a lost standing,
+    which is the demotion by hiding R4 refuses.
+  - **Why a new variant and not a field on `Raised`.** A field on `Raised` would change its encoding, so every existing
+    entry would fail to decode and be skipped ("an entry did not decode"), losing the marks. Old `Raised` entries still
+    decode under the new binary.
+  - **Old entries at a change of roots.** A mark restored from an old `Raised` entry, with no certificate, is kept as
+    today until the first change of roots. It is then re-established from a verifying record in the store, or reads
+    `Unknown`.
+  - **Downgrade, stated.** A downgraded binary skips `RaisedWithCert` with its warning, and so loses the marks written
+    after the upgrade.
+
+  An upgrade note says so in §5. Exit 19.
 
 **Depends on:**
 - S-succeed (done);
@@ -1131,6 +1218,14 @@ the code at v2.40.0 shows, and the decision. The exits named are below.
   filesystem I/O: the calls go through a grouped `use std::{fs, …}` (`tls.rs:354`), which the gate's pattern does not
   match. The `succession/` reads and writes I2 adds sit beside those calls, so the gate must count them before I2
   lands. Each one is routed or baselined in the open.
+- **Every clock read goes through the seam (#768's L4).** These all read `mycelium_core::sim_seam::wall_now_ms` and
+  add no baseline line:
+  - the cutover at the window's start and the narrow at its end;
+  - the wait for unanchored gateways, which ticks through the timer seam;
+  - act-once's comparisons and the window floor;
+  - `tls succeed`'s issuance time (`issuance_after`) and its future bound.
+
+  A `sim` replay of a succession then decides as the recording did.
 
 **Enumerate:**
 - `grep -n "cert_verifier\|fleet_server_verifier\|fn activate\|fn build_rustls_configs\|fn pem_cert_to_der\|fn load_ca_cert_only\|fn generate_ca\|fn generate_node_cert\|fn verify_member_cert" mycelium-core/src/tls.rs`;
@@ -1187,10 +1282,14 @@ the code at v2.40.0 shows, and the decision. The exits named are below.
        removed or is accepted. The fleet keeps both roots for that time, and a holder of the old CA key keeps its reach
        for that time too, which is stated.
    - **A `call:` window is shorter than the succession window.** `call_mandate_ttl_secs` (default 300 s) is capped at
-     `GRANT_TTL_CAP_SECS` (3600 s). `tls succeed` refuses to write a succession record whose window, from its start to
-     its end, is not longer than `GRANT_TTL_CAP_SECS`, and a node refuses such a record by name
-     (`succession_window_too_short`). So whatever a node sets, every `call:` mandate minted before the window started
-     has expired before any provider narrows.
+     `GRANT_TTL_CAP_SECS` (3600 s).
+     - **The floor (#768's M2).** It is I4's D-5 formula: `GRANT_TTL_CAP_SECS` + 2·skew + `max_drain_secs`, where skew is
+       the drift bound (`skew_ms`: `max_clock_drift_ms`, or 300 s when that is 0).
+     - **Where it is refused.** `tls succeed` refuses to write a succession record whose window, from its start to its
+       end, is not longer than the floor. A node refuses such a record by name (`succession_window_too_short`),
+       computing the floor from its own settings.
+     - **What it buys.** Whatever a node sets, every `call:` mandate minted before the window started has expired, and
+       its work has drained, before any provider narrows. This holds on every clock within the drift bound.
 
    The exit:
    - **Held.** A gateway's re-issued record is withheld from a provider until past the window's end. The provider does
@@ -1199,13 +1298,20 @@ the code at v2.40.0 shows, and the decision. The exits named are below.
    - **Each way out.** Release the record and the provider narrows. Remove the gateway instead and it narrows. Accept
      the gateway with `tls succeed --narrow --accept-unanchored` and it narrows past that gateway only: a second
      unanchored gateway, not named, still holds it.
+     - Seen failing first with acceptance applied fleet-wide rather than per named gateway: the second gateway no
+       longer holds the narrow.
    - **The acceptance record.** It is in the publishing gateway's audit and in each acting node's audit chain. One not
      signed by the successor is refused, and so is a replayed one and one naming no gateway.
-   - **The cost after acceptance.** A cancel from the accepted gateway fails to verify, and the work runs no longer
-     than its `call:` window, measured.
+     - Seen failing first with each refusal removed in turn, one build each: the record is acted on.
+   - **The cost after acceptance.** A cancel from the accepted gateway fails to verify, and the work runs no longer than
+     its `call:` window, measured.
+     - Seen failing first with the provider's sweep given no window: the work outlives it.
    - **With the record present,** a cancel signed by the gateway after narrowing verifies and stops the work.
-   - **The window floor.** A succession record whose window is 3600 s or shorter is refused, both by `tls succeed` and
-     at a node.
+     - Seen failing first with the gateway's successor record not judged: the cancel is refused and the work runs on.
+   - **The window floor.** A succession record whose window is not longer than `GRANT_TTL_CAP_SECS` + 2·skew +
+     `max_drain_secs` is refused, both by `tls succeed` and at a node, and one second longer is accepted.
+     - Seen failing first with the floor set to `GRANT_TTL_CAP_SECS` alone: a record inside the skew and drain margin
+       is accepted.
 5. **Offline nodes.** A node offline through widening that returns inside the window widens. One that returns after it
    is cut off and counted, and the operator's recovery (re-issue under the successor, the files pointed at the
    successor, `succession/` removed, a restart) brings it back.
@@ -1236,6 +1342,19 @@ the code at v2.40.0 shows, and the decision. The exits named are below.
     refused, and so is one signed by a key in `peer_keys` that has no certificate. N's old certificate is refused at
     the handshake. Seen failing first with `legacy_closed` ignored: `trusted_keys` answers from `peer_keys` and the
     write is admitted.
+    - **The same holds on two nodes with no `succession/` (#768's H2):**
+      - a node brought back by the operator's recovery procedure (exit 5), which removes `succession/`;
+      - a node first started on the successor's files, after the succession.
+    - On both, `legacy_closed` is set from the root's generation alone, and the refusals above hold. Seen failing first
+      with the flag read from `succession/`: both nodes answer from `peer_keys`.
+    - **The flag stays clear on a widened node,** which trusts generations n and n+1, and on a node of a fleet that has
+      never succeeded, whose root is generation 0. There a legacy node is judged as today (`deprecations.md` §39).
+    - **Two collectors keep their full sets** (#768's M1). A removal still names every key the member held
+      (`membership_ops.rs:47`), and `own_keys` (`http/grants.rs:900`) is unchanged.
+    - **The node's own key.** It keeps trusting its own current key for itself before its own record is judged
+      (`context.rs:321-324`).
+    - **The transient refusal.** A peer whose successor record has not yet been judged is refused until it is, then
+      admitted.
 16. **The rank is carried (R2).** For every pair of a node's keys the rank is the same whether a node sees the old
     record, the successor record or a mix of the two, before narrowing and after, on a long-running node and a restarted
     one. Siblings stay siblings. In a mixed view, with S's successor record beside P's old one, S's signed revocation of
@@ -1253,10 +1372,25 @@ the code at v2.40.0 shows, and the decision. The exits named are below.
     concurrently with `activate` in a loop: no old-roots verdict survives, in `cert_facts` or in I1's `cert_cache`.
     Seen failing first with rev 0.9's prune from the store, where the anchor is gone after hiding, and with a plain
     `clear()`, where the race test fails.
+    - **The same race on `anchors_seen` (#768's M3).** A fold that judged a certificate under generation g and
+      reaches its merge after `activate` bumped to g+1 merges nothing and runs again. A kept certificate tagged g is
+      re-judged by the next fold.
+    - **The test** runs a fold with a plant that pauses it between judging and merging, during which `activate` narrows
+      the roots. No old-CA anchor is left after the fold completes, on any interleaving the loop reaches.
+    - **Seen failing first** two ways:
+      - with the generation check removed from the merge: the old-CA anchor survives;
+      - with `activate` bumping the generation before it swaps the verifier: a fold reads the new generation and the
+        old verifier, and tags an old-roots verdict as new.
 19. **Client certificates (I1).** After narrowing, a client whose current key was re-issued keeps `Current`. A client
     whose key was not re-issued reads `Unknown`, on a long-running node and, under `[persistence]`, a restarted one.
     The re-issued serial is later than the principal's mark. Seen failing first with the mark left un-judged: the old
     key stays `Current`.
+    - **The journal record (#768's M4).** A mark journaled as `RaisedWithCert` is re-judged after a restart across a
+      change of roots, with the store's record hidden: it reads `Unknown` when its certificate fails the new roots,
+      and `Current` when it passes.
+    - **A pre-upgrade `Raised` entry** still decodes. Its mark holds as today until the first change of roots.
+    - **A restart outside any succession** keeps every client's standing. Seen failing first with a restored mark
+      without a certificate read as `Unknown`: every client loses standing on restart.
 20. **Consent certificates (I7).** After narrowing:
     - a consent principal re-issued over its public key keeps its standing;
     - a decision it signs with the **unchanged** private key verifies and records the same grade;
@@ -1837,8 +1971,14 @@ Any time:                                      E2, E3, E4
     move.
   - **A provider does not narrow while a gateway it has seen sign is unanchored under the successor.** It stays
     widened until the gateway is anchored, removed or accepted (`tls succeed --narrow --accept-unanchored`, audited).
-  - **A succession window must be longer than `GRANT_TTL_CAP_SECS` (3600 s).** A shorter one is refused by
-    `tls succeed` and at a node (`succession_window_too_short`).
+  - **A succession window must be longer than `GRANT_TTL_CAP_SECS` + 2·skew + `max_drain_secs`.** A shorter one is
+    refused by `tls succeed` and at a node (`succession_window_too_short`).
+  - **CA certificates carry a generation** (`caGeneration`). `tls ca` mints generation 0, and `tls commit` mints the
+    successor at generation n+1. A CA without the extension is generation 0, so nothing changes for a fleet that never
+    succeeds.
+  - **The client-certificate journal gains a record type, `RaisedWithCert`.** Old `Raised` entries still decode. A
+    downgraded binary skips the new ones with a warning, and so loses the marks written after the upgrade.
+  - **The inventory route is paged:** at most 64 nodes or 4 MiB per page, with a `next` cursor.
   - **After narrowing no node is legacy.** A node with no successor-issued record has no trusted key.
 - **I4:**
   - **`cancellable` and the fleet.** A 2.38-or-later reader refuses a `cancellable` key by name, and a ≤ 2.37 reader
@@ -2015,10 +2155,14 @@ Items found while building a row that the row does not own. Each names its home,
   the advisory, reported daily from 2026-10-21, read as that permanent red. Replaced in #34 by `cargo audit --deny
   warnings` over every tracked lockfile, as this repository's `audit` job runs it. The public release was not
   affected.
-- **O8 · I4's constraint on I2's succession** *(**closed 2026-11-12** by I2's row revision, rev 0.18. Exit 4 records
-  both statements on I2's side. The first, every gateway anchored before any provider narrows, is **required, with an
-  operator override**, by the maintainer's decision of 2026-11-12: a provider waits, widened, and an accepted gateway's
-  cancels fail open for at most its `call:` window. From #766's review M7, 2026-11-12)*.
+- **O8 · I4's constraint on I2's succession** *(**closed 2026-11-12** by I2's row revision, rev 0.18, now that exit 4
+  **enforces** both statements on I2's side; from #766's review M7, 2026-11-12)*.
+  - **The first is enforced.** A provider does not narrow while any gateway it has seen sign is unanchored under the
+    successor. It waits, widened, and names each one (the maintainer's decision, 2026-11-12).
+  - **The one exception** is the operator's audited acceptance of named gateways (`tls succeed --narrow
+    --accept-unanchored`). An accepted gateway's cancels fail open for at most its `call:` window, as stated.
+  - **The second is enforced too.** A succession window not longer than `GRANT_TTL_CAP_SECS` + 2·skew +
+    `max_drain_secs` is refused.
   A `call:` mandate and its checkpoints are verified against the issuing gateway's node key. A cancel from a gateway
   still anchored only under the old CA cannot be verified at a provider that has narrowed, so the work runs to its
   `call_mandate_ttl_secs` window. I2's row must state two things:

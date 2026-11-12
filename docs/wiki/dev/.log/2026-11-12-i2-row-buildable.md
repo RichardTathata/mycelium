@@ -27,3 +27,14 @@ I2 waits on the sim-seams gate fix: `mycelium-core/src/tls.rs`'s grouped `use st
 from `scripts/check-sim-seams.sh`.
 
 Pages touched: none in the wiki. Plan rev 0.18 and `docs/plans/README.md`.
+
+**#768's adversarial review, folded in:**
+- **H1, narrowing.** It is required, with an operator override (the maintainer's re-decision, above).
+- **H2, `legacy_closed`.** It is derived from the roots' CA generation (`caGeneration`, on a `2.25` OID), not from
+  `succession/`. The recovery procedure deletes that directory, and a node started after the succession never had it.
+- **M1, readers.** The rule lives in `trusted_keys`, `is_distrusted` and `retain_trusted`. The key collectors keep their
+  full sets.
+- **M2, the window floor.** It is I4's D-5 formula.
+- **M3, `anchors_seen`.** The generation guard covers it.
+- **M4, client marks.** A new journal variant, `RaisedWithCert`.
+- **L1–L9.** Stated or fixed in the row.
