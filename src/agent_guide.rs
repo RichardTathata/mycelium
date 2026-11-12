@@ -465,8 +465,9 @@ mod tests {
         if guide != job {
             return Err(format!("the guide's ```sh lines {guide:?} are not the one-hour workflow's commands {job:?}"));
         }
-        // Inline code is read as a shell line would be, so a wrapper or an assignment before a runner hides nothing.
-        // A span the classifier refuses is not a command (`mycelium.tls/1`, `--format text|json`) and is passed over.
+        // Inline code is read as a shell line would be, so sudo, env, time, an assignment or `cd … &&` before a runner
+        // hides nothing. A span the classifier refuses is passed over: most are not commands (`mycelium.tls/1`,
+        // `--format text|json`), but a runner behind a program it does not know (`timeout 60 mycelium rules`) is not seen.
         for span in inline_spans(guide_md) {
             let mut segs = Vec::new();
             segments(&span, &mut segs);
@@ -482,11 +483,12 @@ mod tests {
     /// **The row's exit: the guide's commands are the `one-hour` job's.** The guide's `sh` lines, without the one
     /// stated difference ([`GUIDE_ONLY`]), are the commands the workflow runs, without its two environment queries
     /// ([`WORKFLOW_ONLY`]), in the same order — so a step added to either side fails here until the other has it.
-    /// The guide has no fence but `sh` and `toml`, no indented or `~~~` block, and no inline code that runs the
-    /// binary, pip or Python outside the walk and [`INLINE_ALLOWED`]; the stated difference is step 2's first
-    /// command. **Not seen:** a command written in prose without backticks, and a command a workflow reaches through
-    /// a file this test does not read — a script or a local action, each of which fails the extraction by name
-    /// rather than being read.
+    /// The guide has no fence but `sh` and `toml`, no indented or `~~~` block, and no inline code the classifier reads
+    /// as running the binary, pip or Python outside the walk and [`INLINE_ALLOWED`]; the stated difference is step 2's
+    /// first command. **Not seen:** a command written in prose without backticks; inline code behind a program the
+    /// classifier does not know; and a command a workflow reaches without naming the binary, pip or Python on the
+    /// line. Of those, a script, a local action and a variable-held program fail the extraction by name; a `make`
+    /// target, a container or a published action do not.
     #[test]
     fn the_guides_commands_are_the_one_hour_jobs() {
         let job = walk_differs(FLEET, ONE_HOUR).unwrap_or_else(|e| panic!("{e}"));
@@ -589,7 +591,7 @@ mod tests {
         assert!(said.contains("is not the first command of step 2"), "{said}");
     }
 
-    /// The extraction sees a command in every form a workflow can write one — the single-line `run:`, a wrapper
+    /// The extraction sees a command in each of these forms — the single-line `run:`, a wrapper
     /// before it, a path-qualified binary, after `cd … &&`, a second `$(…)` on a line, one inside double quotes —
     /// and nothing that only names the binary.
     #[test]
