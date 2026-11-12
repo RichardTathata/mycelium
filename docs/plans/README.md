@@ -162,6 +162,20 @@ future contributor needs so they don't re-litigate a settled choice — lives he
 
 ## Proposed — not yet started
 
+[`external-critique-2026-11-12.md`](external-critique-2026-11-12.md) — **the third-party critique of 2026-11-12:
+verification and the plan that answers it** (proposed 2026-11-12, rev 0.1; **awaiting the maintainer's decisions**,
+its §5, D1–D12). The critique is vendored unchanged at
+[`external/2026-11-12-360-critique.md`](external/2026-11-12-360-critique.md) — the reviewer's summary and reply; the
+full per-layer document has not been received. Every finding was read against `main` at `156ca329`, nothing built
+or run: none is false, several are narrower or already stated limits, two are not confirmed (self-install is
+opt-in; `TaskCtx` is not the cause of every `too_many_arguments` allow), and the counts hold. Its root cause is the
+owner-signed rule ([wiki](../wiki/dev/owner-signed-records.md), #772), whose inventory the rows are grouped from.
+Rows CR1–CR25 in the agreed order: the KV read guard (in progress) and the log read doors; grant records, the audit
+head and `cap/`·`req/`·`prov-shed` signed by their owners; one door function for authorization; catalogue version,
+expiry and revocation with provenance before staging; the exclusive verbs refusing without an electorate, and a
+model of the acceptor; `#[non_exhaustive]` on `GossipConfig`; then a refusal of an inbound entry stamped beyond the
+drift bound and a per-record WAL checksum (an on-disk format change, against the pinned fixtures); structure last.
+
 [`feature-pages.md`](feature-pages.md) — **feature pages** (delivered, rev 0.14; agreed with the maintainer
 2026-10-19; F1 delivered #654, F2 #655, F3 in five PRs #725–#737 (2026-11-07), F4's fifth rule and `/doc-coverage`
 pass #724 and the pass run once, its findings closed (2026-11-08); F3 and F4 released in v2.40.0). One short page per feature: what it is, when to use it, the settings

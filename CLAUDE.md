@@ -185,6 +185,7 @@ is the state of play).
 - **Adopter surface:** Y9 is paused until a cloud credential is held; each row's stated *not built* items are in the
   plan's §8.
 - **Post-360 hardening:** the *not built* items and the known flakes, `docs/plans/post-360-hardening.md` §3.6.
+- **The third-party critique of 2026-11-12:** verified finding by finding, its rows CR1–CR25 proposed and awaiting the maintainer's decisions (§5), `docs/plans/external-critique-2026-11-12.md`.
 - **Contracts axis, not code gates** (each needs a machine, a counterparty or a credential, not a commit): V1, the nightly scale runner whose self-hosted box is offline, so its criterion has never been
   met; AE4's four joint AWS/GCP runs, which need the counterparty; S4, real object-store buckets, which need
   credentials.

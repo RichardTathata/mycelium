@@ -284,5 +284,8 @@ for each *Does not hold* and *Partly* row; it makes no claim about member remova
 - **A row's Status moves to Meets** by citing the verifying code and the forged-record test, in the PR that builds
   them.
 - The lint pass re-verifies the citations (`/wiki-lint`, check 1); nothing in CI does.
+- **Where the rows are planned:** [`docs/plans/external-critique-2026-11-12.md`](../../plans/external-critique-2026-11-12.md)
+  (proposed 2026-11-12) groups every *Does not hold* and *Partly* row into rows CR2–CR5 and CR7, and says which
+  need a KV value change, an on-disk change or a wire change. A row built there moves its Status here.
 
 Log: [`.log/2026-11-12-owner-signed-rule.md`](.log/2026-11-12-owner-signed-rule.md).
