@@ -3003,8 +3003,8 @@ Wire **v12** unchanged.
 ## 96. A provider can verify an OIDC user's exchanged token; one that does refuses an `oidc:` action without it (2.40.0, identity-and-lifecycle I5, PR 1)
 
 A provider verifies an OIDC user's token itself when its `[oidc]` table sets `exchange_audience`. The token is
-exchanged by the gateway at the IdP (RFC 8693) and bound to the gateway's node key (DPoP). This release builds the
-provider's half; the gateway's exchange is §97.
+exchanged by the gateway at the IdP (RFC 8693) and bound to the gateway's node key (DPoP). This section is the
+provider's half; the gateway's exchange, in the same release, is §97.
 
 - **What changed:**
   - `[oidc]` gained `exchange_audience`, `exchange_client_id` and `exchange_max_lifetime_secs`. **`OidcConfig` now
@@ -3028,7 +3028,7 @@ provider's half; the gateway's exchange is §97.
   - **A build without `compliance` refuses any call carrying an `ot`** (`not_in_build`) rather than run it
     unverified. Before this release no envelope carried one.
 - **A verifying provider needs exchanging gateways** (§97). A provider that sets `exchange_audience` refuses every
-  `oidc:` action that arrives without an `ot`, so set it only once every gateway that calls it for OIDC users runs a
+  `oidc:` action that arrives without an `ot`, so set it only once every gateway that calls it for OIDC users runs
   2.40.0 or later and has its exchange settings. (No gateway before 2.40.0 sends an `ot`.)
 - **The actions** are the protected kinds (`mcp.invoke`, `skill.invoke`, `llm.invoke`, `protected_rpc_kinds`), the
   companions' write kinds, and a hosted capability's invoke (`cap.invoke/{namespace}/{name}`, which runs code). The
@@ -3099,8 +3099,9 @@ live door — `/mcp`, `/a2a`, the provider's enforcement and `[authority]` (§83
 - **What changed:**
   - **An allowance with `requires_values` now permits** when the caller's top-level `arguments` carry the values it
     names. Before, it never did at a live door.
-  - **A prohibition naming a value decides on it.** If the value is present and equal, the call is denied (as
-    before). If it is absent, the value is not established and the call decides `Indeterminate`, failing closed (as
+  - **A prohibition naming a value decides on it.** If the value is present and equal, the call is denied: a
+    definite `Deny` where a live door recorded `Indeterminate` before (refused either way, but the evidence record's
+    verdict changes). If it is absent, the value is not established and the call decides `Indeterminate`, failing closed (as
     before). If it is **present and different** — `"Capital"` against a prohibited `"capital"`, `over_ceiling = false`
     against `over_ceiling = true` — the prohibition **does not apply** and the allowances decide. Before, every request
     the prohibition's actor, operation and resource selected was `Indeterminate`, whatever its value.

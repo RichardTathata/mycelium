@@ -502,7 +502,7 @@ or yanked advisory, and Tokio's floor is 1.53.3 (RUSTSEC-2026-0386, not reachabl
   the work — the reader-side `CapEntry::is_fresh` / `ReqEntry::is_fresh` (an advertisement older than three refresh
   intervals, or that far in the future, is skipped, never deleted) and `store::sweep_stale_tombstones` — with
   `cap_entry_freshness`, `future_stamped_entry_is_quarantined_not_fresh` and `tombstone_gc_sweep_unpacks_hlc_timestamps`.
-  The id is kept, because recorded traces and fault reports name it. Three `cap/` readers do not apply `is_fresh` yet
+  The id is kept, because recorded traces and fault reports name it. Three `cap/` readers did not apply `is_fresh` then
   (the A2A provider resolution and card, the membership governor's eligibility); the rule said so, and #734, also in
   this release, fixes them (the stale-advertisement entry above). Guide 01 no longer says every key has a time-to-live or that `set` takes one; the mailbox module doc
   no longer reads the gossip hop count (`default_ttl`) as a five-minute lifetime, since an undelivered event has no
