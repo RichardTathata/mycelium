@@ -22,7 +22,7 @@ nothing built or run. This verification is the same kind: every finding was read
 (after #771 and #772) under the [verification policy](../wiki/dev/testing/verification-policy.md), rule 1 — the
 entry points enumerated, the grep given, each cited line re-read by the author of this plan after three read-only
 agents found it. **Nothing was built or run.** A verdict of *confirmed* means *the code reads that way*; no
-behaviour was observed, and §6 lists what that leaves open.
+behaviour was observed, and §7 lists what that leaves open.
 
 ## 1 · What the critique found, and what the verification found
 
@@ -161,7 +161,7 @@ Each counted at `156ca329`, with the command.
 
 | | Critique | Verdict or position |
 |---|---|---|
-| Ph1 | Signals and Boundaries is no longer what ships; restate as "flood to discover and broadcast, route what is addressed" | **The maintainer's position (§3 M2):** the reviewer misread the principle. #771 reworded the page; what it now says matches the code (`docs/philosophy.md:11`–`21`; `tasks.rs:368`–`370`). The second half — signed signals, end-to-end encryption — is §5 D6 |
+| Ph1 | Signals and Boundaries is no longer what ships; restate as "flood to discover and broadcast, route what is addressed" | **The maintainer's position (§3 M2):** the principle is unchanged. The reviewer's narrower point — the page claimed more than the code for Individual routing and Group sampling — was accepted, and #771 reworded the page (§6.3); what it now says matches the code (`docs/philosophy.md:11`–`21`; `tasks.rs:368`–`370`). The second half — signed signals, end-to-end encryption — is §5 D6 |
 | Ph2 | "Consensus is a protocol the substrate is unaware of" leaves no authoritative membership; make the electorate mandatory; model the acceptor; openraft | L11 and L12. Mandatory electorate: CR9, §5 D1. The model: taken, CR10. openraft: a counterfactual, agreed by both sides (§3 M5) |
 | Ph3 | "Detection, not prevention" is right for availability and wrong as a security posture | **agreed and adopted** as the owner-signed rule (#772) |
 | Ph4 | "Library, not platform" no longer describes the product | **decided (§3 M3):** it stays, described as a library that also ships a reference node; the positioning to say plainly that Python and TypeScript users run it as a sidecar. Today only `docs/philosophy.md:194` says "sidecar" (`grep -n -i sidecar docs/positioning.md README.md`: none). CR16 |
@@ -271,7 +271,9 @@ written.
 
 **Format:** a KV **value** change for each marker (today a timestamp or `b"1"`), read for one release beside the
 old form, counted — an upgrade note and a mixed-version rule (verifiers before writers), as I3's digest had. A new
-journal stream for the door's own uses: additive on disk, with a lock-order row for its reader. No wire-frame
+journal stream for the door's own uses: additive on disk, with a lock-order row for its reader. During the mixed
+release a pre-dispatch refusal at an un-upgraded gateway — which releases by tombstone
+(`src/agent/http/authz.rs:716`) — spends the grant at upgraded doors: the safe side, stated in the upgrade note. No wire-frame
 change, no change to an existing on-disk format.
 
 **Size:** L — four PRs; the first is M to L and is the one that closes the open row.
@@ -391,8 +393,9 @@ no decision, only who makes the call.
 
 **Exit:** a line never signed by a trusted publisher is not staged (a counter, and no bytes on disk); a withdrawn
 line re-written by a member is refused as *superseded* and counted; an expired line is not installed; a forged low
-`size_bytes` does not win selection; `Provisioner::new` with no publishers installs nothing. Each seen failing
-first. The inventory row moves to *Meets*.
+`size_bytes` does not win selection; `Provisioner::new` with no publishers installs nothing; a restarted reader
+still refuses the lower sequence; a publisher-signed revocation stops an install; a `-proposed-v2` line carries
+the same currency. Each seen failing first. The inventory row moves to *Meets*.
 
 **Does not:** adopt TUF. The reviewer's "TUF-style" is the shape (version, expiry, revocation), and this row takes
 those three; root rotation, delegated targets and threshold signing are not built and are stated. Does not
@@ -472,16 +475,17 @@ a separate, later row if D2 chooses it.
 **What:** docs first: the skew bound of `lock-lifecycle.md:316`–`320` in the threat model's §7 table and the
 consensus guide, and on `what-is-proven.md` (added by this PR). Then a **holder-side margin as a guarantee**:
 the holder stops a stated δ before its deadline, and a guarantee resolves *Enforced* only when δ is non-zero and
-below the lease. The default δ is the authority clock model's `[authority].skew_ms` (default 1 000,
-`mycelium-core/src/config.rs:1872`–`1877`) — **not** `max_clock_drift_ms`, which is the transport's HLC tolerance
+below the lease. δ is 0 unless set; where an `[authority]` table is present, its `skew_ms` (default 1 000,
+`mycelium-core/src/config.rs:1872`–`1877`) is the default. A node with neither is unchanged and the guarantee
+reports `NotConfigured`. The figure is **not** `max_clock_drift_ms`, which is the transport's HLC tolerance
 (300 000 ms, `mycelium-core/src/hlc.rs:92`) and would lapse the default 30 s leader lease
 (`src/agent/overlay_consistent.rs:143`) at the moment it is granted. Profiles require guarantees and set no
 configuration, so "the secure profile sets it" is not available; whether a new revision of `secure-single-domain`
 *requires* the guarantee is §5 D14.
 
 **Exit:** a holder with the margin reports its lock lapsed δ before a reader with a clock δ ahead would grant
-another; a margin of zero, or one at or above the lease, resolves the guarantee `NotConfigured` by name; the
-default configuration is unchanged.
+another; a margin of zero, or one at or above the lease, resolves the guarantee `NotConfigured` by name; a node
+with an `[authority]` table and no margin set takes its `skew_ms`; a node with neither behaves as today.
 
 **Does not:** check a fencing token anywhere. The first draft proposed "a fenced `consistent_set`"; the review of
 #773 showed it does not exist to be fenced — `consistent_set(key, value)` takes no token and is its own consensus
@@ -543,14 +547,18 @@ re-counts them.
 - **Replay** (`src/agent/lifecycle.rs:494`–`511`), the fourth door. It is not a free choice. Refusing at replay
   against the wall clock discards a node's own WAL on a bad-clock boot; keeping the entry means permanent
   divergence from the peers that refuse it — the bucket digests differ, and the entry is re-sent and re-refused
-  every anti-entropy round. The row keeps at replay and needs **a repair verb** for an entry already held (an
-  operator's tombstone at a stamp that wins, by name), or it states the churn.
+  every anti-entropy round. The row keeps at replay and needs **a repair that is node-local, not gossiped**: each node
+  that holds an entry stamped beyond its bound removes it from its own store and WAL (an operator verb by key, or
+  the node's own check at start), counted. A tombstone "at a stamp that wins" is not the repair: to beat a
+  `u64::MAX` entry it must itself be stamped `u64::MAX` (`mycelium-core/src/store.rs:595`), so it is itself
+  beyond the bound, is refused at the three doors, and is never collected (`store.rs:967`). Without the repair,
+  the row states the churn.
 - **Mixed configuration, not only mixed version:** a node with `max_clock_drift_ms = 0` accepts what the others
   refuse, permanently. `validate()` or the guarantee report says so; the upgrade note states both.
 - A `u64::MAX`-stamped entry through each of the three doors leaves the key as it was; an entry inside the bound
   applies; with the bound at 0 nothing changes.
 
-**Does not:** remove a poisoned entry a fleet already holds, without the repair verb. Does not authenticate the
+**Does not:** remove a poisoned entry a fleet already holds, without the node-local repair on every node that holds it. Does not authenticate the
 entry. Does not stop a stamp *inside* the bound: a member can still out-stamp an owner by up to five minutes,
 which is what CR2's first step had to be rewritten around. Does not change the wire.
 
@@ -574,7 +582,10 @@ says so in its upgrade note and tests it against the `fixint-v1` reader's code p
 upgraded node meets a `wal.bin` of v1 records with no header. The row takes one of two shapes and says which —
 the node snapshots and truncates before its first append (the startup snapshot already repairs a torn tail before
 the first append), so a file is all-v1 or all-new; or the header may appear mid-file and the reader switches at
-it. The first is simpler and is the proposal.
+it. The first is simpler and is the proposal. Where the startup snapshot did not run or failed
+(`on_unreadable = "quarantine"`, `src/agent/lifecycle.rs:586`–`590`; the `defer_snapshot` hook, `:556`–`572`),
+the writer does not append new-format records behind v1 ones: it refuses, or writes v1 until the next snapshot.
+An exit test covers the quarantine start.
 
 **Exit:** a flipped bit inside a record's value that still decodes — the case nothing detects today — is
 `Corrupt`; the v1 fixture replays byte for byte; the new fixture replays; an old-format WAL is read and the
@@ -740,7 +751,7 @@ draft made inside a row; the review of #773 found them, and they are here now.
 
 ## 6 · Where the critique is wrong or overstated, and where it is understated
 
-Said plainly, with the code. Two lists: what does not hold as written, and what holds and needed context.
+Said plainly, with the code. Three lists: what does not hold as written, what holds and needed context, and one position.
 
 ### 6.1 · Wrong or overstated
 
