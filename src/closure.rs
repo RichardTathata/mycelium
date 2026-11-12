@@ -306,17 +306,22 @@ impl Corpus {
         })
     }
 
-    /// The fleet line's facts: journals given, the nodes the records name, and whether the closure is known complete —
-    /// `Some(false)` when fewer journals than the stated fleet or than the nodes named, `Some(true)` when at least the
-    /// stated fleet's, `None` when no fleet size was given and nothing shows it incomplete.
-    fn fleet_facts(&self, fleet: Option<usize>) -> (usize, BTreeSet<String>, Option<bool>) {
-        let (journals, nodes) = (self.journals(), self.nodes_named());
-        let complete = match fleet {
-            Some(n) => Some(journals >= n),
-            None if journals < nodes.len() => Some(false),
-            None => None,
-        };
-        (journals, nodes, complete)
+    /// The fleet line's facts: journal files given, the nodes the records name, and the distinct nodes a journal
+    /// given holds records of.
+    fn fleet_facts(&self) -> (usize, BTreeSet<String>, BTreeSet<String>) {
+        let journal_nodes = self.records.iter().filter(|r| r.source == SourceKind::Journal).filter_map(|r| r.node.clone()).collect();
+        (self.journals(), self.nodes_named(), journal_nodes)
+    }
+
+    /// Whether the closure is known complete, by distinct nodes rather than files (#767's review, M2): `Some(false)`
+    /// when a node the records name has no journal here, or when fewer nodes have one than the stated fleet;
+    /// `Some(true)` only when every node named has one and they number at least the stated fleet; `None` when they all
+    /// have one but no fleet size was given, so the reader cannot tell.
+    fn complete(nodes: &BTreeSet<String>, journal_nodes: &BTreeSet<String>, fleet: Option<usize>) -> Option<bool> {
+        if !nodes.is_subset(journal_nodes) {
+            return Some(false);
+        }
+        fleet.map(|n| journal_nodes.len() >= n)
     }
 
     /// Every parent cited anywhere in the files given that no file holds — the root's and the root's own parent
@@ -338,7 +343,7 @@ impl Corpus {
         let mut out = String::new();
         out.push_str(&format!("{SCHEMA} closure of {hash}\n"));
         self.head(&mut out);
-        let (journals, nodes, _) = self.fleet_facts(fleet);
+        let (journals, nodes, _) = self.fleet_facts();
         let fleet_line = match fleet {
             Some(n) if journals < n => format!("INCOMPLETE: {journals} journal(s) given for a fleet of {n} nodes — a record on a node whose journal is not here is not in this closure.\n"),
             Some(n) => format!("{journals} journal(s) given for a fleet of {n} nodes.\n"),
@@ -393,15 +398,17 @@ impl Corpus {
     }
 
     /// [`closure`](Self::closure) as one JSON document (identity-and-lifecycle N3), schema [`SCHEMA`] with
-    /// `"view": "closure"`: the files read; the fleet facts (`complete` is `false` where the text says INCOMPLETE,
-    /// `true` when the stated fleet's journals are all here, `null` when the reader cannot tell); the members in render
+    /// `"view": "closure"`: the files read; the fleet facts (`journal_nodes`, the distinct nodes a journal given holds
+    /// records of; `complete` is `false` unless every node named is one of them, and they number at least the stated
+    /// fleet — `true` — or no fleet size was given — `null`, the reader cannot tell); the members in render
     /// order, each with its depth and whether it is a federation boundary; the root's missing parent and every other
     /// hole, with what a hole may be; and the counts. A root in none of the files is `"root_found": false` with no
     /// members, as the text says.
     pub fn closure_json(&self, hash: &str, fleet: Option<usize>) -> Value {
         use serde_json::json;
-        let (journals, nodes, complete) = self.fleet_facts(fleet);
-        let fleet_v = json!({ "journals": journals, "fleet": fleet, "nodes_named": nodes, "complete": complete });
+        let (journals, nodes, journal_nodes) = self.fleet_facts();
+        let complete = Self::complete(&nodes, &journal_nodes, fleet);
+        let fleet_v = json!({ "journals": journals, "fleet": fleet, "nodes_named": nodes, "journal_nodes": journal_nodes, "complete": complete });
         let root = self.get(hash);
         let order = if root.is_some() { self.visit(hash) } else { Vec::new() };
         let root_parent = root.and_then(|r| r.parent.clone());
@@ -891,7 +898,8 @@ mod tests {
 
         let closure = c.closure_json(&rh, Some(3));
         assert_eq!((closure["view"].as_str(), closure["root_found"].as_bool()), (Some("closure"), Some(true)));
-        assert_eq!(closure["fleet"], json!({ "journals": 1, "fleet": 3, "nodes_named": ["127.0.0.1:7001", "127.0.0.1:7002"], "complete": false }));
+        assert_eq!(closure["fleet"], json!({ "journals": 1, "fleet": 3, "nodes_named": ["127.0.0.1:7001", "127.0.0.1:7002"],
+            "journal_nodes": ["127.0.0.1:7001"], "complete": false }));
         let members = closure["records"].as_array().unwrap();
         assert_eq!(members.len(), 2, "{closure:#}");
         assert_eq!((members[0]["mark"].as_str(), members[0]["depth"].as_u64()), (Some("captured, a root"), Some(0)));
@@ -899,13 +907,38 @@ mod tests {
         assert_eq!(members[1]["parent_held"], true);
         assert_eq!(closure["holes"], json!([{ "hash": "f".repeat(64), "cited_by": 1 }]));
         assert_eq!(closure["counts"], json!({ "records": 2, "files": 2, "boundaries": 1, "holes": 1 }));
-        assert_eq!(c.closure_json(&rh, Some(1))["fleet"]["complete"], true);
-        assert!(c.closure_json(&rh, None)["fleet"]["complete"] == false, "fewer journals than nodes named");
+        // A fleet of one stated, but the trace names a second node with no journal here: not complete (#767's review,
+        // M2 — this line pinned `true` beside `nodes_named` listing two nodes).
+        assert_eq!(c.closure_json(&rh, Some(1))["fleet"]["complete"], false);
+        assert_eq!(c.closure_json(&rh, None)["fleet"]["complete"], false, "a node named without a journal");
 
         let missing = c.closure_json(&"0".repeat(64), None);
         assert_eq!((missing["root_found"].as_bool(), missing["records"].as_array().map(Vec::len)), (Some(false), Some(0)));
         assert_eq!(c.closure_json_for(&rh[..12], None).unwrap(), c.closure_json(&rh, None), "the prefix rule, as the text's");
         assert!(c.closure_json_for("0123", None).is_err());
+    }
+
+    /// `complete` counts nodes, not files (#767's review, M2): two journals from one node are one node's, so a fleet of
+    /// two is not complete with them; every node named with a journal, and as many as the stated fleet, is.
+    #[test]
+    fn complete_counts_distinct_nodes_not_journal_files() {
+        let one = evidence(1, "op-1", "decided", None, None, "gateway:mcp/tools/call");
+        let rh = content_hash(one.as_bytes());
+        let two = evidence(2, "op-2", "decided", None, Some(&rh), "provider");
+        let mut c = Corpus::default();
+        c.add_journal("n1-a.log", &[one.clone().into_bytes()]);
+        c.add_journal("n1-b.log", &[two.clone().into_bytes()]);
+        let f = &c.closure_json(&rh, Some(2))["fleet"];
+        assert_eq!((f["journals"].as_u64(), f["journal_nodes"].as_array().map(Vec::len)), (Some(2), Some(1)), "{f}");
+        assert_eq!(f["complete"], false, "two files, one node, a fleet of two: {f}");
+        assert_eq!(c.closure_json(&rh, Some(1))["fleet"]["complete"], true, "every node named has a journal, and the fleet is one");
+        assert!(c.closure_json(&rh, None)["fleet"]["complete"].is_null(), "all named nodes covered, the fleet's size unknown");
+        // The second node's journal, named in a record, makes a fleet of two complete.
+        let other = json!({"schema": "mycelium.ae/evidence/1", "kind": "decided", "at_ms": 3, "subject": "s", "enforcement_point": "provider",
+            "operation_id": "op-3", "node": "127.0.0.1:7009", "parent": rh}).to_string();
+        c.add_journal("n9.log", &[other.into_bytes()]);
+        assert_eq!(c.closure_json(&rh, Some(2))["fleet"]["complete"], true);
+        assert_eq!(c.closure_json(&rh, Some(3))["fleet"]["complete"], false, "fewer nodes than the stated fleet");
     }
 
     /// A closure read takes the prefix a chain prints: a unique prefix resolves to its record's full hash; one no

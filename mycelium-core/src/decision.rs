@@ -854,6 +854,12 @@ Records the sink dropped are in its counters (decisions.stats.json), not here.\n
     out
 }
 
+/// How many inputs the sink dropped from a record past its input bound (`completeness.inputs_dropped`; 0 where the
+/// record does not say) — in the JSON form only: a step that read more than it shows says so (#767's review).
+fn inputs_dropped(r: &serde_json::Value) -> u64 {
+    r.pointer("/completeness/inputs_dropped").and_then(|x| x.as_u64()).unwrap_or(0)
+}
+
 /// [`explain`] as one JSON document (`mycelium explain --format json`, identity-and-lifecycle N3), schema
 /// [`EXPLAIN_SCHEMA`]: the same targets in the same order, each step's fields as the record carries them (`null` where
 /// it carries none, where the text prints `-`), the rules used with their catalogue summaries, and the same counts. A
@@ -889,6 +895,7 @@ pub fn explain_json(jsonl: &str, catalogue_json: Option<&str>, target: Option<&s
                         "reads": reads,
                         "unattributable": s.unattributable,
                         "inputs_truncated": s.truncated,
+                        "inputs_dropped": inputs_dropped(r),
                     })
                 })
                 .collect();
@@ -905,6 +912,7 @@ pub fn explain_json(jsonl: &str, catalogue_json: Option<&str>, target: Option<&s
             "targets": e.order.len(),
             "unattributable": e.unattributable(),
             "inputs_truncated": e.truncated(),
+            "inputs_dropped": e.by_target.values().flatten().map(|s| inputs_dropped(s.record)).sum::<u64>(),
             "unparsed": e.unparsed,
         },
         "dropped": "records the sink dropped are in its counters (decisions.stats.json), not here",
@@ -1138,7 +1146,11 @@ mod tests {
         assert_eq!(doc["rules"].as_array().unwrap().len(), 3);
         assert_eq!(doc["rules"][0], serde_json::json!({ "id": "prov.demand_response", "summary": null }));
         assert_eq!(doc["rules"][1], serde_json::json!({ "id": "prov.eligible", "summary": "Can host it." }));
-        assert_eq!(doc["counts"], serde_json::json!({ "records": 3, "targets": 2, "unattributable": 1, "inputs_truncated": 0, "unparsed": 1 }));
+        assert_eq!(doc["counts"], serde_json::json!({ "records": 3, "targets": 2, "unattributable": 1, "inputs_truncated": 0, "inputs_dropped": 0, "unparsed": 1 }));
+        assert_eq!(first["inputs_dropped"], 0);
+        let dropped = r#"{"rule":"r","target":"t","completeness":{"inputs_dropped":4}}"#;
+        let d = explain_json(dropped, None, None);
+        assert_eq!((d["targets"][0]["steps"][0]["inputs_dropped"].as_u64(), d["counts"]["inputs_dropped"].as_u64()), (Some(4), Some(4)));
         let only = explain_json(&jsonl, None, Some("route/optimize"));
         assert_eq!(only["targets"].as_array().unwrap().len(), 1);
         assert_eq!(only["counts"]["records"], 1);

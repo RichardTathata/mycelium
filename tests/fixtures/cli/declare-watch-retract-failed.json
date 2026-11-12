@@ -1,0 +1,12 @@
+{
+  "schema": "mycelium.declare/1",
+  "event": "retracted",
+  "retracted": [],
+  "failed": [
+    {
+      "unit": "a",
+      "handle": "h-1",
+      "error": "<contains:/gateway/capability/h-1>"
+    }
+  ]
+}

@@ -1,5 +1,6 @@
 {
   "counts": {
+    "inputs_dropped": 2,
     "inputs_truncated": 1,
     "records": 1,
     "targets": 1,
@@ -20,6 +21,7 @@
       "steps": [
         {
           "effect": null,
+          "inputs_dropped": 2,
           "inputs_truncated": true,
           "node": "127.0.0.1:7002",
           "outcome": "no_action",

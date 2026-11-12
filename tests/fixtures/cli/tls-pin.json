@@ -1,6 +1,6 @@
 {
   "schema": "mycelium.tls/1",
   "command": "pin",
-  "cert": "<path:/127_0_0_1_7971.cert.pem>",
+  "cert": "${OUT}/127_0_0_1_7971.cert.pem",
   "spki_sha256": "<sha256>"
 }

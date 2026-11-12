@@ -19,7 +19,18 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `tests/fixtures/cli/`, checked through the binary by `tests/cli_json.rs`; the shapes are
   `docs/reference/cli-json.md`. `--format text`, the default, prints what each printed before. Library:
   `decision::explain_json`, `Corpus::chain_json`/`closure_json`/`closure_json_for`, `declare::run_with` with
-  `declare::Format`, `declare::event_json`.
+  `declare::Format`, `declare::event_json`. The documents are **additive-stable** (the maintainer's decision,
+  2026-11-12, for every `mycelium.*/N` id, `doctor/1`, `test-faults/1` and `closure/1` included): within `/N` fields
+  are added, never removed, renamed or retyped, readers ignore unknown fields, and a breaking change is `/N+1` with a
+  `deprecations.md` entry — `docs/reference/cli-json.md`.
+
+### Changed
+
+- **`mycelium declare` says when a retraction fails.** A DELETE the gateway did not confirm was discarded, and Ctrl-C
+  under `--watch` reported its declarations retracted before retracting them. The text form now prints each failed
+  retraction and exits 1; a tick's failed retraction of a previous handle is a warning. `Watch::retract` returns a
+  `Retraction` (it returned `()`). Under `--watch` the Ctrl-C handler is installed before the first tick's first
+  request, so a Ctrl-C during the first tick retracts rather than killing the process (#767's review, M1, L5).
 
 ## [2.40.0] — 2026-11-12
 

@@ -36,7 +36,7 @@ This feature is turned on in code.
   has them.
 - [`Corpus`](../../src/closure.rs) — the reader behind `mycelium explain --correlation` and `--closure`; with
   `--format json` either is one document, schema `mycelium.closure/1` with `view` `chain` or `closure`, full hashes
-  and the closure's `complete` (`false` where the text says INCOMPLETE) —
+  and the closure's `complete` (`false` unless every node the records name has a journal given) —
   [the CLI's JSON documents](../reference/cli-json.md#mycelium-explain---correlation----closure----format-json--myceliumclosure1).
 - `the_causal_fields_ride_in_the_payload_to_the_gateway_s_and_the_provider_s_records`, in
   [`src/agent/http/causal_tests.rs`](../../src/agent/http/causal_tests.rs): a real `/mcp` call with both fields, the
@@ -55,7 +55,7 @@ its chain back with `mycelium explain --correlation`. The tests: in
 `a_parent_in_the_envelope_is_counted_not_read_and_one_in_the_payload_is_signed`; in
 [`src/closure.rs`](../../src/closure.rs), `a_chain_marks_captured_reconstructed_and_unattributable` and
 `a_closure_follows_parents_names_holes_and_stops_at_a_federation_edge` and
-`the_json_chain_and_closure_say_what_the_text_says`; in [`tests/cli_json.rs`](../../tests/cli_json.rs),
+`the_json_chain_and_closure_say_what_the_text_says`, `complete_counts_distinct_nodes_not_journal_files`; in [`tests/cli_json.rs`](../../tests/cli_json.rs),
 `explain_a_correlation_and_a_closure_as_json_match_their_goldens`.
 
 ## What it guarantees, and what it does not

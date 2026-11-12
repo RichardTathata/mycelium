@@ -18,6 +18,7 @@
   "fleet": {
     "complete": false,
     "fleet": 2,
+    "journal_nodes": [],
     "journals": 0,
     "nodes_named": [
       "127.0.0.1:7001",

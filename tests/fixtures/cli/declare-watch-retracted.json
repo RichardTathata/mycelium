@@ -1,5 +1,8 @@
 {
   "schema": "mycelium.declare/1",
   "event": "retracted",
-  "declarations": 1
+  "retracted": [
+    "a"
+  ],
+  "failed": []
 }

@@ -33,7 +33,7 @@ This feature is turned on in code.
   (the lease a declaration is held under), `--format text|json`. `--poll-ms` at or above a third of the lease is
   refused: the declaration would lapse between heartbeats.
 - `--format json` prints one JSON object per event, schema `mycelium.declare/1` — once, a single line; under
-  `--watch`, JSON Lines: `declared`, `refused`, `rejected`, `error`, `heartbeat_lost`, `retracted`
+  `--watch`, JSON Lines: `declared`, `refused`, `rejected`, `error`, `heartbeat_lost`, `retracting`, `retracted`
   ([the CLI's JSON documents](../reference/cli-json.md#mycelium-declare---format-json--myceliumdeclare1)).
 - `a_unit_edit_is_redeclared_and_the_old_handle_retracted`, in [`src/declare.rs`](../../src/declare.rs): a real
   gateway node, a unit declared, resolved over HTTP, renamed, re-declared, and the old capability gone.
@@ -48,8 +48,10 @@ edit reaching the fleet, a refused unit leaving the previous declaration, Ctrl-C
 `a_unit_the_gateway_refuses_is_rejected_once_and_its_previous_declaration_put_back`,
 `a_lost_handle_is_declared_again_at_the_next_tick`, `a_unit_removed_from_the_directory_is_retracted`,
 `a_refused_token_is_an_error_naming_the_route`, `a_skill_file_becomes_a_prompt_template` and
-`every_event_has_a_json_line_and_the_text_is_unchanged`; the JSON form through the binary, once, refused and watched to
-Ctrl-C, is `declare_as_json_matches_its_goldens_once_refused_and_watched` in [`tests/cli_json.rs`](../../tests/cli_json.rs).
+`every_event_has_a_json_line_and_the_text_is_unchanged`, `a_retraction_with_the_gateway_down_is_reported_failed`; the JSON
+form through the binary, once, refused and watched to Ctrl-C, is `declare_as_json_matches_its_goldens_once_refused_and_watched`
+in [`tests/cli_json.rs`](../../tests/cli_json.rs), beside `a_retraction_the_gateway_does_not_answer_is_reported_failed` and
+`a_ctrl_c_during_the_first_tick_retracts`.
 
 ## What it guarantees, and what it does not
 
@@ -64,7 +66,12 @@ Ctrl-C, is `declare_as_json_matches_its_goldens_once_refused_and_watched` in [`t
 - A good edit briefly shows no provider: a unit's previous handle is retracted before the new text is declared (one
   KV key per `ns/name`, so the other order would tombstone the new advert), and the window between the two is a
   reader's moment of absence. Inherent, and stated here rather than hidden.
-- A removed unit file is retracted; a removed skill file's template is deleted.
+- A removed unit file is retracted; a removed skill file's template is deleted. A retraction the gateway does not
+  confirm is said — in the tick's warnings, or at Ctrl-C as `failed` with exit 1 — never counted retracted; it lapses
+  with its lease.
+- Under `--watch`, a Ctrl-C from the first tick's first request on is a retraction: the handler is installed before
+  it. Before that — while the files are first read and checked — and once, without `--watch`, Ctrl-C keeps its default.
+  A second Ctrl-C during the retraction is not acted on; the retraction is bounded by the gateway's answers.
 - It declares; it does not enforce. A unit's mandate and rule come back `not_enforced` from a node that attaches no
   evaluator, and the tick prints them.
 - **Not built:** the plan's *Input*-class seam for a filesystem event source — the watch polls modification time and

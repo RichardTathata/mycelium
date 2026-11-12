@@ -5,8 +5,8 @@
   "principal": "token:fleet/svc",
   "issuer": "fleet",
   "name": "svc",
-  "cert": "<path:/client-fleet-svc.cert.pem>",
-  "key": "<path:/client-fleet-svc.key.pem>",
+  "cert": "${OUT}/client-fleet-svc.cert.pem",
+  "key": "${OUT}/client-fleet-svc.key.pem",
   "spki_sha256": "<sha256>",
   "warnings": []
 }

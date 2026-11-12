@@ -1,5 +1,6 @@
 {
   "counts": {
+    "inputs_dropped": 2,
     "inputs_truncated": 1,
     "records": 3,
     "targets": 2,
@@ -28,6 +29,7 @@
       "steps": [
         {
           "effect": null,
+          "inputs_dropped": 0,
           "inputs_truncated": false,
           "node": "127.0.0.1:7002",
           "outcome": "action",
@@ -41,6 +43,7 @@
         },
         {
           "effect": "start_install",
+          "inputs_dropped": 0,
           "inputs_truncated": false,
           "node": "127.0.0.1:7002",
           "outcome": "action",
@@ -66,6 +69,7 @@
       "steps": [
         {
           "effect": null,
+          "inputs_dropped": 2,
           "inputs_truncated": true,
           "node": "127.0.0.1:7002",
           "outcome": "no_action",

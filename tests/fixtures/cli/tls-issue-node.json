@@ -3,10 +3,10 @@
   "command": "issue",
   "kind": "node",
   "node": "127.0.0.1:7971",
-  "cert": "<path:/127_0_0_1_7971.cert.pem>",
-  "key": "<path:/127_0_0_1_7971.key.pem>",
+  "cert": "${OUT}/127_0_0_1_7971.cert.pem",
+  "key": "${OUT}/127_0_0_1_7971.key.pem",
   "spki_sha256": "<sha256>",
-  "ca_cert": "<path:/ca-cert.pem>",
+  "ca_cert": "${CA}/ca-cert.pem",
   "ca_spki_sha256": "<sha256>",
   "warnings": []
 }

@@ -2,11 +2,12 @@
 //! JSON parsed against its golden*: each case runs the built `mycelium` binary, parses its stdout as JSON (one document;
 //! `declare` one line per event), and compares it with its golden under `tests/fixtures/cli/`.
 //!
-//! **The goldens.** A golden is the document itself. Where a value differs from run to run — a path under a scratch
-//! directory, a fingerprint of a freshly generated key, a gateway's port — the golden holds a placeholder string
-//! instead: `"<sha256>"` (64 lowercase hex characters), `"<path:SUFFIX>"` (a string ending in `SUFFIX`), `"<gateway>"`
-//! (the URL this test's node serves) and `"<string>"` (any string). Every other value, and every object's set of keys
-//! and every array's length, must be equal: a key added, dropped or renamed fails here before it surprises a reader.
+//! **The goldens.** A golden is the document itself. Where a value differs from run to run, the golden says how:
+//! `${CA}`, `${OUT}` and `${GATEWAY}` inside a string are replaced by this run's CA directory, output directory and
+//! gateway URL before the string is compared exactly; `"<sha256>"` is 64 lowercase hex characters (a fingerprint of a
+//! freshly generated key, cross-checked against `tls pin` by the test); `"<contains:TEXT>"` is a string holding `TEXT`.
+//! Every other value, and every object's set of keys and every array's length, must be equal: a key added, dropped or
+//! renamed fails here before it surprises a reader.
 #![cfg(feature = "cli")]
 
 use std::path::{Path, PathBuf};
@@ -32,40 +33,48 @@ fn golden(name: &str) -> Value {
         .unwrap_or_else(|e| panic!("{}: {e}", path.display()))
 }
 
+/// This run's values for `${CA}`, `${OUT}` and `${GATEWAY}`.
+type Vars<'a> = &'a [(&'a str, &'a str)];
+
 /// Compare `got` with `want` as the module doc describes, naming the first difference by its JSON pointer.
-fn matches(want: &Value, got: &Value, at: &str, gateway: Option<&str>) -> Result<(), String> {
+fn matches(want: &Value, got: &Value, at: &str, vars: Vars<'_>) -> Result<(), String> {
     match (want, got) {
         (Value::String(w), _) if w.starts_with('<') && w.ends_with('>') => {
             let g = got.as_str().ok_or_else(|| format!("{at}: want a string for {w}, got {got}"))?;
             let ok = match w.as_str() {
                 "<sha256>" => g.len() == 64 && g.chars().all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)),
-                "<string>" => true,
-                "<gateway>" => Some(g) == gateway,
-                p if p.starts_with("<path:") => g.ends_with(&p["<path:".len()..p.len() - 1]),
+                p if p.starts_with("<contains:") => g.contains(&p["<contains:".len()..p.len() - 1]),
                 other => return Err(format!("{at}: unknown placeholder {other}")),
             };
             if ok { Ok(()) } else { Err(format!("{at}: {g:?} is not {w}")) }
+        }
+        (Value::String(w), Value::String(g)) if w.contains("${") => {
+            let want = vars.iter().fold(w.clone(), |acc, (k, v)| acc.replace(&format!("${{{k}}}"), v));
+            if want.contains("${") {
+                return Err(format!("{at}: {w} names a variable this test does not set"));
+            }
+            if *g == want { Ok(()) } else { Err(format!("{at}: {g:?}, the golden has {want:?}")) }
         }
         (Value::Object(w), Value::Object(g)) => {
             let (wk, gk): (Vec<_>, Vec<_>) = (w.keys().collect(), g.keys().collect());
             if wk != gk {
                 return Err(format!("{at}: keys {gk:?}, the golden has {wk:?}"));
             }
-            w.iter().try_for_each(|(k, v)| matches(v, &g[k], &format!("{at}/{k}"), gateway))
+            w.iter().try_for_each(|(k, v)| matches(v, &g[k], &format!("{at}/{k}"), vars))
         }
         (Value::Array(w), Value::Array(g)) => {
             if w.len() != g.len() {
                 return Err(format!("{at}: {} element(s), the golden has {}", g.len(), w.len()));
             }
-            w.iter().zip(g).enumerate().try_for_each(|(i, (w, g))| matches(w, g, &format!("{at}/{i}"), gateway))
+            w.iter().zip(g).enumerate().try_for_each(|(i, (w, g))| matches(w, g, &format!("{at}/{i}"), vars))
         }
         _ if want == got => Ok(()),
         _ => Err(format!("{at}: {got}, the golden has {want}")),
     }
 }
 
-fn assert_golden(name: &str, got: &Value, gateway: Option<&str>) {
-    if let Err(e) = matches(&golden(name), got, "", gateway) {
+fn assert_golden(name: &str, got: &Value, vars: Vars<'_>) {
+    if let Err(e) = matches(&golden(name), got, "", vars) {
         panic!("{name}: {e}\n{}", serde_json::to_string_pretty(got).unwrap());
     }
 }
@@ -81,26 +90,30 @@ fn document(args: &[&str]) -> Value {
 /// value does not fit — so a golden comparison that passes is one that could have failed.
 #[test]
 fn the_golden_matcher_refuses_a_shape_change() {
-    let want = serde_json::json!({ "a": 1, "h": "<sha256>", "p": "<path:/x.pem>", "l": [1, 2] });
-    assert!(matches(&want, &serde_json::json!({ "a": 1, "h": "0".repeat(64), "p": "/tmp/x.pem", "l": [1, 2] }), "", None).is_ok());
-    for bad in [
-        serde_json::json!({ "a": 2, "h": "0".repeat(64), "p": "/tmp/x.pem", "l": [1, 2] }),
-        serde_json::json!({ "a": 1, "h": "0".repeat(64), "p": "/tmp/x.pem", "l": [1, 2], "extra": 0 }),
-        serde_json::json!({ "a": 1, "h": "0".repeat(64), "p": "/tmp/x.pem", "l": [1] }),
-        serde_json::json!({ "a": 1, "h": "XYZ", "p": "/tmp/x.pem", "l": [1, 2] }),
-        serde_json::json!({ "a": 1, "h": "0".repeat(64), "p": "/tmp/x.key", "l": [1, 2] }),
-    ] {
-        assert!(matches(&want, &bad, "", None).is_err(), "{bad}");
+    let want = serde_json::json!({ "a": 1, "h": "<sha256>", "p": "${OUT}/x.pem", "r": "<contains:nobody>", "l": [1, 2] });
+    let vars: Vars<'_> = &[("OUT", "/tmp/o")];
+    let good = || serde_json::json!({ "a": 1, "h": "0".repeat(64), "p": "/tmp/o/x.pem", "r": "error: nobody offers", "l": [1, 2] });
+    assert!(matches(&want, &good(), "", vars).is_ok());
+    let mut bads = Vec::new();
+    for (k, v) in [("a", serde_json::json!(2)), ("h", serde_json::json!("XYZ")), ("p", serde_json::json!("/elsewhere/o/x.pem")),
+                   ("r", serde_json::json!("error: someone")), ("l", serde_json::json!([1])), ("extra", serde_json::json!(0))] {
+        let mut b = good();
+        b[k] = v;
+        bads.push(b);
     }
+    for bad in bads {
+        assert!(matches(&want, &bad, "", vars).is_err(), "{bad}");
+    }
+    assert!(matches(&want, &good(), "", &[]).is_err(), "a variable the test does not set fails, never passes");
 }
 
 /// `explain <trace> --format json`: the targets, steps, rules and counts of the text form, as one document.
 #[test]
 fn explain_a_trace_as_json_matches_its_golden() {
     let doc = document(&["explain", "tests/fixtures/cli/trace.jsonl", "--catalogue", "tests/fixtures/cli/catalogue.json", "--format", "json"]);
-    assert_golden("explain.json", &doc, None);
+    assert_golden("explain.json", &doc, &[]);
     let only = document(&["explain", "tests/fixtures/cli/trace.jsonl", "--target", "route/optimize", "--format", "json"]);
-    assert_golden("explain-target.json", &only, None);
+    assert_golden("explain-target.json", &only, &[]);
     // `--format text` is the text form, unchanged; anything else is a usage error with no document.
     let text = run(&["explain", "tests/fixtures/cli/trace.jsonl", "--format", "text"]);
     assert!(text.status.success() && stdout(&text).starts_with("text/echo\n"), "{}", stdout(&text));
@@ -114,13 +127,13 @@ fn explain_a_trace_as_json_matches_its_golden() {
 #[test]
 fn explain_a_correlation_and_a_closure_as_json_match_their_goldens() {
     let chain = document(&["explain", "--correlation", "run-1", "tests/fixtures/cli/records.jsonl", "--format", "json"]);
-    assert_golden("explain-correlation.json", &chain, None);
+    assert_golden("explain-correlation.json", &chain, &[]);
     // The prefix a chain prints, as the text form takes it.
     let root = chain["records"][0]["hash"].as_str().unwrap().to_string();
     let closure = document(&["explain", "--closure", &root[..12], "tests/fixtures/cli/records.jsonl", "--fleet", "2", "--format", "json"]);
-    assert_golden("explain-closure.json", &closure, None);
+    assert_golden("explain-closure.json", &closure, &[]);
     let missing = document(&["explain", "--closure", &"0".repeat(64), "tests/fixtures/cli/records.jsonl", "--format", "json"]);
-    assert_golden("explain-closure-missing.json", &missing, None);
+    assert_golden("explain-closure-missing.json", &missing, &[]);
     let refused = run(&["explain", "--closure", "0123", "tests/fixtures/cli/records.jsonl", "--format", "json"]);
     assert_eq!(refused.status.code(), Some(2), "a prefix too short is refused, as in the text form");
     assert!(refused.stdout.is_empty());
@@ -136,6 +149,10 @@ mod tls {
         d
     }
 
+    fn hex(b: &[u8]) -> String {
+        b.iter().map(|x| format!("{x:02x}")).collect()
+    }
+
     /// Every string the document holds, at any depth.
     fn strings(v: &Value, out: &mut Vec<String>) {
         match v {
@@ -146,9 +163,32 @@ mod tls {
         }
     }
 
+    /// Each private key file in `dirs`, as hex: its whole PKCS#8 DER, its 32-byte Ed25519 seed and the raw public key
+    /// it derives — the 64-hex values a leaked key would print as (#767's review, L3).
+    fn key_hexes(dirs: &[&Path]) -> Vec<String> {
+        use base64::Engine as _;
+        let mut out = Vec::new();
+        for dir in dirs {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                let text = std::fs::read_to_string(&path).unwrap();
+                if !text.contains("PRIVATE KEY-----") {
+                    continue;
+                }
+                let b64: String = text.lines().filter(|l| !l.starts_with("-----")).collect();
+                let der = base64::engine::general_purpose::STANDARD.decode(b64).unwrap();
+                let seed: [u8; 32] = der[der.len() - 32..].try_into().unwrap();
+                let public = ed25519_dalek::SigningKey::from_bytes(&seed).verifying_key().to_bytes();
+                out.extend([hex(&der), hex(&seed), hex(&public)]);
+            }
+        }
+        assert!(!out.is_empty(), "the directories hold the keys just written");
+        out
+    }
+
     /// **No secrets.** A `tls` document names files and fingerprints only: no PEM block of any kind, no line of any
-    /// key or certificate file written, and every string a path, a 64-hex fingerprint, or one of the names the
-    /// command was given.
+    /// key or certificate file written, no hex form of a key's DER, seed or raw public key, and every string a path, a
+    /// 64-hex fingerprint, or one of the names the command was given.
     fn assert_no_secrets(doc: &Value, raw: &str, dirs: &[&Path], given: &[&str]) {
         assert!(!raw.contains("-----BEGIN") && !raw.contains("PRIVATE KEY"), "a PEM block in the output:\n{raw}");
         for dir in dirs {
@@ -158,6 +198,9 @@ mod tls {
                     assert!(!raw.contains(line), "a line of a written file is in the output: {line}");
                 }
             }
+        }
+        for k in key_hexes(dirs) {
+            assert!(!raw.contains(&k), "a key's hex form is in the output: {k}");
         }
         let mut all = Vec::new();
         strings(doc, &mut all);
@@ -170,18 +213,19 @@ mod tls {
     }
 
     /// `tls ca`, `tls issue --node`, `tls issue --client` and `tls pin`, each with `--format json`: the files written
-    /// and each certificate's SPKI SHA-256, matching the goldens; the fingerprint is the one `tls pin` prints; and no
-    /// document carries key material.
+    /// and each certificate's SPKI SHA-256, matching the goldens; each issued fingerprint is the one `tls pin` prints;
+    /// and no document carries key material.
     #[test]
     fn each_tls_subcommand_as_json_matches_its_golden_and_carries_no_secret() {
         let (ca, out) = (scratch("ca"), scratch("out"));
         let (ca_s, out_s) = (ca.display().to_string(), out.display().to_string());
+        let vars: Vars<'_> = &[("CA", &ca_s), ("OUT", &out_s)];
         let check = |args: &[&str], golden_name: &str, given: &[&str]| -> Value {
             let o = run(args);
             assert!(o.status.success(), "{args:?}: {}", String::from_utf8_lossy(&o.stderr));
             let raw = stdout(&o);
             let doc: Value = serde_json::from_str(&raw).unwrap_or_else(|e| panic!("{args:?}: not one JSON document ({e}):\n{raw}"));
-            assert_golden(golden_name, &doc, None);
+            assert_golden(golden_name, &doc, vars);
             let dirs: Vec<&Path> = [ca.as_path(), out.as_path()].into_iter().filter(|d| d.exists()).collect();
             assert_no_secrets(&doc, &raw, &dirs, given);
             doc
@@ -196,6 +240,10 @@ mod tls {
         assert_eq!(pinned["spki_sha256"], node["spki_sha256"], "issue's fingerprint is the pin");
         let text = run(&["tls", "pin", &cert]);
         assert_eq!(stdout(&text).trim(), node["spki_sha256"].as_str().unwrap(), "and the text form's line");
+        // The client's fingerprint is its certificate's pin too (#767's review, L3).
+        let client_pin = run(&["tls", "pin", client["cert"].as_str().unwrap()]);
+        assert!(client_pin.status.success(), "{}", String::from_utf8_lossy(&client_pin.stderr));
+        assert_eq!(stdout(&client_pin).trim(), client["spki_sha256"].as_str().unwrap(), "the client's fingerprint is its pin");
         assert_ne!(client["spki_sha256"], node["spki_sha256"]);
         // A refusal is on stderr with its exit code, and no document: a second CA, a key issued over without --force.
         for args in [
@@ -210,12 +258,39 @@ mod tls {
         }
         let _ = (std::fs::remove_dir_all(&ca), std::fs::remove_dir_all(&out));
     }
+
+    /// A directory another local user can write is named in `warnings` by `issue --client` as by `issue --node`
+    /// (#767's review, L2). Seen failing first: `--client` printed `"warnings": []`.
+    #[cfg(unix)]
+    #[test]
+    fn issue_client_warns_of_a_directory_others_can_write() {
+        use std::os::unix::fs::PermissionsExt;
+        let (ca, out) = (scratch("warn-ca"), scratch("warn-out"));
+        let (ca_s, out_s) = (ca.display().to_string(), out.display().to_string());
+        assert!(run(&["tls", "ca", "--out", &ca_s]).status.success());
+        std::fs::create_dir_all(&out).unwrap();
+        std::fs::set_permissions(&out, std::fs::Permissions::from_mode(0o777)).unwrap();
+        for (args, what) in [
+            (vec!["tls", "issue", "--ca-dir", &ca_s, "--client", "svc", "--issuer", "fleet", "--out", &out_s, "--format", "json"], "client"),
+            (vec!["tls", "issue", "--ca-dir", &ca_s, "--node", "127.0.0.1:7972", "--out", &out_s, "--format", "json"], "node"),
+        ] {
+            let o = run(&args);
+            assert!(o.status.success(), "{what}: {}", String::from_utf8_lossy(&o.stderr));
+            let doc: Value = serde_json::from_str(&stdout(&o)).unwrap();
+            let warnings = doc["warnings"].as_array().unwrap();
+            assert_eq!(warnings.len(), 1, "{what}: {doc:#}");
+            assert!(warnings[0].as_str().unwrap().contains("writable by group or others"), "{what}: {doc:#}");
+        }
+        let text = run(&["tls", "issue", "--ca-dir", &ca_s, "--client", "svc", "--issuer", "fleet", "--out", &out_s, "--force"]);
+        assert!(String::from_utf8_lossy(&text.stderr).contains("warning: TLS:"), "the text form warns on stderr");
+        let _ = (std::fs::remove_dir_all(&ca), std::fs::remove_dir_all(&out));
+    }
 }
 
 #[cfg(feature = "gateway")]
 mod declare {
     use super::*;
-    use std::io::{BufRead, BufReader};
+    use std::io::{BufRead, BufReader, Read, Write};
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -268,62 +343,164 @@ mod declare {
         raw.lines().map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("not one JSON object per line ({e}): {l}"))).collect()
     }
 
+    fn declare_args(dir: &Path, gateway: &str, extra: &[&str]) -> Vec<String> {
+        let mut a: Vec<String> = ["declare", &dir.display().to_string(), "--gateway", gateway, "--token", "s3cret", "--format", "json"]
+            .iter().map(|s| s.to_string()).collect();
+        a.extend(extra.iter().map(|s| s.to_string()));
+        a
+    }
+
+    fn sigint(pid: u32) {
+        assert!(Command::new("kill").args(["-INT", &pid.to_string()]).status().unwrap().success());
+    }
+
     /// `declare --format json` once: one line, the `declared` event; a unit `wire-check` refuses: one line, the
-    /// `refused` event, exit 1; `--watch`: the `declared` event, then at SIGINT the `retracted` event.
+    /// `refused` event, exit 1; `--watch`: the `declared` event, then at SIGINT `retracting` and `retracted`.
     #[tokio::test(flavor = "multi_thread")]
     async fn declare_as_json_matches_its_goldens_once_refused_and_watched() {
         let (agent, base) = gateway_node().await;
+        let vars: Vars<'_> = &[("GATEWAY", &base)];
         let dir = project("once");
-        let dir_s = dir.display().to_string();
-        let args = |extra: &[&str]| {
-            let mut a = vec!["declare".to_string(), dir_s.clone(), "--gateway".into(), base.clone(), "--token".into(), "s3cret".into(), "--format".into(), "json".into()];
-            a.extend(extra.iter().map(|s| s.to_string()));
-            a
-        };
         let once = tokio::task::spawn_blocking({
-            let a = args(&[]);
+            let a = declare_args(&dir, &base, &[]);
             move || mycelium().args(&a).output().unwrap()
         }).await.unwrap();
         assert!(once.status.success(), "{}", String::from_utf8_lossy(&once.stderr));
         let got = lines(&stdout(&once));
         assert_eq!(got.len(), 1, "once is one line");
-        assert_golden("declare.json", &got[0], Some(&base));
+        assert_golden("declare.json", &got[0], vars);
 
         let refused_dir = project("refused");
         std::fs::write(refused_dir.join("units/b.toml"), "principal = \"b\"\n\n[[requirement]]\nns = \"nobody\"\nname = \"offers\"\n").unwrap();
         let refused = tokio::task::spawn_blocking({
-            let mut a = args(&[]);
-            a[1] = refused_dir.display().to_string();
+            let a = declare_args(&refused_dir, &base, &[]);
             move || mycelium().args(&a).output().unwrap()
         }).await.unwrap();
         assert_eq!(refused.status.code(), Some(1));
         let got = lines(&stdout(&refused));
         assert_eq!(got.len(), 1, "{got:?}");
-        assert_golden("declare-refused.json", &got[0], Some(&base));
+        assert_golden("declare-refused.json", &got[0], vars);
 
         // Watched: the first event, then SIGINT, then the retraction. The child's stdout is read a line at a time on a
         // blocking thread so the node in this process keeps serving.
-        let mut child = mycelium().args(args(&["--watch", "--poll-ms", "100", "--lease-secs", "3"])).stdout(std::process::Stdio::piped()).spawn().unwrap();
+        let mut child = mycelium().args(declare_args(&dir, &base, &["--watch", "--poll-ms", "100", "--lease-secs", "3"])).stdout(std::process::Stdio::piped()).spawn().unwrap();
         let pid = child.id();
         let out = child.stdout.take().unwrap();
         let read = tokio::task::spawn_blocking(move || {
             let mut reader = BufReader::new(out);
             let mut first = String::new();
             reader.read_line(&mut first).unwrap();
-            let _ = Command::new("kill").args(["-INT", &pid.to_string()]).status();
+            sigint(pid);
             let mut rest = String::new();
-            std::io::Read::read_to_string(&mut reader, &mut rest).unwrap();
+            reader.read_to_string(&mut rest).unwrap();
             let status = child.wait().unwrap();
             (first + &rest, status)
         });
         let (raw, status) = tokio::time::timeout(Duration::from_secs(30), read).await.expect("the watch stops at SIGINT").unwrap();
         assert!(status.success(), "{status:?}\n{raw}");
         let got = lines(&raw);
-        assert_eq!(got.len(), 2, "{raw}");
-        assert_golden("declare-watch-declared.json", &got[0], Some(&base));
-        assert_golden("declare-watch-retracted.json", &got[1], Some(&base));
+        assert_eq!(got.len(), 3, "{raw}");
+        assert_golden("declare-watch-declared.json", &got[0], vars);
+        assert_golden("declare-watch-retracting.json", &got[1], vars);
+        assert_golden("declare-watch-retracted.json", &got[2], vars);
 
         agent.shutdown().await;
         let _ = (std::fs::remove_dir_all(&dir), std::fs::remove_dir_all(&refused_dir));
+    }
+
+    /// A gateway that answers `POST /gateway/units/declare` after `delay` with handle `h-1`, a heartbeat or a `DELETE`
+    /// with `{}`, each on its own connection; with `stop_after_declare` it stops listening once it has answered the
+    /// declaration, so the retraction finds no gateway. Each request line is sent on the channel as it arrives.
+    fn fake_gateway(delay: Duration, stop_after_declare: bool) -> (String, std::sync::mpsc::Receiver<String>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut head = String::new();
+                let mut length = 0usize;
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                        break;
+                    }
+                    if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        length = v.trim().parse().unwrap_or(0);
+                    }
+                    if head.is_empty() {
+                        head = line.trim().to_string();
+                    }
+                }
+                let mut body = vec![0u8; length];
+                let _ = reader.read_exact(&mut body);
+                let _ = tx.send(head.clone());
+                let declare = head.starts_with("POST /gateway/units/declare");
+                if declare {
+                    std::thread::sleep(delay);
+                }
+                let reply = if declare { r#"{"handle_id":"h-1","not_enforced":[]}"# } else { "{}" };
+                let _ = write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}", reply.len());
+                let _ = stream.flush();
+                if declare && stop_after_declare {
+                    return; // the listener is dropped: a connection is refused from here on
+                }
+            }
+        });
+        (base, rx)
+    }
+
+    /// The watch's stdout and exit status, with SIGINT sent once `when` returns.
+    fn watch_until(dir: &Path, gateway: &str, when: impl FnOnce(&mut BufReader<std::process::ChildStdout>) -> String) -> (String, std::process::ExitStatus) {
+        let mut child = mycelium().args(declare_args(dir, gateway, &["--watch", "--poll-ms", "100", "--lease-secs", "90"]))
+            .stdout(std::process::Stdio::piped()).spawn().unwrap();
+        let mut reader = BufReader::new(child.stdout.take().unwrap());
+        let before = when(&mut reader);
+        sigint(child.id());
+        let mut rest = String::new();
+        reader.read_to_string(&mut rest).unwrap();
+        (before + &rest, child.wait().unwrap())
+    }
+
+    /// **The gateway down at retract time** (#767's review, M1): `retracting` before the retraction, and `retracted`
+    /// after it naming the unit whose DELETE nobody answered, exit 1 — never a count of declarations as if retracted.
+    /// Seen failing first: the event said `"declarations": 1` before the retraction ran, and its error was discarded.
+    #[test]
+    fn a_retraction_the_gateway_does_not_answer_is_reported_failed() {
+        let (base, _seen) = fake_gateway(Duration::ZERO, true);
+        let dir = project("retract-down");
+        let (raw, status) = watch_until(&dir, &base, |r| {
+            let mut first = String::new();
+            r.read_line(&mut first).unwrap();
+            first
+        });
+        assert_eq!(status.code(), Some(1), "{status:?}\n{raw}");
+        let got = lines(&raw);
+        assert_eq!(got.len(), 3, "{raw}");
+        assert_eq!(got[0]["event"], "declared", "{raw}");
+        assert_eq!(got[1], serde_json::json!({ "schema": "mycelium.declare/1", "event": "retracting", "declarations": 1 }));
+        assert_golden("declare-watch-retract-failed.json", &got[2], &[]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A Ctrl-C during the first tick** is a retraction (#767's review, L5): the SIGINT is sent while the gateway is
+    /// still holding the first `POST`, and the watch finishes the tick, prints it, and retracts. Seen failing first: the
+    /// handler was installed after the first tick, so the signal killed the process with nothing retracted.
+    #[test]
+    fn a_ctrl_c_during_the_first_tick_retracts() {
+        let (base, seen) = fake_gateway(Duration::from_millis(1500), false);
+        let dir = project("first-tick");
+        let (raw, status) = watch_until(&dir, &base, |_| {
+            let first = seen.recv_timeout(Duration::from_secs(30)).expect("the first tick's request reaches the gateway");
+            assert!(first.starts_with("POST /gateway/units/declare"), "{first}");
+            String::new()
+        });
+        assert!(status.success(), "{status:?}\n{raw}");
+        let got = lines(&raw);
+        assert_eq!(got.iter().map(|v| v["event"].as_str().unwrap()).collect::<Vec<_>>(), ["declared", "retracting", "retracted"], "{raw}");
+        assert_eq!(got[2]["retracted"], serde_json::json!(["a"]));
+        assert!(seen.recv_timeout(Duration::from_secs(5)).unwrap().starts_with("DELETE /gateway/capability/h-1"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

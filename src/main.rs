@@ -891,15 +891,21 @@ fn tls_issue_client(ca_dir: &str, issuer: &str, name: &str, out: &str, force: bo
         }
         match mycelium::issue_client_cert(std::path::Path::new(ca_dir), issuer, name, std::path::Path::new(out)) {
             Ok((cert, key)) => {
+                // The same directories `--node` checks: the CA's, and the one the key was written to (#767's review, L2).
+                let warnings: Vec<String> =
+                    [std::path::Path::new(ca_dir), std::path::Path::new(out)].into_iter().flat_map(mycelium::tls_writable_by_others).collect();
                 if json {
                     return tls_json(serde_json::json!({
                         "command": "issue", "kind": "client", "principal": format!("token:{issuer}/{name}"),
                         "issuer": issuer, "name": name,
-                        "cert": cert.display().to_string(), "key": key.display().to_string(), "warnings": [],
+                        "cert": cert.display().to_string(), "key": key.display().to_string(), "warnings": warnings,
                     }), &[("spki_sha256", &cert)]);
                 }
                 println!("issued {} and {}", cert.display(), key.display());
                 println!("principal token:{issuer}/{name}: give the key to the service's process only, and publish the certificate with POST /gateway/identity/client-cert");
+                for said in warnings {
+                    eprintln!("warning: {said}");
+                }
                 0
             }
             Err(e) => { eprintln!("{e}"); 2 }
