@@ -121,7 +121,9 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   under it is cancelled by the sweep once its term is revoked, and `named_stop_records` names the mandate whose lapse
   stopped the work (`StopRecord` is unchanged). A node holds a `call:` scope only where it admitted a call, and only
   until the mandate's window ends; the sweep reclaims at most `RECLAIM_PER_SWEEP` (1 024) scopes at a time, and a
-  feeder reads one key for each held window when a `call:` checkpoint is written. **Not yet built:** the gateway's
+  feeder reads one key for each held window when a `call:` checkpoint is written. A copy of a call's checkpoint read from the KV is verified
+  against the gateway its key names before it is used, and one that fails is treated as absent and counted
+  (`GET /stats` `call_checkpoints_refused`). **Not yet built:** the gateway's
   mint, the provider reading `cm` from a call, and every cancel door — until they land, nothing presents a `call:`
   mandate at a live door.
 

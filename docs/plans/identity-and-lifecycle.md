@@ -564,6 +564,13 @@ How it is built is under *Engineering defaults* below.
     moved to the one place every offer passes.
   - **The feeder reads each held window's key on a wake** (exit 16's first alternative). Its cost is the number of
     windows the node holds, whatever the KV holds.
+  - **A KV copy of a call's checkpoint that fails verification is treated as absent, and counted** (the rule the
+    maintainer adopted 2026-11-12: a security-bearing record in the gossip KV is signed by its owner and verified
+    at read). The copy is used only when its body's authority and scope are its key's and its signature is that
+    gateway's. *Absent* means the call stands on its carried checkpoint; it is not refused, because refusing would
+    let any member that writes garbage at a call's key deny that call. A revocation already seen stays seen. **Stated,
+    not closed:** a member that overwrites or tombstones the key delays a cancel this provider has not yet read,
+    until the gateway writes again or the window ends. The counter is `call_checkpoints_refused`.
   - **N2's case 1 is refused, not cancelled.** A revocation written between the window's insert and the local read is
     seen by that read, so the call is refused `Revoked` and nothing is registered. The row's wording, *"cancelled
     within one sweep"*, holds for case 2.
@@ -990,6 +997,8 @@ changed lines. Each is opened after the one before it merges. The row closes, pr
   view. The durable writes, the fsync's latency and the WAL-only restart: **not built** here (PR 2).
 - *Exit 16*: `the_call_feeder_reads_one_key_per_held_window_whatever_the_kv_holds`, at 10² and 10⁴. The cost is
   **counted** — keys read per feed — not timed.
+- *The 2026-11-12 rule on KV records* — the one record this PR reads from the KV, `call/{gateway}/{term}/checkpoint`:
+  `a_forged_misplaced_or_tombstoned_copy_of_a_calls_checkpoint_does_not_move_the_reader`.
 - *N4, "a stop record naming the grant / the term"* (Q1): the both-slots test above, through `named_stop_records`.
 - *N5 and §5, "protected at the KV routes … `403 protected_key`"*: `"call/"` in `OWNED_KV_PREFIXES`
   (`src/agent/http/authz.rs`), asserted at `POST /gateway/kv` in

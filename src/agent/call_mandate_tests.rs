@@ -83,8 +83,9 @@ impl Node {
     fn assess(&self, c: &PresentedCallMandate, now: u64) -> Option<MandateState> {
         let ctx = Arc::clone(&self.0.task_ctx);
         let members = super::gateway_member_keys(&ctx);
+        let authority = Arc::clone(&self.1);
         self.1
-            .assess_call(&self.gateway(), OP, &self.resource(), &args(), c, now, &members, |by, scope| local_call_checkpoint(&ctx, by, scope))
+            .assess_call(&self.gateway(), OP, &self.resource(), &args(), c, now, &members, |by, scope| local_call_checkpoint(&ctx, &authority, by, scope))
             .binding
             .map(|b| b.state)
     }
@@ -238,5 +239,72 @@ async fn the_call_feeder_reads_one_key_per_held_window_whatever_the_kv_holds() {
     // The one that changes is offered: a cancel of m3 reaches the view through the feeder alone.
     n.write("m3", &n.checkpoint("m3", 2, &["m3"]));
     assert!(until(|| matches!(n.assess(&mine[3], n.now()), Some(MandateState::Refused(MandateRefusal::Revoked { .. }))), Duration::from_secs(5)).await);
+    n.0.shutdown().await;
+}
+
+/// **A copy of a call's checkpoint that its gateway did not write does not move the reader** (the rule of
+/// 2026-11-12: a security-bearing record in the gossip KV is signed by its owner and verified at read). Any member
+/// can write `call/{gateway}/{term}/checkpoint`; here each bad copy is written straight into this node's KV, as a
+/// member's gossip would land it, over a running call and before an admission:
+///
+/// - a **forged** revoking checkpoint — the gateway's name, the call's scope, another key's signature;
+/// - a **misplaced** one — the gateway's own signature, for another call's scope;
+/// - bytes that are **not a checkpoint**.
+///
+/// None cancels the running call, none refuses the admission, each is counted, and nothing more is held. The
+/// gateway's own revoking checkpoint then cancels the call; and once that is seen, a **tombstone** over the key does
+/// not un-cancel it. Seen failing first: with the key-path check taken out of `local_call_checkpoint`, the misplaced
+/// copy is not counted; with the count taken out, none is.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_forged_misplaced_or_tombstoned_copy_of_a_calls_checkpoint_does_not_move_the_reader() {
+    let n = node(2_000).await;
+    let forger = ed25519_dalek::SigningKey::from_bytes(&[77u8; 32]);
+    let forged = |term: &str| call_mint::checkpoint(&forger, &n.gateway(), &format!("call:{term}"), 2, n.now(), &[term]);
+    let refused = || n.1.call_checkpoints_refused();
+    let settle = || tokio::time::sleep(Duration::from_millis(400));
+
+    // A running call.
+    let c = n.mint("f1", 60_000);
+    n.write("f1", &c.checkpoint);
+    assert_eq!(n.assess(&c, n.now()), Some(MandateState::Established));
+    let work = n.begin(&c);
+    assert_eq!(refused(), 0);
+
+    // Forged: verified under the gateway's key, which did not sign it.
+    n.write("f1", &forged("f1"));
+    settle().await;
+    assert!(refused() >= 1, "the forged copy is counted");
+    assert!(!work.is_cancelled(), "a forged revocation cancels nothing");
+    // Misplaced: genuinely the gateway's, for another call.
+    let before = refused();
+    n.write("f1", &n.checkpoint("f2", 2, &["f1", "f2"]));
+    settle().await;
+    assert!(refused() > before, "the misplaced copy is counted");
+    assert!(!work.is_cancelled(), "another call's checkpoint at this key cancels nothing");
+    // Not a checkpoint at all.
+    let before = refused();
+    super::state_machine::write_owned_kv(&n.0.task_ctx, &call_checkpoint_key(&n.gateway(), "f1"), b"not a checkpoint".to_vec());
+    settle().await;
+    assert!(refused() > before, "the unparsed copy is counted");
+    assert!(!work.is_cancelled());
+    assert_eq!(n.assess(&c, n.now()), Some(MandateState::Established), "and the call is still admitted, on its carried checkpoint");
+    assert_eq!(n.1.view_sizes(), (1, 1, 1), "nothing more is held");
+
+    // At admission: a forged copy already in the KV when a new call arrives.
+    let c3 = n.mint("f3", 60_000);
+    n.write("f3", &forged("f3"));
+    let before = refused();
+    assert_eq!(n.assess(&c3, n.now()), Some(MandateState::Established), "a forged revocation refuses no admission");
+    assert!(refused() > before, "counted at the admission's own read");
+
+    // The gateway's own revocation still moves it.
+    n.write("f1", &n.checkpoint("f1", 2, &["f1"]));
+    assert!(until(|| work.is_cancelled(), Duration::from_secs(5)).await, "the gateway's own revoking checkpoint cancels the call");
+    drop(work);
+    // And once seen, a tombstone over the key does not un-cancel it.
+    assert!(mycelium_core::ops::kv_delete(&n.0.task_ctx, std::sync::Arc::from(call_checkpoint_key(&n.gateway(), "f1"))));
+    settle().await;
+    assert!(mycelium_core::ops::kv_get(&n.0.task_ctx, &call_checkpoint_key(&n.gateway(), "f1")).is_none());
+    assert!(matches!(n.assess(&c, n.now()), Some(MandateState::Refused(MandateRefusal::Revoked { .. }))), "a revocation seen stays seen");
     n.0.shutdown().await;
 }

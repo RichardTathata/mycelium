@@ -298,6 +298,9 @@ pub struct ExecutionAuthority {
     legacy_digest_matches: std::sync::atomic::AtomicU64,
     legacy_digest_matches_at_provider: std::sync::atomic::AtomicU64,
     legacy_digest_matches_at_agent: std::sync::atomic::AtomicU64,
+    /// Identity-and-lifecycle I4: copies of a `call:` checkpoint read from the KV and not used — see
+    /// [`call_checkpoints_refused`](Self::call_checkpoints_refused).
+    call_checkpoints_refused: std::sync::atomic::AtomicU64,
 }
 
 /// The words `assess` gives a revoked grant's standing — read by the agent's wait, which treats this one unknown
@@ -396,9 +399,31 @@ pub(crate) fn call_checkpoint_key(gateway: &str, term: &str) -> String {
 
 /// This node's own KV copy of a `call:` scope's newest checkpoint: what [`ExecutionAuthority::assess_call`] reads
 /// under its hold (`read_local`), and what the feeder offers. One key read (papaya, no lock) and a parse.
-pub(crate) fn local_call_checkpoint(ctx: &super::TaskCtx, authority: &crate::mandate::PrincipalId, scope: &str) -> Option<SignedRevocationCheckpoint> {
+///
+/// **The KV is not trusted for it** (the rule of 2026-11-12: a security-bearing record in the gossip KV is signed by
+/// its owner and verified at read). Any member can write this key, so a copy is used only when (a) its body names the
+/// gateway and the scope its key path names — checked here — and (b) its signature verifies under that gateway's node
+/// key — checked by the view's `offer`, which every caller passes it through. A copy that fails either, or does not
+/// parse, is **treated as absent** and counted ([`ExecutionAuthority::call_checkpoints_refused`]). Absent is the safe
+/// fallback the row states: the call stands on its carried checkpoint, and a revocation this node has already seen
+/// stays seen, so a forged copy can neither cancel a call nor un-cancel one. What a member that overwrites or
+/// tombstones the key *can* do is keep a cancel this node has not yet read from reaching it by this path, until the
+/// gateway writes again or the mandate's window ends — stated, and bounded by the window.
+pub(crate) fn local_call_checkpoint(
+    ctx: &super::TaskCtx,
+    refused: &ExecutionAuthority,
+    authority: &crate::mandate::PrincipalId,
+    scope: &str,
+) -> Option<SignedRevocationCheckpoint> {
     let term = scope.strip_prefix(crate::mandate::grant::CALL_SCOPE_PREFIX)?;
-    serde_json::from_slice(&mycelium_core::ops::kv_get(ctx, &call_checkpoint_key(authority.as_str(), term))?).ok()
+    let bytes = mycelium_core::ops::kv_get(ctx, &call_checkpoint_key(authority.as_str(), term))?;
+    match serde_json::from_slice::<SignedRevocationCheckpoint>(&bytes) {
+        Ok(signed) if signed.checkpoint.authority == *authority && signed.checkpoint.scope == scope => Some(signed),
+        _ => {
+            refused.note_call_checkpoint_refused();
+            None
+        }
+    }
 }
 
 /// **Offer `authority` the newest checkpoint of each `call:` scope it holds** (identity-and-lifecycle I4, exit 16) —
@@ -414,14 +439,14 @@ pub(crate) fn feed_call_checkpoints(ctx: &super::TaskCtx, authority: &ExecutionA
     let now_ms = ctx.hlc.decision_now_ms();
     let members = super::gateway_member_keys(ctx);
     for (by, scope) in &held {
-        if let Some(signed) = local_call_checkpoint(ctx, by, scope)
-            && signed.checkpoint.authority == *by
-            && signed.checkpoint.scope == *scope
+        if let Some(signed) = local_call_checkpoint(ctx, authority, by, scope)
             && !authority.holds_checkpoint(by, scope, signed.checkpoint.seq)
         {
             // `offer_checkpoint` keeps it only while the window is still held (row 43), so a scope reclaimed since
-            // the snapshot above plants nothing.
-            let _ = authority.offer_checkpoint(&signed, now_ms, &members);
+            // the snapshot above plants nothing. A copy whose signature is not the gateway's is not kept, and counted.
+            if matches!(authority.offer_checkpoint(&signed, now_ms, &members), CheckpointOffer::Unverifiable(_)) {
+                authority.note_call_checkpoint_refused();
+            }
         }
     }
     held.len()
@@ -551,6 +576,7 @@ impl ExecutionAuthority {
             legacy_digest_matches: std::sync::atomic::AtomicU64::new(0),
             legacy_digest_matches_at_provider: std::sync::atomic::AtomicU64::new(0),
             legacy_digest_matches_at_agent: std::sync::atomic::AtomicU64::new(0),
+            call_checkpoints_refused: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -752,6 +778,23 @@ impl ExecutionAuthority {
         st.revocations.offer(signed, &policy, clock, now_ms, members, &external)
     }
 
+    /// **Copies of a `call:` checkpoint read from this node's KV and not used** (identity-and-lifecycle I4), since
+    /// this authority was built: one that did not parse, named another gateway or scope than its key, or was not
+    /// signed by that gateway's node key. Each was treated as absent. Any fleet member can write the key (Layer I
+    /// detects, it does not prevent), so a rising count is a member writing under another gateway's `call/` keys, or
+    /// a gateway whose key this node does not hold. Counted per read: the feeder reads a held window's key on every
+    /// wake, so one bad copy counts until it is overwritten. `GET /stats` `call_checkpoints_refused`;
+    /// `mycelium_call_checkpoints_refused_total`.
+    pub fn call_checkpoints_refused(&self) -> u64 {
+        self.call_checkpoints_refused.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub(crate) fn note_call_checkpoint_refused(&self) {
+        self.call_checkpoints_refused.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        #[cfg(feature = "metrics")]
+        metrics::counter!("mycelium_call_checkpoints_refused_total").increment(1);
+    }
+
     /// The `call:` scopes this authority holds a window for (identity-and-lifecycle I4), as `(issuing gateway,
     /// scope)`: the calls this node admitted whose mandate's window has not been reclaimed.
     pub(crate) fn held_call_scopes(&self) -> Vec<(crate::mandate::PrincipalId, String)> {
@@ -860,10 +903,21 @@ impl ExecutionAuthority {
         call_hooks::fire(self, call_hooks::Stage::AfterLocalRead);
         // 4. Both offered — only for this mandate's own authority and scope, so neither speaks for anything else.
         let (policy, clock) = (st.gate.freshness(), st.gate.clock());
-        for cp in [Some(carried), local.as_ref()].into_iter().flatten() {
+        for (from_kv, cp) in [(false, Some(carried)), (true, local.as_ref())] {
+            let Some(cp) = cp else { continue };
             let c = &cp.checkpoint;
-            if c.authority == m.established_by && c.scope == m.scope && !st.revocations.holds(&c.authority, &c.scope, c.seq) {
-                let _ = st.revocations.offer(cp, &policy, clock, now_ms, members, &external);
+            if c.authority != m.established_by || c.scope != m.scope {
+                if from_kv {
+                    self.note_call_checkpoint_refused();
+                }
+                continue;
+            }
+            if !st.revocations.holds(&c.authority, &c.scope, c.seq)
+                && matches!(st.revocations.offer(cp, &policy, clock, now_ms, members, &external), CheckpointOffer::Unverifiable(_))
+                && from_kv
+            {
+                // The KV's copy is not the gateway's: treated as absent.
+                self.note_call_checkpoint_refused();
             }
         }
         // 5. Judged as a grant's term is: no freshness, the window bounds its life. A revoked term is refused by name.

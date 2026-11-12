@@ -64,6 +64,10 @@ work.
 - **Not built, for the `call:` mandate:** no gateway mints one and no door cancels one yet. A provider does not
   read one from a call. The authority's half is built
   ([I4](../plans/identity-and-lifecycle.md#3--rows), row I4, *The build*; [§99](../guide/deprecations.md#99-the-execution-authority-verifies-a-call-mandate-a-call-mandate-in-the-first-slot-is-never-established-the-call-key-family-is-owned-2410-identity-and-lifecycle-i4-pr-1a)).
+- **A `call:` checkpoint in the KV is verified at read:** a copy its gateway did not sign, or that names another
+  call, is treated as absent and counted in `GET /stats` `call_checkpoints_refused`. A member that overwrites the
+  key can delay a cancel until the mandate's window ends
+  ([§99](../guide/deprecations.md#99-the-execution-authority-verifies-a-call-mandate-a-call-mandate-in-the-first-slot-is-never-established-the-call-key-family-is-owned-2410-identity-and-lifecycle-i4-pr-1a)).
 - **Evidence:** the ledger rows [running work stops](../operations/what-is-proven.md#running-work-stops) and
   [after a revocation every door runs nothing](../operations/what-is-proven.md#revocation-every-door-runs-nothing).
 

@@ -3165,6 +3165,14 @@ releases of this row, so a node changes behaviour only in the ways listed here.
 - **`GRANT_TTL_CAP_SECS` (3600)** names the cap `POST /gateway/grants/{agent}/{request}` has always applied to
   `ttl_secs`; the door's behaviour is unchanged. `assess_call` refuses a `call:` mandate whose window is longer
   (`OutOfWindow`).
+- **A new counter: `call_checkpoints_refused`** (`GET /stats`; `mycelium_call_checkpoints_refused_total`;
+  `ExecutionAuthority::call_checkpoints_refused`). Any fleet member can write a key under `call/` by gossip, so a
+  copy of a call's checkpoint read from the KV is used only when its body names the gateway and scope its key names
+  and its signature is that gateway's. One that fails, or does not parse, is treated as absent and counted. A forged
+  copy can neither cancel a call nor un-cancel one. **Watch it:** a rising count is a member writing under another
+  gateway's `call/` keys, or a gateway whose key this node does not hold. **Not prevented:** a member that
+  overwrites or tombstones the key can keep a cancel this node has not yet read from reaching it by gossip, until
+  the gateway writes again or the mandate's window ends.
 - **A background task:** a node with an execution authority attached subscribes to keys ending `/checkpoint` under
   `call/`. On each such write it reads one key for each `call:` window it holds — none until a provider admits calls
   under `call:` mandates.

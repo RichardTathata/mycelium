@@ -240,6 +240,9 @@ pub(super) async fn stats_handler(State(ctx): State<Arc<HttpCtx>>) -> impl IntoR
         body["legacy_digest_matches"] = json!(a.map_or(0, |a| a.legacy_digest_matches()));
         body["provider_legacy_digest_matches"] = json!(a.map_or(0, |a| a.legacy_digest_matches_at_provider()));
         body["agent_legacy_digest_matches"] = json!(a.map_or(0, |a| a.legacy_digest_matches_at_agent()));
+        // Identity-and-lifecycle I4: copies of a `call:` checkpoint read from the KV and treated as absent — unparsed,
+        // misplaced, or not signed by the gateway their key names.
+        body["call_checkpoints_refused"] = json!(a.map_or(0, |a| a.call_checkpoints_refused()));
     }
     // Identity-and-lifecycle I5: exchanged OIDC tokens refused at this provider's replay window, by reason — `replayed`
     // (presented twice, by any gateway), `provider_window_full` (the provider's 262 144), `window_full` (a gateway's
