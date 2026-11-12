@@ -504,3 +504,46 @@ mod declare {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
+/// Identity-and-lifecycle N5: `skills list` and `skills get fleet` as `mycelium.skills/1`. `${GUIDE}` in the golden is
+/// the guide's file with the binary's release tag filled in, so the document's `text` is the embedded guide, whole;
+/// the text form prints the same bytes and nothing else.
+#[test]
+fn skills_as_json_match_their_goldens_and_the_text_form_is_the_guide() {
+    let guide = std::fs::read_to_string("docs/reference/agent-skills/fleet.md")
+        .expect("the guide")
+        .replace("{{MYCELIUM_TAG}}", &format!("v{}", env!("CARGO_PKG_VERSION")));
+    assert_golden("skills-list.json", &document(&["skills", "list", "--format", "json"]), &[]);
+    assert_golden("skills-get.json", &document(&["skills", "get", "fleet", "--format", "json"]), &[("GUIDE", &guide)]);
+
+    for args in [&["skills", "get", "fleet"][..], &["skills", "get", "fleet", "--format", "text"]] {
+        let text = run(args);
+        assert!(text.status.success() && text.stderr.is_empty(), "{:?}", text);
+        assert_eq!(stdout(&text), guide, "the text form is the guide's bytes, the tag filled in");
+    }
+    assert!(!guide.contains("{{") && guide.contains(&format!("/tags/v{}.tar.gz", env!("CARGO_PKG_VERSION"))));
+    let list = run(&["skills", "list"]);
+    assert!(list.status.success() && stdout(&list).starts_with("fleet  "), "{:?}", list);
+}
+
+/// A refusal is stderr and a non-zero exit with nothing on stdout, in either format: a guide the binary does not
+/// serve (named, with the ones it does), no verb, a verb it does not have, a bad `--format`. `--help` is exit 0.
+#[test]
+fn skills_refuses_on_stderr_with_nothing_on_stdout() {
+    for args in [&["skills", "get", "nope"][..], &["skills", "get", "nope", "--format", "json"], &["skills"], &["skills", "get"],
+                 &["skills", "put", "fleet"], &["skills", "get", "fleet", "--format", "yaml"], &["skills", "list", "--format"],
+                 &["skills", "get", "fleet", "extra"], &["skills", "list", "--verbose"]] {
+        let o = run(args);
+        assert_eq!(o.status.code(), Some(2), "{args:?}");
+        assert!(o.stdout.is_empty(), "{args:?}: {}", stdout(&o));
+        assert!(!o.stderr.is_empty(), "{args:?}");
+    }
+    let unknown = run(&["skills", "get", "nope"]);
+    let err = String::from_utf8_lossy(&unknown.stderr).to_string();
+    assert!(err.contains("no guide named `nope`") && err.contains("fleet"), "{err}");
+    let help = run(&["skills", "--help"]);
+    assert!(help.status.success() && help.stdout.is_empty() && String::from_utf8_lossy(&help.stderr).contains("mycelium skills get <name>"));
+    // The node's own usage lists it, so `--help` and the guide's table name the same subcommands.
+    let usage = run(&["--help"]);
+    assert!(String::from_utf8_lossy(&usage.stderr).contains("mycelium skills list | get <name>"), "{}", String::from_utf8_lossy(&usage.stderr));
+}

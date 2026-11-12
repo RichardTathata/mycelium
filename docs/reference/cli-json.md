@@ -11,7 +11,8 @@ stdout with exit 1; only a usage error leaves its stdout empty.
 ## The contract: additive within a version
 
 Decided by the maintainer on 2026-11-12, for every `mycelium.*/N` id this page lists — `doctor/1`, `test-faults/1`,
-`rules/1`, `design/declaration/1`, `explain/1`, `closure/1`, `declare/1`, `tls/1` — and every later one:
+`rules/1`, `design/declaration/1`, `explain/1`, `closure/1`, `declare/1`, `tls/1`, `skills/1` — and every later
+one:
 
 - **Within `/N`, a document only grows.** A field may be added — to the document, to an object inside it, or as a new
   `declare` event. No field is removed, renamed or given another type; a value that could be `null` stays nullable,
@@ -38,11 +39,12 @@ Decided by the maintainer on 2026-11-12, for every `mycelium.*/N` id this page l
 | `mycelium explain --closure <hash> … --format json` | `mycelium.closure/1`, `view: "closure"` | [`explain-closure.json`](../../tests/fixtures/cli/explain-closure.json), [`explain-closure-missing.json`](../../tests/fixtures/cli/explain-closure-missing.json) |
 | `mycelium declare [--watch] --format json` | `mycelium.declare/1`, one line per event | [`declare.json`](../../tests/fixtures/cli/declare.json), [`declare-refused.json`](../../tests/fixtures/cli/declare-refused.json), [`declare-watch-*.json`](../../tests/fixtures/cli) |
 | `mycelium tls ca\|issue\|pin --format json` | `mycelium.tls/1` | [`tls-ca.json`](../../tests/fixtures/cli/tls-ca.json), [`tls-issue-node.json`](../../tests/fixtures/cli/tls-issue-node.json), [`tls-issue-client.json`](../../tests/fixtures/cli/tls-issue-client.json), [`tls-pin.json`](../../tests/fixtures/cli/tls-pin.json) |
+| `mycelium skills list\|get <name> --format json` | `mycelium.skills/1` | [`skills-list.json`](../../tests/fixtures/cli/skills-list.json), [`skills-get.json`](../../tests/fixtures/cli/skills-get.json) |
 
-The last four rows are identity-and-lifecycle N3. Their goldens are checked by
+The `explain`, `declare` and `tls` rows are identity-and-lifecycle N3, and `skills` its N5. Their goldens are checked by
 [`tests/cli_json.rs`](../../tests/cli_json.rs), which runs the built binary: every object's keys, every array's length
 and every value must equal the golden's. A value that differs between runs is written in the golden with the run's own
-directories and gateway as `${CA}`, `${OUT}` and `${GATEWAY}`, compared exactly once substituted; a fingerprint of a
+directories and gateway as `${CA}`, `${OUT}` and `${GATEWAY}` (and the guide's text as `${GUIDE}`), compared exactly once substituted; a fingerprint of a
 fresh key as `"<sha256>"`, which the test cross-checks against `tls pin`; and a free-text report or error as
 `"<contains:TEXT>"`. A field added, dropped or renamed fails there.
 `--format text` (the default) prints what each command printed before.
@@ -119,3 +121,14 @@ write (on stderr in the text form).
 - `issue`, `kind: "client"` — `principal` (`token:{issuer}/{name}`), `issuer`, `name`, `cert`, `key`, `spki_sha256`
   (the value `tls pin` prints for this certificate). Its `warnings` check the same two directories as `--node`'s.
 - `pin` — `cert`, `spki_sha256`. A CA certificate or a file with a key is refused as in the text form.
+
+## `mycelium skills … --format json` — `mycelium.skills/1`
+
+The [agent guide](../features/agent-guide.md) the binary embeds ([`list_json`, `get_json`](../../src/agent_guide.rs)).
+`command` is `list` or `get`. A name the binary does not serve is a refusal: stderr naming the guides there are, exit
+2, nothing on stdout.
+
+- `list` — `skills`, each `{name, about}`.
+- `get` — `name`, `about`, and `text`: the guide's Markdown, whole, with the binary's release tag filled in — the
+  bytes `mycelium skills get <name>` prints in the text form. It carries no path of the machine that built the binary
+  and no credential (`nothing_served_names_a_machine_or_a_secret`).

@@ -11,6 +11,18 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **N5: the agent guide the binary serves** (`docs/plans/identity-and-lifecycle.md` N5). `mycelium skills get fleet`
+  prints a Markdown guide for a coding agent, embedded in the binary with its release tag filled in: the six steps
+  from the binary to a governed fleet, every subcommand with the JSON document it prints, and how to read the output.
+  `mycelium skills list` names the guides; `--format json` prints either as one `mycelium.skills/1` document
+  (additive-stable, goldens `tests/fixtures/cli/skills-*.json`, `docs/reference/cli-json.md`). A root `AGENTS.md`, at
+  most 2 KB, points Codex, Cursor and Orca's workers at the command, and `CLAUDE.md` names both. Tests in
+  `src/agent_guide.rs` hold the guide to the code: its walk is the `one-hour` workflow's commands in order, with none
+  left out on either side; its subcommand table is `main`'s dispatch and the usage; its schema ids are
+  `cli-json.md`'s; both sizes are bounded; nothing served names a machine path or a credential. Source:
+  `docs/reference/agent-skills/fleet.md`; feature page `docs/features/agent-guide.md`. Library:
+  `mycelium::agent_guide` (`SKILLS`, `get`, `get_json`, `list_json`). **Not built:** a guide over a gateway route or
+  an MCP resource (N1), an `AGENTS.md` written by `init`.
 - **N3: `--format json` for `explain`, `declare` and `tls`** (`docs/plans/identity-and-lifecycle.md` N3). Each prints one
   JSON document on stdout, logs to stderr: `explain <trace>` as `mycelium.explain/1`; `explain --correlation` and
   `--closure` keep the reader's `mycelium.closure/1`, with `view` `chain` or `closure`, full hashes and the closure's

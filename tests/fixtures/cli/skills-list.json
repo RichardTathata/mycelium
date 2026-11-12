@@ -1,0 +1,10 @@
+{
+  "schema": "mycelium.skills/1",
+  "command": "list",
+  "skills": [
+    {
+      "name": "fleet",
+      "about": "From the binary to a governed fleet in six steps, every subcommand, and how to read what they print"
+    }
+  ]
+}

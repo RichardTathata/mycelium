@@ -253,6 +253,8 @@ pub mod wire_check;
 pub mod doctor;
 /// `mycelium init` — a scaffold that CI builds and runs (docs/plans/adopter-surface.md, X2).
 pub mod init;
+/// `mycelium skills` — the agent guide the binary serves (docs/plans/identity-and-lifecycle.md, N5).
+pub mod agent_guide;
 /// `mycelium explain --correlation` / `--closure` — one run's records as a chain, and one record's dependency
 /// closure, across evidence journals and decision traces (adopter-surface X4).
 pub mod closure;

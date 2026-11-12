@@ -82,6 +82,14 @@ example_watch = ["init", "scaffold", "governed_call"]
 ids = ["concept:init"]
 
 [[feature]]
+name = "Agent guide"
+page = "agent-guide.md"
+example = "none"
+example_watch = ["agent_guide", "agent_skills"]
+ids = ["concept:agent-guide"]
+links = ["concept:skill"]
+
+[[feature]]
 name = "Grants"
 page = "grants.md"
 example = "none"
