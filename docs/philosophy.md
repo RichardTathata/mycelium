@@ -8,9 +8,9 @@ The conceptual foundations behind Mycelium's design — and the litmus tests for
 
 The architecture is grounded in John Holland's framework for Complex Adaptive Systems as formalised in *Signals and Boundaries: Building Blocks for Complex Adaptive Systems* (MIT Press, 2012). Holland's core thesis: the behaviour of complex adaptive systems emerges from two and only two primitives.
 
-**Primitive one — Signals — unconditional propagation.** Signals propagate through the medium unconditionally. No signal is withheld from propagation on the basis of who might act on it. The medium floods.
+**Primitive one — Signals — unconditional propagation.** Signals propagate through the medium unconditionally: no signal is withheld from propagation on the basis of who might act on it. *Unconditional* means **not conditional on admission** — a node forwards a signal whether or not it will act on it. Nor is it conditional on a route: no node needs to know where a recipient is for a signal to reach it. It does not mean every frame is sent to every peer — sending an addressed signal straight to its target when a connection happens to exist is an optimisation of the fan-out, with flooding as the guarantee underneath, and nothing's correctness depends on the shortcut (see the mapping below).
 
-**Primitive two — Boundaries — receptor sets controlling action.** Each agent holds a boundary — a set of conditions under which it *acts* on a signal. The boundary controls acting, not receiving. Forwarding is always unconditional.
+**Primitive two — Boundaries — receptor sets controlling action.** Each agent holds a boundary — a set of conditions under which it *acts* on a signal. The boundary controls acting, not receiving, and never forwarding. **A boundary is not a confidentiality mechanism:** a node that relays a signal can read it, and nothing here isolates one member's signals from another member. A boundary decides who *acts*.
 
 > **The key inversion.** Conventional distributed systems route messages to known recipients — A wants to affect B, so A sends to B. Holland's model changes the medium and lets any agent whose boundary matches respond. The emitter does not need to know who is listening. Topology does not need to be managed explicitly. The system tolerates churn without stalling because there is no routing table to maintain.
 
@@ -18,7 +18,7 @@ The architecture is grounded in John Holland's framework for Complex Adaptive Sy
 
 | Holland concept | Mycelium implementation |
 |---|---|
-| Signal propagation — unconditional flooding | All nodes forward all `Signal` frames regardless of admission (the fan-out *set* is scope-shaped under `group_aware_forwarding`, default on; nothing a node declines to admit stops it forwarding) |
+| Signal propagation — unconditional on admission | All nodes forward `Signal` frames regardless of admission: nothing a node declines to admit stops it forwarding. The fan-out *set* is shaped by scope under `group_aware_forwarding` (default on): a Cluster signal goes to every forwarding peer; a Group signal to the group's members among this node's forwarding peers plus up to `epidemic_extra_peers` other peers chosen at random (a signal naming several groups goes to every forwarding peer), so it still spreads epidemically; an Individual signal directly to its target when a route exists, and by flooding when none does (the fallback, counted as `individual_flood_fallbacks`). With the setting off, every signal fans out to every forwarding peer. Two carve-outs, neither a boundary's doing: a frame addressed to this node terminates here, and a removed member's frames are dropped at the connection ([runtime invariants](wiki/dev/architecture/runtime-invariants.md)) |
 | Boundary — receptor set controlling action | `Boundary::admits()` — controls delivery, never forwarding |
 | Stigmergy — state left in the medium | `sys/load/{node}/…` pheromone keys — opacity written to KV, read by others |
 | Tag matching — signals find matching receptors | `SignalScope::Group(name)` — receptor identity via group membership |
