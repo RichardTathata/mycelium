@@ -141,9 +141,11 @@ class ProtectedKeyError(_ProtectedWriteError):
     """The gateway refused a **protected key** on a raw KV route (HTTP 403 ``protected_key``).
 
     ``set``, ``delete``, ``set_with_min_acks`` and ``consistent_set`` write application keys only
-    (``ckpt/``, ``manifest/``, ``schemas/``, your own namespaces); a key in a namespace the substrate or
-    a companion owns (``sys/``, ``grp/``, ``cap/``, ``prompts/``, ``log/``, ``mailbox/`` …) is written
-    through its own route, which ``message`` names. ``key`` is the refused key.
+    (``ckpt/``, ``manifest/``, ``schemas/``, your own namespaces), and ``get``, ``consistent_get``,
+    ``scan_prefix`` and ``keys`` (for a prefix inside a namespace whose names are hidden) read them only
+    (0.2.16); a key in a namespace the substrate or a companion owns (``sys/``, ``grp/``, ``cap/``,
+    ``prompts/``, ``log/``, ``mailbox/`` …) is written and read through its own route, which ``message``
+    names. ``key`` is the refused key (the prefix, for ``keys``).
     """
 
     def __init__(self, key: str, message: str, response: httpx.Response) -> None:
@@ -1015,10 +1017,13 @@ class MyceliumAgent:
         """Read a KV entry by key.
 
         Returns the raw bytes value, or ``None`` when the key is absent or
-        tombstoned.
+        tombstoned. Application keys only: raises :class:`ProtectedKeyError` for a key in a
+        namespace the substrate or a companion owns (the gateway's ``403 protected_key``; its
+        message names the route that reads it).
         """
         with self._pool.sync() as c:
             resp = c.get("/gateway/kv", params={"key": key})
+            _raise_if_protected(resp, key=key)
             resp.raise_for_status()
             data = resp.json()
             if not data.get("found"):
@@ -1085,7 +1090,11 @@ class MyceliumAgent:
             resp.raise_for_status()
 
     def keys(self, prefix: str | None = None) -> list[str]:
-        """Return all live KV keys, optionally filtered by prefix.
+        """Return all live KV keys, optionally filtered by prefix — names, never values.
+
+        The gateway leaves out the names of the namespaces it hides (grants, mailboxes, the audit
+        chain, client certificates, mandates, rights); a ``prefix`` inside one of them raises
+        :class:`ProtectedKeyError` (its ``key`` is the prefix).
 
         Args:
             prefix: When given, only keys starting with this string are returned.
@@ -1095,6 +1104,7 @@ class MyceliumAgent:
             params["prefix"] = prefix
         with self._pool.sync() as c:
             resp = c.get("/gateway/kv/keys", params=params)
+            _raise_if_protected(resp, key=prefix)
             resp.raise_for_status()
             return resp.json()["keys"]
 
@@ -1159,7 +1169,9 @@ class MyceliumAgent:
         """Return all live KV entries whose key starts with ``prefix``.
 
         Returns a ``{key: value_bytes}`` dict. Requires one HTTP call per key
-        (keys + individual gets) — use sparingly for large keyspaces.
+        (keys + individual gets) — use sparingly for large keyspaces. Raises
+        :class:`ProtectedKeyError` for a prefix that lists an owned namespace's keys: their
+        values are refused, as for :meth:`get`.
         """
         result: dict[str, bytes] = {}
         for key in self.keys(prefix=prefix):
@@ -1296,6 +1308,16 @@ class MyceliumAgent:
                 if data.get("error") == "unserved_run":
                     raise UnservedRunError(run.run_id, str(data.get("message", "unserved_run")))
             resp.raise_for_status()
+
+    def schedule_last(self, schedule_id: str) -> list[Dict[str, Any]]:
+        """The last run of **your own** schedule ``schedule_id``, as the connected node has it: one
+        ``{"node", "slot", "period_ms", "phase_ms"}`` per node that has held it, empty before the first
+        acknowledged run (``GET /gateway/schedules/last``, scope ``schedule:run``; 0.2.16). The id is the one
+        you declared; the gateway reads the entries of your principal's schedule and no other. The raw KV
+        routes refuse ``sched/``, so this is the read."""
+        with self._pool.sync() as c:
+            data = c.get("/gateway/schedules/last", params={"id": schedule_id}).raise_for_status().json()
+        return list(data.get("last", [])) if isinstance(data, dict) else []
 
     # ── Scatter-gather ──────────────────────────────────────────────────────
 
@@ -1441,9 +1463,13 @@ class MyceliumAgent:
         return CommitResult._from_json(data)
 
     def consistent_get(self, key: str) -> Optional[bytes]:
-        """Read the latest ballot-committed value for ``key`` visible to this node (local, eventually consistent). Returns ``None`` if not found."""
+        """Read the latest ballot-committed value for ``key`` visible to this node (local, eventually consistent). Returns ``None`` if not found.
+
+        Raises :class:`ProtectedKeyError` for a key in an owned namespace, as :meth:`get` does."""
         with self._pool.sync() as c:
-            data = c.get("/gateway/overlay/consistent/get", params={"key": key}).raise_for_status().json()
+            resp = c.get("/gateway/overlay/consistent/get", params={"key": key})
+            _raise_if_protected(resp, key=key)
+            data = resp.raise_for_status().json()
         if data.get("found"):
             return base64.b64decode(data["value_b64"])
         return None

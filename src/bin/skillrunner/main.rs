@@ -54,7 +54,7 @@ async fn run(sf: Arc<SkillFile>) -> Result<(), Box<dyn std::error::Error>> {
     let agent   = Arc::new(builder);
 
     // Management dashboard — served from the same HTTP port as the embedded gateway
-    // so the page can query /gateway/kv/* without any CORS restrictions.
+    // so the page can query /gateway/* without any CORS restrictions.
     if sf.node.http_port.is_some() {
         agent.with_http_routes(mgmt_routes());
     }
@@ -305,7 +305,7 @@ h2{font-size:0.78rem;font-weight:600;color:#475569;text-transform:uppercase;lett
   <h2>Skills on Mesh</h2>
   <div id="skills"><div style="color:#475569;font-size:0.85rem">Loading…</div></div>
 
-  <h2 style="margin-top:8px">Recent Invocations (audit/)</h2>
+  <h2 style="margin-top:8px">Recent Invocations (audit trail)</h2>
   <div id="audit"><div class="no-audit">Loading…</div></div>
 </main>
 <script>
@@ -362,35 +362,42 @@ async function refresh(){
       }).join('');
     }
 
-    // Load audit entries
-    var ar=await fetch('/gateway/kv/keys?prefix=audit/');
+    // Load audit entries: the node's audit trail, read through its own route (`audit:read`; a `compliance`
+    // build). The raw KV routes refuse owned namespaces, the audit chain's names included.
+    var ar=await fetch('/gateway/audit?limit=10');
     var auditEntries=[];
+    var auditNote='No invocations recorded yet — invoke a skill to see audit entries';
     if(ar.ok){
       var ad=await ar.json();
-      var auditKeys=(ad.keys||[]).sort().reverse().slice(0,10);
-      document.getElementById('s-invocations').textContent=(ad.keys||[]).length;
-      for(var ak of auditKeys){
-        try{
-          var vr=await fetch('/gateway/kv?key='+encodeURIComponent(ak));
-          if(vr.ok){
-            var v=await vr.json();
-            var raw=v.value;
-            // value is base64-encoded JSON bytes
-            var json=JSON.parse(atob(raw));
-            auditEntries.push(json);
-          }
-        }catch(e){}
+      var total=0;
+      for(var st of (ad.streams||[])){
+        total+=st.count||0;
+        for(var rec of (st.records||[])){
+          if(rec.action!=='Invoke') continue;
+          var d={};
+          try{d=JSON.parse(rec.detail||'{}');}catch(e){}
+          var parts=String(rec.target||'').split('/');
+          auditEntries.push({skill_ns:parts[0]||'?',skill_name:parts.slice(1).join('/')||'?',
+            success:rec.outcome==='Success',duration_ms:d.duration_ms,hlc:rec.hlc||0});
+        }
       }
+      auditEntries.sort(function(a,b){return b.hlc-a.hlc;});
+      auditEntries=auditEntries.slice(0,10);
+      document.getElementById('s-invocations').textContent=total;
     } else {
       document.getElementById('s-invocations').textContent='—';
+      auditNote=ar.status===404
+        ?'The audit trail is served by GET /gateway/audit, which needs a build with the compliance feature'
+        :'The audit trail could not be read (HTTP '+ar.status+'; GET /gateway/audit needs audit:read)';
     }
 
     var auditDiv=document.getElementById('audit');
     if(auditEntries.length===0){
-      auditDiv.innerHTML='<div class="no-audit">No invocations recorded yet — invoke a skill to see audit entries</div>';
+      auditDiv.innerHTML='<div class="no-audit">'+esc(auditNote)+'</div>';
     } else {
       auditDiv.innerHTML=auditEntries.map(function(e){
-        var ts=e.ts_unix_nanos?new Date(Math.floor(e.ts_unix_nanos/1e6)):null;
+        // An HLC's physical part is its upper 48 bits, in milliseconds.
+        var ts=e.hlc?new Date(Math.floor(e.hlc/65536)):null;
         var timeStr=ts?pad2(ts.getHours())+':'+pad2(ts.getMinutes())+':'+pad2(ts.getSeconds()):'?';
         return '<div class="audit-row">'
           +'<span class="audit-skill">'+esc(e.skill_ns+'/'+e.skill_name)+'</span>'

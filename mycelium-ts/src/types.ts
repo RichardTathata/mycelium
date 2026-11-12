@@ -51,6 +51,17 @@ export interface ScheduleDeclaration {
 }
 
 /** One run of a schedule, handed to the client by `scheduleRuns` (adopter-surface Y12). */
+/** One node's record of a schedule's last run, as `scheduleLast` returns it. */
+export interface ScheduleLast {
+  /** The node that ran the slot. */
+  node: string;
+  /** The newest slot that node recorded as run. */
+  slot: number;
+  /** The period and phase the slot was counted under. */
+  periodMs: number;
+  phaseMs: number;
+}
+
 export interface ScheduleRun {
   /** Answer it with `scheduleAck`; only the principal it was handed to can. */
   runId: string;

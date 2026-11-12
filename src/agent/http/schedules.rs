@@ -1,4 +1,5 @@
-//! The schedule run stream (adopter-surface Y12): `GET /gateway/schedules/run` and `POST /gateway/schedules/ack`.
+//! The schedule run stream (adopter-surface Y12): `GET /gateway/schedules/run` and `POST /gateway/schedules/ack`,
+//! and `GET /gateway/schedules/last`, the caller's own schedule's last run (the raw KV routes refuse `sched/`).
 //!
 //! An SDK agent cannot run a `[[schedule]]` in process — `GossipAgent::run_schedule` takes the work as a Rust closure —
 //! so the gateway's node **stands in the holder band for the client**. The stream declares one schedule and keeps it
@@ -267,4 +268,39 @@ pub(super) async fn gw_schedule_ack(
         return unserved();
     }
     Json(json!({"ok": true})).into_response()
+}
+
+#[derive(Deserialize)]
+pub(super) struct ScheduleLastQuery {
+    id: String,
+}
+
+/// `GET /gateway/schedules/last?id=ID` — the last run of **the caller's own** schedule `ID`, as this node has it.
+///
+/// The id is the one the client declared on `schedules/run`; the route reads `sched/{id}~{principal}/last/{node}`,
+/// the principal as this gateway derived it, so a client reads its own schedule's entries and no other principal's
+/// or application's (the raw KV routes refuse `sched/`, values and all). Answers `{"schedule": ID, "last":
+/// [{"node", "slot", "period_ms", "phase_ms"}]}` — one entry per node that has held it, unparsable entries left
+/// out; `last` is empty before the first acknowledged run. An id that cannot name a schedule is `400`. Scope
+/// `schedule:run`.
+pub(super) async fn gw_schedule_last(
+    State(ctx): State<Arc<HttpCtx>>,
+    caller: Option<Extension<ResolvedPrincipal>>,
+    Query(q): Query<ScheduleLastQuery>,
+) -> axum::response::Response {
+    if let Some(why) = crate::schedule::id_problem(&q.id) {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": "invalid schedule id", "detail": why}))).into_response();
+    }
+    let principal = caller.map(|Extension(c)| c.principal).unwrap_or_else(|| gateway_caller::PRINCIPAL_ANONYMOUS.to_string());
+    let prefix = crate::schedule::last_prefix(&crate::schedule::client_scoped_id(&q.id, &principal));
+    let last: Vec<serde_json::Value> = crate::store::scan_kv_prefix(&ctx.agent_ctx.kv_state, &prefix)
+        .into_iter()
+        .filter_map(|(k, v)| {
+            let node = k.strip_prefix(prefix.as_str())?.to_string();
+            let text = std::str::from_utf8(&v).ok()?;
+            let mut parts = text.split_whitespace().map(|p| p.parse::<u64>().ok());
+            Some(json!({ "node": node, "slot": parts.next()??, "period_ms": parts.next()??, "phase_ms": parts.next()?? }))
+        })
+        .collect();
+    Json(json!({ "schedule": q.id, "last": last })).into_response()
 }

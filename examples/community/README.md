@@ -156,20 +156,23 @@ and leaves the substantive LLM work to specialist skills.
 
 The orchestrator exposes a live mesh dashboard at http://localhost:9050/mgmt.
 It shows every skill advertising on the mesh, provider count, and the recent
-invocation audit trail — all from the local KV store, auto-refreshing every
-4 s.
+invocation audit trail, auto-refreshing every 4 s. The skills come from the
+key names under `cap/`; the audit panel reads `GET /gateway/audit`, which a
+build with `compliance` serves (without it the panel says so).
 
 ### Audit trail
 
-Every invocation writes a signed audit record to the KV store:
+With `compliance` and `[tls]`, every invocation is a record in the node's
+hash-chained, signed audit trail (`sys/audit/`), replicated by gossip:
 
 ```bash
-# Visible on the dashboard, or from Rust:
-agent.scan_prefix("audit/")
+# Visible on the dashboard, or over HTTP (audit:read):
+curl -s 'http://localhost:9050/gateway/audit?limit=10'
 ```
 
-Records are HLC-ordered, Ed25519-signed by the invoking node, and replicated
-to every node in the cluster via gossip.
+The raw KV routes do not read it (`403 protected_key`). A build without
+`compliance` writes an unsigned fallback record under `audit/`, which no
+route serves; read it in process (`agent.kv().scan_prefix("audit/")`).
 
 ### Sample output
 

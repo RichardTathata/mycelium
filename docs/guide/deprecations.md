@@ -3128,3 +3128,70 @@ live door — `/mcp`, `/a2a`, the provider's enforcement and `[authority]` (§83
   `the_gateway_door_decides_by_this_units_rules_and_records_each_decision`.
 
 Wire **v12** unchanged.
+
+## 99. The raw KV routes read application keys only; the listing leaves seven namespaces' names out (unreleased, the kv:read decision of 2026-11-12)
+
+§19 closed the raw KV **write** routes to every namespace the substrate or a companion owns. The **read** routes
+stayed open: a token holding only `kv:read` read a grant record without `grant:read`, the audit chain without
+`audit:read`, a mailbox entry, a client certificate's record and every other owned key, and `GET
+/gateway/overlay/consistent/get` did the same under `consensus:read` through its raw-key fallback. Every release
+from 2.27.0 is affected. The read routes now follow the same table as the write routes (`OWNED_KV_PREFIXES`,
+`src/agent/http/authz.rs`).
+
+- **What changed:**
+  - **`GET /gateway/kv?key=K`** answers **403** `protected_key` for a key in an owned namespace, whatever the token's
+    scopes (`"*"` included) and whether or not the key exists. The `message` names the route that reads the namespace
+    where it has one. An application key — `ckpt/`, `ckptw/`, `strands/`, `manifest/`, `schemas/`, `ui/`,
+    `agent/{node}/provision/…`, and every key outside the table — is read as before.
+  - **`GET /gateway/overlay/consistent/get?key=K`** answers the same 403 for an owned key.
+  - **`GET /gateway/kv/keys`** leaves out the key **names** of seven namespaces: `grant/`, `mailbox/`, `audit/`,
+    `sys/audit/`, `sys/client-cert/`, `mandate/` and `rights/`. An unprefixed listing, or a prefix that spans one of
+    them (`sys/`), omits them; a `prefix` inside one of them (`grant/`, `sys/audit/n1`) is **403** `protected_key`.
+    Every other owned namespace's names are still listed — `grp/`, `sys/identity`, `sys/caller-context/`, `cap/`,
+    `skills/`, `consensus/` and the rest — so the Ops Console's panels and a readiness probe on a prefix keep
+    working. Names only: the values of those keys are refused as above.
+  - **Three reads moved to routes of their own.** A schedule's last run: `GET /gateway/schedules/last?id=ID`
+    (`schedule:run`), which answers the caller's own schedule's entries. The topology overrides in force: the
+    `topology_overrides` array on `GET /gateway/govern` (`govern:read`). The `skillrunner` dashboard's invocation
+    panel reads `GET /gateway/audit` (`audit:read`, a `compliance` build).
+- **Will the compiler tell me?** No — it is an HTTP status. The SDKs raise it typed, as they do for writes:
+  `ProtectedKeyError` from `get`, `consistent_get` / `consistentGet`, `scan_prefix` / `scanPrefix`, and from `keys`
+  for a prefix inside a hidden namespace (`mycelium-py` 0.2.16, where it is still the `httpx.HTTPStatusError` these
+  verbs raised; `mycelium-ts` 0.2.10, where these verbs threw a plain `Error` naming the status). `scan_prefix` over
+  a listed owned namespace (`cap/`) raises on the first value.
+- **Who is affected:** a client, script or dashboard that reads an owned namespace through `/gateway/kv` — a value,
+  or the names of one of the seven. A client that reads its own keys is not.
+- **Migration.** Read through the route that owns the namespace:
+
+  | Namespace | Read it through | Scope |
+  |---|---|---|
+  | `grant/` | `GET /gateway/grants/pending`, `GET /gateway/grants/request/{request}`, `GET /gateway/grants/stream` | `grant:read` |
+  | `sys/audit/` | `GET /gateway/audit` | `audit:read` |
+  | `sys/govern/`, `sys/topology-override/` | `GET /gateway/govern` | `govern:read` |
+  | `grp/` | `GET /gateway/mesh/group?group=G` | `mesh:read` |
+  | `cap/` | `GET /gateway/capability/resolve`, `GET /gateway/fleet` | `cap:read`, `fleet:read` |
+  | `prompts/` | `GET /gateway/prompts`, `GET /gateway/prompts/{ns}/{name}` | `llm:read` |
+  | `log/` | `GET /gateway/overlay/log/scan` | `consensus:read` |
+  | `mailbox/` | `GET /gateway/mailbox/{kind}` (the recipient's stream) | `mesh:read` |
+  | `consensus/` | `GET /consensus/{slot}` | `consensus:read` |
+  | `sched/` | `GET /gateway/schedules/last?id=ID` (your own schedule) | `schedule:run` |
+
+  A namespace with no gateway read route — `sys/client-cert/`, `mandate/`, `rights/`, `knowledge/`, `tuple/` and the
+  other companions' — is read in process, through the handle of the component that owns it. `audit/` is the
+  `skillrunner` binary's unsigned fallback trail in a build without `compliance`; nothing serves it over HTTP.
+- **Check after upgrading.** With a `kv:read` token, both of these answered 200 and now answer 403 `protected_key`:
+
+  ```bash
+  curl -s -o /dev/null -w '%{http_code}\n' -H 'Authorization: Bearer KV_READ_TOKEN' \
+       'http://NODE:PORT/gateway/kv?key=sys/audit/x'              # 200 before, 403 after
+  curl -s -o /dev/null -w '%{http_code}\n' -H 'Authorization: Bearer KV_READ_TOKEN' \
+       'http://NODE:PORT/gateway/kv/keys?prefix=grant/'           # 200 before, 403 after
+  ```
+
+  Until every gateway is upgraded, treat `kv:read` as a scope that reads every replicated record, and review who
+  holds it.
+- **Not changed:** the log read routes (`/gateway/overlay/log/scan`, `/log/subscribe`, `/log/group/subscribe`) still
+  read a stream under `cn/`, `wiki/` or `reason/` with `consensus:read`, though §19 refuses writes to them — a
+  follow-up. Layer I is untouched: a peer still replicates every key (detection, not prevention); these are the
+  gateway's doors.
+

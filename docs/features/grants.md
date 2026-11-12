@@ -281,7 +281,7 @@ has no row for this feature. The tests: in [`src/mandate/grant.rs`](../../src/ma
   passes the grant, then the veto window.
 - The record of the decision carries the grant's hash (`mandate_digest` on the evidence record).
 - The pending request is a KV record under a route-owned namespace (`grant/`), appended to the node's WAL where the
-  node persists: the raw KV routes refuse it, a supervisor on another node sees it by gossip, and an agent that asks
+  node persists: the raw KV routes refuse it — a write, a read of its value and a listing of its names alike — a supervisor on another node sees it by gossip, and an agent that asks
   again for the same tool and digest while the request stands and is unconsumed waits on it rather than asking twice.
 - **Veto, not grant:** `require_approval_for` approves on silence and is labelled so in `strength_report()`; its
   `ApprovalTimedOut` variant was never produced and is deprecated (`deprecations.md` §59).

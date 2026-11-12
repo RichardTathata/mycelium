@@ -61,7 +61,7 @@ the page's own `PANELS` list (a test holds them equal) and what CI renders, tab 
 | Tuples | `/gateway/tuple/overview` | the tuple-space companion's stages, from each node's gossip view |
 | Integrity | `/stats` · `/gateway/kv/keys?prefix=grp%2F` · `/gateway/kv/keys?prefix=sys%2Fidentity` · `/gateway/fleet` | the preconditions of the refusals (below) |
 | Audit | `/gateway/audit` | the tamper-evident **signed audit trail** (nodes built `--features compliance`) |
-| KV | `/gateway/kv/keys` | the key set by prefix, per node — a column that differs is a view that has not converged |
+| KV | `/gateway/kv/keys` | the key set by prefix, per node — a column that differs is a view that has not converged. The route leaves out the names under `grant/`, `mailbox/`, `audit/`, `sys/audit/`, `sys/client-cert/`, `mandate/` and `rights/`, so those namespaces do not appear in the map |
 | Metrics | `/metrics` | Prometheus series (nodes built `--features metrics`) |
 
 The **"↗ label"** link reads `/gateway/kv?key=ui%2Fviz` and `ui%2Flabel` — the `ui/viz` convention a

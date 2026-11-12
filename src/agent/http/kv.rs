@@ -9,11 +9,17 @@ pub(super) struct KvKeyQuery { pub(super) key: String }
 
 /// `GET /gateway/kv?key=K` — read a single KV entry.
 ///
-/// Returns `{"found": true, "value_b64": "…"}` or `{"found": false}`.
+/// Returns `{"found": true, "value_b64": "…"}` or `{"found": false}`. Application keys only, as the write doors:
+/// a key in a namespace the substrate or a companion owns is `403 protected_key` whatever the scopes, naming the
+/// route that reads it ([`refuse_protected_key_read`]) — until 2026-11-12 a `kv:read` token read every one of
+/// them here: a grant record, the audit chain, a mailbox entry.
 pub(super) async fn gw_kv_get(
     Query(q):   Query<KvKeyQuery>,
     State(ctx): State<Arc<HttpCtx>>,
 ) -> impl IntoResponse {
+    if let Some(refused) = refuse_protected_key_read(&q.key) {
+        return refused;
+    }
     match ctx.agent_ctx.kv_state.store.pin().get(q.key.as_str()).and_then(|e| e.data.clone()) {
         Some(bytes) => {
             use base64::Engine as _;
@@ -117,20 +123,28 @@ pub(super) struct KvKeysQuery { prefix: Option<String> }
 
 /// `GET /gateway/kv/keys?prefix=P` — list live KV keys, optionally filtered by prefix.
 ///
-/// Returns `{"keys": ["key1", "key2", …]}`.
+/// Returns `{"keys": ["key1", "key2", …]}` — names, never values. The names of the namespaces
+/// `OWNED_KV_PREFIXES` marks `names_hidden` (grants, mailboxes, the audit chain, client certificates, mandates,
+/// rights) are **left out** of every listing, and a `prefix` inside one of them is `403 protected_key`, naming
+/// the route that reads it; the other owned namespaces' names stay listed (the Ops Console's namespace map and
+/// its `grp/` and `sys/identity` panels read them).
 pub(super) async fn gw_kv_keys(
     Query(q):   Query<KvKeysQuery>,
     State(ctx): State<Arc<HttpCtx>>,
 ) -> impl IntoResponse {
+    if let Some(refused) = q.prefix.as_deref().and_then(refuse_hidden_prefix) {
+        return refused;
+    }
     let keys: Vec<String> = if let Some(ref pfx) = q.prefix {
         crate::store::scan_kv_prefix(&ctx.agent_ctx.kv_state, pfx.as_str())
             .into_iter()
+            .filter(|(k, _)| !raw_kv_name_hidden(k))
             .map(|(k, _)| k.as_ref().to_string())
             .collect()
     } else {
         ctx.agent_ctx.kv_state.store.pin()
             .iter()
-            .filter(|(_, v)| v.data.is_some())
+            .filter(|(k, v)| v.data.is_some() && !raw_kv_name_hidden(k))
             .map(|(k, _)| k.as_ref().to_string())
             .collect()
     };

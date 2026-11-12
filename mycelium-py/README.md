@@ -347,6 +347,10 @@ node holds; `on_status` is told why a stream hands out nothing (`not_eligible`: 
 `warming_up`; `not_holder`; `stood_down`). A partition runs a slot on each side under one key: carry `operation_id` to
 a destination that deduplicates. Values are written as TOML basic strings (`toml_basic_string`).
 
+`schedule_last(id)` (0.2.16) answers your own schedule's last run as the connected node has it — a list of
+`{"node", "slot", "period_ms", "phase_ms"}`, one per node that has held it, empty before the first acknowledged
+run. It is the read: `get("sched/…")` raises `ProtectedKeyError`.
+
 #### `scatter_gather(targets, method, payload, *, min_ok, timeout_secs) → list[dict]`
 
 Fan-out RPC to multiple targets; waits for at least `min_ok` replies. Raises `TimeoutError`
@@ -383,6 +387,10 @@ These routes write **application keys**: your own namespaces, plus `ckpt/`, `ckp
 A key in a namespace the substrate or a companion owns — `sys/`, `grp/`, `cap/`, `prompts/`, `log/`,
 `mailbox/`, … — is refused: `set`, `delete`, `set_with_min_acks` and `consistent_set` raise
 `ProtectedKeyError`, whose message names the route that writes it ([Errors](#errors)).
+
+**Reads are application keys only as well (0.2.16; the gateway's kv:read decision,
+[deprecations §99](https://github.com/RichardTathata/mycelium/blob/main/docs/guide/deprecations.md)).** `get`, `consistent_get` and `scan_prefix` raise it too, and `keys` for a prefix inside a namespace whose names the gateway hides (`grant/`, `mailbox/`, `audit/`, `sys/audit/`, `sys/client-cert/`, `mandate/`, `rights/`); `keys` otherwise lists names without those. The message names the route that reads the namespace — `GET /gateway/audit` for the audit trail,
+`GET /gateway/grants/pending` for grants. Before 0.2.16 these verbs returned an owned key's value.
 
 #### `set_with_min_acks(key, value, min_acks, *, timeout_secs=5.0) → int`
 
@@ -732,7 +740,7 @@ these codes) stays an `httpx.HTTPStatusError`.
 | Error | Gateway answer | Raised by | Attribute |
 |---|---|---|---|
 | `ProtectedKindError` | `403 protected_kind` — `mcp.invoke`, `skill.invoke`, `llm.invoke` (and operator-listed kinds) on a raw mesh route | `rpc_call`, `scatter_gather`, `emit`, `deliver_event`, `emit_sharded`, `emit_reliable` (0.2.7) | `.kind` |
-| `ProtectedKeyError` (since 0.2.7) | `403 protected_key` — a key in a namespace the substrate or a companion owns | `set`, `delete`, `set_with_min_acks`, `consistent_set` | `.key`, `.message`, `.response` |
+| `ProtectedKeyError` (since 0.2.7; reads since 0.2.16) | `403 protected_key` — a key in a namespace the substrate or a companion owns | `set`, `delete`, `set_with_min_acks`, `consistent_set`; `get`, `consistent_get`, `scan_prefix`, `keys` (a prefix inside a hidden namespace) | `.key`, `.message`, `.response` |
 | `ProtectedStreamError` (since 0.2.7) | `403 protected_stream` — a log stream under `cn/`, `wiki/`, `reason/` | `append`, `compact_log` | `.stream`, `.message`, `.response` |
 | `SupersededError` (since 0.2.8) | `409 superseded` — the slot was decided for another value (a concurrent writer, holder or leader won) | `consistent_set`, `cross_group_propose`, `distributed_lock`, `elect_leader` | `.response` |
 

@@ -70,7 +70,8 @@ impl AuditRecord {
 ///
 /// **Without `compliance`:** falls back to a plain JSON entry at
 /// `audit/{ts_unix_nanos}/{node_id}` — no signing/chaining is possible without
-/// the identity key, so the legacy time-sorted trail remains.
+/// the identity key, so the legacy time-sorted trail remains. The dashboard does not show these: it reads
+/// `GET /gateway/audit`, which a build without `compliance` does not serve, and the raw KV routes refuse `audit/`.
 pub(crate) fn write_audit(agent: &Arc<GossipAgent>, rec: &AuditRecord) {
     #[cfg(feature = "compliance")]
     {

@@ -301,6 +301,22 @@ commitment's offers. The topology escape hatch moved to
 [`.log/2026-10-07-code-gaps-doors.md`](.log/2026-10-07-code-gaps-doors.md) ·
 [`.log/2026-10-07-ingest-549-551.md`](.log/2026-10-07-ingest-549-551.md).
 
+**The read doors follow the same table (the kv:read decision, 2026-11-12; `deprecations.md` §99).** #549 closed
+the writes and left the reads: `GET /gateway/kv?key=` read any key under `kv:read` — a grant record, the audit
+chain, a mailbox entry — and `GET /gateway/overlay/consistent/get` did under `consensus:read`, through its raw-key
+fallback. Both refuse an owned key **403** `protected_key` now (`refuse_protected_key_read`, the same predicate as
+the write side, `raw_kv_writable`), naming the route that reads the namespace. `GET /gateway/kv/keys` answers names:
+each row of `OWNED_KV_PREFIXES` carries `names_hidden`, set for `grant/`, `mailbox/`, `audit/`, `sys/audit/`,
+`sys/client-cert/`, `mandate/` and `rights/`; a listing leaves those names out and a prefix inside one is 403, while
+the rest stay listed because the Ops Console (`grp/`, `sys/identity`, the namespace map), CI's readiness probes
+(`sys/caller-context/`) and operator procedures read them. The lesson is the verification policy's rule 1 applied
+late: #549 enumerated every door that *writes* a KV key and none that reads one. Three dependants moved to routes of
+their own (`GET /gateway/schedules/last`, `topology_overrides` on `GET /gateway/govern`, skillrunner's panel on
+`GET /gateway/audit`). **Open:** the log read routes (`overlay/log/scan`, `subscribe`, `group/subscribe`) still read
+a stream under `cn/`, `wiki/` or `reason/`, whose writes `OWNED_LOG_STREAMS` refuses; and `call/` needs a row, names
+hidden, when identity-and-lifecycle I4 lands. Tests: `src/agent/http/kv_read_tests.rs`, one per door.
+[`.log/2026-11-12-kv-read-guard.md`](.log/2026-11-12-kv-read-guard.md).
+
 **`/a2a` calls only what its agent card lists (2.27.0 — #550).** The agent card
 listed every advertised capability as a skill, so an external agent was offered the fleet's plumbing — provisioning
 tiers (`{ns}/loading`, `{ns}/installable`), `prov-shed/*` marks, `llm-meta/*`, `artifact/librarian`,
