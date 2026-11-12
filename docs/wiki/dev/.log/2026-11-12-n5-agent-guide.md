@@ -8,13 +8,21 @@ root `AGENTS.md` (at most 2 KB) points Codex, Cursor and Orca's workers at it, a
 names both, because Claude Code reads a root `AGENTS.md` only where there is no `CLAUDE.md`.
 
 The durable part is how a served text is kept true. The guide is compared with its sources by tests in
-`src/agent_guide.rs`, each a set or sequence equality in both directions, so a change on either side fails until the
-other follows:
+`src/agent_guide.rs`:
 
-- the walk's fenced commands against the invocations `.github/workflows/one-hour.yml` runs, in order;
-- the subcommand table against `main`'s dispatch arms and against the usage text;
-- the schema ids against `docs/reference/cli-json.md`;
-- the sizes, the `CLAUDE.md` line, and no machine path or credential in what is served.
+- the walk's fenced commands against the invocations `.github/workflows/one-hour.yml` runs: one sequence, equal both
+  ways, apart from three lines the test names (the guide's virtual-environment line; the workflow's two queries of
+  its own environment). The extraction fails on a workflow line it cannot classify, and the guide may hold no fence
+  but `sh` and `toml`;
+- what each step prints and writes, per step: every expectation the guide quotes is one that step greps for, every
+  grep is quoted or in a list the test holds, and each TOML block equals that step's `printf`;
+- the subcommand table against `main`'s dispatch arms and against the usage text: one set;
+- the schema ids against `docs/reference/cli-json.md` and against the literals in each command's source;
+- the sizes, the `CLAUDE.md` line, the release's feature set, and no machine path or credential in what is served.
+
+Not compared: a subcommand's sub-verbs and flags. The adversarial review of #770 (nine findings) is why the
+extraction fails closed and the expectation check is per step; its first form skipped what it did not recognise and
+checked expectations by `contains` over the whole workflow.
 
 A new subcommand therefore needs its dispatch arm, its usage line and its row in the guide in one change, and a new
 step in the `one-hour` job needs its command in the guide. The comparison is of texts: the six steps run only in the

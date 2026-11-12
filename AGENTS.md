@@ -8,23 +8,26 @@ Mycelium is an embedded Rust library for agent fleets with no coordinator; `myce
 
 ## Using a fleet
 
-Run `mycelium skills get fleet`. The binary prints the guide for its own version: six steps from the binary to a
-governed fleet, every subcommand, and how to read `--format json`. Its source is
-[`docs/reference/agent-skills/fleet.md`](docs/reference/agent-skills/fleet.md), and tests hold it to the code.
+The binary prints the guide for its own version: six steps to a governed fleet, every subcommand, and how to read
+`--format json`. With the published binary on `PATH`:
+
+    mycelium skills get fleet
+
+In a checkout, with the release's features:
+
+    cargo run --features cli,tls,compliance,a2a,llm,metrics --bin mycelium -- skills get fleet
+
+Its source is [`docs/reference/agent-skills/fleet.md`](docs/reference/agent-skills/fleet.md); tests hold it to the code.
 
 ## Changing this repository
 
-Read `CLAUDE.md` first. It applies to every agent. In short:
+Read `CLAUDE.md` first; it applies to every agent. Some of its rules, each with its home:
 
-- **Query the wiki first:** [`docs/wiki/wiki.md`](docs/wiki/wiki.md). Code is canon; the wiki cites it.
-- **Enumerate before fixing:** list every entry point that reads or writes the thing, with the grep, and test each.
-- **A regression test fails first**, on the unfixed code.
-- **A feature's page changes with the feature:** `docs/features/` and `docs/features/registry.toml`.
-- **Gate before pushing:** `make check`. Run one cargo job at a time.
-- **Stage by path**, never `git add -A`: other sessions share this checkout. Do branch work in a worktree.
-- **No direct clock, RNG or filesystem access** in `src/`, `mycelium-core/src/` or `mycelium-wasm-host/src/`:
-  go through `mycelium_core::sim_seam`.
-- **A new `Mutex` or `RwLock` field** in a library crate needs a row in
-  [`docs/wiki/dev/concurrency/lock-order.md`](docs/wiki/dev/concurrency/lock-order.md).
-- A refusal names what it needs. Fix that; do not work around it.
-- Commit or open a pull request only when asked. Do not merge your own.
+- **Query the wiki first:** [`docs/wiki/wiki.md`](docs/wiki/wiki.md) (`CLAUDE.md`, the wiki workflow).
+- **Enumerate before fixing:** every entry point, with the grep, each tested (`CLAUDE.md`, verification rule 1).
+- **A feature's page changes with the feature:** `docs/features/` and its registry (`CLAUDE.md`, rule 5).
+- **Fail-first:** the test that failed before the fix, and its output (`.github/pull_request_template.md`).
+- **Gate before pushing:** `make check` (`CLAUDE.md`, build and test gates).
+- **No direct clock, RNG or filesystem access** in the scanned crates: use `mycelium_core::sim_seam` (`CLAUDE.md`,
+  hot invariants).
+- **A new `Mutex` or `RwLock` field** in a library crate needs a lock-order row (`CLAUDE.md`, hot invariants).

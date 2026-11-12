@@ -6,7 +6,8 @@
 //! [`crate::init::TAG_PLACEHOLDER`] with the binary's own release tag, as `init` does for a scaffold.
 //!
 //! The guide is held to the code by this module's tests, not by a reader: its walk is the `one-hour` workflow's
-//! commands, its subcommand table is the binary's dispatch and usage, its schema ids are `cli-json.md`'s.
+//! commands, its subcommand table is the binary's dispatch and usage, its schema ids are `cli-json.md`'s. What the
+//! tests do not hold is said where they are: a subcommand's sub-verbs and flags are not compared.
 
 use crate::init::{tag, TAG_PLACEHOLDER};
 
@@ -54,53 +55,285 @@ pub fn get_json(skill: &Skill) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::path::Path;
 
     const FLEET: &str = include_str!("../docs/reference/agent-skills/fleet.md");
     const ONE_HOUR: &str = include_str!("../.github/workflows/one-hour.yml");
+    const RELEASE: &str = include_str!("../.github/workflows/release.yml");
     const MAIN: &str = include_str!("main.rs");
     const CLI_JSON: &str = include_str!("../docs/reference/cli-json.md");
     const CONFIGURATION: &str = include_str!("../docs/reference/configuration.md");
     const ROOT_AGENTS: &str = include_str!("../AGENTS.md");
     const CLAUDE: &str = include_str!("../CLAUDE.md");
+    const SCAFFOLD_NODE: &str = include_str!("../templates/governed-call-py/node.toml");
 
-    /// The lines of every fenced block of `lang` in a Markdown text, in order.
-    fn fenced(md: &str, lang: &str) -> Vec<String> {
-        let (mut out, mut inside) = (Vec::new(), false);
+    /// Programs whose invocation is a command of the walk.
+    const RUNNERS: [&str; 6] = ["mycelium", "pip", "pip3", "python", "python3", "uv"];
+    /// Programs that may name the binary, the SDK or Python in their arguments without running any of them. A
+    /// segment that mentions one of the three and starts with a program in neither list fails the extraction.
+    const NOT_RUNNERS: [&str; 14] = ["echo", "grep", "curl", "tar", "install", "[", "set", "test", "cd", "printf", "cat", "exit", "true", "}"];
+    /// What the workflow runs and the guide leaves out: two queries of the job's own environment.
+    const WORKFLOW_ONLY: [&str; 2] = ["python3 --version", "pip show mycelium-py"];
+    /// **The one stated difference**: what the guide runs and the workflow does not. The job's container has its own
+    /// Python; an OS-managed one refuses a bare `pip install` (tutorial 7, *On another machine*).
+    const GUIDE_ONLY: [&str; 1] = ["python3 -m venv .venv && . .venv/bin/activate"];
+    /// Inline code in the guide that invokes a runner without being a step of the walk.
+    const INLINE_ALLOWED: [&str; 1] = ["mycelium skills get fleet"];
+    /// What the workflow greps for and the guide does not quote, by step. A grep added to the workflow fails
+    /// `the_guides_expectations_and_configuration_are_the_one_hour_jobs` until it is quoted in the guide or listed here.
+    const NOT_QUOTED: [(u32, &str); 10] = [
+        (3, "alice declared `purchaser`"),
+        (3, "not enforced by this node"),
+        (3, "the route needs kv:write"),
+        (4, "✓ a grant-required tool is default-deny"),
+        (4, "✓ issuing is the declaration's rule"),
+        (4, "✓ the grant holds across a restart"),
+        (5, "✓ the restarted node finds its lost-acknowledgement record unknown in its own ledger, probes before any retry, and the destination holds one effect"),
+        (5, "✓ the destination saw each effect once"),
+        (5, "mycelium explain --closure"),
+        // A negative check: the job fails if this line IS printed.
+        (6, "gw.token_tables:"),
+    ];
+    /// Each subcommand's `--format json` schema ids, and the source file that holds the literal.
+    const CLI_SCHEMAS: [(&str, &[(&str, &str)]); 9] = [
+        ("init", &[]),
+        ("declare", &[("mycelium.declare/1", include_str!("declare.rs"))]),
+        ("doctor", &[("mycelium.doctor/1", include_str!("doctor.rs"))]),
+        ("wire-check", &[("mycelium.design/declaration/1", include_str!("wire_check.rs"))]),
+        ("rules", &[("mycelium.rules/1", include_str!("../mycelium-core/src/rule.rs"))]),
+        ("test", &[("mycelium.test-faults/1", include_str!("faults.rs"))]),
+        ("explain", &[("mycelium.explain/1", include_str!("../mycelium-core/src/decision.rs")), ("mycelium.closure/1", include_str!("closure.rs"))]),
+        ("tls", &[("mycelium.tls/1", include_str!("main.rs"))]),
+        ("skills", &[(SCHEMA, include_str!("agent_guide.rs"))]),
+    ];
+    /// Schema ids in those source files that are records a command reads, not documents a command prints.
+    const NOT_CLI_DOCUMENTS: [&str; 3] = ["mycelium.decision/1", "mycelium.coverage/1", "mycelium.ae/evidence/1"];
+
+    /// Every fenced block of a Markdown text: its tag and its non-empty lines.
+    fn fences(md: &str) -> Vec<(String, Vec<String>)> {
+        let mut out: Vec<(String, Vec<String>)> = Vec::new();
+        let mut inside = false;
         for line in md.lines() {
-            if let Some(rest) = line.strip_prefix("```") {
-                inside = !inside && rest.trim() == lang;
+            if let Some(rest) = line.trim_start().strip_prefix("```") {
+                inside = !inside;
+                if inside {
+                    out.push((rest.trim().to_string(), Vec::new()));
+                }
             } else if inside && !line.trim().is_empty() {
-                out.push(line.trim().to_string());
+                out.last_mut().unwrap().1.push(line.trim().to_string());
+            }
+        }
+        assert!(!inside, "an unclosed fence");
+        out
+    }
+
+    /// The lines of every fenced block tagged `lang`, in order.
+    fn fenced(md: &str, lang: &str) -> Vec<String> {
+        fences(md).into_iter().filter(|(tag, _)| tag == lang).flat_map(|(_, lines)| lines).collect()
+    }
+
+    /// A workflow's shell lines by step: the number a step's name opens with (`"3 · …"`; 0 without one), and every
+    /// line of its `run:`, in the block form (`run: |`) and the single-line form (`run: cmd`). Comment lines are
+    /// left out.
+    fn run_lines(yml: &str) -> Vec<(u32, String)> {
+        let (mut out, mut step, mut block): (Vec<(u32, String)>, u32, Option<usize>) = (Vec::new(), 0, None);
+        for line in yml.lines() {
+            let indent = line.len() - line.trim_start().len();
+            let trimmed = line.trim();
+            if let Some(at) = block {
+                if trimmed.is_empty() || indent > at {
+                    if !trimmed.is_empty() && !trimmed.starts_with('#') {
+                        out.push((step, trimmed.to_string()));
+                    }
+                    continue;
+                }
+                block = None;
+            }
+            let key = trimmed.strip_prefix("- ").unwrap_or(trimmed);
+            if let Some(name) = key.strip_prefix("name:") {
+                let name = name.trim().trim_matches('"');
+                step = name.split(' ').next().and_then(|n| n.parse().ok()).unwrap_or(0);
+            } else if let Some(rest) = key.strip_prefix("run:") {
+                let rest = rest.trim();
+                if rest.starts_with('|') || rest.starts_with('>') {
+                    block = Some(indent);
+                } else if !rest.is_empty() {
+                    out.push((step, rest.to_string()));
+                }
             }
         }
         out
     }
 
-    /// What the `one-hour` workflow runs: each invocation of the binary, of the SDK's install and of the scaffold's
-    /// program — at the start of a line or inside `$(…)` — without its redirections, and with the job's own
-    /// variables written as the guide writes them.
-    fn workflow_commands(yml: &str) -> Vec<String> {
-        const STARTS: [&str; 3] = ["mycelium ", "pip install ", "MYCELIUM_BIN=mycelium "];
-        let mut out = Vec::new();
-        for line in yml.lines() {
-            let line = line.trim();
-            let cmd = match line.split_once("$(") {
-                Some((_, inner)) if STARTS.iter().any(|s| inner.starts_with(s)) => inner,
-                _ if STARTS.iter().any(|s| line.starts_with(s)) => line,
-                _ => continue,
-            };
-            let end = [" | ", " 2> ", " || ", ")"].iter().filter_map(|stop| cmd.find(stop)).min().unwrap_or(cmd.len());
-            out.push(
-                cmd[..end]
-                    .trim()
+    /// A shell line as its simple commands: split at `&&`, `||`, `;` and `|` outside quotes, with the inside of
+    /// every `$(…)` — at any depth, inside double quotes too — as commands of its own (the outer one keeps `$()` in
+    /// its place). A backtick substitution is refused: the extraction does not read one.
+    fn segments(line: &str, out: &mut Vec<String>) {
+        let b: Vec<char> = line.chars().collect();
+        let (mut cur, mut i, mut single, mut double) = (String::new(), 0, false, false);
+        while i < b.len() {
+            let (c, next) = (b[i], b.get(i + 1).copied());
+            if single {
+                single = c != '\'';
+                cur.push(c);
+                i += 1;
+            } else if c == '\\' {
+                cur.push(c);
+                cur.extend(next);
+                i += 2;
+            } else if c == '$' && next == Some('(') {
+                let (mut depth, mut j) = (1, i + 2);
+                while j < b.len() && depth > 0 {
+                    match b[j] {
+                        '(' => depth += 1,
+                        ')' => depth -= 1,
+                        _ => {}
+                    }
+                    j += 1;
+                }
+                assert_eq!(depth, 0, "an unclosed $( in: {line}");
+                segments(&b[i + 2..j - 1].iter().collect::<String>(), out);
+                cur.push_str("$()");
+                i = j;
+            } else if c == '`' {
+                panic!("a backtick substitution, which the extraction does not read; write $(…): {line}");
+            } else if c == '"' {
+                double = !double;
+                cur.push(c);
+                i += 1;
+            } else if !double && c == '\'' {
+                single = true;
+                cur.push(c);
+                i += 1;
+            } else if !double && (c == ';' || c == '|' || c == '&') {
+                out.push(std::mem::take(&mut cur));
+                i += if next == Some(c) { 2 } else { 1 };
+            } else {
+                cur.push(c);
+                i += 1;
+            }
+        }
+        out.push(cur);
+        out.retain(|s| !s.trim().is_empty());
+    }
+
+    /// The command a segment runs, when its program is one of [`RUNNERS`]: without `sudo`, `env`, `time`, `!`, `if`
+    /// and the like before it, with the program's directory dropped, its own variable assignments kept, and cut at
+    /// a redirection. `None` for a pure assignment or a program in [`NOT_RUNNERS`]. **Fails** on any other program
+    /// whose segment mentions the binary, pip or Python: an unclassified line is never skipped.
+    fn command_of(segment: &str) -> Option<String> {
+        let mut words: Vec<&str> = segment.split_whitespace().collect();
+        while matches!(words.first(), Some(&("sudo" | "env" | "time" | "!" | "if" | "then" | "elif" | "else" | "while" | "do" | "{" | "("))) {
+            words.remove(0);
+        }
+        let assignment = |w: &str| w.split_once('=').is_some_and(|(k, _)| !k.is_empty() && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'));
+        let at = words.iter().position(|w| !assignment(w))?;
+        let program = words[at].trim_matches('"').rsplit('/').next().unwrap_or("");
+        if RUNNERS.contains(&program) {
+            let mut out: Vec<&str> = words[..at].to_vec();
+            out.push(program);
+            out.extend(words[at + 1..].iter().take_while(|w| !w.starts_with('>') && !w.starts_with("2>") && !w.starts_with('<')));
+            return Some(
+                out.join(" ")
                     .replace("\"$HOME/governed-call-py\"", "governed-call-py")
                     .replace("$REPO", "RichardTathata/mycelium")
                     .replace("$TAG", TAG_PLACEHOLDER),
             );
         }
+        let mentions = ["mycelium", "pip", "python"].iter().any(|m| segment.contains(m));
+        assert!(!mentions || NOT_RUNNERS.contains(&program), "unclassified: `{program}` in `{segment}` — a runner, or a program that only names one?");
+        None
+    }
+
+    /// Every command the workflow runs, in order: [`run_lines`], [`segments`], [`command_of`].
+    fn workflow_commands(yml: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        for (_, line) in run_lines(yml) {
+            let mut segs = Vec::new();
+            segments(&line, &mut segs);
+            // A substitution's commands run before the command that holds it; within a line, keep the line's order.
+            out.extend(segs.iter().filter_map(|s| command_of(s)));
+        }
         out
+    }
+
+    /// A shell word without its quoting: `'a'"'"'b'` is `a'b`, `"a \`b\`"` is ``a `b` ``.
+    fn unquote(word: &str) -> String {
+        let (mut out, mut single, mut double) = (String::new(), false, false);
+        let mut chars = word.chars();
+        while let Some(c) = chars.next() {
+            match c {
+                '\'' if !double => single = !single,
+                '"' if !single => double = !double,
+                '\\' if double => out.extend(chars.next()),
+                _ => out.push(c),
+            }
+        }
+        out
+    }
+
+    /// What each step of the workflow greps its output for (`grep -q '<pattern>' <file>`), a leading `^` dropped.
+    fn workflow_expectations(yml: &str) -> BTreeMap<u32, BTreeSet<String>> {
+        let mut out: BTreeMap<u32, BTreeSet<String>> = BTreeMap::new();
+        for (step, line) in run_lines(yml) {
+            let mut segs = Vec::new();
+            segments(&line, &mut segs);
+            for seg in segs {
+                let seg = seg.trim().trim_start_matches("if ").trim_start_matches("! ");
+                if let Some(rest) = seg.strip_prefix("grep -q ") {
+                    let (pattern, _file) = rest.trim().rsplit_once(' ').expect("grep -q '<pattern>' <file>");
+                    out.entry(step).or_default().insert(unquote(pattern).trim_start_matches('^').to_string());
+                }
+            }
+        }
+        out
+    }
+
+    /// The lines each step of the workflow appends to `node.toml` (`printf '…' … > x.toml`).
+    fn workflow_configuration(yml: &str) -> BTreeMap<u32, Vec<String>> {
+        let mut out = BTreeMap::new();
+        for (step, line) in run_lines(yml) {
+            if let Some((_, rest)) = line.split_once("printf '")
+                && line.trim_end().ends_with(".toml")
+            {
+                let text = rest.split('\'').next().unwrap().replace("\\n", "\n");
+                out.insert(step, text.lines().filter(|l| !l.is_empty()).map(str::to_string).collect());
+            }
+        }
+        out
+    }
+
+    /// The guide's walk by step: the text from `N. ` to the next step or the next heading.
+    fn guide_steps(md: &str) -> BTreeMap<u32, String> {
+        let walk = md.split("## The walk").nth(1).expect("the guide has its walk");
+        let walk = walk.split("\n## ").next().unwrap();
+        let mut out: BTreeMap<u32, String> = BTreeMap::new();
+        let mut step = 0;
+        for line in walk.lines() {
+            if let Some(n) = line.split_once(". ").and_then(|(n, _)| n.parse::<u32>().ok()) {
+                step = n;
+            }
+            let text = out.entry(step).or_default();
+            text.push_str(line);
+            text.push('\n');
+        }
+        out
+    }
+
+    /// Every inline code span of a Markdown text, fenced blocks left out.
+    fn inline_spans(md: &str) -> Vec<String> {
+        let mut prose = String::new();
+        let mut inside = false;
+        for line in md.lines() {
+            if line.trim_start().starts_with("```") {
+                inside = !inside;
+            } else if !inside {
+                prose.push_str(line);
+                prose.push('\n');
+            }
+        }
+        prose.split('`').skip(1).step_by(2).map(str::to_string).collect()
     }
 
     /// Every `mycelium.<name>/N` id a text names.
@@ -116,15 +349,13 @@ mod tests {
         out
     }
 
-    /// The first backticked word of each row of the guide's subcommand table.
-    fn guide_subcommands(md: &str) -> BTreeSet<String> {
+    /// The rows of the guide's subcommand table: each subcommand with the schema ids its row names.
+    fn guide_subcommands(md: &str) -> BTreeMap<String, BTreeSet<String>> {
         let section = md.split("## The subcommands").nth(1).expect("the guide has its subcommand table");
         let section = section.split("\n## ").next().unwrap_or(section);
         section
             .lines()
-            .filter_map(|l| l.strip_prefix("| `"))
-            .filter_map(|l| l.split('`').next())
-            .map(str::to_string)
+            .filter_map(|l| l.strip_prefix("| `").map(|rest| (rest.split('`').next().unwrap_or("").to_string(), schema_ids(l))))
             .collect()
     }
 
@@ -158,79 +389,218 @@ mod tests {
             .collect()
     }
 
-    /// **The row's exit: the guide's commands are the `one-hour` job's.** Every command in the guide's walk is one
-    /// the workflow runs, in the workflow's order, and the workflow runs none the guide leaves out — so the walk an
-    /// agent is handed is the one a release is measured on, and a step added to either fails here until the other
-    /// has it.
+    /// The comparison behind the row's exit, over any guide and any workflow: `Err` names the first difference.
+    fn walk_differs(guide_md: &str, yml: &str) -> Result<Vec<String>, String> {
+        let tags: BTreeSet<String> = fences(guide_md).into_iter().map(|(tag, _)| tag).collect();
+        if tags != BTreeSet::from(["sh".to_string(), "toml".to_string()]) {
+            return Err(format!("a fence that is neither `sh` (compared with the workflow's commands) nor `toml` (compared with its printf): {tags:?}"));
+        }
+        let mut guide = fenced(guide_md, "sh");
+        for only in GUIDE_ONLY {
+            if guide.iter().filter(|l| *l == only).count() != 1 {
+                return Err(format!("the stated difference `{only}` is not in the guide exactly once"));
+            }
+        }
+        guide.retain(|l| !GUIDE_ONLY.contains(&l.as_str()));
+        let mut job = workflow_commands(yml);
+        for only in WORKFLOW_ONLY {
+            if !job.iter().any(|l| l == only) {
+                return Err(format!("the workflow does not run `{only}`"));
+            }
+        }
+        job.retain(|l| !WORKFLOW_ONLY.contains(&l.as_str()));
+        if guide != job {
+            return Err(format!("the guide's ```sh lines {guide:?} are not the one-hour workflow's commands {job:?}"));
+        }
+        for span in inline_spans(guide_md) {
+            let program = span.split_whitespace().next().unwrap_or("").rsplit('/').next().unwrap_or("");
+            if RUNNERS.contains(&program) && span.contains(' ') && !guide.contains(&span) && !INLINE_ALLOWED.contains(&span.as_str()) {
+                return Err(format!("inline `{span}` is a command outside the walk"));
+            }
+        }
+        Ok(job)
+    }
+
+    /// **The row's exit: the guide's commands are the `one-hour` job's.** The guide's `sh` lines, without the one
+    /// stated difference ([`GUIDE_ONLY`]), are the commands the workflow runs, without its two environment queries
+    /// ([`WORKFLOW_ONLY`]), in the same order — so a step added to either side fails here until the other has it.
+    /// The guide has no fence but `sh` and `toml`, and no inline code that runs the binary, pip or Python outside
+    /// the walk and [`INLINE_ALLOWED`]: there is no place in it for a command this comparison does not see.
     #[test]
     fn the_guides_commands_are_the_one_hour_jobs() {
-        let guide = fenced(FLEET, "sh");
-        let job = workflow_commands(ONE_HOUR);
-        assert_eq!(guide, job, "the guide's ```sh lines, then the one-hour workflow's commands");
+        let job = walk_differs(FLEET, ONE_HOUR).unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(job.len(), 7, "the extraction found the workflow's commands: {job:?}");
         assert!(job.contains(&"mycelium test --faults grant units --config grant.toml".to_string()), "{job:?}");
     }
 
-    /// The extraction sees a command wherever the workflow could put one, and nothing that only names the binary:
-    /// so a new step cannot be run by the job and missed by the comparison above.
+    /// **Each form, planted, fails** (#770's review, F4). A command added to the real workflow in each form the
+    /// first extraction skipped — a single-line `run:`, behind `sudo`, `env`, `time`, `cd … &&`, `!` or `if`, by
+    /// its path, in a second `$(…)`, through `pip3` or `uv` — and a command added to the real guide where the first
+    /// comparison did not look — a `bash` fence, an untagged one, inline code, one more `sh` line — each makes the
+    /// comparison fail, naming the planted command.
+    #[test]
+    fn a_command_planted_in_any_form_fails_the_comparison() {
+        assert!(ONE_HOUR.ends_with('\n') && ONE_HOUR.contains("\n      - name: \"6 · "), "the plants below are indented as the workflow's steps are");
+        for line in [
+            "sudo mycelium rules",
+            "env A=1 mycelium rules",
+            "time mycelium rules",
+            "cd units && mycelium rules",
+            "! mycelium rules",
+            "if mycelium rules; then true; fi",
+            "/usr/local/bin/mycelium rules",
+            "a=$(date) b=$(mycelium rules)",
+            "echo \"$(uname -m) $(mycelium rules)\"",
+            "pip3 install mycelium-rules",
+            "uv pip install mycelium-rules",
+        ] {
+            for step in [format!("      - name: planted\n        run: |\n          {line}\n"), format!("      - run: {line}\n")] {
+                let err = walk_differs(FLEET, &format!("{ONE_HOUR}{step}")).expect_err(line);
+                assert!(err.contains("rules\"]"), "`{line}`: the planted command is the workflow's last, and the difference: {err}");
+            }
+        }
+        for (plant, names) in [
+            ("\n```bash\nmycelium rules\n```\n", "neither `sh`"),
+            ("\n```\nmycelium rules\n```\n", "neither `sh`"),
+            ("\nThen run `mycelium rules --format json`.\n", "inline `mycelium rules --format json`"),
+            ("\nOr `/usr/local/bin/mycelium rules`.\n", "inline `/usr/local/bin/mycelium rules`"),
+            ("\n```sh\nmycelium rules\n```\n", "are not the one-hour workflow's commands"),
+        ] {
+            let err = walk_differs(&format!("{FLEET}{plant}"), ONE_HOUR).expect_err(plant);
+            assert!(err.contains(names), "{plant:?}: {err}");
+        }
+        let without_venv = FLEET.replace(GUIDE_ONLY[0], "true");
+        assert!(walk_differs(&without_venv, ONE_HOUR).is_err(), "the stated difference is required, not merely allowed");
+    }
+
+    /// The extraction sees a command in every form a workflow can write one — the single-line `run:`, a wrapper
+    /// before it, a path-qualified binary, after `cd … &&`, a second `$(…)` on a line, one inside double quotes —
+    /// and nothing that only names the binary.
     #[test]
     fn the_workflow_extraction_sees_each_form_of_a_command() {
-        let yml = "  got=$(mycelium --version)\n  mycelium init \"$HOME/governed-call-py\" --template x\n  \
-                   mycelium test --faults grant units --config grant.toml 2> grant.err | tee grant.log || true\n  \
-                   MYCELIUM_BIN=mycelium python3 main.py | tee run.log\n  pip install -q \"https://github.com/$REPO/archive/refs/tags/$TAG.tar.gz\"\n  \
-                   grep -q 'mycelium explain --closure' recovery.log\n  install -m 0755 a/mycelium /usr/local/bin/mycelium\n  \
-                   got=$(pip show mycelium-py | sed -n 1p)\n  # mycelium doctor in a comment\n";
+        let yml = "steps:\n  - name: \"1 · one\"\n    run: sudo mycelium --version\n  - name: \"2 · two\"\n    run: |\n      \
+                   set -euo pipefail\n      got=$(mycelium rules --format json)\n      mycelium init \"$HOME/governed-call-py\" --template x\n      \
+                   mycelium test --faults grant units --config grant.toml 2> grant.err | tee grant.log || true\n      \
+                   MYCELIUM_BIN=mycelium python3 main.py | tee run.log\n      pip install -q \"https://github.com/$REPO/archive/refs/tags/$TAG.tar.gz\"\n      \
+                   grep -q 'mycelium explain --closure' recovery.log\n      install -m 0755 a/mycelium /usr/local/bin/mycelium\n      \
+                   # mycelium doctor in a comment\n      cd proj && /usr/local/bin/mycelium doctor node.toml > doctor.log\n      \
+                   echo \"a $(uname -m) b $(python3 --version)\"; time mycelium wire-check units\n      \
+                   if ! env X=1 mycelium declare; then echo no; fi\n      a=$(date) b=$(pip3 list)\n  - name: after\n    run: echo done\n";
         assert_eq!(
             workflow_commands(yml),
             [
                 "mycelium --version",
+                "mycelium rules --format json",
                 "mycelium init governed-call-py --template x",
                 "mycelium test --faults grant units --config grant.toml",
                 "MYCELIUM_BIN=mycelium python3 main.py",
                 "pip install -q \"https://github.com/RichardTathata/mycelium/archive/refs/tags/{{MYCELIUM_TAG}}.tar.gz\"",
+                "mycelium doctor node.toml",
+                "python3 --version",
+                "mycelium wire-check units",
+                "X=1 mycelium declare",
+                "pip3 list",
             ]
         );
+        let steps: Vec<u32> = run_lines(yml).into_iter().map(|(step, _)| step).collect();
+        assert_eq!((steps.first(), steps.last(), steps.len()), (Some(&1), Some(&0), 14), "{steps:?}");
     }
 
-    /// What the guide tells an agent to expect is what the workflow greps for, and the configuration it tells an
-    /// agent to write is what the workflow writes, line for line, in tables the configuration reference has a row for.
+    /// **The extraction fails closed.** A line that mentions the binary, pip or Python under a program the test
+    /// does not know is a failure, never a skipped line; so is a backtick substitution, which it does not read.
+    #[test]
+    fn the_workflow_extraction_refuses_what_it_cannot_classify() {
+        for line in ["xargs mycelium doctor < configs", "nohup python3 main.py", "uvx pip install x", "echo `mycelium --version`"] {
+            let yml = format!("steps:\n  - run: {line}\n");
+            assert!(std::panic::catch_unwind(|| workflow_commands(&yml)).is_err(), "`{line}` was passed over");
+        }
+        assert_eq!(workflow_commands("steps:\n  - run: xargs rm < files\n"), Vec::<String>::new(), "a line that names none of the three is not the extraction's");
+    }
+
+    /// **What the guide says a step prints, and writes, is that step's in the workflow — both ways.** Each
+    /// expectation the guide quotes under step N is a line step N of the workflow greps for; each line the workflow
+    /// greps for is quoted in the guide under the same step or listed in [`NOT_QUOTED`]; and the TOML the guide
+    /// gives a step is, line for line, what that step's `printf` appends, in tables the configuration reference has
+    /// a row for. The ports the guide names are the scaffold's.
     #[test]
     fn the_guides_expectations_and_configuration_are_the_one_hour_jobs() {
-        let mut expected = 0;
-        for line in FLEET.lines().filter(|l| l.starts_with("Expect: ")) {
-            for quoted in line.split('`').skip(1).step_by(2) {
-                let grepped = ONE_HOUR.contains(&format!("grep -q '{quoted}'")) || ONE_HOUR.contains(&format!("grep -q '^{quoted}'"));
-                assert!(grepped, "the workflow greps for no line `{quoted}`");
-                expected += 1;
-            }
-        }
-        assert_eq!(expected, 6, "every step from 3 on says what to expect");
-        let toml = fenced(FLEET, "toml");
-        assert_eq!(toml.len(), 6, "{toml:?}");
-        for line in toml {
-            assert!(ONE_HOUR.contains(&line), "the workflow writes no `{line}`");
-            if let Some(table) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
+        let (steps, greps, printfs) = (guide_steps(FLEET), workflow_expectations(ONE_HOUR), workflow_configuration(ONE_HOUR));
+        assert_eq!(steps.keys().copied().collect::<Vec<_>>(), [0, 1, 2, 3, 4, 5, 6], "the walk's six steps, after its preamble");
+        assert_eq!(greps.values().map(BTreeSet::len).sum::<usize>(), 16, "the workflow's greps were found: {greps:?}");
+        assert_eq!(greps.keys().copied().collect::<Vec<_>>(), [3, 4, 5, 6]);
+
+        let mut quoted_total = 0;
+        for (step, text) in &steps {
+            let quoted: BTreeSet<String> = text.lines().filter(|l| l.starts_with("Expect: ")).flat_map(|l| l.split('`').skip(1).step_by(2)).map(str::to_string).collect();
+            let grepped = greps.get(step).cloned().unwrap_or_default();
+            let not_quoted: BTreeSet<String> = NOT_QUOTED.iter().filter(|(s, _)| s == step).map(|(_, l)| l.to_string()).collect();
+            assert!(quoted.is_subset(&grepped), "step {step}: the guide expects {:?}, which the workflow's step does not grep for", quoted.difference(&grepped));
+            let unquoted: BTreeSet<String> = grepped.difference(&quoted).cloned().collect();
+            assert_eq!(unquoted, not_quoted, "step {step}: what the workflow greps for and the guide does not quote, then NOT_QUOTED");
+            quoted_total += quoted.len();
+
+            let toml: Vec<String> = fences(text).into_iter().filter(|(tag, _)| tag == "toml").flat_map(|(_, lines)| lines).collect();
+            assert_eq!(&toml, printfs.get(step).unwrap_or(&Vec::new()), "step {step}: the guide's TOML, then the workflow's printf");
+            for table in toml.iter().filter_map(|l| l.strip_prefix('[').and_then(|l| l.strip_suffix(']'))) {
                 assert!(CONFIGURATION.contains(&format!("\n| {table} |")), "docs/reference/configuration.md has no row for `{table}`");
             }
         }
+        assert_eq!(quoted_total, 6, "every step from 3 on says what to expect");
+        assert_eq!(printfs.keys().copied().collect::<Vec<_>>(), [4, 5], "steps 4 and 5 write a configuration: {printfs:?}");
+
+        let step3 = &steps[&3];
+        assert!(step3.contains("7950") && SCAFFOLD_NODE.contains("bind_port = 7950"), "the mesh port is the scaffold's");
+        assert!(step3.contains("8300") && SCAFFOLD_NODE.contains("http_port = 8300"), "the gateway port is the scaffold's");
+    }
+
+    /// The features the guide and `AGENTS.md` name are the release's, and the answer the guide says a default build
+    /// gives is the one `test --faults` prints.
+    #[test]
+    fn the_features_named_are_the_releases() {
+        let features = RELEASE.lines().find_map(|l| l.trim().strip_prefix("NODE_FEATURES:")).expect("release.yml sets NODE_FEATURES").trim();
+        assert!(features.split(',').count() >= 4 && features.contains("compliance"), "{features}");
+        assert!(FLEET.contains(&format!("(`{features}`)")), "the guide names the release's features: {features}");
+        assert!(ROOT_AGENTS.contains(&format!("    cargo run --features {features} --bin mycelium -- skills get fleet\n")), "AGENTS.md's checkout form builds the release's features: {features}");
+        assert!(ROOT_AGENTS.contains("    mycelium skills get fleet\n"), "AGENTS.md's published-binary form");
+        assert!(FLEET.contains("`not_in_build — compliance`") && include_str!("faults.rs").contains("\"not_in_build — {feature}\""), "the words are test --faults' own");
     }
 
     /// **Every subcommand the binary accepts is in the guide, and the guide names no other**: the guide's table, the
-    /// arms `main` dispatches and the usage `--help` prints are one set.
+    /// arms `main` dispatches and the usage `--help` prints are one set. A subcommand's sub-verbs (`tls ca`,
+    /// `skills list`) and flags are **not** compared: the guide names a few, and nothing here holds them.
     #[test]
     fn the_guides_subcommands_are_the_binarys() {
-        let (guide, dispatched, usage) = (guide_subcommands(FLEET), dispatched_subcommands(MAIN), usage_subcommands(MAIN));
+        let guide: BTreeSet<String> = guide_subcommands(FLEET).into_keys().collect();
+        let (dispatched, usage) = (dispatched_subcommands(MAIN), usage_subcommands(MAIN));
         assert!(dispatched.contains("wire-check") && dispatched.contains("skills") && dispatched.len() >= 9, "{dispatched:?}");
         assert_eq!(guide, dispatched, "the guide's table, then main's dispatch");
         assert_eq!(usage, dispatched, "the usage, then main's dispatch");
     }
 
-    /// The schema ids the guide names are exactly the ones `docs/reference/cli-json.md` lists.
+    /// **The schema ids, three ways.** Each id [`CLI_SCHEMAS`] gives a subcommand is a literal in the source named
+    /// for it; that set is `cli-json.md`'s and the guide's; and each row of the guide's table names exactly its
+    /// subcommand's ids. And the reverse, from the code: every `mycelium.*/N` literal in those sources is one of
+    /// the reference's or in [`NOT_CLI_DOCUMENTS`], so a schema constant added to a command's source without a
+    /// place in `cli-json.md` fails here.
     #[test]
-    fn the_guides_schema_ids_are_the_references() {
-        let (guide, reference) = (schema_ids(FLEET), schema_ids(CLI_JSON));
-        assert!(reference.contains(SCHEMA) && reference.contains("mycelium.design/declaration/1"), "{reference:?}");
-        assert_eq!(guide, reference, "the guide's ids, then cli-json.md's");
+    fn the_guides_schema_ids_are_the_references_and_the_binarys() {
+        let reference = schema_ids(CLI_JSON);
+        let mut mapped = BTreeSet::new();
+        let rows = guide_subcommands(FLEET);
+        for (subcommand, ids) in CLI_SCHEMAS {
+            let want: BTreeSet<String> = ids.iter().map(|(id, _)| id.to_string()).collect();
+            for (id, source) in ids {
+                assert!(source.contains(&format!("\"{id}\"")), "`{id}` is not a literal in the source named for `{subcommand}`");
+                for literal in schema_ids(source) {
+                    assert!(reference.contains(&literal) || NOT_CLI_DOCUMENTS.contains(&literal.as_str()), "`{literal}`, in the source of `{subcommand}`, is not in cli-json.md");
+                }
+            }
+            assert_eq!(rows.get(subcommand), Some(&want), "the guide's `{subcommand}` row, then its schema ids");
+            mapped.extend(want);
+        }
+        assert_eq!(CLI_SCHEMAS.len(), rows.len(), "a row per subcommand");
+        assert_eq!(mapped, reference, "the ids mapped to subcommands, then cli-json.md's");
+        assert_eq!(schema_ids(FLEET), reference, "the guide's ids, then cli-json.md's");
     }
 
     /// **The size, gated**: the root `AGENTS.md` is at most 2 KB (the row's bound), and a guide at most 6 KB, since

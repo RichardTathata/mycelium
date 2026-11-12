@@ -17,9 +17,11 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `mycelium skills list` names the guides; `--format json` prints either as one `mycelium.skills/1` document
   (additive-stable, goldens `tests/fixtures/cli/skills-*.json`, `docs/reference/cli-json.md`). A root `AGENTS.md`, at
   most 2 KB, points Codex, Cursor and Orca's workers at the command, and `CLAUDE.md` names both. Tests in
-  `src/agent_guide.rs` hold the guide to the code: its walk is the `one-hour` workflow's commands in order, with none
-  left out on either side; its subcommand table is `main`'s dispatch and the usage; its schema ids are
-  `cli-json.md`'s; both sizes are bounded; nothing served names a machine path or a credential. Source:
+  `src/agent_guide.rs` hold the guide to the code: its walk is the `one-hour` workflow's commands in order (one
+  stated difference, a virtual-environment line), from an extraction that fails on a workflow line it cannot classify;
+  what each step prints and writes is that step's in the workflow; its subcommand table is `main`'s dispatch and the
+  usage; its schema ids are `cli-json.md`'s and literals in each command's source; both sizes are bounded; nothing
+  served names a machine path or a credential. A subcommand's sub-verbs and flags are not compared. Source:
   `docs/reference/agent-skills/fleet.md`; feature page `docs/features/agent-guide.md`. Library:
   `mycelium::agent_guide` (`SKILLS`, `get`, `get_json`, `list_json`). **Not built:** a guide over a gateway route or
   an MCP resource (N1), an `AGENTS.md` written by `init`.

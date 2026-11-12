@@ -545,5 +545,30 @@ fn skills_refuses_on_stderr_with_nothing_on_stdout() {
     assert!(help.status.success() && help.stdout.is_empty() && String::from_utf8_lossy(&help.stderr).contains("mycelium skills get <name>"));
     // The node's own usage lists it, so `--help` and the guide's table name the same subcommands.
     let usage = run(&["--help"]);
-    assert!(String::from_utf8_lossy(&usage.stderr).contains("mycelium skills list | get <name>"), "{}", String::from_utf8_lossy(&usage.stderr));
+    assert!(String::from_utf8_lossy(&usage.stderr).contains("mycelium skills list | get <name> [--format text|json]  (agent guides)"), "{}", String::from_utf8_lossy(&usage.stderr));
+    assert!(String::from_utf8_lossy(&help.stderr).contains("Not the prompt skills a node serves"), "the two senses of `skills` are told apart where the command is");
+}
+
+/// **The guide's output rule, against the binary** (#770's review, F1). The agent guide says a usage error leaves
+/// stdout empty, and that a run that finds a problem still prints its document and exits 1. `doctor --format json`
+/// over a configuration `start()` would refuse is the second: exit 1, one `mycelium.doctor/1` document on stdout
+/// carrying the refusal. A usage error of the same command is the first: exit 2, nothing on stdout.
+#[test]
+fn a_doctor_that_would_refuse_prints_its_document_and_exits_1() {
+    let dir = std::env::temp_dir().join(format!("mycelium-cli-json-doctor-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let config = dir.join("node.toml");
+    // The secure profile with nothing it requires configured: `start()` refuses, naming each unmet guarantee.
+    std::fs::write(&config, "profile = \"secure-single-domain\"\n").unwrap();
+    let o = run(&["doctor", config.to_str().unwrap(), "--format", "json"]);
+    assert_eq!(o.status.code(), Some(1), "{}", String::from_utf8_lossy(&o.stderr));
+    let doc: Value = serde_json::from_str(&stdout(&o)).unwrap_or_else(|e| panic!("stdout is not one JSON document ({e}):\n{}", stdout(&o)));
+    assert_eq!(doc["schema"], "mycelium.doctor/1");
+    assert!(doc["refusal"].is_string() || doc["refusal"].is_object(), "the document carries the refusal: {}", doc["refusal"]);
+
+    let usage = run(&["doctor", "--format"]);
+    assert_eq!(usage.status.code(), Some(2));
+    assert!(usage.stdout.is_empty() && !usage.stderr.is_empty(), "a usage error leaves stdout empty");
+    let _ = std::fs::remove_dir_all(&dir);
 }
