@@ -284,5 +284,13 @@ for each *Does not hold* and *Partly* row; it makes no claim about member remova
 - **A row's Status moves to Meets** by citing the verifying code and the forged-record test, in the PR that builds
   them.
 - The lint pass re-verifies the citations (`/wiki-lint`, check 1); nothing in CI does.
+- **Where the rows are planned:** [`docs/plans/external-critique-2026-11-12.md`](../../plans/external-critique-2026-11-12.md)
+  (proposed 2026-11-12) groups every *Does not hold*, *Partly* and *Bounded, not detected* row into rows CR2–CR5
+  and CR7, and says which need a KV value change, an on-disk change or a wire change. A row built there moves
+  its Status here. **From its review (#773): a signature does not meet (c) for a record whose *presence* cancels**
+  — a member's tombstone or garbage value planted before the genuine record wins LWW, and the owner's own write
+  still returns `Ok` (`src/agent/state_machine.rs:981`–`983` discards a `Superseded` receipt). Such a record
+  needs a node-local durable copy read first, *anything but never-written reads present*, and a check of the
+  write's receipt.
 
 Log: [`.log/2026-11-12-owner-signed-rule.md`](.log/2026-11-12-owner-signed-rule.md).
