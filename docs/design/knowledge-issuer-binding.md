@@ -2,7 +2,8 @@
 
 **Status:** P1 **adopted and implemented** 2026-09-24 (`src/knowledge/issuer.rs`, `src/agent/knowledge_keys.rs`).
 P2 **adopted and implemented** 2026-09-24 (`src/mandate/grant.rs`). H3 **adopted and implemented** 2026-09-24
-(`src/mandate/protected.rs`, §6). Plan:
+(`src/mandate/protected.rs`, §6) — as a primitive; no resolve path calls it (2026-11-12,
+`docs/wiki/dev/owner-signed-records.md`). Plan:
 [`docs/plans/boundary-h.md`](../plans/boundary-h.md) (rev 0.3, proposed) §6 P1 and §7 P2. Threat model:
 [`docs/threat-model.md`](../threat-model.md) §5 Boundary H (revision 3 draft).
 
@@ -124,7 +125,8 @@ member holding a power no mandate gave it can offer it to others as a service: a
 
 **Not claimed.**
 - Colluders resolve with their own policy. H3 keeps a laundered power away from **honest** readers and makes it
-  visible; it does not stop a cohort using it among its own members.
+  visible — as a primitive; no resolve path calls it, so a reader gets this only by calling `filter_protected`
+  itself (2026-11-12). It does not stop a cohort using it among its own members.
 - The report is a return value. Wiring it to a metric, an audit record or a knowledge `Observation` is not yet
   built.
 - Retained epochs are in memory.

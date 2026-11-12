@@ -599,7 +599,7 @@ Each step states its claim, its assumptions, where it is enforced, and what the 
 | # | Claim | Assumptions | Enforced at | Evidence source | Kind |
 |---|---|---|---|---|---|
 | 1 | Setup: a declared cohort under the confined profile, plus an observer | A trusted operator's declaration; an enforcing CNI | — | `ConfinementReport` and the deployment test | Replay **and** deployment |
-| 2 | A laundered power does not resolve for the observer | Observer protects the namespace | H3, the observer's resolve path | Observation plus counter | Replay |
+| 2 | A laundered power does not resolve for the observer | Observer protects the namespace | H3 — `filter_protected`, which the observer must call itself: no resolve path in the tree calls it (§17) | Observation; no counter is wired | Replay |
 | 3 | Mutual support counts once | Observer trusts the declaration | H5 in `classify` | Verdict reasons | Replay |
 | 4 | A challenge storm is visible and does not decide, within bounds | Threshold of 2 | H1 plus ingestion bounds | Verdict, and measured resource use | Replay, measured |
 | 5 | A rewritten history is proven | A retained checkpoint covers the rewritten position; the unwitnessed suffix stays unproven | H4 | `Equivocation` with two source signatures | Replay |
@@ -789,3 +789,27 @@ and in the item's ADR, never silently.
 - **Found by tests while building H5.** A union-find fed only by supporters missed a silent member bridging two
   cohorts. The graph now includes every configured and in-force member.
 
+---
+
+## 17. The owner-signed rule: the concrete shape of this plan's fix (2026-11-12)
+
+Every mitigation above that survives a colluding member has one shape: the record a reader decides on carries its
+owner's signature, and the reader verifies it — P1's issuer binding, K2's signed heads, P2's signed grants with
+possession proofs, H3's advertisement bound to authority, H4's source-signed checkpoints. The maintainer adopted that
+shape as a rule on 2026-11-12: **a security-bearing record kept in the gossip KV is signed by its owner and
+verified at read.** It is stated, with its four conditions and what it does not cover, on the wiki page
+[`docs/wiki/dev/owner-signed-records.md`](../wiki/dev/owner-signed-records.md).
+
+That page also holds **the inventory**: every KV namespace a decision reads, enumerated from the owned-namespace
+table (`refuse_protected_key`) and `src/lib.rs`'s ownership table, with the verifying code cited or *does not hold*
+written. It is the starting list for the hardening plan, and it corrects two readings of this plan's delivery
+record (§16):
+
+- **H3 is a primitive, not an enforcement.** `filter_protected` (`src/mandate/protected.rs`) has no caller outside
+  its own tests at `7d4c86a6`, so no resolve path filters an unbacked advertisement. The threat model's H3 entry
+  and §9's step 2 are corrected to say so (2026-11-12).
+- **H4 covers a rewritten position a retained checkpoint witnesses, not a truncated tail.** The audit chain has no
+  signed head, and a chain whose newest records were tombstoned verifies.
+
+Nothing here reopens §12: colluders among themselves, a holder of the fleet CA key and self-assertion stay outside,
+and the rule teaches Layer I nothing.

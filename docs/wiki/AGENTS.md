@@ -55,6 +55,7 @@ the more specific one and is *linked* from the other.
 | Deterministic replay | [`dev/testing/replay.md`](dev/testing/replay.md) | the nondeterminism inventory, the seams, scenarios A/B/C, the corpus |
 | Verification policy | [`dev/testing/verification-policy.md`](dev/testing/verification-policy.md) | the five rules (enumerate · evidence · discovery · adversarial review · feature pages), the gaps that produced them, where each is enforced |
 | Federated domains · the threat model | [`dev/security.md`](dev/security.md) | the trust boundary, the edge and consumer sides, non-merger, TLS pinning |
+| Records a decision reads from the gossip KV | [`dev/owner-signed-records.md`](dev/owner-signed-records.md) | the owner-signed rule, its four conditions, what is outside it, and the inventory — a new security-bearing record adds or moves a row |
 | Scoped mandates · knowledge · control | the page of the subsystem they fence or feed | they are core surfaces, not companions — link from `security.md` where they carry authority |
 | The AE slice (public half) | [`dev/dev.md`](dev/dev.md) → *V3 runtime authorisation and evidence* | the seam, the evidence journal, enforcement points; the adapters and exporter are the private companion's |
 | A companion crate | `dev/companions/<crate>.md` | design, rationale, gates — and its row in [`onboarding-checklist.md`](dev/companions/onboarding-checklist.md) |

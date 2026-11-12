@@ -53,6 +53,24 @@ it reads the diff and the code. Tell it its final message *is* the report.
    report that no page does. Before F3 closes, a field, route or verb whose feature is at `page = "todo"` or
    belongs to no feature is reported but is not a blocking finding; after F3 closes, it is a finding.
 
+8. **Records read from the gossip KV** (the owner-signed rule, `docs/wiki/dev/owner-signed-records.md`). Any
+   admitted member can write or tombstone any key. For every KV record the change reads to make a decision —
+   authority, admission, cancellation, retention, audit — give the grep that found the reads, and say which of
+   these holds, citing the code: (a) the record carries a signature under the key of the principal its key path
+   names, or, where the path names no principal or names the record's subject, of the authority the reader is
+   configured to trust for it; (b) the reader verifies it, that the body's identifying fields equal the key's,
+   and that it is current (a sequence, issue time or supersession rule checked at read), before use; (c) a record
+   that fails is treated as absent, absence fails closed — or to a fallback the change names — and the failure is
+   counted; (d) a test writes the record as another member would (forged, replayed, tombstoned) and shows the
+   reader is not moved. Ask of each read what the reader does when the record is *deleted*: an absence that
+   permits is a finding. The page's inventory gives each record a **Status**. A decision read with (a)–(d) not
+   all holding is a finding unless the change adds or updates the record's row with the Status that is true of
+   it — **Partly** or **Does not hold**, naming the failing condition — or shows the record is outside the rule:
+   **Outside: availability** (the worst forgery is a refusal or a delay), **Outside: no decision**, or
+   **Outside: bounded soft state** (the worst case detected and bounded, the detector and the bound cited in the
+   row). Soft state with a bound and no detector — or one detected only at the owner while another node acts on
+   it — is **Bounded, not detected**, which is a finding until the change cites the detector. A row at **Meets** without the verifying `file:line` and the forged-record test is a finding.
+
 ## The report and what to do with it
 
 The reviewer returns findings ranked by severity, each with `file:line`, a concrete failure scenario, and
