@@ -275,8 +275,8 @@ revoked grant on a restarted node. Each seen failing first. The inventory rows m
 use, a separate decision (§5 D12). **Does not survive the tombstone horizon at a second gateway:** a marker's
 tombstone or the marker itself is all a second gateway has, and once a planted tombstone is collected (3 000 s at
 the defaults, L3) the key reads *never written* there again; a grant valid longer than that horizon can be
-re-armed at a gateway that never recorded the use itself. Stated, and bounded by keeping the honour window below
-the horizon or by D12. A member can also *burn* a grant by planting a tombstone before its use: a refusal, which
+re-armed at a gateway that never recorded the use itself. Stated. No bound is built: D12 decided concurrent
+admission is stated, and the honour window is not shortened by this row. A member can also *burn* a grant by planting a tombstone before its use: a refusal, which
 is availability and outside the rule. Does not change the grant's wire form to the client. I4's collector
 (`identity-and-lifecycle.md`, row I4) must also collect signed markers and releases; the row says so when it is
 written.
@@ -477,7 +477,7 @@ answer is still to be written here (the State line above).
 
 #### CR10 · A model of the acceptor *(L12; Ph2; M5)*
 
-**State (2026-11-12):** ***buildable*, startable in parallel with wave 1b** (it touches no shipped code). The tool is Stateright (D2).
+**State (2026-11-12):** ***buildable*, startable in parallel with wave 1b** (it touches no shipped code). The tool is Stateright (D2). The lease area models CR11's margin as designed; until CR11 lands, the `what-is-proven.md` row says that area checks the design, not the code.
 
 **What:** a model, checked in CI, of the single-decree acceptor with the three things the hand-written
 interleavings cover one case at a time: **slot reuse** after a release or a lapsed lease, the **lease's
@@ -530,7 +530,7 @@ that was §5 D15 (decided: not built). Fencing stays the application's contract,
 
 #### CR12 · `GossipConfig` is `#[non_exhaustive]`, with a constructor *(N4, N6)*
 
-**State (2026-11-12):** ***buildable*, inside wave 1b** (D3, D11): the next MINOR, `default()` plus assignment, no builder.
+**State (2026-11-12):** **inside wave 1b** (D3, D11), *buildable* for `GossipConfig` (D3): the next MINOR, `default()` plus assignment, no builder. The other config structs are enumerated in the PR and included only on the maintainer's yes.
 
 **What:** `#[non_exhaustive]` on `GossipConfig` (and on the config structs that have grown in a MINOR —
 `GatewayTlsConfig`, `OidcConfig`, `TlsConfig` — enumerated first), so a new field stops being a compile break for
@@ -729,7 +729,8 @@ draft made inside a row; the review of #773 found them, and they are here now.
   cfg lines and the two feature-off test crates are the cost of "embedded, pay for what you use". *Recommendation:*
   not now. Measure first which flags an adopter actually builds without; the gateway-as-a-crate move collides
   with CR6 and should follow it if it happens at all.
-  **Decided 2026-11-12:** no feature-flag restructuring now. No row.
+  **Decided 2026-11-12:** no feature-flag restructuring now; measured first (which flags an adopter builds
+  without) if it is reopened. No row.
 - **D6 · Signed signals, and end-to-end encryption for Individual scope?** (L6–L8; Ph1's second half.) Two
   separable things. **Signed signals** (the emitter signs a signal; a receiver verifies before it acts) closes
   reply forgery and the bare-`sender` row; it is a wire change (a new variant, as `SignedData` was) and a
@@ -742,12 +743,16 @@ draft made inside a row; the review of #773 found them, and they are here now.
   now (CR17) and do not plan encryption until an adopter's requirement names it. Both are wire-version decisions
   and belong with the anti-entropy one (D8).
   **Decided 2026-11-12:** measure signed RPC requests and replies first, and decide signed signals with that measurement in hand; state relay confidentiality as a limit in the threat model (CR17); no end-to-end encryption is planned.
+  *The measurement has no row yet; written when taken up.*
 - **D7 · SWIM authentication?** (L5.) *Options:* a MAC under a fleet-derived key on each datagram; require SWIM
   off under `secure-single-domain` as the federation profile does; or state the limit. It is more than eviction: with the default quorum sized from the peer view (L11), a forged `Dead` may shrink a
   quorum, from outside the membership. *Recommendation:* state it now with that consequence (CR17); CR9 removes
   the consequence for the exclusive verbs; make the secure profile's requirement the next step, because turning a liveness mechanism off in a
   profile is cheap and a keyed datagram is a design of its own (key distribution, rotation with the CA).
-  **Decided 2026-11-12:** state the limit now, with the quorum consequence (CR17); then require SWIM off in the secure profile. No keyed datagram is planned.
+  **Decided 2026-11-12:** state the limit now, with the quorum consequence (CR17); then require SWIM off in the secure profile. A keyed datagram is not planned now; it is a design of its own.
+  *The secure-profile requirement has no row yet; written when taken up.* **Proposed, pending the maintainer —
+  this sentence was not put to them:** it follows D14's rule, joining the next `secure-single-domain` revision
+  that changes for another reason.
 - **D8 · Anti-entropy entries that carry their origin's signature?** (L1.) Already recorded as "a wire change, a
   separate decision" (`what-is-proven.md`, [*Anti-entropy entries authenticated*](../operations/what-is-proven.md#anti-entropy-entries-authenticated); the inventory § *Layer I*). The owner-signed rule is the answer
   that needs no wire change **for a record whose forgery is the risk. It is not sufficient for a presence-bearing
@@ -780,6 +785,7 @@ draft made inside a row; the review of #773 found them, and they are here now.
   two gateways at once is to be prevented (a consensus claim per use) or stated. *Recommendation:* state it, and
   offer the `FleetConsensus` scope for the grants an adopter marks as needing it.
   **Decided 2026-11-12:** concurrent admission of a single-use grant is stated, not prevented; the `FleetConsensus` scope is offered for the grants an adopter marks as needing it.
+  *That offer has no row yet; written when taken up.*
 - **D13 · Two choices inside CR7.** (i) Whether, and after how many releases, a v1 catalogue line stops
   verifying. (ii) Whether the library's `Provisioner` with no trusted publisher installs nothing by default — a
   change of a library default for anyone who builds one in code. *Recommendation:* (i) one release of both,

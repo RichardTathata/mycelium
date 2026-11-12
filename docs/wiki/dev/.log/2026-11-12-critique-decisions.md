@@ -10,10 +10,10 @@ as the plan recommended. The plan is now **agreed**, rev 0.3; every row carries 
   CR2's signed markers and releases) and under I2 (CR5f is written with it).
 - **Positions that are now decisions, for whoever builds:** the exclusive verbs refuse without an electorate by a
   deprecation cycle, counter → warning → refusal (D1); Layer I may refuse an inbound entry for its stamp only after
-  a release of counting, default-on with a recorded carve-out in runtime-invariants (D16) — the carve-out is
-  written in the PR that builds the refusal, not before; the acceptor's model is Stateright (D2); no signed
+  a release of counting, **and only if the counter is quiet and the slow-clock case has an acceptable answer**;
+  then default-on, with the carve-out written in that PR (D16); the acceptor's model is Stateright (D2); no signed
   anti-entropy (D8), no end-to-end encryption planned (D6), no keyed SWIM datagram (D7), no library fenced write
-  (D15), no feature-flag restructuring (D5), no OpenAPI schema before a route table (D4).
+  (D15), no feature-flag restructuring — measured first (which flags an adopter builds without) if it is reopened (D5), no OpenAPI schema before a route table (D4).
 - **Not buildable yet, though decided:** CR9 until the single-node quickstart's answer is in its row; CR13's
   refusal until the counter has run a release; CR4's signing PRs until its measurement; CR5's groups until they are
   written as rows.

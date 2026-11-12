@@ -430,7 +430,8 @@ note and goes through the standing review as any row does. No spike ships. The t
 
 *Note (rev 0.19, 2026-11-12):* the collector this row builds must also collect the **signed use markers and signed
 releases** that CR2's first PR writes under `grant/…/used/` ([critique plan](external-critique-2026-11-12.md), CR2),
-under the same retention floor (D-5). Whichever of the two lands second states it in its PR.
+under the same retention floor (D-5), and CR2 states how its node-local use record is retained and collected, under
+the same floor. Whichever of the two lands second states it in its PR.
 
 Decided (D2): scope prefix; holder = the gateway; second mandate slot; `Refused` on revoke; `is_entitled`'s `call:`
 arm (*superseded by D-6: no `is_entitled` arm; a `call:` mandate's issuer is its holder and the envelope's

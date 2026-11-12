@@ -173,7 +173,7 @@ is the state of play).
 - **Wave 1a, released in v2.40.0:** I0, I1, I3, I5, each closed on evidence in the plan's §8.
 - **Wave 1b (one MINOR), next:** I4 (cancellation under a `call:` mandate), I2 (CA succession), I7 (the developer's
   identity), each written from its spike note in `docs/plans/spikes/`; and with them, from the critique plan, CR2's
-  first PR (the grant use marker), CR13's counter and CR12 (`#[non_exhaustive]` on `GossipConfig`). A row is built only once its header says
+  first PR (the grant use marker), CR13's counter and CR12 (`#[non_exhaustive]` on `GossipConfig`). A row is built only once its header (or, for a critique-plan row, its State line) says
   *buildable*.
 - **Wave 2 (one MINOR), the developer surface:** N1 and N3–N7 (N7 the Orca plugin). N3 (`--format json`) is delivered,
   unreleased (#767); N5 needs nothing from wave 1; N4's identity half and N7 wait on I7. The examples and records
