@@ -26,6 +26,13 @@
 #   unqualified ones (`use std::time::Instant`), and `fs as <alias>` imports **plus every use of
 #   that alias** — the last because `persistence.rs` aliases `tokio::fs` to `tfs` and was otherwise
 #   invisible to this check entirely.
+#   A bare `fs` imported from `std` or `tokio` — a grouped `use std::{fs, path::Path, …}` (one line or
+#   many, nested groups beside it, `pub use`, indented inside a module), `fs::{self, …}` in such a
+#   group, `use std::fs;` — **plus every bare `fs::` call after it** is seen since 2026-11-12. Until
+#   then it was not: `mycelium-core/src/tls.rs` (`use std::{fs, path::Path, sync::Arc};`, 23
+#   production lines of TLS identity I/O) and `mycelium-core/src/config.rs` (2) counted 0 and sat
+#   outside the baseline. Only a top-level `fs` of the group counts (`use std::{sync::{fs}}` is not
+#   std's `fs`), and `crate::fs::` / `self::fs::` (a local module) never do.
 #   It does not parse Rust: a call reached through a re-export this script does not know about, or
 #   through a type alias, is invisible to it. That is a real gap, and the honest mitigation is that
 #   the baseline makes *movement* visible even when it cannot attribute it.
@@ -159,6 +166,42 @@ alias_pattern() {
     [ -z "$a" ] && continue
     extra="$extra|(^|[^:a-zA-Z_])$a::(sleep|interval|timeout|Instant)"
   done <<< "$time_aliases"
+
+  # The same gap for the filesystem (2026-11-12): a bare `fs` imported from `std` or `tokio` makes
+  # every `fs::read(…)` / `fs::write(…)` a filesystem call the qualified `std::fs::` / `tokio::fs::`
+  # patterns never see. `mycelium-core/src/tls.rs` writes `use std::{fs, path::Path, sync::Arc};`
+  # and its TLS identity I/O was invisible to this check. Read from whole `use` statements, like
+  # `time` above (one line or many, `pub use`, any indentation): `use std::fs;`, `use
+  # std::fs::{self, …}`, and `fs` or `fs::{self, …}` as a **top-level** item of a `use std::{…}` /
+  # `use tokio::{…}` group, whose nested groups are skipped by depth (`sync::{fs}` is not std's
+  # `fs`). The call-site alternation has the same left guard as `time`'s, so `std::fs::read` is not
+  # counted twice and `crate::fs::` / `self::fs::` (a local module) are not counted at all. The
+  # import line itself enables nothing and is not counted.
+  local fs_bare
+  fs_bare=$(perl -0777 -ne '
+      my $hit = 0;
+      while (/\b(?:pub(?:\([^)]*\))?\s+)?use\s+([^;]*);/gs) {
+        my $u = $1;
+        $u =~ s/\s+//g;
+        $u =~ s/^:://;
+        next unless $u =~ /^(?:std|tokio)::(.*)$/s;
+        my $rest = $1;
+        if ($rest =~ /^fs(?:::\{self[,}].*)?$/s) { $hit = 1; next }
+        next unless $rest =~ /^\{(.*)\}$/s;
+        my ($g, $depth, $item, @items) = ($1, 0, "");
+        for my $c (split //, $g) {
+          if ($c eq "," && $depth == 0) { push @items, $item; $item = ""; next }
+          $depth++ if $c eq "{";
+          $depth-- if $c eq "}";
+          $item .= $c;
+        }
+        push @items, $item;
+        for my $i (@items) { $hit = 1 if $i =~ /^fs(?:::\{self[,}].*)?$/s }
+      }
+      print "fs\n" if $hit;' "$file" 2>/dev/null || true)
+  if [ -n "$fs_bare" ]; then
+    extra="$extra|(^|[^:a-zA-Z_])fs::"
+  fi
   printf '%s' "$extra"
 }
 
