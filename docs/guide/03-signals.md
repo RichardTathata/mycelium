@@ -181,7 +181,8 @@ not create holes in the gossip graph. A temporarily overloaded node remains a
 routing participant; it just stops doing work.
 
 **Group-scoped signals and routing efficiency.** Group-scoped signals still
-flood the whole mesh; it's just that only group members act on them. Locality ranks capability
+reach the whole mesh epidemically (by default each hop sends to the group's members among its
+forwarding peers plus up to `epidemic_extra_peers` others); only group members act on them. Locality ranks capability
 providers; it is not a signal scope and does not constrain propagation. Budget
 for flooding when sizing the transport; admission rules are not bandwidth or
 confidentiality boundaries.
