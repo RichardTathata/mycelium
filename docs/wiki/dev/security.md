@@ -334,7 +334,7 @@ under `log/{row}` and `clog/{row}` and refuses a prefix inside one — derived f
 rows of `OWNED_KV_PREFIXES`, so the two cannot drift. **A new component stream is classified only as far as this:**
 `every_log_stream_in_the_table_is_classified_for_the_log_routes` fails on a `log/{name}/…` key in `src/lib.rs`'s
 ownership table that is neither a row nor a stated application stream; nothing derives streams from the `append`
-call sites, so a stream with no such key in that table is open until someone adds the row (the table's doc says
+call sites, and `check-kv-namespaces.sh` leaves the log verbs out of its call set, so a stream with no such key in that table is open until someone adds the row (the table's doc says
 so). Rule 1's enumeration found no other door that reads a stream by a name the caller chooses — no MCP tool,
 no A2A skill, no companion route — and no dependant: the companions read their streams in process and `mycelium-py`'s
 `ReasonClient.trace` reads `/gateway/reason/trace/{run_id}`. **Left open, stated, a follow-up PR:** `GET

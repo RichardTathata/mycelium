@@ -1846,10 +1846,11 @@ pub(crate) struct OwnedStream {
 /// here nor on that test's stated application list — and on a row here the ownership table does not name; and
 /// `scripts/check-kv-namespaces.sh` fails a `format!("{name}/…")` or a constant in production code whose head has
 /// no row in that table and no allow-list entry, which is how a new stream name reaches the table. **Not gated:**
-/// nothing derives the streams from the `append` call sites. A component that appends to a stream whose name is
-/// assembled from pieces, or whose head already has a KV row or an allow-list entry (as `cn/`, `wiki/` and
-/// `reason/` have), and that adds no `log/{name}/…` row to the ownership table, is open on all five log routes
-/// until someone adds the row here.
+/// nothing derives the streams from the `append` call sites, and `check-kv-namespaces.sh` leaves the log verbs out
+/// of its call set. A component that passes a stream name as a plain literal to `append` / `scan_log` /
+/// `subscribe_log*`, or assembles it from pieces, or uses a head that already has a KV row or an allow-list entry
+/// (as `cn/`, `wiki/` and `reason/` have), and that adds no `log/{name}/…` row to the ownership table, is open on
+/// all five log routes until someone adds the row here.
 pub(crate) const OWNED_LOG_STREAMS: &[OwnedStream] = &[
     OwnedStream {
         prefix: "cn/",
