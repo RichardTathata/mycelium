@@ -65,13 +65,13 @@ work.
   rather than promising none ([what-is-proven § the check-then-act window](../operations/what-is-proven.md#check-then-act-window)).
 - **Not built, for the `call:` mandate:** no gateway mints one and no door cancels one yet. A provider does not
   read one from a call. The authority's half is built
-  ([I4](../plans/identity-and-lifecycle.md#3--rows), row I4, *The build*; [§99](../guide/deprecations.md#99-the-execution-authority-verifies-a-call-mandate-a-call-mandate-in-the-first-slot-is-never-established-the-call-key-family-is-owned-2410-identity-and-lifecycle-i4-pr-1a)).
+  ([I4](../plans/identity-and-lifecycle.md#3--rows), row I4, *The build*; [§100](../guide/deprecations.md#100-the-execution-authority-verifies-a-call-mandate-a-call-mandate-in-the-first-slot-is-never-established-the-call-key-family-is-owned-2410-identity-and-lifecycle-i4-pr-1a)).
 - **A `call:` checkpoint in the KV is verified at read:** a copy its gateway did not sign, or that names another
   call, is treated as absent and counted in `GET /stats` `call_checkpoints_refused`; an older copy written back and
   a tombstone are counted in `call_checkpoints_stale` and `call_checkpoints_missing`. A member that overwrites the
   key can still deny a cancel, until the mandate's window ends, at a provider that had not read it
   ([ledger](../operations/what-is-proven.md#call-checkpoint-replay))
-  ([§99](../guide/deprecations.md#99-the-execution-authority-verifies-a-call-mandate-a-call-mandate-in-the-first-slot-is-never-established-the-call-key-family-is-owned-2410-identity-and-lifecycle-i4-pr-1a)).
+  ([§100](../guide/deprecations.md#100-the-execution-authority-verifies-a-call-mandate-a-call-mandate-in-the-first-slot-is-never-established-the-call-key-family-is-owned-2410-identity-and-lifecycle-i4-pr-1a)).
 - **Evidence:** the ledger rows [running work stops](../operations/what-is-proven.md#running-work-stops) and
   [after a revocation every door runs nothing](../operations/what-is-proven.md#revocation-every-door-runs-nothing).
 

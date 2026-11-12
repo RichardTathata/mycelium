@@ -3,9 +3,10 @@
 `docs/plans/identity-and-lifecycle.md` row I4 gains its build record (rev 0.20): the split (1a, 1b, 2, 3, 4); the
 maintainer's decisions on Q1 (`StopRecord` unchanged; `NamedStop`), Q2 (the cancel receipt, none on the A2A or MCP
 wire) and H1 (a KV copy of a call's checkpoint that fails verification is absent, not refused, with detectors; the
-cancel-forward is the primary cancel path and the KV checkpoint the fallback); the build's engineering defaults; three
-differences from the agreed row put to the maintainer and left open; one question left for PR 1b (`cm` outside the
-envelope's signature).
+cancel-forward is the primary cancel path and the KV checkpoint the fallback); the build's engineering defaults; the
+maintainer's decisions on three differences the build raised (exit 7's refusal is `cancel_not_from_issuer`; a member's
+own unframed call is not cancellable, not built; exit 12's sweep ceiling is the 5 s clamp); one question left for
+PR 1b (`cm` outside the envelope's signature).
 
 PR 1a is the authority's half, in `src/agent/gateway_authority.rs` and `src/mandate/grant.rs`:
 - `ExecutionAuthority::assess_call` takes lock-order row 43 once and, under that hold, verifies the mandate
@@ -23,8 +24,11 @@ PR 1a is the authority's half, in `src/agent/gateway_authority.rs` and `src/mand
   held (#775's M1).
 - The one KV record it reads, `call/{gateway}/{term}/checkpoint`, is verified at read whatever its sequence (body =
   key, then the gateway's signature). A failing copy is absent and counted; an older copy over a newer one held, and
-  a tombstone where a copy was read, are counted too. A first read after such a replay cannot be detected at the
-  reader: that residual is on the inventory row and `what-is-proven.md`.
+  a tombstone where a copy was read, are counted too. A replay is counted only at a node that already holds the
+  revocation: a provider it reaches first — admitting later, restarted, or already running the call — counts nothing.
+  That residual is on the inventory row and `what-is-proven.md`.
+- A gateway is the canonical name of its node (`check_call_mandate`): an alias spelling of one IPv6 address verified
+  under the same key, counted as another gateway and named another KV key.
 - No entitlement table entitles a `call:` scope (`EntitlementTable::is_entitled`), so no `GrantVerifier::check`
   caller finds one valid.
 - `named_stop_records` names the mandate a stopped registration ran under.

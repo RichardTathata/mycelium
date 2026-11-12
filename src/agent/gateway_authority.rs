@@ -579,7 +579,7 @@ impl CallFeed {
 /// window (one map lookup under row 43) and reads the key only if it does, so its work follows the writes that
 /// concern this node, not the `call:` checkpoints the fleet's KV holds nor the windows this node holds. It yields
 /// to the runtime every 64 keys. When the queue overflowed it re-reads every held window instead, 256 per hold of
-/// row 43, yielding between holds.
+/// row 43, yielding between holds and taking the keys written meanwhile.
 pub(crate) async fn feed_call_checkpoints(ctx: &std::sync::Arc<super::TaskCtx>, authority: &ExecutionAuthority, feed: &mut CallFeed) {
     let mut members: Option<std::collections::HashMap<crate::node_id::NodeId, crate::knowledge::issuer::MemberKeys>> = None;
     let mut read = |by: &crate::mandate::PrincipalId, scope: &str| {
@@ -590,7 +590,28 @@ pub(crate) async fn feed_call_checkpoints(ctx: &std::sync::Arc<super::TaskCtx>, 
         let members = members.get_or_insert_with(|| super::gateway_member_keys(ctx));
         authority.read_call_checkpoint(by, scope, ctx.hlc.decision_now_ms(), members, |key| mycelium_core::ops::kv_get(ctx, key));
     };
-    if feed.lagged.swap(false, std::sync::atomic::Ordering::AcqRel) {
+    // The written keys queued so far, each read if this node holds its window; a yield every 64.
+    macro_rules! drain {
+        () => {{
+            let mut n = 0usize;
+            while let Ok(key) = feed.keys.try_recv() {
+                #[cfg(test)]
+                authority.call_keys_seen.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if let Some((by, scope)) = call_key_scope(&key) {
+                    read(&by, &scope);
+                }
+                n += 1;
+                if n.is_multiple_of(64) {
+                    tokio::task::yield_now().await;
+                }
+            }
+        }};
+    }
+    // The fallback: the queue overflowed, so some written key was dropped. What is queued is discarded — the walk
+    // reads every held window's current value — and the windows are walked in short holds. Keys written while it
+    // walks are taken between holds, so the queue does not fill behind a long walk; if it overflows all the same,
+    // the flag is up again and the walk repeats.
+    while feed.lagged.swap(false, std::sync::atomic::Ordering::AcqRel) {
         while feed.keys.try_recv().is_ok() {}
         #[cfg(test)]
         authority.call_rescans.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -603,21 +624,10 @@ pub(crate) async fn feed_call_checkpoints(ctx: &std::sync::Arc<super::TaskCtx>, 
             }
             after = Some(last);
             tokio::task::yield_now().await;
-        }
-        return;
-    }
-    let mut n = 0usize;
-    while let Ok(key) = feed.keys.try_recv() {
-        #[cfg(test)]
-        authority.call_keys_seen.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        if let Some((by, scope)) = call_key_scope(&key) {
-            read(&by, &scope);
-        }
-        n += 1;
-        if n.is_multiple_of(64) {
-            tokio::task::yield_now().await;
+            drain!();
         }
     }
+    drain!();
 }
 
 /// One piece of running work (closure plan C10).
@@ -834,6 +844,9 @@ impl ExecutionAuthority {
         // at most `RECLAIM_PER_HOLD` each, repeated until none is left — so a hold stays short and a node admitting
         // calls faster than one hold's worth per sweep still catches up. Work under a forgotten scope is past its
         // mandate's window and is denied below by that, whatever the view still holds.
+        // The holds run one after another: `sweep` is synchronous and does not yield between them. Each is released
+        // before the next is taken, so another taker of row 43 can get in between, but nothing here makes it wait
+        // its turn; at the caps the whole drain was measured at 89 ms (lock-order row 43).
         while self.state.lock().unwrap_or_else(|e| e.into_inner()).reclaim_call_windows(now_ms) == RECLAIM_PER_HOLD {}
         let denied: Vec<u64> = {
             let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -2330,6 +2343,33 @@ mod call_tests {
         assert_eq!(q.view_sizes(), (0, 0, 0));
         let at_cap = mint(&gw_key(), GW, &"t".repeat(crate::mandate::grant::CALL_TERM_MAX_BYTES), OP, RES, &args(), 1_000, 60_000);
         assert_eq!(state(&assess(&q, GW, &at_cap, 2_000)), Some(MandateState::Established));
+    }
+
+    /// **#775's confirm round: a gateway is the canonical name of its node.** One IPv6 node has many spellings, all
+    /// verifying under its one key. Only `node:{NodeId}` is established; the aliases are not, hold nothing, and so
+    /// cannot count as further gateways against the per-gateway cap or name other KV keys. Seen failing first: with
+    /// the canonical check taken out, each alias is `Established` and the node holds four windows for one gateway.
+    #[test]
+    fn a_gateway_is_the_canonical_name_of_its_node() {
+        let p = provider(false);
+        let node = NodeId::new("::1", 7603).unwrap();
+        let key = SigningKey::from_bytes(&[53u8; 32]);
+        let members = HashMap::from([(node.clone(), MemberKeys { retained: vec![key.verifying_key().to_bytes()], ..Default::default() })]);
+        let canonical = format!("node:{node}");
+        for (i, alias) in ["node:[0:0:0:0:0:0:0:1]:7603", "node:[0::1]:7603", "node:[::0:1]:7603", "node:[::1]:07603"].into_iter().enumerate() {
+            if alias == canonical {
+                continue;
+            }
+            // The alias parses to the same node, so the signatures verify: only the spelling differs.
+            assert_eq!(crate::knowledge::IssuerId::new(alias).and_then(|a| a.member_node()), Some(node.clone()), "{alias}");
+            let c = mint(&key, alias, &format!("a{i}"), OP, RES, &args(), 1_000, 60_000);
+            let a = p.assess_call(alias, OP, RES, &args(), &c, 2_000, &members, no_local);
+            assert!(matches!(state(&a), Some(MandateState::Unknown(_))), "{alias}: {a:?}");
+        }
+        assert_eq!(p.view_sizes(), (0, 0, 0), "an alias holds nothing");
+        let c = mint(&key, &canonical, "a9", OP, RES, &args(), 1_000, 60_000);
+        assert_eq!(state(&p.assess_call(&canonical, OP, RES, &args(), &c, 2_000, &members, no_local)), Some(MandateState::Established), "{canonical}");
+        assert_eq!(p.view_sizes().2, 1);
     }
 
     /// **#775's L2, L5 and L7.** A `call:` mandate that enumerates its call's operation *and another* is refused: it

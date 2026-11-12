@@ -199,7 +199,13 @@ impl EntitlementTable {
 
     /// Entitle `authority` to grant mandates for `scope`.
     pub fn entitle(&mut self, scope: impl Into<String>, authority: PrincipalId) {
-        self.scopes.entry(scope.into()).or_default().insert(authority);
+        let scope = scope.into();
+        if scope.starts_with(CALL_SCOPE_PREFIX) {
+            // Said, not silently accepted: `is_entitled` answers `false` for every `call:` scope.
+            tracing::warn!(%scope, %authority, "an entitlement for a call: scope entitles nothing: a call: mandate is a gateway's cancellation handle, verified apart from every table; ignored");
+            return;
+        }
+        self.scopes.entry(scope).or_default().insert(authority);
     }
 
     /// Is `authority` entitled for `scope`?
@@ -354,8 +360,8 @@ impl GrantVerifier {
 ///
 /// 1. **Shape.** The scope is `call:{term}`: one scope per call, so a call's records are found from its term. The
 ///    term is not empty, at most [`CALL_TERM_MAX_BYTES`] and holds no `/`: it is one segment of the call's keys.
-/// 2. **The issuer rule.** `established_by == holder == gateway`, a `node:` principal — else
-///    [`GrantVerdict::NotEntitled`].
+/// 2. **The issuer rule.** `established_by == holder == gateway`, a `node:` principal in its node's canonical
+///    spelling — else [`GrantVerdict::NotEntitled`].
 /// 3. **Issuance.** The signature verifies under a current key of that member.
 /// 4. **Window.** Inside it at `now_ms`, and no longer than [`GRANT_TTL_CAP_SECS`] — a receiver holds a `call:`
 ///    scope's records until its window ends, so an unbounded window would be unbounded memory.
@@ -385,6 +391,13 @@ pub fn check_call_mandate(
     let Some(issuer) = IssuerId::new(gateway) else {
         return GrantVerdict::Unverifiable(UnverifiableReason::UntrustedExternal);
     };
+    // The principal is the **canonical** name of the node it parses to (#775's confirm round). One node has many
+    // spellings — `node:[::1]:7603`, `node:[0:0:0:0:0:0:0:1]:7603` — which all verify under its one key; taken as
+    // written, each would be a gateway of its own to the per-gateway cap and would name a different KV key, where
+    // the cancel is never found.
+    if issuer.member_node().is_none_or(|node| format!("node:{node}") != gateway) {
+        return GrantVerdict::NotEntitled;
+    }
     match verify_signed_by(&issuer, &m.canonical_bytes(), &grant.signature, members, external) {
         Authenticity::Current { .. } => {}
         Authenticity::Revoked { .. } => return GrantVerdict::SignedUnderRevokedKey,

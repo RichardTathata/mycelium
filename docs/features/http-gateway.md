@@ -55,7 +55,7 @@ token resolves to its own principal is `token_identities_are_qualified_by_the_is
   consistent set and get refuse a key in a namespace the substrate or a companion owns — **403** `protected_key`,
   whatever the scopes, naming the route that owns it — so `kv:write` and `kv:read` reach nothing another scope
   guards. `/gateway/kv/keys` lists names only, and not those under `grant/`, `mailbox/`, `audit/`, `sys/audit/`, `sys/audit-checkpoint/`,
-  `sys/client-cert/`, `mandate/`, `rights/` or `sched/`. One table decides both directions
+  `sys/client-cert/`, `mandate/`, `rights/`, `sched/` or `call/`. One table decides both directions
   (`OWNED_KV_PREFIXES`, in [`authz.rs`](../../src/agent/http/authz.rs)); the tests are
   `the_raw_kv_routes_refuse_governance_intents`, in [`http_tests.rs`](../../src/agent/http/http_tests.rs), and one
   per read door in [`kv_read_tests.rs`](../../src/agent/http/kv_read_tests.rs).
