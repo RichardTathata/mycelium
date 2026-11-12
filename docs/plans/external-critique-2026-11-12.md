@@ -1,14 +1,21 @@
 # The third-party critique of 2026-11-12 — verification and the plan that answers it
 
-**Status:** proposed, awaiting the maintainer's decisions (§5), rev 0.1, 2026-11-12. Nothing in §4 is agreed or
-buildable until §5 is answered; the two exceptions are recorded as already decided in §3 (the KV read guard, in
-progress, and the owner-signed rule, written in #772).
+**Status:** proposed, awaiting the maintainer's decisions (§5), rev 0.2, 2026-11-12 (rev 0.2 takes the independent
+review of this plan's PR, #773: the use-marker row rewritten — a KV record alone cannot carry it; the lease margin
+and the fenced write restated; the drift refusal given its receiver-clock, replay and ordering cases and moved to a
+decision; the WAL checksum's downgrade case; catalogue rollback's limits; four inventory rows that had no plan row;
+§6 split into what is wrong and what is understated; every choice the review found inside a row moved to §5).
+Nothing in §4 is agreed or buildable until §5 is answered, and §4's order is the **proposed** order. Two things
+are agreed and recorded in §3: the KV read guard, in progress, and the owner-signed rule, written in #772.
 
-The critique is vendored unchanged at
-[`external/2026-11-12-360-critique.md`](external/2026-11-12-360-critique.md): the reviewer's summary, then the
-reviewer's reply to the project's first response. **The reviewer's full per-layer document was offered and has not
+The critique is vendored at
+[`external/2026-11-12-360-critique.md`](external/2026-11-12-360-critique.md), its text unchanged: the reviewer's
+summary, then the reviewer's reply to the project's first response (one marked block in its header is the
+project's, not the reviewer's). **The reviewer's full per-layer document was offered and has not
 been received**, so every finding here is the summary's one line, with whatever `file:line` the summary gave. Where
-the summary gives no location, the verification found its own, and says how.
+the summary gives no location, the verification found its own, and says how. The project's first response, which
+the reply answers item by item, was not kept as a document; its six-item list is given in the vendored file's
+header, marked as the project's.
 
 The reviewer states the method: six independent code readers, each layer's lead finding confirmed against the code,
 nothing built or run. This verification is the same kind: every finding was read against `main` at `156ca329`
@@ -32,11 +39,13 @@ counts, and an ordered list of code areas. In short:
   stated, several are limits the repository already states (the reviewer says so; the table says which), and
   three — the far-future stamp, the lease's skew bound, reply forgery — are stated only in a code comment, a
   design note or an upgrade note, where an adopter does not look.
-- **Two findings are not confirmed:** self-install is not on by default (no library or node path installs
-  anything; a stem does only with a `[hosts]` table and a trusted publisher), and `TaskCtx` is not the cause of
-  the `too_many_arguments` allows (a quarter of them are in a crate that has no `TaskCtx`).
-- **The counts are right.** Eleven of thirteen match within a few per cent; the two that differ (clippy
-  invocations, review-history comments) differ in what was counted, stated in §2.4.
+- **Three findings are not confirmed:** self-install is not on by default in code (a stem installs only with a
+  `[hosts]` table and a trusted publisher) — though the reviewer is right that it is the headline (P5); `TaskCtx`
+  was not shown to be the cause of the `too_many_arguments` allows (16 of 57 are outside the root crate; N13); and
+  the upgrade notes do state the two conditional protections as conditional (P3).
+- **The counts are right.** Of the seventeen rows of §2.4, two differ in what was counted (clippy invocations,
+  review-history comments), one states a cause that was not shown (N13), and the rest match within a few per cent.
+- **The critique's "Sound" column was not verified** (§7).
 - **The reviewer's reply is right about the two conditional protections** (`gateway_caller.rs:1348`, `:1405`–`1410`),
   and the v2.40.0 upgrade notes already say so (§2.3). No release note is corrected by this PR.
 
@@ -44,7 +53,18 @@ What the verification found that the critique did not:
 
 - **The far-future stamp is not an anti-entropy property.** A live `Data` or `SignedData` frame takes the same
   path (`connection.rs:1060`, `:1254`): the clock is clamped, the entry is stored at its own stamp. A fix at the
-  anti-entropy arm alone would leave the live door open.
+  anti-entropy arm alone would leave the live door open. And one such write to `cap/{victim}/…` de-advertises
+  the victim for good: the capability freshness check quarantines the entry (`src/capability.rs:565`–`566`) and
+  no refresh by the owner can out-stamp it.
+- **A presence-bearing record cannot be made safe in the KV alone.** While any member can out-stamp the owner, a
+  tombstone or a garbage value planted *before* the genuine record wins LWW, and the door's own write reports
+  success (`src/agent/state_machine.rs:981`–`983` discards a receipt whose application rung is `Superseded`).
+  The #773 review found this against the first draft of CR2; the row now rests on a node-local durable record.
+- **A forged SWIM `Dead` composes with the live-peer quorum.** It removes a peer from `peers`
+  (`mycelium-core/src/swim.rs:208`–`210`), and the default quorum is `peers.len() + 1`
+  (`src/agent/consensus_handle.rs:336`): on a default `[tls]` fleet a non-member with UDP reach may be able to
+  shrink two views until each holds a local majority, with no partition. Inferred, not run; a live TCP peer may
+  be re-added, so it may need repeating (§7).
 - **A WAL checksum is an on-disk format change**, not the "no wire change" item the reply calls cheap. The WAL has
   no magic and no version byte to discriminate on, and the golden fixture rule is *a format change adds a
   directory; it never edits one* (`tests/fixtures/persistence/README.md:14`).
@@ -70,7 +90,7 @@ row that answers it, or the decision in §3 or §5.
 | A1 | The grant use marker is a gossip key; a member can tombstone it to re-arm a grant; two gateways can admit the same grant concurrently | **confirmed** by #772 | [inventory](../wiki/dev/owner-signed-records.md), *Grants* table, `grant/…/used/{door}`: *Does not hold — open*; also `consumed`, `revoked` and the request record. `what-is-proven.md` § *Not yet shown*, first row | CR2 |
 | A2 | The audit chain has no signed head or external anchor; tail truncation is undetectable | **confirmed** by #772 | inventory, *Audit* table, *The audit chain's head*: a truncated or deleted chain verifies `Ok` (`src/agent/audit.rs:917`). Each record is signed and verified (*Meets*, per record) | CR3 |
 | A3 | `cap/`, `req/`, `prov-shed/` are unauthenticated; one member can trigger installs, suppress healing or attract calls | **confirmed, narrower** by #772 | inventory, *Capabilities* table. Forged demand installs only a catalogued, provenance-checked artifact within budget and self-election (`provisioner.rs:1065`); `filter_protected` (H3) exists with no caller | CR4 |
-| A4 | A caller envelope is trusted if signed by any key of the sending node, so any member can assert any principal or scope | **confirmed, narrower** — the reviewer's own reply narrows it: true for a principal with no key (`token:`, `oidc:` without exchange), not for a certificate holder's signed call (I1), a signed grant decision (I3) or an exchanged token (I5) | inventory, *Identity* table, the key-less principal row and the bare-`sender` row; `what-is-proven.md:109` | CR5 |
+| A4 | A caller envelope is trusted if signed by any key of the sending node, so any member can assert any principal or scope | **confirmed, narrower** — the reviewer's own reply narrows it: true for a principal with no key (`token:`, `oidc:` without exchange), not for a certificate holder's signed call (I1), a signed grant decision (I3) or an exchanged token (I5) | inventory, *Identity* table, the key-less principal row and the bare-`sender` row; `what-is-proven.md` § *Not yet shown* | CR5 |
 | A5 | The fix needs no Layer I law: owner-signed records verified at read | **agreed and adopted** — the rule, #772 | `owner-signed-records.md` § *It does not contradict "detection, not prevention"* | — |
 
 ### 2.2 · Layer by layer
@@ -78,15 +98,15 @@ row that answers it, or the decision in §3 or §5.
 | | Critique | Verdict | Evidence, and how it was found | Row |
 |---|---|---|---|---|
 | **Layer I** | | | | |
-| L1 | Anti-entropy applies unsigned entries (`connection.rs:843-868`) | **already stated** | `what-is-proven.md:123` (*Anti-entropy entries authenticated*: "carries no author and no signature and is applied by LWW"); `threat-model.md:85`–`88`; inventory § *Layer I* | §5 D8 |
-| L2 | …with unbounded timestamps, so a `u64::MAX` stamp pins a key forever | **confirmed, wider** — and stated only in a module comment. `hlc.observe(entry.timestamp)` (`mycelium-core/src/connection.rs:852`) clamps the **receiver's clock** to wall + `max_clock_drift_ms` (default 5 min; `hlc.rs:283`–`285`, `config.rs:2147`), then the entry is applied with `timestamp: entry.timestamp` unchanged (`connection.rs:862`). LWW is `incoming_ts > curr.timestamp` with no bound (`store.rs:591`–`594`). A local write stamps about wall-now, so it never beats `u64::MAX`; only a tombstone or a greater value at exactly that stamp does (`store.rs:595`–`598`). The tombstone sweep collects only stamps below its cutoff (`store.rs:967`), so a poisoned tombstone is never collected. **Wider:** live `Data` and `SignedData` frames take the same path (`connection.rs:1060`, `:1254`). The clamp is a rate-limited `warn!` with no counter. `hlc.rs:76`–`83` says so: "the poisoned entry would win LWW against local rewrites until the wall clock catches up", and "Full inbound rejection of out-of-bound updates (store-level quarantine) is a candidate for the next wire-policy pass." Not in `threat-model.md` or `what-is-proven.md` (`grep -n -i "far-future\|drift\|u64::MAX"`) | found: `grep -n "hlc.observe" mycelium-core/src/connection.rs`; `grep -n "observe\|drift" mycelium-core/src/hlc.rs`; `sed -n 591,598p mycelium-core/src/store.rs` | CR13 |
-| L3 | Deleted keys can resurrect after about 50 minutes | **confirmed**; the number is exact from defaults. Tombstones older than `default_ttl × propagation_window_secs × 10` seconds are removed outright (`src/agent/tasks.rs:1029`–`1036`; defaults 5 and 60, `config.rs:2095`, `:2098` → 3 000 s). After that a returning node's live entry meets no tombstone and is inserted; the `StateResponse` arm has no horizon check (`connection.rs:843`–`871`). Needs a node that held the value and missed the tombstone for longer than that. Stated generically in `docs/design/data-lifecycle-and-erasure.md:22`–`23` ("anti-entropy can resurrect a value…") and `docs/operations/data-erasure.md:6`, with no number; not in `threat-model.md` or `what-is-proven.md` (`grep -n -i resurrect`). The knob is `propagation_window_secs` | found: `grep -rn sweep_stale_tombstones src mycelium-core/src` | CR17 |
+| L1 | Anti-entropy applies unsigned entries (`connection.rs:843-868`) | **already stated** | `what-is-proven.md` [*Anti-entropy entries authenticated*](../operations/what-is-proven.md#anti-entropy-entries-authenticated) ( "carries no author and no signature and is applied by LWW"); `threat-model.md:85`–`88`; inventory § *Layer I* | §5 D8 |
+| L2 | …with unbounded timestamps, so a `u64::MAX` stamp pins a key forever | **confirmed, wider** — and stated only in a module comment. `hlc.observe(entry.timestamp)` (`mycelium-core/src/connection.rs:852`) clamps the **receiver's clock** to wall + `max_clock_drift_ms` (default 5 min; `hlc.rs:283`–`285`, `config.rs:2147`), then the entry is applied with `timestamp: entry.timestamp` unchanged (`connection.rs:862`). LWW is `incoming_ts > curr.timestamp` with no bound (`store.rs:591`–`594`). A local write stamps about wall-now, so it never beats `u64::MAX`; only a tombstone or a greater value at exactly that stamp does (`store.rs:595`–`598`). The tombstone sweep collects only stamps below its cutoff (`store.rs:967`), so a poisoned tombstone is never collected. **Wider:** live `Data` and `SignedData` frames take the same path (`connection.rs:1060`, `:1254`), and WAL replay applies a stored stamp as it is (`src/agent/lifecycle.rs:502`–`511`). **Worse above Layer I:** a far-future write to `cap/{victim}/…` fails `CapEntry::is_fresh` (`src/capability.rs:565`–`566`: quarantined when more than three refresh intervals ahead) and beats every refresh by the owner, so one write de-advertises a victim permanently. The clamp is a rate-limited `warn!` with no counter. `hlc.rs:76`–`83` says so: "the poisoned entry would win LWW against local rewrites until the wall clock catches up", and "Full inbound rejection of out-of-bound updates (store-level quarantine) is a candidate for the next wire-policy pass." Not in `threat-model.md` or `what-is-proven.md` (`grep -n -i "far-future\|drift\|u64::MAX"`) | found: `grep -n "hlc.observe" mycelium-core/src/connection.rs`; `grep -n "observe\|drift" mycelium-core/src/hlc.rs`; `sed -n 591,598p mycelium-core/src/store.rs` | CR13 |
+| L3 | Deleted keys can resurrect after about 50 minutes | **confirmed**; the number is exact from defaults, and a floor. Tombstones older than `default_ttl × propagation_window_secs × 10` seconds are removed outright (`src/agent/tasks.rs:1029`–`1036`; defaults 5 and 60, `config.rs:2095`, `:2098` → 3 000 s; a `default_ttl` of 0 auto-sizes upward with the fleet, `config.rs:2267`–`2268`), by a sweep on a tick of at least 60 s (`tasks.rs:1014`). After that a returning node's live entry meets no tombstone and is inserted; the `StateResponse` arm has no horizon check (`connection.rs:843`–`871`). Needs a node that held the value and missed the tombstone for longer than that. Stated generically in `docs/design/data-lifecycle-and-erasure.md:22`–`23` ("anti-entropy can resurrect a value…") and `docs/operations/data-erasure.md:6`, with no number; not in `threat-model.md` or `what-is-proven.md` (`grep -n -i resurrect`). The knob is `propagation_window_secs` | found: `grep -rn sweep_stale_tombstones src mycelium-core/src` | CR17 |
 | L4 | No checksum on WAL records | **confirmed.** A record is `[u32 LE length][payload]` (`mycelium-core/src/persistence.rs:1222`–`1234`); replay sees a zero or oversized length, a file ending inside a record, and a payload that fails to decrypt or decode (`persistence.rs:597`–`624`). A flipped bit that still decodes is replayed. `snapshot.bin` has none either. **Narrower in effect:** torn and corrupt are told apart and a corrupt record refuses the start or quarantines; a configured at-rest cipher makes a decrypt failure corrupt. The three other logs say so themselves: `src/agent/journal.rs:61` ("there is no checksum on disk"), `mycelium-tuple-space/src/store.rs:1669`, `mycelium-blackboard/src/wal.rs:560` ("for want of a checksum") | found: `git grep -n -i "crc\|checksum" -- mycelium-core/src/persistence.rs src/agent/journal.rs mycelium-tuple-space/src mycelium-blackboard/src` | CR14 |
-| L5 | SWIM is unauthenticated UDP even under TLS | **confirmed; already stated** for the federation profile only. Any datagram that decodes is acted on (`mycelium-core/src/swim.rs:356`–`368`); a `Dead` update removes the peer and evicts its writer (`swim.rs:208`–`210`); on by default (`config.rs:2120`). The code says it: `config.rs:307`–`308` ("unauthenticated UDP … signs nothing"), `swim_membership.rs:103`–`105`. Stated at `threat-model.md:252` (off in the enforced profile) and `shared-responsibility-matrix.md:44` ("plaintext, unauthenticated"). **Not stated:** that on an ordinary `[tls]` fleet a host that reaches the UDP port, member or not, can evict a peer. An injected address still has to pass the mTLS handshake | found: `grep -n "sign\|verify\|mac" mycelium-core/src/swim.rs` (no authentication) | §5 D7 |
+| L5 | SWIM is unauthenticated UDP even under TLS | **confirmed; already stated** for the federation profile only. Any datagram that decodes is acted on (`mycelium-core/src/swim.rs:356`–`368`); a `Dead` update removes the peer from `peers` and evicts its writer (`swim.rs:208`–`210`); on by default (`config.rs:2120`). **It composes with L11:** the default quorum is `peers.len() + 1`, so forged `Dead` updates shrink the view a lock's quorum is sized from (inferred, not run). The code says it: `config.rs:307`–`308` ("unauthenticated UDP … signs nothing"), `swim_membership.rs:103`–`105`. Stated at `threat-model.md:252` (off in the enforced profile) and `shared-responsibility-matrix.md:44` ("plaintext, unauthenticated"). **Not stated:** that on an ordinary `[tls]` fleet a host that reaches the UDP port, member or not, can evict a peer and shrink a quorum. An injected address still has to pass the mTLS handshake | found: `grep -n "sign\|verify\|mac" mycelium-core/src/swim.rs` (no authentication) | §5 D7 |
 | **Layer II** | | | | |
 | L6 | Signal frames are unsigned (`framing.rs:193-204`) | **confirmed** at the frame: `WireMessage::Signal` has no signature field (`mycelium-core/src/framing.rs:193`–`204`), and the receive arm checks only that the sender is not removed (`connection.rs:881`) — the bare-`sender` row of the #772 inventory. **Narrower:** payloads that decide carry their own signatures — consensus messages, the gateway caller envelope, grants and possession proofs | inventory, *The bare RPC's `sender`* | §5 D6 |
-| L7 | …so RPC replies are forgeable | **confirmed, narrower.** A reply is matched on an 8-byte nonce and `expected == sig.sender` (`src/agent/mod.rs:1520`–`1521`); the sender is emitter-written. A member that **saw the request** can answer as the target, first reply wins. One that did not must guess the nonce (`fastrand::u64`, `src/agent/rpc.rs:451`; its predictability was not assessed). With `group_aware_forwarding` (default on) an Individual frame goes direct when a route exists (`src/agent/tasks.rs:368`–`370`), so a relay sees a request only on the flood fallback. Stated in code (`src/agent/mod.rs:596`–`599`) and in `docs/guide/deprecations.md:539`–`540`; not in the threat model. No reply authentication exists | found: `grep -n "rpc_reply_sender\|pending.get" src/agent/mod.rs` | §5 D6 |
-| L8 | …and mandates travel in clear past hop TLS, readable by every relay | **confirmed, narrower.** TLS is per hop and a relaying member reads what it relays; that is a confidentiality limit on payloads and envelopes. It is not mandate theft: a grant is signed by its authority and the possession proof by the holder over this call's operation, resource and arguments (`src/agent/gateway_caller.rs:226`–`231`). The philosophy now says a boundary is not a confidentiality mechanism (`docs/philosophy.md:13`, #771); the threat model has no line on relay confidentiality | — | §5 D6 |
+| L7 | …so RPC replies are forgeable | **confirmed, narrower.** A reply is matched on an 8-byte nonce and `expected == sig.sender` (`src/agent/mod.rs:1520`–`1521`); the sender is emitter-written. A member that **saw the request** can answer as the target, first reply wins. One that did not would need the nonce, which is `fastrand::u64` (`src/agent/rpc.rs:451`) — not designed as a secret, the same generator whose outputs travel as frame nonces (`mycelium-core/src/framing.rs:479`); unassessed, and no weight is put on it. With `group_aware_forwarding` (default on) an Individual frame goes direct when a route exists (`src/agent/tasks.rs:368`–`370`), so a relay sees a request only on the flood fallback — **which is the common path in a fleet of any size**: forwarding targets are capped at `2·⌈log2 N⌉`, floor 8 (`mycelium-core/src/config.rs:967`–`988`), so above about nine nodes most unpinned pairs have no direct route. Stated in code (`src/agent/mod.rs:596`–`599`) and in `docs/guide/deprecations.md:539`–`540`; not in the threat model. No reply authentication exists | found: `grep -n "rpc_reply_sender\|pending.get" src/agent/mod.rs` | §5 D6 |
+| L8 | …and mandates travel in clear past hop TLS, readable by every relay | **confirmed** as said ("in clear"): TLS is per hop and a relaying member reads what it relays — and by L7's fan-out cap, relays are the common path. Context, not a rebuttal: a relayed mandate is readable and not usable, since a grant is signed by its authority and the possession proof by the holder over this call's operation, resource and arguments (`src/agent/gateway_caller.rs:226`–`231`). The philosophy now says a boundary is not a confidentiality mechanism (`docs/philosophy.md:13`, #771); the threat model has no line on relay confidentiality | — | §5 D6 |
 | L9 | Quorum-evidence writes amplify each signal by N | **confirmed, narrower; already stated.** Each node that admits a signal of a kind it works on or recently asked about writes `sys/quorum/{kind}/{sender}` and gossips it (`connection.rs:944`–`955`); gated by `has_worker`/`is_pinned` (`mycelium-core/src/signal.rs:1191`), at most once a second per key per node (`signal.rs:870`–`876`), bounded per kind and per second. An Individual signal is one write; a Cluster signal with a worker on every node is up to N. `threat-model.md:205`–`206` states the bound; `deprecations.md:706`–`711` says it "bounds a rate, not a total" and the keys are not collected | — | CR17 (stated, not built) |
 | L10 | Nonce is marked seen before validation | **already stated** for KV frames (`threat-model.md:89`–`92`: "A refused frame still consumes its nonce … recovered by the next anti-entropy exchange"). **Confirmed, and not stated, for signals:** the nonce is marked after the removed-sender check and before admission (`connection.rs:884`–`886`, `:898`), in one set shared with KV frames and keyed by the nonce alone (`mycelium-core/src/seen.rs:35`–`36`). A suppressed signal has no repair | found: `grep -n mark_and_check mycelium-core/src/*.rs` | CR17 |
 | **Layer III** | | | | |
@@ -95,23 +115,23 @@ row that answers it, or the decision in §3 or §5.
 | L13 | Leases have no skew margin | **confirmed; stated in the design note only.** A reader ends a lease on its own wall clock, `wall_now_ms > exp` (`src/consensus_life.rs:275`), against the proposer's wall-clock expiry (`src/consensus.rs:1394`); the holder's deadline is `started + ttl` with nothing subtracted (`consensus_handle.rs:822`). `docs/design/lock-lifecycle.md:316`–`320` states it: "another holder can then be granted while the first is still inside its own deadline … nothing in the substrate knows δ". Not in `threat-model.md` or `what-is-proven.md` (`grep -n -i skew`) | — | CR11 |
 | L14 | Nothing checks the fencing token | **confirmed, by design; already stated.** A token is issued and returned (`src/agent/overlay_consistent.rs:193`–`196`); no library write path checks one — `consistent_set` writes by plain `kv_set` after the commit, and the only resource that refuses a stale token is `examples/distributed_lock.rs`. `threat-model.md:596`: "the effect — fenced **at the resource** with the commit's token"; `docs/guide/04-consensus.md` § fencing says the same. The contract is the application's | found: `git grep -n -i fenc -- 'src/*.rs' 'mycelium-*/src/*.rs'` | CR11 |
 | **Layer IV** | | | | |
-| L15 | Catalogue signatures carry no version or expiry, so any member can roll the fleet back (`catalog.rs:154-168`) | **confirmed, narrower.** The signed message is a domain tag, the entry-format version, kind, artifact hash, the two requirements and the capability bytes (`mycelium-wasm-host/src/catalog.rs:154`–`168`): no sequence, issue time, expiry or revocation. Withdrawal is a plain tombstone, so a withdrawn line any member re-writes verifies (`provisioner.rs:537`–`539`). **Narrower:** it is re-offer and re-selection at the next install; no code was found that replaces a running install. **Wider:** candidates are ranked by `(size_bytes, est_install_secs)` (`provisioner.rs:1147`), both outside the signature, so the replayer can make its line win. Already in the #772 inventory (`installable/…`: *Partly*) | found: `grep -n "provenance_ok\|sort_by_key" mycelium-wasm-host/src/provisioner.rs` | CR7 |
+| L15 | Catalogue signatures carry no version or expiry, so any member can roll the fleet back (`catalog.rs:154-168`) | **confirmed, narrower.** The signed message is a domain tag, the entry-format version, kind, artifact hash, the two requirements and the capability bytes (`mycelium-wasm-host/src/catalog.rs:154`–`168`): no sequence, issue time, expiry or revocation. Withdrawal is a plain tombstone, so a withdrawn line any member re-writes verifies (`provisioner.rs:537`–`539`). **Narrower only in that no single write swaps a running install** — none was found on the catalogue path. It is reachable by composition: a member forces the next install by shedding a band with a forged `prov-shed` (A3), or waits for a probe failure, which withdraws and "this round reinstalls" (`provisioner.rs:947`–`967`); the replayed line is then chosen. **Wider:** candidates are ranked by `(size_bytes, est_install_secs)` (`provisioner.rs:1147`), both outside the signature, so the replayer can make its line win. Already in the #772 inventory (`installable/…`: *Partly*) | found: `grep -n "provenance_ok\|sort_by_key" mycelium-wasm-host/src/provisioner.rs` | CR7 |
 | L16 | Native activation is unconfined unless declared | **confirmed; already stated**, and it is the documented default: `mycelium-wasm-host/src/activation.rs:9`–`12`, `docs/reference/unit-file.md:363`–`365` ("**By default it is unconfined**"). The command comes from the stem's own unit file, not from a gossiped line, so a member or a publisher cannot supply one. Declared confinement fails closed. Not in the threat model | — | CR8 |
 | L17 | Stems stage blobs before checking provenance | **confirmed.** The ticker stages every catalogue entry of a declared kind by its size hint (`mycelium-wasm-host/src/stem.rs:505`–`517`); `provenance_ok` runs later, inside the provision round. The hint is unsigned; the ceiling is the hint or `max_stage_bytes` (`http_source.rs:437`); the staged bytes must hash to the id. Already in the #772 inventory, same row | — | CR7 |
 | **Layer V** | | | | |
 | L18 | Protected kinds are checked by hand at 9 sites, preflight at about 10 | **confirmed, narrower.** Nine gateway handler sites (`mesh.rs:116`, `:171`, `:503`, `:656`, `:750`; `signals.rs:22`, `:72`, `:142`; `overlay.rs:886`), plus three outside the gateway (`provider_enforcement.rs:238`, `exchanged_token.rs:51`, `mycelium-wasm-host/src/confine.rs:100`). Eight handler calls of `ae_preflight` (`mcp_bridge.rs:163`; `a2a.rs:873`, `:1263`; `federation_routes.rs:113`; `grants.rs:350`, `:826`; `llm_bridge.rs:170`, `:311`), the public wrapper (`authz.rs:808`), the provider (`provider_enforcement.rs:280`) and the exposure door (`door.rs:208`). **Narrower:** each site calls one shared predicate (`is_protected_kind`, `src/agent/mod.rs:258`) and one decision function; the *call* is what is hand-wired. There is no single door function and no typed extractor. What bounds it today: the scope layer is central and deny-by-default; the C7 bypass matrix (`src/lib_tests.rs`, `test_c7_the_bypass_matrix_no_door_runs_revoked_work`) and `scripts/check-causal-doors.py` enumerate doors from hand-kept lists, not from the router | found: `git grep -n "refuse_protected_kind(\|refuse_unobservable_kind(\|refuse_unservable_kind(" -- 'src/agent/http/*.rs' ':!*_tests.rs'`; `git grep -n "ae_preflight(" -- 'src/*.rs' ':!*_tests.rs'` | CR6 |
 | L19 | Raw KV reads have no namespace guard (`kv.rs:13-25`), so `kv:read` reads grants and audit | **confirmed** on `main`: `gw_kv_get` reads the store with no guard (`src/agent/http/kv.rs:13`–`17`); `refuse_protected_key` is called on writes only. `docs/operations/rbac.md:71` says "application keys only" of both verbs, which overclaims for `GET`. **Wider:** the log scan and subscribe doors (`overlay.rs:587`, `:646`, `:714`) call no guard | — | CR1 (in progress) |
-| L20 | Default TLS keeps the CA key on every node | **already stated.** True of the default `[tls]` mode (`cert_pem: None` re-signs with the CA key, `mycelium-core/src/config.rs:187`–`190`, `tls.rs:534`–`535`), warned at start unless the profile is `dev` (`src/agent/guarantee.rs:598`), stated at `threat-model.md:486`–`487`, `:547` and `what-is-proven.md:122`; the off-node mode is proven (`what-is-proven.md` — *A TLS node starts without the fleet CA's private key*) and required by `secure-single-domain` | — | none |
+| L20 | Default TLS keeps the CA key on every node | **already stated.** True of the default `[tls]` mode (`cert_pem: None` re-signs with the CA key, `mycelium-core/src/config.rs:187`–`190`, `tls.rs:534`–`535`), warned at start unless the profile is `dev` (`src/agent/guarantee.rs:598`), stated at `threat-model.md:486`–`487`, `:547` and `what-is-proven.md` [*Recovery from a compromised fleet CA key*](../operations/what-is-proven.md#recovery-from-compromised-fleet-ca-key); the off-node mode is proven (`what-is-proven.md` — *A TLS node starts without the fleet CA's private key*) and required by `secure-single-domain` | — | none |
 
 ### 2.3 · The two conditional protections, and the defaults
 
 | | Critique | Verdict | Evidence | Row |
 |---|---|---|---|---|
-| P1 | The exchanged token is required for an `oidc:` principal only where the provider sets `exchange_audience`; otherwise the check returns `Ok(None)` (`gateway_caller.rs:1348-1353`) | **confirmed.** `src/agent/gateway_caller.rs:1348`: `…filter(|v| v.config().exchange_audience.is_some()) else { return Ok(None) }`. Narrower still: where set, it is required for protected kinds (`exchanged_token.rs:51`); a build without `compliance` verifies nothing (`:1340`–`1345`) | **The upgrade notes say so.** `CHANGELOG.md` 2.40.0, §96: "a provider *can* verify … and one that does refuses"; "verifies iff `exchange_audience` is set". `deprecations.md` §96: "**The trigger is `exchange_audience`.**" `what-is-proven.md:109` names the unset case as open | none |
+| P1 | The exchanged token is required for an `oidc:` principal only where the provider sets `exchange_audience`; otherwise the check returns `Ok(None)` (`gateway_caller.rs:1348-1353`) | **confirmed.** `src/agent/gateway_caller.rs:1348`: `…filter(|v| v.config().exchange_audience.is_some()) else { return Ok(None) }`. Narrower still: where set, it is required for protected kinds (`exchanged_token.rs:51`); a build without `compliance` verifies nothing (`:1340`–`1345`) | **The upgrade notes say so.** `CHANGELOG.md` 2.40.0, §96: "a provider *can* verify … and one that does refuses"; "verifies iff `exchange_audience` is set". `deprecations.md` §96: "**The trigger is `exchange_audience`.**" `what-is-proven.md` (*A caller envelope's principal is the client's*) names the unset case as open | none |
 | P2 | An unsigned call for a certificate holder is counted, not refused (`gateway_caller.rs:1405-1409`) | **confirmed.** `gateway_caller.rs:1405`–`1410`: `ctx.unsigned_actions.note_at_provider(req.kind())`, and the call is served | **The upgrade notes say so.** `CHANGELOG.md` 2.40.0, §87: "counted, not yet refused"; `deprecations.md` §87 title and body ("A later release will refuse an unsigned call"); `identity-and-lifecycle.md` §9 O3 | O3, in its plan |
 | P3 | "The upgrade notes should say so until the refusals land" | **not confirmed as a defect in the notes** — they do. The absolute wording is in two one-line summaries: the CHANGELOG's lead sentence for 2.40.0 and `CLAUDE.md`'s release paragraph ("a client's own `cs`/`cn` signature checked at the door and the provider"; "verified at the provider"). Both are summaries above notes that state the condition. This PR changes neither (its brief limits `CLAUDE.md` to one line); the maintainer may want *where configured* in the paragraph at the next release | — | §5 D10 |
-| P4 | "Token set" reads as "secured" when no evaluator, provider enforcement or journal is attached. Warn at start | **confirmed, narrower.** No warning names that case. What exists: a `warn!` when `/a2a` is mounted with no evaluator (`src/agent/lifecycle.rs:296`–`299`); a `warn!` for the `dev` profile, which is the default (`guarantee.rs:631`); the startup guarantee report listing the missing evaluator as `NotConfigured`, at info (`guarantee.rs:1025`); a non-loopback gateway with no credential refused | — | CR15 |
-| P5 | Make self-install opt-in, not the headline default | **not confirmed.** It is opt-in. The library has no provisioning field and "never auto-provisions" (`mycelium-wasm-host/src/provisioner.rs:5`–`6`); the `mycelium` binary has no provisioner; a stem runs one only with a `[hosts]` table (`stem.rs:352`–`353`) and refuses an empty `trusted_publishers` unless `accept_unsigned` is set, which warns (`stem.rs:442`–`461`). `docs/positioning.md` says "It is not true of every node". What is fair: the hero sentence leads with it. One real gap in the other direction: a `Provisioner` built in code accepts unsigned lines until `require_provenance` is called (`provisioner.rs:537`–`539`) | — | CR7 |
+| P4 | "Token set" reads as "secured" when no evaluator, provider enforcement or journal is attached. Warn at start | **confirmed, narrower.** No warning names that case. What exists: a `warn!` when `/a2a` is mounted with no evaluator (`src/agent/lifecycle.rs:296`–`299`); a `warn!` for the `dev` profile, which is the default (`guarantee.rs:631`); a `warn!` when an exposure policy is set with no evaluator (`src/agent/mod.rs:1807`–`1811`); the startup guarantee report listing the missing evaluator as `NotConfigured`, at info (`guarantee.rs:1025`); a non-loopback gateway with no credential refused | — | CR15 |
+| P5 | Make self-install opt-in, not the headline default | **not confirmed in code; right about the headline.** It is opt-in. The library has no provisioning field and "never auto-provisions" (`mycelium-wasm-host/src/provisioner.rs:5`–`6`); the `mycelium` binary has no provisioner; a stem runs one only with a `[hosts]` table (`stem.rs:352`–`353`) and refuses an empty `trusted_publishers` unless `accept_unsigned` is set, which warns (`stem.rs:442`–`461`). `docs/positioning.md` says "It is not true of every node". What is fair, and conceded: the hero sentence leads with it and the README's five-step path has the stem fleet as step 3 (`README.md:38`). One real gap in the other direction: a `Provisioner` built in code accepts unsigned lines until `require_provenance` is called (`provisioner.rs:537`–`539`) | — | CR7 |
 
 ### 2.4 · Language and structure: the counts
 
@@ -131,7 +151,7 @@ Each counted at `156ca329`, with the command.
 | N10 | `src/consensus.rs` 5.5k lines (6,503 with tests), `propose_inner` 414 | **6,503** lines; first `#[cfg(test)]` at 4,984; `propose_inner` 1825–2238 = **414** | `wc -l`; `grep -n "fn propose_inner"`; `awk` to the closing brace | confirmed |
 | N11 | `handle_connection` is a single 929-line function | 367–1295 = **929** | `grep -n "fn handle_connection" mycelium-core/src/connection.rs`; `awk` to the closing `}` | confirmed |
 | N12 | `TaskCtx`: 90 fields and 59 cfg attributes | **90** fields, **61** `#[cfg` lines (`src/agent/mod.rs:696`–`1093`) | `awk` over the struct | confirmed |
-| N13 | …the cause of 56 `too_many_arguments` allows | **57** allows. **Not the cause of all:** 11 are in `mycelium-core` (`persistence.rs` 6, `writer.rs` 3, `swim.rs` 2), which has no `TaskCtx`; the largest clusters are `gateway_caller.rs` 7 and `consensus.rs` 6 | `git grep -n too_many_arguments -- '*.rs' \| awk -F: '{print $1}' \| sort \| uniq -c` | count confirmed; cause **not confirmed** |
+| N13 | …the cause of 56 `too_many_arguments` allows | **57** allows. **The cause was not shown:** 16 are outside the root crate, 13 of them in `mycelium-core` (`persistence.rs` 6, `writer.rs` 3, `swim.rs` 2, `kv_persist.rs` 1, `connection.rs` 1), whose `CoreCtx` is `TaskCtx`'s lower half (`mycelium-core/src/context.rs:111`–`113`), so the crate boundary alone proves little; the largest clusters are `gateway_caller.rs` 7 and `consensus.rs` 6. Whether grouping `TaskCtx` would remove them is what CR21 measures | `git grep -n too_many_arguments -- '*.rs' \| awk -F: '{print $1}' \| sort \| uniq -c` | count confirmed; cause **not confirmed** |
 | N14 | `src/lib_tests.rs`: 18k lines in one file | **18,466** | `wc -l` | confirmed |
 | N15 | about 650 fixed sleeps in tests | **770** `sleep(` calls in test-named files and `tests/` directories (214 in `lib_tests.rs`); 1,015 in all `.rs`. A grep cannot tell a fixed sleep from a poll loop's interval | `git grep -n "sleep(" -- '*.rs'`, split by path | confirmed in order of magnitude; *fixed* **not verified** |
 | N16 | a retry wrapper referenced 30 times in CI | **30** lines name it; **27** are invocations of `scripts/ci-retest.sh`. It re-runs only failed tests, once, annotates a pass-on-retry, and under `CI_RETEST_STRICT=1` fails it | `grep -c "ci-retest" .github/workflows/ci.yml` | confirmed; the wrapper is stricter than "retry" suggests |
@@ -166,14 +186,21 @@ Recorded, not proposed. None of these is a finding to act on in §4 beyond what 
   this was written). Decided: sensitive key names hidden from the listing, every owned key's value refused, the
   log read doors as a follow-up. The reply's first addition ("do item 1 today") is in hand. This plan does not
   touch that work; CR1 records it.
+- **What is agreed about order is these two only:** CR1 and the rule, now. The rest of §4's order is the order
+  the project's first response proposed (its six items, listed in the vendored file's header) and the reviewer's
+  reply called right; the maintainer has not agreed it as a schedule (§5 D11).
 
 ## 4 · Proposed rows
 
 Each row: one PR in its own worktree, every fix written fail-first against a planted fault, an independent
 adversarial review before merge, a feature page updated where the feature changes (rule 5), and for every record
 row the forged-record test the owner-signed rule's condition (d) asks for. Sizes are rough: **S** up to a day,
-**M** a few days, **L** a week or more, counted in PRs where it is more than one. The order is the agreed
-priority; tier 1 is the security work, tier 2 the cheap Layer I items, tier 3 the structure.
+**M** a few days, **L** a week or more, counted in PRs where it is more than one. The order is the **proposed**
+priority (§3, §5 D11); tier 1 is the security work, tier 2 the smaller Layer I items, tier 3 the structure.
+
+Two standing requirements of every row that reads a clock or keeps reader memory: wall time is read through
+`mycelium_core::sim_seam::wall_now_ms` (CR3, CR7's expiry, CR11, CR13), and a new `Mutex` or `RwLock` field for a
+reader's memory (CR2, CR3, CR7) adds its row to the lock-order table.
 
 A row that moves an inventory row to *Meets* cites the verifying code and the forged-record test on
 `owner-signed-records.md` in the same PR.
@@ -199,11 +226,23 @@ owner-signed rule and satisfies none of its rows.
 
 **What:** in this order, each its own PR:
 
-1. **The use marker and its release.** `grant/…/used/{door}` becomes a record signed by the door's node, its body
-   naming the grant, the door and the use; a reader counts a use from a verified marker **and** from a verified
-   marker's tombstone unless a **signed release** by the same door exists. The gateway tombstones the marker itself
-   when a call is refused before dispatch (`src/agent/http/authz.rs:716`), so the release is a signed record and
-   not a deletion — absence after presence must read *used*.
+1. **The use marker and its release.** A KV record alone cannot carry this, signed or not: while any member can
+   out-stamp the owner, a tombstone planted at the predictable key `grant/{holder}/{term}/used/{point}`
+   (`src/agent/http/authz.rs:1436`; `{point}` is the enforcement point's name, not a node) *before* the first use
+   wins LWW, the door's own marker write still returns `Ok` (`write_owned_kv_durable` discards the receipt,
+   `src/agent/state_machine.rs:981`–`983`; `kv_set_requiring_sync` returns `Ok` with the application rung it was
+   given, `mycelium-core/src/ops.rs:495`–`511`), and no verified marker ever exists for a reader to remember. So:
+   - **The door keeps the use in a node-local durable record** (its journal), read before the KV. A restart
+     reads it back; a member's KV write cannot touch it.
+   - **At the marker key, anything other than *never written* reads *used*:** a verified marker, a value that
+     does not verify, or a tombstone. The marker itself is signed by the door's node, its body naming the grant,
+     the door and the use.
+   - **Only a signed release bound to that use reads unused** — signed by the same door, naming the use it
+     releases (not only the door), so an earlier genuine release cannot be replayed over a later use. The gateway
+     today tombstones the marker itself when a call is refused before dispatch (`authz.rs:716`); that becomes
+     the signed release.
+   - **The door checks its own marker write's receipt** and refuses the call, by name, if the write was
+     `Superseded`.
 2. **`consumed` and `revoked`**, the same shape: signed by the agent's node and by the revoker; a planted
    `revoked` no longer stops a real revocation, because the route reads a verified marker only.
 3. **The request record** (`grant/{agent}/{request}`): the supervisor signs what it read, and the agent's honour
@@ -211,21 +250,31 @@ owner-signed rule and satisfies none of its rows.
 4. **`issued` and `checkpoint`, the *Partly* conditions:** the scope compared with the path; a restarted node does
    not take an older genuine checkpoint over a newer one.
 
-**Exit:** per record, the forged-record test: a member's tombstone of a used marker leaves the grant used at a
-second gateway and at the same gateway after a restart; a forged release under another node's key releases
-nothing; a planted `revoked` does not answer `already_revoked`; a replayed sequence-1 checkpoint does not revive a
+**Exit:** per record, the forged-record test. For the use marker: a member's tombstone of a used marker leaves the
+grant used at a second gateway and at the same gateway after a restart; **a tombstone planted before the first
+use** refuses the call (the receipt) and reads used; **a tombstone delivered to a second gateway before the
+marker** reads used there; **a garbage overwrite at a higher stamp** reads used; **a replay of an earlier genuine
+release over a later use** releases nothing; a forged release under another node's key releases
+nothing. For the others: a planted `revoked` does not answer `already_revoked`; a replayed sequence-1 checkpoint does not revive a
 revoked grant on a restarted node. Each seen failing first. The inventory rows move to *Meets*, and
 `what-is-proven.md`'s first *Not yet shown* row moves up.
 
 **Does not:** make two gateways' concurrent admission of one grant impossible — that is a consensus claim per
-use, a separate decision (the tally's `FleetConsensus` scope exists for limits; whether a single-use grant should
-use it is not decided here). Does not change the grant's wire form to the client.
+use, a separate decision (§5 D12). **Does not survive the tombstone horizon at a second gateway:** a marker's
+tombstone or the marker itself is all a second gateway has, and once a planted tombstone is collected (3 000 s at
+the defaults, L3) the key reads *never written* there again; a grant valid longer than that horizon can be
+re-armed at a gateway that never recorded the use itself. Stated, and bounded by keeping the honour window below
+the horizon or by D12. A member can also *burn* a grant by planting a tombstone before its use: a refusal, which
+is availability and outside the rule. Does not change the grant's wire form to the client. I4's collector
+(`identity-and-lifecycle.md`, row I4) must also collect signed markers and releases; the row says so when it is
+written.
 
 **Format:** a KV **value** change for each marker (today a timestamp or `b"1"`), read for one release beside the
-old form, counted — an upgrade note and a mixed-version rule (verifiers before writers), as I3's digest had. No
-wire-frame change, no on-disk format change.
+old form, counted — an upgrade note and a mixed-version rule (verifiers before writers), as I3's digest had. A new
+journal stream for the door's own uses: additive on disk, with a lock-order row for its reader. No wire-frame
+change, no change to an existing on-disk format.
 
-**Size:** L — four PRs; the first is M and is the one that closes the open row.
+**Size:** L — four PRs; the first is M to L and is the one that closes the open row.
 
 #### CR3 · An audit chain whose truncation is detected *(A2; inventory: the chain's head, `sys/audit-checkpoint/`)*
 
@@ -273,8 +322,9 @@ PR. No wire-frame change.
 
 #### CR5 · The remaining *Does not hold* and *Partly* rows, grouped
 
-Not one row to build; five groups to be written as rows once CR2–CR4 show the pattern's cost. Listed so nothing
-in the inventory is unplanned.
+Not one row to build; six groups (CR5a–CR5f) to be written as rows once CR2–CR4 show the pattern's cost. Every *Does not
+hold*, *Partly* and *Bounded, not detected* row of the inventory is named in CR2–CR5 or CR7 (checked by grep for
+each record's prefix against this file).
 
 - **CR5a · Caller identity** — `sys/caller-context/` (unsigned marker), `sys/caller-context-id/` (a tombstone
   fails open), the key-less principal, the bare RPC `sender`. Depends on §5 D6 (signed signals) and on O3; the
@@ -282,15 +332,20 @@ in the inventory is unplanned.
 - **CR5b · What a model is told and where a call goes** — `tools/`, `skills/`, `prompts/`, `cap-group/`·`gcap/`,
   `mailbox/`, `wiki/…/proposal`, `comp/`, `ckpt/`·`ckptw/`·`strands/`. After CR4, same shape.
 - **CR5c · Consensus records** — `consensus/life/…`, the legacy `committed`/`lease` reading, the acceptor's
-  memory and floors, `consensus/trust/`, `sys/topology-override/`, `grp/`, `sys/quorum/`, `sys/load/` under
+  memory (`sys/consensus-accepted/`) and the ballot and decided floors, `consensus/trust/`, `sys/topology-override/`, `grp/`, `sys/quorum/`, `sys/load/` under
   `count_opaque_as_absent`, the self-certified electorate genesis. **After CR10**: these are the records the model
   should say are safe to sign before anyone changes the acceptor. *Format:* value changes, and the acceptor's
   durable record is an on-disk format.
 - **CR5d · Governance and policy** — `sys/capauthz/` (a tombstone removes the role requirement),
   `sys/govern/membership/`, `sys/govern/fleet`·`sys/config/` (no range at read), `sys/role/` currency,
-  `sys/membership/removed/` across a restart, `sys/identity-cert/{self}` as its owner reads it.
+  `sys/membership/removed/` across a restart, `sys/identity-cert/{self}` as its owner reads it; the two
+  *Bounded, not detected* rows `sys/govern/timing` (name its detector) and `cap/{node}/locality/self`.
+- **CR5f · The identity records' *Partly* conditions** — `sys/identity-signed/{node}`,
+  `sys/identity-cert/{node}/{key-hex}` as verifiers read it, `sys/revocation/…` and `sys/client-cert/…`: signed
+  and verified today, each short of *Meets* on counting a failure or on a forged-record test for a tombstone.
+  **These are the records I2 (CA succession) touches**, so this group is written with I2's row, not after it.
 - **CR5e · The tally, exposure, and the companions** — `sys/ae-tally/`, `sys/ae-exposure/` (both *stated*),
-  `sched/…/last`, `cn/` heads and logs, `facts/` key binding, `log/reason/` (untraced: trace first).
+  `sched/…/last`, `cn/` heads and logs, `cn/{requirement}/award` (the unverified `award_of` path), `facts/` key binding, `log/reason/` (untraced: trace first).
 
 **Exit, for the group:** every inventory row has a plan row or a sentence saying it is accepted as a limit, by
 name, on `what-is-proven.md`.
@@ -327,12 +382,12 @@ no decision, only who makes the call.
 2. **Ranking on signed fields**: candidates for one capability are ordered by what the publisher signed, not by
    the two unsigned hints (`provisioner.rs:1147`).
 3. **Version, expiry and revocation**: a line's signed message gains a publisher sequence per `(ns, name)` and an
-   expiry; a reader holds the highest sequence it has verified per publisher and name and refuses a lower one
-   (rollback) and an expired one; a publisher-signed revocation of an artifact hash is honoured before install.
+   expiry; a reader holds the highest sequence it has verified per publisher and name — **durably, in a
+   node-local record, or a restart forgets it** — and refuses a lower one (rollback) and an expired one; a publisher-signed revocation of an artifact hash is honoured before install.
    Withdrawal becomes a signed record, so a tombstone is not the only way to withdraw and a replay of the
    withdrawn line loses.
-4. **The library type refuses by default**: a `Provisioner` with no trusted publisher installs nothing unless
-   unsigned lines are accepted by name, as the stem already requires.
+4. **The library type refuses by default** (a change of a library default: §5 D13): a `Provisioner` with no
+   trusted publisher installs nothing unless unsigned lines are accepted by name, as the stem already requires.
 
 **Exit:** a line never signed by a trusted publisher is not staged (a counter, and no bytes on disk); a withdrawn
 line re-written by a member is refused as *superseded* and counted; an expired line is not installed; a forged low
@@ -341,11 +396,18 @@ first. The inventory row moves to *Meets*.
 
 **Does not:** adopt TUF. The reviewer's "TUF-style" is the shape (version, expiry, revocation), and this row takes
 those three; root rotation, delegated targets and threshold signing are not built and are stated. Does not
-replace a running install on a revocation — whether a revoked artifact is stopped is §5 D9.
+replace a running install on a revocation — whether a revoked artifact is stopped is §5 D9. **Does not protect a
+reader that never saw the newer line:** a newly joined stem — the headline case — holds no sequence and accepts a
+replayed, unexpired line until its expiry; expiry is the only bound there, so the row's value depends on publishers
+choosing short ones. Does not stop the composition of L15 by itself: a member can still force a re-install (CR4
+closes the shed).
 
-**Format:** a new signed-message domain (`mycelium-installable-v2`); a v1 line verifies for one release, counted,
-then is refused — a deprecation-cycle change with an upgrade note (publishers before verifiers refuse v1). No
-wire-frame or on-disk format change.
+**Format:** the entry's encoding gains fields (sequence, expiry, and `size_bytes` moving under the signature) — a
+KV **value** change with a mixed-version rule (readers before publishers) — under a new signed-message domain
+(`mycelium-installable-v2`), and the proposal domain `mycelium-installable-proposed-v1`
+(`mycelium-wasm-host/src/catalog.rs:160`) gains its `-v2` with it, so a proposed line and its reviewer's acceptance
+carry the same currency. A new node-local record for the highest sequence seen: additive on disk. Whether and when
+a v1 line stops verifying is §5 D13. No wire-frame change.
 
 **Size:** M — two PRs (1, 2 and 4; then 3).
 
@@ -405,21 +467,31 @@ a separate, later row if D2 chooses it.
 
 **Size:** L.
 
-#### CR11 · The lease's skew bound and the fence, stated where an adopter reads *(L13, L14)*
+#### CR11 · The lease's skew bound, stated where an adopter reads; a holder-side margin *(L13, L14)*
 
 **What:** docs first: the skew bound of `lock-lifecycle.md:316`–`320` in the threat model's §7 table and the
-consensus guide, and on `what-is-proven.md` (added by this PR). Then one small code change: an optional
-`lease_skew_margin_ms` the holder subtracts from its own deadline, default 0 so nothing changes, set by
-`secure-single-domain` to `max_clock_drift_ms`. A fenced write helper for the KV — `consistent_set` refusing a
-token lower than the highest it has stored — is proposed as its second PR, because the library's own
-single-writer verb should keep the contract it asks of applications.
+consensus guide, and on `what-is-proven.md` (added by this PR). Then a **holder-side margin as a guarantee**:
+the holder stops a stated δ before its deadline, and a guarantee resolves *Enforced* only when δ is non-zero and
+below the lease. The default δ is the authority clock model's `[authority].skew_ms` (default 1 000,
+`mycelium-core/src/config.rs:1872`–`1877`) — **not** `max_clock_drift_ms`, which is the transport's HLC tolerance
+(300 000 ms, `mycelium-core/src/hlc.rs:92`) and would lapse the default 30 s leader lease
+(`src/agent/overlay_consistent.rs:143`) at the moment it is granted. Profiles require guarantees and set no
+configuration, so "the secure profile sets it" is not available; whether a new revision of `secure-single-domain`
+*requires* the guarantee is §5 D14.
 
-**Exit:** a holder with the margin set reports its lock lapsed δ before a reader would grant another; a
-`consistent_set` under a stale token is refused by name with the newer token left in place.
+**Exit:** a holder with the margin reports its lock lapsed δ before a reader with a clock δ ahead would grant
+another; a margin of zero, or one at or above the lease, resolves the guarantee `NotConfigured` by name; the
+default configuration is unchanged.
 
-**Does not:** make fencing automatic for an application's own resource; that stays the application's.
+**Does not:** check a fencing token anywhere. The first draft proposed "a fenced `consistent_set`"; the review of
+#773 showed it does not exist to be fenced — `consistent_set(key, value)` takes no token and is its own consensus
+round, not a lock holder's write (`src/agent/consensus_handle.rs:466`–`470`) — and that "the highest token this
+node has stored" is local to one node, while in the skew case the two holders are on different nodes and LWW
+orders by HLC, not by token: the test could pass while the property fails. A library-provided fenced write would
+be a new verb, a gateway route and both SDKs, with the token compared where the value is decided. Whether to build
+that is §5 D15. Fencing stays the application's contract, as the threat model states.
 
-**Size:** S (docs, in part done here), then M.
+**Size:** S (docs, in part done here), then S to M for the margin and its guarantee.
 
 #### CR12 · `GossipConfig` is `#[non_exhaustive]`, with a constructor *(N4, N6)*
 
@@ -436,30 +508,53 @@ tell me?* entry.
 
 **Does not:** reduce the 84 fields or group them.
 
-**How it ships is §5 D3** — it is itself a source break for every downstream struct literal, once.
+**How it ships is §5 D3** — it is itself a source break for every downstream struct literal, once. Wave 1b's I7
+already adds a field to `GossipConfig` and says "an exhaustive literal breaks"
+(`identity-and-lifecycle.md:1708`), so landing this row in the same MINOR breaks those callers once instead of
+twice. The #773 review counted 114 literal sites in 71 files outside `mycelium-core`; the row's first step
+re-counts them.
 
 **Size:** M (mechanical, wide).
 
-### Tier 2 · The cheap Layer I items
+### Tier 2 · The smaller Layer I items, and what is said aloud
 
-#### CR13 · An inbound entry stamped beyond the drift bound is refused *(L2)*
+#### CR13 · An inbound entry stamped beyond the drift bound: counted, then refused *(L2)*
 
-**What:** where `max_clock_drift_ms > 0`, an inbound KV entry whose physical time is beyond wall + the bound is
-**not applied**, counted (`kv_future_stamps_refused` on `/stats` and in metrics) and warned as the clamp is today
-— at all three doors: the `StateResponse` arm (`connection.rs:843`), `Data` (`:1060`) and `SignedData` (`:1254`).
-This is a check on the entry's own fields, as the size gate is; it names no prefix and no owner, so it teaches
-Layer I no higher-layer law. `hlc.rs:82`–`83` already calls store-level rejection "a candidate for the next wire-policy pass".
+**Not buildable until §5 D16 is answered** — whether Layer I may refuse on this at all.
 
-**Exit:** a `u64::MAX`-stamped entry through each of the three doors leaves the key as it was and is counted; an
-entry inside the bound applies; with the bound at 0 nothing changes; a node that already holds a poisoned entry
-on disk — the row says what happens at replay (refuse and count, or keep: decided in the row's PR with the
-pinned fixture in view).
+**What:** in two steps, as every other refusal in this repository ships (O3, O5, O6; D1's recommendation):
 
-**Does not:** remove a poisoned entry a fleet already holds (a repair verb is a separate decision). Does not
-authenticate the entry. Does not change the wire: no frame gains a field. A mixed-version fleet converges
-differently for a poisoned key while it upgrades — refused here, held there — which the upgrade note states.
+1. **A counter**, where `max_clock_drift_ms > 0`: an inbound KV entry whose physical time is beyond wall + the
+   bound is counted (`kv_future_stamps` on `/stats` and in metrics) at each of the three doors that take a remote
+   stamp — the `StateResponse` arm (`mycelium-core/src/connection.rs:852`), `Data` (`:1060`) and `SignedData`
+   (`:1254`) — and still applied. The clamp has no counter today, so nobody knows how often a healthy fleet would
+   trip a refusal.
+2. **The refusal**, a release later if the counter is quiet: such an entry is not applied. The check comes
+   **before** `hlc.observe` and before `wal.begin_inbound()` (`connection.rs:185`), so a refused entry moves no
+   clock and opens no WAL window. `apply_and_notify` is untouched, so a node's own stamped writes are not
+   affected. It reads the entry's stamp and the receiver's clock: no prefix, no owner.
 
-**Size:** S.
+**The cases the row must answer, each an exit test:**
+
+- **A receiver whose own clock is slow** — booted before NTP, or more than the bound behind. Today it converges
+  on data and only its clock is clamped; with the refusal it would refuse the whole fleet's state. The exit shows
+  it refuses, counts, and is repaired by anti-entropy once its clock is right — and the row says how long that
+  takes and what the node serves meanwhile. If that is not acceptable, step 2 is not built.
+- **Replay** (`src/agent/lifecycle.rs:494`–`511`), the fourth door. It is not a free choice. Refusing at replay
+  against the wall clock discards a node's own WAL on a bad-clock boot; keeping the entry means permanent
+  divergence from the peers that refuse it — the bucket digests differ, and the entry is re-sent and re-refused
+  every anti-entropy round. The row keeps at replay and needs **a repair verb** for an entry already held (an
+  operator's tombstone at a stamp that wins, by name), or it states the churn.
+- **Mixed configuration, not only mixed version:** a node with `max_clock_drift_ms = 0` accepts what the others
+  refuse, permanently. `validate()` or the guarantee report says so; the upgrade note states both.
+- A `u64::MAX`-stamped entry through each of the three doors leaves the key as it was; an entry inside the bound
+  applies; with the bound at 0 nothing changes.
+
+**Does not:** remove a poisoned entry a fleet already holds, without the repair verb. Does not authenticate the
+entry. Does not stop a stamp *inside* the bound: a member can still out-stamp an owner by up to five minutes,
+which is what CR2's first step had to be rewritten around. Does not change the wire.
+
+**Size:** S for the counter; M for the refusal with its four cases.
 
 #### CR14 · A per-record WAL checksum *(L4; the critique's code area 3, first half)*
 
@@ -469,14 +564,22 @@ that offset, with the existing refuse-or-quarantine behaviour.
 **The constraint, from the [contracts-receipts ADR](../design/contracts-receipts.md) §9:** every released on-disk
 file must keep replaying, and `golden_fixture_replays_every_released_on_disk_format`
 (`mycelium-core/src/persistence.rs:2895`) replays `tests/fixtures/persistence/fixint-v1/` in CI. The v1 WAL has no
-magic and no version byte, so the new format must be distinguishable without one: a new file name, or a header
-record a v1 reader cannot mistake for an entry. The row therefore **adds** `tests/fixtures/persistence/<new>/`,
-never edits `fixint-v1/`, and the reader replays both. A downgrade — an older binary meeting a new file — must
-refuse by name, not misread; that is tested.
+magic and no version byte, so the new format must be distinguishable without one: **a header record a v1 reader cannot decode as an entry**.
+(A new file name is not an option: a released binary would find no `wal.bin` and start empty, silently.) The row
+**adds** `tests/fixtures/persistence/<new>/`, never edits `fixint-v1/`, and the reader replays both. **A
+downgrade cannot refuse by name** — a released binary cannot be taught a new message. The best available is that
+it meets the header as its first record and stops with its existing error, "holds a corrupt record at byte 0
+with data after it" (`persistence.rs:581`–`585`), or quarantines under `on_unreadable = "quarantine"`; the row
+says so in its upgrade note and tests it against the `fixint-v1` reader's code path. **The mixed file:** an
+upgraded node meets a `wal.bin` of v1 records with no header. The row takes one of two shapes and says which —
+the node snapshots and truncates before its first append (the startup snapshot already repairs a torn tail before
+the first append), so a file is all-v1 or all-new; or the header may appear mid-file and the reader switches at
+it. The first is simpler and is the proposal.
 
 **Exit:** a flipped bit inside a record's value that still decodes — the case nothing detects today — is
-`Corrupt`; the v1 fixture replays byte for byte; the new fixture replays; an old-format WAL is read and the next
-snapshot writes the new one; the `floor_*` pins and the acknowledgement rungs are unchanged (a checksum changes
+`Corrupt`; the v1 fixture replays byte for byte; the new fixture replays; an old-format WAL is read and the
+startup snapshot leaves a new-format file before the first append; the v1 reader given a new file reports the
+corrupt record at byte 0 and replays nothing as data; the `floor_*` pins and the acknowledgement rungs are unchanged (a checksum changes
 no ack's meaning).
 
 **Does not:** checksum the snapshot (a second, smaller PR), the journal or the companions' logs — that is CR18,
@@ -490,7 +593,7 @@ of the wire only.
 **What:** one `warn!` at start when a gateway credential is configured and no evaluator is attached, naming what
 is then not checked (the seam, provider enforcement, the journal), beside the `dev`-profile warning.
 
-**Exit:** the text pinned; silent when an evaluator is attached or the profile is selected.
+**Exit:** the text pinned; silent when an evaluator is attached or `dev` was selected by name.
 
 **Does not:** change a default.
 
@@ -509,8 +612,10 @@ reference node. Through `scripts/check-positioning.sh`, which pins the hero and 
 #### CR17 · Limits stated where they are not *(L3, L5, L9, L10)*
 
 **What:** docs only, in the threat model: the tombstone horizon and the resurrection case with its number and its
-knob (L3); that SWIM on an ordinary `[tls]` fleet lets a host on the UDP port evict a peer (L5); that a signal's
-nonce is burned before admission and nothing repairs it (L10); the far-future stamp, until CR13 lands; the lease's skew bound (CR11's docs half).
+knob (L3); that SWIM on an ordinary `[tls]` fleet lets a host on the UDP port evict a peer, and — until CR9 lands — shrink
+the peer view a default lock's quorum is sized from (L5 with L11); that a signal's
+nonce is burned before admission and nothing repairs it (L10); that a relaying member reads what it relays, and
+that above about nine nodes relays are the common path for an Individual frame (L7, L8); the far-future stamp, until CR13 lands; the lease's skew bound (CR11's docs half).
 
 **Exit:** each sentence beside the code line it states.
 
@@ -526,15 +631,16 @@ same code.
 | **CR18 · One append log** *(N9)* | Extract one checksummed, length-framed log from the four (KV WAL, `journal.rs`, tuple-space, blackboard), after CR14 fixes the format question once; crash-test it once | the four consumers on one implementation; one torn-tail and one corrupt-record suite; every existing fixture replays | merge the KV WAL's snapshot protocol into the journals | L |
 | **CR19 · `consensus.rs` split** *(N10)* | `propose_inner`'s 414 lines into the state-machine steps CR10's model names; tests out of the 6,503-line file | no test changes; the model and the code share the step functions | change the protocol | L, after CR10 |
 | **CR20 · `handle_connection`** *(N11)* | one function per `WireMessage` arm, the shared state in a struct | no behaviour change; the frame-filter tests pass | touch the wire | M, after CR13 |
-| **CR21 · `TaskCtx`** *(N12, N13)* | group the 90 fields into per-subsystem structs behind the 61 cfg lines; remove the `too_many_arguments` allows that grouping removes, counted before and after | the allow count falls and the PR says by how many; the eleven in `mycelium-core` are a separate, smaller change | promise zero allows | L |
+| **CR21 · `TaskCtx`** *(N12, N13)* | group the 90 fields into per-subsystem structs behind the 61 cfg lines; remove the `too_many_arguments` allows that grouping removes, counted before and after | the allow count falls and the PR says by how many; the thirteen in `mycelium-core` are a separate, smaller change | promise zero allows | L |
 | **CR22 · Test sleeps and `lib_tests.rs`** *(N14–N16)* | classify the 770 `sleep(` calls into poll intervals and fixed waits; convert fixed waits in the suites behind `ci-retest.sh` first; split `lib_tests.rs` by subject | the classification checked in as a count per file; the flake tier's annotations fall | remove the flake tier | L, continuous |
 | **CR23 · Comment hygiene** *(N17)* | a comment states the invariant; the history goes to the commit and the plan. Applied to a file when a row touches it, not as a sweep; `/wiki-lint` gains a check for a comment that names a round or a review and no invariant | the marker count (7.9% today) reported at each release | a repository-wide rewrite | S, continuous |
-| **CR24 · Feature flags** *(N1–N3)* | not proposed as a row: "make consensus unconditional and move the gateway to its own crate" is §5 D5 | — | — | — |
-| **CR25 · An OpenAPI schema for the gateway** *(N7)* | not proposed as a row: §5 D4 | — | — | — |
+| *(no row)* **Feature flags** *(N1–N3)* | not proposed as a row: "make consensus unconditional and move the gateway to its own crate" is §5 D5 | — | — | — |
+| *(no row)* **An OpenAPI schema for the gateway** *(N7)* | not proposed as a row: §5 D4 | — | — | — |
 
 ## 5 · Decisions for the maintainer
 
-Each is the maintainer's. A recommendation is given and nothing is decided here.
+Each is the maintainer's. A recommendation is given and nothing is decided here. D13–D16 are choices the first
+draft made inside a row; the review of #773 found them, and they are here now.
 
 - **D1 · Is a mandatory electorate a MAJOR, or a deprecation cycle?** (CR9.) It changes what
   `GossipConfig::default()` does for `distributed_lock`, `elect_leader` and `consistent_set`: success today, a
@@ -552,8 +658,9 @@ Each is the maintainer's. A recommendation is given and nothing is decided here.
 - **D3 · `#[non_exhaustive]` on `GossipConfig`: when, and with what constructor?** (CR12.) It is a one-time source
   break for every downstream struct literal. *Options:* in the next MINOR with an upgrade note (the project's own
   rule lets a MINOR add fields, and each one already breaks the same callers); or held for a MAJOR.
-  *Recommendation:* the next MINOR, with `default()` plus assignment as the documented path and no builder — a
-  builder for 84 fields is a second API to keep true.
+  *Recommendation:* the next MINOR — **which is wave 1b**, so CR12 moves ahead of the rest of tier 1 in D11 — with
+  `default()` plus assignment as the documented path and no builder; a builder for 84 fields is a second API to
+  keep true. I7 breaks exhaustive literals in that release anyway.
 - **D4 · An OpenAPI schema for the gateway?** (N7.) *Options:* write one by hand and gate it against the router;
   generate one (`utoipa` or similar, an annotation per handler on 76 routes); or keep golden vectors and the
   reviewer as the check. *Recommendation:* a hand-kept route table checked against the router first — the same
@@ -568,17 +675,26 @@ Each is the maintainer's. A recommendation is given and nothing is decided here.
   per-signal signing cost on the hot path. **End-to-end encryption** for Individual scope closes relay
   confidentiality; it needs a recipient key agreement the mesh does not have. *Recommendation:* decide signed
   signals with a measurement in hand (cost per signal at the fan-out the benches use), scoped first to RPC
-  requests and replies, where the gap is concrete; state relay confidentiality as a limit in the threat model
+  requests and replies, where the gap is concrete — forwarding targets are capped at `2·⌈log2 N⌉`, floor 8
+  (`mycelium-core/src/config.rs:967`–`988`), so in a fleet above about nine nodes most Individual frames are
+  relayed and a relaying member can answer for the target; state relay confidentiality as a limit in the threat model
   now (CR17) and do not plan encryption until an adopter's requirement names it. Both are wire-version decisions
   and belong with the anti-entropy one (D8).
 - **D7 · SWIM authentication?** (L5.) *Options:* a MAC under a fleet-derived key on each datagram; require SWIM
-  off under `secure-single-domain` as the federation profile does; or state the limit. *Recommendation:* state it
-  now (CR17); make the secure profile's requirement the next step, because turning a liveness mechanism off in a
+  off under `secure-single-domain` as the federation profile does; or state the limit. It is more than eviction: with the default quorum sized from the peer view (L11), a forged `Dead` may shrink a
+  quorum, from outside the membership. *Recommendation:* state it now with that consequence (CR17); CR9 removes
+  the consequence for the exclusive verbs; make the secure profile's requirement the next step, because turning a liveness mechanism off in a
   profile is cheap and a keyed datagram is a design of its own (key distribution, rotation with the CA).
 - **D8 · Anti-entropy entries that carry their origin's signature?** (L1.) Already recorded as "a wire change, a
-  separate decision" (`what-is-proven.md:123`, the inventory § *Layer I*). The owner-signed rule is the answer
-  that needs no wire change. *Recommendation:* leave as recorded; revisit with D6 if a wire version is cut for
-  signals.
+  separate decision" (`what-is-proven.md`, [*Anti-entropy entries authenticated*](../operations/what-is-proven.md#anti-entropy-entries-authenticated); the inventory § *Layer I*). The owner-signed rule is the answer
+  that needs no wire change **for a record whose forgery is the risk. It is not sufficient for a presence-bearing
+  record** — a use marker, a revocation, a consumed flag: the rule's condition (c) asks that deletion be as hard
+  as forgery, and that cannot be met in the KV alone while any member can out-stamp the owner with a tombstone or
+  a garbage value. CR2 therefore rests on a node-local durable record and on *anything but never-written reads
+  used*, and still has a stated limit at the tombstone horizon. Entries that carry their origin's signature, with
+  a receiver that refuses an unsigned overwrite of a signed record, would close it at the store — which is a
+  Layer I law, and so a larger decision than a wire version. *Recommendation:* leave as recorded for now, with
+  this limit stated; revisit with D6 if a wire version is cut for signals.
 - **D9 · Does a catalogue revocation stop a running install?** (CR7.) *Recommendation:* no in CR7 — refuse new
   installs and count the running ones — and decide stopping separately, since it is an availability decision an
   operator may not want made by a publisher's key.
@@ -586,50 +702,89 @@ Each is the maintainer's. A recommendation is given and nothing is decided here.
   paragraph say "checked" and "verified" without the condition the notes below them state. *Recommendation:* add
   *where configured* to both at the next release edit; not worth a release note of its own.
 - **D11 · Where this plan sits relative to wave 1b.** Wave 1b (I4, I2, I7) is agreed and next, and I4 and I2 each
-  add security-bearing records. *Options:* (a) wave 1b first, this plan after; (b) CR1 now (in hand), CR2's first
-  PR and CR13 before or beside I4, the rest after wave 1b; (c) this plan first. *Recommendation:* (b). CR1 is
-  already being built; the use marker is an open contradiction of a claim on `what-is-proven.md` and should not
-  wait a wave; CR13 is small. I4 and I2 are then built to the rule from the start (their rows are checked against
-  the inventory when they land), and CR3–CR12 follow wave 1b, with CR10 (the model) startable in parallel because
-  it touches no shipped code.
+  add security-bearing records. Only CR1 and the rule are agreed as *now*; the order of everything else is proposed. *Options:* (a) wave 1b
+  first, this plan after; (b) CR1 now (in hand); CR2's first PR, CR13's counter and CR12 inside wave 1b; the rest
+  after it; (c) this plan first. *Recommendation:* (b). CR1 is already being built; the use marker is an open
+  contradiction of a claim on `what-is-proven.md` and should not wait a wave; CR13's first step is a counter;
+  CR12 belongs in the release where I7 already breaks exhaustive literals (D3). I4 and I2 are then built to the
+  rule from the start — CR5f is written with I2's row, and I4's collector learns of CR2's markers — and CR3–CR11
+  follow wave 1b, with CR10 (the model) startable in parallel because it touches no shipped code.
 - **D12 · A concurrent-admission claim for a single-use grant?** (CR2's *Does not*.) Whether one grant admitted at
   two gateways at once is to be prevented (a consensus claim per use) or stated. *Recommendation:* state it, and
   offer the `FleetConsensus` scope for the grants an adopter marks as needing it.
 
-## 6 · Where the critique is wrong or overstated
+- **D13 · Two choices inside CR7.** (i) Whether, and after how many releases, a v1 catalogue line stops
+  verifying. (ii) Whether the library's `Provisioner` with no trusted publisher installs nothing by default — a
+  change of a library default for anyone who builds one in code. *Recommendation:* (i) one release of both,
+  counted, then refuse, as the project's other counters do; (ii) yes, in the same release as (i), with an
+  upgrade note — the stem already refuses, and the library type should not be the weaker door.
+- **D14 · A new revision of `secure-single-domain` that requires the lease margin?** (CR11.) A profile revision
+  makes `start()` refuse on nodes that pass today. *Recommendation:* yes, in the revision that next changes for
+  another reason, not a revision of its own; until then the guarantee reports `NotConfigured`.
+- **D15 · A library-provided fenced write?** (CR11's *Does not*; L14.) A new verb with a token compared where the
+  value is decided, a gateway route and both SDKs — or leave fencing as the application's contract, as stated.
+  *Recommendation:* leave it; an example already shows the pattern, and a fenced verb is only sound if the
+  comparison is part of the decision, which makes it a consensus feature, not a helper.
+- **D16 · May Layer I refuse an entry for its stamp?** (CR13.) The argument that it may: it is not a
+  *higher-layer* law — it reads no prefix, no owner and no upper-layer meaning; the drift bound is Layer I's own
+  contract; `hlc.rs:81`–`83` anticipates it; the size gate and the TLS unsigned-frame refusal are precedents. The
+  argument that it may not, without saying so: it is **prevention at Layer I**, and the first refusal on the
+  merge path that depends on receiver-local state — the receiver's clock — so the store stops being a pure
+  function of the updates received, and two correct nodes can hold different stores for good. That reads against
+  the hot invariant's title (*detection, not prevention*), whatever its body says about higher-layer laws.
+  *Options:* (a) the counter only; (b) the counter, then the refusal, with a recorded carve-out in
+  [runtime-invariants](../wiki/dev/architecture/runtime-invariants.md) beside the two that exist for forwarding;
+  (c) neither, and the limit stated. *Recommendation:* (b), the refusal conditional on what the counter shows
+  and on the slow-clock case having an acceptable answer — and default-on only after a release of counting,
+  which is itself part of this decision.
 
-Said plainly, with the code.
+## 6 · Where the critique is wrong or overstated, and where it is understated
+
+Said plainly, with the code. Two lists: what does not hold as written, and what holds and needed context.
+
+### 6.1 · Wrong or overstated
 
 - **"Almost every guarantee above Layer II … fails against one compromised or buggy mesh member."** Overstated,
-  and the reviewer withdrew it in the reply. What fails is a guarantee whose state is an unsigned KV record; the
-  list is the inventory's.
-- **"Signals and Boundaries is no longer what ships."** The maintainer's position is that this misreads the
-  principle (M2): unconditional means not conditional on admission or on a route, and a direct send to a known
-  route is an optimisation over a flood that remains the fallback (`tasks.rs:368`–`392`). The reviewer holds that
-  the document claimed more than the code did; #771 changed the document. Both are recorded.
-- **"Make self-install opt-in, not the headline default."** It is opt-in (P5). No library or node path installs
-  anything; a stem needs a `[hosts]` table and a trusted publisher or an explicit, warned waiver.
-- **"`TaskCtx` … the cause of 56 `too_many_arguments` allows."** Eleven of the 57 are in `mycelium-core`, which
-  has no `TaskCtx` (N13).
-- **"A u64::MAX stamp pins a key forever (`connection.rs:843-868`)."** True, and understated: it is not specific
-  to anti-entropy, and a fix there alone leaves the live frames (L2).
-- **"Neither needs a wire change"** of the two cheap Layer I items. True of the wire. The checksum is an on-disk
-  format change against a pinned fixture with no version byte to discriminate on (CR14); it is not cheap in the
-  sense the drift refusal is.
-- **"Any member can roll the fleet back."** Narrower: a withdrawn line can be re-offered and selected at the next
-  install; nothing was found that replaces a running install (L15).
-- **"Mandates travel in clear past hop TLS."** A confidentiality limit, not a usable theft: a grant is
-  holder-bound and proved per call (L8).
-- **"Nothing checks the fencing token."** By design and stated: the fence is at the resource (L14). What is fair
-  is that the library's own `consistent_set` does not keep the contract it asks for, which CR11 proposes.
+  and the reviewer **narrowed** it in the reply ("should read 'the guarantees whose state is an unsigned KV record
+  fail against one member'"). That narrower list is the inventory's.
+- **"Make self-install opt-in, not the headline default."** Opt-in in code (P5): a stem needs a `[hosts]` table
+  and a trusted publisher, or an explicit, warned waiver. The reviewer is right that it is the headline — the hero
+  sentence leads with it and the README's path has the stem fleet as step 3 — and right in one place the critique
+  did not name: the library `Provisioner` accepts unsigned lines until told otherwise (CR7, D13).
+- **"`TaskCtx` … the cause of 56 `too_many_arguments` allows."** Not shown. Sixteen of the 57 are outside the root
+  crate (N13); whether grouping the context removes the rest is CR21's measurement, not a finding.
 - **"The upgrade notes should say so."** They do (P3). The absolute wording was in the project's first response
-  and in two one-line summaries.
-- **"Protected kinds are checked by hand."** The predicate and the decision are each one function; what is by
-  hand is the call (L18). The finding stands and CR6 answers it; "everything after authentication is by
-  convention" leaves out the central, deny-by-default scope layer.
+  and in two one-line summaries (D10).
 - **"15–20% of comments narrate review history."** About 8% by a marker grep, 15% only if every plan-row tag
   counts (N17).
+- **"Everything after authentication is by convention."** The predicate and the decision are each one function,
+  and the scope layer is central and deny-by-default; what is by hand is the call (L18). The finding stands and
+  CR6 answers it.
+
+### 6.2 · True, and understated or needing context
+
+- **"A u64::MAX stamp pins a key forever (`connection.rs:843-868`)."** True, and understated: it is not specific
+  to anti-entropy, a fix there alone leaves the live frames, and above Layer I one such write de-advertises a
+  capability for good (L2).
+- **"Any member can roll the fleet back."** True by composition: a member who sheds a band (A3) or waits for a
+  re-heal gets its replayed line chosen. Narrower only in that no single write swaps a running install (L15).
+- **"RPC replies are forgeable" and "readable by every relay."** True, and the fan-out cap makes relays the
+  common path above about nine nodes (L7, L8). The context: a relayed mandate is readable, not usable.
+- **"Neither needs a wire change"** of the two Layer I items. True of the wire. The checksum is an on-disk format
+  change against a pinned fixture with no version byte (CR14), and the drift refusal is a question about what
+  Layer I may do (D16); neither is cheap in the sense the reply means.
+- **"Nothing checks the fencing token."** True; by design and stated — the fence is at the resource (L14, D15).
+- **"SWIM is unauthenticated UDP even under TLS."** True, and understated: with the default quorum it reaches
+  consensus, not only liveness (L5, D7).
 - **"11 clippy invocations."** Fifteen in `make check` and 37 in CI; the critique understates its own point (N2).
+
+### 6.3 · A position, not a refutation
+
+- **"Signals and Boundaries is no longer what ships."** The reviewer's narrower point — that the document claimed
+  more than the code did, for Individual routing and for Group sampling (`src/agent/tasks.rs:368`–`392`,
+  `:396` on) — **was accepted**: #771 changed the document. What the maintainer does not accept is that the
+  principle changed (M2): unconditional means not conditional on admission or on a route, and a direct send is an
+  optimisation over a flood that remains the fallback. Both are recorded.
 
 ## 7 · What was not verified
 
@@ -649,16 +804,24 @@ Said plainly, with the code.
 - **Whether a relay can reuse an exchanged token** it reads from an envelope (L8): the binding is DPoP by design
   (#757); not re-derived.
 - **"Several are stale"** of the comments (N17), and **"fixed"** of the sleeps (N15): a grep does not show either.
-- **The capability layer's freshness check** that `hlc.rs:80` says quarantines far-future entries: not read.
+- **The critique's "Sound" column** — what it says each layer does well — was not verified at all.
+- **Whether a forged SWIM `Dead` persists against a live TCP peer**, and so whether the quorum composition of L5
+  with L11 needs one datagram or a stream of them.
+- **The project's first response** is not a document in the repository; its six items are listed in the
+  vendored file's header from the maintainer's account, and the reply's "item 1", "item 2" and "item 5" are read
+  against that list.
+- **Whether a docs gate checks `what-is-proven.md` anchors**: the links added here were checked by grep.
 - **The inventory's own citations** are #772's, at `7d4c86a6`; they were not re-verified here.
 
 ## 8 · Housekeeping in this PR
 
-- The critique vendored unchanged under `external/`.
+- The critique vendored under `external/`, its own text unchanged.
 - `what-is-proven.md` § *Not yet shown*: four rows dated 2026-11-12 for confirmed gaps that bound a claim on that
   page and were not listed — the WAL checksum, the lease's skew bound, the missing model, and catalogue currency
   with staging before provenance. #772's seven rows are not repeated.
 - `docs/plans/README.md` and one line under `CLAUDE.md`'s *Open elsewhere*.
+- The vendored file's header carries, marked as the project's and not the reviewer's, the six-item list the
+  reply refers to; the critique's own text is unchanged.
 - The wiki: a `.log` entry, and a pointer from `owner-signed-records.md` to this plan as where its rows are
-  grouped.
+  grouped (CR2–CR5, CR7).
 - No release note corrected (P3). No code changed.
