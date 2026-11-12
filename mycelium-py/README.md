@@ -571,6 +571,13 @@ hlc = agent.append("events", b"order-placed")
 
 Range scan over a log stream. Returns `LogEntry(hlc, value)` objects sorted by HLC.
 
+**Application streams only (0.2.16; the gateway's `deprecations.md` §101).** A stream under `cn/`, `wiki/` or
+`reason/` belongs to a component, and the gateway no longer reads it through the log routes: `scan_log`,
+`subscribe_log` and `subscribe_log_group` raise `ProtectedStreamError` ([Errors](#errors)), the two subscriptions
+before yielding anything. Read a trace with `ReasonClient.trace(run_id)`; a commitment's records and a wiki's
+proposals are read in process, by the application that embeds the component. Against an older gateway these verbs
+returned an owned stream's entries.
+
 ```python
 entries = agent.scan_log("events")                   # full log
 recent  = agent.scan_log("events", from_hlc=cursor)  # since cursor
@@ -744,7 +751,7 @@ these codes) stays an `httpx.HTTPStatusError`.
 |---|---|---|---|
 | `ProtectedKindError` | `403 protected_kind` — `mcp.invoke`, `skill.invoke`, `llm.invoke` (and operator-listed kinds) on a raw mesh route | `rpc_call`, `scatter_gather`, `emit`, `deliver_event`, `emit_sharded`, `emit_reliable` (0.2.7) | `.kind` |
 | `ProtectedKeyError` (since 0.2.7; reads since 0.2.16) | `403 protected_key` — a key in a namespace the substrate or a companion owns | `set`, `delete`, `set_with_min_acks`, `consistent_set`; `get`, `consistent_get`, `scan_prefix`, `keys` (a prefix inside a hidden namespace) | `.key`, `.message`, `.response` |
-| `ProtectedStreamError` (since 0.2.7) | `403 protected_stream` — a log stream under `cn/`, `wiki/`, `reason/` | `append`, `compact_log` | `.stream`, `.message`, `.response` |
+| `ProtectedStreamError` (since 0.2.7; reads since 0.2.16) | `403 protected_stream` — a log stream under `cn/`, `wiki/`, `reason/` | `append`, `compact_log`; `scan_log`, `subscribe_log`, `subscribe_log_group` (raised before any entry) | `.stream`, `.message`, `.response` |
 | `SupersededError` (since 0.2.8) | `409 superseded` — the slot was decided for another value (a concurrent writer, holder or leader won) | `consistent_set`, `cross_group_propose`, `distributed_lock`, `elect_leader` | `.response` |
 
 `ProtectedKeyError` and `ProtectedStreamError` are also `httpx.HTTPStatusError`s — what these verbs

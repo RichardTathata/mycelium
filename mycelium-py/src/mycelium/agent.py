@@ -157,8 +157,10 @@ class ProtectedStreamError(_ProtectedWriteError):
     """The gateway refused a **protected log stream** (HTTP 403 ``protected_stream``).
 
     ``append`` and ``compact_log`` refuse a stream under ``cn/``, ``wiki/`` or ``reason/`` — the
-    commitment net's, a wiki's and ``mycelium-reason``'s — which are written through those components.
-    ``stream`` is the refused stream.
+    commitment net's, a wiki's and ``mycelium-reason``'s — which are written through those components, and
+    ``scan_log``, ``subscribe_log`` and ``subscribe_log_group`` refuse to read one (the substrate release after
+    2.40.0; the typed error for the read verbs is this SDK's 0.2.16): ``message`` names the route that reads the stream
+    where there is one (a trace: ``ReasonClient.trace``). ``stream`` is the refused stream.
     """
 
     def __init__(self, stream: str, message: str, response: httpx.Response) -> None:
@@ -201,6 +203,19 @@ def _raise_if_protected(
             raise ProtectedKeyError(key or "", str(data.get("message", "protected key")), resp)
         if error == "protected_stream":
             raise ProtectedStreamError(stream or "", str(data.get("message", "protected stream")), resp)
+
+
+async def _raise_if_stream_refused(resp: httpx.Response, stream: str) -> None:
+    """A log subscription refused at open: ``403 protected_stream`` (a JSON body, not an event stream) is raised
+    as :class:`ProtectedStreamError`, and any other refusal as the :class:`httpx.HTTPStatusError` it is — never
+    as the SSE reader's content-type error."""
+    if resp.status_code < 400:
+        return
+    await resp.aread()
+    _raise_if_protected(resp, stream=stream)
+    resp.raise_for_status()
+
+
 from .artifacts import Artifacts
 from .federation import Federation
 
@@ -1571,10 +1586,14 @@ class MyceliumAgent:
         from_hlc: int = 0,
         to_hlc:   int = 2**64 - 1,
     ) -> list[LogEntry]:
-        """Range scan of ``stream``. Returns entries with HLC in ``[from_hlc, to_hlc)``."""
+        """Range scan of ``stream``. Returns entries with HLC in ``[from_hlc, to_hlc)``.
+
+        Raises :class:`ProtectedStreamError` for a stream under ``cn/``, ``wiki/`` or ``reason/``."""
         params: dict[str, Any] = {"stream": stream, "from": from_hlc, "to": to_hlc}
         with self._pool.sync() as c:
-            data = c.get("/gateway/overlay/log/scan", params=params).raise_for_status().json()
+            resp = c.get("/gateway/overlay/log/scan", params=params)
+            _raise_if_protected(resp, stream=stream)
+            data = resp.raise_for_status().json()
         return [LogEntry(hlc=e["hlc"], value=base64.b64decode(e["value_b64"])) for e in data]
 
     def compact_log(self, stream: str, before_hlc: int) -> None:
@@ -1599,10 +1618,14 @@ class MyceliumAgent:
 
             async for entry in agent.subscribe_log("events"):
                 print(entry.hlc, entry.value)
+
+        Raises :class:`ProtectedStreamError` for a stream under ``cn/``, ``wiki/`` or ``reason/``, before any
+        entry is yielded.
         """
         params = {"stream": stream, "since": since_hlc}
         async with httpx.AsyncClient(base_url=self._base_url, timeout=None, headers=self._pool.headers, verify=self._pool.verify) as c:
             async with aconnect_sse(c, "GET", "/gateway/overlay/log/subscribe", params=params) as es:
+                await _raise_if_stream_refused(es.response, stream)
                 async for event in es.aiter_sse():
                     import json as _json
                     data = _json.loads(event.data)
@@ -1621,10 +1644,14 @@ class MyceliumAgent:
 
             async for entry in agent.subscribe_log_group("events", "workers"):
                 process(entry)
+
+        Raises :class:`ProtectedStreamError` for a stream under ``cn/``, ``wiki/`` or ``reason/``, before the
+        group's claim is contended for.
         """
         params = {"stream": stream, "group": group}
         async with httpx.AsyncClient(base_url=self._base_url, timeout=None, headers=self._pool.headers, verify=self._pool.verify) as c:
             async with aconnect_sse(c, "GET", "/gateway/overlay/log/group/subscribe", params=params) as es:
+                await _raise_if_stream_refused(es.response, stream)
                 async for event in es.aiter_sse():
                     import json as _json
                     data = _json.loads(event.data)

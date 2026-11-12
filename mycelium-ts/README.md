@@ -473,6 +473,13 @@ Tombstones all entries with `hlc < beforeHlc`. `beforeHlc` is sent as an exact J
 A stream under `cn/`, `wiki/` or `reason/` belongs to a component (the commitment net, a wiki,
 `mycelium-reason`): `append` and `compactLog` throw `ProtectedStreamError` for it ([Errors](#errors)).
 
+**Reads are application streams only as well (0.2.10; the gateway's `deprecations.md` §101).** The gateway no
+longer reads a component's stream through the log routes: `scanLog`, `subscribeLog` and `subscribeLogGroup` throw
+`ProtectedStreamError`, the two subscriptions before yielding anything. A trace is read through
+`GET /gateway/reason/trace/{run_id}` (`llm:read`); a commitment's records and a wiki's proposals are read in
+process, by the application that embeds the component. Against an older gateway these verbs returned an owned
+stream's entries.
+
 #### `subscribeLog(stream, options?) → AsyncGenerator<LogEntry>`
 
 Live SSE subscription from `options.sinceHlc`, **inclusive** — the gateway yields entries with
@@ -716,7 +723,7 @@ answer to a write is an `Error` naming the method, path, status and response bod
 |---|---|---|---|
 | `ProtectedKindError` | `403 protected_kind` — `mcp.invoke`, `skill.invoke`, `llm.invoke` (and operator-listed kinds) on a raw mesh route | `rpcCall`, `scatterGather`, `emit`, `deliverEvent`, `emitSharded`, `emitReliable` | `kind` |
 | `ProtectedKeyError` (0.2.2; reads since 0.2.10) | `403 protected_key` — a key in a namespace the substrate or a companion owns | `set`, `delete`, `setWithMinAcks`, `consistentSet`; `get`, `consistentGet`, `scanPrefix`, `keys` (a prefix inside a hidden namespace) | `key`, `status` |
-| `ProtectedStreamError` (0.2.2) | `403 protected_stream` — a log stream under `cn/`, `wiki/`, `reason/` | `append`, `compactLog` | `stream`, `status` |
+| `ProtectedStreamError` (0.2.2; reads since 0.2.10) | `403 protected_stream` — a log stream under `cn/`, `wiki/`, `reason/` | `append`, `compactLog`; `scanLog`, `subscribeLog`, `subscribeLogGroup` (thrown before any entry) | `stream`, `status` |
 | `SupersededError` (0.2.4) | `409 superseded` — the slot was decided for another value (a concurrent writer, holder or leader won) | `consistentSet`, `crossGroupPropose`, `distributedLock`, `electLeader` | `status` |
 
 ```typescript

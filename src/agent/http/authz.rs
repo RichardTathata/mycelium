@@ -1813,17 +1813,69 @@ pub(crate) const OWNED_KV_PREFIXES: &[OwnedPrefix] = &[
 /// reads its values).
 pub(crate) const APPLICATION_KV_PREFIXES: &[&str] = &["ckpt/", "ckptw/", "strands/", "manifest/", "schemas/", "ui/"];
 
+/// One row of [`OWNED_LOG_STREAMS`]: a stream prefix a component owns, and how its entries are read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct OwnedStream {
+    pub(crate) prefix: &'static str,
+    /// What a refused **read** is told: the route that reads the stream where there is one, else that the
+    /// component reads it in process.
+    pub(crate) read_through: &'static str,
+}
+
 /// Streams under `log/` that a substrate component or companion owns: the commitment net's records, a wiki's
-/// durable proposals, `mycelium-reason`'s traces. The log routes take a stream name, so without this they
-/// reach those as well (the review of #549).
-pub(crate) const OWNED_LOG_STREAMS: &[&str] = &["cn/", "wiki/", "reason/"];
+/// durable proposals, `mycelium-reason`'s traces — the ONE table both directions of the log routes read. The log
+/// routes take a stream name, so without this they reach those as well: under `consensus:write` an append could
+/// forge a reason trace and a compact delete a commitment's offers (the review of #549), and under
+/// `consensus:read` a scan or a subscribe read a commitment's offers and awards, a wiki's proposals and a trace
+/// without `llm:read` (the follow-up to the kv:read decision of 2026-11-12, critique plan row CR1).
+///
+/// **A new row names its read.** `the_log_doors_classify_by_the_one_table` (`log_read_tests.rs`) pins the rows
+/// and fails on one it does not know.
+pub(crate) const OWNED_LOG_STREAMS: &[OwnedStream] = &[
+    OwnedStream {
+        prefix: "cn/",
+        read_through: "a commitment's offers, closes, reports and assessments are read in process through \
+                       mycelium-commitment by the application that embeds it; no route reads them",
+    },
+    OwnedStream {
+        prefix: "wiki/",
+        read_through: "a wiki's durable proposals are read in process by the application that embeds the wiki; \
+                       no route reads them",
+    },
+    OwnedStream {
+        prefix: "reason/",
+        read_through: "a reasoning trace is read through GET /gateway/reason/trace/{run_id} (llm:read), where \
+                       mycelium-reason's routes are merged",
+    },
+];
+
+/// The row of [`OWNED_LOG_STREAMS`] that owns `stream`, if one does — the one predicate the append, compact,
+/// scan and both subscribe doors classify by. A stream is the text between `log/` and the entry's HLC segment,
+/// compared as bytes: the store does no normalisation, so `CN/x`, `/cn/x` and ` cn/x` are other (application)
+/// streams whose keys do not lie under `log/cn/`, and a query string is percent-decoded before it reaches here.
+pub(crate) fn owned_log_stream(stream: &str) -> Option<&'static OwnedStream> {
+    OWNED_LOG_STREAMS.iter().find(|p| stream.starts_with(p.prefix) || stream == p.prefix.trim_end_matches('/'))
+}
 
 pub(super) fn refuse_owned_stream(stream: &str) -> Option<axum::response::Response> {
-    let owned = OWNED_LOG_STREAMS.iter().any(|p| stream.starts_with(p) || stream == p.trim_end_matches('/'));
-    owned.then(|| (
+    owned_log_stream(stream).map(|_| (
         StatusCode::FORBIDDEN,
         Json(json!({ "ok": false, "error": "protected_stream",
             "message": "this log stream belongs to a component (commitment, wiki, reason) and is written through it" })),
+    ).into_response())
+}
+
+/// The log **read** doors — `GET /gateway/overlay/log/scan`, `/log/subscribe` and `/log/group/subscribe` — read
+/// application streams only, as the append and compact doors write them ([`owned_log_stream`], the same
+/// predicate). An owned stream is refused `403 protected_stream` whatever the token's scopes, before the store is
+/// read, a watcher registered, a claim proposed or an event sent, so the answer does not say whether the stream
+/// exists. The message names the route that reads the stream where there is one.
+pub(super) fn refuse_owned_stream_read(stream: &str) -> Option<axum::response::Response> {
+    let owned = owned_log_stream(stream)?;
+    warn!(stream, "gateway: a component-owned log stream refused on a log read route");
+    Some((
+        StatusCode::FORBIDDEN,
+        Json(json!({ "ok": false, "error": "protected_stream", "message": owned.read_through })),
     ).into_response())
 }
 
@@ -1885,6 +1937,9 @@ fn protected_read_refusal(key: &str) -> axum::response::Response {
         "a group's roster is read through GET /gateway/mesh/group?group=G (mesh:read)"
     } else if key.starts_with("prompts/") {
         "prompt templates are read through GET /gateway/prompts and /gateway/prompts/{ns}/{name} (llm:read)"
+    } else if let Some(owned) = key.strip_prefix("log/").or_else(|| key.strip_prefix("clog/")).and_then(owned_log_stream) {
+        // A component's stream: the log read routes refuse it too, so the message does not send the caller there.
+        owned.read_through
     } else if key.starts_with("log/") || key.starts_with("clog/") {
         "logs are read through GET /gateway/overlay/log/scan (consensus:read)"
     } else if key.starts_with("cap/") {

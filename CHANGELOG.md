@@ -11,6 +11,35 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Security
 
+- **The log read routes refuse component-owned streams** (critique plan row CR1's follow-up; `deprecations.md`
+  §101). Since 2.27.0 the log *write* routes — append and compact — have refused a stream under `cn/`, `wiki/` or
+  `reason/`; the *read* routes had no such guard, so a token holding only `consensus:read` scanned or subscribed
+  to a commitment's offers, closes, reports and assessments, a wiki's durable proposals, and a reasoning trace
+  without `llm:read` — and `…/log/group/subscribe` proposed a consensus claim and recorded a position under
+  `clog/{stream}/…` for such a stream under that read scope. **Every release from 2.27.0 is affected** (before it
+  `consensus:write` reached them too). Now, by the one table the write routes use (`OWNED_LOG_STREAMS`):
+  - `GET /gateway/overlay/log/scan`, `/log/subscribe` and `/log/group/subscribe` answer **403** `protected_stream`
+    for an owned stream, whatever the scopes and whether or not the stream holds anything, with a JSON body that
+    says how the stream is read (`GET /gateway/reason/trace/{run_id}`, `llm:read`, for a trace; in process for a
+    commitment's and a wiki's). A subscribe is refused before any event is sent, a watcher registered or a claim
+    proposed;
+  - an application stream reads and subscribes as before;
+  - a raw KV read of a key under `log/cn/`, `log/wiki/` or `log/reason/` (403 `protected_key` since §99) names
+    that read in its message and no longer the scan route;
+  - the SDKs raise `ProtectedStreamError` from `scan_log` / `scanLog`, `subscribe_log` / `subscribeLog` and
+    `subscribe_log_group` / `subscribeLogGroup` (`mycelium-py` 0.2.16, `mycelium-ts` 0.2.10, both unreleased
+    with §99's); in `mycelium-py` any other refusal of a log subscription at open is now an
+    `httpx.HTTPStatusError`, where it was the SSE reader's content-type error.
+
+  **Check:** with a `consensus:read` token, `curl -s -o /dev/null -w '%{http_code}\n' -H 'Authorization: Bearer
+  TOKEN' 'http://NODE:PORT/gateway/overlay/log/scan?stream=cn/x/offers'` answers **200** on an affected node and
+  **403** after upgrading (the stream need not exist). Until every gateway is upgraded, treat `consensus:read` as
+  reading every log stream and review who holds it. **Upgrade note:** nothing shipped here reads those streams
+  through the log routes; a client of yours that did reads a trace through `/gateway/reason/trace/{run_id}` and
+  the others in process (§101's table). **Not changed:** `GET /gateway/kv/keys?prefix=log/cn/` still lists the
+  entries' key *names* under `kv:read` (§99 left `log/` listed); `GET /consensus/{slot}` still answers for a
+  group's claim.
+
 - **The raw KV read routes refuse owned namespaces** (the kv:read decision, 2026-11-12; `deprecations.md` §99). Since
   2.27.0 the raw KV *write* routes have refused every key in a namespace the substrate or a companion owns; the
   *read* routes had no such guard, so a token holding only `kv:read` read a grant record without `grant:read`, the
@@ -36,7 +65,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (`…/gateway/kv/keys?prefix=grant/` likewise). Until every gateway is upgraded, treat `kv:read` as reading every
   replicated record and review who holds it. **Upgrade note:** a client or dashboard that read an owned namespace
   through `/gateway/kv` uses the namespace's own route (§99's table). **Not changed:** the log read routes still read
-  a stream under `cn/`, `wiki/` or `reason/` with `consensus:read`; public `/stats` still counts every live key
+  a stream under `cn/`, `wiki/` or `reason/` with `consensus:read` (closed by the entry above, §101); public `/stats` still counts every live key
   (`store_entries`), the hidden namespaces' included.
 
 ### Added

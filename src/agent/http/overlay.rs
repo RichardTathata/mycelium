@@ -590,12 +590,17 @@ pub(super) struct LogScanQuery { stream: String, from: Option<u64>, to: Option<u
 
 /// `GET /gateway/overlay/log/scan?stream=S&from=0&to=MAX` — range scan.
 ///
-/// Returns `[{"hlc": N, "value_b64": "…"}]`.
+/// Returns `[{"hlc": N, "value_b64": "…"}]`. A stream a component owns (`cn/`, `wiki/`, `reason/`) is refused
+/// 403 `protected_stream`, as the append and compact doors refuse it ([`refuse_owned_stream_read`]) — until
+/// 2026-11-12 a `consensus:read` token read every one of them here.
 pub(super) async fn gw_overlay_log_scan(
     Query(q):   Query<LogScanQuery>,
     State(ctx): State<Arc<HttpCtx>>,
 ) -> impl IntoResponse {
     use base64::Engine as _;
+    if let Some(refused) = refuse_owned_stream_read(&q.stream) {
+        return refused;
+    }
     let from = q.from.unwrap_or(0);
     let to   = q.to.unwrap_or(u64::MAX);
     // `(hlc, key)`: the core's order (`KvHandle::scan_log`), so two same-HLC entries come back in the
@@ -649,11 +654,16 @@ pub(super) async fn gw_overlay_log_compact(
 #[derive(Deserialize)]
 pub(super) struct LogSubscribeQuery { stream: String, since: Option<u64> }
 
-/// `GET /gateway/overlay/log/subscribe?stream=S&since=0` — SSE stream of log entries.
+/// `GET /gateway/overlay/log/subscribe?stream=S&since=0` — SSE stream of log entries. A stream a component
+/// owns is refused 403 `protected_stream` with a JSON body, before a watcher is registered or an event sent
+/// ([`refuse_owned_stream_read`]).
 pub(super) async fn gw_overlay_log_subscribe(
     Query(q):   Query<LogSubscribeQuery>,
     State(ctx): State<Arc<HttpCtx>>,
-) -> Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>> {
+) -> axum::response::Response {
+    if let Some(refused) = refuse_owned_stream_read(&q.stream) {
+        return refused;
+    }
     let prefix      = format!("log/{}/", q.stream);
     let prefix_arc: Arc<str> = Arc::from(prefix.as_str());
     let mut watcher  = super::capability_ops::subscribe_prefix_on_kv(&ctx.agent_ctx.kv_state, Arc::clone(&prefix_arc));
@@ -689,7 +699,7 @@ pub(super) async fn gw_overlay_log_subscribe(
         }
     });
 
-    Sse::new(ReceiverStream::new(rx).map(Ok::<_, Infallible>)).keep_alive(KeepAlive::default())
+    Sse::new(ReceiverStream::new(rx).map(Ok::<_, Infallible>)).keep_alive(KeepAlive::default()).into_response()
 }
 
 #[derive(Deserialize)]
@@ -717,13 +727,21 @@ pub(super) struct LogGroupSubscribeQuery { stream: String, group: String }
 /// by construction — no cross-consumer offset hand-off) and **renews the lease** while active; on
 /// its death the lease lapses and a standby takes over (failover). The earlier code used a
 /// bare-LWW "lock" (no mutual exclusion → every consumer drained the whole stream).
+///
+/// **A stream a component owns is refused** 403 `protected_stream` ([`refuse_owned_stream_read`]) before the
+/// claim is proposed: this door would otherwise read the stream *and* write a consensus claim and a position
+/// under `clog/{stream}/…` for it, both under `consensus:read`.
 #[cfg(feature = "consensus")]
 pub(super) async fn gw_overlay_log_group_subscribe(
     Query(q):   Query<LogGroupSubscribeQuery>,
     State(ctx): State<Arc<HttpCtx>>,
-) -> Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>> {
-    Sse::new(log_group_events(Arc::clone(&ctx.agent_ctx), q.stream, q.group).map(|data| Ok(Event::default().data(data.to_string()))))
+) -> axum::response::Response {
+    if let Some(refused) = refuse_owned_stream_read(&q.stream) {
+        return refused;
+    }
+    Sse::new(log_group_events(Arc::clone(&ctx.agent_ctx), q.stream, q.group).map(|data| Ok::<_, Infallible>(Event::default().data(data.to_string()))))
         .keep_alive(KeepAlive::default())
+        .into_response()
 }
 
 /// The event stream behind `GET /gateway/overlay/log/group/subscribe`: each item is one entry's data object.

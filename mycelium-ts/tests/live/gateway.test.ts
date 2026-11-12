@@ -12,7 +12,7 @@
  *   MYCELIUM_TEST_HOST=127.0.0.1 MYCELIUM_TEST_PORT=8300 npm test
  */
 
-import { MyceliumAgent } from "../../src/agent";
+import { MyceliumAgent, ProtectedStreamError } from "../../src/agent";
 
 const TEST_HOST = process.env.MYCELIUM_TEST_HOST;
 const TEST_PORT = parseInt(process.env.MYCELIUM_TEST_PORT ?? "0", 10);
@@ -246,6 +246,22 @@ describe_("MyceliumAgent — live node tests", () => {
     const values = entries.map((e) => e.value.toString());
     expect(values).toContain("entry-1");
     expect(values).toContain("entry-2");
+  });
+
+  // CR1's follow-up (2026-11-12): the log read routes refuse a component's stream, as append and compact do.
+  it_("scanLog, subscribeLog and subscribeLogGroup refuse a component-owned stream", async () => {
+    for (const stream of ["cn/ts-live/offers", "wiki/ts-live/proposals", "reason/ts-live/n"]) {
+      const scan: any = await a.scanLog(stream).catch((e) => e);
+      expect(scan).toBeInstanceOf(ProtectedStreamError);
+      expect(scan.stream).toBe(stream);
+      // The subscriptions are refused at open: the first `next()` throws, and no entry is yielded.
+      const sub: any = await a.subscribeLog(stream).next().catch((e) => e);
+      expect(sub).toBeInstanceOf(ProtectedStreamError);
+      const group: any = await a.subscribeLogGroup(stream, "ts-live").next().catch((e) => e);
+      expect(group).toBeInstanceOf(ProtectedStreamError);
+    }
+    const trace: any = await a.scanLog("reason/ts-live/n").catch((e) => e);
+    expect(String(trace.message)).toContain("/gateway/reason/trace/");
   });
 
   it_("compactLog does not throw", async () => {

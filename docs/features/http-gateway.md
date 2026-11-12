@@ -58,8 +58,17 @@ token resolves to its own principal is `token_identities_are_qualified_by_the_is
   `sys/client-cert/`, `mandate/`, `rights/` or `sched/`. One table decides both directions
   (`OWNED_KV_PREFIXES`, in [`authz.rs`](../../src/agent/http/authz.rs)); the tests are
   `the_raw_kv_routes_refuse_governance_intents`, in [`http_tests.rs`](../../src/agent/http/http_tests.rs), and one
-  per read door in [`kv_read_tests.rs`](../../src/agent/http/kv_read_tests.rs). The log read routes are not covered:
-  `consensus:read` still reads a stream under `cn/`, `wiki/` or `reason/` ([rbac](../operations/rbac.md)).
+  per read door in [`kv_read_tests.rs`](../../src/agent/http/kv_read_tests.rs).
+- **The log routes are for application streams, in both directions.** Append and compact, and scan, subscribe and
+  group subscribe, refuse a stream under `cn/`, `wiki/` or `reason/` — a commitment's records, a wiki's durable
+  proposals, a reasoning trace — **403** `protected_stream`, whatever the scopes and whether or not the stream
+  exists; a read's refusal says how the stream is read, and a subscribe is refused before any event is sent or a
+  claim proposed. So `consensus:read` and `consensus:write` reach nothing `llm:read` or a component guards. One
+  table decides both directions (`OWNED_LOG_STREAMS`, in [`authz.rs`](../../src/agent/http/authz.rs)); the tests
+  are one per read door in [`log_read_tests.rs`](../../src/agent/http/log_read_tests.rs) and, for the writes,
+  `the_raw_kv_routes_refuse_governance_intents`. **Not covered:** `/gateway/kv/keys?prefix=log/cn/` still lists
+  those entries' key names under `kv:read` ([rbac](../operations/rbac.md),
+  [deprecations §101](../guide/deprecations.md)).
 - **Not built:** on a credentialed node `/health`, `/ready`, `/stats`, `/metrics`, `/bulk/{id}` and the A2A
   descriptor stay public, `/a2a` admits an anonymous caller, and a merged router's paths outside `/gateway/` are not
   gated (the `gw.exposed_closed` row); a bearer crosses the wire in cleartext unless the gateway serves

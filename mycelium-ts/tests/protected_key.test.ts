@@ -126,3 +126,51 @@ test("scheduleLast reads the schedule's own route", async () => {
   expect(await agent().scheduleLast("close")).toEqual([{ node: "10.0.0.5:9000", slot: 7, periodMs: 1000, phaseMs: 0 }]);
   expect(seen).toContain("/gateway/schedules/last?id=close");
 });
+
+// CR1's follow-up (2026-11-12, 0.2.10): the log read routes refuse a component-owned stream as append and
+// compact do, and the three read verbs throw the typed error — the subscriptions before any entry.
+const LOG_READ_DOOR = "a reasoning trace is read through GET /gateway/reason/trace/{run_id} (llm:read), where mycelium-reason's routes are merged";
+const drain = async (gen: AsyncGenerator<unknown>): Promise<unknown[]> => {
+  const out: unknown[] = [];
+  for await (const e of gen) out.push(e);
+  return out;
+};
+const logReadDoors: Array<[string, (a: MyceliumAgent) => Promise<unknown>, string]> = [
+  ["scanLog", (a) => a.scanLog("reason/run-1/n"), "/gateway/overlay/log/scan"],
+  ["subscribeLog", (a) => drain(a.subscribeLog("reason/run-1/n")), "/gateway/overlay/log/subscribe"],
+  ["subscribeLogGroup", (a) => drain(a.subscribeLogGroup("reason/run-1/n", "g")), "/gateway/overlay/log/group/subscribe"],
+];
+
+function stubSeeing(body: Record<string, unknown>, status: number, seen: string[]): void {
+  globalThis.fetch = (async (url: unknown) => {
+    seen.push(String(url));
+    return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+  }) as typeof fetch;
+}
+
+test.each(logReadDoors)("%s throws ProtectedStreamError carrying the route that reads the stream", async (_name, call, path) => {
+  const seen: string[] = [];
+  stubSeeing({ ok: false, error: "protected_stream", message: LOG_READ_DOOR }, 403, seen);
+  const err: any = await call(agent()).catch((e) => e);
+  expect(new URL(seen[0]).pathname).toBe(path);
+  expect(new URL(seen[0]).searchParams.get("stream")).toBe("reason/run-1/n");
+  expect(err).toBeInstanceOf(ProtectedStreamError);
+  expect(err.stream).toBe("reason/run-1/n");
+  expect(err.status).toBe(403);
+  expect(err.message).toBe(LOG_READ_DOOR);
+});
+
+test.each(logReadDoors)("an ordinary 403 on %s stays the error it was (the plant)", async (_name, call) => {
+  stubSeeing({ error: "insufficient scope", required_scope: "consensus:read" }, 403, []);
+  const err: any = await call(agent()).catch((e) => e);
+  expect(err).toBeInstanceOf(Error);
+  expect(err).not.toBeInstanceOf(ProtectedStreamError);
+  expect(String(err.message)).toContain("403");
+});
+
+test("a protected_key answer on a log read is not turned into a stream error", async () => {
+  stubSeeing({ ok: false, error: "protected_key", message: "x" }, 403, []);
+  const err: any = await agent().scanLog("events").catch((e) => e);
+  expect(err).not.toBeInstanceOf(ProtectedStreamError);
+  expect(err).not.toBeInstanceOf(ProtectedKeyError);
+});

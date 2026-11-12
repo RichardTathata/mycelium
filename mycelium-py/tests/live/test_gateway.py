@@ -17,7 +17,7 @@ import asyncio
 import os
 import pytest
 
-from mycelium import MyceliumAgent, DemandStatus, RpcRequest, MailboxEvent
+from mycelium import MyceliumAgent, DemandStatus, RpcRequest, MailboxEvent, ProtectedStreamError
 
 # A live suite: it runs only when MYCELIUM_TEST_HOST names a node, and skips itself otherwise, so a
 # directory-wide `pytest mycelium-py/tests` collects it without a node (verification policy rule 3).
@@ -246,6 +246,50 @@ class TestMailboxGateway:
         assert len(received) == 1
         assert received[0].payload == b"task-payload"
         assert received[0].kind == "gw-test.task"
+
+
+class TestLogGateway:
+    """The ordered log, and the streams the log routes do not read (CR1's follow-up, 2026-11-12)."""
+
+    def test_append_and_scan_round_trip(self, agent: MyceliumAgent) -> None:
+        import time
+        stream = f"py-test-log-{time.time_ns()}"
+        first = agent.append(stream, b"entry-1")
+        second = agent.append(stream, b"entry-2")
+        assert second > first
+        assert [e.value for e in agent.scan_log(stream)] == [b"entry-1", b"entry-2"]
+
+    @pytest.mark.asyncio
+    async def test_subscribe_log_delivers_an_application_stream(self, agent: MyceliumAgent) -> None:
+        import time
+        stream = f"py-test-sub-{time.time_ns()}"
+        agent.append(stream, b"one")
+
+        async def first() -> bytes:
+            async for entry in agent.subscribe_log(stream):
+                return entry.value
+            raise AssertionError("the stream ended without an entry")
+
+        assert await asyncio.wait_for(first(), timeout=10.0) == b"one"
+
+    @pytest.mark.parametrize("stream", ["cn/py-live/offers", "wiki/py-live/proposals", "reason/py-live/n"])
+    def test_scan_log_refuses_a_component_owned_stream(self, agent: MyceliumAgent, stream: str) -> None:
+        with pytest.raises(ProtectedStreamError) as e:
+            agent.scan_log(stream)
+        assert e.value.stream == stream
+        assert e.value.response.status_code == 403
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("verb", ["subscribe_log", "subscribe_log_group"])
+    async def test_a_subscription_to_a_component_owned_stream_is_refused_before_any_entry(
+        self, agent: MyceliumAgent, verb: str,
+    ) -> None:
+        stream = "reason/py-live/n"
+        gen = agent.subscribe_log(stream) if verb == "subscribe_log" else agent.subscribe_log_group(stream, "py-live")
+        with pytest.raises(ProtectedStreamError) as e:
+            await asyncio.wait_for(gen.__anext__(), timeout=10.0)
+        assert e.value.stream == stream
+        assert "/gateway/reason/trace/" in e.value.message
 
 
 class TestScatterGateway:
