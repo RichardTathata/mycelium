@@ -26,3 +26,15 @@ After #764's confirm round, two more decisions of the same day:
   `tls issue --client --consent --public-key <spki.pem> --grade`, and a body whose grade differs is refused. This
   revises P4. The grade set is `os_presence(macos, unbound)`, `tty`, `recording` and `service`, and the residual is that
   the grade is what enrolment attested.
+
+After the second confirm round:
+- **A, the maintainer's decision:** a consent principal's `grant:issue` comes from its own table,
+  `gateway_consent_principals`, not a named token. A named-token entry requires a bearer, and a consent never presents
+  one. The evaluator also sees `signed_with`, as a set of accepted grades. A policy keyed on `token:` principals does
+  not match a `consent:` decider, which is the upgrade note.
+- **B:** the `tty` residual is stated. The software consent key is a same-user file, so the agent whose request it
+  approves can sign a `tty` decision with no terminal.
+- The grade extension's OID is on the `2.25` UUID arc, read by a new DER extension reader in `cert_identity`. The grade
+  is appended to the decision message after `t` (a `u32` LE length, empty refused). A P-256 key's record-path hex is the
+  X9.63 point. All of these are pinned in goldens.
+

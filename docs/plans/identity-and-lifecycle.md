@@ -1,6 +1,6 @@
 # Identity and lifecycle — keyed principals, signed decisions, cancellation under a per-call mandate, and the developer surface
 
-**Status:** **agreed with the maintainer on 2026-11-07**, rev 0.16 (rev 0.16, 2026-11-12, takes #764's review (M1–M6, L1–L9) and records the maintainer's decisions on I7 of the same day: P2 a fleet-certified P-256 consent key verified at `grant_decision::verify` only, issued over its public key with the CA off-node; P3 the CryptoKit blob path, no signed bundle; P1 `os_presence(macos, unbound)`, an enrolment claim no verifier can check; P4 the grade on the consent record, D7's three plus `service`; P5 a residual; P6 I1's supersession with every node upgraded first; then, after #764's confirm round, H1 a consent key under its own principal `consent:{issuer}/{name}` (nothing supersedes across kinds; never fed to possession) and H2 the grade written into the consent certificate by the fleet CA, the body's grade refused when it differs (P4 revised); the consent issue flow over an SPKI PEM with `--grade` and a `--force` guard — I7 **buildable on macOS**, its `tty` half then waiting on P7, decided the same day: a fleet-certified P-256 consent key in software on Linux and Windows, graded `tty`, so I7 is **buildable**; D7's *Revised from* and N7 follow; rev 0.15, 2026-11-12, writes row I7 from spike S-presence's note, `docs/plans/spikes/2026-11-07-s-presence.md`, and its maintainer's run of 2026-11-09: the four questions the stub left to the spike answered with what it settled — the fleet CA can certify a P-256 Enclave key and `ring` verifies it, the release pipeline cannot produce a signed bundle, Windows was not run so D7's `tty` stands, and presence is not attested to the verifier, so an `os_presence` grade is an enrolment claim — where the evidence and D7 disagree stated, every verifier a client key reaches enumerated, and I7 **not yet buildable: P1–P6 open**, the maintainer's; rev 0.14, 2026-11-12, records wave 1a — I0, I1, I3 and I5 — released in v2.40.0; rev 0.13, 2026-11-11, closes I5 on evidence across #757, #759 and its PR 2, with the decision that a gateway exchanges only for an action recorded on the row; rev 0.12, 2026-11-11, records #759's review on I5's provider half: the check's order restated and pinned, its clocks read at the receive boundary's instant, one OIDC verifier per node, the replay window keyed across gateways, `typ` and two start-time refusals, and the maintainer's decision that a hosted capability's invoke needs an `ot`; rev 0.11 records the maintainer's four I5 decisions of 2026-11-11 and spike S-exchange's note, `docs/plans/spikes/2026-11-11-s-exchange.md`: the gateway exchanges under its own client credential, `oidc.exchange_audience` is an explicit setting both ends read, the envelope cap stays at 8 KiB; after #757's review, the maintainer's decision to extend the spike to sender binding, and the row rewritten to it: the exchanged token is DPoP-bound to the gateway's Ed25519 node key (Keycloak 26.8.2, default features), the provider refuses a token not bound to the key that signed its envelope, and replay rests on that and the token's `jti` admitted once; rows I2 and I4 are **not yet buildable**: I2's **R1–R4 open**, the round-3 review's questions, and I4's **N1–N5 open**, the round-2 review's questions, which each row's build PR must settle; rev 0.10 writes row I4 from spike S-cancel's note, `docs/plans/spikes/2026-11-07-s-cancel.md`, and takes #731's review and its confirm round: S-cancel re-measured, its reclamation fixed for the feeder, and I4's exit given an item for every D2 decision; rev 0.9 writes row I2 from spike S-succeed's note, `spikes/2026-11-07-s-succeed.md`, and #732's review: a `cert_pem` node re-roots live, the trust set and the successor certificate persist under `succession/`, every cached judgment is re-judged when the roots change, and old-CA records lose standing (decided in the confirm round); rev 0.8 records the agreement, its text rev 0.7's); proposed 2026-10-31. Work starts in §4's order: wave 1a's I0 and wave 1b's spikes in parallel. Five independent adversarial reviews —
+**Status:** **agreed with the maintainer on 2026-11-07**, rev 0.16 (rev 0.16, 2026-11-12, takes #764's review (M1–M6, L1–L9) and records the maintainer's decisions on I7 of the same day: P2 a fleet-certified P-256 consent key verified at `grant_decision::verify` only, issued over its public key with the CA off-node; P3 the CryptoKit blob path, no signed bundle; P1 `os_presence(macos, unbound)`, an enrolment claim no verifier can check; P4 the grade on the consent record, D7's three plus `service`; P5 a residual; P6 I1's supersession with every node upgraded first; then, after #764's confirm round, H1 a consent key under its own principal `consent:{issuer}/{name}` (nothing supersedes across kinds; never fed to possession) and H2 the grade written into the consent certificate by the fleet CA, the body's grade refused when it differs (P4 revised); after the second confirm round, A consent's own authority (`gateway_consent_principals`, `signed_with` at the evaluator), B the `tty` residual stated, the grade's OID on the `2.25` UUID arc, its message encoding and the P-256 key-hex pinned; the consent issue flow over an SPKI PEM with `--grade` and a `--force` guard — I7 **buildable on macOS**, its `tty` half then waiting on P7, decided the same day: a fleet-certified P-256 consent key in software on Linux and Windows, graded `tty`, so I7 is **buildable**; D7's *Revised from* and N7 follow; rev 0.15, 2026-11-12, writes row I7 from spike S-presence's note, `docs/plans/spikes/2026-11-07-s-presence.md`, and its maintainer's run of 2026-11-09: the four questions the stub left to the spike answered with what it settled — the fleet CA can certify a P-256 Enclave key and `ring` verifies it, the release pipeline cannot produce a signed bundle, Windows was not run so D7's `tty` stands, and presence is not attested to the verifier, so an `os_presence` grade is an enrolment claim — where the evidence and D7 disagree stated, every verifier a client key reaches enumerated, and I7 **not yet buildable: P1–P6 open**, the maintainer's; rev 0.14, 2026-11-12, records wave 1a — I0, I1, I3 and I5 — released in v2.40.0; rev 0.13, 2026-11-11, closes I5 on evidence across #757, #759 and its PR 2, with the decision that a gateway exchanges only for an action recorded on the row; rev 0.12, 2026-11-11, records #759's review on I5's provider half: the check's order restated and pinned, its clocks read at the receive boundary's instant, one OIDC verifier per node, the replay window keyed across gateways, `typ` and two start-time refusals, and the maintainer's decision that a hosted capability's invoke needs an `ot`; rev 0.11 records the maintainer's four I5 decisions of 2026-11-11 and spike S-exchange's note, `docs/plans/spikes/2026-11-11-s-exchange.md`: the gateway exchanges under its own client credential, `oidc.exchange_audience` is an explicit setting both ends read, the envelope cap stays at 8 KiB; after #757's review, the maintainer's decision to extend the spike to sender binding, and the row rewritten to it: the exchanged token is DPoP-bound to the gateway's Ed25519 node key (Keycloak 26.8.2, default features), the provider refuses a token not bound to the key that signed its envelope, and replay rests on that and the token's `jti` admitted once; rows I2 and I4 are **not yet buildable**: I2's **R1–R4 open**, the round-3 review's questions, and I4's **N1–N5 open**, the round-2 review's questions, which each row's build PR must settle; rev 0.10 writes row I4 from spike S-cancel's note, `docs/plans/spikes/2026-11-07-s-cancel.md`, and takes #731's review and its confirm round: S-cancel re-measured, its reclamation fixed for the feeder, and I4's exit given an item for every D2 decision; rev 0.9 writes row I2 from spike S-succeed's note, `spikes/2026-11-07-s-succeed.md`, and #732's review: a `cert_pem` node re-roots live, the trust set and the successor certificate persist under `succession/`, every cached judgment is re-judged when the roots change, and old-CA records lose standing (decided in the confirm round); rev 0.8 records the agreement, its text rev 0.7's); proposed 2026-10-31. Work starts in §4's order: wave 1a's I0 and wave 1b's spikes in parallel. Five independent adversarial reviews —
 four on one day, the fifth on the merged document (#715's thread, 2026-11-05; the thread, this paragraph and the *Revised
 from* column are the record of all five): rev 0.1 against the decisions, rev 0.3 against the mechanisms, rev 0.4 and rev 0.5 each against five
 premises, both with the verdict *not yet buildable*. Every premise failure sat in wave 1 (I0–I4) or in the developer
@@ -804,7 +804,7 @@ under the successor; `rotate_identity` still cannot run on the off-node posture.
 - a `[gateway_tls]` gateway on its own certificate, which is outside the fleet CA and unchanged;
 - rotation in place on the off-node posture.
 
-#### I7 · The developer's identity — *written from S-presence ([note](spikes/2026-11-07-s-presence.md), 2026-11-07; its recorded run at tag `spike/s-presence-2026-11-07`, the positive Touch ID path in the note's maintainer's run of 2026-11-09) — **buildable (the maintainer's decisions of 2026-11-12: P1–P7, H1, H2)*** (D7)
+#### I7 · The developer's identity — *written from S-presence ([note](spikes/2026-11-07-s-presence.md), 2026-11-07; its recorded run at tag `spike/s-presence-2026-11-07`, the positive Touch ID path in the note's maintainer's run of 2026-11-09) — **buildable (the maintainer's decisions of 2026-11-12: P1–P7, H1, H2, A)*** (D7)
 
 **Decided before the spike** (D7 and the stub this row replaces):
 - The consent primitive is **an OS user-presence check whose result the repository verifies, graded on the record**.
@@ -919,6 +919,16 @@ This row records the decisions that depart from it, and §2's D7 *Revised from* 
     upgraded before `tls commit`.
 - **P7:** on Linux and Windows a `tty` consent is signed by a **fleet-certified P-256 consent key held in software**,
   graded `tty`. So there is one consent-key kind and one verifier on every platform, as P2 requires.
+  - **The `tty` residual (#764's second confirm round, B), stated.** The key is a same-user file, 0600 in a 0700
+    directory, so any process running as the user can sign with it and no terminal is needed at all.
+  - That includes the coding agent N4 runs, and an Orca plugin through `terminal:send`.
+  - **A `tty` decision may therefore have been made by the agent whose request it approves.** The grade says where
+    the key lives, not that a person typed.
+  - This is why consent has its own authority (A, below): an operator can grant `grant:issue` to a person's consent
+    and not to the service, or the reverse, and a policy can refuse `tty` where it needs more.
+  - The residual is stated in the row, on the feature page (beside P1's) and on N7's card.
+- **A (the maintainer, 2026-11-12): consent has its own authority.** A consent principal's scopes come from their
+  own table, `gateway_consent_principals` *(new)*, never from a named token's (below).
 - **H1 (#764's confirm round): a consent key lives under its own principal.**
   - **The defect:** the design before it put a P-256 consent certificate under the service's `token:{issuer}/{name}`.
     It superseded the service's Ed25519 key there, but `feed_client_keys` feeds no P-256 mark and withdraws nothing.
@@ -957,22 +967,50 @@ This row records the decisions that depart from it, and §2's D7 *Revised from* 
   - **The fold.** I1's client-certificate fold reads it under its own principal, at
     `sys/client-cert/{principal-hex}/{key-hex}`, since the principal differs. It keeps its own mark, so no consent
     certificate supersedes a `token:` key and no `token:` certificate supersedes a consent key.
-  - **The scheme is bound to the key kind.** A `mycelium-consent://` certificate over an Ed25519 key, or a
-    `mycelium-client://` one over a P-256 key, has no facts and never counts.
+  - **The scheme is bound to the key kind.** These have no facts and never count:
+    - a `mycelium-consent://` certificate over an Ed25519 key;
+    - a `mycelium-client://` one over a P-256 key;
+    - a certificate naming **both** `mycelium-client://` and `mycelium-consent://`, which counts as neither, as
+      `client_identity` already refuses a certificate naming both a client and a node URI.
+  - **The key's hex in the record path.** A P-256 key's `{key-hex}` in `sys/client-cert/{principal-hex}/{key-hex}` is
+    the **uncompressed X9.63 point**, 65 bytes and so 130 hex digits. That is the form the spike printed
+    (`pub_x963_hex`), and its length tells it from an Ed25519 key's 64 digits. `parse_hex32` is widened by kind, and
+    the encoding is pinned in a golden (exit 1).
   - **The mesh.** Both mesh verifiers refuse it in `refuse_if_removed` (no Ed25519 key). `refuse_if_client` is widened
     to the new scheme too, so the scheme refusal does not rest on the key alone.
-  - **Who may decide.** `decider_holds_grant_issue` (`http/grants.rs:200`) today matches a `token:` decider against the
-    named-token table. It reads `consent:{issuer}/{name}` against the named token `{name}`'s scopes, so a developer's
-    consent may decide only where the developer's token holds `grant:issue`. That is **this row's choice**, stated; a
-    separate table is the alternative.
+  - **Who may decide (A).** `decider_holds_grant_issue` (`http/grants.rs:200`) today matches a `token:` decider
+    against the named-token table. A `consent:` decider is matched against a **consent table**,
+    `gateway_consent_principals` *(new `GossipConfig` field)*. Each entry is `{ name, scopes }`, with the scopes
+    limited to `grant:issue` (`validate()` refuses any other by name).
+    - **Why a table rather than a `consent_scopes` field on the named-token entry:** a named-token entry requires a
+      bearer `token`, and a consent principal never presents a bearer. A field there would mint a bearer secret for a
+      person who only decides.
+    - With the table, an operator grants `grant:issue` to a person's consent without the service, or to the service
+      without the consent, and revokes either alone by editing one entry.
+    - `GOSSIP_GATEWAY_NAMED_TOKENS`'s format is unchanged.
+  - **The grade at the evaluator (included).** The `ActionEnvelope` the decision routes evaluate
+    (`ae_preflight` at `ENFORCEMENT_POINT_GRANT_ISSUE`, `http/grants.rs:350`) gains `signed_with` *(new field;
+    additive, the type is `#[non_exhaustive]`)*.
+    - A policy can then require a grade for an action, as **a set of accepted grades** rather than a minimum. The
+      grades are not ordered: `tty` and `service` are both a same-user file, and `recording` exists only in `sim`.
+    - An unsigned decision's envelope carries none.
+  - **The upgrade note.** An existing evaluator policy keyed on `token:` principals does **not** match a `consent:`
+    decider, so a deployment that admits developers' decisions by their `token:` principal adds rules for their
+    `consent:` principals. The reference evaluator, the Cedar adapter's re-pin and `deprecations.md` say so.
+    - An older binary ignores `gateway_consent_principals` silently: `GossipConfig` refuses no unknown key. It admits
+      no consent decider either way, since its fold has no consent principal.
   - **The record.** `grant_decision::verify` names the consent principal as the decider. I3's decision record and its
     evidence name it as the actor (the `DecisionActor`'s principal), with `signed_with` beside it.
   - **Never possession.** `feed_client_keys` feeds `token:` principals only, so a consent principal's key never reaches
     `TrustedExternalIssuers.clients`, and the possession proof never sees it.
 - **The grade in the certificate (H2).**
-  - **The extension.** The fleet CA writes the grade as a non-critical X.509 extension under a Mycelium private OID.
-    The tree holds no OID today, so the build PR names the arc (an IANA PEN, or a `2.25` UUID OID) and pins it in a
-    golden.
+  - **The extension.** The fleet CA writes the grade as a non-critical X.509 extension under a **`2.25` UUID OID**
+    (ITU-T X.667: `2.25.` followed by a UUID's decimal value). That needs no IANA PEN.
+    - The build PR draws the UUID once and pins the OID in a golden, with the grade's DER encoding: an `UTF8String`
+      holding the grade's exact text (exit 1).
+    - It is written with `rcgen`'s `CustomExtension`.
+    - Reading it needs a **new DER extension reader in `cert_identity`**: webpki exposes no extension accessor, and
+      `cert_identity` already walks the `TBSCertificate` by hand for the serial and the SANs.
   - **Who decides the grade.** The issuer's host decides it at issue (`--grade`, below); the developer does not choose
     it per decision.
   - **No grade, no consent.** A consent certificate with no grade extension, or with one outside the set, never
@@ -1021,8 +1059,13 @@ This row records the decisions that depart from it, and §2's D7 *Revised from* 
   - **A service decider's grade.** A `token:` decider signing with its Ed25519 key records `service`. A body from it
     naming no grade (today's body, from a pre-I7 SDK) is recorded `service`, and one claiming any other grade is
     refused.
-  - **The signed message.** The grade is appended to `grant_decision_message` only when present, so today's message,
-    and every signature over it, is unchanged.
+  - **A consent decider's body with no grade is refused**, by name, before the signature is checked against a
+    certificate grade.
+  - **The signed message.** The grade is appended to `grant_decision_message` **after `t`** (the `u64` LE
+    `issued_at_ms`), only when present: a `u32` little-endian length, then the grade's bytes.
+    - An empty grade, a length of 0, is refused.
+    - So today's message, and every signature over it, is unchanged.
+    - `tests/fixtures/decision/vector.json` pins both forms, with a grade and without, in all three languages.
   - **`recording`** is accepted only in a `sim` build.
 - **The residual (H2, consistent with P1).** The grade is what enrolment attested: the issuer's host was told which
   kind of key it certified, and no verifier can check that.
@@ -1049,7 +1092,9 @@ This row records the decisions that depart from it, and §2's D7 *Revised from* 
   - `client_cert_key(principal, &[u8; 32])`;
   - `ClientCertPublished.key` (`client_cert::Published`);
   - `ClientKeyStanding`'s argument at `GossipAgent::client_key_standing(&str, &[u8; 32])`;
-  - `SignedDecision`, which gains the grade.
+  - `SignedDecision`, which gains the grade, and `grant_decision_message`, which appends it (a published format);
+  - `GossipConfig`, which gains `gateway_consent_principals` (an exhaustive literal breaks);
+  - `ActionEnvelope`, which gains `signed_with` (additive, `#[non_exhaustive]`).
 - **Unchanged by decision:**
   - `ClientSigned.key`, and `ClientSigner::new(ed25519_dalek::SigningKey, …)` (`client_sig.rs:304`): a consent key
     never signs a `cs`;
@@ -1059,11 +1104,11 @@ This row records the decisions that depart from it, and §2's D7 *Revised from* 
   The build PR keeps each one unchanged, or adds its entry.
 
 **Depends on:** S-presence (done); I1 and I3 (released in v2.40.0), for the client-certificate door, fold and
-supersession, and the signed decision this row grades; the maintainer's decisions of 2026-11-12 (P1–P7, H1, H2).
+supersession, and the signed decision this row grades; the maintainer's decisions of 2026-11-12 (P1–P7, H1, H2, A).
 
 **Enumerate:** every place a client key is read, verified, fed or issued today, found by these greps:
 - `grep -n "fn verify_bytes\|fn ed25519_key_from_cert_der\|fn cert_identity\|fn client_identity\|fn issue_client_cert\|fn refuse_if_removed\|refuse_if_client(" mycelium-core/src/tls.rs`;
-- `grep -rn "client_key_standing\|fn check_bound\|fn check_at_door\|client_sig::check\|grant_decision::verify\|gd::verify\|fn verify_signature\|verify_client\|set_client_key\|fn feed_client_keys\|fn judge\|fn facts\|type PrincipalWindow\|fn client_cert_key\|fn parse_hex32\|fn decider_holds_grant_issue" --include='*.rs' src | grep -v _tests.rs`;
+- `grep -rn "client_key_standing\|fn check_bound\|fn check_at_door\|client_sig::check\|grant_decision::verify\|gd::verify\|fn verify_signature\|verify_client\|set_client_key\|fn feed_client_keys\|fn judge\|fn facts\|type PrincipalWindow\|fn client_cert_key\|fn parse_hex32\|fn decider_holds_grant_issue\|ENFORCEMENT_POINT_GRANT_ISSUE" --include='*.rs' src | grep -v _tests.rs`;
 - `grep -n "class ClientSigner" mycelium-py/src/mycelium/client_sig.py mycelium-ts/src/client_sig.ts`.
 
 The signature checks (`verify_bytes`, `check_bound`, `grant_decision::verify`, `verify_client`) take an Ed25519 key
@@ -1073,7 +1118,8 @@ consent key):
 - **The primitive.** `mycelium_core::tls::verify_bytes(&[u8; 32], …)` (`tls.rs:1480`): Ed25519 `verify_strict`,
   called by every signature check below. It is **unchanged**, and the P-256 verifier sits beside it.
 - **The key read from a certificate** (**reached**). `cert_identity` (`tls.rs:252`) reads its key through
-  `ed25519_key_from_cert_der` (`tls.rs:1104`), which returns `None` for any other SPKI. So `client_identity`
+  `ed25519_key_from_cert_der` (`tls.rs:1104`), which returns `None` for any other SPKI. It reads the serial and the
+  SANs by its own DER walk, and reading the grade needs a **new extension reader** there, since webpki exposes none. So `client_identity`
   (`tls.rs:229`) returns `None` for a P-256 leaf, and `client_cert::facts` (`client_cert.rs:331`) and `judge` (`:308`)
   never count it. Today a P-256 client certificate is **ignored by the fold and refused by the publication door**
   (`client_cert::publish`, `POST /gateway/identity/client-cert`), and silently so at an older node (§5).
@@ -1115,6 +1161,12 @@ consent key):
      `Current`.
    - The flow refuses a non-P-256 SPKI, raw X9.63, a missing `--grade`, a grade of `service`, and an existing
      `.cert.pem` without `--force`. Each is refused by name.
+   - **Goldens:**
+     - the grade extension's OID (the chosen `2.25` UUID OID) and each grade's DER encoding, read back by the new
+       extension reader in `cert_identity`;
+     - the record path's `{key-hex}` for a P-256 key (the 130-digit X9.63 point).
+   - A certificate naming both `mycelium-client://` and `mycelium-consent://` counts as neither, for either
+     principal.
 2. **A signature only after the prompt** (a person's run). The shim is the one the release's `macos` job built,
    obtained by downloading the release tarball through a browser, as an adopter would.
    - `dev` signs a grant decision only after Touch ID is approved, and a dismissed prompt yields no signature and no
@@ -1169,6 +1221,16 @@ consent key):
     build PR cannot produce two release builds, this is stated *not run*, and a re-enrolment (exit 11) is the
     documented recovery.
 13. **The measurement.** The probe's results are re-run on the shipped shim and dated on `what-is-proven.md` (§6.4).
+14. **Consent's own authority (A).**
+    - A `consent:` decider with `grant:issue` in `gateway_consent_principals` decides, while the same person's
+      `token:` principal, holding no `grant:issue`, is refused `decider_lacks_scope`.
+    - The reverse holds too: the `token:` decider has it and the consent principal has none.
+    - Removing either entry revokes that principal alone.
+    - `validate()` refuses a consent entry with any scope but `grant:issue`.
+    - A policy keyed on `token:{issuer}/{name}` does not admit the `consent:` decider: the upgrade note, shown.
+15. **The grade at the evaluator.** A policy accepting only `os_presence(macos, unbound)` for an action refuses the
+    same decision signed at `tty` and at `service`, and admits it at `os_presence(macos, unbound)`. The evidence record
+    names the grade it decided with.
 
 **Not built, stated:**
 - A team-signed bundle, a keychain-stored key, notarization (P3).
@@ -1177,6 +1239,7 @@ consent key):
 - A Windows presence grade, and Linux presence beyond `tty`: both out of scope by §7.
 - A consent key as a `cs` signer, a grant holder or a mesh identity.
 - M-of-N.
+- **The `tty` residual (B):** a same-user process can sign a `tty` consent with no terminal. It is stated, not closed.
 - Not run, and kept so unless a build run makes it: the added-fingerprint leg; a passcode reaching the key by another
   route; user binding across macOS users; device binding.
 
@@ -1231,7 +1294,7 @@ gateway**; a manifest declares `engines.orca` as a **floor**, not a pin, so the 
 and the exact release of its recorded run; the catalog label for a non-official plugin is "Unverified" or
 "`<catalog> · <owner>`". **Exit:** on the recorded release, a workspace gets a dev fleet from the offer; a card within
 the stream's latency; approval only after the OS prompt with `os_presence(macos, unbound)` on the record (I7's P1 and P3: the blob
-path, so the terminal cannot satisfy it on macOS), `tty` elsewhere and said so on the card, with what `unbound` means; a plugin typing into `dev`'s terminal produces no signature on macOS; the Orca half *run when
+path, so the terminal cannot satisfy it on macOS), `tty` elsewhere and said so on the card, with what `unbound` means and the `tty` residual's text (I7, B): "on this platform the consent key is a file any process running as you can use; this decision may have been made without you"; a plugin typing into `dev`'s terminal produces no signature on macOS; the Orca half *run when
 supplied*.
 
 ### Examples and documentation (no new mechanism)
@@ -1296,6 +1359,8 @@ Any time:                                      E2, E3, E4
   - At the mesh, a consent certificate is refused by `refuse_if_removed` before the client-scheme check runs, because
     it carries no Ed25519 key. That holds on every version I1 runs on.
   - A pre-I7 SDK's signed decision, naming no grade, verifies unchanged and records `service`.
+  - **An evaluator policy keyed on `token:` principals does not match a `consent:` decider**: add rules for the
+    `consent:` principals, and their entries in `gateway_consent_principals`, before developers decide.
   - `SignedDecision` gains the grade, and `issue_client_cert` a public-key form. These and the other API types (a)'s
     reach widens are listed in I7's row, each with a `deprecations.md` entry.
 - **N4:** three configuration files written into the worktree, merged.
