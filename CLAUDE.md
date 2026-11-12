@@ -172,7 +172,8 @@ in the plan files. Every gap that is claimed but not gated, dated, is on `docs/o
 is the state of play).
 - **Wave 1a, released in v2.40.0:** I0, I1, I3, I5, each closed on evidence in the plan's §8.
 - **Wave 1b (one MINOR), next:** I4 (cancellation under a `call:` mandate), I2 (CA succession), I7 (the developer's
-  identity), each written from its spike note in `docs/plans/spikes/`. A row is built only once its header says
+  identity), each written from its spike note in `docs/plans/spikes/`; and with them, from the critique plan, CR2's
+  first PR (the grant use marker), CR13's counter and CR12 (`#[non_exhaustive]` on `GossipConfig`). A row is built only once its header (or, for a critique-plan row, its State line) says
   *buildable*.
 - **Wave 2 (one MINOR), the developer surface:** N1 and N3–N7 (N7 the Orca plugin). N3 (`--format json`) is delivered,
   unreleased (#767); N5 needs nothing from wave 1; N4's identity half and N7 wait on I7. The examples and records
@@ -185,7 +186,7 @@ is the state of play).
 - **Adopter surface:** Y9 is paused until a cloud credential is held; each row's stated *not built* items are in the
   plan's §8.
 - **Post-360 hardening:** the *not built* items and the known flakes, `docs/plans/post-360-hardening.md` §3.6.
-- **The third-party critique of 2026-11-12:** verified finding by finding, its rows CR1–CR23 proposed and awaiting the maintainer's decisions (§5, D1–D16), `docs/plans/external-critique-2026-11-12.md`.
+- **The third-party critique of 2026-11-12:** agreed 2026-11-12, all sixteen decisions answered (`docs/plans/external-critique-2026-11-12.md` §5): CR1 now (#774), CR2's first PR, CR13's counter and CR12 inside wave 1b, CR3–CR11 and the rest after it, CR10 (the acceptor's model) in parallel.
 - **Contracts axis, not code gates** (each needs a machine, a counterparty or a credential, not a commit): V1, the nightly scale runner whose self-hosted box is offline, so its criterion has never been
   met; AE4's four joint AWS/GCP runs, which need the counterparty; S4, real object-store buckets, which need
   credentials.

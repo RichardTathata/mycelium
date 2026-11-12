@@ -163,15 +163,17 @@ future contributor needs so they don't re-litigate a settled choice — lives he
 ## Proposed — not yet started
 
 [`external-critique-2026-11-12.md`](external-critique-2026-11-12.md) — **the third-party critique of 2026-11-12:
-verification and the plan that answers it** (proposed 2026-11-12, rev 0.1; **awaiting the maintainer's decisions**,
-its §5, D1–D16; rev 0.2 takes #773's independent review). The critique is vendored unchanged at
+verification and the plan that answers it** (**agreed with the maintainer 2026-11-12**, rev 0.3: all sixteen decisions of its §5 answered as
+recommended; rev 0.2 took #773's independent review). The critique is vendored unchanged at
 [`external/2026-11-12-360-critique.md`](external/2026-11-12-360-critique.md) — the reviewer's summary and reply; the
 full per-layer document has not been received. Every finding was read against `main` at `156ca329`, nothing built
 or run: none is false, several are narrower or already stated limits, three are not confirmed (self-install is
 opt-in in code; `TaskCtx` was not shown to cause the `too_many_arguments` allows; the upgrade notes do state the
 conditions), and the counts hold. Its root cause is the
 owner-signed rule ([wiki](../wiki/dev/owner-signed-records.md), #772), whose inventory the rows are grouped from.
-Rows CR1–CR23 and two questions (D4, D5), in the **proposed** order — only CR1 and the rule are agreed as now: the KV read guard (in progress) and the log read doors; grant records (the use marker on a node-local durable record: a KV record alone cannot carry it), the audit
+Rows CR1–CR23 and two questions decided with no row (D4, D5). **The agreed order (D11):** CR1 now (#774, in
+review); inside wave 1b, CR2's first PR (the use marker), CR13's counter and CR12; CR3–CR11 and the rest after
+wave 1b, CR10 (a Stateright model) startable in parallel. The rows: the KV read guard (in progress) and the log read doors; grant records (the use marker on a node-local durable record: a KV record alone cannot carry it), the audit
 head and `cap/`·`req/`·`prov-shed` signed by their owners; one door function for authorization; catalogue version,
 expiry and revocation with provenance before staging; the exclusive verbs refusing without an electorate, and a
 model of the acceptor; `#[non_exhaustive]` on `GossipConfig`; then a counter, and by decision a refusal, of an inbound entry stamped beyond the
@@ -204,7 +206,7 @@ the comparison proposed that already ships is tabled in its §1; a task lifecycl
 dashboard are deferred in §6 with the question each must answer first.
 
 [`identity-and-lifecycle.md`](identity-and-lifecycle.md) — **identity and lifecycle, waves 1b and 2** (wave 1a delivered; see *Shipped*) (proposed 2026-10-31; **agreed
-with the maintainer 2026-11-07**, rev 0.18 (rev 0.18: row I2 written buildable, R1–R4 decided 2026-11-12, with #768's review; rev 0.17: row I4 written buildable, N1–N5 resolved, #766; rev 0.16: row I7 written from S-presence, the maintainer's decisions of 2026-11-12 recorded, P1–P7, buildable, #764); **wave 1a released in v2.40.0** — I0 (#733), I1 (#741–#745), I3 (#750, #754, #756), I5 (#757, #759, #760), each closed on evidence in §8 — and wave 1b's three spikes written (S-cancel #731, S-succeed #732, S-presence #729, #747); **Next:** build wave 1b's rows I4, I2 and I7, all three now written buildable, then wave 2; reviewed five times — rev 0.1 against the decisions, rev 0.3 against the mechanisms, rev 0.4 and
+with the maintainer 2026-11-07**, rev 0.19 (rev 0.19: wave 1b's MINOR also carries the critique plan's CR2 first PR, CR13's counter and CR12; rev 0.18: row I2 written buildable, R1–R4 decided 2026-11-12, with #768's review; rev 0.17: row I4 written buildable, N1–N5 resolved, #766; rev 0.16: row I7 written from S-presence, the maintainer's decisions of 2026-11-12 recorded, P1–P7, buildable, #764); **wave 1a released in v2.40.0** — I0 (#733), I1 (#741–#745), I3 (#750, #754, #756), I5 (#757, #759, #760), each closed on evidence in §8 — and wave 1b's three spikes written (S-cancel #731, S-succeed #732, S-presence #729, #747); **Next:** build wave 1b's rows I4, I2 and I7, all three now written buildable, then wave 2; reviewed five times — rev 0.1 against the decisions, rev 0.3 against the mechanisms, rev 0.4 and
 rev 0.5 each against five premises, every premise failure in wave 1 or the developer identity; the fifth, on the merged
 document in #715's thread, corrected thirteen stated facts in place). From a comparative reading of Orca and Eve against
 `main` at `9cbd3b82`. Eight decisions D1–D8: every acting principal keyed by a certificate the fleet CA issues off-node,
