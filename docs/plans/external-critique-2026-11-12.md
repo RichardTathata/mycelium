@@ -7,7 +7,7 @@ row rewritten — a KV record alone cannot carry it; the lease margin and the fe
 refusal given its receiver-clock, replay and ordering cases and moved to a decision; the WAL checksum's downgrade
 case; catalogue rollback's limits; four inventory rows that had no plan row; §6 split into what is wrong and what
 is understated; every choice the review found inside a row moved to §5). **The order is agreed (D11):** CR1 now
-(delivered: PR #774 and the log read doors' follow-up); **inside wave 1b**, CR2's first PR (the use marker), CR13's counter and CR12; CR3–CR11 and
+(delivered: PR #774 and the log read doors' follow-up, PR #777); **inside wave 1b**, CR2's first PR (the use marker), CR13's counter and CR12; CR3–CR11 and
 everything else **after wave 1b**, with CR10 (the model) startable in parallel. A row is *buildable* only where
 its text needs no further decision; each row's **State** line says where one remains.
 
@@ -218,7 +218,7 @@ A row that moves an inventory row to *Meets* cites the verifying code and the fo
 #### CR1 · The KV read guard, then the log read doors *(L19)* — delivered
 
 **State (2026-11-12):** **delivered** — the guard is PR #774, merged (`deprecations.md` §99); the log read doors
-follow-up is PR `log-read-guard` (`deprecations.md` §101). The follow-up's exit, promise by promise:
+follow-up is PR #777 (`deprecations.md` §101). The follow-up's exit, promise by promise:
 - *"a `consensus:read` token is refused a scan and both subscribes of `cn/…`, `wiki/…` and `reason/…`"* —
   `a_consensus_read_token_reads_application_streams_only_at_every_log_door` (`compliance`; a `"*"` token too),
   and one test per door: `log_scan_refuses_an_owned_stream_and_reads_an_application_stream`,
