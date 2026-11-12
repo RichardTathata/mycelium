@@ -3004,7 +3004,7 @@ Wire **v12** unchanged.
 
 A provider verifies an OIDC user's token itself when its `[oidc]` table sets `exchange_audience`. The token is
 exchanged by the gateway at the IdP (RFC 8693) and bound to the gateway's node key (DPoP). This release builds the
-provider's half. The gateway's exchange is I5's PR 2.
+provider's half; the gateway's exchange is §97.
 
 - **What changed:**
   - `[oidc]` gained `exchange_audience`, `exchange_client_id` and `exchange_max_lifetime_secs`. **`OidcConfig` now
@@ -3027,9 +3027,9 @@ provider's half. The gateway's exchange is I5's PR 2.
     without one (`ot_required`). The feature page lists every refusal.
   - **A build without `compliance` refuses any call carrying an `ot`** (`not_in_build`) rather than run it
     unverified. Before this release no envelope carried one.
-- **Until the gateway's half ships, no gateway sends an `ot`.** So a provider that sets `exchange_audience` now
-  refuses every `oidc:` action, and says so in a warning at start. **Do not set it yet** on a provider that serves
-  OIDC users.
+- **A verifying provider needs exchanging gateways** (§97). A provider that sets `exchange_audience` refuses every
+  `oidc:` action that arrives without an `ot`, so set it only once every gateway that calls it for OIDC users runs a
+  release with §97 and has its exchange settings. (Until §97, no gateway sent one, and this release warned at start.)
 - **The actions** are the protected kinds (`mcp.invoke`, `skill.invoke`, `llm.invoke`, `protected_rpc_kinds`), the
   companions' write kinds, and a hosted capability's invoke (`cap.invoke/{namespace}/{name}`, which runs code). The
   artifact kinds and `reason.blob.fetch` are not.
@@ -3046,5 +3046,45 @@ provider's half. The gateway's exchange is I5's PR 2.
 - **Code:**
   - `CallerError` gained `ExchangedToken(&'static str)` (it is `#[non_exhaustive]`).
   - `GatewayCaller` gained a `pub(crate)` field.
+
+Wire **v12** unchanged.
+
+## 97. A gateway exchanges an OIDC user's token for every action it dispatches (unreleased, identity-and-lifecycle I5, PR 2)
+
+A node whose `[oidc]` table sets `exchange_token_endpoint` exchanges the user's own bearer at the IdP (RFC 8693) under
+its client credential, with a DPoP proof under its node key, and carries the exchanged token to the provider (§96). It
+does so only for an **action** — the kinds a verifying provider requires an `ot` for — at `/mcp` and `/a2a`, and makes
+no exchange for any other call, nor for a principal that is not `oidc:`.
+
+- **What changed:**
+  - `[oidc]` gained `exchange_token_endpoint` and `exchange_client_secret_env` (default
+    `MYCELIUM_OIDC_EXCHANGE_SECRET`). `OidcConfig { …, ..Default::default() }` is unaffected.
+  - **A node exchanges iff `exchange_token_endpoint` is set, and verifies iff `exchange_audience` is set** (the
+    maintainer's decision, 2026-11-11). Whether it runs an HTTP port decides neither. A verifying node without the
+    endpoint — a provider with only `/health` or `/metrics`, or a gateway that also provides — starts as under §96, with
+    no secret; such a gateway's OIDC users' actions toward a verifying provider are refused there `ot_required`.
+  - **With the endpoint set, the start is refused by name** when the audience is unset (`oidc_exchange_audience_unset`),
+    the client unset (`oidc_exchange_client_unset`), the endpoint is neither https nor a loopback host
+    (`oidc_exchange_endpoint_insecure`), the secret's variable is unset or empty (`oidc_exchange_secret_unset`), or the
+    egress allow-list does not permit the endpoint. Under `gateway_caller_profile = legacy` the settings are inert and
+    not demanded; the start warns.
+  - **An exchange that yields no token refuses the call**, and nothing runs: `oidc_exchange_unreachable` (no answer, or
+    a redirect, which is never followed), `oidc_exchange_refused`, `oidc_exchange_too_large` (past 64 KiB),
+    `oidc_exchange_malformed`, `oidc_exchange_no_subject_token`, `oidc_exchange_no_identity` (JSON-RPC `-32024`; HTTP
+    502 at the raw route). A grant's use the door claimed is given back, as it now is for the gateway's other refusals
+    before sending (`caller_context_too_large`, `provider_without_caller_context`). An IdP outage therefore stops OIDC
+    users' actions through that gateway; their reads continue.
+  - Each action is one exchange: one IdP round trip per call, within a 10 s deadline.
+  - §96's start-time warning is gone.
+  - `mycelium doctor` reports `id.oidc_exchange` (this node exchanges) and `id.oidc_exchanged_token` (it verifies).
+  - Discovery documents and JWKS bodies past 1 MiB are a failed fetch.
+- **Traps:**
+  - **"Action" is read per node.** A kind a provider lists in `protected_rpc_kinds` and its gateway does not is not
+    exchanged for, and is refused `ot_required`. List a protected kind on every node that dispatches or serves it.
+  - **A provider built without `compliance` refuses any `ot`** (`not_in_build`, §96). During a rolling upgrade, an
+    exchanging gateway's actions to such a provider are refused, where before they ran; upgrade the providers, or set
+    the endpoint only once they run a `compliance` build.
+- **Code:** `GatewayDispatchError` gained `Exchange(&'static str)` (it is `#[non_exhaustive]`).
+- **Clients do not change.** The SDKs send the same bearer.
 
 Wire **v12** unchanged.

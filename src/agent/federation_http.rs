@@ -87,7 +87,7 @@ pub(crate) fn authenticate_presented(ctx: &TaskCtx, headers: &HeaderMap) -> Resu
 
 /// Insert the identity the handler and the dispatch will see.
 pub(crate) fn insert_identity(request: &mut Request, identity: FederatedIdentity) {
-    request.extensions_mut().insert(ResolvedPrincipal { principal: identity.principal.clone(), scopes: Vec::new() });
+    request.extensions_mut().insert(ResolvedPrincipal { principal: identity.principal.clone(), scopes: Vec::new(), subject_token: None });
     request.extensions_mut().insert(identity);
 }
 

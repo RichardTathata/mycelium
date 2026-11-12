@@ -213,17 +213,17 @@ impl GossipAgent {
             && self.task_ctx.oidc_verifier.get().is_none()
         {
             let verifier = Arc::new(super::oidc::OidcVerifier::new(oidc.clone(), self.config.egress.clone()));
-            if oidc.exchange_audience.is_some() {
-                // #759's review, L1: no gateway in this release exchanges a user's token, so every `oidc:` action this
-                // node serves is refused `ot_required` until its gateways run the release that does (I5's PR 2).
-                tracing::warn!(
-                    exchange_audience = oidc.exchange_audience.as_deref().unwrap_or_default(),
-                    "oidc: this node verifies exchanged tokens, and no gateway in this release exchanges one; every \
-                     action by an OIDC user (oidc: principal) on this node is refused ot_required until its gateways \
-                     exchange tokens (identity-and-lifecycle I5, deprecations.md §96)"
-                );
-            }
             let _ = self.task_ctx.oidc_verifier.set(verifier);
+        }
+        // I5: a node exchanges an OIDC user's token at the IdP iff `exchange_token_endpoint` is set (the maintainer's
+        // decision of 2026-11-11); its audience, client, endpoint and secret are checked here, each refused by name
+        // (`oidc_exchange_audience_unset`, `oidc_exchange_client_unset`, `oidc_exchange_endpoint_insecure`,
+        // `oidc_exchange_secret_unset`), and the secret read once. No request is made: `mycelium doctor` runs this.
+        #[cfg(feature = "compliance")]
+        if self.task_ctx.oidc_exchanger.get().is_none()
+            && let Some(exchanger) = super::oidc_exchange::OidcExchanger::load(&self.config)?
+        {
+            let _ = self.task_ctx.oidc_exchanger.set(Arc::new(exchanger));
         }
         // Credential bindings (post-360 plan row L): each value read once, here, into the gate. A value
         // that cannot be read refuses the start by name (never by value); a build without the gate's

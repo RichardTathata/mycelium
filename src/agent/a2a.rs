@@ -908,6 +908,15 @@ async fn dispatch_send(
         Some(&resource_claim),
         client_signed.as_ref(),
     ).await;
+    // The gateway's own refusal before it sent anything (a failed exchange, an envelope too large, a provider without
+    // the caller context) ran nothing: a grant's use claimed above is given back (#760's confirm round). A reply is the
+    // skill's raw bytes, which the node did not author, so only an `Err` releases here.
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    if dispatched.is_err()
+        && let Some(reason) = super::http::release_grant_claim_after(&state.task_ctx, &preflight, &dispatched).await
+    {
+        tracing::debug!(skill = %skill_id, reason, "refused before sending: the grant's use at this door is released");
+    }
 
     // A timeout is *unknown*, never a negative — a long-running skill may well have completed.
     #[cfg(all(feature = "gateway", feature = "tls"))]
@@ -1286,6 +1295,13 @@ pub(crate) async fn tasks_send_subscribe(
             Some(&resource_claim),
             client_signed.as_ref(),
         ).await;
+        // As on the unary send: the gateway's own refusal before sending gives a claimed grant use back.
+        #[cfg(all(feature = "gateway", feature = "tls"))]
+        if dispatched.is_err()
+            && let Some(reason) = super::http::release_grant_claim_after(&state.task_ctx, &preflight, &dispatched).await
+        {
+            tracing::debug!(skill = %skill_id, reason, "refused before sending: the grant's use at this door is released");
+        }
 
         #[cfg(all(feature = "gateway", feature = "tls"))]
         {
@@ -2050,11 +2066,11 @@ mod tests {
         };
         tasks.pin().insert("t1".into(), A2aTask { task, context_id: String::new(), generation: Generation::Legacy, created_at: Instant::now(), owner: Some("token:gw/a".into()), pending: None });
         let state = A2aState { task_ctx: make_ctx(), tasks };
-        let creator = ResolvedPrincipal { principal: "token:gw/a".into(), scopes: Vec::new() };
+        let creator = ResolvedPrincipal { principal: "token:gw/a".into(), scopes: Vec::new(), subject_token: None };
         let result = handle_tasks_cancel(&state, Some(&creator), None, &json!({ "id": "t1" }), None);
         assert_eq!(result["error"]["code"], -32002);
         // The owner rule comes before the state rule: another identity, or no identity, is -32004.
-        let other = ResolvedPrincipal { principal: "token:gw/b".into(), scopes: Vec::new() };
+        let other = ResolvedPrincipal { principal: "token:gw/b".into(), scopes: Vec::new(), subject_token: None };
         assert_eq!(handle_tasks_cancel(&state, Some(&other), None, &json!({ "id": "t1" }), None)["error"]["code"], -32004);
         assert_eq!(handle_tasks_cancel(&state, None, None, &json!({ "id": "t1" }), None)["error"]["code"], -32004);
         assert_eq!(handle_tasks_get(&state, None, None, &json!({ "id": "t1" }), None)["error"]["code"], -32004);

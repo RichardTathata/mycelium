@@ -53,6 +53,30 @@
       "docs": "docs/operations/sso.md"
     },
     {
+      "id": "id.oidc_exchange",
+      "revision": 1,
+      "subsystem": "identity",
+      "kind": "node_enforced",
+      "promise": "this gateway exchanges an OIDC user's token at the IdP for every action it dispatches for them, for one DPoP-bound to its node key (identity-and-lifecycle I5): a node exchanges iff `exchange_token_endpoint` is set",
+      "needs": "`compliance`; `[oidc] exchange_token_endpoint` + `exchange_audience` + `exchange_client_id` + the secret's variable; `[tls]`; `gateway_caller_profile = secure`",
+      "enforcement_points": [
+        "oidc_exchange::OidcExchanger"
+      ],
+      "docs": "docs/features/gateway-sso.md"
+    },
+    {
+      "id": "id.oidc_exchanged_token",
+      "revision": 1,
+      "subsystem": "identity",
+      "kind": "node_enforced",
+      "promise": "this provider verifies an OIDC user's exchanged token against its own issuer and the key that signed the envelope, and refuses an OIDC user's action without one (identity-and-lifecycle I5): a node verifies iff `exchange_audience` is set",
+      "needs": "`compliance`; `[oidc] exchange_audience` + `exchange_client_id`; `[tls]`",
+      "enforcement_points": [
+        "exchanged_token::check"
+      ],
+      "docs": "docs/features/gateway-sso.md"
+    },
+    {
       "id": "gw.tls",
       "revision": 1,
       "subsystem": "gateway",

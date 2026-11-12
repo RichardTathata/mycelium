@@ -1460,6 +1460,43 @@ jobs:
       - run: node examples/eve_weather/run_client_grant.mjs | tee "$RUNNER_TEMP/client-grant.log"
       - run: grep -q '^CLIENT GRANT OK$' "$RUNNER_TEMP/client-grant.log"
 
+  oidc-exchange-live:
+    # Identity-and-lifecycle I5's exit: an OIDC user's call verified at the provider, against a real IdP. Keycloak
+    # 26.8.2 pinned by digest — the image spike S-exchange ran (docs/plans/spikes/2026-11-11-s-exchange.md) — in
+    # start-dev with default features; the test makes its own realm. The gateway exchanges the user's token at Keycloak
+    # (RFC 8693) under its client credential with a DPoP proof under its node key, and the provider verifies the
+    # DPoP-bound token. MYCELIUM_OIDC_EXCHANGE_LIVE_REQUIRED makes a missing Keycloak a failure here, not a skip; every
+    # other lib run skips the test (no MYCELIUM_KEYCLOAK_URL).
+    name: OIDC token exchange against Keycloak (I5)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Start Keycloak 26.8.2 (pinned by digest)
+        run: |
+          docker run -d --name keycloak -p 127.0.0.1:18090:8080 \
+            -e KC_BOOTSTRAP_ADMIN_USERNAME=admin -e KC_BOOTSTRAP_ADMIN_PASSWORD=admin \
+            quay.io/keycloak/keycloak@sha256:723b1d6e254c0fc96d5cffec860c7e0744d6a3277822b865bb538cf891575e41 start-dev
+          for i in $(seq 1 120); do
+            curl -sf http://127.0.0.1:18090/realms/master >/dev/null && exit 0
+            sleep 2
+          done
+          docker logs keycloak; exit 1
+      # Exactly one test, by its path: a renamed test would otherwise pass this step with none run (#760's review, L7).
+      - run: |
+          set -o pipefail
+          cargo test --lib --features compliance,a2a -- --exact agent::oidc_exchange_live_tests::oidc_exchange_live_an_oidc_users_call_is_verified_at_the_provider --nocapture \
+            | tee "$RUNNER_TEMP/oidc-live.log"
+          grep -q '^test result: ok. 1 passed; 0 failed' "$RUNNER_TEMP/oidc-live.log"
+        env:
+          MYCELIUM_KEYCLOAK_URL: http://127.0.0.1:18090
+          MYCELIUM_OIDC_EXCHANGE_SECRET: i5-live-gateway-secret
+          MYCELIUM_OIDC_EXCHANGE_LIVE_REQUIRED: "1"
+      - if: failure()
+        run: docker logs keycloak
+
   test-coverage:
     # Verification policy rule 3, observed: fails unless every test in the universe EXECUTED (passed or
     # failed — not skipped, ignored, filtered out, or in a step that did not run) in some job of this run.
@@ -1472,7 +1509,7 @@ jobs:
     if: always()
     needs: [test, embedded, wasm-host, wasm-host-macos, agentfacts, blackboard, effects, commitment, wiki, reason, scaffold,
             guardrails, python-sdk, sdk-ts, loom, demo-smoke, afn-smoke, coop-smoke, conway-gpu, documentation, clippy,
-            audit, test-universe, a2a-sdk, strands-fleet, eve-fleet, ops-console]
+            audit, test-universe, a2a-sdk, strands-fleet, eve-fleet, ops-console, oidc-exchange-live]
     permissions:
       actions: read
       contents: read

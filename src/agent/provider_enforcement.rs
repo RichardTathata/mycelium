@@ -268,7 +268,7 @@ pub(crate) async fn check(ctx: &Arc<TaskCtx>, req: &RpcRequest, already_verified
         Ok(d) => d,
         Err(refusal) => return Checked::Done(Err(refusal)),
     };
-    let resolved = ResolvedPrincipal { principal: principal.clone(), scopes };
+    let resolved = ResolvedPrincipal { principal: principal.clone(), scopes, subject_token: None };
     // The preflight's `_meta`: the mandate from the envelope (C2), and — X4 — the causal fields from the application
     // payload where its kind carries them (`causal_meta`). The exposure policy (Y5) decides on these.
     let mut meta = causal_meta(kind, &payload);

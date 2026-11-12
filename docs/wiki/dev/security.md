@@ -467,7 +467,9 @@ keys come from the node's one OIDC verifier, which its gateway uses for bearers 
 arriving while none is held is refused, retriable. **Lesson from #759's review:** a check and the window that remembers
 its result must read **one instant** — the token's `exp` was read against the system clock and its window pruned
 against the HLC, which a peer can push ahead, so a token in its last moments was forgotten as it was admitted and
-admitted again. `verify_received` now reads `decision_now_ms` once and passes it to every comparison.
+admitted again. `verify_received` now reads `decision_now_ms` once and passes it to every comparison. Since I5's PR 2 the **gateway** obtains the token: for an OIDC user's action it exchanges the user's own bearer
+at the IdP (RFC 8693) under its client credential, with a DPoP proof under its node key (`src/agent/oidc_exchange.rs`),
+and an exchange that yields no token refuses the call; the run against Keycloak 26.8.2 is CI's `oidc-exchange-live`.
 
 > **`sys/identity` authentication — partially closed (WS-E, in progress).** `sys/identity/{node}`
 > is a plain Layer-I KV value with **no signature**, and `merge_peer_keys` **accumulates** any key

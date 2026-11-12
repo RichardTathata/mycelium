@@ -158,7 +158,7 @@ fn decision_actor(
     }
     let relay = caller.map(|c| c.principal.clone()).unwrap_or_else(|| gateway_caller::PRINCIPAL_ANONYMOUS.to_string());
     Ok(DecisionActor {
-        caller: Some(ResolvedPrincipal { principal: signed.decider.clone(), scopes: vec!["grant:issue".to_string()] }),
+        caller: Some(ResolvedPrincipal { principal: signed.decider.clone(), scopes: vec!["grant:issue".to_string()], subject_token: None }),
         relayed: Some(Relayed { signed: signed.clone(), relay, decision, ttl_secs, reason: reason.map(str::to_string) }),
         unsigned: false,
     })

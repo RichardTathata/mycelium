@@ -567,7 +567,7 @@ async fn a_grant_the_provider_refused_before_running_is_given_back() {
     let (asked, grant) = ask_and_issue(http_port, &args).await;
     let resource = asked["resource"].as_str().unwrap().to_string();
     let params = serde_json::json!({"_meta": presented(&grant, &resource, &args, &key)});
-    let caller = crate::agent::gateway_caller::ResolvedPrincipal { principal: FORECASTER.into(), scopes: vec!["mcp:invoke".into()] };
+    let caller = crate::agent::gateway_caller::ResolvedPrincipal { principal: FORECASTER.into(), scopes: vec!["mcp:invoke".into()], subject_token: None };
     let ctx = std::sync::Arc::clone(&a.task_ctx);
     let permit = || ae_preflight(&ctx, Some(&caller), "tools/call", &resource, &args, &params, "gateway:mcp/tools/call");
     let marker = format!("grant/{}/{}/used/gateway", crate::agent::gateway_authority::grant_holder_segment(FORECASTER), grant.mandate.term.as_str());
@@ -591,6 +591,63 @@ async fn a_grant_the_provider_refused_before_running_is_given_back() {
     assert!(matches!(second, Preflight::Proceed { .. }), "RELEASED: the retry under the same grant was refused");
     assert_eq!(kept, None, "a tool's answer gives nothing back");
     assert!(matches!(third, Preflight::Refuse(_)), "the grant is spent after a call that ran");
+}
+
+/// **A grant's use is given back when the gateway itself refused before sending** (I5, #760's review, M2). The door
+/// claims a single-use grant, then the dispatch fails at the gateway — the IdP's exchange yields no token
+/// (`oidc_exchange_unreachable`), or the envelope is too large, or the provider has no caller context, or no context
+/// reached the dispatch (`caller_context_missing`, a handler outside the auth layer) — and nothing
+/// ran. The use is released (the marker gone), and the retry is admitted once; a timeout, which may have run, leaves it
+/// spent. Seen failing first with the release reading only a provider's reply (the retry refused: the grant used).
+#[tokio::test]
+async fn a_grant_is_given_back_when_the_gateway_refused_before_sending() {
+    use crate::agent::gateway_caller::GatewayDispatchError;
+    use crate::agent::http::{ae_preflight, release_grant_claim_after, Preflight};
+    let dir = scratch("release-gw");
+    let http_port = alloc_port();
+    let (a, _ran) = started(&dir, http_port).await;
+    let key = forecaster_key(&a, &dir);
+    let args = serde_json::json!({"city": "Rennes"});
+    let (asked, grant) = ask_and_issue(http_port, &args).await;
+    let resource = asked["resource"].as_str().unwrap().to_string();
+    let params = serde_json::json!({"_meta": presented(&grant, &resource, &args, &key)});
+    let caller = crate::agent::gateway_caller::ResolvedPrincipal { principal: FORECASTER.into(), scopes: vec!["mcp:invoke".into()], subject_token: None };
+    let ctx = std::sync::Arc::clone(&a.task_ctx);
+    let permit = || ae_preflight(&ctx, Some(&caller), "tools/call", &resource, &args, &params, "gateway:mcp/tools/call");
+    let mut released = Vec::new();
+    for refused in [
+        GatewayDispatchError::Exchange("oidc_exchange_unreachable"),
+        GatewayDispatchError::ContextTooLarge,
+        GatewayDispatchError::ProviderWithoutContext(a.node_id().clone()),
+        GatewayDispatchError::MissingContext,
+    ] {
+        let p = permit().await;
+        let claimed = matches!(&p, Preflight::Proceed { grant_claim: Some(_), .. });
+        released.push((claimed, release_grant_claim_after(&ctx, &p, &Err(refused)).await));
+    }
+    let retry = permit().await;
+    let timed_out = release_grant_claim_after(
+        &ctx,
+        &retry,
+        &Err(GatewayDispatchError::Rpc(crate::agent::rpc::RpcError::Timeout)),
+    )
+    .await;
+    let after_timeout = permit().await;
+    a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(
+        released,
+        vec![
+            (true, Some("oidc_exchange_unreachable".to_string())),
+            (true, Some("caller_context_too_large".to_string())),
+            (true, Some("provider_without_caller_context".to_string())),
+            (true, Some("caller_context_missing".to_string())),
+        ],
+        "RELEASED: each claimed, each given back"
+    );
+    assert!(matches!(retry, Preflight::Proceed { grant_claim: Some(_), .. }), "the retry is admitted: {}", describe(&retry));
+    assert_eq!(timed_out, None, "a timeout may have run: nothing given back");
+    assert!(matches!(after_timeout, Preflight::Refuse(_)), "spent after the timeout");
 }
 
 /// **Only the node authors a refusal that gives a grant back** (#745's confirm round). A bridged MCP server's tool runs

@@ -189,6 +189,10 @@ const JWKS_EMPTY_RETRY_BACKOFF: Duration = Duration::from_secs(2);
 /// warn log says so each time. A constant for now; the row says when it becomes a setting.
 const JWKS_MAX_STALE: Duration = Duration::from_secs(24 * 3600);
 
+/// The most bytes a discovery document or a JWKS may take (#760's review, L1). An IdP's set is a few keys, a few KiB;
+/// a body past this is a failed fetch, so a host the egress list permits cannot make the node buffer what it chooses.
+const JWKS_MAX_BYTES: usize = 1 << 20;
+
 /// The verifier's timing, one place: the constants in production, shorter values in tests.
 #[derive(Debug, Clone, Copy)]
 struct Limits {
@@ -526,7 +530,12 @@ impl Shared {
         // lacks) would fail the whole set — and an IdP that adds such a key beside its RS256 keys
         // would never be refreshed again, which the ceiling would turn into a day-later lock-out
         // against a healthy IdP. A key that does not parse is dropped like one that does not build.
-        let published: Vec<serde_json::Value> = match response.json::<serde_json::Value>().await {
+        // Bounded (#760's review, L1): a JWKS is a few keys; one past `JWKS_MAX_BYTES` is a failed fetch.
+        let Some(body) = crate::agent::egress_client::read_bounded(response, JWKS_MAX_BYTES).await else {
+            tracing::warn!(cap = JWKS_MAX_BYTES, "oidc: JWKS body unreadable or past its bound; the held keys are kept");
+            return Err(FetchFailed);
+        };
+        let published: Vec<serde_json::Value> = match serde_json::from_slice::<serde_json::Value>(&body) {
             Ok(serde_json::Value::Object(mut doc)) => match doc.remove("keys") {
                 Some(serde_json::Value::Array(keys)) => keys,
                 _ => { tracing::warn!("oidc: JWKS parse failed: no `keys` array"); return Err(FetchFailed); }
@@ -582,7 +591,7 @@ impl Shared {
                 tracing::warn!(status = %r.status(), "oidc: discovery answered a non-2xx status");
                 return None;
             }
-            Ok(r) => r.json().await.ok()?,
+            Ok(r) => serde_json::from_slice(&crate::agent::egress_client::read_bounded(r, JWKS_MAX_BYTES).await?).ok()?,
             Err(e) => { tracing::warn!("oidc: discovery failed: {e}"); return None; }
         };
         doc.get("jwks_uri")?.as_str().map(str::to_string)
@@ -618,7 +627,7 @@ mod tests {
             jwks_uri: None,
             exchange_audience: None,
             exchange_client_id: None,
-            exchange_max_lifetime_secs: None,
+            exchange_max_lifetime_secs: None, exchange_token_endpoint: None, exchange_client_secret_env: None,
         }
     }
 
@@ -794,6 +803,22 @@ mod tests {
 
     fn open_egress() -> crate::config::EgressPolicy {
         crate::config::EgressPolicy { allow_hosts: Vec::new() }
+    }
+
+    /// **A JWKS past its bound is a failed fetch** (#760's review, L1). The fixture's keys after 1 MiB of padding are not
+    /// read: the body is abandoned at `JWKS_MAX_BYTES`, and the fetch fails (the held keys, none here, are kept). The
+    /// fixture alone is fetched. Seen failing first with the body read whole (the padded set's keys fetched).
+    #[tokio::test]
+    async fn a_jwks_past_its_bound_is_a_failed_fetch() {
+        let doc: serde_json::Value = serde_json::from_str(JWKS_BODY).unwrap();
+        let padded = serde_json::json!({"padding": "x".repeat(JWKS_MAX_BYTES), "keys": doc["keys"]}).to_string();
+        let padded: &'static str = Box::leak(padded.into_boxed_str());
+        let (big, _) = crate::test_util::spawn_counting_listener(padded).await;
+        let (ok, _) = crate::test_util::spawn_counting_listener(JWKS_BODY).await;
+        let too_big = OidcVerifier::new(stub_cfg(big), open_egress()).fetch_keys().await;
+        let fine = OidcVerifier::new(stub_cfg(ok), open_egress()).fetch_keys().await;
+        assert_eq!(too_big.err(), Some(FetchFailed), "BOUNDED");
+        assert!(fine.is_ok_and(|k| !k.is_empty()), "the fixture alone is fetched");
     }
 
     /// **Single-flight (lock-order row 17).** Sixteen concurrent verifies of a token whose `kid` the
