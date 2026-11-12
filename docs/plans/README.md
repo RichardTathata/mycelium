@@ -151,6 +151,8 @@ future contributor needs so they don't re-litigate a settled choice — lives he
 | [`legible-emergence.md`](legible-emergence.md) | Diagnosable coordinator-free fleets (Detect→Localize→Explain→Intervene) — phases 0–5, incl. the operator surface. ✅ complete 2026-07-03 | — |
 | [`mycelium-wiki.md`](mycelium-wiki.md) | The `mycelium-wiki` companion — group-scoped LLM-curated wiki (data plane · curator control plane · reconcile + change-driven lint · MCP + HTTP gateway + py/ts SDKs · access broker · worked example). ✅ phases 1–5 shipped 2026-07-03/04; audited Run 32. Remaining: the additive KV-native variant | — |
 | [`council-substrate-hardening.md`](council-substrate-hardening.md) | **Phase 6** of the Transparency-Platform council-wiki substrate ([design record](../design/transparency-council-substrate.md)): closing the six toy-scale → council-scale gaps the 2026-08-15 step-back critique named — batch commits + batch gate · `cat-file --batch` read plane · pull-on-promote/push-per-round failover · contention measurement · the pluggable `PageFormat` entity codec. ⏳ **planned 2026-08-15, not started**; council-scale claims gated on P6.4's measured run | — |
+| [`external-review-2026-10-31.md`](external-review-2026-10-31.md) | ✅ **Delivered — every row released.** The external code security review of 2026-10-31 (rev 0.9): R1–R4 in v2.39.0, R5–R9 in v2.40.0, each closed on evidence in §5. The review is vendored at [`external/2026-10-31-code-security-review.md`](external/2026-10-31-code-security-review.md). | #712–#714, #718–#722 |
+| [`identity-and-lifecycle.md`](identity-and-lifecycle.md) (wave 1a) | ✅ **Wave 1a released in v2.40.0**, each row closed on evidence in §8: I0 `[authority]` (#733), I1 client certificates, signatures and client-held grants (#741–#745), I3 signed decisions and the RFC 8785 digest (#750, #754, #756), I5 OIDC token exchange (#757, #759, #760). Waves 1b and 2 are listed under *Proposed — not yet started*. | #733, #741–#745, #750, #754, #756, #757, #759, #760 |
 
 ## Design sketches (rationale)
 
@@ -159,8 +161,6 @@ future contributor needs so they don't re-litigate a settled choice — lives he
 | [`mycelium-blackboard.md`](mycelium-blackboard.md) | The blackboard *design rationale* (worked example, `rd`/`in` split, non-goals). ✅ Built — the phased build plan is [`v2-wsg-g3-blackboard.md`](v2-wsg-g3-blackboard.md). |
 
 ## Proposed — not yet started
-
-[`external-review-2026-10-31.md`](external-review-2026-10-31.md) — **the external code security review of 2026-10-31** (agreed with the maintainer 2026-10-31, rev 0.9; nine rows, every one released: R1–R4 in v2.39.0 — #714, #713, #712 — and R5–R9 in v2.40.0 — #719, #718, #722, #720, #721, closed on evidence in §5): the review's seven findings, all verified true at `d656f50c` — three contradict a claim the repository makes — plus the two the verification added (the grant restart gate proves the exit snapshot, not the WAL; the audit warnings are accepted nowhere in the open); R1–R4 before the next MINOR (done, v2.39.0); the rest after it (done, v2.40.0). The review itself is vendored at [`external/2026-10-31-code-security-review.md`](external/2026-10-31-code-security-review.md).
 
 [`feature-pages.md`](feature-pages.md) — **feature pages** (delivered, rev 0.14; agreed with the maintainer
 2026-10-19; F1 delivered #654, F2 #655, F3 in five PRs #725–#737 (2026-11-07), F4's fifth rule and `/doc-coverage`
@@ -188,7 +188,7 @@ measures it on a tagged release (§1.1, D19). What
 the comparison proposed that already ships is tabled in its §1; a task lifecycle, a context selector, schedules and a
 dashboard are deferred in §6 with the question each must answer first.
 
-[`identity-and-lifecycle.md`](identity-and-lifecycle.md) — **identity and lifecycle** (proposed 2026-10-31; **agreed
+[`identity-and-lifecycle.md`](identity-and-lifecycle.md) — **identity and lifecycle, waves 1b and 2** (wave 1a delivered; see *Shipped*) (proposed 2026-10-31; **agreed
 with the maintainer 2026-11-07**, rev 0.14; **wave 1a released in v2.40.0** — I0 (#733), I1 (#741–#745), I3 (#750, #754, #756), I5 (#757, #759, #760), each closed on evidence in §8 — and wave 1b's three spikes written (S-cancel #731, S-succeed #732, S-presence #729, #747); **Next:** wave 1b's rows I4, I2, I7, then wave 2; reviewed five times — rev 0.1 against the decisions, rev 0.3 against the mechanisms, rev 0.4 and
 rev 0.5 each against five premises, every premise failure in wave 1 or the developer identity; the fifth, on the merged
 document in #715's thread, corrected thirteen stated facts in place). From a comparative reading of Orca and Eve against

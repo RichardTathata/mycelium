@@ -3029,7 +3029,7 @@ provider's half; the gateway's exchange is §97.
     unverified. Before this release no envelope carried one.
 - **A verifying provider needs exchanging gateways** (§97). A provider that sets `exchange_audience` refuses every
   `oidc:` action that arrives without an `ot`, so set it only once every gateway that calls it for OIDC users runs a
-  release with §97 and has its exchange settings. (Until §97, no gateway sent one, and this release warned at start.)
+  2.40.0 or later and has its exchange settings. (No gateway before 2.40.0 sends an `ot`.)
 - **The actions** are the protected kinds (`mcp.invoke`, `skill.invoke`, `llm.invoke`, `protected_rpc_kinds`), the
   companions' write kinds, and a hosted capability's invoke (`cap.invoke/{namespace}/{name}`, which runs code). The
   artifact kinds and `reason.blob.fetch` are not.
@@ -3086,5 +3086,44 @@ no exchange for any other call, nor for a principal that is not `oidc:`.
     the endpoint only once they run a `compliance` build.
 - **Code:** `GatewayDispatchError` gained `Exchange(&'static str)` (it is `#[non_exhaustive]`).
 - **Clients do not change.** The SDKs send the same bearer.
+
+Wire **v12** unchanged.
+
+## 98. The reference evaluator decides the value rules it used to leave `Indeterminate`; a prohibition naming a value no longer refuses a differing one (2.40.0, identity-and-lifecycle I0, #733)
+
+`ReferenceEvaluator` now names every `requires_values` key of its rules in `security_relevant_arguments`. An enforcement
+point lifts exactly those arguments into the action envelope. Before, the trait's default selected none, so at every
+live door — `/mcp`, `/a2a`, the provider's enforcement and `[authority]` (§83) — a rule that tests a value read
+*argument value not available* and decided `Indeterminate`. That failed closed, and the rule never permitted.
+
+- **What changed:**
+  - **An allowance with `requires_values` now permits** when the caller's top-level `arguments` carry the values it
+    names. Before, it never did at a live door.
+  - **A prohibition naming a value decides on it.** If the value is present and equal, the call is denied (as
+    before). If it is absent, the value is not established and the call decides `Indeterminate`, failing closed (as
+    before). If it is **present and different** — `"Capital"` against a prohibited `"capital"`, `over_ceiling = false`
+    against `over_ceiling = true` — the prohibition **does not apply** and the allowances decide. Before, every request
+    the prohibition's actor, operation and resource selected was `Indeterminate`, whatever its value.
+- **Who is affected:** a deployment whose reference-evaluator rules (built in code, or from a unit's `[[rule]]`s under
+  `[authority]`) carry `requires_values`, and that relied — knowingly or not — on such a rule never permitting, or on a
+  value-naming prohibition refusing every request it selected. An evaluator other than `ReferenceEvaluator` (the
+  Cedar adapter, your own) is unaffected unless it relied on the default selection. A caller that builds an
+  `ActionEnvelope` itself and calls `evaluate` directly saw the values already and is unaffected.
+- **What to check before upgrading:**
+  - List every rule with `requires_values`. For each **allowance**, confirm you want it to permit when its values
+    match — it now will.
+  - For each **prohibition** on a value, decide what a *different* value should do. If any value other than an
+    allowed one must be refused, express that as an allowance on the allowed values (a request no allowance matches
+    is not established — `Indeterminate`, refused at the door), not as a prohibition on one value.
+  - **A rule is only as strong as the argument it names.** The values are the caller's own top-level `arguments`.
+    A rule on a value the effect itself uses (a ledger's amount) holds; a prohibition on a flag the caller asserts
+    (`over_ceiling`) holds nothing unless the caller cannot set it.
+  - In the evidence journal, decisions recorded `Indeterminate` for *argument value not available* on these rules
+    before the upgrade are the ones that now decide; compare a sample after upgrading.
+- **Code:** no signature changed; `ReferenceEvaluator` implements `ActionEvaluator::security_relevant_arguments`
+  (`src/agent/action_evaluator.rs`). Tests: `a_prohibition_whose_value_is_present_and_equal_denies`,
+  `a_prohibition_whose_value_is_absent_is_indeterminate`,
+  `a_prohibition_whose_value_is_present_and_different_does_not_apply`, and
+  `the_gateway_door_decides_by_this_units_rules_and_records_each_decision`.
 
 Wire **v12** unchanged.

@@ -34,7 +34,8 @@ Each is a section of `docs/guide/deprecations.md`; read the ones that touch your
   `gateway_max_connections` (default 1024) at once; `GossipConfig` gained the field.
 - **§79** — a journal or a companion WAL whose directory cannot be synced refuses to open.
 - **§80** — a bulk call works under `gateway_tls`; an operator certificate needs a `bulk_ca_pem_path` that verifies it;
-  `max_bulk_payload_bytes` (64 MiB) bounds a payload.
+  `max_bulk_payload_bytes` (64 MiB) bounds a payload. `GossipConfig` gained `max_bulk_payload_bytes` and
+  `GatewayTlsConfig` gained `bulk_ca_pem_path`.
 - **§81** — a replica-sync answer is `Failed` while an inbound record is between its apply and its append; `WalHandle`
   gained `begin_inbound` and `inbound_in_flight`.
 - **§82** — every crate requires Tokio 1.53.3 or later; `rustls-pemfile` is no longer a dependency.
@@ -58,10 +59,15 @@ Each is a section of `docs/guide/deprecations.md`; read the ones that touch your
   before binders.
 - **§94** — `gateway_a2a_default_skill` names the skill a message without one reaches; `GossipConfig` gained the field.
 - **§95** — grant decisions may be signed and relayed under `grant:relay`; an unsigned decision is counted.
-- **§96** — a provider can verify an OIDC user's exchanged token, and one that does refuses an `oidc:` action without it.
-- **§97** — a gateway with `exchange_token_endpoint` exchanges an OIDC user's token for every action it dispatches.
+- **§96** — a provider can verify an OIDC user's exchanged token, and one that does refuses an `oidc:` action without it;
+  `OidcConfig` gained `exchange_audience`, `exchange_client_id` and `exchange_max_lifetime_secs`, and implements `Default`.
+- **§97** — a gateway with `exchange_token_endpoint` exchanges an OIDC user's token for every action it dispatches;
+  `OidcConfig` gained `exchange_token_endpoint` and `exchange_client_secret_env`.
+- **§98** — the reference evaluator decides the `requires_values` rules it used to leave `Indeterminate` at every live
+  door: an allowance with values now permits when they match, and a prohibition naming a value no longer refuses a
+  request whose value differs. Check every rule with `requires_values` before upgrading.
 
-Also, without a section: a stem trace or span dashboard keyed on `mycelium.rule_revision` sees the wasm-host rules'
+Also, without a section of its own: a stem trace or span dashboard keyed on `mycelium.rule_revision` sees the wasm-host rules'
 real revisions (2 or 3) where it saw 1 (Fixed, below); `RUST_LOG` now replaces the node's and the stem's default
 filter rather than doing nothing.
 
@@ -169,7 +175,7 @@ or yanked advisory, and Tokio's floor is 1.53.3 (RUSTSEC-2026-0386, not reachabl
 
 - **A provider verifies an OIDC user's exchanged token** (`docs/plans/identity-and-lifecycle.md` I5, PR 1 of 2, D6).
   A provider whose `[oidc]` table sets `exchange_audience` verifies the token a gateway carries in the caller envelope
-  (`ot`), against its own issuer and keys. The gateway's exchange is PR 2.
+  (`ot`), against its own issuer and keys. The gateway's exchange is PR 2, the entry above, also in this release.
   - The checks, each refused by name:
     - the gateway's signature over the token (`so`);
     - its header (`alg`, an access token's `typ`, a `kid`);
@@ -307,8 +313,8 @@ or yanked advisory, and Tokio's floor is 1.53.3 (RUSTSEC-2026-0386, not reachabl
   overwritten or tombstoned, and after a restart; the publishing gateway republishes its records, so a node that
   joins later reads the newer one. A certificate whose serial carries no readable issuance (as `openssl` writes) is
   refused by name. **Upgrade every node before issuing a client certificate:** an older node admits one at the mesh. `GossipAgent::client_key_standing` answers *current*, *superseded*
-  or *unknown*. Not in this change: the `cs`/`cn` call signature, the SDK `tools/call` clients and grants held by a
-  client principal (the feature page lists them). Upgrade note: `deprecations.md` §86.
+  or *unknown*. The `cs`/`cn` call signature, the SDK `tools/call` clients and grants held by a client principal came
+  in I1's later PRs, all in this release (the entries above). Upgrade note: `deprecations.md` §86.
 
 - **`[authority]`: a node's evaluator, execution authority, provider enforcement and evidence journal from its
   declaration** (`docs/plans/identity-and-lifecycle.md` I0). A node built from a configuration file — the `mycelium`
@@ -426,7 +432,7 @@ or yanked advisory, and Tokio's floor is 1.53.3 (RUSTSEC-2026-0386, not reachabl
   `…_is_absent_is_indeterminate`, `…_is_present_and_different_does_not_apply`). At a live door the values are the
   caller's own top-level `arguments`, so a rule is only as strong as the argument it names: one on a value the effect
   itself uses (a ledger) holds, while a prohibition on a flag the caller asserts (`over_ceiling`) holds nothing unless
-  the caller cannot set it.
+  the caller cannot set it. Upgrade note: `deprecations.md` §98.
 
 - **A stem runs only the artifact kinds its `[hosts].kinds` declares** (an independent review of #736, defect A).
   `Provisioner::new` registers the WASM-component runtime unconditionally and `Stem::start` read `kinds` only to add
@@ -489,15 +495,16 @@ or yanked advisory, and Tokio's floor is 1.53.3 (RUSTSEC-2026-0386, not reachabl
   `a_ticket_sent_as_soon_as_bulk_serve_returns_is_served`, `the_llm_invoke_receiver_exists_when_a_prompt_skill_is_registered`,
   `the_llm_invoke_receiver_exists_before_the_skill_is_advertised`, `the_explain_receiver_exists_when_start_returns`.
   No API change.
-- **The `kv.expiry` rule describes code that exists** (rule revision 2; `docs/plans/feature-pages.md` F3). Revision 1
+- **The `kv.expiry` rule describes code that exists** (rule revision 2 in #730, and revision 4 in this release after
+  the stale-advertisement fix above; `docs/plans/feature-pages.md` F3). Revision 1
   cited `store::Store::flush_expired` and the tests `flush_expired`, `is_expired` and `default_ttl_secs`, none of which
   is the KV expiry it described: the store holds no per-entry TTL, and `set` takes none. The rule now cites what does
   the work — the reader-side `CapEntry::is_fresh` / `ReqEntry::is_fresh` (an advertisement older than three refresh
   intervals, or that far in the future, is skipped, never deleted) and `store::sweep_stale_tombstones` — with
   `cap_entry_freshness`, `future_stamped_entry_is_quarantined_not_fresh` and `tombstone_gc_sweep_unpacks_hlc_timestamps`.
   The id is kept, because recorded traces and fault reports name it. Three `cap/` readers do not apply `is_fresh` yet
-  (the A2A provider resolution and card, the membership governor's eligibility); the rule says so, and a separate PR
-  fixes them. Guide 01 no longer says every key has a time-to-live or that `set` takes one; the mailbox module doc
+  (the A2A provider resolution and card, the membership governor's eligibility); the rule said so, and #734, also in
+  this release, fixes them (the stale-advertisement entry above). Guide 01 no longer says every key has a time-to-live or that `set` takes one; the mailbox module doc
   no longer reads the gossip hop count (`default_ttl`) as a five-minute lifetime, since an undelivered event has no
   expiry; and the same claim is gone from the concepts glossary, the cookbook, the Python SDK's README, guide 5,
   guide 9's audit-retention note (SkillRunner's records have no lifetime of their own) and the guide index.
@@ -607,11 +614,15 @@ or yanked advisory, and Tokio's floor is 1.53.3 (RUSTSEC-2026-0386, not reachabl
   audited against the code, its example's assertions, its plan rows and what merged since #655 — 50 Clear, 23 Thin,
   3 Missing, recorded in `docs/analysis/doc-coverage.md` § Feature pages, and all of them fixed here. Three pages for
   features that had none: service calls (RPC, scatter-gather and bulk), the Eve loader and the Ops Console. Seven pages
-  now say their scopes are checked only under `compliance` — on the published `mycelium-stem`, which lacks it, a
-  served skill is called by any valid bearer. Four *See it work* sections now name what checks the feature, where the
+  now say their scopes are checked only under `compliance` — on a stem built without it, a served skill is called by
+  any valid bearer (the published `mycelium-stem` lacked it until #749, in this release, built it with `compliance`). Four *See it work* sections now name what checks the feature, where the
   example relied on it or asserted nothing; rows Y4's and Y7's limits carried; ledger rows linked from the pages they
   prove. The cookbook's service-layer snippets called methods `GossipAgent` does not have (`agent.rpc_call` and
   four more); they go through `agent.service()`.
+- **Verification-policy rule 5: a feature's page changes with the feature** (#724, `docs/plans/feature-pages.md` F4's
+  first half). A PR that adds or changes a feature adds or updates its page under `docs/features/` and its entry in
+  `docs/features/registry.toml`, and the independent reviewer checks both (`/adversarial-review` check 7);
+  `/doc-coverage` gains Step 4b, the feature-pages pass, run once in #739.
 - **The Rust ecosystem watch** (`docs/plans/rust-ecosystem-watch.md`, #755): a monthly register, not a build plan, of
   seven upstream threads that could let Mycelium inherit work it does by hand — build provenance, the official Rust MCP
   SDK (`rmcp`), telemetry beyond the record spans, WASI 0.3, hybrid post-quantum TLS key exchange, async traits, and
