@@ -315,7 +315,7 @@ A key in a namespace the substrate or a companion owns — `sys/`, `grp/`, `cap/
 `ProtectedKeyError`, whose message names the route that writes it ([Errors](#errors)).
 
 **Reads are application keys only as well (0.2.10; the gateway's kv:read decision,
-[deprecations §99](https://github.com/RichardTathata/mycelium/blob/main/docs/guide/deprecations.md)).** `get`, `consistentGet` and `scanPrefix` throw it too, and `keys` for a prefix inside a namespace whose names the gateway hides (`grant/`, `mailbox/`, `audit/`, `sys/audit/`, `sys/audit-checkpoint/`, `sys/client-cert/`, `mandate/`, `rights/`, `sched/`); `keys` otherwise lists names without those. The message names the route that reads the namespace — `GET /gateway/audit` for the audit trail,
+[deprecations §99](https://github.com/RichardTathata/mycelium/blob/main/docs/guide/deprecations.md)).** `get`, `consistentGet` and `scanPrefix` throw it too, and `keys` for a prefix inside a namespace whose names the gateway hides (`grant/`, `mailbox/`, `audit/`, `sys/audit/`, `sys/audit-checkpoint/`, `sys/client-cert/`, `mandate/`, `rights/`, `sched/`); `keys` otherwise lists names without those, and without a component's log streams' (`log/cn/`, `log/wiki/`, `log/reason/` and the same three under `clog/`; a prefix inside one raises it too). The message names the route that reads the namespace — `GET /gateway/audit` for the audit trail,
 `GET /gateway/grants/pending` for grants. Before 0.2.10 these verbs returned an owned key's value.
 
 #### `setWithMinAcks(key, value, minAcks, options?) → Promise<number>`

@@ -3149,7 +3149,8 @@ from 2.27.0 is affected. The read routes now follow the same table as the write 
     them (`sys/`), omits them; a `prefix` inside one of them (`grant/`, `sys/audit/n1`) is **403** `protected_key`.
     Every other owned namespace's names are still listed — `grp/`, `sys/identity`, `sys/caller-context/`, `cap/`,
     `skills/`, `consensus/` and the rest — so the Ops Console's panels and a readiness probe on a prefix keep
-    working. Names only: the values of those keys are refused as above. The nine are the namespaces whose key
+    working (§101 adds the names of a component's log streams, under `log/` and `clog/`, to what is left out).
+    Names only: the values of those keys are refused as above. The nine are the namespaces whose key
     names are themselves the record: a grant's agent and request, a mailbox's recipient, the audit chain's length
     and its checkpoints' positions, a certificate's principal, a mandate's or a right's holder, and a gateway
     client's principal in `sched/{id}~{principal}/…`. **A limit:** `/stats` is public and its `store_entries` is
@@ -3217,7 +3218,8 @@ subscribed to any of them, so it read a commitment's offers, a wiki's proposals,
 `llm:read`. `GET /gateway/overlay/log/group/subscribe` also proposed a consensus claim and recorded a position
 under `clog/{stream}/…` for the stream it was given, under the same read scope. Every release from 2.27.0 is
 affected (before it `consensus:write` reached them too). §99 closed the same asymmetry on the raw KV routes; the
-read routes now follow the table the write routes use (`OWNED_LOG_STREAMS`, `src/agent/http/authz.rs`).
+read routes now follow the table the write routes use (`OWNED_LOG_STREAMS`, `src/agent/http/authz.rs`), and so do
+the key names the raw listing shows. (§100 is identity-and-lifecycle I4's, PR #775.)
 
 - **What changed:**
   - **`GET /gateway/overlay/log/scan?stream=S`**, **`GET /gateway/overlay/log/subscribe?stream=S`** and
@@ -3235,6 +3237,14 @@ read routes now follow the table the write routes use (`OWNED_LOG_STREAMS`, `src
     entries and read as (empty) application streams.
   - **A raw KV read of a key under `log/cn/`, `log/wiki/`, `log/reason/`** (403 `protected_key` since §99) no
     longer names the scan route in its `message`; it names the stream's own read, as above.
+  - **`GET /gateway/kv/keys` leaves out the key names of a component's streams**: every name under `log/cn/`,
+    `log/wiki/` and `log/reason/` — which requirement or run, when an entry was written and by which node — and
+    under `clog/cn/`, `clog/wiki/` and `clog/reason/`, a consumer group's claim and position for such a stream.
+    An unprefixed listing, or a prefix that spans them (`log/`, `log/c`), omits them; a `prefix` inside one
+    (`log/cn/`, `clog/reason/x`) is **403** `protected_key`, as §99 answers inside its hidden namespaces. An
+    application stream's names (`log/events/…`, `clog/events/…`) are listed as before. These six are not rows of
+    §99's table: they are derived from `OWNED_LOG_STREAMS`, so a stream the log routes refuse is a stream whose
+    names the listing hides.
 - **Will the compiler tell me?** No — it is an HTTP status. The SDKs raise it typed, as they do for append and
   compact: `ProtectedStreamError` from `scan_log` / `scanLog`, `subscribe_log` / `subscribeLog` and
   `subscribe_log_group` / `subscribeLogGroup` (`mycelium-py` 0.2.16, where it is still an `httpx.HTTPStatusError`;
@@ -3242,7 +3252,7 @@ read routes now follow the table the write routes use (`OWNED_LOG_STREAMS`, `src
   refusal of a log subscription at open (a missing scope, say) is now the `httpx.HTTPStatusError` it is, where it
   was the SSE reader's content-type error.
 - **Who is affected:** a client, script or dashboard that reads a `cn/`, `wiki/` or `reason/` stream through the
-  log routes. Nothing in this repository does: the companions read their streams in process, and `mycelium-py`'s
+  log routes, or lists those streams' key names through `/gateway/kv/keys`. Nothing in this repository does: the companions read their streams in process, and `mycelium-py`'s
   `ReasonClient.trace` reads `GET /gateway/reason/trace/{run_id}`. A client that reads its own streams is not
   affected.
 - **Migration.**
@@ -3270,12 +3280,12 @@ read routes now follow the table the write routes use (`OWNED_LOG_STREAMS`, `src
   Until every gateway is upgraded, treat `consensus:read` as a scope that reads every log stream, and review who
   holds it.
 - **Not changed:**
-  - **Key names.** `GET /gateway/kv/keys?prefix=log/cn/` still lists the *names* of a component's log entries
-    under `kv:read` — `log/cn/{requirement}/offers/{hlc}/{node}`, `log/reason/{run_id}/{node}/…` — as it lists
-    `cn/` and every other namespace §99 left listed. A name carries the requirement or run id, the entry's time
-    and its writer; the values are refused (§99). Whether `log/`'s component streams join the hidden names is
-    the maintainer's to decide.
-  - `GET /consensus/{slot}` (`consensus:read`) still answers for any slot named, a consumer group's claim
-    `clog/{stream}/{group}/claim` and a commitment's `cn/{requirement}/award` included: its own route.
+  - **`GET /consensus/{slot}` still returns a component-owned slot's value under `consensus:read`**: a
+    commitment's award (`cn/{requirement}/award`, which was never in a log) and a consumer group's claim
+    (`clog/{stream}/{group}/claim`, the holder's node id). That route is not changed here; a follow-up closes
+    it, surveyed first. Until then, `consensus:read` reads a commitment's award.
+  - The names under `cn/`, `wiki/` and the other namespaces §99 left listed are still listed
+    (`cn/{requirement}/award` among them); this section hides only the log and consumer-group keys of a
+    component's streams.
   - Layer I is untouched: a peer still replicates every key (detection, not prevention), and an in-process
     caller reads any stream through `KvHandle`. These are the gateway's doors.

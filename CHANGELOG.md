@@ -26,6 +26,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - an application stream reads and subscribes as before;
   - a raw KV read of a key under `log/cn/`, `log/wiki/` or `log/reason/` (403 `protected_key` since §99) names
     that read in its message and no longer the scan route;
+  - `GET /gateway/kv/keys` leaves out the key names of those streams — everything under `log/cn/`, `log/wiki/`,
+    `log/reason/` and under the same three in `clog/` (a consumer group's claim and position) — and a `prefix`
+    inside one is 403 `protected_key`; an application stream's names stay listed. Derived from
+    `OWNED_LOG_STREAMS`, not a second list;
   - the SDKs raise `ProtectedStreamError` from `scan_log` / `scanLog`, `subscribe_log` / `subscribeLog` and
     `subscribe_log_group` / `subscribeLogGroup` (`mycelium-py` 0.2.16, `mycelium-ts` 0.2.10, both unreleased
     with §99's); in `mycelium-py` any other refusal of a log subscription at open is now an
@@ -36,9 +40,9 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   **403** after upgrading (the stream need not exist). Until every gateway is upgraded, treat `consensus:read` as
   reading every log stream and review who holds it. **Upgrade note:** nothing shipped here reads those streams
   through the log routes; a client of yours that did reads a trace through `/gateway/reason/trace/{run_id}` and
-  the others in process (§101's table). **Not changed:** `GET /gateway/kv/keys?prefix=log/cn/` still lists the
-  entries' key *names* under `kv:read` (§99 left `log/` listed); `GET /consensus/{slot}` still answers for a
-  group's claim.
+  the others in process (§101's table). **Not changed:** `GET /consensus/{slot}` still returns a component-owned
+  slot's value under `consensus:read` — a commitment's award (`cn/{requirement}/award`) and a consumer group's
+  claim; a follow-up closes that route.
 
 - **The raw KV read routes refuse owned namespaces** (the kv:read decision, 2026-11-12; `deprecations.md` §99). Since
   2.27.0 the raw KV *write* routes have refused every key in a namespace the substrate or a companion owns; the
@@ -51,7 +55,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     key, whatever the scopes, naming the route that reads the namespace;
   - `GET /gateway/kv/keys` leaves out the key names under `grant/`, `mailbox/`, `audit/`, `sys/audit/`, `sys/audit-checkpoint/`,
     `sys/client-cert/`, `mandate/`, `rights/` and `sched/`, and a `prefix` inside one of them is 403 `protected_key`; every
-    other namespace's names stay listed (the Ops Console's panels and prefix readiness probes are unaffected);
+    other namespace's names stay listed (the Ops Console's panels and prefix readiness probes are unaffected) —
+    except a component's log streams', which the entry above hides (§101);
   - three reads have routes of their own: `GET /gateway/schedules/last?id=` (`schedule:run`; `scheduleLast` /
     `schedule_last`) for a client's own schedule's last run, `topology_overrides` on `GET /gateway/govern`
     (`govern:read`), and the `skillrunner` dashboard's invocation panel reads `GET /gateway/audit`, or without

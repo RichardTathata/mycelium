@@ -228,8 +228,14 @@ follow-up is PR #777 (`deprecations.md` §101). The follow-up's exit, promise by
   fail on a 200 (the PR lists the counts);
 - *"an application stream still reads"* — the same tests: `events` is scanned, subscribed and group-subscribed,
   an entry delivered at each.
-- **Stated, not built** (outside the row): `GET /gateway/kv/keys?prefix=log/cn/` still lists those entries' key
-  *names* under `kv:read`; whether they join §99's hidden names is the maintainer's to decide.
+- **Added by the review of #777** (the maintainer's decisions, 2026-11-12): the key *names* under `log/cn/`,
+  `log/wiki/`, `log/reason/` and their `clog/` twins are hidden from `GET /gateway/kv/keys`, derived from
+  `OWNED_LOG_STREAMS` — `the_raw_listing_hides_a_component_streams_key_names`; and a `log/{name}/…` family in
+  `src/lib.rs`'s ownership table must be a row of that table or a stated application stream —
+  `every_log_stream_in_the_table_is_classified_for_the_log_routes` (what it does not gate is in the table's doc).
+- **Not built, a follow-up PR, surveyed first:** `GET /consensus/{slot}` still returns a component-owned slot's
+  value under `consensus:read` — a commitment's award (`cn/{requirement}/award`) and a consumer group's claim.
+  This row does not close it.
 
 **What:** as decided (M6): on the raw KV read routes, an owned key's value is refused and sensitive key names are
 hidden from the listing. **Follow-up, one PR:** `gw_overlay_log_scan`, `gw_overlay_log_subscribe` and

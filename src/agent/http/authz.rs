@@ -1826,11 +1826,30 @@ pub(crate) struct OwnedStream {
 /// durable proposals, `mycelium-reason`'s traces — the ONE table both directions of the log routes read. The log
 /// routes take a stream name, so without this they reach those as well: under `consensus:write` an append could
 /// forge a reason trace and a compact delete a commitment's offers (the review of #549), and under
-/// `consensus:read` a scan or a subscribe read a commitment's offers and awards, a wiki's proposals and a trace
-/// without `llm:read` (the follow-up to the kv:read decision of 2026-11-12, critique plan row CR1).
+/// `consensus:read` a scan or a subscribe read a commitment's offers, closes, reports and assessments, a wiki's
+/// proposals and a trace without `llm:read` (the follow-up to the kv:read decision of 2026-11-12, critique plan
+/// row CR1). A commitment's **award** was never in a log: it is the consensus slot `cn/{requirement}/award`, which
+/// `GET /consensus/{slot}` still answers for under `consensus:read` — not this table's to close.
+///
+/// **The key names follow from this table too.** The raw listing (`GET /gateway/kv/keys`) leaves out every name
+/// under `log/{row}` and `clog/{row}` — an entry's requirement or run id, its time and its writer; a group's
+/// claim and position — and refuses a prefix inside one ([`in_owned_stream_keyspace`], read by
+/// [`raw_kv_name_hidden`] and [`refuse_hidden_prefix`]). They are derived, not rows of [`OWNED_KV_PREFIXES`], so
+/// the two tables cannot drift; an application stream's names stay listed.
 ///
 /// **A new row names its read.** `the_log_doors_classify_by_the_one_table` (`log_read_tests.rs`) pins the rows
 /// and fails on one it does not know.
+///
+/// **What keeps a new component stream from being open by default, and what does not.** Gated:
+/// `every_log_stream_in_the_table_is_classified_for_the_log_routes` (`log_read_tests.rs`) reads
+/// `src/lib.rs` § KV namespace ownership and fails on a `log/{name}/…` key there whose `{name}/` is neither a row
+/// here nor on that test's stated application list — and on a row here the ownership table does not name; and
+/// `scripts/check-kv-namespaces.sh` fails a `format!("{name}/…")` or a constant in production code whose head has
+/// no row in that table and no allow-list entry, which is how a new stream name reaches the table. **Not gated:**
+/// nothing derives the streams from the `append` call sites. A component that appends to a stream whose name is
+/// assembled from pieces, or whose head already has a KV row or an allow-list entry (as `cn/`, `wiki/` and
+/// `reason/` have), and that adds no `log/{name}/…` row to the ownership table, is open on all five log routes
+/// until someone adds the row here.
 pub(crate) const OWNED_LOG_STREAMS: &[OwnedStream] = &[
     OwnedStream {
         prefix: "cn/",
@@ -1855,6 +1874,15 @@ pub(crate) const OWNED_LOG_STREAMS: &[OwnedStream] = &[
 /// streams whose keys do not lie under `log/cn/`, and a query string is percent-decoded before it reaches here.
 pub(crate) fn owned_log_stream(stream: &str) -> Option<&'static OwnedStream> {
     OWNED_LOG_STREAMS.iter().find(|p| stream.starts_with(p.prefix) || stream == p.prefix.trim_end_matches('/'))
+}
+
+/// Whether `key_or_prefix` lies inside a component-owned stream's keys: `log/{row}…` (its entries) or
+/// `clog/{row}…` (its consumer groups' claims and positions), for a row of [`OWNED_LOG_STREAMS`]. Derived from that
+/// table, so a stream the log routes refuse is a stream whose key names the raw listing hides.
+pub(crate) fn in_owned_stream_keyspace(key_or_prefix: &str) -> bool {
+    ["log/", "clog/"].iter().any(|ns| {
+        key_or_prefix.strip_prefix(ns).is_some_and(|rest| OWNED_LOG_STREAMS.iter().any(|p| rest.starts_with(p.prefix)))
+    })
 }
 
 pub(super) fn refuse_owned_stream(stream: &str) -> Option<axum::response::Response> {
@@ -1896,10 +1924,12 @@ pub(crate) fn raw_kv_writable(key: &str) -> bool {
 }
 
 /// Whether the raw listing leaves `key`'s name out: an owned key ([`raw_kv_writable`] is false) under a row of
-/// [`OWNED_KV_PREFIXES`] marked `names_hidden`.
+/// [`OWNED_KV_PREFIXES`] marked `names_hidden`, or inside a component-owned stream's keys under `log/` or `clog/`
+/// ([`in_owned_stream_keyspace`], derived from [`OWNED_LOG_STREAMS`]).
 pub(crate) fn raw_kv_name_hidden(key: &str) -> bool {
     !raw_kv_writable(key)
-        && OWNED_KV_PREFIXES.iter().any(|p| p.names_hidden && (key.starts_with(p.prefix) || key == p.prefix.trim_end_matches('/')))
+        && (OWNED_KV_PREFIXES.iter().any(|p| p.names_hidden && (key.starts_with(p.prefix) || key == p.prefix.trim_end_matches('/')))
+            || in_owned_stream_keyspace(key))
 }
 
 /// The read doors that take a KV key from the request — `GET /gateway/kv` and `GET /gateway/overlay/consistent/get`,
@@ -1918,7 +1948,8 @@ pub(super) fn refuse_protected_key_read(key: &str) -> Option<axum::response::Res
 /// `GET /gateway/kv/keys?prefix=P`: a prefix inside a namespace whose names are hidden is refused as a read of
 /// one of its keys is; any other prefix is answered, with hidden names left out ([`raw_kv_name_hidden`]).
 pub(super) fn refuse_hidden_prefix(prefix: &str) -> Option<axum::response::Response> {
-    let inside_hidden = OWNED_KV_PREFIXES.iter().any(|p| p.names_hidden && prefix.starts_with(p.prefix));
+    let inside_hidden = OWNED_KV_PREFIXES.iter().any(|p| p.names_hidden && prefix.starts_with(p.prefix))
+        || in_owned_stream_keyspace(prefix);
     if !inside_hidden {
         return None;
     }

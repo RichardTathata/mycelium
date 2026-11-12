@@ -66,9 +66,11 @@ token resolves to its own principal is `token_identities_are_qualified_by_the_is
   claim proposed. So `consensus:read` and `consensus:write` reach nothing `llm:read` or a component guards. One
   table decides both directions (`OWNED_LOG_STREAMS`, in [`authz.rs`](../../src/agent/http/authz.rs)); the tests
   are one per read door in [`log_read_tests.rs`](../../src/agent/http/log_read_tests.rs) and, for the writes,
-  `the_raw_kv_routes_refuse_governance_intents`. **Not covered:** `/gateway/kv/keys?prefix=log/cn/` still lists
-  those entries' key names under `kv:read` ([rbac](../operations/rbac.md),
-  [deprecations §101](../guide/deprecations.md)).
+  `the_raw_kv_routes_refuse_governance_intents`. The key names follow: `/gateway/kv/keys` leaves out every name
+  under `log/cn/`, `log/wiki/`, `log/reason/` and the same three under `clog/`, derived from the same table
+  (`the_raw_listing_hides_a_component_streams_key_names`). **Not covered:** `GET /consensus/{slot}` still returns
+  a component-owned slot's value under `consensus:read` — a commitment's award, a consumer group's claim
+  ([rbac](../operations/rbac.md), [deprecations §101](../guide/deprecations.md)).
 - **Not built:** on a credentialed node `/health`, `/ready`, `/stats`, `/metrics`, `/bulk/{id}` and the A2A
   descriptor stay public, `/a2a` admits an anonymous caller, and a merged router's paths outside `/gateway/` are not
   gated (the `gw.exposed_closed` row); a bearer crosses the wire in cleartext unless the gateway serves

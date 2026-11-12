@@ -262,20 +262,138 @@ async fn log_group_subscribe_refuses_an_owned_stream_before_the_claim() {
     let a = json(open(&client, url(&base, "group/subscribe", "cn/req-1/offers", "&group=g"), None).await).await;
     let b = json(open(&client, url(&base, "group/subscribe", "cn/absent/offers", "&group=g"), None).await).await;
     assert_eq!(a, b, "present and absent alike");
-    // Nothing was proposed or recorded for any of them: the acquire loop proposes at once, so give it a moment.
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    let touched: Vec<String> = agent.kv().keys().into_iter()
-        .filter(|k| k.starts_with("clog/") || k.contains("clog/cn") || k.contains("clog/wiki") || k.contains("clog/reason"))
-        .map(|k| k.to_string())
-        .collect();
-    assert!(touched.is_empty(), "a refused group subscribe wrote {touched:?}");
-
+    // Nothing was proposed or recorded for any of them. The control is an application stream's group, opened
+    // *after* the refusals and taken through the same path: once ITS claim's keys are in the store (polled, not
+    // slept for) a claim proposed for an owned stream before it would be there too.
     let a = open(&client, url(&base, "group/subscribe", "events", "&group=workers"), None).await;
     assert_eq!(a.status, 200);
     assert!(a.content_type.starts_with("text/event-stream"), "{:?}", a.content_type);
     let event = first_event(a, Duration::from_secs(30)).await.expect("the application stream's entry, once the claim is held");
     assert_eq!(event["value_b64"], "YXBwbGljYXRpb24=", "{event}");
+    // What a claim and a delivery write — traced by moving the refusal after the proposal (the plant): the slot under
+    // `consensus/{ballot,committed,decided,lease}/clog/…` and `sys/consensus-accepted/{node}/clog/…`, and the group's
+    // position under `clog/…`. Every one holds `clog/`, so that is what the assertion below looks for.
+    let control = "clog/events/workers/";
+    let wanted = [format!("consensus/ballot/{control}claim"), format!("consensus/committed/{control}claim"),
+                  format!("{control}cursor"), format!("{control}offset")];
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    let keys = loop {
+        let keys: Vec<String> = agent.kv().keys().into_iter().map(|k| k.to_string()).collect();
+        if wanted.iter().all(|w| keys.iter().any(|k| k.starts_with(w.as_str()))) {
+            break keys;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "the control group's claim and position never appeared; wanted {wanted:?}, have {keys:?}");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    // Every key that names a consumer group — under `clog/` itself, or under any `consensus/…` family for a
+    // `clog/…` slot — is the control's; none names an owned stream, under any family.
+    let stray: Vec<&String> = keys.iter()
+        .filter(|k| k.contains("clog/") && !k.contains(control))
+        .chain(keys.iter().filter(|k| k.starts_with("consensus/") && OWNED.iter().any(|o| k.contains(&format!("/{o}")))))
+        .collect();
+    assert!(stray.is_empty(), "a refused group subscribe wrote {stray:?}");
     agent.shutdown().await;
+}
+
+/// The key **names** follow the same table (the maintainer's decision on #777, 2026-11-12): `GET /gateway/kv/keys`
+/// leaves out every name under `log/{owned}` and `clog/{owned}` — which requirement or run, who wrote and when,
+/// which group consumes — refuses a prefix inside one, and still lists an application stream's names.
+#[tokio::test]
+async fn the_raw_listing_hides_a_component_streams_key_names() {
+    let (agent, base, client) = node(|_| {}).await;
+    seed(&agent);
+    // A consumer group's position for an owned stream, as an in-process `subscribe_log_group` would record it,
+    // and one for an application stream.
+    for key in ["clog/cn/req-1/offers/g/cursor", "clog/reason/run-1/n/g/offset", "clog/wiki/g/proposals/g/claim",
+                "clog/events/workers/cursor", "log/cnx/1/n", "clog/cnx/g/cursor"] {
+        let _ = agent.kv().set(key.to_string(), Bytes::from_static(b"x"));
+    }
+    let names = |body: &serde_json::Value| -> Vec<String> {
+        body["keys"].as_array().expect("a keys array").iter().map(|k| k.as_str().unwrap().to_string()).collect()
+    };
+    let hidden = |k: &str| ["log/", "clog/"].iter().any(|ns| OWNED.iter().any(|o| k.starts_with(&format!("{ns}{o}"))));
+    // The store holds them; the listing does not show them — unprefixed, or under a prefix that spans them.
+    assert_eq!(agent.kv().keys().iter().filter(|k| hidden(k)).count(), OWNED_STREAMS.len() + 3, "seeded");
+    for prefix in ["", "log/", "clog/", "log/c", "clog/r", "l"] {
+        let a = open(&client, format!("{base}/gateway/kv/keys?prefix={prefix}"), None).await;
+        assert_eq!(a.status, 200, "prefix {prefix:?}");
+        let listed = names(&json(a).await);
+        assert!(!listed.iter().any(|k| hidden(k)), "prefix {prefix:?} lists {listed:?}");
+        if "log/events/".starts_with(prefix) {
+            assert!(listed.iter().any(|k| k.starts_with("log/events/")), "prefix {prefix:?}: an application stream's entry is listed");
+        }
+        if "clog/events/workers/cursor".starts_with(prefix) {
+            assert!(listed.iter().any(|k| k == "clog/events/workers/cursor"), "prefix {prefix:?}: an application group's position is listed");
+        }
+    }
+    // A stream that only resembles an owned one keeps its names.
+    let listed = names(&json(open(&client, format!("{base}/gateway/kv/keys?prefix=log/cnx/"), None).await).await);
+    assert_eq!(listed, ["log/cnx/1/n"]);
+    let listed = names(&json(open(&client, format!("{base}/gateway/kv/keys?prefix=clog/cnx/"), None).await).await);
+    assert_eq!(listed, ["clog/cnx/g/cursor"]);
+    // A prefix inside an owned stream's keys is refused, as one inside any names-hidden namespace is — the same
+    // answer whether or not anything is there.
+    for owned in OWNED {
+        for prefix in [format!("log/{owned}"), format!("clog/{owned}"), format!("log/{owned}req-1/offers/"),
+                       format!("clog/{owned}absent/g/"), format!("log/{owned}absent")] {
+            let a = open(&client, format!("{base}/gateway/kv/keys?prefix={prefix}"), None).await;
+            assert_eq!(a.status, 403, "prefix {prefix}");
+            let body = json(a).await;
+            assert_eq!(body["error"], "protected_key", "{prefix}: {body}");
+            assert!(body.get("keys").is_none(), "{prefix}: {body}");
+        }
+    }
+    // Derived from the one table: every row's two key spaces, and nothing else under `log/` or `clog/`.
+    for row in super::OWNED_LOG_STREAMS {
+        for ns in ["log/", "clog/"] {
+            assert!(super::raw_kv_name_hidden(&format!("{ns}{}x/1/n", row.prefix)), "{ns}{}", row.prefix);
+            assert!(super::refuse_hidden_prefix(&format!("{ns}{}", row.prefix)).is_some(), "{ns}{}", row.prefix);
+        }
+    }
+    for key in ["log/events/1/n", "clog/events/g/cursor", "log/cnx/1/n", "log/CN/x/1/n", "log//cn/x/1/n", "logs/cn/x", "cn/r/award"] {
+        assert!(!super::raw_kv_name_hidden(key), "{key} is listed");
+        assert!(super::refuse_hidden_prefix(key).is_none(), "{key} is not inside a hidden key space");
+    }
+    agent.shutdown().await;
+}
+
+/// A component's stream is classified, not open by default — as far as this reaches (the table's doc says what
+/// it does not). `src/lib.rs` § KV namespace ownership is where a new `log/{name}/…` family is recorded
+/// (`scripts/check-kv-namespaces.sh` is what sends a new stream name there): every such family is a row of
+/// `OWNED_LOG_STREAMS` or on the application list below, and every row is in the ownership table.
+#[test]
+fn every_log_stream_in_the_table_is_classified_for_the_log_routes() {
+    /// `log/{name}/…` families the ownership table records that are an application's to read and write through
+    /// the log routes. None today: adding one is a decision that the stream is open to `consensus:read`.
+    const APPLICATION_LOG_STREAMS: &[&str] = &[];
+    let table = include_str!("../../lib.rs");
+    let mut families: Vec<String> = Vec::new();
+    for line in table.lines().filter(|l| l.starts_with("//! | ")) {
+        // Every backticked key on a table row, not only its first: `log/cn/…` sits third on the commitment's row.
+        for (i, cell) in line.split('`').enumerate() {
+            if i % 2 == 0 { continue; }
+            let Some(rest) = cell.strip_prefix("log/") else { continue };
+            let Some((name, _)) = rest.split_once('/') else { continue };
+            // `log/{stream}/{hlc_hex}` is the generic row: a placeholder, not a family.
+            if name.is_empty() || !name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || "_.-".contains(c)) {
+                continue;
+            }
+            families.push(format!("{name}/"));
+        }
+    }
+    families.sort();
+    families.dedup();
+    assert!(families.len() >= 3, "the ownership table was read: {families:?}");
+    for family in &families {
+        assert!(super::OWNED_LOG_STREAMS.iter().any(|p| p.prefix == family) || APPLICATION_LOG_STREAMS.contains(&family.as_str()),
+            "log/{family} in src/lib.rs is neither a row of OWNED_LOG_STREAMS nor a stated application stream: the log routes would read and write it");
+    }
+    for row in super::OWNED_LOG_STREAMS {
+        assert!(families.iter().any(|f| f == row.prefix), "OWNED_LOG_STREAMS row {} has no `log/{}…` key in src/lib.rs's ownership table", row.prefix, row.prefix);
+    }
+    for app in APPLICATION_LOG_STREAMS {
+        assert!(super::owned_log_stream(app).is_none(), "{app} is on both lists");
+    }
 }
 
 /// Every door under a token model: a `consensus:read`-only token and `"*"` are refused an owned stream 403

@@ -328,11 +328,18 @@ compact use (`owned_log_stream`, over `OWNED_LOG_STREAMS`, whose rows now each c
 the store is read, a watcher registered, a claim proposed or an event sent, so the answer is the same for a stream
 that exists and one that does not. A stream is classified as the bytes it is stored under, after the query is
 percent-decoded; a lookalike (`CN/…`, `/cn/…`, an empty name) is another stream and holds none of the owned
-entries. Rule 1's enumeration found no other door that reads a stream by a name the caller chooses — no MCP tool,
+entries. **The key names follow the same table** (the maintainer's decision on #777): `raw_kv_name_hidden` and
+`refuse_hidden_prefix` also consult `in_owned_stream_keyspace`, so `GET /gateway/kv/keys` leaves out every name
+under `log/{row}` and `clog/{row}` and refuses a prefix inside one — derived from `OWNED_LOG_STREAMS`, not six more
+rows of `OWNED_KV_PREFIXES`, so the two cannot drift. **A new component stream is classified only as far as this:**
+`every_log_stream_in_the_table_is_classified_for_the_log_routes` fails on a `log/{name}/…` key in `src/lib.rs`'s
+ownership table that is neither a row nor a stated application stream; nothing derives streams from the `append`
+call sites, so a stream with no such key in that table is open until someone adds the row (the table's doc says
+so). Rule 1's enumeration found no other door that reads a stream by a name the caller chooses — no MCP tool,
 no A2A skill, no companion route — and no dependant: the companions read their streams in process and `mycelium-py`'s
-`ReasonClient.trace` reads `/gateway/reason/trace/{run_id}`. **Left open, stated:** `GET
-/gateway/kv/keys?prefix=log/cn/` lists those entries' key names under `kv:read` (`log/` is a listed row of
-`OWNED_KV_PREFIXES`), and `GET /consensus/{slot}` answers for a group's claim. Tests:
+`ReasonClient.trace` reads `/gateway/reason/trace/{run_id}`. **Left open, stated, a follow-up PR:** `GET
+/consensus/{slot}` returns a component-owned slot's value under `consensus:read` — a commitment's award
+(`cn/{requirement}/award`, never in a log) and a consumer group's claim. Tests:
 `src/agent/http/log_read_tests.rs`, one per door, the table's rows pinned.
 [`.log/2026-11-12-log-read-guard.md`](.log/2026-11-12-log-read-guard.md).
 
