@@ -343,10 +343,17 @@ impl Corpus {
         let mut out = String::new();
         out.push_str(&format!("{SCHEMA} closure of {hash}\n"));
         self.head(&mut out);
-        let (journals, nodes, _) = self.fleet_facts();
+        let (journals, nodes, journal_nodes) = self.fleet_facts();
+        // By distinct nodes, as the JSON form's `complete` (#767's confirm round, 2): two journals of one node are one
+        // node's, and a node named with no journal here is a journal missing whatever the files number.
+        let uncovered: Vec<String> = nodes.difference(&journal_nodes).cloned().collect();
+        const NOT_HERE: &str = "a record on a node whose journal is not here is not in this closure";
         let fleet_line = match fleet {
             Some(n) if journals < n => format!("INCOMPLETE: {journals} journal(s) given for a fleet of {n} nodes — a record on a node whose journal is not here is not in this closure.\n"),
+            Some(n) if journal_nodes.len() < n => format!("INCOMPLETE: {journals} journal(s) given, from {} node(s), for a fleet of {n} nodes — {NOT_HERE}.\n", journal_nodes.len()),
+            Some(n) if !uncovered.is_empty() => format!("INCOMPLETE: {journals} journal(s) given for a fleet of {n} nodes, and the records name {} node(s) with no journal here ({}) — {NOT_HERE}.\n", uncovered.len(), uncovered.join(", ")),
             Some(n) => format!("{journals} journal(s) given for a fleet of {n} nodes.\n"),
+            None if journals >= nodes.len() && !uncovered.is_empty() => format!("INCOMPLETE: {journals} journal(s) given, and the records name {} node(s) with no journal here ({}) — {NOT_HERE}. Pass --fleet <n> to state the fleet's size.\n", uncovered.len(), uncovered.join(", ")),
             None if journals < nodes.len() => format!("INCOMPLETE: {journals} journal(s) given, and the records name {} node(s) ({}) — a record on a node whose journal is not here is not in this closure. Pass --fleet <n> to state the fleet's size.\n", nodes.len(), nodes.iter().cloned().collect::<Vec<_>>().join(", ")),
             None => format!("{journals} journal(s) given; the records name {} node(s). The fleet's size is not known to this reader: pass --fleet <n>, or a closure over fewer journals than nodes is incomplete without saying so.\n", nodes.len()),
         };
@@ -931,6 +938,16 @@ mod tests {
         let f = &c.closure_json(&rh, Some(2))["fleet"];
         assert_eq!((f["journals"].as_u64(), f["journal_nodes"].as_array().map(Vec::len)), (Some(2), Some(1)), "{f}");
         assert_eq!(f["complete"], false, "two files, one node, a fleet of two: {f}");
+        // The text form says the same (#767's confirm round, 2): it counted files, and printed no INCOMPLETE here.
+        let text = c.closure(&rh, Some(2));
+        assert!(text.contains("INCOMPLETE: 2 journal(s) given, from 1 node(s), for a fleet of 2 nodes"), "{text}");
+        assert!(c.closure(&rh, Some(1)).contains("\n2 journal(s) given for a fleet of 1 nodes.\n"), "complete: no INCOMPLETE");
+        // A trace naming a node with no journal here, whatever the files number.
+        let mut t = c.clone();
+        t.add_trace("d.jsonl", &format!("{}\n", decision(1, None, None)), None);
+        assert!(t.closure(&rh, Some(1)).contains("with no journal here (127.0.0.1:7002)"), "{}", t.closure(&rh, Some(1)));
+        assert!(t.closure(&rh, None).contains("INCOMPLETE: 2 journal(s) given, and the records name 1 node(s) with no journal here (127.0.0.1:7002)"), "{}", t.closure(&rh, None));
+        assert_eq!(t.closure_json(&rh, Some(1))["fleet"]["complete"], false);
         assert_eq!(c.closure_json(&rh, Some(1))["fleet"]["complete"], true, "every node named has a journal, and the fleet is one");
         assert!(c.closure_json(&rh, None)["fleet"]["complete"].is_null(), "all named nodes covered, the fleet's size unknown");
         // The second node's journal, named in a record, makes a fleet of two complete.

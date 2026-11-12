@@ -439,6 +439,12 @@ pub async fn run(cfg: WatchConfig, watch: bool, poll: Duration) -> i32 {
     run_with(cfg, watch, poll, Format::Text).await
 }
 
+/// Poll `f` once: `true` when it resolved on that poll — the caller must then not poll it again — `false` when it is
+/// pending, with whatever its first poll installs now installed.
+async fn ready_now<F: std::future::Future>(mut f: std::pin::Pin<&mut F>) -> bool {
+    std::future::poll_fn(|cx| std::task::Poll::Ready(f.as_mut().poll(cx).is_ready())).await
+}
+
 /// [`run`], printing each event in `format`.
 pub async fn run_with(cfg: WatchConfig, watch: bool, poll: Duration, format: Format) -> i32 {
     let mut w = Watch::new(cfg.clone());
@@ -452,13 +458,10 @@ pub async fn run_with(cfg: WatchConfig, watch: bool, poll: Duration, format: For
     let mut last_beat = crate::sim_seam::mono_instant();
     let ctrl_c = tokio::signal::ctrl_c();
     tokio::pin!(ctrl_c);
-    if watch {
-        std::future::poll_fn(|cx| {
-            let _ = std::future::Future::poll(ctrl_c.as_mut(), cx);
-            std::task::Poll::Ready(())
-        })
-        .await;
-    }
+    // The poll's answer is kept: a future that resolved on it must not be polled again (an `async fn` panics when
+    // resumed after completion), so an early `Ready` is the signal itself and the `select!` below takes it without
+    // touching the future (#767's confirm round, 1).
+    let signalled = watch && ready_now(ctrl_c.as_mut()).await;
     let mut first = true;
     loop {
         let tick = w.tick().await;
@@ -478,7 +481,7 @@ pub async fn run_with(cfg: WatchConfig, watch: bool, poll: Duration, format: For
         let wait = until_beat.map_or(poll, |u| u.min(poll));
         tokio::select! {
             _ = tokio::time::sleep(wait) => {}
-            _ = &mut ctrl_c => {
+            _ = async { if !signalled { let _ = (&mut ctrl_c).await; } } => {
                 // A second Ctrl-C while the retraction runs is not acted on: the handler is still installed. The
                 // retraction is bounded by the gateway's answers; what it does not confirm lapses with the lease.
                 print_event(&Event::Retracting(w.handles().len()), &cfg.gateway, format);
@@ -730,6 +733,26 @@ mod tests {
         assert!(r.failed[0].error.contains("/gateway/capability/"), "{r:?}");
         assert!(w.handles().is_empty(), "the watch forgets the handle either way");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The eager poll keeps its answer (#767's confirm round, 1): a future that resolves on it is reported, so the
+    /// caller never polls it again; a pending one has run to its first await and stays pollable.
+    #[tokio::test]
+    async fn the_eager_poll_reports_a_future_that_resolved_on_it() {
+        let done = async {};
+        tokio::pin!(done);
+        assert!(ready_now(done.as_mut()).await, "resolved on the one poll");
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        let started = std::sync::atomic::AtomicBool::new(false);
+        let waiting = async {
+            started.store(true, std::sync::atomic::Ordering::SeqCst);
+            let _ = rx.await;
+        };
+        tokio::pin!(waiting);
+        assert!(!ready_now(waiting.as_mut()).await, "pending");
+        assert!(started.load(std::sync::atomic::Ordering::SeqCst), "and it ran to its first await, as `ctrl_c` installs its handler");
+        tx.send(()).unwrap();
+        waiting.await;
     }
 
     /// The wrong token is an error naming the route and the status, not a silent nothing.

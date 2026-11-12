@@ -20,6 +20,10 @@ Decided by the maintainer on 2026-11-12, for every `mycelium.*/N` id this page l
   an unknown field is not reading this contract.
 - **A breaking change is a new version**: `/N+1`, announced with an entry in
   [`deprecations.md`](../guide/deprecations.md) saying what changed and how a reader moves.
+- [`declaration.schema.json`](declaration.schema.json) is **not a reader's validator**: it says
+  `"additionalProperties": false` throughout, so it refuses a field this contract allows to be added. It pins today's
+  shape for the repository's own gate (`tests/declaration_schema.rs`) and moves in the PR that adds a field; a reader
+  validating `wire-check`'s document with it must expect that, or validate only the fields it reads.
 - The goldens pin today's fields exactly, so an added field changes a golden in the PR that adds it — in the open,
   as this contract requires — and a removed or renamed one fails it.
 

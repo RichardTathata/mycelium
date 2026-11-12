@@ -31,6 +31,9 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   retraction and exits 1; a tick's failed retraction of a previous handle is a warning. `Watch::retract` returns a
   `Retraction` (it returned `()`). Under `--watch` the Ctrl-C handler is installed before the first tick's first
   request, so a Ctrl-C during the first tick retracts rather than killing the process (#767's review, M1, L5).
+- **`mycelium explain --closure`'s text counts nodes, not journal files, as its JSON does.** Two journals of one node
+  under `--fleet 2`, or a record naming a node with no journal given, now print `INCOMPLETE` where the fleet line
+  compared the number of files (#767's confirm round).
 
 ## [2.40.0] — 2026-11-12
 

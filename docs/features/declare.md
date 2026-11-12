@@ -70,7 +70,8 @@ in [`tests/cli_json.rs`](../../tests/cli_json.rs), beside `a_retraction_the_gate
   confirm is said — in the tick's warnings, or at Ctrl-C as `failed` with exit 1 — never counted retracted; it lapses
   with its lease.
 - Under `--watch`, a Ctrl-C from the first tick's first request on is a retraction: the handler is installed before
-  it. Before that — while the files are first read and checked — and once, without `--watch`, Ctrl-C keeps its default.
+  it, and before the files are first read. Before that — process start and argument parsing — and once, without
+  `--watch`, Ctrl-C keeps its default.
   A second Ctrl-C during the retraction is not acted on; the retraction is bounded by the gateway's answers.
 - It declares; it does not enforce. A unit's mandate and rule come back `not_enforced` from a node that attaches no
   evaluator, and the tick prints them.
