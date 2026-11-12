@@ -184,7 +184,7 @@ reading of `sys/client-cert/` (shown against the previous binary).
 
 #### I3 · Signed decisions (D3, D5)
 
-*Delivered (#750, #754 and its PR 3); closed promise by promise in §8; the private Cedar adapter's re-pin is §9 O7.*
+*Delivered (#750, #754 and its PR 3); closed promise by promise in §8; the private Cedar adapter's re-pin is §9 O7, delivered 2026-11-12 (private #34).*
 
 **What:** the decision routes take a body signed by a certificate-holding principal; the gateway verifies it, checks
 the signer's `grant:issue`, checks the addressed node is itself (`not_addressed_here` *(new)*), and records the signer;
@@ -933,7 +933,7 @@ Any time:                                      E2, E3, E4
    CHANGELOG and upgrade note.
 4. Measurements that are run, not asserted, dated on [`what-is-proven.md`](../operations/what-is-proven.md): I1's
    handshake refusal; S-cancel's latency; S-succeed's live re-root; S-presence's probe.
-5. The private Cedar adapter re-pins on I3 (§9 O7: it waits for the release that carries I3) and, later, I4.
+5. The private Cedar adapter re-pins on I3 (§9 O7, delivered at v2.40.0, private #34) and, later, I4.
 
 ## 7 · Not in scope, by decision
 
@@ -1039,9 +1039,28 @@ Items found while building a row that the row does not own. Each names its home,
   gateway — or `grant_decisions_unsigned` flat over a period with no restart, since that counter is in memory — while
   supervisors are answering requests (an answered decision is what it counts, so silence without traffic proves
   nothing).
-- **O7 · The private Cedar adapter's re-pin on I3** *(open; I3's exit "the Cedar re-pin with a refusal case", moved
-  when I3 closed)*. The private adapter is pinned by release tag only, and no tag carries I3. **Home:** the re-pin
-  that follows the release carrying I3 (#750, #754 and I3's PR 3). It moves the pin, runs the adapter's
-  `ae_contract` suite at it, and adds a refusal case: a signed grant decision whose decider the Cedar policy does not
-  permit, refused with the decider, not the relay, as the actor. **Watch:** the release tag; until it exists, nothing
-  in the private repository can build against I3.
+- **O7 · The private Cedar adapter's re-pin on I3** *(delivered 2026-11-12, private #34, merge `7491e61`, head
+  `56b7798d`; I3's exit "the Cedar re-pin with a refusal case", moved when I3 closed)*. The private adapter pins the
+  substrate by release tag only; v2.40.0 is the first tag carrying I3. Its three promises:
+  - *"moves the pin"* — both `mycelium` and `mycelium-core` at `tag = "v2.40.0"`, the lockfile resolving to
+    `d974fc76`, `check-pin.py` passing.
+  - *"runs the adapter's `ae_contract` suite at it"* — `the_shipped_cedar_adapter_meets_the_contract`: every case,
+    two refused at load (the public suite's `accepts_refusal_at_load` cases, `fleet_limit_past_the_seat_cap` and
+    `fleet_window_past_the_horizon`, whose bounds the adapter shares with the substrate), none declined. The
+    agreement test with the reference evaluator accepts a refusal at load on exactly those cases, asserting the
+    adapter's `BuildError::FleetCounter`.
+  - *"adds a refusal case: a signed grant decision whose decider the Cedar policy does not permit, refused with the
+    decider, not the relay, as the actor"* — `o7_a_signed_decision_the_policy_does_not_permit_is_refused_as_the_deciders`,
+    a real node with the Cedar adapter through the grant decision route: a decision signed by a decider the policy
+    does not name, carried by a `grant:relay`-only bearer, answers `403 authority_not_established`; its evidence
+    record's subject is the decider and its `relayed_by` the relay; the permitted decider's relayed decision is
+    admitted under its own name, and no record names the relay. The policy also permits the relay, so a substrate
+    keyed on the relay fails three ways. **Seen failing first** by editing the pinned substrate checkout so the
+    route's actor was the relay — the adapter never sees the relay, so it cannot be planted there.
+
+  Found on the way: the private lockfile had carried `rustls-webpki` 0.103.15 (RUSTSEC-2026-0382) since the v2.36.0
+  re-pin and `rustix` 1.1.4 (RUSTSEC-2026-0486); both bumped to the public v2.40.0 lockfile's versions. The private
+  repository's scheduled audit had failed on every run since 2026-09-27 (the action could not open its issue, and later runs failed on a Search validation error), so
+  the advisory, reported daily from 2026-10-21, read as that permanent red. Replaced in #34 by `cargo audit --deny
+  warnings` over every tracked lockfile, as this repository's `audit` job runs it. The public release was not
+  affected.
