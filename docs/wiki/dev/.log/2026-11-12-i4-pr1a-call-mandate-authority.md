@@ -17,5 +17,9 @@ PR 1a is the authority's half, in `src/agent/gateway_authority.rs` and `src/mand
   that carries no key.
 - `named_stop_records` names the mandate a stopped registration ran under.
 
-Pages: [lock-order](../concurrency/lock-order.md) rows 43, 48 and 49. Not built yet: the provider reading `cm` (1b),
+- The one KV record it reads, `call/{gateway}/{term}/checkpoint`, is verified at read (body = key, then the gateway's
+  signature); a failing copy is treated as absent and counted (`call_checkpoints_refused`).
+
+Pages: [lock-order](../concurrency/lock-order.md) rows 43, 48 and 49; [owner-signed records](../owner-signed-records.md),
+one inventory row. Not built yet: the provider reading `cm` (1b),
 the gateway's mint and the `call/` family's owner (2), the cancel doors (3).
