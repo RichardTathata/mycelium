@@ -24,6 +24,9 @@ pages here cite `src/` / `mycelium-core/src/` rather than paraphrasing it.
 ## Leaf pages
 
 - **[security.md](security.md)** — the v1.x WS1–WS5 security surface + crown-jewel posture.
+- **[owner-signed-records.md](owner-signed-records.md)** — the rule (2026-11-12): a security-bearing record in the
+  gossip KV is signed by its owner and verified at read; its four conditions, what it does not cover, and the
+  inventory of every KV namespace a decision reads — which meet it, which do not.
 - **[diagnostics.md](diagnostics.md)** — the emergent-detector layer (Legible Emergence, Phases
   1–5, complete): the five coordinator-free detectors + the three-verb operator spine —
   **localize** (`/gateway/fleet`) · **explain** (`/gateway/explain`) · **diagnose**

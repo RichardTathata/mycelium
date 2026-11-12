@@ -789,3 +789,27 @@ and in the item's ADR, never silently.
 - **Found by tests while building H5.** A union-find fed only by supporters missed a silent member bridging two
   cohorts. The graph now includes every configured and in-force member.
 
+---
+
+## 17. The owner-signed rule: the concrete shape of this plan's fix (2026-11-12)
+
+Every mitigation above that survives a colluding member has one shape: the record a reader decides on carries its
+owner's signature, and the reader verifies it — P1's issuer binding, K2's signed heads, P2's signed grants with
+possession proofs, H3's advertisement bound to authority, H4's source-signed checkpoints. The maintainer adopted that
+shape as a rule on 2026-11-12: **a security-bearing record kept in the gossip KV is signed by its owner and
+verified at read.** It is stated, with its four conditions and what it does not cover, on the wiki page
+[`docs/wiki/dev/owner-signed-records.md`](../wiki/dev/owner-signed-records.md).
+
+That page also holds **the inventory**: every KV namespace a decision reads, enumerated from the owned-namespace
+table (`refuse_protected_key`) and `src/lib.rs`'s ownership table, with the verifying code cited or *does not hold*
+written. It is the starting list for the hardening plan, and it corrects two readings of this plan's delivery
+record (§16):
+
+- **H3 is a primitive, not an enforcement.** `filter_protected` (`src/mandate/protected.rs`) has no caller outside
+  its own tests at `7d4c86a6`, so no resolve path filters an unbacked advertisement. The threat model's *in force*
+  for H3 holds for a reader that calls it; none in the tree does.
+- **H4 covers a rewritten position a retained checkpoint witnesses, not a truncated tail.** The audit chain has no
+  signed head, and a chain whose newest records were tombstoned verifies.
+
+Nothing here reopens §12: colluders among themselves, a holder of the fleet CA key and self-assertion stay outside,
+and the rule teaches Layer I nothing.

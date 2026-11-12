@@ -348,6 +348,17 @@ collusion and cooperation are the same behaviour, acts off the substrate are inv
 by design. Motivated by the 2026 OpenAI–Hugging Face agent incident.
 Log: [`.log/2026-09-23-threat-model-boundary-h.md`](.log/2026-09-23-threat-model-boundary-h.md).
 
+## The owner-signed rule (2026-11-12)
+
+**A security-bearing record kept in the gossip KV is signed by its owner and verified at read.** Any admitted member
+can write or tombstone any key — Layer I's posture, kept — so a record that decides authority, admission,
+cancellation, retention or audit is never trusted for where it sits. The rule constrains how an upper layer stores
+and reads its own state; it adds no write guard. Its four conditions, what it does not cover (availability, and soft
+state whose worst case is detected and bounded), and the inventory of every namespace a decision reads are on
+[owner-signed-records](owner-signed-records.md). The inventory's open rows include the grant use marker, the audit
+chain's unsigned head, unsigned `cap/`/`req/`/`prov-shed` advertisements, the tally and exposure summaries, and a
+caller envelope's key-less principal.
+
 ## WS2 — tamper-evident audit (`compliance`)
 
 Per-node hash-chained signed records at `sys/audit/{node}/{seq:016x}` (a global chain would

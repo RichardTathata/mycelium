@@ -53,6 +53,19 @@ it reads the diff and the code. Tell it its final message *is* the report.
    report that no page does. Before F3 closes, a field, route or verb whose feature is at `page = "todo"` or
    belongs to no feature is reported but is not a blocking finding; after F3 closes, it is a finding.
 
+8. **Records read from the gossip KV** (the owner-signed rule, `docs/wiki/dev/owner-signed-records.md`). Any
+   admitted member can write or tombstone any key. For every KV record the change reads to make a decision —
+   authority, admission, cancellation, retention, audit — give the grep that found the reads, and say which of
+   these holds, citing the code: (a) the record carries a signature under the key of the principal its key path
+   names; (b) the reader verifies it, and that the body's identifying fields equal the key's, before use; (c) a
+   record that fails is treated as absent — failing closed, or to a fallback the change states — and counted;
+   (d) a test writes the record as another member would (forged, replayed, tombstoned) and shows the reader is
+   not moved. Ask of each read what the reader does when the record is *deleted*: an absence that permits is a
+   finding. A decision read with (a)–(d) not all holding is a finding unless the change adds the record to that
+   page's inventory as *does not hold, stated*, or shows the record is outside the rule (availability only, or
+   soft state whose worst case is detected and bounded — the detector and the bound cited). A new row in the
+   inventory's *meets* column without the verifying `file:line` and the forged-record test is a finding.
+
 ## The report and what to do with it
 
 The reviewer returns findings ranked by severity, each with `file:line`, a concrete failure scenario, and
