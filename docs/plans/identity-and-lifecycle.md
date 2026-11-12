@@ -1060,7 +1060,7 @@ Items found while building a row that the row does not own. Each names its home,
 
   Found on the way: the private lockfile had carried `rustls-webpki` 0.103.15 (RUSTSEC-2026-0382) since the v2.36.0
   re-pin and `rustix` 1.1.4 (RUSTSEC-2026-0486); both bumped to the public v2.40.0 lockfile's versions. The private
-  repository's scheduled audit had failed on every run since 2026-09-27 (the action could not open its issue), so
+  repository's scheduled audit had failed on every run since 2026-09-27 (the action could not open its issue, and later runs failed on a Search validation error), so
   the advisory, reported daily from 2026-10-21, read as that permanent red. Replaced in #34 by `cargo audit --deny
   warnings` over every tracked lockfile, as this repository's `audit` job runs it. The public release was not
   affected.
