@@ -3127,6 +3127,8 @@ live door — `/mcp`, `/a2a`, the provider's enforcement and `[authority]` (§83
   `a_prohibition_whose_value_is_present_and_different_does_not_apply`, and
   `the_gateway_door_decides_by_this_units_rules_and_records_each_decision`.
 
+Wire **v12** unchanged.
+
 ## 99. The raw KV routes read application keys only; the listing leaves ten namespaces' names out (unreleased, the kv:read decision of 2026-11-12)
 
 §19 closed the raw KV **write** routes to every namespace the substrate or a companion owns. The **read** routes
