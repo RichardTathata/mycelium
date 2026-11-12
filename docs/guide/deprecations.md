@@ -3134,20 +3134,26 @@ gateway to itself, carrying its first revocation checkpoint beside it. This rele
 `ExecutionAuthority::assess_call` verifies one and holds its scope until its window ends, and work registered under
 it (`begin`) is cancelled by the sweep when its term is revoked. **Nothing produces or reads one at a live door yet**:
 no gateway mints one, no provider reads one from a call, and no door cancels one. Those arrive in the following
-releases of this row, so a node changes behaviour only in the ways listed here.
+releases of this row, so a node changes behaviour only in the ways listed here. A `call:` mandate is verified against
+its gateway's member key, which a node holds only in a build with **`compliance`**; without it every `call:` mandate
+reads `Unknown` (it fails closed).
 
 - **Behaviour change — the first slot.** A mandate whose scope begins `call:` presented where a caller's mandate goes
   (`params._meta.mandate`, the envelope's `m`, `ExecutionAuthority::assess` / `assess_arguments`) reads `Unknown`,
-  *"a call: mandate is not a caller's"*, whoever presents it and whatever the entitlement table says. **Who is
-  affected:** a deployment that named a scope beginning `call:` for its own mandates and entitled an authority for
-  it. Such a mandate was verified as any other; it is now never established. **Check:** `grep` your entitlements and
-  unit files (`[[mandate]]`, `requires_mandate`) for a scope beginning `call:` and rename it.
+  *"a call: mandate is not a caller's"*, whoever presents it and whatever the entitlement table says. And **no
+  entitlement table entitles a `call:` scope**: `EntitlementTable::is_entitled` answers `false` for one, named or
+  not, so every `GrantVerifier::check` caller — a capability's backing mandate (`mandate::protected`), an agent
+  verifying a grant it waited for — reads `NotEntitled`. **Who is affected:** a deployment that named a scope
+  beginning `call:` for its own mandates and entitled an authority for it. Such a mandate was verified as any other;
+  it is now established nowhere. **Check:** `grep` your entitlements and unit files (`[[mandate]]`,
+  `requires_mandate`) for a scope beginning `call:` and rename it.
 - **Behaviour change — the `call/` key family is owned.** The raw KV routes (`POST` and `DELETE /gateway/kv`, the
   quorum write, the overlay's consistent set) answer a key under `call/` `403 protected_key`. The family holds a
   `call:` mandate's revocation checkpoints, which only the gateway that issued the mandate writes; a write there
   could hide a call's cancellation from the provider running it. **Who is affected:** an application that keeps its
-  own keys under `call/` through the gateway's KV routes. **Check:** `GET /gateway/kv/keys?prefix=call/` before
-  upgrading; move such keys to another prefix.
+  own keys under `call/` through the gateway's KV routes. **Check, before upgrading** (on the release you run
+  now): `GET /gateway/kv/keys?prefix=call/`, and move such keys to another prefix. After the upgrade those keys can no
+  longer be written through the routes.
 - **Behaviour change — `offer_checkpoint`.** A revocation checkpoint whose scope begins `call:` is kept only while the
   authority holds that scope's window (it admitted a call there, through `assess_call`). Otherwise it answers
   `CheckpointOffer::NotHeld` and keeps nothing. A checkpoint for any other scope is unaffected.
@@ -3159,23 +3165,38 @@ releases of this row, so a node changes behaviour only in the ways listed here.
 - **Compiler:** `MandateRefusal` gained `Revoked { term }` and `CheckpointOffer` gained `NotHeld`. Both are
   `#[non_exhaustive]`, so a `match` outside the crate already has a `_` arm; **that arm must fail closed**. Additive:
   `PresentedCallMandate` (`#[non_exhaustive]`, built with `new`), `ExecutionAuthority::assess_call`,
-  `named_stop_records` and `view_sizes`, `NamedStop` (`#[non_exhaustive]`), `RECLAIM_PER_SWEEP`,
-  `mandate::grant::{CALL_SCOPE_PREFIX, GRANT_TTL_CAP_SECS, check_call_mandate}`, `Mandate::is_call`,
-  `RevocationView::{forget, sizes}`. `StopRecord` and `PresentedMandate` are unchanged.
+  `named_stop_records`, `view_sizes` and four counters (below), `NamedStop` (`#[non_exhaustive]`),
+  `RECLAIM_PER_HOLD`, `MAX_CALL_WINDOWS`, `MAX_CALL_WINDOWS_PER_GATEWAY`,
+  `mandate::grant::{CALL_SCOPE_PREFIX, CALL_TERM_MAX_BYTES, GRANT_TTL_CAP_SECS, check_call_mandate}`,
+  `Mandate::is_call`, `RevocationView::sizes`. `StopRecord` and `PresentedMandate` are unchanged.
 - **`GRANT_TTL_CAP_SECS` (3600)** names the cap `POST /gateway/grants/{agent}/{request}` has always applied to
   `ttl_secs`; the door's behaviour is unchanged. `assess_call` refuses a `call:` mandate whose window is longer
   (`OutOfWindow`).
-- **A new counter: `call_checkpoints_refused`** (`GET /stats`; `mycelium_call_checkpoints_refused_total`;
-  `ExecutionAuthority::call_checkpoints_refused`). Any fleet member can write a key under `call/` by gossip, so a
-  copy of a call's checkpoint read from the KV is used only when its body names the gateway and scope its key names
-  and its signature is that gateway's. One that fails, or does not parse, is treated as absent and counted. A forged
-  copy can neither cancel a call nor un-cancel one. **Watch it:** a rising count is a member writing under another
-  gateway's `call/` keys, or a gateway whose key this node does not hold. **Not prevented:** a member that
-  overwrites or tombstones the key can keep a cancel this node has not yet read from reaching it by gossip, until
-  the gateway writes again or the mandate's window ends.
+- **What a node holds for `call:` mandates is bounded.** A `call:` term is one key segment of at most 64 bytes
+  (`CALL_TERM_MAX_BYTES`) with no `/`. A node holds windows for at most `MAX_CALL_WINDOWS` (262 144) calls, and
+  `MAX_CALL_WINDOWS_PER_GATEWAY` (65 536) from one gateway; a `call:` mandate that would be one more is not
+  established and is counted in `call_windows_refused`. The caps are constants in this release.
+- **A call's checkpoint in the KV is verified at read, and four new counters say what was found** (`GET /stats`;
+  `mycelium_call_…_total`; accessors of the same names on `ExecutionAuthority`). Any fleet member can write a key
+  under `call/` by gossip, so a copy read from the KV is used only when its body names the gateway and scope its key
+  names and its signature is that gateway's — whatever its sequence.
+  - `call_checkpoints_refused`: a copy that failed that, or did not parse. It is treated as absent.
+  - `call_checkpoints_stale`: a copy the gateway did sign, older than the newest this node holds — the first
+    checkpoint written back over the revoking one.
+  - `call_checkpoints_missing`: no value where this node had read a verified copy — a tombstone.
+  - `call_windows_refused`: see the caps above.
+
+  A forged copy can neither cancel a call nor un-cancel one, and a revocation a node has seen stays seen. **Watch
+  the first three:** any of them rising is a member writing under another gateway's `call/` keys (or, for `refused`
+  alone, a gateway whose key this node does not hold). **Not prevented, and not always detected:** a provider that
+  reads a call's key *for the first time* after a member has written an older checkpoint back, or tombstoned it —
+  one that admits the call later, or has restarted — sees the call as not revoked and counts nothing. The cancel is
+  then denied at that provider until the mandate's window ends, at most 3 600 s (300 s at the default). The
+  cancel-forward that does not go through the KV, and the gateway re-asserting its key, arrive with the row's later
+  PRs (`docs/operations/what-is-proven.md`).
 - **A background task:** a node with an execution authority attached subscribes to keys ending `/checkpoint` under
-  `call/`. On each such write it reads one key for each `call:` window it holds — none until a provider admits calls
-  under `call:` mandates.
+  `call/`. For each such write it looks up whether it holds that call's window, and reads the key only if it does —
+  no read until a provider admits calls under `call:` mandates.
 - **Code:** `src/agent/gateway_authority.rs` (`assess_call`, `feed_call_checkpoints`), `src/mandate/grant.rs`
   (`check_call_mandate`). Tests: `gateway_authority::call_tests` and `src/agent/call_mandate_tests.rs`.
 

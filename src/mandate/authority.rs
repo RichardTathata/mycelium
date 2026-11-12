@@ -313,7 +313,7 @@ impl RevocationView {
     /// `ExecutionAuthority::sweep` — where a
     /// revocation no longer decides anything: the mandate is refused out of window whatever its checkpoint says.
     /// **Never for a standing scope**: forgetting there would reinstate a revoked appointment.
-    pub fn forget(&mut self, authority: &PrincipalId, scope: &str) {
+    pub(crate) fn forget(&mut self, authority: &PrincipalId, scope: &str) {
         let key = (authority.clone(), scope.to_string());
         self.newest.remove(&key);
         self.revoked.remove(&key);

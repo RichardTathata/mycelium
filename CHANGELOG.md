@@ -120,17 +120,20 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   checkpoint under the same hold, and judges the term: `Established`, `Refused(Revoked)` or `Unknown`. Work registered
   under it is cancelled by the sweep once its term is revoked, and `named_stop_records` names the mandate whose lapse
   stopped the work (`StopRecord` is unchanged). A node holds a `call:` scope only where it admitted a call, and only
-  until the mandate's window ends; the sweep reclaims at most `RECLAIM_PER_SWEEP` (1 024) scopes at a time, and a
-  feeder reads one key for each held window when a `call:` checkpoint is written. A copy of a call's checkpoint read from the KV is verified
-  against the gateway its key names before it is used, and one that fails is treated as absent and counted
-  (`GET /stats` `call_checkpoints_refused`). **Not yet built:** the gateway's
+  until the mandate's window ends; it holds at most 262 144 windows, 65 536 from one gateway, and refuses and counts
+  one more; the sweep reclaims everything expired, 1 024 scopes per hold of its lock; and a feeder reads the key of
+  a `call:` checkpoint that was written only if the node holds that call's window. A copy of a call's checkpoint read from the KV is verified
+  against the gateway its key names before it is used, whatever its sequence. One that fails is treated as absent
+  and counted, and so are an older copy written back over a newer one and a tombstone where a copy was read
+  (`GET /stats` `call_checkpoints_refused`, `call_checkpoints_stale`, `call_checkpoints_missing`,
+  `call_windows_refused`). Needs `compliance`. **Not yet built:** the gateway's
   mint, the provider reading `cm` from a call, and every cancel door — until they land, nothing presents a `call:`
   mandate at a live door.
 
 ### Changed
 
 - The `call/` key family is owned: the raw KV routes answer it `403 protected_key`. A mandate whose scope begins
-  `call:` is never established in the first mandate slot; `offer_checkpoint` keeps a
+  `call:` is never established in the first mandate slot, and no entitlement table entitles one; `offer_checkpoint` keeps a
   `call:` checkpoint only for a held window (`CheckpointOffer::NotHeld` otherwise); a `call:` checkpoint is exempt from
   the start rule, as a grant's is; `MandateRefusal` gained `Revoked { term }` (`deprecations.md` §99).
 

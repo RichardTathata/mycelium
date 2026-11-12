@@ -38,7 +38,9 @@ This feature is turned on in code, in a build with `gateway` and `tls`.
   ([provider enforcement](provider-enforcement.md)).
 - [`assess_call`](../../src/agent/gateway_authority.rs): verifies a gateway's `call:` mandate
   ([`PresentedCallMandate`](../../src/agent/gateway_authority.rs)) from the checkpoint carried beside it, and holds
-  its scope until the mandate's window ends. Work registered under it stops when its term is revoked.
+  its scope until the mandate's window ends. Work registered under it stops when its term is revoked. This one needs
+  a build with `compliance` as well: the mandate is verified against the gateway's member key, which a node holds
+  only there, and without it every `call:` mandate reads unknown.
 - `an_installed_epoch_survives_a_restart_as_a_floor`, in
   [`src/mandate/authority.rs`](../../src/mandate/authority.rs).
 - `a_revocation_written_during_admission_is_read_or_fed_never_missed`, in
@@ -65,8 +67,10 @@ work.
   read one from a call. The authority's half is built
   ([I4](../plans/identity-and-lifecycle.md#3--rows), row I4, *The build*; [§99](../guide/deprecations.md#99-the-execution-authority-verifies-a-call-mandate-a-call-mandate-in-the-first-slot-is-never-established-the-call-key-family-is-owned-2410-identity-and-lifecycle-i4-pr-1a)).
 - **A `call:` checkpoint in the KV is verified at read:** a copy its gateway did not sign, or that names another
-  call, is treated as absent and counted in `GET /stats` `call_checkpoints_refused`. A member that overwrites the
-  key can delay a cancel until the mandate's window ends
+  call, is treated as absent and counted in `GET /stats` `call_checkpoints_refused`; an older copy written back and
+  a tombstone are counted in `call_checkpoints_stale` and `call_checkpoints_missing`. A member that overwrites the
+  key can still deny a cancel, until the mandate's window ends, at a provider that had not read it
+  ([ledger](../operations/what-is-proven.md#call-checkpoint-replay))
   ([§99](../guide/deprecations.md#99-the-execution-authority-verifies-a-call-mandate-a-call-mandate-in-the-first-slot-is-never-established-the-call-key-family-is-owned-2410-identity-and-lifecycle-i4-pr-1a)).
 - **Evidence:** the ledger rows [running work stops](../operations/what-is-proven.md#running-work-stops) and
   [after a revocation every door runs nothing](../operations/what-is-proven.md#revocation-every-door-runs-nothing).

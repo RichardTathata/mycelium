@@ -243,6 +243,11 @@ pub(super) async fn stats_handler(State(ctx): State<Arc<HttpCtx>>) -> impl IntoR
         // Identity-and-lifecycle I4: copies of a `call:` checkpoint read from the KV and treated as absent — unparsed,
         // misplaced, or not signed by the gateway their key names.
         body["call_checkpoints_refused"] = json!(a.map_or(0, |a| a.call_checkpoints_refused()));
+        // …an older copy written back over a newer one this node holds; no value where it had read one; and `call:`
+        // mandates not established because this node holds as many windows as it keeps.
+        body["call_checkpoints_stale"] = json!(a.map_or(0, |a| a.call_checkpoints_stale()));
+        body["call_checkpoints_missing"] = json!(a.map_or(0, |a| a.call_checkpoints_missing()));
+        body["call_windows_refused"] = json!(a.map_or(0, |a| a.call_windows_refused()));
     }
     // Identity-and-lifecycle I5: exchanged OIDC tokens refused at this provider's replay window, by reason — `replayed`
     // (presented twice, by any gateway), `provider_window_full` (the provider's 262 144), `window_full` (a gateway's

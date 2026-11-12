@@ -63,6 +63,10 @@ pub const GRANT_TTL_CAP_SECS: u64 = 3_600;
 /// envelope slot (`cm`, a `PresentedCallMandate`), is
 /// verified by [`check_call_mandate`] and never by [`GrantVerifier::check`], and no [`EntitlementTable`] entitles it.
 pub const CALL_SCOPE_PREFIX: &str = "call:";
+
+/// The longest term a `call:` mandate may carry, in bytes. The term is one segment of the call's KV keys
+/// (`call/{gateway}/{term}/…`) and a receiver holds it for the mandate's window, so it is short and holds no `/`.
+pub const CALL_TERM_MAX_BYTES: usize = 64;
 const BOUND_ARGS: &str = "bound:args:";
 const BOUND_POLICY: &str = "bound:policy:";
 const BOUND_RESOURCE: &str = "bound:resource:";
@@ -200,6 +204,13 @@ impl EntitlementTable {
 
     /// Is `authority` entitled for `scope`?
     pub fn is_entitled(&self, scope: &str, authority: &PrincipalId) -> bool {
+        // A `call:` scope is entitled by nothing (identity-and-lifecycle I4, D-1 and D-6): a `call:` mandate is a
+        // gateway's cancellation handle, verified by `check_call_mandate` alone. Refused here, at the one place
+        // every `GrantVerifier::check` caller reads, so a table that names a `call:` scope makes no such mandate
+        // authority — for a call, a capability advertisement, or an agent's own wait.
+        if scope.starts_with(CALL_SCOPE_PREFIX) {
+            return false;
+        }
         self.scopes.get(scope).is_some_and(|a| a.contains(authority))
             // A grant's scope is its own (`grant:{request}`); the authority entitled for every grant is entitled
             // under the prefix (adopter-surface X3), and with `entitle_grants_from_fleet` every member node is —
@@ -341,7 +352,8 @@ impl GrantVerifier {
 /// `holder` are both `gateway`. So a member cannot issue one for another gateway's call, and
 /// [`EntitlementTable::entitle_grants_from_fleet`] does not reach it.
 ///
-/// 1. **Shape.** The scope is `call:{term}`: one scope per call, so a call's records are found from its term.
+/// 1. **Shape.** The scope is `call:{term}`: one scope per call, so a call's records are found from its term. The
+///    term is not empty, at most [`CALL_TERM_MAX_BYTES`] and holds no `/`: it is one segment of the call's keys.
 /// 2. **The issuer rule.** `established_by == holder == gateway`, a `node:` principal — else
 ///    [`GrantVerdict::NotEntitled`].
 /// 3. **Issuance.** The signature verifies under a current key of that member.
@@ -360,7 +372,11 @@ pub fn check_call_mandate(
     external: &TrustedExternalIssuers,
 ) -> GrantVerdict {
     let m = &grant.mandate;
-    if m.scope.strip_prefix(CALL_SCOPE_PREFIX) != Some(m.term.as_str()) {
+    let term = m.term.as_str();
+    if term.is_empty() || term.len() > CALL_TERM_MAX_BYTES || term.contains('/') {
+        return GrantVerdict::NotEntitled;
+    }
+    if m.scope.strip_prefix(CALL_SCOPE_PREFIX) != Some(term) {
         return GrantVerdict::NotEntitled;
     }
     if !gateway.starts_with("node:") || m.established_by.as_str() != gateway || m.holder.as_str() != gateway {

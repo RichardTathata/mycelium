@@ -433,7 +433,8 @@ pub use agent::guarantee::{
 #[cfg(all(feature = "gateway", feature = "tls"))]
 pub use agent::gateway_authority::{
     arguments_digest, legacy_arguments_digest, mandate_operation, possession_request, resource_key, Assessment, DigestForm,
-    ExecutionAuthority, NamedStop, PresentedCallMandate, PresentedMandate, WorkGuard, RECLAIM_PER_SWEEP,
+    ExecutionAuthority, NamedStop, PresentedCallMandate, PresentedMandate, WorkGuard, MAX_CALL_WINDOWS, MAX_CALL_WINDOWS_PER_GATEWAY,
+    RECLAIM_PER_HOLD,
 };
 #[cfg(all(feature = "gateway", feature = "tls"))]
 pub use agent::evidence_journal::{
