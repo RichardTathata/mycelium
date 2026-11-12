@@ -130,12 +130,25 @@ pub(super) async fn gw_govern_snapshot(State(ctx): State<Arc<HttpCtx>>) -> impl 
             })
         })
         .collect();
+    // The groups whose Hard-topology escape hatch is engaged on this node's view: `sys/topology-override/{group}`
+    // holding exactly `true`, the one value the consensus gate reads as active (`topology_check`). The raw KV
+    // routes refuse `sys/`, so this is where an operator reads it. An unsigned record any admitted member can
+    // write or tombstone, reported as the gate reads it (`docs/wiki/dev/owner-signed-records.md`): the list says
+    // what the gate will do on this node, not that an operator set it through the audited route.
+    const OVERRIDE_PREFIX: &str = "sys/topology-override/";
+    let mut topology_overrides: Vec<String> = crate::store::scan_kv_prefix(&ctx.agent_ctx.kv_state, OVERRIDE_PREFIX)
+        .into_iter()
+        .filter(|(_, v)| v.as_ref() == b"true")
+        .filter_map(|(k, _)| k.strip_prefix(OVERRIDE_PREFIX).map(str::to_string))
+        .collect();
+    topology_overrides.sort();
     Json(json!({
         "node_id":      ctx.agent_ctx.node_id.to_string(),
         "auto_enabled": snap.auto_enabled,
         "params":       params,
         "control":      control,
         "electorates":  electorates,
+        "topology_overrides": topology_overrides,
     }))
     .into_response()
 }

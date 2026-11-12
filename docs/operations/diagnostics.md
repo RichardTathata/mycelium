@@ -251,9 +251,12 @@ alertable scalar, the snapshot field is the relational detail, and the diagnosis
 - **Means:** a Hard-topology group (`topology_policies`) had quorum by headcount, but its voters did not
   span `spread_min_distinct` domains at `spread_depth`; nothing was committed (HTTP **409**
   `{"ok": false, "error": "topology_unsatisfied"}`; `ConsistencyError::TopologyUnsatisfied` in Rust).
-- **Read:** `GET /gateway/mesh/group?group=G` for the roster this node sees; `GET
-  /gateway/kv?key=sys/topology-override/G` for whether an override is in force (engaged only when the value
-  is exactly `true`).
+- **Read:** `GET /gateway/mesh/group?group=G` for the roster this node sees; `GET /gateway/govern`
+  (`govern:read`) for whether an override is in force — `topology_overrides` lists the groups whose override is
+  engaged on this node's view (the raw KV routes refuse `sys/`, [deprecations §99](../guide/deprecations.md)).
+  The override is an unsigned record any admitted member can write or tombstone, reported as the gate reads it: a
+  group listed here that no operator engaged (the audit trail has no `sys/topology-override/G` record) was
+  written by a member, not through the route.
 - **Do:** restore nodes in the missing domains. If the group must commit meanwhile, `POST
   /gateway/govern/topology-override` with `{"group":"G","override":true}` (`govern:write`, `Content-Type:
   application/json`). It does **not** lapse — unlike a governance intent it has no lease — so release it with

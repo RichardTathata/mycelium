@@ -16,6 +16,7 @@ import {
   MailboxEvent,
   RpcRequest,
   ScheduleDeclaration,
+  ScheduleLast,
   ScheduleRun,
   Signal,
   CommitResult,
@@ -158,8 +159,10 @@ function wholeNumber(v: number, field: string): number {
 /**
  * The gateway refused a **protected key** on a raw KV route (HTTP 403 `protected_key`). `set`, `delete`,
  * `setWithMinAcks` and `consistentSet` write application keys only (`ckpt/`, `manifest/`, `schemas/`,
- * your own namespaces); a key in a namespace the substrate or a companion owns (`sys/`, `grp/`, `cap/`,
- * `prompts/`, `log/`, `mailbox/`, …) is written through its own route, which `message` names.
+ * your own namespaces), and `get`, `consistentGet`, `scanPrefix` and `keys` (for a prefix inside a namespace
+ * whose names are hidden) read them only; a key in a namespace the substrate or a companion owns (`sys/`,
+ * `grp/`, `cap/`, `prompts/`, `log/`, `mailbox/`, …) is written and read through its own route, which
+ * `message` names.
  */
 export class ProtectedKeyError extends Error {
   readonly status = 403;
@@ -266,7 +269,7 @@ export class MyceliumAgent {
 
   // ── Internals ─────────────────────────────────────────────────────────────
 
-  private async _get(path: string, params?: Record<string, string>): Promise<unknown> {
+  private async _get(path: string, params?: Record<string, string>, subject?: Subject): Promise<unknown> {
     const url = new URL(path, this.base);
     if (params) {
       for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
@@ -275,6 +278,15 @@ export class MyceliumAgent {
       headers: this.auth,
       signal: AbortSignal.timeout(this.timeout),
     });
+    // A raw KV read of an owned key (0.2.10): the typed refusal the write verbs throw, naming the route that
+    // reads the namespace. Every other failure stays the error it was.
+    if (resp.status === 403 && subject?.key !== undefined) {
+      let body: { error?: string; message?: string } = {};
+      try { body = JSON.parse(await resp.text()) ?? {}; } catch { /* not JSON: fall through */ }
+      if (body.error === "protected_key") {
+        throw new ProtectedKeyError(subject.key, body.message ?? "protected key");
+      }
+    }
     if (!resp.ok) throw new Error(`GET ${path} failed: ${resp.status}`);
     // Lossless: a 64-bit integer above 2^53 arrives as a decimal string, not a rounded double (S1).
     return parseLossless(await resp.text());
@@ -647,10 +659,14 @@ export class MyceliumAgent {
 
   // ── KV store ──────────────────────────────────────────────────────────────
 
-  /** Reads a key, returns `null` if absent or tombstoned. */
+  /**
+   * Reads a key, returns `null` if absent or tombstoned. Application keys only: a key in a namespace the
+   * substrate or a companion owns throws {@link ProtectedKeyError} (the gateway's `403 protected_key`), its
+   * message naming the route that reads it.
+   */
   async get(key: string): Promise<Buffer | null> {
     // `{"found": false}` carries no `value_b64` at all; checking it against `null` threw on absence.
-    const data = await this._get("/gateway/kv", { key }) as { found?: boolean; value_b64?: string | null };
+    const data = await this._get("/gateway/kv", { key }, { key }) as { found?: boolean; value_b64?: string | null };
     return data.found && typeof data.value_b64 === "string" ? fromb64(data.value_b64) : null;
   }
 
@@ -686,13 +702,20 @@ export class MyceliumAgent {
     await this._delete(`/gateway/kv?key=${encodeURIComponent(key)}`, { key });
   }
 
-  /** Lists live keys with an optional prefix filter. */
+  /**
+   * Lists live keys with an optional prefix filter — names, never values. The gateway leaves out the names of
+   * the namespaces it hides (grants, mailboxes, the audit chain and its checkpoints, client certificates, mandates, rights, schedules), and a
+   * `prefix` inside one of them throws {@link ProtectedKeyError} (`key` is the prefix).
+   */
   async keys(prefix = ""): Promise<string[]> {
-    const data = await this._get("/gateway/kv/keys", { prefix }) as { keys: string[] };
+    const data = await this._get("/gateway/kv/keys", { prefix }, { key: prefix }) as { keys: string[] };
     return data.keys;
   }
 
-  /** Returns all live key-value pairs under `prefix`. */
+  /**
+   * Returns all live key-value pairs under `prefix`: one `keys` and a `get` per key, so it throws
+   * {@link ProtectedKeyError} for a prefix that lists an owned namespace's keys (their values are refused).
+   */
   async scanPrefix(prefix: string): Promise<Record<string, Buffer>> {
     const ks = await this.keys(prefix);
     const pairs = await Promise.all(
@@ -864,6 +887,21 @@ export class MyceliumAgent {
   }
 
   /**
+   * The last run of **your own** schedule `id`, as the connected node has it: one entry per node that has held
+   * it (`GET /gateway/schedules/last`, scope `schedule:run`), empty before the first acknowledged run. The id is
+   * the one you declared; the gateway reads the entries of your principal's schedule and no other. The raw KV
+   * routes refuse `sched/`, so this is the read.
+   */
+  async scheduleLast(id: string): Promise<ScheduleLast[]> {
+    const data = await this._get("/gateway/schedules/last", { id }) as {
+      last?: Array<{ node: string; slot: number | string; period_ms: number | string; phase_ms: number | string }>;
+    };
+    return (data.last ?? []).map((e) => ({
+      node: e.node, slot: Number(e.slot), periodMs: Number(e.period_ms), phaseMs: Number(e.phase_ms),
+    }));
+  }
+
+  /**
    * Answer a run {@link scheduleRuns} handed you: no `error`, the slot is run; an `error`, the work failed (an on-time
    * slot is retried at the next tick). Throws {@link UnservedRunError} for a run not handed to this principal, answered
    * already, or ended without an answer.
@@ -995,7 +1033,7 @@ export class MyceliumAgent {
 
   /** Read latest ballot-committed value visible to this node (local, eventually consistent). */
   async consistentGet(key: string): Promise<Buffer | null> {
-    const data = await this._get("/gateway/overlay/consistent/get", { key }) as {
+    const data = await this._get("/gateway/overlay/consistent/get", { key }, { key }) as {
       value_b64?: string | null;
     };
     return typeof data.value_b64 === "string" ? fromb64(data.value_b64) : null;

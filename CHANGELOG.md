@@ -9,6 +9,36 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Security
+
+- **The raw KV read routes refuse owned namespaces** (the kv:read decision, 2026-11-12; `deprecations.md` §99). Since
+  2.27.0 the raw KV *write* routes have refused every key in a namespace the substrate or a companion owns; the
+  *read* routes had no such guard, so a token holding only `kv:read` read a grant record without `grant:read`, the
+  audit chain without `audit:read`, a mailbox entry and every other owned key, and `GET
+  /gateway/overlay/consistent/get` did the same under `consensus:read` through its raw-key fallback. **Every release
+  from 2.27.0 is affected** (before it `kv:write` reached them too). Now, by the one table the write routes use
+  (`OWNED_KV_PREFIXES`):
+  - `GET /gateway/kv?key=` and `GET /gateway/overlay/consistent/get?key=` answer **403** `protected_key` for an owned
+    key, whatever the scopes, naming the route that reads the namespace;
+  - `GET /gateway/kv/keys` leaves out the key names under `grant/`, `mailbox/`, `audit/`, `sys/audit/`, `sys/audit-checkpoint/`,
+    `sys/client-cert/`, `mandate/`, `rights/` and `sched/`, and a `prefix` inside one of them is 403 `protected_key`; every
+    other namespace's names stay listed (the Ops Console's panels and prefix readiness probes are unaffected);
+  - three reads have routes of their own: `GET /gateway/schedules/last?id=` (`schedule:run`; `scheduleLast` /
+    `schedule_last`) for a client's own schedule's last run, `topology_overrides` on `GET /gateway/govern`
+    (`govern:read`), and the `skillrunner` dashboard's invocation panel reads `GET /gateway/audit`, or without
+    `compliance` the binary's own `GET /gateway/skillrunner/invocations`. Both new reads report unsigned records
+    any admitted member can write or tombstone, as the schedule loop and the consensus gate read them;
+  - the SDKs raise `ProtectedKeyError` from `get`, `consistent_get` / `consistentGet`, `scan_prefix` / `scanPrefix`
+    and, for a prefix inside a hidden namespace, `keys` (`mycelium-py` 0.2.16, `mycelium-ts` 0.2.10).
+
+  **Check:** with a `kv:read` token, `curl -s -o /dev/null -w '%{http_code}\n' -H 'Authorization: Bearer TOKEN'
+  'http://NODE:PORT/gateway/kv?key=sys/audit/x'` answers **200** on an affected node and **403** after upgrading
+  (`…/gateway/kv/keys?prefix=grant/` likewise). Until every gateway is upgraded, treat `kv:read` as reading every
+  replicated record and review who holds it. **Upgrade note:** a client or dashboard that read an owned namespace
+  through `/gateway/kv` uses the namespace's own route (§99's table). **Not changed:** the log read routes still read
+  a stream under `cn/`, `wiki/` or `reason/` with `consensus:read`; public `/stats` still counts every live key
+  (`store_entries`), the hidden namespaces' included.
+
 ### Added
 
 - **N5: the agent guide the binary serves** (`docs/plans/identity-and-lifecycle.md` N5). `mycelium skills get fleet`

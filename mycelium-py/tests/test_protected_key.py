@@ -40,6 +40,7 @@ class _Stub(BaseHTTPRequestHandler):
 
     do_POST = _answer  # noqa: N815
     do_DELETE = _answer  # noqa: N815
+    do_GET = _answer  # noqa: N815
 
     def log_message(self, *_: object) -> None:
         pass
@@ -127,3 +128,47 @@ def test_an_ordinary_403_is_not_mistaken_for_it(agent, verb):
     with pytest.raises(httpx.HTTPStatusError) as e:
         call()
     assert not isinstance(e.value, (ProtectedKeyError, ProtectedStreamError))
+
+
+# The kv:read decision (2026-11-12, 0.2.16): the raw KV read routes refuse an owned key as the write routes do.
+READ_DOOR = "grant requests are read through GET /gateway/grants/pending and GET /gateway/grants/request/{request} (grant:read)"
+
+READ_VERBS = {
+    "get":            (lambda a: a.get("grant/a/r1"), "grant/a/r1"),
+    "consistent_get": (lambda a: a.consistent_get("grant/a/r1"), "grant/a/r1"),
+    "keys":           (lambda a: a.keys(prefix="grant/"), "grant/"),
+    "scan_prefix":    (lambda a: a.scan_prefix("grant/"), "grant/"),
+}
+
+
+@pytest.mark.parametrize("verb", sorted(READ_VERBS))
+def test_every_kv_read_door_raises_protected_key_error_with_the_route(agent, verb):
+    _Stub.status = 403
+    _Stub.reply = {"ok": False, "error": "protected_key", "message": READ_DOOR}
+    call, key = READ_VERBS[verb]
+    with pytest.raises(ProtectedKeyError) as e:
+        call(agent)
+    assert _Stub.seen[-1][0] == "GET"
+    assert e.value.key == key
+    assert e.value.message == READ_DOOR
+    assert isinstance(e.value, PermissionError)
+    assert isinstance(e.value, httpx.HTTPStatusError)
+    assert e.value.response.status_code == 403
+
+
+@pytest.mark.parametrize("verb", sorted(READ_VERBS))
+def test_an_ordinary_403_on_a_read_is_not_mistaken_for_it(agent, verb):
+    """The plant: a scope refusal stays the HTTP error it was."""
+    _Stub.status = 403
+    _Stub.reply = {"error": "insufficient scope", "required_scope": "kv:read"}
+    with pytest.raises(httpx.HTTPStatusError) as e:
+        READ_VERBS[verb][0](agent)
+    assert not isinstance(e.value, ProtectedKeyError)
+
+
+def test_schedule_last_reads_the_schedules_own_route(agent):
+    _Stub.status = 200
+    _Stub.reply = {"schedule": "close", "last": [{"node": "10.0.0.5:9000", "slot": 7, "period_ms": 1000, "phase_ms": 0}]}
+    assert agent.schedule_last("close") == [{"node": "10.0.0.5:9000", "slot": 7, "period_ms": 1000, "phase_ms": 0}]
+    method, path, _ = _Stub.seen[-1]
+    assert (method, path) == ("GET", "/gateway/schedules/last?id=close")

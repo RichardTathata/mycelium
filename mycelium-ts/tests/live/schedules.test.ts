@@ -9,9 +9,9 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { MyceliumAgent, ScheduleRefusedError, UnservedRunError } from "../../src/agent";
+import { MyceliumAgent, ProtectedKeyError, ScheduleRefusedError, UnservedRunError } from "../../src/agent";
 import { EVE_PINNED_VERSION, loadEveAgent, runEveSchedules } from "../../src/eve";
-import type { ScheduleDeclaration, ScheduleRun } from "../../src/types";
+import type { ScheduleDeclaration, ScheduleLast, ScheduleRun } from "../../src/types";
 
 const TEST_HOST = process.env.MYCELIUM_TEST_HOST;
 const TEST_PORT = parseInt(process.env.MYCELIUM_TEST_PORT ?? "0", 10);
@@ -45,9 +45,11 @@ describe_("schedules through the gateway (Y12)", () => {
       expect(runs[1].slot).toBeGreaterThan(runs[0].slot);
       await expect(a.scheduleAck(runs[0])).rejects.toBeInstanceOf(UnservedRunError);
       const node = (await a.health()).node_id;
-      const last = await a.get(`sched/${decl.id}~anonymous/last/${node}`);
-      expect(last).not.toBeNull();
-      expect(parseInt(last!.toString().split(" ")[0], 10)).toBeGreaterThanOrEqual(runs[1].slot);
+      // The raw KV routes refuse `sched/` (a ProtectedKeyError); the schedule's own read route answers.
+      await expect(a.get(`sched/${decl.id}~anonymous/last/${node}`)).rejects.toBeInstanceOf(ProtectedKeyError);
+      const last = (await a.scheduleLast(decl.id)).find((e) => e.node === node);
+      expect(last).toBeDefined();
+      expect(last!.slot).toBeGreaterThanOrEqual(runs[1].slot);
     } finally {
       controller.abort();
       await band.drop();
@@ -116,12 +118,12 @@ describe_("schedules through the gateway (Y12)", () => {
       expect(fs.existsSync(marker)).toBe(true);
       // Acknowledged: the slot is the fleet's last run once `waitUntil`'s task settled.
       const node = (await a.health()).node_id;
-      let last: Buffer | null = null;
-      while (last === null && Date.now() < deadline) {
-        last = await a.get(`sched/${eve.schedules[0].id}~anonymous/last/${node}`);
-        if (last === null) await new Promise((r) => setTimeout(r, 200));
+      let last: ScheduleLast | undefined;
+      while (last === undefined && Date.now() < deadline) {
+        last = (await a.scheduleLast(eve.schedules[0].id)).find((e) => e.node === node);
+        if (last === undefined) await new Promise((r) => setTimeout(r, 200));
       }
-      expect(last).not.toBeNull();
+      expect(last).toBeDefined();
       controller.abort();
       await running;
     } finally {

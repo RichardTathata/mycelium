@@ -84,7 +84,7 @@ fn every_namespace_in_the_table_is_classified_for_the_raw_kv_routes() {
         }
         let prefix = format!("{top}/");
         seen += 1;
-        assert!(super::OWNED_KV_PREFIXES.contains(&prefix.as_str()) || super::APPLICATION_KV_PREFIXES.contains(&prefix.as_str()),
+        assert!(super::OWNED_KV_PREFIXES.iter().any(|p| p.prefix == prefix) || super::APPLICATION_KV_PREFIXES.contains(&prefix.as_str()),
             "namespace {prefix} in src/lib.rs is neither owned nor an application namespace for the raw KV routes");
     }
     assert!(seen > 20, "the table was read ({seen} rows)");

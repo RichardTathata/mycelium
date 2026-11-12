@@ -444,6 +444,8 @@ pub(super) fn required_scope(method: &axum::http::Method, matched_path: &str) ->
         // band and hands it the runs — its own scope, not `mesh:serve`, which serves calls and holds nothing.
         "/gateway/schedules/run"   => "schedule:run",
         "/gateway/schedules/ack"   => "schedule:run",
+        // The caller's own schedule's last run, by the id it declared (the raw KV routes refuse `sched/`).
+        "/gateway/schedules/last"  => "schedule:run",
         "/gateway/scatter"         => "mesh:write",
         "/gateway/mailbox/deliver" => "mesh:write",
         "/gateway/mailbox/{kind}"  => "mesh:read",
@@ -1761,20 +1763,46 @@ pub(super) fn dispatch_refused(e: GatewayDispatchError) -> Response {
         .into_response()
 }
 
-/// Top-level KV namespaces the substrate or a companion owns (`src/lib.rs` § KV namespace ownership). The
-/// raw KV routes refuse them: each has its own door, guarded by its own scope, and a write through
-/// `kv:write` would bypass it — a governance intent without `govern:write`, a prompt template without
-/// `llm:write`, another node enrolled in a group (a node joins itself), a forged capability or requirement,
-/// a forged mailbox sender, a planted `sys/caller-context/` marker, a deleted acceptor ballot (the reviews
-/// of #544; the kv:write decision of 2026-10-07). `every_namespace_in_the_table_is_classified_for_the_raw_kv_routes`
-/// keeps this in step with the table.
-pub(crate) const OWNED_KV_PREFIXES: &[&str] = &[
-    "sys/", "consensus/", "grp/", "audit/", "cap/", "req/", "cap-group/", "gcap/", "mailbox/", "tools/",
-    "agent/", "svc/", "log/", "clog/", "lock/", "prompts/", "skills/", "installable/", "comp/", "wiki/", "tuple/",
-    "facts/", "mandate/", "knowledge/", "rights/", "cn/",
-    "grant/",  // adopter-surface X3: grant requests and answers (POST /gateway/grants/{agent}/{request})
-    "sched/",  // adopter-surface Y2: a schedule's last run, written by its holder after the work (src/schedule.rs)
-    "faults/", // adopter-surface X6: `mycelium test --faults`'s own writes on the fleet it builds; no route writes it
+/// One row of [`OWNED_KV_PREFIXES`]: a namespace the substrate or a companion owns, and whether the raw listing
+/// (`GET /gateway/kv/keys`) leaves its key **names** out as well as refusing its values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct OwnedPrefix {
+    pub(crate) prefix: &'static str,
+    /// The names are themselves the record: who asked for a grant and which request, who was sent mail, how long
+    /// the audit chain is and where its checkpoints stand, which principals hold a client certificate, who holds
+    /// which mandate or right, which gateway principal runs which schedule.
+    pub(crate) names_hidden: bool,
+}
+
+const fn listed(prefix: &'static str) -> OwnedPrefix { OwnedPrefix { prefix, names_hidden: false } }
+const fn hidden(prefix: &'static str) -> OwnedPrefix { OwnedPrefix { prefix, names_hidden: true } }
+
+/// KV namespaces the substrate or a companion owns (`src/lib.rs` § KV namespace ownership) — the ONE table both
+/// directions of the raw KV routes read. The raw routes refuse them: each has its own door, guarded by its own
+/// scope, and a write through `kv:write` would bypass it — a governance intent without `govern:write`, a prompt
+/// template without `llm:write`, another node enrolled in a group (a node joins itself), a forged capability or
+/// requirement, a forged mailbox sender, a planted `sys/caller-context/` marker, a deleted acceptor ballot (the
+/// reviews of #544; the kv:write decision of 2026-10-07) — and a read through `kv:read` would bypass it the same
+/// way: a grant record without `grant:read`, the audit chain without `audit:read` (the kv:read decision of
+/// 2026-11-12). A row's `names_hidden` says whether the listing leaves its key names out too; the three
+/// sub-prefixes of `sys/` are rows only for that flag (`sys/` already owns them).
+/// `every_namespace_in_the_table_is_classified_for_the_raw_kv_routes` keeps this in step with the table.
+///
+/// **A new row is classified, not defaulted.** `listed` discloses every key name under the prefix to any
+/// `kv:read` token, so choose it only for names that carry no principal, request, recipient or chain position,
+/// and add the row to the matching list in `the_read_and_write_doors_classify_by_the_one_table`
+/// (`kv_read_tests.rs`), which pins both sets and fails on a row in neither. When `call/` lands
+/// (identity-and-lifecycle I4) it needs a row here, names hidden.
+pub(crate) const OWNED_KV_PREFIXES: &[OwnedPrefix] = &[
+    listed("sys/"), hidden("sys/audit/"), hidden("sys/audit-checkpoint/"), hidden("sys/client-cert/"),
+    listed("consensus/"), listed("grp/"), hidden("audit/"), listed("cap/"), listed("req/"), listed("cap-group/"),
+    listed("gcap/"), hidden("mailbox/"), listed("tools/"), listed("agent/"), listed("svc/"), listed("log/"),
+    listed("clog/"), listed("lock/"), listed("prompts/"), listed("skills/"), listed("installable/"), listed("comp/"),
+    listed("wiki/"), listed("tuple/"), listed("facts/"), hidden("mandate/"), listed("knowledge/"), hidden("rights/"),
+    listed("cn/"),
+    hidden("grant/"),  // adopter-surface X3: grant requests and answers (POST /gateway/grants/{agent}/{request})
+    hidden("sched/"),  // adopter-surface Y2: a schedule's last run, written by its holder after the work (src/schedule.rs); a client's carries its principal in the name
+    listed("faults/"), // adopter-surface X6: `mycelium test --faults`'s own writes on the fleet it builds; no route writes it
 ];
 
 /// Namespaces the table assigns to an application writing through the gateway's KV routes — the LangGraph
@@ -1799,7 +1827,9 @@ pub(super) fn refuse_owned_stream(stream: &str) -> Option<axum::response::Respon
     ).into_response())
 }
 
-/// Whether the raw KV routes write `key`: an application key, not one the substrate or a companion owns.
+/// Whether the raw KV routes write `key` — and read it: an application key, not one the substrate or a companion
+/// owns. One predicate for both directions ([`refuse_protected_key`], [`refuse_protected_key_read`]), so a key
+/// the write doors refuse is a key the read doors refuse.
 pub(crate) fn raw_kv_writable(key: &str) -> bool {
     if APPLICATION_KV_PREFIXES.iter().any(|p| key.starts_with(p)) {
         return true;
@@ -1810,7 +1840,75 @@ pub(crate) fn raw_kv_writable(key: &str) -> bool {
     {
         return true;
     }
-    !OWNED_KV_PREFIXES.iter().any(|p| key.starts_with(p) || key == p.trim_end_matches('/'))
+    !OWNED_KV_PREFIXES.iter().any(|p| key.starts_with(p.prefix) || key == p.prefix.trim_end_matches('/'))
+}
+
+/// Whether the raw listing leaves `key`'s name out: an owned key ([`raw_kv_writable`] is false) under a row of
+/// [`OWNED_KV_PREFIXES`] marked `names_hidden`.
+pub(crate) fn raw_kv_name_hidden(key: &str) -> bool {
+    !raw_kv_writable(key)
+        && OWNED_KV_PREFIXES.iter().any(|p| p.names_hidden && (key.starts_with(p.prefix) || key == p.prefix.trim_end_matches('/')))
+}
+
+/// The read doors that take a KV key from the request — `GET /gateway/kv` and `GET /gateway/overlay/consistent/get`,
+/// whose fallback reads the raw key — read application keys only, as the write doors write them
+/// ([`raw_kv_writable`], the same predicate). An owned key is refused `403 protected_key` whatever the token's
+/// scopes, naming the route that reads the namespace where it has one. The refusal does not say whether the key
+/// exists.
+pub(super) fn refuse_protected_key_read(key: &str) -> Option<axum::response::Response> {
+    if raw_kv_writable(key) {
+        return None;
+    }
+    warn!(key, "gateway: an owned KV key refused on a raw KV read route");
+    Some(protected_read_refusal(key))
+}
+
+/// `GET /gateway/kv/keys?prefix=P`: a prefix inside a namespace whose names are hidden is refused as a read of
+/// one of its keys is; any other prefix is answered, with hidden names left out ([`raw_kv_name_hidden`]).
+pub(super) fn refuse_hidden_prefix(prefix: &str) -> Option<axum::response::Response> {
+    let inside_hidden = OWNED_KV_PREFIXES.iter().any(|p| p.names_hidden && prefix.starts_with(p.prefix));
+    if !inside_hidden {
+        return None;
+    }
+    warn!(prefix, "gateway: a listing inside a names-hidden namespace refused on the raw KV keys route");
+    Some(protected_read_refusal(prefix))
+}
+
+fn protected_read_refusal(key: &str) -> axum::response::Response {
+    let door = if key.starts_with("sys/audit/") {
+        "the audit trail is read through GET /gateway/audit (audit:read)"
+    } else if key.starts_with("sys/govern/") || key.starts_with("sys/topology-override/") {
+        "the governors' state, the electorates and the topology overrides in force are read through GET /gateway/govern (govern:read)"
+    } else if key.starts_with("grant/") {
+        "grant requests are read through GET /gateway/grants/pending and GET /gateway/grants/request/{request} (grant:read)"
+    } else if key.starts_with("grp/") {
+        "a group's roster is read through GET /gateway/mesh/group?group=G (mesh:read)"
+    } else if key.starts_with("prompts/") {
+        "prompt templates are read through GET /gateway/prompts and /gateway/prompts/{ns}/{name} (llm:read)"
+    } else if key.starts_with("log/") || key.starts_with("clog/") {
+        "logs are read through GET /gateway/overlay/log/scan (consensus:read)"
+    } else if key.starts_with("cap/") {
+        "capabilities are resolved through GET /gateway/capability/resolve (cap:read)"
+    } else if key.starts_with("mailbox/") {
+        "a mailbox is read by its recipient through GET /gateway/mailbox/{kind} (mesh:read)"
+    } else if key.starts_with("consensus/") {
+        "a slot's decision is read through GET /consensus/{slot} (consensus:read)"
+    } else if key.starts_with("sched/") {
+        // A gateway client's schedule is `sched/{id}~{principal}/…`; an application's holds no `~` and has no route.
+        if key.split('/').nth(1).is_some_and(|id| id.contains(crate::schedule::CLIENT_SCOPE_SEPARATOR)) {
+            "a gateway client's own schedule's last run is read through GET /gateway/schedules/last?id=ID (schedule:run)"
+        } else {
+            "a schedule's records are read in process by the application that runs it; a gateway client reads its own \
+             schedule's last run through GET /gateway/schedules/last?id=ID (schedule:run), which serves no other schedule"
+        }
+    } else {
+        "this namespace is read through the substrate or the companion that owns it, not through the KV routes \
+         (src/lib.rs § KV namespace ownership); the KV routes read application keys"
+    };
+    (
+        StatusCode::FORBIDDEN,
+        Json(json!({ "ok": false, "error": "protected_key", "message": door })),
+    ).into_response()
 }
 
 /// The doors that take a KV key from the request — `POST`/`DELETE /gateway/kv`, `POST /gateway/kv/quorum`, and

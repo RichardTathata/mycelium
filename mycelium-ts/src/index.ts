@@ -23,6 +23,7 @@ export {
   MailboxEvent,
   RpcRequest,
   ScheduleDeclaration,
+  ScheduleLast,
   ScheduleRun,
   Signal,
 } from "./types";

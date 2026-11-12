@@ -93,7 +93,9 @@ prefixes; **do not write under them:**
 > `ui/` — write `ui/viz` and `ui/label` to advertise your node's own page, and put nothing else there, because a
 > gateway answers values under `ui/` to the browser origins it lists (`gateway_cors_origins`). Note `log/` in particular:
 > `KvHandle::append` writes `log/{stream}/…`, so give your streams an app-scoped name —
-> don't write raw `log/` keys.
+> don't write raw `log/` keys. The gateway's raw KV routes hold the same line in both directions: they write and
+> read application keys only, and answer `403 protected_key` for a key under an owned prefix
+> ([deprecations §99](deprecations.md)).
 >
 > Companion claims: `tuple/` (`mycelium-tuple-space`) · `wiki/` (`mycelium-wiki`) ·
 > `installable/` + `comp/` (`mycelium-wasm-host`) · `facts/` (per-field AgentFacts CRDT,

@@ -54,9 +54,9 @@ async fn run(sf: Arc<SkillFile>) -> Result<(), Box<dyn std::error::Error>> {
     let agent   = Arc::new(builder);
 
     // Management dashboard — served from the same HTTP port as the embedded gateway
-    // so the page can query /gateway/kv/* without any CORS restrictions.
+    // so the page can query /gateway/* without any CORS restrictions.
     if sf.node.http_port.is_some() {
-        agent.with_http_routes(mgmt_routes());
+        agent.with_http_routes(mgmt_routes(&agent));
     }
 
     // Optional OTEL tracer
@@ -244,8 +244,26 @@ fn build_capability(sf: &SkillFile) -> Capability {
 
 // ── Management dashboard ──────────────────────────────────────────────────────
 
-fn mgmt_routes() -> Router {
-    Router::new().route("/mgmt", get(mgmt_handle_root))
+/// The dashboard page, and — in a build without `compliance`, which has no `/gateway/audit` — the route its
+/// invocation panel reads instead: `GET /gateway/skillrunner/invocations`, this binary's unsigned fallback trail
+/// (`audit/…`) read in process, since the raw KV routes refuse `audit/`. Under `/gateway/`, so it sits behind the
+/// gateway's bearer like the routes beside it.
+fn mgmt_routes(agent: &Arc<GossipAgent>) -> Router {
+    let router = Router::new().route("/mgmt", get(mgmt_handle_root));
+    #[cfg(not(feature = "compliance"))]
+    let router = {
+        let agent = Arc::downgrade(agent);
+        router.route("/gateway/skillrunner/invocations", get(move || {
+            let agent = agent.clone();
+            async move {
+                let entries = agent.upgrade().map(|a| a.kv().scan_prefix("audit/")).unwrap_or_default();
+                axum::Json(audit::invocations_json(entries))
+            }
+        }))
+    };
+    #[cfg(feature = "compliance")]
+    let _ = agent;
+    router
 }
 
 async fn mgmt_handle_root() -> Html<&'static str> {
@@ -305,7 +323,7 @@ h2{font-size:0.78rem;font-weight:600;color:#475569;text-transform:uppercase;lett
   <h2>Skills on Mesh</h2>
   <div id="skills"><div style="color:#475569;font-size:0.85rem">Loading…</div></div>
 
-  <h2 style="margin-top:8px">Recent Invocations (audit/)</h2>
+  <h2 style="margin-top:8px">Recent Invocations (audit trail)</h2>
   <div id="audit"><div class="no-audit">Loading…</div></div>
 </main>
 <script>
@@ -362,35 +380,54 @@ async function refresh(){
       }).join('');
     }
 
-    // Load audit entries
-    var ar=await fetch('/gateway/kv/keys?prefix=audit/');
+    // Load audit entries: the node's audit trail, read through its own route (`audit:read`; a `compliance`
+    // build), or this binary's own route in a build without it. The raw KV routes refuse owned namespaces.
+    var ar=await fetch('/gateway/audit?limit=10');
     var auditEntries=[];
+    var auditNote='No invocations recorded yet — invoke a skill to see audit entries';
     if(ar.ok){
       var ad=await ar.json();
-      var auditKeys=(ad.keys||[]).sort().reverse().slice(0,10);
-      document.getElementById('s-invocations').textContent=(ad.keys||[]).length;
-      for(var ak of auditKeys){
-        try{
-          var vr=await fetch('/gateway/kv?key='+encodeURIComponent(ak));
-          if(vr.ok){
-            var v=await vr.json();
-            var raw=v.value;
-            // value is base64-encoded JSON bytes
-            var json=JSON.parse(atob(raw));
-            auditEntries.push(json);
-          }
-        }catch(e){}
+      var total=0;
+      for(var st of (ad.streams||[])){
+        total+=st.count||0;
+        for(var rec of (st.records||[])){
+          if(rec.action!=='Invoke') continue;
+          var d={};
+          try{d=JSON.parse(rec.detail||'{}');}catch(e){}
+          var parts=String(rec.target||'').split('/');
+          auditEntries.push({skill_ns:parts[0]||'?',skill_name:parts.slice(1).join('/')||'?',
+            // An HLC's physical part is its upper 48 bits, in milliseconds.
+            success:rec.outcome==='Success',duration_ms:d.duration_ms,ts_ms:Math.floor((rec.hlc||0)/65536)});
+        }
+      }
+      auditEntries.sort(function(a,b){return b.ts_ms-a.ts_ms;});
+      auditEntries=auditEntries.slice(0,10);
+      document.getElementById('s-invocations').textContent=total;
+    } else if(ar.status===404){
+      // A build without `compliance` has no /gateway/audit: the binary serves its unsigned fallback trail itself.
+      var fr=await fetch('/gateway/skillrunner/invocations');
+      if(fr.ok){
+        var fd=await fr.json();
+        document.getElementById('s-invocations').textContent=fd.count||0;
+        auditEntries=(fd.recent||[]).map(function(e){
+          return {skill_ns:e.skill_ns,skill_name:e.skill_name,success:e.success,duration_ms:e.duration_ms,
+            ts_ms:Math.floor((e.ts_unix_nanos||0)/1e6)};
+        });
+      } else {
+        document.getElementById('s-invocations').textContent='—';
+        auditNote='The invocation trail could not be read (HTTP '+fr.status+')';
       }
     } else {
       document.getElementById('s-invocations').textContent='—';
+      auditNote='The audit trail could not be read (HTTP '+ar.status+'; GET /gateway/audit needs audit:read)';
     }
 
     var auditDiv=document.getElementById('audit');
     if(auditEntries.length===0){
-      auditDiv.innerHTML='<div class="no-audit">No invocations recorded yet — invoke a skill to see audit entries</div>';
+      auditDiv.innerHTML='<div class="no-audit">'+esc(auditNote)+'</div>';
     } else {
       auditDiv.innerHTML=auditEntries.map(function(e){
-        var ts=e.ts_unix_nanos?new Date(Math.floor(e.ts_unix_nanos/1e6)):null;
+        var ts=e.ts_ms?new Date(e.ts_ms):null;
         var timeStr=ts?pad2(ts.getHours())+':'+pad2(ts.getMinutes())+':'+pad2(ts.getSeconds()):'?';
         return '<div class="audit-row">'
           +'<span class="audit-skill">'+esc(e.skill_ns+'/'+e.skill_name)+'</span>'

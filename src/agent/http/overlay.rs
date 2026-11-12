@@ -256,12 +256,19 @@ pub(super) async fn gw_overlay_consistent_set(
 }
 
 /// `GET /gateway/overlay/consistent/get?key=K` — read latest ballot-committed value (local, eventually consistent).
+/// An owned key is `403 protected_key`, as on `GET /gateway/kv`.
 #[cfg(feature = "consensus")]
 pub(super) async fn gw_overlay_consistent_get(
     Query(q):   Query<KvKeyQuery>,
     State(ctx): State<Arc<HttpCtx>>,
 ) -> impl IntoResponse {
     use base64::Engine as _;
+    // The fallback below reads the raw key, so this door reads what `consistent/set` writes — application keys —
+    // and refuses an owned one as `GET /gateway/kv` does: until 2026-11-12 a `consensus:read` token read any
+    // owned key's value here.
+    if let Some(refused) = refuse_protected_key_read(&q.key) {
+        return refused;
+    }
     // The same read the library's `consistent_get` makes (review D6): the slot's live decision — its
     // decision record, or the legacy reading for a slot with none — then the raw key. It read the raw
     // `consensus/committed/consistent/…` key, which disagreed with the library once decisions became

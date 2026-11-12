@@ -36,6 +36,14 @@ the embedding application or, through the gateway, by an SDK agent.
   answers each with `POST /gateway/schedules/ack` within one period. The verbs are `scheduleRuns` / `scheduleAck` /
   `runSchedule` in [`mycelium-ts`](../../mycelium-ts/README.md) and `schedule_runs` / `schedule_ack` in
   [`mycelium-py`](../../mycelium-py/README.md); the node must match `holders` (advertise the capability on it).
+  `GET /gateway/schedules/last?id=<id>` (the same scope; `scheduleLast` / `schedule_last`) answers the client's own
+  schedule's last run, one entry per node that has held it — the raw KV routes refuse `sched/`, to read as to write
+  (`schedules_last_reads_the_callers_own_schedule`, in
+  [`src/agent/http/kv_read_tests.rs`](../../src/agent/http/kv_read_tests.rs); two principals kept apart:
+  `schedules_last_keeps_two_principals_apart`). The entry is an unsigned record any admitted member can write or
+  tombstone, reported as stored — not proof that a slot ran — and the route applies neither of the loop's rules:
+  it returns entries under another period or phase, and entries the loop leaves out as more than 64 slots ahead.
+  An application's `run_schedule` has no HTTP read of its last run: it reads `sched/{id}/last/` in process.
   An Eve agent's `schedules/` loads through Y6's loader and runs this way (`runEveSchedules`, in
   [`mycelium-ts/src/eve.ts`](../../mycelium-ts/src/eve.ts)) when its cron is a period and a phase.
 - `two_holders_under_a_partition_give_one_effect_at_the_destination`, in

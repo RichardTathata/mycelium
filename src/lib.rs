@@ -131,7 +131,7 @@
 //! | `agent/{node}/policy`              | Layer V serialised AgentPolicy (readable by monitors/supervisors) |
 //! | `agent/{node}/task/{id}/turn`      | Layer V turn counter for `max_turns` enforcement              |
 //! | `agent/{node}/task/{id}/calls`     | Layer V tool-call counter for `tool_budget` enforcement       |
-//! | `grant/{agent}/{request}`          | adopter-surface X3 — a grant request the agent's state machine wrote (tool, arguments digest and rendering, policy revision, expiry); route-owned: the raw KV routes refuse the prefix |
+//! | `grant/{agent}/{request}`          | adopter-surface X3 — a grant request the agent's state machine wrote (tool, arguments digest and rendering, policy revision, expiry); route-owned: the raw KV routes refuse the prefix, to read as to write, and leave its names out of the listing |
 //! | `grant/{agent}/{request}/issued`   | the signed grant (`SignedMandateGrant`, scope `grant:{request}`) written by `POST /gateway/grants/{agent}/{request}` (`grant:issue`) |
 //! | `grant/{agent}/{request}/refused`  | a supervisor's refusal, with the issuer and reason |
 //! | `grant/{agent}/{request}/checkpoint` | the issuing node's revocation checkpoint for the grant's scope — sequence 1 at issue (nothing revoked), sequence 2 at revocation (the term named); every node's authority is fed it from the KV, so a grant issued or revoked at one node is known at every other |

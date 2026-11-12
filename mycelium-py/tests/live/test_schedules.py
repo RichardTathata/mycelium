@@ -11,7 +11,7 @@ import uuid
 
 import pytest
 
-from mycelium import MyceliumAgent, ScheduleDeclaration, ScheduleRefusedError, UnservedRunError
+from mycelium import MyceliumAgent, ProtectedKeyError, ScheduleDeclaration, ScheduleRefusedError, UnservedRunError
 
 pytestmark = pytest.mark.skipif(
     not os.getenv("MYCELIUM_TEST_HOST"),
@@ -50,14 +50,17 @@ async def test_a_schedule_declared_through_the_gateway_hands_the_client_its_runs
         with pytest.raises(UnservedRunError):
             agent.schedule_ack(runs[0])
         # The slot the client acknowledged is the fleet's last run — written after the answer, so polled.
-        key = f"sched/{decl.id}~anonymous/last/{agent.health()['node_id']}"
+        # Read through the schedule's own route: the raw KV routes refuse `sched/` (a ProtectedKeyError).
+        node = agent.health()["node_id"]
+        with pytest.raises(ProtectedKeyError):
+            agent.get(f"sched/{decl.id}~anonymous/last/{node}")
         last = None
         for _ in range(50):
-            last = agent.get(key)
-            if last is not None and int(last.split()[0]) >= runs[1].slot:
+            last = next((e for e in agent.schedule_last(decl.id) if e["node"] == node), None)
+            if last is not None and last["slot"] >= runs[1].slot:
                 break
             await asyncio.sleep(0.2)
-        assert last is not None and int(last.split()[0]) >= runs[1].slot
+        assert last is not None and last["slot"] >= runs[1].slot
     finally:
         band.drop()
 

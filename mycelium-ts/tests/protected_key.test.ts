@@ -76,3 +76,53 @@ test.each([...kvDoors, ...logDoors])("an ordinary 403 on %s is not mistaken for 
   expect(err).not.toBeInstanceOf(ProtectedKeyError);
   expect(err).not.toBeInstanceOf(ProtectedStreamError);
 });
+
+// The kv:read decision (2026-11-12, 0.2.10): the raw KV read routes refuse an owned key as the write routes do.
+const READ_DOOR = "grant requests are read through GET /gateway/grants/pending and GET /gateway/grants/request/{request} (grant:read)";
+const readDoors: Array<[string, (a: MyceliumAgent) => Promise<unknown>, string]> = [
+  ["get", (a) => a.get("grant/a/r1"), "grant/a/r1"],
+  ["consistentGet", (a) => a.consistentGet("grant/a/r1"), "grant/a/r1"],
+  ["keys", (a) => a.keys("grant/"), "grant/"],
+  ["scanPrefix", (a) => a.scanPrefix("grant/"), "grant/"],
+];
+
+test.each(readDoors)("%s throws ProtectedKeyError carrying the route that reads the namespace", async (_name, call, key) => {
+  stub({ ok: false, error: "protected_key", message: READ_DOOR }, 403);
+  const err: any = await call(agent()).catch((e) => e);
+  expect(lastMethod).toBe("GET");
+  expect(err).toBeInstanceOf(ProtectedKeyError);
+  expect(err.key).toBe(key);
+  expect(err.status).toBe(403);
+  expect(err.message).toBe(READ_DOOR);
+});
+
+test.each(readDoors)("an ordinary 403 on %s stays the error it was (the plant)", async (_name, call) => {
+  stub({ error: "insufficient scope", required_scope: "kv:read" }, 403);
+  const err: any = await call(agent()).catch((e) => e);
+  expect(err).toBeInstanceOf(Error);
+  expect(err).not.toBeInstanceOf(ProtectedKeyError);
+  expect(String(err.message)).toContain("failed: 403");
+});
+
+test("scanPrefix refuses when a listed key's value is refused", async () => {
+  // `cap/` names are listed; their values are not read through the raw route.
+  globalThis.fetch = (async (url: unknown) => {
+    const u = String(url);
+    return u.includes("/gateway/kv/keys")
+      ? new Response(JSON.stringify({ keys: ["cap/n/demo/echo"] }), { status: 200 })
+      : new Response(JSON.stringify({ ok: false, error: "protected_key", message: "capabilities are resolved through GET /gateway/capability/resolve (cap:read)" }), { status: 403 });
+  }) as typeof fetch;
+  const err: any = await agent().scanPrefix("cap/").catch((e) => e);
+  expect(err).toBeInstanceOf(ProtectedKeyError);
+  expect(err.key).toBe("cap/n/demo/echo");
+});
+
+test("scheduleLast reads the schedule's own route", async () => {
+  let seen = "";
+  globalThis.fetch = (async (url: unknown) => {
+    seen = String(url);
+    return new Response(JSON.stringify({ schedule: "close", last: [{ node: "10.0.0.5:9000", slot: 7, period_ms: 1000, phase_ms: 0 }] }), { status: 200 });
+  }) as typeof fetch;
+  expect(await agent().scheduleLast("close")).toEqual([{ node: "10.0.0.5:9000", slot: 7, periodMs: 1000, phaseMs: 0 }]);
+  expect(seen).toContain("/gateway/schedules/last?id=close");
+});

@@ -355,6 +355,7 @@ pub(super) async fn run_http_server(
         .route("/rpc/respond",            post(gw_rpc_respond))
         .route("/schedules/run",          get(gw_schedule_run))
         .route("/schedules/ack",          post(gw_schedule_ack))
+        .route("/schedules/last",         get(gw_schedule_last))
         .route("/scatter",                post(gw_scatter))
         .route("/kv",                     get(gw_kv_get).post(gw_kv_set).delete(gw_kv_delete))
         .route("/kv/keys",                get(gw_kv_keys))
@@ -650,6 +651,9 @@ mod grant_tests;
 /// Adopter-surface Y3 (D28): cross-origin reads, only where an origin is named and only on the read routes.
 #[cfg(test)]
 mod cors_tests;
+/// The kv:read decision (2026-11-12): every raw KV read door refuses an owned key and hides the hidden names.
+#[cfg(test)]
+mod kv_read_tests;
 /// Adopter-surface Y4's last promise: a record a span names, read by its hash on the node, and verified there.
 #[cfg(all(test, feature = "compliance"))]
 mod record_read_tests;
