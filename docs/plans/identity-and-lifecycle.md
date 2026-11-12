@@ -1052,9 +1052,13 @@ by saying so. The exits named are below.
       generation 0.
     - `KeyStanding`'s `legacy_closed` is computed whenever the root set is built, at start and at each `activate`:
       true when **every** root the node trusts is generation 1 or later.
-    - **The phases.** A widened node trusts generation n and n+1, so it is not closed. A narrowed node, a recovered
-      node and a node started on the successor's files trust generation n+1 alone, so they are closed. Nothing has to
-      survive in `succession/`.
+    - **The phases.** A node widened in a fleet's **first** succession trusts generations 0 and 1, so it is not
+      closed. A node widened in a **later** succession trusts generations n and n+1 with n ≥ 1, so it **stays closed**:
+      "widened" does not mean "open" (#768's confirm round). A narrowed node, a recovered node and a node started on
+      the successor's files trust generation n+1 alone, so they are closed. Nothing has to survive in `succession/`.
+    - **The generation is checked at widen.** A node refuses a succession record whose successor root is not a higher
+      generation than every root it trusts, and refuses a root whose `caGeneration` is present but malformed, rather
+      than reading it as 0. Otherwise a successor minted at generation 0 would narrow the fleet with legacy open.
   - **Where the rule lives (#768's M1).** In exactly three places:
     - `CoreCtx::trusted_keys` (`context.rs:277`): with the flag set, a node with no standing or with `anchored: None`
       has no trusted key;
@@ -1347,8 +1351,10 @@ by saying so. The exits named are below.
       - a node first started on the successor's files, after the succession.
     - On both, `legacy_closed` is set from the root's generation alone, and the refusals above hold. Seen failing first
       with the flag read from `succession/`: both nodes answer from `peer_keys`.
-    - **The flag stays clear on a widened node,** which trusts generations n and n+1, and on a node of a fleet that has
-      never succeeded, whose root is generation 0. There a legacy node is judged as today (`deprecations.md` §39).
+    - **The flag stays clear on a node widened in the first succession,** which trusts generations 0 and 1, and on a
+      node of a fleet that has never succeeded, whose root is generation 0. **It stays set on a node widened in a later
+      succession** (generations 1 and 2). A succession record whose successor is not a higher generation, and a root
+      with a malformed `caGeneration`, are each refused; seen failing first with the check removed. There a legacy node is judged as today (`deprecations.md` §39).
     - **Two collectors keep their full sets** (#768's M1). A removal still names every key the member held
       (`membership_ops.rs:47`), and `own_keys` (`http/grants.rs:900`) is unchanged.
     - **The node's own key.** It keeps trusting its own current key for itself before its own record is judged
