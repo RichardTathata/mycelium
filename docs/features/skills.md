@@ -7,7 +7,10 @@ kind `skill.invoke`. The `skillrunner` binary turns a `.skill.toml` manifest int
 advertises its capability, answers each invocation by running its prompt against an OpenAI-compatible model, and
 writes an audit record — into the node's signed, hash-chained trail in a build with `compliance` and `[tls]`; in a
 `compliance` build without `[tls]` the record is not written, only warned about; and as a plain unsigned `audit/` entry
-in a build without `compliance`. A skill can call other skills by name: the ones it lists in `tools` are resolved
+in a build without `compliance`. In that build only, the binary's dashboard reads the count and the ten newest of
+those records from its own `GET /gateway/skillrunner/invocations`, guarded by the gateway's bearer and nothing finer
+— the build has no scope table — so any bearer holder, or anyone on a gateway with no token, reads them; a
+`compliance` build does not mount the route and serves `GET /gateway/audit` under `audit:read`. A skill can call other skills by name: the ones it lists in `tools` are resolved
 against live advertisements when it runs, never by address. `skill.invoke` is a protected kind, so a gateway's action
 evaluator decides a call that comes through that gateway; `skillrunner` itself attaches no evaluator and no provider
 enforcement, so a call reaching it another way is not decided there.

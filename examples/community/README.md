@@ -158,7 +158,8 @@ The orchestrator exposes a live mesh dashboard at http://localhost:9050/mgmt.
 It shows every skill advertising on the mesh, provider count, and the recent
 invocation audit trail, auto-refreshing every 4 s. The skills come from the
 key names under `cap/`; the audit panel reads `GET /gateway/audit`, which a
-build with `compliance` serves (without it the panel says so).
+build with `compliance` serves; a build without it reads the binary's own
+`GET /gateway/skillrunner/invocations` instead.
 
 ### Audit trail
 
@@ -171,8 +172,11 @@ curl -s 'http://localhost:9050/gateway/audit?limit=10'
 ```
 
 The raw KV routes do not read it (`403 protected_key`). A build without
-`compliance` writes an unsigned fallback record under `audit/`, which no
-route serves; read it in process (`agent.kv().scan_prefix("audit/")`).
+`compliance` writes an unsigned fallback record under `audit/`. In that build
+the skillrunner binary serves the count and the ten newest records at
+`GET /gateway/skillrunner/invocations`, behind the gateway's bearer and
+nothing finer (that build has no scope table); nothing else serves it over
+HTTP. In process, read it with `agent.kv().scan_prefix("audit/")`.
 
 ### Sample output
 
