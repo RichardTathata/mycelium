@@ -695,6 +695,8 @@ mod tests {
         // Unconfined, both ports open: the plant that shows the listeners answer.
         assert_eq!(super::run(&tcp(a), Duration::from_secs(5)), Ok(()));
         assert_eq!(super::run(&tcp(b), Duration::from_secs(5)), Ok(()));
+        // …and UDP goes out unconfined, so the refusal below is the profile's, not this bash's (#761's review).
+        assert_eq!(super::run(&udp(a), Duration::from_secs(5)), Ok(()));
 
         assert!(run(tcp(a), Vec::new()).is_err(), "no `connect`: no network");
         let declared = vec![format!("*:{a}")];
