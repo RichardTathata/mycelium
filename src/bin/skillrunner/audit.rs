@@ -70,8 +70,8 @@ impl AuditRecord {
 ///
 /// **Without `compliance`:** falls back to a plain JSON entry at
 /// `audit/{ts_unix_nanos}/{node_id}` — no signing/chaining is possible without
-/// the identity key, so the legacy time-sorted trail remains. The dashboard does not show these: it reads
-/// `GET /gateway/audit`, which a build without `compliance` does not serve, and the raw KV routes refuse `audit/`.
+/// the identity key, so the legacy time-sorted trail remains. The raw KV routes refuse `audit/`, so the
+/// dashboard reads these through this binary's own route ([`invocations_json`]).
 pub(crate) fn write_audit(agent: &Arc<GossipAgent>, rec: &AuditRecord) {
     #[cfg(feature = "compliance")]
     {
@@ -105,6 +105,53 @@ pub(crate) fn write_audit(agent: &Arc<GossipAgent>, rec: &AuditRecord) {
             Ok(json) => { let _ = agent.kv().set(key, Bytes::from(json)); }
             Err(e)   => tracing::warn!("audit: serialisation failed: {e}"),
         }
+    }
+}
+
+/// The dashboard's invocation panel in a build without `compliance`: how many fallback records this node holds
+/// under `audit/` and the ten newest, newest first (`GET /gateway/skillrunner/invocations`). `entries` is
+/// `agent.kv().scan_prefix("audit/")`; a key is `audit/{ts_unix_nanos}/{node}`, ordered by its timestamp as a
+/// number, and a value that is not a JSON object is counted and left out of `recent`. Unsigned records any
+/// admitted member can write: a display, not an audit.
+#[cfg(not(feature = "compliance"))]
+pub(crate) fn invocations_json(entries: Vec<(Arc<str>, Bytes)>) -> serde_json::Value {
+    let count = entries.len();
+    let mut dated: Vec<(u128, serde_json::Value)> = entries
+        .into_iter()
+        .filter_map(|(key, value)| {
+            let ts = key.strip_prefix("audit/")?.split('/').next()?.parse::<u128>().ok()?;
+            let record: serde_json::Value = serde_json::from_slice(&value).ok()?;
+            record.is_object().then_some((ts, record))
+        })
+        .collect();
+    dated.sort_by_key(|(ts, _)| std::cmp::Reverse(*ts));
+    let recent: Vec<serde_json::Value> = dated.into_iter().take(10).map(|(_, record)| record).collect();
+    serde_json::json!({ "count": count, "recent": recent })
+}
+
+#[cfg(all(test, not(feature = "compliance")))]
+mod tests {
+    use super::*;
+
+    /// The panel's route: the count is every record held, `recent` the ten newest by timestamp as a number
+    /// (a 9-digit timestamp sorts before a 10-digit one, which a string order gets wrong), junk left out.
+    #[test]
+    fn invocations_counts_every_record_and_shows_the_ten_newest() {
+        let record = |n: u128| {
+            let rec = AuditRecord { skill_ns: "ns".into(), skill_name: format!("skill-{n}"), caller: "c".into(), nonce: 1,
+                success: n.is_multiple_of(2), duration_ms: 5, tool_calls: vec![], ts_unix_nanos: n };
+            (Arc::<str>::from(format!("audit/{n}/10.0.0.5:9000")), Bytes::from(serde_json::to_vec(&rec).unwrap()))
+        };
+        let mut entries: Vec<_> = [999_999_999u128, 1_000_000_000, 1_000_000_001].into_iter().map(record).collect();
+        entries.extend((1..=9u128).map(record));
+        entries.push((Arc::from("audit/2000000000/n"), Bytes::from_static(b"not json")));
+        let out = invocations_json(entries);
+        assert_eq!(out["count"], 13, "every record held, the unreadable one included");
+        let names: Vec<&str> = out["recent"].as_array().unwrap().iter().map(|r| r["skill_name"].as_str().unwrap()).collect();
+        assert_eq!(names.len(), 10);
+        assert_eq!(&names[..3], ["skill-1000000001", "skill-1000000000", "skill-999999999"], "newest first, by number");
+        assert_eq!(out["recent"][0]["success"], false);
+        assert_eq!(invocations_json(Vec::new()), serde_json::json!({"count": 0, "recent": []}));
     }
 }
 

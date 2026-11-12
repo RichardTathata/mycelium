@@ -20,12 +20,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (`OWNED_KV_PREFIXES`):
   - `GET /gateway/kv?key=` and `GET /gateway/overlay/consistent/get?key=` answer **403** `protected_key` for an owned
     key, whatever the scopes, naming the route that reads the namespace;
-  - `GET /gateway/kv/keys` leaves out the key names under `grant/`, `mailbox/`, `audit/`, `sys/audit/`,
-    `sys/client-cert/`, `mandate/` and `rights/`, and a `prefix` inside one of them is 403 `protected_key`; every
+  - `GET /gateway/kv/keys` leaves out the key names under `grant/`, `mailbox/`, `audit/`, `sys/audit/`, `sys/audit-checkpoint/`,
+    `sys/client-cert/`, `mandate/`, `rights/` and `sched/`, and a `prefix` inside one of them is 403 `protected_key`; every
     other namespace's names stay listed (the Ops Console's panels and prefix readiness probes are unaffected);
   - three reads have routes of their own: `GET /gateway/schedules/last?id=` (`schedule:run`; `scheduleLast` /
     `schedule_last`) for a client's own schedule's last run, `topology_overrides` on `GET /gateway/govern`
-    (`govern:read`), and the `skillrunner` dashboard's invocation panel reads `GET /gateway/audit`;
+    (`govern:read`), and the `skillrunner` dashboard's invocation panel reads `GET /gateway/audit`, or without
+    `compliance` the binary's own `GET /gateway/skillrunner/invocations`. Both new reads report unsigned records
+    any admitted member can write or tombstone, as the schedule loop and the consensus gate read them;
   - the SDKs raise `ProtectedKeyError` from `get`, `consistent_get` / `consistentGet`, `scan_prefix` / `scanPrefix`
     and, for a prefix inside a hidden namespace, `keys` (`mycelium-py` 0.2.16, `mycelium-ts` 0.2.10).
 
@@ -34,7 +36,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (`…/gateway/kv/keys?prefix=grant/` likewise). Until every gateway is upgraded, treat `kv:read` as reading every
   replicated record and review who holds it. **Upgrade note:** a client or dashboard that read an owned namespace
   through `/gateway/kv` uses the namespace's own route (§99's table). **Not changed:** the log read routes still read
-  a stream under `cn/`, `wiki/` or `reason/` with `consensus:read`.
+  a stream under `cn/`, `wiki/` or `reason/` with `consensus:read`; public `/stats` still counts every live key
+  (`store_entries`), the hidden namespaces' included.
 
 ### Added
 

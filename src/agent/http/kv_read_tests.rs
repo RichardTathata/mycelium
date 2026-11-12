@@ -11,7 +11,14 @@ use std::{sync::Arc, time::Duration};
 fn alloc_port() -> u16 { crate::test_util::alloc_port() }
 
 /// The names the listing hides: exactly these rows, and each one's keys are owned.
-const HIDDEN: &[&str] = &["sys/audit/", "sys/client-cert/", "audit/", "mailbox/", "mandate/", "rights/", "grant/"];
+const HIDDEN: &[&str] = &["sys/audit/", "sys/audit-checkpoint/", "sys/client-cert/", "audit/", "mailbox/", "mandate/",
+                          "rights/", "grant/", "sched/"];
+
+/// The owned rows whose names the listing answers: exactly these. A row added to `OWNED_KV_PREFIXES` is in
+/// neither list until someone decides, and the test below fails on it — `listed` is a disclosure, not a default.
+const LISTED: &[&str] = &["sys/", "consensus/", "grp/", "cap/", "req/", "cap-group/", "gcap/", "tools/", "agent/", "svc/",
+                          "log/", "clog/", "lock/", "prompts/", "skills/", "installable/", "comp/", "wiki/", "tuple/",
+                          "facts/", "knowledge/", "cn/", "faults/"];
 
 async fn node(cfg_edit: impl FnOnce(&mut GossipConfig)) -> (Arc<GossipAgent>, String, reqwest::Client) {
     let gossip_port = alloc_port();
@@ -60,32 +67,24 @@ fn names(body: &serde_json::Value) -> Vec<String> {
     body["keys"].as_array().expect("a keys array").iter().map(|k| k.as_str().unwrap().to_string()).collect()
 }
 
-/// One table, two directions: the hidden rows are the ones decided, every hidden name is an owned key, and the
-/// read predicate is the write predicate — a key the write doors refuse is a key the read doors refuse.
+/// One table, both sets pinned: every row is on exactly one of the two lists above, so a new row fails here until
+/// it is classified; a hidden row's names are hidden and a prefix inside it is refused; a listed row's are neither.
 #[test]
 fn the_read_and_write_doors_classify_by_the_one_table() {
-    let hidden: Vec<&str> = super::OWNED_KV_PREFIXES.iter().filter(|p| p.names_hidden).map(|p| p.prefix).collect();
-    let mut want = HIDDEN.to_vec();
-    want.sort_unstable();
-    let mut got = hidden.clone();
-    got.sort_unstable();
-    assert_eq!(got, want, "the names-hidden rows");
+    let sorted = |mut v: Vec<&'static str>| { v.sort_unstable(); v };
+    let rows = |hidden: bool| sorted(super::OWNED_KV_PREFIXES.iter().filter(|p| p.names_hidden == hidden).map(|p| p.prefix).collect());
+    assert_eq!(rows(true), sorted(HIDDEN.to_vec()), "the names-hidden rows");
+    assert_eq!(rows(false), sorted(LISTED.to_vec()), "the names-listed rows: a new row is classified here, by decision");
+    assert_eq!(super::OWNED_KV_PREFIXES.len(), HIDDEN.len() + LISTED.len(), "no row twice");
     for p in super::OWNED_KV_PREFIXES {
         let key = format!("{}x", p.prefix);
-        assert!(!super::raw_kv_writable(&key), "{key} is owned");
-        assert_eq!(super::refuse_protected_key(&key).is_some(), super::refuse_protected_key_read(&key).is_some(), "{key}");
         assert!(super::refuse_protected_key_read(&key).is_some(), "{key} is refused on the read doors");
         assert_eq!(super::raw_kv_name_hidden(&key), HIDDEN.iter().any(|h| key.starts_with(h)), "{key}");
-        // A hidden sub-row is inside an owned row: hiding never reaches a key the doors would serve.
-        if p.names_hidden {
-            assert!(super::refuse_hidden_prefix(p.prefix).is_some(), "a listing inside {}", p.prefix);
-        } else {
-            assert!(super::refuse_hidden_prefix(p.prefix).is_none(), "{} stays listable", p.prefix);
-        }
+        assert_eq!(super::refuse_hidden_prefix(p.prefix).is_some(), p.names_hidden, "a listing inside {}", p.prefix);
     }
     for key in ["orders/42", "ckpt/t/ns/1", "ckptw/t/ns/1/task/0", "strands/s", "manifest/current", "schemas/s", "ui/viz",
-                "agent/n/provision/item/error", "grantee", "mailboxes/1"] {
-        assert!(super::refuse_protected_key(key).is_none() && super::refuse_protected_key_read(key).is_none(), "{key}");
+                "agent/n/provision/item/error", "grantee", "mailboxes/1", "schedule/1"] {
+        assert!(super::refuse_protected_key_read(key).is_none(), "{key}");
         assert!(!super::raw_kv_name_hidden(key), "{key} is listed");
     }
     // The listed namespaces the Ops Console and the CI probes read by name stay listed.
@@ -106,9 +105,28 @@ async fn kv_get_refuses_an_owned_key_and_reads_an_application_key() {
         assert_eq!(body["error"], "protected_key", "{key}");
         assert!(body.get("value_b64").is_none() && body.get("found").is_none(), "{key}: {body}");
     }
+    // The two directions agree at the doors themselves (two handlers, two refusal functions): every key the read
+    // door refuses the write door refuses, and every application key is written and read back.
+    for key in &owned {
+        let r = client.post(format!("{base}/gateway/kv")).json(&serde_json::json!({"key": key, "value_b64": ""})).send().await.unwrap();
+        assert_eq!(r.status(), 403, "POST {key}");
+        let r = client.delete(format!("{base}/gateway/kv?key={key}")).send().await.unwrap();
+        assert_eq!(r.status(), 403, "DELETE {key}");
+    }
+    for key in &application {
+        let r = client.post(format!("{base}/gateway/kv")).json(&serde_json::json!({"key": key, "value_b64": "cmV3cml0dGVu"})).send().await.unwrap();
+        assert_eq!(r.status(), 200, "POST {key}");
+        let (_, body) = get(&client, format!("{base}/gateway/kv?key={key}"), None).await;
+        assert_eq!(body["value_b64"], "cmV3cml0dGVu", "{key} read back");
+    }
+    // A schedule's refusal names the read route only for a key that route serves: a gateway client's (`~`).
+    let (_, body) = get(&client, format!("{base}/gateway/kv?key=sched/close~anonymous/last/n"), None).await;
+    assert!(body["message"].as_str().unwrap_or("").starts_with("a gateway client's own schedule's last run is read through GET /gateway/schedules/last"), "{body}");
+    let (_, body) = get(&client, format!("{base}/gateway/kv?key=sched/close/last/n"), None).await;
+    assert!(body["message"].as_str().unwrap_or("").starts_with("a schedule's records are read in process"), "{body}");
     // The refusal names the route that reads the namespace.
     for (key, route) in [("grant/a/r", "/gateway/grants/pending"), ("sys/audit/n/1", "/gateway/audit"),
-                         ("sys/topology-override/workers", "/gateway/govern"), ("sched/s/last/n", "/gateway/schedules/last"),
+                         ("sys/topology-override/workers", "/gateway/govern"), ("sched/s~anonymous/last/n", "/gateway/schedules/last"),
                          ("grp/workers/n", "/gateway/mesh/group"), ("mailbox/n/k/1", "/gateway/mailbox/{kind}")] {
         let (_, body) = get(&client, format!("{base}/gateway/kv?key={key}"), None).await;
         assert!(body["message"].as_str().unwrap_or("").contains(route), "{key}: {body}");
@@ -152,7 +170,10 @@ async fn kv_keys_hides_the_hidden_names_and_refuses_a_prefix_inside_them() {
     assert_eq!(status, 200);
     let sys = names(&body);
     assert!(sys.iter().any(|k| k == "sys/probe/1"), "{sys:?}");
-    assert!(!sys.iter().any(|k| k.starts_with("sys/audit/") || k.starts_with("sys/client-cert/")), "{sys:?}");
+    assert!(!sys.iter().any(|k| k.starts_with("sys/audit") || k.starts_with("sys/client-cert/")), "{sys:?}");
+    // `sys/audit` (no slash) spans the chain and its checkpoints: answered, and empty of both.
+    let (status, body) = get(&client, format!("{base}/gateway/kv/keys?prefix=sys/audit"), None).await;
+    assert_eq!((status, names(&body).len()), (200, 0), "{body}");
     // A prefix shorter than a hidden row's: the application keys it matches, none of the row's.
     let (status, body) = get(&client, format!("{base}/gateway/kv/keys?prefix=gra"), None).await;
     assert_eq!(status, 200);
@@ -288,5 +309,41 @@ async fn a_kv_read_token_reads_application_keys_only_at_every_door() {
         let (status, _) = get(&client, format!("{base}{path}"), Some("super")).await;
         assert_eq!(status, 200, "* on {path}");
     }
+    agent.shutdown().await;
+}
+
+/// Two real principals on `GET /gateway/schedules/last`: each named token reads the schedule it runs under its own
+/// principal, and neither reads the other's of the same id — the scoping is the gateway's, never the request's.
+#[cfg(feature = "compliance")]
+#[tokio::test]
+async fn schedules_last_keeps_two_principals_apart() {
+    let (agent, base, client) = node(|cfg| {
+        cfg.gateway_identity_issuer = Some("fleet.example".into());
+        cfg.gateway_named_tokens = vec![
+            crate::GatewayNamedToken { name: "alice".into(), token: "tok-a".into(), scopes: vec!["schedule:run".into()] },
+            crate::GatewayNamedToken { name: "bob".into(), token: "tok-b".into(), scopes: vec!["schedule:run".into(), "kv:read".into()] },
+        ];
+    }).await;
+    let scoped = |name: &str| crate::schedule::client_scoped_id("close", &format!("token:fleet.example/{name}"));
+    let _ = agent.kv().set(format!("sched/{}/last/10.0.0.5:9000", scoped("alice")), Bytes::from_static(b"11 1000 0"));
+    let _ = agent.kv().set(format!("sched/{}/last/10.0.0.5:9000", scoped("bob")), Bytes::from_static(b"22 1000 0"));
+    let url = format!("{base}/gateway/schedules/last?id=close");
+    for (bearer, slot) in [("tok-a", 11), ("tok-b", 22)] {
+        let (status, body) = get(&client, url.clone(), Some(bearer)).await;
+        assert_eq!(status, 200, "{bearer}: {body}");
+        assert_eq!(body["last"], serde_json::json!([{"node": "10.0.0.5:9000", "slot": slot, "period_ms": 1000, "phase_ms": 0}]), "{bearer}");
+    }
+    // Bob cannot name Alice's schedule: her scoped id is not an id (`~`), and a principal in the query is ignored.
+    let alice = scoped("alice");
+    let (status, _) = get(&client, format!("{base}/gateway/schedules/last?id={alice}"), Some("tok-b")).await;
+    assert_eq!(status, 400, "another principal's scoped id");
+    let (status, body) = get(&client, format!("{url}&principal=token:fleet.example/alice"), Some("tok-b")).await;
+    assert_eq!((status, &body["last"][0]["slot"]), (200, &serde_json::json!(22)), "{body}");
+    // And the raw routes give neither of them the other's entry, by name or by value.
+    let (status, body) = get(&client, format!("{base}/gateway/kv/keys?prefix=sched/"), Some("tok-b")).await;
+    assert_eq!((status, body["error"].as_str()), (403, Some("protected_key")), "{body}");
+    let (status, body) = get(&client, format!("{base}/gateway/kv/keys"), Some("tok-b")).await;
+    assert_eq!(status, 200);
+    assert!(!names(&body).iter().any(|k| k.starts_with("sched/")), "a principal in a key name: {body}");
     agent.shutdown().await;
 }

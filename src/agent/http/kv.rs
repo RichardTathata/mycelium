@@ -124,8 +124,8 @@ pub(super) struct KvKeysQuery { prefix: Option<String> }
 /// `GET /gateway/kv/keys?prefix=P` — list live KV keys, optionally filtered by prefix.
 ///
 /// Returns `{"keys": ["key1", "key2", …]}` — names, never values. The names of the namespaces
-/// `OWNED_KV_PREFIXES` marks `names_hidden` (grants, mailboxes, the audit chain, client certificates, mandates,
-/// rights) are **left out** of every listing, and a `prefix` inside one of them is `403 protected_key`, naming
+/// `OWNED_KV_PREFIXES` marks `names_hidden` (grants, mailboxes, the audit chain and its checkpoints, client certificates, mandates,
+/// rights, schedules) are **left out** of every listing, and a `prefix` inside one of them is `403 protected_key`, naming
 /// the route that reads it; the other owned namespaces' names stay listed (the Ops Console's namespace map and
 /// its `grp/` and `sys/identity` panels read them).
 pub(super) async fn gw_kv_keys(

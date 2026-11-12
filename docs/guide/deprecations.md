@@ -3129,7 +3129,7 @@ live door — `/mcp`, `/a2a`, the provider's enforcement and `[authority]` (§83
 
 Wire **v12** unchanged.
 
-## 99. The raw KV routes read application keys only; the listing leaves seven namespaces' names out (unreleased, the kv:read decision of 2026-11-12)
+## 99. The raw KV routes read application keys only; the listing leaves nine namespaces' names out (unreleased, the kv:read decision of 2026-11-12)
 
 §19 closed the raw KV **write** routes to every namespace the substrate or a companion owns. The **read** routes
 stayed open: a token holding only `kv:read` read a grant record without `grant:read`, the audit chain without
@@ -3144,23 +3144,35 @@ from 2.27.0 is affected. The read routes now follow the same table as the write 
     where it has one. An application key — `ckpt/`, `ckptw/`, `strands/`, `manifest/`, `schemas/`, `ui/`,
     `agent/{node}/provision/…`, and every key outside the table — is read as before.
   - **`GET /gateway/overlay/consistent/get?key=K`** answers the same 403 for an owned key.
-  - **`GET /gateway/kv/keys`** leaves out the key **names** of seven namespaces: `grant/`, `mailbox/`, `audit/`,
-    `sys/audit/`, `sys/client-cert/`, `mandate/` and `rights/`. An unprefixed listing, or a prefix that spans one of
+  - **`GET /gateway/kv/keys`** leaves out the key **names** of nine namespaces: `grant/`, `mailbox/`, `audit/`,
+    `sys/audit/`, `sys/audit-checkpoint/`, `sys/client-cert/`, `mandate/`, `rights/` and `sched/`. An unprefixed listing, or a prefix that spans one of
     them (`sys/`), omits them; a `prefix` inside one of them (`grant/`, `sys/audit/n1`) is **403** `protected_key`.
     Every other owned namespace's names are still listed — `grp/`, `sys/identity`, `sys/caller-context/`, `cap/`,
     `skills/`, `consensus/` and the rest — so the Ops Console's panels and a readiness probe on a prefix keep
-    working. Names only: the values of those keys are refused as above.
+    working. Names only: the values of those keys are refused as above. The nine are the namespaces whose key
+    names are themselves the record: a grant's agent and request, a mailbox's recipient, the audit chain's length
+    and its checkpoints' positions, a certificate's principal, a mandate's or a right's holder, and a gateway
+    client's principal in `sched/{id}~{principal}/…`. **A limit:** `/stats` is public and its `store_entries` is
+    the count of every live key, hidden ones included, so a watcher can still see that *some* record was added.
   - **Three reads moved to routes of their own.** A schedule's last run: `GET /gateway/schedules/last?id=ID`
     (`schedule:run`), which answers the caller's own schedule's entries. The topology overrides in force: the
     `topology_overrides` array on `GET /gateway/govern` (`govern:read`). The `skillrunner` dashboard's invocation
-    panel reads `GET /gateway/audit` (`audit:read`, a `compliance` build).
+    panel reads `GET /gateway/audit` (`audit:read`) in a `compliance` build, and without `compliance` the
+    binary's own `GET /gateway/skillrunner/invocations`, which reads its unsigned `audit/` trail in process.
+  - **What the two new reads are worth.** `sched/{id}/last/{node}` and `sys/topology-override/{group}` are unsigned
+    records any admitted member can write or tombstone
+    ([owner-signed records](../wiki/dev/owner-signed-records.md)), and both routes report them as the schedule loop
+    and the consensus gate read them: what the node will act on, not proof that a slot ran or that an operator set
+    an override through the audited route. `schedules/last` returns every parsable entry — it does not apply the
+    loop's rules, which count only entries under the declaration's period and phase and leave out any more than
+    64 slots ahead of the node's clock (`MAX_AHEAD_SLOTS`).
 - **Will the compiler tell me?** No — it is an HTTP status. The SDKs raise it typed, as they do for writes:
   `ProtectedKeyError` from `get`, `consistent_get` / `consistentGet`, `scan_prefix` / `scanPrefix`, and from `keys`
   for a prefix inside a hidden namespace (`mycelium-py` 0.2.16, where it is still the `httpx.HTTPStatusError` these
   verbs raised; `mycelium-ts` 0.2.10, where these verbs threw a plain `Error` naming the status). `scan_prefix` over
   a listed owned namespace (`cap/`) raises on the first value.
 - **Who is affected:** a client, script or dashboard that reads an owned namespace through `/gateway/kv` — a value,
-  or the names of one of the seven. A client that reads its own keys is not.
+  or the names of one of the nine. A client that reads its own keys is not.
 - **Migration.** Read through the route that owns the namespace:
 
   | Namespace | Read it through | Scope |
@@ -3174,11 +3186,12 @@ from 2.27.0 is affected. The read routes now follow the same table as the write 
   | `log/` | `GET /gateway/overlay/log/scan` | `consensus:read` |
   | `mailbox/` | `GET /gateway/mailbox/{kind}` (the recipient's stream) | `mesh:read` |
   | `consensus/` | `GET /consensus/{slot}` | `consensus:read` |
-  | `sched/` | `GET /gateway/schedules/last?id=ID` (your own schedule) | `schedule:run` |
+  | `sched/` | `GET /gateway/schedules/last?id=ID` — a gateway client's own schedule only; an application's `run_schedule` records (`sched/{id}/…`, no `~`) have no HTTP read | `schedule:run` |
 
   A namespace with no gateway read route — `sys/client-cert/`, `mandate/`, `rights/`, `knowledge/`, `tuple/` and the
   other companions' — is read in process, through the handle of the component that owns it. `audit/` is the
-  `skillrunner` binary's unsigned fallback trail in a build without `compliance`; nothing serves it over HTTP.
+  `skillrunner` binary's unsigned fallback trail in a build without `compliance`; that binary serves its count and
+  ten newest records at `GET /gateway/skillrunner/invocations`, and nothing else serves it over HTTP.
 - **Check after upgrading.** With a `kv:read` token, both of these answered 200 and now answer 403 `protected_key`:
 
   ```bash

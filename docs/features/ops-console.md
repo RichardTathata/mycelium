@@ -42,8 +42,8 @@ reads `ok` and that a page served from an origin the nodes do not list reads `bl
 ## What it guarantees, and what it does not
 
 - No guarantee or rule id of its own; what a tab shows is each node's own answer, under that route's scope.
-- **Not shown:** the KV tab's namespace map has no `grant/`, `mailbox/`, `audit/`, `sys/audit/`, `sys/client-cert/`,
-  `mandate/` or `rights/` — `/gateway/kv/keys` leaves those names out for every caller ([rbac](../operations/rbac.md)).
+- **Not shown:** the KV tab's namespace map has no `grant/`, `mailbox/`, `audit/`, `sys/audit/`, `sys/audit-checkpoint/`, `sys/client-cert/`,
+  `mandate/`, `rights/` or `sched/` — `/gateway/kv/keys` leaves those names out for every caller ([rbac](../operations/rbac.md)).
 - **Not built:** a server, a proxy or a server-side poller, by decision (D16, D28); history; a write of any kind; telling an
   unreachable node from one that does not list the page's origin — both read `blocked`.
 - **Evidence:** the [what-is-proven](../operations/what-is-proven.md) ledger has no row for the console on its own.

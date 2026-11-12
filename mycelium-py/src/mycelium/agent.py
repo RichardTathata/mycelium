@@ -1093,7 +1093,7 @@ class MyceliumAgent:
         """Return all live KV keys, optionally filtered by prefix — names, never values.
 
         The gateway leaves out the names of the namespaces it hides (grants, mailboxes, the audit
-        chain, client certificates, mandates, rights); a ``prefix`` inside one of them raises
+        chain and its checkpoints, client certificates, mandates, rights, schedules); a ``prefix`` inside one of them raises
         :class:`ProtectedKeyError` (its ``key`` is the prefix).
 
         Args:

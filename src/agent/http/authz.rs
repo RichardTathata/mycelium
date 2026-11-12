@@ -1769,7 +1769,8 @@ pub(super) fn dispatch_refused(e: GatewayDispatchError) -> Response {
 pub(crate) struct OwnedPrefix {
     pub(crate) prefix: &'static str,
     /// The names are themselves the record: who asked for a grant and which request, who was sent mail, how long
-    /// the audit chain is, which principals hold a client certificate, who holds which mandate or right.
+    /// the audit chain is and where its checkpoints stand, which principals hold a client certificate, who holds
+    /// which mandate or right, which gateway principal runs which schedule.
     pub(crate) names_hidden: bool,
 }
 
@@ -1783,20 +1784,24 @@ const fn hidden(prefix: &'static str) -> OwnedPrefix { OwnedPrefix { prefix, nam
 /// requirement, a forged mailbox sender, a planted `sys/caller-context/` marker, a deleted acceptor ballot (the
 /// reviews of #544; the kv:write decision of 2026-10-07) — and a read through `kv:read` would bypass it the same
 /// way: a grant record without `grant:read`, the audit chain without `audit:read` (the kv:read decision of
-/// 2026-11-12). A row's `names_hidden` says whether the listing leaves its key names out too; the two
+/// 2026-11-12). A row's `names_hidden` says whether the listing leaves its key names out too; the three
 /// sub-prefixes of `sys/` are rows only for that flag (`sys/` already owns them).
 /// `every_namespace_in_the_table_is_classified_for_the_raw_kv_routes` keeps this in step with the table.
 ///
-/// When `call/` lands (identity-and-lifecycle I4) it needs a row here, names hidden.
+/// **A new row is classified, not defaulted.** `listed` discloses every key name under the prefix to any
+/// `kv:read` token, so choose it only for names that carry no principal, request, recipient or chain position,
+/// and add the row to the matching list in `the_read_and_write_doors_classify_by_the_one_table`
+/// (`kv_read_tests.rs`), which pins both sets and fails on a row in neither. When `call/` lands
+/// (identity-and-lifecycle I4) it needs a row here, names hidden.
 pub(crate) const OWNED_KV_PREFIXES: &[OwnedPrefix] = &[
-    listed("sys/"), hidden("sys/audit/"), hidden("sys/client-cert/"),
+    listed("sys/"), hidden("sys/audit/"), hidden("sys/audit-checkpoint/"), hidden("sys/client-cert/"),
     listed("consensus/"), listed("grp/"), hidden("audit/"), listed("cap/"), listed("req/"), listed("cap-group/"),
     listed("gcap/"), hidden("mailbox/"), listed("tools/"), listed("agent/"), listed("svc/"), listed("log/"),
     listed("clog/"), listed("lock/"), listed("prompts/"), listed("skills/"), listed("installable/"), listed("comp/"),
     listed("wiki/"), listed("tuple/"), listed("facts/"), hidden("mandate/"), listed("knowledge/"), hidden("rights/"),
     listed("cn/"),
     hidden("grant/"),  // adopter-surface X3: grant requests and answers (POST /gateway/grants/{agent}/{request})
-    listed("sched/"),  // adopter-surface Y2: a schedule's last run, written by its holder after the work (src/schedule.rs)
+    hidden("sched/"),  // adopter-surface Y2: a schedule's last run, written by its holder after the work (src/schedule.rs); a client's carries its principal in the name
     listed("faults/"), // adopter-surface X6: `mycelium test --faults`'s own writes on the fleet it builds; no route writes it
 ];
 
@@ -1889,7 +1894,13 @@ fn protected_read_refusal(key: &str) -> axum::response::Response {
     } else if key.starts_with("consensus/") {
         "a slot's decision is read through GET /consensus/{slot} (consensus:read)"
     } else if key.starts_with("sched/") {
-        "a schedule's last run is read through GET /gateway/schedules/last?id=ID (schedule:run)"
+        // A gateway client's schedule is `sched/{id}~{principal}/…`; an application's holds no `~` and has no route.
+        if key.split('/').nth(1).is_some_and(|id| id.contains(crate::schedule::CLIENT_SCOPE_SEPARATOR)) {
+            "a gateway client's own schedule's last run is read through GET /gateway/schedules/last?id=ID (schedule:run)"
+        } else {
+            "a schedule's records are read in process by the application that runs it; a gateway client reads its own \
+             schedule's last run through GET /gateway/schedules/last?id=ID (schedule:run), which serves no other schedule"
+        }
     } else {
         "this namespace is read through the substrate or the companion that owns it, not through the KV routes \
          (src/lib.rs § KV namespace ownership); the KV routes read application keys"

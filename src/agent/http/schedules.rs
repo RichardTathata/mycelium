@@ -283,6 +283,13 @@ pub(super) struct ScheduleLastQuery {
 /// [{"node", "slot", "period_ms", "phase_ms"}]}` — one entry per node that has held it, unparsable entries left
 /// out; `last` is empty before the first acknowledged run. An id that cannot name a schedule is `400`. Scope
 /// `schedule:run`.
+///
+/// **What the answer is worth.** `sched/…/last/{node}` is an unsigned record any admitted member can write or
+/// tombstone, reported here as stored (`docs/wiki/dev/owner-signed-records.md`): the route decides nothing, and
+/// it is not proof that a slot ran. It reports **more** than the loop believes: the loop counts only entries under
+/// its declaration's period and phase and leaves out any more than `MAX_AHEAD_SLOTS` past this node's slot
+/// (`fleet_last`); this route knows no declaration, so it returns every parsable entry with its `period_ms` and
+/// `phase_ms` and applies neither rule.
 pub(super) async fn gw_schedule_last(
     State(ctx): State<Arc<HttpCtx>>,
     caller: Option<Extension<ResolvedPrincipal>>,

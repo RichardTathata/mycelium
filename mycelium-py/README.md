@@ -349,7 +349,10 @@ a destination that deduplicates. Values are written as TOML basic strings (`toml
 
 `schedule_last(id)` (0.2.16) answers your own schedule's last run as the connected node has it — a list of
 `{"node", "slot", "period_ms", "phase_ms"}`, one per node that has held it, empty before the first acknowledged
-run. It is the read: `get("sched/…")` raises `ProtectedKeyError`.
+run. It is the read: `get("sched/…")` raises `ProtectedKeyError`. The entry is an unsigned record any
+admitted member can write or tombstone, reported as the node stores it: use it to observe, not as proof that a slot
+ran. It carries every parsable entry, including ones the schedule loop ignores (another period or phase, or more than
+64 slots ahead).
 
 #### `scatter_gather(targets, method, payload, *, min_ok, timeout_secs) → list[dict]`
 
@@ -389,7 +392,7 @@ A key in a namespace the substrate or a companion owns — `sys/`, `grp/`, `cap/
 `ProtectedKeyError`, whose message names the route that writes it ([Errors](#errors)).
 
 **Reads are application keys only as well (0.2.16; the gateway's kv:read decision,
-[deprecations §99](https://github.com/RichardTathata/mycelium/blob/main/docs/guide/deprecations.md)).** `get`, `consistent_get` and `scan_prefix` raise it too, and `keys` for a prefix inside a namespace whose names the gateway hides (`grant/`, `mailbox/`, `audit/`, `sys/audit/`, `sys/client-cert/`, `mandate/`, `rights/`); `keys` otherwise lists names without those. The message names the route that reads the namespace — `GET /gateway/audit` for the audit trail,
+[deprecations §99](https://github.com/RichardTathata/mycelium/blob/main/docs/guide/deprecations.md)).** `get`, `consistent_get` and `scan_prefix` raise it too, and `keys` for a prefix inside a namespace whose names the gateway hides (`grant/`, `mailbox/`, `audit/`, `sys/audit/`, `sys/audit-checkpoint/`, `sys/client-cert/`, `mandate/`, `rights/`, `sched/`); `keys` otherwise lists names without those. The message names the route that reads the namespace — `GET /gateway/audit` for the audit trail,
 `GET /gateway/grants/pending` for grants. Before 0.2.16 these verbs returned an owned key's value.
 
 #### `set_with_min_acks(key, value, min_acks, *, timeout_secs=5.0) → int`

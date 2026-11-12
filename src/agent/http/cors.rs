@@ -37,8 +37,8 @@ use axum::{
 /// one — no write, no SSE stream, no call. `/gateway/kv` is listed only for a `GET` of one key under
 /// [`UI_KEY_PREFIX`] (the `ui/viz` link a showcase advertises; [`admits_path`]) — never another key's
 /// value — and `/gateway/kv/keys` answers key names, not values, and not the names of the namespaces
-/// `OWNED_KV_PREFIXES` marks `names_hidden` (grants, mailboxes, the audit chain, client certificates, mandates,
-/// rights), which the route leaves out for every caller. `/gateway/audit` and
+/// `OWNED_KV_PREFIXES` marks `names_hidden` (grants, mailboxes, the audit chain and its checkpoints, client certificates, mandates,
+/// rights, schedules), which the route leaves out for every caller. `/gateway/audit` and
 /// `/gateway/tuple/overview` answer only where mounted (`compliance`; the tuple-space companion). What each
 /// one discloses to a reader holding its scope is `docs/operations/rbac.md` § Cross-origin reads.
 pub(crate) const CORS_READ_PATHS: &[&str] = &[

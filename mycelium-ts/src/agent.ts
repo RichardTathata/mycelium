@@ -704,7 +704,7 @@ export class MyceliumAgent {
 
   /**
    * Lists live keys with an optional prefix filter — names, never values. The gateway leaves out the names of
-   * the namespaces it hides (grants, mailboxes, the audit chain, client certificates, mandates, rights), and a
+   * the namespaces it hides (grants, mailboxes, the audit chain and its checkpoints, client certificates, mandates, rights, schedules), and a
    * `prefix` inside one of them throws {@link ProtectedKeyError} (`key` is the prefix).
    */
   async keys(prefix = ""): Promise<string[]> {

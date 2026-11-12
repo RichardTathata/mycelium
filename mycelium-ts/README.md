@@ -271,7 +271,10 @@ deduplicates. Values are written as TOML basic strings (`tomlBasicString`).
 
 `scheduleLast(id)` (0.2.10) resolves to your own schedule's last run as the connected node has it —
 `ScheduleLast[]` (`node`, `slot`, `periodMs`, `phaseMs`), one per node that has held it, empty before the first
-acknowledged run. It is the read: `get("sched/…")` throws `ProtectedKeyError`.
+acknowledged run. It is the read: `get("sched/…")` throws `ProtectedKeyError`. The entry is an unsigned record any
+admitted member can write or tombstone, reported as the node stores it: use it to observe, not as proof that a slot
+ran. It carries every parsable entry, including ones the schedule loop ignores (another period or phase, or more than
+64 slots ahead).
 
 #### `scatterGather(targets, method, payload?, options?) → Promise<Array<{sender, result}>>`
 
@@ -312,7 +315,7 @@ A key in a namespace the substrate or a companion owns — `sys/`, `grp/`, `cap/
 `ProtectedKeyError`, whose message names the route that writes it ([Errors](#errors)).
 
 **Reads are application keys only as well (0.2.10; the gateway's kv:read decision,
-[deprecations §99](https://github.com/RichardTathata/mycelium/blob/main/docs/guide/deprecations.md)).** `get`, `consistentGet` and `scanPrefix` throw it too, and `keys` for a prefix inside a namespace whose names the gateway hides (`grant/`, `mailbox/`, `audit/`, `sys/audit/`, `sys/client-cert/`, `mandate/`, `rights/`); `keys` otherwise lists names without those. The message names the route that reads the namespace — `GET /gateway/audit` for the audit trail,
+[deprecations §99](https://github.com/RichardTathata/mycelium/blob/main/docs/guide/deprecations.md)).** `get`, `consistentGet` and `scanPrefix` throw it too, and `keys` for a prefix inside a namespace whose names the gateway hides (`grant/`, `mailbox/`, `audit/`, `sys/audit/`, `sys/audit-checkpoint/`, `sys/client-cert/`, `mandate/`, `rights/`, `sched/`); `keys` otherwise lists names without those. The message names the route that reads the namespace — `GET /gateway/audit` for the audit trail,
 `GET /gateway/grants/pending` for grants. Before 0.2.10 these verbs returned an owned key's value.
 
 #### `setWithMinAcks(key, value, minAcks, options?) → Promise<number>`

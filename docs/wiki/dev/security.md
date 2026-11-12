@@ -306,13 +306,16 @@ the writes and left the reads: `GET /gateway/kv?key=` read any key under `kv:rea
 chain, a mailbox entry — and `GET /gateway/overlay/consistent/get` did under `consensus:read`, through its raw-key
 fallback. Both refuse an owned key **403** `protected_key` now (`refuse_protected_key_read`, the same predicate as
 the write side, `raw_kv_writable`), naming the route that reads the namespace. `GET /gateway/kv/keys` answers names:
-each row of `OWNED_KV_PREFIXES` carries `names_hidden`, set for `grant/`, `mailbox/`, `audit/`, `sys/audit/`,
-`sys/client-cert/`, `mandate/` and `rights/`; a listing leaves those names out and a prefix inside one is 403, while
+each row of `OWNED_KV_PREFIXES` carries `names_hidden`, set for `grant/`, `mailbox/`, `audit/`, `sys/audit/`, `sys/audit-checkpoint/`,
+`sys/client-cert/`, `mandate/`, `rights/` and `sched/`; a listing leaves those names out and a prefix inside one is 403, while
 the rest stay listed because the Ops Console (`grp/`, `sys/identity`, the namespace map), CI's readiness probes
 (`sys/caller-context/`) and operator procedures read them. The lesson is the verification policy's rule 1 applied
 late: #549 enumerated every door that *writes* a KV key and none that reads one. Three dependants moved to routes of
 their own (`GET /gateway/schedules/last`, `topology_overrides` on `GET /gateway/govern`, skillrunner's panel on
-`GET /gateway/audit`). **Open:** the log read routes (`overlay/log/scan`, `subscribe`, `group/subscribe`) still read
+`GET /gateway/audit`, or its own `/gateway/skillrunner/invocations` without `compliance`). The test pins the
+listed rows as well as the hidden ones, so a new row fails until it is classified. **Limits:** public `/stats`
+counts every live key (`store_entries`); the two new reads report unsigned records
+([owner-signed-records](owner-signed-records.md)). **Open:** the log read routes (`overlay/log/scan`, `subscribe`, `group/subscribe`) still read
 a stream under `cn/`, `wiki/` or `reason/`, whose writes `OWNED_LOG_STREAMS` refuses; and `call/` needs a row, names
 hidden, when identity-and-lifecycle I4 lands. Tests: `src/agent/http/kv_read_tests.rs`, one per door.
 [`.log/2026-11-12-kv-read-guard.md`](.log/2026-11-12-kv-read-guard.md).
