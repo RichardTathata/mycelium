@@ -189,7 +189,7 @@ the comparison proposed that already ships is tabled in its §1; a task lifecycl
 dashboard are deferred in §6 with the question each must answer first.
 
 [`identity-and-lifecycle.md`](identity-and-lifecycle.md) — **identity and lifecycle, waves 1b and 2** (wave 1a delivered; see *Shipped*) (proposed 2026-10-31; **agreed
-with the maintainer 2026-11-07**, rev 0.14; **wave 1a released in v2.40.0** — I0 (#733), I1 (#741–#745), I3 (#750, #754, #756), I5 (#757, #759, #760), each closed on evidence in §8 — and wave 1b's three spikes written (S-cancel #731, S-succeed #732, S-presence #729, #747); **Next:** wave 1b's rows I4, I2, I7, then wave 2; reviewed five times — rev 0.1 against the decisions, rev 0.3 against the mechanisms, rev 0.4 and
+with the maintainer 2026-11-07**, rev 0.15 (row I7 written from S-presence, **P1–P6 open**); **wave 1a released in v2.40.0** — I0 (#733), I1 (#741–#745), I3 (#750, #754, #756), I5 (#757, #759, #760), each closed on evidence in §8 — and wave 1b's three spikes written (S-cancel #731, S-succeed #732, S-presence #729, #747); **Next:** wave 1b's rows I4, I2, I7, then wave 2; reviewed five times — rev 0.1 against the decisions, rev 0.3 against the mechanisms, rev 0.4 and
 rev 0.5 each against five premises, every premise failure in wave 1 or the developer identity; the fifth, on the merged
 document in #715's thread, corrected thirteen stated facts in place). From a comparative reading of Orca and Eve against
 `main` at `9cbd3b82`. Eight decisions D1–D8: every acting principal keyed by a certificate the fleet CA issues off-node,
