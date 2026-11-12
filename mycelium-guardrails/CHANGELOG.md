@@ -8,6 +8,10 @@ All notable changes to this crate. It versions **independently** of the Mycelium
 
 ## [Unreleased]
 
+## [1.1.1] — 2026-11-12
+
+On mycelium v2.40.0. A fix and a dependency floor; no API change.
+
 - **A call made as soon as `guarded_rpc_serve` returns is served.** The loop registered its receiver inside the task it
   spawned, so a request delivered before that task first ran found no receiver and was dropped, and the caller timed
   out. The receiver is now registered before the spawn. Seen failing first:

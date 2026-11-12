@@ -22,7 +22,25 @@ As of 2026-06-21 all v1.x/v2.0 engineering plans were shipped. Since then, **Leg
 The three-verb operator spine — **localize** (`/fleet`) · **explain** (`/explain`) · **diagnose**
 (`/diagnose`) — is shipped, tested, and documented for both audiences.
 
-## The external review's R5–R9 — 2026-11-06 → 07 (#718–#722, unreleased)
+## v2.40.0 release — 2026-11-12 (tag `v2.40.0`) — identity and lifecycle wave 1a, and the external review's last rows
+
+A **MINOR** cut on `release-v2.40.0` (the maintainer approved the cut on 2026-11-11), for tagging after an independent
+review. It carries wave 1a of `docs/plans/identity-and-lifecycle.md`, each row closed on evidence in its §8: **I0**
+`[authority]`, a node's evaluator, execution authority, provider enforcement and evidence journal from its declaration
+(#733); **I1** client certificates for services, a client's own `cs`/`cn` signature, grants held by a client principal
+and the SDKs signing as a service (#741–#745); **I3** the RFC 8785 arguments digest in every language and signed grant
+decisions under `grant:relay` (#750, #754, #756); **I5** the provider's verifier of an OIDC user's exchanged token and
+the gateway's RFC 8693 exchange, gated against Keycloak in CI (#757, #759, #760). Also R5–R9 of the external code
+security review (#718–#722, below), feature pages F3 and F4 (#724–#726, #730, #736, #737, #739), RUSTSEC-2026-0459
+(#748) and -0486 (#758), the published stem built with `compliance` and the node's `gateway_a2a` and `gateway_a2a_default_skill` (#749, #751; the
+stem refuses `gateway_a2a`), stale advertisements
+skipped by every reader (#734), the provider's check-then-act refusal (#735), the wasm-host fixes (#738, #740), the
+receivers registered before their loops are spawned (#727), the wave 1b spikes (#729, #731, #732, #747) and the Rust
+ecosystem watch (#755). Companions on their own tags: `mycelium-py` 0.2.15 and `mycelium-ts` 0.2.9, `mycelium-reason`
+0.11.1 and `mycelium-guardrails` 1.1.1; `langgraph-checkpoint-mycelium` 0.3.4 and `strands-session-mycelium` 0.1.0 stay.
+Wire **v12** unchanged; upgrade notes `deprecations.md` §78–§98. Log: `.log/2026-11-12-release-v2.40.0.md`.
+
+## The external review's R5–R9 — 2026-11-06 → 07 (#718–#722, released in 2.40.0)
 
 The rest of the external code security review of 2026-10-31 (`docs/plans/external-review-2026-10-31.md`, rev 0.8),
 each row closed on evidence in the plan's §5. **R5** (#719): the gateway closes a connection that does not speak within

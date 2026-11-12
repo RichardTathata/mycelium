@@ -9,7 +9,78 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.40.0] — 2026-11-12
+
+Wire **v12** unchanged (`PREV = 11`; the rolling-upgrade gate, 3 + 2, passes). A MINOR: **identity and lifecycle wave
+1a** (`docs/plans/identity-and-lifecycle.md`) — I0 `[authority]`, a node's evaluator, execution authority, provider
+enforcement and evidence journal from its declaration; I1 client certificates for services, a client's own signature
+on a call and grants held by a client principal; I3 signed grant decisions relayed under `grant:relay` and the RFC 8785
+arguments digest in every language; I5 OIDC token exchange at the gateway, verified at the provider — beside **R5–R9 of
+the external code security review of 2026-10-31** (`docs/plans/external-review-2026-10-31.md`: gateway connection
+bounds, journal directory syncs, bulk under gateway TLS, an honest replica-sync answer, the audit that fails on an
+unaccepted warning), the **feature pages** F3 and F4 (`docs/plans/feature-pages.md`: every registry feature has a page,
+audited), the advisories **RUSTSEC-2026-0459** (SQLite, in `mycelium-effects`) and **-0486** (`rustix`), many fixes,
+and the **Rust ecosystem watch** register. Companions on their own tags: `mycelium-py` 0.2.15 and `mycelium-ts` 0.2.9
+(`McpClient`, `ClientSigner`, the grant request and decision verbs, signed decisions, the RFC 8785 digest),
+`mycelium-reason` 0.11.1 (Tokio's minimum), `mycelium-guardrails` 1.1.1 (`guarded_rpc_serve` registers before it
+returns; Tokio's minimum); `langgraph-checkpoint-mycelium` 0.3.4 and `strands-session-mycelium` 0.1.0 stay on their
+tags: no package code changed since.
+
+### Upgrade notes
+
+Each is a section of `docs/guide/deprecations.md`; read the ones that touch your deployment before upgrading.
+
+- **§78** — the gateway closes a connection that does not speak within `handshake_timeout_ms` and serves at most
+  `gateway_max_connections` (default 1024) at once; `GossipConfig` gained the field.
+- **§79** — a journal or a companion WAL whose directory cannot be synced refuses to open.
+- **§80** — a bulk call works under `gateway_tls`; an operator certificate needs a `bulk_ca_pem_path` that verifies it;
+  `max_bulk_payload_bytes` (64 MiB) bounds a payload. `GossipConfig` gained `max_bulk_payload_bytes` and
+  `GatewayTlsConfig` gained `bulk_ca_pem_path`.
+- **§81** — a replica-sync answer is `Failed` while an inbound record is between its apply and its append; `WalHandle`
+  gained `begin_inbound` and `inbound_in_flight`.
+- **§82** — every crate requires Tokio 1.53.3 or later; `rustls-pemfile` is no longer a dependency.
+- **§83** — `[authority]` attaches this node's authority from its declaration; `GossipConfig` gained `authority`.
+- **§84** — a provider refuses a call whose mandate was revoked between its preflight and its registration
+  (*authority not established*, `mandate_lapsed_before_run`).
+- **§85** — a stem runs only the artifact kinds `[hosts].kinds` declares; `Provisioner` gained `restrict_kinds`.
+- **§86** — a `mycelium-client://` certificate is refused at the mesh; `sys/client-cert/` and
+  `POST /gateway/identity/client-cert` are new. Upgrade every node before issuing a client certificate.
+- **§87** — a client's own signature on a call (`cs`/`cn` in `params._meta`); an unsigned call from a certificate
+  holder is counted, not yet refused.
+- **§88** — grants held by a client principal (`grant/{hex(principal)}/…` keys); `ExecutionAuthority::new`,
+  `with_cohort_budget` and `with_membership_authorities` take a shared issuer set.
+- **§89** — the SDKs sign as a service and present its own grants.
+- **§90** — `mycelium-effects` depends on `rusqlite` 0.41, which is in its public API.
+- **§91** — the gateway checks a client's signature before it spends a grant; a provider's refusal at `/a2a` is a
+  refusal, not a `completed` task.
+- **§92** — the published stem is built with `compliance`; `gateway_a2a` serves A2A from configuration; `GossipConfig`
+  gained `gateway_a2a`.
+- **§93** — a mandate's arguments digest is RFC 8785, with a one-release window for the older digest. Upgrade verifiers
+  before binders.
+- **§94** — `gateway_a2a_default_skill` names the skill a message without one reaches; `GossipConfig` gained the field.
+- **§95** — grant decisions may be signed and relayed under `grant:relay`; an unsigned decision is counted.
+- **§96** — a provider can verify an OIDC user's exchanged token, and one that does refuses an `oidc:` action without it;
+  `OidcConfig` gained `exchange_audience`, `exchange_client_id` and `exchange_max_lifetime_secs`, and implements `Default`.
+- **§97** — a gateway with `exchange_token_endpoint` exchanges an OIDC user's token for every action it dispatches;
+  `OidcConfig` gained `exchange_token_endpoint` and `exchange_client_secret_env`.
+- **§98** — the reference evaluator decides the `requires_values` rules it used to leave `Indeterminate` at every live
+  door: an allowance with values now permits when they match, and a prohibition naming a value no longer refuses a
+  request whose value differs. Check every rule with `requires_values` before upgrading.
+
+Also, without a section of its own: a stem trace or span dashboard keyed on `mycelium.rule_revision` sees the wasm-host rules'
+real revisions (2 or 3) where it saw 1 (Fixed, below); `RUST_LOG` now replaces the node's and the stem's default
+filter rather than doing nothing.
+
 ### Security
+
+**Operator check.** Four entries below. (1) `grep -A1 '^name = "rustix"$' Cargo.lock` shows `1.1.6` and
+`grep -A1 '^name = "libsqlite3-sys"$' Cargo.lock` shows `0.39.1`; `cargo audit -f Cargo.lock` reports neither
+RUSTSEC-2026-0486 nor -0459. Neither is reachable from a shipped binary: `rustix`'s xattr functions are called nowhere,
+and only an adopter's `mycelium-effects` `SqliteDestination` opens SQLite (exposed only where a less trusted local party
+can write its database file and directory). (2) A gateway that held a silent connection open forever now closes it: open
+a TCP connection to `http_port`, send nothing, and it is closed after `handshake_timeout_ms`;
+`gateway_connections_timed_out` on `/stats` counts it. (3) CI's audit now fails on an unaccepted unmaintained, unsound
+or yanked advisory, and Tokio's floor is 1.53.3 (RUSTSEC-2026-0386, not reachable: nothing calls `AsyncFd`).
 
 - **`rustix` 1.1.4 / 1.1.5 → 1.1.6** (RUSTSEC-2026-0486, an unsoundness advisory, dated 2026-10-27): `rustix::fs`'s
   extended-attribute functions (`getxattr`, `listxattr` and their `l`/`f` forms) marked unwritten bytes initialized
@@ -104,7 +175,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **A provider verifies an OIDC user's exchanged token** (`docs/plans/identity-and-lifecycle.md` I5, PR 1 of 2, D6).
   A provider whose `[oidc]` table sets `exchange_audience` verifies the token a gateway carries in the caller envelope
-  (`ot`), against its own issuer and keys. The gateway's exchange is PR 2.
+  (`ot`), against its own issuer and keys. The gateway's exchange is PR 2, the entry above, also in this release.
   - The checks, each refused by name:
     - the gateway's signature over the token (`so`);
     - its header (`alg`, an access token's `typ`, a `kid`);
@@ -242,8 +313,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   overwritten or tombstoned, and after a restart; the publishing gateway republishes its records, so a node that
   joins later reads the newer one. A certificate whose serial carries no readable issuance (as `openssl` writes) is
   refused by name. **Upgrade every node before issuing a client certificate:** an older node admits one at the mesh. `GossipAgent::client_key_standing` answers *current*, *superseded*
-  or *unknown*. Not in this change: the `cs`/`cn` call signature, the SDK `tools/call` clients and grants held by a
-  client principal (the feature page lists them). Upgrade note: `deprecations.md` §86.
+  or *unknown*. The `cs`/`cn` call signature, the SDK `tools/call` clients and grants held by a client principal came
+  in I1's later PRs, all in this release (the entries above). Upgrade note: `deprecations.md` §86.
 
 - **`[authority]`: a node's evaluator, execution authority, provider enforcement and evidence journal from its
   declaration** (`docs/plans/identity-and-lifecycle.md` I0). A node built from a configuration file — the `mycelium`
@@ -361,7 +432,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `…_is_absent_is_indeterminate`, `…_is_present_and_different_does_not_apply`). At a live door the values are the
   caller's own top-level `arguments`, so a rule is only as strong as the argument it names: one on a value the effect
   itself uses (a ledger) holds, while a prohibition on a flag the caller asserts (`over_ceiling`) holds nothing unless
-  the caller cannot set it.
+  the caller cannot set it. Upgrade note: `deprecations.md` §98.
 
 - **A stem runs only the artifact kinds its `[hosts].kinds` declares** (an independent review of #736, defect A).
   `Provisioner::new` registers the WASM-component runtime unconditionally and `Stem::start` read `kinds` only to add
@@ -424,15 +495,16 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `a_ticket_sent_as_soon_as_bulk_serve_returns_is_served`, `the_llm_invoke_receiver_exists_when_a_prompt_skill_is_registered`,
   `the_llm_invoke_receiver_exists_before_the_skill_is_advertised`, `the_explain_receiver_exists_when_start_returns`.
   No API change.
-- **The `kv.expiry` rule describes code that exists** (rule revision 2; `docs/plans/feature-pages.md` F3). Revision 1
+- **The `kv.expiry` rule describes code that exists** (rule revision 2 in #730, and revision 4 in this release after
+  the stale-advertisement fix above; `docs/plans/feature-pages.md` F3). Revision 1
   cited `store::Store::flush_expired` and the tests `flush_expired`, `is_expired` and `default_ttl_secs`, none of which
   is the KV expiry it described: the store holds no per-entry TTL, and `set` takes none. The rule now cites what does
   the work — the reader-side `CapEntry::is_fresh` / `ReqEntry::is_fresh` (an advertisement older than three refresh
   intervals, or that far in the future, is skipped, never deleted) and `store::sweep_stale_tombstones` — with
   `cap_entry_freshness`, `future_stamped_entry_is_quarantined_not_fresh` and `tombstone_gc_sweep_unpacks_hlc_timestamps`.
-  The id is kept, because recorded traces and fault reports name it. Three `cap/` readers do not apply `is_fresh` yet
-  (the A2A provider resolution and card, the membership governor's eligibility); the rule says so, and a separate PR
-  fixes them. Guide 01 no longer says every key has a time-to-live or that `set` takes one; the mailbox module doc
+  The id is kept, because recorded traces and fault reports name it. Three `cap/` readers did not apply `is_fresh` then
+  (the A2A provider resolution and card, the membership governor's eligibility); the rule said so, and #734, also in
+  this release, fixes them (the stale-advertisement entry above). Guide 01 no longer says every key has a time-to-live or that `set` takes one; the mailbox module doc
   no longer reads the gossip hop count (`default_ttl`) as a five-minute lifetime, since an undelivered event has no
   expiry; and the same claim is gone from the concepts glossary, the cookbook, the Python SDK's README, guide 5,
   guide 9's audit-retention note (SkillRunner's records have no lifetime of their own) and the guide index.
@@ -542,11 +614,20 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   audited against the code, its example's assertions, its plan rows and what merged since #655 — 50 Clear, 23 Thin,
   3 Missing, recorded in `docs/analysis/doc-coverage.md` § Feature pages, and all of them fixed here. Three pages for
   features that had none: service calls (RPC, scatter-gather and bulk), the Eve loader and the Ops Console. Seven pages
-  now say their scopes are checked only under `compliance` — on the published `mycelium-stem`, which lacks it, a
-  served skill is called by any valid bearer. Four *See it work* sections now name what checks the feature, where the
+  now say their scopes are checked only under `compliance` — on a stem built without it, a served skill is called by
+  any valid bearer (the published `mycelium-stem` lacked it until #749, in this release, built it with `compliance`). Four *See it work* sections now name what checks the feature, where the
   example relied on it or asserted nothing; rows Y4's and Y7's limits carried; ledger rows linked from the pages they
   prove. The cookbook's service-layer snippets called methods `GossipAgent` does not have (`agent.rpc_call` and
   four more); they go through `agent.service()`.
+- **Verification-policy rule 5: a feature's page changes with the feature** (#724, `docs/plans/feature-pages.md` F4's
+  first half). A PR that adds or changes a feature adds or updates its page under `docs/features/` and its entry in
+  `docs/features/registry.toml`, and the independent reviewer checks both (`/adversarial-review` check 7);
+  `/doc-coverage` gains Step 4b, the feature-pages pass, run once in #739.
+- **The Rust ecosystem watch** (`docs/plans/rust-ecosystem-watch.md`, #755): a monthly register, not a build plan, of
+  seven upstream threads that could let Mycelium inherit work it does by hand — build provenance, the official Rust MCP
+  SDK (`rmcp`), telemetry beyond the record spans, WASI 0.3, hybrid post-quantum TLS key exchange, async traits, and
+  compile and link times — each row with where Mycelium is (`file:line`, `Cargo.lock` versions), its upstream sources
+  and what would move it, and a review log. Nothing in it is a commitment.
 
 ## [2.39.0] — 2026-11-06
 

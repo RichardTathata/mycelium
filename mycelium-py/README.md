@@ -225,7 +225,7 @@ mandate = signer.prove_possession(grant, "skill.invoke", "skill:depot/dispatch",
 client.send("depot/dispatch", message, mandate=mandate)
 ```
 
-### A service's own key: signed calls and its own grants (identity-and-lifecycle I1)
+### A service's own key: signed calls and its own grants (identity-and-lifecycle I1; 0.2.15)
 
 A service with a client certificate (`mycelium tls issue --client <name> --issuer <issuer>`, published at
 `POST /gateway/identity/client-cert`) signs every call with its key: give the clients its `ClientSigner`
