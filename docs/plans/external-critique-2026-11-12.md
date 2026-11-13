@@ -808,7 +808,7 @@ hosted capability's kind on the raw routes). The Exit, promise by promise, again
   - every kind constant is classified *refused* or *open by decision* —
     `every_kind_constant_is_classified_for_the_gateways_doors`, seen failing with a planted fifth
     `consensus_kind` constant and with `invoke.bulk` off the list.
-- **Not built, stated:** rows CR26–CR28. The default for a kind outside every list is **open**; what the
+- **Not built, stated:** rows CR26–CR29. The default for a kind outside every list is **open**; what the
   classification test does not see is in its doc and on `docs/wiki/dev/security.md`.
 
 **What:** the raw signal routes took a kind from the caller and refused only the RPC reply kinds (on the
@@ -853,7 +853,7 @@ first; a supervisor's does; a veto for another approval of the same tool does no
 
 **Size:** S–M.
 
-#### CR27 · The other library kinds on the signal streams, and a mandate on a tap *(found by the signal-routes survey of 2026-11-13)*
+#### CR27 · The other library kinds on the signal streams, a mandate on a tap, and `MeshHandle::request`'s reply *(found by the signal-routes survey of 2026-11-13 and the reviews of #780)*
 
 **State (2026-11-13):** *after wave 1b*; each line needs its decision (refuse, scope, or state and keep).
 Stated as they stand on `rbac.md` and in `deprecations.md` §103.
@@ -876,6 +876,13 @@ decision* in the classification table of `substrate_kind_tests.rs`):
 - *(closed in CR25, 2026-11-13: `invoke.bulk`, whose ticket a tap turned into the staged payload; and
   `cap.invoke/{namespace}/{name}` by a raw route, which went around `/mcp`'s scope and preflight. Both were this
   row's lines; the review of #780 traced the first and the maintainer decided both.)*
+- **`MeshHandle::request`'s reply** (the confirm round of #780's review; by reading, not run) — `request`
+  (`mycelium-core/src/mesh_handle.rs`) waits on a result kind its caller names and claims the first signal of
+  that kind carrying its nonce; it checks no sender, and `signal_kind`'s doc recommends it with `invoke.result`.
+  A gateway client holding `mesh:read` and `mesh:write` taps the request kind, reads the nonce and emits the
+  result kind, from any gateway in scope: CR25's forged-reply closure covers `rpc.result` and `bulk.result`
+  only. No library code calls `request`. Either `request` checks the sender where the scope names one node, or
+  the result kinds it is documented with are refused on send, or it is stated and kept;
 - **the serve stream on a hosted capability's kind** — `GET /gateway/rpc/serve/cap.invoke/…` is refused only
   where a component serves the kind on that node (`served_in_process`); elsewhere a `mesh:serve` client can
   register for it and receive what members send it there. Not changed by CR25.
@@ -909,6 +916,27 @@ freshness bound inside the signature, and a replay is refused, seen accepted fir
 which is why, without `[tls]`, any member's commit is written.
 
 **Size:** M.
+
+#### CR29 · A gateway door for a hosted capability outside the `tool` namespace *(found by CR25, 2026-11-13)*
+
+**State (2026-11-13):** ***not buildable* until its door is designed**; *after wave 1b*. The maintainer confirmed
+on 2026-11-13 that CR25's refusal of `cap.invoke/…` stays for every namespace.
+
+**What:** a hosted WASM capability is served on `cap.invoke/{namespace}/{name}`. Only one in the `tool` namespace
+is bridged as an MCP tool (`bridge_tool`, `mycelium-wasm-host/src/runtime.rs`), so only that one has an HTTP
+door — `/mcp`, with `mcp:invoke` and the preflight. Since CR25 the gateway's raw routes refuse the whole family
+(`rpc/call` reached any hosted capability, a shadow install included, under `mesh:write` with no decision at a
+door), so a capability in another namespace — `route/optimize` — is called by a member only: an SDK agent cannot
+call it at all. Nothing in the repository did. The door needs deciding before it is built: its scope, whether
+the evaluator's preflight and a mandate apply as at `/mcp`, whether a shadow install is ever reachable, and what
+an exchanged token is asked for (`needs_exchanged_token` already counts the family as an action).
+
+**Exit:** a route that invokes a hosted capability in any namespace under a scope of its own and the same
+preflight a tool gets, refused without it, seen admitted first; the raw routes still refuse the kind.
+
+**Does not:** reopen `rpc/call` to the family, in whole or by namespace.
+
+**Size:** M, once designed.
 
 ### Tier 3 · Structure
 

@@ -22,7 +22,7 @@ signal routes; the maintainer decided the fix the same day, with no debugging ex
   by decision. The default for a kind outside every list is open, and the page says what the test cannot see.
 - **Pages touched:** [security.md](../security.md) (new section, *A kind the caller names*). Outside the wiki:
   `deprecations.md` §103, `rbac.md`, guides 09 and 10, the feature pages `signal-mesh.md` and `service-calls.md`,
-  `what-is-proven.md`, the critique plan (CR25 closed on evidence; CR26–CR28 opened), and the sentences #778
+  `what-is-proven.md`, the critique plan (CR25 closed on evidence; CR26–CR29 opened), and the sentences #778
   left saying the signal routes were open (§102, `rbac.md`, `http-gateway.md`, `security.md`, the CHANGELOG).
 - **Durable lesson:** the handler table is one table. A door that lets a caller name a kind is a door onto every
   receiver registered there, so it needs a refusal list that defaults closed for the substrate's prefixes — the

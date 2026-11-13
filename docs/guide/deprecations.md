@@ -3504,8 +3504,10 @@ followed, each reproduced by a test that failed before this change
    bytes of `payload_b64`), and an emit's sender is the gateway's node — so a token with `mesh:read` and
    `mesh:write` on the provider's own gateway emitted `rpc.result` to the caller, and the caller's `rpc_call`
    returned the client's bytes. `[tls]` does not change this: the reply is the node's own emission. (This closes
-   the forgery for a gateway client. A *member* writes its own `sender` and is not stopped by it — see *Not
-   changed*, and `docs/wiki/dev/owner-signed-records.md`.)
+   the forgery for a gateway client **against `rpc_call`, `scatter` and `bulk_call`**, whose replies are
+   `rpc.result` and `bulk.result`. It does not close it against `MeshHandle::request`, whose reply kind the
+   application chooses, nor for a *member*, which writes its own `sender` — both under *Not changed*, and
+   `docs/wiki/dev/owner-signed-records.md`.)
 4. **A `mesh:read` token read a bulk request's payload.** `bulk_call` stages its payload on the caller's gateway
    and sends an `invoke.bulk` ticket — `nonce ‖ port ‖ kind`. `GET /bulk/{nonce}` is public by design: the nonce
    is its credential. A tap on `invoke.bulk` on the responder's gateway showed the ticket and the caller's
@@ -3574,7 +3576,8 @@ where `GET /gateway/explain` asks `fleet:read`.
     node could — and what it delivered stays under `mailbox/` until it expires;
   - a host that listed a `consensus.*` or `sys.*` kind in a component's `emit_kinds`: the emit is dropped, logged
     and counted (`mycelium_wasm_host_emits_refused_total{reason="protected_kind"}`).
-- **Check after upgrading.** Each answered 200 and now answers 403 `protected_kind`:
+- **Check after upgrading.** Each answered as its comment says — 200, or 504 for the last — and now answers 403
+  `protected_kind`:
 
   ```bash
   curl -s -m 2 -o /dev/null -w '%{http_code}\n' -H 'Authorization: Bearer MESH_READ_TOKEN' \
@@ -3601,7 +3604,7 @@ where `GET /gateway/explain` asks `fleet:read`.
   holds them, and prefer `[tls]`. If a `mesh:write` token may have been misused on a mesh
   without `[tls]`, a decision record nobody proposed is the trace: `commit_conflicts` on `/stats` counts a newer
   decision of another identity arriving over a live one, and a slot's records are under `consensus/life/`.
-- **Not changed, each stated as it stands** (critique plan rows CR26–CR28; each kind below is a row marked *open
+- **Not changed, each stated as it stands** (critique plan rows CR26–CR29; each kind below is a row marked *open
   by decision* in the classification table of `src/agent/http/substrate_kind_tests.rs`):
   - **Supervisor signals are unsigned.** `agent.approve` and `agent.veto` are ordinary signals: any `mesh:write`
     holder can emit `agent.veto` naming a tool and veto a pending approval, and any `mesh:read` holder sees the
@@ -3614,7 +3617,20 @@ where `GET /gateway/explain` asks `fleet:read`.
     `comp/{namespace}/…` kinds.
   - **The serve stream on a hosted capability's kind** is refused only where a component serves it on that node.
   - **A member can still answer another member's call.** The reply claim is a nonce and a sender, and a member
-    writes its own sender; item 3 above is closed for a gateway client only.
+    writes its own sender; item 3 above is closed for a gateway client only, and only for the reply kinds the
+    library owns (`rpc.result`, `bulk.result`).
+  - **A reply to `MeshHandle::request` can still be forged by a gateway client.** `request(kind, scope, payload,
+    result_kind, timeout)` waits on a result kind the application names — `signal_kind`'s doc suggests
+    `invoke.result` — and claims the first signal of that kind whose first eight bytes are its nonce: it checks
+    **no sender** (`mycelium-core/src/mesh_handle.rs`). A client holding `mesh:read` and `mesh:write` taps the
+    request kind, reads the nonce, and emits the result kind; the application's `request` returns the client's
+    bytes — from any gateway in scope, not only the provider's. No library code calls `request`. Use `rpc_call`
+    where the reply decides anything, or list both of your kinds in `protected_rpc_kinds`, which closes the tap
+    and the emit to them (critique plan row CR27).
+  - **A hosted capability outside the `tool` namespace has no gateway route** — *not built* (critique plan row
+    CR29; `what-is-proven.md`). The maintainer confirmed on 2026-11-13 that the refusal stays for every namespace:
+    a namespace carve-out would leave a `mesh:write` route to run installed code — a shadow install included —
+    with no decision at a door.
   - **A tap on an ordinary RPC kind shows the whole request frame**, the caller envelope and a carried mandate
     with its possession proof included, as §19 said of a protected kind before the streams refused it. An RPC
     kind whose calls carry authority belongs in `protected_rpc_kinds`.

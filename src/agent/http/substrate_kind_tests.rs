@@ -159,9 +159,11 @@ async fn doors_not_refusing(kind: &str, doors: Vec<(Door, String, reqwest::Reque
 /// were: 110 of the 110 doors did not refuse — the two signal streams and the mailbox stream answered 200 for all
 /// eleven kinds; the serve stream 200 for eight and `served_in_process` for `consensus.propose`, `consensus.commit`
 /// and `sys.replica-sync.v1`; `signal/emit`, `mailbox/deliver` and `overlay/emit_reliable` 200; `rpc/call` and
-/// `scatter` 200 or a 504; `shard/emit` 404 (no provider), having passed its kind check. With `invoke.bulk` off
-/// the list (the plant for [`a_tapped_bulk_ticket_fetches_no_payload`]) its doors are listed the same way. Run
-/// under the token that holds `*` and under a scoped one (`compliance`): the refusal is the same.
+/// `scatter` 200 or a 504; `shard/emit` 404 (no provider), having passed its kind check. The kinds listed by
+/// name ([`BY_NAME`]) are in the loop on their own account, not only as members of the list: with `invoke.bulk`
+/// planted off `SUBSTRATE_KINDS` the loop still asks for it and fails (the confirm round of #780's review found
+/// it passing — a kind taken off the list dropped out of the loop, leaving its serve and mailbox doors pinned by
+/// nothing). Run under the token that holds `*` and under a scoped one (`compliance`): the refusal is the same.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn every_door_refuses_a_substrate_kind() {
     let (agent, base, client) = node(|_| {}).await;
@@ -170,14 +172,18 @@ async fn every_door_refuses_a_substrate_kind() {
     let target = agent.node_id().to_string();
     let mut open = Vec::new();
     for token in tokens() {
-        for kind in SUBSTRATE_KINDS.iter().chain(UNLISTED) {
-            assert!(is_substrate_kind(kind), "{kind}");
+        // `BY_NAME` is chained in so a kind refused by name stays asked for if it is ever taken off the list.
+        let kinds: std::collections::BTreeSet<&str> = SUBSTRATE_KINDS.iter().chain(UNLISTED).chain(BY_NAME).copied().collect();
+        for kind in kinds {
             let doors = every_door(&client, &base, &target, kind, token);
             assert_eq!(doors.len(), 10);
             open.extend(doors_not_refusing(kind, doors).await);
         }
     }
     assert!(open.is_empty(), "{} doors did not refuse a substrate kind:\n{}", open.len(), open.join("\n"));
+    for kind in SUBSTRATE_KINDS.iter().chain(UNLISTED).chain(BY_NAME) {
+        assert!(is_substrate_kind(kind), "{kind}");
+    }
     agent.shutdown().await;
 }
 
@@ -524,7 +530,8 @@ async fn a_hosted_capability_is_not_called_around_mcp() {
     );
     assert_eq!(status, 403);
     assert_eq!(body["error"], "protected_kind", "{body}");
-    assert!(body["message"].as_str().unwrap_or("").contains("/mcp"), "the refusal names the door: {body}");
+    let message = body["message"].as_str().unwrap_or("");
+    assert!(message.contains("/mcp") && message.contains("no gateway route"), "the refusal names the door, and that only a `tool` capability has it: {body}");
     // A member is not a client: the node's own call reaches the component.
     let own = agent.service().rpc_call(agent.node_id().clone(), cap, Bytes::from_static(b"member"), Duration::from_secs(3)).await;
     assert_eq!(own.as_deref().ok(), Some(&b"component ran: member"[..]), "a member's in-process call is served");
@@ -647,7 +654,8 @@ const CLASSIFIED: &[(&str, Class)] = &[
     ("mcp.invoke", Class::Refused), ("llm.invoke", Class::Refused),
     // Conventions the library names and neither registers for nor emits: an application's to use.
     ("invoke", Class::Open("a naming convention for applications; no library code registers or emits it")),
-    ("invoke.result", Class::Open("a naming convention for applications; no library code registers or emits it")),
+    ("invoke.result", Class::Open("a naming convention for applications; no library code registers or emits it. `MeshHandle::request` \
+        is documented with it and claims a reply on the nonce alone, so a gateway client can forge one (CR27)")),
     ("contract.available", Class::Open("a naming convention for applications; no library code registers or emits it")),
     ("contract.withdrawn", Class::Open("a naming convention for applications; no library code registers or emits it")),
     ("cluster.event", Class::Open("a naming convention for applications; no library code registers or emits it")),
@@ -674,7 +682,9 @@ const CLASSIFIED: &[(&str, Class)] = &[
 /// own functions and an *open* row is not, and says why it is open; every constant under a substrate prefix, and
 /// every refused substrate kind, is in [`SUBSTRATE_KINDS`], which names nothing no constant holds.
 ///
-/// What it does **not** gate, because no constant holds them: a kind written as a literal at its call site
+/// What it does **not** gate: a constant whose **name** lacks `KIND` and whose value is outside the two prefixes
+/// (outside `signal_kind` and `consensus_kind`, a constant is recognised as a kind by its name alone); and,
+/// because no constant holds them, a kind written as a literal at its call site
 /// (`"skill.invoke"`, refused by `BUILTIN_PROTECTED_RPC_KINDS`), and the families built with `format!` —
 /// `blackboard.{ns}.{op}`, `tuple.{ns}.{op}`, `wiki.{group}.{op}` (gated by family scope, `companion_kind_scope`),
 /// `cap.invoke/{ns}/{name}` (refused by prefix) and a component's `comp/{ns}/…` (its own). **The default for a

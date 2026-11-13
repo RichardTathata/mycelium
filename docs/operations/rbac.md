@@ -164,7 +164,7 @@ consensus health through `/stats` and `GET /gateway/explain`. **An application's
 or `consensus.`.**
 
 **What `mesh:read` and `mesh:write` still reach, stated as it stands** (not changed by §103; critique plan rows
-CR26–CR28):
+CR26–CR29):
 - **Supervisor signals are unsigned.** `agent.approve` and `agent.veto` are ordinary signals, so any `mesh:write`
   holder can emit `agent.veto` for a tool and veto a pending approval, and any `mesh:read` holder sees which
   approvals are asked. It **fails closed**: a veto refuses, and nothing can be approved by a signal (silence
@@ -178,7 +178,15 @@ CR26–CR28):
   the artifact or blob for an id the caller knows), and a component's `comp/{namespace}/…`. Each is a row marked
   *open by decision* in the test that classifies every kind constant; **a kind outside every list is open**.
 - **A member can still answer another member's call**: the reply claim is a nonce and a sender, and a member
-  writes its own. The forged reply is closed for a gateway client only.
+  writes its own. The forged reply is closed for a gateway client only, and only for `rpc_call`, `scatter` and
+  `bulk_call`, whose reply kinds (`rpc.result`, `bulk.result`) the gateway refuses to send.
+- **A reply to `MeshHandle::request` can be forged by a gateway client.** `request` waits on a result kind the
+  application chooses (`invoke.result` by convention) and claims a reply on its nonce alone — no sender check. A
+  holder of `mesh:read` and `mesh:write` taps the request kind, reads the nonce and emits the result kind, from
+  any gateway in scope. No library code calls `request`; an application that does, and acts on the reply, should
+  use `rpc_call`, or list both kinds in `protected_rpc_kinds` (critique plan row CR27).
+- **A hosted capability outside the `tool` namespace has no gateway route** (*not built*, critique plan row
+  CR29): only `cap.invoke/tool/{name}` is bridged to `/mcp`.
 - **A signed consensus frame is not bound to its sender or a time.** No gateway route replays one now; a member
   can still re-send another member's.
 

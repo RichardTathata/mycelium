@@ -62,7 +62,9 @@ This feature is turned on in code, through `agent.service()`.
     (`a_tapped_nonce_forges_no_rpc_reply`). A served request is answered through `rpc/respond`, bound to the
     stream that delivered it. **Not built:** a tap on an ordinary RPC kind still shows each request's nonce, caller
     envelope and mandate; list a kind whose calls carry authority in `protected_rpc_kinds`. A member, which
-    writes its own sender, can still answer another member's call;
+    writes its own sender, can still answer another member's call; and a reply to `MeshHandle::request` — a result
+    kind the application names, claimed on the nonce with no sender check — can still be forged by a gateway
+    client that taps the request and emits the result ([rbac](../operations/rbac.md));
   - **a bulk call has no gateway door**: `invoke.bulk`, its ticket, is refused on every door that takes a kind.
     The ticket's nonce is the credential for the payload staged at the public `GET /bulk/{nonce}`, so a
     `mesh:read` tap on the responder's gateway read each bulk request's payload

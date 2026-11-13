@@ -660,8 +660,9 @@ pub(super) fn refuse_protected_kind(cfg: &crate::config::GossipConfig, kind: &st
     if kind.starts_with(crate::agent::HOSTED_CAPABILITY_KIND_PREFIX) {
         warn!(kind, "gateway: a hosted capability's kind refused on a raw route or a stream");
         return Some(protected_kind_refusal(kind, format!(
-            "`{kind}` invokes a hosted capability: it is not sent on raw mesh routes nor observed on a stream; \
-             call the component as a tool through /mcp (tools/call)"
+            "`{kind}` invokes a hosted capability: it is not sent on raw mesh routes nor observed on a stream. \
+             A capability in the `tool` namespace is called as a tool through /mcp (tools/call); one in another \
+             namespace has no gateway route and is called by a member"
         )));
     }
     if !is_protected_kind(cfg, kind) {

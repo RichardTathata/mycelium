@@ -464,16 +464,21 @@ member sends and receives every kind.
 `consensus.` or `sys.` — **name a new node-to-node kind under `sys.`** — or if it is a string constant, which
 `every_kind_constant_is_classified_for_the_gateways_doors` then makes someone classify: it reads `signal_kind`,
 `consensus_kind` and every `…KIND…` constant in the library crates and companions, and each must have a row,
-*refused* (checked against the doors' own functions) or *open by decision* (with its reason). It does not see a
-kind written as a literal at its call site or built with `format!`: `skill.invoke` (in the protected list), the
+*refused* (checked against the doors' own functions) or *open by decision* (with its reason). It does not see a constant whose name lacks `KIND` and whose value is outside the two prefixes (outside those two
+modules a constant is recognised by its name alone), nor a kind written as a literal at its call site or built
+with `format!`: `skill.invoke` (in the protected list), the
 companion families (`blackboard.` / `tuple.` / `wiki.`, gated by family scope), `cap.invoke/` (refused by
 prefix) and a component's `comp/…`.
 
-**Open, stated** (`rbac.md`, `deprecations.md` §103, critique plan CR26–CR28): unsigned supervisor signals
+**Open, stated** (`rbac.md`, `deprecations.md` §103, critique plan CR26–CR29): unsigned supervisor signals
 (`agent.veto` by any `mesh:write` holder, fails closed); `boundary.*`, `agent.state`, `artifact.*`,
 `reason.blob.fetch` observable and sendable; a tap on an ordinary RPC kind shows the caller envelope and mandate;
 the mailbox stream refuses these kinds where a member filled the mailbox; a member can still answer another
-member's call (a gateway client cannot); no freshness or sender bind on a signed consensus frame.
+member's `rpc_call` (a gateway client cannot — `rpc.result` and `bulk.result` are refused on send);
+**`MeshHandle::request` claims its reply on the nonce alone, on a result kind the application names, so a gateway
+client with `mesh:read` and `mesh:write` can still forge that reply** (no library code calls `request`; CR27); a
+hosted capability outside the `tool` namespace has no gateway route (*not built*, CR29); no freshness or sender
+bind on a signed consensus frame.
 
 ## The owner-signed rule (2026-11-12)
 

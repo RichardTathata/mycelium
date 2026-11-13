@@ -67,7 +67,9 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   any `mesh:write` holder can veto (it fails closed); the other kinds the library speaks (`boundary.*`,
   `agent.state`, `artifact.*`, `reason.blob.fetch`) stay observable and sendable; a tap on an ordinary RPC kind
   shows the request's caller envelope and mandate; a member — not a gateway client — can still answer another
-  member's call; a signed consensus frame is not bound to its sender or a time (critique plan rows CR26–CR28).
+  member's `rpc_call`; **a reply to `MeshHandle::request`, whose result kind the application chooses and which
+  checks no sender, can still be forged by a gateway client holding `mesh:read` and `mesh:write`**; a hosted
+  capability outside the `tool` namespace has no gateway route (*not built*, CR29); a signed consensus frame is not bound to its sender or a time (critique plan rows CR26–CR29).
 
 - **The consensus routes refuse component-owned slots, to read and to propose** (the slot decision of
   2026-11-12; `deprecations.md` §102). Two routes take a slot name from the caller and neither asked whose slot it
