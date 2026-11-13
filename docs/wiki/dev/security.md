@@ -371,13 +371,12 @@ owner-signed rule:** these are doors for an HTTP client; the slots' records stay
 `consensus/life/…`, the legacy `consensus/committed/` reading and the acceptor's memory (*Consensus, electorates
 and exclusivity*), `sys/capauthz/…`, and `cn/{requirement}/award` — and a member still proposes on any slot.
 **Left open, stated:** the slot *names* are still listed by `GET /gateway/kv/keys?prefix=consensus/` (critique plan
-row CR24); and **the signal SSE doors do not refuse the consensus kinds** — a `mesh:read` tap on
-`/signals/consensus.propose` or `consensus.commit` received a proposed award's slot and value from a peer
-(probed 2026-11-12; `refuse_unobservable_kind` names only the RPC reply kinds and the protected RPC kinds, and the
-acceptor registers on the same handler table). **And the emit side (the review of #778; read, not run):** a `mesh:write` token can emit a raw `consensus.commit` frame through `POST /gateway/signal/emit`: without `[tls]` the frame is unsigned and a learner records the decision it carries, for any slot; with `[tls]` a client cannot produce the signed wrapper, but can replay one it tapped (`src/agent/http/signals.rs:57`–`130`, `src/consensus.rs:1718`–`1738`, `:5402`–`5500`). So a scope on the slot
-routes does not bound the consensus traffic a `mesh:read` or `mesh:write` token reaches through the signal
-routes. Both are closed by the signal-routes PR (decided 2026-11-13, in progress, branch `substrate-kinds`;
-critique plan row CR25). Tests:
+row CR24). **The signal routes reached the same values by another door, and are closed** (2026-11-13, critique
+plan row CR25; the section *A kind the caller names*, below): a `mesh:read` tap on `/signals/consensus.propose`
+or `consensus.commit` received a proposed award's slot and value from a peer, and a `mesh:write` emit of a raw
+`consensus.commit` frame was written as a decision by a learner without `[tls]` — both run as failing tests
+before the refusal (`src/agent/http/substrate_kind_tests.rs`). So the scopes on the slot routes now bound what a
+gateway client reaches of a slot's value; a member is not bound by them. Tests:
 `src/agent/http/slot_guard_tests.rs` and `mycelium-commitment/tests/award_slot_route.rs`.
 [`.log/2026-11-12-slot-guard.md`](.log/2026-11-12-slot-guard.md).
 
@@ -427,6 +426,59 @@ is stated bluntly:
 collusion and cooperation are the same behaviour, acts off the substrate are invisible, and there is no central halt
 by design. Motivated by the 2026 OpenAI–Hugging Face agent incident.
 Log: [`.log/2026-09-23-threat-model-boundary-h.md`](.log/2026-09-23-threat-model-boundary-h.md).
+
+## A kind the caller names: the substrate's own are refused at the gateway (2026-11-13)
+
+The handler table (`mycelium-core/src/signal.rs`, exact match on the kind's bytes) is one table: the consensus
+acceptor and learner, the `sys.` responders, a hosted component's serve loop and a pending RPC reply all register
+on it, and so does a gateway tap (`register_tap`), a client serve stream (`register_client`) and anything a raw
+route emits. Ten doors take the kind from an HTTP caller. They refused protected work (C1) and the reply kinds on
+the streams, and nothing else, so (each reproduced fail-first, `src/agent/http/substrate_kind_tests.rs`):
+
+- **read:** a `mesh:read` tap on `consensus.propose` / `consensus.commit` received each proposal's and commit's
+  slot and value — the data #774, #777 and the slot guard closed on the KV, log and slot routes;
+- **write:** on a mesh without `[tls]`, `signal/emit` under `mesh:write` delivered a made-up `CommitTerm`, which
+  every learner wrote as the slot's decision (`decode_verify` is a bare decode without `[tls]`; a commit carries no
+  quorum certificate — CFT, not BFT). With `[tls]` only a replay of a tapped signed frame was possible:
+  `sign_payload` covers the message, not its sender, scope or a time;
+- **forged reply:** `PendingReply` claims on the nonce and `sig.sender == target` (`src/agent/rpc.rs`); a tap on
+  the request's kind shows the nonce and an emit's sender is the gateway's node, so a client of the provider's
+  gateway answered for it.
+
+Two more, found by the review of #780 and the survey, each also reproduced fail-first:
+
+- **bulk payload:** `invoke.bulk`'s ticket is `nonce ‖ port ‖ kind` and `GET /bulk/{nonce}` is public, the nonce
+  its credential (`src/agent/bulk.rs`); a `mesh:read` tap on the responder's gateway read the ticket and fetched
+  the caller's staged payload;
+- **around `/mcp`:** `rpc/call` with `method: "cap.invoke/…"` reached a hosted component's serve loop under
+  `mesh:write`, with no `mcp:invoke` and no preflight — the shape `mcp.invoke` had before closure plan C1.
+
+**The rule now:** `SUBSTRATE_KINDS` (the consensus kinds, the two `sys.` kinds, and `invoke.bulk` by name) +
+`SUBSTRATE_KIND_PREFIXES` (`src/agent/mod.rs`, ungated; `is_substrate_kind`) are refused `403 protected_kind` on
+observe, serve, mailbox and send, for every token; the reply kinds on send; `cap.invoke/…` on observe, mailbox
+and send (its door is `/mcp`, for the `tool` namespace); and `confine_kind` refuses a substrate kind and a reply
+kind a host listed (rule `host.emit_admission` rev 2). Layer II is untouched (detection, not prevention): a
+member sends and receives every kind.
+
+**The default for a kind outside every list is open.** A new internal kind is refused only if it is named under
+`consensus.` or `sys.` — **name a new node-to-node kind under `sys.`** — or if it is a string constant, which
+`every_kind_constant_is_classified_for_the_gateways_doors` then makes someone classify: it reads `signal_kind`,
+`consensus_kind` and every `…KIND…` constant in the library crates and companions, and each must have a row,
+*refused* (checked against the doors' own functions) or *open by decision* (with its reason). It does not see a constant whose name lacks `KIND` and whose value is outside the two prefixes (outside those two
+modules a constant is recognised by its name alone), nor a kind written as a literal at its call site or built
+with `format!`: `skill.invoke` (in the protected list), the
+companion families (`blackboard.` / `tuple.` / `wiki.`, gated by family scope), `cap.invoke/` (refused by
+prefix) and a component's `comp/…`.
+
+**Open, stated** (`rbac.md`, `deprecations.md` §103, critique plan CR26–CR29): unsigned supervisor signals
+(`agent.veto` by any `mesh:write` holder, fails closed); `boundary.*`, `agent.state`, `artifact.*`,
+`reason.blob.fetch` observable and sendable; a tap on an ordinary RPC kind shows the caller envelope and mandate;
+the mailbox stream refuses these kinds where a member filled the mailbox; a member can still answer another
+member's `rpc_call` (a gateway client cannot — `rpc.result` and `bulk.result` are refused on send);
+**`MeshHandle::request` claims its reply on the nonce alone, on a result kind the application names, so a gateway
+client with `mesh:read` and `mesh:write` can still forge that reply** (no library code calls `request`; CR27); a
+hosted capability outside the `tool` namespace has no gateway route (*not built*, CR29); no freshness or sender
+bind on a signed consensus frame.
 
 ## The owner-signed rule (2026-11-12)
 

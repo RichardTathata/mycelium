@@ -125,8 +125,8 @@ pub(super) struct CrossGroupProposeBody {
 ///
 /// The one **consensus** route whose caller names the slot, so the one that could propose in a family another
 /// door owns: an application slot only. (Not the only door that reaches a slot: the raw signal routes carry a
-/// caller-chosen kind, the consensus kinds among them — `signals.rs`; that is the signal routes' to close, and
-/// not this guard's.) A slot in a family of `SLOT_FAMILIES` — a commitment's award, a consumer group's
+/// caller-chosen kind — `signals.rs` — and refuse the consensus kinds themselves, `refuse_internal_kind`; that
+/// is not this guard's.) A slot in a family of `SLOT_FAMILIES` — a commitment's award, a consumer group's
 /// claim, an electorate, a fleet counter's seat, a capability's authorisation policy, and the exclusive verbs'
 /// `lock/`, `leader/` and `consistent/` — is **403** `protected_slot` whatever the token's scopes, before anything
 /// is proposed or written (`refuse_owned_slot_proposal`).

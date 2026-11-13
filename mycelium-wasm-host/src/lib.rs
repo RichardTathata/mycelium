@@ -19,7 +19,9 @@
 //!   `comp/{node}/{namespace}/…` and nowhere else (`confine_key`); **`mesh.emit`** sends only a
 //!   kind under `comp/{namespace}/…` or one the host listed for the component, and never a
 //!   protected RPC kind — `mcp.invoke`, `skill.invoke`, `llm.invoke`, the node's
-//!   `protected_rpc_kinds` — whose doors check authority (`confine_kind`); a refused emit is
+//!   `protected_rpc_kinds` — whose doors check authority, nor one of the substrate's own kinds
+//!   (`consensus.*`, `sys.*`, `invoke.bulk`) or an RPC reply kind (`rpc.result`, `bulk.result`),
+//!   listed or not (`confine_kind`); a refused emit is
 //!   dropped, logged and counted (`mycelium_wasm_host_emits_refused_total`). Not confined: `log`,
 //!   and the *payload* of an admitted emit. Bounded beside them: an instance's **linear memory**
 //!   (`DEFAULT_MEMORY_LIMIT_BYTES`, 256 MiB, per instance via `HostState::with_memory_limit`) and,

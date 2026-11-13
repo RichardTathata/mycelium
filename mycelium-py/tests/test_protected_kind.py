@@ -175,3 +175,60 @@ def test_on_signal_raises_a_refused_stream_as_an_http_error_not_an_sse_error(age
     with pytest.raises(ProtectedKindError) as e:
         asyncio.run(first("mcp.invoke"))
     assert e.value.kind == "mcp.invoke"
+
+
+def _refuse_substrate(kind: str) -> None:
+    _Stub.status = 403
+    _Stub.reply = {"ok": False, "error": "protected_kind", "kind": kind,
+                   "message": f"`{kind}` is the substrate's own signal kind and is not observed, served or sent through the gateway"}
+
+
+@pytest.mark.parametrize("verb,kind", [
+    ("on_signal", "consensus.propose"),
+    ("on_signal", "cap.invoke/text/echo"),
+    ("on_signal", "invoke.bulk"),
+    ("mailbox", "cap.invoke/text/echo"),
+    ("mailbox", "consensus.commit"),
+    ("rpc_serve", "consensus.vote"),
+])
+def test_a_stream_of_a_substrate_kind_raises_protected_kind_error(agent, verb, kind):
+    """The substrate's own kinds (2026-11-13): the gateway refuses the consensus kinds, the ``sys.`` kinds and
+    ``invoke.bulk`` at every door that takes a kind, and a hosted capability's kind on the streams and the send
+    routes (its door is ``/mcp``), ``403 protected_kind``. Stubs: no live suite exercises these.
+    Each stream raises ``ProtectedKindError`` at open; ``mailbox`` raised httpx-sse's content-type error."""
+    import asyncio
+
+    async def first():
+        return await getattr(agent, verb)(kind).__anext__()
+
+    _refuse_substrate(kind)
+    with pytest.raises(ProtectedKindError) as e:
+        asyncio.run(first())
+    assert e.value.kind == kind
+
+
+def test_sending_a_substrate_or_reply_kind_raises_protected_kind_error(agent):
+    for kind in ("consensus.commit", "rpc.result", "bulk.result", "sys.explain", "invoke.bulk", "cap.invoke/text/echo"):
+        _refuse_substrate(kind)
+        with pytest.raises(ProtectedKindError) as e:
+            agent.emit(kind, b"x")
+        assert e.value.kind == kind
+        with pytest.raises(ProtectedKindError):
+            agent.rpc_call("127.0.0.1:1", kind, b"x")
+        with pytest.raises(ProtectedKindError):
+            agent.deliver_event("127.0.0.1:1", kind, b"x")
+
+
+def test_a_mailbox_stream_refused_for_a_scope_is_an_http_error(agent):
+    """The plant: a scope refusal of a mailbox stream is the HTTP error, not a ``ProtectedKindError``."""
+    import asyncio
+    import httpx
+
+    async def first():
+        return await agent.mailbox("k").__anext__()
+
+    _Stub.status = 403
+    _Stub.reply = {"error": "insufficient scope", "required_scope": "mesh:read"}
+    with pytest.raises(httpx.HTTPStatusError) as e:
+        asyncio.run(first())
+    assert e.value.response.status_code == 403

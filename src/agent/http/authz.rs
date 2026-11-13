@@ -551,21 +551,56 @@ pub(super) fn required_scope(method: &axum::http::Method, matched_path: &str) ->
 /// (`rpc.result`, `bulk.result`). A reply the interceptor did not claim — late, or from a node the
 /// call was not sent to — falls through to the handler table, so streaming the reply kinds handed
 /// tool and LLM output to any `mesh:read` holder (#587 F7). Same body as the raw routes' refusal.
+///
+/// Everything a stream may not observe is what a raw route may not send (2026-11-13): the substrate's own kinds,
+/// the reply kinds and a hosted capability's `cap.invoke/…` are refused by [`refuse_protected_kind`], below.
 pub(super) fn refuse_unobservable_kind(cfg: &crate::config::GossipConfig, kind: &str) -> Option<axum::response::Response> {
+    refuse_protected_kind(cfg, kind)
+}
+
+/// The one body every kind refusal answers: `403 {"ok": false, "error": "protected_kind", "kind", "message"}`.
+/// The SDKs raise `ProtectedKindError` on `error`.
+fn protected_kind_refusal(kind: &str, message: String) -> axum::response::Response {
+    (
+        StatusCode::FORBIDDEN,
+        Json(json!({ "ok": false, "error": "protected_kind", "kind": kind, "message": message })),
+    ).into_response()
+}
+
+/// The refusal of a kind **no client sends, serves or observes**, on every door that takes a kind (2026-11-13):
+///
+/// - one of the substrate's own ([`is_substrate_kind`](crate::agent::is_substrate_kind): the four consensus kinds,
+///   `sys.explain`, `sys.replica-sync.v1`, `invoke.bulk`, and any kind under `consensus.` or `sys.`). A tap on `consensus.propose`
+///   or `consensus.commit` carried every proposed and committed value in scope with its slot's name — a
+///   commitment's award, an electorate's record, a lock's holder — to a `mesh:read` holder; a client stream on
+///   `rpc/serve` received the same where no listener was registered; and `signal/emit` carried a `mesh:write`
+///   holder's bytes to the acceptor and the learner as this node's own, which a mesh without `[tls]` acts on
+///   unsigned (a `CommitTerm` was written as the slot's decision on every node) and a mesh with it accepts as a
+///   replay of a frame a tap had handed out. `sys.explain` through `rpc/call` read a peer's event ring under
+///   `mesh:write`, where `GET /gateway/explain` asks `fleet:read`. A tap on `invoke.bulk` showed a bulk call's
+///   ticket, whose nonce fetches the caller's staged payload from the public `GET /bulk/{nonce}`.
+/// - an RPC **reply** kind (`rpc.result`, `bulk.result`): a reply is claimed on its correlation nonce and its
+///   sender (`rpc.rs`, `sig.sender == target`), an emit's sender is this node, and a tap on an observable RPC kind
+///   shows the nonce — so a client of the provider's own gateway answered a call in the provider's place.
+///
+/// For every token, the one that holds `*` included, and in every build.
+fn refuse_internal_kind(kind: &str) -> Option<axum::response::Response> {
     use crate::signal::signal_kind::{BULK_RESULT, RPC_RESULT};
     if kind == RPC_RESULT || kind == BULK_RESULT {
-        warn!(kind, "gateway: an RPC reply kind refused on a signal stream");
-        return Some((
-            StatusCode::FORBIDDEN,
-            Json(json!({
-                "ok": false,
-                "error": "protected_kind",
-                "kind": kind,
-                "message": format!("`{kind}` carries RPC replies and is not observable on a signal stream; a reply reaches only its caller"),
-            })),
-        ).into_response());
+        warn!(kind, "gateway: an RPC reply kind refused");
+        return Some(protected_kind_refusal(kind, format!(
+            "`{kind}` carries RPC replies: it is not observed, served or sent through the gateway; \
+             a reply reaches only its caller, and a served request is answered through /gateway/rpc/respond"
+        )));
     }
-    refuse_protected_kind(cfg, kind)
+    if crate::agent::is_substrate_kind(kind) {
+        warn!(kind, "gateway: one of the substrate's own signal kinds refused");
+        return Some(protected_kind_refusal(kind, format!(
+            "`{kind}` is the substrate's own signal kind (the consensus protocol's, a node-to-node `sys.` call, or \
+             the bulk transport's ticket): it is not observed, served or sent through the gateway"
+        )));
+    }
+    None
 }
 
 /// The serve stream's refusal (post-360 row R's review, finding 1): `GET /gateway/rpc/serve/{kind}` registers a
@@ -576,23 +611,23 @@ pub(super) fn refuse_unobservable_kind(cfg: &crate::config::GossipConfig, kind: 
 /// **operator-listed** protected kind (`protected_rpc_kinds`) stays servable: an SDK agent is its provider, checked
 /// by provider enforcement before each request is streamed (closure plan C3). The RPC reply kinds are refused as on
 /// the signal streams.
+///
+/// **The substrate's own kinds** are refused as well (2026-11-13), whether or not a receiver is registered for
+/// them: `consensus.propose` and `consensus.commit` were held in process only on a node that had started its
+/// consensus listener, and `consensus.vote` and `consensus.nack` only while a proposal ran, so a client stream was
+/// admitted in between and received the frames.
 pub(super) fn refuse_unservable_kind(kind: &str) -> Option<axum::response::Response> {
-    use crate::signal::signal_kind::{BULK_RESULT, RPC_RESULT};
-    let builtin = crate::agent::BUILTIN_PROTECTED_RPC_KINDS.contains(&kind);
-    if !builtin && kind != RPC_RESULT && kind != BULK_RESULT {
+    if let Some(refused) = refuse_internal_kind(kind) {
+        return Some(refused);
+    }
+    if !crate::agent::BUILTIN_PROTECTED_RPC_KINDS.contains(&kind) {
         return None;
     }
     warn!(kind, "gateway: a kind this node serves itself refused on rpc/serve");
-    Some((
-        StatusCode::FORBIDDEN,
-        Json(json!({
-            "ok": false,
-            "error": "protected_kind",
-            "kind": kind,
-            "message": format!("`{kind}` is served by this node's own registrations and is not served over rpc/serve: \
-                                a stream for it would receive every such request this node is sent"),
-        })),
-    ).into_response())
+    Some(protected_kind_refusal(kind, format!(
+        "`{kind}` is served by this node's own registrations and is not served over rpc/serve: \
+         a stream for it would receive every such request this node is sent"
+    )))
 }
 
 /// **Closure plan C1.** The gateway's raw routes (`rpc/call`, `scatter`, `signal/emit`,
@@ -607,7 +642,29 @@ pub(super) fn refuse_unservable_kind(kind: &str) -> Option<axum::response::Respo
 /// The two signal SSE doors (`/signals/{kind}`, `/gateway/signal/sse/{kind}`) refuse it too: they
 /// register on the same handler table the serve routes and the native MCP tools use, and a signal
 /// fans to every receiver, so observing a protected kind is reading every protected request's frame.
+///
+/// **The substrate's own kinds and the RPC reply kinds are refused here as well** (2026-11-13,
+/// [`refuse_internal_kind`]) — so on all six raw routes, on both signal streams, and on the mailbox stream, which
+/// refuses what `mailbox/deliver` refuses.
+///
+/// **A hosted capability's kind** (`cap.invoke/{namespace}/{name}`,
+/// [`HOSTED_CAPABILITY_KIND_PREFIX`](crate::agent::HOSTED_CAPABILITY_KIND_PREFIX)) is protected work whose door is
+/// `/mcp`, where a bridged component is a tool (2026-11-13). `rpc/call` reached the component's serve loop under
+/// `mesh:write` — no `mcp:invoke`, no preflight, no mandate — exactly as `mcp.invoke` did before C1; and a tap on
+/// it read every invocation's arguments and caller envelope. The serve stream is not changed: it refuses a kind a
+/// component serves on this node as `served_in_process`.
 pub(super) fn refuse_protected_kind(cfg: &crate::config::GossipConfig, kind: &str) -> Option<axum::response::Response> {
+    if let Some(refused) = refuse_internal_kind(kind) {
+        return Some(refused);
+    }
+    if kind.starts_with(crate::agent::HOSTED_CAPABILITY_KIND_PREFIX) {
+        warn!(kind, "gateway: a hosted capability's kind refused on a raw route or a stream");
+        return Some(protected_kind_refusal(kind, format!(
+            "`{kind}` invokes a hosted capability: it is not sent on raw mesh routes nor observed on a stream. \
+             A capability in the `tool` namespace is called as a tool through /mcp (tools/call); one in another \
+             namespace has no gateway route and is called by a member"
+        )));
+    }
     if !is_protected_kind(cfg, kind) {
         return None;
     }
@@ -618,15 +675,7 @@ pub(super) fn refuse_protected_kind(cfg: &crate::config::GossipConfig, kind: &st
         _ => "the route your operator publishes for it",
     };
     warn!(kind, "gateway: protected RPC kind refused on a raw route");
-    Some((
-        StatusCode::FORBIDDEN,
-        Json(json!({
-            "ok": false,
-            "error": "protected_kind",
-            "kind": kind,
-            "message": format!("`{kind}` is protected work and is not accepted on raw mesh routes; use {door}"),
-        })),
-    ).into_response())
+    Some(protected_kind_refusal(kind, format!("`{kind}` is protected work and is not accepted on raw mesh routes; use {door}")))
 }
 
 /// What the preflight decided, and what the caller owes afterwards.

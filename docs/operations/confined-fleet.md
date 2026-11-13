@@ -80,7 +80,9 @@ possession proof they sign over `mandate_request_bytes(...)`.
 
 `mesh:write` opens the raw routes (`rpc/call`, `scatter`, `signal/emit`, …). Those refuse protected kinds
 (`mcp.invoke`, `skill.invoke`, `llm.invoke`, and any in `protected_rpc_kinds`) with `403 protected_kind`, so they
-cannot carry protected work around `/mcp` and `/a2a`. List every kind your own providers serve as protected work in
+cannot carry protected work around `/mcp` and `/a2a`; they refuse the substrate's own kinds (`consensus.*`, `sys.*`)
+and the RPC reply kinds the same way ([deprecations §103](../guide/deprecations.md)). `mesh:write` still lets its
+holder veto a supervised approval (`agent.veto` is unsigned; it fails closed). List every kind your own providers serve as protected work in
 `protected_rpc_kinds` (`GOSSIP_PROTECTED_RPC_KINDS`). A **companion's** kinds — `blackboard.{ns}.{op}`, `tuple.{ns}.{op}`,
 `wiki.{group}.{op}` — need no listing: the raw routes refuse them `403 insufficient scope` to a caller without the
 companion's family scope (`board:write`, `tuple:write`, `wiki:write`; the read verbs their `:read`), the same scope

@@ -262,6 +262,59 @@ pub fn is_protected_kind(cfg: &GossipConfig, kind: &str) -> bool {
     BUILTIN_PROTECTED_RPC_KINDS.contains(&kind) || cfg.protected_rpc_kinds.iter().any(|k| k == kind)
 }
 
+/// Signal kinds that are **the substrate's own traffic**: the consensus protocol's four kinds
+/// ([`consensus_kind`](crate::consensus_kind)) and the node-to-node RPC kinds under `sys.` (`sys.explain`, the
+/// event-ring fan-out; `sys.replica-sync.v1`, the persisted-by-peer query). No client is their sender, their
+/// provider or their reader, so the gateway's doors refuse them for every token (2026-11-13):
+///
+/// - **observed** (`/signals/{kind}`, `/gateway/signal/sse/{kind}`), a tap read every PROPOSE, promise and COMMIT in
+///   scope — slot names and values, whichever component owned the slot — under `mesh:read`;
+/// - **served** (`/gateway/rpc/serve/{kind}`), a client stream received the same frames on a node whose listener
+///   was not registered, or between two proposals;
+/// - **sent** on a raw route (`signal/emit`, `shard/emit`, `rpc/call`, `scatter`, `overlay/emit_reliable`,
+///   `mailbox/deliver`), a `mesh:write` holder's bytes reached the acceptor and the learner with this node as
+///   their sender — acted on as they stood where the mesh runs without `[tls]`, replayable where it does.
+///
+/// **`invoke.bulk`** is on the list for the same reason (the review of #780): it is the bulk transport's ticket,
+/// sent node to node — `nonce ‖ port ‖ kind` (`bulk.rs`). The nonce is the credential for the caller's staged
+/// payload, which `GET /bulk/{nonce}` serves with no bearer, so a `mesh:read` tap on the responder's gateway
+/// fetched each bulk request's payload while the call was in flight; and an emitted ticket made a `bulk_serve`
+/// node fetch from the gateway's node and run its handler on what it got. It sits outside the two prefixes, so
+/// it is refused by name; a member's `bulk_call` and `bulk_serve` are not a gateway door and are unchanged.
+///
+/// A hosted WASM component's `mesh.emit` refuses them too, listed by its host or not. The list is the kinds the
+/// library names; [`is_substrate_kind`] also refuses the two prefixes, so a kind added under either is refused
+/// before anyone lists it, and a test reads the constants from the source and fails until a new one is listed here.
+/// Literals and not the constants, because this is ungated and `consensus_kind` exists only with `consensus`.
+pub const SUBSTRATE_KINDS: &[&str] = &[
+    "consensus.propose",
+    "consensus.vote",
+    "consensus.commit",
+    "consensus.nack",
+    "sys.explain",
+    "sys.replica-sync.v1",
+    "invoke.bulk",
+];
+
+/// The prefixes [`is_substrate_kind`] refuses whole: every kind under `consensus.` and under `sys.` is the
+/// substrate's, named in [`SUBSTRATE_KINDS`] or not. Compared as bytes, as the handler table compares kinds.
+pub const SUBSTRATE_KIND_PREFIXES: &[&str] = &["consensus.", "sys."];
+
+/// Is `kind` the substrate's own — one of [`SUBSTRATE_KINDS`], or any kind under [`SUBSTRATE_KIND_PREFIXES`]?
+/// Ungated, as [`is_protected_kind`] is: the WASM host asks it in a build without the gateway.
+pub fn is_substrate_kind(kind: &str) -> bool {
+    SUBSTRATE_KINDS.contains(&kind) || SUBSTRATE_KIND_PREFIXES.iter().any(|p| kind.starts_with(p))
+}
+
+/// The kind family a hosted capability is invoked on: `cap.invoke/{namespace}/{name}`
+/// (`mycelium_wasm_host::runtime::cap_invoke_kind`, which this crate cannot name — the host depends on it; the
+/// host's tests hold the two together). The gateway refuses it on the two signal streams, the mailbox stream and
+/// the six raw routes (2026-11-13): a tap read every invocation's arguments and caller envelope under
+/// `mesh:read`, and `rpc/call` invoked a component under `mesh:write` alone — around `/mcp`, the door a bridged
+/// component is called through, with its `mcp:invoke` scope and its preflight. A member's own call
+/// (`ServiceHandle::rpc_call`, the MCP bridge's in-process call) is not a gateway door and is unchanged.
+pub const HOSTED_CAPABILITY_KIND_PREFIX: &str = "cap.invoke/";
+
 /// The gateway scope a **companion-namespaced** RPC kind needs on a raw route (external review 2026-10-31, F1;
 /// plan row R1, decision D1). The companions serve their operations as RPC kinds of the shape
 /// `{family}.{namespace}.{op}` — `blackboard.{ns}.post`, `tuple.{ns}.take`, `wiki.{group}.ingest` — and their own

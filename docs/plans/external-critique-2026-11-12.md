@@ -7,7 +7,7 @@ row rewritten — a KV record alone cannot carry it; the lease margin and the fe
 refusal given its receiver-clock, replay and ordering cases and moved to a decision; the WAL checksum's downgrade
 case; catalogue rollback's limits; four inventory rows that had no plan row; §6 split into what is wrong and what
 is understated; every choice the review found inside a row moved to §5). **The order is agreed (D11):** CR1 now
-(delivered: PR #774, the log read doors' follow-up, PR #777, and the slot routes', PR #778); **inside wave 1b**, CR2's first PR (the use marker), CR13's counter and CR12; CR3–CR11 and
+(delivered: PR #774, the log read doors' follow-up, PR #777, and the slot routes', PR #778; CR25, the signal routes, PR #780); **inside wave 1b**, CR2's first PR (the use marker), CR13's counter and CR12; CR3–CR11 and
 everything else **after wave 1b**, with CR10 (the model) startable in parallel. A row is *buildable* only where
 its text needs no further decision; each row's **State** line says where one remains.
 
@@ -254,10 +254,10 @@ follow-up is PR #777 (`deprecations.md` §101); the slot routes' is PR #778 (`de
     slot-name section of `scripts/kv-namespaces-nonkeys.txt`);
   - *"one end-to-end case with a committed award"* — `a_committed_award_is_not_read_or_proposed_through_the_slot_routes`
     (`mycelium-commitment/tests/award_slot_route.rs`).
-  - **Not built, stated:** the slot *names* in `GET /gateway/kv/keys?prefix=consensus/` (row CR24); the signal
-    SSE doors' consensus kinds — a `mesh:read` tap on `consensus.propose` / `consensus.commit` receives a proposed
-    award's slot and value (probed), and a `mesh:write` emit of a raw `consensus.commit` frame is acted on
-    without `[tls]` (the review of #778; read, not run): row **CR25**, in progress.
+  - **Not built, stated:** the slot *names* in `GET /gateway/kv/keys?prefix=consensus/` (row CR24). The signal
+    doors' consensus kinds — a `mesh:read` tap on `consensus.propose` / `consensus.commit` received a proposed
+    award's slot and value, and a `mesh:write` emit of a raw `consensus.commit` frame was acted on without
+    `[tls]` — were row **CR25**, closed by PR #780.
 
 **What:** as decided (M6): on the raw KV read routes, an owned key's value is refused and sensitive key names are
 hidden from the listing. **Follow-up, one PR:** `gw_overlay_log_scan`, `gw_overlay_log_subscribe` and
@@ -758,7 +758,7 @@ that above about nine nodes relays are the common path for an Individual frame (
 `sys/consensus-accepted/{node}/{slot}`. So the listing still shows which requirement has an award
 (`cn/{requirement}/award`), which stream and group hold a claim, an electorate's group and epoch, a capability's
 `{ns}/{name}` under `capauthz/`, and a seat's two digests (`ae-seat/{counter}/{actor}/{n}`) — the values are
-refused on every KV and slot route since §102 (the signal streams still carry them: CR25), the names are not. The row hides the names of the families `SLOT_FAMILIES`
+refused on every KV and slot route since §102 (and on the signal routes since CR25), the names are not. The row hides the names of the families `SLOT_FAMILIES`
 marks component-owned, **derived from that table** as the log streams' names are derived from
 `OWNED_LOG_STREAMS` (`in_owned_stream_keyspace`), so the two cannot drift; a prefix inside one is refused as
 inside any names-hidden namespace.
@@ -774,29 +774,169 @@ readable, 2026-11-12).
 
 **Size:** S.
 
-#### CR25 · The signal routes refuse the substrate's own kinds *(L19; found by the slot survey and the review of #778)*
+#### CR25 · The signal routes refuse the substrate's own kinds *(L19; found by the slot survey and the review of #778)* — delivered
 
-**State (2026-11-13):** ***in progress*** — decided by the maintainer on 2026-11-13; being built on branch
-`substrate-kinds`, whose PR closes this row.
+**State (2026-11-13):** **delivered** — PR #780 (`deprecations.md` §103), decided by the maintainer on
+2026-11-13 with no debugging exception, and widened by its independent review the same day (`invoke.bulk`; a
+hosted capability's kind on the raw routes). The Exit, promise by promise, against
+`src/agent/http/substrate_kind_tests.rs`:
+- *"each consensus kind refused on both SSE doors, the serve stream and every raw route that sends a kind"* —
+  `every_door_refuses_a_substrate_kind`: the four `consensus.*` kinds, `sys.explain`, `sys.replica-sync.v1`,
+  `invoke.bulk` and five unlisted kinds under the prefixes, at all ten doors (the mailbox stream too), under the
+  token that holds `"*"` and under a scoped one; `the_serve_stream_refuses_a_consensus_kind_without_a_listener`
+  for a node with no receiver registered;
+- *"each seen admitted first"* — with the guards as they were on `main`, 110 of 110 (kind, door) pairs did not
+  refuse, listed door by door by the failure; and three proofs of what that meant, each run and seen failing:
+  `a_tap_never_carries_a_peers_proposed_value` (a `mesh:read` tap carried a peer's proposed award and its
+  `cn/…/award` slot on `consensus.propose` and `consensus.commit`, at both stream doors),
+  `an_emitted_commit_writes_no_decision_record` (without `[tls]`, a `mesh:write` client's made-up `CommitTerm`
+  was written as the slot's decision on the gateway's node and on its peer — this row's *"read, not run"* is now
+  run) and `a_tapped_nonce_forges_no_rpc_reply` (a nonce read from a tap, and an emitted `rpc.result`, answered
+  a caller in its provider's place);
+- *"an application kind still streams and emits"* — `an_ordinary_kind_passes_every_door`: sixteen ordinary and
+  lookalike kinds at all ten doors under both tokens, and an emitted signal arriving on its tap.
+- **Added beyond the Exit** (decided 2026-11-13):
+  - the RPC reply kinds on the six send routes and the mailbox stream — `every_send_door_refuses_a_reply_kind`;
+  - `sys.explain` through `rpc/call` — `the_event_ring_is_not_read_through_rpc_call`;
+  - `invoke.bulk`, on the list by name: a `mesh:read` tap gave a client a bulk call's ticket and the public
+    `GET /bulk/{nonce}` gave it the request's payload — `a_tapped_bulk_ticket_fetches_no_payload`, seen failing;
+  - a hosted capability's `cap.invoke/…` on the signal streams, the mailbox stream and the six raw routes: a
+    `mesh:write` token, refused at `/mcp`, got the component's answer through `rpc/call` —
+    `a_hosted_capability_is_not_called_around_mcp`, seen failing; a member's own call is served as before;
+  - a hosted component's `mesh.emit` refuses a substrate kind and a reply kind even when its host listed it —
+    `a_substrate_kind_is_refused_even_when_listed` (`mycelium-wasm-host`), rule `host.emit_admission` rev 2;
+  - every kind constant is classified *refused* or *open by decision* —
+    `every_kind_constant_is_classified_for_the_gateways_doors`, seen failing with a planted fifth
+    `consensus_kind` constant and with `invoke.bulk` off the list.
+- **Not built, stated:** rows CR26–CR29. The default for a kind outside every list is **open**; what the
+  classification test does not see is in its doc and on `docs/wiki/dev/security.md`.
 
-**What:** the raw signal routes take a kind from the caller and refuse only the RPC reply kinds and the protected
-RPC kinds (`refuse_unobservable_kind`, `refuse_protected_kind`, `src/agent/http/authz.rs`), so the consensus
-kinds (`consensus.propose`, `consensus.vote`, `consensus.commit`, `consensus.nack`, `src/consensus.rs:901`–`910`)
-pass in both directions. **Read:** a `mesh:read` tap on `GET /signals/{kind}` or `GET
-/gateway/signal/sse/{kind}` receives every proposal and commit the node is in scope for, slot and value
-included — probed for `consensus.propose` and `consensus.commit` with a peer's proposed award. **Write:** a
-`mesh:write` token can emit a raw `consensus.commit` frame on `POST /gateway/signal/emit`; without `[tls]` the
-frame is unsigned and a learner records the decision for any slot (`src/agent/http/signals.rs:57`–`130`,
-`src/consensus.rs:1718`–`1738`, `:5402`–`5500`; read, not run), and with `[tls]` a client cannot produce the
-signed wrapper but can replay a tapped one. So the scopes on the slot routes (§102) do not bound the consensus
-traffic a `mesh:read` or `mesh:write` token reaches.
+**What:** the raw signal routes took a kind from the caller and refused only the RPC reply kinds (on the
+streams) and the protected RPC kinds (`refuse_unobservable_kind`, `refuse_protected_kind`,
+`src/agent/http/authz.rs`), so the consensus kinds (`consensus.propose`, `consensus.vote`, `consensus.commit`,
+`consensus.nack`, `consensus_kind` in `src/consensus.rs`) passed in both directions. **Read:** a `mesh:read` tap
+on `GET /signals/{kind}` or `GET /gateway/signal/sse/{kind}` received every proposal and commit the node was in
+scope for, slot and value included. **Write:** a `mesh:write` token emitted a raw `consensus.commit` frame on
+`POST /gateway/signal/emit`; without `[tls]` the frame is unsigned and a learner recorded the decision for any
+slot, and with `[tls]` a client could not produce the signed wrapper but could replay a tapped one. So the scopes
+on the slot routes (§102) did not bound the consensus traffic a `mesh:read` or `mesh:write` token reached. Now
+`SUBSTRATE_KINDS`, `SUBSTRATE_KIND_PREFIXES` and `is_substrate_kind` (`src/agent/mod.rs`) decide, and
+`refuse_internal_kind` (`authz.rs`) refuses at every door.
 
-**Exit:** the builder's, on its PR; at least: each consensus kind refused on both SSE doors, the serve stream
-and every raw route that sends a kind, each seen admitted first; an application kind still streams and emits.
+**Exit:** each consensus kind refused on both SSE doors, the serve stream and every raw route that sends a kind,
+each seen admitted first; an application kind still streams and emits.
 
 **Does not:** stop a member, which sends and receives consensus frames as a member.
 
 **Size:** S.
+
+#### CR26 · Supervisor signals are signed, or scoped *(found by the signal-routes survey of 2026-11-13)*
+
+**State (2026-11-13):** *after wave 1b*; the choice between signing and a scope is the maintainer's and is made
+before the PR. No behaviour was changed by CR25 (decided 2026-11-13).
+
+**What:** `agent.approve` and `agent.veto` (`mycelium-core/src/signal.rs`, `signal_kind`) are plain JSON signals.
+`AgentStateMachine`'s approval wait (`src/agent/state_machine.rs`, the `AGENT_VETO` receiver) takes any
+`agent.veto` naming the tool as a veto: it checks neither who sent it nor that it answers this approval. So any
+member, and any gateway client with `mesh:write` (`POST /gateway/signal/emit`), vetoes any pending approval; any
+`mesh:read` client sees which approvals are asked. It fails closed — a veto refuses, silence approves — so
+nothing is authorised this way; the cost is availability, and a supervisor's veto that proves nothing about the
+supervisor. Either the veto is signed by the supervisor's key and verified against a declared set, bound to the
+approval it answers (its node, tool and a nonce); or the two kinds get a scope of their own at the gateway and a
+sender filter in process (`signal_rx_from`). The limit is stated today on `docs/operations/rbac.md` and
+`deprecations.md` §103.
+
+**Exit:** a veto from a sender outside the declared supervisors does not refuse a transition, seen refusing
+first; a supervisor's does; a veto for another approval of the same tool does not.
+
+**Does not:** make approval anything but default-approve-on-silence; that is the grant path's job (X3).
+
+**Size:** S–M.
+
+#### CR27 · The other library kinds on the signal streams, a mandate on a tap, and `MeshHandle::request`'s reply *(found by the signal-routes survey of 2026-11-13 and the reviews of #780)*
+
+**State (2026-11-13):** *after wave 1b*; each line needs its decision (refuse, scope, or state and keep).
+Stated as they stand on `rbac.md` and in `deprecations.md` §103.
+
+**What:** after CR25 a `mesh:read` tap still receives, and a `mesh:write` emit still sends (each *open by
+decision* in the classification table of `substrate_kind_tests.rs`):
+- `boundary.opaque` / `boundary.transparent` — an emitted `boundary.opaque` makes a proposer on the receiving
+  node re-evaluate its quorum (`src/consensus.rs`, the `opaque_rx` arm); the recompute reads the KV, not the
+  payload, so the worst read is a wasted recompute;
+- `agent.state` — a node's state transitions, by name;
+- `artifact.fetch`, `artifact.size`, `artifact.fetch_range` (`mycelium-wasm-host/src/mesh_source.rs`) and
+  `reason.blob.fetch` (`mycelium-reason/src/blob.rs`) — the ids asked for on a tap; and through `rpc/call` under
+  `mesh:write`, the artifact or blob itself for an id the caller knows;
+- **any RPC kind that is not protected** — a tap shows each request's whole frame: the correlation nonce, the
+  caller envelope, and a carried mandate with its possession proof. CR25 closed what the nonce was used for **by
+  a gateway client** (a forged `rpc.result`; a member writes its own `sender` and can still answer for another —
+  `owner-signed-records.md`); the mandate and the envelope are still read. An operator closes a kind by listing it in
+  `protected_rpc_kinds`; whether the streams should refuse *every* kind an in-process `rpc_rx` serves is the
+  decision;
+- *(closed in CR25, 2026-11-13: `invoke.bulk`, whose ticket a tap turned into the staged payload; and
+  `cap.invoke/{namespace}/{name}` by a raw route, which went around `/mcp`'s scope and preflight. Both were this
+  row's lines; the review of #780 traced the first and the maintainer decided both.)*
+- **`MeshHandle::request`'s reply** (the confirm round of #780's review; by reading, not run) — `request`
+  (`mycelium-core/src/mesh_handle.rs`) waits on a result kind its caller names and claims the first signal of
+  that kind carrying its nonce; it checks no sender, and `signal_kind`'s doc recommends it with `invoke.result`.
+  A gateway client holding `mesh:read` and `mesh:write` taps the request kind, reads the nonce and emits the
+  result kind, from any gateway in scope: CR25's forged-reply closure covers `rpc.result` and `bulk.result`
+  only. No library code calls `request`. Either `request` checks the sender where the scope names one node, or
+  the result kinds it is documented with are refused on send, or it is stated and kept;
+- **the serve stream on a hosted capability's kind** — `GET /gateway/rpc/serve/cap.invoke/…` is refused only
+  where a component serves the kind on that node (`served_in_process`); elsewhere a `mesh:serve` client can
+  register for it and receive what members send it there. Not changed by CR25.
+
+**Exit:** each line refused, scoped or stated with its test or its sentence, and its row in the classification
+table moved with it.
+
+**Does not:** touch a member's emit or receive; these are the gateway's doors.
+
+**Size:** S per line.
+
+#### CR28 · A signed consensus frame is bound to its sender and a time *(found by the signal-routes survey of 2026-11-13)*
+
+**State (2026-11-13):** *after wave 1b*; a wire-format question (wire v12), so it waits for a release that moves
+the wire, and may fold into CR10's model.
+
+**What:** under `[tls]`, `sign_payload` (`src/consensus.rs`) signs `mycelium.consensus/msg/1 ‖ len ‖ msg_bytes`
+and nothing else: not the signal's sender, scope or nonce, and no time. `signer_authorized` binds a proposal's or
+a vote's named node to the signer; `Commit`, `CommitTerm`, `Nack`, `Promise` and `PromiseTerm` carry no such
+field. So a member can re-send another member's signed frame as its own emission, later and to a scope of its
+choosing. CR25 removed the gateway's route to this (a client could tap a signed frame and emit it); a member's
+remains. What a replay achieves is bounded by the acceptor's stored ballots and by the record keys: a replayed
+`CommitTerm` rewrites the same record at the same ballot key and is skipped where that key is a tombstone
+(`run_consensus_listener`). **Not determined:** whether a replayed old commit can bring back a finished decision
+on a node that never held its tombstone.
+
+**Exit:** the undetermined case answered by a test; if it holds, a frame carries its signer's sender and a
+freshness bound inside the signature, and a replay is refused, seen accepted first.
+
+**Does not:** make consensus Byzantine-tolerant: a commit still carries no quorum certificate (CFT, not BFT) —
+which is why, without `[tls]`, any member's commit is written.
+
+**Size:** M.
+
+#### CR29 · A gateway door for a hosted capability outside the `tool` namespace *(found by CR25, 2026-11-13)*
+
+**State (2026-11-13):** ***not buildable* until its door is designed**; *after wave 1b*. The maintainer confirmed
+on 2026-11-13 that CR25's refusal of `cap.invoke/…` stays for every namespace.
+
+**What:** a hosted WASM capability is served on `cap.invoke/{namespace}/{name}`. Only one in the `tool` namespace
+is bridged as an MCP tool (`bridge_tool`, `mycelium-wasm-host/src/runtime.rs`), so only that one has an HTTP
+door — `/mcp`, with `mcp:invoke` and the preflight. Since CR25 the gateway's raw routes refuse the whole family
+(`rpc/call` reached any hosted capability, a shadow install included, under `mesh:write` with no decision at a
+door), so a capability in another namespace — `route/optimize` — is called by a member only: an SDK agent cannot
+call it at all. Nothing in the repository did. The door needs deciding before it is built: its scope, whether
+the evaluator's preflight and a mandate apply as at `/mcp`, whether a shadow install is ever reachable, and what
+an exchanged token is asked for (`needs_exchanged_token` already counts the family as an action).
+
+**Exit:** a route that invokes a hosted capability in any namespace under a scope of its own and the same
+preflight a tool gets, refused without it, seen admitted first; the raw routes still refuse the kind.
+
+**Does not:** reopen `rpc/call` to the family, in whole or by namespace.
+
+**Size:** M, once designed.
 
 ### Tier 3 · Structure
 

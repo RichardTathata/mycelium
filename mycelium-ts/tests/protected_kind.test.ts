@@ -73,3 +73,40 @@ test("an evicted serve stream throws ServeEvictedError rather than ending quietl
   expect(err).toBeInstanceOf(ProtectedKindError);
   expect(err.kind).toBe("work");
 });
+
+// The substrate's own kinds (2026-11-13): the gateway refuses the consensus kinds, the `sys.` kinds and
+// `invoke.bulk` at every door that takes a kind, the RPC reply kinds on the send doors, and a hosted capability's
+// kind on the streams and the send doors (its door is `/mcp`) — each `403 protected_kind`, thrown as
+// ProtectedKindError by every verb that names a kind. Stubs: no live suite exercises these.
+const substrate = (kind: string) => ({ ok: false, error: "protected_kind", kind,
+  message: `\`${kind}\` is the substrate's own signal kind and is not observed, served or sent through the gateway` });
+
+test.each([
+  ["onSignal", "consensus.propose", (a: MyceliumAgent, k: string) => a.onSignal(k).next()],
+  ["onSignal", "cap.invoke/text/echo", (a: MyceliumAgent, k: string) => a.onSignal(k).next()],
+  ["onSignal", "invoke.bulk", (a: MyceliumAgent, k: string) => a.onSignal(k).next()],
+  ["mailbox", "cap.invoke/text/echo", (a: MyceliumAgent, k: string) => a.mailbox(k).next()],
+  ["rpcCall", "cap.invoke/text/echo", (a: MyceliumAgent, k: string) => a.rpcCall("127.0.0.1:1", k)],
+  ["emit", "invoke.bulk", (a: MyceliumAgent, k: string) => a.emit(k, Buffer.from("x"))],
+  ["mailbox", "consensus.commit", (a: MyceliumAgent, k: string) => a.mailbox(k).next()],
+  ["rpcServe", "consensus.vote", (a: MyceliumAgent, k: string) => a.rpcServe(k).next()],
+  ["emit", "consensus.commit", (a: MyceliumAgent, k: string) => a.emit(k, Buffer.from("x"))],
+  ["emit", "rpc.result", (a: MyceliumAgent, k: string) => a.emit(k, Buffer.from("x"))],
+  ["rpcCall", "sys.explain", (a: MyceliumAgent, k: string) => a.rpcCall("127.0.0.1:1", k)],
+  ["deliverEvent", "sys.replica-sync.v1", (a: MyceliumAgent, k: string) => a.deliverEvent("127.0.0.1:1", k)],
+] as const)("%s of the substrate kind %s throws ProtectedKindError", async (_verb, kind, call) => {
+  stub(substrate(kind), 403);
+  const err = await call(new MyceliumAgent("127.0.0.1", 1, 1000), kind).catch((e: unknown) => e) as ProtectedKindError;
+  expect(err).toBeInstanceOf(ProtectedKindError);
+  expect(err.kind).toBe(kind);
+});
+
+test("a signal or mailbox stream refused for a scope is not mistaken for it (the plant)", async () => {
+  stub({ error: "insufficient scope", required_scope: "mesh:read" }, 403);
+  const a = new MyceliumAgent("127.0.0.1", 1, 1000);
+  for (const open of [() => a.onSignal("k").next(), () => a.mailbox("k").next()]) {
+    const err = await open().catch((e) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(err).not.toBeInstanceOf(ProtectedKindError);
+  }
+});

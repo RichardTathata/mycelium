@@ -282,7 +282,16 @@ cancel ends the task's record and stops no work — a task runs inside its reque
 `on_signal` checks the response before it reads events, as `rpc_serve` has since 0.2.12: a stream the gateway refuses
 raises `httpx.HTTPStatusError` — a companion's kind (`blackboard.*`, `tuple.*`, `wiki.*`) needs the family's `:read`
 on the signal streams from mycelium v2.39.0 (`mycelium-py` 0.2.14) — and a protected kind raises `ProtectedKindError`. Earlier
-versions surfaced any `403` there as httpx-sse's content-type `SSEError`.
+versions surfaced any `403` there as httpx-sse's content-type `SSEError`. `mailbox` checks the same way from 0.2.16.
+
+From the mycelium release after v2.40.0 the gateway also answers `403 protected_kind` — `ProtectedKindError` here —
+for **the substrate's own kinds** at every door that takes a kind (`on_signal`, `mailbox`, `rpc_serve`, `emit`,
+`rpc_call`, `deliver_event`, …): `consensus.propose`, `consensus.vote`, `consensus.commit`, `consensus.nack`,
+`sys.explain`, `sys.replica-sync.v1`, `invoke.bulk` and anything starting `consensus.` or `sys.`; for the reply
+kinds `rpc.result` and `bulk.result` when sent (answer a served request with `rpc_respond`); and, on `on_signal`,
+`mailbox` and the send verbs, for a hosted capability's `cap.invoke/…` (call a component as a tool through
+`McpClient`). Name your own kinds outside those prefixes. These cases are stub-tested here, not in the live suite
+([deprecations §103](https://github.com/RichardTathata/mycelium/blob/main/docs/guide/deprecations.md)).
 
 ### The causal fields (0.2.13)
 
