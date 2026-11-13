@@ -116,6 +116,29 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   a stream under `cn/`, `wiki/` or `reason/` with `consensus:read` (closed by the entry above, §101); public `/stats` still counts every live key
   (`store_entries`), the hidden namespaces' included.
 
+- **`quinn-proto` 0.11.18 → 0.11.19 and `quinn-udp` 0.5.14 → 0.5.16** (RUSTSEC-2026-0523, -0524 and -0538, three
+  denial-of-service advisories dated 2026-09-30, in the advisory database since 2026-11-13). **-0523:** a
+  MAX_STREAM_DATA frame naming an unopened peer-initiated bidirectional stream opened it and every lower-numbered
+  one without checking the advertised stream limit, so one small frame hands an accepting endpoint more than 2^40
+  streams (`quinn-proto` 0.11.0–0.11.18). **-0524:** a QUIC client kept a Retry packet's token without a length
+  limit; a long one makes the next transmit panic (debug) or attempt an allocation above 10 GiB (release), and
+  anyone who sees the client's first Initial can send it (`quinn-proto` 0.11.0–0.11.18). **-0538:** on targets that
+  read one datagram per `recvmsg` (Apple without `fast-apple-datapath`, OpenBSD, NetBSD, Solaris, illumos) the
+  receive loop spins after a truncated datagram; Linux, Android, FreeBSD and Windows are not affected (`quinn-udp`
+  below 0.5.16, and 0.6.0–0.6.2). **Not reachable here, in any build:** no QUIC code is compiled. `quinn` is in the
+  root lockfile only as an optional dependency of `reqwest` 0.12.28 and 0.13.5, which their `http3` feature turns
+  on; no manifest in the workspace enables it, and `cargo tree --locked --workspace --all-features --target all
+  -e all` lists no `quinn` crate (`cargo tree -i quinn-proto` prints nothing). The entry stays in the lockfile
+  because `reqwest`'s TLS features name `quinn?/…`. An adopter is exposed only by enabling `reqwest`'s `http3` in
+  their own build, where their own lockfile decides the version. **Affected lockfiles:** the root one, through
+  v2.40.0; `fuzz/Cargo.lock` was already on 0.11.19 / 0.5.16 and `examples/conway-gpu/Cargo.lock` carries no
+  `quinn`. The change is the version and checksum lines of the two packages, nothing else: `cargo update -p` gave
+  the same two versions but also re-resolved Windows-only `windows-sys` edges and moved `hyper-util`'s `socket2`
+  from 0.6.4 to 0.5.9, which is compiled, so those were left as they were (`cargo metadata --locked` accepts the
+  result). `quinn` itself stays at 0.11.9. It is here because CI's audit was failing every PR. No API change.
+  **Check:** `grep -A1 -E '^name = "quinn-(proto|udp)"$' Cargo.lock` shows `0.11.19` and `0.5.16`, and
+  `cargo audit --deny warnings -f Cargo.lock` reports none of the three.
+
 ### Added
 
 - **N5: the agent guide the binary serves** (`docs/plans/identity-and-lifecycle.md` N5). `mycelium skills get fleet`
