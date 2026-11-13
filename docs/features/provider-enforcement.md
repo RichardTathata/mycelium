@@ -5,7 +5,8 @@
 With provider enforcement on, every protected call a node receives — `mcp.invoke`, `skill.invoke` and any kind in
 `protected_rpc_kinds` — runs the same action preflight a gateway runs, as the
 [enforcement point](../guide/00-concepts.md#enforcement-point) `provider`, before any handler sees it. It applies
-whichever door the call came through: a gateway, a member's direct call, or the SDK serve stream. A presented mandate
+whichever door the call came through — a gateway, a member's direct call, or the SDK serve stream — with one
+exception, stated below: the node's built-in `llm.invoke` provider. A presented mandate
 is verified by the node's own execution authority, never taken from a gateway, and the decision is recorded in the
 node's evidence journal.
 
@@ -47,8 +48,10 @@ confirmed stop, checked against the class's bound. CI runs it.
   the action preflight's (a deny, authority not established, evidence not recorded), `no_evaluator`, `caller_context_refused`, `malformed_call` (a tool call that is
   not JSON or names no tool), `resource_unnamed`, `resource_not_here`, `resource_not_served`, `at_capacity`, `call_mandate_not_established` (a
   cancellable rule permitted the call and its gateway's `call:` mandate is not established here, or its term is
-  already revoked: *authority not established*, with what was found in `data.found`, and `execution: none` on the
-  record) or `mandate_lapsed_before_run` (the
+  already revoked — refused under any rule: *authority not established*, with the stable cause in `data.cause`
+  (`revoked`, `no_call_mandate`, `other_envelope`, …; the list is in §104), the sentence in `data.found`,
+  `execution: none` on the record, a grant the call presented given back, and counted in
+  `mycelium_provider_call_mandate_refusals_total{cause}`) or `mandate_lapsed_before_run` (the
   preflight permitted on an established mandate and the re-assessment that registers the work no longer finds it
   established — a revocation in between refuses the call rather than running it unregistered; it answers as
   *authority not established*, `data.detail` `mandate_lapsed_before_run`, and the evidence journal records that
@@ -63,9 +66,13 @@ confirmed stop, checked against the class's bound. CI runs it.
   before the work is registered refuses it, one after is the sweep's to stop; a provider
   that does not turn enforcement on checks no authority, whatever the gateway did, and one that turns it on with no
   evaluator refuses every protected call (`no_evaluator`).
+- **Not built: the built-in `llm.invoke` provider runs no provider check.** Its receiver verifies the caller
+  context and goes to the backend, so at this door no rule on `llm.invoke` is applied, cancellable or not
+  ([ledger](../operations/what-is-proven.md#llm-door-not-checked-at-provider)).
 - **Not built, for a cancellable rule:** no gateway mints a `call:` mandate yet, so such a rule refuses every call
   it permits; a member's own unframed call carries none; the bridged MCP loop and the SDK serve stream do not stop
-  a cancelled call ([§104](../guide/deprecations.md#104-a-cancellable-rule-requires-the-calls-call-mandate-at-the-provider-cm-in-the-caller-envelope-2410-identity-and-lifecycle-i4-pr-1b)).
+  a cancelled call; a revoked term under a rule that is not cancellable is best effort, since a relay that strips
+  `cm` makes the call run; a broader allowance listed first makes a cancellable rule inert ([§104](../guide/deprecations.md#104-a-cancellable-rule-requires-the-calls-call-mandate-at-the-provider-cm-in-the-caller-envelope-2410-identity-and-lifecycle-i4-pr-1b)).
 - **Not built:** on the deferred-check path (a check settling a seat claim), a `withdrawn` refusal (the serve loop
   ended with the check in flight) and the *authority not established* answer to a check whose task panicked can follow
   a permit, and leave its `execution: attempted` alone in the journal: neither has the permit where it is made.

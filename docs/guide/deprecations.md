@@ -3650,20 +3650,47 @@ that declares one refuses every call that rule permits.
 
 - **Do not declare a cancellable rule yet.** Until the gateways of a fleet mint (`gateway_mint_call_mandates`, not
   in this release), an enforcing provider answers a call a cancellable rule permits `authority_not_established`
-  (JSON-RPC -32031), `data.detail` `call_mandate_not_established`, with what it found in `data.found` (*"the
-  envelope carries no call: mandate"*). Nothing runs, and the evidence journal records `execution: none` beside
+  (JSON-RPC -32031), `data.detail` `call_mandate_not_established`, with the stable name of why in `data.cause`
+  (`no_call_mandate`) and the sentence in `data.found` (*"the envelope carries no call: mandate"*). Nothing runs, and the evidence journal records `execution: none` beside
   the permit. This is the rule doing its work: stripping the mandate cannot make a cancellable call run
   uncancellable.
 - **The same refusal, whatever the rule,** for a call whose `call:` term is already revoked when the provider
-  registers it: the gateway cancelled it before it ran.
+  registers it: the gateway cancelled it before it ran (`data.cause` `revoked`). **The limit:** under a rule that is
+  not cancellable this is best effort — a relay that strips `cm` makes the same call run.
+- **`data.cause` is the machine-readable reason; `data.found` is prose and may change.** One detail name, ten
+  causes: `revoked` (final: the gateway cancelled the call before it ran) · `no_envelope` (the call came in no
+  caller envelope) · `no_call_mandate` (the envelope has no `cm`: no mint, or stripped) · `unsigned_envelope` (the
+  envelope is not signed by its gateway — a node with no TLS identity — so its id binds nothing) · `no_authority`
+  (the provider has no execution authority) · `malformed` · `no_envelope_id` · `other_envelope` (the term is not
+  this envelope's) · `refused` (verified, and refused for its window or operation) · `not_verified` (issuer, key or
+  checkpoint not verified here, or the window cap). Match on `revoked` to tell a cancellation from the rest.
+- **Counted:** `mycelium_provider_call_mandate_refusals_total{cause}` (feature `metrics`), one label value per
+  cause above, so a cancellation is not counted with a misconfiguration.
+- **The refusal does not spend a grant.** The provider refuses before any handler runs, so it gives back the use
+  of a grant the same call presented, and the gateway's `/mcp` door gives its own claim back on this answer, as it
+  does for the caller-context refusals of §93. The grant admits the retry once. At the A2A doors a refusal spends
+  the grant, as before. A bridged MCP server cannot author the answer: a reply of its own in this shape is
+  rewritten into an ordinary tool error (-32000).
+- **A cancelled call cannot be made to run by presenting it again**, by three mechanisms in sequence: while the
+  provider stays up, the envelope's id is admitted once and a replay is **dropped unanswered** (the re-presenter
+  sees a timeout, not a refusal); after a provider restart inside the envelope's 300 s, the envelope is admitted
+  again and its term reads revoked from the KV record; after that the envelope is stale. A gateway's retry is a new
+  envelope and a new term, which is not revoked: a cancel is per dispatch.
 - **Where it is enforced.** At a provider with `with_provider_enforcement` (or `[authority]`) in a build with
   `compliance`. A provider without enforcement never reads `cm` and runs the call unregistered; an older provider
   keeps `cm` among the envelope's unknown fields and reads nothing. Neither refuses. A gateway's own preflight
   carries the rule's `cancellable` and does not act on it: the mandate is assessed once, at the provider.
 - **Not covered.** A member's own unframed call has no envelope, so it carries no `call:` mandate: under a
-  cancellable rule it is refused, and under any other rule it runs and cannot be cancelled. A call served through
-  the bridged MCP loop is registered but not stopped when cancelled, and a call served to an SDK agent
-  (`rpc/serve`) is stopped only when a cohort budget is attached; both arrive with the row's cancel doors.
+  cancellable rule it is refused (`no_envelope`), and under any other rule it runs and cannot be cancelled. A call
+  served through the bridged MCP loop is registered but not stopped when cancelled. A call served to an SDK agent
+  (`rpc/serve`) is **not stopped either**: its admission is only parked, and only under a cohort budget, and
+  nothing waits on its lapse. Both arrive with the row's cancel doors.
+- **Not built: the built-in `llm.invoke` provider is not checked at all.** The node's own LLM skill receiver
+  verifies the caller context and goes to the backend; it never runs the provider check. So at an enforcing
+  provider a rule on `llm.invoke` — cancellable or not — is not applied at that door, and a cancellable
+  `llm.invoke` rule neither refuses nor registers the prompt there. This predates the release
+  ([ledger](../operations/what-is-proven.md#llm-door-not-checked-at-provider)); the gateway's own preflight on
+  `/gateway/llm/call` is unaffected.
 - **A `call:` mandate fits one envelope.** Its term must be `c{n}` of the envelope that carries it (the envelope's
   id, inside the gateway's signature). One lifted into another envelope, even of the same gateway for an identical
   call, is not established. `cm` is outside the envelope's signature, as `m` is; wire **v12** is unchanged.
@@ -3672,7 +3699,10 @@ that declares one refuses every call that rule permits.
   loads the file is upgraded.
 - **New refusal at `validate()`:** `requires_mandate` naming a `call:` scope (`"call:*"`, `"call:c1"`). No caller
   can present a `call:` mandate, so such a rule permitted nothing; it now says so by name and points to
-  `cancellable`. An exposure rule with `cancellable` is refused too.
+  `cancellable`. A broader pattern that would cover one (`"call*"`, `"*"`) is not refused and is never met by a
+  `call:` mandate either: the second slot is not what `requires_mandate` reads.
+- **Order matters, as for every rule:** the first matching allowance decides, so a broader allowance listed before
+  a cancellable rule makes it inert, without a word. List the cancellable rule first. An exposure rule with `cancellable` is refused too.
 - **Compiler:** `Rule` and `RuleDecl` gained a public field, `cancellable` — an exhaustive struct literal breaks;
   `Rule::new(…)` and `..Default`-style construction are unaffected. `Decision` (`#[non_exhaustive]`) gained
   `cancellable` and `Decision::requiring_call_mandate`; `GatewayCaller` (`#[non_exhaustive]`) gained

@@ -3760,6 +3760,60 @@ async fn a_gateway_kv_delete_reaches_a_peer_that_requires_signed_frames() {
     let _ = std::fs::remove_dir_all(&cert_dir);
 }
 
+/// **Not built, pinned so the gap is visible: the built-in `llm.invoke` provider runs no provider check** (found by
+/// #781's review, F1; `docs/operations/what-is-proven.md#llm-door-not-checked-at-provider`). The node has provider
+/// enforcement on and **no evaluator**, so every checked door fails closed: a protected kind served through `rpc_rx`
+/// is refused `no_evaluator` and its handler never sees the call. `llm.invoke` — a built-in protected kind — is
+/// answered by the backend all the same, because `handle_llm_invoke` verifies the caller context and never calls
+/// `provider_enforcement::check`. **The PR that puts the check there turns the last assertion round.**
+#[cfg(all(feature = "tls", feature = "gateway", feature = "llm"))]
+#[tokio::test]
+async fn the_built_in_llm_provider_runs_no_provider_check_which_is_not_built() {
+    use crate::config::TlsConfig;
+    use std::sync::atomic::AtomicUsize;
+    let port = alloc_port();
+    let cert_dir = std::env::temp_dir().join(format!("myc-llm-door-{port}"));
+    let _ = std::fs::remove_dir_all(&cert_dir);
+    let mut cfg = GossipConfig::default();
+    cfg.bind_port = port;
+    cfg.protected_rpc_kinds = vec!["depot.custom".into()];
+    cfg.tls = Some(TlsConfig { auto_cert_dir: cert_dir.clone(), ..TlsConfig::default() });
+    let a = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg));
+    a.with_provider_enforcement();
+    a.start().await.unwrap();
+    let _skill = a.llm().register_prompt_skill("review", "echo", crate::PromptTemplate {
+        system: "".into(), user_template: "{{input}}".into(), max_tokens: 32, temperature: 0.0, metadata: Default::default(),
+    }, Arc::new(crate::EchoBackend)).await.unwrap();
+    let served = Arc::new(AtomicUsize::new(0));
+    {
+        let (agent, seen) = (Arc::clone(&a), Arc::clone(&served));
+        let mut rx = a.service().rpc_rx("depot.custom");
+        tokio::spawn(async move {
+            while let Some(req) = rx.recv().await {
+                seen.fetch_add(1, Ordering::SeqCst);
+                agent.service().rpc_respond(&req, b"served".to_vec());
+            }
+        });
+    }
+    let call = |kind: &'static str, app: &'static [u8]| {
+        let a = Arc::clone(&a);
+        async move {
+            let framed = crate::agent::gateway_caller::frame_with_context(&a.task_ctx, a.node_id(), "oidc:idp/alice", &[], bytes::Bytes::from_static(app)).unwrap();
+            let reply = crate::agent::rpc::rpc_call_framed(&a.task_ctx, a.node_id().clone(), Arc::from(kind), framed, Duration::from_secs(10)).await.expect("a reply");
+            String::from_utf8_lossy(&reply).into_owned()
+        }
+    };
+    // A checked door: refused, and the handler never saw it.
+    let custom = call("depot.custom", b"x").await;
+    assert!(custom.contains("no_evaluator"), "the rpc_rx door fails closed with no evaluator: {custom}");
+    assert_eq!(served.load(Ordering::SeqCst), 0);
+    // The built-in LLM door: the backend answered. Not built — the check is not there.
+    let llm: serde_json::Value = serde_json::from_str(&call("llm.invoke", br#"{"prompt":"review/echo","input":"x","context":{}}"#).await).unwrap();
+    assert!(llm["output"].is_string() && llm["error"].is_null(), "llm.invoke ran with enforcement on and no evaluator (the gap): {llm}");
+    a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&cert_dir);
+}
+
 /// **Every receive boundary drops a replayed caller envelope unanswered, and `/stats` counts it**
 /// (post-360 row E's review, finding 2). `rpc_rx` and the MCP loops are tested beside the window; these
 /// are the other three places a request is built from a raw signal: the SDK serve stream

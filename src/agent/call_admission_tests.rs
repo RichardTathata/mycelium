@@ -57,9 +57,31 @@ enum Cm {
     Alias,
 }
 
+/// How a test's node differs from the usual one.
+#[derive(Clone, Copy)]
+struct Opts {
+    /// A TLS identity. Without one the node signs no envelope and holds no key.
+    tls: bool,
+    /// `gateway_caller_profile = legacy`: the node does not promise an envelope on every RPC it originates, so a
+    /// bare frame from it is its own call.
+    legacy: bool,
+    /// Attach the execution authority.
+    authority: bool,
+}
+
+impl Default for Opts {
+    fn default() -> Self {
+        Self { tls: true, legacy: false, authority: true }
+    }
+}
+
+async fn node() -> Node {
+    node_with(Opts::default()).await
+}
+
 /// One node: gateway, provider and caller. Its policy: `slow` and the skill are **cancellable**; `plain` is not;
 /// `both` is cancellable and needs a grant.
-async fn node() -> Node {
+async fn node_with(opts: Opts) -> Node {
     let (port, http_port) = (crate::test_util::alloc_port(), crate::test_util::alloc_port());
     let id = NodeId::new("127.0.0.1", port).unwrap();
     let dir = std::env::temp_dir().join(format!("i4-admit-{port}"));
@@ -68,7 +90,12 @@ async fn node() -> Node {
     let mut cfg = GossipConfig::default();
     cfg.bind_port = port;
     cfg.http_port = Some(http_port);
-    cfg.tls = Some(crate::TlsConfig { auto_cert_dir: dir.join("tls"), ..Default::default() });
+    if opts.tls {
+        cfg.tls = Some(crate::TlsConfig { auto_cert_dir: dir.join("tls"), ..Default::default() });
+    }
+    if opts.legacy {
+        cfg.gateway_caller_profile = crate::config::GatewayCallerProfile::Legacy;
+    }
     cfg.gateway_identity_issuer = Some("gw".into());
     cfg.gateway_named_tokens = vec![crate::config::GatewayNamedToken { name: "alice".into(), token: "alice-secret".into(), scopes: vec!["mcp:invoke".into()] }];
     let a = Arc::new(GossipAgent::new(id.clone(), cfg));
@@ -89,7 +116,9 @@ async fn node() -> Node {
     // F = 2 s: the sweep runs every 100 ms.
     let gate = ExecutionGate::strict(ResourceAuthority::new("unused", 1), ResourceTier::Serialised, ClockModel { skew_ms: 100 }, FreshnessPolicy { freshness_ms: 2_000, interval_ms: 500, delivery_ms: 160 }).unwrap();
     let authority = Arc::new(ExecutionAuthority::new(gate, GrantVerifier::new(entitlements), TrustedExternalIssuers::new()));
-    a.with_execution_authority(Arc::clone(&authority));
+    if opts.authority {
+        a.with_execution_authority(Arc::clone(&authority));
+    }
     a.with_provider_enforcement();
     a.start().await.unwrap();
     let (started, finished) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
@@ -121,7 +150,9 @@ async fn node() -> Node {
             });
         }
     });
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    // Ready when the gateway's listener accepts: the tools, the capability and the skill's receiver are registered
+    // synchronously above, and `start()` has returned.
+    assert!(until(|| std::net::TcpStream::connect(("127.0.0.1", http_port)).is_ok(), Duration::from_secs(20)).await, "the gateway is listening");
     Node { a, authority, dir, http_port, started, finished }
 }
 
@@ -140,8 +171,9 @@ impl Node {
     fn gateway(&self) -> String {
         node_principal(self.a.node_id())
     }
+    /// The node's key; on a node with no TLS identity, a key of the test's own (nothing there holds its public half).
     fn key(&self) -> Arc<ed25519_dalek::SigningKey> {
-        self.a.task_ctx.tls.get().unwrap().signing_key()
+        self.a.task_ctx.tls.get().map(|t| t.signing_key()).unwrap_or_else(|| Arc::new(ed25519_dalek::SigningKey::from_bytes(&[61u8; 32])))
     }
     fn now(&self) -> u64 {
         self.a.task_ctx.hlc.decision_now_ms()
@@ -255,11 +287,13 @@ fn json(reply: &[u8]) -> serde_json::Value {
     serde_json::from_slice(reply).unwrap_or_else(|_| serde_json::json!({ "raw": String::from_utf8_lossy(reply) }))
 }
 
-/// The refusal D-2 promises, at an MCP reply: -32031, `authority_not_established`, `call_mandate_not_established`.
+/// The refusal D-2 promises, at an MCP reply: -32031, `authority_not_established`, `call_mandate_not_established`,
+/// with the stable `data.cause` beside the sentence in `data.found`.
 #[track_caller]
-fn assert_not_established(reply: &[u8], found: &str) {
+fn assert_not_established(reply: &[u8], cause: &str, found: &str) {
     let v = json(reply);
     assert_eq!((v["error"]["code"].as_i64(), v["error"]["data"]["reason"].as_str(), v["error"]["data"]["detail"].as_str()), (Some(-32031), Some("authority_not_established"), Some("call_mandate_not_established")), "{v}");
+    assert_eq!(v["error"]["data"]["cause"].as_str(), Some(cause), "{v}");
     assert!(v["error"]["data"]["found"].as_str().is_some_and(|f| f.contains(found)), "found {found:?} in {v}");
 }
 
@@ -293,9 +327,9 @@ async fn a_cancellable_call_runs_only_registered_under_its_call_mandate_and_a_ca
     // Stripped, and with the checkpoint stripped: refused, nothing runs, and the record says so.
     let before = n.nothing_ran();
     let (reply, _) = n.call(&slow, None, Cm::Stripped).await;
-    assert_not_established(&reply, "carries no call: mandate");
+    assert_not_established(&reply, "no_call_mandate", "carries no call: mandate");
     let (reply, _) = n.call(&slow, None, Cm::NoCheckpoint).await;
-    assert_not_established(&reply, "does not parse");
+    assert_not_established(&reply, "malformed", "does not parse");
     assert_eq!((n.counts(), n.authority.running_count()), ((1, 0), 0), "neither ran");
     assert_eq!(n.nothing_ran(), before + 2, "an execution record for each says nothing ran");
 
@@ -335,12 +369,12 @@ async fn a_call_mandate_lifted_from_another_envelope_of_the_same_gateway_is_not_
     // give the sweep time. The reply must be the refusal, not a cancellation and not a hang to the tool's 30 s.
     n.cancel(id);
     let reply = tokio::time::timeout(Duration::from_secs(10), sent).await.expect("answered at once: the call was refused, not run").unwrap();
-    assert_not_established(&reply, "minted for another call");
+    assert_not_established(&reply, "other_envelope", "minted for another call");
     assert_eq!((n.counts(), n.authority.running_count(), n.authority.view_sizes().2), ((0, 0), 0, 0), "nothing ran, nothing is registered, no window is held");
 
     // The non-canonical spelling, at the door.
     let (reply, _) = n.call(&slow, None, Cm::Alias).await;
-    assert_not_established(&reply, "the gateway that sent it");
+    assert_not_established(&reply, "not_verified", "the gateway that sent it");
     assert_eq!(n.counts(), (0, 0));
     n.a.shutdown().await;
 }
@@ -355,7 +389,9 @@ async fn a_call_mandate_lifted_from_another_envelope_of_the_same_gateway_is_not_
 async fn a_call_cancelled_between_the_preflight_and_the_registration_is_refused() {
     use super::provider_enforcement::test_hooks::PAUSE;
     let n = Arc::new(node().await);
-    for (tool, with_grant) in [("slow", false), ("both", true)] {
+    // `plain` is the rule that is **not** cancellable: a revoked term refuses the call under any rule (the
+    // maintainer, 2026-11-13). Seen failing first: with the refusal kept for cancellable rules only, `plain` runs.
+    for (tool, with_grant) in [("slow", false), ("both", true), ("plain", false)] {
         let call = n.tool(tool);
         let grant = with_grant.then(|| n.grant(&call, &format!("r-{tool}")));
         let (framed, id, _) = n.frame(&call, grant.as_ref(), Cm::Honest);
@@ -367,7 +403,7 @@ async fn a_call_cancelled_between_the_preflight_and_the_registration_is_refused(
         tokio::time::timeout(Duration::from_secs(20), reached.notified()).await.expect("the call reached the window after its preflight");
         n.cancel(id);
         resume.notify_one();
-        assert_not_established(&sent.await.unwrap(), "revoked");
+        assert_not_established(&sent.await.unwrap(), "revoked", "revoked");
         assert_eq!((n.counts(), n.authority.running_count()), ((0, 0), 0), "{tool}: the tool did not run, and nothing is left registered");
         assert_eq!(n.nothing_ran(), before + 1, "{tool}: the journal says nothing ran");
     }
@@ -463,11 +499,110 @@ async fn a_cancellable_rule_refuses_a_call_from_every_door_that_carries_no_call_
     assert_eq!((v["error"]["code"].as_i64(), v["error"]["data"]["detail"].as_str()), (Some(-32031), Some("call_mandate_not_established")), "/mcp: {v}");
     // A member's own call: a self envelope, no second slot.
     let reply = n.a.service().rpc_call(n.a.node_id().clone(), MCP, slow.payload.clone(), Duration::from_secs(20)).await.expect("a reply");
-    assert_not_established(&reply, "carries no call: mandate");
+    assert_not_established(&reply, "no_call_mandate", "carries no call: mandate");
     // An unframed call: the bare payload, no envelope.
     let reply = super::rpc::rpc_call_framed(&n.a.task_ctx, n.a.node_id().clone(), Arc::from(MCP), Bytes::from(slow.payload.clone()), Duration::from_secs(20)).await.expect("a reply");
+    // This node promises an envelope on every RPC it originates, so its bare frame is refused at the caller context,
+    // before any rule is read. (The unframed call that reaches the rule is the legacy sender's, in the next test.)
     let v = json(&reply);
-    assert!(v["error"].is_object(), "an unframed call is refused: {v}");
+    assert_eq!((v["error"]["code"].as_i64(), v["error"]["data"]["reason"].as_str()), (Some(-32022), Some("missing")), "{v}");
     assert_eq!((n.counts(), n.authority.running_count()), ((0, 0), 0), "none of them ran");
     n.a.shutdown().await;
+}
+
+/// One cancellable call at a node built with `opts`, refused by `cause`, and the tool not run. `bare`: sent with no
+/// envelope at all.
+async fn refused_by_cause(opts: Opts, bare: bool, cm: Cm, cause: &str, found: &str) {
+    let n = node_with(opts).await;
+    let slow = n.tool("slow");
+    let reply = if bare {
+        super::rpc::rpc_call_framed(&n.a.task_ctx, n.a.node_id().clone(), Arc::from(MCP), Bytes::from(slow.payload.clone()), Duration::from_secs(20)).await.expect("a reply").to_vec()
+    } else {
+        n.call(&slow, None, cm).await.0.to_vec()
+    };
+    assert_not_established(&reply, cause, found);
+    assert_eq!((n.counts(), n.authority.running_count()), ((0, 0), 0));
+    n.a.shutdown().await;
+}
+
+/// **A member's own unframed call under a cancellable rule is refused, `no_envelope`** (#781's review, F3). The
+/// sender does not promise envelopes (`gateway_caller_profile = legacy`), so its bare frame is read as the node's
+/// own call, the rule permits it, and there is no envelope to carry a `call:` mandate: the unframed call that is not
+/// cancellable under I4. Seen failing first: with the D-2 refusal out, it runs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unframed_call_from_a_sender_that_promises_no_envelope_is_refused_under_a_cancellable_rule() {
+    refused_by_cause(Opts { legacy: true, ..Opts::default() }, true, Cm::Stripped, "no_envelope", "no caller envelope").await;
+}
+
+/// **A provider with enforcement on and no execution authority refuses a cancellable call, `no_authority`**, though
+/// the envelope's `cm` is honest (F3). Seen failing first: with the D-2 refusal out, it runs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_provider_with_no_execution_authority_refuses_a_cancellable_call() {
+    refused_by_cause(Opts { authority: false, ..Opts::default() }, false, Cm::Honest, "no_authority", "no execution authority").await;
+}
+
+/// **A `cm` that is JSON and not a mandate is `malformed`** (F3). Seen failing first: with the D-2 refusal out, the
+/// call runs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_cm_that_is_json_and_not_a_mandate_is_not_established() {
+    refused_by_cause(Opts::default(), false, Cm::Lifted(serde_json::json!("not an object")), "malformed", "does not parse").await;
+}
+
+/// **The slot is assessed only for an envelope its gateway signed** (#781's review, F7). A node with no TLS identity
+/// carries its envelope unsigned, so the envelope's id — what binds a `cm` to its call — is not authenticated, and a
+/// relay could set it to fit a lifted `cm`. Seen failing first: with the check out, the cause is `not_verified` —
+/// refused only because nothing there happens to hold a key for the gateway.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_call_mandate_in_an_unsigned_envelope_is_not_established() {
+    refused_by_cause(Opts { tls: false, ..Opts::default() }, false, Cm::Honest, "unsigned_envelope", "not signed by its gateway").await;
+}
+
+/// **A `call_mandate_not_established` refusal does not spend the caller's grant** (#781's review, F4). Under a rule
+/// that needs a grant and is cancellable, a call with a valid grant and its `cm` stripped is refused — and the same
+/// grant, presented again with an honest `cm`, is accepted and runs: the provider gave the use back, because it
+/// refused before anything ran. Otherwise a relay that strips `cm` would turn an approved grant into a spent one.
+/// Seen failing first: with the release taken out, the second
+/// presentation is refused -32030, the grant already used at the provider.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_call_refused_for_its_call_mandate_gives_the_grant_back() {
+    let n = Arc::new(node().await);
+    let both = n.tool("both");
+    let grant = n.grant(&both, "r-kept");
+    let (reply, _) = n.call(&both, Some(&grant), Cm::Stripped).await;
+    assert_not_established(&reply, "no_call_mandate", "carries no call: mandate");
+    // The same grant, an honest envelope: it runs.
+    let (framed, id, _) = n.frame(&both, Some(&grant), Cm::Honest);
+    let (n2, call) = (Arc::clone(&n), n.tool("both"));
+    let sent = tokio::spawn(async move { n2.send(&call, framed).await });
+    n.running(2).await;
+    n.began(1).await;
+    n.cancel(id);
+    assert!(json(&sent.await.unwrap()).to_string().contains("cancelled: the call's authority lapsed while it ran"));
+    // And it is one use: a third presentation is the grant's second, refused as used.
+    let (reply, _) = n.call(&both, Some(&grant), Cm::Honest).await;
+    assert!(json(&reply)["error"]["message"].as_str().is_some_and(|m| m.contains("already used")), "{}", json(&reply));
+
+    n.a.shutdown().await;
+}
+
+fn answer(detail: &str) -> serde_json::Value {
+    serde_json::json!({"jsonrpc": "2.0", "id": 1, "error": {"code": -32031, "message": "x", "data": {"reason": "authority_not_established", "detail": detail}}})
+}
+
+/// **The gateway's door gives its own claim back on exactly this answer** (F4), and on no other -32031. Seen
+/// failing first: with the branch out of `pre_execution_refusal`, the answer is not one that gives a grant back.
+#[test]
+fn the_gateway_gives_a_grant_back_on_call_mandate_not_established_and_no_other_authority_refusal() {
+    assert_eq!(super::http::pre_execution_refusal(answer("call_mandate_not_established").to_string().as_bytes()).as_deref(), Some("call_mandate_not_established"));
+    assert_eq!(super::http::pre_execution_refusal(answer("mandate_lapsed_before_run").to_string().as_bytes()), None);
+}
+
+/// **Only the node authors that answer** (F4): a bridged server's reply in its shape becomes an ordinary tool error,
+/// which gives nothing back — or a server that ran its effect could have it run twice. Seen failing first: with the
+/// clause out of `as_tool_answer`, the server's reply passes through and the gateway would give the grant back.
+#[test]
+fn a_bridged_servers_reply_shaped_like_call_mandate_not_established_gives_nothing_back() {
+    let rewritten = super::mcp::as_tool_answer(answer("call_mandate_not_established"), &serde_json::json!(1));
+    assert_eq!((rewritten["error"]["code"].as_i64(), rewritten["error"]["data"].is_null()), (Some(-32000), true), "{rewritten}");
+    assert_eq!(super::http::pre_execution_refusal(rewritten.to_string().as_bytes()), None);
 }

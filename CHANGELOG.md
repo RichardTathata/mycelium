@@ -265,12 +265,16 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   registers the call's work, and registers the work under it as well as under the caller's own mandate — so a cancel
   stops the handler, or an `rpc_rx` serve loop racing `authority_lapsed()`, and the stop record names which mandate
   stopped it. Under a cancellable rule a call whose `call:` mandate is not established is refused
-  `authority_not_established` (-32031, `call_mandate_not_established`) and nothing runs; a call whose term is
-  already revoked is refused under any rule. A `call:` mandate fits only the envelope it was minted for (its term
+  `authority_not_established` (-32031, `call_mandate_not_established`, with a stable `data.cause`) and nothing
+  runs; a call whose term is already revoked is refused under any rule (`data.cause` `revoked`; best effort where
+  the rule is not cancellable, since a stripped `cm` lets the call run). The refusal gives back a grant the call
+  presented, is counted in `mycelium_provider_call_mandate_refusals_total{cause}`, and the slot is assessed only
+  for an envelope its gateway signed. A `call:` mandate fits only the envelope it was minted for (its term
   is the envelope's id), so one lifted into another envelope is not established. `validate()` refuses
   `requires_mandate` naming a `call:` scope. **Not yet built:** the gateway's mint — until it lands, a cancellable
-  rule refuses every call at an enforcing provider — and the cancel doors. `Rule` and `RuleDecl` gained a public
-  field.
+  rule refuses every call at an enforcing provider — and the cancel doors. **Stated, and predating this:** the
+  built-in `llm.invoke` provider runs no provider check, so no provider-side rule on `llm.invoke` is applied at
+  that door (`what-is-proven.md`). `Rule` and `RuleDecl` gained a public field.
 - **A `call:` mandate at the execution authority** (identity-and-lifecycle I4, PR 1a; `deprecations.md` §100). A
   `call:` mandate is a gateway's cancellation handle for one call: scope `call:{term}`, issued by the gateway to
   itself, with its first revocation checkpoint carried beside it (`PresentedCallMandate`).

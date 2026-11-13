@@ -18,4 +18,16 @@
   `RpcRequest::authority_lapsed()` wait on either. The bridged MCP loop and the SDK serve stream reach the same
   check but do not stop a cancelled call (PR 3).
 
-Pages: `docs/features/provider-enforcement.md`, `docs/reference/unit-file.md`, rule `provider.enforcement` rev 4.
+From #781's review and the maintainer's decisions of 2026-11-13:
+- Re-presentation holds by three mechanisms in sequence (replay window; `Revoked` from the KV after a provider
+  restart inside 300 s; `Stale`); a replay is dropped unanswered; a retry is a new term. A revoked term refuses under
+  any rule (best effort where the rule is not cancellable). One detail, with a stable `data.cause` (`CallCause`) that
+  also labels the counter.
+- The slot is assessed only for a **signed** envelope (the id is what binds `cm`); the refusal gives a claimed grant
+  back at the provider and at the gateway's `/mcp` door.
+- **Found, not fixed: the built-in `llm.invoke` provider never calls `provider_enforcement::check`**
+  (`what-is-proven.md#llm-door-not-checked-at-provider`).
+- `owner-signed-records.md`: the `call/{gw}/{term}/checkpoint` row now says the record is read from a live door;
+  Status stays Partly.
+
+Pages: `docs/wiki/dev/owner-signed-records.md`, `docs/features/provider-enforcement.md`, `docs/reference/unit-file.md`, rule `provider.enforcement` rev 4.

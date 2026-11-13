@@ -730,8 +730,14 @@ pub(crate) struct GrantClaim {
 /// certificate record has not arrived — and `gateway_caller::verify` refuses before any dispatch, so a retry under
 /// the same grant is safe once it has.
 #[cfg(all(feature = "gateway", feature = "tls"))]
-fn pre_execution_refusal(bytes: &[u8]) -> Option<String> {
+pub(crate) fn pre_execution_refusal(bytes: &[u8]) -> Option<String> {
     let v: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+    // Identity-and-lifecycle I4 (#781's review, F4): the provider's `call_mandate_not_established` is made when it
+    // registers the call's work, before any handler runs, so a grant claimed for that call was not spent. Only the
+    // node authors this shape too: the bridged loop rewrites a server's reply that has it (`mcp::as_tool_answer`).
+    if v["error"]["code"] == -32031 && v["error"]["data"]["reason"] == "authority_not_established" && v["error"]["data"]["detail"] == "call_mandate_not_established" {
+        return Some("call_mandate_not_established".to_string());
+    }
     if v["error"]["code"] != -32022 || !v["error"]["message"].as_str().is_some_and(|m| m.starts_with("caller context refused")) {
         return None;
     }
@@ -753,7 +759,7 @@ fn pre_execution_refusal(bytes: &[u8]) -> Option<String> {
 /// able to run calls at will could do anyway. A timeout, a tool error or any other reply leaves the grant spent.
 #[cfg(all(feature = "gateway", feature = "tls"))]
 pub(crate) async fn release_grant_claim_after(ctx: &Arc<TaskCtx>, preflight: &Preflight, dispatched: &Result<Bytes, GatewayDispatchError>) -> Option<String> {
-    let Preflight::Proceed { grant_claim: Some(c), .. } = preflight else { return None };
+    let Preflight::Proceed { grant_claim: Some(_), .. } = preflight else { return None };
     let reason = match dispatched {
         Ok(reply) => pre_execution_refusal(reply)?,
         // The gateway's own refusals before it sent anything (#760's review, M2): an exchange at the IdP that yielded no
@@ -767,10 +773,20 @@ pub(crate) async fn release_grant_claim_after(ctx: &Arc<TaskCtx>, preflight: &Pr
         ) => e.reason().to_string(),
         Err(_) => return None,
     };
-    let authority = ctx.execution_authority.get()?;
+    release_unspent_grant_claim(ctx, preflight).await.then_some(reason)
+}
+
+/// Give back the grant use `preflight` claimed, for a call this node knows did not run: the marker tombstoned, then
+/// the in-memory claim released. `false` when the permit claimed none. The caller decides that nothing ran —
+/// [`release_grant_claim_after`] from the provider's answer or its own refusal to dispatch, the provider's
+/// registration from its own refusal before any handler (`call_mandate_not_established`).
+#[cfg(all(feature = "gateway", feature = "tls"))]
+pub(crate) async fn release_unspent_grant_claim(ctx: &Arc<TaskCtx>, preflight: &Preflight) -> bool {
+    let Preflight::Proceed { grant_claim: Some(c), .. } = preflight else { return false };
+    let Some(authority) = ctx.execution_authority.get() else { return false };
     mycelium_core::ops::kv_delete_async(ctx, Arc::from(c.marker.as_str())).await;
     authority.release_grant_use(&c.holder, &c.scope, &c.term, &c.point);
-    Some(reason)
+    true
 }
 
 /// The MCP tool-call route, as it is named in every piece of evidence it produces.

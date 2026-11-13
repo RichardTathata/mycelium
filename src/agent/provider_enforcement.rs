@@ -269,6 +269,7 @@ pub(crate) async fn check(ctx: &Arc<TaskCtx>, req: &RpcRequest, already_verified
         presented: c.call_mandate.as_deref().cloned(),
         gateway: gateway_caller::node_principal(&c.via),
         envelope_id: c.envelope_id,
+        signed: matches!(c.attestation, gateway_caller::CallerAttestation::Signed { .. }),
     });
     let (principal, scopes, mandate, claim) = match caller {
         Some(c) => (c.principal, c.scopes, c.mandate, c.resource),
@@ -363,6 +364,8 @@ struct CallSlot {
     gateway: String,
     /// The envelope's id, which the mandate's term must name (`c{n}`).
     envelope_id: Option<u64>,
+    /// The envelope was signed by its gateway's node key and verified here: its id is authenticated.
+    signed: bool,
 }
 
 /// A preflight's refusal as the provider's; on admission, whether the permit was decided on an established mandate.
@@ -448,17 +451,20 @@ async fn admit_after(ctx: &Arc<TaskCtx>, principal: &str, call: Option<&Admitted
     // runs unregistered, as it did before I4.
     let mut call_work = None;
     if let Some(call) = call {
-        let (established, found) = assess_call_slot(ctx, call);
-        match established {
-            Ok(guard) => call_work = guard,
-            Err(revoked) if revoked || call.cancellable => {
+        match assess_call_slot(ctx, call) {
+            Ok(guard) => call_work = Some(guard),
+            Err((cause, found)) if cause == CallCause::Revoked || call.cancellable => {
                 #[cfg(feature = "metrics")]
-                metrics::counter!("mycelium_provider_call_mandate_refusals_total").increment(1);
-                // The permit's record says `Attempted`; this one, citing the same attempt, says nothing ran.
+                metrics::counter!("mycelium_provider_call_mandate_refusals_total", "cause" => cause.label()).increment(1);
                 if let Some(permit) = call.permit.as_ref() {
+                    // The permit's record says `Attempted`; this one, citing the same attempt, says nothing ran.
                     super::http::ae_record_execution(ctx, permit, super::action_evaluator::Execution::None).await;
+                    // And a grant the permit claimed is given back (#781's review, F4): the claim guards work that
+                    // may have run, and this provider knows none did. Without it a relay that strips `cm` would turn
+                    // an approved grant into a spent one.
+                    super::http::release_unspent_grant_claim(ctx, permit).await;
                 }
-                let message = if revoked {
+                let message = if cause == CallCause::Revoked {
                     format!("authority not established: the call was cancelled before it ran ({found}); nothing ran (call_mandate_not_established)")
                 } else {
                     format!("authority not established: the rule that permits this call is cancellable, and the call's call: mandate is not established at this provider ({found}); nothing ran (call_mandate_not_established)")
@@ -467,7 +473,8 @@ async fn admit_after(ctx: &Arc<TaskCtx>, principal: &str, call: Option<&Admitted
                     reason: "authority_not_established".into(),
                     message,
                     code: -32031,
-                    data: json!({ "reason": "authority_not_established", "detail": "call_mandate_not_established", "found": found }),
+                    // One detail, with the cause as a stable name beside the sentence (the maintainer, 2026-11-13).
+                    data: json!({ "reason": "authority_not_established", "detail": "call_mandate_not_established", "cause": cause.label(), "found": found }),
                 });
             }
             Err(_) => {}
@@ -492,32 +499,79 @@ async fn admit_after(ctx: &Arc<TaskCtx>, principal: &str, call: Option<&Admitted
     Ok(Admission { _slot: slot, work, call_work })
 }
 
-/// **Assess a call's second mandate slot and register its work** (identity-and-lifecycle I4). `Ok(Some(guard))`:
-/// the `call:` mandate is established and the work registered under it, until the mandate's own window.
-/// `Ok(None)` never happens with a slot to assess; `Err(true)`: the term is revoked; `Err(false)`: not established,
-/// for the reason given — no envelope, no `cm`, no authority attached, a `cm` that does not parse, a term that is not
-/// this envelope's, or a mandate that does not verify.
+/// Why a call's `call:` mandate is not established — the stable, machine-readable `data.cause` of a
+/// `call_mandate_not_established` refusal, and the label of `mycelium_provider_call_mandate_refusals_total`. A caller
+/// (and the cancel receipt) reads this, never the sentence in `data.found`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CallCause {
+    /// The term is revoked: the gateway cancelled the call before it ran. Final. Refused under any rule.
+    Revoked,
+    /// The call came in no caller envelope, which is what carries a `call:` mandate.
+    NoEnvelope,
+    /// The envelope carries no `cm`: a gateway that does not mint, or a slot stripped on the way.
+    NoCallMandate,
+    /// The envelope is not signed by its gateway, so its id — what binds `cm` to it — is not authenticated.
+    UnsignedEnvelope,
+    /// This provider has no execution authority to assess one.
+    NoAuthority,
+    /// `cm` is not a `PresentedCallMandate`.
+    Malformed,
+    /// The envelope has no id for the term to name.
+    NoEnvelopeId,
+    /// The term is not this envelope's: the mandate was minted for another call.
+    OtherEnvelope,
+    /// The mandate verified and is refused for another reason than revocation (its window, its operation).
+    Refused,
+    /// The mandate did not verify here (its issuer, its key, its checkpoint), or this node holds as many windows
+    /// as it keeps.
+    NotVerified,
+}
+
+impl CallCause {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Revoked => "revoked",
+            Self::NoEnvelope => "no_envelope",
+            Self::NoCallMandate => "no_call_mandate",
+            Self::UnsignedEnvelope => "unsigned_envelope",
+            Self::NoAuthority => "no_authority",
+            Self::Malformed => "malformed",
+            Self::NoEnvelopeId => "no_envelope_id",
+            Self::OtherEnvelope => "other_envelope",
+            Self::Refused => "refused",
+            Self::NotVerified => "not_verified",
+        }
+    }
+}
+
+/// **Assess a call's second mandate slot and register its work** (identity-and-lifecycle I4). `Ok(guard)`: the
+/// `call:` mandate is established and the work registered under it, until the mandate's own window. `Err`: why not
+/// ([`CallCause`]) and what was found, in words.
 ///
 /// **The term must be `c{n}` of the envelope that carried it** (Q9, answered in this PR). `cm` is outside the
 /// gateway's envelope signature, and its possession proof binds the operation, the resource and the arguments —
 /// not the call. So a relaying member could put another of the same gateway's `call:` mandates, minted for an
 /// identical call, into this envelope: the work would be registered under the other call's term and the gateway's
 /// cancel of this one would miss it. The envelope's id is inside its signature, so requiring the term to name it
-/// closes that with no change to the signed bytes.
-fn assess_call_slot(ctx: &Arc<TaskCtx>, call: &AdmittedCall) -> (Result<Option<super::gateway_authority::WorkGuard>, bool>, String) {
+/// closes that with no change to the signed bytes — **which is why the envelope must be signed** (#781's review,
+/// F7): on a node with no TLS identity the id is carried, not authenticated, and a relay could set it to fit.
+fn assess_call_slot(ctx: &Arc<TaskCtx>, call: &AdmittedCall) -> Result<super::gateway_authority::WorkGuard, (CallCause, String)> {
     use super::action_evaluator::MandateState;
-    let not = |why: &str| (Err(false), why.to_string());
-    let Some(slot) = &call.slot2 else { return not("the call came in no caller envelope, which is what carries a call: mandate") };
-    let Some(cm) = &slot.presented else { return not("the envelope carries no call: mandate") };
-    let Some(authority) = ctx.execution_authority.get() else { return not("this provider has no execution authority to assess a call: mandate") };
+    let not = |cause: CallCause, why: &str| Err((cause, why.to_string()));
+    let Some(slot) = &call.slot2 else { return not(CallCause::NoEnvelope, "the call came in no caller envelope, which is what carries a call: mandate") };
+    let Some(cm) = &slot.presented else { return not(CallCause::NoCallMandate, "the envelope carries no call: mandate") };
+    if !slot.signed {
+        return not(CallCause::UnsignedEnvelope, "the envelope is not signed by its gateway, so nothing binds a call: mandate to it");
+    }
+    let Some(authority) = ctx.execution_authority.get() else { return not(CallCause::NoAuthority, "this provider has no execution authority to assess a call: mandate") };
     let Ok(presented) = serde_json::from_value::<super::gateway_authority::PresentedCallMandate>(cm.clone()) else {
-        return not("the envelope's call: mandate does not parse");
+        return not(CallCause::Malformed, "the envelope's call: mandate does not parse");
     };
     let m = &presented.grant.mandate;
     match slot.envelope_id {
         Some(n) if m.term.as_str() == format!("c{n}") => {}
-        Some(n) => return (Err(false), format!("the call: mandate's term {} is not this envelope's (c{n}): it was minted for another call", m.term.as_str())),
-        None => return not("the envelope has no id for a call: mandate's term to name"),
+        Some(n) => return Err((CallCause::OtherEnvelope, format!("the call: mandate's term {} is not this envelope's (c{n}): it was minted for another call", m.term.as_str()))),
+        None => return not(CallCause::NoEnvelopeId, "the envelope has no id for a call: mandate's term to name"),
     }
     let now = ctx.hlc.decision_now_ms();
     let assessed = authority.assess_call(&slot.gateway, &call.operation, &call.resource, &call.arguments, &presented, now, &super::gateway_member_keys(ctx), |key| {
@@ -527,20 +581,19 @@ fn assess_call_slot(ctx: &Arc<TaskCtx>, call: &AdmittedCall) -> (Result<Option<s
         Some(MandateState::Established) => {
             let clock_ctx = Arc::clone(ctx);
             // `AuthorizedWork::new` clamps the registration to the mandate's own window.
-            let guard = authority.begin(
+            Ok(authority.begin(
                 crate::mandate::authority::AuthorizedWork::new(
                     super::gateway_authority::mandate_operation(&call.operation, &call.resource),
                     Some(m.clone()),
                     m.valid_until_ms,
                 ),
                 Arc::new(move || clock_ctx.hlc.decision_now_ms()),
-            );
-            (Ok(Some(guard)), String::new())
+            ))
         }
-        Some(MandateState::Refused(crate::mandate::MandateRefusal::Revoked { term })) => (Err(true), format!("term {term} is revoked")),
-        Some(MandateState::Refused(r)) => (Err(false), format!("refused: {r}")),
-        Some(MandateState::Unknown(why)) => (Err(false), why),
-        None => not("the call: mandate was not assessed"),
+        Some(MandateState::Refused(crate::mandate::MandateRefusal::Revoked { term })) => Err((CallCause::Revoked, format!("term {term} is revoked"))),
+        Some(MandateState::Refused(r)) => Err((CallCause::Refused, format!("refused: {r}"))),
+        Some(MandateState::Unknown(why)) => Err((CallCause::NotVerified, why)),
+        None => not(CallCause::NotVerified, "the call: mandate was not assessed"),
     }
 }
 
