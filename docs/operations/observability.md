@@ -54,10 +54,13 @@ curl -s http://node:8080/stats | jq
      more than the bound behind — the margin is the bound *minus* the furthest any member's stamps run
      ahead, so with one peer four minutes ahead (inside the bound, uncounted) a node 61 s behind counts.
   3. **Honest senders with good clocks, after any node has heard a stamp at or past the bound.** A node
-     that hears such a stamp keeps its own clock at its limit, and its **next local writes are stamped
-     just past that limit**, so every peer whose clock is not ahead of it counts them. One far-future
+     that hears such a stamp keeps its own clock at its limit. When the stamp's logical counter is full
+     (`u64::MAX`, or a member's choice) its **next local write is stamped a millisecond past that
+     limit**, so every peer whose clock is not ahead of it counts it; with a lower counter its next
+     writes are *on* the limit, which a peer with the same clock does not count and a peer even a
+     millisecond behind does. One far-future
      frame therefore makes many nodes count many senders; and a member can cause it with frames stamped
-     exactly *on* the bound, which are themselves never counted
+     exactly *on* the bound with a full logical counter, which are themselves never counted
      (`an_honest_write_after_an_observed_future_stamp_is_reported_by_a_peer`, `mycelium-core/src/hlc.rs`).
      "Every node counts, for many senders" is this case, not a fleet of bad clocks.
 

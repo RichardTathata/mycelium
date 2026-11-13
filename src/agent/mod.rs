@@ -567,9 +567,11 @@ pub struct SystemStats {
     /// **Evidence that a far-future stamp is in circulation, not of who sent it.** Three causes: a
     /// **peer's** clock is ahead; **this node's** clock is behind (by the bound minus the furthest
     /// any member's stamps run ahead, not only by the whole bound); and **honest senders with good
-    /// clocks** — a node that has heard a stamp at or past the bound keeps its clock at its limit and
-    /// stamps its next local writes just past it, which every peer not ahead of it counts. A stamp
-    /// exactly on the bound does this and is itself never counted.
+    /// clocks** — a node that has heard a stamp at or past the bound keeps its clock at its limit. If
+    /// that stamp's logical counter was full (`u64::MAX`, or a member's choice) its next local write
+    /// is stamped a millisecond past the limit, which every peer not ahead of it counts; otherwise
+    /// its next writes are on the limit, which a peer even a millisecond behind counts. A stamp
+    /// exactly on the bound with a full counter does the first and is itself never counted.
     ///
     /// Entries, not keys, senders or incidents: an entry the fleet already holds is counted again by
     /// anti-entropy on every round its bucket differs, and a member can raise the figure at will. A

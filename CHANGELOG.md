@@ -153,7 +153,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `max_clock_drift_ms = 0` nothing is counted. **The count is evidence that a far-future stamp is in
   circulation, not of who sent it**: it rises for a sender whose clock is ahead, for a receiver whose own clock
   is behind, and for honest senders with good clocks once any node has heard a stamp at or past the bound (its
-  next local writes are stamped just past its limit); a held entry is recounted by anti-entropy while its
+  clock is left on its limit: its next local write is stamped just past it when the heard stamp's logical
+  counter was full, and on it otherwise, which a peer even a millisecond behind counts); a held entry is recounted by anti-entropy while its
   bucket differs, and a member can raise the figure at will (`docs/operations/observability.md`). Entries
   replayed from a node's own WAL or snapshot are not counted. `mycelium_core::hlc` gains `beyond_drift_bound`
   and `Hlc::observe_reporting`, `mycelium_core::bounds` `StampDoor` (`#[non_exhaustive]`). **`SystemStats`

@@ -22,8 +22,9 @@ three inbound doors count an entry the clamp caught and apply, forward and persi
   door (`a_node_whose_clock_is_behind_counts_the_fleets_ordinary_entries`).
 - Not built: step 2 (refusal or local non-admission), a count at replay, a node-local repair.
 - #782's review (same day): the count also rises for honest senders with good clocks — a node that has heard a
-  stamp at or past its limit stamps its next local write just past it — and a stamp exactly on the limit does
-  this uncounted. Recorded as a third cause on every page that gave two, as a fifth exit case for step 2 in the
+  stamp at or past its limit with a full logical counter stamps its next local write just past it (with a
+  lower counter, on it: counted by a peer even a millisecond behind) — and a stamp exactly on the limit with a
+  full counter does this uncounted. Recorded as a third cause on every page that gave two, as a fifth exit case for step 2 in the
   plan row, and as tests of the existing clock behaviour (`hlc.rs`, `lib_tests.rs`). Also stated: a held entry is
   recounted by anti-entropy while its bucket differs; a member can raise the count at will; a frame refused
   before the clamp is not counted. `StampDoor` is `#[non_exhaustive]`.

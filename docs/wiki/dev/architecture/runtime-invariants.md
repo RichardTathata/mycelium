@@ -27,9 +27,12 @@ reads no prefix and no owner. `GET /stats` `kv_future_stamps` (+ `kv_future_stam
 far-future stamp is in circulation, not of who sent it.** It rises for a peer whose clock is ahead; for a
 receiver whose own clock is behind (`a_node_whose_clock_is_behind_counts_the_fleets_ordinary_entries`,
 `src/lib_tests.rs`); and — #782's review — for **honest senders with good clocks**: a node that observes a stamp
-at or past its limit is left with its clock on the limit and the logical counter full, so `tick` carries and
-its next local write is one millisecond past it, counted by every same-clock peer. A stamp exactly on the
-limit with a full counter does this and is itself not counted, so a member can make a fleet count its own
+at or past its limit is left with its clock on the limit, one step past the stamp's logical counter. When that
+counter is full (`u64::MAX`, or a member's choice of `0xFFFF`) `tick` carries and its next local write is one
+millisecond past the limit, counted by every same-clock peer; with a lower counter (`pack(limit + 1, 0)` leaves
+`pack(limit, 1)`) the next writes are on the limit, not counted by a same-clock peer and counted by one even a
+millisecond behind. A stamp exactly on the
+limit with a full counter does the first and is itself not counted, so a member can make a fleet count its own
 honest writes without sending one counted frame
 (`an_honest_write_after_an_observed_future_stamp_is_reported_by_a_peer`, `mycelium-core/src/hlc.rs`;
 `an_honest_write_after_a_stamp_on_the_bound_is_counted_at_a_same_clock_peer`, `src/lib_tests.rs`). It is also

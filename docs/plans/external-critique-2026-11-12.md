@@ -662,9 +662,12 @@ trade beside it. Until then neither shape is buildable.
   the row states the churn.
 - **Honest writes after a stamp at or past the bound** (found by step 1's review, #782; a finding against step 2
   in **either** shape). A node that observes a stamp at or past its limit is left with its clock on the limit
-  and the logical counter full (`mycelium-core/src/hlc.rs`, the clamp), so `tick` carries and its next local
-  write is stamped one millisecond past that limit; a peer whose wall clock is not ahead of the writer's sees
-  that honest write as beyond its bound. A stamp **exactly on** the limit with a full counter does the same and
+  (`mycelium-core/src/hlc.rs`, the clamp), one step past the stamp's logical counter. **When that counter is
+  full** — `u64::MAX`, or a member's choice of `0xFFFF` — `tick` carries and the node's next local write is
+  stamped one millisecond past the limit; a peer whose wall clock is not ahead of the writer's sees that honest
+  write as beyond its bound. With a lower counter (`pack(limit + 1, 0)` leaves `pack(limit, 1)`) the next
+  writes are *on* the limit: a same-clock peer does not count them, a peer even a millisecond behind does. A
+  stamp **exactly on** the limit with a full counter does the first and
   is itself inside the bound — not counted today, and not refused under step 2. So under step 2 as written,
   refusal or local non-admission alike, those honest writes would be refused or not admitted: **a member sending
   in-bound frames could turn the refusal on the fleet's own writes**, and the slow-clock margin is not the bound
@@ -685,7 +688,7 @@ trade beside it. Until then neither shape is buildable.
 entry. Does not stop a stamp *inside* the bound: a member can still out-stamp an owner by up to five minutes,
 which is what CR2's first step had to be rewritten around. Does not change the wire.
 
-**Size:** S for the counter; M for the refusal with its four cases.
+**Size:** S for the counter; M for the refusal with its five cases.
 
 #### CR14 · A per-record WAL checksum *(L4; the critique's code area 3, first half)*
 

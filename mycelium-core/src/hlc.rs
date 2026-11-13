@@ -461,6 +461,13 @@ mod tests {
         assert_eq!(physical_ms(honest), WALL + BOUND + 1);
         assert!(peer.observe_reporting(honest).1, "yet the write that follows it is reported by a same-clock peer");
 
+        // The same with a logical counter that is not full: the clock is left one step past it, the
+        // next write is ON the limit, and a same-clock peer does not report it (the confirm round, N1).
+        let (writer, peer) = (Hlc::with_max_drift(BOUND), Hlc::with_max_drift(BOUND));
+        assert!(writer.observe_reporting(pack(WALL + BOUND + 1, 0)).1);
+        assert_eq!(writer.current(), pack(WALL + BOUND, 1));
+        assert!(!peer.observe_reporting(writer.tick()).1, "on the limit: a same-clock peer does not report it");
+
         // 3. A member four minutes ahead, and a receiver 61 s behind.
         let writer = Hlc::with_max_drift(BOUND);
         assert!(!writer.observe_reporting(pack(WALL + 240_000, 0)).1, "four minutes ahead is inside the bound");
