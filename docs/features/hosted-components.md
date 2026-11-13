@@ -6,7 +6,8 @@
 pulled by content address. A component reaches the node only through the imports of its WIT world — a confined KV, a
 confined emit, a log — never the node's own handles: its KV lives under `comp/{node}/{namespace}/…`, a subtree it cannot
 leave, and it may emit only kinds under `comp/{namespace}/…` (or kinds the host listed for it) and never a protected
-RPC kind, because an emit from inside the process would reach that kind's handlers past the door that checks
+RPC kind nor one of the substrate's own kinds (`consensus.*`, `sys.*` — refused even when listed,
+[deprecations §103](../guide/deprecations.md)), because an emit from inside the process would reach that kind's handlers past the door that checks
 authority. Each instance has a memory cap and a wall-clock deadline per call; where `fuel_per_call` or
 `operator_fuel_per_call` is set, fuel is metered by who signed the entry, and with neither set nothing is metered;
 and guest code runs on a blocking thread, never on the node's async workers.

@@ -798,6 +798,87 @@ and every raw route that sends a kind, each seen admitted first; an application 
 
 **Size:** S.
 
+#### CR26 · Supervisor signals are signed, or scoped *(found by the signal-routes survey of 2026-11-13)*
+
+**State (2026-11-13):** *after wave 1b*; the choice between signing and a scope is the maintainer's and is made
+before the PR. No behaviour was changed by CR25 (decided 2026-11-13).
+
+**What:** `agent.approve` and `agent.veto` (`mycelium-core/src/signal.rs`, `signal_kind`) are plain JSON signals.
+`AgentStateMachine`'s approval wait (`src/agent/state_machine.rs`, the `AGENT_VETO` receiver) takes any
+`agent.veto` naming the tool as a veto: it checks neither who sent it nor that it answers this approval. So any
+member, and any gateway client with `mesh:write` (`POST /gateway/signal/emit`), vetoes any pending approval; any
+`mesh:read` client sees which approvals are asked. It fails closed — a veto refuses, silence approves — so
+nothing is authorised this way; the cost is availability, and a supervisor's veto that proves nothing about the
+supervisor. Either the veto is signed by the supervisor's key and verified against a declared set, bound to the
+approval it answers (its node, tool and a nonce); or the two kinds get a scope of their own at the gateway and a
+sender filter in process (`signal_rx_from`). The limit is stated today on `docs/operations/rbac.md` and
+`deprecations.md` §103.
+
+**Exit:** a veto from a sender outside the declared supervisors does not refuse a transition, seen refusing
+first; a supervisor's does; a veto for another approval of the same tool does not.
+
+**Does not:** make approval anything but default-approve-on-silence; that is the grant path's job (X3).
+
+**Size:** S–M.
+
+#### CR27 · The other library kinds on the signal streams, and a mandate on a tap *(found by the signal-routes survey of 2026-11-13)*
+
+**State (2026-11-13):** *after wave 1b*; each line needs its decision (refuse, scope, or state and keep).
+Stated as they stand on `rbac.md` and in `deprecations.md` §103.
+
+**What:** after CR25 a `mesh:read` tap still receives, and a `mesh:write` emit still sends:
+- `invoke.bulk` — a bulk call's ticket. `GET /bulk/{corr_id}` is public by design, its per-call nonce the
+  credential (`src/agent/http/mod.rs`); whether the ticket a tap shows is enough to fetch a staged payload was
+  **not traced**, and is this row's first question;
+- `boundary.opaque` / `boundary.transparent` — an emitted `boundary.opaque` makes a proposer on the receiving
+  node re-evaluate its quorum (`src/consensus.rs`, the `opaque_rx` arm); the recompute reads the KV, not the
+  payload, so the worst read is a wasted recompute;
+- `agent.state` — a node's state transitions, by name;
+- `artifact.fetch`, `artifact.size`, `artifact.fetch_range` (`mycelium-wasm-host/src/mesh_source.rs`) and
+  `reason.blob.fetch` (`mycelium-reason/src/blob.rs`) — the ids asked for on a tap; and through `rpc/call` under
+  `mesh:write`, the artifact or blob itself for an id the caller knows;
+- **any RPC kind that is not protected** — a tap shows each request's whole frame: the correlation nonce, the
+  caller envelope, and a carried mandate with its possession proof. CR25 closed what the nonce was used for (a
+  forged `rpc.result`); the mandate and the envelope are still read. An operator closes a kind by listing it in
+  `protected_rpc_kinds`; whether the streams should refuse *every* kind an in-process `rpc_rx` serves is the
+  decision;
+- **`cap.invoke/{namespace}/{name}` by a raw route** — CR25 refused observing it; `POST /gateway/rpc/call` still
+  invokes a hosted capability under `mesh:write`. Where the component is bridged as an MCP tool the door that
+  decides the call is `/mcp` (`mcp:invoke`, the AE preflight), and the raw route goes around it as `mcp.invoke`
+  did before closure plan C1. Surveyed 2026-11-13: no example, test, SDK or procedure in the repository calls a
+  hosted capability through a raw gateway route; the Rust callers (`examples/coop`'s `stem_driver`, `catalog`,
+  `provisioning`; `mycelium-wasm-host`'s `first_stem_fleet`) are members calling `ServiceHandle::rpc_call`.
+
+**Exit:** each line refused, scoped or stated with its test or its sentence; the `cap.invoke/` line, if refused,
+with a member's direct call seen still served.
+
+**Does not:** touch a member's emit or receive; these are the gateway's doors.
+
+**Size:** S per line.
+
+#### CR28 · A signed consensus frame is bound to its sender and a time *(found by the signal-routes survey of 2026-11-13)*
+
+**State (2026-11-13):** *after wave 1b*; a wire-format question (wire v12), so it waits for a release that moves
+the wire, and may fold into CR10's model.
+
+**What:** under `[tls]`, `sign_payload` (`src/consensus.rs`) signs `mycelium.consensus/msg/1 ‖ len ‖ msg_bytes`
+and nothing else: not the signal's sender, scope or nonce, and no time. `signer_authorized` binds a proposal's or
+a vote's named node to the signer; `Commit`, `CommitTerm`, `Nack`, `Promise` and `PromiseTerm` carry no such
+field. So a member can re-send another member's signed frame as its own emission, later and to a scope of its
+choosing. CR25 removed the gateway's route to this (a client could tap a signed frame and emit it); a member's
+remains. What a replay achieves is bounded by the acceptor's stored ballots and by the record keys: a replayed
+`CommitTerm` rewrites the same record at the same ballot key and is skipped where that key is a tombstone
+(`run_consensus_listener`). **Not determined:** whether a replayed old commit can bring back a finished decision
+on a node that never held its tombstone.
+
+**Exit:** the undetermined case answered by a test; if it holds, a frame carries its signer's sender and a
+freshness bound inside the signature, and a replay is refused, seen accepted first.
+
+**Does not:** make consensus Byzantine-tolerant: a commit still carries no quorum certificate (CFT, not BFT) —
+which is why, without `[tls]`, any member's commit is written.
+
+**Size:** M.
+
 ### Tier 3 · Structure
 
 Lower priority; each is a refactor with no behaviour change, and each waits for the tier-1 row that touches the

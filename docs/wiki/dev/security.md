@@ -428,6 +428,36 @@ collusion and cooperation are the same behaviour, acts off the substrate are inv
 by design. Motivated by the 2026 OpenAI–Hugging Face agent incident.
 Log: [`.log/2026-09-23-threat-model-boundary-h.md`](.log/2026-09-23-threat-model-boundary-h.md).
 
+## A kind the caller names: the substrate's own are refused at the gateway (2026-11-13)
+
+The handler table (`mycelium-core/src/signal.rs`, exact match on the kind's bytes) is one table: the consensus
+acceptor and learner, the `sys.` responders, a hosted component's serve loop and a pending RPC reply all register
+on it, and so does a gateway tap (`register_tap`), a client serve stream (`register_client`) and anything a raw
+route emits. Ten doors take the kind from an HTTP caller. They refused protected work (C1) and the reply kinds on
+the streams, and nothing else, so (each reproduced fail-first, `src/agent/http/substrate_kind_tests.rs`):
+
+- **read:** a `mesh:read` tap on `consensus.propose` / `consensus.commit` received each proposal's and commit's
+  slot and value — the data #774, #777 and the slot guard closed on the KV, log and slot routes;
+- **write:** on a mesh without `[tls]`, `signal/emit` under `mesh:write` delivered a made-up `CommitTerm`, which
+  every learner wrote as the slot's decision (`decode_verify` is a bare decode without `[tls]`; a commit carries no
+  quorum certificate — CFT, not BFT). With `[tls]` only a replay of a tapped signed frame was possible:
+  `sign_payload` covers the message, not its sender, scope or a time;
+- **forged reply:** `PendingReply` claims on the nonce and `sig.sender == target` (`src/agent/rpc.rs`); a tap on
+  the request's kind shows the nonce and an emit's sender is the gateway's node, so a client of the provider's
+  gateway answered for it.
+
+**The rule now:** `SUBSTRATE_KINDS` + `SUBSTRATE_KIND_PREFIXES` (`src/agent/mod.rs`, ungated; `is_substrate_kind`)
+are refused `403 protected_kind` on observe, serve, mailbox and send, for every token; the reply kinds on send;
+`cap.invoke/…` on observe; and `confine_kind` refuses a substrate kind a host listed. A new internal kind is safe
+by default if it is named under `consensus.` or `sys.`, and `the_list_holds_every_substrate_kind_constant` reads the
+constants from the source and fails until it is listed. **Name a new node-to-node kind under `sys.`.** Layer II
+is untouched (detection, not prevention): a member sends and receives every kind.
+
+**Open, stated** (`rbac.md`, `deprecations.md` §103, critique plan CR26–CR28): unsigned supervisor signals
+(`agent.veto` by any `mesh:write` holder, fails closed); `invoke.bulk`, `boundary.*`, `agent.state`, `artifact.*`,
+`reason.blob.fetch` observable; a tap on an ordinary RPC kind shows the caller envelope and mandate; a hosted
+capability callable by a raw route; no freshness or sender bind on a signed consensus frame.
+
 ## The owner-signed rule (2026-11-12)
 
 **A security-bearing record kept in the gossip KV is signed by its owner and verified at read.** Any admitted member

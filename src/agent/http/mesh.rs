@@ -587,16 +587,24 @@ pub(super) async fn gw_scatter(
 /// this stream hands it to the HTTP connection — not when the client reads it: what the connection
 /// (or the kernel's socket buffers) had accepted when it drops is lost, the rest stay for the next
 /// stream (post-360 hardening row E).
+///
+/// A kind `mailbox/deliver` refuses is refused here the same way (2026-11-13): protected work, an RPC reply kind,
+/// one of the substrate's own. Nothing can have been delivered under one, so the stream would only ever be empty;
+/// the refusal keeps the two halves of the mailbox one rule.
 pub(super) async fn gw_mailbox_subscribe(
     Path(kind):  Path<String>,
     State(ctx):  State<Arc<HttpCtx>>,
-) -> Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>> {
+) -> axum::response::Response {
+    if let Some(refused) = refuse_protected_kind(&ctx.agent_ctx.config, &kind) {
+        return refused;
+    }
     let events = mailbox_events(Arc::clone(&ctx.agent_ctx), Arc::from(kind.as_str()), ctx.shutdown_rx.clone());
     Sse::new(events.map(|data| {
         let kind = data["kind"].as_str().unwrap_or_default().to_string();
-        Ok(Event::default().event(kind).data(data.to_string()))
+        Ok::<_, Infallible>(Event::default().event(kind).data(data.to_string()))
     }))
     .keep_alive(KeepAlive::default())
+    .into_response()
 }
 
 /// The event stream behind `GET /gateway/mailbox/{kind}`: each item is one event's data object.

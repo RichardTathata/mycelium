@@ -87,6 +87,20 @@ token resolves to its own principal is `token_identities_are_qualified_by_the_is
   tap on `consensus.propose` or `consensus.commit` receives proposed values, a component's among them, and a `mesh:write` token can emit a raw `consensus.commit` frame through `POST /gateway/signal/emit`: without `[tls]` the frame is unsigned and a learner records the decision it carries, for any slot; with `[tls]` a client cannot produce the signed wrapper, but can replay one it tapped. The cross-group route is the one *consensus* route whose caller names the slot, not the only door
   that reaches one; the signal-routes change closes both (decided 2026-11-13, in progress)
   ([rbac](../operations/rbac.md), [deprecations §102](../guide/deprecations.md)).
+- **A kind the caller names is never the substrate's own.** Ten doors take a signal kind from the request: the two
+  signal streams, the serve stream, the mailbox stream and the six raw send routes. Each refuses the consensus
+  protocol's kinds (`consensus.propose`, `consensus.vote`, `consensus.commit`, `consensus.nack`), the node-to-node
+  `sys.explain` and `sys.replica-sync.v1`, and any kind starting `consensus.` or `sys.` — **403** `protected_kind`,
+  for every token. The send routes and the mailbox stream refuse the reply kinds `rpc.result` and `bulk.result`,
+  and the signal streams a hosted capability's `cap.invoke/…`. So `mesh:read` does not read a consensus proposal,
+  `mesh:write` does not send a commit or a reply, and neither reaches a peer's event ring. One list decides
+  (`SUBSTRATE_KINDS` and `is_substrate_kind`, in [`src/agent/mod.rs`](../../src/agent/mod.rs)), derived from the
+  kind constants by a test; the tests are in
+  [`substrate_kind_tests.rs`](../../src/agent/http/substrate_kind_tests.rs), three of them the proofs of what the
+  doors did before. **Not covered:** the supervisor signals are unsigned (any `mesh:write` holder can veto; it
+  fails closed), a tap on an ordinary RPC kind shows its requests' caller envelope and mandate, and a hosted
+  capability can be called by a raw route ([rbac](../operations/rbac.md),
+  [deprecations §103](../guide/deprecations.md)).
 - **Not built:** on a credentialed node `/health`, `/ready`, `/stats`, `/metrics`, `/bulk/{id}` and the A2A
   descriptor stay public, `/a2a` admits an anonymous caller, and a merged router's paths outside `/gateway/` are not
   gated (the `gw.exposed_closed` row); a bearer crosses the wire in cleartext unless the gateway serves

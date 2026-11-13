@@ -221,6 +221,17 @@ export class SupersededError extends Error {
   }
 }
 
+/** A stream refused `403 protected_kind` at open, as the typed error; any other refusal stays the generic one. */
+function protectedKindRefusal(kind: string): (status: number, body: unknown) => Error | undefined {
+  return (status, body) => {
+    const b = body as { error?: string; kind?: string; message?: string } | undefined;
+    if (status === 403 && b?.error === "protected_kind") {
+      return new ProtectedKindError(String(b.kind ?? kind), String(b.message ?? b.error));
+    }
+    return undefined;
+  };
+}
+
 /** The key, stream or slot a write names, for the refusal that names it back. */
 type Subject = { key?: string; stream?: string; slot?: string };
 
@@ -678,6 +689,8 @@ export class MyceliumAgent {
    */
   async *onSignal(kind: string): AsyncGenerator<Signal> {
     const url = this._sseUrl(`/gateway/signal/sse/${pathSegment(kind)}`);
+    // A kind the stream refuses (`403 protected_kind`: protected work, an RPC reply kind, one of the substrate's
+    // own, a hosted capability's) is thrown as ProtectedKindError, not as an SSE failure (0.2.10).
     yield* sseStream<Signal>({ url, headers: this.auth }, (data, event) => {
       const raw = parseLossless(data) as {
         kind?: string; sender: string; payload_b64: string; nonce: number | string;
@@ -689,7 +702,7 @@ export class MyceliumAgent {
         payload: fromb64(raw.payload_b64),
         nonce: toBigInt(raw.nonce),
       };
-    });
+    }, { refusal: protectedKindRefusal(kind) });
   }
 
   // ── KV store ──────────────────────────────────────────────────────────────
@@ -1045,7 +1058,7 @@ export class MyceliumAgent {
         sender: raw.sender,
         payload: fromb64(raw.payload_b64),
       };
-    });
+    }, { refusal: protectedKindRefusal(kind) });
   }
 
   // ── Consistency & Ordering Overlay ────────────────────────────────────────

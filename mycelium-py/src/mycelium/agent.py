@@ -1427,6 +1427,14 @@ class MyceliumAgent:
         url = f"{self._base_url}/gateway/mailbox/{path_segment(kind)}"
         async with httpx.AsyncClient(timeout=None, headers=self._pool.headers, verify=self._pool.verify) as client:
             async with aconnect_sse(client, "GET", url) as event_source:
+                resp = event_source.response
+                if resp.status_code >= 400:
+                    # A refused stream — a kind `mailbox/deliver` refuses (a protected kind, one of the
+                    # substrate's own, an RPC reply kind), or a missing scope — is raised as ProtectedKindError
+                    # or the HTTP error, rather than as httpx-sse's content-type SSEError, as `on_signal` does.
+                    await resp.aread()
+                    _raise_if_serve_refused(resp)
+                    resp.raise_for_status()
                 async for event in event_source.aiter_sse():
                     import json as _json
                     data    = _json.loads(event.data)

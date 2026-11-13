@@ -660,6 +660,9 @@ mod log_read_tests;
 /// The slot decision (2026-11-12): the routes that take a slot name refuse a component-owned slot, both directions.
 #[cfg(all(test, feature = "consensus"))]
 mod slot_guard_tests;
+/// The substrate's own signal kinds (2026-11-13): refused at every door that takes a kind, for every token.
+#[cfg(test)]
+mod substrate_kind_tests;
 /// Adopter-surface Y4's last promise: a record a span names, read by its hash on the node, and verified there.
 #[cfg(all(test, feature = "compliance"))]
 mod record_read_tests;

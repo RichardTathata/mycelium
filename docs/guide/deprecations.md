@@ -3472,3 +3472,114 @@ the slot routes now classify by one table of their own (`SLOT_FAMILIES`, `src/ag
     subscription's claim, `POST /gateway/govern/electorate`.
   - Layer III is untouched: a member of the fleet proposes on any slot through the library, bounded by the
     electorate door and, for an award, by its signature. These are the gateway's doors.
+
+## 103. The gateway's signal routes refuse the substrate's own kinds; the send routes refuse the RPC reply kinds; the signal streams refuse a hosted capability's kind (unreleased, the signal-routes decision of 2026-11-13)
+
+The gateway has ten doors that take a signal kind from the caller: the two signal streams (`GET /signals/{kind}`,
+`GET /gateway/signal/sse/{kind}`), the serve stream (`GET /gateway/rpc/serve/{kind}`), the mailbox stream
+(`GET /gateway/mailbox/{kind}`) and the six raw send routes (`rpc/call`, `scatter`, `signal/emit`,
+`mailbox/deliver`, `shard/emit`, `overlay/emit_reliable`). They refused protected work (`mcp.invoke`,
+`skill.invoke`, `llm.invoke`, `protected_rpc_kinds`) and, on the streams, the RPC reply kinds. They did not refuse
+the kinds the substrate itself speaks, and those register on the same handler table a stream taps. Three things
+followed, each reproduced by a test that failed before this change
+(`src/agent/http/substrate_kind_tests.rs`):
+
+1. **A `mesh:read` token read consensus traffic.** A tap on `consensus.propose` or `consensus.commit` received
+   every proposal and commit its node was in scope for — the slot's name and the proposed value in `payload_b64` —
+   whichever component owned the slot: a commitment's award (`cn/{requirement}/award`), an electorate's record, a
+   lock's holder, an application's slot. `consensus.vote` and `consensus.nack` carry the acceptors' answers, an
+   accepted value among them. A `mesh:serve` stream on a consensus kind received the same frames on a node whose
+   consensus listener was not started, and on `consensus.vote` / `consensus.nack` between two proposals. §99, §101
+   and §102 closed the KV, log and slot routes to a component's data; this was the same data by another door.
+2. **A `mesh:write` token wrote a consensus decision on a mesh without `[tls]`.** `POST /gateway/signal/emit`
+   (and `shard/emit`) send the caller's bytes as they are, with the gateway's node as the sender. A `CommitTerm`
+   frame a client made up — a slot nobody proposed, a value nobody voted for — was written as that slot's decision
+   by the gateway's node and by its peer; `GET /consensus/{slot}`, `consistent_get` and a lock's reader then read
+   it. Without `[tls]` a consensus frame carries no signature (`sign_payload`, `decode_verify`), and a learner
+   writes a commit's record without a quorum certificate. **With `[tls]`** a frame needs a member's signature, which
+   a client cannot make; it could re-send one a tap had handed it, since the signature covers the message and not
+   its sender, scope or time (see *Not changed*).
+3. **A client of a provider's gateway answered that provider's RPC calls.** A reply is claimed by its correlation
+   nonce and its sender (`sig.sender == target`). A tap on an observable RPC kind shows the nonce (the first eight
+   bytes of `payload_b64`), and an emit's sender is the gateway's node — so a token with `mesh:read` and
+   `mesh:write` on the provider's own gateway emitted `rpc.result` to the caller, and the caller's `rpc_call`
+   returned the client's bytes. `[tls]` does not change this: the reply is the node's own emission.
+
+Also: `POST /gateway/rpc/call` with `method: "sys.explain"` returned a peer's event ring under `mesh:write`,
+where `GET /gateway/explain` asks `fleet:read`.
+
+**Affected:** every release that has the routes. The read of consensus frames needs `mesh:read` (or the legacy
+token, or no token model); the write needs `mesh:write` and a mesh without `[tls]`; the forged reply needs both
+scopes on the provider's gateway.
+
+- **What changed.** All of it is `403 {"ok": false, "error": "protected_kind", "kind": …, "message": …}`, for
+  every token (`"*"` included) and in every build:
+
+  | Kind | Observe (`/signals/{kind}`, `/gateway/signal/sse/{kind}`) | Serve (`/gateway/rpc/serve/{kind}`) | Mailbox stream (`/gateway/mailbox/{kind}`) | Send (the six raw routes) |
+  |---|---|---|---|---|
+  | `consensus.propose`, `consensus.vote`, `consensus.commit`, `consensus.nack`, and **any kind starting `consensus.`** | refused (was 200) | refused, a listener registered or not (was 200, or `served_in_process`) | refused (was 200) | refused (was sent) |
+  | `sys.explain`, `sys.replica-sync.v1`, and **any kind starting `sys.`** | refused (was 200) | refused (was 200, or `served_in_process`) | refused (was 200) | refused (was sent) |
+  | `rpc.result`, `bulk.result` | refused since 2.32.0 | refused since 2.36.0 | refused (was 200) | **refused (was sent)** |
+  | `cap.invoke/{namespace}/{name}` (a hosted capability's invocations) | **refused (was 200)** | unchanged (`served_in_process` where the component runs) | unchanged | **unchanged** — see *Not changed* |
+  | `mcp.invoke`, `skill.invoke`, `llm.invoke`, `protected_rpc_kinds` | refused, as before | as before | refused (was 200; `mailbox/deliver` has refused them since 2.15.0) | refused, as before |
+
+  The list is `mycelium::SUBSTRATE_KINDS`, the prefixes `SUBSTRATE_KIND_PREFIXES`, the predicate
+  `is_substrate_kind`; a test reads the kind constants from the source and fails until a new one is listed, and
+  the prefixes refuse it meanwhile. A kind is compared as bytes, after the path is percent-decoded:
+  `Consensus.propose`, `consensus`, `sys` and `system.x` are other kinds and pass.
+- **A hosted WASM component's `mesh.emit`** refuses a substrate kind even when its host listed it in
+  `emit_kinds` (`confine_kind`, `ConfinementError::ProtectedKind`).
+- **Will the compiler tell me?** No — an HTTP status. Both SDKs raise `ProtectedKindError` for it from every verb
+  that names a kind. Two verbs gained the mapping (`mycelium-py` 0.2.16, `mycelium-ts` 0.2.10, both unreleased):
+  `mailbox` in both (it raised the SSE reader's error), and `onSignal` in TypeScript (it threw a generic
+  `SSE request failed: 403`, for a protected kind too).
+- **Who is affected:**
+  - a client, script or dashboard that watches `consensus.*` on a signal stream. Nothing in this repository does
+    (the ops console has no signal tab). There is **no replacement tap**: read a decided slot through
+    `GET /consensus/{slot}` or `consistent_get` (application slots, §102), and a node's consensus health through
+    `/stats` (`commit_conflicts`, the ballot and timeout counters) and `GET /gateway/explain` (`fleet:read`);
+  - **an application whose own signal kind starts `sys.` or `consensus.`** — rename it. Those prefixes are the
+    substrate's from this release;
+  - a client that emitted `rpc.result` itself to answer a served request: answer through
+    `POST /gateway/rpc/respond` (`rpc_respond` / `rpcRespond`), which is bound to the request it answers;
+  - a client that tapped `cap.invoke/…` to watch a hosted capability's calls: read the host's invocation log
+    (`InvocationLog`), or the decision records where an enforcement point is configured;
+  - a host that listed a `consensus.*` or `sys.*` kind in a component's `emit_kinds`: the emit is dropped, logged
+    and counted (`mycelium_wasm_host_emits_refused_total{reason="protected_kind"}`).
+- **Check after upgrading.** Each answered 200 and now answers 403 `protected_kind`:
+
+  ```bash
+  curl -s -m 2 -o /dev/null -w '%{http_code}\n' -H 'Authorization: Bearer MESH_READ_TOKEN' \
+       'http://NODE:PORT/signals/consensus.propose'                              # 200 before, 403 after
+  curl -s -m 2 -o /dev/null -w '%{http_code}\n' -H 'Authorization: Bearer MESH_READ_TOKEN' \
+       'http://NODE:PORT/gateway/signal/sse/consensus.commit'                    # 200 before, 403 after
+  curl -s -o /dev/null -w '%{http_code}\n' -H 'Authorization: Bearer MESH_WRITE_TOKEN' \
+       -H 'content-type: application/json' -d '{"kind":"rpc.result","scope":"node:127.0.0.1:1"}' \
+       'http://NODE:PORT/gateway/signal/emit'                                    # 200 before, 403 after
+  ```
+
+  (`-m 2` ends the two streams on an affected node, where they stay open. The third sends an empty reply to an
+  address nothing listens on; do not replace its kind with `consensus.commit` against an affected node.)
+  **Until every gateway is upgraded:** treat `mesh:read` as a scope that reads every consensus proposal and
+  commit in the node's scope, and `mesh:write` — on a mesh without `[tls]` — as a scope that can write a consensus
+  decision; review who holds them, and prefer `[tls]`. If a `mesh:write` token may have been misused on a mesh
+  without `[tls]`, a decision record nobody proposed is the trace: `commit_conflicts` on `/stats` counts a newer
+  decision of another identity arriving over a live one, and a slot's records are under `consensus/life/`.
+- **Not changed, each stated as it stands** (critique plan rows CR26–CR28):
+  - **Supervisor signals are unsigned.** `agent.approve` and `agent.veto` are ordinary signals: any `mesh:write`
+    holder can emit `agent.veto` naming a tool and veto a pending approval, and any `mesh:read` holder sees the
+    approvals asked. It fails closed — a veto refuses; nothing can be approved this way, since silence approves —
+    and it is how a supervisor on an SDK takes part. Not changed; CR26 signs or scopes them.
+  - **Calling a hosted capability by a raw route** (`POST /gateway/rpc/call` with `method: "cap.invoke/…"`) is
+    not refused. No client in this repository does it (the HTTP door to a bridged component is `/mcp`).
+  - **Other kinds the library speaks stay observable under `mesh:read`**: `invoke.bulk` (a bulk call's ticket),
+    `boundary.opaque` / `boundary.transparent`, `agent.state`, `artifact.fetch` / `artifact.size` /
+    `artifact.fetch_range` and `reason.blob.fetch` (the ids asked for; a reply is never observable), and a
+    component's own `comp/{namespace}/…` kinds.
+  - **A tap on an ordinary RPC kind shows the whole request frame**, the caller envelope and a carried mandate
+    with its possession proof included, as §19 said of a protected kind before the streams refused it. An RPC
+    kind whose calls carry authority belongs in `protected_rpc_kinds`.
+  - **A signed consensus frame is not bound to its sender or to a time.** With the tap and the emit refused there
+    is no gateway route to a replay; a member can still re-send another member's signed frame.
+  - A member is not a client: a node in the mesh sends and receives these kinds, as the protocol needs. These
+    are the gateway's doors (and a hosted component's `mesh.emit`), not Layer II's.

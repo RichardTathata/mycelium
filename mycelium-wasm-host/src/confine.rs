@@ -38,7 +38,8 @@ pub enum ConfinementError {
     Traversal,
     /// A signal kind that is protected work on this node (`mcp.invoke`, `skill.invoke`,
     /// `llm.invoke`, a configured `protected_rpc_kinds` entry): it has a door of its own where
-    /// authority is checked, and a component is not that door.
+    /// authority is checked, and a component is not that door. Also one of the substrate's own
+    /// kinds (`consensus.*`, `sys.*`): no component is their sender.
     ProtectedKind,
     /// A signal kind outside the component's namespace (`comp/{namespace}/…`) and not listed for
     /// it by the host.
@@ -54,7 +55,7 @@ impl std::fmt::Display for ConfinementError {
             Self::Empty => write!(f, "empty component key"),
             Self::Absolute => write!(f, "absolute key escapes the component subtree"),
             Self::Traversal => write!(f, "`..` traversal escapes the component subtree"),
-            Self::ProtectedKind => write!(f, "protected RPC kind: a component may not emit work that has its own door"),
+            Self::ProtectedKind => write!(f, "protected kind: a component may not emit work that has its own door, nor one of the substrate's own kinds"),
             Self::ForeignKind => write!(f, "signal kind outside the component's namespace and not listed for it"),
             Self::MalformedNamespace => write!(f, "component namespace is empty or contains `/`: its signal family would overlap another's"),
         }
@@ -87,7 +88,8 @@ pub fn confine_key(node: &NodeId, namespace: &str, rel_key: &str) -> Result<Stri
 /// `comp/{namespace}/…`, or one of `listed` (kinds the host granted this component — never a
 /// protected one, so a grant cannot open the door). Refused first and always: a kind in
 /// [`mycelium::BUILTIN_PROTECTED_RPC_KINDS`] or in `protected` (the node's
-/// `protected_rpc_kinds`). Everything else is foreign and refused.
+/// `protected_rpc_kinds`), and one of the substrate's own ([`mycelium::is_substrate_kind`]: the
+/// consensus kinds and every kind under `consensus.` or `sys.`). Everything else is foreign and refused.
 ///
 /// `namespace`, `listed` and `protected` are host-set (trusted); only `kind` is guest-controlled.
 pub fn confine_kind(namespace: &str, kind: &str, listed: &[String], protected: &[String]) -> Result<(), ConfinementError> {
@@ -98,6 +100,11 @@ pub fn confine_kind(namespace: &str, kind: &str, listed: &[String], protected: &
         return Err(ConfinementError::MalformedNamespace);
     }
     if mycelium::BUILTIN_PROTECTED_RPC_KINDS.contains(&kind) || protected.iter().any(|k| k == kind) {
+        return Err(ConfinementError::ProtectedKind);
+    }
+    // The substrate's own kinds (2026-11-13): an emit from inside the node's process reaches this node's acceptor
+    // and learner as a member's frame — unsigned where the mesh runs without `[tls]`. No listing opens them.
+    if mycelium::is_substrate_kind(kind) {
         return Err(ConfinementError::ProtectedKind);
     }
     let own = format!("{COMPONENT_SIGNAL_PREFIX}{namespace}/");
@@ -177,6 +184,33 @@ mod tests {
         let protected = vec!["depot.dispatch".to_string()];
         assert_eq!(confine_kind("nlp", "depot.dispatch", none, &protected), Err(ConfinementError::ProtectedKind));
         assert_eq!(confine_kind("nlp", "depot.dispatch", &protected, &protected), Err(ConfinementError::ProtectedKind));
+    }
+
+    /// The substrate's own kinds (2026-11-13): refused unlisted as foreign kinds always were, and refused
+    /// **listed** — the host's `emit_kinds` cannot hand a component the consensus protocol's kinds. Seen failing
+    /// first: every listed kind answered `Ok(())`.
+    #[test]
+    fn a_substrate_kind_is_refused_even_when_listed() {
+        let none: &[String] = &[];
+        let unlisted_names = ["consensus.future", "sys.anything"];
+        for k in mycelium::SUBSTRATE_KINDS.iter().copied().chain(unlisted_names) {
+            assert_eq!(confine_kind("nlp", k, &[k.to_string()], none), Err(ConfinementError::ProtectedKind), "{k} listed");
+            assert_eq!(confine_kind("nlp", k, none, none), Err(ConfinementError::ProtectedKind), "{k}");
+        }
+        // The plant: a lookalike the host listed is still emitted, and so is the component's own family.
+        for k in ["consensus", "consensusx.propose", "system.explain", "sys"] {
+            assert_eq!(confine_kind("nlp", k, &[k.to_string()], none), Ok(()), "{k}");
+        }
+        assert_eq!(confine_kind("nlp", "comp/nlp/consensus.propose", none, none), Ok(()));
+    }
+
+    /// The kind a hosted capability is invoked on starts with the prefix the gateway's signal streams refuse to
+    /// observe (`mycelium::HOSTED_CAPABILITY_KIND_PREFIX`): the two crates name one family.
+    #[test]
+    fn a_hosted_capabilitys_kind_is_under_the_prefix_the_signal_streams_refuse() {
+        let kind = crate::runtime::cap_invoke_kind("text", "echo");
+        assert!(kind.starts_with(mycelium::HOSTED_CAPABILITY_KIND_PREFIX), "{kind}");
+        assert_eq!(kind, format!("{}text/echo", mycelium::HOSTED_CAPABILITY_KIND_PREFIX));
     }
 
     #[test]

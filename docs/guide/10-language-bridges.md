@@ -350,7 +350,15 @@ shapes; the SDK READMEs carry the receipt narrative, this table carries the wire
 Scopes: `kv:read` for the GET, `kv:write` for both POSTs; `mesh:read` for the two signal streams
 ([rbac.md §2](../operations/rbac.md)).
 
-**What an SDK raises on a 403 refusal.** `protected_kind` raises `ProtectedKindError` in both SDKs.
+**What an SDK raises on a 403 refusal.** `protected_kind` raises `ProtectedKindError` in both SDKs, from every verb
+that names a kind — `emit`, `rpc_call` / `rpcCall`, `deliver_event` / `deliverEvent`, `emit_reliable` /
+`emitReliable`, `rpc_serve` / `rpcServe`, `on_signal` / `onSignal` and `mailbox` (the last in both, and `onSignal`
+in TypeScript, since `mycelium-py` 0.2.16 and `mycelium-ts` 0.2.10). The gateway answers it for protected work
+(`mcp.invoke`, `skill.invoke`, `llm.invoke`, `protected_rpc_kinds`), for **the substrate's own kinds** — the four
+`consensus.*` kinds, `sys.explain`, `sys.replica-sync.v1` and anything starting `consensus.` or `sys.` — at every
+one of those doors, for the reply kinds `rpc.result` and `bulk.result` (answer a served request with
+`rpc_respond` / `rpcRespond`), and on the signal streams for a hosted capability's `cap.invoke/…`
+([deprecations.md §103](deprecations.md)). No scope opens them.
 `protected_key` raises `ProtectedKeyError` (`.key`) and `protected_stream` `ProtectedStreamError` (`.stream`),
 each carrying the gateway's message (`mycelium-py` 0.2.7, where each is also the `httpx.HTTPStatusError` it raised
 before; `mycelium-ts` 0.2.2, where `delete()` now carries the body too). The read verbs raise the same two:

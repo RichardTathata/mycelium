@@ -38,7 +38,7 @@ use super::oidc::{OidcVerifier, ALLOWED_ALGS};
 
 /// The kind family a hosted capability is invoked on: `cap.invoke/{namespace}/{name}`
 /// (`mycelium_wasm_host::runtime::cap_invoke_kind`, which this crate cannot name — the host depends on it).
-pub(crate) const CAP_INVOKE_PREFIX: &str = "cap.invoke/";
+pub(crate) const CAP_INVOKE_PREFIX: &str = super::HOSTED_CAPABILITY_KIND_PREFIX;
 
 /// Whether `kind` is an **action** for which a verifying provider requires an `oidc:` principal to present an `ot`
 /// (#757's confirm round, N4; the maintainer, 2026-11-11, on #759's Q1): a kind [`is_protected_kind`](super::is_protected_kind)
