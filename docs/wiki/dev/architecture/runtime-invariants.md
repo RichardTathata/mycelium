@@ -23,10 +23,19 @@ the door it came through — the anti-entropy `StateResponse`, `Data` and `Signe
 appended to the WAL as before**. The verdict is the clamp's own (`Hlc::observe_reporting`,
 `hlc::beyond_drift_bound`): strict, on physical time, one clock read, nothing counted when the bound is 0. It
 reads no prefix and no owner. `GET /stats` `kv_future_stamps` (+ `kv_future_stamps_by_door`),
-`SystemStats::kv_future_stamps`, `mycelium_kv_future_stamps_total{door}`. It rises for a peer whose clock is
-ahead *and* for a receiver whose own clock is behind (`a_node_whose_clock_is_behind_counts_the_fleets_ordinary_entries`,
-`src/lib_tests.rs`). Not counted: WAL and snapshot replay at start (`src/agent/lifecycle.rs`), a signal's
-`hlc_seq`, a consensus token. **Not a carve-out and not a refusal**: whether Layer I may decline such an entry
+`SystemStats::kv_future_stamps`, `mycelium_kv_future_stamps_total{door}`. **The count is evidence that a
+far-future stamp is in circulation, not of who sent it.** It rises for a peer whose clock is ahead; for a
+receiver whose own clock is behind (`a_node_whose_clock_is_behind_counts_the_fleets_ordinary_entries`,
+`src/lib_tests.rs`); and — #782's review — for **honest senders with good clocks**: a node that observes a stamp
+at or past its limit is left with its clock on the limit and the logical counter full, so `tick` carries and
+its next local write is one millisecond past it, counted by every same-clock peer. A stamp exactly on the
+limit with a full counter does this and is itself not counted, so a member can make a fleet count its own
+honest writes without sending one counted frame
+(`an_honest_write_after_an_observed_future_stamp_is_reported_by_a_peer`, `mycelium-core/src/hlc.rs`;
+`an_honest_write_after_a_stamp_on_the_bound_is_counted_at_a_same_clock_peer`, `src/lib_tests.rs`). It is also
+entries, not incidents: anti-entropy sends a differing bucket whole, so a held entry is recounted while its
+bucket differs, and a member can raise the figure at will. Not counted: a frame refused before the clamp; WAL
+and snapshot replay at start (`src/agent/lifecycle.rs`); a signal's `hlc_seq`; a consensus token. **Not a carve-out and not a refusal**: whether Layer I may decline such an entry
 is the plan's D16, and step 2 is not buildable until a release of counting.
 
 **What detection does not give a reader** (2026-11-12). The tripwires count; they do not make a record

@@ -150,11 +150,16 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   no second clock read): `GET /stats` `kv_future_stamps` and `kv_future_stamps_by_door`,
   `SystemStats::kv_future_stamps`, and `mycelium_kv_future_stamps_total{door}` under `metrics`. **Nothing else
   changes**: the entry is applied, forwarded and written to the WAL exactly as before, and with
-  `max_clock_drift_ms = 0` nothing is counted. The counter rises for a sender whose clock is ahead and for a
-  receiver whose own clock is behind, which is the evidence the row's second step (a refusal, not built) waits
-  for. Entries replayed from a node's own WAL or snapshot are not counted. `SystemStats` gains the field
-  `kv_future_stamps`; `mycelium_core::hlc` gains `beyond_drift_bound` and `Hlc::observe_reporting`,
-  `mycelium_core::bounds` `StampDoor`. No deprecations entry: no behaviour changes.
+  `max_clock_drift_ms = 0` nothing is counted. **The count is evidence that a far-future stamp is in
+  circulation, not of who sent it**: it rises for a sender whose clock is ahead, for a receiver whose own clock
+  is behind, and for honest senders with good clocks once any node has heard a stamp at or past the bound (its
+  next local writes are stamped just past its limit); a held entry is recounted by anti-entropy while its
+  bucket differs, and a member can raise the figure at will (`docs/operations/observability.md`). Entries
+  replayed from a node's own WAL or snapshot are not counted. `mycelium_core::hlc` gains `beyond_drift_bound`
+  and `Hlc::observe_reporting`, `mycelium_core::bounds` `StampDoor` (`#[non_exhaustive]`). **`SystemStats`
+  gains the public field `kv_future_stamps`, and the struct is not `#[non_exhaustive]`: code that builds it
+  with a struct literal, or destructures it without `..`, stops compiling until it names the field** — as with
+  every field added to it before. No deprecations entry: no behaviour changes.
 
 - **N5: the agent guide the binary serves** (`docs/plans/identity-and-lifecycle.md` N5). `mycelium skills get fleet`
   prints a Markdown guide for a coding agent, embedded in the binary with its release tag filled in: the six steps

@@ -424,6 +424,54 @@ mod tests {
         assert!(!unbounded.observe_reporting(u64::MAX).1, "not even u64::MAX");
     }
 
+    /// **What the clamp leaves behind, and why a count names no sender** (#782's review, F1). Three
+    /// cases of existing clock behaviour, the wall clock held still; this test changes none of it.
+    /// 1. A node observes `u64::MAX` (reported, clamped): its clock stands at the limit with the
+    ///    logical counter full, so its **next local write** is one millisecond past the limit, and a
+    ///    peer with the same wall clock reports that honest write.
+    /// 2. A node observes a stamp **on** the limit with the logical counter full — *not reported* —
+    ///    and its next local write is again one millisecond past, reported at a same-clock peer.
+    /// 3. A peer four minutes ahead (inside the five-minute bound, not reported) pulls a node's clock
+    ///    forward; that node's next write is reported by a receiver only 61 s behind, and not by one
+    ///    60 s behind. The slow-clock case starts at the bound minus the largest forward skew in the
+    ///    fleet, not at the bound.
+    #[cfg(not(feature = "sim"))]
+    #[test]
+    fn an_honest_write_after_an_observed_future_stamp_is_reported_by_a_peer() {
+        const WALL: u64 = 1_800_000_000_000;
+        const BOUND: u64 = 300_000;
+        struct Unpin;
+        impl Drop for Unpin { fn drop(&mut self) { crate::sim_seam::pin_wall_clock_for_test(None); } }
+        let _unpin = Unpin;
+        let pin = |ms| crate::sim_seam::pin_wall_clock_for_test(Some(ms));
+        pin(WALL);
+
+        // 1. After a clamped `u64::MAX`.
+        let (writer, peer) = (Hlc::with_max_drift(BOUND), Hlc::with_max_drift(BOUND));
+        assert!(writer.observe_reporting(u64::MAX).1, "the poisoned stamp is reported");
+        assert_eq!(writer.current(), pack(WALL + BOUND, LOGICAL_MASK), "and leaves the clock on the limit, counter full");
+        let honest = writer.tick();
+        assert_eq!(physical_ms(honest), WALL + BOUND + 1, "the next local write is one millisecond past the limit");
+        assert!(peer.observe_reporting(honest).1, "a same-clock peer reports the honest write");
+
+        // 2. After a stamp on the limit that was not itself reported.
+        let (writer, peer) = (Hlc::with_max_drift(BOUND), Hlc::with_max_drift(BOUND));
+        assert!(!writer.observe_reporting(pack(WALL + BOUND, LOGICAL_MASK)).1, "on the limit: not reported");
+        let honest = writer.tick();
+        assert_eq!(physical_ms(honest), WALL + BOUND + 1);
+        assert!(peer.observe_reporting(honest).1, "yet the write that follows it is reported by a same-clock peer");
+
+        // 3. A member four minutes ahead, and a receiver 61 s behind.
+        let writer = Hlc::with_max_drift(BOUND);
+        assert!(!writer.observe_reporting(pack(WALL + 240_000, 0)).1, "four minutes ahead is inside the bound");
+        let honest = writer.tick();
+        assert_eq!(physical_ms(honest), WALL + 240_000, "the writer's clock rides at the member's");
+        pin(WALL - 60_000);
+        assert!(!Hlc::with_max_drift(BOUND).observe_reporting(honest).1, "a receiver 60 s behind: on its limit, not reported");
+        pin(WALL - 61_000);
+        assert!(Hlc::with_max_drift(BOUND).observe_reporting(honest).1, "a receiver 61 s behind reports it");
+    }
+
     /// Pins the HLC state directly; drift bound disabled so tests that pin
     /// far-future physical values keep their original semantics.
     fn pinned(state: u64) -> Hlc {

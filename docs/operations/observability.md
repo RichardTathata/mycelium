@@ -44,12 +44,33 @@ curl -s http://node:8080/stats | jq
   time past this node's wall clock plus `max_clock_drift_ms` (300 s by default). **Counted and still
   applied**: under last-writer-wins such an entry holds its key until the wall clock passes its stamp, and
   nothing refuses it. `kv_future_stamps_by_door` splits the count by where the entry came in —
-  `anti_entropy`, `data` (a live unsigned frame), `signed_data`. Entries, not keys: a re-sent entry is
-  counted again. Two causes, told apart by who reports it: **one sender's clock is ahead** (every receiver
-  counts that sender's writes, and each logs `remote HLC stamp exceeds the clock-drift bound` at most once
-  every ten seconds — check NTP on the sender), or **this node's clock is behind** (this node alone counts,
-  for every sender — check NTP here). Always `0` with `max_clock_drift_ms = 0`. Entries a node reads back
-  from its own WAL or snapshot at start are not counted.
+  `anti_entropy`, `data` (a live unsigned frame), `signed_data`. Always `0` with
+  `max_clock_drift_ms = 0`.
+
+  **What it is evidence of: that a far-future stamp is in circulation, not who sent it.** Three causes:
+  1. **A sender's clock is ahead** by more than the bound: every receiver counts that sender's writes
+     (each logs `remote HLC stamp exceeds the clock-drift bound` at most once every ten seconds).
+  2. **This node's clock is behind**: this node counts the fleet's ordinary writes. Not only when it is
+     more than the bound behind — the margin is the bound *minus* the furthest any member's stamps run
+     ahead, so with one peer four minutes ahead (inside the bound, uncounted) a node 61 s behind counts.
+  3. **Honest senders with good clocks, after any node has heard a stamp at or past the bound.** A node
+     that hears such a stamp keeps its own clock at its limit, and its **next local writes are stamped
+     just past that limit**, so every peer whose clock is not ahead of it counts them. One far-future
+     frame therefore makes many nodes count many senders; and a member can cause it with frames stamped
+     exactly *on* the bound, which are themselves never counted
+     (`an_honest_write_after_an_observed_future_stamp_is_reported_by_a_peer`, `mycelium-core/src/hlc.rs`).
+     "Every node counts, for many senders" is this case, not a fleet of bad clocks.
+
+  **What the figure is not.** It is entries, not keys, senders or incidents, and **a member can raise
+  it at will**: any number of frames stamped `u64::MAX`, or unsolicited `StateResponse` entries, which
+  are unsigned and applied even by a `[tls]` node (existing behaviour, the
+  [mesh mTLS](../features/mesh-mtls.md) page's limit). An entry the fleet **already holds** is counted
+  again at `anti_entropy` on every round in which its bucket differs from a peer's — anti-entropy
+  sends a differing bucket whole — so with ordinary churn the count keeps rising, on every node, after
+  the sender's clock is fixed: the rate then reflects churn, not arrivals. A frame refused **before**
+  the clamp — unsigned on a `[tls]` node, a removed member's, a repeated nonce, a failed or unknown
+  signature — is not counted: it was not applied and moved no clock. Entries a node reads back from its
+  own WAL or snapshot at start are not counted.
 - `commit_conflicts` / `sys_namespace_violations` — the **detection-not-prevention
   tripwires**. A non-zero value means someone wrote to a `consensus/` slot or a
   `sys/{identity,identity-signed,identity-proof,load,role,tuple,caller-context,consensus-accepted}/{node}`

@@ -18560,6 +18560,8 @@ impl StampDoors {
                 #[cfg(not(feature = "tls"))]
                 { WireMessage::SignedData { update: u, signer: self.peer.id_hash(), signature: ([0u8; 32], [0u8; 32]) } }
             }
+            // `StampDoor` is `#[non_exhaustive]`: a later door has no frame in this harness.
+            other => unreachable!("no frame for {other:?}"),
         };
         send_wire(&mut self.writer, &msg).await;
     }
@@ -18585,11 +18587,20 @@ impl StampDoors {
         self.store.pin().get(key).map(|e| (e.timestamp, e.data.is_some()))
     }
 
-    /// Frames the handler handed on to the gossip shards so far.
-    fn forwarded(&mut self) -> usize {
-        let mut n = 0;
-        while self.forwards.try_recv().is_ok() { n += 1; }
-        n
+    /// The frames the handler handed on to the gossip shards so far, decoded: the door each came
+    /// through (its frame kind), its key, its stamp and its TTL. The probes are left out.
+    fn forwarded(&mut self) -> Vec<(mycelium_core::bounds::StampDoor, String, u64, u8)> {
+        use mycelium_core::bounds::StampDoor;
+        let mut out = Vec::new();
+        while let Ok((bytes, _, _)) = self.forwards.try_recv() {
+            let (door, u) = match decode_wire(&bytes).expect("a forwarded frame decodes") {
+                WireMessage::Data(u) => (StampDoor::Data, u),
+                WireMessage::SignedData { update, .. } => (StampDoor::SignedData, update),
+                other => panic!("only KV frames are forwarded here: {other:?}"),
+            };
+            if !u.key.starts_with("fs/probe/") { out.push((door, u.key.to_string(), u.timestamp, u.ttl)); }
+        }
+        out
     }
 }
 
@@ -18598,7 +18609,9 @@ impl StampDoors {
 /// one millisecond past the bound, and a tombstone one millisecond past it. The clock is held still,
 /// so "one millisecond past" is exact. Seen failing first with each door's count removed in turn
 /// (that door: 0 of 3), and with the `Data` door made to skip an entry it counted (the store did
-/// not hold it).
+/// not hold it). The forward, per door (#782's review, F5), seen failing first with the `Data`
+/// arm's forward skipped for a `u64::MAX` stamp, and with the `SignedData` arm forwarding a
+/// lowered stamp.
 #[cfg(not(feature = "sim"))]
 #[tokio::test]
 async fn an_entry_stamped_beyond_the_drift_bound_is_counted_at_its_door_and_still_applied() {
@@ -18608,7 +18621,7 @@ async fn an_entry_stamped_beyond_the_drift_bound_is_counted_at_its_door_and_stil
     let mut d = StampDoors::open(FS_BOUND).await;
     let past = pack(FS_WALL + FS_BOUND + 1, 0);
 
-    for door in StampDoor::ALL {
+    for &door in StampDoor::ALL {
         let n = door.name();
         d.send(door, &format!("fs/{n}/max"), u64::MAX, false).await;
         d.send(door, &format!("fs/{n}/past"), past, false).await;
@@ -18616,7 +18629,7 @@ async fn an_entry_stamped_beyond_the_drift_bound_is_counted_at_its_door_and_stil
     }
     d.drained("beyond").await;
 
-    for door in StampDoor::ALL {
+    for &door in StampDoor::ALL {
         let n = door.name();
         assert_eq!(d.counted(door), 3, "{n}: u64::MAX, bound+1 and a tombstone at bound+1, once each");
         assert_eq!(d.held(&format!("fs/{n}/max")), Some((u64::MAX, true)), "{n}: the u64::MAX entry is applied, at its own stamp");
@@ -18624,9 +18637,16 @@ async fn an_entry_stamped_beyond_the_drift_bound_is_counted_at_its_door_and_stil
         assert_eq!(d.held(&format!("fs/{n}/tomb")), Some((past, false)), "{n}: the tombstone is applied");
     }
     assert_eq!(d.bounds.kv_future_stamps(), 9, "the total is the three doors'");
-    // Three live `Data` frames, three `SignedData` frames and the probe went on to the shards; an
-    // anti-entropy entry never does. The same seven as before the counter.
-    assert_eq!(d.forwarded(), 7, "every live frame is still forwarded");
+    // Each live door's three frames went on to the shards, each with the stamp it arrived with (a
+    // counted frame is not forwarded clamped) and one hop spent; an anti-entropy entry never does.
+    let forwarded = d.forwarded();
+    for door in [StampDoor::Data, StampDoor::SignedData] {
+        let n = door.name();
+        let mine: Vec<_> = forwarded.iter().filter(|f| f.0 == door).map(|f| (f.1.clone(), f.2, f.3)).collect();
+        assert_eq!(mine, vec![(format!("fs/{n}/max"), u64::MAX, 2), (format!("fs/{n}/past"), past, 2), (format!("fs/{n}/tomb"), past, 2)],
+                   "{n}: every counted frame is still forwarded, at its own stamp");
+    }
+    assert_eq!(forwarded.len(), 6, "and nothing else: no anti-entropy entry is forwarded");
 }
 
 /// **An entry on the bound, or inside it, is not counted** — on it with the logical counter full,
@@ -18645,14 +18665,14 @@ async fn an_entry_on_or_inside_the_drift_bound_is_not_counted() {
         ("now", pack(FS_WALL, 3)),
         ("old", pack(FS_WALL - 86_400_000, 0)),
     ];
-    for door in StampDoor::ALL {
+    for &door in StampDoor::ALL {
         for (name, stamp) in stamps {
             d.send(door, &format!("fs/{}/{name}", door.name()), stamp, false).await;
         }
     }
     d.drained("inside").await;
 
-    for door in StampDoor::ALL {
+    for &door in StampDoor::ALL {
         assert_eq!(d.counted(door), 0, "{}: nothing on or inside the bound is counted", door.name());
         for (name, stamp) in stamps {
             assert_eq!(d.held(&format!("fs/{}/{name}", door.name())), Some((stamp, true)), "{}: {name} is applied", door.name());
@@ -18672,14 +18692,14 @@ async fn with_no_drift_bound_no_stamp_is_counted() {
     let _wall = PinnedWall::at(FS_WALL);
     let mut d = StampDoors::open(0).await;
     let past = pack(FS_WALL + FS_BOUND + 1, 0);
-    for door in StampDoor::ALL {
+    for &door in StampDoor::ALL {
         d.send(door, &format!("fs/{}/past", door.name()), past, false).await;
         d.send(door, &format!("fs/{}/max", door.name()), u64::MAX, false).await;
     }
     d.drained("unbounded").await;
 
     assert_eq!(d.bounds.kv_future_stamps(), 0, "no bound, nothing counted");
-    for door in StampDoor::ALL {
+    for &door in StampDoor::ALL {
         assert_eq!(d.held(&format!("fs/{}/past", door.name())), Some((past, true)), "{}", door.name());
         assert_eq!(d.held(&format!("fs/{}/max", door.name())), Some((u64::MAX, true)), "{}", door.name());
     }
@@ -18699,11 +18719,11 @@ async fn a_node_whose_clock_is_behind_counts_the_fleets_ordinary_entries() {
     // The fleet is at FS_WALL. This node is a minute more than the bound behind it.
     let wall = PinnedWall::at(FS_WALL - FS_BOUND - 60_000);
     let mut d = StampDoors::open(FS_BOUND).await;
-    for (i, door) in StampDoor::ALL.into_iter().enumerate() {
+    for (i, door) in StampDoor::ALL.iter().copied().enumerate() {
         d.send(door, &format!("fs/{}/slow", door.name()), pack(FS_WALL, i as u64), false).await;
     }
     d.drained("slow").await;
-    for door in StampDoor::ALL {
+    for &door in StampDoor::ALL {
         assert_eq!(d.counted(door), 1, "{}: a slow node counts an entry stamped at the fleet's present", door.name());
         assert!(d.held(&format!("fs/{}/slow", door.name())).is_some_and(|(_, live)| live), "{}: and applies it", door.name());
     }
@@ -18711,12 +18731,12 @@ async fn a_node_whose_clock_is_behind_counts_the_fleets_ordinary_entries() {
     // NTP corrects the clock: the fleet's entries are ordinary again.
     drop(wall);
     let _wall = PinnedWall::at(FS_WALL);
-    for (i, door) in StampDoor::ALL.into_iter().enumerate() {
+    for (i, door) in StampDoor::ALL.iter().copied().enumerate() {
         d.send(door, &format!("fs/{}/synced", door.name()), pack(FS_WALL + 1_000, i as u64), false).await;
     }
     d.drained("synced").await;
     assert_eq!(d.bounds.kv_future_stamps(), 3, "nothing more is counted once the clock is right");
-    for door in StampDoor::ALL {
+    for &door in StampDoor::ALL {
         assert!(d.held(&format!("fs/{}/synced", door.name())).is_some(), "{}", door.name());
     }
 }
@@ -18759,4 +18779,120 @@ async fn the_future_stamp_counter_is_on_stats_and_in_the_metrics_export() {
         assert!(exported.is_some_and(|v| v >= 1.0), "mycelium_kv_future_stamps_total{{door=\"data\"}} on /metrics; saw {exported:?}");
     }
     a.shutdown().await;
+}
+
+/// **The counter also rises for an honest sender with a good clock** (#782's review, F1), because of
+/// what the clamp leaves behind: a node that observes a stamp on its limit with the logical counter
+/// full — a frame that is itself **not counted** — stamps its next local write one millisecond past
+/// that limit (`tick` carries a full counter into the millisecond), and a peer with the same wall
+/// clock counts that write. So the count says a far-future stamp is in circulation, not who sent
+/// it. Existing clock behaviour, observed here through the `Data` door; nothing is changed by it.
+#[cfg(not(feature = "sim"))]
+#[tokio::test]
+async fn an_honest_write_after_a_stamp_on_the_bound_is_counted_at_a_same_clock_peer() {
+    use mycelium_core::bounds::StampDoor;
+    use mycelium_core::hlc::{pack, physical_ms, Hlc, LOGICAL_MASK};
+    let _wall = PinnedWall::at(FS_WALL);
+    let mut d = StampDoors::open(FS_BOUND).await;
+    let on_the_bound = pack(FS_WALL + FS_BOUND, LOGICAL_MASK);
+
+    // The member's frame reaches this node and an honest writer alike. Neither counts it.
+    let honest = Hlc::with_max_drift(FS_BOUND);
+    assert!(!honest.observe_reporting(on_the_bound).1, "the honest writer does not report the frame on the bound");
+    d.send(StampDoor::Data, "fs/f1/on", on_the_bound, false).await;
+    d.drained("f1-on").await;
+    assert_eq!(d.bounds.kv_future_stamps(), 0, "and this node does not count it");
+
+    // The honest writer's next write, at the same wall clock.
+    let honest_write = honest.tick();
+    assert_eq!(physical_ms(honest_write), FS_WALL + FS_BOUND + 1, "its own next stamp is one millisecond past the limit");
+    d.send(StampDoor::Data, "fs/f1/honest", honest_write, false).await;
+    d.drained("f1-honest").await;
+    assert_eq!(d.counted(StampDoor::Data), 1, "an honest write from a good clock is counted");
+    assert_eq!(d.held("fs/f1/honest"), Some((honest_write, true)), "and applied");
+}
+
+/// **A counted entry is appended to the WAL as before, and replay does not count it** (#782's
+/// review, F5): a `Data` frame stamped `u64::MAX` reaches a node with `[persistence]`, and its
+/// record is read back from the node's WAL on disk **while the node runs** — no snapshot has been
+/// taken since it arrived, so only the append can have put it there (a shutdown's snapshot would
+/// persist it from the store whatever the append did). Then the node is stopped and started over the
+/// same directory: the entry is back at its own stamp, and the restarted node's counter is 0 —
+/// replay is not one of the three doors. Seen failing first with the append skipped for a
+/// `u64::MAX` stamp (the WAL never held the record).
+#[tokio::test]
+async fn a_counted_entry_is_persisted_as_before_and_replay_does_not_count_it() {
+    use crate::config::{OnUnreadable, PersistenceConfig, SyncMode};
+    let port = alloc_port();
+    let base = std::env::temp_dir().join(format!("myc-fs-wal-{}-{port}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let mut cfg = GossipConfig::default();
+    cfg.bind_port = port;
+    cfg.persistence = Some(PersistenceConfig { base_path: base.clone(), sync_mode: SyncMode::Flush, snapshot_wal_threshold: 1_000, snapshot_interval_secs: 3_600, on_unreadable: OnUnreadable::Refuse });
+    let node = NodeId::new("127.0.0.1", port).unwrap();
+    let a = GossipAgent::new(node.clone(), cfg.clone());
+    a.start().await.unwrap();
+
+    let mut writer = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+    let mut far = data_update("fs/wal/max", b"v", 74_950, false);
+    far.timestamp = u64::MAX;
+    send_wire(&mut writer, &WireMessage::Data(far)).await;
+    poll_until(|| a.kv().get("fs/wal/max").is_some(), 10_000).await;
+    let counted = a.system_stats().kv_future_stamps;
+    // The WAL on disk, read as replay reads it, until the record is there (`SyncMode::Flush`).
+    let kv_dir = base.join(node.to_string()).join("kv");
+    let mut in_wal = None;
+    for _ in 0..400 {
+        let mut found = None;
+        let _ = mycelium_core::persistence::replay(&kv_dir, None, |e| {
+            if &*e.key == "fs/wal/max" { found = Some((e.timestamp, e.is_tombstone)); }
+        }).await;
+        if found.is_some() { in_wal = found; break; }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    drop(writer);
+    a.shutdown().await;
+    drop(a);
+
+    let a = GossipAgent::new(node, cfg);
+    a.start().await.unwrap();
+    let held = a.task_ctx.kv_state.store.pin().get("fs/wal/max").map(|e| (e.timestamp, e.data.is_some()));
+    let after_replay = a.system_stats().kv_future_stamps;
+    a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&base);
+    assert_eq!(counted, 1, "counted when it arrived");
+    assert_eq!(in_wal, Some((u64::MAX, false)), "the counted entry's record is in the WAL, at its own stamp, before any snapshot");
+    assert_eq!(held, Some((u64::MAX, true)), "the counted entry was persisted and is replayed at its own stamp");
+    assert_eq!(after_replay, 0, "and replay counts nothing");
+}
+
+/// **The metric counts each door's entries, exactly** (#782's review, F5): with a recorder of this
+/// test's own on its thread — so no other test's increment is in the figure — one entry beyond the
+/// bound through the anti-entropy door, two through `Data` and three through `SignedData` export
+/// `mycelium_kv_future_stamps_total` as 1, 2 and 3 under their `door` labels, and an entry inside
+/// the bound adds nothing. Seen failing first with the metric's line removed.
+#[cfg(all(feature = "metrics", not(feature = "sim")))]
+#[tokio::test]
+async fn the_future_stamp_metric_counts_each_door_exactly() {
+    use mycelium_core::bounds::StampDoor;
+    use mycelium_core::hlc::pack;
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+    let _local = metrics::set_default_local_recorder(&recorder);
+    let _wall = PinnedWall::at(FS_WALL);
+    let mut d = StampDoors::open(FS_BOUND).await;
+    let past = pack(FS_WALL + FS_BOUND + 1, 0);
+    for (i, door) in StampDoor::ALL.iter().copied().enumerate() {
+        for k in 0..=i {
+            d.send(door, &format!("fs/{}/m{k}", door.name()), past, false).await;
+        }
+        d.send(door, &format!("fs/{}/inside", door.name()), pack(FS_WALL, 0), false).await;
+    }
+    d.drained("metric").await;
+
+    let text = handle.render();
+    for (i, door) in StampDoor::ALL.iter().copied().enumerate() {
+        let line = format!("mycelium_kv_future_stamps_total{{door=\"{}\"}} {}", door.name(), i + 1);
+        assert!(text.lines().any(|l| l == line), "expected `{line}` in:\n{text}");
+    }
 }

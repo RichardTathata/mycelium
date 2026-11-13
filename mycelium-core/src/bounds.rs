@@ -93,12 +93,19 @@ pub struct TransportBounds {
     /// clock's clamp (`Hlc::observe_reporting`) is what reports it. Always zero when the bound is 0.
     /// Entries, not keys or peers: an entry that loses last-writer-wins is counted too.
     /// `GET /stats` `kv_future_stamps` (and `kv_future_stamps_by_door`), `SystemStats::kv_future_stamps`.
-    kv_future_stamps: [AtomicU64; StampDoor::ALL.len()],
+    kv_future_stamps: [AtomicU64; 3],
 }
+
+// One counter per door: a door added to `StampDoor::ALL` without one fails the build here.
+const _: () = assert!(StampDoor::ALL.len() == 3);
 
 /// The three doors a remote KV entry's stamp comes through (`connection.rs`'s `StateResponse`, `Data`
 /// and `SignedData` arms) — the breakdown of [`TransportBounds::kv_future_stamps`].
+///
+/// `#[non_exhaustive]`: replay at start is a named later door (CR13, step 2), so a `match` outside
+/// this crate takes a wildcard arm, and [`StampDoor::ALL`] is to be iterated, not indexed by length.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum StampDoor {
     /// An anti-entropy `StateResponse` entry.
     AntiEntropy,
@@ -110,7 +117,7 @@ pub enum StampDoor {
 
 impl StampDoor {
     /// Every door, in the order the counters are held.
-    pub const ALL: [StampDoor; 3] = [StampDoor::AntiEntropy, StampDoor::Data, StampDoor::SignedData];
+    pub const ALL: &'static [StampDoor] = &[StampDoor::AntiEntropy, StampDoor::Data, StampDoor::SignedData];
 
     /// The door's name on `/stats` (`kv_future_stamps_by_door`) and as the metric's `door` label.
     pub const fn name(self) -> &'static str {

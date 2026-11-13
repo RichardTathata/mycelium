@@ -563,9 +563,18 @@ pub struct SystemStats {
     /// **Detection, not prevention**: the entry is applied, forwarded and persisted as before, and
     /// under last-writer-wins it holds its key until the wall clock passes its stamp. The node's own
     /// clock is clamped (`hlc.rs`, "Remote drift bound"); this counts the entries the clamp caught.
-    /// It rises for two different reasons: a **peer's** clock is ahead (one sender, on every
-    /// receiver), or **this node's** clock is behind (every sender, on this receiver only).
-    /// Entries read back from this node's own WAL or snapshot at start are not counted.
+    ///
+    /// **Evidence that a far-future stamp is in circulation, not of who sent it.** Three causes: a
+    /// **peer's** clock is ahead; **this node's** clock is behind (by the bound minus the furthest
+    /// any member's stamps run ahead, not only by the whole bound); and **honest senders with good
+    /// clocks** — a node that has heard a stamp at or past the bound keeps its clock at its limit and
+    /// stamps its next local writes just past it, which every peer not ahead of it counts. A stamp
+    /// exactly on the bound does this and is itself never counted.
+    ///
+    /// Entries, not keys, senders or incidents: an entry the fleet already holds is counted again by
+    /// anti-entropy on every round its bucket differs, and a member can raise the figure at will. A
+    /// frame refused before the clamp is not counted. Entries read back from this node's own WAL or
+    /// snapshot at start are not counted.
     pub kv_future_stamps: u64,
 
     /// Cumulative identity-anchor conflicts (identity-auth Phase 1b): a `sys/identity/{V}` KV
