@@ -196,6 +196,9 @@ RS
   grep -v '`sys/config/{param}`' src/lib.rs > "$scratch/src/lib.rs"
   # An allow-list entry that admits nothing, and one without a reason.
   printf '%s\n' 'zz-stale-entry/   # planted by the self-test' 'zz-noreason/' >> "$scratch/scripts/kv-namespaces-nonkeys.txt"
+  # An owned prefix missing from BOTH of the front door's lists: zero occurrences, the case whose count used to
+  # end the script under `pipefail` before its FAIL line was printed (#775's review).
+  sed -e 's|`rights/` · ||' -e 's| rights/ | |' docs/guide/building-on-mycelium.md > "$scratch/docs/guide/building-on-mycelium.md"
 
   set +e
   out=$("$SCRIPT" --root "$scratch" 2>&1)
@@ -208,7 +211,8 @@ RS
          '"zz-after-oneline/"' '"zz-after-indented/{}"' '"zz-planted-array/"' '"sys/zz-planted-array-sys/"'
          '"zz-planted-slice/"' '"consensus/zforged/{}"' '"sys/govern/zanything"'
          '"zz-after-field/"' '"zz-after-variant/"' '"zz-after-arm/{x}"' '"zz-after-literal-field/{}"'
-         '"zz-after-comment/"' '"zz-after-raw/"')
+         '"zz-after-comment/"' '"zz-after-raw/"'
+         'reserved-prefix list on the front door is missing' 'rights/ (appears 0×')
   for want in "${wants[@]}"; do
     if ! printf '%s\n' "$out" | grep -qF -- "$want"; then
       echo "self-test FAIL: the planted tree's output does not name $want"; fails=1
@@ -499,7 +503,9 @@ if [ -f "$front_door" ]; then
     # list stays short while looking covered.
     # Counted with a leading non-identifier char so `log/` does not also match `clog/`, and with
     # no backtick in the pattern (a backtick inside $(...) is command substitution, not a literal).
-    count=$(grep -oE "[^a-z_-]${prefix%/}/" "$front_door" | wc -l | tr -d " ")
+    # `|| true`: a prefix that appears nowhere makes grep exit 1, and under `pipefail` that ended the script here,
+    # silently, before the FAIL below — exit 1 after a "clean" line (#775's review; the self-test plants it).
+    count=$({ grep -oE "[^a-z_-]${prefix%/}/" "$front_door" || true; } | wc -l | tr -d " ")
     if [ "$count" -lt 2 ]; then
       missing="${missing}  ${prefix} (appears ${count}× — the front door states the list twice)\n"
     fi

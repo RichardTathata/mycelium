@@ -192,6 +192,10 @@ pub enum CheckpointOffer {
     },
     /// The signature does not verify for the named authority.
     Unverifiable(UnverifiableReason),
+    /// A `call:` checkpoint for a scope this reader holds no window for (identity-and-lifecycle I4): it admitted
+    /// no call there, so nothing is kept — a reader holds only the calls it admitted, and reads its own KV copy of
+    /// a call's checkpoint when it admits one.
+    NotHeld,
 }
 
 /// A reader's revocation view: the newest verified checkpoint per `(authority, scope)`, and every
@@ -278,7 +282,11 @@ impl RevocationView {
         // own window bounds its life — so a view started after the grant was issued (a restarted node, a node that
         // joined later) must still be able to hold it, or every grant issued before a restart is refused after it.
         // Sequence and signature still apply.
-        let grant_scope = c.scope.starts_with(crate::mandate::grant::GRANT_SCOPE_PREFIX);
+        // A **`call:` mandate's** checkpoint is exempt for a grant's reason (identity-and-lifecycle I4, N5): its
+        // standing reads no freshness and its window bounds its life, so a call minted before this reader restarted
+        // can still be established here.
+        let grant_scope = c.scope.starts_with(crate::mandate::grant::GRANT_SCOPE_PREFIX)
+            || c.scope.starts_with(crate::mandate::grant::CALL_SCOPE_PREFIX);
         if !grant_scope
             && let Some(t0) = self.started_at_ms
             && c.issued_at_ms.saturating_add(2 * clock.skew_ms) < t0
@@ -298,6 +306,23 @@ impl RevocationView {
     /// signature it has verified already (adopter-surface X3, second PR; #678's review, finding 4).
     pub fn holds(&self, authority: &PrincipalId, scope: &str, seq: u64) -> bool {
         self.newest.get(&(authority.clone(), scope.to_string())).is_some_and(|c| c.seq >= seq)
+    }
+
+    /// **Forget `scope`** of `authority` (identity-and-lifecycle I4): its newest checkpoint and every term it has
+    /// seen revoked there. For a scope whose every mandate is past its window — a `call:` scope, reclaimed by
+    /// `ExecutionAuthority::sweep` — where a
+    /// revocation no longer decides anything: the mandate is refused out of window whatever its checkpoint says.
+    /// **Never for a standing scope**: forgetting there would reinstate a revoked appointment.
+    #[cfg(all(feature = "gateway", feature = "tls"))] // its one caller, the execution authority's sweep, is built only there
+    pub(crate) fn forget(&mut self, authority: &PrincipalId, scope: &str) {
+        let key = (authority.clone(), scope.to_string());
+        self.newest.remove(&key);
+        self.revoked.remove(&key);
+    }
+
+    /// How much the view holds: `(newest checkpoints, revoked sets)`, each counted per `(authority, scope)`.
+    pub fn sizes(&self) -> (usize, usize) {
+        (self.newest.len(), self.revoked.len())
     }
 
     /// Where `term`, appointed by `authority` in `scope`, stands at `now_ms`.

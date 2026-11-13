@@ -307,7 +307,7 @@ chain, a mailbox entry — and `GET /gateway/overlay/consistent/get` did under `
 fallback. Both refuse an owned key **403** `protected_key` now (`refuse_protected_key_read`, the same predicate as
 the write side, `raw_kv_writable`), naming the route that reads the namespace. `GET /gateway/kv/keys` answers names:
 each row of `OWNED_KV_PREFIXES` carries `names_hidden`, set for `grant/`, `mailbox/`, `audit/`, `sys/audit/`, `sys/audit-checkpoint/`,
-`sys/client-cert/`, `mandate/`, `rights/` and `sched/`; a listing leaves those names out and a prefix inside one is 403, while
+`sys/client-cert/`, `mandate/`, `rights/`, `sched/` and (I4) `call/`; a listing leaves those names out and a prefix inside one is 403, while
 the rest stay listed because the Ops Console (`grp/`, `sys/identity`, the namespace map), CI's readiness probes
 (`sys/caller-context/`) and operator procedures read them. The lesson is the verification policy's rule 1 applied
 late: #549 enumerated every door that *writes* a KV key and none that reads one. Three dependants moved to routes of

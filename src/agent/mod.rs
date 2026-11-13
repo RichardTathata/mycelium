@@ -210,6 +210,9 @@ pub(crate) mod oidc;
 pub(crate) mod exchanged_token;
 #[cfg(all(test, feature = "compliance"))]
 mod exchanged_token_tests;
+/// Identity-and-lifecycle I4: a `call:` mandate at a live provider — the KV read under the hold, the feeder.
+#[cfg(all(test, feature = "compliance"))]
+mod call_mandate_tests;
 /// Identity-and-lifecycle I5 (D6): the gateway's token exchange at the IdP, DPoP-bound to the node key.
 #[cfg(feature = "compliance")]
 pub(crate) mod oidc_exchange;
@@ -2028,6 +2031,25 @@ impl GossipAgent {
                         changed = rx.changed() => { if changed.is_err() { break; } }
                     }
                     gateway_authority::feed_grant_checkpoints(&ctx, &authority);
+                }
+            });
+        }
+        // Identity-and-lifecycle I4: a `call:` mandate's checkpoints travel in the KV too
+        // (`call/{gateway}/{term}/checkpoint`). A write under the family wakes this loop, which reads the written key
+        // if this node holds that call's window — never the family, and not the windows it holds — so a call
+        // cancelled at its gateway is known to this node's sweep, and another node's calls cost it one map lookup.
+        {
+            let (ctx, authority) = (Arc::clone(&self.task_ctx), Arc::clone(&authority));
+            let mut shutdown = self.task_ctx.shutdown_tx.subscribe();
+            // Subscribed before the task is spawned, so no write between attaching and the task's first poll is missed.
+            let mut feed = gateway_authority::CallFeed::subscribe(&ctx);
+            self.task_ctx.spawn_task(async move {
+                loop {
+                    tokio::select! {
+                        _ = capability_ops::await_shutdown(&mut shutdown) => break,
+                        changed = feed.changed() => { if !changed { break; } }
+                    }
+                    gateway_authority::feed_call_checkpoints(&ctx, &authority, &mut feed).await;
                 }
             });
         }

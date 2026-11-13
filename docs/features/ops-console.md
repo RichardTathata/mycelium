@@ -43,7 +43,7 @@ reads `ok` and that a page served from an origin the nodes do not list reads `bl
 
 - No guarantee or rule id of its own; what a tab shows is each node's own answer, under that route's scope.
 - **Not shown:** the KV tab's namespace map has no `grant/`, `mailbox/`, `audit/`, `sys/audit/`, `sys/audit-checkpoint/`, `sys/client-cert/`,
-  `mandate/`, `rights/` or `sched/` — `/gateway/kv/keys` leaves those names out for every caller ([rbac](../operations/rbac.md)).
+  `mandate/`, `rights/`, `sched/` or `call/` — `/gateway/kv/keys` leaves those names out for every caller ([rbac](../operations/rbac.md)).
   Nor has it a component's log streams (`log/cn/`, `log/wiki/`, `log/reason/` and the same three under `clog/`): the map's `log/` and `clog/` counts
   are application streams only.
 - **Not built:** a server, a proxy or a server-side poller, by decision (D16, D28); history; a write of any kind; telling an

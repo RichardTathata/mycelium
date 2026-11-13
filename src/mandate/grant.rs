@@ -50,6 +50,23 @@ use crate::knowledge::IssuerId;
 /// or policy revision differ ([`crate::mandate::MandateRefusal::BoundToOtherArguments`], `BoundToOtherPolicy`).
 /// The `Mandate` type and its canonical bytes are unchanged, so every existing mandate and signature stands.
 pub const GRANT_SCOPE_PREFIX: &str = "grant:";
+
+/// The longest window a grant is issued for, in seconds (identity-and-lifecycle I4): the cap
+/// `POST /gateway/grants/{agent}/{request}` has always applied to `ttl_secs`, named. A `call:` mandate's window is
+/// held to the same cap where it is verified ([`check_call_mandate`]).
+pub const GRANT_TTL_CAP_SECS: u64 = 3_600;
+
+/// A **`call:` mandate** (identity-and-lifecycle I4) is a cancellation handle for one call: the gateway that
+/// dispatches the call issues it to itself — its `established_by` is its `holder`, the gateway's `node:` principal
+/// (D-6) — with scope `call:{term}`, one scope per call, and the one operation the call performs. Revoking its term
+/// stops the work registered under it. It is **not authority a rule can require** (D-1): it travels in its own
+/// envelope slot (`cm`, a `PresentedCallMandate`), is
+/// verified by [`check_call_mandate`] and never by [`GrantVerifier::check`], and no [`EntitlementTable`] entitles it.
+pub const CALL_SCOPE_PREFIX: &str = "call:";
+
+/// The longest term a `call:` mandate may carry, in bytes. The term is one segment of the call's KV keys
+/// (`call/{gateway}/{term}/…`) and a receiver holds it for the mandate's window, so it is short and holds no `/`.
+pub const CALL_TERM_MAX_BYTES: usize = 64;
 const BOUND_ARGS: &str = "bound:args:";
 const BOUND_POLICY: &str = "bound:policy:";
 const BOUND_RESOURCE: &str = "bound:resource:";
@@ -67,6 +84,12 @@ impl Mandate {
     /// Is this mandate a grant (scope `grant:…`)?
     pub fn is_grant(&self) -> bool {
         self.scope.starts_with(GRANT_SCOPE_PREFIX)
+    }
+
+    /// Is this mandate a `call:` mandate (scope `call:…`, identity-and-lifecycle I4) — a gateway's cancellation
+    /// handle for one call, see [`CALL_SCOPE_PREFIX`]?
+    pub fn is_call(&self) -> bool {
+        self.scope.starts_with(CALL_SCOPE_PREFIX)
     }
 
     /// A grant's binding, when its signed operations carry one. `None` for a mandate that is not a grant, or a
@@ -176,11 +199,24 @@ impl EntitlementTable {
 
     /// Entitle `authority` to grant mandates for `scope`.
     pub fn entitle(&mut self, scope: impl Into<String>, authority: PrincipalId) {
-        self.scopes.entry(scope.into()).or_default().insert(authority);
+        let scope = scope.into();
+        if scope.starts_with(CALL_SCOPE_PREFIX) {
+            // Said, not silently accepted: `is_entitled` answers `false` for every `call:` scope.
+            tracing::warn!(%scope, %authority, "an entitlement for a call: scope entitles nothing: a call: mandate is a gateway's cancellation handle, verified apart from every table; ignored");
+            return;
+        }
+        self.scopes.entry(scope).or_default().insert(authority);
     }
 
     /// Is `authority` entitled for `scope`?
     pub fn is_entitled(&self, scope: &str, authority: &PrincipalId) -> bool {
+        // A `call:` scope is entitled by nothing (identity-and-lifecycle I4, D-1 and D-6): a `call:` mandate is a
+        // gateway's cancellation handle, verified by `check_call_mandate` alone. Refused here, at the one place
+        // every `GrantVerifier::check` caller reads, so a table that names a `call:` scope makes no such mandate
+        // authority — for a call, a capability advertisement, or an agent's own wait.
+        if scope.starts_with(CALL_SCOPE_PREFIX) {
+            return false;
+        }
         self.scopes.get(scope).is_some_and(|a| a.contains(authority))
             // A grant's scope is its own (`grant:{request}`); the authority entitled for every grant is entitled
             // under the prefix (adopter-surface X3), and with `entitle_grants_from_fleet` every member node is —
@@ -312,6 +348,67 @@ impl GrantVerifier {
             _ if !holder.claims_member_namespace() && external.verify_client(&holder, &message, proof) => GrantVerdict::Valid,
             _ => GrantVerdict::WrongHolder,
         }
+    }
+}
+
+/// **Check a presented `call:` mandate** (identity-and-lifecycle I4, D-6) for the gateway whose envelope carried
+/// it. `gateway` is that gateway's principal, `node:{via}` — established by the receiver from the frame's verified
+/// sender, never from the mandate. The order is [`GrantVerifier::check`]'s, with **entitlement replaced by the
+/// issuer rule**: no table entitles a `call:` scope; the mandate counts only when its `established_by` and its
+/// `holder` are both `gateway`. So a member cannot issue one for another gateway's call, and
+/// [`EntitlementTable::entitle_grants_from_fleet`] does not reach it.
+///
+/// 1. **Shape.** The scope is `call:{term}`: one scope per call, so a call's records are found from its term. The
+///    term is not empty, at most [`CALL_TERM_MAX_BYTES`] and holds no `/`: it is one segment of the call's keys.
+/// 2. **The issuer rule.** `established_by == holder == gateway`, a `node:` principal in its node's canonical
+///    spelling — else [`GrantVerdict::NotEntitled`].
+/// 3. **Issuance.** The signature verifies under a current key of that member.
+/// 4. **Window.** Inside it at `now_ms`, and no longer than [`GRANT_TTL_CAP_SECS`] — a receiver holds a `call:`
+///    scope's records until its window ends, so an unbounded window would be unbounded memory.
+/// 5. **Possession.** The gateway's signature over [`possession_message`]`(grant, request)`.
+///
+/// Nothing is retained: a `call:` scope is one appointment by construction, as a grant's is.
+pub fn check_call_mandate(
+    grant: &SignedMandateGrant,
+    gateway: &str,
+    request: &[u8],
+    possession: &[u8],
+    now_ms: u64,
+    members: &impl MemberKeySource,
+    external: &TrustedExternalIssuers,
+) -> GrantVerdict {
+    let m = &grant.mandate;
+    let term = m.term.as_str();
+    if term.is_empty() || term.len() > CALL_TERM_MAX_BYTES || term.contains('/') {
+        return GrantVerdict::NotEntitled;
+    }
+    if m.scope.strip_prefix(CALL_SCOPE_PREFIX) != Some(term) {
+        return GrantVerdict::NotEntitled;
+    }
+    if !gateway.starts_with("node:") || m.established_by.as_str() != gateway || m.holder.as_str() != gateway {
+        return GrantVerdict::NotEntitled;
+    }
+    let Some(issuer) = IssuerId::new(gateway) else {
+        return GrantVerdict::Unverifiable(UnverifiableReason::UntrustedExternal);
+    };
+    // The principal is the **canonical** name of the node it parses to (#775's confirm round). One node has many
+    // spellings — `node:[::1]:7603`, `node:[0:0:0:0:0:0:0:1]:7603` — which all verify under its one key; taken as
+    // written, each would be a gateway of its own to the per-gateway cap and would name a different KV key, where
+    // the cancel is never found.
+    if issuer.member_node().is_none_or(|node| format!("node:{node}") != gateway) {
+        return GrantVerdict::NotEntitled;
+    }
+    match verify_signed_by(&issuer, &m.canonical_bytes(), &grant.signature, members, external) {
+        Authenticity::Current { .. } => {}
+        Authenticity::Revoked { .. } => return GrantVerdict::SignedUnderRevokedKey,
+        Authenticity::Unverifiable(r) => return GrantVerdict::Unverifiable(r),
+    }
+    if !m.is_current(now_ms) || m.valid_until_ms.saturating_sub(m.valid_from_ms) > GRANT_TTL_CAP_SECS * 1_000 {
+        return GrantVerdict::OutOfWindow;
+    }
+    match verify_signed_by(&issuer, &possession_message(m, request), possession, members, external) {
+        Authenticity::Current { .. } => GrantVerdict::Valid,
+        _ => GrantVerdict::WrongHolder,
     }
 }
 

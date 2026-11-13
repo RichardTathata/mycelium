@@ -54,7 +54,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - `GET /gateway/kv?key=` and `GET /gateway/overlay/consistent/get?key=` answer **403** `protected_key` for an owned
     key, whatever the scopes, naming the route that reads the namespace;
   - `GET /gateway/kv/keys` leaves out the key names under `grant/`, `mailbox/`, `audit/`, `sys/audit/`, `sys/audit-checkpoint/`,
-    `sys/client-cert/`, `mandate/`, `rights/` and `sched/`, and a `prefix` inside one of them is 403 `protected_key`; every
+    `sys/client-cert/`, `mandate/`, `rights/`, `sched/` and `call/`, and a `prefix` inside one of them is 403 `protected_key`; every
     other namespace's names stay listed (the Ops Console's panels and prefix readiness probes are unaffected) —
     except a component's log streams', which the entry above hides (§101);
   - three reads have routes of their own: `GET /gateway/schedules/last?id=` (`schedule:run`; `scheduleLast` /
@@ -112,6 +112,30 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **`mycelium explain --closure`'s text counts nodes, not journal files, as its JSON does.** Two journals of one node
   under `--fleet 2`, or a record naming a node with no journal given, now print `INCOMPLETE` where the fleet line
   compared the number of files (#767's confirm round).
+- **A `call:` mandate at the execution authority** (identity-and-lifecycle I4, PR 1a; `deprecations.md` §100). A
+  `call:` mandate is a gateway's cancellation handle for one call: scope `call:{term}`, issued by the gateway to
+  itself, with its first revocation checkpoint carried beside it (`PresentedCallMandate`).
+  `ExecutionAuthority::assess_call` verifies one — the issuer and the holder must both be the gateway whose envelope
+  carried it, named canonically (`node:{NodeId}`), and no entitlement table is read — inserts the scope's window, reads the node's own KV copy of the
+  checkpoint under the same hold, and judges the term: `Established`, `Refused(Revoked)` or `Unknown`. Work registered
+  under it is cancelled by the sweep once its term is revoked, and `named_stop_records` names the mandate whose lapse
+  stopped the work (`StopRecord` is unchanged). A node holds a `call:` scope only where it admitted a call, and only
+  until the mandate's window ends; it holds at most 262 144 windows, 65 536 from one gateway, and refuses and counts
+  one more; the sweep reclaims everything expired, 1 024 scopes per hold of its lock; and a feeder reads the key of
+  a `call:` checkpoint that was written only if the node holds that call's window. A copy of a call's checkpoint read from the KV is verified
+  against the gateway its key names before it is used, whatever its sequence. One that fails is treated as absent
+  and counted, and so are an older copy written back over a newer one and a tombstone where a copy was read
+  (`GET /stats` `call_checkpoints_refused`, `call_checkpoints_stale`, `call_checkpoints_missing`,
+  `call_windows_refused`). Needs `compliance`. **Not yet built:** the gateway's
+  mint, the provider reading `cm` from a call, and every cancel door — until they land, nothing presents a `call:`
+  mandate at a live door.
+
+### Changed
+
+- The `call/` key family is owned: the raw KV routes answer it `403 protected_key`. A mandate whose scope begins
+  `call:` is never established in the first mandate slot, and no entitlement table entitles one; `offer_checkpoint` keeps a
+  `call:` checkpoint only for a held window (`CheckpointOffer::NotHeld` otherwise); a `call:` checkpoint is exempt from
+  the start rule, as a grant's is; `MandateRefusal` gained `Revoked { term }` (`deprecations.md` §100).
 
 ## [2.40.0] — 2026-11-12
 
