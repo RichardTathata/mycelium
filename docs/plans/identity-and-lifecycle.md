@@ -1,6 +1,6 @@
 # Identity and lifecycle — keyed principals, signed decisions, cancellation under a per-call mandate, and the developer surface
 
-**Status:** **agreed with the maintainer on 2026-11-07**, rev 0.20 (rev 0.20, 2026-11-12, opens I4's build: the split into four PRs, the maintainer's decisions on Q1 (stop records), Q2 (the cancel receipt), from #775's review H1 (a KV copy of a call's checkpoint that fails verification is absent, not refused, with detectors; the cancel-forward the primary cancel path), and on three differences the build raised (exit 7's refusal is `cancel_not_from_issuer`, the exit's text changed; a member's own unframed call is not cancellable, not built; exit 12's sweep ceiling is the 5 s clamp), the build's engineering defaults, and what PR 1a delivers, all in the row; rev 0.19, 2026-11-12, records that wave 1b's MINOR also carries three items of the critique plan, [`external-critique-2026-11-12.md`](external-critique-2026-11-12.md), by the maintainer's decision D11 there: CR2's first PR (the grant use marker), CR13's counter and CR12; a note under I4 on its collector and one under I2 on CR5f; no row's text is otherwise changed. Rev 0.18, 2026-11-12, writes row I2 **buildable**. It records the maintainer's 2026-11-12 decisions on the round-3 review's R1–R4. After narrowing no node is legacy (R1, after narrowing only). A re-issued certificate carries its key's original first issuance in a successor-signed `firstIssuedMs` extension (R2). The issuer learns which keys are revoked from a new gateway inventory, `GET /gateway/identity/inventory` under `identity:read`, which it judges offline, and revocations survive succession (R3). Anchors keep their certificates, not digests, journaled, with a roots-generation cache (R4). I1's client certificates lose standing at narrowing, and `tls succeed` re-issues them. I7's consent certificates follow the same rule and are re-issued over their public key alone, with their grade. Exit 4 states I4's constraint, closing §9 O8: every gateway is anchored under the successor before any provider narrows, required, with an operator override (`tls succeed --narrow --accept-unanchored`, audited; the maintainer's decision, 2026-11-12), and a `call:` window (at most `GRANT_TTL_CAP_SECS`, 3600 s) is shorter than the succession window. #768's review is folded in: `legacy_closed` is derived from the roots' CA generation rather than `succession/` (H2); the rule lives in three readers (M1); the window floor is `GRANT_TTL_CAP_SECS` + 2·skew + `max_drain_secs` (M2); the generation guard covers `anchors_seen` (M3); and the client-certificate journal gains `RaisedWithCert` (M4). Engineering choices are labelled apart from the decisions. Exits 15–20 are added; the drifted `tls.rs:916` citation is now `:987`; I2 depends on the sim-seams gate fix; rev 0.17, 2026-11-12, writes row I4 buildable: N1–N5 resolved, with `file:line` at `d974fc76`, and the maintainer's decisions D-1–D-6 of 2026-11-12 recorded in the row — a `call:` mandate rides a second slot, is a cancellation handle no rule's `requires_mandate` reads, is self-issued by the envelope's gateway and is assessed once at `admit_after`; `cancellable` requires it; the KV, not a window table, survives a restart, with `call:` exempt from the start rule; a retention floor for `call:` and `grant/`; N1's grant half recorded as fixed by #735; exits 1–3, 5–7, 9–16 and 18 reworded, exit 17 new; I2 dependency noted; then #766's review (H1–H3, M1–M7, L1–L8): engineering defaults, marked as such and not decisions — `call_mandate_ttl_secs` (300 s, capped at a named `GRANT_TTL_CAP_SECS` = 3600 s), `gateway_mint_call_mandates`, the mint after the preflight and inside framing, a signed `call/…/window` record for D-5's floor, `Decision.cancellable` through `Preflight::Proceed`, `PresentedCallMandate` in `cm` with `PresentedMandate` untouched, the revoked set counted in the memory bound, the cancel doors' authority, a papaya MCP table; `authority_lapsed()` and the parked SDK-serve admission under both guards (new exit 17); the two uncancellable residuals; §5's I4 line rewritten, §6 item 5 extended, §9 O8 opened for I2's side; I7 noted as not interacting; then #766's confirm round: four decision clauses restored to D-1, D-2, D-5 and D-6, and the `window` record's verification bound to its key's gateway segment; rev 0.16, 2026-11-12, takes #764's review (M1–M6, L1–L9) and records the maintainer's decisions on I7 of the same day: P2 a fleet-certified P-256 consent key verified at `grant_decision::verify` only, issued over its public key with the CA off-node; P3 the CryptoKit blob path, no signed bundle; P1 `os_presence(macos, unbound)`, an enrolment claim no verifier can check; P4 the grade on the consent record, D7's three plus `service`; P5 a residual; P6 I1's supersession with every node upgraded first; then, after #764's confirm round, H1 a consent key under its own principal `consent:{issuer}/{name}` (nothing supersedes across kinds; never fed to possession) and H2 the grade written into the consent certificate by the fleet CA, the body's grade refused when it differs (P4 revised); after the second confirm round, A consent's own authority (`gateway_consent_principals`, `signed_with` at the evaluator), B the `tty` residual stated, the grade's OID on the `2.25` UUID arc, its message encoding and the P-256 key-hex pinned; the consent issue flow over an SPKI PEM with `--grade` and a `--force` guard — I7 **buildable on macOS**, its `tty` half then waiting on P7, decided the same day: a fleet-certified P-256 consent key in software on Linux and Windows, graded `tty`, so I7 is **buildable**; D7's *Revised from* and N7 follow; rev 0.15, 2026-11-12, writes row I7 from spike S-presence's note, `docs/plans/spikes/2026-11-07-s-presence.md`, and its maintainer's run of 2026-11-09: the four questions the stub left to the spike answered with what it settled — the fleet CA can certify a P-256 Enclave key and `ring` verifies it, the release pipeline cannot produce a signed bundle, Windows was not run so D7's `tty` stands, and presence is not attested to the verifier, so an `os_presence` grade is an enrolment claim — where the evidence and D7 disagree stated, every verifier a client key reaches enumerated, and I7 **not yet buildable: P1–P6 open**, the maintainer's; rev 0.14, 2026-11-12, records wave 1a — I0, I1, I3 and I5 — released in v2.40.0; rev 0.13, 2026-11-11, closes I5 on evidence across #757, #759 and its PR 2, with the decision that a gateway exchanges only for an action recorded on the row; rev 0.12, 2026-11-11, records #759's review on I5's provider half: the check's order restated and pinned, its clocks read at the receive boundary's instant, one OIDC verifier per node, the replay window keyed across gateways, `typ` and two start-time refusals, and the maintainer's decision that a hosted capability's invoke needs an `ot`; rev 0.11 records the maintainer's four I5 decisions of 2026-11-11 and spike S-exchange's note, `docs/plans/spikes/2026-11-11-s-exchange.md`: the gateway exchanges under its own client credential, `oidc.exchange_audience` is an explicit setting both ends read, the envelope cap stays at 8 KiB; after #757's review, the maintainer's decision to extend the spike to sender binding, and the row rewritten to it: the exchanged token is DPoP-bound to the gateway's Ed25519 node key (Keycloak 26.8.2, default features), the provider refuses a token not bound to the key that signed its envelope, and replay rests on that and the token's `jti` admitted once; rows I2 and I4 are **not yet buildable**: I2's **R1–R4 open**, the round-3 review's questions, and I4's **N1–N5 open**, the round-2 review's questions, which each row's build PR must settle; rev 0.10 writes row I4 from spike S-cancel's note, `docs/plans/spikes/2026-11-07-s-cancel.md`, and takes #731's review and its confirm round: S-cancel re-measured, its reclamation fixed for the feeder, and I4's exit given an item for every D2 decision; rev 0.9 writes row I2 from spike S-succeed's note, `spikes/2026-11-07-s-succeed.md`, and #732's review: a `cert_pem` node re-roots live, the trust set and the successor certificate persist under `succession/`, every cached judgment is re-judged when the roots change, and old-CA records lose standing (decided in the confirm round); rev 0.8 records the agreement, its text rev 0.7's); proposed 2026-10-31. Work starts in §4's order: wave 1a's I0 and wave 1b's spikes in parallel. Five independent adversarial reviews —
+**Status:** **agreed with the maintainer on 2026-11-07**, rev 0.21 (rev 0.21, 2026-11-13, records I4's PR 1b, the provider's admission: Q9 answered — a `call:` mandate's term must be `c{n}` of the envelope that carries it — what the PR delivers against exits 1, 2, 5, 6, 15 and 17, and the maintainer's three decisions of 2026-11-13 (exits 5 and 9 reworded for re-presentation; D-2 widened, a revoked term refuses under any rule; one refusal detail with a stable `data.cause`); rev 0.20, 2026-11-12, opens I4's build: the split into four PRs, the maintainer's decisions on Q1 (stop records), Q2 (the cancel receipt), from #775's review H1 (a KV copy of a call's checkpoint that fails verification is absent, not refused, with detectors; the cancel-forward the primary cancel path), and on three differences the build raised (exit 7's refusal is `cancel_not_from_issuer`, the exit's text changed; a member's own unframed call is not cancellable, not built; exit 12's sweep ceiling is the 5 s clamp), the build's engineering defaults, and what PR 1a delivers, all in the row; rev 0.19, 2026-11-12, records that wave 1b's MINOR also carries three items of the critique plan, [`external-critique-2026-11-12.md`](external-critique-2026-11-12.md), by the maintainer's decision D11 there: CR2's first PR (the grant use marker), CR13's counter and CR12; a note under I4 on its collector and one under I2 on CR5f; no row's text is otherwise changed. Rev 0.18, 2026-11-12, writes row I2 **buildable**. It records the maintainer's 2026-11-12 decisions on the round-3 review's R1–R4. After narrowing no node is legacy (R1, after narrowing only). A re-issued certificate carries its key's original first issuance in a successor-signed `firstIssuedMs` extension (R2). The issuer learns which keys are revoked from a new gateway inventory, `GET /gateway/identity/inventory` under `identity:read`, which it judges offline, and revocations survive succession (R3). Anchors keep their certificates, not digests, journaled, with a roots-generation cache (R4). I1's client certificates lose standing at narrowing, and `tls succeed` re-issues them. I7's consent certificates follow the same rule and are re-issued over their public key alone, with their grade. Exit 4 states I4's constraint, closing §9 O8: every gateway is anchored under the successor before any provider narrows, required, with an operator override (`tls succeed --narrow --accept-unanchored`, audited; the maintainer's decision, 2026-11-12), and a `call:` window (at most `GRANT_TTL_CAP_SECS`, 3600 s) is shorter than the succession window. #768's review is folded in: `legacy_closed` is derived from the roots' CA generation rather than `succession/` (H2); the rule lives in three readers (M1); the window floor is `GRANT_TTL_CAP_SECS` + 2·skew + `max_drain_secs` (M2); the generation guard covers `anchors_seen` (M3); and the client-certificate journal gains `RaisedWithCert` (M4). Engineering choices are labelled apart from the decisions. Exits 15–20 are added; the drifted `tls.rs:916` citation is now `:987`; I2 depends on the sim-seams gate fix; rev 0.17, 2026-11-12, writes row I4 buildable: N1–N5 resolved, with `file:line` at `d974fc76`, and the maintainer's decisions D-1–D-6 of 2026-11-12 recorded in the row — a `call:` mandate rides a second slot, is a cancellation handle no rule's `requires_mandate` reads, is self-issued by the envelope's gateway and is assessed once at `admit_after`; `cancellable` requires it; the KV, not a window table, survives a restart, with `call:` exempt from the start rule; a retention floor for `call:` and `grant/`; N1's grant half recorded as fixed by #735; exits 1–3, 5–7, 9–16 and 18 reworded, exit 17 new; I2 dependency noted; then #766's review (H1–H3, M1–M7, L1–L8): engineering defaults, marked as such and not decisions — `call_mandate_ttl_secs` (300 s, capped at a named `GRANT_TTL_CAP_SECS` = 3600 s), `gateway_mint_call_mandates`, the mint after the preflight and inside framing, a signed `call/…/window` record for D-5's floor, `Decision.cancellable` through `Preflight::Proceed`, `PresentedCallMandate` in `cm` with `PresentedMandate` untouched, the revoked set counted in the memory bound, the cancel doors' authority, a papaya MCP table; `authority_lapsed()` and the parked SDK-serve admission under both guards (new exit 17); the two uncancellable residuals; §5's I4 line rewritten, §6 item 5 extended, §9 O8 opened for I2's side; I7 noted as not interacting; then #766's confirm round: four decision clauses restored to D-1, D-2, D-5 and D-6, and the `window` record's verification bound to its key's gateway segment; rev 0.16, 2026-11-12, takes #764's review (M1–M6, L1–L9) and records the maintainer's decisions on I7 of the same day: P2 a fleet-certified P-256 consent key verified at `grant_decision::verify` only, issued over its public key with the CA off-node; P3 the CryptoKit blob path, no signed bundle; P1 `os_presence(macos, unbound)`, an enrolment claim no verifier can check; P4 the grade on the consent record, D7's three plus `service`; P5 a residual; P6 I1's supersession with every node upgraded first; then, after #764's confirm round, H1 a consent key under its own principal `consent:{issuer}/{name}` (nothing supersedes across kinds; never fed to possession) and H2 the grade written into the consent certificate by the fleet CA, the body's grade refused when it differs (P4 revised); after the second confirm round, A consent's own authority (`gateway_consent_principals`, `signed_with` at the evaluator), B the `tty` residual stated, the grade's OID on the `2.25` UUID arc, its message encoding and the P-256 key-hex pinned; the consent issue flow over an SPKI PEM with `--grade` and a `--force` guard — I7 **buildable on macOS**, its `tty` half then waiting on P7, decided the same day: a fleet-certified P-256 consent key in software on Linux and Windows, graded `tty`, so I7 is **buildable**; D7's *Revised from* and N7 follow; rev 0.15, 2026-11-12, writes row I7 from spike S-presence's note, `docs/plans/spikes/2026-11-07-s-presence.md`, and its maintainer's run of 2026-11-09: the four questions the stub left to the spike answered with what it settled — the fleet CA can certify a P-256 Enclave key and `ring` verifies it, the release pipeline cannot produce a signed bundle, Windows was not run so D7's `tty` stands, and presence is not attested to the verifier, so an `os_presence` grade is an enrolment claim — where the evidence and D7 disagree stated, every verifier a client key reaches enumerated, and I7 **not yet buildable: P1–P6 open**, the maintainer's; rev 0.14, 2026-11-12, records wave 1a — I0, I1, I3 and I5 — released in v2.40.0; rev 0.13, 2026-11-11, closes I5 on evidence across #757, #759 and its PR 2, with the decision that a gateway exchanges only for an action recorded on the row; rev 0.12, 2026-11-11, records #759's review on I5's provider half: the check's order restated and pinned, its clocks read at the receive boundary's instant, one OIDC verifier per node, the replay window keyed across gateways, `typ` and two start-time refusals, and the maintainer's decision that a hosted capability's invoke needs an `ot`; rev 0.11 records the maintainer's four I5 decisions of 2026-11-11 and spike S-exchange's note, `docs/plans/spikes/2026-11-11-s-exchange.md`: the gateway exchanges under its own client credential, `oidc.exchange_audience` is an explicit setting both ends read, the envelope cap stays at 8 KiB; after #757's review, the maintainer's decision to extend the spike to sender binding, and the row rewritten to it: the exchanged token is DPoP-bound to the gateway's Ed25519 node key (Keycloak 26.8.2, default features), the provider refuses a token not bound to the key that signed its envelope, and replay rests on that and the token's `jti` admitted once; rows I2 and I4 are **not yet buildable**: I2's **R1–R4 open**, the round-3 review's questions, and I4's **N1–N5 open**, the round-2 review's questions, which each row's build PR must settle; rev 0.10 writes row I4 from spike S-cancel's note, `docs/plans/spikes/2026-11-07-s-cancel.md`, and takes #731's review and its confirm round: S-cancel re-measured, its reclamation fixed for the feeder, and I4's exit given an item for every D2 decision; rev 0.9 writes row I2 from spike S-succeed's note, `spikes/2026-11-07-s-succeed.md`, and #732's review: a `cert_pem` node re-roots live, the trust set and the successor certificate persist under `succession/`, every cached judgment is re-judged when the roots change, and old-CA records lose standing (decided in the confirm round); rev 0.8 records the agreement, its text rev 0.7's); proposed 2026-10-31. Work starts in §4's order: wave 1a's I0 and wave 1b's spikes in parallel. Five independent adversarial reviews —
 four on one day, the fifth on the merged document (#715's thread, 2026-11-05; the thread, this paragraph and the *Revised
 from* column are the record of all five): rev 0.1 against the decisions, rev 0.3 against the mechanisms, rev 0.4 and rev 0.5 each against five
 premises, both with the verdict *not yet buildable*. Every premise failure sat in wave 1 (I0–I4) or in the developer
@@ -448,7 +448,10 @@ How it is built is under *Engineering defaults* below.
   `requires_mandate` (`src/agent/action_evaluator.rs:2144–2155`). Otherwise a gateway could mint a mandate for itself
   and meet any rule that requires one. It travels in its own envelope slot, never in `ActionEnvelope.mandate`.
 - **D-2. A rule declared `cancellable` requires an established `call:` mandate at the provider.** Without one, the
-  call is refused (-32031). Stripping slot 2 cannot make a cancellable call run uncancellable.
+  call is refused (-32031). Stripping slot 2 cannot make a cancellable call run uncancellable. **And a call whose
+  `call:` term is already revoked is refused under any rule** *(widened by the maintainer's decision of 2026-11-13)*:
+  the gateway cancelled it before it ran. **The limit:** under a rule that is not cancellable that is best effort —
+  a relay that strips `cm` makes the same call run.
 - **D-3. Slot 2 is assessed at one point, at the provider's `admit_after`, immediately before `begin`.** No second
   assessment can disagree with a first. What remains is the interval from that read to `begin`, and a revocation
   landing there is caught by the sweep (bound 1).
@@ -562,9 +565,7 @@ any fleet member can write (Layer I detects, it does not prevent).
     provider's rule decides. `validate()` refuses `gateway_mint_call_mandates` under `gateway_caller_profile = legacy`
     by name, since a legacy call has no envelope to carry `cm`.
   - **No SDK acknowledgement route** (Q6). The SDK-served path is always unconfirmed. **Not built.**
-  - **The term need not be `c{n}` of the envelope that carries it**: exits 5 and 9 present a term again in a fresh
-    envelope. **This default depends on Q9** (below, open for PR 1b): if a relay can swap one valid `cm` for
-    another, binding `cm` to its envelope is the fix, and this default changes with it.
+  - **The term is `c{n}` of the envelope that carries it, and the provider requires it** (Q9's answer, below).
   - **The 10⁵ soak** (Q10) is an `#[ignore]`d test run once and dated on `what-is-proven.md`. A 10³ version runs in CI.
 - **The authority's own defaults (the build's PR 1a).**
   - **The scope is `call:{term}`, and the term is one short key segment.** One scope per call, so a call's key
@@ -619,12 +620,21 @@ any fleet member can write (Layer I detects, it does not prevent).
 - **Exit 12's "sweep ceiling" is the 5 s clamp on the sweep interval** (`sweep_interval_ms`). The exit's text is
   unchanged; this is its reading.
 
-**Open, to be answered with a test in PR 1b (#775's M3; not a default).** `cm` is outside the envelope's signature,
-which covers the principal, `via`, the scopes, the time, the id and the payload's digest
-(`src/agent/gateway_caller.rs`, `attest`). Can a relaying member swap in **another valid `cm` from the same gateway**
-for a call with the identical operation, resource and arguments? The provider would register the work under the
-other term, and the gateway's cancel of the right term would miss it. PR 1b answers this with a test, and binds `cm`
-to its envelope if the answer is yes.
+**Q9, answered in PR 1b (2026-11-13): a `call:` mandate fits only the envelope it was minted for.** `cm` is outside
+the envelope's signature, which covers the principal, `via`, the scopes, the time, the id and the payload's digest
+(`src/agent/gateway_caller.rs`, `attest`).
+- **The swap worked.** A `call:` mandate's possession proof binds the operation, the resource and the arguments,
+  not the call. So a relaying member could put another valid `cm` of the same gateway, minted for an identical call,
+  into an envelope; the provider would register the work under the other call's term, and the gateway's cancel of
+  the right term would miss it. The test is
+  `a_call_mandate_lifted_from_another_envelope_of_the_same_gateway_is_not_established`; with the check taken out it
+  fails: the lifted `cm` is established and the call runs.
+- **The fix (engineering, PR 1b): the provider requires the mandate's term to be `c{n}` of the envelope that
+  carries it.** `n` is inside the envelope's signature and is what the mint already derives the term from, so
+  nothing is added to the wire and no signed bytes change. The alternative, a further gateway signature over `cm`
+  (as `so` covers `ot`), would add an envelope field and a signature per call.
+- **What it changes** (accepted by the maintainer, 2026-11-13; exits 5 and 9 reworded). A `call:` term reaches a
+  provider only in its own envelope. The earlier default, *"the term need not be `c{n}`"*, is withdrawn.
 
 **From the spike** ([S-cancel's note](spikes/2026-11-07-s-cancel.md), 2026-11-07). The evidence is the tag
 `spike/s-cancel-2026-11-07-r2` (never merged), and the leak's reproduction is at `spike/s-cancel-leak-2026-11-07`. Its
@@ -924,7 +934,19 @@ operator accepts that gateway (the maintainer's decision, 2026-11-12).
    - One whose revocation is already in the provider's KV at `admit_after` is refused there.
    - A revocation written between the window's insert and the KV read, or just after the read, is offered and stops the
      work within one sweep.
-   - Re-presenting the call afterwards is refused `Revoked`.
+   - **A cancelled call cannot be made to run by presenting it again** *(reworded by the maintainer's decision of
+     2026-11-13; it read "re-presenting the call afterwards is refused `Revoked`")*. Three mechanisms, in sequence:
+     - while the provider stays up, the envelope's id is admitted once (the replay window), and a replay is
+       **dropped unanswered**: the re-presenter sees a timeout, not a refusal;
+     - after a provider restart inside the envelope's 300 s (`CALLER_CONTEXT_MAX_AGE_MS`; the window is in memory),
+       the envelope is admitted again and its term reads `Revoked` from the KV record — the door's `Revoked`, and
+       exit 11's case;
+     - after that, the envelope is `Stale`.
+     - A `call:` mandate fits only its own envelope (Q9), so the same `cm` in any other envelope is not
+       established. A gateway's **retry is a new envelope and a new term**, which is not revoked: a cancel is per
+       dispatch.
+     - A restarted gateway whose clock stepped back could reuse an envelope id inside a mandate's window; a swap
+       would then also need an identical call.
 6. **Refused before the handler** (D-3). A revoked term reads `Refused(Revoked)` at `admit_after`, the one point slot
    2 is assessed. The handler does not run, and the record says `Execution::None`. Rev 0.10 said *"at the gateway's
    preflight and at the provider"*. Slot 2 is no longer assessed at the preflight.
@@ -942,7 +964,9 @@ operator accepts that gateway (the maintainer's decision, 2026-11-12).
    class, or `DeliveryUnknown`, never a stop it cannot confirm.
 9. **Reclamation with the feeder running.** A node that admitted none of 10³ calls whose `call:` checkpoints are in its
    KV holds none of them (view sizes zero). A node that admitted them returns to zero one sweep past the last window,
-   and stays at zero when the feeder is woken again. A revoked call re-presented inside its window stays refused.
+   and stays at zero when the feeder is woken again. A revoked call's term stays refused at the authority inside
+   its window, however it is presented *(reworded 2026-11-13 with exit 5: at the door a re-presentation is a
+   replay, a restart's `Revoked`, or stale)*.
    While the 10³ are held, the memory per admitted call is within the counted bound (checkpoint + revoked-set entry +
    window, about 675 B per call in S5).
 10. **The sweep's hold.** No sweep reclaims more than its per-sweep cap. Row 43's entry in
@@ -1071,6 +1095,108 @@ changed lines. Each is opened after the one before it merges. The row closes, pr
   (`src/agent/http/grant_tests.rs`); the four raw doors share the one check (`refuse_protected_key`). It came early
   because `every_namespace_in_the_table_is_classified_for_the_raw_kv_routes` refuses a table row without a
   decision.
+
+**Delivered by PR 1b (the provider's admission).** The tests are in `src/agent/call_admission_tests.rs` unless
+named otherwise; each runs through the node's real serve loops, the envelope framed with the node's key and a
+test-only mint (the gateway's is PR 2).
+- *Exit 1, "the same call with the checkpoint, or the whole of slot 2, stripped is not registered under a rule that
+  is not cancellable. Under a cancellable rule it is refused -32031 `call_mandate_not_established`"*, and the work
+  registered: `a_cancellable_call_runs_only_registered_under_its_call_mandate_and_a_cancel_stops_it`. It also shows
+  the first half of exit 4 — the gateway's cancel ends the running call within the sweep's bound, with its stop
+  record — written here by the test, not by a gateway: the revoke and its durable write are **not built** (PR 2).
+- *Exit 2, "both are assessed: slot 1 against the client principal, slot 2 against `node:{via}` … A `call:` mandate
+  alone does not meet a rule's `requires_mandate`, and its binding is not in `ActionEnvelope.mandate`"*, and N4's
+  test: `a_call_under_a_grant_and_a_call_mandate_is_registered_under_both_and_either_stops_it` (`running_count` 2;
+  each stop record names its mandate). The binding never enters the envelope the evaluator sees: `cm` is read in
+  `admit_after` only (`assess_call_slot`, `src/agent/provider_enforcement.rs`). *"From another gateway's envelope"*
+  at the door is the verified `via`, in its canonical spelling:
+  `a_call_mandate_lifted_from_another_envelope_of_the_same_gateway_is_not_established` (its alias step).
+- *Exits 5 and 6, N1 (D-3), "refused there … the handler does not run, and the record says `Execution::None` … the
+  same holds with both slots present, under a rule that requires the grant"*:
+  `a_call_cancelled_between_the_preflight_and_the_registration_is_refused`, held at the `PAUSE` hook.
+- *Exit 15*: `Decision.cancellable` (`requiring_call_mandate` for an adapter), `Rule::cancellable`, the unit file's
+  `cancellable` key, and `validate()` refusing `requires_mandate = "call:…"` by name:
+  `a_cancellable_allowances_permit_says_so_and_no_constructor_does` (`src/agent/action_evaluator.rs`) and
+  `a_cancellable_rule_and_a_rule_that_would_require_a_call_mandate` (`src/capability_config.rs`). *"A 2.38 reader
+  refuses a `cancellable` key by name"* is the existing unknown-key refusal; no older binary is run.
+- *Exit 17, "stops a `skill.invoke` in-process serve loop racing `RpcRequest::authority_lapsed()`"*:
+  `a_cancel_reaches_an_in_process_serve_loop_through_authority_lapsed`. *"With and without a cohort budget"* and the
+  SDK-served half: **not built** here (PR 3).
+- *Every door that carries no `call:` mandate* (the gateway's `/mcp`, a member's own call, an unframed call):
+  `a_cancellable_rule_refuses_a_call_from_every_door_that_carries_no_call_mandate`. Until a gateway mints (PR 2), a
+  cancellable rule therefore refuses every call at an enforcing provider — stated in §104.
+- **Not built here, stated:** the bridged MCP loop and the SDK serve stream reach the same `check` and so the same
+  refusal, but neither stops a cancelled call — the bridged call's work is registered and its forward not raced, and
+  an SDK-served admission is only parked, under a cohort budget, with nothing awaiting its lapse (H3, PR 3). The
+  built-in `llm.invoke` door does not reach `check` at all (F1, below). `/a2a` and the companions' kinds reach the
+  provider through the same `check`; they are not run end to end here.
+
+**Decided 2026-11-13 (the maintainer, on the three points PR 1b raised).**
+1. **Re-presentation: accepted, and exits 5 and 9 are reworded** (above). The property — a cancelled call cannot be
+   made to run by presenting it again — holds by three mechanisms in sequence: the replay window while the provider
+   is up, `Revoked` from the KV record after a provider restart inside the envelope's 300 s, `Stale` after that. A
+   replay is dropped unanswered (a timeout, not a refusal). A gateway's retry is a new envelope and a new term, so a
+   cancel is per dispatch. A restarted gateway whose clock stepped back could reuse an id.
+2. **A revoked term refuses the call under any rule** (D-2 is widened to say so). The limit: under a rule that is
+   not cancellable, a relay that strips `cm` makes the same call run.
+3. **One refusal detail, `call_mandate_not_established`, with a stable `data.cause` beside `data.found`.** A caller,
+   and PR 3's `CancelReceipt`, read `data.cause`, never the sentence. The causes: `revoked` (final: the gateway
+   cancelled the call), `no_envelope`, `no_call_mandate`, `unsigned_envelope`, `no_authority`, `malformed`,
+   `no_envelope_id`, `other_envelope`, `refused`, `not_verified`. The counter
+   `mycelium_provider_call_mandate_refusals_total` is labelled by cause, so a cancellation is not counted with a
+   misconfiguration. No second detail name.
+
+**From #781's review, in PR 1b.**
+- **F1, stated, not fixed here: the built-in `llm.invoke` provider never calls the provider check**
+  (`handle_llm_invoke`, `src/agent/llm.rs`: it verifies the caller context and goes to the backend). It is the only
+  receiver of `llm.invoke`, so at an enforcing provider no rule on `llm.invoke` — cancellable or not — is applied at
+  that door. **Not built**; its fix is its own PR
+  ([ledger](../operations/what-is-proven.md#llm-door-not-checked-at-provider)). Pinned as a gap by
+  `the_built_in_llm_provider_runs_no_provider_check_which_is_not_built` (`src/lib_tests.rs`): with enforcement on
+  and no evaluator a protected kind at `rpc_rx` is refused `no_evaluator`, and `llm.invoke` is answered by the
+  backend. The fix turns that assertion round.
+- **F2:** the revoked term under a rule that is not cancellable (`plain`) is in
+  `a_call_cancelled_between_the_preflight_and_the_registration_is_refused`.
+- **F3:** `an_unframed_call_from_a_sender_that_promises_no_envelope_is_refused_under_a_cancellable_rule` (a legacy
+  sender's bare call, `no_envelope`), `a_provider_with_no_execution_authority_refuses_a_cancellable_call`
+  (`no_authority`), `a_cm_that_is_json_and_not_a_mandate_is_not_established` (`malformed`). The "every door" test's
+  unframed step now asserts what it meets: `-32022 missing`, at the caller context, before any rule.
+- **F7:** `a_call_mandate_in_an_unsigned_envelope_is_not_established` — the slot is assessed only for an envelope
+  its gateway signed, which is what authenticates the id the term names (`unsigned_envelope`, on a node with no TLS
+  identity).
+- **F4, as narrowed by the confirm round (N1; the maintainer's call, 2026-11-13): the grant is given back at the
+  provider and stays spent at the gateway that claimed it.**
+  - The provider releases its own claim when it refuses (`release_unspent_grant_claim` in `admit_after`): local,
+    before any handler, trusting no reply. `a_call_refused_for_its_call_mandate_gives_the_grant_back`.
+  - **The gateway does not release its claim on this answer**, at `/mcp` or the A2A doors:
+    `the_gateway_gives_no_grant_back_on_call_mandate_not_established_or_any_authority_refusal`. Honouring it was
+    built and removed: a provider at 2.40 or before that bridges an MCP server forwards the server's reply in this
+    shape unrewritten (2.40's `as_tool_answer` rewrites only -32022), so a server that ran its effect could have the
+    grant run again — the mixed-version replay.
+  - The bridged loop's rewrite of that shape is kept
+    (`a_bridged_servers_reply_shaped_like_call_mandate_not_established_gives_nothing_back`), so a later release can
+    honour the answer.
+  - What remains opens no replay: the provider's release is made by the node that refused, before any handler ran.
+    At the A2A doors too the provider gives its own claim back and the retry is refused at the gateway's door.
+- **The causes, pinned:** `the_causes_of_a_call_mandate_refusal_are_a_closed_list` holds the ten names, which are
+  also the counter's labels. Nine are reached by a test (`refused` by
+  `a_call_mandate_out_of_its_window_is_refused_by_its_cause`). **`no_envelope_id` is reached by none:** a signed
+  envelope with no id comes only from a gateway older than the envelope id (2.35), and the framer here draws the id
+  before it mints, so a test would have to forge and re-sign an envelope by hand. Held by reading.
+- **F8, `requires_mandate` patterns that would cover a `call:` scope** (`"call*"`, `"c*"`, `"*"`) are **not
+  refused**, and are harmless: slot 2 never enters `ActionEnvelope.mandate`, so no `call:` mandate can meet any
+  `requires_mandate`, whatever its pattern. Refusing `"*"` would break rules that mean *any mandate*.
+
+**Entry conditions for PR 2 (the gateway's mint), from #781's review.** Once a gateway mints, a cancellable call
+served through the **bridged MCP loop** or **`rpc/serve`** carries a valid `cm`, is admitted, and runs where no
+cancel stops it: the bridged call's work is registered and its forward is not raced, and an SDK-served admission is
+only parked (nothing awaits its lapse). Before PR 2 this cannot happen. PR 2 either refuses a cancellable call at
+those two doors until PR 3 builds their stop, or states the gap as live; that is the maintainer's to choose when
+PR 2 lands. The same holds for the built-in `llm.invoke` door until F1's fix.
+
+**And for honouring `call_mandate_not_established` at the gateway** (N1): a gateway may give its claim back on that
+answer only once every provider that bridges an MCP server is at a version that rewrites a server's reply in that
+shape (2.41 on). Until a release states that floor, a grant refused this way stays spent at the gateway.
 
 #### I2 · CA succession by a pre-committed successor — *written from S-succeed ([note](spikes/2026-11-07-s-succeed.md), 2026-11-07; evidence at tag `spike/s-succeed-2026-11-07-r2`) — **buildable: R1–R4 resolved, decided 2026-11-12***
 

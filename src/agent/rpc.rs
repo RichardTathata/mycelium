@@ -64,14 +64,10 @@ impl RpcRequest {
     /// Awaiting it records that the work **acknowledged** the cancellation; dropping the request
     /// records the stop as **confirmed**.
     pub async fn authority_lapsed(&self) {
-        let work = self
-            .1
-            .0
-            .as_ref()
-            .and_then(|a| a.downcast_ref::<super::provider_enforcement::Admission>())
-            .and_then(|a| a.work());
-        match work {
-            Some(w) => w.cancelled().await,
+        // Either registration (identity-and-lifecycle I4, N4): the caller's mandate, or the gateway's `call:` mandate
+        // — a cancel of the call.
+        match self.1.0.as_ref().and_then(|a| a.downcast_ref::<super::provider_enforcement::Admission>()) {
+            Some(admission) => admission.lapsed().await,
             None => std::future::pending().await,
         }
     }

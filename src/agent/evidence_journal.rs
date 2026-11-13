@@ -592,7 +592,7 @@ mod history_tests {
             .mapping(ActionMapping::mapped("cat", "1"))
             .validity(at_ms, at_ms + 60_000)
             .build();
-        let d = Decision { verdict, checked: vec![], reason: String::new(), policy_revision: "rev".into(), errors: vec![] };
+        let d = Decision { cancellable: false, verdict, checked: vec![], reason: String::new(), policy_revision: "rev".into(), errors: vec![] };
         let execution = if verdict == Verdict::Permit { Execution::Attempted } else { Execution::None };
         AeEvidence::for_decision(&env, &d, execution, point)
     }

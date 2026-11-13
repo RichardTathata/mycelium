@@ -3638,3 +3638,83 @@ where `GET /gateway/explain` asks `fleet:read`.
     is no gateway route to a replay; a member can still re-send another member's signed frame.
   - A member is not a client: a node in the mesh sends and receives these kinds, as the protocol needs. These
     are the gateway's doors (and a hosted component's `mesh.emit`), not Layer II's.
+
+## 104. A cancellable rule requires the call's `call:` mandate at the provider; `cm` in the caller envelope (2.41.0, identity-and-lifecycle I4, PR 1b)
+
+A rule can be declared **cancellable** — `cancellable = true` in a unit file's `[[rule]]`, `Rule::cancellable()` in
+code. The call it permits may run only where a cancel can stop it: an enforcing provider registers the call's work
+under its gateway's `call:` mandate (§100), read from a new field of the caller envelope, `cm`, and **refuses the
+call if that mandate is not established**. This release builds the provider's half. **No gateway mints a `call:`
+mandate yet** (the row's next PR), so nothing changes for a node that declares no cancellable rule — and a node
+that declares one refuses every call that rule permits.
+
+- **Do not declare a cancellable rule yet.** Until the gateways of a fleet mint (`gateway_mint_call_mandates`, not
+  in this release), an enforcing provider answers a call a cancellable rule permits `authority_not_established`
+  (JSON-RPC -32031), `data.detail` `call_mandate_not_established`, with the stable name of why in `data.cause`
+  (`no_call_mandate`) and the sentence in `data.found` (*"the envelope carries no call: mandate"*). Nothing runs, and the evidence journal records `execution: none` beside
+  the permit. This is the rule doing its work: stripping the mandate cannot make a cancellable call run
+  uncancellable.
+- **The same refusal, whatever the rule,** for a call whose `call:` term is already revoked when the provider
+  registers it: the gateway cancelled it before it ran (`data.cause` `revoked`). **The limit:** under a rule that is
+  not cancellable this is best effort — a relay that strips `cm` makes the same call run.
+- **`data.cause` is the machine-readable reason; `data.found` is prose and may change.** One detail name, ten
+  causes: `revoked` (final: the gateway cancelled the call before it ran) · `no_envelope` (the call came in no
+  caller envelope) · `no_call_mandate` (the envelope has no `cm`: no mint, or stripped) · `unsigned_envelope` (the
+  envelope is not signed by its gateway — a node with no TLS identity — so its id binds nothing) · `no_authority`
+  (the provider has no execution authority) · `malformed` · `no_envelope_id` · `other_envelope` (the term is not
+  this envelope's) · `refused` (verified, and refused for its window or operation) · `not_verified` (issuer, key or
+  checkpoint not verified here, or the window cap). Match on `revoked` to tell a cancellation from the rest.
+- **Counted:** `mycelium_provider_call_mandate_refusals_total{cause}` (feature `metrics`), one label value per
+  cause above, so a cancellation is not counted with a misconfiguration.
+- **The refusal gives a grant back at the provider, and leaves it spent at the gateway that claimed it.** The
+  provider refuses before any handler runs, so it releases its own use of a grant the same call presented: a caller
+  that reaches the provider directly may present the grant again, once. **A gateway does not give its claim back
+  on this answer** — at `/mcp` or at the A2A doors — so a retry of the same grant through the same gateway door is
+  refused there as already used, though the provider would admit it. Why: a provider at 2.40 or before that bridges
+  an MCP server forwards the server's replies in this shape unrewritten, so a gateway that honoured the answer
+  would let a server that ran its effect have the grant run again. From this release a bridging provider rewrites
+  a server's reply in this shape into an ordinary tool error (-32000), so a later release can honour the answer at
+  the gateway once every bridging provider is at a version that does. Until then, a `requires_grant` +
+  `cancellable` rule behind a gateway costs a grant per refused call: one more reason not to declare a cancellable
+  rule before the gateways mint.
+- **A cancelled call cannot be made to run by presenting it again**, by three mechanisms in sequence: while the
+  provider stays up, the envelope's id is admitted once and a replay is **dropped unanswered** (the re-presenter
+  sees a timeout, not a refusal); after a provider restart inside the envelope's 300 s, the envelope is admitted
+  again and its term reads revoked from the KV record; after that the envelope is stale. A gateway's retry is a new
+  envelope and a new term, which is not revoked: a cancel is per dispatch.
+- **Where it is enforced.** At a provider with `with_provider_enforcement` (or `[authority]`) in a build with
+  `compliance`. A provider without enforcement never reads `cm` and runs the call unregistered; an older provider
+  keeps `cm` among the envelope's unknown fields and reads nothing. Neither refuses. A gateway's own preflight
+  carries the rule's `cancellable` and does not act on it: the mandate is assessed once, at the provider.
+- **Not covered.** A member's own unframed call has no envelope, so it carries no `call:` mandate: under a
+  cancellable rule it is refused (`no_envelope`), and under any other rule it runs and cannot be cancelled. A call
+  served through the bridged MCP loop is registered but not stopped when cancelled. A call served to an SDK agent
+  (`rpc/serve`) is **not stopped either**: its admission is only parked, and only under a cohort budget, and
+  nothing waits on its lapse. Both arrive with the row's cancel doors.
+- **Not built: the built-in `llm.invoke` provider is not checked at all.** The node's own LLM skill receiver
+  verifies the caller context and goes to the backend; it never runs the provider check. So at an enforcing
+  provider a rule on `llm.invoke` — cancellable or not — is not applied at that door, and a cancellable
+  `llm.invoke` rule neither refuses nor registers the prompt there. This predates the release
+  ([ledger](../operations/what-is-proven.md#llm-door-not-checked-at-provider)); the gateway's own preflight on
+  `/gateway/llm/call` is unaffected.
+- **A `call:` mandate fits one envelope.** Its term must be `c{n}` of the envelope that carries it (the envelope's
+  id, inside the gateway's signature). One lifted into another envelope, even of the same gateway for an identical
+  call, is not established. `cm` is outside the envelope's signature, as `m` is; wire **v12** is unchanged.
+- **A unit file with `cancellable` is refused by an older reader** (a `[[rule]]` with an unknown key is refused by
+  name, §58–§65; a reader at 2.37 or before reads it as a plain allowance). Declare it only once every node that
+  loads the file is upgraded.
+- **New refusal at `validate()`:** `requires_mandate` naming a `call:` scope (`"call:*"`, `"call:c1"`). No caller
+  can present a `call:` mandate, so such a rule permitted nothing; it now says so by name and points to
+  `cancellable`. A broader pattern that would cover one (`"call*"`, `"*"`) is not refused and is never met by a
+  `call:` mandate either: the second slot is not what `requires_mandate` reads.
+- **Order matters, as for every rule:** the first matching allowance decides, so a broader allowance listed before
+  a cancellable rule makes it inert, without a word. List the cancellable rule first. An exposure rule with `cancellable` is refused too.
+- **Compiler:** `Rule` and `RuleDecl` gained a public field, `cancellable` — an exhaustive struct literal breaks;
+  `Rule::new(…)` and `..Default`-style construction are unaffected. `Decision` (`#[non_exhaustive]`) gained
+  `cancellable` and `Decision::requiring_call_mandate`; `GatewayCaller` (`#[non_exhaustive]`) gained
+  `call_mandate`. **An evaluator other than `ReferenceEvaluator`** returns `cancellable: false` from every
+  constructor: under it no rule is cancellable and the requirement is not applied, until the adapter maps its
+  policy's notion onto `requiring_call_mandate`.
+- **No new configuration field.** `GossipConfig` is unchanged by this release of the row.
+- **Code:** `src/agent/provider_enforcement.rs` (`admit_after`, `assess_call_slot`), `src/agent/gateway_caller.rs`
+  (`cm`), `src/agent/action_evaluator.rs`, `src/capability_config.rs`. Tests: `src/agent/call_admission_tests.rs`.

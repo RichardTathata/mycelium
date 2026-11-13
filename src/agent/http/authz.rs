@@ -698,9 +698,13 @@ pub(crate) enum Preflight {
     /// re-assesses the mandate, and when this is `true` a re-assessment that is no longer established refuses the
     /// call (the provider's `mandate_lapsed_before_run`): the revocation is known before the handler runs.
     ///
+    /// `cancellable`: the permit was decided by a **cancellable** rule (`Decision::cancellable`, identity-and-lifecycle
+    /// I4, D-2). The provider's registration reads it: without an established `call:` mandate the call is refused.
+    /// A gateway door carries it and does not act on it — the `call:` mandate is assessed once, at the provider (D-3).
+    ///
     /// `grant_claim`: the grant use this permit claimed at this door, when it presented one — released by
     /// [`release_grant_claim_after`] if the provider then refuses the call before anything runs.
-    Proceed { evidence: Box<super::action_evaluator::AeEvidence>, journal_sha256: Option<String>, mandate_established: bool, grant_claim: Option<GrantClaim> },
+    Proceed { evidence: Box<super::action_evaluator::AeEvidence>, journal_sha256: Option<String>, mandate_established: bool, grant_claim: Option<GrantClaim>, cancellable: bool },
     /// Refused. Nothing is dispatched.
     Refuse(super::action_evaluator::PreflightRefusal),
 }
@@ -726,8 +730,12 @@ pub(crate) struct GrantClaim {
 /// certificate record has not arrived — and `gateway_caller::verify` refuses before any dispatch, so a retry under
 /// the same grant is safe once it has.
 #[cfg(all(feature = "gateway", feature = "tls"))]
-fn pre_execution_refusal(bytes: &[u8]) -> Option<String> {
+pub(crate) fn pre_execution_refusal(bytes: &[u8]) -> Option<String> {
     let v: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+    // **Not** the provider's `call_mandate_not_established` (-32031; identity-and-lifecycle I4, #781's confirm round,
+    // N1), though it too is made before any handler: a provider at 2.40 or before that bridges an MCP server forwards
+    // the server's reply in that shape unrewritten, so honouring it here would let a server that ran its effect have
+    // the grant run again. The provider gives its own claim back; this gateway's stays spent.
     if v["error"]["code"] != -32022 || !v["error"]["message"].as_str().is_some_and(|m| m.starts_with("caller context refused")) {
         return None;
     }
@@ -749,7 +757,7 @@ fn pre_execution_refusal(bytes: &[u8]) -> Option<String> {
 /// able to run calls at will could do anyway. A timeout, a tool error or any other reply leaves the grant spent.
 #[cfg(all(feature = "gateway", feature = "tls"))]
 pub(crate) async fn release_grant_claim_after(ctx: &Arc<TaskCtx>, preflight: &Preflight, dispatched: &Result<Bytes, GatewayDispatchError>) -> Option<String> {
-    let Preflight::Proceed { grant_claim: Some(c), .. } = preflight else { return None };
+    let Preflight::Proceed { grant_claim: Some(_), .. } = preflight else { return None };
     let reason = match dispatched {
         Ok(reply) => pre_execution_refusal(reply)?,
         // The gateway's own refusals before it sent anything (#760's review, M2): an exchange at the IdP that yielded no
@@ -763,10 +771,20 @@ pub(crate) async fn release_grant_claim_after(ctx: &Arc<TaskCtx>, preflight: &Pr
         ) => e.reason().to_string(),
         Err(_) => return None,
     };
-    let authority = ctx.execution_authority.get()?;
+    release_unspent_grant_claim(ctx, preflight).await.then_some(reason)
+}
+
+/// Give back the grant use `preflight` claimed, for a call this node knows did not run: the marker tombstoned, then
+/// the in-memory claim released. `false` when the permit claimed none. The caller decides that nothing ran —
+/// [`release_grant_claim_after`] from the provider's answer or its own refusal to dispatch, the provider's
+/// registration from its own refusal before any handler (`call_mandate_not_established`), which trusts no reply.
+#[cfg(all(feature = "gateway", feature = "tls"))]
+pub(crate) async fn release_unspent_grant_claim(ctx: &Arc<TaskCtx>, preflight: &Preflight) -> bool {
+    let Preflight::Proceed { grant_claim: Some(c), .. } = preflight else { return false };
+    let Some(authority) = ctx.execution_authority.get() else { return false };
     mycelium_core::ops::kv_delete_async(ctx, Arc::from(c.marker.as_str())).await;
     authority.release_grant_use(&c.holder, &c.scope, &c.term, &c.point);
-    Some(reason)
+    true
 }
 
 /// The MCP tool-call route, as it is named in every piece of evidence it produces.
@@ -1593,11 +1611,11 @@ impl Settling {
                     super::fleet_history::release_after_window(ctx, slot, env, window_ms);
                 }
                 let mandate_established = envelope.mandate.as_ref().is_some_and(|b| b.state == ae::MandateState::Established);
-                Preflight::Proceed { evidence: Box::new(evidence), journal_sha256, mandate_established, grant_claim: claimed }
+                Preflight::Proceed { evidence: Box::new(evidence), journal_sha256, mandate_established, grant_claim: claimed, cancellable: decision.cancellable }
             }
             // The shadow rung observes: what it admits was refused, so no later re-assessment refuses it either. (The
             // provider has no shadow rung; this is a gateway door's.)
-            Err(_) if shadow_admit => Preflight::Proceed { evidence: Box::new(evidence), journal_sha256, mandate_established: false, grant_claim: None },
+            Err(_) if shadow_admit => Preflight::Proceed { evidence: Box::new(evidence), journal_sha256, mandate_established: false, grant_claim: None, cancellable: false },
             Err(refusal) => {
                 warn!(actor = %envelope.actor, %operation, %resource,
                       "AE preflight refused: {refusal}");

@@ -313,14 +313,18 @@ async fn forward_bridged(
 }
 
 /// **Only the node authors a refusal** (#745's confirm round): a bridged server's reply is its own bytes, so one shaped
-/// like the node's caller-context refusal — `-32022`, or an `error` string beginning `caller context refused` — is
+/// like the node's caller-context refusal — `-32022`, or an `error` string beginning `caller context refused` — or
+/// like the provider's `call_mandate_not_established` (I4; no gateway honours it yet, and none may until every
+/// bridging provider rewrites it — #781's confirm round, N1) is
 /// rewritten into an ordinary tool error (`-32000`, the server's text kept in the message, no `data`). Otherwise a tool
 /// that ran its effect and answered `-32022`/`stale` would have the gateway give its grant back, and the effect run
 /// twice.
 #[cfg(feature = "gateway")]
-fn as_tool_answer(response: serde_json::Value, id: &serde_json::Value) -> serde_json::Value {
+pub(crate) fn as_tool_answer(response: serde_json::Value, id: &serde_json::Value) -> serde_json::Value {
     let node_shaped = response["error"]["code"] == -32022
-        || response["error"].as_str().is_some_and(|e| e.starts_with("caller context refused"));
+        || response["error"].as_str().is_some_and(|e| e.starts_with("caller context refused"))
+        // The provider's own refusal before any handler (identity-and-lifecycle I4): kept the node's alone to author.
+        || response["error"]["data"]["detail"] == "call_mandate_not_established";
     if !node_shaped {
         return response;
     }
