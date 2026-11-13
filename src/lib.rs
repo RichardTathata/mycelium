@@ -534,6 +534,12 @@ pub use signal::{
     Signal, SignalScope, WatchHandle, signal_kind, kv_ns,
 };
 
+/// The acceptor's decision functions for the model in `mycelium-model` (critique plan row CR10). Gated by the
+/// `model-internals` cargo feature, which no shipped build enables. **Not stable.**
+#[cfg(feature = "model-internals")]
+#[doc(hidden)]
+pub mod model_internals;
+
 /// Re-exports for the cargo-fuzz harness under `fuzz/`. Gated by the
 /// `fuzz-internals` cargo feature so normal builds do not widen the
 /// public API. The functions here wrap internal `pub(crate)` decoders

@@ -221,6 +221,24 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   with a struct literal, or destructures it without `..`, stops compiling until it names the field** — as with
   every field added to it before. No deprecations entry: no behaviour changes.
 
+- **A model of the acceptor, checked in CI** (critique plan row CR10; `docs/operations/what-is-proven.md` §
+  *Proven in CI*). A new workspace crate, `mycelium-model` — never published, and nothing depends on it — checks
+  the single-decree acceptor's **design at a stated bound** with Stateright 0.31.0: slot reuse after a release or
+  a lapsed lease (*at most one value is decided per slot and life*), the lease's wall-clock end with clocks up to
+  δ apart (*no holder is granted while another is inside its own deadline less δ*), and the electorate migration
+  (*nothing is decided by a successor before the predecessor's retirement is visible*). Seven finite
+  configurations, one slot, three or four nodes, each explored in full — about 29 million states, each run's
+  count pinned in its test — and three tests that plant one fault per area (a vote counted from outside the
+  electorate, a lease ended with no margin, a successor deciding early) and require a counterexample, so CI shows
+  the model can fail. The model calls the engine's own decision functions — `prepare_slot`, the accept rule, the
+  phase-1 rule, `read_slot`, the vote filter, the electorate's quorum — through a new cargo feature of `mycelium`,
+  `model-internals`, which is off by default and on in no shipped build; the order of a proposer's steps, the gate
+  and the migration's readiness checks are written again in the model, and its crate documentation lists each.
+  **It does not prove the implementation. The lease area checks the holder-side margin row CR11 designs, which
+  is not built:** with no margin — the engine today — the model finds a second holder granted inside the first's
+  deadline, which until now was a reading of the code (`what-is-proven.md` § *Not yet shown*). No behaviour and no
+  public item of a shipped build changes; `Cargo.lock` gains Stateright and its dependencies, for that crate only.
+  CI job `model`.
 - **N5: the agent guide the binary serves** (`docs/plans/identity-and-lifecycle.md` N5). `mycelium skills get fleet`
   prints a Markdown guide for a coding agent, embedded in the binary with its release tag filled in: the six steps
   from the binary to a governed fleet, every subcommand with the JSON document it prints, and how to read the output.

@@ -531,7 +531,7 @@ fn gate_refused(slot: Arc<str>, tag: Option<&ElectorateTag>) -> ConsensusResult 
 /// The voters a proposal counts: an electorate group's roster as it stood when the proposal began,
 /// narrowed by a declared trust slice when both apply (P2's tension (b): the electorate is named by the
 /// group; a trust slice stays available beneath it). Neither ⇒ no filter.
-fn electorate_vote_filter(trust: Option<AHashSet<u64>>, roster: Option<AHashSet<u64>>) -> Option<AHashSet<u64>> {
+pub(crate) fn electorate_vote_filter(trust: Option<AHashSet<u64>>, roster: Option<AHashSet<u64>>) -> Option<AHashSet<u64>> {
     match (trust, roster) {
         (Some(t), Some(r)) => Some(t.intersection(&r).copied().collect()),
         (None, Some(r)) => Some(r),
@@ -4125,7 +4125,7 @@ impl Carry {
     /// value wrapped in an envelope with this proposer's term and token, lineage = the ballot it was
     /// accepted at — deterministic, so two promisers reporting one legacy acceptance agree; an
     /// acceptance known only by digest stays a digest (and blocks unless it is this proposal's).
-    fn report(&self, slot: &str, ballot: u64, digest: Option<[u8; 32]>, value: Option<Bytes>, is_envelope: bool) -> AcceptReport {
+    pub(crate) fn report(&self, slot: &str, ballot: u64, digest: Option<[u8; 32]>, value: Option<Bytes>, is_envelope: bool) -> AcceptReport {
         match (value, is_envelope) {
             (Some(env), true) => (ballot, value_digest(&env), Some(env)),
             (Some(raw), false) => {
@@ -4180,7 +4180,7 @@ pub(crate) fn raw_of(envelope: &Bytes) -> Option<Bytes> {
 ///
 /// `ended` is the ballot of a decision this node's lifecycle record says is over ([`ended_at`], row
 /// A); acceptances at or below it are set aside whatever `floor` and `over` say.
-fn set_aside_finished(reports: &mut Vec<AcceptReport>, floor: u64, over: bool, ended: u64) {
+pub(crate) fn set_aside_finished(reports: &mut Vec<AcceptReport>, floor: u64, over: bool, ended: u64) {
     let finished = ended.max(if over { floor } else { 0 });
     reports.retain(|r| r.0 > finished);
 }
