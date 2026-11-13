@@ -168,6 +168,22 @@ class ProtectedStreamError(_ProtectedWriteError):
         self.stream = stream
 
 
+class ProtectedSlotError(_ProtectedWriteError):
+    """The gateway refused a **protected consensus slot** (HTTP 403 ``protected_slot``).
+
+    ``cross_group_propose`` proposes on application slots only (the substrate release after 2.40.0; this SDK's
+    0.2.16). A slot in a family a component or one of the substrate's own verbs proposes in — ``cn/`` (a
+    commitment's award), ``clog/`` (a consumer group's claim), ``electorate/``, ``ae-seat/``, ``capauthz/``,
+    ``lock/``, ``leader/``, ``consistent/`` — is refused before anything is proposed, and ``message`` names the
+    route or the component that proposes in it (``distributed_lock``, ``elect_leader`` and ``consistent_set``
+    for the last three). ``slot`` is the refused slot.
+    """
+
+    def __init__(self, slot: str, message: str, response: httpx.Response) -> None:
+        super().__init__(message, response)
+        self.slot = slot
+
+
 def _raise_if_serve_refused(resp: httpx.Response) -> None:
     """Raise :class:`ProtectedKindError` for a serve stream refused on a kind its node serves itself: ``403
     protected_kind`` (``mcp.invoke``, ``skill.invoke``, ``llm.invoke``) or ``403 served_in_process`` (any kind
@@ -184,8 +200,9 @@ def _raise_if_serve_refused(resp: httpx.Response) -> None:
 
 def _raise_if_protected(
     resp: httpx.Response, *, key: Optional[str] = None, stream: Optional[str] = None,
+    slot: Optional[str] = None,
 ) -> None:
-    """Raise the typed error for a gateway ``403`` that names a protected kind, key or stream.
+    """Raise the typed error for a gateway ``403`` that names a protected kind, key, stream or slot.
 
     Any other response (an ordinary scope refusal included) is left to ``raise_for_status``.
     """
@@ -203,6 +220,8 @@ def _raise_if_protected(
             raise ProtectedKeyError(key or "", str(data.get("message", "protected key")), resp)
         if error == "protected_stream":
             raise ProtectedStreamError(stream or "", str(data.get("message", "protected stream")), resp)
+        if error == "protected_slot":
+            raise ProtectedSlotError(slot or "", str(data.get("message", "protected slot")), resp)
 
 
 async def _raise_if_stream_refused(resp: httpx.Response, stream: str) -> None:
@@ -1535,6 +1554,11 @@ class MyceliumAgent:
         Returns a :class:`CommitResult` (``.persisted`` — local durability on the gateway node;
         since 0.2.4). Raises ``RuntimeError`` if the commit failed.
 
+        Application slots only: raises :class:`ProtectedSlotError` for a slot in a family a component or
+        one of the substrate's own verbs proposes in (``cn/``, ``clog/``, ``electorate/``, ``ae-seat/``,
+        ``capauthz/``, ``lock/``, ``leader/``, ``consistent/``) — the gateway's ``403 protected_slot``,
+        whose message names the route to use.
+
         ``groups`` is a list of dicts with keys ``group`` (str), ``quorum`` (float,
         default ``0.5``), and ``veto`` (bool, default ``False``).  The proposal commits
         only when **all** specified groups individually reach their quorum fraction.
@@ -1560,6 +1584,7 @@ class MyceliumAgent:
         }
         with self._pool.sync() as c:
             resp = c.post("/gateway/consensus/cross_group_propose", json=body)
+            _raise_if_protected(resp, slot=slot)
             _raise_if_superseded(resp)
             data = resp.raise_for_status().json()
         if not data.get("ok"):

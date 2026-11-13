@@ -7,7 +7,7 @@
  * verb that reaches those routes. `delete()` used to drop the body and throw `failed: 403`.
  * No node needed — `fetch` is stubbed.
  */
-import { MyceliumAgent, ProtectedKeyError, ProtectedKindError, ProtectedStreamError } from "../src/index";
+import { MyceliumAgent, ProtectedKeyError, ProtectedKindError, ProtectedSlotError, ProtectedStreamError } from "../src/index";
 
 const realFetch = globalThis.fetch;
 afterAll(() => { globalThis.fetch = realFetch; });
@@ -173,4 +173,29 @@ test("a protected_key answer on a log read is not turned into a stream error", a
   const err: any = await agent().scanLog("events").catch((e) => e);
   expect(err).not.toBeInstanceOf(ProtectedStreamError);
   expect(err).not.toBeInstanceOf(ProtectedKeyError);
+});
+
+// The slot decision (2026-11-12, 0.2.10): the cross-group route proposes on application slots only.
+const SLOT_DOOR = "locks are taken through POST /gateway/overlay/lock/acquire (consensus:write)";
+const GROUPS = [{ group: "g", quorum: 0.5 }];
+
+test.each(["lock/x", "cn/r/award", "capauthz/ns/name"])("crossGroupPropose on %s throws ProtectedSlotError carrying the route", async (slot) => {
+  stub({ ok: false, error: "protected_slot", message: SLOT_DOOR }, 403);
+  const err: any = await agent().crossGroupPropose(slot, v, GROUPS).catch((e) => e);
+  expect(lastMethod).toBe("POST");
+  expect(err).toBeInstanceOf(ProtectedSlotError);
+  expect(err).toBeInstanceOf(Error);
+  expect(err.slot).toBe(slot);
+  expect(err.status).toBe(403);
+  expect(err.message).toBe(SLOT_DOOR);
+  expect(err).not.toBeInstanceOf(ProtectedKeyError);
+  expect(err).not.toBeInstanceOf(ProtectedStreamError);
+});
+
+test("an ordinary 403 on crossGroupPropose is not mistaken for it (the plant)", async () => {
+  stub({ error: "insufficient scope", required_scope: "consensus:write" }, 403);
+  const err: any = await agent().crossGroupPropose("donation/x", v, GROUPS).catch((e) => e);
+  expect(err).toBeInstanceOf(Error);
+  expect(err).not.toBeInstanceOf(ProtectedSlotError);
+  expect(String(err.message)).toContain("403");
 });

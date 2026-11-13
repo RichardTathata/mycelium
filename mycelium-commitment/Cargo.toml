@@ -26,6 +26,9 @@ tokio         = { version = "1.53.3", features = ["rt"] }
 [dev-dependencies]
 # `sim`: the tests record a linearizable award under the replay kernel (CN2); `test-util`: the
 # bind-verified port allocator.
-mycelium = { path = "..", default-features = false, features = ["test-util", "sim"] }
+# `gateway`: `tests/award_slot_route.rs` asks a node's own routes for a committed award (the slot decision of
+# 2026-11-12) — the test target only; the crate itself has no route and needs no gateway.
+mycelium = { path = "..", default-features = false, features = ["test-util", "sim", "gateway"] }
 mycelium-sim = { path = "../mycelium-sim" }
+reqwest = { version = "0.12", features = ["json"] }
 tokio = { version = "1.53.3", features = ["full"] }

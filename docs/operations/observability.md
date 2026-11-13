@@ -19,7 +19,7 @@ uncredentialed:
 | `GET /stats` | `node_id`, `cluster_name`, `store_entries`, `dropped_frames`, `task_count`, and the tripwire counters (`commit_conflicts`, `consensus_decided_floor_anomalies`, `consensus_ballot_space_exhausted`, `sys_namespace_violations`, `cap_authz_violations`, `schema_mismatch`, `governance_changes` / `governance_unaudited` (accepted governance writes at this gateway — `/gateway/govern/*`, `identity/revoke` — and those that left no audit record; 2.27.0. A plain group's `mesh:write` join is audited, not counted), `rate_limited_senders`, `individual_flood_fallbacks`), plus liveness (`dead_shards`, `gc_alive`, `health_monitor_alive`) |
 | `GET /metrics` | Prometheus scrape (requires the `metrics` feature). Carries a `cluster` label on every series when `cluster_name` is set |
 | `GET /.well-known/agent-facts.json` | this node's self-certified AgentFacts (when the [facts lens](#viewing-agentfacts) is mounted) |
-| `GET /consensus/{slot}` | a consensus slot's committed value + ballot + lease state. **Bearer required** when a token model is set (scope `consensus:read`, since 2026-09-05); the four rows above stay public |
+| `GET /consensus/{slot}` | a consensus slot's committed value + ballot + lease state — an application's slot, a lock's (`lock/{name}`) or a leader's (`leader/{group}`); a component's slot (`cn/`, `clog/`, `electorate/`, `ae-seat/`, `capauthz/`, and `consistent/{owned key}`) is **403** `protected_slot` whatever the scopes ([deprecations.md §102](../guide/deprecations.md)). **Bearer required** when a token model is set (scope `consensus:read`, since 2026-09-05); the four rows above stay public |
 
 ### Reading `/stats`
 

@@ -1829,7 +1829,7 @@ pub(crate) struct OwnedStream {
 /// `consensus:read` a scan or a subscribe read a commitment's offers, closes, reports and assessments, a wiki's
 /// proposals and a trace without `llm:read` (the follow-up to the kv:read decision of 2026-11-12, critique plan
 /// row CR1). A commitment's **award** was never in a log: it is the consensus slot `cn/{requirement}/award`, which
-/// `GET /consensus/{slot}` still answers for under `consensus:read` — not this table's to close.
+/// the slot routes refuse by their own table ([`SLOT_FAMILIES`]).
 ///
 /// **The key names follow from this table too.** The raw listing (`GET /gateway/kv/keys`) leaves out every name
 /// under `log/{row}` and `clog/{row}` — an entry's requirement or run id, its time and its writer; a group's
@@ -1908,6 +1908,158 @@ pub(super) fn refuse_owned_stream_read(stream: &str) -> Option<axum::response::R
     ).into_response())
 }
 
+/// One row of [`SLOT_FAMILIES`]: a consensus slot family a component or one of the substrate's own verbs proposes
+/// in, how its decision is read, and the route that proposes in it.
+#[cfg(feature = "consensus")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SlotFamily {
+    pub(crate) prefix: &'static str,
+    /// What a refused **read** on `GET /consensus/{slot}` is told — the route that reads the decision where there
+    /// is one, else that the component reads it in process. `None`: the route serves the family (`lock/`,
+    /// `leader/`: the operator's read of a holder, which no other route gives without proposing; `consistent/`,
+    /// whose slot holds an application key's value — an owned key's is refused by the key, see
+    /// [`refuse_owned_slot_read`]).
+    pub(crate) read_through: Option<&'static str>,
+    /// What a refused **proposal** on `POST /gateway/consensus/cross_group_propose` is told: the route or the
+    /// component that proposes in the family.
+    pub(crate) proposed_through: &'static str,
+}
+
+/// Consensus slot families that are not an application's to propose in — the ONE table both directions of the
+/// routes that take a slot name read: `GET /consensus/{slot}` and `POST /gateway/consensus/cross_group_propose`
+/// (the maintainer's decision of 2026-11-12, the follow-up to the kv:read and log-read decisions; critique plan
+/// row CR1). A slot name is its own namespace, not a KV key: `leader/`, `consistent/`, `electorate/`, `capauthz/`
+/// and `ae-seat/` are no row of [`OWNED_KV_PREFIXES`], and an application may name a slot `agent/…` or `tools/…`,
+/// so that table does not classify slots.
+///
+/// - **Component-owned** — `cn/` (a commitment's award, `cn/{requirement}/award`: requirement, awardee, declarer),
+///   `clog/` (a consumer group's claim, `clog/{stream}/{group}/claim`: the holder), `electorate/` (an electorate's
+///   genesis, retirement and migration records: its members — a governance read, behind `govern:read`), `ae-seat/`
+///   (a fleet counter's seats: the attempt that holds each), `capauthz/` (a capability's authorisation policy:
+///   its roles). Refused on read **and** on proposal: until this table a `consensus:read` token read each, around
+///   `govern:read` for an electorate, and a `consensus:write` token could propose in each but an electorate's (which
+///   Layer III's electorate door already refused a cross-group proposal) through the cross-group route — an
+///   award's slot taken before the declarer's, a planted claim, a policy's slot taken so that the
+///   `set_capability_authz_via_consensus` call that follows is superseded.
+/// - **The exclusive verbs' own** — `lock/`, `leader/`, `consistent/`: read by this route (see
+///   [`SlotFamily::read_through`]), proposed only through the route that owns the verb, which is where the lease,
+///   the holder's value, the converged-holder read and the owned-key refusal live.
+///
+/// Matched by whole prefix, and by the bare name (`cn`), as the KV and stream tables match; compared as bytes
+/// after the path or body is decoded — `Cn/x` and `/cn/x` are other (application) slots, whose keys are not the
+/// component's.
+///
+/// **A new family is classified, not defaulted.** `every_slot_family_is_classified_for_the_slot_routes`
+/// (`slot_guard_tests.rs`) pins the rows and fails on a family in `SAFETY_SLOT_FAMILIES`,
+/// `FLEET_EXCLUSIVE_PREFIXES`, `FLEET_EXCLUSIVE_SUFFIXED`, `ELECTORATE_SLOT_PREFIX`, `SEAT_SLOT_PREFIX` or the
+/// slot-name section of `scripts/kv-namespaces-nonkeys.txt` that has no row here. **Not gated:** a component that
+/// proposes on a slot built from a literal in none of those lists is open on both routes until its row is added.
+///
+/// **What this does not cover.** The slot **names** stay listed: `GET /gateway/kv/keys?prefix=consensus/` answers
+/// the keys under `consensus/{committed,ballot,lease,decided,life}/…`, so a `kv:read` token still sees a
+/// requirement id, an electorate's group or a seat's two digests in a key name (critique plan row CR24). And this
+/// is the gateway's door: a member of the fleet proposes on any slot through the library, and Layer III's own
+/// rules (the electorate door, the award's signature) are what bound that.
+#[cfg(feature = "consensus")]
+pub(crate) const SLOT_FAMILIES: &[SlotFamily] = &[
+    SlotFamily {
+        prefix: "cn/",
+        read_through: Some("a commitment's award is read in process through mycelium-commitment (`award_of`, \
+                            `award_of_verified`) by the application that embeds it; no route reads it"),
+        proposed_through: "a commitment's award is proposed in process through mycelium-commitment \
+                           (`commit_award_linearizable`) by the declarer; no route proposes it",
+    },
+    SlotFamily {
+        prefix: "clog/",
+        read_through: Some("a consumer group's claim is held by the node serving GET \
+                            /gateway/overlay/log/group/subscribe for it; no route reads it"),
+        proposed_through: "a consumer group's claim is proposed by the node serving GET \
+                           /gateway/overlay/log/group/subscribe (consensus:read) for it",
+    },
+    SlotFamily {
+        prefix: "electorate/",
+        read_through: Some("the electorates — each group, its epoch, its members, its retirement and its migration — \
+                            are read through GET /gateway/govern (govern:read)"),
+        proposed_through: "an electorate is declared, retired and migrated through POST /gateway/govern/electorate \
+                           (govern:write)",
+    },
+    SlotFamily {
+        prefix: "ae-seat/",
+        read_through: Some("a fleet counter's seats belong to the action evaluator, which reads them in process; \
+                            no route reads them"),
+        proposed_through: "a fleet counter's seat is claimed by the action evaluator when it admits a call; no \
+                           route proposes one",
+    },
+    SlotFamily {
+        prefix: "capauthz/",
+        read_through: Some("a capability's authorisation policy is read in process by the resolvers that enforce \
+                            it; no route reads it"),
+        proposed_through: "a capability's authorisation policy is proposed in process through \
+                           `set_capability_authz_via_consensus`; no route proposes it",
+    },
+    SlotFamily {
+        prefix: "lock/",
+        read_through: None,
+        proposed_through: "locks are taken through POST /gateway/overlay/lock/acquire (consensus:write)",
+    },
+    SlotFamily {
+        prefix: "leader/",
+        read_through: None,
+        proposed_through: "a leader is elected through POST /gateway/overlay/elect (consensus:write)",
+    },
+    SlotFamily {
+        prefix: "consistent/",
+        read_through: None,
+        proposed_through: "a consistent write goes through POST /gateway/overlay/consistent/set (consensus:write)",
+    },
+];
+
+/// The row of [`SLOT_FAMILIES`] `slot` belongs to, if any — the one predicate both slot routes classify by.
+#[cfg(feature = "consensus")]
+pub(crate) fn slot_family(slot: &str) -> Option<&'static SlotFamily> {
+    SLOT_FAMILIES.iter().find(|f| slot.starts_with(f.prefix) || slot == f.prefix.trim_end_matches('/'))
+}
+
+#[cfg(feature = "consensus")]
+fn protected_slot(message: &str) -> axum::response::Response {
+    (
+        StatusCode::FORBIDDEN,
+        Json(json!({ "ok": false, "error": "protected_slot", "message": message })),
+    ).into_response()
+}
+
+/// `GET /consensus/{slot}` reads application slots, a lock's and a leader's — never a component's
+/// ([`SLOT_FAMILIES`]). A component-owned slot is refused `403 protected_slot` whatever the token's scopes,
+/// before the store is read, in the same words whether or not anything was ever decided there; the message names
+/// the route that reads the decision where there is one. A `consistent/{key}` slot holds `{key}`'s value, so it
+/// is read exactly when `GET /gateway/overlay/consistent/get?key={key}` would read it ([`raw_kv_writable`]): an
+/// owned key's slot — written by an in-process `consistent_set` — is refused with that key's own message.
+#[cfg(feature = "consensus")]
+pub(super) fn refuse_owned_slot_read(slot: &str) -> Option<axum::response::Response> {
+    let family = slot_family(slot)?;
+    let message = match family.read_through {
+        Some(message) => message,
+        None => match slot.strip_prefix("consistent/") {
+            Some(key) if !raw_kv_writable(key) => protected_read_door(key),
+            _ => return None,
+        },
+    };
+    warn!(slot, "gateway: a component-owned consensus slot refused on the slot read route");
+    Some(protected_slot(message))
+}
+
+/// `POST /gateway/consensus/cross_group_propose` proposes on application slots only: every family of
+/// [`SLOT_FAMILIES`] is refused `403 protected_slot` whatever the token's scopes, before anything is proposed or
+/// written, naming the route or the component that proposes in it. The exclusive verbs' families are refused
+/// here too: a lock, a leadership and a consistent write each have a route, and a value proposed around it is a
+/// lock no guard releases, a leader that is not a node, or a consistent value whose key was never checked.
+#[cfg(feature = "consensus")]
+pub(super) fn refuse_owned_slot_proposal(slot: &str) -> Option<axum::response::Response> {
+    let family = slot_family(slot)?;
+    warn!(slot, "gateway: a proposal on a component-owned consensus slot refused on the cross-group route");
+    Some(protected_slot(family.proposed_through))
+}
+
 /// Whether the raw KV routes write `key` — and read it: an application key, not one the substrate or a companion
 /// owns. One predicate for both directions ([`refuse_protected_key`], [`refuse_protected_key_read`]), so a key
 /// the write doors refuse is a key the read doors refuse.
@@ -1959,7 +2111,15 @@ pub(super) fn refuse_hidden_prefix(prefix: &str) -> Option<axum::response::Respo
 }
 
 fn protected_read_refusal(key: &str) -> axum::response::Response {
-    let door = if key.starts_with("sys/audit/") {
+    (
+        StatusCode::FORBIDDEN,
+        Json(json!({ "ok": false, "error": "protected_key", "message": protected_read_door(key) })),
+    ).into_response()
+}
+
+/// What a refused read of the owned key `key` is told: the route that reads its namespace, where it has one.
+fn protected_read_door(key: &str) -> &'static str {
+    if key.starts_with("sys/audit/") {
         "the audit trail is read through GET /gateway/audit (audit:read)"
     } else if key.starts_with("sys/govern/") || key.starts_with("sys/topology-override/") {
         "the governors' state, the electorates and the topology overrides in force are read through GET /gateway/govern (govern:read)"
@@ -1981,7 +2141,10 @@ fn protected_read_refusal(key: &str) -> axum::response::Response {
     } else if key.starts_with("mailbox/") {
         "a mailbox is read by its recipient through GET /gateway/mailbox/{kind} (mesh:read)"
     } else if key.starts_with("consensus/") {
-        "a slot's decision is read through GET /consensus/{slot} (consensus:read)"
+        "an application slot's decision, a lock's and a leader's are read through GET /consensus/{slot} \
+         (consensus:read); a component's slot (a commitment's award, a consumer group's claim, an electorate, a \
+         fleet counter's seat, a capability's authorisation policy) is read through the component, and an \
+         electorate through GET /gateway/govern (govern:read)"
     } else if key.starts_with("sched/") {
         // A gateway client's schedule is `sched/{id}~{principal}/…`; an application's holds no `~` and has no route.
         if key.split('/').nth(1).is_some_and(|id| id.contains(crate::schedule::CLIENT_SCOPE_SEPARATOR)) {
@@ -1993,11 +2156,7 @@ fn protected_read_refusal(key: &str) -> axum::response::Response {
     } else {
         "this namespace is read through the substrate or the companion that owns it, not through the KV routes \
          (src/lib.rs § KV namespace ownership); the KV routes read application keys"
-    };
-    (
-        StatusCode::FORBIDDEN,
-        Json(json!({ "ok": false, "error": "protected_key", "message": door })),
-    ).into_response()
+    }
 }
 
 /// The doors that take a KV key from the request — `POST`/`DELETE /gateway/kv`, `POST /gateway/kv/quorum`, and

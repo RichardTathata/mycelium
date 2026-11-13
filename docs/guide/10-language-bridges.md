@@ -357,7 +357,9 @@ before; `mycelium-ts` 0.2.2, where `delete()` now carries the body too). The rea
 `ProtectedKeyError` from the raw KV reads and `ProtectedStreamError` from `scan_log` / `scanLog`, `subscribe_log` /
 `subscribeLog` and `subscribe_log_group` / `subscribeLogGroup`, the subscriptions before any entry (`mycelium-py`
 0.2.16, `mycelium-ts` 0.2.10). No scope fixes either refusal: use the route the message names
-([deprecations.md §19, §99, §101](deprecations.md)).
+([deprecations.md §19, §99, §101](deprecations.md)). `cross_group_propose` / `crossGroupPropose` raise a third,
+`ProtectedSlotError`, for a slot in a family a component or one of the substrate's own verbs proposes in — a
+commitment's award, a lock, a leader, a consistent write (same SDK versions; [§102](deprecations.md)).
 
 **A dropped stream is not resumed — not built: the gateway has no resume point.** No SSE route
 (`/gateway/signal/sse/{kind}`, `/signals/{kind}`, `/gateway/rpc/serve/{kind}`, `/gateway/mailbox/{kind}`,

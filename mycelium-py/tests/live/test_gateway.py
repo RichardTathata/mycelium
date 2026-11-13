@@ -17,7 +17,7 @@ import asyncio
 import os
 import pytest
 
-from mycelium import MyceliumAgent, DemandStatus, RpcRequest, MailboxEvent, ProtectedStreamError
+from mycelium import MyceliumAgent, DemandStatus, RpcRequest, MailboxEvent, ProtectedSlotError, ProtectedStreamError
 
 # A live suite: it runs only when MYCELIUM_TEST_HOST names a node, and skips itself otherwise, so a
 # directory-wide `pytest mycelium-py/tests` collects it without a node (verification policy rule 3).
@@ -290,6 +290,16 @@ class TestLogGateway:
             await asyncio.wait_for(gen.__anext__(), timeout=10.0)
         assert e.value.stream == stream
         assert "/gateway/reason/trace/" in e.value.message
+
+    # The slot decision (2026-11-12): the cross-group route proposes on application slots only.
+    @pytest.mark.parametrize("slot", ["cn/py-live/award", "capauthz/py-live/x", "electorate/py-live/1",
+                                      "ae-seat/py-live/x/0", "clog/py-live/g/claim", "lock/py-live",
+                                      "leader/py-live", "consistent/py-live"])
+    def test_cross_group_propose_refuses_a_component_owned_slot(self, agent: MyceliumAgent, slot: str) -> None:
+        with pytest.raises(ProtectedSlotError) as e:
+            agent.cross_group_propose(slot, b"forged", [{"group": "py-live", "quorum": 0.5}])
+        assert e.value.slot == slot
+        assert e.value.response.status_code == 403
 
 
 class TestScatterGateway:

@@ -188,6 +188,22 @@ export class ProtectedStreamError extends Error {
 }
 
 /**
+ * The gateway refused a **protected consensus slot** (HTTP 403 `protected_slot`, 0.2.10): `crossGroupPropose`
+ * proposes on application slots only. A slot in a family a component or one of the substrate's own verbs
+ * proposes in — `cn/` (a commitment's award), `clog/` (a consumer group's claim), `electorate/`, `ae-seat/`,
+ * `capauthz/`, `lock/`, `leader/`, `consistent/` — is refused before anything is proposed; `message` names the
+ * route or the component that proposes in it (`distributedLock`, `electLeader`, `consistentSet` for the last
+ * three).
+ */
+export class ProtectedSlotError extends Error {
+  readonly status = 403;
+  constructor(public readonly slot: string, message: string) {
+    super(message);
+    this.name = "ProtectedSlotError";
+  }
+}
+
+/**
  * A consensus write that did not commit **your** value: the slot was decided for another (HTTP 409
  * `{"ok": false, "error": "superseded"}`, substrate 2.30.0+ — the normal answer to a concurrent loser).
  *
@@ -205,8 +221,8 @@ export class SupersededError extends Error {
   }
 }
 
-/** The key or stream a write names, for the refusal that names it back. */
-type Subject = { key?: string; stream?: string };
+/** The key, stream or slot a write names, for the refusal that names it back. */
+type Subject = { key?: string; stream?: string; slot?: string };
 
 /** A log subscription refused at open for a component-owned stream: `403 protected_stream`, as the typed error. */
 function streamRefusal(stream: string): (status: number, body: unknown) => Error | undefined {
@@ -347,6 +363,9 @@ export class MyceliumAgent {
       }
       if (body.error === "protected_stream") {
         throw new ProtectedStreamError(subject.stream ?? "", body.message ?? "protected stream");
+      }
+      if (body.error === "protected_slot") {
+        throw new ProtectedSlotError(subject.slot ?? "", body.message ?? "protected slot");
       }
     }
     if (resp.status === 409) {
@@ -1092,6 +1111,9 @@ export class MyceliumAgent {
    * @param value  - Payload bytes to commit.
    * @param groups - Per-group quorum requirements.
    * @returns a {@link CommitResult} (`.persisted` — local durability on the gateway node).
+   * @throws {@link ProtectedSlotError} for a slot in a family a component or one of the substrate's own verbs
+   *   proposes in (`cn/`, `clog/`, `electorate/`, `ae-seat/`, `capauthz/`, `lock/`, `leader/`, `consistent/`):
+   *   the gateway's `403 protected_slot`, whose message names the route to use (0.2.10).
    *
    * @example
    * ```ts
@@ -1114,7 +1136,7 @@ export class MyceliumAgent {
         quorum: g.quorum ?? 0.5,
         veto:   g.veto   ?? false,
       })),
-    }) as { persisted?: boolean };
+    }, { slot }) as { persisted?: boolean };
     return commitResult(data);
   }
 

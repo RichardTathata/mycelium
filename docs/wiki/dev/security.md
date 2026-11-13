@@ -337,11 +337,46 @@ ownership table that is neither a row nor a stated application stream; nothing d
 call sites, and `check-kv-namespaces.sh` leaves the log verbs out of its call set, so a stream with no such key in that table is open until someone adds the row (the table's doc says
 so). Rule 1's enumeration found no other door that reads a stream by a name the caller chooses — no MCP tool,
 no A2A skill, no companion route — and no dependant: the companions read their streams in process and `mycelium-py`'s
-`ReasonClient.trace` reads `/gateway/reason/trace/{run_id}`. **Left open, stated, a follow-up PR:** `GET
-/consensus/{slot}` returns a component-owned slot's value under `consensus:read` — a commitment's award
-(`cn/{requirement}/award`, never in a log) and a consumer group's claim. Tests:
+`ReasonClient.trace` reads `/gateway/reason/trace/{run_id}`. **Left open then, closed by the next paragraph:** `GET
+/consensus/{slot}` returned a component-owned slot's value under `consensus:read`. Tests:
 `src/agent/http/log_read_tests.rs`, one per door, the table's rows pinned.
 [`.log/2026-11-12-log-read-guard.md`](.log/2026-11-12-log-read-guard.md).
+
+**The routes that take a slot name classify by a table of their own (the slot decision of 2026-11-12;
+`deprecations.md` §102).** A slot name is not a KV key — `leader/`, `consistent/`, `electorate/`, `capauthz/` and
+`ae-seat/` are no row of `OWNED_KV_PREFIXES`, and an application may name a slot `agent/…` — so the slot routes
+read `SLOT_FAMILIES` (`src/agent/http/authz.rs`), each row carrying how its decision is read (`None`: served) and
+where it is proposed. **Read:** `GET /consensus/{slot}` answered every slot under `consensus:read` — an award, a
+group's claim, an electorate's members around `govern:read`, a `capauthz/` policy, a seat's attempt id. It refuses
+`cn/`, `clog/`, `electorate/`, `ae-seat/` and `capauthz/` **403** `protected_slot` now (`refuse_owned_slot_read`),
+before the store is read, and `consistent/{key}` exactly when the consistent-get door refuses `{key}`; `lock/` and
+`leader/` stay served (decided: the operator's read of a holder has no other non-proposing route). **Propose:**
+rule 1's enumeration for writes found one door whose caller names the slot, `POST
+/gateway/consensus/cross_group_propose`; every other proposing route builds the slot from a fixed family
+(`consistent/{key}` with the key checked, `lock/{name}`, `leader/{group}`, the group subscription's
+`clog/{stream}/{group}/claim` with the stream checked, `electorate/…` behind `govern:write`), and no MCP tool, A2A
+skill or companion route proposes. On the unguarded route a fleet of one voting in `g` **decided** `cn/…/award`,
+`capauthz/…`, an `ae-seat/…` slot, `clog/…/claim`, `lock/x` and `consistent/{key}` (an owned key's too) — 200,
+the value committed; `electorate/g/…` and `leader/g` were already refused by Layer III's electorate door (409
+`electorate_mismatch`). It refuses all eight families now (`refuse_owned_slot_proposal`) before the engine is
+built, so no ballot or acceptor record is written. What a forged decision did: an award's slot taken before the
+declarer's (`award_of_verified` drops it, but the slot is taken); a `capauthz/` slot taken, so the consensus-set
+call is superseded and applies nothing (only the caller of `set_capability_authz_via_consensus` writes
+`sys/capauthz/…`); a seat held by no call; a lock no guard releases. **A new family is classified only as far as
+this:** `every_slot_family_is_classified_for_the_slot_routes` fails on a family in `SAFETY_SLOT_FAMILIES`,
+`FLEET_EXCLUSIVE_PREFIXES` / `FLEET_EXCLUSIVE_SUFFIXED` (what `is_fleet_exclusive_slot` reads, now data),
+`ELECTORATE_SLOT_PREFIX`, `SEAT_SLOT_PREFIX` or the slot-name section of `scripts/kv-namespaces-nonkeys.txt` with
+no row; a component proposing on a literal in none of those is open until its row is added. **Not the
+owner-signed rule:** these are doors for an HTTP client; the slots' records stay as the inventory has them —
+`consensus/life/…`, the legacy `consensus/committed/` reading and the acceptor's memory (*Consensus, electorates
+and exclusivity*), `sys/capauthz/…`, and `cn/{requirement}/award` — and a member still proposes on any slot.
+**Left open, stated:** the slot *names* are still listed by `GET /gateway/kv/keys?prefix=consensus/` (critique plan
+row CR24); and **the signal SSE doors do not refuse the consensus kinds** — a `mesh:read` tap on
+`/signals/consensus.propose` or `consensus.commit` received a proposed award's slot and value from a peer
+(probed 2026-11-12; `refuse_unobservable_kind` names only the RPC reply kinds and the protected RPC kinds, and the
+acceptor registers on the same handler table), which a follow-up closes. Tests:
+`src/agent/http/slot_guard_tests.rs` and `mycelium-commitment/tests/award_slot_route.rs`.
+[`.log/2026-11-12-slot-guard.md`](.log/2026-11-12-slot-guard.md).
 
 **`/a2a` calls only what its agent card lists (2.27.0 — #550).** The agent card
 listed every advertised capability as a skill, so an external agent was offered the fleet's plumbing — provisioning

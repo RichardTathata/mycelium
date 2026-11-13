@@ -429,6 +429,13 @@ and a timeout does not mean its value lost — read the key (substrate ≥ 2.30.
 `distributedLock` and `electLeader` throw `SupersededError` the same way; a 409 `topology_unsatisfied` stays
 a plain `Error`.
 
+**`crossGroupPropose` proposes on application slots only (0.2.10; the gateway's `deprecations.md` §102).** A
+slot in a family a component or one of the substrate's own verbs proposes in — `cn/` (a commitment's award),
+`clog/` (a consumer group's claim), `electorate/`, `ae-seat/`, `capauthz/`, `lock/`, `leader/`, `consistent/` —
+throws `ProtectedSlotError` ([Errors](#errors)) before anything is proposed; its message names the route to use
+(`distributedLock`, `electLeader` and `consistentSet` for the last three). Against an older gateway the proposal
+was made.
+
 #### `distributedLock(name, options?) → Promise<LockGuard>`
 
 Acquires a named cluster lock via consensus.
@@ -724,6 +731,7 @@ answer to a write is an `Error` naming the method, path, status and response bod
 | `ProtectedKindError` | `403 protected_kind` — `mcp.invoke`, `skill.invoke`, `llm.invoke` (and operator-listed kinds) on a raw mesh route | `rpcCall`, `scatterGather`, `emit`, `deliverEvent`, `emitSharded`, `emitReliable` | `kind` |
 | `ProtectedKeyError` (0.2.2; reads since 0.2.10) | `403 protected_key` — a key in a namespace the substrate or a companion owns | `set`, `delete`, `setWithMinAcks`, `consistentSet`; `get`, `consistentGet`, `scanPrefix`, `keys` (a prefix inside a hidden namespace) | `key`, `status` |
 | `ProtectedStreamError` (0.2.2; reads since 0.2.10) | `403 protected_stream` — a log stream under `cn/`, `wiki/`, `reason/` | `append`, `compactLog`; `scanLog`, `subscribeLog`, `subscribeLogGroup` (thrown before any entry) | `stream`, `status` |
+| `ProtectedSlotError` (0.2.10) | `403 protected_slot` — a consensus slot in a family a component or one of the substrate's own verbs proposes in (`cn/`, `clog/`, `electorate/`, `ae-seat/`, `capauthz/`, `lock/`, `leader/`, `consistent/`) | `crossGroupPropose` (thrown before anything is proposed) | `slot`, `status` |
 | `SupersededError` (0.2.4) | `409 superseded` — the slot was decided for another value (a concurrent writer, holder or leader won) | `consistentSet`, `crossGroupPropose`, `distributedLock`, `electLeader` | `status` |
 
 ```typescript

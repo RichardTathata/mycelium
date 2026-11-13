@@ -95,13 +95,22 @@ pub(super) async fn bulk_staging_handler(
 /// `lease_expired: true` distinguishes the two). `ballot` reflects the highest
 /// ballot number seen for that slot (0 = never proposed).
 ///
-/// This endpoint is public (no auth) and is intended for operational debugging.
+/// Behind the gateway's bearer-then-scope layer (`consensus:read`), like `/gateway/*` — open only where the
+/// gateway is. It reads an application's slots, a lock's (`lock/{name}`) and a leader's (`leader/{group}`) — the
+/// operator's read of a holder. A **component-owned** slot — `cn/…` (a commitment's award), `clog/…` (a consumer
+/// group's claim), `electorate/…`, `ae-seat/…`, `capauthz/…`, and `consistent/{key}` for an owned `{key}` — is
+/// **403** `protected_slot` whatever the token's scopes, before the store is read, so the answer is the same
+/// whether or not anything was decided there (`refuse_owned_slot_read`, over `SLOT_FAMILIES`). The slot is the
+/// path tail, percent-decoded by the extractor before it is classified.
 #[cfg(feature = "consensus")]
 pub(super) async fn consensus_slot_handler(
     Path(slot):   Path<String>,
     State(ctx):   State<Arc<HttpCtx>>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
     use base64::Engine as _;
+    if let Some(refused) = refuse_owned_slot_read(&slot) {
+        return refused;
+    }
     let committed_key = format!("{}{}", crate::consensus::consensus_ns::COMMITTED, slot);
     let lease_key     = format!("{}{}", crate::consensus::consensus_ns::LEASE,     slot);
     let ballot_key    = format!("{}{}", crate::consensus::consensus_ns::BALLOT,    slot);
@@ -138,7 +147,7 @@ pub(super) async fn consensus_slot_handler(
         "ballot":        ballot,
         "lease_ms":      lease_ms,
         "lease_expired": lease_expired,
-    }))
+    })).into_response()
 }
 
 pub(super) async fn stats_handler(State(ctx): State<Arc<HttpCtx>>) -> impl IntoResponse {

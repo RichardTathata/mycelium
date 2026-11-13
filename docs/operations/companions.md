@@ -336,7 +336,10 @@ an absent section.
   compaction runs in the embedding process through `agent.kv().compact_log(…)`. The read routes refuse it the
   same way (`GET /gateway/overlay/log/{scan,subscribe,group/subscribe}`,
   [deprecations.md §101](../guide/deprecations.md)): a commitment's offers, closes, reports and assessments are
-  read in process, through this crate.
+  read in process, through this crate. So is its **award**: the consensus slot `cn/{requirement}/award` is not
+  read through `GET /consensus/{slot}` nor proposed through `POST /gateway/consensus/cross_group_propose` — both
+  answer **403** `protected_slot` ([deprecations.md §102](../guide/deprecations.md)); read it with `award_of` /
+  `award_of_verified`.
 - **Observe.** The KV heads and streams directly. No metrics.
 
 ### mycelium-effects — the transactional destination

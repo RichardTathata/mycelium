@@ -3186,7 +3186,7 @@ from 2.27.0 is affected. The read routes now follow the same table as the write 
   | `prompts/` | `GET /gateway/prompts`, `GET /gateway/prompts/{ns}/{name}` | `llm:read` |
   | `log/` | `GET /gateway/overlay/log/scan` — an application stream; a component's stream (`cn/`, `wiki/`, `reason/`) by §101 | `consensus:read` |
   | `mailbox/` | `GET /gateway/mailbox/{kind}` (the recipient's stream) | `mesh:read` |
-  | `consensus/` | `GET /consensus/{slot}` | `consensus:read` |
+  | `consensus/` | `GET /consensus/{slot}` — an application's slot, a lock's or a leader's; a component's slot is refused there too (§102) | `consensus:read` |
   | `sched/` | `GET /gateway/schedules/last?id=ID` — a gateway client's own schedule only; an application's `run_schedule` records (`sched/{id}/…`, no `~`) have no HTTP read | `schedule:run` |
 
   A namespace with no gateway read route — `sys/client-cert/`, `mandate/`, `rights/`, `call/` (§100), `knowledge/`, `tuple/` and
@@ -3359,10 +3359,112 @@ the key names the raw listing shows. (§100 is identity-and-lifecycle I4's, PR #
 - **Not changed:**
   - **`GET /consensus/{slot}` still returns a component-owned slot's value under `consensus:read`**: a
     commitment's award (`cn/{requirement}/award`, which was never in a log) and a consumer group's claim
-    (`clog/{stream}/{group}/claim`, the holder's node id). That route is not changed here; a follow-up closes
-    it, surveyed first. Until then, `consensus:read` reads a commitment's award.
+    (`clog/{stream}/{group}/claim`, the holder's node id). That route is not changed here; **§102 closes it**.
   - The names under `cn/`, `wiki/` and the other namespaces §99 left listed are still listed
     (`cn/{requirement}/award` among them); this section hides only the log and consumer-group keys of a
     component's streams.
   - Layer I is untouched: a peer still replicates every key (detection, not prevention), and an in-process
     caller reads any stream through `KvHandle`. These are the gateway's doors.
+
+## 102. The consensus routes refuse component-owned slots, to read and to propose (unreleased, the slot decision of 2026-11-12)
+
+Two gateway routes take a consensus **slot name** from the caller, and neither asked whose slot it was.
+`GET /consensus/{slot}` answered any slot's committed value to a token holding only `consensus:read`: a
+commitment's award (`cn/{requirement}/award` — the requirement, the awardee, the declarer), a consumer group's
+claim, an electorate's record with its members (a read `GET /gateway/govern` puts behind `govern:read`), a
+capability's authorisation policy and a fleet counter's seats. `POST /gateway/consensus/cross_group_propose`
+proposed on any slot for a token holding `consensus:write`: on a fleet with no electorate declared it **decided**
+an award's slot, a `capauthz/{ns}/{name}` policy slot, a seat, a consumer group's claim, a `lock/{name}` and a
+`consistent/{key}` — each seen committed on the unguarded route, value and all (an `electorate/{group}/…` slot and
+`leader/{group}` were already refused there by the electorate door, 409 `electorate_mismatch`). Every release that
+has the two routes is affected. §99 and §101 closed the same asymmetry on the raw KV routes and the log routes;
+the slot routes now classify by one table of their own (`SLOT_FAMILIES`, `src/agent/http/authz.rs`).
+
+- **What changed:**
+  - **`GET /consensus/{slot}`** answers **403** `{"ok": false, "error": "protected_slot", "message": "…"}` for a
+    slot under `cn/`, `clog/`, `electorate/`, `ae-seat/` or `capauthz/` (and for each bare name — `cn`,
+    `capauthz`, …), whatever the token's scopes (`"*"` included), before the store is read: the body is the same
+    whether or not anything was ever decided on the slot. The `message` says how the decision is read — an
+    electorate through `GET /gateway/govern` (`govern:read`); the others in process, by the component that owns
+    them, and no route.
+  - **`GET /consensus/consistent/{key}`** is read exactly when `GET /gateway/overlay/consistent/get?key={key}`
+    reads `{key}`: for a key in an owned namespace (§99's table) it is 403 `protected_slot` with that key's own
+    message. The gateway's `consistent/set` never wrote such a slot; an in-process `consistent_set` can.
+  - **A lock's slot (`lock/{name}`) and a leader's (`leader/{group}`) are read as before** — the operator's read
+    of a holder, which no other route gives without proposing — and so is every application slot. A slot is
+    compared as bytes after the path is percent-decoded: `/consensus/cn%2Fr%2Faward` is `cn/r/award` and is
+    refused; `CN/r/award`, `cnx/r/award` and a doubly-encoded `cn%252Fr%252Faward` are other slots, which hold
+    none of a component's decisions.
+  - **`POST /gateway/consensus/cross_group_propose`** answers the same **403** `protected_slot` for a `slot` in
+    any of those five families **and in `lock/`, `leader/` and `consistent/`**, before anything is proposed: no
+    ballot, no acceptor record and no decision is written for the slot. The `message` names the route or the
+    component that proposes in the family — `POST /gateway/overlay/lock/acquire`, `POST /gateway/overlay/elect`,
+    `POST /gateway/overlay/consistent/set`, `POST /gateway/govern/electorate` (`govern:write`), or the component in
+    process. An application slot is proposed as before.
+  - **A raw KV read of a `consensus/…` key** (403 `protected_key` since §99) says in its `message` which slots the
+    slot route reads, and no longer sends every reader there.
+- **Will the compiler tell me?** No — it is an HTTP status. The SDKs raise the proposal's refusal typed:
+  `ProtectedSlotError` from `cross_group_propose` / `crossGroupPropose` (`mycelium-py` 0.2.16, where it is still a
+  `PermissionError` and an `httpx.HTTPStatusError`; `mycelium-ts` 0.2.10). Neither SDK has a verb for
+  `GET /consensus/{slot}`.
+- **Who is affected:** a client, script or dashboard that reads a component's slot through `GET /consensus/…`, or
+  that proposes through the cross-group route on a slot named under one of the eight families — for instance one
+  that took a lock by proposing on `lock/{name}` instead of calling the lock route. Nothing in this repository
+  does either: the runbooks read `lock/{name}`, which is unchanged; the SDKs and the examples propose on their own
+  names (`donation/…`, `pipeline/config`). A client whose own slot names happen to start with one of the eight
+  prefixes must rename them.
+- **Migration.**
+
+  | Slot family | Read it through | Propose in it through |
+  |---|---|---|
+  | `cn/{requirement}/award` | in process: `mycelium-commitment` (`award_of`, `award_of_verified`) | in process: `commit_award_linearizable` |
+  | `clog/{stream}/{group}/claim` | — (held by the node serving the group subscription) | `GET /gateway/overlay/log/group/subscribe` (`consensus:read`) |
+  | `electorate/{group}/…` | `GET /gateway/govern` (`govern:read`) | `POST /gateway/govern/electorate` (`govern:write`) |
+  | `ae-seat/…` | — (the action evaluator's) | — (claimed when a call is admitted) |
+  | `capauthz/{ns}/{name}` | in process, by the resolvers that enforce it | in process: `set_capability_authz_via_consensus` |
+  | `lock/{name}` | `GET /consensus/lock/{name}` (`consensus:read`), unchanged | `POST /gateway/overlay/lock/acquire` (`consensus:write`) |
+  | `leader/{group}` | `GET /consensus/leader/{group}` (`consensus:read`), unchanged | `POST /gateway/overlay/elect` (`consensus:write`) |
+  | `consistent/{key}` | `GET /gateway/overlay/consistent/get?key={key}`, or `GET /consensus/consistent/{key}` for an application key | `POST /gateway/overlay/consistent/set` (`consensus:write`) |
+
+- **Check after upgrading.** The read, with a `consensus:read` token, answered 200 and now answers 403
+  `protected_slot` (the slot need not exist); a lock's slot still answers 200:
+
+  ```bash
+  curl -s -o /dev/null -w '%{http_code}\n' -H 'Authorization: Bearer CONSENSUS_READ_TOKEN' \
+       'http://NODE:PORT/consensus/cn/x/award'                     # 200 before, 403 after
+  curl -s -o /dev/null -w '%{http_code}\n' -H 'Authorization: Bearer CONSENSUS_READ_TOKEN' \
+       'http://NODE:PORT/consensus/lock/x'                         # 200 before and after
+  ```
+
+  The proposal, with a `consensus:write` token. **Run it against an upgraded node only**: on an affected node it
+  is a real proposal, and where the node can reach a quorum of group `G` it decides the slot — use a requirement
+  name nothing will ever announce, or do not run it there at all.
+
+  ```bash
+  curl -s -w '\n%{http_code}\n' -X POST -H 'Authorization: Bearer CONSENSUS_WRITE_TOKEN' \
+       -H 'content-type: application/json' \
+       -d '{"slot":"cn/upgrade-check-never-announced/award","value_b64":"","groups":[{"group":"G","quorum":0.5,"veto":false}]}' \
+       'http://NODE:PORT/gateway/consensus/cross_group_propose'    # 403 protected_slot after
+  ```
+
+  Until every gateway is upgraded, treat `consensus:read` as a scope that reads a commitment's award and an
+  electorate's members, and `consensus:write` as one that can decide an award's slot, a capability's
+  authorisation policy slot and a lock without the lock route — and review who holds them. If a `consensus:write`
+  token may have been misused, an award is checked by its signature (`award_of_verified` with the declarer you
+  pin), and a `capauthz/` slot's value is applied to `sys/capauthz/…` only by the node that called
+  `set_capability_authz_via_consensus`, never by a learner.
+- **Not changed:**
+  - **The slot names are still listed.** `GET /gateway/kv/keys?prefix=consensus/` answers the key names under
+    `consensus/{committed,ballot,lease,decided}/{slot}` and `consensus/life/{escaped slot}/…` to a `kv:read` token,
+    so the listing still shows that a requirement has an award, an electorate's group and epoch, a
+    `capauthz/{ns}/{name}` and a seat's two digests — the values are refused on every route, the names are not.
+    Stated as a limit; a later row hides them (`docs/plans/external-critique-2026-11-12.md`, CR24).
+  - **The signal streams.** `GET /signals/{kind}` and `GET /gateway/signal/sse/{kind}` (`mesh:read`) do not refuse
+    the consensus kinds (`consensus.propose`, `consensus.commit`): a tap on a node receives the proposals and
+    commits that node is in scope for, slot and value included. This section does not close that; treat
+    `mesh:read` on a node as reading the consensus traffic it sees.
+  - `lock/{name}` and `leader/{group}` stay readable under `consensus:read`: the holder's or the leader's node id.
+  - The routes that build the slot themselves are untouched: lock acquire, elect, consistent set, the group
+    subscription's claim, `POST /gateway/govern/electorate`.
+  - Layer III is untouched: a member of the fleet proposes on any slot through the library, bounded by the
+    electorate door and, for an award, by its signature. These are the gateway's doors.

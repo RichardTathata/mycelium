@@ -7,7 +7,7 @@ row rewritten — a KV record alone cannot carry it; the lease margin and the fe
 refusal given its receiver-clock, replay and ordering cases and moved to a decision; the WAL checksum's downgrade
 case; catalogue rollback's limits; four inventory rows that had no plan row; §6 split into what is wrong and what
 is understated; every choice the review found inside a row moved to §5). **The order is agreed (D11):** CR1 now
-(delivered: PR #774 and the log read doors' follow-up, PR #777); **inside wave 1b**, CR2's first PR (the use marker), CR13's counter and CR12; CR3–CR11 and
+(delivered: PR #774, the log read doors' follow-up, PR #777, and the slot routes', PR #SLOTPR); **inside wave 1b**, CR2's first PR (the use marker), CR13's counter and CR12; CR3–CR11 and
 everything else **after wave 1b**, with CR10 (the model) startable in parallel. A row is *buildable* only where
 its text needs no further decision; each row's **State** line says where one remains.
 
@@ -218,7 +218,7 @@ A row that moves an inventory row to *Meets* cites the verifying code and the fo
 #### CR1 · The KV read guard, then the log read doors *(L19)* — delivered
 
 **State (2026-11-12):** **delivered** — the guard is PR #774, merged (`deprecations.md` §99); the log read doors
-follow-up is PR #777 (`deprecations.md` §101). The follow-up's exit, promise by promise:
+follow-up is PR #777 (`deprecations.md` §101); the slot routes' is PR #SLOTPR (`deprecations.md` §102). The follow-up's exit, promise by promise:
 - *"a `consensus:read` token is refused a scan and both subscribes of `cn/…`, `wiki/…` and `reason/…`"* —
   `a_consensus_read_token_reads_application_streams_only_at_every_log_door` (`compliance`; a `"*"` token too),
   and one test per door: `log_scan_refuses_an_owned_stream_and_reads_an_application_stream`,
@@ -233,9 +233,30 @@ follow-up is PR #777 (`deprecations.md` §101). The follow-up's exit, promise by
   `OWNED_LOG_STREAMS` — `the_raw_listing_hides_a_component_streams_key_names`; and a `log/{name}/…` family in
   `src/lib.rs`'s ownership table must be a row of that table or a stated application stream —
   `every_log_stream_in_the_table_is_classified_for_the_log_routes` (what it does not gate is in the table's doc).
-- **Not built, a follow-up PR, surveyed first:** `GET /consensus/{slot}` still returns a component-owned slot's
-  value under `consensus:read` — a commitment's award (`cn/{requirement}/award`) and a consumer group's claim.
-  This row does not close it.
+- **The slot routes, closed by the second follow-up** (PR #SLOTPR, `deprecations.md` §102; the survey and the
+  maintainer's decisions of 2026-11-12: `lock/` and `leader/` stay readable; one table, both directions; refuse
+  outright). #777 stated `GET /consensus/{slot}` open — it answered a commitment's award and a consumer group's
+  claim under `consensus:read`. Promise by promise:
+  - *"every owned family 403 for `consensus:read` and `*`, present or absent, literal and `%2F`"* —
+    `the_slot_route_refuses_an_owned_slot_and_reads_the_rest` and, under tokens,
+    `no_scope_opens_an_owned_slot_at_either_door` (`src/agent/http/slot_guard_tests.rs`): `cn/`, `clog/`,
+    `electorate/`, `ae-seat/`, `capauthz/`, and `consistent/{owned key}`;
+  - *"`lock/x`, `leader/g`, `consistent/orders/1`, an application slot still 200"* — the same two tests, and
+    `the_routes_that_own_a_family_still_propose_in_it`;
+  - *"the write hole proved with a test that fails on main"* — `the_cross_group_route_refuses_a_proposal_on_an_owned_slot`
+    against the unguarded handler: the route **decided** `cn/req-1/award`, `capauthz/demo/echo`, an `ae-seat/…`
+    slot, `clog/events/workers/claim`, `lock/x` and `consistent/{key}` (200, the value committed); **not
+    reachable**: `electorate/g/…` and `leader/g`, which the electorate door already refused (409
+    `electorate_mismatch`). All eight families are refused at the route now, before anything is written;
+  - *"a table pin"* — `the_slot_routes_classify_by_the_one_table` (the rows) and
+    `every_slot_family_is_classified_for_the_slot_routes` (against `SAFETY_SLOT_FAMILIES`,
+    `FLEET_EXCLUSIVE_PREFIXES`, `FLEET_EXCLUSIVE_SUFFIXED`, `ELECTORATE_SLOT_PREFIX`, `SEAT_SLOT_PREFIX` and the
+    slot-name section of `scripts/kv-namespaces-nonkeys.txt`);
+  - *"one end-to-end case with a committed award"* — `a_committed_award_is_not_read_or_proposed_through_the_slot_routes`
+    (`mycelium-commitment/tests/award_slot_route.rs`).
+  - **Not built, stated:** the slot *names* in `GET /gateway/kv/keys?prefix=consensus/` (row CR24); the signal
+    SSE doors' consensus kinds — a `mesh:read` tap on `consensus.propose` / `consensus.commit` receives a proposed
+    award's slot and value (probed; a follow-up, not a row yet).
 
 **What:** as decided (M6): on the raw KV read routes, an owned key's value is refused and sensitive key names are
 hidden from the listing. **Follow-up, one PR:** `gw_overlay_log_scan`, `gw_overlay_log_subscribe` and
@@ -688,6 +709,33 @@ nonce is burned before admission and nothing repairs it (L10); that a relaying m
 that above about nine nodes relays are the common path for an Individual frame (L7, L8); the far-future stamp, until CR13 lands; the lease's skew bound (CR11's docs half).
 
 **Exit:** each sentence beside the code line it states.
+
+**Size:** S.
+
+#### CR24 · A component's slot names in the raw listing *(L19; added by the slot decision of 2026-11-12)*
+
+**State (2026-11-12):** *after wave 1b*. Added when the slot routes were closed (CR1's second follow-up,
+`deprecations.md` §102): the maintainer decided the names stay listed in that PR and are a row here.
+
+**What:** `GET /gateway/kv/keys?prefix=consensus/` answers every key name under `consensus/` to a `kv:read` token
+(`listed("consensus/")`, `OWNED_KV_PREFIXES`, `src/agent/http/authz.rs`), and a slot's name is in its keys:
+`consensus/{committed,ballot,lease,decided}/{slot}`, `consensus/life/{escaped slot}/…` and
+`sys/consensus-accepted/{node}/{slot}`. So the listing still shows which requirement has an award
+(`cn/{requirement}/award`), which stream and group hold a claim, an electorate's group and epoch, a capability's
+`{ns}/{name}` under `capauthz/`, and a seat's two digests (`ae-seat/{counter}/{actor}/{n}`) — the values are
+refused on every route since §102, the names are not. The row hides the names of the families `SLOT_FAMILIES`
+marks component-owned, **derived from that table** as the log streams' names are derived from
+`OWNED_LOG_STREAMS` (`in_owned_stream_keyspace`), so the two cannot drift; a prefix inside one is refused as
+inside any names-hidden namespace.
+
+**Exit:** with an award, a claim, an electorate, a policy and a seat decided, an unprefixed listing and one under
+`consensus/` and `sys/consensus-accepted/` show none of their key names, in the literal and the escaped
+(`consensus/life/cn%2F…`) forms; a lock's, a leader's and an application slot's names are still listed; a prefix
+inside an owned family is 403 `protected_key`; the Ops Console and the CI probes that read `consensus/` names
+(`kv_read_tests.rs` pins `consensus/committed/s` as listed) still pass.
+
+**Does not:** stop a member — a member holds the keys. Does not hide a lock's or a leader's name (decided
+readable, 2026-11-12).
 
 **Size:** S.
 

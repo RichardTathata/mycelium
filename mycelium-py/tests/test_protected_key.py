@@ -19,7 +19,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import httpx
 import pytest
 
-from mycelium import MyceliumAgent, ProtectedKeyError, ProtectedKindError, ProtectedStreamError
+from mycelium import MyceliumAgent, ProtectedKeyError, ProtectedKindError, ProtectedSlotError, ProtectedStreamError
 
 
 class _Stub(BaseHTTPRequestHandler):
@@ -218,3 +218,34 @@ def test_an_ordinary_403_on_a_log_read_is_not_mistaken_for_it(agent, verb):
         LOG_READ_VERBS[verb][0](agent)
     assert not isinstance(e.value, ProtectedStreamError)
     assert e.value.response.status_code == 403
+
+
+# The slot decision (2026-11-12, 0.2.16): the cross-group route proposes on application slots only.
+SLOT_DOOR = "locks are taken through POST /gateway/overlay/lock/acquire (consensus:write)"
+GROUPS = [{"group": "g", "quorum": 0.5}]
+
+
+@pytest.mark.parametrize("slot", ["lock/x", "cn/r/award", "capauthz/ns/name"])
+def test_cross_group_propose_raises_protected_slot_error_with_the_route(agent, slot):
+    _Stub.status = 403
+    _Stub.reply = {"ok": False, "error": "protected_slot", "message": SLOT_DOOR}
+    with pytest.raises(ProtectedSlotError) as e:
+        agent.cross_group_propose(slot, b"x", GROUPS)
+    method, path, body = _Stub.seen[-1]
+    assert (method, path, body["slot"]) == ("POST", "/gateway/consensus/cross_group_propose", slot)
+    assert e.value.slot == slot
+    assert e.value.message == SLOT_DOOR
+    assert "/gateway/overlay/lock/acquire" in str(e.value)
+    assert isinstance(e.value, PermissionError)
+    assert isinstance(e.value, httpx.HTTPStatusError)
+    assert e.value.response.status_code == 403
+    assert not isinstance(e.value, (ProtectedKeyError, ProtectedStreamError, ProtectedKindError))
+
+
+def test_an_ordinary_403_on_cross_group_propose_is_not_mistaken_for_it(agent):
+    """The plant: a scope refusal stays the HTTP error it was."""
+    _Stub.status = 403
+    _Stub.reply = {"error": "insufficient scope", "required_scope": "consensus:write"}
+    with pytest.raises(httpx.HTTPStatusError) as e:
+        agent.cross_group_propose("donation/x", b"x", GROUPS)
+    assert not isinstance(e.value, ProtectedSlotError)

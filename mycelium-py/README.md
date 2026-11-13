@@ -527,6 +527,13 @@ res.persisted   # True: on the gateway node's disk · False: committed but that 
 `None` before, so existing callers are unaffected). The commit is cluster-wide either way —
 `persisted` is the *gateway node's* local durability, the same flag the Rust API reports.
 
+**`cross_group_propose` proposes on application slots only (0.2.16; the gateway's `deprecations.md` §102).** A
+slot in a family a component or one of the substrate's own verbs proposes in — `cn/` (a commitment's award),
+`clog/` (a consumer group's claim), `electorate/`, `ae-seat/`, `capauthz/`, `lock/`, `leader/`, `consistent/` —
+raises `ProtectedSlotError` ([Errors](#errors)) before anything is proposed; its message names the route to use
+(`distributed_lock`, `elect_leader` and `consistent_set` for the last three). Against an older gateway the
+proposal was made.
+
 #### `distributed_lock(name, *, ttl_secs=30) → LockGuard`
 
 Acquires a named cluster lock via consensus. Returns a `LockGuard`; use as a context
@@ -752,6 +759,7 @@ these codes) stays an `httpx.HTTPStatusError`.
 | `ProtectedKindError` | `403 protected_kind` — `mcp.invoke`, `skill.invoke`, `llm.invoke` (and operator-listed kinds) on a raw mesh route | `rpc_call`, `scatter_gather`, `emit`, `deliver_event`, `emit_sharded`, `emit_reliable` (0.2.7) | `.kind` |
 | `ProtectedKeyError` (since 0.2.7; reads since 0.2.16) | `403 protected_key` — a key in a namespace the substrate or a companion owns | `set`, `delete`, `set_with_min_acks`, `consistent_set`; `get`, `consistent_get`, `scan_prefix`, `keys` (a prefix inside a hidden namespace) | `.key`, `.message`, `.response` |
 | `ProtectedStreamError` (since 0.2.7; reads since 0.2.16) | `403 protected_stream` — a log stream under `cn/`, `wiki/`, `reason/` | `append`, `compact_log`; `scan_log`, `subscribe_log`, `subscribe_log_group` (raised before any entry) | `.stream`, `.message`, `.response` |
+| `ProtectedSlotError` (since 0.2.16) | `403 protected_slot` — a consensus slot in a family a component or one of the substrate's own verbs proposes in (`cn/`, `clog/`, `electorate/`, `ae-seat/`, `capauthz/`, `lock/`, `leader/`, `consistent/`) | `cross_group_propose` (raised before anything is proposed) | `.slot`, `.message`, `.response` |
 | `SupersededError` (since 0.2.8) | `409 superseded` — the slot was decided for another value (a concurrent writer, holder or leader won) | `consistent_set`, `cross_group_propose`, `distributed_lock`, `elect_leader` | `.response` |
 
 `ProtectedKeyError` and `ProtectedStreamError` are also `httpx.HTTPStatusError`s — what these verbs

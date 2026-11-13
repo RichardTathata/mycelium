@@ -109,7 +109,8 @@ exit and needs only `consensus` + `metrics`. Distributed locks are
 consensus slots (`lock/{name}`), so they ride these metrics — there is deliberately **no
 per-lock gauge** (cardinality); inspect an individual lock with `GET /consensus/lock/{name}` (the route
 captures the path tail, so the hierarchical slot is typed as-is; bearer when a token is set —
-`consensus:read`).
+`consensus:read`; a lock's and a leader's slots stay readable there, a component's slot is refused,
+[deprecations.md §102](../guide/deprecations.md)).
 
 | Metric | Type | Labels | Meaning | Watch for / alert |
 |---|---|---|---|---|

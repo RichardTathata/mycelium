@@ -2,6 +2,7 @@ export {
   MyceliumAgent,
   ProtectedKeyError,
   ProtectedKindError,
+  ProtectedSlotError,
   ProtectedStreamError,
   ScheduleRefusedError,
   ServeEvictedError,

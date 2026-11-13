@@ -195,6 +195,13 @@ row cites where.
 
 ### Consensus, electorates and exclusivity
 
+*The gateway's slot routes are not this rule.* Since 2026-11-12 `GET /consensus/{slot}` and `POST
+/gateway/consensus/cross_group_propose` refuse a component-owned slot (`SLOT_FAMILIES`,
+`src/agent/http/authz.rs`; [security](security.md)) — a door for an HTTP client. The slots' records are the rows
+below (`consensus/life/…`, the legacy `consensus/committed/` reading, the acceptor's memory, the electorate
+certificate), `sys/capauthz/{ns}/{name}` under *Capabilities* and `cn/{requirement}/award` under the companions;
+none of their statuses changes, and a member still proposes on any slot.
+
 | Record | (a) signed by | (b) verified: body = key, current | (c) failure and absence | (d) forged-record test | Status |
 |---|---|---|---|---|---|
 | `consensus/electorate-cert/{group}/…` with its `consensus/committed/electorate/…` record | The electors' signed votes (`certificate_holds`, `src/consensus.rs:2883`) — **but the electors are the member set the record itself names** (`src/consensus.rs:2276`); no configured authority | Slot, value digest and voter-in-electorate (`src/consensus.rs:2886`, `src/consensus.rs:2891`) | Refused, skipped and counted (`src/agent/electorate.rs:694`) | `a_forged_electorate_record_is_not_adopted` (`src/lib_tests.rs:16469`), `an_electorate_certificate_verifies_under_tls` (`src/lib_tests.rs:16554`) | **Partly.** (a): a genesis naming only its author certifies itself — `check_genesis` accepts any sorted, non-empty member set at epoch 1 (`src/agent/electorate.rs:495`–`521`) and adoption checks the certificate against that set. Confirmed from the code; no test. Also *inferred*: a tombstone after adoption is not re-examined, so a restarted node sees no electorate. Without `[tls]` the check is a shape |

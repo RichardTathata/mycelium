@@ -270,7 +270,10 @@ alertable scalar, the snapshot field is the relational detail, and the diagnosis
 - **Read:** inspect the lock's authoritative slot — `GET /consensus/lock/{name}` (the slot is
   `lock/{name}`; the route captures the path tail, so hierarchical slots are typed as-is — the
   percent-encoded form works too; send the gateway bearer when a token is set, scope `consensus:read`) →
-  `{committed, ballot, lease_ms, lease_expired}`. A non-null `committed` with a live `lease_ms` ⇒
+  `{committed, ballot, lease_ms, lease_expired}`. (A lock's slot and a leader's, `leader/{group}`, stay readable
+  on this route; a component's slot — a commitment's award, a consumer group's claim, an electorate, a fleet
+  counter's seat, a capability's authorisation policy — is refused `403 protected_slot`,
+  [deprecations.md §102](../guide/deprecations.md).) A non-null `committed` with a live `lease_ms` ⇒
   **held**; `lease_expired: true` ⇒ the lease lapsed and the slot has **reopened** — the lock is
   effectively free (a stale holder cannot win). Repeated `Superseded` in caller logs is
   contention, **not** a bug — the converged-holder discipline rejecting a loser. Watch

@@ -11,6 +11,47 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Security
 
+- **The consensus routes refuse component-owned slots, to read and to propose** (the slot decision of
+  2026-11-12; `deprecations.md` §102). Two routes take a slot name from the caller and neither asked whose slot it
+  was. `GET /consensus/{slot}` answered any slot's committed value to a token holding only `consensus:read` — a
+  commitment's award (requirement, awardee, declarer), a consumer group's claim, an electorate's record with its
+  members (a read `GET /gateway/govern` puts behind `govern:read`), a capability's authorisation policy, a fleet
+  counter's seats. `POST /gateway/consensus/cross_group_propose` proposed on any slot for a `consensus:write`
+  token: on a fleet with no electorate declared it **decided** an award's slot, a `capauthz/{ns}/{name}` slot, a
+  seat, a consumer group's claim, a `lock/{name}` and a `consistent/{key}`, each seen committed on the unguarded
+  route (`electorate/{group}/…` and `leader/{group}` were already refused there by the electorate door). **Every
+  release that has the two routes is affected.** Now, by one table (`SLOT_FAMILIES`,
+  `src/agent/http/authz.rs`):
+  - `GET /consensus/{slot}` answers **403** `protected_slot` for a slot under `cn/`, `clog/`, `electorate/`,
+    `ae-seat/` or `capauthz/`, whatever the scopes, before the store is read — the same body whether or not
+    anything was decided — and for `consistent/{key}` where `{key}` is an owned key (§99). The message says how
+    the decision is read (`GET /gateway/govern`, `govern:read`, for an electorate; in process for the others);
+  - **a lock's slot (`lock/{name}`), a leader's (`leader/{group}`) and every application slot are read as
+    before** — the runbooks' `GET /consensus/lock/{name}` is unchanged;
+  - `POST /gateway/consensus/cross_group_propose` answers the same 403 for a slot in those five families **and in
+    `lock/`, `leader/` and `consistent/`**, before anything is proposed or written, naming the route that proposes
+    in the family (`/gateway/overlay/lock/acquire`, `/elect`, `/consistent/set`, `/gateway/govern/electorate`); an
+    application slot is proposed as before;
+  - a raw KV read of a `consensus/…` key (403 `protected_key` since §99) says which slots the slot route reads;
+  - the SDKs raise `ProtectedSlotError` from `cross_group_propose` / `crossGroupPropose` (`mycelium-py` 0.2.16,
+    `mycelium-ts` 0.2.10, both unreleased with §99's and §101's).
+
+  **Check (read):** with a `consensus:read` token, `curl -s -o /dev/null -w '%{http_code}\n' -H 'Authorization:
+  Bearer TOKEN' 'http://NODE:PORT/consensus/cn/x/award'` answers **200** on an affected node and **403** after
+  upgrading (the slot need not exist); `…/consensus/lock/x` answers 200 before and after. **Check (propose), on an
+  upgraded node only** — on an affected node it is a real proposal: with a `consensus:write` token, `curl -s -X
+  POST -H 'Authorization: Bearer TOKEN' -H 'content-type: application/json' -d
+  '{"slot":"cn/upgrade-check-never-announced/award","value_b64":"","groups":[{"group":"G","quorum":0.5,"veto":false}]}'
+  'http://NODE:PORT/gateway/consensus/cross_group_propose'` answers **403** `protected_slot`. Until every gateway
+  is upgraded, treat `consensus:read` as reading a commitment's award and an electorate's members, and
+  `consensus:write` as able to decide an award's slot and take a lock without the lock route; review who holds
+  them. **Upgrade note:** nothing shipped here reads a component's slot through the route or proposes on one
+  through the cross-group route; a client of yours whose own slot names start with one of the eight prefixes must
+  rename them (§102's table). **Not changed, stated:** the slot *names* are still listed by `GET
+  /gateway/kv/keys?prefix=consensus/` under `kv:read` (critique plan row CR24); and the signal streams
+  (`/signals/{kind}`, `/gateway/signal/sse/{kind}`, `mesh:read`) do not refuse the consensus kinds, so a tap on a
+  node receives the proposals and commits it is in scope for, slot and value included.
+
 - **The log read routes refuse component-owned streams** (critique plan row CR1's follow-up; `deprecations.md`
   §101). Since 2.27.0 the log *write* routes — append and compact — have refused a stream under `cn/`, `wiki/` or
   `reason/`; the *read* routes had no such guard, so a token holding only `consensus:read` scanned or subscribed
@@ -40,9 +81,9 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   **403** after upgrading (the stream need not exist). Until every gateway is upgraded, treat `consensus:read` as
   reading every log stream and review who holds it. **Upgrade note:** nothing shipped here reads those streams
   through the log routes; a client of yours that did reads a trace through `/gateway/reason/trace/{run_id}` and
-  the others in process (§101's table). **Not changed:** `GET /consensus/{slot}` still returns a component-owned
-  slot's value under `consensus:read` — a commitment's award (`cn/{requirement}/award`) and a consumer group's
-  claim; a follow-up closes that route.
+  the others in process (§101's table). **Not changed here:** `GET /consensus/{slot}` returned a
+  component-owned slot's value under `consensus:read` — a commitment's award (`cn/{requirement}/award`) and a
+  consumer group's claim; the next entry closes that route.
 
 - **The raw KV read routes refuse owned namespaces** (the kv:read decision, 2026-11-12; `deprecations.md` §99). Since
   2.27.0 the raw KV *write* routes have refused every key in a namespace the substrate or a companion owns; the

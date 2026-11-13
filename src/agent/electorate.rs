@@ -613,10 +613,20 @@ pub(crate) fn groups_with_records(ctx: &TaskCtx) -> Vec<String> {
 /// so two groups never decide the same `consensus/committed/{slot}` (round 2, finding 2c).
 #[cfg(feature = "consensus")]
 pub fn is_fleet_exclusive_slot(slot: &str) -> bool {
-    ["lock/", "consistent/", "capauthz/"].iter().any(|f| slot.starts_with(f))
-        || (slot.starts_with("cn/") && slot.ends_with("/award"))
-        || (slot.starts_with("clog/") && slot.ends_with("/claim"))
+    FLEET_EXCLUSIVE_PREFIXES.iter().any(|f| slot.starts_with(f))
+        || FLEET_EXCLUSIVE_SUFFIXED.iter().any(|(head, tail)| slot.starts_with(head) && slot.ends_with(tail))
 }
+
+/// [`is_fleet_exclusive_slot`]'s families matched by prefix. Data, not a match arm, so the gateway's slot table
+/// (`SLOT_FAMILIES`, `src/agent/http/authz.rs`) is held against it: a family added here fails
+/// `every_slot_family_is_classified_for_the_slot_routes` until the slot routes classify it.
+#[cfg(feature = "consensus")]
+pub(crate) const FLEET_EXCLUSIVE_PREFIXES: &[&str] = &["lock/", "consistent/", "capauthz/"];
+
+/// [`is_fleet_exclusive_slot`]'s families matched by a head and a last segment: a commitment's award
+/// (`cn/{requirement}/award`) and a consumer group's claim (`clog/{stream}/{group}/claim`).
+#[cfg(feature = "consensus")]
+pub(crate) const FLEET_EXCLUSIVE_SUFFIXED: &[(&str, &str)] = &[("cn/", "/award"), ("clog/", "/claim")];
 
 /// The group a slot names itself, when its family does: `leader/{group}` and `electorate/{group}/…` are
 /// decided only by that group — and never carried from a predecessor.
