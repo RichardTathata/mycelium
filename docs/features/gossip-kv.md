@@ -61,7 +61,11 @@ local replica, in a browser.
   tombstone is collected by the sweep (revision 2 replaced a function and tests the tree does not have).
 - **Not built:** agreement between writers; authenticated anti-entropy (a state reply's entries carry no author, the
   [mesh mTLS](mesh-mtls.md) page's limit); the store enforces no ownership of a namespace — the doors do, and the
-  `sys/` tripwire counts rather than refuses.
+  `sys/` tripwire counts rather than refuses. An inbound entry stamped beyond the receiver's drift bound
+  ([`max_clock_drift_ms`](../reference/configuration.md#max_clock_drift_ms)) is counted and still applied
+  (`kv_future_stamps` on [`/stats`](../operations/observability.md#reading-stats)): it holds its key until the
+  wall clock passes its stamp, and nothing refuses it
+  ([the ledger row](../operations/what-is-proven.md#far-future-stamp-holds-its-key)).
 - **Evidence:** the ledger rows [a TLS node refuses unsigned KV frames](../operations/what-is-proven.md#tls-node-refuses-unsigned-kv-frames),
   [the 100-node cluster](../operations/what-is-proven.md#100-node-cluster) and the
   [hot-path costs](../operations/what-is-proven.md#hot-path-cost).

@@ -554,6 +554,20 @@ pub struct SystemStats {
     /// at read; unsigned keys (`load`, `tuple`) rely on this signal alone.
     pub sys_namespace_violations: u64,
 
+    /// Cumulative inbound KV entries whose stamp was **beyond this node's drift bound** — physical
+    /// time past this node's wall clock plus `max_clock_drift_ms` — at the three doors a remote stamp
+    /// comes through: an anti-entropy entry, a `Data` frame, a `SignedData` frame (external-critique
+    /// plan CR13, step 1; the per-door figures are on `GET /stats` `kv_future_stamps_by_door` and the
+    /// `door` label of `mycelium_kv_future_stamps_total`). Always `0` when the bound is `0`.
+    ///
+    /// **Detection, not prevention**: the entry is applied, forwarded and persisted as before, and
+    /// under last-writer-wins it holds its key until the wall clock passes its stamp. The node's own
+    /// clock is clamped (`hlc.rs`, "Remote drift bound"); this counts the entries the clamp caught.
+    /// It rises for two different reasons: a **peer's** clock is ahead (one sender, on every
+    /// receiver), or **this node's** clock is behind (every sender, on this receiver only).
+    /// Entries read back from this node's own WAL or snapshot at start are not counted.
+    pub kv_future_stamps: u64,
+
     /// Cumulative identity-anchor conflicts (identity-auth Phase 1b): a `sys/identity/{V}` KV
     /// entry introduced a key differing from `V`'s CA-anchored (mTLS-cert) key. A poisoning
     /// signal; may briefly rise on a legitimate rotation until the new key is re-anchored.

@@ -208,6 +208,7 @@ impl GossipAgent {
             consensus_ballot_space_exhausted: self.task_ctx.ballot_space_exhausted.load(Ordering::Relaxed),
             sys_namespace_violations:
                 self.task_ctx.sys_namespace_violations.load(Ordering::Relaxed),
+            kv_future_stamps: self.task_ctx.transport_bounds.kv_future_stamps(),
             identity_anchor_conflicts:
                 self.task_ctx.identity_anchor_conflicts.load(Ordering::Relaxed),
             cap_authz_violations: self.task_ctx.cap_authz_violations.load(Ordering::Relaxed),

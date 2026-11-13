@@ -16,6 +16,19 @@ to `apply_and_notify` — that teaches Layer I a Layer III law and inverts the d
 The same posture governs the `sys/` namespace tripwire (`sys_namespace_violations`, see
 [security](../security.md)) and the RBAC design generally.
 
+**The future-stamp tripwire** (2026-11-13; critique plan CR13, step 1) is the same posture at Layer I's own
+bound: an inbound KV entry whose stamp is beyond this node's wall clock plus `max_clock_drift_ms` is counted at
+the door it came through — the anti-entropy `StateResponse`, `Data` and `SignedData` arms of
+`mycelium-core/src/connection.rs`, on `TransportBounds::count_future_stamp` — and **applied, forwarded and
+appended to the WAL as before**. The verdict is the clamp's own (`Hlc::observe_reporting`,
+`hlc::beyond_drift_bound`): strict, on physical time, one clock read, nothing counted when the bound is 0. It
+reads no prefix and no owner. `GET /stats` `kv_future_stamps` (+ `kv_future_stamps_by_door`),
+`SystemStats::kv_future_stamps`, `mycelium_kv_future_stamps_total{door}`. It rises for a peer whose clock is
+ahead *and* for a receiver whose own clock is behind (`a_node_whose_clock_is_behind_counts_the_fleets_ordinary_entries`,
+`src/lib_tests.rs`). Not counted: WAL and snapshot replay at start (`src/agent/lifecycle.rs`), a signal's
+`hlc_seq`, a consensus token. **Not a carve-out and not a refusal**: whether Layer I may decline such an entry
+is the plan's D16, and step 2 is not buildable until a release of counting.
+
 **What detection does not give a reader** (2026-11-12). The tripwires count; they do not make a record
 trustworthy to the node that reads it. The decision records under `consensus/life/{slot}/…` and the legacy
 `consensus/committed/` reading are unsigned, and a record a member plants is read — the rows are in

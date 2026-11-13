@@ -173,6 +173,12 @@ pub(super) async fn stats_handler(State(ctx): State<Arc<HttpCtx>>) -> impl IntoR
             .load(std::sync::atomic::Ordering::Relaxed),
         "sys_namespace_violations": ctx.agent_ctx.sys_namespace_violations
             .load(std::sync::atomic::Ordering::Relaxed),
+        // CR13, step 1: inbound KV entries stamped beyond `max_clock_drift_ms`, counted and still
+        // applied — the total, and the door each came through. Zero when the bound is 0.
+        "kv_future_stamps": ctx.agent_ctx.transport_bounds.kv_future_stamps(),
+        "kv_future_stamps_by_door": mycelium_core::bounds::StampDoor::ALL.iter()
+            .map(|d| (d.name().to_string(), json!(ctx.agent_ctx.transport_bounds.kv_future_stamps_at(*d))))
+            .collect::<serde_json::Map<String, serde_json::Value>>(),
         "identity_anchor_conflicts": ctx.agent_ctx.identity_anchor_conflicts
             .load(std::sync::atomic::Ordering::Relaxed),
         "cap_authz_violations": ctx.agent_ctx.cap_authz_violations

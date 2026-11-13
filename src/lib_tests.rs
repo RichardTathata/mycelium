@@ -151,7 +151,8 @@ fn spawn_handler_with(
     let core_ctx = Arc::new(CoreCtx {
         node_id: node_id.clone(),
         seen,
-        hlc: Arc::new(crate::hlc::Hlc::new()),
+        // The node's own drift bound, as `GossipAgent::new` builds it (the default is `Hlc::new()`'s).
+        hlc: Arc::new(crate::hlc::Hlc::with_max_drift(opts.config.max_clock_drift_ms)),
         signal_boundary: Arc::new(RwLock::new(Boundary::new(node_id))),
         decision_sink: std::sync::OnceLock::new(),
         inbound_observer: std::sync::OnceLock::new(),
@@ -18463,4 +18464,299 @@ async fn a_bulk_call_after_rotate_and_revoke_presents_the_new_certificate() {
     assert!(seen, "B saw C's old key revoked and its new key held");
     assert!(counted, "B counts the revocation, so its handshake refuses C's old certificate");
     assert_eq!(after, Ok(payload), "after rotate-and-revoke, C's gateway presents its new certificate and B fetches");
+}
+
+// ── CR13, step 1: an inbound entry stamped beyond the drift bound is counted ─────────────────────
+// (external-critique plan, `docs/plans/external-critique-2026-11-12.md`). Detection only: every
+// test here also holds the store and the forward to what they were before the counter existed.
+
+/// The wall clock the future-stamp tests hold their node at, and the default drift bound.
+#[cfg(not(feature = "sim"))]
+const FS_WALL: u64 = 1_800_000_000_000;
+#[cfg(not(feature = "sim"))]
+const FS_BOUND: u64 = mycelium_core::hlc::DEFAULT_MAX_CLOCK_DRIFT_MS;
+
+/// Holds this thread's wall clock still (`sim_seam::pin_wall_clock_for_test`) and lets it run again
+/// when dropped, so a failed assertion does not leave the pin behind.
+#[cfg(not(feature = "sim"))]
+struct PinnedWall;
+#[cfg(not(feature = "sim"))]
+impl PinnedWall {
+    fn at(ms: u64) -> Self {
+        mycelium_core::sim_seam::pin_wall_clock_for_test(Some(ms));
+        PinnedWall
+    }
+}
+#[cfg(not(feature = "sim"))]
+impl Drop for PinnedWall {
+    fn drop(&mut self) {
+        mycelium_core::sim_seam::pin_wall_clock_for_test(None);
+    }
+}
+
+/// One connection handler and the three doors into it that carry a remote stamp.
+#[cfg(not(feature = "sim"))]
+struct StampDoors {
+    writer:   TcpStream,
+    store:    Arc<papaya::HashMap<Arc<str>, StoreEntry>>,
+    bounds:   Arc<mycelium_core::bounds::TransportBounds>,
+    forwards: mpsc::Receiver<(Bytes, u64, crate::framing::ForwardHint)>,
+    peer:     NodeId,
+    #[cfg(feature = "tls")]
+    sk:       ed25519_dalek::SigningKey,
+    nonce:    u64,
+}
+
+#[cfg(not(feature = "sim"))]
+impl StampDoors {
+    /// A handler whose node has `max_clock_drift_ms = bound_ms`. Call with the clock already pinned:
+    /// the handler runs on this test's thread and reads the same clock.
+    async fn open(bound_ms: u64) -> Self {
+        let (writer, reader) = loopback_pair().await;
+        let store: Arc<papaya::HashMap<Arc<str>, StoreEntry>> = Arc::new(papaya::HashMap::new());
+        let (tx, forwards) = mpsc::channel(256);
+        let peer = NodeId::new("127.0.0.1", 7411).unwrap();
+        let mut config = GossipConfig::default();
+        config.max_clock_drift_ms = bound_ms;
+        #[cfg(feature = "tls")]
+        let sk = ed25519_dalek::SigningKey::from_bytes(&[74u8; 32]);
+        let opts = HandlerOpts {
+            config,
+            #[cfg(feature = "tls")]
+            peer_keys: vec![(peer.clone(), vec![sk.verifying_key().to_bytes()])],
+            ..Default::default()
+        };
+        let bounds = Arc::clone(&opts.bounds);
+        let _ = spawn_handler_with(reader, Arc::clone(&store), Arc::new(papaya::HashMap::new()), tx,
+                                   Arc::new(ShardedSeen::new(N_GOSSIP_SHARDS)), GossipConfig::default().default_ttl, opts);
+        StampDoors { writer, store, bounds, forwards, peer, #[cfg(feature = "tls")] sk, nonce: 74_000 }
+    }
+
+    fn update(&mut self, key: &str, stamp: u64, tombstone: bool) -> GossipUpdate {
+        self.nonce += 1;
+        let mut u = data_update(key, if tombstone { b"" } else { b"v" }, self.nonce, tombstone);
+        u.sender = self.peer.id_hash();
+        u.timestamp = stamp;
+        u
+    }
+
+    /// Through one door: an anti-entropy entry, a live `Data` frame, or a live `SignedData` frame.
+    async fn send(&mut self, door: mycelium_core::bounds::StampDoor, key: &str, stamp: u64, tombstone: bool) {
+        use mycelium_core::bounds::StampDoor;
+        let msg = match door {
+            StampDoor::AntiEntropy => WireMessage::StateResponse { entries: vec![SyncEntry {
+                key: Arc::from(key), value: if tombstone { Bytes::new() } else { Bytes::from_static(b"v") },
+                timestamp: stamp, is_tombstone: tombstone,
+            }] },
+            StampDoor::Data => WireMessage::Data(self.update(key, stamp, tombstone)),
+            StampDoor::SignedData => {
+                let u = self.update(key, stamp, tombstone);
+                #[cfg(feature = "tls")]
+                {
+                    let canonical = crate::framing::canonical_sign_bytes(&u);
+                    signed_data_over(u, self.peer.id_hash(), &self.sk, &crate::framing::kv_signing_message(&canonical))
+                }
+                // Without `tls` the arm verifies nothing: any signature is carried.
+                #[cfg(not(feature = "tls"))]
+                { WireMessage::SignedData { update: u, signer: self.peer.id_hash(), signature: ([0u8; 32], [0u8; 32]) } }
+            }
+        };
+        send_wire(&mut self.writer, &msg).await;
+    }
+
+    /// Waits until the handler has read everything sent so far: an ordinary `Data` frame behind it
+    /// all (one connection, frames in order), polled for in the store. No sleep decides anything.
+    async fn drained(&mut self, tag: &str) {
+        let key = format!("fs/probe/{tag}");
+        self.nonce += 1;
+        let mut probe = data_update(&key, b"p", self.nonce, false);
+        probe.timestamp = 1;
+        send_wire(&mut self.writer, &WireMessage::Data(probe)).await;
+        let s = Arc::clone(&self.store);
+        poll_until(|| s.pin().get(key.as_str()).is_some(), 10_000).await;
+    }
+
+    fn counted(&self, door: mycelium_core::bounds::StampDoor) -> u64 {
+        self.bounds.kv_future_stamps_at(door)
+    }
+
+    /// What the store holds under `key`: its stamp and whether it is live.
+    fn held(&self, key: &str) -> Option<(u64, bool)> {
+        self.store.pin().get(key).map(|e| (e.timestamp, e.data.is_some()))
+    }
+
+    /// Frames the handler handed on to the gossip shards so far.
+    fn forwarded(&mut self) -> usize {
+        let mut n = 0;
+        while self.forwards.try_recv().is_ok() { n += 1; }
+        n
+    }
+}
+
+/// **An entry stamped beyond the drift bound is counted once at the door it came through, and is
+/// still applied and still forwarded** (CR13, step 1). Through each of the three doors: `u64::MAX`,
+/// one millisecond past the bound, and a tombstone one millisecond past it. The clock is held still,
+/// so "one millisecond past" is exact. Seen failing first with each door's count removed in turn
+/// (that door: 0 of 3), and with the `Data` door made to skip an entry it counted (the store did
+/// not hold it).
+#[cfg(not(feature = "sim"))]
+#[tokio::test]
+async fn an_entry_stamped_beyond_the_drift_bound_is_counted_at_its_door_and_still_applied() {
+    use mycelium_core::bounds::StampDoor;
+    use mycelium_core::hlc::pack;
+    let _wall = PinnedWall::at(FS_WALL);
+    let mut d = StampDoors::open(FS_BOUND).await;
+    let past = pack(FS_WALL + FS_BOUND + 1, 0);
+
+    for door in StampDoor::ALL {
+        let n = door.name();
+        d.send(door, &format!("fs/{n}/max"), u64::MAX, false).await;
+        d.send(door, &format!("fs/{n}/past"), past, false).await;
+        d.send(door, &format!("fs/{n}/tomb"), past, true).await;
+    }
+    d.drained("beyond").await;
+
+    for door in StampDoor::ALL {
+        let n = door.name();
+        assert_eq!(d.counted(door), 3, "{n}: u64::MAX, bound+1 and a tombstone at bound+1, once each");
+        assert_eq!(d.held(&format!("fs/{n}/max")), Some((u64::MAX, true)), "{n}: the u64::MAX entry is applied, at its own stamp");
+        assert_eq!(d.held(&format!("fs/{n}/past")), Some((past, true)), "{n}: the bound+1 entry is applied");
+        assert_eq!(d.held(&format!("fs/{n}/tomb")), Some((past, false)), "{n}: the tombstone is applied");
+    }
+    assert_eq!(d.bounds.kv_future_stamps(), 9, "the total is the three doors'");
+    // Three live `Data` frames, three `SignedData` frames and the probe went on to the shards; an
+    // anti-entropy entry never does. The same seven as before the counter.
+    assert_eq!(d.forwarded(), 7, "every live frame is still forwarded");
+}
+
+/// **An entry on the bound, or inside it, is not counted** — on it with the logical counter full,
+/// one millisecond inside, at the node's own time, and long past. Each is applied. Seen failing first
+/// with the clamp's comparison made `>=` (the entry on the bound counted at each door).
+#[cfg(not(feature = "sim"))]
+#[tokio::test]
+async fn an_entry_on_or_inside_the_drift_bound_is_not_counted() {
+    use mycelium_core::bounds::StampDoor;
+    use mycelium_core::hlc::{pack, LOGICAL_MASK};
+    let _wall = PinnedWall::at(FS_WALL);
+    let mut d = StampDoors::open(FS_BOUND).await;
+    let stamps = [
+        ("on", pack(FS_WALL + FS_BOUND, LOGICAL_MASK)),
+        ("inside", pack(FS_WALL + FS_BOUND - 1, 0)),
+        ("now", pack(FS_WALL, 3)),
+        ("old", pack(FS_WALL - 86_400_000, 0)),
+    ];
+    for door in StampDoor::ALL {
+        for (name, stamp) in stamps {
+            d.send(door, &format!("fs/{}/{name}", door.name()), stamp, false).await;
+        }
+    }
+    d.drained("inside").await;
+
+    for door in StampDoor::ALL {
+        assert_eq!(d.counted(door), 0, "{}: nothing on or inside the bound is counted", door.name());
+        for (name, stamp) in stamps {
+            assert_eq!(d.held(&format!("fs/{}/{name}", door.name())), Some((stamp, true)), "{}: {name} is applied", door.name());
+        }
+    }
+    assert_eq!(d.bounds.kv_future_stamps(), 0);
+}
+
+/// **With `max_clock_drift_ms = 0` nothing is counted**: there is no bound to be beyond. `u64::MAX`
+/// and a stamp past the default bound go through each door, are applied, and leave the counter at 0.
+/// Seen failing first with a stamp past the default bound reported when the bound is 0.
+#[cfg(not(feature = "sim"))]
+#[tokio::test]
+async fn with_no_drift_bound_no_stamp_is_counted() {
+    use mycelium_core::bounds::StampDoor;
+    use mycelium_core::hlc::pack;
+    let _wall = PinnedWall::at(FS_WALL);
+    let mut d = StampDoors::open(0).await;
+    let past = pack(FS_WALL + FS_BOUND + 1, 0);
+    for door in StampDoor::ALL {
+        d.send(door, &format!("fs/{}/past", door.name()), past, false).await;
+        d.send(door, &format!("fs/{}/max", door.name()), u64::MAX, false).await;
+    }
+    d.drained("unbounded").await;
+
+    assert_eq!(d.bounds.kv_future_stamps(), 0, "no bound, nothing counted");
+    for door in StampDoor::ALL {
+        assert_eq!(d.held(&format!("fs/{}/past", door.name())), Some((past, true)), "{}", door.name());
+        assert_eq!(d.held(&format!("fs/{}/max", door.name())), Some((u64::MAX, true)), "{}", door.name());
+    }
+}
+
+/// **The slow-clock receiver, as an observation** (the evidence CR13's second step waits for): a node
+/// whose own clock is more than the bound behind — booted before NTP — counts the fleet's *ordinary*
+/// entries, every one, at every door, and applies them; once its clock is corrected the same entries
+/// are not counted. So the counter rises for a far-future sender *and* for a slow receiver, and a
+/// refusal built on it would have this node refuse the whole fleet until its clock was fixed. The
+/// clock is driven through the seam; nothing sleeps.
+#[cfg(not(feature = "sim"))]
+#[tokio::test]
+async fn a_node_whose_clock_is_behind_counts_the_fleets_ordinary_entries() {
+    use mycelium_core::bounds::StampDoor;
+    use mycelium_core::hlc::pack;
+    // The fleet is at FS_WALL. This node is a minute more than the bound behind it.
+    let wall = PinnedWall::at(FS_WALL - FS_BOUND - 60_000);
+    let mut d = StampDoors::open(FS_BOUND).await;
+    for (i, door) in StampDoor::ALL.into_iter().enumerate() {
+        d.send(door, &format!("fs/{}/slow", door.name()), pack(FS_WALL, i as u64), false).await;
+    }
+    d.drained("slow").await;
+    for door in StampDoor::ALL {
+        assert_eq!(d.counted(door), 1, "{}: a slow node counts an entry stamped at the fleet's present", door.name());
+        assert!(d.held(&format!("fs/{}/slow", door.name())).is_some_and(|(_, live)| live), "{}: and applies it", door.name());
+    }
+
+    // NTP corrects the clock: the fleet's entries are ordinary again.
+    drop(wall);
+    let _wall = PinnedWall::at(FS_WALL);
+    for (i, door) in StampDoor::ALL.into_iter().enumerate() {
+        d.send(door, &format!("fs/{}/synced", door.name()), pack(FS_WALL + 1_000, i as u64), false).await;
+    }
+    d.drained("synced").await;
+    assert_eq!(d.bounds.kv_future_stamps(), 3, "nothing more is counted once the clock is right");
+    for door in StampDoor::ALL {
+        assert!(d.held(&format!("fs/{}/synced", door.name())).is_some(), "{}", door.name());
+    }
+}
+
+/// **The counter is on `GET /stats`, on `SystemStats` and in the metrics export**, from a frame on a
+/// running node's gossip port: a `Data` frame stamped `u64::MAX` is applied, `kv_future_stamps` and
+/// its `data` door read 1, the other doors 0, and (under `metrics`) the series
+/// `mycelium_kv_future_stamps_total{door="data"}` is exported. Seen failing first with the `/stats`
+/// field removed, and with the metric's line removed.
+#[cfg(feature = "gateway")]
+#[tokio::test]
+async fn the_future_stamp_counter_is_on_stats_and_in_the_metrics_export() {
+    let (port, http_port) = (alloc_port(), alloc_port());
+    let mut cfg = GossipConfig::default();
+    cfg.bind_port = port;
+    cfg.http_port = Some(http_port);
+    let a = GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg);
+    a.start().await.unwrap();
+
+    let mut writer = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+    let mut far = data_update("fs/stats/max", b"v", 74_900, false);
+    far.timestamp = u64::MAX;
+    send_wire(&mut writer, &WireMessage::Data(far)).await;
+    poll_until(|| a.kv().get("fs/stats/max").is_some(), 10_000).await;
+    assert_eq!(a.system_stats().kv_future_stamps, 1, "counted on SystemStats, and applied");
+
+    let client = reqwest::Client::new();
+    let stats: serde_json::Value = client.get(format!("http://127.0.0.1:{http_port}/stats")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(stats["kv_future_stamps"], 1, "{stats}");
+    assert_eq!(stats["kv_future_stamps_by_door"], serde_json::json!({ "anti_entropy": 0, "data": 1, "signed_data": 0 }), "{stats}");
+
+    // The recorder is process-wide, so another test's count may be in the series: at least this one.
+    #[cfg(feature = "metrics")]
+    {
+        let text = client.get(format!("http://127.0.0.1:{http_port}/metrics")).send().await.unwrap().text().await.unwrap();
+        let exported = text.lines()
+            .find(|l| l.starts_with("mycelium_kv_future_stamps_total{") && l.contains("door=\"data\""))
+            .and_then(|l| l.split_whitespace().last())
+            .and_then(|v| v.parse::<f64>().ok());
+        assert!(exported.is_some_and(|v| v >= 1.0), "mycelium_kv_future_stamps_total{{door=\"data\"}} on /metrics; saw {exported:?}");
+    }
+    a.shutdown().await;
 }

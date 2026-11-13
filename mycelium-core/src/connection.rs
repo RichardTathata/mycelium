@@ -849,7 +849,11 @@ pub async fn handle_connection(
                     // Absorb the remote HLC stamp so our clock dominates anything
                     // anti-entropy hands us, even on a fresh restart where the
                     // local clock is otherwise far behind any prior cluster state.
-                    hlc.observe(entry.timestamp);
+                    // Counted when the stamp is beyond the drift bound, and applied all the same
+                    // (CR13, step 1: detection only — the clamp's own verdict, no second clock read).
+                    if hlc.observe_reporting(entry.timestamp).1 {
+                        task_ctx.transport_bounds.count_future_stamp(crate::bounds::StampDoor::AntiEntropy);
+                    }
                     // Intern keys from anti-entropy the same way as Data messages so
                     // both paths share the same Arc<str> allocation for the same key.
                     let key = if intern_keys { intern_key(entry.key, intern_max_keys) } else { entry.key };
@@ -1057,7 +1061,11 @@ pub async fn handle_connection(
                 // Absorb the remote HLC stamp so any locally-originated update we
                 // emit afterwards strictly dominates this one — preserves causal
                 // happens-before across the cluster even under wall-clock skew.
-                hlc.observe(update.timestamp);
+                // Counted when the stamp is beyond the drift bound, and applied and forwarded all
+                // the same (CR13, step 1: detection only).
+                if hlc.observe_reporting(update.timestamp).1 {
+                    task_ctx.transport_bounds.count_future_stamp(crate::bounds::StampDoor::Data);
+                }
                 if intern_keys { update.key = intern_key(update.key, intern_max_keys); }
                 // Apply (running the `sys/` tripwire), then persist (persistence.rs durability
                 // invariant 1). A gossip frame carries its originator's hash.
@@ -1250,8 +1258,11 @@ pub async fn handle_connection(
                     }
                 }
 
-                // Absorb HLC and apply to local store.
-                hlc.observe(update.timestamp);
+                // Absorb HLC and apply to local store. Counted when the stamp is beyond the drift
+                // bound, and applied and forwarded all the same (CR13, step 1: detection only).
+                if hlc.observe_reporting(update.timestamp).1 {
+                    task_ctx.transport_bounds.count_future_stamp(crate::bounds::StampDoor::SignedData);
+                }
                 if intern_keys { update.key = intern_key(update.key, intern_max_keys); }
                 // Apply (running the `sys/` tripwire), then persist (persistence.rs durability
                 // invariant 1). A gossip frame carries its originator's hash.
