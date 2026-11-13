@@ -1,11 +1,12 @@
 //! The routes that take a consensus **slot name** from the caller read and propose on application slots only
 //! (the maintainer's decision of 2026-11-12, the follow-up to the kv:read and log-read decisions; critique plan
 //! row CR1). Rule 1's enumeration, one test per door: `GET /consensus/{slot}` (read) and
-//! `POST /gateway/consensus/cross_group_propose` (the one route whose body names the slot); the one table both
+//! `POST /gateway/consensus/cross_group_propose` (the one consensus route whose body names the slot); the one table both
 //! classify by; every door under a token model. The other proposing routes build the slot from a fixed family —
 //! `consistent/{key}` (the key checked by `refuse_protected_key`), `lock/{name}`, `leader/{group}`,
 //! `clog/{stream}/{group}/claim` (the stream checked by `refuse_owned_stream_read`), `electorate/{group}/…`
-//! behind `govern:write` — and take no slot name.
+//! behind `govern:write` — and take no slot name. Outside these: the raw signal routes take a caller-chosen kind,
+//! the consensus kinds included (a tap reads frames, an emit sends one); they are the signal routes' to close.
 
 use crate::{GossipAgent, GossipConfig, NodeId};
 use bytes::Bytes;

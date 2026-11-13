@@ -3457,12 +3457,16 @@ the slot routes now classify by one table of their own (`SLOT_FAMILIES`, `src/ag
   - **The slot names are still listed.** `GET /gateway/kv/keys?prefix=consensus/` answers the key names under
     `consensus/{committed,ballot,lease,decided}/{slot}` and `consensus/life/{escaped slot}/…` to a `kv:read` token,
     so the listing still shows that a requirement has an award, an electorate's group and epoch, a
-    `capauthz/{ns}/{name}` and a seat's two digests — the values are refused on every route, the names are not.
+    `capauthz/{ns}/{name}` and a seat's two digests — the values are refused on every KV and slot route (the
+    signal streams still carry them, below), the names are not.
     Stated as a limit; a later row hides them (`docs/plans/external-critique-2026-11-12.md`, CR24).
   - **The signal streams.** `GET /signals/{kind}` and `GET /gateway/signal/sse/{kind}` (`mesh:read`) do not refuse
     the consensus kinds (`consensus.propose`, `consensus.commit`): a tap on a node receives the proposals and
-    commits that node is in scope for, slot and value included. This section does not close that; treat
-    `mesh:read` on a node as reading the consensus traffic it sees.
+    commits that node is in scope for, slot and value included. And `cross_group_propose` is the one *consensus*
+    route whose caller names the slot, not the only door that reaches one: `POST /gateway/signal/emit`
+    (`mesh:write`) takes a caller-chosen kind, and a `mesh:write` token can emit a raw `consensus.commit` frame through `POST /gateway/signal/emit`: without `[tls]` the frame is unsigned and a learner records the decision it carries, for any slot; with `[tls]` a client cannot produce the signed wrapper, but can replay one it tapped. This section closes neither: until the signal-routes change lands (decided 2026-11-13, in
+    progress; critique plan row CR25), treat `mesh:read` on a node as reading the consensus traffic it sees, and
+    `mesh:write` on a node without `[tls]` as able to plant a decision on any slot.
   - `lock/{name}` and `leader/{group}` stay readable under `consensus:read`: the holder's or the leader's node id.
   - The routes that build the slot themselves are untouched: lock acquire, elect, consistent set, the group
     subscription's claim, `POST /gateway/govern/electorate`.

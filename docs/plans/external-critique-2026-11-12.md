@@ -256,7 +256,8 @@ follow-up is PR #777 (`deprecations.md` §101); the slot routes' is PR #778 (`de
     (`mycelium-commitment/tests/award_slot_route.rs`).
   - **Not built, stated:** the slot *names* in `GET /gateway/kv/keys?prefix=consensus/` (row CR24); the signal
     SSE doors' consensus kinds — a `mesh:read` tap on `consensus.propose` / `consensus.commit` receives a proposed
-    award's slot and value (probed; a follow-up, not a row yet).
+    award's slot and value (probed), and a `mesh:write` emit of a raw `consensus.commit` frame is acted on
+    without `[tls]` (the review of #778; read, not run): row **CR25**, in progress.
 
 **What:** as decided (M6): on the raw KV read routes, an owned key's value is refused and sensitive key names are
 hidden from the listing. **Follow-up, one PR:** `gw_overlay_log_scan`, `gw_overlay_log_subscribe` and
@@ -723,7 +724,7 @@ that above about nine nodes relays are the common path for an Individual frame (
 `sys/consensus-accepted/{node}/{slot}`. So the listing still shows which requirement has an award
 (`cn/{requirement}/award`), which stream and group hold a claim, an electorate's group and epoch, a capability's
 `{ns}/{name}` under `capauthz/`, and a seat's two digests (`ae-seat/{counter}/{actor}/{n}`) — the values are
-refused on every route since §102, the names are not. The row hides the names of the families `SLOT_FAMILIES`
+refused on every KV and slot route since §102 (the signal streams still carry them: CR25), the names are not. The row hides the names of the families `SLOT_FAMILIES`
 marks component-owned, **derived from that table** as the log streams' names are derived from
 `OWNED_LOG_STREAMS` (`in_owned_stream_keyspace`), so the two cannot drift; a prefix inside one is refused as
 inside any names-hidden namespace.
@@ -736,6 +737,30 @@ inside an owned family is 403 `protected_key`; the Ops Console and the CI probes
 
 **Does not:** stop a member — a member holds the keys. Does not hide a lock's or a leader's name (decided
 readable, 2026-11-12).
+
+**Size:** S.
+
+#### CR25 · The signal routes refuse the substrate's own kinds *(L19; found by the slot survey and the review of #778)*
+
+**State (2026-11-13):** ***in progress*** — decided by the maintainer on 2026-11-13; being built on branch
+`substrate-kinds`, whose PR closes this row.
+
+**What:** the raw signal routes take a kind from the caller and refuse only the RPC reply kinds and the protected
+RPC kinds (`refuse_unobservable_kind`, `refuse_protected_kind`, `src/agent/http/authz.rs`), so the consensus
+kinds (`consensus.propose`, `consensus.vote`, `consensus.commit`, `consensus.nack`, `src/consensus.rs:901`–`910`)
+pass in both directions. **Read:** a `mesh:read` tap on `GET /signals/{kind}` or `GET
+/gateway/signal/sse/{kind}` receives every proposal and commit the node is in scope for, slot and value
+included — probed for `consensus.propose` and `consensus.commit` with a peer's proposed award. **Write:** a
+`mesh:write` token can emit a raw `consensus.commit` frame on `POST /gateway/signal/emit`; without `[tls]` the
+frame is unsigned and a learner records the decision for any slot (`src/agent/http/signals.rs:57`–`130`,
+`src/consensus.rs:1718`–`1738`, `:5402`–`5500`; read, not run), and with `[tls]` a client cannot produce the
+signed wrapper but can replay a tapped one. So the scopes on the slot routes (§102) do not bound the consensus
+traffic a `mesh:read` or `mesh:write` token reaches.
+
+**Exit:** the builder's, on its PR; at least: each consensus kind refused on both SSE doors, the serve stream
+and every raw route that sends a kind, each seen admitted first; an application kind still streams and emits.
+
+**Does not:** stop a member, which sends and receives consensus frames as a member.
 
 **Size:** S.
 

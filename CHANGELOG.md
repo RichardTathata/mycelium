@@ -50,7 +50,9 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   rename them (§102's table). **Not changed, stated:** the slot *names* are still listed by `GET
   /gateway/kv/keys?prefix=consensus/` under `kv:read` (critique plan row CR24); and the signal streams
   (`/signals/{kind}`, `/gateway/signal/sse/{kind}`, `mesh:read`) do not refuse the consensus kinds, so a tap on a
-  node receives the proposals and commits it is in scope for, slot and value included.
+  node receives the proposals and commits it is in scope for, slot and value included — and `POST
+  /gateway/signal/emit` (`mesh:write`) does not refuse them either: a `mesh:write` token can emit a raw `consensus.commit` frame through `POST /gateway/signal/emit`: without `[tls]` the frame is unsigned and a learner records the decision it carries, for any slot; with `[tls]` a client cannot produce the signed wrapper, but can replay one it tapped. The cross-group route is the one *consensus* route whose caller names the slot, not the only door that
+  reaches one; the signal-routes change closes both (decided 2026-11-13, in progress).
 
 - **The log read routes refuse component-owned streams** (critique plan row CR1's follow-up; `deprecations.md`
   §101). Since 2.27.0 the log *write* routes — append and compact — have refused a stream under `cn/`, `wiki/` or

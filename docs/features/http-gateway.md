@@ -76,14 +76,16 @@ token resolves to its own principal is `token_identities_are_qualified_by_the_is
   is read (an electorate: `GET /gateway/govern`, `govern:read`). It still reads a lock's slot and a leader's — the
   operator's read of a holder — and every application slot. `POST /gateway/consensus/cross_group_propose`, the one
   route whose body names the slot, refuses a proposal in those families and in `lock/`, `leader/` and
-  `consistent/`, naming the route that proposes there, before anything is proposed. So `consensus:read` reads
-  nothing `govern:read` or a component guards, and `consensus:write` decides no award, policy, seat or claim. One
+  `consistent/`, naming the route that proposes there, before anything is proposed. So, on these two routes,
+  `consensus:read` reads nothing `govern:read` or a component guards, and `consensus:write` decides no award,
+  policy, seat or claim. One
   table decides both directions (`SLOT_FAMILIES`, in [`authz.rs`](../../src/agent/http/authz.rs)); the tests are
   one per door in [`slot_guard_tests.rs`](../../src/agent/http/slot_guard_tests.rs), the table's rows pinned
   against the substrate's own family lists, and `a_committed_award_is_not_read_or_proposed_through_the_slot_routes`
   in `mycelium-commitment`. **Not covered:** the slot *names* are still listed by `/gateway/kv/keys` under
-  `consensus/`; and the signal streams do not refuse the consensus kinds, so a `mesh:read` tap on
-  `consensus.propose` or `consensus.commit` receives proposed values, a component's among them
+  `consensus/`; and **the signal routes do not refuse the consensus kinds**, in either direction — a `mesh:read`
+  tap on `consensus.propose` or `consensus.commit` receives proposed values, a component's among them, and a `mesh:write` token can emit a raw `consensus.commit` frame through `POST /gateway/signal/emit`: without `[tls]` the frame is unsigned and a learner records the decision it carries, for any slot; with `[tls]` a client cannot produce the signed wrapper, but can replay one it tapped. The cross-group route is the one *consensus* route whose caller names the slot, not the only door
+  that reaches one; the signal-routes change closes both (decided 2026-11-13, in progress)
   ([rbac](../operations/rbac.md), [deprecations §102](../guide/deprecations.md)).
 - **Not built:** on a credentialed node `/health`, `/ready`, `/stats`, `/metrics`, `/bulk/{id}` and the A2A
   descriptor stay public, `/a2a` admits an anonymous caller, and a merged router's paths outside `/gateway/` are not

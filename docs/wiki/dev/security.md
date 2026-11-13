@@ -351,8 +351,8 @@ group's claim, an electorate's members around `govern:read`, a `capauthz/` polic
 `cn/`, `clog/`, `electorate/`, `ae-seat/` and `capauthz/` **403** `protected_slot` now (`refuse_owned_slot_read`),
 before the store is read, and `consistent/{key}` exactly when the consistent-get door refuses `{key}`; `lock/` and
 `leader/` stay served (decided: the operator's read of a holder has no other non-proposing route). **Propose:**
-rule 1's enumeration for writes found one door whose caller names the slot, `POST
-/gateway/consensus/cross_group_propose`; every other proposing route builds the slot from a fixed family
+rule 1's enumeration for writes found one **consensus** route whose caller names the slot, `POST
+/gateway/consensus/cross_group_propose` (the raw signal routes, which carry a caller-chosen *kind*, are below); every other proposing route builds the slot from a fixed family
 (`consistent/{key}` with the key checked, `lock/{name}`, `leader/{group}`, the group subscription's
 `clog/{stream}/{group}/claim` with the stream checked, `electorate/…` behind `govern:write`), and no MCP tool, A2A
 skill or companion route proposes. On the unguarded route a fleet of one voting in `g` **decided** `cn/…/award`,
@@ -374,7 +374,10 @@ and exclusivity*), `sys/capauthz/…`, and `cn/{requirement}/award` — and a me
 row CR24); and **the signal SSE doors do not refuse the consensus kinds** — a `mesh:read` tap on
 `/signals/consensus.propose` or `consensus.commit` received a proposed award's slot and value from a peer
 (probed 2026-11-12; `refuse_unobservable_kind` names only the RPC reply kinds and the protected RPC kinds, and the
-acceptor registers on the same handler table), which a follow-up closes. Tests:
+acceptor registers on the same handler table). **And the emit side (the review of #778; read, not run):** a `mesh:write` token can emit a raw `consensus.commit` frame through `POST /gateway/signal/emit`: without `[tls]` the frame is unsigned and a learner records the decision it carries, for any slot; with `[tls]` a client cannot produce the signed wrapper, but can replay one it tapped (`src/agent/http/signals.rs:57`–`130`, `src/consensus.rs:1718`–`1738`, `:5402`–`5500`). So a scope on the slot
+routes does not bound the consensus traffic a `mesh:read` or `mesh:write` token reaches through the signal
+routes. Both are closed by the signal-routes PR (decided 2026-11-13, in progress, branch `substrate-kinds`;
+critique plan row CR25). Tests:
 `src/agent/http/slot_guard_tests.rs` and `mycelium-commitment/tests/award_slot_route.rs`.
 [`.log/2026-11-12-slot-guard.md`](.log/2026-11-12-slot-guard.md).
 
