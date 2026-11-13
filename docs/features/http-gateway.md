@@ -94,7 +94,7 @@ token resolves to its own principal is `token_identities_are_qualified_by_the_is
   refuse the reply kinds `rpc.result` and `bulk.result`; and the signal streams, the mailbox stream and the send
   routes refuse a hosted capability's `cap.invoke/…`, which is called as a tool through `/mcp` (a capability in
   the `tool` namespace; one in another namespace has no gateway route). So `mesh:read` reads no consensus
-  proposal and no bulk payload, `mesh:write` sends no commit and no reply and invokes no component, and neither
+  proposal and no bulk payload, `mesh:write` sends no commit and no `rpc.result` or `bulk.result` and invokes no component, and neither
   reaches a peer's event ring. One list decides (`SUBSTRATE_KINDS` and `is_substrate_kind`, in
   [`src/agent/mod.rs`](../../src/agent/mod.rs)); the tests are in
   [`substrate_kind_tests.rs`](../../src/agent/http/substrate_kind_tests.rs), five of them the proofs of what the
