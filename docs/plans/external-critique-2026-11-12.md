@@ -517,7 +517,7 @@ answer is still to be written here (the State line above).
 
 #### CR10 · A model of the acceptor *(L12; Ph2; M5)*
 
-**State (2026-11-13):** ***built*, unreleased** — the crate `mycelium-model` (Stateright 0.31.0, D2; a workspace member that is never published and that nothing depends on), CI job `model`. Each promise beside what delivers it; the tests are in `mycelium-model/tests/model.rs`, the properties in `mycelium-model/src/slot.rs` and `src/migration.rs`:
+**State (2026-11-13):** ***built*, unreleased (PR #784)** — the crate `mycelium-model` (Stateright 0.31.0, D2; a workspace member that is never published and that nothing depends on), CI job `model`. Each promise beside what delivers it; the tests are in `mycelium-model/tests/model.rs`, the properties in `mycelium-model/src/slot.rs` and `src/migration.rs`:
 
 - *"a model, checked in CI, of the single-decree acceptor"* — `SlotModel` and `MigrationModel`; `ci.yml` job `model` runs `cargo test -p mycelium-model --release`, and `scripts/check-test-inventory.py` fails without that step.
 - *"slot reuse after a release or a lapsed lease"* — `a_slot_is_reused_after_a_lapsed_lease_and_each_life_has_one_value`, `a_slot_is_reused_after_a_release_and_each_life_has_one_value` (every message its own step), `a_slot_is_reused_across_three_lives` (each ballot one step); each must also *reach* a second life, or it fails.
