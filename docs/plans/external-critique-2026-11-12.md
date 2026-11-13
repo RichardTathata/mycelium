@@ -600,20 +600,28 @@ the two shapes are the same. It is not the `Boundary` type itself: that sees a s
 never passes through it; opacity is a load hint and carries no stamp. It is the boundary's *principle* applied at
 Layer I's three doors.
 
-- *What it changes:* the framing, and with it D16's carve-out. "Admission is local; forwarding is unconditional"
-  is what the design already says, so this shape may need no carve-out from *detection, not prevention* where a
-  refusal needs one. Each node judges by its own clock and its own `max_clock_drift_ms`, as each holds its own
-  boundary.
-- *What it does not change:* the slow-clock receiver, the replay door, the node-local repair and the mixed
-  configuration case below are the same under either shape. A node that will not apply an entry is still offered
-  it at every anti-entropy round by a peer that holds it.
-- *What it costs:* containment. A forwarded far-future entry still reaches, and pins, a node whose bound is 0 or
-  whose clock is ahead; a refusal that also stops the forward would not carry it there. The trade is consistency
-  with the forwarding principle against how far one poisoned entry travels.
+- *What it changes:* the frame is still forwarded, so the mesh gains no new case of a dropped KV frame, and a
+  node whose own clock is slow **still relays the fleet's live writes**, where a refusing node on a gossip path
+  would stop them until anti-entropy.
+- *What it does not change:* D16's objection. A node still declines an update on its own clock, so the store is
+  still not a pure function of the updates received, and — unlike a signal a node does not admit, which leaves
+  nothing behind — an entry a node does not apply is a lasting divergence from the peers that hold it. Whether a
+  carve-out is recorded is unchanged by this shape and is decided with step 2. The slow-clock receiver's own
+  store, the replay door, the node-local repair and the mixed-configuration case below are the same under either
+  shape; a node that will not apply an entry is still offered it at every anti-entropy round by a peer that holds it.
+- *What it must do, as the refusal must:* skip `hlc.observe` as well as the apply, or the node's clock is still
+  dragged to the limit; append nothing to the WAL and open no `begin_inbound` window (`connection.rs:185`); and
+  **move the forward out from behind the apply**, or place the check between them — today both live arms forward
+  only after `apply_inbound_then_append` (`connection.rs:1088`–`1125`, `:1262`–`1290`).
+- *What it costs:* containment, by a bounded amount. A forwarded far-future entry travels on by its remaining
+  TTL over live gossip, once per node (the seen-set drops a repeat, the TTL is never reset), so it reaches — and
+  pins — a node whose bound is 0 or whose clock is ahead that is reachable only through non-applying nodes. A
+  node that already holds the entry offers it to everyone by anti-entropy under either shape.
 
-D16's decision stands — the counter, then a refusal conditional on what the counter shows. Which of the two
-shapes the second step takes is chosen when that step is written, with the counter's figures and this trade
-beside it; until then neither is buildable.
+D16's decision stands — the counter, then a second step conditional on what the counter shows, which as decided
+lands default-on with a recorded carve-out. Taking this shape instead, or dropping the carve-out, would change
+that decided text: **it is the maintainer's choice when step 2 is written**, with the counter's figures and this
+trade beside it. Until then neither shape is buildable.
 
 **The cases the row must answer, each an exit test:**
 
@@ -860,8 +868,9 @@ draft made inside a row; the review of #773 found them, and they are here now.
   **Decided 2026-11-12:** (b). The counter first; the refusal default-on only after a release of counting, with a recorded carve-out in runtime-invariants, and conditional on what the counter shows and on the slow-clock case having an acceptable answer.
   **Added 2026-11-13, at the maintainer's request, not a new decision:** step 2 has a second candidate shape,
   written in CR13 — *local non-admission with forwarding unchanged*, the boundary's principle applied to a KV
-  entry — which may need no carve-out and contains a poisoned entry less well. It is weighed against the refusal
-  when step 2 is written.
+  entry — which keeps relaying where a refusal would stop a frame, contains a poisoned entry slightly less well,
+  and leaves this decision's objection where it is. Which shape step 2 takes is the maintainer's choice when
+  that step is written.
 
 ## 6 · Where the critique is wrong or overstated, and where it is understated
 
