@@ -186,12 +186,15 @@ def _refuse_substrate(kind: str) -> None:
 @pytest.mark.parametrize("verb,kind", [
     ("on_signal", "consensus.propose"),
     ("on_signal", "cap.invoke/text/echo"),
+    ("on_signal", "invoke.bulk"),
+    ("mailbox", "cap.invoke/text/echo"),
     ("mailbox", "consensus.commit"),
     ("rpc_serve", "consensus.vote"),
 ])
 def test_a_stream_of_a_substrate_kind_raises_protected_kind_error(agent, verb, kind):
-    """The substrate's own kinds (2026-11-13): the gateway refuses the consensus kinds and the ``sys.`` kinds at
-    every door that takes a kind, and a hosted capability's kind on the signal streams, ``403 protected_kind``.
+    """The substrate's own kinds (2026-11-13): the gateway refuses the consensus kinds, the ``sys.`` kinds and
+    ``invoke.bulk`` at every door that takes a kind, and a hosted capability's kind on the streams and the send
+    routes (its door is ``/mcp``), ``403 protected_kind``. Stubs: no live suite exercises these.
     Each stream raises ``ProtectedKindError`` at open; ``mailbox`` raised httpx-sse's content-type error."""
     import asyncio
 
@@ -205,7 +208,7 @@ def test_a_stream_of_a_substrate_kind_raises_protected_kind_error(agent, verb, k
 
 
 def test_sending_a_substrate_or_reply_kind_raises_protected_kind_error(agent):
-    for kind in ("consensus.commit", "rpc.result", "bulk.result", "sys.explain"):
+    for kind in ("consensus.commit", "rpc.result", "bulk.result", "sys.explain", "invoke.bulk", "cap.invoke/text/echo"):
         _refuse_substrate(kind)
         with pytest.raises(ProtectedKindError) as e:
             agent.emit(kind, b"x")

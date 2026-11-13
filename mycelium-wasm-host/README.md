@@ -27,7 +27,9 @@ socket:
   registry. A component's `mesh.emit` is confined to kinds under `comp/{namespace}/…` (or kinds
   the host listed for it) and never a protected RPC kind — `mcp.invoke`, `skill.invoke`,
   `llm.invoke`, the node's `protected_rpc_kinds` — since an emit from inside the process would
-  reach that kind's handlers unframed, past the door that checks authority; a refused emit is
+  reach that kind's handlers unframed, past the door that checks authority; nor, listed or not, one
+  of the substrate's own kinds (`consensus.*`, `sys.*`, `invoke.bulk`) or an RPC reply kind
+  (`rpc.result`, `bulk.result`), which the node would send as its own; a refused emit is
   dropped, logged and counted (`mycelium_wasm_host_emits_refused_total`). This is the one place the substrate's *detection-not-prevention* posture flips to
   genuine **prevention** — the guest is untrusted foreign code in the node's own process, so the
   host mediating every import is legitimate. The host also provides a **restricted, deny-by-default

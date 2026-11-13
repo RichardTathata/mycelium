@@ -6,8 +6,8 @@
 pulled by content address. A component reaches the node only through the imports of its WIT world — a confined KV, a
 confined emit, a log — never the node's own handles: its KV lives under `comp/{node}/{namespace}/…`, a subtree it cannot
 leave, and it may emit only kinds under `comp/{namespace}/…` (or kinds the host listed for it) and never a protected
-RPC kind nor one of the substrate's own kinds (`consensus.*`, `sys.*` — refused even when listed,
-[deprecations §103](../guide/deprecations.md)), because an emit from inside the process would reach that kind's handlers past the door that checks
+RPC kind, nor one of the substrate's own kinds (`consensus.*`, `sys.*`, `invoke.bulk`) or an RPC reply kind —
+refused even when listed ([deprecations §103](../guide/deprecations.md)) — because an emit from inside the process would reach that kind's handlers past the door that checks
 authority. Each instance has a memory cap and a wall-clock deadline per call; where `fuel_per_call` or
 `operator_fuel_per_call` is set, fuel is metered by who signed the entry, and with neither set nothing is metered;
 and guest code runs on a blocking thread, never on the node's async workers.
@@ -44,9 +44,16 @@ installs a WASM component that arrives over the mesh, and the component is bridg
 
 ## What it guarantees, and what it does not
 
-- **Rule:** [`host.emit_admission`](../reference/rule-catalogue.md#hostemit_admission) — `admitted`, or refused
-  `protected_kind`, `foreign_kind` or `malformed`; a refused emit is dropped and counted
+- **Rule:** [`host.emit_admission`](../reference/rule-catalogue.md#hostemit_admission), revision 2 — `admitted`,
+  or refused `protected_kind` (protected work, one of the substrate's own kinds, an RPC reply kind — each listed or
+  not), `foreign_kind` or `malformed`; a refused emit is dropped and counted
   (`mycelium_wasm_host_emits_refused_total{reason}`).
+- **How a hosted capability is called.** By a member: `rpc_call` on `cap.invoke/{namespace}/{name}`. Over HTTP:
+  as a tool through `/mcp` (`mcp:invoke`, the preflight), for a capability in the `tool` namespace, which the
+  runtime bridges. The gateway's raw routes and streams refuse the kind `403 protected_kind`
+  ([deprecations §103](../guide/deprecations.md)): `rpc/call` reached the serve loop under `mesh:write` alone, and
+  a tap read every invocation's arguments. **Not built:** a gateway route to a hosted capability outside the
+  `tool` namespace.
 - **Not built:** a component's resource use beyond memory, fuel and the deadline; a guest-to-guest boundary beyond the
   per-component namespace; anything but what the world imports — the host is only as safe as wasmtime, which is why
   its advisories are releases here. A call past its deadline or fuel is stopped and recorded by name.

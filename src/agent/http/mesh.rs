@@ -589,8 +589,11 @@ pub(super) async fn gw_scatter(
 /// stream (post-360 hardening row E).
 ///
 /// A kind `mailbox/deliver` refuses is refused here the same way (2026-11-13): protected work, an RPC reply kind,
-/// one of the substrate's own. Nothing can have been delivered under one, so the stream would only ever be empty;
-/// the refusal keeps the two halves of the mailbox one rule.
+/// one of the substrate's own, a hosted capability's. The gateway's `mailbox/deliver` cannot have filled such a
+/// mailbox, but a **member** can — `ServiceHandle::deliver_event` checks no kind — so a client that read one a
+/// member fills (an operator-listed protected kind, an application's `sys.alerts`) is now refused, and the
+/// entries stay under `mailbox/` until they expire: rename the mailbox's kind. The refusal keeps the two halves
+/// of the gateway's mailbox one rule.
 pub(super) async fn gw_mailbox_subscribe(
     Path(kind):  Path<String>,
     State(ctx):  State<Arc<HttpCtx>>,

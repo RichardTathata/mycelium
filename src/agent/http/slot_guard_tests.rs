@@ -6,7 +6,7 @@
 //! `consistent/{key}` (the key checked by `refuse_protected_key`), `lock/{name}`, `leader/{group}`,
 //! `clog/{stream}/{group}/claim` (the stream checked by `refuse_owned_stream_read`), `electorate/{group}/…`
 //! behind `govern:write` — and take no slot name. Outside these: the raw signal routes take a caller-chosen kind,
-//! the consensus kinds included (a tap reads frames, an emit sends one); they are the signal routes' to close.
+//! and refuse the consensus kinds on every one of their doors (`substrate_kind_tests.rs`, critique plan CR25).
 
 use crate::{GossipAgent, GossipConfig, NodeId};
 use bytes::Bytes;

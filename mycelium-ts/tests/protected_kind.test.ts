@@ -74,15 +74,20 @@ test("an evicted serve stream throws ServeEvictedError rather than ending quietl
   expect(err.kind).toBe("work");
 });
 
-// The substrate's own kinds (2026-11-13): the gateway refuses the consensus kinds and the `sys.` kinds at every
-// door that takes a kind, the RPC reply kinds on the send doors, and a hosted capability's kind on the signal
-// streams — each `403 protected_kind`, thrown as ProtectedKindError by every verb that names a kind.
+// The substrate's own kinds (2026-11-13): the gateway refuses the consensus kinds, the `sys.` kinds and
+// `invoke.bulk` at every door that takes a kind, the RPC reply kinds on the send doors, and a hosted capability's
+// kind on the streams and the send doors (its door is `/mcp`) — each `403 protected_kind`, thrown as
+// ProtectedKindError by every verb that names a kind. Stubs: no live suite exercises these.
 const substrate = (kind: string) => ({ ok: false, error: "protected_kind", kind,
   message: `\`${kind}\` is the substrate's own signal kind and is not observed, served or sent through the gateway` });
 
 test.each([
   ["onSignal", "consensus.propose", (a: MyceliumAgent, k: string) => a.onSignal(k).next()],
   ["onSignal", "cap.invoke/text/echo", (a: MyceliumAgent, k: string) => a.onSignal(k).next()],
+  ["onSignal", "invoke.bulk", (a: MyceliumAgent, k: string) => a.onSignal(k).next()],
+  ["mailbox", "cap.invoke/text/echo", (a: MyceliumAgent, k: string) => a.mailbox(k).next()],
+  ["rpcCall", "cap.invoke/text/echo", (a: MyceliumAgent, k: string) => a.rpcCall("127.0.0.1:1", k)],
+  ["emit", "invoke.bulk", (a: MyceliumAgent, k: string) => a.emit(k, Buffer.from("x"))],
   ["mailbox", "consensus.commit", (a: MyceliumAgent, k: string) => a.mailbox(k).next()],
   ["rpcServe", "consensus.vote", (a: MyceliumAgent, k: string) => a.rpcServe(k).next()],
   ["emit", "consensus.commit", (a: MyceliumAgent, k: string) => a.emit(k, Buffer.from("x"))],

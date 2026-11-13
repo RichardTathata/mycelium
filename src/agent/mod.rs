@@ -275,6 +275,13 @@ pub fn is_protected_kind(cfg: &GossipConfig, kind: &str) -> bool {
 ///   `mailbox/deliver`), a `mesh:write` holder's bytes reached the acceptor and the learner with this node as
 ///   their sender — acted on as they stood where the mesh runs without `[tls]`, replayable where it does.
 ///
+/// **`invoke.bulk`** is on the list for the same reason (the review of #780): it is the bulk transport's ticket,
+/// sent node to node — `nonce ‖ port ‖ kind` (`bulk.rs`). The nonce is the credential for the caller's staged
+/// payload, which `GET /bulk/{nonce}` serves with no bearer, so a `mesh:read` tap on the responder's gateway
+/// fetched each bulk request's payload while the call was in flight; and an emitted ticket made a `bulk_serve`
+/// node fetch from the gateway's node and run its handler on what it got. It sits outside the two prefixes, so
+/// it is refused by name; a member's `bulk_call` and `bulk_serve` are not a gateway door and are unchanged.
+///
 /// A hosted WASM component's `mesh.emit` refuses them too, listed by its host or not. The list is the kinds the
 /// library names; [`is_substrate_kind`] also refuses the two prefixes, so a kind added under either is refused
 /// before anyone lists it, and a test reads the constants from the source and fails until a new one is listed here.
@@ -286,6 +293,7 @@ pub const SUBSTRATE_KINDS: &[&str] = &[
     "consensus.nack",
     "sys.explain",
     "sys.replica-sync.v1",
+    "invoke.bulk",
 ];
 
 /// The prefixes [`is_substrate_kind`] refuses whole: every kind under `consensus.` and under `sys.` is the
@@ -300,8 +308,11 @@ pub fn is_substrate_kind(kind: &str) -> bool {
 
 /// The kind family a hosted capability is invoked on: `cap.invoke/{namespace}/{name}`
 /// (`mycelium_wasm_host::runtime::cap_invoke_kind`, which this crate cannot name — the host depends on it; the
-/// host's tests hold the two together). The signal streams refuse to **observe** it (2026-11-13): a tap read every
-/// invocation's arguments and caller envelope under `mesh:read`. Calling one is not changed.
+/// host's tests hold the two together). The gateway refuses it on the two signal streams, the mailbox stream and
+/// the six raw routes (2026-11-13): a tap read every invocation's arguments and caller envelope under
+/// `mesh:read`, and `rpc/call` invoked a component under `mesh:write` alone — around `/mcp`, the door a bridged
+/// component is called through, with its `mcp:invoke` scope and its preflight. A member's own call
+/// (`ServiceHandle::rpc_call`, the MCP bridge's in-process call) is not a gateway door and is unchanged.
 pub const HOSTED_CAPABILITY_KIND_PREFIX: &str = "cap.invoke/";
 
 /// The gateway scope a **companion-namespaced** RPC kind needs on a raw route (external review 2026-10-31, F1;

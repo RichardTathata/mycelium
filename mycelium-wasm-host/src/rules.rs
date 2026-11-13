@@ -233,7 +233,7 @@ pub static RULES: &[RuleDescriptor] = &[
         summary: "Withdrawal removes the install and tombstones its advertisement; restart ≡ provisioning is how it comes back.",
     },
     RuleDescriptor {
-        id: "host.emit_admission", revision: 1, subsystem: "mycelium-wasm-host::host", responsibilities: &[Admission, Authority],
+        id: "host.emit_admission", revision: 2, subsystem: "mycelium-wasm-host::host", responsibilities: &[Admission, Authority],
         trigger: "a hosted component calls its `mesh.emit(kind, payload)` import",
         inputs: &[Input { source: "the component's namespace, the kinds the host listed for it, and the node's `protected_rpc_kinds` — all set at instantiation", scope: "this component instance", freshness: "fixed at instantiation" }],
         outcomes: &[
@@ -243,8 +243,8 @@ pub static RULES: &[RuleDescriptor] = &[
         effects: &["the signal is emitted at cluster scope, or dropped — never sent — and counted: `mycelium_wasm_host_emits_refused_total{reason}`"],
         guards: &[Guard::Authority], may_trigger: &[], may_inhibit: &[], depends_on: &[],
         symbol: "host::HostState::emit", docs: "docs/reference/unit-file.md",
-        tests: &["a_component_cannot_emit_a_protected_kind_but_can_emit_in_its_own_namespace", "a_protected_kind_is_refused_even_when_listed"],
+        tests: &["a_component_cannot_emit_a_protected_kind_but_can_emit_in_its_own_namespace", "a_protected_kind_is_refused_even_when_listed", "a_substrate_kind_is_refused_even_when_listed"],
         trace: CatalogueOnly,
-        summary: "A component emits only under `comp/{namespace}/…` or a kind the host listed for it, and never a protected RPC kind — an emit from inside the process would reach that kind's handlers unframed, past the door that checks authority.",
+        summary: "A component emits only under `comp/{namespace}/…` or a kind the host listed for it, and never — listed or not — a protected RPC kind, one of the substrate's own kinds (`consensus.*`, `sys.*`, `invoke.bulk`) or an RPC reply kind (`rpc.result`, `bulk.result`): an emit from inside the process is sent as the node, so it would reach a protected kind's handlers unframed, past the door that checks authority, the consensus acceptor and learner as a member's frame, and a waiting caller as its provider's reply (rev 2: the substrate's kinds and the reply kinds).",
     },
 ];

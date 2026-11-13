@@ -56,13 +56,15 @@ does not depend on membership).
 - **At the gateway, a client's kinds are not the substrate's.** The doors that take a kind from an HTTP caller — the
   two signal streams, the serve stream, the mailbox stream and the six raw send routes — refuse the substrate's own
   kinds (`consensus.propose`, `consensus.vote`, `consensus.commit`, `consensus.nack`, `sys.explain`,
-  `sys.replica-sync.v1`, and any kind starting `consensus.` or `sys.`) `403 protected_kind` for every token; the
-  send routes refuse the RPC reply kinds, and the signal streams a hosted capability's `cap.invoke/…`
+  `sys.replica-sync.v1`, `invoke.bulk`, and any kind starting `consensus.` or `sys.`) `403 protected_kind` for
+  every token; the send routes refuse the RPC reply kinds, and the streams and the send routes a hosted
+  capability's `cap.invoke/…`
   ([deprecations §103](../guide/deprecations.md), `src/agent/http/substrate_kind_tests.rs`). A member in the mesh
   is not held to this: Layer II forwards and delivers every kind. **Not built:** a signature or a scope on the
   supervisor signals — any `mesh:write` holder can emit `agent.veto` (it fails closed); the other kinds the library
-  speaks (`invoke.bulk`, `boundary.*`, `agent.state`, `artifact.*`, `reason.blob.fetch`) are observable under
-  `mesh:read` ([rbac.md](../operations/rbac.md)).
+  speaks (`boundary.*`, `agent.state`, `artifact.*`, `reason.blob.fetch`) are observable under `mesh:read` and
+  sendable under `mesh:write`, each open by a recorded decision, and a kind outside every list is open
+  ([rbac.md](../operations/rbac.md)).
 - **Evidence:** the ledger rows
   [one stalled subscriber does not veto its kind, and the signal log is bounded](../operations/what-is-proven.md#silent-slow-stalled-peers-closed-stalled)
   and the [hot-path costs](../operations/what-is-proven.md#hot-path-cost), which give the signal fan-out.

@@ -28,33 +28,46 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - **A forged RPC reply, under `mesh:read` + `mesh:write` on the provider's own gateway, `[tls]` or not:** a tap
     on an observable RPC kind shows the call's correlation nonce, and an emitted `rpc.result` carrying it, sent by
     the gateway's node, was taken by the caller as the provider's answer.
+  - **A bulk request's payload, under `mesh:read`:** a tap on `invoke.bulk` on the responder's gateway showed a
+    bulk call's ticket — its nonce is the credential for the caller's staged payload — and `GET /bulk/{nonce}`,
+    public by design, returned the payload while the call was in flight.
+  - **A hosted capability, under `mesh:write`, around `/mcp`:** `POST /gateway/rpc/call` with `method:
+    "cap.invoke/…"` reached a component's serve loop and returned its answer to a token `/mcp` refuses — no
+    `mcp:invoke`, no preflight — as `mcp.invoke` did before closure plan C1.
   - `POST /gateway/rpc/call` with `method: "sys.explain"` read a peer's event ring under `mesh:write`
     (`GET /gateway/explain` asks `fleet:read`).
 
   Now, `403 protected_kind` for every token and in every build:
   - `consensus.propose`, `consensus.vote`, `consensus.commit`, `consensus.nack`, `sys.explain`,
-    `sys.replica-sync.v1` and **any kind starting `consensus.` or `sys.`** are refused on the two signal streams,
-    the serve stream (whether or not a receiver is registered), the mailbox stream and the six raw send routes
-    (`mycelium::SUBSTRATE_KINDS`, `is_substrate_kind`; a test derives the list from the kind constants);
+    `sys.replica-sync.v1`, `invoke.bulk` and **any kind starting `consensus.` or `sys.`** are refused on the two
+    signal streams, the serve stream (whether or not a receiver is registered), the mailbox stream and the six
+    raw send routes (`mycelium::SUBSTRATE_KINDS`, `is_substrate_kind`; a test classifies every kind constant as
+    refused or open by decision, and fails on a new one);
   - `rpc.result` and `bulk.result` are refused on the six send routes and the mailbox stream, as they were on the
     signal and serve streams;
-  - a hosted capability's kind, `cap.invoke/{namespace}/{name}`, is refused on the two signal streams (a tap read
-    every invocation's arguments and caller envelope). Calling one by a raw route is not changed;
-  - the mailbox stream refuses what `mailbox/deliver` refuses, protected kinds included;
-  - a hosted WASM component's `mesh.emit` refuses a substrate kind even when its host listed it;
+  - a hosted capability's kind, `cap.invoke/{namespace}/{name}`, is refused on the two signal streams, the
+    mailbox stream and the six raw routes: it is called as a tool through `/mcp`. **Only a capability in the
+    `tool` namespace is bridged as a tool; one in another namespace has no gateway route now** and is called by a
+    member. A member's own `rpc_call` is unchanged;
+  - the mailbox stream refuses what `mailbox/deliver` refuses, protected kinds included. **A client that reads a
+    mailbox a *member* fills under a protected kind, a hosted capability's kind, or a kind starting `sys.` /
+    `consensus.` is now refused: rename the mailbox kind** (`ServiceHandle::deliver_event` checks no kind);
+  - a hosted WASM component's `mesh.emit` refuses a substrate kind and an RPC reply kind even when its host
+    listed it (rule `host.emit_admission`, revision 2);
   - the SDKs raise `ProtectedKindError` from every verb that names a kind: `mailbox` in both and `onSignal` in
     TypeScript gained the mapping (`mycelium-py` 0.2.16, `mycelium-ts` 0.2.10, both unreleased).
 
   **Check:** with a `mesh:read` token, `curl -s -m 2 -o /dev/null -w '%{http_code}\n' -H 'Authorization: Bearer
   TOKEN' 'http://NODE:PORT/signals/consensus.propose'` answers **200** on an affected node and **403** after
   upgrading. Until every gateway is upgraded, treat `mesh:read` as a scope that reads every consensus proposal
-  and commit in the node's scope and — on a mesh without `[tls]` — `mesh:write` as one that can write a consensus
-  decision; review who holds them. **An application signal kind starting `sys.` or `consensus.` must be
+  and commit in the node's scope and every bulk payload sent to the node, and `mesh:write` as one that invokes
+  any hosted capability and — on a mesh without `[tls]` — can write a consensus decision; review who holds
+  them. **An application signal kind starting `sys.` or `consensus.` must be
   renamed.** Not changed, and stated in §103: supervisor signals (`agent.approve`, `agent.veto`) are unsigned, so
-  any `mesh:write` holder can veto (it fails closed); the other kinds the library speaks (`invoke.bulk`,
-  `boundary.*`, `agent.state`, `artifact.*`, `reason.blob.fetch`) stay observable; a tap on an ordinary RPC kind
-  shows the request's caller envelope and mandate; a signed consensus frame is not bound to its sender or a time
-  (critique plan rows CR26–CR28).
+  any `mesh:write` holder can veto (it fails closed); the other kinds the library speaks (`boundary.*`,
+  `agent.state`, `artifact.*`, `reason.blob.fetch`) stay observable and sendable; a tap on an ordinary RPC kind
+  shows the request's caller envelope and mandate; a member — not a gateway client — can still answer another
+  member's call; a signed consensus frame is not bound to its sender or a time (critique plan rows CR26–CR28).
 
 - **The consensus routes refuse component-owned slots, to read and to propose** (the slot decision of
   2026-11-12; `deprecations.md` §102). Two routes take a slot name from the caller and neither asked whose slot it
@@ -93,11 +106,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   them. **Upgrade note:** nothing shipped here reads a component's slot through the route or proposes on one
   through the cross-group route; a client of yours whose own slot names start with one of the eight prefixes must
   rename them (§102's table). **Not changed, stated:** the slot *names* are still listed by `GET
-  /gateway/kv/keys?prefix=consensus/` under `kv:read` (critique plan row CR24); and the signal streams
-  (`/signals/{kind}`, `/gateway/signal/sse/{kind}`, `mesh:read`) do not refuse the consensus kinds, so a tap on a
-  node receives the proposals and commits it is in scope for, slot and value included — and `POST
-  /gateway/signal/emit` (`mesh:write`) does not refuse them either: a `mesh:write` token can emit a raw `consensus.commit` frame through `POST /gateway/signal/emit`: without `[tls]` the frame is unsigned and a learner records the decision it carries, for any slot; with `[tls]` a client cannot produce the signed wrapper, but can replay one it tapped. The cross-group route is the one *consensus* route whose caller names the slot, not the only door that
-  reaches one; the signal-routes change closes both (decided 2026-11-13, in progress).
+  /gateway/kv/keys?prefix=consensus/` under `kv:read` (critique plan row CR24). The signal routes, which take a
+  caller-chosen *kind*, carried the consensus kinds in both directions when this entry was written — a tap read
+  proposals and commits, an emit sent a commit; they refuse them since `deprecations.md` §103 (the entry above,
+  critique plan row CR25).
 
 - **The log read routes refuse component-owned streams** (critique plan row CR1's follow-up; `deprecations.md`
   §101). Since 2.27.0 the log *write* routes — append and compact — have refused a stream under `cn/`, `wiki/` or

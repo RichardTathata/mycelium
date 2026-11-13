@@ -171,7 +171,7 @@ or run: none is false, several are narrower or already stated limits, three are 
 opt-in in code; `TaskCtx` was not shown to cause the `too_many_arguments` allows; the upgrade notes do state the
 conditions), and the counts hold. Its root cause is the
 owner-signed rule ([wiki](../wiki/dev/owner-signed-records.md), #772), whose inventory the rows are grouped from.
-Rows CR1–CR23 and two questions decided with no row (D4, D5). **The agreed order (D11):** CR1 now (#774, in
+Rows CR1–CR28 and two questions decided with no row (D4, D5) — CR24–CR28 added 2026-11-13: a component's slot names in the raw listing; the signal routes refusing the substrate's own kinds (CR25, delivered, #780); supervisor signals signed or scoped; the other library kinds on the signal streams; a sender and time bind on a signed consensus frame. **The agreed order (D11):** CR1 now (#774, in
 review); inside wave 1b, CR2's first PR (the use marker), CR13's counter and CR12; CR3–CR11 and the rest after
 wave 1b, CR10 (a Stateright model) startable in parallel. The rows: the KV read guard (in progress) and the log read doors; grant records (the use marker on a node-local durable record: a KV record alone cannot carry it), the audit
 head and `cap/`·`req/`·`prov-shed` signed by their owners; one door function for authorization; catalogue version,

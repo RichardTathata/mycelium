@@ -51,7 +51,7 @@ This feature is turned on in code, through `agent.service()`.
     [exposure](exposure-policy.md) decision first, when this node hosts the companion (row Y11).
 
   The serve stream refuses the built-in protected kinds, the reply kinds `rpc.result` and `bulk.result` and the
-  substrate's own kinds (`consensus.*`, `sys.*`) (`403 protected_kind`), and any kind a receiver on this node
+  substrate's own kinds (`consensus.*`, `sys.*`, `invoke.bulk`) (`403 protected_kind`), and any kind a receiver on this node
   already serves (`403 served_in_process`); a kind the operator added to `protected_rpc_kinds` can still be served
   there. Neither SDK has a bulk verb.
   - **a reply kind is not sent through a raw route**: `rpc.result` and `bulk.result` are refused
@@ -61,7 +61,12 @@ This feature is turned on in code, through `agent.service()`.
     nonce from a tap on the request's kind — answered in the provider's place
     (`a_tapped_nonce_forges_no_rpc_reply`). A served request is answered through `rpc/respond`, bound to the
     stream that delivered it. **Not built:** a tap on an ordinary RPC kind still shows each request's nonce, caller
-    envelope and mandate; list a kind whose calls carry authority in `protected_rpc_kinds`.
+    envelope and mandate; list a kind whose calls carry authority in `protected_rpc_kinds`. A member, which
+    writes its own sender, can still answer another member's call;
+  - **a bulk call has no gateway door**: `invoke.bulk`, its ticket, is refused on every door that takes a kind.
+    The ticket's nonce is the credential for the payload staged at the public `GET /bulk/{nonce}`, so a
+    `mesh:read` tap on the responder's gateway read each bulk request's payload
+    (`a_tapped_bulk_ticket_fetches_no_payload`). `bulk_call` and `bulk_serve` are a member's.
 - `test_rpc_round_trip`, in [`src/agent/rpc.rs`](../../src/agent/rpc.rs).
 
 ## See it work
