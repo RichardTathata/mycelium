@@ -50,7 +50,8 @@ confirmed stop, checked against the class's bound. CI runs it.
   cancellable rule permitted the call and its gateway's `call:` mandate is not established here, or its term is
   already revoked — refused under any rule: *authority not established*, with the stable cause in `data.cause`
   (`revoked`, `no_call_mandate`, `other_envelope`, …; the list is in §104), the sentence in `data.found`,
-  `execution: none` on the record, a grant the call presented given back, and counted in
+  `execution: none` on the record, the provider's own use of a grant the call presented given back (the gateway
+  that claimed the grant keeps it spent, §104), and counted in
   `mycelium_provider_call_mandate_refusals_total{cause}`) or `mandate_lapsed_before_run` (the
   preflight permitted on an established mandate and the re-assessment that registers the work no longer finds it
   established — a revocation in between refuses the call rather than running it unregistered; it answers as

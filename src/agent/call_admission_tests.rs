@@ -55,6 +55,8 @@ enum Cm {
     NoCheckpoint,
     /// Honest, but issued and held under another spelling of this gateway's address.
     Alias,
+    /// Honest in every field, with a window that ended before the call.
+    Expired,
 }
 
 /// How a test's node differs from the usual one.
@@ -200,6 +202,10 @@ impl Node {
             let cm = match &cm {
                 Cm::Honest => Some(honest(&self.gateway(), n)),
                 Cm::Stripped => None,
+                Cm::Expired => {
+                    let now = self.now();
+                    Some(serde_json::to_value(call_mint::mint(&self.key(), &self.gateway(), &format!("c{n}"), call.operation, &call.resource, &call.arguments, now - 2_000, now - 1_000)).unwrap())
+                }
                 Cm::Lifted(other) => Some(other.clone()),
                 Cm::NoCheckpoint => {
                     let mut v = honest(&self.gateway(), n);
@@ -589,17 +595,46 @@ fn answer(detail: &str) -> serde_json::Value {
     serde_json::json!({"jsonrpc": "2.0", "id": 1, "error": {"code": -32031, "message": "x", "data": {"reason": "authority_not_established", "detail": detail}}})
 }
 
-/// **The gateway's door gives its own claim back on exactly this answer** (F4), and on no other -32031. Seen
-/// failing first: with the branch out of `pre_execution_refusal`, the answer is not one that gives a grant back.
+/// **The gateway's door does NOT give its claim back on this answer** (#781's confirm round, N1), nor on any other
+/// -32031. A provider at 2.40 or before that bridges an MCP server forwards the server's reply in this shape
+/// unrewritten, so a gateway that honoured it would let a server that ran its effect have the grant run again. The
+/// provider gives its own claim back, which trusts no reply; the gateway's stays spent. Seen failing first: against
+/// the gateway half as first built, the answer gave the grant back.
 #[test]
-fn the_gateway_gives_a_grant_back_on_call_mandate_not_established_and_no_other_authority_refusal() {
-    assert_eq!(super::http::pre_execution_refusal(answer("call_mandate_not_established").to_string().as_bytes()).as_deref(), Some("call_mandate_not_established"));
+fn the_gateway_gives_no_grant_back_on_call_mandate_not_established_or_any_authority_refusal() {
+    assert_eq!(super::http::pre_execution_refusal(answer("call_mandate_not_established").to_string().as_bytes()), None);
     assert_eq!(super::http::pre_execution_refusal(answer("mandate_lapsed_before_run").to_string().as_bytes()), None);
+}
+
+/// **A `call:` mandate whose window has ended is `refused`** (the cause for a mandate that verifies and is refused
+/// for another reason than revocation).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_call_mandate_out_of_its_window_is_refused_by_its_cause() {
+    refused_by_cause(Opts::default(), false, Cm::Expired, "refused", "refused").await;
+}
+
+/// **The set of causes is closed, and so is the counter's label set** (#781's confirm round): `data.cause` and the
+/// `cause` label of `mycelium_provider_call_mandate_refusals_total` are one function, and these ten names are what
+/// §104 documents and what a caller matches. Renaming one, or adding one without listing it here and there, fails.
+/// Seen failing first with `no_call_mandate` renamed.
+#[test]
+fn the_causes_of_a_call_mandate_refusal_are_a_closed_list() {
+    use super::provider_enforcement::CallCause;
+    // Exhaustive, with no wildcard: a new variant stops this compiling until it is listed here and in `ALL`.
+    for c in CallCause::ALL {
+        match c {
+            CallCause::Revoked | CallCause::NoEnvelope | CallCause::NoCallMandate | CallCause::UnsignedEnvelope | CallCause::NoAuthority => {}
+            CallCause::Malformed | CallCause::NoEnvelopeId | CallCause::OtherEnvelope | CallCause::Refused | CallCause::NotVerified => {}
+        }
+    }
+    let labels: Vec<&str> = CallCause::ALL.iter().map(|c| c.label()).collect();
+    assert_eq!(labels, ["revoked", "no_envelope", "no_call_mandate", "unsigned_envelope", "no_authority", "malformed", "no_envelope_id", "other_envelope", "refused", "not_verified"]);
 }
 
 /// **Only the node authors that answer** (F4): a bridged server's reply in its shape becomes an ordinary tool error,
 /// which gives nothing back — or a server that ran its effect could have it run twice. Seen failing first: with the
-/// clause out of `as_tool_answer`, the server's reply passes through and the gateway would give the grant back.
+/// clause out of `as_tool_answer`, the server's reply passes through with its `data`. No gateway honours the shape
+/// today (N1); the rewrite is what lets a later release do so.
 #[test]
 fn a_bridged_servers_reply_shaped_like_call_mandate_not_established_gives_nothing_back() {
     let rewritten = super::mcp::as_tool_answer(answer("call_mandate_not_established"), &serde_json::json!(1));

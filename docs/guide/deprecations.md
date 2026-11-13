@@ -3666,11 +3666,17 @@ that declares one refuses every call that rule permits.
   checkpoint not verified here, or the window cap). Match on `revoked` to tell a cancellation from the rest.
 - **Counted:** `mycelium_provider_call_mandate_refusals_total{cause}` (feature `metrics`), one label value per
   cause above, so a cancellation is not counted with a misconfiguration.
-- **The refusal does not spend a grant.** The provider refuses before any handler runs, so it gives back the use
-  of a grant the same call presented, and the gateway's `/mcp` door gives its own claim back on this answer, as it
-  does for the caller-context refusals of §93. The grant admits the retry once. At the A2A doors a refusal spends
-  the grant, as before. A bridged MCP server cannot author the answer: a reply of its own in this shape is
-  rewritten into an ordinary tool error (-32000).
+- **The refusal gives a grant back at the provider, and leaves it spent at the gateway that claimed it.** The
+  provider refuses before any handler runs, so it releases its own use of a grant the same call presented: a caller
+  that reaches the provider directly may present the grant again, once. **A gateway does not give its claim back
+  on this answer** — at `/mcp` or at the A2A doors — so a retry of the same grant through the same gateway door is
+  refused there as already used, though the provider would admit it. Why: a provider at 2.40 or before that bridges
+  an MCP server forwards the server's replies in this shape unrewritten, so a gateway that honoured the answer
+  would let a server that ran its effect have the grant run again. From this release a bridging provider rewrites
+  a server's reply in this shape into an ordinary tool error (-32000), so a later release can honour the answer at
+  the gateway once every bridging provider is at a version that does. Until then, a `requires_grant` +
+  `cancellable` rule behind a gateway costs a grant per refused call: one more reason not to declare a cancellable
+  rule before the gateways mint.
 - **A cancelled call cannot be made to run by presenting it again**, by three mechanisms in sequence: while the
   provider stays up, the envelope's id is admitted once and a replay is **dropped unanswered** (the re-presenter
   sees a timeout, not a refusal); after a provider restart inside the envelope's 300 s, the envelope is admitted

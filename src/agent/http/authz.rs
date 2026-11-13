@@ -732,12 +732,10 @@ pub(crate) struct GrantClaim {
 #[cfg(all(feature = "gateway", feature = "tls"))]
 pub(crate) fn pre_execution_refusal(bytes: &[u8]) -> Option<String> {
     let v: serde_json::Value = serde_json::from_slice(bytes).ok()?;
-    // Identity-and-lifecycle I4 (#781's review, F4): the provider's `call_mandate_not_established` is made when it
-    // registers the call's work, before any handler runs, so a grant claimed for that call was not spent. Only the
-    // node authors this shape too: the bridged loop rewrites a server's reply that has it (`mcp::as_tool_answer`).
-    if v["error"]["code"] == -32031 && v["error"]["data"]["reason"] == "authority_not_established" && v["error"]["data"]["detail"] == "call_mandate_not_established" {
-        return Some("call_mandate_not_established".to_string());
-    }
+    // **Not** the provider's `call_mandate_not_established` (-32031; identity-and-lifecycle I4, #781's confirm round,
+    // N1), though it too is made before any handler: a provider at 2.40 or before that bridges an MCP server forwards
+    // the server's reply in that shape unrewritten, so honouring it here would let a server that ran its effect have
+    // the grant run again. The provider gives its own claim back; this gateway's stays spent.
     if v["error"]["code"] != -32022 || !v["error"]["message"].as_str().is_some_and(|m| m.starts_with("caller context refused")) {
         return None;
     }
@@ -779,7 +777,7 @@ pub(crate) async fn release_grant_claim_after(ctx: &Arc<TaskCtx>, preflight: &Pr
 /// Give back the grant use `preflight` claimed, for a call this node knows did not run: the marker tombstoned, then
 /// the in-memory claim released. `false` when the permit claimed none. The caller decides that nothing ran —
 /// [`release_grant_claim_after`] from the provider's answer or its own refusal to dispatch, the provider's
-/// registration from its own refusal before any handler (`call_mandate_not_established`).
+/// registration from its own refusal before any handler (`call_mandate_not_established`), which trusts no reply.
 #[cfg(all(feature = "gateway", feature = "tls"))]
 pub(crate) async fn release_unspent_grant_claim(ctx: &Arc<TaskCtx>, preflight: &Preflight) -> bool {
     let Preflight::Proceed { grant_claim: Some(c), .. } = preflight else { return false };

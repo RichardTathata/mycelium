@@ -1164,12 +1164,25 @@ test-only mint (the gateway's is PR 2).
 - **F7:** `a_call_mandate_in_an_unsigned_envelope_is_not_established` — the slot is assessed only for an envelope
   its gateway signed, which is what authenticates the id the term names (`unsigned_envelope`, on a node with no TLS
   identity).
-- **F4:** a `call_mandate_not_established` refusal gives the caller's grant back —
-  `a_call_refused_for_its_call_mandate_gives_the_grant_back`,
-  `the_gateway_gives_a_grant_back_on_call_mandate_not_established_and_no_other_authority_refusal`,
-  `a_bridged_servers_reply_shaped_like_call_mandate_not_established_gives_nothing_back`. The provider releases its own claim (it refused before
-  any handler); the gateway's `/mcp` door gives its claim back on the same answer (`pre_execution_refusal`), and the
-  bridged loop rewrites a server's reply in that shape, so only the node authors it. No replay opens: nothing ran.
+- **F4, as narrowed by the confirm round (N1; the maintainer's call, 2026-11-13): the grant is given back at the
+  provider and stays spent at the gateway that claimed it.**
+  - The provider releases its own claim when it refuses (`release_unspent_grant_claim` in `admit_after`): local,
+    before any handler, trusting no reply. `a_call_refused_for_its_call_mandate_gives_the_grant_back`.
+  - **The gateway does not release its claim on this answer**, at `/mcp` or the A2A doors:
+    `the_gateway_gives_no_grant_back_on_call_mandate_not_established_or_any_authority_refusal`. Honouring it was
+    built and removed: a provider at 2.40 or before that bridges an MCP server forwards the server's reply in this
+    shape unrewritten (2.40's `as_tool_answer` rewrites only -32022), so a server that ran its effect could have the
+    grant run again — the mixed-version replay.
+  - The bridged loop's rewrite of that shape is kept
+    (`a_bridged_servers_reply_shaped_like_call_mandate_not_established_gives_nothing_back`), so a later release can
+    honour the answer.
+  - What remains opens no replay: the provider's release is made by the node that refused, before any handler ran.
+    At the A2A doors too the provider gives its own claim back and the retry is refused at the gateway's door.
+- **The causes, pinned:** `the_causes_of_a_call_mandate_refusal_are_a_closed_list` holds the ten names, which are
+  also the counter's labels. Nine are reached by a test (`refused` by
+  `a_call_mandate_out_of_its_window_is_refused_by_its_cause`). **`no_envelope_id` is reached by none:** a signed
+  envelope with no id comes only from a gateway older than the envelope id (2.35), and the framer here draws the id
+  before it mints, so a test would have to forge and re-sign an envelope by hand. Held by reading.
 - **F8, `requires_mandate` patterns that would cover a `call:` scope** (`"call*"`, `"c*"`, `"*"`) are **not
   refused**, and are harmless: slot 2 never enters `ActionEnvelope.mandate`, so no `call:` mandate can meet any
   `requires_mandate`, whatever its pattern. Refusing `"*"` would break rules that mean *any mandate*.
@@ -1180,6 +1193,10 @@ cancel stops it: the bridged call's work is registered and its forward is not ra
 only parked (nothing awaits its lapse). Before PR 2 this cannot happen. PR 2 either refuses a cancellable call at
 those two doors until PR 3 builds their stop, or states the gap as live; that is the maintainer's to choose when
 PR 2 lands. The same holds for the built-in `llm.invoke` door until F1's fix.
+
+**And for honouring `call_mandate_not_established` at the gateway** (N1): a gateway may give its claim back on that
+answer only once every provider that bridges an MCP server is at a version that rewrites a server's reply in that
+shape (2.41 on). Until a release states that floor, a grant refused this way stays spent at the gateway.
 
 #### I2 · CA succession by a pre-committed successor — *written from S-succeed ([note](spikes/2026-11-07-s-succeed.md), 2026-11-07; evidence at tag `spike/s-succeed-2026-11-07-r2`) — **buildable: R1–R4 resolved, decided 2026-11-12***
 

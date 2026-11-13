@@ -24,7 +24,9 @@ From #781's review and the maintainer's decisions of 2026-11-13:
   any rule (best effort where the rule is not cancellable). One detail, with a stable `data.cause` (`CallCause`) that
   also labels the counter.
 - The slot is assessed only for a **signed** envelope (the id is what binds `cm`); the refusal gives a claimed grant
-  back at the provider and at the gateway's `/mcp` door.
+  back at the provider only. The gateway's claim stays spent (the confirm round's N1: a 2.40 bridging provider
+  forwards a server's reply in that shape unrewritten); `owner-signed-records.md`'s use-marker row names both
+  releasers.
 - **Found, not fixed: the built-in `llm.invoke` provider never calls `provider_enforcement::check`**
   (`what-is-proven.md#llm-door-not-checked-at-provider`).
 - `owner-signed-records.md`: the `call/{gw}/{term}/checkpoint` row now says the record is read from a live door;

@@ -267,8 +267,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   stopped it. Under a cancellable rule a call whose `call:` mandate is not established is refused
   `authority_not_established` (-32031, `call_mandate_not_established`, with a stable `data.cause`) and nothing
   runs; a call whose term is already revoked is refused under any rule (`data.cause` `revoked`; best effort where
-  the rule is not cancellable, since a stripped `cm` lets the call run). The refusal gives back a grant the call
-  presented, is counted in `mycelium_provider_call_mandate_refusals_total{cause}`, and the slot is assessed only
+  the rule is not cancellable, since a stripped `cm` lets the call run). The provider gives back its own use of a
+  grant the call presented; the gateway that claimed the grant does not (an older bridging provider forwards a
+  server's reply in this shape unrewritten, so honouring it would be a replay), and a bridging provider now
+  rewrites that shape. The refusal is counted in `mycelium_provider_call_mandate_refusals_total{cause}`, and the slot is assessed only
   for an envelope its gateway signed. A `call:` mandate fits only the envelope it was minted for (its term
   is the envelope's id), so one lifted into another envelope is not established. `validate()` refuses
   `requires_mandate` naming a `call:` scope. **Not yet built:** the gateway's mint — until it lands, a cancellable

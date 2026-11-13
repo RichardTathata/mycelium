@@ -528,6 +528,22 @@ pub(crate) enum CallCause {
 }
 
 impl CallCause {
+    /// Every cause, for the test that pins the set (`the_causes_of_a_call_mandate_refusal_are_a_closed_list`, whose
+    /// own exhaustive `match` stops compiling when a variant is added and not listed).
+    #[cfg(all(test, feature = "compliance"))]
+    pub(crate) const ALL: [Self; 10] = [
+        Self::Revoked,
+        Self::NoEnvelope,
+        Self::NoCallMandate,
+        Self::UnsignedEnvelope,
+        Self::NoAuthority,
+        Self::Malformed,
+        Self::NoEnvelopeId,
+        Self::OtherEnvelope,
+        Self::Refused,
+        Self::NotVerified,
+    ];
+
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Revoked => "revoked",
