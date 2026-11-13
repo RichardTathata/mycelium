@@ -213,6 +213,9 @@ mod exchanged_token_tests;
 /// Identity-and-lifecycle I4: a `call:` mandate at a live provider — the KV read under the hold, the feeder.
 #[cfg(all(test, feature = "compliance"))]
 mod call_mandate_tests;
+/// Identity-and-lifecycle I4, PR 1b: the provider's admission under the envelope's second mandate slot.
+#[cfg(all(test, feature = "compliance"))]
+mod call_admission_tests;
 /// Identity-and-lifecycle I5 (D6): the gateway's token exchange at the IdP, DPoP-bound to the node key.
 #[cfg(feature = "compliance")]
 pub(crate) mod oidc_exchange;

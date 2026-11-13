@@ -248,6 +248,11 @@ pub struct GatewayCaller {
     /// The OIDC user's exchanged token, verified (identity-and-lifecycle I5): its id, admitted once at the receive
     /// boundary. `None` when the envelope carries none, or this node does not verify them.
     pub(crate) exchanged: Option<Box<ExchangedToken>>,
+    /// The gateway's `call:` mandate for this call (the envelope's `cm`, identity-and-lifecycle I4), **carried, not
+    /// verified**: a cancellation handle, not authority (D-1). A provider that enforces assesses it once, when it
+    /// registers the call's work, against the gateway that sent the envelope ([`via`](Self::via)) and this
+    /// envelope's id. `None` when the envelope carries none. Boxed to keep [`RequestPrincipal`]'s variants close in size.
+    pub call_mandate: Option<Box<serde_json::Value>>,
 }
 
 /// How a [`GatewayCaller`] was attested.
@@ -832,6 +837,13 @@ struct Envelope {
     /// when `ot` is present, so a relay cannot swap one user's token into another's envelope (#757's confirm round, N3).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     so: Option<String>,
+    /// The gateway's **`call:` mandate** for this call (identity-and-lifecycle I4): the envelope's second mandate
+    /// slot, a `PresentedCallMandate` as JSON. Outside the gateway's signature, as `m` is: the mandate, its possession
+    /// proof and its checkpoint are signed by the gateway's node key, and its term must be `c{n}` of this envelope
+    /// (the id inside the signature), so one lifted from another envelope does not fit. An older provider keeps it
+    /// in `x` and reads nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cm: Option<serde_json::Value>,
     /// Fields this version does not define, kept so a verifier can see them: a `correlation` or `parent` placed here
     /// (adopter-surface X4) sits outside every signature and is never read — counted, and the record's field stays
     /// empty. Never produced by this crate; absent on the wire when empty, so the envelope's bytes are unchanged.
@@ -911,6 +923,30 @@ pub(crate) fn frame_envelope_at(
     ot: Option<&str>,
     issued_at_ms: u64,
 ) -> Option<Bytes> {
+    frame_envelope_minting_at(ctx, target, principal, scopes, app, mandate, resource, client, ot, issued_at_ms, None)
+}
+
+/// What mints an envelope's `call:` mandate (`cm`, identity-and-lifecycle I4): given the envelope's id `n`, the
+/// `PresentedCallMandate` for term `c{n}` as JSON, or `None` for no mandate.
+pub(crate) type CallMint<'a> = &'a (dyn Fn(u64) -> Option<serde_json::Value> + 'a);
+
+/// [`frame_envelope_at`], with the envelope's second mandate slot. The mint is called once the envelope's id is
+/// drawn, because the mandate's term is that id. **No gateway door passes a mint yet** — the gateway's own
+/// (`gateway_mint_call_mandates`) is the row's next PR; until then only tests frame a `cm`.
+#[allow(clippy::too_many_arguments)] // the envelope's fields, each one
+pub(crate) fn frame_envelope_minting_at(
+    ctx: &TaskCtx,
+    target: &NodeId,
+    principal: &str,
+    scopes: &[String],
+    app: Bytes,
+    mandate: Option<&serde_json::Value>,
+    resource: Option<&str>,
+    client: Option<&(super::client_sig::ClientSignature, super::client_sig::ClientNonce)>,
+    ot: Option<&str>,
+    issued_at_ms: u64,
+    mint: Option<CallMint<'_>>,
+) -> Option<Bytes> {
     let via = ctx.node_id.to_string();
     let id = ctx.hlc.tick();
     let to = target.to_string();
@@ -933,6 +969,7 @@ pub(crate) fn frame_envelope_at(
         cn: client.map(|c| c.1.clone()),
         so,
         ot: ot.map(str::to_string),
+        cm: mint.and_then(|mint| mint(id)),
         x: Default::default(),
     };
     let env_bytes = serde_json::to_vec(&env).ok()?;
@@ -1320,6 +1357,7 @@ fn verify_at(ctx: &TaskCtx, req: &RpcRequest, now_ms: u64) -> Result<Option<Gate
         mandate: env.m,
         resource: env.r,
         envelope_id: env.n,
+        call_mandate: env.cm.map(Box::new),
     }))
 }
 
@@ -1970,7 +2008,7 @@ mod tests {
     fn principals_are_qualified_by_their_issuer() {
         let g1 = NodeId::new("127.0.0.1", 9001).unwrap();
         let g2 = NodeId::new("127.0.0.1", 9002).unwrap();
-        let mk = |via: &NodeId, p: String| GatewayCaller {
+        let mk = |via: &NodeId, p: String| GatewayCaller { call_mandate: None,
             client_signed: None,
             exchanged: None,
             misplaced_causal: false,
@@ -2014,7 +2052,7 @@ mod tests {
         assert_eq!(verify(&a.task_ctx, &req), Err(CallerError::BadSignature));
 
         // Unsigned envelope on an authenticated node: refused.
-        let unsigned = serde_json::to_vec(&Envelope {
+        let unsigned = serde_json::to_vec(&Envelope { cm: None,
             v: 1, p: "oidc:idp/mallory".into(), via: a.node_id().to_string(), s: vec![], t: 0, k: None, sig: None,
             m: None,
             r: None, n: None, o: None, sn: None, cs: None, cn: None, ot: None, so: None, x: Default::default(),
@@ -2028,7 +2066,7 @@ mod tests {
             let rogue = ed25519_dalek::SigningKey::from_bytes(&[5u8; 32]);
             let msg = signed_message("oidc:idp/mallory", &a.node_id().to_string(), &[], 0, &digest(b"payload"));
             let sig = crate::tls::sign_bytes(&rogue, &msg);
-            let forged = serde_json::to_vec(&Envelope {
+            let forged = serde_json::to_vec(&Envelope { cm: None,
                 v: 1, p: "oidc:idp/mallory".into(), via: a.node_id().to_string(), s: vec![], t: 0,
                 k: Some(base64::engine::general_purpose::STANDARD.encode(rogue.verifying_key().to_bytes())),
                 sig: Some(base64::engine::general_purpose::STANDARD.encode(sig)),
@@ -2105,7 +2143,7 @@ mod tests {
             system: "".into(), user_template: "{{input}}".into(), max_tokens: 32, temperature: 0.0, metadata: Default::default(),
         }, Arc::new(crate::EchoBackend)).await.unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        let env = serde_json::to_vec(&Envelope {
+        let env = serde_json::to_vec(&Envelope { cm: None,
             v: 1, p: "oidc:idp/admin".into(), via: a.node_id().to_string(), s: vec![], t: 0, k: None, sig: None,
             m: None,
             r: None, n: None, o: None, sn: None, cs: None, cn: None, ot: None, so: None, x: Default::default(),
@@ -2244,7 +2282,7 @@ mod tests {
     fn an_empty_replay_window_is_swept() {
         let w = ReplayWindows::default();
         let (gone, live) = (NodeId::new("127.0.0.1", 9611).unwrap(), NodeId::new("127.0.0.1", 9612).unwrap());
-        let caller = |via: &NodeId, t: u64, id: u64| GatewayCaller {
+        let caller = |via: &NodeId, t: u64, id: u64| GatewayCaller { call_mandate: None,
             client_signed: None,
             exchanged: None,
             misplaced_causal: false,
@@ -2269,7 +2307,7 @@ mod tests {
     fn the_replay_window_is_bounded_and_fails_closed() {
         let w = ReplayWindows::default();
         let via = NodeId::new("127.0.0.1", 9601).unwrap();
-        let caller = |t: u64, id: u64| GatewayCaller {
+        let caller = |t: u64, id: u64| GatewayCaller { call_mandate: None,
             client_signed: None,
             exchanged: None,
             misplaced_causal: false,

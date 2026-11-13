@@ -409,6 +409,13 @@ pub struct Decision {
     /// Policy-evaluation failures and unrecognised clauses. A non-empty list with a `Permit`
     /// verdict is a contradiction the seam resolves to `Indeterminate`.
     pub errors: Vec<String>,
+    /// The rule that permitted this action is **cancellable** (identity-and-lifecycle I4, D-2): the call may run
+    /// only where its gateway's `call:` mandate is established and its work registered, so a cancel can stop it. A
+    /// provider that enforces refuses a permit that says so when no such mandate is established
+    /// (`authority_not_established`, `call_mandate_not_established`). `false` from every constructor: an evaluator
+    /// that does not map the notion treats no rule as cancellable, and the requirement is not applied under it.
+    /// Meaningful only on a `Permit`.
+    pub cancellable: bool,
 }
 
 impl Decision {
@@ -425,7 +432,15 @@ impl Decision {
             reason: reason.into(),
             policy_revision: policy_revision.into(),
             errors: Vec::new(),
+            cancellable: false,
         }
+    }
+
+    /// Mark this permit as decided by a **cancellable** rule ([`Decision::cancellable`]) — what an adapter calls
+    /// when the policy it evaluates says the permitted call must be cancellable.
+    pub fn requiring_call_mandate(mut self) -> Self {
+        self.cancellable = true;
+        self
     }
 
     /// Authority established for this exact action.
@@ -1680,7 +1695,7 @@ pub fn preflight_with_history(
 
     // Expiry is the seam's own check: an evaluator is deterministic and holds no clock.
     if envelope.is_expired(now_ms) {
-        return Err(PreflightRefusal::Denied(Decision {
+        return Err(PreflightRefusal::Denied(Decision { cancellable: false,
             verdict: Verdict::Deny,
             checked: vec!["validity".into()],
             reason: format!("envelope expired at {} (now {now_ms})", envelope.not_after_ms),
@@ -1833,6 +1848,9 @@ pub struct Rule {
     /// without a fleet limit (and, in a struct literal that leaves it out, a digest of the rule's patterns —
     /// [`Rule::counter_key`]).
     pub counter: Option<String>,
+    /// An allowance whose permitted call must be **cancellable** (identity-and-lifecycle I4, D-2): its permit
+    /// carries [`Decision::cancellable`]. Read on an allowance only; a prohibition permits nothing.
+    pub cancellable: bool,
 }
 
 /// *At most `count` in `window_ms`* — a limit over the actor's history, counted at `scope`: this enforcement point
@@ -1864,7 +1882,16 @@ impl Rule {
             data_class: None,
             locality: None,
             counter: None,
+            cancellable: false,
         }
+    }
+
+    /// The call this allowance permits must be **cancellable** (identity-and-lifecycle I4, D-2): a provider that
+    /// enforces runs it only with its gateway's `call:` mandate established and its work registered, and refuses it
+    /// otherwise — so stripping the mandate cannot make the call run uncancellable.
+    pub fn cancellable(mut self) -> Self {
+        self.cancellable = true;
+        self
     }
 
     /// Apply this rule only to requests whose data is of `class` (post-360 row R) — e.g. with
@@ -2190,7 +2217,7 @@ impl ActionEvaluator for ReferenceEvaluator {
             _ => None,
         });
         if let Some((b, refusal)) = refused {
-            return Decision {
+            return Decision { cancellable: false,
                 verdict: Verdict::Deny,
                 checked: vec![format!(
                     "mandate holder={} term={} scope={} epoch={}",
@@ -2208,7 +2235,7 @@ impl ActionEvaluator for ReferenceEvaluator {
         if let Some(p) = self.prohibitions.iter().find(|r| r.matches(env)) {
             let missing = unestablished(p);
             if !missing.is_empty() {
-                return Decision {
+                return Decision { cancellable: false,
                     verdict: Verdict::Indeterminate,
                     checked: std::iter::once(format!("prohibition actor={} operation={}", p.actor, p.operation))
                         .chain(p.route_clause(env))
@@ -2218,7 +2245,7 @@ impl ActionEvaluator for ReferenceEvaluator {
                     errors: missing,
                 };
             }
-            return Decision {
+            return Decision { cancellable: false,
                 verdict: Verdict::Deny,
                 checked: std::iter::once(format!(
                     "prohibition actor={} operation={} resource={}",
@@ -2235,7 +2262,7 @@ impl ActionEvaluator for ReferenceEvaluator {
         if let Some(a) = self.allowances.iter().find(|r| r.matches(env)) {
             let missing = unestablished(a);
             if !missing.is_empty() {
-                return Decision {
+                return Decision { cancellable: false,
                     verdict: Verdict::Indeterminate,
                     checked: std::iter::once(format!("allowance actor={} operation={}", a.actor, a.operation))
                         .chain(a.route_clause(env))
@@ -2256,7 +2283,7 @@ impl ActionEvaluator for ReferenceEvaluator {
                 let view = match history {
                     History::View(v) => v,
                     History::Unavailable(why) => {
-                        return Decision {
+                        return Decision { cancellable: false,
                             verdict: Verdict::Indeterminate,
                             checked: vec![limited],
                             reason: "the matching allowance is limited over the actor's history, which was not established".into(),
@@ -2266,7 +2293,7 @@ impl ActionEvaluator for ReferenceEvaluator {
                     }
                 };
                 if limit.window_ms == 0 {
-                    return Decision {
+                    return Decision { cancellable: false,
                         verdict: Verdict::Indeterminate,
                         checked: vec![limited],
                         reason: "the allowance is limited over an empty window, which counts nothing".into(),
@@ -2300,7 +2327,7 @@ impl ActionEvaluator for ReferenceEvaluator {
                     view.point, limit.window_ms, limit.count
                 );
                 if n >= limit.count as usize {
-                    return Decision {
+                    return Decision { cancellable: false,
                         verdict: Verdict::Deny,
                         checked: vec![limited, tally],
                         reason: format!(
@@ -2312,7 +2339,7 @@ impl ActionEvaluator for ReferenceEvaluator {
                     };
                 }
                 if !view.complete_for(limit.window_ms) {
-                    return Decision {
+                    return Decision { cancellable: false,
                         verdict: Verdict::Indeterminate,
                         checked: vec![limited, tally],
                         reason: "the actor's history is incomplete, so a count below the limit is not established".into(),
@@ -2353,11 +2380,15 @@ fn permit_of(a: &Rule, env: &ActionEnvelope, counted: Option<String>, rev: Strin
             }
             c.extend(a.route_clause(env));
             c.extend(counted);
+            if a.cancellable {
+                c.push("cancellable: runs only under an established call: mandate at the provider".into());
+            }
             c
         },
         reason: "an allowance matches this action".into(),
         policy_revision: rev,
         errors: Vec::new(),
+        cancellable: a.cancellable,
     }
 }
 
@@ -2372,7 +2403,7 @@ fn fleet_limit(a: &Rule, limit: HistoryLimit, view: &HistoryView, rev: &str, lim
     // to every member. The reference evaluator bounds that growth by the policy: an exact fleet limit names its
     // actor (review finding 4).
     if limit.scope == HistoryScope::FleetConsensus && a.actor == "*" {
-        return Err(Decision {
+        return Err(Decision { cancellable: false,
             verdict: Verdict::Indeterminate,
             checked: vec![limited],
             reason: format!("a limit at scope {scope} must name its actor, not `*`"),
@@ -2386,7 +2417,7 @@ fn fleet_limit(a: &Rule, limit: HistoryLimit, view: &HistoryView, rev: &str, lim
     // A fleet limit is bounded: past the seat cap or the history horizon it is a cost on every request the rule covers,
     // not a limit (the Cedar adapter's review). Not established, as a wildcard actor is — never clamped.
     if let Err(out) = check_fleet_bounds(limit.count, limit.window_ms) {
-        return Err(Decision {
+        return Err(Decision { cancellable: false,
             verdict: Verdict::Indeterminate,
             checked: vec![limited],
             reason: format!("a limit at scope {scope} must be within the fleet bounds: {out}"),
@@ -2394,7 +2425,7 @@ fn fleet_limit(a: &Rule, limit: HistoryLimit, view: &HistoryView, rev: &str, lim
             errors: vec![format!("fleet history not established at scope {scope}: {out}")],
         });
     }
-    let undecided = |why: String| Decision {
+    let undecided = |why: String| Decision { cancellable: false,
         verdict: Verdict::Indeterminate,
         checked: vec![limited.clone()],
         reason: format!("the matching allowance is limited at scope {scope}, whose count was not established"),
@@ -2404,7 +2435,7 @@ fn fleet_limit(a: &Rule, limit: HistoryLimit, view: &HistoryView, rev: &str, lim
     let Some(found) = view.fleet.iter().find(|c| c.counter.scope == limit.scope && c.counter.key == key) else {
         return Err(undecided("the enforcement point gave no count for this rule's counter".into()));
     };
-    let deny = |line: String, held: u32, caveat: &str| Decision {
+    let deny = |line: String, held: u32, caveat: &str| Decision { cancellable: false,
         verdict: Verdict::Deny,
         checked: vec![limited.clone(), line],
         reason: format!(
@@ -3069,7 +3100,7 @@ mod tests {
         struct Permissive(FleetCounter);
         impl ActionEvaluator for Permissive {
             fn evaluate(&self, _env: &ActionEnvelope) -> Decision {
-                Decision { verdict: Verdict::Permit, checked: vec!["anything".into()], reason: "permissive".into(), policy_revision: "rev-1".into(), errors: Vec::new() }
+                Decision { cancellable: false, verdict: Verdict::Permit, checked: vec!["anything".into()], reason: "permissive".into(), policy_revision: "rev-1".into(), errors: Vec::new() }
             }
             fn fleet_counters(&self, _env: &ActionEnvelope) -> Vec<FleetCounter> {
                 vec![self.0.clone()]
@@ -3460,6 +3491,27 @@ mod tests {
         assert_eq!(preflight(None, &env, 2_000), Ok(None));
     }
 
+    /// Identity-and-lifecycle I4 (D-2): the reference evaluator's permit carries its allowance's `cancellable`, and
+    /// says so in what it checked; every constructor leaves it `false`, so an evaluator that does not map the notion
+    /// treats no rule as cancellable; an adapter sets it with `requiring_call_mandate`. Seen failing first: with
+    /// `permit_of` not copying the key, the cancellable allowance's permit says `false`.
+    #[test]
+    fn a_cancellable_allowances_permit_says_so_and_no_constructor_does() {
+        let ev = evaluator(
+            ReferenceEvaluator::new("rev-1")
+                .allow(Rule::new("*", "tools/call", "tool:square@n1").cancellable())
+                .allow(Rule::new("*", "tools/call", "tool:cube@n1")),
+        );
+        let square = preflight(Some(&ev), &envelope("oidc:idp/alice", "tools/call", "tool:square@n1"), 2_000).unwrap().unwrap();
+        assert!(square.cancellable && square.checked.iter().any(|c| c.starts_with("cancellable")), "{square:?}");
+        let cube = preflight(Some(&ev), &envelope("oidc:idp/alice", "tools/call", "tool:cube@n1"), 2_000).unwrap().unwrap();
+        assert!(!cube.cancellable && !cube.checked.iter().any(|c| c.starts_with("cancellable")), "{cube:?}");
+        for d in [Decision::permit("p", "r"), Decision::deny("d", "r"), Decision::indeterminate("i", "r"), Decision::new(Verdict::Permit, "n", "r")] {
+            assert!(!d.cancellable);
+        }
+        assert!(Decision::permit("p", "r").requiring_call_mandate().cancellable);
+    }
+
     /// The happy path: an allowance permits, and the decision reaches the caller for the record.
     #[test]
     fn an_allowance_permits_and_reports_what_it_checked() {
@@ -3583,7 +3635,7 @@ mod tests {
         struct Sloppy;
         impl ActionEvaluator for Sloppy {
             fn evaluate(&self, _: &ActionEnvelope) -> Decision {
-                Decision {
+                Decision { cancellable: false,
                     verdict: Verdict::Permit,
                     checked: vec![],
                     reason: "allowed".into(),

@@ -925,6 +925,11 @@ pub struct RuleDecl {
     pub requires_grant: bool,
     #[serde(default)]
     pub requires_values: BTreeMap<String, toml::Value>,
+    /// The call this allowance permits must be **cancellable** (identity-and-lifecycle I4, D-2): an enforcing
+    /// provider runs it only with its gateway's `call:` mandate established, and refuses it otherwise. A reader
+    /// before this key refuses the file by name (unknown keys are refused); declare it once every node is upgraded.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cancellable: bool,
     /// **An exposure rule** (adopter-surface Y5): with this table the rule is not an allowance — it holds new dependent
     /// work it selects while the actor's unresolved closure is past a threshold, and carries no `requires_*` clause.
     /// Loaded into [`ExposurePolicy`](crate::exposure::ExposurePolicy), never into the evaluator.
@@ -967,6 +972,9 @@ impl RuleDecl {
         if !self.requires_scopes.is_empty() || !self.requires_facts.is_empty() || self.requires_mandate.is_some() || self.requires_grant || !self.requires_values.is_empty() {
             return Some(Err("an exposure rule selects and holds; it carries no requires_* clause, which belongs to an allowance — write the allowance as its own [[rule]]".into()));
         }
+        if self.cancellable {
+            return Some(Err("an exposure rule selects and holds; `cancellable` belongs to an allowance — write the allowance as its own [[rule]]".into()));
+        }
         Some(
             crate::exposure::ExposureLimit::new(e.max_unresolved, e.max_oldest_age_ms, &e.scope)
                 .map(|limit| crate::exposure::ExposureRule { actor: self.actor.clone(), operation: self.operation.clone(), resource: self.resource.clone(), limit })
@@ -985,6 +993,17 @@ impl RuleDecl {
         (self.operation == "grant.issue" || self.operation == "*") && (self.resource == "*" || bare(&self.resource) == bare(resource))
     }
 
+    /// `requires_mandate` naming a `call:` scope, refused by name (identity-and-lifecycle I4, D-1): a `call:` mandate
+    /// is a gateway's cancellation handle, never authority a rule can require — no caller can present one, so the
+    /// rule would permit nothing. What the author wants is `cancellable = true`.
+    pub fn call_scope_required(&self) -> Option<String> {
+        // The literal, not `mandate::grant::CALL_SCOPE_PREFIX`: that module is built only with `tls`, and a unit file is
+        // validated in every build. The test below holds the two equal.
+        self.requires_mandate.as_deref().filter(|s| s.starts_with("call:")).map(|s| {
+            format!("requires_mandate = \"{s}\" names a call: scope, which no rule can require: a call: mandate is the gateway's cancellation handle for one call, not authority a caller presents — use `cancellable = true` to require one at the provider")
+        })
+    }
+
     /// The evaluator's own rule type, where the evaluator exists (a gateway that can attest).
     #[cfg(all(feature = "gateway", feature = "tls"))]
     pub fn to_rule(&self) -> Result<crate::Rule, String> {
@@ -997,7 +1016,11 @@ impl RuleDecl {
         let mut rule = crate::Rule::new(self.actor.as_str(), self.operation.as_str(), self.resource.as_str());
         rule.requires_scopes = self.requires_scopes.clone();
         rule.requires_facts = self.requires_facts.clone();
+        if let Some(why) = self.call_scope_required() {
+            return Err(why);
+        }
         rule.requires_mandate = self.requires_mandate.clone();
+        rule.cancellable = self.cancellable;
         if self.requires_grant {
             rule = rule.requiring_grant();
         }
@@ -1164,6 +1187,10 @@ impl NodeCapabilityConfig {
             // Refused where every reader loads the file, so `wire-check` and `test` agree (#680's review, finding 5).
             if r.requires_grant && r.requires_mandate.is_some() {
                 return Err(invalid("rule", "requires_grant and requires_mandate are one or the other: a grant is a mandate in the grant: family"));
+            }
+            // I4, D-1: a rule cannot require a call: mandate.
+            if let Some(why) = r.call_scope_required() {
+                return Err(invalid("rule.requires_mandate", why));
             }
             // Y5: an exposure rule is refused where every reader loads the file, by name.
             if let Some(Err(why)) = r.to_exposure_rule() {
@@ -1679,6 +1706,36 @@ max_providers = 4
     /// `requires_grant = true` is the grant family's shorthand (adopter-surface X3, fourth PR); with
     /// `requires_mandate` beside it the rule is refused; a key the rule does not have is refused by name, as a
     /// `[[mandate]]`'s is — a misspelt requirement would otherwise admit without one.
+    /// Identity-and-lifecycle I4 (exit 15, D-1, D-2): `cancellable = true` is an allowance's key and reaches the
+    /// evaluator's rule; `requires_mandate` naming a `call:` scope is refused by name where every reader loads the
+    /// file and at `to_rule` — a `call:` mandate is never authority a rule can require; and an exposure rule carries
+    /// no `cancellable`. A file without the key serialises without it. Seen failing first: with the two refusals
+    /// taken out, `call:*` validates and loads.
+    #[test]
+    fn a_cancellable_rule_and_a_rule_that_would_require_a_call_mandate() {
+        let rule = "[[rule]]\nactor = \"*\"\noperation = \"tools/call\"\nresource = \"tool:restock\"\n";
+        let cfg: NodeCapabilityConfig = toml::from_str(&format!("{rule}cancellable = true\n")).unwrap();
+        assert!(cfg.rules[0].cancellable);
+        cfg.validate().unwrap();
+        let plain: NodeCapabilityConfig = toml::from_str(rule).unwrap();
+        assert!(!plain.rules[0].cancellable);
+        assert!(!toml::to_string(&plain.rules[0]).unwrap().contains("cancellable"), "absent when false");
+        #[cfg(all(feature = "gateway", feature = "tls"))]
+        assert!(cfg.rules[0].to_rule().unwrap().cancellable && !plain.rules[0].to_rule().unwrap().cancellable);
+        for scope in ["call:*", "call:c1"] {
+            let bad: NodeCapabilityConfig = toml::from_str(&format!("{rule}requires_mandate = \"{scope}\"\n")).unwrap();
+            let err = bad.validate().unwrap_err().to_string();
+            assert!(err.contains("requires_mandate") && err.contains("call: scope") && err.contains("cancellable = true"), "{err}");
+            #[cfg(all(feature = "gateway", feature = "tls"))]
+            assert!(bad.rules[0].to_rule().unwrap_err().contains("call: scope"));
+        }
+        #[cfg(feature = "tls")]
+        assert_eq!(crate::mandate::grant::CALL_SCOPE_PREFIX, "call:", "the prefix `call_scope_required` tests for");
+        let exposure: NodeCapabilityConfig = toml::from_str(&format!("{rule}cancellable = true\n[rule.exposure]\nmax_unresolved = 1\n")).unwrap();
+        let err = exposure.validate().unwrap_err().to_string();
+        assert!(err.contains("`cancellable` belongs to an allowance"), "{err}");
+    }
+
     #[test]
     fn a_rule_requiring_a_grant_and_an_unknown_rule_key() {
         let cfg: NodeCapabilityConfig = toml::from_str("[[rule]]\nactor = \"purchaser\"\noperation = \"tools/call\"\nresource = \"tool:purchase.approve\"\nrequires_grant = true\n").unwrap();
@@ -1696,7 +1753,7 @@ max_providers = 4
         let typo = toml::from_str::<NodeCapabilityConfig>("[[mandate]]\nholder = \"p\"\nscope = \"s\"\noperations = []\nholders = [\"q\"]\n").unwrap_err().to_string();
         assert!(typo.contains("holders"), "{typo}");
         // The one reading of "may issue": `*` is any operation and any resource; a `@node` suffix is not matched.
-        let rule = |op: &str, res: &str| RuleDecl { actor: "t".into(), operation: op.into(), resource: res.into(), requires_scopes: vec![], requires_facts: vec![], requires_mandate: None, requires_grant: false, requires_values: Default::default(), exposure: None };
+        let rule = |op: &str, res: &str| RuleDecl { actor: "t".into(), operation: op.into(), resource: res.into(), requires_scopes: vec![], requires_facts: vec![], requires_mandate: None, requires_grant: false, requires_values: Default::default(), cancellable: false, exposure: None };
         assert!(rule("grant.issue", "tool:x").admits_grant_issue_for("tool:x"));
         assert!(rule("*", "*").admits_grant_issue_for("tool:x"));
         assert!(rule("grant.issue", "tool:x").admits_grant_issue_for("tool:x@127.0.0.1:1"));

@@ -2279,7 +2279,9 @@ runs of the whole `agent::bulk` module at 24 parallel processes.
   attempt 2, 2026-11-06); attempts 1 and 3 of the same head passed. Its node has no persistence, so #718's directory
   syncs do not run in it. `deliver` emits the higher-ballot `COMMIT` and a probe `COMMIT` back to back and waits only
   for the probe to apply, so on a multi-threaded runtime the probe can land first and the assertion read the slot
-  before the re-commit — the shape of a readiness signal that is not the event under test.
+  before the re-commit — the shape of a readiness signal that is not the event under test. Seen again, same message,
+  once in the `test-frame-filter` lib run on #775's successor branch (I4's PR 1b, 2026-11-13, a loaded machine); the
+  re-run of the line passed, 1 615 of 1 615. The branch touches no consensus or lock code.
 
 **Open next:**
 - each delivered row's *not built* list, in its §3.5 block and below — for K2: signed tally entries (a forgery under a

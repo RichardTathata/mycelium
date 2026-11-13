@@ -258,6 +258,19 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **`mycelium explain --closure`'s text counts nodes, not journal files, as its JSON does.** Two journals of one node
   under `--fleet 2`, or a record naming a node with no journal given, now print `INCOMPLETE` where the fleet line
   compared the number of files (#767's confirm round).
+- **A cancellable rule, and the provider's admission under a `call:` mandate** (identity-and-lifecycle I4, PR 1b;
+  `deprecations.md` §104). `cancellable = true` on a unit file's `[[rule]]` (`Rule::cancellable()`,
+  `Decision::cancellable`) says the call the rule permits must be cancellable. An enforcing provider reads the
+  gateway's `call:` mandate from the caller envelope's new second mandate slot, `cm`, assesses it once as it
+  registers the call's work, and registers the work under it as well as under the caller's own mandate — so a cancel
+  stops the handler, or an `rpc_rx` serve loop racing `authority_lapsed()`, and the stop record names which mandate
+  stopped it. Under a cancellable rule a call whose `call:` mandate is not established is refused
+  `authority_not_established` (-32031, `call_mandate_not_established`) and nothing runs; a call whose term is
+  already revoked is refused under any rule. A `call:` mandate fits only the envelope it was minted for (its term
+  is the envelope's id), so one lifted into another envelope is not established. `validate()` refuses
+  `requires_mandate` naming a `call:` scope. **Not yet built:** the gateway's mint — until it lands, a cancellable
+  rule refuses every call at an enforcing provider — and the cancel doors. `Rule` and `RuleDecl` gained a public
+  field.
 - **A `call:` mandate at the execution authority** (identity-and-lifecycle I4, PR 1a; `deprecations.md` §100). A
   `call:` mandate is a gateway's cancellation handle for one call: scope `call:{term}`, issued by the gateway to
   itself, with its first revocation checkpoint carried beside it (`PresentedCallMandate`).

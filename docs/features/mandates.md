@@ -63,8 +63,8 @@ work.
 - **Not built:** [guide 21 § What this does not establish](../guide/21-mandates.md#what-this-does-not-establish).
   The check-then-act window is narrowed and stated, not eliminated, and the wiki store counts its late writes
   rather than promising none ([what-is-proven § the check-then-act window](../operations/what-is-proven.md#check-then-act-window)).
-- **Not built, for the `call:` mandate:** no gateway mints one and no door cancels one yet. A provider does not
-  read one from a call. The authority's half is built
+- **Not built, for the `call:` mandate:** no gateway mints one and no door cancels one yet. The authority's half
+  and the provider's admission are built ([provider enforcement](provider-enforcement.md))
   ([I4](../plans/identity-and-lifecycle.md#3--rows), row I4, *The build*; [§100](../guide/deprecations.md#100-the-execution-authority-verifies-a-call-mandate-a-call-mandate-in-the-first-slot-is-never-established-the-call-key-family-is-owned-2410-identity-and-lifecycle-i4-pr-1a)).
 - **A `call:` checkpoint in the KV is verified at read:** a copy its gateway did not sign, or that names another
   call, is treated as absent and counted in `GET /stats` `call_checkpoints_refused`; an older copy written back and

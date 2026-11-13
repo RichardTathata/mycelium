@@ -698,9 +698,13 @@ pub(crate) enum Preflight {
     /// re-assesses the mandate, and when this is `true` a re-assessment that is no longer established refuses the
     /// call (the provider's `mandate_lapsed_before_run`): the revocation is known before the handler runs.
     ///
+    /// `cancellable`: the permit was decided by a **cancellable** rule (`Decision::cancellable`, identity-and-lifecycle
+    /// I4, D-2). The provider's registration reads it: without an established `call:` mandate the call is refused.
+    /// A gateway door carries it and does not act on it — the `call:` mandate is assessed once, at the provider (D-3).
+    ///
     /// `grant_claim`: the grant use this permit claimed at this door, when it presented one — released by
     /// [`release_grant_claim_after`] if the provider then refuses the call before anything runs.
-    Proceed { evidence: Box<super::action_evaluator::AeEvidence>, journal_sha256: Option<String>, mandate_established: bool, grant_claim: Option<GrantClaim> },
+    Proceed { evidence: Box<super::action_evaluator::AeEvidence>, journal_sha256: Option<String>, mandate_established: bool, grant_claim: Option<GrantClaim>, cancellable: bool },
     /// Refused. Nothing is dispatched.
     Refuse(super::action_evaluator::PreflightRefusal),
 }
@@ -1593,11 +1597,11 @@ impl Settling {
                     super::fleet_history::release_after_window(ctx, slot, env, window_ms);
                 }
                 let mandate_established = envelope.mandate.as_ref().is_some_and(|b| b.state == ae::MandateState::Established);
-                Preflight::Proceed { evidence: Box::new(evidence), journal_sha256, mandate_established, grant_claim: claimed }
+                Preflight::Proceed { evidence: Box::new(evidence), journal_sha256, mandate_established, grant_claim: claimed, cancellable: decision.cancellable }
             }
             // The shadow rung observes: what it admits was refused, so no later re-assessment refuses it either. (The
             // provider has no shadow rung; this is a gateway door's.)
-            Err(_) if shadow_admit => Preflight::Proceed { evidence: Box::new(evidence), journal_sha256, mandate_established: false, grant_claim: None },
+            Err(_) if shadow_admit => Preflight::Proceed { evidence: Box::new(evidence), journal_sha256, mandate_established: false, grant_claim: None, cancellable: false },
             Err(refusal) => {
                 warn!(actor = %envelope.actor, %operation, %resource,
                       "AE preflight refused: {refusal}");
