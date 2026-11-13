@@ -597,7 +597,7 @@ re-counts them.
 
 #### CR13 · An inbound entry stamped beyond the drift bound: counted, then refused *(L2)*
 
-**State (2026-11-12):** **step 1, the counter, is *buildable*, inside wave 1b** (D11, D16). **Step 2, the refusal, is not buildable yet**: it waits for a release of counting and for the slow-clock case to have an acceptable answer (D16), and it lands default-on with a recorded carve-out in runtime-invariants, in the same PR.
+**State (2026-11-13):** **step 1, the counter, is delivered, unreleased** — each promise beside its test (`src/lib_tests.rs` unless said): *"where `max_clock_drift_ms > 0`"* and, with the bound at 0, nothing counted — `with_no_drift_bound_no_stamp_is_counted`; *"an inbound KV entry whose physical time is beyond wall + the bound is counted"* — the clamp's own condition, strict, physical time only (`Hlc::observe_reporting`, `hlc::beyond_drift_bound`; `beyond_the_drift_bound_is_strictly_past_the_limit` and `observe_reports_a_stamp_it_clamped_and_no_other`, `mycelium-core/src/hlc.rs`), with `an_entry_on_or_inside_the_drift_bound_is_not_counted` for the entry on the bound and inside it; *"at each of the three doors that take a remote stamp"* and *"still applied"* — `an_entry_stamped_beyond_the_drift_bound_is_counted_at_its_door_and_still_applied` (`u64::MAX`, bound + 1 ms and a tombstone through `StateResponse`, `Data` and `SignedData`: once each, held by the store at its own stamp, each live door's frames still forwarded at their own stamps; appended to the WAL as before, `a_counted_entry_is_persisted_as_before_and_replay_does_not_count_it`); *"`kv_future_stamps` on `/stats` and in metrics"* — `the_future_stamp_counter_is_on_stats_and_in_the_metrics_export` (`kv_future_stamps`, `kv_future_stamps_by_door`, `SystemStats::kv_future_stamps`, `mycelium_kv_future_stamps_total{door}`; the metric per door, exactly, `the_future_stamp_metric_counts_each_door_exactly`). The slow-clock receiver is observed, not answered: `a_node_whose_clock_is_behind_counts_the_fleets_ordinary_entries`. *Not built, by this step:* a count at replay (`src/agent/lifecycle.rs`, step 2's fourth door); anything that changes what is applied, forwarded or written to the WAL. **A finding of step 1 against step 2 (#782's review, 2026-11-13):** the counter also rises for honest senders with good clocks, and a member can make it — the fifth case below, which step 2 must answer. **Step 2, the refusal, is not buildable yet**: it waits for a release of counting, for the slow-clock case to have an acceptable answer (D16) and for the fifth case to have one, and it lands default-on with a recorded carve-out in runtime-invariants, in the same PR.
 
 **What:** in two steps, as every other refusal in this repository ships (O3, O5, O6; D1's recommendation):
 
@@ -660,6 +660,25 @@ trade beside it. Until then neither shape is buildable.
   `u64::MAX` entry it must itself be stamped `u64::MAX` (`mycelium-core/src/store.rs:595`), so it is itself
   beyond the bound, is refused at the three doors, and is never collected (`store.rs:967`). Without the repair,
   the row states the churn.
+- **Honest writes after a stamp at or past the bound** (found by step 1's review, #782; a finding against step 2
+  in **either** shape). A node that observes a stamp at or past its limit is left with its clock on the limit
+  (`mycelium-core/src/hlc.rs`, the clamp), one step past the stamp's logical counter. **When that counter is
+  full** — `u64::MAX`, or a member's choice of `0xFFFF` — `tick` carries and the node's next local write is
+  stamped one millisecond past the limit; a peer whose wall clock is not ahead of the writer's sees that honest
+  write as beyond its bound. With a lower counter (`pack(limit + 1, 0)` leaves `pack(limit, 1)`) the next
+  writes are *on* the limit: a same-clock peer does not count them, a peer even a millisecond behind does. A
+  stamp **exactly on** the limit with a full counter does the first and
+  is itself inside the bound — not counted today, and not refused under step 2. So under step 2 as written,
+  refusal or local non-admission alike, those honest writes would be refused or not admitted: **a member sending
+  in-bound frames could turn the refusal on the fleet's own writes**, and the slow-clock margin is not the bound
+  but the bound minus the furthest any member's stamps run ahead (a peer four minutes ahead makes a receiver
+  61 s behind count). Shown, as existing clock behaviour:
+  `an_honest_write_after_an_observed_future_stamp_is_reported_by_a_peer` (`mycelium-core/src/hlc.rs`) and
+  `an_honest_write_after_a_stamp_on_the_bound_is_counted_at_a_same_clock_peer` (`src/lib_tests.rs`). It also
+  means a release of counting does not read as "how often a healthy fleet would trip a refusal": the count
+  includes these, an entry already held is recounted by anti-entropy while its bucket differs, and a member can
+  raise it at will. The row must say what step 2 does about this case, with an exit test, before step 2 is
+  buildable; the answer is not designed here.
 - **Mixed configuration, not only mixed version:** a node with `max_clock_drift_ms = 0` accepts what the others
   refuse, permanently. `validate()` or the guarantee report says so; the upgrade note states both.
 - A `u64::MAX`-stamped entry through each of the three doors leaves the key as it was; an entry inside the bound
@@ -669,7 +688,7 @@ trade beside it. Until then neither shape is buildable.
 entry. Does not stop a stamp *inside* the bound: a member can still out-stamp an owner by up to five minutes,
 which is what CR2's first step had to be rewritten around. Does not change the wire.
 
-**Size:** S for the counter; M for the refusal with its four cases.
+**Size:** S for the counter; M for the refusal with its five cases.
 
 #### CR14 · A per-record WAL checksum *(L4; the critique's code area 3, first half)*
 

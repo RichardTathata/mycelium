@@ -87,6 +87,46 @@ pub struct TransportBounds {
     /// them is one their node has revoked (post-360 plan row Q) — a compromised key still in use, or a
     /// record signed before the revocation replayed. `GET /stats` `kv_revoked_key_refused`.
     pub kv_revoked_key_refused: AtomicU64,
+    /// Inbound KV entries whose stamp was **beyond this node's drift bound** (`max_clock_drift_ms`),
+    /// one counter per door ([`StampDoor`]) — external-critique plan CR13, step 1. **Detection, not
+    /// prevention**: the entry is applied, forwarded and written to the WAL exactly as before; the
+    /// clock's clamp (`Hlc::observe_reporting`) is what reports it. Always zero when the bound is 0.
+    /// Entries, not keys or peers: an entry that loses last-writer-wins is counted too.
+    /// `GET /stats` `kv_future_stamps` (and `kv_future_stamps_by_door`), `SystemStats::kv_future_stamps`.
+    kv_future_stamps: [AtomicU64; 3],
+}
+
+// One counter per door: a door added to `StampDoor::ALL` without one fails the build here.
+const _: () = assert!(StampDoor::ALL.len() == 3);
+
+/// The three doors a remote KV entry's stamp comes through (`connection.rs`'s `StateResponse`, `Data`
+/// and `SignedData` arms) — the breakdown of [`TransportBounds::kv_future_stamps`].
+///
+/// `#[non_exhaustive]`: replay at start is a named later door (CR13, step 2), so a `match` outside
+/// this crate takes a wildcard arm, and [`StampDoor::ALL`] is to be iterated, not indexed by length.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum StampDoor {
+    /// An anti-entropy `StateResponse` entry.
+    AntiEntropy,
+    /// A live, unsigned `Data` frame.
+    Data,
+    /// A live `SignedData` frame.
+    SignedData,
+}
+
+impl StampDoor {
+    /// Every door, in the order the counters are held.
+    pub const ALL: &'static [StampDoor] = &[StampDoor::AntiEntropy, StampDoor::Data, StampDoor::SignedData];
+
+    /// The door's name on `/stats` (`kv_future_stamps_by_door`) and as the metric's `door` label.
+    pub const fn name(self) -> &'static str {
+        match self {
+            StampDoor::AntiEntropy => "anti_entropy",
+            StampDoor::Data => "data",
+            StampDoor::SignedData => "signed_data",
+        }
+    }
 }
 
 /// One connection's place under the per-source cap; given back when dropped. It holds the very
@@ -168,6 +208,24 @@ impl TransportBounds {
     /// Whether a reply to `peer` is in flight (tests and diagnostics).
     pub fn reply_in_flight(&self, peer: &NodeId) -> bool {
         self.replying_to.pin().contains_key(peer)
+    }
+
+    /// Counts one inbound KV entry stamped beyond the drift bound, at `door` (CR13, step 1). A relaxed
+    /// increment; called only for an entry the clamp caught, so the ordinary entry pays one branch.
+    pub fn count_future_stamp(&self, door: StampDoor) {
+        self.kv_future_stamps[door as usize].fetch_add(1, Ordering::Relaxed);
+        #[cfg(feature = "metrics")]
+        metrics::counter!("mycelium_kv_future_stamps_total", "door" => door.name()).increment(1);
+    }
+
+    /// Entries counted at `door` ([`Self::count_future_stamp`]).
+    pub fn kv_future_stamps_at(&self, door: StampDoor) -> u64 {
+        self.kv_future_stamps[door as usize].load(Ordering::Relaxed)
+    }
+
+    /// Entries counted at every door: `GET /stats` `kv_future_stamps`.
+    pub fn kv_future_stamps(&self) -> u64 {
+        StampDoor::ALL.iter().map(|d| self.kv_future_stamps_at(*d)).sum()
     }
 
     /// Counts one inbound connection closed because a frame in progress stalled.

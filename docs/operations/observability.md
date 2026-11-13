@@ -16,7 +16,7 @@ uncredentialed:
 |---|---|
 | `GET /health` | `200` = process alive (liveness probe). With `[persistence]` the body carries a `persistence` block: `wal_refusing_appends` (`true` while the WAL writer refuses every append after a failed write, until a snapshot truncates the torn tail — since 2026-10-09), its `reason`, and `dropped_appends` (appends with no WAL record: queue-full drops, the failed write, the refusals) |
 | `GET /ready` | `200` = startup complete → serving KV/signals/membership (readiness probe). Capability discovery gossips independently and does **not** gate readiness — a node advertising no soft state is still ready (changed 2026-07-15) |
-| `GET /stats` | `node_id`, `cluster_name`, `store_entries`, `dropped_frames`, `task_count`, and the tripwire counters (`commit_conflicts`, `consensus_decided_floor_anomalies`, `consensus_ballot_space_exhausted`, `sys_namespace_violations`, `cap_authz_violations`, `schema_mismatch`, `governance_changes` / `governance_unaudited` (accepted governance writes at this gateway — `/gateway/govern/*`, `identity/revoke` — and those that left no audit record; 2.27.0. A plain group's `mesh:write` join is audited, not counted), `rate_limited_senders`, `individual_flood_fallbacks`), plus liveness (`dead_shards`, `gc_alive`, `health_monitor_alive`) |
+| `GET /stats` | `node_id`, `cluster_name`, `store_entries`, `dropped_frames`, `task_count`, and the tripwire counters (`commit_conflicts`, `consensus_decided_floor_anomalies`, `consensus_ballot_space_exhausted`, `sys_namespace_violations`, `cap_authz_violations`, `schema_mismatch`, `governance_changes` / `governance_unaudited` (accepted governance writes at this gateway — `/gateway/govern/*`, `identity/revoke` — and those that left no audit record; 2.27.0. A plain group's `mesh:write` join is audited, not counted), `rate_limited_senders`, `individual_flood_fallbacks`, `kv_future_stamps` with `kv_future_stamps_by_door`), plus liveness (`dead_shards`, `gc_alive`, `health_monitor_alive`) |
 | `GET /metrics` | Prometheus scrape (requires the `metrics` feature). Carries a `cluster` label on every series when `cluster_name` is set |
 | `GET /.well-known/agent-facts.json` | this node's self-certified AgentFacts (when the [facts lens](#viewing-agentfacts) is mounted) |
 | `GET /consensus/{slot}` | a consensus slot's committed value + ballot + lease state — an application's slot, a lock's (`lock/{name}`) or a leader's (`leader/{group}`); a component's slot (`cn/`, `clog/`, `electorate/`, `ae-seat/`, `capauthz/`, and `consistent/{owned key}`) is **403** `protected_slot` whatever the scopes ([deprecations.md §102](../guide/deprecations.md)). **Bearer required** when a token model is set (scope `consensus:read`, since 2026-09-05); the four rows above stay public |
@@ -40,6 +40,40 @@ curl -s http://node:8080/stats | jq
   `Individual-scoped frame has no direct route; flooding via relay (topology pressure …)`.
   Remedy: pin the pair with `GossipAgent::connect_peer` — see
   [tuning §RPC-heavy pairs](tuning.md#rpc-heavy-pairs--the-topology-pressure-warn).
+- `kv_future_stamps` — inbound KV entries whose stamp was **beyond this node's drift bound**: physical
+  time past this node's wall clock plus `max_clock_drift_ms` (300 s by default). **Counted and still
+  applied**: under last-writer-wins such an entry holds its key until the wall clock passes its stamp, and
+  nothing refuses it. `kv_future_stamps_by_door` splits the count by where the entry came in —
+  `anti_entropy`, `data` (a live unsigned frame), `signed_data`. Always `0` with
+  `max_clock_drift_ms = 0`.
+
+  **What it is evidence of: that a far-future stamp is in circulation, not who sent it.** Three causes:
+  1. **A sender's clock is ahead** by more than the bound: every receiver counts that sender's writes
+     (each logs `remote HLC stamp exceeds the clock-drift bound` at most once every ten seconds).
+  2. **This node's clock is behind**: this node counts the fleet's ordinary writes. Not only when it is
+     more than the bound behind — the margin is the bound *minus* the furthest any member's stamps run
+     ahead, so with one peer four minutes ahead (inside the bound, uncounted) a node 61 s behind counts.
+  3. **Honest senders with good clocks, after any node has heard a stamp at or past the bound.** A node
+     that hears such a stamp keeps its own clock at its limit. When the stamp's logical counter is full
+     (`u64::MAX`, or a member's choice) its **next local write is stamped a millisecond past that
+     limit**, so every peer whose clock is not ahead of it counts it; with a lower counter its next
+     writes are *on* the limit, which a peer with the same clock does not count and a peer even a
+     millisecond behind does. One far-future
+     frame therefore makes many nodes count many senders; and a member can cause it with frames stamped
+     exactly *on* the bound with a full logical counter, which are themselves never counted
+     (`an_honest_write_after_an_observed_future_stamp_is_reported_by_a_peer`, `mycelium-core/src/hlc.rs`).
+     "Every node counts, for many senders" is this case, not a fleet of bad clocks.
+
+  **What the figure is not.** It is entries, not keys, senders or incidents, and **a member can raise
+  it at will**: any number of frames stamped `u64::MAX`, or unsolicited `StateResponse` entries, which
+  are unsigned and applied even by a `[tls]` node (existing behaviour, the
+  [mesh mTLS](../features/mesh-mtls.md) page's limit). An entry the fleet **already holds** is counted
+  again at `anti_entropy` on every round in which its bucket differs from a peer's — anti-entropy
+  sends a differing bucket whole — so with ordinary churn the count keeps rising, on every node, after
+  the sender's clock is fixed: the rate then reflects churn, not arrivals. A frame refused **before**
+  the clamp — unsigned on a `[tls]` node, a removed member's, a repeated nonce, a failed or unknown
+  signature — is not counted: it was not applied and moved no clock. Entries a node reads back from its
+  own WAL or snapshot at start are not counted.
 - `commit_conflicts` / `sys_namespace_violations` — the **detection-not-prevention
   tripwires**. A non-zero value means someone wrote to a `consensus/` slot or a
   `sys/{identity,identity-signed,identity-proof,load,role,tuple,caller-context,consensus-accepted}/{node}`

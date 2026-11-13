@@ -200,6 +200,27 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **An inbound KV entry stamped beyond the drift bound is counted** (the external-critique plan's row CR13, step
+  1; `docs/plans/external-critique-2026-11-12.md`). A node clamps its own clock when a peer's stamp is more than
+  `max_clock_drift_ms` ahead of its wall clock, and applies the entry all the same: under last-writer-wins a
+  far-future stamp — `u64::MAX` at the limit — holds its key until the wall clock passes it. Nothing counted how
+  often that happens. Now each such entry is counted at the door it came through — an anti-entropy entry, a `Data`
+  frame, a `SignedData` frame — by the clamp's own condition (`Hlc::observe_reporting`; strict, on physical time,
+  no second clock read): `GET /stats` `kv_future_stamps` and `kv_future_stamps_by_door`,
+  `SystemStats::kv_future_stamps`, and `mycelium_kv_future_stamps_total{door}` under `metrics`. **Nothing else
+  changes**: the entry is applied, forwarded and written to the WAL exactly as before, and with
+  `max_clock_drift_ms = 0` nothing is counted. **The count is evidence that a far-future stamp is in
+  circulation, not of who sent it**: it rises for a sender whose clock is ahead, for a receiver whose own clock
+  is behind, and for honest senders with good clocks once any node has heard a stamp at or past the bound (its
+  clock is left on its limit: its next local write is stamped just past it when the heard stamp's logical
+  counter was full, and on it otherwise, which a peer even a millisecond behind counts); a held entry is recounted by anti-entropy while its
+  bucket differs, and a member can raise the figure at will (`docs/operations/observability.md`). Entries
+  replayed from a node's own WAL or snapshot are not counted. `mycelium_core::hlc` gains `beyond_drift_bound`
+  and `Hlc::observe_reporting`, `mycelium_core::bounds` `StampDoor` (`#[non_exhaustive]`). **`SystemStats`
+  gains the public field `kv_future_stamps`, and the struct is not `#[non_exhaustive]`: code that builds it
+  with a struct literal, or destructures it without `..`, stops compiling until it names the field** — as with
+  every field added to it before. No deprecations entry: no behaviour changes.
+
 - **N5: the agent guide the binary serves** (`docs/plans/identity-and-lifecycle.md` N5). `mycelium skills get fleet`
   prints a Markdown guide for a coding agent, embedded in the binary with its release tag filled in: the six steps
   from the binary to a governed fleet, every subcommand with the JSON document it prints, and how to read the output.

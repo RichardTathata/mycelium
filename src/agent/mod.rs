@@ -607,6 +607,31 @@ pub struct SystemStats {
     /// at read; unsigned keys (`load`, `tuple`) rely on this signal alone.
     pub sys_namespace_violations: u64,
 
+    /// Cumulative inbound KV entries whose stamp was **beyond this node's drift bound** — physical
+    /// time past this node's wall clock plus `max_clock_drift_ms` — at the three doors a remote stamp
+    /// comes through: an anti-entropy entry, a `Data` frame, a `SignedData` frame (external-critique
+    /// plan CR13, step 1; the per-door figures are on `GET /stats` `kv_future_stamps_by_door` and the
+    /// `door` label of `mycelium_kv_future_stamps_total`). Always `0` when the bound is `0`.
+    ///
+    /// **Detection, not prevention**: the entry is applied, forwarded and persisted as before, and
+    /// under last-writer-wins it holds its key until the wall clock passes its stamp. The node's own
+    /// clock is clamped (`hlc.rs`, "Remote drift bound"); this counts the entries the clamp caught.
+    ///
+    /// **Evidence that a far-future stamp is in circulation, not of who sent it.** Three causes: a
+    /// **peer's** clock is ahead; **this node's** clock is behind (by the bound minus the furthest
+    /// any member's stamps run ahead, not only by the whole bound); and **honest senders with good
+    /// clocks** — a node that has heard a stamp at or past the bound keeps its clock at its limit. If
+    /// that stamp's logical counter was full (`u64::MAX`, or a member's choice) its next local write
+    /// is stamped a millisecond past the limit, which every peer not ahead of it counts; otherwise
+    /// its next writes are on the limit, which a peer even a millisecond behind counts. A stamp
+    /// exactly on the bound with a full counter does the first and is itself never counted.
+    ///
+    /// Entries, not keys, senders or incidents: an entry the fleet already holds is counted again by
+    /// anti-entropy on every round its bucket differs, and a member can raise the figure at will. A
+    /// frame refused before the clamp is not counted. Entries read back from this node's own WAL or
+    /// snapshot at start are not counted.
+    pub kv_future_stamps: u64,
+
     /// Cumulative identity-anchor conflicts (identity-auth Phase 1b): a `sys/identity/{V}` KV
     /// entry introduced a key differing from `V`'s CA-anchored (mTLS-cert) key. A poisoning
     /// signal; may briefly rise on a legitimate rotation until the new key is re-anchored.

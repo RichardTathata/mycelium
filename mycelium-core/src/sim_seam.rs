@@ -46,6 +46,10 @@
 pub fn wall_now_ms() -> u64 {
     #[cfg(any(test, feature = "test-support"))]
     {
+        let pin = WALL_PIN_MS.with(|c| c.get());
+        if pin != 0 {
+            return pin;
+        }
         let off = WALL_STEP_MS.with(|c| c.get());
         if off != 0 {
             return real_wall_now_ms().saturating_add_signed(off);
@@ -57,6 +61,16 @@ pub fn wall_now_ms() -> u64 {
 #[cfg(all(not(feature = "sim"), any(test, feature = "test-support")))]
 thread_local! {
     static WALL_STEP_MS: std::cell::Cell<i64> = const { std::cell::Cell::new(0) };
+    static WALL_PIN_MS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// **Test only:** hold this thread's wall clock at `ms` (`None` lets it run again). Where a test must
+/// stand exactly on a bound — one millisecond inside it, on it, one past it — a running clock moves
+/// between the stamp and the read, and a step ([`step_wall_clock_for_test`]) moves with it. A pin wins
+/// over a step. `Some(0)` is not a pin. Same reach as the step: a `#[tokio::test]`'s own thread.
+#[cfg(all(not(feature = "sim"), any(test, feature = "test-support")))]
+pub fn pin_wall_clock_for_test(ms: Option<u64>) {
+    WALL_PIN_MS.with(|c| c.set(ms.unwrap_or(0)));
 }
 
 /// **Test only:** step this thread's wall clock by `ms` (negative is backwards) — what an NTP step
