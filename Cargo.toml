@@ -31,6 +31,10 @@ gateway = ["dep:axum", "dep:tower-http", "dep:tokio-stream", "dep:futures-util",
 # cargo-fuzz harness under `fuzz/`. NOT part of the stable public API — only
 # enable when building fuzz targets.
 fuzz-internals = []
+# Exposes the `model_internals` module wrapping the acceptor's pure decision functions for the
+# Stateright model in `mycelium-model` (critique plan row CR10). NOT part of the stable public API,
+# and on in no shipped build — only `mycelium-model` enables it.
+model-internals = ["consensus"]
 # Enables mTLS on the gossip TCP port, keypair-backed node identity, and
 # consensus payload signing. Adds tokio-rustls, rcgen, and ed25519-dalek.
 tls = ["mycelium-core/tls", "dep:tokio-rustls", "dep:rustls", "dep:rcgen", "dep:ed25519-dalek", "dep:rand_core", "dep:arc-swap", "dep:webpki", "reqwest?/rustls-tls-manual-roots"]
@@ -64,7 +68,7 @@ test-frame-filter = ["mycelium-core/test-frame-filter"]
 # The `fuzz/` directory is its own cargo-fuzz crate; keep it out of any
 # implicit-workspace traversal from this parent manifest.
 [workspace]
-members = ["mycelium-core", "mycelium-sim", "mycelium-tuple-space", "mycelium-blackboard", "mycelium-wiki", "mycelium-wasm-host", "mycelium-agentfacts", "mycelium-reason", "mycelium-guardrails", "mycelium-effects", "mycelium-commitment", "examples/coop", "loom-spike", "mycelium-gateway-free-tests", "mycelium-tls-free-tests"]
+members = ["mycelium-core", "mycelium-sim", "mycelium-tuple-space", "mycelium-blackboard", "mycelium-wiki", "mycelium-wasm-host", "mycelium-agentfacts", "mycelium-reason", "mycelium-guardrails", "mycelium-effects", "mycelium-commitment", "examples/coop", "loom-spike", "mycelium-model", "mycelium-gateway-free-tests", "mycelium-tls-free-tests"]
 # `fuzz/` is its own cargo-fuzz crate; the wasm guest fixture is a wasm32 cdylib
 # built out-of-band (its prebuilt .wasm is committed as a test fixture).
 exclude = ["fuzz", "mycelium-wasm-host/tests/fixtures/echo-component", "examples/conway-gpu", "templates"]

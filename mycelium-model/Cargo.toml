@@ -1,0 +1,17 @@
+[package]
+name         = "mycelium-model"
+version      = "0.0.0"
+edition      = "2024"
+publish      = false
+description  = "A Stateright model of Mycelium's single-decree acceptor: slot reuse, the lease's wall-clock end, the electorate migration (critique plan row CR10)."
+
+# Why a crate of its own: Stateright (and its dependencies — an HTTP explorer, `rand`, `dashmap`) must not be in
+# the dependency graph of `mycelium`, `mycelium-core` or any published crate, as a dependency or a
+# dev-dependency. This crate depends on `mycelium`; nothing depends on it; it is never published. It reaches the
+# engine's decision functions through `mycelium`'s `model-internals` feature, which only this crate enables.
+
+[dependencies]
+mycelium   = { path = "..", default-features = false, features = ["consensus", "model-internals"] }
+bytes      = "1"
+# Pinned exactly: the checker is part of what a CI result means. 0.31.0 was published 2025-07-27.
+stateright = "=0.31.0"
