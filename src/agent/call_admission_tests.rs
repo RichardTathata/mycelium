@@ -620,7 +620,7 @@ async fn a_call_mandate_out_of_its_window_is_refused_by_its_cause() {
 #[test]
 fn the_causes_of_a_call_mandate_refusal_are_a_closed_list() {
     use super::provider_enforcement::CallCause;
-    // Exhaustive, with no wildcard: a new variant stops this compiling until it is listed here and in `ALL`.
+    // Exhaustive, with no wildcard: a new variant stops this compiling until it is listed here. `ALL` is not forced the same way: a variant left out of it compiles and is unpinned, so add it there too.
     for c in CallCause::ALL {
         match c {
             CallCause::Revoked | CallCause::NoEnvelope | CallCause::NoCallMandate | CallCause::UnsignedEnvelope | CallCause::NoAuthority => {}
