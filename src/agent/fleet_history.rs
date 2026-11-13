@@ -30,7 +30,9 @@
 //!   ([`FLEET_TALLY_CAVEAT`](super::action_evaluator::FLEET_TALLY_CAVEAT)).
 //!
 //! **What is visible fleet-wide, and to whom.** Every member holds these keys, as it holds every gossiped key; the
-//! gateway's raw KV routes refuse both namespaces (`sys/` and `consensus/` are owned). A key carries two digests (the
+//! gateway's raw KV routes refuse both namespaces' values (`sys/` and `consensus/` are owned) and its slot routes
+//! refuse the `ae-seat/` family, to read and to propose (`SLOT_FAMILIES`, `src/agent/http/authz.rs`); the raw
+//! listing still shows the key names under `consensus/`. A key carries two digests (the
 //! first 128 bits of a SHA-256): of the policy's **declared counter id** with the kind of point, and of the actor's
 //! principal. The counter id is opaque — the policy chooses it ([`Rule::scoped`](super::action_evaluator::Rule::scoped))
 //! and it never encodes the rule's operation or resource, so a member learns *that* an actor counted against *some*

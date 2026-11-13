@@ -18,6 +18,7 @@ from .agent import (
     ProtectedKindError,
     ServeEvictedError,
     ProtectedKeyError,
+    ProtectedSlotError,
     ProtectedStreamError,
     SupersededError,
 )
@@ -43,6 +44,7 @@ __all__ = [
     "ProtectedKindError",
     "ServeEvictedError",
     "ProtectedKeyError",
+    "ProtectedSlotError",
     "ProtectedStreamError",
     "SupersededError",
     "CapabilityHandle",

@@ -12,7 +12,7 @@
  *   MYCELIUM_TEST_HOST=127.0.0.1 MYCELIUM_TEST_PORT=8300 npm test
  */
 
-import { MyceliumAgent, ProtectedStreamError } from "../../src/agent";
+import { MyceliumAgent, ProtectedSlotError, ProtectedStreamError } from "../../src/agent";
 
 const TEST_HOST = process.env.MYCELIUM_TEST_HOST;
 const TEST_PORT = parseInt(process.env.MYCELIUM_TEST_PORT ?? "0", 10);
@@ -262,6 +262,16 @@ describe_("MyceliumAgent — live node tests", () => {
     }
     const trace: any = await a.scanLog("reason/ts-live/n").catch((e) => e);
     expect(String(trace.message)).toContain("/gateway/reason/trace/");
+  });
+
+  // The slot decision (2026-11-12): the cross-group route proposes on application slots only.
+  it_("crossGroupPropose refuses a component-owned slot", async () => {
+    for (const slot of ["cn/ts-live/award", "capauthz/ts-live/x", "electorate/ts-live/1", "ae-seat/ts-live/x/0",
+                        "clog/ts-live/g/claim", "lock/ts-live", "leader/ts-live", "consistent/ts-live"]) {
+      const err: any = await a.crossGroupPropose(slot, Buffer.from("forged"), [{ group: "ts-live", quorum: 0.5 }]).catch((e) => e);
+      expect(err).toBeInstanceOf(ProtectedSlotError);
+      expect(err.slot).toBe(slot);
+    }
   });
 
   it_("compactLog does not throw", async () => {

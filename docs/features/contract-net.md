@@ -47,6 +47,11 @@ for by drivers, each awarded exactly once, reported, and assessed by a food-bank
 
 - No guarantee or rule id of its own: the award's durability is the rung its
   [durability receipt](durability-receipts.md) names, and no more.
+- A linearizable award's slot (`cn/{requirement}/award`) is not an HTTP client's: a node's
+  `GET /consensus/{slot}` does not read it and `POST /gateway/consensus/cross_group_propose` does not propose on
+  it — both answer 403 `protected_slot`, whatever the token's scopes ([the gateway](http-gateway.md);
+  `a_committed_award_is_not_read_or_proposed_through_the_slot_routes`). A member of the fleet still can, through
+  the library: that is what the `_verified` path is for.
 - **Not built:** a single award between racing declarers on the plain path — two declarers racing `award` both commit
   and last-writer-wins keeps one; only the linearizable commit refuses the second; protection on the plain path from
   forgery — any member can append a close or write an award, and the unverified readers (`close_of`, `award_of`) can be
