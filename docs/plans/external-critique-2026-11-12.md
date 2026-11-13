@@ -1,6 +1,6 @@
 # The third-party critique of 2026-11-12 — verification and the plan that answers it
 
-**Status:** **agreed with the maintainer on 2026-11-12**, rev 0.3 (rev 0.3, 2026-11-12, records the maintainer's
+**Status:** **agreed with the maintainer on 2026-11-12**, rev 0.4 (rev 0.4, 2026-11-13: CR13's second step gains a second candidate shape, local non-admission with forwarding unchanged, to be weighed with the counter's data; D16 unchanged; rev 0.3, 2026-11-12, records the maintainer's
 answers to all sixteen decisions of §5, each as recommended, and marks every row of §4 *buildable*, *after wave
 1b* or *decision recorded, no row*; rev 0.2 took the independent review of this plan's PR, #773: the use-marker
 row rewritten — a KV record alone cannot carry it; the lease margin and the fenced write restated; the drift
@@ -589,6 +589,40 @@ re-counts them.
    clock and opens no WAL window. `apply_and_notify` is untouched, so a node's own stamped writes are not
    affected. It reads the entry's stamp and the receiver's clock: no prefix, no owner.
 
+**A second shape for step 2, to weigh with the counter's data (the maintainer's question, 2026-11-13): local
+non-admission, forwarding unchanged.** Step 2 as written does not say what happens to the frame after the entry is
+not applied. The signal mesh's rule is that a node always forwards and decides locally whether to *act*
+(`Boundary::admits`, `mycelium-core/src/signal.rs:140`). The same rule for a KV entry: a node whose clock puts the
+stamp beyond its bound **does not apply it to its own store, counts it, and forwards the frame as it would any
+other** — a live `Data` or `SignedData` frame is already forwarded by its TTL whether or not it won LWW
+(`mycelium-core/src/connection.rs:1089`–`1119`), and an anti-entropy entry is never forwarded (TTL 1), so there
+the two shapes are the same. It is not the `Boundary` type itself: that sees a signal's scope only, and a KV frame
+never passes through it; opacity is a load hint and carries no stamp. It is the boundary's *principle* applied at
+Layer I's three doors.
+
+- *What it changes:* the frame is still forwarded, so the mesh gains no new case of a dropped KV frame, and a
+  node whose own clock is slow **still relays the fleet's live writes**, where a refusing node on a gossip path
+  would stop them until anti-entropy.
+- *What it does not change:* D16's objection. A node still declines an update on its own clock, so the store is
+  still not a pure function of the updates received, and — unlike a signal a node does not admit, which leaves
+  nothing behind — an entry a node does not apply is a lasting divergence from the peers that hold it. Whether a
+  carve-out is recorded is unchanged by this shape and is decided with step 2. The slow-clock receiver's own
+  store, the replay door, the node-local repair and the mixed-configuration case below are the same under either
+  shape; a node that will not apply an entry is still offered it at every anti-entropy round by a peer that holds it.
+- *What it must do:* as the refusal must, skip `hlc.observe` as well as the apply, or the node's clock is still
+  dragged to the limit, and append nothing to the WAL and open no `begin_inbound` window (`connection.rs:185`);
+  and, **for this shape only, move the forward out from behind the apply**, or place the check between them — today both live arms forward
+  only after `apply_inbound_then_append` (`connection.rs:1088`–`1125`, `:1262`–`1290`).
+- *What it costs:* containment, by a bounded amount. A forwarded far-future entry travels on by its remaining
+  TTL over live gossip, once per node (the seen-set drops a repeat, the TTL is never reset), so it reaches — and
+  pins — a node whose bound is 0 or whose clock is ahead that is reachable only through non-applying nodes. A
+  node that already holds the entry offers it to everyone by anti-entropy under either shape.
+
+D16's decision stands — the counter, then a second step conditional on what the counter shows, which as decided
+lands default-on with a recorded carve-out. Taking this shape instead, or dropping the carve-out, would change
+that decided text: **it is the maintainer's choice when step 2 is written**, with the counter's figures and this
+trade beside it. Until then neither shape is buildable.
+
 **The cases the row must answer, each an exit test:**
 
 - **A receiver whose own clock is slow** — booted before NTP, or more than the bound behind. Today it converges
@@ -832,6 +866,11 @@ draft made inside a row; the review of #773 found them, and they are here now.
   and on the slow-clock case having an acceptable answer — and default-on only after a release of counting,
   which is itself part of this decision.
   **Decided 2026-11-12:** (b). The counter first; the refusal default-on only after a release of counting, with a recorded carve-out in runtime-invariants, and conditional on what the counter shows and on the slow-clock case having an acceptable answer.
+  **Added 2026-11-13, at the maintainer's request, not a new decision:** step 2 has a second candidate shape,
+  written in CR13 — *local non-admission with forwarding unchanged*, the boundary's principle applied to a KV
+  entry — which keeps relaying where a refusal would stop a frame, contains a poisoned entry slightly less well,
+  and leaves this decision's objection where it is. Which shape step 2 takes is the maintainer's choice when
+  that step is written.
 
 ## 6 · Where the critique is wrong or overstated, and where it is understated
 

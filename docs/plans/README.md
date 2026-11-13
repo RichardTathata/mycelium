@@ -163,7 +163,7 @@ future contributor needs so they don't re-litigate a settled choice — lives he
 ## Proposed — not yet started
 
 [`external-critique-2026-11-12.md`](external-critique-2026-11-12.md) — **the third-party critique of 2026-11-12:
-verification and the plan that answers it** (**agreed with the maintainer 2026-11-12**, rev 0.3: all sixteen decisions of its §5 answered as
+verification and the plan that answers it** (**agreed with the maintainer 2026-11-12**, rev 0.4 — rev 0.4, 2026-11-13, adds a second candidate shape for CR13's second step; rev 0.3: all sixteen decisions of its §5 answered as
 recommended; rev 0.2 took #773's independent review). The critique is vendored unchanged at
 [`external/2026-11-12-360-critique.md`](external/2026-11-12-360-critique.md) — the reviewer's summary and reply; the
 full per-layer document has not been received. Every finding was read against `main` at `156ca329`, nothing built
