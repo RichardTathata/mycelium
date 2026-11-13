@@ -1,6 +1,6 @@
 # The third-party critique of 2026-11-12 — verification and the plan that answers it
 
-**Status:** **agreed with the maintainer on 2026-11-12**, rev 0.3 (rev 0.3, 2026-11-12, records the maintainer's
+**Status:** **agreed with the maintainer on 2026-11-12**, rev 0.4 (rev 0.4, 2026-11-13: CR13's second step gains a second candidate shape, local non-admission with forwarding unchanged, to be weighed with the counter's data; D16 unchanged; rev 0.3, 2026-11-12, records the maintainer's
 answers to all sixteen decisions of §5, each as recommended, and marks every row of §4 *buildable*, *after wave
 1b* or *decision recorded, no row*; rev 0.2 took the independent review of this plan's PR, #773: the use-marker
 row rewritten — a KV record alone cannot carry it; the lease margin and the fenced write restated; the drift
@@ -589,6 +589,32 @@ re-counts them.
    clock and opens no WAL window. `apply_and_notify` is untouched, so a node's own stamped writes are not
    affected. It reads the entry's stamp and the receiver's clock: no prefix, no owner.
 
+**A second shape for step 2, to weigh with the counter's data (the maintainer's question, 2026-11-13): local
+non-admission, forwarding unchanged.** Step 2 as written does not say what happens to the frame after the entry is
+not applied. The signal mesh's rule is that a node always forwards and decides locally whether to *act*
+(`Boundary::admits`, `mycelium-core/src/signal.rs:140`). The same rule for a KV entry: a node whose clock puts the
+stamp beyond its bound **does not apply it to its own store, counts it, and forwards the frame as it would any
+other** — a live `Data` or `SignedData` frame is already forwarded by its TTL whether or not it won LWW
+(`mycelium-core/src/connection.rs:1089`–`1119`), and an anti-entropy entry is never forwarded (TTL 1), so there
+the two shapes are the same. It is not the `Boundary` type itself: that sees a signal's scope only, and a KV frame
+never passes through it; opacity is a load hint and carries no stamp. It is the boundary's *principle* applied at
+Layer I's three doors.
+
+- *What it changes:* the framing, and with it D16's carve-out. "Admission is local; forwarding is unconditional"
+  is what the design already says, so this shape may need no carve-out from *detection, not prevention* where a
+  refusal needs one. Each node judges by its own clock and its own `max_clock_drift_ms`, as each holds its own
+  boundary.
+- *What it does not change:* the slow-clock receiver, the replay door, the node-local repair and the mixed
+  configuration case below are the same under either shape. A node that will not apply an entry is still offered
+  it at every anti-entropy round by a peer that holds it.
+- *What it costs:* containment. A forwarded far-future entry still reaches, and pins, a node whose bound is 0 or
+  whose clock is ahead; a refusal that also stops the forward would not carry it there. The trade is consistency
+  with the forwarding principle against how far one poisoned entry travels.
+
+D16's decision stands — the counter, then a refusal conditional on what the counter shows. Which of the two
+shapes the second step takes is chosen when that step is written, with the counter's figures and this trade
+beside it; until then neither is buildable.
+
 **The cases the row must answer, each an exit test:**
 
 - **A receiver whose own clock is slow** — booted before NTP, or more than the bound behind. Today it converges
@@ -832,6 +858,10 @@ draft made inside a row; the review of #773 found them, and they are here now.
   and on the slow-clock case having an acceptable answer — and default-on only after a release of counting,
   which is itself part of this decision.
   **Decided 2026-11-12:** (b). The counter first; the refusal default-on only after a release of counting, with a recorded carve-out in runtime-invariants, and conditional on what the counter shows and on the slow-clock case having an acceptable answer.
+  **Added 2026-11-13, at the maintainer's request, not a new decision:** step 2 has a second candidate shape,
+  written in CR13 — *local non-admission with forwarding unchanged*, the boundary's principle applied to a KV
+  entry — which may need no carve-out and contains a poisoned entry less well. It is weighed against the refusal
+  when step 2 is written.
 
 ## 6 · Where the critique is wrong or overstated, and where it is understated
 
