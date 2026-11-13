@@ -609,9 +609,9 @@ Layer I's three doors.
   carve-out is recorded is unchanged by this shape and is decided with step 2. The slow-clock receiver's own
   store, the replay door, the node-local repair and the mixed-configuration case below are the same under either
   shape; a node that will not apply an entry is still offered it at every anti-entropy round by a peer that holds it.
-- *What it must do, as the refusal must:* skip `hlc.observe` as well as the apply, or the node's clock is still
-  dragged to the limit; append nothing to the WAL and open no `begin_inbound` window (`connection.rs:185`); and
-  **move the forward out from behind the apply**, or place the check between them — today both live arms forward
+- *What it must do:* as the refusal must, skip `hlc.observe` as well as the apply, or the node's clock is still
+  dragged to the limit, and append nothing to the WAL and open no `begin_inbound` window (`connection.rs:185`);
+  and, **for this shape only, move the forward out from behind the apply**, or place the check between them — today both live arms forward
   only after `apply_inbound_then_append` (`connection.rs:1088`–`1125`, `:1262`–`1290`).
 - *What it costs:* containment, by a bounded amount. A forwarded far-future entry travels on by its remaining
   TTL over live gossip, once per node (the seen-set drops a repeat, the TTL is never reset), so it reaches — and
