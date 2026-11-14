@@ -995,7 +995,8 @@ credential inside `CONNECT`, no path limit, a value returned transformed. [`.log
 
 Every workspace library with code carries `#![deny(unsafe_code)]`: the root crate (`src/lib.rs`),
 `mycelium-core` (`mycelium-core/src/lib.rs`) and each companion's `src/lib.rs` (sim, tuple-space,
-blackboard, wiki, wasm-host, agentfacts, reason, guardrails, effects, commitment, the coop examples).
+blackboard, wiki, wasm-host, agentfacts, reason, guardrails, effects, commitment, the coop examples, and the
+acceptor's model, `mycelium-model`).
 `loom-spike` and `mycelium-gateway-free-tests` have empty libraries and carry nothing. **No production
 `unsafe` remains**; the DEK wipe in `SubjectKeyRegistry::destroy` was the last (a `write_volatile` loop),
 and is `zeroize` now (`wipe` in `mycelium-core/src/erasure.rs`, pinned by `wipe_zeroes_every_dek_byte`).

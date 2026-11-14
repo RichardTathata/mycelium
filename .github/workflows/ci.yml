@@ -1302,6 +1302,35 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: RUSTFLAGS="--cfg loom" cargo test -p loom-spike --release
 
+  model:
+    # The model of the single-decree acceptor (critique plan row CR10; `mycelium-model`, Stateright): slot reuse
+    # after a release or a lapsed lease, the lease's wall-clock end under a skew bound, the electorate migration.
+    # Every configuration is finite and explored in full — the bounds are the constructors in
+    # `mycelium-model/src/{slot,migration}.rs`, the number of states each explores is pinned in
+    # `mycelium-model/tests/model.rs`, and `docs/operations/what-is-proven.md` states both. The `planted_*` tests
+    # are the proof the model can fail: one fault in each area, and a counterexample found.
+    # Release, because the checker's inner loop is the whole cost (about 30 million states); without the release
+    # profile's LTO and single codegen unit, which lengthen the build more than they shorten the run.
+    name: Model (acceptor, Stateright)
+    runs-on: ubuntu-latest
+    # A fault in an engine function the model calls can make a run grow without end rather than fail (a promise
+    # given twice at one ballot did, in review): the limit turns that into a red job, not a six-hour one.
+    timeout-minutes: 25
+    env:
+      CARGO_PROFILE_RELEASE_LTO: "false"
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96.0
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      # --locked: the lockfile holds `dashmap` at 6.1.0 so that no shared dependency moved; an unlocked resolve would move it.
+      - run: cargo test -p mycelium-model --release --locked
+      - run: cargo clippy -p mycelium-model --all-targets -- -D warnings
+      # The module the model reaches the engine through (`mycelium`'s `model-internals`, on in no shipped build).
+      - run: cargo clippy --lib --no-default-features --features model-internals -- -D warnings
+
   test-universe:
     # Verification policy rule 3, the universe half: every test the compiler and the runners know of,
     # including ones gated on a feature no other step enables. `cargo test --all-features -- --list`
@@ -1508,7 +1537,7 @@ jobs:
     runs-on: ubuntu-latest
     if: always()
     needs: [test, embedded, wasm-host, wasm-host-macos, agentfacts, blackboard, effects, commitment, wiki, reason, scaffold,
-            guardrails, python-sdk, sdk-ts, loom, demo-smoke, afn-smoke, coop-smoke, conway-gpu, documentation, clippy,
+            guardrails, python-sdk, sdk-ts, loom, model, demo-smoke, afn-smoke, coop-smoke, conway-gpu, documentation, clippy,
             audit, test-universe, a2a-sdk, strands-fleet, eve-fleet, ops-console, oidc-exchange-live]
     permissions:
       actions: read
