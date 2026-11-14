@@ -3737,9 +3737,13 @@ Now:
   does not, a tombstone, a release made at another door. The marker is now a JSON record signed by the door's node
   — `{v, kind: "use", grant, door, node, use, at_ms, signer, sig}` — its body naming the grant, the door and the
   use.
-- **A door reads its own marker write's receipt.** If the write lost to a newer value at the key (a tombstone or an
-  overwrite at a later stamp, landing after the door's read), the call is **refused** — a denial whose reason ends
-  `(grant_use_superseded)` — and the grant stays used at that door.
+- **A door reads its own marker write's receipt, and admits only when the marker is the key's value.** If the
+  write lost to a newer value at the key (a tombstone or an overwrite at a later stamp, landing after the door's
+  read), the call is **refused** — a denial whose reason ends `(grant_use_superseded)`. If the node's store
+  applied nothing (its live-entry cap, `max_store_entries`, is reached — which a member's flood can cause), the
+  call is refused with a reason ending `(grant_use_not_stored)`: admitted, it would have run with no marker at
+  this node's key. In both cases **the grant stays used at that door** though nothing ran — the record was synced
+  to the WAL and gossiped before the apply was decided, so a restart or a peer may hold it.
 - **A release is a signed record, and only the door that made it honours it.** A gateway that refuses a call
   before dispatch, or is answered a caller-context refusal by the provider (§91, §97), and a provider that refuses
   `call_mandate_not_established` before any handler (§104), give their use back: the release goes into the door's
@@ -3752,8 +3756,11 @@ marker was tombstoned, and absence admitted). Now:
 
 - after a refusal before dispatch at a gateway, **the retry must go to the same gateway node**; at any other
   gateway the grant is refused *already used at gateway*;
-- after a provider's `call_mandate_not_established` give-back, **a direct caller's retry must reach the same
-  provider node**; at another provider of the same tool it is refused *already used at provider*.
+- after a provider's `call_mandate_not_established` give-back, **the retry must reach the same provider node**;
+  at another provider of the same tool it is refused *already used at provider*. A direct caller chooses its
+  provider. For a call a gateway routes, the caller does not choose the provider: `tools/call` goes to the
+  first provider in scan order, so after provider P1 gives its use back a retry routed to P2 — after a membership
+  change, say — is refused *already used at provider*, and the client cannot steer it. It needs a new grant.
 
 A client behind a load balancer over several gateways pins its retry to the gateway that refused it (the request
 id of a client-held grant ends in the gateway that wrote it), or asks for a new grant. Why it is so: a door that
@@ -3763,7 +3770,8 @@ overlapped another door's admission — each would re-arm a spent grant there. T
 therefore never the reason a grant reads unused: the releasing door's journal is. The KV copy tells the other
 doors, an auditor and a later collector who released which use.
 
-**Mixed versions (one release).** Every combination is on the refusing side; none re-arms a grant:
+**Mixed versions (one release).** No combination re-arms a grant at an upgraded door. An un-upgraded door is
+unprotected until it is upgraded: a member's tombstone still re-arms the grant there. Case by case:
 
 - an upgraded door reads an **old-form marker** (a timestamp) as *used*, and counts it (`legacy`);
 - an un-upgraded door reads a new-form marker or release by presence: *used*;
@@ -3788,9 +3796,19 @@ an unverifiable value, which reads *used* too.
 | `release_elsewhere` | a verified release made by another node's door | used |
 | `release_forged` | a release that does not verify — another key, another grant or door | used |
 | `release_replayed` | this node's own release that is not the release of the use its journal shows released | used |
-| `superseded` | this door's own marker or release write lost to a newer value | the call refused / the grant spent |
+| `superseded` | this door's own marker or release write lost to a newer value, or its release was not written because the key no longer held its own marker for that use | the call refused / the grant spent |
+| `not_stored` | this door's own marker write was refused by the node's store (`max_store_entries` reached) | the call refused, the grant spent at this door |
 
-Any of the first six above zero on a fleet at one version means a member wrote a marker key it does not own.
+`tombstone`, `unverifiable`, `release_forged` or `release_replayed` above zero on a fleet at one version means a
+member wrote a marker key it does not own. `release_elsewhere` does not: an honest retry at another gateway than
+the one that released produces it. `legacy` is expected while older doors run. `not_stored` means the store is
+full.
+
+**A release's signature decides nothing.** Under the rule above no reader takes a release for *unused* except
+the door that made it, and that door decides from its journal. The signature is verified so that a forged release
+is counted apart (`release_forged`); with the verification removed only the counters move. A release is written
+only over the releasing door's own marker for that use: if the key holds anything else by then, nothing is
+written over it and the use is not given back.
 
 **Not built, stated:**
 
@@ -3805,6 +3823,14 @@ Any of the first six above zero on a fleet at one version means a member wrote a
   affected.
 - **A member can spend a grant** by writing anything at its marker key before the first use: a refusal, which is
   availability and outside the owner-signed rule.
+- **What a door's journal does not survive, stated.** A node restarted **under a new address** is a new door
+  with an empty journal (the journal sits under the node's id): it reads uses the old address made from the KV
+  only. An entry that does not decode is skipped, logged and counted (`GET /stats`
+  `grant_use_journal_undecoded`), which forgets that use; a deleted
+  journal file reads as empty. The journal is read whole at every start and never compacted. A build with
+  `gateway` and `tls` and **without `compliance`** runs this path with no member-key view beyond the keys the
+  node itself trusts (`trusted_keys`): a marker it cannot verify reads used and is counted `unverifiable`, and its
+  own records verify under its own key — **untested**: the tests here are in a `compliance`-gated module.
 - **The journal is not compacted**, and the signed markers and releases under `grant/` are not collected: both
   arrive with I4's collector. A use is about 200 bytes; a door forgets a use in memory 3 720 s after it (the
   grant's window cap plus two minutes).
@@ -3814,7 +3840,7 @@ Any of the first six above zero on a fleet at one version means a member wrote a
 KV **value** changes; no existing on-disk file changes; one new file per persisting node. A node restored from a
 backup taken before a use reads that use from the KV marker only.
 
-**Check:** `curl -s http://NODE:PORT/stats | jq .grant_use` shows the seven
+**Check:** `curl -s http://NODE:PORT/stats | jq .grant_use` shows the eight
 readings; after a call under a grant, `ls BASE_PATH/NODE/grants/uses.journal` exists on the node whose door
 admitted it; and presenting the same grant again at a second gateway is refused *already used at gateway* whether
 or not another member has first deleted the marker's key.

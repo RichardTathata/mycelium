@@ -44,7 +44,8 @@ curl -s http://node:8080/stats | jq
   neither a verified marker nor *never written*, by reading: `tombstone`, `unverifiable`, `legacy`,
   `release_elsewhere`, `release_forged`, `release_replayed` — **each read as used, so none re-arms a grant** —
   and `superseded`, this door's own marker or release write that lost to a newer value (the call refused
-  `grant_use_superseded`, or the grant left spent). In memory; zero after a restart. On a fleet at one version
+  `grant_use_superseded`, or the grant left spent), and `not_stored`, its marker write refused by the node's
+  store at `max_store_entries` (the call refused `grant_use_not_stored`). In memory; zero after a restart. On a fleet at one version
   a non-zero `tombstone`, `unverifiable`, `release_forged` or `release_replayed` means a member wrote a marker
   key that is not its own; `release_elsewhere` is ordinary when a client retries a refused call at another
   gateway than the one that released it; `legacy` is expected only while doors older than 2.41 run. With

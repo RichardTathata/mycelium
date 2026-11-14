@@ -8,7 +8,7 @@
 - At the marker key `grant/{holder}/{term}/used/{point}` **anything other than *never written* reads used**
   (`reads_used`): a verified marker (now a record signed by the door's node), a value that does not verify, a
   tombstone, an old-form marker, a release made elsewhere. The reader takes the store's entry, not `kv_get`: a
-  tombstone is an entry with no data. Seven counted readings on `/stats` `grant_use`.
+  tombstone is an entry with no data. Eight counted readings on `/stats` `grant_use` (seven of the key, one of the store refusing the marker).
 - The door reads its marker write's receipt (`write_owned_kv_reporting`) and refuses `grant_use_superseded` on
   `Superseded`.
 - **Decision (maintainer, 2026-11-13): a release is honoured only by the door that made it.** The key names no

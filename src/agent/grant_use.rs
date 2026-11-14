@@ -49,6 +49,24 @@ const RETENTION_MS: u64 = crate::mandate::grant::GRANT_TTL_CAP_SECS * 1_000 + 12
 
 /// The stable name of the refusal a door answers when its own marker write lost to a newer value at the key.
 pub(crate) const GRANT_USE_SUPERSEDED: &str = "grant_use_superseded";
+/// The stable name of the refusal a door answers when its store applied nothing of its marker write (the live-entry
+/// cap, `max_store_entries`): the key holds no marker here, the call does not run, and the use stands in the journal.
+pub(crate) const GRANT_USE_NOT_STORED: &str = "grant_use_not_stored";
+
+/// What a door's marker write established, read from its receipt. Only [`MarkerWrite::Current`] admits the call.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MarkerWrite {
+    /// The marker is the key's value (`Applied`, or `AlreadyCurrent`).
+    Current,
+    /// A newer value held the key and LWW kept it (`Superseded`) — or an outcome this code does not know, which is
+    /// not *current* either. The use stands in this door's journal: something is at the key that it did not read.
+    Superseded,
+    /// The store refused the write and applied nothing (`Refused`: the live-entry cap). No marker is at the key
+    /// here for a reader to find, so the call does not run. The use stands in the journal, as for `Superseded`: the
+    /// write path syncs the record to the WAL and gossips it whatever the local apply did, so the marker may be on
+    /// this node's disk (a restart replays it) and at its peers — a give-back here would disagree with both.
+    NotStored,
+}
 
 /// What a use record says: a use, or the release of one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -193,12 +211,16 @@ pub(crate) enum Odd {
     /// A genuine release by this node that is not the release of the use its journal shows released — an earlier
     /// release written back over a later use: read as used.
     ReleaseReplayed,
-    /// This door's own marker or release write lost to a newer value at the key.
+    /// This door's own marker or release write lost to a newer value at the key — or its release was not written
+    /// because the key no longer held this door's marker for that use.
     Superseded,
+    /// This door's own marker write was refused by the store (the live-entry cap): nothing applied, the call
+    /// refused, the use standing at this door.
+    NotStored,
 }
 
 impl Odd {
-    pub(crate) const ALL: [Odd; 7] = [Odd::Tombstone, Odd::Unverifiable, Odd::Legacy, Odd::ReleaseElsewhere, Odd::ReleaseForged, Odd::ReleaseReplayed, Odd::Superseded];
+    pub(crate) const ALL: [Odd; 8] = [Odd::Tombstone, Odd::Unverifiable, Odd::Legacy, Odd::ReleaseElsewhere, Odd::ReleaseForged, Odd::ReleaseReplayed, Odd::Superseded, Odd::NotStored];
 
     pub(crate) fn label(self) -> &'static str {
         match self {
@@ -209,6 +231,7 @@ impl Odd {
             Odd::ReleaseForged => "release_forged",
             Odd::ReleaseReplayed => "release_replayed",
             Odd::Superseded => "superseded",
+            Odd::NotStored => "not_stored",
         }
     }
 }
@@ -222,7 +245,7 @@ pub(crate) struct GrantUseLedger {
     uses: Mutex<HashMap<String, OwnUse>>,
     /// The map's size after its last prune, doubled: the next size at which it is pruned.
     prune_at: AtomicU64,
-    odd: [AtomicU64; 7],
+    odd: [AtomicU64; 8],
     /// Journal entries that did not decode at open; skipped.
     pub(crate) undecoded: AtomicU64,
     /// Test seam: run once between a use's journal append and its marker write — where another member's write to
@@ -373,12 +396,20 @@ pub(crate) fn new_use_id(ctx: &TaskCtx, marker_key: &str, attempt_id: &str) -> S
 }
 
 /// **Record a use this door is about to admit**: the journal (fsynced), then the signed marker in the KV with its
-/// receipt read. `Err(reason)`: the use is not on disk, nothing is remembered and the caller gives its in-memory
-/// claim back — nothing ran, so nothing is spent. `Ok(false)`: the use is recorded here and the marker **lost to a
-/// newer value at the key** (`Superseded`): something else was written there first, so the call is refused
-/// [`GRANT_USE_SUPERSEDED`] and the grant reads used at this door. `Ok(true)`: recorded, and the marker is the
-/// key's value.
-pub(crate) async fn record_use(ctx: &Arc<TaskCtx>, marker_key: &str, use_id: &str) -> Result<bool, String> {
+/// receipt read. Every outcome of the write is named, and only one admits:
+///
+/// - `Ok(Current)` — `Applied` or `AlreadyCurrent`: the marker is the key's value. The call may run.
+/// - `Ok(Superseded)` — `Superseded` (or an outcome this code does not know): a newer value holds the key, written
+///   after this door's read. The call is refused [`GRANT_USE_SUPERSEDED`] and **the use stands** in the journal: the
+///   grant reads used at this door.
+/// - `Ok(NotStored)` — `Refused`: the store's live-entry cap applied nothing, so this node's key is as it was read,
+///   *never written*, and a call admitted now would leave no marker here. The call is refused
+///   [`GRANT_USE_NOT_STORED`] and **the use stands** in the journal — spent at this door, though nothing ran: the
+///   record was synced to the WAL and gossiped before the apply was refused, so a restart or a peer may hold it.
+/// - `Err(reason)` — the use or the marker is not on disk. Nothing is remembered, the caller gives its in-memory
+///   claim back, and nothing is spent.
+pub(crate) async fn record_use(ctx: &Arc<TaskCtx>, marker_key: &str, use_id: &str) -> Result<MarkerWrite, String> {
+    use mycelium_core::receipt::LocalApplication;
     let now_ms = ctx.hlc.decision_now_ms();
     ctx.grant_uses.record_use(marker_key, use_id, now_ms).await?;
     let Some(rec) = UseRecord::signed(ctx, UseKind::Use, marker_key, use_id) else { return Err(format!("{marker_key} is not a marker key")) };
@@ -390,14 +421,19 @@ pub(crate) async fn record_use(ctx: &Arc<TaskCtx>, marker_key: &str, use_id: &st
         }
     }
     match super::state_machine::write_owned_kv_reporting(ctx, marker_key, rec.to_bytes()).await {
-        Ok(mycelium_core::receipt::LocalApplication::Superseded) => {
-            ctx.grant_uses.count(Odd::Superseded);
-            Ok(false)
+        Ok(LocalApplication::Applied | LocalApplication::AlreadyCurrent) => Ok(MarkerWrite::Current),
+        Ok(LocalApplication::Refused) => {
+            ctx.grant_uses.count(Odd::NotStored);
+            Ok(MarkerWrite::NotStored)
         }
-        Ok(_) => Ok(true),
+        // `Superseded`, and — the enum is `#[non_exhaustive]` — anything added later: not *current*, so not admitted.
+        Ok(_) => {
+            ctx.grant_uses.count(Odd::Superseded);
+            Ok(MarkerWrite::Superseded)
+        }
         Err(reason) => {
             // The marker is not on disk, so the call does not run and the use is given back — in the journal too,
-            // or a restart would read a use that admitted nothing. If that append fails as well the use stands.
+            // or a restart would read a use that admitted nothing.
             if let Err(e) = ctx.grant_uses.record_release(marker_key, use_id, now_ms).await {
                 tracing::warn!(key = marker_key, error = %e, "grant use: the marker was not written and the journal did not take the release; the grant stays spent at this door");
             }
@@ -406,23 +442,41 @@ pub(crate) async fn record_use(ctx: &Arc<TaskCtx>, marker_key: &str, use_id: &st
     }
 }
 
+/// Does `marker_key` hold **this node's own marker for `use_id`** — the record this door wrote when it admitted the
+/// call, still the key's value?
+fn holds_own_marker(ctx: &TaskCtx, marker_key: &str, use_id: &str) -> bool {
+    let held = ctx.kv_state.store.pin().get(marker_key).and_then(|e| e.data.clone());
+    held.and_then(|bytes| serde_json::from_slice::<UseRecord>(&bytes).ok())
+        .is_some_and(|rec| rec.kind == UseKind::Use && rec.use_id == use_id && rec.node == ctx.node_id.to_string() && rec.verifies_at(ctx, marker_key))
+}
+
 /// **Release the use `use_id` this door made at `marker_key`**, for a call this node knows did not run: the journal
-/// first, then the signed release over the marker. `true` when the grant now reads unused at this door. `false`
-/// leaves it spent: the journal did not take the release, or the release lost to a newer value at the key (which
-/// reads used).
+/// first, then the signed release — written **only over this door's own marker for that use**. `true` when the
+/// release is the key's value, so the grant reads unused at this door. `false` leaves it spent:
+///
+/// - the journal did not take the release;
+/// - the key no longer holds this door's marker for the use — another door's marker (two doors admitted at once),
+///   a tombstone, any other value. Nothing is written over it, it reads used, and it is counted (`superseded`). A
+///   value that lands between this check and the write still loses to the release under LWW: stated, D12's window;
+/// - the release's own write was not *current*: `Superseded`, or `Refused` (which cannot happen over a live marker —
+///   an overwrite of a live key is outside the cap — and is read the same way if it does).
 pub(crate) async fn release_use(ctx: &Arc<TaskCtx>, marker_key: &str, use_id: &str) -> bool {
     let now_ms = ctx.hlc.decision_now_ms();
     if let Err(e) = ctx.grant_uses.record_release(marker_key, use_id, now_ms).await {
         tracing::warn!(key = marker_key, error = %e, "grant use: the release was not journaled; the grant stays spent at this door");
         return false;
     }
+    if !holds_own_marker(ctx, marker_key, use_id) {
+        ctx.grant_uses.count(Odd::Superseded);
+        return false;
+    }
     let Some(rec) = UseRecord::signed(ctx, UseKind::Release, marker_key, use_id) else { return false };
     match super::state_machine::write_owned_kv_reporting(ctx, marker_key, rec.to_bytes()).await {
-        Ok(mycelium_core::receipt::LocalApplication::Superseded) => {
+        Ok(application) if application.is_current() => true,
+        Ok(_) => {
             ctx.grant_uses.count(Odd::Superseded);
             false
         }
-        Ok(_) => true,
         Err(e) => {
             tracing::warn!(key = marker_key, error = %e, "grant use: the signed release was not written; the marker stands and the grant stays spent at this door");
             false
