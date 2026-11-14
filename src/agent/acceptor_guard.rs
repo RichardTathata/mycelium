@@ -60,6 +60,27 @@ use crate::node_id::NodeId;
 static PERSISTENCE_REFUSED: AtomicU64 = AtomicU64::new(0);
 static MEMORY_EMPTY: AtomicU64 = AtomicU64::new(0);
 static PROMISES_FORGOTTEN: AtomicU64 = AtomicU64::new(0);
+static GROUPS_REWRITTEN: AtomicU64 = AtomicU64::new(0);
+
+/// Copies of this node's own acceptor record that named **another group** for the acceptance its memory holds —
+/// the same ballot and value, made somewhere else (critique plan CR30). No answer of this node's says that: the
+/// record was rewritten by another member. Counted each time (`mycelium_acceptor_guard_total{event="group_rewritten"}`)
+/// and the record written back from memory; nothing is withheld.
+#[cfg_attr(not(test), allow(dead_code))] // read by the test; an operator reads the metric
+pub(crate) fn acceptor_record_groups_rewritten() -> u64 {
+    GROUPS_REWRITTEN.load(Ordering::Relaxed)
+}
+
+/// Whether `copy` holds the acceptance `held` holds — one ballot, one value — and says it was made somewhere else,
+/// both knowing where. A copy whose group is unknown is an older record of the same acceptance, not a rewrite.
+fn group_rewritten(copy: &AcceptorSlot, held: &AcceptorSlot) -> bool {
+    use crate::consensus::MadeIn;
+    match (&copy.accepted, &held.accepted) {
+        (Some((cb, ca)), Some((hb, ha))) => cb == hb && ca.digest() == ha.digest()
+            && copy.made_in != MadeIn::Unknown && held.made_in != MadeIn::Unknown && copy.made_in != held.made_in,
+        _ => false,
+    }
+}
 
 /// Refusals because an electorate member has no `[persistence]`: an adoption (counted once per record), a
 /// declaration, a genesis proposal at the door, or a genesis answer at the acceptor (each counted as it happens).
@@ -236,7 +257,21 @@ fn compare_own_record(
 ) -> Option<AcceptorSlot> {
     let copy = decode_acceptor(value)?;
     let held = memory.pin().get(slot).cloned().unwrap_or_default();
-    if !forgotten(&copy, &held) { return None; }
+    if !forgotten(&copy, &held) {
+        // The same acceptance under another group's name (CR30): a carry decides by that name, so the record is put
+        // back as memory has it. Detection: the copy that wins last-writer-wins while this node is down is read at
+        // its next start as it stands.
+        if group_rewritten(&copy, &held) {
+            GROUPS_REWRITTEN.fetch_add(1, Ordering::Relaxed);
+            #[cfg(feature = "metrics")]
+            metrics::counter!("mycelium_acceptor_guard_total", "event" => "group_rewritten").increment(1);
+            tracing::warn!(slot, copy_made_in = ?copy.made_in, held_made_in = ?held.made_in,
+                "consensus: a peer holds this node's own acceptor record naming another group for the acceptance this \
+                 node made — a record this node did not write. Writing it back from memory");
+            return Some(held);
+        }
+        return None;
+    }
     let copy_accepted = accepted_ballot(&copy);
     let merged = merge_records(&copy, &held);
     if withheld.pin().insert(Arc::from(slot)) {
@@ -383,5 +418,47 @@ mod tests {
         let malformed = AcceptorSlot { promised: 1, promised_to: Some(1), accepted: Some((6, Accepted::DigestOnly([3; 32]))), groups: Vec::new(), made_in: crate::consensus::MadeIn::Unknown };
         assert_eq!(merge_records(&malformed, &held).promised, 6, "promised is clamped to the acceptance it carries");
         assert!(forgotten(&malformed, &held));
+    }
+}
+
+#[cfg(test)]
+mod rev787 {
+    use super::*;
+    use crate::consensus::{encode_acceptor, Accepted, MadeIn};
+
+    /// rev787 R3 (check 8) — a member's forged copy of this node's own acceptor record that changes **only**
+    /// `made_in`. As the reviewer wrote it against 7606eddf the guard neither counted nor repaired it; it now
+    /// counts it (`acceptor_record_groups_rewritten`) and hands memory's record back to be rewritten, without
+    /// withholding the slot — no answer was forgotten. What the forged record would do if it were read at a start
+    /// instead: named for another group, a carry whose every report is named does not hear the acceptance; named
+    /// for no group, the carry hears everything, as before 2.41.0. An older copy of the same acceptance, with the
+    /// group unknown, is not a rewrite.
+    #[test]
+    fn rev787_a_forged_made_in_is_counted_and_put_back() {
+        use crate::consensus::carry_hears;
+        let memory: AcceptorMemory = papaya::HashMap::new();
+        let withheld: papaya::HashSet<Arc<str>> = papaya::HashSet::new();
+        let held = AcceptorSlot {
+            promised: 4, promised_to: Some(7), accepted: Some((4, Accepted::DigestOnly([9; 32]))),
+            groups: vec![Arc::from("new")], made_in: MadeIn::Group(Arc::from("new")),
+        };
+        memory.pin().insert(Arc::from("s"), held.clone());
+        let report = (4u64, [9u8; 32], None);
+        assert_eq!(carry_hears(vec![report.clone()], std::slice::from_ref(&held.made_in), "new").len(), 1);
+        for (forged_in, heard_after_a_restart) in [(MadeIn::Group(Arc::from("zzz")), 0), (MadeIn::NoGroup, 1)] {
+            let before = acceptor_record_groups_rewritten();
+            let forged = encode_acceptor(&AcceptorSlot { made_in: forged_in.clone(), ..held.clone() });
+            assert_eq!(forged[0], 0x05);
+            let repaired = compare_own_record(&memory, &withheld, "s", &forged).expect("detected: the record is put back");
+            assert_eq!(repaired.made_in, held.made_in, "from memory");
+            assert!(acceptor_record_groups_rewritten() > before, "counted");
+            assert!(withheld.pin().is_empty(), "nothing was forgotten, so nothing is withheld");
+            let back = decode_acceptor(&forged).expect("decodes");
+            assert_eq!(carry_hears(vec![report.clone()], std::slice::from_ref(&back.made_in), "new").len(), heard_after_a_restart);
+        }
+        let before = acceptor_record_groups_rewritten();
+        let older = encode_acceptor(&AcceptorSlot { made_in: MadeIn::Unknown, ..held.clone() });
+        assert!(compare_own_record(&memory, &withheld, "s", &older).is_none());
+        assert_eq!(acceptor_record_groups_rewritten(), before, "an older record of the same acceptance is not a rewrite");
     }
 }

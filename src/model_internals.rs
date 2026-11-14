@@ -39,6 +39,7 @@ impl Acceptor {
             promised_to: self.promised_to,
             accepted:    self.accepted.as_ref().map(|(b, e)| (*b, Accepted::Envelope(e.clone()))),
             groups:      Vec::new(),
+            made_in:     crate::consensus::MadeIn::Unknown,
         });
         memory
     }

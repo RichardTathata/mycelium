@@ -226,10 +226,11 @@ predecessors is a **merge**. When the old group held the fleet's exclusive defau
 it. **What it needs:** a reachable strict majority of the old group — to retire it and to enumerate it —
 and of the successor; a group that lost its majority cannot migrate (its repair is the disaster-recovery
 procedure, not built). **When the successor shares a member with the old group** — replacing one member is
-exactly that — set `consensus_record_acceptance_group = true` on every node first (2.41.0 on; off by default for
-one release, because a 2.40.0 node cannot read the record it writes): without it the successor can decide a value
-the old group outvoted, which the completion reports under `conflicts` and does not prevent
-([deprecations §107](deprecations.md)). A completion run interrupted by a restart is simply run again. A group retires only
+exactly that — set `consensus_record_acceptance_group = true` first, on the node that will complete the migration
+and on every member of both groups (2.41.0 on; off by default for one release, because a 2.40.0 node cannot read
+the record it writes or answer the question it asks): without it the successor can decide a value the old group
+outvoted, which the completion reports under `conflicts` and does not prevent. With it the carry is right whenever
+every acceptance it hears of was made, and kept, under 2.41.0 ([deprecations §107](deprecations.md)). A completion run interrupted by a restart is simply run again. A group retires only
 once every predecessor it names is complete — a retirement not yet visible counts as incomplete, and every
 acceptor checks this at the prepare before it closes anything. **A predecessor that cannot retire into
 the successor any more** — its retirement to another successor is visible (you declared two successors

@@ -828,6 +828,35 @@ pub(crate) enum ConsensusMsg {
         entries:   Vec<ManifestEntry>,
         done:      bool,
     },
+    /// [`CarryPrepare`](Self::CarryPrepare) from a carrier that decides over **where each reported acceptance was
+    /// made** (critique plan CR30): the same promise is asked, and it is answered with
+    /// [`PrepareAckTagged`](Self::PrepareAckTagged). Sent by a carrier with
+    /// `GossipConfig::consensus_record_acceptance_group`; one without sends `CarryPrepare` as before. Appended last,
+    /// as every variant since `Prepare` was: a node before 2.41.0 ignores it, so a carry asked this way needs a
+    /// strict majority of the successor at 2.41.0 or later, and times out rather than decides without one.
+    CarryPrepareTagged {
+        slot:        Arc<str>,
+        ballot:      u64,
+        proposer:    NodeId,
+        epoch:       u64,
+        electorate:  [u8; 32],
+        predecessor: Arc<str>,
+    },
+    /// [`PrepareAckTerm`](Self::PrepareAckTerm) answering a [`CarryPrepareTagged`](Self::CarryPrepareTagged): the
+    /// same promise and the same report — **whatever this acceptor holds, unfiltered** — with `made_in`, where the
+    /// reported acceptance was made as far as this acceptor knows ([`MadeIn`]). The carrier, which sees the whole
+    /// promise quorum, decides what to hear ([`carry_hears`]).
+    PrepareAckTagged {
+        slot:                 Arc<str>,
+        ballot:               u64,
+        voter:                NodeId,
+        accepted_ballot:      u64,
+        accepted_digest:      Option<[u8; 32]>,
+        accepted:             Option<Bytes>,
+        accepted_is_envelope: bool,
+        committed_digest:     Option<[u8; 32]>,
+        made_in:              MadeIn,
+    },
 }
 
 /// One slot of a retired member's manifest: its acceptor state for the slot in the retired group (migration
@@ -1949,6 +1978,11 @@ impl ConsensusEngine {
             self.build_carry(&slot, &value, lease_ms, ballot)
         };
         let mut value = if carry_ballot.is_some() { value } else { carry.own.encode() };
+        // A carry that asks where each acceptance was made (CR30) starts every ballot from the envelope it carries,
+        // and adopts only what that ballot's phase 1 hears: a value a refusal reported, or one an earlier ballot's
+        // phase 1 adopted and this node never accepted, is no acceptance of the successor's. (What this node did
+        // accept at an earlier ballot is in its own memory, made in the successor, and phase 1 hears it.)
+        let carried = (carry_ballot.is_some() && self.asks_tagged()).then(|| value.clone());
 
         // Extract the group name once for `sys/topology-override/{group}` lookups
         // and for completing the TopologyUnsatisfied return.
@@ -1998,6 +2032,10 @@ impl ConsensusEngine {
             // **Phase 1: ask a quorum what it has accepted before proposing anything** — see
             // `ConsensusMsg::Prepare`. Whatever the promise quorum reports at its highest ballot
             // is what this ballot must carry.
+            if let Some(envelope) = &carried {
+                value = envelope.clone();
+                adopted_from = 0;
+            }
             let needed = quorum_size;
             let phase1 = self.prepare_phase(
                 &mut vote_rx, &mut nack_rx, &scope, &slot, ballot, &value,
@@ -2172,7 +2210,8 @@ impl ConsensusEngine {
                     // this the retry is `ballot + 1` with the proposer's original value, which can
                     // replace a value a quorum already accepted — acceptors permit it, because any
                     // strictly greater ballot passes `may_cast_vote`.
-                    if let Some((ab, v, is_env)) = reported
+                    if carried.is_none()
+                        && let Some((ab, v, is_env)) = reported
                         && ab >= adopted_from
                         && let (_, _, Some(env)) = carry.report(&slot, ab, None, Some(v), is_env)
                         && !carry.renews(&env) {
@@ -2757,18 +2796,28 @@ impl ConsensusEngine {
         }
     }
 
-    /// **Where an acceptance claimed through `gate` is made** — what the claim records beside it (CR30). The
-    /// gate's electorate group, or none; [`MadeIn::Unknown`] while this node does not record it
-    /// (`GossipConfig::consensus_record_acceptance_group`, off by default in 2.41.0), which leaves the acceptance
-    /// reported as before and its record in the older shape.
+    /// **Where an acceptance claimed through `gate` is made** — what the claim keeps beside it in memory (CR30):
+    /// the gate's electorate group, or none. Kept by every node from 2.41.0, whatever
+    /// `GossipConfig::consensus_record_acceptance_group` says; that switch decides whether it reaches the durable
+    /// record ([`acceptor_record`](Self::acceptor_record)) and whether this node's own carry asks for it
+    /// ([`asks_tagged`](Self::asks_tagged)).
     pub(crate) fn made_in(&self, gate: Option<&Gate>) -> MadeIn {
-        if !self.task_ctx.config.consensus_record_acceptance_group { return MadeIn::Unknown; }
         gate.map_or(MadeIn::NoGroup, |g| MadeIn::Group(Arc::clone(&g.group)))
     }
 
-    /// This node's durable acceptor record for `state`. While the node does not record an acceptance's group it
-    /// writes none — a group read back from a `0x05` record written while the switch was on stays in memory until
-    /// the next start, and the record it is next written to is the older shape.
+    /// Whether this node's carry ballots ask where each reported acceptance was made
+    /// ([`ConsensusMsg::CarryPrepareTagged`]) and decide by it ([`carry_hears`]):
+    /// `GossipConfig::consensus_record_acceptance_group`. Off (the default in 2.41.0), a carry is the 2.40.0 carry,
+    /// message for message.
+    pub(crate) fn asks_tagged(&self) -> bool {
+        self.task_ctx.config.consensus_record_acceptance_group
+    }
+
+    /// This node's durable acceptor record for `state`. While the node does not write an acceptance's group
+    /// (`consensus_record_acceptance_group` off) the record is the 2.40.0 shape, so the group — known in memory —
+    /// is unknown after the next start. That holds for a group read back from a `0x05` record written while the
+    /// switch was on, too: the record it is next written to is the older shape, **and the group is then gone for
+    /// good**, while memory keeps it until the next start.
     pub(crate) fn acceptor_record(&self, state: &AcceptorSlot) -> Bytes {
         if self.task_ctx.config.consensus_record_acceptance_group || state.made_in == MadeIn::Unknown {
             encode_acceptor(state)
@@ -3692,16 +3741,19 @@ impl ConsensusEngine {
         let floor = self.floor(slot);
         // This node's own promise passes the electorate's gate like any other claim (P2 round 2, finding 1).
         let gate = tag.map(|t| &t.gate);
-        // A carry ballot hears only acceptances made in its own electorate — this node's own among them (CR30).
-        let carry_into = tag.filter(|t| t.carry.is_some()).map(|t| &*t.gate.group);
-        match self.claim_gated(gate, || prepare_slot_for(&self.task_ctx.consensus_accepted, slot, ballot, me.id_hash(), floor, carry_into)) {
+        // A carry ballot of a node that asks (CR30) keeps, beside each report, where the acceptance was made — this
+        // node's own among them — and decides what it hears once the quorum has answered (`carry_hears`).
+        let tagged = tag.filter(|t| t.carry.is_some() && self.asks_tagged()).map(|t| Arc::clone(&t.gate.group));
+        let mut made_in: Vec<MadeIn> = Vec::new();
+        match self.claim_gated(gate, || prepare_slot_tagged(&self.task_ctx.consensus_accepted, slot, ballot, me.id_hash(), floor)) {
             None => return Phase1::Closed,
-            Some(PrepareOutcome::Refused { promised, .. }) => return Phase1::Refused(promised),
-            Some(PrepareOutcome::Promised(acc)) => {
+            Some((PrepareOutcome::Refused { promised, .. }, _)) => return Phase1::Refused(promised),
+            Some((PrepareOutcome::Promised(acc), own_made_in)) => {
                 if let Some((b, a)) = acc {
                     let is_env = matches!(a, Accepted::Envelope(_));
                     if !is_env && a.value().is_some() { raw_ballots.push(b); }
                     reports.push(carry.report(slot, b, Some(a.digest()), a.value(), is_env));
+                    made_in.push(own_made_in);
                 }
             }
         }
@@ -3714,6 +3766,10 @@ impl ConsensusEngine {
             // rather than colliding on it.
             self.raise_ballot(&format!("{}{}", consensus_ns::BALLOT, &**slot), ballot).await;
             let prepare = match tag {
+                Some(t) if tagged.is_some() => ConsensusMsg::CarryPrepareTagged {
+                    slot: Arc::clone(slot), ballot, proposer: me.clone(), epoch: t.epoch, electorate: t.digest,
+                    predecessor: t.carry.clone().unwrap_or_default(),
+                },
                 Some(t) if t.carry.is_some() => ConsensusMsg::CarryPrepare {
                     slot: Arc::clone(slot), ballot, proposer: me.clone(), epoch: t.epoch, electorate: t.digest,
                     predecessor: t.carry.clone().unwrap_or_default(),
@@ -3734,11 +3790,24 @@ impl ConsensusEngine {
                 tokio::select! { biased;
                     _ = &mut sleep => return Phase1::Short(promisers.len().saturating_sub(1)),
                     Some(sig) = vote_rx.recv() => {
-                        match self.decode_verify(&sig.payload) {
+                        // A carry that asked for the group counts only the tagged answer; any other, only the
+                        // untagged one — the two are never mixed in one quorum.
+                        let ack = match self.decode_verify(&sig.payload) {
                             Some(ConsensusMsg::PrepareAckTerm {
                                 slot: s, ballot: b, voter, accepted_ballot, accepted_digest,
                                 accepted, accepted_is_envelope, committed_digest,
-                            }) => {
+                            }) if tagged.is_none() => Some((s, b, voter, accepted_ballot, accepted_digest, accepted,
+                                accepted_is_envelope, committed_digest, MadeIn::Unknown)),
+                            Some(ConsensusMsg::PrepareAckTagged {
+                                slot: s, ballot: b, voter, accepted_ballot, accepted_digest,
+                                accepted, accepted_is_envelope, committed_digest, made_in,
+                            }) if tagged.is_some() => Some((s, b, voter, accepted_ballot, accepted_digest, accepted,
+                                accepted_is_envelope, committed_digest, made_in)),
+                            _ => None,
+                        };
+                        match ack {
+                            Some((s, b, voter, accepted_ballot, accepted_digest, accepted, accepted_is_envelope,
+                                committed_digest, reported_in)) => {
                                 if s != *slot || b != ballot { continue; }
                                 if let Some(ts) = trust_set
                                     && !ts.contains(&voter.id_hash()) { continue; }
@@ -3761,6 +3830,7 @@ impl ConsensusEngine {
                                     }
                                     if !accepted_is_envelope && accepted.is_some() { raw_ballots.push(accepted_ballot); }
                                     reports.push(carry.report(slot, accepted_ballot, accepted_digest, accepted, accepted_is_envelope));
+                                    made_in.push(reported_in);
                                 }
                                 promisers.insert(voter);
                             }
@@ -3804,6 +3874,9 @@ impl ConsensusEngine {
         // Row A: a slot whose top decision record has ended — released, or its lease past — sets
         // aside every acceptance at or below that record's ballot (design §2.3). The record carries
         // its own ballot, so this needs neither the committed entry nor the decided floor.
+        // A carry that asked for the group hears the successor's own acceptances when every report says where it
+        // was made, and every report otherwise (`carry_hears`, CR30).
+        if let Some(group) = &tagged { reports = carry_hears(reports, &made_in, group); }
         set_aside_finished(&mut reports, 0, false, self.ended(slot));
         // `decided` sets aside **only acceptances reported raw** — a legacy proposer's — and only when
         // the legacy reading says that legacy decision is over (no decision record, the committed entry
@@ -4387,6 +4460,8 @@ fn signer_authorized(msg: &ConsensusMsg, signer: &NodeId) -> bool {
         ConsensusMsg::CarryPrepare { proposer, .. } => proposer == signer,
         ConsensusMsg::CarryPropose { proposer, .. } => proposer == signer,
         ConsensusMsg::CarryManifestPage { voter, .. } => voter == signer,
+        ConsensusMsg::CarryPrepareTagged { proposer, .. } => proposer == signer,
+        ConsensusMsg::PrepareAckTagged { voter, .. } => voter == signer,
         ConsensusMsg::Commit { .. } | ConsensusMsg::Nack { .. } | ConsensusMsg::Promise { .. }
         | ConsensusMsg::PromiseTerm { .. } | ConsensusMsg::CommitTerm { .. } => true,
     }
@@ -4694,11 +4769,10 @@ pub(crate) struct AcceptorSlot {
 /// either an acceptance made in the predecessor or one made in the successor, and until this was recorded
 /// nothing told them apart: a carry's phase 1 adopted a predecessor acceptance the predecessor had outvoted.
 #[cfg(feature = "consensus")]
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) enum MadeIn {
-    /// Not recorded: accepted by a node that was not recording it (`consensus_record_acceptance_group` off, or a
-    /// release before 2.41.0), or read back from a record older than `0x05`. Treated as before: reported to
-    /// whoever asks.
+    /// Not known: accepted by a release before 2.41.0, or read back at a start from a record older than `0x05` —
+    /// which is every record of a node that does not write the group (`consensus_record_acceptance_group` off).
     #[default]
     Unknown,
     /// Outside any electorate group — a cluster-scoped, cross-group or ungoverned group proposal.
@@ -4707,27 +4781,24 @@ pub(crate) enum MadeIn {
     Group(Arc<str>),
 }
 
+/// **What a carry ballot into electorate `group` hears of its promise quorum's acceptances** (critique plan CR30) —
+/// pure, so it is tested on its own. `made_in[i]` is where `reports[i]` was made, the carrier's own among them.
+///
+/// - **Every reported acceptance was made in an electorate group that is named:** the carry hears those made in
+///   `group` and no other. That is the successor's own Paxos: an acceptance made in the predecessor is the
+///   predecessor's, counted in its manifests, and the ballot numbers of two groups do not compare.
+/// - **Any reported acceptance is of unknown group, or was made outside every group:** the carry hears **all** of
+///   them, as it did before 2.41.0. Hearing only some would be worse than hearing all: with a shared member's
+///   recorded copy of the predecessor's chosen value set aside and another member's unrecorded, outvoted one heard,
+///   the carry adopts the outvoted value where the old rule carried the chosen one (#787's review, F1). An
+///   acceptance made outside every group is treated the same way, since a cluster-scoped acceptance on the slot can
+///   have replaced one made in the successor.
+///
+/// So the result is never worse than the old rule, and is the sound one once nothing in the quorum is unknown.
 #[cfg(feature = "consensus")]
-impl MadeIn {
-    /// Whether a carry ballot of electorate `group` hears an acceptance made here: one made in `group`, or one
-    /// whose group was not recorded (the legacy rule — as before). An acceptance known to have been made
-    /// elsewhere is not the successor's, and its phase 1 does not hear it.
-    pub(crate) fn heard_by_carry_into(&self, group: &str) -> bool {
-        match self {
-            MadeIn::Unknown => true,
-            MadeIn::NoGroup => false,
-            MadeIn::Group(g) => &**g == group,
-        }
-    }
-}
-
-/// `held` as a carry ballot of `carry_into` hears it; unchanged for any other proposal.
-#[cfg(feature = "consensus")]
-fn heard(held: Option<(u64, Accepted)>, made_in: &MadeIn, carry_into: Option<&str>) -> Option<(u64, Accepted)> {
-    match carry_into {
-        Some(group) if !made_in.heard_by_carry_into(group) => None,
-        _ => held,
-    }
+pub(crate) fn carry_hears(reports: Vec<AcceptReport>, made_in: &[MadeIn], group: &str) -> Vec<AcceptReport> {
+    if reports.len() != made_in.len() || !made_in.iter().all(|m| matches!(m, MadeIn::Group(_))) { return reports; }
+    reports.into_iter().zip(made_in).filter(|(_, m)| matches!(m, MadeIn::Group(g) if &**g == group)).map(|(r, _)| r).collect()
 }
 
 /// Tags `slot`'s acceptor memory with `group` (retry-safe: a pure insert-if-absent).
@@ -4762,7 +4833,7 @@ pub(crate) enum PrepareOutcome {
 ///
 /// The `compute` closure re-reads the entry on every attempt and is retry-safe.
 #[cfg(feature = "consensus")]
-#[cfg_attr(not(test), allow(dead_code))] // the engine claims through the `_in`/`_for` form; tests and the rule's documentation use this one
+#[allow(dead_code)] // the engine promises through `prepare_slot_tagged`; the tests, the model and the rule's documentation use this one
 pub(crate) fn prepare_slot(
     memory:   &AcceptorMemory,
     slot:     &Arc<str>,
@@ -4770,26 +4841,26 @@ pub(crate) fn prepare_slot(
     proposer: u64,
     floor:    u64,
 ) -> PrepareOutcome {
-    prepare_slot_for(memory, slot, ballot, proposer, floor, None)
+    prepare_slot_tagged(memory, slot, ballot, proposer, floor).0
 }
 
-/// [`prepare_slot`] for a prepare that may be a **carry ballot** of electorate `carry_into` (CR30): the promise is
-/// the same, and the acceptance it reports — granted or refused — is the one a carry into that group hears
-/// ([`MadeIn::heard_by_carry_into`]), read in the same `compute` as the promise.
+/// [`prepare_slot`], with where the acceptance it reports was made ([`MadeIn`]) — read in the same `compute` as the
+/// promise, so the two describe one state (CR30).
 #[cfg(feature = "consensus")]
-pub(crate) fn prepare_slot_for(
-    memory:     &AcceptorMemory,
-    slot:       &Arc<str>,
-    ballot:     u64,
-    proposer:   u64,
-    floor:      u64,
-    carry_into: Option<&str>,
-) -> PrepareOutcome {
+pub(crate) fn prepare_slot_tagged(
+    memory:   &AcceptorMemory,
+    slot:     &Arc<str>,
+    ballot:   u64,
+    proposer: u64,
+    floor:    u64,
+) -> (PrepareOutcome, MadeIn) {
     use papaya::Operation;
     let mut outcome = PrepareOutcome::Refused { promised: 0, accepted: None };
+    let mut made_in = MadeIn::Unknown;
     memory.pin().compute(Arc::clone(slot), |entry| {
         let cur = entry.map(|(_, s)| s.clone()).unwrap_or_default();
-        let reported = heard(cur.accepted.clone(), &cur.made_in, carry_into);
+        let reported = cur.accepted.clone();
+        made_in = cur.made_in.clone();
         if ballot <= floor {
             outcome = PrepareOutcome::Refused { promised: cur.promised.max(floor), accepted: reported };
             return Operation::Abort(());
@@ -4804,7 +4875,7 @@ pub(crate) fn prepare_slot_for(
             Operation::Abort(())
         }
     });
-    outcome
+    (outcome, made_in)
 }
 
 /// One acceptor's report in a promise quorum: `(accepted_ballot, digest, value if known)`.
@@ -5144,7 +5215,7 @@ fn test_swallow_prepare(node: &NodeId, slot: &str) -> bool {
 /// the withheld answer is counted (`acceptor_answers_unrecorded`).
 #[cfg(feature = "consensus")]
 async fn answer_prepare(
-    ctx: &ConsensusEngine, slot: Arc<str>, ballot: u64, proposer: NodeId, term: bool, gate: Option<Gate>, carry: bool,
+    ctx: &ConsensusEngine, slot: Arc<str>, ballot: u64, proposer: NodeId, term: bool, gate: Option<Gate>, tagged: bool,
 ) {
     // A slot whose forgotten promise was detected is not answered until the next start (`acceptor_guard`).
     if crate::agent::acceptor_guard::withheld(&ctx.task_ctx, &slot) { return; }
@@ -5153,11 +5224,10 @@ async fn answer_prepare(
     let floor = ctx.floor(&slot);
     // P2: the promise passes the electorate's gate, which only decides. A gate that refused sends no promise
     // (round 3, finding 5).
-    // A carry ballot is told only of an acceptance made in the electorate it carries into (CR30): this member's
-    // acceptance from the predecessor is the predecessor's, already in its manifest, and not the successor's to adopt.
-    let carry_into = gate.as_ref().filter(|_| carry).map(|g| &*g.group);
-    let outcome = ctx.claim_gated(gate.as_ref(), || prepare_slot_for(&ctx.task_ctx.consensus_accepted, &slot, ballot, proposer.id_hash(), floor, carry_into));
-    let Some(outcome) = outcome else {
+    // The acceptance is reported as it is held, with where it was made, read in the promise's own `compute`; a
+    // carrier that asked (`tagged`, CR30) is told, and decides what to hear over its whole quorum.
+    let outcome = ctx.claim_gated(gate.as_ref(), || prepare_slot_tagged(&ctx.task_ctx.consensus_accepted, &slot, ballot, proposer.id_hash(), floor));
+    let Some((outcome, made_in)) = outcome else {
         if let Some(g) = &gate {
             let digest = crate::agent::electorate::cached(&ctx.task_ctx, &g.group).map_or([0; 32], |d| d.digest());
             refuse_stale(ctx, slot, proposer, (g.epoch + 1, digest));
@@ -5173,7 +5243,15 @@ async fn answer_prepare(
             let accepted_ballot = acc.as_ref().map(|(b, _)| *b).unwrap_or(0);
             let accepted_digest = acc.as_ref().map(|(_, a)| a.digest());
             let committed_digest = ctx.live_digest(&slot);
-            let ack = if term {
+            let ack = if tagged {
+                ConsensusMsg::PrepareAckTagged {
+                    slot: Arc::clone(&slot), ballot, voter: ctx.task_ctx.node_id.clone(),
+                    accepted_ballot, accepted_digest,
+                    accepted_is_envelope: matches!(acc, Some((_, Accepted::Envelope(_)))),
+                    accepted: acc.and_then(|(_, a)| a.value()),
+                    committed_digest, made_in,
+                }
+            } else if term {
                 ConsensusMsg::PrepareAckTerm {
                     slot: Arc::clone(&slot), ballot, voter: ctx.task_ctx.node_id.clone(),
                     accepted_ballot, accepted_digest,
@@ -5383,7 +5461,7 @@ pub(crate) async fn run_consensus_listener(
                 // envelope, and every answer is the flagged form.
                 // P2: a proposal is answered only for this node's own electorate (`electorate_admits`) — a message
                 // without one on an electorate group, or one naming another, is refused by name.
-                let (slot, ballot, value, proposer, term, gate, carry) = match ctx.decode_verify(&sig.payload) {
+                let (slot, ballot, value, proposer, term, gate) = match ctx.decode_verify(&sig.payload) {
                     Some(ConsensusMsg::Prepare { slot, ballot, proposer }) => {
                         match ctx.electorate_admits(&sig.scope, &slot, None, &proposer, None, None) {
                             Ok(gate) => answer_prepare(&ctx, slot, ballot, proposer, false, gate, false).await,
@@ -5407,6 +5485,13 @@ pub(crate) async fn run_consensus_listener(
                     }
                     Some(ConsensusMsg::CarryPrepare { slot, ballot, proposer, epoch, electorate, predecessor }) => {
                         match ctx.electorate_admits(&sig.scope, &slot, Some((epoch, electorate)), &proposer, None, Some(&predecessor)) {
+                            Ok(gate) => answer_prepare(&ctx, slot, ballot, proposer, true, gate, false).await,
+                            Err(own) => refuse_stale(&ctx, slot, proposer, own),
+                        }
+                        continue;
+                    }
+                    Some(ConsensusMsg::CarryPrepareTagged { slot, ballot, proposer, epoch, electorate, predecessor }) => {
+                        match ctx.electorate_admits(&sig.scope, &slot, Some((epoch, electorate)), &proposer, None, Some(&predecessor)) {
                             Ok(gate) => answer_prepare(&ctx, slot, ballot, proposer, true, gate, true).await,
                             Err(own) => refuse_stale(&ctx, slot, proposer, own),
                         }
@@ -5418,7 +5503,7 @@ pub(crate) async fn run_consensus_listener(
                     }
                     Some(ConsensusMsg::Propose { slot, ballot, value, proposer }) => {
                         match ctx.electorate_admits(&sig.scope, &slot, None, &proposer, Some((&value, false)), None) {
-                            Ok(gate) => (slot, ballot, value, proposer, false, gate, false),
+                            Ok(gate) => (slot, ballot, value, proposer, false, gate),
                             Err(own) => { refuse_stale(&ctx, slot, proposer, own); continue; }
                         }
                     }
@@ -5428,7 +5513,7 @@ pub(crate) async fn run_consensus_listener(
                             continue;
                         }
                         match ctx.electorate_admits(&sig.scope, &slot, None, &proposer, Some((&envelope, true)), None) {
-                            Ok(gate) => (slot, ballot, envelope, proposer, true, gate, false),
+                            Ok(gate) => (slot, ballot, envelope, proposer, true, gate),
                             Err(own) => { refuse_stale(&ctx, slot, proposer, own); continue; }
                         }
                     }
@@ -5437,7 +5522,7 @@ pub(crate) async fn run_consensus_listener(
                             continue;
                         }
                         match ctx.electorate_admits(&sig.scope, &slot, Some((epoch, electorate)), &proposer, Some((&envelope, true)), None) {
-                            Ok(gate) => (slot, ballot, envelope, proposer, true, gate, false),
+                            Ok(gate) => (slot, ballot, envelope, proposer, true, gate),
                             Err(own) => { refuse_stale(&ctx, slot, proposer, own); continue; }
                         }
                     }
@@ -5446,7 +5531,7 @@ pub(crate) async fn run_consensus_listener(
                             continue;
                         }
                         match ctx.electorate_admits(&sig.scope, &slot, Some((epoch, electorate)), &proposer, Some((&envelope, true)), Some(&predecessor)) {
-                            Ok(gate) => (slot, ballot, envelope, proposer, true, gate, true),
+                            Ok(gate) => (slot, ballot, envelope, proposer, true, gate),
                             Err(own) => { refuse_stale(&ctx, slot, proposer, own); continue; }
                         }
                     }
@@ -5487,12 +5572,8 @@ pub(crate) async fn run_consensus_listener(
                     // value a quorum already accepted.
                     // `None` after a restart: the durable record carries the digest, not the value,
                     // so this node can refuse a conflicting vote but cannot help the proposer adopt.
-                    // To a carry ballot, only an acceptance made in the electorate it carries into (CR30) — the
-                    // proposer adopts what a refusal reports.
                     let state = accepted.pin().get(&slot).cloned().unwrap_or_default();
-                    let carry_into = gate.as_ref().filter(|_| carry).map(|g| &*g.group);
-                    let held = heard(state.accepted, &state.made_in, carry_into);
-                    emit_refusal(&ctx, &slot, state.promised.max(floor), held, proposer, term, true);
+                    emit_refusal(&ctx, &slot, state.promised.max(floor), state.accepted, proposer, term, true);
                 } else {
                     // **Durable before the vote leaves.** A vote that reaches a proposer while this
                     // node's acceptance is unrecorded is exactly the memory a restart would lose —
@@ -6448,41 +6529,86 @@ mod consensus_msg_auth_tests {
         assert!(decode_acceptor(&none).is_none(), "0x05 without an acceptance is no record");
     }
 
-    /// **After a restart a `0x05` record still refuses and is still filtered** (CR30). An acceptance over the
-    /// record's value cap comes back by digest only, with its group: it refuses another value at its ballot, a
-    /// carry into another electorate is told of no acceptance, and any other prepare — and a carry into the group
-    /// it was made in — is told of it. An acceptance whose group is unknown is reported to every one of them.
+    /// **After a restart a `0x05` record still refuses, and still says where its acceptance was made** (CR30). An
+    /// acceptance over the record's value cap comes back by digest only, with its group: it refuses another value at
+    /// its ballot, and a prepare is answered with the acceptance **as it is held** and its group, granted or refused —
+    /// the acceptor hides nothing; the carrier decides ([`carry_hears`]). A promise keeps both. A record of the older
+    /// shape comes back with the group unknown.
     #[test]
-    fn a_restarted_acceptor_keeps_the_group_and_reports_by_it() {
+    fn a_restarted_acceptor_keeps_the_group_and_reports_it() {
         let slot: Arc<str> = Arc::from("work/x");
         let big = Bytes::from(vec![7u8; ACCEPTOR_RECORD_VALUE_CAP + 1]);
+        let old = MadeIn::Group(Arc::from("old"));
         let live: AcceptorMemory = papaya::HashMap::new();
-        assert!(claim_vote_in(&live, &slot, 4, &big, 1, 0, MadeIn::Group(Arc::from("old"))));
-        let rec = encode_acceptor(&live.pin().get(&slot).cloned().unwrap());
-        let back = decode_acceptor(&rec).expect("record");
-        assert!(matches!(back.accepted, Some((4, Accepted::DigestOnly(_)))) && back.made_in == MadeIn::Group(Arc::from("old")));
-        let reported = |m: &AcceptorMemory, ballot: u64, carry_into: Option<&str>| match prepare_slot_for(m, &slot, ballot, 9, 0, carry_into) {
-            PrepareOutcome::Promised(a) => a.map(|(b, _)| b),
-            PrepareOutcome::Refused { .. } => panic!("a higher ballot is promised"),
-        };
+        assert!(claim_vote_in(&live, &slot, 4, &big, 1, 0, old.clone()));
+        let held = live.pin().get(&slot).cloned().unwrap();
+        let back = decode_acceptor(&encode_acceptor(&held)).expect("record");
+        assert!(matches!(back.accepted, Some((4, Accepted::DigestOnly(_)))) && back.made_in == old);
         let restarted: AcceptorMemory = papaya::HashMap::new();
         restarted.pin().insert(Arc::clone(&slot), back);
         assert!(!claim_vote(&restarted, &slot, 4, &Bytes::from_static(b"other"), 1, 0), "another value at the ballot is refused");
-        assert_eq!(reported(&restarted, 5, Some("new")), None, "a carry into new hears nothing made in old");
-        assert_eq!(reported(&restarted, 6, Some("old")), Some(4));
-        assert_eq!(reported(&restarted, 7, None), Some(4), "an ordinary prepare is told as before");
-        assert_eq!(restarted.pin().get(&slot).map(|s| (s.promised, s.made_in.clone())), Some((7, MadeIn::Group(Arc::from("old")))),
+        let (granted, made_in) = prepare_slot_tagged(&restarted, &slot, 5, 9, 0);
+        assert!(matches!(granted, PrepareOutcome::Promised(Some((4, Accepted::DigestOnly(_))))) && made_in == old);
+        assert_eq!(restarted.pin().get(&slot).map(|s| (s.promised, s.made_in.clone())), Some((5, old.clone())),
             "a promise keeps the acceptance and its group");
-        // A refusal reports by the same rule.
-        assert!(matches!(prepare_slot_for(&restarted, &slot, 6, 9, 0, Some("new")), PrepareOutcome::Refused { promised: 7, accepted: None }));
-        assert!(matches!(prepare_slot_for(&restarted, &slot, 6, 9, 0, None), PrepareOutcome::Refused { promised: 7, accepted: Some((4, _)) }));
-        // Unknown and no-group acceptances.
-        let unknown: AcceptorMemory = papaya::HashMap::new();
-        assert!(claim_vote(&unknown, &slot, 4, &big, 1, 0));
-        assert_eq!((reported(&unknown, 5, Some("new")), reported(&unknown, 6, None)), (Some(4), Some(4)), "the legacy rule: as before");
-        let outside: AcceptorMemory = papaya::HashMap::new();
-        assert!(claim_vote_in(&outside, &slot, 4, &big, 1, 0, MadeIn::NoGroup));
-        assert_eq!((reported(&outside, 5, Some("new")), reported(&outside, 6, None)), (None, Some(4)));
+        let (refused, made_in) = prepare_slot_tagged(&restarted, &slot, 4, 9, 0);
+        assert!(matches!(refused, PrepareOutcome::Refused { promised: 5, accepted: Some((4, _)) }) && made_in == old);
+        assert!(matches!(prepare_slot(&restarted, &slot, 6, 9, 0), PrepareOutcome::Promised(Some((4, _)))), "the untagged form reports the same");
+        // The older shape: the group is unknown after the restart.
+        let unrecorded = decode_acceptor(&encode_acceptor(&AcceptorSlot { made_in: MadeIn::Unknown, ..held })).expect("record");
+        assert_eq!(unrecorded.made_in, MadeIn::Unknown);
+    }
+
+    /// **What a carry hears** ([`carry_hears`], CR30). Every report's group named: only those made in the successor —
+    /// whatever their ballots, since two groups' ballots do not compare. Any report of unknown group, or made
+    /// outside every group: all of them, as before 2.41.0 — hearing a part would be worse than hearing all (#787's
+    /// review, F1: the recorded copy of the chosen value set aside, the unrecorded outvoted one heard).
+    #[test]
+    fn a_carry_hears_the_successors_acceptances_only_when_every_report_names_its_group() {
+        let (v0, v1) = (Bytes::from_static(b"v0"), Bytes::from_static(b"v1"));
+        let report = |b: u64, v: &Bytes| -> AcceptReport { (b, value_digest(v), Some(v.clone())) };
+        let (old, new) = (MadeIn::Group(Arc::from("old")), MadeIn::Group(Arc::from("new")));
+        let mine = Bytes::from_static(b"carried");
+        // All named, none the successor's: nothing is heard, so the carried value is kept — the model's trace.
+        assert!(carry_hears(vec![report(1, &v1)], std::slice::from_ref(&old), "new").is_empty());
+        assert_eq!(choose_after_prepare(&mine, &carry_hears(vec![report(1, &v1)], std::slice::from_ref(&old), "new")), Phase1Choice::Keep);
+        // All named: the successor's lower acceptance is heard, the predecessor's higher one is not — the re-carry.
+        let heard = carry_hears(vec![report(3, &v0), report(7, &v1)], &[new.clone(), old.clone()], "new");
+        assert_eq!(choose_after_prepare(&mine, &heard), Phase1Choice::Adopt(3, v0.clone()));
+        // One unknown beside a recorded copy of the chosen value: everything is heard, and the highest wins (F1).
+        let heard = carry_hears(vec![report(2, &v0), report(1, &v1)], &[old.clone(), MadeIn::Unknown], "new");
+        assert_eq!(choose_after_prepare(&mine, &heard), Phase1Choice::Adopt(2, v0.clone()), "as before 2.41.0, not worse");
+        // An acceptance made outside every group may have replaced one made in the successor: everything is heard.
+        let heard = carry_hears(vec![report(9, &v0), report(1, &v1)], &[MadeIn::NoGroup, old.clone()], "new");
+        assert_eq!(heard.len(), 2);
+        // A report known only by digest is heard or not by the same rule, and blocks only when heard.
+        let digest_only: AcceptReport = (5, value_digest(&v1), None);
+        assert_eq!(choose_after_prepare(&mine, &carry_hears(vec![digest_only.clone()], std::slice::from_ref(&old), "new")), Phase1Choice::Keep);
+        assert_eq!(choose_after_prepare(&mine, &carry_hears(vec![digest_only.clone()], std::slice::from_ref(&new), "new")), Phase1Choice::Blocked);
+        assert_eq!(choose_after_prepare(&mine, &carry_hears(vec![digest_only], &[MadeIn::Unknown], "new")), Phase1Choice::Blocked);
+        // No report: nothing to hear. A length mismatch (never built by the engine) hears everything.
+        assert!(carry_hears(Vec::new(), &[], "new").is_empty());
+        assert_eq!(carry_hears(vec![report(1, &v1)], &[], "new").len(), 1);
+        // The tagged messages round-trip, and are appended after every earlier variant.
+        let ack = ConsensusMsg::PrepareAckTagged {
+            slot: Arc::from("work/x"), ballot: 3, voter: NodeId::new("127.0.0.1", 1).unwrap(), accepted_ballot: 1,
+            accepted_digest: Some(value_digest(&v1)), accepted: Some(v1.clone()), accepted_is_envelope: true,
+            committed_digest: None, made_in: old.clone(),
+        };
+        match decode_consensus_msg(&encode_consensus_msg(&ack)) {
+            Some(ConsensusMsg::PrepareAckTagged { ballot: 3, accepted_ballot: 1, made_in, .. }) => assert_eq!(made_in, old),
+            other => panic!("{other:?}"),
+        }
+        let page = ConsensusMsg::CarryManifestPage {
+            group: Arc::from("old"), successor: Arc::from("new"), voter: NodeId::new("127.0.0.1", 1).unwrap(), after: None,
+            nonce: 0, entries: Vec::new(), done: true,
+        };
+        let prepare = ConsensusMsg::CarryPrepareTagged {
+            slot: Arc::from("work/x"), ballot: 3, proposer: NodeId::new("127.0.0.1", 1).unwrap(), epoch: 1, electorate: [0; 32],
+            predecessor: Arc::from("old"),
+        };
+        let index = |m: &ConsensusMsg| u32::from_le_bytes(encode_consensus_msg(m)[..4].try_into().unwrap());
+        assert_eq!((index(&prepare), index(&ack)), (index(&page) + 1, index(&page) + 2), "appended last: an older node cannot decode them");
     }
 
     /// **The phase-1 rule**: the highest acceptance among the promisers decides; a value whose
@@ -6737,5 +6863,69 @@ mod electorate_filter_tests {
         assert_eq!(electorate_vote_filter(None, Some(set(&[1, 2, 3]))), Some(set(&[1, 2, 3])));
         assert_eq!(electorate_vote_filter(Some(set(&[1, 9])), Some(set(&[1, 2, 3]))), Some(set(&[1])),
             "9 is in the slice but not the electorate: it does not count");
+    }
+}
+
+#[cfg(all(test, feature = "consensus"))]
+mod rev787 {
+    use super::*;
+
+    /// 2.40.0's `encode_acceptor`, verbatim from tag v2.40.0.
+    fn encode_acceptor_2_40(state: &AcceptorSlot) -> Bytes {
+        let mut v = Vec::with_capacity(ACCEPTOR_RECORD_LEN + 1);
+        let envelope = matches!(&state.accepted, Some((_, Accepted::Envelope(_))));
+        let tagged = !state.groups.is_empty();
+        v.push(if tagged { 0x04 } else if envelope { 0x03 } else { 0x02 });
+        v.extend_from_slice(&state.promised.to_le_bytes());
+        v.push(u8::from(state.promised_to.is_some()));
+        v.extend_from_slice(&state.promised_to.unwrap_or(0).to_le_bytes());
+        v.push(u8::from(state.accepted.is_some()));
+        let (ab, d) = state.accepted.as_ref().map(|(b, a)| (*b, a.digest())).unwrap_or((0, [0u8; 32]));
+        v.extend_from_slice(&ab.to_le_bytes());
+        v.extend_from_slice(&d);
+        if tagged {
+            v.push(u8::from(envelope));
+            let groups: Vec<&Arc<str>> = state.groups.iter().take(usize::from(u8::MAX)).collect();
+            v.push(groups.len() as u8);
+            for g in groups {
+                let name = g.as_bytes();
+                let len = name.len().min(usize::from(u16::MAX));
+                v.extend_from_slice(&(len as u16).to_le_bytes());
+                v.extend_from_slice(&name[..len]);
+            }
+        } else if envelope {
+            v.push(1);
+        }
+        if let Some((_, Accepted::Full(value) | Accepted::Envelope(value))) = &state.accepted
+            && value.len() <= ACCEPTOR_RECORD_VALUE_CAP {
+                v.extend_from_slice(value);
+            }
+        Bytes::from(v)
+    }
+
+    /// rev787 R4 — with no group recorded the encoder's output is 2.40.0's, byte for byte, over every shape.
+    #[test]
+    fn rev787_an_unrecorded_acceptance_encodes_as_2_40_did_byte_for_byte() {
+        let env = crate::consensus_life::Envelope::new(
+            "work/x", Bytes::from_static(b"v"), crate::consensus_life::Term::Permanent, 4, NodeId::new("127.0.0.1", 1).unwrap(), 9,
+        ).encode();
+        let big = Bytes::from(vec![7u8; ACCEPTOR_RECORD_VALUE_CAP + 1]);
+        let mut n = 0;
+        for groups in [Vec::new(), vec![Arc::<str>::from("new")], vec![Arc::<str>::from("new"), Arc::<str>::from("old")]] {
+            for promised_to in [None, Some(2u64), Some(FLOOR_SENTINEL)] {
+                for accepted in [None, Some(Accepted::Envelope(env.clone())), Some(Accepted::Full(Bytes::from_static(b"raw"))),
+                    Some(Accepted::Full(big.clone())), Some(Accepted::DigestOnly([7; 32]))] {
+                    let st = AcceptorSlot { promised: 5, promised_to, accepted: accepted.map(|a| (4, a)), groups: groups.clone(), made_in: MadeIn::Unknown };
+                    assert_eq!(encode_acceptor(&st), encode_acceptor_2_40(&st), "{st:?}");
+                    // A promise alone never records a group, whatever memory says.
+                    if st.accepted.is_none() {
+                        let labelled = AcceptorSlot { made_in: MadeIn::Group(Arc::from("new")), ..st.clone() };
+                        assert_eq!(encode_acceptor(&labelled), encode_acceptor_2_40(&st));
+                    }
+                    n += 1;
+                }
+            }
+        }
+        assert_eq!(n, 45);
     }
 }

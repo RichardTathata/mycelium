@@ -164,17 +164,22 @@ retires is dropped (`electorate/{g}/drop/{p}`, `PredecessorDrop`, void if a reti
 verified completion stands as proof of the retirement (`predecessor_state`) and the predecessor's records are fsynced
 on each successor member at completion (`sync_migration_records`); untagged slots are reported too, and skipped only
 when the successor may not decide them at all. Nothing of a run's progress needs to survive: a restart re-enumerates.
-**A carry hears only acceptances made in the successor — where the group is recorded** (critique plan CR30,
-2026-11-14): the acceptor memory is one record per slot whatever group asks, so a member of both electorates holds
-its predecessor acceptance in the record it answers the successor from, and a carry adopted one the predecessor had
-outvoted. `AcceptorSlot::made_in` (`MadeIn::{Unknown, NoGroup, Group}`, record tag `0x05`) is set at the claim
-(`ConsensusEngine::made_in`, from the gate) and read in the same `compute` as the promise (`prepare_slot_for`,
-`heard`) on all three paths that feed a carry: the promiser's ack, the carrier's own memory, a refusal. It is
-written only with `consensus_record_acceptance_group` (off by default in 2.41.0: a 2.40.0 node reads `0x05` as no
-record); `Unknown` is reported as before, so the default keeps the gap — detected, not prevented. Do not "fix" it
-at the proposer: ballots of two groups do not compare, and counting the manifest's acceptance as a phase-1 report
-lets a re-carry replace the successor's own decision. A manifest still reports the member's one record whichever
-group made it.
+**A carry hears only acceptances made in the successor — when every report names its group** (critique plan
+CR30, 2026-11-14, #787): the acceptor memory is one record per slot whatever group asks, so a member of both
+electorates holds its predecessor acceptance in the record it answers the successor from, and a carry adopted one
+the predecessor had outvoted. `AcceptorSlot::made_in` (`MadeIn::{Unknown, NoGroup, Group}`) is set at every claim
+on every node (`ConsensusEngine::made_in`, from the gate) and read in the promise's own `compute`
+(`prepare_slot_tagged`). **The carrier decides, not the acceptor**: with `consensus_record_acceptance_group` a
+carry sends `CarryPrepareTagged`, each promiser answers `PrepareAckTagged` with what it holds and where it was made,
+and `carry_hears` runs over the whole quorum, the carrier's own memory included — every report a named group: only
+the successor's; any unknown or outside every group: all of them, as before. The switch also writes the group to
+the record (tag `0x05`; a 2.40.0 node reads it as no record, hence off by default in 2.41.0). Two shapes not to
+return to: a rule on ballots at the proposer (ballots of two groups do not compare — counting the manifest's
+acceptance as a report lets a re-carry replace the successor's own decision), and a filter at the acceptor (it
+cannot see the other reports; hiding a recorded predecessor acceptance while an unrecorded one is heard decided
+the outvoted value where the old rule did not — #787's review, F1). A carry that asks adopts nothing from a refusal
+(the refusal of a proposal is a separate read of memory, and carries no group). A manifest still reports the
+member's one record whichever group made it.
 No lock was added — the caches are papaya maps and sets. A dead member lowers the group's fault tolerance until the
 group is migrated, a lost majority stops it and cannot migrate, and a lost majority's repair (an operator-forced
 genesis from the survivors' durable records) is not built. **A member comes back with its state or not at all** (2026-10-11,

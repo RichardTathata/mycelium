@@ -570,7 +570,10 @@ A rising
 a forgery, or a write by hand.
 
 **The acceptor's memory guard** (`GET /stats` → `electorate_persistence_refused`,
-`acceptor_memory_empty_for_electorate`, `acceptor_promises_forgotten`; `mycelium_acceptor_guard_total{event}`). A
+`acceptor_memory_empty_for_electorate`, `acceptor_promises_forgotten`; `mycelium_acceptor_guard_total{event}`). The
+event `group_rewritten` (the metric only, 2.41.0) counts a copy of this node's own acceptor record that named another
+electorate group for an acceptance the node holds — a record it did not write, since an acceptor record is unsigned
+and any member can overwrite it; the node writes its record back from memory and withholds nothing. A
 non-zero `acceptor_memory_empty_for_electorate` means this node is a member of a decided electorate and holds no
 acceptor record for its genesis — it is running over an **empty or older** store than the fleet's record of it: stop
 it, restore `{persistence.base_path}/{node_id}/kv/` at its latest state, or retire it onto the removal ledger

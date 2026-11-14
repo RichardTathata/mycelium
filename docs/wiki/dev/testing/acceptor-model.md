@@ -42,8 +42,8 @@ The engine reading: `propose_carry`'s `above` only lifts the carry's ballot (`sr
 nothing checks "above it". **Limits:** in the engine an acceptor holding a live decision record of another value
 refuses, and so does the committer, so it needs `v0`'s record not yet at the carry's quorum; and the engine
 counts it afterwards (`Carried::Conflict`, `commit_conflicts`). The model has no decision record in the
-migration and re-implements the carry; two engine tests of the interleaving, written the same day on branch
-`carry-phase1` (its PR to follow), are what confirm it.
+migration and re-implements the carry; two engine tests of the interleaving, written the same day (#787), are
+what confirm it.
 
 Why the first bound missed it: `contended` had ballots to 2 and the carry runs above every ballot the manifests
 name, so a ballot-2 decision could never be carried. At ballots to 3 that configuration is 110,929,684 states
@@ -53,10 +53,10 @@ fixed, node 0 a bystander to the migration's own steps) as
 that expects the counterexample**. Ledger:
 `docs/operations/what-is-proven.md#carry-across-overlapping-electorates-keeps-value`.
 
-**The fix is decided (maintainer, 2026-11-14) and built on branch `carry-phase1`, its PR to follow:** the acceptor record carries the group
-each acceptance was made in, and a carry hears only acceptances made in the successor; an acceptance with no
-recorded group is treated as today. After that PR merges the model gives each acceptance its group and the
-expected-failure test is inverted.
+**The fix is decided (maintainer, 2026-11-14) and built in #787** (critique plan CR30): every acceptance carries
+the group it was made in, and a carry that asks hears only acceptances made in the successor when every report
+names its group; a report with no group makes it hear everything, as today. After #787 merges, a follow-up gives
+each acceptance in the model its group and inverts the expected-failure test.
 
 **A fix the model passed and that is wrong.** A model-side switch — the carry's phase 1 counting the manifests'
 highest acceptance as one more report — held in `overlap` and in the full configuration at ballots to 3. It is

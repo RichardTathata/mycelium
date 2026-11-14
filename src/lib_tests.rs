@@ -17927,10 +17927,11 @@ async fn a_slot_claimed_before_the_tag_existed_is_carried() {
     let slot: Arc<str> = Arc::from("work/legacy");
     for n in [a, b] {
         assert!(crate::agent::electorate::engine(&n.task_ctx).accept_for_test("old", &slot, 5, &v, a.node_id()).await);
-        // As a 2.32.0 member holds it: the acceptor memory and the durable record without the tag.
+        // As a 2.32.0 member holds it: the acceptor memory and the durable record without the tag — and without
+        // where the acceptance was made, which every node keeps in memory from 2.41.0 (CR30).
         n.task_ctx.consensus_accepted.pin().compute(Arc::clone(&slot), |e| {
             let cur = e.map(|(_, s)| s.clone()).unwrap_or_default();
-            papaya::Operation::<_, ()>::Insert(crate::consensus::AcceptorSlot { groups: Vec::new(), ..cur })
+            papaya::Operation::<_, ()>::Insert(crate::consensus::AcceptorSlot { groups: Vec::new(), made_in: crate::consensus::MadeIn::Unknown, ..cur })
         });
         let rec = crate::consensus::encode_acceptor(&n.task_ctx.consensus_accepted.pin().get(&slot).cloned().unwrap());
         assert_eq!(rec[0], 0x03, "the 2.32.0 record shape");
@@ -18437,7 +18438,8 @@ struct OutvotedCarry {
 ///    proposes v0. N2 does not answer the carry's prepare, so the promise quorum is {N3, N1}, and the only
 ///    acceptance N1 holds is (1, v1), made in `old`.
 ///
-/// Node `i` records the group of its acceptances when `records(i)`.
+/// Node `i` has `consensus_record_acceptance_group` on when `records(i)`: it writes the group to its record, and its
+/// own carry asks for the group and decides by it.
 #[cfg(all(feature = "consensus", feature = "test-frame-filter"))]
 async fn carry_over_an_outvoted_acceptance(records: impl Fn(usize) -> bool, carrier_holds_record: bool) -> OutvotedCarry {
     use crate::consensus::{consensus_kind, consensus_ns, decode_consensus_msg, ConsensusMsg};
@@ -18511,9 +18513,9 @@ fn carried_from_old(conflicts: u64) -> Vec<crate::MigrationState> {
 }
 
 /// **A carry decides the value its predecessor decided, whatever a member of both electorates still holds**
-/// (CR30; [`carry_over_an_outvoted_acceptance`]). Every node records the group of its acceptances
-/// (`consensus_record_acceptance_group`): N1's (1, v1) is recorded as made in `old`, so N1's promise to the carry
-/// reports no acceptance, the carry keeps v0, and `new` decides v0 with no conflict.
+/// (CR30; [`carry_over_an_outvoted_acceptance`]). Every node has `consensus_record_acceptance_group` on: the carrier
+/// asks where each acceptance was made, N1 answers (1, v1) made in `old`, every report names its group and none is
+/// `new`'s, so the carry hears nothing, keeps v0, and `new` decides v0 with no conflict.
 ///
 /// Seen failing first, before the acceptance's group was recorded (main at ae592416): `new` decided v1 at ballot 3
 /// — N1 and N3 both held (3, v1) — and the completion reported `conflicts: 1`.
@@ -18542,26 +18544,35 @@ async fn with_the_acceptance_group_unrecorded_a_carry_still_adopts_an_outvoted_a
     let out = carry_over_an_outvoted_acceptance(|_| false, false).await;
     assert_eq!(out.read_in_new, Some(out.v1.clone()), "run {:?}; held {:?}", out.states, out.held);
     assert_eq!(out.states, Ok(carried_from_old(1)), "detected: the completion reports the conflict");
-    assert!(out.held.iter().flatten().all(|h| h.2 == crate::consensus::MadeIn::Unknown), "nothing was recorded: {:?}", out.held);
 }
 
-/// **A mixed fleet: the filter is the acceptor's** (CR30). The carrier N3 does not record the group (it writes the
-/// older record); N0, N1 and N2 do. N1 is the member that holds the outvoted acceptance, and it is N1 that withholds
-/// it from the carry, so `new` decides v0 whatever the carrier runs. (The other way round — N1 not recording — is the
-/// default's gap, pinned above.)
+/// **A mixed fleet: the rule is the carrier's** (CR30; #787's review, F1). Only the carrier N3 has the switch on. It
+/// asks where each acceptance was made, and N1 — switch off, so its record is the older shape — answers from memory,
+/// where every node from 2.41.0 keeps the group: (1, v1), made in `old`. `new` decides v0. (Had N1 restarted, its
+/// answer would be "unknown" and the carrier would hear everything, as before 2.41.0.)
 #[cfg(all(feature = "consensus", feature = "test-frame-filter"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_carrier_that_does_not_record_the_group_is_protected_by_an_acceptor_that_does() {
-    let out = carry_over_an_outvoted_acceptance(|i| i != 3, false).await;
+async fn a_carrier_that_asks_is_answered_by_members_that_do_not_write_the_group() {
+    let out = carry_over_an_outvoted_acceptance(|i| i == 3, false).await;
     assert_eq!(out.read_in_new, Some(out.v0.clone()), "run {:?}; held {:?}", out.states, out.held);
     assert_eq!(out.states, Ok(carried_from_old(0)));
-    assert_eq!(out.held[3].as_ref().map(|h| h.2.clone()), Some(crate::consensus::MadeIn::Unknown), "N3 records no group");
-    assert_eq!(out.held[1].as_ref().map(|h| h.2.clone()), Some(crate::consensus::MadeIn::Group(Arc::from("new"))));
+}
+
+/// **The default in 2.41.0, pinned from the carrier's side: a carrier with the switch off asks as 2.40.0 did**
+/// (stated 2026-11-14). N0, N1 and N2 have the switch on; the carrier N3 does not. It sends the old prepare, is
+/// answered the old way, hears N1's (1, v1), and `new` decides v1 — the gap is closed by the node that runs the
+/// completion, not by the members that answer it.
+#[cfg(all(feature = "consensus", feature = "test-frame-filter"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_carrier_with_the_switch_off_carries_as_before_whatever_the_members_record() {
+    let out = carry_over_an_outvoted_acceptance(|i| i != 3, false).await;
+    assert_eq!(out.read_in_new, Some(out.v1.clone()), "run {:?}; held {:?}", out.states, out.held);
+    assert_eq!(out.states, Ok(carried_from_old(1)));
 }
 
 /// **A carrier that holds the predecessor's record leaves no other value accepted in the successor** (CR30). As
-/// above, but v0's decision record has reached N3. With the group recorded, N1 reports nothing, the carry proposes
-/// v0, and both N1 and N3 hold v0.
+/// above, but v0's decision record has reached N3. With the switch on, the carry does not hear N1's `old`-made
+/// acceptance, proposes v0, and both N1 and N3 hold v0.
 ///
 /// Seen failing first, with the group unrecorded — the next test pins it.
 #[cfg(all(feature = "consensus", feature = "test-frame-filter"))]
@@ -18603,8 +18614,8 @@ async fn with_the_group_unrecorded_a_carrier_holding_the_record_cannot_complete_
 /// **The same, with no record anywhere** — the window needs no gossip lag. v0 is **chosen** in `old` (accepted by
 /// {N0,N2} at ballot 2) and never committed, as when its proposer stops between the second acceptance and the commit;
 /// N1 holds v1 from ballot 1. No node holds a decision record for the slot, so no record can stop a second value. The
-/// carry's promise quorum is {N3, N1}. Every node records the group. Seen failing first, before the group was
-/// recorded: `new` decided v1, `conflicts: 1`.
+/// carry's promise quorum is {N3, N1}. Every node has the switch on. Seen failing first on ae592416: `new` decided
+/// v1, `conflicts: 1`.
 #[cfg(feature = "consensus")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_carry_decides_what_the_predecessor_chose_whatever_an_overlapping_member_holds() {
@@ -18631,6 +18642,50 @@ async fn a_carry_decides_what_the_predecessor_chose_whatever_an_overlapping_memb
         "old chose v0; new decided {decided_in_new:?} (v1 is {v1:?}); the completion run returned {states:?}");
     assert_eq!(states, Ok(carried_from_old(0)));
     for n in &agents { n.shutdown_with_timeout(Duration::from_secs(5)).await; }
+}
+
+/// **A successor member that cannot answer the tagged prepare — a node before 2.41.0 — makes the carry time out,
+/// not decide** (CR30; the liveness cost of the switch, stated). Every node has the switch on; N1 drops the
+/// carrier's `CarryPrepareTagged`, as a 2.40.0 node ignores a message it cannot decode, and N2 answers no prepare
+/// for the slot. The carrier alone is no quorum: the run returns *not decided*, `new` reads nothing for the slot,
+/// and N1 still holds only its `old`-made acceptance.
+#[cfg(all(feature = "consensus", feature = "test-frame-filter"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_carry_that_asks_times_out_when_a_successor_quorum_cannot_answer_it() {
+    use crate::consensus::{consensus_kind, decode_consensus_msg, ConsensusMsg};
+    use crate::store::FrameView;
+    let (agents, _l, _serial) = recording_mesh(|_| true).await;
+    let (n0, n1, n2, n3) = (&agents[0], &agents[1], &agents[2], &agents[3]);
+    for n in [n0, n1, n2] { n.mesh().join_group("old"); }
+    roster_converges(&agents, "old", &[n0, n1, n2]).await;
+    declare(n0, "old", false).await.expect("genesis of old");
+    epoch_converges(&agents, "old", 1).await;
+    let slot: Arc<str> = Arc::from("work/contended");
+    let (v0, v1) = (Bytes::from_static(b"v0-chosen-in-old"), Bytes::from_static(b"v1-outvoted-in-old"));
+    let engine = |n: &GossipAgent| crate::agent::electorate::engine(&n.task_ctx);
+    assert!(engine(n1).accept_for_test("old", &slot, 1, &v1, n1.node_id()).await);
+    for n in [n0, n2] { assert!(engine(n).accept_for_test("old", &slot, 2, &v0, n0.node_id()).await); }
+    successor(&agents, n3, "new", &[n1, n2, n3], &["old"]).await;
+    n1.retire_electorate("old", "new").await.expect("old retires to new");
+    retirement_converges(&agents, "old").await;
+    n1.task_ctx.kv_state.frame_filter.pin().insert(1, Arc::new(|v: &FrameView<'_>| match v {
+        FrameView::Signal { kind, payload, .. } if *kind == consensus_kind::PROPOSE =>
+            matches!(decode_consensus_msg(&Bytes::copy_from_slice(payload)), Some(ConsensusMsg::CarryPrepareTagged { .. })),
+        _ => false,
+    }));
+    crate::consensus::TEST_SWALLOW_PREPARES.pin().insert(n2.node_id().to_string(),
+        (slot.to_string(), Arc::new(std::sync::atomic::AtomicU32::new(u32::MAX))));
+    let states = n3.complete_migration("new").await;
+    crate::consensus::TEST_SWALLOW_PREPARES.pin().remove(&n2.node_id().to_string());
+    let read = n3.consensus().consensus_get(&slot);
+    let held = held_for_contended_slot(n1);
+    for n in &agents { n.shutdown_with_timeout(Duration::from_secs(5)).await; }
+    match &states {
+        Err(crate::ElectorateError::NotDecided(why)) => assert!(why.contains("did not decide"), "{why}"),
+        other => panic!("the carry does not decide without a quorum that can answer it: {other:?}"),
+    }
+    assert_eq!(read, None, "nothing is decided in new");
+    assert_eq!(held.map(|h| (h.1, h.2)), Some((Some((1, Some(v1))), crate::consensus::MadeIn::Group(Arc::from("old")))));
 }
 
 /// What [`recarry_under_a_higher_predecessor_acceptance`] ends with.
@@ -18703,8 +18758,8 @@ async fn recarry_under_a_higher_predecessor_acceptance(records: bool) -> Recarry
 }
 
 /// **A re-carry does not put a predecessor's higher acceptance in the successor** (CR30;
-/// [`recarry_under_a_higher_predecessor_acceptance`]). With the group recorded, N1's (7, v7) is `old`'s and the
-/// second run hears only N3's (3, v0): it re-decides v0, the migration completes, and N1 and N3 hold v0. When the
+/// [`recarry_under_a_higher_predecessor_acceptance`]). With the switch on, every report names its group: N1's
+/// (7, v7) is `old`'s and the second run hears only N3's (3, v0): it re-decides v0, the migration completes, and N1 and N3 hold v0. When the
 /// second run's manifests include N1's (which two of `old` answer first depends on the node ids), the value it set
 /// out to carry is v7 — `old` chose nothing, so either acceptance is a fair carry — and deciding v0 instead is
 /// reported as a conflict on that slot: the successor's earlier decision stands.
@@ -19314,4 +19369,206 @@ async fn the_future_stamp_metric_counts_each_door_exactly() {
         let line = format!("mycelium_kv_future_stamps_total{{door=\"{}\"}} {}", door.name(), i + 1);
         assert!(text.lines().any(|l| l == line), "expected `{line}` in:\n{text}");
     }
+}
+
+// ─────────── rev787: the adversarial reviewer's traces of PR #787 (critique plan CR30), taken into the PR ───────────
+
+/// rev787 R1 — a chain a → b → c with N1 a member of `a` and `c` but not `b`. `a` chose v0 (N0, N2 at ballot 2);
+/// N1 holds its outvoted (1, v1) made in `a`. `b` = {N0,N2,N3} carries v0. `c` = {N1,N3,N4}; the carry's promise
+/// quorum is {N4, N1}.
+#[cfg(feature = "consensus")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rev787_a_member_of_the_first_and_third_electorate_does_not_hand_the_third_its_outvoted_acceptance() {
+    let (agents, _l, _serial) = electorate_mesh(5, |c| { c.consensus_record_acceptance_group = true; }).await;
+    let (n0, n1, n2, n3, n4) = (&agents[0], &agents[1], &agents[2], &agents[3], &agents[4]);
+    for n in [n0, n1, n2] { n.mesh().join_group("a"); }
+    roster_converges(&agents, "a", &[n0, n1, n2]).await;
+    declare(n0, "a", false).await.expect("genesis of a");
+    epoch_converges(&agents, "a", 1).await;
+    let slot: Arc<str> = Arc::from("work/contended");
+    let (v0, v1) = (Bytes::from_static(b"v0-chosen-in-a"), Bytes::from_static(b"v1-outvoted-in-a"));
+    let engine = |n: &GossipAgent| crate::agent::electorate::engine(&n.task_ctx);
+    assert!(engine(n1).accept_for_test("a", &slot, 1, &v1, n1.node_id()).await);
+    for n in [n0, n2] { assert!(engine(n).accept_for_test("a", &slot, 2, &v0, n0.node_id()).await); }
+    successor(&agents, n3, "b", &[n0, n2, n3], &["a"]).await;
+    n0.retire_electorate("a", "b").await.expect("a retires to b");
+    retirement_converges(&agents, "a").await;
+    let states = complete(&agents, n3, "b").await;
+    assert_eq!(states, vec![crate::MigrationState { predecessor: "a".into(), phase: crate::MigrationPhase::Complete { slots: 1, conflicts: 0 } }], "{states:?}");
+    let n1_holds = |n: &GossipAgent| n.task_ctx.consensus_accepted.pin().get("work/contended").map(|s| (
+        s.accepted.as_ref().map(|(b, a)| (*b, a.value().and_then(|e| crate::consensus_life::Envelope::decode(&e)).and_then(|e| e.value))),
+        s.made_in.clone()));
+    assert_eq!(n1_holds(n1), Some((Some((1, Some(v1.clone()))), crate::consensus::MadeIn::Group(Arc::from("a")))), "N1 still holds its a-made v1");
+    successor(&agents, n4, "c", &[n1, n3, n4], &["b"]).await;
+    n0.retire_electorate("b", "c").await.expect("b retires to c");
+    retirement_converges(&agents, "b").await;
+    crate::consensus::TEST_SWALLOW_PREPARES.pin().insert(n3.node_id().to_string(),
+        (slot.to_string(), Arc::new(std::sync::atomic::AtomicU32::new(u32::MAX))));
+    let states = n4.complete_migration("c").await;
+    crate::consensus::TEST_SWALLOW_PREPARES.pin().remove(&n3.node_id().to_string());
+    let read = n4.consensus().consensus_get(&slot);
+    let held = n1_holds(n1);
+    for n in &agents { n.shutdown_with_timeout(Duration::from_secs(5)).await; }
+    assert_eq!(read, Some(v0.clone()), "c reads {read:?}; run {states:?}; N1 holds {held:?}");
+    assert_eq!(states, Ok(vec![crate::MigrationState { predecessor: "b".into(), phase: crate::MigrationPhase::Complete { slots: 1, conflicts: 0 } }]));
+    assert_eq!(held.map(|h| (h.0.and_then(|a| a.1), h.1)), Some((Some(v0), crate::consensus::MadeIn::Group(Arc::from("c")))), "N1 accepted v0 in c");
+}
+
+/// rev787 R2 — an ordinary proposal on the successor **after the completion**, from the member that still holds its
+/// outvoted predecessor acceptance (the PR's "not tested"). `old` chose v0 (N0, N2 at 2); N1 holds (1, v1) made in
+/// `old`. The carry and the completion are decided by {N3, N2}: N1 hears no proposal of N3's and never gets the
+/// slot's record. Then N1 proposes w in `new`: its phase 1 hears its own (1, v1) — unfiltered, it is no carry — and
+/// a successor acceptance (3, v0).
+#[cfg(all(feature = "consensus", feature = "test-frame-filter"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rev787_an_ordinary_proposal_after_the_completion_keeps_the_carried_value() {
+    use crate::consensus::{consensus_kind, consensus_ns};
+    use crate::store::FrameView;
+    let (agents, _l, _serial) = recording_mesh(|_| true).await;
+    let (n0, n1, n2, n3) = (&agents[0], &agents[1], &agents[2], &agents[3]);
+    for n in [n0, n1, n2] { n.mesh().join_group("old"); }
+    roster_converges(&agents, "old", &[n0, n1, n2]).await;
+    declare(n0, "old", false).await.expect("genesis of old");
+    epoch_converges(&agents, "old", 1).await;
+    let slot: Arc<str> = Arc::from("work/contended");
+    let (v0, v1, w) = (Bytes::from_static(b"v0-chosen-in-old"), Bytes::from_static(b"v1-outvoted-in-old"), Bytes::from_static(b"w-asked-later"));
+    let engine = |n: &GossipAgent| crate::agent::electorate::engine(&n.task_ctx);
+    assert!(engine(n1).accept_for_test("old", &slot, 1, &v1, n1.node_id()).await);
+    for n in [n0, n2] { assert!(engine(n).accept_for_test("old", &slot, 2, &v0, n0.node_id()).await); }
+    successor(&agents, n3, "new", &[n1, n2, n3], &["old"]).await;
+    n1.retire_electorate("old", "new").await.expect("old retires to new");
+    retirement_converges(&agents, "old").await;
+    let h3 = n3.node_id().id_hash();
+    n1.task_ctx.kv_state.frame_filter.pin().insert(1, Arc::new(move |v: &FrameView<'_>|
+        matches!(v, FrameView::Signal { kind, sender, .. } if *sender == h3 && *kind == consensus_kind::PROPOSE)));
+    let committed = format!("{}{slot}", consensus_ns::COMMITTED);
+    let life = crate::consensus_life::slot_prefix(&slot);
+    n1.task_ctx.kv_state.frame_filter.pin().insert(2, Arc::new(move |v: &FrameView<'_>| match v {
+        FrameView::Signal { kind, sender, payload } => *sender == h3 && *kind == consensus_kind::COMMIT && names_contended_slot(payload),
+        FrameView::Kv { key, .. } => key.starts_with(life.as_str()) || *key == committed,
+    }));
+    let states = n3.complete_migration("new").await;
+    assert_eq!(states, Ok(carried_from_old(0)));
+    assert_eq!(n3.consensus().consensus_get(&slot), Some(v0.clone()));
+    poll_until(|| n1.electorate_completion("new", "old").is_some(), 20_000).await;
+    assert!(n1.consensus().consensus_get(&slot).is_none(), "the carried decision's record has not reached N1");
+    assert_eq!(held_for_contended_slot(n1).map(|h| (h.1, h.2)), Some((Some((1, Some(v1.clone()))), crate::consensus::MadeIn::Group(Arc::from("old")))));
+    n1.task_ctx.kv_state.frame_filter.pin().remove(&1);
+    let res = n1.consensus().group_propose("new", &slot, w.clone(), quick_cfg()).await;
+    let held: Vec<Held> = agents.iter().map(held_for_contended_slot).collect();
+    let read = n3.consensus().consensus_get(&slot);
+    for n in &agents { n.shutdown_with_timeout(Duration::from_secs(5)).await; }
+    assert_eq!(read, Some(v0.clone()), "N1's proposal returned {res:?}; held {held:?}");
+    assert!(!matches!(res, ConsensusResult::Committed { .. }), "w is not decided: {res:?}");
+    for i in [2, 3] {
+        assert_eq!(held[i].as_ref().and_then(|h| h.1.as_ref().and_then(|a| a.1.clone())), Some(v0.clone()), "N{i}: {:?} (after {res:?})", held[i]);
+    }
+    // N1 is told the slot is decided (a promiser's live record) and stops: it holds v0, or still its old-made v1 — never w,
+    // and never v1 as an acceptance made in new.
+    let n1 = held[1].clone().expect("N1 holds the slot");
+    assert!(n1.1.as_ref().and_then(|a| a.1.clone()) != Some(w.clone()), "{n1:?}");
+    assert!(n1.2 != crate::consensus::MadeIn::Group(Arc::from("new")) || n1.1.as_ref().and_then(|a| a.1.clone()) == Some(v0.clone()), "{n1:?} (after {res:?})");
+}
+
+/// rev787 R5 — **the carrier is the shared member**: N1, a member of `old` and `new`, holds its own outvoted
+/// (1, v1) made in `old` and runs the completion itself. The third feed path (`prepare_phase`'s own memory) is
+/// what keeps it from adopting its own stale acceptance; the promise quorum is {N1, N3}.
+#[cfg(feature = "consensus")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rev787_a_carrier_that_is_the_shared_member_does_not_adopt_its_own_outvoted_acceptance() {
+    let (agents, _l, _serial) = recording_mesh(|_| true).await;
+    let (n0, n1, n2, n3) = (&agents[0], &agents[1], &agents[2], &agents[3]);
+    for n in [n0, n1, n2] { n.mesh().join_group("old"); }
+    roster_converges(&agents, "old", &[n0, n1, n2]).await;
+    declare(n0, "old", false).await.expect("genesis of old");
+    epoch_converges(&agents, "old", 1).await;
+    let slot: Arc<str> = Arc::from("work/contended");
+    let (v0, v1) = (Bytes::from_static(b"v0-chosen-in-old"), Bytes::from_static(b"v1-outvoted-in-old"));
+    let engine = |n: &GossipAgent| crate::agent::electorate::engine(&n.task_ctx);
+    assert!(engine(n1).accept_for_test("old", &slot, 1, &v1, n1.node_id()).await);
+    for n in [n0, n2] { assert!(engine(n).accept_for_test("old", &slot, 2, &v0, n0.node_id()).await); }
+    successor(&agents, n3, "new", &[n1, n2, n3], &["old"]).await;
+    n1.retire_electorate("old", "new").await.expect("old retires to new");
+    retirement_converges(&agents, "old").await;
+    crate::consensus::TEST_SWALLOW_PREPARES.pin().insert(n2.node_id().to_string(),
+        (slot.to_string(), Arc::new(std::sync::atomic::AtomicU32::new(u32::MAX))));
+    let states = n1.complete_migration("new").await;
+    crate::consensus::TEST_SWALLOW_PREPARES.pin().remove(&n2.node_id().to_string());
+    let read = n1.consensus().consensus_get(&slot);
+    let held: Vec<_> = agents.iter().map(|n| n.task_ctx.consensus_accepted.pin().get("work/contended").map(|s| (
+        s.promised, s.accepted.as_ref().map(|(b, a)| (*b, a.value().and_then(|e| crate::consensus_life::Envelope::decode(&e)).and_then(|e| e.value))), s.made_in.clone()))).collect();
+    for n in &agents { n.shutdown_with_timeout(Duration::from_secs(5)).await; }
+    assert_eq!(read, Some(v0.clone()), "old chose v0; new decided {read:?} (v1 is {v1:?}); run {states:?}; held {held:?}");
+    assert_eq!(states, Ok(vec![crate::MigrationState { predecessor: "old".into(), phase: crate::MigrationPhase::Complete { slots: 1, conflicts: 0 } }]));
+}
+
+/// rev787 R6 — **the carrier is a shared member that holds the value `old` chose; the other promiser is a shared
+/// member whose outvoted acceptance has no recorded group.** `old` = {N0,N1,N2} chose v0 (N0, N2 at ballot 2); N1
+/// holds (1, v1). `new` = {N1,N2,N3}; N2 completes; N3 answers no prepare, so the promise quorum is {N2, N1}.
+/// `records(i)`: node i has the switch on. `n1_latent`: N1's acceptance is left without a group although N1 has the
+/// switch on — an acceptance made before the switch was turned on, read back from the older record.
+///
+/// R6b and R6c failed on 7606eddf, where the acceptor hid a recorded predecessor acceptance and reported an
+/// unrecorded one (the review's F1): `new` decided v1. They pass now that the carrier decides over the whole
+/// quorum — R6b by hearing everything (one report's group is unknown), R6c because N1, switch off, still answers
+/// from memory with the group.
+#[cfg(feature = "consensus")]
+async fn rev787_shared_carrier(records: impl Fn(usize) -> bool, n1_latent: bool) -> (Bytes, Bytes, Option<Bytes>, Result<Vec<crate::MigrationState>, crate::ElectorateError>, String) {
+    let (agents, _l, _serial) = recording_mesh(records).await;
+    let (n0, n1, n2, n3) = (&agents[0], &agents[1], &agents[2], &agents[3]);
+    for n in [n0, n1, n2] { n.mesh().join_group("old"); }
+    roster_converges(&agents, "old", &[n0, n1, n2]).await;
+    declare(n0, "old", false).await.expect("genesis of old");
+    epoch_converges(&agents, "old", 1).await;
+    let slot: Arc<str> = Arc::from("work/contended");
+    let (v0, v1) = (Bytes::from_static(b"v0-chosen-in-old"), Bytes::from_static(b"v1-outvoted-in-old"));
+    let engine = |n: &GossipAgent| crate::agent::electorate::engine(&n.task_ctx);
+    assert!(engine(n1).accept_for_test("old", &slot, 1, &v1, n1.node_id()).await);
+    if n1_latent {
+        // As after a restart with the switch newly on: the record written before it decodes with no group.
+        let mem = n1.task_ctx.consensus_accepted.pin();
+        let cur = mem.get("work/contended").cloned().expect("accepted");
+        let old_shape = crate::consensus::encode_acceptor(&crate::consensus::AcceptorSlot { made_in: crate::consensus::MadeIn::Unknown, ..cur });
+        mem.insert(Arc::clone(&slot), crate::consensus::decode_acceptor(&old_shape).expect("the older record"));
+    }
+    for n in [n0, n2] { assert!(engine(n).accept_for_test("old", &slot, 2, &v0, n0.node_id()).await); }
+    successor(&agents, n3, "new", &[n1, n2, n3], &["old"]).await;
+    n1.retire_electorate("old", "new").await.expect("old retires to new");
+    retirement_converges(&agents, "old").await;
+    crate::consensus::TEST_SWALLOW_PREPARES.pin().insert(n3.node_id().to_string(),
+        (slot.to_string(), Arc::new(std::sync::atomic::AtomicU32::new(u32::MAX))));
+    let states = n2.complete_migration("new").await;
+    crate::consensus::TEST_SWALLOW_PREPARES.pin().remove(&n3.node_id().to_string());
+    let read = n2.consensus().consensus_get(&slot);
+    let held = format!("{:?}", agents.iter().map(|n| n.task_ctx.consensus_accepted.pin().get("work/contended").map(|s| (
+        s.promised, s.accepted.as_ref().map(|(b, a)| (*b, a.value().and_then(|e| crate::consensus_life::Envelope::decode(&e)).and_then(|e| e.value))), s.made_in.clone()))).collect::<Vec<_>>());
+    for n in &agents { n.shutdown_with_timeout(Duration::from_secs(5)).await; }
+    (v0, v1, read, states, held)
+}
+
+/// R6a — the default (nobody records): the carrier hears its own (2, v0) above N1's (1, v1) and carries v0.
+#[cfg(feature = "consensus")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rev787_r6a_with_no_node_recording_a_shared_carrier_carries_the_chosen_value() {
+    let (v0, v1, read, states, held) = rev787_shared_carrier(|_| false, false).await;
+    assert_eq!(read, Some(v0), "old chose v0; new decided {read:?} (v1 is {v1:?}); run {states:?}; held {held}");
+    assert_eq!(states, Ok(vec![crate::MigrationState { predecessor: "old".into(), phase: crate::MigrationPhase::Complete { slots: 1, conflicts: 0 } }]));
+}
+
+/// R6b — every node records, and N1's outvoted acceptance was made before the switch.
+#[cfg(feature = "consensus")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rev787_r6b_with_every_node_recording_and_one_acceptance_made_before_the_switch() {
+    let (v0, v1, read, states, held) = rev787_shared_carrier(|_| true, true).await;
+    assert_eq!(read, Some(v0), "old chose v0; new decided {read:?} (v1 is {v1:?}); run {states:?}; held {held}");
+    assert_eq!(states, Ok(vec![crate::MigrationState { predecessor: "old".into(), phase: crate::MigrationPhase::Complete { slots: 1, conflicts: 0 } }]));
+}
+
+/// R6c — a mixed fleet: every node but N1 records.
+#[cfg(feature = "consensus")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rev787_r6c_with_every_node_but_the_outvoted_member_recording() {
+    let (v0, v1, read, states, held) = rev787_shared_carrier(|i| i != 1, false).await;
+    assert_eq!(read, Some(v0), "old chose v0; new decided {read:?} (v1 is {v1:?}); run {states:?}; held {held}");
+    assert_eq!(states, Ok(vec![crate::MigrationState { predecessor: "old".into(), phase: crate::MigrationPhase::Complete { slots: 1, conflicts: 0 } }]));
 }

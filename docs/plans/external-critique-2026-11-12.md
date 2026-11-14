@@ -612,7 +612,7 @@ answer is still to be written here (the State line above).
 
 **"It touches no shipped code", restated:** no behaviour and no public item of a shipped build changed. `mycelium` gained the feature `model-internals` (off by default, enabled only by `mycelium-model`) and the module it gates, `src/model_internals.rs`, which wraps the functions above; and three private functions of `src/consensus.rs` became `pub(crate)` so that module can call them (`electorate_vote_filter`, `Carry::report`, `set_aside_finished`). Stateright is in the root `Cargo.lock` and in no published crate's dependencies or dev-dependencies.
 
-**The finding (found by the model 2026-11-14 and confirmed on the engine the same day).** Raising the contended migration to ballots ≤ 3 — the review's F3 — broke `ONE_VALUE_ACROSS` with no fault planted. Predecessor {0, 1, 2}, successor {1, 2, 3}: node 1 accepts `v1` in the predecessor at ballot 1 and no quorum follows; nodes 0 and 2 decide `v0` at ballot 2; the manifests name `v0` and the carry runs at ballot 3 with node 1 as the rest of its quorum; node 1's promise reports `v1`@1, phase 1 carries the highest report of its promise quorum and knows nothing of the manifests, and the successor decides `v1`. In the engine it needs `v0`'s decision record not yet at the carry's quorum, and is counted afterwards (`commit_conflicts`). CI holds the trace as a test that expects it (`found_a_carry_adopts_a_stale_acceptance_of_an_overlapping_member_and_the_groups_decide_two_values`); the full configuration at ballots ≤ 3 is 110,929,684 states, about eight minutes, run by hand and not in CI. **The fix is decided (maintainer, 2026-11-14) and is built on branch `carry-phase1`, its PR to follow, not here:** the acceptor record carries the group each acceptance was made in, and a carry hears only acceptances made in the successor; an acceptance with no recorded group is treated as today. The expected-failure test is inverted, with the acceptor's group modelled, after that PR merges. Ledger: `what-is-proven.md#carry-across-overlapping-electorates-keeps-value`.
+**The finding (found by the model 2026-11-14 and confirmed on the engine the same day).** Raising the contended migration to ballots ≤ 3 — the review's F3 — broke `ONE_VALUE_ACROSS` with no fault planted. Predecessor {0, 1, 2}, successor {1, 2, 3}: node 1 accepts `v1` in the predecessor at ballot 1 and no quorum follows; nodes 0 and 2 decide `v0` at ballot 2; the manifests name `v0` and the carry runs at ballot 3 with node 1 as the rest of its quorum; node 1's promise reports `v1`@1, phase 1 carries the highest report of its promise quorum and knows nothing of the manifests, and the successor decides `v1`. In the engine it needs `v0`'s decision record not yet at the carry's quorum, and is counted afterwards (`commit_conflicts`). CI holds the trace as a test that expects it (`found_a_carry_adopts_a_stale_acceptance_of_an_overlapping_member_and_the_groups_decide_two_values`); the full configuration at ballots ≤ 3 is 110,929,684 states, about eight minutes, run by hand and not in CI. **The fix is decided (maintainer, 2026-11-14) and built in #787 (row CR30), not here:** every acceptance carries the group it was made in, and a carry that asks hears only acceptances made in the successor when every report names its group; a report with no group makes it hear everything, as today. The expected-failure test is inverted, with the acceptor's group modelled, in a follow-up after #787 merges. Ledger: `what-is-proven.md#carry-across-overlapping-electorates-keeps-value`.
 
 The lease area models CR11's margin as designed; until CR11 lands, the `what-is-proven.md` row says that area checks the design, not the code.
 
@@ -1056,40 +1056,56 @@ preflight a tool gets, refused without it, seen admitted first; the raw routes s
 
 #### CR30 · A carry hears only acceptances made in the successor *(found by CR10's model, 2026-11-14)*
 
-**State (2026-11-14):** **step 1 delivered** (unreleased); **step 2 — the switch on by default — one MINOR
+**State (2026-11-14):** **step 1 delivered** (#787, unreleased); **step 2 — the switch on by default — one MINOR
 later**, *buildable* once step 1 has shipped in a release. Decided by the maintainer on 2026-11-14: record the
-group in the acceptor record, in two steps, and report an acceptance with no recorded group as before.
+group an acceptance is made in, in two steps, and treat an acceptance of unknown group as today. #787's review
+(F1) showed that filtering at the acceptor cannot deliver the second half; the decision moved to the carrier.
 
 **What:** CR10's migration model found, and two engine tests confirmed, that a successor electorate sharing a
 member with its predecessor can decide a value the predecessor outvoted. The acceptor memory is one record per
 slot whatever group asks; a shared member answered a carry's prepare with its predecessor acceptance; the carry's
 phase 1 adopted it over the manifest's value when the promise quorum was that member and the carrier and neither
 held the decision's record (`docs/design/consensus-electorate.md` §8.3 (iii) said "G2 held nothing" — true of the
-group, not of its members). A proposer-side rule cannot close it: ballots of two groups do not compare, in either
-direction (counting the manifest's acceptance as a report lets a re-carry replace the successor's own decision).
+group, not of its members). Two shapes that do not close it: a proposer-side rule on ballots (ballots of two
+groups do not compare, in either direction — counting the manifest's acceptance as a report lets a re-carry
+replace the successor's own decision), and a filter at the acceptor (it cannot see the other reports: hiding a
+recorded predecessor acceptance while an unrecorded one is heard is worse than hearing both).
 
-**Step 1 (this row's first PR):** the acceptor record's tag `0x05` — the acceptance with the group it was made in,
-or none (`MadeIn`); read by every node; written only with `consensus_record_acceptance_group`, off by default,
-because a 2.40.0 node reads `0x05` as no record. With the group known a carry ballot is told only of an acceptance
-made in the successor: in the promise, in a refusal, and from the carrier's own memory. An acceptance with no
-group is reported as before. The carry-conflict warning no longer claims two values were chosen in the past.
+**Step 1 (#787):**
+- every node keeps, beside an acceptance in memory, the group it was made in, or none (`MadeIn`);
+- the acceptor record's tag `0x05` carries it; read by every node; written only with
+  `consensus_record_acceptance_group`, off by default, because a 2.40.0 node reads `0x05` as no record;
+- two consensus messages appended last, `CarryPrepareTagged` and `PrepareAckTagged`: a carrier with the switch
+  asks each promiser where its acceptance was made, and every node answers with what it holds, unfiltered;
+- the carrier decides over its whole promise quorum, its own memory included (`carry_hears`): every report names
+  its group → hear only the successor's; any report unknown, or made outside every group → hear everything, as
+  today. It adopts nothing from a refusal and starts each ballot from the envelope it carries;
+- a carrier without the switch carries as 2.40.0 did;
+- the carry-conflict warning no longer claims two values were chosen in the past; a rewritten group in a copy of
+  a node's own record is counted and undone.
 
-**Step 2:** the default becomes `true`; the default-pinning tests invert; the ledger row closes for acceptances
-made after it.
+**Step 2:** the default becomes `true`; the four default-pinning tests invert; the ledger row narrows to
+acceptances of unknown group.
 
 **Exit (step 1):** the model's trace as an engine test deciding the predecessor's value with the switch on, seen
-deciding the other without it; the default pinned by tests that name the gap; the record's round trip, a 2.40.0
-reader's refusal of it stated, a restart over it; a mixed fleet. **Delivered:** `src/lib_tests.rs`
-(`a_carry_decides_what_the_predecessor_decided_whatever_an_overlapping_member_holds` and six beside it),
-`src/consensus.rs` (two unit tests). The model's own expected-failure test (#784) inverts after this merges.
+deciding the other without it; the default pinned by tests that name the gap; the rule on its own; the record's
+round trip, a 2.40.0 reader's refusal of it stated, a restart over it; mixed fleets both ways; a quorum that
+cannot answer times out. **Delivered:** `src/lib_tests.rs` (ten tests from
+`a_carry_decides_what_the_predecessor_decided_whatever_an_overlapping_member_holds`, and the reviewer's six
+`rev787_…`), `src/consensus.rs` (four unit tests), `src/agent/acceptor_guard.rs` (one). The model's own
+expected-failure test inverts in a follow-up.
 
-**Does not:** change the wire (v12); change a manifest (a retired member still reports its one record for a slot,
-whichever group its acceptance was made in — leaving it out could lose a value the predecessor chose); filter an
-ordinary proposal's phase 1 after the completion; give an acceptance made before the switch a group.
+**Does not:** change the wire version (v12; two variants appended); change a manifest (a retired member still
+reports its one record for a slot, whichever group its acceptance was made in — leaving it out could lose a value
+the predecessor chose); filter an ordinary proposal's phase 1 after the completion (a promiser's live record and
+successor ballots above the predecessor's protect it); give an acceptance of unknown group a group by inference
+(a slot is tagged at a promise too, so a single tag does not say where its acceptance was made); sign the
+acceptor record (the owner-signed inventory row).
 
 **Not built, stated:** with the switch off — the default — the gap stands, and where the carrier holds the
 predecessor's record the completion run does not decide and leaves the outvoted value accepted by a majority of
-the successor (`what-is-proven.md`, `deprecations.md` §107).
+the successor. With it on, a report of unknown group falls back to today's rule for that ballot; a carry needs a
+successor majority at 2.41.0 (`what-is-proven.md`, `deprecations.md` §107).
 
 **Size:** M (step 1), S (step 2).
 

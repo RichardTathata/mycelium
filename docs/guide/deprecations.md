@@ -3969,9 +3969,9 @@ or not another member has first deleted the marker's key.
 `src/agent/http/authz.rs` (the claim in `Settling::finish`, `release_unspent_grant_claim`),
 `src/agent/state_machine.rs` (`write_owned_kv_reporting`). Tests: `src/agent/grant_use_tests.rs`.
 
-## 107. An acceptor records the group an acceptance is made in, behind `consensus_record_acceptance_group`; off by default (2.41.0, critique plan CR30)
+## 107. A carry asks where each acceptance was made, behind `consensus_record_acceptance_group`; off by default (2.41.0, critique plan CR30, #787)
 
-*Numbered 107: §105 and §106 are taken by pull requests open at the time of writing (#785, #786).*
+*Numbered 107: §105 and §106 were taken by #785 and #786.*
 
 A migration (§34) moves who decides from a retired electorate to its successor by carrying each slot the retired
 one may have decided. **When the two electorates share a member, the successor could decide a value the
@@ -3981,41 +3981,86 @@ was that member and the carrier, and neither yet held the record of the predeces
 it. Found by the consensus model (CR10) on 2026-11-14 and reproduced on real nodes. Affected: every release with
 the migration, 2.33.0 on.
 
-- **What 2.41.0 changes by default: nothing you can observe.** Every node reads a new acceptor record tag,
-  `0x05`, beside the older ones. No node writes it unless told to. The gap stands, and is detected as before: the
-  carry is counted (`mycelium_electorate_carry_conflicts_total`, `commit_conflicts`) and the completion names the
-  slot under `conflicts`.
+- **What every 2.41.0 node does, whatever its configuration.** It keeps, beside each acceptance in memory, the
+  electorate group it was made in (or that it was made in none). It reads a new acceptor record tag, `0x05`,
+  beside the older ones. And it answers a carrier that asks where its acceptance was made — two consensus
+  messages appended after every earlier one, `CarryPrepareTagged` and `PrepareAckTagged`. It reports what it
+  holds, unfiltered, with the group as far as it knows it.
+- **What 2.41.0 changes by default: nothing you can observe.** A node with the switch off writes the records
+  2.40.0 wrote and runs its own carry with the messages 2.40.0 sent. The gap stands, and is detected as before:
+  the carry is counted (`mycelium_electorate_carry_conflicts_total`, `commit_conflicts`) and the completion names
+  the slot under `conflicts`.
 - **The switch: `consensus_record_acceptance_group = true`** (env `GOSSIP_CONSENSUS_RECORD_ACCEPTANCE_GROUP`; a new
-  public field of `GossipConfig` — an exhaustive struct literal breaks, `..Default::default()` does not). A node
-  with it on records, beside each acceptance, the electorate group it was made in, or that it was made in none; a
-  carry ballot into a group is then told only of acceptances made in that group. The member that holds the outvoted
-  acceptance is the one that withholds it, so **what matters is the switch on the members the two electorates
-  share** — a carrier that does not record is protected by an acceptor that does.
-- **Turn it on only when every node runs 2.41.0 or later, and do not downgrade below 2.41.0 afterwards.** A 2.40.0
-  node reads a `0x05` record as no record: restarted over one, it has forgotten that promise and acceptance, which
-  is the hazard `cons.acceptor_memory` exists to detect. Turning the switch off again stops the writing; a record
-  already `0x05` stays so until its slot is next written.
+  public field of `GossipConfig` — an exhaustive struct literal breaks, `..Default::default()` does not). On a node
+  it does two things:
+  1. its acceptor **writes** the group into its durable record (`0x05`), so the group survives a restart;
+  2. its own carry ballots **ask** for the group and decide by it.
+- **The rule a carry that asks applies** — over its whole promise quorum, its own memory included:
+  - every reported acceptance names an electorate group → the carry hears those made **in the successor** and no
+    other. That is the sound rule: ballot numbers of two groups do not compare;
+  - any reported acceptance is of unknown group, or was made outside every group → the carry hears **all** of
+    them, as 2.40.0 did.
+
+  So a carry that asks is never worse off than one that does not, and is right once nothing in its quorum is
+  unknown. (An earlier draft filtered at the acceptor, which hid a shared member's recorded copy of the chosen
+  value while another member's unrecorded, outvoted acceptance was still heard — worse than 2.40.0 in a trace
+  2.40.0 gets right; #787's review, F1.)
+- **Where to turn it on:** on **the node that runs `complete_migration`** (that is what asks) **and on every
+  member of both electorates** (that is what keeps the group across a restart). A member with the switch off
+  still answers with the group it has in memory; after a restart it answers "unknown".
+- **Turn it on only when every node runs 2.41.0 or later, and do not downgrade below 2.41.0 afterwards.**
+  - A carry that asks needs a strict majority of the successor at 2.41.0 or later: an older member ignores the
+    question, and the carry times out rather than decides.
+  - A 2.40.0 node reads a `0x05` record as no record: restarted over one it has forgotten that promise and
+    acceptance. With the switch on **every** acceptance is written `0x05` — cluster-scoped slots and an
+    electorate's own genesis and retirement slots included — so a downgrade forgets all of them. 2.40.0's guard
+    (`cons.acceptor_memory`) does not help: it cannot decode a peer's `0x05` copy of the node's own record either,
+    so it is blind to exactly these slots.
+  - Turning the switch off again stops the writing. A record already `0x05` stays so until its slot is next
+    written; that write is the older shape **and drops the group for good**, while memory keeps it until the next
+    start — so the acceptance turns from "named" to "unknown" at a later restart, with no configuration change.
 - **It becomes the default one MINOR after 2.41.0.** The default is off now so that a fleet mid-upgrade, or one
   that rolls back to 2.40.0, loses nothing.
-- **An acceptance made before the switch has no group, and is reported as before.** So a migration over slots
-  last accepted before the switch — or accepted by a node that had it off — keeps the gap for those slots. The
-  switch protects acceptances made after it is on.
-- **Two more things the default leaves, both pinned by tests.** Where the carrier already holds the predecessor's
-  decision record, the carry does not decide the outvoted value: its own acceptor refuses its proposal at every
-  ballot, the completion run returns *not decided* however often it is run, and a majority of the successor is
-  left holding the outvoted value. The same on a re-carry, where a shared member's predecessor acceptance sits
-  above what the successor's first carry decided. With the switch on neither happens.
-- **Until every shared member records the group:** migrate between electorates that share no member, or wait for
-  the fleet to converge on the predecessor's decisions (every member reads each decided slot) before retiring it.
+- **What an acceptance of unknown group costs.** An acceptance made before its node ran 2.41.0, or one whose node
+  restarted with the switch off, has no group. A carry whose promise quorum reports one hears everything: for that
+  ballot the migration is exactly as exposed as before, never more. The switch protects carries whose quorum
+  holds only acceptances made, and kept, under 2.41.0.
+- **Not done, on purpose: guessing the group at start.** A slot is tagged with a group at any claim, a promise
+  included, so "this slot is tagged with one group, therefore its acceptance was made there" is false for an
+  acceptance made elsewhere before a successor's prepare tagged the slot. A wrong guess would make a predecessor
+  acceptance count as the successor's.
+- **Three more things the default leaves, each pinned by a test.** A carrier with the switch off carries as before
+  whatever the members record. Where the carrier already holds the predecessor's decision record, the carry does
+  not decide the outvoted value: its own acceptor refuses its proposal at every ballot, the completion run returns
+  *not decided* however often it is run, and a majority of the successor is left holding the outvoted value. The
+  same on a re-carry, where a shared member's predecessor acceptance sits above what the successor's first carry
+  decided. With the switch on at the carrier and every report named, none of the three happens.
+- **An ordinary proposal after the completion is not filtered.** What protects it is a promiser's live decision
+  record (the proposal ends `Superseded`) and that every successor ballot is above every predecessor ballot the
+  manifests reported — the carry starts above them. A shared member holding a predecessor acceptance above that
+  (two of this section's tests build one, with a test seam) is then stopped by the record alone.
+- **Until every shared member and the completing node have the switch on:** migrate between electorates that
+  share no member, or wait for the fleet to converge on the predecessor's decisions (every member reads each
+  decided slot) before retiring it.
 - **A manifest is unchanged.** A retired member still reports its current acceptance for a slot when an earlier
   carry made it in the successor: it has one record, and leaving the entry out could lose a value the predecessor
   chose. The carry proposes it and the successor's own phase 1 decides.
+- **An acceptor record is not signed** ([owner-signed records](../wiki/dev/owner-signed-records.md)): a member can
+  overwrite another's. A copy of a node's own record naming another group for the acceptance it holds is counted
+  (`mycelium_acceptor_guard_total{event="group_rewritten"}`) and written back from memory; one that wins while the
+  node is down is read at its next start as it stands, and can hide a successor-made acceptance from a carry.
 - **The warning's text changed**, not its counters: it no longer says two values "were chosen" for the slot when
   the carry itself chose the second.
-- **Wire v12 is unchanged.** The acceptor leaves the acceptance out of the answer it already sends.
-- **Code:** `src/consensus.rs` (`MadeIn`, `ConsensusEngine::made_in`, `prepare_slot_for`, `encode_acceptor`),
-  `src/agent/migration.rs`, `mycelium-core/src/config.rs`. Tests: `src/lib_tests.rs`
-  (`a_carry_decides_what_the_predecessor_decided_whatever_an_overlapping_member_holds` and the six beside it),
-  `src/consensus.rs` (`an_acceptor_record_carries_the_group_its_acceptance_was_made_in`,
-  `a_restarted_acceptor_keeps_the_group_and_reports_by_it`). Design: `docs/design/consensus-electorate.md` §8.3
-  (iii), §8.5, §8.6.
+- **Wire v12 is unchanged.** Two variants are appended to the consensus message; the existing ones are untouched.
+- **Code:** `src/consensus.rs` (`MadeIn`, `carry_hears`, `ConsensusEngine::made_in` / `asks_tagged` /
+  `acceptor_record`, `prepare_slot_tagged`, `encode_acceptor`, `ConsensusMsg::CarryPrepareTagged` /
+  `PrepareAckTagged`), `src/agent/migration.rs`, `src/agent/acceptor_guard.rs` (`group_rewritten`),
+  `mycelium-core/src/config.rs`. Tests: `src/lib_tests.rs` — the ten from
+  `a_carry_decides_what_the_predecessor_decided_whatever_an_overlapping_member_holds` to
+  `with_the_group_unrecorded_a_recarry_cannot_complete_and_leaves_the_predecessors_acceptance_accepted`, and the
+  reviewer's six (`rev787_…`); `src/consensus.rs` (`an_acceptor_record_carries_the_group_its_acceptance_was_made_in`,
+  `a_restarted_acceptor_keeps_the_group_and_reports_it`,
+  `a_carry_hears_the_successors_acceptances_only_when_every_report_names_its_group`,
+  `rev787_an_unrecorded_acceptance_encodes_as_2_40_did_byte_for_byte`); `src/agent/acceptor_guard.rs`
+  (`rev787_a_forged_made_in_is_counted_and_put_back`). Design: `docs/design/consensus-electorate.md` §8.3 (iii),
+  §8.5, §8.6.
