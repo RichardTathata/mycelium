@@ -131,8 +131,9 @@ jobs:
       # #781's review, F1: the built-in `llm.invoke` provider runs the provider check. Three of its tests present a
       # `call:` mandate or a gateway token, which need `compliance` (a node's key is verified only through the
       # member-key view it builds) as well as `llm` — a pair no lib line above builds, so without this step they
-      # compile in the universe and run nowhere. The suite's other seven run here too, and on the `llm` line above.
-      - run: ./scripts/ci-retest.sh --lib --features compliance,llm llm_door_tests
+      # compile in the universe and run nowhere. The suite's others run here too, and on the `llm` line above.
+      # Strict, as the `compliance,a2a` line is: this is an enforcement point, and a pass on retry is a failure.
+      - run: CI_RETEST_STRICT=1 ./scripts/ci-retest.sh --lib --features compliance,llm llm_door_tests
       - run: ./scripts/ci-retest.sh -p mycelium-tuple-space --features gateway
       # Examples are the documented contract for the guide chapters; an
       # examples-free CI let a stale include_str! path hide behind cargo's
@@ -198,6 +199,8 @@ jobs:
       # Compliance-gated code (WS1–WS5) is invisible to the line above; `make check` has
       # linted it since 2026-07-22 but CI never did (2026-09-04 wiki-lint finding).
       - run: cargo clippy --lib --tests --features compliance -- -D warnings
+      # `compliance` with `llm`: the pair the `llm_door_tests` step builds and no line above lints (#785's review).
+      - run: cargo clippy --lib --tests --features compliance,llm -- -D warnings
       # `otel` and the two bench targets were built by no CI step until post-360 row J (2026-10-12) — only
       # the test-universe job's `--all-features -- --list` compile touched them, which is neither a lint nor
       # a build of the feature on its own. `gateway_overhead` requires `gateway,test-util`; `throughput` is

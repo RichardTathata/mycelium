@@ -3740,9 +3740,15 @@ node without enforcement and without a cohort budget is unchanged: the same repl
   refuses every prompt-skill call at that provider** (`authority_not_established`: no allowance matches; a
   prohibition answers `action_denied`), where it ran before. Add the rule before
   upgrading: `Rule::new("*", "llm.invoke", "prompt:{ns}/{name}@{provider}")`, or in a unit file a `[[rule]]` with
-  `operation = "llm.invoke"` and `resource = "prompt:{ns}/{name}@{provider}"` or `"*"`. A resource matches exactly
-  or as `*`, and **`[authority]` does not qualify a bare `prompt:{ns}/{name}` to its node** as it does a bare
-  `tool:` or `skill:` — write the node's address, as a rule for the gateway's LLM doors already had to.
+  `operation = "llm.invoke"` and `resource = "prompt:{ns}/{name}"`.
+- **Behaviour change under `[authority]`: a bare `prompt:{ns}/{name}` rule is qualified to the node** (#785's
+  review), as a bare `tool:` or `skill:` already was. A resource matches exactly or as `*`, and both LLM doors
+  present `prompt:{ns}/{name}@{node}`, so until now such a rule matched nothing — at the gateway's
+  `/gateway/llm/call` and `/gateway/llm/stream` as well as at the provider — and the working spellings were the
+  node's address or `*`, the wider rule. **A unit that already carries a bare `prompt:` rule starts permitting
+  that prompt skill at this node, at both doors.** Read your units for one before upgrading
+  (`grep -rn 'resource *= *"prompt:' <units>`); no unit, template or example in this repository has one. A rule
+  that names a node (`…@{node}`) or `*` is unchanged, and a prompt skill on another node is still not admitted.
 - **With enforcement on and no evaluator the door refuses** (`no_evaluator`), as `rpc_rx` does.
 - **With a cohort budget and enforcement off** no policy is consulted, as at every door, but a prompt-skill call
   now takes its caller's place in the budget for as long as the backend runs, and is refused `at_capacity` when
@@ -3780,8 +3786,11 @@ node without enforcement and without a cohort budget is unchanged: the same repl
   failure by `data.reason` being present**; `llm_error`, `template_not_found` and the door's other errors carry no
   `data`.
 - **At the gateway: `403`, not `502`.** `/gateway/llm/call` answered every provider error `502`. A reply that
-  carries `data.reason` is now forwarded whole with **`403`** (`429` for `at_capacity`); a backend or template
-  failure is still `502`. `/gateway/llm/stream` sent `{"type": "done", "output": ""}` for **any** error reply —
+  carries `data.reason` is now forwarded whole with **`403`** — **`429`** for `at_capacity`, and **`409`** for
+  `cancelled`, a call the provider admitted and then stopped, which is not a refusal of authority and may have
+  begun; a backend or template failure is still `502`. **The exception:** the provider's refusal of the caller
+  context at this door (`caller_context_refused`) is made before the check, carries no `data`, and is still
+  answered `502`. `/gateway/llm/stream` sent `{"type": "done", "output": ""}` for **any** error reply —
   a refusal or a failed backend read as an empty answer; it now sends
   `{"type": "error", "error": …, "detail": …, "data": …}`. A client that treated an empty `done` as success sees
   the error it was missing.
@@ -3798,6 +3807,21 @@ node without enforcement and without a cohort budget is unchanged: the same repl
   (`httpx.HTTPStatusError`; `Error("Mycelium gateway error 403: …")`), so a refusal that was a `502` is now a
   `403` carrying the reason. Rust's `call_prompt_skill` returns `PromptSkillError::LlmError("{error}: {detail}")`,
   as for every error reply — the text names the reason; there is no separate variant.
+- **Not built: three other receivers make no decision** (#785's review), in the order they matter. None is a door
+  this release changed; each has a dated row on [what is proven](../operations/what-is-proven.md).
+  1. A hosted WASM capability's kind, `cap.invoke/{ns}/{name}`, is served through `rpc_rx`, where the check runs
+     and is inert because the kind is not protected: on a stem with `[authority]` a member's direct `rpc_call` of
+     `cap.invoke/tool/x` runs the component with no decision, mandate or record, while `/mcp` decides the same
+     component. A gateway client cannot reach the kind (§103). **Open today; decided by the maintainer on 2026-11-14
+     to be protected at an enforcing provider, in its own PR.**
+  2. `bulk_serve` runs its handler with no caller context and no check, even for a kind in `protected_rpc_kinds`.
+     Members only; a bypass only where an application serves a protected kind over bulk.
+  3. A raw receiver (`mesh().signal_rx(kind)` + `RpcRequest::from`) has no public way to run the provider check.
+- **Not built: this door's waiting checks are not bounded.** A check that must wait on a seat claim (a
+  fleet-consensus limit) is held by the other four doors in a set of at most 64 (`MAX_DEFERRED_CHECKS`), which then
+  stops draining the kind's channel. This door runs each call on a task of its own and waits there, so a burst of
+  `llm.invoke` calls under such a limit holds one task and one claim each, with no bound of the door's own.
+  Bringing it under the same set means moving the check into the dispatch loop; not done here.
 - **`mycelium-reason`:** a provider's refusal is a failed attempt, so the router fails over to the next provider
   and, if every one refuses, answers `exhausted` (`502` on `/gateway/reason/route`) with each provider's reason in
   the detail. Unchanged by this release; not yet a `403`.

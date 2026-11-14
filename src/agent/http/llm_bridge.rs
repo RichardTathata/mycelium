@@ -239,12 +239,19 @@ pub(super) async fn gw_llm_call(
 /// **Is this `llm.invoke` reply a provider's refusal, and what does the door answer it with?** A provider that checks
 /// authority for itself (`with_provider_enforcement`, or a cohort budget) answers a call it refuses, or stops, with
 /// the check's structured `data` — `data.reason` — beside its `error`; a backend or template failure carries none.
-/// `429` for a full cohort (`at_capacity`), `403` for every other reason. Without this a refusal read as an upstream
-/// failure (`502`).
+/// `429` for a full cohort (`at_capacity`); `409` for a call the provider admitted and then **stopped** (`cancelled`:
+/// its authority lapsed, or its gateway cancelled it, while the backend ran — not a refusal of authority, and
+/// something may have run); `403` for every other reason. Without this a refusal read as an upstream failure
+/// (`502`). **The exception:** the provider's caller-context refusal at this door (`caller_context_refused`) is made
+/// before the check and carries no `data`, so it is still answered `502`.
 #[cfg(feature = "llm")]
 pub(super) fn provider_refusal_status(reply: &serde_json::Value) -> Option<StatusCode> {
     let reason = reply.get("data")?.get("reason")?.as_str()?;
-    Some(if reason == "at_capacity" { StatusCode::TOO_MANY_REQUESTS } else { StatusCode::FORBIDDEN })
+    Some(match reason {
+        "at_capacity" => StatusCode::TOO_MANY_REQUESTS,
+        "cancelled" => StatusCode::CONFLICT,
+        _ => StatusCode::FORBIDDEN,
+    })
 }
 
 #[cfg(feature = "llm")]

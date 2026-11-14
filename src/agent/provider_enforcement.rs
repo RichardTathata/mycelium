@@ -35,11 +35,19 @@
 //! like any other. The `llm.invoke` row is what `/gateway/llm/call`, `/gateway/llm/stream` and `mycelium-reason`'s
 //! router decide on at their own doors.
 //!
-//! # Every door
+//! # The doors that call it, and the three that do not
 //!
-//! Five places on a node take a protected kind off the mesh, and each calls [`check`]: `rpc_rx` (`rpc.rs`), the MCP
+//! The node serves protected work through five receivers, and each calls [`check`]: `rpc_rx` (`rpc.rs`), the MCP
 //! tool loop and the bridged MCP loop (`mcp.rs`), the SDK serve stream (`http/mesh.rs`), and the built-in
 //! `llm.invoke` provider (`llm.rs` — until #781's review found it, F1, it verified the caller and ran).
+//!
+//! **That is not every receiver** (#785's review; each a *not built* row on `docs/operations/what-is-proven.md`):
+//!
+//! 1. a hosted capability's kind, `cap.invoke/{ns}/{name}`, reaches `rpc_rx` and so this function, which returns at
+//!    once: the kind is not protected ([`is_protected_kind`](super::is_protected_kind)). A member's direct call of
+//!    it at an enforcing provider is not decided. Decided on 2026-11-14 to be protected, in its own PR;
+//! 2. `bulk_serve` runs its handler with no caller context and never calls this, whatever the ticket's inner kind;
+//! 3. an application's raw receiver (`mesh().signal_rx` + `RpcRequest::from`) has no public way to call it.
 //!
 //! # Cohort budgets (closure plan C4)
 //!

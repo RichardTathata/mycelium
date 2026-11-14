@@ -80,9 +80,12 @@ Four layers, all additive/opt-in (`src/agent/rbac.rs`, gateway middleware in
    `gateway_named_tokens`); `rpc_rx` verifies at the receive boundary for every loop in every crate,
    and the LLM / MCP / explain receivers verify directly (**verifying the caller is not deciding the call**: the LLM
    receiver verified and ran until 2026-11-13, when #781's review found it never called
-   `provider_enforcement::check` — every receiver of a protected kind calls both, and there are five: `rpc_rx`, the
-   MCP tool loop, the bridged MCP loop, `rpc/serve` and `handle_llm_invoke`;
-   [log](.log/2026-11-13-llm-door-provider-check.md)); framing is three-way and malformed refuses,
+   `provider_enforcement::check` — the five receivers the node serves protected work through call both: `rpc_rx`,
+   the MCP tool loop, the bridged MCP loop, `rpc/serve` and `handle_llm_invoke`. **Not every receiver there is:** a
+   hosted capability's `cap.invoke/…` reaches `rpc_rx` and is not a protected kind, `bulk_serve` carries no caller
+   context and runs no check, and a raw `signal_rx` receiver has no public way to run it — each *not built* on
+   `what-is-proven.md` (#785's review; [log](.log/2026-11-13-llm-door-provider-check.md),
+   [review log](.log/2026-11-14-llm-door-review.md))); framing is three-way and malformed refuses,
    with a producer bound. Strength: *HardPrevention* at a `tls` provider; *SelfImposedPrevention* on an unauthenticated
    mesh (`CallerAttestation::UnauthenticatedMesh`). Runbook: `docs/operations/rbac.md` §7; log
    [`.log/2026-09-13-item7-gateway-caller-identity.md`](.log/2026-09-13-item7-gateway-caller-identity.md).

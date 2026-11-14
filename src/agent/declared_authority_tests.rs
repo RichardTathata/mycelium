@@ -371,6 +371,31 @@ fn a_bare_skill_resource_is_qualified_to_this_node() {
     assert_ne!(decide("skill:depot/dispatch@127.0.0.1:1".to_string()), crate::Verdict::Permit, "not at another node");
 }
 
+/// **A prompt-skill rule admits at this node** (#785's review, F3): a bare `prompt:<ns>/<name>` is qualified to this
+/// node, as a tool and a skill are — the gateway's LLM doors and the provider's `llm.invoke` door both present
+/// `prompt:<ns>/<name>@<node>`. Without it a unit's rule for a prompt skill had to spell the node's address or fall
+/// back on `*`, the wider rule. A prompt skill on another node is not admitted. Seen failing first: with `prompt:`
+/// out of the qualification, the skill at this node is not permitted.
+#[test]
+fn a_bare_prompt_resource_is_qualified_to_this_node() {
+    let dir = scratch("prompt");
+    let unit = "principal = \"reviewer\"\n\n[[rule]]\nactor     = \"*\"\noperation = \"llm.invoke\"\nresource  = \"prompt:review/summary\"\n";
+    let (id, cfg) = config(&dir, alloc_port(), None);
+    let auth = authority(&dir, units(&dir, &[("reviewer", unit)]), "reviewer");
+    let planned = super::declared_authority::plan(&cfg, &id, &auth).expect("planned");
+    let decide = |resource: String| {
+        let env = crate::ActionEnvelope::builder("token:governed-call/alice", id.clone(), "llm.invoke", resource)
+            .identities("op-1", "op-1/1")
+            .validity(1_000, u64::MAX)
+            .mapping(planned.evaluator.mapping("llm.invoke", "*"))
+            .build();
+        planned.evaluator.evaluate(&env).verdict
+    };
+    assert_eq!(decide(format!("prompt:review/summary@{id}")), crate::Verdict::Permit, "the prompt skill at this node");
+    assert_ne!(decide("prompt:review/summary@127.0.0.1:1".to_string()), crate::Verdict::Permit, "not at another node");
+    assert_ne!(decide(format!("prompt:review/other@{id}")), crate::Verdict::Permit, "nor another prompt skill");
+}
+
 /// **The binary's configuration path, over the scaffold** (#733's review, the scaffold): the scaffold's `node.toml`
 /// with a gateway, its tokens, `[persistence]` and `[authority]` appended, loaded by `GossipConfig::load_from_file` and
 /// `validate()` as `mycelium -c` loads it, then started — the call no rule permits is refused at the gateway door and

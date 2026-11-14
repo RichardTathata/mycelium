@@ -52,11 +52,16 @@ struct Probe {
     ended: AtomicUsize,
     hold: Duration,
     fails: bool,
+    /// When set, a call waits for a permit here in place of `hold`: the test decides when it ends.
+    gate: Option<tokio::sync::Semaphore>,
 }
 
 impl Probe {
     fn new(hold: Duration, fails: bool) -> Arc<Self> {
-        Arc::new(Self { began: AtomicUsize::new(0), ended: AtomicUsize::new(0), hold, fails })
+        Arc::new(Self { began: AtomicUsize::new(0), ended: AtomicUsize::new(0), hold, fails, gate: None })
+    }
+    fn gated() -> Arc<Self> {
+        Arc::new(Self { began: AtomicUsize::new(0), ended: AtomicUsize::new(0), hold: Duration::ZERO, fails: false, gate: Some(tokio::sync::Semaphore::new(0)) })
     }
     fn counts(&self) -> (usize, usize) {
         (self.began.load(Ordering::SeqCst), self.ended.load(Ordering::SeqCst))
@@ -69,7 +74,10 @@ struct ProbeBackend(Arc<Probe>);
 impl LlmBackend for ProbeBackend {
     async fn complete(&self, _system: &str, user: &str, _max_tokens: u32, _temperature: f32) -> Result<LlmResult, LlmError> {
         self.0.began.fetch_add(1, Ordering::SeqCst);
-        tokio::time::sleep(self.0.hold).await;
+        match &self.0.gate {
+            Some(gate) => gate.acquire().await.expect("open").forget(),
+            None => tokio::time::sleep(self.0.hold).await,
+        }
         self.0.ended.fetch_add(1, Ordering::SeqCst);
         if self.0.fails {
             return Err(LlmError::Api("503: the endpoint is down".into()));
@@ -91,11 +99,13 @@ struct Opts {
     /// A gateway token for [`CALLER`] (`agent-1` / `s3cret`), so a request through the gateway is that client's.
     /// A token table needs `compliance`.
     token: bool,
+    /// Attach a cohort budget in which every caller no cohort names shares **one** place.
+    budget: bool,
 }
 
 impl Default for Opts {
     fn default() -> Self {
-        Self { enforcing: true, evaluator: true, freshness_ms: 2_000, token: false }
+        Self { enforcing: true, evaluator: true, freshness_ms: 2_000, token: false, budget: false }
     }
 }
 
@@ -110,6 +120,8 @@ struct Door {
     slow: Arc<Probe>,
     /// The backend of `review/failing`.
     failing: Arc<Probe>,
+    /// The backend of `review/held`: a call ends when the test adds a permit.
+    held: Arc<Probe>,
     /// The operator whose `depot` mandates the node's authority honours.
     operator: SigningKey,
     /// [`CALLER`]'s key.
@@ -173,14 +185,17 @@ async fn door(opts: Opts) -> Door {
     if opts.enforcing {
         a.with_provider_enforcement();
     }
+    if opts.budget {
+        a.with_cohort_budget(crate::knowledge::cohort_budget::CohortBudget::new(3, 1), crate::knowledge::cohort::CohortView::trusting([]), TrustedExternalIssuers::new());
+    }
     a.start().await.unwrap();
-    let (fast, slow, failing) = (Probe::new(Duration::ZERO, false), Probe::new(Duration::from_secs(30), false), Probe::new(Duration::ZERO, true));
-    for (name, probe) in [("plain", &fast), ("denied", &fast), ("guarded", &fast), ("unruled", &fast), ("slow", &slow), ("slowguarded", &slow), ("failing", &failing)] {
+    let (fast, slow, failing, held) = (Probe::new(Duration::ZERO, false), Probe::new(Duration::from_secs(30), false), Probe::new(Duration::ZERO, true), Probe::gated());
+    for (name, probe) in [("held", &held), ("plain", &fast), ("denied", &fast), ("guarded", &fast), ("unruled", &fast), ("slow", &slow), ("slowguarded", &slow), ("failing", &failing)] {
         let template = PromptTemplate { system: String::new(), user_template: "{{input}}".into(), max_tokens: 32, temperature: 0.0, metadata: Default::default() };
         std::mem::forget(a.llm().register_prompt_skill("review", name, template, Arc::new(ProbeBackend(Arc::clone(probe)))).await.unwrap());
     }
     assert!(until(|| std::net::TcpStream::connect(("127.0.0.1", http_port)).is_ok(), Duration::from_secs(20)).await, "the gateway is listening");
-    Door { a, authority, dir, http_port, fast, slow, failing, operator, holder }
+    Door { a, authority, dir, http_port, fast, slow, failing, held, operator, holder }
 }
 
 /// What goes in the envelope's second slot.
@@ -467,6 +482,53 @@ async fn with_enforcement_off_llm_invoke_is_unchanged() {
     let framed = super::gateway_caller::frame_with_context(&d.a.task_ctx, d.a.node_id(), "oidc:idp/alice", &[], Bytes::from_static(b"not json")).unwrap();
     assert_eq!(d.send(framed).await["error"], "parse_error");
     assert!(d.provider_records().is_empty(), "the provider decided nothing and recorded nothing");
+    d.a.shutdown().await;
+}
+
+/// **A cohort budget counts `llm.invoke`, with enforcement off too, and the gateway answers a full pool `429`**
+/// (#785's review, F4). The node has a cohort budget — one place for every caller no cohort names — and **no**
+/// provider enforcement, so no policy is consulted: the prohibited skill would run. A call to `review/held` is in
+/// flight, its backend waiting on the test. While it holds the place, a second call is refused `at_capacity` at
+/// the door (`code` -32004) and its backend is not called; `/gateway/llm/call` answers that refusal **429** with the
+/// provider's body, and `/gateway/llm/stream` as an error event. When the first call ends the place is free and
+/// the next call runs. Before the door ran the check, `llm.invoke` was outside the budget. Seen failing first:
+/// with the check taken out of `handle_llm_invoke`, the second call runs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_cohort_budget_counts_llm_invoke_with_enforcement_off_and_a_full_pool_is_429() {
+    let d = Arc::new(door(Opts { enforcing: false, budget: true, ..Opts::default() }).await);
+    let (framed, _) = d.frame("held", Some(&d.resource("held")), Cm::None);
+    let d2 = Arc::clone(&d);
+    let first = tokio::spawn(async move { d2.send(framed).await });
+    assert!(until(|| d.held.counts() == (1, 0), Duration::from_secs(20)).await, "the first call's backend is running");
+
+    let (reply, _) = d.call("denied", Cm::None).await;
+    assert_refused(&reply, "at_capacity");
+    assert_eq!(reply["code"].as_i64(), Some(-32004), "{reply}");
+    assert_eq!(d.fast.counts(), (0, 0), "the refused call's backend was not called");
+
+    let http = reqwest::Client::new();
+    let body = serde_json::json!({ "ns": "review", "name": "plain", "input": "the text", "context": { "tone": "plain" } });
+    let r = http.post(d.url("/gateway/llm/call")).json(&body).send().await.unwrap();
+    assert_eq!(r.status(), 429, "a full cohort is 429 at the gateway");
+    assert_refused(&r.json::<serde_json::Value>().await.unwrap(), "at_capacity");
+    let text = http.post(d.url("/gateway/llm/stream")).json(&body).send().await.unwrap().text().await.unwrap();
+    let v: serde_json::Value = serde_json::from_str(text.lines().find_map(|l| l.strip_prefix("data:")).expect("one event").trim()).unwrap();
+    assert_eq!((v["type"].as_str(), v["error"].as_str(), v["data"]["reason"].as_str()), (Some("error"), Some("at_capacity"), Some("at_capacity")), "{v}");
+    assert_eq!(d.fast.counts(), (0, 0), "nothing ran while the pool was full");
+
+    d.held.gate.as_ref().unwrap().add_permits(1);
+    assert_eq!(first.await.unwrap()["output"].as_str(), Some("ran: the text"), "the first call ran to its end");
+    // The place is released when the handler's task ends, just after its answer is sent.
+    let d3 = Arc::clone(&d);
+    let mut ran = false;
+    for _ in 0..200 {
+        if d3.call("denied", Cm::None).await.0["output"].is_string() {
+            ran = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(ran, "the released place admits the next call — and with enforcement off no policy refuses it");
     d.a.shutdown().await;
 }
 

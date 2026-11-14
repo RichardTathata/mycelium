@@ -53,8 +53,8 @@ treasurer issues a grant at the gateway and revokes it, and the provider door re
   table maps each door's operation, and an unmapped door refuses the start.
 - **A rule's actor is matched exactly.** An issuer at this gateway is a gateway principal (`token:<issuer>/<name>`),
   and a rule names it so; the scaffold fixes its issuer (`gateway_identity_issuer`) so its unit can.
-- **This node only:** a bare `tool:<name>` or `skill:<ns>/<name>` is qualified to this node, so the gateway admits
-  only the tools and skills this node serves.
+- **This node only:** a bare `tool:<name>`, `skill:<ns>/<name>` or `prompt:<ns>/<name>` (the last since 2.41) is
+  qualified to this node, so the gateway admits only the tools, skills and prompt skills this node serves.
 - **The clock:** the gate's guarantee assumes every issuing authority's clock is within `skew_ms` of this node's.
 - **Epochs:** no route or setting installs a newer epoch on a table-only node, so its gate stays at the first epoch;
   an embedder installs one in code.

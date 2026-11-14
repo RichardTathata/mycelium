@@ -8,8 +8,8 @@
 //! 1. **reads the declaration** — every `*.toml` in `declarations` is a unit file; the unit whose `principal` is
 //!    `unit` is this node's ([`plan`]);
 //! 2. **builds the reference evaluator from that unit's `[[rule]]`s only**, each as written and, for the forms the
-//!    doors present, two more readings — a bare `tool:<name>` also at this node (`tool:<name>@<node>`, the resource
-//!    the provider's door names), and a grant-requiring rule whose actor is the unit's own principal also for this
+//!    doors present, two more readings — a bare `tool:<name>`, `skill:<ns>/<name>` or `prompt:<ns>/<name>` also at
+//!    this node (`tool:<name>@<node>`, the resource the provider's door names), and a grant-requiring rule whose actor is the unit's own principal also for this
 //!    node's principal (`node:<id>`, the one principal that holds a node's grant). That is what `mycelium test
 //!    --faults grant` builds ([`crate::faults`]'s `grant` class) narrowed to one unit: a declaration carries no
 //!    placement, so another unit's rule cannot be qualified to the node it runs on, and is not loaded;
@@ -200,10 +200,11 @@ pub(crate) fn plan(cfg: &GossipConfig, node: &NodeId, auth: &AuthorityConfig) ->
     for r in &unit.config.rules {
         let built = r.to_rule().map_err(|e| refused(format!("unit {}: [[rule]] {} {} {}: {e}", unit.name, r.actor, r.operation, r.resource)))?;
         let mut forms = vec![built.clone()];
-        // The doors present a tool or a skill at the node that serves it (`tool:<name>@<node>`,
-        // `skill:<ns>/<name>@<node>`); a bare one in the unit is qualified to this node — the only node a declaration
+        // The doors present a tool, a skill or a prompt skill at the node that serves it (`tool:<name>@<node>`,
+        // `skill:<ns>/<name>@<node>`, `prompt:<ns>/<name>@<node>` — the last since #785's review, F3: the provider's
+        // `llm.invoke` door names it, as the gateway's LLM doors did); a bare one in the unit is qualified to this node — the only node a declaration
         // can place this unit's rules on. A tool or skill on another node is not admitted here.
-        if (r.resource.starts_with("tool:") || r.resource.starts_with("skill:")) && !r.resource.contains('@') {
+        if (r.resource.starts_with("tool:") || r.resource.starts_with("skill:") || r.resource.starts_with("prompt:")) && !r.resource.contains('@') {
             let mut at_node = built;
             at_node.resource = format!("{}@{node}", r.resource);
             forms.push(at_node);

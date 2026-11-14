@@ -263,13 +263,20 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and answers `cancelled` — which abandons the built-in backend's request, and does not stop a model endpoint
   that has already begun or a task a custom backend spawned. A refusal keeps the door's shape, `{"error":
   reason, "detail": sentence}`, with `code` and `data` beside them. **At the gateway:** `/gateway/llm/call`
-  answers a provider's refusal `403` (`429` for `at_capacity`) where every provider error was `502`, and
+  answers a provider's refusal `403` (`429` for `at_capacity`, `409` for a call stopped while it ran) where every
+  provider error was `502`, and
   `/gateway/llm/stream` sends an error event for an error reply where it sent `done` with an empty output. No
   grant is given back by a gateway on this answer. **Upgrade:** a provider with enforcement on and a prompt skill
   needs a rule that permits `llm.invoke`, or every prompt-skill call there is refused
   (`authority_not_established`); a class
-  or locality rule does not permit at a provider. A node without enforcement and without a cohort budget is
-  unchanged. **Not built:** `mycelium-reason`'s router still answers `exhausted` (`502`) when every provider
+  or locality rule does not permit at a provider. **Under `[authority]` a bare `prompt:{ns}/{name}` rule is now
+  qualified to the node**, as `tool:` and `skill:` were: one that was inert starts permitting that prompt skill
+  at the gateway's LLM doors and at the provider. A node without enforcement and without a cohort budget is
+  unchanged. **Not built:** three other receivers make no decision at a provider — a hosted
+  capability's `cap.invoke/…` kind (open today; decided 2026-11-14 to be protected at an enforcing provider, in
+  its own PR), `bulk_serve` and a raw `signal_rx` receiver (both open, undecided)
+  (`what-is-proven.md`); this door's checks waiting on a seat claim are not bounded as the other doors' are;
+  `mycelium-reason`'s router still answers `exhausted` (`502`) when every provider
   refuses; the door has no row in the C7 matrix (its own suite, `src/agent/llm_door_tests.rs`, asks the matrix's
   question). ***Check:*** on an enforcing node with a prompt skill and no rule for it, `POST /gateway/llm/call`
   answers `403`.

@@ -6,7 +6,8 @@
   `provider_enforcement::check` straight after, before the parse, the registry lookup and the template read, holds
   the admission to the end of the call, and races the backend against `Admission::lapsed()`. A `Waiting` check (a
   seat claim) is awaited on the call's own task, raced against shutdown (`withdrawn`).
-- **Five receivers take a protected kind off the mesh and each calls `check`:** `rpc_rx`, the MCP tool loop, the
+- **The node serves protected work through five receivers and each calls `check`** (not every receiver there is:
+  see the 2026-11-14 review log for the three that make no decision)**:** `rpc_rx`, the MCP tool loop, the
   bridged MCP loop, the SDK serve stream, the built-in LLM provider. The enumeration: every
   `signal_handlers.register*` call in `src/` and the companions, read against `is_protected_kind`. A sixth
   receiver has to call it too; nothing gates that but the reviewer.

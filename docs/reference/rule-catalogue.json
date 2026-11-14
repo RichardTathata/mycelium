@@ -1702,7 +1702,7 @@
     },
     {
       "id": "provider.enforcement",
-      "revision": 5,
+      "revision": 6,
       "subsystem": "mycelium::agent::provider_enforcement",
       "responsibilities": [
         "authority"
@@ -1767,10 +1767,11 @@
         "a_call_mandate_lifted_from_another_envelope_of_the_same_gateway_is_not_established",
         "a_rule_on_llm_invoke_is_applied_at_the_built_in_provider",
         "a_mandate_that_lapses_stops_a_running_llm_invoke",
-        "a_revoked_mandate_runs_no_llm_backend"
+        "a_revoked_mandate_runs_no_llm_backend",
+        "a_cohort_budget_counts_llm_invoke_with_enforcement_off_and_a_full_pool_is_429"
       ],
       "trace": "catalogue_only",
-      "summary": "Authority where the work happens: a protected call is checked at the provider whichever door it came through — `rpc_rx`, the MCP tool loop, the bridged MCP loop, the SDK serve stream and the node's built-in `llm.invoke` provider, which decides on the prompt skill its payload names (`prompt:{ns}/{name}@{self}`) and answers a refusal in its own `{error, detail, code, data}` shape; with enforcement on and no evaluator it is refused (`no_evaluator`); with it off no authority is checked, though an attached cohort budget still verifies the caller context and admits by cohort (`caller_context_refused`, `at_capacity`). `mandate_lapsed_before_run` is the wire `detail` of a refusal whose reason is `authority_not_established`: a permit decided on an established mandate whose re-assessment at registration no longer finds it established. `call_mandate_not_established` is the same reason's `detail` for a call a cancellable rule permitted whose gateway's `call:` mandate is not established here — absent, not this envelope's, not verifying — or whose term is already revoked (identity-and-lifecycle I4): the call is refused rather than run where no cancel could stop it."
+      "summary": "Authority where the work happens: a protected call is checked at the provider at the five receivers the node serves protected work through — `rpc_rx`, the MCP tool loop, the bridged MCP loop, the SDK serve stream and the node's built-in `llm.invoke` provider — and not at three others (a hosted capability's `cap.invoke/…` kind, which is not a protected kind; `bulk_serve`; an application's raw `signal_rx` receiver: each not built). The `llm.invoke` provider decides on the prompt skill its payload names (`prompt:{ns}/{name}@{self}`) and answers a refusal in its own `{error, detail, code, data}` shape; with enforcement on and no evaluator it is refused (`no_evaluator`); with it off no authority is checked, though an attached cohort budget still verifies the caller context and admits by cohort (`caller_context_refused`, `at_capacity`). `mandate_lapsed_before_run` is the wire `detail` of a refusal whose reason is `authority_not_established`: a permit decided on an established mandate whose re-assessment at registration no longer finds it established. `call_mandate_not_established` is the same reason's `detail` for a call a cancellable rule permitted whose gateway's `call:` mandate is not established here — absent, not this envelope's, not verifying — or whose term is already revoked (identity-and-lifecycle I4): the call is refused rather than run where no cancel could stop it."
     },
     {
       "id": "sched.missed",

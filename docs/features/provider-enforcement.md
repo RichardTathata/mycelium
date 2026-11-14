@@ -5,9 +5,10 @@
 With provider enforcement on, every protected call a node receives — `mcp.invoke`, `skill.invoke`, `llm.invoke` and
 any kind in `protected_rpc_kinds` — runs the same action preflight a gateway runs, as the
 [enforcement point](../guide/00-concepts.md#enforcement-point) `provider`, before any handler sees it. It applies
-whichever door the call came through — a gateway, a member's direct call, or the SDK serve stream — and at every
-receiver the node has: `rpc_rx`, the MCP tool loop, the bridged MCP loop, the SDK serve stream and the built-in
-`llm.invoke` provider that answers a prompt skill. A presented mandate
+whichever door the call came through — a gateway, a member's direct call, or the SDK serve stream — at the five
+receivers the node itself serves protected work through: `rpc_rx`, the MCP tool loop, the bridged MCP loop, the SDK
+serve stream and the built-in `llm.invoke` provider that answers a prompt skill. **Not at every receiver there is:**
+a hosted capability's kind, `bulk_serve` and an application's raw receiver are not decided (stated below). A presented mandate
 is verified by the node's own execution authority, never taken from a gateway, and the decision is recorded in the
 node's evidence journal.
 
@@ -78,9 +79,23 @@ confirmed stop, checked against the class's bound. CI runs it.
   call is decided too. A refusal keeps the door's shape, `{"error": reason, "detail": sentence}`, with `code` and
   `data` beside them; the gateway's `/gateway/llm/call` answers it `403` (`429` for `at_capacity`) and
   `/gateway/llm/stream` as an error event. The backend call is raced against the call's authority: a lapse or a
-  cancel drops it and answers `cancelled`.
+  cancel drops it and answers `cancelled`, which the gateway answers `409` — a stop, not a refusal of authority.
+  The provider's caller-context refusal at this door carries no `data` and is still `502` at the gateway.
 - **Not stopped, at that door:** work a model endpoint has already begun when the backend's future is dropped (it
   may finish generating), and anything a custom `LlmBackend` runs on a task of its own.
+- **Not built: three receivers no decision is made at** (#785's review, 2026-11-14), in the order they matter:
+  1. **a hosted capability's kind, `cap.invoke/{ns}/{name}`** — served through `rpc_rx`, where the check runs and is
+     inert because the kind is not protected: at an enforcing stem a member's direct `rpc_call` of it runs the
+     component undecided, while `/mcp` decides the same component. **Open today; decided on 2026-11-14 to be
+     protected at an enforcing provider, in its own PR**
+     ([ledger](../operations/what-is-proven.md#hosted-capability-not-decided-at-provider));
+  2. **`bulk_serve`** — its handler runs with no caller context and no check, even for a kind in
+     `protected_rpc_kinds`; members only, and a bypass only where an application serves a protected kind over bulk
+     ([ledger](../operations/what-is-proven.md#bulk-serve-runs-no-provider-check));
+  3. **a raw receiver** (`mesh().signal_rx` + `RpcRequest::from`) — it can verify the caller and has no public way to
+     run the check ([ledger](../operations/what-is-proven.md#raw-receiver-cannot-run-provider-check)).
+- **Not built, at the `llm.invoke` door:** a check waiting on a seat claim there is not under the bound the other
+  four doors keep (`MAX_DEFERRED_CHECKS`, 64): each call has a task of its own and waits in it.
 - **Not built, at that door:** a class or locality rule does not permit there (neither fact travels to a
   provider); `mycelium-reason`'s router reads a provider's refusal as a failed attempt and answers `exhausted`
   (`502`) when every provider refuses; and the door has no row in the C7 matrix itself (the matrix runs on CI's
