@@ -328,8 +328,14 @@ predecessor is never consulted again.*
      lapsed decision stays ended, because its marker names the lineage and its window is inside the envelope. A
      carry ballot does not stop at a live decision record (the record may be G1's commit, held here by gossip and
      by no G2 majority — the committed-but-unpropagated value is what a carry brings over); G2's own phase 1 applies,
-     so an acceptance G2 already holds above it wins. A slot in S with promises only has nothing to carry: no value
-     was chosen in G1 (ii). Sequential, one ballot per slot — a one-off cost proportional to |S|, stated.
+     and it hears **acceptances made in G2** — an earlier carry's — the highest of which wins. The acceptor memory is
+     one record per slot whatever group asks, so a member of both G1 and G2 answers a carry's prepare from the same
+     record it answered G1 from; its acceptance made in G1 is G1's, already counted in the manifests, and a carry is
+     not told of it — in the promise, in a refusal, or from the carrier's own memory (critique plan CR30; the
+     acceptance's group is in the acceptor record, tag `0x05`, `MadeIn`). **That holds for an acceptance whose group
+     is recorded**: a node records it only with `consensus_record_acceptance_group`, off by default in 2.41.0, and
+     an acceptance without one is reported as before (§8.5). A slot in S with promises only has nothing to carry: no
+     value was chosen in G1 (ii). Sequential, one ballot per slot — a one-off cost proportional to |S|, stated.
    - **completion**: a decision of G2 on `electorate/G2/carried/G1` (`Completion { group, epoch, predecessor,
      predecessor_epoch, passes_default, slots: |S|, digest(S) }`), certified by a strict majority of G2 and adopted
      only when the certificate verifies. It **stands as proof of the retirement**: `successor_ready`, `holds_default`
@@ -404,11 +410,20 @@ failing first with its mechanism disabled:
   accepts nothing new. The tag that files the slot under G1 is in the durable record, so a restarted member's
   manifest is complete. *Test:* `a_value_chosen_in_a_retired_group_is_carried_by_its_successor` — v accepted by A and
   B, never committed; with the manifest reporting no acceptances, D's lock value was decided over it.
-- **(iii) Each slot in S is decided in G2 with the carried value, or with a value G2's own Paxos chose above it.** The
-  carry is an ordinary G2 ballot: a promise quorum of G2 reports what G2 accepted, and the highest acceptance wins
-  (the row-A phase-1 rule, unchanged); G2 held nothing for `s` before the first carry (it decided nothing until the
-  retirement was visible, and `s` was not G2's), so the first carry decides the carried value, and a later carry of
-  the same slot re-decides what G2 holds. *Tests:* the carried locks, consistent write and chosen value of
+- **(iii) Each slot in S is decided in G2 with the carried value, or with a value G2's own Paxos chose before it.** The
+  carry is a G2 ballot: a promise quorum of G2 reports what was accepted **in G2**, and the highest such acceptance
+  wins (the row-A phase-1 rule over those reports); G2 — the group — accepted nothing for `s` before the first carry
+  (it decided nothing until the retirement was visible, and `s` was not G2's), so the first carry decides the carried
+  value, and a later carry of the same slot re-decides what G2 holds. **The group held nothing; its members may
+  have** (corrected 2026-11-14, critique plan CR30 — the sentence used to say "G2 held nothing"): a member of both
+  G1 and G2 holds its G1 acceptance in the one record it answers G2 from, and a G1 acceptance that G1 outvoted,
+  reported to the carry, was adopted over the value G1 decided. The argument therefore needs each acceptance's group
+  to be known, and holds **where every member of G1 ∩ G2 records it** (`consensus_record_acceptance_group`); where
+  one does not, see §8.5. *Tests:* `a_carry_decides_what_the_predecessor_decided_whatever_an_overlapping_member_holds`
+  (every step a real proposal; before the group was recorded G2 decided the outvoted value),
+  `a_carry_decides_what_the_predecessor_chose_whatever_an_overlapping_member_holds`,
+  `a_carrier_that_does_not_record_the_group_is_protected_by_an_acceptor_that_does`,
+  `a_recarry_does_not_put_a_predecessors_higher_acceptance_in_the_successor`; the carried locks, consistent write and chosen value of
   `after_the_completion_the_successor_survives_the_predecessors_departure_and_its_own_restart`;
   `a_completion_run_that_stops_mid_carry_is_resumed_by_the_next` (the next run re-carries the first slot and keeps
   its value; with a run trusting the progress it remembered instead of re-enumerating, the completion was decided
@@ -578,6 +593,25 @@ attempt it holds; the argument above then needs every other adopter of `k` to re
 
 ### 8.5 What does not hold — stated
 
+- **Overlapping electorates, while an acceptance's group is not recorded** (stated 2026-11-14; critique plan CR30;
+  found by CR10's model and reproduced on the engine). A successor that shares a member with its predecessor —
+  the ordinary way to replace one member — can decide a value **other than the one the predecessor decided**: the
+  shared member holds an acceptance the predecessor outvoted, the carry's promise quorum is that member and the
+  carrier, neither holds the decision's record yet (the predecessor's proposer stopped, or lagged, after it
+  committed), and the carry adopts the outvoted acceptance. It is **detected, not prevented**: the carry is counted
+  on `commit_conflicts` and `mycelium_electorate_carry_conflicts_total` and the completion reports the slot. It is
+  **prevented** on a member that records the group of its acceptances —
+  `consensus_record_acceptance_group = true`, off by default in 2.41.0 and on by default one MINOR later, because a
+  release before 2.41.0 reads the record it writes (`0x05`) as no record. With it on at every member the two
+  electorates share, a carry hears only acceptances made in the successor. **What stays as it was even then:** an
+  acceptance made while the switch was off, or before 2.41.0, carries no group and is reported as before — so a
+  migration over slots last accepted before the switch keeps this gap for those slots; and a predecessor's manifest
+  still reports a member's current acceptance for a slot when that acceptance was made in the successor by an
+  earlier carry (the member has one record, and dropping the entry could lose a value the predecessor chose whose
+  only other copy that carry overwrote) — the carry then proposes it and the successor's own phase 1 decides.
+  Until every shared member records the group: migrate between electorates that share no member, or wait until the
+  fleet has converged on the predecessor's decisions before retiring it.
+
 - **The guarantee starts when genesis is chosen.** A member that has touched a genesis attempt refuses an untagged
   proposal on the group until one is adopted.
 - **Genesis assumes its members agree on the roster.** Each acceptor checks a genesis against the roster it sees, and
@@ -718,6 +752,18 @@ proposals and a successor never answers its; a genesis with no predecessors is b
 node-owned acceptor record of a slot never claimed on an electorate group is unchanged. An un-upgraded member's
 acceptor record carries no group tag; its slots are reported untagged by an upgraded reporter that shares them and
 skipped only when the successor may not decide them at all.
+
+**The acceptor record's tag `0x05` (2.41.0, critique plan CR30)** is `0x04` with the group count allowed to be zero
+and, after the groups, where the acceptance was made: `0x00` outside any electorate group, or `0x01` and a
+length-prefixed group name. A node from 2.41.0 reads `0x02`–`0x05`; it **writes** `0x05` only with
+`consensus_record_acceptance_group`, and only for an acceptance made while that was on, so with the switch off its
+records are byte-identical to 2.40.0's. **A 2.40.0 node reads `0x05` as no record**: restarted over such a record it
+has forgotten that promise and acceptance (§8.5's restart hazard, by downgrade). So the switch goes on only when
+every node is at 2.41.0 or later, and a fleet that has turned it on does not downgrade below 2.41.0; turning it off
+again stops the writing, and a record already `0x05` stays so until its slot is next written. Nothing on the wire
+changes: the filter is the acceptor's — it leaves the acceptance out of the `PrepareAckTerm` or `PromiseTerm` it
+would have sent — so a carrier at 2.40.0 is protected by an acceptor that records, and an acceptor at 2.40.0, or
+one that does not record, reports as before.
 
 The cluster-scoped exclusive verbs (`distributed_lock`, `LockService`, `consistent_set`, the lock and consistent routes,
 the log claim, `mycelium-commitment`'s linearizable award, `set_capability_authz_via_consensus`) decide in the fleet's

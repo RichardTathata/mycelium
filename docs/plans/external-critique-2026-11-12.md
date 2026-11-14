@@ -1054,6 +1054,45 @@ preflight a tool gets, refused without it, seen admitted first; the raw routes s
 
 **Size:** M, once designed.
 
+#### CR30 · A carry hears only acceptances made in the successor *(found by CR10's model, 2026-11-14)*
+
+**State (2026-11-14):** **step 1 delivered** (unreleased); **step 2 — the switch on by default — one MINOR
+later**, *buildable* once step 1 has shipped in a release. Decided by the maintainer on 2026-11-14: record the
+group in the acceptor record, in two steps, and report an acceptance with no recorded group as before.
+
+**What:** CR10's migration model found, and two engine tests confirmed, that a successor electorate sharing a
+member with its predecessor can decide a value the predecessor outvoted. The acceptor memory is one record per
+slot whatever group asks; a shared member answered a carry's prepare with its predecessor acceptance; the carry's
+phase 1 adopted it over the manifest's value when the promise quorum was that member and the carrier and neither
+held the decision's record (`docs/design/consensus-electorate.md` §8.3 (iii) said "G2 held nothing" — true of the
+group, not of its members). A proposer-side rule cannot close it: ballots of two groups do not compare, in either
+direction (counting the manifest's acceptance as a report lets a re-carry replace the successor's own decision).
+
+**Step 1 (this row's first PR):** the acceptor record's tag `0x05` — the acceptance with the group it was made in,
+or none (`MadeIn`); read by every node; written only with `consensus_record_acceptance_group`, off by default,
+because a 2.40.0 node reads `0x05` as no record. With the group known a carry ballot is told only of an acceptance
+made in the successor: in the promise, in a refusal, and from the carrier's own memory. An acceptance with no
+group is reported as before. The carry-conflict warning no longer claims two values were chosen in the past.
+
+**Step 2:** the default becomes `true`; the default-pinning tests invert; the ledger row closes for acceptances
+made after it.
+
+**Exit (step 1):** the model's trace as an engine test deciding the predecessor's value with the switch on, seen
+deciding the other without it; the default pinned by tests that name the gap; the record's round trip, a 2.40.0
+reader's refusal of it stated, a restart over it; a mixed fleet. **Delivered:** `src/lib_tests.rs`
+(`a_carry_decides_what_the_predecessor_decided_whatever_an_overlapping_member_holds` and six beside it),
+`src/consensus.rs` (two unit tests). The model's own expected-failure test (#784) inverts after this merges.
+
+**Does not:** change the wire (v12); change a manifest (a retired member still reports its one record for a slot,
+whichever group its acceptance was made in — leaving it out could lose a value the predecessor chose); filter an
+ordinary proposal's phase 1 after the completion; give an acceptance made before the switch a group.
+
+**Not built, stated:** with the switch off — the default — the gap stands, and where the carrier holds the
+predecessor's record the completion run does not decide and leaves the outvoted value accepted by a majority of
+the successor (`what-is-proven.md`, `deprecations.md` §107).
+
+**Size:** M (step 1), S (step 2).
+
 ### Tier 3 · Structure
 
 Lower priority; each is a refactor with no behaviour change, and each waits for the tier-1 row that touches the

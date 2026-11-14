@@ -54,7 +54,7 @@ use bytes::Bytes;
 
 use super::electorate::{genesis_slot, ElectorateDecl, ELECTORATE_SLOT_PREFIX};
 use super::TaskCtx;
-use crate::consensus::{accepted_key, consensus_ns, decode_acceptor, encode_acceptor, AcceptorMemory, AcceptorSlot, FLOOR_SENTINEL};
+use crate::consensus::{accepted_key, consensus_ns, decode_acceptor, AcceptorMemory, AcceptorSlot, FLOOR_SENTINEL};
 use crate::node_id::NodeId;
 
 static PERSISTENCE_REFUSED: AtomicU64 = AtomicU64::new(0);
@@ -206,14 +206,14 @@ fn accepted_ballot(s: &AcceptorSlot) -> u64 {
 /// it carries (a malformed copy is clamped; accepting at a ballot is promising it).
 pub(crate) fn merge_records(a: &AcceptorSlot, b: &AcceptorSlot) -> AcceptorSlot {
     let (pa, pb) = (accepted_ballot(a), accepted_ballot(b));
-    let accepted = if pa > pb { a.accepted.clone() } else { b.accepted.clone() };
+    let (accepted, made_in) = if pa > pb { (a.accepted.clone(), a.made_in.clone()) } else { (b.accepted.clone(), b.made_in.clone()) };
     let (promised, promised_to) = if a.promised > b.promised { (a.promised, a.promised_to) } else { (b.promised, b.promised_to) };
-    let floor = accepted_ballot(&AcceptorSlot { promised: 0, promised_to: None, accepted: accepted.clone(), groups: Vec::new() });
+    let floor = accepted_ballot(&AcceptorSlot { promised: 0, promised_to: None, accepted: accepted.clone(), groups: Vec::new(), made_in: crate::consensus::MadeIn::Unknown });
     // The electorate groups the slot is tagged with (P2's migration) are the union: a tag is never removed.
     let mut groups = a.groups.clone();
     for g in &b.groups { if !groups.contains(g) { groups.push(Arc::clone(g)); } }
     groups.sort();
-    AcceptorSlot { promised: promised.max(floor), promised_to, accepted, groups }
+    AcceptorSlot { promised: promised.max(floor), promised_to, accepted, groups, made_in }
 }
 
 /// **The rule**: is `copy` — a peer's copy of this node's own record — an answer this node gave and does not hold?
@@ -266,7 +266,7 @@ pub(crate) fn repair_own_record(ctx: &Arc<TaskCtx>, slot: &str, merged: &Accepto
     let _records = ctx.acceptor_records.lock().unwrap_or_else(|e| e.into_inner());
     let now = ctx.consensus_accepted.pin().get(slot).cloned().unwrap_or_default();
     let record = merge_records(merged, &now);
-    let upd = engine.kv_set_returning(accepted_key(&ctx.node_id, slot), encode_acceptor(&record));
+    let upd = engine.kv_set_returning(accepted_key(&ctx.node_id, slot), engine.acceptor_record(&record));
     engine.wal_try(&upd);
 }
 
@@ -327,7 +327,7 @@ mod tests {
         encode_acceptor(&AcceptorSlot {
             promised, promised_to: Some(7),
             accepted: accepted.map(|b| (b, Accepted::DigestOnly([9; 32]))),
-            groups: Vec::new(),
+            groups: Vec::new(), made_in: crate::consensus::MadeIn::Unknown,
         })
     }
 
@@ -341,7 +341,7 @@ mod tests {
         let before = acceptor_promises_forgotten();
         assert!(compare_own_record(&memory, &withheld, "a", &copy(0, None)).is_none());
         assert!(withheld.pin().is_empty(), "a record of nothing is nothing");
-        memory.pin().insert(Arc::from("b"), AcceptorSlot { promised: 5, promised_to: Some(1), accepted: Some((4, Accepted::DigestOnly([1; 32]))), groups: Vec::new() });
+        memory.pin().insert(Arc::from("b"), AcceptorSlot { promised: 5, promised_to: Some(1), accepted: Some((4, Accepted::DigestOnly([1; 32]))), groups: Vec::new(), made_in: crate::consensus::MadeIn::Unknown });
         assert!(compare_own_record(&memory, &withheld, "b", &copy(5, Some(4))).is_none());
         assert!(compare_own_record(&memory, &withheld, "b", &copy(3, Some(2))).is_none());
         assert!(withheld.pin().is_empty(), "a copy at or below memory is one this node wrote");
@@ -351,7 +351,7 @@ mod tests {
         assert_eq!((merged.promised, merged.promised_to, merged.accepted.as_ref().map(|(b, _)| *b)), (6, Some(7), Some(4)));
         assert!(compare_own_record(&memory, &withheld, "b", &copy(6, None)).is_some(), "the record is merged again; the slot was withheld already");
         assert_eq!(acceptor_promises_forgotten() - before, 1, "once per slot");
-        memory.pin().insert(Arc::from("c"), AcceptorSlot { promised: 2, promised_to: Some(FLOOR_SENTINEL), accepted: None, groups: Vec::new() });
+        memory.pin().insert(Arc::from("c"), AcceptorSlot { promised: 2, promised_to: Some(FLOOR_SENTINEL), accepted: None, groups: Vec::new(), made_in: crate::consensus::MadeIn::Unknown });
         assert!(compare_own_record(&memory, &withheld, "c", &copy(2, Some(2))).is_none());
         assert!(!withheld.pin().contains("c"), "an acceptance at a shrunk record's floor is one the collector shed");
         let merged = compare_own_record(&memory, &withheld, "c", &copy(3, Some(3))).expect("an acceptance (and its promise) above memory is forgotten");
@@ -369,18 +369,18 @@ mod tests {
     /// record — not. And the merge never leaves `promised` below the acceptance it carries.
     #[test]
     fn an_acceptance_at_the_promised_ballot_is_forgotten_unless_the_promise_is_the_collection_floor() {
-        let held = AcceptorSlot { promised: 4, promised_to: Some(0xEE), accepted: None, groups: Vec::new() };
-        let copy = AcceptorSlot { promised: 4, promised_to: Some(0xAA), accepted: Some((4, Accepted::DigestOnly([3; 32]))), groups: Vec::new() };
+        let held = AcceptorSlot { promised: 4, promised_to: Some(0xEE), accepted: None, groups: Vec::new(), made_in: crate::consensus::MadeIn::Unknown };
+        let copy = AcceptorSlot { promised: 4, promised_to: Some(0xAA), accepted: Some((4, Accepted::DigestOnly([3; 32]))), groups: Vec::new(), made_in: crate::consensus::MadeIn::Unknown };
         assert!(forgotten(&copy, &held), "an acceptance at the promised ballot that memory lacks");
-        let floor = AcceptorSlot { promised: 4, promised_to: Some(FLOOR_SENTINEL), accepted: None, groups: Vec::new() };
+        let floor = AcceptorSlot { promised: 4, promised_to: Some(FLOOR_SENTINEL), accepted: None, groups: Vec::new(), made_in: crate::consensus::MadeIn::Unknown };
         assert!(!forgotten(&copy, &floor), "a collected slot's floor legitimately has an older acceptance-bearing copy");
-        let below = AcceptorSlot { promised: 3, promised_to: Some(0xAA), accepted: Some((3, Accepted::DigestOnly([3; 32]))), groups: Vec::new() };
+        let below = AcceptorSlot { promised: 3, promised_to: Some(0xAA), accepted: Some((3, Accepted::DigestOnly([3; 32]))), groups: Vec::new(), made_in: crate::consensus::MadeIn::Unknown };
         assert!(!forgotten(&below, &held), "an acceptance below the promise is one memory may have shed");
-        let same = AcceptorSlot { promised: 4, promised_to: Some(0xEE), accepted: Some((4, Accepted::DigestOnly([3; 32]))), groups: Vec::new() };
+        let same = AcceptorSlot { promised: 4, promised_to: Some(0xEE), accepted: Some((4, Accepted::DigestOnly([3; 32]))), groups: Vec::new(), made_in: crate::consensus::MadeIn::Unknown };
         assert!(!forgotten(&copy, &same), "an acceptance memory holds is nothing");
         let merged = merge_records(&copy, &held);
         assert_eq!((merged.promised, merged.promised_to, accepted_ballot(&merged)), (4, Some(0xEE), 4), "the merge keeps the later promisee and the acceptance");
-        let malformed = AcceptorSlot { promised: 1, promised_to: Some(1), accepted: Some((6, Accepted::DigestOnly([3; 32]))), groups: Vec::new() };
+        let malformed = AcceptorSlot { promised: 1, promised_to: Some(1), accepted: Some((6, Accepted::DigestOnly([3; 32]))), groups: Vec::new(), made_in: crate::consensus::MadeIn::Unknown };
         assert_eq!(merge_records(&malformed, &held).promised, 6, "promised is clamped to the acceptance it carries");
         assert!(forgotten(&malformed, &held));
     }

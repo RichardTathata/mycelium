@@ -1469,7 +1469,7 @@ impl ConsensusEngine {
     /// contradict. `true` when there is nothing to record or nothing was promised (no WAL).
     async fn persist_acceptor(&self, slot: &Arc<str>) -> bool {
         let key = accepted_key(&self.task_ctx.node_id, slot);
-        let read = || self.task_ctx.consensus_accepted.pin().get(slot).map(encode_acceptor);
+        let read = || self.task_ctx.consensus_accepted.pin().get(slot).map(|s| self.acceptor_record(s));
         let mut written: Option<GossipUpdate> = None;
         {
             // Serialised with every other writer of this node's acceptor records — the listener, the
@@ -1581,6 +1581,7 @@ impl ConsensusEngine {
                 Some((_, state)) if state.promised <= ended && state.accepted.is_some() =>
                     papaya::Operation::Insert(AcceptorSlot {
                         promised: ended, promised_to: Some(FLOOR_SENTINEL), accepted: None, groups: state.groups.clone(),
+                        made_in: MadeIn::Unknown,
                     }),
                 _ => papaya::Operation::Abort(()),
             }),
@@ -2066,8 +2067,9 @@ impl ConsensusEngine {
             // Through the electorate's gate, inside the same `compute` as the claim (P2 round 2, finding 1): a
             // superseding genesis adopted here since the door ends this proposal, by name.
             let gate = tag.as_ref().map(|t| &t.gate);
+            let made_in = self.made_in(gate);
             let claimed = self.claim_gated(gate, || {
-                claim_envelope(&self.task_ctx.consensus_accepted, &slot, ballot, &value, self.task_ctx.node_id.id_hash(), floor)
+                claim_envelope_in(&self.task_ctx.consensus_accepted, &slot, ballot, &value, self.task_ctx.node_id.id_hash(), floor, made_in)
             });
             if claimed.is_none() && tag.is_some() {
                 return gate_refused(slot, tag.as_ref());
@@ -2755,6 +2757,26 @@ impl ConsensusEngine {
         }
     }
 
+    /// **Where an acceptance claimed through `gate` is made** — what the claim records beside it (CR30). The
+    /// gate's electorate group, or none; [`MadeIn::Unknown`] while this node does not record it
+    /// (`GossipConfig::consensus_record_acceptance_group`, off by default in 2.41.0), which leaves the acceptance
+    /// reported as before and its record in the older shape.
+    pub(crate) fn made_in(&self, gate: Option<&Gate>) -> MadeIn {
+        if !self.task_ctx.config.consensus_record_acceptance_group { return MadeIn::Unknown; }
+        gate.map_or(MadeIn::NoGroup, |g| MadeIn::Group(Arc::clone(&g.group)))
+    }
+
+    /// This node's durable acceptor record for `state`. While the node does not record an acceptance's group it
+    /// writes none — a group read back from a `0x05` record written while the switch was on stays in memory until
+    /// the next start, and the record it is next written to is the older shape.
+    pub(crate) fn acceptor_record(&self, state: &AcceptorSlot) -> Bytes {
+        if self.task_ctx.config.consensus_record_acceptance_group || state.made_in == MadeIn::Unknown {
+            encode_acceptor(state)
+        } else {
+            encode_acceptor(&AcceptorSlot { made_in: MadeIn::Unknown, ..state.clone() })
+        }
+    }
+
     /// Closes the retired electorate `d` for good on this node — through the gate, after any ordinary claim in
     /// flight — and puts its retirement (record and certificate) on stable storage, so a restart still finds the
     /// group closed. What a member does before it reports a manifest to a successor. `false` when the retirement
@@ -2909,7 +2931,8 @@ impl ConsensusEngine {
         let envelope = crate::consensus_life::Envelope::new(
             slot, value.clone(), crate::consensus_life::Term::Permanent, ballot, proposer.clone(), ballot,
         ).encode();
-        self.claim_gated(Some(&gate), || claim_envelope(&self.task_ctx.consensus_accepted, slot, ballot, &envelope, proposer.id_hash(), floor))
+        let made_in = self.made_in(Some(&gate));
+        self.claim_gated(Some(&gate), || claim_envelope_in(&self.task_ctx.consensus_accepted, slot, ballot, &envelope, proposer.id_hash(), floor, made_in))
             == Some(true) && self.persist_acceptor(slot).await
     }
 
@@ -3501,7 +3524,7 @@ impl ConsensusEngine {
             // many proposals it runs for the slot at once. This proposer does not count its own vote
             // here; the claim is the gate, not a vote.
             let floor = self.floor(&slot);
-            if !claim_envelope(&self.task_ctx.consensus_accepted, &slot, ballot, &value, self.task_ctx.node_id.id_hash(), floor) {
+            if !claim_envelope_in(&self.task_ctx.consensus_accepted, &slot, ballot, &value, self.task_ctx.node_id.id_hash(), floor, self.made_in(None)) {
                 last = LastAttempt::Contended;
                 let Some(next) = next_ballot(ballot.max(self.read_ballot(&ballot_key))) else {
                     return self.ballots_exhausted(slot, _attempt + 1, 0);
@@ -3669,7 +3692,9 @@ impl ConsensusEngine {
         let floor = self.floor(slot);
         // This node's own promise passes the electorate's gate like any other claim (P2 round 2, finding 1).
         let gate = tag.map(|t| &t.gate);
-        match self.claim_gated(gate, || prepare_slot(&self.task_ctx.consensus_accepted, slot, ballot, me.id_hash(), floor)) {
+        // A carry ballot hears only acceptances made in its own electorate — this node's own among them (CR30).
+        let carry_into = tag.filter(|t| t.carry.is_some()).map(|t| &*t.gate.group);
+        match self.claim_gated(gate, || prepare_slot_for(&self.task_ctx.consensus_accepted, slot, ballot, me.id_hash(), floor, carry_into)) {
             None => return Phase1::Closed,
             Some(PrepareOutcome::Refused { promised, .. }) => return Phase1::Refused(promised),
             Some(PrepareOutcome::Promised(acc)) => {
@@ -4472,9 +4497,14 @@ pub(crate) fn encode_acceptor(state: &AcceptorSlot) -> Bytes {
     // `0x04` (P2 migration) is `0x03` with the envelope byte always present, then the electorate
     // groups the slot is tagged with (a count byte, then `u16` LE length + name each); written only
     // when there are any, so a record for a slot never claimed on an electorate group stays `0x02`/`0x03`.
+    // `0x05` (CR30) is `0x04` with the group count allowed to be zero and, after the groups, where the
+    // acceptance was made: `0x00` outside any electorate group, `0x01` then `u16` LE length + name on one.
+    // Written only for an acceptance whose group is recorded ([`MadeIn`]), so every other record keeps its
+    // older shape — and a release before 2.41.0 reads `0x05` as no record at all.
     let envelope = matches!(&state.accepted, Some((_, Accepted::Envelope(_))));
-    let tagged = !state.groups.is_empty();
-    v.push(if tagged { 0x04 } else if envelope { 0x03 } else { 0x02 });
+    let recorded = state.accepted.is_some() && state.made_in != MadeIn::Unknown;
+    let tagged = !state.groups.is_empty() || recorded;
+    v.push(if recorded { 0x05 } else if tagged { 0x04 } else if envelope { 0x03 } else { 0x02 });
     v.extend_from_slice(&state.promised.to_le_bytes());
     v.push(u8::from(state.promised_to.is_some()));
     v.extend_from_slice(&state.promised_to.unwrap_or(0).to_le_bytes());
@@ -4491,6 +4521,18 @@ pub(crate) fn encode_acceptor(state: &AcceptorSlot) -> Bytes {
             let len = name.len().min(usize::from(u16::MAX));
             v.extend_from_slice(&(len as u16).to_le_bytes());
             v.extend_from_slice(&name[..len]);
+        }
+        if recorded {
+            match &state.made_in {
+                MadeIn::Group(g) => {
+                    v.push(1);
+                    let name = g.as_bytes();
+                    let len = name.len().min(usize::from(u16::MAX));
+                    v.extend_from_slice(&(len as u16).to_le_bytes());
+                    v.extend_from_slice(&name[..len]);
+                }
+                _ => v.push(0),
+            }
         }
     } else if envelope {
         v.push(1);
@@ -4525,21 +4567,24 @@ pub(crate) fn decode_acceptor(bytes: &[u8]) -> Option<AcceptorSlot> {
             promised_to: None,
             accepted:    Some((ballot, Accepted::DigestOnly(digest))),
             groups:      Vec::new(),
+            made_in:     MadeIn::Unknown,
         });
     }
-    let (tagged, mut envelope) = match bytes.first() {
-        Some(0x02) => (false, false), Some(0x03) => (false, true), Some(0x04) => (true, false), _ => return None,
+    let (tagged, mut envelope, recorded) = match bytes.first() {
+        Some(0x02) => (false, false, false), Some(0x03) => (false, true, false), Some(0x04) => (true, false, false),
+        Some(0x05) => (true, false, true), _ => return None,
     };
     if bytes.len() < ACCEPTOR_RECORD_LEN { return None; }
     let u64_at = |i: usize| bytes[i..i + 8].try_into().ok().map(u64::from_le_bytes);
     let flag = |i: usize| match bytes.get(i)? { 0 => Some(false), 1 => Some(true), _ => None };
     // A tagged record: the envelope byte, the group count, then the groups; the value is what follows.
     let mut groups: Vec<Arc<str>> = Vec::new();
+    let mut made_in = MadeIn::Unknown;
     let mut head = ACCEPTOR_RECORD_LEN + usize::from(envelope);
     if tagged {
         envelope = flag(ACCEPTOR_RECORD_LEN)?;
         let n = usize::from(*bytes.get(ACCEPTOR_RECORD_LEN + 1)?);
-        if n == 0 { return None; }
+        if n == 0 && !recorded { return None; }
         let mut at = ACCEPTOR_RECORD_LEN + 2;
         for _ in 0..n {
             let len = usize::from(u16::from_le_bytes(bytes.get(at..at + 2)?.try_into().ok()?));
@@ -4549,6 +4594,19 @@ pub(crate) fn decode_acceptor(bytes: &[u8]) -> Option<AcceptorSlot> {
             at += 2 + len;
         }
         if groups.windows(2).any(|w| w[0] >= w[1]) { return None; }
+        if recorded {
+            made_in = match *bytes.get(at)? {
+                0 => { at += 1; MadeIn::NoGroup }
+                1 => {
+                    let len = usize::from(u16::from_le_bytes(bytes.get(at + 1..at + 3)?.try_into().ok()?));
+                    let name = std::str::from_utf8(bytes.get(at + 3..at + 3 + len)?).ok()?;
+                    if !crate::agent::electorate::valid_group(name) { return None; }
+                    at += 3 + len;
+                    MadeIn::Group(Arc::from(name))
+                }
+                _ => return None,
+            };
+        }
         head = at;
     }
     let promised = u64_at(1)?;
@@ -4568,10 +4626,11 @@ pub(crate) fn decode_acceptor(bytes: &[u8]) -> Option<AcceptorSlot> {
             Some((ab, if envelope { Accepted::Envelope(value) } else { Accepted::Full(value) }))
         }
     } else {
-        if envelope || bytes.len() != head { return None; }
+        // `0x05` is written only beside an acceptance.
+        if envelope || recorded || bytes.len() != head { return None; }
         None
     };
-    Some(AcceptorSlot { promised, promised_to, accepted, groups })
+    Some(AcceptorSlot { promised, promised_to, accepted, groups, made_in })
 }
 
 /// **Recover this node's acceptor memory from its durable records.**
@@ -4625,6 +4684,50 @@ pub(crate) struct AcceptorSlot {
     /// without duplicates, never removed: a retired member's manifest names every slot tagged with the retired
     /// group. Empty for a slot never claimed on an electorate group; in the durable record only when not.
     pub(crate) groups:      Vec<Arc<str>>,
+    /// The group `accepted` was made in ([`MadeIn`]) — what a carry's phase 1 is filtered by. Meaningful only
+    /// beside an acceptance.
+    pub(crate) made_in:     MadeIn,
+}
+
+/// **Where an acceptance was made** (critique plan CR30). The acceptor memory is one record per slot whatever
+/// group asks, so a member of two electorates — a predecessor and its successor — holds, for a carried slot,
+/// either an acceptance made in the predecessor or one made in the successor, and until this was recorded
+/// nothing told them apart: a carry's phase 1 adopted a predecessor acceptance the predecessor had outvoted.
+#[cfg(feature = "consensus")]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) enum MadeIn {
+    /// Not recorded: accepted by a node that was not recording it (`consensus_record_acceptance_group` off, or a
+    /// release before 2.41.0), or read back from a record older than `0x05`. Treated as before: reported to
+    /// whoever asks.
+    #[default]
+    Unknown,
+    /// Outside any electorate group — a cluster-scoped, cross-group or ungoverned group proposal.
+    NoGroup,
+    /// On this electorate group.
+    Group(Arc<str>),
+}
+
+#[cfg(feature = "consensus")]
+impl MadeIn {
+    /// Whether a carry ballot of electorate `group` hears an acceptance made here: one made in `group`, or one
+    /// whose group was not recorded (the legacy rule — as before). An acceptance known to have been made
+    /// elsewhere is not the successor's, and its phase 1 does not hear it.
+    pub(crate) fn heard_by_carry_into(&self, group: &str) -> bool {
+        match self {
+            MadeIn::Unknown => true,
+            MadeIn::NoGroup => false,
+            MadeIn::Group(g) => &**g == group,
+        }
+    }
+}
+
+/// `held` as a carry ballot of `carry_into` hears it; unchanged for any other proposal.
+#[cfg(feature = "consensus")]
+fn heard(held: Option<(u64, Accepted)>, made_in: &MadeIn, carry_into: Option<&str>) -> Option<(u64, Accepted)> {
+    match carry_into {
+        Some(group) if !made_in.heard_by_carry_into(group) => None,
+        _ => held,
+    }
 }
 
 /// Tags `slot`'s acceptor memory with `group` (retry-safe: a pure insert-if-absent).
@@ -4659,6 +4762,7 @@ pub(crate) enum PrepareOutcome {
 ///
 /// The `compute` closure re-reads the entry on every attempt and is retry-safe.
 #[cfg(feature = "consensus")]
+#[cfg_attr(not(test), allow(dead_code))] // the engine claims through the `_in`/`_for` form; tests and the rule's documentation use this one
 pub(crate) fn prepare_slot(
     memory:   &AcceptorMemory,
     slot:     &Arc<str>,
@@ -4666,21 +4770,37 @@ pub(crate) fn prepare_slot(
     proposer: u64,
     floor:    u64,
 ) -> PrepareOutcome {
+    prepare_slot_for(memory, slot, ballot, proposer, floor, None)
+}
+
+/// [`prepare_slot`] for a prepare that may be a **carry ballot** of electorate `carry_into` (CR30): the promise is
+/// the same, and the acceptance it reports — granted or refused — is the one a carry into that group hears
+/// ([`MadeIn::heard_by_carry_into`]), read in the same `compute` as the promise.
+#[cfg(feature = "consensus")]
+pub(crate) fn prepare_slot_for(
+    memory:     &AcceptorMemory,
+    slot:       &Arc<str>,
+    ballot:     u64,
+    proposer:   u64,
+    floor:      u64,
+    carry_into: Option<&str>,
+) -> PrepareOutcome {
     use papaya::Operation;
     let mut outcome = PrepareOutcome::Refused { promised: 0, accepted: None };
     memory.pin().compute(Arc::clone(slot), |entry| {
         let cur = entry.map(|(_, s)| s.clone()).unwrap_or_default();
+        let reported = heard(cur.accepted.clone(), &cur.made_in, carry_into);
         if ballot <= floor {
-            outcome = PrepareOutcome::Refused { promised: cur.promised.max(floor), accepted: cur.accepted };
+            outcome = PrepareOutcome::Refused { promised: cur.promised.max(floor), accepted: reported };
             return Operation::Abort(());
         }
         let granted = ballot > cur.promised
             || (ballot == cur.promised && cur.promised_to == Some(proposer));
         if granted {
-            outcome = PrepareOutcome::Promised(cur.accepted.clone());
+            outcome = PrepareOutcome::Promised(reported);
             Operation::Insert(AcceptorSlot { promised: ballot, promised_to: Some(proposer), ..cur })
         } else {
-            outcome = PrepareOutcome::Refused { promised: cur.promised, accepted: cur.accepted };
+            outcome = PrepareOutcome::Refused { promised: cur.promised, accepted: reported };
             Operation::Abort(())
         }
     });
@@ -4813,6 +4933,7 @@ impl Accepted {
 /// promises nothing above that decision's ballot, after the decided floor has been raised to it on
 /// stable storage ([`ConsensusEngine::collect_finished`]). A permanent decision's memory is kept.
 #[cfg(feature = "consensus")]
+#[cfg_attr(not(test), allow(dead_code))] // the engine claims through the `_in`/`_for` form; tests and the rule's documentation use this one
 pub(crate) fn claim_vote(
     memory:   &AcceptorMemory,
     slot:     &Arc<str>,
@@ -4821,12 +4942,21 @@ pub(crate) fn claim_vote(
     proposer: u64,
     floor:    u64,
 ) -> bool {
-    claim(memory, slot, ballot, Accepted::Full(value.clone()), proposer, floor)
+    claim(memory, slot, ballot, Accepted::Full(value.clone()), proposer, floor, MadeIn::Unknown)
+}
+
+/// [`claim_vote`], recording where the acceptance is made ([`ConsensusEngine::made_in`]).
+#[cfg(feature = "consensus")]
+pub(crate) fn claim_vote_in(
+    memory: &AcceptorMemory, slot: &Arc<str>, ballot: u64, value: &Bytes, proposer: u64, floor: u64, made_in: MadeIn,
+) -> bool {
+    claim(memory, slot, ballot, Accepted::Full(value.clone()), proposer, floor, made_in)
 }
 
 /// [`claim_vote`] for a decision envelope (row A): the same rule, recorded as
 /// [`Accepted::Envelope`] so it is reported flagged.
 #[cfg(feature = "consensus")]
+#[allow(dead_code)] // the engine claims through `claim_envelope_in`; the tests of one feature set use this one
 pub(crate) fn claim_envelope(
     memory:   &AcceptorMemory,
     slot:     &Arc<str>,
@@ -4835,7 +4965,15 @@ pub(crate) fn claim_envelope(
     proposer: u64,
     floor:    u64,
 ) -> bool {
-    claim(memory, slot, ballot, Accepted::Envelope(envelope.clone()), proposer, floor)
+    claim(memory, slot, ballot, Accepted::Envelope(envelope.clone()), proposer, floor, MadeIn::Unknown)
+}
+
+/// [`claim_envelope`], recording where the acceptance is made ([`ConsensusEngine::made_in`]).
+#[cfg(feature = "consensus")]
+pub(crate) fn claim_envelope_in(
+    memory: &AcceptorMemory, slot: &Arc<str>, ballot: u64, envelope: &Bytes, proposer: u64, floor: u64, made_in: MadeIn,
+) -> bool {
+    claim(memory, slot, ballot, Accepted::Envelope(envelope.clone()), proposer, floor, made_in)
 }
 
 #[cfg(feature = "consensus")]
@@ -4846,6 +4984,7 @@ fn claim(
     accept:   Accepted,
     proposer: u64,
     floor:    u64,
+    made_in:  MadeIn,
 ) -> bool {
     use papaya::Operation;
     let want = accept.digest();
@@ -4860,6 +4999,7 @@ fn claim(
                 promised_to: Some(proposer),
                 accepted:    Some((ballot, accept.clone())),
                 groups:      cur.groups.clone(),
+                made_in:     made_in.clone(),
             })
         } else {
             Operation::Abort(())
@@ -5004,7 +5144,7 @@ fn test_swallow_prepare(node: &NodeId, slot: &str) -> bool {
 /// the withheld answer is counted (`acceptor_answers_unrecorded`).
 #[cfg(feature = "consensus")]
 async fn answer_prepare(
-    ctx: &ConsensusEngine, slot: Arc<str>, ballot: u64, proposer: NodeId, term: bool, gate: Option<Gate>,
+    ctx: &ConsensusEngine, slot: Arc<str>, ballot: u64, proposer: NodeId, term: bool, gate: Option<Gate>, carry: bool,
 ) {
     // A slot whose forgotten promise was detected is not answered until the next start (`acceptor_guard`).
     if crate::agent::acceptor_guard::withheld(&ctx.task_ctx, &slot) { return; }
@@ -5013,7 +5153,10 @@ async fn answer_prepare(
     let floor = ctx.floor(&slot);
     // P2: the promise passes the electorate's gate, which only decides. A gate that refused sends no promise
     // (round 3, finding 5).
-    let outcome = ctx.claim_gated(gate.as_ref(), || prepare_slot(&ctx.task_ctx.consensus_accepted, &slot, ballot, proposer.id_hash(), floor));
+    // A carry ballot is told only of an acceptance made in the electorate it carries into (CR30): this member's
+    // acceptance from the predecessor is the predecessor's, already in its manifest, and not the successor's to adopt.
+    let carry_into = gate.as_ref().filter(|_| carry).map(|g| &*g.group);
+    let outcome = ctx.claim_gated(gate.as_ref(), || prepare_slot_for(&ctx.task_ctx.consensus_accepted, &slot, ballot, proposer.id_hash(), floor, carry_into));
     let Some(outcome) = outcome else {
         if let Some(g) = &gate {
             let digest = crate::agent::electorate::cached(&ctx.task_ctx, &g.group).map_or([0; 32], |d| d.digest());
@@ -5240,31 +5383,31 @@ pub(crate) async fn run_consensus_listener(
                 // envelope, and every answer is the flagged form.
                 // P2: a proposal is answered only for this node's own electorate (`electorate_admits`) — a message
                 // without one on an electorate group, or one naming another, is refused by name.
-                let (slot, ballot, value, proposer, term, gate) = match ctx.decode_verify(&sig.payload) {
+                let (slot, ballot, value, proposer, term, gate, carry) = match ctx.decode_verify(&sig.payload) {
                     Some(ConsensusMsg::Prepare { slot, ballot, proposer }) => {
                         match ctx.electorate_admits(&sig.scope, &slot, None, &proposer, None, None) {
-                            Ok(gate) => answer_prepare(&ctx, slot, ballot, proposer, false, gate).await,
+                            Ok(gate) => answer_prepare(&ctx, slot, ballot, proposer, false, gate, false).await,
                             Err(own) => refuse_stale(&ctx, slot, proposer, own),
                         }
                         continue;
                     }
                     Some(ConsensusMsg::PrepareTerm { slot, ballot, proposer }) => {
                         match ctx.electorate_admits(&sig.scope, &slot, None, &proposer, None, None) {
-                            Ok(gate) => answer_prepare(&ctx, slot, ballot, proposer, true, gate).await,
+                            Ok(gate) => answer_prepare(&ctx, slot, ballot, proposer, true, gate, false).await,
                             Err(own) => refuse_stale(&ctx, slot, proposer, own),
                         }
                         continue;
                     }
                     Some(ConsensusMsg::PrepareIn { slot, ballot, proposer, epoch, electorate }) => {
                         match ctx.electorate_admits(&sig.scope, &slot, Some((epoch, electorate)), &proposer, None, None) {
-                            Ok(gate) => answer_prepare(&ctx, slot, ballot, proposer, true, gate).await,
+                            Ok(gate) => answer_prepare(&ctx, slot, ballot, proposer, true, gate, false).await,
                             Err(own) => refuse_stale(&ctx, slot, proposer, own),
                         }
                         continue;
                     }
                     Some(ConsensusMsg::CarryPrepare { slot, ballot, proposer, epoch, electorate, predecessor }) => {
                         match ctx.electorate_admits(&sig.scope, &slot, Some((epoch, electorate)), &proposer, None, Some(&predecessor)) {
-                            Ok(gate) => answer_prepare(&ctx, slot, ballot, proposer, true, gate).await,
+                            Ok(gate) => answer_prepare(&ctx, slot, ballot, proposer, true, gate, true).await,
                             Err(own) => refuse_stale(&ctx, slot, proposer, own),
                         }
                         continue;
@@ -5275,7 +5418,7 @@ pub(crate) async fn run_consensus_listener(
                     }
                     Some(ConsensusMsg::Propose { slot, ballot, value, proposer }) => {
                         match ctx.electorate_admits(&sig.scope, &slot, None, &proposer, Some((&value, false)), None) {
-                            Ok(gate) => (slot, ballot, value, proposer, false, gate),
+                            Ok(gate) => (slot, ballot, value, proposer, false, gate, false),
                             Err(own) => { refuse_stale(&ctx, slot, proposer, own); continue; }
                         }
                     }
@@ -5285,7 +5428,7 @@ pub(crate) async fn run_consensus_listener(
                             continue;
                         }
                         match ctx.electorate_admits(&sig.scope, &slot, None, &proposer, Some((&envelope, true)), None) {
-                            Ok(gate) => (slot, ballot, envelope, proposer, true, gate),
+                            Ok(gate) => (slot, ballot, envelope, proposer, true, gate, false),
                             Err(own) => { refuse_stale(&ctx, slot, proposer, own); continue; }
                         }
                     }
@@ -5294,7 +5437,7 @@ pub(crate) async fn run_consensus_listener(
                             continue;
                         }
                         match ctx.electorate_admits(&sig.scope, &slot, Some((epoch, electorate)), &proposer, Some((&envelope, true)), None) {
-                            Ok(gate) => (slot, ballot, envelope, proposer, true, gate),
+                            Ok(gate) => (slot, ballot, envelope, proposer, true, gate, false),
                             Err(own) => { refuse_stale(&ctx, slot, proposer, own); continue; }
                         }
                     }
@@ -5303,7 +5446,7 @@ pub(crate) async fn run_consensus_listener(
                             continue;
                         }
                         match ctx.electorate_admits(&sig.scope, &slot, Some((epoch, electorate)), &proposer, Some((&envelope, true)), Some(&predecessor)) {
-                            Ok(gate) => (slot, ballot, envelope, proposer, true, gate),
+                            Ok(gate) => (slot, ballot, envelope, proposer, true, gate, true),
                             Err(own) => { refuse_stale(&ctx, slot, proposer, own); continue; }
                         }
                     }
@@ -5324,10 +5467,11 @@ pub(crate) async fn run_consensus_listener(
                 let floor = ctx.floor(&slot);
                 // Through the electorate's gate, in the same `compute` as the claim (P2 round 2, finding 1).
                 let gated = if decided_otherwise { Some(false) } else {
+                    let made_in = ctx.made_in(gate.as_ref());
                     ctx.claim_gated(gate.as_ref(), || if term {
-                        claim_envelope(&accepted, &slot, ballot, &value, proposer.id_hash(), floor)
+                        claim_envelope_in(&accepted, &slot, ballot, &value, proposer.id_hash(), floor, made_in)
                     } else {
-                        claim_vote(&accepted, &slot, ballot, &value, proposer.id_hash(), floor)
+                        claim_vote_in(&accepted, &slot, ballot, &value, proposer.id_hash(), floor, made_in)
                     })
                 };
                 if gated.is_none() && let Some(g) = &gate {
@@ -5343,8 +5487,12 @@ pub(crate) async fn run_consensus_listener(
                     // value a quorum already accepted.
                     // `None` after a restart: the durable record carries the digest, not the value,
                     // so this node can refuse a conflicting vote but cannot help the proposer adopt.
+                    // To a carry ballot, only an acceptance made in the electorate it carries into (CR30) — the
+                    // proposer adopts what a refusal reports.
                     let state = accepted.pin().get(&slot).cloned().unwrap_or_default();
-                    emit_refusal(&ctx, &slot, state.promised.max(floor), state.accepted, proposer, term, true);
+                    let carry_into = gate.as_ref().filter(|_| carry).map(|g| &*g.group);
+                    let held = heard(state.accepted, &state.made_in, carry_into);
+                    emit_refusal(&ctx, &slot, state.promised.max(floor), held, proposer, term, true);
                 } else {
                     // **Durable before the vote leaves.** A vote that reaches a proposer while this
                     // node's acceptance is unrecorded is exactly the memory a restart would lose —
@@ -6188,7 +6336,7 @@ mod consensus_msg_auth_tests {
         let st = AcceptorSlot {
             promised: 9, promised_to: Some(3),
             accepted: Some((8, Accepted::DigestOnly(value_digest(&Bytes::from_static(b"v"))))),
-            groups: Vec::new(),
+            groups: Vec::new(), made_in: crate::consensus::MadeIn::Unknown,
         };
         let good = encode_acceptor(&st).to_vec();
         let back = decode_acceptor(&good).expect("round trip");
@@ -6213,7 +6361,7 @@ mod consensus_msg_auth_tests {
         let env = crate::consensus_life::Envelope::new("work/x", v.clone(), crate::consensus_life::Term::Permanent, 2, id(1), 7).encode();
         let groups: Vec<Arc<str>> = vec![Arc::from("council"), Arc::from("old")];
         for accepted in [None, Some((4, Accepted::Full(v.clone()))), Some((4, Accepted::Envelope(env.clone()))), Some((4, Accepted::DigestOnly([9; 32])))] {
-            let st = AcceptorSlot { promised: 5, promised_to: Some(2), accepted: accepted.clone(), groups: groups.clone() };
+            let st = AcceptorSlot { promised: 5, promised_to: Some(2), accepted: accepted.clone(), groups: groups.clone(), made_in: crate::consensus::MadeIn::Unknown };
             let rec = encode_acceptor(&st);
             assert_eq!(rec[0], 0x04);
             let back = decode_acceptor(&rec).expect("a tagged record round-trips");
@@ -6225,9 +6373,9 @@ mod consensus_msg_auth_tests {
                 other => panic!("the acceptance shape changed: {other:?}"),
             }
         }
-        let untagged = AcceptorSlot { promised: 5, promised_to: Some(2), accepted: Some((4, Accepted::Envelope(env.clone()))), groups: Vec::new() };
+        let untagged = AcceptorSlot { promised: 5, promised_to: Some(2), accepted: Some((4, Accepted::Envelope(env.clone()))), groups: Vec::new(), made_in: crate::consensus::MadeIn::Unknown };
         assert_eq!(encode_acceptor(&untagged)[0], 0x03, "an untagged slot writes the 2.32.0 record");
-        let st = AcceptorSlot { promised: 5, promised_to: Some(2), accepted: Some((4, Accepted::Envelope(env))), groups: groups.clone() };
+        let st = AcceptorSlot { promised: 5, promised_to: Some(2), accepted: Some((4, Accepted::Envelope(env))), groups: groups.clone(), made_in: crate::consensus::MadeIn::Unknown };
         let good = encode_acceptor(&st).to_vec();
         let mut none = good.clone(); none[ACCEPTOR_RECORD_LEN + 1] = 0;
         assert!(decode_acceptor(&none).is_none(), "a tagged record names at least one group");
@@ -6245,6 +6393,96 @@ mod consensus_msg_auth_tests {
         assert_eq!(tagged_memory.pin().get(&slot).map(|s| s.groups.clone()), Some(groups), "tagged once each, sorted");
         assert!(claim_vote(&tagged_memory, &slot, 3, &v, 1, 0), "a claim keeps the tags");
         assert_eq!(tagged_memory.pin().get(&slot).map(|s| s.groups.len()), Some(2));
+    }
+
+    /// **The `0x05` acceptor record** (CR30): an acceptance with the group it was made in — an electorate group, or
+    /// none — round-trips, with and without tags and with the value or only its digest; an acceptance whose group is
+    /// not recorded writes the record 2.40.0 wrote, byte for byte; a malformed one is no record.
+    ///
+    /// **A release before 2.41.0 reads `0x05` as no record at all**: its `decode_acceptor` accepts a 40-byte legacy
+    /// record or a first byte of `0x02`, `0x03` or `0x04` and nothing else (the match below is that release's). So a
+    /// node writes `0x05` only when told to (`GossipConfig::consensus_record_acceptance_group`).
+    #[test]
+    fn an_acceptor_record_carries_the_group_its_acceptance_was_made_in() {
+        let env = crate::consensus_life::Envelope::new(
+            "work/x", Bytes::from_static(b"v"), crate::consensus_life::Term::Permanent, 4, NodeId::new("127.0.0.1", 1).unwrap(), 9,
+        ).encode();
+        let tags: Vec<Arc<str>> = vec![Arc::from("new"), Arc::from("old")];
+        let v2_40_reads = |rec: &[u8]| rec.len() == 40 || matches!(rec.first(), Some(0x02..=0x04));
+        for made_in in [MadeIn::NoGroup, MadeIn::Group(Arc::from("new"))] {
+            for groups in [Vec::new(), tags.clone()] {
+                for accepted in [Accepted::Envelope(env.clone()), Accepted::Full(Bytes::from_static(b"raw")), Accepted::DigestOnly([7; 32])] {
+                    let st = AcceptorSlot { promised: 5, promised_to: Some(2), accepted: Some((4, accepted.clone())), groups: groups.clone(), made_in: made_in.clone() };
+                    let rec = encode_acceptor(&st);
+                    assert_eq!(rec[0], 0x05);
+                    assert!(!v2_40_reads(&rec), "a 2.40.0 node reads it as no record");
+                    let back = decode_acceptor(&rec).expect("a 0x05 record round-trips");
+                    assert_eq!((back.promised, back.promised_to, &back.groups, &back.made_in), (5, Some(2), &groups, &made_in));
+                    let (b, a) = back.accepted.expect("the acceptance");
+                    assert_eq!((b, a.digest(), a.value()), (4, accepted.digest(), accepted.value()));
+                    assert_eq!(matches!(a, Accepted::Envelope(_)), matches!(accepted, Accepted::Envelope(_)));
+                    // Not recorded: the record 2.40.0 wrote.
+                    let unrecorded = AcceptorSlot { made_in: MadeIn::Unknown, ..st.clone() };
+                    let old = encode_acceptor(&unrecorded);
+                    let want = if !groups.is_empty() { 0x04 } else if matches!(accepted, Accepted::Envelope(_)) { 0x03 } else { 0x02 };
+                    assert_eq!(old[0], want);
+                    assert!(v2_40_reads(&old));
+                    assert_eq!(decode_acceptor(&old).map(|s| s.made_in), Some(MadeIn::Unknown), "an older record's group is unknown");
+                }
+            }
+        }
+        // A promise alone records no group: `0x05` is written only beside an acceptance.
+        let promise = AcceptorSlot { promised: 5, promised_to: Some(2), accepted: None, groups: tags.clone(), made_in: MadeIn::Group(Arc::from("new")) };
+        assert_eq!(encode_acceptor(&promise)[0], 0x04);
+        // Malformed: an unknown kind byte, a truncated name, a name that is no group, `0x05` with no acceptance.
+        let st = AcceptorSlot { promised: 5, promised_to: Some(2), accepted: Some((4, Accepted::DigestOnly([7; 32]))), groups: Vec::new(), made_in: MadeIn::Group(Arc::from("new")) };
+        let good = encode_acceptor(&st).to_vec();
+        let kind_at = ACCEPTOR_RECORD_LEN + 2;
+        assert_eq!((good[kind_at], good.len()), (1, kind_at + 3 + 3));
+        let mut bad = good.clone(); bad[kind_at] = 2;
+        assert!(decode_acceptor(&bad).is_none());
+        assert!(decode_acceptor(&good[..good.len() - 1]).is_none(), "a truncated name is no record");
+        let mut slash = good.clone(); slash[kind_at + 3] = b'/';
+        assert!(decode_acceptor(&slash).is_none());
+        let mut none = good.clone(); none[18] = 0;
+        assert!(decode_acceptor(&none).is_none(), "0x05 without an acceptance is no record");
+    }
+
+    /// **After a restart a `0x05` record still refuses and is still filtered** (CR30). An acceptance over the
+    /// record's value cap comes back by digest only, with its group: it refuses another value at its ballot, a
+    /// carry into another electorate is told of no acceptance, and any other prepare — and a carry into the group
+    /// it was made in — is told of it. An acceptance whose group is unknown is reported to every one of them.
+    #[test]
+    fn a_restarted_acceptor_keeps_the_group_and_reports_by_it() {
+        let slot: Arc<str> = Arc::from("work/x");
+        let big = Bytes::from(vec![7u8; ACCEPTOR_RECORD_VALUE_CAP + 1]);
+        let live: AcceptorMemory = papaya::HashMap::new();
+        assert!(claim_vote_in(&live, &slot, 4, &big, 1, 0, MadeIn::Group(Arc::from("old"))));
+        let rec = encode_acceptor(&live.pin().get(&slot).cloned().unwrap());
+        let back = decode_acceptor(&rec).expect("record");
+        assert!(matches!(back.accepted, Some((4, Accepted::DigestOnly(_)))) && back.made_in == MadeIn::Group(Arc::from("old")));
+        let reported = |m: &AcceptorMemory, ballot: u64, carry_into: Option<&str>| match prepare_slot_for(m, &slot, ballot, 9, 0, carry_into) {
+            PrepareOutcome::Promised(a) => a.map(|(b, _)| b),
+            PrepareOutcome::Refused { .. } => panic!("a higher ballot is promised"),
+        };
+        let restarted: AcceptorMemory = papaya::HashMap::new();
+        restarted.pin().insert(Arc::clone(&slot), back);
+        assert!(!claim_vote(&restarted, &slot, 4, &Bytes::from_static(b"other"), 1, 0), "another value at the ballot is refused");
+        assert_eq!(reported(&restarted, 5, Some("new")), None, "a carry into new hears nothing made in old");
+        assert_eq!(reported(&restarted, 6, Some("old")), Some(4));
+        assert_eq!(reported(&restarted, 7, None), Some(4), "an ordinary prepare is told as before");
+        assert_eq!(restarted.pin().get(&slot).map(|s| (s.promised, s.made_in.clone())), Some((7, MadeIn::Group(Arc::from("old")))),
+            "a promise keeps the acceptance and its group");
+        // A refusal reports by the same rule.
+        assert!(matches!(prepare_slot_for(&restarted, &slot, 6, 9, 0, Some("new")), PrepareOutcome::Refused { promised: 7, accepted: None }));
+        assert!(matches!(prepare_slot_for(&restarted, &slot, 6, 9, 0, None), PrepareOutcome::Refused { promised: 7, accepted: Some((4, _)) }));
+        // Unknown and no-group acceptances.
+        let unknown: AcceptorMemory = papaya::HashMap::new();
+        assert!(claim_vote(&unknown, &slot, 4, &big, 1, 0));
+        assert_eq!((reported(&unknown, 5, Some("new")), reported(&unknown, 6, None)), (Some(4), Some(4)), "the legacy rule: as before");
+        let outside: AcceptorMemory = papaya::HashMap::new();
+        assert!(claim_vote_in(&outside, &slot, 4, &big, 1, 0, MadeIn::NoGroup));
+        assert_eq!((reported(&outside, 5, Some("new")), reported(&outside, 6, None)), (None, Some(4)));
     }
 
     /// **The phase-1 rule**: the highest acceptance among the promisers decides; a value whose
@@ -6275,7 +6513,7 @@ mod consensus_msg_auth_tests {
     #[test]
     fn the_promise_record_carries_the_value() {
         let v = Bytes::from_static(b"the-value");
-        let st = AcceptorSlot { promised: 3, promised_to: Some(1), accepted: Some((3, Accepted::Full(v.clone()))), groups: Vec::new() };
+        let st = AcceptorSlot { promised: 3, promised_to: Some(1), accepted: Some((3, Accepted::Full(v.clone()))), groups: Vec::new(), made_in: crate::consensus::MadeIn::Unknown };
         let rec = encode_acceptor(&st);
         let back = decode_acceptor(&rec).expect("round trip");
         assert_eq!(back.accepted.and_then(|(_, a)| a.value()), Some(v), "a restart keeps the bytes");
@@ -6283,7 +6521,7 @@ mod consensus_msg_auth_tests {
         let last = bad.len() - 1;
         bad[last] ^= 1;
         assert!(decode_acceptor(&bad).is_none(), "bytes that contradict the digest are no record");
-        let none = AcceptorSlot { promised: 3, promised_to: Some(1), accepted: None, groups: Vec::new() };
+        let none = AcceptorSlot { promised: 3, promised_to: Some(1), accepted: None, groups: Vec::new(), made_in: crate::consensus::MadeIn::Unknown };
         let mut trailing = encode_acceptor(&none).to_vec();
         trailing.push(7);
         assert!(decode_acceptor(&trailing).is_none(), "a value with no acceptance is incoherent");
