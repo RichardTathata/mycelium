@@ -481,7 +481,9 @@ impl Model for MigrationModel {
                         for n in members() { s = step(s, Action::Deliver(m, n)); }
                     }
                 }
-                if role == Role::Carry && matches!(s.carry, Phase::Proposing { .. }) { s.stalled = true; }
+                // Stalled: this ballot's proposal was lost after its proposer accepted it. (A ballot whose proposal
+                // is delivered is also `Proposing` here, until its votes come back just below — that is not a stall.)
+                if lost && role == Role::Carry && matches!(s.carry, Phase::Proposing { .. }) { s.stalled = true; }
                 for m in s.net.clone() {
                     if matches!(m, Msg::Vote { role: r, ballot: b, .. } if r == role && b == ballot) { s = step(s, Action::Deliver(m, self.carrier)); }
                 }
@@ -528,9 +530,7 @@ impl Model for MigrationModel {
             }));
         }
         if self.carry_may_stall {
-            out.push(Property::<Self>::sometimes(CARRY_RUN_AGAIN, |_, s| {
-                s.stalled && s.carried && decisions(s).iter().any(|(succ, _)| *succ)
-            }));
+            out.push(Property::<Self>::sometimes(CARRY_RUN_AGAIN, |_, s| carry_run_again(s)));
         }
         out
     }
@@ -556,6 +556,12 @@ pub const CARRIED_FROM_A_RETRY: &str = "a value the predecessor decided at ballo
 pub const CARRY_RUN_AGAIN: &str = "a carry ballot that did not decide is run again and decides";
 /// Reachability: the successor decides a value of its own.
 pub const SUCCESSOR_DECIDES: &str = "the successor decides a value of its own";
+
+/// Whether a carry ballot stalled — its proposal lost after its proposer accepted it — and a later carry ballot
+/// decided: the condition of [`CARRY_RUN_AGAIN`].
+pub fn carry_run_again(s: &MigrationState) -> bool {
+    s.stalled && s.carried && decisions(s).iter().any(|(succ, _)| *succ)
+}
 
 /// Every decision: `(in the successor, value)`.
 fn decisions(s: &MigrationState) -> Vec<(bool, Val)> {

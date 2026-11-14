@@ -75,7 +75,8 @@ fn an_electorate_counts_its_members_and_needs_a_strict_majority_of_them() {
 /// record's ballot alone, then `phase1_choice`. Nothing but text ties the two compositions together, so this
 /// holds the text: if `prepare_phase` composes them differently, `model_internals::phase1` is changed with it.
 /// (The engine's legacy `decided` filter sits between the last two and is left out: legacy acceptances are not
-/// modelled.)
+/// modelled.) **A tripwire on those three statements, not a check of the composition**: it fails on a reformat
+/// or a rename, and it does not see a step added between them — the legacy filter already sits there unseen.
 #[test]
 fn the_phase_one_wrapper_composes_what_the_engines_prepare_phase_composes() {
     let engine = include_str!("../../src/consensus.rs");

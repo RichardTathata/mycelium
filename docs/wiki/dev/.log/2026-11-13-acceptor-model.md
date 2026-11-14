@@ -22,5 +22,5 @@ three planted faults — one per area — are each required to produce a counter
   assertions) and `COMPLETION_PROVES` added; the page lists which rule is held by an invariant, a pin, the
   bridge or nothing, and what the model does not check. **Raising the contended migration's bound found a
   counterexample with no fault planted** — a carry between overlapping electorates adopting a stale acceptance —
-  found by the model and confirmed on the engine the same day; the fix is decided and in its own PR; the page and the ledger
+  found by the model and confirmed on the engine the same day; the fix is decided and on branch `carry-phase1`, its PR to follow; the page and the ledger
   (`#carry-across-overlapping-electorates-keeps-value`) carry it.

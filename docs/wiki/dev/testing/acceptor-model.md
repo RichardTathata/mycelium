@@ -42,8 +42,8 @@ The engine reading: `propose_carry`'s `above` only lifts the carry's ballot (`sr
 nothing checks "above it". **Limits:** in the engine an acceptor holding a live decision record of another value
 refuses, and so does the committer, so it needs `v0`'s record not yet at the carry's quorum; and the engine
 counts it afterwards (`Carried::Conflict`, `commit_conflicts`). The model has no decision record in the
-migration and re-implements the carry; two engine tests of the interleaving, written the same day, are what
-confirm it.
+migration and re-implements the carry; two engine tests of the interleaving, written the same day on branch
+`carry-phase1` (its PR to follow), are what confirm it.
 
 Why the first bound missed it: `contended` had ballots to 2 and the carry runs above every ballot the manifests
 name, so a ballot-2 decision could never be carried. At ballots to 3 that configuration is 110,929,684 states
@@ -53,7 +53,7 @@ fixed, node 0 a bystander to the migration's own steps) as
 that expects the counterexample**. Ledger:
 `docs/operations/what-is-proven.md#carry-across-overlapping-electorates-keeps-value`.
 
-**The fix is decided (maintainer, 2026-11-14) and built in its own PR:** the acceptor record carries the group
+**The fix is decided (maintainer, 2026-11-14) and built on branch `carry-phase1`, its PR to follow:** the acceptor record carries the group
 each acceptance was made in, and a carry hears only acceptances made in the successor; an acceptance with no
 recorded group is treated as today. After that PR merges the model gives each acceptance its group and the
 expected-failure test is inverted.
@@ -111,8 +111,8 @@ What caught each, at these bounds:
 | **the top record has not ended before a guard is issued** (the model's copy) | **nothing** — in the model a lapsed top also fails the deadline check, and a holder cannot have released a guard it was not yet issued, so the check never decides |
 | a manifest only after closing; manifests from a majority; a carry only with the retirement visible; a completion only after the carry | `ONE_VALUE_ACROSS` or `RETIREMENT_FIRST` |
 
-A promise given twice at one ballot, and an acceptance below the promise, made runs **grow without end** rather
-than fail (one reached 37 GB): the CI job has a `timeout-minutes` for that.
+A promise given twice at one ballot, an acceptance below the promise, and a promise that drops the acceptance
+made runs **grow without end** rather than fail (one reached 37 GB): the CI job has a `timeout-minutes` for that.
 
 ## What the model does not check — beyond the crate's *not modelled* list
 

@@ -1,6 +1,6 @@
 //! The model, run (critique plan row CR10): every configuration explored in full with its faults out — and,
 //! with one fault planted in each area, a counterexample found. CI runs this file in release
-//! (`cargo test -p mycelium-model --release`).
+//! (`cargo test -p mycelium-model --release --locked`).
 //!
 //! Each passing run pins the number of distinct states it explored. The number is the bound: a change to a
 //! configuration, to the model or to an engine function the model calls moves it, and is then made here, in
@@ -13,7 +13,7 @@ use std::time::Instant;
 
 use mycelium_model::migration::{self, MigrationModel};
 use mycelium_model::slot::{self, SlotModel};
-use stateright::{Checker, Expectation, HasDiscoveries, Model, Path};
+use stateright::{Checker, Expectation, HasDiscoveries, Model, Path, Property};
 
 fn threads() -> usize {
     std::thread::available_parallelism().map_or(1, usize::from)
@@ -117,8 +117,33 @@ fn a_migration_decides_nothing_early_and_keeps_the_predecessors_value() {
 /// The migration with a carry ballot that stalls and is run again.
 #[test]
 fn a_carry_ballot_that_did_not_decide_is_run_again() {
-    explore("migration, stalled carry", MigrationModel::stalled_carry(), 11_796_281,
+    explore("migration, stalled carry", MigrationModel::stalled_carry(), 13_549_301,
         &[migration::CARRIED_OVER, migration::CARRY_RUN_AGAIN]);
+}
+
+/// `CARRY_RUN_AGAIN` is reached only through a stall: with no carry ballot allowed to lose its proposal, no
+/// reachable state satisfies its condition. (Until #784's confirm round it was satisfied by any carry ballot.)
+#[test]
+fn a_carry_that_cannot_stall_is_never_seen_run_again() {
+    struct NoRetry(MigrationModel);
+    impl Model for NoRetry {
+        type State = migration::MigrationState;
+        type Action = migration::Action;
+        fn init_states(&self) -> Vec<Self::State> { self.0.init_states() }
+        fn actions(&self, state: &Self::State, out: &mut Vec<Self::Action>) { self.0.actions(state, out) }
+        fn next_state(&self, last: &Self::State, action: Self::Action) -> Option<Self::State> { self.0.next_state(last, action) }
+        fn properties(&self) -> Vec<Property<Self>> {
+            vec![
+                Property::<Self>::always("no carry is seen run again", |_, s| !migration::carry_run_again(s)),
+                Property::<Self>::sometimes("the carry decides", |_, s| s.carried && s.net.iter().any(|m| {
+                    matches!(m, migration::Msg::Commit { successor: true, .. })
+                })),
+            ]
+        }
+    }
+    let model = MigrationModel { carry_may_stall: false, ..MigrationModel::stalled_carry() };
+    let checker = NoRetry(model).checker().threads(threads()).spawn_dfs().join();
+    checker.assert_properties();
 }
 
 /// The migration with two proposers contending in the predecessor while it retires — **ballots to 2**, so the

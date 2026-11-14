@@ -274,7 +274,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   δ apart (*no holder is granted while another is inside its own deadline less δ*), and the electorate migration
   (*nothing is decided by a successor before the predecessor's retirement is visible*, checked as *the two
   groups decide one value*). Nine finite configurations, one slot, three or four nodes, each explored in full —
-  about 41 million states, each run's count pinned in its test — and tests that plant one fault per area (a vote
+  about 43 million states, each run's count pinned in its test — and tests that plant one fault per area (a vote
   counted from outside the electorate, a lease ended with no margin, a successor deciding early) and require a
   counterexample, so CI shows the model can fail. The model calls the engine's own decision functions — `prepare_slot`, the accept rule, the
   phase-1 rule, `read_slot`, the vote filter, the electorate's quorum — through a new cargo feature of `mycelium`,
