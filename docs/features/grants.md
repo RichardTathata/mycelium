@@ -153,8 +153,9 @@ This feature is turned on in code.
   pending request's id in the status message and nothing else, then `working` once it is answered — the
   `InputRequired` step of [`Step`](../../src/agent/a2a.rs) (the design question, decided: yes).
 - [`claim_grant_use`](../../src/agent/gateway_authority.rs) and [`feed_grant_checkpoint`](../../src/agent/gateway_authority.rs)
-  — a grant admits **one call at each door** (the gateway's and the provider's preflight each claim their use, the
-  marker `…/used/{door}` on the WAL), and a grant's checkpoints travel in the KV beside it, fed to every node's
+  — a grant admits **one call at each door** (the gateway's and the provider's preflight each claim their use: in
+  the door's own journal, read by [`reads_used`](../../src/agent/grant_use.rs), and as the signed marker `…/used/{door}`),
+  and a grant's checkpoints travel in the KV beside it, fed to every node's
   authority — at issue (standing known) and at revocation (the sweep stops work running under it).
 - [`GRANT_SCOPE_PREFIX`](../../src/mandate/grant.rs), [`grant_operations`](../../src/mandate/grant.rs) and
   [`entitle_grants`](../../src/mandate/grant.rs) — the grant as a mandate: scope `grant:{request}`, its binding inside
@@ -230,10 +231,62 @@ has no row for this feature. The tests: in [`src/mandate/grant.rs`](../../src/ma
 - **One grant, one commit at the agent, one call at each door.** The request a grant answered is marked consumed by
   the commit it admitted, so the same tool and arguments ask again; and each enforcement point — the gateway's
   preflight, the provider's — admits a grant **once**: the authority's claim is atomic across concurrent presentations,
-  the marker under the request (`…/used/{door}`) is on the WAL and fsynced **before the work runs** — a marker the disk will not take refuses the call by name, *grant use not recorded durably*, and releases the claim, since nothing ran (external review 2026-10-31, R3; `deprecations.md` §77) — and a second presentation is **denied** `GrantUsed`
+  the use is in the door's own journal and the signed marker under the request (`…/used/{door}`) on the WAL, both fsynced **before the work runs** — a use the disk will not take refuses the call by name, *grant use not recorded durably*, and releases the claim, since nothing ran (external review 2026-10-31, R3; `deprecations.md` §77) — and a second presentation is **denied** `GrantUsed`
   naming the door. A grant admitted at a door is spent there whether or not the work completes, as a nonce is; the claim is made once
   per call at settling — after the permit's history and seats, before its record — so a refusal earlier in that
   settling (a full fleet counter) spends nothing, and a retry of the history view cannot meet its own marker.
+- **A member cannot re-arm a used grant** (critique plan row CR2, first PR; `deprecations.md` §106). The marker's
+  key is one any admitted member can write or tombstone, so a door does not trust it for *unused*:
+  - **the door that admitted the call reads its own journal first** —
+    `{base_path}/{node}/grants/uses.journal`, never gossiped, read back at a restart — and a use it holds reads
+    used whatever the key holds;
+  - **at the key, anything other than *never written* reads used**: a marker that verifies (signed by the door's
+    node, its body naming the grant, the door and the use), a value that does not, a tombstone, a release made at
+    another door. Each odd reading is counted: `GET /stats` `grant_use` and
+    `mycelium_grant_use_reads_total{reading}` (`tombstone`, `unverifiable`, `legacy`, `release_elsewhere`,
+    `release_forged`, `release_replayed`, `superseded`, `not_stored`);
+  - **the door reads its own marker write's receipt**: a write that lost to a newer value at the key refuses the
+    call, its reason ending `(grant_use_superseded)` — or `(grant_use_not_stored)` when the node's store applied
+    nothing of the marker (`max_store_entries` reached) — and the grant stays used there.
+
+  Shown by `the_door_that_made_a_use_reads_its_journal_and_only_its_own_release_gives_it_back` and
+  `a_second_gateway_reads_anything_but_never_written_as_used` (`src/agent/grant_use_tests.rs`): a member's
+  tombstone, a tombstone that arrives before the marker, a garbage overwrite, an earlier genuine release written
+  back over a later use, a release forged under another node's key and a member's own marker-and-release pair each
+  leave the grant used, at a second gateway and at the first after a restart.
+- **A use that ran nothing is given back — at the door that claimed it, and nowhere else.** A gateway that refuses
+  before dispatch, or is answered a caller-context refusal, and a provider that refuses
+  `call_mandate_not_established`, release their use: a signed release over their own marker, and then — only once that is the key's value — in the
+  journal, so a give-back that does not complete leaves the use standing there. That
+  node's door then admits the grant once more. **Every other door of the class reads the release as used**, so
+  **a retry must return to the same gateway node**, and after a provider's give-back to the same provider node;
+  elsewhere it
+  is refused *already used*. A door that did not record the use cannot tell a genuine release of the newest use
+  from an older one written back, from a member's own pair, or from a release that overlapped another door's
+  admission. The release in the KV is never why a grant reads unused — the releasing door's journal is; it tells
+  the other doors, an auditor and a later collector who released which use.
+- **The provider's give-back, for a call a gateway routes.** For a call a gateway routes, the caller does not choose the provider: `tools/call` goes to the
+  first provider in scan order, so after provider P1 gives its use back a retry routed to P2 — after a membership
+  change, say — is refused *already used at provider*, and the client cannot steer it. It needs a new grant.
+  A release's signature decides nothing — the releasing door's journal does; it is verified so a forged one is
+  counted apart — and a release is written only over the releasing door's own marker for that use.
+- **What a door's journal does not survive, stated.** A node restarted **under a new address** is a new door
+  with an empty journal (the journal sits under the node's id): it reads uses the old address made from the KV
+  only. An entry that does not decode is skipped, logged and counted (`GET /stats`
+  `grant_use_journal_undecoded`), which forgets that use; a deleted
+  journal file reads as empty. The journal is read whole at every start and never compacted. A build with
+  `gateway` and `tls` and **without `compliance`** runs this path with no member-key view beyond the keys the
+  node itself trusts (`trusted_keys`): a marker it cannot verify reads used and is counted `unverifiable`, and its
+  own records verify under its own key — **untested**: the tests here are in a `compliance`-gated module.
+- **What this does not do, stated.** (1) **Two doors admitting one grant at once**: two gateways that each read
+  *never written* before either marker arrives both admit; a third gateway then sees whichever value won — the
+  other's marker, or its release, both read used. Not prevented (critique plan D12). (2) **The tombstone horizon
+  at a door that never recorded the use**: a planted tombstone is collected after 3 000 s at the defaults, the key
+  then reads *never written* there, and a grant valid longer (the cap is 3 600 s) can be presented once more at a
+  gateway that did not make the first use. (3) **A member can spend a grant** by writing its marker key first: a
+  refusal — availability. (4) During a release of mixed versions an un-upgraded gateway releases by tombstone,
+  which upgraded doors read as used. (5) The journal is not compacted and the signed records are not collected
+  (with I4's collector).
 - **Revocation.** `POST …/revoke` at the issuing node reads the tool and the agent from the **signed** grant (its one
   enumerated operation and its holder), not from the request record, and publishes the next checkpoint for the grant's scope naming the
   term, offers it to its own authority — whose sweep judges work under a grant by that standing and its window, not by
@@ -257,7 +310,7 @@ has no row for this feature. The tests: in [`src/mandate/grant.rs`](../../src/ma
 - **A restart re-waits.** The request reaches the WAL at the **buffered** rung at most (the state machine's write is
   `append_try`: a full queue or a poisoned writer drops the record and counts it, and the agent is not told); losing
   it to a crash fails safe — the agent asks again. The grant (`…/issued`) is written on the receipt path and the
-  supervisor's answer carries its `local_durability`. The agent's `consumed` marker, the door's `used/{door}` marker
+  supervisor's answer carries its `local_durability`. The agent's `consumed` marker, the door's use (its journal and its `used/{door}` marker)
   and a revocation's checkpoint and `revoked` records are **on disk before the step they admit**, or that step is
   refused by name (R3) — a lost `consumed` would re-honour the grant, and a provider with no door has nothing else to
   remember a use by. A node without `[persistence]` writes every one of these in memory and has never claimed a disk.

@@ -40,6 +40,16 @@ curl -s http://node:8080/stats | jq
   `Individual-scoped frame has no direct route; flooding via relay (topology pressure …)`.
   Remedy: pin the pair with `GossipAgent::connect_peer` — see
   [tuning §RPC-heavy pairs](tuning.md#rpc-heavy-pairs--the-topology-pressure-warn).
+- `grant_use` — what this node's doors found at a grant's use-marker key (`grant/…/used/{door}`) that was
+  neither a verified marker nor *never written*, by reading: `tombstone`, `unverifiable`, `legacy`,
+  `release_elsewhere`, `release_forged`, `release_replayed` — **each read as used, so none re-arms a grant** —
+  and `superseded`, this door's own marker or release write that lost to a newer value (the call refused
+  `grant_use_superseded`, or the grant left spent), and `not_stored`, its marker write refused by the node's
+  store at `max_store_entries` (the call refused `grant_use_not_stored`). In memory; zero after a restart. On a fleet at one version
+  a non-zero `tombstone`, `unverifiable`, `release_forged` or `release_replayed` means a member wrote a marker
+  key that is not its own; `release_elsewhere` is ordinary when a client retries a refused call at another
+  gateway than the one that released it; `legacy` is expected only while doors older than 2.41 run. With
+  `metrics`: `mycelium_grant_use_reads_total{reading}`. See [deprecations §106](../guide/deprecations.md).
 - `kv_future_stamps` — inbound KV entries whose stamp was **beyond this node's drift bound**: physical
   time past this node's wall clock plus `max_clock_drift_ms` (300 s by default). **Counted and still
   applied**: under last-writer-wins such an entry holds its key until the wall clock passes its stamp, and
