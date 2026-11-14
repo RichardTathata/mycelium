@@ -45,6 +45,7 @@ pub fn id_hash(n: Node) -> u64 {
 
 thread_local! {
     static BYTES: RefCell<HashMap<Val, Bytes>> = RefCell::new(HashMap::new());
+    static VALS: RefCell<HashMap<Bytes, Val>> = RefCell::new(HashMap::new());
     static READS: RefCell<HashMap<ReadKey, Option<Top>>> = RefCell::new(HashMap::new());
     static PREPARES: RefCell<HashMap<(Acc, u64, Node, u64), Promise>> = RefCell::new(HashMap::new());
     static ACCEPTS: RefCell<HashMap<AcceptKey, Option<Acc>>> = RefCell::new(HashMap::new());
@@ -66,9 +67,23 @@ pub fn bytes(v: Val) -> Bytes {
         cache.borrow_mut().entry(v).or_insert_with(|| {
             let lease = v.expires.map(|at| (1, at));
             let token = (u64::from(v.proposer) << 8) | u64::from(v.call);
-            engine::envelope(SLOT, &[v.proposer, v.call], lease, v.lineage, &node_id(v.proposer), token)
+            let env = engine::envelope(SLOT, &[v.proposer, v.call], lease, v.lineage, &node_id(v.proposer), token);
+            VALS.with(|back| back.borrow_mut().insert(env.clone(), v));
+            env
         }).clone()
     })
+}
+
+/// The model's value for envelope bytes the engine handed back. The engine only ever returns bytes it was
+/// given, and every envelope it is given went through [`bytes`] on this thread.
+fn val(env: &Bytes) -> Val {
+    VALS.with(|back| back.borrow().get(env).copied())
+        .expect("the engine returned an envelope the model never gave it")
+}
+
+/// The model's node for a proposer hash the engine handed back.
+fn node(hash: u64) -> Node {
+    (0..=Node::MAX).find(|n| id_hash(*n) == hash).expect("the engine returned a proposer the model never named")
 }
 
 /// One acceptor's memory of the slot.
@@ -87,6 +102,16 @@ impl Acc {
             accepted:    self.accepted.map(|(b, v)| (b, bytes(v))),
         }
     }
+
+    /// The acceptor as the engine left it — every field read back from the engine's state, none kept from the
+    /// model's.
+    fn from_engine(after: &engine::Acceptor) -> Self {
+        Self {
+            promised:    after.promised,
+            promised_to: after.promised_to.map(node),
+            accepted:    after.accepted.as_ref().map(|(b, env)| (*b, val(env))),
+        }
+    }
 }
 
 type Promise = (Acc, Option<Option<(u64, Val)>>);
@@ -97,12 +122,11 @@ pub fn prepare(acc: &Acc, ballot: u64, proposer: Node, floor: u64) -> Promise {
     let key = (acc.clone(), ballot, proposer, floor);
     if let Some(hit) = PREPARES.with(|cache| cache.borrow().get(&key).cloned()) { return hit; }
     let (after, answer) = engine::prepare(&acc.to_engine(), SLOT, ballot, id_hash(proposer), floor);
+    // Both halves of the answer are the engine's: the acceptor it left behind, and what its promise reports.
     let out = match answer {
-        engine::Prepared::Promised(_) => {
-            assert_eq!((after.promised, after.promised_to), (ballot, Some(id_hash(proposer))));
-            (Acc { promised: after.promised, promised_to: Some(proposer), accepted: acc.accepted }, Some(acc.accepted))
-        }
-        engine::Prepared::Refused(_) => (acc.clone(), None),
+        engine::Prepared::Promised(reported) =>
+            (Acc::from_engine(&after), Some(reported.map(|(b, env)| (b, val(&env))))),
+        engine::Prepared::Refused(_) => (Acc::from_engine(&after), None),
     };
     PREPARES.with(|cache| cache.borrow_mut().insert(key, out.clone()));
     out
@@ -112,10 +136,8 @@ pub fn prepare(acc: &Acc, ballot: u64, proposer: Node, floor: u64) -> Promise {
 pub fn accept(acc: &Acc, ballot: u64, value: Val, proposer: Node, floor: u64) -> Option<Acc> {
     let key = (acc.clone(), ballot, value, proposer, floor);
     if let Some(hit) = ACCEPTS.with(|cache| cache.borrow().get(&key).cloned()) { return hit; }
-    let out = engine::accept(&acc.to_engine(), SLOT, ballot, &bytes(value), id_hash(proposer), floor).map(|after| {
-        assert_eq!(after.accepted, Some((ballot, bytes(value))));
-        Acc { promised: after.promised, promised_to: Some(proposer), accepted: Some((ballot, value)) }
-    });
+    let out = engine::accept(&acc.to_engine(), SLOT, ballot, &bytes(value), id_hash(proposer), floor)
+        .map(|after| Acc::from_engine(&after));
     ACCEPTS.with(|cache| cache.borrow_mut().insert(key, out.clone()));
     out
 }
