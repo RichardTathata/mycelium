@@ -226,17 +226,25 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the single-decree acceptor's **design at a stated bound** with Stateright 0.31.0: slot reuse after a release or
   a lapsed lease (*at most one value is decided per slot and life*), the lease's wall-clock end with clocks up to
   δ apart (*no holder is granted while another is inside its own deadline less δ*), and the electorate migration
-  (*nothing is decided by a successor before the predecessor's retirement is visible*). Seven finite
-  configurations, one slot, three or four nodes, each explored in full — about 29 million states, each run's
-  count pinned in its test — and three tests that plant one fault per area (a vote counted from outside the
-  electorate, a lease ended with no margin, a successor deciding early) and require a counterexample, so CI shows
-  the model can fail. The model calls the engine's own decision functions — `prepare_slot`, the accept rule, the
+  (*nothing is decided by a successor before the predecessor's retirement is visible*, checked as *the two
+  groups decide one value*). Nine finite configurations, one slot, three or four nodes, each explored in full —
+  about 41 million states, each run's count pinned in its test — and tests that plant one fault per area (a vote
+  counted from outside the electorate, a lease ended with no margin, a successor deciding early) and require a
+  counterexample, so CI shows the model can fail. The model calls the engine's own decision functions — `prepare_slot`, the accept rule, the
   phase-1 rule, `read_slot`, the vote filter, the electorate's quorum — through a new cargo feature of `mycelium`,
   `model-internals`, which is off by default and on in no shipped build; the order of a proposer's steps, the gate
   and the migration's readiness checks are written again in the model, and its crate documentation lists each.
   **It does not prove the implementation. The lease area checks the holder-side margin row CR11 designs, which
-  is not built:** with no margin — the engine today — the model finds a second holder granted inside the first's
-  deadline, which until now was a reading of the code (`what-is-proven.md` § *Not yet shown*). No behaviour and no
+  is not built:** with a margin of 0 the model finds a second holder granted inside the first's deadline — a trace
+  of the model at a bound, with its own guard and a ballot as one step; in the engine that remains a reading of
+  the code (`what-is-proven.md` § *Not yet shown*). **The model also found one case where the design does
+  not hold (found by the model 2026-11-14 and confirmed on the engine the same day):** between
+  overlapping electorates, the successor's carry can adopt a stale lower-ballot acceptance a shared member made in
+  the predecessor, and decide it while the predecessor decided another value. It needs the predecessor's decision
+  record not yet at the carry's quorum, and the engine counts it afterwards (`commit_conflicts`). CI holds the
+  trace as a test that expects it; nothing in the engine is changed here — the fix, decided on 2026-11-14 (the
+  acceptor record carries the group an acceptance was made in, and a carry hears only the successor's), is its
+  own change (`what-is-proven.md` § *Not yet shown*, the carry row). No behaviour and no
   public item of a shipped build changes; `Cargo.lock` gains Stateright and its dependencies, for that crate only.
   CI job `model`.
 - **N5: the agent guide the binary serves** (`docs/plans/identity-and-lifecycle.md` N5). `mycelium skills get fleet`

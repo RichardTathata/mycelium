@@ -27,9 +27,14 @@ fn an_acceptance_is_one_value_per_ballot_and_never_below_the_promise_or_the_floo
     assert!(shared::accept(&acc, 1, a, 0, 0).is_some(), "the same value again");
     assert!(shared::accept(&acc, 2, b, 1, 0).is_some(), "a higher ballot");
     assert!(shared::accept(&acc, 2, b, 1, 2).is_none(), "a ballot at the floor");
-    let (promised, _) = shared::prepare(&acc, 3, 1, 0);
-    assert_eq!(promised.accepted, Some((1, a)), "a promise keeps the acceptance, and reports it");
+    let (promised, reported) = shared::prepare(&acc, 3, 1, 0);
+    assert_eq!(promised.accepted, Some((1, a)), "the engine's acceptor keeps the acceptance through a promise");
+    assert_eq!(reported, Some(Some((1, a))), "and the engine's promise reports it");
+    assert_eq!((promised.promised, promised.promised_to), (3, Some(1)), "promised to the proposer that asked");
     assert!(shared::accept(&promised, 2, b, 1, 0).is_none(), "below the promise");
+    let accepted = shared::accept(&promised, 3, b, 1, 0).expect("at the promise, by the proposer it was made to");
+    assert_eq!((accepted.promised, accepted.promised_to, accepted.accepted), (3, Some(1), Some((3, b))),
+        "the engine's acceptor after an acceptance");
 }
 
 #[test]
@@ -63,4 +68,29 @@ fn an_electorate_counts_its_members_and_needs_a_strict_majority_of_them() {
     let filter = shared::vote_filter(Some(&[0, 1, 2])).expect("a roster is a filter");
     assert!(shared::counted(Some(&filter), 1) && !shared::counted(Some(&filter), 3));
     assert!(shared::vote_filter(None).is_none() && shared::counted(None, 3), "no roster, no filter: anyone counts");
+}
+
+/// `model_internals::phase1` is not one engine function: it composes three, in the order the engine's
+/// `prepare_phase` does — each report through `Carry::report`, then `set_aside_finished` with the ended
+/// record's ballot alone, then `phase1_choice`. Nothing but text ties the two compositions together, so this
+/// holds the text: if `prepare_phase` composes them differently, `model_internals::phase1` is changed with it.
+/// (The engine's legacy `decided` filter sits between the last two and is left out: legacy acceptances are not
+/// modelled.)
+#[test]
+fn the_phase_one_wrapper_composes_what_the_engines_prepare_phase_composes() {
+    let engine = include_str!("../../src/consensus.rs");
+    let wrapper = include_str!("../../src/model_internals.rs");
+    let body = engine.split("async fn prepare_phase(").nth(1).expect("the engine has a prepare phase")
+        .split("\n    }\n").next().expect("which ends");
+    let at = |needle: &str| body.find(needle).unwrap_or_else(|| panic!("prepare_phase no longer says `{needle}`"));
+    let report = at("reports.push(carry.report(slot, accepted_ballot, accepted_digest, accepted, accepted_is_envelope));");
+    let aside = at("set_aside_finished(&mut reports, 0, false, self.ended(slot));");
+    let choice = at("Phase1::Ready(phase1_choice(current, &reports, carry))");
+    assert!(report < aside && aside < choice, "report, set aside, choose — in that order");
+    assert_eq!(body.matches("set_aside_finished(").count(), 1, "one set-aside, with the ended ballot alone");
+    let at = |needle: &str| wrapper.find(needle).unwrap_or_else(|| panic!("the wrapper no longer says `{needle}`"));
+    let report = at("carry.report(slot, *b, Some(value_digest(e)), Some(e.clone()), true)");
+    let aside = at("set_aside_finished(&mut reported, 0, false, ended);");
+    let choice = at("phase1_choice(current, &reported, &carry)");
+    assert!(report < aside && aside < choice, "the wrapper: report, set aside, choose — in that order");
 }

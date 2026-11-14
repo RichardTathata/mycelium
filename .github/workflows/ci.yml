@@ -1313,6 +1313,9 @@ jobs:
     # profile's LTO and single codegen unit, which lengthen the build more than they shorten the run.
     name: Model (acceptor, Stateright)
     runs-on: ubuntu-latest
+    # A fault in an engine function the model calls can make a run grow without end rather than fail (a promise
+    # given twice at one ballot did, in review): the limit turns that into a red job, not a six-hour one.
+    timeout-minutes: 25
     env:
       CARGO_PROFILE_RELEASE_LTO: "false"
       CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
@@ -1322,7 +1325,8 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test -p mycelium-model --release
+      # --locked: the lockfile holds `dashmap` at 6.1.0 so that no shared dependency moved; an unlocked resolve would move it.
+      - run: cargo test -p mycelium-model --release --locked
       - run: cargo clippy -p mycelium-model --all-targets -- -D warnings
       # The module the model reaches the engine through (`mycelium`'s `model-internals`, on in no shipped build).
       - run: cargo clippy --lib --no-default-features --features model-internals -- -D warnings

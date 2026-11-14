@@ -35,9 +35,23 @@ pub struct MigrationModel {
     pub carrier:     Node,
     /// The highest ballot drawn.
     pub max_ballot:  u64,
+    /// Whether a carry ballot's proposal may reach nobody: the ballot then stops with its proposer's own
+    /// acceptance, undecided, and the carry is run again at a higher ballot.
+    pub carry_may_stall: bool,
+    /// Whether the successor proposes a value of its own once the carry is complete.
+    pub successor_proposes: bool,
+    /// Whether each predecessor proposer draws one fixed ballot — the first of `proposers` ballot 1, the second
+    /// ballot 2 — instead of any ballot the ballot key allows. A smaller space, for one named interleaving.
+    pub fixed_ballots: bool,
+    /// Nodes that take no step of the migration itself — they learn no record, promise no retirement and report
+    /// no manifest; they still propose and answer ballots. A smaller space, for one named interleaving.
+    pub bystanders: Vec<Node>,
     /// **Planted fault** — the successor decides early: its ordinary proposals are admitted, at the proposer's
     /// door and at every acceptor, without the predecessor's retirement or the carry's completion.
     pub successor_decides_early: bool,
+    /// **Planted fault** — a completion that proves nothing: a successor member votes for it with neither the
+    /// carry done nor the retirement visible.
+    pub completion_unproven: bool,
 }
 
 impl MigrationModel {
@@ -46,13 +60,36 @@ impl MigrationModel {
     pub fn rolling() -> Self {
         Self {
             predecessor: vec![0, 1, 2], successor: vec![1, 2, 3], proposers: vec![0], carrier: 3, max_ballot: 3,
-            successor_decides_early: false,
+            carry_may_stall: false, successor_proposes: true, fixed_ballots: false, bystanders: Vec::new(),
+            successor_decides_early: false, completion_unproven: false,
         }
     }
 
     /// [`rolling`](Self::rolling) with both predecessor proposers contending — nodes 0 and 1 — and ballots to 2.
+    /// At ballots to 3 (not run in CI: 110,929,684 states) the unplanted model breaks [`ONE_VALUE_ACROSS`]; see
+    /// [`overlap`](Self::overlap), which holds that trace in a space small enough to run.
     pub fn contended() -> Self {
         Self { proposers: vec![0, 1], max_ballot: 2, ..Self::rolling() }
+    }
+
+    /// [`rolling`](Self::rolling) with a carry ballot that may stall and be run again; the successor proposes
+    /// nothing of its own.
+    pub fn stalled_carry() -> Self {
+        Self { carry_may_stall: true, successor_proposes: false, ..Self::rolling() }
+    }
+
+    /// **The finding of 2026-11-14 (confirmed on the engine the same day), in its smallest setting**: [`contended`](Self::contended) with node 1
+    /// proposing at ballot 1 and node 0 at ballot 2, ballots to 3, no ballot of the successor's own, and node 0
+    /// taking no part in the migration's own steps (nodes 1 and 2 retire the predecessor and report). Node 1 is
+    /// in both groups; an acceptance it made in the predecessor at ballot 1 is what the successor's carry meets.
+    pub fn overlap() -> Self {
+        Self { proposers: vec![1, 0], fixed_ballots: true, bystanders: vec![0], successor_proposes: false, ..Self::rolling() }
+    }
+
+    /// A planted fault beside the row's: a completion that proves nothing.
+    pub fn with_completion_unproven(mut self) -> Self {
+        self.completion_unproven = true;
+        self
     }
 
     /// The planted fault of the migration area: a successor deciding early.
@@ -168,6 +205,8 @@ pub struct MigrationState {
     pub carry:     Phase,
     /// The carry is done: the carry ballot committed, or the manifests held nothing to carry.
     pub carried:   bool,
+    /// A carry ballot was accepted by its proposer and did not decide (its proposal reached nobody).
+    pub stalled:   bool,
     pub ordinary:  Phase,
 }
 
@@ -189,8 +228,9 @@ pub enum Action {
     Begin(Role, u64),
     Deliver(Msg, Node),
     /// A whole ballot of the successor — the carry, or an ordinary one — with these members as the rest of its
-    /// quorum: prepare, promise, proposal, vote and commit in one step.
-    Ballot(Role, u64, Set),
+    /// quorum: prepare, promise, proposal, vote and commit in one step. `true`: the proposal reaches nobody, so
+    /// the ballot stops with its proposer's own acceptance and no decision.
+    Ballot(Role, u64, Set, bool),
 }
 
 impl MigrationState {
@@ -256,6 +296,7 @@ impl Model for MigrationModel {
             manifests: (Set::default(), None, 0),
             carry: Phase::Idle,
             carried: false,
+            stalled: false,
             ordinary: Phase::Idle,
         }]
     }
@@ -273,13 +314,20 @@ impl Model for MigrationModel {
         out.extend(self.successor.iter().map(|n| Action::CompleteVote(*n)));
         // A ballot is drawn one above the shared ballot key, which is gossip (see `slot`).
         let top = s.nodes.iter().map(|n| n.acc.promised).max().unwrap_or(0).saturating_add(1).min(self.max_ballot);
-        out.extend(self.proposers.iter().flat_map(|p| (1..=top).map(move |b| Action::Begin(Role::Predecessor(*p), b))));
+        out.extend(self.proposers.iter().enumerate().flat_map(|(i, p)| {
+            (1..=top).filter(move |b| !self.fixed_ballots || *b == i as u64 + 1).map(move |b| Action::Begin(Role::Predecessor(*p), b))
+        }));
         for role in [Role::Carry, Role::Successor] {
+            if role == Role::Successor && !self.successor_proposes { continue; }
             let others = (0u16..1 << self.nodes()).map(Set).filter(move |q| {
                 !q.has(self.carrier) && q.len() + 1 == self.quorum(role)
                     && (0..self.nodes() as Node).all(|n| !q.has(n) || self.successor.contains(&n))
             });
-            out.extend(others.flat_map(|q| (1..=top).map(move |b| Action::Ballot(role, b, q))));
+            out.extend(others.flat_map(|q| (1..=top).flat_map(move |b| {
+                // Only a carry ballot is run again, so only a carry ballot is worth losing.
+                let may_stall = self.carry_may_stall && role == Role::Carry;
+                [false, true].into_iter().filter(move |lost| !lost || may_stall).map(move |lost| Action::Ballot(role, b, q, lost))
+            })));
         }
         for msg in &s.net {
             match *msg {
@@ -295,6 +343,9 @@ impl Model for MigrationModel {
     }
 
     fn next_state(&self, last: &MigrationState, action: Action) -> Option<MigrationState> {
+        if let Action::LearnSuccessor(n) | Action::LearnRetirement(n) | Action::LearnCompletion(n)
+            | Action::RetireVote(n) | Action::Manifest(n) | Action::CompleteVote(n) = action
+            && self.bystanders.contains(&n) { return None; }
         let mut s = last.clone();
         match action {
             Action::Declare => {
@@ -332,9 +383,9 @@ impl Model for MigrationModel {
             Action::CompleteVote(n) => {
                 // The completion is proposed once the carry is done, and accepted where the retirement is visible
                 // (`completion_acceptable`).
-                if !s.carried { return None; }
+                let proven = s.carried && s.nodes[usize::from(n)].sees_retirement;
                 let node = &mut s.nodes[usize::from(n)];
-                if !node.sees_successor || !node.sees_retirement { return None; }
+                if !node.sees_successor || !(proven || self.completion_unproven) { return None; }
                 node.complete_vote = true;
             }
             Action::Begin(role, ballot) => {
@@ -416,7 +467,7 @@ impl Model for MigrationModel {
                 if accepted.is_some_and(|(b, _)| best.is_none_or(|(top, _)| b > top)) { *best = accepted; }
             }
             Action::Deliver(Msg::Commit { .. }, _) => return None,
-            Action::Ballot(role, ballot, others) => {
+            Action::Ballot(role, ballot, others, lost) => {
                 if matches!(role, Role::Predecessor(_)) { return None; }
                 let step = |s: MigrationState, a: Action| self.next_state(&s, a).unwrap_or(s);
                 let members = || self.successor.iter().copied().filter(|n| others.has(*n));
@@ -426,10 +477,11 @@ impl Model for MigrationModel {
                     if matches!(m, Msg::Ack { role: r, ballot: b, .. } if r == role && b == ballot) { s = step(s, Action::Deliver(m, self.carrier)); }
                 }
                 for m in s.net.clone() {
-                    if matches!(m, Msg::Propose { role: r, ballot: b, .. } if r == role && b == ballot) {
+                    if !lost && matches!(m, Msg::Propose { role: r, ballot: b, .. } if r == role && b == ballot) {
                         for n in members() { s = step(s, Action::Deliver(m, n)); }
                     }
                 }
+                if role == Role::Carry && matches!(s.carry, Phase::Proposing { .. }) { s.stalled = true; }
                 for m in s.net.clone() {
                     if matches!(m, Msg::Vote { role: r, ballot: b, .. } if r == role && b == ballot) { s = step(s, Action::Deliver(m, self.carrier)); }
                 }
@@ -444,12 +496,15 @@ impl Model for MigrationModel {
     }
 
     fn properties(&self) -> Vec<Property<Self>> {
-        vec![
+        let mut out = vec![
             Property::<Self>::always(RETIREMENT_FIRST, |_, s| {
                 s.nodes.iter().all(|n| !(n.accepted_carry || n.accepted_own) || n.sees_retirement || n.sees_completion)
             }),
             Property::<Self>::always(COMPLETION_FIRST, |_, s| {
                 s.nodes.iter().all(|n| !n.accepted_own || n.sees_completion)
+            }),
+            Property::<Self>::always(COMPLETION_PROVES, |m, s| {
+                !s.nodes.iter().any(|n| n.sees_completion) || (m.retired(s) && s.carried)
             }),
             Property::<Self>::always(ONE_VALUE_ACROSS, |_, s| {
                 let decided = decisions(s);
@@ -459,10 +514,25 @@ impl Model for MigrationModel {
                 let decided = decisions(s);
                 decided.iter().any(|(succ, v)| !succ && decided.contains(&(true, *v)))
             }),
-            Property::<Self>::sometimes(SUCCESSOR_DECIDES, |m, s| {
+        ];
+        // What a configuration can reach, it must reach; `tests/model.rs` names the list each run must carry.
+        if self.successor_proposes {
+            out.push(Property::<Self>::sometimes(SUCCESSOR_DECIDES, |m, s| {
                 decisions(s).iter().any(|(succ, v)| *succ && v.proposer == m.carrier)
-            }),
-        ]
+            }));
+        }
+        if self.proposers.len() >= 2 && self.max_ballot >= 3 && !self.fixed_ballots {
+            out.push(Property::<Self>::sometimes(CARRIED_FROM_A_RETRY, |_, s| {
+                s.net.iter().any(|m| matches!(m, Msg::Commit { successor: false, ballot, value }
+                    if *ballot >= 2 && decisions(s).contains(&(true, *value))))
+            }));
+        }
+        if self.carry_may_stall {
+            out.push(Property::<Self>::sometimes(CARRY_RUN_AGAIN, |_, s| {
+                s.stalled && s.carried && decisions(s).iter().any(|(succ, _)| *succ)
+            }));
+        }
+        out
     }
 }
 
@@ -471,10 +541,19 @@ impl Model for MigrationModel {
 pub const RETIREMENT_FIRST: &str = "nothing is decided by the successor before the predecessor's retirement is visible";
 /// Invariant: the successor decides outside the carry only once the carry is complete.
 pub const COMPLETION_FIRST: &str = "the successor decides nothing of its own before the carry is complete";
+/// Invariant: a completion visible anywhere proves what it stands for — the retirement is decided and the carry
+/// is done. The two invariants above read the same flags the model's own guard (`admits`) reads in the step that
+/// sets them, so no interleaving can break them — only a guard that is switched off; this one and
+/// [`ONE_VALUE_ACROSS`] are what the checker searches for.
+pub const COMPLETION_PROVES: &str = "a visible completion proves the retirement is decided and the carry is done";
 /// Invariant: the slot has one value, whichever group decided it.
 pub const ONE_VALUE_ACROSS: &str = "the predecessor and the successor decide one value";
 /// Reachability: a value decided in the predecessor is decided again by the carry.
 pub const CARRIED_OVER: &str = "a value the predecessor decided is carried";
+/// Reachability: a value the predecessor decided at a ballot above its first is carried.
+pub const CARRIED_FROM_A_RETRY: &str = "a value the predecessor decided at ballot 2 or above is carried";
+/// Reachability: a carry ballot its proposer accepted did not decide, and the carry run again decided.
+pub const CARRY_RUN_AGAIN: &str = "a carry ballot that did not decide is run again and decides";
 /// Reachability: the successor decides a value of its own.
 pub const SUCCESSOR_DECIDES: &str = "the successor decides a value of its own";
 

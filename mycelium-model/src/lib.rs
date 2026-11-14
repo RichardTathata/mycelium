@@ -10,7 +10,10 @@
 //!   its deadline: that margin is **row CR11's, as designed, and is not built** — this area checks the design, and
 //!   the engine as it stands is the model's planted fault (no margin).
 //! - **the electorate migration** ([`migration`]) — declare the successor, retire the predecessor, carry,
-//!   complete. *Nothing is decided by a successor before the predecessor's retirement is visible.*
+//!   complete. *Nothing is decided by a successor before the predecessor's retirement is visible* — checked as
+//!   what that rule protects: the two groups decide one value. **At ballots to 3 with two contending predecessor
+//!   proposers they do not** (found by the model on 2026-11-14 and confirmed on the engine the same day): see
+//!   [`migration::MigrationModel::overlap`].
 //!
 //! # What the model shares with the engine
 //!
@@ -19,7 +22,7 @@
 //!
 //! | Decision | Engine function |
 //! |---|---|
-//! | promise a ballot, or refuse | `prepare_slot` (`src/consensus.rs:4662`) |
+//! | promise a ballot, or refuse; the acceptor a promise leaves; what a promise reports | `prepare_slot` (`src/consensus.rs:4662`) |
 //! | accept a value at a ballot, or refuse | `claim_envelope` → `claim` → `may_accept` → `may_cast_vote_digest` (`src/consensus.rs:4830`, `4842`, `4876`, `4891`) |
 //! | what a proposer carries after its promise quorum | `Carry::report`, `set_aside_finished`, `phase1_choice` → `choose_after_prepare` (`src/consensus.rs:4128`, `4183`, `4159`, `4730`) |
 //! | whether a decision is over — released, or its lease past on the reader's clock — and which record is the top | `consensus_life::read_slot`, with `Envelope::identity`, `marker_key`, `encode_marker`, `decode_marker` (`src/consensus_life.rs:245`; the lapse is line 275) |

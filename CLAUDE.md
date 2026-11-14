@@ -107,7 +107,7 @@ cargo clippy --lib --no-default-features -- -D warnings   # catches the feature-
 Companion crates: `cargo test -p mycelium-tuple-space --features gateway`, same for
 `mycelium-blackboard` (+ clippy `--all-targets`); `cargo test -p mycelium-effects --features tuple-space`
 (+ clippy with and without the feature; `rusqlite` bundled, quarantined to that crate); `cargo test -p mycelium-commitment`
-(+ clippy `--all-targets` + `cargo run -p mycelium-commitment --example redistribution_cn`, the CN1 gate). The acceptor's model (critique plan CR10): `cargo test -p mycelium-model --release` (+ clippy `--all-targets`) — read the wiki's [acceptor-model page](docs/wiki/dev/testing/acceptor-model.md) before changing `prepare_slot`, the accept rule, the phase-1 rule or `read_slot`: the model calls them, and a pinned state count moves when they do. CI also gates `tsc --noEmit` and the TypeScript SDK's `jest` suites — node-free, and since 2026-10-05 the live suite against a
+(+ clippy `--all-targets` + `cargo run -p mycelium-commitment --example redistribution_cn`, the CN1 gate). CI also gates `tsc --noEmit` and the TypeScript SDK's `jest` suites — node-free, and since 2026-10-05 the live suite against a
 `mycelium` node — the AFN +
 coop smokes, fuzz (non-PR), and `cargo audit`. **Never trust a memorised test count** — run
 the suite. Scale suites: `make test-scale` (100 nodes), `test-scale-resilience`,
@@ -187,7 +187,7 @@ is the state of play).
 - **Adopter surface:** Y9 is paused until a cloud credential is held; each row's stated *not built* items are in the
   plan's §8.
 - **Post-360 hardening:** the *not built* items and the known flakes, `docs/plans/post-360-hardening.md` §3.6.
-- **The third-party critique of 2026-11-12:** agreed 2026-11-12, all sixteen decisions answered (`docs/plans/external-critique-2026-11-12.md` §5): CR1 now (#774), CR2's first PR, CR13's counter and CR12 inside wave 1b, CR3–CR11 and the rest after it; CR10 (the acceptor's model, `mycelium-model`, CI job `model`) is delivered, unreleased.
+- **The third-party critique of 2026-11-12:** agreed 2026-11-12, all sixteen decisions answered (`docs/plans/external-critique-2026-11-12.md` §5): CR1 now (#774), CR2's first PR, CR13's counter and CR12 inside wave 1b, CR3–CR11 and the rest after it, CR10 (the acceptor's model) in parallel.
 - **Contracts axis, not code gates** (each needs a machine, a counterparty or a credential, not a commit): V1, the nightly scale runner whose self-hosted box is offline, so its criterion has never been
   met; AE4's four joint AWS/GCP runs, which need the counterparty; S4, real object-store buckets, which need
   credentials.

@@ -89,6 +89,15 @@ impl SlotModel {
         }
     }
 
+    /// **The lease, one tick from the edge**: [`lease`](Self::lease) with clocks up to δ = 3 ticks apart, a
+    /// five-tick lease, clocks to tick 8, no releases — and a margin of **δ − 1 = 2**. On whole ticks the reader
+    /// ends a lease at `now > expiry` and the holder stops at `now + margin < expiry`, both strict, so δ − 1 is
+    /// the least margin that holds and δ − 2 breaks. This run and its planted twin (`margin: 1`) show that edge;
+    /// [`lease`](Self::lease), with its margin of δ, sits one tick inside it and cannot.
+    pub fn lease_edge() -> Self {
+        Self { lease: 5, skew: 3, margin: 2, horizon: 8, release: false, ..Self::lease() }
+    }
+
     /// **The lease's wall-clock end**: three members, two proposers with one call each, ballots to 3, a
     /// four-tick lease, every node its own clock, no two more than δ = 2 ticks apart, running to tick 6; the
     /// holder stops δ before its deadline and may release — each ballot one step.
@@ -557,7 +566,9 @@ impl Model for SlotModel {
             }),
             Property::<Self>::sometimes(DECIDED, |_, s| !decisions(s).is_empty()),
         ];
-        // What a configuration can reach, it must reach: a bound that never decides twice checks no reuse.
+        // What a configuration can reach, it must reach: a bound that never decides twice checks no reuse. Which
+        // of these a configuration carries follows from its fields; `tests/model.rs` names the list each run must
+        // carry, so a configuration edited until one drops out fails there rather than passing with less.
         if self.retries {
             out.push(Property::<Self>::sometimes(REDECIDED, |_, s| {
                 let decided = decisions(s);
@@ -584,6 +595,12 @@ impl Model for SlotModel {
                 s.granted.iter().map(|v| v.proposer).collect::<BTreeSet<_>>().len() >= 2
             }));
         }
+        if self.proposers >= 3 && self.release && self.horizon > self.lease {
+            out.push(Property::<Self>::sometimes(THIRD_LIFE, |_, s| {
+                decisions(s).iter().map(|(_, v)| v.raw()).collect::<BTreeSet<_>>().len() >= 3
+                    && s.granted.iter().map(|v| v.proposer).collect::<BTreeSet<_>>().len() >= 3
+            }));
+        }
         out
     }
 }
@@ -607,6 +624,8 @@ pub const REDECIDED: &str = "a later ballot decides the same value again";
 pub const REUSED_AFTER_LAPSE: &str = "the slot is decided again after a lapsed lease";
 /// Reachability: the slot is decided again after a release, inside the released lease.
 pub const REUSED_AFTER_RELEASE: &str = "the slot is decided again after a release";
+/// Reachability: three proposers' values are each decided, and each proposer is issued a guard.
+pub const THIRD_LIFE: &str = "the slot is decided a third time, and a third node is granted the lock";
 /// Reachability: two nodes are each issued a guard.
 pub const SECOND_HOLDER: &str = "a second node is granted the lock";
 
