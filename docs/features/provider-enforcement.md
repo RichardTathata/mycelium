@@ -2,13 +2,14 @@
 
 ## What it is
 
-With provider enforcement on, every protected call a node receives — `mcp.invoke`, `skill.invoke`, `llm.invoke` and
-any kind in `protected_rpc_kinds` — runs the same action preflight a gateway runs, as the
+With provider enforcement on, every protected call a node receives — `mcp.invoke`, `skill.invoke`, `llm.invoke`,
+any kind in `protected_rpc_kinds`, and a hosted capability's `cap.invoke/{ns}/{name}` — runs the same action
+preflight a gateway runs, as the
 [enforcement point](../guide/00-concepts.md#enforcement-point) `provider`, before any handler sees it. It applies
 whichever door the call came through — a gateway, a member's direct call, or the SDK serve stream — at the five
 receivers the node itself serves protected work through: `rpc_rx`, the MCP tool loop, the bridged MCP loop, the SDK
 serve stream and the built-in `llm.invoke` provider that answers a prompt skill. **Not at every receiver there is:**
-a hosted capability's kind, `bulk_serve` and an application's raw receiver are not decided (stated below). A presented mandate
+`bulk_serve` and an application's raw receiver are not decided (stated below). A presented mandate
 is verified by the node's own execution authority, never taken from a gateway, and the decision is recorded in the
 node's evidence journal.
 
@@ -36,6 +37,11 @@ This feature is turned on in code, in a build with `gateway` and `tls`.
   mandate established here, registered so that a cancel stops it; this needs `compliance` as well.
 - `test_c7_the_bypass_matrix_no_door_runs_revoked_work`, in [`src/lib_tests.rs`](../../src/lib_tests.rs): after a
   revocation, no door runs the work, counted by the handlers themselves.
+- `a_members_direct_call_of_a_hosted_capability_is_decided_at_an_enforcing_provider`, in
+  [`src/agent/hosted_capability_door_tests.rs`](../../src/agent/hosted_capability_door_tests.rs), and
+  [`mycelium-wasm-host/tests/hosted_capability_enforcement.rs`](../../mycelium-wasm-host/tests/hosted_capability_enforcement.rs):
+  a hosted capability at an enforcing provider — a member's direct call decided, and `/mcp` through the bridge
+  decided once, as the client, counted by the component's own invocation log.
 - `a_revoked_mandate_runs_no_llm_backend`, in
   [`src/agent/llm_door_tests.rs`](../../src/agent/llm_door_tests.rs): the same question at the built-in
   `llm.invoke` provider, counted by the backend — in its own suite because the matrix is built without `llm`.
@@ -51,7 +57,8 @@ confirmed stop, checked against the class's bound. CI runs it.
 
 - **Rule:** [`provider.enforcement`](../reference/rule-catalogue.md#providerenforcement) — a permit, or a refusal:
   the action preflight's (a deny, authority not established, evidence not recorded), `no_evaluator`, `caller_context_refused`, `malformed_call` (a tool call that is
-  not JSON or names no tool, or an `llm.invoke` call that names no prompt skill), `resource_unnamed`, `resource_not_here`, `resource_not_served`, `at_capacity`, `call_mandate_not_established` (a
+  not JSON or names no tool, an `llm.invoke` call that names no prompt skill, or a kind under `cap.invoke/` that
+  names no capability), `resource_unnamed`, `resource_not_here`, `resource_not_served`, `at_capacity`, `call_mandate_not_established` (a
   cancellable rule permitted the call and its gateway's `call:` mandate is not established here, or its term is
   already revoked — refused under any rule: *authority not established*, with the stable cause in `data.cause`
   (`revoked`, `no_call_mandate`, `other_envelope`, …; the list is in §104), the sentence in `data.found`,
@@ -83,16 +90,34 @@ confirmed stop, checked against the class's bound. CI runs it.
   The provider's caller-context refusal at this door carries no `data` and is still `502` at the gateway.
 - **Not stopped, at that door:** work a model endpoint has already begun when the backend's future is dropped (it
   may finish generating), and anything a custom `LlmBackend` runs on a task of its own.
-- **Not built: three receivers no decision is made at** (#785's review, 2026-11-14), in the order they matter:
-  1. **a hosted capability's kind, `cap.invoke/{ns}/{name}`** — served through `rpc_rx`, where the check runs and is
-     inert because the kind is not protected: at an enforcing stem a member's direct `rpc_call` of it runs the
-     component undecided, while `/mcp` decides the same component. **Open today; decided on 2026-11-14 to be
-     protected at an enforcing provider, in its own PR**
-     ([ledger](../operations/what-is-proven.md#hosted-capability-not-decided-at-provider));
-  2. **`bulk_serve`** — its handler runs with no caller context and no check, even for a kind in
-     `protected_rpc_kinds`; members only, and a bypass only where an application serves a protected kind over bulk
+- **A hosted capability, `cap.invoke/{ns}/{name}`** (unreleased, [§108](../guide/deprecations.md#108-an-enforcing-provider-decides-a-hosted-capabilitys-kind-capinvokensname-unreleased-the-decision-of-2026-11-14);
+  [ledger](../operations/what-is-proven.md#hosted-capability-decided-at-provider)). A hosted WASM component is
+  served on this kind, and a member's direct `rpc_call` of it is decided before the component runs — on the
+  capability the **kind** names, never the envelope's claim:
+
+  | Namespace | Operation | Resource | Arguments |
+  |---|---|---|---|
+  | `tool` | `tools/call` | `tool:{name}@{provider}` | the payload as JSON |
+  | any other | `cap.invoke` | `cap:{ns}/{name}@{provider}` | the payload as JSON |
+
+  A `tool/{name}` component is also the MCP tool `{name}`, so the first row is what the MCP tool loop decides for
+  the same component: one rule, and one mandate's arguments digest, cover both doors. A payload that is not JSON is
+  carried as `{"payload_b64": …}`. The principal is `node:{sender}` for a member's own call. The wasm host's MCP
+  bridge hands an admitted tool call to its component inside the process, so `/mcp` → tool → component is decided
+  once at the provider, as the client; no call "from this node" is exempt, and a frame that names the provider as
+  its sender is decided as `node:{provider}`. A cohort budget counts these calls, with enforcement off too.
+- **Not established, for a hosted capability:** a JSON payload of exactly the shape `{"payload_b64": "<base64>"}`
+  and the non-JSON bytes it encodes derive the same arguments, so a mandate's arguments digest does not tell that
+  one pair apart; the payload carries no causal fields, so the exposure policy reads a direct call as a root; a
+  capability whose namespace or name holds `@` is refused `malformed_call` at an enforcing provider; and a
+  component's own `mesh.emit` of a `cap.invoke/…` kind its host listed is a member's call like any other —
+  decided at the provider that receives it as `node:{the emitting node}`.
+- **Not built: two receivers no decision is made at** (#785's review, 2026-11-14):
+  1. **`bulk_serve`** — its handler runs with no caller context and no check, even for a kind in
+     `protected_rpc_kinds` or a hosted capability's; members only, and a bypass only where an application serves
+     a protected kind over bulk (the wasm host serves none that way)
      ([ledger](../operations/what-is-proven.md#bulk-serve-runs-no-provider-check));
-  3. **a raw receiver** (`mesh().signal_rx` + `RpcRequest::from`) — it can verify the caller and has no public way to
+  2. **a raw receiver** (`mesh().signal_rx` + `RpcRequest::from`) — it can verify the caller and has no public way to
      run the check ([ledger](../operations/what-is-proven.md#raw-receiver-cannot-run-provider-check)).
 - **Not built, at the `llm.invoke` door:** a check waiting on a seat claim there is not under the bound the other
   four doors keep (`MAX_DEFERRED_CHECKS`, 64): each call has a task of its own and waits in it
@@ -103,7 +128,8 @@ confirmed stop, checked against the class's bound. CI runs it.
   `compliance,a2a` line, which builds no `llm`).
 - **Not built, for a cancellable rule:** no gateway mints a `call:` mandate yet, so such a rule refuses every call
   it permits; a member's own unframed call carries none; the bridged MCP loop and the SDK serve stream do not stop
-  a cancelled call; a revoked term under a rule that is not cancellable is best effort, since a relay that strips
+  a cancelled call; a hosted component runs to its own deadline once begun (a guest call is not interrupted); a
+  revoked term under a rule that is not cancellable is best effort, since a relay that strips
   `cm` makes the call run; a broader allowance listed first makes a cancellable rule inert ([§104](../guide/deprecations.md#104-a-cancellable-rule-requires-the-calls-call-mandate-at-the-provider-cm-in-the-caller-envelope-2410-identity-and-lifecycle-i4-pr-1b)).
 - **Not built:** on the deferred-check path (a check settling a seat claim), a `withdrawn` refusal (the serve loop
   ended with the check in flight) and the *authority not established* answer to a check whose task panicked can follow

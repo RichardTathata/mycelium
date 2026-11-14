@@ -26,6 +26,8 @@
 //! | `mcp.invoke` | `tools/call` | `tool:{name}@{self}`, from the payload | the call's `arguments` |
 //! | `skill.invoke` | `skill.invoke` | the envelope's claim, confirmed as `skill:{ns}/{name}@{self}` for a capability this node advertises | `{"text": payload}` |
 //! | `llm.invoke` | `llm.invoke` | `prompt:{ns}/{name}@{self}`, from the payload's `prompt` | `{"input": …, "context": …}`, from the payload |
+//! | `cap.invoke/tool/{name}` | `tools/call` | `tool:{name}@{self}`, from the kind | the payload as JSON; `{"payload_b64": …}` if it is not JSON |
+//! | `cap.invoke/{ns}/{name}`, any other namespace | `cap.invoke` | `cap:{ns}/{name}@{self}`, from the kind | the same |
 //! | any other protected kind | the kind | the envelope's claim, confirmed as `…@{self}` | `{"payload_b64": base64(payload)}` |
 //!
 //! A claim that names another node, or a skill this node does not serve, is refused: a mandate for
@@ -35,7 +37,22 @@
 //! like any other. The `llm.invoke` row is what `/gateway/llm/call`, `/gateway/llm/stream` and `mycelium-reason`'s
 //! router decide on at their own doors.
 //!
-//! # The doors that call it, and the three that do not
+//! **A hosted capability's kind** (`cap.invoke/{ns}/{name}`, the wasm host's serve kind) is protected work here
+//! since 2026-11-14 ([`protected_here`]), and the **kind** names what runs, so the claim is not consulted for it
+//! either. A `tool/{name}` component is also the MCP tool `{name}` (the host's bridge), so it is decided as that
+//! tool — the operation, the resource and the arguments the MCP tool loop decides — and one rule, and one mandate's
+//! arguments digest, cover both doors. Any other namespace is decided under the one operation `cap.invoke`. A
+//! payload that is not JSON is carried as `{"payload_b64": …}`; so a JSON payload of exactly that shape and the
+//! bytes it encodes derive the same arguments — the one pair of payloads a digest does not tell apart. The
+//! payload carries no causal fields ([`causal_meta`]): such a call is read as a root.
+//!
+//! **The bridge's own call is not a second door.** The host's MCP tool handler, which runs only after the MCP tool
+//! loop has decided the call as its client, hands the admitted arguments to the component's serve loop over a
+//! channel inside the process (`mycelium-wasm-host`'s `serve_loop`). It makes no RPC to this node, so nothing here
+//! exempts "a call from this node": a frame that names this node as its sender is a member's frame, decided as
+//! `node:{self}` (a signal's `sender` is not authenticated by the connection it arrives on).
+//!
+//! # The doors that call it, and the two that do not
 //!
 //! The node serves protected work through five receivers, and each calls [`check`]: `rpc_rx` (`rpc.rs`), the MCP
 //! tool loop and the bridged MCP loop (`mcp.rs`), the SDK serve stream (`http/mesh.rs`), and the built-in
@@ -43,11 +60,12 @@
 //!
 //! **That is not every receiver** (#785's review; each a *not built* row on `docs/operations/what-is-proven.md`):
 //!
-//! 1. a hosted capability's kind, `cap.invoke/{ns}/{name}`, reaches `rpc_rx` and so this function, which returns at
-//!    once: the kind is not protected ([`is_protected_kind`](super::is_protected_kind)). A member's direct call of
-//!    it at an enforcing provider is not decided. Decided on 2026-11-14 to be protected, in its own PR;
-//! 2. `bulk_serve` runs its handler with no caller context and never calls this, whatever the ticket's inner kind;
-//! 3. an application's raw receiver (`mesh().signal_rx` + `RpcRequest::from`) has no public way to call it.
+//! 1. `bulk_serve` runs its handler with no caller context and never calls this, whatever the ticket's inner kind —
+//!    a hosted capability's included, where an application serves one over bulk (the wasm host does not);
+//! 2. an application's raw receiver (`mesh().signal_rx` + `RpcRequest::from`) has no public way to call it.
+//!
+//! The third the review found — a hosted capability's kind reaching `rpc_rx`, where this function returned at once
+//! because the kind was not protected — is closed (2026-11-14): see the derivation above.
 //!
 //! # Cohort budgets (closure plan C4)
 //!
@@ -262,7 +280,7 @@ pub(crate) async fn check(ctx: &Arc<TaskCtx>, req: &RpcRequest, already_verified
         return Checked::Done(Ok(Admission::default()));
     }
     let kind: &str = req.kind();
-    if !super::is_protected_kind(&ctx.config, kind) {
+    if !protected_here(&ctx.config, kind) {
         return Checked::Done(Ok(Admission::default()));
     }
     if enforcing && ctx.action_evaluator.get().is_none() {
@@ -763,8 +781,20 @@ pub(crate) fn causal_meta(kind: &str, payload: &[u8]) -> serde_json::Map<String,
     meta
 }
 
+/// **Is `kind` protected work at this provider?** A protected kind ([`is_protected_kind`](super::is_protected_kind):
+/// the three built in and the operator's `protected_rpc_kinds`), or any kind in the hosted-capability family
+/// (`cap.invoke/…`, [`HOSTED_CAPABILITY_KIND_PREFIX`](super::HOSTED_CAPABILITY_KIND_PREFIX)) — the whole prefix, so a
+/// kind under it that names no capability is refused (`malformed_call`) rather than run undecided.
+///
+/// The provider's own predicate, not a wider `is_protected_kind`: the gateway's routes, the `ot` requirement and a
+/// component's `mesh.emit` each ask that one and each already treats the family in its own way (the routes refuse
+/// it with its own message, `ot` counts it an action, `mesh.emit` admits one the host listed).
+pub(crate) fn protected_here(cfg: &crate::config::GossipConfig, kind: &str) -> bool {
+    super::is_protected_kind(cfg, kind) || kind.starts_with(super::HOSTED_CAPABILITY_KIND_PREFIX)
+}
+
 /// The operation, resource and arguments of a protected call, derived as the gateway derives them.
-fn derive(
+pub(crate) fn derive(
     ctx: &TaskCtx,
     kind: &str,
     payload: &[u8],
@@ -797,6 +827,29 @@ fn derive(
         };
         let arguments = json!({ "input": call["input"], "context": call["context"] });
         return Ok((kind.to_string(), format!("prompt:{ns}/{name}@{me}"), arguments));
+    }
+
+    if kind.starts_with(super::HOSTED_CAPABILITY_KIND_PREFIX) {
+        // The kind names what runs — `cap.invoke/{ns}/{name}` is the component's own serve kind — so the resource is
+        // read from it and the envelope's claim is not consulted, as for a tool and a prompt skill: a claim that
+        // names a capability the caller is permitted cannot admit a call to another.
+        let Some((ns, name)) = super::hosted_capability_of(kind) else {
+            return Err(ProviderRefusal::local("malformed_call", format!("`{kind}` names no hosted capability")));
+        };
+        // The arguments are the payload as JSON where it is JSON: a `tool/{name}` component is also the MCP tool
+        // `{name}` (the wasm host's bridge), whose door decides on the call's `arguments` and hands the component
+        // exactly those as its payload — so a rule's value conditions and a mandate's arguments digest (RFC 8785)
+        // mean the same for a direct call as for the tool call. A payload that is not JSON is carried as the
+        // generic arm carries it.
+        let arguments = serde_json::from_slice::<Value>(payload)
+            .unwrap_or_else(|_| json!({ "payload_b64": base64::engine::general_purpose::STANDARD.encode(payload) }));
+        // The `tool` namespace is decided as the tool it is — the operation and the resource the MCP tool loop
+        // decides — so one rule covers both doors; any other namespace under the family's own operation.
+        return Ok(if ns == "tool" {
+            ("tools/call".into(), format!("tool:{name}@{me}"), arguments)
+        } else {
+            (super::HOSTED_CAPABILITY_OPERATION.into(), format!("cap:{ns}/{name}@{me}"), arguments)
+        });
     }
 
     let Some(resource) = claim else {

@@ -396,6 +396,32 @@ fn a_bare_prompt_resource_is_qualified_to_this_node() {
     assert_ne!(decide(format!("prompt:review/other@{id}")), crate::Verdict::Permit, "nor another prompt skill");
 }
 
+/// **A hosted-capability rule admits at this node** (the decision of 2026-11-14): a bare `cap:<ns>/<name>` is
+/// qualified to this node, as a tool, a skill and a prompt skill are — the provider's `cap.invoke/…` door presents
+/// `cap:<ns>/<name>@<node>` under the operation `cap.invoke`, which `[authority]` maps as a door of its own. A
+/// capability on another node is not admitted, nor another capability here. Seen failing first: with `cap:` out
+/// of the qualification, the capability at this node is not permitted.
+#[test]
+fn a_bare_cap_resource_is_qualified_to_this_node() {
+    let dir = scratch("cap");
+    let unit = "principal = \"router\"\n\n[[rule]]\nactor     = \"*\"\noperation = \"cap.invoke\"\nresource  = \"cap:route/optimize\"\n";
+    let (id, cfg) = config(&dir, alloc_port(), None);
+    let auth = authority(&dir, units(&dir, &[("router", unit)]), "router");
+    let planned = super::declared_authority::plan(&cfg, &id, &auth).expect("planned");
+    assert!(planned.doors.iter().any(|(p, o)| p == "provider" && o == crate::HOSTED_CAPABILITY_OPERATION), "the family's operation is a mapped door: {:?}", planned.doors);
+    let decide = |resource: String| {
+        let env = crate::ActionEnvelope::builder(format!("node:{id}"), id.clone(), crate::HOSTED_CAPABILITY_OPERATION, resource)
+            .identities("op-1", "op-1/1")
+            .validity(1_000, u64::MAX)
+            .mapping(planned.evaluator.mapping(crate::HOSTED_CAPABILITY_OPERATION, "*"))
+            .build();
+        planned.evaluator.evaluate(&env).verdict
+    };
+    assert_eq!(decide(format!("cap:route/optimize@{id}")), crate::Verdict::Permit, "the capability at this node");
+    assert_ne!(decide("cap:route/optimize@127.0.0.1:1".to_string()), crate::Verdict::Permit, "not at another node");
+    assert_ne!(decide(format!("cap:route/other@{id}")), crate::Verdict::Permit, "nor another capability");
+}
+
 /// **The binary's configuration path, over the scaffold** (#733's review, the scaffold): the scaffold's `node.toml`
 /// with a gateway, its tokens, `[persistence]` and `[authority]` appended, loaded by `GossipConfig::load_from_file` and
 /// `validate()` as `mycelium -c` loads it, then started — the call no rule permits is refused at the gateway door and
