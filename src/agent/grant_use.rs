@@ -462,8 +462,9 @@ fn holds_own_marker(ctx: &TaskCtx, marker_key: &str, use_id: &str) -> bool {
 ///    `Refused`, which cannot happen over a live marker — an overwrite of a live key is outside the cap) leaves the
 ///    use standing, counted. A write that is not on disk leaves it standing too;
 /// 3. only then is the release appended to the journal. If the journal does not take it the use stands at this
-///    door — the key holds the release, which every other door reads as used and this door reads as a release of a
-///    use its journal does not show released (`release_replayed`): spent, the safe side.
+///    door — the key holds the release, which every other door reads as used; this door reads used from its
+///    journal, and counts nothing until the journal has forgotten the use (then `release_replayed`): spent, the
+///    safe side.
 ///
 /// `true` only when all three held: the grant then reads unused at this door.
 pub(crate) async fn release_use(ctx: &Arc<TaskCtx>, marker_key: &str, use_id: &str) -> bool {
