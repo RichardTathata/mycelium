@@ -123,7 +123,8 @@ way. `a_newer_certificate_supersedes_the_older_key_and_an_overwrite_cannot_lower
 - **At `/mcp`, a grant the provider refused before running is given back.** The gateway's fold of client certificates
   can lead the provider's. When the provider node answers `client_key_*`, `client_signature_*`, `stale` or
   `unknown_signer`, nothing ran: its tool serve loop refused the call before the handler, answering `-32022` with the
-  reason in `data.reason`. The gateway then tombstones its `…/used/{door}` marker and releases its claim, so
+  reason in `data.reason`. The gateway then releases its use — in its own journal, and by a signed release over its
+  `…/used/{door}` marker (a tombstone before critique plan row CR2; `deprecations.md` §106) — and its claim, so
   `client_key_unknown`, and a provider's `unknown_signer` for a gateway key it has not learned yet, are retriable under
   the same grant (`a_grant_the_provider_refused_before_running_is_given_back`,
   `a_provider_that_does_not_yet_trust_the_gateway_gives_the_grant_back`).

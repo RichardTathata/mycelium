@@ -255,6 +255,14 @@ pub(super) async fn stats_handler(State(ctx): State<Arc<HttpCtx>>) -> impl IntoR
         body["legacy_digest_matches"] = json!(a.map_or(0, |a| a.legacy_digest_matches()));
         body["provider_legacy_digest_matches"] = json!(a.map_or(0, |a| a.legacy_digest_matches_at_provider()));
         body["agent_legacy_digest_matches"] = json!(a.map_or(0, |a| a.legacy_digest_matches_at_agent()));
+        // Critique plan row CR2: what this node's doors found at a grant's use-marker key that was not a verified
+        // marker or *never written* — each read as used — and its own marker or release writes that lost to a newer
+        // value (`deprecations.md` §106). In memory, so zero again after a restart.
+        {
+            use crate::agent::grant_use::Odd;
+            let g = &ctx.agent_ctx.grant_uses;
+            body["grant_use"] = json!(Odd::ALL.iter().map(|o| (o.label(), g.counted(*o))).collect::<std::collections::BTreeMap<_, _>>());
+        }
         // Identity-and-lifecycle I4: copies of a `call:` checkpoint read from the KV and treated as absent — unparsed,
         // misplaced, or not signed by the gateway their key names.
         body["call_checkpoints_refused"] = json!(a.map_or(0, |a| a.call_checkpoints_refused()));

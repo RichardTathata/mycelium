@@ -296,7 +296,8 @@ The enforcement remainder of X3. What to know: a grant's holder is the **agent's
 a grant reaches is the provider's, on the node's own call (`rpc_call_with_mandate`); a bearer presenting a node's
 grant at `/mcp` is refused as not the holder's before anything else. Single use is claimed in `ae_preflight` after the
 evaluator permits — `ExecutionAuthority::claim_grant_use` (lock-order row 70) plus the marker
-`grant/{agent}/{request}/used/{door}` read first (the WAL half) — so the gateway and the provider each spend their
+`grant/{agent}/{request}/used/{door}` read first — and, before it, the door's own journal of its uses (critique plan
+CR2: `grant_use::reads_used`, lock-order row 79; at the key anything but *never written* reads used) — so the gateway and the provider each spend their
 own use of one call. A grant's checkpoints (`…/checkpoint`, seq 1 at issue, seq 2 at revocation) travel in the KV:
 `feed_grant_checkpoint` offers one before every assessment, and a watcher on `grant/` (spawned in
 `with_execution_authority`) offers every one that lands, which is what carries a revocation to another node's sweep.
