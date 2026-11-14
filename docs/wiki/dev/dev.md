@@ -16,7 +16,8 @@ pages here cite `src/` / `mycelium-core/src/` rather than paraphrasing it.
 - **[testing/](testing/testing.md)** — test conventions, the feature matrix, the CI-gated
   Docker cluster suites (+ their self-diagnosing harness), scale-test + Docker-bridge lore,
   the SWIM divergence saga — and **[replay](testing/replay.md)**: the nondeterminism inventory,
-  the seams, scenarios A/B/C and the checked-in corpus.
+  the seams, scenarios A/B/C and the checked-in corpus — and **[the acceptor's model](testing/acceptor-model.md)**:
+  the consensus design checked at a bound by Stateright, against the engine's own decision functions.
 - **[companions/](companions/companions.md)** — the companion crates built on the public API
   (tuple-space, blackboard, wiki, wasm-host, agentfacts, and the axis' three: `mycelium-effects`,
   `mycelium-sim`, `mycelium-commitment`), plus what a new one owes before it counts as landed.

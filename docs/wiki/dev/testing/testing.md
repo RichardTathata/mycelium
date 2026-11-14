@@ -1,7 +1,8 @@
 # dev/testing — conventions
 
 ↑ [dev/](../dev.md) · child pages: [scale-tests.md](scale-tests.md) ·
-[cluster-suites.md](cluster-suites.md) · [verification-policy.md](verification-policy.md)
+[cluster-suites.md](cluster-suites.md) · [verification-policy.md](verification-policy.md) ·
+[replay.md](replay.md) · [acceptor-model.md](acceptor-model.md)
 
 **Read first: [verification-policy.md](verification-policy.md)** — a change is verified against the surface
 it touches, not its own description: enumerate every entry point before fixing, close plan rows on quoted
@@ -688,6 +689,14 @@ ships a `#[ignore]`d **broken twin** (a `load`-then-`store` allocator, an all-`R
 publish) kept as **executable proof loom catches the race**: run one with `-- --ignored` and it
 FAILS with the offending schedule. `#[ignore]` keeps the default run green while the bug-catch
 stays one command away.
+
+## Stateright: the acceptor's design at a bound
+
+Loom checks thread interleavings of an atomic idiom; it says nothing about a protocol. The consensus
+acceptor — slot reuse, the lease's wall-clock end, the electorate migration — is checked by a second model,
+`mycelium-model`, which calls the engine's own decision functions and explores every interleaving of a small,
+finite configuration. It has its own page: **[acceptor-model.md](acceptor-model.md)** — what is shared with the
+code, what is written again, the bound, and what to do when a pinned state count moves.
 
 ## The CI flake tier (structural, Run-38 floor fix)
 

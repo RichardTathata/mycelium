@@ -605,8 +605,8 @@ ids = ["concept:rule-catalogue", "concept:decision-trace"]
 # ------------------------------------------------------------------------------------------- exclusions
 
 [[exclusion]]
-reason = "A test or fuzz build switch, never on in a shipped build: it exposes internals to a harness (fuzz-internals, test-util, test-support), filters frames in tests (test-frame-filter), or turns on this crate's own test seams (mycelium-wasm-host's sim)."
-ids = ["cargo:mycelium/fuzz-internals", "cargo:mycelium/test-util", "cargo:mycelium/test-frame-filter",
+reason = "A test, fuzz or model build switch, never on in a shipped build: it exposes internals to a harness (fuzz-internals, test-util, test-support) or to the acceptor's model (model-internals), filters frames in tests (test-frame-filter), or turns on this crate's own test seams (mycelium-wasm-host's sim)."
+ids = ["cargo:mycelium/fuzz-internals", "cargo:mycelium/model-internals", "cargo:mycelium/test-util", "cargo:mycelium/test-frame-filter",
        "cargo:mycelium-core/test-frame-filter", "cargo:mycelium-core/test-support", "cargo:mycelium-wasm-host/sim"]
 
 [[exclusion]]
@@ -645,6 +645,6 @@ reason = "The substrate's own crates: every feature they carry is mapped by its 
 ids = ["crate:mycelium", "crate:mycelium-core"]
 
 [[exclusion]]
-reason = "A test or example crate, not a library a reader adopts: the gateway-free and tls-free test builds, the loom model-check spike, and the co-op examples (routed by the example index)."
-ids = ["crate:mycelium-gateway-free-tests", "crate:mycelium-tls-free-tests", "crate:loom-spike",
+reason = "A test, model or example crate, not a library a reader adopts: the gateway-free and tls-free test builds, the loom model-check spike, the Stateright model of the acceptor, and the co-op examples (routed by the example index)."
+ids = ["crate:mycelium-gateway-free-tests", "crate:mycelium-tls-free-tests", "crate:loom-spike", "crate:mycelium-model",
        "crate:mycelium-coop-examples"]
