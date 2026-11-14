@@ -548,6 +548,19 @@ impl GossipAgent {
                     },
                 }
 
+                // Critique plan row CR2: this node's own grant uses, read back before any door admits a call —
+                // a use made before the restart reads used whatever the gossip KV now holds at its marker.
+                #[cfg(all(feature = "gateway", feature = "tls"))]
+                {
+                    let path = pcfg.base_path.join(self.node_id.to_string()).join("grants").join("uses.journal");
+                    if let Err(e) = self.task_ctx.grant_uses.open_journal(&path, self.task_ctx.hlc.decision_now_ms()) {
+                        return Err(GossipError::InvalidField {
+                            field: "persistence",
+                            reason: format!("the grant-use journal {} cannot be opened: {e}", path.display()),
+                        });
+                    }
+                }
+
                 // Inject the Layer-II opacity check the snapshot loop uses to defer
                 // (core takes only the closure; it stays unaware of `sys/load/`).
                 let defer_snapshot: Option<crate::persistence::SnapshotDeferHook> = {
@@ -1478,6 +1491,9 @@ impl GossipAgent {
         self.task_ctx.identity_ledger.close_journal();
         #[cfg(feature = "tls")]
         self.task_ctx.client_certs.close_journal();
+        // Critique plan row CR2: and the grant-use journal.
+        #[cfg(all(feature = "gateway", feature = "tls"))]
+        self.task_ctx.grant_uses.close_journal();
     }
 
     /// Signals all background tasks to stop and waits for them to exit.

@@ -1194,7 +1194,7 @@ fn signed_fields(sep: &[u8], principal: &str, via: &str, scopes: &[String], issu
 /// and CA anchors) plus this node's own current key when `node` is self, minus the keys `node` has
 /// revoked (in every `tls` build since post-360 plan row Q).
 #[cfg(feature = "tls")]
-fn verifying_keys_for(ctx: &TaskCtx, node: &NodeId) -> Vec<[u8; 32]> {
+pub(crate) fn verifying_keys_for(ctx: &TaskCtx, node: &NodeId) -> Vec<[u8; 32]> {
     #[cfg(feature = "compliance")]
     {
         super::helpers::known_verifying_keys(ctx, node)
