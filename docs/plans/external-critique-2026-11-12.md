@@ -361,7 +361,8 @@ change, no change to an existing on-disk format.
   `UseRecord::verifies_at`. Test: `a_second_gateway_reads_anything_but_never_written_as_used` (*TOMBSTONE*,
   *DELIVERED FIRST*, *GARBAGE*, *COUNTED*).
 - *"Only a signed release bound to that use reads unused at the door that made it; elsewhere a release reads
-  used"* — `release_use` (journal, then the signed release over the marker) from `release_unspent_grant_claim`,
+  used"* — `release_use` (the signed release over the door's own marker, then the journal — last, so a give-back that does
+  not complete leaves the use standing; #786's confirm round, N1) from `release_unspent_grant_claim`,
   which both releasers call; `reads_used`'s release arm. Tests: the same two (*REPLAY*, *FORGED*, *OWN PAIR* at the
   second gateway and at the first, before and after a restart), and for the two releasers
   `a_grant_the_provider_refused_before_running_is_given_back`,

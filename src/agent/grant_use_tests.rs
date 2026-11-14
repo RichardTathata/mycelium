@@ -246,9 +246,12 @@ async fn the_door_that_made_a_use_reads_its_journal_and_only_its_own_release_giv
 /// - *Not this door's marker*: the door claims a grant, another value replaces its marker at the key (as another
 ///   door's marker does when two admit at once), and the door then gives its use back. The release is not written
 ///   over that value: nothing is given back, the value stands and reads used, and it is counted (`superseded`).
+///   **And the journal still shows the use** (#786's confirm round, N1): once nothing is left at the key the door
+///   still reads used.
 ///
 /// Seen failing first, one build per plant: a `Refused` receipt taken as written (the call admitted, nothing at the
-/// key); the release written over whatever the key holds (the other value replaced by this door's release).
+/// key); the release written over whatever the key holds (the other value replaced by this door's release); the
+/// release journaled before the key is checked (the use read unused once the key was empty).
 #[tokio::test]
 async fn a_marker_the_store_refuses_admits_nothing_and_a_release_is_written_only_over_this_doors_marker() {
     let mut moved: Vec<String> = Vec::new();
@@ -300,6 +303,12 @@ async fn a_marker_the_store_refuses_admits_nothing_and_a_release_is_written_only
     let stands = held(&ctx, &replaced_key).flatten();
     let superseded = ctx.grant_uses.counted(Odd::Superseded);
     let retry = at(&replaced).await;
+    // The give-back was refused, so the journal still shows the use — and with nothing left at the key (the other
+    // value tombstoned and collected, as at the horizon) this door still reads used.
+    let journal_after_refusal = ctx.grant_uses.own(&replaced_key);
+    ctx.kv_state.store.pin().remove(&Arc::<str>::from(replaced_key.as_str()));
+    let key_gone = held(&ctx, &replaced_key).is_none();
+    let after_horizon = at(&replaced).await;
     a.shutdown().await;
     let _ = std::fs::remove_dir_all(&dir);
 
@@ -317,6 +326,9 @@ async fn a_marker_the_store_refuses_admits_nothing_and_a_release_is_written_only
     check!(stands.as_ref() == Some(&other), "OWN MARKER: the release was written over another value at the key: {stands:?}");
     check!(superseded == 1, "the release not written is not counted once: {superseded}");
     check!(refused_as_used(&retry), "the other value reads used: {}", describe(&retry));
+    check!(journal_after_refusal.as_ref().is_some_and(|u| !u.released), "NOT GIVEN BACK: the journal shows the use released although the give-back was refused: {journal_after_refusal:?}");
+    check!(key_gone, "the key reads never written");
+    check!(refused_as_used(&after_horizon), "NOT GIVEN BACK, at the horizon: with nothing at the key the door admitted a use it did not give back: {}", describe(&after_horizon));
     assert!(moved.is_empty(), "{} reading(s) moved:\n{}", moved.len(), moved.join("\n"));
 }
 

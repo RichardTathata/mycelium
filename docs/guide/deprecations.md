@@ -3746,9 +3746,10 @@ Now:
   to the WAL and gossiped before the apply was decided, so a restart or a peer may hold it.
 - **A release is a signed record, and only the door that made it honours it.** A gateway that refuses a call
   before dispatch, or is answered a caller-context refusal by the provider (§91, §97), and a provider that refuses
-  `call_mandate_not_established` before any handler (§104), give their use back: the release goes into the door's
-  journal, and a signed `kind: "release"` record naming the use replaces the marker (a tombstone before this
-  release). **At that node's door the grant then admits one more call. At every other door of the same class the
+  `call_mandate_not_established` before any handler (§104), give their use back: a signed `kind: "release"` record naming the use replaces the door's own marker (a
+  tombstone before this release), and **only then** is the release appended to the door's journal. A give-back
+  that does not complete — the key no longer holds this door's marker, or the release's write was not the key's
+  value — leaves the journal showing the use, so the door reads used even once nothing is left at the key. **At that node's door the grant then admits one more call. At every other door of the same class the
   release reads *used*.**
 
 **The behaviour change to plan for.** Before this release a released grant was admitted by *any* gateway (the
@@ -3808,7 +3809,7 @@ full.
 the door that made it, and that door decides from its journal. The signature is verified so that a forged release
 is counted apart (`release_forged`); with the verification removed only the counters move. A release is written
 only over the releasing door's own marker for that use: if the key holds anything else by then, nothing is
-written over it and the use is not given back.
+written over it, the use is not given back, and the journal still shows it.
 
 **Not built, stated:**
 

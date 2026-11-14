@@ -14,7 +14,7 @@
 //!    node meet.
 //!
 //! **A release is honoured only by the door that made it** (decided 2026-11-13). A door that claimed a use and then
-//! knows nothing ran appends the release to its journal and writes a signed release over its marker. At that door
+//! knows nothing ran writes a signed release over its own marker and then appends the release to its journal. At that door
 //! the key then reads unused when it holds exactly that release — this node's, signed, naming the use the journal
 //! shows released — or was never written. At every other door a release is a value like any other and reads used:
 //! a reader that did not record the use cannot tell a genuine release of the newest use from a replayed older one,
@@ -450,36 +450,42 @@ fn holds_own_marker(ctx: &TaskCtx, marker_key: &str, use_id: &str) -> bool {
         .is_some_and(|rec| rec.kind == UseKind::Use && rec.use_id == use_id && rec.node == ctx.node_id.to_string() && rec.verifies_at(ctx, marker_key))
 }
 
-/// **Release the use `use_id` this door made at `marker_key`**, for a call this node knows did not run: the journal
-/// first, then the signed release — written **only over this door's own marker for that use**. `true` when the
-/// release is the key's value, so the grant reads unused at this door. `false` leaves it spent:
+/// **Release the use `use_id` this door made at `marker_key`**, for a call this node knows did not run. **The
+/// journal is written last**: a release that is not given back leaves the journal showing the use, so the door
+/// reads used even once nothing is left at the key. In order:
 ///
-/// - the journal did not take the release;
-/// - the key no longer holds this door's marker for the use — another door's marker (two doors admitted at once),
-///   a tombstone, any other value. Nothing is written over it, it reads used, and it is counted (`superseded`). A
-///   value that lands between this check and the write still loses to the release under LWW: stated, D12's window;
-/// - the release's own write was not *current*: `Superseded`, or `Refused` (which cannot happen over a live marker —
-///   an overwrite of a live key is outside the cap — and is read the same way if it does).
+/// 1. the key must hold **this door's own marker for that use**. If it holds anything else — another door's marker
+///    (two doors admitted at once), a tombstone, any other value — nothing is written, the use stands and it is
+///    counted (`superseded`). A value that lands between this check and the write still loses to the release under
+///    LWW: stated, D12's window;
+/// 2. the signed release is written over the marker, and its receipt read: anything but *current* (`Superseded`;
+///    `Refused`, which cannot happen over a live marker — an overwrite of a live key is outside the cap) leaves the
+///    use standing, counted. A write that is not on disk leaves it standing too;
+/// 3. only then is the release appended to the journal. If the journal does not take it the use stands at this
+///    door — the key holds the release, which every other door reads as used and this door reads as a release of a
+///    use its journal does not show released (`release_replayed`): spent, the safe side.
+///
+/// `true` only when all three held: the grant then reads unused at this door.
 pub(crate) async fn release_use(ctx: &Arc<TaskCtx>, marker_key: &str, use_id: &str) -> bool {
-    let now_ms = ctx.hlc.decision_now_ms();
-    if let Err(e) = ctx.grant_uses.record_release(marker_key, use_id, now_ms).await {
-        tracing::warn!(key = marker_key, error = %e, "grant use: the release was not journaled; the grant stays spent at this door");
-        return false;
-    }
     if !holds_own_marker(ctx, marker_key, use_id) {
         ctx.grant_uses.count(Odd::Superseded);
         return false;
     }
     let Some(rec) = UseRecord::signed(ctx, UseKind::Release, marker_key, use_id) else { return false };
     match super::state_machine::write_owned_kv_reporting(ctx, marker_key, rec.to_bytes()).await {
-        Ok(application) if application.is_current() => true,
+        Ok(application) if application.is_current() => {}
         Ok(_) => {
             ctx.grant_uses.count(Odd::Superseded);
-            false
+            return false;
         }
         Err(e) => {
             tracing::warn!(key = marker_key, error = %e, "grant use: the signed release was not written; the marker stands and the grant stays spent at this door");
-            false
+            return false;
         }
     }
+    if let Err(e) = ctx.grant_uses.record_release(marker_key, use_id, ctx.hlc.decision_now_ms()).await {
+        tracing::warn!(key = marker_key, error = %e, "grant use: the release was written and not journaled; the grant stays spent at this door");
+        return false;
+    }
+    true
 }
