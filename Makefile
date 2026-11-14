@@ -171,6 +171,7 @@ check:
 	cargo clippy --lib --tests --features test-frame-filter -- -D warnings
 	cargo clippy --lib --tests --features tls,metrics,a2a,llm -- -D warnings
 	cargo clippy --lib --tests --features compliance -- -D warnings
+	cargo clippy --lib --tests --features compliance,llm -- -D warnings  # the pair CI's llm_door_tests step builds (#785's review)
 	cargo clippy --lib --bins --tests --no-default-features -- -D warnings  # CI's line; NOT gateway-free (dev-deps re-enable gateway/tls) -- it catches test-only items and the skillrunner bin (a test-only re-export slipped past --lib, #642)
 	cargo clippy --lib --no-default-features -- -D warnings
 	cargo clippy --lib --no-default-features --features metrics -- -D warnings  # metrics without gateway: a half-live `emergent` (row J)
@@ -226,6 +227,7 @@ check-full: check
 	cargo clippy --benches --features gateway,test-util -- -D warnings  # both bench targets (gateway_overhead needs these features)
 	cargo test  --lib --features tls,metrics,a2a,llm,test-frame-filter   # + the row-A frame-filter tests
 	cargo test  --lib --features compliance,a2a   # the audit chain + both gateway enforcement points
+	CI_RETEST_STRICT=1 ./scripts/ci-retest.sh --lib --features compliance,llm llm_door_tests   # as CI runs it, strict: the built-in llm.invoke provider's check, the three tests that need a node's key verified (no other line builds compliance with llm)
 	cargo test  --features tls,a2a --test '*'           # every root integration test, by discovery (rule 3)
 	cargo test  --features tls,a2a --bins                # the skillrunner binary's unit tests
 	cargo test  --features tls,a2a --doc                 # the crate's doctests (cargo will not mix --doc with other targets)

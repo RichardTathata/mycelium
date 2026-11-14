@@ -25,10 +25,29 @@
 //! |---|---|---|---|
 //! | `mcp.invoke` | `tools/call` | `tool:{name}@{self}`, from the payload | the call's `arguments` |
 //! | `skill.invoke` | `skill.invoke` | the envelope's claim, confirmed as `skill:{ns}/{name}@{self}` for a capability this node advertises | `{"text": payload}` |
+//! | `llm.invoke` | `llm.invoke` | `prompt:{ns}/{name}@{self}`, from the payload's `prompt` | `{"input": …, "context": …}`, from the payload |
 //! | any other protected kind | the kind | the envelope's claim, confirmed as `…@{self}` | `{"payload_b64": base64(payload)}` |
 //!
 //! A claim that names another node, or a skill this node does not serve, is refused: a mandate for
-//! one resource does not admit a call routed to another.
+//! one resource does not admit a call routed to another. For `mcp.invoke` and `llm.invoke` the payload names what
+//! runs, so the resource is read from it and the envelope's claim is not consulted: a call is decided on the tool or
+//! the prompt skill it would run, whatever it claims, and a member's own call — which carries no claim — is decided
+//! like any other. The `llm.invoke` row is what `/gateway/llm/call`, `/gateway/llm/stream` and `mycelium-reason`'s
+//! router decide on at their own doors.
+//!
+//! # The doors that call it, and the three that do not
+//!
+//! The node serves protected work through five receivers, and each calls [`check`]: `rpc_rx` (`rpc.rs`), the MCP
+//! tool loop and the bridged MCP loop (`mcp.rs`), the SDK serve stream (`http/mesh.rs`), and the built-in
+//! `llm.invoke` provider (`llm.rs` — until #781's review found it, F1, it verified the caller and ran).
+//!
+//! **That is not every receiver** (#785's review; each a *not built* row on `docs/operations/what-is-proven.md`):
+//!
+//! 1. a hosted capability's kind, `cap.invoke/{ns}/{name}`, reaches `rpc_rx` and so this function, which returns at
+//!    once: the kind is not protected ([`is_protected_kind`](super::is_protected_kind)). A member's direct call of
+//!    it at an enforcing provider is not decided. Decided on 2026-11-14 to be protected, in its own PR;
+//! 2. `bulk_serve` runs its handler with no caller context and never calls this, whatever the ticket's inner kind;
+//! 3. an application's raw receiver (`mesh().signal_rx` + `RpcRequest::from`) has no public way to call it.
 //!
 //! # Cohort budgets (closure plan C4)
 //!
@@ -232,7 +251,8 @@ pub(crate) enum Checked {
 /// it must, the decision is made, the history gate released, and the claim and everything after it returned as a
 /// [`Checked::Waiting`] for the serve loop to settle beside itself ([`DeferredChecks`]); otherwise the whole check
 /// runs here. Nothing is decided twice and no second envelope is built. Every serve loop on this node — `rpc_rx`,
-/// the MCP tool loop, the bridged MCP loop and the `rpc/serve` stream — settles a `Waiting` check that way.
+/// the MCP tool loop, the bridged MCP loop and the `rpc/serve` stream — settles a `Waiting` check that way; the
+/// built-in `llm.invoke` provider runs each call on a task of its own and awaits it there.
 /// `already_verified`: the receive boundary ran `gateway_caller::verify_received` on this request first, so its
 /// counting is done; `false` where this check is the request's first verification (the native MCP loop).
 pub(crate) async fn check(ctx: &Arc<TaskCtx>, req: &RpcRequest, already_verified: bool) -> Checked {
@@ -759,6 +779,24 @@ fn derive(
             .ok_or_else(|| ProviderRefusal::local("malformed_call", "the tool call names no tool".into()))?;
         let arguments = call["params"].get("arguments").cloned().unwrap_or_else(|| json!({}));
         return Ok(("tools/call".into(), format!("tool:{name}@{me}"), arguments));
+    }
+
+    if kind == crate::signal::signal_kind::LLM_INVOKE {
+        // The payload names the prompt skill that would run (`{"prompt": "{ns}/{name}", "input", "context"}`), so the
+        // resource is read from it, as a tool's is — never from the claim, which a caller could point at a prompt it
+        // is permitted while the payload names another. Operation, resource and arguments are the ones the gateway's
+        // LLM doors and `mycelium-reason`'s router decide on, so a mandate's possession proof means the same here.
+        let call: Value = serde_json::from_slice(payload)
+            .map_err(|_| ProviderRefusal::local("malformed_call", "the llm.invoke call is not JSON".into()))?;
+        let named = call["prompt"]
+            .as_str()
+            .and_then(|p| p.split_once('/'))
+            .filter(|(ns, name)| super::helpers::prompt_kv_key(ns, name).is_some());
+        let Some((ns, name)) = named else {
+            return Err(ProviderRefusal::local("malformed_call", "the llm.invoke call names no prompt skill".into()));
+        };
+        let arguments = json!({ "input": call["input"], "context": call["context"] });
+        return Ok((kind.to_string(), format!("prompt:{ns}/{name}@{me}"), arguments));
     }
 
     let Some(resource) = claim else {

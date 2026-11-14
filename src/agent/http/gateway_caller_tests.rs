@@ -596,6 +596,27 @@ async fn named_tokens_alone_still_close_the_gateway() {
     g.shutdown().await;
 }
 
+/// **What the LLM doors answer a provider's reply with, by its `data.reason`** (#785's review, F4 and F6): `429` for
+/// a full cohort, `409` for a call the provider admitted and then stopped (a cancel is not a refusal of authority),
+/// `403` for any other reason the provider's check names — and nothing for a reply with no `data.reason`, which is
+/// a backend or template failure, or the provider's caller-context refusal, and stays `502`. Seen failing first:
+/// with the `at_capacity` and `cancelled` arms taken out, both read `403`.
+#[cfg(feature = "llm")]
+#[test]
+fn a_providers_reply_is_answered_by_its_reason() {
+    use axum::http::StatusCode;
+    let status = |reply: serde_json::Value| super::llm_bridge::provider_refusal_status(&reply);
+    let refused = |reason: &str| serde_json::json!({ "error": reason, "detail": "…", "code": -32000, "data": { "reason": reason } });
+    assert_eq!(status(refused("at_capacity")), Some(StatusCode::TOO_MANY_REQUESTS));
+    assert_eq!(status(refused("cancelled")), Some(StatusCode::CONFLICT));
+    for reason in ["action_denied", "authority_not_established", "no_evaluator", "malformed_call"] {
+        assert_eq!(status(refused(reason)), Some(StatusCode::FORBIDDEN), "{reason}");
+    }
+    assert_eq!(status(serde_json::json!({ "error": "llm_error", "detail": "503" })), None, "a backend failure");
+    assert_eq!(status(serde_json::json!({ "error": "caller_context_refused", "detail": "missing" })), None, "the caller-context refusal carries no data");
+    assert_eq!(status(serde_json::json!({ "output": "x", "data": { "reason": 7 } })), None);
+}
+
 /// **`/gateway/llm/call` and `/gateway/llm/stream` ran no action preflight.** The raw routes send
 /// `llm.invoke` to these two doors (`refuse_protected_kind` names `/gateway/llm/call`), yet neither
 /// consulted the evaluator `/mcp` and `/a2a` consult: a policy denying `llm.invoke` was walked

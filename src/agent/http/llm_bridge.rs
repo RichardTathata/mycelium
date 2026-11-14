@@ -214,6 +214,12 @@ pub(super) async fn gw_llm_call(
             let v: serde_json::Value = serde_json::from_slice(&reply)
                 .unwrap_or_else(|_| serde_json::json!({"error":"parse_error","detail":""}));
             if v.get("error").is_some() {
+                // The provider's own check refused the call, or stopped it (`data.reason`): a refusal, answered as
+                // one and forwarded whole. Nothing is given back on it — this door releases no grant claim on any
+                // provider-authored answer.
+                if let Some(status) = provider_refusal_status(&v) {
+                    return (status, axum::Json(v)).into_response();
+                }
                 // Provider-side failure forwarded to the caller: upstream error.
                 return (StatusCode::BAD_GATEWAY, axum::Json(v)).into_response();
             }
@@ -228,6 +234,24 @@ pub(super) async fn gw_llm_call(
                 .into_response(),
         Err(e) => dispatch_refused(e),
     }
+}
+
+/// **Is this `llm.invoke` reply a provider's refusal, and what does the door answer it with?** A provider that checks
+/// authority for itself (`with_provider_enforcement`, or a cohort budget) answers a call it refuses, or stops, with
+/// the check's structured `data` — `data.reason` — beside its `error`; a backend or template failure carries none.
+/// `429` for a full cohort (`at_capacity`); `409` for a call the provider admitted and then **stopped** (`cancelled`:
+/// its authority lapsed, or its gateway cancelled it, while the backend ran — not a refusal of authority, and
+/// something may have run); `403` for every other reason. Without this a refusal read as an upstream failure
+/// (`502`). **The exception:** the provider's caller-context refusal at this door (`caller_context_refused`) is made
+/// before the check and carries no `data`, so it is still answered `502`.
+#[cfg(feature = "llm")]
+pub(super) fn provider_refusal_status(reply: &serde_json::Value) -> Option<StatusCode> {
+    let reason = reply.get("data")?.get("reason")?.as_str()?;
+    Some(match reason {
+        "at_capacity" => StatusCode::TOO_MANY_REQUESTS,
+        "cancelled" => StatusCode::CONFLICT,
+        _ => StatusCode::FORBIDDEN,
+    })
 }
 
 #[cfg(feature = "llm")]
@@ -350,6 +374,17 @@ pub(super) async fn llm_stream_event(
         Ok(reply) => {
             let v: serde_json::Value = serde_json::from_slice(&reply)
                 .unwrap_or_else(|_| serde_json::json!({"error":"parse_error"}));
+            // A reply that reports an error is the stream's error event, never a `done` with an empty output: a
+            // provider's refusal (`data.reason`, forwarded) and a backend failure alike.
+            if let Some(error) = v.get("error") {
+                let mut event = serde_json::json!({"type": "error", "error": error});
+                for key in ["detail", "reason", "code", "data"] {
+                    if let Some(field) = v.get(key) {
+                        event[key] = field.clone();
+                    }
+                }
+                return Event::default().data(event.to_string());
+            }
             let output = v["output"].as_str().unwrap_or("").to_owned();
             let data = serde_json::json!({"type":"done","output":output}).to_string();
             Event::default().data(data)

@@ -250,6 +250,36 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **An enforcing provider applies its rules to `llm.invoke`** (#781's review, F1; `deprecations.md` §105). The
+  node's built-in `llm.invoke` provider — a prompt skill, a stem's `[[serve]]` model, `mycelium-reason`'s
+  `llm/{model}` — verified the caller context and went to the backend; it never ran the provider check the other
+  four receivers run. With `with_provider_enforcement` or `[authority]` on, no rule the provider held was applied
+  to `llm.invoke` there. It now runs the check before the request is parsed or a backend looked up: the provider's
+  evaluator decides `llm.invoke` on `prompt:{ns}/{name}@{provider}` with arguments `{"input", "context"}` — read
+  from the payload, as the gateway's LLM doors decide it — a carried mandate is assessed by the provider's own
+  authority, a cancellable rule requires the gateway's `call:` mandate (§104), the call takes its cohort place,
+  and the decision is in the provider's journal. With enforcement on and no evaluator the door refuses
+  (`no_evaluator`). The backend call is raced against the call's authority: a lapsed mandate or a cancel drops it
+  and answers `cancelled` — which abandons the built-in backend's request, and does not stop a model endpoint
+  that has already begun or a task a custom backend spawned. A refusal keeps the door's shape, `{"error":
+  reason, "detail": sentence}`, with `code` and `data` beside them. **At the gateway:** `/gateway/llm/call`
+  answers a provider's refusal `403` (`429` for `at_capacity`, `409` for a call stopped while it ran) where every
+  provider error was `502`, and
+  `/gateway/llm/stream` sends an error event for an error reply where it sent `done` with an empty output. No
+  grant is given back by a gateway on this answer. **Upgrade:** a provider with enforcement on and a prompt skill
+  needs a rule that permits `llm.invoke`, or every prompt-skill call there is refused
+  (`authority_not_established`); a class
+  or locality rule does not permit at a provider. **Under `[authority]` a bare `prompt:{ns}/{name}` rule is now
+  qualified to the node**, as `tool:` and `skill:` were: one that was inert starts permitting that prompt skill
+  at the gateway's LLM doors and at the provider. A node without enforcement and without a cohort budget is
+  unchanged. **Not built:** three other receivers make no decision at a provider — a hosted
+  capability's `cap.invoke/…` kind (open today; decided 2026-11-14 to be protected at an enforcing provider, in
+  its own PR), `bulk_serve` and a raw `signal_rx` receiver (both open, undecided)
+  (`what-is-proven.md`); this door's checks waiting on a seat claim are not bounded as the other doors' are;
+  `mycelium-reason`'s router still answers `exhausted` (`502`) when every provider
+  refuses; the door has no row in the C7 matrix (its own suite, `src/agent/llm_door_tests.rs`, asks the matrix's
+  question). ***Check:*** on an enforcing node with a prompt skill and no rule for it, `POST /gateway/llm/call`
+  answers `403`.
 - **`mycelium declare` says when a retraction fails.** A DELETE the gateway did not confirm was discarded, and Ctrl-C
   under `--watch` reported its declarations retracted before retracting them. The text form now prints each failed
   retraction and exits 1; a tick's failed retraction of a previous handle is a warning. `Watch::retract` returns a
@@ -274,9 +304,9 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   for an envelope its gateway signed. A `call:` mandate fits only the envelope it was minted for (its term
   is the envelope's id), so one lifted into another envelope is not established. `validate()` refuses
   `requires_mandate` naming a `call:` scope. **Not yet built:** the gateway's mint — until it lands, a cancellable
-  rule refuses every call at an enforcing provider — and the cancel doors. **Stated, and predating this:** the
-  built-in `llm.invoke` provider runs no provider check, so no provider-side rule on `llm.invoke` is applied at
-  that door (`what-is-proven.md`). `Rule` and `RuleDecl` gained a public field.
+  rule refuses every call at an enforcing provider — and the cancel doors. The built-in `llm.invoke` provider,
+  which ran no provider check when this landed, runs it since the entry above (§105). `Rule` and `RuleDecl`
+  gained a public field.
 - **A `call:` mandate at the execution authority** (identity-and-lifecycle I4, PR 1a; `deprecations.md` §100). A
   `call:` mandate is a gateway's cancellation handle for one call: scope `call:{term}`, issued by the gateway to
   itself, with its first revocation checkpoint carried beside it (`PresentedCallMandate`).

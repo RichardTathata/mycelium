@@ -6,7 +6,9 @@ A node can take its [evaluator](../guide/00-concepts.md#evaluator), its executio
 its [evidence journal](../guide/00-concepts.md#evidence-journal) from configuration instead of from code. `start()`
 reads this node's unit from the declaration, builds the reference evaluator from that unit's `[[rule]]`s only, and
 attaches all four before the node serves a request. A node built from a file, such as the published `mycelium`
-binary, then decides every door it serves by the rules it declares.
+binary, then decides the doors it serves by the rules it declares — with one exception until its follow-up lands:
+a hosted capability's `cap.invoke/{ns}/{name}` kind, called directly by a member, is not decided at the provider
+(decided on 2026-11-14 to be protected; [ledger](../operations/what-is-proven.md#hosted-capability-not-decided-at-provider)).
 
 ## When to use it, and when not
 
@@ -53,8 +55,8 @@ treasurer issues a grant at the gateway and revokes it, and the provider door re
   table maps each door's operation, and an unmapped door refuses the start.
 - **A rule's actor is matched exactly.** An issuer at this gateway is a gateway principal (`token:<issuer>/<name>`),
   and a rule names it so; the scaffold fixes its issuer (`gateway_identity_issuer`) so its unit can.
-- **This node only:** a bare `tool:<name>` or `skill:<ns>/<name>` is qualified to this node, so the gateway admits
-  only the tools and skills this node serves.
+- **This node only:** a bare `tool:<name>`, `skill:<ns>/<name>` or `prompt:<ns>/<name>` (the last since 2.41) is
+  qualified to this node, so the gateway admits only the tools, skills and prompt skills this node serves.
 - **The clock:** the gate's guarantee assumes every issuing authority's clock is within `skew_ms` of this node's.
 - **Epochs:** no route or setting installs a newer epoch on a table-only node, so its gate stays at the first epoch;
   an embedder installs one in code.

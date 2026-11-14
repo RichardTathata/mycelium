@@ -3690,13 +3690,13 @@ that declares one refuses every call that rule permits.
   cancellable rule it is refused (`no_envelope`), and under any other rule it runs and cannot be cancelled. A call
   served through the bridged MCP loop is registered but not stopped when cancelled. A call served to an SDK agent
   (`rpc/serve`) is **not stopped either**: its admission is only parked, and only under a cohort budget, and
-  nothing waits on its lapse. Both arrive with the row's cancel doors.
-- **Not built: the built-in `llm.invoke` provider is not checked at all.** The node's own LLM skill receiver
-  verifies the caller context and goes to the backend; it never runs the provider check. So at an enforcing
-  provider a rule on `llm.invoke` — cancellable or not — is not applied at that door, and a cancellable
-  `llm.invoke` rule neither refuses nor registers the prompt there. This predates the release
-  ([ledger](../operations/what-is-proven.md#llm-door-not-checked-at-provider)); the gateway's own preflight on
-  `/gateway/llm/call` is unaffected.
+  nothing waits on its lapse. Both arrive with the row's cancel doors. The doors that **do** stop a cancelled call:
+  the native MCP tool loop, an `rpc_rx` serve loop that races `authority_lapsed()`, and the built-in `llm.invoke`
+  provider (§105).
+- **The built-in `llm.invoke` provider is checked like every other door** (§105; it was not when this section was
+  first written, and a cancellable `llm.invoke` rule neither refused nor registered the prompt there). A
+  cancellable rule on `llm.invoke` now refuses at an enforcing provider as above, in that door's own shape, and a
+  cancel stops a prompt skill's backend call — as far as dropping it can (§105).
 - **A `call:` mandate fits one envelope.** Its term must be `c{n}` of the envelope that carries it (the envelope's
   id, inside the gateway's signature). One lifted into another envelope, even of the same gateway for an identical
   call, is not established. `cm` is outside the envelope's signature, as `m` is; wire **v12** is unchanged.
@@ -3718,3 +3718,122 @@ that declares one refuses every call that rule permits.
 - **No new configuration field.** `GossipConfig` is unchanged by this release of the row.
 - **Code:** `src/agent/provider_enforcement.rs` (`admit_after`, `assess_call_slot`), `src/agent/gateway_caller.rs`
   (`cm`), `src/agent/action_evaluator.rs`, `src/capability_config.rs`. Tests: `src/agent/call_admission_tests.rs`.
+
+## 105. An enforcing provider applies its rules to `llm.invoke` at the built-in LLM door (2.41.0, #781's review F1)
+
+The node's built-in `llm.invoke` provider — what answers a prompt skill registered with `register_prompt_skill`, a
+stem's `[[serve]]` model, `mycelium-reason`'s `llm/{model}` — verified the caller context and went to the backend.
+It never ran the provider check every other door runs (`rpc_rx`, the two MCP loops, `rpc/serve`). So with
+`with_provider_enforcement` or `[authority]` on, no rule the provider held was applied to `llm.invoke` at that door:
+no evaluator decision, no mandate assessment, no work registration, no cohort admission and no provider evidence
+record. It now runs the check, after the caller context and before the request is parsed, a backend looked up or a
+template read.
+
+**Who is affected:** a node that has **both** provider enforcement (or a cohort budget) **and** a prompt skill. A
+node without enforcement and without a cohort budget is unchanged: the same replies, byte for byte, and no record.
+
+- **Your provider's policy now decides `llm.invoke`.** The call is decided as operation `llm.invoke` on resource
+  `prompt:{ns}/{name}@{provider}` with arguments `{"input": …, "context": …}` — what `/gateway/llm/call`,
+  `/gateway/llm/stream` and `mycelium-reason`'s router decide on at their own doors, so one rule and one mandate
+  mean the same at both. The principal is the gateway's client (through a gateway) or `node:{sender}` (a member's
+  own call: `call_prompt_skill`, `InferenceRouter::call`). **A policy with no rule that permits `llm.invoke` now
+  refuses every prompt-skill call at that provider** (`authority_not_established`: no allowance matches; a
+  prohibition answers `action_denied`), where it ran before. Add the rule before
+  upgrading: `Rule::new("*", "llm.invoke", "prompt:{ns}/{name}@{provider}")`, or in a unit file a `[[rule]]` with
+  `operation = "llm.invoke"` and `resource = "prompt:{ns}/{name}"`.
+- **Behaviour change under `[authority]`: a bare `prompt:{ns}/{name}` rule is qualified to the node** (#785's
+  review), as a bare `tool:` or `skill:` already was. A resource matches exactly or as `*`, and both LLM doors
+  present `prompt:{ns}/{name}@{node}`, so until now such a rule matched nothing — at the gateway's
+  `/gateway/llm/call` and `/gateway/llm/stream` as well as at the provider — and the working spellings were the
+  node's address or `*`, the wider rule. **A unit that already carries a bare `prompt:` rule starts permitting
+  that prompt skill at this node, at both doors.** Read your units for one before upgrading
+  (`grep -rn 'resource *= *"prompt:' <units>`); no unit, template or example in this repository has one. A rule
+  that names a node (`…@{node}`) or `*` is unchanged, and a prompt skill on another node is still not admitted.
+- **With enforcement on and no evaluator the door refuses** (`no_evaluator`), as `rpc_rx` does.
+- **With a cohort budget and enforcement off** no policy is consulted, as at every door, but a prompt-skill call
+  now takes its caller's place in the budget for as long as the backend runs, and is refused `at_capacity` when
+  the pool is full. Before, `llm.invoke` was outside the budget.
+- **The resource is read from the payload, not from the envelope's claim** — as a tool's is for `mcp.invoke`. A
+  caller cannot have a call decided on one prompt skill and run another, and a member's own call, which names no
+  resource, is decided on the skill it would run (it is not refused `resource_unnamed`). A payload that names no
+  prompt skill (`{ns}/{name}`, neither part empty or holding a `/`) is refused `malformed_call`. **This is the
+  derivation for the kind**, so an application that serves `llm.invoke` through its own `rpc_rx` loop under
+  provider enforcement is decided the same way: before, it was decided on the envelope's claim with arguments
+  `{"payload_b64": …}`, which no mandate presented at the gateway's LLM doors could match.
+- **A rule that requires a mandate is met by the mandate the gateway carried** (`_meta.mandate` on
+  `/gateway/llm/call` and `/gateway/llm/stream`), assessed again by the provider's own execution authority; a
+  revoked one is refused there too, and work under an established one is stopped if it lapses while the backend
+  runs.
+- **A class or locality rule does not permit at the provider.** `for_class` and `at_locality` are established by
+  `mycelium-reason`'s façade at the gateway; neither travels, so an enforcing provider whose only allowance for
+  `llm.invoke` carries one refuses the call. Give the provider an allowance without them (class rules belong at the
+  gateway — `20-authorising-actions.md`).
+- **A cancellable rule on `llm.invoke`** behaves as §104 says for every door: refused
+  `call_mandate_not_established` until the gateways mint, and refused under any rule once the call's term is
+  revoked. Do not declare one yet.
+- **The refusal keeps the door's own shape**, `{"error", "detail"}`, with two fields beside them:
+
+  ```json
+  {"error": "authority_not_established",
+   "detail": "authority not established: the rule that permits this call is cancellable, and … (call_mandate_not_established)",
+   "code": -32031,
+   "data": {"reason": "authority_not_established", "detail": "call_mandate_not_established", "cause": "no_call_mandate", "found": "…"}}
+  ```
+
+  `error` is the stable reason every other door names (`no_evaluator`, `action_denied`,
+  `authority_not_established`, `malformed_call`, `at_capacity`, …), `detail` the sentence, `code` the JSON-RPC code
+  the MCP doors answer the same refusal with, and `data` what they carry. **A refusal is told from a backend
+  failure by `data.reason` being present**; `llm_error`, `template_not_found` and the door's other errors carry no
+  `data`.
+- **At the gateway: `403`, not `502`.** `/gateway/llm/call` answered every provider error `502`. A reply that
+  carries `data.reason` is now forwarded whole with **`403`** — **`429`** for `at_capacity`, and **`409`** for
+  `cancelled`, a call the provider admitted and then stopped, which is not a refusal of authority and may have
+  begun; a backend or template failure is still `502`. **The exception:** the provider's refusal of the caller
+  context at this door (`caller_context_refused`) is made before the check, carries no `data`, and is still
+  answered `502`. `/gateway/llm/stream` sent `{"type": "done", "output": ""}` for **any** error reply —
+  a refusal or a failed backend read as an empty answer; it now sends
+  `{"type": "error", "error": …, "detail": …, "data": …}`. A client that treated an empty `done` as success sees
+  the error it was missing.
+- **No grant is given back by a gateway on this answer.** The LLM doors release no grant claim on any reply, and
+  none was added. The provider releases its own use when it refuses before running (§104).
+- **A cancelled or lapsed call is stopped, as far as dropping it can.** The backend call is raced against the
+  call's authority: when the caller's mandate lapses or the gateway cancels the call, the backend's future is
+  dropped and the caller is answered `{"error": "cancelled", …, "data": {"reason": "cancelled"}}`. For the built-in
+  `OpenAiBackend` that abandons the HTTP request and closes its connection, and no output is returned. **Not
+  stopped:** work the model endpoint has already begun — it may finish generating, and bill for it — and anything
+  a custom `LlmBackend` runs on a task of its own. A backend that must stop for certain has to make its own work
+  end when its future is dropped.
+- **SDKs:** no change to their error mapping. `PromptSkillClient.call` raises on a non-2xx in both SDKs
+  (`httpx.HTTPStatusError`; `Error("Mycelium gateway error 403: …")`), so a refusal that was a `502` is now a
+  `403` carrying the reason. Rust's `call_prompt_skill` returns `PromptSkillError::LlmError("{error}: {detail}")`,
+  as for every error reply — the text names the reason; there is no separate variant.
+- **Not built: three other receivers make no decision** (#785's review), in the order they matter. None is a door
+  this release changed; each has a dated row on [what is proven](../operations/what-is-proven.md).
+  1. A hosted WASM capability's kind, `cap.invoke/{ns}/{name}`, is served through `rpc_rx`, where the check runs
+     and is inert because the kind is not protected: on a stem with `[authority]` a member's direct `rpc_call` of
+     `cap.invoke/tool/x` runs the component with no decision, mandate or record, while `/mcp` decides the same
+     component. A gateway client cannot reach the kind (§103). **Open today; decided by the maintainer on 2026-11-14
+     to be protected at an enforcing provider, in its own PR.**
+  2. `bulk_serve` runs its handler with no caller context and no check, even for a kind in `protected_rpc_kinds`.
+     Members only; a bypass only where an application serves a protected kind over bulk.
+  3. A raw receiver (`mesh().signal_rx(kind)` + `RpcRequest::from`) has no public way to run the provider check.
+- **Not built: this door's waiting checks are not bounded.** A check that must wait on a seat claim (a
+  fleet-consensus limit) is held by the other four doors in a set of at most 64 (`MAX_DEFERRED_CHECKS`), which then
+  stops draining the kind's channel. This door runs each call on a task of its own and waits there, so a burst of
+  `llm.invoke` calls under such a limit holds one task and one claim each, with no bound of the door's own.
+  Bringing it under the same set means moving the check into the dispatch loop; not done here.
+- **`mycelium-reason`:** a provider's refusal is a failed attempt, so the router fails over to the next provider
+  and, if every one refuses, answers `exhausted` (`502` on `/gateway/reason/route`) with each provider's reason in
+  the detail. Unchanged by this release; not yet a `403`.
+- **Not built:** the door has no row in the C7 bypass matrix (the matrix is built under `compliance` + `a2a`, a
+  prompt skill needs `llm`, and no CI line builds both); its own suite asks the matrix's question under
+  `tls` + `llm`.
+- ***Check:*** on an enforcing node with a prompt skill and no rule for it,
+  `curl -s -o /dev/null -w '%{http_code}\n' -X POST localhost:8300/gateway/llm/call -H 'content-type: application/json' -d '{"ns":"<ns>","name":"<name>","input":"x"}'`
+  (add `-H 'authorization: Bearer <token>'` where the gateway has tokens; `8300` is the node's `http_port`)
+  prints `403` — from the gateway's own preflight if it shares the policy (`"error": "policy"`), from the provider
+  otherwise (`"error": "authority_not_established"`). A member's `call_prompt_skill` to the same skill returns an
+  error naming `authority_not_established`. After adding the rule both answer.
+- **Code:** `src/agent/llm.rs` (`handle_llm_invoke`), `src/agent/provider_enforcement.rs` (`derive`),
+  `src/agent/http/llm_bridge.rs` (`provider_refusal_status`). Tests: `src/agent/llm_door_tests.rs`,
+  `the_built_in_llm_provider_fails_closed_with_no_evaluator_like_every_other_door` (`src/lib_tests.rs`).

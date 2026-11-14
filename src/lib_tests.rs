@@ -3760,15 +3760,16 @@ async fn a_gateway_kv_delete_reaches_a_peer_that_requires_signed_frames() {
     let _ = std::fs::remove_dir_all(&cert_dir);
 }
 
-/// **Not built, pinned so the gap is visible: the built-in `llm.invoke` provider runs no provider check** (found by
-/// #781's review, F1; `docs/operations/what-is-proven.md#llm-door-not-checked-at-provider`). The node has provider
-/// enforcement on and **no evaluator**, so every checked door fails closed: a protected kind served through `rpc_rx`
-/// is refused `no_evaluator` and its handler never sees the call. `llm.invoke` — a built-in protected kind — is
-/// answered by the backend all the same, because `handle_llm_invoke` verifies the caller context and never calls
-/// `provider_enforcement::check`. **The PR that puts the check there turns the last assertion round.**
+/// **The built-in `llm.invoke` provider runs the provider check, like every other door** (the gap #781's review
+/// found, F1, closed). The node has provider enforcement on and **no evaluator**, so every checked door fails
+/// closed: a protected kind served through `rpc_rx` is refused `no_evaluator` and its handler never sees the call —
+/// and so is `llm.invoke`, a built-in protected kind, whose backend is never called. Until `handle_llm_invoke`
+/// called `provider_enforcement::check`, this test pinned the opposite (the backend answered); the rules, the
+/// `call:` mandate and the cancel at this door are `src/agent/llm_door_tests.rs`. Seen failing first: with the
+/// check taken out of `handle_llm_invoke`, the backend answers.
 #[cfg(all(feature = "tls", feature = "gateway", feature = "llm"))]
 #[tokio::test]
-async fn the_built_in_llm_provider_runs_no_provider_check_which_is_not_built() {
+async fn the_built_in_llm_provider_fails_closed_with_no_evaluator_like_every_other_door() {
     use crate::config::TlsConfig;
     use std::sync::atomic::AtomicUsize;
     let port = alloc_port();
@@ -3807,9 +3808,10 @@ async fn the_built_in_llm_provider_runs_no_provider_check_which_is_not_built() {
     let custom = call("depot.custom", b"x").await;
     assert!(custom.contains("no_evaluator"), "the rpc_rx door fails closed with no evaluator: {custom}");
     assert_eq!(served.load(Ordering::SeqCst), 0);
-    // The built-in LLM door: the backend answered. Not built — the check is not there.
+    // The built-in LLM door: refused the same way, in its own `{error, detail}` shape, and the backend never ran.
     let llm: serde_json::Value = serde_json::from_str(&call("llm.invoke", br#"{"prompt":"review/echo","input":"x","context":{}}"#).await).unwrap();
-    assert!(llm["output"].is_string() && llm["error"].is_null(), "llm.invoke ran with enforcement on and no evaluator (the gap): {llm}");
+    assert_eq!((llm["error"].as_str(), llm["data"]["reason"].as_str()), (Some("no_evaluator"), Some("no_evaluator")), "the llm.invoke door fails closed with no evaluator: {llm}");
+    assert!(llm["output"].is_null() && llm["detail"].as_str().is_some_and(|d| d.contains("no action evaluator")), "{llm}");
     a.shutdown().await;
     let _ = std::fs::remove_dir_all(&cert_dir);
 }
