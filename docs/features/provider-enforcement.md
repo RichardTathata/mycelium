@@ -95,7 +95,8 @@ confirmed stop, checked against the class's bound. CI runs it.
   3. **a raw receiver** (`mesh().signal_rx` + `RpcRequest::from`) — it can verify the caller and has no public way to
      run the check ([ledger](../operations/what-is-proven.md#raw-receiver-cannot-run-provider-check)).
 - **Not built, at the `llm.invoke` door:** a check waiting on a seat claim there is not under the bound the other
-  four doors keep (`MAX_DEFERRED_CHECKS`, 64): each call has a task of its own and waits in it.
+  four doors keep (`MAX_DEFERRED_CHECKS`, 64): each call has a task of its own and waits in it
+  ([ledger](../operations/what-is-proven.md#llm-door-waiting-checks-unbounded)).
 - **Not built, at that door:** a class or locality rule does not permit there (neither fact travels to a
   provider); `mycelium-reason`'s router reads a provider's refusal as a failed attempt and answers `exhausted`
   (`502`) when every provider refuses; and the door has no row in the C7 matrix itself (the matrix runs on CI's

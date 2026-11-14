@@ -45,8 +45,9 @@ The [example index](../../examples/README.md#the-capability-matrix) lists
   [`provider.enforcement`](../reference/rule-catalogue.md#providerenforcement) before a backend is called (since
   2.41): the provider's policy decides `llm.invoke` on `prompt:{ns}/{name}@{provider}`, so it needs a rule that
   permits it. A refusal is `{"error": reason, "detail": sentence, "code", "data"}`; `/gateway/llm/call` answers it
-  `403` and `/gateway/llm/stream` as an error event. A call whose authority lapses while the backend runs is
-  dropped and answered `cancelled`; a model endpoint that has already begun is not stopped.
+  `403` — `429` when the provider's cohort budget is full (`at_capacity`), `409` for a call stopped while it ran
+  (`cancelled`) — and `/gateway/llm/stream` as an error event. A call whose authority lapses while the backend
+  runs is dropped and answered `cancelled`; a model endpoint that has already begun is not stopped.
 - **Not built:** output quality — the substrate routes and records the call, not what the model says; a template is
   last-writer-wins, so two concurrent updates keep one; a prompt skill is not on the A2A card, and `/a2a` refuses it
   by name.

@@ -180,7 +180,9 @@ class PromptSkillClient:
         On error raises :class:`httpx.HTTPStatusError` — the gateway reports
         failures via status codes (404 no provider, 403 refused by policy — at
         the gateway, ``"error": "policy"``, or by an enforcing provider, whose
-        ``"error"`` names its reason — 502 provider-side error,
+        ``"error"`` names its reason — 429 an enforcing provider's cohort
+        budget is full (``at_capacity``), 409 the provider stopped the call
+        while it ran (``cancelled``), 502 provider-side error,
         504 RPC timeout); the response body carries
         ``{"error": "...", "detail": "..."}``.
 

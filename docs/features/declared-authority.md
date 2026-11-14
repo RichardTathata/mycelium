@@ -6,7 +6,9 @@ A node can take its [evaluator](../guide/00-concepts.md#evaluator), its executio
 its [evidence journal](../guide/00-concepts.md#evidence-journal) from configuration instead of from code. `start()`
 reads this node's unit from the declaration, builds the reference evaluator from that unit's `[[rule]]`s only, and
 attaches all four before the node serves a request. A node built from a file, such as the published `mycelium`
-binary, then decides every door it serves by the rules it declares.
+binary, then decides the doors it serves by the rules it declares — with one exception until its follow-up lands:
+a hosted capability's `cap.invoke/{ns}/{name}` kind, called directly by a member, is not decided at the provider
+(decided on 2026-11-14 to be protected; [ledger](../operations/what-is-proven.md#hosted-capability-not-decided-at-provider)).
 
 ## When to use it, and when not
 
