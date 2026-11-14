@@ -216,6 +216,9 @@ mod call_mandate_tests;
 /// Identity-and-lifecycle I4, PR 1b: the provider's admission under the envelope's second mandate slot.
 #[cfg(all(test, feature = "compliance"))]
 mod call_admission_tests;
+/// #781's review, F1: the built-in `llm.invoke` provider runs the provider check.
+#[cfg(all(test, feature = "gateway", feature = "tls", feature = "llm"))]
+mod llm_door_tests;
 /// Identity-and-lifecycle I5 (D6): the gateway's token exchange at the IdP, DPoP-bound to the node key.
 #[cfg(feature = "compliance")]
 pub(crate) mod oidc_exchange;

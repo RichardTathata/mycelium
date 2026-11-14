@@ -2,11 +2,12 @@
 
 ## What it is
 
-With provider enforcement on, every protected call a node receives — `mcp.invoke`, `skill.invoke` and any kind in
-`protected_rpc_kinds` — runs the same action preflight a gateway runs, as the
+With provider enforcement on, every protected call a node receives — `mcp.invoke`, `skill.invoke`, `llm.invoke` and
+any kind in `protected_rpc_kinds` — runs the same action preflight a gateway runs, as the
 [enforcement point](../guide/00-concepts.md#enforcement-point) `provider`, before any handler sees it. It applies
-whichever door the call came through — a gateway, a member's direct call, or the SDK serve stream — with one
-exception, stated below: the node's built-in `llm.invoke` provider. A presented mandate
+whichever door the call came through — a gateway, a member's direct call, or the SDK serve stream — and at every
+receiver the node has: `rpc_rx`, the MCP tool loop, the bridged MCP loop, the SDK serve stream and the built-in
+`llm.invoke` provider that answers a prompt skill. A presented mandate
 is verified by the node's own execution authority, never taken from a gateway, and the decision is recorded in the
 node's evidence journal.
 
@@ -34,6 +35,9 @@ This feature is turned on in code, in a build with `gateway` and `tls`.
   mandate established here, registered so that a cancel stops it; this needs `compliance` as well.
 - `test_c7_the_bypass_matrix_no_door_runs_revoked_work`, in [`src/lib_tests.rs`](../../src/lib_tests.rs): after a
   revocation, no door runs the work, counted by the handlers themselves.
+- `a_revoked_mandate_runs_no_llm_backend`, in
+  [`src/agent/llm_door_tests.rs`](../../src/agent/llm_door_tests.rs): the same question at the built-in
+  `llm.invoke` provider, counted by the backend — in its own suite because the matrix is built without `llm`.
 
 ## See it work
 
@@ -46,7 +50,7 @@ confirmed stop, checked against the class's bound. CI runs it.
 
 - **Rule:** [`provider.enforcement`](../reference/rule-catalogue.md#providerenforcement) — a permit, or a refusal:
   the action preflight's (a deny, authority not established, evidence not recorded), `no_evaluator`, `caller_context_refused`, `malformed_call` (a tool call that is
-  not JSON or names no tool), `resource_unnamed`, `resource_not_here`, `resource_not_served`, `at_capacity`, `call_mandate_not_established` (a
+  not JSON or names no tool, or an `llm.invoke` call that names no prompt skill), `resource_unnamed`, `resource_not_here`, `resource_not_served`, `at_capacity`, `call_mandate_not_established` (a
   cancellable rule permitted the call and its gateway's `call:` mandate is not established here, or its term is
   already revoked — refused under any rule: *authority not established*, with the stable cause in `data.cause`
   (`revoked`, `no_call_mandate`, `other_envelope`, …; the list is in §104), the sentence in `data.found`,
@@ -67,9 +71,20 @@ confirmed stop, checked against the class's bound. CI runs it.
   before the work is registered refuses it, one after is the sweep's to stop; a provider
   that does not turn enforcement on checks no authority, whatever the gateway did, and one that turns it on with no
   evaluator refuses every protected call (`no_evaluator`).
-- **Not built: the built-in `llm.invoke` provider runs no provider check.** Its receiver verifies the caller
-  context and goes to the backend, so at this door no rule on `llm.invoke` is applied, cancellable or not
-  ([ledger](../operations/what-is-proven.md#llm-door-not-checked-at-provider)).
+- **`llm.invoke` at the built-in provider** (since 2.41, [§105](../guide/deprecations.md#105-an-enforcing-provider-applies-its-rules-to-llminvoke-at-the-built-in-llm-door-2410-781s-review-f1);
+  [ledger](../operations/what-is-proven.md#llm-door-not-checked-at-provider)). The call is decided on the prompt
+  skill its **payload** names — operation `llm.invoke`, resource `prompt:{ns}/{name}@{provider}`, arguments
+  `{"input", "context"}`, as the gateway's LLM doors decide it — never on the envelope's claim, so a member's own
+  call is decided too. A refusal keeps the door's shape, `{"error": reason, "detail": sentence}`, with `code` and
+  `data` beside them; the gateway's `/gateway/llm/call` answers it `403` (`429` for `at_capacity`) and
+  `/gateway/llm/stream` as an error event. The backend call is raced against the call's authority: a lapse or a
+  cancel drops it and answers `cancelled`.
+- **Not stopped, at that door:** work a model endpoint has already begun when the backend's future is dropped (it
+  may finish generating), and anything a custom `LlmBackend` runs on a task of its own.
+- **Not built, at that door:** a class or locality rule does not permit there (neither fact travels to a
+  provider); `mycelium-reason`'s router reads a provider's refusal as a failed attempt and answers `exhausted`
+  (`502`) when every provider refuses; and the door has no row in the C7 matrix itself (the matrix runs on CI's
+  `compliance,a2a` line, which builds no `llm`).
 - **Not built, for a cancellable rule:** no gateway mints a `call:` mandate yet, so such a rule refuses every call
   it permits; a member's own unframed call carries none; the bridged MCP loop and the SDK serve stream do not stop
   a cancelled call; a revoked term under a rule that is not cancellable is best effort, since a relay that strips
@@ -87,4 +102,5 @@ confirmed stop, checked against the class's bound. CI runs it.
 - **Runbook:** [confined fleet](../operations/confined-fleet.md), where providers are reachable only through their
   gateway and enforce anyway.
 - **Design:** [`authority-at-execution.md`](../design/authority-at-execution.md).
-- **Code:** [`src/agent/provider_enforcement.rs`](../../src/agent/provider_enforcement.rs) (`check`).
+- **Code:** [`src/agent/provider_enforcement.rs`](../../src/agent/provider_enforcement.rs) (`check`); the built-in LLM
+  door, [`src/agent/llm.rs`](../../src/agent/llm.rs) (`handle_llm_invoke`).

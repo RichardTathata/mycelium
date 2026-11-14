@@ -128,6 +128,11 @@ jobs:
       # this its test (`what_reaches_the_exporter_is_the_pinned_set_and_no_input`) compiles in the universe and runs
       # nowhere. `tls` for the evidence half (the journal exists only where the evaluator seam does).
       - run: cargo test --lib --features otel,tls span_export
+      # #781's review, F1: the built-in `llm.invoke` provider runs the provider check. Three of its tests present a
+      # `call:` mandate or a gateway token, which need `compliance` (a node's key is verified only through the
+      # member-key view it builds) as well as `llm` — a pair no lib line above builds, so without this step they
+      # compile in the universe and run nowhere. The suite's other seven run here too, and on the `llm` line above.
+      - run: ./scripts/ci-retest.sh --lib --features compliance,llm llm_door_tests
       - run: ./scripts/ci-retest.sh -p mycelium-tuple-space --features gateway
       # Examples are the documented contract for the guide chapters; an
       # examples-free CI let a stale include_str! path hide behind cargo's

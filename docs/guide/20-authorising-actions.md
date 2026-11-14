@@ -702,12 +702,12 @@ the `route_*` cases).
   nor locality is consulted; nor do `SkillRunner`'s own OpenAI-compatible client, a `[[serve]]` backend or any other
   in-process `LlmBackend`. A `[[serve]]` skill advertises no `llm-meta` ad, so its locality is unknown and a class rule
   never permits it through the façade.
-- **Not at the provider.** The node's built-in `llm.invoke` provider runs **no** provider check: with
-  `with_provider_enforcement` it verifies the caller context and goes to the backend, so no rule placed at the provider
-  is applied to `llm.invoke` there — a class rule, a mandate requirement or `cancellable`
-  ([not built](../operations/what-is-proven.md#llm-door-not-checked-at-provider); *corrected 2026-11-13: this read "the
-  provider's own evaluator re-checks `llm.invoke`"*). Neither class nor destination travels in any case. Put class rules
-  at the gateway.
+- **At the provider, the rule but not the class.** With `with_provider_enforcement` the node's built-in `llm.invoke`
+  provider runs the provider check (since 2.41, [§105](deprecations.md#105-an-enforcing-provider-applies-its-rules-to-llminvoke-at-the-built-in-llm-door-2410-781s-review-f1);
+  before it, no rule placed at the provider was applied to `llm.invoke` there): the provider's own evaluator decides
+  `llm.invoke` on `prompt:{ns}/{name}@{provider}`, assesses a carried mandate and applies `cancellable`. **Neither
+  class nor destination travels**, so a rule with `for_class` or `at_locality` never permits at a provider: put class
+  rules at the gateway, and give an enforcing provider an allowance for `llm.invoke` that carries neither.
 - **One evidence record per refused candidate.** A route over many providers that the policy refuses writes one denied
   decision per candidate tried.
 

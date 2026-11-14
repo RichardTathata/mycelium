@@ -43,6 +43,11 @@ a credential binding is `a_served_skill_sends_its_binding_value_which_the_stem_n
 - No guarantee or rule id of its own: a served skill is called through the LLM doors, where the
   [action evaluator](action-authorisation.md) and [inference routing](inference-routing.md) decide; the key's handling
   is `egress.credentials`' when a binding carries it.
+- **On a stem with `[authority]`** (or `with_provider_enforcement`) the served skill's `llm.invoke` is decided by the
+  stem's own policy before the endpoint is reached (since 2.41,
+  [provider enforcement](provider-enforcement.md)): the unit needs a `[[rule]]` that permits `llm.invoke` on
+  `prompt:{namespace}/{name}@{node}` — the node's address written out, or `*`; a bare `prompt:` is not qualified
+  to the node as a bare `tool:` is — or every call to the served skill is refused there.
 - **Not built:** the skill's availability follows the install's advertisement, not the endpoint's health — a model server
   that is up but failing still serves until its probe withdraws the install; `api_key` as a literal is for a file that
   is not committed; a served skill is not on the A2A card.

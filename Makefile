@@ -226,6 +226,7 @@ check-full: check
 	cargo clippy --benches --features gateway,test-util -- -D warnings  # both bench targets (gateway_overhead needs these features)
 	cargo test  --lib --features tls,metrics,a2a,llm,test-frame-filter   # + the row-A frame-filter tests
 	cargo test  --lib --features compliance,a2a   # the audit chain + both gateway enforcement points
+	cargo test  --lib --features compliance,llm llm_door_tests   # the built-in llm.invoke provider's check: the three tests that need a node's key verified (no other line builds compliance with llm)
 	cargo test  --features tls,a2a --test '*'           # every root integration test, by discovery (rule 3)
 	cargo test  --features tls,a2a --bins                # the skillrunner binary's unit tests
 	cargo test  --features tls,a2a --doc                 # the crate's doctests (cargo will not mix --doc with other targets)

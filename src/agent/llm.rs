@@ -248,6 +248,31 @@ pub(crate) struct LlmInvokeError {
     pub detail: String,
 }
 
+/// What the door answers when the provider check refuses the call, or stops it: the door's own `{error, detail}`
+/// with the check's structured `data` beside them. `error` is the stable reason every other door names
+/// (`no_evaluator`, `action_denied`, `authority_not_established`, `at_capacity`, …), `detail` the sentence, `code`
+/// the JSON-RPC code the MCP doors answer the same refusal with, and `data` what they carry (`data.reason`, and for
+/// a `call:` mandate `data.detail = "call_mandate_not_established"` with its `data.cause`). A caller tells a refusal
+/// from a backend failure by `data.reason` being there.
+#[cfg(all(feature = "gateway", feature = "tls"))]
+#[derive(Debug, Serialize)]
+pub(crate) struct LlmInvokeRefusal<'a> {
+    pub error:  &'a str,
+    pub detail: &'a str,
+    pub code:   i32,
+    pub data:   &'a serde_json::Value,
+}
+
+/// Answer `req` with the provider check's refusal, in this door's shape.
+#[cfg(all(feature = "gateway", feature = "tls"))]
+fn refuse_llm_invoke(ctx: &Arc<TaskCtx>, req: &super::rpc::RpcRequest, refusal: &super::provider_enforcement::ProviderRefusal) {
+    tracing::warn!(sender = %req.sender(), reason = %refusal.reason, "llm.invoke: refused by provider enforcement");
+    let body = serde_json::to_vec(&LlmInvokeRefusal {
+        error: &refusal.reason, detail: &refusal.message, code: refusal.code, data: &refusal.data,
+    }).unwrap_or_default();
+    rpc_respond_ctx(ctx, req, Bytes::from(body));
+}
+
 // ── Shared dispatch loop ──────────────────────────────────────────────────────
 
 /// Spawns the single `llm.invoke` dispatch loop for this node.
@@ -311,6 +336,34 @@ async fn handle_llm_invoke(
         rpc_respond_ctx(&ctx, &req, Bytes::from(err));
         return;
     }
+
+    // Closure plan C3, at this door (#781's review, F1): authority is decided here, as at every other door that
+    // serves a protected kind, before the request is parsed, a backend looked up or a template read. Inert unless
+    // provider enforcement or a cohort budget is on. The admission is held until this function returns, so the call
+    // counts as in flight (C4) and its work stays registered (C10, I4) for as long as the backend runs.
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    let admission = {
+        use super::provider_enforcement::{check, withdrawn, Checked};
+        let checked = match check(&ctx, &req, true).await {
+            Checked::Done(checked) => checked,
+            // A seat claim still settling (K2): this call has a task of its own, so it waits here and stalls no
+            // other; a node shutting down answers it rather than leaving it to time out.
+            Checked::Waiting(waiting) => {
+                let mut shutdown = ctx.shutdown_tx.subscribe();
+                tokio::select! { biased;
+                    _ = shutdown.wait_for(|v| *v) => Err(withdrawn()),
+                    checked = waiting => checked,
+                }
+            }
+        };
+        match checked {
+            Ok(admission) => admission,
+            Err(refusal) => {
+                refuse_llm_invoke(&ctx, &req, &refusal);
+                return;
+            }
+        }
+    };
 
     // Parse request
     let invoke_req: LlmInvokeRequest = match serde_json::from_slice(&req.payload()) {
@@ -413,8 +466,29 @@ async fn handle_llm_invoke(
         }
     };
 
-    // Call backend
-    match backend.complete(&rendered_system, &rendered_user, template.max_tokens, template.temperature).await {
+    // Call backend — raced against the call's authority (C10, I4): if the caller's mandate lapses or the call is
+    // cancelled (its `call:` term revoked) while the backend runs, the backend's future is dropped and the call
+    // answers that it was stopped. Dropping the future ends this node's part: `OpenAiBackend`'s request is abandoned
+    // and its connection closed, and no output reaches the caller. What it cannot do is stop work the endpoint has
+    // already begun (a model may finish generating, and bill for it), or a task a custom backend spawned for itself.
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    let completed = tokio::select! {
+        result = backend.complete(&rendered_system, &rendered_user, template.max_tokens, template.temperature) => result,
+        _ = admission.lapsed() => {
+            warn!("llm.invoke for {}: stopped, the call's authority lapsed while the backend ran", skill_id);
+            let err = serde_json::to_vec(&LlmInvokeRefusal {
+                error: "cancelled",
+                detail: "cancelled: the call's authority lapsed while it ran",
+                code: -32603,
+                data: &serde_json::json!({ "reason": "cancelled" }),
+            }).unwrap_or_default();
+            rpc_respond_ctx(&ctx, &req, Bytes::from(err));
+            return;
+        }
+    };
+    #[cfg(not(all(feature = "gateway", feature = "tls")))]
+    let completed = backend.complete(&rendered_system, &rendered_user, template.max_tokens, template.temperature).await;
+    match completed {
         Ok(result) => {
             let resp = serde_json::to_vec(&LlmInvokeResponse {
                 output:      result.output,
