@@ -64,6 +64,8 @@ pub(crate) mod gateway_authority;
 /// Closure plan C3: the action preflight, mandates included, at the provider's receive boundary.
 #[cfg(all(feature = "gateway", feature = "tls"))]
 pub(crate) mod provider_enforcement;
+#[cfg(all(feature = "gateway", feature = "tls"))]
+pub(crate) mod grant_use;
 /// Identity-and-lifecycle I0: `[authority]` — this node's evaluator, execution authority, provider enforcement and
 /// evidence journal, built from its declaration at `start()`.
 #[cfg(feature = "compliance")]
@@ -1066,6 +1068,10 @@ pub(crate) struct TaskCtx {
     /// Absent = the gateway binds no mandate, exactly as before.
     #[cfg(all(feature = "gateway", feature = "tls"))]
     pub(crate) execution_authority: std::sync::OnceLock<Arc<gateway_authority::ExecutionAuthority>>,
+    /// Critique plan row CR2: this node's own record of the grant uses its doors made — the journal under
+    /// `[persistence]` and its fold (`grant_use::GrantUseLedger`, lock-order row 79).
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    pub(crate) grant_uses: Arc<grant_use::GrantUseLedger>,
     /// Closure plan C3: whether this node, as a **provider**, runs the action preflight on protected
     /// work it receives, set via `with_provider_enforcement`. Off = today's behaviour.
     #[cfg(all(feature = "gateway", feature = "tls"))]
@@ -1723,6 +1729,8 @@ impl GossipAgent {
             ae_tally_lock: std::sync::Mutex::new(()),
             #[cfg(all(feature = "gateway", feature = "tls"))]
             execution_authority: std::sync::OnceLock::new(),
+            #[cfg(all(feature = "gateway", feature = "tls"))]
+            grant_uses: Arc::new(grant_use::GrantUseLedger::default()),
             #[cfg(all(feature = "gateway", feature = "tls"))]
             provider_enforcement: std::sync::atomic::AtomicBool::new(false),
             #[cfg(feature = "compliance")]

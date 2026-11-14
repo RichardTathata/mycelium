@@ -984,6 +984,32 @@ pub(crate) async fn write_owned_kv_durable(ctx: &Arc<super::TaskCtx>, key: &str,
         .map_err(|e| e.to_string())
 }
 
+/// [`write_owned_kv_durable`] **reporting what the write did at the key** — for a record whose writer must know
+/// whether its value is the one the store now holds (critique plan row CR2: a door's use marker). `Superseded` means
+/// a newer value held the key and LWW kept it: the write is on the WAL and is not what a reader sees. On a node with
+/// no `[persistence]` the write is in memory and the application is still reported.
+#[cfg(all(feature = "gateway", feature = "tls"))]
+pub(crate) async fn write_owned_kv_reporting(ctx: &Arc<super::TaskCtx>, key: &str, value: Vec<u8>) -> Result<mycelium_core::receipt::LocalApplication, String> {
+    if ctx.wal.get().is_none() {
+        let update = make_gossip_update(&ctx.node_id, ctx.default_ttl, Arc::from(key), Bytes::from(value), false, &ctx.hlc);
+        let application = crate::store::apply_and_notify_reporting(&ctx.kv_state, &update);
+        dispatch_gossip_try_send(
+            &ctx.gossip_txs,
+            crate::framing::local_kv_wire_msg(ctx, update),
+            ctx.node_id.id_hash(),
+            ForwardHint::All,
+            &ctx.kv_state.dropped_frames,
+        );
+        return Ok(application);
+    }
+    let op = mycelium_core::receipt::OperationId::generate(&ctx.node_id);
+    let attempt = mycelium_core::receipt::AttemptId::fresh(&op);
+    mycelium_core::ops::kv_set_requiring_sync(ctx, op, attempt, Arc::from(key), Bytes::from(value), None)
+        .await
+        .map(|receipt| receipt.application)
+        .map_err(|e| e.to_string())
+}
+
 /// Snapshot all `agent/{node}/state` entries from the local KV store.
 fn scan_agent_states(kv: &crate::store::KvState) -> Vec<(NodeId, ExecutionState)> {
     let guard = kv.store.pin();

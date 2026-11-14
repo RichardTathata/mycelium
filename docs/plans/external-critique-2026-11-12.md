@@ -274,7 +274,7 @@ owner-signed rule and satisfies none of its rows.
 
 #### CR2 · Grant records a member cannot re-arm *(A1; inventory: `used/{door}`, `consumed`, `revoked`, the request, `issued`, `checkpoint`)*
 
-**State (2026-11-12):** **the first PR (the use marker and its release) is *buildable*, inside wave 1b** (D11); concurrent admission at two gateways is stated, not prevented (D12). PRs 2–4 are *after wave 1b*, their text ready.
+**State (2026-11-13):** **the first PR (the use marker and its release) is delivered** — inside wave 1b (D11), its promises quoted beside their code and tests under *Delivered* below; concurrent admission at two gateways is stated, not prevented (D12). **One decision was taken while building it (maintainer, 2026-11-13): a release is honoured only by the door that made it** — the row's release text below is corrected, with the finding that prompted it. PRs 2–4 are *after wave 1b*, their text ready, and untouched.
 
 **What:** in this order, each its own PR:
 
@@ -289,10 +289,28 @@ owner-signed rule and satisfies none of its rows.
    - **At the marker key, anything other than *never written* reads *used*:** a verified marker, a value that
      does not verify, or a tombstone. The marker itself is signed by the door's node, its body naming the grant,
      the door and the use.
-   - **Only a signed release bound to that use reads unused** — signed by the same door, naming the use it
-     releases (not only the door), so an earlier genuine release cannot be replayed over a later use. The gateway
-     today tombstones the marker itself when a call is refused before dispatch (`authz.rs:716`); that becomes
-     the signed release.
+   - **Only a signed release bound to that use reads unused at the door that made it; elsewhere a release reads
+     used** — signed by the same door, naming the use it releases (not only the door), so an earlier genuine
+     release cannot be replayed over a later use. The gateway today tombstones the marker itself when a call is
+     refused before dispatch (`authz.rs:716`), and since I4's PR 1b so does the provider
+     (`release_unspent_grant_claim` from `admit_after`); both become the signed release.
+     *Corrected 2026-11-13 (decision A).* As first written — "only a signed release bound to that use reads
+     unused", with no reader named — the row did not work at a second door. The marker key names no node
+     (`{point}` is `gateway` or `provider`), so every door of a class shares one LWW key, and a reader that did
+     not record the use holds one value and no memory. A release that verified there would have to carry the
+     marker it releases, and then: **(1) replay** — gateway G1 claims U1, is refused before dispatch and releases
+     R1; the retry claims U2 and runs; a member writes the genuine R1 back at a higher stamp, and G2 cannot know
+     U2 existed; **(2) a member's own pair** — after G1's use, member M writes its own marker and its own release
+     at the shared key; both verify under M's key, and nothing tells G2 that M was not the door; **(3) honest
+     overlap** — G1 admits and runs while G3's claim-then-release lands at a higher stamp, and the key shows a
+     genuine release over a spent grant. The options were A (a release honoured only by its own door), B (any
+     door honours a self-consistent release — leaves 1–3 open) and C (a key per door node and use — a key-shape
+     change, not this row's Format). **A was chosen.** *What the signed release in the KV is then for:* the
+     releasing door's own journal fully answers its own read — it is the reason a grant reads unused there — and
+     the door additionally requires the key to hold exactly that release (or nothing) before it admits again, so
+     that another door's marker, a tombstone or a garbage value written since still reads used. For every other
+     reader the KV release is never a reason for *unused*: it says to the other doors, to an auditor and to I4's
+     collector who released which use. It is kept for those three.
    - **The door checks its own marker write's receipt** and refuses the call, by name, if the write was
      `Superseded`.
 2. **`consumed` and `revoked`**, the same shape: signed by the agent's node and by the revoker; a planted
@@ -327,6 +345,56 @@ journal stream for the door's own uses: additive on disk, with a lock-order row 
 release a pre-dispatch refusal at an un-upgraded gateway — which releases by tombstone
 (`src/agent/http/authz.rs:716`) — spends the grant at upgraded doors: the safe side, stated in the upgrade note. No wire-frame
 change, no change to an existing on-disk format.
+
+**Delivered — the first PR (2026-11-13), each promise beside what delivers it** (`src/agent/grant_use.rs`,
+`src/agent/grant_use_tests.rs`; every test seen failing first, the plants listed in the PR):
+
+- *"The door keeps the use in a node-local durable record (its journal), read before the KV. A restart reads it
+  back; a member's KV write cannot touch it."* — `GrantUseLedger` (stream `grant/uses`, file
+  `{base_path}/{node}/grants/uses.journal`, opened in `lifecycle.rs` before any door serves); `record_use` appends
+  and fsyncs before `Settling::finish` admits; `reads_used` consults `GrantUseLedger::own` before the store.
+  Test: `the_door_that_made_a_use_reads_its_journal_and_only_its_own_release_gives_it_back` (*RESTART*, *FOLD*,
+  *JOURNAL* — the last with nothing left at the key).
+- *"At the marker key, anything other than never written reads used: a verified marker, a value that does not
+  verify, or a tombstone. The marker itself is signed by the door's node, its body naming the grant, the door and
+  the use."* — `reads_used` reads the store's entry (a tombstone is an entry with no data), `UseRecord::signed`,
+  `UseRecord::verifies_at`. Test: `a_second_gateway_reads_anything_but_never_written_as_used` (*TOMBSTONE*,
+  *DELIVERED FIRST*, *GARBAGE*, *COUNTED*).
+- *"Only a signed release bound to that use reads unused at the door that made it; elsewhere a release reads
+  used"* — `release_use` (journal, then the signed release over the marker) from `release_unspent_grant_claim`,
+  which both releasers call; `reads_used`'s release arm. Tests: the same two (*REPLAY*, *FORGED*, *OWN PAIR* at the
+  second gateway and at the first, before and after a restart), and for the two releasers
+  `a_grant_the_provider_refused_before_running_is_given_back`,
+  `a_grant_is_given_back_when_the_gateway_refused_before_sending` (`client_grant_tests.rs`) and the provider's
+  end-to-end give-back, `a_call_refused_for_its_call_mandate_gives_the_grant_back` (`call_admission_tests.rs`).
+- *"The door checks its own marker write's receipt and refuses the call, by name, if the write was
+  `Superseded`."* — `write_owned_kv_reporting` (`state_machine.rs`), `record_use`'s `Ok(false)`, the denial in
+  `Settling::finish` whose reason ends `(grant_use_superseded)`. Test: the first above (*RECEIPT*).
+- *Exit:* *"a member's tombstone of a used marker leaves the grant used at a second gateway and at the same
+  gateway after a restart"* — *TOMBSTONE* ×3; *"a tombstone planted before the first use refuses the call (the
+  receipt) and reads used"* — *PLANTED* (read before the write: refused as used) and *RECEIPT* (landing between
+  the read and the write: refused by the receipt, then reads used); *"a tombstone delivered to a second gateway
+  before the marker reads used there"* — *DELIVERED FIRST*; *"a garbage overwrite at a higher stamp reads used"*
+  — *GARBAGE*; *"a replay of an earlier genuine release over a later use releases nothing"* — *REPLAY*; *"a forged
+  release under another node's key releases nothing"* — *FORGED*; and, not on the list, a member's own
+  marker-and-release pair — *OWN PAIR*.
+- *Format:* *"a KV value change … read for one release beside the old form, counted"* — `is_legacy_marker`,
+  `Odd::Legacy` (*OLD FORM*); *"an upgrade note and a mixed-version rule"* — `deprecations.md` §106; *"A new
+  journal stream … additive on disk, with a lock-order row for its reader"* — lock-order row 79; *"No wire-frame
+  change, no change to an existing on-disk format"* — none made.
+- **The inventory row moved to *Partly*, not *Meets*,** and `what-is-proven.md`'s first *Not yet shown* row is
+  narrowed, not moved up: condition (c) holds at the door that made the use, and at another door only until a
+  planted tombstone is collected — this row's own *Does not*. The row's Exit sentence *"The inventory rows move to
+  Meets"* is **not delivered** for the use marker, for that reason, and is not for the other records until PRs
+  2–4.
+- **Not built in this PR:** PRs 2–4. The journal is not compacted. **I4's collector:** at `ae592416` nothing
+  collects any `grant/` key — I4's PR 1a and 1b reclaim only the execution authority's in-memory `call:` windows
+  (`reclaim_call_windows`) — so no collector change was needed or made; the signed markers and releases under
+  `grant/…/used/`, and the retention of the node-local journal (a door forgets a use in memory 3 720 s after it;
+  the file only grows), are **due with I4's collector** (`identity-and-lifecycle.md`, row I4, the gateway PR).
+- **Stated on the feature page and in §106:** D12's concurrent admission, with what a third gateway sees (the
+  winner under LWW — a marker, or a release, both read used); the tombstone horizon at a door that never recorded
+  the use; a member spending a grant by writing first; the retry that must return to the releasing node.
 
 **Size:** L — four PRs; the first is M to L and is the one that closes the open row.
 

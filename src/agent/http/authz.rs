@@ -718,6 +718,8 @@ pub(crate) struct GrantClaim {
     term: String,
     point: String,
     marker: String,
+    /// The use this door recorded in its journal and signed into the marker (critique plan row CR2).
+    use_id: String,
 }
 
 /// The provider's refusals that are answered **before anything runs**: the receive boundary's check of the caller
@@ -747,12 +749,13 @@ pub(crate) fn pre_execution_refusal(bytes: &[u8]) -> Option<String> {
 /// **Give back a grant's use the provider never spent** (identity-and-lifecycle I1, #745's review). The gateway claims
 /// a grant's use before it dispatches — the marker on disk before the work can run (R2) — and a provider whose fold of
 /// client certificates lags the gateway's answers `client_key_unknown`; a retry was then refused `GrantUsed` although
-/// nothing ran. When the reply is one of [`pre_execution_refusal`]'s, the marker is tombstoned and then the in-memory
-/// claim released, so the grant admits the retry once. The gateway's own refusals before dispatch — a failed exchange,
+/// nothing ran. When the reply is one of [`pre_execution_refusal`]'s, the use is released — in this node's journal and
+/// by a signed release over the marker (critique plan row CR2) — and then the in-memory claim, so the grant admits
+/// the retry once **at this gateway node**; another gateway reads the release as used. The gateway's own refusals before dispatch — a failed exchange,
 /// an envelope too large, a provider without the caller context — release it too, and need no trust in a provider.
 /// **At `/mcp` only**: the A2A doors' skills and an embedder's
 /// kinds answer with raw bytes the node did not author, so a refusal there spends the grant. Sound against R2: the marker guards *work that may have run*,
-/// and none did; a crash before the tombstone is durable leaves the grant spent — the safe side. **Trusts the
+/// and none did; a crash before the release is durable leaves the grant spent — the safe side. **Trusts the
 /// provider's answer**: a provider that ran the call and answered a refusal could have it run twice, which a provider
 /// able to run calls at will could do anyway. A timeout, a tool error or any other reply leaves the grant spent.
 #[cfg(all(feature = "gateway", feature = "tls"))]
@@ -774,17 +777,21 @@ pub(crate) async fn release_grant_claim_after(ctx: &Arc<TaskCtx>, preflight: &Pr
     release_unspent_grant_claim(ctx, preflight).await.then_some(reason)
 }
 
-/// Give back the grant use `preflight` claimed, for a call this node knows did not run: the marker tombstoned, then
-/// the in-memory claim released. `false` when the permit claimed none. The caller decides that nothing ran —
-/// [`release_grant_claim_after`] from the provider's answer or its own refusal to dispatch, the provider's
-/// registration from its own refusal before any handler (`call_mandate_not_established`), which trusts no reply.
+/// Give back the grant use `preflight` claimed, for a call this node knows did not run: the release in this node's
+/// journal, then **the signed release over the marker** (critique plan row CR2 — a tombstone before it, which now
+/// reads used), then the in-memory claim. `false` when the permit claimed none, or when the release did not take —
+/// the journal refused it, or the release lost to a newer value at the key — and the grant stays spent. The caller
+/// decides that nothing ran: [`release_grant_claim_after`] from the provider's answer or its own refusal to dispatch,
+/// the provider's registration from its own refusal before any handler (`call_mandate_not_established`), which
+/// trusts no reply. **Honoured at this node's door only**: every other door of the class reads the release as used
+/// (`grant_use`), so the retry must come back here.
 #[cfg(all(feature = "gateway", feature = "tls"))]
 pub(crate) async fn release_unspent_grant_claim(ctx: &Arc<TaskCtx>, preflight: &Preflight) -> bool {
     let Preflight::Proceed { grant_claim: Some(c), .. } = preflight else { return false };
     let Some(authority) = ctx.execution_authority.get() else { return false };
-    mycelium_core::ops::kv_delete_async(ctx, Arc::from(c.marker.as_str())).await;
+    let released = super::super::grant_use::release_use(ctx, &c.marker, &c.use_id).await;
     authority.release_grant_use(&c.holder, &c.scope, &c.term, &c.point);
-    true
+    released
 }
 
 /// The MCP tool-call route, as it is named in every piece of evidence it produces.
@@ -1493,17 +1500,18 @@ impl Settling {
         }
         // Adopter-surface X3 (second PR): a grant admits **one call at each door**. Claimed here — once per call,
         // after the permit's history and seats and before its record — not inside the history loop, whose retry would
-        // meet its own marker (#678's review, finding 2). The authority's map is the atomic half (two concurrent
-        // presentations meet there), the marker under the request (`…/used/{door}`, on the WAL) the durable half,
-        // read first so a restart does not forget a use. A used grant **denies**, naming the door, and gives back the
-        // history permit; a grant admitted here is spent at this door whether or not the work completes, as a nonce
-        // is — a refusal earlier in this settling (a full fleet counter) spends nothing.
+        // meet its own marker (#678's review, finding 2). Critique plan row CR2: the use is read from this node's own
+        // journal first, then from the marker key, where anything other than *never written* reads used
+        // (`grant_use::reads_used`) — so a member's tombstone or overwrite re-arms nothing; the authority's map is
+        // the atomic half (two concurrent presentations meet there). A used grant **denies**, naming the door, and
+        // gives back the history permit; a grant admitted here is spent at this door whether or not the work
+        // completes, as a nonce is — a refusal earlier in this settling (a full fleet counter) spends nothing.
         let grant_use = match (&outcome, &envelope.mandate, ctx.execution_authority.get()) {
             (Ok(Some(permit)), Some(b), Some(authority))
                 if b.scope.starts_with(crate::mandate::grant::GRANT_SCOPE_PREFIX) && b.state == ae::MandateState::Established =>
             {
                 let marker = format!("grant/{}/{}/used/{point}", super::gateway_authority::grant_holder_segment(b.holder.as_str()), b.term.as_str());
-                let used = mycelium_core::ops::kv_get(ctx, &marker).is_some()
+                let used = super::super::grant_use::reads_used(ctx, &marker)
                     || !authority.claim_grant_use(b.holder.as_str(), &b.scope, b.term.as_str(), &point, envelope.not_after_ms);
                 Some((marker, used, permit.policy_revision.clone(), (b.holder.as_str().to_string(), b.scope.clone(), b.term.as_str().to_string())))
             }
@@ -1521,24 +1529,42 @@ impl Settling {
                 ));
             }
             Some((marker, false, policy_revision, (holder, scope, term))) => {
-                // The marker is on disk before the work runs, or the work does not run (external review
-                // 2026-10-31, F2; D2): a dropped append was counted and the call went ahead, so after a crash the
-                // door had forgotten the use. A use that cannot be recorded ran nothing, so it is not spent: the
-                // claim is released, and a retry once the disk is repaired runs once — the answer a restart gives
-                // too, since no marker was written.
-                if let Err(reason) = super::super::state_machine::write_owned_kv_durable(ctx, &marker, ctx.hlc.decision_now_ms().to_string().into_bytes()).await {
-                    if let Some(authority) = ctx.execution_authority.get() {
-                        authority.release_grant_use(&holder, &scope, &term, &point);
+                // The use is on this node's disk before the work runs, or the work does not run (external review
+                // 2026-10-31, F2; D2) — in the journal, fsynced, then the signed marker in the KV. A use that cannot
+                // be recorded ran nothing, so it is not spent: the claim is released, and a retry once the disk is
+                // repaired runs once. A marker write that **lost to a newer value at the key** (CR2: the receipt's
+                // `Superseded`) means something was written there that this door did not read — a tombstone or a
+                // value at a later stamp — so the call is refused by name and the grant stays used at this door.
+                let use_id = super::super::grant_use::new_use_id(ctx, &marker, &envelope.attempt_id);
+                match super::super::grant_use::record_use(ctx, &marker, &use_id).await {
+                    Err(reason) => {
+                        if let Some(authority) = ctx.execution_authority.get() {
+                            authority.release_grant_use(&holder, &scope, &term, &point);
+                        }
+                        if admitted && let Some(index) = history_index {
+                            index.retract(&point, &envelope.actor, &envelope.attempt_id);
+                        }
+                        outcome = Err(ae::PreflightRefusal::Denied(
+                            ae::Decision::deny(format!("grant use not recorded durably at {point}: {reason}"), policy_revision)
+                                .checking(["grant use recorded durably before the work"]),
+                        ));
                     }
-                    if admitted && let Some(index) = history_index {
-                        index.retract(&point, &envelope.actor, &envelope.attempt_id);
+                    Ok(false) => {
+                        if admitted && let Some(index) = history_index {
+                            index.retract(&point, &envelope.actor, &envelope.attempt_id);
+                        }
+                        outcome = Err(ae::PreflightRefusal::Denied(
+                            ae::Decision::deny(
+                                format!(
+                                    "the grant's use marker at {point} was superseded by a newer value at its key, so the use is not established and the call does not run; the grant stays used at this door ({})",
+                                    super::super::grant_use::GRANT_USE_SUPERSEDED
+                                ),
+                                policy_revision,
+                            )
+                            .checking(["grant use marker's write receipt: applied, not superseded"]),
+                        ));
                     }
-                    outcome = Err(ae::PreflightRefusal::Denied(
-                        ae::Decision::deny(format!("grant use not recorded durably at {point}: {reason}"), policy_revision)
-                            .checking(["grant use recorded durably before the work"]),
-                    ));
-                } else {
-                    claimed = Some(GrantClaim { holder, scope, term, point: point.clone(), marker });
+                    Ok(true) => claimed = Some(GrantClaim { holder, scope, term, point: point.clone(), marker, use_id }),
                 }
             }
             None => {}

@@ -275,6 +275,8 @@ fn spawn_handler_with(
         #[cfg(all(feature = "gateway", feature = "tls"))]
         execution_authority: std::sync::OnceLock::new(),
         #[cfg(all(feature = "gateway", feature = "tls"))]
+        grant_uses: Default::default(),
+        #[cfg(all(feature = "gateway", feature = "tls"))]
         provider_enforcement: std::sync::atomic::AtomicBool::new(false),
         #[cfg(feature = "compliance")]
         declared_authority: std::sync::OnceLock::new(),
@@ -4428,6 +4430,8 @@ async fn test_subscribe_notified_via_gossip() {
         ae_tally_lock: std::sync::Mutex::new(()),
         #[cfg(all(feature = "gateway", feature = "tls"))]
         execution_authority: std::sync::OnceLock::new(),
+        #[cfg(all(feature = "gateway", feature = "tls"))]
+        grant_uses: Default::default(),
         #[cfg(all(feature = "gateway", feature = "tls"))]
         provider_enforcement: std::sync::atomic::AtomicBool::new(false),
         #[cfg(feature = "compliance")]

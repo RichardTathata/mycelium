@@ -551,9 +551,9 @@ fn describe(p: &crate::agent::http::Preflight) -> String {
 /// **A grant the provider refused before running is given back** (I1's PR 4, #745's review, item 1). The gateway's
 /// fold of client certificates can lead the provider's: the gateway judges the key current, claims the grant's use
 /// and dispatches, and the provider answers `client_key_unknown` — before anything ran. That answer, `stale`, and the
-/// other `client_signature_*` / `client_key_*` refusals tombstone the gateway's marker and release its claim, so the
-/// retry is admitted once; any other reply leaves the grant spent. Driven at the preflight: the permit claims the
-/// grant; the provider's `client_key_unknown` body releases it (the marker gone, a second permit admitted); a tool's
+/// other `client_signature_*` / `client_key_*` refusals release the gateway's use — its journal, and a signed release
+/// over its marker (critique plan row CR2) — and its claim, so the retry is admitted once at this gateway; any other reply leaves the grant spent. Driven at the preflight: the permit claims the
+/// grant; the provider's `client_key_unknown` body releases it (the marker replaced by the release, a second permit admitted); a tool's
 /// answer does not (the third refused `GrantUsed`). Seen failing first with the release doing nothing (the second
 /// permit refused: the grant used at the gateway).
 #[tokio::test]
@@ -578,7 +578,10 @@ async fn a_grant_the_provider_refused_before_running_is_given_back() {
     // The provider's refusal as a tool's serve loop answers it.
     let refused_body = bytes::Bytes::from(serde_json::json!({"jsonrpc": "2.0", "id": 1, "error": {"code": -32022, "message": "caller context refused: the client's signature on this call was refused: client_key_unknown", "data": {"reason": "client_key_unknown"}}}).to_string());
     let released = release_grant_claim_after(&ctx, &first, &Ok(refused_body)).await;
-    let marker_gone = mycelium_core::ops::kv_get(&ctx, &marker).is_none();
+    // Critique plan row CR2: the release is a signed record over the marker, not a tombstone (which reads used).
+    let marker_gone = mycelium_core::ops::kv_get(&ctx, &marker)
+        .and_then(|v| serde_json::from_slice::<crate::agent::grant_use::UseRecord>(&v).ok())
+        .is_some_and(|r| r.kind == crate::agent::grant_use::UseKind::Release && r.node == a.node_id().to_string());
     let second = permit().await;
     let kept = release_grant_claim_after(&ctx, &second, &Ok(bytes::Bytes::from_static(br#"{"jsonrpc":"2.0","id":1,"result":{"content":[]}}"#))).await;
     let third = permit().await;
@@ -587,7 +590,7 @@ async fn a_grant_the_provider_refused_before_running_is_given_back() {
 
     assert!(claimed, "the first permit claimed the grant at the gateway, its marker on disk: {}; markers {:?}", describe(&first), used_markers);
     assert_eq!(released.as_deref(), Some("client_key_unknown"));
-    assert!(marker_gone, "the marker was tombstoned");
+    assert!(marker_gone, "the marker was replaced by this gateway's signed release");
     assert!(matches!(second, Preflight::Proceed { .. }), "RELEASED: the retry under the same grant was refused");
     assert_eq!(kept, None, "a tool's answer gives nothing back");
     assert!(matches!(third, Preflight::Refuse(_)), "the grant is spent after a call that ran");
@@ -597,7 +600,7 @@ async fn a_grant_the_provider_refused_before_running_is_given_back() {
 /// claims a single-use grant, then the dispatch fails at the gateway — the IdP's exchange yields no token
 /// (`oidc_exchange_unreachable`), or the envelope is too large, or the provider has no caller context, or no context
 /// reached the dispatch (`caller_context_missing`, a handler outside the auth layer) — and nothing
-/// ran. The use is released (the marker gone), and the retry is admitted once; a timeout, which may have run, leaves it
+/// ran. The use is released (a signed release over the marker), and the retry is admitted once; a timeout, which may have run, leaves it
 /// spent. Seen failing first with the release reading only a provider's reply (the retry refused: the grant used).
 #[tokio::test]
 async fn a_grant_is_given_back_when_the_gateway_refused_before_sending() {
@@ -1225,3 +1228,8 @@ async fn an_issue_the_node_cannot_sign_records_that_nothing_ran() {
     let executions: Vec<Execution> = journal.iter().filter(|r| r.kind == RecordKind::Execution && r.operation_id == decided).map(|r| r.execution).collect();
     assert_eq!(executions, vec![Execution::None], "RECORDED: nothing ran");
 }
+
+/// Critique plan row CR2 (first PR): the use marker a member cannot re-arm, at the door that made the use and at a
+/// second one. A child module, for this file's fleet and grant helpers.
+#[path = "grant_use_tests.rs"]
+mod grant_use;

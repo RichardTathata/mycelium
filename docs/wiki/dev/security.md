@@ -487,8 +487,9 @@ can write or tombstone any key — Layer I's posture, kept — so a record that 
 cancellation, retention or audit is never trusted for where it sits. The rule constrains how an upper layer stores
 and reads its own state; it adds no write guard. Its four conditions, what it does not cover (availability, and soft
 state whose worst case is detected and bounded), and the inventory of every namespace a decision reads are on
-[owner-signed-records](owner-signed-records.md). The inventory's open rows include the grant use marker, the audit
-chain's unsigned head, unsigned `cap/`/`req/`/`prov-shed` advertisements, the tally and exposure summaries, and a
+[owner-signed-records](owner-signed-records.md). The inventory's open rows include the audit
+chain's unsigned head, the grant `consumed` and `revoked` markers (the use marker is *Partly* since critique plan
+CR2's first PR: closed at the door that made the use, a tombstone-horizon limit at any other), unsigned `cap/`/`req/`/`prov-shed` advertisements, the tally and exposure summaries, and a
 caller envelope's key-less principal.
 
 ## WS2 — tamper-evident audit (`compliance`)
