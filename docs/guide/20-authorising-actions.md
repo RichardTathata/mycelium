@@ -843,6 +843,15 @@ edge's two call shapes — `skill.invoke` on `skill:{ns}/{name}` and `tools/call
 - **`ungoverned edge`** (warning): the requirer declares no mandate and no rule, while other units
   do. Its edge is outside the authority vocabulary.
 
+**Not built: an edge to a hosted capability** (2026-11-14,
+[ledger](../operations/what-is-proven.md#wire-check-does-not-know-the-hosted-capability-shape)). The two shapes
+are the only ones the overlay tries. A provider with enforcement on decides a member's direct call of a hosted
+component outside the `tool` namespace as `cap.invoke` on `cap:{ns}/{name}`, for the actor `node:{sender}`
+([deprecations §108](deprecations.md)). For such an edge the overlay is wrong in both directions: it reports
+`unauthorisable edge` when the only rule is the `cap.invoke` one, and it reports the edge clean on a
+`skill.invoke` rule that provider never reads (the co-op fixture's `auditor.toml` over `route-optimizer.toml`).
+Read its verdict by hand for those edges until the overlay learns the shape.
+
 An edge with no provider is skipped here; it is already reported as unwired. The overlay is on by
 default and `--no-authority` turns it off. An error makes the check exit 1. The whole
 declare-check-deploy loop is [the capability lifecycle](../operations/capability-lifecycle.md).

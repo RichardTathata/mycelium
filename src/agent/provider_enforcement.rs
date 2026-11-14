@@ -42,9 +42,15 @@
 //! either. A `tool/{name}` component is also the MCP tool `{name}` (the host's bridge), so it is decided as that
 //! tool — the operation, the resource and the arguments the MCP tool loop decides — and one rule, and one mandate's
 //! arguments digest, cover both doors. Any other namespace is decided under the one operation `cap.invoke`. A
-//! payload that is not JSON is carried as `{"payload_b64": …}`; so a JSON payload of exactly that shape and the
-//! bytes it encodes derive the same arguments — the one pair of payloads a digest does not tell apart. The
-//! payload carries no causal fields ([`causal_meta`]): such a call is read as a root.
+//! payload that is not JSON is carried as `{"payload_b64": …}`.
+//!
+//! **Decided is handed.** The MCP tool loop hands its handler the value this module decided on
+//! (`mcp::decided_arguments`: the call's `arguments`, `{}` when it has none). The direct door's receiver is handed
+//! the payload's **bytes**, and the decision is on their parse, so a JSON payload that repeats an object key is
+//! refused `malformed_call` ([`repeats_a_key`]) rather than decided on the last value and read by a guest as the
+//! first. What an arguments digest still does not tell apart there: a JSON payload of exactly the shape
+//! `{"payload_b64": …}` and the bytes it encodes; and, by design, JSON texts RFC 8785 writes alike (`1`, `1.0`,
+//! `1e0`; two key orders). The payload carries no causal fields ([`causal_meta`]): such a call is read as a root.
 //!
 //! **The bridge's own call is not a second door.** The host's MCP tool handler, which runs only after the MCP tool
 //! loop has decided the call as its client, hands the admitted arguments to the component's serve loop over a
@@ -793,6 +799,56 @@ pub(crate) fn protected_here(cfg: &crate::config::GossipConfig, kind: &str) -> b
     super::is_protected_kind(cfg, kind) || kind.starts_with(super::HOSTED_CAPABILITY_KIND_PREFIX)
 }
 
+/// Is `payload` JSON in which some object, at any depth, carries a key twice? `false` for bytes that are not JSON.
+/// Builds nothing but each object's key set.
+pub(crate) fn repeats_a_key(payload: &[u8]) -> bool {
+    use serde::de::{DeserializeSeed, Error as _, MapAccess, SeqAccess, Visitor};
+    const REPEATED: &str = "mycelium: repeated object key";
+    struct Walk;
+    impl<'de> DeserializeSeed<'de> for Walk {
+        type Value = ();
+        fn deserialize<D: serde::Deserializer<'de>>(self, d: D) -> Result<(), D::Error> {
+            d.deserialize_any(Walk)
+        }
+    }
+    impl<'de> Visitor<'de> for Walk {
+        type Value = ();
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("any JSON value")
+        }
+        fn visit_bool<E>(self, _: bool) -> Result<(), E> { Ok(()) }
+        fn visit_i64<E>(self, _: i64) -> Result<(), E> { Ok(()) }
+        fn visit_u64<E>(self, _: u64) -> Result<(), E> { Ok(()) }
+        fn visit_f64<E>(self, _: f64) -> Result<(), E> { Ok(()) }
+        fn visit_str<E>(self, _: &str) -> Result<(), E> { Ok(()) }
+        fn visit_unit<E>(self) -> Result<(), E> { Ok(()) }
+        fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<(), A::Error> {
+            while seq.next_element_seed(Walk)?.is_some() {}
+            Ok(())
+        }
+        fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<(), A::Error> {
+            let mut seen = std::collections::HashSet::new();
+            while let Some(key) = map.next_key::<String>()? {
+                if !seen.insert(key) {
+                    return Err(A::Error::custom(REPEATED));
+                }
+                map.next_value_seed(Walk)?;
+            }
+            Ok(())
+        }
+    }
+    // Only a payload that is JSON as a whole: a truncated text can repeat a key before it fails to parse, and that
+    // one is not JSON — it is carried as `{"payload_b64"}`.
+    if serde_json::from_slice::<serde::de::IgnoredAny>(payload).is_err() {
+        return false;
+    }
+    let mut de = serde_json::Deserializer::from_slice(payload);
+    match Walk.deserialize(&mut de).and_then(|()| de.end()) {
+        Ok(()) => false,
+        Err(e) => e.to_string().contains(REPEATED),
+    }
+}
+
 /// The operation, resource and arguments of a protected call, derived as the gateway derives them.
 pub(crate) fn derive(
     ctx: &TaskCtx,
@@ -807,7 +863,7 @@ pub(crate) fn derive(
         let name = call["params"]["name"]
             .as_str()
             .ok_or_else(|| ProviderRefusal::local("malformed_call", "the tool call names no tool".into()))?;
-        let arguments = call["params"].get("arguments").cloned().unwrap_or_else(|| json!({}));
+        let arguments = super::mcp::decided_arguments(&call);
         return Ok(("tools/call".into(), format!("tool:{name}@{me}"), arguments));
     }
 
@@ -843,6 +899,16 @@ pub(crate) fn derive(
         // generic arm carries it.
         let arguments = serde_json::from_slice::<Value>(payload)
             .unwrap_or_else(|_| json!({ "payload_b64": base64::engine::general_purpose::STANDARD.encode(payload) }));
+        // The component is handed the payload's **bytes**, and the decision is made on their parse — which keeps the
+        // last of a repeated object key. A guest whose parser keeps the first would act on a value no rule and no
+        // digest saw (#788's review, F2), so a payload that is JSON and repeats a key in any object is refused. The
+        // MCP door has no such gap: its handler is handed the parsed value it was decided on.
+        if repeats_a_key(payload) {
+            return Err(ProviderRefusal::local(
+                "malformed_call",
+                format!("the `{kind}` payload repeats an object key: the provider would decide on one value and the component could read another"),
+            ));
+        }
         // The `tool` namespace is decided as the tool it is — the operation and the resource the MCP tool loop
         // decides — so one rule covers both doors; any other namespace under the family's own operation.
         return Ok(if ns == "tool" {

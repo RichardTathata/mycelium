@@ -385,15 +385,23 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   tool handler hands the admitted arguments to the component's serve loop inside the process, so `/mcp` → tool →
   component is decided once at the provider, as the client, and nothing exempts "a call from this node" — a frame
   naming the provider as its sender is decided as `node:{provider}`. **Upgrade:** an enforcing provider whose
-  hosted capability members call directly needs a rule for it (`operation = "cap.invoke"`,
+  hosted capability members call directly needs a rule for it (`actor = "node:<caller>"` or `"*"` — a member is
+  `node:{sender}`, and a unit's principal does not match — `operation = "cap.invoke"`,
   `resource = "cap:{ns}/{name}"`; for a `tool/*` component the tool's own rule, which must name the member), or
   the call is refused `authority_not_established`; an evaluator built in code maps `cap.invoke`. Under
   `[authority]` a bare `cap:{ns}/{name}` is qualified to the node. A receiver or tap on `cap.invoke/tool/{name}`
   no longer sees calls that arrive through `/mcp`. A node without enforcement and without a cohort budget is
-  unchanged, and so is every call through `/mcp`. `is_protected_kind` is unchanged (the exact-kind list);
+  unchanged at this door, and so is every call through `/mcp`. `is_protected_kind` is unchanged (the exact-kind list);
   `HOSTED_CAPABILITY_OPERATION` and `hosted_capability_of` are new. **Not built:** `bulk_serve` and a raw
-  `signal_rx` receiver run no provider check, for this family as for any; a component's call, once begun, is not
-  interrupted by a cancel.
+  `signal_rx` receiver run no provider check, for this family as for any; a guest call that has begun is not
+  interrupted by a cancel or a lapse (a tool call still queued when its handler has gone is not begun; a queued
+  direct call is); `wire-check`'s authority overlay does not know the `cap.invoke` shape — a false red on a
+  `cap.invoke` rule and a false green on a `skill.invoke` one, to be closed before the MINOR that ships §108.
+  **Decided is handed** (#788's review): an `mcp.invoke` that reaches the provider with no `arguments` member (a
+  member's direct call; the gateway's `/mcp` sends an explicit `null`, unchanged) is decided on `{}` and its
+  handler is now handed `{}`, where it was handed `null`, enforcement on or off; and at the direct door a
+  JSON payload that repeats an object key is refused `malformed_call` at an enforcing provider, because the
+  component is handed the bytes and the provider decides on their parse.
 
 - **An enforcing provider applies its rules to `llm.invoke`** (#781's review, F1; `deprecations.md` §105). The
   node's built-in `llm.invoke` provider — a prompt skill, a stem's `[[serve]]` model, `mycelium-reason`'s

@@ -5,12 +5,19 @@
 //! One node is the provider and the caller. The receivers below stand where a hosted component's serve loop stands
 //! (`mycelium-wasm-host`'s `serve_loop` reads the same `rpc_rx`), and each counts what reaches it, so every
 //! "nothing ran" is read from the receiver, not from the absence of an answer. The wasm host's own tests ask the same
-//! questions of a real component and of its MCP bridge (`mycelium-wasm-host/src/provisioner.rs`).
+//! questions of a real component and of its MCP bridge
+//! (`mycelium-wasm-host/tests/hosted_capability_enforcement.rs`).
 //!
 //! Needs `gateway` + `tls` (the provider check's own gate): it runs on both of CI's lib lines.
 
 use super::action_evaluator::{AeEvidence, DecisionKind, RecordKind};
+use super::gateway_authority::{arguments_digest, possession_request, ExecutionAuthority, PresentedMandate};
 use super::gateway_caller::{frame_with_context_and_mandate, node_principal};
+use crate::knowledge::IssuerId;
+use crate::mandate::authority::{ClockModel, ExecutionGate, FreshnessPolicy, ResourceTier, RevocationCheckpoint, SignedRevocationCheckpoint};
+use crate::mandate::grant::{possession_message, EntitlementTable, GrantVerifier, SignedMandateGrant};
+use crate::mandate::{Mandate, PrincipalId, ResourceAuthority, TermId};
+use ed25519_dalek::SigningKey;
 use super::provider_enforcement::{derive, protected_here, ENFORCEMENT_POINT_PROVIDER};
 use crate::agent::evidence_journal::{EvidenceJournal, EvidenceProfile};
 use crate::knowledge::issuer::TrustedExternalIssuers;
@@ -27,7 +34,7 @@ use std::time::Duration;
 const CLIENT: &str = "token:gw/agent-1";
 
 /// The capabilities the node "hosts", as `(namespace, name)`.
-const HOSTED: &[(&str, &str)] = &[("tool", "echo"), ("tool", "secret"), ("tool", "clientonly"), ("route", "optimize"), ("route", "secret"), ("route", "slow")];
+const HOSTED: &[(&str, &str)] = &[("tool", "echo"), ("tool", "secret"), ("tool", "clientonly"), ("tool", "guarded"), ("route", "optimize"), ("route", "secret"), ("route", "slow")];
 
 fn kind(ns: &str, name: &str) -> String {
     format!("{}{ns}/{name}", crate::HOSTED_CAPABILITY_KIND_PREFIX)
@@ -55,6 +62,11 @@ struct Door {
     ran: Arc<Mutex<HashMap<String, usize>>>,
     /// The MCP tool `echo`'s runs.
     tool_ran: Arc<AtomicUsize>,
+    /// The MCP tool `guarded`'s runs.
+    guarded_ran: Arc<AtomicUsize>,
+    /// The operator whose `depot` mandates the node's authority honours, and the client's own key.
+    operator: SigningKey,
+    holder: SigningKey,
     /// Requests kept in flight (`Opts::hold`).
     held: Arc<Mutex<Vec<super::rpc::RpcRequest>>>,
 }
@@ -70,8 +82,8 @@ impl Drop for Door {
 }
 
 /// One node. Its policy: the node itself may call the tool `echo` and the capability `route/optimize`; the client
-/// may call the tool `clientonly`; `route/slow` is allowed to anyone and **cancellable**; `tool/secret` and
-/// `route/secret` have a receiver and no rule.
+/// may call the tool `clientonly`, and the tool `guarded` under a `depot` mandate; `route/slow` is allowed to anyone
+/// and **cancellable**; `tool/secret` and `route/secret` have a receiver and no rule.
 async fn door(opts: Opts) -> Door {
     let port = crate::test_util::alloc_port();
     let id = NodeId::new("127.0.0.1", port).unwrap();
@@ -91,9 +103,19 @@ async fn door(opts: Opts) -> Door {
             .map_action(crate::HOSTED_CAPABILITY_OPERATION, "*")
             .allow(Rule::new(me.clone(), "tools/call", format!("tool:echo@{id}")))
             .allow(Rule::new(CLIENT, "tools/call", format!("tool:clientonly@{id}")))
+            .allow(Rule::new(CLIENT, "tools/call", format!("tool:guarded@{id}")).requiring_mandate("depot"))
             .allow(Rule::new(me, crate::HOSTED_CAPABILITY_OPERATION, format!("cap:route/optimize@{id}")))
             .allow(Rule::new("*", crate::HOSTED_CAPABILITY_OPERATION, format!("cap:route/slow@{id}")).cancellable()),
     ));
+    let (operator, holder) = (SigningKey::from_bytes(&[60u8; 32]), SigningKey::from_bytes(&[62u8; 32]));
+    let mut entitlements = EntitlementTable::new();
+    entitlements.entitle("depot", PrincipalId::new("operator:acme").unwrap());
+    let mut external = TrustedExternalIssuers::new();
+    external.trust(IssuerId::new("operator:acme").unwrap(), operator.verifying_key().to_bytes()).unwrap();
+    external.trust(IssuerId::new(CLIENT).unwrap(), holder.verifying_key().to_bytes()).unwrap();
+    let f = 120_000;
+    let gate = ExecutionGate::strict(ResourceAuthority::new("depot", 1), ResourceTier::Serialised, ClockModel { skew_ms: f / 20 }, FreshnessPolicy { freshness_ms: f, interval_ms: f / 4, delivery_ms: f / 12 }).unwrap();
+    a.with_execution_authority(Arc::new(ExecutionAuthority::new(gate, GrantVerifier::new(entitlements), external)));
     if opts.enforcing {
         a.with_provider_enforcement();
     }
@@ -119,20 +141,21 @@ async fn door(opts: Opts) -> Door {
             }
         });
     }
-    // The MCP tool `echo`: what the wasm host's bridge registers for a `tool/echo` component.
-    let tool_ran = Arc::new(AtomicUsize::new(0));
-    {
-        let tool_ran = Arc::clone(&tool_ran);
-        std::mem::forget(a.mcp().register_mcp_tool("echo", json!({"type": "object"}), move |args| {
-            let tool_ran = Arc::clone(&tool_ran);
+    // The MCP tools `echo` and `guarded`: what the wasm host's bridge registers for a `tool/{name}` component. Each
+    // answers the arguments it was handed.
+    let (tool_ran, guarded_ran) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+    for (name, counter) in [("echo", &tool_ran), ("guarded", &guarded_ran)] {
+        let counter = Arc::clone(counter);
+        std::mem::forget(a.mcp().register_mcp_tool(name, json!({"type": "object"}), move |args| {
+            let counter = Arc::clone(&counter);
             async move {
-                tool_ran.fetch_add(1, Ordering::SeqCst);
+                counter.fetch_add(1, Ordering::SeqCst);
                 Ok(args)
             }
         }));
     }
     tokio::time::sleep(Duration::from_millis(150)).await;
-    Door { a, dir, ran, tool_ran, held }
+    Door { a, dir, ran, tool_ran, guarded_ran, held, operator, holder }
 }
 
 impl Door {
@@ -155,6 +178,36 @@ impl Door {
         let framed = frame_with_context_and_mandate(&self.a.task_ctx, self.a.node_id(), principal, &[], Bytes::copy_from_slice(payload), None, claim).expect("fits");
         let reply = super::rpc::rpc_call_framed(&self.a.task_ctx, self.a.node_id().clone(), Arc::from(kind), framed, Duration::from_secs(20)).await.expect("a reply");
         serde_json::from_slice(&reply).unwrap_or_else(|_| json!({ "raw": String::from_utf8_lossy(&reply) }))
+    }
+    /// A call of `kind` framed for `principal`, presenting `mandate`.
+    async fn call_under(&self, principal: &str, kind: &str, payload: &[u8], mandate: &Value) -> Value {
+        let framed = frame_with_context_and_mandate(&self.a.task_ctx, self.a.node_id(), principal, &[], Bytes::copy_from_slice(payload), Some(mandate), None).expect("fits");
+        let reply = super::rpc::rpc_call_framed(&self.a.task_ctx, self.a.node_id().clone(), Arc::from(kind), framed, Duration::from_secs(20)).await.expect("a reply");
+        serde_json::from_slice(&reply).unwrap_or_else(|_| json!({ "raw": String::from_utf8_lossy(&reply) }))
+    }
+    /// The operator's first checkpoint for `depot`, revoking nothing: the authority has heard from it.
+    fn offer_depot_checkpoint(&self) {
+        let c = RevocationCheckpoint { authority: PrincipalId::new("operator:acme").unwrap(), scope: "depot".into(), seq: 1, issued_at_ms: self.a.task_ctx.hlc.decision_now_ms(), revoked: Default::default() };
+        let signed = SignedRevocationCheckpoint { signature: mycelium_core::tls::sign_bytes(&self.operator, &c.canonical_bytes()).to_vec(), checkpoint: c };
+        self.a.offer_revocation_checkpoint(&signed).unwrap();
+    }
+    /// A `depot` mandate held by [`CLIENT`] for the tool `guarded`, its possession proof over **the MCP door's**
+    /// operation, resource and arguments digest: `tools/call`, `tool:guarded@{self}`, the digest of `arguments`.
+    fn tool_mandate(&self, arguments: &Value) -> Value {
+        let m = Mandate {
+            holder: PrincipalId::new(CLIENT).unwrap(),
+            established_by: PrincipalId::new("operator:acme").unwrap(),
+            purpose: "depot".into(),
+            scope: "depot".into(),
+            operations: vec!["tools/call:tool:guarded".to_string()],
+            epoch: 1,
+            term: TermId::new("t1").unwrap(),
+            valid_from_ms: 0,
+            valid_until_ms: self.a.task_ctx.hlc.decision_now_ms() + 3_000_000,
+        };
+        let proof = mycelium_core::tls::sign_bytes(&self.holder, &possession_message(&m, &possession_request("tools/call", &format!("tool:guarded@{}", self.me()), &arguments_digest(arguments))));
+        let grant = SignedMandateGrant { signature: mycelium_core::tls::sign_bytes(&self.operator, &m.canonical_bytes()).to_vec(), mandate: m };
+        serde_json::to_value(PresentedMandate { grant, possession: base64::Engine::encode(&base64::engine::general_purpose::STANDARD, proof) }).unwrap()
     }
     /// The provider's decision records, as `(subject, operation, resource, decision)`.
     fn decisions(&self) -> Vec<(String, String, String, DecisionKind)> {
@@ -296,6 +349,77 @@ async fn a_frame_naming_this_node_as_its_sender_is_decided_as_the_node() {
     d.a.shutdown().await;
 }
 
+/// **A mandate bound at the MCP door's digest verifies on a direct call of the same tool and arguments, and not for
+/// other arguments** (#788's review, F4). The client holds a `depot` mandate for the tool `guarded`, its possession
+/// proof signed over `tools/call`, `tool:guarded@{self}` and the digest of the tool call's `arguments` — what the
+/// MCP door decides on. Presented at the MCP door the tool runs; presented on a direct `cap.invoke/tool/guarded`
+/// whose payload is those arguments, the capability runs under the same mandate; with the same mandate and other
+/// arguments the direct call is refused and nothing runs; with no mandate it is refused. So "one mandate covers both
+/// doors" is shown end to end, for a call that carries arguments. Seen to bite: with the direct arm's arguments
+/// planted to `{"payload_b64"}` (the generic arm's form) the direct call under the mandate was refused.
+#[tokio::test]
+async fn a_mandate_bound_at_the_mcp_door_verifies_on_a_direct_call_of_the_same_tool_and_arguments() {
+    let d = door(Opts::default()).await;
+    d.offer_depot_checkpoint();
+    let args = json!({"order": 7, "to": ["a", "b"]});
+    let mandate = d.tool_mandate(&args);
+    let k = kind("tool", "guarded");
+
+    let tool_call = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "guarded", "arguments": args}});
+    let at_mcp = d.call_under(CLIENT, crate::signal::signal_kind::MCP_INVOKE, tool_call.to_string().as_bytes(), &mandate).await;
+    assert!(at_mcp["error"].is_null(), "plant: the mandate is established at the MCP door: {at_mcp}");
+    assert_eq!(d.guarded_ran.load(Ordering::SeqCst), 1);
+
+    assert_ran(&d.call_under(CLIENT, &k, args.to_string().as_bytes(), &mandate).await, &k);
+    assert_eq!(d.ran("tool", "guarded"), 1, "the same mandate admits the direct call of the same tool and arguments");
+
+    let other = d.call_under(CLIENT, &k, json!({"order": 8, "to": ["a", "b"]}).to_string().as_bytes(), &mandate).await;
+    assert_refused(&other, "authority_not_established");
+    let none = d.call_framed(CLIENT, &k, args.to_string().as_bytes(), None).await;
+    assert_refused(&none, "authority_not_established");
+    assert_eq!(d.ran("tool", "guarded"), 1, "other arguments, or no mandate: nothing ran");
+    d.a.shutdown().await;
+}
+
+/// **What is decided is what is handed over, at both doors** (#788's review, F2 and F3).
+///
+/// - **A tool call with no `arguments`** is decided on `{}`, and the tool's handler is handed `{}` — it was handed
+///   `null`, a value the provider had not decided on, and one whose digest differs. Seen failing first: with
+///   `serve_mcp_call` handing `params.arguments` as it stood, the tool answered `null`.
+/// - **A repeated object key at the MCP door** is read once, by the node: the provider decides on the parsed value
+///   (the last of the repeated key) and the handler is handed that same value.
+/// - **A repeated object key at the direct door** is refused `malformed_call`, at any depth: the component is handed
+///   the payload's bytes, so a guest whose parser keeps the first of a repeated key would act on a value no rule and
+///   no digest saw. Seen failing first: with the refusal out of `derive`, both payloads reached the receiver.
+/// - Bytes that are not JSON are not that case: they are carried as `{"payload_b64"}` and run under the rule.
+#[tokio::test]
+async fn what_is_decided_is_what_is_handed_over_at_both_doors() {
+    let d = door(Opts::default()).await;
+    let text = |reply: &Value| reply["result"]["content"][0]["text"].as_str().map(str::to_string);
+
+    let bare = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "echo"}});
+    let reply = d.call(crate::signal::signal_kind::MCP_INVOKE, bare.to_string().as_bytes()).await;
+    assert_eq!(text(&reply).as_deref(), Some("{}"), "HANDED UNDECIDED: decided on {{}}, handed something else: {reply}");
+
+    let repeated = br#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"echo","arguments":{"kg":1000000,"kg":1}}}"#;
+    let reply = d.call(crate::signal::signal_kind::MCP_INVOKE, repeated).await;
+    assert_eq!(text(&reply).as_deref(), Some(r#"{"kg":1}"#), "the MCP door hands the handler the value it decided on: {reply}");
+    assert_eq!(d.tool_ran.load(Ordering::SeqCst), 2);
+
+    let k = kind("tool", "echo");
+    for payload in [&br#"{"kg":1000000,"kg":1}"#[..], br#"{"a":[{"b":1,"c":{"d":1,"d":2}}]}"#] {
+        let reply = d.call(&k, payload).await;
+        assert_refused(&reply, "malformed_call");
+        assert!(reply["error"].as_str().unwrap().contains("repeats an object key"), "{reply}");
+    }
+    assert_eq!(d.ran("tool", "echo"), 0, "READ TWO WAYS: a payload with a repeated key reached the receiver");
+    // The same key in two different objects is not a repeat; nor are bytes that are not JSON.
+    assert_ran(&d.call(&k, br#"{"a":{"k":1},"b":{"k":2},"c":[{"k":3},{"k":4}]}"#).await, &k);
+    assert_ran(&d.call(&k, br#"{"kg":1,"kg":2"#).await, &k);
+    assert_eq!(d.ran("tool", "echo"), 2);
+    d.a.shutdown().await;
+}
+
 /// **Enforcement off, and no cohort budget: nothing changes.** A capability no rule names runs, and the provider
 /// records nothing — and a kind that names no capability, which an enforcing provider refuses, runs too. A pin,
 /// not a regression test: it passes on the code as it was. Seen to bite with the family's `malformed_call` refusal
@@ -307,6 +431,8 @@ async fn with_enforcement_off_a_hosted_capability_call_is_as_it_was() {
     assert_ran(&d.call(&kind("tool", "secret"), b"not json").await, &kind("tool", "secret"));
     assert_ran(&d.call(&kind("route", "secret"), b"{}").await, &kind("route", "secret"));
     assert_ran(&d.call("cap.invoke/lonely", b"{}").await, "cap.invoke/lonely");
+    // A payload an enforcing provider refuses for a repeated key runs too: nothing is decided on it here.
+    assert_ran(&d.call(&kind("tool", "secret"), br#"{"kg":1000000,"kg":1}"#).await, &kind("tool", "secret"));
     assert!(d.decisions().is_empty(), "no authority is checked with enforcement off");
     d.a.shutdown().await;
 }
@@ -456,8 +582,8 @@ fn a_hosted_capability_is_derived_from_its_kind() {
     assert_eq!(direct, at_mcp, "the tool namespace is decided as the MCP tool loop decides the tool");
     assert_eq!(direct, ("tools/call".to_string(), format!("tool:echo@{me}"), args.clone()));
     assert_eq!(
-        super::gateway_authority::arguments_digest(&direct.2),
-        super::gateway_authority::arguments_digest(&at_mcp.2),
+        arguments_digest(&direct.2),
+        arguments_digest(&at_mcp.2),
         "one arguments digest at both doors"
     );
 
@@ -467,6 +593,23 @@ fn a_hosted_capability_is_derived_from_its_kind() {
     assert_eq!(claimed, direct, "nor in the tool namespace");
     // A name may hold `/` and `.`: everything after the namespace is the name.
     assert_eq!(derive(ctx, "cap.invoke/route/eu/optimize.shadow", b"{}", None, me).unwrap().1, format!("cap:route/eu/optimize.shadow@{me}"));
+
+    // No `arguments` at the MCP door is `{}`; an explicit `null` is `null`, at both doors.
+    let bare = json!({"jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": {"name": "echo"}});
+    assert_eq!(derive(ctx, crate::signal::signal_kind::MCP_INVOKE, bare.to_string().as_bytes(), None, me).unwrap().2, json!({}));
+    assert_eq!(super::mcp::decided_arguments(&bare), json!({}), "and the handler is handed the same");
+    let null = json!({"jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": {"name": "echo", "arguments": null}});
+    assert_eq!(derive(ctx, crate::signal::signal_kind::MCP_INVOKE, null.to_string().as_bytes(), None, me).unwrap().2, Value::Null);
+    assert_eq!(derive(ctx, "cap.invoke/tool/echo", b"null", None, me).unwrap().2, Value::Null);
+
+    // A repeated object key, at any depth, is refused at the direct door; numbers RFC 8785 writes alike share a digest.
+    for (payload, repeats) in [(&br#"{"a":1,"a":2}"#[..], true), (br#"[{"x":{"y":1,"y":1}}]"#, true), (br#"{"a":{"k":1},"b":{"k":1}}"#, false), (br#"{"a":1,"a":2"#, false), (b"plain", false), (b"", false), (br#"{"a":1} trailing"#, false)] {
+        assert_eq!(super::provider_enforcement::repeats_a_key(payload), repeats, "{}", String::from_utf8_lossy(payload));
+    }
+    assert_eq!(derive(ctx, "cap.invoke/route/optimize", br#"{"a":1,"a":2}"#, None, me).unwrap_err().reason, "malformed_call");
+    let digest = |p: &[u8]| arguments_digest(&derive(ctx, "cap.invoke/route/optimize", p, None, me).unwrap().2);
+    assert_eq!(digest(br#"{"n":1}"#), digest(br#"{"n":1.0}"#), "equal numbers, one digest: RFC 8785's canonical form, by design");
+    assert_ne!(digest(br#"{"n":1}"#), digest(br#"{"n":2}"#));
 
     let raw = derive(ctx, "cap.invoke/text/echo", b"plain bytes", None, me).expect("derived");
     assert_eq!(raw.2, json!({"payload_b64": "cGxhaW4gYnl0ZXM="}), "a payload that is not JSON");

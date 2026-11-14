@@ -8,7 +8,17 @@
 - **The kind names what runs, so the claim is never read** — as for `mcp.invoke` and `llm.invoke`. `tool/{name}`
   derives what the MCP tool loop derives for the tool `{name}` (`tools/call`, `tool:{name}@{node}`, the payload as
   JSON), so one rule and one arguments digest cover both doors; any other namespace derives `cap.invoke` on
-  `cap:{ns}/{name}@{node}`. Not JSON → `{"payload_b64"}` (one stated collision with a JSON payload of that shape).
+  `cap:{ns}/{name}@{node}`. Not JSON → `{"payload_b64"}`.
+- **Decided is handed** (#788's review, F2/F3). Where a door decides on a parse and hands on something else, the
+  two can differ: the direct door hands the component the payload's bytes, so a JSON payload that repeats an
+  object key is refused (`repeats_a_key`); the MCP tool loop now hands its handler `mcp::decided_arguments`, the
+  value `derive` read (`{}` for no `arguments`, where it handed `null`). A digest still does not tell apart the
+  `payload_b64` pair, nor JSON texts RFC 8785 writes alike — the latter by design.
+- **A queued bridged call whose handler has gone is skipped** (`reply.is_closed()`, F1); a begun guest call is
+  never interrupted, and a queued direct call still runs.
+- **`wire-check`'s overlay is wrong both ways for a hosted capability outside `tool`** (false red on `cap.invoke`,
+  false green on `skill.invoke`; the co-op fixture is the instance): its own *not built* row, to close before the
+  MINOR that ships §108.
 - **A signal's `sender` is not authenticated by the connection it arrives on.** `connection.rs` builds the `Signal`
   from the frame's own `sender` field and delivers it; only a caller envelope inside the payload is signed. So
   "this request came from this node" cannot be read off a request, and an exemption for it would be forgeable by

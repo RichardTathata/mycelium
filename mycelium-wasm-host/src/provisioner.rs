@@ -2388,6 +2388,78 @@ mod tests {
         agent.shutdown().await;
     }
 
+    /// **A bridged call nobody waits for is not begun** (#788's review, F1). The bridge's tool handler gives up — its
+    /// wait elapsed, or it was dropped when its call's authority lapsed or the call was cancelled — and the MCP loop
+    /// then releases that call's admission. A call still queued behind a running guest call at that moment used to
+    /// be taken off the bridge's channel afterwards and run anyway. `tool/spin` never returns and is stopped at a
+    /// 1.5 s deadline: a member's direct call occupies the guest; a tool call through the MCP door queues behind it
+    /// and its handler gives up after 300 ms (the 30 s wait, shortened for this tool); once the direct call has been
+    /// stopped the abandoned call is skipped — the runtime's log holds the direct call's one invocation and no
+    /// second. A tool call made after that is still served. Seen failing first: with the `is_closed` check out of
+    /// the serve loop, the log held two invocations.
+    #[cfg(feature = "gateway")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_bridged_call_nobody_waits_for_is_not_begun() {
+        use crate::catalog::InstallableEntry;
+        const SPIN_COMPONENT: &[u8] = include_bytes!("../tests/fixtures/spin_component.wasm");
+        crate::runtime::TEST_BRIDGE_TIMEOUTS.lock().unwrap().push(("spin".into(), 300));
+        let agent = live_agent().await;
+        let host = Arc::new(WasmHost::new().expect("engine").with_call_deadline(Some(Duration::from_millis(1500))));
+        let mut source = InMemorySource::new();
+        let id = source.insert(SPIN_COMPONENT.to_vec());
+        let mut catalog = InstallableCatalog::new();
+        catalog.add(InstallableEntry::new(Capability::new("tool", "spin"), id));
+        let mut prov = Provisioner::new(Arc::clone(&agent), host, catalog, Arc::new(source), 1.0);
+        prov.supervise(CapFilter::new("tool", "spin"), 1);
+        let key = format!("tools/spin/{}", agent.node_id());
+        for _ in 0..200 {
+            prov.provision_round();
+            if prov.hosted_count() == 1 && prov.installing_count() == 0 && agent.kv().get(&key).is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert!(agent.kv().get(&key).is_some(), "tool/spin is hosted and bridged");
+
+        let tool_call = || {
+            let agent = Arc::clone(&agent);
+            async move {
+                let call = serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "spin", "arguments": {}}});
+                let reply = agent.service().rpc_call(agent.node_id().clone(), mycelium::signal_kind::MCP_INVOKE, call.to_string().into_bytes(), Duration::from_secs(20)).await.expect("mcp.invoke answers");
+                String::from_utf8_lossy(&reply).into_owned()
+            }
+        };
+        // The direct call: it occupies the guest until the deadline stops it.
+        let direct = {
+            let agent = Arc::clone(&agent);
+            tokio::spawn(async move {
+                agent.service().rpc_call(agent.node_id().clone(), crate::runtime::cap_invoke_kind("tool", "spin"), b"{}".to_vec(), Duration::from_secs(20)).await
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(prov.invocations().len(), 0, "the direct call is still running");
+        // The tool call queues behind it, and its handler gives up.
+        let abandoned = tool_call().await;
+        assert!(abandoned.contains("bridge: rpc call timed out"), "the handler gave up while its call was queued: {abandoned}");
+        let stopped = direct.await.unwrap().expect("the direct call is answered");
+        assert!(String::from_utf8_lossy(&stopped).contains("deadline exceeded"), "{}", String::from_utf8_lossy(&stopped));
+        // Long enough for the abandoned call to have been run to its own deadline, had it begun.
+        tokio::time::sleep(Duration::from_millis(2500)).await;
+        assert_eq!(prov.invocations().len(), 1, "RAN ABANDONED: the guest ran a bridged call nobody was waiting for");
+
+        // The bridge still serves: a new tool call is begun (and, the guest never returning, given up on).
+        let again = tool_call().await;
+        assert!(again.contains("bridge: rpc call timed out"), "{again}");
+        for _ in 0..200 {
+            if prov.invocations().len() == 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert_eq!(prov.invocations().len(), 2, "a call somebody waited for when it was taken is begun");
+        agent.shutdown().await;
+    }
+
     /// D20's gate (plan F2): a proposed entry loads only into the shadow lane — resolvable as
     /// `{name}.shadow` for comparison, never by the incumbent's filter — a stranger's acceptance
     /// changes nothing, and a listed reviewer's acceptance promotes it. Seen failing first: with

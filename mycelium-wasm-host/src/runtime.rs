@@ -388,6 +388,19 @@ const BRIDGE_QUEUE: usize = 8;
 #[cfg(feature = "gateway")]
 const BRIDGE_TIMEOUT_MS: u64 = 30_000;
 
+/// Test hook: a bridge timeout in place of [`BRIDGE_TIMEOUT_MS`] for the tool of one name.
+#[cfg(all(test, feature = "gateway"))]
+pub(crate) static TEST_BRIDGE_TIMEOUTS: Mutex<Vec<(String, u64)>> = Mutex::new(Vec::new());
+
+#[cfg(feature = "gateway")]
+fn bridge_timeout_ms(#[allow(unused_variables)] tool: &str) -> u64 {
+    #[cfg(test)]
+    if let Some((_, ms)) = TEST_BRIDGE_TIMEOUTS.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|(t, _)| t == tool) {
+        return *ms;
+    }
+    BRIDGE_TIMEOUT_MS
+}
+
 /// Who asked for a call, and so where its answer goes.
 enum Asked {
     /// A request off the mesh, through `rpc_rx` — verified and, at an enforcing provider, decided there. Held until
@@ -499,7 +512,15 @@ async fn serve_loop(agent: Arc<GossipAgent>, instance: Instance, mut rx: myceliu
                     Some(req) => (req.payload().to_vec(), Asked::Mesh(req)),
                     None => return,
                 },
-                call = next_bridged(&mut bridged) => (call.payload, Asked::Bridge(call.reply)),
+                call = next_bridged(&mut bridged) => {
+                    // Nobody waits for it any more: the tool's handler gave up, or was dropped when its call's
+                    // authority lapsed or the call was cancelled — and the MCP loop has released that call's
+                    // admission. A call that has not begun does not begin (#788's review, F1).
+                    if call.reply.is_closed() {
+                        continue;
+                    }
+                    (call.payload, Asked::Bridge(call.reply))
+                }
             };
             let from_mesh = matches!(asked, Asked::Mesh(_));
             if !serve_one(&agent, &served, &mut slot, payload, asked).await {
@@ -659,8 +680,10 @@ impl ArtifactRuntime for WasmComponentRuntime {
             // The tool's handler runs only after the MCP tool loop has verified the caller and — at an enforcing
             // provider — decided the call as that caller (`run_mcp_tool_task`). It hands the admitted arguments to
             // this install's serve loop in process (see `serve_loop`): the call is decided once, as the client.
+            let tool: Arc<str> = Arc::from(entry.provides.name.as_ref());
             Some(ctx.agent.mcp().register_mcp_tool(entry.provides.name.clone(), schema, move |args: serde_json::Value| {
                 let bridge_tx = bridge_tx.clone();
+                let tool = Arc::clone(&tool);
                 async move {
                     let (reply, answered) = tokio::sync::oneshot::channel();
                     let call = BridgedCall { payload: args.to_string().into_bytes(), reply };
@@ -671,7 +694,7 @@ impl ArtifactRuntime for WasmComponentRuntime {
                     };
                     let out = tokio::select! {
                         out = handed => out.ok_or_else(|| "bridge: the component is no longer served".to_string())?,
-                        _ = mycelium::sim_seam::sleep_ms("wasm_host.bridge", BRIDGE_TIMEOUT_MS) => {
+                        _ = mycelium::sim_seam::sleep_ms("wasm_host.bridge", bridge_timeout_ms(&tool)) => {
                             return Err(format!("bridge: {}", mycelium::RpcError::Timeout));
                         }
                     };
