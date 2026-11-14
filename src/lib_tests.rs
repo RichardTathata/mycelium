@@ -18688,6 +18688,73 @@ async fn a_carry_that_asks_times_out_when_a_successor_quorum_cannot_answer_it() 
     assert_eq!(held.map(|h| (h.1, h.2)), Some((Some((1, Some(v1))), crate::consensus::MadeIn::Group(Arc::from("old")))));
 }
 
+/// **A carry that asks starts every ballot from the envelope it carries** (CR30; #787's confirm round, G3). The one
+/// path on which that changes the value: a ballot that fell back to hearing everything and adopted a predecessor
+/// acceptance, whose own claim then failed, followed by a ballot whose every report is the lineage's.
+///
+/// `old` chose v0 (N0, N2 at ballot 2); N1 holds (1, v1) with no group (made before the switch). N3 carries.
+/// - **First ballot:** N2 answers no prepare, so the quorum is {N3, N1}; N1's report is of unknown group, the carry
+///   hears everything and adopts v1. N3's own claim is refused without being made (the test hook — as when N3 has
+///   promised a higher ballot meanwhile), so N3 has accepted nothing.
+/// - **Second ballot:** N1 does not hear the prepare, so the quorum is {N3, N2}; N2's (2, v0) is `old`'s, every
+///   report is the lineage's and none is `new`'s. Nothing is heard: the carry proposes **the envelope it carries**,
+///   v0 — not the v1 an earlier ballot adopted and nobody accepted in `new`.
+///
+/// Seen failing first, with the per-ballot restart removed (and refusals adopted again): `new` decided v1.
+#[cfg(all(feature = "consensus", feature = "test-frame-filter"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_carry_that_asks_starts_each_ballot_from_the_envelope_it_carries() {
+    use crate::consensus::{consensus_kind, decode_consensus_msg, ConsensusMsg, TEST_REFUSE_OWN_CLAIMS, TEST_SWALLOW_PREPARES};
+    use crate::store::FrameView;
+    use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+    let (agents, _l, _serial) = recording_mesh(|_| true).await;
+    let (n0, n1, n2, n3) = (&agents[0], &agents[1], &agents[2], &agents[3]);
+    for n in [n0, n1, n2] { n.mesh().join_group("old"); }
+    roster_converges(&agents, "old", &[n0, n1, n2]).await;
+    declare(n0, "old", false).await.expect("genesis of old");
+    epoch_converges(&agents, "old", 1).await;
+    let slot: Arc<str> = Arc::from("work/contended");
+    let (v0, v1) = (Bytes::from_static(b"v0-chosen-in-old"), Bytes::from_static(b"v1-outvoted-in-old"));
+    let engine = |n: &GossipAgent| crate::agent::electorate::engine(&n.task_ctx);
+    assert!(engine(n1).accept_for_test("old", &slot, 1, &v1, n1.node_id()).await);
+    {
+        // As after a restart over the older record: N1's acceptance has no group.
+        let mem = n1.task_ctx.consensus_accepted.pin();
+        let cur = mem.get("work/contended").cloned().expect("accepted");
+        mem.insert(Arc::clone(&slot), crate::consensus::AcceptorSlot { made_in: crate::consensus::MadeIn::Unknown, ..cur });
+    }
+    for n in [n0, n2] { assert!(engine(n).accept_for_test("old", &slot, 2, &v0, n0.node_id()).await); }
+    successor(&agents, n3, "new", &[n1, n2, n3], &["old"]).await;
+    n1.retire_electorate("old", "new").await.expect("old retires to new");
+    retirement_converges(&agents, "old").await;
+    // N2 misses the first prepare; N1 hears only the first ballot's; N3's first claim is refused unmade.
+    TEST_SWALLOW_PREPARES.pin().insert(n2.node_id().to_string(), (slot.to_string(), Arc::new(AtomicU32::new(1))));
+    let first_ballot = Arc::new(AtomicU64::new(0));
+    let seen = Arc::clone(&first_ballot);
+    n1.task_ctx.kv_state.frame_filter.pin().insert(1, Arc::new(move |v: &FrameView<'_>| match v {
+        FrameView::Signal { kind, payload, .. } if *kind == consensus_kind::PROPOSE =>
+            match decode_consensus_msg(&Bytes::copy_from_slice(payload)) {
+                Some(ConsensusMsg::CarryPrepareTagged { ballot, .. }) => {
+                    let first = seen.compare_exchange(0, ballot, Ordering::SeqCst, Ordering::SeqCst).unwrap_or_else(|held| held);
+                    first != 0 && first != ballot
+                }
+                _ => false,
+            },
+        _ => false,
+    }));
+    let refusals = Arc::new(AtomicU32::new(1));
+    TEST_REFUSE_OWN_CLAIMS.pin().insert(n3.node_id().to_string(), (slot.to_string(), Arc::clone(&refusals)));
+    let states = n3.complete_migration("new").await;
+    TEST_SWALLOW_PREPARES.pin().remove(&n2.node_id().to_string());
+    TEST_REFUSE_OWN_CLAIMS.pin().remove(&n3.node_id().to_string());
+    let read = n3.consensus().consensus_get(&slot);
+    let held: Vec<Held> = agents.iter().map(held_for_contended_slot).collect();
+    for n in &agents { n.shutdown_with_timeout(Duration::from_secs(5)).await; }
+    assert_eq!(refusals.load(Ordering::SeqCst), 0, "the first ballot adopted and its claim was refused: {states:?}");
+    assert_eq!(read, Some(v0.clone()), "old chose v0; new decided {read:?} (v1 is {v1:?}); run {states:?}; held {held:?}");
+    assert_eq!(states, Ok(carried_from_old(0)), "held {held:?}");
+}
+
 /// What [`recarry_under_a_higher_predecessor_acceptance`] ends with.
 #[cfg(all(feature = "consensus", feature = "test-frame-filter"))]
 struct Recarry {
@@ -19571,4 +19638,45 @@ async fn rev787_r6c_with_every_node_but_the_outvoted_member_recording() {
     let (v0, v1, read, states, held) = rev787_shared_carrier(|i| i != 1, false).await;
     assert_eq!(read, Some(v0), "old chose v0; new decided {read:?} (v1 is {v1:?}); run {states:?}; held {held}");
     assert_eq!(states, Ok(vec![crate::MigrationState { predecessor: "old".into(), phase: crate::MigrationPhase::Complete { slots: 1, conflicts: 0 } }]));
+}
+
+/// rev787 round 2, G1 — **a group rewrite arriving for a withheld slot must not undo the repair.** B's slot is
+/// withheld after a forgotten promise at `p+4` and the merged record is on B's key. A second copy then arrives that
+/// holds the acceptance B's memory holds (same ballot, same value) under another group's name, at a promise not above
+/// memory's. The guard counts it as a group rewrite and writes the record back **from memory** — which, for a withheld
+/// slot, is the state from before the repair.
+#[cfg(feature = "consensus")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rev787b_a_group_rewrite_on_a_withheld_slot_keeps_the_repaired_record() {
+    use crate::consensus::{accepted_key, decode_acceptor, encode_acceptor, Accepted, AcceptorSlot, MadeIn};
+    let _serial = ELECTORATE_MESHES.lock().await;
+    let port = alloc_port();
+    let id = NodeId::new("127.0.0.1", port).unwrap();
+    let b = GossipAgent::new(id.clone(), electorate_cfg(port, vec![], true));
+    b.start().await.unwrap();
+    let _listener = b.consensus().start_consensus_listener(ConsensusConfig::default());
+    b.mesh().join_group("solo");
+    let r = b.consensus().group_propose("solo", "work/x", Bytes::from_static(b"own"), ConsensusConfig::default()).await;
+    assert!(matches!(r, ConsensusResult::Committed { .. }), "{r:?}");
+    let slot: Arc<str> = Arc::from("work/x");
+    let held = b.task_ctx.consensus_accepted.pin().get(&slot).cloned().expect("B holds the slot");
+    let p = held.promised;
+    assert!(held.made_in != MadeIn::Unknown, "memory knows where it was made: {held:?}");
+    let key = accepted_key(&id, &slot);
+    let observe = |value: Bytes, nonce: u64| {
+        let upd = crate::framing::GossipUpdate { nonce, sender: 0xBEEF, ttl: 1, is_tombstone: false, timestamp: 1, key: Arc::from(key.as_str()), value };
+        (b.task_ctx.inbound_observer.get().expect("the guard is installed").on_inbound)(&upd);
+    };
+    let forgotten = AcceptorSlot { promised: p + 4, promised_to: Some(0xC0FFEE), accepted: Some((p + 4, Accepted::DigestOnly([7; 32]))), groups: Vec::new(), made_in: MadeIn::Unknown };
+    observe(encode_acceptor(&forgotten), 1);
+    assert!(b.task_ctx.acceptor_withheld.pin().contains("work/x"), "the slot is withheld");
+    let repaired = b.kv().get(&key).and_then(|v| decode_acceptor(&v)).expect("record");
+    assert_eq!(repaired.promised, p + 4, "the merged record is on B's key");
+    // The same acceptance memory holds, named for another group.
+    let renamed = AcceptorSlot { made_in: MadeIn::Group(Arc::from("zzz")), ..held.clone() };
+    observe(encode_acceptor(&renamed), 2);
+    let after = b.kv().get(&key).and_then(|v| decode_acceptor(&v)).expect("record");
+    b.shutdown_with_timeout(Duration::from_secs(5)).await;
+    assert_eq!((after.promised, after.accepted.as_ref().map(|(b, _)| *b)), (p + 4, Some(p + 4)),
+        "the repaired record still holds the forgotten promise and acceptance; it now reads {after:?}");
 }

@@ -65,7 +65,10 @@ static GROUPS_REWRITTEN: AtomicU64 = AtomicU64::new(0);
 /// Copies of this node's own acceptor record that named **another group** for the acceptance its memory holds —
 /// the same ballot and value, made somewhere else (critique plan CR30). No answer of this node's says that: the
 /// record was rewritten by another member. Counted each time (`mycelium_acceptor_guard_total{event="group_rewritten"}`)
-/// and the record written back from memory; nothing is withheld.
+/// and the record written back from memory — unless the slot is withheld, whose record is the repaired one and is
+/// left alone; nothing is withheld on this account. The write-back is an ordinary last-writer-wins write: a rewritten
+/// copy stamped ahead of this node's clock, within the drift bound, wins until the clock passes it (critique plan
+/// CR13 counts such a stamp today and refuses it later).
 #[cfg_attr(not(test), allow(dead_code))] // read by the test; an operator reads the metric
 pub(crate) fn acceptor_record_groups_rewritten() -> u64 {
     GROUPS_REWRITTEN.load(Ordering::Relaxed)
@@ -265,10 +268,16 @@ fn compare_own_record(
             GROUPS_REWRITTEN.fetch_add(1, Ordering::Relaxed);
             #[cfg(feature = "metrics")]
             metrics::counter!("mycelium_acceptor_guard_total", "event" => "group_rewritten").increment(1);
-            tracing::warn!(slot, copy_made_in = ?copy.made_in, held_made_in = ?held.made_in,
+            // A withheld slot's durable record is the merged one `repair_own_record` wrote, and memory is the state
+            // from before that repair: writing memory back would put the forgotten promise below what the record
+            // holds (#787's confirm round, G1). So it is counted and nothing is written — the rule
+            // `persist_acceptor` keeps for a withheld slot. (Merging with the stored record instead would keep the
+            // promise, but the stored record can already be the rewritten copy, whose group the merge would keep.)
+            let is_withheld = withheld.pin().contains(slot);
+            tracing::warn!(slot, copy_made_in = ?copy.made_in, held_made_in = ?held.made_in, withheld = is_withheld,
                 "consensus: a peer holds this node's own acceptor record naming another group for the acceptance this \
-                 node made — a record this node did not write. Writing it back from memory");
-            return Some(held);
+                 node made — a record this node did not write. Written back from memory unless the slot is withheld");
+            return (!is_withheld).then_some(held);
         }
         return None;
     }
@@ -430,9 +439,10 @@ mod rev787 {
     /// `made_in`. As the reviewer wrote it against 7606eddf the guard neither counted nor repaired it; it now
     /// counts it (`acceptor_record_groups_rewritten`) and hands memory's record back to be rewritten, without
     /// withholding the slot — no answer was forgotten. What the forged record would do if it were read at a start
-    /// instead: named for another group, a carry whose every report is named does not hear the acceptance; named
-    /// for no group, the carry hears everything, as before 2.41.0. An older copy of the same acceptance, with the
-    /// group unknown, is not a rewrite.
+    /// instead: named for an **ancestor** of the successor, a carry whose every report is the lineage's does not
+    /// hear the acceptance; named for an unrelated group, or for no group, the carry hears everything, as before
+    /// 2.41.0. An older copy of the same acceptance, with the group unknown, is not a rewrite. **On a withheld slot
+    /// nothing is handed back** (the confirm round, G1): memory there is older than the repaired record.
     #[test]
     fn rev787_a_forged_made_in_is_counted_and_put_back() {
         use crate::consensus::carry_hears;
@@ -444,8 +454,9 @@ mod rev787 {
         };
         memory.pin().insert(Arc::from("s"), held.clone());
         let report = (4u64, [9u8; 32], None);
-        assert_eq!(carry_hears(vec![report.clone()], std::slice::from_ref(&held.made_in), "new").len(), 1);
-        for (forged_in, heard_after_a_restart) in [(MadeIn::Group(Arc::from("zzz")), 0), (MadeIn::NoGroup, 1)] {
+        let lineage: Vec<Arc<str>> = vec![Arc::from("new"), Arc::from("old")];
+        assert_eq!(carry_hears(vec![report.clone()], std::slice::from_ref(&held.made_in), "new", &lineage).len(), 1);
+        for (forged_in, heard_after_a_restart) in [(MadeIn::Group(Arc::from("old")), 0), (MadeIn::Group(Arc::from("zzz")), 1), (MadeIn::NoGroup, 1)] {
             let before = acceptor_record_groups_rewritten();
             let forged = encode_acceptor(&AcceptorSlot { made_in: forged_in.clone(), ..held.clone() });
             assert_eq!(forged[0], 0x05);
@@ -454,11 +465,16 @@ mod rev787 {
             assert!(acceptor_record_groups_rewritten() > before, "counted");
             assert!(withheld.pin().is_empty(), "nothing was forgotten, so nothing is withheld");
             let back = decode_acceptor(&forged).expect("decodes");
-            assert_eq!(carry_hears(vec![report.clone()], std::slice::from_ref(&back.made_in), "new").len(), heard_after_a_restart);
+            assert_eq!(carry_hears(vec![report.clone()], std::slice::from_ref(&back.made_in), "new", &lineage).len(), heard_after_a_restart);
         }
         let before = acceptor_record_groups_rewritten();
         let older = encode_acceptor(&AcceptorSlot { made_in: MadeIn::Unknown, ..held.clone() });
         assert!(compare_own_record(&memory, &withheld, "s", &older).is_none());
         assert_eq!(acceptor_record_groups_rewritten(), before, "an older record of the same acceptance is not a rewrite");
+        // Withheld: counted, and nothing handed back to be written.
+        withheld.pin().insert(Arc::from("s"));
+        let forged = encode_acceptor(&AcceptorSlot { made_in: MadeIn::Group(Arc::from("old")), ..held.clone() });
+        assert!(compare_own_record(&memory, &withheld, "s", &forged).is_none(), "a withheld slot's record is left as repaired");
+        assert!(acceptor_record_groups_rewritten() > before, "and still counted");
     }
 }

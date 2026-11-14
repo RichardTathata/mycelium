@@ -2106,9 +2106,15 @@ impl ConsensusEngine {
             // superseding genesis adopted here since the door ends this proposal, by name.
             let gate = tag.as_ref().map(|t| &t.gate);
             let made_in = self.made_in(gate);
-            let claimed = self.claim_gated(gate, || {
-                claim_envelope_in(&self.task_ctx.consensus_accepted, &slot, ballot, &value, self.task_ctx.node_id.id_hash(), floor, made_in)
-            });
+            #[cfg(test)]
+            let refused_by_hook = test_refuse_own_claim(&self.task_ctx.node_id, &slot);
+            #[cfg(not(test))]
+            let refused_by_hook = false;
+            let claimed = if refused_by_hook { Some(false) } else {
+                self.claim_gated(gate, || {
+                    claim_envelope_in(&self.task_ctx.consensus_accepted, &slot, ballot, &value, self.task_ctx.node_id.id_hash(), floor, made_in)
+                })
+            };
             if claimed.is_none() && tag.is_some() {
                 return gate_refused(slot, tag.as_ref());
             }
@@ -2803,6 +2809,26 @@ impl ConsensusEngine {
     /// ([`asks_tagged`](Self::asks_tagged)).
     pub(crate) fn made_in(&self, gate: Option<&Gate>) -> MadeIn {
         gate.map_or(MadeIn::NoGroup, |g| MadeIn::Group(Arc::clone(&g.group)))
+    }
+
+    /// **`group` and every ancestor of it this node can name**: its predecessors, theirs, and so on, each read from
+    /// an electorate this node holds verified ([`electorate_view`](Self::electorate_view)) — what
+    /// [`carry_hears`] takes as the groups whose acceptances a carry into `group` may set aside. Nothing is
+    /// guessed: an ancestor whose own electorate is not visible here is named (its descendant's genesis names it)
+    /// and its predecessors are not, so a report naming one of those is outside the lineage and the carry hears
+    /// everything. Bounded at [`LINEAGE_CAP`] groups.
+    pub(crate) fn lineage(&self, group: &str) -> Vec<Arc<str>> {
+        let mut named: Vec<Arc<str>> = vec![Arc::from(group)];
+        let mut at = 0;
+        while at < named.len() && named.len() < LINEAGE_CAP {
+            if let Some(d) = self.electorate_view(&named[at]) {
+                for p in &d.predecessors {
+                    if named.len() < LINEAGE_CAP && !named.iter().any(|n| &**n == p.as_str()) { named.push(Arc::from(p.as_str())); }
+                }
+            }
+            at += 1;
+        }
+        named
     }
 
     /// Whether this node's carry ballots ask where each reported acceptance was made
@@ -3876,7 +3902,7 @@ impl ConsensusEngine {
         // its own ballot, so this needs neither the committed entry nor the decided floor.
         // A carry that asked for the group hears the successor's own acceptances when every report says where it
         // was made, and every report otherwise (`carry_hears`, CR30).
-        if let Some(group) = &tagged { reports = carry_hears(reports, &made_in, group); }
+        if let Some(group) = &tagged { reports = carry_hears(reports, &made_in, group, &self.lineage(group)); }
         set_aside_finished(&mut reports, 0, false, self.ended(slot));
         // `decided` sets aside **only acceptances reported raw** — a legacy proposer's — and only when
         // the legacy reading says that legacy decision is over (no decision record, the committed entry
@@ -4782,24 +4808,32 @@ pub(crate) enum MadeIn {
 }
 
 /// **What a carry ballot into electorate `group` hears of its promise quorum's acceptances** (critique plan CR30) —
-/// pure, so it is tested on its own. `made_in[i]` is where `reports[i]` was made, the carrier's own among them.
+/// pure, so it is tested on its own. `made_in[i]` is where `reports[i]` was made, the carrier's own among them;
+/// `lineage` is `group` and the ancestors of it the carrier can name ([`ConsensusEngine::lineage`]).
 ///
-/// - **Every reported acceptance was made in an electorate group that is named:** the carry hears those made in
-///   `group` and no other. That is the successor's own Paxos: an acceptance made in the predecessor is the
-///   predecessor's, counted in its manifests, and the ballot numbers of two groups do not compare.
-/// - **Any reported acceptance is of unknown group, or was made outside every group:** the carry hears **all** of
-///   them, as it did before 2.41.0. Hearing only some would be worse than hearing all: with a shared member's
-///   recorded copy of the predecessor's chosen value set aside and another member's unrecorded, outvoted one heard,
-///   the carry adopts the outvoted value where the old rule carried the chosen one (#787's review, F1). An
-///   acceptance made outside every group is treated the same way, since a cluster-scoped acceptance on the slot can
-///   have replaced one made in the successor.
+/// - **Every reported acceptance was made in a group of the lineage:** the carry hears those made in `group` and no
+///   other. That is the successor's own Paxos: an acceptance made in a predecessor is the predecessor's, counted in
+///   its manifests, and the ballot numbers of two groups do not compare.
+/// - **Any reported acceptance is of unknown group, was made outside every group, or names a group outside the
+///   lineage:** the carry hears **all** of them, as it did before 2.41.0. Hearing only some would be worse than
+///   hearing all: with a shared member's recorded copy of the predecessor's chosen value set aside and another
+///   member's unrecorded, outvoted one heard, the carry adopts the outvoted value where the old rule carried the
+///   chosen one (#787's review, F1). An acceptance made outside every group, or on an unrelated one — a
+///   non-exclusive slot may be proposed on any electorate group — is treated the same way, since it can have
+///   replaced one made in the successor on that member (the confirm round, G2). An ancestor's cannot: a member
+///   answers a carry only once the predecessor's retirement is visible to it, which closes the predecessor there.
 ///
-/// So the result is never worse than the old rule, and is the sound one once nothing in the quorum is unknown.
+/// So the result is never worse than the old rule, and is the sound one once every report is the lineage's.
 #[cfg(feature = "consensus")]
-pub(crate) fn carry_hears(reports: Vec<AcceptReport>, made_in: &[MadeIn], group: &str) -> Vec<AcceptReport> {
-    if reports.len() != made_in.len() || !made_in.iter().all(|m| matches!(m, MadeIn::Group(_))) { return reports; }
+pub(crate) fn carry_hears(reports: Vec<AcceptReport>, made_in: &[MadeIn], group: &str, lineage: &[Arc<str>]) -> Vec<AcceptReport> {
+    let of_lineage = |m: &MadeIn| matches!(m, MadeIn::Group(g) if &**g == group || lineage.iter().any(|l| l == g));
+    if reports.len() != made_in.len() || !made_in.iter().all(of_lineage) { return reports; }
     reports.into_iter().zip(made_in).filter(|(_, m)| matches!(m, MadeIn::Group(g) if &**g == group)).map(|(r, _)| r).collect()
 }
+
+/// The most groups [`ConsensusEngine::lineage`] names.
+#[cfg(feature = "consensus")]
+const LINEAGE_CAP: usize = 256;
 
 /// Tags `slot`'s acceptor memory with `group` (retry-safe: a pure insert-if-absent).
 #[cfg(feature = "consensus")]
@@ -5201,6 +5235,23 @@ pub(crate) static TEST_SWALLOW_PREPARES: std::sync::LazyLock<
 fn test_swallow_prepare(node: &NodeId, slot: &str) -> bool {
     use std::sync::atomic::Ordering;
     let hook = TEST_SWALLOW_PREPARES.pin().get(&node.to_string()).cloned();
+    hook.is_some_and(|(prefix, left)| {
+        slot.starts_with(prefix.as_str()) && left.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1)).is_ok()
+    })
+}
+
+/// Test hook, per proposer node: a slot prefix and how many of its own claims are still refused without being made —
+/// as when this node promised a higher ballot between its phase 1 and its claim — so the proposal moves to its next
+/// ballot holding whatever phase 1 chose and having accepted nothing.
+#[cfg(test)]
+pub(crate) static TEST_REFUSE_OWN_CLAIMS: std::sync::LazyLock<
+    papaya::HashMap<String, (String, Arc<std::sync::atomic::AtomicU32>)>,
+> = std::sync::LazyLock::new(papaya::HashMap::new);
+
+#[cfg(test)]
+fn test_refuse_own_claim(node: &NodeId, slot: &str) -> bool {
+    use std::sync::atomic::Ordering;
+    let hook = TEST_REFUSE_OWN_CLAIMS.pin().get(&node.to_string()).cloned();
     hook.is_some_and(|(prefix, left)| {
         slot.starts_with(prefix.as_str()) && left.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1)).is_ok()
     })
@@ -6569,26 +6620,34 @@ mod consensus_msg_auth_tests {
         let report = |b: u64, v: &Bytes| -> AcceptReport { (b, value_digest(v), Some(v.clone())) };
         let (old, new) = (MadeIn::Group(Arc::from("old")), MadeIn::Group(Arc::from("new")));
         let mine = Bytes::from_static(b"carried");
+        let lineage: Vec<Arc<str>> = vec![Arc::from("new"), Arc::from("old"), Arc::from("older")];
         // All named, none the successor's: nothing is heard, so the carried value is kept — the model's trace.
-        assert!(carry_hears(vec![report(1, &v1)], std::slice::from_ref(&old), "new").is_empty());
-        assert_eq!(choose_after_prepare(&mine, &carry_hears(vec![report(1, &v1)], std::slice::from_ref(&old), "new")), Phase1Choice::Keep);
+        assert!(carry_hears(vec![report(1, &v1)], std::slice::from_ref(&old), "new", &lineage).is_empty());
+        assert_eq!(choose_after_prepare(&mine, &carry_hears(vec![report(1, &v1)], std::slice::from_ref(&old), "new", &lineage)), Phase1Choice::Keep);
         // All named: the successor's lower acceptance is heard, the predecessor's higher one is not — the re-carry.
-        let heard = carry_hears(vec![report(3, &v0), report(7, &v1)], &[new.clone(), old.clone()], "new");
+        let heard = carry_hears(vec![report(3, &v0), report(7, &v1)], &[new.clone(), old.clone()], "new", &lineage);
         assert_eq!(choose_after_prepare(&mine, &heard), Phase1Choice::Adopt(3, v0.clone()));
         // One unknown beside a recorded copy of the chosen value: everything is heard, and the highest wins (F1).
-        let heard = carry_hears(vec![report(2, &v0), report(1, &v1)], &[old.clone(), MadeIn::Unknown], "new");
+        let heard = carry_hears(vec![report(2, &v0), report(1, &v1)], &[old.clone(), MadeIn::Unknown], "new", &lineage);
         assert_eq!(choose_after_prepare(&mine, &heard), Phase1Choice::Adopt(2, v0.clone()), "as before 2.41.0, not worse");
         // An acceptance made outside every group may have replaced one made in the successor: everything is heard.
-        let heard = carry_hears(vec![report(9, &v0), report(1, &v1)], &[MadeIn::NoGroup, old.clone()], "new");
+        let heard = carry_hears(vec![report(9, &v0), report(1, &v1)], &[MadeIn::NoGroup, old.clone()], "new", &lineage);
         assert_eq!(heard.len(), 2);
+        // So may one made on an unrelated electorate group — a non-exclusive slot may be proposed on any — while an
+        // ancestor's cannot have, and is set aside like the predecessor's (the confirm round, G2).
+        let unrelated = MadeIn::Group(Arc::from("elsewhere"));
+        assert_eq!(carry_hears(vec![report(9, &v0), report(1, &v1)], &[unrelated, old.clone()], "new", &lineage).len(), 2);
+        let older = MadeIn::Group(Arc::from("older"));
+        assert_eq!(carry_hears(vec![report(3, &v0), report(1, &v1)], &[new.clone(), older], "new", &lineage), vec![report(3, &v0)]);
+        assert_eq!(carry_hears(vec![report(1, &v1)], std::slice::from_ref(&old), "new", &[]).len(), 1, "a lineage that does not name old hears it");
         // A report known only by digest is heard or not by the same rule, and blocks only when heard.
         let digest_only: AcceptReport = (5, value_digest(&v1), None);
-        assert_eq!(choose_after_prepare(&mine, &carry_hears(vec![digest_only.clone()], std::slice::from_ref(&old), "new")), Phase1Choice::Keep);
-        assert_eq!(choose_after_prepare(&mine, &carry_hears(vec![digest_only.clone()], std::slice::from_ref(&new), "new")), Phase1Choice::Blocked);
-        assert_eq!(choose_after_prepare(&mine, &carry_hears(vec![digest_only], &[MadeIn::Unknown], "new")), Phase1Choice::Blocked);
+        assert_eq!(choose_after_prepare(&mine, &carry_hears(vec![digest_only.clone()], std::slice::from_ref(&old), "new", &lineage)), Phase1Choice::Keep);
+        assert_eq!(choose_after_prepare(&mine, &carry_hears(vec![digest_only.clone()], std::slice::from_ref(&new), "new", &lineage)), Phase1Choice::Blocked);
+        assert_eq!(choose_after_prepare(&mine, &carry_hears(vec![digest_only], &[MadeIn::Unknown], "new", &lineage)), Phase1Choice::Blocked);
         // No report: nothing to hear. A length mismatch (never built by the engine) hears everything.
-        assert!(carry_hears(Vec::new(), &[], "new").is_empty());
-        assert_eq!(carry_hears(vec![report(1, &v1)], &[], "new").len(), 1);
+        assert!(carry_hears(Vec::new(), &[], "new", &lineage).is_empty());
+        assert_eq!(carry_hears(vec![report(1, &v1)], &[], "new", &lineage).len(), 1);
         // The tagged messages round-trip, and are appended after every earlier variant.
         let ack = ConsensusMsg::PrepareAckTagged {
             slot: Arc::from("work/x"), ballot: 3, voter: NodeId::new("127.0.0.1", 1).unwrap(), accepted_ballot: 1,

@@ -28,9 +28,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - **New, off by default: `consensus_record_acceptance_group`** (env `GOSSIP_CONSENSUS_RECORD_ACCEPTANCE_GROUP`).
     On a node it does two things. Its acceptor **writes** the group into its durable record (tag `0x05`), so the
     group survives a restart. And its own carry ballots **ask** each promiser where its acceptance was made and
-    decide by it: when every acceptance the promise quorum reports names its group, the carry hears only those made
-    in the successor; when any is of unknown group, or was made outside every group, it hears all of them, as
-    before. So a carry is never worse off than before, and is sound once nothing in its quorum is unknown. The
+    decide by it: when every acceptance the promise quorum reports was made in a group of the successor's
+    lineage (the successor and the ancestors the carrier can name), the carry hears only those made in the
+    successor; when any is of unknown group, was made outside every group, or names a group outside the lineage,
+    it hears all of them, as before. So a carry is never worse off than before, and is sound once nothing in its quorum is unknown. The
     switch becomes the default one MINOR later.
   - **Every node at this release reads `0x05` and the older tags**, whatever the switch says. **A 2.40.0 node reads
     `0x05` as no record**, which is why writing it is not the default yet.
@@ -38,7 +39,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     byte-identical to 2.40.0's while no `0x05` record is in its store. The gap stands, pinned by four tests and
     listed on `what-is-proven.md`.
   - A copy of a node's own acceptor record that names another group for the acceptance it holds is counted
-    (`mycelium_acceptor_guard_total{event="group_rewritten"}`) and written back from memory.
+    (`mycelium_acceptor_guard_total{event="group_rewritten"}`) and written back from memory — an ordinary
+    last-writer-wins write, and not on a slot the guard has withheld.
   - The carry-conflict warning no longer says two values "were chosen" when the carry itself chose the second; the
     counters are unchanged.
 

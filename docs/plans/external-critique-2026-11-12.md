@@ -1077,12 +1077,16 @@ recorded predecessor acceptance while an unrecorded one is heard is worse than h
   `consensus_record_acceptance_group`, off by default, because a 2.40.0 node reads `0x05` as no record;
 - two consensus messages appended last, `CarryPrepareTagged` and `PrepareAckTagged`: a carrier with the switch
   asks each promiser where its acceptance was made, and every node answers with what it holds, unfiltered;
-- the carrier decides over its whole promise quorum, its own memory included (`carry_hears`): every report names
-  its group → hear only the successor's; any report unknown, or made outside every group → hear everything, as
-  today. It adopts nothing from a refusal and starts each ballot from the envelope it carries;
+- the carrier decides over its whole promise quorum, its own memory included (`carry_hears`): every report made
+  in a group of the successor's lineage (`ConsensusEngine::lineage`: the successor and the ancestors whose
+  verified electorates the carrier holds) → hear only the successor's; any report unknown, made outside every
+  group, or naming a group outside the lineage → hear everything, as today. It adopts nothing from a refusal and
+  starts each ballot from the envelope it carries
+  (`a_carry_that_asks_starts_each_ballot_from_the_envelope_it_carries`);
 - a carrier without the switch carries as 2.40.0 did;
 - the carry-conflict warning no longer claims two values were chosen in the past; a rewritten group in a copy of
-  a node's own record is counted and undone.
+  a node's own record is counted and undone — by a last-writer-wins write (CR13 bounds what outlasts it), and not
+  on a withheld slot.
 
 **Step 2:** the default becomes `true`; the four default-pinning tests invert; the ledger row narrows to
 acceptances of unknown group.
@@ -1091,8 +1095,9 @@ acceptances of unknown group.
 deciding the other without it; the default pinned by tests that name the gap; the rule on its own; the record's
 round trip, a 2.40.0 reader's refusal of it stated, a restart over it; mixed fleets both ways; a quorum that
 cannot answer times out. **Delivered:** `src/lib_tests.rs` (ten tests from
-`a_carry_decides_what_the_predecessor_decided_whatever_an_overlapping_member_holds`, and the reviewer's six
-`rev787_…`), `src/consensus.rs` (four unit tests), `src/agent/acceptor_guard.rs` (one). The model's own
+`a_carry_decides_what_the_predecessor_decided_whatever_an_overlapping_member_holds`, an eleventh for the
+per-ballot restart, and the reviewer's seven `rev787…`), `src/consensus.rs` (four unit tests),
+`src/agent/acceptor_guard.rs` (one). The model's own
 expected-failure test inverts in a follow-up.
 
 **Does not:** change the wire version (v12; two variants appended); change a manifest (a retired member still

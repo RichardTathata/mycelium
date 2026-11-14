@@ -3996,10 +3996,15 @@ the migration, 2.33.0 on.
   1. its acceptor **writes** the group into its durable record (`0x05`), so the group survives a restart;
   2. its own carry ballots **ask** for the group and decide by it.
 - **The rule a carry that asks applies** — over its whole promise quorum, its own memory included:
-  - every reported acceptance names an electorate group → the carry hears those made **in the successor** and no
-    other. That is the sound rule: ballot numbers of two groups do not compare;
-  - any reported acceptance is of unknown group, or was made outside every group → the carry hears **all** of
-    them, as 2.40.0 did.
+  - every reported acceptance was made in a group of the successor's **lineage** — the successor, its
+    predecessors, theirs, and so on, as far as the carrier holds each one's verified electorate → the carry hears
+    those made **in the successor** and no other. That is the sound rule: ballot numbers of two groups do not
+    compare;
+  - any reported acceptance is of unknown group, was made outside every group, or names a group outside the
+    lineage → the carry hears **all** of them, as 2.40.0 did. (A non-exclusive slot can be proposed on an
+    unrelated electorate group, and such an acceptance can have replaced one made in the successor on a shared
+    member — as a cluster-scoped one can. An ancestor's cannot: a member answers a carry only once the
+    predecessor's retirement is visible to it, which closes the predecessor there.)
 
   So a carry that asks is never worse off than one that does not, and is right once nothing in its quorum is
   unknown. (An earlier draft filtered at the acceptor, which hid a shared member's recorded copy of the chosen
@@ -4047,18 +4052,22 @@ the migration, 2.33.0 on.
   chose. The carry proposes it and the successor's own phase 1 decides.
 - **An acceptor record is not signed** ([owner-signed records](../wiki/dev/owner-signed-records.md)): a member can
   overwrite another's. A copy of a node's own record naming another group for the acceptance it holds is counted
-  (`mycelium_acceptor_guard_total{event="group_rewritten"}`) and written back from memory; one that wins while the
-  node is down is read at its next start as it stands, and can hide a successor-made acceptance from a carry.
+  (`mycelium_acceptor_guard_total{event="group_rewritten"}`) and written back from memory — except on a slot the
+  guard has withheld, whose record is the repaired one and is left alone. The write-back is an ordinary
+  last-writer-wins write: a rewritten copy stamped ahead of the node's clock, within the drift bound, wins until
+  the clock passes it (critique plan CR13 counts such a stamp today and refuses it later). A rewritten copy that
+  wins, or one that lands while the node is down, is read at its next start as it stands, and — naming an ancestor
+  of the successor — can hide a successor-made acceptance from a carry.
 - **The warning's text changed**, not its counters: it no longer says two values "were chosen" for the slot when
   the carry itself chose the second.
 - **Wire v12 is unchanged.** Two variants are appended to the consensus message; the existing ones are untouched.
 - **Code:** `src/consensus.rs` (`MadeIn`, `carry_hears`, `ConsensusEngine::made_in` / `asks_tagged` /
   `acceptor_record`, `prepare_slot_tagged`, `encode_acceptor`, `ConsensusMsg::CarryPrepareTagged` /
-  `PrepareAckTagged`), `src/agent/migration.rs`, `src/agent/acceptor_guard.rs` (`group_rewritten`),
+  `PrepareAckTagged`, `ConsensusEngine::lineage`), `src/agent/migration.rs`, `src/agent/acceptor_guard.rs` (`group_rewritten`),
   `mycelium-core/src/config.rs`. Tests: `src/lib_tests.rs` — the ten from
   `a_carry_decides_what_the_predecessor_decided_whatever_an_overlapping_member_holds` to
-  `with_the_group_unrecorded_a_recarry_cannot_complete_and_leaves_the_predecessors_acceptance_accepted`, and the
-  reviewer's six (`rev787_…`); `src/consensus.rs` (`an_acceptor_record_carries_the_group_its_acceptance_was_made_in`,
+  `with_the_group_unrecorded_a_recarry_cannot_complete_and_leaves_the_predecessors_acceptance_accepted`,
+  `a_carry_that_asks_starts_each_ballot_from_the_envelope_it_carries`, and the reviewer's seven (`rev787…`); `src/consensus.rs` (`an_acceptor_record_carries_the_group_its_acceptance_was_made_in`,
   `a_restarted_acceptor_keeps_the_group_and_reports_it`,
   `a_carry_hears_the_successors_acceptances_only_when_every_report_names_its_group`,
   `rev787_an_unrecorded_acceptance_encodes_as_2_40_did_byte_for_byte`); `src/agent/acceptor_guard.rs`

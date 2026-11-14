@@ -171,8 +171,10 @@ the predecessor had outvoted. `AcceptorSlot::made_in` (`MadeIn::{Unknown, NoGrou
 on every node (`ConsensusEngine::made_in`, from the gate) and read in the promise's own `compute`
 (`prepare_slot_tagged`). **The carrier decides, not the acceptor**: with `consensus_record_acceptance_group` a
 carry sends `CarryPrepareTagged`, each promiser answers `PrepareAckTagged` with what it holds and where it was made,
-and `carry_hears` runs over the whole quorum, the carrier's own memory included — every report a named group: only
-the successor's; any unknown or outside every group: all of them, as before. The switch also writes the group to
+and `carry_hears` runs over the whole quorum, the carrier's own memory included — every report made in a group of
+the successor's lineage (`ConsensusEngine::lineage`: the successor and the ancestors whose verified electorates
+the carrier holds): only the successor's; any unknown, outside every group, or naming a group outside the lineage:
+all of them, as before. The switch also writes the group to
 the record (tag `0x05`; a 2.40.0 node reads it as no record, hence off by default in 2.41.0). Two shapes not to
 return to: a rule on ballots at the proposer (ballots of two groups do not compare — counting the manifest's
 acceptance as a report lets a re-carry replace the successor's own decision), and a filter at the acceptor (it

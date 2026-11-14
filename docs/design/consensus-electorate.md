@@ -335,8 +335,10 @@ predecessor is never consulted again.*
      keeps, beside an acceptance, the group it was made in (`MadeIn`); a carrier with
      `consensus_record_acceptance_group` asks each promiser for it (`CarryPrepareTagged` / `PrepareAckTagged`) and
      decides over its whole promise quorum, its own memory included (`carry_hears`): **when every reported
-     acceptance names its group, the carry hears only those made in G2; when any is of unknown group, or was made
-     outside every group, it hears all of them, as before 2.41.0.** The acceptor hides nothing — it cannot see the
+     acceptance was made in a group of G2's lineage — G2, its predecessors, theirs, as far as the carrier holds each
+     verified electorate (`ConsensusEngine::lineage`) — the carry hears only those made in G2; when any is of
+     unknown group, was made outside every group, or names a group outside the lineage, it hears all of them, as
+     before 2.41.0.** The acceptor hides nothing — it cannot see the
      other reports, and hearing a part is worse than hearing all (§8.5). A carrier without the switch — the default
      in 2.41.0 — asks and hears as before. A slot in S with promises only has nothing to carry: no
      value was chosen in G1 (ii). Sequential, one ballot per slot — a one-off cost proportional to |S|, stated.
@@ -425,8 +427,10 @@ failing first with its mechanism disabled:
   to be known, and holds **for a carry ballot whose carrier asks for it and whose promise quorum reports only
   acceptances that name theirs** (`consensus_record_acceptance_group` on the carrier; on the members, so that the
   group survives a restart). Then: an acceptance made in G2 is never replaced by one made in G1 on the same member (a
-  member answers a carry only once G1's retirement is visible to it, which closes G1 there), so each quorum member's
-  report is its latest G2 acceptance or says it has none; G2's own Paxos is intact; and the value carried when no
+  member answers a carry only once G1's retirement is visible to it, which closes G1 there) — **that covers G1 and
+  G2's other ancestors, not an unrelated group**, on which a non-exclusive slot may also be proposed and whose
+  acceptance can replace a G2-made one; a report naming a group outside G2's lineage therefore sends the carry
+  back to hearing everything — so each quorum member's report is its latest G2 acceptance or says it has none; G2's own Paxos is intact; and the value carried when no
   G2 acceptance is heard is the manifests' highest, which (ii) makes G1's chosen value. A partial carry and a
   restart keep it (the group is in the record); a chain keeps it (a member of G1 and G3 only holds a G1-made
   acceptance, which G3's carry from G2 does not hear); the carrier's own memory is one of the reports. Where a
@@ -626,8 +630,10 @@ attempt it holds; the argument above then needs every other adopter of `k` to re
     question a carrier asks.
   - **A report of unknown group makes the carry hear everything, as before** — never worse than before, and not
     fixed for that ballot. An acceptance has no group when it was made before its node ran 2.41.0, or its node
-    restarted while its own switch was off. An acceptance made outside every electorate group counts the same way:
-    a cluster-scoped acceptance on the slot can have replaced one made in the successor. **Why not hear the named
+    restarted while its own switch was off. An acceptance made outside every electorate group counts the same way,
+    and so does one naming a group outside the successor's lineage (a non-exclusive slot may be proposed on any
+    electorate group): either can have replaced an acceptance made in the successor. The lineage is what the
+    carrier can name from the verified electorates it holds; an ancestor it cannot see is outside it. **Why not hear the named
     ones and the unknown ones by different rules:** setting aside a shared member's recorded copy of the chosen
     value while hearing another member's unrecorded, outvoted one adopts the outvoted value in a trace the old rule
     gets right (#787's review, F1; `rev787_r6b_…`).
@@ -643,8 +649,9 @@ attempt it holds; the argument above then needs every other adopter of `k` to re
     a shared member whose predecessor acceptance sits above that is stopped by the record alone
     (`rev787_an_ordinary_proposal_after_the_completion_keeps_the_carried_value`).
   - **The acceptor record is unsigned** (`docs/wiki/dev/owner-signed-records.md`): a member that rewrites another's
-    record to name another group is counted and undone while the owner is up, and believed at the owner's next
-    start otherwise.
+    record to name another group is counted and undone while the owner is up (not on a withheld slot, whose
+    repaired record is left alone; and the undoing is a last-writer-wins write, which a copy stamped ahead within
+    the drift bound outlasts — CR13), and believed at the owner's next start otherwise.
   Until the completing node and every shared member have the switch on: migrate between electorates that share no
   member, or wait until the fleet has converged on the predecessor's decisions before retiring it.
 - **The guarantee starts when genesis is chosen.** A member that has touched a genesis attempt refuses an untagged
