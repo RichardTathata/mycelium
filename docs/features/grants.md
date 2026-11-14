@@ -244,9 +244,10 @@ has no row for this feature. The tests: in [`src/mandate/grant.rs`](../../src/ma
     node, its body naming the grant, the door and the use), a value that does not, a tombstone, a release made at
     another door. Each odd reading is counted: `GET /stats` `grant_use` and
     `mycelium_grant_use_reads_total{reading}` (`tombstone`, `unverifiable`, `legacy`, `release_elsewhere`,
-    `release_forged`, `release_replayed`, `superseded`);
+    `release_forged`, `release_replayed`, `superseded`, `not_stored`);
   - **the door reads its own marker write's receipt**: a write that lost to a newer value at the key refuses the
-    call, its reason ending `(grant_use_superseded)`, and the grant stays used there.
+    call, its reason ending `(grant_use_superseded)` — or `(grant_use_not_stored)` when the node's store applied
+    nothing of the marker (`max_store_entries` reached) — and the grant stays used there.
 
   Shown by `the_door_that_made_a_use_reads_its_journal_and_only_its_own_release_gives_it_back` and
   `a_second_gateway_reads_anything_but_never_written_as_used` (`src/agent/grant_use_tests.rs`): a member's
@@ -257,11 +258,25 @@ has no row for this feature. The tests: in [`src/mandate/grant.rs`](../../src/ma
   before dispatch, or is answered a caller-context refusal, and a provider that refuses
   `call_mandate_not_established`, release their use: in the journal, and as a signed release over the marker. That
   node's door then admits the grant once more. **Every other door of the class reads the release as used**, so
-  **a retry must return to the same gateway node** (and a direct caller's to the same provider node); elsewhere it
+  **a retry must return to the same gateway node**, and after a provider's give-back to the same provider node;
+  elsewhere it
   is refused *already used*. A door that did not record the use cannot tell a genuine release of the newest use
   from an older one written back, from a member's own pair, or from a release that overlapped another door's
   admission. The release in the KV is never why a grant reads unused — the releasing door's journal is; it tells
   the other doors, an auditor and a later collector who released which use.
+- **The provider's give-back, for a call a gateway routes.** For a call a gateway routes, the caller does not choose the provider: `tools/call` goes to the
+  first provider in scan order, so after provider P1 gives its use back a retry routed to P2 — after a membership
+  change, say — is refused *already used at provider*, and the client cannot steer it. It needs a new grant.
+  A release's signature decides nothing — the releasing door's journal does; it is verified so a forged one is
+  counted apart — and a release is written only over the releasing door's own marker for that use.
+- **What a door's journal does not survive, stated.** A node restarted **under a new address** is a new door
+  with an empty journal (the journal sits under the node's id): it reads uses the old address made from the KV
+  only. An entry that does not decode is skipped, logged and counted (`GET /stats`
+  `grant_use_journal_undecoded`), which forgets that use; a deleted
+  journal file reads as empty. The journal is read whole at every start and never compacted. A build with
+  `gateway` and `tls` and **without `compliance`** runs this path with no member-key view beyond the keys the
+  node itself trusts (`trusted_keys`): a marker it cannot verify reads used and is counted `unverifiable`, and its
+  own records verify under its own key — **untested**: the tests here are in a `compliance`-gated module.
 - **What this does not do, stated.** (1) **Two doors admitting one grant at once**: two gateways that each read
   *never written* before either marker arrives both admit; a third gateway then sees whichever value won — the
   other's marker, or its release, both read used. Not prevented (critique plan D12). (2) **The tombstone horizon

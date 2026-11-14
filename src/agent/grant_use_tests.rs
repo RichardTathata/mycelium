@@ -7,7 +7,7 @@
 //! in that order at the stamps gossip would carry.
 
 use super::*;
-use crate::agent::grant_use::{reads_used, record_use, Odd, UseKind, UseRecord, GRANT_USE_SUPERSEDED};
+use crate::agent::grant_use::{reads_used, record_use, MarkerWrite, Odd, UseKind, UseRecord, GRANT_USE_NOT_STORED, GRANT_USE_SUPERSEDED};
 use crate::agent::http::{ae_preflight, release_grant_claim_after, Preflight};
 use crate::mandate::grant::SignedMandateGrant;
 use bytes::Bytes;
@@ -206,7 +206,7 @@ async fn the_door_that_made_a_use_reads_its_journal_and_only_its_own_release_giv
     check!(superseded_count == 1, "the superseded write is not counted once: {superseded_count}");
     check!(refused_as_used(&raced_again), "the grant reads used after the superseded write: {}", describe(&raced_again));
     check!(raced_own.is_some_and(|u| !u.released), "the use is in this door's own record");
-    check!(lone_write == Ok(false), "the write half does not report the receipt's Superseded: {lone_write:?}");
+    check!(lone_write == Ok(MarkerWrite::Superseded), "the write half does not report the receipt's Superseded: {lone_write:?}");
     check!(lone_reads, "and the key reads used");
     check!(admitted(&claimed), "{}", describe(&claimed));
     check!(refused_as_used(&mid_claim_after), "RESTART: a grant claimed before the restart was admitted after it: {}", describe(&mid_claim_after));
@@ -232,6 +232,91 @@ async fn the_door_that_made_a_use_reads_its_journal_and_only_its_own_release_giv
     check!(refused_as_used(&after_replay_and_restart), "REPLAY, after a restart: {}", describe(&after_replay_and_restart));
     check!(admitted(&burnt_first) && burnt_back.is_some(), "{}", describe(&burnt_first));
     check!(refused_as_used(&burnt_retry), "a tombstone over this door's own release reads used: {}", describe(&burnt_retry));
+    assert!(moved.is_empty(), "{} reading(s) moved:\n{}", moved.len(), moved.join("\n"));
+}
+
+/// **A marker the store refuses admits nothing; a release is written only over this door's own marker** (#786's review, findings 1 and 6). One node, its gateway door, two grants:
+///
+/// - *Not stored*: the node's store is at its live-entry cap (`max_store_entries` — the live count set to the cap,
+///   as a member's flood leaves it), so the marker's write is `Refused` and nothing is applied. Taken as written,
+///   the call ran with nothing at the key, and every other gateway — reading *never written* — admitted the same
+///   grant. Now the call is refused `grant_use_not_stored`, counted; this node's key is still never written; and
+///   the use stands in the door's journal, so with room in the store again the grant reads used here — the record
+///   was synced and gossiped before the apply was refused, so a restart or a peer may hold it.
+/// - *Not this door's marker*: the door claims a grant, another value replaces its marker at the key (as another
+///   door's marker does when two admit at once), and the door then gives its use back. The release is not written
+///   over that value: nothing is given back, the value stands and reads used, and it is counted (`superseded`).
+///
+/// Seen failing first, one build per plant: a `Refused` receipt taken as written (the call admitted, nothing at the
+/// key); the release written over whatever the key holds (the other value replaced by this door's release).
+#[tokio::test]
+async fn a_marker_the_store_refuses_admits_nothing_and_a_release_is_written_only_over_this_doors_marker() {
+    let mut moved: Vec<String> = Vec::new();
+    macro_rules! check {
+        ($cond:expr, $($why:tt)+) => {
+            if !$cond {
+                moved.push(format!($($why)+));
+            }
+        };
+    }
+    const CAP: usize = 1_000_000;
+    let dir = scratch("cr2-cap");
+    let http_port = alloc_port();
+    let (id, mut cfg) = config(&dir, http_port, &Node { certs: dir.join("tls"), bootstrap: vec![], authority: true, port: None });
+    cfg.max_store_entries = CAP;
+    let a = Arc::new(GossipAgent::new(id, cfg));
+    a.start().await.expect("the node starts from its declaration");
+    serve_tool(&a);
+    let key = forecaster_key(&a, &dir);
+    let ctx = Arc::clone(&a.task_ctx);
+    let mut grants = Vec::new();
+    for city in ["Meaux", "Niort"] {
+        let args = serde_json::json!({"city": city});
+        let (asked, grant) = ask_and_issue(http_port, &args).await;
+        grants.push((asked["resource"].as_str().unwrap().to_string(), args, grant));
+    }
+    let [capped, replaced] = <[_; 2]>::try_from(grants).ok().unwrap();
+    let at = |g: &(String, serde_json::Value, SignedMandateGrant)| {
+        let (ctx, key, g) = (Arc::clone(&ctx), key.clone(), g.clone());
+        async move { present(&ctx, &g.0, &g.1, &g.2, &key).await }
+    };
+
+    // Not stored: the store at its cap.
+    let capped_key = marker_key(&capped.2);
+    let live = ctx.kv_state.live_count.swap(CAP, Ordering::SeqCst);
+    let at_cap = at(&capped).await;
+    ctx.kv_state.live_count.store(live, Ordering::SeqCst);
+    let key_after = held(&ctx, &capped_key);
+    let journal_after = ctx.grant_uses.own(&capped_key);
+    let not_stored = ctx.grant_uses.counted(Odd::NotStored);
+    let with_room = at(&capped).await;
+
+    // Not this door's marker: another value at the key when the door gives its use back.
+    let replaced_key = marker_key(&replaced.2);
+    let claimed = at(&replaced).await;
+    let other = Bytes::from_static(b"another door's marker");
+    mycelium_core::ops::kv_set(&ctx, Arc::from(replaced_key.as_str()), other.clone());
+    let gave_back = release_grant_claim_after(&ctx, &claimed, &refused_before_running()).await;
+    let stands = held(&ctx, &replaced_key).flatten();
+    let superseded = ctx.grant_uses.counted(Odd::Superseded);
+    let retry = at(&replaced).await;
+    a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+
+    check!(
+        matches!(&at_cap, Preflight::Refuse(r) if r.decision().reason.contains(GRANT_USE_NOT_STORED)),
+        "NOT STORED: the store refused the marker and the call was not refused by name: {}",
+        describe(&at_cap)
+    );
+    check!(key_after.is_none(), "nothing is at the marker's key: {key_after:?}");
+    check!(journal_after.as_ref().is_some_and(|u| !u.released), "the use does not stand in the door's journal: {journal_after:?}");
+    check!(not_stored == 1, "the refused write is not counted once: {not_stored}");
+    check!(refused_as_used(&with_room), "with room in the store again the grant reads used at this door: {}", describe(&with_room));
+    check!(admitted(&claimed), "{}", describe(&claimed));
+    check!(gave_back.is_none(), "OWN MARKER: a use was given back although the key no longer held this door's marker: {gave_back:?}");
+    check!(stands.as_ref() == Some(&other), "OWN MARKER: the release was written over another value at the key: {stands:?}");
+    check!(superseded == 1, "the release not written is not counted once: {superseded}");
+    check!(refused_as_used(&retry), "the other value reads used: {}", describe(&retry));
     assert!(moved.is_empty(), "{} reading(s) moved:\n{}", moved.len(), moved.join("\n"));
 }
 
@@ -435,7 +520,7 @@ async fn a_second_gateway_reads_anything_but_never_written_as_used() {
     check!(journal_after.is_some_and(|u| !u.released), "JOURNAL: the use was not read back from the journal after the restart");
     check!(refused_as_used(&tomb_after_restart), "TOMBSTONE, the same gateway after a restart: {}", describe(&tomb_after_restart));
     check!(refused_as_used(&replay_after_restart), "REPLAY, the same gateway after a restart: {}", describe(&replay_after_restart));
-    let expected = vec![("tombstone", 2), ("unverifiable", 1), ("legacy", 1), ("release_elsewhere", 2), ("release_forged", 1), ("release_replayed", 0), ("superseded", 0)];
+    let expected = vec![("tombstone", 2), ("unverifiable", 1), ("legacy", 1), ("release_elsewhere", 2), ("release_forged", 1), ("release_replayed", 0), ("superseded", 0), ("not_stored", 0)];
     check!(counted_b == expected, "COUNTED at the second gateway: each odd reading once — two tombstones, the replayed release and the member's own both made elsewhere: {counted_b:?}, expected {expected:?}");
     assert!(moved.is_empty(), "{} reading(s) moved:\n{}", moved.len(), moved.join("\n"));
 }

@@ -1549,7 +1549,7 @@ impl Settling {
                                 .checking(["grant use recorded durably before the work"]),
                         ));
                     }
-                    Ok(false) => {
+                    Ok(super::super::grant_use::MarkerWrite::Superseded) => {
                         if admitted && let Some(index) = history_index {
                             index.retract(&point, &envelope.actor, &envelope.attempt_id);
                         }
@@ -1564,7 +1564,26 @@ impl Settling {
                             .checking(["grant use marker's write receipt: applied, not superseded"]),
                         ));
                     }
-                    Ok(true) => claimed = Some(GrantClaim { holder, scope, term, point: point.clone(), marker, use_id }),
+                    // The store applied nothing of the marker (its live-entry cap): a call admitted now would leave
+                    // no marker at this node's key, so it does not run. The use stands in the journal and the claim is
+                    // kept, as for a superseded write — the record reached the WAL and the gossip queue before the
+                    // apply was refused.
+                    Ok(super::super::grant_use::MarkerWrite::NotStored) => {
+                        if admitted && let Some(index) = history_index {
+                            index.retract(&point, &envelope.actor, &envelope.attempt_id);
+                        }
+                        outcome = Err(ae::PreflightRefusal::Denied(
+                            ae::Decision::deny(
+                                format!(
+                                    "the grant's use marker at {point} was refused by this node's store (its live-entry cap is reached), so the use is not established where another door reads it and the call does not run; the grant stays used at this door ({})",
+                                    super::super::grant_use::GRANT_USE_NOT_STORED
+                                ),
+                                policy_revision,
+                            )
+                            .checking(["grant use marker's write receipt: applied, not refused by the store"]),
+                        ));
+                    }
+                    Ok(super::super::grant_use::MarkerWrite::Current) => claimed = Some(GrantClaim { holder, scope, term, point: point.clone(), marker, use_id }),
                 }
             }
             None => {}

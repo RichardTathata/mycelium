@@ -368,8 +368,17 @@ change, no change to an existing on-disk format.
   `a_grant_is_given_back_when_the_gateway_refused_before_sending` (`client_grant_tests.rs`) and the provider's
   end-to-end give-back, `a_call_refused_for_its_call_mandate_gives_the_grant_back` (`call_admission_tests.rs`).
 - *"The door checks its own marker write's receipt and refuses the call, by name, if the write was
-  `Superseded`."* — `write_owned_kv_reporting` (`state_machine.rs`), `record_use`'s `Ok(false)`, the denial in
-  `Settling::finish` whose reason ends `(grant_use_superseded)`. Test: the first above (*RECEIPT*).
+  `Superseded`."* — `write_owned_kv_reporting` (`state_machine.rs`), `record_use`'s `MarkerWrite`, the denial in
+  `Settling::finish` whose reason ends `(grant_use_superseded)`. Test: the first above (*RECEIPT*). **From #786's
+  review:** the door admits only when the receipt says the marker is the key's value — `Applied` or
+  `AlreadyCurrent`; `Superseded` refuses as above; the store's `Refused` (the live-entry cap, nothing applied)
+  refuses `grant_use_not_stored`; any outcome added later refuses. In each refusal the use stands in the journal.
+  And a release is written only over the releasing door's own marker for that use. Test:
+  `a_marker_the_store_refuses_admits_nothing_and_a_release_is_written_only_over_this_doors_marker`.
+- **The release's signature decides nothing under decision A.** Conditions (a) and (b) are met for the release in
+  form — it is signed, and verified at read — but the journal is what protects the grant: with the release's
+  verification removed no reading of *used* or *unused* changes, only the `release_forged` counter. It is kept for
+  that counter.
 - *Exit:* *"a member's tombstone of a used marker leaves the grant used at a second gateway and at the same
   gateway after a restart"* — *TOMBSTONE* ×3; *"a tombstone planted before the first use refuses the call (the
   receipt) and reads used"* — *PLANTED* (read before the write: refused as used) and *RECEIPT* (landing between

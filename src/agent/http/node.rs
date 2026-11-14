@@ -262,6 +262,8 @@ pub(super) async fn stats_handler(State(ctx): State<Arc<HttpCtx>>) -> impl IntoR
             use crate::agent::grant_use::Odd;
             let g = &ctx.agent_ctx.grant_uses;
             body["grant_use"] = json!(Odd::ALL.iter().map(|o| (o.label(), g.counted(*o))).collect::<std::collections::BTreeMap<_, _>>());
+            // Entries of this node's grant-use journal that did not decode at start: each is a use it has forgotten.
+            body["grant_use_journal_undecoded"] = json!(g.undecoded.load(std::sync::atomic::Ordering::Relaxed));
         }
         // Identity-and-lifecycle I4: copies of a `call:` checkpoint read from the KV and treated as absent — unparsed,
         // misplaced, or not signed by the gateway their key names.

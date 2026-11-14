@@ -24,24 +24,28 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     fsynced before the call is admitted) and reads it before the KV; a restart reads it back;
   - **at the marker key anything other than *never written* reads used** — a verified marker (now a record signed
     by the door's node, naming the grant, the door and the use), a value that does not verify, a tombstone;
-  - **a door reads its own marker write's receipt** and refuses the call, its reason ending
-    `(grant_use_superseded)`, when the write lost to a newer value at the key;
+  - **a door reads its own marker write's receipt** and admits only when the marker is the key's value: it
+    refuses, its reason ending `(grant_use_superseded)`, when the write lost to a newer value at the key, and
+    `(grant_use_not_stored)` when the node's store applied nothing (`max_store_entries` reached);
   - **a release is a signed record, honoured only by the door that made it.** The gateway's give-back after a
     refusal before dispatch, and the provider's after `call_mandate_not_established`, write a signed release over
     the marker where they wrote a tombstone.
 
   **Behaviour change:** a released grant used to be admitted by any gateway. **Now the retry must return to the
-  gateway node that released it** (a direct caller's, to the same provider node); every other door of the class
+  gateway node that released it**, and after a provider's give-back to the same provider node — which a caller
+  routed by a gateway does not choose (`tools/call` takes the first provider in scan order), so a retry routed to
+  another provider is refused and needs a new grant; every other door of the class
   reads the release as used and refuses *already used*. A door that did not record a use cannot tell a genuine
   release of the newest use from an older one written back over a later use, from a member's own marker-and-release
   pair, or from a release that overlapped another door's admission.
 
   **Mixed versions, one release:** an old-form marker is honoured as used and counted; **an un-upgraded gateway
   releases by tombstone, which upgraded doors read as used** — a refused call there spends the grant at upgraded
-  doors. Nothing in a mixed fleet re-arms a grant. Upgrade the doors of a class together.
+  doors. No combination re-arms a grant at an upgraded door. An un-upgraded door is unprotected until it is
+  upgraded: a member's tombstone still re-arms the grant there. Upgrade the doors of a class together.
 
   **Counted:** `GET /stats` `grant_use` and `mycelium_grant_use_reads_total{reading}` — `tombstone`,
-  `unverifiable`, `legacy`, `release_elsewhere`, `release_forged`, `release_replayed`, `superseded`.
+  `unverifiable`, `legacy`, `release_elsewhere`, `release_forged`, `release_replayed`, `superseded`, `not_stored`.
 
   **Not built, stated:** two gateways admitting one grant at the same time (D12); at a gateway that never recorded
   the use, a planted tombstone is collected after 3 000 s at the defaults and the key reads *never written* again;
@@ -50,7 +54,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `checkpoint` are unchanged (CR2's later PRs). No wire-frame change (v12), no change to an existing on-disk
   file, no public API change. Lock-order row 79.
 
-  **Check:** `curl -s http://NODE:PORT/stats | jq .grant_use` shows the seven readings, and after a call under a
+  **Check:** `curl -s http://NODE:PORT/stats | jq .grant_use` shows the eight readings, and after a call under a
   grant `BASE_PATH/NODE/grants/uses.journal` exists on the node whose door admitted it.
 
 - **The gateway's signal routes refuse the substrate's own kinds** (the signal-routes decision of 2026-11-13,
