@@ -107,7 +107,7 @@ cargo clippy --lib --no-default-features -- -D warnings   # catches the feature-
 Companion crates: `cargo test -p mycelium-tuple-space --features gateway`, same for
 `mycelium-blackboard` (+ clippy `--all-targets`); `cargo test -p mycelium-effects --features tuple-space`
 (+ clippy with and without the feature; `rusqlite` bundled, quarantined to that crate); `cargo test -p mycelium-commitment`
-(+ clippy `--all-targets` + `cargo run -p mycelium-commitment --example redistribution_cn`, the CN1 gate). CI also gates `tsc --noEmit` and the TypeScript SDK's `jest` suites — node-free, and since 2026-10-05 the live suite against a
+(+ clippy `--all-targets` + `cargo run -p mycelium-commitment --example redistribution_cn`, the CN1 gate). The acceptor's model (critique plan CR10): `cargo test -p mycelium-model --release --locked` (+ clippy `--all-targets`) — read the wiki's [acceptor-model page](docs/wiki/dev/testing/acceptor-model.md) before changing `prepare_slot`, the accept rule, the phase-1 rule or `read_slot`: the model calls them, so a change there can break one of its invariants or move a pinned state count. CI also gates `tsc --noEmit` and the TypeScript SDK's `jest` suites — node-free, and since 2026-10-05 the live suite against a
 `mycelium` node — the AFN +
 coop smokes, fuzz (non-PR), and `cargo audit`. **Never trust a memorised test count** — run
 the suite. Scale suites: `make test-scale` (100 nodes), `test-scale-resilience`,
@@ -174,7 +174,7 @@ is the state of play).
 - **Wave 1a, released in v2.40.0:** I0, I1, I3, I5, each closed on evidence in the plan's §8.
 - **Wave 1b (one MINOR), next:** I4 (cancellation under a `call:` mandate), I2 (CA succession), I7 (the developer's
   identity), each written from its spike note in `docs/plans/spikes/`; and with them, from the critique plan, CR2's
-  first PR (the grant use marker), CR13's counter and CR12 (`#[non_exhaustive]` on `GossipConfig`). A row is built only once its header (or, for a critique-plan row, its State line) says
+  first PR (the grant use marker; delivered, unreleased, #786), CR13's counter (delivered, unreleased, #782) and CR12 (`#[non_exhaustive]` on `GossipConfig`). A row is built only once its header (or, for a critique-plan row, its State line) says
   *buildable*.
 - **Wave 2 (one MINOR), the developer surface:** N1 and N3–N7 (N7 the Orca plugin). N3 (`--format json`) is delivered,
   unreleased (#767); N5 needs nothing from wave 1; N4's identity half and N7 wait on I7. The examples and records
@@ -187,7 +187,7 @@ is the state of play).
 - **Adopter surface:** Y9 is paused until a cloud credential is held; each row's stated *not built* items are in the
   plan's §8.
 - **Post-360 hardening:** the *not built* items and the known flakes, `docs/plans/post-360-hardening.md` §3.6.
-- **The third-party critique of 2026-11-12:** agreed 2026-11-12, all sixteen decisions answered (`docs/plans/external-critique-2026-11-12.md` §5): CR1 now (#774), CR2's first PR, CR13's counter and CR12 inside wave 1b, CR3–CR11 and the rest after it, CR10 (the acceptor's model) in parallel.
+- **The third-party critique of 2026-11-12:** agreed 2026-11-12, all sixteen decisions answered (`docs/plans/external-critique-2026-11-12.md` §5): CR1 now (#774), CR2's first PR (delivered, #786), CR13's counter (delivered, #782) and CR12 inside wave 1b, CR3–CR11 and the rest after it; CR10 (the acceptor's model, `mycelium-model`, CI job `model`) is delivered, unreleased (#784) — it found a carry across overlapping electorates deciding a value the predecessor outvoted, confirmed on the engine; the fix is in review (#787).
 - **Contracts axis, not code gates** (each needs a machine, a counterparty or a credential, not a commit): V1, the nightly scale runner whose self-hosted box is offline, so its criterion has never been
   met; AE4's four joint AWS/GCP runs, which need the counterparty; S4, real object-store buckets, which need
   credentials.
