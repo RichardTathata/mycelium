@@ -18384,6 +18384,131 @@ async fn a_completion_run_that_stops_mid_carry_is_resumed_by_the_next() {
     for n in &agents { n.shutdown_with_timeout(Duration::from_secs(5)).await; }
 }
 
+/// Whether a consensus signal's payload names the slot the carry-phase-1 tests contend for.
+#[cfg(feature = "consensus")]
+fn names_contended_slot(payload: &[u8]) -> bool {
+    const SLOT: &[u8] = b"work/contended";
+    payload.windows(SLOT.len()).any(|w| w == SLOT)
+}
+
+/// **A carry decides the value its predecessor decided, whatever an overlapping member still holds** (the
+/// counterexample the migration model found, CR10; run against real nodes). `old` = {N0,N1,N2}, `new` = {N1,N2,N3},
+/// one slot, every step a real proposal:
+///
+/// 1. N1 proposes v1 at ballot 1: N2 promises, N1 accepts its own v1@1, and its proposal reaches nobody (the frame
+///    filter drops it at N0 and N2) — an acceptance that never reaches a quorum;
+/// 2. N0 proposes v0 at ballot 2: N2 promises and accepts, N0 commits — **v0 is decided in `old`** by {N0,N2}. N1
+///    hears nothing of it and the decision record does not reach N1 or N3 (gossip lag, held open by the filter);
+/// 3. `old` retires to `new`; N3 completes the migration. The manifests report (1, v1) and (2, v0); the carry
+///    proposes v0. N2 does not answer the carry's prepare, so the promise quorum is {N3, N1}, and N1 reports the only
+///    acceptance it holds: (1, v1), made in `old`.
+///
+/// The property: `new` never decides a value other than the one `old` decided.
+///
+/// **Fails on main (2026-11-14), and is left failing on this branch: no fix is agreed.** `new` decides v1 at ballot
+/// 3 — N1 and N3 both hold (3, v1) — and the completion reports `conflicts: 1`.
+#[cfg(all(feature = "consensus", feature = "test-frame-filter"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_carry_decides_what_the_predecessor_decided_whatever_an_overlapping_member_holds() {
+    use crate::consensus::{consensus_kind, consensus_ns, decode_consensus_msg, ConsensusMsg};
+    use crate::store::FrameView;
+    let (agents, _l, _serial) = electorate_mesh(4, |_| {}).await;
+    let (n0, n1, n2, n3) = (&agents[0], &agents[1], &agents[2], &agents[3]);
+    for n in [n0, n1, n2] { n.mesh().join_group("old"); }
+    roster_converges(&agents, "old", &[n0, n1, n2]).await;
+    declare(n0, "old", false).await.expect("genesis of old");
+    epoch_converges(&agents, "old", 1).await;
+    let slot: Arc<str> = Arc::from("work/contended");
+    let (v0, v1) = (Bytes::from_static(b"v0-decided-in-old"), Bytes::from_static(b"v1-outvoted-in-old"));
+    let (h0, h1) = (n0.node_id().id_hash(), n1.node_id().id_hash());
+
+    // N1's ballot 1: its prepare reaches N2, its proposal reaches nobody, and N0 hears none of it.
+    n0.task_ctx.kv_state.frame_filter.pin().insert(1, Arc::new(move |v: &FrameView<'_>|
+        matches!(v, FrameView::Signal { sender, payload, .. } if *sender == h1 && names_contended_slot(payload))));
+    n2.task_ctx.kv_state.frame_filter.pin().insert(1, Arc::new(move |v: &FrameView<'_>| match v {
+        FrameView::Signal { kind, sender, payload } if *sender == h1 && *kind == consensus_kind::PROPOSE =>
+            matches!(decode_consensus_msg(&Bytes::copy_from_slice(payload)),
+                Some(ConsensusMsg::ProposeIn { slot, .. }) if &*slot == "work/contended"),
+        _ => false,
+    }));
+    // N1 hears nothing from N0 about the slot; the record of the decision at ballot 2 reaches neither N1 nor N3.
+    let record = crate::consensus_life::record_key(&slot, 2);
+    let committed = format!("{}{slot}", consensus_ns::COMMITTED);
+    for n in [n1, n3] {
+        let (record, committed) = (record.clone(), committed.clone());
+        n.task_ctx.kv_state.frame_filter.pin().insert(1, Arc::new(move |v: &FrameView<'_>| match v {
+            FrameView::Signal { sender, payload, .. } => *sender == h0 && names_contended_slot(payload),
+            FrameView::Kv { key, .. } => *key == record || *key == committed,
+        }));
+    }
+    let once = ConsensusConfig { phase1_timeout: Duration::from_millis(1500), max_ballots: 1, ..ConsensusConfig::default() };
+    let r1 = n1.consensus().group_propose("old", &slot, v1.clone(), once).await;
+    assert!(matches!(r1, ConsensusResult::Timeout { .. }), "v1 at ballot 1 reaches no quorum: {r1:?}");
+    let held = |n: &GossipAgent| n.task_ctx.consensus_accepted.pin().get(&slot)
+        .and_then(|s| s.accepted.as_ref().map(|(b, a)| (*b, a.value().and_then(|e| crate::consensus_life::Envelope::decode(&e)).and_then(|e| e.value))));
+    assert_eq!(held(n1), Some((1, Some(v1.clone()))), "N1 accepted its own v1 at ballot 1");
+    assert_eq!((held(n0), held(n2)), (None, None), "nobody else accepted it");
+    let ballot_key = format!("{}{slot}", consensus_ns::BALLOT);
+    poll_until(|| n0.kv().get(&ballot_key).is_some(), 10_000).await;
+    let r0 = n0.consensus().group_propose("old", &slot, v0.clone(), quick_cfg()).await;
+    assert!(matches!(r0, ConsensusResult::Committed { ballot: 2, .. }), "v0 is decided in old at ballot 2 by {{N0, N2}}: {r0:?}");
+    poll_until(|| n2.consensus().consensus_get(&slot) == Some(v0.clone()), 10_000).await;
+    assert_eq!(held(n1), Some((1, Some(v1.clone()))), "N1 still holds only its outvoted acceptance");
+
+    successor(&agents, n3, "new", &[n1, n2, n3], &["old"]).await;
+    n1.retire_electorate("old", "new").await.expect("old retires to new");
+    retirement_converges(&agents, "old").await;
+    assert!(n1.consensus().consensus_get(&slot).is_none() && n3.consensus().consensus_get(&slot).is_none(),
+        "the decision's record has not reached N1 or N3");
+    // N2 answers no prepare for the slot from here on: the carry's promise quorum is {N3, N1}.
+    crate::consensus::TEST_SWALLOW_PREPARES.pin().insert(n2.node_id().to_string(),
+        (slot.to_string(), Arc::new(std::sync::atomic::AtomicU32::new(u32::MAX))));
+    let states = n3.complete_migration("new").await;
+    crate::consensus::TEST_SWALLOW_PREPARES.pin().remove(&n2.node_id().to_string());
+    let decided_in_new = n3.consensus().consensus_get(&slot);
+    assert_eq!(decided_in_new, Some(v0.clone()),
+        "old decided v0; new decided {:?} (v1 is {v1:?}); the completion run returned {states:?}; N1 now holds {:?}, N3 {:?}",
+        decided_in_new, held(n1), held(n3));
+    assert_eq!(states.expect("the migration completes"), vec![crate::MigrationState {
+        predecessor: "old".into(), phase: crate::MigrationPhase::Complete { slots: 1, conflicts: 0 },
+    }]);
+    for n in &agents { n.shutdown_with_timeout(Duration::from_secs(5)).await; }
+}
+
+/// **The same, with no record anywhere** — the window needs no gossip lag. v0 is **chosen** in `old` (accepted by
+/// {N0,N2} at ballot 2) and never committed, as when its proposer stops between the second acceptance and the commit;
+/// N1 holds v1 from ballot 1. No node holds a decision record for the slot, so no record can stop a second value. The
+/// carry's promise quorum is {N3, N1}. Fails on main the same way.
+#[cfg(feature = "consensus")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_carry_decides_what_the_predecessor_chose_whatever_an_overlapping_member_holds() {
+    let (agents, _l, _serial) = electorate_mesh(4, |_| {}).await;
+    let (n0, n1, n2, n3) = (&agents[0], &agents[1], &agents[2], &agents[3]);
+    for n in [n0, n1, n2] { n.mesh().join_group("old"); }
+    roster_converges(&agents, "old", &[n0, n1, n2]).await;
+    declare(n0, "old", false).await.expect("genesis of old");
+    epoch_converges(&agents, "old", 1).await;
+    let slot: Arc<str> = Arc::from("work/contended");
+    let (v0, v1) = (Bytes::from_static(b"v0-chosen-in-old"), Bytes::from_static(b"v1-outvoted-in-old"));
+    let engine = |n: &GossipAgent| crate::agent::electorate::engine(&n.task_ctx);
+    assert!(engine(n1).accept_for_test("old", &slot, 1, &v1, n1.node_id()).await);
+    for n in [n0, n2] { assert!(engine(n).accept_for_test("old", &slot, 2, &v0, n0.node_id()).await); }
+    successor(&agents, n3, "new", &[n1, n2, n3], &["old"]).await;
+    n1.retire_electorate("old", "new").await.expect("old retires to new");
+    retirement_converges(&agents, "old").await;
+    crate::consensus::TEST_SWALLOW_PREPARES.pin().insert(n2.node_id().to_string(),
+        (slot.to_string(), Arc::new(std::sync::atomic::AtomicU32::new(u32::MAX))));
+    let states = n3.complete_migration("new").await;
+    crate::consensus::TEST_SWALLOW_PREPARES.pin().remove(&n2.node_id().to_string());
+    let decided_in_new = n3.consensus().consensus_get(&slot);
+    assert_eq!(decided_in_new, Some(v0.clone()),
+        "old chose v0; new decided {decided_in_new:?} (v1 is {v1:?}); the completion run returned {states:?}");
+    assert_eq!(states.expect("the migration completes"), vec![crate::MigrationState {
+        predecessor: "old".into(), phase: crate::MigrationPhase::Complete { slots: 1, conflicts: 0 },
+    }]);
+    for n in &agents { n.shutdown_with_timeout(Duration::from_secs(5)).await; }
+}
+
 /// **After the completion, with every predecessor node shut down and the successor restarted, the successor decides
 /// new slots and reads every carried slot correctly** — the acceptance test. `old` = {A,B,C} (the default) holds a
 /// lock with a 30 s window (A's), a lock A acquired and released, a permanent consistent write, and a value chosen but
