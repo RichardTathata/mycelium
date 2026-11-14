@@ -256,7 +256,8 @@ has no row for this feature. The tests: in [`src/mandate/grant.rs`](../../src/ma
   leave the grant used, at a second gateway and at the first after a restart.
 - **A use that ran nothing is given back — at the door that claimed it, and nowhere else.** A gateway that refuses
   before dispatch, or is answered a caller-context refusal, and a provider that refuses
-  `call_mandate_not_established`, release their use: in the journal, and as a signed release over the marker. That
+  `call_mandate_not_established`, release their use: a signed release over their own marker, and then — only once that is the key's value — in the
+  journal, so a give-back that does not complete leaves the use standing there. That
   node's door then admits the grant once more. **Every other door of the class reads the release as used**, so
   **a retry must return to the same gateway node**, and after a provider's give-back to the same provider node;
   elsewhere it

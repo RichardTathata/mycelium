@@ -777,10 +777,11 @@ pub(crate) async fn release_grant_claim_after(ctx: &Arc<TaskCtx>, preflight: &Pr
     release_unspent_grant_claim(ctx, preflight).await.then_some(reason)
 }
 
-/// Give back the grant use `preflight` claimed, for a call this node knows did not run: the release in this node's
-/// journal, then **the signed release over the marker** (critique plan row CR2 — a tombstone before it, which now
-/// reads used), then the in-memory claim. `false` when the permit claimed none, or when the release did not take —
-/// the journal refused it, or the release lost to a newer value at the key — and the grant stays spent. The caller
+/// Give back the grant use `preflight` claimed, for a call this node knows did not run: **the signed release over this door's own
+/// marker** (critique plan row CR2 — a tombstone before it, which now reads used), then the release in this node's
+/// journal, then the in-memory claim. `false` when the permit claimed none, or when the release did not take — the
+/// key no longer held this door's marker, the release lost to a newer value, or the journal refused it — and the
+/// grant stays spent, the journal still showing the use (`grant_use::release_use`). The caller
 /// decides that nothing ran: [`release_grant_claim_after`] from the provider's answer or its own refusal to dispatch,
 /// the provider's registration from its own refusal before any handler (`call_mandate_not_established`), which
 /// trusts no reply. **Honoured at this node's door only**: every other door of the class reads the release as used
