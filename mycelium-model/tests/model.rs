@@ -15,8 +15,12 @@ use mycelium_model::migration::{self, MigrationModel};
 use mycelium_model::slot::{self, SlotModel};
 use stateright::{Checker, Expectation, HasDiscoveries, Model, Path, Property};
 
+/// The checker's threads: every core, or `MYCELIUM_MODEL_THREADS`. No test's outcome may depend on the number —
+/// a passing run explores the same states whatever it is, and a counterexample is checked for what every
+/// violating trace has, not for which one the search returned.
 fn threads() -> usize {
-    std::thread::available_parallelism().map_or(1, usize::from)
+    std::env::var("MYCELIUM_MODEL_THREADS").ok().and_then(|n| n.parse().ok()).filter(|n| *n > 0)
+        .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, usize::from))
 }
 
 /// Explores every reachable state of `model`, depth first (the visited set is all it keeps), and holds it to its
@@ -185,25 +189,33 @@ fn found_a_carry_adopts_a_stale_acceptance_of_an_overlapping_member_and_the_grou
             _ => None,
         }).collect()
     };
-    // The step at which the second value is decided (the search is parallel, so the trace may run a step on).
-    let at = steps.iter().position(|(state, _)| decided_in(state, false) != decided_in(state, true)
-        && !decided_in(state, false).is_empty() && !decided_in(state, true).is_empty())
-        .expect("a state in which the two groups have decided different values");
-    let (last, _) = &steps[at];
-    let (before, carry) = &steps[at - 1];
-    assert!(matches!(carry, Some(migration::Action::Ballot(migration::Role::Carry, 3, _, false))),
-        "the step that breaks it is the carry ballot, above the predecessor's ballots: {carry:?}");
-    let decided = |successor: bool| decided_in(last, successor);
-    let (v0, v1) = (decided(false), decided(true));
+    // What is asserted is what **every** trace that breaks the invariant in this configuration has, not where in
+    // the trace it sits. The search is parallel and returns whichever violating state a thread reaches first: the
+    // predecessor's commit may land before the carry or after it (its vote can be delivered last), and the trace
+    // may run on past either. So: the two groups' decisions are read from the trace's last state, and the carry
+    // is found as the ballot at which the successor's decision first appears, wherever that is.
+    let (last, _) = steps.last().expect("a counterexample has a last state");
+    let (v0, v1) = (decided_in(last, false), decided_in(last, true));
     assert_eq!((v0.len(), v1.len()), (1, 1), "each group decided one value: {v0:?} {v1:?}");
     assert_ne!(v0, v1, "and not the same one");
     let (v0, v1) = (*v0.first().unwrap(), *v1.first().unwrap());
     assert_eq!((v0.proposer, v1.proposer), (0, 1), "the predecessor decided node 0's value, the successor node 1's");
-    assert_eq!(before.manifests.1.map(|(_, v)| v), Some(v0), "the manifests named the decided value as the one to carry");
-    let quorum: Vec<usize> = (0..last.nodes.len()).filter(|n| last.nodes[*n].accepted_carry).collect();
+
+    let at = steps.iter().position(|(state, _)| !decided_in(state, true).is_empty())
+        .expect("a state in which the successor has decided");
+    assert!(at > 0, "the successor decides nothing in the first state");
+    let (after, _) = &steps[at];
+    let (before, carry) = &steps[at - 1];
+    assert!(matches!(carry, Some(migration::Action::Ballot(migration::Role::Carry, 3, _, false))),
+        "the successor's decision is a carry ballot's, above the predecessor's ballots: {carry:?}");
+    assert_eq!(before.manifests.1.map(|(_, v)| v), Some(v0),
+        "the manifests named the value the predecessor decided as the one to carry");
+    // The carry's quorum: the members that accepted it in that step.
+    let quorum: Vec<usize> = (0..after.nodes.len())
+        .filter(|n| after.nodes[*n].accepted_carry && !before.nodes[*n].accepted_carry).collect();
     assert_eq!(quorum.len(), 2, "the carry's quorum: {quorum:?}");
     assert!(quorum.iter().all(|n| before.nodes[*n].acc.accepted.map(|(_, v)| v) != Some(v0)),
-        "no member of the carry's quorum held the decided value");
+        "no member of the carry's quorum held the value the predecessor decided");
     assert!(quorum.iter().any(|n| before.nodes[*n].acc.accepted == Some((1, v1))),
         "and one of them held the stale acceptance, made in the predecessor at ballot 1");
 }
