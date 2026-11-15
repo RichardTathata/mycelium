@@ -541,7 +541,12 @@ pub(crate) fn collect(ctx: &TaskCtx, now_ms: u64) -> Collected {
     // mandate out of window whatever its checkpoint says, so there is nothing left to re-assert or revoke from memory.
     ctx.call_issuer.issued.pin().retain(|_, i| now_ms <= i.until_ms.saturating_add(skew2));
 
-    // `grant/`: this node's own issue records and its own door's markers and releases.
+    // `grant/`: this node's own issue records and its own door's markers and releases — only with
+    // `collect_expired_records` on. The `call/` half above runs on a minting gateway too (#794's round-2 review, C3).
+    if !ctx.config.collect_expired_records {
+        ctx.call_issuer.call_records_collected.fetch_add(out.call_records as u64, Ordering::Relaxed);
+        return out;
+    }
     let mut grants: Grouped<String> = Default::default();
     for (key, bytes) in crate::store::scan_kv_prefix(&ctx.kv_state, "grant/") {
         let mut parts = key.splitn(4, '/');
@@ -570,11 +575,19 @@ pub(crate) fn collect(ctx: &TaskCtx, now_ms: u64) -> Collected {
                 }
             }
         }
-        // As a door: the use markers and releases this node signed.
+        // As a door: the use markers and releases this node signed — kept at least until the grant's own window
+        // ends, whatever the retention (#794's round-2 review, C2): `GrantVerifier` caps no `grant:` window, so a
+        // grant can outlive the retention, and a marker gone inside the window would let the grant be used again.
         for (key, bytes) in records.iter().filter(|(k, _)| k.contains("/used/")) {
-            if let Some(at_ms) = super::grant_use::own_record_at(ctx, key, bytes)
-                && now_ms > at_ms.saturating_add(retention_ms).saturating_add(skew2)
-            {
+            let Some(at_ms) = super::grant_use::own_record_at(ctx, key, bytes) else { continue };
+            let until_ms = match super::grant_use::own_use_until(ctx, key) {
+                Some(until) => until,
+                // No use held: with a journal, it was dropped past its window too, so the retention alone bounds it.
+                None if super::grant_use::journaled(ctx) => 0,
+                // Without one, a restart forgets: the window is unknown, so the marker is kept.
+                None => continue,
+            };
+            if now_ms > at_ms.saturating_add(retention_ms).max(until_ms).saturating_add(skew2) {
                 delete(key);
                 out.grant_records += 1;
             }
@@ -609,10 +622,13 @@ fn verified_grant(base: &str, bytes: &[u8], members: &impl MemberKeySource) -> O
         .then(|| (issuer.to_string(), (m.valid_from_ms, m.valid_until_ms)))
 }
 
-/// Start the collector, once per node, if `collect_expired_records` is on: each minute, through the timer seam.
+/// Start the collector, once per node, if `collect_expired_records` or `gateway_mint_call_mandates` is on: each
+/// minute, through the timer seam. With only the mint on it collects the gateway's own `call/` records.
 /// `false`: not started (off, or already running).
 pub(crate) fn start_collector(ctx: &Arc<TaskCtx>) -> bool {
-    if !ctx.config.collect_expired_records {
+    // The mint implies collecting the gateway's own `call/` records: that is the minting gateway's promise about its
+    // own records (#794's round-2 review, C3). Everything else waits for `collect_expired_records`.
+    if !ctx.config.collect_expired_records && !ctx.config.gateway_mint_call_mandates {
         return false;
     }
     if ctx.call_issuer.collector.swap(true, Ordering::AcqRel) {

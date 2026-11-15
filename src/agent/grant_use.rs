@@ -174,6 +174,20 @@ pub(crate) fn own_record_at(ctx: &TaskCtx, marker_key: &str, bytes: &[u8]) -> Op
     (r.node.parse::<NodeId>().ok()? == ctx.node_id && r.verifies_at(ctx, marker_key)).then_some(r.at_ms)
 }
 
+/// **The end of the grant's window for this door's own use at `marker_key`**, from its own record of the use
+/// (#794's round-2 review, C2): `Some(until)` when this door holds the use. `None` when it holds none — which at a
+/// node with a journal means the use was dropped past both its retention and its grant's window (`held`), so
+/// nothing is left to keep; and at a node without one may mean only that it restarted, so the caller keeps the
+/// marker.
+pub(crate) fn own_use_until(ctx: &TaskCtx, marker_key: &str) -> Option<u64> {
+    ctx.grant_uses.own(marker_key).map(|u| u.until_ms)
+}
+
+/// Does this node keep a grant-use journal (`[persistence]`)?
+pub(crate) fn journaled(ctx: &TaskCtx) -> bool {
+    ctx.grant_uses.journal.load().is_some()
+}
+
 /// `grant/{holder}/{term}/used/{point}` → (`{holder}/{term}`, `{point}`).
 fn split_marker_key(key: &str) -> Option<(&str, &str)> {
     let rest = key.strip_prefix("grant/")?;
@@ -186,18 +200,32 @@ fn is_legacy_marker(bytes: &[u8]) -> bool {
     !bytes.is_empty() && bytes.len() <= 20 && bytes.iter().all(u8::is_ascii_digit)
 }
 
+fn is_zero(v: &u64) -> bool {
+    *v == 0
+}
+
+/// Is `u` still held at `now_ms`? Past the retention after it, **and** past its grant's own window: a grant can be
+/// longer than the retention (`GrantVerifier` caps no `grant:` window), and a use forgotten inside the window could
+/// be made again (#794's round-2 review, C2).
+fn held(u: &OwnUse, now_ms: u64) -> bool {
+    u.at_ms.saturating_add(RETENTION_MS).max(u.until_ms.saturating_add(120_000)) > now_ms
+}
+
 /// One use this door made of a grant, as its journal holds it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct OwnUse {
     pub(crate) use_id: String,
     pub(crate) released: bool,
     pub(crate) at_ms: u64,
+    /// The end of the grant's own window (identity-and-lifecycle I4; #794's round-2 review, C2): the use is kept —
+    /// in memory, and its marker in the KV — at least until then. `0` for a use journaled before this field.
+    pub(crate) until_ms: u64,
 }
 
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "e", rename_all = "lowercase")]
 enum Entry {
-    Used { key: String, #[serde(rename = "use")] use_id: String, at_ms: u64 },
+    Used { key: String, #[serde(rename = "use")] use_id: String, at_ms: u64, #[serde(default, skip_serializing_if = "is_zero")] until_ms: u64 },
     Released { key: String, #[serde(rename = "use")] use_id: String, at_ms: u64 },
 }
 
@@ -277,8 +305,8 @@ impl GrantUseLedger {
             let mut uses = self.uses.lock().unwrap_or_else(|e| e.into_inner());
             for bytes in existing {
                 match serde_json::from_slice::<Entry>(&bytes) {
-                    Ok(Entry::Used { key, use_id, at_ms }) => {
-                        uses.insert(key, OwnUse { use_id, released: false, at_ms });
+                    Ok(Entry::Used { key, use_id, at_ms, until_ms }) => {
+                        uses.insert(key, OwnUse { use_id, released: false, at_ms, until_ms });
                     }
                     Ok(Entry::Released { key, use_id, .. }) => {
                         if let Some(u) = uses.get_mut(&key).filter(|u| u.use_id == use_id) {
@@ -291,7 +319,7 @@ impl GrantUseLedger {
                     }
                 }
             }
-            uses.retain(|_, u| u.at_ms.saturating_add(RETENTION_MS) > now_ms);
+            uses.retain(|_, u| held(u, now_ms));
         }
         self.journal.store(Some(Journal::open(path, STREAM)?));
         Ok(())
@@ -317,14 +345,14 @@ impl GrantUseLedger {
     /// returns** on a node that persists, then in memory. `Err` names why it is not on disk; nothing is remembered
     /// then, and the caller refuses the call. A node with no `[persistence]` has no journal: the use is in memory,
     /// as everything there is.
-    pub(crate) async fn record_use(&self, key: &str, use_id: &str, at_ms: u64) -> Result<(), String> {
-        self.append(&Entry::Used { key: key.to_string(), use_id: use_id.to_string(), at_ms }).await?;
+    pub(crate) async fn record_use(&self, key: &str, use_id: &str, at_ms: u64, until_ms: u64) -> Result<(), String> {
+        self.append(&Entry::Used { key: key.to_string(), use_id: use_id.to_string(), at_ms, until_ms }).await?;
         let mut uses = self.uses.lock().unwrap_or_else(|e| e.into_inner());
         if uses.len() as u64 >= self.prune_at.load(Ordering::Relaxed) {
-            uses.retain(|_, u| u.at_ms.saturating_add(RETENTION_MS) > at_ms);
+            uses.retain(|_, u| held(u, at_ms));
             self.prune_at.store((uses.len() as u64).saturating_mul(2).max(1_024), Ordering::Relaxed);
         }
-        uses.insert(key.to_string(), OwnUse { use_id: use_id.to_string(), released: false, at_ms });
+        uses.insert(key.to_string(), OwnUse { use_id: use_id.to_string(), released: false, at_ms, until_ms });
         Ok(())
     }
 
@@ -416,10 +444,10 @@ pub(crate) fn new_use_id(ctx: &TaskCtx, marker_key: &str, attempt_id: &str) -> S
 ///   record was synced to the WAL and gossiped before the apply was refused, so a restart or a peer may hold it.
 /// - `Err(reason)` — the use or the marker is not on disk. Nothing is remembered, the caller gives its in-memory
 ///   claim back, and nothing is spent.
-pub(crate) async fn record_use(ctx: &Arc<TaskCtx>, marker_key: &str, use_id: &str) -> Result<MarkerWrite, String> {
+pub(crate) async fn record_use(ctx: &Arc<TaskCtx>, marker_key: &str, use_id: &str, until_ms: u64) -> Result<MarkerWrite, String> {
     use mycelium_core::receipt::LocalApplication;
     let now_ms = ctx.hlc.decision_now_ms();
-    ctx.grant_uses.record_use(marker_key, use_id, now_ms).await?;
+    ctx.grant_uses.record_use(marker_key, use_id, now_ms, until_ms).await?;
     let Some(rec) = UseRecord::signed(ctx, UseKind::Use, marker_key, use_id) else { return Err(format!("{marker_key} is not a marker key")) };
     #[cfg(test)]
     {

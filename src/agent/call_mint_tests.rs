@@ -42,6 +42,8 @@ struct Opts {
     tools: bool,
     /// `collect_expired_records`.
     collect: bool,
+    /// `grant_retention_secs`, when not the default.
+    retention_secs: Option<u64>,
 }
 
 struct N {
@@ -80,6 +82,9 @@ async fn node(opts: Opts) -> N {
     }
     cfg.gateway_mint_call_mandates = opts.mint;
     cfg.collect_expired_records = opts.collect;
+    if let Some(r) = opts.retention_secs {
+        cfg.grant_retention_secs = r;
+    }
     if let Some(t) = opts.ttl_secs {
         cfg.call_mandate_ttl_secs = t;
     }
@@ -506,7 +511,7 @@ async fn a_calls_records_are_collected_past_their_floor_by_their_issuer_and_by_n
 /// other door's marker and the request went, and the status route answered `404 unknown_request`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn each_owner_collects_only_its_own_grant_records_and_the_holder_reads_expired() {
-    let n = node(Opts::default()).await;
+    let n = node(Opts { collect: true, ..Opts::default() }).await;
     let ctx = n.ctx();
     let key = ctx.tls.get().unwrap().signing_key();
     let other = ed25519_dalek::SigningKey::from_bytes(&[78u8; 32]);
@@ -547,6 +552,7 @@ async fn each_owner_collects_only_its_own_grant_records_and_the_holder_reads_exp
     // The doors: this node's own marker; another door's, signed by its node; a forged one that names this node.
     let marker = |base: &str, point: &str| format!("{base}/used/{point}");
     let own = super::grant_use::UseRecord::signed(ctx, super::grant_use::UseKind::Use, &marker(&genuine, "provider"), "u1").unwrap();
+    ctx.grant_uses.record_use(&marker(&genuine, "provider"), "u1", own.at_ms, now + 300_000).await.unwrap();
     super::state_machine::write_owned_kv(ctx, &marker(&genuine, "provider"), own.to_bytes());
     let mut theirs = own.clone();
     theirs.node = "127.0.0.1:1".into();
@@ -696,17 +702,99 @@ async fn rev794_a_revoke_is_not_acknowledged_while_the_disk_is_gone_whatever_the
     assert!(matches!(again, Err(call_issuer::RevokeRefusal::NotDurable(_))), "the disk is still gone, so the revoke is not acknowledged: {again:?}");
 }
 
-/// **The collector runs only where it is turned on** (#794's review, K3). A node with an execution authority and a
-/// mint, `collect_expired_records` off (the default), starts no collector — so nothing is deleted; with it on, one is
-/// started, once. Seen failing first: with `start_collector` ignoring the setting, the default node started one.
+/// **The collector runs only where it is turned on, and the mint implies its own `call/` half** (#794's review, K3;
+/// round 2, C3). A node with neither switch starts none. A minting gateway with `collect_expired_records` off starts
+/// one and collects its own `call/` records — its promise about its own records — and nothing of `grant/`, not even
+/// a grant it issued. With the switch on, a node starts one, once. Seen failing first: with `start_collector`
+/// ignoring the settings the default node started one; with the mint not implying the collector the minting
+/// gateway's records stayed for ever.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_collector_runs_only_where_it_is_turned_on() {
-    let off = node(Opts { mint: true, ..Opts::default() }).await;
-    assert!(!call_issuer::start_collector(off.ctx()), "off: not started");
+    let off = node(Opts::default()).await;
+    assert!(!call_issuer::start_collector(off.ctx()), "neither switch: not started");
     assert!(!off.ctx().call_issuer.collecting(), "no collector runs at a default node");
     off.a.shutdown().await;
-    let on = node(Opts { mint: true, collect: true, ..Opts::default() }).await;
+    // The mint alone: its own `call/` records, and no `grant/` record.
+    let mint = node(Opts { mint: true, tools: true, ..Opts::default() }).await;
+    assert!(mint.ctx().call_issuer.collecting(), "a minting gateway collects its own call/ records");
+    let me = mint.a.node_id().clone();
+    let (_framed, term) = mint.framed(&me, "quick").await;
+    let issued = format!("grant/{}/r9/issued", grant_holder_segment("token:gw/alice"));
+    let m = Mandate {
+        holder: PrincipalId::new("token:gw/alice").unwrap(),
+        established_by: PrincipalId::new(mint.gateway()).unwrap(),
+        purpose: "grant".into(),
+        scope: "grant:r9".into(),
+        operations: vec!["tools/call:tool:deploy@x".into()],
+        epoch: 1,
+        term: TermId::new("r9").unwrap(),
+        valid_from_ms: 0,
+        valid_until_ms: 1,
+    };
+    let key = mint.ctx().tls.get().unwrap().signing_key();
+    let g = SignedMandateGrant { signature: mycelium_core::tls::sign_bytes(&key, &m.canonical_bytes()).to_vec(), mandate: m };
+    super::state_machine::write_owned_kv(mint.ctx(), &issued, serde_json::to_vec(&g).unwrap());
+    let out = call_issuer::collect(mint.ctx(), u64::MAX / 2);
+    assert_eq!((out.call_records, out.grant_records), (2, 0), "its own call/ pair, and no grant/ record");
+    assert!(mint.kv(&call_checkpoint_key(&mint.gateway(), &term)).is_none() && mint.kv(&issued).is_some());
+    mint.a.shutdown().await;
+    let on = node(Opts { collect: true, ..Opts::default() }).await;
     assert!(on.ctx().call_issuer.collecting(), "on: started at the node's start");
     assert!(!call_issuer::start_collector(on.ctx()), "and only once");
     on.a.shutdown().await;
+}
+
+/// **A door keeps its marker until the grant's own window ends, whatever the retention** (#794's round-2 review, C2).
+/// `GrantVerifier` caps no `grant:` window, so an entitled issuer can issue a two-day grant; with
+/// `grant_retention_secs = 3600` the door's marker was collected after an hour — the journal had forgotten the use,
+/// the tombstone would be collected, and the grant could be used again inside its window. Now the door's own record
+/// of the use carries the grant's window, and the marker is kept to its end + 2·skew. Seen failing first: with the
+/// floor at the use + the retention + 2·skew alone, the marker went an hour after the use.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_doors_marker_is_kept_to_its_grants_window_whatever_the_retention() {
+    let n = node(Opts { collect: true, retention_secs: Some(3_600), ..Opts::default() }).await;
+    let ctx = n.ctx();
+    let marker = format!("grant/{}/r2d/used/provider", grant_holder_segment("token:gw/alice"));
+    let rec = super::grant_use::UseRecord::signed(ctx, super::grant_use::UseKind::Use, &marker, "u2").unwrap();
+    let until = rec.at_ms + 2 * 24 * 3_600_000;
+    ctx.grant_uses.record_use(&marker, "u2", rec.at_ms, until).await.unwrap();
+    super::state_machine::write_owned_kv(ctx, &marker, rec.to_bytes());
+    let after_retention = rec.at_ms + 3_600_000 + 2 * SKEW_MS + 1;
+    assert_eq!(call_issuer::collect(ctx, after_retention).grant_records, 0, "kept past the retention, inside the window");
+    assert_eq!(call_issuer::collect(ctx, until + 2 * SKEW_MS).grant_records, 0, "kept to the window's end + 2·skew");
+    assert_eq!(call_issuer::collect(ctx, until + 2 * SKEW_MS + 1).grant_records, 1, "and collected past it");
+    n.a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&n.dir);
+}
+
+/// **A genuine grant another member issued is not this node's to delete** (#794's round-2 review, C4). `g` holds, in
+/// its KV, a grant validly signed by `p` and issued by `p`; with `g`'s collector on and far past every floor, `g`
+/// deletes none of it. Seen failing first: with the `issuer == me` check removed, `g` deleted `p`'s grant.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_genuine_grant_another_member_issued_is_not_collected_here() {
+    let (g, p, cert_dir) = pair(Opts { collect: true, ..Opts::default() }).await;
+    let theirs = p.ctx().tls.get().unwrap().signing_key();
+    let m = Mandate {
+        holder: PrincipalId::new("token:gw/alice").unwrap(),
+        established_by: PrincipalId::new(p.gateway()).unwrap(),
+        purpose: "grant".into(),
+        scope: "grant:rp".into(),
+        operations: vec!["tools/call:tool:deploy@x".into()],
+        epoch: 1,
+        term: TermId::new("rp").unwrap(),
+        valid_from_ms: 0,
+        valid_until_ms: 1,
+    };
+    let grant = SignedMandateGrant { signature: mycelium_core::tls::sign_bytes(&theirs, &m.canonical_bytes()).to_vec(), mandate: m };
+    let base = format!("grant/{}/rp", grant_holder_segment("token:gw/alice"));
+    let cp = serde_json::to_vec(&super::gateway_authority::call_mint::checkpoint(&theirs, &p.gateway(), "grant:rp", 1, 0, &[])).unwrap();
+    super::state_machine::write_owned_kv(g.ctx(), &format!("{base}/issued"), serde_json::to_vec(&grant).unwrap());
+    super::state_machine::write_owned_kv(g.ctx(), &format!("{base}/checkpoint"), cp);
+    let members = call_issuer::record_keys(g.ctx());
+    assert!(members.get(p.a.node_id()).is_some_and(|k| k.retained.contains(&theirs.verifying_key().to_bytes())), "g verifies p's signature");
+    assert_eq!(call_issuer::collect(g.ctx(), u64::MAX / 2).grant_records, 0, "p's grant is p's to collect");
+    assert!(g.kv(&format!("{base}/issued")).is_some() && g.kv(&format!("{base}/checkpoint")).is_some());
+    g.a.shutdown().await;
+    p.a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&cert_dir);
 }

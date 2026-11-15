@@ -1421,6 +1421,14 @@ step. **What is kept to answer `expired` is the request record itself**: request
 rule no node may delete them — signing them, so their writer can collect them and keep only a signed expiry stub, is
 **not built** and is put to the maintainer.
 
+**From #794's round-2 review (2026-11-15).** C2: a door keeps its marker until the grant's own window ends (+ 2·skew),
+whatever `grant_retention_secs` — the door's own promise about its own record; `GrantVerifier` is not given a cap on
+`grant:` windows, which would change what an issuer may promise. The door's journal entry carries the window
+(`until_ms`, additive). `a_doors_marker_is_kept_to_its_grants_window_whatever_the_retention`. C3: the mint implies
+collecting the gateway's own `call/` records (`the_collector_runs_only_where_it_is_turned_on`). C4:
+`a_genuine_grant_another_member_issued_is_not_collected_here`. Never collected, stated: unsigned `grant/` records,
+legacy markers, records whose owner does not run the collector, a departed gateway's `call/` pairs.
+
 **PR 2's entry conditions, as PR 2 meets them.**
 - *"PR 2 either refuses a cancellable call at those two doors until PR 3 builds their stop, or states the gap as
   live"*: refused (the maintainer's decision above). `provider_enforcement::Door` names the door at each `check`; a
@@ -1479,6 +1487,24 @@ rule no node may delete them — signing them, so their writer can collect them 
   gateway; no release has stated the floor. `the_gateway_gives_no_grant_back_on_call_mandate_not_established_or_any_authority_refusal`
   still holds. A grant claimed for a call refused `call_mandate_not_durable` is given back: the gateway refused
   before it sent anything.
+
+#### I4a · Sign the grant request, `consumed`, `revoked` and `refused` records, then let each owner collect its own — *follow-up of I4, agreed with the maintainer 2026-11-15 — **not buildable until written***
+
+*Why:* I4's collector is owner-only (the maintainer's decision of 2026-11-15: each agent's retention is a promise about
+its own records), so it deletes only what its owner signed. Four `grant/` records are unsigned, and so nothing
+collects them today; the [owner-signed inventory](../wiki/dev/owner-signed-records.md#grants-mandates-and-cancellation)
+records each as *Does not hold* (the request, `consumed`, `revoked`), or *Outside: availability* (`refused`).
+What nothing collects today, the C3 bound of #794's round-2 review, as `deprecations.md` §110 states it: unsigned
+`grant/` records, legacy markers, records whose owner does not run the collector, and a departed gateway's `call/`
+pairs.
+
+The row's promises, to be written into a buildable row:
+1. **Each record is signed by the agent that wrote it, under the key its path names**: the holder's request; the
+   gateway's `consumed`, `revoked` and `refused`. Read by the owner-signed rule: verified at read, a failed record
+   read as absent and counted, absence failing closed, and a forged-record test.
+2. **Once signed, each owner's collector deletes its own expired records.** The holder's `expired` answer then needs
+   only the minimal record this row names, not the whole request.
+3. **Legacy unsigned records are read for one release behind a counter, then refused**, as §9's O3, O5 and O6 do.
 
 #### I2 · CA succession by a pre-committed successor — *written from S-succeed ([note](spikes/2026-11-07-s-succeed.md), 2026-11-07; evidence at tag `spike/s-succeed-2026-11-07-r2`) — **buildable: R1–R4 resolved, decided 2026-11-12***
 

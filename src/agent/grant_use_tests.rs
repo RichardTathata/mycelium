@@ -147,7 +147,7 @@ async fn the_door_that_made_a_use_reads_its_journal_and_only_its_own_release_giv
     // …and the write half alone, on a key nothing has used: `Ok(false)` is the receipt's `Superseded`.
     let lone = "grant/node:127.0.0.1:1/t-lone/used/gateway";
     plant_tombstone_ahead(&ctx, lone);
-    let lone_write = record_use(&ctx, lone, "0123456789abcdef").await;
+    let lone_write = record_use(&ctx, lone, "0123456789abcdef", 0).await;
     let lone_reads = reads_used(&ctx, lone);
 
     // Mid-claim, and released.

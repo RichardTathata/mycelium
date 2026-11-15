@@ -291,7 +291,8 @@ has no row for this feature. The tests: in [`src/mandate/grant.rs`](../../src/ma
   the window + 2·skew and the issue + [`grant_retention_secs`](../reference/configuration.md#grant_retention_secs);
   each door deletes the markers and releases it signed past their time + the retention; nobody deletes another
   agent's record, and unsigned records (the request, `consumed`, `revoked`, `refused`) stay — so the holder's
-  `GET /gateway/grants/request/{r}` still answers `expired`, never `unknown_request`.
+  `GET /gateway/grants/request/{r}` still answers `expired`, never `unknown_request`. A door keeps its marker at
+  least until the grant's own window ends, whatever the retention: no verifier caps a `grant:` window.
 - **Revocation.** `POST …/revoke` at the issuing node reads the tool and the agent from the **signed** grant (its one
   enumerated operation and its holder), not from the request record, and publishes the next checkpoint for the grant's scope naming the
   term, offers it to its own authority — whose sweep judges work under a grant by that standing and its window, not by

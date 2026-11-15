@@ -4376,8 +4376,19 @@ which is new in this wave (§104).
   "expired"`** for a request past its `expires_at_ms` with no `issued`, `refused` or `revoked` beside it (`revoked`
   while the unsigned revocation stands) — never `unknown_request`. What is kept to answer it: the request record
   itself. Signing the request and the issuer's other records, so their owners can collect them, is not built.
-  Counted: `call_records_collected`, `grant_records_collected`. A build without `compliance` verifies its own
-  records under its own key, which is all it collects. ***Check:*** with it off (the default), `GET /stats`
+  **A minting gateway collects its own `call/` records whatever this switch says** (#794's round-2 review, C3):
+  `gateway_mint_call_mandates` implies it — the gateway's promise about the records it writes, two per call, which
+  would otherwise stay for ever. The `grant/` half needs `collect_expired_records`. **A door keeps its marker until
+  the grant's own window ends** (+ 2·skew), whatever the retention (C2): `GrantVerifier` caps no `grant:` window,
+  and the door's own record of the use now carries the window; a node without a journal that has restarted no
+  longer knows it, and keeps the marker. Counted: `call_records_collected`, `grant_records_collected`. A build
+  without `compliance` verifies its own records under its own key, which is all it collects.
+  **Never collected, stated:** unsigned `grant/` records (the request, `consumed`, `revoked`, `refused`); legacy
+  markers (the timestamp form before §106); records whose owner does not run the collector; and a departed
+  gateway's `call/` pairs, which no other node may delete. Signing the unsigned four (the request, `consumed`,
+  `revoked`, `refused`) so their owners can collect them is plan row **I4a** (`docs/plans/identity-and-lifecycle.md`,
+  agreed 2026-11-15, not yet buildable); their *Does not hold* rows are in the
+  [owner-signed inventory](../wiki/dev/owner-signed-records.md#grants-mandates-and-cancellation). ***Check:*** with it off (the default), `GET /stats`
   `grant_records_collected` and `call_records_collected` stay at 0.
 - **Not collected, stated:** every unsigned `grant/` record (above); every record another agent wrote; and the
   door's own grant-use journal (`grants/uses.journal`, §106), which is still read whole at
@@ -4416,6 +4427,8 @@ which is new in this wave (§104).
   sent late after the stop was asked. **What it does not prove:** that the work went on (a receiver may stop and
   answer late), or anything about a receiver that never answers, whether it stopped or not. A reply racing the
   cancel inside the grace is not a broken promise and is not counted. Nothing is refused because of the count.
+  **A declared receiver's stop is recorded as confirmed even when the counter shows it answered late**: the
+  confirmation is the receiver's own promise, the counter the node's assessment of it.
 - **`mycelium-reason`: a cancelled call is final.** The router read any error reply as a failed attempt and tried
   the next provider — a new envelope and a new `call:` term the cancel does not cover, so a cancelled call would
   run again. It now stops at a reply with `data.reason` `cancelled` (stopped while it ran) or `data.detail`
