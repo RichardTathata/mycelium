@@ -3,6 +3,7 @@ use crate::signal::reconcile_boundary_from_store;
 #[cfg(feature = "tls")] use crate::signal::kv_ns;
 use crate::store::{apply_and_notify, intern_key};
 use crate::framing::GossipUpdate;
+#[cfg_attr(not(feature = "tls"), allow(unused_imports))] // since the caller-context marker moved to `gateway_caller`, used only under `tls`
 use bytes::Bytes;
 use std::{
     net::{IpAddr, SocketAddr},

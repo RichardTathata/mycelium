@@ -543,7 +543,7 @@ pub(crate) fn publish_caller_context_marker(ctx: &TaskCtx) {
     if mycelium_core::ops::kv_get(ctx, &key).as_deref() == Some(value) {
         return;
     }
-    let _ = super::helpers::kv_set(ctx, Arc::from(key.as_str()), Bytes::from_static(value));
+    let _ = super::helpers::kv_set(ctx, std::sync::Arc::from(key.as_str()), Bytes::from_static(value));
 }
 
 /// How often a node re-asserts its caller-envelope id marker (post-360 row E).
