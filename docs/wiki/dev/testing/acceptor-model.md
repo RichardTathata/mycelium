@@ -76,6 +76,18 @@ accepted, at these bounds, so recording adds no state); `overlap` with every nod
 (the carrier's carry does not ask). Both planted wrapper faults were seen failing first: with `carry_hears` left out
 of the wrapper, and with `claim_envelope_in` given `Unknown`, the bridge tests and the every-node `overlap` run fail.
 
+What two of those runs can and cannot show (#792's review): the `contended` run with every node recording cannot
+fail for anything the fix does — at ballots to 2 the stale case is unreachable — so it is a regression pin; the
+shared-carrier run also holds with nobody recording, so its job is against a *partial* rule: the reviewer's plant
+that set aside only the recorded ancestor acceptances is caught by it alone.
+
+**Run in review, not in CI:** the reviewer added a `Forget(n)` step — at any step, any node's recorded group
+turned `Unknown`, a restart from a record written without it. `overlap` with every node recording and `Forget`:
+70,985,223 states, complete; two-value violations are reachable and every one is the documented fallback; no other
+invariant breaks. Not run on the larger configurations. With the carry step recorded, the reviewer's runs with
+everyone recording also held: `rolling` 35,170,675, `stalled_carry` 128,085,121, `contended` to 2 42,208,266,
+`overlap_shared_carrier` 12,730,277 (larger than the pins: the carry step is part of the state there).
+
 The model's half was promised in #784 and is done: the expected-failure test that stood for the finding is now
 the switch-off case, and the switch-on cases are explored in full.
 
@@ -154,10 +166,12 @@ made runs **grow without end** rather than fail (one reached 37 GB): the CI job 
 - **Where an acceptance was made, beyond two groups and a restart.** The model has the predecessor and the
   successor only, so a group outside the lineage, an acceptance made outside every group in the migration, and a
   grandparent's lineage are not reached; `Unknown` stands for a pre-2.41.0 node or a restart from a record without
-  the group, and no restart is modelled; the record's group is never rewritten (the guard's `group_rewritten`).
+  the group — the conservative direction: the engine keeps the group in memory from 2.41.0 whatever the switch
+  says — and no restart is modelled (the review of #792 added one, below); the record's group is never rewritten (the guard's `group_rewritten`).
 - **In the migration:** a completion vote requires the carry done, as one global fact — no acceptor in the
-  engine checks that; it is the completer's discipline (`src/agent/migration.rs`). There is one carrier and it
-  is outside the predecessor; a second, racing or restarted completer never occurs; the carry-conflict path
+  engine checks that; it is the completer's discipline (`src/agent/migration.rs`). There is one carrier per run —
+  node 3, outside the predecessor, or in `overlap_shared_carrier` node 2, a member of both groups; a second,
+  racing or restarted completer never occurs; the carry-conflict path
   (`Superseded` → `Conflict`, the completion still proposed, `src/agent/migration.rs:355`–`376`) is not
   modelled; the predecessor closes on a retirement promise or a manifest only (the engine also closes on a
   visible retirement); the retirement is decided by a majority of promises (the engine needs votes); and there
