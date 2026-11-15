@@ -16994,8 +16994,7 @@ async fn an_undecided_genesis_is_superseded_by_one_naming_the_live_roster() {
     let engine = crate::agent::electorate::engine(&b.task_ctx);
     assert_eq!(admits(&engine, &SignalScope::Group(Arc::from("council")), "work/x", Some((1, pending.digest())), a.node_id(), None),
         Err((2, live.digest())));
-    let cfg = ConsensusConfig { phase1_timeout: Duration::from_millis(1500), max_ballots: 3, ..ConsensusConfig::default() };
-    assert!(matches!(a.consensus().group_propose("council", "work/after", Bytes::from_static(b"z"), cfg).await,
+    assert!(matches!(a.consensus().group_propose("council", "work/after", Bytes::from_static(b"z"), commit_cfg()).await,
         ConsensusResult::Committed { .. }), "the group decides again");
     for n in &agents { n.shutdown_with_timeout(Duration::from_secs(5)).await; }
 }
@@ -17362,7 +17361,8 @@ async fn a_forgotten_promise_withholds_the_slot_so_a_second_value_is_not_decided
     }));
     drop(listeners.remove(2));
     let cfg = ConsensusConfig { phase1_timeout: Duration::from_millis(1500), max_ballots: 2, ..ConsensusConfig::default() };
-    let r = agents[0].consensus().group_propose("council", "work/x", Bytes::from_static(b"v1"), cfg.clone()).await;
+    // A and B answer, so this commits as soon as they have (`commit_cfg`); C's withheld proposal below keeps `cfg`.
+    let r = agents[0].consensus().group_propose("council", "work/x", Bytes::from_static(b"v1"), commit_cfg()).await;
     assert!(matches!(r, ConsensusResult::Committed { .. }), "v1 decided by {{A, B}}: {r:?}");
     poll_until(|| agents[1].consensus().consensus_get("work/x").as_deref() == Some(b"v1".as_slice()), 20_001).await;
     assert!(agents[1].task_ctx.consensus_accepted.pin().get("work/x").is_some_and(|s| s.accepted.is_some()), "B accepted v1");
@@ -17399,7 +17399,7 @@ async fn a_forgotten_promise_withholds_the_slot_so_a_second_value_is_not_decided
     assert_ne!(c.consensus().consensus_get("work/x").as_deref(), Some(b"v2".as_slice()), "v2 was not decided");
     // C hears A again: A reports v1, C adopts it.
     c.task_ctx.kv_state.frame_filter.pin().remove(&1);
-    let r = c.consensus().group_propose("council", "work/x", Bytes::from_static(b"v2"), cfg).await;
+    let r = c.consensus().group_propose("council", "work/x", Bytes::from_static(b"v2"), commit_cfg()).await;
     // A reports v1 in its promise: C adopts and commits it (`Committed`, the store written here), or learns the
     // decision from A's report (`Superseded`) and holds the record once anti-entropy carries it — one round.
     if matches!(r, ConsensusResult::Committed { .. }) {
@@ -17551,9 +17551,9 @@ async fn a_forgotten_acceptance_at_an_equal_ballot_withholds_the_slot() {
     }));
     drop(listeners.remove(1)); // Y answers nothing while X decides
     let cfg = ConsensusConfig { phase1_timeout: Duration::from_millis(1500), max_ballots: 1, ..ConsensusConfig::default() };
-    // X's one ballot must decide: X and N both answer, so it returns once they have, and the 30 s timeout is only a
-    // bound — 1.5 s timed out under load before N's promise arrived. Y's proposal below keeps `cfg`: it times out
-    // because N withholds, however long it waits.
+    // X's one ballot must decide: X and N both answer, so each phase returns once they have, and the 30 s bounds each
+    // phase only if N does not answer — 1.5 s timed out under load before N's promise arrived. Y's proposal below
+    // keeps `cfg`: it times out because N withholds, however long it waits.
     let decides = ConsensusConfig { phase1_timeout: Duration::from_secs(30), ..cfg.clone() };
     let r = agents[0].consensus().group_propose("council", "work/x", Bytes::from_static(b"vX"), decides).await;
     assert!(matches!(r, ConsensusResult::Committed { ballot: 1, .. }), "vX decided at ballot 1 by {{X, N}}: {r:?}");
@@ -17655,6 +17655,15 @@ async fn complete(agents: &[GossipAgent], by: &GossipAgent, group: &str) -> Vec<
 #[cfg(feature = "consensus")]
 fn quick_cfg() -> ConsensusConfig {
     ConsensusConfig { phase1_timeout: Duration::from_millis(1500), max_ballots: 3, ..ConsensusConfig::default() }
+}
+
+/// [`quick_cfg`] for a proposal the test needs to **commit**, on a quorum that answers. Each phase returns as soon as
+/// its quorum has answered, so a commit costs no more than with `quick_cfg`; the 30 s bounds each phase only when the
+/// quorum does not answer. With 1.5 s, a proposal whose promises came late at every ballot under load returned
+/// `Timeout`: less often than with one ballot, but not never.
+#[cfg(feature = "consensus")]
+fn commit_cfg() -> ConsensusConfig {
+    ConsensusConfig { phase1_timeout: Duration::from_secs(30), ..quick_cfg() }
 }
 
 /// **Two concurrent retirements decide one successor**, and a non-member cannot retire. Two members retire the
@@ -18275,7 +18284,7 @@ async fn a_drop_needs_a_retirement_elsewhere_and_a_forced_drop_that_races_a_reti
         n.task_ctx.electorate_drops.pin().remove(crate::agent::electorate::migration_key("g2", "p").as_str());
         n.task_ctx.electorate_dropped_known.pin().remove(crate::agent::electorate::migration_key("g2", "p").as_str());
     }
-    assert!(matches!(f.consensus().group_propose("g2", &slot, Bytes::from_static(b"w"), quick_cfg()).await, ConsensusResult::Committed { .. }),
+    assert!(matches!(f.consensus().group_propose("g2", &slot, Bytes::from_static(b"w"), commit_cfg()).await, ConsensusResult::Committed { .. }),
         "g2 decides freely once p is dropped");
     a.retire_electorate("p", "g2").await.expect("p retires into g2 where the drop is not visible");
     retirement_converges(&agents, "p").await;
@@ -18318,7 +18327,7 @@ async fn a_completion_stands_as_proof_when_the_predecessor_is_gone_and_the_succe
         roster_converges(&agents, "old", &[a, b, c]).await;
         declare(a, "old", true).await.unwrap();
         epoch_converges(&agents, "old", 1).await;
-        assert!(matches!(a.consensus().group_propose("old", "work/k", Bytes::from_static(b"k"), quick_cfg()).await, ConsensusResult::Committed { .. }));
+        assert!(matches!(a.consensus().group_propose("old", "work/k", Bytes::from_static(b"k"), commit_cfg()).await, ConsensusResult::Committed { .. }));
         successor(&agents, d, "new", &[d, e, f], &["old"]).await;
         a.retire_electorate("old", "new").await.unwrap();
         retirement_converges(&agents, "old").await;
@@ -18335,7 +18344,7 @@ async fn a_completion_stands_as_proof_when_the_predecessor_is_gone_and_the_succe
         let g = d.electorate("new").unwrap();
         assert_eq!(engine.migration_complete(&g), Ok(()), "the completion stands as proof of the retirement");
         assert_eq!(crate::agent::electorate::exclusive_electorate(&d.task_ctx), Ok(Some("new".to_string())), "and of the default passed");
-        assert!(matches!(d.consensus().group_propose("new", "work/proof", Bytes::from_static(b"p"), quick_cfg()).await, ConsensusResult::Committed { .. }));
+        assert!(matches!(d.consensus().group_propose("new", "work/proof", Bytes::from_static(b"p"), commit_cfg()).await, ConsensusResult::Committed { .. }));
     }
     // The crash: what is on disk now, with the nodes still running, is all a restart has (the files copied aside).
     let crash = base.join("crash");
@@ -18385,7 +18394,7 @@ async fn a_completion_stands_as_proof_when_the_predecessor_is_gone_and_the_succe
         assert!(n.electorate_completion("new", "old").is_some(), "{} holds the completion", n.node_id());
         assert_eq!(crate::agent::electorate::exclusive_electorate(&n.task_ctx), Ok(Some("new".to_string())), "{}", n.node_id());
     }
-    assert!(matches!(d.consensus().group_propose("new", "work/fresh", Bytes::from_static(b"fresh"), quick_cfg()).await, ConsensusResult::Committed { .. }));
+    assert!(matches!(d.consensus().group_propose("new", "work/fresh", Bytes::from_static(b"fresh"), commit_cfg()).await, ConsensusResult::Committed { .. }));
     drop(e.consensus().distributed_lock("other", Duration::from_secs(5)).await.expect("the default is new's"));
     assert_eq!(f.consensus().consensus_get("work/k"), Some(Bytes::from_static(b"k")));
     for n in &restarted { n.shutdown_with_timeout(Duration::from_secs(5)).await; }
@@ -18462,7 +18471,7 @@ async fn a_committed_but_unpropagated_value_is_carried() {
     epoch_converges(&agents, "old", 1).await;
     let v = Bytes::from_static(b"v-committed-in-old");
     let slot: Arc<str> = Arc::from("work/k");
-    assert!(matches!(a.consensus().group_propose("old", &slot, v.clone(), quick_cfg()).await, ConsensusResult::Committed { .. }));
+    assert!(matches!(a.consensus().group_propose("old", &slot, v.clone(), commit_cfg()).await, ConsensusResult::Committed { .. }));
     poll_until(|| agents.iter().all(|n| n.consensus().consensus_get(&slot).is_some()), 10_000).await;
     successor(&agents, d, "new", &[d, e, f], &["old"]).await;
     a.retire_electorate("old", "new").await.unwrap();
@@ -18704,26 +18713,39 @@ async fn carry_over_an_outvoted_acceptance(records: impl Fn(usize) -> bool, carr
     // Ballot 1 runs until N1 has accepted its own v1 and N2 has dropped the proposal, and is then cancelled. N1
     // accepts only once phase 1 has a promise quorum ({N1, N2}); a phase-1 timeout short enough to wait out ended the
     // ballot under load before N2's promise arrived, with nothing accepted. The proposal cannot reach a quorum however
-    // long it runs — N0 hears none of it and N2 drops the proposal, so N1's own vote is the only one — so its 30 s
-    // timeout is only the bound on a phase 1 that never completes: then it ends first, and the test fails by name.
+    // long it runs — N0 hears none of it and N2 drops the proposal, so N1's own vote is the only one. The 30 s bounds
+    // each phase (the prepare and the collection of votes): if N2 never promises, or the proposal never reaches N2's
+    // filter, the proposal ends first, or the 70 s wait does, and the test fails by name.
     let accepted = |n: &GossipAgent| held_for_contended_slot(n).and_then(|h| h.1);
+    let was_dropped = || proposal_dropped.load(std::sync::atomic::Ordering::SeqCst);
     let unbounded = ConsensusConfig { phase1_timeout: Duration::from_secs(30), max_ballots: 1, ..ConsensusConfig::default() };
     {
         let c1 = n1.consensus();
         let r1 = c1.group_propose("old", &slot, v1.clone(), unbounded);
         tokio::pin!(r1);
+        let reached = async { while !(accepted(n1).is_some() && was_dropped()) { time::sleep(Duration::from_millis(5)).await; } };
         tokio::select! {
-            r1 = &mut r1 => panic!("v1 at ballot 1 reaches no quorum, and N1 accepts it before its proposal ends: {r1:?}; N1 holds {:?}", accepted(n1)),
-            () = poll_until(|| accepted(n1).is_some() && proposal_dropped.load(std::sync::atomic::Ordering::SeqCst), 60_000) => {}
+            r1 = &mut r1 => panic!("v1 at ballot 1 reaches no quorum, and N1 accepts it before its proposal ends: {r1:?}; \
+                N1 holds {:?}; N2 dropped the proposal: {}", accepted(n1), was_dropped()),
+            reached = tokio::time::timeout(Duration::from_secs(70), reached) => if reached.is_err() {
+                panic!("in 70 s, N1 did not accept its v1 at ballot 1 and N2 drop the proposal: N1 holds {:?}; N2 dropped the proposal: {}", accepted(n1), was_dropped());
+            },
         }
     } // The proposal is dropped here: cancelled, and listening for nothing.
     assert_eq!(accepted(n1), Some((1, Some(v1.clone()))), "N1 accepted its own v1 at ballot 1");
-    assert_eq!((accepted(n0), accepted(n2)), (None, None), "nobody else accepted it");
+    // The flag is set as the proposal reaches N2's filter, before N2's acceptor would process a frame let through: the
+    // check is held open for 250 ms after it, so a filter that lets the proposal through fails here, by name.
+    let settle = time::Instant::now() + Duration::from_millis(250);
+    while time::Instant::now() < settle {
+        assert_eq!((accepted(n0), accepted(n2)), (None, None), "nobody else accepted it");
+        time::sleep(Duration::from_millis(5)).await;
+    }
     let ballot_key = format!("{}{slot}", consensus_ns::BALLOT);
     poll_until(|| n0.kv().get(&ballot_key).is_some(), 10_000).await;
     // Ballot 2 must decide at its first try: a promise later than `quick_cfg`'s 1.5 s under load moved it to a later
-    // ballot. N0 and N2 both answer, so the proposal returns once they have; the 30 s timeout is only a bound.
-    let decides = ConsensusConfig { phase1_timeout: Duration::from_secs(30), ..quick_cfg() };
+    // ballot. N0 and N2 both answer, so each phase returns once they have; the 30 s bounds each phase only if N2 does
+    // not answer. One ballot: a retry could only fail the assertion.
+    let decides = ConsensusConfig { max_ballots: 1, ..commit_cfg() };
     let r0 = n0.consensus().group_propose("old", &slot, v0.clone(), decides).await;
     assert!(matches!(r0, ConsensusResult::Committed { ballot: 2, .. }), "v0 is decided in old at ballot 2 by {{N0, N2}}: {r0:?}");
     poll_until(|| n2.consensus().consensus_get(&slot) == Some(v0.clone()), 10_000).await;
@@ -19175,7 +19197,7 @@ async fn after_the_completion_the_successor_survives_the_predecessors_departure_
         assert_eq!(crate::agent::electorate::exclusive_electorate(&n.task_ctx), Ok(Some("new".to_string())));
     }
     // Decides afresh, without old.
-    assert!(matches!(d.consensus().group_propose("new", "work/fresh", Bytes::from_static(b"fresh"), quick_cfg()).await,
+    assert!(matches!(d.consensus().group_propose("new", "work/fresh", Bytes::from_static(b"fresh"), commit_cfg()).await,
         ConsensusResult::Committed { .. }), "a fresh slot decides in the restarted successor");
     drop(e.consensus().distributed_lock("other", Duration::from_secs(5)).await.expect("a fresh lock decides"));
     // Reads every carried slot correctly.
