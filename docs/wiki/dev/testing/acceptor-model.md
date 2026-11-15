@@ -167,7 +167,7 @@ made runs **grow without end** rather than fail (one reached 37 GB): the CI job 
   successor only, so a group outside the lineage, an acceptance made outside every group in the migration, and a
   grandparent's lineage are not reached; `Unknown` stands for a pre-2.41.0 node or a restart from a record without
   the group — the conservative direction: the engine keeps the group in memory from 2.41.0 whatever the switch
-  says — and no restart is modelled (the review of #792 added one, below); the record's group is never rewritten (the guard's `group_rewritten`).
+  says — and no restart is modelled (the review of #792 ran one, above); the record's group is never rewritten (the guard's `group_rewritten`).
 - **In the migration:** a completion vote requires the carry done, as one global fact — no acceptor in the
   engine checks that; it is the completer's discipline (`src/agent/migration.rs`). There is one carrier per run —
   node 3, outside the predecessor, or in `overlap_shared_carrier` node 2, a member of both groups; a second,
