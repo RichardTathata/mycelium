@@ -512,7 +512,7 @@ async fn an_oidc_users_a2a_call_is_exchanged_on_send_and_stream() {
             }
         });
     }
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    crate::agent::capability_ops::until_advertised(&a.task_ctx, "weather", "forecast").await;
     let bearer = user_token(&issuer);
     let a2a = |method: &'static str, id: String| {
         let bearer = bearer.clone();

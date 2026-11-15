@@ -786,7 +786,8 @@ async fn a_streamed_a2a_task_waiting_for_a_grant_reports_input_required_with_the
             }
         });
     }
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // The skill's receiver is registered above; its advertisement is a spawned task's write.
+    crate::agent::capability_ops::until_advertised(&a.task_ctx, "depot", "dispatch").await;
     // The supervisor issues the first request that appears.
     let (a2, principal2) = (Arc::clone(&a), agent_principal.clone());
     let issuing = tokio::spawn(async move { issue_pending(a2, http_port, principal2).await });

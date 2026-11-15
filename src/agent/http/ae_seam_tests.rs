@@ -60,7 +60,7 @@ async fn the_a2a_door_sends_the_same_refusal_body_as_mcp() {
     let _reg = agent
         .capabilities()
         .advertise_capability(Capability::new("depot", "dispatch"), Duration::from_secs(30));
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    crate::agent::capability_ops::until_advertised(&agent.task_ctx, "depot", "dispatch").await;
 
     let resp = reqwest::Client::new()
         .post(format!("http://127.0.0.1:{http_port}/a2a"))
@@ -144,7 +144,7 @@ async fn no_event_follows_a_terminal_task_state_on_the_stream() {
     let _reg = agent
         .capabilities()
         .advertise_capability(Capability::new("depot", "dispatch"), Duration::from_secs(30));
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    crate::agent::capability_ops::until_advertised(&agent.task_ctx, "depot", "dispatch").await;
 
     let resp = reqwest::Client::new()
         .post(format!("http://127.0.0.1:{http_port}/a2a"))
