@@ -196,6 +196,8 @@ mod client_sig_tests;
 mod client_grant_tests;
 #[cfg(all(test, feature = "tls"))]
 mod client_cert_tests;
+#[cfg(all(test, feature = "tls"))]
+mod succession_tests;
 #[cfg(feature = "compliance")]
 mod knowledge_keys;
 /// Closure plan C5: applying member removals at the agent.
@@ -2667,7 +2669,8 @@ impl GossipAgent {
         // Post-360 plan row Q: the new certificate is issued strictly after every one of this node's
         // own, so a clock stepped back cannot mint a successor that ranks below its predecessor.
         let floor = revocation::own_newest_issuance(&self.task_ctx);
-        let material = crate::tls::generate_rotation_after(tls_cfg, &self.node_id, Arc::clone(&self.task_ctx.removed), Arc::clone(&self.task_ctx.key_standing), floor)?;
+        // I2 (#796's review, finding 2): over the roots this node trusts now, not the configuration file's.
+        let material = tls.rotation_after(tls_cfg, &self.node_id, floor)?;
         let new_vk = material.verifying_key;
 
         // Post-360 plan row Q: the new key's certificate record, before anything else — the new key's
@@ -2713,7 +2716,8 @@ impl GossipAgent {
         tokio::time::sleep(propagation).await;
 
         // 4. Cut over to the new key/cert.
-        tls.activate(material);
+        // Refused when the roots changed while the new key propagated: rebuild and rotate again.
+        tls.activate(material)?;
 
         // 5. Re-sign the same history with the NEW current key and republish the sealed record and the
         //    proof (#623's confirming check). Step 2's record, signed by the prior key, must reach peers

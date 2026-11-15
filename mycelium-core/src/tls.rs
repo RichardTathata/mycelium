@@ -36,10 +36,15 @@ pub struct NodeTls {
     #[cfg(feature = "tls")]
     gateway_key: std::sync::Arc<arc_swap::ArcSwap<rustls::sign::CertifiedKey>>,
     /// The fleet's server-certificate check — the CA chain, then the removal and revocation checks —
-    /// for a client this node builds outside the mesh (the bulk fetch, R7). Fixed for the node's life:
-    /// rotation reuses the CA, and the removal and standing sets it reads are shared and live.
+    /// for a client this node builds outside the mesh (the bulk fetch, R7). One verifier for the node's
+    /// life, handed out by [`fleet_server_verifier`](NodeTls::fleet_server_verifier), that delegates at
+    /// every verification to the check [`activate`](NodeTls::activate) last installed: a client built
+    /// once at start (the bulk fetch's) follows a change of roots (identity-and-lifecycle I2).
     #[cfg(feature = "tls")]
     fleet_server_verifier: std::sync::Arc<dyn rustls::client::danger::ServerCertVerifier>,
+    /// The check `fleet_server_verifier` delegates to; swapped by `activate` when the roots change.
+    #[cfg(feature = "tls")]
+    fleet_server_current: std::sync::Arc<arc_swap::ArcSwap<std::sync::Arc<dyn rustls::client::danger::ServerCertVerifier>>>,
     /// Identity-anchor sink (identity-auth Phase 1b): records a directly-connected peer's
     /// CA-validated Ed25519 key. Installed once at agent start with a closure capturing the
     /// `CoreCtx` anchor maps; the outbound writer calls it after each handshake. `OnceLock` so
@@ -52,9 +57,31 @@ pub struct NodeTls {
     #[cfg(feature = "tls")]
     node_cert: arc_swap::ArcSwap<Vec<u8>>,
     /// The fleet CA's chain check, without the removal check — what a certificate record is judged
-    /// by (`verify_member_cert`). Fixed for the node's life: rotation reuses the CA.
+    /// by (`verify_member_cert`). A same-CA rotation keeps it; a change of roots swaps it
+    /// (identity-and-lifecycle I2), **before** `roots_generation` is bumped.
     #[cfg(feature = "tls")]
-    cert_verifier: std::sync::Arc<dyn rustls::server::danger::ClientCertVerifier>,
+    cert_verifier: arc_swap::ArcSwap<std::sync::Arc<dyn rustls::server::danger::ClientCertVerifier>>,
+    /// The CA certificates this node trusts now (DER), in the order the root store was built from.
+    #[cfg(feature = "tls")]
+    roots: arc_swap::ArcSwap<Vec<Vec<u8>>>,
+    /// The **roots generation** (identity-and-lifecycle I2, R4): bumped by `activate`, with a `Release`
+    /// store, after it has swapped the verifiers for material that changes the roots. A reader loads it
+    /// with `Acquire` **before** it loads a verifier ([`verify_member_cert_tagged`](NodeTls::verify_member_cert_tagged)),
+    /// so a reader that sees the new generation sees the new verifier, and one that sees the old tags
+    /// what it judged with the old: a cached verdict of an older generation is a miss.
+    #[cfg(feature = "tls")]
+    roots_generation: std::sync::atomic::AtomicU64,
+    /// The removal and standing sets the mesh verifiers read — kept so a change of roots
+    /// ([`reroot_material`](NodeTls::reroot_material)) builds verifiers over the same live sets.
+    #[cfg(feature = "tls")]
+    removed: std::sync::Arc<crate::removal::RemovedSet>,
+    #[cfg(feature = "tls")]
+    standing: std::sync::Arc<crate::removal::KeyStanding>,
+    /// Held for the whole of [`activate`](NodeTls::activate) and while [`rotation_after`](NodeTls::rotation_after)
+    /// reads the roots it builds over: one writer of the identity and the roots at a time (#796's review,
+    /// finding 2). Never held across an `.await` or another lock (lock-order table, `NodeTls::activate_lock`).
+    #[cfg(feature = "tls")]
+    activate_lock: std::sync::Mutex<()>,
 }
 
 #[cfg(feature = "tls")]
@@ -75,8 +102,23 @@ impl NodeTls {
     }
     /// The fleet's server-certificate check (CA chain, removal, revocation), for a client built
     /// outside the mesh — the bulk fetch (external review R7).
+    ///
+    /// The verifier returned is the same for the node's life and delegates, at each verification, to
+    /// the check over the roots the node trusts **then**: a client holding it follows a change of roots
+    /// (identity-and-lifecycle I2).
     pub fn fleet_server_verifier(&self) -> std::sync::Arc<dyn rustls::client::danger::ServerCertVerifier> {
         std::sync::Arc::clone(&self.fleet_server_verifier)
+    }
+
+    /// The roots generation (identity-and-lifecycle I2, R4), loaded with `Acquire`: `0` at start, one
+    /// more at each [`activate`](NodeTls::activate) whose material changed the roots.
+    pub fn roots_generation(&self) -> u64 {
+        self.roots_generation.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// The CA certificates (DER) this node trusts now.
+    pub fn roots_der(&self) -> Vec<Vec<u8>> {
+        self.roots.load().as_ref().clone()
     }
 
     /// Install the identity-anchor sink (identity-auth Phase 1b) — called once at agent start
@@ -108,12 +150,64 @@ impl NodeTls {
     /// new key/cert immediately; existing connections keep their old (CA-trusted)
     /// session. Call only *after* the new verifying key has been published to
     /// peers, so they already accept it.
-    pub fn activate(&self, m: RotationMaterial) {
+    ///
+    /// **A change of roots** (material from [`reroot_material`](NodeTls::reroot_material),
+    /// identity-and-lifecycle I2) also swaps the chain check behind
+    /// [`verify_member_cert`](NodeTls::verify_member_cert) and the fleet's server check, and then — only
+    /// then, with a `Release` store — bumps [`roots_generation`](NodeTls::roots_generation). A same-CA
+    /// rotation carries no roots and leaves both checks and the generation as they were.
+    ///
+    /// **One writer at a time** (#796's review, finding 2): `activate` holds `activate_lock` for its whole
+    /// body, so two activations never interleave their stores. Material that carries no roots was built
+    /// over a root set — the one [`rotation_after`](NodeTls::rotation_after) read, or the configuration's
+    /// root for the free [`generate_rotation_after`] — and is **refused** when the roots have changed
+    /// since: its mesh configs would trust the old set while the chain check trusted the new one, so a
+    /// peer `verify_member_cert` accepts would be refused at the handshake. Rebuild it and activate again.
+    pub fn activate(&self, m: RotationMaterial) -> Result<(), crate::error::GossipError> {
+        let _one_writer = self.activate_lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if m.roots.is_none() {
+            let now = self.roots_generation();
+            let built = m.built_over.unwrap_or(0);
+            if built != now || (m.built_over.is_none() && now != 0) {
+                return Err(crate::error::GossipError::InvalidField {
+                    field: "tls",
+                    reason: format!(
+                        "TLS: rotation material built over roots generation {built} cannot be activated at generation \
+                         {now}: the node's roots changed after it was built — build it again (NodeTls::rotation_after)"
+                    ),
+                });
+            }
+        }
         self.signing_key.store(m.signing_key);
         self.server_config.store(m.server_config);
         self.client_config.store(m.client_config);
         self.gateway_key.store(m.gateway_key);
         self.node_cert.store(std::sync::Arc::new(m.node_cert_der));
+        if let Some(roots) = m.roots {
+            self.cert_verifier.store(std::sync::Arc::new(roots.chain));
+            self.fleet_server_current.store(std::sync::Arc::new(roots.fleet));
+            self.roots.store(std::sync::Arc::new(roots.ders));
+            #[cfg(test)]
+            if let Some(plant) = ACTIVATE_PLANT.with(|p| p.borrow_mut().take()) {
+                plant(self);
+            }
+            self.roots_generation.fetch_add(1, std::sync::atomic::Ordering::Release);
+        }
+        Ok(())
+    }
+
+    /// **A same-CA rotation over the roots this node trusts now** (#796's review, finding 2): a fresh key and
+    /// its certificate, issued with the CA key in `cfg` exactly as [`generate_rotation_after`] issues it, but
+    /// with the mesh configs built over this node's **current** roots — after a change of roots those are
+    /// not the configuration file's. The material records the roots generation it was built over, and
+    /// [`activate`](NodeTls::activate) refuses it if the roots change before it is activated. The agent's
+    /// `rotate_identity` rotates through this.
+    pub fn rotation_after(&self, cfg: &crate::config::TlsConfig, node_id: &crate::node_id::NodeId, issued_floor_ms: u64) -> Result<RotationMaterial, crate::error::GossipError> {
+        let (generation, roots) = {
+            let _one_writer = self.activate_lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            (self.roots_generation(), self.roots_der())
+        };
+        imp::rotation_over(cfg, node_id, std::sync::Arc::clone(&self.removed), std::sync::Arc::clone(&self.standing), issued_floor_ms, Some((generation, roots)))
     }
 
     /// This node's current certificate, DER (post-360 plan row Q: the node's certificate record).
@@ -126,12 +220,65 @@ impl NodeTls {
     /// must pass before its key has any standing (post-360 plan row Q). The removal check is not
     /// part of it: a removed member's keys are filtered where keys are read.
     pub fn verify_member_cert(&self, der: &[u8]) -> bool {
+        self.verify_member_cert_tagged(der).1
+    }
+
+    /// [`verify_member_cert`](NodeTls::verify_member_cert), with the roots generation it judged under
+    /// (identity-and-lifecycle I2, R4): the generation is loaded (`Acquire`) **before** the chain check
+    /// is, so a verdict tagged `g` was reached by generation `g`'s check or a later one's, never an
+    /// earlier one's. A cache of verdicts stores the tag and treats a verdict whose tag is not the
+    /// current [`roots_generation`](NodeTls::roots_generation) as a miss — clearing the cache at
+    /// `activate` would not do: a judgment running across `activate` would insert its old-roots verdict
+    /// after the clear.
+    pub fn verify_member_cert_tagged(&self, der: &[u8]) -> (u64, bool) {
+        let generation = self.roots_generation();
+        #[cfg(test)]
+        if let Some(plant) = READER_PLANT.with(|p| p.borrow_mut().take()) {
+            plant(self);
+        }
+        let verifier = self.cert_verifier.load_full();
         let cert = rustls::pki_types::CertificateDer::from(der);
         let now = rustls::pki_types::UnixTime::since_unix_epoch(std::time::Duration::from_millis(
             crate::sim_seam::wall_now_ms(),
         ));
-        self.cert_verifier.verify_client_cert(&cert, &[], now).is_ok()
+        (generation, verifier.verify_client_cert(&cert, &[], now).is_ok())
     }
+
+    /// **Rotation material for a change of roots** (identity-and-lifecycle I2's reload path): this
+    /// node's **current** key, presenting `node_cert_der` — a certificate for that key, pre-issued on
+    /// the issuer's host — over a root store of every certificate in `roots`. No CA key is read or
+    /// needed, so a node on the secure posture (`cert_pem`, no `ca-key.pem`) can take it live, with no
+    /// restart; [`activate`](NodeTls::activate) installs it.
+    ///
+    /// Refused, by name: no roots; a root that is not a CA certificate rustls can anchor; a certificate
+    /// whose key is not this node's current key; and a certificate the given roots do not verify now
+    /// (a node never presents a certificate its own new roots would refuse).
+    ///
+    /// This is the reload path alone. What decides **when** a node widens, cuts over and narrows — the
+    /// successor-signed record, its phases persisted under `succession/` — and the re-judging of the
+    /// kept anchors (`anchors_seen`) are I2's later PRs: until they land, nothing in the agent calls
+    /// this, and a caller that does is judged by the stated state of row I2.
+    pub fn reroot_material(&self, node_cert_der: Vec<u8>, roots: Vec<Vec<u8>>) -> Result<RotationMaterial, crate::error::GossipError> {
+        imp::reroot_material(self, node_cert_der, roots)
+    }
+}
+
+#[cfg(all(test, feature = "tls"))]
+thread_local! {
+    /// A plant for the roots-generation ordering test (I2, exit 18): run between `activate`'s swap of the
+    /// verifiers and its generation bump, on this thread's next change of roots.
+    pub(crate) static ACTIVATE_PLANT: std::cell::RefCell<Option<ActivatePlant>> = const { std::cell::RefCell::new(None) };
+}
+
+/// What [`ACTIVATE_PLANT`] runs.
+#[cfg(all(test, feature = "tls"))]
+pub(crate) type ActivatePlant = Box<dyn FnOnce(&NodeTls)>;
+
+#[cfg(all(test, feature = "tls"))]
+thread_local! {
+    /// A plant for the reader-order test (#796's review, finding 3): run between `verify_member_cert_tagged`'s
+    /// load of the roots generation and its load of the chain check, on this thread's next call.
+    pub(crate) static READER_PLANT: std::cell::RefCell<Option<ActivatePlant>> = const { std::cell::RefCell::new(None) };
 }
 
 /// A freshly-generated identity key + CA-signed cert + rustls configs, not yet
@@ -145,6 +292,20 @@ pub struct RotationMaterial {
     gateway_key: std::sync::Arc<rustls::sign::CertifiedKey>,
     /// The new key's certificate, DER — published as its certificate record before the cutover.
     pub node_cert_der: Vec<u8>,
+    /// New roots and the chain checks over them (a change of roots, I2), or `None` for a same-CA
+    /// rotation, which keeps the node's checks.
+    roots: Option<RootsMaterial>,
+    /// For a same-CA rotation: the roots generation whose roots its mesh configs were built over, or
+    /// `None` when they were built over the configuration's root (the free `generate_rotation_after`).
+    built_over: Option<u64>,
+}
+
+/// The chain checks over a new root set, carried by [`RotationMaterial`] for a change of roots.
+#[cfg(feature = "tls")]
+struct RootsMaterial {
+    ders: Vec<Vec<u8>>,
+    chain: std::sync::Arc<dyn rustls::server::danger::ClientCertVerifier>,
+    fleet: std::sync::Arc<dyn rustls::client::danger::ServerCertVerifier>,
 }
 
 /// What a node certificate says about whose key it is (post-360 plan row Q): its Ed25519 key, the
@@ -339,6 +500,66 @@ fn der_tlv(input: &[u8]) -> Option<(u8, &[u8], &[u8])> {
     Some((tag, &rest[..len], &rest[len..]))
 }
 
+/// Which name of a `TBSCertificate` [`tbs_name`] reads.
+#[cfg(feature = "tls")]
+#[derive(Clone, Copy)]
+pub(crate) enum TbsName {
+    Issuer,
+    Subject,
+}
+
+/// The DER of a certificate's issuer or subject `Name` (the whole TLV), by the bounds-checked walk
+/// [`cert_identity`] uses. `None` for anything that is not a certificate. Never panics.
+#[cfg(feature = "tls")]
+pub(crate) fn tbs_name(der: &[u8], which: TbsName) -> Option<&[u8]> {
+    let (tag, cert, _) = der_tlv(der)?;
+    if tag != 0x30 { return None; }
+    let (tag, tbs, _) = der_tlv(cert)?;
+    if tag != 0x30 { return None; }
+    let mut rest = tbs;
+    let (tag, _, next) = der_tlv(rest)?;
+    if tag == 0xA0 {
+        rest = next; // [0] EXPLICIT version
+    }
+    // serial, signature, then issuer; validity, then subject
+    let skip = match which { TbsName::Issuer => 2, TbsName::Subject => 4 };
+    for _ in 0..skip {
+        let (_, _, n) = der_tlv(rest)?;
+        rest = n;
+    }
+    let (tag, _, after) = der_tlv(rest)?;
+    if tag != 0x30 { return None; }
+    Some(&rest[..rest.len() - after.len()])
+}
+
+/// The commonName of a CA certificate's subject, when the subject is **exactly** what this tree writes:
+/// one RDN holding one `commonName` (2.5.4.3) `UTF8String` — rcgen's default subject, which every CA
+/// before identity-and-lifecycle I2 has, and the subject `mycelium tls ca` writes since. `None` for any
+/// other subject, which this issuer cannot reproduce byte for byte (see `signing_ca`). Never panics.
+#[cfg(feature = "tls")]
+pub(crate) fn ca_subject_cn(ca_cert_der: &[u8]) -> Option<String> {
+    let name = tbs_name(ca_cert_der, TbsName::Subject)?;
+    let (_, rdns, rest) = der_tlv(name)?;
+    if !rest.is_empty() { return None; }
+    let (tag, set, rest) = der_tlv(rdns)?;
+    if tag != 0x31 || !rest.is_empty() { return None; }
+    let (tag, atv, rest) = der_tlv(set)?;
+    if tag != 0x30 || !rest.is_empty() { return None; }
+    let (tag, oid, value) = der_tlv(atv)?;
+    if tag != 0x06 || oid != [0x55, 0x04, 0x03] { return None; }
+    let (tag, cn, rest) = der_tlv(value)?;
+    if tag != 0x0C || !rest.is_empty() { return None; }
+    std::str::from_utf8(cn).ok().map(str::to_string)
+}
+
+/// The subject `mycelium tls ca` gives a fleet CA (identity-and-lifecycle I2): its commonName names the
+/// fleet — a 64-bit id drawn when the CA is minted — and the CA's generation, so two fleets' CAs, and a
+/// CA and its successor, never share a name. A node's own CA (no `tls ca`) keeps rcgen's default subject.
+#[cfg(feature = "tls")]
+pub fn fleet_ca_subject(fleet: u64, generation: u64) -> String {
+    format!("Mycelium fleet {fleet:016x} CA generation {generation}")
+}
+
 #[cfg(feature = "tls")]
 mod imp {
     use super::NodeTls;
@@ -385,7 +606,7 @@ mod imp {
 
         let load = || -> Result<(CertificateDer<'static>, KeyPair), GossipError> {
             let pem = fs::read_to_string(&ca_cert_path).map_err(|e| err(format!("TLS: read CA cert: {e}")))?;
-            let der = pem_cert_to_der(&pem)?;
+            let der = ca_cert_to_der(&pem, &ca_cert_path, root_is_operators(cfg))?;
             let key_pem = fs::read_to_string(&auto_ca_key_path).map_err(|e| err(format!("TLS: read CA key: {e}")))?;
             let key = KeyPair::from_pem(&key_pem).map_err(|e| err(format!("TLS: parse CA key: {e}")))?;
             Ok((der, key))
@@ -429,14 +650,21 @@ mod imp {
 
     #[cfg(test)]
     pub(crate) fn generate_ca_for_test() -> (CertificateDer<'static>, KeyPair) {
-        generate_ca().expect("a CA")
+        generate_ca(None).expect("a CA")
     }
 
-    /// A fresh self-signed Ed25519 CA: its certificate and key pair, written nowhere.
-    fn generate_ca() -> Result<(CertificateDer<'static>, KeyPair), GossipError> {
+    /// A fresh self-signed Ed25519 CA: its certificate and key pair, written nowhere. `subject` is its
+    /// commonName ([`super::fleet_ca_subject`] for `mycelium tls ca`); `None` keeps rcgen's default, which
+    /// a node's own CA has.
+    fn generate_ca(subject: Option<String>) -> Result<(CertificateDer<'static>, KeyPair), GossipError> {
         let err = |reason: String| GossipError::InvalidField { field: "tls", reason };
         let ca_key_pair = KeyPair::generate_for(&PKCS_ED25519).map_err(|e| err(format!("TLS: generate CA key: {e}")))?;
         let mut ca_params = CertificateParams::new(vec![]).map_err(|e| err(format!("TLS: CA params: {e}")))?;
+        if let Some(cn) = subject {
+            let mut dn = rcgen::DistinguishedName::new();
+            dn.push(rcgen::DnType::CommonName, rcgen::DnValue::Utf8String(cn));
+            ca_params.distinguished_name = dn;
+        }
         ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
         ca_params.not_before = rcgen::date_time_ymd(2024, 1, 1);
         ca_params.not_after = rcgen::date_time_ymd(2099, 1, 1);
@@ -471,7 +699,7 @@ mod imp {
         key_path: &Path,
     ) -> Result<(CertificateDer<'static>, KeyPair), GossipError> {
         let err = |reason: String| GossipError::InvalidField { field: "tls", reason };
-        let (ca_cert_der, ca_key_pair) = generate_ca()?;
+        let (ca_cert_der, ca_key_pair) = generate_ca(None)?;
 
         let staged = stage_ca(dir, &ca_cert_der, &ca_key_pair)?;
         fs::rename(&staged.key, key_path).map_err(|e| err(format!("TLS: publish CA key: {e}")))?;
@@ -532,17 +760,19 @@ mod imp {
             }
             None => {
                 let (ca_cert_der, ca_key_pair) = load_or_create_ca(cfg)?;
-                let node_cert_der = generate_node_cert(node_id, &signing_key, &ca_key_pair, super::issuance_after(0))?;
+                let node_cert_der = node_cert_under(node_id, &public_key_of(&signing_key), &ca_cert_der, &ca_key_pair, super::issuance_after(0))?;
                 (ca_cert_der, node_cert_der)
             }
         };
 
         // ── 4. Build rustls configs ───────────────────────────────────────
         let cert_bytes = node_cert_der.as_ref().to_vec();
+        let roots = vec![ca_cert_der.as_ref().to_vec()];
         let (server_config, client_config, gateway_key, cert_verifier, fleet_server_verifier) =
-            build_rustls_configs(node_cert_der, &signing_key, ca_cert_der, removed, standing)?;
+            build_rustls_configs(node_cert_der, &signing_key, std::slice::from_ref(&ca_cert_der), Arc::clone(&removed), Arc::clone(&standing))?;
         let gateway_key = Arc::new(arc_swap::ArcSwap::new(gateway_key));
         let gateway_server_config = Arc::new(live_gateway_server_config(Arc::clone(&gateway_key)));
+        let fleet_server_current = Arc::new(arc_swap::ArcSwap::from_pointee(fleet_server_verifier));
 
         Ok(NodeTls {
             server_config: arc_swap::ArcSwap::from_pointee(server_config),
@@ -550,10 +780,16 @@ mod imp {
             signing_key: arc_swap::ArcSwap::from_pointee(signing_key),
             gateway_server_config,
             gateway_key,
-            fleet_server_verifier,
+            fleet_server_verifier: Arc::new(LiveFleetServerVerifier(Arc::clone(&fleet_server_current))),
+            fleet_server_current,
             peer_anchor_sink: std::sync::OnceLock::new(),
             node_cert: arc_swap::ArcSwap::from_pointee(cert_bytes),
-            cert_verifier,
+            cert_verifier: arc_swap::ArcSwap::from_pointee(cert_verifier),
+            roots: arc_swap::ArcSwap::from_pointee(roots),
+            roots_generation: std::sync::atomic::AtomicU64::new(0),
+            removed,
+            standing,
+            activate_lock: std::sync::Mutex::new(()),
         })
     }
 
@@ -583,6 +819,19 @@ mod imp {
         standing: Arc<crate::removal::KeyStanding>,
         issued_floor_ms: u64,
     ) -> Result<super::RotationMaterial, GossipError> {
+        rotation_over(cfg, node_id, removed, standing, issued_floor_ms, None)
+    }
+
+    /// The rotation [`generate_rotation_after`] and [`NodeTls::rotation_after`] build: the mesh configs over
+    /// `over`'s roots (with the generation they were read at), or over the configuration's root when `None`.
+    pub(super) fn rotation_over(
+        cfg: &TlsConfig,
+        node_id: &NodeId,
+        removed: Arc<crate::removal::RemovedSet>,
+        standing: Arc<crate::removal::KeyStanding>,
+        issued_floor_ms: u64,
+        over: Option<(u64, Vec<Vec<u8>>)>,
+    ) -> Result<super::RotationMaterial, GossipError> {
         let signing_key = generate_key()?;
         let verifying_key = signing_key.verifying_key().to_bytes();
 
@@ -592,10 +841,14 @@ mod imp {
         save_key_raw(&signing_key, &auto_key_path)?;
 
         let (ca_cert_der, ca_key_pair) = load_existing_ca(cfg)?;
-        let node_cert_der = generate_node_cert(node_id, &signing_key, &ca_key_pair, super::issuance_after(issued_floor_ms))?;
+        let node_cert_der = node_cert_under(node_id, &verifying_key, &ca_cert_der, &ca_key_pair, super::issuance_after(issued_floor_ms))?;
         let cert_bytes = node_cert_der.as_ref().to_vec();
+        let (built_over, roots) = match over {
+            Some((generation, roots)) => (Some(generation), roots.into_iter().map(CertificateDer::from).collect::<Vec<_>>()),
+            None => (None, vec![ca_cert_der]),
+        };
         let (server_config, client_config, gateway_key, _, _) =
-            build_rustls_configs(node_cert_der, &signing_key, ca_cert_der, removed, standing)?;
+            build_rustls_configs(node_cert_der, &signing_key, &roots, removed, standing)?;
 
         Ok(super::RotationMaterial {
             verifying_key,
@@ -604,6 +857,42 @@ mod imp {
             signing_key: Arc::new(signing_key),
             gateway_key,
             node_cert_der: cert_bytes,
+            roots: None,
+            built_over,
+        })
+    }
+
+    /// [`NodeTls::reroot_material`]: the node's current key and `node_cert_der` over a root store of
+    /// `roots`, with no CA key (identity-and-lifecycle I2's reload path).
+    pub(super) fn reroot_material(tls: &NodeTls, node_cert_der: Vec<u8>, roots: Vec<Vec<u8>>) -> Result<super::RotationMaterial, GossipError> {
+        let err = |reason: String| GossipError::InvalidField { field: "tls", reason };
+        if roots.is_empty() {
+            return Err(err("TLS: a change of roots needs at least one CA certificate".into()));
+        }
+        let signing_key = tls.signing_key();
+        let verifying_key = signing_key.verifying_key().to_bytes();
+        if ed25519_key_from_cert_der(&node_cert_der) != Some(verifying_key) {
+            return Err(err("TLS: the certificate for a change of roots is not for this node's current key — the \
+                 successor re-issues the node's current key, never a new one".into()));
+        }
+        let root_ders: Vec<CertificateDer<'static>> = roots.iter().map(|d| CertificateDer::from(d.clone())).collect();
+        let cert = CertificateDer::from(node_cert_der.clone());
+        let (server_config, client_config, gateway_key, chain, fleet) =
+            build_rustls_configs(cert.clone(), &signing_key, &root_ders, Arc::clone(&tls.removed), Arc::clone(&tls.standing))?;
+        let now = rustls::pki_types::UnixTime::since_unix_epoch(std::time::Duration::from_millis(crate::sim_seam::wall_now_ms()));
+        chain.verify_client_cert(&cert, &[], now).map_err(|e| err(format!(
+            "TLS: the certificate for a change of roots does not verify against the new roots ({e}) — a node never \
+             presents a certificate its own roots would refuse"
+        )))?;
+        Ok(super::RotationMaterial {
+            verifying_key,
+            server_config: Arc::new(server_config),
+            client_config: Arc::new(client_config),
+            signing_key,
+            gateway_key,
+            node_cert_der,
+            roots: Some(super::RootsMaterial { ders: roots, chain, fleet }),
+            built_over: None,
         })
     }
 
@@ -705,7 +994,10 @@ mod imp {
             "TLS: publish CA {what} by hard link in {ca_dir:?}: {e} — `tls ca` needs a filesystem with hard links (FAT, exFAT \
              and some SMB mounts have none): mint on a local disk and copy the directory"
         ));
-        let (ca_cert_der, ca_key_pair) = generate_ca()?;
+        // I2: a minted CA's subject names its fleet and its generation (0: no predecessor), so two
+        // fleets' CAs never share a name and a node certificate's issuer is its own CA's.
+        let fleet = rand_core::RngCore::next_u64(&mut rand_core::OsRng);
+        let (ca_cert_der, ca_key_pair) = generate_ca(Some(super::fleet_ca_subject(fleet, 0)))?;
         // Both files written in full under names of this call's own, then published by hard link, which fails when
         // the name exists — so the check above is a courtesy and the link is the guard: two concurrent mints
         // publish one CA, and the other is refused rather than replacing it (#695's review, finding 4). The key is
@@ -738,9 +1030,9 @@ mod imp {
         use ed25519_dalek::pkcs8::EncodePrivateKey;
         let err = |reason: String| GossipError::InvalidField { field: "tls", reason };
         let ca_cfg = TlsConfig { auto_cert_dir: ca_dir.to_path_buf(), ..TlsConfig::default() };
-        let (_ca_cert_der, ca_key_pair) = load_existing_ca(&ca_cfg)?;
+        let (ca_cert_der, ca_key_pair) = load_existing_ca(&ca_cfg)?;
         let signing_key = generate_key()?;
-        let node_cert_der = generate_node_cert(node_id, &signing_key, &ca_key_pair, super::issuance_after(0))?;
+        let node_cert_der = node_cert_under(node_id, &public_key_of(&signing_key), &ca_cert_der, &ca_key_pair, super::issuance_after(0))?;
         create_private_dir(out_dir).map_err(|e| err(format!("TLS: create {out_dir:?}: {e}")))?;
         let sanitized = node_id.as_str().replace([':', '.'], "_");
         let cert_path = out_dir.join(format!("{sanitized}.cert.pem"));
@@ -758,6 +1050,18 @@ mod imp {
         Ok((cert_path, key_path))
     }
 
+    /// **Re-issue an existing key** under the CA in `ca_dir` (identity-and-lifecycle I2): a node
+    /// certificate for `node_id` over `public_key` **alone** — no private key reaches the issuer's host —
+    /// issued strictly after `floor_ms` (the node's newest issuance, post-360 plan row Q). Returns the
+    /// certificate's DER and writes nothing. The primitive `mycelium tls succeed` is to call (I2's later
+    /// PR, which adds `firstIssuedMs` and the inventory); until then only tests do.
+    #[doc(hidden)]
+    pub fn issue_node_cert_for_key(ca_dir: &Path, node_id: &NodeId, public_key: [u8; 32], floor_ms: u64) -> Result<Vec<u8>, GossipError> {
+        let ca_cfg = TlsConfig { auto_cert_dir: ca_dir.to_path_buf(), ..TlsConfig::default() };
+        let (ca_cert_der, ca_key_pair) = load_existing_ca(&ca_cfg)?;
+        Ok(node_cert_under(node_id, &public_key, &ca_cert_der, &ca_key_pair, super::issuance_after(floor_ms))?.as_ref().to_vec())
+    }
+
     /// The CA **certificate** alone (`ca_cert_pem`, else `{auto_cert_dir}/ca-cert.pem`): load-only,
     /// an error naming the path when absent — never a mint. The path a pre-issued node cert takes.
     fn load_ca_cert_only(cfg: &TlsConfig) -> Result<CertificateDer<'static>, GossipError> {
@@ -765,8 +1069,42 @@ mod imp {
         let pem = fs::read_to_string(&ca_cert_path).map_err(|e| GossipError::InvalidField {
             field: "tls", reason: format!("TLS: a pre-issued node cert needs the CA cert ({ca_cert_path:?}): {e}"),
         })?;
-        pem_cert_to_der(&pem)
+        ca_cert_to_der(&pem, &ca_cert_path, root_is_operators(cfg))
     }
+
+    /// Whether the CA certificate file is the operator's root rather than a node's own CA: `ca_cert_pem` is
+    /// set, or the node starts from a pre-issued `cert_pem`, whose `{auto_cert_dir}/ca-cert.pem` the operator
+    /// copied there (`mycelium tls issue` says to; #796's review, finding 1).
+    fn root_is_operators(cfg: &TlsConfig) -> bool {
+        cfg.ca_cert_pem.is_some() || cfg.cert_pem.is_some()
+    }
+
+    /// The CA certificate of a PEM document read as the fleet's root. When it is the operator's
+    /// root (`configured`: `ca_cert_pem`, or `ca-cert.pem` beside a pre-issued `cert_pem`), it must hold **exactly one** certificate (identity-and-lifecycle I2,
+    /// exit 14): `pem_cert_to_der` keeps only the first, so a second root there was silently dropped,
+    /// and a succession's two roots must never be written that way. The on-node CA's `ca-cert.pem`
+    /// (`configured` false) is read as before; `cert_pem`, a chain, is never read here.
+    pub(crate) fn ca_cert_to_der(pem: &str, path: &Path, configured: bool) -> Result<CertificateDer<'static>, GossipError> {
+        if configured {
+            let n = pem_certs(pem.as_bytes())
+                .map_err(|e| GossipError::InvalidField { field: "tls", reason: format!("TLS: parse CA cert PEM: {e}") })?
+                .len();
+            if n > 1 {
+                return Err(GossipError::InvalidField {
+                    field: "tls.ca_cert_pem",
+                    reason: format!(
+                        "TLS: the fleet's root (`ca_cert_pem`, or `ca-cert.pem` beside a pre-issued `cert_pem`: {path:?}) holds {n} certificates; it must hold exactly one, the fleet CA's. \
+                         Before this release only the first was read and the rest were ignored, so remove the others \
+                         (docs/guide/deprecations.md §{CA_CERT_PEM_SECTION})"
+                    ),
+                });
+            }
+        }
+        pem_cert_to_der(pem)
+    }
+
+    /// The section of `docs/guide/deprecations.md` that states [`ca_cert_to_der`]'s refusal.
+    pub(crate) const CA_CERT_PEM_SECTION: u32 = 111;
 
     /// Load the existing cluster CA cert + key (load-only; errors if absent —
     /// unlike `load_or_generate`, rotation must never mint a new CA).
@@ -782,7 +1120,7 @@ mod imp {
         let pem = fs::read_to_string(&ca_cert_path).map_err(|e| GossipError::InvalidField {
             field: "tls", reason: format!("TLS: needs an existing CA cert ({ca_cert_path:?}) — never minted here: {e}"),
         })?;
-        let ca_cert_der = pem_cert_to_der(&pem)?;
+        let ca_cert_der = ca_cert_to_der(&pem, &ca_cert_path, root_is_operators(cfg))?;
         let key_pem = fs::read_to_string(&auto_ca_key_path).map_err(|e| GossipError::InvalidField {
             field: "tls", reason: format!("TLS: needs the CA key ({auto_ca_key_path:?}) — rotation and issuance sign with it, a node never needs it: {e}"),
         })?;
@@ -958,21 +1296,83 @@ mod imp {
             .map_err(|e| GossipError::InvalidField { field: "tls", reason: format!("TLS: parse PKCS8 key: {e}") })
     }
 
-    pub(super) fn generate_node_cert(
+    /// An Ed25519 public key as rcgen signs a certificate over it: the certificate is issued over the
+    /// **public key alone** — the private key never reaches the issuer (the re-issue I2 builds on).
+    pub(super) struct Ed25519Public(pub(super) [u8; 32]);
+
+    impl rcgen::PublicKeyData for Ed25519Public {
+        fn der_bytes(&self) -> &[u8] {
+            &self.0
+        }
+        fn algorithm(&self) -> &rcgen::SignatureAlgorithm {
+            &PKCS_ED25519
+        }
+    }
+
+    pub(super) fn public_key_of(key: &SigningKey) -> [u8; 32] {
+        key.verifying_key().to_bytes()
+    }
+
+    /// The CA a certificate is signed by, rebuilt for rcgen from the CA's key and **the subject its
+    /// certificate carries** (identity-and-lifecycle I2: a distinct successor subject). rcgen 0.13 has no
+    /// `from_ca_cert_der` without its `x509-parser` feature, so the CA is rebuilt from parameters; until
+    /// I2 the parameters were fixed, and so carried rcgen's default subject whatever the CA's certificate
+    /// said. That was harmless only while every CA had that subject.
+    ///
+    /// The chain is found **by name**: webpki looks the issuer up among the roots by the certificate's
+    /// issuer name, and only then checks the signature (the spike S-succeed's finding 3 — across two CAs
+    /// with one name a refusal read `BadSignature`, not `UnknownIssuer`). The comment this replaces said
+    /// rustls chained by the SubjectKeyIdentifier; it does not. So the issuer name written must be the
+    /// CA's subject byte for byte: the subject is read from the CA certificate (`ca_subject_cn`), only
+    /// the one shape this tree writes is accepted, and the issued certificate's issuer is compared with it
+    /// after signing (`issue_checked`).
+    fn signing_ca(ca_cert_der: &[u8], ca_key_pair: &KeyPair) -> Result<rcgen::Certificate, GossipError> {
+        let err = |reason: String| GossipError::InvalidField { field: "tls", reason };
+        let cn = super::ca_subject_cn(ca_cert_der).ok_or_else(|| err(
+            "TLS: the CA certificate's subject is not one this issuer writes (exactly one UTF8String commonName): \
+             issue under a CA minted by `mycelium tls ca` or by a node".into(),
+        ))?;
+        let mut ca_params = CertificateParams::new(vec![]).map_err(|e| err(format!("TLS: CA params for signing: {e}")))?;
+        let mut dn = rcgen::DistinguishedName::new();
+        dn.push(rcgen::DnType::CommonName, rcgen::DnValue::Utf8String(cn));
+        ca_params.distinguished_name = dn;
+        ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        ca_params.not_before = rcgen::date_time_ymd(2024, 1, 1);
+        ca_params.not_after  = rcgen::date_time_ymd(2099, 1, 1);
+        ca_params.self_signed(ca_key_pair).map_err(|e| err(format!("TLS: reconstruct CA for signing: {e}")))
+    }
+
+    /// Sign `params` over `public` under the CA, and refuse the result unless its issuer name is the CA
+    /// certificate's subject byte for byte (see [`signing_ca`]).
+    fn issue_checked(
+        params: CertificateParams,
+        public: &[u8; 32],
+        ca_cert_der: &[u8],
+        ca_key_pair: &KeyPair,
+    ) -> Result<CertificateDer<'static>, GossipError> {
+        let err = |reason: String| GossipError::InvalidField { field: "tls", reason };
+        let ca = signing_ca(ca_cert_der, ca_key_pair)?;
+        let cert = params
+            .signed_by(&Ed25519Public(*public), &ca, ca_key_pair)
+            .map_err(|e| err(format!("TLS: sign certificate: {e}")))?;
+        let der = cert.der().to_vec();
+        if super::tbs_name(&der, super::TbsName::Issuer).is_none()
+            || super::tbs_name(&der, super::TbsName::Issuer) != super::tbs_name(ca_cert_der, super::TbsName::Subject)
+        {
+            return Err(err("TLS: the certificate's issuer name is not the CA's subject — it would chain to no root".into()));
+        }
+        Ok(CertificateDer::from(der))
+    }
+
+    /// A node certificate for `public` under the CA whose certificate is `ca_cert_der` (post-360 plan row
+    /// Q's names and serial; identity-and-lifecycle I2's issuer name).
+    pub(super) fn node_cert_under(
         node_id: &NodeId,
-        signing_key: &SigningKey,
+        public: &[u8; 32],
+        ca_cert_der: &[u8],
         ca_key_pair: &KeyPair,
         issued_ms: u64,
     ) -> Result<CertificateDer<'static>, GossipError> {
-        use ed25519_dalek::pkcs8::EncodePrivateKey;
-
-        // Convert ed25519-dalek key → rcgen KeyPair via PKCS8 DER
-        let pkcs8 = signing_key
-            .to_pkcs8_der()
-            .map_err(|e| GossipError::InvalidField { field: "tls", reason: format!("TLS: encode node key: {e}") })?;
-        let node_key_pair = KeyPair::try_from(pkcs8.as_bytes())
-            .map_err(|e| GossipError::InvalidField { field: "tls", reason: format!("TLS: rcgen node key: {e}") })?;
-
         // Add the node's IP address as a Subject Alternative Name
         let ip: std::net::IpAddr = node_id.to_socket_addr().ip();
         let mut params = CertificateParams::new(vec![])
@@ -987,39 +1387,42 @@ mod imp {
         params.serial_number = Some(rcgen::SerialNumber::from(issued_ms));
         params.not_before = rcgen::date_time_ymd(2024, 1, 1);
         params.not_after  = rcgen::date_time_ymd(2099, 1, 1);
+        issue_checked(params, public, ca_cert_der, ca_key_pair)
+    }
 
-        // Reconstruct the CA Certificate for signing from the key pair + known fixed params.
-        // rcgen 0.13 removed CertificateParams::from_ca_cert_der; since Mycelium always
-        // generates its own CA with these exact params, reconstruction is deterministic.
-        // Rustls verifies the chain via the SubjectKeyIdentifier (public-key hash), not the
-        // serial number, so the reconstructed cert's AKI matches the saved ca-cert.pem.
-        let mut ca_params = CertificateParams::new(vec![])
-            .map_err(|e| GossipError::InvalidField { field: "tls", reason: format!("TLS: CA params for signing: {e}") })?;
+    /// The CA certificate rcgen's fixed parameters make from `ca_key_pair` — the subject every CA had
+    /// before I2, and that a node's own CA (`generate_ca`) still has.
+    #[cfg(test)]
+    pub(super) fn default_subject_ca_der(ca_key_pair: &KeyPair) -> Vec<u8> {
+        let mut ca_params = CertificateParams::new(vec![]).unwrap();
         ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
         ca_params.not_before = rcgen::date_time_ymd(2024, 1, 1);
         ca_params.not_after  = rcgen::date_time_ymd(2099, 1, 1);
-        let signing_ca = ca_params
-            .self_signed(ca_key_pair)
-            .map_err(|e| GossipError::InvalidField { field: "tls", reason: format!("TLS: reconstruct CA for signing: {e}") })?;
+        ca_params.self_signed(ca_key_pair).unwrap().der().to_vec()
+    }
 
-        let node_cert = params
-            .signed_by(&node_key_pair, &signing_ca, ca_key_pair)
-            .map_err(|e| GossipError::InvalidField { field: "tls", reason: format!("TLS: sign node cert: {e}") })?;
-
-        Ok(CertificateDer::from(node_cert.der().to_vec()))
+    /// A node certificate under a CA with rcgen's default subject, for tests that hold only a CA key.
+    #[cfg(test)]
+    pub(super) fn generate_node_cert(
+        node_id: &NodeId,
+        signing_key: &SigningKey,
+        ca_key_pair: &KeyPair,
+        issued_ms: u64,
+    ) -> Result<CertificateDer<'static>, GossipError> {
+        node_cert_under(node_id, &public_key_of(signing_key), &default_subject_ca_der(ca_key_pair), ca_key_pair, issued_ms)
     }
 
     /// A **client** certificate for the principal `token:{issuer}/{name}` (identity-and-lifecycle I1, D1): the
     /// key's certificate, signed by the fleet CA exactly as a node's is, naming `mycelium-client://{issuer}/{name}`
     /// and nothing else — no IP, no `mycelium://` URI — and dated in its serial like a node's.
-    pub(super) fn generate_client_cert(
+    pub(super) fn client_cert_under(
         issuer: &str,
         name: &str,
-        signing_key: &SigningKey,
+        public: &[u8; 32],
+        ca_cert_der: &[u8],
         ca_key_pair: &KeyPair,
         issued_ms: u64,
     ) -> Result<CertificateDer<'static>, GossipError> {
-        use ed25519_dalek::pkcs8::EncodePrivateKey;
         let err = |reason: String| GossipError::InvalidField { field: "tls", reason };
         if !super::valid_client_segment(issuer) || !super::valid_client_segment(name) {
             return Err(err(format!(
@@ -1031,23 +1434,25 @@ mod imp {
                 "TLS: the client name {name:?} is reserved: token:{issuer}/{name} is already another credential's principal"
             )));
         }
-        let pkcs8 = signing_key.to_pkcs8_der().map_err(|e| err(format!("TLS: encode client key: {e}")))?;
-        let client_key_pair = KeyPair::try_from(pkcs8.as_bytes()).map_err(|e| err(format!("TLS: rcgen client key: {e}")))?;
         let mut params = CertificateParams::new(vec![]).map_err(|e| err(format!("TLS: client cert params: {e}")))?;
         let uri = rcgen::Ia5String::try_from(super::client_uri(issuer, name)).map_err(|e| err(format!("TLS: client URI: {e}")))?;
         params.subject_alt_names = vec![SanType::URI(uri)];
         params.serial_number = Some(rcgen::SerialNumber::from(issued_ms));
         params.not_before = rcgen::date_time_ymd(2024, 1, 1);
         params.not_after  = rcgen::date_time_ymd(2099, 1, 1);
-        let mut ca_params = CertificateParams::new(vec![]).map_err(|e| err(format!("TLS: CA params for signing: {e}")))?;
-        ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-        ca_params.not_before = rcgen::date_time_ymd(2024, 1, 1);
-        ca_params.not_after  = rcgen::date_time_ymd(2099, 1, 1);
-        let signing_ca = ca_params.self_signed(ca_key_pair).map_err(|e| err(format!("TLS: reconstruct CA for signing: {e}")))?;
-        let cert = params
-            .signed_by(&client_key_pair, &signing_ca, ca_key_pair)
-            .map_err(|e| err(format!("TLS: sign client cert: {e}")))?;
-        Ok(CertificateDer::from(cert.der().to_vec()))
+        issue_checked(params, public, ca_cert_der, ca_key_pair)
+    }
+
+    /// A client certificate under a CA with rcgen's default subject, for tests that hold only a CA key.
+    #[cfg(test)]
+    pub(super) fn generate_client_cert(
+        issuer: &str,
+        name: &str,
+        signing_key: &SigningKey,
+        ca_key_pair: &KeyPair,
+        issued_ms: u64,
+    ) -> Result<CertificateDer<'static>, GossipError> {
+        client_cert_under(issuer, name, &public_key_of(signing_key), &default_subject_ca_der(ca_key_pair), ca_key_pair, issued_ms)
     }
 
     /// **Issue a client certificate off-node** (identity-and-lifecycle I1): loads the CA from `ca_dir` (never mints
@@ -1063,9 +1468,9 @@ mod imp {
         use ed25519_dalek::pkcs8::EncodePrivateKey;
         let err = |reason: String| GossipError::InvalidField { field: "tls", reason };
         let ca_cfg = TlsConfig { auto_cert_dir: ca_dir.to_path_buf(), ..TlsConfig::default() };
-        let (_ca_cert_der, ca_key_pair) = load_existing_ca(&ca_cfg)?;
+        let (ca_cert_der, ca_key_pair) = load_existing_ca(&ca_cfg)?;
         let signing_key = generate_key()?;
-        let cert_der = generate_client_cert(issuer, name, &signing_key, &ca_key_pair, super::issuance_after(0))?;
+        let cert_der = client_cert_under(issuer, name, &public_key_of(&signing_key), &ca_cert_der, &ca_key_pair, super::issuance_after(0))?;
         create_private_dir(out_dir).map_err(|e| err(format!("TLS: create {out_dir:?}: {e}")))?;
         let cert_path = out_dir.join(format!("client-{issuer}-{name}.cert.pem"));
         let key_path = out_dir.join(format!("client-{issuer}-{name}.key.pem"));
@@ -1163,7 +1568,7 @@ mod imp {
     pub(super) fn build_rustls_configs(
         node_cert_der: CertificateDer<'static>,
         signing_key: &SigningKey,
-        ca_cert_der: CertificateDer<'static>,
+        roots: &[CertificateDer<'static>],
         removed: Arc<crate::removal::RemovedSet>,
         standing: Arc<crate::removal::KeyStanding>,
     ) -> Result<RustlsConfigs, GossipError> {
@@ -1178,11 +1583,14 @@ mod imp {
         let key_der: PrivateKeyDer<'static> =
             PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(pkcs8.as_bytes().to_vec()));
 
-        // Build root store from CA cert
+        // The root store: every CA certificate the node trusts — one, except across a CA succession's
+        // window (identity-and-lifecycle I2), when it is the old CA's and the successor's.
         let mut root_store = RootCertStore::empty();
-        root_store
-            .add(ca_cert_der.clone())
-            .map_err(|e| GossipError::InvalidField { field: "tls", reason: format!("TLS: add CA to root store: {e}") })?;
+        for ca_cert_der in roots {
+            root_store
+                .add(ca_cert_der.clone())
+                .map_err(|e| GossipError::InvalidField { field: "tls", reason: format!("TLS: add CA to root store: {e}") })?;
+        }
         let root_store = Arc::new(root_store);
 
         // Server config: require client cert verified against CA
@@ -1425,6 +1833,45 @@ mod imp {
         }
     }
 
+    /// The fleet's server check as [`NodeTls::fleet_server_verifier`] hands it out: one verifier for the
+    /// node's life that delegates, at each call, to the check over the roots the node trusts then
+    /// (identity-and-lifecycle I2). A client built once — the bulk fetch's, at `start()` — therefore
+    /// follows `activate`'s change of roots without being rebuilt.
+    #[derive(Debug)]
+    pub(super) struct LiveFleetServerVerifier(pub(super) Arc<arc_swap::ArcSwap<Arc<dyn rustls::client::danger::ServerCertVerifier>>>);
+
+    impl rustls::client::danger::ServerCertVerifier for LiveFleetServerVerifier {
+        fn verify_server_cert(
+            &self,
+            end_entity: &CertificateDer<'_>,
+            intermediates: &[CertificateDer<'_>],
+            server_name: &rustls::pki_types::ServerName<'_>,
+            ocsp_response: &[u8],
+            now: rustls::pki_types::UnixTime,
+        ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+            self.0.load().verify_server_cert(end_entity, intermediates, server_name, ocsp_response, now)
+        }
+        fn verify_tls12_signature(
+            &self,
+            message: &[u8],
+            cert: &CertificateDer<'_>,
+            dss: &rustls::DigitallySignedStruct,
+        ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+            self.0.load().verify_tls12_signature(message, cert, dss)
+        }
+        fn verify_tls13_signature(
+            &self,
+            message: &[u8],
+            cert: &CertificateDer<'_>,
+            dss: &rustls::DigitallySignedStruct,
+        ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+            self.0.load().verify_tls13_signature(message, cert, dss)
+        }
+        fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+            self.0.load().supported_verify_schemes()
+        }
+    }
+
     /// Every `CERTIFICATE` section of a PEM document, in order; any other section (a key, a CRL) and any text between
     /// sections is skipped. A malformed section is an error. With [`pem_private_key`] this is where the node's TLS module
     /// reads the gateway's certificate and key and the CA and node certificates (`pem_cert_to_der`), so the parser behind
@@ -1486,7 +1933,7 @@ mod imp {
 }
 
 #[cfg(feature = "tls")]
-pub use imp::{ed25519_key_from_cert_der, gateway_server_config_from_pem, generate_rotation, generate_rotation_after, issue_client_cert, issue_node_cert, load_or_generate, mint_ca, sign_bytes, verify_bytes, writable_by_others};
+pub use imp::{ed25519_key_from_cert_der, gateway_server_config_from_pem, generate_rotation, generate_rotation_after, issue_client_cert, issue_node_cert, issue_node_cert_for_key, load_or_generate, mint_ca, sign_bytes, verify_bytes, writable_by_others};
 
 #[cfg(all(test, feature = "tls"))]
 mod key_extract_tests {
@@ -2165,7 +2612,7 @@ mod ca_race_tests {
         let legacy = legacy_cert(&cfg, &nc, &k0);
         assert!(super::cert_identity(legacy.as_ref()).is_some_and(|id| id.node_uris.is_empty()), "the certificate names no node");
         let ca_der = load_or_create_ca(&cfg).unwrap().0;
-        let (_, thief, _, _, _) = super::imp::build_rustls_configs(legacy, &k0, ca_der, Arc::new(RemovedSet::default()), Default::default()).unwrap();
+        let (_, thief, _, _, _) = super::imp::build_rustls_configs(legacy, &k0, &[ca_der], Arc::new(RemovedSet::default()), Default::default()).unwrap();
         let thief = Arc::new(thief);
 
         b_standing.set(&other, NodeStanding { anchored: Some([[2u8; 32]].into_iter().collect()), revoked: [k0_pub].into_iter().collect(), counted: Default::default() });
@@ -2309,12 +2756,12 @@ mod ca_race_tests {
         assert_eq!((id.principal(), id.key), ("token:fleet/forecaster".to_string(), client_key.verifying_key().to_bytes()));
         assert!(b.verify_member_cert(client_cert.as_ref()), "the chain check alone still accepts a client certificate");
         let (client_server, client_client, _, _, _) =
-            super::imp::build_rustls_configs(client_cert, &client_key, ca_der.clone(), Arc::new(RemovedSet::default()), Default::default()).unwrap();
+            super::imp::build_rustls_configs(client_cert, &client_key, std::slice::from_ref(&ca_der), Arc::new(RemovedSet::default()), Default::default()).unwrap();
 
         let legacy_key = ed25519_dalek::SigningKey::from_bytes(&[42u8; 32]);
         let legacy = legacy_cert(&cfg, &nl, &legacy_key);
         let (_, legacy_client, _, _, _) =
-            super::imp::build_rustls_configs(legacy, &legacy_key, ca_der, Arc::new(RemovedSet::default()), Default::default()).unwrap();
+            super::imp::build_rustls_configs(legacy, &legacy_key, &[ca_der], Arc::new(RemovedSet::default()), Default::default()).unwrap();
         assert_eq!(handshake(c.client_config(), b.server_config()), Ok(()), "plant: a node certificate dials B");
         assert_eq!(handshake(Arc::new(legacy_client), b.server_config()), Ok(()), "plant: a pre-row-Q certificate naming no node dials B");
 
@@ -2338,7 +2785,7 @@ mod ca_race_tests {
             rustls::pki_types::CertificateDer::from(p.signed_by(&kp, &ca, &ca_key).unwrap().der().to_vec())
         };
         let (with_ip_server, _, _, _, _) =
-            super::imp::build_rustls_configs(with_ip, &client_key, load_or_create_ca(&cfg).unwrap().0, Arc::new(RemovedSet::default()), Default::default()).unwrap();
+            super::imp::build_rustls_configs(with_ip, &client_key, &[load_or_create_ca(&cfg).unwrap().0], Arc::new(RemovedSet::default()), Default::default()).unwrap();
         let _ = client_server;
         let served = handshake(b.client_config(), Arc::new(with_ip_server));
         let _ = std::fs::remove_dir_all(&dir);
@@ -2393,5 +2840,387 @@ mod ca_race_tests {
         let _ = std::fs::remove_dir_all(&dir);
         assert!(issued.is_err(), "ISSUED: a client certificate naming `legacy`");
         assert_eq!(super::client_identity(&minted), None, "READ: a certificate naming `legacy` as a client identity");
+    }
+}
+
+/// Identity-and-lifecycle I2, PR 1: the reload path over a root set, the roots generation, the distinct
+/// successor subject, and the refusal of a multi-certificate `ca_cert_pem`.
+#[cfg(all(test, feature = "tls"))]
+mod succession_tests {
+    use super::{NodeTls, TbsName};
+    use crate::{config::TlsConfig, node_id::NodeId, removal::RemovedSet};
+    use rustls::pki_types::{pem::PemObject, CertificateDer};
+    use std::{path::{Path, PathBuf}, sync::Arc};
+
+    fn fresh_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("myc-i2-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn der_of(p: &Path) -> Vec<u8> {
+        CertificateDer::from_pem_file(p).unwrap().as_ref().to_vec()
+    }
+
+    /// A minted CA in `{base}/{name}`: its directory and its certificate's DER.
+    fn ca(base: &Path, name: &str) -> (PathBuf, Vec<u8>) {
+        let dir = base.join(name);
+        let cert = super::mint_ca(&dir).unwrap();
+        (dir, der_of(&cert))
+    }
+
+    /// A node on the secure posture: a certificate issued off-node under `ca_dir`, trusting `trust`.
+    fn node(base: &Path, name: &str, port: u16, ca_dir: &Path, trust: &Path) -> (NodeId, NodeTls) {
+        let id = NodeId::new("127.0.0.1", port).unwrap();
+        let out = base.join(format!("{name}-issued"));
+        let (cert, key) = super::issue_node_cert(ca_dir, &id, &out).unwrap();
+        let cfg = TlsConfig {
+            auto_cert_dir: base.join(format!("{name}-node")),
+            cert_pem: Some(cert),
+            key_pem: Some(key),
+            ca_cert_pem: Some(trust.to_path_buf()),
+        };
+        let tls = super::load_or_generate(&cfg, &id, Arc::new(RemovedSet::default()), Default::default()).unwrap();
+        assert!(!cfg.auto_cert_dir.join("ca-key.pem").exists(), "the secure posture: no CA key on the node");
+        (id, tls)
+    }
+
+    fn handshake(client: Arc<rustls::ClientConfig>, server: Arc<rustls::ServerConfig>) -> Result<(), String> {
+        let name = rustls::pki_types::ServerName::try_from("127.0.0.1").unwrap().to_owned();
+        let mut c = rustls::ClientConnection::new(client, name).unwrap();
+        let mut s = rustls::ServerConnection::new(server).unwrap();
+        for _ in 0..16 {
+            let mut buf = Vec::new();
+            while c.wants_write() { c.write_tls(&mut buf).unwrap(); }
+            if !buf.is_empty() {
+                s.read_tls(&mut buf.as_slice()).unwrap();
+                s.process_new_packets().map_err(|e| format!("server refused: {e}"))?;
+            }
+            let mut buf = Vec::new();
+            while s.wants_write() { s.write_tls(&mut buf).unwrap(); }
+            if !buf.is_empty() {
+                c.read_tls(&mut buf.as_slice()).unwrap();
+                c.process_new_packets().map_err(|e| format!("client refused: {e}"))?;
+            }
+            if !c.is_handshaking() && !s.is_handshaking() { return Ok(()); }
+        }
+        Err("did not finish".into())
+    }
+
+    /// The chain check alone over `roots`, as a verifier's error.
+    fn chain_error(roots: &[&[u8]], cert: &[u8]) -> Option<rustls::Error> {
+        let mut store = rustls::RootCertStore::empty();
+        for r in roots { store.add(CertificateDer::from(r.to_vec())).unwrap(); }
+        let v = rustls::server::WebPkiClientVerifier::builder_with_provider(Arc::new(store), Arc::new(rustls::crypto::ring::default_provider()))
+            .build().unwrap();
+        v.verify_client_cert(&CertificateDer::from(cert.to_vec()), &[], rustls::pki_types::UnixTime::now()).err()
+    }
+
+    /// **Exit 7: a distinct successor subject.** Two CAs minted by `tls ca` have distinct subjects, each naming
+    /// its fleet and its generation; a node certificate's issuer name is its own CA's subject, byte for byte; and a
+    /// refusal across the two CAs reads `UnknownIssuer`. Seen failing first on the code before I2: both CAs carried
+    /// rcgen's default subject, and the cross-CA refusal read `BadSignature` (spike S-succeed, finding 3).
+    #[test]
+    fn two_minted_cas_have_distinct_subjects_and_a_cross_ca_refusal_reads_unknown_issuer() {
+        let base = fresh_dir("subject");
+        let (ca1, der1) = ca(&base, "ca1");
+        let (_ca2, der2) = ca(&base, "ca2");
+        let (s1, s2) = (super::tbs_name(&der1, TbsName::Subject).unwrap(), super::tbs_name(&der2, TbsName::Subject).unwrap());
+        assert_ne!(s1, s2, "two minted CAs share no name");
+        for d in [&der1, &der2] {
+            let cn = super::ca_subject_cn(d).expect("the one subject shape tls ca writes");
+            assert!(cn.starts_with("Mycelium fleet ") && cn.ends_with(" CA generation 0"), "{cn}");
+        }
+        let id = NodeId::new("127.0.0.1", 9601).unwrap();
+        let (cert, _) = super::issue_node_cert(&ca1, &id, &base.join("issued")).unwrap();
+        let cert = der_of(&cert);
+        assert_eq!(super::tbs_name(&cert, TbsName::Issuer), Some(s1), "the issuer name is CA1's subject");
+        assert!(chain_error(&[&der1], &cert).is_none(), "and it chains to CA1");
+        let refused = chain_error(&[&der2], &cert).expect("CA2 does not verify CA1's certificate");
+        assert!(
+            matches!(refused, rustls::Error::InvalidCertificate(rustls::CertificateError::UnknownIssuer)),
+            "across two CAs the refusal names the issuer: {refused:?}"
+        );
+
+        // Mixed versions, stated in deprecations.md §111: an issuer before I2 rebuilt the CA with rcgen's default
+        // subject. Under a CA minted by this release its certificate names the wrong issuer and chains to no root.
+        let ca1_key = rcgen::KeyPair::from_pem(&std::fs::read_to_string(ca1.join("ca-key.pem")).unwrap()).unwrap();
+        let k = ed25519_dalek::SigningKey::from_bytes(&[4u8; 32]);
+        let old_issuer = super::imp::generate_node_cert(&id, &k, &ca1_key, 1).unwrap();
+        assert!(matches!(chain_error(&[&der1], old_issuer.as_ref()),
+            Some(rustls::Error::InvalidCertificate(rustls::CertificateError::UnknownIssuer))),
+            "an older issuer's certificate under a minted CA chains to no root");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// **A CA already deployed keeps its name.** A node's own CA, and every CA before I2, has rcgen's default
+    /// subject; a certificate issued under it still names that subject as its issuer and verifies. A CA whose
+    /// subject this issuer cannot reproduce is refused at issue, never signed under another name.
+    #[test]
+    fn a_default_subject_ca_keeps_its_name_and_an_unreproducible_subject_is_refused() {
+        let (ca_der, ca_key) = super::imp::generate_ca_for_test();
+        assert_eq!(super::ca_subject_cn(ca_der.as_ref()).as_deref(), Some("rcgen self signed cert"));
+        let k = ed25519_dalek::SigningKey::from_bytes(&[3u8; 32]);
+        let id = NodeId::new("127.0.0.1", 9602).unwrap();
+        let cert = super::imp::node_cert_under(&id, &k.verifying_key().to_bytes(), ca_der.as_ref(), &ca_key, 1).unwrap();
+        assert_eq!(super::tbs_name(cert.as_ref(), TbsName::Issuer), super::tbs_name(ca_der.as_ref(), TbsName::Subject));
+        assert!(chain_error(&[ca_der.as_ref()], cert.as_ref()).is_none());
+
+        let mut params = rcgen::CertificateParams::new(vec![]).unwrap();
+        params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        params.distinguished_name.push(rcgen::DnType::OrganizationName, "two attributes");
+        let odd = params.self_signed(&ca_key).unwrap();
+        assert_eq!(super::ca_subject_cn(odd.der()), None);
+        let said = super::imp::node_cert_under(&id, &k.verifying_key().to_bytes(), odd.der(), &ca_key, 1).unwrap_err().to_string();
+        assert!(said.contains("subject is not one this issuer writes"), "{said}");
+    }
+
+    /// **Exit 14: no silent root drop.** A `ca_cert_pem` holding two certificates is refused at start, naming the
+    /// field, the path and the upgrade note; one certificate starts; a chain in `cert_pem` (the node's certificate
+    /// and its CA's) is unaffected; and the on-node CA's `ca-cert.pem` is read as before. Seen failing first: the
+    /// two-certificate file started, trusting only its first certificate.
+    #[test]
+    fn a_multi_certificate_ca_cert_pem_is_refused_by_name_and_a_cert_pem_chain_is_not() {
+        let base = fresh_dir("multi");
+        let (ca1, der1) = ca(&base, "ca1");
+        let (_ca2, _) = ca(&base, "ca2");
+        let both = base.join("both.pem");
+        let pem = |p: &Path| std::fs::read_to_string(p).unwrap();
+        std::fs::write(&both, pem(&ca1.join("ca-cert.pem")) + &pem(&base.join("ca2/ca-cert.pem"))).unwrap();
+        let id = NodeId::new("127.0.0.1", 9603).unwrap();
+        let (cert, key) = super::issue_node_cert(&ca1, &id, &base.join("issued")).unwrap();
+        let cfg = |trust: &Path, cert: &Path| TlsConfig {
+            auto_cert_dir: base.join("node"),
+            cert_pem: Some(cert.to_path_buf()),
+            key_pem: Some(key.clone()),
+            ca_cert_pem: Some(trust.to_path_buf()),
+        };
+        let refused = super::load_or_generate(&cfg(&both, &cert), &id, Arc::new(RemovedSet::default()), Default::default())
+            .err().expect("two roots in ca_cert_pem are refused").to_string();
+        assert!(refused.contains("tls.ca_cert_pem") && refused.contains("holds 2 certificates") && refused.contains("both.pem")
+            && refused.contains("deprecations.md §111"), "{refused}");
+
+        // The same file as `{auto_cert_dir}/ca-cert.pem` beside a pre-issued `cert_pem`, `ca_cert_pem` unset — the
+        // operator's root on that posture (`tls issue` says to copy it there; #796's review, finding 1). Seen failing
+        // first with the refusal keyed on `ca_cert_pem` alone: the node started trusting the first certificate.
+        let posture = base.join("posture");
+        std::fs::create_dir_all(&posture).unwrap();
+        std::fs::copy(&both, posture.join("ca-cert.pem")).unwrap();
+        let mut beside = TlsConfig::default();
+        beside.auto_cert_dir = posture.clone();
+        beside.cert_pem = Some(cert.clone());
+        beside.key_pem = Some(key.clone());
+        let refused = super::load_or_generate(&beside, &id, Arc::new(RemovedSet::default()), Default::default())
+            .err().expect("two roots beside a pre-issued cert_pem are refused").to_string();
+        assert!(refused.contains("holds 2 certificates") && refused.contains("posture"), "{refused}");
+
+        let chain = base.join("chain.pem");
+        std::fs::write(&chain, pem(&cert) + &pem(&ca1.join("ca-cert.pem"))).unwrap();
+        let tls = super::load_or_generate(&cfg(&ca1.join("ca-cert.pem"), &chain), &id, Arc::new(RemovedSet::default()), Default::default())
+            .expect("a chain in cert_pem starts");
+        assert_eq!(tls.roots_der(), vec![der1.clone()]);
+        assert_eq!(tls.node_cert_der(), der_of(&cert), "the chain's first certificate is the node's");
+
+        // The on-node CA: `ca_cert_pem` unset, `ca-cert.pem` in `auto_cert_dir` — read as before.
+        let own = base.join("own");
+        let own_cfg = TlsConfig { auto_cert_dir: own.clone(), ..TlsConfig::default() };
+        let _ = super::load_or_generate(&own_cfg, &id, Arc::new(RemovedSet::default()), Default::default()).unwrap();
+        let first = pem(&own.join("ca-cert.pem"));
+        std::fs::write(own.join("ca-cert.pem"), first + &pem(&base.join("ca2/ca-cert.pem"))).unwrap();
+        assert!(super::load_or_generate(&own_cfg, &id, Arc::new(RemovedSet::default()), Default::default()).is_ok(),
+            "the on-node CA's ca-cert.pem is not ca_cert_pem, and is unaffected");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// **The reload path, live, no restart (exits 1 and 11 at the TLS layer).** A node on `cert_pem` with no CA
+    /// key widens to two roots, cuts over to its current key re-issued under the successor, and narrows to the
+    /// successor alone, through `activate` only. At each phase: the chain check behind `verify_member_cert`, the
+    /// mesh configs (a handshake each way with a peer), the fleet server check **handed out before the first
+    /// change** (the bulk fetch's, built once at start), and the gateway's one config (it presents the successor
+    /// certificate). After narrowing, a peer that trusts both roots but holds an old-root certificate is refused by
+    /// the narrowed node's accept side and by its dial side (spike M2). Each change of roots bumps the roots
+    /// generation once; a same-CA rotation does not.
+    #[test]
+    fn a_cert_pem_node_widens_cuts_over_and_narrows_live_through_activate() {
+        let base = fresh_dir("live");
+        let (ca1, der1) = ca(&base, "ca1");
+        let (ca2, der2) = ca(&base, "ca2");
+        let r1 = ca1.join("ca-cert.pem");
+        let (ia, a) = node(&base, "a", 9611, &ca1, &r1);
+        let (ib, b) = node(&base, "b", 9612, &ca1, &r1);
+        let (_if, f) = node(&base, "f", 9613, &ca1, &r1);
+        let fleet_at_start = a.fleet_server_verifier();
+        let a2 = super::issue_node_cert_for_key(&ca2, &ia, a.verifying_key_bytes(), 0).unwrap();
+        let b2 = super::issue_node_cert_for_key(&ca2, &ib, b.verifying_key_bytes(), 0).unwrap();
+        assert!(!a.verify_member_cert(&b2), "before: A does not know CA2");
+        assert_eq!(a.roots_generation(), 0);
+
+        // Widen: every node trusts both roots, keeping its CA1 certificate.
+        for t in [&a, &b, &f] {
+            t.activate(t.reroot_material(t.node_cert_der(), vec![der1.clone(), der2.clone()]).unwrap()).unwrap();
+            assert_eq!(t.roots_generation(), 1);
+        }
+        assert!(a.verify_member_cert(&b2), "widened: A's record check accepts a successor certificate");
+        // Cut over: B presents its successor certificate.
+        b.activate(b.reroot_material(b2.clone(), vec![der1.clone(), der2.clone()]).unwrap()).unwrap();
+        assert_eq!(b.node_cert_der(), b2);
+        assert_eq!(handshake(b.client_config(), a.server_config()), Ok(()), "B (CA2) → A (two roots)");
+        assert_eq!(handshake(a.client_config(), b.server_config()), Ok(()), "A (CA1) → B (CA2)");
+        // Narrow: A presents its successor certificate and trusts CA2 alone.
+        a.activate(a.reroot_material(a2.clone(), vec![der2.clone()]).unwrap()).unwrap();
+        b.activate(b.reroot_material(b2.clone(), vec![der2.clone()]).unwrap()).unwrap();
+        assert_eq!(a.roots_generation(), 2, "A widened and narrowed: two changes of roots");
+        assert_eq!(handshake(b.client_config(), a.server_config()), Ok(()), "B → A, both narrowed");
+        assert_eq!(handshake(a.client_config(), b.server_config()), Ok(()), "A → B, both narrowed");
+        assert!(!a.verify_member_cert(&f.node_cert_der()), "narrowed: an old-root record no longer verifies");
+        let f_to_a = handshake(f.client_config(), a.server_config());
+        assert!(f_to_a.as_ref().is_err_and(|e| e.starts_with("server refused")), "A's accept side refuses F's CA1 cert: {f_to_a:?}");
+        let a_to_f = handshake(a.client_config(), f.server_config());
+        assert!(a_to_f.as_ref().is_err_and(|e| e.starts_with("client refused")), "A's dial side refuses F's CA1 cert: {a_to_f:?}");
+
+        // Exit 11: the fleet server check handed out at start now judges by CA2 alone.
+        let name = rustls::pki_types::ServerName::try_from("127.0.0.1").unwrap();
+        let now = rustls::pki_types::UnixTime::now();
+        assert!(fleet_at_start.verify_server_cert(&CertificateDer::from(b2.clone()), &[], &name, &[], now).is_ok(),
+            "the bulk fetch's verifier, held since start, accepts a successor server certificate");
+        assert!(fleet_at_start.verify_server_cert(&CertificateDer::from(f.node_cert_der()), &[], &name, &[], now).is_err(),
+            "and refuses an old-root one after narrowing");
+        // Exit 11: the gateway's one config presents A's successor certificate, to a client trusting CA2 only.
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(CertificateDer::from(der2.clone())).unwrap();
+        let ca2_only = rustls::ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+            .with_safe_default_protocol_versions().unwrap()
+            .with_root_certificates(roots).with_no_client_auth();
+        assert_eq!(handshake(Arc::new(ca2_only), a.gateway_server_config()), Ok(()), "the gateway presents A's CA2 certificate");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A same-CA rotation carries no roots: the chain checks stay and the roots generation does not move.
+    #[test]
+    fn a_same_ca_rotation_leaves_the_roots_and_their_generation() {
+        let base = fresh_dir("rotate");
+        let cfg = TlsConfig { auto_cert_dir: base.clone(), ..TlsConfig::default() };
+        let id = NodeId::new("127.0.0.1", 9614).unwrap();
+        let tls = super::load_or_generate(&cfg, &id, Arc::new(RemovedSet::default()), Default::default()).unwrap();
+        let before = tls.roots_der();
+        tls.activate(super::generate_rotation(&cfg, &id, Arc::new(RemovedSet::default()), Default::default()).unwrap()).unwrap();
+        assert_eq!((tls.roots_generation(), tls.roots_der()), (0, before));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// `reroot_material` refuses, by name: no roots, a certificate for another key, and a certificate the new
+    /// roots do not verify.
+    #[test]
+    fn a_change_of_roots_is_refused_without_roots_for_another_key_or_unverified() {
+        let base = fresh_dir("refuse");
+        let (ca1, der1) = ca(&base, "ca1");
+        let (ca2, der2) = ca(&base, "ca2");
+        let (ia, a) = node(&base, "a", 9615, &ca1, &ca1.join("ca-cert.pem"));
+        let said = |r: Result<super::RotationMaterial, crate::error::GossipError>| r.err().expect("refused").to_string();
+        assert!(said(a.reroot_material(a.node_cert_der(), vec![])).contains("at least one CA certificate"));
+        let other = super::issue_node_cert_for_key(&ca2, &ia, [9u8; 32], 0);
+        // [9; 32] is not a valid point for every check, but the certificate is only parsed for its key.
+        if let Ok(other) = other {
+            assert!(said(a.reroot_material(other, vec![der2.clone()])).contains("not for this node's current key"));
+        }
+        assert!(said(a.reroot_material(a.node_cert_der(), vec![der2.clone()])).contains("does not verify against the new roots"));
+        assert_eq!(a.roots_generation(), 0, "nothing was activated");
+        assert!(a.reroot_material(a.node_cert_der(), vec![der1, der2]).is_ok());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// **Exit 18's ordering (#768's M3): `activate` swaps the verifier before it bumps the roots generation.** A
+    /// reader that loads the generation and then the verifier, between the two steps, tags what it judged with
+    /// the **old** generation — so a verdict tagged with the new generation was always reached by the new
+    /// verifier. Seen failing first with the bump moved before the swap: the plant read the new generation and the
+    /// old verifier, and tagged an old-roots refusal as new.
+    #[test]
+    fn a_verdict_tagged_with_the_new_generation_was_reached_by_the_new_verifier() {
+        let base = fresh_dir("order");
+        let (ca1, der1) = ca(&base, "ca1");
+        let (ca2, der2) = ca(&base, "ca2");
+        let (ib, _) = node(&base, "b", 9617, &ca1, &ca1.join("ca-cert.pem"));
+        let (_, a) = node(&base, "a", 9616, &ca1, &ca1.join("ca-cert.pem"));
+        let successor = super::issue_node_cert_for_key(&ca2, &ib, ed25519_dalek::SigningKey::from_bytes(&[5u8; 32]).verifying_key().to_bytes(), 0).unwrap();
+        let seen = std::rc::Rc::new(std::cell::Cell::new(None));
+        let s = std::rc::Rc::clone(&seen);
+        let cert = successor.clone();
+        super::ACTIVATE_PLANT.with(|p| *p.borrow_mut() = Some(Box::new(move |t: &NodeTls| s.set(Some(t.verify_member_cert_tagged(&cert))))));
+        a.activate(a.reroot_material(a.node_cert_der(), vec![der1, der2]).unwrap()).unwrap();
+        let (generation, verified) = seen.get().expect("the plant ran");
+        assert!(generation == 0 || verified, "a verdict tagged with the new generation ({generation}) came from the old verifier");
+        assert_eq!(a.verify_member_cert_tagged(&successor), (1, true));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// **The reader's order (#796's review, finding 3): the generation is loaded before the chain check.** A
+    /// change of roots between the reader's two loads (a plant there) leaves the verdict tagged with the old
+    /// generation, so it is re-judged. Seen failing first with the two loads swapped: the reader loaded the old
+    /// check, then the new generation, and tagged an old-roots refusal as current.
+    #[test]
+    fn a_change_of_roots_between_the_readers_two_loads_tags_the_old_generation() {
+        let base = fresh_dir("reader");
+        let (ca1, der1) = ca(&base, "ca1");
+        let (ca2, der2) = ca(&base, "ca2");
+        let (_, a) = node(&base, "a", 9618, &ca1, &ca1.join("ca-cert.pem"));
+        let id = NodeId::new("127.0.0.1", 9619).unwrap();
+        let successor = super::issue_node_cert_for_key(&ca2, &id, ed25519_dalek::SigningKey::from_bytes(&[6u8; 32]).verifying_key().to_bytes(), 0).unwrap();
+        let wide = a.reroot_material(a.node_cert_der(), vec![der1, der2]).unwrap();
+        super::READER_PLANT.with(|p| *p.borrow_mut() = Some(Box::new(move |t: &NodeTls| t.activate(wide).unwrap())));
+        let (generation, verified) = a.verify_member_cert_tagged(&successor);
+        assert_eq!(a.roots_generation(), 1, "the plant widened the roots");
+        assert!(generation == 0 || verified, "tagged {generation} (current) with an old-roots refusal");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// **A same-CA rotation after a change of roots keeps one trust (#796's review, finding 2).** A node with its
+    /// CA key on-node widens to its own CA and a successor, then rotates (`rotation_after`, what `rotate_identity`
+    /// calls). A peer holding a successor certificate is accepted at the handshake **and** by `verify_member_cert`,
+    /// as before the rotation. Seen failing first with the rotation built over the configuration's root: the
+    /// handshake refused the peer while `verify_member_cert` accepted it.
+    #[test]
+    fn a_rotation_after_a_change_of_roots_builds_over_the_current_roots() {
+        let base = fresh_dir("rotate-roots");
+        let cfg = { let mut c = TlsConfig::default(); c.auto_cert_dir = base.join("own"); c };
+        let id = NodeId::new("127.0.0.1", 9620).unwrap();
+        let a = super::load_or_generate(&cfg, &id, Arc::new(RemovedSet::default()), Default::default()).unwrap();
+        let own = a.roots_der().remove(0);
+        let (ca2, der2) = ca(&base, "ca2");
+        let (_, peer) = node(&base, "peer", 9621, &ca2, &ca2.join("ca-cert.pem"));
+        let wide = vec![own.clone(), der2.clone()];
+        peer.activate(peer.reroot_material(peer.node_cert_der(), wide.clone()).unwrap()).unwrap();
+        a.activate(a.reroot_material(a.node_cert_der(), wide).unwrap()).unwrap();
+        assert_eq!(handshake(peer.client_config(), a.server_config()), Ok(()), "widened: the CA2 peer → A");
+        a.activate(a.rotation_after(&cfg, &id, 0).unwrap()).unwrap();
+        assert!(a.verify_member_cert(&peer.node_cert_der()), "the record check still accepts the CA2 peer");
+        assert_eq!(handshake(peer.client_config(), a.server_config()), Ok(()), "and so does the handshake, after rotating");
+        assert_eq!(handshake(a.client_config(), peer.server_config()), Ok(()), "both ways");
+        assert_eq!(a.roots_generation(), 1, "a same-CA rotation does not move the roots");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// **Stale rotation material is refused (#796's review, finding 2).** Material built over the configuration's
+    /// root (the free `generate_rotation_after`), or over a root set that changed before it was activated, would
+    /// split the node's trust; `activate` refuses it, naming the generations, and leaves the node as it was. Seen
+    /// failing first with the check removed: the stale material was activated.
+    #[test]
+    fn rotation_material_built_over_other_roots_is_refused() {
+        let base = fresh_dir("rotate-stale");
+        let cfg = { let mut c = TlsConfig::default(); c.auto_cert_dir = base.join("own"); c };
+        let id = NodeId::new("127.0.0.1", 9622).unwrap();
+        let a = super::load_or_generate(&cfg, &id, Arc::new(RemovedSet::default()), Default::default()).unwrap();
+        let own = a.roots_der().remove(0);
+        let (_ca2, der2) = ca(&base, "ca2");
+        let from_file = super::generate_rotation(&cfg, &id, Arc::new(RemovedSet::default()), Default::default()).unwrap();
+        let before = a.rotation_after(&cfg, &id, 0).unwrap();
+        a.activate(a.reroot_material(a.node_cert_der(), vec![own, der2]).unwrap()).unwrap();
+        let key = a.verifying_key_bytes();
+        for stale in [from_file, before] {
+            let said = a.activate(stale).expect_err("stale material is refused").to_string();
+            assert!(said.contains("cannot be activated at generation 1"), "{said}");
+        }
+        assert_eq!(a.verifying_key_bytes(), key, "nothing was activated");
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

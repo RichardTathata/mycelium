@@ -276,8 +276,10 @@ pub(crate) struct IdentityLedger {
     own_records: papaya::HashMap<String, Vec<u8>>,
     /// Every key each node has revoked that this node ever counted: never un-counted.
     counted_ever: papaya::HashMap<NodeId, HashSet<[u8; 32]>>,
-    /// The CA check and parse per distinct certificate (by SHA-256), bounded by [`CERT_CACHE_MAX`].
-    cert_cache: papaya::HashMap<[u8; 32], Option<CertFacts>>,
+    /// The CA check and parse per distinct certificate (by SHA-256), bounded by [`CERT_CACHE_MAX`],
+    /// each verdict tagged with the roots generation it was judged under (identity-and-lifecycle I2,
+    /// R4): a verdict of an older generation is a miss.
+    cert_cache: papaya::HashMap<[u8; 32], (u64, Option<CertFacts>)>,
     running: AtomicBool,
     again: AtomicBool,
     /// Certificate records whose issuance was past `wall_now_ms` plus the skew bound when judged.
@@ -404,20 +406,50 @@ struct CertFacts {
 /// The CA check and the parse of `der`, once per distinct certificate (the final review's finding
 /// 3: a record can carry the same certificate thousands of times). The cache is bounded: past
 /// [`CERT_CACHE_MAX`] entries it is cleared, never grown.
+///
+/// **Re-judged when the roots change** (identity-and-lifecycle I2, R4): each verdict carries the roots
+/// generation [`NodeTls::verify_member_cert_tagged`](mycelium_core::tls::NodeTls::verify_member_cert_tagged)
+/// read before it loaded the chain check, and a verdict whose generation is not the node's current one is
+/// a miss. Clearing the cache when the roots change would not do: a fold judging across `activate` would
+/// insert its old-roots verdict after the clear.
 fn cert_facts(ledger: &IdentityLedger, tls: &mycelium_core::tls::NodeTls, der: &[u8]) -> Option<CertFacts> {
+    cert_facts_with(ledger, tls, der, || {})
+}
+
+/// [`cert_facts`], running `between` after the judgment and before its verdict is cached — the plant
+/// the roots-generation test (I2, exit 18) changes the roots in.
+/// Empty the certificate cache — what clearing it at a change of roots would do (I2's roots-generation tests).
+#[cfg(test)]
+pub(super) fn clear_cert_cache_for_test(ledger: &IdentityLedger) {
+    ledger.cert_cache.pin().clear();
+}
+
+/// Whether [`cert_facts_with`] gives `der` facts (I2's roots-generation tests).
+#[cfg(test)]
+pub(super) fn cert_verdict_for_test(ledger: &IdentityLedger, tls: &mycelium_core::tls::NodeTls, der: &[u8], between: impl FnOnce()) -> bool {
+    cert_facts_with(ledger, tls, der, between).is_some()
+}
+
+fn cert_facts_with(ledger: &IdentityLedger, tls: &mycelium_core::tls::NodeTls, der: &[u8], between: impl FnOnce()) -> Option<CertFacts> {
     let digest: [u8; 32] = Sha256::digest(der).into();
-    if let Some(hit) = ledger.cert_cache.pin().get(&digest) {
+    if let Some((generation, hit)) = ledger.cert_cache.pin().get(&digest)
+        && *generation == tls.roots_generation()
+    {
         return hit.clone();
     }
-    let facts = mycelium_core::tls::cert_identity(der).filter(|_| tls.verify_member_cert(der)).map(|id| CertFacts {
-        key: id.key,
-        issued: id.issued_ms.unwrap_or(0),
-    });
+    let (generation, facts) = match mycelium_core::tls::cert_identity(der) {
+        Some(id) => {
+            let (generation, verified) = tls.verify_member_cert_tagged(der);
+            (generation, verified.then_some(CertFacts { key: id.key, issued: id.issued_ms.unwrap_or(0) }))
+        }
+        None => (tls.roots_generation(), None),
+    };
+    between();
     let cache = ledger.cert_cache.pin();
     if cache.len() >= CERT_CACHE_MAX {
         cache.clear();
     }
-    cache.insert(digest, facts.clone());
+    cache.insert(digest, (generation, facts.clone()));
     facts
 }
 

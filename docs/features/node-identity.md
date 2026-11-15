@@ -37,6 +37,11 @@ certificate where the CA key is. The two-domain scaffold's
   [`MemberRemoval`](../../src/membership.rs), refused at the handshake once seen.
 - `a_pre_issued_node_cert_starts_without_the_ca_key_and_mints_nothing`, in
   [`mycelium-core/src/tls.rs`](../../mycelium-core/src/tls.rs).
+- `ca_cert_pem` names **one** certificate, the fleet CA's: a file of two is refused at start by name (unreleased,
+  [`deprecations.md` §111](../guide/deprecations.md)). `mycelium tls ca` gives the CA a subject naming the fleet and
+  its generation, and every issuer writes that subject as a certificate's issuer, so a certificate from another
+  fleet is refused as `UnknownIssuer`
+  ([cert rotation § Succeeding the fleet CA](../operations/cert-rotation.md#succeeding-the-fleet-ca-identity-and-lifecycle-i2--what-this-release-has-and-what-it-does-not-yet)).
 
 ## See it work
 
@@ -51,13 +56,17 @@ which needs two processes and lives in the Docker suites.
   [`id.ca_key_off_node`](../reference/guarantee-catalogue.md#id.ca_key_off_node) and
   [`id.revocation_authority`](../reference/guarantee-catalogue.md#id.revocation_authority).
 - **Not built:** rotation in place under the off-node posture (recovery is re-issue); the CA key cannot be rotated,
-  and its compromise is recovered by re-issue only; a node whose
+  and its compromise is recovered by re-issue only — CA succession (plan row I2) has its reload path in the library
+  (`NodeTls::reroot_material`, the roots generation that re-judges cached certificate verdicts) and nothing yet that
+  drives it: the successor-signed record, its phases and `tls succeed` are I2's next PRs; a node whose
   certificate predates row Q has no standing to revoke until it is re-issued; a removed member's gateway tokens are a
   separate revocation ([cert rotation § Removing a member](../operations/cert-rotation.md#removing-a-member-an-operators-authority-c5)).
 - **Evidence:** the ledger rows
   [identity proofs required by default](../operations/what-is-proven.md#identity-proofs-required-default-so-member),
   [a revoked key stops verifying](../operations/what-is-proven.md#key-node-has-revoked-stops-verifying) and
-  [a TLS node starts without the fleet CA](../operations/what-is-proven.md#tls-node-starts-without-fleet-ca).
+  [a TLS node starts without the fleet CA](../operations/what-is-proven.md#tls-node-starts-without-fleet-ca),
+  [a node takes a new root set live](../operations/what-is-proven.md#node-takes-new-roots-live-and-caches-rejudge) and
+  [one root in `ca_cert_pem`](../operations/what-is-proven.md#ca-cert-pem-one-root-and-named-fleet-ca).
 
 ## Go deeper
 
