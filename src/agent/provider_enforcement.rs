@@ -50,7 +50,8 @@
 //! refused `malformed_call` ([`repeats_a_key`]) rather than decided on the last value and read by a guest as the
 //! first. What an arguments digest still does not tell apart there: a JSON payload of exactly the shape
 //! `{"payload_b64": …}` and the bytes it encodes; and, by design, JSON texts RFC 8785 writes alike (`1`, `1.0`,
-//! `1e0`; two key orders). The payload carries no causal fields ([`causal_meta`]): such a call is read as a root.
+//! `1e0`; two key orders; two decimals that round to one double, `0.1` and `0.1000000000000000055`). The payload
+//! carries no causal fields ([`causal_meta`]): such a call is read as a root.
 //!
 //! **The bridge's own call is not a second door.** The host's MCP tool handler, which runs only after the MCP tool
 //! loop has decided the call as its client, hands the admitted arguments to the component's serve loop over a
@@ -799,8 +800,10 @@ pub(crate) fn protected_here(cfg: &crate::config::GossipConfig, kind: &str) -> b
     super::is_protected_kind(cfg, kind) || kind.starts_with(super::HOSTED_CAPABILITY_KIND_PREFIX)
 }
 
-/// Is `payload` JSON in which some object, at any depth, carries a key twice? `false` for bytes that are not JSON.
-/// Builds nothing but each object's key set.
+/// Does some object in `payload`, at any depth, carry a key twice? Builds nothing but each object's key set. Asked by
+/// `derive` only of a payload that parsed as a `Value` (#788's confirm round, N3), so a text that is not JSON as a
+/// whole — a repeat followed by `1e400` or a lone surrogate, which this walk would reach first — is carried as
+/// `{"payload_b64"}` like any other bytes.
 pub(crate) fn repeats_a_key(payload: &[u8]) -> bool {
     use serde::de::{DeserializeSeed, Error as _, MapAccess, SeqAccess, Visitor};
     const REPEATED: &str = "mycelium: repeated object key";
@@ -836,11 +839,6 @@ pub(crate) fn repeats_a_key(payload: &[u8]) -> bool {
             }
             Ok(())
         }
-    }
-    // Only a payload that is JSON as a whole: a truncated text can repeat a key before it fails to parse, and that
-    // one is not JSON — it is carried as `{"payload_b64"}`.
-    if serde_json::from_slice::<serde::de::IgnoredAny>(payload).is_err() {
-        return false;
     }
     let mut de = serde_json::Deserializer::from_slice(payload);
     match Walk.deserialize(&mut de).and_then(|()| de.end()) {
@@ -897,13 +895,15 @@ pub(crate) fn derive(
         // exactly those as its payload — so a rule's value conditions and a mandate's arguments digest (RFC 8785)
         // mean the same for a direct call as for the tool call. A payload that is not JSON is carried as the
         // generic arm carries it.
-        let arguments = serde_json::from_slice::<Value>(payload)
-            .unwrap_or_else(|_| json!({ "payload_b64": base64::engine::general_purpose::STANDARD.encode(payload) }));
+        let parsed = serde_json::from_slice::<Value>(payload).ok();
+        let is_json = parsed.is_some();
+        let arguments =
+            parsed.unwrap_or_else(|| json!({ "payload_b64": base64::engine::general_purpose::STANDARD.encode(payload) }));
         // The component is handed the payload's **bytes**, and the decision is made on their parse — which keeps the
         // last of a repeated object key. A guest whose parser keeps the first would act on a value no rule and no
         // digest saw (#788's review, F2), so a payload that is JSON and repeats a key in any object is refused. The
         // MCP door has no such gap: its handler is handed the parsed value it was decided on.
-        if repeats_a_key(payload) {
+        if is_json && repeats_a_key(payload) {
             return Err(ProviderRefusal::local(
                 "malformed_call",
                 format!("the `{kind}` payload repeats an object key: the provider would decide on one value and the component could read another"),

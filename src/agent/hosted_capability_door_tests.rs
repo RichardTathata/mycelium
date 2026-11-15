@@ -556,6 +556,31 @@ async fn the_serve_stream_decides_a_hosted_capability_kind_before_streaming_it()
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// **Decided, signed and handed agree for a tool call with no `arguments`** (#788's confirm round, N1). The provider
+/// decides such an `mcp.invoke` on `{}` and hands the tool `{}`; the client signature it checks
+/// (`client_sig::binding_of`) is over the same value, and a signature over `null` no longer binds it. An explicit
+/// `"arguments": null` — what the gateway's `/mcp` forwards for a client's call with none — is `null` all three
+/// ways. Seen failing first: with `binding_of` reading `params.arguments` as it stood, the absent case bound
+/// `digest(null)`.
+#[test]
+fn decided_signed_and_handed_agree_for_a_tool_call_with_no_arguments() {
+    use super::client_sig::{binding_of, door_binding_mcp};
+    let a = GossipAgent::new(NodeId::new("127.0.0.1", 9004).unwrap(), GossipConfig::default());
+    let me = "127.0.0.1:9004";
+    for (call, want) in [
+        (json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "echo"}}), json!({})),
+        (json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "echo", "arguments": null}}), Value::Null),
+        (json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "echo", "arguments": {"kg": 5}}}), json!({"kg": 5})),
+    ] {
+        let payload = call.to_string().into_bytes();
+        let decided = derive(&a.task_ctx, crate::signal::signal_kind::MCP_INVOKE, &payload, None, me).unwrap().2;
+        let handed = super::mcp::decided_arguments(&call);
+        let signed = binding_of(crate::signal::signal_kind::MCP_INVOKE, &payload, None).unwrap();
+        assert_eq!((&decided, &handed), (&want, &want), "{call}");
+        assert_eq!(signed, door_binding_mcp("echo", &want).unwrap(), "SIGNED OTHER: the signature binds another value than was decided: {call}");
+    }
+}
+
 /// **What the family is decided on**, read from `derive` itself:
 /// - the `tool` namespace derives **exactly** what the MCP tool loop derives for the same tool and arguments —
 ///   operation, resource and arguments — so a rule's value conditions and a mandate's arguments digest mean one
@@ -573,6 +598,7 @@ fn a_hosted_capability_is_derived_from_its_kind() {
     let a = GossipAgent::new(NodeId::new("127.0.0.1", 9003).unwrap(), GossipConfig::default());
     let ctx = &a.task_ctx;
     let me = "127.0.0.1:9003";
+    let digest_of = |p: &[u8]| arguments_digest(&derive(ctx, "cap.invoke/route/optimize", p, None, me).unwrap().2);
     let args = json!({"kg": 5000.0, "to": ["a", "b"], "nested": {"z": 1, "a": null}});
 
     let tool_call = json!({"jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": {"name": "echo", "arguments": args}});
@@ -602,12 +628,18 @@ fn a_hosted_capability_is_derived_from_its_kind() {
     assert_eq!(derive(ctx, crate::signal::signal_kind::MCP_INVOKE, null.to_string().as_bytes(), None, me).unwrap().2, Value::Null);
     assert_eq!(derive(ctx, "cap.invoke/tool/echo", b"null", None, me).unwrap().2, Value::Null);
 
-    // A repeated object key, at any depth, is refused at the direct door; numbers RFC 8785 writes alike share a digest.
-    for (payload, repeats) in [(&br#"{"a":1,"a":2}"#[..], true), (br#"[{"x":{"y":1,"y":1}}]"#, true), (br#"{"a":{"k":1},"b":{"k":1}}"#, false), (br#"{"a":1,"a":2"#, false), (b"plain", false), (b"", false), (br#"{"a":1} trailing"#, false)] {
+    // A repeated object key, at any depth, is refused at the direct door — only in a payload that is JSON as a whole;
+    // numbers RFC 8785 writes alike share a digest.
+    for whole_not_json in [&br#"{"a":1,"a":2,"b":1e400}"#[..], br#"{"a":1,"a":2,"b":"\ud800"}"#, br#"{"a":1,"a":2"#] {
+        let (_, _, args) = derive(ctx, "cap.invoke/route/optimize", whole_not_json, None, me).expect("carried, not refused");
+        assert!(args.get("payload_b64").is_some(), "{}: not JSON as a whole, so carried as bytes", String::from_utf8_lossy(whole_not_json));
+    }
+    assert_eq!(digest_of(br#"{"n":0.1}"#), digest_of(br#"{"n":0.1000000000000000055}"#), "two decimals that round to one double");
+    for (payload, repeats) in [(&br#"{"a":1,"a":2}"#[..], true), (br#"[{"x":{"y":1,"y":1}}]"#, true), (br#"{"a":{"k":1},"b":{"k":1}}"#, false), (b"plain", false), (b"", false), (br#"{"a":1} trailing"#, false)] {
         assert_eq!(super::provider_enforcement::repeats_a_key(payload), repeats, "{}", String::from_utf8_lossy(payload));
     }
     assert_eq!(derive(ctx, "cap.invoke/route/optimize", br#"{"a":1,"a":2}"#, None, me).unwrap_err().reason, "malformed_call");
-    let digest = |p: &[u8]| arguments_digest(&derive(ctx, "cap.invoke/route/optimize", p, None, me).unwrap().2);
+    let digest = digest_of;
     assert_eq!(digest(br#"{"n":1}"#), digest(br#"{"n":1.0}"#), "equal numbers, one digest: RFC 8785's canonical form, by design");
     assert_ne!(digest(br#"{"n":1}"#), digest(br#"{"n":2}"#));
 

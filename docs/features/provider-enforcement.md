@@ -113,7 +113,7 @@ confirmed stop, checked against the class's bound. CI runs it.
   its sender is decided as `node:{provider}`. A cohort budget counts these calls, with enforcement off too.
 - **Not established, for a hosted capability:** a JSON payload of exactly the shape `{"payload_b64": "<base64>"}`
   and the non-JSON bytes it encodes derive the same arguments, and JSON texts RFC 8785 writes alike (`1`, `1.0`
-  and `1e0`; two key orders) share a digest by design while the component is handed the bytes as sent; the
+  and `1e0`; two key orders; two decimals that round to one double, `0.1` and `0.1000000000000000055`) share a digest by design while the component is handed the bytes as sent; the
   payload carries no causal fields, so the exposure policy reads a direct call as a root; a
   capability whose namespace or name holds `@` is refused `malformed_call` at an enforcing provider; and a
   component's own `mesh.emit` of a `cap.invoke/…` kind its host listed is a member's call like any other —

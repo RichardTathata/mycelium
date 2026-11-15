@@ -440,7 +440,9 @@ pub(crate) fn binding_of(kind: &str, payload: &[u8], resource_claim: Option<&str
     if kind == crate::signal::signal_kind::MCP_INVOKE {
         let v: serde_json::Value = serde_json::from_slice(payload).map_err(|_| unbound)?;
         let name = v["params"]["name"].as_str().ok_or(unbound)?;
-        let (op, res, d) = door_binding_mcp(name, &v["params"]["arguments"]).map_err(|_| ClientSigRefusal::UnsafeInteger)?;
+        // The arguments the provider decides on and hands the tool (`mcp::decided_arguments`: `{}` for a call with no
+        // `arguments` member), so what is signed is what is decided and handed (#788's confirm round, N1).
+        let (op, res, d) = door_binding_mcp(name, &super::mcp::decided_arguments(&v)).map_err(|_| ClientSigRefusal::UnsafeInteger)?;
         // The envelope's claim, where present, must name the same tool.
         // The claim is `{resource}@{provider}`: the provider is after the **last** `@`, so a name holding one still binds
         // (#745's review).

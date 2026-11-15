@@ -4135,10 +4135,19 @@ run without it).
   `rpc_call`), for every tool the node serves through the tool loop or the external-server bridge (which is now
   sent `"arguments": {}`), with enforcement on or off. A call that carries `"arguments": null` is decided on
   `null` and handed `null`, as before — and that is what the gateway's `/mcp` sends for a client's call with no
-  `arguments`, so a call through `/mcp` is unchanged. At the direct door the component is handed
+  `arguments`, so a call through `/mcp` is unchanged. **A client signature is checked against the same value**
+  (`client_sig::binding_of`): for an `mcp.invoke` that reaches the provider with no `arguments` member, the
+  signature must be over `{}`, where it was checked over `null`. No shipped client is affected: both SDKs'
+  `McpClient.call_tool` / `callTool` send `"arguments": {}` when given none and sign that, the Rust
+  `ClientSigner::sign_tools_call` takes its arguments explicitly, and through `/mcp` the gateway checks the
+  signature and forwards an explicit value, which the provider reads as sent. Only a member that relays a client's
+  signed call with the member removed sees it: a signature over `null` is now refused `client_signature_invalid`.
+  At the direct door the component is handed
   the payload's bytes, so **a JSON payload that repeats an object key, at any depth, is refused `malformed_call`
   at an enforcing provider**: the provider would decide on the last value while a guest's parser might keep the
-  first. With enforcement off nothing is decided on the payload and it is not refused.
+  first. Only a payload that parses as JSON as a whole is asked: one that is not — a repeated key followed by
+  `1e400`, or a lone surrogate — is carried as `{"payload_b64"}` like any other bytes.
+  With enforcement off nothing is decided on the payload and it is not refused.
 - **Behaviour change under `[authority]`: a bare `cap:{ns}/{name}` rule is qualified to the node**, as a bare
   `tool:`, `skill:` and `prompt:` are. No rule could match the form before (nothing presented it), so no unit
   changes meaning; `provider (cap.invoke)` joins the doors `[authority]` maps and reports.
@@ -4155,7 +4164,8 @@ run without it).
 - **A payload that is not JSON** is carried as `{"payload_b64": "<base64>"}`, as an operator's protected kind's
   is. **What an arguments digest does not tell apart at this door:** a JSON payload of exactly that shape and the
   bytes it encodes, which derive the same arguments; and, by design, JSON texts that RFC 8785 writes alike —
-  `{"n":1}`, `{"n":1.0}` and `{"n":1e0}` have one digest, as do two orders of the same keys or two spacings — while
+  `{"n":1}`, `{"n":1.0}` and `{"n":1e0}` have one digest, as do two decimals that round to one double
+  (`0.1` and `0.1000000000000000055`), two orders of the same keys or two spacings — while
   the component is handed the bytes as sent. A repeated key is refused (above). An empty payload is not JSON.
 - **With enforcement on and no evaluator the call is refused** (`no_evaluator`), as every protected kind is. An
   evaluator built in code must map the operation (`map_action("cap.invoke", "*")`), or the call is refused
