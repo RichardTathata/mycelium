@@ -196,6 +196,8 @@ mod client_sig_tests;
 mod client_grant_tests;
 #[cfg(all(test, feature = "tls"))]
 mod client_cert_tests;
+#[cfg(all(test, feature = "tls"))]
+mod succession_tests;
 #[cfg(feature = "compliance")]
 mod knowledge_keys;
 /// Closure plan C5: applying member removals at the agent.

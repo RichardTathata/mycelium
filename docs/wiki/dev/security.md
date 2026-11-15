@@ -590,6 +590,18 @@ certificate for the principal **supersedes** the older key, by a per-principal h
 (journaled under `[persistence]`, `identity/client-certs.journal`), so an overwrite of the newer record cannot bring the
 older key back. A record counts by the certificate it holds, never by its KV write time — `sys/client-cert/` is
 member-writable, like `sys/identity-cert/`.
+**The roots can change on a live node** (identity-and-lifecycle I2, PR 1, unreleased): `NodeTls` holds its chain
+checks behind `ArcSwap` and a **roots generation** (`mycelium-core/src/tls.rs`). `reroot_material` builds material for
+the node's *current* key over a set of roots with no CA key; `activate` swaps the chain checks, then bumps the
+generation (`Release`); a reader loads the generation (`Acquire`) before the verifier (`verify_member_cert_tagged`), and
+the revocation fold's and the client-certificate fold's verdict caches treat an older generation as a miss — **never
+clear such a cache at a change of roots instead**: a judgment running across `activate` inserts its old verdict after
+the clear. `fleet_server_verifier()` hands out one delegating verifier, so a client built once (the bulk fetch's)
+follows. `ca_cert_pem` must hold exactly one certificate (it used to keep the first silently). An issuer writes the CA
+certificate's own subject as the issuer name: webpki finds the issuer **by name**, so the old fixed-parameter rebuild
+(rcgen's default subject) only worked while every CA had that name; `tls ca` now mints
+`CN=Mycelium fleet <hex> CA generation 0`. Not yet: `anchors_seen` and the client marks are not re-judged, and
+nothing drives a change of roots — I2's PRs 2 and 3 (`docs/plans/identity-and-lifecycle.md` §8).
 **A client's own signature** (I1, D1′): a call through `/mcp` or `/a2a` may carry `params._meta.cs`/`cn`, signed by the
 principal's client key over the principal, operation, resource, arguments' digest and `cn`; the gateway carries it
 outside its own signature and the **provider** checks it in `gateway_caller::verify` — binding, signature, the key's

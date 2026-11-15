@@ -140,8 +140,10 @@ pub enum ClientKeyStanding {
 #[derive(Default)]
 pub(crate) struct ClientCertLedger {
     pub(super) marks: papaya::HashMap<String, Mark>,
-    /// The parse and chain verdict per distinct certificate (by SHA-256), bounded by [`CERT_CACHE_MAX`].
-    cert_cache: papaya::HashMap<[u8; 32], Option<Facts>>,
+    /// The parse and chain verdict per distinct certificate (by SHA-256), bounded by [`CERT_CACHE_MAX`],
+    /// each tagged with the roots generation it was judged under (identity-and-lifecycle I2, R4): a
+    /// verdict of an older generation is a miss.
+    cert_cache: papaya::HashMap<[u8; 32], (u64, Option<Facts>)>,
     /// The records this gateway published, newest per principal, `(path, der)`: republished when missing or
     /// overwritten, as `revocation.rs` republishes a node's own records.
     published: papaya::HashMap<String, (String, Vec<u8>)>,
@@ -328,22 +330,47 @@ pub(crate) fn judge(ctx: &TaskCtx, tls: &mycelium_core::tls::NodeTls, principal:
 /// The parse and the CA chain check of `der`, once per distinct certificate (a member can write one certificate under
 /// many paths, or many principals' worth of foreign ones): cached by digest, the cache cleared when full. Only a
 /// client certificate the fleet CA issued has facts.
+///
+/// Re-judged when the roots change (identity-and-lifecycle I2, R4), as `revocation.rs`'s `cert_facts` is: a verdict
+/// carries the roots generation read before the chain check, and one of an older generation is a miss.
 fn facts(ledger: &ClientCertLedger, tls: &mycelium_core::tls::NodeTls, der: &[u8]) -> Option<Facts> {
+    facts_with(ledger, tls, der, || {})
+}
+
+/// [`facts`], running `between` after the judgment and before its verdict is cached (the I2 exit-18 plant).
+/// Empty the certificate cache — what clearing it at a change of roots would do (I2's roots-generation tests).
+#[cfg(test)]
+pub(super) fn clear_cert_cache_for_test(ledger: &ClientCertLedger) {
+    ledger.cert_cache.pin().clear();
+}
+
+/// Whether [`facts_with`] gives `der` facts (I2's roots-generation tests).
+#[cfg(test)]
+pub(super) fn client_verdict_for_test(ledger: &ClientCertLedger, tls: &mycelium_core::tls::NodeTls, der: &[u8], between: impl FnOnce()) -> bool {
+    facts_with(ledger, tls, der, between).is_some()
+}
+
+fn facts_with(ledger: &ClientCertLedger, tls: &mycelium_core::tls::NodeTls, der: &[u8], between: impl FnOnce()) -> Option<Facts> {
     let digest: [u8; 32] = Sha256::digest(der).into();
-    if let Some(hit) = ledger.cert_cache.pin().get(&digest) {
+    if let Some((generation, hit)) = ledger.cert_cache.pin().get(&digest)
+        && *generation == tls.roots_generation()
+    {
         return hit.clone();
     }
-    let found = mycelium_core::tls::client_identity(der)
-        .filter(|_| {
+    let (generation, found) = match mycelium_core::tls::client_identity(der) {
+        Some(id) => {
             ledger.chain_checks.fetch_add(1, Ordering::Relaxed);
-            tls.verify_member_cert(der)
-        })
-        .map(|id| Facts { principal: id.principal(), key: id.key, issued: id.issued_ms });
+            let (generation, verified) = tls.verify_member_cert_tagged(der);
+            (generation, verified.then(|| Facts { principal: id.principal(), key: id.key, issued: id.issued_ms }))
+        }
+        None => (tls.roots_generation(), None),
+    };
+    between();
     let cache = ledger.cert_cache.pin();
     if cache.len() >= CERT_CACHE_MAX {
         cache.clear();
     }
-    cache.insert(digest, found.clone());
+    cache.insert(digest, (generation, found.clone()));
     found
 }
 

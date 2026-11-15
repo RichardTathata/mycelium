@@ -221,6 +221,37 @@ minting a new CA over the fleet's. For a federation partner, `mycelium tls pin
 <cert.pem>` prints the hex SPKI SHA-256 of a gateway's certificate — the value the partner's client pins
 ([federation § Encrypting the link](federation.md#encrypting-the-link-tls-pinning)).
 
+### Succeeding the fleet CA (identity and lifecycle I2) — what this release has, and what it does not yet
+
+Replacing the fleet CA live, by a pre-committed successor, is row I2 of
+[`identity-and-lifecycle.md`](../plans/identity-and-lifecycle.md). **This release does not run a succession**: there
+is no `tls commit`, no `tls succeed` and no successor-signed record yet, so a CA compromise is still recovered by
+re-issue under a new CA and a restart of every node. What this release changes, and an operator should know:
+
+- **`ca_cert_pem` holds exactly one certificate.** A node whose `[tls] ca_cert_pem` names a file of two or more
+  certificates **refuses to start**, naming `tls.ca_cert_pem`, the path and the count. Before, only the first was read
+  and the rest were ignored without a word, so removing the others changes nothing about whom the node trusts:
+  ```bash
+  # keep only the fleet CA's certificate (the first one, which is the one a node before this release used)
+  openssl x509 -in /var/lib/mycelium/tls/ca-cert.pem -out /var/lib/mycelium/tls/ca-cert.pem.one && \
+    mv /var/lib/mycelium/tls/ca-cert.pem.one /var/lib/mycelium/tls/ca-cert.pem
+  ```
+  A `cert_pem` holding a chain is unaffected, and so is a node's own `ca-cert.pem` in `auto_cert_dir` when
+  `ca_cert_pem` is unset ([`deprecations.md` §111](../guide/deprecations.md)).
+- **`mycelium tls ca` names the fleet and the generation.** A CA it mints has the subject
+  `CN=Mycelium fleet <16 hex> CA generation 0`, the hex a fleet id drawn at the mint. Two fleets' CAs therefore never
+  share a name, and a certificate presented to the wrong fleet is refused as `UnknownIssuer` instead of
+  `BadSignature`. **A CA already deployed keeps its name**: `tls issue` now writes a certificate's issuer as the CA
+  certificate's own subject (it used to write rcgen's default, which every earlier CA happened to have), so certificates
+  issued under an existing CA are exactly as before. A node's own on-node CA keeps the default subject.
+- **Issue under a CA minted by this release only with this release's `mycelium`.** An older `tls issue`, or an
+  older node holding that CA's key, writes the default issuer name, and its certificates chain to no root. The
+  issuer's host runs one binary, so this bites only when it is downgraded.
+- **The reload path exists, inside the library.** A node on `cert_pem` (no CA key) can take a certificate for its
+  current key under another root set without a restart, and every cached judgment of a certificate is re-made when
+  the roots change. Nothing in the node or the CLI drives it yet; I2's next PR adds the successor-signed record, the
+  phases (widen, cut over, narrow) persisted under `auto_cert_dir/succession/`, and this section's procedure.
+
 ### Authenticated identity — enabling proof enforcement (identity-auth Phase 2/3)
 
 Every TLS node now publishes a signed `sys/identity-proof/{self}` alongside its identity, and
