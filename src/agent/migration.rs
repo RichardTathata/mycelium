@@ -17,7 +17,15 @@
 //! 3. **carry** — for each slot in `S`, one ordinary ballot of the successor proposing the highest acceptance's
 //!    decision envelope whole (`ConsensusEngine::propose_carry`): the holder's window, lineage, proposer and token
 //!    are kept, so a lock keeps its holder's window and a released decision stays released (its marker names the
-//!    lineage). The successor's own phase 1 applies: an acceptance the successor already holds above it wins;
+//!    lineage). The successor's own phase 1 applies, and what it must hear is **acceptances made in the successor** —
+//!    an earlier carry's — the highest of which wins; an acceptance a member of both electorates made in the
+//!    predecessor is the predecessor's, counted in its manifest and not again here (critique plan CR30). A carrier
+//!    with `GossipConfig::consensus_record_acceptance_group` asks each promiser where its acceptance was made and
+//!    applies that rule **when every reported acceptance names its group**; when one does not — made before its
+//!    node ran 2.41.0, or kept by a node that restarted with the switch off — it hears every report, as a carrier
+//!    without the switch (the default in 2.41.0) always does. Hearing every report is the rule that can adopt a
+//!    successor member's outvoted predecessor acceptance over the value the predecessor decided
+//!    (`docs/design/consensus-electorate.md` §8.5);
 //! 4. **complete** — a decision of the successor on `electorate/{successor}/carried/{predecessor}`
 //!    ([`Completion`]), certified by a strict majority of the successor. Until it, the successor decides nothing
 //!    outside `S` (the proposer's door refuses, naming this step); after it, anything, without the predecessor.
@@ -305,14 +313,15 @@ fn carry_set_digest(set: &BTreeMap<Arc<str>, Highest>) -> [u8; 32] {
 enum Carried {
     /// Nothing to carry, or the carried value decided (or already decided) in the successor.
     Carried,
-    /// The successor already held a **different** value above the carried one: a detected conflict.
+    /// The successor decided a **different** value than the carried one — one it already held, or one this carry
+    /// adopted from a predecessor acceptance it heard: a detected conflict.
     Conflict,
 }
 
 /// **Carry one slot**: one ballot of the successor `d` proposing the highest acceptance's envelope. A slot with
 /// no acceptance in any manifest has nothing to carry (no value was chosen in the predecessor). A value known
 /// only by digest is resolved from a decision record this node holds, or the carry stops here, named. A ballot that
-/// finds a different value already decided above the carried one is a **conflict** (review round 2, A(ii)): counted
+/// ends with a different value decided than the carried one is a **conflict** (review round 2, A(ii)): counted
 /// on the commit-conflict tripwire, logged by name, reported — never counted as carried.
 async fn carry_slot(engine: &ConsensusEngine, ctx: &Arc<TaskCtx>, d: &ElectorateDecl, predecessor: &str, slot: &Arc<str>, best: &Highest) -> Result<Carried, String> {
     if best.ballot == 0 { return Ok(Carried::Carried); }
@@ -368,11 +377,15 @@ async fn carry_slot(engine: &ConsensusEngine, ctx: &Arc<TaskCtx>, d: &Electorate
             metrics::counter!("mycelium_electorate_carry_conflicts_total").increment(1);
             if ctx.config.emergent_detectors_enabled {
                 crate::agent::emergent::record_event(ctx, "commit_conflict",
-                    format!("migration carry conflict: {} already decided another value for {slot} above the one carried from {predecessor}", d.group));
+                    format!("migration carry conflict: {} decided another value for {slot} than the one carried from {predecessor}", d.group));
             }
-            tracing::warn!(group = %d.group, predecessor, slot = %slot, "electorate migration: the carry found another value \
-                decided above the one carried — two values were chosen for one slot (a forced drop that raced a retirement, \
-                a 2.32.0 member, two merged defaults); the successor's value stands; counted on commit_conflicts");
+            tracing::warn!(group = %d.group, predecessor, slot = %slot, "electorate migration: the successor decided another \
+                value for the slot than the one carried. Either two values had been chosen for it (a forced drop that raced a \
+                retirement, a 2.32.0 member, two merged defaults), or the predecessor had chosen none and an earlier carry \
+                decided another of its acceptances, or this carry heard an acceptance a successor member made in the \
+                predecessor — this node carries without consensus_record_acceptance_group, or a report did not name \
+                its group — and chose it over the predecessor's value; the successor's value stands; counted on \
+                commit_conflicts");
             Ok(Carried::Conflict)
         }
         other => Err(format!("slot {slot}: the carry ballot in {} did not decide: {other:?}", d.group)),

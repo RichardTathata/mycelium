@@ -164,6 +164,24 @@ retires is dropped (`electorate/{g}/drop/{p}`, `PredecessorDrop`, void if a reti
 verified completion stands as proof of the retirement (`predecessor_state`) and the predecessor's records are fsynced
 on each successor member at completion (`sync_migration_records`); untagged slots are reported too, and skipped only
 when the successor may not decide them at all. Nothing of a run's progress needs to survive: a restart re-enumerates.
+**A carry hears only acceptances made in the successor — when every report names its group** (critique plan
+CR30, 2026-11-14, #787): the acceptor memory is one record per slot whatever group asks, so a member of both
+electorates holds its predecessor acceptance in the record it answers the successor from, and a carry adopted one
+the predecessor had outvoted. `AcceptorSlot::made_in` (`MadeIn::{Unknown, NoGroup, Group}`) is set at every claim
+on every node (`ConsensusEngine::made_in`, from the gate) and read in the promise's own `compute`
+(`prepare_slot_tagged`). **The carrier decides, not the acceptor**: with `consensus_record_acceptance_group` a
+carry sends `CarryPrepareTagged`, each promiser answers `PrepareAckTagged` with what it holds and where it was made,
+and `carry_hears` runs over the whole quorum, the carrier's own memory included — every report made in a group of
+the successor's lineage (`ConsensusEngine::lineage`: the successor and the ancestors whose verified electorates
+the carrier holds): only the successor's; any unknown, outside every group, or naming a group outside the lineage:
+all of them, as before. The switch also writes the group to
+the record (tag `0x05`; a 2.40.0 node reads it as no record, hence off by default in 2.41.0). Two shapes not to
+return to: a rule on ballots at the proposer (ballots of two groups do not compare — counting the manifest's
+acceptance as a report lets a re-carry replace the successor's own decision), and a filter at the acceptor (it
+cannot see the other reports; hiding a recorded predecessor acceptance while an unrecorded one is heard decided
+the outvoted value where the old rule did not — #787's review, F1). A carry that asks adopts nothing from a refusal
+(the refusal of a proposal is a separate read of memory, and carries no group). A manifest still reports the
+member's one record whichever group made it.
 No lock was added — the caches are papaya maps and sets. A dead member lowers the group's fault tolerance until the
 group is migrated, a lost majority stops it and cannot migrate, and a lost majority's repair (an operator-forced
 genesis from the survivors' durable records) is not built. **A member comes back with its state or not at all** (2026-10-11,

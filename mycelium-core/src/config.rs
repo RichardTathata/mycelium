@@ -1783,6 +1783,21 @@ pub struct GossipConfig {
     #[serde(default)]
     pub consensus_require_electorate: bool,
 
+    /// **Write the electorate group each consensus acceptance is made in, and have this node's carry ballots ask
+    /// for it** (critique plan CR30, `docs/design/consensus-electorate.md` §8.3). When `true`: this node's acceptor
+    /// writes its durable record in the `0x05` shape — the acceptance with the group it was made in — so the group
+    /// survives a restart; and a migration this node completes asks each promiser where its acceptance was made
+    /// and, when every report names its group, hears only acceptances made in the successor, so a member of both
+    /// electorates no longer hands the successor an acceptance its predecessor outvoted. When a report's group is
+    /// unknown the carry hears every report, as before. `false` (default in 2.41.0; the default becomes `true` one
+    /// MINOR later) writes the record as 2.40.0 did and carries as 2.40.0 did. Every node from 2.41.0 keeps the
+    /// group in memory, **reads** both record shapes and answers the question whatever this says; a release before
+    /// 2.41.0 reads a `0x05` record as no record and ignores the question, so turn it on only once every node is
+    /// at 2.41.0 or later — on the node that completes the migration and on every member of both electorates —
+    /// and do not downgrade below it afterwards. Env `GOSSIP_CONSENSUS_RECORD_ACCEPTANCE_GROUP`.
+    #[serde(default)]
+    pub consensus_record_acceptance_group: bool,
+
     /// **The electorate group the cluster-scoped exclusive verbs decide in** — `distributed_lock`,
     /// `LockService`, `consistent_set`, `/gateway/overlay/lock/acquire`, `/gateway/overlay/consistent/set`
     /// and the `/gateway/overlay/log/group/subscribe` claim. `None` (default) proposes to the whole
@@ -2177,6 +2192,7 @@ impl Default for GossipConfig {
             domain_profile:                DomainProfile::Open,
             profile:                       None,
             consensus_require_electorate:  false,
+            consensus_record_acceptance_group: false,
             consensus_electorate:          None,
             egress:                        EgressPolicy::default(),
             egress_credentials:            Vec::new(),
@@ -3048,6 +3064,9 @@ impl GossipConfig {
         }
         if let Ok(v) = env::var("GOSSIP_CONSENSUS_REQUIRE_ELECTORATE") {
             self.consensus_require_electorate = matches!(v.trim(), "1" | "true" | "yes" | "on");
+        }
+        if let Ok(v) = env::var("GOSSIP_CONSENSUS_RECORD_ACCEPTANCE_GROUP") {
+            self.consensus_record_acceptance_group = matches!(v.trim(), "1" | "true" | "yes" | "on");
         }
         if let Ok(v) = env::var("GOSSIP_CONSENSUS_ELECTORATE") {
             let v = v.trim();

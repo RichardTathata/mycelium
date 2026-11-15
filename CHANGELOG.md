@@ -9,6 +9,55 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **A migration between electorates that share a member can decide a value the predecessor outvoted — closed
+  behind a switch, off by default in this release** (critique plan row CR30; `deprecations.md` §107; found by
+  CR10's model on 2026-11-14, reproduced on the engine, PR #787). An acceptor keeps one record per slot whatever
+  group asks, so a member of both the retired electorate and its successor answered a carry ballot's prepare with
+  the acceptance it made in the retired one. If that acceptance had been outvoted there, the carry's promise quorum
+  was that member and the carrier, and neither held the decision's record yet (its proposer stopped or lagged just
+  after it committed), **the successor decided the outvoted value although the predecessor had decided another** —
+  counted as a carry conflict and reported in the completion, not prevented. Where the carrier did hold the record
+  the carry could not complete instead, and left the outvoted value accepted by a majority of the successor.
+  Every release with the migration (2.33.0 on) is affected, for electorates that overlap.
+  - **Every node at this release keeps, beside each acceptance, the group it was made in** — in memory — and
+    answers a carrier that asks for it. That is two new consensus messages, appended after every earlier one
+    (`CarryPrepareTagged`, `PrepareAckTagged`); wire **v12** is unchanged, and a node before this release ignores
+    them.
+  - **New, off by default: `consensus_record_acceptance_group`** (env `GOSSIP_CONSENSUS_RECORD_ACCEPTANCE_GROUP`).
+    On a node it does two things. Its acceptor **writes** the group into its durable record (tag `0x05`), so the
+    group survives a restart. And its own carry ballots **ask** each promiser where its acceptance was made and
+    decide by it: when every acceptance the promise quorum reports was made in a group of the successor's
+    lineage (the successor and the ancestors the carrier can name), the carry hears only those made in the
+    successor; when any is of unknown group, was made outside every group, or names a group outside the lineage,
+    it hears all of them, as before. So a carry is never worse off than before, and is sound once nothing in its quorum is unknown. The
+    switch becomes the default one MINOR later.
+  - **Every node at this release reads `0x05` and the older tags**, whatever the switch says. **A 2.40.0 node reads
+    `0x05` as no record**, which is why writing it is not the default yet.
+  - **With the switch off a node's carry is the 2.40.0 carry, message for message**, and its records are
+    byte-identical to 2.40.0's while no `0x05` record is in its store. The gap stands, pinned by four tests and
+    listed on `what-is-proven.md`.
+  - **A fix to the acceptor guard (`cons.acceptor_memory`, since 2.32.0):** a second forgotten copy of a node's
+    own record, lower than the first but still above memory, was merged with memory alone and written over the
+    repair, so the higher promise was lost at the next start. A repair now merges the record already on the node's
+    key too, and never lowers it.
+  - A copy of a node's own acceptor record that names another group for the acceptance it holds is counted
+    (`mycelium_acceptor_guard_total{event="group_rewritten"}`) and written back from memory — an ordinary
+    last-writer-wins write, and not on a slot the guard has withheld.
+  - The carry-conflict warning no longer says two values "were chosen" when the carry itself chose the second; the
+    counters are unchanged.
+
+  **Check:** `mycelium_electorate_carry_conflicts_total` and each completion's `conflicts` (`GET /gateway/govern`)
+  say whether a migration already run hit it. **To close it:** upgrade every node to this release; set
+  `consensus_record_acceptance_group = true` on **the node that runs `complete_migration` and on every member of
+  both electorates**; then migrate. **What that does and does not buy:** the carry is sound when every acceptance
+  its promise quorum reports names its group. An acceptance made before a node ran this release, or held by a
+  node that restarted while its switch was off, has no group; a carry that meets one hears everything, exactly as
+  before — no worse, and not fixed for that ballot. A carry that asks needs a strict majority of the successor at
+  this release, and times out without one. Until then, migrate between electorates that share no member, or let
+  the fleet converge on the predecessor's decisions before retiring it.
+
 ### Security
 
 - **A member can no longer re-arm a used grant** (critique plan row CR2, first PR; the owner-signed rule;

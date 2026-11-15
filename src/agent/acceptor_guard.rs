@@ -54,12 +54,36 @@ use bytes::Bytes;
 
 use super::electorate::{genesis_slot, ElectorateDecl, ELECTORATE_SLOT_PREFIX};
 use super::TaskCtx;
-use crate::consensus::{accepted_key, consensus_ns, decode_acceptor, encode_acceptor, AcceptorMemory, AcceptorSlot, FLOOR_SENTINEL};
+use crate::consensus::{accepted_key, consensus_ns, decode_acceptor, AcceptorMemory, AcceptorSlot, FLOOR_SENTINEL};
 use crate::node_id::NodeId;
 
 static PERSISTENCE_REFUSED: AtomicU64 = AtomicU64::new(0);
 static MEMORY_EMPTY: AtomicU64 = AtomicU64::new(0);
 static PROMISES_FORGOTTEN: AtomicU64 = AtomicU64::new(0);
+static GROUPS_REWRITTEN: AtomicU64 = AtomicU64::new(0);
+
+/// Copies of this node's own acceptor record that named **another group** for the acceptance its memory holds —
+/// the same ballot and value, made somewhere else (critique plan CR30). No answer of this node's says that: the
+/// record was rewritten by another member. Counted each time (`mycelium_acceptor_guard_total{event="group_rewritten"}`)
+/// and the record written back from memory — unless the slot is withheld, whose record is the repaired one and is
+/// left alone; nothing is withheld on this account. The write-back is an ordinary last-writer-wins write: a rewritten
+/// copy stamped ahead of this node's clock, within the drift bound, wins until the clock passes it (critique plan
+/// CR13 counts such a stamp today and refuses it later).
+#[cfg_attr(not(test), allow(dead_code))] // read by the test; an operator reads the metric
+pub(crate) fn acceptor_record_groups_rewritten() -> u64 {
+    GROUPS_REWRITTEN.load(Ordering::Relaxed)
+}
+
+/// Whether `copy` holds the acceptance `held` holds — one ballot, one value — and says it was made somewhere else,
+/// both knowing where. A copy whose group is unknown is an older record of the same acceptance, not a rewrite.
+fn group_rewritten(copy: &AcceptorSlot, held: &AcceptorSlot) -> bool {
+    use crate::consensus::MadeIn;
+    match (&copy.accepted, &held.accepted) {
+        (Some((cb, ca)), Some((hb, ha))) => cb == hb && ca.digest() == ha.digest()
+            && copy.made_in != MadeIn::Unknown && held.made_in != MadeIn::Unknown && copy.made_in != held.made_in,
+        _ => false,
+    }
+}
 
 /// Refusals because an electorate member has no `[persistence]`: an adoption (counted once per record), a
 /// declaration, a genesis proposal at the door, or a genesis answer at the acceptor (each counted as it happens).
@@ -206,14 +230,14 @@ fn accepted_ballot(s: &AcceptorSlot) -> u64 {
 /// it carries (a malformed copy is clamped; accepting at a ballot is promising it).
 pub(crate) fn merge_records(a: &AcceptorSlot, b: &AcceptorSlot) -> AcceptorSlot {
     let (pa, pb) = (accepted_ballot(a), accepted_ballot(b));
-    let accepted = if pa > pb { a.accepted.clone() } else { b.accepted.clone() };
+    let (accepted, made_in) = if pa > pb { (a.accepted.clone(), a.made_in.clone()) } else { (b.accepted.clone(), b.made_in.clone()) };
     let (promised, promised_to) = if a.promised > b.promised { (a.promised, a.promised_to) } else { (b.promised, b.promised_to) };
-    let floor = accepted_ballot(&AcceptorSlot { promised: 0, promised_to: None, accepted: accepted.clone(), groups: Vec::new() });
+    let floor = accepted_ballot(&AcceptorSlot { promised: 0, promised_to: None, accepted: accepted.clone(), groups: Vec::new(), made_in: crate::consensus::MadeIn::Unknown });
     // The electorate groups the slot is tagged with (P2's migration) are the union: a tag is never removed.
     let mut groups = a.groups.clone();
     for g in &b.groups { if !groups.contains(g) { groups.push(Arc::clone(g)); } }
     groups.sort();
-    AcceptorSlot { promised: promised.max(floor), promised_to, accepted, groups }
+    AcceptorSlot { promised: promised.max(floor), promised_to, accepted, groups, made_in }
 }
 
 /// **The rule**: is `copy` — a peer's copy of this node's own record — an answer this node gave and does not hold?
@@ -236,7 +260,27 @@ fn compare_own_record(
 ) -> Option<AcceptorSlot> {
     let copy = decode_acceptor(value)?;
     let held = memory.pin().get(slot).cloned().unwrap_or_default();
-    if !forgotten(&copy, &held) { return None; }
+    if !forgotten(&copy, &held) {
+        // The same acceptance under another group's name (CR30): a carry decides by that name, so the record is put
+        // back as memory has it. Detection: the copy that wins last-writer-wins while this node is down is read at
+        // its next start as it stands.
+        if group_rewritten(&copy, &held) {
+            GROUPS_REWRITTEN.fetch_add(1, Ordering::Relaxed);
+            #[cfg(feature = "metrics")]
+            metrics::counter!("mycelium_acceptor_guard_total", "event" => "group_rewritten").increment(1);
+            // A withheld slot's durable record is the merged one `repair_own_record` wrote, and memory is the state
+            // from before that repair: writing memory back would put the forgotten promise below what the record
+            // holds (#787's confirm round, G1). So it is counted and nothing is written — the rule
+            // `persist_acceptor` keeps for a withheld slot. (Merging with the stored record instead would keep the
+            // promise, but the stored record can already be the rewritten copy, whose group the merge would keep.)
+            let is_withheld = withheld.pin().contains(slot);
+            tracing::warn!(slot, copy_made_in = ?copy.made_in, held_made_in = ?held.made_in, withheld = is_withheld,
+                "consensus: a peer holds this node's own acceptor record naming another group for the acceptance this \
+                 node made — a record this node did not write. Written back from memory unless the slot is withheld");
+            return (!is_withheld).then_some(held);
+        }
+        return None;
+    }
     let copy_accepted = accepted_ballot(&copy);
     let merged = merge_records(&copy, &held);
     if withheld.pin().insert(Arc::from(slot)) {
@@ -261,12 +305,23 @@ fn compare_own_record(
 /// written here must not say less than any answer that is out. A Layer III write of a key this node owns, so the next
 /// start's `prewarm_accepted` reads the forgotten promise and acceptance back even where this node's own empty-handed
 /// write had won LWW over the copy. Memory itself is left as it is: the slot stays withheld until that start.
+///
+/// **And the record already on this node's key is merged in too, so a repair never lowers it** (#787's confirm round,
+/// H1 — a defect since #605). On a withheld slot memory is older than the repaired record, so a second forgotten copy
+/// lower than the first but still above memory (`{5,5}` repaired, then `{3,3}`) merged with memory alone was written
+/// over the repair, and the promise at 5 was lost at the next start. Writing nothing on a slot already withheld would
+/// keep it, but would also drop a second copy **higher** than the first, which must be kept. The stored record goes
+/// first in the merge, so at an equal ballot the acceptance (and its group) is the one `merged` and memory give — a
+/// rewritten copy sitting on the key does not choose it (G1).
 pub(crate) fn repair_own_record(ctx: &Arc<TaskCtx>, slot: &str, merged: &AcceptorSlot) {
     let engine = crate::agent::helpers::make_consensus_engine_ctx(ctx, false, false, 0, None);
+    let key = accepted_key(&ctx.node_id, slot);
     let _records = ctx.acceptor_records.lock().unwrap_or_else(|e| e.into_inner());
     let now = ctx.consensus_accepted.pin().get(slot).cloned().unwrap_or_default();
-    let record = merge_records(merged, &now);
-    let upd = engine.kv_set_returning(accepted_key(&ctx.node_id, slot), encode_acceptor(&record));
+    let stored = ctx.kv_state.store.pin().get(key.as_str()).and_then(|e| e.data.clone()).and_then(|b| decode_acceptor(&b));
+    let fresh = merge_records(merged, &now);
+    let record = match stored { Some(stored) => merge_records(&stored, &fresh), None => fresh };
+    let upd = engine.kv_set_returning(key, engine.acceptor_record(&record));
     engine.wal_try(&upd);
 }
 
@@ -327,7 +382,7 @@ mod tests {
         encode_acceptor(&AcceptorSlot {
             promised, promised_to: Some(7),
             accepted: accepted.map(|b| (b, Accepted::DigestOnly([9; 32]))),
-            groups: Vec::new(),
+            groups: Vec::new(), made_in: crate::consensus::MadeIn::Unknown,
         })
     }
 
@@ -341,7 +396,7 @@ mod tests {
         let before = acceptor_promises_forgotten();
         assert!(compare_own_record(&memory, &withheld, "a", &copy(0, None)).is_none());
         assert!(withheld.pin().is_empty(), "a record of nothing is nothing");
-        memory.pin().insert(Arc::from("b"), AcceptorSlot { promised: 5, promised_to: Some(1), accepted: Some((4, Accepted::DigestOnly([1; 32]))), groups: Vec::new() });
+        memory.pin().insert(Arc::from("b"), AcceptorSlot { promised: 5, promised_to: Some(1), accepted: Some((4, Accepted::DigestOnly([1; 32]))), groups: Vec::new(), made_in: crate::consensus::MadeIn::Unknown });
         assert!(compare_own_record(&memory, &withheld, "b", &copy(5, Some(4))).is_none());
         assert!(compare_own_record(&memory, &withheld, "b", &copy(3, Some(2))).is_none());
         assert!(withheld.pin().is_empty(), "a copy at or below memory is one this node wrote");
@@ -351,7 +406,7 @@ mod tests {
         assert_eq!((merged.promised, merged.promised_to, merged.accepted.as_ref().map(|(b, _)| *b)), (6, Some(7), Some(4)));
         assert!(compare_own_record(&memory, &withheld, "b", &copy(6, None)).is_some(), "the record is merged again; the slot was withheld already");
         assert_eq!(acceptor_promises_forgotten() - before, 1, "once per slot");
-        memory.pin().insert(Arc::from("c"), AcceptorSlot { promised: 2, promised_to: Some(FLOOR_SENTINEL), accepted: None, groups: Vec::new() });
+        memory.pin().insert(Arc::from("c"), AcceptorSlot { promised: 2, promised_to: Some(FLOOR_SENTINEL), accepted: None, groups: Vec::new(), made_in: crate::consensus::MadeIn::Unknown });
         assert!(compare_own_record(&memory, &withheld, "c", &copy(2, Some(2))).is_none());
         assert!(!withheld.pin().contains("c"), "an acceptance at a shrunk record's floor is one the collector shed");
         let merged = compare_own_record(&memory, &withheld, "c", &copy(3, Some(3))).expect("an acceptance (and its promise) above memory is forgotten");
@@ -369,19 +424,68 @@ mod tests {
     /// record — not. And the merge never leaves `promised` below the acceptance it carries.
     #[test]
     fn an_acceptance_at_the_promised_ballot_is_forgotten_unless_the_promise_is_the_collection_floor() {
-        let held = AcceptorSlot { promised: 4, promised_to: Some(0xEE), accepted: None, groups: Vec::new() };
-        let copy = AcceptorSlot { promised: 4, promised_to: Some(0xAA), accepted: Some((4, Accepted::DigestOnly([3; 32]))), groups: Vec::new() };
+        let held = AcceptorSlot { promised: 4, promised_to: Some(0xEE), accepted: None, groups: Vec::new(), made_in: crate::consensus::MadeIn::Unknown };
+        let copy = AcceptorSlot { promised: 4, promised_to: Some(0xAA), accepted: Some((4, Accepted::DigestOnly([3; 32]))), groups: Vec::new(), made_in: crate::consensus::MadeIn::Unknown };
         assert!(forgotten(&copy, &held), "an acceptance at the promised ballot that memory lacks");
-        let floor = AcceptorSlot { promised: 4, promised_to: Some(FLOOR_SENTINEL), accepted: None, groups: Vec::new() };
+        let floor = AcceptorSlot { promised: 4, promised_to: Some(FLOOR_SENTINEL), accepted: None, groups: Vec::new(), made_in: crate::consensus::MadeIn::Unknown };
         assert!(!forgotten(&copy, &floor), "a collected slot's floor legitimately has an older acceptance-bearing copy");
-        let below = AcceptorSlot { promised: 3, promised_to: Some(0xAA), accepted: Some((3, Accepted::DigestOnly([3; 32]))), groups: Vec::new() };
+        let below = AcceptorSlot { promised: 3, promised_to: Some(0xAA), accepted: Some((3, Accepted::DigestOnly([3; 32]))), groups: Vec::new(), made_in: crate::consensus::MadeIn::Unknown };
         assert!(!forgotten(&below, &held), "an acceptance below the promise is one memory may have shed");
-        let same = AcceptorSlot { promised: 4, promised_to: Some(0xEE), accepted: Some((4, Accepted::DigestOnly([3; 32]))), groups: Vec::new() };
+        let same = AcceptorSlot { promised: 4, promised_to: Some(0xEE), accepted: Some((4, Accepted::DigestOnly([3; 32]))), groups: Vec::new(), made_in: crate::consensus::MadeIn::Unknown };
         assert!(!forgotten(&copy, &same), "an acceptance memory holds is nothing");
         let merged = merge_records(&copy, &held);
         assert_eq!((merged.promised, merged.promised_to, accepted_ballot(&merged)), (4, Some(0xEE), 4), "the merge keeps the later promisee and the acceptance");
-        let malformed = AcceptorSlot { promised: 1, promised_to: Some(1), accepted: Some((6, Accepted::DigestOnly([3; 32]))), groups: Vec::new() };
+        let malformed = AcceptorSlot { promised: 1, promised_to: Some(1), accepted: Some((6, Accepted::DigestOnly([3; 32]))), groups: Vec::new(), made_in: crate::consensus::MadeIn::Unknown };
         assert_eq!(merge_records(&malformed, &held).promised, 6, "promised is clamped to the acceptance it carries");
         assert!(forgotten(&malformed, &held));
+    }
+}
+
+#[cfg(test)]
+mod rev787 {
+    use super::*;
+    use crate::consensus::{encode_acceptor, Accepted, MadeIn};
+
+    /// rev787 R3 (check 8) — a member's forged copy of this node's own acceptor record that changes **only**
+    /// `made_in`. As the reviewer wrote it against 7606eddf the guard neither counted nor repaired it; it now
+    /// counts it (`acceptor_record_groups_rewritten`) and hands memory's record back to be rewritten, without
+    /// withholding the slot — no answer was forgotten. What the forged record would do if it were read at a start
+    /// instead: named for an **ancestor** of the successor, a carry whose every report is the lineage's does not
+    /// hear the acceptance; named for an unrelated group, or for no group, the carry hears everything, as before
+    /// 2.41.0. An older copy of the same acceptance, with the group unknown, is not a rewrite. **On a withheld slot
+    /// nothing is handed back** (the confirm round, G1): memory there is older than the repaired record.
+    #[test]
+    fn rev787_a_forged_made_in_is_counted_and_put_back() {
+        use crate::consensus::carry_hears;
+        let memory: AcceptorMemory = papaya::HashMap::new();
+        let withheld: papaya::HashSet<Arc<str>> = papaya::HashSet::new();
+        let held = AcceptorSlot {
+            promised: 4, promised_to: Some(7), accepted: Some((4, Accepted::DigestOnly([9; 32]))),
+            groups: vec![Arc::from("new")], made_in: MadeIn::Group(Arc::from("new")),
+        };
+        memory.pin().insert(Arc::from("s"), held.clone());
+        let report = (4u64, [9u8; 32], None);
+        let lineage: Vec<Arc<str>> = vec![Arc::from("new"), Arc::from("old")];
+        assert_eq!(carry_hears(vec![report.clone()], std::slice::from_ref(&held.made_in), "new", &lineage).len(), 1);
+        for (forged_in, heard_after_a_restart) in [(MadeIn::Group(Arc::from("old")), 0), (MadeIn::Group(Arc::from("zzz")), 1), (MadeIn::NoGroup, 1)] {
+            let before = acceptor_record_groups_rewritten();
+            let forged = encode_acceptor(&AcceptorSlot { made_in: forged_in.clone(), ..held.clone() });
+            assert_eq!(forged[0], 0x05);
+            let repaired = compare_own_record(&memory, &withheld, "s", &forged).expect("detected: the record is put back");
+            assert_eq!(repaired.made_in, held.made_in, "from memory");
+            assert!(acceptor_record_groups_rewritten() > before, "counted");
+            assert!(withheld.pin().is_empty(), "nothing was forgotten, so nothing is withheld");
+            let back = decode_acceptor(&forged).expect("decodes");
+            assert_eq!(carry_hears(vec![report.clone()], std::slice::from_ref(&back.made_in), "new", &lineage).len(), heard_after_a_restart);
+        }
+        let before = acceptor_record_groups_rewritten();
+        let older = encode_acceptor(&AcceptorSlot { made_in: MadeIn::Unknown, ..held.clone() });
+        assert!(compare_own_record(&memory, &withheld, "s", &older).is_none());
+        assert_eq!(acceptor_record_groups_rewritten(), before, "an older record of the same acceptance is not a rewrite");
+        // Withheld: counted, and nothing handed back to be written.
+        withheld.pin().insert(Arc::from("s"));
+        let forged = encode_acceptor(&AcceptorSlot { made_in: MadeIn::Group(Arc::from("old")), ..held.clone() });
+        assert!(compare_own_record(&memory, &withheld, "s", &forged).is_none(), "a withheld slot's record is left as repaired");
+        assert!(acceptor_record_groups_rewritten() > before, "and still counted");
     }
 }

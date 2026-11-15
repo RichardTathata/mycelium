@@ -328,8 +328,20 @@ predecessor is never consulted again.*
      lapsed decision stays ended, because its marker names the lineage and its window is inside the envelope. A
      carry ballot does not stop at a live decision record (the record may be G1's commit, held here by gossip and
      by no G2 majority — the committed-but-unpropagated value is what a carry brings over); G2's own phase 1 applies,
-     so an acceptance G2 already holds above it wins. A slot in S with promises only has nothing to carry: no value
-     was chosen in G1 (ii). Sequential, one ballot per slot — a one-off cost proportional to |S|, stated.
+     and what it must hear is **acceptances made in G2** — an earlier carry's — the highest of which wins. The
+     acceptor memory is one record per slot whatever group asks, so a member of both G1 and G2 answers a carry's
+     prepare from the same record it answered G1 from; its acceptance made in G1 is G1's, already counted in the
+     manifests, and the ballot numbers of two groups do not compare (critique plan CR30). Every node from 2.41.0
+     keeps, beside an acceptance, the group it was made in (`MadeIn`); a carrier with
+     `consensus_record_acceptance_group` asks each promiser for it (`CarryPrepareTagged` / `PrepareAckTagged`) and
+     decides over its whole promise quorum, its own memory included (`carry_hears`): **when every reported
+     acceptance was made in a group of G2's lineage — G2, its predecessors, theirs, as far as the carrier holds each
+     verified electorate (`ConsensusEngine::lineage`) — the carry hears only those made in G2; when any is of
+     unknown group, was made outside every group, or names a group outside the lineage, it hears all of them, as
+     before 2.41.0.** The acceptor hides nothing — it cannot see the
+     other reports, and hearing a part is worse than hearing all (§8.5). A carrier without the switch — the default
+     in 2.41.0 — asks and hears as before. A slot in S with promises only has nothing to carry: no
+     value was chosen in G1 (ii). Sequential, one ballot per slot — a one-off cost proportional to |S|, stated.
    - **completion**: a decision of G2 on `electorate/G2/carried/G1` (`Completion { group, epoch, predecessor,
      predecessor_epoch, passes_default, slots: |S|, digest(S) }`), certified by a strict majority of G2 and adopted
      only when the certificate verifies. It **stands as proof of the retirement**: `successor_ready`, `holds_default`
@@ -404,11 +416,36 @@ failing first with its mechanism disabled:
   accepts nothing new. The tag that files the slot under G1 is in the durable record, so a restarted member's
   manifest is complete. *Test:* `a_value_chosen_in_a_retired_group_is_carried_by_its_successor` — v accepted by A and
   B, never committed; with the manifest reporting no acceptances, D's lock value was decided over it.
-- **(iii) Each slot in S is decided in G2 with the carried value, or with a value G2's own Paxos chose above it.** The
-  carry is an ordinary G2 ballot: a promise quorum of G2 reports what G2 accepted, and the highest acceptance wins
-  (the row-A phase-1 rule, unchanged); G2 held nothing for `s` before the first carry (it decided nothing until the
-  retirement was visible, and `s` was not G2's), so the first carry decides the carried value, and a later carry of
-  the same slot re-decides what G2 holds. *Tests:* the carried locks, consistent write and chosen value of
+- **(iii) Each slot in S is decided in G2 with the carried value, or with a value G2's own Paxos chose before it.** The
+  carry is a G2 ballot: a promise quorum of G2 reports what was accepted **in G2**, and the highest such acceptance
+  wins (the row-A phase-1 rule over those reports); G2 — the group — accepted nothing for `s` before the first carry
+  (it decided nothing until the retirement was visible, and `s` was not G2's), so the first carry decides the carried
+  value, and a later carry of the same slot re-decides what G2 holds. **The group held nothing; its members may
+  have** (corrected 2026-11-14, critique plan CR30 — the sentence used to say "G2 held nothing"): a member of both
+  G1 and G2 holds its G1 acceptance in the one record it answers G2 from, and a G1 acceptance that G1 outvoted,
+  reported to the carry, was adopted over the value G1 decided. The argument therefore needs each acceptance's group
+  to be known, and holds **for a carry ballot whose carrier asks for it and whose promise quorum reports only
+  acceptances that name theirs** (`consensus_record_acceptance_group` on the carrier; on the members, so that the
+  group survives a restart). Then: an acceptance made in G2 is never replaced by one made in G1 on the same member (a
+  member answers a carry only once G1's retirement is visible to it, which closes G1 there — **checked for the direct
+  predecessor only**: for an older ancestor the argument relies on that group's retirement record having reached the
+  member by gossip, which the carry does not check, and no earlier rule is right in that state either) — **that
+  covers G1 and G2's other ancestors, not an unrelated group**, on which a non-exclusive slot may also be proposed and whose
+  acceptance can replace a G2-made one; a report naming a group outside G2's lineage therefore sends the carry
+  back to hearing everything — so each quorum member's report is its latest G2 acceptance or says it has none; G2's own Paxos is intact; and the value carried when no
+  G2 acceptance is heard is the manifests' highest, which (ii) makes G1's chosen value. A partial carry and a
+  restart keep it (the group is in the record); a chain keeps it (a member of G1 and G3 only holds a G1-made
+  acceptance, which G3's carry from G2 does not hear); the carrier's own memory is one of the reports. Where a
+  report's group is unknown the carry falls back to hearing everything, and the argument is the old, broken one for
+  that ballot — see §8.5. *Tests:* `a_carry_decides_what_the_predecessor_decided_whatever_an_overlapping_member_holds`
+  (every step a real proposal; on main G2 decided the outvoted value),
+  `a_carry_decides_what_the_predecessor_chose_whatever_an_overlapping_member_holds`,
+  `a_carrier_that_asks_is_answered_by_members_that_do_not_write_the_group`,
+  `a_recarry_does_not_put_a_predecessors_higher_acceptance_in_the_successor`, the reviewer's
+  `rev787_a_carrier_that_is_the_shared_member_does_not_adopt_its_own_outvoted_acceptance`,
+  `rev787_a_member_of_the_first_and_third_electorate_does_not_hand_the_third_its_outvoted_acceptance` and
+  `rev787_r6b_…` / `rev787_r6c_…` (a quorum with one unknown report, and with one member not writing the group),
+  and the rule alone, `a_carry_hears_the_successors_acceptances_only_when_every_report_names_its_group`; the carried locks, consistent write and chosen value of
   `after_the_completion_the_successor_survives_the_predecessors_departure_and_its_own_restart`;
   `a_completion_run_that_stops_mid_carry_is_resumed_by_the_next` (the next run re-carries the first slot and keeps
   its value; with a run trusting the progress it remembered instead of re-enumerating, the completion was decided
@@ -578,6 +615,47 @@ attempt it holds; the argument above then needs every other adopter of `k` to re
 
 ### 8.5 What does not hold — stated
 
+- **Overlapping electorates, wherever a carry does not know each acceptance's group** (stated 2026-11-14; critique
+  plan CR30; found by CR10's model and reproduced on the engine; #787). A successor that shares a member with its
+  predecessor — the ordinary way to replace one member — can decide a value **other than the one the predecessor
+  decided**: the shared member holds an acceptance the predecessor outvoted, the carry's promise quorum is that
+  member and the carrier, neither holds the decision's record yet (the predecessor's proposer stopped, or lagged,
+  after it committed), and the carry adopts the outvoted acceptance. It is **detected, not prevented**: the carry is
+  counted on `commit_conflicts` and `mycelium_electorate_carry_conflicts_total` and the completion reports the slot.
+  - **By default (2.41.0) this stands.** A carrier without `consensus_record_acceptance_group` carries as 2.40.0
+    did, whatever the members record. Where the carrier holds the predecessor's record the carry instead never
+    decides — the carrier's own acceptor refuses its proposal of the adopted value at every ballot — and leaves that
+    value accepted by a majority of the successor.
+  - **Prevented for a carry ballot whose carrier has the switch on and whose promise quorum reports only
+    acceptances that name their group** (§8.3 (iii)). The switch is off by default in 2.41.0 and on by default one
+    MINOR later, because a release before 2.41.0 reads the record it writes (`0x05`) as no record and ignores the
+    question a carrier asks.
+  - **A report of unknown group makes the carry hear everything, as before** — never worse than before, and not
+    fixed for that ballot. An acceptance has no group when it was made before its node ran 2.41.0, or its node
+    restarted while its own switch was off. An acceptance made outside every electorate group counts the same way,
+    and so does one naming a group outside the successor's lineage (a non-exclusive slot may be proposed on any
+    electorate group): either can have replaced an acceptance made in the successor. The lineage is what the
+    carrier can name from the verified electorates it holds; an ancestor it cannot see is outside it. **Why not hear the named
+    ones and the unknown ones by different rules:** setting aside a shared member's recorded copy of the chosen
+    value while hearing another member's unrecorded, outvoted one adopts the outvoted value in a trace the old rule
+    gets right (#787's review, F1; `rev787_r6b_…`).
+  - **The group is not guessed.** A slot is tagged with a group at any claim, a promise included
+    (`claim_gated`), so a slot tagged with exactly one group can hold an acceptance made elsewhere before a
+    successor's prepare tagged it; labelling it would turn a predecessor acceptance into the successor's.
+  - **A manifest is unchanged**: a predecessor's manifest still reports a member's current acceptance for a slot
+    when that acceptance was made in the successor by an earlier carry (the member has one record, and dropping the
+    entry could lose a value the predecessor chose whose only other copy that carry overwrote) — the carry then
+    proposes it and the successor's own phase 1 decides.
+  - **An ordinary proposal on the successor after the completion is not filtered.** It is protected by a promiser's
+    live decision record and by every successor ballot being above every predecessor ballot the manifests reported;
+    a shared member whose predecessor acceptance sits above that is stopped by the record alone
+    (`rev787_an_ordinary_proposal_after_the_completion_keeps_the_carried_value`).
+  - **The acceptor record is unsigned** (`docs/wiki/dev/owner-signed-records.md`): a member that rewrites another's
+    record to name another group is counted and undone while the owner is up (not on a withheld slot, whose
+    repaired record is left alone; and the undoing is a last-writer-wins write, which a copy stamped ahead within
+    the drift bound outlasts — CR13), and believed at the owner's next start otherwise.
+  Until the completing node and every shared member have the switch on: migrate between electorates that share no
+  member, or wait until the fleet has converged on the predecessor's decisions before retiring it.
 - **The guarantee starts when genesis is chosen.** A member that has touched a genesis attempt refuses an untagged
   proposal on the group until one is adopted.
 - **Genesis assumes its members agree on the roster.** Each acceptor checks a genesis against the roster it sees, and
@@ -718,6 +796,24 @@ proposals and a successor never answers its; a genesis with no predecessors is b
 node-owned acceptor record of a slot never claimed on an electorate group is unchanged. An un-upgraded member's
 acceptor record carries no group tag; its slots are reported untagged by an upgraded reporter that shares them and
 skipped only when the successor may not decide them at all.
+
+**The acceptor record's tag `0x05` and two more messages (2.41.0, critique plan CR30).** `0x05` is `0x04` with the
+group count allowed to be zero and, after the groups, where the acceptance was made: `0x00` outside any electorate
+group, or `0x01` and a length-prefixed group name. A node from 2.41.0 reads `0x02`–`0x05` and keeps the group in
+memory whatever its configuration; it **writes** `0x05` only with `consensus_record_acceptance_group`, so with the
+switch off its records are byte-identical to 2.40.0's while no `0x05` record is in its store. **A 2.40.0 node reads
+`0x05` as no record**: restarted over such a record it has forgotten that promise and acceptance, and its guard
+cannot decode a peer's copy either. With the switch on every acceptance is `0x05`, cluster-scoped and electorate
+slots included. So the switch goes on only when every node is at 2.41.0 or later, and a fleet that has turned it on
+does not downgrade below 2.41.0; turning it off again stops the writing, a record already `0x05` stays so until its
+slot is next written, and that write drops the group for good while memory keeps it until the next start.
+`CarryPrepareTagged` and `PrepareAckTagged` are appended to `ConsensusMsg` after every earlier variant (wire v12):
+`CarryPrepare` and `PrepareAckTerm` with, in the answer, where the reported acceptance was made. A carrier sends the
+tagged prepare only with the switch on and then counts only tagged answers; **a node before 2.41.0 ignores it, so a
+carry that asks needs a strict majority of the successor at 2.41.0 or later and times out rather than decides without
+one** (`a_carry_that_asks_times_out_when_a_successor_quorum_cannot_answer_it`). A carrier without the switch sends
+`CarryPrepare`, which every node answers as before. A refusal carries no group: a carry that asks adopts nothing
+from a refusal, and starts every ballot from the envelope it carries.
 
 The cluster-scoped exclusive verbs (`distributed_lock`, `LockService`, `consistent_set`, the lock and consistent routes,
 the log claim, `mycelium-commitment`'s linearizable award, `set_capability_authz_via_consensus`) decide in the fleet's

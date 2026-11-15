@@ -33,6 +33,11 @@ This feature is turned on in code: `consensus` is a default feature of `mycelium
 - [`consensus_require_electorate`](../reference/configuration.md#consensus_require_electorate): refuse a
   safety-sensitive proposal outside an electorate.
 - [`persistence`](../reference/configuration.md#persistence): required on an electorate member.
+- [`consensus_record_acceptance_group`](../reference/configuration.md#consensus_record_acceptance_group): write the
+  group each acceptance is made in, and have this node's own carry ask for it, so a migration between electorates
+  that share a member carries only what the predecessor decided. Off by default in 2.41.0; turn it on once every
+  node runs 2.41.0 or later — on the node that completes the migration and on every member of both electorates —
+  before migrating.
 - `a_safety_sensitive_proposal_is_decided_only_by_an_electorate_group`, in [`src/lib_tests.rs`](../../src/lib_tests.rs):
   a leadership outside an electorate is refused, then the group is joined, declared and decides.
 
@@ -54,6 +59,11 @@ in [`src/lib_tests.rs`](../../src/lib_tests.rs).
   once its genesis is known, and a forgotten promise withholds the slot only when a peer's copy of this node's record
   arrives before the next higher ballot. A member restarted over an empty or older store is otherwise not detected
   ([what-is-proven § disaster recovery](../operations/what-is-proven.md#disaster-recovery-electorate-lost-majority)).
+- **Does not hold by default:** a successor electorate that shares a member with its predecessor can decide a
+  value the predecessor outvoted, unless the node completing the migration has
+  `consensus_record_acceptance_group` on and every acceptance its carry hears of names its group — detected (the
+  completion reports the conflict), not prevented
+  ([ledger](../operations/what-is-proven.md#carry-across-overlapping-electorates-keeps-value)).
 - **Not built:** leadership is not an exclusive grant that stays true — exclusivity is enforced at the resource, by
   refusing a stale fencing token; single-decree safety is not a proof of the whole protocol; an electorate's
   members cannot change except by migration, and a group that lost its majority stays stopped.
