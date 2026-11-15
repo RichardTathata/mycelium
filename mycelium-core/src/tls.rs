@@ -222,8 +222,12 @@ impl NodeTls {
 thread_local! {
     /// A plant for the roots-generation ordering test (I2, exit 18): run between `activate`'s swap of the
     /// verifiers and its generation bump, on this thread's next change of roots.
-    pub(crate) static ACTIVATE_PLANT: std::cell::RefCell<Option<Box<dyn FnOnce(&NodeTls)>>> = const { std::cell::RefCell::new(None) };
+    pub(crate) static ACTIVATE_PLANT: std::cell::RefCell<Option<ActivatePlant>> = const { std::cell::RefCell::new(None) };
 }
+
+/// What [`ACTIVATE_PLANT`] runs.
+#[cfg(all(test, feature = "tls"))]
+pub(crate) type ActivatePlant = Box<dyn FnOnce(&NodeTls)>;
 
 /// A freshly-generated identity key + CA-signed cert + rustls configs, not yet
 /// activated. Produced by `generate_rotation`; consumed by `NodeTls::activate`.
@@ -2670,7 +2674,7 @@ mod ca_race_tests {
         assert_eq!((id.principal(), id.key), ("token:fleet/forecaster".to_string(), client_key.verifying_key().to_bytes()));
         assert!(b.verify_member_cert(client_cert.as_ref()), "the chain check alone still accepts a client certificate");
         let (client_server, client_client, _, _, _) =
-            super::imp::build_rustls_configs(client_cert, &client_key, &[ca_der.clone()], Arc::new(RemovedSet::default()), Default::default()).unwrap();
+            super::imp::build_rustls_configs(client_cert, &client_key, std::slice::from_ref(&ca_der), Arc::new(RemovedSet::default()), Default::default()).unwrap();
 
         let legacy_key = ed25519_dalek::SigningKey::from_bytes(&[42u8; 32]);
         let legacy = legacy_cert(&cfg, &nl, &legacy_key);
