@@ -4289,8 +4289,8 @@ oidc.audience = "mycelium-cluster".into();
 
 Where the value is an expression, a block keeps it one: `cfg.tls = Some({ let mut t = TlsConfig::default();
 t.auto_cert_dir = dir; t });`. Every literal in this repository outside `mycelium-core` — 265 of them in 112 files,
-across the `mycelium` crate's modules and tests, the examples, the co-op examples, the two feature-off test crates and
-nine companion crates — was rewritten this way in the same pull request, with the defaults and values unchanged.
+across the `mycelium` crate's modules and tests, the examples, the co-op examples, `mycelium-tls-free-tests` (the
+gateway-free test crate had none) and nine companion crates — was rewritten this way in the same pull request, with the defaults and values unchanged.
 
 **Will the compiler tell me?** **Yes** — every literal is an error (`E0639`, *cannot create non-exhaustive struct
 using struct expression*), and a destructuring pattern without `..` is `E0638`. Nothing changes at runtime.

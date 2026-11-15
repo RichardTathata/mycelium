@@ -44,7 +44,8 @@ cfg.oidc = Some(oidc);
 ```
 
 `OidcConfig` implements `Default` with a TOML table's defaults (`group_claim = "groups"`, no group scopes, discovery,
-no exchange), so end every literal with `..Default::default()`; a field added later then does not break it.
+no exchange), and it is `#[non_exhaustive]`: start from `OidcConfig::default()` and assign the fields you set, as above — a
+struct literal does not compile outside `mycelium-core` (`deprecations.md` §109), and a field added later then breaks nothing.
 
 - **`issuer` / `audience`** are validated on every token (mismatch → 401).
 - **`exchange_audience`** (with `exchange_client_id`, and optionally `exchange_max_lifetime_secs`) makes this node
