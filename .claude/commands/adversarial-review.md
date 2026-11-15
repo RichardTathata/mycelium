@@ -71,6 +71,18 @@ it reads the diff and the code. Tell it its final message *is* the report.
    row). Soft state with a bound and no detector — or one detected only at the owner while another node acts on
    it — is **Bounded, not detected**, which is a finding until the change cites the detector. A row at **Meets** without the verifying `file:line` and the forged-record test is a finding.
 
+9. **Who promises what** (Promise Theory, `docs/philosophy.md` § The Promise Theory Convergence). An agent — a node, a
+   door, a gateway, a provider, an application's receiver, a CA — can promise only its own behaviour. For each
+   guarantee the change gives, and each answer it sends (`cancelled`, *stopped*, *refused*, *used*, *carried*,
+   *decided*), name the agent that makes the promise and the agent whose behaviour it is about. They must be the
+   same agent. A finding: a component that answers for work another agent does and it does not control (the
+   library saying a call stopped when an application's loop runs it); one that deletes, overwrites or releases a
+   record another agent wrote and still relies on; one that decides on another's behalf what that agent alone can
+   see; a guarantee stated in a doc that no single agent can keep. For each promise, also say who **assesses** it
+   — the promisee checking that it was kept (a verified signature, a counter of broken promises) — and what that
+   agent does when it cannot assess it. An imposition is not made acceptable by being detected; detection is how
+   a kept promise is checked, not a substitute for one.
+
 ## The report and what to do with it
 
 The reviewer returns findings ranked by severity, each with `file:line`, a concrete failure scenario, and
