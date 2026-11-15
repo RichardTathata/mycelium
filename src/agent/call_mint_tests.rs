@@ -69,7 +69,11 @@ async fn node(opts: Opts) -> N {
     cfg.http_port = Some(http_port);
     cfg.bootstrap_peers = opts.bootstrap.clone();
     cfg.reconnect_backoff_secs = 1;
-    cfg.tls = Some(crate::TlsConfig { auto_cert_dir: opts.cert_dir.clone().unwrap_or_else(|| dir.join("tls")), ..Default::default() });
+    cfg.tls = Some({
+        let mut tls_cfg = crate::TlsConfig::default();
+        tls_cfg.auto_cert_dir = opts.cert_dir.clone().unwrap_or_else(|| dir.join("tls"));
+        tls_cfg
+    });
     if opts.persist {
         use crate::config::{OnUnreadable, PersistenceConfig, SyncMode};
         cfg.persistence = Some(PersistenceConfig { base_path: dir.join("persist"), sync_mode: SyncMode::Flush, snapshot_wal_threshold: 1_000, snapshot_interval_secs: 3_600, on_unreadable: OnUnreadable::Refuse });
