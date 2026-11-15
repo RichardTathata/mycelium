@@ -871,3 +871,49 @@ async fn a_marker_without_its_grants_window_is_kept_and_counted() {
     n.a.shutdown().await;
     let _ = std::fs::remove_dir_all(&n.dir);
 }
+
+/// rev794 round 4, T1 — **a door's marker cannot lose, gain or change its grant window and still read as its own.**
+/// A windowed marker with `until_ms` stripped (re-encoded without the field), one with the window moved, and a
+/// window-less marker given a window all fail `own_record_at`: the window's presence and value are signed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rev794d_a_markers_window_is_signed_and_cannot_be_stripped_or_moved() {
+    let n = node(Opts::default()).await;
+    let ctx = n.ctx();
+    let marker = format!("grant/{}/rW/used/provider", grant_holder_segment("token:gw/alice"));
+    let until = n.now() + 2 * 24 * 3_600_000;
+    let rec = super::grant_use::UseRecord::signed(ctx, super::grant_use::UseKind::Use, &marker, "uW", until).unwrap();
+    assert_eq!(super::grant_use::own_record_at(ctx, &marker, &rec.to_bytes()), Some((rec.at_ms, until)), "the genuine marker is this door's");
+    let mut stripped = rec.clone();
+    stripped.until_ms = 0;
+    let mut moved = rec.clone();
+    moved.until_ms = until - 1;
+    let plain = super::grant_use::UseRecord::signed(ctx, super::grant_use::UseKind::Use, &marker, "uP", 0).unwrap();
+    let mut given = plain.clone();
+    given.until_ms = until;
+    let verdicts = [stripped, moved, given].map(|r| super::grant_use::own_record_at(ctx, &marker, &r.to_bytes()));
+    n.a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&n.dir);
+    assert_eq!(verdicts, [None, None, None], "stripped, moved and added windows are not this door's signed body");
+}
+
+/// **A release carries its use's window by construction** (#794's round-4 review, E4): `release_use` takes the window
+/// from the held marker's own signed body, not from the ledger. Here the ledger holds no record of the use (a door
+/// without a journal whose busy ledger pruned it, say), and the release still names the marker's window, so the
+/// door's collector keeps the release as long as the use. Seen failing first: with the window taken from the ledger,
+/// the release carried none.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_release_carries_its_uses_window_from_the_held_marker() {
+    let n = node(Opts::default()).await;
+    let ctx = n.ctx();
+    let marker = format!("grant/{}/rR/used/provider", grant_holder_segment("token:gw/alice"));
+    let until = n.now() + 2 * 24 * 3_600_000;
+    let rec = super::grant_use::UseRecord::signed(ctx, super::grant_use::UseKind::Use, &marker, "uR", until).unwrap();
+    super::state_machine::write_owned_kv(ctx, &marker, rec.to_bytes());
+    assert!(ctx.grant_uses.own(&marker).is_none(), "the ledger holds no record of the use");
+    assert!(super::grant_use::release_use(ctx, &marker, "uR").await, "released");
+    let held: super::grant_use::UseRecord = serde_json::from_slice(&n.kv(&marker).unwrap()).unwrap();
+    assert_eq!((held.kind, held.until_ms), (super::grant_use::UseKind::Release, until), "the release names the use's window");
+    assert_eq!(super::grant_use::own_record_at(ctx, &marker, &n.kv(&marker).unwrap()).map(|r| r.1), Some(until), "and is this door's own, signed");
+    n.a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&n.dir);
+}

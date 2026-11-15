@@ -1503,7 +1503,8 @@ What nothing collects today, the C3 bound of #794's round-2 review, as `deprecat
 pairs.
 
 The row's promises, to be written into a buildable row:
-1. **Each record is signed by the agent that wrote it, under the key its path names**: the request, by its writer —
+1. **Each record is signed by the agent that wrote it, under the writer's key** (the path names the holder, not the
+   writer): the request, by its writer —
    the agent's own node for a node holder (`state_machine.rs`, `transition_invoking`), the gateway that received
    `POST /gateway/grants/request` for a client holder (`gw_grant_request`); `consumed`, by the agent that commits the
    grant (`state_machine.rs`, the commit that writes it); `revoked` and `refused`, by the issuing gateway

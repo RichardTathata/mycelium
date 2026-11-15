@@ -478,10 +478,10 @@ pub(crate) async fn record_use(ctx: &Arc<TaskCtx>, marker_key: &str, use_id: &st
 
 /// Does `marker_key` hold **this node's own marker for `use_id`** — the record this door wrote when it admitted the
 /// call, still the key's value?
-fn holds_own_marker(ctx: &TaskCtx, marker_key: &str, use_id: &str) -> bool {
+fn holds_own_marker(ctx: &TaskCtx, marker_key: &str, use_id: &str) -> Option<UseRecord> {
     let held = ctx.kv_state.store.pin().get(marker_key).and_then(|e| e.data.clone());
     held.and_then(|bytes| serde_json::from_slice::<UseRecord>(&bytes).ok())
-        .is_some_and(|rec| rec.kind == UseKind::Use && rec.use_id == use_id && rec.node == ctx.node_id.to_string() && rec.verifies_at(ctx, marker_key))
+        .filter(|rec| rec.kind == UseKind::Use && rec.use_id == use_id && rec.node == ctx.node_id.to_string() && rec.verifies_at(ctx, marker_key))
 }
 
 /// **Release the use `use_id` this door made at `marker_key`**, for a call this node knows did not run. **The
@@ -502,12 +502,13 @@ fn holds_own_marker(ctx: &TaskCtx, marker_key: &str, use_id: &str) -> bool {
 ///
 /// `true` only when all three held: the grant then reads unused at this door.
 pub(crate) async fn release_use(ctx: &Arc<TaskCtx>, marker_key: &str, use_id: &str) -> bool {
-    if !holds_own_marker(ctx, marker_key, use_id) {
+    let Some(held) = holds_own_marker(ctx, marker_key, use_id) else {
         ctx.grant_uses.count(Odd::Superseded);
         return false;
-    }
-    // The release names the same window as the use it releases, from this door's own record of the use.
-    let until_ms = ctx.grant_uses.own(marker_key).filter(|u| u.use_id == use_id).map_or(0, |u| u.until_ms);
+    };
+    // The release names the same window as the use it releases, by construction: from the held marker's own signed
+    // body, not from the ledger, which may have pruned the use (#794's round-4 review, E4).
+    let until_ms = held.until_ms;
     let Some(rec) = UseRecord::signed(ctx, UseKind::Release, marker_key, use_id, until_ms) else { return false };
     match super::state_machine::write_owned_kv_reporting(ctx, marker_key, rec.to_bytes()).await {
         Ok(application) if application.is_current() => {}

@@ -4383,7 +4383,9 @@ which is new in this wave (§104).
   and the window is in the door's own **signed marker body** (`until_ms`, additive; §106's markers are unreleased,
   so no released marker lacks it): the door's collector judges its own marker from that body alone, with no need of
   its ledger or journal (#794's round-3 review, D3). A marker without the field — only from a build before it — is
-  kept and counted (`GET /stats` `grant_markers_without_window`). The door's journal entry carries the window too
+  kept and counted (`GET /stats` `grant_markers_without_window`). The window is inside the signature: a marker whose window is stripped,
+  moved or added does not read as the door's own. A release carries its use's window, taken from the held marker's
+  own signed body. The door's journal entry carries the window too
   (`until_ms`, additive; its format pinned in `tests/fixtures/grant-use-journal/`). Counted: `call_records_collected`, `grant_records_collected`. A build
   without `compliance` verifies its own records under its own key, which is all it collects.
   **Never collected, stated:** unsigned `grant/` records (the request, `consumed`, `revoked`, `refused`); legacy

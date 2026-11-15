@@ -45,6 +45,12 @@ const measured = { date: new Date().toISOString().slice(0, 10), mycelium: myceli
 
 function fail(message) {
   console.error(`FAILED: ${message}\n(work directory: ${work})`);
+  // The tail of each node's log, so a failure in CI can be diagnosed from the job's output (#794's review, E2).
+  const tailLines = Number(process.env.CLIENT_GRANT_LOG_TAIL ?? 80);
+  for (const name of fs.readdirSync(work).filter((f) => /^node-\d+\.log$/.test(f)).sort()) {
+    const lines = fs.readFileSync(path.join(work, name), "utf8").split("\n");
+    console.error(`--- ${name}: last ${tailLines} of ${lines.length} lines ---\n${lines.slice(-tailLines).join("\n")}`);
+  }
   for (const c of children.values()) c.kill("SIGTERM");
   process.exit(1);
 }
