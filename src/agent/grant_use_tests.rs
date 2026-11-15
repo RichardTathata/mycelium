@@ -219,7 +219,7 @@ async fn the_door_that_made_a_use_reads_its_journal_and_only_its_own_release_giv
     check!(admitted(&first), "{}", describe(&first));
     check!(gave_back.as_deref() == Some("client_key_unknown"), "the release was not made: {gave_back:?}");
     check!(release_record.is_some(), "RELEASE: the key holds no use record after the release");
-    let blank = UseRecord { v: 0, kind: UseKind::Use, grant: String::new(), door: String::new(), node: String::new(), use_id: String::new(), at_ms: 0, signer: String::new(), sig: String::new() };
+    let blank = UseRecord { v: 0, kind: UseKind::Use, grant: String::new(), door: String::new(), node: String::new(), use_id: String::new(), at_ms: 0, until_ms: 0, signer: String::new(), sig: String::new() };
     let release_record = release_record.unwrap_or_else(|| blank.clone());
     check!((release_record.kind, release_record.node.as_str(), release_record.door.as_str()) == (UseKind::Release, a.node_id().to_string().as_str(), "gateway"), "RELEASE: not a signed release naming the door and its node: {release_record:?}");
     check!(!release_record.sig.is_empty() && release_record.grant.ends_with(released.2.mandate.term.as_str()), "signed, naming the grant: {release_record:?}");
@@ -445,7 +445,7 @@ async fn a_second_gateway_reads_anything_but_never_written_as_used() {
     // Delivered first: at B, the tombstone, then the marker it out-stamps — a use A never made here, signed as A signs.
     let k_first = marker_key(&delivered_first.2);
     let stamp = cb.hlc.tick();
-    let a_marker = UseRecord::signed(&ca, UseKind::Use, &k_first, "00112233445566778899aabbccddeeff").unwrap().to_bytes();
+    let a_marker = UseRecord::signed(&ca, UseKind::Use, &k_first, "00112233445566778899aabbccddeeff", 0).unwrap().to_bytes();
     crate::store::apply_and_notify(&cb.kv_state, &crate::framing::make_gossip_update_stamped(c.node_id(), cb.default_ttl, Arc::from(k_first.as_str()), Bytes::new(), true, stamp + 1));
     let marker_lost = crate::store::apply_and_notify_reporting(&cb.kv_state, &crate::framing::make_gossip_update_stamped(a.node_id(), cb.default_ttl, Arc::from(k_first.as_str()), Bytes::from(a_marker), false, stamp));
     let first_b = at(&cb, &delivered_first).await;
@@ -494,8 +494,8 @@ async fn a_second_gateway_reads_anything_but_never_written_as_used() {
     let k_pair = marker_key(&own_pair.2);
     let pair_used = at(&ca, &own_pair).await;
     assert!(admitted(&pair_used), "{}", describe(&pair_used));
-    let c_marker = UseRecord::signed(&cc, UseKind::Use, &k_pair, "ffeeddccbbaa99887766554433221100").unwrap();
-    let c_release = UseRecord::signed(&cc, UseKind::Release, &k_pair, "ffeeddccbbaa99887766554433221100").unwrap();
+    let c_marker = UseRecord::signed(&cc, UseKind::Use, &k_pair, "ffeeddccbbaa99887766554433221100", 0).unwrap();
+    let c_release = UseRecord::signed(&cc, UseKind::Release, &k_pair, "ffeeddccbbaa99887766554433221100", 0).unwrap();
     member_writes(k_pair.clone(), Some(Bytes::from(c_marker.to_bytes()))).await;
     member_writes(k_pair.clone(), Some(Bytes::from(c_release.to_bytes()))).await;
     let pair_b = at(&cb, &own_pair).await;

@@ -3223,7 +3223,11 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
         assert!(!after.is_empty(), "the capability advertisement itself must appear");
-        for key in &after {
+        // This node's own caller-context marker is not scheduler state: it is the provider's promise about itself,
+        // published before any advertisement since #794 (so a gateway never sees work here before it can see that
+        // this node enforces the caller context). Exactly this node's key is allowed, nothing else under `sys/`.
+        let own_marker = format!("sys/caller-context/{}", agent.node_id());
+        for key in after.iter().filter(|k| **k != own_marker) {
             assert!(
                 key.starts_with("cap/"),
                 "self-election left non-advertisement fleet state: {key} — that would be a \

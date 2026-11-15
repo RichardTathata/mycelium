@@ -4380,8 +4380,11 @@ which is new in this wave (§104).
   `gateway_mint_call_mandates` implies it — the gateway's promise about the records it writes, two per call, which
   would otherwise stay for ever. The `grant/` half needs `collect_expired_records`. **A door keeps its marker until
   the grant's own window ends** (+ 2·skew), whatever the retention (C2): `GrantVerifier` caps no `grant:` window,
-  and the door's own record of the use now carries the window; a node without a journal that has restarted no
-  longer knows it, and keeps the marker. Counted: `call_records_collected`, `grant_records_collected`. A build
+  and the window is in the door's own **signed marker body** (`until_ms`, additive; §106's markers are unreleased,
+  so no released marker lacks it): the door's collector judges its own marker from that body alone, with no need of
+  its ledger or journal (#794's round-3 review, D3). A marker without the field — only from a build before it — is
+  kept and counted (`GET /stats` `grant_markers_without_window`). The door's journal entry carries the window too
+  (`until_ms`, additive; its format pinned in `tests/fixtures/grant-use-journal/`). Counted: `call_records_collected`, `grant_records_collected`. A build
   without `compliance` verifies its own records under its own key, which is all it collects.
   **Never collected, stated:** unsigned `grant/` records (the request, `consumed`, `revoked`, `refused`); legacy
   markers (the timestamp form before §106); records whose owner does not run the collector; and a departed

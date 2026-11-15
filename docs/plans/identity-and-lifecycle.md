@@ -1423,8 +1423,12 @@ rule no node may delete them — signing them, so their writer can collect them 
 
 **From #794's round-2 review (2026-11-15).** C2: a door keeps its marker until the grant's own window ends (+ 2·skew),
 whatever `grant_retention_secs` — the door's own promise about its own record; `GrantVerifier` is not given a cap on
-`grant:` windows, which would change what an issuer may promise. The door's journal entry carries the window
-(`until_ms`, additive). `a_doors_marker_is_kept_to_its_grants_window_whatever_the_retention`. C3: the mint implies
+`grant:` windows, which would change what an issuer may promise. The door's signed marker body carries the window
+(`UseRecord::until_ms`, additive; round 3, D3: the collector reads it there, needing neither the ledger nor the
+journal — `rev794c_a_journal_less_doors_marker_is_collected_after_a_later_use_prunes_its_use`, the reviewer's test, seen
+failing on `62467e7c`; a body without it kept and counted, `a_marker_without_its_grants_window_is_kept_and_counted`), and
+so does its journal entry (format pinned, `the_grant_use_journal_format_is_pinned_by_a_golden_file`).
+`a_doors_marker_is_kept_to_its_grants_window_whatever_the_retention`. C3: the mint implies
 collecting the gateway's own `call/` records (`the_collector_runs_only_where_it_is_turned_on`). C4:
 `a_genuine_grant_another_member_issued_is_not_collected_here`. Never collected, stated: unsigned `grant/` records,
 legacy markers, records whose owner does not run the collector, a departed gateway's `call/` pairs.
@@ -1499,8 +1503,11 @@ What nothing collects today, the C3 bound of #794's round-2 review, as `deprecat
 pairs.
 
 The row's promises, to be written into a buildable row:
-1. **Each record is signed by the agent that wrote it, under the key its path names**: the holder's request; the
-   gateway's `consumed`, `revoked` and `refused`. Read by the owner-signed rule: verified at read, a failed record
+1. **Each record is signed by the agent that wrote it, under the key its path names**: the request, by its writer —
+   the agent's own node for a node holder (`state_machine.rs`, `transition_invoking`), the gateway that received
+   `POST /gateway/grants/request` for a client holder (`gw_grant_request`); `consumed`, by the agent that commits the
+   grant (`state_machine.rs`, the commit that writes it); `revoked` and `refused`, by the issuing gateway
+   (`revoke_grant`, `decide_grant`). Read by the owner-signed rule: verified at read, a failed record
    read as absent and counted, absence failing closed, and a forged-record test.
 2. **Once signed, each owner's collector deletes its own expired records.** The holder's `expired` answer then needs
    only the minimal record this row names, not the whole request.

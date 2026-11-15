@@ -211,6 +211,9 @@ pub(crate) struct CallIssuer {
     pub(crate) call_records_collected: AtomicU64,
     pub(crate) call_records_unverifiable: AtomicU64,
     pub(crate) grant_records_collected: AtomicU64,
+    /// This door's own markers with no grant window in their signed body — from a build before the field, never
+    /// released — kept, not collected (#794's round-3 review, D3).
+    pub(crate) markers_without_window: AtomicU64,
 }
 
 impl CallIssuer {
@@ -579,14 +582,13 @@ pub(crate) fn collect(ctx: &TaskCtx, now_ms: u64) -> Collected {
         // ends, whatever the retention (#794's round-2 review, C2): `GrantVerifier` caps no `grant:` window, so a
         // grant can outlive the retention, and a marker gone inside the window would let the grant be used again.
         for (key, bytes) in records.iter().filter(|(k, _)| k.contains("/used/")) {
-            let Some(at_ms) = super::grant_use::own_record_at(ctx, key, bytes) else { continue };
-            let until_ms = match super::grant_use::own_use_until(ctx, key) {
-                Some(until) => until,
-                // No use held: with a journal, it was dropped past its window too, so the retention alone bounds it.
-                None if super::grant_use::journaled(ctx) => 0,
-                // Without one, a restart forgets: the window is unknown, so the marker is kept.
-                None => continue,
-            };
+            let Some((at_ms, until_ms)) = super::grant_use::own_record_at(ctx, key, bytes) else { continue };
+            // The window from the door's own signed body (#794's round-3 review, D3): no ledger or journal needed.
+            // A body without it comes only from a build before the field, never released: kept, and counted.
+            if until_ms == 0 {
+                ctx.call_issuer.markers_without_window.fetch_add(1, Ordering::Relaxed);
+                continue;
+            }
             if now_ms > at_ms.saturating_add(retention_ms).max(until_ms).saturating_add(skew2) {
                 delete(key);
                 out.grant_records += 1;

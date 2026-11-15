@@ -547,7 +547,7 @@ async fn each_owner_collects_only_its_own_grant_records_and_the_holder_reads_exp
     let forged = write_grant("r2", &other);
     // The doors: this node's own marker; another door's, signed by its node; a forged one that names this node.
     let marker = |base: &str, point: &str| format!("{base}/used/{point}");
-    let own = super::grant_use::UseRecord::signed(ctx, super::grant_use::UseKind::Use, &marker(&genuine, "provider"), "u1").unwrap();
+    let own = super::grant_use::UseRecord::signed(ctx, super::grant_use::UseKind::Use, &marker(&genuine, "provider"), "u1", now + 300_000).unwrap();
     ctx.grant_uses.record_use(&marker(&genuine, "provider"), "u1", own.at_ms, now + 300_000).await.unwrap();
     super::state_machine::write_owned_kv(ctx, &marker(&genuine, "provider"), own.to_bytes());
     let mut theirs = own.clone();
@@ -751,8 +751,8 @@ async fn a_doors_marker_is_kept_to_its_grants_window_whatever_the_retention() {
     let n = node(Opts { collect: true, retention_secs: Some(3_600), ..Opts::default() }).await;
     let ctx = n.ctx();
     let marker = format!("grant/{}/r2d/used/provider", grant_holder_segment("token:gw/alice"));
-    let rec = super::grant_use::UseRecord::signed(ctx, super::grant_use::UseKind::Use, &marker, "u2").unwrap();
-    let until = rec.at_ms + 2 * 24 * 3_600_000;
+    let until = n.now() + 2 * 24 * 3_600_000;
+    let rec = super::grant_use::UseRecord::signed(ctx, super::grant_use::UseKind::Use, &marker, "u2", until).unwrap();
     ctx.grant_uses.record_use(&marker, "u2", rec.at_ms, until).await.unwrap();
     super::state_machine::write_owned_kv(ctx, &marker, rec.to_bytes());
     let after_retention = rec.at_ms + 3_600_000 + 2 * SKEW_MS + 1;
@@ -819,6 +819,55 @@ async fn a_provider_publishes_its_caller_context_marker_before_it_advertises_wor
     let n = node(Opts::default()).await;
     let _cap = n.a.capabilities().advertise_capability(crate::capability::Capability::new("depot", "fresh"), Duration::from_secs(60));
     assert!(n.kv(&super::gateway_caller::marker_key(n.a.node_id())).is_some(), "a capability's advertisement publishes it too");
+    n.a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&n.dir);
+}
+
+/// rev794 round 3, N1 — **at a door without a journal, a marker whose use a later use pruned is never collected.**
+/// No `[persistence]` (the test node's default) and the default 7-day retention. The door uses grant `rA` and writes
+/// its marker; 1 025 uses of other grants, past the first use's in-memory hold, prune `rA`'s use from the ledger
+/// (`GrantUseLedger::record_use`'s `retain`). Far past the retention and `rA`'s window, the collector found no use held
+/// and no journal and kept the marker — at every later collection too. The reviewer's test, seen failing on
+/// `62467e7c` (`(0, true)`); fixed by the grant's window in the door's own signed marker body (`UseRecord::until_ms`),
+/// which the collector reads without the ledger. A marker without it (a pre-release build's) is kept and counted:
+/// `a_marker_without_its_grants_window_is_kept_and_counted`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rev794c_a_journal_less_doors_marker_is_collected_after_a_later_use_prunes_its_use() {
+    let n = node(Opts { collect: true, ..Opts::default() }).await;
+    let ctx = n.ctx();
+    let seg = grant_holder_segment("token:gw/alice");
+    let marker = format!("grant/{seg}/rA/used/provider");
+    let rec = super::grant_use::UseRecord::signed(ctx, super::grant_use::UseKind::Use, &marker, "uA", n.now() + 300_000).unwrap();
+    ctx.grant_uses.record_use(&marker, "uA", rec.at_ms, rec.until_ms).await.unwrap();
+    super::state_machine::write_owned_kv(ctx, &marker, rec.to_bytes());
+    // The ledger prunes when it holds its threshold (1 024 uses): a busy door's later uses.
+    let then = rec.at_ms + 3_721_000;
+    for i in 0..1_025 {
+        let later = format!("grant/{seg}/rB{i}/used/provider");
+        ctx.grant_uses.record_use(&later, &format!("uB{i}"), then, then + 300_000).await.unwrap();
+    }
+    assert!(ctx.grant_uses.own(&marker).is_none(), "the later use pruned the first from memory");
+    let past = rec.at_ms + ctx.config.grant_retention_secs * 1_000 + 2 * SKEW_MS + 1;
+    let collected = call_issuer::collect(ctx, past).grant_records;
+    let held = n.kv(&marker).is_some();
+    n.a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&n.dir);
+    assert_eq!((collected, held), (1, false), "this door's own marker, past its retention and its grant's window, is collected");
+}
+
+/// **A door's own marker with no grant window in its signed body is kept and counted** (#794's round-3 review, D3): such
+/// a body comes only from a build before `UseRecord::until_ms`, never released, and the door cannot tell how long its
+/// grant lasts, so it keeps the marker (`grant_markers_without_window` on `/stats`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_marker_without_its_grants_window_is_kept_and_counted() {
+    let n = node(Opts { collect: true, ..Opts::default() }).await;
+    let ctx = n.ctx();
+    let marker = format!("grant/{}/rC/used/provider", grant_holder_segment("token:gw/alice"));
+    let rec = super::grant_use::UseRecord::signed(ctx, super::grant_use::UseKind::Use, &marker, "uC", 0).unwrap();
+    super::state_machine::write_owned_kv(ctx, &marker, rec.to_bytes());
+    assert_eq!(call_issuer::collect(ctx, u64::MAX / 2).grant_records, 0, "kept");
+    assert!(n.kv(&marker).is_some());
+    assert_eq!(ctx.call_issuer.markers_without_window.load(Ordering::Relaxed), 1, "counted");
     n.a.shutdown().await;
     let _ = std::fs::remove_dir_all(&n.dir);
 }

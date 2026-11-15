@@ -94,6 +94,12 @@ pub(crate) struct UseRecord {
     #[serde(rename = "use")]
     pub(crate) use_id: String,
     pub(crate) at_ms: u64,
+    /// The end of the grant's own window, as the door that admitted the call read it (identity-and-lifecycle I4;
+    /// #794's round-3 review, D3). Signed with the rest when present: the door's collector keeps its marker at least
+    /// this long from its own signed body, with no need of its ledger or journal. Absent (`0`) only on a record from a
+    /// build before this field — never released — which the collector keeps and counts.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub(crate) until_ms: u64,
     /// The signing key (base64) and the Ed25519 signature (base64) over [`UseRecord::message`]. Empty on a node with
     /// no identity, which signs nothing anywhere.
     #[serde(default)]
@@ -114,11 +120,16 @@ impl UseRecord {
             m.extend_from_slice(field.as_bytes());
         }
         m.extend_from_slice(&self.at_ms.to_le_bytes());
+        // Appended only when present, so a record without the field signs the bytes it always signed.
+        if self.until_ms != 0 {
+            m.extend_from_slice(b"until");
+            m.extend_from_slice(&self.until_ms.to_le_bytes());
+        }
         m
     }
 
     /// A record of `kind` for the use `use_id` at this node's door, signed with the node's key when it has one.
-    pub(crate) fn signed(ctx: &TaskCtx, kind: UseKind, marker_key: &str, use_id: &str) -> Option<Self> {
+    pub(crate) fn signed(ctx: &TaskCtx, kind: UseKind, marker_key: &str, use_id: &str, until_ms: u64) -> Option<Self> {
         let (grant, door) = split_marker_key(marker_key)?;
         let mut r = Self {
             v: 1,
@@ -128,6 +139,7 @@ impl UseRecord {
             node: ctx.node_id.to_string(),
             use_id: use_id.to_string(),
             at_ms: ctx.hlc.decision_now_ms(),
+            until_ms,
             signer: String::new(),
             sig: String::new(),
         };
@@ -169,23 +181,9 @@ impl UseRecord {
 /// **This node's own use marker or release at `marker_key`** (identity-and-lifecycle I4's collector: a door collects
 /// only what it signed): the record's `at_ms` when it parses, names the key's grant and door, names this node and
 /// verifies under this node's key; `None` for anything else — another door's record, a forged one, a legacy marker.
-pub(crate) fn own_record_at(ctx: &TaskCtx, marker_key: &str, bytes: &[u8]) -> Option<u64> {
+pub(crate) fn own_record_at(ctx: &TaskCtx, marker_key: &str, bytes: &[u8]) -> Option<(u64, u64)> {
     let r: UseRecord = serde_json::from_slice(bytes).ok()?;
-    (r.node.parse::<NodeId>().ok()? == ctx.node_id && r.verifies_at(ctx, marker_key)).then_some(r.at_ms)
-}
-
-/// **The end of the grant's window for this door's own use at `marker_key`**, from its own record of the use
-/// (#794's round-2 review, C2): `Some(until)` when this door holds the use. `None` when it holds none — which at a
-/// node with a journal means the use was dropped past both its retention and its grant's window (`held`), so
-/// nothing is left to keep; and at a node without one may mean only that it restarted, so the caller keeps the
-/// marker.
-pub(crate) fn own_use_until(ctx: &TaskCtx, marker_key: &str) -> Option<u64> {
-    ctx.grant_uses.own(marker_key).map(|u| u.until_ms)
-}
-
-/// Does this node keep a grant-use journal (`[persistence]`)?
-pub(crate) fn journaled(ctx: &TaskCtx) -> bool {
-    ctx.grant_uses.journal.load().is_some()
+    (r.node.parse::<NodeId>().ok()? == ctx.node_id && r.verifies_at(ctx, marker_key)).then_some((r.at_ms, r.until_ms))
 }
 
 /// `grant/{holder}/{term}/used/{point}` → (`{holder}/{term}`, `{point}`).
@@ -448,7 +446,7 @@ pub(crate) async fn record_use(ctx: &Arc<TaskCtx>, marker_key: &str, use_id: &st
     use mycelium_core::receipt::LocalApplication;
     let now_ms = ctx.hlc.decision_now_ms();
     ctx.grant_uses.record_use(marker_key, use_id, now_ms, until_ms).await?;
-    let Some(rec) = UseRecord::signed(ctx, UseKind::Use, marker_key, use_id) else { return Err(format!("{marker_key} is not a marker key")) };
+    let Some(rec) = UseRecord::signed(ctx, UseKind::Use, marker_key, use_id, until_ms) else { return Err(format!("{marker_key} is not a marker key")) };
     #[cfg(test)]
     {
         let hook = ctx.grant_uses.before_marker_write.lock().unwrap_or_else(|e| e.into_inner()).take();
@@ -508,7 +506,9 @@ pub(crate) async fn release_use(ctx: &Arc<TaskCtx>, marker_key: &str, use_id: &s
         ctx.grant_uses.count(Odd::Superseded);
         return false;
     }
-    let Some(rec) = UseRecord::signed(ctx, UseKind::Release, marker_key, use_id) else { return false };
+    // The release names the same window as the use it releases, from this door's own record of the use.
+    let until_ms = ctx.grant_uses.own(marker_key).filter(|u| u.use_id == use_id).map_or(0, |u| u.until_ms);
+    let Some(rec) = UseRecord::signed(ctx, UseKind::Release, marker_key, use_id, until_ms) else { return false };
     match super::state_machine::write_owned_kv_reporting(ctx, marker_key, rec.to_bytes()).await {
         Ok(application) if application.is_current() => {}
         Ok(_) => {
@@ -525,4 +525,33 @@ pub(crate) async fn release_use(ctx: &Arc<TaskCtx>, marker_key: &str, use_id: &s
         return false;
     }
     true
+}
+
+#[cfg(test)]
+mod journal_format_tests {
+    use super::Entry;
+
+    /// **The grant-use journal's entry format is pinned** (#794's round-3 review): a use before `until_ms` existed, a
+    /// use with it, and a release, read back from the checked-in golden file and written out to the same bytes. A
+    /// door restarted under a later build reads every entry an earlier one wrote; an entry without `until_ms` reads as
+    /// `0` (its grant's window unknown).
+    #[test]
+    fn the_grant_use_journal_format_is_pinned_by_a_golden_file() {
+        let golden = include_str!("../../tests/fixtures/grant-use-journal/entries.jsonl");
+        let lines: Vec<&str> = golden.lines().collect();
+        assert_eq!(lines.len(), 3);
+        let entries: Vec<Entry> = lines.iter().map(|l| serde_json::from_str(l).expect("a golden entry decodes")).collect();
+        match &entries[0] {
+            Entry::Used { until_ms, at_ms, .. } => assert_eq!((*until_ms, *at_ms), (0, 1_794_700_000_000), "no until_ms reads as 0"),
+            other => panic!("{}", serde_json::to_string(other).unwrap()),
+        }
+        match &entries[1] {
+            Entry::Used { until_ms, .. } => assert_eq!(*until_ms, 1_794_872_800_000),
+            other => panic!("{}", serde_json::to_string(other).unwrap()),
+        }
+        assert!(matches!(entries[2], Entry::Released { .. }));
+        for (entry, line) in entries.iter().zip(&lines) {
+            assert_eq!(serde_json::to_string(entry).unwrap(), *line, "written back byte for byte");
+        }
+    }
 }
