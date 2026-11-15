@@ -17862,7 +17862,7 @@ async fn a_value_chosen_in_a_retired_group_is_carried_by_its_successor() {
     // old's majority is gone; new decides without it, and reads what it carried.
     drop(listeners.remove(1));
     drop(listeners.remove(0));
-    let fresh = e.consensus().group_propose("new", "work/fresh", Bytes::from_static(b"first"), quick_cfg()).await;
+    let fresh = e.consensus().group_propose("new", "work/fresh", Bytes::from_static(b"first"), commit_cfg()).await;
     assert!(matches!(fresh, ConsensusResult::Committed { .. }), "after the completion new decides a fresh slot without old: {fresh:?}");
     assert_eq!(e.consensus().consensus_get(&slot), Some(v), "and still reads the carried value");
     assert!(crate::migration_completions() >= 1);
