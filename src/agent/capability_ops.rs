@@ -211,9 +211,10 @@ fn is_stale(hlc_ts: u64, now_ms: u64, max_age: std::time::Duration) -> bool {
 /// (`resolve_cap_providers`, the line `/gateway/llm/call` and `/gateway/llm/stream` answer `404 no_provider` on).
 /// `advertise_capability` hands the first write to a spawned task, so a capability is not resolvable when it returns
 /// — a test that calls a door at once can find no provider. Polls with a deadline; panics naming the capability.
-/// Gated on the features its callers need — the LLM doors (`llm`), `/a2a` (`a2a`), and the provider's admission of
-/// a skill (`compliance`): a default-feature test build has no caller (the feature-gated dead-code trap).
-#[cfg(all(test, any(feature = "llm", feature = "a2a", feature = "compliance")))]
+/// Gated on the features its callers need — the LLM doors (`llm`), and `/a2a` and the provider's admission of a skill
+/// (`compliance`; every `/a2a` caller is gated on it too): a build without either has no caller (the feature-gated
+/// dead-code trap — `--features a2a` alone is one).
+#[cfg(all(test, any(feature = "llm", feature = "compliance")))]
 pub(crate) async fn until_advertised(ctx: &super::TaskCtx, ns: &str, name: &str) {
     let filter = CapFilter::new(ns, name);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
