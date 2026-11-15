@@ -46,7 +46,9 @@ grows a tool on demand ([hosted components](hosted-components.md)).
   the gateway and [`provider.enforcement`](../reference/rule-catalogue.md#providerenforcement)'s at a provider that
   turns it on.
 - **Not built:** a tool registration is a claim, not proof the tool does what its description says; a bridged external
-  server's own behaviour is outside the node; discovery is as fresh as gossip.
+  server's own behaviour is outside the node; discovery is as fresh as gossip. **A bridged server's tool, and a tool
+  registered with `register_mcp_tool_unstoppable`, refuse a call under a cancellable rule** (`door_cannot_stop`,
+  [§110](../guide/deprecations.md)): neither can stop a call once it runs, until I4's PR 3.
 - **Evidence:** the ledger row
   [after a revocation every door runs nothing](../operations/what-is-proven.md#revocation-every-door-runs-nothing), `/mcp`
   among the doors.

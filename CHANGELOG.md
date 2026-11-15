@@ -467,6 +467,34 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **`mycelium explain --closure`'s text counts nodes, not journal files, as its JSON does.** Two journals of one node
   under `--fleet 2`, or a record naming a node with no journal given, now print `INCOMPLETE` where the fleet line
   compared the number of files (#767's confirm round).
+- **A gateway mints each protected call's `call:` mandate, behind `gateway_mint_call_mandates`** (identity-and-lifecycle
+  I4, PR 2; `deprecations.md` §110). Off by default. On, every protected call a gateway dispatches carries a `call:`
+  mandate the gateway issues to itself for that call (term `c{n}`, the envelope's id) in the envelope's `cm`, and its
+  first checkpoint and a signed `window` record (`call/{gateway}/c{n}/window`) are written durably before the
+  envelope is sent; a write the disk will not take refuses the call `call_mandate_not_durable` (-32025) and nothing
+  is sent. An enforcing provider admits the call under it, so a cancellable rule admits the calls its gateways mint
+  for. The gateway's revoke writes the call's next checkpoint durably and the provider's sweep stops the call (on
+  loopback, two nodes, *F* = 2 s: under 2 s); no door calls it yet (the row's next PR). The gateway re-asserts its
+  checkpoint when another value lands at its key (`call_checkpoints_reasserted`). A collector (each minute, at every
+  node with an execution authority or a mint) removes `call/` records past their window + 2·skew +
+  `max_drain_secs` and `grant/` records — CR2's use markers and releases with them — past the later of their window
+  + 2·skew and their issue + `grant_retention_secs` (7 days); a record that does not verify only delays collection.
+  New `GossipConfig` fields: `gateway_mint_call_mandates`, `call_mandate_ttl_secs` (300, at most 3 600),
+  `max_drain_secs` (300), `grant_retention_secs` (604 800, at least 3 600). Two fsynced writes per minted call: 15.7–25.2
+  ms p50, 31.5–34.2 ms p95 on the test machine (two runs). ***Check:*** with the mint on, `GET /stats` `call_mints` counts a protected
+  call through the gateway.
+- **A door that cannot stop a running call refuses a call under a cancellable rule, by name** (the maintainer's
+  decision of 2026-11-15; `deprecations.md` §110): the bridged MCP loop (`bridged_mcp`), the SDK serve stream
+  (`sdk_serve`), a hosted component's kind through `rpc_rx` (`hosted_capability`), and a tool registered with the new
+  `McpHandle::register_mcp_tool_unstoppable` (`unstoppable_mcp_tool`), which the wasm host's bridge now uses. -32031,
+  `data.detail` `door_cannot_stop`, the door in `data.door`; nothing is forwarded, streamed or run. A cancellable rule
+  over an external MCP tool, an SDK-served kind or a hosted component therefore refuses every call until the row's
+  next PR builds their stop. An application's own `rpc_rx` receiver is not refused: it stops a cancelled call only
+  if it races `authority_lapsed()`.
+- **`mycelium-reason`: a cancelled call is final at the router.** A provider's answer `data.reason` `cancelled`, or
+  `call_mandate_not_established` with `data.cause` `revoked`, ends the route with the new
+  `RouteError::Cancelled` (`409` at the façades) instead of trying the next provider under a new, uncancelled term.
+  `RouteError` gained a variant.
 - **A cancellable rule, and the provider's admission under a `call:` mandate** (identity-and-lifecycle I4, PR 1b;
   `deprecations.md` §104). `cancellable = true` on a unit file's `[[rule]]` (`Rule::cancellable()`,
   `Decision::cancellable`) says the call the rule permits must be cancellable. An enforcing provider reads the

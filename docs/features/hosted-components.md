@@ -60,6 +60,10 @@ installs a WASM component that arrives over the mesh, and the component is bridg
   `cap:{namespace}/{name}@{node}` — [provider enforcement](provider-enforcement.md). The bridge hands a tool call
   the MCP door admitted to the component inside the process: it is not a second call, and it is not a signal a
   receiver on the kind sees. With enforcement off, and no cohort budget, a direct call is not decided.
+- **A cancellable rule over a hosted component refuses every call, until I4's PR 3** ([§110](../guide/deprecations.md)):
+  a begun guest call is never interrupted, so a cancel could not stop it; the provider answers `door_cannot_stop`
+  (`hosted_capability` for a direct call, `unstoppable_mcp_tool` for the bridge, which the host registers with
+  `register_mcp_tool_unstoppable`). Under any other rule nothing changes.
 - **Not built:** a component's resource use beyond memory, fuel and the deadline; a guest-to-guest boundary beyond the
   per-component namespace; anything but what the world imports — the host is only as safe as wasmtime, which is why
   its advisories are releases here. A call past its deadline or fuel is stopped and recorded by name.

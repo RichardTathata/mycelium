@@ -285,8 +285,10 @@ has no row for this feature. The tests: in [`src/mandate/grant.rs`](../../src/ma
   then reads *never written* there, and a grant valid longer (the cap is 3 600 s) can be presented once more at a
   gateway that did not make the first use. (3) **A member can spend a grant** by writing its marker key first: a
   refusal — availability. (4) During a release of mixed versions an un-upgraded gateway releases by tombstone,
-  which upgraded doors read as used. (5) The journal is not compacted and the signed records are not collected
-  (with I4's collector).
+  which upgraded doors read as used. (5) The journal is not compacted. The signed records are collected by I4's
+  collector, with every other record of the grant, past the later of its window + 2·skew and its issue +
+  [`grant_retention_secs`](../reference/configuration.md#grant_retention_secs) (7 days) — a grant's records in the
+  KV are gone after that; a request never answered or refused is not collected ([§110](../guide/deprecations.md)).
 - **Revocation.** `POST …/revoke` at the issuing node reads the tool and the agent from the **signed** grant (its one
   enumerated operation and its holder), not from the request record, and publishes the next checkpoint for the grant's scope naming the
   term, offers it to its own authority — whose sweep judges work under a grant by that standing and its window, not by

@@ -49,6 +49,11 @@ mock engine. [`reason_node`](../../examples/README.md#the-capability-matrix) and
   calls are not seen; blobs above 8 MiB (one RPC frame) or a store past its quota (1 GiB by default; nothing evicts);
   read-your-writes across nodes — checkpoint metadata is gossip-eventual; a trace anchored into the audit chain, except
   under `compliance`.
+- **A cancelled call is final** ([§110](../guide/deprecations.md)): a provider's answer that the call was cancelled
+  (`data.reason` `cancelled`, or `call_mandate_not_established` with `data.cause` `revoked`) ends the route with
+  `RouteError::Cancelled` (`409` at the façades); no other provider is tried, since a retry would carry a new,
+  uncancelled `call:` term. `a_cancelled_call_is_not_retried_on_the_next_provider`, in
+  [`mycelium-reason/tests/reason.rs`](../../mycelium-reason/tests/reason.rs).
 - **Evidence:** the ledger row
   [a routed model call is decided per candidate](../operations/what-is-proven.md#routed-model-call-decided-per-candidate).
 

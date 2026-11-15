@@ -4303,6 +4303,114 @@ using struct expression*), and a destructuring pattern without `..` is `E0638`. 
   `OidcConfig` pair under `--features compliance`). A doc-test is compiled as a crate of its own, so each pair is the
   outside caller's view.
 
+## 110. A gateway can mint each call's `call:` mandate, behind `gateway_mint_call_mandates`; a door that cannot stop a running call refuses a cancellable one; `GossipConfig` gained four fields (2.41.0, identity-and-lifecycle I4, PR 2)
+
+*Numbered 110: §109 is critique plan row CR12's, built in parallel.*
+
+§104 built the provider's half of a cancellable rule and said not to declare one until the gateways mint. This
+release builds the gateway's half. **Nothing changes until you turn it on**: `gateway_mint_call_mandates` defaults to
+`false`.
+
+- **New, off by default: `gateway_mint_call_mandates`** (env `GOSSIP_GATEWAY_MINT_CALL_MANDATES`). On, every
+  protected call the gateway dispatches — through `/mcp`, `/a2a`, `/gateway/llm/*`, a companion's route — carries,
+  in its caller envelope's `cm`, a `call:` mandate the gateway issues to itself for that one call (scope
+  `call:c{n}`, `n` the envelope's id), with its possession proof and first checkpoint. Before the envelope is sent
+  the gateway writes two records **durably** (on the WAL and fsynced, under `[persistence]`):
+  `call/{gateway}/c{n}/checkpoint` and `call/{gateway}/c{n}/window` (the window's end, signed under
+  `mycelium:call-window:v1\n`). An enforcing provider at this release admits the call under it and registers its
+  work, so the gateway can cancel it. **This is what a cancellable rule needs**: with the gateways of a fleet
+  minting, a `cancellable = true` rule stops refusing every call (§104) and admits the calls its gateways mint for.
+- **What it costs.** Per protected call: three signatures at the gateway (the mandate, its checkpoint, the
+  possession proof) and **two fsynced writes before the call is sent** — measured on loopback, an Apple M2 Max, SyncMode
+  `Flush`, n = 20, two runs: **15.7 / 25.2 ms p50, 31.5 / 34.2 ms p95** added to the call's dispatch
+  (`the_mints_records_are_on_disk_before_the_call_is_sent_or_nothing_is_sent`, printed); about 1 KiB more envelope
+  against the 8 KiB cap; and two `call/` records in the KV, gossiped, until they are collected.
+- **New refusal at the gateway: `call_mandate_not_durable`** (JSON-RPC **-32025**; HTTP **503** at a route that
+  answers a dispatch refusal over HTTP). The two records are not on disk — the WAL refuses appends — so the call is
+  **not sent**: a call the gateway could not cancel after a restart does not run. The grant a gateway claimed for it is
+  given back, as for every refusal before dispatch. An envelope that fits the 8 KiB cap only without its `call:`
+  mandate is refused `caller_context_too_large`, as before, and nothing of the mint is written.
+- **Four new `GossipConfig` fields:** `gateway_mint_call_mandates` (default `false`; refused by `validate()` under
+  `gateway_caller_profile = legacy`, which carries no envelope); `call_mandate_ttl_secs` (default **300**, the
+  window of each minted mandate — the most an uncancellable call runs; `validate()` refuses `0` and anything above
+  `GRANT_TTL_CAP_SECS` = 3 600); `max_drain_secs` (default **300**: how long past its window a `call:` mandate's
+  records are kept); `grant_retention_secs` (default **604 800**, 7 days: how long a grant's records are kept from
+  its issue; `validate()` refuses anything below 3 600). Envs `GOSSIP_CALL_MANDATE_TTL_SECS`,
+  `GOSSIP_MAX_DRAIN_SECS`, `GOSSIP_GRANT_RETENTION_SECS`. An exhaustive `GossipConfig` literal breaks (see §109).
+- **The cancel.** This release builds the gateway's revoke — the call's next checkpoint, its term revoked,
+  written durably — which a provider learns from the KV and acts on within its sweep (*F* / 20). **No door calls it
+  yet**: A2A `tasks/cancel`, MCP `notifications/cancelled` and the cancel-forward RPC are the row's next PR. Until
+  then a minted call is cancelled only at its window's end. Measured end to end on loopback, two nodes, *F* = 2 s:
+  the client answered `cancelled` 82 ms after the revoke was written (the test asserts under 2 s).
+- **How many calls a gateway holds.** It keeps each minted call in memory until its window's end + 2·skew, at
+  most `MAX_ISSUED_CALLS` (262 144); at that bound it mints nothing more — the call goes without `cm`, counted
+  `call_mints_refused` — so at the default 300 s window, swept each minute, a gateway mints for about 700 calls a second, sustained.
+  A provider holds at most 65 536 windows from one gateway (§100), about 218 a second at the default window.
+- **The gateway re-asserts its checkpoint.** A minting gateway watches its own `call/{self}/…/checkpoint` keys; when
+  one holds anything but what it wrote — another member's value, a tombstone, its own first checkpoint written back
+  over the cancel — it writes its newest again, past that value's stamp, and counts it (`GET /stats`
+  `call_checkpoints_reasserted`). What it holds is in memory: after a gateway restart nothing is re-asserted until
+  the gateway mints again (§100's ledger row stands for that case).
+- **A collector for the `call/` and `grant/` families.** Every node with an execution authority, or a mint, runs it
+  each minute. **`call/`**: a pair is collected past its window's end + 2·skew + `max_drain_secs`, read from its
+  verified `window` record — or, with none, past its verified checkpoint's issue + 3 600 s + 2·skew +
+  `max_drain_secs`; a pair neither of whose records verifies is never collected here (`call_records_unverifiable`).
+  **`grant/`**: a grant whose `issued` record verifies is collected — the request, the grant, its checkpoints, its
+  revocation, `consumed`, the use markers and releases (§106) — past the later of its window's end + 2·skew and
+  its issue + `grant_retention_secs`. The issuer deletes with a tombstone; any other node deletes only the value it
+  holds (`kv_delete_held`), so a newer write beats it. Counted: `call_records_collected`, `grant_records_collected`.
+  A build without `compliance` has no view of other members' keys, so its collector verifies — and collects — only
+  the records this node issued; another issuer's are left to that issuer and to `compliance` nodes.
+  **What changes:** a grant's records, which were kept for ever, **are gone 7 days after its issue**. An auditor that
+  reads `grant/` from the KV reads it before then, or raises `grant_retention_secs`; the evidence journal, which is
+  the audit record, is unchanged.
+- **Not collected, stated:** a grant request never answered, or refused (it has no `issued` record to read a
+  window from); and the door's own grant-use journal (`grants/uses.journal`, §106), which is still read whole at
+  every start and never compacted — I4's collector leaves it as it is, and its compaction is not built.
+- **New refusal at a provider: `door_cannot_stop`** (JSON-RPC **-32031**, `data.reason` `authority_not_established`,
+  `data.detail` `door_cannot_stop`, the door's stable name in `data.door`). The maintainer's decision of
+  2026-11-15: until the row's next PR builds their stop, a door that cannot stop a running call **refuses a call
+  under a cancellable rule**, so a cancel never claims to stop work it cannot. The doors:
+  - `bridged_mcp` — an **external MCP server's** tool, bridged with `connect_mcp_server`;
+  - `sdk_serve` — a kind served to an **SDK agent** over `GET /gateway/rpc/serve/{kind}`;
+  - `hosted_capability` — a **hosted component's** kind (`cap.invoke/{ns}/{name}`) through `rpc_rx`;
+  - `unstoppable_mcp_tool` — a tool registered with the new **`McpHandle::register_mcp_tool_unstoppable`**, which
+    the wasm host now uses for its bridge (a begun guest call is never interrupted).
+
+  **A cancellable rule over an external MCP tool, an SDK-served kind or a hosted component stops working until the
+  next PR** — every call it permits is refused there, with nothing forwarded, streamed or run, `execution: none` in
+  the journal and a claimed grant given back at the provider. Under any rule that is not cancellable these doors
+  serve as before. Counted: `mycelium_provider_door_cannot_stop_total{door}` (feature `metrics`).
+- **Not refused, stated: an application's own `rpc_rx` receiver.** A cancel stops it only if its loop races
+  `RpcRequest::authority_lapsed()`; this crate cannot tell whether it does, so it admits a cancellable call there.
+  No companion's receiver races it at this release. Declare a cancellable rule only over a kind whose receiver
+  stops when its authority lapses.
+- **`mycelium-reason`: a cancelled call is final.** The router read any error reply as a failed attempt and tried
+  the next provider — a new envelope and a new `call:` term the cancel does not cover, so a cancelled call would
+  run again. It now stops at a reply with `data.reason` `cancelled` (stopped while it ran) or `data.detail`
+  `call_mandate_not_established` with `data.cause` `revoked` (cancelled before it ran), with the new
+  `RouteError::Cancelled { provider, detail, failures }` — an exhaustive `match` on `RouteError` breaks — answered
+  `409` (`error: cancelled`) by `/gateway/reason/route` and the OpenAI-compatible façade.
+- **The give-back on `call_mandate_not_established` is still not honoured at the gateway** (§104). It needs every
+  provider that bridges an MCP server at a version that rewrites a server's reply in that shape — this release and
+  later — and no release has yet stated that floor. Unchanged here.
+- **Mixed versions.** A gateway that mints in front of a provider at 2.40 or before: the provider keeps `cm` among
+  the envelope's unknown fields and runs the call unregistered — not cancellable, and not refused. A provider at
+  this release behind a gateway that does not mint: a cancellable rule refuses as §104 says. Turn the mint on once
+  every provider a gateway reaches is at this release.
+- **Compiler:** `GatewayDispatchError` (`#[non_exhaustive]`) gained `CallNotDurable`; `McpHandle` gained
+  `register_mcp_tool_unstoppable`; `GossipConfig` gained the four fields above; `mycelium-reason`'s `RouteError`
+  gained `Cancelled`. Wire **v12** unchanged; the `call/` records are new values under a prefix §100 already owns.
+- **Check:** with `gateway_mint_call_mandates = true`, `curl -s http://GATEWAY:PORT/stats | jq '{call_mints, call_mints_refused, call_checkpoints_reasserted, call_records_collected}'`
+  shows the mints after a protected call, and `call/node:GATEWAY/` holds its two records; a cancellable rule over a
+  bridged tool answers `door_cannot_stop`.
+- **Code:** `src/agent/call_issuer.rs` (`mint`, `record`, `revoke_call`, `reassert`, `collect`),
+  `src/agent/gateway_caller.rs` (`frame_minting`, `gateway_rpc_call_with_mandate`), `src/agent/provider_enforcement.rs`
+  (`Door`, `derive_call`), `mycelium-core/src/config.rs`, `mycelium-reason/src/route.rs` (`is_cancelled`). Tests:
+  `src/agent/call_mint_tests.rs`, `the_doors_that_cannot_stop_a_call_refuse_one_under_a_cancellable_rule_by_name`
+  (`src/agent/call_admission_tests.rs`), `a_cancelled_call_is_not_retried_on_the_next_provider`
+  (`mycelium-reason/tests/reason.rs`).
+
 ## 111. `ca_cert_pem` must hold exactly one certificate; `tls ca` names the fleet and the generation; a certificate's issuer is its CA's subject (unreleased, identity-and-lifecycle I2, PR 1)
 
 *Numbered 111 because open pull requests hold §109 (#793, CR12) and §110 (I4's PR 2) at the time of writing; the
