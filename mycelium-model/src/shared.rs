@@ -53,8 +53,8 @@ thread_local! {
     static FILTERS: RefCell<HashMap<Option<Vec<Node>>, Filter>> = RefCell::new(HashMap::new());
 }
 
-type ChoiceKey = (Val, Val, Vec<(u64, Val)>, u64);
-type AcceptKey = (Acc, u64, Val, Node, u64);
+type ChoiceKey = (Val, Val, Vec<(u64, Val)>, u64, Option<Vec<Made>>);
+type AcceptKey = (Acc, u64, Val, Node, u64, Made);
 
 /// The voters a proposal counts, as node hashes; `None`: no filter.
 pub type Filter = Option<std::rc::Rc<[u64]>>;
@@ -86,12 +86,53 @@ fn node(hash: u64) -> Node {
     (0..=Node::MAX).find(|n| id_hash(*n) == hash).expect("the engine returned a proposer the model never named")
 }
 
+/// The predecessor's group name in the engine, and the successor's.
+pub const PREDECESSOR: &str = "pred";
+pub const SUCCESSOR: &str = "succ";
+
+/// Where an acceptance was made — the engine's `MadeIn` (critique plan CR30), over the model's two groups.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Made {
+    /// Not known: a node that does not record it (before 2.41.0, or restarted from a record without it).
+    #[default]
+    Unknown,
+    /// Outside any electorate group.
+    NoGroup,
+    /// In the predecessor.
+    Predecessor,
+    /// In the successor.
+    Successor,
+}
+
+impl Made {
+    fn to_engine(self) -> engine::Made {
+        match self {
+            Made::Unknown => engine::Made::Unknown,
+            Made::NoGroup => engine::Made::NoGroup,
+            Made::Predecessor => engine::Made::Group(PREDECESSOR.to_string()),
+            Made::Successor => engine::Made::Group(SUCCESSOR.to_string()),
+        }
+    }
+
+    fn of_engine(m: &engine::Made) -> Self {
+        match m {
+            engine::Made::Unknown => Made::Unknown,
+            engine::Made::NoGroup => Made::NoGroup,
+            engine::Made::Group(g) if g == PREDECESSOR => Made::Predecessor,
+            engine::Made::Group(g) if g == SUCCESSOR => Made::Successor,
+            engine::Made::Group(g) => panic!("the engine returned a group the model never named: {g}"),
+        }
+    }
+}
+
 /// One acceptor's memory of the slot.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Acc {
     pub promised:    u64,
     pub promised_to: Option<Node>,
     pub accepted:    Option<(u64, Val)>,
+    /// Where `accepted` was made, as the engine keeps it.
+    pub made_in:     Made,
 }
 
 impl Acc {
@@ -100,6 +141,7 @@ impl Acc {
             promised:    self.promised,
             promised_to: self.promised_to.map(id_hash),
             accepted:    self.accepted.map(|(b, v)| (b, bytes(v))),
+            made_in:     self.made_in.to_engine(),
         }
     }
 
@@ -110,36 +152,51 @@ impl Acc {
             promised:    after.promised,
             promised_to: after.promised_to.map(node),
             accepted:    after.accepted.as_ref().map(|(b, env)| (*b, val(env))),
+            made_in:     Made::of_engine(&after.made_in),
         }
     }
 }
 
-type Promise = (Acc, Option<Option<(u64, Val)>>);
+type Promise = (Acc, Option<(Option<(u64, Val)>, Made)>);
 
-/// The engine's `prepare_slot`: the acceptor afterwards and, when it promised, what it had accepted. Cached per
-/// thread, as every bridge function is: the engine's function is pure, and runs once per distinct input.
-pub fn prepare(acc: &Acc, ballot: u64, proposer: Node, floor: u64) -> Promise {
+/// The engine's `prepare_slot_tagged`: the acceptor afterwards and, when it promised, what it had accepted and
+/// where that was made. Cached per thread, as every bridge function is: the engine's function is pure, and runs
+/// once per distinct input.
+pub fn prepare_tagged(acc: &Acc, ballot: u64, proposer: Node, floor: u64) -> Promise {
     let key = (acc.clone(), ballot, proposer, floor);
     if let Some(hit) = PREPARES.with(|cache| cache.borrow().get(&key).cloned()) { return hit; }
     let (after, answer) = engine::prepare(&acc.to_engine(), SLOT, ballot, id_hash(proposer), floor);
-    // Both halves of the answer are the engine's: the acceptor it left behind, and what its promise reports.
+    // Every part of the answer is the engine's: the acceptor it left behind, what its promise reports, and where
+    // that was made.
     let out = match answer {
-        engine::Prepared::Promised(reported) =>
-            (Acc::from_engine(&after), Some(reported.map(|(b, env)| (b, val(&env))))),
+        engine::Prepared::Promised(reported, made_in) =>
+            (Acc::from_engine(&after), Some((reported.map(|(b, env)| (b, val(&env))), Made::of_engine(&made_in)))),
         engine::Prepared::Refused(_) => (Acc::from_engine(&after), None),
     };
     PREPARES.with(|cache| cache.borrow_mut().insert(key, out.clone()));
     out
 }
 
-/// The engine's `claim_envelope`: the acceptor afterwards when it accepted `value` at `ballot`.
-pub fn accept(acc: &Acc, ballot: u64, value: Val, proposer: Node, floor: u64) -> Option<Acc> {
-    let key = (acc.clone(), ballot, value, proposer, floor);
+/// [`prepare_tagged`] without where the report was made.
+pub fn prepare(acc: &Acc, ballot: u64, proposer: Node, floor: u64) -> (Acc, Option<Option<(u64, Val)>>) {
+    let (after, answer) = prepare_tagged(acc, ballot, proposer, floor);
+    (after, answer.map(|(reported, _)| reported))
+}
+
+/// The engine's `claim_envelope_in`: the acceptor afterwards when it accepted `value` at `ballot`, the acceptance
+/// recorded as made in `made_in`.
+pub fn accept_in(acc: &Acc, ballot: u64, value: Val, proposer: Node, floor: u64, made_in: Made) -> Option<Acc> {
+    let key = (acc.clone(), ballot, value, proposer, floor, made_in);
     if let Some(hit) = ACCEPTS.with(|cache| cache.borrow().get(&key).cloned()) { return hit; }
-    let out = engine::accept(&acc.to_engine(), SLOT, ballot, &bytes(value), id_hash(proposer), floor)
+    let out = engine::accept(&acc.to_engine(), SLOT, ballot, &bytes(value), id_hash(proposer), floor, &made_in.to_engine())
         .map(|after| Acc::from_engine(&after));
     ACCEPTS.with(|cache| cache.borrow_mut().insert(key, out.clone()));
     out
+}
+
+/// [`accept_in`] for a proposal outside any electorate group — the engine's cluster-scoped lock.
+pub fn accept(acc: &Acc, ballot: u64, value: Val, proposer: Node, floor: u64) -> Option<Acc> {
+    accept_in(acc, ballot, value, proposer, floor, Made::NoGroup)
 }
 
 /// What a proposer does after its promise quorum answered.
@@ -152,10 +209,23 @@ pub enum Choice {
 
 /// The engine's phase-1 rule (`set_aside_finished`, then `phase1_choice`) over the quorum's reports.
 pub fn phase1(own: Val, current: Val, reports: &[(u64, Val)], ended: u64) -> Choice {
-    let key: ChoiceKey = (own, current, reports.to_vec(), ended);
+    choose(own, current, reports, ended, None)
+}
+
+/// The engine's phase-1 rule for a carry ballot into the successor that asked where each report was made
+/// (`carry_hears` first): `made_in[i]` is where `reports[i]` was made; the lineage is the successor and the
+/// predecessor.
+pub fn phase1_carry(own: Val, current: Val, reports: &[(u64, Val)], made_in: &[Made], ended: u64) -> Choice {
+    choose(own, current, reports, ended, Some(made_in))
+}
+
+fn choose(own: Val, current: Val, reports: &[(u64, Val)], ended: u64, made_in: Option<&[Made]>) -> Choice {
+    let key: ChoiceKey = (own, current, reports.to_vec(), ended, made_in.map(<[Made]>::to_vec));
     if let Some(hit) = CHOICES.with(|cache| cache.borrow().get(&key).copied()) { return hit; }
     let reported: Vec<(u64, Bytes)> = reports.iter().map(|(b, v)| (*b, bytes(*v))).collect();
-    let out = match engine::phase1(SLOT, &bytes(own), &bytes(current), &reported, ended) {
+    let made: Option<Vec<engine::Made>> = made_in.map(|m| m.iter().map(|x| x.to_engine()).collect());
+    let hears = made.as_deref().map(|m| engine::CarryHears { made_in: m, group: SUCCESSOR, lineage: &[SUCCESSOR, PREDECESSOR] });
+    let out = match engine::phase1(SLOT, &bytes(own), &bytes(current), &reported, ended, hears.as_ref()) {
         engine::Phase1::Keep => Choice::Keep,
         engine::Phase1::Blocked => Choice::Blocked,
         engine::Phase1::Adopt(ballot, env) => {

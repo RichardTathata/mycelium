@@ -1317,7 +1317,7 @@ jobs:
     # `mycelium-model/src/{slot,migration}.rs`, the number of states each explores is pinned in
     # `mycelium-model/tests/model.rs`, and `docs/operations/what-is-proven.md` states both. The `planted_*` tests
     # are the proof the model can fail: one fault in each area, and a counterexample found.
-    # Release, because the checker's inner loop is the whole cost (about 43 million states); without the release
+    # Release, because the checker's inner loop is the whole cost (about 54 million states); without the release
     # profile's LTO and single codegen unit, which lengthen the build more than they shorten the run.
     name: Model (acceptor, Stateright)
     runs-on: ubuntu-latest

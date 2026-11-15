@@ -58,6 +58,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   this release, and times out without one. Until then, migrate between electorates that share no member, or let
   the fleet converge on the predecessor's decisions before retiring it.
 
+  **Modelled** (CR10's model, which calls this rule — `carry_hears`, `prepare_slot_tagged`, `claim_envelope_in`):
+  with every node recording, the migration where the model found it decides one value (584,220 states; the
+  contended configuration 7,938,958 in CI, and at ballots up to 3, 110,929,684 once by hand), and so does a mixed
+  fleet whose carrier holds the chosen value; with the stale acceptance unrecorded and a carrier that does not
+  hold it, the fallback is the old rule and the model finds the old counterexample — the statement above, as a
+  trace.
+
 ### Security
 
 - **A member can no longer re-arm a used grant** (critique plan row CR2, first PR; the owner-signed rule;
@@ -323,7 +330,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   δ apart (*no holder is granted while another is inside its own deadline less δ*), and the electorate migration
   (*nothing is decided by a successor before the predecessor's retirement is visible*, checked as *the two
   groups decide one value*). Nine finite configurations, one slot, three or four nodes, each explored in full —
-  about 43 million states, each run's count pinned in its test — and tests that plant one fault per area (a vote
+  about 54 million states, each run's count pinned in its test — and tests that plant one fault per area (a vote
   counted from outside the electorate, a lease ended with no margin, a successor deciding early) and require a
   counterexample, so CI shows the model can fail. The model calls the engine's own decision functions — `prepare_slot`, the accept rule, the
   phase-1 rule, `read_slot`, the vote filter, the electorate's quorum — through a new cargo feature of `mycelium`,
@@ -336,10 +343,11 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   not hold (found by the model 2026-11-14 and confirmed on the engine the same day):** between
   overlapping electorates, the successor's carry can adopt a stale lower-ballot acceptance a shared member made in
   the predecessor, and decide it while the predecessor decided another value. It needs the predecessor's decision
-  record not yet at the carry's quorum, and the engine counts it afterwards (`commit_conflicts`). CI holds the
-  trace as a test that expects it; nothing in the engine is changed here — the fix, decided on 2026-11-14 (the
-  acceptor record carries the group an acceptance was made in, and a carry hears only the successor's), is its
-  own change (`what-is-proven.md` § *Not yet shown*, the carry row). No behaviour and no
+  record not yet at the carry's quorum, and the engine counts it afterwards (`commit_conflicts`). The fix is #787,
+  behind a switch (below); the model calls its rule (`carry_hears`, `prepare_slot_tagged`, `claim_envelope_in`) and,
+  with every node recording, holds the two groups to one value where it found the counterexample; with nobody
+  recording, or the stale acceptance unrecorded and a carrier that does not hold the chosen value, the counterexample
+  is pinned as one (`what-is-proven.md`, the model row and the carry row). No behaviour and no
   public item of a shipped build changes; `Cargo.lock` gains Stateright and its dependencies, for that crate only.
   CI job `model`.
 - **N5: the agent guide the binary serves** (`docs/plans/identity-and-lifecycle.md` N5). `mycelium skills get fleet`

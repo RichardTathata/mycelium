@@ -17,7 +17,7 @@ documentation, `mycelium-model/src/lib.rs` — this page does not repeat those t
 |---|---|---|---|
 | Slot reuse after a release or a lapsed lease | at most one value decided per slot and life (`slot::ONE_VALUE_PER_LIFE`) | `mycelium-model/src/slot.rs`, `SlotModel::{acceptor, reuse_after_lapse, reuse_after_release, reuse}` | every message its own step, except `reuse` (a ballot is one step) |
 | The lease's wall-clock end under a skew bound δ | no holder granted while another is inside its own deadline less δ (`slot::GRANT_OUTSIDE_SKEW`, `slot::ONE_HOLDER`) | `SlotModel::{lease, lease_edge}` | a ballot is one step; each clock, each record learned and each release its own |
-| The electorate migration | the two groups decide one value (`migration::ONE_VALUE_ACROSS`); a visible completion proves the retirement decided and the carry done (`COMPLETION_PROVES`); and the row's sentence, nothing decided by a successor before the predecessor's retirement is visible, as guard assertions (`RETIREMENT_FIRST`, `COMPLETION_FIRST` — see below) | `mycelium-model/src/migration.rs`, `MigrationModel::{rolling, stalled_carry, contended, overlap}` | the predecessor's ballots message by message; the successor's one step each; genesis, retirement and completion each a certificate of votes |
+| The electorate migration | the two groups decide one value (`migration::ONE_VALUE_ACROSS`); a visible completion proves the retirement decided and the carry done (`COMPLETION_PROVES`); and the row's sentence, nothing decided by a successor before the predecessor's retirement is visible, as guard assertions (`RETIREMENT_FIRST`, `COMPLETION_FIRST` — see below) | `mycelium-model/src/migration.rs`, `MigrationModel::{rolling, stalled_carry, contended, overlap, overlap_shared_carrier}`, each with a `Recording` (who records where an acceptance was made) | the predecessor's ballots message by message; the successor's one step each; genesis, retirement and completion each a certificate of votes |
 
 The bound of each configuration is its constructor; the number of states it explores is pinned in
 `mycelium-model/tests/model.rs`, beside the reachability properties the run must carry; both are restated in
@@ -48,15 +48,36 @@ what confirm it.
 Why the first bound missed it: `contended` had ballots to 2 and the carry runs above every ballot the manifests
 name, so a ballot-2 decision could never be carried. At ballots to 3 that configuration is 110,929,684 states
 (about eight minutes on twelve cores) — not a CI run. CI holds the trace in `MigrationModel::overlap` (ballots
-fixed, node 0 a bystander to the migration's own steps) as
-`found_a_carry_adopts_a_stale_acceptance_of_an_overlapping_member_and_the_groups_decide_two_values`, **a test
-that expects the counterexample**. Ledger:
+fixed, node 0 a bystander to the migration's own steps). Ledger:
 `docs/operations/what-is-proven.md#carry-across-overlapping-electorates-keeps-value`.
 
-**The fix is decided (maintainer, 2026-11-14) and built in #787** (critique plan CR30): every acceptance carries
-the group it was made in, and a carry that asks hears only acceptances made in the successor when every report
-names its group; a report with no group makes it hear everything, as today. After #787 merges, a follow-up gives
-each acceptance in the model its group and inverts the expected-failure test.
+**The fix, #787 (critique plan CR30), and the model of it (2026-11-15).** Every acceptance carries the group it
+was made in, and a carry whose carrier has `consensus_record_acceptance_group` on asks each promiser where its
+acceptance was made and hears by `carry_hears`: when every report names a group of the successor's lineage, only
+the successor's; otherwise every report, as before. The model calls all of it — `prepare_slot_tagged` reports
+where the acceptance was made and leaves it on the acceptor, `claim_envelope_in` records it, `carry_hears` sits
+in the phase-1 wrapper where `prepare_phase` puts it — and `MigrationModel::recording` says which nodes record.
+A node that does not keeps `Unknown`: in the engine that is a node before 2.41.0, or one restarted from a record
+written without the group (memory keeps the group from 2.41.0 whatever the switch says), and its carry does not
+ask.
+
+| Recording | Configuration | Result | Test |
+|---|---|---|---|
+| everyone | `overlap` | holds, 584,220 states | `with_every_node_recording_a_carry_between_overlapping_electorates_keeps_the_predecessors_value` |
+| everyone | `contended`, ballots to 2 | holds, 7,938,958 | `with_every_node_recording_a_contended_migration_keeps_one_value` |
+| everyone | `contended`, ballots to 3 | holds, 110,929,684, 486 s on twelve cores | run once by hand, 2026-11-15; not in CI |
+| all but the stale member (1); carrier a shared member holding the chosen value | `overlap_shared_carrier` | holds: one report is `Unknown`, the carry hears all of them, and the carrier's own copy of the chosen value is the highest — the reviewer's R6c | `with_the_stale_acceptance_unrecorded_a_carrier_holding_the_chosen_value_falls_back_and_keeps_it` |
+| nobody (the default in 2.41.0) | `overlap` | **breaks**, the finding | `with_the_switch_off_a_carry_adopts_a_stale_acceptance_of_an_overlapping_member_and_the_groups_decide_two_values` (expects it) |
+| all but the stale member (1); carrier node 3 | `overlap` | **breaks**: the fallback is the old rule, and the quorum {3, 1} hears `v1`@1 alone — the bound `carry_hears` states | `with_the_stale_acceptance_unrecorded_a_carry_falls_back_to_the_old_rule_and_the_finding_stands` (expects it) |
+
+Run once by hand and not pinned: `rolling` and `stalled_carry` with everyone recording hold (4,277,735 and
+13,549,301 — the same counts as with nobody recording: where an acceptance was made is a function of what was
+accepted, at these bounds, so recording adds no state); `overlap` with every node but the carrier recording breaks
+(the carrier's carry does not ask). Both planted wrapper faults were seen failing first: with `carry_hears` left out
+of the wrapper, and with `claim_envelope_in` given `Unknown`, the bridge tests and the every-node `overlap` run fail.
+
+The model's half was promised in #784 and is done: the expected-failure test that stood for the finding is now
+the switch-off case, and the switch-on cases are explored in full.
 
 **A fix the model passed and that is wrong.** A model-side switch — the carry's phase 1 counting the manifests'
 highest acceptance as one more report — held in `overlap` and in the full configuration at ballots to 3. It is
@@ -105,6 +126,7 @@ What caught each, at these bounds:
 | `set_aside_finished` dropping nothing; `read_slot` ignoring a marker | the bridge; reachability only (no reuse happens) |
 | **one value per ballot in the accept rule** | **the bridge test only** — no model run or pin moves |
 | **the floor in `claim` and in `prepare_slot`** | the bridge; in the model runs **a pin only** |
+| where an acceptance was made — kept by `claim_envelope_in`, reported by `prepare_slot_tagged` — and the carry's rule (`carry_hears`) | the bridge (`where_an_acceptance_was_made_…`, `a_carry_hears_…`); `ONE_VALUE_ACROSS` in `overlap` with every node recording (both seen failing with the fault planted in the wrapper) |
 | **an acceptor refuses a proposal while it holds a live decision of another value** (the model's copy) | **a pin only** |
 | **a retirement promise closes the group** (the model's copy) | **pins only** |
 | **the carry runs above the manifests' ballots** (the model's copy) | `ONE_VALUE_ACROSS` in `contended`; **a pin only** in `rolling` |
@@ -129,6 +151,10 @@ made runs **grow without end** rather than fail (one reached 37 GB): the CI job 
 - **`RETIREMENT_FIRST` and `COMPLETION_FIRST` as searches.** They read the flags the model's own guard read in
   the step that set them: no interleaving can break them, only a guard switched off. They are guard
   assertions. `ONE_VALUE_ACROSS` and `COMPLETION_PROVES` are what the checker searches for.
+- **Where an acceptance was made, beyond two groups and a restart.** The model has the predecessor and the
+  successor only, so a group outside the lineage, an acceptance made outside every group in the migration, and a
+  grandparent's lineage are not reached; `Unknown` stands for a pre-2.41.0 node or a restart from a record without
+  the group, and no restart is modelled; the record's group is never rewritten (the guard's `group_rewritten`).
 - **In the migration:** a completion vote requires the carry done, as one global fact — no acceptor in the
   engine checks that; it is the completer's discipline (`src/agent/migration.rs`). There is one carrier and it
   is outside the predecessor; a second, racing or restarted completer never occurs; the carry-conflict path
