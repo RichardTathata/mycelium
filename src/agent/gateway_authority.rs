@@ -1217,6 +1217,11 @@ impl ExecutionAuthority {
         assessment
     }
 
+    /// The clock model's skew *s*, ms — what D-5's retention floor counts twice (identity-and-lifecycle I4).
+    pub(crate) fn skew_ms(&self) -> u64 {
+        self.state.lock().unwrap_or_else(|e| e.into_inner()).gate.clock().skew_ms
+    }
+
     /// Install a later epoch at the protected resource. Never goes backwards.
     pub fn install_epoch(&self, epoch: u64) -> bool {
         self.state.lock().unwrap_or_else(|e| e.into_inner()).gate.install_epoch(epoch)

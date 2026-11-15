@@ -768,6 +768,7 @@ pub(crate) async fn release_grant_claim_after(ctx: &Arc<TaskCtx>, preflight: &Pr
         // nothing ran, so the use is given back without trusting any provider.
         Err(
             e @ (GatewayDispatchError::Exchange(_)
+            | GatewayDispatchError::CallNotDurable
             | GatewayDispatchError::ContextTooLarge
             | GatewayDispatchError::ProviderWithoutContext(_)
             | GatewayDispatchError::MissingContext),
@@ -1691,7 +1692,8 @@ pub(crate) fn observed_execution(
         Ok(_) => Execution::Completed,
         Err(GatewayDispatchError::ProviderWithoutContext(_))
         | Err(GatewayDispatchError::ContextTooLarge)
-        | Err(GatewayDispatchError::Exchange(_)) => Execution::None,
+        | Err(GatewayDispatchError::Exchange(_))
+        | Err(GatewayDispatchError::CallNotDurable) => Execution::None,
         Err(_) => Execution::Unknown,
     }
 }
@@ -1870,6 +1872,8 @@ pub(super) fn dispatch_refused(e: GatewayDispatchError) -> Response {
         GatewayDispatchError::ContextTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
         // I5: the IdP, upstream of this gateway, did not give the exchanged token.
         GatewayDispatchError::Exchange(_) => StatusCode::BAD_GATEWAY,
+        // I4: this gateway's disk would not take the call's `call:` records — the node's state, not the request's.
+        GatewayDispatchError::CallNotDurable => StatusCode::SERVICE_UNAVAILABLE,
         _ => StatusCode::PRECONDITION_FAILED,
     };
     (status, Json(json!({ "ok": false, "error": e.reason(), "detail": e.to_string(), "provider": provider })))

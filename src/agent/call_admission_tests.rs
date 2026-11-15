@@ -22,6 +22,8 @@ use std::time::Duration;
 const LONG_WINDOW_MS: u64 = 3_000_000;
 const MCP: &str = "mcp.invoke";
 const SKILL: &str = "skill.invoke";
+const CUSTOM: &str = "depot.custom";
+const HOSTED: &str = "cap.invoke/depot/thing";
 
 struct Node {
     a: Arc<GossipAgent>,
@@ -103,7 +105,12 @@ async fn node_with(opts: Opts) -> Node {
         cfg.gateway_caller_profile = crate::config::GatewayCallerProfile::Legacy;
     }
     cfg.gateway_identity_issuer = Some("gw".into());
-    cfg.gateway_named_tokens = vec![crate::config::GatewayNamedToken { name: "alice".into(), token: "alice-secret".into(), scopes: vec!["mcp:invoke".into()] }];
+    cfg.gateway_named_tokens = vec![
+        crate::config::GatewayNamedToken { name: "alice".into(), token: "alice-secret".into(), scopes: vec!["mcp:invoke".into()] },
+        crate::config::GatewayNamedToken { name: "sdk".into(), token: "sdk-secret".into(), scopes: vec!["mesh:serve".into()] },
+    ];
+    // An operator's protected kind, served to an SDK agent over `rpc/serve` (the doors that cannot stop a call).
+    cfg.protected_rpc_kinds = vec![CUSTOM.into()];
     let a = Arc::new(GossipAgent::new(id.clone(), cfg));
     let me = id.to_string();
     a.with_evidence_journal(EvidenceJournal::open(dir.join("evidence.log"), EvidenceProfile::Strict).unwrap());
@@ -115,7 +122,17 @@ async fn node_with(opts: Opts) -> Node {
             .allow(Rule::new("*", "tools/call", format!("tool:slow@{me}")).cancellable())
             .allow(Rule::new("*", "tools/call", format!("tool:plain@{me}")))
             .allow(Rule::new("*", "tools/call", format!("tool:both@{me}")).requiring_grant().cancellable())
-            .allow(Rule::new("*", "skill.invoke", format!("skill:depot/long@{me}")).cancellable()),
+            .allow(Rule::new("*", "skill.invoke", format!("skill:depot/long@{me}")).cancellable())
+            // The doors that cannot stop a running call (the maintainer's decision of 2026-11-15): a bridged MCP
+            // server's tool, a tool registered as unstoppable, a hosted capability's kind, an SDK-served kind — each
+            // cancellable, and the unstoppable tool's twin not.
+            .allow(Rule::new("*", "tools/call", format!("tool:remote@{me}")).cancellable())
+            .allow(Rule::new("*", "tools/call", format!("tool:hosted@{me}")).cancellable())
+            .allow(Rule::new("*", "tools/call", format!("tool:hosted_plain@{me}")))
+            .map_action("cap.invoke", "*")
+            .allow(Rule::new("*", "cap.invoke", format!("cap:depot/thing@{me}")).cancellable())
+            .map_action(CUSTOM, "*")
+            .allow(Rule::new("*", CUSTOM, format!("res:x@{me}")).cancellable()),
     ));
     let mut entitlements = EntitlementTable::new();
     entitlements.entitle_grants(PrincipalId::new(node_principal(&id)).unwrap());
@@ -191,6 +208,16 @@ impl Node {
         let arguments = serde_json::json!({ "aisle": 4 });
         let payload = serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": name, "arguments": arguments}}).to_string().into_bytes();
         Call { kind: MCP, payload, claim: None, operation: "tools/call", resource: format!("tool:{name}@{}", self.a.node_id()), arguments }
+    }
+    /// A hosted capability's kind, as the wasm host serves it (`rpc_rx`), decided as `cap.invoke` on its `cap:` resource.
+    fn hosted(&self) -> Call {
+        let arguments = serde_json::json!({ "n": 1 });
+        Call { kind: HOSTED, payload: arguments.to_string().into_bytes(), claim: None, operation: "cap.invoke", resource: format!("cap:depot/thing@{}", self.a.node_id()), arguments }
+    }
+    /// The operator's protected kind, as an SDK agent serves it.
+    fn custom(&self) -> Call {
+        let resource = format!("res:x@{}", self.a.node_id());
+        Call { kind: CUSTOM, payload: b"work".to_vec(), claim: Some(resource.clone()), operation: CUSTOM, resource, arguments: serde_json::json!({ "payload_b64": "d29yaw==" }) }
     }
     fn skill(&self) -> Call {
         let resource = format!("skill:depot/long@{}", self.a.node_id());
@@ -492,7 +519,7 @@ async fn a_cancel_reaches_an_in_process_serve_loop_through_authority_lapsed() {
 }
 
 /// **Every other way a call reaches a cancellable rule without a `call:` mandate is refused, by the same name.**
-/// No gateway mints yet (the row's next PR), so each of these doors carries none:
+/// A gateway that does not mint (`gateway_mint_call_mandates` off, the default), so each of these doors carries none:
 ///
 /// - **the gateway's `/mcp`**: its preflight permits and carries the rule's `cancellable`; the provider refuses;
 /// - **a member's own call** (`ServiceHandle::rpc_call`, a self envelope with no second slot);
@@ -647,4 +674,90 @@ fn a_bridged_servers_reply_shaped_like_call_mandate_not_established_gives_nothin
     let rewritten = super::mcp::as_tool_answer(answer("call_mandate_not_established"), &serde_json::json!(1));
     assert_eq!((rewritten["error"]["code"].as_i64(), rewritten["error"]["data"].is_null()), (Some(-32000), true), "{rewritten}");
     assert_eq!(super::http::pre_execution_refusal(rewritten.to_string().as_bytes()), None);
+}
+
+/// The refusal of a door that cannot stop a running call: -32031, `authority_not_established`, `door_cannot_stop`,
+/// with the door's stable name in `data.door`. `v` is a JSON-RPC answer or a plain receiver's refusal body.
+#[track_caller]
+fn assert_door_cannot_stop(v: &serde_json::Value, door: &str) {
+    let data = if v["error"].is_object() { &v["error"]["data"] } else { &v["data"] };
+    assert_eq!((data["reason"].as_str(), data["detail"].as_str(), data["door"].as_str()), (Some("authority_not_established"), Some("door_cannot_stop"), Some(door)), "{v}");
+}
+
+/// **The doors that cannot stop a running call refuse a call under a cancellable rule, by name** (the maintainer's
+/// decision of 2026-11-15, until I4's PR 3 builds their stop): the **bridged MCP loop** (an external MCP server's
+/// tool), a tool registered with **`register_mcp_tool_unstoppable`** (the wasm host's bridge: a begun guest call is
+/// never interrupted), a **hosted capability's kind** through `rpc_rx`, and the **SDK serve stream**. Each call
+/// carries an honest `cm`, so without this refusal it would be admitted and registered where a cancel claims a stop it
+/// cannot make. In each case nothing is forwarded, streamed or run, and the provider's journal says nothing ran; the
+/// unstoppable tool's twin under a rule that is **not** cancellable runs. Seen failing first: with the refusal taken
+/// out of `admit_after`, the bridged call was forwarded.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_doors_that_cannot_stop_a_call_refuse_one_under_a_cancellable_rule_by_name() {
+    let n = node().await;
+    let before = n.nothing_ran();
+    // The bridged MCP loop.
+    let (mock_port, _mock) = super::mcp::tests::spawn_mock_mcp_server(vec![serde_json::json!({"name": "remote", "inputSchema": {"type": "object"}})]).await;
+    let _bridge = n.a.mcp().connect_mcp_server(format!("http://127.0.0.1:{mock_port}/")).await.expect("bridged");
+    let (reply, _) = n.call(&n.tool("remote"), None, Cm::Honest).await;
+    assert_door_cannot_stop(&json(&reply), "bridged_mcp");
+    assert!(!String::from_utf8_lossy(&reply).contains("echo:remote"), "nothing was forwarded");
+    // A tool whose handler cannot stop what it started.
+    let ran = Arc::new(AtomicUsize::new(0));
+    let r = Arc::clone(&ran);
+    let _hosted = n.a.mcp().register_mcp_tool_unstoppable("hosted", serde_json::json!({"type": "object"}), move |_| {
+        r.fetch_add(1, Ordering::SeqCst);
+        async { Ok(serde_json::json!("ran")) }
+    });
+    let r = Arc::clone(&ran);
+    let _plain = n.a.mcp().register_mcp_tool_unstoppable("hosted_plain", serde_json::json!({"type": "object"}), move |_| {
+        r.fetch_add(1, Ordering::SeqCst);
+        async { Ok(serde_json::json!("ran")) }
+    });
+    let (reply, _) = n.call(&n.tool("hosted"), None, Cm::Honest).await;
+    assert_door_cannot_stop(&json(&reply), "unstoppable_mcp_tool");
+    assert_eq!(ran.load(Ordering::SeqCst), 0, "the unstoppable tool did not run under the cancellable rule");
+    let (reply, _) = n.call(&n.tool("hosted_plain"), None, Cm::Honest).await;
+    assert_eq!(json(&reply)["error"], serde_json::Value::Null, "under a plain rule it runs: {}", json(&reply));
+    assert_eq!(ran.load(Ordering::SeqCst), 1);
+    // A hosted capability's kind, through `rpc_rx` (the check runs inside `recv`): the receiver is handed nothing.
+    let mut rx = n.a.service().rpc_rx(HOSTED);
+    let handed = Arc::new(AtomicUsize::new(0));
+    let h = Arc::clone(&handed);
+    let receiver = tokio::spawn(async move {
+        while rx.recv().await.is_some() {
+            h.fetch_add(1, Ordering::SeqCst);
+        }
+    });
+    let hosted = n.hosted();
+    let (reply, _) = n.call(&hosted, None, Cm::Honest).await;
+    assert_door_cannot_stop(&json(&reply), "hosted_capability");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(handed.load(Ordering::SeqCst), 0, "the hosted kind's receiver was handed nothing");
+    receiver.abort();
+    // The SDK serve stream, read as an SDK agent reads it: the request is answered, never streamed.
+    let mut stream = reqwest::Client::new()
+        .get(format!("http://127.0.0.1:{}/gateway/rpc/serve/{CUSTOM}", n.http_port))
+        .bearer_auth("sdk-secret")
+        .send()
+        .await
+        .expect("the serve stream opens");
+    assert_eq!(stream.status(), 200);
+    let seen = Arc::new(std::sync::Mutex::new(String::new()));
+    let into = Arc::clone(&seen);
+    let reader = tokio::spawn(async move {
+        while let Ok(Some(c)) = stream.chunk().await {
+            into.lock().unwrap().push_str(&String::from_utf8_lossy(&c));
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let (reply, _) = n.call(&n.custom(), None, Cm::Honest).await;
+    assert_door_cannot_stop(&json(&reply), "sdk_serve");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let streamed = seen.lock().unwrap().clone();
+    assert!(!streamed.contains("d29yaw") && !streamed.contains("nonce"), "nothing was streamed: {streamed}");
+    reader.abort();
+    assert_eq!(n.authority.running_count(), 0, "nothing was registered");
+    assert_eq!(n.nothing_ran(), before + 4, "an execution record for each refusal says nothing ran");
+    n.a.shutdown().await;
 }

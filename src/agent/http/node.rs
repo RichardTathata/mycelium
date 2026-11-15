@@ -273,6 +273,17 @@ pub(super) async fn stats_handler(State(ctx): State<Arc<HttpCtx>>) -> impl IntoR
         body["call_checkpoints_stale"] = json!(a.map_or(0, |a| a.call_checkpoints_stale()));
         body["call_checkpoints_missing"] = json!(a.map_or(0, |a| a.call_checkpoints_missing()));
         body["call_windows_refused"] = json!(a.map_or(0, |a| a.call_windows_refused()));
+        // Identity-and-lifecycle I4, PR 2: the gateway's mints — made, and not made (no derivable operation, or its
+        // table full); its checkpoints written again over another value; and what the collector removed, and the
+        // `call/` pairs neither of whose records verifies, which it never collects.
+        let c = &ctx.agent_ctx.call_issuer;
+        let n = |v: &std::sync::atomic::AtomicU64| v.load(std::sync::atomic::Ordering::Relaxed);
+        body["call_mints"] = json!(n(&c.mints));
+        body["call_mints_refused"] = json!(n(&c.mints_refused));
+        body["call_checkpoints_reasserted"] = json!(n(&c.reasserted));
+        body["call_records_collected"] = json!(n(&c.call_records_collected));
+        body["call_records_unverifiable"] = json!(n(&c.call_records_unverifiable));
+        body["grant_records_collected"] = json!(n(&c.grant_records_collected));
     }
     // Identity-and-lifecycle I5: exchanged OIDC tokens refused at this provider's replay window, by reason — `replayed`
     // (presented twice, by any gateway), `provider_window_full` (the provider's 262 144), `window_full` (a gateway's

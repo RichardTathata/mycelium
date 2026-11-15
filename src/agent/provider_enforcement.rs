@@ -63,7 +63,11 @@
 //!
 //! The node serves protected work through five receivers, and each calls [`check`]: `rpc_rx` (`rpc.rs`), the MCP
 //! tool loop and the bridged MCP loop (`mcp.rs`), the SDK serve stream (`http/mesh.rs`), and the built-in
-//! `llm.invoke` provider (`llm.rs` — until #781's review found it, F1, it verified the caller and ran).
+//! `llm.invoke` provider (`llm.rs` — until #781's review found it, F1, it verified the caller and ran). Each names
+//! itself ([`Door`]); a call under a **cancellable** rule is refused (`door_cannot_stop`) at a door that cannot stop
+//! it once it runs — the bridged MCP loop, the SDK serve stream, a tool registered with
+//! `register_mcp_tool_unstoppable` (the wasm host's bridge), and a hosted capability's kind through `rpc_rx` — until
+//! identity-and-lifecycle I4's PR 3 builds their stop (the maintainer's decision of 2026-11-15).
 //!
 //! **That is not every receiver** (#785's review; each a *not built* row on `docs/operations/what-is-proven.md`):
 //!
@@ -280,7 +284,7 @@ pub(crate) enum Checked {
 /// built-in `llm.invoke` provider runs each call on a task of its own and awaits it there.
 /// `already_verified`: the receive boundary ran `gateway_caller::verify_received` on this request first, so its
 /// counting is done; `false` where this check is the request's first verification (the native MCP loop).
-pub(crate) async fn check(ctx: &Arc<TaskCtx>, req: &RpcRequest, already_verified: bool) -> Checked {
+pub(crate) async fn check(ctx: &Arc<TaskCtx>, req: &RpcRequest, already_verified: bool, door: Door) -> Checked {
     let enforcing = ctx.provider_enforcement.load(Ordering::Acquire);
     let budget = ctx.cohort_budget.get();
     if !enforcing && budget.is_none() {
@@ -339,7 +343,7 @@ pub(crate) async fn check(ctx: &Arc<TaskCtx>, req: &RpcRequest, already_verified
     let params = if meta.is_empty() { Value::Null } else { json!({ "_meta": meta }) };
     let decided =
         super::http::ae_decide(ctx, Some(&resolved), &operation, &resource, &arguments, &params, ENFORCEMENT_POINT_PROVIDER, None).await;
-    let call = AdmittedCall { principal, mandate, operation, resource, arguments, established_at_preflight: false, permit: None, slot2, cancellable: false };
+    let call = AdmittedCall { principal, mandate, operation, resource, arguments, established_at_preflight: false, permit: None, slot2, cancellable: false, unstoppable_at: door.cannot_stop(kind) };
     match decided {
         super::http::Decided::Done(p) => Checked::Done(after_preflight(ctx, call, p).await),
         super::http::Decided::Settle(settling) if settling.will_claim() => {
@@ -399,6 +403,45 @@ struct AdmittedCall {
     /// The permit was decided by a cancellable rule (`Preflight::Proceed`'s `cancellable`, D-2): without an
     /// established `call:` mandate the call is refused.
     cancellable: bool,
+    /// The door serving the call cannot stop it once it runs ([`Door::cannot_stop`]): under a cancellable rule the
+    /// call is refused (`door_cannot_stop`), so a cancel never claims to stop work it cannot.
+    unstoppable_at: Option<&'static str>,
+}
+
+/// **Which serve loop is asking** (identity-and-lifecycle I4; the maintainer's decision of 2026-11-15). A
+/// cancellable rule's call may run only where a cancel can stop it, and three doors cannot stop a call once it
+/// runs, until I4's PR 3 builds their stop: they refuse a call under a cancellable rule by name
+/// (`door_cannot_stop`), before anything is forwarded or streamed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Door {
+    /// An `rpc_rx` receiver: the admission rides the request, and a loop that races `authority_lapsed()` stops a
+    /// cancelled call. Whether it races is the application's; the one receiver this crate knows never stops a begun
+    /// call is a hosted capability's (`cap.invoke/…`, the wasm host's serve loop, which never interrupts a guest).
+    RpcRx,
+    /// The native MCP tool loop, which drops the handler's future when the call's authority lapses. `stops: false` for
+    /// a tool whose handler hands its work to something it cannot stop
+    /// ([`register_mcp_tool_unstoppable`](crate::McpHandle::register_mcp_tool_unstoppable): the wasm host's bridge).
+    McpTool { stops: bool },
+    /// The bridged MCP loop: the call is forwarded to an external MCP server, and nothing races the forward.
+    BridgedMcp,
+    /// The SDK serve stream (`rpc/serve`): the call is streamed to an SDK agent, and its admission only parked.
+    SdkServe,
+    /// The built-in `llm.invoke` provider, which races the backend call against the admission's lapse.
+    #[cfg_attr(not(feature = "llm"), allow(dead_code))]
+    LlmInvoke,
+}
+
+impl Door {
+    /// `Some(name)`: this door cannot stop a running `kind` call — the stable name its refusal carries in `data.door`.
+    pub(crate) fn cannot_stop(self, kind: &str) -> Option<&'static str> {
+        match self {
+            Door::BridgedMcp => Some("bridged_mcp"),
+            Door::SdkServe => Some("sdk_serve"),
+            Door::McpTool { stops: false } => Some("unstoppable_mcp_tool"),
+            Door::RpcRx if kind.starts_with(super::HOSTED_CAPABILITY_KIND_PREFIX) => Some("hosted_capability"),
+            Door::RpcRx | Door::McpTool { stops: true } | Door::LlmInvoke => None,
+        }
+    }
 }
 
 /// What an envelope carried in its second mandate slot, and what it is bound to.
@@ -485,6 +528,33 @@ async fn admit_after(ctx: &Arc<TaskCtx>, principal: &str, call: Option<&Admitted
             message: format!("authority not established: the call's mandate was established at the provider's preflight and is no longer ({why}); nothing ran (mandate_lapsed_before_run)"),
             code: -32031,
             data: json!({ "reason": "authority_not_established", "detail": "mandate_lapsed_before_run", "found": why }),
+        });
+    }
+
+    // Identity-and-lifecycle I4, the maintainer's decision of 2026-11-15: a cancellable rule's call is refused at a
+    // door that cannot stop it once it runs — before the second slot is assessed, so nothing is registered — rather
+    // than admitted where a cancel would claim to stop work it cannot.
+    if let Some(call) = call
+        && call.cancellable
+        && let Some(door) = call.unstoppable_at
+    {
+        #[cfg(feature = "metrics")]
+        metrics::counter!("mycelium_provider_door_cannot_stop_total", "door" => door).increment(1);
+        if let Some(permit) = call.permit.as_ref() {
+            super::http::ae_record_execution(ctx, permit, super::action_evaluator::Execution::None).await;
+            super::http::release_unspent_grant_claim(ctx, permit).await;
+        }
+        let found = match door {
+            "bridged_mcp" => "the call would be forwarded to an external MCP server, and nothing here stops a forwarded call",
+            "sdk_serve" => "the call would be streamed to an SDK agent, and nothing here stops a served call",
+            "hosted_capability" | "unstoppable_mcp_tool" => "the call would run in a hosted component, and a begun guest call is never interrupted",
+            _ => "this door cannot stop a running call",
+        };
+        return Err(ProviderRefusal {
+            reason: "authority_not_established".into(),
+            message: format!("authority not established: the rule that permits this call is cancellable, and this door cannot stop a running call ({found}); nothing ran (door_cannot_stop)"),
+            code: -32031,
+            data: json!({ "reason": "authority_not_established", "detail": "door_cannot_stop", "door": door, "found": found }),
         });
     }
 
@@ -855,6 +925,26 @@ pub(crate) fn derive(
     claim: Option<&str>,
     me: &str,
 ) -> Result<(String, String, Value), ProviderRefusal> {
+    let derived = derive_call(kind, payload, claim, me)?;
+    if kind == "skill.invoke" {
+        let served = derived
+            .1
+            .strip_suffix(&format!("@{me}"))
+            .and_then(|key| key.strip_prefix("skill:"))
+            .and_then(|id| id.split_once('/'))
+            .is_some_and(|(ns, name)| advertises(ctx, ns, name));
+        if !served {
+            let key = derived.1.strip_suffix(&format!("@{me}")).unwrap_or(&derived.1);
+            return Err(ProviderRefusal::local("resource_not_served", format!("this node does not serve {key}")));
+        }
+    }
+    Ok(derived)
+}
+
+/// [`derive`] without what only the provider can know (whether it advertises a skill): the operation, resource and
+/// arguments of a protected `kind` call to `me` — what the gateway's mint binds a `call:` mandate to
+/// (identity-and-lifecycle I4, PR 2), so the mandate the gateway signs is the one the provider's `derive` checks.
+pub(crate) fn derive_call(kind: &str, payload: &[u8], claim: Option<&str>, me: &str) -> Result<(String, String, Value), ProviderRefusal> {
     if kind == crate::signal::signal_kind::MCP_INVOKE {
         let call: Value = serde_json::from_slice(payload)
             .map_err(|_| ProviderRefusal::local("malformed_call", "the tool call is not JSON".into()))?;
@@ -924,24 +1014,14 @@ pub(crate) fn derive(
             format!("a protected `{kind}` call must name the resource it acts on"),
         ));
     };
-    let Some(key) = resource.strip_suffix(&format!("@{me}")) else {
+    if resource.strip_suffix(&format!("@{me}")).is_none() {
         return Err(ProviderRefusal::local(
             "resource_not_here",
             format!("the call names {resource}, which is not this node's"),
         ));
-    };
+    }
 
     if kind == "skill.invoke" {
-        let served = key
-            .strip_prefix("skill:")
-            .and_then(|id| id.split_once('/'))
-            .is_some_and(|(ns, name)| advertises(ctx, ns, name));
-        if !served {
-            return Err(ProviderRefusal::local(
-                "resource_not_served",
-                format!("this node does not serve {key}"),
-            ));
-        }
         return Ok(("skill.invoke".into(), resource.to_string(), json!({ "text": String::from_utf8_lossy(payload) })));
     }
 

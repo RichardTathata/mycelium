@@ -514,3 +514,40 @@ async fn a_run_id_with_a_slash_cannot_write_into_another_runs_trace() {
 
     agent.shutdown_with_timeout(Duration::from_secs(5)).await;
 }
+
+/// **A cancelled call is final at the router** (identity-and-lifecycle I4, the entry condition #785's review set
+/// for a gateway's mint): the router used to read any error reply as a failed attempt and try the next provider —
+/// each attempt a new envelope and a new `call:` term the gateway's cancel does not cover, so the cancelled call
+/// would run again. Both providers here answer the built-in `llm.invoke` provider's cancellation
+/// (`data.reason` `cancelled`); the route stops at the first with `RouteError::Cancelled` and the second is never
+/// asked. Seen failing first: with the router's `is_cancelled` check out, both were asked and the route answered
+/// `Exhausted`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_cancelled_call_is_not_retried_on_the_next_provider() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let (agent_a, agent_b) = start_pair().await;
+    let asked = Arc::new(AtomicUsize::new(0));
+    let mut ads = Vec::new();
+    for agent in [&agent_a, &agent_b] {
+        ads.push(agent.capabilities().advertise_capability(Capability::new("llm", "fable-c"), Duration::from_secs(60)));
+        let mut rx = agent.service().rpc_rx(mycelium::signal_kind::LLM_INVOKE);
+        let (agent, asked) = (Arc::clone(agent), Arc::clone(&asked));
+        tokio::spawn(async move {
+            while let Some(req) = rx.recv().await {
+                asked.fetch_add(1, Ordering::SeqCst);
+                let body = serde_json::json!({"error": "cancelled", "detail": "cancelled: the call's authority lapsed while it ran", "code": -32603, "data": {"reason": "cancelled"}});
+                agent.service().rpc_respond(&req, body.to_string().into_bytes());
+            }
+        });
+    }
+    let cfg = RouterConfig { max_attempts: 3, call_timeout: Duration::from_secs(5), failover_timeout: Duration::from_secs(5), ..RouterConfig::default() };
+    let router = InferenceRouter::new(Arc::clone(&agent_a), cfg);
+    let q = ModelQuery::new("fable-c");
+    assert!(poll_until(|| router.candidates(&q).len() == 2, Duration::from_secs(20)).await, "both providers visible");
+    let out = router.call(&q, "stop me", &HashMap::new(), None).await;
+    assert!(matches!(&out, Err(mycelium_reason::RouteError::Cancelled { failures, .. }) if failures.is_empty()), "{out:?}");
+    assert_eq!(asked.load(Ordering::SeqCst), 1, "the second provider was never asked");
+    drop(ads);
+    agent_a.shutdown_with_timeout(Duration::from_secs(5)).await;
+    agent_b.shutdown_with_timeout(Duration::from_secs(5)).await;
+}

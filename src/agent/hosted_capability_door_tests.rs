@@ -462,21 +462,18 @@ async fn a_cohort_budget_counts_a_hosted_capability_call() {
     d.a.shutdown().await;
 }
 
-/// **A cancellable rule refuses a member's direct call of a hosted capability** (identity-and-lifecycle I4, §104):
-/// the rule permits the call only with its gateway's `call:` mandate established here, and a member's own call
-/// carries none — unframed it has no envelope to carry one (`no_envelope`), framed it has an empty second slot
-/// (`no_call_mandate`). Refused *authority not established*, `call_mandate_not_established`, nothing run — as for
-/// every other protected kind. Seen failing first: with the family outside the provider's protected set both ran.
+/// **A cancellable rule refuses a member's direct call of a hosted capability** (identity-and-lifecycle I4, §104,
+/// §110): the rule permits the call only where a cancel can stop it, and a begun guest call is never interrupted —
+/// so since I4's PR 2 the call is refused at its door before its second slot is read (`door_cannot_stop`, door
+/// `hosted_capability`), unframed or framed, with or without a `call:` mandate. Refused *authority not established*,
+/// nothing run. Seen failing first: with the family outside the provider's protected set both ran.
 #[tokio::test]
 async fn a_cancellable_rule_refuses_a_members_direct_call_of_a_hosted_capability() {
     let d = door(Opts::default()).await;
     let k = kind("route", "slow");
-    for (reply, cause) in [
-        (d.call(&k, b"{}").await, "no_envelope"),
-        (d.call_framed(&node_principal(d.a.node_id()), &k, b"{}", None).await, "no_call_mandate"),
-    ] {
+    for reply in [d.call(&k, b"{}").await, d.call_framed(&node_principal(d.a.node_id()), &k, b"{}", None).await] {
         assert_refused(&reply, "authority_not_established");
-        assert_eq!((reply["data"]["detail"].as_str(), reply["data"]["cause"].as_str()), (Some("call_mandate_not_established"), Some(cause)), "{reply}");
+        assert_eq!((reply["data"]["detail"].as_str(), reply["data"]["door"].as_str()), (Some("door_cannot_stop"), Some("hosted_capability")), "{reply}");
     }
     assert_eq!(d.ran("route", "slow"), 0, "RAN UNCANCELLABLE");
     d.a.shutdown().await;

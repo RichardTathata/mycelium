@@ -1,0 +1,665 @@
+//! **The gateway's half of a `call:` mandate** (identity-and-lifecycle I4, PR 2): the mint, the records it writes,
+//! the revoke, the re-assertion of a checkpoint another member wrote over, and the collector of the `call/` and
+//! `grant/` key families.
+//!
+//! # The mint
+//!
+//! With `gateway_mint_call_mandates` on, every protected call the gateway dispatches (`gateway_rpc_call_with_mandate`,
+//! the one dispatch path of every gateway door) carries, in its envelope's second mandate slot (`cm`), a mandate the
+//! gateway issues **to itself** for that one call (D-6): scope `call:c{n}` where `n` is the envelope's id, issuer and
+//! holder `node:{self}`, the one operation of the call, a window of `call_mandate_ttl_secs`. Beside it go its
+//! possession proof (over the call's operation, resource and RFC 8785 arguments digest — derived by the provider's
+//! own [`derive_call`](super::provider_enforcement::derive_call), so the two cannot disagree) and its first
+//! revocation checkpoint (sequence 1, nothing revoked). The provider establishes it from what the envelope carries,
+//! with no round trip.
+//!
+//! The order is the plan's: the gateway's preflight has decided (a refused call never reaches the dispatch); the mint
+//! is drawn inside framing, once the envelope's id is known; then **the first checkpoint and the `window` record are
+//! written durably** (`call/{gateway}/c{n}/checkpoint` and `…/window`); only then is the envelope sent. A write the
+//! disk will not take refuses the dispatch by name (`call_mandate_not_durable`): nothing is sent.
+//!
+//! A gateway mints for every protected kind, whatever its own preflight said about `cancellable` (the provider's rule
+//! decides, Q5). It mints nothing it cannot: without a TLS identity, for a call whose operation cannot be derived
+//! (the provider will refuse it the same way), or with [`MAX_ISSUED_CALLS`] held — each counted.
+//!
+//! # The records (owner-signed, verified at read)
+//!
+//! Any admitted member can write any key, so neither record is trusted for where it sits:
+//! - `checkpoint` is a `SignedRevocationCheckpoint`, used only when its authority and scope are its key's and it is
+//!   signed by that gateway's node key (`take_kv_copy` at a provider; [`verified_checkpoint`] here);
+//! - `window` is a [`CallWindow`] signed by the issuer's node key under the domain tag `mycelium:call-window:v1\n`
+//!   ([`window_message`], pinned in a golden), used only when its `scope` and `term` are its key's and the signature
+//!   is under the node key of the gateway its key's segment names ([`verified_window`]).
+//!
+//! A record that fails reads as **absent**. The only reader of `window` is the collector, and its absence moves the
+//! floor later, never earlier: a forged record can only delay collection, never hasten it.
+//!
+//! # The revoke and the re-assertion
+//!
+//! [`revoke_call`] writes the call's next checkpoint (sequence 2, its term revoked) durably and offers it to this node's
+//! own authority. A provider learns it from the KV (its feeder reads the key only for a window it holds) and its sweep
+//! stops the work — bound 1. The cancel doors that call it are the row's PR 3.
+//!
+//! **The gateway re-asserts its checkpoint** (#775's review, H1): it watches its own `call/{self}/` keys, and when one
+//! holds anything but what it wrote — another member's value, a tombstone, its own first checkpoint written back over
+//! the revoking one — it writes its newest again, at a later stamp. What it holds is in memory ([`Issued`], at most
+//! [`MAX_ISSUED_CALLS`]); after a restart it holds nothing and re-asserts nothing (D-4: the KV is the record), which is
+//! stated, not closed.
+//!
+//! # The collector (D-5)
+//!
+//! A record is never collected while its mandate could still be presented. For `call/`: past the window's end
+//! + 2·skew + `max_drain_secs`, the window read from a verified `window` record — or, with none, past the verified
+//! checkpoint's `issued_at_ms` + [`GRANT_TTL_CAP_SECS`] + 2·skew + `max_drain_secs`; a pair neither of whose records
+//! verifies is never collected here (counted). For `grant/`: a grant whose `issued` record verifies is collected,
+//! every record under it (the request, the grant, its checkpoints, its revocation, `consumed`, the use markers and
+//! releases of critique plan row CR2), past the later of its window's end + 2·skew and its issue +
+//! `grant_retention_secs`. The issuer deletes with `kv_delete`; any other node with `kv_delete_held`, at the stamp it
+//! holds, so a newer write beats it.
+
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
+
+use base64::Engine as _;
+use bytes::Bytes;
+use serde::{Deserialize, Serialize};
+
+use super::gateway_authority::{arguments_digest, call_checkpoint_key, grant_holder_from_segment, grant_holder_segment, mandate_operation, possession_request, PresentedCallMandate, CALL_KEY_PREFIX};
+use super::gateway_caller::node_principal;
+use super::TaskCtx;
+use crate::knowledge::issuer::{verify_signed_by, Authenticity, MemberKeySource, MemberKeys, TrustedExternalIssuers};
+use crate::knowledge::IssuerId;
+use crate::mandate::authority::{RevocationCheckpoint, SignedRevocationCheckpoint};
+use crate::mandate::grant::{possession_message, SignedMandateGrant, CALL_SCOPE_PREFIX, GRANT_TTL_CAP_SECS};
+use crate::mandate::{Mandate, PrincipalId, TermId};
+use crate::node_id::NodeId;
+
+/// The domain tag a `window` record's signature is made under.
+pub(crate) const CALL_WINDOW_DOMAIN: &[u8] = b"mycelium:call-window:v1\n";
+
+/// The most calls a gateway holds in memory as issued — for the re-assertion and the revoke — at once: the
+/// provider's own cap on the windows it holds ([`MAX_CALL_WINDOWS`](super::gateway_authority::MAX_CALL_WINDOWS)).
+/// At it, the gateway mints nothing (counted, `call_mints_refused`) until windows end.
+pub const MAX_ISSUED_CALLS: usize = super::gateway_authority::MAX_CALL_WINDOWS;
+
+/// How often the collector runs.
+const COLLECT_INTERVAL_MS: u64 = 60_000;
+
+/// How many written keys the re-assertion queues before it falls back to re-reading every call it holds.
+const REASSERT_QUEUE: usize = 4_096;
+
+/// **A `call:` mandate's window, as its issuer signs it** (`call/{gateway}/{term}/window`): what any node reads D-5's
+/// floor from, since a checkpoint carries no window.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct CallWindow {
+    /// `1`.
+    pub(crate) v: u8,
+    /// `call:{term}`.
+    pub(crate) scope: String,
+    pub(crate) term: String,
+    pub(crate) valid_until_ms: u64,
+}
+
+/// A [`CallWindow`] and the issuer's signature over [`window_message`], base64.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(crate) struct SignedCallWindow {
+    pub(crate) window: CallWindow,
+    pub(crate) signature: String,
+}
+
+/// The bytes a `window` record's signature covers: the domain tag, then `v`, `scope`, `term` and `valid_until_ms`,
+/// each a little-endian `u32` length and its bytes (`valid_until_ms` as eight little-endian bytes). Pinned in
+/// `the_window_records_signed_message_is_pinned`.
+pub(crate) fn window_message(w: &CallWindow) -> Vec<u8> {
+    fn lp(out: &mut Vec<u8>, b: &[u8]) {
+        out.extend_from_slice(&(b.len() as u32).to_le_bytes());
+        out.extend_from_slice(b);
+    }
+    let mut out = CALL_WINDOW_DOMAIN.to_vec();
+    out.push(w.v);
+    lp(&mut out, w.scope.as_bytes());
+    lp(&mut out, w.term.as_bytes());
+    out.extend_from_slice(&w.valid_until_ms.to_le_bytes());
+    out
+}
+
+/// The key of a `call:` mandate's window record: `call/{gateway segment}/{term}/window`.
+pub(crate) fn call_window_key(gateway: &str, term: &str) -> String {
+    format!("{CALL_KEY_PREFIX}{}/{term}/window", grant_holder_segment(gateway))
+}
+
+/// What a `call/{segment}/{term}/{leaf}` key names: `(gateway principal, term)`. `None` for any other shape, or a
+/// segment that names no node.
+pub(crate) fn call_key_names(key: &str) -> Option<(String, String)> {
+    let mut parts = key.strip_prefix(CALL_KEY_PREFIX)?.split('/');
+    let (segment, term, _leaf) = (parts.next()?, parts.next()?, parts.next()?);
+    if parts.next().is_some() || term.is_empty() {
+        return None;
+    }
+    let gateway = grant_holder_from_segment(segment)?;
+    gateway.starts_with("node:").then(|| (gateway, term.to_string()))
+}
+
+/// The member keys a record is verified against: this node's view of every member's keys, and its own current key
+/// for itself — so a build without `compliance`, whose view is empty, still reads back what it wrote.
+pub(crate) fn record_keys(ctx: &TaskCtx) -> std::collections::HashMap<NodeId, MemberKeys> {
+    let mut members = super::gateway_member_keys(ctx);
+    if let Some(tls) = ctx.tls.get() {
+        let own = members.entry(ctx.node_id.clone()).or_default();
+        let key = tls.verifying_key_bytes();
+        if !own.retained.contains(&key) {
+            own.retained.push(key);
+        }
+    }
+    members
+}
+
+/// Is `signature` over `message` the current key of the node `gateway` names?
+fn signed_by(gateway: &str, message: &[u8], signature: &[u8], members: &impl MemberKeySource) -> bool {
+    IssuerId::new(gateway).is_some_and(|issuer| {
+        matches!(verify_signed_by(&issuer, message, signature, members, &TrustedExternalIssuers::new()), Authenticity::Current { .. })
+    })
+}
+
+/// **A `window` record, verified at read**: its body's `scope` and `term` are the key's and it is signed by the node
+/// key of the gateway its key names. `None` for anything else — absent.
+pub(crate) fn verified_window(key: &str, bytes: &[u8], members: &impl MemberKeySource) -> Option<CallWindow> {
+    let (gateway, term) = call_key_names(key)?;
+    let signed: SignedCallWindow = serde_json::from_slice(bytes).ok()?;
+    let w = signed.window;
+    if w.v != 1 || w.term != term || w.scope != format!("{CALL_SCOPE_PREFIX}{term}") {
+        return None;
+    }
+    let signature = base64::engine::general_purpose::STANDARD.decode(signed.signature.as_bytes()).ok()?;
+    signed_by(&gateway, &window_message(&w), &signature, members).then_some(w)
+}
+
+/// **A `checkpoint` record, verified at read**: its authority and scope are the key's and it is signed by that
+/// gateway's node key. `None` for anything else.
+pub(crate) fn verified_checkpoint(key: &str, bytes: &[u8], members: &impl MemberKeySource) -> Option<RevocationCheckpoint> {
+    let (gateway, term) = call_key_names(key)?;
+    let signed: SignedRevocationCheckpoint = serde_json::from_slice(bytes).ok()?;
+    let c = &signed.checkpoint;
+    if c.authority.as_str() != gateway || c.scope != format!("{CALL_SCOPE_PREFIX}{term}") {
+        return None;
+    }
+    let verified = signed_by(&gateway, &c.canonical_bytes(), &signed.signature, members);
+    verified.then_some(signed.checkpoint)
+}
+
+/// One call this gateway issued, as it holds it: what its newest checkpoint is, so it can be signed again — the
+/// signature is deterministic, so the same bytes — and the end of its window.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Issued {
+    seq: u64,
+    at_ms: u64,
+    revoked: bool,
+    until_ms: u64,
+}
+
+/// The gateway's state for the calls it mints, on `TaskCtx`. A papaya map, so it adds no lock.
+#[derive(Default)]
+pub(crate) struct CallIssuer {
+    /// Each term this gateway minted and holds, until its window's end + 2·skew.
+    issued: papaya::HashMap<String, Issued>,
+    /// The collector's and the re-assertion's tasks are started once.
+    collector: AtomicBool,
+    watcher: AtomicBool,
+    pub(crate) mints: AtomicU64,
+    pub(crate) mints_refused: AtomicU64,
+    pub(crate) reasserted: AtomicU64,
+    pub(crate) call_records_collected: AtomicU64,
+    pub(crate) call_records_unverifiable: AtomicU64,
+    pub(crate) grant_records_collected: AtomicU64,
+}
+
+impl CallIssuer {
+    /// The terms this gateway holds as issued (the re-assertion's fallback walk; tests).
+    pub(crate) fn issued_terms(&self) -> Vec<String> {
+        self.issued.pin().keys().cloned().collect()
+    }
+}
+
+/// Does this gateway mint for a `kind` call? Only with `gateway_mint_call_mandates`, a TLS identity, and for protected
+/// work (the provider's own predicate, so a hosted capability's kind is minted for too).
+pub(crate) fn mints_for(ctx: &TaskCtx, kind: &str) -> bool {
+    ctx.config.gateway_mint_call_mandates && ctx.tls.get().is_some() && super::provider_enforcement::protected_here(&ctx.config, kind)
+}
+
+/// What one mint produced: `cm` for the envelope, and the two records to write before it is sent.
+pub(crate) struct Minted {
+    pub(crate) cm: serde_json::Value,
+    term: String,
+    checkpoint: Vec<u8>,
+    window: Vec<u8>,
+    at_ms: u64,
+    until_ms: u64,
+}
+
+/// The signed checkpoint `seq` of `term`'s scope, as this gateway issues it.
+fn sign_checkpoint(ctx: &TaskCtx, term: &str, seq: u64, at_ms: u64, revoked: bool) -> Option<SignedRevocationCheckpoint> {
+    let tls = ctx.tls.get()?;
+    let c = RevocationCheckpoint {
+        authority: PrincipalId::new(node_principal(&ctx.node_id))?,
+        scope: format!("{CALL_SCOPE_PREFIX}{term}"),
+        seq,
+        issued_at_ms: at_ms,
+        revoked: if revoked { std::iter::once(TermId::new(term)?).collect() } else { Default::default() },
+    };
+    Some(SignedRevocationCheckpoint { signature: mycelium_core::tls::sign_bytes(&tls.signing_key(), &c.canonical_bytes()).to_vec(), checkpoint: c })
+}
+
+/// **Mint the `call:` mandate for envelope `n`** of a `kind` call to `target` — `None`, minting nothing, where it
+/// cannot (see the module doc).
+#[allow(clippy::too_many_arguments)] // one call's facts
+pub(crate) fn mint(ctx: &TaskCtx, kind: &str, payload: &[u8], claim: Option<&str>, target: &NodeId, n: u64, now_ms: u64) -> Option<Minted> {
+    let refused = || {
+        ctx.call_issuer.mints_refused.fetch_add(1, Ordering::Relaxed);
+        #[cfg(feature = "metrics")]
+        metrics::counter!("mycelium_gateway_call_mints_refused_total").increment(1);
+        None
+    };
+    let tls = ctx.tls.get()?;
+    if ctx.call_issuer.issued.len() >= MAX_ISSUED_CALLS {
+        return refused();
+    }
+    let Ok((operation, resource, arguments)) = super::provider_enforcement::derive_call(kind, payload, claim, &target.to_string()) else {
+        return refused();
+    };
+    let gateway = PrincipalId::new(node_principal(&ctx.node_id))?;
+    let term = format!("c{n}");
+    let until_ms = now_ms.saturating_add(ctx.config.call_mandate_ttl_secs.min(GRANT_TTL_CAP_SECS) * 1_000);
+    let m = Mandate {
+        holder: gateway.clone(),
+        established_by: gateway.clone(),
+        purpose: format!("call {term} dispatched by {}", gateway.as_str()),
+        scope: format!("{CALL_SCOPE_PREFIX}{term}"),
+        operations: vec![mandate_operation(&operation, &resource)],
+        epoch: 1,
+        term: TermId::new(&term)?,
+        valid_from_ms: now_ms,
+        valid_until_ms: until_ms,
+    };
+    let sk = tls.signing_key();
+    let first = sign_checkpoint(ctx, &term, 1, now_ms, false)?;
+    let proof = mycelium_core::tls::sign_bytes(&sk, &possession_message(&m, &possession_request(&operation, &resource, &arguments_digest(&arguments))));
+    let grant = SignedMandateGrant { signature: mycelium_core::tls::sign_bytes(&sk, &m.canonical_bytes()).to_vec(), mandate: m };
+    let checkpoint = serde_json::to_vec(&first).ok()?;
+    let window = CallWindow { v: 1, scope: format!("{CALL_SCOPE_PREFIX}{term}"), term: term.clone(), valid_until_ms: until_ms };
+    let window = serde_json::to_vec(&SignedCallWindow {
+        signature: base64::engine::general_purpose::STANDARD.encode(mycelium_core::tls::sign_bytes(&sk, &window_message(&window))),
+        window,
+    })
+    .ok()?;
+    let cm = serde_json::to_value(PresentedCallMandate::new(grant, &proof, first)).ok()?;
+    Some(Minted { cm, term, checkpoint, window, at_ms: now_ms, until_ms })
+}
+
+/// A record on disk — the WAL's required-sync write, fsynced before it is applied or gossiped — or why not. A node
+/// with no `[persistence]` writes in memory, as every owned record there is written.
+async fn write_durable(ctx: &TaskCtx, key: String, value: Vec<u8>) -> Result<(), String> {
+    let op = mycelium_core::receipt::OperationId::generate(&ctx.node_id);
+    let attempt = mycelium_core::receipt::AttemptId::fresh(&op);
+    let key: Arc<str> = Arc::from(key.as_str());
+    let written = if ctx.wal.get().is_some() {
+        mycelium_core::ops::kv_set_requiring_sync(ctx, op, attempt, key, Bytes::from(value), None).await
+    } else {
+        mycelium_core::ops::kv_set_with_receipt(ctx, op, attempt, key, Bytes::from(value), None).await
+    };
+    written.map(|_| ()).map_err(|e| e.to_string())
+}
+
+/// **Write a mint's two records durably and hold the call as issued** — before its envelope is sent. `Err`: a record
+/// is not on disk, and the call must not be sent.
+pub(crate) async fn record(ctx: &TaskCtx, minted: Minted) -> Result<(), String> {
+    let gateway = node_principal(&ctx.node_id);
+    #[cfg(test)]
+    let started = mycelium_core::sim_seam::mono_instant();
+    write_durable(ctx, call_checkpoint_key(&gateway, &minted.term), minted.checkpoint).await?;
+    write_durable(ctx, call_window_key(&gateway, &minted.term), minted.window).await?;
+    #[cfg(test)]
+    test_hooks::note_record_latency(&ctx.node_id, started.elapsed());
+    ctx.call_issuer.issued.pin().insert(minted.term, Issued { seq: 1, at_ms: minted.at_ms, revoked: false, until_ms: minted.until_ms });
+    ctx.call_issuer.mints.fetch_add(1, Ordering::Relaxed);
+    #[cfg(feature = "metrics")]
+    metrics::counter!("mycelium_gateway_call_mints_total").increment(1);
+    Ok(())
+}
+
+/// Why a revoke did not stand.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(not(all(test, feature = "compliance")), allow(dead_code))]
+pub(crate) enum RevokeRefusal {
+    /// This node has no TLS identity to sign with.
+    NoIdentity,
+    /// This gateway holds no call of that term, in memory or as a verified window record of its own.
+    UnknownTerm,
+    /// The revoking checkpoint is not on disk; it stands in this process only.
+    NotDurable(String),
+}
+
+/// **Cancel the call of `term`** (I4): its next checkpoint, its term revoked, offered to this node's own authority
+/// (and its sweep run, so work admitted here stops now) and written durably where a provider reads it. `Ok(true)`:
+/// this call wrote the revoking checkpoint to disk; `Ok(false)`: it was there already. A revoke whose write the
+/// disk refused is answered `NotDurable` and stands in this process only; called again once the disk is back, it
+/// writes the same checkpoint (its signature is deterministic) and answers `Ok(true)`.
+///
+/// The term is known from memory, or — after a restart, which keeps nothing in memory (D-4) — from this gateway's
+/// own verified `window` record and checkpoint in the KV. Two revokes of one term at once make one checkpoint: the
+/// transition to revoked is one papaya `compute` (retry-safe: it reads only its input), and the loser writes the
+/// winner's.
+#[cfg_attr(not(all(test, feature = "compliance")), allow(dead_code))] // I4's PR 3: the cancel doors (A2A `tasks/cancel`, MCP `notifications/cancelled`, the cancel-forward)
+pub(crate) async fn revoke_call(ctx: &Arc<TaskCtx>, term: &str) -> Result<bool, RevokeRefusal> {
+    if ctx.tls.get().is_none() {
+        return Err(RevokeRefusal::NoIdentity);
+    }
+    let gateway = node_principal(&ctx.node_id);
+    let cp_key = call_checkpoint_key(&gateway, term);
+    let members = record_keys(ctx);
+    let held = ctx.call_issuer.issued.pin().get(term).copied();
+    let issued = match held {
+        Some(i) => i,
+        None => {
+            let window_key = call_window_key(&gateway, term);
+            let Some(w) = mycelium_core::ops::kv_get(ctx, &window_key).and_then(|b| verified_window(&window_key, &b, &members)) else {
+                return Err(RevokeRefusal::UnknownTerm);
+            };
+            let held = mycelium_core::ops::kv_get(ctx, &cp_key).and_then(|b| verified_checkpoint(&cp_key, &b, &members));
+            Issued {
+                seq: held.as_ref().map_or(1, |c| c.seq),
+                at_ms: held.as_ref().map_or(0, |c| c.issued_at_ms),
+                revoked: held.as_ref().is_some_and(|c| c.revoked.iter().any(|t| t.as_str() == term)),
+                until_ms: w.valid_until_ms,
+            }
+        }
+    };
+    let now = ctx.hlc.decision_now_ms();
+    let next = Issued { seq: issued.seq + 1, at_ms: now, revoked: true, until_ms: issued.until_ms };
+    // Held as issued **before** the write: the re-assertion compares the KV with what it holds, so it must never
+    // hold the first checkpoint while the revoking one is in the KV — it would write the first back over it.
+    let won = !issued.revoked
+        && matches!(
+            ctx.call_issuer.issued.pin().compute(term.to_string(), |entry| match entry {
+                Some((_, cur)) if cur.revoked => papaya::Operation::Abort(()),
+                _ => papaya::Operation::Insert(next),
+            }),
+            papaya::Compute::Inserted(..) | papaya::Compute::Updated { .. }
+        );
+    let revoking = if won { next } else { ctx.call_issuer.issued.pin().get(term).copied().filter(|i| i.revoked).unwrap_or(issued) };
+    let Some(signed) = sign_checkpoint(ctx, term, revoking.seq, revoking.at_ms, true) else { return Err(RevokeRefusal::NoIdentity) };
+    if won && let Some(authority) = ctx.execution_authority.get() {
+        let _ = authority.offer_checkpoint(&signed, now, &super::gateway_member_keys(ctx));
+        authority.sweep(now);
+    }
+    let bytes = serde_json::to_vec(&signed).map_err(|e| RevokeRefusal::NotDurable(e.to_string()))?;
+    // Already on record — this gateway's own revoking checkpoint at or past this sequence: nothing to write.
+    if mycelium_core::ops::kv_get(ctx, &cp_key)
+        .and_then(|b| verified_checkpoint(&cp_key, &b, &members))
+        .is_some_and(|c| c.seq >= revoking.seq && c.revoked.iter().any(|t| t.as_str() == term))
+    {
+        return Ok(false);
+    }
+    write_durable(ctx, cp_key, bytes).await.map_err(RevokeRefusal::NotDurable)?;
+    #[cfg(feature = "metrics")]
+    metrics::counter!("mycelium_gateway_calls_cancelled_total").increment(1);
+    Ok(true)
+}
+
+/// **Write this gateway's newest checkpoint for `term` again if the KV holds anything else** (#775's H1): another
+/// member's value, a tombstone, or an older checkpoint of this gateway's written back over a newer one. Nothing for a
+/// term it does not hold, or one past its floor (the collector's). `true`: re-asserted.
+pub(crate) fn reassert(ctx: &Arc<TaskCtx>, term: &str) -> bool {
+    let Some(issued) = ctx.call_issuer.issued.pin().get(term).copied() else { return false };
+    if ctx.hlc.decision_now_ms() > issued.until_ms.saturating_add(2 * skew_ms(ctx)) {
+        return false;
+    }
+    let Some(ours) = sign_checkpoint(ctx, term, issued.seq, issued.at_ms, issued.revoked).and_then(|s| serde_json::to_vec(&s).ok()) else { return false };
+    let key = call_checkpoint_key(&node_principal(&ctx.node_id), term);
+    let held = mycelium_core::ops::kv_get(ctx, &key);
+    if held.as_deref() == Some(ours.as_slice()) {
+        return false;
+    }
+    // A checkpoint of this gateway's own at or past the sequence it holds is never written over.
+    if let Some(c) = held.as_deref().and_then(|b| verified_checkpoint(&key, b, &record_keys(ctx)))
+        && c.seq >= issued.seq
+    {
+        return false;
+    }
+    tracing::warn!(key = %key, "a call: checkpoint this gateway issued was written over by another value; re-asserting it");
+    // Written at a stamp past the value it replaces, whatever clock wrote that one (within the HLC's drift bound):
+    // last-writer-wins must keep the re-assertion, here and wherever it gossips.
+    if let Some(stamp) = ctx.kv_state.store.pin().get(key.as_str()).map(|e| e.timestamp) {
+        ctx.hlc.observe(stamp);
+    }
+    super::state_machine::write_owned_kv(ctx, &key, ours);
+    ctx.call_issuer.reasserted.fetch_add(1, Ordering::Relaxed);
+    #[cfg(feature = "metrics")]
+    metrics::counter!("mycelium_gateway_call_checkpoints_reasserted_total").increment(1);
+    true
+}
+
+/// The skew D-5's floor counts twice: this node's execution authority's, else `[authority]`'s, else its default.
+fn skew_ms(ctx: &TaskCtx) -> u64 {
+    if let Some(a) = ctx.execution_authority.get() {
+        return a.skew_ms();
+    }
+    ctx.config.authority.as_ref().map_or(1_000, |a| a.skew_ms)
+}
+
+/// The records of a KV key family, grouped: each group's keys and their values.
+type Grouped<K> = std::collections::BTreeMap<K, Vec<(Arc<str>, Bytes)>>;
+
+/// What one collection removed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Collected {
+    pub(crate) call_records: usize,
+    pub(crate) grant_records: usize,
+}
+
+/// Tombstone `key`: with `kv_delete` at the issuer, with `kv_delete_held` at the stamp this node holds elsewhere.
+fn delete(ctx: &TaskCtx, key: &Arc<str>, issuer: bool) -> bool {
+    if issuer {
+        mycelium_core::ops::kv_delete(ctx, Arc::clone(key));
+        return true;
+    }
+    let held = ctx.kv_state.store.pin().get(key.as_ref()).and_then(|e| e.data.as_ref().map(|_| e.timestamp));
+    held.is_some_and(|stamp| mycelium_core::ops::kv_delete_held(ctx, Arc::clone(key), stamp))
+}
+
+/// **Collect what D-5 lets go at `now_ms`** (see the module doc). Every node with an execution authority or a mint
+/// runs it each minute.
+pub(crate) fn collect(ctx: &TaskCtx, now_ms: u64) -> Collected {
+    let members = record_keys(ctx);
+    let me = node_principal(&ctx.node_id);
+    let skew2 = 2 * skew_ms(ctx);
+    let mut out = Collected::default();
+
+    // `call/`: grouped by `{segment}/{term}`.
+    let mut calls: Grouped<(String, String)> = Default::default();
+    for (key, bytes) in crate::store::scan_kv_prefix(&ctx.kv_state, CALL_KEY_PREFIX) {
+        if let Some((gateway, term)) = call_key_names(&key) {
+            calls.entry((gateway, term)).or_default().push((key, bytes));
+        }
+    }
+    for ((gateway, term), records) in calls {
+        let leaf = |name: &str| records.iter().find(|(k, _)| k.ends_with(&format!("/{name}")));
+        let window = leaf("window").and_then(|(k, b)| verified_window(k, b, &members));
+        let floor_of = |until_ms: u64| until_ms.saturating_add(skew2).saturating_add(ctx.config.max_drain_secs * 1_000);
+        let floor = match window {
+            Some(w) => Some(floor_of(w.valid_until_ms)),
+            None => leaf("checkpoint")
+                .and_then(|(k, b)| verified_checkpoint(k, b, &members))
+                .map(|c| floor_of(c.issued_at_ms.saturating_add(GRANT_TTL_CAP_SECS * 1_000))),
+        };
+        let Some(floor) = floor else {
+            ctx.call_issuer.call_records_unverifiable.fetch_add(1, Ordering::Relaxed);
+            continue;
+        };
+        if now_ms <= floor {
+            continue;
+        }
+        let issuer = gateway == me;
+        if issuer {
+            // Forgotten before the delete, so the re-assertion does not write back what is being collected.
+            ctx.call_issuer.issued.pin().remove(&term);
+        }
+        for (key, _) in &records {
+            if delete(ctx, key, issuer) {
+                out.call_records += 1;
+            }
+        }
+    }
+    // What this gateway holds past its floor with nothing left in the KV.
+    // Held until its window could no longer be presented anywhere (its end + 2·skew): past it a provider refuses the
+    // mandate out of window whatever its checkpoint says, so there is nothing left to re-assert or revoke from memory.
+    ctx.call_issuer.issued.pin().retain(|_, i| now_ms <= i.until_ms.saturating_add(skew2));
+
+    // `grant/`: grouped by `grant/{segment}/{request}`, collected only under a verified `issued` record.
+    let mut grants: Grouped<String> = Default::default();
+    for (key, bytes) in crate::store::scan_kv_prefix(&ctx.kv_state, "grant/") {
+        let mut parts = key.splitn(4, '/');
+        let (Some(_), Some(segment), Some(request)) = (parts.next(), parts.next(), parts.next()) else { continue };
+        grants.entry(format!("grant/{segment}/{request}")).or_default().push((key, bytes));
+    }
+    let retention_ms = ctx.config.grant_retention_secs.max(GRANT_TTL_CAP_SECS) * 1_000;
+    for (base, records) in grants {
+        let issued_key = format!("{base}/issued");
+        let Some((_, bytes)) = records.iter().find(|(k, _)| k.as_ref() == issued_key) else { continue };
+        let Some(issuer) = verified_grant(&base, bytes, &members) else { continue };
+        let (from, until) = issuer.1;
+        let floor = until.saturating_add(skew2).max(from.saturating_add(retention_ms));
+        if now_ms <= floor {
+            continue;
+        }
+        let is_issuer = issuer.0 == me;
+        for (key, _) in &records {
+            if delete(ctx, key, is_issuer) {
+                out.grant_records += 1;
+            }
+        }
+    }
+    ctx.call_issuer.call_records_collected.fetch_add(out.call_records as u64, Ordering::Relaxed);
+    ctx.call_issuer.grant_records_collected.fetch_add(out.grant_records as u64, Ordering::Relaxed);
+    out
+}
+
+/// A grant's `issued` record at `grant/{segment}/{request}/issued`, verified at read: a grant whose holder's segment
+/// and term are its key's, issued by a node, under that node's current key. `(issuer, (valid_from, valid_until))`.
+fn verified_grant(base: &str, bytes: &[u8], members: &impl MemberKeySource) -> Option<(String, (u64, u64))> {
+    let g: SignedMandateGrant = serde_json::from_slice(bytes).ok()?;
+    let m = &g.mandate;
+    let (segment, request) = base.strip_prefix("grant/")?.split_once('/')?;
+    if !m.is_grant() || m.term.as_str() != request || grant_holder_segment(m.holder.as_str()) != segment {
+        return None;
+    }
+    let issuer = m.established_by.as_str();
+    (issuer.starts_with("node:") && signed_by(issuer, &m.canonical_bytes(), &g.signature, members))
+        .then(|| (issuer.to_string(), (m.valid_from_ms, m.valid_until_ms)))
+}
+
+/// Start the collector, once per node: each minute, through the timer seam.
+pub(crate) fn start_collector(ctx: &Arc<TaskCtx>) {
+    if ctx.call_issuer.collector.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let ctx2 = Arc::clone(ctx);
+    let mut shutdown = ctx.shutdown_tx.subscribe();
+    ctx.spawn_task(async move {
+        loop {
+            tokio::select! {
+                _ = super::capability_ops::await_shutdown(&mut shutdown) => break,
+                _ = mycelium_core::sim_seam::sleep_ms("authority/collect", COLLECT_INTERVAL_MS) => {}
+            }
+            let _ = collect(&ctx2, ctx2.hlc.decision_now_ms());
+        }
+    });
+}
+
+/// Start the re-assertion, once per minting gateway: a write under its own `call/{self}/…/checkpoint` keys is taken
+/// where the KV's prefix watch sees it, in a bounded queue; when the queue overflows, every held call is re-read.
+pub(crate) fn start_reassertion(ctx: &Arc<TaskCtx>) {
+    if ctx.call_issuer.watcher.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let (tx, mut keys) = tokio::sync::mpsc::channel::<Arc<str>>(REASSERT_QUEUE);
+    let lagged = Arc::new(AtomicBool::new(false));
+    let raise = Arc::clone(&lagged);
+    let own = format!("{CALL_KEY_PREFIX}{}/", grant_holder_segment(&node_principal(&ctx.node_id)));
+    let mut wake = mycelium_core::kv_handle::KvHandle::from_core(Arc::clone(&ctx.core)).subscribe_prefix_with_predicate(CALL_KEY_PREFIX, move |k: &str| {
+        if !k.starts_with(own.as_str()) || !k.ends_with("/checkpoint") {
+            return false;
+        }
+        if mycelium_core::sim_seam::chan_try_send("authority/call-reassert", &tx, Arc::from(k)) != mycelium_core::sim_seam::ChanVerdict::Sent {
+            raise.store(true, Ordering::Release);
+        }
+        true
+    });
+    let ctx2 = Arc::clone(ctx);
+    let mut shutdown = ctx.shutdown_tx.subscribe();
+    ctx.spawn_task(async move {
+        loop {
+            tokio::select! {
+                _ = super::capability_ops::await_shutdown(&mut shutdown) => break,
+                changed = wake.changed() => { if changed.is_err() { break; } }
+            }
+            if lagged.swap(false, Ordering::AcqRel) {
+                while keys.try_recv().is_ok() {}
+                for term in ctx2.call_issuer.issued_terms() {
+                    reassert(&ctx2, &term);
+                }
+            }
+            while let Ok(key) = keys.try_recv() {
+                if let Some((_, term)) = call_key_names(&key) {
+                    reassert(&ctx2, &term);
+                }
+            }
+        }
+    });
+}
+
+/// Test hooks: the mint's durable writes, timed.
+#[cfg(test)]
+pub(crate) mod test_hooks {
+    use std::sync::Mutex;
+    /// Per node: how long each mint's two durable writes took.
+    pub(crate) static RECORD_LATENCIES: Mutex<Vec<(String, std::time::Duration)>> = Mutex::new(Vec::new());
+    pub(super) fn note_record_latency(node: &crate::node_id::NodeId, d: std::time::Duration) {
+        RECORD_LATENCIES.lock().unwrap_or_else(|e| e.into_inner()).push((node.to_string(), d));
+    }
+    #[cfg_attr(not(feature = "compliance"), allow(dead_code))] // read by `call_mint_tests`
+    pub(crate) fn record_latencies(node: &crate::node_id::NodeId) -> Vec<std::time::Duration> {
+        let node = node.to_string();
+        RECORD_LATENCIES.lock().unwrap_or_else(|e| e.into_inner()).iter().filter(|(n, _)| *n == node).map(|(_, d)| *d).collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// **The `window` record's signed message is pinned** (the plan's golden): the domain tag, `v`, then each field
+    /// length-prefixed. A change to the encoding breaks every window record a gateway has written.
+    #[test]
+    fn the_window_records_signed_message_is_pinned() {
+        let w = CallWindow { v: 1, scope: "call:c7".into(), term: "c7".into(), valid_until_ms: 0x0102_0304_0506_0708 };
+        let hex: String = window_message(&w).iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(
+            hex,
+            "6d7963656c69756d3a63616c6c2d77696e646f773a76310a\
+             01\
+             0700000063616c6c3a6337\
+             020000006337\
+             0807060504030201"
+        );
+    }
+
+    /// The key shapes the collector and the re-assertion read: only `call/{node segment}/{term}/{leaf}`.
+    #[test]
+    fn a_call_key_names_its_gateway_and_term_and_nothing_else_does() {
+        assert_eq!(call_key_names("call/node:127.0.0.1:7000/c9/window"), Some(("node:127.0.0.1:7000".into(), "c9".into())));
+        assert_eq!(call_key_names(&call_window_key("node:127.0.0.1:7000", "c9")), Some(("node:127.0.0.1:7000".into(), "c9".into())));
+        for bad in ["call/node:127.0.0.1:7000/c9", "call/node:127.0.0.1:7000//window", "call/node:a/c9/window/x", "grant/node:a/c9/window", "call/746f6b656e3a67772f61/c9/window"] {
+            assert_eq!(call_key_names(bad), None, "{bad}");
+        }
+    }
+}
