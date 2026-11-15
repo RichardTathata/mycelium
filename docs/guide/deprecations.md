@@ -4303,7 +4303,7 @@ using struct expression*), and a destructuring pattern without `..` is `E0638`. 
   `OidcConfig` pair under `--features compliance`). A doc-test is compiled as a crate of its own, so each pair is the
   outside caller's view.
 
-## 110. A gateway can mint each call's `call:` mandate, behind `gateway_mint_call_mandates`; a door that cannot stop a running call refuses a cancellable one; `GossipConfig` gained four fields (2.41.0, identity-and-lifecycle I4, PR 2)
+## 110. A gateway can mint each call's `call:` mandate, behind `gateway_mint_call_mandates`; a door that cannot stop a running call refuses a cancellable one, an `rpc_rx` receiver unless it declares it stops; `GossipConfig` gained four fields (2.41.0, identity-and-lifecycle I4, PR 2)
 
 *Numbered 110: §109 is critique plan row CR12's, built in parallel.*
 
@@ -4381,10 +4381,26 @@ release builds the gateway's half. **Nothing changes until you turn it on**: `ga
   next PR** — every call it permits is refused there, with nothing forwarded, streamed or run, `execution: none` in
   the journal and a claimed grant given back at the provider. Under any rule that is not cancellable these doors
   serve as before. Counted: `mycelium_provider_door_cannot_stop_total{door}` (feature `metrics`).
-- **Not refused, stated: an application's own `rpc_rx` receiver.** A cancel stops it only if its loop races
-  `RpcRequest::authority_lapsed()`; this crate cannot tell whether it does, so it admits a cancellable call there.
-  No companion's receiver races it at this release. Declare a cancellable rule only over a kind whose receiver
-  stops when its authority lapses.
+  - `rpc_rx` — an **`rpc_rx` receiver that has not declared it stops** (the maintainer's decision of 2026-11-15:
+    an agent promises only its own behaviour). A cancel stops an `rpc_rx` call only if the receiver's loop races
+    `RpcRequest::authority_lapsed()`, and only the receiver can say it does: **new, additive,
+    `RpcRequestRx::stops_when_authority_lapses()`** — `service().rpc_rx(kind).stops_when_authority_lapses()` —
+    declares it. A declared receiver is served a cancellable call; an undeclared one is refused it. A hosted
+    component's kind keeps its own name (`hosted_capability`): the wasm host's loop makes no such promise.
+- **Who is affected by the `rpc_rx` refusal: nobody shipped.** Cancellable rules are new in this wave (§104), and
+  under any other rule an undeclared receiver is served as before. In-tree, no shipped receiver races
+  `authority_lapsed()`, so none declares: the examples' and `skillrunner`'s `skill.invoke` loops, the companions'
+  receivers (`mycelium-blackboard`, `mycelium-tuple-space`, `mycelium-guardrails`, `mycelium-reason`'s blob server,
+  `mycelium-wiki`), the wasm host's serve and artifact loops, and the node's own `replica_sync`. A cancellable rule
+  over any of their kinds refuses every call until they are made to stop and declare (later work). The two
+  in-tree test loops that race it declare.
+- **The promise is assessed, not enforced.** A declared receiver that answers a call more than
+  **`LAPSE_ANSWER_GRACE_MS` = 1 000 ms** after the call's authority lapsed (from the sweep's request to stop — the
+  moment `authority_lapsed()` resolves — to the reply) is counted: `GET /stats` `rpc_rx_answered_after_lapse`, by
+  kind, and `mycelium_rpc_rx_answered_after_lapse_total{kind}` (feature `metrics`). **What it measures:** a reply
+  sent late after the stop was asked. **What it does not prove:** that the work went on (a receiver may stop and
+  answer late), or anything about a receiver that never answers, whether it stopped or not. A reply racing the
+  cancel inside the grace is not a broken promise and is not counted. Nothing is refused because of the count.
 - **`mycelium-reason`: a cancelled call is final.** The router read any error reply as a failed attempt and tried
   the next provider — a new envelope and a new `call:` term the cancel does not cover, so a cancelled call would
   run again. It now stops at a reply with `data.reason` `cancelled` (stopped while it ran) or `data.detail`
@@ -4399,7 +4415,8 @@ release builds the gateway's half. **Nothing changes until you turn it on**: `ga
   this release behind a gateway that does not mint: a cancellable rule refuses as §104 says. Turn the mint on once
   every provider a gateway reaches is at this release.
 - **Compiler:** `GatewayDispatchError` (`#[non_exhaustive]`) gained `CallNotDurable`; `McpHandle` gained
-  `register_mcp_tool_unstoppable`; `GossipConfig` gained the four fields above; `mycelium-reason`'s `RouteError`
+  `register_mcp_tool_unstoppable`; `RpcRequestRx` gained `stops_when_authority_lapses`; the constant
+  `LAPSE_ANSWER_GRACE_MS` is new; `GossipConfig` gained the four fields above; `mycelium-reason`'s `RouteError`
   gained `Cancelled`. Wire **v12** unchanged; the `call/` records are new values under a prefix §100 already owns.
 - **Check:** with `gateway_mint_call_mandates = true`, `curl -s http://GATEWAY:PORT/stats | jq '{call_mints, call_mints_refused, call_checkpoints_reasserted, call_records_collected}'`
   shows the mints after a protected call, and `call/node:GATEWAY/` holds its two records; a cancellable rule over a
@@ -4408,7 +4425,8 @@ release builds the gateway's half. **Nothing changes until you turn it on**: `ga
   `src/agent/gateway_caller.rs` (`frame_minting`, `gateway_rpc_call_with_mandate`), `src/agent/provider_enforcement.rs`
   (`Door`, `derive_call`), `mycelium-core/src/config.rs`, `mycelium-reason/src/route.rs` (`is_cancelled`). Tests:
   `src/agent/call_mint_tests.rs`, `the_doors_that_cannot_stop_a_call_refuse_one_under_a_cancellable_rule_by_name`
-  (`src/agent/call_admission_tests.rs`), `a_cancelled_call_is_not_retried_on_the_next_provider`
+  (`src/agent/call_admission_tests.rs`, with `an_undeclared_rpc_rx_receiver_is_refused_a_cancellable_call_and_served_a_plain_one` and
+  `a_declared_rpc_rx_receiver_is_served_and_stopped_and_one_that_ignores_the_lapse_is_counted`), `a_cancelled_call_is_not_retried_on_the_next_provider`
   (`mycelium-reason/tests/reason.rs`).
 
 ## 111. `ca_cert_pem` must hold exactly one certificate; `tls ca` names the fleet and the generation; a certificate's issuer is its CA's subject (unreleased, identity-and-lifecycle I2, PR 1)

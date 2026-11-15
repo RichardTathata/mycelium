@@ -664,6 +664,14 @@ impl std::fmt::Debug for WorkGuard {
 }
 
 impl WorkGuard {
+    /// When the authority asked this work to stop, on its own clock — `None` while it has not.
+    pub(crate) fn stop_requested_ms(&self) -> Option<u64> {
+        match self.requested_ms.load(std::sync::atomic::Ordering::Acquire) {
+            0 => None,
+            t => Some(t),
+        }
+    }
+
     /// Has the authority cancelled this work?
     pub fn is_cancelled(&self) -> bool {
         self.cancelled.load(std::sync::atomic::Ordering::Acquire)

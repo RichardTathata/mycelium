@@ -27,6 +27,10 @@ This feature is turned on in code, through `agent.service()`.
   with [`rpc_respond`](../../src/agent/service_handle.rs); [`rpc_call_with_mandate`](../../src/agent/service_handle.rs)
   carries a [mandate](mandates.md) the provider can verify, and returns `ContextTooLarge` when the envelope would not
   fit.
+- [`stops_when_authority_lapses`](../../src/agent/rpc.rs), on an `rpc_rx` receiver: the receiver declares that its
+  loop races `authority_lapsed()` and ends a call whose authority lapsed. At an enforcing provider a call under a
+  cancellable rule is served only to a receiver that has declared it, and refused `door_cannot_stop` otherwise
+  ([provider enforcement](provider-enforcement.md); [§110](../guide/deprecations.md)).
 - [`scatter_gather`](../../src/agent/service_handle.rs): the targets, the kind, the payload, a timeout and `min_ok`. Any
   reply counts toward `min_ok`, a provider's refusal body included, and a target listed twice is called twice and can
   count twice; with `min_ok = 0` it returns at the first reply, or, if none comes, `Ok` of nothing once every call has

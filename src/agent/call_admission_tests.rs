@@ -24,6 +24,8 @@ const MCP: &str = "mcp.invoke";
 const SKILL: &str = "skill.invoke";
 const CUSTOM: &str = "depot.custom";
 const HOSTED: &str = "cap.invoke/depot/thing";
+/// An operator's protected kind under a rule that is not cancellable.
+const PLAIN_KIND: &str = "depot.plain";
 
 struct Node {
     a: Arc<GossipAgent>,
@@ -110,7 +112,7 @@ async fn node_with(opts: Opts) -> Node {
         crate::config::GatewayNamedToken { name: "sdk".into(), token: "sdk-secret".into(), scopes: vec!["mesh:serve".into()] },
     ];
     // An operator's protected kind, served to an SDK agent over `rpc/serve` (the doors that cannot stop a call).
-    cfg.protected_rpc_kinds = vec![CUSTOM.into()];
+    cfg.protected_rpc_kinds = vec![CUSTOM.into(), PLAIN_KIND.into()];
     let a = Arc::new(GossipAgent::new(id.clone(), cfg));
     let me = id.to_string();
     a.with_evidence_journal(EvidenceJournal::open(dir.join("evidence.log"), EvidenceProfile::Strict).unwrap());
@@ -132,7 +134,9 @@ async fn node_with(opts: Opts) -> Node {
             .map_action("cap.invoke", "*")
             .allow(Rule::new("*", "cap.invoke", format!("cap:depot/thing@{me}")).cancellable())
             .map_action(CUSTOM, "*")
-            .allow(Rule::new("*", CUSTOM, format!("res:x@{me}")).cancellable()),
+            .allow(Rule::new("*", CUSTOM, format!("res:x@{me}")).cancellable())
+            .map_action(PLAIN_KIND, "*")
+            .allow(Rule::new("*", PLAIN_KIND, format!("res:y@{me}"))),
     ));
     let mut entitlements = EntitlementTable::new();
     entitlements.entitle_grants(PrincipalId::new(node_principal(&id)).unwrap());
@@ -160,7 +164,7 @@ async fn node_with(opts: Opts) -> Node {
     // A cooperative `rpc_rx` skill: its work ends when it finishes or when its authority lapses.
     std::mem::forget(a.capabilities().advertise_capability(crate::capability::Capability::new("depot", "long"), Duration::from_secs(600)));
     let (agent, s, f) = (Arc::clone(&a), Arc::clone(&started), Arc::clone(&finished));
-    let mut rx = a.service().rpc_rx(SKILL);
+    let mut rx = a.service().rpc_rx(SKILL).stops_when_authority_lapses();
     tokio::spawn(async move {
         while let Some(req) = rx.recv().await {
             let (agent, s, f) = (Arc::clone(&agent), Arc::clone(&s), Arc::clone(&f));
@@ -213,6 +217,11 @@ impl Node {
     fn hosted(&self) -> Call {
         let arguments = serde_json::json!({ "n": 1 });
         Call { kind: HOSTED, payload: arguments.to_string().into_bytes(), claim: None, operation: "cap.invoke", resource: format!("cap:depot/thing@{}", self.a.node_id()), arguments }
+    }
+    /// The operator's protected kind under a plain rule.
+    fn plain_kind(&self) -> Call {
+        let resource = format!("res:y@{}", self.a.node_id());
+        Call { kind: PLAIN_KIND, payload: b"work".to_vec(), claim: Some(resource.clone()), operation: PLAIN_KIND, resource, arguments: serde_json::json!({ "payload_b64": "d29yaw==" }) }
     }
     /// The operator's protected kind, as an SDK agent serves it.
     fn custom(&self) -> Call {
@@ -759,5 +768,97 @@ async fn the_doors_that_cannot_stop_a_call_refuse_one_under_a_cancellable_rule_b
     reader.abort();
     assert_eq!(n.authority.running_count(), 0, "nothing was registered");
     assert_eq!(n.nothing_ran(), before + 4, "an execution record for each refusal says nothing ran");
+    n.a.shutdown().await;
+}
+
+/// An `rpc_rx` serve loop on `kind` that answers `"done"` once `work` has passed — or, if `races`, `"stopped"` 300 ms
+/// after the call's authority lapses (a receiver that stops and tidies up first). Returns how many requests it was
+/// handed.
+fn serve_rpc(n: &Node, kind: &'static str, declared: bool, races: bool, work: Duration) -> Arc<AtomicUsize> {
+    let rx = n.a.service().rpc_rx(kind);
+    let mut rx = if declared { rx.stops_when_authority_lapses() } else { rx };
+    let handed = Arc::new(AtomicUsize::new(0));
+    let (h, agent) = (Arc::clone(&handed), Arc::clone(&n.a));
+    tokio::spawn(async move {
+        while let Some(req) = rx.recv().await {
+            h.fetch_add(1, Ordering::SeqCst);
+            let agent = Arc::clone(&agent);
+            tokio::spawn(async move {
+                if races {
+                    tokio::select! {
+                        _ = tokio::time::sleep(work) => agent.service().rpc_respond(&req, b"done".to_vec()),
+                        _ = req.authority_lapsed() => {
+                            tokio::time::sleep(Duration::from_millis(300)).await;
+                            agent.service().rpc_respond(&req, b"stopped".to_vec());
+                        }
+                    }
+                } else {
+                    tokio::time::sleep(work).await;
+                    agent.service().rpc_respond(&req, b"done".to_vec());
+                }
+            });
+        }
+    });
+    handed
+}
+
+/// **An `rpc_rx` receiver that has not declared it stops is refused a call under a cancellable rule, by name, and
+/// served one under any other rule** (the maintainer's decision of 2026-11-15: a receiver promises only its own
+/// behaviour, and the node serves a cancellable call only where that promise was made). The undeclared receiver of
+/// the cancellable kind is handed nothing and the caller is answered -32031 `door_cannot_stop`, `data.door`
+/// `rpc_rx`; the undeclared receiver of a kind under a plain rule is handed the call, which runs. Seen failing first:
+/// with `Door::RpcRx` answering as a door that stops whatever the receiver declared, the cancellable call was handed
+/// to the undeclared receiver.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_undeclared_rpc_rx_receiver_is_refused_a_cancellable_call_and_served_a_plain_one() {
+    let n = node().await;
+    let custom = serve_rpc(&n, CUSTOM, false, false, Duration::ZERO);
+    let plain = serve_rpc(&n, PLAIN_KIND, false, false, Duration::ZERO);
+    let before = n.nothing_ran();
+    let (reply, _) = n.call(&n.custom(), None, Cm::Honest).await;
+    assert_door_cannot_stop(&json(&reply), "rpc_rx");
+    let (reply, _) = n.call(&n.plain_kind(), None, Cm::Honest).await;
+    assert_eq!(reply, b"done".to_vec(), "{}", String::from_utf8_lossy(&reply));
+    assert_eq!((custom.load(Ordering::SeqCst), plain.load(Ordering::SeqCst)), (0, 1));
+    assert_eq!(n.nothing_ran(), before + 1, "the refusal says nothing ran");
+    n.a.shutdown().await;
+}
+
+/// **A receiver that declared it stops is served a cancellable call and stops it on the gateway's revoke, uncounted;
+/// one that declared and ignores the lapse is counted** (the assessment, not enforcement: nothing is refused). The
+/// declared, racing receiver stops and answers `stopped` 300 ms after the lapse — inside `LAPSE_ANSWER_GRACE_MS`, so
+/// `rpc_rx_answered_after_lapse` stays at zero. A second declared receiver keeps working past the lapse and answers
+/// `done` 2.5 s after the revoke: counted once under its kind. Seen failing first: with `assess_answer` returning at
+/// once the late answer was not counted, and with the grace at zero the racing receiver's answer was.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_declared_rpc_rx_receiver_is_served_and_stopped_and_one_that_ignores_the_lapse_is_counted() {
+    let n = Arc::new(node().await);
+    let late = |n: &Node| n.a.task_ctx.rpc_rx_late_answers.pin().get(CUSTOM).copied().unwrap_or(0);
+    // Declared and racing: served, registered, stopped by the revoke within the grace.
+    let handed = serve_rpc(&n, CUSTOM, true, true, Duration::from_secs(30));
+    let (framed, id, _) = n.frame(&n.custom(), None, Cm::Honest);
+    let (n2, call) = (Arc::clone(&n), n.custom());
+    let running = tokio::spawn(async move { n2.send(&call, framed).await });
+    n.running(1).await;
+    let asked = std::time::Instant::now();
+    n.cancel(id);
+    let reply = running.await.unwrap();
+    assert_eq!(reply, b"stopped".to_vec(), "{}", String::from_utf8_lossy(&reply));
+    assert!(asked.elapsed() < Duration::from_secs(5), "{:?}", asked.elapsed());
+    assert_eq!((handed.load(Ordering::SeqCst), late(&n)), (1, 0), "an answer racing the cancel is not a broken promise");
+    n.running(0).await;
+    n.a.shutdown().await;
+
+    // Declared and ignoring the lapse: served too (the node does not check the promise), and its late answer counted.
+    let n = Arc::new(node().await);
+    let _handed = serve_rpc(&n, CUSTOM, true, false, Duration::from_secs(3));
+    let (framed, id, _) = n.frame(&n.custom(), None, Cm::Honest);
+    let (n2, call) = (Arc::clone(&n), n.custom());
+    let running = tokio::spawn(async move { n2.send(&call, framed).await });
+    n.running(1).await;
+    n.cancel(id);
+    let reply = running.await.unwrap();
+    assert_eq!(reply, b"done".to_vec(), "the receiver ignored the lapse and answered when its work ended");
+    assert_eq!(late(&n), 1, "counted under its kind");
     n.a.shutdown().await;
 }

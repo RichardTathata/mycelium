@@ -438,6 +438,10 @@ pub use agent::gateway_authority::{
     ExecutionAuthority, NamedStop, PresentedCallMandate, PresentedMandate, WorkGuard, MAX_CALL_WINDOWS, MAX_CALL_WINDOWS_PER_GATEWAY,
     RECLAIM_PER_HOLD,
 };
+/// Identity-and-lifecycle I4: the grace past a call's lapse within which a receiver that declared it stops may still
+/// answer uncounted (`RpcRequestRx::stops_when_authority_lapses`).
+#[cfg(all(feature = "gateway", feature = "tls"))]
+pub use agent::provider_enforcement::LAPSE_ANSWER_GRACE_MS;
 #[cfg(all(feature = "gateway", feature = "tls"))]
 pub use agent::evidence_journal::{
     read_evidence_journal, read_evidence_journal_from, Appended, EvidenceCursor, EvidenceJournal,

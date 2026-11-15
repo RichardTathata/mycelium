@@ -21,7 +21,11 @@
   `uses.journal` (not compacted, stated).
 - Doors (rule 1, the maintainer's decision): `provider_enforcement::Door` at each `check`; a cancellable call at a
   door that cannot stop it is refused `door_cannot_stop` — bridged MCP, SDK serve, a hosted kind via `rpc_rx`, and
-  the new `register_mcp_tool_unstoppable` (the wasm host's bridge). An application's `rpc_rx` is **not** refused
-  (the crate cannot tell whether it races `authority_lapsed()`); a ledger row and a question for the maintainer.
+  the new `register_mcp_tool_unstoppable` (the wasm host's bridge). **`rpc_rx`, decided the same day in
+  promise-theory terms (an agent promises only its own behaviour):** a receiver declares it stops
+  (`RpcRequestRx::stops_when_authority_lapses`); an undeclared one is refused a cancellable call (`data.door`
+  `rpc_rx`); a declared one's answer more than `LAPSE_ANSWER_GRACE_MS` (1 s) after the lapse is counted
+  (`rpc_rx_answered_after_lapse`), never refused — assessment, not enforcement. Only two test loops declare;
+  no shipped receiver races `authority_lapsed()` yet.
 - `mycelium-reason`: `cancelled` (and `call_mandate_not_established`/`revoked`) is terminal (`RouteError::Cancelled`).
 - Pages touched: `owner-signed-records.md` (the `window` row now on `main`; the checkpoint row narrowed).

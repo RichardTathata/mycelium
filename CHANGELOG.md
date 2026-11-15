@@ -489,8 +489,11 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `McpHandle::register_mcp_tool_unstoppable` (`unstoppable_mcp_tool`), which the wasm host's bridge now uses. -32031,
   `data.detail` `door_cannot_stop`, the door in `data.door`; nothing is forwarded, streamed or run. A cancellable rule
   over an external MCP tool, an SDK-served kind or a hosted component therefore refuses every call until the row's
-  next PR builds their stop. An application's own `rpc_rx` receiver is not refused: it stops a cancelled call only
-  if it races `authority_lapsed()`.
+  next PR builds their stop. **An `rpc_rx` receiver declares that it stops** with the new
+  `RpcRequestRx::stops_when_authority_lapses()` (its loop races `authority_lapsed()`); an undeclared receiver is
+  refused a cancellable call (`data.door` `rpc_rx`) and served any other, and a declared one answering more than
+  `LAPSE_ANSWER_GRACE_MS` (1 s) after its call's authority lapsed is counted (`GET /stats`
+  `rpc_rx_answered_after_lapse`, by kind), never refused. No shipped receiver declares yet.
 - **`mycelium-reason`: a cancelled call is final at the router.** A provider's answer `data.reason` `cancelled`, or
   `call_mandate_not_established` with `data.cause` `revoked`, ends the route with the new
   `RouteError::Cancelled` (`409` at the façades) instead of trying the next provider under a new, uncancelled term.

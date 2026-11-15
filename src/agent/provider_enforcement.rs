@@ -118,9 +118,18 @@ pub(crate) struct Admission {
     /// what a cancel stops. A call under a client's grant and a `call:` mandate holds both; when the handler's
     /// future drops, both drop, and only a cancelled one writes a stop record.
     call_work: Option<super::gateway_authority::WorkGuard>,
+    /// The `rpc_rx` receiver this call was handed to declared that it stops on a lapse
+    /// (`RpcRequestRx::stops_when_authority_lapses`): its answers are assessed ([`assess_answer`]).
+    pub(crate) promised_stop: bool,
 }
 
 impl Admission {
+    /// When the authority first asked this call's work to stop, under either registration — `None` while it has
+    /// not (`WorkGuard::stop_requested_ms`).
+    fn stop_requested_ms(&self) -> Option<u64> {
+        [&self.work, &self.call_work].into_iter().flatten().filter_map(|g| g.stop_requested_ms()).min()
+    }
+
     /// **Resolves when the authority cancels this call's work** — under either registration: the caller's mandate
     /// lapsed, or the call was cancelled (its `call:` term revoked). Never resolves for a call registered under
     /// neither. Awaiting it records that the work acknowledged the cancellation.
@@ -417,7 +426,10 @@ pub(crate) enum Door {
     /// An `rpc_rx` receiver: the admission rides the request, and a loop that races `authority_lapsed()` stops a
     /// cancelled call. Whether it races is the application's; the one receiver this crate knows never stops a begun
     /// call is a hosted capability's (`cap.invoke/…`, the wasm host's serve loop, which never interrupts a guest).
-    RpcRx,
+    RpcRx {
+        /// The receiver declared that it stops (`RpcRequestRx::stops_when_authority_lapses`).
+        stops: bool,
+    },
     /// The native MCP tool loop, which drops the handler's future when the call's authority lapses. `stops: false` for
     /// a tool whose handler hands its work to something it cannot stop
     /// ([`register_mcp_tool_unstoppable`](crate::McpHandle::register_mcp_tool_unstoppable): the wasm host's bridge).
@@ -438,8 +450,11 @@ impl Door {
             Door::BridgedMcp => Some("bridged_mcp"),
             Door::SdkServe => Some("sdk_serve"),
             Door::McpTool { stops: false } => Some("unstoppable_mcp_tool"),
-            Door::RpcRx if kind.starts_with(super::HOSTED_CAPABILITY_KIND_PREFIX) => Some("hosted_capability"),
-            Door::RpcRx | Door::McpTool { stops: true } | Door::LlmInvoke => None,
+            // A receiver's own promise decides, and only the receiver can make it: the wasm host's serve loop makes
+            // none (a begun guest call is never interrupted), so a hosted capability's kind keeps its own name.
+            Door::RpcRx { stops: false } if kind.starts_with(super::HOSTED_CAPABILITY_KIND_PREFIX) => Some("hosted_capability"),
+            Door::RpcRx { stops: false } => Some("rpc_rx"),
+            Door::RpcRx { stops: true } | Door::McpTool { stops: true } | Door::LlmInvoke => None,
         }
     }
 }
@@ -548,6 +563,7 @@ async fn admit_after(ctx: &Arc<TaskCtx>, principal: &str, call: Option<&Admitted
             "bridged_mcp" => "the call would be forwarded to an external MCP server, and nothing here stops a forwarded call",
             "sdk_serve" => "the call would be streamed to an SDK agent, and nothing here stops a served call",
             "hosted_capability" | "unstoppable_mcp_tool" => "the call would run in a hosted component, and a begun guest call is never interrupted",
+            "rpc_rx" => "the receiver of this kind has not declared that it stops when a call's authority lapses (stops_when_authority_lapses)",
             _ => "this door cannot stop a running call",
         };
         return Err(ProviderRefusal {
@@ -611,7 +627,7 @@ async fn admit_after(ctx: &Arc<TaskCtx>, principal: &str, call: Option<&Admitted
         },
         None => None,
     };
-    Ok(Admission { _slot: slot, work, call_work })
+    Ok(Admission { _slot: slot, work, call_work, promised_stop: false })
 }
 
 /// Why a call's `call:` mandate is not established — the stable, machine-readable `data.cause` of a
@@ -726,6 +742,33 @@ fn assess_call_slot(ctx: &Arc<TaskCtx>, call: &AdmittedCall) -> Result<super::ga
         Some(MandateState::Unknown(why)) => Err((CallCause::NotVerified, why)),
         None => not(CallCause::NotVerified, "the call: mandate was not assessed"),
     }
+}
+
+/// How long after a call's authority lapsed a receiver that declared it stops may still answer before the answer is
+/// counted (identity-and-lifecycle I4): 1 s, measured from the sweep's request to stop — the moment
+/// `authority_lapsed()` resolves for a receiver racing it — to the reply. A receiver that stops answers within its
+/// own scheduling delay; the second is room for a loaded host, not a bound proved.
+pub const LAPSE_ANSWER_GRACE_MS: u64 = 1_000;
+
+/// **Assess a declared receiver's answer** (identity-and-lifecycle I4): if the call was handed to an `rpc_rx`
+/// receiver that declared it stops on a lapse, and its authority lapsed more than [`LAPSE_ANSWER_GRACE_MS`] before
+/// this answer, count it under the call's kind. What this measures: an answer sent late after the stop was asked.
+/// What it does not prove: that the work went on (a receiver may stop its work and answer late), nor anything about
+/// a receiver that never answers — stopped or still working; and a reply racing the cancel inside the grace is not
+/// a broken promise and is not counted. Nothing is refused because of it.
+pub(crate) fn assess_answer(ctx: &TaskCtx, request: &RpcRequest) {
+    let Some(admission) = request.admission() else { return };
+    if !admission.promised_stop {
+        return;
+    }
+    let Some(asked) = admission.stop_requested_ms() else { return };
+    if ctx.hlc.decision_now_ms().saturating_sub(asked) <= LAPSE_ANSWER_GRACE_MS {
+        return;
+    }
+    let kind = request.kind().to_string();
+    #[cfg(feature = "metrics")]
+    metrics::counter!("mycelium_rpc_rx_answered_after_lapse_total", "kind" => kind.clone()).increment(1);
+    ctx.rpc_rx_late_answers.pin().update_or_insert(kind, |n| n + 1, 1);
 }
 
 /// Test hook: take one place in the cohort budget for `principal`, as an in-flight call would (`grant_tests`).

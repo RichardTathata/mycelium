@@ -284,6 +284,9 @@ pub(super) async fn stats_handler(State(ctx): State<Arc<HttpCtx>>) -> impl IntoR
         body["call_records_collected"] = json!(n(&c.call_records_collected));
         body["call_records_unverifiable"] = json!(n(&c.call_records_unverifiable));
         body["grant_records_collected"] = json!(n(&c.grant_records_collected));
+        // …and answers a receiver that declared it stops on a lapse sent more than `LAPSE_ANSWER_GRACE_MS` after its
+        // call's authority lapsed, by kind: an assessment of the receiver's promise, never a refusal.
+        body["rpc_rx_answered_after_lapse"] = json!(ctx.agent_ctx.rpc_rx_late_answers.pin().iter().map(|(k, v)| (k.clone(), *v)).collect::<std::collections::BTreeMap<_, _>>());
     }
     // Identity-and-lifecycle I5: exchanged OIDC tokens refused at this provider's replay window, by reason — `replayed`
     // (presented twice, by any gateway), `provider_window_full` (the provider's 262 144), `window_full` (a gateway's

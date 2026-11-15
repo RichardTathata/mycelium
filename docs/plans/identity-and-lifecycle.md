@@ -1412,7 +1412,7 @@ a snapshot back and touching the file).
 
   | Door | Can a cancel stop a running call? | PR 2 |
   |---|---|---|
-  | `rpc_rx` (an application's receiver) | only if its loop races `RpcRequest::authority_lapsed()`; the crate cannot tell, and no companion's receiver races it | **not refused** — stated ([ledger](../operations/what-is-proven.md#rpc-rx-cancellable-not-refused)) |
+  | `rpc_rx` (an application's receiver) | only if its loop races `RpcRequest::authority_lapsed()` — which only the receiver can promise | **served if the receiver declared it stops** (`stops_when_authority_lapses`), **refused `rpc_rx` otherwise** — the maintainer's second decision of 2026-11-15, below |
   | the native MCP tool loop | yes — the handler's future is dropped (`run`) | admitted |
   | a tool registered with `register_mcp_tool_unstoppable` (new; the wasm host's bridge) | no — a begun guest call is never interrupted (#788) | refused, `unstoppable_mcp_tool` |
   | the bridged MCP loop | no — nothing races the forward | refused, `bridged_mcp` |
@@ -1421,6 +1421,28 @@ a snapshot back and touching the file).
   | a hosted capability's kind through `rpc_rx` (the wasm host's serve loop) | no — a begun guest call is never interrupted | refused, `hosted_capability` |
   | `bulk_serve`, a raw `signal_rx` receiver | no check runs at all (#785's review, open) | unchanged — the ledger rows stand |
 
+- **Decided 2026-11-15 (the maintainer, on the `rpc_rx` question PR 2 raised), in promise-theory terms: an agent
+  promises only its own behaviour.** A receiver on `rpc_rx` declares that it stops when its call's authority lapses;
+  the node makes only its own promise — it serves a cancellable call to a receiver that has declared and refuses one
+  to a receiver that has not, by name — and assesses the receiver's promise without enforcing it. Built:
+  *"a receiver registered on `rpc_rx` can declare that it stops"*: `RpcRequestRx::stops_when_authority_lapses()`
+  (additive; `rpc_rx` callers unchanged). *"Refuses one to an undeclared receiver by name (-32031, `data.detail =
+  door_cannot_stop`, `data.door = "rpc_rx"`)"* and *"served under a non-cancellable one"*:
+  `an_undeclared_rpc_rx_receiver_is_refused_a_cancellable_call_and_served_a_plain_one`. *"Declared receiver served
+  and stopped by the revoke; declared receiver that ignores the lapse is counted, and one that answers within the
+  grace is not"*: `a_declared_rpc_rx_receiver_is_served_and_stopped_and_one_that_ignores_the_lapse_is_counted`.
+  *"Count a declared receiver that still answers after its call's authority lapsed, past a stated grace"*:
+  `provider_enforcement::assess_answer` at `rpc_respond`, grace `LAPSE_ANSWER_GRACE_MS` = 1 000 ms from the sweep's
+  request to stop; `GET /stats` `rpc_rx_answered_after_lapse` and `mycelium_rpc_rx_answered_after_lapse_total{kind}`;
+  no refusal follows. It does not show that the work went on, nor see a declared receiver that never answers.
+  *"PR 1b's in-process skill loop (and any other in-tree receiver that does race `authority_lapsed()`) declares
+  itself"*: `git grep -n "rpc_rx(" -- 'src/*.rs' 'mycelium-*/src' 'examples'` and `git grep -n authority_lapsed`
+  — the only receivers that race it are two test loops (`call_admission_tests.rs`'s skill loop and
+  `lib_tests.rs`'s C10 skill loop), and both declare (seen failing first: with the skill loop's declaration taken
+  out, `a_cancel_reaches_an_in_process_serve_loop_through_authority_lapsed` was refused at the door and never ran). **Undeclared, because they do not race it:** the examples'
+  and `skillrunner`'s `skill.invoke` loops; the companions' receivers (`mycelium-blackboard`, `mycelium-tuple-space`,
+  `mycelium-guardrails`, `mycelium-reason`'s blob server, `mycelium-wiki`); the wasm host's serve loop
+  (`hosted_capability`) and artifact-source loops; and `replica_sync`'s receiver. Making them stop is later work.
 - *"`cancelled` must be terminal at `mycelium-reason`'s router … before PR 2's mint is on by default the router
   stops on `data.reason` `cancelled`"*: built now, though the mint is off by default — `route::is_cancelled` and
   `RouteError::Cancelled` (`409` at the façades); it also stops on `call_mandate_not_established` with `data.cause`

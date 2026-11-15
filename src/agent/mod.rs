@@ -1110,6 +1110,10 @@ pub(crate) struct TaskCtx {
     /// Identity-and-lifecycle I4, PR 2: the calls this gateway minted a `call:` mandate for, and its counters.
     #[cfg(all(feature = "gateway", feature = "tls"))]
     pub(crate) call_issuer: call_issuer::CallIssuer,
+    /// Identity-and-lifecycle I4: answers a declared `rpc_rx` receiver sent past the grace after its call's authority
+    /// lapsed, by kind (`provider_enforcement::assess_answer`). One entry per kind a declared receiver serves.
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    pub(crate) rpc_rx_late_answers: papaya::HashMap<String, u64>,
     /// Closure plan C3: whether this node, as a **provider**, runs the action preflight on protected
     /// work it receives, set via `with_provider_enforcement`. Off = today's behaviour.
     #[cfg(all(feature = "gateway", feature = "tls"))]
@@ -1771,6 +1775,8 @@ impl GossipAgent {
             grant_uses: Arc::new(grant_use::GrantUseLedger::default()),
             #[cfg(all(feature = "gateway", feature = "tls"))]
             call_issuer: call_issuer::CallIssuer::default(),
+            #[cfg(all(feature = "gateway", feature = "tls"))]
+            rpc_rx_late_answers: papaya::HashMap::new(),
             #[cfg(all(feature = "gateway", feature = "tls"))]
             provider_enforcement: std::sync::atomic::AtomicBool::new(false),
             #[cfg(feature = "compliance")]
