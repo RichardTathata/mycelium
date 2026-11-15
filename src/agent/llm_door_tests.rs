@@ -194,6 +194,11 @@ async fn door(opts: Opts) -> Door {
         let template = PromptTemplate { system: String::new(), user_template: "{{input}}".into(), max_tokens: 32, temperature: 0.0, metadata: Default::default() };
         std::mem::forget(a.llm().register_prompt_skill("review", name, template, Arc::new(ProbeBackend(Arc::clone(probe)))).await.unwrap());
     }
+    // Ready when every skill resolves to this node at the gateway's lookup: the advertisement's first write is a
+    // spawned task's, so a call made as soon as registration returns could find no provider (404 no_provider).
+    for name in ["held", "plain", "denied", "guarded", "unruled", "slow", "slowguarded", "failing"] {
+        super::capability_ops::until_advertised(&a.task_ctx, "review", name).await;
+    }
     assert!(until(|| std::net::TcpStream::connect(("127.0.0.1", http_port)).is_ok(), Duration::from_secs(20)).await, "the gateway is listening");
     Door { a, authority, dir, http_port, fast, slow, failing, held, operator, holder }
 }
