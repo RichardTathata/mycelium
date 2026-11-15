@@ -719,7 +719,8 @@ mod tests {
             for _ in 0..16 {
                 let port = mycelium::test_util::alloc_port();
                 let id = NodeId::new("127.0.0.1", port).unwrap();
-                let cfg = GossipConfig { bind_port: port, ..Default::default() };
+                let mut cfg = GossipConfig::default();
+                cfg.bind_port = port;
                 let agent = Arc::new(GossipAgent::new(id, cfg));
                 if agent.start().await.is_ok() {
                     a = Some(agent);

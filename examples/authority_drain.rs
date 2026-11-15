@@ -60,7 +60,11 @@ async fn main() {
     let _ = std::fs::remove_dir_all(&cert_dir);
     let mut cfg = GossipConfig::default();
     cfg.bind_port = port;
-    cfg.tls = Some(TlsConfig { auto_cert_dir: cert_dir.clone(), ..Default::default() });
+    cfg.tls = Some({
+        let mut tls = TlsConfig::default();
+        tls.auto_cert_dir = cert_dir.clone();
+        tls
+    });
     let agent = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg));
     let me = agent.node_id().clone();
     let tool = format!("tool:slow@{me}");

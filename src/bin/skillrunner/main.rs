@@ -193,13 +193,15 @@ fn build_gossip_config(sf: &SkillFile) -> Result<GossipConfig, GossipError> {
     }
 
     if let Some(ref t) = sf.node.tls {
-        cfg.tls = Some(TlsConfig {
-            cert_pem:     t.cert_pem.as_ref().map(Into::into),
-            key_pem:      t.key_pem.as_ref().map(Into::into),
-            ca_cert_pem:  t.ca_cert_pem.as_ref().map(Into::into),
-            auto_cert_dir: t.auto_cert_dir.as_ref()
+        cfg.tls = Some({
+            let mut tls_cfg = TlsConfig::default();
+            tls_cfg.cert_pem = t.cert_pem.as_ref().map(Into::into);
+            tls_cfg.key_pem = t.key_pem.as_ref().map(Into::into);
+            tls_cfg.ca_cert_pem = t.ca_cert_pem.as_ref().map(Into::into);
+            tls_cfg.auto_cert_dir = t.auto_cert_dir.as_ref()
                 .map(Into::into)
-                .unwrap_or_else(|| "./mycelium-tls/".into()),
+                .unwrap_or_else(|| "./mycelium-tls/".into());
+            tls_cfg
         });
     }
 

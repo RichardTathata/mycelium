@@ -27,7 +27,7 @@ the notice.
 | 4 | `ConsensusResult::Committed { persisted: bool }` | 2.4.2 | `cluster_propose_receipt` / `group_propose_receipt` | No |
 | 5 | node-as-caller gateway dispatch (`GatewayCallerProfile::Legacy`) | 2.5.0 | `GatewayCaller` (item 7) | No — a `warn!` at startup |
 | 6 | `BoardConfig` not `#[non_exhaustive]` | 2.8.0 | `..Default::default()` | No — it breaks at 3.0.0 |
-| 7 | `GossipConfig` (and sibling config structs) not `#[non_exhaustive]` | — | `..Default::default()` | No — it breaks at 3.0.0 |
+| 7 | `GossipConfig` (and sibling config structs) not `#[non_exhaustive]` | — | `default()` plus assignment | **Resolved in 2.41.0** for `GossipConfig`, `TlsConfig`, `GatewayTlsConfig` and `OidcConfig` — `#[non_exhaustive]`, §109; the other config structs as below |
 | 8 | exhaustive `match` on `RecordKind` | 2.10.0 | add a `_` arm | **Yes** — `#[non_exhaustive]` from 2.10.0 |
 | 9 | exhaustive `match` on `Execution` | 2.10.0 | add a `_` arm that reads as **unknown**, not as *nothing ran* | **Yes** — `#[non_exhaustive]` from 2.10.0 |
 | 10 | `FederationEdge::authorize(presented, export, now_ms)` | 2.12.0 | `authorize(presented, export, **body**, now_ms)` | **Yes** — it will not compile |
@@ -77,13 +77,16 @@ the notice.
 | 54 | `mycelium_core`'s `CoreCtx::gossip_txs`, `WriterEntry::tx`, `writer::get_or_spawn_writer` / `request_state`, `run_peer_writer`, and `framing::dispatch_gossip_send` / `dispatch_gossip_try_send` / `gossip_shard_fill` in their old shapes | 2.36.0 (the shutdown-sweep fix, #650) | `GossipTxs::new(senders, Unsent::default())`; pass `gossip_txs.unsent()`; wrap a shard receiver in `CountedRx::new(rx, unsent)` | **Yes** — every use is a type error; code that only uses `GossipAgent` is unaffected ([§54](#54-mycelium-cores-outbound-path-is-counted-its-channel-types-changed-shape-2360-the-shutdown-sweep-fix)) |
 | 55 | a fleet-scoped limit (`HistoryScope::FleetConsensus` / `FleetTally`) over more than 1 024 seats, or over a window of zero or more than 24 hours | 2.37.0 (row K2's bounds) | a per-point limit, or a fleet limit within `MAX_FLEET_SEATS` / `MAX_FLEET_WINDOW_MS`; check a policy at load with `check_fleet_bounds` or `FleetCounter::try_new` | **No** — it builds, and every request its rule covers decides `Indeterminate`; **yes** for a `ContractCase` or `Report` literal (a new field) ([§55](#55-a-fleet-limit-is-bounded-at-most-1-024-seats-a-window-of-at-most-24-hours-2370-post-360-plan-row-k2s-bounds)) |
 | 56 | a `FleetTally` rule reading a member's entries this node holds without its heartbeat as zero, or counting a forged (future) time as a permit | 2.37.0 (row K2, #656) | nothing to migrate: such a member is unknown coverage while its entry is inside the window plus the staleness and drift bounds | **No** — a tally rule can decide `Indeterminate` where it admitted before, for at most that window ([§56](#56-a-members-tally-entries-without-its-heartbeat-are-unknown-coverage-not-zero-2370-post-360-plan-row-k2)) |
+| 109 | a struct literal of `GossipConfig`, `TlsConfig`, `GatewayTlsConfig` or `OidcConfig` outside `mycelium-core`, with or without `..Default::default()` | 2.41.0 (critique plan CR12) | `let mut c = X::default();` and assign the fields | **Yes** — `E0639`; a field added later then breaks nothing ([§109](#109-gossipconfig-tlsconfig-gatewaytlsconfig-and-oidcconfig-are-non_exhaustive-build-one-with-default-and-assignment-2410-critique-plan-row-cr12)) |
 
 **Entry 10 is the loud kind**, and deliberately so: a signature change, caught by the compiler, not
 a behaviour change to discover at runtime. You cannot authorise a federated call without saying
 which body it is — see §10 below.
 
 Entries 6 and 7 are the inverse of the usual case: nothing is deprecated *today*, but a future
-`#[non_exhaustive]` will break one specific pattern, so the pattern is worth abandoning now.
+`#[non_exhaustive]` will break one specific pattern, so the pattern is worth abandoning now. **Entry 7 arrived early
+for four structs**: `GossipConfig`, `TlsConfig`, `GatewayTlsConfig` and `OidcConfig` are `#[non_exhaustive]` from
+2.41.0, so `..Default::default()` stops compiling for them too (§109).
 **Entry 8 is that same case already done**: `RecordKind` was marked `#[non_exhaustive]` in 2.10.0
 *before* AE0 §5's remaining record kinds arrive, so their arrival costs nothing. Add the `_` arm
 once; that is the whole of it.
@@ -205,7 +208,10 @@ cfg.bind_port = 7000;
 cfg.bootstrap_peers = peers;
 ```
 
-The `Default` + assignment pattern is the supported one. Same for `BoardConfig` and `..Default::default()`.
+The `Default` + assignment pattern is the supported one. **Since 2.41.0 it is the only one for `GossipConfig`,
+`TlsConfig`, `GatewayTlsConfig` and `OidcConfig`**, which are `#[non_exhaustive]`: a literal with
+`..Default::default()` is refused for them as well (§109). For `BoardConfig` and the other config structs,
+`..Default::default()` still compiles.
 
 ---
 
@@ -3009,7 +3015,8 @@ provider's half; the gateway's exchange, in the same release, is §97.
 - **What changed:**
   - `[oidc]` gained `exchange_audience`, `exchange_client_id` and `exchange_max_lifetime_secs`. **`OidcConfig` now
     implements `Default`**, so a literal that names every field breaks once; write
-    `OidcConfig { issuer, audience, group_scopes, ..Default::default() }` and later fields will not break it. The
+    `OidcConfig { issuer, audience, group_scopes, ..Default::default() }` and later fields will not break it (*since
+    §109, 2.41.0: `OidcConfig::default()` plus assignment — the literal is refused*). The
     defaults are a TOML table's: `group_claim = "groups"`, no group scopes, discovery for the JWKS, no exchange.
   - **The trigger is `exchange_audience`.** An `[oidc]` table without it is unchanged, and so is a node without one.
   - With it, `validate()` refuses a missing `exchange_client_id` (`oidc_exchange_client_unset`), a lifetime outside
@@ -3058,7 +3065,8 @@ no exchange for any other call, nor for a principal that is not `oidc:`.
 
 - **What changed:**
   - `[oidc]` gained `exchange_token_endpoint` and `exchange_client_secret_env` (default
-    `MYCELIUM_OIDC_EXCHANGE_SECRET`). `OidcConfig { …, ..Default::default() }` is unaffected.
+    `MYCELIUM_OIDC_EXCHANGE_SECRET`). `OidcConfig { …, ..Default::default() }` is unaffected (since §109, 2.41.0,
+    build it with `OidcConfig::default()` plus assignment).
   - **A node exchanges iff `exchange_token_endpoint` is set, and verifies iff `exchange_audience` is set** (the
     maintainer's decision, 2026-11-11). Whether it runs an HTTP port decides neither. A verifying node without the
     endpoint — a provider with only `/health` or `/metrics`, or a gateway that also provides — starts as under §96, with
@@ -4236,3 +4244,61 @@ run without it).
   (`mycelium-wasm-host/src/provisioner.rs`),
   `mycelium-wasm-host/tests/hosted_capability_enforcement.rs`,
   `a_bare_cap_resource_is_qualified_to_this_node` (`src/agent/declared_authority_tests.rs`).
+
+## 109. `GossipConfig`, `TlsConfig`, `GatewayTlsConfig` and `OidcConfig` are `#[non_exhaustive]`: build one with `default()` and assignment (2.41.0, critique plan row CR12)
+
+**A source break, once, for a struct literal of any of the four** — the replacement for entry 7's "it breaks at
+3.0.0", brought forward to the MINOR that carries wave 1b (the maintainer's decision D3, 2026-11-12; the three
+siblings on the maintainer's yes, 2026-11-14). Every MINOR has added fields to these structs, and each addition broke
+an exhaustive literal (entries 32, 35 and 48 and §§78–97 name them). From this release a field added in a MINOR
+breaks nothing, so the *Will the compiler tell me?* note "`GossipConfig` gained a field (an exhaustive literal
+breaks)" is not written again for these four.
+
+**Who is affected:** Rust code **outside `mycelium-core`** — the `mycelium` crate's callers, every companion crate
+and application — that builds one of the four with a struct expression. Both forms are refused (`E0639`): an
+exhaustive literal, and a literal with `..Default::default()` (or any `..base`), which the earlier entries
+recommended. Inside `mycelium-core` nothing changes. Reading a field, assigning a field, `Clone`, `PartialEq`,
+`Debug` and the TOML / `serde` path (`GossipConfig::load_from_file`, `[tls]`, `[gateway_tls]`, `[oidc]`) are
+unchanged, as is every default. A pattern that destructures one of the four outside `mycelium-core` needs a `..`.
+
+**What to do:** start from `default()` and assign the fields you set. There is no builder (D3: a builder for 84
+fields is a second API to keep true).
+
+```rust
+// before — refused from 2.41.0
+let cfg = GossipConfig { bind_port: 7946, bootstrap_peers: peers, ..Default::default() };
+cfg.tls = Some(TlsConfig { auto_cert_dir: dir.clone(), ..TlsConfig::default() });
+
+// after
+let mut cfg = GossipConfig::default();
+cfg.bind_port = 7946;
+cfg.bootstrap_peers = peers;
+let mut tls = TlsConfig::default();
+tls.auto_cert_dir = dir.clone();
+cfg.tls = Some(tls);
+
+// the same for the other two
+let mut gw = GatewayTlsConfig::default();
+gw.cert_pem_path = Some("/etc/mycelium/gateway-cert.pem".into());
+gw.key_pem_path = Some("/etc/mycelium/gateway-key.pem".into());
+gw.bulk_ca_pem_path = Some("/etc/mycelium/gateway-ca.pem".into());
+let mut oidc = OidcConfig::default(); // `compliance`
+oidc.issuer = "https://login.example.com/".into();
+oidc.audience = "mycelium-cluster".into();
+```
+
+Where the value is an expression, a block keeps it one: `cfg.tls = Some({ let mut t = TlsConfig::default();
+t.auto_cert_dir = dir; t });`. Every literal in this repository outside `mycelium-core` — 265 of them in 112 files,
+across the `mycelium` crate's modules and tests, the examples, the co-op examples, the two feature-off test crates and
+nine companion crates — was rewritten this way in the same pull request, with the defaults and values unchanged.
+
+**Will the compiler tell me?** **Yes** — every literal is an error (`E0639`, *cannot create non-exhaustive struct
+using struct expression*), and a destructuring pattern without `..` is `E0638`. Nothing changes at runtime.
+
+- ***Check:*** `cargo build` of your crate (all targets: `cargo test --no-run`) compiles. A remaining literal fails
+  with `E0639` naming the struct; `grep -rnE '\b(GossipConfig|TlsConfig|GatewayTlsConfig|OidcConfig)\s*\{'` over your
+  sources lists the candidates (a `fn … -> GossipConfig {` line is a return type, not a literal).
+- **Code:** `mycelium-core/src/config.rs` (the four structs; each one's *Construction* doc-test pair, one that compiles
+  and its `compile_fail` twin). Tests: those doc-tests, run by CI's `cargo test -p mycelium-core` lines (the
+  `OidcConfig` pair under `--features compliance`). A doc-test is compiled as a crate of its own, so each pair is the
+  outside caller's view.

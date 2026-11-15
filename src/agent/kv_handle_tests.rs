@@ -17,7 +17,9 @@ fn alloc_port() -> u16 { crate::test_util::alloc_port() }
 
 async fn make_started_agent(port: u16) -> GossipAgent {
     let id  = NodeId::new("127.0.0.1", port).unwrap();
-    let cfg = GossipConfig { bind_address: "127.0.0.1".parse().unwrap(), bind_port: port, ..GossipConfig::default() };
+    let mut cfg = GossipConfig::default();
+    cfg.bind_address = "127.0.0.1".parse().unwrap();
+    cfg.bind_port = port;
     let a   = GossipAgent::new(id, cfg);
     a.start().await.unwrap();
     a

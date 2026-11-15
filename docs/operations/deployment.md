@@ -86,7 +86,9 @@ so one compromised host can mint a certificate for every node, and the node warn
 each node `[tls] cert_pem` + `key_pem` ([cert-rotation](cert-rotation.md), [production readiness](production-readiness.md)).
 
 ```rust
-cfg.tls = Some(TlsConfig { auto_cert_dir: "/var/lib/mycelium/tls".into(), ..Default::default() });
+let mut tls = TlsConfig::default(); // `#[non_exhaustive]`: default() plus assignment
+tls.auto_cert_dir = "/var/lib/mycelium/tls".into();
+cfg.tls = Some(tls);
 ```
 
 With `tls` set, the node generates an Ed25519 identity + a CA-signed cert into

@@ -259,14 +259,13 @@ mod tests {
         let id = NodeId::new("127.0.0.1", port).unwrap();
         let cert_dir = std::env::temp_dir().join(format!("myc-af-{port}"));
         let _ = std::fs::remove_dir_all(&cert_dir);
-        let cfg = GossipConfig {
-            bind_port: port,
-            tls: Some(mycelium::config::TlsConfig {
-                auto_cert_dir: cert_dir.clone(),
-                ..mycelium::config::TlsConfig::default()
-            }),
-            ..Default::default()
-        };
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = port;
+        cfg.tls = Some({
+            let mut tls = mycelium::config::TlsConfig::default();
+            tls.auto_cert_dir = cert_dir.clone();
+            tls
+        });
         let agent = Arc::new(GossipAgent::new(id, cfg));
         agent.start().await.unwrap();
         (agent, cert_dir)

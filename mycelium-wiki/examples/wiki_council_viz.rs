@@ -476,11 +476,9 @@ fn parse_doc(stem: &str, text: &str) -> (String, String) {
 
 async fn import(store_dir: &Path, corpus: &Path) -> Arc<FsStore> {
     let port = mycelium::test_util::alloc_port();
-    let cfg = GossipConfig {
-        bind_port: port,
-        cluster_name: Some(std::env::var("GOSSIP_CLUSTER_NAME").unwrap_or_else(|_| "wiki-council".into())),
-        ..Default::default()
-    };
+    let mut cfg = GossipConfig::default();
+    cfg.bind_port = port;
+    cfg.cluster_name = Some(std::env::var("GOSSIP_CLUSTER_NAME").unwrap_or_else(|_| "wiki-council".into()));
     let agent = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg));
     agent.start().await.unwrap();
     let store = Arc::new(FsStore::open(store_dir, GROUP).unwrap());
@@ -535,14 +533,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // A gateway-carrying node so the Ops Console can target this demo + discover its UI.
     let gwport = OPS_PORT;
-    let cfg = GossipConfig {
-        bind_port: mycelium::test_util::alloc_port(),
-        cluster_name: Some(std::env::var("GOSSIP_CLUSTER_NAME").unwrap_or_else(|_| "wiki-council".into())),
-        http_port: Some(gwport),
-        // The Ops Console page, served on :8099, reads this gateway from the browser (Y3).
-        gateway_cors_origins: vec!["http://127.0.0.1:8099".into()],
-        ..Default::default()
-    };
+    let mut cfg = GossipConfig::default();
+    cfg.bind_port = mycelium::test_util::alloc_port();
+    cfg.cluster_name = Some(std::env::var("GOSSIP_CLUSTER_NAME").unwrap_or_else(|_| "wiki-council".into()));
+    cfg.http_port = Some(gwport);
+    // The Ops Console page, served on :8099, reads this gateway from the browser (Y3).
+    cfg.gateway_cors_origins = vec!["http://127.0.0.1:8099".into()];
     let gw = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", cfg.bind_port)?, cfg));
     gw.start().await?;
     #[cfg(feature = "gateway")]

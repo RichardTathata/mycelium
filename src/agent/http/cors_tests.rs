@@ -338,7 +338,11 @@ async fn the_https_gateway_answers_a_listed_origin_the_same_way() {
     let mut cfg = GossipConfig::default();
     cfg.bind_port = gossip_port;
     cfg.http_port = Some(http_port);
-    cfg.tls = Some(crate::TlsConfig { auto_cert_dir: cert_dir.clone(), ..Default::default() });
+    cfg.tls = Some({
+        let mut tls = crate::TlsConfig::default();
+        tls.auto_cert_dir = cert_dir.clone();
+        tls
+    });
     cfg.gateway_tls = Some(crate::GatewayTlsConfig::default());
     cfg.gateway_cors_origins = vec![CONSOLE.into()];
     let agent = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", gossip_port).unwrap(), cfg));

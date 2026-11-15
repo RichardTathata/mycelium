@@ -38,9 +38,10 @@ async fn main() {
     let node_b = NodeId::new("127.0.0.1", 19101).unwrap();
     let node_c = NodeId::new("127.0.0.1", 19102).unwrap();
 
-    let cfg = || GossipConfig {
-        cluster_name: Some(std::env::var("GOSSIP_CLUSTER_NAME").unwrap_or_else(|_| "semantic".to_string())),
-        ..Default::default()
+    let cfg = || {
+        let mut cfg = GossipConfig::default();
+        cfg.cluster_name = Some(std::env::var("GOSSIP_CLUSTER_NAME").unwrap_or_else(|_| "semantic".to_string()));
+        cfg
     };
     let agent_a = GossipAgent::new(node_a.clone(), cfg());
     let agent_b = GossipAgent::new(node_b.clone(), cfg());

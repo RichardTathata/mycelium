@@ -28,7 +28,7 @@ is part of a cluster if two things hold:
 > boundary: KV floods every node in it. See the guide on [security](09-security.md).)
 >
 > **Setting it** (optional; default = unlabelled): set it **in code** —
-> `GossipConfig { cluster_name: Some("prod-eu".into()), .. }` — or via the env var
+> `cfg.cluster_name = Some("prod-eu".into())` on a `GossipConfig::default()` — or via the env var
 > `GOSSIP_CLUSTER_NAME=prod-eu`. ⚠️ **The env var only takes effect if your binary calls
 > `cfg.apply_env_overrides()`** after building the config — like *every* `GOSSIP_*` knob, it is a
 > deliberate opt-in, not automatic. A `GOSSIP_CLUSTER_NAME` that "does nothing" almost always means

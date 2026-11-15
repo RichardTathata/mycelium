@@ -16,7 +16,9 @@ const FAR_DEADLINE: u64 = 1_000;
 
 async fn node() -> (Arc<GossipAgent>, String, reqwest::Client) {
     let (gossip_port, http_port) = (mycelium::test_util::alloc_port(), mycelium::test_util::alloc_port());
-    let cfg = GossipConfig { bind_port: gossip_port, http_port: Some(http_port), ..Default::default() };
+    let mut cfg = GossipConfig::default();
+    cfg.bind_port = gossip_port;
+    cfg.http_port = Some(http_port);
     let agent = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", gossip_port).unwrap(), cfg));
     agent.start().await.expect("the node starts");
     let base = format!("http://127.0.0.1:{http_port}");

@@ -113,7 +113,11 @@ async fn main() {
     let plain_port = free_port();
     let plain = GossipAgent::new(
         NodeId::new("127.0.0.1", plain_port).unwrap(),
-        GossipConfig { bind_port: plain_port, ..Default::default() },
+        {
+            let mut cfg = GossipConfig::default();
+            cfg.bind_port = plain_port;
+            cfg
+        },
     );
     plain.start().await.expect("the node binds");
     let accepted = plain.kv().set("ladder/plain", bytes::Bytes::from_static(b"v"));

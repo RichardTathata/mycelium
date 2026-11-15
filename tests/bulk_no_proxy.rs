@@ -27,7 +27,11 @@ async fn pair(tls_dir: Option<&std::path::Path>) -> (Arc<GossipAgent>, Arc<Gossi
         cfg.bootstrap_peers = boot;
         cfg.health_check_max_jitter_ms = 1;
         if let Some(dir) = tls_dir {
-            cfg.tls = Some(TlsConfig { auto_cert_dir: dir.to_path_buf(), ..Default::default() });
+            cfg.tls = Some({
+                let mut tls = TlsConfig::default();
+                tls.auto_cert_dir = dir.to_path_buf();
+                tls
+            });
             cfg.gateway_tls = Some(GatewayTlsConfig::default());
         }
         (NodeId::new("127.0.0.1", p).unwrap(), cfg)

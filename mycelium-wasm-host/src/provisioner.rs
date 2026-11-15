@@ -1657,7 +1657,8 @@ mod tests {
         for _ in 0..16 {
             let port = alloc_port();
             let id = mycelium::NodeId::new("127.0.0.1", port).unwrap();
-            let cfg = mycelium::GossipConfig { bind_port: port, ..Default::default() };
+            let mut cfg = mycelium::GossipConfig::default();
+            cfg.bind_port = port;
             let agent = Arc::new(GossipAgent::new(id, cfg));
             if agent.start().await.is_ok() {
                 return agent;
@@ -3250,7 +3251,11 @@ mod tests {
             let id = mycelium::NodeId::new("127.0.0.1", port).unwrap();
             let agent = Arc::new(GossipAgent::new(
                 id,
-                mycelium::GossipConfig { bind_port: port, ..Default::default() },
+                {
+                    let mut cfg = mycelium::GossipConfig::default();
+                    cfg.bind_port = port;
+                    cfg
+                },
             ));
             let host = Arc::new(WasmHost::new().expect("engine"));
             let mut source = InMemorySource::new();
@@ -3284,7 +3289,11 @@ mod tests {
     async fn an_entry_providing_a_model_metadata_ad_is_never_installed() {
         let port = mycelium::test_util::alloc_port();
         let id = mycelium::NodeId::new("127.0.0.1", port).unwrap();
-        let agent = Arc::new(GossipAgent::new(id, mycelium::GossipConfig { bind_port: port, ..Default::default() }));
+        let agent = Arc::new(GossipAgent::new(id, {
+            let mut cfg = mycelium::GossipConfig::default();
+            cfg.bind_port = port;
+            cfg
+        }));
         let host = Arc::new(WasmHost::new().expect("engine"));
         let mut source = InMemorySource::new();
         let blob = source.insert(b"not a model".to_vec());
@@ -3443,7 +3452,11 @@ mod tests {
         fn draws(sink: Option<Arc<DecisionSink>>) -> (Vec<bool>, Vec<String>) {
             install(SimContext { kernel: Kernel::recording(), sources: Sources::seeded(7, 1_700_000_000_000), node: "pilot".into(), offsets: Default::default() });
             let port = alloc_port();
-            let agent = Arc::new(GossipAgent::new(mycelium::NodeId::new("127.0.0.1", port).unwrap(), mycelium::GossipConfig { bind_port: port, ..Default::default() }));
+            let agent = Arc::new(GossipAgent::new(mycelium::NodeId::new("127.0.0.1", port).unwrap(), {
+                let mut cfg = mycelium::GossipConfig::default();
+                cfg.bind_port = port;
+                cfg
+            }));
             let host = Arc::new(WasmHost::new().expect("engine"));
             let mut prov = Provisioner::new(agent, host, InstallableCatalog::new(), Arc::new(InMemorySource::new()), 0.5);
             if let Some(s) = &sink { prov.with_decision_trace(Arc::clone(s)); }

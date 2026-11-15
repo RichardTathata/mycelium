@@ -12,14 +12,12 @@ async fn start_agent(port: u16, bootstrap: Option<u16>) -> Arc<GossipAgent> {
     let id = NodeId::new("127.0.0.1", port).expect("node id");
     // Tight health-check jitter so loopback peer formation is fast (same
     // setting the in-repo examples use for local clusters).
-    let cfg = GossipConfig {
-        bind_port: port,
-        health_check_max_jitter_ms: 50,
-        bootstrap_peers: bootstrap
-            .map(|b| vec![NodeId::new("127.0.0.1", b).expect("bootstrap id")])
-            .unwrap_or_default(),
-        ..Default::default()
-    };
+    let mut cfg = GossipConfig::default();
+    cfg.bind_port = port;
+    cfg.health_check_max_jitter_ms = 50;
+    cfg.bootstrap_peers = bootstrap
+        .map(|b| vec![NodeId::new("127.0.0.1", b).expect("bootstrap id")])
+        .unwrap_or_default();
     let agent = Arc::new(GossipAgent::new(id, cfg));
     agent.start().await.expect("agent start");
     agent

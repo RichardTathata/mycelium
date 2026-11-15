@@ -51,7 +51,11 @@ async fn main() {
 async fn ca_init(dir: &str) {
     let mut cfg = GossipConfig::default();
     cfg.bind_port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
-    cfg.tls = Some(TlsConfig { auto_cert_dir: dir.into(), ..Default::default() });
+    cfg.tls = Some({
+        let mut tls = TlsConfig::default();
+        tls.auto_cert_dir = dir.into();
+        tls
+    });
     let agent = GossipAgent::new(NodeId::new("127.0.0.1", cfg.bind_port).unwrap(), cfg);
     agent.start().await.expect("start");
     agent.shutdown().await;
@@ -81,7 +85,11 @@ async fn node() {
     if let Ok(secs) = std::env::var("WRITER_IDLE_TIMEOUT_SECS") {
         cfg.writer_idle_timeout_secs = secs.parse().expect("WRITER_IDLE_TIMEOUT_SECS");
     }
-    cfg.tls = Some(TlsConfig { auto_cert_dir: cert_dir, ..Default::default() });
+    cfg.tls = Some({
+        let mut tls = TlsConfig::default();
+        tls.auto_cert_dir = cert_dir;
+        tls
+    });
     cfg.bootstrap_peers = std::env::var("PEERS")
         .unwrap_or_default()
         .split(',')

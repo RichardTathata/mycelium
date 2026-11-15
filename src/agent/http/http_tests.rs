@@ -539,7 +539,11 @@ async fn test_gateway_serves_native_tls() {
     cfg.bind_port = gossip_port;
     cfg.http_port = Some(http_port);
     cfg.http_addr = "127.0.0.1".to_string();
-    cfg.tls = Some(crate::TlsConfig { auto_cert_dir: cert_dir.clone(), ..Default::default() });
+    cfg.tls = Some({
+        let mut tls = crate::TlsConfig::default();
+        tls.auto_cert_dir = cert_dir.clone();
+        tls
+    });
     cfg.gateway_tls = Some(crate::GatewayTlsConfig::default()); // reuse node cert
 
     let agent = Arc::new(GossipAgent::new(id, cfg));
@@ -676,7 +680,11 @@ async fn test_identity_anchor_recorded_and_conflict_flagged() {
         let mut cfg = GossipConfig::default();
         cfg.bind_port = port;
         cfg.bootstrap_peers = boot;
-        cfg.tls = Some(crate::TlsConfig { auto_cert_dir: cert_dir.clone(), ..Default::default() });
+        cfg.tls = Some({
+            let mut tls = crate::TlsConfig::default();
+            tls.auto_cert_dir = cert_dir.clone();
+            tls
+        });
         Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg))
     };
     let a = mk(pa, vec![]);
@@ -753,7 +761,11 @@ async fn test_audit_checkpoint_prune_and_verify() {
     let id = NodeId::new("127.0.0.1", gossip_port).unwrap();
     let mut cfg = GossipConfig::default();
     cfg.bind_port = gossip_port;
-    cfg.tls = Some(crate::TlsConfig { auto_cert_dir: cert_dir.clone(), ..Default::default() });
+    cfg.tls = Some({
+        let mut tls = crate::TlsConfig::default();
+        tls.auto_cert_dir = cert_dir.clone();
+        tls
+    });
     let agent = Arc::new(GossipAgent::new(id.clone(), cfg));
     agent.start().await.unwrap();
     tokio::time::sleep(Duration::from_millis(80)).await;
@@ -806,7 +818,11 @@ async fn test_audit_sink_mirrors_sealed_records() {
     let id = NodeId::new("127.0.0.1", gossip_port).unwrap();
     let mut cfg = GossipConfig::default();
     cfg.bind_port = gossip_port;
-    cfg.tls = Some(crate::TlsConfig { auto_cert_dir: cert_dir.clone(), ..Default::default() });
+    cfg.tls = Some({
+        let mut tls = crate::TlsConfig::default();
+        tls.auto_cert_dir = cert_dir.clone();
+        tls
+    });
     let agent = Arc::new(GossipAgent::new(id, cfg));
 
     let captured = Arc::new(StdMutex::new(Vec::new()));
@@ -846,7 +862,11 @@ async fn test_rotate_on_compromise_revokes_old_key() {
     let id = NodeId::new("127.0.0.1", gossip_port).unwrap();
     let mut cfg = GossipConfig::default();
     cfg.bind_port = gossip_port;
-    cfg.tls = Some(crate::TlsConfig { auto_cert_dir: cert_dir.clone(), ..Default::default() });
+    cfg.tls = Some({
+        let mut tls = crate::TlsConfig::default();
+        tls.auto_cert_dir = cert_dir.clone();
+        tls
+    });
     let agent = Arc::new(GossipAgent::new(id, cfg));
     agent.start().await.unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -2697,7 +2717,11 @@ async fn governance_changes_are_sealed_with_an_identity() {
     let mut cfg = GossipConfig::default();
     cfg.bind_port = gossip_port;
     cfg.http_port = Some(http_port);
-    cfg.tls = Some(TlsConfig { auto_cert_dir: cert_dir.clone(), ..TlsConfig::default() });
+    cfg.tls = Some({
+        let mut tls = TlsConfig::default();
+        tls.auto_cert_dir = cert_dir.clone();
+        tls
+    });
     cfg.gateway_scoped_tokens = vec![crate::GatewayToken {
         token: "gov".into(), scopes: vec!["govern:write".into(), "identity:write".into()],
     }];
@@ -2866,15 +2890,19 @@ async fn test_gateway_oidc_jwt_maps_groups_to_scopes() {
     let mut cfg = GossipConfig::default();
     cfg.bind_port = gossip_port;
     cfg.http_port = Some(http_port);
-    cfg.oidc = Some(crate::OidcConfig {
-        issuer: issuer.clone(),
-        audience: "mycelium-cluster".into(),
-        group_claim: "groups".into(),
-        group_scopes,
-        jwks_uri: None, // exercise discovery
-        exchange_audience: None,
-        exchange_client_id: None,
-        exchange_max_lifetime_secs: None, exchange_token_endpoint: None, exchange_client_secret_env: None,
+    cfg.oidc = Some({
+        let mut oidc = crate::OidcConfig::default();
+        oidc.issuer = issuer.clone();
+        oidc.audience = "mycelium-cluster".into();
+        oidc.group_claim = "groups".into();
+        oidc.group_scopes = group_scopes;
+        oidc.jwks_uri = None; // exercise discovery
+        oidc.exchange_audience = None;
+        oidc.exchange_client_id = None;
+        oidc.exchange_max_lifetime_secs = None;
+        oidc.exchange_token_endpoint = None;
+        oidc.exchange_client_secret_env = None;
+        oidc
     });
     let agent = Arc::new(GossipAgent::new(id, cfg));
     agent.start().await.unwrap();
@@ -2930,7 +2958,11 @@ async fn test_gateway_audit_endpoint_verifies_and_scope_gates() {
     let mut cfg = GossipConfig::default();
     cfg.bind_port = gossip_port;
     cfg.http_port = Some(http_port);
-    cfg.tls = Some(TlsConfig { auto_cert_dir: cert_dir.clone(), ..TlsConfig::default() });
+    cfg.tls = Some({
+        let mut tls = TlsConfig::default();
+        tls.auto_cert_dir = cert_dir.clone();
+        tls
+    });
     cfg.gateway_scoped_tokens = vec![
         GatewayToken { token: "auditor".into(), scopes: vec!["audit:read".into()] },
         GatewayToken { token: "noaudit".into(), scopes: vec!["kv:read".into()] },
@@ -2989,7 +3021,11 @@ async fn test_gateway_transparency_inclusion_proof_verifies_and_scope_gates() {
     let mut cfg = GossipConfig::default();
     cfg.bind_port = gossip_port;
     cfg.http_port = Some(http_port);
-    cfg.tls = Some(TlsConfig { auto_cert_dir: cert_dir.clone(), ..TlsConfig::default() });
+    cfg.tls = Some({
+        let mut tls = TlsConfig::default();
+        tls.auto_cert_dir = cert_dir.clone();
+        tls
+    });
     cfg.gateway_scoped_tokens = vec![
         GatewayToken { token: "auditor".into(), scopes: vec!["transparency:read".into()] },
         GatewayToken { token: "noaudit".into(), scopes: vec!["kv:read".into()] },

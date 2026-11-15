@@ -142,7 +142,11 @@ async fn main() {
     cfg.http_port = Some(http);
     cfg.gateway_auth_token = Some("agent-token".to_string());
     // The evidence journal is signed, so the decisions this gateway makes are attributable.
-    cfg.tls = Some(TlsConfig { auto_cert_dir: cert_dir.clone(), ..TlsConfig::default() });
+    cfg.tls = Some({
+        let mut tls = TlsConfig::default();
+        tls.auto_cert_dir = cert_dir.clone();
+        tls
+    });
     let agent = Arc::new(GossipAgent::new(id.clone(), cfg));
 
     // Attach the policy. Without this the seam is INERT and the gateway behaves exactly as it

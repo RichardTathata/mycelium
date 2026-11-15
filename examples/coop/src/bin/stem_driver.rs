@@ -66,7 +66,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let demo = std::env::args().nth(1).unwrap_or_default();
     let host = std::env::var("STEM_DRIVER_HOST").unwrap_or_else(|_| "127.0.0.1".into());
     let port: u16 = std::env::var("STEM_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(57000);
-    let cfg = GossipConfig { bind_address: host.clone(), bind_port: port, ..Default::default() };
+    let mut cfg = GossipConfig::default();
+    cfg.bind_address = host.clone();
+    cfg.bind_port = port;
     let agent = Arc::new(GossipAgent::new(NodeId::new(&host, port)?, cfg));
     agent.start().await?;
     println!("[driver] up at {host}:{port} — the fleet's bootstrap seed; demo {demo:?}");

@@ -150,7 +150,11 @@ async fn door(opts: Opts) -> Door {
     let mut cfg = GossipConfig::default();
     cfg.bind_port = port;
     cfg.http_port = Some(http_port);
-    cfg.tls = Some(crate::TlsConfig { auto_cert_dir: dir.join("tls"), ..Default::default() });
+    cfg.tls = Some({
+        let mut tls_cfg = crate::TlsConfig::default();
+        tls_cfg.auto_cert_dir = dir.join("tls");
+        tls_cfg
+    });
     if opts.token {
         cfg.gateway_identity_issuer = Some("gw".into());
         cfg.gateway_named_tokens = vec![crate::config::GatewayNamedToken { name: "agent-1".into(), token: "s3cret".into(), scopes: vec!["*".into()] }];

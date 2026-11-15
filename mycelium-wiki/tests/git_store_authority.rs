@@ -278,7 +278,8 @@ async fn a_curator_without_present_authority_keeps_proposals_queued_until_it_has
 
     let agent = loop {
         let port = mycelium::test_util::alloc_port();
-        let cfg = GossipConfig { bind_port: port, ..Default::default() };
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = port;
         let a = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg));
         if a.start().await.is_ok() {
             break a;

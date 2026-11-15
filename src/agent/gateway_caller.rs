@@ -1759,7 +1759,11 @@ mod tests {
         if tls {
             let dir = std::env::temp_dir().join(format!("gwcaller-{port}"));
             let _ = std::fs::remove_dir_all(&dir);
-            cfg.tls = Some(crate::TlsConfig { auto_cert_dir: dir, ..Default::default() });
+            cfg.tls = Some({
+                let mut tls = crate::TlsConfig::default();
+                tls.auto_cert_dir = dir;
+                tls
+            });
         }
         #[cfg(not(feature = "tls"))]
         let _ = tls;

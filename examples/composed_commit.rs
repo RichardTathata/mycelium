@@ -130,7 +130,11 @@ async fn main() {
     cfg.gateway_identity_issuer = Some("gw".into());
     cfg.gateway_named_tokens =
         vec![GatewayNamedToken { name: "worker-a".into(), token: TOKEN.into(), scopes: vec!["*".into()] }];
-    cfg.tls = Some(TlsConfig { auto_cert_dir: cert_dir.clone(), ..TlsConfig::default() });
+    cfg.tls = Some({
+        let mut tls = TlsConfig::default();
+        tls.auto_cert_dir = cert_dir.clone();
+        tls
+    });
     let agent = Arc::new(GossipAgent::new(me.clone(), cfg));
     let resource = format!("tool:ledger.record@{me}");
 

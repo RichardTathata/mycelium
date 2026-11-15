@@ -1214,7 +1214,11 @@ mod tests {
             let port = mycelium::test_util::alloc_port();
             let agent = Arc::new(GossipAgent::new(
                 NodeId::new("127.0.0.1", port).unwrap(),
-                GossipConfig { bind_port: port, ..Default::default() },
+                {
+                    let mut cfg = GossipConfig::default();
+                    cfg.bind_port = port;
+                    cfg
+                },
             ));
             if agent.start().await.is_ok() {
                 return agent;
@@ -1336,7 +1340,11 @@ mod tests {
             }
             let agent = Arc::new(GossipAgent::new(
                 NodeId::new("127.0.0.1", port).unwrap(),
-                GossipConfig { bind_port: port, ..Default::default() },
+                {
+                    let mut cfg = GossipConfig::default();
+                    cfg.bind_port = port;
+                    cfg
+                },
             ));
             agent.start().await.expect("the node binds its port");
             let hub = ContractNet::new(Arc::clone(&agent), "hub");

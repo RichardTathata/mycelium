@@ -1614,7 +1614,8 @@ mod wal_role_tests {
 
     async fn agent() -> Arc<GossipAgent> {
         let port = mycelium::test_util::alloc_port();
-        let cfg = GossipConfig { bind_port: port, ..Default::default() };
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = port;
         let agent = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg));
         agent.start().await.unwrap();
         agent
@@ -1824,11 +1825,9 @@ mod wal_role_tests {
     async fn the_backfill_redrains_a_refused_record() {
         let a = agent().await;
         let port = mycelium::test_util::alloc_port();
-        let cfg = GossipConfig {
-            bind_port: port,
-            bootstrap_peers: vec![a.node_id().clone()],
-            ..Default::default()
-        };
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = port;
+        cfg.bootstrap_peers = vec![a.node_id().clone()];
         let b = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg));
         b.start().await.unwrap();
         let path = temp_wal("redrain-loop");

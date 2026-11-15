@@ -33,10 +33,11 @@ async fn shutdown_flushes_wal_and_restart_recovers() {
     {
         let agent = Arc::new(GossipAgent::new(
             NodeId::new("127.0.0.1", port).expect("node id"),
-            GossipConfig {
-                bind_port: port,
-                health_check_max_jitter_ms: 50,
-                ..Default::default()
+            {
+                let mut cfg = GossipConfig::default();
+                cfg.bind_port = port;
+                cfg.health_check_max_jitter_ms = 50;
+                cfg
             },
         ));
         agent.start().await.expect("agent start");
@@ -74,10 +75,11 @@ async fn shutdown_flushes_wal_and_restart_recovers() {
     {
         let agent = Arc::new(GossipAgent::new(
             NodeId::new("127.0.0.1", port + 1).expect("node id"),
-            GossipConfig {
-                bind_port: port + 1,
-                health_check_max_jitter_ms: 50,
-                ..Default::default()
+            {
+                let mut cfg = GossipConfig::default();
+                cfg.bind_port = port + 1;
+                cfg.health_check_max_jitter_ms = 50;
+                cfg
             },
         ));
         agent.start().await.expect("agent restart");

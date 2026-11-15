@@ -229,7 +229,11 @@ async fn authorized_callers_judges_the_client_not_the_gateway_node() {
     let cert_dir = std::env::temp_dir().join(format!("gwcaller-gate-{}", alloc_port()));
     let _ = std::fs::remove_dir_all(&cert_dir);
     let tls = |c: &mut GossipConfig| {
-        c.tls = Some(crate::TlsConfig { auto_cert_dir: cert_dir.clone(), ..Default::default() });
+        c.tls = Some({
+            let mut tls = crate::TlsConfig::default();
+            tls.auto_cert_dir = cert_dir.clone();
+            tls
+        });
     };
     let http_port = alloc_port();
     let gateway = node(Some(http_port), vec![], |c| { tls(c); c.gateway_auth_token = Some("tok".into()); });
@@ -414,7 +418,11 @@ async fn raw_gateway_signal_cannot_pass_as_the_node() {
     let _ = std::fs::remove_dir_all(&cert_dir);
     let a = node(Some(http_port), vec![], |c| {
         c.gateway_auth_token = Some("review-token".into());
-        c.tls = Some(crate::TlsConfig { auto_cert_dir: cert_dir.clone(), ..Default::default() });
+        c.tls = Some({
+            let mut tls = crate::TlsConfig::default();
+            tls.auto_cert_dir = cert_dir.clone();
+            tls
+        });
     });
     a.start().await.unwrap();
     // Observe the raw signal below the verifying `rpc_rx` boundary too.
@@ -639,7 +647,11 @@ async fn the_llm_doors_run_the_action_preflight() {
     let mut cfg = GossipConfig::default();
     cfg.bind_port = gossip_port;
     cfg.http_port = Some(http_port);
-    cfg.tls = Some(crate::TlsConfig { auto_cert_dir: cert_dir.clone(), ..Default::default() });
+    cfg.tls = Some({
+        let mut tls = crate::TlsConfig::default();
+        tls.auto_cert_dir = cert_dir.clone();
+        tls
+    });
     let agent = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", gossip_port).unwrap(), cfg));
     let me = agent.node_id().clone();
     let resource = format!("prompt:llm/echo@{me}");

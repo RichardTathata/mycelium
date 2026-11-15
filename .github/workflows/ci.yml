@@ -101,6 +101,10 @@ jobs:
       # Core's `tls`-gated unit tests (erasure's crypto-shred, tls's key extraction, framing's TLS cases)
       # ran in no step until 2026-10-06 — found by the test inventory once it counted library unit tests.
       - run: ./scripts/ci-retest.sh -p mycelium-core --features tls
+      # The `compliance` arm of core's doc-tests: `OidcConfig` exists only under it, so its CR12 pair (a
+      # `default()`-plus-assignment build and the `compile_fail` struct literal, `#[non_exhaustive]`) runs here and in
+      # no other step. The other three config structs' pairs run in every `-p mycelium-core` line above.
+      - run: ./scripts/ci-retest.sh -p mycelium-core --features compliance --doc
       # In-suite decoder mini-fuzz (gated behind fuzz-internals). The fuzz/
       # targets existed for the whole project's life but were never executed
       # in CI, and an unbounded-allocation decode DoS sat uncaught (M2 Run-20).

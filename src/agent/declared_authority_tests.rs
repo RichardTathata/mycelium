@@ -62,7 +62,11 @@ fn config(dir: &Path, http_port: u16, auth: Option<AuthorityConfig>) -> (NodeId,
     let mut cfg = GossipConfig::default();
     cfg.bind_port = port;
     cfg.http_port = Some(http_port);
-    cfg.tls = Some(TlsConfig { auto_cert_dir: dir.join("tls"), ..Default::default() });
+    cfg.tls = Some({
+        let mut tls_cfg = TlsConfig::default();
+        tls_cfg.auto_cert_dir = dir.join("tls");
+        tls_cfg
+    });
     cfg.persistence = Some(persistence(dir));
     cfg.gateway_identity_issuer = Some(ISSUER.into());
     cfg.gateway_named_tokens = vec![
@@ -321,7 +325,11 @@ async fn the_table_meets_the_secure_profiles_authority_requirements() {
         let issuer_port = alloc_port();
         let mut icfg = GossipConfig::auto();
         icfg.bind_port = issuer_port;
-        icfg.tls = Some(TlsConfig { auto_cert_dir: ca_dir.clone(), ..Default::default() });
+        icfg.tls = Some({
+            let mut tls = TlsConfig::default();
+            tls.auto_cert_dir = ca_dir.clone();
+            tls
+        });
         let issuer = GossipAgent::new(NodeId::new("127.0.0.1", issuer_port).unwrap(), icfg);
         issuer.start().await.expect("the issuer node mints the fleet CA");
         issuer.shutdown().await;
@@ -332,7 +340,14 @@ async fn the_table_meets_the_secure_profiles_authority_requirements() {
     cfg.bind_port = port;
     cfg.http_port = Some(alloc_port());
     cfg.http_addr = "127.0.0.1".to_string();
-    cfg.tls = Some(TlsConfig { auto_cert_dir: cert_dir.clone(), cert_pem: Some(cert_pem), key_pem: Some(key_pem), ca_cert_pem: None });
+    cfg.tls = Some({
+        let mut tls = TlsConfig::default();
+        tls.auto_cert_dir = cert_dir.clone();
+        tls.cert_pem = Some(cert_pem);
+        tls.key_pem = Some(key_pem);
+        tls.ca_cert_pem = None;
+        tls
+    });
     cfg.gateway_tls = Some(crate::GatewayTlsConfig::default());
     cfg.gateway_auth_token = Some("s3cret".into());
     cfg.require_identity_proofs = true;

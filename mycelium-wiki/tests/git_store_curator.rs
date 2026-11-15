@@ -31,7 +31,8 @@ async fn curator_applies_proposals_as_scoped_git_commits() {
 
     let agent = loop {
         let port = mycelium::test_util::alloc_port();
-        let cfg = GossipConfig { bind_port: port, ..Default::default() };
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = port;
         let a = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg));
         if a.start().await.is_ok() {
             break a;
@@ -97,7 +98,8 @@ async fn two_council_curators_share_one_repo_without_cross_scope_commits() {
         // Independent write domains need no shared mesh: each council's group has its own curator.
         let agent = loop {
             let port = mycelium::test_util::alloc_port();
-            let cfg = GossipConfig { bind_port: port, ..Default::default() };
+            let mut cfg = GossipConfig::default();
+            cfg.bind_port = port;
             let a = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg));
             if a.start().await.is_ok() {
                 break a;
@@ -192,7 +194,8 @@ async fn gate_refused_proposals_are_dropped_and_the_curator_keeps_working() {
 
     let agent = loop {
         let port = mycelium::test_util::alloc_port();
-        let cfg = GossipConfig { bind_port: port, ..Default::default() };
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = port;
         let a = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg));
         if a.start().await.is_ok() {
             break a;
@@ -271,11 +274,9 @@ async fn a_worker_submits_a_batch_reference_and_the_curator_applies_it() {
         for _ in 0..16 {
             let (pa, pb) = (mycelium::test_util::alloc_port(), mycelium::test_util::alloc_port());
             let mk = |port: u16, boot: u16| {
-                let cfg = GossipConfig {
-                    bind_port: port,
-                    bootstrap_peers: vec![NodeId::new("127.0.0.1", boot).unwrap()],
-                    ..Default::default()
-                };
+                let mut cfg = GossipConfig::default();
+                cfg.bind_port = port;
+                cfg.bootstrap_peers = vec![NodeId::new("127.0.0.1", boot).unwrap()];
                 Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg))
             };
             let a = mk(pa, pb);
@@ -351,7 +352,8 @@ async fn curator_failover_resumes_on_a_fresh_clone_via_the_shared_remote() {
     // ── Node A: curator, applies a proposal; the drain round publishes to the shared remote. ──
     let agent_a = loop {
         let port = mycelium::test_util::alloc_port();
-        let cfg = GossipConfig { bind_port: port, ..Default::default() };
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = port;
         let a = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg));
         if a.start().await.is_ok() {
             break a;
@@ -401,7 +403,8 @@ async fn curator_failover_resumes_on_a_fresh_clone_via_the_shared_remote() {
     // ── Node B: a FRESH clone promotes; pull-on-promote adopts the remote head. ──
     let agent_b = loop {
         let port = mycelium::test_util::alloc_port();
-        let cfg = GossipConfig { bind_port: port, ..Default::default() };
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = port;
         let a = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg));
         if a.start().await.is_ok() {
             break a;
@@ -458,7 +461,8 @@ async fn a_curator_that_cannot_refresh_never_serves() {
     let tmp = tempfile::tempdir().unwrap();
     let agent = loop {
         let port = mycelium::test_util::alloc_port();
-        let cfg = GossipConfig { bind_port: port, ..Default::default() };
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = port;
         let a = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg));
         if a.start().await.is_ok() {
             break a;
@@ -501,7 +505,8 @@ async fn erase_page_is_curator_only_and_redacts_at_tip() {
 
     let agent = loop {
         let port = mycelium::test_util::alloc_port();
-        let cfg = GossipConfig { bind_port: port, ..Default::default() };
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = port;
         let a = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg));
         if a.start().await.is_ok() {
             break a;

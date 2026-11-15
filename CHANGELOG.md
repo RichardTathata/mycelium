@@ -491,6 +491,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `call:` is never established in the first mandate slot, and no entitlement table entitles one; `offer_checkpoint` keeps a
   `call:` checkpoint only for a held window (`CheckpointOffer::NotHeld` otherwise); a `call:` checkpoint is exempt from
   the start rule, as a grant's is; `MandateRefusal` gained `Revoked { term }` (`deprecations.md` §100).
+- **`GossipConfig`, `TlsConfig`, `GatewayTlsConfig` and `OidcConfig` are `#[non_exhaustive]`** (critique plan row
+  CR12, decision D3; `deprecations.md` §109). **A source break, once:** outside `mycelium-core` a struct literal of any
+  of the four — exhaustive, or with `..Default::default()` — no longer compiles (`E0639`); build one with `default()`
+  and assign the fields you set (no builder). A field added in a later MINOR then breaks no caller. Defaults, `serde`
+  and TOML loading are unchanged. Every literal in the repository outside `mycelium-core` — 265 in 112 files — is
+  rewritten so. Each struct's documentation carries a doc-test pair, one that builds it by assignment and its
+  `compile_fail` twin as a literal; the `OidcConfig` pair runs in a new CI line,
+  `cargo test -p mycelium-core --features compliance --doc`.
 
 ## [2.40.0] — 2026-11-12
 

@@ -890,7 +890,11 @@ mod tests {
             cfg.health_check_max_jitter_ms = 1;
             #[cfg(feature = "tls")]
             if let Some(dir) = tls_dir {
-                cfg.tls = Some(crate::TlsConfig { auto_cert_dir: dir.to_path_buf(), ..Default::default() });
+                cfg.tls = Some({
+                    let mut tls = crate::TlsConfig::default();
+                    tls.auto_cert_dir = dir.to_path_buf();
+                    tls
+                });
                 cfg.gateway_tls = Some(crate::GatewayTlsConfig::default());
             }
             #[cfg(not(feature = "tls"))]
@@ -1129,8 +1133,18 @@ mod tests {
             let mut cfg = GossipConfig::default();
             cfg.bind_port = port;
             cfg.http_port = Some(alloc_port());
-            cfg.tls = Some(crate::TlsConfig { auto_cert_dir: dir.join("mesh"), ..Default::default() });
-            cfg.gateway_tls = Some(crate::GatewayTlsConfig { cert_pem_path: Some(cert.clone()), key_pem_path: Some(key.clone()), bulk_ca_pem_path: bulk_ca.clone() });
+            cfg.tls = Some({
+                let mut tls = crate::TlsConfig::default();
+                tls.auto_cert_dir = dir.join("mesh");
+                tls
+            });
+            cfg.gateway_tls = Some({
+                let mut gw_tls = crate::GatewayTlsConfig::default();
+                gw_tls.cert_pem_path = Some(cert.clone());
+                gw_tls.key_pem_path = Some(key.clone());
+                gw_tls.bulk_ca_pem_path = bulk_ca.clone();
+                gw_tls
+            });
             let a = GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg);
             match a.start().await {
                 Err(crate::GossipError::InvalidField { field: "gateway_tls.bulk_ca_pem_path", .. }) => {}
@@ -1156,8 +1170,12 @@ mod tests {
             // both start (R7's review, finding 1).
             let (a_ca, a_cert, a_key) = if trusted { op.clone() } else { other.clone() };
             let (b_ca, b_cert, b_key) = op;
-            let gw = |cert: std::path::PathBuf, key: std::path::PathBuf, ca: std::path::PathBuf| crate::GatewayTlsConfig {
-                cert_pem_path: Some(cert), key_pem_path: Some(key), bulk_ca_pem_path: Some(ca),
+            let gw = |cert: std::path::PathBuf, key: std::path::PathBuf, ca: std::path::PathBuf| {
+                let mut gw_tls = crate::GatewayTlsConfig::default();
+                gw_tls.cert_pem_path = Some(cert);
+                gw_tls.key_pem_path = Some(key);
+                gw_tls.bulk_ca_pem_path = Some(ca);
+                gw_tls
             };
             let (ida, cfga) = tls_node(&dir, vec![], true, gw(a_cert, a_key, a_ca));
             let (idb, cfgb) = tls_node(&dir, vec![ida.clone()], true, gw(b_cert, b_key, b_ca));
@@ -1268,7 +1286,11 @@ mod tests {
         cfg.http_addr = "127.0.0.1".to_string();
         cfg.bootstrap_peers = boot;
         cfg.health_check_max_jitter_ms = 1;
-        cfg.tls = Some(crate::TlsConfig { auto_cert_dir: dir.join("mesh"), ..Default::default() });
+        cfg.tls = Some({
+            let mut tls = crate::TlsConfig::default();
+            tls.auto_cert_dir = dir.join("mesh");
+            tls
+        });
         cfg.gateway_tls = Some(gateway);
         (NodeId::new("127.0.0.1", port).unwrap(), cfg)
     }
@@ -1288,8 +1310,12 @@ mod tests {
             ("a hostname-only certificate", &host_cert, &host_key, &ca),
             ("a certificate another CA signed", &ip_cert, &ip_key, &other_ca),
         ] {
-            let (id, cfg) = tls_node(&dir, vec![], true, crate::GatewayTlsConfig {
-                cert_pem_path: Some(cert.clone()), key_pem_path: Some(key.clone()), bulk_ca_pem_path: Some(bulk_ca.clone()),
+            let (id, cfg) = tls_node(&dir, vec![], true, {
+                let mut gw_tls = crate::GatewayTlsConfig::default();
+                gw_tls.cert_pem_path = Some(cert.clone());
+                gw_tls.key_pem_path = Some(key.clone());
+                gw_tls.bulk_ca_pem_path = Some(bulk_ca.clone());
+                gw_tls
             });
             let a = GossipAgent::new(id, cfg);
             match a.start().await {
@@ -1308,8 +1334,11 @@ mod tests {
     async fn an_operator_certificate_on_a_node_without_a_gateway_port_starts() {
         let dir = std::env::temp_dir().join(format!("bulk-nohttp-{}-{}", std::process::id(), alloc_port()));
         let (_ca, cert, key) = operator_pki_with(&dir, "op", vec![rcgen::SanType::IpAddress("127.0.0.1".parse().unwrap())]);
-        let (id, cfg) = tls_node(&dir, vec![], false, crate::GatewayTlsConfig {
-            cert_pem_path: Some(cert), key_pem_path: Some(key), ..Default::default()
+        let (id, cfg) = tls_node(&dir, vec![], false, {
+            let mut gw_tls = crate::GatewayTlsConfig::default();
+            gw_tls.cert_pem_path = Some(cert);
+            gw_tls.key_pem_path = Some(key);
+            gw_tls
         });
         let a = GossipAgent::new(id, cfg);
         a.start().await.expect("no http_port: the gateway table is ignored and the node starts");
@@ -1324,9 +1353,17 @@ mod tests {
     async fn a_mixed_fleet_of_node_and_operator_certificates_completes_bulk_both_ways() {
         let dir = std::env::temp_dir().join(format!("bulk-mixed-{}-{}", std::process::id(), alloc_port()));
         let (ca, cert, key) = operator_pki_with(&dir, "op", vec![rcgen::SanType::IpAddress("127.0.0.1".parse().unwrap())]);
-        let (ida, cfga) = tls_node(&dir, vec![], true, crate::GatewayTlsConfig { bulk_ca_pem_path: Some(ca.clone()), ..Default::default() });
-        let (idb, cfgb) = tls_node(&dir, vec![ida.clone()], true, crate::GatewayTlsConfig {
-            cert_pem_path: Some(cert), key_pem_path: Some(key), bulk_ca_pem_path: Some(ca),
+        let (ida, cfga) = tls_node(&dir, vec![], true, {
+            let mut gw_tls = crate::GatewayTlsConfig::default();
+            gw_tls.bulk_ca_pem_path = Some(ca.clone());
+            gw_tls
+        });
+        let (idb, cfgb) = tls_node(&dir, vec![ida.clone()], true, {
+            let mut gw_tls = crate::GatewayTlsConfig::default();
+            gw_tls.cert_pem_path = Some(cert);
+            gw_tls.key_pem_path = Some(key);
+            gw_tls.bulk_ca_pem_path = Some(ca);
+            gw_tls
         });
         let a = Arc::new(GossipAgent::new(ida.clone(), cfga));
         a.start().await.unwrap();
@@ -1437,8 +1474,12 @@ mod tests {
         let (cert, key) = (dir.join("gw.pem"), dir.join("gw.key"));
         std::fs::write(&cert, leaf.pem()).unwrap();
         std::fs::write(&key, leaf_key.serialize_pem()).unwrap();
-        let (id, cfg) = tls_node(&dir, vec![], true, crate::GatewayTlsConfig {
-            cert_pem_path: Some(cert), key_pem_path: Some(key), bulk_ca_pem_path: Some(mesh.join("ca-cert.pem")),
+        let (id, cfg) = tls_node(&dir, vec![], true, {
+            let mut gw_tls = crate::GatewayTlsConfig::default();
+            gw_tls.cert_pem_path = Some(cert);
+            gw_tls.key_pem_path = Some(key);
+            gw_tls.bulk_ca_pem_path = Some(mesh.join("ca-cert.pem"));
+            gw_tls
         });
         let a = GossipAgent::new(id, cfg);
         let got = a.start().await;

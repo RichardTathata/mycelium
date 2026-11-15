@@ -83,11 +83,10 @@ cfg.tls = Some(TlsConfig::default());
 // `mycelium tls issue`, `mycelium::issue_node_cert`), set cert_pem + key_pem; auto_cert_dir
 // must then hold ca-cert.pem, and the node never mints. With only auto_cert_dir, the node
 // re-signs its certificate at every start with the CA key, which must be on the node.
-cfg.tls = Some(TlsConfig {
-    key_pem:  Some(PathBuf::from("/etc/mycelium/node.key")),
-    cert_pem: Some(PathBuf::from("/etc/mycelium/node.crt")),
-    ..Default::default()
-});
+let mut tls = TlsConfig::default(); // `#[non_exhaustive]`: default() plus assignment (deprecations §109)
+tls.key_pem  = Some(PathBuf::from("/etc/mycelium/node.key"));
+tls.cert_pem = Some(PathBuf::from("/etc/mycelium/node.crt"));
+cfg.tls = Some(tls);
 // (The fields are `cert_pem` / `key_pem` / `ca_cert_pem` / `auto_cert_dir` —
 // `mycelium-core/src/config.rs`. An earlier version of this snippet used `key_path` /
 // `cert_path`, which do not exist and did not compile; doc-coverage run 17.)
@@ -403,10 +402,9 @@ without a volume, a wiped dir regenerates the identity (breaking continuity), so
 at an explicit key:
 
 ```rust
-cfg.tls = Some(TlsConfig {
-    key_pem: Some(PathBuf::from("/var/lib/mycelium/node.key")),   // PEM PKCS8; None = auto under auto_cert_dir
-    ..Default::default()
-});
+let mut tls = TlsConfig::default();
+tls.key_pem = Some(PathBuf::from("/var/lib/mycelium/node.key"));   // PEM PKCS8; None = auto under auto_cert_dir
+cfg.tls = Some(tls);
 ```
 
 **Compliance controls (the SOC 2 audit-gap surface, shipped 2026-07-22).** Beyond mTLS/RBAC/audit

@@ -64,7 +64,11 @@ async fn main() {
     cfg.bind_port = port;
     // The audit chain is signed, so it needs a TLS identity — an unsigned "tamper-evident" log
     // would be a contradiction in terms.
-    cfg.tls = Some(TlsConfig { auto_cert_dir: cert_dir.clone(), ..TlsConfig::default() });
+    cfg.tls = Some({
+        let mut tls = TlsConfig::default();
+        tls.auto_cert_dir = cert_dir.clone();
+        tls
+    });
     let agent = Arc::new(GossipAgent::new(id.clone(), cfg));
 
     let sink = Arc::new(CollectingSink(Mutex::new(Vec::new())));

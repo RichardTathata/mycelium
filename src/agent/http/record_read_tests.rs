@@ -48,7 +48,11 @@ async fn node(tag: &str, prepare: impl FnOnce(&GossipAgent, &std::path::Path)) -
     let mut cfg = GossipConfig::default();
     cfg.bind_port = gossip_port;
     cfg.http_port = Some(http_port);
-    cfg.tls = Some(TlsConfig { auto_cert_dir: dir.join("certs"), ..TlsConfig::default() });
+    cfg.tls = Some({
+        let mut tls = TlsConfig::default();
+        tls.auto_cert_dir = dir.join("certs");
+        tls
+    });
     cfg.gateway_scoped_tokens = vec![
         GatewayToken { token: "auditor".into(), scopes: vec!["audit:read".into()] },
         GatewayToken { token: "reader".into(), scopes: vec!["kv:read".into(), "fleet:read".into()] },

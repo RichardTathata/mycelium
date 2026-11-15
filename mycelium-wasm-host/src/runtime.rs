@@ -1053,7 +1053,11 @@ mod tests {
         let id = mycelium::NodeId::new("127.0.0.1", port).unwrap();
         let agent = Arc::new(GossipAgent::new(
             id,
-            mycelium::GossipConfig { bind_port: port, ..Default::default() },
+            {
+                let mut cfg = mycelium::GossipConfig::default();
+                cfg.bind_port = port;
+                cfg
+            },
         ));
         RuntimeCtx { agent, trace: None, install_token: 0, shadow: false }
     }
@@ -1086,7 +1090,11 @@ mod tests {
         for _ in 0..16 {
             let port = mycelium::test_util::alloc_port();
             let id = mycelium::NodeId::new("127.0.0.1", port).unwrap();
-            let a = Arc::new(GossipAgent::new(id, mycelium::GossipConfig { bind_port: port, ..Default::default() }));
+            let a = Arc::new(GossipAgent::new(id, {
+                let mut cfg = mycelium::GossipConfig::default();
+                cfg.bind_port = port;
+                cfg
+            }));
             if a.start().await.is_ok() {
                 agent = Some(a);
                 break;

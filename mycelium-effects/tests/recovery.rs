@@ -41,7 +41,12 @@ fn business_rows(path: &std::path::Path) -> i64 {
 async fn primary(port: u16, wal: &std::path::Path) -> (Arc<GossipAgent>, Arc<TupleSpace>) {
     let agent = Arc::new(GossipAgent::new(
         NodeId::new("127.0.0.1", port).expect("node id"),
-        GossipConfig { bind_port: port, health_check_max_jitter_ms: 50, ..Default::default() },
+        {
+            let mut cfg = GossipConfig::default();
+            cfg.bind_port = port;
+            cfg.health_check_max_jitter_ms = 50;
+            cfg
+        },
     ));
     agent.start().await.expect("agent start");
     let space = TupleSpace::new(

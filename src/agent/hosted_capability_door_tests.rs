@@ -92,7 +92,11 @@ async fn door(opts: Opts) -> Door {
     std::fs::create_dir_all(&dir).unwrap();
     let mut cfg = GossipConfig::default();
     cfg.bind_port = port;
-    cfg.tls = Some(crate::TlsConfig { auto_cert_dir: dir.join("tls"), ..Default::default() });
+    cfg.tls = Some({
+        let mut tls_cfg = crate::TlsConfig::default();
+        tls_cfg.auto_cert_dir = dir.join("tls");
+        tls_cfg
+    });
     let a = Arc::new(GossipAgent::new(id.clone(), cfg));
     let me = node_principal(&id);
     a.with_evidence_journal(EvidenceJournal::open(dir.join("evidence.log"), EvidenceProfile::Strict).unwrap());
@@ -503,7 +507,11 @@ async fn the_serve_stream_decides_a_hosted_capability_kind_before_streaming_it()
     let mut cfg = GossipConfig::default();
     cfg.bind_port = port;
     cfg.http_port = Some(http_port);
-    cfg.tls = Some(crate::TlsConfig { auto_cert_dir: dir.join("tls"), ..Default::default() });
+    cfg.tls = Some({
+        let mut tls_cfg = crate::TlsConfig::default();
+        tls_cfg.auto_cert_dir = dir.join("tls");
+        tls_cfg
+    });
     let a = Arc::new(GossipAgent::new(id.clone(), cfg));
     a.with_evidence_journal(EvidenceJournal::open(dir.join("evidence.log"), EvidenceProfile::Strict).unwrap());
     a.with_action_evaluator(Arc::new(

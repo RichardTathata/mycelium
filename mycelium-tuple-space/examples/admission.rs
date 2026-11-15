@@ -32,7 +32,11 @@ async fn main() {
     let port = mycelium::test_util::alloc_port();
     let agent = Arc::new(GossipAgent::new(
         NodeId::new("127.0.0.1", port).unwrap(),
-        GossipConfig { bind_port: port, ..Default::default() },
+        {
+            let mut cfg = GossipConfig::default();
+            cfg.bind_port = port;
+            cfg
+        },
     ));
     agent.start().await.unwrap();
     let ts = TupleSpace::new(

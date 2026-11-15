@@ -252,12 +252,10 @@ mod tests {
 
     async fn make_agent(port: u16, peers: &[u16]) -> GossipAgent {
         let id = NodeId::new("127.0.0.1", port).unwrap();
-        let cfg = GossipConfig {
-            bind_address:    "127.0.0.1".parse().unwrap(),
-            bind_port:       port,
-            bootstrap_peers: peers.iter().map(|p| NodeId::new("127.0.0.1", *p).unwrap()).collect(),
-            ..GossipConfig::default()
-        };
+        let mut cfg = GossipConfig::default();
+        cfg.bind_address = "127.0.0.1".parse().unwrap();
+        cfg.bind_port = port;
+        cfg.bootstrap_peers = peers.iter().map(|p| NodeId::new("127.0.0.1", *p).unwrap()).collect();
         let a = GossipAgent::new(id, cfg);
         a.start().await.unwrap();
         a
@@ -314,11 +312,9 @@ mod tests {
         use crate::consensus::ConsensusConfig;
         let p   = alloc_port();
         let id  = NodeId::new("127.0.0.1", p).unwrap();
-        let cfg = GossipConfig {
-            bind_address: "127.0.0.1".parse().unwrap(),
-            bind_port:    p,
-            ..GossipConfig::default()
-        };
+        let mut cfg = GossipConfig::default();
+        cfg.bind_address = "127.0.0.1".parse().unwrap();
+        cfg.bind_port = p;
         let a = GossipAgent::new(id, cfg);
         a.start().await.unwrap();
 

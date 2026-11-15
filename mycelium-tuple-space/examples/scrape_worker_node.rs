@@ -48,12 +48,10 @@ async fn main() {
         .map(|(h, p)| (h.to_string(), p.parse::<u16>().expect("join port")))
         .expect("join must be host:port");
 
-    let mut cfg = GossipConfig {
-        bind_port: bind,
-        http_port: Some(http),
-        bootstrap_peers: vec![NodeId::new(&join_host, join_port).expect("join peer id")],
-        ..Default::default()
-    };
+    let mut cfg = GossipConfig::default();
+    cfg.bind_port = bind;
+    cfg.http_port = Some(http);
+    cfg.bootstrap_peers = vec![NodeId::new(&join_host, join_port).expect("join peer id")];
     // Env overrides are the startup configuration surface (see scrape_fleet_node.rs).
     // Launch sidecars with the same GOSSIP_CLUSTER_NAME as the primary so they don't
     // show up unlabelled next to a labelled primary.

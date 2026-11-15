@@ -9,11 +9,9 @@ use std::time::Duration;
 
 async fn start_agent(port: u16) -> Arc<GossipAgent> {
     let id = NodeId::new("127.0.0.1", port).expect("node id");
-    let cfg = GossipConfig {
-        bind_port: port,
-        health_check_max_jitter_ms: 50,
-        ..Default::default()
-    };
+    let mut cfg = GossipConfig::default();
+    cfg.bind_port = port;
+    cfg.health_check_max_jitter_ms = 50;
     let agent = Arc::new(GossipAgent::new(id, cfg));
     agent.start().await.expect("agent start");
     agent

@@ -812,12 +812,10 @@ mod tests {
 
     async fn agent(port: u16, bootstrap: Option<u16>) -> Arc<GossipAgent> {
         let id = NodeId::new("127.0.0.1", port).unwrap();
-        let cfg = mycelium::GossipConfig {
-            bind_port: port,
-            bootstrap_peers: bootstrap.map(|b| vec![NodeId::new("127.0.0.1", b).unwrap()]).unwrap_or_default(),
-            health_check_interval_secs: 2,
-            ..Default::default()
-        };
+        let mut cfg = mycelium::GossipConfig::default();
+        cfg.bind_port = port;
+        cfg.bootstrap_peers = bootstrap.map(|b| vec![NodeId::new("127.0.0.1", b).unwrap()]).unwrap_or_default();
+        cfg.health_check_interval_secs = 2;
         let a = Arc::new(GossipAgent::new(id, cfg));
         a.start().await.expect("agent start");
         a
@@ -859,15 +857,13 @@ mod tests {
             .unwrap()
         };
         let units = |egress: &str| units_with("pack", "", Some(egress));
-        let cfg = mycelium::GossipConfig {
-            egress: mycelium::EgressPolicy { allow_hosts: vec!["127.0.0.1".into(), "api.example.com".into()] },
-            egress_credentials: vec![mycelium::CredentialBinding {
-                name: "model".into(), host: "api.example.com".into(), port: None, path_prefix: None,
-                form: mycelium::CredentialForm::Bearer, header: None, username: None,
-                value_env: Some("MYCELIUM_TEST_EGRESS_VALUE_ENV_7F".into()), value_file: None, allow_plaintext: false,
-            }],
-            ..Default::default()
-        };
+        let mut cfg = mycelium::GossipConfig::default();
+        cfg.egress = mycelium::EgressPolicy { allow_hosts: vec!["127.0.0.1".into(), "api.example.com".into()] };
+        cfg.egress_credentials = vec![mycelium::CredentialBinding {
+            name: "model".into(), host: "api.example.com".into(), port: None, path_prefix: None,
+            form: mycelium::CredentialForm::Bearer, header: None, username: None,
+            value_env: Some("MYCELIUM_TEST_EGRESS_VALUE_ENV_7F".into()), value_file: None, allow_plaintext: false,
+        }];
         let unstarted = GossipAgent::new(NodeId::new("127.0.0.1", alloc_port()).unwrap(), cfg);
         let e = start_egress_proxies(&unstarted, &units_with("pack", "env = [\"MYCELIUM_TEST_EGRESS_VALUE_ENV_7F\"]\n", None)).unwrap_err().to_string();
         assert!(e.contains("data/pack") && e.contains("env passes a variable") && !e.contains("MYCELIUM_TEST_EGRESS_VALUE_ENV_7F"), "{e}");
@@ -930,15 +926,13 @@ mod tests {
         std::fs::create_dir_all(&placement).unwrap();
         let file = dir.join("key");
         std::fs::write(&file, VALUE).unwrap();
-        let cfg = mycelium::GossipConfig {
-            bind_port: alloc_port(),
-            egress_credentials: vec![mycelium::CredentialBinding {
-                name: "model".into(), host: "api.example.com".into(), port: None, path_prefix: None,
-                form: mycelium::CredentialForm::Bearer, header: None, username: None,
-                value_env: None, value_file: Some(file.clone()), allow_plaintext: false,
-            }],
-            ..Default::default()
-        };
+        let mut cfg = mycelium::GossipConfig::default();
+        cfg.bind_port = alloc_port();
+        cfg.egress_credentials = vec![mycelium::CredentialBinding {
+            name: "model".into(), host: "api.example.com".into(), port: None, path_prefix: None,
+            form: mycelium::CredentialForm::Bearer, header: None, username: None,
+            value_env: None, value_file: Some(file.clone()), allow_plaintext: false,
+        }];
         let a = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", cfg.bind_port).unwrap(), cfg));
         a.start().await.expect("starts");
         let units = |placement: &std::path::Path, confine: &str| {
@@ -992,14 +986,12 @@ mod tests {
         std::fs::hard_link(&target, dir.join("second-name")).unwrap();
         let link = dir.join("value-file");
         std::os::unix::fs::symlink(&target, &link).unwrap();
-        let cfg = mycelium::GossipConfig {
-            egress_credentials: vec![mycelium::CredentialBinding {
-                name: "model".into(), host: "api.example.com".into(), port: None, path_prefix: None,
-                form: mycelium::CredentialForm::Bearer, header: None, username: None,
-                value_env: None, value_file: Some(link.clone()), allow_plaintext: false,
-            }],
-            ..Default::default()
-        };
+        let mut cfg = mycelium::GossipConfig::default();
+        cfg.egress_credentials = vec![mycelium::CredentialBinding {
+            name: "model".into(), host: "api.example.com".into(), port: None, path_prefix: None,
+            form: mycelium::CredentialForm::Bearer, header: None, username: None,
+            value_env: None, value_file: Some(link.clone()), allow_plaintext: false,
+        }];
         let a = GossipAgent::new(NodeId::new("127.0.0.1", alloc_port()).unwrap(), cfg);
         let units = NodeCapabilityConfig::from_toml_str(&format!(
             "[hosts]\nkinds=[\"blob\"]\naccept_unsigned=true\nplacement_root=\"{}\"\n[[activation]]\nns=\"data\"\nname=\"pack\"\ncommand=[\"true\"]\n[activation.confine]\n",
@@ -1437,17 +1429,15 @@ mod tests {
         )).unwrap();
         assert!(!format!("{units:?}").contains(SECRET));
         let port = alloc_port();
-        let cfg = mycelium::GossipConfig {
-            bind_port: port,
-            bootstrap_peers: vec![NodeId::new("127.0.0.1", seed.node_id().to_socket_addr().port()).unwrap()],
-            health_check_interval_secs: 2,
-            egress_credentials: vec![mycelium::CredentialBinding {
-                name: "model".into(), host: "localhost".into(), path_prefix: Some("/v1".into()),
-                form: mycelium::CredentialForm::Bearer, header: None, username: None,
-                value_env: None, value_file: Some(secret_file.clone()), allow_plaintext: false, port: Some(endpoint_port),
-            }],
-            ..Default::default()
-        };
+        let mut cfg = mycelium::GossipConfig::default();
+        cfg.bind_port = port;
+        cfg.bootstrap_peers = vec![NodeId::new("127.0.0.1", seed.node_id().to_socket_addr().port()).unwrap()];
+        cfg.health_check_interval_secs = 2;
+        cfg.egress_credentials = vec![mycelium::CredentialBinding {
+            name: "model".into(), host: "localhost".into(), path_prefix: Some("/v1".into()),
+            form: mycelium::CredentialForm::Bearer, header: None, username: None,
+            value_env: None, value_file: Some(secret_file.clone()), allow_plaintext: false, port: Some(endpoint_port),
+        }];
         let node = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg));
         node.start().await.expect("agent start");
         let stem = Stem::start(Arc::clone(&node), &units, stem_opts(&lib_dir)).unwrap();
@@ -1479,17 +1469,15 @@ mod tests {
             "{head}[[serve]]\nname=\"keyed\"\nendpoint=\"https://elsewhere.example/v1\"\nmodel=\"pack\"\ncredential=\"model\"\n"
         )).unwrap();
         let port = alloc_port();
-        let cfg = mycelium::GossipConfig {
-            bind_port: port,
-            bootstrap_peers: vec![NodeId::new("127.0.0.1", seed.node_id().to_socket_addr().port()).unwrap()],
-            health_check_interval_secs: 2,
-            egress_credentials: vec![mycelium::CredentialBinding {
-                name: "model".into(), host: "api.example.com".into(), path_prefix: None,
-                form: mycelium::CredentialForm::Bearer, header: None, username: None,
-                value_env: None, value_file: Some(secret_file.clone()), allow_plaintext: false, port: None,
-            }],
-            ..Default::default()
-        };
+        let mut cfg = mycelium::GossipConfig::default();
+        cfg.bind_port = port;
+        cfg.bootstrap_peers = vec![NodeId::new("127.0.0.1", seed.node_id().to_socket_addr().port()).unwrap()];
+        cfg.health_check_interval_secs = 2;
+        cfg.egress_credentials = vec![mycelium::CredentialBinding {
+            name: "model".into(), host: "api.example.com".into(), path_prefix: None,
+            form: mycelium::CredentialForm::Bearer, header: None, username: None,
+            value_env: None, value_file: Some(secret_file.clone()), allow_plaintext: false, port: None,
+        }];
         let node = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg));
         node.start().await.expect("agent start");
         let err = match Stem::start(Arc::clone(&node), &units, stem_opts(&lib_dir)) {

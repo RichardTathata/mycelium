@@ -1088,7 +1088,8 @@ async fn test_upsert_propagates() {
 fn test_tls_identity(tag: &str, node: &NodeId) -> (Arc<crate::tls::NodeTls>, std::path::PathBuf) {
     let dir = std::env::temp_dir().join(format!("myc-{tag}-{}-{}", node.to_socket_addr().port(), std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
-    let cfg = crate::config::TlsConfig { auto_cert_dir: dir.clone(), ..Default::default() };
+    let mut cfg = crate::config::TlsConfig::default();
+    cfg.auto_cert_dir = dir.clone();
     let tls = crate::tls::load_or_generate(&cfg, node, Arc::new(mycelium_core::removal::RemovedSet::default()), Default::default()).unwrap();
     (Arc::new(tls), dir)
 }
@@ -1312,7 +1313,11 @@ async fn three_signed_nodes_tweaked(tag: &str, proofs: bool, tweak_b: impl Fn(&m
         cfg.reconnect_backoff_secs = 1;
         cfg.health_check_interval_secs = 60;
         cfg.require_identity_proofs = proofs;
-        cfg.tls = Some(TlsConfig { auto_cert_dir: cert_dir.clone(), ..TlsConfig::default() });
+        cfg.tls = Some({
+            let mut tls = TlsConfig::default();
+            tls.auto_cert_dir = cert_dir.clone();
+            tls
+        });
         GossipAgent::new(node.clone(), cfg)
     };
     let a = mk(&na, vec![]);
@@ -1581,7 +1586,11 @@ async fn a_double_rotation_keeps_the_original_key_in_the_published_history() {
     // A short health interval so anti-entropy — the only way a joiner gets records gossiped before it
     // arrived — runs within the test's bound.
     cfg.health_check_interval_secs = 1;
-    cfg.tls = Some(crate::config::TlsConfig { auto_cert_dir: dir.clone(), ..crate::config::TlsConfig::default() });
+    cfg.tls = Some({
+        let mut tls = crate::config::TlsConfig::default();
+        tls.auto_cert_dir = dir.clone();
+        tls
+    });
     let d = GossipAgent::new(nd, cfg);
     d.start().await.unwrap();
     let mut d_k2 = false;
@@ -2006,7 +2015,11 @@ async fn revoking_the_key_a_node_signs_with_is_refused() {
     let _ = std::fs::remove_dir_all(&dir);
     let mut cfg = GossipConfig::default();
     cfg.bind_port = port;
-    cfg.tls = Some(crate::config::TlsConfig { auto_cert_dir: dir.clone(), ..Default::default() });
+    cfg.tls = Some({
+        let mut tls = crate::config::TlsConfig::default();
+        tls.auto_cert_dir = dir.clone();
+        tls
+    });
     let agent = GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg);
     agent.start().await.unwrap();
     let current = agent.identity_public_key().unwrap();
@@ -2426,7 +2439,11 @@ async fn an_audit_chain_sealed_under_a_key_without_a_certificate_record_survives
     let _ = std::fs::remove_dir_all(&base);
     let mut cfg = GossipConfig::default();
     cfg.bind_port = port;
-    cfg.tls = Some(TlsConfig { auto_cert_dir: base.join("certs"), ..TlsConfig::default() });
+    cfg.tls = Some({
+        let mut tls = TlsConfig::default();
+        tls.auto_cert_dir = base.join("certs");
+        tls
+    });
     cfg.persistence = Some(PersistenceConfig { base_path: base.join("data"), sync_mode: SyncMode::Flush, snapshot_wal_threshold: 1_000, snapshot_interval_secs: 3_600, on_unreadable: OnUnreadable::Refuse });
     let a = GossipAgent::new(id.clone(), cfg.clone());
     a.start().await.unwrap();
@@ -2511,7 +2528,12 @@ async fn a_node_whose_key_pem_names_a_retired_key_refuses_to_start() {
     std::fs::write(base.join("k0.pem"), pem).unwrap();
     let mut cfg = GossipConfig::default();
     cfg.bind_port = port;
-    cfg.tls = Some(TlsConfig { auto_cert_dir: base.join("certs"), key_pem: Some(base.join("k0.pem")), ..TlsConfig::default() });
+    cfg.tls = Some({
+        let mut tls = TlsConfig::default();
+        tls.auto_cert_dir = base.join("certs");
+        tls.key_pem = Some(base.join("k0.pem"));
+        tls
+    });
     cfg.persistence = Some(PersistenceConfig { base_path: base.join("data"), sync_mode: SyncMode::Flush, snapshot_wal_threshold: 1_000, snapshot_interval_secs: 3_600, on_unreadable: OnUnreadable::Refuse });
     let a = GossipAgent::new(id.clone(), cfg.clone());
     a.start().await.unwrap();
@@ -2622,7 +2644,11 @@ async fn revoking_one_key_twice_writes_one_record() {
     let _ = std::fs::remove_dir_all(&dir);
     let mut cfg = GossipConfig::default();
     cfg.bind_port = port;
-    cfg.tls = Some(crate::config::TlsConfig { auto_cert_dir: dir.clone(), ..Default::default() });
+    cfg.tls = Some({
+        let mut tls = crate::config::TlsConfig::default();
+        tls.auto_cert_dir = dir.clone();
+        tls
+    });
     let id = NodeId::new("127.0.0.1", port).unwrap();
     let a = GossipAgent::new(id.clone(), cfg);
     a.start().await.unwrap();
@@ -2704,7 +2730,11 @@ async fn a_planted_record_does_not_refuse_a_start_whose_own_certificate_record_i
     let _ = std::fs::remove_dir_all(&base);
     let mut cfg = GossipConfig::default();
     cfg.bind_port = port;
-    cfg.tls = Some(TlsConfig { auto_cert_dir: base.join("certs"), ..TlsConfig::default() });
+    cfg.tls = Some({
+        let mut tls = TlsConfig::default();
+        tls.auto_cert_dir = base.join("certs");
+        tls
+    });
     cfg.persistence = Some(PersistenceConfig { base_path: base.join("data"), sync_mode: SyncMode::Flush, snapshot_wal_threshold: 1_000, snapshot_interval_secs: 3_600, on_unreadable: OnUnreadable::Refuse });
     let a = GossipAgent::new(id.clone(), cfg.clone());
     a.start().await.unwrap();
@@ -2730,7 +2760,12 @@ async fn a_planted_record_does_not_refuse_a_start_whose_own_certificate_record_i
     let b64 = { use base64::Engine as _; base64::engine::general_purpose::STANDARD.encode(der.as_bytes()) };
     std::fs::write(base.join("keys/k2.pem"), format!("-----BEGIN PRIVATE KEY-----\n{b64}\n-----END PRIVATE KEY-----\n")).unwrap();
     let mut cfg2 = cfg.clone();
-    cfg2.tls = Some(TlsConfig { auto_cert_dir: base.join("certs"), key_pem: Some(base.join("keys/k2.pem")), ..TlsConfig::default() });
+    cfg2.tls = Some({
+        let mut tls = TlsConfig::default();
+        tls.auto_cert_dir = base.join("certs");
+        tls.key_pem = Some(base.join("keys/k2.pem"));
+        tls
+    });
     let again = GossipAgent::new(id.clone(), cfg2);
     let res = again.start().await;
     let k2_now = again.identity_public_key();
@@ -2796,7 +2831,11 @@ async fn an_audit_genesis_survives_an_upgrade_after_an_old_version_rotation() {
     let _ = std::fs::remove_dir_all(&base);
     let mut cfg = GossipConfig::default();
     cfg.bind_port = port;
-    cfg.tls = Some(TlsConfig { auto_cert_dir: base.join("certs"), ..TlsConfig::default() });
+    cfg.tls = Some({
+        let mut tls = TlsConfig::default();
+        tls.auto_cert_dir = base.join("certs");
+        tls
+    });
     cfg.persistence = Some(PersistenceConfig { base_path: base.join("data"), sync_mode: SyncMode::Flush, snapshot_wal_threshold: 1_000, snapshot_interval_secs: 3_600, on_unreadable: OnUnreadable::Refuse });
     let a = GossipAgent::new(id.clone(), cfg.clone());
     a.start().await.unwrap();
@@ -2884,7 +2923,11 @@ fn audit_test_node(tag: &str) -> (NodeId, GossipConfig, std::path::PathBuf, u16)
     cfg.bind_port = port;
     cfg.http_port = Some(http_port);
     cfg.gateway_scoped_tokens = vec![crate::GatewayToken { token: "auditor".into(), scopes: vec!["audit:read".into()] }];
-    cfg.tls = Some(TlsConfig { auto_cert_dir: base.join("certs"), ..TlsConfig::default() });
+    cfg.tls = Some({
+        let mut tls = TlsConfig::default();
+        tls.auto_cert_dir = base.join("certs");
+        tls
+    });
     cfg.persistence = Some(PersistenceConfig { base_path: base.join("data"), sync_mode: SyncMode::Flush, snapshot_wal_threshold: 1_000, snapshot_interval_secs: 3_600, on_unreadable: OnUnreadable::Refuse });
     (id, cfg, base, http_port)
 }
@@ -3106,7 +3149,11 @@ async fn a_planted_run_of_any_length_leaves_the_node_sealing_and_is_reported() {
     let _ = std::fs::remove_dir_all(&dir);
     let mut cfg = GossipConfig::default();
     cfg.bind_port = port;
-    cfg.tls = Some(crate::config::TlsConfig { auto_cert_dir: dir.clone(), ..Default::default() });
+    cfg.tls = Some({
+        let mut tls = crate::config::TlsConfig::default();
+        tls.auto_cert_dir = dir.clone();
+        tls
+    });
     let a = GossipAgent::new(id.clone(), cfg);
     a.start().await.unwrap();
     let h0 = a.audit(AuditAction::Invoke, "p", "t0", AuditOutcome::Success, None).unwrap();
@@ -3161,7 +3208,11 @@ async fn a_seal_over_one_planted_record_costs_the_run_not_the_stream() {
     let _ = std::fs::remove_dir_all(&dir);
     let mut cfg = GossipConfig::default();
     cfg.bind_port = port;
-    cfg.tls = Some(crate::config::TlsConfig { auto_cert_dir: dir.clone(), ..Default::default() });
+    cfg.tls = Some({
+        let mut tls = crate::config::TlsConfig::default();
+        tls.auto_cert_dir = dir.clone();
+        tls
+    });
     let a = GossipAgent::new(id.clone(), cfg);
     a.start().await.unwrap();
     let h0 = a.audit(AuditAction::Invoke, "p", "t0", AuditOutcome::Success, None).unwrap();
@@ -3341,7 +3392,11 @@ fn a_frame_a_writer_holds_at_shutdown_is_written_before_shutdown_returns() {
         cfg.bootstrap_peers = boots;
         cfg.reconnect_backoff_secs = 1;
         cfg.health_check_interval_secs = 60;
-        cfg.tls = Some(TlsConfig { auto_cert_dir: cert_dir.clone(), ..TlsConfig::default() });
+        cfg.tls = Some({
+            let mut tls = TlsConfig::default();
+            tls.auto_cert_dir = cert_dir.clone();
+            tls
+        });
         GossipAgent::new(node.clone(), cfg)
     };
     let a = mk(&node_a, vec![]);
@@ -3688,7 +3743,11 @@ async fn signed_fleet_pair(tag: &str, http_a: Option<u16>) -> (GossipAgent, Goss
         cfg.reconnect_backoff_secs = 1;
         cfg.health_check_interval_secs = 60;
         cfg.http_port = http;
-        cfg.tls = Some(TlsConfig { auto_cert_dir: cert_dir.clone(), ..TlsConfig::default() });
+        cfg.tls = Some({
+            let mut tls = TlsConfig::default();
+            tls.auto_cert_dir = cert_dir.clone();
+            tls
+        });
         GossipAgent::new(node.clone(), cfg)
     };
     let a = mk(&node_a, vec![], http_a);
@@ -3780,7 +3839,11 @@ async fn the_built_in_llm_provider_fails_closed_with_no_evaluator_like_every_oth
     let mut cfg = GossipConfig::default();
     cfg.bind_port = port;
     cfg.protected_rpc_kinds = vec!["depot.custom".into()];
-    cfg.tls = Some(TlsConfig { auto_cert_dir: cert_dir.clone(), ..TlsConfig::default() });
+    cfg.tls = Some({
+        let mut tls = TlsConfig::default();
+        tls.auto_cert_dir = cert_dir.clone();
+        tls
+    });
     let a = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg));
     a.with_provider_enforcement();
     a.start().await.unwrap();
@@ -3837,7 +3900,11 @@ async fn every_receive_boundary_drops_a_replay_unanswered() {
     cfg.bind_port = port;
     cfg.http_port = Some(http_port);
     cfg.emergent_detectors_enabled = true;
-    cfg.tls = Some(TlsConfig { auto_cert_dir: cert_dir.clone(), ..TlsConfig::default() });
+    cfg.tls = Some({
+        let mut tls = TlsConfig::default();
+        tls.auto_cert_dir = cert_dir.clone();
+        tls
+    });
     let a = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg));
     a.start().await.unwrap();
     let _skill = a.llm().register_prompt_skill("review", "echo", crate::PromptTemplate {
@@ -3999,7 +4066,11 @@ async fn the_row_f_window_counters_are_on_gateway_stats() {
     let mut cfg = GossipConfig::default();
     cfg.bind_port = port;
     cfg.http_port = Some(http_port);
-    cfg.tls = Some(TlsConfig { auto_cert_dir: cert_dir.clone(), ..TlsConfig::default() });
+    cfg.tls = Some({
+        let mut tls = TlsConfig::default();
+        tls.auto_cert_dir = cert_dir.clone();
+        tls
+    });
     let a = GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg);
     a.start().await.unwrap();
     let b = &a.task_ctx.transport_bounds;
@@ -4049,7 +4120,11 @@ async fn an_agent_write_reaches_a_peer_that_requires_signed_frames() {
         cfg.bootstrap_peers = boots;
         cfg.reconnect_backoff_secs = 1;
         cfg.health_check_interval_secs = 60; // anti-entropy is not what carries the write
-        cfg.tls = Some(TlsConfig { auto_cert_dir: cert_dir.clone(), ..TlsConfig::default() });
+        cfg.tls = Some({
+            let mut tls = TlsConfig::default();
+            tls.auto_cert_dir = cert_dir.clone();
+            tls
+        });
         GossipAgent::new(node.clone(), cfg)
     };
     let a = mk(&node_a, vec![]);
@@ -4817,7 +4892,8 @@ async fn regression_store_entries_reflects_writes_immediately() {
 #[tokio::test]
 async fn test_shutdown_with_timeout_does_not_hang() {
     let port = alloc_port();
-    let cfg = GossipConfig { bind_port: port, ..GossipConfig::default() };
+    let mut cfg = GossipConfig::default();
+    cfg.bind_port = port;
     let agent = GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg);
     agent.start().await.unwrap();
     // Use a 1 ms internal timeout so the abort path fires; the outer 2 s
@@ -4835,7 +4911,8 @@ async fn test_shutdown_lifecycle_edges_never_started_and_double() {
     // Shutdown on an agent that was never started must return promptly, not
     // hang waiting on tasks that were never spawned.
     let port = alloc_port();
-    let cfg = GossipConfig { bind_port: port, ..GossipConfig::default() };
+    let mut cfg = GossipConfig::default();
+    cfg.bind_port = port;
     let agent = GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg);
     tokio::time::timeout(Duration::from_secs(2), agent.shutdown())
         .await
@@ -4843,7 +4920,8 @@ async fn test_shutdown_lifecycle_edges_never_started_and_double() {
 
     // A second shutdown after a completed one must be an idempotent no-op.
     let port = alloc_port();
-    let cfg = GossipConfig { bind_port: port, ..GossipConfig::default() };
+    let mut cfg = GossipConfig::default();
+    cfg.bind_port = port;
     let agent = GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg);
     agent.start().await.unwrap();
     agent.shutdown().await;
@@ -7666,7 +7744,11 @@ async fn test_identity_proofs_required_two_nodes_still_authenticate() {
         // The opt-in under test. Both nodes require it, so neither will accept an identity that
         // is not sealed — including the other's.
         cfg.require_identity_proofs = true;
-        cfg.tls = Some(TlsConfig { auto_cert_dir: cert_dir.clone(), ..TlsConfig::default() });
+        cfg.tls = Some({
+            let mut tls = TlsConfig::default();
+            tls.auto_cert_dir = cert_dir.clone();
+            tls
+        });
         GossipAgent::new(id(port), cfg)
     };
 
@@ -7747,9 +7829,10 @@ async fn test_ws1_rbac_signed_roles_propagate_and_authorize_across_nodes() {
         // Fast Pings so peer registration (which happens on Ping receipt) and
         // anti-entropy converge well inside the poll window.
         cfg.health_check_interval_secs = 1;
-        cfg.tls = Some(TlsConfig {
-            auto_cert_dir: cert_dir.clone(),
-            ..TlsConfig::default()
+        cfg.tls = Some({
+            let mut tls = TlsConfig::default();
+            tls.auto_cert_dir = cert_dir.clone();
+            tls
         });
         GossipAgent::new(id(port), cfg)
     };
@@ -7984,7 +8067,11 @@ async fn test_ws2_audit_chain_writes_and_verifies_on_a_node() {
 
     let mut cfg = GossipConfig::default();
     cfg.bind_port = port;
-    cfg.tls = Some(TlsConfig { auto_cert_dir: cert_dir.clone(), ..TlsConfig::default() });
+    cfg.tls = Some({
+        let mut tls = TlsConfig::default();
+        tls.auto_cert_dir = cert_dir.clone();
+        tls
+    });
     let a = Arc::new(GossipAgent::new(id.clone(), cfg));
     a.start().await.unwrap();
 
@@ -8050,7 +8137,11 @@ async fn the_audit_chain_head_is_recovered_from_persistence_at_restart() {
     let _ = std::fs::remove_dir_all(&base);
     let mut cfg = GossipConfig::default();
     cfg.bind_port = port;
-    cfg.tls = Some(TlsConfig { auto_cert_dir: base.join("certs"), ..TlsConfig::default() });
+    cfg.tls = Some({
+        let mut tls = TlsConfig::default();
+        tls.auto_cert_dir = base.join("certs");
+        tls
+    });
     cfg.persistence = Some(PersistenceConfig { base_path: base.join("data"), sync_mode: SyncMode::Flush, snapshot_wal_threshold: 1_000, snapshot_interval_secs: 3_600, on_unreadable: OnUnreadable::Refuse });
 
     let stream = |a: &GossipAgent| -> Vec<SignedAuditRecord> {
@@ -8101,7 +8192,11 @@ async fn a_forged_record_in_the_persisted_audit_stream_does_not_seed_the_chain_h
     let _ = std::fs::remove_dir_all(&base);
     let mut cfg = GossipConfig::default();
     cfg.bind_port = port;
-    cfg.tls = Some(TlsConfig { auto_cert_dir: base.join("certs"), ..TlsConfig::default() });
+    cfg.tls = Some({
+        let mut tls = TlsConfig::default();
+        tls.auto_cert_dir = base.join("certs");
+        tls
+    });
     cfg.persistence = Some(PersistenceConfig { base_path: base.join("data"), sync_mode: SyncMode::Flush, snapshot_wal_threshold: 1_000, snapshot_interval_secs: 3_600, on_unreadable: OnUnreadable::Refuse });
 
     let a = GossipAgent::new(id.clone(), cfg.clone());
@@ -8151,7 +8246,11 @@ async fn recover_chain_head_anchors_at_a_checkpoint_or_reports_the_gap() {
     let _ = std::fs::remove_dir_all(&cert_dir);
     let mut cfg = GossipConfig::default();
     cfg.bind_port = port;
-    cfg.tls = Some(TlsConfig { auto_cert_dir: cert_dir.clone(), ..TlsConfig::default() });
+    cfg.tls = Some({
+        let mut tls = TlsConfig::default();
+        tls.auto_cert_dir = cert_dir.clone();
+        tls
+    });
     let a = GossipAgent::new(id.clone(), cfg);
     a.start().await.unwrap();
     let seal = |n: u64| a.audit(AuditAction::Invoke, "10.0.0.1:9000", format!("skill/{n}"), AuditOutcome::Success, None).unwrap();
@@ -8344,11 +8443,13 @@ async fn a_gateway_that_cannot_come_up_fails_the_start() {
     let mut cfg = GossipConfig::auto();
     cfg.bind_port = port;
     cfg.http_port = Some(alloc_port());
-    cfg.gateway_tls = Some(crate::GatewayTlsConfig {
-        cert_pem_path: Some("/nonexistent/gateway.cert.pem".into()),
-        key_pem_path: Some("/nonexistent/gateway.key.pem".into()),
+    cfg.gateway_tls = Some({
+        let mut gw_tls = crate::GatewayTlsConfig::default();
+        gw_tls.cert_pem_path = Some("/nonexistent/gateway.cert.pem".into());
+        gw_tls.key_pem_path = Some("/nonexistent/gateway.key.pem".into());
         // R7: an operator certificate needs bulk roots, or start() refuses before reading the cert.
-        bulk_ca_pem_path: Some(bulk_ca_for_test()),
+        gw_tls.bulk_ca_pem_path = Some(bulk_ca_for_test());
+        gw_tls
     });
     let b = GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg);
     let e = b.start().await.expect_err("an unreadable gateway certificate must fail the start");
@@ -8923,7 +9024,11 @@ async fn test_ws5_rotate_identity_verifies_across_rotation_on_peer() {
         cfg.bootstrap_peers = boots;
         cfg.reconnect_backoff_secs = 1;
         cfg.health_check_interval_secs = 1;
-        cfg.tls = Some(TlsConfig { auto_cert_dir: cert_dir.clone(), ..TlsConfig::default() });
+        cfg.tls = Some({
+            let mut tls = TlsConfig::default();
+            tls.auto_cert_dir = cert_dir.clone();
+            tls
+        });
         GossipAgent::new(id(port), cfg)
     };
 
@@ -8999,7 +9104,11 @@ async fn test_wsd_revoked_key_is_rejected_by_peer_verification() {
         cfg.bootstrap_peers = boots;
         cfg.reconnect_backoff_secs = 1;
         cfg.health_check_interval_secs = 1;
-        cfg.tls = Some(TlsConfig { auto_cert_dir: cert_dir.clone(), ..TlsConfig::default() });
+        cfg.tls = Some({
+            let mut tls = TlsConfig::default();
+            tls.auto_cert_dir = cert_dir.clone();
+            tls
+        });
         GossipAgent::new(id(port), cfg)
     };
 
@@ -9083,7 +9192,11 @@ async fn test_wsd_capability_authz_routes_around_unauthorized_advertiser() {
         cfg.bootstrap_peers = boots;
         cfg.reconnect_backoff_secs = 1;
         cfg.health_check_interval_secs = 1;
-        cfg.tls = Some(TlsConfig { auto_cert_dir: cert_dir.clone(), ..TlsConfig::default() });
+        cfg.tls = Some({
+            let mut tls = TlsConfig::default();
+            tls.auto_cert_dir = cert_dir.clone();
+            tls
+        });
         GossipAgent::new(id(port), cfg)
     };
 
@@ -9157,7 +9270,11 @@ async fn test_wsd_capability_authz_policy_via_consensus() {
         cfg.bootstrap_peers = boots;
         cfg.reconnect_backoff_secs = 1;
         cfg.health_check_interval_secs = 1;
-        cfg.tls = Some(TlsConfig { auto_cert_dir: cert_dir.clone(), ..TlsConfig::default() });
+        cfg.tls = Some({
+            let mut tls = TlsConfig::default();
+            tls.auto_cert_dir = cert_dir.clone();
+            tls
+        });
         GossipAgent::new(id(port), cfg)
     };
 
@@ -9558,7 +9675,11 @@ async fn probe_concurrent_audit_chain_is_contiguous_and_verifies() {
     let _ = std::fs::remove_dir_all(&cert_dir);
     let mut cfg = GossipConfig::default();
     cfg.bind_port = port;
-    cfg.tls = Some(TlsConfig { auto_cert_dir: cert_dir.clone(), ..TlsConfig::default() });
+    cfg.tls = Some({
+        let mut tls = TlsConfig::default();
+        tls.auto_cert_dir = cert_dir.clone();
+        tls
+    });
     let a = Arc::new(GossipAgent::new(id.clone(), cfg));
     a.start().await.unwrap();
 
@@ -9641,7 +9762,11 @@ async fn test_wsf_public_identity_signing_round_trips() {
     let _ = std::fs::remove_dir_all(&cert_dir);
     let mut cfg = GossipConfig::default();
     cfg.bind_port = port;
-    cfg.tls = Some(TlsConfig { auto_cert_dir: cert_dir.clone(), ..TlsConfig::default() });
+    cfg.tls = Some({
+        let mut tls = TlsConfig::default();
+        tls.auto_cert_dir = cert_dir.clone();
+        tls
+    });
     let a = Arc::new(GossipAgent::new(id, cfg));
     a.start().await.unwrap();
 
@@ -10231,7 +10356,11 @@ async fn connect_peer_racing_shutdown_is_safe() {
     let port = crate::test_util::alloc_port();
     let agent = std::sync::Arc::new(GossipAgent::new(
         NodeId::new("127.0.0.1", port).unwrap(),
-        GossipConfig { bind_port: port, ..Default::default() },
+        {
+            let mut cfg = GossipConfig::default();
+            cfg.bind_port = port;
+            cfg
+        },
     ));
     agent.start().await.unwrap();
 
@@ -10272,14 +10401,19 @@ async fn self_targeted_signal_does_not_flood() {
     let (pa, pb) = (crate::test_util::alloc_port(), crate::test_util::alloc_port());
     let a = std::sync::Arc::new(GossipAgent::new(
         NodeId::new("127.0.0.1", pa).unwrap(),
-        GossipConfig { bind_port: pa, ..Default::default() },
+        {
+            let mut cfg = GossipConfig::default();
+            cfg.bind_port = pa;
+            cfg
+        },
     ));
     let b = std::sync::Arc::new(GossipAgent::new(
         NodeId::new("127.0.0.1", pb).unwrap(),
-        GossipConfig {
-            bind_port: pb,
-            bootstrap_peers: vec![NodeId::new("127.0.0.1", pa).unwrap()],
-            ..Default::default()
+        {
+            let mut cfg = GossipConfig::default();
+            cfg.bind_port = pb;
+            cfg.bootstrap_peers = vec![NodeId::new("127.0.0.1", pa).unwrap()];
+            cfg
         },
     ));
     a.start().await.unwrap();
@@ -11715,7 +11849,11 @@ mod federation_transport {
         cfg.health_check_interval_secs = 4;
         cfg.domain_profile = DomainProfile::Enforced;
         cfg.swim_failure_detector = false;
-        cfg.tls = Some(TlsConfig { auto_cert_dir: cert_dir.to_path_buf(), ..TlsConfig::default() });
+        cfg.tls = Some({
+            let mut tls = TlsConfig::default();
+            tls.auto_cert_dir = cert_dir.to_path_buf();
+            tls
+        });
         let a = match gateway {
             Some((http_port, edge)) => {
                 cfg.http_port = Some(http_port);
@@ -12160,7 +12298,11 @@ mod federation_transport {
         cfg.http_port = Some(http);
         cfg.http_addr = "127.0.0.1".to_string();
         cfg.health_check_max_jitter_ms = 50;
-        cfg.tls = Some(crate::TlsConfig { auto_cert_dir: dir.clone(), ..Default::default() });
+        cfg.tls = Some({
+            let mut tls = crate::TlsConfig::default();
+            tls.auto_cert_dir = dir.clone();
+            tls
+        });
         cfg.gateway_tls = Some(crate::GatewayTlsConfig::default()); // reuse the node cert
         let id = NodeId::new("127.0.0.1", bind).unwrap();
         let a = Arc::new(GossipAgent::new(id, cfg).with_a2a().with_federation_edge(edge));
@@ -13694,7 +13836,11 @@ async fn an_acceptor_answers_only_a_tagged_request() {
     let _ = std::fs::remove_dir_all(&cert_dir);
     let mut cfg = GossipConfig::default();
     cfg.bind_port = port;
-    cfg.tls = Some(TlsConfig { auto_cert_dir: cert_dir.clone(), ..TlsConfig::default() });
+    cfg.tls = Some({
+        let mut tls = TlsConfig::default();
+        tls.auto_cert_dir = cert_dir.clone();
+        tls
+    });
     let a = GossipAgent::new(id.clone(), cfg);
     a.start().await.unwrap();
     let _listener = a.consensus().start_consensus_listener(ConsensusConfig::default());
@@ -13944,7 +14090,11 @@ async fn test_boundary_h_p1_issuer_binding_on_live_nodes() {
         cfg.bootstrap_peers = boots;
         cfg.reconnect_backoff_secs = 1;
         cfg.health_check_interval_secs = 1;
-        cfg.tls = Some(TlsConfig { auto_cert_dir: cert_dir.clone(), ..TlsConfig::default() });
+        cfg.tls = Some({
+            let mut tls = TlsConfig::default();
+            tls.auto_cert_dir = cert_dir.clone();
+            tls
+        });
         GossipAgent::new(id(port), cfg)
     };
     let a = Arc::new(mk(port_a, vec![]));
@@ -14053,7 +14203,11 @@ async fn test_boundary_h_a1_gateway_establishes_mandates_end_to_end() {
     let mut cfg = GossipConfig::default();
     cfg.bind_port = gossip_port;
     cfg.http_port = Some(http_port);
-    cfg.tls = Some(TlsConfig { auto_cert_dir: cert_dir.clone(), ..Default::default() });
+    cfg.tls = Some({
+        let mut tls = TlsConfig::default();
+        tls.auto_cert_dir = cert_dir.clone();
+        tls
+    });
     cfg.gateway_identity_issuer = Some("gw".into());
     cfg.gateway_named_tokens =
         vec![GatewayNamedToken { name: "agent-1".into(), token: "s3cret".into(), scopes: vec!["*".into()] }];
@@ -14244,7 +14398,11 @@ async fn a2a_a_grant_is_given_back_when_the_gateway_refused_before_sending() {
     let mut cfg = GossipConfig::default();
     cfg.bind_port = gossip_port;
     cfg.http_port = Some(http_port);
-    cfg.tls = Some(TlsConfig { auto_cert_dir: cert_dir.clone(), ..Default::default() });
+    cfg.tls = Some({
+        let mut tls = TlsConfig::default();
+        tls.auto_cert_dir = cert_dir.clone();
+        tls
+    });
     cfg.gateway_identity_issuer = Some("gw".into());
     cfg.gateway_named_tokens = vec![GatewayNamedToken { name: "agent-1".into(), token: "s3cret".into(), scopes: vec!["*".into()] }];
     let agent = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", gossip_port).unwrap(), cfg).with_a2a());
@@ -14391,7 +14549,11 @@ async fn test_c3_provider_enforcement_decides_direct_member_calls() {
     let _ = std::fs::remove_dir_all(&cert_dir);
     let mut cfg = GossipConfig::default();
     cfg.bind_port = gossip_port;
-    cfg.tls = Some(TlsConfig { auto_cert_dir: cert_dir.clone(), ..Default::default() });
+    cfg.tls = Some({
+        let mut tls = TlsConfig::default();
+        tls.auto_cert_dir = cert_dir.clone();
+        tls
+    });
     cfg.protected_rpc_kinds = vec!["depot.custom".into()];
     let agent = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", gossip_port).unwrap(), cfg));
     let me = agent.node_id().clone();
@@ -14558,7 +14720,11 @@ async fn test_c10_running_work_stops_when_its_authority_lapses() {
     let _ = std::fs::remove_dir_all(&cert_dir);
     let mut cfg = GossipConfig::default();
     cfg.bind_port = gossip_port;
-    cfg.tls = Some(TlsConfig { auto_cert_dir: cert_dir.clone(), ..Default::default() });
+    cfg.tls = Some({
+        let mut tls = TlsConfig::default();
+        tls.auto_cert_dir = cert_dir.clone();
+        tls
+    });
     let agent = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", gossip_port).unwrap(), cfg));
     let me = agent.node_id().clone();
     let tool = format!("tool:slow@{me}");
@@ -14725,7 +14891,11 @@ async fn test_c11_a_quiet_gateway_still_sees_a_mandate_expire() {
     let mut cfg = GossipConfig::default();
     cfg.bind_port = gossip_port;
     cfg.http_port = Some(http_port);
-    cfg.tls = Some(TlsConfig { auto_cert_dir: cert_dir.clone(), ..Default::default() });
+    cfg.tls = Some({
+        let mut tls = TlsConfig::default();
+        tls.auto_cert_dir = cert_dir.clone();
+        tls
+    });
     cfg.gateway_identity_issuer = Some("gw".into());
     cfg.gateway_named_tokens =
         vec![GatewayNamedToken { name: "agent-1".into(), token: "s3cret".into(), scopes: vec!["*".into()] }];
@@ -14876,7 +15046,11 @@ async fn test_c7_the_bypass_matrix_no_door_runs_revoked_work() {
     let mut cfg = GossipConfig::default();
     cfg.bind_port = gossip_port;
     cfg.http_port = Some(http_port);
-    cfg.tls = Some(TlsConfig { auto_cert_dir: cert_dir.clone(), ..Default::default() });
+    cfg.tls = Some({
+        let mut tls = TlsConfig::default();
+        tls.auto_cert_dir = cert_dir.clone();
+        tls
+    });
     cfg.gateway_identity_issuer = Some("gw".into());
     cfg.gateway_named_tokens =
         vec![GatewayNamedToken { name: "agent-1".into(), token: "s3cret".into(), scopes: vec!["*".into()] }];
@@ -15273,7 +15447,11 @@ mod member_removal {
             cfg.bootstrap_peers = boots;
             cfg.reconnect_backoff_secs = 1;
             cfg.health_check_interval_secs = 1;
-            cfg.tls = Some(TlsConfig { auto_cert_dir: cert_dir.clone(), ..TlsConfig::default() });
+            cfg.tls = Some({
+                let mut tls = TlsConfig::default();
+                tls.auto_cert_dir = cert_dir.clone();
+                tls
+            });
             Arc::new(GossipAgent::new(id(port), cfg))
         };
         let a = mk(ports[0], vec![]);
@@ -15781,7 +15959,11 @@ async fn a_node_providing_every_requirement_starts_under_the_secure_profile() {
         let issuer_port = alloc_port();
         let mut icfg = GossipConfig::auto();
         icfg.bind_port = issuer_port;
-        icfg.tls = Some(TlsConfig { auto_cert_dir: ca_dir.clone(), ..Default::default() });
+        icfg.tls = Some({
+            let mut tls = TlsConfig::default();
+            tls.auto_cert_dir = ca_dir.clone();
+            tls
+        });
         let issuer = GossipAgent::new(NodeId::new("127.0.0.1", issuer_port).unwrap(), icfg);
         issuer.start().await.expect("the issuer node mints the fleet CA");
         issuer.shutdown().await;
@@ -15790,7 +15972,14 @@ async fn a_node_providing_every_requirement_starts_under_the_secure_profile() {
     let (cert_pem, key_pem) = crate::issue_node_cert(&ca_dir, &id, &cert_dir).expect("a node certificate issued off-node");
     std::fs::copy(ca_dir.join("ca-cert.pem"), cert_dir.join("ca-cert.pem")).unwrap();
     assert!(!cert_dir.join("ca-key.pem").exists(), "and never on the node");
-    cfg.tls = Some(TlsConfig { auto_cert_dir: cert_dir.clone(), cert_pem: Some(cert_pem), key_pem: Some(key_pem), ca_cert_pem: None });
+    cfg.tls = Some({
+        let mut tls = TlsConfig::default();
+        tls.auto_cert_dir = cert_dir.clone();
+        tls.cert_pem = Some(cert_pem);
+        tls.key_pem = Some(key_pem);
+        tls.ca_cert_pem = None;
+        tls
+    });
     cfg.gateway_tls = Some(crate::GatewayTlsConfig::default()); // the node cert serves the gateway too
     cfg.gateway_auth_token = Some("s3cret".into());
     cfg.require_identity_proofs = true;
@@ -15917,14 +16106,25 @@ async fn secure_node_under(profile: &str, tag: &str, federated: bool) -> (Gossip
         let issuer_port = alloc_port();
         let mut icfg = GossipConfig::auto();
         icfg.bind_port = issuer_port;
-        icfg.tls = Some(TlsConfig { auto_cert_dir: ca_dir.clone(), ..Default::default() });
+        icfg.tls = Some({
+            let mut tls = TlsConfig::default();
+            tls.auto_cert_dir = ca_dir.clone();
+            tls
+        });
         let issuer = GossipAgent::new(NodeId::new("127.0.0.1", issuer_port).unwrap(), icfg);
         issuer.start().await.expect("the issuer node mints the fleet CA");
         issuer.shutdown().await;
     }
     let (cert_pem, key_pem) = crate::issue_node_cert(&ca_dir, &id, &cert_dir).expect("a node certificate issued off-node");
     std::fs::copy(ca_dir.join("ca-cert.pem"), cert_dir.join("ca-cert.pem")).unwrap();
-    cfg.tls = Some(TlsConfig { auto_cert_dir: cert_dir, cert_pem: Some(cert_pem), key_pem: Some(key_pem), ca_cert_pem: None });
+    cfg.tls = Some({
+        let mut tls = TlsConfig::default();
+        tls.auto_cert_dir = cert_dir;
+        tls.cert_pem = Some(cert_pem);
+        tls.key_pem = Some(key_pem);
+        tls.ca_cert_pem = None;
+        tls
+    });
     cfg.gateway_tls = Some(crate::GatewayTlsConfig::default());
     cfg.gateway_auth_token = Some("s3cret".into());
     cfg.require_identity_proofs = true;
@@ -16116,7 +16316,20 @@ async fn an_oidc_issuer_the_egress_policy_denies_refuses_the_start() {
     let port = alloc_port();
     let mut cfg = GossipConfig::auto();
     cfg.bind_port = port;
-    cfg.oidc = Some(crate::OidcConfig { issuer: "https://idp.example".into(), audience: "mycelium".into(), group_claim: "groups".into(), group_scopes: Default::default(), jwks_uri: None, exchange_audience: None, exchange_client_id: None, exchange_max_lifetime_secs: None, exchange_token_endpoint: None, exchange_client_secret_env: None });
+    cfg.oidc = Some({
+        let mut oidc = crate::OidcConfig::default();
+        oidc.issuer = "https://idp.example".into();
+        oidc.audience = "mycelium".into();
+        oidc.group_claim = "groups".into();
+        oidc.group_scopes = Default::default();
+        oidc.jwks_uri = None;
+        oidc.exchange_audience = None;
+        oidc.exchange_client_id = None;
+        oidc.exchange_max_lifetime_secs = None;
+        oidc.exchange_token_endpoint = None;
+        oidc.exchange_client_secret_env = None;
+        oidc
+    });
     cfg.egress.allow_hosts = vec!["api.allowed.example".into()];
     let a = GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg.clone());
     let e = a.start().await.expect_err("an issuer the egress policy denies must refuse the start");
@@ -16617,7 +16830,11 @@ async fn an_electorate_certificate_verifies_under_tls() {
     let _ = std::fs::remove_dir_all(&cert_dir);
     let dir = cert_dir.clone();
     let (agents, _l, _serial) = electorate_mesh(3, move |c| {
-        c.tls = Some(TlsConfig { auto_cert_dir: dir.clone(), ..TlsConfig::default() });
+        c.tls = Some({
+            let mut tls = TlsConfig::default();
+            tls.auto_cert_dir = dir.clone();
+            tls
+        });
     }).await;
     let (a, b, c) = (&agents[0], &agents[1], &agents[2]);
     for n in [a, b] { n.mesh().join_group("council"); }

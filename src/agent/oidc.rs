@@ -619,16 +619,18 @@ mod tests {
         let mut group_scopes = HashMap::new();
         group_scopes.insert("admins".to_string(), vec!["*".to_string()]);
         group_scopes.insert("readers".to_string(), vec!["kv:read".to_string()]);
-        OidcConfig {
-            issuer: "https://idp.example".into(),
-            audience: "mycelium-cluster".into(),
-            group_claim: "groups".into(),
-            group_scopes,
-            jwks_uri: None,
-            exchange_audience: None,
-            exchange_client_id: None,
-            exchange_max_lifetime_secs: None, exchange_token_endpoint: None, exchange_client_secret_env: None,
-        }
+        let mut oidc = OidcConfig::default();
+        oidc.issuer = "https://idp.example".into();
+        oidc.audience = "mycelium-cluster".into();
+        oidc.group_claim = "groups".into();
+        oidc.group_scopes = group_scopes;
+        oidc.jwks_uri = None;
+        oidc.exchange_audience = None;
+        oidc.exchange_client_id = None;
+        oidc.exchange_max_lifetime_secs = None;
+        oidc.exchange_token_endpoint = None;
+        oidc.exchange_client_secret_env = None;
+        oidc
     }
 
     fn keys() -> Vec<(String, DecodingKey)> {
