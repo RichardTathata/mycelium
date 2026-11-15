@@ -11,6 +11,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A client calling soon after a provider starts is no longer refused `provider_without_caller_context`** (-32021;
+  #794's review, K2, and the Eve fleet job on #796). A provider wrote its caller-context marker
+  (`sys/caller-context/{node}`) from a task that waited for a peer, up to 5 s, while a tool's entry and a capability's
+  advertisement were written at once, so a gateway could see the tool first and refuse the call. Every
+  advertisement now publishes the marker first (`gateway_caller::publish_caller_context_marker`, from
+  `register_mcp_tool` and its siblings, `connect_mcp_server`'s bridged tools and `advertise_capability`) — a provider
+  promises it enforces the caller context before it offers work. Every release with the marker is affected.
 - **A migration between electorates that share a member can decide a value the predecessor outvoted — closed
   behind a switch, off by default in this release** (critique plan row CR30; `deprecations.md` §107; found by
   CR10's model on 2026-11-14, reproduced on the engine, PR #787). An acceptor keeps one record per slot whatever

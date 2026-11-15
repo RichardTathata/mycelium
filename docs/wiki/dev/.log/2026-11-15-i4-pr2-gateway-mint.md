@@ -31,3 +31,8 @@
   no shipped receiver races `authority_lapsed()` yet.
 - `mycelium-reason`: `cancelled` (and `call_mandate_not_established`/`revoked`) is terminal (`RouteError::Cancelled`).
 - Pages touched: `owner-signed-records.md` (the `window` row now on `main`; the checkpoint row narrowed).
+- K2 root cause (#794's review; the Eve fleet job on #796): a provider advertised tools and capabilities before its
+  lazily-written caller-context marker, and a gateway refused the call -32021. Every advertisement now publishes the
+  marker first (`gateway_caller::publish_caller_context_marker`; rule 1 grep: `tools/{name}/{node}` is written only
+  in `mcp_handle.rs` — `register_tool` and `connect_mcp_server` — and `cap/` by `advertise_unchecked`; the wasm host
+  and the stem reach both through those).

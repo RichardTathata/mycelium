@@ -899,8 +899,9 @@ impl GossipAgent {
                     }
                 }
                 if *srx.borrow() { return; }
-                let _ = kv_set(&ctx, key,
-                               Bytes::from_static(super::gateway_caller::marker_value(&ctx.config)));
+                // Already written by an advertisement, if one came first (#794's review, K2).
+                let _ = key;
+                super::gateway_caller::publish_caller_context_marker(&ctx);
                 // Post-360 row E: every envelope this node frames carries an id, so a provider may refuse
                 // an id-less one in this node's name as a replay with the id stripped. The marker is this
                 // node's signed, dated statement, re-asserted so a provider honours it only while it is

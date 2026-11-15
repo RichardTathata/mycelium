@@ -160,6 +160,9 @@ impl McpHandle {
         let ctx         = Arc::clone(&self.ctx);
         let rx          = self.ctx.signal_handlers.register(Arc::from(signal_kind::MCP_INVOKE));
 
+        // The marker first: a gateway must never see this tool before it can see that this node enforces the caller
+        // context (#794's review, K2).
+        super::gateway_caller::publish_caller_context_marker(&self.ctx);
         kv_set(&self.ctx, Arc::clone(&kv_key), Bytes::from(schema.to_string().into_bytes()));
 
         self.ctx.spawn_task(run_mcp_tool_task(
@@ -239,6 +242,8 @@ impl McpHandle {
 
         // ── Register tool KV entries ──────────────────────────────────────────
         let node_id = self.ctx.node_id.clone();
+        // The marker before any bridged tool's entry (#794's review, K2).
+        super::gateway_caller::publish_caller_context_marker(&self.ctx);
         let mut kv_keys: Vec<Arc<str>>   = Vec::with_capacity(tools.len());
         let mut tool_names: Vec<Arc<str>> = Vec::with_capacity(tools.len());
 

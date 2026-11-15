@@ -530,6 +530,22 @@ pub(crate) fn marker_value(config: &crate::config::GossipConfig) -> &'static [u8
     if promises_envelopes(config) { MARKER_PROMISES_ENVELOPES } else { MARKER_VERIFIES }
 }
 
+/// **Publish this node's caller-context marker now, if its store does not already hold this node's value** — called
+/// before every advertisement of work a gateway can dispatch here (a tool's `tools/{name}/{node}` entry, a
+/// capability's `cap/{node}/…`), so a provider never advertises work before it has said it enforces the caller
+/// context (#794's review, K2; the Eve fleet job on #796). Before this the marker came only from the lazy task in
+/// `start()`, after a peer connected, while a tool entry was written at once: a gateway could see the tool first and
+/// refuse the call -32021 `provider_without_caller_context`. Writing the marker here adds no hazard the advertisement
+/// itself does not already carry: both are the same kind of gossip write at the same moment.
+pub(crate) fn publish_caller_context_marker(ctx: &TaskCtx) {
+    let key = marker_key(&ctx.node_id);
+    let value = marker_value(&ctx.config);
+    if mycelium_core::ops::kv_get(ctx, &key).as_deref() == Some(value) {
+        return;
+    }
+    let _ = super::helpers::kv_set(ctx, Arc::from(key.as_str()), Bytes::from_static(value));
+}
+
 /// How often a node re-asserts its caller-envelope id marker (post-360 row E).
 #[cfg(feature = "tls")]
 pub(crate) const ID_MARKER_REFRESH_MS: u64 = 60_000;

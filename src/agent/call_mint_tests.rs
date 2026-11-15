@@ -186,11 +186,6 @@ async fn pair(gopts: Opts) -> (N, N, std::path::PathBuf) {
     assert!(until(|| knows(&g.a, p.a.node_id()) && knows(&p.a, g.a.node_id()), Duration::from_secs(20)).await, "the nodes learned each other's keys");
     let tool = format!("tools/slow/{}", p.a.node_id());
     assert!(until(|| g.kv(&tool).is_some(), Duration::from_secs(20)).await, "the gateway sees the provider's tool");
-    // #794's review, K2: the gateway dispatches only to a provider whose caller-context marker it holds
-    // (`provider_enforces_context`), and the provider reads the gateway's. Under a loaded suite the tool's entry could
-    // arrive before the marker, and the call was refused `provider_without_caller_context` — never registered.
-    let marked = |x: &N, of: &NodeId| x.kv(&super::gateway_caller::marker_key(of)).is_some();
-    assert!(until(|| marked(&g, p.a.node_id()) && marked(&p, g.a.node_id()), Duration::from_secs(20)).await, "each node holds the other's caller-context marker");
     (g, p, cert_dir)
 }
 
@@ -201,10 +196,11 @@ async fn pair(gopts: Opts) -> (N, N, std::path::PathBuf) {
 /// stops the call **within gossip + *F* / 20 + the drain bound, asserted against the configured *F* (2 s)**; the
 /// client is answered `cancelled`, the tool did not finish, and `p`'s stop record names the term. Seen failing first:
 /// with `mints_for` answering `false`, the call was never registered at the provider (refused `no_call_mandate`).
-/// #794's review, K2: this test timed out once in CI with nothing registered. With the gateway not yet holding the
-/// provider's caller-context marker — planted, as a loaded suite can leave it — the call is refused
-/// `provider_without_caller_context` and never sent, the same symptom; `pair` now waits for both markers, and a miss
-/// prints the client's answer and the counters.
+/// #794's review, K2: this test timed out once in CI with nothing registered — the gateway saw the provider's tool
+/// before its caller-context marker and refused the call `provider_without_caller_context`. Fixed at the provider:
+/// it publishes the marker before it advertises the tool
+/// (`a_provider_publishes_its_caller_context_marker_before_it_advertises_work`); a miss prints the client's answer
+/// and the counters.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_clients_call_through_the_gateway_is_minted_admitted_and_stopped_by_a_cancel() {
     let (g, p, cert_dir) = pair(Opts { mint: true, ..Opts::default() }).await;
@@ -797,4 +793,32 @@ async fn a_genuine_grant_another_member_issued_is_not_collected_here() {
     g.a.shutdown().await;
     p.a.shutdown().await;
     let _ = std::fs::remove_dir_all(&cert_dir);
+}
+
+/// **A provider never advertises work before it has published that it enforces the caller context** (#794's review,
+/// K2; the Eve fleet job on #796, -32021 `provider_without_caller_context`). The marker came only from a task in
+/// `start()` that waits for a peer (up to 5 s), while a tool's entry and a capability's were written at once, so a
+/// gateway could see the tool first and refuse a client's call. Now every advertisement publishes the marker first:
+/// on a node with no peer yet, the marker is in its store the moment a tool is registered or a capability
+/// advertised, and stamped no later than the tool's entry. Seen failing first: with the publish taken out of the tool
+/// registration, the tool's entry was there and the marker was not.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_provider_publishes_its_caller_context_marker_before_it_advertises_work() {
+    let n = node(Opts::default()).await;
+    let ctx = n.ctx();
+    let marker = super::gateway_caller::marker_key(n.a.node_id());
+    assert!(n.kv(&marker).is_none(), "no peer yet: the lazy marker task is still waiting");
+    let _tool = n.a.mcp().register_mcp_tool("fresh", serde_json::json!({"type": "object"}), |_| async { Ok(serde_json::json!("ok")) });
+    let tool_key = format!("tools/fresh/{}", n.a.node_id());
+    let stamp = |k: &str| ctx.kv_state.store.pin().get(k).map(|e| e.timestamp);
+    assert!(n.kv(&tool_key).is_some(), "the tool is advertised");
+    assert!(n.kv(&marker).is_some(), "and the marker is already published");
+    assert!(stamp(&marker) <= stamp(&tool_key), "written before the tool's entry");
+    n.a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&n.dir);
+    let n = node(Opts::default()).await;
+    let _cap = n.a.capabilities().advertise_capability(crate::capability::Capability::new("depot", "fresh"), Duration::from_secs(60));
+    assert!(n.kv(&super::gateway_caller::marker_key(n.a.node_id())).is_some(), "a capability's advertisement publishes it too");
+    n.a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&n.dir);
 }
