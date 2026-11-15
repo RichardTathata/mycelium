@@ -4820,8 +4820,11 @@ pub(crate) enum MadeIn {
 ///   member's unrecorded, outvoted one heard, the carry adopts the outvoted value where the old rule carried the
 ///   chosen one (#787's review, F1). An acceptance made outside every group, or on an unrelated one — a
 ///   non-exclusive slot may be proposed on any electorate group — is treated the same way, since it can have
-///   replaced one made in the successor on that member (the confirm round, G2). An ancestor's cannot: a member
-///   answers a carry only once the predecessor's retirement is visible to it, which closes the predecessor there.
+///   replaced one made in the successor on that member (the confirm round, G2). An ancestor's cannot, **as far as
+///   it is checked**: a member answers a carry only once the direct predecessor's retirement is visible to it
+///   (`carry_admissible`), which closes that predecessor there. For a grandparent or older the argument relies on
+///   that group's own retirement record having reached the member by gossip — not checked at the carry. No rule
+///   before this one is right in that state either, so it is a bound, not a regression.
 ///
 /// So the result is never worse than the old rule, and is the sound one once every report is the lineage's.
 #[cfg(feature = "consensus")]

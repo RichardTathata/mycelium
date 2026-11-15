@@ -38,6 +38,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - **With the switch off a node's carry is the 2.40.0 carry, message for message**, and its records are
     byte-identical to 2.40.0's while no `0x05` record is in its store. The gap stands, pinned by four tests and
     listed on `what-is-proven.md`.
+  - **A fix to the acceptor guard (`cons.acceptor_memory`, since 2.32.0):** a second forgotten copy of a node's
+    own record, lower than the first but still above memory, was merged with memory alone and written over the
+    repair, so the higher promise was lost at the next start. A repair now merges the record already on the node's
+    key too, and never lowers it.
   - A copy of a node's own acceptor record that names another group for the acceptance it holds is counted
     (`mycelium_acceptor_guard_total{event="group_rewritten"}`) and written back from memory — an ordinary
     last-writer-wins write, and not on a slot the guard has withheld.

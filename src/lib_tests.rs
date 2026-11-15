@@ -19680,3 +19680,35 @@ async fn rev787b_a_group_rewrite_on_a_withheld_slot_keeps_the_repaired_record() 
     assert_eq!((after.promised, after.accepted.as_ref().map(|(b, _)| *b)), (p + 4, Some(p + 4)),
         "the repaired record still holds the forgotten promise and acceptance; it now reads {after:?}");
 }
+
+/// rev787 round 3, H1 — **a lower forgotten copy after a higher one lowers the repaired record** (pre-existing, #605's
+/// guard; the same family as G1). B's slot is withheld after a copy at `p+4`; a second copy at `p+2` — still above
+/// memory, so "forgotten" again — is merged with **memory**, not with the repaired record, and written over it.
+#[cfg(feature = "consensus")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rev787c_a_lower_forgotten_copy_does_not_lower_the_repaired_record() {
+    use crate::consensus::{accepted_key, decode_acceptor, encode_acceptor, Accepted, AcceptorSlot, MadeIn};
+    let _serial = ELECTORATE_MESHES.lock().await;
+    let port = alloc_port();
+    let id = NodeId::new("127.0.0.1", port).unwrap();
+    let b = GossipAgent::new(id.clone(), electorate_cfg(port, vec![], true));
+    b.start().await.unwrap();
+    let _listener = b.consensus().start_consensus_listener(ConsensusConfig::default());
+    b.mesh().join_group("solo");
+    let r = b.consensus().group_propose("solo", "work/x", Bytes::from_static(b"own"), ConsensusConfig::default()).await;
+    assert!(matches!(r, ConsensusResult::Committed { .. }), "{r:?}");
+    let slot: Arc<str> = Arc::from("work/x");
+    let p = b.task_ctx.consensus_accepted.pin().get(&slot).map(|s| s.promised).expect("held");
+    let key = accepted_key(&id, &slot);
+    let observe = |value: Bytes, nonce: u64| {
+        let upd = crate::framing::GossipUpdate { nonce, sender: 0xBEEF, ttl: 1, is_tombstone: false, timestamp: 1, key: Arc::from(key.as_str()), value };
+        (b.task_ctx.inbound_observer.get().expect("the guard is installed").on_inbound)(&upd);
+    };
+    let copy = |at: u64, d: u8| AcceptorSlot { promised: at, promised_to: Some(0xC0FFEE), accepted: Some((at, Accepted::DigestOnly([d; 32]))), groups: Vec::new(), made_in: MadeIn::Unknown };
+    observe(encode_acceptor(&copy(p + 4, 7)), 1);
+    assert!(b.task_ctx.acceptor_withheld.pin().contains("work/x"));
+    observe(encode_acceptor(&copy(p + 2, 8)), 2);
+    let after = b.kv().get(&key).and_then(|v| decode_acceptor(&v)).expect("record");
+    b.shutdown_with_timeout(Duration::from_secs(5)).await;
+    assert_eq!((after.promised, after.accepted.as_ref().map(|(b, _)| *b)), (p + 4, Some(p + 4)), "it now reads {after:?}");
+}

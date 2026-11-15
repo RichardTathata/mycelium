@@ -427,8 +427,10 @@ failing first with its mechanism disabled:
   to be known, and holds **for a carry ballot whose carrier asks for it and whose promise quorum reports only
   acceptances that name theirs** (`consensus_record_acceptance_group` on the carrier; on the members, so that the
   group survives a restart). Then: an acceptance made in G2 is never replaced by one made in G1 on the same member (a
-  member answers a carry only once G1's retirement is visible to it, which closes G1 there) — **that covers G1 and
-  G2's other ancestors, not an unrelated group**, on which a non-exclusive slot may also be proposed and whose
+  member answers a carry only once G1's retirement is visible to it, which closes G1 there — **checked for the direct
+  predecessor only**: for an older ancestor the argument relies on that group's retirement record having reached the
+  member by gossip, which the carry does not check, and no earlier rule is right in that state either) — **that
+  covers G1 and G2's other ancestors, not an unrelated group**, on which a non-exclusive slot may also be proposed and whose
   acceptance can replace a G2-made one; a report naming a group outside G2's lineage therefore sends the carry
   back to hearing everything — so each quorum member's report is its latest G2 acceptance or says it has none; G2's own Paxos is intact; and the value carried when no
   G2 acceptance is heard is the manifests' highest, which (ii) makes G1's chosen value. A partial carry and a

@@ -4003,8 +4003,9 @@ the migration, 2.33.0 on.
   - any reported acceptance is of unknown group, was made outside every group, or names a group outside the
     lineage → the carry hears **all** of them, as 2.40.0 did. (A non-exclusive slot can be proposed on an
     unrelated electorate group, and such an acceptance can have replaced one made in the successor on a shared
-    member — as a cluster-scoped one can. An ancestor's cannot: a member answers a carry only once the
-    predecessor's retirement is visible to it, which closes the predecessor there.)
+    member — as a cluster-scoped one can. An ancestor's cannot: a member answers a carry only once the direct
+    predecessor's retirement is visible to it, which closes the predecessor there. For an older ancestor that
+    relies on its retirement record having reached the member by gossip, which the carry does not check.)
 
   So a carry that asks is never worse off than one that does not, and is right once nothing in its quorum is
   unknown. (An earlier draft filtered at the acceptor, which hid a shared member's recorded copy of the chosen
@@ -4058,6 +4059,11 @@ the migration, 2.33.0 on.
   the clock passes it (critique plan CR13 counts such a stamp today and refuses it later). A rewritten copy that
   wins, or one that lands while the node is down, is read at its next start as it stands, and — naming an ancestor
   of the successor — can hide a successor-made acceptance from a carry.
+- **A fix to the acceptor guard** (`cons.acceptor_memory`, since 2.32.0; #787's confirm round, H1). When a peer's
+  copy of a node's own record shows a promise the node forgot, the guard withholds the slot and writes a merged
+  record. A second such copy — lower than the first, still above memory — was merged with memory alone and written
+  over the first repair (`{5,5}` repaired, then `{3,3}`), so the promise at 5 was lost at the next start. Now the
+  record already on the key is merged in as well, and a repair never lowers it. Nothing to do; no configuration.
 - **The warning's text changed**, not its counters: it no longer says two values "were chosen" for the slot when
   the carry itself chose the second.
 - **Wire v12 is unchanged.** Two variants are appended to the consensus message; the existing ones are untouched.

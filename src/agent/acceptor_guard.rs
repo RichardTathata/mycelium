@@ -305,12 +305,23 @@ fn compare_own_record(
 /// written here must not say less than any answer that is out. A Layer III write of a key this node owns, so the next
 /// start's `prewarm_accepted` reads the forgotten promise and acceptance back even where this node's own empty-handed
 /// write had won LWW over the copy. Memory itself is left as it is: the slot stays withheld until that start.
+///
+/// **And the record already on this node's key is merged in too, so a repair never lowers it** (#787's confirm round,
+/// H1 — a defect since #605). On a withheld slot memory is older than the repaired record, so a second forgotten copy
+/// lower than the first but still above memory (`{5,5}` repaired, then `{3,3}`) merged with memory alone was written
+/// over the repair, and the promise at 5 was lost at the next start. Writing nothing on a slot already withheld would
+/// keep it, but would also drop a second copy **higher** than the first, which must be kept. The stored record goes
+/// first in the merge, so at an equal ballot the acceptance (and its group) is the one `merged` and memory give — a
+/// rewritten copy sitting on the key does not choose it (G1).
 pub(crate) fn repair_own_record(ctx: &Arc<TaskCtx>, slot: &str, merged: &AcceptorSlot) {
     let engine = crate::agent::helpers::make_consensus_engine_ctx(ctx, false, false, 0, None);
+    let key = accepted_key(&ctx.node_id, slot);
     let _records = ctx.acceptor_records.lock().unwrap_or_else(|e| e.into_inner());
     let now = ctx.consensus_accepted.pin().get(slot).cloned().unwrap_or_default();
-    let record = merge_records(merged, &now);
-    let upd = engine.kv_set_returning(accepted_key(&ctx.node_id, slot), engine.acceptor_record(&record));
+    let stored = ctx.kv_state.store.pin().get(key.as_str()).and_then(|e| e.data.clone()).and_then(|b| decode_acceptor(&b));
+    let fresh = merge_records(merged, &now);
+    let record = match stored { Some(stored) => merge_records(&stored, &fresh), None => fresh };
+    let upd = engine.kv_set_returning(key, engine.acceptor_record(&record));
     engine.wal_try(&upd);
 }
 
