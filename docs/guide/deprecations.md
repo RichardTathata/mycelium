@@ -3809,11 +3809,11 @@ node without enforcement and without a cohort budget is unchanged: the same repl
   as for every error reply — the text names the reason; there is no separate variant.
 - **Not built: three other receivers make no decision** (#785's review), in the order they matter. None is a door
   this release changed; each has a dated row on [what is proven](../operations/what-is-proven.md).
-  1. A hosted WASM capability's kind, `cap.invoke/{ns}/{name}`, is served through `rpc_rx`, where the check runs
-     and is inert because the kind is not protected: on a stem with `[authority]` a member's direct `rpc_call` of
-     `cap.invoke/tool/x` runs the component with no decision, mandate or record, while `/mcp` decides the same
-     component. A gateway client cannot reach the kind (§103). **Open today; decided by the maintainer on 2026-11-14
-     to be protected at an enforcing provider, in its own PR.**
+  1. A hosted WASM capability's kind, `cap.invoke/{ns}/{name}`, is served through `rpc_rx`, where the check ran
+     and was inert because the kind was not protected: on a stem with `[authority]` a member's direct `rpc_call` of
+     `cap.invoke/tool/x` ran the component with no decision, mandate or record, while `/mcp` decided the same
+     component. A gateway client cannot reach the kind (§103). **Closed by §108** (the maintainer's decision of
+     2026-11-14: protected at an enforcing provider).
   2. `bulk_serve` runs its handler with no caller context and no check, even for a kind in `protected_rpc_kinds`.
      Members only; a bypass only where an application serves a protected kind over bulk.
   3. A raw receiver (`mesh().signal_rx(kind)` + `RpcRequest::from`) has no public way to run the provider check.
@@ -4079,3 +4079,160 @@ the migration, 2.33.0 on.
   `rev787_an_unrecorded_acceptance_encodes_as_2_40_did_byte_for_byte`); `src/agent/acceptor_guard.rs`
   (`rev787_a_forged_made_in_is_counted_and_put_back`). Design: `docs/design/consensus-electorate.md` §8.3 (iii),
   §8.5, §8.6.
+
+## 108. An enforcing provider decides a hosted capability's kind, `cap.invoke/{ns}/{name}` (unreleased, the decision of 2026-11-14)
+
+*Numbered 108 because an open pull request (#787) holds §107 at the time of writing; the sections are in order
+once it merges.*
+
+A hosted WASM component is served on the RPC kind `cap.invoke/{ns}/{name}` (`mycelium-wasm-host`,
+`cap_invoke_kind`). The kind reached `rpc_rx`, where the provider check ran and returned at once, because the kind
+was not protected work: on a node with `with_provider_enforcement` or `[authority]` — a stem, typically — any
+member's direct `rpc_call` of it ran the component with no evaluator decision, no mandate assessment, no cohort
+admission and no provider record, while `/mcp` decided the same component as a tool (#785's review; §105 listed it
+*not built*). The family is now protected work **at the provider**.
+
+**Who is affected:** a node that has **both** provider enforcement (or a cohort budget) **and** a hosted
+component that members call directly — `rpc_call(provider, "cap.invoke/{ns}/{name}", …)`. A node without
+enforcement and without a cohort budget is unchanged at this door: the same replies, byte for byte, and no
+record. A call through `/mcp` is unchanged everywhere. **One change reaches every node, enforcing or not:** a
+member's own `mcp.invoke` that carries no `arguments` member is handed to its tool as `{}`, where it was `null`
+(*Decided is handed*, below). No template, example or stem default in this repository turns enforcement
+on over a hosted capability that members call directly (the co-op examples that call `cap.invoke/route/optimize`
+run without it).
+
+- **Your provider's policy now decides the call**, on the capability the **kind** names:
+
+  | Namespace | Operation | Resource | Arguments |
+  |---|---|---|---|
+  | `tool` | `tools/call` | `tool:{name}@{provider}` | the payload as JSON |
+  | any other | `cap.invoke` | `cap:{ns}/{name}@{provider}` | the payload as JSON |
+
+  The principal is `node:{sender}` for a member's own call. **A policy with no rule that permits the call now
+  refuses it** (`authority_not_established`: no allowance matches; a prohibition answers `action_denied`), where
+  the component ran before. Add the rule before upgrading: in code
+  `Rule::new("node:{caller}", "cap.invoke", "cap:{ns}/{name}@{provider}")` with `map_action("cap.invoke", "*")`
+  on the evaluator; in a unit file a `[[rule]]` with `actor = "node:<the caller's address>"` (or `actor = "*"`),
+  `operation = "cap.invoke"` and `resource = "cap:{ns}/{name}"`. **The actor is the calling node, not a unit's
+  principal**: a member's call is `node:{sender}` and `[authority]` matches actors exactly, so a rule whose actor
+  is the requirer's unit principal — the one `wire-check` reads — does not admit it.
+  The refusal is `rpc_rx`'s, `{"error", "reason", "data"}`, in place of the component's answer.
+- **The `tool` namespace is decided as the tool it is.** A `tool/{name}` component is also the MCP tool `{name}`,
+  and a direct call of its kind is decided under the operation, resource and arguments the MCP tool loop decides
+  for that tool. A rule that admits a principal to `tools/call` on `tool:{name}` admits it at both doors, and no
+  other rule is needed; a rule that admits only gateway clients (`token:…`, `oidc:…`) refuses a member's direct
+  call **sent as the member** — unframed, or under its own self envelope — which it did not before. A mandate
+  whose possession proof is over the tool call's operation, resource and arguments digest is established on a
+  direct call of the same tool with the same arguments, and not with others (tested end to end).
+  **"As the member" is the bound**: a member that holds a node key can frame an envelope naming a key-less
+  client principal, at this door as at every provider door ([`key-less-principal-is-bound-to-its-gateway`](../operations/what-is-proven.md#key-less-principal-is-bound-to-its-gateway)), and a bare frame's `sender` is
+  whatever the frame says. A rule for a key-less client is therefore not proof against a dishonest member here
+  either; a client that signs its calls (I1) is.
+- **Decided is handed, at both doors.** At the MCP door the node parses the call once, decides on the parsed
+  `arguments` and hands the tool that same value — so a repeated object key is read one way (the last), by both.
+  **An `mcp.invoke` that reaches the provider with no `arguments` member is now handed to its tool as `{}`, the
+  value it is decided on; the handler used to be handed `null`.** That is a member's own `mcp.invoke` (a direct
+  `rpc_call`), for every tool the node serves through the tool loop or the external-server bridge (which is now
+  sent `"arguments": {}`), with enforcement on or off. A call that carries `"arguments": null` is decided on
+  `null` and handed `null`, as before — and that is what the gateway's `/mcp` sends for a client's call with no
+  `arguments`, so a call through `/mcp` is unchanged. **A client signature is checked against the same value**
+  (`client_sig::binding_of`): for an `mcp.invoke` that reaches the provider with no `arguments` member, the
+  signature must be over `{}`, where it was checked over `null`. No shipped client is affected: both SDKs'
+  `McpClient.call_tool` / `callTool` send `"arguments": {}` when given none and sign that, the Rust
+  `ClientSigner::sign_tools_call` takes its arguments explicitly, and through `/mcp` the gateway checks the
+  signature and forwards an explicit value, which the provider reads as sent. Only a member that relays a client's
+  signed call with the member removed sees it: a signature over `null` is now refused `client_signature_invalid`.
+  At the direct door the component is handed
+  the payload's bytes, so **a JSON payload that repeats an object key, at any depth, is refused `malformed_call`
+  at an enforcing provider**: the provider would decide on the last value while a guest's parser might keep the
+  first. Only a payload that parses as JSON as a whole is asked: one that is not — a repeated key followed by
+  `1e400`, or a lone surrogate — is carried as `{"payload_b64"}` like any other bytes.
+  With enforcement off nothing is decided on the payload and it is not refused.
+- **Behaviour change under `[authority]`: a bare `cap:{ns}/{name}` rule is qualified to the node**, as a bare
+  `tool:`, `skill:` and `prompt:` are. No rule could match the form before (nothing presented it), so no unit
+  changes meaning; `provider (cap.invoke)` joins the doors `[authority]` maps and reports.
+- **The resource is read from the kind, never from the envelope's claim.** A caller cannot have a call decided on
+  one capability and run another, and a member's own call — which carries no claim — is not refused
+  `resource_unnamed`. A kind under `cap.invoke/` that names no capability (an empty namespace or name), or whose
+  namespace or name holds `@`, is refused `malformed_call`. **This is the derivation for the family**, so an
+  application that serves a `cap.invoke/…` kind through its own `rpc_rx` loop under provider enforcement is
+  decided the same way; before, such a kind was not decided at all unless the operator listed it in
+  `protected_rpc_kinds`, and then on the envelope's claim. **If you listed a `cap.invoke/…` kind in
+  `protected_rpc_kinds`**, its rule named the kind as the operation and the claimed resource; rewrite it to the
+  table above, or the call is refused (the listing itself can stay: it still stops a component's `mesh.emit` of
+  the kind and the gateway's routes).
+- **A payload that is not JSON** is carried as `{"payload_b64": "<base64>"}`, as an operator's protected kind's
+  is. **What an arguments digest does not tell apart at this door:** a JSON payload of exactly that shape and the
+  bytes it encodes, which derive the same arguments; and, by design, JSON texts that RFC 8785 writes alike —
+  `{"n":1}`, `{"n":1.0}` and `{"n":1e0}` have one digest, as do two decimals that round to one double
+  (`0.1` and `0.1000000000000000055`), two orders of the same keys or two spacings — while
+  the component is handed the bytes as sent. A repeated key is refused (above). An empty payload is not JSON.
+- **With enforcement on and no evaluator the call is refused** (`no_evaluator`), as every protected kind is. An
+  evaluator built in code must map the operation (`map_action("cap.invoke", "*")`), or the call is refused
+  unmapped.
+- **With a cohort budget and enforcement off** no policy is consulted, but a direct call now takes its caller's
+  place in the budget for as long as its serve loop holds the request, and is refused `at_capacity` when the pool
+  is full. Before, the family was outside the budget. A call through `/mcp` holds one place, the client's, as
+  before: the bridge's own hand-over takes none.
+- **A cancellable rule** behaves as §104 says for every protected kind: a member's own call carries no `call:`
+  mandate and is refused `call_mandate_not_established` (`no_envelope` unframed, `no_call_mandate` framed). Do not
+  declare one for a hosted capability yet.
+- **What a cancel or a lapse stops at a hosted component, exactly.** A guest call that has begun runs to its end
+  or to the host's deadline: nothing interrupts it, through either door. A tool call through `/mcp` that is still
+  **queued** behind another guest call when its handler has gone — its 30 s wait elapsed, its authority lapsed, or
+  it was cancelled — is not begun: the serve loop skips it. A **direct** call that is queued is still run when its
+  turn comes: its request holds its admission until it is answered, and the serve loop does not race the
+  authority's lapse.
+- **The wasm host's MCP bridge no longer calls its own node.** The tool handler of a `tool/{name}` component made
+  an `rpc_call` of `cap.invoke/tool/{name}` to the node it runs on; once the family is decided that second leg
+  would have been decided again, as `node:{self}`. It now hands the admitted arguments to the component's serve
+  loop over a channel inside the process. What changes for an operator: the bridged call is no longer a signal —
+  a receiver or tap a member registered on `cap.invoke/tool/{name}` does not see calls that arrive through `/mcp`
+  (it sees direct calls, as before), and the arguments of a tool call are no longer emitted on the mesh for the
+  node's own id. Its answers are unchanged, and so is its timeout (`bridge: rpc call timed out — no reply from
+  target` after 30 s). **One error is new**, `bridge: the component is no longer served`, answered at once when
+  the install's serve loop has gone, where the old bridge waited out its 30 s. **There is no
+  exemption for "a call from this node"**: a frame that names the provider as its sender is decided as
+  `node:{provider}`.
+- **Unchanged:** the gateway's routes still refuse the family (`403 protected_kind`, §103) — a client reaches a
+  hosted component through `/mcp` only; `is_protected_kind` still answers for the exact-kind list alone, so a
+  component's `mesh.emit` of a `cap.invoke/…` kind its host listed with `with_emit_kinds` is still sent (and is
+  decided, at the provider that receives it, as `node:{the emitting node}`); the `ot` requirement (I5) already
+  counted the family.
+- **Compiler:** two public items are new, `HOSTED_CAPABILITY_OPERATION` (`"cap.invoke"`) and
+  `hosted_capability_of(kind) -> Option<(&str, &str)>`. `is_protected_kind` is unchanged. No configuration field,
+  no wire change (wire **v12**), and no ordering between nodes on upgrade: the change is local to each provider.
+- **Not built:** `bulk_serve` and a raw `signal_rx` receiver run no check for this family either (§105's items 2
+  and 3); an HTTP client still has no route to a hosted capability outside the `tool` namespace (CR29); the
+  payload carries no causal fields, so the exposure policy reads a direct call as a root.
+- **Not built, and to be closed before the MINOR that ships this section: `wire-check`'s authority overlay does
+  not know the `cap.invoke` shape** ([ledger](../operations/what-is-proven.md#wire-check-does-not-know-the-hosted-capability-shape)). It reads an edge as a skill (`skill.invoke` on
+  `skill:{ns}/{name}`) or a tool (`tools/call` on `tool:{name}`), and it is wrong in both directions for a hosted
+  capability outside the `tool` namespace:
+  - **a false red:** a governed requirer whose only rule for the capability is the `cap.invoke` one above is
+    reported `unauthorisable edge` — an error at design time for a declaration the provider admits;
+  - **a false green:** an edge authorised by a `skill.invoke` (or `tools/call`) rule is reported clean, and an
+    enforcing provider that hosts the capability never consults that rule — it decides `cap.invoke` on
+    `cap:{ns}/{name}@{node}` and refuses. The repository's own fixture is the instance:
+    `tests/fixtures/units/coop/auditor.toml` authorises `route/optimize` with `skill.invoke` on
+    `skill:route/optimize`, `tests/fixtures/units/artifacts/route-optimizer.toml` provides it as a hosted component,
+    and the check reads the pair green. Nothing shipped turns enforcement on over that fixture.
+
+  The overlay also reads a rule's actor as a unit principal, where the provider sees `node:{sender}` (above).
+  Until the overlay learns the shape (it is part of the declaration JSON's contract, `operations`), read its
+  finding by hand for an edge to a hosted capability, or run the check with `--no-authority`.
+- ***Check:*** on an enforcing stem that hosts `route/optimize` and has no rule for it, a member's
+  `rpc_call(stem, "cap.invoke/route/optimize", payload)` returns
+  `{"error": "…", "reason": "authority_not_established", …}`, and the stem's evidence journal (the file
+  `[authority].journal` names; `read_evidence_journal`) holds a `provider` decision on `cap:route/optimize@<stem>`
+  whose subject is `node:<the member's address>`. After adding a `[[rule]]` with
+  `actor = "node:<the member's address>"` (or `"*"`), `operation = "cap.invoke"`,
+  `resource = "cap:route/optimize"` to the stem's unit, the call answers. A rule whose actor is a unit's principal
+  does not.
+- **Code:** `src/agent/provider_enforcement.rs` (`protected_here`, `derive`), `src/agent/mod.rs`
+  (`hosted_capability_of`, `HOSTED_CAPABILITY_OPERATION`), `src/agent/declared_authority.rs` (`plan`, `doors`),
+  `src/agent/mcp.rs` (`decided_arguments`), `mycelium-wasm-host/src/runtime.rs` (`serve_loop`). Tests:
+  `src/agent/hosted_capability_door_tests.rs`, `a_bridged_call_nobody_waits_for_is_not_begun`
+  (`mycelium-wasm-host/src/provisioner.rs`),
+  `mycelium-wasm-host/tests/hosted_capability_enforcement.rs`,
+  `a_bare_cap_resource_is_qualified_to_this_node` (`src/agent/declared_authority_tests.rs`).

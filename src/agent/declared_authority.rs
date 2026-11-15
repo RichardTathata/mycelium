@@ -8,7 +8,8 @@
 //! 1. **reads the declaration** — every `*.toml` in `declarations` is a unit file; the unit whose `principal` is
 //!    `unit` is this node's ([`plan`]);
 //! 2. **builds the reference evaluator from that unit's `[[rule]]`s only**, each as written and, for the forms the
-//!    doors present, two more readings — a bare `tool:<name>`, `skill:<ns>/<name>` or `prompt:<ns>/<name>` also at
+//!    doors present, two more readings — a bare `tool:<name>`, `skill:<ns>/<name>`, `prompt:<ns>/<name>` or
+//!    `cap:<ns>/<name>` (a hosted capability outside the `tool` namespace) also at
 //!    this node (`tool:<name>@<node>`, the resource the provider's door names), and a grant-requiring rule whose actor is the unit's own principal also for this
 //!    node's principal (`node:<id>`, the one principal that holds a node's grant). That is what `mycelium test
 //!    --faults grant` builds ([`crate::faults`]'s `grant` class) narrowed to one unit: a declaration carries no
@@ -66,7 +67,7 @@ fn refused(reason: impl Into<String>) -> GossipError {
 
 /// Every door the evaluator must map on this node: the gateway's ([`super::http::evaluated_doors`]) and the
 /// provider's — each protected kind, under the operation `provider_enforcement` derives for it (`mcp.invoke` is
-/// `tools/call`; every other kind is its own name).
+/// `tools/call`; every other kind is its own name) — and the hosted-capability family's one operation, `cap.invoke`.
 pub(crate) fn doors(cfg: &GossipConfig) -> Vec<(String, String)> {
     let mut doors: Vec<(String, String)> = super::http::evaluated_doors().into_iter().map(|(p, o)| (p.to_string(), o.to_string())).collect();
     let provider = super::provider_enforcement::ENFORCEMENT_POINT_PROVIDER;
@@ -74,6 +75,9 @@ pub(crate) fn doors(cfg: &GossipConfig) -> Vec<(String, String)> {
         let operation = if kind == crate::signal::signal_kind::MCP_INVOKE { "tools/call".to_string() } else { kind };
         doors.push((provider.to_string(), operation));
     }
+    // A hosted capability outside the `tool` namespace is decided under the family's one operation (a `tool/*` one
+    // under `tools/call`, above).
+    doors.push((provider.to_string(), super::HOSTED_CAPABILITY_OPERATION.to_string()));
     doors.sort();
     doors.dedup();
     doors
@@ -204,7 +208,9 @@ pub(crate) fn plan(cfg: &GossipConfig, node: &NodeId, auth: &AuthorityConfig) ->
         // `skill:<ns>/<name>@<node>`, `prompt:<ns>/<name>@<node>` — the last since #785's review, F3: the provider's
         // `llm.invoke` door names it, as the gateway's LLM doors did); a bare one in the unit is qualified to this node — the only node a declaration
         // can place this unit's rules on. A tool or skill on another node is not admitted here.
-        if (r.resource.starts_with("tool:") || r.resource.starts_with("skill:") || r.resource.starts_with("prompt:")) && !r.resource.contains('@') {
+        // A hosted capability outside the `tool` namespace is presented as `cap:<ns>/<name>@<node>` by the provider's
+        // door (`cap.invoke/…`, 2026-11-14), and a bare `cap:<ns>/<name>` is qualified the same way.
+        if ["tool:", "skill:", "prompt:", "cap:"].iter().any(|p| r.resource.starts_with(p)) && !r.resource.contains('@') {
             let mut at_node = built;
             at_node.resource = format!("{}@{node}", r.resource);
             forms.push(at_node);

@@ -238,6 +238,15 @@ fn refuse_mcp_call(
     rpc_respond_ctx(ctx, req, Bytes::from(refusal.jsonrpc_body(&rpc_req["id"])));
 }
 
+/// **The arguments a tool call is decided on, and so the ones its handler is handed**: the call's `arguments`, or
+/// `{}` when it carries none — what `provider_enforcement::derive` reads for `mcp.invoke`. Until #788's review (F3)
+/// a handler was handed `null` for a call with no `arguments` while the provider decided on `{}`: the value a rule
+/// and a mandate's digest were checked against was not the value the tool acted on. The gateway's `/mcp` door sends
+/// an explicit `"arguments": null` for a client's call with none, which is decided and handed as `null`.
+pub(crate) fn decided_arguments(rpc_req: &serde_json::Value) -> serde_json::Value {
+    rpc_req["params"].get("arguments").cloned().unwrap_or_else(|| json!({}))
+}
+
 /// Run the handler for an admitted call and answer it.
 async fn serve_mcp_call<F, Fut>(
     ctx: &Arc<TaskCtx>,
@@ -251,7 +260,7 @@ where
     F: Fn(McpCall, serde_json::Value) -> Fut + Send + Sync + 'static,
     Fut: std::future::Future<Output = Result<serde_json::Value, String>> + Send + 'static,
 {
-    let args = rpc_req["params"]["arguments"].clone();
+    let args = decided_arguments(rpc_req);
     #[cfg(all(feature = "gateway", feature = "tls"))]
     let result = super::provider_enforcement::run(&admission, handler(call, args)).await;
     #[cfg(not(all(feature = "gateway", feature = "tls")))]
@@ -298,7 +307,7 @@ async fn forward_bridged(
         "jsonrpc": "2.0",
         "id": rpc_req["id"],
         "method": "tools/call",
-        "params": {"name": rpc_req["params"]["name"], "arguments": rpc_req["params"]["arguments"]},
+        "params": {"name": rpc_req["params"]["name"], "arguments": decided_arguments(rpc_req)},
     });
     let response: serde_json::Value = match http_client.post(server_url).json(&call_req).send().await {
         Ok(resp) => match resp.json().await {

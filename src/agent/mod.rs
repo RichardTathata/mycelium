@@ -221,6 +221,9 @@ mod call_admission_tests;
 /// #781's review, F1: the built-in `llm.invoke` provider runs the provider check.
 #[cfg(all(test, feature = "gateway", feature = "tls", feature = "llm"))]
 mod llm_door_tests;
+/// The decision of 2026-11-14: a hosted capability's kind is protected work at an enforcing provider.
+#[cfg(all(test, feature = "gateway", feature = "tls"))]
+mod hosted_capability_door_tests;
 /// Identity-and-lifecycle I5 (D6): the gateway's token exchange at the IdP, DPoP-bound to the node key.
 #[cfg(feature = "compliance")]
 pub(crate) mod oidc_exchange;
@@ -258,6 +261,8 @@ pub use rpc::{RpcError, RpcRequest, RpcRequestRx};
 /// `GossipConfig::protected_rpc_kinds`. Ungated: the gateway's raw routes refuse these kinds
 /// (closure plan C1), provider enforcement checks them (C3), and a hosted WASM component's
 /// `mesh.emit` refuses them — the last of which exists in a build without the gateway.
+/// Provider enforcement checks one family more, a hosted capability's `cap.invoke/…`
+/// ([`HOSTED_CAPABILITY_KIND_PREFIX`]), which is not on this list.
 pub const BUILTIN_PROTECTED_RPC_KINDS: &[&str] = &[
     signal_kind::MCP_INVOKE,
     "skill.invoke",
@@ -320,8 +325,25 @@ pub fn is_substrate_kind(kind: &str) -> bool {
 /// the six raw routes (2026-11-13): a tap read every invocation's arguments and caller envelope under
 /// `mesh:read`, and `rpc/call` invoked a component under `mesh:write` alone — around `/mcp`, the door a bridged
 /// component is called through, with its `mcp:invoke` scope and its preflight. A member's own call
-/// (`ServiceHandle::rpc_call`, the MCP bridge's in-process call) is not a gateway door and is unchanged.
+/// (`ServiceHandle::rpc_call`) is not a gateway door.
+///
+/// **At an enforcing provider the family is protected work** (the maintainer's decision of 2026-11-14;
+/// `provider_enforcement::check`): a member's direct call is decided on what the kind names — `tool:{name}@{node}`
+/// under `tools/call` for the `tool` namespace, `cap:{ns}/{name}@{node}` under `cap.invoke` for any other — before
+/// the component runs. [`is_protected_kind`] does **not** answer for it: that predicate is the exact-kind list the
+/// gateway's routes and a component's `mesh.emit` ask, and each of those doors treats this family in its own way.
 pub const HOSTED_CAPABILITY_KIND_PREFIX: &str = "cap.invoke/";
+
+/// The operation a hosted capability outside the `tool` namespace is decided under at an enforcing provider.
+pub const HOSTED_CAPABILITY_OPERATION: &str = "cap.invoke";
+
+/// The `(namespace, name)` a hosted capability's kind names, `cap.invoke/{namespace}/{name}`: the namespace up to
+/// the first `/`, the name everything after it. `None` for a kind outside the family, and for one inside it that
+/// names no capability (an empty namespace or name) or carries `@` — the separator a resource puts before its node.
+pub fn hosted_capability_of(kind: &str) -> Option<(&str, &str)> {
+    let (ns, name) = kind.strip_prefix(HOSTED_CAPABILITY_KIND_PREFIX)?.split_once('/')?;
+    (!ns.is_empty() && !name.is_empty() && !ns.contains('@') && !name.contains('@')).then_some((ns, name))
+}
 
 /// The gateway scope a **companion-namespaced** RPC kind needs on a raw route (external review 2026-10-31, F1;
 /// plan row R1, decision D1). The companions serve their operations as RPC kinds of the shape

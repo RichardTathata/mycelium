@@ -365,52 +365,170 @@ fn outcome_label(outcome: &InvocationOutcome) -> &'static str {
     }
 }
 
+/// One call the MCP bridge hands its own install's serve loop **in process**: the arguments the MCP tool loop
+/// admitted, and where the component's answer goes. See [`serve_loop`].
+#[cfg(feature = "gateway")]
+struct BridgedCall {
+    payload: Vec<u8>,
+    reply:   tokio::sync::oneshot::Sender<Vec<u8>>,
+}
+
+/// The receiving end of an install's bridge, when the install is bridged as an MCP tool.
+#[cfg(feature = "gateway")]
+type Bridged = Option<tokio::sync::mpsc::Receiver<BridgedCall>>;
+#[cfg(not(feature = "gateway"))]
+type Bridged = ();
+
+/// How many bridged calls may wait for the serve loop. The MCP tool loop runs one handler at a time, so one call
+/// is in flight per tool; the rest is slack.
+#[cfg(feature = "gateway")]
+const BRIDGE_QUEUE: usize = 8;
+
+/// How long the bridge waits for its component's answer.
+#[cfg(feature = "gateway")]
+const BRIDGE_TIMEOUT_MS: u64 = 30_000;
+
+/// Test hook: a bridge timeout in place of [`BRIDGE_TIMEOUT_MS`] for the tool of one name.
+#[cfg(all(test, feature = "gateway"))]
+pub(crate) static TEST_BRIDGE_TIMEOUTS: Mutex<Vec<(String, u64)>> = Mutex::new(Vec::new());
+
+#[cfg(feature = "gateway")]
+fn bridge_timeout_ms(#[allow(unused_variables)] tool: &str) -> u64 {
+    #[cfg(test)]
+    if let Some((_, ms)) = TEST_BRIDGE_TIMEOUTS.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|(t, _)| t == tool) {
+        return *ms;
+    }
+    BRIDGE_TIMEOUT_MS
+}
+
+/// Who asked for a call, and so where its answer goes.
+enum Asked {
+    /// A request off the mesh, through `rpc_rx` — verified and, at an enforcing provider, decided there. Held until
+    /// it is answered: its admission (a cohort place, registered work) lasts as long.
+    Mesh(mycelium::RpcRequest),
+    /// The MCP bridge, in process.
+    #[cfg(feature = "gateway")]
+    Bridge(tokio::sync::oneshot::Sender<Vec<u8>>),
+}
+
+impl Asked {
+    fn answer(self, agent: &GossipAgent, result: Vec<u8>) {
+        match self {
+            Asked::Mesh(req) => agent.service().rpc_respond(&req, result),
+            // The tool's handler was dropped (its call cancelled, or timed out): nobody is waiting.
+            #[cfg(feature = "gateway")]
+            Asked::Bridge(reply) => {
+                let _ = reply.send(result);
+            }
+        }
+    }
+}
+
+/// The next bridged call. Never resolves for an install with no bridge, or once the bridge's tool is gone.
+#[cfg(feature = "gateway")]
+async fn next_bridged(bridged: &mut Bridged) -> BridgedCall {
+    if let Some(rx) = bridged.as_mut() {
+        if let Some(call) = rx.recv().await {
+            return call;
+        }
+        *bridged = None;
+    }
+    std::future::pending().await
+}
+
+/// Run one call on the install's instance and answer it. `false`: the serve task stops (the instance is gone and
+/// could not be replaced, or its thread failed).
+async fn serve_one(agent: &Arc<GossipAgent>, served: &Arc<Served>, slot: &mut Option<Instance>, payload: Vec<u8>, asked: Asked) -> bool {
+    let Some(instance) = slot.take() else { return false };
+    let (a, s) = (Arc::clone(agent), Arc::clone(served));
+    let (next, result, outcome) = match tokio::task::spawn_blocking(move || s.call(&a, instance, payload)).await {
+        Ok(done) => done,
+        Err(e) => {
+            // A panic inside the host (not a guest trap, which is an `Err`): the instance went
+            // with it, so stop serving and let the probe withdraw the install. A cancellation
+            // is the runtime shutting down (review finding 7) — not a failure.
+            if e.is_cancelled() {
+                tracing::debug!(artifact = %served.artifact, provides = %served.provides,
+                    "the guest call was cancelled (runtime shutdown) — the serve task stops");
+            } else {
+                tracing::error!(artifact = %served.artifact, provides = %served.provides, error = %e,
+                    "the guest call's thread failed — the serve task stops; the probe will withdraw the install");
+            }
+            let outcome = InvocationOutcome::HostError(format!("guest call thread: {e}"));
+            asked.answer(agent, format!("host-error: guest call thread: {e}").into_bytes());
+            record_invocation(&served.log, served.record(outcome));
+            return false;
+        }
+    };
+    metrics::counter!("mycelium_artifact_invocations_total", "outcome" => outcome_label(&outcome)).increment(1);
+    match &outcome {
+        InvocationOutcome::FuelExhausted { budget } => {
+            tracing::warn!(artifact = %served.artifact, provides = %served.provides, budget, "hosted component stopped at its fuel budget");
+        }
+        InvocationOutcome::DeadlineExceeded { deadline_ms } => {
+            tracing::warn!(artifact = %served.artifact, provides = %served.provides, deadline_ms, "hosted component stopped at its call deadline");
+        }
+        _ => {}
+    }
+    record_invocation(&served.log, served.record(outcome));
+    asked.answer(agent, result);
+    *slot = next;
+    slot.is_some()
+}
+
 /// Row D: guest code runs **off the runtime's worker threads** — each call (and the replacement of
 /// a trapped instance, which runs the guest's start-up code) goes to `spawn_blocking`, the instance
 /// moving there and back. One call at a time per install, as before (a store is single-threaded);
 /// the serve task itself only awaits. A call is bounded by the host's deadline, so a blocking
 /// thread is held for at most that long — including after an uninstall aborts this task mid-call.
-async fn serve_loop(agent: Arc<GossipAgent>, instance: Instance, mut rx: mycelium::RpcRequestRx, served: Served) {
+///
+/// **Two ways in, and only one of them is a door.** A request off the mesh arrives through `rpc_rx`, which verifies
+/// its caller and — at an enforcing provider — decides it (`cap.invoke/…` is protected work there, 2026-11-14)
+/// before this loop sees it. A `tool/{name}` install is also the MCP tool `{name}`: that call is decided by the MCP
+/// tool loop, as the client that made it, and its handler hands the admitted arguments to this loop over a channel
+/// **this process alone holds** (`bridged`). Until 2026-11-14 the handler made an RPC to this node instead, which
+/// a provider that decides this family would have decided a second time, as the node. The channel is not a
+/// request and carries no sender: nothing that arrives on the mesh — a frame naming this node as its sender
+/// included — can reach it, so there is no "from this node" exemption for a member to forge.
+async fn serve_loop(agent: Arc<GossipAgent>, instance: Instance, mut rx: mycelium::RpcRequestRx, served: Served, #[allow(unused_mut, unused_variables)] mut bridged: Bridged) {
     let served = Arc::new(served);
     let mut slot = Some(instance);
+    #[cfg(not(feature = "gateway"))]
     while let Some(req) = rx.recv().await {
-        let Some(instance) = slot.take() else { return };
         let payload = req.payload().to_vec();
-        let (a, s) = (Arc::clone(&agent), Arc::clone(&served));
-        let (next, result, outcome) = match tokio::task::spawn_blocking(move || s.call(&a, instance, payload)).await {
-            Ok(done) => done,
-            Err(e) => {
-                // A panic inside the host (not a guest trap, which is an `Err`): the instance went
-                // with it, so stop serving and let the probe withdraw the install. A cancellation
-                // is the runtime shutting down (review finding 7) — not a failure.
-                if e.is_cancelled() {
-                    tracing::debug!(artifact = %served.artifact, provides = %served.provides,
-                        "the guest call was cancelled (runtime shutdown) — the serve task stops");
-                } else {
-                    tracing::error!(artifact = %served.artifact, provides = %served.provides, error = %e,
-                        "the guest call's thread failed — the serve task stops; the probe will withdraw the install");
+        if !serve_one(&agent, &served, &mut slot, payload, Asked::Mesh(req)).await {
+            return;
+        }
+    }
+    #[cfg(feature = "gateway")]
+    loop {
+        // `recv` is not cancel-safe — it may hold a request whose provider check is still running — so one call of
+        // it is kept across the bridged calls that arrive meanwhile, and replaced only once it has yielded.
+        let recv = rx.recv();
+        tokio::pin!(recv);
+        loop {
+            let (payload, asked) = tokio::select! {
+                req = &mut recv => match req {
+                    Some(req) => (req.payload().to_vec(), Asked::Mesh(req)),
+                    None => return,
+                },
+                call = next_bridged(&mut bridged) => {
+                    // Nobody waits for it any more: the tool's handler gave up, or was dropped when its call's
+                    // authority lapsed or the call was cancelled — and the MCP loop has released that call's
+                    // admission. A call that has not begun does not begin (#788's review, F1).
+                    if call.reply.is_closed() {
+                        continue;
+                    }
+                    (call.payload, Asked::Bridge(call.reply))
                 }
-                let outcome = InvocationOutcome::HostError(format!("guest call thread: {e}"));
-                agent.service().rpc_respond(&req, format!("host-error: guest call thread: {e}").into_bytes());
-                record_invocation(&served.log, served.record(outcome));
+            };
+            let from_mesh = matches!(asked, Asked::Mesh(_));
+            if !serve_one(&agent, &served, &mut slot, payload, asked).await {
                 return;
             }
-        };
-        metrics::counter!("mycelium_artifact_invocations_total", "outcome" => outcome_label(&outcome)).increment(1);
-        match &outcome {
-            InvocationOutcome::FuelExhausted { budget } => {
-                tracing::warn!(artifact = %served.artifact, provides = %served.provides, budget, "hosted component stopped at its fuel budget");
+            if from_mesh {
+                break;
             }
-            InvocationOutcome::DeadlineExceeded { deadline_ms } => {
-                tracing::warn!(artifact = %served.artifact, provides = %served.provides, deadline_ms, "hosted component stopped at its call deadline");
-            }
-            _ => {}
-        }
-        record_invocation(&served.log, served.record(outcome));
-        agent.service().rpc_respond(&req, result);
-        match next {
-            Some(i) => slot = Some(i),
-            None => return,
         }
     }
 }
@@ -527,8 +645,6 @@ impl ArtifactRuntime for WasmComponentRuntime {
         // Register the inbound serve handler *before* returning, so the advertisement the
         // provisioner makes on success always finds a live RPC receiver.
         let invoke_kind = cap_invoke_kind(&entry.provides.namespace, &entry.provides.name);
-        #[cfg(feature = "gateway")]
-        let bridge_kind: Arc<str> = Arc::from(invoke_kind.as_str());
         let rx = ctx.agent.service().rpc_rx(invoke_kind);
         let provides = format!("{}/{}", entry.provides.namespace, entry.provides.name);
         let gone = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -541,11 +657,18 @@ impl ArtifactRuntime for WasmComponentRuntime {
             again: Reinstantiate { host: Arc::clone(&self.host), component, budget },
             gone: Arc::clone(&gone),
         };
-        let serve = tokio::spawn(serve_loop(Arc::clone(&ctx.agent), instance, rx, served));
         #[cfg(feature = "gateway")]
-        let mcp_tool = if bridge_tool {
-            let agent = Arc::clone(&ctx.agent);
-            let kind = bridge_kind;
+        let (bridge_tx, bridged) = if bridge_tool {
+            let (tx, rx) = tokio::sync::mpsc::channel::<BridgedCall>(BRIDGE_QUEUE);
+            (Some(tx), Some(rx))
+        } else {
+            (None, None)
+        };
+        #[cfg(not(feature = "gateway"))]
+        let bridged = ();
+        let serve = tokio::spawn(serve_loop(Arc::clone(&ctx.agent), instance, rx, served, bridged));
+        #[cfg(feature = "gateway")]
+        let mcp_tool = if let Some(bridge_tx) = bridge_tx {
             let generic = format!("{} — an installed WASM component, bridged over mcp.invoke", entry.provides.name);
             let schema = match described {
                 Some(d) => serde_json::json!({
@@ -554,15 +677,27 @@ impl ArtifactRuntime for WasmComponentRuntime {
                 }),
                 None => serde_json::json!({ "description": generic, "inputSchema": {"type": "object"} }),
             };
+            // The tool's handler runs only after the MCP tool loop has verified the caller and — at an enforcing
+            // provider — decided the call as that caller (`run_mcp_tool_task`). It hands the admitted arguments to
+            // this install's serve loop in process (see `serve_loop`): the call is decided once, as the client.
+            let tool: Arc<str> = Arc::from(entry.provides.name.as_ref());
             Some(ctx.agent.mcp().register_mcp_tool(entry.provides.name.clone(), schema, move |args: serde_json::Value| {
-                let agent = Arc::clone(&agent);
-                let kind = Arc::clone(&kind);
+                let bridge_tx = bridge_tx.clone();
+                let tool = Arc::clone(&tool);
                 async move {
-                    let out = agent
-                        .service()
-                        .rpc_call(agent.node_id().clone(), kind, args.to_string().into_bytes(), std::time::Duration::from_secs(30))
-                        .await
-                        .map_err(|e| format!("bridge: {e}"))?;
+                    let (reply, answered) = tokio::sync::oneshot::channel();
+                    let call = BridgedCall { payload: args.to_string().into_bytes(), reply };
+                    // Thirty seconds, as the RPC this replaced waited; through the timer seam, so a recorded run replays.
+                    let handed = async move {
+                        bridge_tx.send(call).await.ok()?;
+                        answered.await.ok()
+                    };
+                    let out = tokio::select! {
+                        out = handed => out.ok_or_else(|| "bridge: the component is no longer served".to_string())?,
+                        _ = mycelium::sim_seam::sleep_ms("wasm_host.bridge", bridge_timeout_ms(&tool)) => {
+                            return Err(format!("bridge: {}", mycelium::RpcError::Timeout));
+                        }
+                    };
                     if out.starts_with(b"component-error:") || out.starts_with(b"host-error:") {
                         return Err(String::from_utf8_lossy(&out).into_owned());
                     }
@@ -589,7 +724,7 @@ struct WasmInstalled {
     /// on its blocking thread does not replace its instance.
     gone:  Arc<std::sync::atomic::AtomicBool>,
     /// X2: a `tool/{name}` component is also an MCP tool `{name}` (`tools/{name}/{node}` in KV,
-    /// `tools/call` over `mcp.invoke`), forwarded to the component's serve loop. Dropped with the
+    /// `tools/call` over `mcp.invoke`), handed to the component's serve loop in process. Dropped with the
     /// install, so the tool disappears with the capability. Needs the node's gateway feature.
     #[cfg(feature = "gateway")]
     _mcp_tool: Option<mycelium::McpToolHandle>,

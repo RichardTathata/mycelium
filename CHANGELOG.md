@@ -371,6 +371,38 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **An enforcing provider decides a hosted capability's kind, `cap.invoke/{ns}/{name}`** (the maintainer's decision
+  of 2026-11-14, on #785's review; `deprecations.md` §108). A hosted WASM component is served on that kind through
+  `rpc_rx`, where the provider check returned at once because the kind was not protected: on a node with
+  `with_provider_enforcement` or `[authority]`, a member's direct `rpc_call` of it ran the component with no
+  decision, mandate assessment, cohort admission or record, while `/mcp` decided the same component. The family is
+  now protected work at the provider, decided on what the **kind** names, never the envelope's claim: a
+  `tool/{name}` component as the tool it is — `tools/call` on `tool:{name}@{provider}`, the decision the MCP tool
+  loop makes, so one rule and one mandate cover both doors — and any other namespace under the new operation
+  `cap.invoke` on `cap:{ns}/{name}@{provider}`; the arguments are the payload as JSON (`{"payload_b64"}` when it
+  is not JSON). A kind under the prefix that names no capability is refused `malformed_call`. A cohort budget
+  counts these calls, with enforcement off too. **The wasm host's MCP bridge no longer calls its own node**: the
+  tool handler hands the admitted arguments to the component's serve loop inside the process, so `/mcp` → tool →
+  component is decided once at the provider, as the client, and nothing exempts "a call from this node" — a frame
+  naming the provider as its sender is decided as `node:{provider}`. **Upgrade:** an enforcing provider whose
+  hosted capability members call directly needs a rule for it (`actor = "node:<caller>"` or `"*"` — a member is
+  `node:{sender}`, and a unit's principal does not match — `operation = "cap.invoke"`,
+  `resource = "cap:{ns}/{name}"`; for a `tool/*` component the tool's own rule, which must name the member), or
+  the call is refused `authority_not_established`; an evaluator built in code maps `cap.invoke`. Under
+  `[authority]` a bare `cap:{ns}/{name}` is qualified to the node. A receiver or tap on `cap.invoke/tool/{name}`
+  no longer sees calls that arrive through `/mcp`. A node without enforcement and without a cohort budget is
+  unchanged at this door, and so is every call through `/mcp`. `is_protected_kind` is unchanged (the exact-kind list);
+  `HOSTED_CAPABILITY_OPERATION` and `hosted_capability_of` are new. **Not built:** `bulk_serve` and a raw
+  `signal_rx` receiver run no provider check, for this family as for any; a guest call that has begun is not
+  interrupted by a cancel or a lapse (a tool call still queued when its handler has gone is not begun; a queued
+  direct call is); `wire-check`'s authority overlay does not know the `cap.invoke` shape — a false red on a
+  `cap.invoke` rule and a false green on a `skill.invoke` one, to be closed before the MINOR that ships §108.
+  **Decided is handed** (#788's review): an `mcp.invoke` that reaches the provider with no `arguments` member (a
+  member's direct call; the gateway's `/mcp` sends an explicit `null`, unchanged) is decided on `{}` and its
+  handler is now handed `{}`, where it was handed `null`, enforcement on or off; and at the direct door a
+  JSON payload that repeats an object key is refused `malformed_call` at an enforcing provider, because the
+  component is handed the bytes and the provider decides on their parse.
+
 - **An enforcing provider applies its rules to `llm.invoke`** (#781's review, F1; `deprecations.md` §105). The
   node's built-in `llm.invoke` provider — a prompt skill, a stem's `[[serve]]` model, `mycelium-reason`'s
   `llm/{model}` — verified the caller context and went to the backend; it never ran the provider check the other
@@ -393,10 +425,9 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   or locality rule does not permit at a provider. **Under `[authority]` a bare `prompt:{ns}/{name}` rule is now
   qualified to the node**, as `tool:` and `skill:` were: one that was inert starts permitting that prompt skill
   at the gateway's LLM doors and at the provider. A node without enforcement and without a cohort budget is
-  unchanged. **Not built:** three other receivers make no decision at a provider — a hosted
-  capability's `cap.invoke/…` kind (open today; decided 2026-11-14 to be protected at an enforcing provider, in
-  its own PR), `bulk_serve` and a raw `signal_rx` receiver (both open, undecided)
-  (`what-is-proven.md`); this door's checks waiting on a seat claim are not bounded as the other doors' are;
+  unchanged. **Not built:** two other receivers make no decision at a provider — `bulk_serve` and a
+  raw `signal_rx` receiver (both open, undecided; `what-is-proven.md`); the third #785's review found, a hosted
+  capability's `cap.invoke/…` kind, is decided since the entry above (§108); this door's checks waiting on a seat claim are not bounded as the other doors' are;
   `mycelium-reason`'s router still answers `exhausted` (`502`) when every provider
   refuses; the door has no row in the C7 matrix (its own suite, `src/agent/llm_door_tests.rs`, asks the matrix's
   question). ***Check:*** on an enforcing node with a prompt skill and no rule for it, `POST /gateway/llm/call`

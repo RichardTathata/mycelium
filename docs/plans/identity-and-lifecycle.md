@@ -1213,12 +1213,21 @@ test-only mint (the gateway's is PR 2).
     (`a_cohort_budget_counts_llm_invoke_with_enforcement_off_and_a_full_pool_is_429`); `[authority]` qualifies a
     bare `prompt:{ns}/{name}` to its node (`a_bare_prompt_resource_is_qualified_to_this_node`,
     `src/agent/declared_authority_tests.rs`; §105); the `compliance,llm` step is strict and the pair is linted.
-  - **Not built, from the same review — three receivers where no decision is made**, none of them this row's
+  - **From the same review — three receivers where no decision was made**, none of them this row's
     door, each a dated row on the ledger: (1) a hosted capability's `cap.invoke/{ns}/{name}`, served through
-    `rpc_rx` where `check` is inert because the kind is not protected — a member's direct call at an enforcing stem
-    runs the component undecided while `/mcp` decides it; **open today; decided by the maintainer on 2026-11-14 to
-    be protected at an enforcing provider, built as its own PR inside wave 1b**; row I5 (M2)
-    already lists the family as an action, *it runs code*, for `ot`, so the two lists disagree; (2) `bulk_serve`,
+    `rpc_rx` where `check` was inert because the kind was not protected — a member's direct call at an enforcing
+    stem ran the component undecided while `/mcp` decided it. **Closed 2026-11-14, in its own PR** (the
+    maintainer's decision the same day; `deprecations.md` §108): the family is protected at an enforcing provider
+    (`provider_enforcement::protected_here`), decided on what the kind names — `tools/call` on `tool:{name}@{node}`
+    for the `tool` namespace, `cap.invoke` on `cap:{ns}/{name}@{node}` for any other — and the wasm host's MCP
+    bridge reaches its component in process, so `/mcp` is decided once, as the client
+    (`src/agent/hosted_capability_door_tests.rs`, `mycelium-wasm-host/tests/hosted_capability_enforcement.rs`).
+    **The two lists now agree on this family, and are still two lists:** row I5 (M2) counts it an action for `ot`
+    (`exchanged_token::needs_exchanged_token`, *it runs code*) and the provider counts it protected work
+    (`protected_here`); both add the `cap.invoke/` prefix to `is_protected_kind`, which itself stays the
+    exact-kind list the gateway's routes and a component's `mesh.emit` ask. They differ only where they did
+    before this review: `ot` also counts the companion families' write kinds (`blackboard.`, `tuple.`, `wiki.`), which are not
+    protected work at a provider unless the operator lists them. (2) `bulk_serve`,
     no caller context and no check, even for a kind in `protected_rpc_kinds`; (3) a raw `signal_rx` +
     `RpcRequest::from` receiver, which has no public way to run the check. (2) and (3) are open and undecided.
   - **Not built: the door's waiting checks are unbounded.** A `Checked::Waiting` check is awaited on the call's

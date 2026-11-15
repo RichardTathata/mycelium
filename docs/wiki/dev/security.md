@@ -81,11 +81,16 @@ Four layers, all additive/opt-in (`src/agent/rbac.rs`, gateway middleware in
    and the LLM / MCP / explain receivers verify directly (**verifying the caller is not deciding the call**: the LLM
    receiver verified and ran until 2026-11-13, when #781's review found it never called
    `provider_enforcement::check` — the five receivers the node serves protected work through call both: `rpc_rx`,
-   the MCP tool loop, the bridged MCP loop, `rpc/serve` and `handle_llm_invoke`. **Not every receiver there is:** a
-   hosted capability's `cap.invoke/…` reaches `rpc_rx` and is not a protected kind, `bulk_serve` carries no caller
-   context and runs no check, and a raw `signal_rx` receiver has no public way to run it — each *not built* on
-   `what-is-proven.md` (#785's review; [log](.log/2026-11-13-llm-door-provider-check.md),
-   [review log](.log/2026-11-14-llm-door-review.md))); framing is three-way and malformed refuses,
+   the MCP tool loop, the bridged MCP loop, `rpc/serve` and `handle_llm_invoke`. **Not every receiver there is:**
+   `bulk_serve` carries no caller context and runs no check, and a raw `signal_rx` receiver has no public way to
+   run it — each *not built* on `what-is-proven.md` (#785's review; [log](.log/2026-11-13-llm-door-provider-check.md),
+   [review log](.log/2026-11-14-llm-door-review.md)). **A hosted capability's `cap.invoke/{ns}/{name}` is protected
+   work at an enforcing provider** since 2026-11-14 (`provider_enforcement::protected_here`, not a wider
+   `is_protected_kind`): decided on what the kind names — a `tool/*` component as the tool the MCP loop decides,
+   any other namespace as `cap.invoke` on `cap:{ns}/{name}@{node}`. The wasm host's MCP bridge reaches its
+   component over an in-process channel, never an RPC to its own node, **because a signal's `sender` is not
+   authenticated by the connection** (`mycelium-core/src/connection.rs` delivers it as written): "from this node"
+   is a field a member can set, so no door may exempt it ([log](.log/2026-11-14-hosted-capability-protected.md))); framing is three-way and malformed refuses,
    with a producer bound. Strength: *HardPrevention* at a `tls` provider; *SelfImposedPrevention* on an unauthenticated
    mesh (`CallerAttestation::UnauthenticatedMesh`). Runbook: `docs/operations/rbac.md` §7; log
    [`.log/2026-09-13-item7-gateway-caller-identity.md`](.log/2026-09-13-item7-gateway-caller-identity.md).

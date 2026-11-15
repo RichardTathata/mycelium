@@ -387,7 +387,7 @@ pub use agent::{
     KvHandle, KvQuorumExt, MeshHandle, QuorumError, ServiceHandle, ShardError,
     SchemaError, SchemaHandle, SchemaPublishResult,
     is_protected_kind, companion_kind_scope, companion_kind_family, companion_family_scope, BUILTIN_PROTECTED_RPC_KINDS,
-    is_substrate_kind, SUBSTRATE_KINDS, SUBSTRATE_KIND_PREFIXES, HOSTED_CAPABILITY_KIND_PREFIX,
+    is_substrate_kind, SUBSTRATE_KINDS, SUBSTRATE_KIND_PREFIXES, HOSTED_CAPABILITY_KIND_PREFIX, HOSTED_CAPABILITY_OPERATION, hosted_capability_of,
 };
 // Layer III consensus + the consistency overlay built on it (v2 M2 feature gate).
 // The AE evaluator seam (runtime authorisation at the gateway) — present where it is enforced.

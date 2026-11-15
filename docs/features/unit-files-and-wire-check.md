@@ -47,6 +47,15 @@ runs it, and the [sixth tutorial](../guide/tutorials/06-declared-versus-observed
 
 - No guarantee or rule id of its own: the check applies [`cap.match`](../reference/rule-catalogue.md#capmatch), the same
   rule the resolver uses.
+- **Not built: the overlay does not know how a hosted capability is decided** (2026-11-14;
+  [ledger](../operations/what-is-proven.md#wire-check-does-not-know-the-hosted-capability-shape)). It tries a skill
+  shape and a tool shape for every edge. An enforcing provider decides a member's direct call of a hosted
+  component outside the `tool` namespace as `cap.invoke` on `cap:{ns}/{name}`, with the calling **node** as the
+  actor ([deprecations §108](../guide/deprecations.md)). So for such an edge the check can report
+  `unauthorisable edge` for a declaration the provider admits, and can report an edge clean on a `skill.invoke`
+  rule the provider never consults — the co-op fixture's `auditor.toml` over `route-optimizer.toml` is one. For an
+  edge to a hosted capability, "found in CI rather than in production" does not hold yet; to be closed before the
+  MINOR that ships §108.
 - **Not built:** placement — `[hosts]` describes eligibility and the check never says which host installs; an observed
   binding — the answer is *would bind*; enforcement of `[[mandate]]` and `[[rule]]` at runtime from the file (an
   evaluator does that, built in code).
