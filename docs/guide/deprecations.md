@@ -4308,20 +4308,21 @@ using struct expression*), and a destructuring pattern without `..` is `E0638`. 
 *Numbered 111 because open pull requests hold §109 (#793, CR12) and §110 (I4's PR 2) at the time of writing; the
 sections are in order once they merge.*
 
-**A `ca_cert_pem` holding more than one certificate is refused at start.** `[tls] ca_cert_pem` names the fleet's
-root. Until this release the node read the **first** certificate of the file and ignored the rest without a word
+**A fleet root file holding more than one certificate is refused at start.** `[tls] ca_cert_pem` names the fleet's
+root, and so does `{auto_cert_dir}/ca-cert.pem` on a node started from a pre-issued `cert_pem` (where `mycelium tls
+issue` tells the operator to copy it). Until this release the node read the **first** certificate of the file and ignored the rest without a word
 (`pem_cert_to_der`), so a file of two roots trusted one. A CA succession widens a node to two roots, and that must
 never be written this way, so the file is now refused, naming `tls.ca_cert_pem`, the path and the count
 (`ca_cert_to_der`, `mycelium-core/src/tls.rs`).
 
-- **Who is affected:** a node whose `ca_cert_pem` file holds a second certificate. No deployment can rely on it: it
-  was ignored.
+- **Who is affected:** a node whose `ca_cert_pem` file — or, on the `cert_pem` posture with `ca_cert_pem` unset, whose
+  `{auto_cert_dir}/ca-cert.pem` — holds a second certificate. No deployment can rely on it: it was ignored.
 - **What to do before upgrading:** keep only the first certificate in the file — the one the node trusted — for
   example `openssl x509 -in ca-cert.pem -out ca-cert.one.pem` (it reads the first certificate) and point
   `ca_cert_pem` at the result ([cert rotation § Succeeding the fleet CA](../operations/cert-rotation.md)).
-- **Unaffected:** `cert_pem`, which may hold a chain (its first certificate is the node's); a node's own
-  `ca-cert.pem` in `auto_cert_dir` when `ca_cert_pem` is unset; the skillrunner, which passes `ca_cert_pem` through
-  unchanged and is refused the same way.
+- **Unaffected:** `cert_pem`, which may hold a chain (its first certificate is the node's); the `ca-cert.pem` of a
+  node that holds its CA key on-node (no `cert_pem`, no `ca_cert_pem`), which is that node's own CA. The skillrunner
+  passes `ca_cert_pem` through unchanged and is refused the same way.
 - Test: `a_multi_certificate_ca_cert_pem_is_refused_by_name_and_a_cert_pem_chain_is_not`
   (`mycelium-core/src/tls.rs`).
 
@@ -4347,7 +4348,11 @@ an existing fleet**.
   `a_default_subject_ca_keeps_its_name_and_an_unreproducible_subject_is_refused` (`mycelium-core/src/tls.rs`).
 
 **API (mycelium-core, `tls`):** `NodeTls` gains `roots_generation`, `roots_der`, `verify_member_cert_tagged` and
-`reroot_material`; `fleet_server_verifier` now returns one verifier for the node's life that delegates to the check
+`reroot_material` and `rotation_after`; **`activate` now returns `Result<(), GossipError>`** (it returned `()`): it
+refuses same-CA rotation material built over roots the node no longer trusts — the free `generate_rotation_after`'s,
+built over the configuration's root, once the roots have changed — and an existing call site needs a `?` or an
+`unwrap` (`#[must_use]` warns); `rotate_identity` rotates over the current roots through `rotation_after`;
+`fleet_server_verifier` now returns one verifier for the node's life that delegates to the check
 over the current roots (it returned the check itself, which never changed); `fleet_ca_subject` is new, and
 `issue_node_cert_for_key` is new and `#[doc(hidden)]` (the re-issue primitive I2's later PR builds `tls succeed` on).
 Nothing is removed or renamed.

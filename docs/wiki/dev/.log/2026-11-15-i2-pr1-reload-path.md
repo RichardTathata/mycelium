@@ -14,3 +14,8 @@ reload path; PR 2 the succession protocol (record, phases, `succession/`, R1, R4
   `sys/client-cert/` rows: re-judged on a change of roots). Outside the wiki: the plan's I2 note and §8 row,
   `deprecations.md` §111, `CHANGELOG.md`, `operations/cert-rotation.md`, `operations/what-is-proven.md` (two rows),
   `features/node-identity.md`.
+
+- #796's review: the operator's root on the `cert_pem` posture refused too; `activate` serialized (lock-order row 81),
+  returning `Result`, refusing rotation material over stale roots; the reader's load order planted and tested; the
+  maintainer's PR 2/3 design (a)–(e) and the must-address items 6–7 recorded in the plan's §8 row.
+  Also touched: `dev/concurrency/lock-order.md`.

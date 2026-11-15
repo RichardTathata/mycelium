@@ -228,16 +228,17 @@ Replacing the fleet CA live, by a pre-committed successor, is row I2 of
 is no `tls commit`, no `tls succeed` and no successor-signed record yet, so a CA compromise is still recovered by
 re-issue under a new CA and a restart of every node. What this release changes, and an operator should know:
 
-- **`ca_cert_pem` holds exactly one certificate.** A node whose `[tls] ca_cert_pem` names a file of two or more
-  certificates **refuses to start**, naming `tls.ca_cert_pem`, the path and the count. Before, only the first was read
+- **The fleet root file holds exactly one certificate.** A node whose `[tls] ca_cert_pem` names a file of two or more
+  certificates — or, started from `cert_pem` with `ca_cert_pem` unset, whose `auto_cert_dir/ca-cert.pem` holds two —
+  **refuses to start**, naming `tls.ca_cert_pem`, the path and the count. Before, only the first was read
   and the rest were ignored without a word, so removing the others changes nothing about whom the node trusts:
   ```bash
   # keep only the fleet CA's certificate (the first one, which is the one a node before this release used)
   openssl x509 -in /var/lib/mycelium/tls/ca-cert.pem -out /var/lib/mycelium/tls/ca-cert.pem.one && \
     mv /var/lib/mycelium/tls/ca-cert.pem.one /var/lib/mycelium/tls/ca-cert.pem
   ```
-  A `cert_pem` holding a chain is unaffected, and so is a node's own `ca-cert.pem` in `auto_cert_dir` when
-  `ca_cert_pem` is unset ([`deprecations.md` §111](../guide/deprecations.md)).
+  A `cert_pem` holding a chain is unaffected, and so is the `ca-cert.pem` of a node that holds its CA key on-node
+  (no `cert_pem`) ([`deprecations.md` §111](../guide/deprecations.md)).
 - **`mycelium tls ca` names the fleet and the generation.** A CA it mints has the subject
   `CN=Mycelium fleet <16 hex> CA generation 0`, the hex a fleet id drawn at the mint. Two fleets' CAs therefore never
   share a name, and a certificate presented to the wrong fleet is refused as `UnknownIssuer` instead of

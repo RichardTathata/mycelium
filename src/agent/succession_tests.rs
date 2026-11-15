@@ -96,7 +96,7 @@ async fn an_old_roots_verdict_cached_across_a_change_of_roots_is_re_judged() {
     let base = fresh_dir("cache");
     let ((ca1, der1), (ca2, der2)) = two_cas(&base);
     let (ia, a) = node_tls(&base, "a", &ca1, &ca1.join("ca-cert.pem"));
-    a.activate(a.reroot_material(a.node_cert_der(), vec![der1.clone(), der2.clone()]).unwrap());
+    a.activate(a.reroot_material(a.node_cert_der(), vec![der1.clone(), der2.clone()]).unwrap()).unwrap();
     let a2 = crate::tls::issue_node_cert_for_key(&ca2, &ia, a.verifying_key_bytes(), 0).unwrap();
     let (_, x) = node_tls(&base, "x", &ca1, &ca1.join("ca-cert.pem"));
     let old_node_cert = x.node_cert_der();
@@ -104,14 +104,14 @@ async fn an_old_roots_verdict_cached_across_a_change_of_roots_is_re_judged() {
     let old_client_cert = der(&client);
 
     let ledger = revocation::IdentityLedger::default();
-    let narrow = |t: &crate::tls::NodeTls| t.activate(t.reroot_material(a2.clone(), vec![der2.clone()]).unwrap());
+    let narrow = |t: &crate::tls::NodeTls| t.activate(t.reroot_material(a2.clone(), vec![der2.clone()]).unwrap()).unwrap();
     assert!(revocation::cert_verdict_for_test(&ledger, &a, &old_node_cert, || {
         narrow(&a);
         revocation::clear_cert_cache_for_test(&ledger);
     }), "judged while both roots were trusted");
     assert!(!revocation::cert_verdict_for_test(&ledger, &a, &old_node_cert, || {}), "the fold re-judges it under the successor alone");
 
-    a.activate(a.reroot_material(a2.clone(), vec![der1.clone(), der2.clone()]).unwrap());
+    a.activate(a.reroot_material(a2.clone(), vec![der1.clone(), der2.clone()]).unwrap()).unwrap();
     let clients = client_cert::ClientCertLedger::default();
     assert!(client_cert::client_verdict_for_test(&clients, &a, &old_client_cert, || {
         narrow(&a);
@@ -136,7 +136,7 @@ fn judging_concurrently_with_activate_leaves_no_old_roots_verdict() {
     let ledger = Arc::new(revocation::IdentityLedger::default());
     let clients = Arc::new(client_cert::ClientCertLedger::default());
     let wide = a.reroot_material(a2.clone(), vec![der1.clone(), der2.clone()]).unwrap();
-    a.activate(wide);
+    a.activate(wide).unwrap();
     let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let judge = {
         let (a, ledger, clients, stop, old, old_client) = (Arc::clone(&a), Arc::clone(&ledger), Arc::clone(&clients), Arc::clone(&stop), old.clone(), old_client.clone());
@@ -149,9 +149,9 @@ fn judging_concurrently_with_activate_leaves_no_old_roots_verdict() {
     };
     for i in 0..200 {
         let roots = if i % 2 == 0 { vec![der2.clone()] } else { vec![der1.clone(), der2.clone()] };
-        a.activate(a.reroot_material(a2.clone(), roots).unwrap());
+        a.activate(a.reroot_material(a2.clone(), roots).unwrap()).unwrap();
     }
-    a.activate(a.reroot_material(a2.clone(), vec![der2.clone()]).unwrap());
+    a.activate(a.reroot_material(a2.clone(), vec![der2.clone()]).unwrap()).unwrap();
     stop.store(true, std::sync::atomic::Ordering::Relaxed);
     judge.join().unwrap();
     assert!(!revocation::cert_verdict_for_test(&ledger, &a, &old, || {}), "no old-roots verdict in cert_facts");
@@ -173,10 +173,10 @@ fn the_bulk_fetch_client_built_at_start_follows_a_change_of_roots() {
     let (ib, b) = node_tls(&base, "b", &ca1, &ca1.join("ca-cert.pem"));
     let client = Arc::new(bulk::bulk_tls_client_config(Some(a.fleet_server_verifier()), None).unwrap());
     let b2 = crate::tls::issue_node_cert_for_key(&ca2, &ib, b.verifying_key_bytes(), 0).unwrap();
-    b.activate(b.reroot_material(b2, vec![der1.clone(), der2.clone()]).unwrap());
+    b.activate(b.reroot_material(b2, vec![der1.clone(), der2.clone()]).unwrap()).unwrap();
     let before = handshake(Arc::clone(&client), b.gateway_server_config());
     assert!(before.is_err(), "A trusts CA1 alone: B's successor certificate is refused: {before:?}");
-    a.activate(a.reroot_material(a.node_cert_der(), vec![der1, der2]).unwrap());
+    a.activate(a.reroot_material(a.node_cert_der(), vec![der1, der2]).unwrap()).unwrap();
     assert_eq!(handshake(client, b.gateway_server_config()), Ok(()), "the same client, after A widens");
     let _ = std::fs::remove_dir_all(&base);
 }
@@ -209,7 +209,7 @@ async fn live_cert_pem_nodes_widen_cut_over_and_narrow_without_a_restart() {
 
     // Widen: both trust CA1 and CA2, keeping their CA1 certificates.
     for t in [&ta, &tb] {
-        t.activate(t.reroot_material(t.node_cert_der(), vec![der1.clone(), der2.clone()]).unwrap());
+        t.activate(t.reroot_material(t.node_cert_der(), vec![der1.clone(), der2.clone()]).unwrap()).unwrap();
     }
     assert_eq!(handshake(tb.client_config(), ta.server_config()), Ok(()), "widened: B → A");
     assert_eq!(handshake(ta.client_config(), tb.server_config()), Ok(()), "widened: A → B");
@@ -219,16 +219,16 @@ async fn live_cert_pem_nodes_widen_cut_over_and_narrow_without_a_restart() {
     // Cut over: each presents its current key re-issued under CA2.
     let a2 = crate::tls::issue_node_cert_for_key(&ca2, &ia, ta.verifying_key_bytes(), 0).unwrap();
     let b2 = crate::tls::issue_node_cert_for_key(&ca2, &ib, tb.verifying_key_bytes(), 0).unwrap();
-    tb.activate(tb.reroot_material(b2.clone(), vec![der1.clone(), der2.clone()]).unwrap());
-    ta.activate(ta.reroot_material(a2.clone(), vec![der1.clone(), der2.clone()]).unwrap());
+    tb.activate(tb.reroot_material(b2.clone(), vec![der1.clone(), der2.clone()]).unwrap()).unwrap();
+    ta.activate(ta.reroot_material(a2.clone(), vec![der1.clone(), der2.clone()]).unwrap()).unwrap();
     assert_eq!(handshake(tb.client_config(), ta.server_config()), Ok(()), "cut over: B → A");
     assert_eq!(handshake(ta.client_config(), tb.server_config()), Ok(()), "cut over: A → B");
     write(&b, "i2/cut-over");
     until("a write crosses once cut over", 15, || a.kv().get("i2/cut-over").is_some()).await;
 
     // Narrow: CA2 alone.
-    tb.activate(tb.reroot_material(b2, vec![der2.clone()]).unwrap());
-    ta.activate(ta.reroot_material(a2, vec![der2.clone()]).unwrap());
+    tb.activate(tb.reroot_material(b2, vec![der2.clone()]).unwrap()).unwrap();
+    ta.activate(ta.reroot_material(a2, vec![der2.clone()]).unwrap()).unwrap();
     assert_eq!(handshake(tb.client_config(), ta.server_config()), Ok(()), "narrowed: B → A");
     assert_eq!(handshake(ta.client_config(), tb.server_config()), Ok(()), "narrowed: A → B");
     write(&b, "i2/narrowed");
@@ -246,7 +246,7 @@ async fn live_cert_pem_nodes_widen_cut_over_and_narrow_without_a_restart() {
     let f = Arc::new(GossipAgent::new(if_, cf));
     f.start().await.unwrap();
     let tf = Arc::clone(f.task_ctx.tls.get().unwrap());
-    tf.activate(tf.reroot_material(tf.node_cert_der(), vec![der1, der2]).unwrap());
+    tf.activate(tf.reroot_material(tf.node_cert_der(), vec![der1, der2]).unwrap()).unwrap();
     let f_to_a = handshake(tf.client_config(), ta.server_config());
     assert!(f_to_a.as_ref().is_err_and(|e| e.starts_with("server refused")), "A's accept side: {f_to_a:?}");
     let a_to_f = handshake(ta.client_config(), tf.server_config());

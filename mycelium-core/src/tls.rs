@@ -77,6 +77,11 @@ pub struct NodeTls {
     removed: std::sync::Arc<crate::removal::RemovedSet>,
     #[cfg(feature = "tls")]
     standing: std::sync::Arc<crate::removal::KeyStanding>,
+    /// Held for the whole of [`activate`](NodeTls::activate) and while [`rotation_after`](NodeTls::rotation_after)
+    /// reads the roots it builds over: one writer of the identity and the roots at a time (#796's review,
+    /// finding 2). Never held across an `.await` or another lock (lock-order table, `NodeTls::activate_lock`).
+    #[cfg(feature = "tls")]
+    activate_lock: std::sync::Mutex<()>,
 }
 
 #[cfg(feature = "tls")]
@@ -151,7 +156,28 @@ impl NodeTls {
     /// [`verify_member_cert`](NodeTls::verify_member_cert) and the fleet's server check, and then — only
     /// then, with a `Release` store — bumps [`roots_generation`](NodeTls::roots_generation). A same-CA
     /// rotation carries no roots and leaves both checks and the generation as they were.
-    pub fn activate(&self, m: RotationMaterial) {
+    ///
+    /// **One writer at a time** (#796's review, finding 2): `activate` holds `activate_lock` for its whole
+    /// body, so two activations never interleave their stores. Material that carries no roots was built
+    /// over a root set — the one [`rotation_after`](NodeTls::rotation_after) read, or the configuration's
+    /// root for the free [`generate_rotation_after`] — and is **refused** when the roots have changed
+    /// since: its mesh configs would trust the old set while the chain check trusted the new one, so a
+    /// peer `verify_member_cert` accepts would be refused at the handshake. Rebuild it and activate again.
+    pub fn activate(&self, m: RotationMaterial) -> Result<(), crate::error::GossipError> {
+        let _one_writer = self.activate_lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if m.roots.is_none() {
+            let now = self.roots_generation();
+            let built = m.built_over.unwrap_or(0);
+            if built != now || (m.built_over.is_none() && now != 0) {
+                return Err(crate::error::GossipError::InvalidField {
+                    field: "tls",
+                    reason: format!(
+                        "TLS: rotation material built over roots generation {built} cannot be activated at generation \
+                         {now}: the node's roots changed after it was built — build it again (NodeTls::rotation_after)"
+                    ),
+                });
+            }
+        }
         self.signing_key.store(m.signing_key);
         self.server_config.store(m.server_config);
         self.client_config.store(m.client_config);
@@ -167,6 +193,21 @@ impl NodeTls {
             }
             self.roots_generation.fetch_add(1, std::sync::atomic::Ordering::Release);
         }
+        Ok(())
+    }
+
+    /// **A same-CA rotation over the roots this node trusts now** (#796's review, finding 2): a fresh key and
+    /// its certificate, issued with the CA key in `cfg` exactly as [`generate_rotation_after`] issues it, but
+    /// with the mesh configs built over this node's **current** roots — after a change of roots those are
+    /// not the configuration file's. The material records the roots generation it was built over, and
+    /// [`activate`](NodeTls::activate) refuses it if the roots change before it is activated. The agent's
+    /// `rotate_identity` rotates through this.
+    pub fn rotation_after(&self, cfg: &crate::config::TlsConfig, node_id: &crate::node_id::NodeId, issued_floor_ms: u64) -> Result<RotationMaterial, crate::error::GossipError> {
+        let (generation, roots) = {
+            let _one_writer = self.activate_lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            (self.roots_generation(), self.roots_der())
+        };
+        imp::rotation_over(cfg, node_id, std::sync::Arc::clone(&self.removed), std::sync::Arc::clone(&self.standing), issued_floor_ms, Some((generation, roots)))
     }
 
     /// This node's current certificate, DER (post-360 plan row Q: the node's certificate record).
@@ -191,6 +232,10 @@ impl NodeTls {
     /// after the clear.
     pub fn verify_member_cert_tagged(&self, der: &[u8]) -> (u64, bool) {
         let generation = self.roots_generation();
+        #[cfg(test)]
+        if let Some(plant) = READER_PLANT.with(|p| p.borrow_mut().take()) {
+            plant(self);
+        }
         let verifier = self.cert_verifier.load_full();
         let cert = rustls::pki_types::CertificateDer::from(der);
         let now = rustls::pki_types::UnixTime::since_unix_epoch(std::time::Duration::from_millis(
@@ -229,6 +274,13 @@ thread_local! {
 #[cfg(all(test, feature = "tls"))]
 pub(crate) type ActivatePlant = Box<dyn FnOnce(&NodeTls)>;
 
+#[cfg(all(test, feature = "tls"))]
+thread_local! {
+    /// A plant for the reader-order test (#796's review, finding 3): run between `verify_member_cert_tagged`'s
+    /// load of the roots generation and its load of the chain check, on this thread's next call.
+    pub(crate) static READER_PLANT: std::cell::RefCell<Option<ActivatePlant>> = const { std::cell::RefCell::new(None) };
+}
+
 /// A freshly-generated identity key + CA-signed cert + rustls configs, not yet
 /// activated. Produced by `generate_rotation`; consumed by `NodeTls::activate`.
 #[cfg(feature = "tls")]
@@ -243,6 +295,9 @@ pub struct RotationMaterial {
     /// New roots and the chain checks over them (a change of roots, I2), or `None` for a same-CA
     /// rotation, which keeps the node's checks.
     roots: Option<RootsMaterial>,
+    /// For a same-CA rotation: the roots generation whose roots its mesh configs were built over, or
+    /// `None` when they were built over the configuration's root (the free `generate_rotation_after`).
+    built_over: Option<u64>,
 }
 
 /// The chain checks over a new root set, carried by [`RotationMaterial`] for a change of roots.
@@ -551,7 +606,7 @@ mod imp {
 
         let load = || -> Result<(CertificateDer<'static>, KeyPair), GossipError> {
             let pem = fs::read_to_string(&ca_cert_path).map_err(|e| err(format!("TLS: read CA cert: {e}")))?;
-            let der = ca_cert_to_der(&pem, &ca_cert_path, cfg.ca_cert_pem.is_some())?;
+            let der = ca_cert_to_der(&pem, &ca_cert_path, root_is_operators(cfg))?;
             let key_pem = fs::read_to_string(&auto_ca_key_path).map_err(|e| err(format!("TLS: read CA key: {e}")))?;
             let key = KeyPair::from_pem(&key_pem).map_err(|e| err(format!("TLS: parse CA key: {e}")))?;
             Ok((der, key))
@@ -734,6 +789,7 @@ mod imp {
             roots_generation: std::sync::atomic::AtomicU64::new(0),
             removed,
             standing,
+            activate_lock: std::sync::Mutex::new(()),
         })
     }
 
@@ -763,6 +819,19 @@ mod imp {
         standing: Arc<crate::removal::KeyStanding>,
         issued_floor_ms: u64,
     ) -> Result<super::RotationMaterial, GossipError> {
+        rotation_over(cfg, node_id, removed, standing, issued_floor_ms, None)
+    }
+
+    /// The rotation [`generate_rotation_after`] and [`NodeTls::rotation_after`] build: the mesh configs over
+    /// `over`'s roots (with the generation they were read at), or over the configuration's root when `None`.
+    pub(super) fn rotation_over(
+        cfg: &TlsConfig,
+        node_id: &NodeId,
+        removed: Arc<crate::removal::RemovedSet>,
+        standing: Arc<crate::removal::KeyStanding>,
+        issued_floor_ms: u64,
+        over: Option<(u64, Vec<Vec<u8>>)>,
+    ) -> Result<super::RotationMaterial, GossipError> {
         let signing_key = generate_key()?;
         let verifying_key = signing_key.verifying_key().to_bytes();
 
@@ -774,8 +843,12 @@ mod imp {
         let (ca_cert_der, ca_key_pair) = load_existing_ca(cfg)?;
         let node_cert_der = node_cert_under(node_id, &verifying_key, &ca_cert_der, &ca_key_pair, super::issuance_after(issued_floor_ms))?;
         let cert_bytes = node_cert_der.as_ref().to_vec();
+        let (built_over, roots) = match over {
+            Some((generation, roots)) => (Some(generation), roots.into_iter().map(CertificateDer::from).collect::<Vec<_>>()),
+            None => (None, vec![ca_cert_der]),
+        };
         let (server_config, client_config, gateway_key, _, _) =
-            build_rustls_configs(node_cert_der, &signing_key, std::slice::from_ref(&ca_cert_der), removed, standing)?;
+            build_rustls_configs(node_cert_der, &signing_key, &roots, removed, standing)?;
 
         Ok(super::RotationMaterial {
             verifying_key,
@@ -785,6 +858,7 @@ mod imp {
             gateway_key,
             node_cert_der: cert_bytes,
             roots: None,
+            built_over,
         })
     }
 
@@ -818,6 +892,7 @@ mod imp {
             gateway_key,
             node_cert_der,
             roots: Some(super::RootsMaterial { ders: roots, chain, fleet }),
+            built_over: None,
         })
     }
 
@@ -994,11 +1069,18 @@ mod imp {
         let pem = fs::read_to_string(&ca_cert_path).map_err(|e| GossipError::InvalidField {
             field: "tls", reason: format!("TLS: a pre-issued node cert needs the CA cert ({ca_cert_path:?}): {e}"),
         })?;
-        ca_cert_to_der(&pem, &ca_cert_path, cfg.ca_cert_pem.is_some())
+        ca_cert_to_der(&pem, &ca_cert_path, root_is_operators(cfg))
+    }
+
+    /// Whether the CA certificate file is the operator's root rather than a node's own CA: `ca_cert_pem` is
+    /// set, or the node starts from a pre-issued `cert_pem`, whose `{auto_cert_dir}/ca-cert.pem` the operator
+    /// copied there (`mycelium tls issue` says to; #796's review, finding 1).
+    fn root_is_operators(cfg: &TlsConfig) -> bool {
+        cfg.ca_cert_pem.is_some() || cfg.cert_pem.is_some()
     }
 
     /// The CA certificate of a PEM document read as the fleet's root. When it is the operator's
-    /// `ca_cert_pem` (`configured`), it must hold **exactly one** certificate (identity-and-lifecycle I2,
+    /// root (`configured`: `ca_cert_pem`, or `ca-cert.pem` beside a pre-issued `cert_pem`), it must hold **exactly one** certificate (identity-and-lifecycle I2,
     /// exit 14): `pem_cert_to_der` keeps only the first, so a second root there was silently dropped,
     /// and a succession's two roots must never be written that way. The on-node CA's `ca-cert.pem`
     /// (`configured` false) is read as before; `cert_pem`, a chain, is never read here.
@@ -1011,7 +1093,7 @@ mod imp {
                 return Err(GossipError::InvalidField {
                     field: "tls.ca_cert_pem",
                     reason: format!(
-                        "TLS: `ca_cert_pem` ({path:?}) holds {n} certificates; it must hold exactly one, the fleet CA's. \
+                        "TLS: the fleet's root (`ca_cert_pem`, or `ca-cert.pem` beside a pre-issued `cert_pem`: {path:?}) holds {n} certificates; it must hold exactly one, the fleet CA's. \
                          Before this release only the first was read and the rest were ignored, so remove the others \
                          (docs/guide/deprecations.md §{CA_CERT_PEM_SECTION})"
                     ),
@@ -1038,7 +1120,7 @@ mod imp {
         let pem = fs::read_to_string(&ca_cert_path).map_err(|e| GossipError::InvalidField {
             field: "tls", reason: format!("TLS: needs an existing CA cert ({ca_cert_path:?}) — never minted here: {e}"),
         })?;
-        let ca_cert_der = ca_cert_to_der(&pem, &ca_cert_path, cfg.ca_cert_pem.is_some())?;
+        let ca_cert_der = ca_cert_to_der(&pem, &ca_cert_path, root_is_operators(cfg))?;
         let key_pem = fs::read_to_string(&auto_ca_key_path).map_err(|e| GossipError::InvalidField {
             field: "tls", reason: format!("TLS: needs the CA key ({auto_ca_key_path:?}) — rotation and issuance sign with it, a node never needs it: {e}"),
         })?;
@@ -2919,6 +3001,20 @@ mod succession_tests {
         assert!(refused.contains("tls.ca_cert_pem") && refused.contains("holds 2 certificates") && refused.contains("both.pem")
             && refused.contains("deprecations.md §111"), "{refused}");
 
+        // The same file as `{auto_cert_dir}/ca-cert.pem` beside a pre-issued `cert_pem`, `ca_cert_pem` unset — the
+        // operator's root on that posture (`tls issue` says to copy it there; #796's review, finding 1). Seen failing
+        // first with the refusal keyed on `ca_cert_pem` alone: the node started trusting the first certificate.
+        let posture = base.join("posture");
+        std::fs::create_dir_all(&posture).unwrap();
+        std::fs::copy(&both, posture.join("ca-cert.pem")).unwrap();
+        let mut beside = TlsConfig::default();
+        beside.auto_cert_dir = posture.clone();
+        beside.cert_pem = Some(cert.clone());
+        beside.key_pem = Some(key.clone());
+        let refused = super::load_or_generate(&beside, &id, Arc::new(RemovedSet::default()), Default::default())
+            .err().expect("two roots beside a pre-issued cert_pem are refused").to_string();
+        assert!(refused.contains("holds 2 certificates") && refused.contains("posture"), "{refused}");
+
         let chain = base.join("chain.pem");
         std::fs::write(&chain, pem(&cert) + &pem(&ca1.join("ca-cert.pem"))).unwrap();
         let tls = super::load_or_generate(&cfg(&ca1.join("ca-cert.pem"), &chain), &id, Arc::new(RemovedSet::default()), Default::default())
@@ -2962,18 +3058,18 @@ mod succession_tests {
 
         // Widen: every node trusts both roots, keeping its CA1 certificate.
         for t in [&a, &b, &f] {
-            t.activate(t.reroot_material(t.node_cert_der(), vec![der1.clone(), der2.clone()]).unwrap());
+            t.activate(t.reroot_material(t.node_cert_der(), vec![der1.clone(), der2.clone()]).unwrap()).unwrap();
             assert_eq!(t.roots_generation(), 1);
         }
         assert!(a.verify_member_cert(&b2), "widened: A's record check accepts a successor certificate");
         // Cut over: B presents its successor certificate.
-        b.activate(b.reroot_material(b2.clone(), vec![der1.clone(), der2.clone()]).unwrap());
+        b.activate(b.reroot_material(b2.clone(), vec![der1.clone(), der2.clone()]).unwrap()).unwrap();
         assert_eq!(b.node_cert_der(), b2);
         assert_eq!(handshake(b.client_config(), a.server_config()), Ok(()), "B (CA2) → A (two roots)");
         assert_eq!(handshake(a.client_config(), b.server_config()), Ok(()), "A (CA1) → B (CA2)");
         // Narrow: A presents its successor certificate and trusts CA2 alone.
-        a.activate(a.reroot_material(a2.clone(), vec![der2.clone()]).unwrap());
-        b.activate(b.reroot_material(b2.clone(), vec![der2.clone()]).unwrap());
+        a.activate(a.reroot_material(a2.clone(), vec![der2.clone()]).unwrap()).unwrap();
+        b.activate(b.reroot_material(b2.clone(), vec![der2.clone()]).unwrap()).unwrap();
         assert_eq!(a.roots_generation(), 2, "A widened and narrowed: two changes of roots");
         assert_eq!(handshake(b.client_config(), a.server_config()), Ok(()), "B → A, both narrowed");
         assert_eq!(handshake(a.client_config(), b.server_config()), Ok(()), "A → B, both narrowed");
@@ -3008,7 +3104,7 @@ mod succession_tests {
         let id = NodeId::new("127.0.0.1", 9614).unwrap();
         let tls = super::load_or_generate(&cfg, &id, Arc::new(RemovedSet::default()), Default::default()).unwrap();
         let before = tls.roots_der();
-        tls.activate(super::generate_rotation(&cfg, &id, Arc::new(RemovedSet::default()), Default::default()).unwrap());
+        tls.activate(super::generate_rotation(&cfg, &id, Arc::new(RemovedSet::default()), Default::default()).unwrap()).unwrap();
         assert_eq!((tls.roots_generation(), tls.roots_der()), (0, before));
         let _ = std::fs::remove_dir_all(&base);
     }
@@ -3051,10 +3147,80 @@ mod succession_tests {
         let s = std::rc::Rc::clone(&seen);
         let cert = successor.clone();
         super::ACTIVATE_PLANT.with(|p| *p.borrow_mut() = Some(Box::new(move |t: &NodeTls| s.set(Some(t.verify_member_cert_tagged(&cert))))));
-        a.activate(a.reroot_material(a.node_cert_der(), vec![der1, der2]).unwrap());
+        a.activate(a.reroot_material(a.node_cert_der(), vec![der1, der2]).unwrap()).unwrap();
         let (generation, verified) = seen.get().expect("the plant ran");
         assert!(generation == 0 || verified, "a verdict tagged with the new generation ({generation}) came from the old verifier");
         assert_eq!(a.verify_member_cert_tagged(&successor), (1, true));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// **The reader's order (#796's review, finding 3): the generation is loaded before the chain check.** A
+    /// change of roots between the reader's two loads (a plant there) leaves the verdict tagged with the old
+    /// generation, so it is re-judged. Seen failing first with the two loads swapped: the reader loaded the old
+    /// check, then the new generation, and tagged an old-roots refusal as current.
+    #[test]
+    fn a_change_of_roots_between_the_readers_two_loads_tags_the_old_generation() {
+        let base = fresh_dir("reader");
+        let (ca1, der1) = ca(&base, "ca1");
+        let (ca2, der2) = ca(&base, "ca2");
+        let (_, a) = node(&base, "a", 9618, &ca1, &ca1.join("ca-cert.pem"));
+        let id = NodeId::new("127.0.0.1", 9619).unwrap();
+        let successor = super::issue_node_cert_for_key(&ca2, &id, ed25519_dalek::SigningKey::from_bytes(&[6u8; 32]).verifying_key().to_bytes(), 0).unwrap();
+        let wide = a.reroot_material(a.node_cert_der(), vec![der1, der2]).unwrap();
+        super::READER_PLANT.with(|p| *p.borrow_mut() = Some(Box::new(move |t: &NodeTls| t.activate(wide).unwrap())));
+        let (generation, verified) = a.verify_member_cert_tagged(&successor);
+        assert_eq!(a.roots_generation(), 1, "the plant widened the roots");
+        assert!(generation == 0 || verified, "tagged {generation} (current) with an old-roots refusal");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// **A same-CA rotation after a change of roots keeps one trust (#796's review, finding 2).** A node with its
+    /// CA key on-node widens to its own CA and a successor, then rotates (`rotation_after`, what `rotate_identity`
+    /// calls). A peer holding a successor certificate is accepted at the handshake **and** by `verify_member_cert`,
+    /// as before the rotation. Seen failing first with the rotation built over the configuration's root: the
+    /// handshake refused the peer while `verify_member_cert` accepted it.
+    #[test]
+    fn a_rotation_after_a_change_of_roots_builds_over_the_current_roots() {
+        let base = fresh_dir("rotate-roots");
+        let cfg = { let mut c = TlsConfig::default(); c.auto_cert_dir = base.join("own"); c };
+        let id = NodeId::new("127.0.0.1", 9620).unwrap();
+        let a = super::load_or_generate(&cfg, &id, Arc::new(RemovedSet::default()), Default::default()).unwrap();
+        let own = a.roots_der().remove(0);
+        let (ca2, der2) = ca(&base, "ca2");
+        let (_, peer) = node(&base, "peer", 9621, &ca2, &ca2.join("ca-cert.pem"));
+        let wide = vec![own.clone(), der2.clone()];
+        peer.activate(peer.reroot_material(peer.node_cert_der(), wide.clone()).unwrap()).unwrap();
+        a.activate(a.reroot_material(a.node_cert_der(), wide).unwrap()).unwrap();
+        assert_eq!(handshake(peer.client_config(), a.server_config()), Ok(()), "widened: the CA2 peer → A");
+        a.activate(a.rotation_after(&cfg, &id, 0).unwrap()).unwrap();
+        assert!(a.verify_member_cert(&peer.node_cert_der()), "the record check still accepts the CA2 peer");
+        assert_eq!(handshake(peer.client_config(), a.server_config()), Ok(()), "and so does the handshake, after rotating");
+        assert_eq!(handshake(a.client_config(), peer.server_config()), Ok(()), "both ways");
+        assert_eq!(a.roots_generation(), 1, "a same-CA rotation does not move the roots");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// **Stale rotation material is refused (#796's review, finding 2).** Material built over the configuration's
+    /// root (the free `generate_rotation_after`), or over a root set that changed before it was activated, would
+    /// split the node's trust; `activate` refuses it, naming the generations, and leaves the node as it was. Seen
+    /// failing first with the check removed: the stale material was activated.
+    #[test]
+    fn rotation_material_built_over_other_roots_is_refused() {
+        let base = fresh_dir("rotate-stale");
+        let cfg = { let mut c = TlsConfig::default(); c.auto_cert_dir = base.join("own"); c };
+        let id = NodeId::new("127.0.0.1", 9622).unwrap();
+        let a = super::load_or_generate(&cfg, &id, Arc::new(RemovedSet::default()), Default::default()).unwrap();
+        let own = a.roots_der().remove(0);
+        let (_ca2, der2) = ca(&base, "ca2");
+        let from_file = super::generate_rotation(&cfg, &id, Arc::new(RemovedSet::default()), Default::default()).unwrap();
+        let before = a.rotation_after(&cfg, &id, 0).unwrap();
+        a.activate(a.reroot_material(a.node_cert_der(), vec![own, der2]).unwrap()).unwrap();
+        let key = a.verifying_key_bytes();
+        for stale in [from_file, before] {
+            let said = a.activate(stale).expect_err("stale material is refused").to_string();
+            assert!(said.contains("cannot be activated at generation 1"), "{said}");
+        }
+        assert_eq!(a.verifying_key_bytes(), key, "nothing was activated");
         let _ = std::fs::remove_dir_all(&base);
     }
 }

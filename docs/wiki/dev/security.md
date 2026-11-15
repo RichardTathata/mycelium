@@ -597,7 +597,9 @@ generation (`Release`); a reader loads the generation (`Acquire`) before the ver
 the revocation fold's and the client-certificate fold's verdict caches treat an older generation as a miss — **never
 clear such a cache at a change of roots instead**: a judgment running across `activate` inserts its old verdict after
 the clear. `fleet_server_verifier()` hands out one delegating verifier, so a client built once (the bulk fetch's)
-follows. `ca_cert_pem` must hold exactly one certificate (it used to keep the first silently). An issuer writes the CA
+follows. `activate` is one writer at a time (`activate_lock`) and refuses same-CA rotation material built over
+roots the node no longer trusts; `rotate_identity` builds over the current roots (`rotation_after`), so the handshake and
+`verify_member_cert` never trust different sets. `ca_cert_pem` must hold exactly one certificate (it used to keep the first silently). An issuer writes the CA
 certificate's own subject as the issuer name: webpki finds the issuer **by name**, so the old fixed-parameter rebuild
 (rcgen's default subject) only worked while every CA had that name; `tls ca` now mints
 `CN=Mycelium fleet <hex> CA generation 0`. Not yet: `anchors_seen` and the client marks are not re-judged, and

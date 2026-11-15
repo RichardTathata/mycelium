@@ -383,7 +383,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   lifecycle I2, PR 1 of 3; `deprecations.md` §111; the split and what each promise has is in the plan's §8 row).
   - **A `ca_cert_pem` holding more than one certificate is refused at start**, naming `tls.ca_cert_pem`, the path and
     the count. Only the first was ever read. *Check:* `grep -c "BEGIN CERTIFICATE" "$ca_cert_pem"` prints `1` on every
-    node before upgrading. `cert_pem` chains and a node's own `ca-cert.pem` are unaffected.
+    node before upgrading, and in `auto_cert_dir/ca-cert.pem` on a `cert_pem` node without `ca_cert_pem`. `cert_pem`
+    chains and an on-node CA's `ca-cert.pem` are unaffected.
   - **`mycelium tls ca` names the fleet and the generation** (`CN=Mycelium fleet <16 hex> CA generation 0`), and every
     issuer (`tls issue`, `tls issue --client`, a node with its CA key) writes the CA certificate's own subject as the
     issuer name instead of rcgen's default. Certificates under an existing CA are unchanged; across two fleets' CAs a
@@ -391,7 +392,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - **The reload path (library):** `NodeTls::reroot_material` builds material for the node's current key over a set of
     roots with no CA key, and `activate` swaps the chain checks with it, then bumps a roots generation; the bulk
     fetch's verifier follows the swap; the revocation fold's and I1's client-certificate caches re-judge a verdict of
-    an older generation. **Nothing drives it yet**: the successor-signed record, the phases under `succession/`, the
+    an older generation. `activate` now returns `Result` and is serialized: it refuses same-CA rotation material built
+    over roots the node no longer trusts, and `rotate_identity` rotates over the current roots (`rotation_after`), so a
+    rotation after a change of roots cannot split the handshake's trust from `verify_member_cert`'s. A fleet root of two
+    certificates is refused on the `cert_pem` posture's `auto_cert_dir/ca-cert.pem` too. **Nothing drives it yet**: the successor-signed record, the phases under `succession/`, the
     kept anchors, `firstIssuedMs`, `caGeneration` and `tls succeed` are PRs 2 and 3.
 
 - **An enforcing provider decides a hosted capability's kind, `cap.invoke/{ns}/{name}`** (the maintainer's decision
