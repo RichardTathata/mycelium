@@ -199,7 +199,11 @@ mod tls {
             cfg.bind_port = gossip_port;
             cfg.http_port = Some(port);
             cfg.http_addr = "127.0.0.1".to_string();
-            cfg.tls = Some(crate::TlsConfig { auto_cert_dir: cert_dir.clone(), ..Default::default() });
+            cfg.tls = Some({
+                let mut tls = crate::TlsConfig::default();
+                tls.auto_cert_dir = cert_dir.clone();
+                tls
+            });
             cfg.gateway_tls = Some(crate::GatewayTlsConfig::default());
             cfg.handshake_timeout_ms    = handshake_ms;
             cfg.gateway_max_connections = max_conns;

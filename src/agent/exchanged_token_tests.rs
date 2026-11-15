@@ -43,16 +43,15 @@ impl Drop for Provider {
 }
 
 /// The `[oidc]` table of a verifying provider whose JWKS is at `jwks_port` — written as an adopter would, with
-/// `..Default::default()` (#759's review, M3).
+/// `OidcConfig::default()` plus assignment (#759's review, M3; `#[non_exhaustive]` since CR12).
 fn oidc_table(jwks_port: u16) -> crate::OidcConfig {
-    crate::OidcConfig {
-        issuer: ISSUER.into(),
-        audience: "mycelium-cluster".into(),
-        jwks_uri: Some(format!("http://127.0.0.1:{jwks_port}/jwks")),
-        exchange_audience: Some(AUDIENCE.into()),
-        exchange_client_id: Some(CLIENT.into()),
-        ..Default::default()
-    }
+    let mut oidc = crate::OidcConfig::default();
+    oidc.issuer = ISSUER.into();
+    oidc.audience = "mycelium-cluster".into();
+    oidc.jwks_uri = Some(format!("http://127.0.0.1:{jwks_port}/jwks"));
+    oidc.exchange_audience = Some(AUDIENCE.into());
+    oidc.exchange_client_id = Some(CLIENT.into());
+    oidc
 }
 
 /// A started node with `[tls]` and an `[oidc]` table naming `exchange_audience`, its JWKS at `jwks_port`.
@@ -66,7 +65,11 @@ async fn provider_with(jwks_port: u16, tweak: impl FnOnce(&mut crate::OidcConfig
     let _ = std::fs::remove_dir_all(&dir);
     let mut cfg = GossipConfig::default();
     cfg.bind_port = port;
-    cfg.tls = Some(crate::TlsConfig { auto_cert_dir: dir.clone(), ..Default::default() });
+    cfg.tls = Some({
+        let mut tls = crate::TlsConfig::default();
+        tls.auto_cert_dir = dir.clone();
+        tls
+    });
     let mut oidc = oidc_table(jwks_port);
     tweak(&mut oidc);
     cfg.oidc = Some(oidc);
@@ -657,11 +660,14 @@ fn two_concurrent_admissions_of_one_token_admit_it_once() {
     assert_eq!(admitted, 1);
 }
 
-/// **`OidcConfig::default()` is a minimal `[oidc]` table** (#759's review, M3): the literal `OidcConfig { issuer,
-/// audience, ..Default::default() }` reads the same as TOML naming only those two.
+/// **`OidcConfig::default()` is a minimal `[oidc]` table** (#759's review, M3): `OidcConfig::default()` with `issuer`
+/// and `audience` assigned — once the literal `OidcConfig { issuer, audience, ..Default::default() }`, refused since
+/// CR12 made the struct `#[non_exhaustive]` — reads the same as TOML naming only those two.
 #[test]
 fn an_oidc_literal_with_default_is_the_minimal_table() {
-    let literal = crate::OidcConfig { issuer: ISSUER.into(), audience: "mycelium-cluster".into(), ..Default::default() };
+    let mut literal = crate::OidcConfig::default();
+    literal.issuer = ISSUER.into();
+    literal.audience = "mycelium-cluster".into();
     let parsed: crate::OidcConfig = toml::from_str(&format!("issuer = \"{ISSUER}\"\naudience = \"mycelium-cluster\"\n")).unwrap();
     assert_eq!(literal, parsed);
 }
@@ -676,7 +682,11 @@ async fn preflight_builds_the_verifier_and_fetches_nothing() {
     let dir = std::env::temp_dir().join(format!("i5-ot-{node_port}"));
     let mut cfg = GossipConfig::default();
     cfg.bind_port = node_port;
-    cfg.tls = Some(crate::TlsConfig { auto_cert_dir: dir.clone(), ..Default::default() });
+    cfg.tls = Some({
+        let mut tls = crate::TlsConfig::default();
+        tls.auto_cert_dir = dir.clone();
+        tls
+    });
     cfg.oidc = Some(oidc_table(port));
     let a = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", node_port).unwrap(), cfg));
     let _cleanup = Provider(Arc::clone(&a), dir);

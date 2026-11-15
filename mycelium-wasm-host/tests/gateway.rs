@@ -24,15 +24,13 @@ async fn a_signed_entry_reaches_a_second_node_and_the_refusals_are_by_name() {
     let librarian_key = SigningKey::from_bytes(&[53u8; 32]);
     let trusted = trusted_key.verifying_key().to_bytes();
 
-    let cfg_a = GossipConfig {
-        bind_port: ga,
-        http_port: Some(ha),
-        gateway_scoped_tokens: vec![
-            GatewayToken { token: "artpub".into(), scopes: vec!["artifact:publish".into()] },
-            GatewayToken { token: "kvw".into(), scopes: vec!["kv:write".into()] },
-        ],
-        ..Default::default()
-    };
+    let mut cfg_a = GossipConfig::default();
+    cfg_a.bind_port = ga;
+    cfg_a.http_port = Some(ha);
+    cfg_a.gateway_scoped_tokens = vec![
+        GatewayToken { token: "artpub".into(), scopes: vec!["artifact:publish".into()] },
+        GatewayToken { token: "kvw".into(), scopes: vec!["kv:write".into()] },
+    ];
     let a = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", ga).unwrap(), cfg_a));
     a.with_http_routes(artifact_router(
         Arc::clone(&a),
@@ -40,11 +38,9 @@ async fn a_signed_entry_reaches_a_second_node_and_the_refusals_are_by_name() {
         Some(librarian_key.verifying_key().to_bytes()),
     ));
     a.start().await.unwrap();
-    let cfg_b = GossipConfig {
-        bind_port: gb,
-        bootstrap_peers: vec![NodeId::new("127.0.0.1", ga).unwrap()],
-        ..Default::default()
-    };
+    let mut cfg_b = GossipConfig::default();
+    cfg_b.bind_port = gb;
+    cfg_b.bootstrap_peers = vec![NodeId::new("127.0.0.1", ga).unwrap()];
     let b = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", gb).unwrap(), cfg_b));
     b.start().await.unwrap();
 
@@ -123,12 +119,10 @@ async fn a_signed_entry_reaches_a_second_node_and_the_refusals_are_by_name() {
 async fn a_node_with_no_trusted_publishers_admits_nothing() {
     let (g, h) = (alloc_port(), alloc_port());
     let key = SigningKey::from_bytes(&[54u8; 32]);
-    let cfg = GossipConfig {
-        bind_port: g,
-        http_port: Some(h),
-        gateway_scoped_tokens: vec![GatewayToken { token: "artpub".into(), scopes: vec!["artifact:publish".into()] }],
-        ..Default::default()
-    };
+    let mut cfg = GossipConfig::default();
+    cfg.bind_port = g;
+    cfg.http_port = Some(h);
+    cfg.gateway_scoped_tokens = vec![GatewayToken { token: "artpub".into(), scopes: vec!["artifact:publish".into()] }];
     let a = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", g).unwrap(), cfg));
     a.with_http_routes(artifact_router(Arc::clone(&a), vec![], None));
     a.start().await.unwrap();

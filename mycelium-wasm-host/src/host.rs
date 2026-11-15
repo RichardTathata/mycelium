@@ -607,7 +607,8 @@ mod tests {
         for _ in 0..16 {
             let port = alloc_port();
             let id = NodeId::new("127.0.0.1", port).unwrap();
-            let cfg = mycelium::GossipConfig { bind_port: port, ..Default::default() };
+            let mut cfg = mycelium::GossipConfig::default();
+            cfg.bind_port = port;
             let agent = std::sync::Arc::new(mycelium::GossipAgent::new(id, cfg));
             if agent.start().await.is_ok() {
                 return agent;

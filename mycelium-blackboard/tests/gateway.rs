@@ -19,7 +19,10 @@ async fn gateway_claim_lifecycle_and_race() {
     let base = mycelium::test_util::alloc_port();
     let http_port = mycelium::test_util::alloc_port();
 
-    let cfg = GossipConfig { bind_port: base, http_port: Some(http_port), health_check_max_jitter_ms: 50, ..Default::default() };
+    let mut cfg = GossipConfig::default();
+    cfg.bind_port = base;
+    cfg.http_port = Some(http_port);
+    cfg.health_check_max_jitter_ms = 50;
     let agent = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", base).unwrap(), cfg));
 
     let bb = Blackboard::new(

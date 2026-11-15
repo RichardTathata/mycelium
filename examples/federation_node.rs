@@ -367,17 +367,21 @@ async fn run_node(role: &str) {
         Some(dir) => {
             let dir = std::path::PathBuf::from(dir);
             let sanitized = id.as_str().replace([':', '.'], "_");
-            TlsConfig {
-                cert_pem: Some(dir.join(format!("{sanitized}.cert.pem"))),
-                key_pem: Some(dir.join(format!("{sanitized}.key.pem"))),
-                auto_cert_dir: dir,
-                ca_cert_pem: None,
-            }
+            let mut tls = TlsConfig::default();
+            tls.cert_pem = Some(dir.join(format!("{sanitized}.cert.pem")));
+            tls.key_pem = Some(dir.join(format!("{sanitized}.key.pem")));
+            tls.auto_cert_dir = dir;
+            tls.ca_cert_pem = None;
+            tls
         }
         // The development posture: the CA generated in (or read from) a directory this node holds,
         // private key included. The admission plant runs this way, and so does the profile plant —
         // where `start()` must refuse it by name.
-        None => TlsConfig { auto_cert_dir: must("FED_CA_DIR").into(), ..TlsConfig::default() },
+        None => {
+            let mut tls = TlsConfig::default();
+            tls.auto_cert_dir = must("FED_CA_DIR").into();
+            tls
+        },
     });
     if secure {
         // `secure-multi-domain` (adopter-surface Y7): the single-domain twenty and the federation
@@ -683,7 +687,11 @@ async fn run_pki() {
         let mut cfg = GossipConfig::auto();
         cfg.bind_address = "127.0.0.1".into();
         cfg.bind_port = 57999;
-        cfg.tls = Some(TlsConfig { auto_cert_dir: ca_dir.clone(), ..TlsConfig::default() });
+        cfg.tls = Some({
+            let mut tls = TlsConfig::default();
+            tls.auto_cert_dir = ca_dir.clone();
+            tls
+        });
         let issuer = GossipAgent::new(NodeId::new("127.0.0.1", 57999).expect("issuer id"), cfg);
         issuer.start().await.expect("the issuer mints the domain CA");
         issuer.shutdown().await;

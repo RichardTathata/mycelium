@@ -946,7 +946,11 @@ pub(super) mod tests {
         cfg.bind_port = port;
         let dir = std::env::temp_dir().join(format!("mcp-bridge-replay-{port}"));
         let _ = std::fs::remove_dir_all(&dir);
-        cfg.tls = Some(crate::TlsConfig { auto_cert_dir: dir.clone(), ..Default::default() });
+        cfg.tls = Some({
+            let mut tls = crate::TlsConfig::default();
+            tls.auto_cert_dir = dir.clone();
+            tls
+        });
         let agent = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg));
         agent.start().await.unwrap();
         let _bridge = agent.mcp().connect_mcp_server(format!("http://127.0.0.1:{mock_port}/")).await.unwrap();

@@ -38,12 +38,10 @@ fn posts(limit: u32, window_ms: u64, scope: HistoryScope) -> ReferenceEvaluator 
 
 /// A node at `p` dialling `peers`, with a strict evidence journal and `policy`.
 async fn node_with(p: u16, peers: &[u16], policy: ReferenceEvaluator, tune: impl FnOnce(&mut GossipConfig)) -> Arc<GossipAgent> {
-    let mut cfg = GossipConfig {
-        bind_address: "127.0.0.1".parse().unwrap(),
-        bind_port: p,
-        bootstrap_peers: peers.iter().map(|q| NodeId::new("127.0.0.1", *q).unwrap()).collect(),
-        ..GossipConfig::default()
-    };
+    let mut cfg = GossipConfig::default();
+    cfg.bind_address = "127.0.0.1".parse().unwrap();
+    cfg.bind_port = p;
+    cfg.bootstrap_peers = peers.iter().map(|q| NodeId::new("127.0.0.1", *q).unwrap()).collect();
     tune(&mut cfg);
     let agent = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", p).unwrap(), cfg));
     let dir = std::env::temp_dir().join(format!("k2-fleet-{p}"));
@@ -366,13 +364,11 @@ async fn the_mcp_door_counts_into_the_fleet_counter() {
             .allow(Rule::new(crate::PRINCIPAL_ANONYMOUS, "tools/call", "*").at_most(3, TEN_MIN).scoped(scope, "c-posts"))
     };
     let start = |p: u16, peers: Vec<u16>, http_port: Option<u16>| async move {
-        let cfg = GossipConfig {
-            bind_address: "127.0.0.1".parse().unwrap(),
-            bind_port: p,
-            http_port,
-            bootstrap_peers: peers.iter().map(|q| NodeId::new("127.0.0.1", *q).unwrap()).collect(),
-            ..GossipConfig::default()
-        };
+        let mut cfg = GossipConfig::default();
+        cfg.bind_address = "127.0.0.1".parse().unwrap();
+        cfg.bind_port = p;
+        cfg.http_port = http_port;
+        cfg.bootstrap_peers = peers.iter().map(|q| NodeId::new("127.0.0.1", *q).unwrap()).collect();
         let agent = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", p).unwrap(), cfg));
         let dir = std::env::temp_dir().join(format!("k2-door-{p}"));
         let _ = std::fs::remove_dir_all(&dir);
@@ -820,11 +816,9 @@ async fn a_holder_shut_down_within_its_window_leaves_the_seat_to_its_lease() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn a_permit_not_recorded_schedules_no_release() {
     let (p1, p2) = (port(), port());
-    let cfg = GossipConfig {
-        bind_address: "127.0.0.1".parse().unwrap(),
-        bind_port: p1,
-        ..GossipConfig::default()
-    };
+    let mut cfg = GossipConfig::default();
+    cfg.bind_address = "127.0.0.1".parse().unwrap();
+    cfg.bind_port = p1;
     let a = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", p1).unwrap(), cfg));
     a.with_evidence_journal(EvidenceJournal::stalled(EvidenceProfile::Strict));
     a.with_action_evaluator(Arc::new(posts(1, 1_000, HistoryScope::FleetConsensus)));
@@ -1018,7 +1012,9 @@ async fn a_wrapper_that_hides_the_fleet_counters_is_not_established() {
         }
     }
     let p1 = port();
-    let mut cfg = GossipConfig { bind_address: "127.0.0.1".parse().unwrap(), bind_port: p1, ..GossipConfig::default() };
+    let mut cfg = GossipConfig::default();
+    cfg.bind_address = "127.0.0.1".parse().unwrap();
+    cfg.bind_port = p1;
     cfg.bootstrap_peers = Vec::new();
     let a = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", p1).unwrap(), cfg));
     let dir = std::env::temp_dir().join(format!("k2-wrapper-{p1}"));
@@ -1337,7 +1333,11 @@ async fn node_tls(
 ) -> Arc<GossipAgent> {
     let dir = cert_dir.to_path_buf();
     node_with(p, peers, policy, move |c| {
-        c.tls = Some(crate::TlsConfig { auto_cert_dir: dir, ..Default::default() });
+        c.tls = Some({
+            let mut tls = crate::TlsConfig::default();
+            tls.auto_cert_dir = dir;
+            tls
+        });
         tune(c);
     })
     .await
@@ -1842,12 +1842,10 @@ async fn the_owners_reassert_makes_a_collectors_tombstone_lose() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_mcp_timeout_tells_the_caller_nothing_about_the_mesh() {
     let (p1, http) = (port(), port());
-    let cfg = GossipConfig {
-        bind_address: "127.0.0.1".parse().unwrap(),
-        bind_port: p1,
-        http_port: Some(http),
-        ..GossipConfig::default()
-    };
+    let mut cfg = GossipConfig::default();
+    cfg.bind_address = "127.0.0.1".parse().unwrap();
+    cfg.bind_port = p1;
+    cfg.http_port = Some(http);
     let a = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", p1).unwrap(), cfg));
     a.start().await.unwrap();
     let me = a.node_id().to_string();
@@ -2218,7 +2216,9 @@ async fn a_fleet_counter_past_the_bounds_is_not_established_at_the_enforcement_p
         }
     }
     let p1 = port();
-    let mut cfg = GossipConfig { bind_address: "127.0.0.1".parse().unwrap(), bind_port: p1, ..GossipConfig::default() };
+    let mut cfg = GossipConfig::default();
+    cfg.bind_address = "127.0.0.1".parse().unwrap();
+    cfg.bind_port = p1;
     cfg.bootstrap_peers = Vec::new();
     let a = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", p1).unwrap(), cfg));
     let dir = std::env::temp_dir().join(format!("k2-bounds-{p1}"));

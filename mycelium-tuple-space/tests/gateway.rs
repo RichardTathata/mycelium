@@ -14,12 +14,10 @@ async fn gateway_roundtrip_and_api_tuple() {
     let base: u16 = 22400 + (std::process::id() % 400) as u16 * 2;
     let http_port = base + 1;
 
-    let cfg = GossipConfig {
-        bind_port: base,
-        http_port: Some(http_port),
-        health_check_max_jitter_ms: 50,
-        ..Default::default()
-    };
+    let mut cfg = GossipConfig::default();
+    cfg.bind_port = base;
+    cfg.http_port = Some(http_port);
+    cfg.health_check_max_jitter_ms = 50;
     let agent = Arc::new(GossipAgent::new(
         NodeId::new("127.0.0.1", base).expect("node id"),
         cfg,
@@ -188,13 +186,11 @@ async fn gateway_roundtrip_and_api_tuple() {
 async fn the_overview_sits_behind_the_gateway_bearer() {
     let base: u16 = 23400 + (std::process::id() % 400) as u16 * 2;
     let http_port = base + 1;
-    let cfg = GossipConfig {
-        bind_port: base,
-        http_port: Some(http_port),
-        gateway_auth_token: Some("secret".into()),
-        health_check_max_jitter_ms: 50,
-        ..Default::default()
-    };
+    let mut cfg = GossipConfig::default();
+    cfg.bind_port = base;
+    cfg.http_port = Some(http_port);
+    cfg.gateway_auth_token = Some("secret".into());
+    cfg.health_check_max_jitter_ms = 50;
     let agent = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", base).expect("node id"), cfg));
     let ts = TupleSpace::new(
         Arc::clone(&agent),

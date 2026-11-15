@@ -68,7 +68,11 @@ fn config(dir: &Path, http_port: u16, n: &Node) -> (NodeId, GossipConfig) {
     cfg.http_port = Some(http_port);
     cfg.bootstrap_peers = n.bootstrap.clone();
     cfg.reconnect_backoff_secs = 1;
-    cfg.tls = Some(TlsConfig { auto_cert_dir: n.certs.clone(), ..Default::default() });
+    cfg.tls = Some({
+        let mut tls = TlsConfig::default();
+        tls.auto_cert_dir = n.certs.clone();
+        tls
+    });
     cfg.persistence = Some(PersistenceConfig { base_path: dir.join("persist"), sync_mode: SyncMode::Flush, snapshot_wal_threshold: 1_000, snapshot_interval_secs: 3_600, on_unreadable: OnUnreadable::Refuse });
     cfg.gateway_identity_issuer = Some(ISSUER.into());
     cfg.gateway_named_tokens = vec![

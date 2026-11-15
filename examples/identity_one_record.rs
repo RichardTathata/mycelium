@@ -67,7 +67,11 @@ async fn main() {
         // The default since post-360 row S, set explicitly so the demonstration does not depend on
         // it. Both nodes refuse any identity they cannot authenticate — including each other's.
         cfg.require_identity_proofs = true;
-        cfg.tls = Some(TlsConfig { auto_cert_dir: cert_dir.clone(), ..TlsConfig::default() });
+        cfg.tls = Some({
+            let mut tls = TlsConfig::default();
+            tls.auto_cert_dir = cert_dir.clone();
+            tls
+        });
         Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", port).expect("id"), cfg))
     };
 

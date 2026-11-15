@@ -18,8 +18,34 @@ use crate::NodeId;
 /// `validate_token`) stays in the upper crate and imports this struct. The IdP's
 /// signing keys are not configured here — they are fetched from the JWKS at runtime,
 /// so vendor differences stay configuration.
+///
+/// # Construction
+///
+/// `#[non_exhaustive]` (critique plan CR12): outside this crate, start from `OidcConfig::default()` and assign the
+/// fields you set, so a field added in a MINOR breaks no caller. A struct literal is refused, with
+/// `..Default::default()` or without (`docs/guide/deprecations.md` §109).
+/// (Under the `compliance` feature.)
+///
+/// ```
+/// let mut c = mycelium_core::config::OidcConfig::default();
+/// c.issuer = "https://idp.example".into();
+/// c.audience = "mycelium".into();
+/// # let _ = c;
+/// ```
+///
+/// The same fields as a literal do not compile — the twin of the block above, so the error is the literal:
+///
+/// ```compile_fail
+/// let c = mycelium_core::config::OidcConfig { issuer: "https://idp.example".into(), audience: "mycelium".into(), ..Default::default() };
+/// # let _ = c;
+/// ```
+/// ```compile_fail
+/// let c = mycelium_core::config::OidcConfig { issuer: "https://idp.example".into(), audience: "mycelium".into(), group_claim: "groups".into(), group_scopes: Default::default(), jwks_uri: None, exchange_audience: None, exchange_client_id: None, exchange_max_lifetime_secs: None, exchange_token_endpoint: None, exchange_client_secret_env: None };
+/// # let _ = c;
+/// ```
 #[cfg(feature = "compliance")]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct OidcConfig {
     /// Expected `iss` claim — the IdP issuer URL. Also the discovery base
     /// (`{issuer}/.well-known/openid-configuration`) when `jwks_uri` is absent.
@@ -125,8 +151,8 @@ pub fn exchange_endpoint_is_secure(endpoint: &str) -> bool {
 
 /// The values a TOML `[oidc]` table naming only `issuer` and `audience` gets (#759's review, M3): the claim `groups`,
 /// no group scopes, discovery for the JWKS, and no exchanged-token verification. `issuer` and `audience` are empty and
-/// must be set — a literal reads `OidcConfig { issuer, audience, ..Default::default() }`, so a field added later does
-/// not break it.
+/// must be set — `let mut c = OidcConfig::default(); c.issuer = …; c.audience = …;`, the construction path outside this
+/// crate (`#[non_exhaustive]`, critique plan CR12), so a field added later does not break it.
 #[cfg(feature = "compliance")]
 impl Default for OidcConfig {
     fn default() -> Self {
@@ -181,8 +207,32 @@ impl OidcConfig {
 ///
 /// Only meaningful when the `tls` crate feature is enabled. Has no effect when
 /// the feature is disabled.
+///
+/// # Construction
+///
+/// `#[non_exhaustive]` (critique plan CR12): outside this crate, start from `TlsConfig::default()` and assign the
+/// fields you set, so a field added in a MINOR breaks no caller. A struct literal is refused, with
+/// `..Default::default()` or without (`docs/guide/deprecations.md` §109).
+///
+/// ```
+/// let mut c = mycelium_core::config::TlsConfig::default();
+/// c.auto_cert_dir = "/var/lib/mycelium/tls".into();
+/// # let _ = c;
+/// ```
+///
+/// The same fields as a literal do not compile — the twin of the block above, so the error is the literal:
+///
+/// ```compile_fail
+/// let c = mycelium_core::config::TlsConfig { auto_cert_dir: "/var/lib/mycelium/tls".into(), ..Default::default() };
+/// # let _ = c;
+/// ```
+/// ```compile_fail
+/// let c = mycelium_core::config::TlsConfig { cert_pem: None, key_pem: None, ca_cert_pem: None, auto_cert_dir: "/var/lib/mycelium/tls".into() };
+/// # let _ = c;
+/// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
+#[non_exhaustive]
 pub struct TlsConfig {
     /// Path to a PEM-encoded node certificate, **pre-issued off-node** (`mycelium tls issue`). With
     /// it the node starts from the CA certificate alone and never needs or mints the CA key
@@ -232,8 +282,33 @@ pub const MAX_BULK_PAYLOAD_BYTES_CEILING: u64 = 16 * 1024 * 1024 * 1024;
 /// the files and restart to rotate an operator certificate). Three fields in all: the third,
 /// `bulk_ca_pem_path`, is the roots a bulk fetch verifies a peer's gateway with, required beside an
 /// operator certificate.
+///
+/// # Construction
+///
+/// `#[non_exhaustive]` (critique plan CR12): outside this crate, start from `GatewayTlsConfig::default()` and assign the
+/// fields you set, so a field added in a MINOR breaks no caller. A struct literal is refused, with
+/// `..Default::default()` or without (`docs/guide/deprecations.md` §109).
+///
+/// ```
+/// let mut c = mycelium_core::config::GatewayTlsConfig::default();
+/// c.cert_pem_path = Some("gw.pem".into());
+/// c.key_pem_path = Some("gw.key".into());
+/// # let _ = c;
+/// ```
+///
+/// The same fields as a literal do not compile — the twin of the block above, so the error is the literal:
+///
+/// ```compile_fail
+/// let c = mycelium_core::config::GatewayTlsConfig { cert_pem_path: Some("gw.pem".into()), key_pem_path: Some("gw.key".into()), ..Default::default() };
+/// # let _ = c;
+/// ```
+/// ```compile_fail
+/// let c = mycelium_core::config::GatewayTlsConfig { cert_pem_path: Some("gw.pem".into()), key_pem_path: Some("gw.key".into()), bulk_ca_pem_path: None };
+/// # let _ = c;
+/// ```
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
+#[non_exhaustive]
 pub struct GatewayTlsConfig {
     /// Server cert chain (PEM). `None` = reuse the node identity cert.
     pub cert_pem_path: Option<PathBuf>,
@@ -1011,8 +1086,29 @@ pub const PEER_WRITE_STALL_DEFAULT_MS: u64 = 1_140_000;
 /// a restart, and its default and environment variable — is one table per field in
 /// `docs/reference/configuration.md` (realignment repairs A2). Only five fields change at runtime,
 /// through `HotConfig`; every other field is read once, when the agent is built.
+///
+/// # Construction
+///
+/// `#[non_exhaustive]` (critique plan CR12): outside this crate, start from `GossipConfig::default()` and assign the
+/// fields you set, so a field added in a MINOR breaks no caller. A struct literal is refused, with
+/// `..Default::default()` or without (`docs/guide/deprecations.md` §109).
+///
+/// ```
+/// let mut c = mycelium_core::GossipConfig::default();
+/// c.bind_port = 7946;
+/// c.cluster_name = Some("microgrid".into());
+/// # let _ = c;
+/// ```
+///
+/// The same fields as a literal do not compile — the twin of the block above, so the error is the literal:
+///
+/// ```compile_fail
+/// let c = mycelium_core::GossipConfig { bind_port: 7946, cluster_name: Some("microgrid".into()), ..Default::default() };
+/// # let _ = c;
+/// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
+#[non_exhaustive]
 pub struct GossipConfig {
     /// IP address the node binds its TCP listener to.
     pub bind_address: String,
@@ -1853,7 +1949,7 @@ pub struct GossipConfig {
     /// Mutual TLS configuration.
     ///
     /// `None` (the default) disables TLS — the gossip TCP port accepts plain
-    /// connections with no authentication. Set to `Some(TlsConfig { .. })` to
+    /// connections with no authentication. Set to `Some(TlsConfig::default())` (or a `TlsConfig` with its fields assigned) to
     /// require mTLS: all peers must present a certificate signed by the cluster CA.
     ///
     /// Requires the `tls` crate feature: a build without it **refuses to start** with this set

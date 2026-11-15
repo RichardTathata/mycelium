@@ -336,17 +336,18 @@ mechanism — persistence is purely local recovery.
 
 ```rust
 use mycelium::{GossipConfig, PersistenceConfig, SyncMode};
+use mycelium::config::OnUnreadable;
 use std::path::PathBuf;
 
-let config = GossipConfig {
-    persistence: Some(PersistenceConfig {
-        base_path:               PathBuf::from("/var/lib/mycelium"),
-        sync_mode:               SyncMode::Async,   // default; Flush for hard durability
-        snapshot_wal_threshold:  10_000,             // default
-        snapshot_interval_secs:  300,                // default
-    }),
-    ..GossipConfig::default()
-};
+// `GossipConfig` is `#[non_exhaustive]` (deprecations §109): default() plus assignment.
+let mut config = GossipConfig::default();
+config.persistence = Some(PersistenceConfig {
+    base_path:               PathBuf::from("/var/lib/mycelium"),
+    sync_mode:               SyncMode::Async,   // default; Flush for hard durability
+    snapshot_wal_threshold:  10_000,             // default
+    snapshot_interval_secs:  300,                // default
+    on_unreadable:           OnUnreadable::Refuse,
+});
 ```
 
 `persistence: None` (the default) preserves the previous fully-in-memory behaviour.

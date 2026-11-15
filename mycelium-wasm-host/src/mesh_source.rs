@@ -316,13 +316,11 @@ mod tests {
 
     async fn agent(port: u16, bootstrap: Option<u16>) -> Arc<GossipAgent> {
         let id = NodeId::new("127.0.0.1", port).unwrap();
-        let cfg = mycelium::GossipConfig {
-            bind_port: port,
-            bootstrap_peers: bootstrap
-                .map(|b| vec![NodeId::new("127.0.0.1", b).unwrap()])
-                .unwrap_or_default(),
-            ..Default::default()
-        };
+        let mut cfg = mycelium::GossipConfig::default();
+        cfg.bind_port = port;
+        cfg.bootstrap_peers = bootstrap
+            .map(|b| vec![NodeId::new("127.0.0.1", b).unwrap()])
+            .unwrap_or_default();
         let a = Arc::new(GossipAgent::new(id, cfg));
         a.start().await.expect("agent start");
         a

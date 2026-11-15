@@ -52,12 +52,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// The one non-obvious line is `bind_port`: an agent listens on `config.bind_port`, **not** on
 /// the `NodeId`'s port — so set both to the same value (a common first-time gotcha).
 async fn start_agent(port: u16, peers: &[u16]) -> Result<Arc<GossipAgent>, Box<dyn std::error::Error>> {
-    let config = GossipConfig {
-        bind_port: port,
-        bootstrap_peers: peers.iter().map(|p| NodeId::new("127.0.0.1", *p).unwrap()).collect(),
-        cluster_name: Some(std::env::var("GOSSIP_CLUSTER_NAME").unwrap_or_else(|_| "hello-mesh".to_string())),
-        ..Default::default()
-    };
+    let mut config = GossipConfig::default();
+    config.bind_port = port;
+    config.bootstrap_peers = peers.iter().map(|p| NodeId::new("127.0.0.1", *p).unwrap()).collect();
+    config.cluster_name = Some(std::env::var("GOSSIP_CLUSTER_NAME").unwrap_or_else(|_| "hello-mesh".to_string()));
     let agent = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", port)?, config));
     agent.start().await?;
     Ok(agent)

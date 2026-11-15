@@ -1040,7 +1040,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let mut cfg = GossipConfig::default();
         cfg.bind_port = port;
-        cfg.tls = Some(TlsConfig { auto_cert_dir: dir.clone(), ..Default::default() });
+        cfg.tls = Some({
+            let mut tls = TlsConfig::default();
+            tls.auto_cert_dir = dir.clone();
+            tls
+        });
         cfg.protected_rpc_kinds = vec!["depot.custom".into()];
         let agent = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg));
         agent.start().await.unwrap();

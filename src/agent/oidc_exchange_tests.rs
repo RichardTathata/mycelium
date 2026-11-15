@@ -148,20 +148,26 @@ async fn node(idp: &str, http_port: u16, tweak: impl FnOnce(&mut GossipConfig)) 
     let mut cfg = GossipConfig::default();
     cfg.bind_port = port;
     cfg.http_port = Some(http_port);
-    cfg.tls = Some(crate::TlsConfig { auto_cert_dir: dir, ..Default::default() });
+    cfg.tls = Some({
+        let mut tls = crate::TlsConfig::default();
+        tls.auto_cert_dir = dir;
+        tls
+    });
     let mut group_scopes = std::collections::HashMap::new();
     group_scopes.insert("users".to_string(), vec!["mcp:invoke".to_string()]);
-    cfg.oidc = Some(crate::OidcConfig {
-        issuer: idp.to_string(),
-        audience: "mycelium-cluster".into(),
-        group_claim: "groups".into(),
-        group_scopes,
-        jwks_uri: Some(format!("{idp}/jwks")),
-        exchange_audience: Some(AUDIENCE.into()),
-        exchange_client_id: Some(CLIENT.into()),
-        exchange_max_lifetime_secs: None,
-        exchange_token_endpoint: Some(format!("{idp}/token")),
-        exchange_client_secret_env: Some(SECRET_ENV.into()),
+    cfg.oidc = Some({
+        let mut oidc = crate::OidcConfig::default();
+        oidc.issuer = idp.to_string();
+        oidc.audience = "mycelium-cluster".into();
+        oidc.group_claim = "groups".into();
+        oidc.group_scopes = group_scopes;
+        oidc.jwks_uri = Some(format!("{idp}/jwks"));
+        oidc.exchange_audience = Some(AUDIENCE.into());
+        oidc.exchange_client_id = Some(CLIENT.into());
+        oidc.exchange_max_lifetime_secs = None;
+        oidc.exchange_token_endpoint = Some(format!("{idp}/token"));
+        oidc.exchange_client_secret_env = Some(SECRET_ENV.into());
+        oidc
     });
     tweak(&mut cfg);
     let a = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg));
@@ -329,13 +335,14 @@ async fn the_exchange_settings_are_refused_by_name_at_start() {
     }).await);
     // An empty variable, through the loader's seam: no test sets one (`deny(unsafe_code)`).
     let mut cfg = GossipConfig::default();
-    cfg.oidc = Some(crate::OidcConfig {
-        issuer: issuer.clone(),
-        audience: "a".into(),
-        exchange_audience: Some(AUDIENCE.into()),
-        exchange_client_id: Some(CLIENT.into()),
-        exchange_token_endpoint: Some(format!("{issuer}/token")),
-        ..Default::default()
+    cfg.oidc = Some({
+        let mut oidc = crate::OidcConfig::default();
+        oidc.issuer = issuer.clone();
+        oidc.audience = "a".into();
+        oidc.exchange_audience = Some(AUDIENCE.into());
+        oidc.exchange_client_id = Some(CLIENT.into());
+        oidc.exchange_token_endpoint = Some(format!("{issuer}/token"));
+        oidc
     });
     let secret_empty = super::oidc_exchange::OidcExchanger::load_with(&cfg, |_| Some(String::new())).err().map(|e| e.to_string()).unwrap_or_default();
     // M1: the endpoint decides, not the HTTP port — `cfg` has none, and still exchanges.

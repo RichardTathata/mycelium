@@ -334,7 +334,9 @@ mod doors {
 
     async fn node_with(tag: &str, policy: ExposurePolicy, source: Option<Arc<dyn ExposureSource>>, tune: impl FnOnce(&mut GossipConfig)) -> Arc<GossipAgent> {
         let p = crate::test_util::alloc_port();
-        let mut cfg = GossipConfig { bind_address: "127.0.0.1".parse().unwrap(), bind_port: p, ..GossipConfig::default() };
+        let mut cfg = GossipConfig::default();
+        cfg.bind_address = "127.0.0.1".parse().unwrap();
+        cfg.bind_port = p;
         tune(&mut cfg);
         let agent = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", p).unwrap(), cfg));
         let dir = std::env::temp_dir().join(format!("y5-exposure-{tag}-{p}"));
@@ -532,7 +534,10 @@ mod doors {
     #[tokio::test]
     async fn a_protected_kind_named_as_an_exempt_operation_is_refused_at_start() {
         let p = crate::test_util::alloc_port();
-        let cfg = GossipConfig { bind_address: "127.0.0.1".parse().unwrap(), bind_port: p, protected_rpc_kinds: vec!["effect.compensate".into()], ..GossipConfig::default() };
+        let mut cfg = GossipConfig::default();
+        cfg.bind_address = "127.0.0.1".parse().unwrap();
+        cfg.bind_port = p;
+        cfg.protected_rpc_kinds = vec!["effect.compensate".into()];
         let agent = GossipAgent::new(NodeId::new("127.0.0.1", p).unwrap(), cfg);
         let err = agent.start().await.expect_err("refused").to_string();
         assert!(err.contains("protected_rpc_kinds") && err.contains("effect.compensate"), "{err}");

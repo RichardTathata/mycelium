@@ -29,7 +29,11 @@ fn config(dir: &Path, port: u16, persist: bool) -> GossipConfig {
     let mut cfg = GossipConfig::default();
     cfg.bind_port = port;
     // The development posture: the CA's key sits in `auto_cert_dir`, so the test issues client certificates from it.
-    cfg.tls = Some(TlsConfig { auto_cert_dir: dir.join("certs"), ..TlsConfig::default() });
+    cfg.tls = Some({
+        let mut tls = TlsConfig::default();
+        tls.auto_cert_dir = dir.join("certs");
+        tls
+    });
     if persist {
         cfg.persistence = Some(persistence(dir));
     }

@@ -1778,7 +1778,11 @@ mod tests {
     fn the_revoke_class_sees_the_three_verifiers_and_the_mandate_refuse() {
         let dir = scratch("revoke");
         let mut cfg = GossipConfig::default();
-        cfg.tls = Some(crate::config::TlsConfig { auto_cert_dir: dir.join("tls"), ..crate::config::TlsConfig::default() });
+        cfg.tls = Some({
+            let mut tls_cfg = crate::config::TlsConfig::default();
+            tls_cfg.auto_cert_dir = dir.join("tls");
+            tls_cfg
+        });
         let units = vec![unit("purchaser", "principal = \"purchaser\"\n[[capability]]\nns = \"purchase\"\nname = \"place\"\nttl_secs = 5\n[[mandate]]\nholder = \"purchaser\"\nscope = \"petty-cash\"\noperations = [\"tools/call:tool:purchase.place\"]\n")];
         let c = run_class(Class::Revoke, &units, &cfg, &dir, None);
         assert!(all_held(&c), "{c:?}");
@@ -1845,7 +1849,11 @@ mod tests {
     fn the_grant_class_refuses_on_silence_issues_by_the_declared_rule_and_holds_across_a_restart() {
         let dir = scratch("grant");
         let mut cfg = persisted(&dir);
-        cfg.tls = Some(crate::config::TlsConfig { auto_cert_dir: dir.join("tls"), ..crate::config::TlsConfig::default() });
+        cfg.tls = Some({
+            let mut tls_cfg = crate::config::TlsConfig::default();
+            tls_cfg.auto_cert_dir = dir.join("tls");
+            tls_cfg
+        });
         let units = vec![unit("purchaser", concat!(
             "principal = \"purchaser\"\n[[capability]]\nns = \"purchase\"\nname = \"place\"\nttl_secs = 5\n",
             "[[rule]]\nactor = \"purchaser\"\noperation = \"tools/call\"\nresource = \"tool:purchase.approve\"\nrequires_grant = true\n",
@@ -1872,7 +1880,11 @@ mod tests {
     fn the_grant_class_states_an_issuer_rule_that_admits_anyone() {
         let dir = scratch("grant-anyone");
         let mut cfg = persisted(&dir);
-        cfg.tls = Some(crate::config::TlsConfig { auto_cert_dir: dir.join("tls"), ..crate::config::TlsConfig::default() });
+        cfg.tls = Some({
+            let mut tls_cfg = crate::config::TlsConfig::default();
+            tls_cfg.auto_cert_dir = dir.join("tls");
+            tls_cfg
+        });
         let units = vec![unit("purchaser", concat!(
             "principal = \"purchaser\"\n",
             "[[rule]]\nactor = \"purchaser\"\noperation = \"tools/call\"\nresource = \"tool:purchase.approve\"\nrequires_grant = true\n",
@@ -1905,7 +1917,11 @@ mod tests {
             assert!(matches!(&r.classes[0].state, ClassState::NotConfigured { missing } if missing.starts_with("[tls]")), "{:?}", r.classes[0].state);
             let dir = scratch("grant-no-persist");
             let mut cfg = GossipConfig::default();
-            cfg.tls = Some(crate::config::TlsConfig { auto_cert_dir: dir.join("tls"), ..crate::config::TlsConfig::default() });
+            cfg.tls = Some({
+                let mut tls_cfg = crate::config::TlsConfig::default();
+                tls_cfg.auto_cert_dir = dir.join("tls");
+                tls_cfg
+            });
             let c = run_class(Class::Grant, &issuable, &cfg, &dir, None);
             assert_eq!(c.state, ClassState::NotConfigured { missing: "[persistence]".into() }, "{c:?}");
             let _ = std::fs::remove_dir_all(&dir);
@@ -1956,7 +1972,11 @@ mod tests {
     fn the_fleet_runs_under_dev_selected_so_no_ca_key_warning() {
         let dir = scratch("fleet-dev");
         let mut base = GossipConfig::default();
-        base.tls = Some(crate::config::TlsConfig { auto_cert_dir: dir.join("adopter-tls"), ..crate::config::TlsConfig::default() });
+        base.tls = Some({
+            let mut tls_cfg = crate::config::TlsConfig::default();
+            tls_cfg.auto_cert_dir = dir.join("adopter-tls");
+            tls_cfg
+        });
         let ids = vec![NodeId::new("127.0.0.1", crate::test_util::alloc_port()).expect("id")];
         let cfg = fleet_config(&base, &dir, 0, &ids);
         let a = crate::GossipAgent::new(ids[0].clone(), cfg);

@@ -32,7 +32,10 @@ fn token(name: &str, token: &str, scopes: &[&str]) -> GatewayNamedToken {
 async fn a_tuple_put_through_a_raw_route_needs_tuple_write_as_the_spaces_own_route_does() {
     let gossip = mycelium::test_util::alloc_port();
     let http = mycelium::test_util::alloc_port();
-    let mut cfg = GossipConfig { bind_port: gossip, http_port: Some(http), health_check_max_jitter_ms: 50, ..Default::default() };
+    let mut cfg = GossipConfig::default();
+    cfg.bind_port = gossip;
+    cfg.http_port = Some(http);
+    cfg.health_check_max_jitter_ms = 50;
     cfg.gateway_named_tokens = vec![
         token("emitter", "t-mesh", &["mesh:write"]),
         token("both", "t-both", &["mesh:write", "tuple:write"]),

@@ -127,7 +127,11 @@ async fn main() {
     cfg.http_port = Some(http);
     // A real bearer, and a real gateway that requires it — so act 0's contrast is not staged.
     cfg.gateway_auth_token = Some("depot-token".to_string());
-    cfg.tls = Some(TlsConfig { auto_cert_dir: cert_dir.clone(), ..TlsConfig::default() });
+    cfg.tls = Some({
+        let mut tls = TlsConfig::default();
+        tls.auto_cert_dir = cert_dir.clone();
+        tls
+    });
 
     // `with_a2a()` mounts the door. Without it `/a2a` 404s and none of this runs.
     let agent = Arc::new(GossipAgent::new(id.clone(), cfg).with_a2a());

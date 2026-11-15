@@ -41,7 +41,11 @@ async fn node(freshness_ms: u64) -> Node {
     let _ = std::fs::remove_dir_all(&dir);
     let mut cfg = GossipConfig::default();
     cfg.bind_port = port;
-    cfg.tls = Some(crate::TlsConfig { auto_cert_dir: dir.clone(), ..Default::default() });
+    cfg.tls = Some({
+        let mut tls = crate::TlsConfig::default();
+        tls.auto_cert_dir = dir.clone();
+        tls
+    });
     let a = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg));
     let gate = ExecutionGate::strict(
         ResourceAuthority::new("unused", 1),

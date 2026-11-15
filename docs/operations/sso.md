@@ -29,22 +29,23 @@ Public routes (`/health`, `/ready`, `/stats`, `/metrics`, descriptor) are never 
 ## 2. Configure
 
 ```rust
-cfg.oidc = Some(mycelium::OidcConfig {
-    issuer:   "https://login.example.com/".into(), // must equal the JWT `iss`
-    audience: "mycelium-cluster".into(),           // must equal the JWT `aud`
-    group_claim: "groups".into(),                  // the claim carrying group names
-    group_scopes: HashMap::from([
-        ("platform-admins".into(), vec!["*".into()]),
-        ("sre".into(),             vec!["kv:read".into(), "kv:write".into(), "consensus:read".into()]),
-        ("auditors".into(),        vec!["audit:read".into()]),
-    ]),
-    jwks_uri: None, // None = discover via {issuer}/.well-known/openid-configuration
-    ..Default::default() // the exchange settings below, unset
-});
+// `OidcConfig` is `#[non_exhaustive]`: start from `default()` and assign (deprecations §109).
+let mut oidc = mycelium::OidcConfig::default();  // the exchange settings below, unset
+oidc.issuer   = "https://login.example.com/".into(); // must equal the JWT `iss`
+oidc.audience = "mycelium-cluster".into();           // must equal the JWT `aud`
+oidc.group_claim = "groups".into();                  // the claim carrying group names
+oidc.group_scopes = HashMap::from([
+    ("platform-admins".into(), vec!["*".into()]),
+    ("sre".into(),             vec!["kv:read".into(), "kv:write".into(), "consensus:read".into()]),
+    ("auditors".into(),        vec!["audit:read".into()]),
+]);
+oidc.jwks_uri = None; // None = discover via {issuer}/.well-known/openid-configuration
+cfg.oidc = Some(oidc);
 ```
 
 `OidcConfig` implements `Default` with a TOML table's defaults (`group_claim = "groups"`, no group scopes, discovery,
-no exchange), so end every literal with `..Default::default()`; a field added later then does not break it.
+no exchange), and it is `#[non_exhaustive]`: start from `OidcConfig::default()` and assign the fields you set, as above — a
+struct literal does not compile outside `mycelium-core` (`deprecations.md` §109), and a field added later then breaks nothing.
 
 - **`issuer` / `audience`** are validated on every token (mismatch → 401).
 - **`exchange_audience`** (with `exchange_client_id`, and optionally `exchange_max_lifetime_secs`) makes this node

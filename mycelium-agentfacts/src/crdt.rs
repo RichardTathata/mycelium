@@ -192,16 +192,15 @@ mod tests {
     async fn tls_agent(bootstrap: Option<u16>, cert_dir: &std::path::Path) -> (Arc<GossipAgent>, u16) {
         let port = alloc_port();
         let id = NodeId::new("127.0.0.1", port).unwrap();
-        let cfg = GossipConfig {
-            bind_port: port,
-            bootstrap_peers: bootstrap.map(|b| vec![NodeId::new("127.0.0.1", b).unwrap()]).unwrap_or_default(),
-            health_check_interval_secs: 1,
-            tls: Some(mycelium::config::TlsConfig {
-                auto_cert_dir: cert_dir.to_path_buf(),
-                ..mycelium::config::TlsConfig::default()
-            }),
-            ..Default::default()
-        };
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = port;
+        cfg.bootstrap_peers = bootstrap.map(|b| vec![NodeId::new("127.0.0.1", b).unwrap()]).unwrap_or_default();
+        cfg.health_check_interval_secs = 1;
+        cfg.tls = Some({
+            let mut tls = mycelium::config::TlsConfig::default();
+            tls.auto_cert_dir = cert_dir.to_path_buf();
+            tls
+        });
         let agent = Arc::new(GossipAgent::new(id, cfg));
         agent.start().await.unwrap();
         (agent, port)

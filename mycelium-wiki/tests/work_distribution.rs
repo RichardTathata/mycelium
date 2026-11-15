@@ -54,7 +54,8 @@ async fn a_dead_workers_lease_redelivers_and_the_batch_lands_exactly_once() {
 
     let agent = loop {
         let port = mycelium::test_util::alloc_port();
-        let cfg = GossipConfig { bind_port: port, ..Default::default() };
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = port;
         let a = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg));
         if a.start().await.is_ok() {
             break a;

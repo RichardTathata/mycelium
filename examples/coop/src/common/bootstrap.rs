@@ -78,19 +78,21 @@ pub async fn spawn_depot(opts: DepotOpts) -> Result<Depot, Box<dyn std::error::E
         bootstrap_peers.push(NodeId::new("127.0.0.1", *p)?);
     }
 
-    let mut cfg = GossipConfig {
-        bind_port: opts.gossip_port,
-        http_port: Some(opts.http_port),
-        // The Ops Console page, served on :8099, reads each gateway from the browser (Y3).
-        gateway_cors_origins: vec!["http://127.0.0.1:8099".into()],
-        bootstrap_peers,
-        tls: Some(TlsConfig { auto_cert_dir: opts.cert_dir.clone(), ..TlsConfig::default() }),
-        // Every coop node carries a cluster name (never null on /stats or the `cluster=` metric
-        // label) — a "coop" default, overridable with GOSSIP_CLUSTER_NAME so one Prometheus/Grafana
-        // can tell environments apart. It is a *label*, not a membership boundary.
-        cluster_name: Some(std::env::var("GOSSIP_CLUSTER_NAME").unwrap_or_else(|_| "coop".to_string())),
-        ..Default::default()
-    };
+    let mut cfg = GossipConfig::default();
+    cfg.bind_port = opts.gossip_port;
+    cfg.http_port = Some(opts.http_port);
+    // The Ops Console page, served on :8099, reads each gateway from the browser (Y3).
+    cfg.gateway_cors_origins = vec!["http://127.0.0.1:8099".into()];
+    cfg.bootstrap_peers = bootstrap_peers;
+    cfg.tls = Some({
+        let mut tls = TlsConfig::default();
+        tls.auto_cert_dir = opts.cert_dir.clone();
+        tls
+    });
+    // Every coop node carries a cluster name (never null on /stats or the `cluster=` metric
+    // label) — a "coop" default, overridable with GOSSIP_CLUSTER_NAME so one Prometheus/Grafana
+    // can tell environments apart. It is a *label*, not a membership boundary.
+    cfg.cluster_name = Some(std::env::var("GOSSIP_CLUSTER_NAME").unwrap_or_else(|_| "coop".to_string()));
     if let Some(h) = opts.health_secs {
         cfg.health_check_interval_secs = h.max(1);
         // reconnect_backoff must be >= 1 (0 is rejected); keep it < health where possible.

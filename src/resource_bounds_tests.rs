@@ -24,7 +24,8 @@ async fn until(within: Duration, mut f: impl FnMut() -> bool) -> bool {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn idle_sockets_that_never_speak_are_closed_and_a_new_peer_connects() {
     let (px, py) = (alloc_port(), alloc_port());
-    let mut cx = GossipConfig { bind_port: px, ..Default::default() };
+    let mut cx = GossipConfig::default();
+    cx.bind_port = px;
     cx.max_connections = 2;
     cx.handshake_timeout_ms = 300;
     let x = GossipAgent::new(NodeId::new("127.0.0.1", px).unwrap(), cx);
@@ -46,11 +47,12 @@ async fn idle_sockets_that_never_speak_are_closed_and_a_new_peer_connects() {
     // And a real peer connects: its write reaches X.
     let y = GossipAgent::new(
         NodeId::new("127.0.0.1", py).unwrap(),
-        GossipConfig {
-            bind_port: py,
-            bootstrap_peers: vec![NodeId::new("127.0.0.1", px).unwrap()],
-            reconnect_backoff_secs: 1,
-            ..Default::default()
+        {
+            let mut cfg = GossipConfig::default();
+            cfg.bind_port = py;
+            cfg.bootstrap_peers = vec![NodeId::new("127.0.0.1", px).unwrap()];
+            cfg.reconnect_backoff_secs = 1;
+            cfg
         },
     );
     y.start().await.unwrap();
@@ -73,7 +75,11 @@ async fn a_peer_that_never_reads_gets_one_anti_entropy_reply_at_a_time() {
     let px = alloc_port();
     let x = GossipAgent::new(
         NodeId::new("127.0.0.1", px).unwrap(),
-        GossipConfig { bind_port: px, ..Default::default() },
+        {
+            let mut cfg = GossipConfig::default();
+            cfg.bind_port = px;
+            cfg
+        },
     );
     x.start().await.unwrap();
     // ~12 MB of store, so one dump is far past the socket buffers of a peer that never reads.
@@ -119,14 +125,19 @@ async fn a_stalled_subscriber_does_not_stop_admission_for_another() {
     let (pa, pb) = (alloc_port(), alloc_port());
     let a = Arc::new(GossipAgent::new(
         NodeId::new("127.0.0.1", pa).unwrap(),
-        GossipConfig { bind_port: pa, ..Default::default() },
+        {
+            let mut cfg = GossipConfig::default();
+            cfg.bind_port = pa;
+            cfg
+        },
     ));
     let b = Arc::new(GossipAgent::new(
         NodeId::new("127.0.0.1", pb).unwrap(),
-        GossipConfig {
-            bind_port: pb,
-            bootstrap_peers: vec![NodeId::new("127.0.0.1", pa).unwrap()],
-            ..Default::default()
+        {
+            let mut cfg = GossipConfig::default();
+            cfg.bind_port = pb;
+            cfg.bootstrap_peers = vec![NodeId::new("127.0.0.1", pa).unwrap()];
+            cfg
         },
     ));
     a.start().await.unwrap();
@@ -188,7 +199,8 @@ fn big_data(key: &str, len: usize) -> WireMessage {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_large_first_frame_trickling_steadily_is_read_past_the_handshake_bound() {
     let px = alloc_port();
-    let mut cx = GossipConfig { bind_port: px, ..Default::default() };
+    let mut cx = GossipConfig::default();
+    cx.bind_port = px;
     cx.handshake_timeout_ms = 400;
     let x = GossipAgent::new(NodeId::new("127.0.0.1", px).unwrap(), cx);
     x.start().await.unwrap();
@@ -207,7 +219,8 @@ async fn a_large_first_frame_trickling_steadily_is_read_past_the_handshake_bound
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_frame_that_stalls_mid_body_is_closed_and_counted_apart() {
     let px = alloc_port();
-    let mut cx = GossipConfig { bind_port: px, ..Default::default() };
+    let mut cx = GossipConfig::default();
+    cx.bind_port = px;
     cx.peer_read_stall_timeout_ms = 300;
     let x = GossipAgent::new(NodeId::new("127.0.0.1", px).unwrap(), cx);
     x.start().await.unwrap();
@@ -228,7 +241,11 @@ async fn a_frame_that_stalls_mid_body_is_closed_and_counted_apart() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_kind_whose_every_worker_is_full_sheds_while_a_tap_reads() {
     let px = alloc_port();
-    let x = GossipAgent::new(NodeId::new("127.0.0.1", px).unwrap(), GossipConfig { bind_port: px, ..Default::default() });
+    let x = GossipAgent::new(NodeId::new("127.0.0.1", px).unwrap(), {
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = px;
+        cfg
+    });
     x.start().await.unwrap();
     let kind: Arc<str> = Arc::from("bounds.shed");
     let _worker = x.mesh().signal_rx_with_capacity(Arc::clone(&kind), 8); // never read
@@ -268,7 +285,8 @@ async fn worst_case_chunk_apply_with_an_fsync_wal() {
     ] {
         let px = alloc_port();
         let dir = std::env::temp_dir().join(format!("mycelium-chunk-apply-{px}"));
-        let mut cfg = GossipConfig { bind_port: px, ..Default::default() };
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = px;
         cfg.persistence = Some(PersistenceConfig {
             base_path: dir.clone(), sync_mode: mode,
             snapshot_wal_threshold: 1_000_000, snapshot_interval_secs: 3_600, on_unreadable: OnUnreadable::Refuse,
@@ -307,7 +325,8 @@ async fn worst_case_chunk_apply_with_an_fsync_wal() {
 async fn a_one_byte_trickle_is_closed_by_the_rate_floor() {
     use tokio::io::AsyncWriteExt;
     let px = alloc_port();
-    let mut cx = GossipConfig { bind_port: px, ..Default::default() };
+    let mut cx = GossipConfig::default();
+    cx.bind_port = px;
     cx.peer_read_stall_timeout_ms = 300;
     cx.peer_min_rate_bytes_per_sec = 10_000;
     let x = GossipAgent::new(NodeId::new("127.0.0.1", px).unwrap(), cx);
@@ -335,7 +354,8 @@ async fn a_one_byte_trickle_is_closed_by_the_rate_floor() {
 async fn one_byte_then_silence_is_closed_with_the_floor_off() {
     use tokio::io::AsyncWriteExt;
     let px = alloc_port();
-    let mut cx = GossipConfig { bind_port: px, ..Default::default() };
+    let mut cx = GossipConfig::default();
+    cx.bind_port = px;
     cx.peer_read_stall_timeout_ms = 300;
     cx.peer_min_rate_bytes_per_sec = 0;
     let x = GossipAgent::new(NodeId::new("127.0.0.1", px).unwrap(), cx);
@@ -353,7 +373,8 @@ async fn one_byte_then_silence_is_closed_with_the_floor_off() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_per_source_cap_closes_a_second_connection_from_one_address() {
     let px = alloc_port();
-    let mut cx = GossipConfig { bind_port: px, ..Default::default() };
+    let mut cx = GossipConfig::default();
+    cx.bind_port = px;
     cx.max_connections_per_source = 1;
     let x = GossipAgent::new(NodeId::new("127.0.0.1", px).unwrap(), cx);
     x.start().await.unwrap();

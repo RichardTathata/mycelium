@@ -85,15 +85,14 @@ mod tests {
         let id = NodeId::new("127.0.0.1", gossip_port).unwrap();
         let cert_dir = std::env::temp_dir().join(format!("myc-af-http-{gossip_port}"));
         let _ = std::fs::remove_dir_all(&cert_dir);
-        let cfg = GossipConfig {
-            bind_port: gossip_port,
-            http_port: Some(http_port),
-            tls: Some(mycelium::config::TlsConfig {
-                auto_cert_dir: cert_dir.clone(),
-                ..mycelium::config::TlsConfig::default()
-            }),
-            ..Default::default()
-        };
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = gossip_port;
+        cfg.http_port = Some(http_port);
+        cfg.tls = Some({
+            let mut tls = mycelium::config::TlsConfig::default();
+            tls.auto_cert_dir = cert_dir.clone();
+            tls
+        });
         let agent = Arc::new(GossipAgent::new(id, cfg));
         let _reg = agent.capabilities().advertise_capability(
             Capability::new("nlp", "summarize"),
@@ -143,15 +142,14 @@ mod tests {
         let id = NodeId::new("127.0.0.1", gossip_port).unwrap();
         let cert_dir = std::env::temp_dir().join(format!("myc-af-dom-{gossip_port}"));
         let _ = std::fs::remove_dir_all(&cert_dir);
-        let cfg = GossipConfig {
-            bind_port: gossip_port,
-            http_port: Some(http_port),
-            tls: Some(mycelium::config::TlsConfig {
-                auto_cert_dir: cert_dir.clone(),
-                ..mycelium::config::TlsConfig::default()
-            }),
-            ..Default::default()
-        };
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = gossip_port;
+        cfg.http_port = Some(http_port);
+        cfg.tls = Some({
+            let mut tls = mycelium::config::TlsConfig::default();
+            tls.auto_cert_dir = cert_dir.clone();
+            tls
+        });
         let agent = Arc::new(GossipAgent::new(id, cfg));
         agent.with_http_routes(agent_facts_router(Arc::clone(&agent), FactsOptions { ttl_secs: 120, ..Default::default() }));
         agent.start().await.unwrap();

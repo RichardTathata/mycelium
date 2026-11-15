@@ -84,20 +84,26 @@ async fn oidc_exchange_live_an_oidc_users_call_is_verified_at_the_provider() {
     let mut cfg = GossipConfig::default();
     cfg.bind_port = port;
     cfg.http_port = Some(http_port);
-    cfg.tls = Some(crate::TlsConfig { auto_cert_dir: dir, ..Default::default() });
+    cfg.tls = Some({
+        let mut tls = crate::TlsConfig::default();
+        tls.auto_cert_dir = dir;
+        tls
+    });
     let mut group_scopes = std::collections::HashMap::new();
     group_scopes.insert("users".to_string(), vec!["mcp:invoke".to_string()]);
-    cfg.oidc = Some(crate::OidcConfig {
-        issuer: issuer.clone(),
-        audience: "mycelium-gateway".into(),
-        group_claim: "groups".into(),
-        group_scopes,
-        jwks_uri: None,
-        exchange_audience: Some("mycelium:fleet".into()),
-        exchange_client_id: Some("mycelium-gateway".into()),
-        exchange_max_lifetime_secs: None,
-        exchange_token_endpoint: Some(format!("{issuer}/protocol/openid-connect/token")),
-        exchange_client_secret_env: None,
+    cfg.oidc = Some({
+        let mut oidc = crate::OidcConfig::default();
+        oidc.issuer = issuer.clone();
+        oidc.audience = "mycelium-gateway".into();
+        oidc.group_claim = "groups".into();
+        oidc.group_scopes = group_scopes;
+        oidc.jwks_uri = None;
+        oidc.exchange_audience = Some("mycelium:fleet".into());
+        oidc.exchange_client_id = Some("mycelium-gateway".into());
+        oidc.exchange_max_lifetime_secs = None;
+        oidc.exchange_token_endpoint = Some(format!("{issuer}/protocol/openid-connect/token"));
+        oidc.exchange_client_secret_env = None;
+        oidc
     });
     let a = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg));
     a.start().await.expect("starts");

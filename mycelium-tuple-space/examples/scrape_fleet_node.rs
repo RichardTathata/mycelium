@@ -38,11 +38,9 @@ async fn main() {
     // and the old 7200s default requeued it mid-run → duplicate run + ghost (#726).
     let inflight: u64 = args.next().and_then(|s| s.parse().ok()).unwrap_or(14400);
 
-    let mut cfg = GossipConfig {
-        bind_port: bind,
-        http_port: Some(http),
-        ..Default::default()
-    };
+    let mut cfg = GossipConfig::default();
+    cfg.bind_port = bind;
+    cfg.http_port = Some(http);
     // Deployment knobs stay out of the source: env overrides (GOSSIP_CLUSTER_NAME
     // et al.) are the startup configuration surface. The cluster label lands on
     // GET /stats and as a `cluster` label on every /metrics series.

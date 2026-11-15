@@ -67,7 +67,10 @@ async fn main() {
         None => Vec::new(),
     };
 
-    let mut cfg = GossipConfig { bind_port, http_port: Some(http_port), bootstrap_peers, ..Default::default() };
+    let mut cfg = GossipConfig::default();
+    cfg.bind_port = bind_port;
+    cfg.http_port = Some(http_port);
+    cfg.bootstrap_peers = bootstrap_peers;
     cfg.apply_env_overrides().expect("GOSSIP_* env overrides");
     let agent = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", bind_port).expect("BIND_PORT"), cfg));
     let blobs = std::env::temp_dir().join(format!("mycelium-openai-serve-{}", std::process::id()));

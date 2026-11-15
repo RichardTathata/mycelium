@@ -39,7 +39,11 @@ async fn the_a2a_door_sends_the_same_refusal_body_as_mcp() {
     let mut cfg = GossipConfig::default();
     cfg.bind_port = gossip_port;
     cfg.http_port = Some(http_port);
-    cfg.tls = Some(crate::TlsConfig { auto_cert_dir: cert_dir.clone(), ..Default::default() });
+    cfg.tls = Some({
+        let mut tls = crate::TlsConfig::default();
+        tls.auto_cert_dir = cert_dir.clone();
+        tls
+    });
     // `/a2a` is mounted by `with_a2a`; without it the route 404s and the preflight this test
     // is about never runs.
     let agent = Arc::new(
@@ -125,7 +129,11 @@ async fn no_event_follows_a_terminal_task_state_on_the_stream() {
     let mut cfg = GossipConfig::default();
     cfg.bind_port = gossip_port;
     cfg.http_port = Some(http_port);
-    cfg.tls = Some(crate::TlsConfig { auto_cert_dir: cert_dir.clone(), ..Default::default() });
+    cfg.tls = Some({
+        let mut tls = crate::TlsConfig::default();
+        tls.auto_cert_dir = cert_dir.clone();
+        tls
+    });
     let agent = Arc::new(
         GossipAgent::new(NodeId::new("127.0.0.1", gossip_port).unwrap(), cfg).with_a2a(),
     );
@@ -206,7 +214,11 @@ async fn the_gateway_preflight_refuses_before_the_tool_runs() {
     let mut cfg = GossipConfig::default();
     cfg.bind_port = gossip_port;
     cfg.http_port = Some(http_port);
-    cfg.tls = Some(crate::TlsConfig { auto_cert_dir: cert_dir.clone(), ..Default::default() });
+    cfg.tls = Some({
+        let mut tls = crate::TlsConfig::default();
+        tls.auto_cert_dir = cert_dir.clone();
+        tls
+    });
     let agent = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", gossip_port).unwrap(), cfg));
 
     // `anonymous` may call `allowed`; `forbidden` is prohibited outright; `uncovered` is in
@@ -286,7 +298,11 @@ async fn evidence_goes_to_the_journal_and_only_a_reference_gossips() {
     let mut cfg = GossipConfig::default();
     cfg.bind_port = gossip_port;
     cfg.http_port = Some(http_port);
-    cfg.tls = Some(crate::TlsConfig { auto_cert_dir: cert_dir.clone(), ..Default::default() });
+    cfg.tls = Some({
+        let mut tls = crate::TlsConfig::default();
+        tls.auto_cert_dir = cert_dir.clone();
+        tls
+    });
     let agent = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", gossip_port).unwrap(), cfg));
 
     let me = agent.node_id().clone();
@@ -423,7 +439,11 @@ async fn a_failing_journal_refuses_under_strict_and_is_declared_under_lenient() 
         let mut cfg = GossipConfig::default();
         cfg.bind_port = gossip_port;
         cfg.http_port = Some(http_port);
-        cfg.tls = Some(crate::TlsConfig { auto_cert_dir: cert_dir.clone(), ..Default::default() });
+        cfg.tls = Some({
+            let mut tls = crate::TlsConfig::default();
+            tls.auto_cert_dir = cert_dir.clone();
+            tls
+        });
         let agent =
             Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", gossip_port).unwrap(), cfg));
 
@@ -492,7 +512,11 @@ async fn a_reported_deployment_makes_a_stale_policy_detectable() {
     let mut cfg = GossipConfig::default();
     cfg.bind_port = gossip_port;
     cfg.http_port = Some(http_port);
-    cfg.tls = Some(crate::TlsConfig { auto_cert_dir: cert_dir.clone(), ..Default::default() });
+    cfg.tls = Some({
+        let mut tls = crate::TlsConfig::default();
+        tls.auto_cert_dir = cert_dir.clone();
+        tls
+    });
     let agent = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", gossip_port).unwrap(), cfg));
 
     let me = agent.node_id().clone();
@@ -619,7 +643,11 @@ async fn at_most_three_posts_in_ten_minutes_counted_at_this_gateway() {
         let mut cfg = GossipConfig::default();
         cfg.bind_port = gossip_port;
         cfg.http_port = Some(http_port);
-        cfg.tls = Some(crate::TlsConfig { auto_cert_dir: cert_dir.clone(), ..Default::default() });
+        cfg.tls = Some({
+            let mut tls = crate::TlsConfig::default();
+            tls.auto_cert_dir = cert_dir.clone();
+            tls
+        });
         let agent = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", gossip_port).unwrap(), cfg));
         let me = agent.node_id().clone();
         agent.with_evidence_journal(EvidenceJournal::open(&journal_path, EvidenceProfile::Strict).unwrap());

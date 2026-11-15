@@ -441,7 +441,8 @@ fn an_llm_backend_debug_redacts_a_literal_key() {
 #[tokio::test]
 async fn start_loads_the_gate_and_refuses_an_unreadable_binding() {
     let f = secret_file("start", SECRET);
-    let mut cfg = crate::config::GossipConfig { bind_port: crate::test_util::alloc_port(), ..Default::default() };
+    let mut cfg = crate::config::GossipConfig::default();
+    cfg.bind_port = crate::test_util::alloc_port();
     cfg.egress_credentials = vec![binding("model", "api.example.com", CredentialForm::Bearer, &f)];
     let plain = crate::GossipAgent::new(crate::NodeId::new("127.0.0.1", cfg.bind_port).unwrap(), crate::config::GossipConfig::default());
     assert!(matches!(

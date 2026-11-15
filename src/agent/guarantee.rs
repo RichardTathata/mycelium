@@ -1399,7 +1399,11 @@ mod tests {
         std::fs::write(dir.join("ca-key.pem"), b"placeholder").unwrap();
         let with_ca_key = |profile: Option<&str>| {
             let mut cfg = GossipConfig::default();
-            cfg.tls = Some(TlsConfig { auto_cert_dir: dir.clone(), ..TlsConfig::default() });
+            cfg.tls = Some({
+                let mut tls = TlsConfig::default();
+                tls.auto_cert_dir = dir.clone();
+                tls
+            });
             cfg.profile = profile.map(str::to_string);
             agent(cfg).guarantee_report()
         };
@@ -1435,7 +1439,11 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("myc-row-s-{}", crate::test_util::alloc_port()));
         let tls = |proofs: Option<bool>| {
             let mut cfg = GossipConfig::default();
-            cfg.tls = Some(TlsConfig { auto_cert_dir: dir.clone(), ..TlsConfig::default() });
+            cfg.tls = Some({
+                let mut tls = TlsConfig::default();
+                tls.auto_cert_dir = dir.clone();
+                tls
+            });
             if let Some(p) = proofs { cfg.require_identity_proofs = p; }
             agent(cfg).guarantee_report()
         };
@@ -1703,7 +1711,11 @@ mod tests {
         if drop != FedDrop::DomainOpen {
             cfg.domain_profile = crate::config::DomainProfile::Enforced;
             cfg.swim_failure_detector = false;
-            cfg.tls = Some(crate::config::TlsConfig { auto_cert_dir: std::env::temp_dir().join(format!("mycelium-y7-{port}")), ..Default::default() });
+            cfg.tls = Some({
+                let mut tls = crate::config::TlsConfig::default();
+                tls.auto_cert_dir = std::env::temp_dir().join(format!("mycelium-y7-{port}"));
+                tls
+            });
         }
         if drop != FedDrop::Credential { cfg.gateway_auth_token = Some("a-real-secret".into()); }
         cfg.egress.allow_hosts = match drop {

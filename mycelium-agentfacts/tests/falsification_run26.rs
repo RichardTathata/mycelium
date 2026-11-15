@@ -44,14 +44,13 @@ async fn read_verified_fields_for_unknown_node_is_empty_not_panic() {
     let port = mycelium::test_util::alloc_port();
     let cert_dir = std::env::temp_dir().join(format!("myc-fals26-{port}"));
     let _ = std::fs::remove_dir_all(&cert_dir);
-    let cfg = GossipConfig {
-        bind_port: port,
-        tls: Some(mycelium::config::TlsConfig {
-            auto_cert_dir: cert_dir.clone(),
-            ..mycelium::config::TlsConfig::default()
-        }),
-        ..Default::default()
-    };
+    let mut cfg = GossipConfig::default();
+    cfg.bind_port = port;
+    cfg.tls = Some({
+        let mut tls = mycelium::config::TlsConfig::default();
+        tls.auto_cert_dir = cert_dir.clone();
+        tls
+    });
     let agent = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg));
     agent.start().await.unwrap();
 

@@ -14,12 +14,10 @@ use std::time::Duration;
 fn port() -> u16 { crate::test_util::alloc_port() }
 
 async fn node(p: u16, peers: &[u16]) -> GossipAgent {
-    let cfg = GossipConfig {
-        bind_address: "127.0.0.1".parse().unwrap(),
-        bind_port: p,
-        bootstrap_peers: peers.iter().map(|q| NodeId::new("127.0.0.1", *q).unwrap()).collect(),
-        ..GossipConfig::default()
-    };
+    let mut cfg = GossipConfig::default();
+    cfg.bind_address = "127.0.0.1".parse().unwrap();
+    cfg.bind_port = p;
+    cfg.bootstrap_peers = peers.iter().map(|q| NodeId::new("127.0.0.1", *q).unwrap()).collect();
     let a = GossipAgent::new(NodeId::new("127.0.0.1", p).unwrap(), cfg);
     a.start().await.unwrap();
     a

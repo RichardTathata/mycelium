@@ -63,7 +63,11 @@ async fn node_with(http_port: u16, opts: Opts) -> (Arc<GossipAgent>, std::path::
     cfg.http_port = Some(http_port);
     cfg.bootstrap_peers = opts.bootstrap.clone();
     cfg.reconnect_backoff_secs = 1;
-    cfg.tls = Some(TlsConfig { auto_cert_dir: opts.cert_dir.clone().unwrap_or_else(|| dir.join("tls")), ..Default::default() });
+    cfg.tls = Some({
+        let mut tls_cfg = TlsConfig::default();
+        tls_cfg.auto_cert_dir = opts.cert_dir.clone().unwrap_or_else(|| dir.join("tls"));
+        tls_cfg
+    });
     if opts.persist {
         use crate::config::{OnUnreadable, PersistenceConfig, SyncMode};
         cfg.persistence = Some(PersistenceConfig { base_path: dir.join("persist"), sync_mode: SyncMode::Flush, snapshot_wal_threshold: 1_000, snapshot_interval_secs: 3_600, on_unreadable: OnUnreadable::Refuse });
@@ -893,7 +897,11 @@ async fn a_grant_is_bound_to_its_policy_revision_and_consumed_by_its_commit() {
     let mut cfg = GossipConfig::default();
     cfg.bind_port = gossip_port;
     cfg.http_port = Some(http_port);
-    cfg.tls = Some(TlsConfig { auto_cert_dir: dir.join("tls"), ..Default::default() });
+    cfg.tls = Some({
+        let mut tls_cfg = TlsConfig::default();
+        tls_cfg.auto_cert_dir = dir.join("tls");
+        tls_cfg
+    });
     cfg.gateway_identity_issuer = Some("gw".into());
     cfg.gateway_named_tokens = vec![GatewayNamedToken { name: "alice".into(), token: "alice-secret".into(), scopes: vec!["grant:read".into(), "grant:issue".into()] }];
     let a = Arc::new(GossipAgent::new(id.clone(), cfg));

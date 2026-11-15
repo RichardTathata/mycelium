@@ -41,13 +41,14 @@ cfg.tls = Some(TlsConfig::default());
 cfg.gateway_tls = Some(GatewayTlsConfig::default());
 
 // (b) Operator-supplied cert with a real hostname SAN (browser trust):
-cfg.gateway_tls = Some(GatewayTlsConfig {
-    cert_pem_path: Some("/etc/mycelium/gateway-cert.pem".into()),
-    key_pem_path:  Some("/etc/mycelium/gateway-key.pem".into()),
-    // Required with an operator cert (R7): the CA that signs the fleet's gateway certificates,
-    // which a bulk fetch from a peer's gateway is verified against.
-    bulk_ca_pem_path: Some("/etc/mycelium/gateway-ca.pem".into()),
-});
+// `GatewayTlsConfig` is `#[non_exhaustive]`: start from `default()` and assign (deprecations §109).
+let mut gw = GatewayTlsConfig::default();
+gw.cert_pem_path = Some("/etc/mycelium/gateway-cert.pem".into());
+gw.key_pem_path  = Some("/etc/mycelium/gateway-key.pem".into());
+// Required with an operator cert (R7): the CA that signs the fleet's gateway certificates,
+// which a bulk fetch from a peer's gateway is verified against.
+gw.bulk_ca_pem_path = Some("/etc/mycelium/gateway-ca.pem".into());
+cfg.gateway_tls = Some(gw);
 ```
 
 **Which cert?**

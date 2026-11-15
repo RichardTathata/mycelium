@@ -44,7 +44,8 @@ so a node the list does not let reach it starts and, holding no keys, answers ev
 
 `validate()` also refuses `exchange_audience` on a node without `[tls]` (`oidc_exchange_needs_tls`: the token binds to
 the key that signs the envelope) and equal to `audience` (`oidc_exchange_audience_is_gateway_audience`). `OidcConfig`
-implements `Default`; write a literal with `..Default::default()`.
+implements `Default` and is `#[non_exhaustive]`: start from `OidcConfig::default()` and assign the fields you set — a
+struct literal, with or without `..Default::default()`, does not compile outside `mycelium-core` (`deprecations.md` §109).
 
 **The gateway's half (I5, PR 2).** **A node exchanges iff `exchange_token_endpoint` is set, and verifies iff
 `exchange_audience` is set** (the maintainer's decision, 2026-11-11); its HTTP port decides neither. An exchanging node

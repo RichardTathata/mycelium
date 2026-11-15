@@ -61,7 +61,11 @@ async fn try_start(port: u16, boot: Vec<u16>, cert_dir: &std::path::Path) -> Opt
     cfg.bootstrap_peers = boot.into_iter().map(|p| NodeId::new("127.0.0.1", p).unwrap()).collect();
     cfg.reconnect_backoff_secs = 1;
     cfg.health_check_interval_secs = 1;
-    cfg.tls = Some(TlsConfig { auto_cert_dir: cert_dir.to_path_buf(), ..TlsConfig::default() });
+    cfg.tls = Some({
+        let mut tls = TlsConfig::default();
+        tls.auto_cert_dir = cert_dir.to_path_buf();
+        tls
+    });
     let agent = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg));
     agent.start().await.ok().map(|_| agent)
 }

@@ -342,7 +342,11 @@ async fn the_facade_runs_the_action_preflight() {
     let store = Arc::new(FsBlobStore::open(dir.path()).unwrap());
     let cert_dir = dir.path().join("certs");
     let (agent, _base, http_port) = start_gateway_node_with(store, Some("mesh-key"), |cfg| {
-        cfg.tls = Some(mycelium::TlsConfig { auto_cert_dir: cert_dir.clone(), ..Default::default() });
+        cfg.tls = Some({
+            let mut tls = mycelium::TlsConfig::default();
+            tls.auto_cert_dir = cert_dir.clone();
+            tls
+        });
     })
     .await;
     let me = agent.node_id().clone();

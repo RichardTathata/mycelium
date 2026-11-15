@@ -30,7 +30,11 @@ fn fresh(tag: &str) -> PathBuf {
 fn config(dir: &Path, port: u16, issuer: Option<&str>) -> GossipConfig {
     let mut cfg = GossipConfig::default();
     cfg.bind_port = port;
-    cfg.tls = Some(TlsConfig { auto_cert_dir: dir.join("certs"), ..TlsConfig::default() });
+    cfg.tls = Some({
+        let mut tls = TlsConfig::default();
+        tls.auto_cert_dir = dir.join("certs");
+        tls
+    });
     cfg.gateway_identity_issuer = issuer.map(str::to_string);
     cfg
 }

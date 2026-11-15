@@ -93,7 +93,11 @@ async fn node_with(opts: Opts) -> Node {
     cfg.bind_port = port;
     cfg.http_port = Some(http_port);
     if opts.tls {
-        cfg.tls = Some(crate::TlsConfig { auto_cert_dir: dir.join("tls"), ..Default::default() });
+        cfg.tls = Some({
+            let mut tls_cfg = crate::TlsConfig::default();
+            tls_cfg.auto_cert_dir = dir.join("tls");
+            tls_cfg
+        });
     }
     if opts.legacy {
         cfg.gateway_caller_profile = crate::config::GatewayCallerProfile::Legacy;

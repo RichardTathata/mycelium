@@ -974,7 +974,11 @@ rev 2 — a node certificate **issued off-node**, so the fleet CA's key is on no
 // On the issuer's host (the `mycelium tls issue` CLI wraps this):
 let (cert, key) = mycelium::issue_node_cert(&ca_dir, &node_id, &out_dir)?;
 // On the node: start from the issued pair; `auto_cert_dir` holds ca-cert.pem only.
-cfg.tls = Some(TlsConfig { cert_pem: Some(cert), key_pem: Some(key), auto_cert_dir: node_dir, ..Default::default() });
+let mut tls = TlsConfig::default(); // `#[non_exhaustive]`: default() plus assignment
+tls.cert_pem = Some(cert);
+tls.key_pem = Some(key);
+tls.auto_cert_dir = node_dir;
+cfg.tls = Some(tls);
 ```
 
 The operator's side — the checklist, the catalogue of every guarantee's state under reference
