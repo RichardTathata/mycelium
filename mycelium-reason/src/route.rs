@@ -892,7 +892,9 @@ impl InferenceRouter {
 /// **Is this provider reply a cancellation?** (identity-and-lifecycle I4.) The built-in `llm.invoke` provider answers a
 /// call stopped while it ran with `data.reason` `cancelled`, and one whose `call:` term was already revoked when it
 /// was admitted with `data.detail` `call_mandate_not_established`, `data.cause` `revoked`. Both are the gateway's
-/// cancel, and final. Any other `call_mandate_not_established` cause is not: another provider may admit the call.
+/// cancel, and final. `data.reason` `cancelled` is also the answer when the **caller's own mandate** lapses while the
+/// call runs (#794's review, K7): the route stops then too — a retry would run under the same lapsed mandate. Any
+/// other `call_mandate_not_established` cause is not final: another provider may admit the call.
 pub(crate) fn is_cancelled(reply: &serde_json::Value) -> bool {
     let data = &reply["data"];
     data["reason"].as_str() == Some("cancelled")

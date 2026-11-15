@@ -17,7 +17,9 @@
 - The collector (D-5), each minute at every node with an authority or a mint: `call/` past window + 2·skew +
   `max_drain_secs` (a forged or missing window ⇒ the cap-based floor; nothing verifies ⇒ never); `grant/` under a
   verified `issued` record past the later of window + 2·skew and issue + `grant_retention_secs`, CR2's markers and
-  releases with it. Issuer `kv_delete`; others `kv_delete_held`. Not collected: unanswered/refused requests; CR2's
+  releases with it — **then, on #794's review and the maintainer's decision of 2026-11-15, owner-only and off by default
+  (`collect_expired_records`)**: a node deletes only what its own agent signed (its `call/` pairs, its grants' `issued`
+  and `checkpoint`, its own door's markers and releases); unsigned records are never collected. Not collected: unanswered/refused requests; CR2's
   `uses.journal` (not compacted, stated).
 - Doors (rule 1, the maintainer's decision): `provider_enforcement::Door` at each `check`; a cancellable call at a
   door that cannot stop it is refused `door_cannot_stop` — bridged MCP, SDK serve, a hosted kind via `rpc_rx`, and

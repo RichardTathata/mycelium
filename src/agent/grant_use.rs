@@ -166,6 +166,14 @@ impl UseRecord {
     }
 }
 
+/// **This node's own use marker or release at `marker_key`** (identity-and-lifecycle I4's collector: a door collects
+/// only what it signed): the record's `at_ms` when it parses, names the key's grant and door, names this node and
+/// verifies under this node's key; `None` for anything else — another door's record, a forged one, a legacy marker.
+pub(crate) fn own_record_at(ctx: &TaskCtx, marker_key: &str, bytes: &[u8]) -> Option<u64> {
+    let r: UseRecord = serde_json::from_slice(bytes).ok()?;
+    (r.node.parse::<NodeId>().ok()? == ctx.node_id && r.verifies_at(ctx, marker_key)).then_some(r.at_ms)
+}
+
 /// `grant/{holder}/{term}/used/{point}` → (`{holder}/{term}`, `{point}`).
 fn split_marker_key(key: &str) -> Option<(&str, &str)> {
     let rest = key.strip_prefix("grant/")?;

@@ -862,3 +862,38 @@ async fn a_declared_rpc_rx_receiver_is_served_and_stopped_and_one_that_ignores_t
     assert_eq!(late(&n), 1, "counted under its kind");
     n.a.shutdown().await;
 }
+
+/// **A stop is recorded as confirmed only where the agent doing the work promised to stop** (#794's review, the
+/// promise-theory finding). An undeclared `rpc_rx` receiver of a kind under a plain rule is served a call with an
+/// honest `call:` mandate; the gateway cancels it; the receiver ignores the lapse and answers when its work ends. Its
+/// stop record says the stop was asked (`requested_ms`) and nothing more — no acknowledgement, no confirmation:
+/// the library saw the request released, not the work stopped. A declared receiver's stop is confirmed. Seen
+/// failing first: with every dropped, cancelled guard recording `confirmed_ms = now`, the undeclared receiver's work,
+/// which ran to its end, was recorded as a confirmed stop.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_undeclared_receivers_stop_is_a_release_and_a_declared_ones_is_confirmed() {
+    let n = Arc::new(node().await);
+    let _plain = serve_rpc(&n, PLAIN_KIND, false, false, Duration::from_millis(1_500));
+    let (framed, id, _) = n.frame(&n.plain_kind(), None, Cm::Honest);
+    let (n2, call) = (Arc::clone(&n), n.plain_kind());
+    let running = tokio::spawn(async move { n2.send(&call, framed).await });
+    n.running(1).await;
+    n.cancel(id);
+    assert_eq!(running.await.unwrap(), b"done".to_vec(), "the undeclared receiver ran to its end");
+    n.running(0).await;
+    let stop = n.authority.named_stop_records().into_iter().rev().find(|s| s.term.as_deref() == Some(&format!("c{id}"))).expect("a stop record");
+    assert!(stop.record.requested_ms.is_some(), "{stop:?}");
+    assert_eq!((stop.record.acknowledged_ms, stop.record.confirmed_ms), (None, None), "a release, not a confirmed stop: {stop:?}");
+    // The declared receiver's stop is its own promise kept: confirmed.
+    let _custom = serve_rpc(&n, CUSTOM, true, true, Duration::from_secs(30));
+    let (framed, id, _) = n.frame(&n.custom(), None, Cm::Honest);
+    let (n2, call) = (Arc::clone(&n), n.custom());
+    let running = tokio::spawn(async move { n2.send(&call, framed).await });
+    n.running(1).await;
+    n.cancel(id);
+    assert_eq!(running.await.unwrap(), b"stopped".to_vec());
+    n.running(0).await;
+    let stop = n.authority.named_stop_records().into_iter().rev().find(|s| s.term.as_deref() == Some(&format!("c{id}"))).expect("a stop record");
+    assert!(stop.record.acknowledged_ms.is_some() && stop.record.confirmed_ms.is_some(), "{stop:?}");
+    n.a.shutdown().await;
+}

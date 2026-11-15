@@ -475,11 +475,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   is sent. An enforcing provider admits the call under it, so a cancellable rule admits the calls its gateways mint
   for. The gateway's revoke writes the call's next checkpoint durably and the provider's sweep stops the call (on
   loopback, two nodes, *F* = 2 s: under 2 s); no door calls it yet (the row's next PR). The gateway re-asserts its
-  checkpoint when another value lands at its key (`call_checkpoints_reasserted`). A collector (each minute, at every
-  node with an execution authority or a mint) removes `call/` records past their window + 2·skew +
-  `max_drain_secs` and `grant/` records — CR2's use markers and releases with them — past the later of their window
-  + 2·skew and their issue + `grant_retention_secs` (7 days); a record that does not verify only delays collection.
-  New `GossipConfig` fields: `gateway_mint_call_mandates`, `call_mandate_ttl_secs` (300, at most 3 600),
+  checkpoint when another value lands at its key (`call_checkpoints_reasserted`). A collector — **off by default, behind `collect_expired_records`**, and **owner-only** (the maintainer's decision of
+  2026-11-15) — deletes only records its own node wrote and signed: a gateway its `call/` pairs past window + 2·skew
+  + `max_drain_secs` and its grants' `issued` and `checkpoint` past the later of window + 2·skew and issue +
+  `grant_retention_secs`; a door the CR2 markers and releases it signed past their time + the retention. No node
+  deletes another agent's record; an unverifiable one is left alone and counted; unsigned records (the request,
+  `consumed`, `revoked`, `refused`) are never collected, so the holder's status route still answers `expired`.
+  New `GossipConfig` fields: `gateway_mint_call_mandates`, `collect_expired_records` (default `false`), `call_mandate_ttl_secs` (300, at most 3 600),
   `max_drain_secs` (300), `grant_retention_secs` (604 800, at least 3 600). Two fsynced writes per minted call: 15.7–25.2
   ms p50, 31.5–34.2 ms p95 on the test machine (two runs). ***Check:*** with the mint on, `GET /stats` `call_mints` counts a protected
   call through the gateway.
@@ -494,10 +496,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   refused a cancellable call (`data.door` `rpc_rx`) and served any other, and a declared one answering more than
   `LAPSE_ANSWER_GRACE_MS` (1 s) after its call's authority lapsed is counted (`GET /stats`
   `rpc_rx_answered_after_lapse`, by kind), never refused. No shipped receiver declares yet.
+- **A stop is recorded as confirmed only where the agent doing the work promised to stop** (#794's review): at a door
+  that cannot stop a call, or an undeclared `rpc_rx` receiver, a cancelled call's work is recorded as released —
+  `StopRecord::confirmed_ms` none, `acknowledged_ms` only if it acknowledged. Every cancelled work's drop recorded a
+  confirmed stop before.
 - **`mycelium-reason`: a cancelled call is final at the router.** A provider's answer `data.reason` `cancelled`, or
   `call_mandate_not_established` with `data.cause` `revoked`, ends the route with the new
   `RouteError::Cancelled` (`409` at the façades) instead of trying the next provider under a new, uncancelled term.
-  `RouteError` gained a variant.
+  `RouteError` gained a variant, so `mycelium-reason` goes to 0.12.0 at release. Neither SDK maps the new answers yet.
 - **A cancellable rule, and the provider's admission under a `call:` mandate** (identity-and-lifecycle I4, PR 1b;
   `deprecations.md` §104). `cancellable = true` on a unit file's `[[rule]]` (`Rule::cancellable()`,
   `Decision::cancellable`) says the call the rule permits must be cancellable. An enforcing provider reads the

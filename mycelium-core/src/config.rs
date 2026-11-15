@@ -1873,6 +1873,15 @@ pub struct GossipConfig {
     #[serde(default = "default_grant_retention_secs")]
     pub grant_retention_secs: u64,
 
+    /// **Run the collector of the `call/` and `grant/` key families on this node** (I4, D-5). Off by default: until it
+    /// is on, nothing is deleted — `max_drain_secs` and `grant_retention_secs` are read only by it. On, each minute this
+    /// node deletes the `call/` records past their window + 2·skew + `max_drain_secs` and the `grant/` records under a
+    /// verified grant past the later of its window + 2·skew and its issue + `grant_retention_secs` — its own with a
+    /// tombstone, another node's only at the stamp it holds. Who may delete which records is the maintainer's open
+    /// question (#794's review). Env `GOSSIP_COLLECT_EXPIRED_RECORDS`.
+    #[serde(default)]
+    pub collect_expired_records: bool,
+
     /// The confidence bound every governor applies before it counts its view as *certain enough*
     /// (item 4's control contract, `ConfidenceBound`): the stalest heard peer may be at most this
     /// old. Default **30 000 ms** — strict on purpose; an operator loosens it *on evidence*
@@ -2325,6 +2334,7 @@ impl Default for GossipConfig {
             call_mandate_ttl_secs:         default_call_mandate_ttl_secs(),
             max_drain_secs:                default_max_drain_secs(),
             grant_retention_secs:          default_grant_retention_secs(),
+            collect_expired_records:       false,
             control_max_staleness_ms:      30_000,
             control_min_peers_heard:       1,
             domain_profile:                DomainProfile::Open,
@@ -3265,6 +3275,13 @@ impl GossipConfig {
                 other => return Err(GossipError::InvalidField { field: "gateway_mint_call_mandates", reason: format!("GOSSIP_GATEWAY_MINT_CALL_MANDATES must be true/false/1/0, got {other:?}") }),
             };
         }
+        if let Ok(v) = env::var("GOSSIP_COLLECT_EXPIRED_RECORDS") {
+            self.collect_expired_records = match v.as_str() {
+                "true" | "1" => true,
+                "false" | "0" => false,
+                other => return Err(GossipError::InvalidField { field: "collect_expired_records", reason: format!("GOSSIP_COLLECT_EXPIRED_RECORDS must be true/false/1/0, got {other:?}") }),
+            };
+        }
         if let Ok(v) = env::var("GOSSIP_CALL_MANDATE_TTL_SECS") {
             self.call_mandate_ttl_secs = v.parse().map_err(GossipError::Parse)?;
         }
@@ -3773,6 +3790,7 @@ mod tests {
     #[test]
     fn the_call_mandate_settings_refuse_what_cannot_hold() {
         let ok = GossipConfig::default();
+        assert!(!ok.collect_expired_records, "nothing is collected until the operator turns it on (#794's review, K3)");
         assert!(!ok.gateway_mint_call_mandates && ok.call_mandate_ttl_secs == 300 && ok.max_drain_secs == 300 && ok.grant_retention_secs == 604_800);
         assert!(ok.validate().is_ok());
         let refused = |edit: &dyn Fn(&mut GossipConfig)| {

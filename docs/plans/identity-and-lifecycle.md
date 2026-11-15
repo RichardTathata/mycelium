@@ -1331,7 +1331,11 @@ a snapshot back and touching the file).
   never finishing, the stop record naming the term, a second revoke idempotent. *The revoke* is
   `call_issuer::revoke_call`: sequence 2 naming the term, held as issued **before** it is written (so the
   re-assertion never writes the first checkpoint back over it), offered to this node's own authority with a sweep,
-  written durably. **No door calls it yet** (PR 3); it is `pub(crate)`.
+  written durably. **No door calls it yet** (PR 3); it is `pub(crate)`. *#794's review, K1:* it answers that the
+  checkpoint is on record only from this process's own record of its durable writes (`Issued::durable_seq`), never
+  from the KV, which the re-assertion writes without an fsync — the reviewer's
+  `rev794_a_revoke_is_not_acknowledged_while_the_disk_is_gone_whatever_the_re_assertion_wrote`, seen failing on
+  `8e56186a` and with the KV shortcut planted back; after a restart the revoke writes the checkpoint again.
 - *Exit 11, "the first and the revoking checkpoint are on disk (`write_record_durable`) before the call is admitted
   or the cancel acknowledged, and the fsync's added admission latency is measured"*:
   `the_mints_records_are_on_disk_before_the_call_is_sent_or_nothing_is_sent` — both records on the WAL's
@@ -1365,20 +1369,24 @@ a snapshot back and touching the file).
   collects below D-5's floor"*, *"a non-issuer reads `valid_until_ms` from the `call/…/window` record. With the record
   absent or forged, it keeps the pair until the cap-based floor"*, *"the issuer collects with `kv_delete`, and any other
   node with `kv_delete_held`"*, *"a test for each shows the records gone after the setting, and kept before it. One
-  case runs with the issuer stopped"*: `call_issuer::collect`, run each minute by every node with an execution
-  authority or a mint (`start_collector`); `a_calls_records_are_kept_to_their_floor_and_collected_past_it_by_the_issuer_or_any_other_node`
-  (kept at the floor, collected 1 ms past it, at the issuer and — the issuer stopped — at the provider) and the
-  forged-record test (a forged, misplaced or missing window keeps the pair to the cap-based floor; a pair neither of
-  whose records verifies is never collected, counted `call_records_unverifiable`). The records are collected at the
+  case runs with the issuer stopped"*: `call_issuer::collect`, run each minute by a node with the new
+  `collect_expired_records` on (`start_collector`; off by default since #794's review, K3). **Changed by the
+  maintainer's decision of 2026-11-15 (owner-only, above): "any other node with `kv_delete_held`" is withdrawn** — no
+  node deletes another agent's record, so with the issuer stopped its records stay at the provider.
+  `a_calls_records_are_collected_past_their_floor_by_their_issuer_and_by_no_other_node` (kept at the floor, collected
+  1 ms past it by the issuer; at the provider, with the issuer stopped, never) and the forged-record test (a forged,
+  misplaced or missing window keeps the pair to the cap-based floor, and is itself neither trusted nor deleted; a pair
+  neither of whose records verifies is never collected, counted `call_records_unverifiable`). The records are collected at the
   first collection past the floor, so `max_drain_secs` caps their life to the floor plus one interval (60 s).
   *"The sweep ceiling applies to `call:` work"*: PR 1a's 5 s clamp (`sweep_interval_ms`), unchanged.
   *"`grant_retention_secs` (default 7 days) collects `grant/` records past it"*, with D-5's *"for `grant/`, until
   `valid_until_ms` + 2·skew"* and rev 0.19's note *"the collector this row builds must also collect the signed use
   markers and signed releases that CR2's first PR writes under `grant/…/used/` … under the same retention floor"*:
-  `a_grants_records_are_kept_for_their_retention_and_collected_past_it` — every record under a grant whose `issued`
-  record verifies, its `used/` markers and releases with them, past the later of its window + 2·skew and its issue +
-  the retention; a grant whose `issued` record does not verify is never collected. **Not built, stated:** a grant
-  request never answered or refused (no `issued` record to read a window from) is not collected; and **CR2's
+  `each_owner_collects_only_its_own_grant_records_and_the_holder_reads_expired` — owner-only: the issuer's own signed
+  `issued` and `checkpoint` past the later of the window + 2·skew and the issue + the retention; the door's own signed
+  markers and releases past their time + the retention; nothing another agent wrote, nothing unsigned, nothing of a
+  grant this node did not issue; and the holder's status route answering `expired`. **Not built, stated:** unsigned
+  records (the request, `consumed`, `revoked`, `refused`) are never collected; and **CR2's
   node-local use journal** (`grants/uses.journal`), which the note asks *"whichever of the two lands second"* to state
   — this PR lands second: the journal is still read whole at every start and never compacted; its compaction is not
   built, and its retention is the node's disk ([ledger](../operations/what-is-proven.md#grant-use-journal-not-compacted)).
@@ -1397,6 +1405,21 @@ a snapshot back and touching the file).
   (the collector) or re-asserting it (the gateway); the forged-record test is
   `a_forged_or_missing_record_at_a_calls_keys_moves_neither_the_gateway_nor_its_collector`. The collector also reads
   `grant/…/issued` the same way (verified under its issuing node's key, its holder and term against the key).
+
+**Decided 2026-11-15 (the maintainer, on #794's review): each agent's retention is a promise about its own
+records.** The collector deletes only records its own agent wrote. A gateway collects its own `call/` records and its
+own grant issue records, signed under its key; a door collects the CR2 use markers and releases it signed, after the
+same `grant_retention_secs` (the use is a statement about the same grant, and a retention of at least the longest
+window keeps it while the grant can be presented, so no reason was found to differ); no node deletes a record whose
+signer is another agent, and a record that does not verify under the key its path names is left alone and counted.
+A holder's request expires on its gateway's schedule (`expires_at_ms`), and after its grant's records go the status
+route answers it `expired` (200, `"state": "expired"`), never `unknown_request`. Each collector runs only where it is
+turned on (`collect_expired_records`, off by default). *Built in PR 2*: `call_issuer::collect`,
+`grant_use::own_record_at`; tests `a_calls_records_are_collected_past_their_floor_by_their_issuer_and_by_no_other_node`,
+`each_owner_collects_only_its_own_grant_records_and_the_holder_reads_expired`, and the forged-record test's window
+step. **What is kept to answer `expired` is the request record itself**: request records are unsigned, so by the same
+rule no node may delete them — signing them, so their writer can collect them and keep only a signed expiry stub, is
+**not built** and is put to the maintainer.
 
 **PR 2's entry conditions, as PR 2 meets them.**
 - *"PR 2 either refuses a cancellable call at those two doors until PR 3 builds their stop, or states the gap as
@@ -1446,7 +1469,8 @@ a snapshot back and touching the file).
 - *"`cancelled` must be terminal at `mycelium-reason`'s router … before PR 2's mint is on by default the router
   stops on `data.reason` `cancelled`"*: built now, though the mint is off by default — `route::is_cancelled` and
   `RouteError::Cancelled` (`409` at the façades); it also stops on `call_mandate_not_established` with `data.cause`
-  `revoked` (cancelled before it ran). `a_cancelled_reply_is_final_and_no_other_refusal_is` (unit) and
+  `revoked` (cancelled before it ran). **`mycelium-reason` needs 0.12.0 at release**: `RouteError` gains a variant and
+  is not `#[non_exhaustive]`. `a_cancelled_reply_is_final_and_no_other_refusal_is` (unit) and
   `a_cancelled_call_is_not_retried_on_the_next_provider` (`mycelium-reason/tests/reason.rs`, two providers, the
   second never asked).
 - *"A gateway may give its claim back on that answer only once every provider that bridges an MCP server is at a

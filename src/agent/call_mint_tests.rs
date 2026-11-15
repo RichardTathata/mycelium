@@ -40,6 +40,8 @@ struct Opts {
     persist: bool,
     /// This node serves the tools (`slow`, 30 s; `quick`, at once).
     tools: bool,
+    /// `collect_expired_records`.
+    collect: bool,
 }
 
 struct N {
@@ -73,6 +75,7 @@ async fn node(opts: Opts) -> N {
         cfg.persistence = Some(PersistenceConfig { base_path: dir.join("persist"), sync_mode: SyncMode::Flush, snapshot_wal_threshold: 1_000, snapshot_interval_secs: 3_600, on_unreadable: OnUnreadable::Refuse });
     }
     cfg.gateway_mint_call_mandates = opts.mint;
+    cfg.collect_expired_records = opts.collect;
     if let Some(t) = opts.ttl_secs {
         cfg.call_mandate_ttl_secs = t;
     }
@@ -174,6 +177,11 @@ async fn pair(gopts: Opts) -> (N, N, std::path::PathBuf) {
     assert!(until(|| knows(&g.a, p.a.node_id()) && knows(&p.a, g.a.node_id()), Duration::from_secs(20)).await, "the nodes learned each other's keys");
     let tool = format!("tools/slow/{}", p.a.node_id());
     assert!(until(|| g.kv(&tool).is_some(), Duration::from_secs(20)).await, "the gateway sees the provider's tool");
+    // #794's review, K2: the gateway dispatches only to a provider whose caller-context marker it holds
+    // (`provider_enforces_context`), and the provider reads the gateway's. Under a loaded suite the tool's entry could
+    // arrive before the marker, and the call was refused `provider_without_caller_context` — never registered.
+    let marked = |x: &N, of: &NodeId| x.kv(&super::gateway_caller::marker_key(of)).is_some();
+    assert!(until(|| marked(&g, p.a.node_id()) && marked(&p, g.a.node_id()), Duration::from_secs(20)).await, "each node holds the other's caller-context marker");
     (g, p, cert_dir)
 }
 
@@ -184,13 +192,26 @@ async fn pair(gopts: Opts) -> (N, N, std::path::PathBuf) {
 /// stops the call **within gossip + *F* / 20 + the drain bound, asserted against the configured *F* (2 s)**; the
 /// client is answered `cancelled`, the tool did not finish, and `p`'s stop record names the term. Seen failing first:
 /// with `mints_for` answering `false`, the call was never registered at the provider (refused `no_call_mandate`).
+/// #794's review, K2: this test timed out once in CI with nothing registered. With the gateway not yet holding the
+/// provider's caller-context marker — planted, as a loaded suite can leave it — the call is refused
+/// `provider_without_caller_context` and never sent, the same symptom; `pair` now waits for both markers, and a miss
+/// prints the client's answer and the counters.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_clients_call_through_the_gateway_is_minted_admitted_and_stopped_by_a_cancel() {
     let (g, p, cert_dir) = pair(Opts { mint: true, ..Opts::default() }).await;
     let g = Arc::new(g);
     let g2 = Arc::clone(&g);
     let answered = tokio::spawn(async move { g2.client_call("slow").await });
-    p.running(1).await;
+    // On a miss, say why (#794's review, K2): the client's answer, the gateway's mints and the provider's refusals.
+    if !until(|| p.authority.running_count() == 1 || answered.is_finished(), Duration::from_secs(20)).await || p.authority.running_count() != 1 {
+        let reply = if answered.is_finished() { answered.await.ok() } else { None };
+        let c = &g.ctx().call_issuer;
+        panic!(
+            "the call was not registered at the provider: client answer {reply:?}; gateway mints {} refused {}; provider windows {:?}, call_windows_refused {}, checkpoints refused {}",
+            c.mints.load(Ordering::Relaxed), c.mints_refused.load(Ordering::Relaxed), p.authority.view_sizes(),
+            p.authority.call_windows_refused(), p.authority.call_checkpoints_refused(),
+        );
+    }
     p.began(1).await;
     let terms = g.ctx().call_issuer.issued_terms();
     assert_eq!(terms.len(), 1, "one call, one mint: {terms:?}");
@@ -310,8 +331,10 @@ async fn a_cancelled_call_presented_again_after_a_wal_only_restart_is_refused_an
     let v = n.send(&me, kept).await;
     assert!(v["error"].is_null(), "the call minted before the restart is established after it: {v}");
     assert_eq!(n.finished.load(Ordering::SeqCst), 1, "only the kept call ran");
-    // The term is known again from the gateway's own verified records, so a cancel after the restart answers it.
-    assert_eq!(call_issuer::revoke_call(n.ctx(), &term).await, Ok(false), "already revoked, read back from the KV");
+    // The term is known again from the gateway's own verified records, so a cancel after the restart answers it — by
+    // writing the revoking checkpoint durably again: this process cannot know the KV's copy is on its disk (K1).
+    assert_eq!(call_issuer::revoke_call(n.ctx(), &term).await, Ok(true), "written again after the restart");
+    assert_eq!(call_issuer::revoke_call(n.ctx(), &term).await, Ok(false), "and then on record");
     n.a.shutdown().await;
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -388,7 +411,8 @@ async fn a_forged_or_missing_record_at_a_calls_keys_moves_neither_the_gateway_no
     assert!(until(|| n.kv(&cp).as_ref() == Some(&ours), Duration::from_secs(5)).await, "the forged checkpoint was written over");
     mycelium_core::ops::kv_delete(n.ctx(), Arc::from(cp.as_str()));
     assert!(until(|| n.kv(&cp).as_ref() == Some(&ours), Duration::from_secs(5)).await, "the tombstone was written over");
-    assert_eq!(n.ctx().call_issuer.reasserted.load(Ordering::Relaxed), 2);
+    // The count follows the write (`reassert` writes, then counts): wait on it, not on the value.
+    assert!(until(|| n.ctx().call_issuer.reasserted.load(Ordering::Relaxed) == 2, Duration::from_secs(5)).await, "each re-assertion counted");
 
     // The window: genuine first, to read its end.
     let members = call_issuer::record_keys(n.ctx());
@@ -408,8 +432,11 @@ async fn a_forged_or_missing_record_at_a_calls_keys_moves_neither_the_gateway_no
     assert!(call_issuer::verified_window(&win, &n.kv(&win).unwrap(), &members).is_none(), "a window for another term at this key");
     assert_eq!(call_issuer::collect(n.ctx(), floor + 1).call_records, 0);
     assert_eq!(call_issuer::collect(n.ctx(), fallback).call_records, 0, "kept up to the fallback floor");
-    assert_eq!(call_issuer::collect(n.ctx(), fallback + 1).call_records, 2, "and collected past it");
-    assert!(n.kv(&cp).is_none() && n.kv(&win).is_none());
+    let before = n.ctx().call_issuer.call_records_unverifiable.load(Ordering::Relaxed);
+    assert_eq!(call_issuer::collect(n.ctx(), fallback + 1).call_records, 1, "past it, the gateway's own checkpoint goes");
+    assert!(n.kv(&cp).is_none(), "its own record collected");
+    assert!(n.kv(&win).is_some(), "the value it did not sign at its window key is neither trusted nor deleted");
+    assert!(n.ctx().call_issuer.call_records_unverifiable.load(Ordering::Relaxed) > before, "and counted");
 
     // A pair neither of whose records verifies: never collected, counted.
     let junk = "c4242";
@@ -422,13 +449,14 @@ async fn a_forged_or_missing_record_at_a_calls_keys_moves_neither_the_gateway_no
     let _ = std::fs::remove_dir_all(&n.dir);
 }
 
-/// **Exit 12, the `call/` family.** A minted call's two records are kept up to D-5's floor — the window's end +
-/// 2·skew + `max_drain_secs` — and collected one millisecond past it, by the issuer with `kv_delete`; what the gateway
-/// held as issued goes with them. **With the issuer stopped**, the provider that holds the records (by gossip)
-/// collects them itself with `kv_delete_held`, at the same floor and not before. Seen failing first: with the floor
-/// read without `max_drain_secs`, the records went at the window's end + 2·skew.
+/// **Exit 12, the `call/` family, owner-only** (the maintainer's decision of 2026-11-15). A minted call's two records
+/// are kept up to D-5's floor — the window's end + 2·skew + `max_drain_secs` — and collected one millisecond past it,
+/// by their issuer; what the gateway held as issued goes with them. **The provider that holds them by gossip never
+/// deletes them**, even with the issuer stopped and far past the floor: they are another agent's records. Seen
+/// failing first: with the floor read without `max_drain_secs`, the records went at the window's end + 2·skew; and
+/// with the collector deleting every `call/` pair it holds (the PR's first head), the provider took the gateway's.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_calls_records_are_kept_to_their_floor_and_collected_past_it_by_the_issuer_or_any_other_node() {
+async fn a_calls_records_are_collected_past_their_floor_by_their_issuer_and_by_no_other_node() {
     let (g, p, cert_dir) = pair(Opts { mint: true, ..Opts::default() }).await;
     let target = p.a.node_id().clone();
     let (_a, issuer_term) = g.framed(&target, "quick").await;
@@ -452,30 +480,42 @@ async fn a_calls_records_are_kept_to_their_floor_and_collected_past_it_by_the_is
     let until_ms = call_issuer::verified_window(&win, &p.kv(&win).unwrap(), &call_issuer::record_keys(p.ctx())).unwrap().valid_until_ms;
     let floor = until_ms + 2 * SKEW_MS + p.ctx().config.max_drain_secs * 1_000;
     g.a.shutdown().await;
-    assert_eq!(call_issuer::collect(p.ctx(), floor).call_records, 0, "kept at the floor with the issuer gone");
-    assert_eq!(call_issuer::collect(p.ctx(), floor + 1).call_records, 2, "collected past it by a node that is not the issuer");
-    assert!(p.kv(&cp).is_none() && p.kv(&win).is_none());
+    assert_eq!(call_issuer::collect(p.ctx(), floor + 1).call_records, 0, "not the provider's to delete");
+    assert_eq!(call_issuer::collect(p.ctx(), u64::MAX / 2).call_records, 0, "not even far past the floor");
+    assert!(p.kv(&cp).is_some() && p.kv(&win).is_some(), "the gateway's records stand at the provider");
     p.a.shutdown().await;
     let _ = std::fs::remove_dir_all(&cert_dir);
 }
 
-/// **Exit 12, the `grant/` family, with critique plan CR2's markers and releases.** A grant whose `issued` record
-/// verifies is collected — the request, the grant, its checkpoint, `consumed`, the use marker and a release under
-/// `used/` — past the later of its window's end + 2·skew and its issue + `grant_retention_secs`, and kept before.
-/// A grant whose `issued` record is signed by another key is never collected; nor is a request with no `issued`
-/// record (pending or refused: not built). Seen failing first: with the floor at the window's end + 2·skew only, the
-/// grant's records went six days early.
+/// **Exit 12, the `grant/` family, owner-only, with critique plan CR2's markers and releases** (the maintainer's
+/// decision of 2026-11-15: each agent's retention is a promise about its own records). This node is the grant's
+/// issuer and one of its doors:
+/// - as the issuer it deletes its own `issued` and `checkpoint` — each signed under its key — past the later of the
+///   window + 2·skew and the issue + `grant_retention_secs`, and keeps them before;
+/// - as a door it deletes the use marker it signed past its `at_ms` + the retention + 2·skew;
+/// - it deletes nothing else: another door's marker (signed by another node), a forged marker naming this node, the
+///   request, `consumed`, `revoked`, and every record of a grant whose `issued` another key signed — even far past;
+/// - and the holder's status route then answers the request **`expired`**, from the request record it kept, not
+///   `unknown_request`.
+///
+/// Seen failing first: with the collector deleting every record under a verified grant (the PR's first head), the
+/// other door's marker and the request went, and the status route answered `404 unknown_request`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_grants_records_are_kept_for_their_retention_and_collected_past_it() {
+async fn each_owner_collects_only_its_own_grant_records_and_the_holder_reads_expired() {
     let n = node(Opts::default()).await;
-    let key = n.ctx().tls.get().unwrap().signing_key();
+    let ctx = n.ctx();
+    let key = ctx.tls.get().unwrap().signing_key();
     let other = ed25519_dalek::SigningKey::from_bytes(&[78u8; 32]);
     let holder = "token:gw/alice";
     let now = n.now();
+    let me = n.gateway();
+    let sign_checkpoint = |sk: &ed25519_dalek::SigningKey, request: &str| {
+        serde_json::to_vec(&super::gateway_authority::call_mint::checkpoint(sk, &me, &format!("grant:{request}"), 1, now, &[])).unwrap()
+    };
     let write_grant = |request: &str, signer: &ed25519_dalek::SigningKey| {
         let m = Mandate {
             holder: PrincipalId::new(holder).unwrap(),
-            established_by: PrincipalId::new(n.gateway()).unwrap(),
+            established_by: PrincipalId::new(&me).unwrap(),
             purpose: "grant".into(),
             scope: format!("grant:{request}"),
             operations: vec!["tools/call:tool:deploy@x".into()],
@@ -486,34 +526,59 @@ async fn a_grants_records_are_kept_for_their_retention_and_collected_past_it() {
         };
         let g = SignedMandateGrant { signature: mycelium_core::tls::sign_bytes(signer, &m.canonical_bytes()).to_vec(), mandate: m };
         let base = format!("grant/{}/{request}", grant_holder_segment(holder));
+        let request_record = serde_json::json!({"schema": "mycelium.grant-request/1", "request": request, "agent": holder, "tool": "deploy", "requested_at_ms": now, "expires_at_ms": now.saturating_sub(1)});
         for (k, v) in [
-            (base.clone(), b"{\"request\":1}".to_vec()),
+            (base.clone(), request_record.to_string().into_bytes()),
             (format!("{base}/issued"), serde_json::to_vec(&g).unwrap()),
-            (format!("{base}/checkpoint"), b"{}".to_vec()),
+            (format!("{base}/checkpoint"), sign_checkpoint(signer, request)),
             (format!("{base}/consumed"), b"{}".to_vec()),
-            (format!("{base}/used/gateway"), b"{\"kind\":\"use\"}".to_vec()),
-            (format!("{base}/used/provider"), b"{\"kind\":\"release\"}".to_vec()),
+            (format!("{base}/revoked"), b"{}".to_vec()),
         ] {
-            super::state_machine::write_owned_kv(n.ctx(), &k, v);
+            super::state_machine::write_owned_kv(ctx, &k, v);
         }
         base
     };
     let genuine = write_grant("r1", &key);
     let forged = write_grant("r2", &other);
-    let pending = format!("grant/{}/r3", grant_holder_segment(holder));
-    super::state_machine::write_owned_kv(n.ctx(), &pending, b"{\"request\":3}".to_vec());
-    // A request id that is a prefix of another's is its own grant: `r1`'s collection leaves `r10` alone.
-    let neighbour = format!("grant/{}/r10", grant_holder_segment(holder));
-    super::state_machine::write_owned_kv(n.ctx(), &neighbour, b"{\"request\":10}".to_vec());
-    let held = |base: &str| crate::store::scan_kv_prefix(&n.ctx().kv_state, base).into_iter().filter(|(k, _)| k.as_ref() == base || k.starts_with(&format!("{base}/"))).count();
-    assert_eq!((held(&genuine), held(&forged)), (6, 6));
-    let retention = n.ctx().config.grant_retention_secs * 1_000;
+    // The doors: this node's own marker; another door's, signed by its node; a forged one that names this node.
+    let marker = |base: &str, point: &str| format!("{base}/used/{point}");
+    let own = super::grant_use::UseRecord::signed(ctx, super::grant_use::UseKind::Use, &marker(&genuine, "provider"), "u1").unwrap();
+    super::state_machine::write_owned_kv(ctx, &marker(&genuine, "provider"), own.to_bytes());
+    let mut theirs = own.clone();
+    theirs.node = "127.0.0.1:1".into();
+    theirs.door = "gateway".into();
+    theirs.sign_with(&other);
+    super::state_machine::write_owned_kv(ctx, &marker(&genuine, "gateway"), theirs.to_bytes());
+    let mut fake = own.clone();
+    fake.door = "relay".into();
+    fake.sign_with(&other);
+    super::state_machine::write_owned_kv(ctx, &marker(&genuine, "relay"), fake.to_bytes());
+    let held = |k: &str| n.kv(k).is_some();
+    let retention = ctx.config.grant_retention_secs * 1_000;
     let floor = now + retention;
     assert!(floor > now + 300_000 + 2 * SKEW_MS, "the retention, not the window, is the later bound at the default");
-    assert_eq!(call_issuer::collect(n.ctx(), floor).grant_records, 0, "kept for its retention");
-    assert_eq!(call_issuer::collect(n.ctx(), floor + 1).grant_records, 6, "collected past it, markers and release with it");
-    assert_eq!((held(&genuine), held(&forged), held(&pending), held(&neighbour)), (0, 6, 1, 1), "the forged grant, the pending request and the neighbour stay");
-    assert_eq!(call_issuer::collect(n.ctx(), u64::MAX / 2).grant_records, 0, "and are never collected here");
+    assert_eq!(call_issuer::collect(ctx, floor).grant_records, 0, "kept for its retention");
+    let marker_floor = own.at_ms + retention + 2 * SKEW_MS;
+    let past = floor.max(marker_floor) + 1;
+    assert_eq!(call_issuer::collect(ctx, past).grant_records, 3, "its issued, its checkpoint and its own marker");
+    assert!(!held(&format!("{genuine}/issued")) && !held(&format!("{genuine}/checkpoint")) && !held(&marker(&genuine, "provider")));
+    for k in [genuine.clone(), format!("{genuine}/consumed"), format!("{genuine}/revoked"), marker(&genuine, "gateway"), marker(&genuine, "relay")] {
+        assert!(held(&k), "{k}: another agent's, unsigned, or forged — left alone");
+    }
+    for k in [forged.clone(), format!("{forged}/issued"), format!("{forged}/checkpoint")] {
+        assert!(held(&k), "{k}: a grant this node did not issue");
+    }
+    assert_eq!(call_issuer::collect(ctx, u64::MAX / 2).grant_records, 0, "and never collected here");
+    // The holder's status route answers the request it kept: expired, not unknown.
+    let resp = reqwest::Client::new().get(format!("http://127.0.0.1:{}/gateway/grants/request/r1", n.http_port)).bearer_auth("alice-secret").send().await.unwrap();
+    let status = resp.status().as_u16();
+    let v: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!((status, v["state"].as_str()), (200, Some("revoked")), "the unsigned revoked record still answers: {v}");
+    mycelium_core::ops::kv_delete(ctx, Arc::from(format!("{genuine}/revoked").as_str()));
+    let resp = reqwest::Client::new().get(format!("http://127.0.0.1:{}/gateway/grants/request/r1", n.http_port)).bearer_auth("alice-secret").send().await.unwrap();
+    let status = resp.status().as_u16();
+    let v: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!((status, v["state"].as_str()), (200, Some("expired")), "{v}");
     n.a.shutdown().await;
     let _ = std::fs::remove_dir_all(&n.dir);
 }
@@ -599,4 +664,45 @@ async fn an_envelope_past_the_cap_with_its_call_mandate_is_refused_by_name_and_w
     assert_eq!(n.ctx().call_issuer.mints.load(Ordering::Relaxed), 0);
     n.a.shutdown().await;
     let _ = std::fs::remove_dir_all(&n.dir);
+}
+
+
+/// rev794 K1 — **a revoke the disk refused, then a member's write at the call's key: the re-assertion puts the revoking
+/// checkpoint in the KV without an fsync, and the next revoke answers `Ok` — acknowledged — while the disk is still
+/// gone.** `revoke_call`'s "already on record" shortcut reads the KV, and `reassert` writes through `write_owned_kv`
+/// (`append_try`, no sync). The reviewer's test, seen failing on 8e56186a (`Ok(false)`); fixed by `Issued::durable_seq`:
+/// only this process's own durable write lets a revoke answer that the checkpoint is on record.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rev794_a_revoke_is_not_acknowledged_while_the_disk_is_gone_whatever_the_re_assertion_wrote() {
+    let n = node(Opts { mint: true, persist: true, tools: true, ..Opts::default() }).await;
+    let me = n.a.node_id().clone();
+    let (_framed, term) = n.framed(&me, "quick").await;
+    let cp = call_checkpoint_key(&n.gateway(), &term);
+    n.ctx().wal.get().expect("persists").poison_for_test("the disk is gone").await.unwrap();
+    assert!(matches!(call_issuer::revoke_call(n.ctx(), &term).await, Err(call_issuer::RevokeRefusal::NotDurable(_))), "the first revoke is refused");
+    // A member writes at the key (anything): the gateway's watcher re-asserts what it holds — the revoking checkpoint.
+    let before = n.ctx().call_issuer.reasserted.load(Ordering::Relaxed);
+    let member = NodeId::new("127.0.0.1", 1).unwrap();
+    let junk = crate::framing::make_gossip_update_stamped(&member, 5, Arc::from(cp.as_str()), Bytes::from_static(b"junk"), false, crate::hlc::pack(n.now() + 10, 0));
+    crate::store::apply_and_notify(&n.ctx().kv_state, &junk);
+    assert!(until(|| n.ctx().call_issuer.reasserted.load(Ordering::Relaxed) > before, Duration::from_secs(5)).await, "re-asserted");
+    let again = call_issuer::revoke_call(n.ctx(), &term).await;
+    n.a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&n.dir);
+    assert!(matches!(again, Err(call_issuer::RevokeRefusal::NotDurable(_))), "the disk is still gone, so the revoke is not acknowledged: {again:?}");
+}
+
+/// **The collector runs only where it is turned on** (#794's review, K3). A node with an execution authority and a
+/// mint, `collect_expired_records` off (the default), starts no collector — so nothing is deleted; with it on, one is
+/// started, once. Seen failing first: with `start_collector` ignoring the setting, the default node started one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_collector_runs_only_where_it_is_turned_on() {
+    let off = node(Opts { mint: true, ..Opts::default() }).await;
+    assert!(!call_issuer::start_collector(off.ctx()), "off: not started");
+    assert_eq!(off.ctx().call_issuer.collecting(), false, "no collector runs at a default node");
+    off.a.shutdown().await;
+    let on = node(Opts { mint: true, collect: true, ..Opts::default() }).await;
+    assert!(on.ctx().call_issuer.collecting(), "on: started at the node's start");
+    assert!(!call_issuer::start_collector(on.ctx()), "and only once");
+    on.a.shutdown().await;
 }

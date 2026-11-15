@@ -46,16 +46,13 @@
 //! [`MAX_ISSUED_CALLS`]); after a restart it holds nothing and re-asserts nothing (D-4: the KV is the record), which is
 //! stated, not closed.
 //!
-//! # The collector (D-5)
+//! # The collector (D-5), owner-only
 //!
-//! A record is never collected while its mandate could still be presented. For `call/`: past the window's end
-//! + 2·skew + `max_drain_secs`, the window read from a verified `window` record — or, with none, past the verified
-//! checkpoint's `issued_at_ms` + [`GRANT_TTL_CAP_SECS`] + 2·skew + `max_drain_secs`; a pair neither of whose records
-//! verifies is never collected here (counted). For `grant/`: a grant whose `issued` record verifies is collected,
-//! every record under it (the request, the grant, its checkpoints, its revocation, `consumed`, the use markers and
-//! releases of critique plan row CR2), past the later of its window's end + 2·skew and its issue +
-//! `grant_retention_secs`. The issuer deletes with `kv_delete`; any other node with `kv_delete_held`, at the stamp it
-//! holds, so a newer write beats it.
+//! Off unless `collect_expired_records` is on. **Each node deletes only records its own agent wrote** (the
+//! maintainer's decision of 2026-11-15): a gateway its own `call/` pairs and its own grant issue records (`issued`,
+//! `checkpoint`), a door the use markers and releases it signed — each checked against this node's key before it is
+//! tombstoned, never earlier than D-5's floor. Another agent's record, and any record that does not verify, is left
+//! alone; one at a path naming this node is counted. See [`collect`].
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -195,6 +192,9 @@ pub(crate) struct Issued {
     at_ms: u64,
     revoked: bool,
     until_ms: u64,
+    /// The highest sequence **this process** wrote durably (#794's review, K1): the re-assertion writes without an
+    /// fsync, so a checkpoint in the KV is not, by itself, a checkpoint on disk.
+    durable_seq: u64,
 }
 
 /// The gateway's state for the calls it mints, on `TaskCtx`. A papaya map, so it adds no lock.
@@ -214,6 +214,12 @@ pub(crate) struct CallIssuer {
 }
 
 impl CallIssuer {
+    /// Is this node's collector running?
+    #[cfg_attr(not(all(test, feature = "compliance")), allow(dead_code))]
+    pub(crate) fn collecting(&self) -> bool {
+        self.collector.load(Ordering::Acquire)
+    }
+
     /// The terms this gateway holds as issued (the re-assertion's fallback walk; tests).
     pub(crate) fn issued_terms(&self) -> Vec<String> {
         self.issued.pin().keys().cloned().collect()
@@ -319,7 +325,7 @@ pub(crate) async fn record(ctx: &TaskCtx, minted: Minted) -> Result<(), String> 
     write_durable(ctx, call_window_key(&gateway, &minted.term), minted.window).await?;
     #[cfg(test)]
     test_hooks::note_record_latency(&ctx.node_id, started.elapsed());
-    ctx.call_issuer.issued.pin().insert(minted.term, Issued { seq: 1, at_ms: minted.at_ms, revoked: false, until_ms: minted.until_ms });
+    ctx.call_issuer.issued.pin().insert(minted.term, Issued { seq: 1, at_ms: minted.at_ms, revoked: false, until_ms: minted.until_ms, durable_seq: 1 });
     ctx.call_issuer.mints.fetch_add(1, Ordering::Relaxed);
     #[cfg(feature = "metrics")]
     metrics::counter!("mycelium_gateway_call_mints_total").increment(1);
@@ -340,9 +346,11 @@ pub(crate) enum RevokeRefusal {
 
 /// **Cancel the call of `term`** (I4): its next checkpoint, its term revoked, offered to this node's own authority
 /// (and its sweep run, so work admitted here stops now) and written durably where a provider reads it. `Ok(true)`:
-/// this call wrote the revoking checkpoint to disk; `Ok(false)`: it was there already. A revoke whose write the
-/// disk refused is answered `NotDurable` and stands in this process only; called again once the disk is back, it
-/// writes the same checkpoint (its signature is deterministic) and answers `Ok(true)`.
+/// this call wrote the revoking checkpoint to disk; `Ok(false)`: this process had already written it durably. A revoke
+/// whose write the disk refused is answered `NotDurable` and stands in this process only; called again it writes the
+/// same checkpoint (its signature is deterministic) and answers `Ok(true)` once the disk takes it — whatever the KV
+/// holds meanwhile, since the re-assertion writes without an fsync (#794's review, K1). After a restart the term is
+/// written again for the same reason.
 ///
 /// The term is known from memory, or — after a restart, which keeps nothing in memory (D-4) — from this gateway's
 /// own verified `window` record and checkpoint in the KV. Two revokes of one term at once make one checkpoint: the
@@ -365,16 +373,22 @@ pub(crate) async fn revoke_call(ctx: &Arc<TaskCtx>, term: &str) -> Result<bool, 
                 return Err(RevokeRefusal::UnknownTerm);
             };
             let held = mycelium_core::ops::kv_get(ctx, &cp_key).and_then(|b| verified_checkpoint(&cp_key, &b, &members));
-            Issued {
+            let issued = Issued {
                 seq: held.as_ref().map_or(1, |c| c.seq),
                 at_ms: held.as_ref().map_or(0, |c| c.issued_at_ms),
                 revoked: held.as_ref().is_some_and(|c| c.revoked.iter().any(|t| t.as_str() == term)),
                 until_ms: w.valid_until_ms,
-            }
+                // What the KV holds after a restart may have come back by gossip from a copy this gateway never
+                // fsynced: nothing is taken as on disk until this process writes it.
+                durable_seq: 0,
+            };
+            // Held from here, so what this process writes durably is remembered (and re-asserted).
+            let _ = ctx.call_issuer.issued.pin().try_insert(term.to_string(), issued);
+            issued
         }
     };
     let now = ctx.hlc.decision_now_ms();
-    let next = Issued { seq: issued.seq + 1, at_ms: now, revoked: true, until_ms: issued.until_ms };
+    let next = Issued { seq: issued.seq + 1, at_ms: now, revoked: true, until_ms: issued.until_ms, durable_seq: issued.durable_seq };
     // Held as issued **before** the write: the re-assertion compares the KV with what it holds, so it must never
     // hold the first checkpoint while the revoking one is in the KV — it would write the first back over it.
     let won = !issued.revoked
@@ -392,14 +406,15 @@ pub(crate) async fn revoke_call(ctx: &Arc<TaskCtx>, term: &str) -> Result<bool, 
         authority.sweep(now);
     }
     let bytes = serde_json::to_vec(&signed).map_err(|e| RevokeRefusal::NotDurable(e.to_string()))?;
-    // Already on record — this gateway's own revoking checkpoint at or past this sequence: nothing to write.
-    if mycelium_core::ops::kv_get(ctx, &cp_key)
-        .and_then(|b| verified_checkpoint(&cp_key, &b, &members))
-        .is_some_and(|c| c.seq >= revoking.seq && c.revoked.iter().any(|t| t.as_str() == term))
-    {
+    // Already on disk — written durably by this process at or past this sequence: nothing to write. Only this
+    // process's own record of its durable writes decides it (#794's review, K1): the KV may hold the revoking
+    // checkpoint because the re-assertion wrote it without an fsync.
+    if revoking.durable_seq >= revoking.seq {
         return Ok(false);
     }
     write_durable(ctx, cp_key, bytes).await.map_err(RevokeRefusal::NotDurable)?;
+    let written = revoking.seq;
+    ctx.call_issuer.issued.pin().update(term.to_string(), move |i| Issued { durable_seq: i.durable_seq.max(written), ..*i });
     #[cfg(feature = "metrics")]
     metrics::counter!("mycelium_gateway_calls_cancelled_total").increment(1);
     Ok(true)
@@ -456,84 +471,111 @@ pub(crate) struct Collected {
     pub(crate) grant_records: usize,
 }
 
-/// Tombstone `key`: with `kv_delete` at the issuer, with `kv_delete_held` at the stamp this node holds elsewhere.
-fn delete(ctx: &TaskCtx, key: &Arc<str>, issuer: bool) -> bool {
-    if issuer {
-        mycelium_core::ops::kv_delete(ctx, Arc::clone(key));
-        return true;
-    }
-    let held = ctx.kv_state.store.pin().get(key.as_ref()).and_then(|e| e.data.as_ref().map(|_| e.timestamp));
-    held.is_some_and(|stamp| mycelium_core::ops::kv_delete_held(ctx, Arc::clone(key), stamp))
-}
-
-/// **Collect what D-5 lets go at `now_ms`** (see the module doc). Every node with an execution authority or a mint
-/// runs it each minute.
+/// **Collect what D-5 lets go at `now_ms` — only records this node's own agent wrote** (the maintainer's decision of
+/// 2026-11-15: each agent's retention is a promise about its own records). This node deletes, with a tombstone:
+/// - **as a gateway**, its own `call/{self}/{term}/…` records — the pair once its window record (or, with none, its
+///   checkpoint) verifies under this node's key — past the window's end + 2·skew + `max_drain_secs`; and its own grant
+///   issue records, `grant/…/issued` and `grant/…/checkpoint` signed under its key, past the later of the grant's
+///   window + 2·skew and its issue + `grant_retention_secs`;
+/// - **as a door**, the use markers and releases it signed (critique plan CR2), past their `at_ms` +
+///   `grant_retention_secs` + 2·skew — never before the grant's window ends, since the retention is at least the
+///   longest window.
+///
+/// **No other record is deleted.** Another agent's record — a member's `call/` pair, another issuer's grant, another
+/// door's marker, an agent's request, an unsigned `revoked` or `refused` — is left alone; a record at a path that
+/// names this node and does not verify under its key is left alone and counted (`call_records_unverifiable`). A
+/// request record is unsigned, so it is never collected: after its grant's records go, the holder's status route
+/// still answers it `expired` from it.
 pub(crate) fn collect(ctx: &TaskCtx, now_ms: u64) -> Collected {
     let members = record_keys(ctx);
     let me = node_principal(&ctx.node_id);
     let skew2 = 2 * skew_ms(ctx);
+    let drain_ms = ctx.config.max_drain_secs * 1_000;
+    let retention_ms = ctx.config.grant_retention_secs.max(GRANT_TTL_CAP_SECS) * 1_000;
     let mut out = Collected::default();
+    let unverifiable = || {
+        ctx.call_issuer.call_records_unverifiable.fetch_add(1, Ordering::Relaxed);
+    };
+    let delete = |key: &Arc<str>| mycelium_core::ops::kv_delete(ctx, Arc::clone(key));
 
-    // `call/`: grouped by `{segment}/{term}`.
-    let mut calls: Grouped<(String, String)> = Default::default();
-    for (key, bytes) in crate::store::scan_kv_prefix(&ctx.kv_state, CALL_KEY_PREFIX) {
-        if let Some((gateway, term)) = call_key_names(&key) {
-            calls.entry((gateway, term)).or_default().push((key, bytes));
+    // `call/{self}/…`: this gateway's own pairs only.
+    let own = format!("{CALL_KEY_PREFIX}{}/", grant_holder_segment(&me));
+    let mut calls: Grouped<String> = Default::default();
+    for (key, bytes) in crate::store::scan_kv_prefix(&ctx.kv_state, &own) {
+        if let Some((_, term)) = call_key_names(&key) {
+            calls.entry(term).or_default().push((key, bytes));
         }
     }
-    for ((gateway, term), records) in calls {
+    for (term, records) in calls {
         let leaf = |name: &str| records.iter().find(|(k, _)| k.ends_with(&format!("/{name}")));
-        let window = leaf("window").and_then(|(k, b)| verified_window(k, b, &members));
-        let floor_of = |until_ms: u64| until_ms.saturating_add(skew2).saturating_add(ctx.config.max_drain_secs * 1_000);
-        let floor = match window {
+        let floor_of = |until_ms: u64| until_ms.saturating_add(skew2).saturating_add(drain_ms);
+        let floor = match leaf("window").and_then(|(k, b)| verified_window(k, b, &members)) {
             Some(w) => Some(floor_of(w.valid_until_ms)),
             None => leaf("checkpoint")
                 .and_then(|(k, b)| verified_checkpoint(k, b, &members))
                 .map(|c| floor_of(c.issued_at_ms.saturating_add(GRANT_TTL_CAP_SECS * 1_000))),
         };
         let Some(floor) = floor else {
-            ctx.call_issuer.call_records_unverifiable.fetch_add(1, Ordering::Relaxed);
+            unverifiable();
             continue;
         };
         if now_ms <= floor {
             continue;
         }
-        let issuer = gateway == me;
-        if issuer {
-            // Forgotten before the delete, so the re-assertion does not write back what is being collected.
-            ctx.call_issuer.issued.pin().remove(&term);
-        }
-        for (key, _) in &records {
-            if delete(ctx, key, issuer) {
+        // Forgotten before the delete, so the re-assertion does not write back what is being collected.
+        ctx.call_issuer.issued.pin().remove(&term);
+        // Only the two records this gateway writes, and each only if it is this gateway's: a value another member
+        // wrote at one of the keys is left alone.
+        for (key, bytes) in &records {
+            let ours = (key.ends_with("/window") && verified_window(key, bytes, &members).is_some())
+                || (key.ends_with("/checkpoint") && verified_checkpoint(key, bytes, &members).is_some());
+            if ours {
+                delete(key);
                 out.call_records += 1;
+            } else {
+                unverifiable();
             }
         }
     }
-    // What this gateway holds past its floor with nothing left in the KV.
     // Held until its window could no longer be presented anywhere (its end + 2·skew): past it a provider refuses the
     // mandate out of window whatever its checkpoint says, so there is nothing left to re-assert or revoke from memory.
     ctx.call_issuer.issued.pin().retain(|_, i| now_ms <= i.until_ms.saturating_add(skew2));
 
-    // `grant/`: grouped by `grant/{segment}/{request}`, collected only under a verified `issued` record.
+    // `grant/`: this node's own issue records and its own door's markers and releases.
     let mut grants: Grouped<String> = Default::default();
     for (key, bytes) in crate::store::scan_kv_prefix(&ctx.kv_state, "grant/") {
         let mut parts = key.splitn(4, '/');
         let (Some(_), Some(segment), Some(request)) = (parts.next(), parts.next(), parts.next()) else { continue };
         grants.entry(format!("grant/{segment}/{request}")).or_default().push((key, bytes));
     }
-    let retention_ms = ctx.config.grant_retention_secs.max(GRANT_TTL_CAP_SECS) * 1_000;
     for (base, records) in grants {
+        // As the issuer: `issued` and `checkpoint`, each signed under this node's key.
         let issued_key = format!("{base}/issued");
-        let Some((_, bytes)) = records.iter().find(|(k, _)| k.as_ref() == issued_key) else { continue };
-        let Some(issuer) = verified_grant(&base, bytes, &members) else { continue };
-        let (from, until) = issuer.1;
-        let floor = until.saturating_add(skew2).max(from.saturating_add(retention_ms));
-        if now_ms <= floor {
-            continue;
+        if let Some((key, bytes)) = records.iter().find(|(k, _)| k.as_ref() == issued_key)
+            && let Some((issuer, (from, until))) = verified_grant(&base, bytes, &members)
+            && issuer == me
+        {
+            let floor = until.saturating_add(skew2).max(from.saturating_add(retention_ms));
+            if now_ms > floor {
+                delete(key);
+                out.grant_records += 1;
+                let cp_key = format!("{base}/checkpoint");
+                if let Some((k, b)) = records.iter().find(|(k, _)| k.as_ref() == cp_key) {
+                    if own_grant_checkpoint(&base, b, &me, &members) {
+                        delete(k);
+                        out.grant_records += 1;
+                    } else {
+                        unverifiable();
+                    }
+                }
+            }
         }
-        let is_issuer = issuer.0 == me;
-        for (key, _) in &records {
-            if delete(ctx, key, is_issuer) {
+        // As a door: the use markers and releases this node signed.
+        for (key, bytes) in records.iter().filter(|(k, _)| k.contains("/used/")) {
+            if let Some(at_ms) = super::grant_use::own_record_at(ctx, key, bytes)
+                && now_ms > at_ms.saturating_add(retention_ms).saturating_add(skew2)
+            {
+                delete(key);
                 out.grant_records += 1;
             }
         }
@@ -543,6 +585,16 @@ pub(crate) fn collect(ctx: &TaskCtx, now_ms: u64) -> Collected {
     out
 }
 
+/// A grant's checkpoint at `{base}/checkpoint`, signed by this node (`me`) for the grant's scope.
+fn own_grant_checkpoint(base: &str, bytes: &[u8], me: &str, members: &impl MemberKeySource) -> bool {
+    let Some(request) = base.rsplit('/').next() else { return false };
+    let Ok(signed) = serde_json::from_slice::<SignedRevocationCheckpoint>(bytes) else { return false };
+    let c = &signed.checkpoint;
+    c.authority.as_str() == me && c.scope == format!("grant:{request}") && signed_by(me, &c.canonical_bytes(), &signed.signature, members)
+}
+
+/// A grant's `issued` record at `grant/{segment}/{request}/issued`, verified at read: a grant whose holder's segment
+/// and term are its key's, issued by a node, under that node's current key. `(issuer, (valid_from, valid_until))`.
 /// A grant's `issued` record at `grant/{segment}/{request}/issued`, verified at read: a grant whose holder's segment
 /// and term are its key's, issued by a node, under that node's current key. `(issuer, (valid_from, valid_until))`.
 fn verified_grant(base: &str, bytes: &[u8], members: &impl MemberKeySource) -> Option<(String, (u64, u64))> {
@@ -557,10 +609,14 @@ fn verified_grant(base: &str, bytes: &[u8], members: &impl MemberKeySource) -> O
         .then(|| (issuer.to_string(), (m.valid_from_ms, m.valid_until_ms)))
 }
 
-/// Start the collector, once per node: each minute, through the timer seam.
-pub(crate) fn start_collector(ctx: &Arc<TaskCtx>) {
+/// Start the collector, once per node, if `collect_expired_records` is on: each minute, through the timer seam.
+/// `false`: not started (off, or already running).
+pub(crate) fn start_collector(ctx: &Arc<TaskCtx>) -> bool {
+    if !ctx.config.collect_expired_records {
+        return false;
+    }
     if ctx.call_issuer.collector.swap(true, Ordering::AcqRel) {
-        return;
+        return false;
     }
     let ctx2 = Arc::clone(ctx);
     let mut shutdown = ctx.shutdown_tx.subscribe();
@@ -573,6 +629,7 @@ pub(crate) fn start_collector(ctx: &Arc<TaskCtx>) {
             let _ = collect(&ctx2, ctx2.hlc.decision_now_ms());
         }
     });
+    true
 }
 
 /// Start the re-assertion, once per minting gateway: a write under its own `call/{self}/…/checkpoint` keys is taken

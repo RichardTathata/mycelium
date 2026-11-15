@@ -2188,8 +2188,9 @@ impl GossipAgent {
                 }
             });
         }
-        // Identity-and-lifecycle I4, PR 2: the collector of the `call/` and `grant/` families (D-5), once per node.
-        call_issuer::start_collector(&self.task_ctx);
+        // Identity-and-lifecycle I4, PR 2: the collector of the `call/` and `grant/` families (D-5), once per node — only
+        // with `collect_expired_records` on (#794's review, K3).
+        let _ = call_issuer::start_collector(&self.task_ctx);
         // Identity-and-lifecycle I1: the authority verifies a client holder's possession by the client's current key, so
         // its external issuers are fed each one — those on record now, and each as the fold raises it. Only the
         // authority attached is fed (#743's review, item 9): one refused as a second is not registered.

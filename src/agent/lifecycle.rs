@@ -416,12 +416,14 @@ impl GossipAgent {
             let _ = self.task_ctx.a2a_default_skill.set(skill.clone());
         }
         // Identity-and-lifecycle I4, PR 2: a minting gateway re-asserts the `call:` checkpoints it issued when another
-        // value lands at their keys, and collects the `call/` and `grant/` records past D-5's floor.
+        // value lands at their keys; a node with `collect_expired_records` collects the `call/` and `grant/` records
+        // past D-5's floor.
         #[cfg(all(feature = "gateway", feature = "tls"))]
         if self.config.gateway_mint_call_mandates {
             super::call_issuer::start_reassertion(&self.task_ctx);
-            super::call_issuer::start_collector(&self.task_ctx);
         }
+        #[cfg(all(feature = "gateway", feature = "tls"))]
+        let _ = super::call_issuer::start_collector(&self.task_ctx);
         // `[authority]`'s plan, attached before the boundary: the journal opened first (identity-and-lifecycle I0).
         #[cfg(feature = "compliance")]
         if let Some(planned) = self.task_ctx.declared_authority.get().cloned()

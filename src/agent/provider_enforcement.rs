@@ -519,14 +519,15 @@ async fn admit_after(ctx: &Arc<TaskCtx>, principal: &str, call: Option<&Admitted
         if state == Some(super::action_evaluator::MandateState::Established) {
             let g = &presented.grant.mandate;
             let clock_ctx = Arc::clone(ctx);
-            work = Some(authority.begin(
+            let guard = authority.begin(
                 crate::mandate::authority::AuthorizedWork::new(
                     super::gateway_authority::mandate_operation(&call.operation, &call.resource),
                     Some(g.clone()),
                     g.valid_until_ms,
                 ),
                 Arc::new(move || clock_ctx.hlc.decision_now_ms()),
-            ));
+            );
+            work = Some(if call.unstoppable_at.is_some() { guard.unconfirmed() } else { guard });
         }
     }
     if let Some(why) = lapsed.filter(|w| !w.is_empty()) {
@@ -583,7 +584,8 @@ async fn admit_after(ctx: &Arc<TaskCtx>, principal: &str, call: Option<&Admitted
     let mut call_work = None;
     if let Some(call) = call {
         match assess_call_slot(ctx, call) {
-            Ok(guard) => call_work = Some(guard),
+            // A stop at a door that cannot stop is the door's release, not a confirmed stop (#794's review).
+            Ok(guard) => call_work = Some(if call.unstoppable_at.is_some() { guard.unconfirmed() } else { guard }),
             Err((cause, found)) if cause == CallCause::Revoked || call.cancellable => {
                 #[cfg(feature = "metrics")]
                 metrics::counter!("mycelium_provider_call_mandate_refusals_total", "cause" => cause.label()).increment(1);
