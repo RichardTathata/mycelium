@@ -17551,7 +17551,11 @@ async fn a_forgotten_acceptance_at_an_equal_ballot_withholds_the_slot() {
     }));
     drop(listeners.remove(1)); // Y answers nothing while X decides
     let cfg = ConsensusConfig { phase1_timeout: Duration::from_millis(1500), max_ballots: 1, ..ConsensusConfig::default() };
-    let r = agents[0].consensus().group_propose("council", "work/x", Bytes::from_static(b"vX"), cfg.clone()).await;
+    // X's one ballot must decide: X and N both answer, so it returns once they have, and the 30 s timeout is only a
+    // bound — 1.5 s timed out under load before N's promise arrived. Y's proposal below keeps `cfg`: it times out
+    // because N withholds, however long it waits.
+    let decides = ConsensusConfig { phase1_timeout: Duration::from_secs(30), ..cfg.clone() };
+    let r = agents[0].consensus().group_propose("council", "work/x", Bytes::from_static(b"vX"), decides).await;
     assert!(matches!(r, ConsensusResult::Committed { ballot: 1, .. }), "vX decided at ballot 1 by {{X, N}}: {r:?}");
     poll_until(|| agents[2].task_ctx.consensus_accepted.pin().get("work/x").is_some_and(|s| s.accepted.is_some()), 10_000).await;
     listeners.push(agents[1].consensus().start_consensus_listener(ConsensusConfig::default()));
@@ -18674,10 +18678,16 @@ async fn carry_over_an_outvoted_acceptance(records: impl Fn(usize) -> bool, carr
     // N1's ballot 1: its prepare reaches N2, its proposal reaches nobody, and N0 hears none of it.
     n0.task_ctx.kv_state.frame_filter.pin().insert(1, Arc::new(move |v: &FrameView<'_>|
         matches!(v, FrameView::Signal { sender, payload, .. } if *sender == h1 && names_contended_slot(payload))));
+    // N2's filter also records that it dropped the proposal: the state ballot 1 is waited for (below).
+    let proposal_dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let dropped = Arc::clone(&proposal_dropped);
     n2.task_ctx.kv_state.frame_filter.pin().insert(1, Arc::new(move |v: &FrameView<'_>| match v {
-        FrameView::Signal { kind, sender, payload } if *sender == h1 && *kind == consensus_kind::PROPOSE =>
-            matches!(decode_consensus_msg(&Bytes::copy_from_slice(payload)),
-                Some(ConsensusMsg::ProposeIn { slot, .. }) if &*slot == "work/contended"),
+        FrameView::Signal { kind, sender, payload } if *sender == h1 && *kind == consensus_kind::PROPOSE => {
+            let is_it = matches!(decode_consensus_msg(&Bytes::copy_from_slice(payload)),
+                Some(ConsensusMsg::ProposeIn { slot, .. }) if &*slot == "work/contended");
+            if is_it { dropped.store(true, std::sync::atomic::Ordering::SeqCst); }
+            is_it
+        }
         _ => false,
     }));
     // N1 hears nothing from N0 about the slot; the record of the decision at ballot 2 does not reach the laggards.
@@ -18691,15 +18701,30 @@ async fn carry_over_an_outvoted_acceptance(records: impl Fn(usize) -> bool, carr
             FrameView::Kv { key, .. } => *key == record || *key == committed,
         }));
     }
-    let once = ConsensusConfig { phase1_timeout: Duration::from_millis(1500), max_ballots: 1, ..ConsensusConfig::default() };
-    let r1 = n1.consensus().group_propose("old", &slot, v1.clone(), once).await;
-    assert!(matches!(r1, ConsensusResult::Timeout { .. }), "v1 at ballot 1 reaches no quorum: {r1:?}");
+    // Ballot 1 runs until N1 has accepted its own v1 and N2 has dropped the proposal, and is then cancelled. N1
+    // accepts only once phase 1 has a promise quorum ({N1, N2}); a phase-1 timeout short enough to wait out ended the
+    // ballot under load before N2's promise arrived, with nothing accepted. The proposal cannot reach a quorum however
+    // long it runs — N0 hears none of it and N2 drops the proposal, so N1's own vote is the only one — so its 30 s
+    // timeout is only the bound on a phase 1 that never completes: then it ends first, and the test fails by name.
     let accepted = |n: &GossipAgent| held_for_contended_slot(n).and_then(|h| h.1);
+    let unbounded = ConsensusConfig { phase1_timeout: Duration::from_secs(30), max_ballots: 1, ..ConsensusConfig::default() };
+    {
+        let c1 = n1.consensus();
+        let r1 = c1.group_propose("old", &slot, v1.clone(), unbounded);
+        tokio::pin!(r1);
+        tokio::select! {
+            r1 = &mut r1 => panic!("v1 at ballot 1 reaches no quorum, and N1 accepts it before its proposal ends: {r1:?}; N1 holds {:?}", accepted(n1)),
+            () = poll_until(|| accepted(n1).is_some() && proposal_dropped.load(std::sync::atomic::Ordering::SeqCst), 60_000) => {}
+        }
+    } // The proposal is dropped here: cancelled, and listening for nothing.
     assert_eq!(accepted(n1), Some((1, Some(v1.clone()))), "N1 accepted its own v1 at ballot 1");
     assert_eq!((accepted(n0), accepted(n2)), (None, None), "nobody else accepted it");
     let ballot_key = format!("{}{slot}", consensus_ns::BALLOT);
     poll_until(|| n0.kv().get(&ballot_key).is_some(), 10_000).await;
-    let r0 = n0.consensus().group_propose("old", &slot, v0.clone(), quick_cfg()).await;
+    // Ballot 2 must decide at its first try: a promise later than `quick_cfg`'s 1.5 s under load moved it to a later
+    // ballot. N0 and N2 both answer, so the proposal returns once they have; the 30 s timeout is only a bound.
+    let decides = ConsensusConfig { phase1_timeout: Duration::from_secs(30), ..quick_cfg() };
+    let r0 = n0.consensus().group_propose("old", &slot, v0.clone(), decides).await;
     assert!(matches!(r0, ConsensusResult::Committed { ballot: 2, .. }), "v0 is decided in old at ballot 2 by {{N0, N2}}: {r0:?}");
     poll_until(|| n2.consensus().consensus_get(&slot) == Some(v0.clone()), 10_000).await;
     if carrier_holds_record { poll_until(|| n3.consensus().consensus_get(&slot) == Some(v0.clone()), 10_000).await; }
