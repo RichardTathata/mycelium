@@ -207,6 +207,23 @@ fn is_stale(hlc_ts: u64, now_ms: u64, max_age: std::time::Duration) -> bool {
     now_ms.saturating_sub(entry_physical_ms) > max_age.as_millis() as u64
 }
 
+/// **Test helper: wait until this node's own advertisement of `ns/name` resolves**, as the gateway's lookup reads it
+/// (`resolve_cap_providers`, the line `/gateway/llm/call` and `/gateway/llm/stream` answer `404 no_provider` on).
+/// `advertise_capability` hands the first write to a spawned task, so a capability is not resolvable when it returns
+/// — a test that calls a door at once can find no provider. Polls with a deadline; panics naming the capability.
+/// Gated on the features its callers need — the LLM doors (`llm`), and `/a2a` and the provider's admission of a skill
+/// (`compliance`; every `/a2a` caller is gated on it too): a build without either has no caller (the feature-gated
+/// dead-code trap — `--features a2a` alone is one).
+#[cfg(all(test, any(feature = "llm", feature = "compliance")))]
+pub(crate) async fn until_advertised(ctx: &super::TaskCtx, ns: &str, name: &str) {
+    let filter = CapFilter::new(ns, name);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while !resolve_filter_against_kv(&ctx.kv_state, &filter).iter().any(|(node, _)| node == &ctx.node_id) {
+        assert!(std::time::Instant::now() < deadline, "{ns}/{name} was never advertised by this node (20 s)");
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+}
+
 /// Snapshot resolve from a `KvState` (used inside spawned tasks).
 pub(super) fn resolve_filter_against_kv(
     kv_state: &crate::store::KvState,

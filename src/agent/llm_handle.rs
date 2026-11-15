@@ -28,7 +28,14 @@ pub struct LlmHandle {
 
 impl LlmHandle {
     /// Publish a prompt template to the cluster KV and register this node as a
-    /// provider. The skill is discoverable via the capability ring immediately.
+    /// provider. When this returns, the template, the backend and the `llm.invoke`
+    /// receiver are in place, but the skill is **not yet discoverable**: its
+    /// capability advertisement is written by a spawned task, which writes it
+    /// first on its first tick — normally just after this returns — and then once
+    /// per refresh interval. Other nodes see it after gossip delivers that write.
+    /// A caller that must resolve the skill at once — this node's gateway, or
+    /// [`call_prompt_skill`](Self::call_prompt_skill) — waits until
+    /// [`capabilities().resolve`](CapabilitiesHandle::resolve) finds it.
     /// Dropping the returned handle retracts the capability and removes the backend.
     pub async fn register_prompt_skill(
         &self,

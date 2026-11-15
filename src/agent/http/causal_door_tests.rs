@@ -160,7 +160,7 @@ async fn the_llm_door_carries_the_fields_on_its_own_record() {
     let (a, journal, _ran) = node(http_port, &[("llm.invoke", "prompt:demo/greeting@{id}")]).await;
     let skill = PromptTemplate { system: String::new(), user_template: "Greet {{input}}".into(), max_tokens: 16, temperature: 0.0, metadata: Default::default() };
     let _skill = a.llm().register_prompt_skill("demo", "greeting", skill, Arc::new(EchoBackend)).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    crate::agent::capability_ops::until_advertised(&a.task_ctx, "demo", "greeting").await;
     let parent = crate::causal::content_hash(b"the decision this prompt acts on");
     let resp = reqwest::Client::new()
         .post(format!("http://127.0.0.1:{http_port}/gateway/llm/call"))

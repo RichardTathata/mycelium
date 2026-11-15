@@ -73,7 +73,14 @@ async fn node(cfg_edit: impl FnOnce(&mut GossipConfig)) -> (Arc<GossipAgent>, St
     let agent = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", gossip_port).unwrap(), cfg));
     agent.start().await.unwrap();
     let base = format!("http://127.0.0.1:{http_port}");
-    let client = reqwest::Client::new();
+    // Bounded, so a stalled door fails instead of hanging the run (one run of `an_ordinary_kind_passes_every_door` hung
+    // ~15 min for #788's author): a connection must open in 5 s, and a body that sends nothing for 30 s errors. No
+    // whole-request timeout — a stream's response is held open across a test, and that would cut it.
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(5))
+        .read_timeout(Duration::from_secs(30))
+        .build()
+        .expect("the test client builds");
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     while client.get(format!("{base}/health")).send().await.is_err() {
         assert!(tokio::time::Instant::now() < deadline, "the gateway did not come up");
@@ -245,6 +252,9 @@ async fn nine_doors_refuse_a_hosted_capability_kind_and_the_serve_stream_is_unch
     agent.shutdown().await;
 }
 
+/// The longest one door's request may take in [`an_ordinary_kind_passes_every_door`] before the test fails naming it.
+const REQUEST_BOUND: Duration = Duration::from_secs(20);
+
 /// **The plant: an ordinary kind, and every lookalike, is still observable, servable and sendable at every door**,
 /// under the token that holds `*` and under the scoped one.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -256,24 +266,31 @@ async fn an_ordinary_kind_passes_every_door() {
     for token in tokens() {
         for kind in LOOKALIKES {
             assert!(!is_substrate_kind(kind), "{kind}");
-            // Together: three of the sends wait a second for a reply no one gives.
+            // Together: three of the sends wait a second for a reply no one gives. Each is bounded, so a door that
+            // stalls fails naming itself rather than hanging the run.
             let answers = futures_util::future::join_all(every_door(&client, &base, &target, kind, token).into_iter()
-                .map(|(door, path, req)| async move { (door, path, req.send().await.unwrap()) })).await;
+                .map(|(door, path, req)| async move {
+                    let r = tokio::time::timeout(REQUEST_BOUND, req.send()).await
+                        .unwrap_or_else(|_| panic!("{path} gave no response for `{kind}` in {REQUEST_BOUND:?}"))
+                        .unwrap_or_else(|e| panic!("{path} failed for `{kind}`: {e}"));
+                    (door, path, r)
+                })).await;
             for (door, path, r) in answers {
                 match door {
                     // Not a refusal of any sort: neither the kind (403 `protected_kind`) nor a scope (403, 401).
-                    Door::Send => assert!(r.status() != 403 && r.status() != 401, "{path} refused the ordinary kind `{kind}`: {} {:?}", r.status(), r.text().await),
+                    Door::Send => assert!(r.status() != 403 && r.status() != 401, "{path} refused the ordinary kind `{kind}`: {} {:?}", r.status(), tokio::time::timeout(REQUEST_BOUND, r.text()).await),
                     _ => assert_eq!(r.status(), 200, "{path} must stream the ordinary kind `{kind}`"),
                 }
             }
         }
     }
     // …and an emitted ordinary signal arrives on a tap, payload intact.
-    let mut tap = client.get(format!("{base}/gateway/signal/sse/repair.request")).bearer_auth(TOKEN).send().await.unwrap();
+    let mut tap = tokio::time::timeout(REQUEST_BOUND, client.get(format!("{base}/gateway/signal/sse/repair.request")).bearer_auth(TOKEN).send())
+        .await.expect("the tap opens in time").unwrap();
     assert_eq!(tap.status(), 200);
-    let r = client.post(format!("{base}/gateway/signal/emit")).bearer_auth(TOKEN)
+    let r = tokio::time::timeout(REQUEST_BOUND, client.post(format!("{base}/gateway/signal/emit")).bearer_auth(TOKEN)
         .json(&serde_json::json!({"kind": "repair.request", "scope": "cluster", "payload_b64": b64(b"pump-7")}))
-        .send().await.unwrap();
+        .send()).await.expect("the emit answers in time").unwrap();
     assert_eq!(r.status(), 200);
     let event = next_event(&mut tap, Duration::from_secs(5)).await.expect("the ordinary signal reaches its tap");
     assert_eq!(event, b"pump-7");

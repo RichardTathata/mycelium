@@ -414,15 +414,8 @@ async fn both_a2a_doors_carry_a_client_signature_and_the_skill_sees_it() {
         });
     };
     let until_advertised = |a: &Arc<GossipAgent>| {
-        let key = format!("cap/{}/depot/dispatch", a.node_id());
         let a = Arc::clone(a);
-        async move {
-            let deadline = std::time::Instant::now() + Duration::from_secs(10);
-            while a.kv().get(&key).is_none() {
-                assert!(std::time::Instant::now() < deadline, "{key} never written");
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-        }
+        async move { super::capability_ops::until_advertised(&a.task_ctx, "depot", "dispatch").await }
     };
     let client = reqwest::Client::new();
     let post = |http_port: u16, method: &'static str, params: serde_json::Value| {
@@ -662,10 +655,7 @@ async fn a_providers_refusal_is_a_failed_task_at_both_a2a_doors_and_on_the_recor
             a2.service().rpc_respond(&req, b"dispatched".to_vec());
         }
     });
-    let key = format!("cap/{}/depot/dispatch", a.node_id());
-    while a.kv().get(&key).is_none() {
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    super::capability_ops::until_advertised(&a.task_ctx, "depot", "dispatch").await;
     let k1 = issue_and_publish(&a, &dir, "forecaster", "k1");
     let kb = k1.verifying_key().to_bytes();
     let now = a.task_ctx.hlc.decision_now_ms();

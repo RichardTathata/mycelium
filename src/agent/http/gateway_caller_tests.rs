@@ -651,6 +651,7 @@ async fn the_llm_doors_run_the_action_preflight() {
     ));
     agent.start().await.unwrap();
     let _reg = agent.capabilities().advertise_capability(Capability::new("llm", "echo"), Duration::from_secs(30));
+    crate::agent::capability_ops::until_advertised(&agent.task_ctx, "llm", "echo").await;
     let reached = Arc::new(AtomicUsize::new(0));
     {
         let (agent, reached) = (Arc::clone(&agent), Arc::clone(&reached));

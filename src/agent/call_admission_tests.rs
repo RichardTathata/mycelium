@@ -152,9 +152,12 @@ async fn node_with(opts: Opts) -> Node {
             });
         }
     });
-    // Ready when the gateway's listener accepts: the tools, the capability and the skill's receiver are registered
-    // synchronously above, and `start()` has returned.
+    // Ready when the gateway's listener accepts and the skill is advertised. The tools (their KV entries are written
+    // in `register_mcp_tool`) and the skill's receiver are registered synchronously above; the capability is not —
+    // `advertise_capability` hands its first write to a spawned task, and until it lands the provider answers the
+    // skill `resource_not_served`.
     assert!(until(|| std::net::TcpStream::connect(("127.0.0.1", http_port)).is_ok(), Duration::from_secs(20)).await, "the gateway is listening");
+    super::capability_ops::until_advertised(&a.task_ctx, "depot", "long").await;
     Node { a, authority, dir, http_port, started, finished }
 }
 

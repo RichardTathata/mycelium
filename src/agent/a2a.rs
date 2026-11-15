@@ -1685,7 +1685,7 @@ mod tests {
                 }
             });
         }
-        until_advertised(&agent, "depot", "dispatch").await;
+        crate::agent::capability_ops::until_advertised(&agent.task_ctx, "depot", "dispatch").await;
 
         let http = reqwest::Client::new();
         let base = format!("http://127.0.0.1:{http_port}");
@@ -1790,19 +1790,6 @@ mod tests {
         assert_eq!(ran.load(Ordering::SeqCst), 5);
 
         agent.shutdown().await;
-    }
-
-    /// Waits until the node's own `cap/` entry for `ns/name` is in its store. Advertising is spawned,
-    /// so a fixed sleep before the first send lost the race under a loaded test run (`skill not
-    /// found`, seen on the full suite 2026-10-17).
-    #[cfg(feature = "compliance")]
-    async fn until_advertised(agent: &GossipAgent, ns: &str, name: &str) {
-        let key = format!("cap/{}/{ns}/{name}", agent.node_id());
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
-        while agent.kv().get(&key).is_none() {
-            assert!(std::time::Instant::now() < deadline, "{key} was never written");
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
     }
 
     fn make_ctx() -> Arc<TaskCtx> {
@@ -2115,7 +2102,7 @@ mod tests {
                 }
             });
         }
-        until_advertised(&agent, "depot", "dispatch").await;
+        crate::agent::capability_ops::until_advertised(&agent.task_ctx, "depot", "dispatch").await;
 
         let http = reqwest::Client::new();
         let url = format!("http://127.0.0.1:{http_port}/a2a");
@@ -2199,7 +2186,7 @@ mod tests {
                 }
             });
         }
-        until_advertised(&agent, "depot", "dispatch").await;
+        crate::agent::capability_ops::until_advertised(&agent.task_ctx, "depot", "dispatch").await;
 
         let url = format!("http://127.0.0.1:{http_port}/a2a");
         let send = |bearer: &'static str| {
