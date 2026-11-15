@@ -703,7 +703,7 @@ async fn rev794_a_revoke_is_not_acknowledged_while_the_disk_is_gone_whatever_the
 async fn the_collector_runs_only_where_it_is_turned_on() {
     let off = node(Opts { mint: true, ..Opts::default() }).await;
     assert!(!call_issuer::start_collector(off.ctx()), "off: not started");
-    assert_eq!(off.ctx().call_issuer.collecting(), false, "no collector runs at a default node");
+    assert!(!off.ctx().call_issuer.collecting(), "no collector runs at a default node");
     off.a.shutdown().await;
     let on = node(Opts { mint: true, collect: true, ..Opts::default() }).await;
     assert!(on.ctx().call_issuer.collecting(), "on: started at the node's start");

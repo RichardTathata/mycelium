@@ -25,7 +25,7 @@ const SKILL: &str = "skill.invoke";
 const CUSTOM: &str = "depot.custom";
 const HOSTED: &str = "cap.invoke/depot/thing";
 /// An operator's protected kind under a rule that is not cancellable.
-const PLAIN_KIND: &str = "depot.plain";
+const PLAIN_RPC: &str = "depot.plain";
 
 struct Node {
     a: Arc<GossipAgent>,
@@ -112,7 +112,7 @@ async fn node_with(opts: Opts) -> Node {
         crate::config::GatewayNamedToken { name: "sdk".into(), token: "sdk-secret".into(), scopes: vec!["mesh:serve".into()] },
     ];
     // An operator's protected kind, served to an SDK agent over `rpc/serve` (the doors that cannot stop a call).
-    cfg.protected_rpc_kinds = vec![CUSTOM.into(), PLAIN_KIND.into()];
+    cfg.protected_rpc_kinds = vec![CUSTOM.into(), PLAIN_RPC.into()];
     let a = Arc::new(GossipAgent::new(id.clone(), cfg));
     let me = id.to_string();
     a.with_evidence_journal(EvidenceJournal::open(dir.join("evidence.log"), EvidenceProfile::Strict).unwrap());
@@ -135,8 +135,8 @@ async fn node_with(opts: Opts) -> Node {
             .allow(Rule::new("*", "cap.invoke", format!("cap:depot/thing@{me}")).cancellable())
             .map_action(CUSTOM, "*")
             .allow(Rule::new("*", CUSTOM, format!("res:x@{me}")).cancellable())
-            .map_action(PLAIN_KIND, "*")
-            .allow(Rule::new("*", PLAIN_KIND, format!("res:y@{me}"))),
+            .map_action(PLAIN_RPC, "*")
+            .allow(Rule::new("*", PLAIN_RPC, format!("res:y@{me}"))),
     ));
     let mut entitlements = EntitlementTable::new();
     entitlements.entitle_grants(PrincipalId::new(node_principal(&id)).unwrap());
@@ -221,7 +221,7 @@ impl Node {
     /// The operator's protected kind under a plain rule.
     fn plain_kind(&self) -> Call {
         let resource = format!("res:y@{}", self.a.node_id());
-        Call { kind: PLAIN_KIND, payload: b"work".to_vec(), claim: Some(resource.clone()), operation: PLAIN_KIND, resource, arguments: serde_json::json!({ "payload_b64": "d29yaw==" }) }
+        Call { kind: PLAIN_RPC, payload: b"work".to_vec(), claim: Some(resource.clone()), operation: PLAIN_RPC, resource, arguments: serde_json::json!({ "payload_b64": "d29yaw==" }) }
     }
     /// The operator's protected kind, as an SDK agent serves it.
     fn custom(&self) -> Call {
@@ -813,7 +813,7 @@ fn serve_rpc(n: &Node, kind: &'static str, declared: bool, races: bool, work: Du
 async fn an_undeclared_rpc_rx_receiver_is_refused_a_cancellable_call_and_served_a_plain_one() {
     let n = node().await;
     let custom = serve_rpc(&n, CUSTOM, false, false, Duration::ZERO);
-    let plain = serve_rpc(&n, PLAIN_KIND, false, false, Duration::ZERO);
+    let plain = serve_rpc(&n, PLAIN_RPC, false, false, Duration::ZERO);
     let before = n.nothing_ran();
     let (reply, _) = n.call(&n.custom(), None, Cm::Honest).await;
     assert_door_cannot_stop(&json(&reply), "rpc_rx");
@@ -873,7 +873,7 @@ async fn a_declared_rpc_rx_receiver_is_served_and_stopped_and_one_that_ignores_t
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_undeclared_receivers_stop_is_a_release_and_a_declared_ones_is_confirmed() {
     let n = Arc::new(node().await);
-    let _plain = serve_rpc(&n, PLAIN_KIND, false, false, Duration::from_millis(1_500));
+    let _plain = serve_rpc(&n, PLAIN_RPC, false, false, Duration::from_millis(1_500));
     let (framed, id, _) = n.frame(&n.plain_kind(), None, Cm::Honest);
     let (n2, call) = (Arc::clone(&n), n.plain_kind());
     let running = tokio::spawn(async move { n2.send(&call, framed).await });
