@@ -85,13 +85,49 @@ fn the_phase_one_wrapper_composes_what_the_engines_prepare_phase_composes() {
         .split("\n    }\n").next().expect("which ends");
     let at = |needle: &str| body.find(needle).unwrap_or_else(|| panic!("prepare_phase no longer says `{needle}`"));
     let report = at("reports.push(carry.report(slot, accepted_ballot, accepted_digest, accepted, accepted_is_envelope));");
+    let hears = at("if let Some(group) = &tagged { reports = carry_hears(reports, &made_in, group, &self.lineage(group)); }");
     let aside = at("set_aside_finished(&mut reports, 0, false, self.ended(slot));");
     let choice = at("Phase1::Ready(phase1_choice(current, &reports, carry))");
-    assert!(report < aside && aside < choice, "report, set aside, choose — in that order");
+    assert!(report < hears && hears < aside && aside < choice, "report, hear (a carry that asked), set aside, choose — in that order");
     assert_eq!(body.matches("set_aside_finished(").count(), 1, "one set-aside, with the ended ballot alone");
     let at = |needle: &str| wrapper.find(needle).unwrap_or_else(|| panic!("the wrapper no longer says `{needle}`"));
     let report = at("carry.report(slot, *b, Some(value_digest(e)), Some(e.clone()), true)");
+    let hears = at("reported = carry_hears(reported, &made_in, h.group, &lineage);");
     let aside = at("set_aside_finished(&mut reported, 0, false, ended);");
     let choice = at("phase1_choice(current, &reported, &carry)");
-    assert!(report < aside && aside < choice, "the wrapper: report, set aside, choose — in that order");
+    assert!(report < hears && hears < aside && aside < choice, "the wrapper: report, hear, set aside, choose — in that order");
+}
+
+/// Where an acceptance was made is the engine's answer (CR30): `claim_envelope_in` keeps it beside the acceptance,
+/// and `prepare_slot_tagged` reports it with the promise and leaves it on the acceptor.
+#[test]
+fn where_an_acceptance_was_made_is_kept_by_the_accept_and_reported_by_the_promise() {
+    use shared::Made;
+    let a = val(0, 1, None);
+    let acc = shared::accept_in(&Acc::default(), 1, a, 0, 0, Made::Predecessor).expect("a fresh acceptor accepts");
+    assert_eq!(acc.made_in, Made::Predecessor, "the engine keeps where it was made");
+    let (after, answer) = shared::prepare_tagged(&acc, 2, 3, 0);
+    assert_eq!(answer, Some((Some((1, a)), Made::Predecessor)), "and the promise reports it");
+    assert_eq!(after.made_in, Made::Predecessor, "and leaves it");
+    let again = shared::accept_in(&after, 2, a, 3, 0, Made::Successor).expect("a higher ballot");
+    assert_eq!(again.made_in, Made::Successor, "a new acceptance is recorded where it is made");
+    assert_eq!(shared::accept_in(&Acc::default(), 1, a, 0, 0, Made::Unknown).map(|x| x.made_in), Some(Made::Unknown));
+}
+
+/// The carry's rule is the engine's (`carry_hears`): every report made in the lineage — only the successor's are
+/// heard; any report of unknown group — all of them, as before.
+#[test]
+fn a_carry_hears_the_successors_acceptances_when_every_report_says_where_and_all_of_them_otherwise() {
+    use shared::Made;
+    let (own, stale, chosen) = (val(3, 9, None), val(1, 1, None), val(0, 2, None));
+    assert_eq!(shared::phase1_carry(own, own, &[(1, stale)], &[Made::Predecessor], 0), Choice::Keep,
+        "a predecessor's acceptance is not heard when every report names a group of the lineage");
+    assert_eq!(shared::phase1_carry(own, own, &[(1, stale)], &[Made::Unknown], 0), Choice::Adopt(1, stale),
+        "one of unknown group: every report is heard, as before 2.41.0");
+    assert_eq!(shared::phase1_carry(own, own, &[(1, stale), (2, chosen)], &[Made::Unknown, Made::Predecessor], 0),
+        Choice::Adopt(2, chosen), "and then the highest of them is carried");
+    assert_eq!(shared::phase1_carry(own, own, &[(3, chosen)], &[Made::Successor], 0), Choice::Adopt(3, chosen),
+        "the successor's own acceptance is heard");
+    assert_eq!(shared::phase1_carry(own, own, &[(1, stale)], &[Made::NoGroup], 0), Choice::Adopt(1, stale),
+        "one made outside every group: every report is heard");
 }

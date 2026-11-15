@@ -20,6 +20,7 @@ use std::collections::BTreeSet;
 
 use stateright::{Model, Property};
 
+pub use crate::shared::Made;
 use crate::shared::{self, Acc, Choice, Node, Set, Val};
 
 /// The configuration of a run: the bound, and the planted fault.
@@ -46,6 +47,11 @@ pub struct MigrationModel {
     /// Nodes that take no step of the migration itself — they learn no record, promise no retirement and report
     /// no manifest; they still propose and answer ballots. A smaller space, for one named interleaving.
     pub bystanders: Vec<Node>,
+    /// Which nodes record where each acceptance was made (critique plan CR30, `consensus_record_acceptance_group`).
+    /// A node that records keeps its acceptances' group, and its own carry asks for every report's and hears by the
+    /// engine's rule (`carry_hears`); one that does not keeps none — `Unknown`, as a node before 2.41.0 or one
+    /// restarted from a record without it — and its carry is the old one.
+    pub recording: Recording,
     /// **Planted fault** — the successor decides early: its ordinary proposals are admitted, at the proposer's
     /// door and at every acceptor, without the predecessor's retirement or the carry's completion.
     pub successor_decides_early: bool,
@@ -61,7 +67,7 @@ impl MigrationModel {
         Self {
             predecessor: vec![0, 1, 2], successor: vec![1, 2, 3], proposers: vec![0], carrier: 3, max_ballot: 3,
             carry_may_stall: false, successor_proposes: true, fixed_ballots: false, bystanders: Vec::new(),
-            successor_decides_early: false, completion_unproven: false,
+            recording: Recording::Nobody, successor_decides_early: false, completion_unproven: false,
         }
     }
 
@@ -82,8 +88,45 @@ impl MigrationModel {
     /// proposing at ballot 1 and node 0 at ballot 2, ballots to 3, no ballot of the successor's own, and node 0
     /// taking no part in the migration's own steps (nodes 1 and 2 retire the predecessor and report). Node 1 is
     /// in both groups; an acceptance it made in the predecessor at ballot 1 is what the successor's carry meets.
+    /// With nobody recording the two groups decide two values; with everyone recording they do not (#787).
     pub fn overlap() -> Self {
         Self { proposers: vec![1, 0], fixed_ballots: true, bystanders: vec![0], successor_proposes: false, ..Self::rolling() }
+    }
+
+    /// **The reviewer's case on #787 (R6)**: [`overlap`](Self::overlap) with the carry run by node 2 — a member of
+    /// both groups that holds the value the predecessor chose — instead of node 3. With node 1's stale acceptance
+    /// unrecorded and the rest recorded, the carry hears everything (one report's group is unknown) and the
+    /// carrier's own copy of the chosen value is the highest report.
+    pub fn overlap_shared_carrier() -> Self {
+        Self { carrier: 2, ..Self::overlap() }
+    }
+
+    /// With `recording` set.
+    pub fn recording(mut self, recording: Recording) -> Self {
+        self.recording = recording;
+        self
+    }
+
+    fn records(&self, n: Node) -> bool {
+        match self.recording {
+            Recording::Nobody => false,
+            Recording::Everyone => true,
+            Recording::AllBut(m) => n != m,
+        }
+    }
+
+    /// Where `n` records an acceptance it makes in `role`'s group.
+    fn made_in(&self, role: Role, n: Node) -> Made {
+        match (self.records(n), role) {
+            (false, _) => Made::Unknown,
+            (true, Role::Predecessor(_)) => Made::Predecessor,
+            (true, Role::Carry | Role::Successor) => Made::Successor,
+        }
+    }
+
+    /// Whether `role`'s phase 1 hears by `carry_hears`: a carry ballot whose carrier records (`asks_tagged`).
+    fn asks(&self, role: Role) -> bool {
+        role == Role::Carry && self.records(self.carrier)
     }
 
     /// A planted fault beside the row's: a completion that proves nothing.
@@ -137,6 +180,18 @@ impl MigrationModel {
     }
 }
 
+/// Which nodes record where each acceptance was made.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Recording {
+    /// None: every acceptance's group is unknown, and no carry asks — the engine with the switch off.
+    Nobody,
+    /// Every node: the engine with the switch on everywhere.
+    Everyone,
+    /// Every node but this one: a fleet part-way through turning the switch on, or with one node restarted
+    /// from a record that did not carry the group.
+    AllBut(Node),
+}
+
 /// Whose ballot a message belongs to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Role {
@@ -151,7 +206,8 @@ pub enum Role {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Msg {
     Prepare { role: Role, ballot: u64 },
-    Ack { role: Role, ballot: u64, voter: Node, accepted: Option<(u64, Val)> },
+    /// `PrepareAckTerm`, or `PrepareAckTagged` with where the acceptance was made.
+    Ack { role: Role, ballot: u64, voter: Node, accepted: Option<(u64, Val)>, made_in: Made },
     Propose { role: Role, ballot: u64, value: Val },
     Vote { role: Role, ballot: u64, voter: Node, value: Val },
     /// A decision: `successor` says in which group.
@@ -165,7 +221,8 @@ pub enum Msg {
 pub enum Phase {
     /// Not begun.
     Idle,
-    Preparing { own: Val, ballot: u64, promisers: Set, reports: Vec<(u64, Val)> },
+    /// `reports`: each promiser's acceptance and where it was made.
+    Preparing { own: Val, ballot: u64, promisers: Set, reports: Vec<(u64, Val, Made)> },
     Proposing { value: Val, ballot: u64, voters: Set },
     /// The call is over.
     Done,
@@ -260,13 +317,22 @@ impl MigrationModel {
     fn finish_phase1(&self, s: &mut MigrationState, role: Role) {
         let p = self.proposer(role);
         let Phase::Preparing { own, ballot, ref reports, .. } = *s.phase(self, role) else { return };
-        let value = match shared::phase1(own, own, reports, 0) {
+        let accepted: Vec<(u64, Val)> = reports.iter().map(|(b, v, _)| (*b, *v)).collect();
+        let choice = if self.asks(role) {
+            let made_in: Vec<Made> = reports.iter().map(|(_, _, m)| *m).collect();
+            shared::phase1_carry(own, own, &accepted, &made_in, 0)
+        } else {
+            shared::phase1(own, own, &accepted, 0)
+        };
+        let value = match choice {
             Choice::Keep => own,
             Choice::Adopt(_, adopted) => adopted,
             Choice::Blocked => { *s.phase(self, role) = Phase::Done; return; }
         };
         // The proposer's own vote passes the same gate and the same claim as any acceptor's.
-        let claimed = if self.admits(s, role, p) { shared::accept(&s.nodes[usize::from(p)].acc, ballot, value, p, 0) } else { None };
+        let claimed = if self.admits(s, role, p) {
+            shared::accept_in(&s.nodes[usize::from(p)].acc, ballot, value, p, 0, self.made_in(role, p))
+        } else { None };
         let Some(acc) = claimed else { *s.phase(self, role) = Phase::Done; return; };
         s.nodes[usize::from(p)].acc = acc;
         Self::note_accepted(&mut s.nodes[usize::from(p)], role);
@@ -411,32 +477,35 @@ impl Model for MigrationModel {
                 };
                 // The proposer's door, then its own promise through the gate.
                 if !self.admits(&s, role, p) { return None; }
-                let (acc, promised) = shared::prepare(&s.nodes[usize::from(p)].acc, ballot, p, 0);
-                let Some(accepted) = promised else {
+                let (acc, promised) = shared::prepare_tagged(&s.nodes[usize::from(p)].acc, ballot, p, 0);
+                let Some((accepted, made_in)) = promised else {
                     *s.phase(self, role) = Phase::Done;
                     return Some(s);
                 };
                 s.nodes[usize::from(p)].acc = acc;
                 *s.phase(self, role) = Phase::Preparing {
-                    own, ballot, promisers: Set::default().with(p), reports: accepted.into_iter().collect(),
+                    own, ballot, promisers: Set::default().with(p),
+                    reports: accepted.map(|(b, v)| (b, v, if self.asks(role) { made_in } else { Made::Unknown })).into_iter().collect(),
                 };
                 if self.quorum(role) <= 1 { self.finish_phase1(&mut s, role); } else { s.net.insert(Msg::Prepare { role, ballot }); }
             }
             Action::Deliver(Msg::Prepare { role, ballot }, n) => {
                 if !self.admits(&s, role, n) { return None; }
                 let node = &mut s.nodes[usize::from(n)];
-                let (acc, promised) = shared::prepare(&node.acc, ballot, self.proposer(role), 0);
-                let accepted = promised?;
+                let (acc, promised) = shared::prepare_tagged(&node.acc, ballot, self.proposer(role), 0);
+                let (accepted, made_in) = promised?;
                 node.acc = acc;
-                s.net.insert(Msg::Ack { role, ballot, voter: n, accepted });
+                // Where it was made is told only to a carrier that asked (`PrepareAckTagged`).
+                let made_in = if self.asks(role) { made_in } else { Made::Unknown };
+                s.net.insert(Msg::Ack { role, ballot, voter: n, accepted, made_in });
             }
-            Action::Deliver(Msg::Ack { role, ballot, voter, accepted }, _) => {
+            Action::Deliver(Msg::Ack { role, ballot, voter, accepted, made_in }, _) => {
                 let quorum = self.quorum(role);
                 let filter = self.filter(role);
                 let Phase::Preparing { ballot: at, ref mut promisers, ref mut reports, .. } = *s.phase(self, role) else { return None };
                 if at != ballot || promisers.has(voter) || !shared::counted(filter.as_deref(), voter) { return None; }
-                if let Some(report) = accepted && !reports.contains(&report) {
-                    reports.push(report);
+                if let Some((b, v)) = accepted && !reports.contains(&(b, v, made_in)) {
+                    reports.push((b, v, made_in));
                     reports.sort_unstable();
                 }
                 *promisers = promisers.with(voter);
@@ -445,7 +514,7 @@ impl Model for MigrationModel {
             Action::Deliver(Msg::Propose { role, ballot, value }, n) => {
                 if !self.admits(&s, role, n) { return None; }
                 let node = &mut s.nodes[usize::from(n)];
-                node.acc = shared::accept(&node.acc, ballot, value, self.proposer(role), 0)?;
+                node.acc = shared::accept_in(&node.acc, ballot, value, self.proposer(role), 0, self.made_in(role, n))?;
                 Self::note_accepted(node, role);
                 s.net.insert(Msg::Vote { role, ballot, voter: n, value });
             }

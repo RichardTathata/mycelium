@@ -11,7 +11,7 @@ use std::fmt::Debug;
 use std::hash::Hash;
 use std::time::Instant;
 
-use mycelium_model::migration::{self, MigrationModel};
+use mycelium_model::migration::{self, MigrationModel, Recording};
 use mycelium_model::slot::{self, SlotModel};
 use stateright::{Checker, Expectation, HasDiscoveries, Model, Path, Property};
 
@@ -160,28 +160,15 @@ fn a_migration_carries_the_value_two_contending_proposers_decided() {
         &[migration::CARRIED_OVER, migration::SUCCESSOR_DECIDES]);
 }
 
-// ── Found by the model, 2026-11-14, confirmed on the engine — no fault planted ───────────────────────────────────────────────
+// ── The carry between overlapping electorates (critique plan CR30) ──────────────────────────────────────────
 
-/// **A finding, not a plant: found by the model on 2026-11-14 and confirmed on the engine the same day.**
-///
-/// With overlapping electorates, the successor's carry can decide a value the predecessor did not. Node 1 — in
-/// both groups — accepts `v1` in the predecessor at ballot 1, which no quorum follows; nodes 0 and 2 decide `v0`
-/// at ballot 2; the manifests name `v0` as the highest acceptance and the carry runs at ballot 3 — with node 1 as
-/// the rest of its quorum. Node 1's promise reports the acceptance it holds, `v1`@1; phase 1 carries the highest
-/// report of its promise quorum (`choose_after_prepare`) and knows nothing of the manifests, so the successor
-/// decides `v1`.
-///
-/// In the engine this needs `v0`'s decision record not yet at the carry's quorum (an acceptor holding a live
-/// record of another value refuses), and it is counted afterwards (`commit_conflicts`, `Carried::Conflict`).
-///
-/// **This test asserts the counterexample is found.** The fix is decided and is its own change: the acceptor
-/// record carries the group each acceptance was made in, and a carry hears only acceptances made in the
-/// successor. **When that has merged, the model gives each acceptance its group and this test is inverted**:
-/// `overlap()` goes through `explore` like every other configuration.
-#[test]
-fn found_a_carry_adopts_a_stale_acceptance_of_an_overlapping_member_and_the_groups_decide_two_values() {
-    let model = MigrationModel::overlap();
-    let path = counterexample(model.clone(), migration::ONE_VALUE_ACROSS);
+/// What every trace has in which the carry in `overlap()` decides a stale acceptance — found by the model on
+/// 2026-11-14 and confirmed on the engine the same day. Node 1, in both groups, accepts `v1` in the predecessor at
+/// ballot 1, which no quorum follows; nodes 0 and 2 decide `v0` at ballot 2; the manifests name `v0` and the carry
+/// runs at ballot 3 with node 1 as the rest of its quorum; node 1's promise reports `v1`@1 and phase 1 carries it.
+/// Asserted as what every such trace has, not where in it it sits: the search is parallel and returns whichever
+/// violating state a thread reaches first. Returns node 1's state just before the carry.
+fn assert_a_stale_carry(path: Path<migration::MigrationState, migration::Action>) -> migration::NodeState {
     let steps = path.into_vec();
     let decided_in = |state: &migration::MigrationState, successor: bool| -> BTreeSet<_> {
         state.net.iter().filter_map(|m| match m {
@@ -218,6 +205,54 @@ fn found_a_carry_adopts_a_stale_acceptance_of_an_overlapping_member_and_the_grou
         "no member of the carry's quorum held the value the predecessor decided");
     assert!(quorum.iter().any(|n| before.nodes[*n].acc.accepted == Some((1, v1))),
         "and one of them held the stale acceptance, made in the predecessor at ballot 1");
+    before.nodes[1].clone()
+}
+
+/// **With the switch off — the default in 2.41.0 — the finding stands.** No node records where an acceptance was
+/// made, so no carry asks, and the carry decides `v1` as before. Pinned as the engine pins it
+/// (`a_carrier_with_the_switch_off_carries_as_before_whatever_the_members_record`).
+#[test]
+fn with_the_switch_off_a_carry_adopts_a_stale_acceptance_of_an_overlapping_member_and_the_groups_decide_two_values() {
+    let stale = assert_a_stale_carry(counterexample(MigrationModel::overlap(), migration::ONE_VALUE_ACROSS));
+    assert_eq!(stale.acc.made_in, migration::Made::Unknown, "nobody records where an acceptance was made");
+}
+
+/// **With every node recording, the carry hears only the successor's acceptances and the two groups decide one
+/// value** (critique plan CR30, #787) — the same configuration as the finding, explored in full.
+#[test]
+fn with_every_node_recording_a_carry_between_overlapping_electorates_keeps_the_predecessors_value() {
+    explore("migration, overlap, every node recording", MigrationModel::overlap().recording(Recording::Everyone),
+        584_220, &[migration::CARRIED_OVER]);
+}
+
+/// The contended migration at its CI bound with every node recording.
+#[test]
+fn with_every_node_recording_a_contended_migration_keeps_one_value() {
+    explore("migration, contended, every node recording", MigrationModel::contended().recording(Recording::Everyone),
+        7_938_958, &[migration::CARRIED_OVER, migration::SUCCESSOR_DECIDES]);
+}
+
+/// **The reviewer's mixed case on #787 (R6c): every node records but the one whose acceptance is stale.** The
+/// carrier is node 2, a member of both groups holding the value the predecessor chose. Node 1's report has no
+/// group, so the carry hears every report — the old rule — and the carrier's own copy of the chosen value is the
+/// highest of them. The rule falls back, and holds.
+#[test]
+fn with_the_stale_acceptance_unrecorded_a_carrier_holding_the_chosen_value_falls_back_and_keeps_it() {
+    explore("migration, shared carrier, all but the stale member recording",
+        MigrationModel::overlap_shared_carrier().recording(Recording::AllBut(1)), 2_190_145, &[migration::CARRIED_OVER]);
+}
+
+/// **The fallback's bound, pinned: with the stale acceptance unrecorded and a carrier that does not hold the
+/// chosen value, the finding stands with the switch on.** Node 1's report has no group, so the carry hears every
+/// report — as before 2.41.0, which is what the engine states (`carry_hears`: never worse than the old rule; the
+/// sound rule once every report says where it was made) — and the quorum {3, 1} hears `v1`@1 alone. In the
+/// engine node 1 answers from memory, where every node from 2.41.0 keeps the group, so this needs node 1 to be
+/// older than 2.41.0, or restarted from a record written without the group.
+#[test]
+fn with_the_stale_acceptance_unrecorded_a_carry_falls_back_to_the_old_rule_and_the_finding_stands() {
+    let model = MigrationModel::overlap().recording(Recording::AllBut(1));
+    let stale = assert_a_stale_carry(counterexample(model, migration::ONE_VALUE_ACROSS));
+    assert_eq!(stale.acc.made_in, migration::Made::Unknown, "the stale acceptance's group is not recorded");
 }
 
 // ── With one fault planted in each area: the model fails ─────────────────────────────────────────────
@@ -269,8 +304,10 @@ fn planted_a_successor_deciding_early_decides_before_the_retirement_is_visible()
         migration::Msg::Commit { successor, value, .. } => Some((*successor, *value)),
         _ => None,
     }).collect();
-    assert!(values.iter().any(|(succ, v)| !succ && values.iter().any(|(other, w)| *other && v != w)),
-        "the predecessor and the successor decided different values: {values:?}");
+    // Two different values are decided — in which groups depends on the trace the search returns (one decides
+    // both in the successor, its carry and its own ballot), so only that is asserted.
+    let distinct: BTreeSet<_> = values.iter().map(|(_, v)| *v).collect();
+    assert!(distinct.len() >= 2, "two different values are decided: {values:?}");
 }
 
 /// **Planted beside the row's three: a completion that proves nothing** — a successor member votes for it with

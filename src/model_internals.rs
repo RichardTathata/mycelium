@@ -13,11 +13,41 @@ use std::sync::Arc;
 use bytes::Bytes;
 
 use crate::consensus::{
-    claim_envelope, electorate_vote_filter, phase1_choice, prepare_slot, set_aside_finished, value_digest, Accepted,
-    AcceptorMemory, AcceptorSlot, Carry, Phase1Choice, PrepareOutcome,
+    carry_hears, claim_envelope_in, electorate_vote_filter, phase1_choice, prepare_slot_tagged, set_aside_finished,
+    value_digest, Accepted, AcceptorMemory, AcceptorSlot, Carry, MadeIn, Phase1Choice, PrepareOutcome,
 };
 use crate::consensus_life::{self as life, Envelope, SlotView, Term};
 use crate::node_id::NodeId;
+
+/// Where an acceptance was made — the engine's `MadeIn` (critique plan CR30).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Made {
+    /// Not known: an acceptance by a node before 2.41.0, or read back from a record that does not carry it.
+    #[default]
+    Unknown,
+    /// Outside any electorate group.
+    NoGroup,
+    /// On this electorate group.
+    Group(String),
+}
+
+impl Made {
+    fn to_engine(&self) -> MadeIn {
+        match self {
+            Made::Unknown => MadeIn::Unknown,
+            Made::NoGroup => MadeIn::NoGroup,
+            Made::Group(g) => MadeIn::Group(Arc::from(g.as_str())),
+        }
+    }
+
+    fn of_engine(m: &MadeIn) -> Self {
+        match m {
+            MadeIn::Unknown => Made::Unknown,
+            MadeIn::NoGroup => Made::NoGroup,
+            MadeIn::Group(g) => Made::Group(g.to_string()),
+        }
+    }
+}
 
 /// One acceptor's memory of one slot — [`AcceptorSlot`] without the group tags, which only a migration's
 /// manifest reads.
@@ -29,6 +59,8 @@ pub struct Acceptor {
     pub promised_to: Option<u64>,
     /// The ballot and decision envelope most recently accepted.
     pub accepted:    Option<(u64, Bytes)>,
+    /// Where `accepted` was made.
+    pub made_in:     Made,
 }
 
 impl Acceptor {
@@ -39,7 +71,7 @@ impl Acceptor {
             promised_to: self.promised_to,
             accepted:    self.accepted.as_ref().map(|(b, e)| (*b, Accepted::Envelope(e.clone()))),
             groups:      Vec::new(),
-            made_in:     crate::consensus::MadeIn::Unknown,
+            made_in:     self.made_in.to_engine(),
         });
         memory
     }
@@ -50,6 +82,7 @@ impl Acceptor {
             promised:    state.promised,
             promised_to: state.promised_to,
             accepted:    state.accepted.and_then(|(b, a)| a.value().map(|v| (b, v))),
+            made_in:     Made::of_engine(&state.made_in),
         }
     }
 }
@@ -57,28 +90,42 @@ impl Acceptor {
 /// What [`prepare`] answered.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Prepared {
-    /// Promised; carries what this acceptor had accepted.
-    Promised(Option<(u64, Bytes)>),
+    /// Promised; carries what this acceptor had accepted, and where it was made.
+    Promised(Option<(u64, Bytes)>, Made),
     /// Refused; carries the ballot this acceptor holds.
     Refused(u64),
 }
 
-/// [`prepare_slot`] over one acceptor's state: the state afterwards and the answer.
+/// [`prepare_slot_tagged`] over one acceptor's state: the state afterwards and the answer, with where the
+/// reported acceptance was made — read in the same `compute` as the promise.
 pub fn prepare(acceptor: &Acceptor, slot: &str, ballot: u64, proposer: u64, floor: u64) -> (Acceptor, Prepared) {
     let slot: Arc<str> = Arc::from(slot);
     let memory = acceptor.memory(&slot);
-    let answer = match prepare_slot(&memory, &slot, ballot, proposer, floor) {
-        PrepareOutcome::Promised(acc) => Prepared::Promised(acc.and_then(|(b, a)| a.value().map(|v| (b, v)))),
-        PrepareOutcome::Refused { promised, .. } => Prepared::Refused(promised),
+    let answer = match prepare_slot_tagged(&memory, &slot, ballot, proposer, floor) {
+        (PrepareOutcome::Promised(acc), made_in) =>
+            Prepared::Promised(acc.and_then(|(b, a)| a.value().map(|v| (b, v))), Made::of_engine(&made_in)),
+        (PrepareOutcome::Refused { promised, .. }, _) => Prepared::Refused(promised),
     };
     (Acceptor::read(&memory, &slot), answer)
 }
 
-/// [`claim_envelope`] over one acceptor's state: the state afterwards when the claim is granted.
-pub fn accept(acceptor: &Acceptor, slot: &str, ballot: u64, envelope: &Bytes, proposer: u64, floor: u64) -> Option<Acceptor> {
+/// [`claim_envelope_in`] over one acceptor's state: the state afterwards when the claim is granted, recording
+/// the acceptance as made in `made_in`.
+pub fn accept(
+    acceptor: &Acceptor, slot: &str, ballot: u64, envelope: &Bytes, proposer: u64, floor: u64, made_in: &Made,
+) -> Option<Acceptor> {
     let slot: Arc<str> = Arc::from(slot);
     let memory = acceptor.memory(&slot);
-    claim_envelope(&memory, &slot, ballot, envelope, proposer, floor).then(|| Acceptor::read(&memory, &slot))
+    claim_envelope_in(&memory, &slot, ballot, envelope, proposer, floor, made_in.to_engine())
+        .then(|| Acceptor::read(&memory, &slot))
+}
+
+/// What a carry ballot into `group` asks of each report (critique plan CR30): `made_in[i]` is where `reports[i]`
+/// was made, and `lineage` is `group` and the ancestors the carrier can name.
+pub struct CarryHears<'a> {
+    pub made_in: &'a [Made],
+    pub group:   &'a str,
+    pub lineage: &'a [&'a str],
 }
 
 /// What a proposer may propose after its promise quorum answered.
@@ -93,14 +140,23 @@ pub enum Phase1 {
 }
 
 /// The end of the engine's prepare phase: the promise quorum's `reports` (ballot, accepted envelope) through
-/// `Carry::report`, the acceptances at or below `ended` set aside (`set_aside_finished`), then [`phase1_choice`]
-/// — which, for a proposal that renews nothing, is `choose_after_prepare`. `own` is the proposer's own envelope, `current` the one it carries.
-pub fn phase1(slot: &str, own: &Bytes, current: &Bytes, reports: &[(u64, Bytes)], ended: u64) -> Phase1 {
+/// `Carry::report`; for a carry ballot that asked where each was made, what it hears of them ([`carry_hears`]);
+/// the acceptances at or below `ended` set aside (`set_aside_finished`); then [`phase1_choice`] — which, for a
+/// proposal that renews nothing, is `choose_after_prepare`. `own` is the proposer's own envelope, `current` the
+/// one it carries.
+pub fn phase1(
+    slot: &str, own: &Bytes, current: &Bytes, reports: &[(u64, Bytes)], ended: u64, hears: Option<&CarryHears<'_>>,
+) -> Phase1 {
     let Some(own) = Envelope::decode(own) else { return Phase1::Blocked };
     let carry = Carry { own, renewing: None, legacy_term: Term::Permanent };
     let mut reported = reports.iter()
         .map(|(b, e)| carry.report(slot, *b, Some(value_digest(e)), Some(e.clone()), true))
         .collect::<Vec<_>>();
+    if let Some(h) = hears {
+        let made_in: Vec<MadeIn> = h.made_in.iter().map(Made::to_engine).collect();
+        let lineage: Vec<Arc<str>> = h.lineage.iter().map(|g| Arc::from(*g)).collect();
+        reported = carry_hears(reported, &made_in, h.group, &lineage);
+    }
     set_aside_finished(&mut reported, 0, false, ended);
     match phase1_choice(current, &reported, &carry) {
         Phase1Choice::Keep => Phase1::Keep,
