@@ -204,16 +204,21 @@ impl SwimMembership {
     }
 
     /// [`Self::gossip_sample`] for a datagram addressed to `target`: when this table holds a
-    /// `Suspect` or `Dead` fact about `target`, that fact is in the sample (in place of the last
-    /// sampled entry, so the datagram's size is unchanged), so the target hears the rumour about
-    /// itself and can refute it by out-incarnating it (#798). An `Alive` fact needs no carrying.
+    /// `Suspect` or `Dead` fact about `target`, that fact is in the sample, so the target hears the
+    /// rumour about itself and can refute it by out-incarnating it (#798). An `Alive` fact needs no
+    /// carrying. The sample holds **no more entries** than [`Self::gossip_sample`]'s `n + 1`: a full
+    /// sample gives up its last entry for the fact (the bytes may differ by a `NodeId`'s length).
+    /// With `n = 0` (no gossip slots) nothing is carried.
     pub fn gossip_sample_for(&self, n: usize, target: &NodeId) -> Vec<MemberUpdate> {
         let mut out = self.gossip_sample(n);
+        if n == 0 {
+            return out;
+        }
         if let Some(f) = self.fact(target)
             && f.status != MemberStatus::Alive
             && !out.iter().any(|u| u.node == *target)
         {
-            if out.len() > n.max(1) {
+            if out.len() > n {
                 out.pop();
             }
             out.push(f);
@@ -432,6 +437,25 @@ mod tests {
             target.apply(&u, now);
         }
         assert_eq!(target.self_incarnation(), 1, "the suspect out-incarnates the rumour");
+    }
+
+    /// #801's review, F5: a targeted sample holds no more entries than a plain one, at every `n`
+    /// (at `n = 0` it carried one more), and the self entry is never the one given up.
+    #[test]
+    fn a_targeted_sample_has_no_more_entries_than_a_plain_one() {
+        let mut m = SwimMembership::new(id(1));
+        let now = Instant::now();
+        for p in 2..40 { m.apply(&alive(p, 0), now); }
+        m.suspect(&id(7), now);
+        for n in [0usize, 1, 2, 4, 12, 64] {
+            let plain = m.gossip_sample(n).len();
+            let targeted = m.gossip_sample_for(n, &id(7));
+            assert!(targeted.len() <= plain, "n = {n}: {} entries against {plain}", targeted.len());
+            assert_eq!(targeted[0].node, id(1), "n = {n}: self stays first");
+            if n > 0 {
+                assert!(targeted.iter().any(|u| *u == suspect(7, 0)), "n = {n}: the rumour rides");
+            }
+        }
     }
 
     #[test]

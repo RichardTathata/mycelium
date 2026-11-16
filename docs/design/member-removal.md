@@ -126,9 +126,14 @@ key is in its own certificate directory), reported `Present` or `Absent`. `Prese
 - **Knowledge verifies the removed node's signatures as `Revoked`**, not a new `Removed` variant: its keys join
   the revoked set, which is what makes A1 refuse its mandates too (§6.3). Attributable history, never current, as
   §2.2 asks.
-- **Membership/SWIM is covered by the connection loop:** a removed node's pings, signals and gossip writes are
-  dropped there (by node, and for writes by origin and signer), and it leaves the peer table and the outbound
-  writers.
+- **Membership is covered on both transports.** On TCP, the connection loop drops a removed node's pings, signals
+  and gossip writes (by node, and for writes by origin and signer), and the node leaves the peer table and the
+  outbound writers. On SWIM's UDP path (`mycelium-core/src/swim.rs`, from #801; before it, this line claimed the
+  connection loop covered SWIM, which it did not): a removed node's `Ping`, `Ack` and `PingReq` are dropped unanswered,
+  a `PingReq` naming it is not relayed, it is never a probe target, relay or rejoin target, and a `BecameAlive` for
+  it never re-enters `peers` or the fan-out watch. Each refusal is counted (`SwimState::removed_refused`). The agent
+  hands SWIM the removed set at start (`SwimState::set_removed`). Gate:
+  `swim::tests::a_removed_member_is_never_probed_or_taken_back_into_peers`.
 - **Keys named are extended with what the node has seen:** the removal's keys, plus every current and anchored key
   the applying node holds for that member.
 - **Not covered:** an HTTP client of some gateway that holds a token issued to the removed member's agents. Tokens

@@ -390,8 +390,18 @@ Three corollaries hardened 2026-07-21 (the cold-start saga —
   and `Suspect`, as SWIM specifies), each probe's gossip carries the prober's `Suspect`/`Dead`
   fact about its target (`gossip_sample_for`), and once a suspicion window (counted in protocol
   periods) it probes one bootstrap peer it holds `Dead` or has not heard of (`run_swim_prober`,
-  `mycelium-core/src/swim.rs`). Gates: `a_restarted_seed_that_is_suspected_is_probed_and_refutes`,
-  `a_restarted_seed_that_is_declared_dead_is_rejoined`, `a_dead_bootstrap_peer_that_is_gone_stays_dead`.
+  `mycelium-core/src/swim.rs`). Two limits travel with it (#801's review). **Relays stay `Alive`
+  only** (`relay_candidates`): a suspect is a target, never a relay, or a half-dead fleet falsely
+  suspects live targets. **A removed member is shut out of SWIM** as of the TCP path: its datagrams
+  dropped, never probed, relayed for or rejoined, and a `BecameAlive` for it kept out of `peers`
+  (`SwimState::set_removed`, counted in `removed_refused`). **Not covered:** a node with no bootstrap
+  peers that is in no one's `bootstrap_peers` and was declared `Dead` while down stays partitioned —
+  rejoin follows bootstrap edges only. And the fix is on the prober's side: a fleet's *members* must
+  run it. Gates: `a_restarted_seed_that_is_suspected_is_probed_and_refutes`,
+  `a_restarted_seed_that_is_declared_dead_is_rejoined`,
+  `a_dead_bootstrap_peer_that_is_gone_costs_one_ping_a_window_and_stays_dead`,
+  `relays_are_alive_members_only`, `a_removed_member_is_never_probed_or_taken_back_into_peers`,
+  `the_rumour_reaches_the_suspect_through_a_roster_larger_than_the_sample`.
 
 ## Anti-entropy is chunked; KV writes are size-gated (2026-07-02)
 
