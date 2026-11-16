@@ -139,6 +139,16 @@ impl N {
     async fn began(&self, k: usize) {
         assert!(until(|| self.started.load(Ordering::SeqCst) == k, Duration::from_secs(20)).await, "started {}", self.started.load(Ordering::SeqCst));
     }
+    /// Wait until `n` calls are registered here while the call `answered` is still out — and if it is answered first,
+    /// fail with its answer (#794's review, F1): a refusal names its code and reason, not only "running_count 0".
+    async fn running_or_answered(&self, n: usize, answered: &mut tokio::task::JoinHandle<serde_json::Value>) {
+        let done = until(|| self.authority.running_count() == n || answered.is_finished(), Duration::from_secs(20)).await;
+        if done && self.authority.running_count() == n {
+            return;
+        }
+        let reply = if answered.is_finished() { Some((&mut *answered).await) } else { None };
+        panic!("running_count {} (wanted {n}); the call's answer: {reply:?}", self.authority.running_count());
+    }
     /// A client's `tools/call` through this node's `/mcp`.
     async fn client_call(&self, tool: &str) -> serde_json::Value {
         let body = serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": tool, "arguments": {"aisle": 4}}});
@@ -176,7 +186,7 @@ async fn until(cond: impl Fn() -> bool, within: Duration) -> bool {
 }
 
 /// Two nodes under one CA: `g` the gateway (`gopts`), `p` the provider serving the tools; ready when each holds the
-/// other's key and `g` sees `p`'s tool.
+/// other's key and `g` sees both of `p`'s tools.
 async fn pair(gopts: Opts) -> (N, N, std::path::PathBuf) {
     let cert_dir = std::env::temp_dir().join(format!("i4-mint-ca-{}", crate::test_util::alloc_port()));
     let _ = std::fs::remove_dir_all(&cert_dir);
@@ -184,8 +194,12 @@ async fn pair(gopts: Opts) -> (N, N, std::path::PathBuf) {
     let p = node(Opts { cert_dir: Some(cert_dir.clone()), bootstrap: vec![g.a.node_id().clone()], tools: true, ..Opts::default() }).await;
     let knows = |x: &GossipAgent, n: &NodeId| x.task_ctx.peer_keys.pin().get(n).is_some_and(|k| !k.is_empty());
     assert!(until(|| knows(&g.a, p.a.node_id()) && knows(&p.a, g.a.node_id()), Duration::from_secs(20)).await, "the nodes learned each other's keys");
-    let tool = format!("tools/slow/{}", p.a.node_id());
-    assert!(until(|| g.kv(&tool).is_some(), Duration::from_secs(20)).await, "the gateway sees the provider's tool");
+    // Both tools: a test that calls `quick` straight after this was answered `tool not found: quick` under load when
+    // only `slow` was waited for (#794's review, F1 — `only_a_gateway_with_minting_on_mints_a_call_mandate`).
+    for tool in ["slow", "quick"] {
+        let key = format!("tools/{tool}/{}", p.a.node_id());
+        assert!(until(|| g.kv(&key).is_some(), Duration::from_secs(20)).await, "the gateway sees the provider's tool {tool}");
+    }
     (g, p, cert_dir)
 }
 
@@ -356,8 +370,8 @@ async fn a_first_checkpoint_written_back_over_the_cancel_is_re_asserted_and_the_
     let (g, p, cert_dir) = pair(Opts { mint: true, ..Opts::default() }).await;
     let g = Arc::new(g);
     let g2 = Arc::clone(&g);
-    let answered = tokio::spawn(async move { g2.client_call("slow").await });
-    p.running(1).await;
+    let mut answered = tokio::spawn(async move { g2.client_call("slow").await });
+    p.running_or_answered(1, &mut answered).await;
     let term = g.ctx().call_issuer.issued_terms().pop().unwrap();
     let key = call_checkpoint_key(&g.gateway(), &term);
     assert!(until(|| p.kv(&key).is_some(), Duration::from_secs(10)).await);
@@ -599,8 +613,8 @@ async fn with_the_issuer_down_a_running_call_ends_at_its_mandates_window() {
     let g = Arc::new(g);
     let g2 = Arc::clone(&g);
     let minted_at = std::time::Instant::now();
-    let _answered = tokio::spawn(async move { g2.client_call("slow").await });
-    p.running(1).await;
+    let mut answered = tokio::spawn(async move { g2.client_call("slow").await });
+    p.running_or_answered(1, &mut answered).await;
     p.began(1).await;
     let term = g.ctx().call_issuer.issued_terms().pop().unwrap();
     g.a.shutdown().await;
@@ -627,8 +641,8 @@ async fn at_the_default_window_a_running_call_ends_300_s_after_its_mint() {
     let cp = call_issuer::verified_checkpoint(&call_checkpoint_key(&n.gateway(), &term), &n.kv(&call_checkpoint_key(&n.gateway(), &term)).unwrap(), &call_issuer::record_keys(n.ctx())).unwrap();
     assert_eq!(w.valid_until_ms - cp.issued_at_ms, 300_000, "the default window is 300 s from the mint");
     let (n2, me2) = (Arc::clone(&n), me.clone());
-    let answered = tokio::spawn(async move { n2.send(&me2, framed).await });
-    n.running(1).await;
+    let mut answered = tokio::spawn(async move { n2.send(&me2, framed).await });
+    n.running_or_answered(1, &mut answered).await;
     n.authority.sweep(w.valid_until_ms - 1);
     assert_eq!(n.authority.running_count(), 1, "inside the window it runs");
     n.authority.sweep(w.valid_until_ms + 1);

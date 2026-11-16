@@ -318,6 +318,16 @@ impl Node {
     async fn running(&self, n: usize) {
         assert!(until(|| self.authority.running_count() == n, Duration::from_secs(20)).await, "running_count {} (wanted {n})", self.authority.running_count());
     }
+    /// Wait until `n` calls are registered here while the call `answered` is still out — and if it is answered first,
+    /// fail with its answer (#794's review, F1): a refusal names its code and reason, not only "running_count 0".
+    async fn running_or_answered(&self, n: usize, answered: &mut tokio::task::JoinHandle<Vec<u8>>) {
+        let done = until(|| self.authority.running_count() == n || answered.is_finished(), Duration::from_secs(20)).await;
+        if done && self.authority.running_count() == n {
+            return;
+        }
+        let reply = if answered.is_finished() { (&mut *answered).await.ok().map(|r| String::from_utf8_lossy(&r).into_owned()) } else { None };
+        panic!("running_count {} (wanted {n}); the call's answer: {reply:?}", self.authority.running_count());
+    }
 }
 
 async fn until(cond: impl Fn() -> bool, within: Duration) -> bool {
@@ -360,8 +370,8 @@ async fn a_cancellable_call_runs_only_registered_under_its_call_mandate_and_a_ca
     // Honest: registered, then cancelled.
     let (framed, id, _) = n.frame(&slow, None, Cm::Honest);
     let (n2, call) = (Arc::clone(&n), n.tool("slow"));
-    let running = tokio::spawn(async move { n2.send(&call, framed).await });
-    n.running(1).await;
+    let mut running = tokio::spawn(async move { n2.send(&call, framed).await });
+    n.running_or_answered(1, &mut running).await;
     n.began(1).await;
     assert_eq!(n.counts(), (1, 0), "the tool is running");
     let asked = std::time::Instant::now();
@@ -481,8 +491,8 @@ async fn a_call_under_a_grant_and_a_call_mandate_is_registered_under_both_and_ei
         let grant = n.grant(&both, &request);
         let (framed, id, _) = n.frame(&both, Some(&grant), Cm::Honest);
         let (n2, call) = (Arc::clone(&n), n.tool("both"));
-        let sent = tokio::spawn(async move { n2.send(&call, framed).await });
-        n.running(2).await;
+        let mut sent = tokio::spawn(async move { n2.send(&call, framed).await });
+        n.running_or_answered(2, &mut sent).await;
         n.began(round).await;
         if by_grant {
             n.offer_grant_checkpoint(&request, 2, &[request.as_str()]);
@@ -512,8 +522,8 @@ async fn a_cancel_reaches_an_in_process_serve_loop_through_authority_lapsed() {
     let skill = n.skill();
     let (framed, id, _) = n.frame(&skill, None, Cm::Honest);
     let (n2, call) = (Arc::clone(&n), n.skill());
-    let sent = tokio::spawn(async move { n2.send(&call, framed).await });
-    n.running(1).await;
+    let mut sent = tokio::spawn(async move { n2.send(&call, framed).await });
+    n.running_or_answered(1, &mut sent).await;
     n.began(1).await;
     n.cancel(id);
     let reply = tokio::time::timeout(Duration::from_secs(10), sent).await.expect("the skill was told its authority lapsed").unwrap();
@@ -622,8 +632,8 @@ async fn a_call_refused_for_its_call_mandate_gives_the_grant_back() {
     // The same grant, an honest envelope: it runs.
     let (framed, id, _) = n.frame(&both, Some(&grant), Cm::Honest);
     let (n2, call) = (Arc::clone(&n), n.tool("both"));
-    let sent = tokio::spawn(async move { n2.send(&call, framed).await });
-    n.running(2).await;
+    let mut sent = tokio::spawn(async move { n2.send(&call, framed).await });
+    n.running_or_answered(2, &mut sent).await;
     n.began(1).await;
     n.cancel(id);
     assert!(json(&sent.await.unwrap()).to_string().contains("cancelled: the call's authority lapsed while it ran"));
@@ -838,8 +848,8 @@ async fn a_declared_rpc_rx_receiver_is_served_and_stopped_and_one_that_ignores_t
     let handed = serve_rpc(&n, CUSTOM, true, true, Duration::from_secs(30));
     let (framed, id, _) = n.frame(&n.custom(), None, Cm::Honest);
     let (n2, call) = (Arc::clone(&n), n.custom());
-    let running = tokio::spawn(async move { n2.send(&call, framed).await });
-    n.running(1).await;
+    let mut running = tokio::spawn(async move { n2.send(&call, framed).await });
+    n.running_or_answered(1, &mut running).await;
     let asked = std::time::Instant::now();
     n.cancel(id);
     let reply = running.await.unwrap();
@@ -854,8 +864,8 @@ async fn a_declared_rpc_rx_receiver_is_served_and_stopped_and_one_that_ignores_t
     let _handed = serve_rpc(&n, CUSTOM, true, false, Duration::from_secs(3));
     let (framed, id, _) = n.frame(&n.custom(), None, Cm::Honest);
     let (n2, call) = (Arc::clone(&n), n.custom());
-    let running = tokio::spawn(async move { n2.send(&call, framed).await });
-    n.running(1).await;
+    let mut running = tokio::spawn(async move { n2.send(&call, framed).await });
+    n.running_or_answered(1, &mut running).await;
     n.cancel(id);
     let reply = running.await.unwrap();
     assert_eq!(reply, b"done".to_vec(), "the receiver ignored the lapse and answered when its work ended");
@@ -876,8 +886,8 @@ async fn an_undeclared_receivers_stop_is_a_release_and_a_declared_ones_is_confir
     let _plain = serve_rpc(&n, PLAIN_RPC, false, false, Duration::from_millis(1_500));
     let (framed, id, _) = n.frame(&n.plain_kind(), None, Cm::Honest);
     let (n2, call) = (Arc::clone(&n), n.plain_kind());
-    let running = tokio::spawn(async move { n2.send(&call, framed).await });
-    n.running(1).await;
+    let mut running = tokio::spawn(async move { n2.send(&call, framed).await });
+    n.running_or_answered(1, &mut running).await;
     n.cancel(id);
     assert_eq!(running.await.unwrap(), b"done".to_vec(), "the undeclared receiver ran to its end");
     n.running(0).await;
@@ -888,8 +898,8 @@ async fn an_undeclared_receivers_stop_is_a_release_and_a_declared_ones_is_confir
     let _custom = serve_rpc(&n, CUSTOM, true, true, Duration::from_secs(30));
     let (framed, id, _) = n.frame(&n.custom(), None, Cm::Honest);
     let (n2, call) = (Arc::clone(&n), n.custom());
-    let running = tokio::spawn(async move { n2.send(&call, framed).await });
-    n.running(1).await;
+    let mut running = tokio::spawn(async move { n2.send(&call, framed).await });
+    n.running_or_answered(1, &mut running).await;
     n.cancel(id);
     assert_eq!(running.await.unwrap(), b"stopped".to_vec());
     n.running(0).await;
