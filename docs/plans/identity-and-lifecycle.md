@@ -1644,6 +1644,13 @@ fail-first test of its own (a race between the cap's two steps), and the bounded
 - **L5:** the gateway issues no `Mcp-Session-Id`, so clients sharing a token can cancel each other's calls — stated on
   `mcp-tools.md` and in §114. The table's cap is now a reservation (an atomic count taken before the insert, given
   back on a miss), and a full table scans for stale entries at most once a second.
+- **From the confirm round (2026-11-16, comment 6918209958).** *L5:* the eviction removes an entry only if it is
+  still the one its scan saw (`remove_if` on the handle's pointer), so a fresh call registered at a stale key in
+  between keeps its handle: `the_mcp_tables_eviction_leaves_a_fresh_call_registered_at_a_stale_key`, seen failing
+  with the removal by key alone. *M1:* the early return that makes a provider without enforcement hold nothing is not
+  redundant — without it the class is the same (`NotRegistered`) but a window is held that refuses nothing; pinned in
+  `an_unenforcing_provider_answers_not_registered_never_not_running` (`view_sizes().2 == 0`), seen failing with the
+  check taken out.
 
 #### I4a · Sign the grant request, `consumed`, `revoked` and `refused` records, then let each owner collect its own — *follow-up of I4, agreed with the maintainer 2026-11-15 — **not buildable until written***
 

@@ -369,6 +369,9 @@ async fn an_unenforcing_provider_answers_not_registered_never_not_running() {
     let receipt = g.a.cancel_call(&term).await.expect("recorded");
     assert_eq!(receipt.class, CancelClass::NotRegistered, "{receipt:?}");
     assert_eq!((p.finished.load(Ordering::SeqCst), answered.is_finished()), (0, false), "the call still runs, which is what NotRegistered allows");
+    // And it holds nothing (#799's confirm round, M1): a hold here would refuse nothing, since nothing is checked at
+    // admission. Seen failing first with the enforcement check taken out of `answer`: one window was held.
+    assert_eq!(p.authority.view_sizes().2, 0, "an unenforcing provider holds no revocation");
     g.a.shutdown().await;
     p.a.shutdown().await;
     let _ = std::fs::remove_dir_all(&cert_dir);
@@ -478,4 +481,35 @@ async fn a_resent_pending_task_runs_no_second_call_and_its_cancel_stays() {
     g.a.shutdown().await;
     p.a.shutdown().await;
     let _ = std::fs::remove_dir_all(&cert_dir);
+}
+
+/// **L5 (#799's confirm round): the `/mcp` table's eviction removes only the stale entry it scanned.** The table is
+/// full of entries past `call_mandate_ttl_secs`; between the eviction's scan and its removals, key 0's old call ends
+/// and a fresh call registers at key 0. The eviction must leave the fresh entry, so its cancel still finds it. Seen
+/// failing first with the removal by key alone (`remove`): the fresh call lost its handle.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_mcp_tables_eviction_leaves_a_fresh_call_registered_at_a_stale_key() {
+    let n = node(Opts { ttl_secs: Some(1), ..Opts::default() }).await;
+    let key = |i: usize| ("token:gw/alice".to_string(), String::new(), i.to_string());
+    let mut held = Vec::with_capacity(MAX_MCP_CANCEL_ENTRIES);
+    for i in 0..MAX_MCP_CANCEL_ENTRIES {
+        held.push(call_cancel::register_mcp_call(n.ctx(), key(i)).expect("room"));
+    }
+    tokio::time::sleep(Duration::from_millis(1_200)).await;
+    let old = held.swap_remove(0);
+    let fresh: Arc<std::sync::Mutex<Option<call_cancel::McpRegistration>>> = Arc::default();
+    let (ctx, slot) = (Arc::clone(n.ctx()), Arc::clone(&fresh));
+    call_cancel::test_hooks::AFTER_EVICT_SCAN.lock().unwrap().push((
+        n.a.node_id().to_string(),
+        Box::new(move || {
+            drop(old);
+            *slot.lock().unwrap() = Some(call_cancel::register_mcp_call(&ctx, key(0)).expect("the old call's place"));
+        }),
+    ));
+    let _trigger = call_cancel::register_mcp_call(n.ctx(), key(MAX_MCP_CANCEL_ENTRIES)).expect("room after eviction");
+    let fresh_sink = fresh.lock().unwrap().as_ref().expect("the hook ran").sink();
+    let held_sink = call_cancel::test_hooks::mcp_sink(n.ctx(), &key(0)).expect("the fresh call is still registered");
+    assert!(Arc::ptr_eq(&held_sink, &fresh_sink), "the table holds the fresh call's handle");
+    std::mem::forget(held);
+    n.a.shutdown().await;
 }

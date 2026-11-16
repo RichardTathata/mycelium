@@ -390,9 +390,19 @@ pub(crate) fn register_mcp_call(ctx: &Arc<TaskCtx>, key: McpCallKey) -> Option<M
         let last = t.last_evict_ms.load(Ordering::Relaxed);
         if now.saturating_sub(last) >= 1_000 && t.last_evict_ms.compare_exchange(last, now, Ordering::AcqRel, Ordering::Relaxed).is_ok() {
             let ttl_ms = ctx.config.call_mandate_ttl_secs.saturating_mul(1_000);
-            let stale: Vec<McpCallKey> = t.calls.pin().iter().filter(|(_, v)| now.saturating_sub(v.at_ms) > ttl_ms).map(|(k, _)| k.clone()).collect();
-            for k in stale {
-                if t.calls.pin().remove(&k).is_some() {
+            // Each with its handle: a key re-registered between the scan and the removal holds a fresh call, which
+            // must keep its cancel handle (#799's confirm round, L5) — so only the entry the scan saw is removed.
+            let stale: Vec<(McpCallKey, Arc<CallSink>)> = t
+                .calls
+                .pin()
+                .iter()
+                .filter(|(_, v)| now.saturating_sub(v.at_ms) > ttl_ms)
+                .map(|(k, v)| (k.clone(), Arc::clone(&v.sink)))
+                .collect();
+            #[cfg(test)]
+            test_hooks::after_evict_scan(&ctx.node_id);
+            for (k, seen) in stale {
+                if matches!(t.calls.pin().remove_if(&k, |_, v| Arc::ptr_eq(&v.sink, &seen)), Ok(Some(_))) {
                     t.count.fetch_sub(1, Ordering::AcqRel);
                 }
             }
@@ -574,6 +584,27 @@ pub(crate) mod test_hooks {
 
     pub(super) fn forward_suppressed(node: &crate::node_id::NodeId) -> bool {
         SUPPRESS_FORWARD.pin().contains_key(&node.to_string())
+    }
+
+    /// Per gateway node: run once between the `/mcp` table's eviction scan and its removals.
+    #[allow(clippy::type_complexity)]
+    pub(crate) static AFTER_EVICT_SCAN: std::sync::Mutex<Vec<(String, Box<dyn FnOnce() + Send>)>> = std::sync::Mutex::new(Vec::new());
+
+    pub(super) fn after_evict_scan(node: &crate::node_id::NodeId) {
+        let node = node.to_string();
+        let hook = {
+            let mut hooks = AFTER_EVICT_SCAN.lock().unwrap_or_else(|e| e.into_inner());
+            hooks.iter().position(|(n, _)| *n == node).map(|i| hooks.remove(i).1)
+        };
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+
+    /// The handle the `/mcp` table holds for `key`, if any.
+    #[cfg_attr(not(feature = "compliance"), allow(dead_code))] // read by `call_cancel_tests`, a `compliance` module
+    pub(crate) fn mcp_sink(ctx: &crate::agent::TaskCtx, key: &super::McpCallKey) -> Option<std::sync::Arc<super::CallSink>> {
+        ctx.call_issuer.mcp_cancels.calls.pin().get(key).map(|c| std::sync::Arc::clone(&c.sink))
     }
 }
 
