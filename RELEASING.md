@@ -189,6 +189,10 @@ re-point `latest` by hand afterwards.
 
 ## 8. Publish the GitHub Release
 
+**Not while a release blocker stands.** Run `scripts/check-release-blockers.sh --release` first; while it fails (today:
+`CONSENT_GRADE_OID_IS_PROVISIONAL` is `true`, identity-and-lifecycle I7), do not publish by hand with `gh release
+create` — the release workflow's `version` job refuses such a tag, and a hand-run publish would go around that refusal.
+
 A tag is not an announcement. The Releases page is what a reader who watches releases rather than
 commits actually sees, and **it silently stopped being updated after v2.4.4** — so from 2026-09-12
 to 2026-09-23 the page said *"Latest: v2.4.4"* while eleven tags shipped behind it, **four of them
