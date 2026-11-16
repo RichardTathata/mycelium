@@ -68,7 +68,9 @@ Four layers, all additive/opt-in (`src/agent/rbac.rs`, gateway middleware in
    **Secure profile** (`gateway_caller_profile`, default) refuses rather than impersonates:
    forged context (ignored at the gateway / `CallerError` at the provider), missing context
    (`-32020`), over-scoped assertion (intersection by construction), and a provider without
-   the `sys/caller-context/{node}` marker (`-32021` / HTTP 412, naming it); `legacy` =
+   the `sys/caller-context/{node}` marker (`-32021` / HTTP 412, naming it, for a named target; a door that
+   chooses its provider passes it over and answers its "no provider" — #802, the gateway sends only on a promise it
+   holds); `legacy` =
    node-as-caller for a rolling-upgrade window, `warn!` at start, plan §6.6 removal-ledger entry.
    Gates: `gateway_caller_tests` (`src/agent/http/gateway_caller_tests.rs` — the four negative cases, the
    `authorized_callers` gate under `tls`+`compliance` with a mesh forgery, `/a2a` principal

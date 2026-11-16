@@ -118,6 +118,18 @@ pub(super) struct LlmCallBody {
 #[cfg(feature = "llm")]
 pub(super) fn default_timeout_ms() -> u64 { 30_000 }
 
+/// The providers an LLM door may send to: those whose caller-context marker this gateway holds (#802,
+/// [`gateway_caller::gateway_sends_to`]). With none left the door answers `no_provider`, as for a prompt skill nobody
+/// advertises.
+#[cfg(feature = "llm")]
+fn sendable_providers(
+    ctx: &crate::agent::TaskCtx,
+    mut providers: Vec<(crate::node_id::NodeId, crate::capability::Capability)>,
+) -> Vec<(crate::node_id::NodeId, crate::capability::Capability)> {
+    providers.retain(|(n, _)| gateway_caller::gateway_sends_to(ctx, n));
+    providers
+}
+
 #[cfg(feature = "llm")]
 pub(super) async fn gw_llm_call(
     State(ctx): State<Arc<HttpCtx>>,
@@ -140,7 +152,7 @@ pub(super) async fn gw_llm_call(
     }
     let timeout = gateway_rpc_timeout_ms(body.timeout_ms);
     let filter  = CapFilter::new(body.ns.as_str(), body.name.as_str());
-    let providers = resolve_cap_providers(&ctx.agent_ctx.kv_state, &filter);
+    let providers = sendable_providers(&ctx.agent_ctx, resolve_cap_providers(&ctx.agent_ctx.kv_state, &filter));
 
     let provider_str = providers.first()
         .map(|(id, _)| id.to_string())
@@ -287,7 +299,7 @@ pub(super) async fn gw_llm_stream(
     // with gw_llm_call, which uses 404/502/504).
     let timeout = std::time::Duration::from_secs(30);
     let filter  = CapFilter::new(body.ns.as_str(), body.name.as_str());
-    let providers = resolve_cap_providers(&ctx.agent_ctx.kv_state, &filter);
+    let providers = sendable_providers(&ctx.agent_ctx, resolve_cap_providers(&ctx.agent_ctx.kv_state, &filter));
 
     let event = match providers.into_iter().next() {
         // Identity-and-lifecycle I1: this door binds no client signature; one sent here is refused, never dropped.

@@ -556,10 +556,10 @@ pub(super) async fn gw_grants_stream(State(ctx): State<Arc<HttpCtx>>) -> axum::r
     Sse::new(tokio_stream::StreamExt::map(tokio_stream::wrappers::ReceiverStream::new(out), Ok::<_, std::convert::Infallible>)).keep_alive(KeepAlive::default()).into_response()
 }
 
-/// The node providing `tool`, as `/mcp` resolves it (the first `tools/{tool}/{node}` record).
+/// The node providing `tool`, as `/mcp` resolves it — the one function, so a grant names the provider the call will be
+/// sent to, a provider whose caller-context marker this gateway does not hold passed over at both (#802).
 fn tool_provider(ctx: &TaskCtx, tool: &str) -> Option<crate::node_id::NodeId> {
-    let prefix = format!("tools/{tool}/");
-    crate::store::scan_kv_prefix(&ctx.kv_state, &prefix).into_iter().find_map(|(key, _)| key.strip_prefix(&prefix)?.parse().ok())
+    super::mcp_bridge::tool_provider(ctx, tool)
 }
 
 /// The most requests one client principal may have standing unanswered at once: past it the door refuses by name

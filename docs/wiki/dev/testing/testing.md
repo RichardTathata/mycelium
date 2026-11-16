@@ -444,7 +444,10 @@ HTTP server is up, while a secure-profile gateway refuses to route to a provider
 `sys/caller-context/` marker it cannot see yet (item 7), correctly answering HTTP 412 rather than
 running the call as the node. That marker is published lazily and must then gossip, so between
 "healthy" and "dispatchable" every call is a 412 — which reddened the Python SDK job on 2026-09-15.
-The gate now polls until both markers are visible on the dispatching node. Integration scenario 13
+The gate now polls until both markers are visible on the dispatching node. Since #802 a door that chooses its provider
+passes over one whose marker it does not hold and answers its "no provider" (`404`, `-32601`, `skill not found`)
+rather than 412 — still not "dispatchable", so the poll is unchanged; only a named target (`/gateway/rpc/call`) still
+answers 412. Integration scenario 13
 had the sibling version of this (a gossiped role record that survives a restart, so "primary" can be
 stale), and the client-deadline section below has the third. Before trusting a readiness poll, ask:
 *if this predicate is true and the next line still fails, what did I fail to prove?*
@@ -549,7 +552,8 @@ scan only recognises node ids, not foreign slots.
   `health_check_interval_secs = 1`, as the WS1 TLS test sets them.
 - **A secure-profile gateway dispatches only to a provider whose `sys/caller-context` marker it has seen**
   (item 7), and the marker reaches it by gossip like the capability does. Poll for both before the first call;
-  the first draft polled only for the capability and got `-32021`.
+  the first draft polled only for the capability and got `-32021` (since #802, `skill not found`: the door passes
+  over an unpromised provider — `gateway_sends_to` is the predicate to poll).
 - **An export needs a skill behind it.** A grant added mid-partition is only callable if the provider
   advertises that skill; the gateway answers `-32001 skill not found` otherwise. Not a federation refusal —
   the test now advertises both exports and the pre-call poll checks both.

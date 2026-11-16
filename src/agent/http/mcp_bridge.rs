@@ -54,8 +54,13 @@ pub(super) async fn mcp_handler(
                 crate::store::scan_kv_prefix(&ctx.agent_ctx.kv_state, "tools/")
             {
                 let rest = key.strip_prefix("tools/").unwrap_or_default();
-                let Some((name, _node_id)) = rest.split_once('/') else { continue };
+                let Some((name, node_id)) = rest.split_once('/') else { continue };
                 if tool_map.contains_key(name) { continue; }
+                // #802: listed as `tools/call` resolves it — only a provider this gateway may send to offers the tool,
+                // so a client that lists a tool can call it.
+                if !node_id.parse::<crate::node_id::NodeId>().is_ok_and(|n| gateway_caller::gateway_sends_to(&ctx.agent_ctx, &n)) {
+                    continue;
+                }
                 let schema: serde_json::Value =
                     serde_json::from_slice(&bytes).unwrap_or(json!({}));
                 tool_map.insert(name.to_string(), schema);
@@ -103,15 +108,8 @@ pub(super) async fn mcp_handler(
                 })).into_response();
             }
 
-            let prefix = format!("tools/{name}/");
-            let provider = crate::store::scan_kv_prefix(&ctx.agent_ctx.kv_state, &prefix)
-                .into_iter()
-                .find_map(|(key, _)| {
-                    let rest = key.strip_prefix(&prefix)?;
-                    rest.parse::<crate::node_id::NodeId>().ok()
-                });
-
-            let Some(provider_node_id) = provider else {
+            // #802: a provider whose caller-context marker this gateway does not yet hold is not yet one it sends to.
+            let Some(provider_node_id) = tool_provider(&ctx.agent_ctx, &name) else {
                 return Json(json!({
                     "jsonrpc": "2.0", "id": id,
                     "error": {"code": -32601, "message": format!("tool not found: {name}")},
@@ -341,6 +339,28 @@ fn mcp_dispatch_timeout(_node: &crate::node_id::NodeId) -> Duration {
 #[cfg(test)]
 pub(crate) static TEST_DISPATCH_TIMEOUT_MS: std::sync::LazyLock<papaya::HashMap<String, u64>> =
     std::sync::LazyLock::new(papaya::HashMap::new);
+
+/// **The node `/mcp` sends a call of `tool` to:** the first `tools/{tool}/{node}` record whose provider this gateway
+/// may send to ([`gateway_caller::gateway_sends_to`], #802) — a provider whose caller-context marker has not reached
+/// this gateway is passed over, and with none left the call is answered `tool not found`, as for a tool not yet
+/// advertised. The grant door names the same provider (`grants.rs`), so a grant is asked for where the call will go.
+pub(crate) fn tool_provider(ctx: &crate::agent::TaskCtx, tool: &str) -> Option<crate::node_id::NodeId> {
+    let prefix = format!("tools/{tool}/");
+    let mut passed_over = Vec::new();
+    let chosen = crate::store::scan_kv_prefix(&ctx.kv_state, &prefix).into_iter().find_map(|(key, _)| {
+        let node = key.strip_prefix(&prefix)?.parse::<crate::node_id::NodeId>().ok()?;
+        if gateway_caller::gateway_sends_to(ctx, &node) {
+            Some(node)
+        } else {
+            passed_over.push(node);
+            None
+        }
+    });
+    if !passed_over.is_empty() {
+        tracing::debug!(tool, ?passed_over, "mcp: passed over providers whose caller-context marker this gateway does not hold yet");
+    }
+    chosen
+}
 
 /// Test hook: the last dispatch timeout's diagnostics, per gateway node — what the `warn!` logs.
 #[cfg(test)]

@@ -257,6 +257,11 @@ pub(super) async fn pair(gopts: Opts) -> (N, N, std::path::PathBuf) {
         let key = format!("tools/{tool}/{}", p.a.node_id());
         assert!(until(|| g.kv(&key).is_some(), Duration::from_secs(20)).await, "the gateway sees the provider's tool {tool}");
     }
+    // #802: and holds the provider's caller-context marker — until then `/mcp` passes the provider over (`tool not
+    // found`, which this test's client does not retry). The marker and the tool are separate keys gossip may deliver in
+    // either order: this wait, missing, is what the -32021 sightings of this file were (before #802 the gateway sent
+    // and was refused `provider_without_caller_context`).
+    assert!(until(|| super::gateway_caller::gateway_sends_to(g.ctx(), p.a.node_id()), Duration::from_secs(20)).await, "the gateway holds the provider's marker");
     (g, p, cert_dir)
 }
 
@@ -268,10 +273,11 @@ pub(super) async fn pair(gopts: Opts) -> (N, N, std::path::PathBuf) {
 /// client is answered `cancelled`, the tool did not finish, and `p`'s stop record names the term. Seen failing first:
 /// with `mints_for` answering `false`, the call was never registered at the provider (refused `no_call_mandate`).
 /// #794's review, K2: this test timed out once in CI with nothing registered — the gateway saw the provider's tool
-/// before its caller-context marker and refused the call `provider_without_caller_context`. Fixed at the provider:
-/// it publishes the marker before it advertises the tool
-/// (`a_provider_publishes_its_caller_context_marker_before_it_advertises_work`); a miss prints the client's answer
-/// and the counters.
+/// before its caller-context marker and refused the call `provider_without_caller_context`. The provider publishes the
+/// marker before it advertises the tool (`a_provider_publishes_its_caller_context_marker_before_it_advertises_work`),
+/// but gossip delivers the two keys in either order, so it recurred under load on main 542df4ae (#802). Fixed at the
+/// gateway: it passes over a provider whose marker it does not hold (`gateway_sends_to`), and `pair()` waits for it;
+/// a miss prints the client's answer and the counters.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_clients_call_through_the_gateway_is_minted_admitted_and_stopped_by_a_cancel() {
     let (g, p, cert_dir) = pair(Opts { mint: true, ..Opts::default() }).await;

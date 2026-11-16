@@ -723,6 +723,15 @@ impl InferenceRouter {
                 }
                 break; // every eligible provider has been tried
             };
+            // #802: for a client, a provider whose caller-context marker this gateway does not yet hold is not yet one
+            // it can send to (gossip can deliver its `llm` advertisement first). Passed over, not an attempt; with none
+            // left before any pick, the route answers `NoProvider`, which a client retries — never -32021.
+            #[cfg(feature = "gateway")]
+            if matches!(dispatch, Dispatch::ForClient { .. }) && !self.agent.gateway_sends_to(&node) {
+                drop(reservation);
+                tried.push(node);
+                continue;
+            }
             let node = &node;
             if first_pick {
                 if let Some(t) = trace {

@@ -858,6 +858,17 @@ impl GatewayPreflight {
 }
 
 impl crate::GossipAgent {
+    /// **May this gateway send a client's call to `node` now?** (#802.) A provider promises that it enforces the
+    /// gateway caller context by publishing its `sys/caller-context/{node}` marker; a gateway sends only to a provider
+    /// whose promise it holds. Gossip can deliver a provider's advertisement before its marker, so a companion door that
+    /// chooses among providers for [`ServiceHandle::rpc_call_as`](crate::ServiceHandle::rpc_call_as) passes over one
+    /// this answers `false` for, as the node's own doors do, and answers its own "no provider" when none is left —
+    /// rather than send and be refused `provider_without_caller_context` (-32021). `true` for this node, and for every
+    /// node under `gateway_caller_profile = legacy`.
+    pub fn gateway_sends_to(&self, node: &crate::NodeId) -> bool {
+        crate::agent::gateway_caller::gateway_sends_to(&self.task_ctx, node)
+    }
+
     /// The action preflight a gateway door runs **between the auth layer and the dispatch**, for a
     /// route a companion mounts. The same function `/mcp`, `/a2a` and `/gateway/llm/call` call:
     /// inert unless an evaluator is attached (`with_action_evaluator`); with one, the envelope is

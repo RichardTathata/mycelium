@@ -341,9 +341,10 @@ pub struct GatewayTlsConfig {
 #[serde(rename_all = "lowercase")]
 pub enum GatewayCallerProfile {
     /// **Default.** Every gateway dispatch carries a caller context. The gateway refuses
-    /// (rather than silently running as the node) when it cannot: a provider that does not
-    /// enforce the context (no `sys/caller-context/{provider}` marker — a pre-2.5 node) is
-    /// answered with an explicit error naming the provider.
+    /// (rather than silently running as the node) when it cannot: it sends only to a provider whose
+    /// `sys/caller-context/{provider}` marker it holds. A door that chooses its provider passes one
+    /// without it over (#802) and answers its own "no provider"; a target the client named is answered
+    /// with an explicit error naming the provider (`provider_without_caller_context`).
     #[default]
     Secure,
     /// Node-as-caller dispatch, exactly as before item 7. **Only for a rolling upgrade window**

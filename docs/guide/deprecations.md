@@ -4688,3 +4688,53 @@ gateway that does not mint** (`gateway_mint_call_mandates`, off by default) exce
   answers it, so the receipt is `DeliveryUnknown` after 5 s, and the call stops by the KV as before (bound 1).
   ***Check:*** on a minting gateway, cancel a running call with `GossipAgent::cancel_call`; the receipt is `Stopped`
   and `GET /stats` `call_cancel_receipts.stopped` is 1.
+
+## 115. A gateway sends only to a provider whose caller-context marker it holds; with none, a choosing door answers its "no provider", not -32021 (unreleased, #802)
+
+*Numbered 115 because an open pull request holds §113 (#801) at the time of writing; §114 is #799's.*
+
+**What changed.** A provider promises that it enforces the gateway caller context by publishing
+`sys/caller-context/{node}`; a secure gateway sends a client's call only to a provider whose promise it holds. The
+marker and the provider's `tools/` or `cap/` entry are separate keys, and gossip does not deliver separate keys in the
+order they were written (#794 ordered the writes at the provider only), so a gateway could hold a tool before its
+provider's marker and refuse the call `-32021 provider_without_caller_context`. Now every door that **chooses** a
+provider passes over one whose marker it does not hold:
+
+| Door | Answer when no provider is left (unchanged — the door's own "no provider") |
+|---|---|
+| `/mcp` `tools/call` | `-32601` `tool not found: {name}` |
+| `POST /gateway/grants/request` (names the provider `/mcp` will choose) | `404 no_provider` |
+| `/a2a` `tasks/send`, `tasks/sendSubscribe` | the unresolved skill: `-32602` (`-32001` legacy), `skill not found` |
+| `/gateway/llm/call`, `/gateway/llm/stream` | `404 no_provider` / the in-stream `{"type":"error","error":"no_provider"}` |
+| `mycelium-reason`'s routes for a client (`call_as`, `/gateway/reason/route`, `/gateway/reason/v1/chat/completions`) | `RouteError::NoProvider`: `404 no_provider`, or the chat route's `404 model_not_found`; passed over, not an attempt |
+
+With another provider whose marker it holds, the call goes there instead. **The listings agree with the calls:** `/mcp`
+`tools/list` lists a tool, and the A2A agent card a skill, only when a provider the gateway may send to offers it — so a
+client that waits for a tool to be listed before calling it (a common readiness probe) is ready to call it.
+
+**What an adopter sees.** A transient `-32021` (HTTP `412`) right after a provider starts becomes the door's
+no-provider answer, which a client already retries. **Beyond that, one answer changes:** a provider that will
+**never** publish the marker — a node from before the marker (2.5.0), or one whose marker a member tombstoned — is now
+invisible at a choosing door: absent from `tools/list` and the agent card, and `/mcp` answers `tool not found`, `/a2a` `skill not found`, the LLM doors and the reason
+router `no_provider`, where they answered `-32021` / `412` naming the provider. *Check:* an operator who diagnosed a
+stale provider by its `-32021` finds it now by comparing `GET /gateway/kv/keys?prefix=tools/` (or `cap/`) with
+`?prefix=sys/caller-context/`; a debug log at `/mcp` names the providers passed over. Every node of a supported
+release publishes its marker before it advertises work (#794), so in a current fleet this arises only while a
+marker is in flight.
+
+**What -32021 means now.** No marker value says "does not enforce": a node publishes `"1"` (`MARKER_VERIFIES`) or
+`"2"` (`MARKER_PROMISES_ENVELOPES`), and both promise enforcement. So `-32021` / `412 provider_without_caller_context`
+is answered only where the gateway did not choose: **a target the client named** — `/gateway/rpc/call`,
+`/gateway/scatter` (listed under `refused`), `/gateway/overlay/emit_reliable`, and `ServiceHandle::rpc_call_as` — whose
+marker this gateway does not hold (not yet, or never), and at a choosing door only if the marker is withdrawn between
+the choice and the send. Its message now says so: *"provider {n} is not known to enforce the gateway caller context
+(this gateway holds no sys/caller-context marker for it): retry once its marker arrives, upgrade it if it predates the
+marker, or set gateway_caller_profile = legacy …"* (it said *"does not enforce"*). The code, the reason and the
+status are unchanged. Under `gateway_caller_profile = legacy` nothing changes: no marker is asked for.
+
+**API (additive):** `GossipAgent::gateway_sends_to(&NodeId) -> bool` (`gateway`) — the predicate the node's doors use,
+for a companion door that chooses among providers before `ServiceHandle::rpc_call_as`.
+
+Tests: `src/agent/http/marker_race_tests.rs` (each door, the tool entry delivered before the marker; served once it
+arrives), `a_client_route_passes_over_a_provider_whose_marker_is_not_held` (`mycelium-reason/tests/gateway.rs`),
+`secure_profile_refuses_a_provider_without_the_marker_and_legacy_does_not` (the named target still `412`).

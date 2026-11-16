@@ -165,7 +165,8 @@ async fn granted_scopes_are_the_intersection_never_the_wildcard() {
 
 /// Negative case 4 — **an older provider that cannot enforce the context is refused, not
 /// silently run as the node**: with the provider's `sys/caller-context/` marker absent, the
-/// secure gateway answers `-32021`; the explicit `legacy` profile dispatches as before.
+/// secure gateway sends nothing — `/mcp` passes the provider over (`-32601`, #802) and a named target is
+/// refused `412 provider_without_caller_context`; the explicit `legacy` profile dispatches as before.
 #[tokio::test]
 async fn secure_profile_refuses_a_provider_without_the_marker_and_legacy_does_not() {
     let provider = node(None, vec![], |_| {});
@@ -196,11 +197,21 @@ async fn secure_profile_refuses_a_provider_without_the_marker_and_legacy_does_no
     assert!(poll_until(|| secure.kv().get(&marker).is_none() && legacy.kv().get(&marker).is_none(),
                        Duration::from_secs(10)).await, "the tombstone reaches both gateways");
 
+    // #802: `/mcp` chooses its provider, and passes over one whose marker it does not hold — the tool's only
+    // provider is not one it can send to, so the call is answered as for a tool not advertised, and nothing is sent.
+    *seen.lock().unwrap() = None;
     let body = tools_call(secure_port, None, serde_json::json!({"name": "whoami", "arguments": {}})).await;
-    assert_eq!(body["error"]["code"], -32021, "secure profile refuses: {body}");
-    assert_eq!(body["error"]["data"]["reason"], "provider_without_caller_context");
-    assert!(body["error"]["message"].as_str().unwrap().contains(&provider.node_id().to_string()),
-            "the refusal names the provider");
+    assert_eq!(body["error"]["code"], -32601, "secure profile does not send: {body}");
+    assert!(seen.lock().unwrap().is_none(), "nothing reached the tool");
+    // A target the client names is refused -32021 / 412, naming the provider.
+    let resp = reqwest::Client::new()
+        .post(format!("http://127.0.0.1:{secure_port}/gateway/rpc/call"))
+        .json(&serde_json::json!({"target": provider.node_id().to_string(), "method": "app.ping", "timeout_secs": 2}))
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 412, "secure profile refuses a named target without the marker");
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["error"], "provider_without_caller_context", "{body}");
+    assert_eq!(body["provider"], provider.node_id().to_string(), "the refusal names the provider");
 
     // The explicit legacy profile still dispatches — as the node, which is what the
     // provider (here: one that would strip nothing) then sees.

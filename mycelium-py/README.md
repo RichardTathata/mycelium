@@ -128,8 +128,10 @@ the gateway node. Raw emissions (`emit`, shard emit, mailbox deliver) carry no p
 an RPC provider as the node. On the serving side, `rpc_serve` requests
 carry it as `RpcRequest.caller` (`{"principal", "via", "scopes", "attested"}`; `None` for a direct
 in-mesh call). Two new gateway refusals, both meaning "the node will not impersonate": HTTP `412` /
-JSON-RPC `-32021` `provider_without_caller_context` (the target node predates item 7 — upgrade it,
-or run the gateway with `gateway_caller_profile = legacy` during the rollout) and `-32020`
+JSON-RPC `-32021` `provider_without_caller_context` (a target you named whose caller-context marker the
+gateway does not hold: not yet arrived — retry — or a node that predates item 7 — upgrade it, or run the gateway with
+`gateway_caller_profile = legacy` during the rollout; where the gateway chooses the provider, `/mcp`, `/a2a` and the
+LLM doors pass such a provider over and answer their "no provider" instead, #802) and `-32020`
 `caller_context_missing`. The `A2aClient` sends its `token` on `/a2a` too; without one the skill
 sees `anonymous`. Operator page: `docs/operations/rbac.md` §7.
 

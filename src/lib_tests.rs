@@ -14434,8 +14434,8 @@ async fn test_boundary_h_a1_gateway_establishes_mandates_end_to_end() {
 
 /// **A grant's use is given back at `/a2a` when the gateway refused before sending** (I5, #760's confirm round). Both
 /// A2A doors claim a grant's use in the preflight; a refusal the gateway authors before it sends — here
-/// `provider_without_caller_context`, the skill's only advertisement naming a node that publishes no caller-context
-/// marker; an exchange that yields no token takes the same arm — ran nothing, so the use is released, and the retry
+/// `provider_without_caller_context`, the skill's only advertisement naming a node whose caller-context marker reads
+/// as withdrawn between `/a2a`'s choice and the send (a test hook; #802); an exchange that yields no token takes the same arm — ran nothing, so the use is released, and the retry
 /// under the same single-use grant is admitted once, unary (`tasks/send`) and streamed (`tasks/sendSubscribe`) alike.
 /// (An `oidc:` principal cannot hold a grant today — possession needs a key the IdP's user has none of — so the
 /// failing-IdP case is the `/mcp` test's function-level one.) Seen failing first: the retry refused `GrantUsed`.
@@ -14553,11 +14553,17 @@ async fn a2a_a_grant_is_given_back_when_the_gateway_refused_before_sending() {
             .await
             .unwrap()
     };
-    // The skill's only advertisement names a node with no caller-context marker: the gateway refuses before sending.
+    // The skill's only advertisement names a node whose caller-context marker the gateway held when `/a2a` chose it and
+    // reads as withdrawn at the send (#802: a door passes over a provider whose marker it does not hold, so this is
+    // the one way a choosing door still meets -32021): the gateway refuses before sending.
     let elsewhere_ad = format!("cap/{elsewhere}/depot/dispatch");
     mycelium_core::ops::kv_set(&agent.task_ctx, Arc::from(elsewhere_ad.as_str()), crate::capability::Capability::new("depot", "dispatch").encode());
+    mycelium_core::ops::kv_set(&agent.task_ctx, Arc::from(crate::agent::gateway_caller::marker_key(&elsewhere).as_str()), bytes::Bytes::from_static(b"1"));
+    let withdrawn = format!("{me} {elsewhere}");
+    crate::agent::gateway_caller::TEST_WITHDRAWN_AT_SEND.pin().insert(withdrawn.clone());
     let unary_refused = call("tasks/send", unary_grant.clone()).await;
     let stream_refused = call("tasks/sendSubscribe", stream_grant.clone()).await;
+    crate::agent::gateway_caller::TEST_WITHDRAWN_AT_SEND.pin().remove(&withdrawn);
     // Now the skill is served here: the retries under the same grants are admitted, once each.
     mycelium_core::ops::kv_delete_async(&agent.task_ctx, Arc::from(elsewhere_ad.as_str())).await;
     let _reg = agent.capabilities().advertise_capability(crate::capability::Capability::new("depot", "dispatch"), Duration::from_secs(30));
@@ -14573,7 +14579,7 @@ async fn a2a_a_grant_is_given_back_when_the_gateway_refused_before_sending() {
     let runs = reached.load(Ordering::SeqCst);
     agent.shutdown().await;
     let _ = std::fs::remove_dir_all(&cert_dir);
-    assert!(unary_refused.contains("does not enforce the gateway caller context"), "UNARY REFUSED BEFORE SENDING: {unary_refused}");
+    assert!(unary_refused.contains("is not known to enforce the gateway caller context"), "UNARY REFUSED BEFORE SENDING: {unary_refused}");
     assert!(stream_refused.contains("provider_without_caller_context"), "STREAM REFUSED BEFORE SENDING: {stream_refused}");
     assert!(unary_retry.contains("dispatched") || unary_retry.contains("\"completed\""), "UNARY RELEASED: the retry under the same grant: {unary_retry}");
     assert!(stream_retry.contains("\"completed\""), "STREAM RELEASED: the retry under the same grant: {stream_retry}");

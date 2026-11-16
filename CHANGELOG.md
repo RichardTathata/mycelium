@@ -33,6 +33,15 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - **Check:** stop a seed (a node with `bootstrap_peers = []` that the others list) for longer than
     `swim_suspicion_timeout_ms` (4 s by default) and start it again: within about one more suspicion window,
     `curl -s http://SEED:HTTP_PORT/stats | jq .peers` shows its peers again (it stayed `0` before).
+- **A gateway sends a client's call only to a provider whose caller-context marker it holds** (#802; `deprecations.md`
+  §115). #794 ordered the marker before the advertisement at the provider, but gossip does not deliver separate keys
+  in write order, so a gateway could still hold a provider's tool before its marker and refuse the call -32021
+  `provider_without_caller_context`. Every door that chooses a provider — `/mcp` `tools/call` and the grant door,
+  `/a2a` send and stream, `/gateway/llm/call` and `/gateway/llm/stream`, and `mycelium-reason`'s client routes — now
+  passes such a provider over (`gateway_sends_to`), and with none left answers its own "no provider", which clients
+  retry; `tools/list` and the A2A agent card list only what such a provider offers. -32021 stays for a target the client names. *Check:* a provider that never publishes the marker (before
+  2.5.0, or a tombstoned marker) is now answered "no provider" at those doors rather than -32021. New:
+  `GossipAgent::gateway_sends_to`.
 - **A client calling soon after a provider starts is no longer refused `provider_without_caller_context`** (-32021;
   #794's review, K2, and the Eve fleet job on #796). A provider wrote its caller-context marker
   (`sys/caller-context/{node}`) from a task that waited for a peer, up to 5 s, while a tool's entry and a capability's
