@@ -11,6 +11,15 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A restarted SWIM seed is found again** (#798; the Eve fleet job's `a write at node 1 reaching node 3 … within
+  120000 ms`). A node with no `bootstrap_peers` of its own (a seed) starts its restart with an empty membership table
+  and contacts no one. If one probe landed while it was down, its peers held it `Suspect` — and the prober chose
+  among `Alive` members only, so no one probed it again: it never heard the rumour, could not refute it, and was
+  `Dead` on every peer `swim_suspicion_timeout_ms` later, its writes reaching no one for good. The prober now probes
+  `Suspect` members too (as SWIM specifies), carries its rumour about a target in the probe so the target refutes it,
+  and once each suspicion window probes one bootstrap peer it holds `Dead` or has not heard of. No wire change (the
+  SWIM datagram's layout is unchanged; a probe's gossip sample is no larger). Every release with SWIM on by default
+  is affected.
 - **A client calling soon after a provider starts is no longer refused `provider_without_caller_context`** (-32021;
   #794's review, K2, and the Eve fleet job on #796). A provider wrote its caller-context marker
   (`sys/caller-context/{node}`) from a task that waited for a peer, up to 5 s, while a tool's entry and a capability's

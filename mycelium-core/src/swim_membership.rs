@@ -179,6 +179,48 @@ impl SwimMembership {
             .collect()
     }
 
+    /// Members to choose a probe target from: `Alive` **and `Suspect`** (#798). SWIM keeps a
+    /// suspected member in the probe rotation, because a probe is how the suspect hears the
+    /// rumour and refutes it. Probing only `Alive` members meant that once a suspicion had spread
+    /// (it gossips to every node), nobody contacted the suspect again: a restarted node with no
+    /// bootstrap peers of its own never heard it was suspected, could not refute, was declared
+    /// `Dead` everywhere `suspicion_timeout` later and stayed partitioned.
+    pub fn probe_candidates(&self) -> Vec<NodeId> {
+        self.members
+            .iter()
+            .filter(|(_, e)| e.status != MemberStatus::Dead)
+            .map(|(n, _)| n.clone())
+            .collect()
+    }
+
+    /// This table's fact about `node`, if it holds one.
+    pub fn fact(&self, node: &NodeId) -> Option<MemberUpdate> {
+        self.members.get(node).map(|e| MemberUpdate { node: node.clone(), incarnation: e.incarnation, status: e.status })
+    }
+
+    /// Whether `node` is `Alive` or `Suspect` here — in the probe rotation.
+    pub fn is_probed(&self, node: &NodeId) -> bool {
+        self.members.get(node).is_some_and(|e| e.status != MemberStatus::Dead)
+    }
+
+    /// [`Self::gossip_sample`] for a datagram addressed to `target`: when this table holds a
+    /// `Suspect` or `Dead` fact about `target`, that fact is in the sample (in place of the last
+    /// sampled entry, so the datagram's size is unchanged), so the target hears the rumour about
+    /// itself and can refute it by out-incarnating it (#798). An `Alive` fact needs no carrying.
+    pub fn gossip_sample_for(&self, n: usize, target: &NodeId) -> Vec<MemberUpdate> {
+        let mut out = self.gossip_sample(n);
+        if let Some(f) = self.fact(target)
+            && f.status != MemberStatus::Alive
+            && !out.iter().any(|u| u.node == *target)
+        {
+            if out.len() > n.max(1) {
+                out.pop();
+            }
+            out.push(f);
+        }
+        out
+    }
+
     /// A gossip sample of up to `n` updates, with our own `Alive` state always included
     /// first so peers learn (and can refute against) our incarnation.
     ///
@@ -349,6 +391,47 @@ mod tests {
         assert_eq!(dead.len(), 1);
         assert_eq!(dead[0].status, MemberStatus::Dead);
         assert!(m.alive_members().is_empty());
+    }
+
+    /// #798: a suspect stays in the probe rotation (only `Dead` leaves it), so the suspect can be
+    /// told and refute.
+    #[test]
+    fn probe_candidates_keep_a_suspect_and_drop_the_dead() {
+        let mut m = SwimMembership::new(id(1));
+        let now = Instant::now();
+        m.apply(&alive(2, 0), now);
+        m.apply(&alive(3, 0), now);
+        m.apply(&alive(4, 0), now);
+        m.suspect(&id(3), now);
+        m.apply(&dead(4, 0), now);
+        let mut c = m.probe_candidates();
+        c.sort_by_key(|n| n.to_string());
+        assert_eq!(c, vec![id(2), id(3)], "the suspect is probed, the dead is not");
+        assert!(m.is_probed(&id(3)) && !m.is_probed(&id(4)) && !m.is_probed(&id(9)));
+    }
+
+    /// #798: a datagram to a node this table suspects (or holds dead) carries that fact, however
+    /// large the roster, and is no larger than a plain sample.
+    #[test]
+    fn gossip_for_a_target_carries_the_rumour_about_it() {
+        let mut m = SwimMembership::new(id(1));
+        let now = Instant::now();
+        for p in 2..40 { m.apply(&alive(p, 0), now); }
+        m.suspect(&id(7), now);
+        m.apply(&dead(8, 0), now);
+        for _ in 0..50 {
+            let s = m.gossip_sample_for(4, &id(7));
+            assert!(s.len() <= 5, "bounded like gossip_sample");
+            assert!(s.iter().any(|u| *u == suspect(7, 0)), "the suspicion rides to the suspect");
+            let s = m.gossip_sample_for(4, &id(8));
+            assert!(s.iter().any(|u| *u == dead(8, 0)), "the death rides to the dead-declared node");
+        }
+        // The target refutes it on receipt.
+        let mut target = SwimMembership::new(id(7));
+        for u in m.gossip_sample_for(4, &id(7)) {
+            target.apply(&u, now);
+        }
+        assert_eq!(target.self_incarnation(), 1, "the suspect out-incarnates the rumour");
     }
 
     #[test]

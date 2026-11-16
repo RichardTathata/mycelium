@@ -379,6 +379,19 @@ Three corollaries hardened 2026-07-21 (the cold-start saga —
   `became_alive_activates_despite_bootstrap_seeded_watch`.
 - Watch publishes are RMW-atomic (`send_if_modified` only) — rule + loom model in
   [lock-free-and-atomics](../concurrency/lock-free-and-atomics.md).
+- **A suspect is still probed, and a dead bootstrap peer is re-probed** (#798, 2026-11-16). Under
+  SWIM a restarted node starts with an empty table, and a seed (`bootstrap_peers = []`) contacts
+  no one: it is found again only when someone probes it. The prober chose among `Alive` members
+  only, so one probe that landed while the seed was down made it `Suspect`, the suspicion gossiped
+  to every node, nobody contacted the seed again, it never heard the rumour to refute it, and
+  `swim_suspicion_timeout_ms` later it was `Dead` everywhere — a permanent partition (the Eve
+  fleet's gateway restart: node 1 logging `Ignoring StateRequest from unknown peer` while its
+  writes reached no one). The prober now draws from `SwimMembership::probe_candidates` (`Alive`
+  and `Suspect`, as SWIM specifies), each probe's gossip carries the prober's `Suspect`/`Dead`
+  fact about its target (`gossip_sample_for`), and once a suspicion window (counted in protocol
+  periods) it probes one bootstrap peer it holds `Dead` or has not heard of (`run_swim_prober`,
+  `mycelium-core/src/swim.rs`). Gates: `a_restarted_seed_that_is_suspected_is_probed_and_refutes`,
+  `a_restarted_seed_that_is_declared_dead_is_rejoined`, `a_dead_bootstrap_peer_that_is_gone_stays_dead`.
 
 ## Anti-entropy is chunked; KV writes are size-gated (2026-07-02)
 

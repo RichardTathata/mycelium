@@ -154,6 +154,12 @@ impl SwimState {
         self.lock_membership().gossip_sample(self.gossip_updates)
     }
 
+    /// A gossip sample for a datagram to `target`, carrying any `Suspect`/`Dead` fact this node
+    /// holds about it, so the target can refute it (#798).
+    fn gossip_for(&self, target: &NodeId) -> Vec<MemberUpdate> {
+        self.lock_membership().gossip_sample_for(self.gossip_updates, target)
+    }
+
     /// Merge inbound gossip and apply each effect to the shared `peers` map. Returns the
     /// updates we must re-gossip to refute a rumour about ourselves (if any).
     fn merge_gossip(&self, updates: &[MemberUpdate]) {
@@ -241,9 +247,17 @@ impl SwimState {
         }
     }
 
-    /// Members currently believed alive (probe candidates).
-    fn alive_members(&self) -> Vec<NodeId> {
-        self.lock_membership().alive_members()
+    /// Members to probe: `Alive` and `Suspect` (#798; see
+    /// [`SwimMembership::probe_candidates`]).
+    fn probe_candidates(&self) -> Vec<NodeId> {
+        self.lock_membership().probe_candidates()
+    }
+
+    /// The bootstrap peers this node does not probe — held `Dead`, or never heard of — other
+    /// than this node itself.
+    fn unprobed_bootstrap(&self, bootstrap: &[NodeId]) -> Vec<NodeId> {
+        let m = self.lock_membership();
+        bootstrap.iter().filter(|b| **b != self.self_id && !m.is_probed(b)).cloned().collect()
     }
 
     fn next_seq(&self) -> u64 {
@@ -273,12 +287,23 @@ impl SwimState {
     /// Direct probe: `Ping` the target and wait up to `timeout` for its `Ack`.
     /// Returns `true` iff the target acknowledged.
     pub async fn probe_direct(&self, target: SocketAddr, timeout: Duration) -> bool {
+        self.probe_with(target, self.gossip(), timeout).await
+    }
+
+    /// Direct probe of a member: as [`Self::probe_direct`], with the `Ping`'s gossip carrying
+    /// this node's `Suspect`/`Dead` fact about `target`, so a suspected or dead-declared node that
+    /// is in fact up (a restart) hears it and refutes it in its `Ack` (#798).
+    pub async fn probe_member(&self, target: &NodeId, timeout: Duration) -> bool {
+        self.probe_with(probe_addr(target), self.gossip_for(target), timeout).await
+    }
+
+    async fn probe_with(&self, target: SocketAddr, gossip: Vec<MemberUpdate>, timeout: Duration) -> bool {
         let seq = self.next_seq();
         let (_pending, rx) = self.register(seq);
         let ping = SwimDatagram::Ping {
             seq,
             from: self.self_id.clone(),
-            gossip: self.gossip(),
+            gossip,
         }
         .encode();
         if self.socket.send_to(&ping, target).await.is_err() {
@@ -389,7 +414,7 @@ pub async fn run_swim_listener(
                         // slow/dead target cannot stall the recv loop.
                         let state = Arc::clone(&state);
                         tokio::spawn(async move {
-                            if state.probe_direct(probe_addr(&target), probe_timeout).await {
+                            if state.probe_member(&target, probe_timeout).await {
                                 let ack = SwimDatagram::PingReqAck { seq, target }.encode();
                                 let _ = state.socket.send_to(&ack, src).await;
                             }
@@ -437,26 +462,45 @@ pub async fn run_swim_prober(
     // caught by `validate()` before the pass-4 fix) aborts the whole node under the release
     // `panic="abort"` profile. Defense-in-depth mirroring the GC/health tickers (audit 2026-07-15 pass 4).
     // Through the timer seam (item 6); the 1 ms floor stays, the seam wraps the same interval.
+    let period = interval.max(Duration::from_millis(1));
     let mut ticker = crate::sim_seam::interval_ms(
         "swim/probe",
-        interval.max(Duration::from_millis(1)).as_millis() as u64,
+        period.as_millis() as u64,
         tokio::time::MissedTickBehavior::Skip,
     );
+    // Rejoin (#798): once every suspicion window, counted in protocol periods (a count, not a
+    // clock), probe one bootstrap peer this node does not probe — one it holds `Dead`, or has not
+    // heard of. A bootstrap peer that restarted after it was declared dead, and has no bootstrap
+    // peers of its own (a seed), starts with an empty table: without this nobody would contact it
+    // again, and the cluster would stay partitioned from it for good.
+    let rejoin_every = (suspicion_timeout.as_millis() / period.as_millis()).max(1) as u64;
+    let mut ticks: u64 = 0;
     loop {
         tokio::select! {
             _ = ticker.tick() => {
                 state.tick_suspicion(suspicion_timeout);
+                ticks = ticks.wrapping_add(1);
 
-                // Probe candidates: alive members, falling back to bootstrap peers while
-                // the table is still empty (join — we have no gossip yet).
-                let mut members = state.alive_members();
+                // Probe candidates: alive and suspected members (#798), falling back to
+                // bootstrap peers while the table is still empty (join — we have no gossip yet).
+                let mut members = state.probe_candidates();
+                if !members.is_empty() && ticks.is_multiple_of(rejoin_every) {
+                    let unprobed = state.unprobed_bootstrap(&bootstrap);
+                    if !unprobed.is_empty() {
+                        // In turn, not at random: no RNG draw, and every one is reached.
+                        let b = &unprobed[((ticks / rejoin_every) % unprobed.len() as u64) as usize];
+                        if state.probe_member(b, probe_timeout).await {
+                            state.observe_alive(b);
+                        }
+                    }
+                }
                 if members.is_empty() {
                     members = bootstrap.iter().cloned().collect();
                 }
                 if members.is_empty() { continue; }
                 let target = members[fastrand::usize(..members.len())].clone();
 
-                if state.probe_direct(probe_addr(&target), probe_timeout).await {
+                if state.probe_member(&target, probe_timeout).await {
                     state.observe_alive(&target);
                     continue;
                 }
@@ -658,6 +702,121 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
         assert!(found, "B discovered C via gossip without probing it");
+    }
+
+    /// Start `state`'s prober with fast timings (period 50 ms, probe timeout 100 ms, suspicion
+    /// `suspicion`), stopped by `sh`.
+    fn start_prober(state: &Arc<SwimState>, bootstrap: Vec<NodeId>, sh: &Arc<watch::Sender<bool>>, suspicion: Duration) {
+        tokio::spawn(run_swim_prober(
+            Arc::clone(state), bootstrap.into(), Arc::clone(sh), Arc::new(AtomicBool::new(false)),
+            Duration::from_millis(50), Duration::from_millis(100), 1, suspicion,
+        ));
+    }
+
+    /// Polls `cond` every 25 ms for up to `within`.
+    async fn eventually(within: Duration, mut cond: impl FnMut() -> bool) -> bool {
+        let deadline = tokio::time::Instant::now() + within;
+        while tokio::time::Instant::now() < deadline {
+            if cond() { return true; }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        cond()
+    }
+
+    /// **#798, a restarted seed is suspected.** The Eve fleet's shape: the seed `a` has no
+    /// bootstrap peers; `b` and `c` bootstrap from it. `a` restarts, a probe lands while it is
+    /// down, and the suspicion gossips to both — then `a` is back, with an empty table. The state
+    /// is planted directly: `a` is a fresh node; `b` and `c` know each other `Alive` and hold `a`
+    /// `Suspect`. The prober probed `Alive` members only, so neither ever contacted `a`: it never
+    /// heard the rumour, never refuted it, never learned of `b` or `c`, and was declared `Dead`
+    /// a suspicion window later — the gateway's writes reached no one. A suspect stays in the
+    /// probe rotation, and the probe carries the rumour, so `a` refutes it and is back on both.
+    #[tokio::test]
+    async fn a_restarted_seed_that_is_suspected_is_probed_and_refutes() {
+        let (a, aid, ash, a_peers) = spawn_node().await;
+        let (b, bid, bsh, _) = spawn_node().await;
+        let (c, cid, csh, _) = spawn_node().await;
+        let now = Instant::now();
+        for (me, other) in [(&b, &cid), (&c, &bid)] {
+            let mut m = me.lock_membership();
+            m.apply(&MemberUpdate { node: other.clone(), incarnation: 0, status: MemberStatus::Alive }, now);
+            m.apply(&MemberUpdate { node: aid.clone(), incarnation: 0, status: MemberStatus::Suspect }, now);
+        }
+        // A suspicion window long enough that `Dead` is never reached while the test watches.
+        let suspicion = Duration::from_secs(30);
+        start_prober(&a, vec![], &ash, suspicion);
+        start_prober(&b, vec![aid.clone()], &bsh, suspicion);
+        start_prober(&c, vec![aid.clone()], &csh, suspicion);
+        assert!(
+            eventually(Duration::from_secs(5), || {
+                a_peers.pin().contains_key(&bid) && a_peers.pin().contains_key(&cid)
+            }).await,
+            "the restarted seed learns its peers: a suspect is probed"
+        );
+        assert!(
+            eventually(Duration::from_secs(5), || {
+                [&b, &c].iter().all(|n| n.lock_membership().alive_members().contains(&aid))
+            }).await,
+            "both peers hold the seed Alive again: it refuted the suspicion"
+        );
+        assert!(a.lock_membership().self_incarnation() >= 1, "the seed out-incarnated the rumour");
+        for sh in [ash, bsh, csh] { let _ = sh.send(true); }
+    }
+
+    /// **#798, a restarted seed is declared dead.** As above, with the seed down for longer than
+    /// the suspicion window, so `b` and `c` hold it `Dead`. Nothing contacted a `Dead` member, and
+    /// the seed has no bootstrap peers of its own: the partition was permanent. A bootstrap peer
+    /// held `Dead` is probed once a suspicion window (rejoin), with the `Dead` fact in the
+    /// `Ping`, so the seed refutes it and both peers take it back.
+    #[tokio::test]
+    async fn a_restarted_seed_that_is_declared_dead_is_rejoined() {
+        let (a, aid, ash, a_peers) = spawn_node().await;
+        let (b, bid, bsh, _) = spawn_node().await;
+        let (c, cid, csh, _) = spawn_node().await;
+        let now = Instant::now();
+        for (me, other) in [(&b, &cid), (&c, &bid)] {
+            let mut m = me.lock_membership();
+            m.apply(&MemberUpdate { node: other.clone(), incarnation: 0, status: MemberStatus::Alive }, now);
+            m.apply(&MemberUpdate { node: aid.clone(), incarnation: 0, status: MemberStatus::Dead }, now);
+        }
+        // Rejoin every 300 ms / 50 ms = 6 periods.
+        let suspicion = Duration::from_millis(300);
+        start_prober(&a, vec![], &ash, suspicion);
+        start_prober(&b, vec![aid.clone()], &bsh, suspicion);
+        start_prober(&c, vec![aid.clone()], &csh, suspicion);
+        assert!(
+            eventually(Duration::from_secs(5), || {
+                a_peers.pin().contains_key(&bid) && a_peers.pin().contains_key(&cid)
+            }).await,
+            "the restarted seed learns its peers: a dead bootstrap peer is re-probed"
+        );
+        assert!(
+            eventually(Duration::from_secs(5), || {
+                [&b, &c].iter().all(|n| n.lock_membership().alive_members().contains(&aid))
+            }).await,
+            "both peers hold the seed Alive again: it refuted its death"
+        );
+        for sh in [ash, bsh, csh] { let _ = sh.send(true); }
+    }
+
+    /// A bootstrap peer that is genuinely gone is only ever probed directly on rejoin: it is not
+    /// suspected again, and stays `Dead`.
+    #[tokio::test]
+    async fn a_dead_bootstrap_peer_that_is_gone_stays_dead() {
+        let (b, _bid, bsh, b_peers) = spawn_node().await;
+        let (_c, cid, _csh, _) = spawn_node().await;
+        let gone = dead_node().await;
+        let now = Instant::now();
+        {
+            let mut m = b.lock_membership();
+            m.apply(&MemberUpdate { node: cid.clone(), incarnation: 0, status: MemberStatus::Alive }, now);
+            m.apply(&MemberUpdate { node: gone.clone(), incarnation: 0, status: MemberStatus::Dead }, now);
+        }
+        start_prober(&b, vec![gone.clone()], &bsh, Duration::from_millis(100));
+        tokio::time::sleep(Duration::from_millis(800)).await;
+        assert_eq!(b.lock_membership().fact(&gone).map(|f| f.status), Some(MemberStatus::Dead));
+        assert!(!b_peers.pin().contains_key(&gone), "a gone peer is not resurrected");
+        let _ = bsh.send(true);
     }
 
     #[tokio::test]
