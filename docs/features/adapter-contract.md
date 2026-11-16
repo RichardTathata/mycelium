@@ -62,7 +62,7 @@ holds every companion README to its limits section.
 - **What the doors do not establish** (the limits section the door rows cite): a task accepted at `/a2a` lives in
   that node and is lost with it, **by design** — the work it tracks is not durable either, and durable work is the
   tuple space's and the commitment net's; `tasks/cancel` ends a task's record and, on a gateway that mints `call:`
-  mandates, revokes its call (I4, [§112](../guide/deprecations.md)); `/mcp` takes `notifications/cancelled` for the
+  mandates, revokes its call (I4, [§114](../guide/deprecations.md)); `/mcp` takes `notifications/cancelled` for the
   caller's own `tools/call` the same way; no SDK adapter sends either yet, and without a minting gateway running work
   stops only when its authority lapses; a
   tool result and a task result are not receipts; provider-side enforcement needs an evaluator attached at the

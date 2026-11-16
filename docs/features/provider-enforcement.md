@@ -142,7 +142,7 @@ confirmed stop, checked against the class's bound. CI runs it.
   `compliance,a2a` line, which builds no `llm`).
 - **Not built, for a cancellable rule:** a gateway mints a `call:` mandate only with `gateway_mint_call_mandates`
   on (off by default), and without it such a rule refuses every call it permits; a member's own unframed call
-  carries none. A cancel reaches the provider by the cancel-forward (`sys.call-cancel.v1`, [§112](../guide/deprecations.md)):
+  carries none. A cancel reaches the provider by the cancel-forward (`sys.call-cancel.v1`, [§114](../guide/deprecations.md)):
   the provider holds the revocation, stops the work and answers its own class — `Stopped` only at a door whose agent
   promised to stop, and `NotRegistered` wherever it never registered the call: with enforcement off it registers
   nothing and holds nothing, and under a rule that is not cancellable a call whose `call:` slot did not establish

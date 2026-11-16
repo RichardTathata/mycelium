@@ -69,7 +69,7 @@ work.
   a signed `window` record durably before sending the call, re-asserts its checkpoint when another value lands at
   its key, and collects the `call/` and `grant/` families past D-5's floor (`max_drain_secs`,
   `grant_retention_secs`). Tests: [`src/agent/call_mint_tests.rs`](../../src/agent/call_mint_tests.rs).
-- **Cancelling a call** ([§112](../guide/deprecations.md)): A2A `tasks/cancel`, MCP `notifications/cancelled` at
+- **Cancelling a call** ([§114](../guide/deprecations.md)): A2A `tasks/cancel`, MCP `notifications/cancelled` at
   `/mcp`, and `GossipAgent::cancel_call` ([`call_cancel.rs`](../../src/agent/call_cancel.rs)) revoke a minted call's term, record the
   revocation on disk, and **forward it to the provider the call went to** (the cancel-forward, `sys.call-cancel.v1`,
   accepted only from the issuing gateway — `cancel_not_from_issuer` otherwise). `cancel_call` returns a

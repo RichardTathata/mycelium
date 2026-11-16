@@ -1623,7 +1623,7 @@ fail-first test of its own (a race between the cap's two steps), and the bounded
   enforcement off it registers nothing and holds nothing; a window records whether a call was registered under it
   (`CallWindow::registered`, set where `assess_call` establishes the mandate), and only such a scope can be
   `NotRunning`. `an_unenforcing_provider_answers_not_registered_never_not_running` (the reviewer's probe A) and
-  `a_plain_rules_call_with_no_call_mandate_is_not_registered`; §112 and `provider-enforcement.md` corrected.
+  `a_plain_rules_call_with_no_call_mandate_is_not_registered`; §114 and `provider-enforcement.md` corrected.
 - **M2: a pre-0.2 re-send of a pending A2A task starts no second call.** It is answered the pending task
   (`Unclaimable::InFlight`; `tasks/sendSubscribe` refused `-32004` for it), so the task's one call is the one its cancel
   revokes, and a cancelled task cannot be written back. `a_resent_pending_task_runs_no_second_call_and_its_cancel_stays`
@@ -1632,7 +1632,7 @@ fail-first test of its own (a race between the cap's two steps), and the bounded
   `MAX_CALL_HOLDS_PER_GATEWAY` = 1 024 per sender, counted apart from the windows of admitted calls (which stay at
   `MAX_CALL_WINDOWS` = 262 144, 65 536 per gateway): no set of senders can take an admitted call's room. Past it,
   `NotHeld`, counted `call_holds_refused`. `holds_from_cancel_forwards_have_a_per_sender_budget_apart_from_admitted_calls`
-  (`src/agent/gateway_authority.rs`). The bound is stated in §112.
+  (`src/agent/gateway_authority.rs`). The bound is stated in §114.
 - **L1: stop records name their gateway.** `NamedStop::established_by` (additive, `#[non_exhaustive]`), and
   `call_stop_recorded` matches the gateway, the scope and the term:
   `a_stop_record_answers_only_for_its_own_gateways_term` (`src/agent/gateway_authority.rs`).
@@ -1640,9 +1640,9 @@ fail-first test of its own (a race between the cap's two steps), and the bounded
 - **L3:** `the_hold_alone_refuses_a_call_that_arrives_after_its_cancel` (the reviewer's probe B).
 - **L4: `Stopped` is worded "the work promised to stop and has ended"**, not "the stop ended it": a `WorkGuard`
   dropped after its cancel is recorded the same way whether the work stopped or finished, so the requester may
-  still get its result. Stated on `CancelClass::Stopped` and in §112; not changed in the record.
+  still get its result. Stated on `CancelClass::Stopped` and in §114; not changed in the record.
 - **L5:** the gateway issues no `Mcp-Session-Id`, so clients sharing a token can cancel each other's calls — stated on
-  `mcp-tools.md` and in §112. The table's cap is now a reservation (an atomic count taken before the insert, given
+  `mcp-tools.md` and in §114. The table's cap is now a reservation (an atomic count taken before the insert, given
   back on a miss), and a full table scans for stale entries at most once a second.
 
 #### I4a · Sign the grant request, `consumed`, `revoked` and `refused` records, then let each owner collect its own — *follow-up of I4, agreed with the maintainer 2026-11-15 — **not buildable until written***

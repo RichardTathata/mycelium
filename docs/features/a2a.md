@@ -67,7 +67,7 @@ is a manual run with a real model.
 - **Guarantee:** [`a2a.admission`](../reference/guarantee-catalogue.md#a2a.admission) — `/a2a` is not anonymous skill
   dispatch, which holds only with an evaluator that denies anonymous principals.
 - **`tasks/cancel` revokes the task's call before it removes the task** (identity-and-lifecycle I4,
-  [§112](../guide/deprecations.md)): on a gateway that mints `call:` mandates, the call's term is revoked and
+  [§114](../guide/deprecations.md)): on a gateway that mints `call:` mandates, the call's term is revoked and
   recorded on disk before `canceled` is answered, then forwarded to the provider; only the task's creator can cancel
   it, and a cancelled task stays cancelled; a pre-0.2 re-send of a pending task is answered the pending task and
   starts no second call. The answer says what the gateway did, never that the provider stopped —
