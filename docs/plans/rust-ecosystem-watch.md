@@ -176,8 +176,8 @@ is, what adopting it would buy, what it would cost or risk, its state, and what 
 - **Upstream:** [papaya on crates.io](https://crates.io/crates/papaya) and its
   [repository](https://github.com/ibraheemdev/papaya) (changelog and releases). 0.2.1 and 0.2.5 are released.
 - **Where Mycelium is:** `papaya = "0.1"` in `Cargo.toml:90`, `mycelium-core/Cargo.toml:46` and
-  `mycelium-tuple-space/Cargo.toml:30`. `Cargo.lock` resolves 0.1.9. About 46 source files across `src/`,
-  `mycelium-core/src/`, `mycelium-tuple-space/src/` and `mycelium-wasm-host/src/` use it. The rules for using it are
+  `mycelium-tuple-space/Cargo.toml:30`. `Cargo.lock` resolves 0.1.9. 46 source files use it: 32 in `src/`, 13 in
+  `mycelium-core/src/` and 1 in `mycelium-tuple-space/src/`. The rules for using it are
   [lock-free-and-atomics](../wiki/dev/concurrency/lock-free-and-atomics.md).
 - **Why now:** papaya 0.1.9's `HashMap::retain` dereferences an entry pointer that still carries its tag bits
   (`raw/mod.rs:1212`, `&*entry.raw`, where `iter` and `compute` use the masked `entry.ptr`).
@@ -186,7 +186,9 @@ is, what adopting it would buy, what it would cost or risk, its state, and what 
     abort.
   - It was found in #799's review, at the one library call site, `call_issuer::collect` from #794. It was unreleased,
     and minting is off by default.
-  - The same repro passes on 0.2.1 and 0.2.5.
+  - The bug does not reproduce on 0.2.1 or 0.2.5: there `retain` dereferences the masked `entry.ptr`. Every other
+    dereference in 0.1.9's `raw/mod.rs` uses the masked pointer, so `retain` is the only affected method (#803's
+    review). Step 1 below names the first 0.2.x release that carries the fix.
   - #799 removes that call and bans `papaya::HashMap::retain` through clippy's `disallowed-methods`, so the known
     exposure is closed and cannot return before this row is built.
 - **What it buys:** the fix upstream rather than a ban, and the maintained line.
