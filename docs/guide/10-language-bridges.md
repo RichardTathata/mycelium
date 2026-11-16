@@ -355,7 +355,7 @@ that names a kind — `emit`, `rpc_call` / `rpcCall`, `deliver_event` / `deliver
 `emitReliable`, `rpc_serve` / `rpcServe`, `on_signal` / `onSignal` and `mailbox` (the last in both, and `onSignal`
 in TypeScript, since `mycelium-py` 0.2.16 and `mycelium-ts` 0.2.10). The gateway answers it for protected work
 (`mcp.invoke`, `skill.invoke`, `llm.invoke`, `protected_rpc_kinds`), for **the substrate's own kinds** — the four
-`consensus.*` kinds, `sys.explain`, `sys.replica-sync.v1`, `invoke.bulk` and anything starting `consensus.` or
+`consensus.*` kinds, `sys.explain`, `sys.replica-sync.v1`, `sys.call-cancel.v1`, `invoke.bulk` and anything starting `consensus.` or
 `sys.` — at every one of those doors, for the reply kinds `rpc.result` and `bulk.result` (answer a served request
 with `rpc_respond` / `rpcRespond`), and for a hosted capability's `cap.invoke/…` on the signal and mailbox
 streams and the send verbs (call a component as a tool through `/mcp`)

@@ -4583,3 +4583,71 @@ features, test-only and off by default: `mycelium/provisional-consent-grade` and
 `ConsentIdentity`, so no mesh or `cs` reader is widened), `client_cert_key`, `ClientKeyStanding`,
 `GossipAgent::client_key_standing`'s signature, `ClientSigned.key`, `ClientSigner::new`,
 `TrustedExternalIssuers::set_client_key`, and lock-order row 76.
+
+## 114. A gateway's cancel reaches the provider directly: the cancel-forward, `GossipAgent::cancel_call` and its receipt; A2A `tasks/cancel` revokes the call; MCP `notifications/cancelled` cancels the caller's own call (unreleased, identity-and-lifecycle I4, PR 3a)
+
+*Numbered 114: §111 is I2's first PR, §112 I7's first (#800), and §113 #801's, built in parallel.*
+
+§110 built the gateway's revoke and said no door called it. This change gives it its doors. **Nothing changes on a
+gateway that does not mint** (`gateway_mint_call_mandates`, off by default) except the two wire facts marked
+*every gateway* below.
+
+- **New: the cancel-forward**, RPC kind **`sys.call-cancel.v1`**. A cancel now sends the call's revoking checkpoint
+  **to the provider the call went to**, as well as writing it to the KV, so a member that rewrites the
+  `call/…/checkpoint` key can no longer deny it at a running provider (§100's ledger row is narrowed to a gateway
+  that restarted). **Every node serves it** from `start()`. A provider accepts it only from the term's issuing
+  gateway — in an envelope its sender signed as itself, the checkpoint that sender's — and otherwise answers
+  `cancel_not_from_issuer` and moves nothing (`GET /stats` `call_cancel_forwards_refused`, by reason). It is a
+  substrate kind (`SUBSTRATE_KINDS`): **every gateway** refuses it on its raw routes, sent, served or observed,
+  `403 protected_kind`. An **enforcing** provider holds a revocation it is sent even for a call it has not
+  admitted, until the checkpoint's issue + 3 600 s, so a call admitted there later under the term is refused
+  `revoked`. **These holds have a budget of their own** (#799's review, M3): at most `MAX_CALL_HOLDS` = 16 384 at a
+  provider and `MAX_CALL_HOLDS_PER_GATEWAY` = 1 024 from one sender — about one cancel-before-arrival every 3.5 s per
+  gateway per provider, sustained — and they never count against the windows of admitted calls (`MAX_CALL_WINDOWS`,
+  262 144; 65 536 per gateway), so no set of senders can take the room admitted calls need; past the budget a forward's
+  revocation is not held (`NotHeld`, counted `GET /stats` `call_holds_refused`) and a later call reads the KV record.
+  A provider that **does not enforce** registers no work and checks no admission: it holds nothing and answers
+  `NotRegistered`.
+- **New, additive: `GossipAgent::cancel_call(term) -> Result<CancelReceipt, CancelRefusal>`**, with
+  `CancelReceipt { term, class }` and `CancelClass` (`#[non_exhaustive]`): `Stopped` (the work was at a door whose
+  agent promised to stop, the provider asked it to stop, and it **has ended** — the rung is "promised to stop and
+  ended", not "ended by the stop": work that finished on its own just after the request reads the same, so the
+  requester may still get the call's result; #799's review, L4), `StopRequested` (asked, not ended within
+  `CANCEL_CONFIRM_WAIT_MS` = 1 000 ms), `Unbounded` (the agent doing the work made no promise to stop: its end is not
+  the provider's to confirm), `NotRunning` (a call under the term was admitted and registered there, and has ended with no stop recorded; a call the KV's copy of the revocation stopped a moment before the forward arrived is answered from its stop record, `Stopped` or `Unbounded`), `NotRegistered` (the provider never registered a call under the term, so it cannot say whether one runs: the call has not arrived, or it runs there unregistered — the provider does not enforce, or a rule that is not cancellable admitted it with its `call:` slot not established — #799's review, M1), `NotHeld` (the
+  provider's windows are full), `Refused(reason)`, **`DeliveryUnknown`** (no answer within
+  `CANCEL_FORWARD_TIMEOUT_MS` = 5 000 ms — never a negative: the KV still carries the revocation) and
+  `NotForwarded` (this gateway restarted since the mint and does not know where the call went). A receipt exists
+  only once the gateway has recorded the revocation on disk; `CancelRefusal::NotDurable` forwards nothing. Counted by
+  class: `GET /stats` `call_cancel_receipts`, `mycelium_gateway_call_cancel_receipts_total{class}`.
+- **Changed: A2A `tasks/cancel` (and `CancelTask`) revokes the task's call before it removes the task.** On a
+  minting gateway, cancelling a pending task revokes its call's term and **answers `canceled` only once the
+  revocation is on disk**; the forward then runs on its own task. A revoke the disk refuses is answered **`-32603`**
+  and the task is kept. A cancel that lands before the gateway has minted (the preflight still running) is caught by
+  the dispatch, which revokes the term and sends nothing. **And a cancelled task stays cancelled**: its send's late
+  answer no longer writes the task back (it did, before, as a completed task). **A pre-0.2 `tasks/send` re-sent
+  while its task is pending starts no second call** (#799's review, M2): it is answered the pending task, as an
+  idempotent re-send, and `tasks/sendSubscribe` is refused `-32004` for it. Before, it ran the skill a second time,
+  which the cancel could not reach. The answer's shape is unchanged; it
+  says what the gateway did, never that the provider stopped — that is the receipt's.
+- **Changed, every gateway: `/mcp` answers `notifications/cancelled` with `202 Accepted` and no body.** It answered
+  a JSON-RPC `-32601 method not found`, which a notification must never receive. On a minting gateway it cancels the
+  caller's own `tools/call` of that `requestId` (and `Mcp-Session-Id`, if the client sent one): its term revoked on
+  disk and forwarded. Another principal's notification for the same id finds nothing, cancels nothing, and is
+  counted (`GET /stats` `mcp_cancels.unmatched`). **The gateway issues no `Mcp-Session-Id`**, so a client that sends
+  none is keyed by its principal and request id alone: clients sharing one token, each numbering from `id: 1`, can
+  cancel each other's calls, and two concurrent calls with the same id collide (the second runs uncancellable). Give
+  each client its own token (#799's review, L5; the build's default, Q4). The door holds at most `MAX_MCP_CANCEL_ENTRIES` = 65 536 calls; at
+  that bound, after evicting entries older than `call_mandate_ttl_secs`, a new call is not registered
+  (`mcp_cancels.table_full`), nor is a second call with an id already in flight (`mcp_cancels.collisions`): such a
+  call runs and stops only at its window.
+- **New dispatch refusal: `cancelled_before_sent`** (JSON-RPC **-32026**; HTTP **409**): the door that dispatched
+  the call cancelled it before it was sent. Nothing ran; a grant the gateway claimed for it is given back.
+- **Unchanged, stated: the bridged MCP loop and the SDK serve stream still refuse a call under a cancellable rule**
+  (`door_cannot_stop`, §110). Neither can build a stop the agent doing the work has promised — an external MCP
+  server and an SDK process are other agents — so lifting that refusal is the maintainer's decision, put with this
+  change (plan row I4, PR 3b).
+- **Upgrade.** Upgrade providers before relying on the receipt: a provider without the cancel-forward never
+  answers it, so the receipt is `DeliveryUnknown` after 5 s, and the call stops by the KV as before (bound 1).
+  ***Check:*** on a minting gateway, cancel a running call with `GossipAgent::cancel_call`; the receipt is `Stopped`
+  and `GET /stats` `call_cancel_receipts.stopped` is 1.

@@ -48,7 +48,12 @@ grows a tool on demand ([hosted components](hosted-components.md)).
 - **Not built:** a tool registration is a claim, not proof the tool does what its description says; a bridged external
   server's own behaviour is outside the node; discovery is as fresh as gossip. **A bridged server's tool, and a tool
   registered with `register_mcp_tool_unstoppable`, refuse a call under a cancellable rule** (`door_cannot_stop`,
-  [§110](../guide/deprecations.md)): neither can stop a call once it runs, until I4's PR 3. **A tool registered with
+  [§110](../guide/deprecations.md)): neither can stop a call once it runs (lifting the refusal at the bridged loop is I4's PR 3b, the maintainer's
+  decision). **`notifications/cancelled`** at `/mcp` cancels the caller's own in-flight `tools/call` of that
+  `requestId` on a gateway that mints `call:` mandates, and is answered `202` with no body
+  ([§114](../guide/deprecations.md); another principal's finds nothing and is counted, `mcp_cancels.unmatched`). **The gateway issues no
+  `Mcp-Session-Id`**, so the cancel is keyed by principal and request id: clients that share one token can cancel
+  each other's calls — give each its own token. **A tool registered with
   the default `register_mcp_tool` is presumed stoppable**: dropping its handler's future stops what that future
   does, not work the handler spawned for itself.
 - **Evidence:** the ledger row

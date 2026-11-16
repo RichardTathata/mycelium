@@ -69,16 +69,24 @@ work.
   a signed `window` record durably before sending the call, re-asserts its checkpoint when another value lands at
   its key, and collects the `call/` and `grant/` families past D-5's floor (`max_drain_secs`,
   `grant_retention_secs`). Tests: [`src/agent/call_mint_tests.rs`](../../src/agent/call_mint_tests.rs).
-- **Not built, for the `call:` mandate:** no door cancels one yet — the gateway's revoke is built and called by none
-  (I4's PR 3: A2A `tasks/cancel`, MCP `notifications/cancelled`, the cancel-forward); after a gateway restart, the
-  gateway re-asserts nothing for the calls it minted before. The authority's half and the provider's admission are
+- **Cancelling a call** ([§114](../guide/deprecations.md)): A2A `tasks/cancel`, MCP `notifications/cancelled` at
+  `/mcp`, and `GossipAgent::cancel_call` ([`call_cancel.rs`](../../src/agent/call_cancel.rs)) revoke a minted call's term, record the
+  revocation on disk, and **forward it to the provider the call went to** (the cancel-forward, `sys.call-cancel.v1`,
+  accepted only from the issuing gateway — `cancel_not_from_issuer` otherwise). `cancel_call` returns a
+  `CancelReceipt` whose class is the provider's own answer — `Stopped` only where the agent doing the work promised
+  to stop and it ended, `Unbounded` where it made no such promise, `DeliveryUnknown` for no answer (never a
+  negative). Tests: [`src/agent/call_cancel_tests.rs`](../../src/agent/call_cancel_tests.rs).
+- **Not built, for the `call:` mandate:** a receipt on the A2A or MCP wire (by decision, Q2: the doors answer what
+  the gateway did); after a gateway restart, the gateway re-asserts nothing and forwards nothing for the calls it
+  minted before (`NotForwarded`: the KV carries the cancel). The authority's half and the provider's admission are
   built ([provider enforcement](provider-enforcement.md))
   ([I4](../plans/identity-and-lifecycle.md#3--rows), row I4, *The build*; [§100](../guide/deprecations.md#100-the-execution-authority-verifies-a-call-mandate-a-call-mandate-in-the-first-slot-is-never-established-the-call-key-family-is-owned-2410-identity-and-lifecycle-i4-pr-1a)).
 - **A `call:` checkpoint in the KV is verified at read:** a copy its gateway did not sign, or that names another
   call, is treated as absent and counted in `GET /stats` `call_checkpoints_refused`; an older copy written back and
   a tombstone are counted in `call_checkpoints_stale` and `call_checkpoints_missing`. A member that overwrites the
-  key can still deny a cancel, until the mandate's window ends, at a provider that had not read it — unless the
-  minting gateway, which watches its own keys, writes its checkpoint back first (PR 2's re-assertion)
+  key can no longer deny a cancel the gateway forwards (PR 3: the forward does not go through the KV); it still can,
+  until the mandate's window ends, where nothing is forwarded — after a gateway restart — unless the minting gateway
+  writes its checkpoint back first (PR 2's re-assertion)
   ([ledger](../operations/what-is-proven.md#call-checkpoint-replay))
   ([§100](../guide/deprecations.md#100-the-execution-authority-verifies-a-call-mandate-a-call-mandate-in-the-first-slot-is-never-established-the-call-key-family-is-owned-2410-identity-and-lifecycle-i4-pr-1a)).
 - **Evidence:** the ledger rows [running work stops](../operations/what-is-proven.md#running-work-stops) and

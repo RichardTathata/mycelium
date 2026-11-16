@@ -663,6 +663,8 @@ const CLASSIFIED: &[(&str, Class)] = &[
     ("consensus.propose", Class::Refused), ("consensus.vote", Class::Refused),
     ("consensus.commit", Class::Refused), ("consensus.nack", Class::Refused),
     ("sys.explain", Class::Refused), ("sys.replica-sync.v1", Class::Refused),
+    // I4, PR 3a: a gateway's cancel of a call it sent, to the provider; accepted only from the term's issuer.
+    ("sys.call-cancel.v1", Class::Refused),
     // The bulk transport: its ticket's nonce is the credential for the staged payload.
     ("invoke.bulk", Class::Refused),
     // RPC replies: claimed on a nonce and the sender, which an emit through the gateway supplies.

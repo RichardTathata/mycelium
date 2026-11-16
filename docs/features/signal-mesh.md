@@ -56,7 +56,7 @@ does not depend on membership).
 - **At the gateway, a client's kinds are not the substrate's.** The doors that take a kind from an HTTP caller — the
   two signal streams, the serve stream, the mailbox stream and the six raw send routes — refuse the substrate's own
   kinds (`consensus.propose`, `consensus.vote`, `consensus.commit`, `consensus.nack`, `sys.explain`,
-  `sys.replica-sync.v1`, `invoke.bulk`, and any kind starting `consensus.` or `sys.`) `403 protected_kind` for
+  `sys.replica-sync.v1`, `sys.call-cancel.v1`, `invoke.bulk`, and any kind starting `consensus.` or `sys.`) `403 protected_kind` for
   every token; the send routes refuse the RPC reply kinds, and the streams and the send routes a hosted
   capability's `cap.invoke/…`
   ([deprecations §103](../guide/deprecations.md), `src/agent/http/substrate_kind_tests.rs`). A member in the mesh

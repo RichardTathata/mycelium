@@ -454,6 +454,10 @@ pub use agent::gateway_authority::{
 /// answer uncounted (`RpcRequestRx::stops_when_authority_lapses`).
 #[cfg(all(feature = "gateway", feature = "tls"))]
 pub use agent::provider_enforcement::LAPSE_ANSWER_GRACE_MS;
+/// Identity-and-lifecycle I4, PR 3: a cancel's receipt (`GossipAgent::cancel_call`) — each class the promise of the
+/// agent that answered, and nothing above it.
+#[cfg(all(feature = "gateway", feature = "tls"))]
+pub use agent::call_cancel::{CancelClass, CancelReceipt, CancelRefusal, CANCEL_CONFIRM_WAIT_MS, CANCEL_FORWARD_TIMEOUT_MS, MAX_MCP_CANCEL_ENTRIES};
 #[cfg(all(feature = "gateway", feature = "tls"))]
 pub use agent::evidence_journal::{
     read_evidence_journal, read_evidence_journal_from, Appended, EvidenceCursor, EvidenceJournal,

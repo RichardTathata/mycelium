@@ -648,6 +648,9 @@ pub enum GatewayDispatchError {
     /// is not on disk (`call_mandate_not_durable`). A call the gateway could not cancel after a restart is not sent;
     /// nothing ran.
     CallNotDurable,
+    /// Identity-and-lifecycle I4, PR 3: the door that dispatched the call cancelled it before it was sent
+    /// (`cancelled_before_sent`) — its term is revoked on disk, and nothing was sent or ran.
+    CancelledBeforeSent,
 }
 
 #[cfg(any(feature = "gateway", test))]
@@ -661,6 +664,7 @@ impl GatewayDispatchError {
             GatewayDispatchError::ContextTooLarge => -32023,
             GatewayDispatchError::Exchange(_) => -32024,
             GatewayDispatchError::CallNotDurable => -32025,
+            GatewayDispatchError::CancelledBeforeSent => -32026,
         }
     }
 
@@ -673,6 +677,7 @@ impl GatewayDispatchError {
             GatewayDispatchError::ContextTooLarge => "caller_context_too_large",
             GatewayDispatchError::Exchange(reason) => reason,
             GatewayDispatchError::CallNotDurable => "call_mandate_not_durable",
+            GatewayDispatchError::CancelledBeforeSent => "cancelled_before_sent",
         }
     }
 }
@@ -699,6 +704,7 @@ impl std::fmt::Display for GatewayDispatchError {
             GatewayDispatchError::CallNotDurable => f.write_str(
                 "the call's call: mandate could not be recorded durably at this gateway, so the call is not sent: it could not be cancelled after a restart",
             ),
+            GatewayDispatchError::CancelledBeforeSent => f.write_str("the call was cancelled before it was sent; nothing ran"),
         }
     }
 }
@@ -776,12 +782,19 @@ pub(crate) async fn gateway_rpc_call_with_mandate(
                 return Err(GatewayDispatchError::ContextTooLarge);
             };
             #[cfg(all(feature = "gateway", feature = "tls"))]
-            if let Some(minted) = minted
-                && let Err(e) = super::call_issuer::record(ctx, minted).await
-            {
-                tracing::warn!(target = %target, "the call's call: mandate is not on disk, so the call is not sent: {e}");
-                refused("call_mandate_not_durable");
-                return Err(GatewayDispatchError::CallNotDurable);
+            if let Some(minted) = minted {
+                let term = minted.term.clone();
+                if let Err(e) = super::call_issuer::record(ctx, minted).await {
+                    tracing::warn!(target = %target, "the call's call: mandate is not on disk, so the call is not sent: {e}");
+                    refused("call_mandate_not_durable");
+                    return Err(GatewayDispatchError::CallNotDurable);
+                }
+                // I4, PR 3: the door that dispatches this call learns its term here; one that cancelled it already has
+                // it revoked now, and the call is not sent.
+                if super::call_cancel::cancelled_before_sent(ctx, &term).await {
+                    refused("cancelled_before_sent");
+                    return Err(GatewayDispatchError::CancelledBeforeSent);
+                }
             }
             super::rpc::rpc_call_framed(ctx, target, kind, framed, timeout)
                 .await

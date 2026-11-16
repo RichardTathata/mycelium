@@ -89,7 +89,7 @@ token resolves to its own principal is `token_identities_are_qualified_by_the_is
 - **A kind the caller names is never the substrate's own.** Ten doors take a signal kind from the request: the two
   signal streams, the serve stream, the mailbox stream and the six raw send routes. Each refuses the consensus
   protocol's kinds (`consensus.propose`, `consensus.vote`, `consensus.commit`, `consensus.nack`), the node-to-node
-  `sys.explain` and `sys.replica-sync.v1`, the bulk transport's ticket `invoke.bulk`, and any kind starting
+  `sys.explain` and `sys.replica-sync.v1`, `sys.call-cancel.v1`, the bulk transport's ticket `invoke.bulk`, and any kind starting
   `consensus.` or `sys.` — **403** `protected_kind`, for every token. The send routes and the mailbox stream
   refuse the reply kinds `rpc.result` and `bulk.result`; and the signal streams, the mailbox stream and the send
   routes refuse a hosted capability's `cap.invoke/…`, which is called as a tool through `/mcp` (a capability in

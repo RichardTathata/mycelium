@@ -38,7 +38,9 @@
 //!
 //! [`revoke_call`] writes the call's next checkpoint (sequence 2, its term revoked) durably and offers it to this node's
 //! own authority. A provider learns it from the KV (its feeder reads the key only for a window it holds) and its sweep
-//! stops the work — bound 1. The cancel doors that call it are the row's PR 3.
+//! stops the work — bound 1. The cancel doors (A2A `tasks/cancel`, MCP `notifications/cancelled`,
+//! `GossipAgent::cancel_call`) go through [`revoke`] and then forward the revoking checkpoint to the provider
+//! directly (`call_cancel`, the row's PR 3) — the primary path; the KV is the fallback.
 //!
 //! **The gateway re-asserts its checkpoint** (#775's review, H1): it watches its own `call/{self}/` keys, and when one
 //! holds anything but what it wrote — another member's value, a tombstone, its own first checkpoint written back over
@@ -186,7 +188,7 @@ pub(crate) fn verified_checkpoint(key: &str, bytes: &[u8], members: &impl Member
 
 /// One call this gateway issued, as it holds it: what its newest checkpoint is, so it can be signed again — the
 /// signature is deterministic, so the same bytes — and the end of its window.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct Issued {
     seq: u64,
     at_ms: u64,
@@ -195,6 +197,9 @@ pub(crate) struct Issued {
     /// The highest sequence **this process** wrote durably (#794's review, K1): the re-assertion writes without an
     /// fsync, so a checkpoint in the KV is not, by itself, a checkpoint on disk.
     durable_seq: u64,
+    /// The provider the call was sent to — where the cancel-forward goes (I4, PR 3). `None` for a term this process
+    /// learned from the KV after a restart (D-4: nothing is kept), so its cancel reaches the provider only by the KV.
+    target: Option<NodeId>,
 }
 
 /// The gateway's state for the calls it mints, on `TaskCtx`. A papaya map, so it adds no lock.
@@ -214,6 +219,12 @@ pub(crate) struct CallIssuer {
     /// This door's own markers with no grant window in their signed body — from a build before the field, never
     /// released — kept, not collected (#794's round-3 review, D3).
     pub(crate) markers_without_window: AtomicU64,
+    /// I4, PR 3: this gateway's cancel receipts, by class (`CancelClass::label`).
+    pub(crate) cancel_receipts: papaya::HashMap<&'static str, u64>,
+    /// I4, PR 3: cancel-forwards this node refused as a provider, by reason (`cancel_not_from_issuer`, …).
+    pub(crate) cancel_forwards_refused: papaya::HashMap<&'static str, u64>,
+    /// I4, PR 3: the `/mcp` door's id → term table for `notifications/cancelled`, and its counters.
+    pub(crate) mcp_cancels: super::call_cancel::McpCancels,
 }
 
 impl CallIssuer {
@@ -238,7 +249,8 @@ pub(crate) fn mints_for(ctx: &TaskCtx, kind: &str) -> bool {
 /// What one mint produced: `cm` for the envelope, and the two records to write before it is sent.
 pub(crate) struct Minted {
     pub(crate) cm: serde_json::Value,
-    term: String,
+    pub(crate) term: String,
+    target: NodeId,
     checkpoint: Vec<u8>,
     window: Vec<u8>,
     at_ms: u64,
@@ -256,6 +268,18 @@ fn sign_checkpoint(ctx: &TaskCtx, term: &str, seq: u64, at_ms: u64, revoked: boo
         revoked: if revoked { std::iter::once(TermId::new(term)?).collect() } else { Default::default() },
     };
     Some(SignedRevocationCheckpoint { signature: mycelium_core::tls::sign_bytes(&tls.signing_key(), &c.canonical_bytes()).to_vec(), checkpoint: c })
+}
+
+/// Test hook: hold `term` as issued until `until_ms`, as a mint does, with no record written.
+#[cfg(all(test, feature = "compliance"))]
+pub(crate) fn test_hold_issued(ctx: &TaskCtx, term: &str, until_ms: u64) {
+    ctx.call_issuer.issued.pin().insert(term.to_string(), Issued { seq: 1, at_ms: 0, revoked: false, until_ms, durable_seq: 1, target: None });
+}
+
+/// Test hook: the checkpoint `seq` of `term` this gateway would sign, written nowhere.
+#[cfg(all(test, feature = "compliance"))]
+pub(crate) fn test_sign_checkpoint(ctx: &TaskCtx, term: &str, seq: u64, at_ms: u64, revoked: bool) -> SignedRevocationCheckpoint {
+    sign_checkpoint(ctx, term, seq, at_ms, revoked).expect("an identity")
 }
 
 /// **Mint the `call:` mandate for envelope `n`** of a `kind` call to `target` — `None`, minting nothing, where it
@@ -301,7 +325,7 @@ pub(crate) fn mint(ctx: &TaskCtx, kind: &str, payload: &[u8], claim: Option<&str
     })
     .ok()?;
     let cm = serde_json::to_value(PresentedCallMandate::new(grant, &proof, first)).ok()?;
-    Some(Minted { cm, term, checkpoint, window, at_ms: now_ms, until_ms })
+    Some(Minted { cm, term, target: target.clone(), checkpoint, window, at_ms: now_ms, until_ms })
 }
 
 /// A record on disk — the WAL's required-sync write, fsynced before it is applied or gossiped — or why not. A node
@@ -328,7 +352,10 @@ pub(crate) async fn record(ctx: &TaskCtx, minted: Minted) -> Result<(), String> 
     write_durable(ctx, call_window_key(&gateway, &minted.term), minted.window).await?;
     #[cfg(test)]
     test_hooks::note_record_latency(&ctx.node_id, started.elapsed());
-    ctx.call_issuer.issued.pin().insert(minted.term, Issued { seq: 1, at_ms: minted.at_ms, revoked: false, until_ms: minted.until_ms, durable_seq: 1 });
+    ctx.call_issuer.issued.pin().insert(
+        minted.term,
+        Issued { seq: 1, at_ms: minted.at_ms, revoked: false, until_ms: minted.until_ms, durable_seq: 1, target: Some(minted.target) },
+    );
     ctx.call_issuer.mints.fetch_add(1, Ordering::Relaxed);
     #[cfg(feature = "metrics")]
     metrics::counter!("mycelium_gateway_call_mints_total").increment(1);
@@ -337,7 +364,6 @@ pub(crate) async fn record(ctx: &TaskCtx, minted: Minted) -> Result<(), String> 
 
 /// Why a revoke did not stand.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(not(all(test, feature = "compliance")), allow(dead_code))]
 pub(crate) enum RevokeRefusal {
     /// This node has no TLS identity to sign with.
     NoIdentity,
@@ -359,15 +385,28 @@ pub(crate) enum RevokeRefusal {
 /// own verified `window` record and checkpoint in the KV. Two revokes of one term at once make one checkpoint: the
 /// transition to revoked is one papaya `compute` (retry-safe: it reads only its input), and the loser writes the
 /// winner's.
-#[cfg_attr(not(all(test, feature = "compliance")), allow(dead_code))] // I4's PR 3: the cancel doors (A2A `tasks/cancel`, MCP `notifications/cancelled`, the cancel-forward)
-pub(crate) async fn revoke_call(ctx: &Arc<TaskCtx>, term: &str) -> Result<bool, RevokeRefusal> {
+#[cfg_attr(not(all(test, feature = "compliance")), allow(dead_code))] // the tests' entry; the doors go through `revoke`
+pub(crate) async fn revoke_call(ctx: &TaskCtx, term: &str) -> Result<bool, RevokeRefusal> {
+    revoke(ctx, term).await.map(|r| r.written)
+}
+
+/// What a revoke did: whether this call wrote the revoking checkpoint to disk, the checkpoint itself (what the
+/// cancel-forward carries), and the provider the call was sent to, if this process knows it.
+pub(crate) struct Revoked {
+    pub(crate) written: bool,
+    pub(crate) checkpoint: SignedRevocationCheckpoint,
+    pub(crate) target: Option<NodeId>,
+}
+
+/// [`revoke_call`], with what the cancel-forward needs (I4, PR 3: `call_cancel::cancel`).
+pub(crate) async fn revoke(ctx: &TaskCtx, term: &str) -> Result<Revoked, RevokeRefusal> {
     if ctx.tls.get().is_none() {
         return Err(RevokeRefusal::NoIdentity);
     }
     let gateway = node_principal(&ctx.node_id);
     let cp_key = call_checkpoint_key(&gateway, term);
     let members = record_keys(ctx);
-    let held = ctx.call_issuer.issued.pin().get(term).copied();
+    let held = ctx.call_issuer.issued.pin().get(term).cloned();
     let issued = match held {
         Some(i) => i,
         None => {
@@ -384,50 +423,53 @@ pub(crate) async fn revoke_call(ctx: &Arc<TaskCtx>, term: &str) -> Result<bool, 
                 // What the KV holds after a restart may have come back by gossip from a copy this gateway never
                 // fsynced: nothing is taken as on disk until this process writes it.
                 durable_seq: 0,
+                // Not kept across a restart (D-4): this cancel reaches the provider by the KV only.
+                target: None,
             };
             // Held from here, so what this process writes durably is remembered (and re-asserted).
-            let _ = ctx.call_issuer.issued.pin().try_insert(term.to_string(), issued);
+            let _ = ctx.call_issuer.issued.pin().try_insert(term.to_string(), issued.clone());
             issued
         }
     };
     let now = ctx.hlc.decision_now_ms();
-    let next = Issued { seq: issued.seq + 1, at_ms: now, revoked: true, until_ms: issued.until_ms, durable_seq: issued.durable_seq };
+    let next = Issued { seq: issued.seq + 1, at_ms: now, revoked: true, until_ms: issued.until_ms, durable_seq: issued.durable_seq, target: issued.target.clone() };
     // Held as issued **before** the write: the re-assertion compares the KV with what it holds, so it must never
     // hold the first checkpoint while the revoking one is in the KV — it would write the first back over it.
     let won = !issued.revoked
         && matches!(
             ctx.call_issuer.issued.pin().compute(term.to_string(), |entry| match entry {
                 Some((_, cur)) if cur.revoked => papaya::Operation::Abort(()),
-                _ => papaya::Operation::Insert(next),
+                _ => papaya::Operation::Insert(next.clone()),
             }),
             papaya::Compute::Inserted(..) | papaya::Compute::Updated { .. }
         );
-    let revoking = if won { next } else { ctx.call_issuer.issued.pin().get(term).copied().filter(|i| i.revoked).unwrap_or(issued) };
+    let revoking = if won { next } else { ctx.call_issuer.issued.pin().get(term).cloned().filter(|i| i.revoked).unwrap_or(issued) };
     let Some(signed) = sign_checkpoint(ctx, term, revoking.seq, revoking.at_ms, true) else { return Err(RevokeRefusal::NoIdentity) };
     if won && let Some(authority) = ctx.execution_authority.get() {
         let _ = authority.offer_checkpoint(&signed, now, &super::gateway_member_keys(ctx));
         authority.sweep(now);
     }
     let bytes = serde_json::to_vec(&signed).map_err(|e| RevokeRefusal::NotDurable(e.to_string()))?;
+    let target = revoking.target.clone();
     // Already on disk — written durably by this process at or past this sequence: nothing to write. Only this
     // process's own record of its durable writes decides it (#794's review, K1): the KV may hold the revoking
     // checkpoint because the re-assertion wrote it without an fsync.
     if revoking.durable_seq >= revoking.seq {
-        return Ok(false);
+        return Ok(Revoked { written: false, checkpoint: signed, target });
     }
     write_durable(ctx, cp_key, bytes).await.map_err(RevokeRefusal::NotDurable)?;
     let written = revoking.seq;
-    ctx.call_issuer.issued.pin().update(term.to_string(), move |i| Issued { durable_seq: i.durable_seq.max(written), ..*i });
+    ctx.call_issuer.issued.pin().update(term.to_string(), move |i| Issued { durable_seq: i.durable_seq.max(written), ..i.clone() });
     #[cfg(feature = "metrics")]
     metrics::counter!("mycelium_gateway_calls_cancelled_total").increment(1);
-    Ok(true)
+    Ok(Revoked { written: true, checkpoint: signed, target })
 }
 
 /// **Write this gateway's newest checkpoint for `term` again if the KV holds anything else** (#775's H1): another
 /// member's value, a tombstone, or an older checkpoint of this gateway's written back over a newer one. Nothing for a
 /// term it does not hold, or one past its floor (the collector's). `true`: re-asserted.
 pub(crate) fn reassert(ctx: &Arc<TaskCtx>, term: &str) -> bool {
-    let Some(issued) = ctx.call_issuer.issued.pin().get(term).copied() else { return false };
+    let Some(issued) = ctx.call_issuer.issued.pin().get(term).cloned() else { return false };
     if ctx.hlc.decision_now_ms() > issued.until_ms.saturating_add(2 * skew_ms(ctx)) {
         return false;
     }
@@ -542,7 +584,13 @@ pub(crate) fn collect(ctx: &TaskCtx, now_ms: u64) -> Collected {
     }
     // Held until its window could no longer be presented anywhere (its end + 2·skew): past it a provider refuses the
     // mandate out of window whatever its checkpoint says, so there is nothing left to re-assert or revoke from memory.
-    ctx.call_issuer.issued.pin().retain(|_, i| now_ms <= i.until_ms.saturating_add(skew2));
+    // Not `papaya::HashMap::retain`: on papaya 0.1.x it reads each entry through its tagged pointer, so after an
+    // incremental resize the closure is handed bytes 4 off the entry (#799's review, H1; fixed upstream in 0.2.x).
+    // `iter` reads the masked pointer: collect the dead terms under one guard, remove them one by one.
+    let dead: Vec<String> = ctx.call_issuer.issued.pin().iter().filter(|(_, i)| now_ms > i.until_ms.saturating_add(skew2)).map(|(t, _)| t.clone()).collect();
+    for term in dead {
+        ctx.call_issuer.issued.pin().remove(&term);
+    }
 
     // `grant/`: this node's own issue records and its own door's markers and releases — only with
     // `collect_expired_records` on. The `call/` half above runs on a minting gateway too (#794's round-2 review, C3).

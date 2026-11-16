@@ -8,6 +8,9 @@ use super::*;
 /// - `initialize`   — returns server capabilities.
 /// - `tools/list`   — scans `tools/` prefix and returns registered tools.
 /// - `tools/call`   — locates a provider and proxies the call via `rpc_call_ctx`.
+/// - `notifications/cancelled` — identity-and-lifecycle I4, PR 3: the caller's own `tools/call` of that
+///   `requestId` (and `Mcp-Session-Id`, if it sent one) is cancelled — its `call:` term revoked and recorded, then
+///   forwarded to the provider. A notification is answered `202 Accepted` with no body, whatever it finds.
 pub(super) async fn mcp_handler(
     State(ctx): State<Arc<HttpCtx>>,
     caller: Option<Extension<ResolvedPrincipal>>,
@@ -72,6 +75,21 @@ pub(super) async fn mcp_handler(
                 "id": id,
                 "result": {"tools": tools},
             })).into_response()
+        }
+
+        "notifications/cancelled" => {
+            #[cfg(all(feature = "gateway", feature = "tls"))]
+            if let Some(principal) = caller.as_ref().map(|c| c.principal().to_string())
+                && let Some(request_id) = req["params"].get("requestId")
+            {
+                let key = (principal, mcp_session(&headers), request_id.to_string());
+                match crate::agent::call_cancel::cancel_mcp_call(&ctx.agent_ctx, &key).await {
+                    Ok(Some(done)) => tracing::debug!(?done, "mcp notifications/cancelled: the call is cancelled"),
+                    Ok(None) => tracing::debug!("mcp notifications/cancelled: no call of this caller's with that id is in flight"),
+                    Err(e) => warn!("mcp notifications/cancelled: the cancel was not recorded: {e}"),
+                }
+            }
+            axum::http::StatusCode::ACCEPTED.into_response()
         }
 
         "tools/call" => {
@@ -154,6 +172,15 @@ pub(super) async fn mcp_handler(
                 })).into_response();
             }
 
+            // I4, PR 3: a call this gateway mints a `call:` mandate for can be cancelled by its caller's
+            // `notifications/cancelled` — registered before the preflight, so a cancel during it is caught, and removed
+            // when the dispatch ends (or this request is dropped). Unregistered (counted) at a full table or a key in
+            // flight: that call runs, and stops only at its window.
+            #[cfg(all(feature = "gateway", feature = "tls"))]
+            let cancel_handle = caller.as_ref().filter(|_| crate::agent::call_issuer::mints_for(&ctx.agent_ctx, crate::signal::signal_kind::MCP_INVOKE)).and_then(|c| {
+                crate::agent::call_cancel::register_mcp_call(&ctx.agent_ctx, (c.principal().to_string(), mcp_session(&headers), id.to_string()))
+            });
+
             // AE slice: the evaluator preflight, between the auth layer and the dispatch. Inert
             // unless an evaluator is attached (`with_action_evaluator`); with one, a call whose
             // authority the policy does not establish never reaches the provider *through this
@@ -198,7 +225,7 @@ pub(super) async fn mcp_handler(
             // to the provider, which verifies them itself.
             let decided = mycelium_core::sim_seam::mono_instant();
             let resource_claim = format!("tool:{name}@{provider_node_id}");
-            let dispatched = gateway_caller::gateway_rpc_call_with_mandate(
+            let dispatch = gateway_caller::gateway_rpc_call_with_mandate(
                 &ctx.agent_ctx,
                 caller.as_ref(),
                 provider_node_id.clone(),
@@ -208,7 +235,14 @@ pub(super) async fn mcp_handler(
                 gateway_caller::presented_mandate(&req["params"]),
                 Some(&resource_claim),
                 client_signed.as_ref(),
-            ).await;
+            );
+            #[cfg(all(feature = "gateway", feature = "tls"))]
+            let dispatched = match &cancel_handle {
+                Some(h) => crate::agent::call_cancel::CALL_SINK.scope(h.sink(), dispatch).await,
+                None => dispatch.await,
+            };
+            #[cfg(not(all(feature = "gateway", feature = "tls")))]
+            let dispatched = dispatch.await;
 
             // What this gateway actually observed. A timeout is **unknown**, never a negative: the
             // call may well have run (item 1's rule, and the hot invariant). A dispatch the gateway
@@ -285,6 +319,13 @@ pub(crate) fn note_misplaced_causal_headers(ctx: &crate::agent::TaskCtx, headers
     if crate::agent::causal::MISPLACED_HEADERS.iter().any(|h| headers.contains_key(*h)) {
         ctx.note_misplaced_causal(door);
     }
+}
+
+/// The MCP session a request names (`Mcp-Session-Id`), or empty: the `/mcp` door keeps no session of its own, so a
+/// cancel's key is the caller, this header and the request id (the build's default, Q4).
+#[cfg(all(feature = "gateway", feature = "tls"))]
+fn mcp_session(headers: &axum::http::HeaderMap) -> String {
+    headers.get("mcp-session-id").and_then(|v| v.to_str().ok()).unwrap_or_default().to_string()
 }
 
 /// How long `/mcp` waits for a tool's answer: 30 s, or a test's override for this gateway node.

@@ -217,8 +217,12 @@ struct AuthorityState {
     /// The same windows ordered by their end, so a sweep reclaims only what has expired, at most
     /// [`RECLAIM_PER_HOLD`] in one hold, without scanning what it holds.
     call_expiry: std::collections::BTreeSet<(u64, crate::mandate::PrincipalId, String)>,
-    /// How many windows are held per issuing gateway, for [`MAX_CALL_WINDOWS_PER_GATEWAY`].
+    /// How many windows are held per issuing gateway, for [`MAX_CALL_WINDOWS_PER_GATEWAY`] — admitted calls' only.
     call_windows_by_gateway: std::collections::HashMap<crate::mandate::PrincipalId, usize>,
+    /// Identity-and-lifecycle I4, PR 3a (#799's review, M3): windows planted by cancel-forwards, in all and per
+    /// sender — a budget of their own, so no set of senders can take the windows admitted calls need.
+    call_holds: usize,
+    call_holds_by_gateway: std::collections::HashMap<crate::mandate::PrincipalId, usize>,
 }
 
 /// One held `call:` scope.
@@ -229,6 +233,12 @@ struct CallWindow {
     /// the SHA-256 of its bytes. `None` until one is read. What a later read is compared with: the same bytes are
     /// not verified again; an older sequence, or nothing at all, where this was read is counted.
     kv: Option<(u64, [u8; 32])>,
+    /// A call was admitted and registered under the scope here (`assess_call` found its mandate established): what
+    /// lets a cancel-forward answer `not_running` — this node saw the call — rather than `not_registered`.
+    registered: bool,
+    /// Planted by a cancel-forward for a call this node had not admitted (`hold_call_revocation`): counted against
+    /// [`MAX_CALL_HOLDS`] and [`MAX_CALL_HOLDS_PER_GATEWAY`], never against the windows of admitted calls.
+    hold: bool,
 }
 
 /// What one hold of row 43 counted about `call:` records, reported after the hold is released (the metrics
@@ -257,15 +267,47 @@ impl AuthorityState {
             }
             None => {
                 let by_gateway = self.call_windows_by_gateway.get(authority).copied().unwrap_or(0);
-                if self.call_windows.len() >= MAX_CALL_WINDOWS || by_gateway >= MAX_CALL_WINDOWS_PER_GATEWAY {
+                // Holds are budgeted apart (`keep_call_hold`): they never count against an admitted call's room.
+                if self.call_windows.len() - self.call_holds >= MAX_CALL_WINDOWS || by_gateway >= MAX_CALL_WINDOWS_PER_GATEWAY {
                     return false;
                 }
                 self.call_windows_by_gateway.insert(authority.clone(), by_gateway + 1);
                 self.call_expiry.insert((until, k.0.clone(), k.1.clone()));
-                self.call_windows.insert(k, CallWindow { until, kv: None });
+                self.call_windows.insert(k, CallWindow { until, kv: None, registered: false, hold: false });
             }
         }
         true
+    }
+
+    /// A cancel-forward's hold for a scope this node holds no window for (#799's review, M3): inside
+    /// [`MAX_CALL_HOLDS`] in all and [`MAX_CALL_HOLDS_PER_GATEWAY`] for its sender. `false`: at either, nothing held.
+    fn keep_call_hold(&mut self, authority: &crate::mandate::PrincipalId, scope: &str, until: u64) -> bool {
+        let by_sender = self.call_holds_by_gateway.get(authority).copied().unwrap_or(0);
+        if self.call_holds >= MAX_CALL_HOLDS || by_sender >= MAX_CALL_HOLDS_PER_GATEWAY {
+            return false;
+        }
+        self.call_holds += 1;
+        self.call_holds_by_gateway.insert(authority.clone(), by_sender + 1);
+        self.call_expiry.insert((until, authority.clone(), scope.to_string()));
+        self.call_windows.insert((authority.clone(), scope.to_string()), CallWindow { until, kv: None, registered: false, hold: true });
+        true
+    }
+
+    /// Forget one held `call:` scope: its window, its counters and what the revocation view holds for it.
+    fn forget_call_window(&mut self, authority: &crate::mandate::PrincipalId, scope: &str) {
+        let Some(w) = self.call_windows.remove(&(authority.clone(), scope.to_string())) else { return };
+        self.call_expiry.remove(&(w.until, authority.clone(), scope.to_string()));
+        self.revocations.forget(authority, scope);
+        let (total, per) = if w.hold { (Some(&mut self.call_holds), &mut self.call_holds_by_gateway) } else { (None, &mut self.call_windows_by_gateway) };
+        if let Some(t) = total {
+            *t -= 1;
+        }
+        if let Some(count) = per.get_mut(authority) {
+            *count -= 1;
+            if *count == 0 {
+                per.remove(authority);
+            }
+        }
     }
 
     /// Forget up to [`RECLAIM_PER_HOLD`] `call:` scopes whose window ended before `now_ms`: the window, the scope's
@@ -280,14 +322,7 @@ impl AuthorityState {
                 break;
             }
             self.call_expiry.remove(&first);
-            self.revocations.forget(&first.1, &first.2);
-            if let Some(count) = self.call_windows_by_gateway.get_mut(&first.1) {
-                *count -= 1;
-                if *count == 0 {
-                    self.call_windows_by_gateway.remove(&first.1);
-                }
-            }
-            self.call_windows.remove(&(first.1, first.2));
+            self.forget_call_window(&first.1, &first.2);
             n += 1;
         }
         n
@@ -373,6 +408,32 @@ pub const MAX_CALL_WINDOWS: usize = 262_144;
 /// from one gateway to one provider.
 pub const MAX_CALL_WINDOWS_PER_GATEWAY: usize = 65_536;
 
+/// The most revocations a provider holds for calls it has not admitted, planted by cancel-forwards
+/// (identity-and-lifecycle I4, PR 3a; #799's review, M3): a budget apart from [`MAX_CALL_WINDOWS`], so a sender that
+/// sends cancels for calls it never sent here takes nothing an admitted call needs. Each is held at most
+/// `GRANT_TTL_CAP_SECS` (3 600 s). Past it a forward's revocation is not held (`NotHeld`, counted
+/// `call_holds_refused`), and a call admitted later under the term reads the KV record.
+pub const MAX_CALL_HOLDS: usize = 16_384;
+
+/// The most such holds for one sender: 16 senders at their share fill [`MAX_CALL_HOLDS`], and none of them touches
+/// the windows of admitted calls. At the 3 600 s hold, about one cancel-before-arrival every 3.5 s, sustained, per
+/// gateway per provider.
+pub const MAX_CALL_HOLDS_PER_GATEWAY: usize = 1_024;
+
+/// What [`ExecutionAuthority::hold_call_revocation`] did with a cancel-forward's checkpoint.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CallRevocationHeld {
+    /// The term is held revoked here: running work under it is stopped by the sweep, a later admission refused.
+    /// `registered`: a call under the term was admitted and registered here before — this node saw it.
+    Held { registered: bool },
+    /// This node holds as many windows as it keeps: nothing is held, and a later admission reads the KV record.
+    NotHeld,
+    /// Not a revoking checkpoint of its sender's for one `call:{term}` scope.
+    Malformed,
+    /// It did not verify under its gateway's node key (or is dated in the future); nothing is held.
+    NotVerified,
+}
+
 /// A stop record with the mandate whose lapse stopped the work (identity-and-lifecycle I4; the maintainer's decision
 /// of 2026-11-12, Q1), from [`ExecutionAuthority::named_stop_records`]. [`StopRecord`] itself is unchanged. A call
 /// registered under a client's grant and its gateway's `call:` mandate has two registrations, and only a cancelled
@@ -380,6 +441,9 @@ pub const MAX_CALL_WINDOWS_PER_GATEWAY: usize = 65_536;
 #[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NamedStop {
+    /// The issuer (`established_by`) of the mandate the work was registered under — for a `call:` mandate, its
+    /// gateway: terms are `c{n}` of each gateway's own clock and collide across gateways (#799's review, L1).
+    pub established_by: Option<String>,
     /// The scope of the mandate the work was registered under. `None`: it was registered under none.
     pub scope: Option<String>,
     /// That mandate's term.
@@ -401,6 +465,9 @@ pub struct ExecutionAuthority {
     next_work: std::sync::atomic::AtomicU64,
     /// Closure plan C10, lock-order row 49: stop records of cancelled work, newest last, bounded. Leaf.
     stops: Mutex<std::collections::VecDeque<NamedStop>>,
+    /// Notified when a piece of running work ends (its guard dropped): what a cancel-forward waits on before it
+    /// answers that the work it asked to stop has stopped (identity-and-lifecycle I4, PR 3). Not a lock.
+    ended: tokio::sync::Notify,
     /// Adopter-surface X3 (second PR), lock-order row 70: the grants this authority has admitted once, by scope, term
     /// and door — the single-use claim's atomic half (the marker under the request in the KV is its durable half).
     /// Leaf, µs.
@@ -419,6 +486,8 @@ pub struct ExecutionAuthority {
     call_checkpoints_missing: std::sync::atomic::AtomicU64,
     /// See [`call_windows_refused`](Self::call_windows_refused).
     call_windows_refused: std::sync::atomic::AtomicU64,
+    /// See [`call_holds_refused`](Self::call_holds_refused).
+    call_holds_refused: std::sync::atomic::AtomicU64,
     /// Test-only: KV reads made for `call:` checkpoints, and rescans of the held windows (exit 16 counts them).
     #[cfg(test)]
     pub(crate) call_kv_reads: std::sync::atomic::AtomicU64,
@@ -637,6 +706,9 @@ struct Running {
     cancel: std::sync::Arc<tokio::sync::Notify>,
     cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
     requested_ms: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// The agent doing the work promised to stop ([`WorkGuard::unconfirmed`] clears it): what a cancel-forward's
+    /// answer reads to say whether the stop it reports is confirmed (identity-and-lifecycle I4, PR 3).
+    confirms: bool,
 }
 
 /// How many stop records an authority keeps for measurement.
@@ -673,6 +745,10 @@ impl WorkGuard {
     /// recorded as a release: `confirmed_ms` none, and `acknowledged_ms` only if the work acknowledged.
     pub(crate) fn unconfirmed(mut self) -> Self {
         self.confirms = false;
+        // Row 48, flat: the registration says so too, for a cancel-forward's answer (`call_registrations`).
+        if let Some(r) = self.authority.running.lock().unwrap_or_else(|e| e.into_inner()).get_mut(&self.id) {
+            r.confirms = false;
+        }
         self
     }
 
@@ -718,6 +794,7 @@ impl Drop for WorkGuard {
             let now = (self.now_ms)();
             let mandate = was.and_then(|r| r.work.mandate);
             let record = NamedStop {
+                established_by: mandate.as_ref().map(|m| m.established_by.as_str().to_string()),
                 scope: mandate.as_ref().map(|m| m.scope.clone()),
                 term: mandate.as_ref().map(|m| m.term.as_str().to_string()),
                 // A drop confirms a stop only where the agent doing the work promised to stop; elsewhere the library
@@ -734,6 +811,8 @@ impl Drop for WorkGuard {
             }
             stops.push_back(record);
         }
+        // A cancel-forward waiting for this work to end is woken (identity-and-lifecycle I4, PR 3).
+        self.authority.ended.notify_waiters();
     }
 }
 
@@ -768,12 +847,15 @@ impl ExecutionAuthority {
                 call_windows: std::collections::HashMap::new(),
                 call_expiry: std::collections::BTreeSet::new(),
                 call_windows_by_gateway: std::collections::HashMap::new(),
+                call_holds: 0,
+                call_holds_by_gateway: std::collections::HashMap::new(),
             }),
             external,
             durable: std::sync::OnceLock::new(),
             running: Mutex::new(std::collections::HashMap::new()),
             next_work: std::sync::atomic::AtomicU64::new(1),
             stops: Mutex::new(std::collections::VecDeque::new()),
+            ended: tokio::sync::Notify::new(),
             used_grants: Mutex::new(std::collections::HashMap::new()),
             legacy_digest_matches: std::sync::atomic::AtomicU64::new(0),
             legacy_digest_matches_at_provider: std::sync::atomic::AtomicU64::new(0),
@@ -782,6 +864,7 @@ impl ExecutionAuthority {
             call_checkpoints_stale: std::sync::atomic::AtomicU64::new(0),
             call_checkpoints_missing: std::sync::atomic::AtomicU64::new(0),
             call_windows_refused: std::sync::atomic::AtomicU64::new(0),
+            call_holds_refused: std::sync::atomic::AtomicU64::new(0),
             #[cfg(test)]
             call_kv_reads: std::sync::atomic::AtomicU64::new(0),
             #[cfg(test)]
@@ -841,6 +924,7 @@ impl ExecutionAuthority {
                 cancel: std::sync::Arc::clone(&cancel),
                 cancelled: std::sync::Arc::clone(&cancelled),
                 requested_ms: std::sync::Arc::clone(&requested_ms),
+                confirms: true,
             },
         );
         WorkGuard { authority: std::sync::Arc::clone(self), id, cancel, cancelled, requested_ms, acknowledged_ms, now_ms, confirms: true }
@@ -1028,6 +1112,13 @@ impl ExecutionAuthority {
         self.call_windows_refused.load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    /// **Cancel-forwards whose revocation was not held** because this node holds as many as it keeps for calls it has
+    /// not admitted ([`MAX_CALL_HOLDS`], [`MAX_CALL_HOLDS_PER_GATEWAY`]; #799's review, M3). `GET /stats`
+    /// `call_holds_refused`; `mycelium_call_holds_refused_total`.
+    pub fn call_holds_refused(&self) -> u64 {
+        self.call_holds_refused.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     /// Report what a hold counted — after the hold: the metrics recorder is not called under row 43.
     fn note_calls(&self, tally: &CallTally) {
         use std::sync::atomic::Ordering::Relaxed;
@@ -1043,6 +1134,98 @@ impl ExecutionAuthority {
                 metrics::counter!(_name).increment(n);
             }
         }
+    }
+
+    /// **Hold a revoking checkpoint a cancel-forward carried** (identity-and-lifecycle I4, PR 3): the term its
+    /// issuing gateway `by` revoked, taken here from the gateway itself rather than from the KV, under one hold of
+    /// row 43. The checkpoint must be `by`'s, for a `call:{term}` scope, and list that term revoked; it is verified
+    /// under `by`'s node key as any offered checkpoint is.
+    ///
+    /// A scope this node already holds a window for keeps it. A scope it does not — the call has not reached it yet,
+    /// or never will — is held **until the checkpoint's `issued_at_ms` + `GRANT_TTL_CAP_SECS`**: a `call:` mandate
+    /// is minted before its revocation and its window is at most the cap, so no mandate of that term can be
+    /// presented after that, and a call admitted later under it is refused `Revoked` whatever the KV says. At
+    /// [`MAX_CALL_WINDOWS`] or [`MAX_CALL_WINDOWS_PER_GATEWAY`] nothing is held (`NotHeld`). A checkpoint that does
+    /// not verify plants nothing: a window inserted for it is taken back under the same hold.
+    pub(crate) fn hold_call_revocation(
+        &self,
+        by: &crate::mandate::PrincipalId,
+        signed: &SignedRevocationCheckpoint,
+        now_ms: u64,
+        members: &impl MemberKeySource,
+    ) -> CallRevocationHeld {
+        let c = &signed.checkpoint;
+        let Some(term) = c.scope.strip_prefix(crate::mandate::grant::CALL_SCOPE_PREFIX) else { return CallRevocationHeld::Malformed };
+        let Some(term_id) = crate::mandate::TermId::new(term) else { return CallRevocationHeld::Malformed };
+        if c.authority != *by || !c.revoked.contains(&term_id) {
+            return CallRevocationHeld::Malformed;
+        }
+        let external = self.external.read().clone();
+        let mut guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let st = &mut *guard;
+        let key = (by.clone(), c.scope.clone());
+        let held = st.call_windows.get(&key).map(|w| w.registered);
+        let inserted = held.is_none();
+        if inserted {
+            let until = c.issued_at_ms.saturating_add(crate::mandate::grant::GRANT_TTL_CAP_SECS * 1_000);
+            // A hold, budgeted apart from the windows of admitted calls (#799's review, M3).
+            if !st.keep_call_hold(by, &c.scope, until) {
+                drop(guard);
+                self.call_holds_refused.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                #[cfg(feature = "metrics")]
+                metrics::counter!("mycelium_call_holds_refused_total").increment(1);
+                return CallRevocationHeld::NotHeld;
+            }
+        }
+        let (policy, clock) = (st.gate.freshness(), st.gate.clock());
+        let _ = st.revocations.offer(signed, &policy, clock, now_ms, members, &external);
+        if matches!(st.revocations.grant_standing(by, &c.scope, &term_id), RevocationStanding::Revoked) {
+            return CallRevocationHeld::Held { registered: held.unwrap_or(false) };
+        }
+        if inserted {
+            // Nothing verified: take back what this call planted.
+            st.forget_call_window(by, &c.scope);
+        }
+        CallRevocationHeld::NotVerified
+    }
+
+    /// The work running here under `by`'s `call:` `scope`, as `(confirmed, unconfirmed)` registrations: whether the
+    /// agent doing each promised to stop (a [`WorkGuard`] not made [`unconfirmed`](WorkGuard::unconfirmed)). One
+    /// pass under row 48.
+    pub(crate) fn call_registrations(&self, by: &crate::mandate::PrincipalId, scope: &str) -> (usize, usize) {
+        let running = self.running.lock().unwrap_or_else(|e| e.into_inner());
+        let mut out = (0, 0);
+        for r in running.values() {
+            if r.work.mandate.as_ref().is_some_and(|m| m.is_call() && m.established_by == *by && m.scope == scope) {
+                if r.confirms {
+                    out.0 += 1;
+                } else {
+                    out.1 += 1;
+                }
+            }
+        }
+        out
+    }
+
+    /// **The newest stop record of work under `by`'s `scope` and term `term`**, if this authority keeps one: `Some(true)` a
+    /// confirmed stop, `Some(false)` a release it could not confirm. One pass under row 49. Records are the newest
+    /// [`STOP_RECORDS_KEPT`] (1 024), so under load an older stop has aged out and this answers `None`.
+    pub(crate) fn call_stop_recorded(&self, by: &crate::mandate::PrincipalId, scope: &str, term: &str) -> Option<bool> {
+        let stops = self.stops.lock().unwrap_or_else(|e| e.into_inner());
+        stops
+            .iter()
+            .rev()
+            .find(|s| s.established_by.as_deref() == Some(by.as_str()) && s.scope.as_deref() == Some(scope) && s.term.as_deref() == Some(term))
+            .map(|s| s.record.confirmed_ms.is_some())
+    }
+
+    /// Resolves the next time a piece of running work ends — or at once, if one ends between this call and the
+    /// first poll: the waiter is enabled before it returns. Pair with [`call_registrations`](Self::call_registrations)
+    /// in a loop.
+    pub(crate) fn work_ended(&self) -> impl std::future::Future<Output = ()> + '_ {
+        let mut notified = Box::pin(self.ended.notified());
+        notified.as_mut().enable();
+        notified
     }
 
     /// Does this authority hold a window for `scope` of `by`? One lookup under row 43.
@@ -1224,13 +1407,19 @@ impl ExecutionAuthority {
             st.take_kv_copy(&m.established_by, &m.scope, local.as_deref(), now_ms, members, &external, &mut tally);
             // 5. Judged as a grant's term is: no freshness, the window bounds its life. A revoked term is refused by name.
             match st.revocations.grant_standing(&m.established_by, &m.scope, &m.term) {
-                RevocationStanding::NotRevoked => Assessment {
+                RevocationStanding::NotRevoked => {
+                    // The caller registers the work at once (`assess_call_slot`'s `begin`): this node saw the call.
+                    if let Some(w) = st.call_windows.get_mut(&(m.established_by.clone(), m.scope.clone())) {
+                        w.registered = true;
+                    }
+                    Assessment {
                     binding: Some(
                         MandateBinding::established(m.holder.clone(), m.term.clone(), m.scope.clone(), m.epoch)
                             .with_facts(Some(digest_hex.clone()), None),
                     ),
                     valid_until_ms: Some(m.valid_until_ms),
-                },
+                    }
+                }
                 RevocationStanding::Revoked => refused(MandateRefusal::Revoked { term: m.term.as_str().to_string() }),
                 _ => unknown("the call's checkpoint did not verify at this node".into()),
             }
@@ -2535,5 +2724,99 @@ mod call_tests {
             us[us.len() * 99 / 100],
             us[us.len() - 1]
         );
+    }
+}
+
+/// Identity-and-lifecycle I4, PR 3a, at the authority: what #799's review found in the cancel-forward's hold and its
+/// stop records.
+#[cfg(test)]
+mod call_cancel_tests {
+    use super::call_mint::{checkpoint, mint};
+    use super::tests::{external, keys, OP, RES};
+    use super::*;
+    use crate::agent::action_evaluator::MandateState;
+    use crate::knowledge::issuer::MemberKeys;
+    use crate::mandate::authority::{ClockModel, FreshnessPolicy, ResourceTier};
+    use crate::mandate::grant::EntitlementTable;
+    use crate::mandate::{PrincipalId, ResourceAuthority};
+    use crate::node_id::NodeId;
+    use ed25519_dalek::SigningKey;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    const A: &str = "node:127.0.0.1:7701";
+    const B: &str = "node:127.0.0.1:7702";
+
+    fn key_a() -> SigningKey {
+        SigningKey::from_bytes(&[61u8; 32])
+    }
+    fn key_b() -> SigningKey {
+        SigningKey::from_bytes(&[62u8; 32])
+    }
+    fn members() -> HashMap<NodeId, MemberKeys> {
+        HashMap::from([
+            (NodeId::new("127.0.0.1", 7701).unwrap(), MemberKeys { retained: vec![key_a().verifying_key().to_bytes()], ..Default::default() }),
+            (NodeId::new("127.0.0.1", 7702).unwrap(), MemberKeys { retained: vec![key_b().verifying_key().to_bytes()], ..Default::default() }),
+        ])
+    }
+    fn args() -> serde_json::Value {
+        serde_json::json!({ "text": "restock aisle 4" })
+    }
+    fn provider() -> Arc<ExecutionAuthority> {
+        let (ak, hk) = keys();
+        let gate = ExecutionGate::strict(
+            ResourceAuthority::new("depot", 1),
+            ResourceTier::Serialised,
+            ClockModel { skew_ms: 100 },
+            FreshnessPolicy { freshness_ms: 60_000, interval_ms: 20_000, delivery_ms: 5_000 },
+        )
+        .unwrap();
+        Arc::new(ExecutionAuthority::new(gate, GrantVerifier::new(EntitlementTable::new()), external(&ak, &hk)))
+    }
+    fn p(s: &str) -> PrincipalId {
+        PrincipalId::new(s).unwrap()
+    }
+
+    /// **L1: a stop record answers only for its own gateway's term.** Terms are `c{n}` of each gateway's own clock, so
+    /// gateway A's `c42` and gateway B's `c42` are two calls. A's call is admitted, registered and stopped here; B's
+    /// cancel of its own `c42` is not answered from A's record. Seen failing first with `call_stop_recorded` matching
+    /// on the scope and term alone: B was answered `Some(true)`.
+    #[test]
+    fn a_stop_record_answers_only_for_its_own_gateways_term() {
+        let a = provider();
+        let c = mint(&key_a(), A, "c42", OP, RES, &args(), 1_000, 60_000);
+        let s = a.assess_call(A, OP, RES, &args(), &c, 2_000, &members(), |_| None);
+        assert_eq!(s.binding.map(|b| b.state), Some(MandateState::Established));
+        let m = &c.grant.mandate;
+        let guard = a.begin(AuthorizedWork::new(mandate_operation(OP, RES), Some(m.clone()), m.valid_until_ms), Arc::new(|| 3_000));
+        let revoking = checkpoint(&key_a(), A, "call:c42", 2, 2_500, &["c42"]);
+        assert_eq!(a.hold_call_revocation(&p(A), &revoking, 2_600, &members()), CallRevocationHeld::Held { registered: true });
+        assert_eq!(a.sweep(2_700), 1);
+        drop(guard);
+        assert_eq!(a.call_stop_recorded(&p(A), "call:c42", "c42"), Some(true), "A's own record");
+        assert_eq!(a.call_stop_recorded(&p(B), "call:c42", "c42"), None, "never B's");
+    }
+
+    /// **M3: holds from cancel-forwards have a budget of their own, per sender, and take nothing admitted calls need.**
+    /// A sender's revocations for calls this node never admitted are held up to `MAX_CALL_HOLDS_PER_GATEWAY`; past it
+    /// each is `NotHeld` and counted (`call_holds_refused`); the windows of admitted calls are untouched, and a call
+    /// from the same gateway is still admitted. Seen failing first with the holds taken as admitted windows
+    /// (`keep_call_window`) under no budget of their own: the sender's 1 025th hold was held.
+    #[test]
+    fn holds_from_cancel_forwards_have_a_per_sender_budget_apart_from_admitted_calls() {
+        let a = provider();
+        for i in 0..MAX_CALL_HOLDS_PER_GATEWAY {
+            let cp = checkpoint(&key_b(), B, &format!("call:h{i}"), 2, 10, &[&format!("h{i}")]);
+            assert_eq!(a.hold_call_revocation(&p(B), &cp, 10, &members()), CallRevocationHeld::Held { registered: false }, "hold {i}");
+        }
+        let over = checkpoint(&key_b(), B, "call:hx", 2, 10, &["hx"]);
+        assert_eq!(a.hold_call_revocation(&p(B), &over, 10, &members()), CallRevocationHeld::NotHeld, "past the sender's budget");
+        assert_eq!((a.call_holds_refused(), a.call_windows_refused()), (1, 0), "counted as a hold refused, not an admitted window");
+        let c = mint(&key_b(), B, "c7", OP, RES, &args(), 1_000, 60_000);
+        let s = a.assess_call(B, OP, RES, &args(), &c, 2_000, &members(), |_| None);
+        assert_eq!(s.binding.map(|b| b.state), Some(MandateState::Established), "an admitted call from the same gateway still gets its window");
+        // Another sender's holds are its own budget.
+        let cp = checkpoint(&key_a(), A, "call:h0", 2, 10, &["h0"]);
+        assert_eq!(a.hold_call_revocation(&p(A), &cp, 10, &members()), CallRevocationHeld::Held { registered: false });
     }
 }

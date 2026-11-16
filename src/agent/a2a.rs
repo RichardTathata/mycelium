@@ -354,6 +354,10 @@ pub(crate) struct A2aTask {
     /// task replaces it with `None`; a reservation whose send ends without one is removed by
     /// [`TaskReservation`]'s `Drop`, only if the token is still its own.
     pub pending:    Option<u64>,
+    /// Identity-and-lifecycle I4, PR 3: the handle of the call this task's send dispatches — its `call:` term once
+    /// the gateway mints one — which `tasks/cancel` revokes before it removes the task. `None` on a completed task.
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    pub call:       Option<Arc<super::call_cancel::CallSink>>,
 }
 
 /// Reservation tokens: process-unique, never reused (not a draw — the replay seam holds no RNG here).
@@ -369,20 +373,48 @@ pub(crate) struct TaskReservation {
     owner: Option<String>,
     /// `None` when the id already belonged to this caller (a re-send): nothing of ours to remove.
     token: Option<u64>,
+    /// The reservation's call handle (I4, PR 3), which its dispatch is scoped with. `None` on a re-send.
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    call: Option<Arc<super::call_cancel::CallSink>>,
 }
 
 impl TaskReservation {
-    /// Store the completed task under the reserved id; the reservation is spent.
+    /// Store the completed task under the reserved id; the reservation is spent. A reservation a `tasks/cancel`
+    /// removed stays removed (I4, PR 3): the task was cancelled, and its send's late answer does not bring it back.
     fn complete(mut self, task: Task) {
-        self.token = None;
-        self.tasks.pin().insert(self.id.clone(), A2aTask {
+        let token = self.token.take();
+        let done = A2aTask {
             task,
             context_id: self.context_id.clone(),
             generation: self.generation,
             created_at: mycelium_core::sim_seam::mono_instant(),
             owner: self.owner.clone(),
             pending: None,
-        });
+            #[cfg(all(feature = "gateway", feature = "tls"))]
+            call: None,
+        };
+        match token {
+            // Only over our own reservation: a cancelled task's entry is gone, and stays gone.
+            Some(token) => {
+                let mut done = Some(done);
+                self.tasks.pin().compute(self.id.clone(), |existing| match existing {
+                    Some((_, t)) if t.pending == Some(token) => match done.take() {
+                        Some(d) => papaya::Operation::Insert(d),
+                        None => papaya::Operation::Abort(()),
+                    },
+                    _ => papaya::Operation::Abort(()),
+                });
+            }
+            None => {
+                self.tasks.pin().insert(self.id.clone(), done);
+            }
+        }
+    }
+
+    /// The handle to scope this reservation's dispatch with, if it has one.
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    fn call(&self) -> Option<Arc<super::call_cancel::CallSink>> {
+        self.call.clone()
     }
 }
 
@@ -409,6 +441,8 @@ fn reserve_task(
     owner:      &Option<String>,
 ) -> Result<TaskReservation, Unclaimable> {
     let token = RESERVATION_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    let call = Arc::new(super::call_cancel::CallSink::default());
     let guard = state.tasks.pin();
     let claimed = guard.compute(task_id.to_string(), |existing| match existing {
         Some((_, t)) if t.owner != *owner => papaya::Operation::Abort(Err(Unclaimable::Foreign)),
@@ -417,6 +451,9 @@ fn reserve_task(
         Some((_, t)) if t.generation != Generation::Legacy || generation != Generation::Legacy => {
             papaya::Operation::Abort(Err(Unclaimable::NotResendable))
         }
+        // A re-send of a task still in flight starts no second call (#799's review, M2): its cancel would reach only
+        // the first, and the second's answer would write the cancelled task back. It is answered the pending task.
+        Some((_, t)) if t.pending.is_some() => papaya::Operation::Abort(Err(Unclaimable::InFlight)),
         Some(_) => papaya::Operation::Abort(Ok(())),
         None => papaya::Operation::Insert(A2aTask {
             task: Task { id: task_id.to_string(), status: TaskStatus { state: "submitted".into() }, artifacts: vec![] },
@@ -425,6 +462,8 @@ fn reserve_task(
             created_at: mycelium_core::sim_seam::mono_instant(),
             owner: owner.clone(),
             pending: Some(token),
+            #[cfg(all(feature = "gateway", feature = "tls"))]
+            call: Some(Arc::clone(&call)),
         }),
     });
     let token = match claimed {
@@ -439,6 +478,8 @@ fn reserve_task(
         context_id: context_id.to_string(),
         generation,
         owner: owner.clone(),
+        #[cfg(all(feature = "gateway", feature = "tls"))]
+        call: token.map(|_| call),
         token,
     })
 }
@@ -450,6 +491,8 @@ pub(crate) enum Unclaimable {
     Foreign,
     /// It is a task a 0.3 or 1.0 method created, which is never re-sent.
     NotResendable,
+    /// A pre-0.2 re-send of a task whose first send is still in flight: answered the pending task, nothing dispatched.
+    InFlight,
 }
 
 impl Unclaimable {
@@ -461,6 +504,7 @@ impl Unclaimable {
                 -32004,
                 "this task was created by message/send or SendMessage and is its own message's: send a new message instead",
             ),
+            Unclaimable::InFlight => jsonrpc_error(id, -32004, "this task's send is still in flight: tasks/get it, or tasks/cancel it"),
         }
     }
 }
@@ -837,6 +881,13 @@ async fn dispatch_send(
     // new id cannot both run). An id another identity owns is refused here, before anything is sent.
     let reservation = match reserve_task(state, &req.task_id, &req.context_id, req.generation, &task_owner(caller)) {
         Ok(reservation) => reservation,
+        // The idempotent re-send: the task as it stands, and no second call.
+        Err(Unclaimable::InFlight) => {
+            return match state.tasks.pin().get(&req.task_id) {
+                Some(entry) => Ok(entry.task.clone()),
+                None => Err(jsonrpc_error(id, -32001, "task not found")),
+            };
+        }
         Err(why) => return Err(why.refusal(id)),
     };
     let text = req.text.clone();
@@ -902,12 +953,20 @@ async fn dispatch_send(
     if let Some(claim) = _claim.take() {
         claim.spend();
     }
-    let dispatched = gateway_caller::gateway_rpc_call_with_mandate(
+    let dispatch = gateway_caller::gateway_rpc_call_with_mandate(
         &state.task_ctx, caller, target,
         "skill.invoke".into(), Bytes::from(text.into_bytes()), timeout, gateway_caller::presented_mandate(params),
         Some(&resource_claim),
         client_signed.as_ref(),
-    ).await;
+    );
+    // I4, PR 3: scoped with the task's call handle, so `tasks/cancel` can revoke the term this dispatch mints.
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    let dispatched = match reservation.call() {
+        Some(sink) => super::call_cancel::CALL_SINK.scope(sink, dispatch).await,
+        None => dispatch.await,
+    };
+    #[cfg(not(all(feature = "gateway", feature = "tls")))]
+    let dispatched = dispatch.await;
     // The gateway's own refusal before it sent anything (a failed exchange, an envelope too large, a provider without
     // the caller context) ran nothing: a grant's use claimed above is given back (#760's confirm round). A reply is the
     // skill's raw bytes, which the node did not author, so only an `Err` releases here.
@@ -1027,7 +1086,15 @@ fn handle_tasks_get(
 
 /// `tasks/cancel` / `CancelTask`: the same owner rule as `tasks/get`, checked before the task's state,
 /// and the same `asked`.
-fn handle_tasks_cancel(
+///
+/// **It revokes before it removes** (identity-and-lifecycle I4, PR 3). A pending task whose send this gateway minted
+/// a `call:` mandate for has that term revoked and the revocation recorded on disk — awaited, so `canceled` is
+/// answered only once the gateway has recorded it — and then forwarded to the provider on a task of its own; a cancel
+/// that arrives before the mint is caught by the dispatch, which sends nothing. The answer says what this gateway
+/// did (the task is `canceled` here, its call revoked) and never that the provider stopped: that is the provider's
+/// to say, in the cancel receipt (`GET /stats` `call_cancel_receipts`). A revoke the disk refuses is answered
+/// `-32603` and the task is kept.
+async fn handle_tasks_cancel(
     state:  &A2aState,
     caller: Option<&ResolvedPrincipal>,
     id:     Option<Value>,
@@ -1036,24 +1103,42 @@ fn handle_tasks_cancel(
 ) -> Value {
     let task_id = params.get("id").and_then(|v| v.as_str()).unwrap_or("");
     let owner = task_owner(caller);
-    let guard = state.tasks.pin();
-    match guard.get(task_id) {
-        Some(entry) if owner.is_none() || entry.owner != owner => not_the_creator(id),
-        Some(entry) if entry.task.status.state == "completed" => {
-            jsonrpc_error(id, -32002, "task already completed")
+    let (generation, context_id) = match state.tasks.pin().get(task_id) {
+        Some(entry) if owner.is_none() || entry.owner != owner => return not_the_creator(id),
+        Some(entry) if entry.task.status.state == "completed" => return jsonrpc_error(id, -32002, "task already completed"),
+        Some(entry) => (asked.unwrap_or(entry.generation), entry.context_id.clone()),
+        None => return jsonrpc_error(id, -32001, "task not found"),
+    };
+    // Revoked before it is removed: the gateway records the cancel, then the task goes.
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    {
+        let call = state.tasks.pin().get(task_id).and_then(|e| e.call.clone());
+        if let Some(call) = call
+            && let Err(e) = super::call_cancel::cancel_at_door(&state.task_ctx, &call).await
+        {
+            warn!("A2A tasks/cancel: the call's cancel was not recorded: {e}");
+            return jsonrpc_error(id, -32603, &format!("the cancel could not be recorded: {e}"));
         }
-        Some(entry) => {
-            let generation = asked.unwrap_or(entry.generation);
-            let canceled = Task { id: task_id.to_string(), status: TaskStatus { state: "canceled".into() }, artifacts: vec![] };
-            let answer = match generation {
-                Generation::Legacy => json!({ "id": task_id, "status": { "state": "canceled" } }),
-                Generation::V03 | Generation::V10 => render_task(&canceled, &entry.context_id, generation),
-            };
-            guard.remove(task_id);
-            jsonrpc_ok(id, answer)
-        }
-        None => jsonrpc_error(id, -32001, "task not found"),
     }
+    // Removed unless its send completed meanwhile: a completed task is not cancelled.
+    let completed_meanwhile = {
+        let tasks = state.tasks.pin();
+        let removed = tasks.compute(task_id.to_string(), |existing| match existing {
+            Some((_, t)) if t.task.status.state == "completed" => papaya::Operation::Abort(true),
+            Some(_) => papaya::Operation::Remove,
+            None => papaya::Operation::Abort(false),
+        });
+        matches!(removed, papaya::Compute::Aborted(true))
+    };
+    if completed_meanwhile {
+        return jsonrpc_error(id, -32002, "task already completed");
+    }
+    let canceled = Task { id: task_id.to_string(), status: TaskStatus { state: "canceled".into() }, artifacts: vec![] };
+    let answer = match generation {
+        Generation::Legacy => json!({ "id": task_id, "status": { "state": "canceled" } }),
+        Generation::V03 | Generation::V10 => render_task(&canceled, &context_id, generation),
+    };
+    jsonrpc_ok(id, answer)
 }
 
 // ── tasks/sendSubscribe SSE ───────────────────────────────────────────────────
@@ -1289,12 +1374,20 @@ pub(crate) async fn tasks_send_subscribe(
         // Closure plan C2: the presented mandate travels to the provider, which verifies it itself.
         let mandate = gateway_caller::presented_mandate(&req.meta);
         let resource_claim = format!("skill:{skill_id}@{target}");
-        let dispatched = gateway_caller::gateway_rpc_call_with_mandate(
+        let dispatch = gateway_caller::gateway_rpc_call_with_mandate(
             &state.task_ctx, caller.as_ref(), target,
             "skill.invoke".into(), Bytes::from(req.text.clone().into_bytes()), timeout, mandate,
             Some(&resource_claim),
             client_signed.as_ref(),
-        ).await;
+        );
+        // I4, PR 3: as on the unary send, scoped with the task's call handle.
+        #[cfg(all(feature = "gateway", feature = "tls"))]
+        let dispatched = match reservation.call() {
+            Some(sink) => super::call_cancel::CALL_SINK.scope(sink, dispatch).await,
+            None => dispatch.await,
+        };
+        #[cfg(not(all(feature = "gateway", feature = "tls")))]
+        let dispatched = dispatch.await;
         // As on the unary send: the gateway's own refusal before sending gives a claimed grant use back.
         #[cfg(all(feature = "gateway", feature = "tls"))]
         if dispatched.is_err()
@@ -1453,7 +1546,7 @@ pub(crate) async fn a2a_jsonrpc_full(
             Err(error) => error,
         },
         Verb::Get    => handle_tasks_get(&state, caller.as_ref(), id.clone(), &params, generation),
-        Verb::Cancel => handle_tasks_cancel(&state, caller.as_ref(), id.clone(), &params, generation),
+        Verb::Cancel => handle_tasks_cancel(&state, caller.as_ref(), id.clone(), &params, generation).await,
     };
     Json(result).into_response()
 }
@@ -2040,30 +2133,30 @@ mod tests {
         let tasks = Arc::new(papaya::HashMap::<String, A2aTask>::new());
         let now = Instant::now();
         let old = now.checked_sub(Duration::from_secs(600)).expect("clock supports -600s");
-        tasks.pin().insert("stale".into(), A2aTask { task: mk("stale"), context_id: String::new(), generation: Generation::Legacy, created_at: old, owner: None, pending: None });
-        tasks.pin().insert("fresh".into(), A2aTask { task: mk("fresh"), context_id: String::new(), generation: Generation::Legacy, created_at: now, owner: None, pending: None });
+        tasks.pin().insert("stale".into(), A2aTask { task: mk("stale"), context_id: String::new(), generation: Generation::Legacy, created_at: old, owner: None, pending: None, #[cfg(all(feature = "gateway", feature = "tls"))] call: None });
+        tasks.pin().insert("fresh".into(), A2aTask { task: mk("fresh"), context_id: String::new(), generation: Generation::Legacy, created_at: now, owner: None, pending: None, #[cfg(all(feature = "gateway", feature = "tls"))] call: None });
         evict_stale_tasks(&tasks, now);
         assert!(tasks.pin().get("stale").is_none(), "stale task evicted");
         assert!(tasks.pin().get("fresh").is_some(), "fresh task survives the sweep");
     }
 
-    #[test]
-    fn tasks_cancel_completed_returns_error() {
+    #[tokio::test]
+    async fn tasks_cancel_completed_returns_error() {
         let tasks = Arc::new(papaya::HashMap::<String, A2aTask>::new());
         let task  = Task {
             id:        "t1".into(),
             status:    TaskStatus { state: "completed".into() },
             artifacts: vec![],
         };
-        tasks.pin().insert("t1".into(), A2aTask { task, context_id: String::new(), generation: Generation::Legacy, created_at: Instant::now(), owner: Some("token:gw/a".into()), pending: None });
+        tasks.pin().insert("t1".into(), A2aTask { task, context_id: String::new(), generation: Generation::Legacy, created_at: Instant::now(), owner: Some("token:gw/a".into()), pending: None, #[cfg(all(feature = "gateway", feature = "tls"))] call: None });
         let state = A2aState { task_ctx: make_ctx(), tasks };
         let creator = ResolvedPrincipal { principal: "token:gw/a".into(), scopes: Vec::new(), subject_token: None };
-        let result = handle_tasks_cancel(&state, Some(&creator), None, &json!({ "id": "t1" }), None);
+        let result = handle_tasks_cancel(&state, Some(&creator), None, &json!({ "id": "t1" }), None).await;
         assert_eq!(result["error"]["code"], -32002);
         // The owner rule comes before the state rule: another identity, or no identity, is -32004.
         let other = ResolvedPrincipal { principal: "token:gw/b".into(), scopes: Vec::new(), subject_token: None };
-        assert_eq!(handle_tasks_cancel(&state, Some(&other), None, &json!({ "id": "t1" }), None)["error"]["code"], -32004);
-        assert_eq!(handle_tasks_cancel(&state, None, None, &json!({ "id": "t1" }), None)["error"]["code"], -32004);
+        assert_eq!(handle_tasks_cancel(&state, Some(&other), None, &json!({ "id": "t1" }), None).await["error"]["code"], -32004);
+        assert_eq!(handle_tasks_cancel(&state, None, None, &json!({ "id": "t1" }), None).await["error"]["code"], -32004);
         assert_eq!(handle_tasks_get(&state, None, None, &json!({ "id": "t1" }), None)["error"]["code"], -32004);
         assert_eq!(handle_tasks_get(&state, Some(&creator), None, &json!({ "id": "t1" }), None)["result"]["id"], "t1");
     }

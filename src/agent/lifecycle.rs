@@ -939,6 +939,11 @@ impl GossipAgent {
         // not — any node can hold a replica, so any node may be asked. The loop ends on its own
         // when the agent shuts down (`rpc_rx` yields `None`), so it holds nothing open.
         super::replica_sync::serve(self);
+        // Identity-and-lifecycle I4, PR 3: serve the cancel-forward — a gateway cancelling a call it sent here. Every
+        // node, so a node with no execution authority answers `no_authority` rather than leaving the gateway to time
+        // out.
+        #[cfg(all(feature = "gateway", feature = "tls"))]
+        super::call_cancel::serve(self);
         // Post-360 row K2: this node's fleet-tally heartbeat — from start, whether or not it ever admits under a
         // tally rule, so its peers can tell a node that has nothing to report from one they cannot hear (review
         // finding 3); it says whether this node enforces.
