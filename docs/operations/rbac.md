@@ -138,7 +138,7 @@ them, carrying tool and LLM output.
 **The substrate's own kinds are refused at every door that takes a kind**
 ([deprecations.md §103](../guide/deprecations.md), the decision of 2026-11-13). The consensus protocol's four kinds
 (`consensus.propose`, `consensus.vote`, `consensus.commit`, `consensus.nack`), the node-to-node calls `sys.explain`
-and `sys.replica-sync.v1`, the bulk transport's ticket `invoke.bulk`, and any kind starting `consensus.` or `sys.`
+and `sys.replica-sync.v1`, `sys.call-cancel.v1`, the bulk transport's ticket `invoke.bulk`, and any kind starting `consensus.` or `sys.`
 (`mycelium::SUBSTRATE_KINDS`, `is_substrate_kind`) answer `403 protected_kind` for every token — `"*"` included —
 and in every build:
 

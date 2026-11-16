@@ -373,6 +373,19 @@ pub const MAX_CALL_WINDOWS: usize = 262_144;
 /// from one gateway to one provider.
 pub const MAX_CALL_WINDOWS_PER_GATEWAY: usize = 65_536;
 
+/// What [`ExecutionAuthority::hold_call_revocation`] did with a cancel-forward's checkpoint.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CallRevocationHeld {
+    /// The term is held revoked here: running work under it is stopped by the sweep, a later admission refused.
+    Held,
+    /// This node holds as many windows as it keeps: nothing is held, and a later admission reads the KV record.
+    NotHeld,
+    /// Not a revoking checkpoint of its sender's for one `call:{term}` scope.
+    Malformed,
+    /// It did not verify under its gateway's node key (or is dated in the future); nothing is held.
+    NotVerified,
+}
+
 /// A stop record with the mandate whose lapse stopped the work (identity-and-lifecycle I4; the maintainer's decision
 /// of 2026-11-12, Q1), from [`ExecutionAuthority::named_stop_records`]. [`StopRecord`] itself is unchanged. A call
 /// registered under a client's grant and its gateway's `call:` mandate has two registrations, and only a cancelled
@@ -401,6 +414,9 @@ pub struct ExecutionAuthority {
     next_work: std::sync::atomic::AtomicU64,
     /// Closure plan C10, lock-order row 49: stop records of cancelled work, newest last, bounded. Leaf.
     stops: Mutex<std::collections::VecDeque<NamedStop>>,
+    /// Notified when a piece of running work ends (its guard dropped): what a cancel-forward waits on before it
+    /// answers that the work it asked to stop has stopped (identity-and-lifecycle I4, PR 3). Not a lock.
+    ended: tokio::sync::Notify,
     /// Adopter-surface X3 (second PR), lock-order row 70: the grants this authority has admitted once, by scope, term
     /// and door — the single-use claim's atomic half (the marker under the request in the KV is its durable half).
     /// Leaf, µs.
@@ -637,6 +653,9 @@ struct Running {
     cancel: std::sync::Arc<tokio::sync::Notify>,
     cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
     requested_ms: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// The agent doing the work promised to stop ([`WorkGuard::unconfirmed`] clears it): what a cancel-forward's
+    /// answer reads to say whether the stop it reports is confirmed (identity-and-lifecycle I4, PR 3).
+    confirms: bool,
 }
 
 /// How many stop records an authority keeps for measurement.
@@ -673,6 +692,10 @@ impl WorkGuard {
     /// recorded as a release: `confirmed_ms` none, and `acknowledged_ms` only if the work acknowledged.
     pub(crate) fn unconfirmed(mut self) -> Self {
         self.confirms = false;
+        // Row 48, flat: the registration says so too, for a cancel-forward's answer (`call_registrations`).
+        if let Some(r) = self.authority.running.lock().unwrap_or_else(|e| e.into_inner()).get_mut(&self.id) {
+            r.confirms = false;
+        }
         self
     }
 
@@ -734,6 +757,8 @@ impl Drop for WorkGuard {
             }
             stops.push_back(record);
         }
+        // A cancel-forward waiting for this work to end is woken (identity-and-lifecycle I4, PR 3).
+        self.authority.ended.notify_waiters();
     }
 }
 
@@ -774,6 +799,7 @@ impl ExecutionAuthority {
             running: Mutex::new(std::collections::HashMap::new()),
             next_work: std::sync::atomic::AtomicU64::new(1),
             stops: Mutex::new(std::collections::VecDeque::new()),
+            ended: tokio::sync::Notify::new(),
             used_grants: Mutex::new(std::collections::HashMap::new()),
             legacy_digest_matches: std::sync::atomic::AtomicU64::new(0),
             legacy_digest_matches_at_provider: std::sync::atomic::AtomicU64::new(0),
@@ -841,6 +867,7 @@ impl ExecutionAuthority {
                 cancel: std::sync::Arc::clone(&cancel),
                 cancelled: std::sync::Arc::clone(&cancelled),
                 requested_ms: std::sync::Arc::clone(&requested_ms),
+                confirms: true,
             },
         );
         WorkGuard { authority: std::sync::Arc::clone(self), id, cancel, cancelled, requested_ms, acknowledged_ms, now_ms, confirms: true }
@@ -1043,6 +1070,93 @@ impl ExecutionAuthority {
                 metrics::counter!(_name).increment(n);
             }
         }
+    }
+
+    /// **Hold a revoking checkpoint a cancel-forward carried** (identity-and-lifecycle I4, PR 3): the term its
+    /// issuing gateway `by` revoked, taken here from the gateway itself rather than from the KV, under one hold of
+    /// row 43. The checkpoint must be `by`'s, for a `call:{term}` scope, and list that term revoked; it is verified
+    /// under `by`'s node key as any offered checkpoint is.
+    ///
+    /// A scope this node already holds a window for keeps it. A scope it does not — the call has not reached it yet,
+    /// or never will — is held **until the checkpoint's `issued_at_ms` + `GRANT_TTL_CAP_SECS`**: a `call:` mandate
+    /// is minted before its revocation and its window is at most the cap, so no mandate of that term can be
+    /// presented after that, and a call admitted later under it is refused `Revoked` whatever the KV says. At
+    /// [`MAX_CALL_WINDOWS`] or [`MAX_CALL_WINDOWS_PER_GATEWAY`] nothing is held (`NotHeld`). A checkpoint that does
+    /// not verify plants nothing: a window inserted for it is taken back under the same hold.
+    pub(crate) fn hold_call_revocation(
+        &self,
+        by: &crate::mandate::PrincipalId,
+        signed: &SignedRevocationCheckpoint,
+        now_ms: u64,
+        members: &impl MemberKeySource,
+    ) -> CallRevocationHeld {
+        let c = &signed.checkpoint;
+        let Some(term) = c.scope.strip_prefix(crate::mandate::grant::CALL_SCOPE_PREFIX) else { return CallRevocationHeld::Malformed };
+        let Some(term_id) = crate::mandate::TermId::new(term) else { return CallRevocationHeld::Malformed };
+        if c.authority != *by || !c.revoked.contains(&term_id) {
+            return CallRevocationHeld::Malformed;
+        }
+        let external = self.external.read().clone();
+        let mut guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let st = &mut *guard;
+        let key = (by.clone(), c.scope.clone());
+        let inserted = !st.call_windows.contains_key(&key);
+        if inserted {
+            let until = c.issued_at_ms.saturating_add(crate::mandate::grant::GRANT_TTL_CAP_SECS * 1_000);
+            if !st.keep_call_window(by, &c.scope, until) {
+                drop(guard);
+                self.call_windows_refused.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                #[cfg(feature = "metrics")]
+                metrics::counter!("mycelium_call_windows_refused_total").increment(1);
+                return CallRevocationHeld::NotHeld;
+            }
+        }
+        let (policy, clock) = (st.gate.freshness(), st.gate.clock());
+        let _ = st.revocations.offer(signed, &policy, clock, now_ms, members, &external);
+        if matches!(st.revocations.grant_standing(by, &c.scope, &term_id), RevocationStanding::Revoked) {
+            return CallRevocationHeld::Held;
+        }
+        if inserted {
+            // Nothing verified: take back what this call planted, as `reclaim_call_windows` forgets a scope.
+            if let Some(w) = st.call_windows.remove(&key) {
+                st.call_expiry.remove(&(w.until, key.0.clone(), key.1.clone()));
+            }
+            st.revocations.forget(by, &c.scope);
+            if let Some(count) = st.call_windows_by_gateway.get_mut(by) {
+                *count -= 1;
+                if *count == 0 {
+                    st.call_windows_by_gateway.remove(by);
+                }
+            }
+        }
+        CallRevocationHeld::NotVerified
+    }
+
+    /// The work running here under `by`'s `call:` `scope`, as `(confirmed, unconfirmed)` registrations: whether the
+    /// agent doing each promised to stop (a [`WorkGuard`] not made [`unconfirmed`](WorkGuard::unconfirmed)). One
+    /// pass under row 48.
+    pub(crate) fn call_registrations(&self, by: &crate::mandate::PrincipalId, scope: &str) -> (usize, usize) {
+        let running = self.running.lock().unwrap_or_else(|e| e.into_inner());
+        let mut out = (0, 0);
+        for r in running.values() {
+            if r.work.mandate.as_ref().is_some_and(|m| m.is_call() && m.established_by == *by && m.scope == scope) {
+                if r.confirms {
+                    out.0 += 1;
+                } else {
+                    out.1 += 1;
+                }
+            }
+        }
+        out
+    }
+
+    /// Resolves the next time a piece of running work ends — or at once, if one ends between this call and the
+    /// first poll: the waiter is enabled before it returns. Pair with [`call_registrations`](Self::call_registrations)
+    /// in a loop.
+    pub(crate) fn work_ended(&self) -> impl std::future::Future<Output = ()> + '_ {
+        let mut notified = Box::pin(self.ended.notified());
+        notified.as_mut().enable();
+        notified
     }
 
     /// Does this authority hold a window for `scope` of `by`? One lookup under row 43.

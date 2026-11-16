@@ -322,6 +322,17 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   --release`). A consent key's point must lie on P-256; `tls issue --node … --consent` is refused.
   Verifying a consent decision, `gateway_consent_principals`, the grade on the record and `dev`'s key are PRs 2 and 3.
 
+- **A gateway's cancel reaches the provider directly, and the doors cancel** (identity-and-lifecycle I4, PR 3a;
+  `deprecations.md` §114). `GossipAgent::cancel_call(term)` revokes a minted call's term, records it on disk and
+  forwards it to the provider the call went to (the cancel-forward, `sys.call-cancel.v1`, accepted only from the
+  issuing gateway — `cancel_not_from_issuer` otherwise — and refused at every gateway raw route). It returns a
+  `CancelReceipt` whose `CancelClass` is the provider's own answer: `Stopped` only where the agent doing the work
+  promised to stop and it ended, `Unbounded` where it made no such promise, `DeliveryUnknown` on no answer (never a
+  negative). A2A `tasks/cancel` revokes the task's call before removing the task, and a cancelled task stays
+  cancelled; `/mcp` answers `notifications/cancelled` `202` and cancels the caller's own `tools/call`; a cancel before
+  the mint sends nothing (`cancelled_before_sent`, -32026). `GET /stats` gains `call_cancel_receipts`,
+  `call_cancel_forwards_refused` and `mcp_cancels`. The bridged MCP loop and the SDK serve stream still refuse a
+  cancellable call (their stop is PR 3b, a decision put to the maintainer).
 - **An inbound KV entry stamped beyond the drift bound is counted** (the external-critique plan's row CR13, step
   1; `docs/plans/external-critique-2026-11-12.md`). A node clamps its own clock when a peer's stamp is more than
   `max_clock_drift_ms` ahead of its wall clock, and applies the entry all the same: under last-writer-wins a

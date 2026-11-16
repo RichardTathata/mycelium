@@ -18,46 +18,52 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-const MCP: &str = "mcp.invoke";
+pub(super) const MCP: &str = "mcp.invoke";
 /// The gate's freshness window *F*: the sweep runs every *F* / 20 = 100 ms.
-const F_MS: u64 = 2_000;
+pub(super) const F_MS: u64 = 2_000;
 /// The skew of the gate's clock model: D-5's floor counts it twice.
 const SKEW_MS: u64 = 100;
 
 #[derive(Clone, Default)]
-struct Opts {
+pub(super) struct Opts {
     /// `gateway_mint_call_mandates`.
-    mint: bool,
+    pub(super) mint: bool,
     /// `call_mandate_ttl_secs`, when not the default.
-    ttl_secs: Option<u64>,
+    pub(super) ttl_secs: Option<u64>,
     /// A certificate directory shared with the other node, and the peers to bootstrap to.
-    cert_dir: Option<std::path::PathBuf>,
-    bootstrap: Vec<NodeId>,
+    pub(super) cert_dir: Option<std::path::PathBuf>,
+    pub(super) bootstrap: Vec<NodeId>,
     /// Fixed ports and directory: a restart over the same identity.
-    gossip_port: Option<u16>,
-    http_port: Option<u16>,
+    pub(super) gossip_port: Option<u16>,
+    pub(super) http_port: Option<u16>,
     /// `[persistence]` under the node's directory.
-    persist: bool,
+    pub(super) persist: bool,
     /// This node serves the tools (`slow`, 30 s; `quick`, at once).
-    tools: bool,
+    pub(super) tools: bool,
     /// `collect_expired_records`.
-    collect: bool,
+    pub(super) collect: bool,
     /// `grant_retention_secs`, when not the default.
-    retention_secs: Option<u64>,
+    pub(super) retention_secs: Option<u64>,
+    /// I4, PR 3: the policy's rules are **not** cancellable (a plain allowance), so a call at a door that cannot stop
+    /// it is admitted and registered unconfirmed.
+    pub(super) plain: bool,
+    /// I4, PR 3: this node also serves `unstoppable` (30 s) with `register_mcp_tool_unstoppable`, and the A2A skill
+    /// `depot/dispatch` through an `rpc_rx` receiver that declared it stops; the gateway mounts `/a2a`.
+    pub(super) more_doors: bool,
 }
 
-struct N {
-    a: Arc<GossipAgent>,
-    authority: Arc<ExecutionAuthority>,
+pub(super) struct N {
+    pub(super) a: Arc<GossipAgent>,
+    pub(super) authority: Arc<ExecutionAuthority>,
     dir: std::path::PathBuf,
-    http_port: u16,
-    started: Arc<AtomicUsize>,
-    finished: Arc<AtomicUsize>,
+    pub(super) http_port: u16,
+    pub(super) started: Arc<AtomicUsize>,
+    pub(super) finished: Arc<AtomicUsize>,
 }
 
 /// One node: a gateway (named token `alice`, `mcp:invoke`), an enforcing provider, an execution authority with
 /// *F* = 2 s, and a policy under which **every tool call is cancellable**.
-async fn node(opts: Opts) -> N {
+pub(super) async fn node(opts: Opts) -> N {
     let port = opts.gossip_port.unwrap_or_else(crate::test_util::alloc_port);
     let http_port = opts.http_port.unwrap_or_else(crate::test_util::alloc_port);
     let id = NodeId::new("127.0.0.1", port).unwrap();
@@ -89,10 +95,24 @@ async fn node(opts: Opts) -> N {
         cfg.call_mandate_ttl_secs = t;
     }
     cfg.gateway_identity_issuer = Some("gw".into());
-    cfg.gateway_named_tokens = vec![crate::config::GatewayNamedToken { name: "alice".into(), token: "alice-secret".into(), scopes: vec!["mcp:invoke".into()] }];
-    let a = Arc::new(GossipAgent::new(id.clone(), cfg));
+    cfg.gateway_named_tokens = vec![
+        crate::config::GatewayNamedToken { name: "alice".into(), token: "alice-secret".into(), scopes: vec!["mcp:invoke".into()] },
+        crate::config::GatewayNamedToken { name: "bob".into(), token: "bob-secret".into(), scopes: vec!["mcp:invoke".into()] },
+    ];
+    let a = GossipAgent::new(id.clone(), cfg);
+    #[cfg(feature = "a2a")]
+    let a = if opts.more_doors { a.with_a2a() } else { a };
+    let a = Arc::new(a);
     a.with_evidence_journal(EvidenceJournal::open(dir.join("evidence.log"), EvidenceProfile::Strict).unwrap());
-    a.with_action_evaluator(Arc::new(ReferenceEvaluator::new("rev-mint").with_catalogue("cat-mint", "1").map_action("tools/call", "*").allow(Rule::new("*", "tools/call", "*").cancellable())));
+    let rule = |action: &str| if opts.plain { Rule::new("*", action, "*") } else { Rule::new("*", action, "*").cancellable() };
+    a.with_action_evaluator(Arc::new(
+        ReferenceEvaluator::new("rev-mint")
+            .with_catalogue("cat-mint", "1")
+            .map_action("tools/call", "*")
+            .map_action("skill.invoke", "*")
+            .allow(rule("tools/call"))
+            .allow(rule("skill.invoke")),
+    ));
     let gate = ExecutionGate::strict(ResourceAuthority::new("unused", 1), ResourceTier::Serialised, ClockModel { skew_ms: SKEW_MS }, FreshnessPolicy { freshness_ms: F_MS, interval_ms: 500, delivery_ms: 160 }).unwrap();
     let authority = Arc::new(ExecutionAuthority::new(gate, GrantVerifier::new(EntitlementTable::new()), TrustedExternalIssuers::new()));
     a.with_execution_authority(Arc::clone(&authority));
@@ -113,30 +133,61 @@ async fn node(opts: Opts) -> N {
             }));
         }
     }
+    if opts.tools && opts.more_doors {
+        let (s, f) = (Arc::clone(&started), Arc::clone(&finished));
+        std::mem::forget(a.mcp().register_mcp_tool_unstoppable("unstoppable", serde_json::json!({"type": "object"}), move |_| {
+            let (s, f) = (Arc::clone(&s), Arc::clone(&f));
+            async move {
+                s.fetch_add(1, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                f.fetch_add(1, Ordering::SeqCst);
+                Ok(serde_json::json!("done"))
+            }
+        }));
+        // The A2A skill, served by a receiver that declared it stops: it races `authority_lapsed()`.
+        std::mem::forget(a.capabilities().advertise_capability(crate::capability::Capability::new("depot", "dispatch"), Duration::from_secs(60)));
+        let mut rx = a.service().rpc_rx("skill.invoke").stops_when_authority_lapses();
+        let (a2, s, f) = (Arc::clone(&a), Arc::clone(&started), Arc::clone(&finished));
+        tokio::spawn(async move {
+            while let Some(req) = rx.recv().await {
+                let (a3, s, f) = (Arc::clone(&a2), Arc::clone(&s), Arc::clone(&f));
+                tokio::spawn(async move {
+                    s.fetch_add(1, Ordering::SeqCst);
+                    tokio::select! {
+                        _ = tokio::time::sleep(Duration::from_secs(30)) => {
+                            f.fetch_add(1, Ordering::SeqCst);
+                            a3.service().rpc_respond(&req, b"dispatched".to_vec());
+                        }
+                        _ = req.authority_lapsed() => a3.service().rpc_respond(&req, b"stopped: authority lapsed".to_vec()),
+                    }
+                });
+            }
+        });
+    }
     assert!(until(|| std::net::TcpStream::connect(("127.0.0.1", http_port)).is_ok(), Duration::from_secs(20)).await, "the gateway is listening");
     N { a, authority, dir, http_port, started, finished }
 }
 
 impl N {
-    fn ctx(&self) -> &Arc<super::TaskCtx> {
+    pub(super) fn ctx(&self) -> &Arc<super::TaskCtx> {
         &self.a.task_ctx
     }
-    fn gateway(&self) -> String {
+    pub(super) fn gateway(&self) -> String {
         node_principal(self.a.node_id())
     }
-    fn now(&self) -> u64 {
+    pub(super) fn now(&self) -> u64 {
         self.ctx().hlc.decision_now_ms()
     }
-    fn kv(&self, key: &str) -> Option<Bytes> {
+    pub(super) fn kv(&self, key: &str) -> Option<Bytes> {
         mycelium_core::ops::kv_get(self.ctx(), key)
     }
     fn call_keys(&self) -> Vec<String> {
         crate::store::scan_kv_prefix(&self.ctx().kv_state, "call/").into_iter().map(|(k, _)| k.to_string()).collect()
     }
-    async fn running(&self, n: usize) {
+    pub(super) async fn running(&self, n: usize) {
         assert!(until(|| self.authority.running_count() == n, Duration::from_secs(20)).await, "running_count {} (wanted {n})", self.authority.running_count());
     }
-    async fn began(&self, k: usize) {
+    pub(super) async fn began(&self, k: usize) {
         assert!(until(|| self.started.load(Ordering::SeqCst) == k, Duration::from_secs(20)).await, "started {}", self.started.load(Ordering::SeqCst));
     }
     /// Wait until `n` calls are registered here while the call `answered` is still out — and if it is answered first,
@@ -150,7 +201,7 @@ impl N {
         panic!("running_count {} (wanted {n}); the call's answer: {reply:?}", self.authority.running_count());
     }
     /// A client's `tools/call` through this node's `/mcp`.
-    async fn client_call(&self, tool: &str) -> serde_json::Value {
+    pub(super) async fn client_call(&self, tool: &str) -> serde_json::Value {
         let body = serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": tool, "arguments": {"aisle": 4}}});
         let resp = reqwest::Client::new().post(format!("http://127.0.0.1:{}/mcp", self.http_port)).bearer_auth("alice-secret").json(&body).send().await.expect("the gateway answers");
         let status = resp.status().as_u16();
@@ -160,7 +211,7 @@ impl N {
     }
     /// Frame a member's own `tool` call to `target` as the gateway's dispatch frames it — the real mint, its records
     /// written — and return the frame and its term.
-    async fn framed(&self, target: &NodeId, tool: &str) -> (Bytes, String) {
+    pub(super) async fn framed(&self, target: &NodeId, tool: &str) -> (Bytes, String) {
         let payload = serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": tool, "arguments": {"aisle": 4}}}).to_string();
         let (framed, minted) = frame_minting(self.ctx(), target, &self.gateway(), &[], MCP, Bytes::from(payload), None, None, None, None, self.now());
         let minted = minted.expect("minted");
@@ -168,13 +219,13 @@ impl N {
         call_issuer::record(self.ctx(), minted).await.expect("the records are written");
         (framed.expect("fits"), term)
     }
-    async fn send(&self, target: &NodeId, framed: Bytes) -> serde_json::Value {
+    pub(super) async fn send(&self, target: &NodeId, framed: Bytes) -> serde_json::Value {
         let reply = super::rpc::rpc_call_framed(self.ctx(), target.clone(), Arc::from(MCP), framed, Duration::from_secs(60)).await.expect("a reply");
         serde_json::from_slice(&reply).unwrap()
     }
 }
 
-async fn until(cond: impl Fn() -> bool, within: Duration) -> bool {
+pub(super) async fn until(cond: impl Fn() -> bool, within: Duration) -> bool {
     let deadline = std::time::Instant::now() + within;
     while std::time::Instant::now() < deadline {
         if cond() {
@@ -187,11 +238,12 @@ async fn until(cond: impl Fn() -> bool, within: Duration) -> bool {
 
 /// Two nodes under one CA: `g` the gateway (`gopts`), `p` the provider serving the tools; ready when each holds the
 /// other's key and `g` sees both of `p`'s tools.
-async fn pair(gopts: Opts) -> (N, N, std::path::PathBuf) {
+pub(super) async fn pair(gopts: Opts) -> (N, N, std::path::PathBuf) {
+    let (plain, more_doors) = (gopts.plain, gopts.more_doors);
     let cert_dir = std::env::temp_dir().join(format!("i4-mint-ca-{}", crate::test_util::alloc_port()));
     let _ = std::fs::remove_dir_all(&cert_dir);
     let g = node(Opts { cert_dir: Some(cert_dir.clone()), ..gopts }).await;
-    let p = node(Opts { cert_dir: Some(cert_dir.clone()), bootstrap: vec![g.a.node_id().clone()], tools: true, ..Opts::default() }).await;
+    let p = node(Opts { cert_dir: Some(cert_dir.clone()), bootstrap: vec![g.a.node_id().clone()], tools: true, plain, more_doors, ..Opts::default() }).await;
     let knows = |x: &GossipAgent, n: &NodeId| x.task_ctx.peer_keys.pin().get(n).is_some_and(|k| !k.is_empty());
     assert!(until(|| knows(&g.a, p.a.node_id()) && knows(&p.a, g.a.node_id()), Duration::from_secs(20)).await, "the nodes learned each other's keys");
     // Both tools: a test that calls `quick` straight after this was answered `tool not found: quick` under load when

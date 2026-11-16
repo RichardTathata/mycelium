@@ -60,7 +60,7 @@ This feature is turned on in code, through `agent.service()`.
   already serves (`403 served_in_process`); a kind the operator added to `protected_rpc_kinds` can still be served
   there. Neither SDK has a bulk verb.
   - **a reply kind is not sent through a raw route**: `rpc.result` and `bulk.result` are refused
-    `403 protected_kind` on all six, and so are the substrate's own kinds (`sys.explain`, `sys.replica-sync.v1`,
+    `403 protected_kind` on all six, and so are the substrate's own kinds (`sys.explain`, `sys.replica-sync.v1`, `sys.call-cancel.v1`,
     the `consensus.*` kinds; [deprecations §103](../guide/deprecations.md)). A reply is claimed on its correlation
     nonce and its sender, so a client that could emit `rpc.result` from a provider's gateway — having read the
     nonce from a tap on the request's kind — answered in the provider's place

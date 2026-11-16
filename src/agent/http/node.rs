@@ -285,6 +285,19 @@ pub(super) async fn stats_handler(State(ctx): State<Arc<HttpCtx>>) -> impl IntoR
         body["call_records_unverifiable"] = json!(n(&c.call_records_unverifiable));
         body["grant_records_collected"] = json!(n(&c.grant_records_collected));
         body["grant_markers_without_window"] = json!(n(&c.markers_without_window));
+        // Identity-and-lifecycle I4, PR 3: this gateway's cancel receipts by class — what each provider answered for
+        // its own stop, or why there is no answer (`delivery_unknown` is never a negative); the cancel-forwards this
+        // node refused as a provider, by reason; and the `/mcp` door's `notifications/cancelled` table: cancels made,
+        // cancels that found no call of their caller's, and calls not registered (the table full, or the key in flight).
+        body["call_cancel_receipts"] = json!(c.cancel_receipts.pin().iter().map(|(k, v)| (k.to_string(), *v)).collect::<std::collections::BTreeMap<_, _>>());
+        body["call_cancel_forwards_refused"] = json!(c.cancel_forwards_refused.pin().iter().map(|(k, v)| (k.to_string(), *v)).collect::<std::collections::BTreeMap<_, _>>());
+        let m = &c.mcp_cancels;
+        body["mcp_cancels"] = json!({
+            "cancelled": n(&m.cancelled),
+            "unmatched": n(&m.unmatched),
+            "table_full": n(&m.full),
+            "collisions": n(&m.collisions),
+        });
         // …and answers a receiver that declared it stops on a lapse sent more than `LAPSE_ANSWER_GRACE_MS` after its
         // call's authority lapsed, by kind: an assessment of the receiver's promise, never a refusal.
         body["rpc_rx_answered_after_lapse"] = json!(ctx.agent_ctx.rpc_rx_late_answers.pin().iter().map(|(k, v)| (k.clone(), *v)).collect::<std::collections::BTreeMap<_, _>>());

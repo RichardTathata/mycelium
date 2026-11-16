@@ -141,9 +141,11 @@ confirmed stop, checked against the class's bound. CI runs it.
   (`502`) when every provider refuses; and the door has no row in the C7 matrix itself (the matrix runs on CI's
   `compliance,a2a` line, which builds no `llm`).
 - **Not built, for a cancellable rule:** a gateway mints a `call:` mandate only with `gateway_mint_call_mandates`
-  on (off by default), and without it such a rule refuses every call it permits; no door cancels a call yet (the
-  gateway's revoke is built and called by none: I4's PR 3); a member's own unframed call carries none. **Refused by
-  name until PR 3** (`door_cannot_stop`, the door in `data.door`): the bridged MCP loop (`bridged_mcp`), the SDK
+  on (off by default), and without it such a rule refuses every call it permits; a member's own unframed call
+  carries none. A cancel reaches the provider by the cancel-forward (`sys.call-cancel.v1`, [§112](../guide/deprecations.md)):
+  the provider holds the revocation, stops the work and answers its own class — `Stopped` only at a door whose agent
+  promised to stop. **Refused by name** (`door_cannot_stop`, the door in `data.door`; lifting it at the bridged
+  loop and the SDK stream is I4's PR 3b, the maintainer's decision): the bridged MCP loop (`bridged_mcp`), the SDK
   serve stream (`sdk_serve`), a hosted component's kind through `rpc_rx` (`hosted_capability`) and a tool registered
   unstoppable (`unstoppable_mcp_tool`) — so a cancellable rule over any of them refuses every call; an
   `rpc_rx` receiver is refused one (`rpc_rx`) unless it declares that it stops when its call's authority lapses

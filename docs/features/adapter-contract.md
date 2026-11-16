@@ -61,8 +61,10 @@ holds every companion README to its limits section.
   grant verbs, the pending-grants stream and the A2A `input-required` state are carried since X3's second and third PRs).
 - **What the doors do not establish** (the limits section the door rows cite): a task accepted at `/a2a` lives in
   that node and is lost with it, **by design** — the work it tracks is not durable either, and durable work is the
-  tuple space's and the commitment net's; `tasks/cancel` ends a task's record and stops no work, and `tools/call`
-  has no cancel — no adapter carries cancellation today, and running work stops only when its authority lapses; a
+  tuple space's and the commitment net's; `tasks/cancel` ends a task's record and, on a gateway that mints `call:`
+  mandates, revokes its call (I4, [§112](../guide/deprecations.md)); `/mcp` takes `notifications/cancelled` for the
+  caller's own `tools/call` the same way; no SDK adapter sends either yet, and without a minting gateway running work
+  stops only when its authority lapses; a
   tool result and a task result are not receipts; provider-side enforcement needs an evaluator attached at the
   provider, and fails closed without one.
 - **Upgrade note:** a unit carrying `runtime` is refused by every reader older than 2.38.0 — a 2.37.0

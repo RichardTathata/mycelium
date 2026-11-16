@@ -233,7 +233,7 @@ there for one release with a warning; **since 2.18.2 it is refused** — `403 {"
 `/gateway/signal/sse/{kind}`) answer the same `403` for a protected kind since 2.32.0 — a `mesh:read`
 token cannot observe protected work, which would be every such request's frame, mandate included. The same `403`
 answers **the substrate's own kinds** at every door that takes a kind — `consensus.propose`, `consensus.vote`,
-`consensus.commit`, `consensus.nack`, `sys.explain`, `sys.replica-sync.v1`, `invoke.bulk`, and anything starting
+`consensus.commit`, `consensus.nack`, `sys.explain`, `sys.replica-sync.v1`, `sys.call-cancel.v1`, `invoke.bulk`, and anything starting
 `consensus.` or `sys.` — the RPC reply kinds (`rpc.result`, `bulk.result`) on the send routes, and a hosted
 capability's `cap.invoke/…` on the streams and the send routes, whose door is `/mcp`
 ([deprecations.md §103](deprecations.md)). A tap on `consensus.propose` read every proposed value in scope; an

@@ -70,6 +70,9 @@ pub(crate) mod grant_use;
 /// re-assertion and the collector of the `call/` and `grant/` families.
 #[cfg(all(feature = "gateway", feature = "tls"))]
 pub(crate) mod call_issuer;
+/// Identity-and-lifecycle I4, PR 3: the cancel-forward, the cancel receipt, and the doors' handle on a call.
+#[cfg(all(feature = "gateway", feature = "tls"))]
+pub(crate) mod call_cancel;
 /// Identity-and-lifecycle I0: `[authority]` — this node's evaluator, execution authority, provider enforcement and
 /// evidence journal, built from its declaration at `start()`.
 #[cfg(feature = "compliance")]
@@ -228,6 +231,9 @@ mod call_admission_tests;
 /// re-assertion, the collector; the doors that cannot stop a call.
 #[cfg(all(test, feature = "compliance"))]
 mod call_mint_tests;
+/// Identity-and-lifecycle I4, PR 3: the cancel doors — the cancel-forward, the receipt, MCP and A2A.
+#[cfg(all(test, feature = "compliance"))]
+mod call_cancel_tests;
 /// #781's review, F1: the built-in `llm.invoke` provider runs the provider check.
 #[cfg(all(test, feature = "gateway", feature = "tls", feature = "llm"))]
 mod llm_door_tests;
@@ -316,6 +322,7 @@ pub const SUBSTRATE_KINDS: &[&str] = &[
     "consensus.nack",
     "sys.explain",
     "sys.replica-sync.v1",
+    "sys.call-cancel.v1",
     "invoke.bulk",
 ];
 
