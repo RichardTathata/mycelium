@@ -191,6 +191,14 @@ ids = []
 links = []
 
 [[feature]]
+name = "Developer consent certificates"
+page = "consent-certificates.md"
+example = "none"
+example_watch = ["consent_cert", "orca_worktree"]
+ids = []
+links = []
+
+[[feature]]
 name = "Evidence journal"
 page = "evidence-journal.md"
 example = "none"

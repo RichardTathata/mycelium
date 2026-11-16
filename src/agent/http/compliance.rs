@@ -160,7 +160,12 @@ pub(super) async fn gw_identity_revoke(
 /// issued by the fleet CA and valid now, its issuance no later than the wall clock plus the skew bound — and
 /// refuses one older than the principal's newest already read (`409 superseded`: publishing it would change
 /// nothing). Publishing a newer certificate **supersedes** the principal's earlier key at every node that
-/// reads the record. Audited as a governance write. `{ "principal", "key", "issued_ms" }` on success.
+/// reads the record. Audited as a governance write. `{ "principal", "key", "grade", "issued_ms" }` on success.
+///
+/// **A consent certificate** (identity-and-lifecycle I7: `mycelium tls issue --client <name> --consent`, one
+/// `mycelium-consent://{issuer}/{name}` over a P-256 key, with its grade) is published here too, under
+/// `consent:{issuer}/{name}`: `key` is then its point's 130 hex digits and `grade` its grade (`null` for a client
+/// certificate). A newer consent certificate supersedes only the consent principal's earlier key.
 #[cfg(feature = "compliance")]
 pub(super) async fn gw_identity_client_cert(
     State(ctx): State<Arc<HttpCtx>>,
@@ -180,15 +185,20 @@ pub(super) async fn gw_identity_client_cert(
         let why = "gateway_identity_issuer_unset";
         return (StatusCode::CONFLICT, Json(json!({"error": "set gateway_identity_issuer: this gateway's principals are qualified by its node id, which no client certificate names", "reason": why}))).into_response();
     };
-    if mycelium_core::tls::client_identity(der.as_ref()).is_some_and(|id| id.issuer != issuer) {
+    // A consent certificate (identity-and-lifecycle I7) is published through this door too, under the same rule.
+    let named_issuer = mycelium_core::tls::client_identity(der.as_ref())
+        .map(|id| id.issuer)
+        .or_else(|| mycelium_core::tls::consent_identity(der.as_ref()).map(|id| id.issuer));
+    if named_issuer.is_some_and(|named| named != issuer) {
         return (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({"error": format!("the certificate names another issuer than this gateway's ({issuer})"), "reason": "issuer_mismatch"}))).into_response();
     }
     match super::client_cert::publish(&ctx.agent_ctx, der.as_ref()) {
         Ok(p) => {
             // The bearer who published, beside the principal published for (#741's review, item 7).
             let by = caller.as_ref().map(|Extension(c)| c.principal().to_string());
-            audit_govern(&ctx.agent_ctx, "identity/client-cert", json!({"principal": p.principal, "key": hex32(&p.key), "by": by}).to_string());
-            Json(json!({"ok": true, "principal": p.principal, "key": hex32(&p.key), "issued_ms": p.issued_ms})).into_response()
+            let grade = p.grade.map(|g| g.as_str());
+            audit_govern(&ctx.agent_ctx, "identity/client-cert", json!({"principal": p.principal, "key": p.key_hex, "grade": grade, "by": by}).to_string());
+            Json(json!({"ok": true, "principal": p.principal, "key": p.key_hex, "grade": grade, "issued_ms": p.issued_ms})).into_response()
         }
         Err(e) => {
             let status = match e {

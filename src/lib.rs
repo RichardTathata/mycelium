@@ -103,7 +103,7 @@
 //! | `sys/audit-checkpoint/{node}/{seq}` | WS-D audit — signed mid-chain boundary enabling export-then-prune retention (`compliance`) |
 //! | `sys/revocation/{node}/{key-hex}[/{revoker-hex}]` | WS-D — signed key revocation; post-360 row Q: keyed `(revoked, revoker)`, the v1 bytes then a trailer carrying the certificates it rests on; counts only when signed by an anchored key issued after the revoked one's; honoured by every verifier of a node's key (`tls`) |
 //! | `sys/identity-cert/{node}/{key-hex}` | post-360 row Q — a node's **certificate record**: the DER of a CA-issued certificate naming the node by `mycelium://<node>`, issuance (ms) in the serial; the only source of key standing (`tls`) |
-//! | `sys/client-cert/{principal-hex}/{key-hex}` | identity-and-lifecycle I1 — a service's **client certificate**: the DER of a CA-issued certificate naming `mycelium-client://{issuer}/{name}` for the principal `token:{issuer}/{name}`, issuance (ms) in the serial; published by `POST /gateway/identity/client-cert`, judged by the certificate, never by write time; the newest supersedes (`tls`) |
+//! | `sys/client-cert/{principal-hex}/{key-hex}` | identity-and-lifecycle I1 — a service's **client certificate**: the DER of a CA-issued certificate naming `mycelium-client://{issuer}/{name}` for the principal `token:{issuer}/{name}`, issuance (ms) in the serial; published by `POST /gateway/identity/client-cert`, judged by the certificate, never by write time; the newest supersedes (`tls`). Also identity-and-lifecycle I7's **consent certificates**, `mycelium-consent://{issuer}/{name}` over a P-256 key with its grade, for `consent:{issuer}/{name}` — `{key-hex}` the 130-digit X9.63 point; each principal its own supersession |
 //! | `sys/capauthz/{ns}/{name}`          | Gossip-level capability-authz policy (`required_roles`; resolve-time enforcement) (`compliance`) |
 //! | `sys/config/{param}`               | `ClusterTuner` advisory config (WS-C M9) — a fleet recommendation a node may adopt, today `writer_channel_depth` (u64 LE), written only when it changes (`src/agent/cluster_tuner.rs`, `CONFIG_PREFIX`) |
 //! | `sys/govern/timing`                 | Timing governor — the fleet timing intent (evaporating soft state; local-wins), written through `POST /gateway/govern/timing` (`src/agent/timing_governor.rs`, `TIMING_INTENT_KEY`) |
@@ -332,7 +332,19 @@ pub use mycelium_core::tls::{client_identity, client_uri, issue_client_cert, val
 /// Identity-and-lifecycle I1: where a client principal's key stands — current, superseded by a newer
 /// certificate, or unknown — and the record path a client certificate is published under.
 #[cfg(feature = "tls")]
-pub use agent::client_cert::{client_cert_key, ClientKeyStanding, PublishRefusal as ClientCertRefusal, Published as ClientCertPublished, CLIENT_CERT_PREFIX};
+pub use agent::client_cert::{client_cert_key, consent_cert_key, ClientKeyStanding, PublishRefusal as ClientCertRefusal, Published as ClientCertPublished, CLIENT_CERT_PREFIX};
+/// Identity-and-lifecycle I7: a **consent certificate** for a developer's P-256 key (`mycelium tls issue --client
+/// <name> --consent --public-key <spki.pem> --grade <grade>`), naming `mycelium-consent://{issuer}/{name}` for the
+/// principal `consent:{issuer}/{name}` and carrying its [`ConsentGrade`] — the issuer's statement of what the
+/// enrolment told it, which no verifier can check. Issued over the public key alone; refused at the mesh; published by
+/// `POST /gateway/identity/client-cert`; never fed as a possession key. **The grade extension's OID is provisional**
+/// ([`CONSENT_GRADE_OID_IS_PROVISIONAL`]): outside a test build the issuer refuses, and a release is blocked on the
+/// registered arc.
+#[cfg(feature = "tls")]
+pub use mycelium_core::tls::{
+    consent_grade_oid_der, consent_identity, consent_uri, issue_consent_cert, p256_point_from_spki_pem, p256_spki_pem, ConsentGrade, ConsentIdentity,
+    CONSENT_GRADE_OID, CONSENT_GRADE_OID_IS_PROVISIONAL, CONSENT_URI_SCHEME,
+};
 /// Identity-and-lifecycle I1 (D1′): a client's own signature on a gateway call. A service signs each `tools/call` or
 /// A2A send with its client certificate's key ([`ClientSigner`]) and sends `cs`/`cn` in `params._meta`; the provider
 /// checks it at its receive boundary. [`client_signature_message`] is the published format the SDKs compute too.

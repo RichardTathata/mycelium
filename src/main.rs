@@ -779,7 +779,7 @@ fn explain_cli(args: Vec<String>) -> i32 {
 /// material, no certificate body. The warnings `tls_writable_by_others` gives go into the document's `warnings`
 /// rather than to stderr; a refusal is on stderr with its exit code and no document.
 fn tls_cli(args: Vec<String>) -> i32 {
-    const USAGE: &str = "Usage: mycelium tls ca --out <dir> [--format text|json]\n       mycelium tls issue --ca-dir <dir> --node <ip:port> --out <dir> [--force] [--format text|json]\n       mycelium tls issue --ca-dir <dir> --client <name> --issuer <issuer> --out <dir> [--force] [--format text|json]\n       mycelium tls pin <cert.pem> [--format text|json]";
+    const USAGE: &str = "Usage: mycelium tls ca --out <dir> [--format text|json]\n       mycelium tls issue --ca-dir <dir> --node <ip:port> --out <dir> [--force] [--format text|json]\n       mycelium tls issue --ca-dir <dir> --client <name> --issuer <issuer> --out <dir> [--force] [--format text|json]\n       mycelium tls issue --ca-dir <dir> --client <name> --consent --public-key <spki.pem> --grade <grade> --issuer <issuer> --out <dir> [--force] [--format text|json]\n       mycelium tls pin <cert.pem> [--format text|json]";
     // `--format` is the one flag every subcommand takes; read it out first, so each keeps its own parsing.
     let mut json = false;
     let mut rest = Vec::with_capacity(args.len());
@@ -800,10 +800,14 @@ fn tls_cli(args: Vec<String>) -> i32 {
     }
     let (mut ca_dir, mut node, mut out): (Option<String>, Option<String>, Option<String>) = (None, None, None);
     let (mut client, mut issuer): (Option<String>, Option<String>) = (None, None);
+    let (mut consent, mut public_key, mut grade): (bool, Option<String>, Option<String>) = (false, None, None);
     let mut force = false;
     while let Some(a) = it.next() {
         match a.as_str() {
             "--force" => force = true,
+            "--consent" => consent = true,
+            "--public-key" => public_key = it.next(),
+            "--grade" => grade = it.next(),
             "--ca-dir" => ca_dir = it.next(),
             "--node" => node = it.next(),
             "--client" => client = it.next(),
@@ -815,7 +819,22 @@ fn tls_cli(args: Vec<String>) -> i32 {
     }
     // Identity-and-lifecycle I1: a client certificate for a service's process — `--client` and `--issuer` instead of
     // `--node`, never both.
+    // Identity-and-lifecycle I7: `--consent` issues a developer's consent certificate over a public key alone;
+    // `--public-key` and `--grade` belong to it and are refused without it.
+    if !consent && (public_key.is_some() || grade.is_some()) {
+        eprintln!("--public-key and --grade are for --consent only\n{USAGE}");
+        return 2;
+    }
     match (&node, &client, &issuer) {
+        (None, Some(name), Some(iss)) if consent => {
+            let (Some(ca_dir), Some(out)) = (ca_dir, out) else { eprintln!("{USAGE}"); return 2; };
+            let Some(public_key) = public_key else { eprintln!("--consent needs --public-key <spki.pem>: the developer's P-256 public key, as SPKI PEM"); return 2; };
+            let Some(grade) = grade else {
+                eprintln!("--consent needs --grade: one of os_presence(macos, unbound), tty, recording");
+                return 2;
+            };
+            return tls_issue_consent(&ca_dir, iss, name, &public_key, &grade, &out, force, json);
+        }
         (None, Some(name), Some(iss)) => {
             let (Some(ca_dir), Some(out)) = (ca_dir, out) else { eprintln!("{USAGE}"); return 2; };
             return tls_issue_client(&ca_dir, iss, name, &out, force, json);
@@ -917,6 +936,70 @@ fn tls_issue_client(ca_dir: &str, issuer: &str, name: &str, out: &str, force: bo
     #[cfg(not(feature = "tls"))]
     {
         let _ = (ca_dir, issuer, name, out, force, json);
+        eprintln!("mycelium tls issue needs a binary built with the `tls` feature");
+        2
+    }
+}
+
+/// `mycelium tls issue --ca-dir <dir> --client <name> --consent --public-key <spki.pem> --grade <grade> --issuer
+/// <issuer> --out <dir> [--force]` — issue a **consent certificate** (identity-and-lifecycle I7) for the principal
+/// `consent:{issuer}/{name}`, over the developer's P-256 public key alone: writes `<out>/consent-{issuer}-{name}.cert.pem`
+/// and **no key file**. `--grade` is the operator's statement of what the enrolment told it — `os_presence(macos,
+/// unbound)`, `tty` or `recording`; `service` is refused, being no consent grade. Once published the new certificate
+/// supersedes the consent principal's earlier key, so replacing an existing `.cert.pem` takes `--force`. Exits 2 on
+/// usage, a refused key or grade, or a CA that does not load. **While the grade extension's OID is provisional, a
+/// shipped binary refuses here** (the library's issuer refuses outside a test build).
+#[allow(clippy::too_many_arguments)]
+fn tls_issue_consent(ca_dir: &str, issuer: &str, name: &str, public_key: &str, grade: &str, out: &str, force: bool, json: bool) -> i32 {
+    #[cfg(feature = "tls")]
+    {
+        if !mycelium::valid_client_segment(issuer) || !mycelium::valid_client_segment(name) {
+            eprintln!("--issuer and --client are each 1-128 of A-Z a-z 0-9 - _ . (got {issuer:?} and {name:?})");
+            return 2;
+        }
+        let Some(grade) = mycelium::ConsentGrade::parse(grade) else {
+            let why = if grade == "service" { "service is the grade of a service's own key, never a consent grade" } else { "not a consent grade" };
+            eprintln!("--grade {grade:?}: {why}; one of os_presence(macos, unbound), tty, recording");
+            return 2;
+        };
+        let existing = std::path::Path::new(out).join(format!("consent-{issuer}-{name}.cert.pem"));
+        if existing.exists() && !force {
+            eprintln!(
+                "{} exists: once published, a new consent certificate supersedes this person's earlier consent key at every \
+                 node; pass --force to issue anyway",
+                existing.display()
+            );
+            return 2;
+        }
+        // The one file reader `tls` already uses (`read_cert_file`), so no new filesystem site.
+        let spki = match read_cert_file(std::path::Path::new(public_key)) {
+            Ok(s) => s,
+            Err(e) => { eprintln!("--public-key {public_key}: {e}"); return 2; }
+        };
+        match mycelium::issue_consent_cert(std::path::Path::new(ca_dir), issuer, name, &spki, grade, std::path::Path::new(out)) {
+            Ok(cert) => {
+                let warnings: Vec<String> =
+                    [std::path::Path::new(ca_dir), std::path::Path::new(out)].into_iter().flat_map(mycelium::tls_writable_by_others).collect();
+                if json {
+                    return tls_json(serde_json::json!({
+                        "command": "issue", "kind": "consent", "principal": format!("consent:{issuer}/{name}"),
+                        "issuer": issuer, "name": name, "grade": grade.as_str(),
+                        "cert": cert.display().to_string(), "warnings": warnings,
+                    }), &[("spki_sha256", &cert)]);
+                }
+                println!("issued {} (no key file: the private key stays on the developer's device)", cert.display());
+                println!("principal consent:{issuer}/{name}, grade {grade}: copy the certificate back to the developer, who publishes it with POST /gateway/identity/client-cert");
+                for said in warnings {
+                    eprintln!("warning: {said}");
+                }
+                0
+            }
+            Err(e) => { eprintln!("{e}"); 2 }
+        }
+    }
+    #[cfg(not(feature = "tls"))]
+    {
+        let _ = (ca_dir, issuer, name, public_key, grade, out, force, json);
         eprintln!("mycelium tls issue needs a binary built with the `tls` feature");
         2
     }
@@ -1119,7 +1202,7 @@ fn skills_cli(args: Vec<String>) -> i32 {
 
 fn print_usage() {
     eprintln!(
-        "Usage: mycelium [OPTIONS]\n       mycelium init <dir> [--template <name>] | --list\n       mycelium declare [project-dir] [--gateway <url>] [--token <bearer>] [--watch] [--format text|json]\n       mycelium doctor [config.toml] [--units <dir>] [--format text|json]\n       mycelium wire-check <units-dir> [--library <dir>] [--schemas <dir>] [--format text|json|dot] [--strict-deployed] [--no-authority]\n       mycelium rules [--format md|json]\n       mycelium test --faults [<class>,…] <units-dir> [--config <node.toml>] [--against <units-dir>] [--format text|json]\n       mycelium explain <decisions.jsonl> [--catalogue <rule-catalogue.json>] [--target <target>] [--format text|json]\n       mycelium explain --correlation <id> <files…> | --closure <sha256> <files…> [--fleet <n>] [--format text|json]\n       mycelium tls ca --out <dir> | issue --ca-dir <dir> (--node <ip:port> | --client <name> --issuer <issuer>) --out <dir> [--force] | pin <cert.pem>  [--format text|json]\n       mycelium skills list | get <name> [--format text|json]  (agent guides)\n\
+        "Usage: mycelium [OPTIONS]\n       mycelium init <dir> [--template <name>] | --list\n       mycelium declare [project-dir] [--gateway <url>] [--token <bearer>] [--watch] [--format text|json]\n       mycelium doctor [config.toml] [--units <dir>] [--format text|json]\n       mycelium wire-check <units-dir> [--library <dir>] [--schemas <dir>] [--format text|json|dot] [--strict-deployed] [--no-authority]\n       mycelium rules [--format md|json]\n       mycelium test --faults [<class>,…] <units-dir> [--config <node.toml>] [--against <units-dir>] [--format text|json]\n       mycelium explain <decisions.jsonl> [--catalogue <rule-catalogue.json>] [--target <target>] [--format text|json]\n       mycelium explain --correlation <id> <files…> | --closure <sha256> <files…> [--fleet <n>] [--format text|json]\n       mycelium tls ca --out <dir> | issue --ca-dir <dir> (--node <ip:port> | --client <name> --issuer <issuer> [--consent --public-key <spki.pem> --grade <grade>]) --out <dir> [--force] | pin <cert.pem>  [--format text|json]\n       mycelium skills list | get <name> [--format text|json]  (agent guides)\n\
          \n\
          Options:\n\
          -c, --config <file>      Load configuration from a TOML file\n\
@@ -1345,6 +1428,64 @@ mod tls_cli_tests {
         assert_eq!(issue(&["--force"]), 0);
         assert_ne!(pin_of_pem(&std::fs::read_to_string(&cert).unwrap()).unwrap(), before, "--force replaces the key, and the pin with it");
         let _ = (std::fs::remove_dir_all(&ca), std::fs::remove_dir_all(&out));
+    }
+
+    /// **I7 exit 1, the consent issue flow at the CLI.** `tls issue --client <name> --consent --public-key <spki.pem>
+    /// --grade <grade>` issues `consent-{issuer}-{name}.cert.pem` over the public key alone and writes no key file; it
+    /// refuses a missing `--grade` or `--public-key`, a grade of `service` or outside the set, a non-P-256 SPKI, raw
+    /// X9.63, `--public-key`/`--grade` without `--consent`, and an existing `.cert.pem` without `--force` (which then
+    /// replaces it). Seen failing first with the `--force` guard keyed on a key file (the second issue replaced the
+    /// certificate silently, exit 0).
+    #[test]
+    fn the_consent_issue_flow_refuses_by_name_and_needs_force_over_an_existing_certificate() {
+        let (ca, out, keys) = (scratch("consent-ca"), scratch("consent-out"), scratch("consent-keys"));
+        assert_eq!(tls_ca(vec!["--out".into(), ca.display().to_string()], false), 0);
+        std::fs::create_dir_all(&keys).unwrap();
+        let write = |name: &str, body: String| {
+            let p = keys.join(name);
+            std::fs::write(&p, body).unwrap();
+            p.display().to_string()
+        };
+        let p256 = || {
+            let kp = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+            let point: [u8; 65] = kp.public_key_raw().try_into().unwrap();
+            point
+        };
+        let point = p256();
+        let good = write("good.pem", mycelium::p256_spki_pem(&point));
+        let ed = write("ed.pem", {
+            let mut der = vec![0x30, 0x2A, 0x30, 0x05, 0x06, 0x03, 0x2B, 0x65, 0x70, 0x03, 0x21, 0x00];
+            der.extend([9u8; 32]);
+            format!("-----BEGIN PUBLIC KEY-----\n{}\n-----END PUBLIC KEY-----\n", base64::Engine::encode(&base64::engine::general_purpose::STANDARD, der))
+        });
+        let raw = write("raw.x963", point.iter().map(|b| format!("{b:02x}")).collect());
+        let issue = |extra: &[&str]| {
+            let mut a: Vec<String> = ["issue", "--ca-dir", &ca.display().to_string(), "--client", "richard", "--issuer", "fleet", "--out", &out.display().to_string()]
+                .iter().map(|s| s.to_string()).collect();
+            a.extend(extra.iter().map(|s| s.to_string()));
+            tls_cli(a)
+        };
+        let cert = out.join("consent-fleet-richard.cert.pem");
+        assert_eq!(issue(&["--consent", "--public-key", &good]), 2, "a missing --grade");
+        assert_eq!(issue(&["--consent", "--grade", "tty"]), 2, "a missing --public-key");
+        assert_eq!(issue(&["--consent", "--public-key", &good, "--grade", "service"]), 2, "service is no consent grade");
+        assert_eq!(issue(&["--consent", "--public-key", &good, "--grade", "os_presence(macos)"]), 2, "a grade outside the set");
+        assert_eq!(issue(&["--consent", "--public-key", &ed, "--grade", "tty"]), 2, "an Ed25519 SPKI");
+        assert_eq!(issue(&["--consent", "--public-key", &raw, "--grade", "tty"]), 2, "raw X9.63");
+        assert_eq!(issue(&["--public-key", &good, "--grade", "tty"]), 2, "--public-key and --grade without --consent");
+        assert!(!cert.exists(), "no refusal wrote a certificate");
+        assert_eq!(issue(&["--consent", "--public-key", &good, "--grade", "os_presence(macos, unbound)"]), 0);
+        let written: Vec<_> = std::fs::read_dir(&out).unwrap().flatten().map(|e| e.file_name().into_string().unwrap()).collect();
+        assert_eq!(written, vec!["consent-fleet-richard.cert.pem".to_string()], "the certificate and no key file");
+        let before = std::fs::read_to_string(&cert).unwrap();
+        let id = mycelium::consent_identity(&der_of_pem(&before).unwrap()).unwrap();
+        assert_eq!((id.principal(), id.point, id.grade), ("consent:fleet/richard".to_string(), point, mycelium::ConsentGrade::OsPresenceMacosUnbound));
+        let other = write("other.pem", mycelium::p256_spki_pem(&p256()));
+        assert_eq!(issue(&["--consent", "--public-key", &other, "--grade", "tty"]), 2, "an existing .cert.pem without --force");
+        assert_eq!(std::fs::read_to_string(&cert).unwrap(), before, "and changes nothing");
+        assert_eq!(issue(&["--consent", "--public-key", &other, "--grade", "tty", "--force"]), 0);
+        assert_ne!(std::fs::read_to_string(&cert).unwrap(), before, "--force replaces the certificate");
+        let _ = (std::fs::remove_dir_all(&ca), std::fs::remove_dir_all(&out), std::fs::remove_dir_all(&keys));
     }
 }
 
