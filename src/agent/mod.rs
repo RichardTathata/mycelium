@@ -2595,9 +2595,18 @@ impl GossipAgent {
         client_cert::client_key_standing(&self.task_ctx, principal, key)
     }
 
-    /// Publish a client certificate (DER) as its principal's record — what `POST /gateway/identity/client-cert`
-    /// does, for an embedder. Judged first: a client certificate the fleet CA issued, not issued in the future,
-    /// not older than the principal's newest already read.
+    /// Where a **consent** principal's P-256 key stands at this node (identity-and-lifecycle I7): as
+    /// [`client_key_standing`](Self::client_key_standing), within `consent:{issuer}/{name}` only — the developer's
+    /// consent certificates supersede one another and never a `token:` key. `point` is the uncompressed X9.63 point.
+    pub fn consent_key_standing(&self, principal: &str, point: &[u8; 65]) -> client_cert::ClientKeyStanding {
+        client_cert::consent_key_standing(&self.task_ctx, principal, point)
+    }
+
+    /// Publish a client certificate, or a consent certificate (identity-and-lifecycle I7), as its principal's
+    /// record — what `POST /gateway/identity/client-cert` does, for an embedder. Judged first: a certificate the
+    /// fleet CA issued, not issued in the future, not older than the principal's newest already read. For a consent
+    /// certificate the answer's `key` is **the SHA-256 of the P-256 point**, not a key (`key_hex` holds the point),
+    /// and `grade` is what the issuing operator was told at enrolment.
     pub fn publish_client_cert(&self, der: &[u8]) -> Result<client_cert::Published, client_cert::PublishRefusal> {
         client_cert::publish(&self.task_ctx, der)
     }

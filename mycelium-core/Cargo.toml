@@ -17,7 +17,7 @@ categories = ["network-programming", "asynchronous"]
 [features]
 default = []
 # mTLS transport, Ed25519 node identity, signed KV/consensus payloads, hot rotation.
-tls = ["dep:tokio-rustls", "dep:rustls", "dep:rcgen", "dep:ed25519-dalek", "dep:rand_core", "dep:arc-swap", "dep:ring", "dep:zeroize", "dep:webpki"]
+tls = ["dep:tokio-rustls", "dep:rustls", "dep:rcgen", "dep:ed25519-dalek", "dep:rand_core", "dep:arc-swap", "dep:ring", "dep:zeroize", "dep:webpki", "dep:p256"]
 # Prometheus gauge/counter emission from the store/connection paths (no-op without).
 metrics = ["dep:metrics"]
 # Signed-identity surface the compliance layer builds on (audit/RBAC live upstream).
@@ -37,6 +37,11 @@ test-support = []
 # frames from a node. Enabled only by `mycelium`'s `test-frame-filter` feature for its lib tests — never
 # by `test-support`, so examples, benches and demo images do not compile it.
 test-frame-filter = []
+# Identity-and-lifecycle I7, #800's review finding 2: lets a build issue **and read** a consent certificate while the
+# grade extension's OID (`tls::CONSENT_GRADE_OID`) is provisional. Off by default; enabled only by `mycelium`'s
+# feature of the same name, for the test lines that exercise consent certificates — never by `test-support`, an
+# example, a Docker image or a shipped binary. Once the registered PEN arc replaces the OID it changes nothing.
+provisional-consent-grade = ["tls"]
 
 [dependencies]
 # Test harness only, and optional: see the `sim` feature.
@@ -78,6 +83,12 @@ zeroize        = { version = "1",    optional = true }
 # its structural position (post-360 plan row F; it replaced a byte-scan for the Ed25519 SPKI prefix).
 # Already in the tree via `rustls` — declaring it adds no new compiled crate.
 webpki         = { package = "rustls-webpki", version = "0.103", optional = true }
+
+# P-256 point decoding (identity-and-lifecycle I7, #800's review finding 4): a consent key's point is checked to be
+# on the curve at issue and at read, so the fleet CA never vouches for a key no device can hold. Arithmetic only (no
+# ECDSA, no RNG): `PublicKey::from_sec1_bytes`. New compiled crates under `tls` (RustCrypto's elliptic-curve stack,
+# 15 lockfile entries). 0.14, not 0.13: 0.13's crypto-bigint 0.5 carries RUSTSEC-2026-0387 (CI's audit refused it).
+p256           = { version = "0.14", default-features = false, features = ["arithmetic"], optional = true }
 
 # Prometheus metrics (optional — "metrics" feature)
 metrics = { version = "0.24", optional = true }

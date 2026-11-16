@@ -4528,3 +4528,58 @@ built over the configuration's root, once the roots have changed — and an exis
 over the current roots (it returned the check itself, which never changed); `fleet_ca_subject` is new, and
 `issue_node_cert_for_key` is new and `#[doc(hidden)]` (the re-issue primitive I2's later PR builds `tls succeed` on).
 Nothing is removed or renamed.
+
+## 112. Consent certificates: a `consent:` principal beside `token:`, one door for both, a client certificate naming the consent scheme is no client's (unreleased, identity-and-lifecycle I7, PR 1)
+
+**A developer's consent certificate is new** — `mycelium tls issue --client <name> --consent --public-key <spki.pem>
+--grade <grade>`, a P-256 key's certificate naming `mycelium-consent://{issuer}/{name}`, with the grade in a
+non-critical extension ([consent certificates](../features/consent-certificates.md)). **Not issued by a shipped
+binary yet:** the extension's OID is provisional until the registered IANA Private Enterprise Number arc arrives, and
+until then the issuer refuses outside a test build (`CONSENT_GRADE_OID_IS_PROVISIONAL`). A release is blocked on that
+arc, and the release workflow refuses a tag while `CONSENT_GRADE_OID_IS_PROVISIONAL` is `true`
+(`scripts/check-release-blockers.sh --release`, `RELEASING.md` § 2). **A shipped node also reads none:** a consent
+certificate under the provisional OID is no consent identity in a build without the test-only feature
+`provisional-consent-grade` — the fold ignores and counts it, and the door refuses it `422
+consent_grade_oid_provisional` (#800's review, finding 1). What changes for an existing fleet:
+
+- **Upgrade every node before publishing a consent certificate.** An older node's fold reads Ed25519 client
+  certificates only: it never sees a consent certificate, and its `POST /gateway/identity/client-cert` refuses one
+  (`422 not_a_client_certificate`). An older node also decodes this release's client-certificate journal unchanged —
+  a consent principal's entries use the existing entry form, under a principal it is never asked about.
+- **A certificate naming both `mycelium-client://` and `mycelium-consent://` is no client's** (`client_identity` returns
+  `None`), as one naming a node's `mycelium://` already was. No certificate this tree issued names both.
+- **The mesh refuses the consent scheme** (`refuse_if_client`), beside the client scheme. A P-256 consent certificate is
+  refused before that, for its key.
+- **`POST /gateway/identity/client-cert` answers `grade` and `grade_source`** (`"operator"`: the grade is what the
+  issuing operator was told at enrolment and vouches for; both `null` for a client certificate); for a consent
+  certificate its `key` is the point's 130 hex digits, not 64. Its audit record carries the same three. It refuses a
+  consent certificate under the provisional OID outside a test build (`consent_grade_oid_provisional`).
+- **`tls issue --node … --consent`** (or `--consent` without `--client`) is refused before anything is written; it
+  used to be ignored and a node certificate and key issued (#800's review, finding 3).
+- **A consent key's point must lie on P-256**, at issue and at read (`not_p256: the point is not on the curve`), so a
+  corrupt public key file can never become a consent principal's newest certificate (#800's review, finding 4).
+  `mycelium-core`'s `tls` feature now builds RustCrypto's `p256` 0.14 (arithmetic only) for the check — 15 new
+  lockfile entries, its elliptic-curve stack; 0.13 was refused by `cargo audit` (RUSTSEC-2026-0387, crypto-bigint 0.5).
+- **Downgrade:** an older binary reading this release's client-certificate journal decodes it, and its unfiltered
+  `feed_client_keys` feeds a consent principal's mark — the SHA-256 of the point — to its external issuers as an
+  "Ed25519 key" for `consent:…`. That is harmless: no one holds a private key for it, and no grant names a `consent:`
+  holder.
+- Tests: `the_consent_scheme_is_bound_to_a_p256_key_and_a_certificate_without_a_grade_counts_as_neither`,
+  `a_consent_certificate_is_refused_at_the_mesh_for_its_key_and_for_its_scheme` (`mycelium-core/src/tls.rs`),
+  `the_door_publishes_a_consent_certificate_for_its_own_issuer_only` (`src/agent/client_cert_tests.rs`).
+
+**API (additive):** `mycelium-core::tls` gains `CONSENT_URI_SCHEME`, `consent_uri`, `CONSENT_GRADE_OID`,
+`CONSENT_GRADE_OID_IS_PROVISIONAL`, `consent_grade_oid_der`, `ConsentGrade` (`#[non_exhaustive]`), `ConsentIdentity`,
+`consent_identity`, `P256_SPKI_HEADER`, `p256_point_from_spki_pem`, `p256_spki_pem`, `p256_point_from_cert_der` and
+`issue_consent_cert` — a sibling of `issue_client_cert` (which is unchanged), taking a public key and a grade and
+writing no key — plus `consent_grade_oid_open`, `consent_grade_oid_open_when`, `consent_identity_closed_by_provisional_oid`
+and `p256_point_on_curve`. `mycelium` re-exports them, and gains `consent_cert_key` and
+`GossipAgent::consent_key_standing`. **`ClientCertPublished` gains `key_hex` and `grade`** — a struct literal of it
+breaks (none is built outside the crate) — **and its `key` changes meaning for a consent certificate: it is the SHA-256
+of the P-256 point, not a key** (`key_hex` holds the point). An embedder that reads `key` as an Ed25519 key for every
+publish must check `grade` (`Some` for consent) first. `ClientCertRefusal` gains `ProvisionalConsentGrade`. New Cargo
+features, test-only and off by default: `mycelium/provisional-consent-grade` and `mycelium-core/provisional-consent-grade`. `client_key_standing` answers `Unknown` for a `consent:` principal. **Unchanged, by decision of this PR:**
+`CertIdentity` and `ClientIdentity` (their `key` stays the Ed25519 `[u8; 32]`; a consent key is read by its own
+`ConsentIdentity`, so no mesh or `cs` reader is widened), `client_cert_key`, `ClientKeyStanding`,
+`GossipAgent::client_key_standing`'s signature, `ClientSigned.key`, `ClientSigner::new`,
+`TrustedExternalIssuers::set_client_key`, and lock-order row 76.

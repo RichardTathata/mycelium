@@ -20,6 +20,16 @@ make check-full        # clippy feature-matrix + wasm-host clippy + the test sui
 ```
 Must be green. (`make check` is the fast pre-push gate; a *release* runs `check-full`.)
 
+```bash
+scripts/check-release-blockers.sh --release   # a blocker a constant in the tree states
+```
+Must exit 0. Today it fails while `CONSENT_GRADE_OID_IS_PROVISIONAL` is `true` in `mycelium-core/src/tls.rs`: the consent
+grade extension's OID is a documentation-PEN placeholder until the registered IANA Private Enterprise Number arc
+arrives, and a certificate carrying an OID is permanent (identity-and-lifecycle I7). Replace `CONSENT_GRADE_OID` with
+the registered arc, set the constant to `false`, and update the golden (`the_grade_extensions_oid_and_each_grades_der_are_pinned`)
+in one PR before cutting a release that carries I7. The release workflow's `version` job runs the same check on the
+tag push and refuses the release by name.
+
 ## 2b. CI on the branch you are releasing **from**
 
 ```bash
@@ -178,6 +188,10 @@ unconditional: a patch cut from an older line after a newer MINOR relabels both 
 re-point `latest` by hand afterwards.
 
 ## 8. Publish the GitHub Release
+
+**Not while a release blocker stands.** Run `scripts/check-release-blockers.sh --release` first; while it fails (today:
+`CONSENT_GRADE_OID_IS_PROVISIONAL` is `true`, identity-and-lifecycle I7), do not publish by hand with `gh release
+create` — the release workflow's `version` job refuses such a tag, and a hand-run publish would go around that refusal.
 
 A tag is not an announcement. The Releases page is what a reader who watches releases rather than
 commits actually sees, and **it silently stopped being updated after v2.4.4** — so from 2026-09-12

@@ -383,13 +383,14 @@ impl ClientIdentity {
 pub const RESERVED_CLIENT_NAMES: &[&str] = &["legacy"];
 
 /// Read a client certificate's [`ClientIdentity`]: exactly one `mycelium-client://{issuer}/{name}` URI
-/// with two valid segments, a name not in [`RESERVED_CLIENT_NAMES`], and no `mycelium://` (node) URI — a
-/// certificate naming both is no client's and no node's. `None` otherwise. Says nothing about who issued it: judge
+/// with two valid segments, a name not in [`RESERVED_CLIENT_NAMES`], and no `mycelium://` (node) or
+/// `mycelium-consent://` (I7) URI — a certificate naming both is no client's, no node's and no consent's. `None` otherwise. Says nothing about who issued it: judge
 /// the chain with [`NodeTls::verify_member_cert`] first. Never panics.
 #[cfg(feature = "tls")]
 pub fn client_identity(der: &[u8]) -> Option<ClientIdentity> {
     let id = cert_identity(der)?;
-    if id.node_uris.iter().any(|u| u.starts_with("mycelium://")) {
+    // A node's name, or a consent principal's (identity-and-lifecycle I7, H1), beside the client's: no one's.
+    if id.node_uris.iter().any(|u| u.starts_with("mycelium://") || u.starts_with(CONSENT_URI_SCHEME)) {
         return None;
     }
     let mut clients = id.node_uris.iter().filter_map(|u| u.strip_prefix(CLIENT_URI_SCHEME));
@@ -412,6 +413,27 @@ pub fn client_identity(der: &[u8]) -> Option<ClientIdentity> {
 #[cfg(feature = "tls")]
 pub fn cert_identity(der: &[u8]) -> Option<CertIdentity> {
     let key = imp::ed25519_key_from_cert_der(der)?;
+    let walk = tbs_walk(der)?;
+    Some(CertIdentity { key, node_uris: walk.uris, issued_ms: walk.issued_ms })
+}
+
+/// What the hand walk of a `TBSCertificate` reads: the serial as an issuance time, the URIs among the subject
+/// alternative names, and the value of the consent grade extension ([`CONSENT_GRADE_OID`]), if present.
+#[cfg(feature = "tls")]
+struct TbsWalk {
+    issued_ms: Option<u64>,
+    uris: Vec<String>,
+    /// `Some(value)` for exactly one grade extension (the `extnValue` OCTET STRING's contents); `None` for none.
+    grade_ext: Option<Vec<u8>>,
+}
+
+/// The bounds-checked DER walk [`cert_identity`] and [`consent_identity`] share. `None` for anything that is not a
+/// certificate this walk can read, and for one carrying the grade extension twice (RFC 5280 §4.2: an extension
+/// appears at most once — a reader that took the first or the last would let the issuer's encoder decide the grade).
+/// Never panics.
+#[cfg(feature = "tls")]
+fn tbs_walk(der: &[u8]) -> Option<TbsWalk> {
+    let grade_oid = consent_grade_oid_der();
     let (tag, cert, _) = der_tlv(der)?;
     if tag != 0x30 { return None; }
     let (tag, tbs, _) = der_tlv(cert)?;
@@ -441,7 +463,8 @@ pub fn cert_identity(der: &[u8]) -> Option<CertIdentity> {
         let (_, _, n) = der_tlv(rest)?;
         rest = n;
     }
-    let mut node_uris = Vec::new();
+    let mut uris = Vec::new();
+    let mut grade_ext: Option<Vec<u8>> = None;
     while !rest.is_empty() {
         let (tag, body, n) = der_tlv(rest)?;
         rest = n;
@@ -455,7 +478,9 @@ pub fn cert_identity(der: &[u8]) -> Option<CertIdentity> {
             if tag != 0x30 { return None; }
             let (tag, oid, mut e) = der_tlv(ext)?;
             if tag != 0x06 { return None; }
-            if oid != [0x55, 0x1D, 0x11] { continue; } // 2.5.29.17 subjectAltName
+            let san = oid == [0x55, 0x1D, 0x11]; // 2.5.29.17 subjectAltName
+            let grade = oid == grade_oid.as_slice();
+            if !san && !grade { continue; }
             let (mut tag, mut value, mut n2) = der_tlv(e)?;
             if tag == 0x01 {
                 // critical BOOLEAN
@@ -464,6 +489,11 @@ pub fn cert_identity(der: &[u8]) -> Option<CertIdentity> {
             }
             let _ = n2;
             if tag != 0x04 { return None; }
+            if grade {
+                if grade_ext.is_some() { return None; }
+                grade_ext = Some(value.to_vec());
+                continue;
+            }
             let (tag, mut names, _) = der_tlv(value)?;
             if tag != 0x30 { return None; }
             while !names.is_empty() {
@@ -471,12 +501,318 @@ pub fn cert_identity(der: &[u8]) -> Option<CertIdentity> {
                 names = n3;
                 if tag == 0x86 {
                     // [6] IMPLICIT IA5String: uniformResourceIdentifier
-                    if let Ok(uri) = std::str::from_utf8(name) { node_uris.push(uri.to_string()); }
+                    if let Ok(uri) = std::str::from_utf8(name) { uris.push(uri.to_string()); }
                 }
             }
         }
     }
-    Some(CertIdentity { key, node_uris, issued_ms })
+    Some(TbsWalk { issued_ms, uris, grade_ext })
+}
+
+/// The scheme a **consent** certificate names its principal by (identity-and-lifecycle I7, H1):
+/// `mycelium-consent://{issuer}/{name}` — the principal `consent:{issuer}/{name}`, beside (never instead of) the
+/// service's `token:{issuer}/{name}`. A consent certificate is the fleet CA's statement over a developer's **P-256**
+/// public key alone (`mycelium tls issue --client <name> --consent`): the key decides grants, and never calls, never
+/// holds a grant and never joins the mesh. The scheme is bound to the key kind — a `mycelium-consent://` certificate
+/// over an Ed25519 key, or one also naming `mycelium-client://` or `mycelium://`, is no consent certificate.
+pub const CONSENT_URI_SCHEME: &str = "mycelium-consent://";
+
+/// The URI a consent certificate names its principal by: `mycelium-consent://{issuer}/{name}`.
+pub fn consent_uri(issuer: &str, name: &str) -> String {
+    format!("{CONSENT_URI_SCHEME}{issuer}/{name}")
+}
+
+/// **PROVISIONAL — no certificate carrying it may ship.** The arcs of the consent grade extension's OID
+/// (identity-and-lifecycle I7, H2): a non-critical X.509 extension whose value is a DER `UTF8String` holding the
+/// grade's exact text ([`ConsentGrade::as_str`]).
+///
+/// The row planned a `2.25` UUID OID; rcgen's `CustomExtension::from_oid_content` takes `u64` arcs and cannot write a
+/// 128-bit UUID arc. The maintainer decided (2026-11-15) that such identifiers go under a **registered IANA Private
+/// Enterprise Number** arc, which is requested and not yet held. Until it is, this constant sits under PEN **32473**,
+/// the number IANA reserves for documentation (RFC 5612) — so it can collide with no one's real extension — and the
+/// issuer refuses to write it outside a test build ([`CONSENT_GRADE_OID_IS_PROVISIONAL`]). A release is blocked on
+/// replacing it: the OID is permanent once a certificate carries it.
+pub const CONSENT_GRADE_OID: &[u64] = &[1, 3, 6, 1, 4, 1, 32473, 7, 1];
+
+/// Whether [`CONSENT_GRADE_OID`] is still the provisional documentation-PEN arc. While it is, a build that is not a
+/// test build ([`consent_grade_oid_open`]) neither issues nor reads a consent certificate: the issuer refuses, and
+/// [`consent_identity`] reads none (#800's review, finding 1 — anyone holding the CA key can mint one with openssl, so
+/// an ungated reader would give a placeholder OID standing in a shipped node). `scripts/check-release-blockers.sh
+/// --release`, run by the release workflow on a tag push, refuses a release while this is `true`.
+pub const CONSENT_GRADE_OID_IS_PROVISIONAL: bool = true;
+
+/// Whether this build may issue and read a consent certificate under [`CONSENT_GRADE_OID`]: always once the OID is
+/// registered; while it is provisional, only in a test build — `cfg(test)` (mycelium-core's own tests) or the
+/// non-default feature `provisional-consent-grade`, which only the test lines that exercise consent certificates turn
+/// on (never `test-support`, an example, a Docker image or a shipped binary: #800's review, finding 2).
+pub fn consent_grade_oid_open() -> bool {
+    consent_grade_oid_open_when(CONSENT_GRADE_OID_IS_PROVISIONAL, provisional_build_open())
+}
+
+/// The rule [`consent_grade_oid_open`] applies: a registered OID is open to every build; a provisional one only to a
+/// test build.
+pub fn consent_grade_oid_open_when(provisional: bool, test_build: bool) -> bool {
+    !provisional || test_build
+}
+
+#[cfg(any(test, feature = "provisional-consent-grade"))]
+thread_local! {
+    static PROVISIONAL_GATE_CLOSED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn provisional_build_open() -> bool {
+    #[cfg(any(test, feature = "provisional-consent-grade"))]
+    {
+        !PROVISIONAL_GATE_CLOSED.with(|c| c.get())
+    }
+    #[cfg(not(any(test, feature = "provisional-consent-grade")))]
+    {
+        false
+    }
+}
+
+/// Run `f` on this thread as a shipped build would: the provisional gate closed (#800's review, finding 1's tests).
+/// Only in a build that has the gate open to close.
+#[cfg(any(test, feature = "provisional-consent-grade"))]
+#[doc(hidden)]
+pub fn with_provisional_consent_grade_closed<R>(f: impl FnOnce() -> R) -> R {
+    struct Reopen;
+    impl Drop for Reopen {
+        fn drop(&mut self) {
+            PROVISIONAL_GATE_CLOSED.with(|c| c.set(false));
+        }
+    }
+    PROVISIONAL_GATE_CLOSED.with(|c| c.set(true));
+    let _reopen = Reopen;
+    f()
+}
+
+/// Whether `point` is a point of P-256 other than the identity, as SEC 1 decodes an uncompressed point (`04 ‖ x ‖
+/// y`, `y² = x³ − 3x + b mod p`): #800's review, finding 4 — the fleet CA must never vouch for a key no device can
+/// hold, which as a consent principal's newest certificate would leave the person's real key `Superseded`.
+#[cfg(feature = "tls")]
+pub fn p256_point_on_curve(point: &[u8; 65]) -> bool {
+    point[0] == 0x04 && p256::PublicKey::from_sec1_bytes(point).is_ok()
+}
+
+/// The DER content octets of [`CONSENT_GRADE_OID`] (base-128 arcs, the first two folded): what the walk compares an
+/// extension's `extnID` against. Pinned in a golden (`consent_tests`).
+pub fn consent_grade_oid_der() -> Vec<u8> {
+    let arcs = CONSENT_GRADE_OID;
+    let mut out = Vec::new();
+    let mut push = |mut v: u64| {
+        let mut tmp = [0u8; 10];
+        let mut i = tmp.len();
+        i -= 1;
+        tmp[i] = (v & 0x7F) as u8;
+        v >>= 7;
+        while v > 0 {
+            i -= 1;
+            tmp[i] = 0x80 | (v & 0x7F) as u8;
+            v >>= 7;
+        }
+        out.extend_from_slice(&tmp[i..]);
+    };
+    push(arcs[0] * 40 + arcs[1]);
+    for &a in &arcs[2..] {
+        push(a);
+    }
+    out
+}
+
+/// The grade a consent certificate carries (identity-and-lifecycle I7, P1, P4 revised by H2, P7): **the issuer's
+/// statement of what the enrolment told it** about the key, signed by the fleet CA. It is not a property any verifier
+/// can check — a verifier holding the public key cannot tell an Enclave key with a presence flag from a software key
+/// (S-presence) — and nothing in this tree reads it as one: a grade names where the enrolling device said the key
+/// lives, and the operator who ran `tls issue --grade` vouches for having been told it.
+///
+/// `service` is not a consent grade (it is the grade a `token:` decider's record carries, I7's later PR), and the
+/// grades are not ordered: a policy accepts a **set** of them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum ConsentGrade {
+    /// `os_presence(macos, unbound)`: the enrolment said the key is a Secure Enclave key created with
+    /// `biometryCurrentSet` (P1) — an enrolment claim, unverifiable, and *unbound*: the prompt's text is the signing
+    /// process's to choose (P5).
+    OsPresenceMacosUnbound,
+    /// `tty`: the enrolment said the key is a software P-256 key in a same-user file (P7) — any process running as the
+    /// user can sign with it, so a `tty` decision may have been made by the agent whose request it approves (B).
+    Tty,
+    /// `recording`: the enrolment said the key is a `sim` test build's (E6's walk), with no person involved — the
+    /// operator's statement, as for every grade.
+    Recording,
+}
+
+impl ConsentGrade {
+    /// Every consent grade, in a fixed order.
+    pub const ALL: [ConsentGrade; 3] = [ConsentGrade::OsPresenceMacosUnbound, ConsentGrade::Tty, ConsentGrade::Recording];
+
+    /// The grade's exact text, as the extension carries it and a record names it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ConsentGrade::OsPresenceMacosUnbound => "os_presence(macos, unbound)",
+            ConsentGrade::Tty => "tty",
+            ConsentGrade::Recording => "recording",
+        }
+    }
+
+    /// The grade named by exactly `s`; `None` for anything else, `service` included.
+    pub fn parse(s: &str) -> Option<ConsentGrade> {
+        ConsentGrade::ALL.into_iter().find(|g| g.as_str() == s)
+    }
+
+    /// The extension's value: a DER `UTF8String` holding [`as_str`](Self::as_str).
+    pub fn extension_der(self) -> Vec<u8> {
+        let text = self.as_str().as_bytes();
+        let mut out = vec![0x0C, text.len() as u8];
+        out.extend_from_slice(text);
+        out
+    }
+
+    /// The grade an extension value names: exactly one `UTF8String`, nothing after it, holding a grade's text.
+    pub fn from_extension_der(value: &[u8]) -> Option<ConsentGrade> {
+        #[cfg(feature = "tls")]
+        {
+            let (tag, text, rest) = der_tlv(value)?;
+            if tag != 0x0C || !rest.is_empty() { return None; }
+            ConsentGrade::parse(std::str::from_utf8(text).ok()?)
+        }
+        #[cfg(not(feature = "tls"))]
+        {
+            let _ = value;
+            None
+        }
+    }
+}
+
+impl std::fmt::Display for ConsentGrade {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// What a consent certificate says about whose key it is (identity-and-lifecycle I7).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConsentIdentity {
+    /// The gateway identity issuer the principal is qualified by (`gateway_identity_issuer`).
+    pub issuer: String,
+    /// The person's name under that issuer.
+    pub name: String,
+    /// The certificate's P-256 key: the uncompressed X9.63 point (`04 ‖ x ‖ y`), 65 bytes.
+    pub point: [u8; 65],
+    /// The grade the fleet CA wrote at enrolment.
+    pub grade: ConsentGrade,
+    /// The issuance time carried in the serial (ms since the epoch), as for a client certificate.
+    pub issued_ms: Option<u64>,
+}
+
+impl ConsentIdentity {
+    /// The principal this certificate's key decides for: `consent:{issuer}/{name}`.
+    pub fn principal(&self) -> String {
+        format!("consent:{}/{}", self.issuer, self.name)
+    }
+}
+
+/// Read a consent certificate's [`ConsentIdentity`]: a **P-256** key (`id-ecPublicKey` over `prime256v1`, an
+/// uncompressed point), exactly one `mycelium-consent://{issuer}/{name}` URI with two valid segments and a name not in
+/// [`RESERVED_CLIENT_NAMES`], no `mycelium://` or `mycelium-client://` URI beside it, and exactly one grade extension
+/// naming a [`ConsentGrade`], over a point on the curve. `None` otherwise — **no grade, no consent** — and `None` in
+/// every build where [`consent_grade_oid_open`] is false, so a shipped node fails closed on a certificate carrying the
+/// provisional OID ([`consent_identity_closed_by_provisional_oid`] tells that case apart, for a counter and a named
+/// refusal). Says nothing about who issued it: judge the chain with [`NodeTls::verify_member_cert`] first. Never
+/// panics.
+#[cfg(feature = "tls")]
+pub fn consent_identity(der: &[u8]) -> Option<ConsentIdentity> {
+    if !consent_grade_oid_open() {
+        return None;
+    }
+    consent_identity_ungated(der)
+}
+
+/// Whether `der` is a consent certificate this build does not read **only** because the grade OID is provisional and
+/// this is not a test build (#800's review, finding 1): what the fold counts and the door refuses by name.
+#[cfg(feature = "tls")]
+pub fn consent_identity_closed_by_provisional_oid(der: &[u8]) -> bool {
+    !consent_grade_oid_open() && consent_identity_ungated(der).is_some()
+}
+
+#[cfg(feature = "tls")]
+fn consent_identity_ungated(der: &[u8]) -> Option<ConsentIdentity> {
+    let point = imp::p256_point_from_cert_der(der)?;
+    let walk = tbs_walk(der)?;
+    if walk.uris.iter().any(|u| u.starts_with("mycelium://") || u.starts_with(CLIENT_URI_SCHEME)) {
+        return None;
+    }
+    let mut named = walk.uris.iter().filter_map(|u| u.strip_prefix(CONSENT_URI_SCHEME));
+    let only = named.next()?;
+    if named.next().is_some() {
+        return None;
+    }
+    let (issuer, name) = only.split_once('/')?;
+    if !valid_client_segment(issuer) || !valid_client_segment(name) || RESERVED_CLIENT_NAMES.contains(&name) {
+        return None;
+    }
+    let grade = ConsentGrade::from_extension_der(walk.grade_ext.as_deref()?)?;
+    Some(ConsentIdentity { issuer: issuer.to_string(), name: name.to_string(), point, grade, issued_ms: walk.issued_ms })
+}
+
+/// The fixed DER header of a P-256 `SubjectPublicKeyInfo` over an uncompressed point (RFC 5480):
+/// `SEQUENCE { SEQUENCE { id-ecPublicKey, prime256v1 }, BIT STRING (0 unused bits) }`, followed by the 65-byte point.
+pub const P256_SPKI_HEADER: [u8; 26] = [
+    0x30, 0x59, 0x30, 0x13, 0x06, 0x07, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x02, 0x01, 0x06, 0x08, 0x2A, 0x86, 0x48, 0xCE,
+    0x3D, 0x03, 0x01, 0x07, 0x03, 0x42, 0x00,
+];
+
+/// The uncompressed point of a P-256 SPKI PEM (`-----BEGIN PUBLIC KEY-----`), as the developer's side exports it
+/// (identity-and-lifecycle I7's issue flow: CryptoKit's `pemRepresentation`, or [`p256_spki_pem`]). Refused, by name:
+/// no `PUBLIC KEY` block, or more than one; an SPKI for another algorithm or curve (an Ed25519 key among them); a
+/// compressed point; a point not on the curve (#800's review, finding 4). **Raw X9.63 is not accepted**, so the input
+/// names its own algorithm.
+#[cfg(feature = "tls")]
+pub fn p256_point_from_spki_pem(pem: &str) -> Result<[u8; 65], String> {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    const BEGIN: &str = "-----BEGIN PUBLIC KEY-----";
+    const END: &str = "-----END PUBLIC KEY-----";
+    if pem.matches(BEGIN).count() != 1 || pem.matches(END).count() != 1 {
+        return Err("not_spki_pem: expected exactly one -----BEGIN PUBLIC KEY----- block (raw X9.63 is not accepted)".into());
+    }
+    if pem.contains("-----BEGIN") && pem.matches("-----BEGIN").count() != 1 {
+        return Err("not_spki_pem: expected exactly one PEM block".into());
+    }
+    let start = pem.find(BEGIN).expect("counted") + BEGIN.len();
+    let end = pem.find(END).expect("counted");
+    if end < start {
+        return Err("not_spki_pem: the END line precedes the BEGIN line".into());
+    }
+    let b64: String = pem[start..end].chars().filter(|c| !c.is_whitespace()).collect();
+    let der = STANDARD.decode(b64).map_err(|e| format!("not_spki_pem: the block is not base64: {e}"))?;
+    let (header, point) = der
+        .split_at_checked(P256_SPKI_HEADER.len())
+        .ok_or_else(|| "not_p256: the SPKI is shorter than a P-256 key's".to_string())?;
+    if header != P256_SPKI_HEADER || point.len() != 65 || point[0] != 0x04 {
+        return Err("not_p256: the SPKI is not a P-256 (prime256v1) key over an uncompressed point".into());
+    }
+    let point: [u8; 65] = point.try_into().expect("checked length");
+    if !p256_point_on_curve(&point) {
+        return Err("not_p256: the point is not on the curve".into());
+    }
+    Ok(point)
+}
+
+/// The SPKI PEM of a P-256 uncompressed point — the fixed header, then the point — as `dev` exports a software
+/// consent key's public half (`ring`'s `EcdsaKeyPair::public_key` is this point).
+pub fn p256_spki_pem(point: &[u8; 65]) -> String {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    let mut der = P256_SPKI_HEADER.to_vec();
+    der.extend_from_slice(point);
+    let b64 = STANDARD.encode(der);
+    let mut pem = String::from("-----BEGIN PUBLIC KEY-----\n");
+    for chunk in b64.as_bytes().chunks(64) {
+        pem.push_str(std::str::from_utf8(chunk).expect("base64 is ascii"));
+        pem.push('\n');
+    }
+    pem.push_str("-----END PUBLIC KEY-----\n");
+    pem
 }
 
 /// One DER TLV: `(tag, content, rest)`. Single-byte tags, definite lengths of at most four length
@@ -1350,10 +1686,21 @@ mod imp {
         ca_cert_der: &[u8],
         ca_key_pair: &KeyPair,
     ) -> Result<CertificateDer<'static>, GossipError> {
+        issue_checked_over(params, &Ed25519Public(*public), ca_cert_der, ca_key_pair)
+    }
+
+    /// [`issue_checked`] over any public key rcgen can certify — an Ed25519 key, or a consent certificate's P-256
+    /// point (identity-and-lifecycle I7).
+    fn issue_checked_over(
+        params: CertificateParams,
+        public: &impl rcgen::PublicKeyData,
+        ca_cert_der: &[u8],
+        ca_key_pair: &KeyPair,
+    ) -> Result<CertificateDer<'static>, GossipError> {
         let err = |reason: String| GossipError::InvalidField { field: "tls", reason };
         let ca = signing_ca(ca_cert_der, ca_key_pair)?;
         let cert = params
-            .signed_by(&Ed25519Public(*public), &ca, ca_key_pair)
+            .signed_by(public, &ca, ca_key_pair)
             .map_err(|e| err(format!("TLS: sign certificate: {e}")))?;
         let der = cert.der().to_vec();
         if super::tbs_name(&der, super::TbsName::Issuer).is_none()
@@ -1485,6 +1832,124 @@ mod imp {
         write_public(&cert_path, cert_der_to_pem(cert_der.as_ref()).as_bytes()).map_err(|e| err(format!("TLS: write {cert_path:?}: {e}")))?;
         write_private(&key_path, key_pem.as_bytes()).map_err(|e| err(format!("TLS: write {key_path:?}: {e}")))?;
         Ok((cert_path, key_path))
+    }
+
+    /// A P-256 public point as rcgen signs a certificate over it (identity-and-lifecycle I7, the spike S-presence's
+    /// row 6): the fleet's Ed25519 CA certifies a consent key over its **public half alone** — the private half is in
+    /// the developer's Secure Enclave or software key file and never reaches the issuer.
+    pub(super) struct P256Public(pub(super) [u8; 65]);
+
+    impl rcgen::PublicKeyData for P256Public {
+        fn der_bytes(&self) -> &[u8] {
+            &self.0
+        }
+        fn algorithm(&self) -> &rcgen::SignatureAlgorithm {
+            &rcgen::PKCS_ECDSA_P256_SHA256
+        }
+    }
+
+    /// Whether this build may write the consent grade extension: [`consent_grade_oid_open`](super::consent_grade_oid_open),
+    /// the same gate the reader takes.
+    fn may_write_consent_grade() -> bool {
+        super::consent_grade_oid_open()
+    }
+
+    /// A **consent** certificate for the principal `consent:{issuer}/{name}` (identity-and-lifecycle I7, H1, H2): the
+    /// P-256 `point`'s certificate, signed by the fleet CA, naming `mycelium-consent://{issuer}/{name}` and nothing
+    /// else, dated in its serial like a client's, and carrying `grade` in the non-critical grade extension. Refused
+    /// while the extension's OID is provisional, outside a test build.
+    pub(super) fn consent_cert_under(
+        issuer: &str,
+        name: &str,
+        point: &[u8; 65],
+        grade: super::ConsentGrade,
+        ca_cert_der: &[u8],
+        ca_key_pair: &KeyPair,
+        issued_ms: u64,
+    ) -> Result<CertificateDer<'static>, GossipError> {
+        let err = |reason: String| GossipError::InvalidField { field: "tls", reason };
+        if !may_write_consent_grade() {
+            return Err(err(
+                "TLS: consent certificates are not issued by this build: the grade extension's OID is provisional until \
+                 the registered IANA Private Enterprise Number arc arrives (identity-and-lifecycle I7)"
+                    .into(),
+            ));
+        }
+        if !super::valid_client_segment(issuer) || !super::valid_client_segment(name) {
+            return Err(err(format!(
+                "TLS: a consent principal's issuer and name are each 1-128 of A-Z a-z 0-9 - _ . (got {issuer:?} / {name:?})"
+            )));
+        }
+        if super::RESERVED_CLIENT_NAMES.contains(&name) {
+            return Err(err(format!("TLS: the name {name:?} is reserved")));
+        }
+        if !super::p256_point_on_curve(point) {
+            return Err(err("TLS: not_p256: a consent key is an uncompressed P-256 point on the curve (04 || x || y)".into()));
+        }
+        let mut params = CertificateParams::new(vec![]).map_err(|e| err(format!("TLS: consent cert params: {e}")))?;
+        let uri = rcgen::Ia5String::try_from(super::consent_uri(issuer, name)).map_err(|e| err(format!("TLS: consent URI: {e}")))?;
+        params.subject_alt_names = vec![SanType::URI(uri)];
+        params.serial_number = Some(rcgen::SerialNumber::from(issued_ms));
+        params.not_before = rcgen::date_time_ymd(2024, 1, 1);
+        params.not_after  = rcgen::date_time_ymd(2099, 1, 1);
+        params.custom_extensions = vec![rcgen::CustomExtension::from_oid_content(super::CONSENT_GRADE_OID, grade.extension_der())];
+        issue_checked_over(params, &P256Public(*point), ca_cert_der, ca_key_pair)
+    }
+
+    /// A consent certificate under a CA with rcgen's default subject, for tests that hold only a CA key.
+    #[cfg(test)]
+    pub(super) fn generate_consent_cert(
+        issuer: &str,
+        name: &str,
+        point: &[u8; 65],
+        grade: super::ConsentGrade,
+        ca_key_pair: &KeyPair,
+        issued_ms: u64,
+    ) -> Result<CertificateDer<'static>, GossipError> {
+        consent_cert_under(issuer, name, point, grade, &default_subject_ca_der(ca_key_pair), ca_key_pair, issued_ms)
+    }
+
+    /// **Issue a consent certificate off-node, over a public key alone** (identity-and-lifecycle I7's issue flow, L7,
+    /// M-new-1): loads the CA from `ca_dir` (never mints one), reads the developer's P-256 key from `spki_pem`
+    /// ([`p256_point_from_spki_pem`](super::p256_point_from_spki_pem): raw X9.63 and any other algorithm refused),
+    /// and writes `consent-{issuer}-{name}.cert.pem` under `out_dir` — **and no key file**: the private half never
+    /// reaches this host, and the CA key never reaches the developer's. `grade` is the operator's statement of what
+    /// the enrolment told it (H2); the CLI refuses `service`, which is no consent grade. Issuing again for the same
+    /// principal supersedes the earlier consent key once published (P6), within `consent:{issuer}/{name}` only (H1).
+    /// Returns the certificate's path.
+    pub fn issue_consent_cert(
+        ca_dir: &Path,
+        issuer: &str,
+        name: &str,
+        spki_pem: &str,
+        grade: super::ConsentGrade,
+        out_dir: &Path,
+    ) -> Result<std::path::PathBuf, GossipError> {
+        let err = |reason: String| GossipError::InvalidField { field: "tls", reason };
+        let point = super::p256_point_from_spki_pem(spki_pem).map_err(|e| err(format!("TLS: --public-key: {e}")))?;
+        let ca_cfg = TlsConfig { auto_cert_dir: ca_dir.to_path_buf(), ..TlsConfig::default() };
+        let (ca_cert_der, ca_key_pair) = load_existing_ca(&ca_cfg)?;
+        let cert_der = consent_cert_under(issuer, name, &point, grade, &ca_cert_der, &ca_key_pair, super::issuance_after(0))?;
+        create_private_dir(out_dir).map_err(|e| err(format!("TLS: create {out_dir:?}: {e}")))?;
+        let cert_path = out_dir.join(format!("consent-{issuer}-{name}.cert.pem"));
+        write_public(&cert_path, cert_der_to_pem(cert_der.as_ref()).as_bytes()).map_err(|e| err(format!("TLS: write {cert_path:?}: {e}")))?;
+        Ok(cert_path)
+    }
+
+    /// The uncompressed P-256 point of a certificate's `SubjectPublicKeyInfo` (identity-and-lifecycle I7), read from
+    /// its structural position by the parser rustls uses, as [`ed25519_key_from_cert_der`] reads an Ed25519 key: the
+    /// parsed SPKI compared whole against [`P256_SPKI_HEADER`](super::P256_SPKI_HEADER) then a 65-byte `04` point.
+    /// `None` for anything else. Never panics.
+    pub fn p256_point_from_cert_der(der: &[u8]) -> Option<[u8; 65]> {
+        let der = CertificateDer::from(der);
+        let cert = webpki::EndEntityCert::try_from(&der).ok()?;
+        let spki = cert.subject_public_key_info();
+        let (header, point) = spki.as_ref().split_at_checked(super::P256_SPKI_HEADER.len())?;
+        if header != super::P256_SPKI_HEADER || point.len() != 65 || point[0] != 0x04 {
+            return None;
+        }
+        let point: [u8; 65] = point.try_into().ok()?;
+        super::p256_point_on_curve(&point).then_some(point)
     }
 
     /// Extract the Ed25519 public key from a node cert's `SubjectPublicKeyInfo` (audit 2026-07-15,
@@ -1677,8 +2142,8 @@ mod imp {
         Ok(())
     }
 
-    /// Refuse a **client** certificate at the mesh (identity-and-lifecycle I1, D1): one whose names include a
-    /// `mycelium-client://` URI. A client certificate is the fleet CA's too, so the chain check alone admits it;
+    /// Refuse a **client** or **consent** certificate at the mesh (identity-and-lifecycle I1, D1; I7): one whose
+    /// names include a `mycelium-client://` or `mycelium-consent://` URI. A client certificate is the fleet CA's too, so the chain check alone admits it;
     /// this keeps a service's key — which its agent's shell can reach — off the transport. Fails closed: a
     /// certificate whose names this node cannot read is refused (every certificate this tree issues is readable,
     /// node or client, before row Q or after). Run after the CA chain check, in both verifiers, never in
@@ -1689,6 +2154,12 @@ mod imp {
         };
         if id.node_uris.iter().any(|u| u.starts_with(super::CLIENT_URI_SCHEME)) {
             return Err(rustls::Error::General("mycelium: a client certificate cannot join the mesh".into()));
+        }
+        // Identity-and-lifecycle I7: a consent certificate is P-256 and `refuse_if_removed` refuses it for its key
+        // first; this refuses the scheme too, so the refusal does not rest on the key alone (an Ed25519 certificate a
+        // CA-key holder minted with the consent scheme).
+        if id.node_uris.iter().any(|u| u.starts_with(super::CONSENT_URI_SCHEME)) {
+            return Err(rustls::Error::General("mycelium: a consent certificate cannot join the mesh".into()));
         }
         Ok(())
     }
@@ -1933,7 +2404,7 @@ mod imp {
 }
 
 #[cfg(feature = "tls")]
-pub use imp::{ed25519_key_from_cert_der, gateway_server_config_from_pem, generate_rotation, generate_rotation_after, issue_client_cert, issue_node_cert, issue_node_cert_for_key, load_or_generate, mint_ca, sign_bytes, verify_bytes, writable_by_others};
+pub use imp::{ed25519_key_from_cert_der, gateway_server_config_from_pem, generate_rotation, generate_rotation_after, issue_client_cert, issue_consent_cert, issue_node_cert, p256_point_from_cert_der, issue_node_cert_for_key, load_or_generate, mint_ca, sign_bytes, verify_bytes, writable_by_others};
 
 #[cfg(all(test, feature = "tls"))]
 mod key_extract_tests {
@@ -2840,6 +3311,308 @@ mod ca_race_tests {
         let _ = std::fs::remove_dir_all(&dir);
         assert!(issued.is_err(), "ISSUED: a client certificate naming `legacy`");
         assert_eq!(super::client_identity(&minted), None, "READ: a certificate naming `legacy` as a client identity");
+    }
+
+    // ---- Identity-and-lifecycle I7, PR 1: the consent certificate ----
+
+    /// A fresh P-256 key pair and its SPKI PEM, as `dev` would export it.
+    fn p256_key() -> (rcgen::KeyPair, [u8; 65], String) {
+        let kp = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+        let point: [u8; 65] = kp.public_key_raw().try_into().unwrap();
+        let pem = super::p256_spki_pem(&point);
+        (kp, point, pem)
+    }
+
+    /// A certificate a CA-key holder mints by hand: `uris` as its names, over `public`, with `extensions`.
+    fn minted(ca_key: &rcgen::KeyPair, public: &impl rcgen::PublicKeyData, uris: &[String], extensions: Vec<rcgen::CustomExtension>, serial: u64) -> Vec<u8> {
+        let mut p = rcgen::CertificateParams::new(vec![]).unwrap();
+        p.subject_alt_names = uris.iter().map(|u| rcgen::SanType::URI(rcgen::Ia5String::try_from(u.clone()).unwrap())).collect();
+        p.serial_number = Some(rcgen::SerialNumber::from(serial));
+        p.not_before = rcgen::date_time_ymd(2024, 1, 1);
+        p.not_after = rcgen::date_time_ymd(2099, 1, 1);
+        p.custom_extensions = extensions;
+        let mut ca_params = rcgen::CertificateParams::new(vec![]).unwrap();
+        ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        ca_params.not_before = rcgen::date_time_ymd(2024, 1, 1);
+        ca_params.not_after = rcgen::date_time_ymd(2099, 1, 1);
+        let ca = ca_params.self_signed(ca_key).unwrap();
+        p.signed_by(public, &ca, ca_key).unwrap().der().to_vec()
+    }
+
+    fn grade_ext(value: Vec<u8>) -> rcgen::CustomExtension {
+        rcgen::CustomExtension::from_oid_content(super::CONSENT_GRADE_OID, value)
+    }
+
+    /// **I7 exit 1, the issue flow over a public key alone.** On a host holding the CA key and no private consent key,
+    /// `issue_consent_cert` issues over a P-256 SPKI PEM with its grade, writes the certificate and **no key file**, and
+    /// the certificate chains to the fleet CA (`verify_member_cert`, the chain check the fold judges by), names
+    /// `mycelium-consent://{issuer}/{name}` and reads back as `consent:{issuer}/{name}` with the enrolled point and grade
+    /// — for each grade. Our SPKI PEM is rcgen's own for the key, so the fixed header is the standard encoding. Seen
+    /// failing first with the issuer writing no grade extension (`consent_identity` read `None`: no grade, no consent).
+    #[test]
+    fn a_consent_certificate_is_issued_over_a_p256_spki_alone_and_reads_back_its_principal_and_grade() {
+        use crate::node_id::NodeId;
+        use crate::removal::RemovedSet;
+        let dir = fresh_dir("consent-issue");
+        let ca_dir = dir.join("ca");
+        super::imp::mint_ca(&ca_dir).unwrap();
+        let cfg = TlsConfig { auto_cert_dir: ca_dir.clone(), ..TlsConfig::default() };
+        let node = super::imp::load_or_generate(&cfg, &NodeId::new("127.0.0.1", 9561).unwrap(), Arc::new(RemovedSet::default()), Default::default()).unwrap();
+        for (i, grade) in super::ConsentGrade::ALL.into_iter().enumerate() {
+            let (kp, point, pem) = p256_key();
+            assert_eq!(pem.replace('\n', ""), kp.public_key_pem().replace(['\n', '\r'], ""), "our SPKI PEM is the standard encoding");
+            let out = dir.join(format!("out-{i}"));
+            let cert = super::issue_consent_cert(&ca_dir, "fleet", "richard", &pem, grade, &out).expect("issued over the public key alone");
+            assert_eq!(cert, out.join("consent-fleet-richard.cert.pem"));
+            let written: Vec<_> = std::fs::read_dir(&out).unwrap().flatten().map(|e| e.file_name().into_string().unwrap()).collect();
+            assert_eq!(written, vec!["consent-fleet-richard.cert.pem".to_string()], "a certificate and no key file");
+            let der = super::imp::pem_cert_to_der(&std::fs::read_to_string(&cert).unwrap()).unwrap();
+            assert!(node.verify_member_cert(der.as_ref()), "the chain verifies: an Ed25519 CA over a P-256 leaf");
+            let id = super::consent_identity(der.as_ref()).expect("a consent certificate reads as one");
+            assert_eq!((id.principal(), id.point, id.grade), ("consent:fleet/richard".to_string(), point, grade));
+            assert!(id.issued_ms.is_some(), "dated in its serial, as a client certificate is");
+            assert_eq!(super::client_identity(der.as_ref()), None, "a consent certificate is no client's");
+            assert_eq!(super::cert_identity(der.as_ref()), None, "nor a mesh identity's: it carries no Ed25519 key");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **I7 exit 1's goldens.** The grade extension's OID — **provisional**, the documentation PEN 32473 until the
+    /// registered arc arrives — and each grade's DER, an `UTF8String` of the grade's exact text, read back from an issued
+    /// certificate by the walk in `cert_identity`'s reader. The OID's encoding is checked against the bytes rcgen wrote.
+    #[test]
+    fn the_grade_extensions_oid_and_each_grades_der_are_pinned() {
+        const { assert!(super::CONSENT_GRADE_OID_IS_PROVISIONAL, "a release is blocked until the registered PEN arc replaces this OID") };
+        assert_eq!(super::CONSENT_GRADE_OID, &[1, 3, 6, 1, 4, 1, 32473, 7, 1]);
+        assert_eq!(super::consent_grade_oid_der(), vec![0x2B, 0x06, 0x01, 0x04, 0x01, 0x81, 0xFD, 0x59, 0x07, 0x01]);
+        let golden: [(super::ConsentGrade, &str, &str); 3] = [
+            (super::ConsentGrade::OsPresenceMacosUnbound, "os_presence(macos, unbound)", "0c1b6f735f70726573656e6365286d61636f732c20756e626f756e6429"),
+            (super::ConsentGrade::Tty, "tty", "0c03747479"),
+            (super::ConsentGrade::Recording, "recording", "0c097265636f7264696e67"),
+        ];
+        let dir = fresh_dir("consent-golden");
+        let cfg = TlsConfig { auto_cert_dir: dir.clone(), ..TlsConfig::default() };
+        let (_, ca_key) = load_or_create_ca(&cfg).unwrap();
+        for (grade, text, der_hex) in golden {
+            assert_eq!(grade.as_str(), text);
+            assert_eq!(super::ConsentGrade::parse(text), Some(grade));
+            let der: String = grade.extension_der().iter().map(|b| format!("{b:02x}")).collect();
+            assert_eq!(der, der_hex, "{text}'s DER");
+            let (_, point, _) = p256_key();
+            let cert = super::imp::generate_consent_cert("fleet", "richard", &point, grade, &ca_key, 5).unwrap();
+            let walk = super::tbs_walk(cert.as_ref()).unwrap();
+            assert_eq!(walk.grade_ext.as_deref(), Some(grade.extension_der().as_slice()), "{text} read back");
+            let mut tlv = vec![0x06, 0x0A];
+            tlv.extend(super::consent_grade_oid_der());
+            assert!(cert.as_ref().windows(tlv.len()).any(|w| w == tlv.as_slice()), "rcgen wrote the pinned OID");
+        }
+        assert_eq!(super::ConsentGrade::parse("service"), None, "service is no consent grade");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A shipped build fails closed on the provisional OID** (#800's review, finding 1). With the gate closed — as in
+    /// a build without `cfg(test)` or `provisional-consent-grade` — a consent certificate carrying the provisional OID
+    /// reads as no consent identity, `consent_identity_closed_by_provisional_oid` names why, and the issuer refuses;
+    /// with it open the same certificate reads. Seen failing first with `consent_identity` ungated (the certificate read
+    /// as `consent:fleet/richard` with the gate closed).
+    #[test]
+    fn a_closed_provisional_gate_reads_no_consent_certificate_and_issues_none() {
+        let dir = fresh_dir("consent-gate");
+        let cfg = TlsConfig { auto_cert_dir: dir.clone(), ..TlsConfig::default() };
+        let (_, ca_key) = load_or_create_ca(&cfg).unwrap();
+        let (_, point, _) = p256_key();
+        let cert = super::imp::generate_consent_cert("fleet", "richard", &point, super::ConsentGrade::Tty, &ca_key, 9).unwrap();
+        assert!(super::consent_identity(cert.as_ref()).is_some(), "plant: the test build reads it");
+        assert!(!super::consent_identity_closed_by_provisional_oid(cert.as_ref()));
+        let (read, named, issued) = super::with_provisional_consent_grade_closed(|| (
+            super::consent_identity(cert.as_ref()),
+            super::consent_identity_closed_by_provisional_oid(cert.as_ref()),
+            super::imp::generate_consent_cert("fleet", "richard", &point, super::ConsentGrade::Tty, &ca_key, 10),
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(read, None, "READ: a provisional-OID consent certificate with the gate closed");
+        assert!(named, "the closed gate is named as the reason");
+        assert!(issued.is_err_and(|e| e.to_string().contains("provisional")), "ISSUED with the gate closed");
+        assert!(super::consent_identity(cert.as_ref()).is_some(), "the gate reopens after the closure");
+    }
+
+    /// **A point not on P-256 is refused at issue and at read** (#800's review, finding 4). `04 ‖ 0^64` and a point
+    /// with `y` off by one are refused by the SPKI reader (`not_p256: the point is not on the curve`), by the issuer,
+    /// and — minted by a CA-key holder — read as no consent identity, so such a certificate never becomes a consent
+    /// principal's newest mark. Seen failing first with only the `04` prefix checked (all three accepted).
+    #[test]
+    fn a_point_off_the_curve_is_refused_at_issue_and_at_read() {
+        use base64::{engine::general_purpose::STANDARD, Engine};
+        let dir = fresh_dir("consent-curve");
+        let cfg = TlsConfig { auto_cert_dir: dir.clone(), ..TlsConfig::default() };
+        let (_, ca_key) = load_or_create_ca(&cfg).unwrap();
+        let (_, good, _) = p256_key();
+        let mut zero = [0u8; 65];
+        zero[0] = 0x04;
+        let mut nudged = good;
+        nudged[64] ^= 0x01;
+        for (what, point) in [("04 || 0^64", zero), ("y off by one", nudged)] {
+            assert!(!super::p256_point_on_curve(&point), "{what}");
+            let mut der = super::P256_SPKI_HEADER.to_vec();
+            der.extend_from_slice(&point);
+            let pem = format!("-----BEGIN PUBLIC KEY-----\n{}\n-----END PUBLIC KEY-----\n", STANDARD.encode(der));
+            let read = super::p256_point_from_spki_pem(&pem);
+            assert!(read.as_ref().is_err_and(|e| e.contains("not on the curve")), "{what}: {read:?}");
+            assert!(super::imp::generate_consent_cert("fleet", "x", &point, super::ConsentGrade::Tty, &ca_key, 1).is_err(), "ISSUED: {what}");
+            let minted_cert = minted(&ca_key, &super::imp::P256Public(point), &[super::consent_uri("fleet", "x")],
+                vec![grade_ext(super::ConsentGrade::Tty.extension_der())], 4);
+            assert_eq!(super::consent_identity(&minted_cert), None, "READ: {what}");
+        }
+        assert!(super::p256_point_on_curve(&good), "plant: a real key's point is on the curve");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **No shipped binary writes or reads the provisional OID: the rule.** While `CONSENT_GRADE_OID_IS_PROVISIONAL`
+    /// holds, only a test build may; once the registered arc replaces it, any build may. The wiring is
+    /// `a_closed_provisional_gate_reads_no_consent_certificate_and_issues_none`; the shipped binary's refusal is a run
+    /// against a `cargo build` binary (no `provisional-consent-grade`), recorded in the plan's §8. Seen failing first
+    /// with the rule returning `true` whatever the build.
+    #[test]
+    fn a_provisional_grade_oid_is_written_only_by_a_test_build() {
+        assert!(!super::consent_grade_oid_open_when(true, false), "WRITTEN: the provisional OID by a shipped build");
+        assert!(super::consent_grade_oid_open_when(true, true));
+        assert!(super::consent_grade_oid_open_when(false, false));
+    }
+
+    /// **I7 exit 1's refusals at the key.** The SPKI reader refuses, by name: an Ed25519 SPKI, a P-384 SPKI, a
+    /// compressed point, raw X9.63 (hex or bytes, no PEM), and two blocks. `issue_consent_cert` refuses each the same
+    /// way and writes nothing. Seen failing first with the reader taking the last 65 bytes of any SPKI and no header
+    /// check: the P-384 SPKI was read as a point (the Ed25519 one was refused only for being shorter than 65 bytes).
+    #[test]
+    fn the_consent_issuer_refuses_a_key_that_is_not_a_p256_spki_by_name() {
+        use base64::{engine::general_purpose::STANDARD, Engine};
+        let pem_of = |der: &[u8]| format!("-----BEGIN PUBLIC KEY-----\n{}\n-----END PUBLIC KEY-----\n", STANDARD.encode(der));
+        let mut ed = vec![0x30, 0x2A, 0x30, 0x05, 0x06, 0x03, 0x2B, 0x65, 0x70, 0x03, 0x21, 0x00];
+        ed.extend([7u8; 32]);
+        let p384 = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P384_SHA384).unwrap().public_key_pem();
+        let (_, point, good) = p256_key();
+        let mut compressed = super::P256_SPKI_HEADER.to_vec();
+        compressed.extend_from_slice(&point);
+        compressed[1] = 0x39;
+        compressed[24] = 0x22;
+        compressed.truncate(super::P256_SPKI_HEADER.len());
+        compressed.push(0x02);
+        compressed.extend_from_slice(&point[1..33]);
+        let raw_hex: String = point.iter().map(|b| format!("{b:02x}")).collect();
+        let cases: [(&str, String, &str); 6] = [
+            ("ed25519", pem_of(&ed), "not_p256"),
+            ("p384", p384, "not_p256"),
+            ("compressed", pem_of(&compressed), "not_p256"),
+            ("raw x9.63 hex", raw_hex, "not_spki_pem"),
+            ("raw x9.63 base64", STANDARD.encode(point), "not_spki_pem"),
+            ("two blocks", format!("{good}{good}"), "not_spki_pem"),
+        ];
+        let dir = fresh_dir("consent-refuse");
+        let ca_dir = dir.join("ca");
+        super::imp::mint_ca(&ca_dir).unwrap();
+        for (what, input, reason) in cases {
+            let read = super::p256_point_from_spki_pem(&input);
+            assert!(read.as_ref().is_err_and(|e| e.starts_with(reason)), "{what}: {read:?}");
+            let out = dir.join("out");
+            let issued = super::issue_consent_cert(&ca_dir, "fleet", "richard", &input, super::ConsentGrade::Tty, &out);
+            assert!(issued.as_ref().is_err_and(|e| e.to_string().contains(reason)), "{what} issued: {issued:?}");
+            assert!(!out.exists(), "{what}: nothing written");
+        }
+        assert_eq!(super::p256_point_from_spki_pem(&good).unwrap(), point);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **The scheme is bound to the key kind, and no grade is no consent** (I7, H1, H2). A CA-key holder can mint any
+    /// of these; none reads as a consent identity, and none as a client identity where it names the consent scheme:
+    /// the consent scheme over an Ed25519 key; the client scheme over a P-256 key; a certificate naming **both** schemes
+    /// (over either key); the consent scheme beside a node's `mycelium://`; a consent certificate with no grade, with a
+    /// grade outside the set (`service`, or a near miss), with its grade twice, or with a grade that is not an
+    /// `UTF8String`. The plant: the same mint with one consent URI and one grade reads as a consent identity. Seen
+    /// failing first with `client_identity` ignoring the consent scheme (the both-schemes Ed25519 certificate read as
+    /// `token:fleet/richard`).
+    #[test]
+    fn the_consent_scheme_is_bound_to_a_p256_key_and_a_certificate_without_a_grade_counts_as_neither() {
+        let dir = fresh_dir("consent-bound");
+        let cfg = TlsConfig { auto_cert_dir: dir.clone(), ..TlsConfig::default() };
+        let (_, ca_key) = load_or_create_ca(&cfg).unwrap();
+        let ed = rcgen::KeyPair::try_from(
+            ed25519_dalek::pkcs8::EncodePrivateKey::to_pkcs8_der(&ed25519_dalek::SigningKey::from_bytes(&[61u8; 32])).unwrap().as_bytes(),
+        ).unwrap();
+        let (p256, _, _) = p256_key();
+        let (consent, client, node) = (super::consent_uri("fleet", "richard"), super::client_uri("fleet", "richard"), "mycelium://127.0.0.1:9562".to_string());
+        let tty = || vec![grade_ext(super::ConsentGrade::Tty.extension_der())];
+        let plant = minted(&ca_key, &p256, std::slice::from_ref(&consent), tty(), 3);
+        assert_eq!(super::consent_identity(&plant).map(|i| (i.principal(), i.grade)), Some(("consent:fleet/richard".into(), super::ConsentGrade::Tty)), "plant");
+        let none_consent: Vec<(&str, Vec<u8>)> = vec![
+            ("consent scheme over ed25519", minted(&ca_key, &ed, std::slice::from_ref(&consent), tty(), 3)),
+            ("client scheme over p256", minted(&ca_key, &p256, std::slice::from_ref(&client), tty(), 3)),
+            ("both schemes over p256", minted(&ca_key, &p256, &[consent.clone(), client.clone()], tty(), 3)),
+            ("both schemes over ed25519", minted(&ca_key, &ed, &[client.clone(), consent.clone()], tty(), 3)),
+            ("consent beside a node", minted(&ca_key, &p256, &[consent.clone(), node.clone()], tty(), 3)),
+            ("two consent names", minted(&ca_key, &p256, &[consent.clone(), super::consent_uri("fleet", "other")], tty(), 3)),
+            ("no grade", minted(&ca_key, &p256, std::slice::from_ref(&consent), vec![], 3)),
+            ("grade service", minted(&ca_key, &p256, std::slice::from_ref(&consent), vec![grade_ext(vec![0x0C, 7, b's', b'e', b'r', b'v', b'i', b'c', b'e'])], 3)),
+            ("grade near miss", minted(&ca_key, &p256, std::slice::from_ref(&consent), vec![grade_ext(vec![0x0C, 4, b't', b't', b'y', b' '])], 3)),
+            ("grade twice", minted(&ca_key, &p256, std::slice::from_ref(&consent), vec![grade_ext(super::ConsentGrade::Tty.extension_der()), grade_ext(super::ConsentGrade::Recording.extension_der())], 3)),
+            ("grade not utf8string", minted(&ca_key, &p256, std::slice::from_ref(&consent), vec![grade_ext(vec![0x13, 3, b't', b't', b'y'])], 3)),
+            ("grade with trailing bytes", minted(&ca_key, &p256, std::slice::from_ref(&consent), vec![grade_ext(vec![0x0C, 3, b't', b't', b'y', 0x00])], 3)),
+        ];
+        let _ = std::fs::remove_dir_all(&dir);
+        for (what, der) in &none_consent {
+            assert_eq!(super::consent_identity(der), None, "COUNTED AS CONSENT: {what}");
+            assert_eq!(super::client_identity(der), None, "COUNTED AS A CLIENT: {what}");
+        }
+        assert!(super::imp::generate_consent_cert("fleet", "legacy", &p256.public_key_raw().try_into().unwrap(), super::ConsentGrade::Tty, &ca_key, 1).is_err(),
+            "a reserved name is refused at issue");
+    }
+
+    /// **I7 exit 8, the mesh.** A P-256 consent certificate is refused by the mesh's key check with the reason the row
+    /// names — `refuse_if_removed`: "a mesh certificate must carry an Ed25519 identity key" — and an **Ed25519**
+    /// certificate a CA-key holder minted with the consent scheme (and an IP, so the name check passes) is refused by
+    /// the widened scheme check, `refuse_if_client`, at a real handshake when it dials B. The plant: the same mint
+    /// without the consent URI dials B. Seen failing first with `refuse_if_client` checking the client scheme only (the
+    /// Ed25519 consent-scheme certificate joined).
+    #[test]
+    fn a_consent_certificate_is_refused_at_the_mesh_for_its_key_and_for_its_scheme() {
+        use crate::node_id::NodeId;
+        use crate::removal::RemovedSet;
+        let dir = fresh_dir("consent-mesh");
+        let cfg = TlsConfig { auto_cert_dir: dir.clone(), ..TlsConfig::default() };
+        let nb = NodeId::new("127.0.0.1", 9563).unwrap();
+        let b = super::imp::load_or_generate(&cfg, &nb, Arc::new(RemovedSet::default()), Default::default()).unwrap();
+        let (ca_der, ca_key) = load_or_create_ca(&cfg).unwrap();
+        let (_, point, _) = p256_key();
+        let p256_cert = super::imp::generate_consent_cert("fleet", "richard", &point, super::ConsentGrade::Tty, &ca_key, 1_700_000_000_000).unwrap();
+        let by_key = super::imp::refuse_if_removed(&RemovedSet::default(), &p256_cert);
+        assert!(by_key.as_ref().is_err_and(|e| e.to_string().contains("a mesh certificate must carry an Ed25519 identity key")), "{by_key:?}");
+
+        let k = ed25519_dalek::SigningKey::from_bytes(&[62u8; 32]);
+        let kp = rcgen::KeyPair::try_from(ed25519_dalek::pkcs8::EncodePrivateKey::to_pkcs8_der(&k).unwrap().as_bytes()).unwrap();
+        let mint = |uris: Vec<rcgen::SanType>| {
+            let mut p = rcgen::CertificateParams::new(vec![]).unwrap();
+            p.subject_alt_names = uris;
+            p.not_before = rcgen::date_time_ymd(2024, 1, 1);
+            p.not_after = rcgen::date_time_ymd(2099, 1, 1);
+            let mut ca_params = rcgen::CertificateParams::new(vec![]).unwrap();
+            ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+            ca_params.not_before = rcgen::date_time_ymd(2024, 1, 1);
+            ca_params.not_after = rcgen::date_time_ymd(2099, 1, 1);
+            let ca = ca_params.self_signed(&ca_key).unwrap();
+            rustls::pki_types::CertificateDer::from(p.signed_by(&kp, &ca, &ca_key).unwrap().der().to_vec())
+        };
+        let ip = rcgen::SanType::IpAddress("127.0.0.1".parse().unwrap());
+        let plant = mint(vec![ip.clone()]);
+        let scheme = mint(vec![ip, rcgen::SanType::URI(rcgen::Ia5String::try_from(super::consent_uri("fleet", "richard")).unwrap())]);
+        let dial = |cert| {
+            let (_, client, _, _, _) = super::imp::build_rustls_configs(cert, &k, std::slice::from_ref(&ca_der), Arc::new(RemovedSet::default()), Default::default()).unwrap();
+            handshake(Arc::new(client), b.server_config())
+        };
+        let planted = dial(plant);
+        let dialled = dial(scheme);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(planted, Ok(()), "plant: the same mint without the consent scheme dials B");
+        assert!(dialled.as_ref().is_err_and(|e| e.starts_with("server refused") && e.contains("consent certificate")),
+            "ADMITTED: an Ed25519 certificate naming the consent scheme dialled the mesh: {dialled:?}");
     }
 }
 

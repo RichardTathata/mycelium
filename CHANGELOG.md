@@ -309,6 +309,19 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Developer consent certificates: the certificate and its principal** (identity-and-lifecycle I7, PR 1 of 3;
+  `deprecations.md` §112; [feature page](docs/features/consent-certificates.md)). `mycelium tls issue --client <name>
+  --consent --public-key <spki.pem> --grade <grade>` certifies a developer's P-256 key over its public half alone
+  (no key file written), naming `mycelium-consent://{issuer}/{name}` and carrying the grade the enrolment reported in a
+  non-critical extension. The certificate is published through `POST /gateway/identity/client-cert` and folded under
+  its own principal, `consent:{issuer}/{name}`, which never supersedes or is superseded by the same person's `token:`
+  key, is never fed as a possession key, and is refused at the mesh. **A release is blocked on the grade extension's
+  registered IANA PEN arc:** until it arrives the OID is provisional, a build without the test-only feature
+  `provisional-consent-grade` neither issues nor reads a consent certificate (its door refuses one,
+  `consent_grade_oid_provisional`), and the release workflow refuses a tag (`scripts/check-release-blockers.sh
+  --release`). A consent key's point must lie on P-256; `tls issue --node … --consent` is refused.
+  Verifying a consent decision, `gateway_consent_principals`, the grade on the record and `dev`'s key are PRs 2 and 3.
+
 - **An inbound KV entry stamped beyond the drift bound is counted** (the external-critique plan's row CR13, step
   1; `docs/plans/external-critique-2026-11-12.md`). A node clamps its own clock when a peer's stamp is more than
   `max_clock_drift_ms` ahead of its wall clock, and applies the entry all the same: under last-writer-wins a

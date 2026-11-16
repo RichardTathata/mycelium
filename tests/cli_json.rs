@@ -259,6 +259,32 @@ mod tls {
         let _ = (std::fs::remove_dir_all(&ca), std::fs::remove_dir_all(&out));
     }
 
+    /// **`tls issue --consent --format json` matches its golden** (identity-and-lifecycle I7, `kind: "consent"`; #800's
+    /// review, finding 7): the principal, the grade beside `grade_source: "operator"` (what the operator vouches for),
+    /// the certificate's path and SPKI SHA-256, and **no `key`** — none is written, and nothing secret is printed. Seen
+    /// failing first with the golden expecting `grade_source` before the binary printed it.
+    #[cfg(feature = "provisional-consent-grade")]
+    #[test]
+    fn tls_issue_consent_as_json_matches_its_golden_and_names_no_key() {
+        let (ca, out, keys) = (scratch("consent-ca"), scratch("consent-out"), scratch("consent-keys"));
+        let (ca_s, out_s) = (ca.display().to_string(), out.display().to_string());
+        let vars: Vars<'_> = &[("CA", &ca_s), ("OUT", &out_s)];
+        assert!(run(&["tls", "ca", "--out", &ca_s]).status.success());
+        std::fs::create_dir_all(&keys).unwrap();
+        let pem = keys.join("pub.pem");
+        std::fs::write(&pem, rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap().public_key_pem()).unwrap();
+        let pem_s = pem.display().to_string();
+        let o = run(&["tls", "issue", "--ca-dir", &ca_s, "--client", "dev", "--consent", "--public-key", &pem_s, "--grade", "tty",
+            "--issuer", "fleet", "--out", &out_s, "--format", "json"]);
+        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+        let raw = stdout(&o);
+        let doc: Value = serde_json::from_str(&raw).unwrap_or_else(|e| panic!("not one JSON document ({e}):\n{raw}"));
+        assert_golden("tls-issue-consent.json", &doc, vars);
+        assert!(doc.get("key").is_none(), "a consent issue names no key file");
+        assert_no_secrets(&doc, &raw, &[ca.as_path(), out.as_path()], &["dev", "fleet", "consent:fleet/dev", "tty", "consent", "operator"]);
+        let _ = (std::fs::remove_dir_all(&ca), std::fs::remove_dir_all(&out), std::fs::remove_dir_all(&keys));
+    }
+
     /// A directory another local user can write is named in `warnings` by `issue --client` as by `issue --node`
     /// (#767's review, L2). Seen failing first: `--client` printed `"warnings": []`.
     #[cfg(unix)]

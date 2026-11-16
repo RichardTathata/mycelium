@@ -590,6 +590,19 @@ certificate for the principal **supersedes** the older key, by a per-principal h
 (journaled under `[persistence]`, `identity/client-certs.journal`), so an overwrite of the newer record cannot bring the
 older key back. A record counts by the certificate it holds, never by its KV write time — `sys/client-cert/` is
 member-writable, like `sys/identity-cert/`.
+**Consent certificates are a second principal kind in the same fold** (identity-and-lifecycle I7, PR 1, unreleased): a
+P-256 key's certificate naming `mycelium-consent://{issuer}/{name}`, for `consent:{issuer}/{name}`, with a grade
+extension (`consent_identity`, `mycelium-core/src/tls.rs`). The scheme is bound to the key kind — no reader accepts the
+consent scheme over Ed25519, the client scheme over P-256, or both schemes — and **no grade, no consent**. Each
+principal has its own mark, so a consent key never supersedes a `token:` key (H1: the defect that made this a separate
+principal was a P-256 certificate superseding a `token:` key that `feed_client_keys` could not withdraw). Inside the
+fold a consent key is known by SHA-256 of its point (the path names the 130-digit point), so the journal form is
+unchanged. `client_key_standing` is `Unknown` for `consent:` and `feed_client_keys` feeds `token:` only, so no Ed25519
+check (`cs`, possession) can be answered for a consent key. **The grade is the enrolment's claim, signed by the CA, not
+a property any verifier can check** (S-presence): write it so everywhere. The grade OID is provisional until the
+registered PEN arc arrives: outside a test build (`cfg(test)` or the test-only feature `provisional-consent-grade`, never
+`test-support`) the issuer refuses and the reader reads none, and `scripts/check-release-blockers.sh --release` stops a
+tag. A consent point must lie on P-256 (RustCrypto `p256`), at issue and at read.
 **The roots can change on a live node** (identity-and-lifecycle I2, PR 1, unreleased): `NodeTls` holds its chain
 checks behind `ArcSwap` and a **roots generation** (`mycelium-core/src/tls.rs`). `reroot_material` builds material for
 the node's *current* key over a set of roots with no CA key; `activate` swaps the chain checks, then bumps the

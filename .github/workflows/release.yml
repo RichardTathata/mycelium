@@ -82,6 +82,18 @@ jobs:
               echo "::warning::dry_run=false on a workflow_dispatch is ignored: only a v* tag push publishes"
             fi
           fi
+      # Release blockers a constant in the tree states (RELEASING.md § 2): on a tag push a blocker fails the release
+      # here, before anything is built; on a dry run it is a warning. Today: the consent grade extension's OID is
+      # provisional until the registered IANA PEN arc arrives (identity-and-lifecycle I7, #800's review finding 1).
+      - name: Release blockers
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ steps.v.outputs.dry_run }}" == "false" ]]; then
+            scripts/check-release-blockers.sh --release
+          else
+            scripts/check-release-blockers.sh
+          fi
 
   linux:
     name: Linux ${{ matrix.target }}

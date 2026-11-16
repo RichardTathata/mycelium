@@ -53,6 +53,19 @@
 //! `refresh` scans the prefix once, grouped by principal, and checks each distinct certificate's chain once while it
 //! is cached by digest; it is single-flight. A certificate whose serial carries no readable issuance is never counted.
 //!
+//! ## Consent certificates (identity-and-lifecycle I7, H1)
+//!
+//! The same fold reads a developer's **consent** certificates — `mycelium-consent://{issuer}/{name}` over a P-256 key
+//! with its grade (`mycelium_core::tls::consent_identity`) — under their **own principal**, `consent:{issuer}/{name}`,
+//! beside the service's `token:{issuer}/{name}`. Each principal keeps its own mark, so no consent certificate
+//! supersedes a `token:` key and no `token:` certificate supersedes a consent key (H1). A consent record's path names
+//! the key as the **uncompressed X9.63 point**, 130 hex digits, which its length tells from an Ed25519 key's 64; inside
+//! the fold a consent key is known by the SHA-256 of that point, so a mark and the journal keep their 32-byte form and
+//! an older binary decodes the journal unchanged (it reads a consent principal's entries as a principal it is never
+//! asked about). A consent key is **never fed** to an execution authority's external-issuer set
+//! ([`feed_client_keys`] feeds `token:` principals only): it decides grants, and never proves possession of one.
+//! [`client_key_standing`] answers for `token:` principals only and [`consent_key_standing`] for `consent:` ones.
+//!
 //! Lock-free (papaya and atomics): no lock-order row.
 
 use std::collections::HashMap;
@@ -98,6 +111,58 @@ fn parse_hex32(s: &str) -> Option<[u8; 32]> {
 /// The record path of `principal`'s certificate for `key`.
 pub fn client_cert_key(principal: &str, key: &[u8; 32]) -> String {
     format!("{CLIENT_CERT_PREFIX}{}/{}", hex(principal.as_bytes()), hex(key))
+}
+
+/// The record path of a consent principal's certificate for its P-256 `point` (identity-and-lifecycle I7): the
+/// point's 130 hex digits, uncompressed X9.63, as the path's key segment.
+pub fn consent_cert_key(principal: &str, point: &[u8; 65]) -> String {
+    format!("{CLIENT_CERT_PREFIX}{}/{}", hex(principal.as_bytes()), hex(point))
+}
+
+/// Whether `principal` is a consent principal (`consent:{issuer}/{name}`, I7) rather than a service's `token:` one.
+fn is_consent(principal: &str) -> bool {
+    principal.starts_with("consent:")
+}
+
+/// How the fold knows a consent key: the SHA-256 of its point, so a mark stays 32 bytes (I7).
+fn consent_key_id(point: &[u8; 65]) -> [u8; 32] {
+    Sha256::digest(point).into()
+}
+
+/// The key a record path's last segment names, as the fold knows it, by the principal's kind: 64 hex digits (an
+/// Ed25519 key) for a `token:` principal, 130 (an uncompressed P-256 point, `04` first) for a `consent:` one. `None`
+/// for any other length or a kind mismatch.
+fn parse_path_key(principal: &str, s: &str) -> Option<[u8; 32]> {
+    if !is_consent(principal) {
+        return parse_hex32(s);
+    }
+    if s.len() != 130 || !s.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()) {
+        return None;
+    }
+    let mut point = [0u8; 65];
+    for (i, o) in point.iter_mut().enumerate() {
+        *o = u8::from_str_radix(&s[2 * i..2 * i + 2], 16).ok()?;
+    }
+    (point[0] == 0x04).then(|| consent_key_id(&point))
+}
+
+/// What a client or consent certificate names, read without the chain: its principal, its key as the fold knows it,
+/// the record path's key segment, its issuance, and (for consent) its grade. A certificate is at most one of the two:
+/// each reader refuses the other's scheme.
+struct Named {
+    principal: String,
+    key: [u8; 32],
+    key_hex: String,
+    issued: Option<u64>,
+    grade: Option<mycelium_core::tls::ConsentGrade>,
+}
+
+fn named(der: &[u8]) -> Option<Named> {
+    if let Some(id) = mycelium_core::tls::client_identity(der) {
+        return Some(Named { principal: id.principal(), key: id.key, key_hex: hex(&id.key), issued: id.issued_ms, grade: None });
+    }
+    let id = mycelium_core::tls::consent_identity(der)?;
+    Some(Named { principal: id.principal(), key: consent_key_id(&id.point), key_hex: hex(&id.point), issued: id.issued_ms, grade: Some(id.grade) })
 }
 
 /// A principal's newest verified issuance: the certificate's serial in ms, then its key.
@@ -163,6 +228,9 @@ pub(crate) struct ClientCertLedger {
     pub(crate) chain_checks: AtomicU64,
     /// Records ignored because their certificate carried no readable issuance.
     pub(crate) no_issuance: AtomicU64,
+    /// Consent certificates ignored because the grade extension's OID is provisional and this is no test build
+    /// (identity-and-lifecycle I7, #800's review finding 1): a shipped node fails closed on them, and counts.
+    pub(crate) provisional_grade: AtomicU64,
 }
 
 impl std::fmt::Debug for ClientCertLedger {
@@ -293,8 +361,8 @@ impl ClientCertLedger {
 
 /// A held record's order: its certificate's issuance and key, read without the chain (the door checked it).
 fn published_mark(der: &[u8]) -> Option<Mark> {
-    let id = mycelium_core::tls::client_identity(der)?;
-    Some(Mark { issued: id.issued_ms?, key: id.key })
+    let id = named(der)?;
+    Some(Mark { issued: id.issued?, key: id.key })
 }
 
 fn skew_ms(ctx: &TaskCtx) -> u64 {
@@ -357,13 +425,19 @@ fn facts_with(ledger: &ClientCertLedger, tls: &mycelium_core::tls::NodeTls, der:
     {
         return hit.clone();
     }
-    let (generation, found) = match mycelium_core::tls::client_identity(der) {
+    let (generation, found) = match named(der) {
         Some(id) => {
             ledger.chain_checks.fetch_add(1, Ordering::Relaxed);
             let (generation, verified) = tls.verify_member_cert_tagged(der);
-            (generation, verified.then(|| Facts { principal: id.principal(), key: id.key, issued: id.issued_ms }))
+            (generation, verified.then_some(Facts { principal: id.principal, key: id.key, issued: id.issued }))
         }
-        None => (tls.roots_generation(), None),
+        None => {
+            if mycelium_core::tls::consent_identity_closed_by_provisional_oid(der) {
+                ledger.provisional_grade.fetch_add(1, Ordering::Relaxed);
+                tracing::warn!("consent certificate under the provisional grade OID: ignored (this build reads none until the registered arc)");
+            }
+            (tls.roots_generation(), None)
+        }
     };
     between();
     let cache = ledger.cert_cache.pin();
@@ -384,7 +458,7 @@ fn fold(ctx: &TaskCtx, tls: &mycelium_core::tls::NodeTls, principal: &str) -> Ha
     // a fold costs one scan of the principal's records and a chain check per certificate not yet seen.
     ctx.client_certs.scans.fetch_add(1, Ordering::Relaxed);
     for (path, der) in mycelium_core::store::scan_kv_prefix(&ctx.kv_state, &prefix) {
-        let Some(expect) = path.rsplit('/').next().and_then(parse_hex32) else { continue };
+        let Some(expect) = path.rsplit('/').next().and_then(|k| parse_path_key(principal, k)) else { continue };
         if let Some(m) = judge(ctx, tls, principal, &der, Some(expect)) {
             let e = seen.entry(m.key).or_insert(m.issued);
             *e = (*e).max(m.issued);
@@ -397,10 +471,31 @@ fn fold(ctx: &TaskCtx, tls: &mycelium_core::tls::NodeTls, principal: &str) -> Ha
     seen
 }
 
-/// Where `key` stands for `principal`: folds the principal's records first, so a newer record read now
-/// supersedes at once. After a restart the mark is the newest the journal held and the store shows; for a
-/// saturated principal the journal stopped at its budget, so a newer mark reached later lives in this process only.
+/// Where the Ed25519 `key` stands for the service principal `principal` (`token:{issuer}/{name}`): folds the
+/// principal's records first, so a newer record read now supersedes at once. After a restart the mark is the newest
+/// the journal held and the store shows; for a saturated principal the journal stopped at its budget, so a newer mark
+/// reached later lives in this process only. A `consent:` principal is always `Unknown` here (identity-and-lifecycle
+/// I7, H1): its keys are P-256 and its standing is [`consent_key_standing`]'s, so no `cs`, possession or other
+/// Ed25519 check that asks this can be answered for a consent principal.
 pub fn client_key_standing(ctx: &TaskCtx, principal: &str, key: &[u8; 32]) -> ClientKeyStanding {
+    if is_consent(principal) {
+        return ClientKeyStanding::Unknown;
+    }
+    standing(ctx, principal, key)
+}
+
+/// Where the P-256 `point` stands for the consent principal `principal` (`consent:{issuer}/{name}`,
+/// identity-and-lifecycle I7): the same fold and mark as [`client_key_standing`], within the consent principal only,
+/// so a newer consent certificate supersedes the older consent key (P6) and nothing across the `token:` principal
+/// (H1). Any other principal is `Unknown`.
+pub fn consent_key_standing(ctx: &TaskCtx, principal: &str, point: &[u8; 65]) -> ClientKeyStanding {
+    if !is_consent(principal) {
+        return ClientKeyStanding::Unknown;
+    }
+    standing(ctx, principal, &consent_key_id(point))
+}
+
+fn standing(ctx: &TaskCtx, principal: &str, key: &[u8; 32]) -> ClientKeyStanding {
     let Some(tls) = ctx.tls.get() else { return ClientKeyStanding::Unknown };
     let seen = fold(ctx, tls, principal);
     let Some(mark) = ctx.client_certs.mark(principal) else { return ClientKeyStanding::Unknown };
@@ -448,7 +543,8 @@ fn refresh_once(ctx: &TaskCtx) {
     for (path, der) in mycelium_core::store::scan_kv_prefix(&ctx.kv_state, CLIENT_CERT_PREFIX) {
         let Some(rest) = path.strip_prefix(CLIENT_CERT_PREFIX) else { continue };
         let Some((phex, khex)) = rest.split_once('/') else { continue };
-        let (Some(principal), Some(expect)) = (decode_principal_hex(phex), parse_hex32(khex)) else { continue };
+        let Some(principal) = decode_principal_hex(phex) else { continue };
+        let Some(expect) = parse_path_key(&principal, khex) else { continue };
         if let Some(m) = judge(ctx, tls, &principal, &der, Some(expect)) {
             let e = newest.entry(principal).or_insert(m);
             *e = (*e).max(m);
@@ -467,7 +563,7 @@ pub(crate) fn republish_own(ctx: &TaskCtx) -> usize {
     let Some(tls) = ctx.tls.get() else { return 0 };
     let mut n = 0;
     for (principal, (path, der)) in ctx.client_certs.published.pin().iter() {
-        let key = path.rsplit('/').next().and_then(parse_hex32);
+        let key = path.rsplit('/').next().and_then(|k| parse_path_key(principal, k));
         if ctx.client_certs.mark(principal).is_some_and(|m| Some(m.key) != key) {
             continue;
         }
@@ -508,7 +604,8 @@ fn decode_principal_hex(s: &str) -> Option<String> {
 pub enum PublishRefusal {
     /// This node has no `[tls]`, so it holds no CA anchor to judge the chain by.
     NoTls,
-    /// Not a client certificate: no `mycelium-client://{issuer}/{name}` name, or a node's name beside it.
+    /// Not a client certificate: no `mycelium-client://{issuer}/{name}` name over an Ed25519 key, and no
+    /// `mycelium-consent://{issuer}/{name}` name over a P-256 key with a grade (I7), or a node's name beside either.
     NotAClientCertificate,
     /// The fleet CA did not issue it, or it is not valid now.
     NotIssuedByTheFleetCa,
@@ -519,6 +616,9 @@ pub enum PublishRefusal {
     NoReadableIssuance,
     /// A newer certificate for the principal has already been read: publishing this one would change nothing.
     Superseded,
+    /// A consent certificate under the grade extension's provisional OID, which this build does not read
+    /// (identity-and-lifecycle I7, #800's review finding 1): it is not published until the registered arc arrives.
+    ProvisionalConsentGrade,
 }
 
 impl std::fmt::Display for PublishRefusal {
@@ -530,28 +630,41 @@ impl std::fmt::Display for PublishRefusal {
             Self::IssuedInTheFuture => "issued_in_the_future",
             Self::NoReadableIssuance => "no_readable_issuance",
             Self::Superseded => "superseded",
+            Self::ProvisionalConsentGrade => "consent_grade_oid_provisional",
         })
     }
 }
 
-/// What a published client certificate says.
+/// What a published client or consent certificate says.
 #[derive(Debug)]
 pub struct Published {
     pub principal: String,
+    /// The key as the fold knows it: a client's Ed25519 key — or, for a consent certificate (I7), **the SHA-256 of the
+    /// P-256 point, not a key**: read `key_hex` for the point itself.
     pub key: [u8; 32],
+    /// The record path's key segment: the Ed25519 key's 64 hex digits, or the consent key's point's 130 (I7).
+    pub key_hex: String,
     pub issued_ms: u64,
+    /// A consent certificate's grade (I7); `None` for a client certificate.
+    pub grade: Option<mycelium_core::tls::ConsentGrade>,
 }
 
 /// Judge `der` and publish it as its principal's record: the door `POST /gateway/identity/client-cert` calls
 /// this. The record is the certificate itself, so any node judges it the same way this one did.
 pub fn publish(ctx: &Arc<TaskCtx>, der: &[u8]) -> Result<Published, PublishRefusal> {
     let Some(tls) = ctx.tls.get() else { return Err(PublishRefusal::NoTls) };
-    let id = mycelium_core::tls::client_identity(der).ok_or(PublishRefusal::NotAClientCertificate)?;
-    let principal = id.principal();
+    let Some(id) = named(der) else {
+        if mycelium_core::tls::consent_identity_closed_by_provisional_oid(der) {
+            ctx.client_certs.provisional_grade.fetch_add(1, Ordering::Relaxed);
+            return Err(PublishRefusal::ProvisionalConsentGrade);
+        }
+        return Err(PublishRefusal::NotAClientCertificate);
+    };
+    let principal = id.principal.clone();
     if !tls.verify_member_cert(der) {
         return Err(PublishRefusal::NotIssuedByTheFleetCa);
     }
-    let issued = id.issued_ms.ok_or(PublishRefusal::NoReadableIssuance)?;
+    let issued = id.issued.ok_or(PublishRefusal::NoReadableIssuance)?;
     if issued > mycelium_core::sim_seam::wall_now_ms().saturating_add(skew_ms(ctx)) {
         return Err(PublishRefusal::IssuedInTheFuture);
     }
@@ -559,12 +672,12 @@ pub fn publish(ctx: &Arc<TaskCtx>, der: &[u8]) -> Result<Published, PublishRefus
     if ctx.client_certs.mark(&principal).is_some_and(|m| m > Mark { issued, key: id.key }) {
         return Err(PublishRefusal::Superseded);
     }
-    let path = client_cert_key(&principal, &id.key);
+    let path = format!("{CLIENT_CERT_PREFIX}{}/{}", hex(principal.as_bytes()), id.key_hex);
     let _ = super::helpers::kv_set(ctx, Arc::from(path.as_str()), bytes::Bytes::copy_from_slice(der));
     ctx.client_certs.raise(&principal, Mark { issued, key: id.key });
     feed_client_keys(ctx);
     ctx.client_certs.hold_published(&principal, path, der.to_vec());
-    Ok(Published { principal, key: id.key, issued_ms: issued })
+    Ok(Published { principal, key: id.key, key_hex: id.key_hex, issued_ms: issued, grade: id.grade })
 }
 
 /// A `Published` journal entry, encoded as the ledger writes it (tests build a journal by hand).
@@ -584,12 +697,15 @@ impl ClientCertLedger {
 /// Feed every client principal's current key — the fold's marks — to each registered external-issuer set
 /// (identity-and-lifecycle I1): an execution authority then verifies a client holder's possession proof by it. A
 /// superseded key is replaced, never kept beside its successor. Run after each fold and when an authority attaches.
+/// **`token:` principals only** (I7, H1): a consent principal's key decides grants and never proves possession, so it
+/// is never fed — and its mark, the SHA-256 of a P-256 point, is no Ed25519 key.
 pub(crate) fn feed_client_keys(ctx: &TaskCtx) {
     let sinks: Vec<crate::knowledge::issuer::SharedExternalIssuers> = ctx.client_key_sinks.pin().values().cloned().collect();
     if sinks.is_empty() {
         return;
     }
-    let marks: Vec<(String, Mark)> = ctx.client_certs.marks.pin().iter().map(|(p, m)| (p.clone(), *m)).collect();
+    let marks: Vec<(String, Mark)> =
+        ctx.client_certs.marks.pin().iter().filter(|(p, _)| p.starts_with("token:")).map(|(p, m)| (p.clone(), *m)).collect();
     for (principal, mark) in marks {
         let Some(issuer) = crate::knowledge::IssuerId::new(&principal) else { continue };
         for sink in &sinks {
