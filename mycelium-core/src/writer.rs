@@ -110,6 +110,12 @@ pub async fn run_peer_writer(
     tls: Option<Arc<NodeTls>>,
 ) {
     let mut conn: Option<BufWriter<crate::stall::StallGuard<GossipStream>>> = None;
+    // Identity-and-lifecycle I2 (#796's review, must-address 6): the roots generation the session's handshake was judged
+    // under, and the peer's certificate. When the node's roots change, the session is re-judged before its next write,
+    // and dropped when the new roots refuse the peer — no verifier runs on an established session, so without this an
+    // old-root peer kept receiving after a narrow. The reconnect then handshakes under the new roots.
+    #[cfg(feature = "tls")]
+    let mut session: Option<(u64, Vec<u8>)> = None;
     // Stores (fail_time, actual_backoff) where actual_backoff is jittered so
     // simultaneous reconnects after a partition don't all fire at the same instant.
     // (when it failed, how long to wait) — monotonic nanoseconds from the clock seam, so a replay
@@ -156,10 +162,29 @@ pub async fn run_peer_writer(
                 continue;
             }
 
+        #[cfg(feature = "tls")]
+        if conn.is_some()
+            && let (Some(t), Some((judged_at, der))) = (tls.as_ref(), session.as_ref())
+            && *judged_at != t.roots_generation()
+        {
+            let (now, trusted) = t.verify_member_cert_tagged(der);
+            if trusted {
+                session = Some((now, der.clone()));
+            } else {
+                warn!("Dropping the session to {peer}: its certificate does not verify against this node's new roots");
+                conn = None;
+                session = None;
+            }
+        }
+
         // Lazily establish (or re-establish) the connection. The connect and the TLS handshake are
         // bounded together by `timing.connect`, and shutdown or eviction interrupts them (row B):
         // a peer that accepts TCP and never answers the handshake used to park this task.
         if conn.is_none() {
+            // Read before the client config is loaded (inside `tls_connect`): `activate` stores the config before it
+            // bumps the generation, so a handshake tagged with the current generation ran under the current roots.
+            #[cfg(feature = "tls")]
+            let judged_at = tls.as_ref().map_or(0, |t| t.roots_generation());
             let attempt = async {
                 #[cfg(any(test, feature = "test-frame-filter"))]
                 {
@@ -195,7 +220,11 @@ pub async fn run_peer_writer(
                     if let Some(ref t) = tls
                         && let Some(anchor_key) = gs.peer_ed25519_key()
                     {
-                        t.record_anchor(&peer, anchor_key);
+                        t.record_anchor(&peer, anchor_key, judged_at);
+                    }
+                    #[cfg(feature = "tls")]
+                    {
+                        session = gs.peer_cert_der().map(|der| (judged_at, der));
                     }
                     // 16 KB buffer coalesces a full burst of small gossip frames into
                     // one or two kernel write calls; explicit flush sends after drain.
@@ -278,6 +307,10 @@ pub async fn run_peer_writer(
                 warn!("Write to {} made no progress within {:?} (peer_write_stall_timeout_ms)", peer, stall.stall);
             }
             conn = None;
+            #[cfg(feature = "tls")]
+            {
+                session = None;
+            }
             // +1 for the frame that caused the write failure (already dequeued, never sent).
             let dropped = rx.len() + 1;
             last_fail = Some((crate::sim_seam::mono_now_ns(), jittered(backoff)));

@@ -72,6 +72,10 @@ pub struct TransportBounds {
     /// without the `mycelium.kv/update/1` tag — a peer still on 2.32 (post-360 row F2). Frames, not
     /// peers. `GET /stats` `kv_untagged_signatures_refused`.
     pub kv_untagged_refused: AtomicU64,
+    /// Inbound mesh sessions closed because, after a change of this node's roots, the peer's certificate no longer
+    /// verifies against them (identity-and-lifecycle I2, #796's review must-address 6). `GET /stats`
+    /// `sessions_closed_by_roots`.
+    pub sessions_closed_by_roots: AtomicU64,
     /// `SignedData` frames dropped because their `signer` is not the update's `sender` (#611's review,
     /// finding 1). `GET /stats` `kv_signer_mismatch`.
     pub kv_signer_mismatch: AtomicU64,

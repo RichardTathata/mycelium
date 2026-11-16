@@ -311,7 +311,7 @@ pub(crate) async fn decide_grant(ctx: &Arc<TaskCtx>, caller: Option<&ResolvedPri
     let is_client = !holder_principal.starts_with("node:");
     if is_client {
         // A client holder must be able to prove possession: its certificate is on record here.
-        if ctx.client_certs.mark(&holder_principal).is_none() {
+        if crate::agent::client_cert::current_mark(ctx, &holder_principal).is_none() {
             return Err(GrantRefusal::door(StatusCode::CONFLICT, "not_a_member", format!("{holder_principal} has no client certificate on record here; a grant held by a client is issued only to a principal whose current key this node knows")));
         }
     } else if holder_principal != gateway_caller::node_principal(&ctx.node_id) && !is_member_agent(ctx, &holder_principal) {
@@ -607,7 +607,7 @@ pub(super) async fn gw_grant_request(
     let Some(principal) = caller.map(|Extension(c)| c.principal().to_string()) else {
         return refused(StatusCode::UNAUTHORIZED, "no_principal", "a grant is requested by an authenticated principal");
     };
-    if principal.starts_with("node:") || tc.client_certs.mark(&principal).is_none() {
+    if principal.starts_with("node:") || crate::agent::client_cert::current_mark(tc, &principal).is_none() {
         return refused(StatusCode::CONFLICT, "not_a_client_holder", format!("{principal} has no client certificate on record here: a grant held by a client needs a key that proves possession (mycelium tls issue --client, then POST /gateway/identity/client-cert)"));
     }
     if body.tool.is_empty() || body.tool.contains('/') {

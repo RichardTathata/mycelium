@@ -97,6 +97,12 @@ pub struct NodeStanding {
 #[derive(Default)]
 pub struct KeyStanding {
     by_node: papaya::HashMap<NodeId, std::sync::Arc<NodeStanding>>,
+    /// **No legacy class** (identity-and-lifecycle I2, R1; the maintainer's decision of 2026-11-12): set when every root
+    /// this node trusts is generation 1 or later — computed by `NodeTls` whenever the root set is built, at start and at
+    /// each change of roots, never from `succession/`. While it is set, a node with no standing, or with
+    /// `anchored: None`, has no trusted key ([`Self::is_distrusted`] is true for every key of it). Stored `Release`,
+    /// loaded `Acquire`. Lock-free: no lock-order row.
+    legacy_closed: std::sync::atomic::AtomicBool,
 }
 
 impl std::fmt::Debug for KeyStanding {
@@ -149,11 +155,30 @@ impl KeyStanding {
     }
 
     /// Is `key` **not** a key this node trusts for `node`, whatever else holds it — revoked, or, for an
-    /// anchored node, not one of its anchored keys?
+    /// anchored node, not one of its anchored keys? With [legacy closed](Self::legacy_closed) (I2, R1), also every key
+    /// of a node with no standing or with `anchored: None`: such a node has no trusted key, so this fails closed where
+    /// it was permissive (#796's review, must-address 7).
     pub fn is_distrusted(&self, node: &NodeId, key: &[u8; 32]) -> bool {
-        self.get(node).is_some_and(|s| {
-            s.revoked.contains(key) || s.anchored.as_ref().is_some_and(|a| !a.contains(key))
-        })
+        match self.get(node) {
+            Some(s) => {
+                s.revoked.contains(key)
+                    || match s.anchored.as_ref() {
+                        Some(a) => !a.contains(key),
+                        None => self.legacy_closed(),
+                    }
+            }
+            None => self.legacy_closed(),
+        }
+    }
+
+    /// Whether this node has no legacy class (I2, R1): every root it trusts is generation 1 or later.
+    pub fn legacy_closed(&self) -> bool {
+        self.legacy_closed.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Set [`Self::legacy_closed`] — by `NodeTls`, whenever it builds the root set.
+    pub fn set_legacy_closed(&self, closed: bool) {
+        self.legacy_closed.store(closed, std::sync::atomic::Ordering::Release);
     }
 
     /// Every node with a judged standing.
@@ -199,5 +224,28 @@ mod tests {
         assert!(k.is_distrusted(&owner, &[3u8; 32]) && k.is_revoked(&owner, &[3u8; 32]), "anchored, revoked");
         assert!(!k.is_distrusted(&other, &[3u8; 32]), "the owner's standing says nothing about another node");
         assert_eq!(k.node_by_hash(owner.id_hash()), Some(owner.clone()));
+    }
+
+    /// **R1 (identity-and-lifecycle I2), the standing half of exit 15.** With legacy closed, a node with no standing and
+    /// a node with `anchored: None` have no trusted key — `is_distrusted` fails closed where it was permissive (#796's
+    /// review, must-address 7) — and an anchored node is judged exactly as before. Seen failing first with the flag
+    /// ignored in `is_distrusted`: the legacy node's key was not distrusted.
+    #[test]
+    fn with_legacy_closed_a_node_without_standing_has_no_trusted_key() {
+        let k = KeyStanding::default();
+        let anchored = NodeId::new("127.0.0.1", 7021).unwrap();
+        let legacy = NodeId::new("127.0.0.1", 7022).unwrap();
+        let unjudged = NodeId::new("127.0.0.1", 7023).unwrap();
+        k.set(&anchored, NodeStanding { anchored: Some([[2u8; 32]].into_iter().collect()), revoked: Default::default(), counted: Default::default() });
+        k.set(&legacy, NodeStanding { anchored: None, revoked: Default::default(), counted: Default::default() });
+        assert!(!k.legacy_closed());
+        assert!(!k.is_distrusted(&legacy, &[5u8; 32]) && !k.is_distrusted(&unjudged, &[5u8; 32]), "open: legacy judged as before");
+        k.set_legacy_closed(true);
+        assert!(k.is_distrusted(&legacy, &[5u8; 32]), "closed: anchored None trusts nothing");
+        assert!(k.is_distrusted(&unjudged, &[5u8; 32]), "closed: no standing trusts nothing");
+        assert!(!k.is_distrusted(&anchored, &[2u8; 32]) && k.is_distrusted(&anchored, &[3u8; 32]), "an anchored node as before");
+        let empty = KeyStanding::default();
+        empty.set_legacy_closed(true);
+        assert!(empty.is_distrusted(&unjudged, &[5u8; 32]), "closed with nothing judged at all");
     }
 }

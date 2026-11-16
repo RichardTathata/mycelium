@@ -2,6 +2,9 @@
 # Release blockers that a constant in the tree states (identity-and-lifecycle I7, #800's review finding 1).
 #
 # WHY IT EXISTS
+#   Two provisional OIDs, one rule (the maintainer's decision (e), 2026-11-15): the consent grade extension's
+#   (`CONSENT_GRADE_OID`, I7) and the CA generation extension's (`CA_GENERATION_OID`, identity-and-lifecycle I2, PR 2a),
+#   each beside its `…_IS_PROVISIONAL` constant in mycelium-core/src/tls.rs. Each is checked alike.
 #   The consent grade extension's OID (`CONSENT_GRADE_OID` in mycelium-core/src/tls.rs) is provisional until the
 #   registered IANA Private Enterprise Number arc arrives (the maintainer, 2026-11-15). A certificate that carries an
 #   OID is permanent, so no release may ship while `CONSENT_GRADE_OID_IS_PROVISIONAL` is `true`. The plan said so in
@@ -18,17 +21,19 @@ set -euo pipefail
 self_test() {
   local dir
   dir=$(mktemp -d)
-  printf 'pub const CONSENT_GRADE_OID_IS_PROVISIONAL: bool = true;\n' >"$dir/blocked.rs"
-  printf 'pub const CONSENT_GRADE_OID_IS_PROVISIONAL: bool = false;\n' >"$dir/clear.rs"
-  printf 'pub const SOMETHING_ELSE: bool = true;\n' >"$dir/missing.rs"
+  printf 'pub const CONSENT_GRADE_OID_IS_PROVISIONAL: bool = true;\npub const CA_GENERATION_OID_IS_PROVISIONAL: bool = false;\n' >"$dir/blocked.rs"
+  printf 'pub const CONSENT_GRADE_OID_IS_PROVISIONAL: bool = false;\npub const CA_GENERATION_OID_IS_PROVISIONAL: bool = true;\n' >"$dir/blocked-gen.rs"
+  printf 'pub const CONSENT_GRADE_OID_IS_PROVISIONAL: bool = false;\npub const CA_GENERATION_OID_IS_PROVISIONAL: bool = false;\n' >"$dir/clear.rs"
+  printf 'pub const CONSENT_GRADE_OID_IS_PROVISIONAL: bool = false;\n' >"$dir/missing.rs"
   local ok=1
-  if "$0" --release "$dir/blocked.rs" >/dev/null 2>&1; then echo "self-test: a provisional OID passed --release"; ok=0; fi
+  if "$0" --release "$dir/blocked.rs" >/dev/null 2>&1; then echo "self-test: a provisional grade OID passed --release"; ok=0; fi
+  if "$0" --release "$dir/blocked-gen.rs" >/dev/null 2>&1; then echo "self-test: a provisional generation OID passed --release"; ok=0; fi
   if ! "$0" "$dir/blocked.rs" >/dev/null 2>&1; then echo "self-test: a provisional OID failed without --release"; ok=0; fi
-  if ! "$0" --release "$dir/clear.rs" >/dev/null 2>&1; then echo "self-test: a registered OID failed --release"; ok=0; fi
-  if "$0" --release "$dir/missing.rs" >/dev/null 2>&1; then echo "self-test: a file without the constant passed"; ok=0; fi
-  rm -f "$dir/blocked.rs" "$dir/clear.rs" "$dir/missing.rs"
+  if ! "$0" --release "$dir/clear.rs" >/dev/null 2>&1; then echo "self-test: registered OIDs failed --release"; ok=0; fi
+  if "$0" --release "$dir/missing.rs" >/dev/null 2>&1; then echo "self-test: a file without a constant passed"; ok=0; fi
+  rm -f "$dir/blocked.rs" "$dir/blocked-gen.rs" "$dir/clear.rs" "$dir/missing.rs"
   rmdir "$dir"
-  if [[ $ok == 1 ]]; then echo "check-release-blockers --self-test: ok (4 cases)"; else exit 1; fi
+  if [[ $ok == 1 ]]; then echo "check-release-blockers --self-test: ok (5 cases)"; else exit 1; fi
 }
 
 release=0
@@ -41,18 +46,25 @@ for a in "$@"; do
   esac
 done
 
-line=$(grep -E '^pub const CONSENT_GRADE_OID_IS_PROVISIONAL: bool = (true|false);' "$file" || true)
-if [[ -z "$line" ]]; then
-  echo "check-release-blockers: $file has no \`pub const CONSENT_GRADE_OID_IS_PROVISIONAL: bool = …;\` line — the check cannot read the blocker" >&2
-  exit 1
-fi
-if [[ "$line" == *"= true;"* ]]; then
-  msg="release blocked: CONSENT_GRADE_OID_IS_PROVISIONAL is true in $file — the consent grade extension's OID is the documentation-PEN placeholder until the registered IANA PEN arc replaces it (identity-and-lifecycle I7; RELEASING.md § 2)"
-  if [[ $release == 1 ]]; then
-    echo "::error::$msg"
+blocked=0
+warned=0
+for constant in CONSENT_GRADE_OID_IS_PROVISIONAL CA_GENERATION_OID_IS_PROVISIONAL; do
+  line=$(grep -E "^pub const ${constant}: bool = (true|false);" "$file" || true)
+  if [[ -z "$line" ]]; then
+    echo "check-release-blockers: $file has no \`pub const ${constant}: bool = …;\` line — the check cannot read the blocker" >&2
     exit 1
   fi
-  echo "check-release-blockers: warning: $msg"
-  exit 0
-fi
+  if [[ "$line" == *"= true;"* ]]; then
+    msg="release blocked: ${constant} is true in $file — the OID is the documentation-PEN placeholder until the registered IANA PEN arc replaces it (identity-and-lifecycle I7 and I2; RELEASING.md § 2)"
+    if [[ $release == 1 ]]; then
+      echo "::error::$msg"
+      blocked=1
+    else
+      echo "check-release-blockers: warning: $msg"
+      warned=1
+    fi
+  fi
+done
+if [[ $blocked == 1 ]]; then exit 1; fi
+if [[ $warned == 1 ]]; then exit 0; fi
 echo "check-release-blockers: no blocker"

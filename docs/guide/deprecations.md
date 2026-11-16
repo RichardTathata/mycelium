@@ -4767,3 +4767,81 @@ Tests: `src/agent/http/marker_race_tests.rs` (each door, the tool entry delivere
 and count; served once it arrives; a tombstoned marker restored by its provider within a period),
 `the_grant_door_passes_over_a_provider_whose_marker_is_not_held` (`src/agent/client_grant_tests.rs`), `a_client_route_passes_over_a_provider_whose_marker_is_not_held` (`mycelium-reason/tests/gateway.rs`),
 `secure_profile_refuses_a_provider_without_the_marker_and_legacy_does_not` (the named target still `412`).
+
+## 115. Standing under changed roots: kept anchors, no legacy class on a node trusting only successor roots, client marks with their certificate, sessions re-judged, and a CA's generation (unreleased, identity-and-lifecycle I2, PR 2a)
+
+*Numbered 115 because an open pull request holds §113 (#801) at the time of writing; the sections are in order once it
+merges.*
+
+Every change below acts only at a **change of a node's roots** or on a node whose roots are a successor's. In a fleet
+that has never succeeded — every root generation 0, no change of roots — behaviour is as before, except that kept
+anchors are journaled under `[persistence]` (the first item). Nothing in this release changes a node's roots on its
+own: the successor-signed record that drives a succession is I2's next PR, and until it lands only
+`GossipAgent::change_roots` (`#[doc(hidden)]`) does.
+
+**An anchor keeps its certificates, journaled.** A key a certificate record anchors for a node is kept with the
+certificate itself (at most two, one per issuer), and under `[persistence]` each kept certificate is appended to the
+identity journal (`identity/revocations.journal`, `Anchor` entries). An anchor leaves only when its kept certificates
+fail the roots this node trusts now — at a change of roots and at start, never because the record left the store — so
+a node restarted under `[persistence]` keeps an anchor whose record was hidden while it was down. Before, anchors were
+kept for the process's life only. A node whose anchors were all dropped **trusts nothing** for that node (it keeps an
+empty entry), where before it fell back to the legacy rule (`peer_keys`). Counters: `anchors_dropped`,
+`anchor_journal_refused` (the anchors' own budget: 32 per node, 65 536 in all; past it an anchor lives in memory only).
+- **Downgrade:** an older binary skips `Anchor` entries with its "an entry did not decode" warning; nothing else in the
+  journal is affected.
+- Tests: `a_kept_anchor_survives_its_record_hidden_and_an_old_ca_one_is_dropped_at_narrowing`,
+  `a_fold_whose_merge_meets_a_change_of_roots_merges_nothing`, `removing_every_anchor_of_a_node_fails_closed_with_legacy_open`
+  (`src/agent/succession_tests.rs`).
+
+**A node that trusts only successor roots has no legacy class** (R1, the maintainer's decision of 2026-11-12). When
+every root a node trusts is generation 1 or later, a node with no certificate standing has no trusted key: its keys in
+`peer_keys`, however they got there, verify nothing (`CoreCtx::trusted_keys`, `KeyStanding::is_distrusted`,
+`CoreCtx::retain_trusted`). The rule is derived from the roots alone, so it holds on a node recovered by the operator's
+procedure and on one first started on a successor's files. It does not reach a fleet that has never succeeded (every
+root generation 0: §39's window is unchanged).
+
+**A CA's generation, and a provisional OID.** A CA certificate may carry a non-critical `caGeneration` extension (a
+DER `INTEGER`). Its OID is **provisional** — `1.3.6.1.4.1.32473.2.1`, under the documentation PEN, until the registered
+IANA PEN arc replaces it — so a shipped build mints no CA carrying it and **refuses, by name, a root carrying it** at
+start, at a change of roots and when issuing; a malformed one is refused everywhere, never read as generation 0. `tls
+ca` mints generation 0 and writes no extension, so no CA minted by any release carries it, and nothing changes for an
+existing fleet. A release is blocked while the OID is provisional (`scripts/check-release-blockers.sh --release`).
+- Tests: `a_closed_provisional_gate_reads_no_ca_generation_and_mints_none`, `a_ca_generation_is_read_and_a_malformed_one_is_never_zero`,
+  `legacy_closes_only_when_every_root_is_generation_one_or_later` (`mycelium-core/src/tls.rs`); the shipped binary's
+  refusal, `scripts/check-shipped-ca-generation-refusal.sh` (CI).
+
+**A client principal's mark keeps the certificate that raised it** (#768's M4). The client-certificate journal
+(`identity/client-certs.journal`) gains a `RaisedWithCert` entry, appended in place of `Raised`, so a mark restored at
+start is judged again against the node's roots. The key at a mark is current only while its certificate verifies: after
+a change of roots, a client whose key was not re-issued under the successor reads `Unknown`, is no longer a grant
+holder "with a certificate on record", and its key is withdrawn from the execution authority's external-issuer set.
+A mark restored from an older `Raised` entry (no certificate) holds as before until the first change of roots, then
+reads `Unknown` until a verifying record re-establishes it.
+- **Downgrade:** an older binary skips `RaisedWithCert` with its warning, and so loses the marks written after the
+  upgrade (a client then holds the standing its newest visible record gives).
+- Test: `client_marks_are_re_judged_at_a_change_of_roots` (`src/agent/succession_tests.rs`).
+
+**A mesh session is re-judged when the roots change.** Each live session — inbound and outbound — judges its peer's
+certificate again against the new roots before its next frame, and closes when they refuse it; an inbound close is
+counted (`GET /stats` `sessions_closed_by_roots`). The handshake anchors (`peer_anchor_keys`) are cleared at a change of
+roots, and an anchor from a handshake judged under the old roots is discarded. Each new inbound session's certificate
+is judged once more on its first frame (one chain check per connection).
+- Test: `an_established_session_to_an_old_root_peer_is_dropped_at_narrowing` (`src/agent/succession_tests.rs`),
+  `an_anchor_from_a_handshake_judged_under_old_roots_is_not_recorded` (`mycelium-core/src/tls.rs`).
+
+**A rotation and a change of roots have one owner.** `rotate_identity` holds the identity's owner from building its
+material to activating it, across its propagation wait, and a change of roots waits for it: `activate` no longer
+refuses a rotation whose new key was already saved and published (#796's review, must-address 8).
+- Test: `a_rotation_and_a_change_of_roots_have_one_owner`.
+
+**API.** mycelium-core (`tls`): `CA_GENERATION_OID`, `CA_GENERATION_OID_IS_PROVISIONAL`, `ca_generation`,
+`CaGenerationError`, `ca_generation_oid_open`, `ca_generation_oid_der`, `ca_generation_extension_der`,
+`roots_close_legacy`, `cert_issuer_der`, `mint_ca_at` and `issue_client_cert_for_key` (both `#[doc(hidden)]`) are new;
+**`NodeTls::record_anchor` takes a third argument**, the roots generation the handshake was judged under (an embedder
+calling it passes `roots_generation()` read before it loaded the client config); `GossipStream::peer_cert_der` is new;
+`KeyStanding` gains `legacy_closed` and `set_legacy_closed`; `TransportBounds` gains `sessions_closed_by_roots`.
+mycelium: `GossipAgent::change_roots` (`#[doc(hidden)]`); `SharedExternalIssuers::withdraw_client_key` and
+`TrustedExternalIssuers::withdraw_client_key`; the Cargo feature `provisional-ca-generation` (test lines only).
+Nothing is removed or renamed.
+
+*Check:* `grep -rn "record_anchor(" --include='*.rs' .` — every call passes a generation.

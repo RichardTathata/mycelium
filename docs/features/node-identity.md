@@ -55,10 +55,17 @@ which needs two processes and lives in the Docker suites.
 - **Guarantees:** [`id.proofs_required`](../reference/guarantee-catalogue.md#id.proofs_required),
   [`id.ca_key_off_node`](../reference/guarantee-catalogue.md#id.ca_key_off_node) and
   [`id.revocation_authority`](../reference/guarantee-catalogue.md#id.revocation_authority).
+- **Under a change of roots** (plan row I2, PRs 1 and 2a): a node changes only its own trust
+  (`GossipAgent::change_roots`, under one owner with `rotate_identity`), and everything it judged under the old roots
+  is judged again. An anchored key keeps its certificates — one per issuer, journaled under `[persistence]` — and
+  leaves only when they fail the roots the node trusts now, never because its record left the store; a node left with
+  no anchor trusts nothing, never reverting to legacy. A node whose every root is generation 1 or later (a CA's
+  `caGeneration`, under a **provisional** OID a shipped build refuses by name) has no legacy class. Live mesh sessions
+  are re-judged before their next frame and closed when the new roots refuse the peer (`sessions_closed_by_roots`).
 - **Not built:** rotation in place under the off-node posture (recovery is re-issue); the CA key cannot be rotated,
-  and its compromise is recovered by re-issue only — CA succession (plan row I2) has its reload path in the library
-  (`NodeTls::reroot_material`, the roots generation that re-judges cached certificate verdicts) and nothing yet that
-  drives it: the successor-signed record, its phases and `tls succeed` are I2's next PRs; a node whose
+  and its compromise is recovered by re-issue only — CA succession (plan row I2) has its reload path and its standing
+  rules in the library and nothing yet that drives them: `ca-commit.pem`, `tls commit`, the successor-signed record, its
+  phases under `succession/` (PR 2b) and `tls succeed` (PR 3) are I2's next PRs; a node whose
   certificate predates row Q has no standing to revoke until it is re-issued; a removed member's gateway tokens are a
   separate revocation ([cert rotation § Removing a member](../operations/cert-rotation.md#removing-a-member-an-operators-authority-c5)).
 - **Evidence:** the ledger rows

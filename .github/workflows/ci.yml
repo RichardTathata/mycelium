@@ -43,9 +43,9 @@ jobs:
       # real frames with (`agent::lock_lifecycle_tests`, `agent::lock_lifecycle_review_tests`). Only lib
       # test runs enable it — never `test-support` — so examples and demo images do not compile it.
       - run: ./scripts/ci-retest.sh --lib --features test-frame-filter
-      # `provisional-consent-grade` (I7, #800's review): the test-only switch that lets the consent-certificate tests
-      # issue and read under the grade's provisional OID; no example, image or shipped binary enables it.
-      - run: ./scripts/ci-retest.sh --lib --features tls,metrics,a2a,llm,test-frame-filter,provisional-consent-grade
+      # `provisional-consent-grade` (I7, #800's review) and `provisional-ca-generation` (I2, PR 2a): the test-only switches that let the consent-certificate and
+      # change-of-roots tests issue and read under the provisional OIDs; no example, image or shipped binary enables them.
+      - run: ./scripts/ci-retest.sh --lib --features tls,metrics,a2a,llm,test-frame-filter,provisional-consent-grade,provisional-ca-generation
       # STRICT, no retry: the shutdown-delivery tests (the shutdown-sweep flake, #650), by name. They also
       # run in the flake tier above, by discovery; here a failure is never retried. Seven hold one place on
       # the outbound path open with a test pause or check the count itself, so they are deterministic. Three
@@ -78,7 +78,7 @@ jobs:
       # STRICT: the audit chain and both gateway enforcement points are a security gate, and a
       # security gate that goes green on an isolated retry has not passed. The retry still runs
       # (it is diagnostic) and is still annotated, but it fails the job.
-      - run: CI_RETEST_STRICT=1 ./scripts/ci-retest.sh --lib --features compliance,a2a,provisional-consent-grade
+      - run: CI_RETEST_STRICT=1 ./scripts/ci-retest.sh --lib --features compliance,a2a,provisional-consent-grade,provisional-ca-generation
       # Consensus-free embed: gateway without the consensus feature must still
       # test green (a minimal-embed node forwards PROPOSE/VOTE/COMMIT without
       # running them). Same 2026-07-21 gap closure.
@@ -202,8 +202,8 @@ jobs:
       # Full feature matrix — `--lib --tests` alone misses code behind
       # #[cfg(feature = "tls")] etc. (same set CLAUDE.md mandates locally).
       - run: cargo clippy --lib --tests --features tls,metrics,a2a,llm -- -D warnings
-      # The consent-certificate tests behind the test-only `provisional-consent-grade` (I7, #800's review).
-      - run: cargo clippy --lib --bins --tests --features tls,metrics,a2a,llm,compliance,provisional-consent-grade -- -D warnings
+      # The consent-certificate and change-of-roots tests behind the test-only `provisional-consent-grade` and `provisional-ca-generation` (I7, #800's review; I2, PR 2a).
+      - run: cargo clippy --lib --bins --tests --features tls,metrics,a2a,llm,compliance,provisional-consent-grade,provisional-ca-generation -- -D warnings
       # Compliance-gated code (WS1–WS5) is invisible to the line above; `make check` has
       # linted it since 2026-07-22 but CI never did (2026-09-04 wiki-lint finding).
       - run: cargo clippy --lib --tests --features compliance -- -D warnings
@@ -1497,6 +1497,8 @@ jobs:
       - run: cargo build --bin mycelium --features cli,tls,compliance,a2a,llm,metrics
       # That binary, as it ships, refuses a consent certificate while the grade OID is provisional (I7, #800's review).
       - run: ./scripts/check-shipped-consent-refusal.sh ./target/debug/mycelium
+      # …and a CA carrying the caGeneration extension while its OID is provisional (I2, PR 2a; decision (e)).
+      - run: ./scripts/check-shipped-ca-generation-refusal.sh ./target/debug/mycelium
       - uses: actions/setup-node@v4
         with:
           node-version: 24

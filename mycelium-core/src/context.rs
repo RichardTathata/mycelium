@@ -274,11 +274,17 @@ impl CoreCtx {
     ///
     /// A revocation seen *after* a write was verified does not un-apply that write (detection, not
     /// prevention); every verification after it is seen refuses.
+    ///
+    /// **No legacy class once legacy is closed** (identity-and-lifecycle I2, R1): when every root this node trusts is
+    /// generation 1 or later ([`crate::removal::KeyStanding::legacy_closed`]), a node with no standing or with
+    /// `anchored: None` has no trusted key — `peer_keys` is not read — except this node's own current key for itself
+    /// (it trusts its own key before its own record is judged).
     pub fn trusted_keys(&self, node: &NodeId) -> Vec<[u8; 32]> {
         let mut keys: Vec<[u8; 32]> = match self.key_standing.get(node) {
             Some(s) if s.anchored.is_some() => {
                 s.anchored.iter().flatten().filter(|k| !s.revoked.contains(*k)).copied().collect()
             }
+            _ if self.key_standing.legacy_closed() => self.own_current_key_for(node).into_iter().collect(),
             _ => self.peer_keys.pin().get(node).cloned().unwrap_or_default(),
         };
         self.retain_trusted(node, &mut keys);
@@ -315,16 +321,29 @@ impl CoreCtx {
     /// Drop from `keys` (offered for `node`) every key this node does not trust for it: revoked by
     /// `node`, not among an anchored node's anchored keys, or a removed member's. This node's own
     /// current key is always kept for itself (its certificate record may not have been judged yet).
+    ///
+    /// The fast path skips the standing check only while nothing has been judged **and** legacy is open (I2, R1): with
+    /// legacy closed an empty standing distrusts every key but this node's own.
     pub fn retain_trusted(&self, node: &NodeId, keys: &mut Vec<[u8; 32]>) {
-        if !self.key_standing.is_empty() {
-            #[cfg(feature = "tls")]
-            let own = (node == &self.node_id).then(|| self.tls.get().map(|t| t.verifying_key_bytes())).flatten();
-            #[cfg(not(feature = "tls"))]
-            let own: Option<[u8; 32]> = None;
+        if !self.key_standing.is_empty() || self.key_standing.legacy_closed() {
+            let own = self.own_current_key_for(node);
             keys.retain(|k| Some(*k) == own || !self.key_standing.is_distrusted(node, k));
         }
         if !self.removed.is_empty() {
             keys.retain(|k| !self.removed.is_key_removed(k));
+        }
+    }
+
+    /// This node's own current key, when `node` is this node (the own-key exception of [`Self::retain_trusted`]).
+    fn own_current_key_for(&self, node: &NodeId) -> Option<[u8; 32]> {
+        #[cfg(feature = "tls")]
+        {
+            (node == &self.node_id).then(|| self.tls.get().map(|t| t.verifying_key_bytes())).flatten()
+        }
+        #[cfg(not(feature = "tls"))]
+        {
+            let _ = node;
+            None
         }
     }
 
