@@ -609,7 +609,16 @@ pub async fn handle_connection(
                     let is_new = if sender == node_id {
                         false
                     } else {
-                        guard.insert(sender.clone(), now).is_none()
+                        let is_new = guard.insert(sender.clone(), now).is_none();
+                        // Re-checked after the insert (#801's confirm round, C2): a removal applied
+                        // between the check above and the insert has already cleared `peers`, so the
+                        // insert would outlive it. The removal writes the set before it clears
+                        // `peers`, so one of the two always sees the other.
+                        if task_ctx.removed.is_node_removed(&sender) {
+                            guard.remove(&sender);
+                            continue;
+                        }
+                        is_new
                     };
                     // Only add piggybacked peers while the table has room.
                     // The direct sender is always admitted (inserted above); only
@@ -617,8 +626,15 @@ pub async fn handle_connection(
                     let mut dropped_peers = 0usize;
                     for peer in known_peers {
                         if peer == node_id { continue; }
+                        // Closure plan C5 (#801's confirm round, C3): a peer that has not applied a
+                        // removal still lists the removed member; it is not re-introduced here.
+                        if task_ctx.removed.is_node_removed(&peer) { continue; }
                         if guard.len() < max_peers {
-                            guard.get_or_insert(peer, now);
+                            guard.get_or_insert(peer.clone(), now);
+                            // Re-checked after the insert, as the sender is (C2).
+                            if task_ctx.removed.is_node_removed(&peer) {
+                                guard.remove(&peer);
+                            }
                         } else {
                             dropped_peers += 1;
                         }

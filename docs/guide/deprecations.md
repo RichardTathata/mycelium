@@ -4606,6 +4606,10 @@ in `mycelium-core/src/swim.rs`.
   unanswered, it is never a probe target, relay or rejoin target, and a `BecameAlive` for it never re-enters
   `peers` or the fan-out watch. Before this, SWIM could bring a removed member that was up back into `peers`.
   Refusals are counted in `SwimState::removed_refused` (not in `/stats`).
+- **A removed member is not re-introduced by TCP peer exchange.** A ping's piggybacked `known_peers` naming a removed
+  member are skipped; before, a peer that had not yet applied the removal brought it back into the peer table (every
+  tick with SWIM off, as the enforced domain profile runs). Every insert into the peer table re-checks removal after
+  it inserts, so a removal landing between the check and the insert still wins.
 - **Who must upgrade:** the fix is on the prober's side. A restarted seed is found again once its **peers** run this
   release, whatever version the seed runs. A fleet whose members run 2.40.0 keeps the bug.
 - **Still not covered:** a node with no bootstrap peers that is in **no one's** `bootstrap_peers`, and that was

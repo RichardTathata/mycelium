@@ -18,9 +18,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `Dead` on every peer `swim_suspicion_timeout_ms` later, its writes reaching no one for good. The prober now probes
   `Suspect` members too (as SWIM specifies, with relays still `Alive` members only), carries its rumour about a target
   in the probe so the target refutes it, and once each suspicion window probes one bootstrap peer it holds `Dead` or
-  has not heard of. With it, SWIM shuts out a removed member (closure plan C5) as the TCP path does: never probed,
-  relayed for or re-admitted into `peers`, its datagrams dropped (before, SWIM could bring a removed member that was up
-  back). No wire change: the SWIM datagram's layout is unchanged, and a probe's gossip sample holds no more entries.
+  has not heard of. With it, a removed member (closure plan C5) stays out of the peer table on both transports: SWIM
+  never probes, relays for or re-admits it and drops its datagrams, and a TCP ping's piggybacked `known_peers` no longer
+  re-introduce it (before, SWIM could bring back a removed member that was up, and so could peer exchange from a node
+  that had not yet applied the removal). No wire change: the SWIM datagram's layout is unchanged, and a probe's gossip sample holds no more entries.
   Every release with SWIM on by default is affected (`deprecations.md` §113).
   - **Upgrade the members, not the seed:** the fix is on the prober's side, so a restarted seed of any version is
     found again once its peers run this release. A fleet whose members run 2.40.0 keeps the bug.

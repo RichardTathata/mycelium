@@ -128,12 +128,19 @@ key is in its own certificate directory), reported `Present` or `Absent`. `Prese
   §2.2 asks.
 - **Membership is covered on both transports.** On TCP, the connection loop drops a removed node's pings, signals
   and gossip writes (by node, and for writes by origin and signer), and the node leaves the peer table and the
-  outbound writers. On SWIM's UDP path (`mycelium-core/src/swim.rs`, from #801; before it, this line claimed the
+  outbound writers. A ping's piggybacked `known_peers` never re-introduce it: a peer that has not yet applied the
+  removal still lists it, and the Ping arm skips it (from #801; before, only the sender was checked, so peer
+  exchange brought a removed member back — every tick with SWIM off). Gate:
+  `lib_tests::test_piggybacked_removed_member_not_added`. Every insert into the peer table — the Ping arm's sender
+  and piggybacked peers, SWIM's `BecameAlive` — re-checks the removed set after it inserts and takes the member out
+  again, so a removal that lands between the check and the insert (it writes the set, then clears the table) still
+  wins (gate: `swim::tests::a_removal_between_the_check_and_the_insert_still_wins`). On SWIM's UDP path (`mycelium-core/src/swim.rs`, from #801; before it, this line claimed the
   connection loop covered SWIM, which it did not): a removed node's `Ping`, `Ack` and `PingReq` are dropped unanswered,
   a `PingReq` naming it is not relayed, it is never a probe target, relay or rejoin target, and a `BecameAlive` for
   it never re-enters `peers` or the fan-out watch. Each refusal is counted (`SwimState::removed_refused`). The agent
   hands SWIM the removed set at start (`SwimState::set_removed`). Gate:
-  `swim::tests::a_removed_member_is_never_probed_or_taken_back_into_peers`.
+  `swim::tests::a_removed_member_is_never_probed_or_taken_back_into_peers`,
+  `swim::tests::a_third_partys_gossip_does_not_readmit_a_removed_member` (a third party's `Alive` for it).
 - **Keys named are extended with what the node has seen:** the removal's keys, plus every current and anchored key
   the applying node holds for that member.
 - **Not covered:** an HTTP client of some gateway that holds a token issued to the removed member's agents. Tokens

@@ -98,6 +98,8 @@ struct HandlerOpts {
     peer_keys: Vec<(NodeId, Vec<[u8; 32]>)>,
     /// The handler's per-node counters, shared so a test can read them.
     bounds:    Arc<mycelium_core::bounds::TransportBounds>,
+    /// The node's removed members (closure plan C5), shared so a test can remove one.
+    removed:   Arc<mycelium_core::removal::RemovedSet>,
 }
 
 fn spawn_handler_with(
@@ -170,7 +172,7 @@ fn spawn_handler_with(
         },
         peer_keys: Arc::new(opts.peer_keys.into_iter().collect()),
         peer_anchor_keys: Arc::new(papaya::HashMap::new()),
-        removed: Arc::new(mycelium_core::removal::RemovedSet::default()),
+        removed: Arc::clone(&opts.removed),
         key_standing: Arc::new(mycelium_core::removal::KeyStanding::default()),
         identity_anchor_conflicts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         peers: Arc::new(papaya::HashMap::new()),
@@ -4643,6 +4645,32 @@ async fn test_piggybacked_peers_added_to_table() {
         },
         200,
     ).await;
+}
+
+/// **A removed member is not re-introduced by peer exchange** (closure plan C5; #801's confirm
+/// round, C3). A node that has not applied a removal still lists the removed member in its pings'
+/// `known_peers` (every tick with SWIM off, which the enforced domain profile requires; the ping-back
+/// to a new sender with SWIM on). The Ping arm checked the sender only and inserted every piggybacked
+/// peer, so the removed member came back into `peers`. Seen failing first with the `known_peers`
+/// filter removed.
+#[tokio::test]
+async fn test_piggybacked_removed_member_not_added() {
+    let (mut writer, reader) = loopback_pair().await;
+    let peers: Arc<papaya::HashMap<NodeId, Instant>> = Arc::new(papaya::HashMap::new());
+    let (tx, _rx) = mpsc::channel(10);
+    let removed_member = NodeId::new("127.0.0.1", 5101).unwrap();
+    let opts = HandlerOpts::default();
+    opts.removed.remove(&removed_member, []);
+    let _ = spawn_handler_with(reader, Arc::new(papaya::HashMap::new()), Arc::clone(&peers), tx,
+                               Arc::new(ShardedSeen::new(N_GOSSIP_SHARDS)), GossipConfig::default().default_ttl, opts);
+    let kept = NodeId::new("127.0.0.1", 5102).unwrap();
+    send_wire(&mut writer, &WireMessage::Ping {
+        sender: "127.0.0.1:9100".parse().unwrap(),
+        known_peers: vec![removed_member.clone(), kept.clone()],
+    }).await;
+    let p = Arc::clone(&peers);
+    poll_until(|| p.pin().contains_key(&kept), 200).await;
+    assert!(!peers.pin().contains_key(&removed_member), "a removed member re-entered peers through known_peers");
 }
 
 #[tokio::test]

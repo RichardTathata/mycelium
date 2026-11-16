@@ -84,6 +84,10 @@ impl SwimDatagram {
     }
 }
 
+/// **Test-only:** the hook [`SwimState`] calls between `BecameAlive`'s removal check and its insert.
+#[cfg(test)]
+type TestHook = Box<dyn Fn(&NodeId) + Send + Sync>;
+
 /// Shared SWIM transport state: the UDP socket, this node's identity, a monotonic
 /// probe-sequence counter, and the table of in-flight probes awaiting an acknowledgement.
 /// Held in an `Arc` and shared between the listener loop (which resolves acks) and the
@@ -122,6 +126,10 @@ pub struct SwimState {
     /// SWIM datagrams and membership facts refused because they name a removed member
     /// ([`SwimState::removed_refused`]).
     removed_refused: AtomicU64,
+    /// **Test-only:** called between `BecameAlive`'s removal check and its insert into `peers`, so a
+    /// test can land a removal in that window.
+    #[cfg(test)]
+    test_before_insert: std::sync::OnceLock<TestHook>,
 }
 
 impl SwimState {
@@ -151,6 +159,8 @@ impl SwimState {
             max_active_connections,
             removed: std::sync::OnceLock::new(),
             removed_refused: AtomicU64::new(0),
+            #[cfg(test)]
+            test_before_insert: std::sync::OnceLock::new(),
         })
     }
 
@@ -220,7 +230,20 @@ impl SwimState {
                 // A removed member is not a peer, however SWIM hears of it (#801's review, F2):
                 // the TCP Ping arm refuses it the same way (`connection.rs`).
                 if node != self.self_id && !self.refuse_removed(&node) {
+                    #[cfg(test)]
+                    if let Some(hook) = self.test_before_insert.get() { hook(&node); }
                     self.peers.pin().get_or_insert(node.clone(), now);
+                    // Re-checked after the insert (#801's confirm round, C2). A removal
+                    // (`membership_ops::apply`) writes the removed set and then clears `peers`; one
+                    // landing between the check above and this insert has already cleared it, and
+                    // nothing would ever probe the member again, so the insert would outlive the
+                    // removal. Whichever order the two interleave in, one sees the other: a clear
+                    // after the insert removes it, and a clear before it means the set was written
+                    // first and this read sees it.
+                    if self.refuse_removed(&node) {
+                        self.peers.pin().remove(&node);
+                        return;
+                    }
                     // Event-driven fan-out activation — the SWIM twin of the TCP Ping
                     // arm's append. Bounded by the same resolved fan-out `k`; the health
                     // monitor remains the steady-state reconciler/evictor. Without this,
@@ -960,6 +983,49 @@ mod tests {
             assert!(!r_peers.pin().contains_key(&aid), "{status:?}: a answered or probed the removed member");
             assert!(a.removed_refused() > 0, "{status:?}: the refusals are counted");
         }
+    }
+
+    /// **A third party's gossip does not re-admit a removed member** (#801's confirm round, C1).
+    /// `a` holds `r` `Suspect`; `r` is removed **after** start (the set SWIM holds is the live one);
+    /// then `c`, which holds `Alive(r)@1`, probes `a`. Its gossip reaches `a`'s table directly — no
+    /// datagram from `r`, no probe of `r` — and only the `BecameAlive` gate keeps `r` out of `peers`.
+    /// Seen failing with the gate planted out.
+    #[tokio::test]
+    async fn a_third_partys_gossip_does_not_readmit_a_removed_member() {
+        let (a, aid, _ash, a_peers) = spawn_node().await;
+        let (c, _cid, _csh, _) = spawn_node().await;
+        let rid = id(9301);
+        let removed = Arc::new(crate::removal::RemovedSet::default());
+        a.set_removed(Arc::clone(&removed));
+        let now = Instant::now();
+        a.lock_membership().apply(&MemberUpdate { node: rid.clone(), incarnation: 0, status: MemberStatus::Suspect }, now);
+        c.lock_membership().apply(&MemberUpdate { node: rid.clone(), incarnation: 1, status: MemberStatus::Alive }, now);
+        removed.remove(&rid, []);
+        assert!(c.probe_member(&aid, PT).await, "c reaches a");
+        assert_eq!(a.lock_membership().fact(&rid).map(|f| (f.incarnation, f.status)), Some((1, MemberStatus::Alive)),
+            "a merged c's Alive(r)@1, so the gate is what decides");
+        assert!(!a_peers.pin().contains_key(&rid), "a removed member re-entered peers by third-party gossip");
+        assert!(a.removed_refused() > 0, "the refusal is counted");
+    }
+
+    /// **A removal that lands between `BecameAlive`'s check and its insert still wins** (#801's
+    /// confirm round, C2). The hook removes `r` the way `membership_ops::apply` does — the set
+    /// first, then `peers` — after the check has passed and before the insert. Without the
+    /// re-check after the insert, `r` stayed in `peers`. Seen failing with the re-check planted out.
+    #[tokio::test]
+    async fn a_removal_between_the_check_and_the_insert_still_wins() {
+        let (a, _aid, _ash, a_peers) = spawn_node().await;
+        let rid = id(9302);
+        let removed = Arc::new(crate::removal::RemovedSet::default());
+        a.set_removed(Arc::clone(&removed));
+        let (set, peers) = (Arc::clone(&removed), Arc::clone(&a_peers));
+        let _ = a.test_before_insert.set(Box::new(move |n: &NodeId| {
+            set.remove(n, []);
+            peers.pin().remove(n);
+        }));
+        a.apply_effect(ApplyEffect::BecameAlive(rid.clone()), Instant::now());
+        assert!(!a_peers.pin().contains_key(&rid), "the removal landed in the window and the member stayed");
+        assert!(a.removed_refused() > 0);
     }
 
     /// **The rumour reaches the suspect when the roster is larger than the sample** (#801's
