@@ -1150,6 +1150,14 @@ impl ExecutionAuthority {
         out
     }
 
+    /// **The newest stop record of work under `scope`'s term `term`**, if this authority keeps one: `Some(true)` a
+    /// confirmed stop, `Some(false)` a release it could not confirm. One pass under row 49. Records are the newest
+    /// [`STOP_RECORDS_KEPT`] (1 024), so under load an older stop has aged out and this answers `None`.
+    pub(crate) fn call_stop_recorded(&self, scope: &str, term: &str) -> Option<bool> {
+        let stops = self.stops.lock().unwrap_or_else(|e| e.into_inner());
+        stops.iter().rev().find(|s| s.scope.as_deref() == Some(scope) && s.term.as_deref() == Some(term)).map(|s| s.record.confirmed_ms.is_some())
+    }
+
     /// Resolves the next time a piece of running work ends — or at once, if one ends between this call and the
     /// first poll: the waiter is enabled before it returns. Pair with [`call_registrations`](Self::call_registrations)
     /// in a loop.

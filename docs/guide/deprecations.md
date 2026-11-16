@@ -4606,7 +4606,7 @@ gateway that does not mint** (`gateway_mint_call_mandates`, off by default) exce
   `CancelReceipt { term, class }` and `CancelClass` (`#[non_exhaustive]`): `Stopped` (the provider's confirmed stop:
   the work was at a door whose agent promised to stop, and it ended), `StopRequested` (asked, not ended within
   `CANCEL_CONFIRM_WAIT_MS` = 1 000 ms), `Unbounded` (the agent doing the work made no promise to stop: its end is not
-  the provider's to confirm), `NotRunning` (nothing ran under the term there; the revocation is held), `NotHeld` (the
+  the provider's to confirm), `NotRunning` (nothing runs under the term there and no stop record of it is kept; the revocation is held — a call the KV's copy of the revocation stopped a moment before the forward arrived is answered from its stop record, `Stopped`), `NotHeld` (the
   provider's windows are full), `Refused(reason)`, **`DeliveryUnknown`** (no answer within
   `CANCEL_FORWARD_TIMEOUT_MS` = 5 000 ms — never a negative: the KV still carries the revocation) and
   `NotForwarded` (this gateway restarted since the mint and does not know where the call went). A receipt exists

@@ -99,8 +99,10 @@ pub enum CancelClass {
     /// confirm its end: the class's drain is unbounded (`DrainBound::Unbounded`), and the work runs at most to its
     /// mandate's window.
     Unbounded,
-    /// The provider holds the revocation and was running nothing under the term: the call finished, or has not
-    /// reached it — and if it does, it is refused `revoked` before it runs.
+    /// The provider holds the revocation, runs nothing under the term and keeps no stop record of it: the call
+    /// finished, or has not reached it — and if it does, it is refused `revoked` before it runs. (A stop the revocation
+    /// in the KV made a moment before the forward arrived is answered from its stop record — `Stopped`, or `Unbounded`
+    /// for an unconfirmed release — while the provider keeps it, among its newest 1 024.)
     NotRunning,
     /// The provider could not hold the revocation (its windows are at their cap); a call it admits later under the
     /// term reads the KV record.
@@ -452,7 +454,13 @@ async fn answer(ctx: &TaskCtx, by: &PrincipalId, signed: &SignedRevocationCheckp
             authority.sweep(now);
             let scope = &signed.checkpoint.scope;
             match authority.call_registrations(by, scope) {
-                (0, 0) => "not_running",
+                // Nothing runs under the term now. If it ran here and was stopped — by this sweep or, a moment
+                // earlier, by the revocation the KV carried — its stop record says how; otherwise it never ran here.
+                (0, 0) => match signed.checkpoint.scope.strip_prefix(crate::mandate::grant::CALL_SCOPE_PREFIX).and_then(|t| authority.call_stop_recorded(scope, t)) {
+                    Some(true) => "stopped",
+                    Some(false) => "unbounded",
+                    None => "not_running",
+                },
                 (_, u) if u > 0 => "unbounded",
                 _ if !wait => "stop_requested",
                 _ => {

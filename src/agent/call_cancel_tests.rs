@@ -82,11 +82,14 @@ async fn cancel_call_returns_the_providers_receipt_and_counts_it() {
     assert!(reply.to_string().contains("cancelled"), "{reply}");
     assert_eq!(p.finished.load(Ordering::SeqCst), 0);
     assert_eq!(stat(&g, "receipts", "stopped"), 1);
+    // The revocation also reached the provider by the KV, and on a slower machine (CI's) it stopped the call before
+    // the forward arrived: the provider answers from the stop record it keeps, not `NotRunning` (#799's CI, first
+    // run — the fail-first evidence of the fix). A second cancel of the stopped term is that case, every time.
     let again = g.a.cancel_call(&term).await.expect("idempotent");
-    assert_eq!(again.class, CancelClass::NotRunning, "nothing runs under the term, and the revocation is held: {again:?}");
+    assert_eq!(again.class, CancelClass::Stopped, "the work under the term was stopped here, and its record says so: {again:?}");
     assert_eq!(g.a.cancel_call("c1").await, Err(crate::CancelRefusal::UnknownTerm));
     let stats: serde_json::Value = reqwest::Client::new().get(format!("http://127.0.0.1:{}/stats", g.http_port)).send().await.unwrap().json().await.unwrap();
-    assert_eq!((stats["call_cancel_receipts"]["stopped"].as_u64(), stats["call_cancel_receipts"]["not_running"].as_u64()), (Some(1), Some(1)), "{}", stats["call_cancel_receipts"]);
+    assert_eq!(stats["call_cancel_receipts"]["stopped"].as_u64(), Some(2), "{}", stats["call_cancel_receipts"]);
     g.a.shutdown().await;
     p.a.shutdown().await;
     let _ = std::fs::remove_dir_all(&cert_dir);
