@@ -188,7 +188,7 @@ is, what adopting it would buy, what it would cost or risk, its state, and what 
     and minting is off by default.
   - The bug does not reproduce on 0.2.1 or 0.2.5: there `retain` dereferences the masked `entry.ptr`. Every other
     dereference in 0.1.9's `raw/mod.rs` uses the masked pointer, so `retain` is the only affected method (#803's
-    review). Step 1 below names the first 0.2.x release that carries the fix.
+    review). Which 0.2.x release first carries the fix is not yet known; step 1 below finds it.
   - #799 removes that call and bans `papaya::HashMap::retain` through clippy's `disallowed-methods`, so the known
     exposure is closed and cannot return before this row is built.
 - **What it buys:** the fix upstream rather than a ban, and the maintained line.
