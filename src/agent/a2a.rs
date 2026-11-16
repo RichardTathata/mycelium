@@ -451,6 +451,9 @@ fn reserve_task(
         Some((_, t)) if t.generation != Generation::Legacy || generation != Generation::Legacy => {
             papaya::Operation::Abort(Err(Unclaimable::NotResendable))
         }
+        // A re-send of a task still in flight starts no second call (#799's review, M2): its cancel would reach only
+        // the first, and the second's answer would write the cancelled task back. It is answered the pending task.
+        Some((_, t)) if t.pending.is_some() => papaya::Operation::Abort(Err(Unclaimable::InFlight)),
         Some(_) => papaya::Operation::Abort(Ok(())),
         None => papaya::Operation::Insert(A2aTask {
             task: Task { id: task_id.to_string(), status: TaskStatus { state: "submitted".into() }, artifacts: vec![] },
@@ -488,6 +491,8 @@ pub(crate) enum Unclaimable {
     Foreign,
     /// It is a task a 0.3 or 1.0 method created, which is never re-sent.
     NotResendable,
+    /// A pre-0.2 re-send of a task whose first send is still in flight: answered the pending task, nothing dispatched.
+    InFlight,
 }
 
 impl Unclaimable {
@@ -499,6 +504,7 @@ impl Unclaimable {
                 -32004,
                 "this task was created by message/send or SendMessage and is its own message's: send a new message instead",
             ),
+            Unclaimable::InFlight => jsonrpc_error(id, -32004, "this task's send is still in flight: tasks/get it, or tasks/cancel it"),
         }
     }
 }
@@ -875,6 +881,13 @@ async fn dispatch_send(
     // new id cannot both run). An id another identity owns is refused here, before anything is sent.
     let reservation = match reserve_task(state, &req.task_id, &req.context_id, req.generation, &task_owner(caller)) {
         Ok(reservation) => reservation,
+        // The idempotent re-send: the task as it stands, and no second call.
+        Err(Unclaimable::InFlight) => {
+            return match state.tasks.pin().get(&req.task_id) {
+                Some(entry) => Ok(entry.task.clone()),
+                None => Err(jsonrpc_error(id, -32001, "task not found")),
+            };
+        }
         Err(why) => return Err(why.refusal(id)),
     };
     let text = req.text.clone();

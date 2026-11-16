@@ -69,7 +69,8 @@ is a manual run with a real model.
 - **`tasks/cancel` revokes the task's call before it removes the task** (identity-and-lifecycle I4,
   [§112](../guide/deprecations.md)): on a gateway that mints `call:` mandates, the call's term is revoked and
   recorded on disk before `canceled` is answered, then forwarded to the provider; only the task's creator can cancel
-  it, and a cancelled task stays cancelled. The answer says what the gateway did, never that the provider stopped —
+  it, and a cancelled task stays cancelled; a pre-0.2 re-send of a pending task is answered the pending task and
+  starts no second call. The answer says what the gateway did, never that the provider stopped —
   that is `GossipAgent::cancel_call`'s receipt and `GET /stats` `call_cancel_receipts`.
 - **Not built:** `/a2a` on the published stem — it is built without `a2a` by decision (2026-11-09), so it refuses
   `gateway_a2a` and `gateway_a2a_default_skill` at start; the card is public on a credentialed node; the pre-0.2

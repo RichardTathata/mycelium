@@ -270,6 +270,12 @@ fn sign_checkpoint(ctx: &TaskCtx, term: &str, seq: u64, at_ms: u64, revoked: boo
     Some(SignedRevocationCheckpoint { signature: mycelium_core::tls::sign_bytes(&tls.signing_key(), &c.canonical_bytes()).to_vec(), checkpoint: c })
 }
 
+/// Test hook: hold `term` as issued until `until_ms`, as a mint does, with no record written.
+#[cfg(all(test, feature = "compliance"))]
+pub(crate) fn test_hold_issued(ctx: &TaskCtx, term: &str, until_ms: u64) {
+    ctx.call_issuer.issued.pin().insert(term.to_string(), Issued { seq: 1, at_ms: 0, revoked: false, until_ms, durable_seq: 1, target: None });
+}
+
 /// Test hook: the checkpoint `seq` of `term` this gateway would sign, written nowhere.
 #[cfg(all(test, feature = "compliance"))]
 pub(crate) fn test_sign_checkpoint(ctx: &TaskCtx, term: &str, seq: u64, at_ms: u64, revoked: bool) -> SignedRevocationCheckpoint {
@@ -578,7 +584,13 @@ pub(crate) fn collect(ctx: &TaskCtx, now_ms: u64) -> Collected {
     }
     // Held until its window could no longer be presented anywhere (its end + 2·skew): past it a provider refuses the
     // mandate out of window whatever its checkpoint says, so there is nothing left to re-assert or revoke from memory.
-    ctx.call_issuer.issued.pin().retain(|_, i| now_ms <= i.until_ms.saturating_add(skew2));
+    // Not `papaya::HashMap::retain`: on papaya 0.1.x it reads each entry through its tagged pointer, so after an
+    // incremental resize the closure is handed bytes 4 off the entry (#799's review, H1; fixed upstream in 0.2.x).
+    // `iter` reads the masked pointer: collect the dead terms under one guard, remove them one by one.
+    let dead: Vec<String> = ctx.call_issuer.issued.pin().iter().filter(|(_, i)| now_ms > i.until_ms.saturating_add(skew2)).map(|(t, _)| t.clone()).collect();
+    for term in dead {
+        ctx.call_issuer.issued.pin().remove(&term);
+    }
 
     // `grant/`: this node's own issue records and its own door's markers and releases — only with
     // `collect_expired_records` on. The `call/` half above runs on a minting gateway too (#794's round-2 review, C3).

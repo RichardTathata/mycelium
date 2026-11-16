@@ -6,7 +6,7 @@
 
 Four M2-audit findings (Runs 16–18) plus a sweep all reduced to one shape: **a lock-free
 operation followed by an unserialised derived effect.** Two rules close the family; apply
-them to every new papaya call site:
+them to every new papaya call site, and rule 3 is the library's own defect on 0.1.x:
 
 1. **`compute` closures must be retry-safe.** papaya re-invokes the closure on concurrent
    change. Never `take()` a single-use value inside one (panics on retry); clone per
@@ -16,6 +16,22 @@ them to every new papaya call site:
    (`is_empty()` → spawn), unconditional remove keyed by something another caller may have
    replaced — all must re-validate inside a `compute` (conditional remove), behind an atomic
    `swap`, by `Arc::ptr_eq` identity, or under a stripe lock with a re-read.
+
+3. **No `papaya::HashMap::retain` on papaya 0.1.x** (#799's review, H1, 2026-11-16). papaya 0.1.9's `retain`
+   (`raw/mod.rs:1212`) reads each entry through `entry.raw`, the pointer **with its tag bits still set**; `iter`
+   reads `entry.ptr`, masked (`raw/mod.rs:2722`). After an incremental resize (the default,
+   `ResizeMode::Incremental(64)`) every copied entry carries the `BORROWED` tag (`0b100`), so `retain`'s closure is
+   handed a key and value read 4 bytes off: in release a map of about 40 entries already decides on garbage, in
+   debug a large one aborts (`misaligned pointer dereference`). Repro: a crate with `papaya = "=0.1.9"`, insert *n*
+   `u64 → u64` pairs with key = value, `retain(|k, v| { assert_eq!(k, v); k % 2 == 0 })` — *n* = 40 fails the
+   assertion in release, *n* = 100 000 aborts in debug. Fixed upstream in 0.2.x (the same repro passes on 0.2.1 and
+   0.2.5). Until the workspace moves to 0.2, filter with `iter` and `remove` the collected keys one by one (the
+   reference: `call_issuer::collect` and `call_cancel::register_mcp_call`). The one `retain` the workspace had,
+   `call_issuer::collect`'s on `issued` (since #794), was replaced; gate:
+   `collect_keeps_the_live_issued_calls_and_drops_the_dead_past_a_resize`. **Gated:** the workspace `clippy.toml`
+   bans `papaya::{HashMap, HashMapRef, HashSet, HashSetRef}::retain` (`disallowed-methods`), so every clippy line of
+   `make check` and CI refuses a new one — seen firing on a planted `retain` in `src/` (`HashMapRef`) and in
+   `mycelium-core` (`HashSetRef`). Lift the ban with the move to papaya 0.2.x (`rust-ecosystem-watch.md` W8).
 
 Reference implementations: `get_or_spawn_writer` (claim-by-sentinel, spawn outside the
 closure), `ShardedSeen::evict_below` (conditional remove), `kv_quorum::{install_tracker,

@@ -50,6 +50,9 @@ pub(super) struct Opts {
     /// I4, PR 3: this node also serves `unstoppable` (30 s) with `register_mcp_tool_unstoppable`, and the A2A skill
     /// `depot/dispatch` through an `rpc_rx` receiver that declared it stops; the gateway mounts `/a2a`.
     pub(super) more_doors: bool,
+    /// I4, PR 3a (#799's review, M1): the provider in `pair` has an execution authority and **no** provider
+    /// enforcement.
+    pub(super) no_enforce: bool,
 }
 
 pub(super) struct N {
@@ -116,7 +119,9 @@ pub(super) async fn node(opts: Opts) -> N {
     let gate = ExecutionGate::strict(ResourceAuthority::new("unused", 1), ResourceTier::Serialised, ClockModel { skew_ms: SKEW_MS }, FreshnessPolicy { freshness_ms: F_MS, interval_ms: 500, delivery_ms: 160 }).unwrap();
     let authority = Arc::new(ExecutionAuthority::new(gate, GrantVerifier::new(EntitlementTable::new()), TrustedExternalIssuers::new()));
     a.with_execution_authority(Arc::clone(&authority));
-    a.with_provider_enforcement();
+    if !opts.no_enforce {
+        a.with_provider_enforcement();
+    }
     a.start().await.unwrap();
     let (started, finished) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
     if opts.tools {
@@ -239,11 +244,11 @@ pub(super) async fn until(cond: impl Fn() -> bool, within: Duration) -> bool {
 /// Two nodes under one CA: `g` the gateway (`gopts`), `p` the provider serving the tools; ready when each holds the
 /// other's key and `g` sees both of `p`'s tools.
 pub(super) async fn pair(gopts: Opts) -> (N, N, std::path::PathBuf) {
-    let (plain, more_doors) = (gopts.plain, gopts.more_doors);
+    let (plain, more_doors, no_enforce) = (gopts.plain, gopts.more_doors, gopts.no_enforce);
     let cert_dir = std::env::temp_dir().join(format!("i4-mint-ca-{}", crate::test_util::alloc_port()));
     let _ = std::fs::remove_dir_all(&cert_dir);
     let g = node(Opts { cert_dir: Some(cert_dir.clone()), ..gopts }).await;
-    let p = node(Opts { cert_dir: Some(cert_dir.clone()), bootstrap: vec![g.a.node_id().clone()], tools: true, plain, more_doors, ..Opts::default() }).await;
+    let p = node(Opts { cert_dir: Some(cert_dir.clone()), bootstrap: vec![g.a.node_id().clone()], tools: true, plain, more_doors, no_enforce, ..Opts::default() }).await;
     let knows = |x: &GossipAgent, n: &NodeId| x.task_ctx.peer_keys.pin().get(n).is_some_and(|k| !k.is_empty());
     assert!(until(|| knows(&g.a, p.a.node_id()) && knows(&p.a, g.a.node_id()), Duration::from_secs(20)).await, "the nodes learned each other's keys");
     // Both tools: a test that calls `quick` straight after this was answered `tool not found: quick` under load when

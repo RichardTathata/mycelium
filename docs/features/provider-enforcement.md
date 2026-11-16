@@ -144,7 +144,9 @@ confirmed stop, checked against the class's bound. CI runs it.
   on (off by default), and without it such a rule refuses every call it permits; a member's own unframed call
   carries none. A cancel reaches the provider by the cancel-forward (`sys.call-cancel.v1`, [§112](../guide/deprecations.md)):
   the provider holds the revocation, stops the work and answers its own class — `Stopped` only at a door whose agent
-  promised to stop. **Refused by name** (`door_cannot_stop`, the door in `data.door`; lifting it at the bridged
+  promised to stop, and `NotRegistered` wherever it never registered the call: with enforcement off it registers
+  nothing and holds nothing, and under a rule that is not cancellable a call whose `call:` slot did not establish
+  runs unregistered and runs on after its cancel (#799's review, M1). **Refused by name** (`door_cannot_stop`, the door in `data.door`; lifting it at the bridged
   loop and the SDK stream is I4's PR 3b, the maintainer's decision): the bridged MCP loop (`bridged_mcp`), the SDK
   serve stream (`sdk_serve`), a hosted component's kind through `rpc_rx` (`hosted_capability`) and a tool registered
   unstoppable (`unstoppable_mcp_tool`) — so a cancellable rule over any of them refuses every call; an

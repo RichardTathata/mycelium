@@ -150,7 +150,7 @@ async fn no_answer_is_delivery_unknown_and_the_kv_still_stops_the_call() {
 
 /// **A call that reaches the provider after its cancel-forward is refused `revoked`** — the provider held the
 /// revocation it was sent, so the call never runs, whatever arrives later. The gateway mints a call and records it
-/// without sending; `cancel_call` answers `NotRunning` and the provider holds the term's window; the envelope, sent
+/// without sending; `cancel_call` answers `NotRegistered` (the provider never saw it) and holds the term's window; the envelope, sent
 /// now, is refused `call_mandate_not_established` with `data.cause` `revoked`, the tool not started. Seen failing
 /// first with `hold_call_revocation` planted to hold nothing for a scope it has no window for (`NotHeld`).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -158,7 +158,9 @@ async fn a_call_arriving_after_its_cancel_forward_is_refused_revoked() {
     let (g, p, cert_dir) = pair(Opts { mint: true, ..Opts::default() }).await;
     let (framed, term) = g.framed(p.a.node_id(), "quick").await;
     let receipt = g.a.cancel_call(&term).await.expect("recorded");
-    assert_eq!(receipt.class, CancelClass::NotRunning, "{receipt:?}");
+    // The call has not reached the provider, which never registered it: it cannot say the call is not running
+    // (#799's review, M1).
+    assert_eq!(receipt.class, CancelClass::NotRegistered, "{receipt:?}");
     let scope = format!("call:{term}");
     assert!(p.authority.holds_call_window(&crate::mandate::PrincipalId::new(g.gateway()).unwrap(), &scope), "the provider holds the revoked term");
     let v = g.send(p.a.node_id(), framed).await;
@@ -323,6 +325,155 @@ async fn tasks_cancel_revokes_before_it_removes_and_only_for_the_tasks_owner() {
     p.running(0).await;
     assert_eq!(p.finished.load(Ordering::SeqCst), 0, "the skill stopped");
     let v = a2a(&g, "alice-secret", "tasks/get", serde_json::json!({"id": "t-1"})).await;
+    assert_eq!(v["error"]["code"], -32001, "the cancelled task stays gone: {v}");
+    g.a.shutdown().await;
+    p.a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&cert_dir);
+}
+
+// ── #799's review: the fixes, each seen failing first against the plant its doc comment names ───────────────────
+
+/// **H1: `collect` keeps the live issued calls and drops the dead, past a resize of `issued`.** 4 000 terms are held
+/// as issued — every other one already past its window + 2·skew — far past papaya's first incremental resize, then
+/// `collect` runs. Seen failing first with `collect`'s `papaya::HashMap::retain` put back: papaya 0.1.9's `retain`
+/// reads each entry through its tagged pointer after the resize, and the test binary aborts
+/// (`misaligned pointer dereference`, `raw/mod.rs`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn collect_keeps_the_live_issued_calls_and_drops_the_dead_past_a_resize() {
+    let n = node(Opts { mint: true, ..Opts::default() }).await;
+    let now = n.now();
+    let live: std::collections::BTreeSet<String> = (0..4_000u64).filter(|i| i % 2 == 0).map(|i| format!("t{i}")).collect();
+    for i in 0..4_000u64 {
+        let until = if i % 2 == 0 { now + 3_600_000 } else { 1 };
+        call_issuer::test_hold_issued(n.ctx(), &format!("t{i}"), until);
+    }
+    let _ = call_issuer::collect(n.ctx(), now);
+    let held: std::collections::BTreeSet<String> = n.ctx().call_issuer.issued_terms().into_iter().collect();
+    assert_eq!(held, live, "only the live terms are held after collect");
+    n.a.shutdown().await;
+}
+
+/// **M1 (the reviewer's probe A): a provider that does not enforce never answers `NotRunning` for a call it runs.**
+/// The provider has an execution authority and no provider enforcement, so it registers nothing. A client's 30 s call
+/// runs there; its cancel's receipt is `NotRegistered` — the provider cannot see the work — while the tool still
+/// runs. Seen failing first with 722ead12's answer planted back (no enforcement check, an unregistered scope
+/// answered `not_running`): `NotRunning` with the tool started and unfinished.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unenforcing_provider_answers_not_registered_never_not_running() {
+    let (g, p, cert_dir) = pair(Opts { mint: true, no_enforce: true, ..Opts::default() }).await;
+    let g = Arc::new(g);
+    let g2 = Arc::clone(&g);
+    let answered = tokio::spawn(async move { g2.client_call("slow").await });
+    p.began(1).await;
+    let term = g.ctx().call_issuer.issued_terms().pop().expect("minted");
+    let receipt = g.a.cancel_call(&term).await.expect("recorded");
+    assert_eq!(receipt.class, CancelClass::NotRegistered, "{receipt:?}");
+    assert_eq!((p.finished.load(Ordering::SeqCst), answered.is_finished()), (0, false), "the call still runs, which is what NotRegistered allows");
+    g.a.shutdown().await;
+    p.a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&cert_dir);
+}
+
+/// **M1's narrower case: a plain rule's call whose `call:` slot did not establish is `NotRegistered`.** Under a rule
+/// that is not cancellable, a call whose second slot is not a mandate runs unregistered at the enforcing provider;
+/// a revocation forwarded for its term is answered `NotRegistered`. Seen failing first against the same plant:
+/// `not_running`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_plain_rules_call_with_no_call_mandate_is_not_registered() {
+    let (g, p, cert_dir) = pair(Opts { mint: true, plain: true, ..Opts::default() }).await;
+    // Framed by the gateway with a second slot that is not a mandate (`malformed`): under the plain rule the call
+    // runs, unregistered. Its term is `c{n}` of the envelope, as any minted term would be.
+    let n_seen = std::sync::Mutex::new(0u64);
+    let bogus = |n: u64| {
+        *n_seen.lock().unwrap() = n;
+        Some(serde_json::json!({ "not": "a mandate" }))
+    };
+    let payload = serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "slow", "arguments": {"aisle": 4}}}).to_string();
+    let stripped = super::gateway_caller::frame_envelope_minting_at(g.ctx(), p.a.node_id(), &g.gateway(), &[], Bytes::from(payload), None, None, None, None, g.now(), Some(&bogus)).expect("fits");
+    let term = format!("c{}", *n_seen.lock().unwrap());
+    let (g2, target) = (Arc::new(g), p.a.node_id().clone());
+    let g3 = Arc::clone(&g2);
+    let _running = tokio::spawn(async move { g3.send(&target, stripped).await });
+    p.began(1).await;
+    assert_eq!(p.authority.running_count(), 0, "unregistered");
+    let revoking = call_issuer::test_sign_checkpoint(g2.ctx(), &term, 2, g2.now(), true);
+    let v = forward_from(g2.ctx(), p.a.node_id(), &revoking).await;
+    assert_eq!(v["class"], "not_registered", "{v}");
+    g2.a.shutdown().await;
+    p.a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&cert_dir);
+}
+
+/// **L3 (the reviewer's probe B): the hold alone refuses a call that arrives after its cancel.** The revoking
+/// checkpoint is forwarded and written nowhere, so the provider's KV holds only sequence 1; the call sent afterwards
+/// is refused `revoked` and nothing runs. Seen failing first with `hold_call_revocation` planted to plant the window
+/// and answer `Held` without offering the checkpoint: the call ran.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_hold_alone_refuses_a_call_that_arrives_after_its_cancel() {
+    let (g, p, cert_dir) = pair(Opts { mint: true, ..Opts::default() }).await;
+    let (framed, term) = g.framed(p.a.node_id(), "quick").await;
+    let revoking = call_issuer::test_sign_checkpoint(g.ctx(), &term, 2, g.now(), true);
+    let v = forward_from(g.ctx(), p.a.node_id(), &revoking).await;
+    assert_eq!(v["class"], "not_registered", "{v}");
+    let cp = call_checkpoint_key(&g.gateway(), &term);
+    assert!(until(|| p.kv(&cp).is_some(), Duration::from_secs(10)).await);
+    let held = serde_json::from_slice::<SignedRevocationCheckpoint>(&p.kv(&cp).unwrap()).unwrap();
+    assert_eq!(held.checkpoint.seq, 1, "the KV holds only the first checkpoint");
+    let v = g.send(p.a.node_id(), framed).await;
+    assert_eq!((v["error"]["data"]["detail"].as_str(), v["error"]["data"]["cause"].as_str()), (Some("call_mandate_not_established"), Some("revoked")), "{v}");
+    assert_eq!(p.started.load(Ordering::SeqCst), 0, "nothing ran");
+    g.a.shutdown().await;
+    p.a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&cert_dir);
+}
+
+/// **L2: an unconfirmed release the KV made before the forward arrived is `Unbounded`, never `Stopped`.** Under a plain
+/// rule a tool registered unstoppable runs registered unconfirmed; the gateway's revoke reaches the provider by the KV
+/// (no forward), the sweep releases the work, and only then is the cancel forwarded: the provider answers from the
+/// unconfirmed stop record. Seen failing first with the `Some(false)` arm planted to answer `stopped`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unconfirmed_release_recorded_before_the_forward_is_unbounded() {
+    let (g, p, cert_dir) = pair(Opts { mint: true, plain: true, more_doors: true, ..Opts::default() }).await;
+    let key = format!("tools/unstoppable/{}", p.a.node_id());
+    assert!(until(|| g.kv(&key).is_some(), Duration::from_secs(20)).await);
+    let g = Arc::new(g);
+    let g2 = Arc::clone(&g);
+    let _answered = tokio::spawn(async move { g2.client_call("unstoppable").await });
+    p.running(1).await;
+    let term = g.ctx().call_issuer.issued_terms().pop().expect("minted");
+    assert_eq!(call_issuer::revoke_call(g.ctx(), &term).await, Ok(true), "revoked, by the KV only");
+    p.running(0).await;
+    let receipt = g.a.cancel_call(&term).await.expect("recorded");
+    assert_eq!(receipt.class, CancelClass::Unbounded, "{receipt:?}");
+    g.a.shutdown().await;
+    p.a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&cert_dir);
+}
+
+/// **M2 (the reviewer's probe D): a pre-0.2 re-send of a pending task starts no second call, so its cancel reaches
+/// the task's only call and the task stays cancelled.** Alice sends `t-r`, then re-sends it while it is pending: the
+/// re-send is answered the pending task and nothing more runs (`running_count` stays 1). Her `tasks/cancel` stops
+/// that call, and `tasks/get` afterwards finds no task. Seen failing first with the `InFlight` arm taken out
+/// (722ead12's reservation): the re-send ran a second call (`started` 2).
+#[cfg(feature = "a2a")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_resent_pending_task_runs_no_second_call_and_its_cancel_stays() {
+    let (g, p, cert_dir) = pair(Opts { mint: true, more_doors: true, ..Opts::default() }).await;
+    assert!(until(|| crate::store::scan_kv_prefix(&g.ctx().kv_state, "cap/").iter().any(|(k, _)| k.contains("depot")), Duration::from_secs(20)).await);
+    let g = Arc::new(g);
+    let send = serde_json::json!({"id": "t-r", "skillId": "depot/dispatch", "message": {"role": "user", "parts": [{"type": "text", "text": "go"}]}});
+    let (g2, s2) = (Arc::clone(&g), send.clone());
+    let first = tokio::spawn(async move { a2a(&g2, "alice-secret", "tasks/send", s2).await });
+    p.running(1).await;
+    let again = a2a(&g, "alice-secret", "tasks/send", send.clone()).await;
+    assert_eq!(again["result"]["id"], "t-r", "the re-send is answered the task: {again}");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!((p.authority.running_count(), p.started.load(Ordering::SeqCst)), (1, 1), "no second call");
+    let v = a2a(&g, "alice-secret", "tasks/cancel", serde_json::json!({"id": "t-r"})).await;
+    assert_eq!(v["result"]["status"]["state"], "canceled", "{v}");
+    let _ = tokio::time::timeout(Duration::from_secs(10), first).await.expect("the send is answered");
+    p.running(0).await;
+    let v = a2a(&g, "alice-secret", "tasks/get", serde_json::json!({"id": "t-r"})).await;
     assert_eq!(v["error"]["code"], -32001, "the cancelled task stays gone: {v}");
     g.a.shutdown().await;
     p.a.shutdown().await;

@@ -273,6 +273,8 @@ pub(super) async fn stats_handler(State(ctx): State<Arc<HttpCtx>>) -> impl IntoR
         body["call_checkpoints_stale"] = json!(a.map_or(0, |a| a.call_checkpoints_stale()));
         body["call_checkpoints_missing"] = json!(a.map_or(0, |a| a.call_checkpoints_missing()));
         body["call_windows_refused"] = json!(a.map_or(0, |a| a.call_windows_refused()));
+        // I4, PR 3a (#799's review, M3): cancel-forwards whose revocation was not held — the holds' own budget full.
+        body["call_holds_refused"] = json!(a.map_or(0, |a| a.call_holds_refused()));
         // Identity-and-lifecycle I4, PR 2: the gateway's mints — made, and not made (no derivable operation, or its
         // table full); its checkpoints written again over another value; and what the collector removed, and the
         // `call/` pairs neither of whose records verifies, which it never collects.

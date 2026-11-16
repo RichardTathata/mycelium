@@ -15,7 +15,13 @@
   the dispatch (`cancelled_before_sent`). `/mcp`'s id → term table is a papaya map keyed by principal, session,
   request id.
 - A papaya 0.1.9 `retain` on a 65 536-entry map aborted a debug test ("misaligned pointer dereference" in
-  `raw/mod.rs` `retain`), after `remove_if` calls on it: the table evicts by `iter` + `remove` instead. The one other
-  papaya `retain` in `src/` is `call_issuer::collect`'s on `issued` — not changed here, flagged.
+  `raw/mod.rs` `retain`). **Corrected by #799's review (H1):** `remove_if` played no part — papaya 0.1.9's `retain`
+  reads through the tagged pointer, so after any incremental resize its closure sees bytes 4 off the entry (fixed
+  in papaya 0.2.x). The table evicts by `iter` + `remove`; the one other papaya `retain` in the workspace,
+  `call_issuer::collect`'s on `issued` (#794), is replaced the same way. Rule 3 on `lock-free-and-atomics.md`.
+- #799's review, also: a provider that cannot see the work (no enforcement, or an unregistered plain-rule call)
+  answers `not_registered`, never `not_running`; holds from cancel-forwards have their own budget
+  (`MAX_CALL_HOLDS` 16 384, `MAX_CALL_HOLDS_PER_GATEWAY` 1 024); stop records name their gateway; a pending A2A
+  task's re-send starts no second call.
 - Pages touched: `lock-order.md` rows 43 and 48, `owner-signed-records.md` (the `call/` row narrowed),
   `operations/what-is-proven.md#call-checkpoint-replay`.

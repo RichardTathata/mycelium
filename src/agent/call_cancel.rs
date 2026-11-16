@@ -89,7 +89,10 @@ pub struct CancelReceipt {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CancelClass {
     /// The provider holds the revocation; work under the term was running there at a door whose agent promised to
-    /// stop, and that work has ended — a **confirmed** stop, with its stop record.
+    /// stop, the provider asked it to stop, and that work **has ended**, with its stop record. The rung is "the work
+    /// promised to stop and has ended", not "the stop ended it": work that finished on its own just after the request
+    /// is recorded the same way (a `WorkGuard` dropped after its cancel; #799's review, L4), so the requester may
+    /// still have the call's result.
     Stopped,
     /// The provider holds the revocation and asked the work under the term to stop; that work had not ended when it
     /// answered ([`CANCEL_CONFIRM_WAIT_MS`]). A stop asked for, not a stop seen.
@@ -99,11 +102,17 @@ pub enum CancelClass {
     /// confirm its end: the class's drain is unbounded (`DrainBound::Unbounded`), and the work runs at most to its
     /// mandate's window.
     Unbounded,
-    /// The provider holds the revocation, runs nothing under the term and keeps no stop record of it: the call
-    /// finished, or has not reached it — and if it does, it is refused `revoked` before it runs. (A stop the revocation
-    /// in the KV made a moment before the forward arrived is answered from its stop record — `Stopped`, or `Unbounded`
-    /// for an unconfirmed release — while the provider keeps it, among its newest 1 024.)
+    /// The provider holds the revocation; a call under the term was admitted and registered there, nothing runs under
+    /// it now, and no stop of it is recorded: it finished on its own. (A stop the revocation in the KV made a moment
+    /// before the forward arrived is answered from its stop record — `Stopped`, or `Unbounded` for an unconfirmed
+    /// release — while the provider keeps it, among its newest 1 024.)
     NotRunning,
+    /// The provider has **not registered** a call under the term, so it cannot say whether one runs (#799's review,
+    /// M1). The call has not reached it, or it runs there unregistered: the provider does not enforce (it registers
+    /// no work and holds nothing), or a rule that is not cancellable admitted the call with its `call:` slot not
+    /// established. Where the provider enforces it holds the revocation, so a call admitted there later under the
+    /// term is refused `revoked`; one already running unregistered runs to its end.
+    NotRegistered,
     /// The provider could not hold the revocation (its windows are at their cap); a call it admits later under the
     /// term reads the KV record.
     NotHeld,
@@ -128,6 +137,7 @@ impl CancelClass {
             Self::Unbounded => "unbounded",
             Self::NotRunning => "not_running",
             Self::NotHeld => "not_held",
+            Self::NotRegistered => "not_registered",
             Self::Refused(_) => "refused",
             Self::DeliveryUnknown => "delivery_unknown",
             Self::NotForwarded => "not_forwarded",
@@ -141,6 +151,7 @@ impl CancelClass {
             "unbounded" => Self::Unbounded,
             "not_running" => Self::NotRunning,
             "not_held" => Self::NotHeld,
+            "not_registered" => Self::NotRegistered,
             "refused" => Self::Refused(reason.unwrap_or("refused").to_string()),
             _ => return None,
         })
@@ -334,6 +345,10 @@ pub(crate) struct McpCancels {
     pub(crate) collisions: AtomicU64,
     /// Cancels this door revoked.
     pub(crate) cancelled: AtomicU64,
+    /// Entries in `calls`, reserved before each insert: the cap's atomic half.
+    count: std::sync::atomic::AtomicUsize,
+    /// When the last eviction scan ran (`hlc.decision_now_ms()`): at most one a second.
+    last_evict_ms: AtomicU64,
 }
 
 /// Removes its entry from the table when the call's dispatch ends — or its request is dropped.
@@ -354,7 +369,10 @@ impl Drop for McpRegistration {
     fn drop(&mut self) {
         let sink = Arc::clone(&self.sink);
         // Only this registration's entry: a key re-registered after a collision is not ours.
-        let _ = self.ctx.call_issuer.mcp_cancels.calls.pin().remove_if(&self.key, |_, v| Arc::ptr_eq(&v.sink, &sink));
+        let t = &self.ctx.call_issuer.mcp_cancels;
+        if matches!(t.calls.pin().remove_if(&self.key, |_, v| Arc::ptr_eq(&v.sink, &sink)), Ok(Some(_))) {
+            t.count.fetch_sub(1, Ordering::AcqRel);
+        }
     }
 }
 
@@ -364,29 +382,42 @@ impl Drop for McpRegistration {
 pub(crate) fn register_mcp_call(ctx: &Arc<TaskCtx>, key: McpCallKey) -> Option<McpRegistration> {
     let t = &ctx.call_issuer.mcp_cancels;
     let now = ctx.hlc.decision_now_ms();
-    if t.calls.len() >= MAX_MCP_CANCEL_ENTRIES {
-        // Evict what is past the window — collected under one guard, removed one by one.
-        let ttl_ms = ctx.config.call_mandate_ttl_secs.saturating_mul(1_000);
-        let stale: Vec<McpCallKey> = t.calls.pin().iter().filter(|(_, v)| now.saturating_sub(v.at_ms) > ttl_ms).map(|(k, _)| k.clone()).collect();
-        for k in stale {
-            t.calls.pin().remove(&k);
+    // The cap is a reservation (#799's review, L5): a place is taken before the insert, so concurrent registrations
+    // cannot pass it, and given back if nothing is inserted.
+    if !reserve(&t.count) {
+        // Full: evict what is past the window — at most one scan a second, so a full table under load does not scan
+        // its 65 536 entries per registration — and try once more.
+        let last = t.last_evict_ms.load(Ordering::Relaxed);
+        if now.saturating_sub(last) >= 1_000 && t.last_evict_ms.compare_exchange(last, now, Ordering::AcqRel, Ordering::Relaxed).is_ok() {
+            let ttl_ms = ctx.config.call_mandate_ttl_secs.saturating_mul(1_000);
+            let stale: Vec<McpCallKey> = t.calls.pin().iter().filter(|(_, v)| now.saturating_sub(v.at_ms) > ttl_ms).map(|(k, _)| k.clone()).collect();
+            for k in stale {
+                if t.calls.pin().remove(&k).is_some() {
+                    t.count.fetch_sub(1, Ordering::AcqRel);
+                }
+            }
         }
-        if t.calls.len() >= MAX_MCP_CANCEL_ENTRIES {
+        if !reserve(&t.count) {
             t.full.fetch_add(1, Ordering::Relaxed);
             #[cfg(feature = "metrics")]
             metrics::counter!("mycelium_gateway_mcp_cancel_table_full_total").increment(1);
             return None;
         }
     }
-    let calls = t.calls.pin();
     let sink = Arc::new(CallSink::default());
-    match calls.try_insert(key.clone(), McpCall { sink: Arc::clone(&sink), at_ms: now }) {
+    match t.calls.pin().try_insert(key.clone(), McpCall { sink: Arc::clone(&sink), at_ms: now }) {
         Ok(_) => Some(McpRegistration { ctx: Arc::clone(ctx), key, sink }),
         Err(_) => {
+            t.count.fetch_sub(1, Ordering::AcqRel);
             t.collisions.fetch_add(1, Ordering::Relaxed);
             None
         }
     }
+}
+
+/// Take one place in the table, if one is free.
+fn reserve(count: &std::sync::atomic::AtomicUsize) -> bool {
+    count.fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| (n < MAX_MCP_CANCEL_ENTRIES).then_some(n + 1)).is_ok()
 }
 
 /// **`notifications/cancelled` at `/mcp`**: the caller's own call of that key is cancelled — its term revoked on disk
@@ -445,21 +476,30 @@ fn admit(ctx: &TaskCtx, req: &super::rpc::RpcRequest) -> Result<(PrincipalId, Si
 /// work whose agent promised to stop to end, if `wait`.
 async fn answer(ctx: &TaskCtx, by: &PrincipalId, signed: &SignedRevocationCheckpoint, wait: bool) -> Vec<u8> {
     let Some(authority) = ctx.execution_authority.get() else { return refused(ctx, "no_authority", "no execution authority") };
+    // A provider that does not enforce registers no work and checks no admission (#799's review, M1): it cannot see
+    // whether the call runs here, and a hold would refuse nothing. It says so, and holds nothing.
+    if !ctx.provider_enforcement.load(Ordering::Acquire) {
+        return json!({ "v": 1, "class": "not_registered" }).to_string().into_bytes();
+    }
     let now = ctx.hlc.decision_now_ms();
     let class = match authority.hold_call_revocation(by, signed, now, &super::gateway_member_keys(ctx)) {
         CallRevocationHeld::Malformed => return refused(ctx, "malformed", "not a revoking checkpoint for one call: scope"),
         CallRevocationHeld::NotVerified => return refused(ctx, "not_verified", "the checkpoint does not verify under the issuing gateway's node key"),
         CallRevocationHeld::NotHeld => "not_held",
-        CallRevocationHeld::Held => {
+        CallRevocationHeld::Held { registered } => {
             authority.sweep(now);
             let scope = &signed.checkpoint.scope;
             match authority.call_registrations(by, scope) {
-                // Nothing runs under the term now. If it ran here and was stopped — by this sweep or, a moment
-                // earlier, by the revocation the KV carried — its stop record says how; otherwise it never ran here.
-                (0, 0) => match signed.checkpoint.scope.strip_prefix(crate::mandate::grant::CALL_SCOPE_PREFIX).and_then(|t| authority.call_stop_recorded(scope, t)) {
+                // Nothing registered runs under the term now. If it ran here and was stopped — by this sweep or, a
+                // moment earlier, by the revocation the KV carried — its stop record says how. Otherwise it ran here
+                // registered and ended (`not_running`), or this node never registered it (`not_registered`): it has not
+                // arrived, or it runs here unregistered — a plain rule's call whose `call:` slot did not establish —
+                // and this node cannot say which (#799's review, M1).
+                (0, 0) => match signed.checkpoint.scope.strip_prefix(crate::mandate::grant::CALL_SCOPE_PREFIX).and_then(|t| authority.call_stop_recorded(by, scope, t)) {
                     Some(true) => "stopped",
                     Some(false) => "unbounded",
-                    None => "not_running",
+                    None if registered => "not_running",
+                    None => "not_registered",
                 },
                 (_, u) if u > 0 => "unbounded",
                 _ if !wait => "stop_requested",

@@ -1540,10 +1540,12 @@ snapshot back and touching the file.
   stops it.
 - *Q2, "a `CancelReceipt { term, class | DeliveryUnknown }` from the cancel-forward's reply or its timeout, exposed
   through a library call and a `/stats` counter"*: `CancelReceipt`, `CancelClass` (`Stopped`, `StopRequested`,
-  `Unbounded`, `NotRunning`, `NotHeld`, `Refused`, `DeliveryUnknown`, `NotForwarded`), `GossipAgent::cancel_call`;
+  `Unbounded`, `NotRunning`, `NotRegistered`, `NotHeld`, `Refused`, `DeliveryUnknown`, `NotForwarded`), `GossipAgent::cancel_call`;
   `GET /stats` `call_cancel_receipts` by class and `mycelium_gateway_call_cancel_receipts_total{class}`.
-  `cancel_call_returns_the_providers_receipt_and_counts_it` (`Stopped`, then `NotRunning` for the same term, an
-  unknown term refused, the `/stats` counts). *"The A2A answer carries only what is known when it answers. A receipt
+  `cancel_call_returns_the_providers_receipt_and_counts_it` (`Stopped`; a second cancel of the stopped term `Stopped`
+  again, from the provider's stop record — the case #799's first CI run met, where the KV's revocation stopped the
+  call before the forward arrived and the answer was `NotRunning`, fixed by `ExecutionAuthority::call_stop_recorded`;
+  an unknown term refused; the `/stats` counts). *"The A2A answer carries only what is known when it answers. A receipt
   on the A2A or MCP wire is not built"*: unchanged — not built, by Q2.
 - *Exit 8, "a cancel of work whose class is `Unbounded` answers with a receipt naming that class, or
   `DeliveryUnknown`, never a stop it cannot confirm"*: the provider counts the registrations under the term,
@@ -1559,9 +1561,10 @@ snapshot back and touching the file.
 - *A cancel-forward that arrives before the call* (not in the row; the forward made it possible):
   `ExecutionAuthority::hold_call_revocation` holds the revocation for a scope this node has no window for yet, until
   the checkpoint's issue + `GRANT_TTL_CAP_SECS` (every `call:` mandate of the term was minted before it and is at most
-  that long), under one hold of row 43, inside the per-gateway window cap; a checkpoint that does not verify takes
-  back what it planted. `a_call_arriving_after_its_cancel_forward_is_refused_revoked` (`NotRunning`, then the
-  envelope refused `call_mandate_not_established` / `revoked`, nothing run).
+  that long), under one hold of row 43, inside a budget of its own (below); a checkpoint that does not verify takes
+  back what it planted. `a_call_arriving_after_its_cancel_forward_is_refused_revoked` (`NotRegistered`, then the
+  envelope refused `call_mandate_not_established` / `revoked`, nothing run), and — with the KV holding only the first
+  checkpoint, so the hold alone refuses — `the_hold_alone_refuses_a_call_that_arrives_after_its_cancel`.
 - *Exit 7, "A2A `tasks/cancel` revokes the call's term **before** it removes the task (the revocation spawned, since
   `handle_tasks_cancel` is sync, and stated)"*: **changed, stated:** `handle_tasks_cancel` is made `async`, and the
   revoke and its durable write are **awaited** before the task is removed and `canceled` answered — so the answer
@@ -1600,6 +1603,47 @@ snapshot back and touching the file.
   (D-4). **The CI flake suspected in `call_mint_tests`** — a fire-and-forget `emit_signal` while the writer dials —
   sits on this path too: the forward is an `rpc_call`, and a lost frame is a `DeliveryUnknown` receipt after 5 s, with
   the KV still carrying the cancel; nothing here retries it.
+
+**From #799's review (2026-11-16), fixed in the PR.** Each fix beside the test that shows it, seen failing first
+against the plant its doc comment names (722ead12's behaviour put back, or the fix taken out; four plant builds,
+each plant restored by copying a snapshot back and touching the file). L4 is wording; L5's reservation has no
+fail-first test of its own (a race between the cap's two steps), and the bounded-table test covers its counts.
+- **H1 (on `main` since #794): `call_issuer::collect`'s `papaya::HashMap::retain` decided on garbage.** papaya
+  0.1.9's `retain` reads entries through their tagged pointer, so after an incremental resize its closure sees bytes
+  4 off the entry. Replaced by `iter` + `remove`; `collect_keeps_the_live_issued_calls_and_drops_the_dead_past_a_resize`
+  (4 000 terms, half dead; with the `retain` put back the test binary aborts, `misaligned pointer dereference`).
+  `git grep -n "\.retain("` over the workspace — `src/`, `mycelium-core/src`, every `mycelium-*/src`, `examples/` —
+  and every `let x = ….pin(); … x.retain(` site: it was the only papaya `retain`; every other is on a `std`
+  collection. Rule 3 of `lock-free-and-atomics.md`. **Banned by clippy** (the maintainer's addition): the new
+  workspace `clippy.toml` lists `papaya::{HashMap, HashMapRef, HashSet, HashSetRef}::retain` under
+  `disallowed-methods`, with the reason; seen firing on a planted `retain` in `src/agent/call_issuer.rs` and in
+  `mycelium-core/src/removal.rs`. **Not done here, its own plan row:** papaya 0.2.x fixes `retain` upstream; the
+  workspace stays on 0.1.
+- **M1 (check 9): a provider that cannot see the work answers `NotRegistered`, never `NotRunning`.** With provider
+  enforcement off it registers nothing and holds nothing; a window records whether a call was registered under it
+  (`CallWindow::registered`, set where `assess_call` establishes the mandate), and only such a scope can be
+  `NotRunning`. `an_unenforcing_provider_answers_not_registered_never_not_running` (the reviewer's probe A) and
+  `a_plain_rules_call_with_no_call_mandate_is_not_registered`; §112 and `provider-enforcement.md` corrected.
+- **M2: a pre-0.2 re-send of a pending A2A task starts no second call.** It is answered the pending task
+  (`Unclaimable::InFlight`; `tasks/sendSubscribe` refused `-32004` for it), so the task's one call is the one its cancel
+  revokes, and a cancelled task cannot be written back. `a_resent_pending_task_runs_no_second_call_and_its_cancel_stays`
+  (the reviewer's probe D).
+- **M3: holds from cancel-forwards have a budget of their own.** `MAX_CALL_HOLDS` = 16 384 at a provider and
+  `MAX_CALL_HOLDS_PER_GATEWAY` = 1 024 per sender, counted apart from the windows of admitted calls (which stay at
+  `MAX_CALL_WINDOWS` = 262 144, 65 536 per gateway): no set of senders can take an admitted call's room. Past it,
+  `NotHeld`, counted `call_holds_refused`. `holds_from_cancel_forwards_have_a_per_sender_budget_apart_from_admitted_calls`
+  (`src/agent/gateway_authority.rs`). The bound is stated in §112.
+- **L1: stop records name their gateway.** `NamedStop::established_by` (additive, `#[non_exhaustive]`), and
+  `call_stop_recorded` matches the gateway, the scope and the term:
+  `a_stop_record_answers_only_for_its_own_gateways_term` (`src/agent/gateway_authority.rs`).
+- **L2:** `an_unconfirmed_release_recorded_before_the_forward_is_unbounded` — the `Some(false)` arm.
+- **L3:** `the_hold_alone_refuses_a_call_that_arrives_after_its_cancel` (the reviewer's probe B).
+- **L4: `Stopped` is worded "the work promised to stop and has ended"**, not "the stop ended it": a `WorkGuard`
+  dropped after its cancel is recorded the same way whether the work stopped or finished, so the requester may
+  still get its result. Stated on `CancelClass::Stopped` and in §112; not changed in the record.
+- **L5:** the gateway issues no `Mcp-Session-Id`, so clients sharing a token can cancel each other's calls — stated on
+  `mcp-tools.md` and in §112. The table's cap is now a reservation (an atomic count taken before the insert, given
+  back on a miss), and a full table scans for stale entries at most once a second.
 
 #### I4a · Sign the grant request, `consumed`, `revoked` and `refused` records, then let each owner collect its own — *follow-up of I4, agreed with the maintainer 2026-11-15 — **not buildable until written***
 

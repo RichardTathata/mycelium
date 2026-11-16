@@ -1,0 +1,13 @@
+# Workspace clippy configuration (every crate under this directory reads it).
+
+# papaya 0.1.x's `retain` reads each entry through its tagged pointer (`raw/mod.rs:1212`, `&*entry.raw`) where
+# `iter` reads the masked one: after an incremental resize every copied entry carries the BORROWED tag, so the
+# closure is handed a key and value read 4 bytes off — garbage in release from ~40 entries, an abort in debug
+# (#799's review, H1; `docs/wiki/dev/concurrency/lock-free-and-atomics.md`, rule 3). Fixed upstream in papaya 0.2.x;
+# the upgrade is `docs/plans/rust-ecosystem-watch.md` W8. Until then: collect the keys with `iter`, then `remove` them one by one.
+disallowed-methods = [
+    { path = "papaya::HashMap::retain", reason = "papaya 0.1.x retain reads a tagged pointer after a resize (garbage, or an abort): use iter + remove until the 0.2 upgrade" },
+    { path = "papaya::HashMapRef::retain", reason = "papaya 0.1.x retain reads a tagged pointer after a resize (garbage, or an abort): use iter + remove until the 0.2 upgrade" },
+    { path = "papaya::HashSet::retain", reason = "papaya 0.1.x retain reads a tagged pointer after a resize (garbage, or an abort): use iter + remove until the 0.2 upgrade" },
+    { path = "papaya::HashSetRef::retain", reason = "papaya 0.1.x retain reads a tagged pointer after a resize (garbage, or an abort): use iter + remove until the 0.2 upgrade" },
+]
