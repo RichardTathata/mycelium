@@ -4558,7 +4558,8 @@ consent_grade_oid_provisional` (#800's review, finding 1). What changes for an e
   used to be ignored and a node certificate and key issued (#800's review, finding 3).
 - **A consent key's point must lie on P-256**, at issue and at read (`not_p256: the point is not on the curve`), so a
   corrupt public key file can never become a consent principal's newest certificate (#800's review, finding 4).
-  `mycelium-core`'s `tls` feature now builds RustCrypto's `p256` (arithmetic only) for the check.
+  `mycelium-core`'s `tls` feature now builds RustCrypto's `p256` 0.14 (arithmetic only) for the check — 15 new
+  lockfile entries, its elliptic-curve stack; 0.13 was refused by `cargo audit` (RUSTSEC-2026-0387, crypto-bigint 0.5).
 - **Downgrade:** an older binary reading this release's client-certificate journal decodes it, and its unfiltered
   `feed_client_keys` feeds a consent principal's mark — the SHA-256 of the point — to its external issuers as an
   "Ed25519 key" for `consent:…`. That is harmless: no one holds a private key for it, and no grant names a `consent:`

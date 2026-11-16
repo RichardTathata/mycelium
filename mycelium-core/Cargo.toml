@@ -86,8 +86,9 @@ webpki         = { package = "rustls-webpki", version = "0.103", optional = true
 
 # P-256 point decoding (identity-and-lifecycle I7, #800's review finding 4): a consent key's point is checked to be
 # on the curve at issue and at read, so the fleet CA never vouches for a key no device can hold. Arithmetic only (no
-# ECDSA, no RNG): `PublicKey::from_sec1_bytes`. New compiled crates under `tls` (RustCrypto's elliptic-curve stack).
-p256           = { version = "0.13", default-features = false, features = ["arithmetic"], optional = true }
+# ECDSA, no RNG): `PublicKey::from_sec1_bytes`. New compiled crates under `tls` (RustCrypto's elliptic-curve stack,
+# 15 lockfile entries). 0.14, not 0.13: 0.13's crypto-bigint 0.5 carries RUSTSEC-2026-0387 (CI's audit refused it).
+p256           = { version = "0.14", default-features = false, features = ["arithmetic"], optional = true }
 
 # Prometheus metrics (optional — "metrics" feature)
 metrics = { version = "0.24", optional = true }
