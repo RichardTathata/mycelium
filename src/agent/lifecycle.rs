@@ -1076,6 +1076,9 @@ impl GossipAgent {
             self.config.gossip_fanout,
             self.config.max_active_connections,
         );
+        // Closure plan C5 on the UDP path: SWIM never probes, relays for or re-admits a removed
+        // member (#801's review, F2).
+        state.set_removed(Arc::clone(&self.task_ctx.removed));
         let probe_timeout = Duration::from_millis(self.config.swim_probe_timeout_ms);
 
         self.spawn_task(mycelium_core::swim::run_swim_listener(

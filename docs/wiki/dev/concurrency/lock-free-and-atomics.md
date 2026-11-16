@@ -68,6 +68,12 @@ the sweep mechanically clean.
   see the other): `SoftStateGate` (`mycelium-core/src/kv_persist.rs`) — a writer increments `in_flight` then reads
   `closed`; `close` sets `closed` then reads `in_flight`. Acquire/Release does not order a store before a later load
   of a *different* variable, so with anything weaker both sides can miss each other. Say why in a comment at the site.
+  - **Across papaya maps, with `fence(SeqCst)`:** the same handshake when the two "variables" are concurrent maps —
+    the member-removal admission (#801). `membership_ops::apply` stores the removed set, then clears `peers`; every
+    inserter into `peers` (the TCP Ping arm's sender and piggybacked peers, SWIM's `BecameAlive`) stores `peers`, then
+    re-checks the set. Clearing a key not yet present writes nothing, so the map's own atomics order nothing; a
+    `std::sync::atomic::fence(SeqCst)` between store and load on **both** sides closes the litmus. No test can make
+    the fence fail deterministically; the hook tests cover the interleavings, the fences the memory model.
 - **`Relaxed` — purely diagnostic counters** (`dropped_frames`, `hash_acc`,
   `listener_count`, `AliveGuard` flags): read by stats/logging only; no control flow depends
   on precise visibility.

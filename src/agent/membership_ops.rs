@@ -47,6 +47,11 @@ fn apply(ctx: &TaskCtx, auth: &MembershipAuthorities, writers: &Writers, signed:
         keys.extend(standing.anchored.iter().flatten().copied());
     }
     ctx.removed.remove(node, keys);
+    // The removal's half of the store-buffering litmus (#801's confirm round): every inserter into
+    // `peers` (the TCP Ping arm's sender and piggybacked peers, SWIM's `BecameAlive`) stores `peers`,
+    // fences, then re-checks the set. With a `SeqCst` fence on both sides, this clear sees an insert
+    // that missed the removal, or the insert's re-check sees the removal; without them both can miss.
+    std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
     ctx.peers.pin().remove(node);
     writers.pin().remove(node);
     tracing::warn!(%node, reason = %signed.removal.reason, "membership: member removed");

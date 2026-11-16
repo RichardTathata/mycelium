@@ -379,6 +379,32 @@ Three corollaries hardened 2026-07-21 (the cold-start saga —
   `became_alive_activates_despite_bootstrap_seeded_watch`.
 - Watch publishes are RMW-atomic (`send_if_modified` only) — rule + loom model in
   [lock-free-and-atomics](../concurrency/lock-free-and-atomics.md).
+- **A suspect is still probed, and a dead bootstrap peer is re-probed** (#798, 2026-11-16). Under
+  SWIM a restarted node starts with an empty table, and a seed (`bootstrap_peers = []`) contacts
+  no one: it is found again only when someone probes it. The prober chose among `Alive` members
+  only, so one probe that landed while the seed was down made it `Suspect`, the suspicion gossiped
+  to every node, nobody contacted the seed again, it never heard the rumour to refute it, and
+  `swim_suspicion_timeout_ms` later it was `Dead` everywhere — a permanent partition (the Eve
+  fleet's gateway restart: node 1 logging `Ignoring StateRequest from unknown peer` while its
+  writes reached no one). The prober now draws from `SwimMembership::probe_candidates` (`Alive`
+  and `Suspect`, as SWIM specifies), each probe's gossip carries the prober's `Suspect`/`Dead`
+  fact about its target (`gossip_sample_for`), and once a suspicion window (counted in protocol
+  periods) it probes one bootstrap peer it holds `Dead` or has not heard of (`run_swim_prober`,
+  `mycelium-core/src/swim.rs`). Two limits travel with it (#801's review). **Relays stay `Alive`
+  only** (`relay_candidates`): a suspect is a target, never a relay, or a half-dead fleet falsely
+  suspects live targets. **A removed member is shut out of SWIM** as of the TCP path: its datagrams
+  dropped, never probed, relayed for or rejoined, and a `BecameAlive` for it kept out of `peers`
+  (`SwimState::set_removed`, counted in `removed_refused`); the TCP Ping arm skips a removed member
+  in `known_peers`, and every `peers` insert re-checks removal after inserting, with a `SeqCst` fence
+  between its store and its load on both sides — the store-buffering pattern, see
+  [lock-free-and-atomics](../concurrency/lock-free-and-atomics.md#memory-ordering-policy-for-atomics). **Not covered:** a node with no bootstrap
+  peers that is in no one's `bootstrap_peers` and was declared `Dead` while down stays partitioned —
+  rejoin follows bootstrap edges only. And the fix is on the prober's side: a fleet's *members* must
+  run it. Gates: `a_restarted_seed_that_is_suspected_is_probed_and_refutes`,
+  `a_restarted_seed_that_is_declared_dead_is_rejoined`,
+  `a_dead_bootstrap_peer_that_is_gone_costs_one_ping_a_window_and_stays_dead`,
+  `relays_are_alive_members_only`, `a_removed_member_is_never_probed_or_taken_back_into_peers`,
+  `the_rumour_reaches_the_suspect_through_a_roster_larger_than_the_sample`.
 
 ## Anti-entropy is chunked; KV writes are size-gated (2026-07-02)
 

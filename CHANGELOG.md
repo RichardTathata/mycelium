@@ -11,6 +11,28 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A restarted SWIM seed is found again** (#798, #801; the Eve fleet job's `a write at node 1 reaching node 3 …
+  within 120000 ms`). A node with no `bootstrap_peers` of its own (a seed) starts its restart with an empty membership
+  table and contacts no one. If one probe landed while it was down, its peers held it `Suspect` — and the prober chose
+  among `Alive` members only, so no one probed it again: it never heard the rumour, could not refute it, and was
+  `Dead` on every peer `swim_suspicion_timeout_ms` later, its writes reaching no one for good. The prober now probes
+  `Suspect` members too (as SWIM specifies, with relays still `Alive` members only), carries its rumour about a target
+  in the probe so the target refutes it, and once each suspicion window probes one bootstrap peer it holds `Dead` or
+  has not heard of. With it, a removed member (closure plan C5) stays out of the peer table on both transports: SWIM
+  never probes, relays for or re-admits it and drops its datagrams, and a TCP ping's piggybacked `known_peers` no longer
+  re-introduce it (before, SWIM could bring back a removed member that was up, and so could peer exchange from a node
+  that had not yet applied the removal). No wire change: the SWIM datagram's layout is unchanged, and a probe's gossip sample holds no more entries.
+  Every release with SWIM on by default is affected (`deprecations.md` §113).
+  - **Upgrade the members, not the seed:** the fix is on the prober's side, so a restarted seed of any version is
+    found again once its peers run this release. A fleet whose members run 2.40.0 keeps the bug.
+  - **The cost, for as long as the peer is listed:** one UDP `Ping` per `swim_suspicion_timeout_ms` to each bootstrap
+    peer held `Dead`, in turn, each waiting up to `swim_probe_timeout_ms` in its own task. A decommissioned seed left
+    in `bootstrap_peers` keeps receiving them; remove it from the list.
+  - **Not fixed:** a node with no bootstrap peers that is in no one's `bootstrap_peers`, declared `Dead` while it was
+    down, stays partitioned, because rejoin follows bootstrap edges only. List it as a bootstrap peer of another node.
+  - **Check:** stop a seed (a node with `bootstrap_peers = []` that the others list) for longer than
+    `swim_suspicion_timeout_ms` (4 s by default) and start it again: within about one more suspicion window,
+    `curl -s http://SEED:HTTP_PORT/stats | jq .peers` shows its peers again (it stayed `0` before).
 - **A client calling soon after a provider starts is no longer refused `provider_without_caller_context`** (-32021;
   #794's review, K2, and the Eve fleet job on #796). A provider wrote its caller-context marker
   (`sys/caller-context/{node}`) from a task that waited for a peer, up to 5 s, while a tool's entry and a capability's

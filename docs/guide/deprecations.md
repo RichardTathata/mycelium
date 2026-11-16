@@ -4584,6 +4584,43 @@ features, test-only and off by default: `mycelium/provisional-consent-grade` and
 `GossipAgent::client_key_standing`'s signature, `ClientSigned.key`, `ClientSigner::new`,
 `TrustedExternalIssuers::set_client_key`, and lock-order row 76.
 
+## 113. SWIM probes a suspect, never relays through one, re-probes a dead bootstrap peer each suspicion window, and never re-admits a removed member (unreleased, #798, #801)
+
+*Numbered 113: §112 is #800's (consent certificates) and §114 #799's (the cancel-forward).*
+
+Nothing compiles differently and no field changes shape: `SwimState` gains `set_removed` and `removed_refused`,
+both additive. These are behaviour changes in the SWIM failure detector (`swim_failure_detector`, on by default),
+in `mycelium-core/src/swim.rs`.
+
+- **A suspected member is probed.** The prober now picks its target among `Alive` and `Suspect` members (it picked
+  `Alive` only), and each probe carries the prober's `Suspect`/`Dead` fact about its target, so a suspect that is up
+  hears the rumour and refutes it. Before, one probe that landed while a seed (`bootstrap_peers = []`) restarted
+  made it `Suspect`; the suspicion spread, no one probed it again, and it was `Dead` everywhere for good (#798).
+- **Relays are `Alive` members only.** The `swim_indirect_probes` relays of an indirect probe are never a suspect.
+- **A dead bootstrap peer is re-probed.** Once each `swim_suspicion_timeout_ms` (counted in
+  `swim_probe_interval_ms` periods), a node sends one UDP `Ping` to one bootstrap peer it holds `Dead` or has not
+  heard of, in turn, from a spawned task (up to `swim_probe_timeout_ms` each). This goes on for as long as the peer is
+  listed, so a decommissioned seed left in `bootstrap_peers` receives one datagram per window from each node that
+  lists it. Remove it from `bootstrap_peers` to stop that.
+- **A removed member (closure plan C5) is shut out of SWIM.** Its `Ping`, `Ack` and `PingReq` are dropped
+  unanswered, it is never a probe target, relay or rejoin target, and a `BecameAlive` for it never re-enters
+  `peers` or the fan-out watch. Before this, SWIM could bring a removed member that was up back into `peers`.
+  Refusals are counted in `SwimState::removed_refused` (not in `/stats`).
+- **A removed member is not re-introduced by TCP peer exchange.** A ping's piggybacked `known_peers` naming a removed
+  member are skipped; before, a peer that had not yet applied the removal brought it back into the peer table (every
+  tick with SWIM off, as the enforced domain profile runs). Every insert into the peer table re-checks removal after
+  it inserts, so a removal landing between the check and the insert still wins.
+- **Who must upgrade:** the fix is on the prober's side. A restarted seed is found again once its **peers** run this
+  release, whatever version the seed runs. A fleet whose members run 2.40.0 keeps the bug.
+- **Still not covered:** a node with no bootstrap peers that is in **no one's** `bootstrap_peers`, and that was
+  declared `Dead` while it was down, stays partitioned. Rejoin follows bootstrap edges only. List such a node as a
+  bootstrap peer of at least one other node.
+- Tests: `swim::tests::a_restarted_seed_that_is_suspected_is_probed_and_refutes`,
+  `a_restarted_seed_that_is_declared_dead_is_rejoined`,
+  `a_dead_bootstrap_peer_that_is_gone_costs_one_ping_a_window_and_stays_dead`, `relays_are_alive_members_only`,
+  `a_removed_member_is_never_probed_or_taken_back_into_peers`,
+  `the_rumour_reaches_the_suspect_through_a_roster_larger_than_the_sample`.
+
 ## 114. A gateway's cancel reaches the provider directly: the cancel-forward, `GossipAgent::cancel_call` and its receipt; A2A `tasks/cancel` revokes the call; MCP `notifications/cancelled` cancels the caller's own call (unreleased, identity-and-lifecycle I4, PR 3a)
 
 *Numbered 114: §111 is I2's first PR, §112 I7's first (#800), and §113 #801's, built in parallel.*
