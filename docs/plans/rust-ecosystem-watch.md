@@ -169,6 +169,37 @@ is, what adopting it would buy, what it would cost or risk, its state, and what 
 - **Cost and risk:** a development-only change; production toolchains stay pinned.
 - **Next:** `spike` when one ships on stable: measure it on `make check` in a development build.
 
+### W8. papaya 0.2.x, the concurrent map under most shared state
+
+- **State:** `plan`. Build it right after the wave 1b release (agreed with the maintainer 2026-11-16). It moves ahead
+  of that release if step 1 below finds a fixed soundness bug in a method Mycelium calls.
+- **Upstream:** [papaya on crates.io](https://crates.io/crates/papaya) and its
+  [repository](https://github.com/ibraheemdev/papaya) (changelog and releases). 0.2.1 and 0.2.5 are released.
+- **Where Mycelium is:** `papaya = "0.1"` in `Cargo.toml:90`, `mycelium-core/Cargo.toml:46` and
+  `mycelium-tuple-space/Cargo.toml:30`. `Cargo.lock` resolves 0.1.9. About 46 source files across `src/`,
+  `mycelium-core/src/`, `mycelium-tuple-space/src/` and `mycelium-wasm-host/src/` use it. The rules for using it are
+  [lock-free-and-atomics](../wiki/dev/concurrency/lock-free-and-atomics.md).
+- **Why now:** papaya 0.1.9's `HashMap::retain` dereferences an entry pointer that still carries its tag bits
+  (`raw/mod.rs:1212`, `&*entry.raw`, where `iter` and `compute` use the masked `entry.ptr`).
+  - After an incremental resize (the default mode), copied entries carry the `BORROWED` tag, so the closure reads the
+    wrong bytes: from about 40 entries in a release build, and in a debug build a "misaligned pointer dereference"
+    abort.
+  - It was found in #799's review, at the one library call site, `call_issuer::collect` from #794. It was unreleased,
+    and minting is off by default.
+  - The same repro passes on 0.2.1 and 0.2.5.
+  - #799 removes that call and bans `papaya::HashMap::retain` through clippy's `disallowed-methods`, so the known
+    exposure is closed and cannot return before this row is built.
+- **What it buys:** the fix upstream rather than a ban, and the maintained line.
+- **Cost and risk:** papaya is the backbone of the concurrency design: the `compute` retry-safety rule, the stale-read
+  rule and most shared maps. A move from 0.1 to 0.2 can change semantics as well as signatures.
+- **Next (the row, when built):**
+  1. Read papaya's changelog and commits from 0.1.9 to the target 0.2.x for every fixed soundness or correctness bug,
+     and check each against the methods Mycelium calls.
+  2. Check every call site against 0.2's semantics, `compute` closures and guards especially.
+  3. Re-verify the lock-free-and-atomics page, which is the doc-versus-code check.
+  4. Run the full suites, the model job, and `make test-scale-resilience`.
+  5. Lift the `retain` ban only if 0.2's `retain` is shown correct by the repro.
+
 ## Review log
 
 | Date | Reviewer | What changed |
@@ -176,3 +207,4 @@ is, what adopting it would buy, what it would cost or risk, its state, and what 
 | 2026-11-10 | maintainer + Claude | Register started from an external roadmap note, its code claims checked against `main` at `634f655f`. *dial9* unverified. Priority proposed: W1–W7. |
 | 2026-11-11 | maintainer | Priority agreed as proposed (W1–W7 in order). |
 | 2026-11-11 | independent review (#755) | Two of the first draft's own claims corrected. **W3:** record spans with correlation ids already ship (`src/span_export.rs`, Y4), so its proposed spike was already built; it is now about door and dispatch spans. **W5:** `aws-lc-rs` is already compiled in, so post-quantum TLS needs no new C build. W4's advisory list, the procedure's sources and `file:line`s, and the states made consistent. |
+| 2026-11-16 | maintainer + Claude | **W8 added** (papaya 0.2.x), state `plan`, to be built after the wave 1b release. Its cause: papaya 0.1.9's `retain` reads a tagged pointer after a resize, found in #799's review and banned there. |
