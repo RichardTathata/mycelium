@@ -3308,7 +3308,7 @@ mod ca_race_tests {
     /// certificate by the walk in `cert_identity`'s reader. The OID's encoding is checked against the bytes rcgen wrote.
     #[test]
     fn the_grade_extensions_oid_and_each_grades_der_are_pinned() {
-        assert!(super::CONSENT_GRADE_OID_IS_PROVISIONAL, "a release is blocked until the registered PEN arc replaces this OID");
+        const { assert!(super::CONSENT_GRADE_OID_IS_PROVISIONAL, "a release is blocked until the registered PEN arc replaces this OID") };
         assert_eq!(super::CONSENT_GRADE_OID, &[1, 3, 6, 1, 4, 1, 32473, 7, 1]);
         assert_eq!(super::consent_grade_oid_der(), vec![0x2B, 0x06, 0x01, 0x04, 0x01, 0x81, 0xFD, 0x59, 0x07, 0x01]);
         let golden: [(super::ConsentGrade, &str, &str); 3] = [

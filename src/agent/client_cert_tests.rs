@@ -604,7 +604,7 @@ async fn a_consent_certificate_is_published_and_read_under_its_own_principal_at_
     assert_eq!((p.principal.as_str(), p.grade), (CONSENT, Some(crate::ConsentGrade::Tty)));
     assert_eq!(p.key_hex.len(), 130);
     let path = crate::consent_cert_key(CONSENT, &point);
-    assert_eq!(mycelium_core::ops::kv_get(&*a.task_ctx, &path).as_deref(), Some(der.as_slice()), "the record is at the point's path");
+    assert_eq!(mycelium_core::ops::kv_get(&a.task_ctx, &path).as_deref(), Some(der.as_slice()), "the record is at the point's path");
     // A fresh fold over the store alone: forget the mark the publish raised.
     a.task_ctx.client_certs.marks.pin().clear();
     assert_eq!(a.consent_key_standing(CONSENT, &point), ClientKeyStanding::Current, "the fold reads it back from its path");
