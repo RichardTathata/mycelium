@@ -142,6 +142,7 @@ impl ServiceHandle {
             pending: super::provider_enforcement::DeferredChecks::new(&self.ctx),
             #[cfg(all(feature = "gateway", feature = "tls"))]
             closed: false,
+            stops_on_lapse: false,
         }
     }
 

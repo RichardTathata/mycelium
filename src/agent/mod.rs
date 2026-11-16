@@ -66,6 +66,10 @@ pub(crate) mod gateway_authority;
 pub(crate) mod provider_enforcement;
 #[cfg(all(feature = "gateway", feature = "tls"))]
 pub(crate) mod grant_use;
+/// Identity-and-lifecycle I4, PR 2: the gateway's mint of a `call:` mandate, its records, the revoke, the
+/// re-assertion and the collector of the `call/` and `grant/` families.
+#[cfg(all(feature = "gateway", feature = "tls"))]
+pub(crate) mod call_issuer;
 /// Identity-and-lifecycle I0: `[authority]` — this node's evaluator, execution authority, provider enforcement and
 /// evidence journal, built from its declaration at `start()`.
 #[cfg(feature = "compliance")]
@@ -220,6 +224,10 @@ mod call_mandate_tests;
 /// Identity-and-lifecycle I4, PR 1b: the provider's admission under the envelope's second mandate slot.
 #[cfg(all(test, feature = "compliance"))]
 mod call_admission_tests;
+/// Identity-and-lifecycle I4, PR 2: the gateway's mint, end to end over two nodes; the records, the revoke, the
+/// re-assertion, the collector; the doors that cannot stop a call.
+#[cfg(all(test, feature = "compliance"))]
+mod call_mint_tests;
 /// #781's review, F1: the built-in `llm.invoke` provider runs the provider check.
 #[cfg(all(test, feature = "gateway", feature = "tls", feature = "llm"))]
 mod llm_door_tests;
@@ -1099,6 +1107,13 @@ pub(crate) struct TaskCtx {
     /// `[persistence]` and its fold (`grant_use::GrantUseLedger`, lock-order row 79).
     #[cfg(all(feature = "gateway", feature = "tls"))]
     pub(crate) grant_uses: Arc<grant_use::GrantUseLedger>,
+    /// Identity-and-lifecycle I4, PR 2: the calls this gateway minted a `call:` mandate for, and its counters.
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    pub(crate) call_issuer: call_issuer::CallIssuer,
+    /// Identity-and-lifecycle I4: answers a declared `rpc_rx` receiver sent past the grace after its call's authority
+    /// lapsed, by kind (`provider_enforcement::assess_answer`). One entry per kind a declared receiver serves.
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    pub(crate) rpc_rx_late_answers: papaya::HashMap<String, u64>,
     /// Closure plan C3: whether this node, as a **provider**, runs the action preflight on protected
     /// work it receives, set via `with_provider_enforcement`. Off = today's behaviour.
     #[cfg(all(feature = "gateway", feature = "tls"))]
@@ -1759,6 +1774,10 @@ impl GossipAgent {
             #[cfg(all(feature = "gateway", feature = "tls"))]
             grant_uses: Arc::new(grant_use::GrantUseLedger::default()),
             #[cfg(all(feature = "gateway", feature = "tls"))]
+            call_issuer: call_issuer::CallIssuer::default(),
+            #[cfg(all(feature = "gateway", feature = "tls"))]
+            rpc_rx_late_answers: papaya::HashMap::new(),
+            #[cfg(all(feature = "gateway", feature = "tls"))]
             provider_enforcement: std::sync::atomic::AtomicBool::new(false),
             #[cfg(feature = "compliance")]
             declared_authority: std::sync::OnceLock::new(),
@@ -2169,6 +2188,9 @@ impl GossipAgent {
                 }
             });
         }
+        // Identity-and-lifecycle I4, PR 2: the collector of the `call/` and `grant/` families (D-5), once per node — only
+        // with `collect_expired_records` on (#794's review, K3).
+        let _ = call_issuer::start_collector(&self.task_ctx);
         // Identity-and-lifecycle I1: the authority verifies a client holder's possession by the client's current key, so
         // its external issuers are fed each one — those on record now, and each as the fold raises it. Only the
         // authority attached is fed (#743's review, item 9): one refused as a second is not registered.

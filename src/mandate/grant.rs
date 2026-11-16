@@ -54,7 +54,7 @@ pub const GRANT_SCOPE_PREFIX: &str = "grant:";
 /// The longest window a grant is issued for, in seconds (identity-and-lifecycle I4): the cap
 /// `POST /gateway/grants/{agent}/{request}` has always applied to `ttl_secs`, named. A `call:` mandate's window is
 /// held to the same cap where it is verified ([`check_call_mandate`]).
-pub const GRANT_TTL_CAP_SECS: u64 = 3_600;
+pub const GRANT_TTL_CAP_SECS: u64 = mycelium_core::config::GRANT_TTL_CAP_SECS;
 
 /// A **`call:` mandate** (identity-and-lifecycle I4) is a cancellation handle for one call: the gateway that
 /// dispatches the call issues it to itself — its `established_by` is its `holder`, the gateway's `node:` principal

@@ -655,6 +655,10 @@ pub struct WorkGuard {
     requested_ms: std::sync::Arc<std::sync::atomic::AtomicU64>,
     acknowledged_ms: std::sync::Arc<std::sync::atomic::AtomicU64>,
     now_ms: std::sync::Arc<dyn Fn() -> u64 + Send + Sync>,
+    /// The agent doing the work declared that it stops — the door drops the work, or the receiver promised to race
+    /// the lapse — so the guard's drop is a **confirmed** stop. `false` ([`unconfirmed`](Self::unconfirmed)): the
+    /// drop is only the work's release, recorded with no confirmation and no acknowledgement it did not make.
+    confirms: bool,
 }
 
 impl std::fmt::Debug for WorkGuard {
@@ -664,6 +668,22 @@ impl std::fmt::Debug for WorkGuard {
 }
 
 impl WorkGuard {
+    /// This work's stop is not the library's to confirm (identity-and-lifecycle I4; #794's review): the agent doing it
+    /// made no promise to stop — an `rpc_rx` receiver that did not declare it, a forwarded or streamed call. Its drop is
+    /// recorded as a release: `confirmed_ms` none, and `acknowledged_ms` only if the work acknowledged.
+    pub(crate) fn unconfirmed(mut self) -> Self {
+        self.confirms = false;
+        self
+    }
+
+    /// When the authority asked this work to stop, on its own clock — `None` while it has not.
+    pub(crate) fn stop_requested_ms(&self) -> Option<u64> {
+        match self.requested_ms.load(std::sync::atomic::Ordering::Acquire) {
+            0 => None,
+            t => Some(t),
+        }
+    }
+
     /// Has the authority cancelled this work?
     pub fn is_cancelled(&self) -> bool {
         self.cancelled.load(std::sync::atomic::Ordering::Acquire)
@@ -700,10 +720,12 @@ impl Drop for WorkGuard {
             let record = NamedStop {
                 scope: mandate.as_ref().map(|m| m.scope.clone()),
                 term: mandate.as_ref().map(|m| m.term.as_str().to_string()),
+                // A drop confirms a stop only where the agent doing the work promised to stop; elsewhere the library
+                // records what it saw — the release — and claims nothing about the work.
                 record: crate::mandate::authority::StopRecord {
                     requested_ms: at(&self.requested_ms),
-                    acknowledged_ms: at(&self.acknowledged_ms).or(Some(now)),
-                    confirmed_ms: Some(now),
+                    acknowledged_ms: if self.confirms { at(&self.acknowledged_ms).or(Some(now)) } else { at(&self.acknowledged_ms) },
+                    confirmed_ms: self.confirms.then_some(now),
                 },
             };
             let mut stops = self.authority.stops.lock().unwrap_or_else(|e| e.into_inner());
@@ -821,7 +843,7 @@ impl ExecutionAuthority {
                 requested_ms: std::sync::Arc::clone(&requested_ms),
             },
         );
-        WorkGuard { authority: std::sync::Arc::clone(self), id, cancel, cancelled, requested_ms, acknowledged_ms, now_ms }
+        WorkGuard { authority: std::sync::Arc::clone(self), id, cancel, cancelled, requested_ms, acknowledged_ms, now_ms, confirms: true }
     }
 
     /// **Re-check every piece of running work now** (closure plan C10): the same A1 check as at
@@ -1215,6 +1237,11 @@ impl ExecutionAuthority {
         };
         self.note_calls(&tally);
         assessment
+    }
+
+    /// The clock model's skew *s*, ms — what D-5's retention floor counts twice (identity-and-lifecycle I4).
+    pub(crate) fn skew_ms(&self) -> u64 {
+        self.state.lock().unwrap_or_else(|e| e.into_inner()).gate.clock().skew_ms
     }
 
     /// Install a later epoch at the protected resource. Never goes backwards.

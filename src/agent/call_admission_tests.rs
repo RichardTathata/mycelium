@@ -22,6 +22,10 @@ use std::time::Duration;
 const LONG_WINDOW_MS: u64 = 3_000_000;
 const MCP: &str = "mcp.invoke";
 const SKILL: &str = "skill.invoke";
+const CUSTOM: &str = "depot.custom";
+const HOSTED: &str = "cap.invoke/depot/thing";
+/// An operator's protected kind under a rule that is not cancellable.
+const PLAIN_RPC: &str = "depot.plain";
 
 struct Node {
     a: Arc<GossipAgent>,
@@ -103,7 +107,12 @@ async fn node_with(opts: Opts) -> Node {
         cfg.gateway_caller_profile = crate::config::GatewayCallerProfile::Legacy;
     }
     cfg.gateway_identity_issuer = Some("gw".into());
-    cfg.gateway_named_tokens = vec![crate::config::GatewayNamedToken { name: "alice".into(), token: "alice-secret".into(), scopes: vec!["mcp:invoke".into()] }];
+    cfg.gateway_named_tokens = vec![
+        crate::config::GatewayNamedToken { name: "alice".into(), token: "alice-secret".into(), scopes: vec!["mcp:invoke".into()] },
+        crate::config::GatewayNamedToken { name: "sdk".into(), token: "sdk-secret".into(), scopes: vec!["mesh:serve".into()] },
+    ];
+    // An operator's protected kind, served to an SDK agent over `rpc/serve` (the doors that cannot stop a call).
+    cfg.protected_rpc_kinds = vec![CUSTOM.into(), PLAIN_RPC.into()];
     let a = Arc::new(GossipAgent::new(id.clone(), cfg));
     let me = id.to_string();
     a.with_evidence_journal(EvidenceJournal::open(dir.join("evidence.log"), EvidenceProfile::Strict).unwrap());
@@ -115,7 +124,19 @@ async fn node_with(opts: Opts) -> Node {
             .allow(Rule::new("*", "tools/call", format!("tool:slow@{me}")).cancellable())
             .allow(Rule::new("*", "tools/call", format!("tool:plain@{me}")))
             .allow(Rule::new("*", "tools/call", format!("tool:both@{me}")).requiring_grant().cancellable())
-            .allow(Rule::new("*", "skill.invoke", format!("skill:depot/long@{me}")).cancellable()),
+            .allow(Rule::new("*", "skill.invoke", format!("skill:depot/long@{me}")).cancellable())
+            // The doors that cannot stop a running call (the maintainer's decision of 2026-11-15): a bridged MCP
+            // server's tool, a tool registered as unstoppable, a hosted capability's kind, an SDK-served kind — each
+            // cancellable, and the unstoppable tool's twin not.
+            .allow(Rule::new("*", "tools/call", format!("tool:remote@{me}")).cancellable())
+            .allow(Rule::new("*", "tools/call", format!("tool:hosted@{me}")).cancellable())
+            .allow(Rule::new("*", "tools/call", format!("tool:hosted_plain@{me}")))
+            .map_action("cap.invoke", "*")
+            .allow(Rule::new("*", "cap.invoke", format!("cap:depot/thing@{me}")).cancellable())
+            .map_action(CUSTOM, "*")
+            .allow(Rule::new("*", CUSTOM, format!("res:x@{me}")).cancellable())
+            .map_action(PLAIN_RPC, "*")
+            .allow(Rule::new("*", PLAIN_RPC, format!("res:y@{me}"))),
     ));
     let mut entitlements = EntitlementTable::new();
     entitlements.entitle_grants(PrincipalId::new(node_principal(&id)).unwrap());
@@ -143,7 +164,7 @@ async fn node_with(opts: Opts) -> Node {
     // A cooperative `rpc_rx` skill: its work ends when it finishes or when its authority lapses.
     std::mem::forget(a.capabilities().advertise_capability(crate::capability::Capability::new("depot", "long"), Duration::from_secs(600)));
     let (agent, s, f) = (Arc::clone(&a), Arc::clone(&started), Arc::clone(&finished));
-    let mut rx = a.service().rpc_rx(SKILL);
+    let mut rx = a.service().rpc_rx(SKILL).stops_when_authority_lapses();
     tokio::spawn(async move {
         while let Some(req) = rx.recv().await {
             let (agent, s, f) = (Arc::clone(&agent), Arc::clone(&s), Arc::clone(&f));
@@ -191,6 +212,21 @@ impl Node {
         let arguments = serde_json::json!({ "aisle": 4 });
         let payload = serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": name, "arguments": arguments}}).to_string().into_bytes();
         Call { kind: MCP, payload, claim: None, operation: "tools/call", resource: format!("tool:{name}@{}", self.a.node_id()), arguments }
+    }
+    /// A hosted capability's kind, as the wasm host serves it (`rpc_rx`), decided as `cap.invoke` on its `cap:` resource.
+    fn hosted(&self) -> Call {
+        let arguments = serde_json::json!({ "n": 1 });
+        Call { kind: HOSTED, payload: arguments.to_string().into_bytes(), claim: None, operation: "cap.invoke", resource: format!("cap:depot/thing@{}", self.a.node_id()), arguments }
+    }
+    /// The operator's protected kind under a plain rule.
+    fn plain_kind(&self) -> Call {
+        let resource = format!("res:y@{}", self.a.node_id());
+        Call { kind: PLAIN_RPC, payload: b"work".to_vec(), claim: Some(resource.clone()), operation: PLAIN_RPC, resource, arguments: serde_json::json!({ "payload_b64": "d29yaw==" }) }
+    }
+    /// The operator's protected kind, as an SDK agent serves it.
+    fn custom(&self) -> Call {
+        let resource = format!("res:x@{}", self.a.node_id());
+        Call { kind: CUSTOM, payload: b"work".to_vec(), claim: Some(resource.clone()), operation: CUSTOM, resource, arguments: serde_json::json!({ "payload_b64": "d29yaw==" }) }
     }
     fn skill(&self) -> Call {
         let resource = format!("skill:depot/long@{}", self.a.node_id());
@@ -282,6 +318,16 @@ impl Node {
     async fn running(&self, n: usize) {
         assert!(until(|| self.authority.running_count() == n, Duration::from_secs(20)).await, "running_count {} (wanted {n})", self.authority.running_count());
     }
+    /// Wait until `n` calls are registered here while the call `answered` is still out — and if it is answered first,
+    /// fail with its answer (#794's review, F1): a refusal names its code and reason, not only "running_count 0".
+    async fn running_or_answered(&self, n: usize, answered: &mut tokio::task::JoinHandle<Vec<u8>>) {
+        let done = until(|| self.authority.running_count() == n || answered.is_finished(), Duration::from_secs(20)).await;
+        if done && self.authority.running_count() == n {
+            return;
+        }
+        let reply = if answered.is_finished() { (&mut *answered).await.ok().map(|r| String::from_utf8_lossy(&r).into_owned()) } else { None };
+        panic!("running_count {} (wanted {n}); the call's answer: {reply:?}", self.authority.running_count());
+    }
 }
 
 async fn until(cond: impl Fn() -> bool, within: Duration) -> bool {
@@ -324,8 +370,8 @@ async fn a_cancellable_call_runs_only_registered_under_its_call_mandate_and_a_ca
     // Honest: registered, then cancelled.
     let (framed, id, _) = n.frame(&slow, None, Cm::Honest);
     let (n2, call) = (Arc::clone(&n), n.tool("slow"));
-    let running = tokio::spawn(async move { n2.send(&call, framed).await });
-    n.running(1).await;
+    let mut running = tokio::spawn(async move { n2.send(&call, framed).await });
+    n.running_or_answered(1, &mut running).await;
     n.began(1).await;
     assert_eq!(n.counts(), (1, 0), "the tool is running");
     let asked = std::time::Instant::now();
@@ -445,8 +491,8 @@ async fn a_call_under_a_grant_and_a_call_mandate_is_registered_under_both_and_ei
         let grant = n.grant(&both, &request);
         let (framed, id, _) = n.frame(&both, Some(&grant), Cm::Honest);
         let (n2, call) = (Arc::clone(&n), n.tool("both"));
-        let sent = tokio::spawn(async move { n2.send(&call, framed).await });
-        n.running(2).await;
+        let mut sent = tokio::spawn(async move { n2.send(&call, framed).await });
+        n.running_or_answered(2, &mut sent).await;
         n.began(round).await;
         if by_grant {
             n.offer_grant_checkpoint(&request, 2, &[request.as_str()]);
@@ -476,8 +522,8 @@ async fn a_cancel_reaches_an_in_process_serve_loop_through_authority_lapsed() {
     let skill = n.skill();
     let (framed, id, _) = n.frame(&skill, None, Cm::Honest);
     let (n2, call) = (Arc::clone(&n), n.skill());
-    let sent = tokio::spawn(async move { n2.send(&call, framed).await });
-    n.running(1).await;
+    let mut sent = tokio::spawn(async move { n2.send(&call, framed).await });
+    n.running_or_answered(1, &mut sent).await;
     n.began(1).await;
     n.cancel(id);
     let reply = tokio::time::timeout(Duration::from_secs(10), sent).await.expect("the skill was told its authority lapsed").unwrap();
@@ -492,7 +538,7 @@ async fn a_cancel_reaches_an_in_process_serve_loop_through_authority_lapsed() {
 }
 
 /// **Every other way a call reaches a cancellable rule without a `call:` mandate is refused, by the same name.**
-/// No gateway mints yet (the row's next PR), so each of these doors carries none:
+/// A gateway that does not mint (`gateway_mint_call_mandates` off, the default), so each of these doors carries none:
 ///
 /// - **the gateway's `/mcp`**: its preflight permits and carries the rule's `cancellable`; the provider refuses;
 /// - **a member's own call** (`ServiceHandle::rpc_call`, a self envelope with no second slot);
@@ -586,8 +632,8 @@ async fn a_call_refused_for_its_call_mandate_gives_the_grant_back() {
     // The same grant, an honest envelope: it runs.
     let (framed, id, _) = n.frame(&both, Some(&grant), Cm::Honest);
     let (n2, call) = (Arc::clone(&n), n.tool("both"));
-    let sent = tokio::spawn(async move { n2.send(&call, framed).await });
-    n.running(2).await;
+    let mut sent = tokio::spawn(async move { n2.send(&call, framed).await });
+    n.running_or_answered(2, &mut sent).await;
     n.began(1).await;
     n.cancel(id);
     assert!(json(&sent.await.unwrap()).to_string().contains("cancelled: the call's authority lapsed while it ran"));
@@ -647,4 +693,217 @@ fn a_bridged_servers_reply_shaped_like_call_mandate_not_established_gives_nothin
     let rewritten = super::mcp::as_tool_answer(answer("call_mandate_not_established"), &serde_json::json!(1));
     assert_eq!((rewritten["error"]["code"].as_i64(), rewritten["error"]["data"].is_null()), (Some(-32000), true), "{rewritten}");
     assert_eq!(super::http::pre_execution_refusal(rewritten.to_string().as_bytes()), None);
+}
+
+/// The refusal of a door that cannot stop a running call: -32031, `authority_not_established`, `door_cannot_stop`,
+/// with the door's stable name in `data.door`. `v` is a JSON-RPC answer or a plain receiver's refusal body.
+#[track_caller]
+fn assert_door_cannot_stop(v: &serde_json::Value, door: &str) {
+    let data = if v["error"].is_object() { &v["error"]["data"] } else { &v["data"] };
+    assert_eq!((data["reason"].as_str(), data["detail"].as_str(), data["door"].as_str()), (Some("authority_not_established"), Some("door_cannot_stop"), Some(door)), "{v}");
+}
+
+/// **The doors that cannot stop a running call refuse a call under a cancellable rule, by name** (the maintainer's
+/// decision of 2026-11-15, until I4's PR 3 builds their stop): the **bridged MCP loop** (an external MCP server's
+/// tool), a tool registered with **`register_mcp_tool_unstoppable`** (the wasm host's bridge: a begun guest call is
+/// never interrupted), a **hosted capability's kind** through `rpc_rx`, and the **SDK serve stream**. Each call
+/// carries an honest `cm`, so without this refusal it would be admitted and registered where a cancel claims a stop it
+/// cannot make. In each case nothing is forwarded, streamed or run, and the provider's journal says nothing ran; the
+/// unstoppable tool's twin under a rule that is **not** cancellable runs. Seen failing first: with the refusal taken
+/// out of `admit_after`, the bridged call was forwarded.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_doors_that_cannot_stop_a_call_refuse_one_under_a_cancellable_rule_by_name() {
+    let n = node().await;
+    let before = n.nothing_ran();
+    // The bridged MCP loop.
+    let (mock_port, _mock) = super::mcp::tests::spawn_mock_mcp_server(vec![serde_json::json!({"name": "remote", "inputSchema": {"type": "object"}})]).await;
+    let _bridge = n.a.mcp().connect_mcp_server(format!("http://127.0.0.1:{mock_port}/")).await.expect("bridged");
+    let (reply, _) = n.call(&n.tool("remote"), None, Cm::Honest).await;
+    assert_door_cannot_stop(&json(&reply), "bridged_mcp");
+    assert!(!String::from_utf8_lossy(&reply).contains("echo:remote"), "nothing was forwarded");
+    // A tool whose handler cannot stop what it started.
+    let ran = Arc::new(AtomicUsize::new(0));
+    let r = Arc::clone(&ran);
+    let _hosted = n.a.mcp().register_mcp_tool_unstoppable("hosted", serde_json::json!({"type": "object"}), move |_| {
+        r.fetch_add(1, Ordering::SeqCst);
+        async { Ok(serde_json::json!("ran")) }
+    });
+    let r = Arc::clone(&ran);
+    let _plain = n.a.mcp().register_mcp_tool_unstoppable("hosted_plain", serde_json::json!({"type": "object"}), move |_| {
+        r.fetch_add(1, Ordering::SeqCst);
+        async { Ok(serde_json::json!("ran")) }
+    });
+    let (reply, _) = n.call(&n.tool("hosted"), None, Cm::Honest).await;
+    assert_door_cannot_stop(&json(&reply), "unstoppable_mcp_tool");
+    assert_eq!(ran.load(Ordering::SeqCst), 0, "the unstoppable tool did not run under the cancellable rule");
+    let (reply, _) = n.call(&n.tool("hosted_plain"), None, Cm::Honest).await;
+    assert_eq!(json(&reply)["error"], serde_json::Value::Null, "under a plain rule it runs: {}", json(&reply));
+    assert_eq!(ran.load(Ordering::SeqCst), 1);
+    // A hosted capability's kind, through `rpc_rx` (the check runs inside `recv`): the receiver is handed nothing.
+    let mut rx = n.a.service().rpc_rx(HOSTED);
+    let handed = Arc::new(AtomicUsize::new(0));
+    let h = Arc::clone(&handed);
+    let receiver = tokio::spawn(async move {
+        while rx.recv().await.is_some() {
+            h.fetch_add(1, Ordering::SeqCst);
+        }
+    });
+    let hosted = n.hosted();
+    let (reply, _) = n.call(&hosted, None, Cm::Honest).await;
+    assert_door_cannot_stop(&json(&reply), "hosted_capability");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(handed.load(Ordering::SeqCst), 0, "the hosted kind's receiver was handed nothing");
+    receiver.abort();
+    // The SDK serve stream, read as an SDK agent reads it: the request is answered, never streamed.
+    let mut stream = reqwest::Client::new()
+        .get(format!("http://127.0.0.1:{}/gateway/rpc/serve/{CUSTOM}", n.http_port))
+        .bearer_auth("sdk-secret")
+        .send()
+        .await
+        .expect("the serve stream opens");
+    assert_eq!(stream.status(), 200);
+    let seen = Arc::new(std::sync::Mutex::new(String::new()));
+    let into = Arc::clone(&seen);
+    let reader = tokio::spawn(async move {
+        while let Ok(Some(c)) = stream.chunk().await {
+            into.lock().unwrap().push_str(&String::from_utf8_lossy(&c));
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let (reply, _) = n.call(&n.custom(), None, Cm::Honest).await;
+    assert_door_cannot_stop(&json(&reply), "sdk_serve");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let streamed = seen.lock().unwrap().clone();
+    assert!(!streamed.contains("d29yaw") && !streamed.contains("nonce"), "nothing was streamed: {streamed}");
+    reader.abort();
+    assert_eq!(n.authority.running_count(), 0, "nothing was registered");
+    assert_eq!(n.nothing_ran(), before + 4, "an execution record for each refusal says nothing ran");
+    n.a.shutdown().await;
+}
+
+/// An `rpc_rx` serve loop on `kind` that answers `"done"` once `work` has passed — or, if `races`, `"stopped"` 300 ms
+/// after the call's authority lapses (a receiver that stops and tidies up first). Returns how many requests it was
+/// handed.
+fn serve_rpc(n: &Node, kind: &'static str, declared: bool, races: bool, work: Duration) -> Arc<AtomicUsize> {
+    let rx = n.a.service().rpc_rx(kind);
+    let mut rx = if declared { rx.stops_when_authority_lapses() } else { rx };
+    let handed = Arc::new(AtomicUsize::new(0));
+    let (h, agent) = (Arc::clone(&handed), Arc::clone(&n.a));
+    tokio::spawn(async move {
+        while let Some(req) = rx.recv().await {
+            h.fetch_add(1, Ordering::SeqCst);
+            let agent = Arc::clone(&agent);
+            tokio::spawn(async move {
+                if races {
+                    tokio::select! {
+                        _ = tokio::time::sleep(work) => agent.service().rpc_respond(&req, b"done".to_vec()),
+                        _ = req.authority_lapsed() => {
+                            tokio::time::sleep(Duration::from_millis(300)).await;
+                            agent.service().rpc_respond(&req, b"stopped".to_vec());
+                        }
+                    }
+                } else {
+                    tokio::time::sleep(work).await;
+                    agent.service().rpc_respond(&req, b"done".to_vec());
+                }
+            });
+        }
+    });
+    handed
+}
+
+/// **An `rpc_rx` receiver that has not declared it stops is refused a call under a cancellable rule, by name, and
+/// served one under any other rule** (the maintainer's decision of 2026-11-15: a receiver promises only its own
+/// behaviour, and the node serves a cancellable call only where that promise was made). The undeclared receiver of
+/// the cancellable kind is handed nothing and the caller is answered -32031 `door_cannot_stop`, `data.door`
+/// `rpc_rx`; the undeclared receiver of a kind under a plain rule is handed the call, which runs. Seen failing first:
+/// with `Door::RpcRx` answering as a door that stops whatever the receiver declared, the cancellable call was handed
+/// to the undeclared receiver.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_undeclared_rpc_rx_receiver_is_refused_a_cancellable_call_and_served_a_plain_one() {
+    let n = node().await;
+    let custom = serve_rpc(&n, CUSTOM, false, false, Duration::ZERO);
+    let plain = serve_rpc(&n, PLAIN_RPC, false, false, Duration::ZERO);
+    let before = n.nothing_ran();
+    let (reply, _) = n.call(&n.custom(), None, Cm::Honest).await;
+    assert_door_cannot_stop(&json(&reply), "rpc_rx");
+    let (reply, _) = n.call(&n.plain_kind(), None, Cm::Honest).await;
+    assert_eq!(reply, b"done".to_vec(), "{}", String::from_utf8_lossy(&reply));
+    assert_eq!((custom.load(Ordering::SeqCst), plain.load(Ordering::SeqCst)), (0, 1));
+    assert_eq!(n.nothing_ran(), before + 1, "the refusal says nothing ran");
+    n.a.shutdown().await;
+}
+
+/// **A receiver that declared it stops is served a cancellable call and stops it on the gateway's revoke, uncounted;
+/// one that declared and ignores the lapse is counted** (the assessment, not enforcement: nothing is refused). The
+/// declared, racing receiver stops and answers `stopped` 300 ms after the lapse — inside `LAPSE_ANSWER_GRACE_MS`, so
+/// `rpc_rx_answered_after_lapse` stays at zero. A second declared receiver keeps working past the lapse and answers
+/// `done` 2.5 s after the revoke: counted once under its kind. Seen failing first: with `assess_answer` returning at
+/// once the late answer was not counted, and with the grace at zero the racing receiver's answer was.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_declared_rpc_rx_receiver_is_served_and_stopped_and_one_that_ignores_the_lapse_is_counted() {
+    let n = Arc::new(node().await);
+    let late = |n: &Node| n.a.task_ctx.rpc_rx_late_answers.pin().get(CUSTOM).copied().unwrap_or(0);
+    // Declared and racing: served, registered, stopped by the revoke within the grace.
+    let handed = serve_rpc(&n, CUSTOM, true, true, Duration::from_secs(30));
+    let (framed, id, _) = n.frame(&n.custom(), None, Cm::Honest);
+    let (n2, call) = (Arc::clone(&n), n.custom());
+    let mut running = tokio::spawn(async move { n2.send(&call, framed).await });
+    n.running_or_answered(1, &mut running).await;
+    let asked = std::time::Instant::now();
+    n.cancel(id);
+    let reply = running.await.unwrap();
+    assert_eq!(reply, b"stopped".to_vec(), "{}", String::from_utf8_lossy(&reply));
+    assert!(asked.elapsed() < Duration::from_secs(5), "{:?}", asked.elapsed());
+    assert_eq!((handed.load(Ordering::SeqCst), late(&n)), (1, 0), "an answer racing the cancel is not a broken promise");
+    n.running(0).await;
+    n.a.shutdown().await;
+
+    // Declared and ignoring the lapse: served too (the node does not check the promise), and its late answer counted.
+    let n = Arc::new(node().await);
+    let _handed = serve_rpc(&n, CUSTOM, true, false, Duration::from_secs(3));
+    let (framed, id, _) = n.frame(&n.custom(), None, Cm::Honest);
+    let (n2, call) = (Arc::clone(&n), n.custom());
+    let mut running = tokio::spawn(async move { n2.send(&call, framed).await });
+    n.running_or_answered(1, &mut running).await;
+    n.cancel(id);
+    let reply = running.await.unwrap();
+    assert_eq!(reply, b"done".to_vec(), "the receiver ignored the lapse and answered when its work ended");
+    assert_eq!(late(&n), 1, "counted under its kind");
+    n.a.shutdown().await;
+}
+
+/// **A stop is recorded as confirmed only where the agent doing the work promised to stop** (#794's review, the
+/// promise-theory finding). An undeclared `rpc_rx` receiver of a kind under a plain rule is served a call with an
+/// honest `call:` mandate; the gateway cancels it; the receiver ignores the lapse and answers when its work ends. Its
+/// stop record says the stop was asked (`requested_ms`) and nothing more — no acknowledgement, no confirmation:
+/// the library saw the request released, not the work stopped. A declared receiver's stop is confirmed. Seen
+/// failing first: with every dropped, cancelled guard recording `confirmed_ms = now`, the undeclared receiver's work,
+/// which ran to its end, was recorded as a confirmed stop.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_undeclared_receivers_stop_is_a_release_and_a_declared_ones_is_confirmed() {
+    let n = Arc::new(node().await);
+    let _plain = serve_rpc(&n, PLAIN_RPC, false, false, Duration::from_millis(1_500));
+    let (framed, id, _) = n.frame(&n.plain_kind(), None, Cm::Honest);
+    let (n2, call) = (Arc::clone(&n), n.plain_kind());
+    let mut running = tokio::spawn(async move { n2.send(&call, framed).await });
+    n.running_or_answered(1, &mut running).await;
+    n.cancel(id);
+    assert_eq!(running.await.unwrap(), b"done".to_vec(), "the undeclared receiver ran to its end");
+    n.running(0).await;
+    let stop = n.authority.named_stop_records().into_iter().rev().find(|s| s.term.as_deref() == Some(&format!("c{id}"))).expect("a stop record");
+    assert!(stop.record.requested_ms.is_some(), "{stop:?}");
+    assert_eq!((stop.record.acknowledged_ms, stop.record.confirmed_ms), (None, None), "a release, not a confirmed stop: {stop:?}");
+    // The declared receiver's stop is its own promise kept: confirmed.
+    let _custom = serve_rpc(&n, CUSTOM, true, true, Duration::from_secs(30));
+    let (framed, id, _) = n.frame(&n.custom(), None, Cm::Honest);
+    let (n2, call) = (Arc::clone(&n), n.custom());
+    let mut running = tokio::spawn(async move { n2.send(&call, framed).await });
+    n.running_or_answered(1, &mut running).await;
+    n.cancel(id);
+    assert_eq!(running.await.unwrap(), b"stopped".to_vec());
+    n.running(0).await;
+    let stop = n.authority.named_stop_records().into_iter().rev().find(|s| s.term.as_deref() == Some(&format!("c{id}"))).expect("a stop record");
+    assert!(stop.record.acknowledged_ms.is_some() && stop.record.confirmed_ms.is_some(), "{stop:?}");
+    n.a.shutdown().await;
 }

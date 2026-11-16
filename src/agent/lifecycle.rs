@@ -3,6 +3,7 @@ use crate::signal::reconcile_boundary_from_store;
 #[cfg(feature = "tls")] use crate::signal::kv_ns;
 use crate::store::{apply_and_notify, intern_key};
 use crate::framing::GossipUpdate;
+#[cfg_attr(not(feature = "tls"), allow(unused_imports))] // since the caller-context marker moved to `gateway_caller`, used only under `tls`
 use bytes::Bytes;
 use std::{
     net::{IpAddr, SocketAddr},
@@ -415,6 +416,15 @@ impl GossipAgent {
         if let Some(skill) = &self.config.gateway_a2a_default_skill {
             let _ = self.task_ctx.a2a_default_skill.set(skill.clone());
         }
+        // Identity-and-lifecycle I4, PR 2: a minting gateway re-asserts the `call:` checkpoints it issued when another
+        // value lands at their keys; a node with `collect_expired_records` collects the `call/` and `grant/` records
+        // past D-5's floor.
+        #[cfg(all(feature = "gateway", feature = "tls"))]
+        if self.config.gateway_mint_call_mandates {
+            super::call_issuer::start_reassertion(&self.task_ctx);
+        }
+        #[cfg(all(feature = "gateway", feature = "tls"))]
+        let _ = super::call_issuer::start_collector(&self.task_ctx);
         // `[authority]`'s plan, attached before the boundary: the journal opened first (identity-and-lifecycle I0).
         #[cfg(feature = "compliance")]
         if let Some(planned) = self.task_ctx.declared_authority.get().cloned()
@@ -890,8 +900,9 @@ impl GossipAgent {
                     }
                 }
                 if *srx.borrow() { return; }
-                let _ = kv_set(&ctx, key,
-                               Bytes::from_static(super::gateway_caller::marker_value(&ctx.config)));
+                // Already written by an advertisement, if one came first (#794's review, K2).
+                let _ = key;
+                super::gateway_caller::publish_caller_context_marker(&ctx);
                 // Post-360 row E: every envelope this node frames carries an id, so a provider may refuse
                 // an id-less one in this node's name as a replay with the id stripped. The marker is this
                 // node's signed, dated statement, re-asserted so a provider honours it only while it is

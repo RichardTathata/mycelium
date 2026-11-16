@@ -1842,6 +1842,46 @@ pub struct GossipConfig {
     #[serde(default)]
     pub protected_rpc_kinds: Vec<String>,
 
+    /// **Mint a `call:` mandate for each protected call this gateway dispatches** (identity-and-lifecycle I4, D-6). On,
+    /// every protected call the gateway frames carries, in its envelope's second mandate slot (`cm`), a mandate the
+    /// gateway issues to itself for that one call (scope `call:c{n}`, `n` the envelope's id), with its first revocation
+    /// checkpoint; the checkpoint and a signed `window` record are written durably under `call/{gateway}/c{n}/` before the
+    /// envelope is sent. A provider registers the call's work under it, so the gateway can cancel the call. **What a
+    /// cancellable rule needs** (`cancellable = true`): without a mint, an enforcing provider refuses every call such a
+    /// rule permits. Refused by `validate()` under `gateway_caller_profile = legacy` (a legacy call has no envelope).
+    /// Default `false`. Env `GOSSIP_GATEWAY_MINT_CALL_MANDATES`.
+    #[serde(default)]
+    pub gateway_mint_call_mandates: bool,
+
+    /// **The window of each minted `call:` mandate, in seconds** (I4). It bounds a call nothing can cancel — under a
+    /// partition, or for a class whose drain is unbounded, the work runs to this window and no further. Default **300**,
+    /// the call's own timeout. `validate()` refuses `0` and a value above [`GRANT_TTL_CAP_SECS`] (3 600), the cap a
+    /// provider holds a `call:` window to. Env `GOSSIP_CALL_MANDATE_TTL_SECS`.
+    #[serde(default = "default_call_mandate_ttl_secs")]
+    pub call_mandate_ttl_secs: u64,
+
+    /// **How long a `call:` mandate's records are kept past the end of its window, in seconds** (I4, D-5): its
+    /// checkpoint and its `window` record are collected no earlier than the window's end + 2·skew + this, so a
+    /// provider still draining a cancelled call can read why. Default **300**. Env `GOSSIP_MAX_DRAIN_SECS`.
+    #[serde(default = "default_max_drain_secs")]
+    pub max_drain_secs: u64,
+
+    /// **How long a grant's records under `grant/` are kept, in seconds from the grant's issue** (I4, D-5) — the
+    /// request, the issued grant, its checkpoints, its revocation, its `consumed` and its use markers and releases.
+    /// Never below the grant's window + 2·skew, whatever this says. Default **604 800** (7 days). `validate()` refuses a
+    /// value below [`GRANT_TTL_CAP_SECS`], the longest window a grant is issued for. Env `GOSSIP_GRANT_RETENTION_SECS`.
+    #[serde(default = "default_grant_retention_secs")]
+    pub grant_retention_secs: u64,
+
+    /// **Run the collector of the `call/` and `grant/` key families on this node** (I4, D-5). Off by default: until it
+    /// is on, nothing is deleted — `max_drain_secs` and `grant_retention_secs` are read only by it. On, each minute this
+    /// node deletes the `call/` records past their window + 2·skew + `max_drain_secs` and the `grant/` records under a
+    /// verified grant past the later of its window + 2·skew and its issue + `grant_retention_secs` — its own with a
+    /// tombstone, another node's only at the stamp it holds. Who may delete which records is the maintainer's open
+    /// question (#794's review). Env `GOSSIP_COLLECT_EXPIRED_RECORDS`.
+    #[serde(default)]
+    pub collect_expired_records: bool,
+
     /// The confidence bound every governor applies before it counts its view as *certain enough*
     /// (item 4's control contract, `ConfidenceBound`): the stalest heard peer may be at most this
     /// old. Default **30 000 ms** — strict on purpose; an operator loosens it *on evidence*
@@ -2024,6 +2064,13 @@ fn default_authority_freshness_ms() -> u64 { 120_000 }
 fn default_authority_skew_ms() -> u64 { 1_000 }
 
 fn default_control_max_staleness_ms() -> u64 { 30_000 }
+
+/// The longest window a grant — and a `call:` mandate — is issued for, in seconds (identity-and-lifecycle I4).
+/// `mycelium::mandate::grant::GRANT_TTL_CAP_SECS` is this constant.
+pub const GRANT_TTL_CAP_SECS: u64 = 3_600;
+fn default_call_mandate_ttl_secs() -> u64 { 300 }
+fn default_max_drain_secs() -> u64 { 300 }
+fn default_grant_retention_secs() -> u64 { 7 * 24 * 3_600 }
 fn default_control_min_peers_heard() -> usize { 1 }
 fn default_require_identity_proofs() -> bool { true }
 
@@ -2283,6 +2330,11 @@ impl Default for GossipConfig {
             kv_require_signed_frames:      false,
             gateway_caller_profile:        GatewayCallerProfile::Secure,
             protected_rpc_kinds:           Vec::new(),
+            gateway_mint_call_mandates:    false,
+            call_mandate_ttl_secs:         default_call_mandate_ttl_secs(),
+            max_drain_secs:                default_max_drain_secs(),
+            grant_retention_secs:          default_grant_retention_secs(),
+            collect_expired_records:       false,
             control_max_staleness_ms:      30_000,
             control_min_peers_heard:       1,
             domain_profile:                DomainProfile::Open,
@@ -2812,6 +2864,25 @@ impl GossipConfig {
                 }
             })?;
         }
+        // Identity-and-lifecycle I4: the `call:` mandate's settings.
+        if self.gateway_mint_call_mandates && self.gateway_caller_profile == GatewayCallerProfile::Legacy {
+            return Err(GossipError::InvalidField {
+                field:  "gateway_mint_call_mandates",
+                reason: "set under gateway_caller_profile = legacy: a legacy call carries no envelope, so there is nowhere to put a call: mandate".into(),
+            });
+        }
+        if self.call_mandate_ttl_secs == 0 || self.call_mandate_ttl_secs > GRANT_TTL_CAP_SECS {
+            return Err(GossipError::InvalidField {
+                field:  "call_mandate_ttl_secs",
+                reason: format!("must be in 1..={GRANT_TTL_CAP_SECS} (GRANT_TTL_CAP_SECS: a provider holds a call: window no longer), got {}", self.call_mandate_ttl_secs),
+            });
+        }
+        if self.grant_retention_secs < GRANT_TTL_CAP_SECS {
+            return Err(GossipError::InvalidField {
+                field:  "grant_retention_secs",
+                reason: format!("must be at least {GRANT_TTL_CAP_SECS} (GRANT_TTL_CAP_SECS, the longest grant window): a grant's records are never collected while it can be presented; got {}", self.grant_retention_secs),
+            });
+        }
         if self.gateway_max_connections == 0 || self.gateway_max_connections > 65535 {
             return Err(GossipError::InvalidField {
                 field:  "gateway_max_connections",
@@ -3196,6 +3267,29 @@ impl GossipConfig {
         }
         if let Ok(v) = env::var("GOSSIP_GATEWAY_MAX_CONNECTIONS") {
             self.gateway_max_connections = v.parse().map_err(GossipError::Parse)?;
+        }
+        if let Ok(v) = env::var("GOSSIP_GATEWAY_MINT_CALL_MANDATES") {
+            self.gateway_mint_call_mandates = match v.as_str() {
+                "true" | "1" => true,
+                "false" | "0" => false,
+                other => return Err(GossipError::InvalidField { field: "gateway_mint_call_mandates", reason: format!("GOSSIP_GATEWAY_MINT_CALL_MANDATES must be true/false/1/0, got {other:?}") }),
+            };
+        }
+        if let Ok(v) = env::var("GOSSIP_COLLECT_EXPIRED_RECORDS") {
+            self.collect_expired_records = match v.as_str() {
+                "true" | "1" => true,
+                "false" | "0" => false,
+                other => return Err(GossipError::InvalidField { field: "collect_expired_records", reason: format!("GOSSIP_COLLECT_EXPIRED_RECORDS must be true/false/1/0, got {other:?}") }),
+            };
+        }
+        if let Ok(v) = env::var("GOSSIP_CALL_MANDATE_TTL_SECS") {
+            self.call_mandate_ttl_secs = v.parse().map_err(GossipError::Parse)?;
+        }
+        if let Ok(v) = env::var("GOSSIP_MAX_DRAIN_SECS") {
+            self.max_drain_secs = v.parse().map_err(GossipError::Parse)?;
+        }
+        if let Ok(v) = env::var("GOSSIP_GRANT_RETENTION_SECS") {
+            self.grant_retention_secs = v.parse().map_err(GossipError::Parse)?;
         }
         if let Ok(v) = env::var("GOSSIP_GATEWAY_ALLOW_UNAUTHENTICATED") {
             // Strict, unlike the diagnostic toggles above: this one waives a security refusal, so a
@@ -3687,6 +3781,34 @@ mod tests {
         let mut cfg = GossipConfig::default();
         cfg.writer_channel_depth = 0;
         assert!(cfg.validate().is_err());
+    }
+
+    /// Identity-and-lifecycle I4: the `call:` mandate's settings refuse what cannot hold — a mint under the legacy
+    /// profile (no envelope to carry it), a window of 0 or past `GRANT_TTL_CAP_SECS`, and a grant retention below the
+    /// longest grant window (D-5's floor would be the setting's, not the window's). Seen failing first: with the three
+    /// checks out of `validate()`, every case below was accepted.
+    #[test]
+    fn the_call_mandate_settings_refuse_what_cannot_hold() {
+        let ok = GossipConfig::default();
+        assert!(!ok.collect_expired_records, "nothing is collected until the operator turns it on (#794's review, K3)");
+        assert!(!ok.gateway_mint_call_mandates && ok.call_mandate_ttl_secs == 300 && ok.max_drain_secs == 300 && ok.grant_retention_secs == 604_800);
+        assert!(ok.validate().is_ok());
+        let refused = |edit: &dyn Fn(&mut GossipConfig)| {
+            let mut c = GossipConfig::default();
+            edit(&mut c);
+            match c.validate() {
+                Err(GossipError::InvalidField { field, .. }) => field,
+                other => panic!("{other:?}"),
+            }
+        };
+        assert_eq!(refused(&|c| { c.gateway_mint_call_mandates = true; c.gateway_caller_profile = GatewayCallerProfile::Legacy; }), "gateway_mint_call_mandates");
+        assert_eq!(refused(&|c| c.call_mandate_ttl_secs = 0), "call_mandate_ttl_secs");
+        assert_eq!(refused(&|c| c.call_mandate_ttl_secs = GRANT_TTL_CAP_SECS + 1), "call_mandate_ttl_secs");
+        assert_eq!(refused(&|c| c.grant_retention_secs = GRANT_TTL_CAP_SECS - 1), "grant_retention_secs");
+        let mut edge = GossipConfig { gateway_mint_call_mandates: true, call_mandate_ttl_secs: GRANT_TTL_CAP_SECS, grant_retention_secs: GRANT_TTL_CAP_SECS, ..GossipConfig::default() };
+        assert!(edge.validate().is_ok());
+        edge.max_drain_secs = 0;
+        assert!(edge.validate().is_ok(), "no drain past the window is a choice, not a fault");
     }
 
     #[test]

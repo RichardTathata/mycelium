@@ -285,8 +285,14 @@ has no row for this feature. The tests: in [`src/mandate/grant.rs`](../../src/ma
   then reads *never written* there, and a grant valid longer (the cap is 3 600 s) can be presented once more at a
   gateway that did not make the first use. (3) **A member can spend a grant** by writing its marker key first: a
   refusal — availability. (4) During a release of mixed versions an un-upgraded gateway releases by tombstone,
-  which upgraded doors read as used. (5) The journal is not compacted and the signed records are not collected
-  (with I4's collector).
+  which upgraded doors read as used. (5) The journal is not compacted. **Collection is owner-only and off by
+  default** ([`collect_expired_records`](../reference/configuration.md#collect_expired_records),
+  [§110](../guide/deprecations.md)): the issuer deletes its own signed `issued` and `checkpoint` past the later of
+  the window + 2·skew and the issue + [`grant_retention_secs`](../reference/configuration.md#grant_retention_secs);
+  each door deletes the markers and releases it signed past their time + the retention; nobody deletes another
+  agent's record, and unsigned records (the request, `consumed`, `revoked`, `refused`) stay — so the holder's
+  `GET /gateway/grants/request/{r}` still answers `expired`, never `unknown_request`. A door keeps its marker at
+  least until the grant's own window ends, whatever the retention: no verifier caps a `grant:` window.
 - **Revocation.** `POST …/revoke` at the issuing node reads the tool and the agent from the **signed** grant (its one
   enumerated operation and its holder), not from the request record, and publishes the next checkpoint for the grant's scope naming the
   term, offers it to its own authority — whose sweep judges work under a grant by that standing and its window, not by

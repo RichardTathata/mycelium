@@ -34,7 +34,14 @@ This feature is turned on in code, in a build with `gateway` and `tls`.
 - [`protected_rpc_kinds`](../reference/configuration.md#protected_rpc_kinds): further kinds to treat as protected.
 - [`cancellable`](../../src/agent/action_evaluator.rs): on an allowance (`cancellable = true` in a
   [unit file's `[[rule]]`](../reference/unit-file.md)), the call it permits runs only with its gateway's `call:`
-  mandate established here, registered so that a cancel stops it; this needs `compliance` as well.
+  mandate established here, registered so that a cancel stops it; this needs `compliance` as well, and a gateway
+  in front that mints the mandate ([`gateway_mint_call_mandates`](../reference/configuration.md#gateway_mint_call_mandates),
+  [mandates](mandates.md)). A door that cannot stop a running call refuses such a call by name, `door_cannot_stop`
+  ([§110](../guide/deprecations.md)).
+- [`stops_when_authority_lapses`](../../src/agent/rpc.rs): declare that an `rpc_rx` receiver stops a call when its
+  authority lapses (it races `authority_lapsed()`); a cancellable rule's call is served only to a receiver that has.
+- [`register_mcp_tool_unstoppable`](../../src/agent/mcp_handle.rs): register a tool whose handler hands its work to
+  something it cannot stop (the wasm host's bridge uses it); a cancellable rule refuses calls to it.
 - `test_c7_the_bypass_matrix_no_door_runs_revoked_work`, in [`src/lib_tests.rs`](../../src/lib_tests.rs): after a
   revocation, no door runs the work, counted by the handlers themselves.
 - `a_members_direct_call_of_a_hosted_capability_is_decided_at_an_enforcing_provider`, in
@@ -133,10 +140,15 @@ confirmed stop, checked against the class's bound. CI runs it.
   provider); `mycelium-reason`'s router reads a provider's refusal as a failed attempt and answers `exhausted`
   (`502`) when every provider refuses; and the door has no row in the C7 matrix itself (the matrix runs on CI's
   `compliance,a2a` line, which builds no `llm`).
-- **Not built, for a cancellable rule:** no gateway mints a `call:` mandate yet, so such a rule refuses every call
-  it permits; a member's own unframed call carries none; the bridged MCP loop and the SDK serve stream do not stop
-  a cancelled call; a hosted component's guest call that has begun runs to its end or its deadline (a tool call still queued when
-  its handler has gone is not begun; a queued direct call is still run); a
+- **Not built, for a cancellable rule:** a gateway mints a `call:` mandate only with `gateway_mint_call_mandates`
+  on (off by default), and without it such a rule refuses every call it permits; no door cancels a call yet (the
+  gateway's revoke is built and called by none: I4's PR 3); a member's own unframed call carries none. **Refused by
+  name until PR 3** (`door_cannot_stop`, the door in `data.door`): the bridged MCP loop (`bridged_mcp`), the SDK
+  serve stream (`sdk_serve`), a hosted component's kind through `rpc_rx` (`hosted_capability`) and a tool registered
+  unstoppable (`unstoppable_mcp_tool`) — so a cancellable rule over any of them refuses every call; an
+  `rpc_rx` receiver is refused one (`rpc_rx`) unless it declares that it stops when its call's authority lapses
+  ([`stops_when_authority_lapses`](../../src/agent/rpc.rs)), and a declared receiver's late answers are counted
+  (`rpc_rx_answered_after_lapse`), not refused ([ledger](../operations/what-is-proven.md#rpc-rx-cancellable-not-refused)); a
   revoked term under a rule that is not cancellable is best effort, since a relay that strips
   `cm` makes the call run; a broader allowance listed first makes a cancellable rule inert ([§104](../guide/deprecations.md#104-a-cancellable-rule-requires-the-calls-call-mandate-at-the-provider-cm-in-the-caller-envelope-2410-identity-and-lifecycle-i4-pr-1b)).
 - **Not built:** on the deferred-check path (a check settling a seat claim), a `withdrawn` refusal (the serve loop

@@ -328,6 +328,12 @@ pub enum RouteError {
     NoProvider,
     /// Every attempted candidate failed; per-node error strings in attempt order.
     Exhausted(Vec<(NodeId, String)>),
+    /// **The call was cancelled** at the provider that ran it (identity-and-lifecycle I4): its gateway revoked the
+    /// call's `call:` term while it ran (`data.reason` `cancelled`), or before it began (`data.cause` `revoked`).
+    /// Final: the route stops here and tries no other provider — a retry would be a new envelope and a new term,
+    /// which the cancel does not cover, so it would run the call the gateway cancelled. Earlier failed attempts are
+    /// in `failures`.
+    Cancelled { provider: NodeId, detail: String, failures: Vec<(NodeId, String)> },
     /// The gateway's action preflight refused the call for the HTTP client it was routed for
     /// ([`InferenceRouter::call_as`]): nothing was dispatched. The fields are what every gateway
     /// door answers with — the JSON-RPC `code`, the machine-readable `reason` (`action_denied`,
@@ -351,6 +357,7 @@ impl fmt::Display for RouteError {
             RouteError::NoProvider => write!(f, "no provider for the requested model"),
             RouteError::Refused { reason, message, .. } => write!(f, "refused by policy ({reason}): {message}"),
             RouteError::Unclassifiable(why) => write!(f, "the request could not be classified: {why}"),
+            RouteError::Cancelled { provider, detail, .. } => write!(f, "the call was cancelled at {provider}: {detail}"),
             RouteError::Exhausted(fails) => {
                 write!(f, "all {} attempted provider(s) failed: ", fails.len())?;
                 let mut first = true;
@@ -816,6 +823,14 @@ impl InferenceRouter {
                     Ok(v) => {
                         if let Some(e) = v.get("error").and_then(|e| e.as_str()) {
                             let detail = v.get("detail").and_then(|d| d.as_str()).unwrap_or("");
+                            // I4: a cancelled call is final — never retried on the next provider under a new term.
+                            if is_cancelled(&v) {
+                                if let Some(t) = trace {
+                                    t.llm_call(node, false, 0, duration_ms, Some(&format!("{e}: {detail}")));
+                                }
+                                metrics::counter!("mycelium_reason_route_cancelled_total").increment(1);
+                                return Err(RouteError::Cancelled { provider: node.clone(), detail: format!("{e}: {detail}"), failures });
+                            }
                             format!("{e}: {detail}")
                         } else {
                             let output = v["output"].as_str().unwrap_or_default().to_owned();
@@ -872,6 +887,18 @@ impl InferenceRouter {
         metrics::counter!("mycelium_reason_route_exhausted_total").increment(1);
         Err(RouteError::Exhausted(failures))
     }
+}
+
+/// **Is this provider reply a cancellation?** (identity-and-lifecycle I4.) The built-in `llm.invoke` provider answers a
+/// call stopped while it ran with `data.reason` `cancelled`, and one whose `call:` term was already revoked when it
+/// was admitted with `data.detail` `call_mandate_not_established`, `data.cause` `revoked`. Both are the gateway's
+/// cancel, and final. `data.reason` `cancelled` is also the answer when the **caller's own mandate** lapses while the
+/// call runs (#794's review, K7): the route stops then too — a retry would run under the same lapsed mandate. Any
+/// other `call_mandate_not_established` cause is not final: another provider may admit the call.
+pub(crate) fn is_cancelled(reply: &serde_json::Value) -> bool {
+    let data = &reply["data"];
+    data["reason"].as_str() == Some("cancelled")
+        || (data["detail"].as_str() == Some("call_mandate_not_established") && data["cause"].as_str() == Some("revoked"))
 }
 
 /// A correlation id for one routed call (row R): this node, the wall clock and a process-local sequence. Not
@@ -991,6 +1018,23 @@ mod tests {
             again.iter().map(|(n, _)| n.to_string()).collect::<Vec<_>>(),
             order,
         );
+    }
+
+    #[test]
+    fn a_cancelled_reply_is_final_and_no_other_refusal_is() {
+        use serde_json::json;
+        // The provider's answer to a call cancelled while it ran (`llm.rs`), and to one cancelled before it began.
+        assert!(is_cancelled(&json!({"error": "cancelled", "detail": "cancelled: the call's authority lapsed while it ran", "code": -32603, "data": {"reason": "cancelled"}})));
+        assert!(is_cancelled(&json!({"error": "authority_not_established", "code": -32031, "data": {"reason": "authority_not_established", "detail": "call_mandate_not_established", "cause": "revoked"}})));
+        // Not a cancellation: another provider may run the call.
+        for other in [
+            json!({"error": "authority_not_established", "data": {"reason": "authority_not_established", "detail": "call_mandate_not_established", "cause": "no_call_mandate"}}),
+            json!({"error": "authority_not_established", "data": {"reason": "authority_not_established", "detail": "door_cannot_stop"}}),
+            json!({"error": "llm_error", "detail": "boom"}),
+            json!({"error": "cancelled"}),
+        ] {
+            assert!(!is_cancelled(&other), "{other}");
+        }
     }
 
     #[test]

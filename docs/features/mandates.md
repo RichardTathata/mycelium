@@ -63,13 +63,22 @@ work.
 - **Not built:** [guide 21 § What this does not establish](../guide/21-mandates.md#what-this-does-not-establish).
   The check-then-act window is narrowed and stated, not eliminated, and the wiki store counts its late writes
   rather than promising none ([what-is-proven § the check-then-act window](../operations/what-is-proven.md#check-then-act-window)).
-- **Not built, for the `call:` mandate:** no gateway mints one and no door cancels one yet. The authority's half
-  and the provider's admission are built ([provider enforcement](provider-enforcement.md))
+- **The `call:` mandate's gateway half** ([§110](../guide/deprecations.md)): with
+  [`gateway_mint_call_mandates`](../reference/configuration.md#gateway_mint_call_mandates) on, a gateway mints one
+  for each protected call it dispatches ([`mint`](../../src/agent/call_issuer.rs)), writes its checkpoint and
+  a signed `window` record durably before sending the call, re-asserts its checkpoint when another value lands at
+  its key, and collects the `call/` and `grant/` families past D-5's floor (`max_drain_secs`,
+  `grant_retention_secs`). Tests: [`src/agent/call_mint_tests.rs`](../../src/agent/call_mint_tests.rs).
+- **Not built, for the `call:` mandate:** no door cancels one yet — the gateway's revoke is built and called by none
+  (I4's PR 3: A2A `tasks/cancel`, MCP `notifications/cancelled`, the cancel-forward); after a gateway restart, the
+  gateway re-asserts nothing for the calls it minted before. The authority's half and the provider's admission are
+  built ([provider enforcement](provider-enforcement.md))
   ([I4](../plans/identity-and-lifecycle.md#3--rows), row I4, *The build*; [§100](../guide/deprecations.md#100-the-execution-authority-verifies-a-call-mandate-a-call-mandate-in-the-first-slot-is-never-established-the-call-key-family-is-owned-2410-identity-and-lifecycle-i4-pr-1a)).
 - **A `call:` checkpoint in the KV is verified at read:** a copy its gateway did not sign, or that names another
   call, is treated as absent and counted in `GET /stats` `call_checkpoints_refused`; an older copy written back and
   a tombstone are counted in `call_checkpoints_stale` and `call_checkpoints_missing`. A member that overwrites the
-  key can still deny a cancel, until the mandate's window ends, at a provider that had not read it
+  key can still deny a cancel, until the mandate's window ends, at a provider that had not read it — unless the
+  minting gateway, which watches its own keys, writes its checkpoint back first (PR 2's re-assertion)
   ([ledger](../operations/what-is-proven.md#call-checkpoint-replay))
   ([§100](../guide/deprecations.md#100-the-execution-authority-verifies-a-call-mandate-a-call-mandate-in-the-first-slot-is-never-established-the-call-key-family-is-owned-2410-identity-and-lifecycle-i4-pr-1a)).
 - **Evidence:** the ledger rows [running work stops](../operations/what-is-proven.md#running-work-stops) and

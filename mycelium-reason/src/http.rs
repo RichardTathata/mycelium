@@ -293,6 +293,10 @@ async fn gw_route(
             (StatusCode::BAD_GATEWAY, Json(json!({ "error": "exhausted", "detail": e.to_string() })))
                 .into_response()
         }
+        // I4: a stop after admission is not a refusal of authority — 409, as the gateway's own LLM doors answer it.
+        Err(e @ RouteError::Cancelled { .. }) => {
+            (StatusCode::CONFLICT, Json(json!({ "error": "cancelled", "detail": e.to_string() }))).into_response()
+        }
     }
 }
 
@@ -518,6 +522,9 @@ async fn gw_openai_chat(
         }
         Err(e @ RouteError::Exhausted(_)) => {
             openai_error(StatusCode::BAD_GATEWAY, e.to_string(), "server_error", "exhausted", None)
+        }
+        Err(e @ RouteError::Cancelled { .. }) => {
+            openai_error(StatusCode::CONFLICT, e.to_string(), "server_error", "cancelled", None)
         }
     }
 }

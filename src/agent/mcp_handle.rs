@@ -117,6 +117,40 @@ impl McpHandle {
         F: Fn(crate::McpCall, serde_json::Value) -> Fut + Send + Sync + 'static,
         Fut: std::future::Future<Output = Result<serde_json::Value, String>> + Send + 'static,
     {
+        self.register_tool(name, schema, handler, true)
+    }
+
+    /// [`register_mcp_tool`](Self::register_mcp_tool), for a handler that **hands its work to something it cannot
+    /// stop** — a hosted component's guest call, which is never interrupted once begun, or a task the handler spawns
+    /// for itself. Dropping such a handler's future (what this node does when a call's authority lapses or the call
+    /// is cancelled) stops nothing, so at an enforcing provider a call **under a cancellable rule is refused**
+    /// (JSON-RPC -32031, `data.detail` `door_cannot_stop`) rather than admitted where a cancel would claim to stop
+    /// it (identity-and-lifecycle I4; the maintainer's decision of 2026-11-15). Under any other rule the tool is
+    /// served exactly as `register_mcp_tool` serves it.
+    pub fn register_mcp_tool_unstoppable<F, Fut>(
+        &self,
+        name:    impl Into<Arc<str>>,
+        schema:  serde_json::Value,
+        handler: F,
+    ) -> McpToolHandle
+    where
+        F: Fn(serde_json::Value) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = Result<serde_json::Value, String>> + Send + 'static,
+    {
+        self.register_tool(name, schema, move |_call, args| handler(args), false)
+    }
+
+    fn register_tool<F, Fut>(
+        &self,
+        name:    impl Into<Arc<str>>,
+        schema:  serde_json::Value,
+        handler: F,
+        stops:   bool,
+    ) -> McpToolHandle
+    where
+        F: Fn(crate::McpCall, serde_json::Value) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = Result<serde_json::Value, String>> + Send + 'static,
+    {
         let name: Arc<str>   = name.into();
         let kv_key: Arc<str> = Arc::from(
             format!("tools/{}/{}", name, self.ctx.node_id).as_str(),
@@ -126,10 +160,13 @@ impl McpHandle {
         let ctx         = Arc::clone(&self.ctx);
         let rx          = self.ctx.signal_handlers.register(Arc::from(signal_kind::MCP_INVOKE));
 
+        // The marker first: a gateway must never see this tool before it can see that this node enforces the caller
+        // context (#794's review, K2).
+        super::gateway_caller::publish_caller_context_marker(&self.ctx);
         kv_set(&self.ctx, Arc::clone(&kv_key), Bytes::from(schema.to_string().into_bytes()));
 
         self.ctx.spawn_task(run_mcp_tool_task(
-            ctx, cancel_rx, shutdown_rx, kv_key, name, rx, handler,
+            ctx, cancel_rx, shutdown_rx, kv_key, name, rx, handler, stops,
         ));
         McpToolHandle { _cancel: cancel_tx }
     }
@@ -205,6 +242,8 @@ impl McpHandle {
 
         // ── Register tool KV entries ──────────────────────────────────────────
         let node_id = self.ctx.node_id.clone();
+        // The marker before any bridged tool's entry (#794's review, K2).
+        super::gateway_caller::publish_caller_context_marker(&self.ctx);
         let mut kv_keys: Vec<Arc<str>>   = Vec::with_capacity(tools.len());
         let mut tool_names: Vec<Arc<str>> = Vec::with_capacity(tools.len());
 

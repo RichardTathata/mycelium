@@ -277,6 +277,10 @@ fn spawn_handler_with(
         #[cfg(all(feature = "gateway", feature = "tls"))]
         grant_uses: Default::default(),
         #[cfg(all(feature = "gateway", feature = "tls"))]
+        call_issuer: crate::agent::call_issuer::CallIssuer::default(),
+        #[cfg(all(feature = "gateway", feature = "tls"))]
+        rpc_rx_late_answers: papaya::HashMap::new(),
+        #[cfg(all(feature = "gateway", feature = "tls"))]
         provider_enforcement: std::sync::atomic::AtomicBool::new(false),
         #[cfg(feature = "compliance")]
         declared_authority: std::sync::OnceLock::new(),
@@ -4509,6 +4513,10 @@ async fn test_subscribe_notified_via_gossip() {
         execution_authority: std::sync::OnceLock::new(),
         #[cfg(all(feature = "gateway", feature = "tls"))]
         grant_uses: Default::default(),
+        #[cfg(all(feature = "gateway", feature = "tls"))]
+        call_issuer: crate::agent::call_issuer::CallIssuer::default(),
+        #[cfg(all(feature = "gateway", feature = "tls"))]
+        rpc_rx_late_answers: papaya::HashMap::new(),
         #[cfg(all(feature = "gateway", feature = "tls"))]
         provider_enforcement: std::sync::atomic::AtomicBool::new(false),
         #[cfg(feature = "compliance")]
@@ -14761,7 +14769,7 @@ async fn test_c10_running_work_stops_when_its_authority_lapses() {
     });
     {
         let agent = Arc::clone(&agent);
-        let mut rx = agent.service().rpc_rx("skill.invoke");
+        let mut rx = agent.service().rpc_rx("skill.invoke").stops_when_authority_lapses();
         tokio::spawn(async move {
             while let Some(req) = rx.recv().await {
                 let agent = Arc::clone(&agent);

@@ -88,6 +88,9 @@ impl CapabilitiesHandle {
             warn!(ns = %capability.namespace, name = %capability.name, problem, "advertise_capability: refused; nothing is advertised");
             return CapabilityReg { _retract: cancel_tx };
         }
+        // The caller-context marker before the advertisement: a gateway that dispatches to this capability must find
+        // it (#794's review, K2).
+        super::gateway_caller::publish_caller_context_marker(&self.ctx);
         let shutdown_rx            = self.ctx.shutdown_tx.subscribe();
         let ctx: Arc<TaskCtx>      = Arc::clone(&self.ctx);
         let kv_key: Arc<str>       = Arc::from(format!(

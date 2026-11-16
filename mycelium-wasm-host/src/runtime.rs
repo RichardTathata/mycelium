@@ -681,7 +681,9 @@ impl ArtifactRuntime for WasmComponentRuntime {
             // provider — decided the call as that caller (`run_mcp_tool_task`). It hands the admitted arguments to
             // this install's serve loop in process (see `serve_loop`): the call is decided once, as the client.
             let tool: Arc<str> = Arc::from(entry.provides.name.as_ref());
-            Some(ctx.agent.mcp().register_mcp_tool(entry.provides.name.clone(), schema, move |args: serde_json::Value| {
+            // A begun guest call is never interrupted (#788), so dropping this handler stops nothing: registered as a tool
+            // that cannot stop, so a cancellable rule refuses a call to it rather than claim a stop (I4, 2026-11-15).
+            Some(ctx.agent.mcp().register_mcp_tool_unstoppable(entry.provides.name.clone(), schema, move |args: serde_json::Value| {
                 let bridge_tx = bridge_tx.clone();
                 let tool = Arc::clone(&tool);
                 async move {

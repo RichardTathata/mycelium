@@ -768,6 +768,7 @@ pub(crate) async fn release_grant_claim_after(ctx: &Arc<TaskCtx>, preflight: &Pr
         // nothing ran, so the use is given back without trusting any provider.
         Err(
             e @ (GatewayDispatchError::Exchange(_)
+            | GatewayDispatchError::CallNotDurable
             | GatewayDispatchError::ContextTooLarge
             | GatewayDispatchError::ProviderWithoutContext(_)
             | GatewayDispatchError::MissingContext),
@@ -1056,6 +1057,9 @@ pub(crate) struct Settling {
     /// Identity-and-lifecycle I3 (#754's review, finding 4): a signed grant decision as presented, for the record's
     /// `signed_decision`. Read only at the grant decision point, whose `params` the route builds itself.
     signed_decision: Option<serde_json::Value>,
+    /// The presented mandate's own window end, when one was assessed: a grant's use is kept at this door at least
+    /// that long (identity-and-lifecycle I4's collector; #794's round-2 review, C2).
+    mandate_until_ms: Option<u64>,
 }
 
 /// Test hook: the per-actor history admission refused at these nodes, as if the history changed on every try — the
@@ -1206,6 +1210,8 @@ pub(crate) async fn ae_decide(
         }
         None => super::gateway_authority::Assessment { binding: None, valid_until_ms: None },
     };
+    // The mandate's own window: a door keeps its use of a grant at least this long (#794's round-2 review, C2).
+    let mandate_until_ms = assessment.valid_until_ms;
     // A1 rule 3: the envelope can never outlive the mandate it acts under.
     let not_after_ms = match assessment.valid_until_ms {
         Some(until) => now_ms.saturating_add(60_000).min(until),
@@ -1388,6 +1394,7 @@ pub(crate) async fn ae_decide(
         signed_decision: (enforcement_point == super::grants::ENFORCEMENT_POINT_GRANT_ISSUE)
             .then(|| params["_meta"]["signed_decision"].clone())
             .filter(serde_json::Value::is_object),
+        mandate_until_ms,
     }))
 }
 
@@ -1433,7 +1440,7 @@ impl Settling {
     /// Claim the permit's seats and record the decision: the rest of [`ae_preflight`].
     pub(crate) async fn finish(self) -> Preflight {
         use super::action_evaluator as ae;
-        let Settling { ctx, envelope, counters, mut outcome, history, admitted, point, enforcement_point, route, exposure_shadow, shadow_admit, signed_decision } = self;
+        let Settling { ctx, envelope, counters, mut outcome, history, admitted, point, enforcement_point, route, exposure_shadow, shadow_admit, signed_decision, mandate_until_ms } = self;
         let ctx = &ctx;
         let enforcement_point = enforcement_point.as_str();
         let (operation, resource) = (envelope.operation.clone(), envelope.resource.clone());
@@ -1537,7 +1544,7 @@ impl Settling {
                 // `Superseded`) means something was written there that this door did not read — a tombstone or a
                 // value at a later stamp — so the call is refused by name and the grant stays used at this door.
                 let use_id = super::super::grant_use::new_use_id(ctx, &marker, &envelope.attempt_id);
-                match super::super::grant_use::record_use(ctx, &marker, &use_id).await {
+                match super::super::grant_use::record_use(ctx, &marker, &use_id, mandate_until_ms.unwrap_or(envelope.not_after_ms)).await {
                     Err(reason) => {
                         if let Some(authority) = ctx.execution_authority.get() {
                             authority.release_grant_use(&holder, &scope, &term, &point);
@@ -1691,7 +1698,8 @@ pub(crate) fn observed_execution(
         Ok(_) => Execution::Completed,
         Err(GatewayDispatchError::ProviderWithoutContext(_))
         | Err(GatewayDispatchError::ContextTooLarge)
-        | Err(GatewayDispatchError::Exchange(_)) => Execution::None,
+        | Err(GatewayDispatchError::Exchange(_))
+        | Err(GatewayDispatchError::CallNotDurable) => Execution::None,
         Err(_) => Execution::Unknown,
     }
 }
@@ -1870,6 +1878,8 @@ pub(super) fn dispatch_refused(e: GatewayDispatchError) -> Response {
         GatewayDispatchError::ContextTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
         // I5: the IdP, upstream of this gateway, did not give the exchanged token.
         GatewayDispatchError::Exchange(_) => StatusCode::BAD_GATEWAY,
+        // I4: this gateway's disk would not take the call's `call:` records — the node's state, not the request's.
+        GatewayDispatchError::CallNotDurable => StatusCode::SERVICE_UNAVAILABLE,
         _ => StatusCode::PRECONDITION_FAILED,
     };
     (status, Json(json!({ "ok": false, "error": e.reason(), "detail": e.to_string(), "provider": provider })))

@@ -49,6 +49,11 @@ impl Held {
 /// Closure plan C10: cooperative cancellation for work served through `rpc_rx`.
 #[cfg(all(feature = "gateway", feature = "tls"))]
 impl RpcRequest {
+    /// The admission this request holds, if the provider check admitted it.
+    pub(crate) fn admission(&self) -> Option<&super::provider_enforcement::Admission> {
+        self.1.0.as_ref().and_then(|a| a.downcast_ref::<super::provider_enforcement::Admission>())
+    }
+
     /// **Resolves when the authority this request runs under lapses** (Boundary H closure plan C10):
     /// its mandate expired, was revoked, went stale or was superseded, as the node's authority sweep
     /// found. Never resolves for a request that acts under no established mandate, or on a node
@@ -144,9 +149,29 @@ pub struct RpcRequestRx {
     /// The channel has closed: yield what is still settling, then end (N5 — never spin on the closed channel).
     #[cfg(all(feature = "gateway", feature = "tls"))]
     pub(crate) closed: bool,
+    /// This receiver has declared that it stops when a call's authority lapses
+    /// ([`stops_when_authority_lapses`](Self::stops_when_authority_lapses)).
+    #[cfg_attr(not(all(feature = "gateway", feature = "tls")), allow(dead_code))]
+    pub(crate) stops_on_lapse: bool,
 }
 
 impl RpcRequestRx {
+    /// **Declare that this receiver stops a call when the call's authority lapses** (identity-and-lifecycle I4; the
+    /// maintainer's decision of 2026-11-15): its serve loop races [`RpcRequest::authority_lapsed`] and ends the work
+    /// when it resolves — the caller's mandate lapsed, or the gateway cancelled the call. The receiver makes this
+    /// promise about its own behaviour; the node makes only its own: at an enforcing provider it serves a call under a
+    /// **cancellable** rule to a receiver that has declared, and refuses one to a receiver that has not (JSON-RPC
+    /// -32031, `data.detail` `door_cannot_stop`, `data.door` `rpc_rx`), since a cancel there could not be claimed to
+    /// stop anything. Under any other rule nothing changes.
+    ///
+    /// The node does not check the promise; it assesses it: a reply this receiver sends more than
+    /// [`LAPSE_ANSWER_GRACE_MS`](crate::LAPSE_ANSWER_GRACE_MS) after the call's authority lapsed is counted (`GET /stats`
+    /// `rpc_rx_answered_after_lapse`, by kind), and nothing is refused because of it.
+    pub fn stops_when_authority_lapses(mut self) -> Self {
+        self.stops_on_lapse = true;
+        self
+    }
+
     /// Receives the next **verified** RPC request. Returns `None` when the agent shuts down.
     ///
     /// The shutdown arm is what makes that true (row B, post-360 hardening): this receiver's sender
@@ -196,7 +221,7 @@ impl RpcRequestRx {
                     // anything. Inert unless provider enforcement is on.
                     #[cfg(all(feature = "gateway", feature = "tls"))]
                     {
-                        match super::provider_enforcement::check(&self.ctx, &req, true).await {
+                        match super::provider_enforcement::check(&self.ctx, &req, true, super::provider_enforcement::Door::RpcRx { stops: self.stops_on_lapse }).await {
                             super::provider_enforcement::Checked::Done(checked) => match self.admit_checked(req, checked) {
                                 Some(req) => return Some(req),
                                 None => continue,
@@ -233,7 +258,8 @@ impl RpcRequestRx {
         checked: Result<super::provider_enforcement::Admission, super::provider_enforcement::ProviderRefusal>,
     ) -> Option<RpcRequest> {
         match checked {
-            Ok(admission) => {
+            Ok(mut admission) => {
+                admission.promised_stop = self.stops_on_lapse;
                 req.1 = Held::new(admission);
                 Some(req)
             }
@@ -399,6 +425,9 @@ pub(crate) fn rpc_respond_ctx(ctx: &TaskCtx, request: &RpcRequest, result: impl 
         );
         return;
     }
+    // I4: a receiver that declared it stops on a lapse, answering well after its call's authority lapsed, is counted.
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    super::provider_enforcement::assess_answer(ctx, request);
     let nonce_bytes = request.0.payload.slice(..8);
     let result_bytes: Bytes = result.into();
     let mut buf = BytesMut::with_capacity(8 + result_bytes.len());

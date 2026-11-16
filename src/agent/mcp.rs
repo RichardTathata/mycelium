@@ -98,6 +98,7 @@ impl McpCall {
 #[cfg(all(feature = "gateway", feature = "tls"))]
 type McpCarry = (RpcRequest, serde_json::Value, McpCall);
 
+#[allow(clippy::too_many_arguments)] // the loop's channels, its tool, its handler, and whether that handler can stop
 pub(super) async fn run_mcp_tool_task<F, Fut>(
     ctx:             Arc<TaskCtx>,
     mut cancel_rx:   oneshot::Receiver<()>,
@@ -106,6 +107,7 @@ pub(super) async fn run_mcp_tool_task<F, Fut>(
     tool_name:       Arc<str>,
     mut rx:          mpsc::Receiver<Signal>,
     handler:         F,
+    #[cfg_attr(not(all(feature = "gateway", feature = "tls")), allow(unused_variables))] stops: bool,
 )
 where
     F: Fn(McpCall, serde_json::Value) -> Fut + Send + Sync + 'static,
@@ -191,7 +193,7 @@ where
         // C4: the admission (a cohort-budget slot, if a budget is attached) is held across the
         // handler, so the call counts as in flight until it returns.
         #[cfg(all(feature = "gateway", feature = "tls"))]
-        match super::provider_enforcement::check(&ctx, &req, false).await {
+        match super::provider_enforcement::check(&ctx, &req, false, super::provider_enforcement::Door::McpTool { stops }).await {
             super::provider_enforcement::Checked::Done(Ok(admission)) => {
                 serve_mcp_call(&ctx, &req, &rpc_req, call, admission, &handler).await
             }
@@ -446,7 +448,7 @@ pub(super) async fn run_mcp_client_task(
 
         // Closure plan C3: the bridged external server is protected at this node's boundary.
         #[cfg(all(feature = "gateway", feature = "tls"))]
-        match super::provider_enforcement::check(&ctx, &req, true).await {
+        match super::provider_enforcement::check(&ctx, &req, true, super::provider_enforcement::Door::BridgedMcp).await {
             super::provider_enforcement::Checked::Done(Ok(_admission)) => {
                 forward_bridged(&ctx, &http_client, &server_url, &req, &rpc_req).await
             }

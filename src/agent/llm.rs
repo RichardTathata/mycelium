@@ -344,7 +344,7 @@ async fn handle_llm_invoke(
     #[cfg(all(feature = "gateway", feature = "tls"))]
     let admission = {
         use super::provider_enforcement::{check, withdrawn, Checked};
-        let checked = match check(&ctx, &req, true).await {
+        let checked = match check(&ctx, &req, true, super::provider_enforcement::Door::LlmInvoke).await {
             Checked::Done(checked) => checked,
             // A seat claim still settling (K2): this call has a task of its own, so it waits here and stalls no
             // other; a node shutting down answers it rather than leaving it to time out.

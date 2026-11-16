@@ -530,6 +530,22 @@ pub(crate) fn marker_value(config: &crate::config::GossipConfig) -> &'static [u8
     if promises_envelopes(config) { MARKER_PROMISES_ENVELOPES } else { MARKER_VERIFIES }
 }
 
+/// **Publish this node's caller-context marker now, if its store does not already hold this node's value** — called
+/// before every advertisement of work a gateway can dispatch here (a tool's `tools/{name}/{node}` entry, a
+/// capability's `cap/{node}/…`), so a provider never advertises work before it has said it enforces the caller
+/// context (#794's review, K2; the Eve fleet job on #796). Before this the marker came only from the lazy task in
+/// `start()`, after a peer connected, while a tool entry was written at once: a gateway could see the tool first and
+/// refuse the call -32021 `provider_without_caller_context`. Writing the marker here adds no hazard the advertisement
+/// itself does not already carry: both are the same kind of gossip write at the same moment.
+pub(crate) fn publish_caller_context_marker(ctx: &TaskCtx) {
+    let key = marker_key(&ctx.node_id);
+    let value = marker_value(&ctx.config);
+    if mycelium_core::ops::kv_get(ctx, &key).as_deref() == Some(value) {
+        return;
+    }
+    let _ = super::helpers::kv_set(ctx, std::sync::Arc::from(key.as_str()), Bytes::from_static(value));
+}
+
 /// How often a node re-asserts its caller-envelope id marker (post-360 row E).
 #[cfg(feature = "tls")]
 pub(crate) const ID_MARKER_REFRESH_MS: u64 = 60_000;
@@ -628,6 +644,10 @@ pub enum GatewayDispatchError {
     /// `oidc_exchange_unreachable`, `oidc_exchange_refused`, `oidc_exchange_malformed`, or the user's own token or this
     /// node's identity missing. Refused before dispatch; nothing ran.
     Exchange(&'static str),
+    /// Identity-and-lifecycle I4: the call's `call:` mandate was minted, and its first checkpoint or its window record
+    /// is not on disk (`call_mandate_not_durable`). A call the gateway could not cancel after a restart is not sent;
+    /// nothing ran.
+    CallNotDurable,
 }
 
 #[cfg(any(feature = "gateway", test))]
@@ -640,6 +660,7 @@ impl GatewayDispatchError {
             GatewayDispatchError::ProviderWithoutContext(_) => -32021,
             GatewayDispatchError::ContextTooLarge => -32023,
             GatewayDispatchError::Exchange(_) => -32024,
+            GatewayDispatchError::CallNotDurable => -32025,
         }
     }
 
@@ -651,6 +672,7 @@ impl GatewayDispatchError {
             GatewayDispatchError::ProviderWithoutContext(_) => "provider_without_caller_context",
             GatewayDispatchError::ContextTooLarge => "caller_context_too_large",
             GatewayDispatchError::Exchange(reason) => reason,
+            GatewayDispatchError::CallNotDurable => "call_mandate_not_durable",
         }
     }
 }
@@ -674,6 +696,9 @@ impl std::fmt::Display for GatewayDispatchError {
             GatewayDispatchError::Exchange(reason) => {
                 write!(f, "the OIDC user's token could not be exchanged at the IdP for one the provider verifies: {reason}")
             }
+            GatewayDispatchError::CallNotDurable => f.write_str(
+                "the call's call: mandate could not be recorded durably at this gateway, so the call is not sent: it could not be cancelled after a restart",
+            ),
         }
     }
 }
@@ -736,17 +761,65 @@ pub(crate) async fn gateway_rpc_call_with_mandate(
                     return Err(GatewayDispatchError::Exchange(reason));
                 }
             };
-            let Some(framed) = frame_envelope_at(
-                ctx, &target, &caller.principal, &caller.scopes, payload, mandate, resource, client, ot.as_deref(), ctx.hlc.decision_now_ms(),
-            ) else {
+            let now = ctx.hlc.decision_now_ms();
+            // I4, PR 2: under `gateway_mint_call_mandates`, a protected call carries the gateway's `call:` mandate for
+            // it, minted once the envelope's id is drawn (the term is `c{n}`); its two records are on disk before the
+            // envelope is sent, or nothing is sent.
+            #[cfg(all(feature = "gateway", feature = "tls"))]
+            let (framed, minted) =
+                frame_minting(ctx, &target, &caller.principal, &caller.scopes, &kind, payload, mandate, resource, client, ot.as_deref(), now);
+            #[cfg(not(all(feature = "gateway", feature = "tls")))]
+            let framed = frame_envelope_at(ctx, &target, &caller.principal, &caller.scopes, payload, mandate, resource, client, ot.as_deref(), now);
+            // Past the cap, nothing is written: the records are written only for an envelope that will be sent.
+            let Some(framed) = framed else {
                 refused("caller_context_too_large");
                 return Err(GatewayDispatchError::ContextTooLarge);
             };
+            #[cfg(all(feature = "gateway", feature = "tls"))]
+            if let Some(minted) = minted
+                && let Err(e) = super::call_issuer::record(ctx, minted).await
+            {
+                tracing::warn!(target = %target, "the call's call: mandate is not on disk, so the call is not sent: {e}");
+                refused("call_mandate_not_durable");
+                return Err(GatewayDispatchError::CallNotDurable);
+            }
             super::rpc::rpc_call_framed(ctx, target, kind, framed, timeout)
                 .await
                 .map_err(GatewayDispatchError::Rpc)
         }
     }
+}
+
+/// **Frame a gateway's envelope, minting its `call:` mandate** where this gateway mints for `kind`
+/// (identity-and-lifecycle I4, PR 2; `call_issuer::mints_for`): the mint is drawn once the envelope's id is known, its
+/// term `c{n}`. Returns the framed payload (`None` past [`MAX_ENVELOPE_BYTES`]) and what was minted, whose records the
+/// caller writes ([`call_issuer::record`](super::call_issuer::record)) before it sends — and only if the frame fits.
+#[cfg(all(feature = "gateway", feature = "tls"))]
+#[allow(clippy::too_many_arguments)] // the envelope's fields, each one
+pub(crate) fn frame_minting(
+    ctx: &TaskCtx,
+    target: &NodeId,
+    principal: &str,
+    scopes: &[String],
+    kind: &str,
+    payload: Bytes,
+    mandate: Option<&serde_json::Value>,
+    resource: Option<&str>,
+    client: Option<&(super::client_sig::ClientSignature, super::client_sig::ClientNonce)>,
+    ot: Option<&str>,
+    now: u64,
+) -> (Option<Bytes>, Option<super::call_issuer::Minted>) {
+    let minted = std::sync::Mutex::new(None);
+    let app = payload.clone();
+    let mint = |n: u64| {
+        let m = super::call_issuer::mint(ctx, kind, &app, resource, target, n, now)?;
+        let cm = m.cm.clone();
+        *minted.lock().unwrap_or_else(|e| e.into_inner()) = Some(m);
+        Some(cm)
+    };
+    let minting = super::call_issuer::mints_for(ctx, kind);
+    let framed = frame_envelope_minting_at(ctx, target, principal, scopes, payload, mandate, resource, client, ot, now, if minting { Some(&mint) } else { None });
+    (framed, minted.into_inner().unwrap_or_else(|e| e.into_inner()))
 }
 
 /// Identity-and-lifecycle I5: the exchanged token an OIDC user's call carries — `Some` only on a gateway that
@@ -931,8 +1004,8 @@ pub(crate) fn frame_envelope_at(
 pub(crate) type CallMint<'a> = &'a (dyn Fn(u64) -> Option<serde_json::Value> + 'a);
 
 /// [`frame_envelope_at`], with the envelope's second mandate slot. The mint is called once the envelope's id is
-/// drawn, because the mandate's term is that id. **No gateway door passes a mint yet** — the gateway's own
-/// (`gateway_mint_call_mandates`) is the row's next PR; until then only tests frame a `cm`.
+/// drawn, because the mandate's term is that id: the gateway's own (`call_issuer::mint`, under
+/// `gateway_mint_call_mandates`) from `gateway_rpc_call_with_mandate`, and the tests' `call_mint`.
 #[allow(clippy::too_many_arguments)] // the envelope's fields, each one
 pub(crate) fn frame_envelope_minting_at(
     ctx: &TaskCtx,

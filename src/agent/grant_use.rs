@@ -94,6 +94,12 @@ pub(crate) struct UseRecord {
     #[serde(rename = "use")]
     pub(crate) use_id: String,
     pub(crate) at_ms: u64,
+    /// The end of the grant's own window, as the door that admitted the call read it (identity-and-lifecycle I4;
+    /// #794's round-3 review, D3). Signed with the rest when present: the door's collector keeps its marker at least
+    /// this long from its own signed body, with no need of its ledger or journal. Absent (`0`) only on a record from a
+    /// build before this field — never released — which the collector keeps and counts.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub(crate) until_ms: u64,
     /// The signing key (base64) and the Ed25519 signature (base64) over [`UseRecord::message`]. Empty on a node with
     /// no identity, which signs nothing anywhere.
     #[serde(default)]
@@ -114,11 +120,16 @@ impl UseRecord {
             m.extend_from_slice(field.as_bytes());
         }
         m.extend_from_slice(&self.at_ms.to_le_bytes());
+        // Appended only when present, so a record without the field signs the bytes it always signed.
+        if self.until_ms != 0 {
+            m.extend_from_slice(b"until");
+            m.extend_from_slice(&self.until_ms.to_le_bytes());
+        }
         m
     }
 
     /// A record of `kind` for the use `use_id` at this node's door, signed with the node's key when it has one.
-    pub(crate) fn signed(ctx: &TaskCtx, kind: UseKind, marker_key: &str, use_id: &str) -> Option<Self> {
+    pub(crate) fn signed(ctx: &TaskCtx, kind: UseKind, marker_key: &str, use_id: &str, until_ms: u64) -> Option<Self> {
         let (grant, door) = split_marker_key(marker_key)?;
         let mut r = Self {
             v: 1,
@@ -128,6 +139,7 @@ impl UseRecord {
             node: ctx.node_id.to_string(),
             use_id: use_id.to_string(),
             at_ms: ctx.hlc.decision_now_ms(),
+            until_ms,
             signer: String::new(),
             sig: String::new(),
         };
@@ -166,6 +178,14 @@ impl UseRecord {
     }
 }
 
+/// **This node's own use marker or release at `marker_key`** (identity-and-lifecycle I4's collector: a door collects
+/// only what it signed): the record's `at_ms` when it parses, names the key's grant and door, names this node and
+/// verifies under this node's key; `None` for anything else — another door's record, a forged one, a legacy marker.
+pub(crate) fn own_record_at(ctx: &TaskCtx, marker_key: &str, bytes: &[u8]) -> Option<(u64, u64)> {
+    let r: UseRecord = serde_json::from_slice(bytes).ok()?;
+    (r.node.parse::<NodeId>().ok()? == ctx.node_id && r.verifies_at(ctx, marker_key)).then_some((r.at_ms, r.until_ms))
+}
+
 /// `grant/{holder}/{term}/used/{point}` → (`{holder}/{term}`, `{point}`).
 fn split_marker_key(key: &str) -> Option<(&str, &str)> {
     let rest = key.strip_prefix("grant/")?;
@@ -178,18 +198,32 @@ fn is_legacy_marker(bytes: &[u8]) -> bool {
     !bytes.is_empty() && bytes.len() <= 20 && bytes.iter().all(u8::is_ascii_digit)
 }
 
+fn is_zero(v: &u64) -> bool {
+    *v == 0
+}
+
+/// Is `u` still held at `now_ms`? Past the retention after it, **and** past its grant's own window: a grant can be
+/// longer than the retention (`GrantVerifier` caps no `grant:` window), and a use forgotten inside the window could
+/// be made again (#794's round-2 review, C2).
+fn held(u: &OwnUse, now_ms: u64) -> bool {
+    u.at_ms.saturating_add(RETENTION_MS).max(u.until_ms.saturating_add(120_000)) > now_ms
+}
+
 /// One use this door made of a grant, as its journal holds it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct OwnUse {
     pub(crate) use_id: String,
     pub(crate) released: bool,
     pub(crate) at_ms: u64,
+    /// The end of the grant's own window (identity-and-lifecycle I4; #794's round-2 review, C2): the use is kept —
+    /// in memory, and its marker in the KV — at least until then. `0` for a use journaled before this field.
+    pub(crate) until_ms: u64,
 }
 
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "e", rename_all = "lowercase")]
 enum Entry {
-    Used { key: String, #[serde(rename = "use")] use_id: String, at_ms: u64 },
+    Used { key: String, #[serde(rename = "use")] use_id: String, at_ms: u64, #[serde(default, skip_serializing_if = "is_zero")] until_ms: u64 },
     Released { key: String, #[serde(rename = "use")] use_id: String, at_ms: u64 },
 }
 
@@ -269,8 +303,8 @@ impl GrantUseLedger {
             let mut uses = self.uses.lock().unwrap_or_else(|e| e.into_inner());
             for bytes in existing {
                 match serde_json::from_slice::<Entry>(&bytes) {
-                    Ok(Entry::Used { key, use_id, at_ms }) => {
-                        uses.insert(key, OwnUse { use_id, released: false, at_ms });
+                    Ok(Entry::Used { key, use_id, at_ms, until_ms }) => {
+                        uses.insert(key, OwnUse { use_id, released: false, at_ms, until_ms });
                     }
                     Ok(Entry::Released { key, use_id, .. }) => {
                         if let Some(u) = uses.get_mut(&key).filter(|u| u.use_id == use_id) {
@@ -283,7 +317,7 @@ impl GrantUseLedger {
                     }
                 }
             }
-            uses.retain(|_, u| u.at_ms.saturating_add(RETENTION_MS) > now_ms);
+            uses.retain(|_, u| held(u, now_ms));
         }
         self.journal.store(Some(Journal::open(path, STREAM)?));
         Ok(())
@@ -309,14 +343,14 @@ impl GrantUseLedger {
     /// returns** on a node that persists, then in memory. `Err` names why it is not on disk; nothing is remembered
     /// then, and the caller refuses the call. A node with no `[persistence]` has no journal: the use is in memory,
     /// as everything there is.
-    pub(crate) async fn record_use(&self, key: &str, use_id: &str, at_ms: u64) -> Result<(), String> {
-        self.append(&Entry::Used { key: key.to_string(), use_id: use_id.to_string(), at_ms }).await?;
+    pub(crate) async fn record_use(&self, key: &str, use_id: &str, at_ms: u64, until_ms: u64) -> Result<(), String> {
+        self.append(&Entry::Used { key: key.to_string(), use_id: use_id.to_string(), at_ms, until_ms }).await?;
         let mut uses = self.uses.lock().unwrap_or_else(|e| e.into_inner());
         if uses.len() as u64 >= self.prune_at.load(Ordering::Relaxed) {
-            uses.retain(|_, u| u.at_ms.saturating_add(RETENTION_MS) > at_ms);
+            uses.retain(|_, u| held(u, at_ms));
             self.prune_at.store((uses.len() as u64).saturating_mul(2).max(1_024), Ordering::Relaxed);
         }
-        uses.insert(key.to_string(), OwnUse { use_id: use_id.to_string(), released: false, at_ms });
+        uses.insert(key.to_string(), OwnUse { use_id: use_id.to_string(), released: false, at_ms, until_ms });
         Ok(())
     }
 
@@ -408,11 +442,11 @@ pub(crate) fn new_use_id(ctx: &TaskCtx, marker_key: &str, attempt_id: &str) -> S
 ///   record was synced to the WAL and gossiped before the apply was refused, so a restart or a peer may hold it.
 /// - `Err(reason)` — the use or the marker is not on disk. Nothing is remembered, the caller gives its in-memory
 ///   claim back, and nothing is spent.
-pub(crate) async fn record_use(ctx: &Arc<TaskCtx>, marker_key: &str, use_id: &str) -> Result<MarkerWrite, String> {
+pub(crate) async fn record_use(ctx: &Arc<TaskCtx>, marker_key: &str, use_id: &str, until_ms: u64) -> Result<MarkerWrite, String> {
     use mycelium_core::receipt::LocalApplication;
     let now_ms = ctx.hlc.decision_now_ms();
-    ctx.grant_uses.record_use(marker_key, use_id, now_ms).await?;
-    let Some(rec) = UseRecord::signed(ctx, UseKind::Use, marker_key, use_id) else { return Err(format!("{marker_key} is not a marker key")) };
+    ctx.grant_uses.record_use(marker_key, use_id, now_ms, until_ms).await?;
+    let Some(rec) = UseRecord::signed(ctx, UseKind::Use, marker_key, use_id, until_ms) else { return Err(format!("{marker_key} is not a marker key")) };
     #[cfg(test)]
     {
         let hook = ctx.grant_uses.before_marker_write.lock().unwrap_or_else(|e| e.into_inner()).take();
@@ -444,10 +478,10 @@ pub(crate) async fn record_use(ctx: &Arc<TaskCtx>, marker_key: &str, use_id: &st
 
 /// Does `marker_key` hold **this node's own marker for `use_id`** — the record this door wrote when it admitted the
 /// call, still the key's value?
-fn holds_own_marker(ctx: &TaskCtx, marker_key: &str, use_id: &str) -> bool {
+fn holds_own_marker(ctx: &TaskCtx, marker_key: &str, use_id: &str) -> Option<UseRecord> {
     let held = ctx.kv_state.store.pin().get(marker_key).and_then(|e| e.data.clone());
     held.and_then(|bytes| serde_json::from_slice::<UseRecord>(&bytes).ok())
-        .is_some_and(|rec| rec.kind == UseKind::Use && rec.use_id == use_id && rec.node == ctx.node_id.to_string() && rec.verifies_at(ctx, marker_key))
+        .filter(|rec| rec.kind == UseKind::Use && rec.use_id == use_id && rec.node == ctx.node_id.to_string() && rec.verifies_at(ctx, marker_key))
 }
 
 /// **Release the use `use_id` this door made at `marker_key`**, for a call this node knows did not run. **The
@@ -468,11 +502,14 @@ fn holds_own_marker(ctx: &TaskCtx, marker_key: &str, use_id: &str) -> bool {
 ///
 /// `true` only when all three held: the grant then reads unused at this door.
 pub(crate) async fn release_use(ctx: &Arc<TaskCtx>, marker_key: &str, use_id: &str) -> bool {
-    if !holds_own_marker(ctx, marker_key, use_id) {
+    let Some(held) = holds_own_marker(ctx, marker_key, use_id) else {
         ctx.grant_uses.count(Odd::Superseded);
         return false;
-    }
-    let Some(rec) = UseRecord::signed(ctx, UseKind::Release, marker_key, use_id) else { return false };
+    };
+    // The release names the same window as the use it releases, by construction: from the held marker's own signed
+    // body, not from the ledger, which may have pruned the use (#794's round-4 review, E4).
+    let until_ms = held.until_ms;
+    let Some(rec) = UseRecord::signed(ctx, UseKind::Release, marker_key, use_id, until_ms) else { return false };
     match super::state_machine::write_owned_kv_reporting(ctx, marker_key, rec.to_bytes()).await {
         Ok(application) if application.is_current() => {}
         Ok(_) => {
@@ -489,4 +526,33 @@ pub(crate) async fn release_use(ctx: &Arc<TaskCtx>, marker_key: &str, use_id: &s
         return false;
     }
     true
+}
+
+#[cfg(test)]
+mod journal_format_tests {
+    use super::Entry;
+
+    /// **The grant-use journal's entry format is pinned** (#794's round-3 review): a use before `until_ms` existed, a
+    /// use with it, and a release, read back from the checked-in golden file and written out to the same bytes. A
+    /// door restarted under a later build reads every entry an earlier one wrote; an entry without `until_ms` reads as
+    /// `0` (its grant's window unknown).
+    #[test]
+    fn the_grant_use_journal_format_is_pinned_by_a_golden_file() {
+        let golden = include_str!("../../tests/fixtures/grant-use-journal/entries.jsonl");
+        let lines: Vec<&str> = golden.lines().collect();
+        assert_eq!(lines.len(), 3);
+        let entries: Vec<Entry> = lines.iter().map(|l| serde_json::from_str(l).expect("a golden entry decodes")).collect();
+        match &entries[0] {
+            Entry::Used { until_ms, at_ms, .. } => assert_eq!((*until_ms, *at_ms), (0, 1_794_700_000_000), "no until_ms reads as 0"),
+            other => panic!("{}", serde_json::to_string(other).unwrap()),
+        }
+        match &entries[1] {
+            Entry::Used { until_ms, .. } => assert_eq!(*until_ms, 1_794_872_800_000),
+            other => panic!("{}", serde_json::to_string(other).unwrap()),
+        }
+        assert!(matches!(entries[2], Entry::Released { .. }));
+        for (entry, line) in entries.iter().zip(&lines) {
+            assert_eq!(serde_json::to_string(entry).unwrap(), *line, "written back byte for byte");
+        }
+    }
 }
