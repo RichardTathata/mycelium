@@ -4673,6 +4673,38 @@ async fn test_piggybacked_removed_member_not_added() {
     assert!(!peers.pin().contains_key(&removed_member), "a removed member re-entered peers through known_peers");
 }
 
+/// **A removal that lands between the Ping arm's check and its insert of the sender still wins**
+/// (#801's confirm round). The hook removes the sender the way `membership_ops::apply` does — the set,
+/// then `peers` — after the check has passed and before the insert. Without the re-check after the
+/// insert, the sender stayed in `peers`. A second sender's Ping, behind it on the same connection,
+/// marks the first as processed. Seen failing with the re-check removed.
+#[cfg(feature = "test-frame-filter")]
+#[tokio::test]
+async fn test_a_removal_between_the_ping_arms_check_and_insert_still_wins() {
+    use mycelium_core::connection::TEST_BEFORE_PEER_INSERT;
+    let (mut writer, reader) = loopback_pair().await;
+    let peers: Arc<papaya::HashMap<NodeId, Instant>> = Arc::new(papaya::HashMap::new());
+    let (tx, _rx) = mpsc::channel(10);
+    let opts = HandlerOpts::default();
+    let removed = Arc::clone(&opts.removed);
+    let _ = spawn_handler_with(reader, Arc::new(papaya::HashMap::new()), Arc::clone(&peers), tx,
+                               Arc::new(ShardedSeen::new(N_GOSSIP_SHARDS)), GossipConfig::default().default_ttl, opts);
+    let sender = NodeId::new("127.0.0.1", 9110).unwrap();
+    let (set, table) = (Arc::clone(&removed), Arc::clone(&peers));
+    TEST_BEFORE_PEER_INSERT.pin().insert(sender.to_string(), Arc::new(move |n: &NodeId| {
+        set.remove(n, []);
+        table.pin().remove(n);
+    }));
+    send_wire(&mut writer, &WireMessage::Ping { sender: sender.clone(), known_peers: vec![] }).await;
+    let after = NodeId::new("127.0.0.1", 9111).unwrap();
+    send_wire(&mut writer, &WireMessage::Ping { sender: after.clone(), known_peers: vec![] }).await;
+    let p = Arc::clone(&peers);
+    poll_until(|| p.pin().contains_key(&after), 200).await;
+    TEST_BEFORE_PEER_INSERT.pin().remove(&sender.to_string());
+    assert!(removed.is_node_removed(&sender), "the hook ran");
+    assert!(!peers.pin().contains_key(&sender), "the removal landed in the window and the sender stayed");
+}
+
 #[tokio::test]
 async fn test_piggybacked_self_not_added() {
     let (mut writer, reader) = loopback_pair().await;

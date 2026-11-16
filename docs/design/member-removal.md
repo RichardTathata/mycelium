@@ -133,8 +133,14 @@ key is in its own certificate directory), reported `Present` or `Absent`. `Prese
   exchange brought a removed member back — every tick with SWIM off). Gate:
   `lib_tests::test_piggybacked_removed_member_not_added`. Every insert into the peer table — the Ping arm's sender
   and piggybacked peers, SWIM's `BecameAlive` — re-checks the removed set after it inserts and takes the member out
-  again, so a removal that lands between the check and the insert (it writes the set, then clears the table) still
-  wins (gate: `swim::tests::a_removal_between_the_check_and_the_insert_still_wins`). On SWIM's UDP path (`mycelium-core/src/swim.rs`, from #801; before it, this line claimed the
+  again, so a removal that lands between the check and the insert still wins. The removal stores the set, then
+  clears the table; an inserter stores the table, then loads the set — the store-buffering pattern — so both sides
+  put a `SeqCst` fence between their store and their load (`membership_ops::apply`; `connection.rs`'s Ping arm,
+  twice; `swim.rs`'s `BecameAlive`), and at least one sees the other. Gates, each landing a removal in the window
+  through a test-only hook: `lib_tests::test_a_removal_between_the_ping_arms_check_and_insert_still_wins` (the
+  sender) and `swim::tests::a_removal_between_the_check_and_the_insert_still_wins` (`BecameAlive`). The piggybacked
+  peers' re-check has no hook of its own (it is the sender's code, per entry), and the fences have no test: a
+  memory-model fence cannot be made to fail deterministically on a test machine. On SWIM's UDP path (`mycelium-core/src/swim.rs`, from #801; before it, this line claimed the
   connection loop covered SWIM, which it did not): a removed node's `Ping`, `Ack` and `PingReq` are dropped unanswered,
   a `PingReq` naming it is not relayed, it is never a probe target, relay or rejoin target, and a `BecameAlive` for
   it never re-enters `peers` or the fan-out watch. Each refusal is counted (`SwimState::removed_refused`). The agent

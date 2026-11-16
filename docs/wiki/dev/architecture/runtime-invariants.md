@@ -395,8 +395,9 @@ Three corollaries hardened 2026-07-21 (the cold-start saga —
   suspects live targets. **A removed member is shut out of SWIM** as of the TCP path: its datagrams
   dropped, never probed, relayed for or rejoined, and a `BecameAlive` for it kept out of `peers`
   (`SwimState::set_removed`, counted in `removed_refused`); the TCP Ping arm skips a removed member
-  in `known_peers`, and every `peers` insert re-checks removal after inserting (a removal writes the
-  set, then clears `peers`, so one side always sees the other). **Not covered:** a node with no bootstrap
+  in `known_peers`, and every `peers` insert re-checks removal after inserting, with a `SeqCst` fence
+  between its store and its load on both sides — the store-buffering pattern, see
+  [lock-free-and-atomics](../concurrency/lock-free-and-atomics.md#memory-ordering-policy-for-atomics). **Not covered:** a node with no bootstrap
   peers that is in no one's `bootstrap_peers` and was declared `Dead` while down stays partitioned —
   rejoin follows bootstrap edges only. And the fix is on the prober's side: a fleet's *members* must
   run it. Gates: `a_restarted_seed_that_is_suspected_is_probed_and_refutes`,

@@ -191,6 +191,19 @@ async fn apply_inbound_then_append(
     }
 }
 
+/// What [`TEST_BEFORE_PEER_INSERT`] holds.
+#[cfg(any(test, feature = "test-frame-filter"))]
+#[doc(hidden)]
+pub type PeerInsertHook = std::sync::Arc<dyn Fn(&NodeId) + Send + Sync>;
+
+/// **Test-only** hook, per Ping sender (`NodeId` as a string), called after the Ping arm's removal
+/// check and before its insert of the sender into `peers`, so a test can land a removal in that window
+/// (#801's confirm round).
+#[cfg(any(test, feature = "test-frame-filter"))]
+#[doc(hidden)]
+pub static TEST_BEFORE_PEER_INSERT: std::sync::LazyLock<papaya::HashMap<String, PeerInsertHook>> =
+    std::sync::LazyLock::new(papaya::HashMap::new);
+
 /// Shared state threaded into every inbound connection handler.
 #[derive(Clone)]
 pub struct ConnContext {
@@ -609,11 +622,20 @@ pub async fn handle_connection(
                     let is_new = if sender == node_id {
                         false
                     } else {
+                        #[cfg(any(test, feature = "test-frame-filter"))]
+                        if let Some(hook) = TEST_BEFORE_PEER_INSERT.pin().get(&sender.to_string()).cloned() {
+                            hook(&sender);
+                        }
                         let is_new = guard.insert(sender.clone(), now).is_none();
                         // Re-checked after the insert (#801's confirm round, C2): a removal applied
                         // between the check above and the insert has already cleared `peers`, so the
-                        // insert would outlive it. The removal writes the set before it clears
-                        // `peers`, so one of the two always sees the other.
+                        // insert would outlive it. The removal (`membership_ops::apply`) stores the
+                        // set, fences, then clears `peers`; this side stores `peers`, fences, then
+                        // loads the set. The two `SeqCst` fences close the store-buffering litmus
+                        // (each side's load missing the other's store, which acquire/release and x86
+                        // allow — the clear of a key not yet present writes nothing to order by), so
+                        // at least one side sees the other.
+                        std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
                         if task_ctx.removed.is_node_removed(&sender) {
                             guard.remove(&sender);
                             continue;
@@ -631,7 +653,9 @@ pub async fn handle_connection(
                         if task_ctx.removed.is_node_removed(&peer) { continue; }
                         if guard.len() < max_peers {
                             guard.get_or_insert(peer.clone(), now);
-                            // Re-checked after the insert, as the sender is (C2).
+                            // Re-checked after the insert, behind the same `SeqCst` fence, as the
+                            // sender is (C2; the store-buffering litmus).
+                            std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
                             if task_ctx.removed.is_node_removed(&peer) {
                                 guard.remove(&peer);
                             }

@@ -234,12 +234,15 @@ impl SwimState {
                     if let Some(hook) = self.test_before_insert.get() { hook(&node); }
                     self.peers.pin().get_or_insert(node.clone(), now);
                     // Re-checked after the insert (#801's confirm round, C2). A removal
-                    // (`membership_ops::apply`) writes the removed set and then clears `peers`; one
-                    // landing between the check above and this insert has already cleared it, and
-                    // nothing would ever probe the member again, so the insert would outlive the
-                    // removal. Whichever order the two interleave in, one sees the other: a clear
-                    // after the insert removes it, and a clear before it means the set was written
-                    // first and this read sees it.
+                    // (`membership_ops::apply`) stores the removed set, fences, then clears `peers`;
+                    // one landing between the check above and this insert has already cleared it,
+                    // and nothing would ever probe the member again, so the insert would outlive the
+                    // removal. This side stores `peers`, fences, then loads the set. The two `SeqCst`
+                    // fences close the store-buffering litmus — each side's load missing the
+                    // other's store, which acquire/release and x86 allow, and which nothing else
+                    // orders here because clearing a key not yet present writes nothing — so at
+                    // least one side sees the other.
+                    std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
                     if self.refuse_removed(&node) {
                         self.peers.pin().remove(&node);
                         return;
