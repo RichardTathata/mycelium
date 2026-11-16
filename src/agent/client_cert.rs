@@ -228,6 +228,9 @@ pub(crate) struct ClientCertLedger {
     pub(crate) chain_checks: AtomicU64,
     /// Records ignored because their certificate carried no readable issuance.
     pub(crate) no_issuance: AtomicU64,
+    /// Consent certificates ignored because the grade extension's OID is provisional and this is no test build
+    /// (identity-and-lifecycle I7, #800's review finding 1): a shipped node fails closed on them, and counts.
+    pub(crate) provisional_grade: AtomicU64,
 }
 
 impl std::fmt::Debug for ClientCertLedger {
@@ -428,7 +431,13 @@ fn facts_with(ledger: &ClientCertLedger, tls: &mycelium_core::tls::NodeTls, der:
             let (generation, verified) = tls.verify_member_cert_tagged(der);
             (generation, verified.then_some(Facts { principal: id.principal, key: id.key, issued: id.issued }))
         }
-        None => (tls.roots_generation(), None),
+        None => {
+            if mycelium_core::tls::consent_identity_closed_by_provisional_oid(der) {
+                ledger.provisional_grade.fetch_add(1, Ordering::Relaxed);
+                tracing::warn!("consent certificate under the provisional grade OID: ignored (this build reads none until the registered arc)");
+            }
+            (tls.roots_generation(), None)
+        }
     };
     between();
     let cache = ledger.cert_cache.pin();
@@ -607,6 +616,9 @@ pub enum PublishRefusal {
     NoReadableIssuance,
     /// A newer certificate for the principal has already been read: publishing this one would change nothing.
     Superseded,
+    /// A consent certificate under the grade extension's provisional OID, which this build does not read
+    /// (identity-and-lifecycle I7, #800's review finding 1): it is not published until the registered arc arrives.
+    ProvisionalConsentGrade,
 }
 
 impl std::fmt::Display for PublishRefusal {
@@ -618,6 +630,7 @@ impl std::fmt::Display for PublishRefusal {
             Self::IssuedInTheFuture => "issued_in_the_future",
             Self::NoReadableIssuance => "no_readable_issuance",
             Self::Superseded => "superseded",
+            Self::ProvisionalConsentGrade => "consent_grade_oid_provisional",
         })
     }
 }
@@ -626,7 +639,8 @@ impl std::fmt::Display for PublishRefusal {
 #[derive(Debug)]
 pub struct Published {
     pub principal: String,
-    /// The key as the fold knows it: a client's Ed25519 key, or the SHA-256 of a consent key's point (I7).
+    /// The key as the fold knows it: a client's Ed25519 key — or, for a consent certificate (I7), **the SHA-256 of the
+    /// P-256 point, not a key**: read `key_hex` for the point itself.
     pub key: [u8; 32],
     /// The record path's key segment: the Ed25519 key's 64 hex digits, or the consent key's point's 130 (I7).
     pub key_hex: String,
@@ -639,7 +653,13 @@ pub struct Published {
 /// this. The record is the certificate itself, so any node judges it the same way this one did.
 pub fn publish(ctx: &Arc<TaskCtx>, der: &[u8]) -> Result<Published, PublishRefusal> {
     let Some(tls) = ctx.tls.get() else { return Err(PublishRefusal::NoTls) };
-    let id = named(der).ok_or(PublishRefusal::NotAClientCertificate)?;
+    let Some(id) = named(der) else {
+        if mycelium_core::tls::consent_identity_closed_by_provisional_oid(der) {
+            ctx.client_certs.provisional_grade.fetch_add(1, Ordering::Relaxed);
+            return Err(PublishRefusal::ProvisionalConsentGrade);
+        }
+        return Err(PublishRefusal::NotAClientCertificate);
+    };
     let principal = id.principal.clone();
     if !tls.verify_member_cert(der) {
         return Err(PublishRefusal::NotIssuedByTheFleetCa);

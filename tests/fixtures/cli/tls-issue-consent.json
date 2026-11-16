@@ -1,0 +1,13 @@
+{
+  "schema": "mycelium.tls/1",
+  "command": "issue",
+  "kind": "consent",
+  "principal": "consent:fleet/dev",
+  "issuer": "fleet",
+  "name": "dev",
+  "grade": "tty",
+  "grade_source": "operator",
+  "cert": "${OUT}/consent-fleet-dev.cert.pem",
+  "spki_sha256": "<sha256>",
+  "warnings": []
+}

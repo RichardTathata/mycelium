@@ -556,199 +556,282 @@ async fn the_client_cert_door_checks_its_issuer_and_audits_the_bearer() {
 }
 
 // ---- Identity-and-lifecycle I7, PR 1: the consent certificate under its own principal ----
+#[cfg(feature = "provisional-consent-grade")]
+mod consent {
+    use super::*;
 
-const CONSENT: &str = "consent:fleet/forecaster";
+    const CONSENT: &str = "consent:fleet/forecaster";
 
-/// A fresh P-256 consent key's uncompressed point, and a consent certificate issued over its SPKI PEM alone with
-/// `grade`, from the CA in `dir/certs`: the issuer's host holds no private consent key.
-fn issue_consent(dir: &Path, name: &str, out: &str, grade: crate::ConsentGrade) -> (Vec<u8>, [u8; 65]) {
-    let kp = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
-    let point: [u8; 65] = kp.public_key_raw().try_into().unwrap();
-    let cert = crate::issue_consent_cert(&dir.join("certs"), "fleet", name, &crate::p256_spki_pem(&point), grade, &dir.join(out)).expect("issued over the public key alone");
-    (rustls::pki_types::CertificateDer::from_pem_file(&cert).unwrap().as_ref().to_vec(), point)
-}
+    /// A fresh P-256 consent key's uncompressed point, and a consent certificate issued over its SPKI PEM alone with
+    /// `grade`, from the CA in `dir/certs`: the issuer's host holds no private consent key.
+    fn issue_consent(dir: &Path, name: &str, out: &str, grade: crate::ConsentGrade) -> (Vec<u8>, [u8; 65]) {
+        let kp = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+        let point: [u8; 65] = kp.public_key_raw().try_into().unwrap();
+        let cert = crate::issue_consent_cert(&dir.join("certs"), "fleet", name, &crate::p256_spki_pem(&point), grade, &dir.join(out)).expect("issued over the public key alone");
+        (rustls::pki_types::CertificateDer::from_pem_file(&cert).unwrap().as_ref().to_vec(), point)
+    }
 
-/// The external-issuer set an execution authority would hold, registered as the node's client-key sink.
-fn sink(a: &GossipAgent) -> crate::knowledge::issuer::SharedExternalIssuers {
-    let set = crate::knowledge::issuer::SharedExternalIssuers::from(crate::knowledge::issuer::TrustedExternalIssuers::new());
-    a.task_ctx.client_key_sinks.pin().insert(set.id(), set.clone());
-    set
-}
+    /// The external-issuer set an execution authority would hold, registered as the node's client-key sink.
+    fn sink(a: &GossipAgent) -> crate::knowledge::issuer::SharedExternalIssuers {
+        let set = crate::knowledge::issuer::SharedExternalIssuers::from(crate::knowledge::issuer::TrustedExternalIssuers::new());
+        a.task_ctx.client_key_sinks.pin().insert(set.id(), set.clone());
+        set
+    }
 
-/// **I7 exit 1, the door and the fold.** A consent certificate is published through I1's door
-/// (`publish_client_cert`, what `POST /gateway/identity/client-cert` calls) under `consent:{issuer}/{name}`, at the
-/// record path whose key segment is the point's 130 hex digits; the fold reads it there and `consent_key_standing`
-/// answers `Current` — while `client_key_standing`, the Ed25519 checks' reader, answers `Unknown` for the consent
-/// principal whatever 32 bytes it is asked about (the fold's own key id among them). The path's encoding is pinned by
-/// a golden. Seen failing first with the fold's path parser taking 64 digits only (the record was never read back:
-/// `Unknown`), and with the guard removed from `client_key_standing` (the key id read `Current` there).
-#[tokio::test]
-async fn a_consent_certificate_is_published_and_read_under_its_own_principal_at_its_points_path() {
-    let point = {
-        let mut p = [0u8; 65];
-        p[0] = 0x04;
-        for (i, b) in p.iter_mut().enumerate().skip(1) { *b = i as u8; }
-        p
-    };
-    assert_eq!(
-        crate::consent_cert_key(CONSENT, &point),
-        format!("sys/client-cert/636f6e73656e743a666c6565742f666f7265636173746572/04{}", (1..65u8).map(|b| format!("{b:02x}")).collect::<String>()),
-        "the golden: the principal's hex, then the uncompressed X9.63 point, 130 digits"
-    );
-    let dir = fresh("consent-publish");
-    let port = alloc_port();
-    let a = started(config(&dir, port, false), port).await;
-    let (der, point) = issue_consent(&dir, "forecaster", "c1", crate::ConsentGrade::Tty);
-    assert_eq!(a.consent_key_standing(CONSENT, &point), ClientKeyStanding::Unknown, "nothing published yet");
-    let p = a.publish_client_cert(&der).expect("the door publishes a consent certificate");
-    assert_eq!((p.principal.as_str(), p.grade), (CONSENT, Some(crate::ConsentGrade::Tty)));
-    assert_eq!(p.key_hex.len(), 130);
-    let path = crate::consent_cert_key(CONSENT, &point);
-    assert_eq!(mycelium_core::ops::kv_get(&a.task_ctx, &path).as_deref(), Some(der.as_slice()), "the record is at the point's path");
-    // A fresh fold over the store alone: forget the mark the publish raised.
-    a.task_ctx.client_certs.marks.pin().clear();
-    assert_eq!(a.consent_key_standing(CONSENT, &point), ClientKeyStanding::Current, "the fold reads it back from its path");
-    let key_id: [u8; 32] = <sha2::Sha256 as sha2::Digest>::digest(point).into();
-    assert_eq!(a.client_key_standing(CONSENT, &key_id), ClientKeyStanding::Unknown, "READ AS AN ED25519 KEY: a consent principal at client_key_standing");
-    assert_eq!(a.consent_key_standing(PRINCIPAL, &point), ClientKeyStanding::Unknown, "a token: principal at consent_key_standing");
-    a.shutdown().await;
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-/// **I7 exit 7, separate principals (H1).** One person holds an Ed25519 service certificate (`token:fleet/forecaster`)
-/// and a P-256 consent certificate (`consent:fleet/forecaster`). In each issue order both keys stay `Current` and
-/// neither supersedes the other; the service key is fed to the execution authority's external issuers and proves
-/// possession there (`verify_client`, the one reader `GrantVerifier::check`, the gateway's preflight and the provider's
-/// `reassess_arguments` use), and the consent key is never fed. Re-issuing the service key supersedes the old service
-/// key and only it: the old key's possession proof is refused, the consent key stays `Current`. Seen failing first with
-/// the consent certificate's principal read as `token:` (the consent certificate superseded the service key), and
-/// with `feed_client_keys` feeding every principal (the consent principal had a fed key).
-#[tokio::test]
-async fn a_service_key_and_a_consent_key_under_one_name_never_supersede_each_other() {
-    for consent_first in [false, true] {
-        let dir = fresh(if consent_first { "h1-consent-first" } else { "h1-service-first" });
+    /// **I7 exit 1, the door and the fold.** A consent certificate is published through I1's door
+    /// (`publish_client_cert`, what `POST /gateway/identity/client-cert` calls) under `consent:{issuer}/{name}`, at the
+    /// record path whose key segment is the point's 130 hex digits; the fold reads it there and `consent_key_standing`
+    /// answers `Current` — while `client_key_standing`, the Ed25519 checks' reader, answers `Unknown` for the consent
+    /// principal whatever 32 bytes it is asked about (the fold's own key id among them). The path's encoding is pinned by
+    /// a golden. Seen failing first with the fold's path parser taking 64 digits only (the record was never read back:
+    /// `Unknown`), and with the guard removed from `client_key_standing` (the key id read `Current` there).
+    #[tokio::test]
+    async fn a_consent_certificate_is_published_and_read_under_its_own_principal_at_its_points_path() {
+        let point = {
+            let mut p = [0u8; 65];
+            p[0] = 0x04;
+            for (i, b) in p.iter_mut().enumerate().skip(1) { *b = i as u8; }
+            p
+        };
+        assert_eq!(
+            crate::consent_cert_key(CONSENT, &point),
+            format!("sys/client-cert/636f6e73656e743a666c6565742f666f7265636173746572/04{}", (1..65u8).map(|b| format!("{b:02x}")).collect::<String>()),
+            "the golden: the principal's hex, then the uncompressed X9.63 point, 130 digits"
+        );
+        let dir = fresh("consent-publish");
         let port = alloc_port();
         let a = started(config(&dir, port, false), port).await;
-        let fed = sink(&a);
-        let (s_der, s_key, s_sk) = {
-            let (cert, key) = crate::issue_client_cert(&dir.join("certs"), "fleet", "forecaster", &dir.join("s1")).unwrap();
-            let der = rustls::pki_types::CertificateDer::from_pem_file(&cert).unwrap().as_ref().to_vec();
-            let pem = std::fs::read_to_string(key).unwrap();
-            let b64: String = pem.lines().filter(|l| !l.starts_with("-----")).collect();
-            let pkcs8 = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b64).unwrap();
-            let sk = <ed25519_dalek::SigningKey as ed25519_dalek::pkcs8::DecodePrivateKey>::from_pkcs8_der(&pkcs8).unwrap();
-            (der, sk.verifying_key().to_bytes(), sk)
-        };
-        let (c_der, c_point) = issue_consent(&dir, "forecaster", "c1", crate::ConsentGrade::OsPresenceMacosUnbound);
-        if consent_first {
-            a.publish_client_cert(&c_der).unwrap();
-            tokio::time::sleep(Duration::from_millis(5)).await;
-            a.publish_client_cert(&s_der).unwrap();
-        } else {
-            a.publish_client_cert(&s_der).unwrap();
-            tokio::time::sleep(Duration::from_millis(5)).await;
-            a.publish_client_cert(&c_der).unwrap();
-        }
-        let order = if consent_first { "consent first" } else { "service first" };
-        assert_eq!(a.client_key_standing(PRINCIPAL, &s_key), ClientKeyStanding::Current, "SUPERSEDED ACROSS PRINCIPALS ({order}): the service key");
-        assert_eq!(a.consent_key_standing(CONSENT, &c_point), ClientKeyStanding::Current, "SUPERSEDED ACROSS PRINCIPALS ({order}): the consent key");
-        let holder = crate::knowledge::IssuerId::new(PRINCIPAL).unwrap();
-        let msg = b"possession proof";
-        let proof = ed25519_dalek::Signer::sign(&s_sk, msg).to_bytes();
-        assert!(fed.read().verify_client(&holder, msg, &proof), "the service key proves possession ({order})");
-        let consent_issuer = crate::knowledge::IssuerId::new(CONSENT).unwrap();
-        assert_eq!(fed.read().client_key(&consent_issuer), None, "FED ({order}): a consent principal's key reached the external issuers");
-
-        tokio::time::sleep(Duration::from_millis(5)).await;
-        let (s2_der, s2_key) = issue(&dir, "forecaster", "s2");
-        a.publish_client_cert(&s2_der).unwrap();
-        assert_eq!(a.client_key_standing(PRINCIPAL, &s_key), ClientKeyStanding::Superseded, "{order}");
-        assert_eq!(a.client_key_standing(PRINCIPAL, &s2_key), ClientKeyStanding::Current, "{order}");
-        assert!(!fed.read().verify_client(&holder, msg, &proof), "REFUSED NOT: the superseded service key's possession proof ({order})");
-        assert_eq!(fed.read().client_key(&holder), Some(s2_key), "{order}");
-        assert_eq!(a.consent_key_standing(CONSENT, &c_point), ClientKeyStanding::Current, "a service re-issue moved the consent key ({order})");
-        assert_eq!(fed.read().client_key(&consent_issuer), None, "{order}");
+        let (der, point) = issue_consent(&dir, "forecaster", "c1", crate::ConsentGrade::Tty);
+        assert_eq!(a.consent_key_standing(CONSENT, &point), ClientKeyStanding::Unknown, "nothing published yet");
+        let p = a.publish_client_cert(&der).expect("the door publishes a consent certificate");
+        assert_eq!((p.principal.as_str(), p.grade), (CONSENT, Some(crate::ConsentGrade::Tty)));
+        assert_eq!(p.key_hex.len(), 130);
+        let path = crate::consent_cert_key(CONSENT, &point);
+        assert_eq!(mycelium_core::ops::kv_get(&a.task_ctx, &path).as_deref(), Some(der.as_slice()), "the record is at the point's path");
+        // A fresh fold over the store alone: forget the mark the publish raised.
+        a.task_ctx.client_certs.marks.pin().clear();
+        assert_eq!(a.consent_key_standing(CONSENT, &point), ClientKeyStanding::Current, "the fold reads it back from its path");
+        let key_id: [u8; 32] = <sha2::Sha256 as sha2::Digest>::digest(point).into();
+        assert_eq!(a.client_key_standing(CONSENT, &key_id), ClientKeyStanding::Unknown, "READ AS AN ED25519 KEY: a consent principal at client_key_standing");
+        assert_eq!(a.consent_key_standing(PRINCIPAL, &point), ClientKeyStanding::Unknown, "a token: principal at consent_key_standing");
         a.shutdown().await;
         let _ = std::fs::remove_dir_all(&dir);
     }
-}
 
-/// **I7 exit 11, re-enrolment (P6), at the fold and across a restart under `[persistence]`.** A newer consent
-/// certificate supersedes the older consent key; its record tombstoned and the node restarted over the same
-/// directory, the older key stays `Superseded` and the newer `Current` — the journal holds the consent principal's
-/// mark, in the same entry form an older binary decodes. The service principal of the same name is untouched. The
-/// plant: the same restart with the journal removed brings the older consent key back. Seen failing first with the
-/// fold parsing a consent record's path as an Ed25519 key's (64 digits): the newer record, written by a member, was
-/// never read, and the older key stayed `Current`.
-#[tokio::test]
-async fn a_newer_consent_certificate_supersedes_the_older_consent_key_across_a_restart() {
-    let dir = fresh("consent-restart");
-    let port = alloc_port();
-    let (c1, c2) = {
-        let a = started(config(&dir, port, true), port).await;
-        let (c1_der, c1) = issue_consent(&dir, "forecaster", "c1", crate::ConsentGrade::Tty);
-        a.publish_client_cert(&c1_der).unwrap();
-        tokio::time::sleep(Duration::from_millis(5)).await;
-        let (c2_der, c2) = issue_consent(&dir, "forecaster", "c2", crate::ConsentGrade::Tty);
-        let c2_path: Arc<str> = Arc::from(crate::consent_cert_key(CONSENT, &c2).as_str());
-        let _ = super::helpers::kv_set(&a.task_ctx, Arc::clone(&c2_path), bytes::Bytes::from(c2_der));
-        assert_eq!(a.consent_key_standing(CONSENT, &c1), ClientKeyStanding::Superseded);
-        assert_eq!(a.consent_key_standing(CONSENT, &c2), ClientKeyStanding::Current);
-        let _ = super::helpers::kv_delete(&a.task_ctx, c2_path);
-        tokio::time::sleep(Duration::from_millis(200)).await;
+    /// **I7 exit 7, separate principals (H1).** One person holds an Ed25519 service certificate (`token:fleet/forecaster`)
+    /// and a P-256 consent certificate (`consent:fleet/forecaster`). In each issue order both keys stay `Current` and
+    /// neither supersedes the other; the service key is fed to the execution authority's external issuers and proves
+    /// possession there (`verify_client`, the one reader `GrantVerifier::check`, the gateway's preflight and the provider's
+    /// `reassess_arguments` use), and the consent key is never fed. Re-issuing the service key supersedes the old service
+    /// key and only it: the old key's possession proof is refused, the consent key stays `Current`. Seen failing first with
+    /// the consent certificate's principal read as `token:` (the consent certificate superseded the service key), and
+    /// with `feed_client_keys` feeding every principal (the consent principal had a fed key).
+    #[tokio::test]
+    async fn a_service_key_and_a_consent_key_under_one_name_never_supersede_each_other() {
+        for consent_first in [false, true] {
+            let dir = fresh(if consent_first { "h1-consent-first" } else { "h1-service-first" });
+            let port = alloc_port();
+            let a = started(config(&dir, port, false), port).await;
+            let fed = sink(&a);
+            let (s_der, s_key, s_sk) = {
+                let (cert, key) = crate::issue_client_cert(&dir.join("certs"), "fleet", "forecaster", &dir.join("s1")).unwrap();
+                let der = rustls::pki_types::CertificateDer::from_pem_file(&cert).unwrap().as_ref().to_vec();
+                let pem = std::fs::read_to_string(key).unwrap();
+                let b64: String = pem.lines().filter(|l| !l.starts_with("-----")).collect();
+                let pkcs8 = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b64).unwrap();
+                let sk = <ed25519_dalek::SigningKey as ed25519_dalek::pkcs8::DecodePrivateKey>::from_pkcs8_der(&pkcs8).unwrap();
+                (der, sk.verifying_key().to_bytes(), sk)
+            };
+            let (c_der, c_point) = issue_consent(&dir, "forecaster", "c1", crate::ConsentGrade::OsPresenceMacosUnbound);
+            if consent_first {
+                a.publish_client_cert(&c_der).unwrap();
+                tokio::time::sleep(Duration::from_millis(5)).await;
+                a.publish_client_cert(&s_der).unwrap();
+            } else {
+                a.publish_client_cert(&s_der).unwrap();
+                tokio::time::sleep(Duration::from_millis(5)).await;
+                a.publish_client_cert(&c_der).unwrap();
+            }
+            let order = if consent_first { "consent first" } else { "service first" };
+            assert_eq!(a.client_key_standing(PRINCIPAL, &s_key), ClientKeyStanding::Current, "SUPERSEDED ACROSS PRINCIPALS ({order}): the service key");
+            assert_eq!(a.consent_key_standing(CONSENT, &c_point), ClientKeyStanding::Current, "SUPERSEDED ACROSS PRINCIPALS ({order}): the consent key");
+            let holder = crate::knowledge::IssuerId::new(PRINCIPAL).unwrap();
+            let msg = b"possession proof";
+            let proof = ed25519_dalek::Signer::sign(&s_sk, msg).to_bytes();
+            assert!(fed.read().verify_client(&holder, msg, &proof), "the service key proves possession ({order})");
+            let consent_issuer = crate::knowledge::IssuerId::new(CONSENT).unwrap();
+            assert_eq!(fed.read().client_key(&consent_issuer), None, "FED ({order}): a consent principal's key reached the external issuers");
+
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            let (s2_der, s2_key) = issue(&dir, "forecaster", "s2");
+            a.publish_client_cert(&s2_der).unwrap();
+            assert_eq!(a.client_key_standing(PRINCIPAL, &s_key), ClientKeyStanding::Superseded, "{order}");
+            assert_eq!(a.client_key_standing(PRINCIPAL, &s2_key), ClientKeyStanding::Current, "{order}");
+            assert!(!fed.read().verify_client(&holder, msg, &proof), "REFUSED NOT: the superseded service key's possession proof ({order})");
+            assert_eq!(fed.read().client_key(&holder), Some(s2_key), "{order}");
+            assert_eq!(a.consent_key_standing(CONSENT, &c_point), ClientKeyStanding::Current, "a service re-issue moved the consent key ({order})");
+            assert_eq!(fed.read().client_key(&consent_issuer), None, "{order}");
+            a.shutdown().await;
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// **I7 exit 11, re-enrolment (P6), at the fold and across a restart under `[persistence]`.** A newer consent
+    /// certificate supersedes the older consent key; its record tombstoned and the node restarted over the same
+    /// directory, the older key stays `Superseded` and the newer `Current` — the journal holds the consent principal's
+    /// mark, in the same entry form an older binary decodes. The service principal of the same name is untouched. The
+    /// plant: the same restart with the journal removed brings the older consent key back. Seen failing first with the
+    /// fold parsing a consent record's path as an Ed25519 key's (64 digits): the newer record, written by a member, was
+    /// never read, and the older key stayed `Current`.
+    #[tokio::test]
+    async fn a_newer_consent_certificate_supersedes_the_older_consent_key_across_a_restart() {
+        let dir = fresh("consent-restart");
+        let port = alloc_port();
+        let (c1, c2) = {
+            let a = started(config(&dir, port, true), port).await;
+            let (c1_der, c1) = issue_consent(&dir, "forecaster", "c1", crate::ConsentGrade::Tty);
+            a.publish_client_cert(&c1_der).unwrap();
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            let (c2_der, c2) = issue_consent(&dir, "forecaster", "c2", crate::ConsentGrade::Tty);
+            let c2_path: Arc<str> = Arc::from(crate::consent_cert_key(CONSENT, &c2).as_str());
+            let _ = crate::agent::helpers::kv_set(&a.task_ctx, Arc::clone(&c2_path), bytes::Bytes::from(c2_der));
+            assert_eq!(a.consent_key_standing(CONSENT, &c1), ClientKeyStanding::Superseded);
+            assert_eq!(a.consent_key_standing(CONSENT, &c2), ClientKeyStanding::Current);
+            let _ = crate::agent::helpers::kv_delete(&a.task_ctx, c2_path);
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            a.shutdown().await;
+            (c1, c2)
+        };
+        let journal = dir.join("persist").join("identity").join("client-certs.journal");
+        let b = started(config(&dir, port, true), port).await;
+        assert_eq!(b.consent_key_standing(CONSENT, &c1), ClientKeyStanding::Superseded, "RESTORED: the older consent key after a restart");
+        assert_eq!(b.consent_key_standing(CONSENT, &c2), ClientKeyStanding::Current);
+        b.shutdown().await;
+        std::fs::remove_file(&journal).unwrap();
+        let c = started(config(&dir, port, true), port).await;
+        let without = c.consent_key_standing(CONSENT, &c1);
+        c.shutdown().await;
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(without, ClientKeyStanding::Current, "plant: without the journal the older consent key is back");
+    }
+
+    /// **I7, the door's issuer rule and its answer for a consent certificate.** `POST /gateway/identity/client-cert`
+    /// refuses a consent certificate for another issuer (`422 issuer_mismatch`), and publishes one for its own, answering
+    /// the consent principal, the point's 130 hex digits as `key`, and the grade. Seen failing first: the door read the
+    /// issuer through `client_identity` alone and published the foreign issuer's consent certificate.
+    #[cfg(feature = "compliance")]
+        #[tokio::test]
+    async fn the_door_publishes_a_consent_certificate_for_its_own_issuer_only() {
+        use axum::http::header::AUTHORIZATION;
+        let dir = fresh("consent-door");
+        let port = alloc_port();
+        let http_port = alloc_port();
+        let mut cfg = config(&dir, port, false);
+        cfg.http_port = Some(http_port);
+        cfg.gateway_identity_issuer = Some("fleet".into());
+        cfg.gateway_named_tokens = vec![crate::GatewayNamedToken { name: "ops".into(), token: "ops".into(), scopes: vec!["identity:write".into()] }];
+        let a = started(cfg, port).await;
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        let pem_of = |issuer: &str, out: &str| {
+            let kp = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+            let point: [u8; 65] = kp.public_key_raw().try_into().unwrap();
+            let cert = crate::issue_consent_cert(&dir.join("certs"), issuer, "forecaster", &crate::p256_spki_pem(&point), crate::ConsentGrade::Tty, &dir.join(out)).unwrap();
+            (std::fs::read_to_string(cert).unwrap(), point)
+        };
+        let post = |pem: String| async move {
+            let r = reqwest::Client::new().post(format!("http://127.0.0.1:{http_port}/gateway/identity/client-cert"))
+                .header(AUTHORIZATION, "Bearer ops").json(&serde_json::json!({"cert_pem": pem})).send().await.unwrap();
+            (r.status().as_u16(), r.json::<serde_json::Value>().await.unwrap_or_default())
+        };
+        let (foreign_pem, _) = pem_of("other", "other");
+        let foreign = post(foreign_pem).await;
+        let (ours_pem, point) = pem_of("fleet", "fleet");
+        let ours = post(ours_pem).await;
+        let standing = a.consent_key_standing(CONSENT, &point);
         a.shutdown().await;
-        (c1, c2)
-    };
-    let journal = dir.join("persist").join("identity").join("client-certs.journal");
-    let b = started(config(&dir, port, true), port).await;
-    assert_eq!(b.consent_key_standing(CONSENT, &c1), ClientKeyStanding::Superseded, "RESTORED: the older consent key after a restart");
-    assert_eq!(b.consent_key_standing(CONSENT, &c2), ClientKeyStanding::Current);
-    b.shutdown().await;
-    std::fs::remove_file(&journal).unwrap();
-    let c = started(config(&dir, port, true), port).await;
-    let without = c.consent_key_standing(CONSENT, &c1);
-    c.shutdown().await;
-    let _ = std::fs::remove_dir_all(&dir);
-    assert_eq!(without, ClientKeyStanding::Current, "plant: without the journal the older consent key is back");
-}
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!((foreign.0, foreign.1["reason"].as_str()), (422, Some("issuer_mismatch")), "PUBLISHED another issuer's consent certificate: {foreign:?}");
+        let hex: String = point.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!((ours.0, ours.1["principal"].as_str(), ours.1["key"].as_str(), ours.1["grade"].as_str()), (200, Some(CONSENT), Some(hex.as_str()), Some("tty")), "{ours:?}");
+        assert_eq!(standing, ClientKeyStanding::Current);
+    }
 
-/// **I7, the door's issuer rule and its answer for a consent certificate.** `POST /gateway/identity/client-cert`
-/// refuses a consent certificate for another issuer (`422 issuer_mismatch`), and publishes one for its own, answering
-/// the consent principal, the point's 130 hex digits as `key`, and the grade. Seen failing first: the door read the
-/// issuer through `client_identity` alone and published the foreign issuer's consent certificate.
-#[cfg(feature = "compliance")]
-#[tokio::test]
-async fn the_door_publishes_a_consent_certificate_for_its_own_issuer_only() {
-    use axum::http::header::AUTHORIZATION;
-    let dir = fresh("consent-door");
-    let port = alloc_port();
-    let http_port = alloc_port();
-    let mut cfg = config(&dir, port, false);
-    cfg.http_port = Some(http_port);
-    cfg.gateway_identity_issuer = Some("fleet".into());
-    cfg.gateway_named_tokens = vec![crate::GatewayNamedToken { name: "ops".into(), token: "ops".into(), scopes: vec!["identity:write".into()] }];
-    let a = started(cfg, port).await;
-    tokio::time::sleep(Duration::from_millis(80)).await;
-    let pem_of = |issuer: &str, out: &str| {
-        let kp = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
-        let point: [u8; 65] = kp.public_key_raw().try_into().unwrap();
-        let cert = crate::issue_consent_cert(&dir.join("certs"), issuer, "forecaster", &crate::p256_spki_pem(&point), crate::ConsentGrade::Tty, &dir.join(out)).unwrap();
-        (std::fs::read_to_string(cert).unwrap(), point)
-    };
-    let post = |pem: String| async move {
-        let r = reqwest::Client::new().post(format!("http://127.0.0.1:{http_port}/gateway/identity/client-cert"))
-            .header(AUTHORIZATION, "Bearer ops").json(&serde_json::json!({"cert_pem": pem})).send().await.unwrap();
-        (r.status().as_u16(), r.json::<serde_json::Value>().await.unwrap_or_default())
-    };
-    let (foreign_pem, _) = pem_of("other", "other");
-    let foreign = post(foreign_pem).await;
-    let (ours_pem, point) = pem_of("fleet", "fleet");
-    let ours = post(ours_pem).await;
-    let standing = a.consent_key_standing(CONSENT, &point);
-    a.shutdown().await;
-    let _ = std::fs::remove_dir_all(&dir);
-    assert_eq!((foreign.0, foreign.1["reason"].as_str()), (422, Some("issuer_mismatch")), "PUBLISHED another issuer's consent certificate: {foreign:?}");
-    let hex: String = point.iter().map(|b| format!("{b:02x}")).collect();
-    assert_eq!((ours.0, ours.1["principal"].as_str(), ours.1["key"].as_str(), ours.1["grade"].as_str()), (200, Some(CONSENT), Some(hex.as_str()), Some("tty")), "{ours:?}");
-    assert_eq!(standing, ClientKeyStanding::Current);
+    /// **A shipped node fails closed on a provisional-OID consent certificate** (#800's review, finding 1). With the
+    /// provisional gate closed, as in a build without `provisional-consent-grade`: the door refuses the certificate by
+    /// name (`consent_grade_oid_provisional`) and writes nothing; a record a member writes directly is not counted —
+    /// `consent_key_standing` answers `Unknown` and `provisional_grade` counts it. The plant: the same certificate
+    /// published with the gate open is `Current`. Seen failing first with `consent_identity` ungated (published, and
+    /// `Current` with the gate closed).
+    #[tokio::test]
+    async fn with_the_provisional_gate_closed_the_door_refuses_and_the_fold_counts_a_consent_certificate() {
+        let dir = fresh("consent-gate");
+        let port = alloc_port();
+        let a = started(config(&dir, port, false), port).await;
+        let (der, point) = issue_consent(&dir, "forecaster", "c1", crate::ConsentGrade::Tty);
+        let refused = mycelium_core::tls::with_provisional_consent_grade_closed(|| a.publish_client_cert(&der));
+        assert_eq!(refused.err(), Some(PublishRefusal::ProvisionalConsentGrade), "PUBLISHED with the gate closed");
+        assert_eq!(PublishRefusal::ProvisionalConsentGrade.to_string(), "consent_grade_oid_provisional");
+        let path = crate::consent_cert_key(CONSENT, &point);
+        assert_eq!(mycelium_core::ops::kv_get(&a.task_ctx, &path), None, "the refusal wrote nothing");
+        // A member writes the record itself; with no await between the write and the read, the watcher cannot fold it
+        // with the gate open first.
+        let standing = {
+            let _ = crate::agent::helpers::kv_set(&a.task_ctx, Arc::from(path.as_str()), bytes::Bytes::from(der.clone()));
+            mycelium_core::tls::with_provisional_consent_grade_closed(|| a.consent_key_standing(CONSENT, &point))
+        };
+        assert_eq!(standing, ClientKeyStanding::Unknown, "COUNTED with the gate closed");
+        assert!(a.task_ctx.client_certs.provisional_grade.load(std::sync::atomic::Ordering::Relaxed) >= 2, "the door and the fold count it");
+        super::super::client_cert::clear_cert_cache_for_test(&a.task_ctx.client_certs);
+        a.publish_client_cert(&der).expect("plant: published with the gate open");
+        assert_eq!(a.consent_key_standing(CONSENT, &point), ClientKeyStanding::Current);
+        a.shutdown().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **Forged consent records are uncounted** (check 8; #800's review, finding 5 — the reviewer's probe, pinned). A
+    /// member writes, with any bytes it likes: a genuine consent certificate at a path naming **another** point; the
+    /// same certificate under the `token:` principal, at its 64-digit key id and at its point; a genuine **service**
+    /// certificate under the consent principal, at 130 digits and at 64; and the consent certificate at its own path
+    /// in upper-case hex. None raises a mark: `consent_key_standing` and `client_key_standing` stay `Unknown` for
+    /// every key. The plant: the same certificate at its real path reads `Current`. Seen failing first with
+    /// `parse_path_key` accepting upper-case hex (the upper-case record read `Current`).
+    #[tokio::test]
+    async fn forged_consent_records_at_the_wrong_path_or_principal_are_uncounted() {
+        let dir = fresh("consent-forged");
+        let port = alloc_port();
+        let a = started(config(&dir, port, false), port).await;
+        let (c_der, c_point) = issue_consent(&dir, "forecaster", "c1", crate::ConsentGrade::Tty);
+        let (_, other_point) = issue_consent(&dir, "forecaster", "c2", crate::ConsentGrade::Tty);
+        let (s_der, s_key) = issue(&dir, "forecaster", "s1");
+        let hex = |b: &[u8]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
+        let at = |principal: &str, key: String| format!("{}{}/{}", super::super::client_cert::CLIENT_CERT_PREFIX, hex(principal.as_bytes()), key);
+        let key_id: [u8; 32] = <sha2::Sha256 as sha2::Digest>::digest(c_point).into();
+        let forged = [
+            ("consent cert at another point's path", at(CONSENT, hex(&other_point)), c_der.clone()),
+            ("consent cert under token: at its key id", at(PRINCIPAL, hex(&key_id)), c_der.clone()),
+            ("consent cert under token: at its point", at(PRINCIPAL, hex(&c_point)), c_der.clone()),
+            ("service cert under consent: at 130 digits", at(CONSENT, hex(&c_point)), s_der.clone()),
+            ("service cert under consent: at 64 digits", at(CONSENT, hex(&s_key)), s_der.clone()),
+            ("consent cert at an upper-case path", at(CONSENT, hex(&c_point).to_uppercase()), c_der.clone()),
+        ];
+        for (_, path, der) in &forged {
+            let _ = crate::agent::helpers::kv_set(&a.task_ctx, Arc::from(path.as_str()), bytes::Bytes::from(der.clone()));
+        }
+        super::super::client_cert::refresh(&a.task_ctx);
+        let standings = (
+            a.consent_key_standing(CONSENT, &c_point),
+            a.consent_key_standing(CONSENT, &other_point),
+            a.client_key_standing(PRINCIPAL, &s_key),
+            a.client_key_standing(PRINCIPAL, &key_id),
+            a.client_key_standing(CONSENT, &s_key),
+        );
+        assert_eq!(standings, (ClientKeyStanding::Unknown, ClientKeyStanding::Unknown, ClientKeyStanding::Unknown, ClientKeyStanding::Unknown, ClientKeyStanding::Unknown),
+            "COUNTED a forged record: {:?}", forged.iter().map(|f| f.0).collect::<Vec<_>>());
+        assert_eq!(a.task_ctx.client_certs.mark(CONSENT), None, "no consent mark rose");
+        assert_eq!(a.task_ctx.client_certs.mark(PRINCIPAL), None, "no token mark rose");
+        let _ = crate::agent::helpers::kv_set(&a.task_ctx, Arc::from(crate::consent_cert_key(CONSENT, &c_point).as_str()), bytes::Bytes::from(c_der));
+        assert_eq!(a.consent_key_standing(CONSENT, &c_point), ClientKeyStanding::Current, "plant: the real path counts");
+        a.shutdown().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

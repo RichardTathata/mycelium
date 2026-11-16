@@ -107,8 +107,8 @@ MUTATIONS = {
     # fuzz
     "a fuzz target not run": regex(CI, r"^.*fuzz run .* fixint_decode .*\n", ""),
     # integration tests
-    "integration tests by one name": edit(CI, "cargo test --features tls,a2a --test '*'",
-                                          "cargo test --features tls,a2a --test proptest_tests"),
+    "integration tests by one name": edit(CI, "cargo test --features tls,a2a,provisional-consent-grade --test '*'",
+                                          "cargo test --features tls,a2a,provisional-consent-grade --test proptest_tests"),
 }
 
 LIB_TESTS = "src/lib_tests.rs"
@@ -160,7 +160,7 @@ EXPECT = {
                                            'path = "src/bin/skillrunner/main.rs"\nrequired-features = ["llm"]\n'),
                                       "bin mycelium::src/bin/skillrunner"),
     "[lib] test = false": (append("mycelium-commitment/Cargo.toml", "\n[lib]\ntest = false\n"), "lib mycelium-commitment"),
-    "a bin filter that matches no test path": (edit(CI, "cargo test --features tls,a2a --bins", "cargo test --features tls,a2a --bins skillrunner"),
+    "a bin filter that matches no test path": (edit(CI, "cargo test --features tls,a2a,provisional-consent-grade --bins", "cargo test --features tls,a2a,provisional-consent-grade --bins skillrunner"),
                                                "bin mycelium::src/bin/skillrunner"),
     "pytest --collect-only": (edit(CI, "pytest langgraph-checkpoint-mycelium/tests mycelium-py/tests strands-session-mycelium/tests -v",
                                    "pytest langgraph-checkpoint-mycelium/tests mycelium-py/tests strands-session-mycelium/tests -v --co"),

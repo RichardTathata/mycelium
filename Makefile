@@ -170,6 +170,7 @@ check:
 	cargo clippy --lib --tests -- -D warnings
 	cargo clippy --lib --tests --features test-frame-filter -- -D warnings
 	cargo clippy --lib --tests --features tls,metrics,a2a,llm -- -D warnings
+	cargo clippy --lib --bins --tests --features tls,metrics,a2a,llm,compliance,provisional-consent-grade -- -D warnings  # the consent tests (I7)
 	cargo clippy --lib --tests --features compliance -- -D warnings
 	cargo clippy --lib --tests --features compliance,llm -- -D warnings  # the pair CI's llm_door_tests step builds (#785's review)
 	cargo clippy --lib --bins --tests --no-default-features -- -D warnings  # CI's line; NOT gateway-free (dev-deps re-enable gateway/tls) -- it catches test-only items and the skillrunner bin (a test-only re-export slipped past --lib, #642)
@@ -190,6 +191,8 @@ check:
 	cargo check --all-targets --no-default-features                          # an example missing required-features
 	./scripts/check-hlc-current.sh                                           # every Hlc::current() read classified
 	./scripts/check-sim-seams.sh                                # no new nondeterminism outside the seams
+	./scripts/check-release-blockers.sh                         # a release blocker the tree states (warns; --release fails, RELEASING.md § 2)
+	./scripts/check-release-blockers.sh --self-test             # …and it refuses a planted blocker, passes a clear one
 	./scripts/test-check-sim-seams.sh                           # …and it sees every timer-alias spelling (planted files)
 	./scripts/with-pyyaml.sh scripts/check-test-inventory.py    # every test requirement runs in some CI step, with its features (verification policy rule 3)
 	./scripts/with-pyyaml.sh scripts/test-check-test-inventory.py  # …and the check catches every bypass a review found
@@ -227,8 +230,8 @@ gate-knowledge:
 check-full: check
 	cargo clippy --lib --tests --features otel,tls -- -D warnings      # the one root feature no other line builds (row J); tests: Y4
 	cargo clippy --benches --features gateway,test-util -- -D warnings  # both bench targets (gateway_overhead needs these features)
-	cargo test  --lib --features tls,metrics,a2a,llm,test-frame-filter   # + the row-A frame-filter tests
-	cargo test  --lib --features compliance,a2a   # the audit chain + both gateway enforcement points
+	cargo test  --lib --features tls,metrics,a2a,llm,test-frame-filter,provisional-consent-grade   # + the row-A frame-filter tests, the consent tests
+	cargo test  --lib --features compliance,a2a,provisional-consent-grade   # the audit chain + both gateway enforcement points
 	CI_RETEST_STRICT=1 ./scripts/ci-retest.sh --lib --features compliance,llm llm_door_tests   # as CI runs it, strict: the built-in llm.invoke provider's check, the three tests that need a node's key verified (no other line builds compliance with llm)
 	cargo test  --features tls,a2a --test '*'           # every root integration test, by discovery (rule 3)
 	cargo test  --features tls,a2a --bins                # the skillrunner binary's unit tests

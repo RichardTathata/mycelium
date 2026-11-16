@@ -121,8 +121,10 @@ write (on stderr in the text form).
 - `issue`, `kind: "client"` — `principal` (`token:{issuer}/{name}`), `issuer`, `name`, `cert`, `key`, `spki_sha256`
   (the value `tls pin` prints for this certificate). Its `warnings` check the same two directories as `--node`'s.
 - `issue`, `kind: "consent"` (identity-and-lifecycle I7, additive) — `principal` (`consent:{issuer}/{name}`), `issuer`,
-  `name`, `grade`, `cert`, `spki_sha256` (of the developer's P-256 key), and no `key`: none is written. Not issued by a
-  shipped binary while the grade extension's OID is provisional ([consent certificates](../features/consent-certificates.md)).
+  `name`, `grade` with `grade_source: "operator"` (the grade is what the operator was told at enrolment and vouches
+  for; no node can check it), `cert`, `spki_sha256` (of the developer's P-256 key), and no `key`: none is written.
+  Golden `tests/fixtures/cli/tls-issue-consent.json`. Not issued by a shipped binary while the grade extension's OID is
+  provisional ([consent certificates](../features/consent-certificates.md)).
 - `pin` — `cert`, `spki_sha256`. A CA certificate or a file with a key is refused as in the text form.
 
 ## `mycelium skills … --format json` — `mycelium.skills/1`

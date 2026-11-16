@@ -534,10 +534,66 @@ pub fn consent_uri(issuer: &str, name: &str) -> String {
 /// replacing it: the OID is permanent once a certificate carries it.
 pub const CONSENT_GRADE_OID: &[u64] = &[1, 3, 6, 1, 4, 1, 32473, 7, 1];
 
-/// Whether [`CONSENT_GRADE_OID`] is still the provisional documentation-PEN arc. While it is, the consent issuer
-/// refuses outside a test build (`cfg(test)` or mycelium-core's `test-support`, which only a test's dev-dependency
-/// enables), so no shipped binary can write a certificate that carries it.
+/// Whether [`CONSENT_GRADE_OID`] is still the provisional documentation-PEN arc. While it is, a build that is not a
+/// test build ([`consent_grade_oid_open`]) neither issues nor reads a consent certificate: the issuer refuses, and
+/// [`consent_identity`] reads none (#800's review, finding 1 — anyone holding the CA key can mint one with openssl, so
+/// an ungated reader would give a placeholder OID standing in a shipped node). `scripts/check-release-blockers.sh
+/// --release`, run by the release workflow on a tag push, refuses a release while this is `true`.
 pub const CONSENT_GRADE_OID_IS_PROVISIONAL: bool = true;
+
+/// Whether this build may issue and read a consent certificate under [`CONSENT_GRADE_OID`]: always once the OID is
+/// registered; while it is provisional, only in a test build — `cfg(test)` (mycelium-core's own tests) or the
+/// non-default feature `provisional-consent-grade`, which only the test lines that exercise consent certificates turn
+/// on (never `test-support`, an example, a Docker image or a shipped binary: #800's review, finding 2).
+pub fn consent_grade_oid_open() -> bool {
+    consent_grade_oid_open_when(CONSENT_GRADE_OID_IS_PROVISIONAL, provisional_build_open())
+}
+
+/// The rule [`consent_grade_oid_open`] applies: a registered OID is open to every build; a provisional one only to a
+/// test build.
+pub fn consent_grade_oid_open_when(provisional: bool, test_build: bool) -> bool {
+    !provisional || test_build
+}
+
+#[cfg(any(test, feature = "provisional-consent-grade"))]
+thread_local! {
+    static PROVISIONAL_GATE_CLOSED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn provisional_build_open() -> bool {
+    #[cfg(any(test, feature = "provisional-consent-grade"))]
+    {
+        !PROVISIONAL_GATE_CLOSED.with(|c| c.get())
+    }
+    #[cfg(not(any(test, feature = "provisional-consent-grade")))]
+    {
+        false
+    }
+}
+
+/// Run `f` on this thread as a shipped build would: the provisional gate closed (#800's review, finding 1's tests).
+/// Only in a build that has the gate open to close.
+#[cfg(any(test, feature = "provisional-consent-grade"))]
+#[doc(hidden)]
+pub fn with_provisional_consent_grade_closed<R>(f: impl FnOnce() -> R) -> R {
+    struct Reopen;
+    impl Drop for Reopen {
+        fn drop(&mut self) {
+            PROVISIONAL_GATE_CLOSED.with(|c| c.set(false));
+        }
+    }
+    PROVISIONAL_GATE_CLOSED.with(|c| c.set(true));
+    let _reopen = Reopen;
+    f()
+}
+
+/// Whether `point` is a point of P-256 other than the identity, as SEC 1 decodes an uncompressed point (`04 ‖ x ‖
+/// y`, `y² = x³ − 3x + b mod p`): #800's review, finding 4 — the fleet CA must never vouch for a key no device can
+/// hold, which as a consent principal's newest certificate would leave the person's real key `Superseded`.
+#[cfg(feature = "tls")]
+pub fn p256_point_on_curve(point: &[u8; 65]) -> bool {
+    point[0] == 0x04 && p256::PublicKey::from_sec1_bytes(point).is_ok()
+}
 
 /// The DER content octets of [`CONSENT_GRADE_OID`] (base-128 arcs, the first two folded): what the walk compares an
 /// extension's `extnID` against. Pinned in a golden (`consent_tests`).
@@ -582,7 +638,8 @@ pub enum ConsentGrade {
     /// `tty`: the enrolment said the key is a software P-256 key in a same-user file (P7) — any process running as the
     /// user can sign with it, so a `tty` decision may have been made by the agent whose request it approves (B).
     Tty,
-    /// `recording`: a `sim` test build's key (E6's walk), no person involved.
+    /// `recording`: the enrolment said the key is a `sim` test build's (E6's walk), with no person involved — the
+    /// operator's statement, as for every grade.
     Recording,
 }
 
@@ -659,10 +716,28 @@ impl ConsentIdentity {
 /// Read a consent certificate's [`ConsentIdentity`]: a **P-256** key (`id-ecPublicKey` over `prime256v1`, an
 /// uncompressed point), exactly one `mycelium-consent://{issuer}/{name}` URI with two valid segments and a name not in
 /// [`RESERVED_CLIENT_NAMES`], no `mycelium://` or `mycelium-client://` URI beside it, and exactly one grade extension
-/// naming a [`ConsentGrade`]. `None` otherwise — **no grade, no consent**. Says nothing about who issued it: judge the
-/// chain with [`NodeTls::verify_member_cert`] first. Never panics.
+/// naming a [`ConsentGrade`], over a point on the curve. `None` otherwise — **no grade, no consent** — and `None` in
+/// every build where [`consent_grade_oid_open`] is false, so a shipped node fails closed on a certificate carrying the
+/// provisional OID ([`consent_identity_closed_by_provisional_oid`] tells that case apart, for a counter and a named
+/// refusal). Says nothing about who issued it: judge the chain with [`NodeTls::verify_member_cert`] first. Never
+/// panics.
 #[cfg(feature = "tls")]
 pub fn consent_identity(der: &[u8]) -> Option<ConsentIdentity> {
+    if !consent_grade_oid_open() {
+        return None;
+    }
+    consent_identity_ungated(der)
+}
+
+/// Whether `der` is a consent certificate this build does not read **only** because the grade OID is provisional and
+/// this is not a test build (#800's review, finding 1): what the fold counts and the door refuses by name.
+#[cfg(feature = "tls")]
+pub fn consent_identity_closed_by_provisional_oid(der: &[u8]) -> bool {
+    !consent_grade_oid_open() && consent_identity_ungated(der).is_some()
+}
+
+#[cfg(feature = "tls")]
+fn consent_identity_ungated(der: &[u8]) -> Option<ConsentIdentity> {
     let point = imp::p256_point_from_cert_der(der)?;
     let walk = tbs_walk(der)?;
     if walk.uris.iter().any(|u| u.starts_with("mycelium://") || u.starts_with(CLIENT_URI_SCHEME)) {
@@ -691,8 +766,9 @@ pub const P256_SPKI_HEADER: [u8; 26] = [
 /// The uncompressed point of a P-256 SPKI PEM (`-----BEGIN PUBLIC KEY-----`), as the developer's side exports it
 /// (identity-and-lifecycle I7's issue flow: CryptoKit's `pemRepresentation`, or [`p256_spki_pem`]). Refused, by name:
 /// no `PUBLIC KEY` block, or more than one; an SPKI for another algorithm or curve (an Ed25519 key among them); a
-/// compressed point. **Raw X9.63 is not accepted**, so the input names its own algorithm. The point is not checked to
-/// be on the curve here: one that is not verifies no signature.
+/// compressed point; a point not on the curve (#800's review, finding 4). **Raw X9.63 is not accepted**, so the input
+/// names its own algorithm.
+#[cfg(feature = "tls")]
 pub fn p256_point_from_spki_pem(pem: &str) -> Result<[u8; 65], String> {
     use base64::{engine::general_purpose::STANDARD, Engine};
     const BEGIN: &str = "-----BEGIN PUBLIC KEY-----";
@@ -716,7 +792,11 @@ pub fn p256_point_from_spki_pem(pem: &str) -> Result<[u8; 65], String> {
     if header != P256_SPKI_HEADER || point.len() != 65 || point[0] != 0x04 {
         return Err("not_p256: the SPKI is not a P-256 (prime256v1) key over an uncompressed point".into());
     }
-    Ok(point.try_into().expect("checked length"))
+    let point: [u8; 65] = point.try_into().expect("checked length");
+    if !p256_point_on_curve(&point) {
+        return Err("not_p256: the point is not on the curve".into());
+    }
+    Ok(point)
 }
 
 /// The SPKI PEM of a P-256 uncompressed point — the fixed header, then the point — as `dev` exports a software
@@ -1757,7 +1837,7 @@ mod imp {
     /// A P-256 public point as rcgen signs a certificate over it (identity-and-lifecycle I7, the spike S-presence's
     /// row 6): the fleet's Ed25519 CA certifies a consent key over its **public half alone** — the private half is in
     /// the developer's Secure Enclave or software key file and never reaches the issuer.
-    struct P256Public([u8; 65]);
+    pub(super) struct P256Public(pub(super) [u8; 65]);
 
     impl rcgen::PublicKeyData for P256Public {
         fn der_bytes(&self) -> &[u8] {
@@ -1768,17 +1848,10 @@ mod imp {
         }
     }
 
-    /// Whether this build may write the consent grade extension: only a test build while
-    /// [`CONSENT_GRADE_OID_IS_PROVISIONAL`](super::CONSENT_GRADE_OID_IS_PROVISIONAL) holds — `cfg(test)`, or
-    /// `test-support`, which only a test's dev-dependency enables.
+    /// Whether this build may write the consent grade extension: [`consent_grade_oid_open`](super::consent_grade_oid_open),
+    /// the same gate the reader takes.
     fn may_write_consent_grade() -> bool {
-        may_write_consent_grade_when(super::CONSENT_GRADE_OID_IS_PROVISIONAL, cfg!(any(test, feature = "test-support")))
-    }
-
-    /// The rule [`may_write_consent_grade`] applies: a registered OID may be written by any build; a provisional one
-    /// only by a test build.
-    pub(super) fn may_write_consent_grade_when(provisional: bool, test_build: bool) -> bool {
-        !provisional || test_build
+        super::consent_grade_oid_open()
     }
 
     /// A **consent** certificate for the principal `consent:{issuer}/{name}` (identity-and-lifecycle I7, H1, H2): the
@@ -1810,8 +1883,8 @@ mod imp {
         if super::RESERVED_CLIENT_NAMES.contains(&name) {
             return Err(err(format!("TLS: the name {name:?} is reserved")));
         }
-        if point[0] != 0x04 {
-            return Err(err("TLS: a consent key is an uncompressed P-256 point (04 || x || y)".into()));
+        if !super::p256_point_on_curve(point) {
+            return Err(err("TLS: not_p256: a consent key is an uncompressed P-256 point on the curve (04 || x || y)".into()));
         }
         let mut params = CertificateParams::new(vec![]).map_err(|e| err(format!("TLS: consent cert params: {e}")))?;
         let uri = rcgen::Ia5String::try_from(super::consent_uri(issuer, name)).map_err(|e| err(format!("TLS: consent URI: {e}")))?;
@@ -1875,7 +1948,8 @@ mod imp {
         if header != super::P256_SPKI_HEADER || point.len() != 65 || point[0] != 0x04 {
             return None;
         }
-        point.try_into().ok()
+        let point: [u8; 65] = point.try_into().ok()?;
+        super::p256_point_on_curve(&point).then_some(point)
     }
 
     /// Extract the Ed25519 public key from a node cert's `SubjectPublicKeyInfo` (audit 2026-07-15,
@@ -3336,15 +3410,73 @@ mod ca_race_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// **No shipped binary writes the provisional OID.** While `CONSENT_GRADE_OID_IS_PROVISIONAL` holds, only a test
-    /// build may write the grade extension; once the registered arc replaces it, any build may. The shipped binary's
-    /// refusal itself is a run against a `cargo build` binary (no `test-support`), recorded in the plan's §8. Seen
-    /// failing first with the rule returning `true` whatever the build.
+    /// **A shipped build fails closed on the provisional OID** (#800's review, finding 1). With the gate closed — as in
+    /// a build without `cfg(test)` or `provisional-consent-grade` — a consent certificate carrying the provisional OID
+    /// reads as no consent identity, `consent_identity_closed_by_provisional_oid` names why, and the issuer refuses;
+    /// with it open the same certificate reads. Seen failing first with `consent_identity` ungated (the certificate read
+    /// as `consent:fleet/richard` with the gate closed).
+    #[test]
+    fn a_closed_provisional_gate_reads_no_consent_certificate_and_issues_none() {
+        let dir = fresh_dir("consent-gate");
+        let cfg = TlsConfig { auto_cert_dir: dir.clone(), ..TlsConfig::default() };
+        let (_, ca_key) = load_or_create_ca(&cfg).unwrap();
+        let (_, point, _) = p256_key();
+        let cert = super::imp::generate_consent_cert("fleet", "richard", &point, super::ConsentGrade::Tty, &ca_key, 9).unwrap();
+        assert!(super::consent_identity(cert.as_ref()).is_some(), "plant: the test build reads it");
+        assert!(!super::consent_identity_closed_by_provisional_oid(cert.as_ref()));
+        let (read, named, issued) = super::with_provisional_consent_grade_closed(|| (
+            super::consent_identity(cert.as_ref()),
+            super::consent_identity_closed_by_provisional_oid(cert.as_ref()),
+            super::imp::generate_consent_cert("fleet", "richard", &point, super::ConsentGrade::Tty, &ca_key, 10),
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(read, None, "READ: a provisional-OID consent certificate with the gate closed");
+        assert!(named, "the closed gate is named as the reason");
+        assert!(issued.is_err_and(|e| e.to_string().contains("provisional")), "ISSUED with the gate closed");
+        assert!(super::consent_identity(cert.as_ref()).is_some(), "the gate reopens after the closure");
+    }
+
+    /// **A point not on P-256 is refused at issue and at read** (#800's review, finding 4). `04 ‖ 0^64` and a point
+    /// with `y` off by one are refused by the SPKI reader (`not_p256: the point is not on the curve`), by the issuer,
+    /// and — minted by a CA-key holder — read as no consent identity, so such a certificate never becomes a consent
+    /// principal's newest mark. Seen failing first with only the `04` prefix checked (all three accepted).
+    #[test]
+    fn a_point_off_the_curve_is_refused_at_issue_and_at_read() {
+        use base64::{engine::general_purpose::STANDARD, Engine};
+        let dir = fresh_dir("consent-curve");
+        let cfg = TlsConfig { auto_cert_dir: dir.clone(), ..TlsConfig::default() };
+        let (_, ca_key) = load_or_create_ca(&cfg).unwrap();
+        let (_, good, _) = p256_key();
+        let mut zero = [0u8; 65];
+        zero[0] = 0x04;
+        let mut nudged = good;
+        nudged[64] ^= 0x01;
+        for (what, point) in [("04 || 0^64", zero), ("y off by one", nudged)] {
+            assert!(!super::p256_point_on_curve(&point), "{what}");
+            let mut der = super::P256_SPKI_HEADER.to_vec();
+            der.extend_from_slice(&point);
+            let pem = format!("-----BEGIN PUBLIC KEY-----\n{}\n-----END PUBLIC KEY-----\n", STANDARD.encode(der));
+            let read = super::p256_point_from_spki_pem(&pem);
+            assert!(read.as_ref().is_err_and(|e| e.contains("not on the curve")), "{what}: {read:?}");
+            assert!(super::imp::generate_consent_cert("fleet", "x", &point, super::ConsentGrade::Tty, &ca_key, 1).is_err(), "ISSUED: {what}");
+            let minted_cert = minted(&ca_key, &super::imp::P256Public(point), &[super::consent_uri("fleet", "x")],
+                vec![grade_ext(super::ConsentGrade::Tty.extension_der())], 4);
+            assert_eq!(super::consent_identity(&minted_cert), None, "READ: {what}");
+        }
+        assert!(super::p256_point_on_curve(&good), "plant: a real key's point is on the curve");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **No shipped binary writes or reads the provisional OID: the rule.** While `CONSENT_GRADE_OID_IS_PROVISIONAL`
+    /// holds, only a test build may; once the registered arc replaces it, any build may. The wiring is
+    /// `a_closed_provisional_gate_reads_no_consent_certificate_and_issues_none`; the shipped binary's refusal is a run
+    /// against a `cargo build` binary (no `provisional-consent-grade`), recorded in the plan's §8. Seen failing first
+    /// with the rule returning `true` whatever the build.
     #[test]
     fn a_provisional_grade_oid_is_written_only_by_a_test_build() {
-        assert!(!super::imp::may_write_consent_grade_when(true, false), "WRITTEN: the provisional OID by a shipped build");
-        assert!(super::imp::may_write_consent_grade_when(true, true));
-        assert!(super::imp::may_write_consent_grade_when(false, false));
+        assert!(!super::consent_grade_oid_open_when(true, false), "WRITTEN: the provisional OID by a shipped build");
+        assert!(super::consent_grade_oid_open_when(true, true));
+        assert!(super::consent_grade_oid_open_when(false, false));
     }
 
     /// **I7 exit 1's refusals at the key.** The SPKI reader refuses, by name: an Ed25519 SPKI, a P-384 SPKI, a

@@ -43,7 +43,9 @@ jobs:
       # real frames with (`agent::lock_lifecycle_tests`, `agent::lock_lifecycle_review_tests`). Only lib
       # test runs enable it — never `test-support` — so examples and demo images do not compile it.
       - run: ./scripts/ci-retest.sh --lib --features test-frame-filter
-      - run: ./scripts/ci-retest.sh --lib --features tls,metrics,a2a,llm,test-frame-filter
+      # `provisional-consent-grade` (I7, #800's review): the test-only switch that lets the consent-certificate tests
+      # issue and read under the grade's provisional OID; no example, image or shipped binary enables it.
+      - run: ./scripts/ci-retest.sh --lib --features tls,metrics,a2a,llm,test-frame-filter,provisional-consent-grade
       # STRICT, no retry: the shutdown-delivery tests (the shutdown-sweep flake, #650), by name. They also
       # run in the flake tier above, by discovery; here a failure is never retried. Seven hold one place on
       # the outbound path open with a test pause or check the count itself, so they are deterministic. Three
@@ -76,7 +78,7 @@ jobs:
       # STRICT: the audit chain and both gateway enforcement points are a security gate, and a
       # security gate that goes green on an isolated retry has not passed. The retry still runs
       # (it is diagnostic) and is still annotated, but it fails the job.
-      - run: CI_RETEST_STRICT=1 ./scripts/ci-retest.sh --lib --features compliance,a2a
+      - run: CI_RETEST_STRICT=1 ./scripts/ci-retest.sh --lib --features compliance,a2a,provisional-consent-grade
       # Consensus-free embed: gateway without the consensus feature must still
       # test green (a minimal-embed node forwards PROPOSE/VOTE/COMMIT without
       # running them). Same 2026-07-21 gap closure.
@@ -118,10 +120,10 @@ jobs:
       # `declaration_schema`, `wire_check_examples` and `wire_check_fixtures` unrun until 2026-10-06. So:
       # every root integration test, by discovery (verification policy rule 3). A file gated on a
       # feature this line lacks (`decision_trace_replay`, `sim`) compiles empty here and runs below.
-      - run: cargo test --features tls,a2a --test '*'
+      - run: cargo test --features tls,a2a,provisional-consent-grade --test '*'
       # The skillrunner binary's unit tests and the crate's doctests ran in no step until 2026-10-06 — one
       # doctest (`lock_service`'s `with_lock`) had stopped compiling. `check-test-inventory.py` found both.
-      - run: cargo test --features tls,a2a --bins
+      - run: cargo test --features tls,a2a,provisional-consent-grade --bins
       - run: cargo test --features tls,a2a --doc
       - run: cargo test -p mycelium-coop-examples --doc
       # `tls` as well as `fuzz-internals`: two of the trust-edge parsers (the presented
@@ -200,6 +202,8 @@ jobs:
       # Full feature matrix — `--lib --tests` alone misses code behind
       # #[cfg(feature = "tls")] etc. (same set CLAUDE.md mandates locally).
       - run: cargo clippy --lib --tests --features tls,metrics,a2a,llm -- -D warnings
+      # The consent-certificate tests behind the test-only `provisional-consent-grade` (I7, #800's review).
+      - run: cargo clippy --lib --bins --tests --features tls,metrics,a2a,llm,compliance,provisional-consent-grade -- -D warnings
       # Compliance-gated code (WS1–WS5) is invisible to the line above; `make check` has
       # linted it since 2026-07-22 but CI never did (2026-09-04 wiki-lint finding).
       - run: cargo clippy --lib --tests --features compliance -- -D warnings
@@ -256,6 +260,10 @@ jobs:
       # the gate to name each.
       - run: ./scripts/check-kv-namespaces.sh
       - run: ./scripts/check-kv-namespaces.sh --self-test
+      # Release blockers the tree states (RELEASING.md § 2; identity-and-lifecycle I7's provisional consent grade OID):
+      # a warning here, an error on the release workflow's tag push; and the self-test that it refuses a planted one.
+      - run: ./scripts/check-release-blockers.sh
+      - run: ./scripts/check-release-blockers.sh --self-test
       - run: ./scripts/check-wiki-mutation-fence.sh
       # Post-360 plan row F: every locally-originated KV write leaves through `make_kv_wire_msg`, so a
       # TLS node signs it — a bare `Data` frame at a write site would be refused by a fleet that
@@ -1481,6 +1489,8 @@ jobs:
       - run: cargo build --example eve_fleet_node --features compliance,llm
       # The release's NODE_FEATURES (release.yml), so the exit run's gateway is the binary as it ships, in debug.
       - run: cargo build --bin mycelium --features cli,tls,compliance,a2a,llm,metrics
+      # That binary, as it ships, refuses a consent certificate while the grade OID is provisional (I7, #800's review).
+      - run: ./scripts/check-shipped-consent-refusal.sh ./target/debug/mycelium
       - uses: actions/setup-node@v4
         with:
           node-version: 24

@@ -779,7 +779,7 @@ fn explain_cli(args: Vec<String>) -> i32 {
 /// material, no certificate body. The warnings `tls_writable_by_others` gives go into the document's `warnings`
 /// rather than to stderr; a refusal is on stderr with its exit code and no document.
 fn tls_cli(args: Vec<String>) -> i32 {
-    const USAGE: &str = "Usage: mycelium tls ca --out <dir> [--format text|json]\n       mycelium tls issue --ca-dir <dir> --node <ip:port> --out <dir> [--force] [--format text|json]\n       mycelium tls issue --ca-dir <dir> --client <name> --issuer <issuer> --out <dir> [--force] [--format text|json]\n       mycelium tls issue --ca-dir <dir> --client <name> --consent --public-key <spki.pem> --grade <grade> --issuer <issuer> --out <dir> [--force] [--format text|json]\n       mycelium tls pin <cert.pem> [--format text|json]";
+    const USAGE: &str = "Usage: mycelium tls ca --out <dir> [--format text|json]\n       mycelium tls issue --ca-dir <dir> --node <ip:port> --out <dir> [--force] [--format text|json]\n       mycelium tls issue --ca-dir <dir> --client <name> --issuer <issuer> --out <dir> [--force] [--format text|json]\n       mycelium tls issue --ca-dir <dir> --client <name> --consent --public-key <spki.pem> --grade <grade> --issuer <issuer> --out <dir> [--force] [--format text|json]\n         (--grade: what the enrolment told you about where the key lives; you vouch for it, and no node can check it)\n       mycelium tls pin <cert.pem> [--format text|json]";
     // `--format` is the one flag every subcommand takes; read it out first, so each keeps its own parsing.
     let mut json = false;
     let mut rest = Vec::with_capacity(args.len());
@@ -825,12 +825,21 @@ fn tls_cli(args: Vec<String>) -> i32 {
         eprintln!("--public-key and --grade are for --consent only\n{USAGE}");
         return 2;
     }
+    // #800's review, finding 3: `--consent` belongs to `--client` alone. With `--node` (or with neither) it would be
+    // ignored and a node certificate and key written — a mesh identity minted where a public key was meant.
+    if consent && (node.is_some() || client.is_none()) {
+        eprintln!("--consent, --public-key and --grade go with --client <name> --issuer <issuer>, never with --node\n{USAGE}");
+        return 2;
+    }
     match (&node, &client, &issuer) {
         (None, Some(name), Some(iss)) if consent => {
             let (Some(ca_dir), Some(out)) = (ca_dir, out) else { eprintln!("{USAGE}"); return 2; };
             let Some(public_key) = public_key else { eprintln!("--consent needs --public-key <spki.pem>: the developer's P-256 public key, as SPKI PEM"); return 2; };
             let Some(grade) = grade else {
-                eprintln!("--consent needs --grade: one of os_presence(macos, unbound), tty, recording");
+                eprintln!(
+                    "--consent needs --grade: what the enrolment told you about where the key lives — os_presence(macos, unbound), \
+                     tty or recording. You vouch for it, and no node can check it"
+                );
                 return 2;
             };
             return tls_issue_consent(&ca_dir, iss, name, &public_key, &grade, &out, force, json);
@@ -959,7 +968,7 @@ fn tls_issue_consent(ca_dir: &str, issuer: &str, name: &str, public_key: &str, g
         }
         let Some(grade) = mycelium::ConsentGrade::parse(grade) else {
             let why = if grade == "service" { "service is the grade of a service's own key, never a consent grade" } else { "not a consent grade" };
-            eprintln!("--grade {grade:?}: {why}; one of os_presence(macos, unbound), tty, recording");
+            eprintln!("--grade {grade:?}: {why}; one of os_presence(macos, unbound), tty, recording (what the enrolment told you, which you vouch for)");
             return 2;
         };
         let existing = std::path::Path::new(out).join(format!("consent-{issuer}-{name}.cert.pem"));
@@ -983,12 +992,15 @@ fn tls_issue_consent(ca_dir: &str, issuer: &str, name: &str, public_key: &str, g
                 if json {
                     return tls_json(serde_json::json!({
                         "command": "issue", "kind": "consent", "principal": format!("consent:{issuer}/{name}"),
-                        "issuer": issuer, "name": name, "grade": grade.as_str(),
+                        "issuer": issuer, "name": name, "grade": grade.as_str(), "grade_source": "operator",
                         "cert": cert.display().to_string(), "warnings": warnings,
                     }), &[("spki_sha256", &cert)]);
                 }
                 println!("issued {} (no key file: the private key stays on the developer's device)", cert.display());
-                println!("principal consent:{issuer}/{name}, grade {grade}: copy the certificate back to the developer, who publishes it with POST /gateway/identity/client-cert");
+                println!(
+                    "principal consent:{issuer}/{name}: the certificate states grade {grade} as what you were told at enrolment, and you vouch \
+                     for it (no node can check it); copy it back to the developer, who publishes it with POST /gateway/identity/client-cert"
+                );
                 for said in warnings {
                     eprintln!("warning: {said}");
                 }
@@ -1436,7 +1448,40 @@ mod tls_cli_tests {
     /// X9.63, `--public-key`/`--grade` without `--consent`, and an existing `.cert.pem` without `--force` (which then
     /// replaces it). Seen failing first with the `--force` guard keyed on a key file (the second issue replaced the
     /// certificate silently, exit 0).
+    /// **`--consent` goes with `--client` alone** (#800's review, finding 3). `tls issue --node … --consent --public-key
+    /// --grade`, and `--consent` with neither `--node` nor `--client`, are refused before anything is written; the
+    /// plant, the same `--node` issue without the consent flags, writes its node certificate. Seen failing first: the
+    /// `--node` arm ignored the three flags and wrote a node certificate and key, exit 0.
     #[test]
+    fn consent_flags_are_refused_outside_client_before_anything_is_written() {
+        let (ca, out, keys) = (scratch("consent-node-ca"), scratch("consent-node-out"), scratch("consent-node-keys"));
+        assert_eq!(tls_ca(vec!["--out".into(), ca.display().to_string()], false), 0);
+        std::fs::create_dir_all(&keys).unwrap();
+        let pem = keys.join("pub.pem");
+        let kp = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+        std::fs::write(&pem, kp.public_key_pem()).unwrap();
+        let run = |extra: &[&str]| {
+            let mut a: Vec<String> = ["issue", "--ca-dir", &ca.display().to_string(), "--out", &out.display().to_string()].iter().map(|s| s.to_string()).collect();
+            a.extend(extra.iter().map(|s| s.to_string()));
+            tls_cli(a)
+        };
+        let consent = ["--consent", "--public-key", &pem.display().to_string(), "--grade", "tty"].map(str::to_string);
+        let consent: Vec<&str> = consent.iter().map(String::as_str).collect();
+        let mut with_node = vec!["--node", "127.0.0.1:7963"];
+        with_node.extend(&consent);
+        assert_eq!(run(&with_node), 2, "--consent with --node");
+        assert!(!out.exists(), "WRITTEN: --consent with --node issued into --out");
+        let mut alone = vec!["--issuer", "fleet"];
+        alone.extend(&consent);
+        assert_eq!(run(&alone), 2, "--consent with neither --node nor --client");
+        assert!(!out.exists(), "WRITTEN: --consent alone");
+        assert_eq!(run(&["--node", "127.0.0.1:7963"]), 0, "plant: the node issue itself");
+        assert!(out.join("127_0_0_1_7963.cert.pem").exists());
+        let _ = (std::fs::remove_dir_all(&ca), std::fs::remove_dir_all(&out), std::fs::remove_dir_all(&keys));
+    }
+
+    #[test]
+    #[cfg(feature = "provisional-consent-grade")]
     fn the_consent_issue_flow_refuses_by_name_and_needs_force_over_an_existing_certificate() {
         let (ca, out, keys) = (scratch("consent-ca"), scratch("consent-out"), scratch("consent-keys"));
         assert_eq!(tls_ca(vec!["--out".into(), ca.display().to_string()], false), 0);
@@ -1473,6 +1518,7 @@ mod tls_cli_tests {
         assert_eq!(issue(&["--consent", "--public-key", &ed, "--grade", "tty"]), 2, "an Ed25519 SPKI");
         assert_eq!(issue(&["--consent", "--public-key", &raw, "--grade", "tty"]), 2, "raw X9.63");
         assert_eq!(issue(&["--public-key", &good, "--grade", "tty"]), 2, "--public-key and --grade without --consent");
+
         assert!(!cert.exists(), "no refusal wrote a certificate");
         assert_eq!(issue(&["--consent", "--public-key", &good, "--grade", "os_presence(macos, unbound)"]), 0);
         let written: Vec<_> = std::fs::read_dir(&out).unwrap().flatten().map(|e| e.file_name().into_string().unwrap()).collect();

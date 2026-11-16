@@ -15,8 +15,11 @@ Identity-and-lifecycle I7 builds it, and this page covers I7's first PR, the cer
 - **Not when** the key is to sign calls, hold grants or join the mesh: a consent key does none of these (I7's
   [*Not built*](../plans/identity-and-lifecycle.md)).
 - **Not yet in a release.** The grade extension's OID is provisional until the registered IANA Private Enterprise
-  Number arc arrives, and a shipped binary refuses to issue a consent certificate until then
-  ([`CONSENT_GRADE_OID_IS_PROVISIONAL`](../../mycelium-core/src/tls.rs)).
+  Number arc arrives ([`CONSENT_GRADE_OID_IS_PROVISIONAL`](../../mycelium-core/src/tls.rs)). Until then:
+  - a binary built without the test-only feature `provisional-consent-grade` (every shipped binary, example and Docker
+    image) neither issues nor reads a consent certificate. Its fold ignores one and counts it, and its door refuses one
+    (`consent_grade_oid_provisional`);
+  - the release workflow refuses a tag (`scripts/check-release-blockers.sh --release`, `RELEASING.md` § 2).
 
 ## Turn it on
 
@@ -25,8 +28,9 @@ Identity-and-lifecycle I7 builds it, and this page covers I7's first PR, the cer
   `dev` creating the key is a later PR of I7.
 - On the host that holds the fleet CA's key: `mycelium tls issue --ca-dir <dir> --client <name> --consent --public-key
   <spki.pem> --grade <grade> --issuer <issuer> --out <dir> [--force]`
-  ([`tls_issue_consent`](../../src/main.rs)). The grade is one of `os_presence(macos, unbound)`, `tty` or `recording`;
-  `service` is refused. It writes `consent-{issuer}-{name}.cert.pem` and no key file. Issuing over an existing
+  ([`tls_issue_consent`](../../src/main.rs)). The grade is what the enrolment told the operator about where the key
+  lives, and the operator vouches for it: one of `os_presence(macos, unbound)`, `tty` or `recording`; `service` is
+  refused. The flags go with `--client` only: `--consent` with `--node` is refused before anything is written. It writes `consent-{issuer}-{name}.cert.pem` and no key file. Issuing over an existing
   certificate needs `--force`. The issuer is the fleet's
   [`gateway_identity_issuer`](../reference/configuration.md#gateway_identity_issuer), as for a client certificate.
 - Upgrade every node first: an older node never reads a consent certificate, and its door refuses one
@@ -35,7 +39,8 @@ Identity-and-lifecycle I7 builds it, and this page covers I7's first PR, the cer
 - [`persistence`](../reference/configuration.md#persistence): keeps a re-enrolment's supersession across a restart.
 - Publish the certificate with `POST /gateway/identity/client-cert`, the door client certificates use, under
   `identity:write` in a build with `compliance` ([`gw_identity_client_cert`](../../src/agent/http/compliance.rs)). It
-  answers the consent principal, the key as the point's 130 hex digits, and the grade.
+  answers the consent principal, the key as the point's 130 hex digits, and the grade beside `grade_source:
+  "operator"`: the certificate's claim, not something the node checked.
 - `the_consent_issue_flow_refuses_by_name_and_needs_force_over_an_existing_certificate`, in
   [`src/main.rs`](../../src/main.rs), runs the CLI flow.
 
@@ -61,6 +66,8 @@ in [`mycelium-core/src/tls.rs`](../../mycelium-core/src/tls.rs), issues over a p
   `tty` decision may therefore have been made by the agent whose request it approves (I7's B).
 - **No grade, no consent.** A consent certificate with no grade, a grade outside the set, or the grade twice never
   counts.
+- **A key on the curve.** The point must lie on P-256, at issue and at read, so a corrupt public key file can never
+  become a person's newest consent certificate and leave their real key superseded.
 - **The scheme is bound to the key kind.** The consent scheme over an Ed25519 key, the client scheme over a P-256 key,
   and a certificate naming both count as neither.
 - **Its own principal.** A consent certificate supersedes only an older consent key of the same `consent:` principal,

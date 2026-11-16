@@ -164,8 +164,12 @@ pub(super) async fn gw_identity_revoke(
 ///
 /// **A consent certificate** (identity-and-lifecycle I7: `mycelium tls issue --client <name> --consent`, one
 /// `mycelium-consent://{issuer}/{name}` over a P-256 key, with its grade) is published here too, under
-/// `consent:{issuer}/{name}`: `key` is then its point's 130 hex digits and `grade` its grade (`null` for a client
-/// certificate). A newer consent certificate supersedes only the consent principal's earlier key.
+/// `consent:{issuer}/{name}`: `key` is then its point's 130 hex digits and `grade` its grade, with `grade_source:
+/// "operator"` (both `null` for a client certificate). **The grade is the certificate's claim** — what the operator who
+/// ran `tls issue --grade` was told at enrolment and vouches for, signed by the fleet CA — and no node can check it.
+/// A newer consent certificate supersedes only the consent principal's earlier key. While the grade extension's OID
+/// is provisional, a build that is no test build refuses a consent certificate here (`422
+/// consent_grade_oid_provisional`).
 #[cfg(feature = "compliance")]
 pub(super) async fn gw_identity_client_cert(
     State(ctx): State<Arc<HttpCtx>>,
@@ -196,9 +200,12 @@ pub(super) async fn gw_identity_client_cert(
         Ok(p) => {
             // The bearer who published, beside the principal published for (#741's review, item 7).
             let by = caller.as_ref().map(|Extension(c)| c.principal().to_string());
+            // The grade is what the operator who issued the certificate was told at enrolment, and vouches for; no
+            // node can check it (I7, H2; #800's review, finding 6) — so it is answered beside who stated it.
             let grade = p.grade.map(|g| g.as_str());
-            audit_govern(&ctx.agent_ctx, "identity/client-cert", json!({"principal": p.principal, "key": p.key_hex, "grade": grade, "by": by}).to_string());
-            Json(json!({"ok": true, "principal": p.principal, "key": p.key_hex, "grade": grade, "issued_ms": p.issued_ms})).into_response()
+            let grade_source = grade.map(|_| "operator");
+            audit_govern(&ctx.agent_ctx, "identity/client-cert", json!({"principal": p.principal, "key": p.key_hex, "grade": grade, "grade_source": grade_source, "by": by}).to_string());
+            Json(json!({"ok": true, "principal": p.principal, "key": p.key_hex, "grade": grade, "grade_source": grade_source, "issued_ms": p.issued_ms})).into_response()
         }
         Err(e) => {
             let status = match e {

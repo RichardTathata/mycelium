@@ -64,6 +64,11 @@ test-util = []
 # frames (`agent::lock_lifecycle_tests`, `agent::lock_lifecycle_review_tests`). CI's default lib run
 # enables it; nothing shipped does.
 test-frame-filter = ["mycelium-core/test-frame-filter"]
+# Identity-and-lifecycle I7 (#800's review, finding 2): lets a build issue and read consent certificates while the
+# grade extension's OID is provisional (`mycelium-core/provisional-consent-grade`). Only the CI test lines that
+# exercise consent certificates enable it; no example, Docker image or shipped binary does. A shipped node fails
+# closed on such a certificate, and the release workflow refuses a release while the OID is provisional.
+provisional-consent-grade = ["tls", "mycelium-core/provisional-consent-grade"]
 
 # The `fuzz/` directory is its own cargo-fuzz crate; keep it out of any
 # implicit-workspace traversal from this parent manifest.
