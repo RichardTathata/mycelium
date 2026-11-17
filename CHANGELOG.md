@@ -19,6 +19,19 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the log before it launches, the node appends, and the loop reads once. A project scaffolded by 2.40.0 keeps the old
   `fleet.sh`: replace its `start)` case with this release's (`templates/two-domains/fleet.sh`), or remove
   `data/<node>.log` before a restart.
+- **An actor's second call is no longer refused while the evidence journal is being read** (found as a CI flake in
+  `the_shadow_profile_counts_and_holds_nothing`). On a node whose evaluator has a limited rule (`at_most`), every
+  decision asks for the actor's history. Until the journal had been read into the history index — and for good if the
+  journal could not be read — a call under a rule with *no* limit was permitted only while its actor had no decision
+  recorded at that enforcement point, and each later one refused -32031 `authority_not_established`, *the actor's
+  history kept changing while this decision was made on it*. Nothing was changing: the version a permit is admitted
+  at was a constant 0 while no history could be given, so only an actor with nothing recorded matched it. The version
+  is now the actor's own. Limited
+  rules are unchanged: with no history they are not established. Affected: every release since policy over history
+  (post-360 row K), for the length of the journal's read after a start — milliseconds on a small journal, longer on a
+  large one — and permanently under an unreadable journal.
+  - **Check:** on a gateway with one `at_most` rule and one unlimited rule, restart over a large evidence journal and
+    call the unlimited tool twice: both are permitted (the second was refused -32031 before).
 - **A restarted SWIM seed is found again** (#798, #801; the Eve fleet job's `a write at node 1 reaching node 3 …
   within 120000 ms`). A node with no `bootstrap_peers` of its own (a seed) starts its restart with an empty membership
   table and contacts no one. If one probe landed while it was down, its peers held it `Suspect` — and the prober chose
