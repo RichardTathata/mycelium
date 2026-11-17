@@ -990,7 +990,7 @@ fn merge_anchors_seen(
         fresh = m.values().flat_map(|a| a.certs.iter()).map(|c| Arc::clone(&c.der)).collect();
         // Certificates this merge stops keeping (dropped, replaced or capped): their retry bookkeeping goes with them.
         gone = existing.map(|(_, old)| {
-            old.values().flat_map(|a| a.certs.iter()).filter(|c| !fresh.iter().any(|f| *f == c.der)).map(|c| Sha256::digest(&c.der).into()).collect()
+            old.values().flat_map(|a| a.certs.iter()).filter(|c| !fresh.contains(&c.der)).map(|c| Sha256::digest(&c.der).into()).collect()
         }).unwrap_or_default();
         merged_out = Some(m.iter().filter_map(|(k, a)| a.rank().map(|r| (*k, r))).collect());
         if existing.is_none() && m.is_empty() {
