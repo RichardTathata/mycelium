@@ -63,6 +63,7 @@ echo "check-shipped-consent-refusal: gateway_consent_principals refused at start
 printf 'bind_port = %s\nhttp_port = %s\ngateway_identity_issuer = "fleet"\n[[gateway_named_tokens]]\nname = "relay"\ntoken = "relay-secret"\nscopes = ["grant:relay"]\n' "$port" "$http" > "$work/node.toml"
 "$bin" -c "$work/node.toml" > "$work/node.log" 2>&1 &
 node_pid=$!
+echo "check-shipped-consent-refusal: started a node, pid $node_pid, on 127.0.0.1:$port (gateway $http)"
 up=0
 for _ in $(seq 1 100); do
   if curl -fs -o /dev/null "http://127.0.0.1:$http/health"; then up=1; break; fi
@@ -80,6 +81,7 @@ status=$(curl -s -o "$work/answer" -w '%{http_code}' -X POST -H 'Authorization: 
   --data "$body" "http://127.0.0.1:$http/gateway/grants/token%3Afleet%2Fforecaster/r1")
 kill "$node_pid" 2>/dev/null || true
 wait "$node_pid" 2>/dev/null || true
+echo "check-shipped-consent-refusal: stopped the node, pid $node_pid"
 node_pid=""
 if [[ "$status" != "422" ]] || ! grep -q '"consent_grade_oid_provisional"' "$work/answer"; then
   echo "::error::a shipped-configuration node did not refuse a consent principal's grant decision by name (HTTP $status): $(cat "$work/answer")"
