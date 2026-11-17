@@ -871,6 +871,8 @@ export class MyceliumAgent {
     // The requests handed out and not yet cancelled, so a `cancel` event finds its request. Bounded: the oldest go
     // first — a request that old has long been answered.
     const handed = new Map<string, AbortController>();
+    // Ends a declaring stream's reader, which is suspended in a read the generator's `return` would wait behind.
+    const stop = new AbortController();
     // A kind the node serves itself (`protected_kind`: mcp.invoke, skill.invoke, llm.invoke; `served_in_process`:
     // any kind with a receiver on that node) is refused 403 with a JSON body: thrown as ProtectedKindError.
     const refusal = (status: number, body: unknown): Error | undefined => {
@@ -910,7 +912,7 @@ export class MyceliumAgent {
       handed.set(`${req.sender} ${req.nonceHex}`, abort);
       while (handed.size > HANDED_KEPT) handed.delete(handed.keys().next().value as string);
       return { req };
-    }, { refusal });
+    }, { refusal, signal: stop.signal });
     if (!declared) {
       // Read as you ask: a `cancel` event is seen when you next ask for a request.
       for await (const item of items) {
@@ -950,7 +952,7 @@ export class MyceliumAgent {
         if (next.req) yield next.req;
       }
     } finally {
-      await items.return(undefined).catch(() => {});
+      stop.abort();
       await pump.catch(() => {});
     }
   }

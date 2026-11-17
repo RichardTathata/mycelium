@@ -1731,7 +1731,9 @@ restored by copying a snapshot back and touching the file. **Enumerated** (rule 
   `mycelium-py/tests/test_serve_cancel.py` and `mycelium-ts/tests/serve_cancel.test.ts` (four each, against a stub
   node: the parameters, the cancel reaching a held request, an undeclared subscriber seeing it on its next ask, the
   confirmation's body and `409`), and in both live suites a declaring stream served by a real node with a stray
-  confirmation refused (`mycelium-py/tests/live/test_gateway.py`, `mycelium-ts/tests/live/gateway.test.ts`). **What
+  confirmation refused (`mycelium-py/tests/live/test_gateway.py`, `mycelium-ts/tests/live/gateway.test.ts`). The
+  TypeScript live test found what the stub could not: leaving a declaring stream hung, its `return` queued behind the
+  reader's open read; the reader is now aborted (seen failing first against a node, the 5 s test timeout). **What
   the SDK does not do, stated:** it does not stop the caller's work — the declaration is the application's promise,
   made through the SDK, as `stops_when_authority_lapses` is a Rust receiver's.
 - *Lock order*: no new lock; row 46 retired (above); row 55 gains `served_rpc_answered` and the watcher's
