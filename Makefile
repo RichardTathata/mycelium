@@ -185,6 +185,8 @@ check:
 	cargo clippy -p mycelium-gateway-free-tests --all-targets -- -D warnings  # the gateway-free test crate (R8)
 	cargo clippy -p mycelium-tls-free-tests --all-targets -- -D warnings      # the tls-free test crate
 	cargo clippy -p mycelium-model --all-targets -- -D warnings               # the acceptor's model (critique plan CR10)
+	cargo clippy -p mycelium-reason --all-targets -- -D warnings              # CI's Reason job, both lines: a lint in its tests reached CI unseen (#804)
+	cargo clippy -p mycelium-reason --features llm,gateway,ollama,knowledge,compliance --all-targets -- -D warnings
 	cargo clippy --lib --no-default-features --features model-internals -- -D warnings  # …and the module it reaches the engine through
 	cargo check --bin mycelium --features cli,sim                            # the node binary's recording path
 	cargo clippy --lib --features sim -- -D warnings                         # the `sim` arm of the library (the Effects job's `--features sim` clippy builds it; adopter-surface X6)
