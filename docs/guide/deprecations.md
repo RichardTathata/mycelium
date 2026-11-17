@@ -4882,7 +4882,7 @@ Nothing is removed or renamed.
 
 ## 118. A signed grant decision carries a grade; a consent principal decides by its own table; `signed_with` on the record, the envelope and a rule (unreleased, identity-and-lifecycle I7, PR 2)
 
-*Numbered 118 because open pull requests hold §116 (#806) and §117 (#805) at the time of writing.*
+*Numbered 118 because §117 is #805's (merged) and an open pull request holds §116 (#806) at the time of writing.*
 
 §112 built the consent certificate and its principal. This change lets a consent principal **decide**: the node a
 signed grant decision is addressed to verifies a P-256 signature, checks the grade the body names against the
@@ -4941,13 +4941,30 @@ nothing changes** but the additive fields below.
     its path, and a node that never read the newer one — a gateway that joins later, or one rebuilt with an empty
     persistence directory — has the older one as the newest it knows. The entry is the operator's own configuration,
     which no member can write, so **a node never relies on which certificate reached it first**.
-  - **Re-certifying a key at another grade is two deliberate acts**: `tls issue --grade` at the CA, and this field at
-    each gateway that admits the principal. Until a gateway's entry is updated it refuses the re-certified key's
-    decisions (`decision_grade_not_accepted`); that is the intended fail-closed order, and the counter shows it.
-  - **What this does not close.** It binds the *grade*, not the *key*: a node that never read a newer certificate for
-    a **different** key of the same principal, at the grade the entry accepts, still takes the older key as current.
-    That is the supersession residual `sys/client-cert/` already states
-    ([owner-signed records](../wiki/dev/owner-signed-records.md), status *Partly*), unchanged by this entry.
+  - **Re-certifying a key at another grade is two deliberate acts, in this order:**
+    1. **update `signed_with` at each gateway that admits the principal** (a restart: the configuration is read at
+       start);
+    2. **then** re-certify at the CA (`tls issue --grade`) and publish the new certificate.
+
+    Between the two, every gateway refuses the principal's decisions (`decision_grade_not_accepted`: the certificate
+    still carries the old grade). That outage is the fail-closed side, and the counter shows it.
+    **Done the other way round — re-certified first, an entry still naming the old grade — there is a window at that
+    gateway**: a node there that has read the new certificate refuses (the entry disagrees), but a node that never
+    read it and finds only the older certificate at the path — written back by a member, on a gateway that joined
+    late or lost its persistence directory — still admits a decision at the **old** grade, because body, certificate
+    and entry all name it. The window closes when that gateway's entry is updated. So the entry goes first.
+  - **What this does not close.** It binds the *grade*, not the *key*. A node that never read a newer certificate
+    for a **different** key of the same principal, at the grade the entry accepts, takes the older key as current:
+    the supersession residual of `sys/client-cert/` ([owner-signed records](../wiki/dev/owner-signed-records.md),
+    status *Partly*), which is not only a restart without `[persistence]` — a node that **joins late, with
+    `[persistence]`**, and never read the newer record is in the same position.
+    - *What its holder gets:* the holder of a superseded consent key can approve, refuse and revoke grants as that
+      principal, within policy.
+    - *What it needs:* the old private key; the newer record absent from that node's view; and a gateway that joined
+      after, or lost its persistence directory.
+    - *When it ends:* when the newer certificate is read there.
+    - *What an operator can do meanwhile:* **remove or rename the principal's `gateway_consent_principals` entry** at
+      that gateway. With no entry the principal decides nothing there, whichever key signs.
 - **A consent principal never holds a grant.** A decision for a request under a `consent:` holder is refused
   `409 consent_holder`: a consent key proves no possession, so the grant could never be presented.
 - **A policy keyed on `token:` principals does not match a `consent:` decider.** A deployment that admits a developer's

@@ -61,9 +61,12 @@ principal, and the decision. The developer's own tooling (`dev`, the macOS shim,
   ```
 
   `signed_with` is required: the one consent grade this gateway accepts for the principal, the grade its certificate
-  was issued at. **Re-certifying the key at another grade means updating this entry too**, at every gateway that
-  admits the principal — a deliberate act by the gateway's operator, beside the CA operator's `tls issue --grade`.
-  Until then the gateway refuses the re-certified key's decisions (`decision_grade_not_accepted`).
+  was issued at. **Re-certifying the key at another grade is two deliberate acts, in this order**: first update this
+  entry at every gateway that admits the principal, then re-certify at the CA (`tls issue --grade`) and publish.
+  Between the two the gateways refuse the principal's decisions (`decision_grade_not_accepted`), which is the
+  fail-closed side. Done the other way round, a gateway whose entry still names the old grade has a window: one of
+  its nodes that never read the new certificate, and finds only the older one at the path, still admits a decision
+  at the old grade until the entry is updated.
 
   A consent principal's authority comes from this table and never from a named token's, so granting it gives nothing to the same
   person's `token:` principal, and removing the entry revokes the consent principal alone
@@ -134,10 +137,17 @@ and the grade recorded with it.
   operator's configuration, which no member can write. So a node never relies on which certificate reached it
   first: a gateway that joins late, or restarts with an empty persistence directory, and finds only an older
   certificate at a different grade, admits nothing under it.
-- **What that does not cover.** It binds the grade, not the key. A late-joining node that finds only an older
-  certificate for a *different, superseded* key at the accepted grade takes that key as current: the supersession
-  residual of [client certificates](client-certificates.md), which `[persistence]` narrows to a node that has
-  never read the newer certificate.
+- **What that does not cover.** It binds the grade, not the key. A node that never read a newer certificate for a
+  *different, superseded* key at the accepted grade takes that key as current: the supersession residual of
+  [client certificates](client-certificates.md). That is a node restarted without `[persistence]`, and equally a
+  node that joins late, with `[persistence]`, while the newer record is absent from its view.
+  - The holder of a superseded consent key can then approve, refuse and revoke grants as that principal, within
+    policy.
+  - It needs the old private key, the newer record absent from that node's view, and a gateway that joined after,
+    or lost its persistence directory.
+  - It ends when the newer certificate is read there.
+  - Meanwhile an operator can stop it by removing or renaming the principal's `gateway_consent_principals` entry at
+    that gateway.
 - **The grade cannot be altered in transit or by a record.** It is inside the signature, so a relay that rewrites it
   breaks the decision. A body naming a grade other than its certificate's is refused (`decision_grade_mismatch`), and
   one naming none is refused (`decision_grade_missing`). At a node that has read the newer certificate, the grade is

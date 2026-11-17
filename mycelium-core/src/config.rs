@@ -466,7 +466,25 @@ pub struct GatewayNamedToken {
 /// which certificate reached it first. Re-certifying a key at another grade is therefore two deliberate acts by
 /// operators: `tls issue --grade` at the CA, and this field at each gateway.
 ///
-/// `#[non_exhaustive]`: outside this crate, build one with [`GatewayConsentPrincipal::new`].
+/// `#[non_exhaustive]`: outside this crate, build one with [`GatewayConsentPrincipal::new`] and assign what differs,
+/// so a field added later breaks no caller. A struct literal is refused (`docs/guide/deprecations.md` §118).
+///
+/// ```
+/// let mut p = mycelium_core::config::GatewayConsentPrincipal::new("richard", "tty");
+/// p.scopes = vec![];
+/// # let _ = p;
+/// ```
+///
+/// The same entry as a literal does not compile — the twin of the block above, so the error is the literal:
+///
+/// ```compile_fail
+/// let p = mycelium_core::config::GatewayConsentPrincipal { scopes: vec![], ..mycelium_core::config::GatewayConsentPrincipal::new("richard", "tty") };
+/// # let _ = p;
+/// ```
+/// ```compile_fail
+/// let p = mycelium_core::config::GatewayConsentPrincipal { name: "richard".into(), scopes: vec![], signed_with: "tty".into() };
+/// # let _ = p;
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]

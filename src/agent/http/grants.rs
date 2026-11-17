@@ -76,16 +76,20 @@ pub(super) struct GrantDecisionBody {
 /// A signed decision as it was presented, with the bearer that carried it (identity-and-lifecycle I3): kept on the
 /// answer's record and on the evidence record (`signed_decision`), so the decision can be re-verified afterwards
 /// (`SignedDecision::verify_signature`) — #754's review, finding 4.
+///
+/// Its fields are private to this module (#810's confirm round, D): a `Relayed` is built in one place,
+/// [`decision_actor`], from a decision [`grant_decision::verify`](crate::agent::grant_decision::verify) admitted, so
+/// the [`VerifiedDecision`] made from it cannot be assembled anywhere else in the crate.
 pub(crate) struct Relayed {
-    pub(crate) signed: crate::agent::grant_decision::SignedDecision,
+    signed: crate::agent::grant_decision::SignedDecision,
     /// Which key signed it and the grade recorded with it (identity-and-lifecycle I7), as
     /// [`grant_decision::verify`](crate::agent::grant_decision::verify) established them: for a consent key the grade
     /// its certificate carries — the operator's statement, never an observation.
-    pub(crate) signed_with: crate::agent::grant_decision::SignedWith,
-    pub(crate) relay: String,
-    pub(crate) decision: &'static str,
-    pub(crate) ttl_secs: Option<u64>,
-    pub(crate) reason: Option<String>,
+    signed_with: crate::agent::grant_decision::SignedWith,
+    relay: String,
+    decision: &'static str,
+    ttl_secs: Option<u64>,
+    reason: Option<String>,
 }
 
 impl Relayed {
