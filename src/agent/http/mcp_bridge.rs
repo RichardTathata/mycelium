@@ -109,11 +109,14 @@ pub(super) async fn mcp_handler(
             }
 
             // #802: a provider whose caller-context marker this gateway does not yet hold is not yet one it sends to.
-            let Some(provider_node_id) = tool_provider(&ctx.agent_ctx, &name) else {
-                return Json(json!({
-                    "jsonrpc": "2.0", "id": id,
-                    "error": {"code": -32601, "message": format!("tool not found: {name}")},
-                })).into_response();
+            let chosen = tool_provider(&ctx.agent_ctx, &name, gateway_caller::PassedOverDoor::ToolsCall);
+            let Some(provider_node_id) = chosen.node.clone() else {
+                let mut error = json!({"code": -32601, "message": format!("tool not found: {name}")});
+                // #802's review, M2: additive — the advertisement is held, its provider's promise not yet.
+                if let Some(data) = chosen.not_promised_data() {
+                    error["data"] = data;
+                }
+                return Json(json!({ "jsonrpc": "2.0", "id": id, "error": error })).into_response();
             };
 
             // Where a call's time went, kept for the one answer that cannot say why: a dispatch timeout (it named
@@ -341,25 +344,20 @@ pub(crate) static TEST_DISPATCH_TIMEOUT_MS: std::sync::LazyLock<papaya::HashMap<
     std::sync::LazyLock::new(papaya::HashMap::new);
 
 /// **The node `/mcp` sends a call of `tool` to:** the first `tools/{tool}/{node}` record whose provider this gateway
-/// may send to ([`gateway_caller::gateway_sends_to`], #802) — a provider whose caller-context marker has not reached
-/// this gateway is passed over, and with none left the call is answered `tool not found`, as for a tool not yet
-/// advertised. The grant door names the same provider (`grants.rs`), so a grant is asked for where the call will go.
-pub(crate) fn tool_provider(ctx: &crate::agent::TaskCtx, tool: &str) -> Option<crate::node_id::NodeId> {
+/// may send to ([`gateway_caller::first_sendable`], #802) — a provider whose caller-context marker has not reached this
+/// gateway is passed over and counted at `door`, and with none left the call is answered `tool not found`, as for a
+/// tool not yet advertised (with `data.reason` `provider_not_promised` when one was passed over). The grant door names
+/// the same provider (`grants.rs`), so a grant is asked for where the call will go.
+pub(crate) fn tool_provider(
+    ctx: &crate::agent::TaskCtx,
+    tool: &str,
+    door: gateway_caller::PassedOverDoor,
+) -> gateway_caller::Chosen {
     let prefix = format!("tools/{tool}/");
-    let mut passed_over = Vec::new();
-    let chosen = crate::store::scan_kv_prefix(&ctx.kv_state, &prefix).into_iter().find_map(|(key, _)| {
-        let node = key.strip_prefix(&prefix)?.parse::<crate::node_id::NodeId>().ok()?;
-        if gateway_caller::gateway_sends_to(ctx, &node) {
-            Some(node)
-        } else {
-            passed_over.push(node);
-            None
-        }
-    });
-    if !passed_over.is_empty() {
-        tracing::debug!(tool, ?passed_over, "mcp: passed over providers whose caller-context marker this gateway does not hold yet");
-    }
-    chosen
+    let candidates = crate::store::scan_kv_prefix(&ctx.kv_state, &prefix)
+        .into_iter()
+        .filter_map(|(key, _)| key.strip_prefix(&prefix)?.parse::<crate::node_id::NodeId>().ok());
+    gateway_caller::first_sendable(ctx, door, candidates)
 }
 
 /// Test hook: the last dispatch timeout's diagnostics, per gateway node — what the `warn!` logs.

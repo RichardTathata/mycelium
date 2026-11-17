@@ -297,6 +297,8 @@ fn spawn_handler_with(
         #[cfg(feature = "tls")]
         client_key_sinks: papaya::HashMap::new(),
         caller_replay: Default::default(),
+        #[cfg(feature = "gateway")]
+        passed_over: Default::default(),
         #[cfg(feature = "tls")]
         client_replay: Default::default(),
         #[cfg(feature = "tls")]
@@ -4534,6 +4536,8 @@ async fn test_subscribe_notified_via_gossip() {
         #[cfg(feature = "tls")]
         client_key_sinks: papaya::HashMap::new(),
         caller_replay: Default::default(),
+        #[cfg(feature = "gateway")]
+        passed_over: Default::default(),
         #[cfg(feature = "tls")]
         client_replay: Default::default(),
         #[cfg(feature = "tls")]

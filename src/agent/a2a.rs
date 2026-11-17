@@ -643,20 +643,34 @@ fn jsonrpc_ok(id: Option<Value>, result: Value) -> Value {
 }
 
 /// Resolves the first node for `skill_id` ("ns/name") from the live cap/ KV prefix, or says why not.
-fn resolve_skill(ctx: &TaskCtx, skill_id: &str) -> Result<crate::node_id::NodeId, String> {
-    let Some((ns, name)) = skill_id.split_once('/') else { return Err("skill not found".into()) };
+fn resolve_skill(ctx: &TaskCtx, skill_id: &str) -> Result<crate::node_id::NodeId, Unresolved> {
+    let unresolved = |why: String| Unresolved { why, passed_over: 0 };
+    let Some((ns, name)) = skill_id.split_once('/') else { return Err(unresolved("skill not found".into())) };
     if let Some(why) = not_an_a2a_skill(&ctx.kv_state, ns, name) {
-        return Err(why);
+        return Err(unresolved(why));
     }
     let filter = CapFilter::new(ns, name);
     let providers = resolve_providers(ctx, &filter);
     // #802: a provider whose caller-context marker this gateway does not yet hold is not yet one it sends to; with none
-    // left the skill is answered as one nobody advertises, which a client retries.
-    providers
-        .into_iter()
-        .map(|(n, _)| n)
-        .find(|n| gateway_caller::gateway_sends_to(ctx, n))
-        .ok_or_else(|| "skill not found".into())
+    // left the skill is answered as one nobody advertises (with `data.reason` `provider_not_promised` when one was
+    // passed over).
+    let chosen = gateway_caller::first_sendable(ctx, gateway_caller::PassedOverDoor::SkillInvoke, providers.into_iter().map(|(n, _)| n));
+    chosen.node.ok_or(Unresolved { why: "skill not found".into(), passed_over: chosen.passed_over })
+}
+
+/// Why `/a2a` resolved no provider for a skill: the sentence it answers, and how many providers it passed over for want
+/// of their caller-context marker (#802's review, M2).
+#[derive(Debug)]
+struct Unresolved {
+    why: String,
+    passed_over: usize,
+}
+
+impl Unresolved {
+    /// The additive `data` of the answer, when a provider was passed over.
+    fn data(&self) -> Option<Value> {
+        (self.passed_over > 0).then(|| json!({ "reason": gateway_caller::PROVIDER_NOT_PROMISED, "passed_over": self.passed_over }))
+    }
 }
 
 /// The providers `tasks/send` may route to: every *fresh* advertisement matching `filter` — the
@@ -904,7 +918,13 @@ async fn dispatch_send(
 
     let target = match resolve_skill(&state.task_ctx, skill_id) {
         Ok(target) => target,
-        Err(why) => return Err(jsonrpc_error(id, unresolved_skill_code(req.generation), &why)),
+        Err(u) => {
+            let code = unresolved_skill_code(req.generation);
+            return Err(match u.data() {
+                Some(data) => jsonrpc_error_with_data(id, code, &u.why, data),
+                None => jsonrpc_error(id, code, &u.why),
+            });
+        }
     };
 
     // Generous: A2A skills are frequently multi-step LLM pipelines
@@ -1270,8 +1290,10 @@ pub(crate) async fn tasks_send_subscribe(
         let skill_id = req.skill_id.clone();
         let target = match resolve_skill(&state.task_ctx, &skill_id) {
             Ok(target) => target,
-            Err(why) => {
-                send_all(stream_events(&id, &req, Step::Failed { error: Some(why), detail: None })).await;
+            Err(u) => {
+                // #802's review, M2: the stream's `detail` names the transient case.
+                let detail = (u.passed_over > 0).then(|| gateway_caller::PROVIDER_NOT_PROMISED.to_string());
+                send_all(stream_events(&id, &req, Step::Failed { error: Some(u.why), detail })).await;
                 return;
             }
         };
@@ -2036,7 +2058,7 @@ mod tests {
         for id in ["prov-shed/demo:echo:00ff", "artifact/librarian", "tuple/orders.primary", "llm/qwen3"] {
             assert!(resolve_skill(&ctx, id).is_err(), "{id} resolved");
         }
-        assert!(resolve_skill(&ctx, "llm/qwen3").unwrap_err().contains("/gateway/llm/call"));
+        assert!(resolve_skill(&ctx, "llm/qwen3").unwrap_err().why.contains("/gateway/llm/call"));
     }
 
     /// **A crashed provider's advertisement is never tombstoned** — it evaporates at its readers,

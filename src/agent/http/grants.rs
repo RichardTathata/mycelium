@@ -558,8 +558,8 @@ pub(super) async fn gw_grants_stream(State(ctx): State<Arc<HttpCtx>>) -> axum::r
 
 /// The node providing `tool`, as `/mcp` resolves it — the one function, so a grant names the provider the call will be
 /// sent to, a provider whose caller-context marker this gateway does not hold passed over at both (#802).
-fn tool_provider(ctx: &TaskCtx, tool: &str) -> Option<crate::node_id::NodeId> {
-    super::mcp_bridge::tool_provider(ctx, tool)
+fn tool_provider(ctx: &TaskCtx, tool: &str) -> gateway_caller::Chosen {
+    super::mcp_bridge::tool_provider(ctx, tool, gateway_caller::PassedOverDoor::GrantRequest)
 }
 
 /// The most requests one client principal may have standing unanswered at once: past it the door refuses by name
@@ -639,8 +639,14 @@ pub(super) async fn gw_grant_request(
     if standing.len() >= MAX_PENDING_GRANT_REQUESTS_PER_CLIENT {
         return refused(StatusCode::TOO_MANY_REQUESTS, "too_many_pending", format!("{principal} has {} grant requests standing unanswered, the most one client may (MAX_PENDING_GRANT_REQUESTS_PER_CLIENT); wait for an answer or an expiry", standing.len()));
     }
-    let Some(provider) = tool_provider(tc, &body.tool) else {
-        return refused(StatusCode::NOT_FOUND, "no_provider", format!("no node provides {}", body.tool));
+    let chosen = tool_provider(tc, &body.tool);
+    let Some(provider) = chosen.node.clone() else {
+        let mut answer = json!({ "ok": false, "error": "no_provider", "detail": format!("no node provides {}", body.tool) });
+        // #802's review, M2: additive — a provider is advertised, its caller-context marker not yet held here.
+        if let Some(data) = chosen.not_promised_data() {
+            answer["data"] = data;
+        }
+        return (StatusCode::NOT_FOUND, Json(answer)).into_response();
     };
     let window_ms = body.window_secs.unwrap_or(60).clamp(1, 600) * 1_000;
     // The id names the writer: two gateways serving one client tick their own clocks, and the key does not name them.

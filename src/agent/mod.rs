@@ -1152,6 +1152,9 @@ pub(crate) struct TaskCtx {
     /// Post-360 row E: each gateway's recent caller-envelope ids, checked once per received request
     /// (`gateway_caller::verify_received`), so a captured envelope is not served twice.
     pub(crate) caller_replay: gateway_caller::ReplayWindows,
+    /// #802's review, M1: providers a choosing door passed over for want of their caller-context marker, by door.
+    #[cfg(feature = "gateway")]
+    pub(crate) passed_over: gateway_caller::PassedOver,
     /// Identity-and-lifecycle I1: every client key's recent `cn`s, as this provider has received them.
     #[cfg(feature = "tls")]
     pub(crate) client_replay: client_sig::ClientReplayWindows,
@@ -1799,6 +1802,8 @@ impl GossipAgent {
             #[cfg(feature = "tls")]
             client_key_sinks: papaya::HashMap::new(),
             caller_replay: Default::default(),
+            #[cfg(feature = "gateway")]
+            passed_over: Default::default(),
             #[cfg(feature = "tls")]
             client_replay: Default::default(),
             #[cfg(feature = "tls")]

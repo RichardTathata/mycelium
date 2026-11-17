@@ -3,7 +3,8 @@
 //! The marker and a provider's `tools/` or `cap/` entry are separate keys, and gossip does not deliver separate keys in
 //! the order they were written, so a gateway can hold the advertisement first. Until the marker arrives that provider
 //! is not yet one the gateway can send to: every door that chooses a provider passes it over, and with none left the
-//! client is answered the door's own "no provider" — the answer it already retries — never -32021.
+//! client is answered the door's own "no provider" — the answer for a tool or skill nobody advertises, with
+//! `data.reason` `provider_not_promised` where the answer has a data field — never -32021.
 
 use crate::{GossipAgent, GossipConfig, NodeId, RequestPrincipal};
 use std::{sync::{Arc, Mutex}, time::Duration};
@@ -33,6 +34,10 @@ fn node_at(gossip_port: u16, http_port: Option<u16>, boot: Vec<NodeId>) -> Arc<G
 fn plant(at: &GossipAgent, origin: &NodeId, key: &str, value: bytes::Bytes) {
     let upd = crate::framing::make_gossip_update(origin, 5, Arc::from(key), value, false, &at.task_ctx.hlc);
     crate::store::apply_and_notify(&at.task_ctx.kv_state, &upd);
+}
+
+async fn stats(http_port: u16) -> serde_json::Value {
+    reqwest::get(format!("http://127.0.0.1:{http_port}/stats")).await.unwrap().json().await.unwrap()
 }
 
 async fn tools_listed(http_port: u16) -> Vec<String> {
@@ -69,7 +74,7 @@ fn observing_tool(agent: &GossipAgent) -> (crate::McpToolHandle, Arc<Mutex<Optio
 /// **A tool whose provider's marker the gateway does not yet hold is not yet a tool it can send to** — not listed, not
 /// sent — and it is listed and served once the marker arrives. The provider's tool entry reaches the gateway first (planted, as gossip may deliver
 /// it): the client's `tools/call` is answered `-32601 tool not found`, the answer a client gets for a tool not yet
-/// advertised, which it retries — not `-32021 provider_without_caller_context`. Then the provider starts, its marker
+/// advertised (with `data.reason` `provider_not_promised`) — not `-32021 provider_without_caller_context`. Then the provider starts, its marker
 /// reaches the gateway, and the same call is served with the client as the caller. Seen failing first on c50f7bde:
 /// the first call was answered -32021 naming the provider.
 #[tokio::test]
@@ -86,7 +91,12 @@ async fn a_tool_seen_before_its_providers_marker_is_answered_not_found_and_serve
     assert!(!tools_listed(gw_http).await.contains(&"whoami".to_string()), "NOT LISTED: tools/list agrees with tools/call");
     let early = tools_call(gw_http, "whoami").await;
     assert_eq!(early["error"]["code"], -32601, "NOT YET A PROVIDER: the tool's only provider has not been seen to promise: {early}");
-    assert_ne!(early["error"]["data"]["reason"], "provider_without_caller_context", "{early}");
+    assert_eq!(early["error"]["data"]["reason"], "provider_not_promised", "TOLD APART from a tool nobody advertises: {early}");
+    assert_eq!(early["error"]["data"]["passed_over"], 1, "{early}");
+    assert_eq!(stats(gw_http).await["providers_passed_over_unpromised"]["tools/call"], 1, "COUNTED");
+    // A tool nobody advertises keeps its answer unchanged: no data.
+    let absent = tools_call(gw_http, "nobody-serves-this").await;
+    assert!(absent["error"].get("data").is_none(), "{absent}");
 
     let provider = node_at(provider_port, None, vec![gateway.node_id().clone()]);
     provider.start().await.unwrap();
@@ -144,8 +154,11 @@ async fn the_llm_doors_answer_no_provider_for_a_provider_whose_marker_is_not_hel
     let status = call.status().as_u16();
     let v: serde_json::Value = call.json().await.unwrap();
     assert_eq!((status, v["error"].as_str()), (404, Some("no_provider")), "NOT YET A PROVIDER at /gateway/llm/call: {v}");
+    assert_eq!(v["data"]["reason"], "provider_not_promised", "{v}");
     let stream = client.post(format!("http://127.0.0.1:{gw_http}/gateway/llm/stream")).json(&body).send().await.unwrap().text().await.unwrap();
     assert!(stream.contains("\"no_provider\""), "NOT YET A PROVIDER at /gateway/llm/stream: {stream}");
+    assert!(stream.contains("provider_not_promised"), "{stream}");
+    assert_eq!(stats(gw_http).await["providers_passed_over_unpromised"]["llm.invoke"], 2, "COUNTED, once per door call");
     gateway.shutdown().await;
 }
 
@@ -171,8 +184,44 @@ async fn a2a_answers_an_unresolved_skill_for_a_provider_whose_marker_is_not_held
         .send().await.unwrap().text().await.unwrap();
     assert!(answer.contains("skill not found"), "NOT YET A PROVIDER at /a2a: {answer}");
     assert!(!answer.contains("caller context"), "{answer}");
+    assert!(answer.contains("provider_not_promised"), "TOLD APART: {answer}");
+    assert_eq!(stats(gw_http).await["providers_passed_over_unpromised"]["skill.invoke"], 1, "COUNTED");
     // The card agrees with `tasks/send`: a skill whose providers have not been seen to promise is not offered.
     let card: serde_json::Value = reqwest::get(format!("http://127.0.0.1:{gw_http}/.well-known/agent-card.json")).await.unwrap().json().await.unwrap();
     assert!(!card.to_string().contains("depot/dispatch"), "NOT ON THE CARD: {card}");
     gateway.shutdown().await;
+}
+
+/// #804's review, M1: **a provider keeps its own promise visible.** A member tombstones the provider's marker — which
+/// now hides the provider from every choosing door — and the provider writes it back within one re-assertion period
+/// (`gateway_caller::CALLER_CONTEXT_MARKER_REFRESH_MS`, shortened here by `TEST_MARKER_REFRESH_MS`), so the gateway
+/// sends to it again without a restart. Seen failing first with the re-assertion taken out of the ticker: the marker
+/// stayed tombstoned and the tool was answered `-32601`.
+#[tokio::test]
+async fn a_tombstoned_marker_is_restored_by_its_provider_within_a_refresh() {
+    let gw_http = alloc_port();
+    let gateway = node_at(alloc_port(), Some(gw_http), vec![]);
+    gateway.start().await.unwrap();
+    let provider = node_at(alloc_port(), None, vec![gateway.node_id().clone()]);
+    super::super::gateway_caller::TEST_MARKER_REFRESH_MS.pin().insert(provider.node_id().to_string(), 200);
+    provider.start().await.unwrap();
+    let (_tool, _seen) = observing_tool(&provider);
+    let marker = super::super::gateway_caller::marker_key(provider.node_id());
+    let tool_key = format!("tools/whoami/{}", provider.node_id());
+    assert!(poll_until(|| gateway.kv().get(&marker).is_some() && gateway.kv().get(&tool_key).is_some(), Duration::from_secs(15)).await,
+        "the gateway holds the provider's tool and marker");
+    // A member (here the gateway) tombstones the provider's marker, twice: the first tombstone can race the provider's
+    // one-shot publish after its first peer, so only the second is the re-assertion's alone.
+    let mut restored = true;
+    for _ in 0..2 {
+        assert!(gateway.kv().delete(marker.clone()));
+        // Within a few periods, the provider has written it back and the gateway holds it again.
+        restored &= poll_until(|| gateway.kv().get(&marker).is_some(), Duration::from_secs(5)).await;
+    }
+    let body = tools_call(gw_http, "whoami").await;
+    super::super::gateway_caller::TEST_MARKER_REFRESH_MS.pin().remove(&provider.node_id().to_string());
+    provider.shutdown().await;
+    gateway.shutdown().await;
+    assert!(restored, "RESTORED: the provider re-asserted its marker after the tombstone");
+    assert!(body.get("error").is_none(), "SERVED again: {body}");
 }

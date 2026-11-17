@@ -276,6 +276,9 @@ async fn a_client_grant_is_revoked_against_its_issued_resource_with_the_provider
     let (b, ran_b) = started_as(&dir_b, http_b, &Node { certs: certs.clone(), bootstrap: vec![a.node_id().clone()], authority: false, port: Some(port_b) }, true).await;
     let provided = |n: &GossipAgent| crate::store::scan_kv_prefix(&a.task_ctx.kv_state, &format!("tools/{TOOL}/")).iter().any(|(k, _)| k.ends_with(&n.node_id().to_string()));
     assert!(until(|| provided(&b), Duration::from_secs(15)).await, "A learned that B serves the tool");
+    // #804's review, H1: and A holds B's caller-context marker — the grant door chooses B only then (#802), and answers
+    // `404 no_provider` before.
+    assert!(until(|| crate::agent::gateway_caller::gateway_sends_to(&a.task_ctx, b.node_id()), Duration::from_secs(15)).await, "A holds B's marker");
     let _key = forecaster_key_in(&a, &certs, &dir_a.join("client"));
     let args = serde_json::json!({"city": "Brest"});
     let (asked, grant) = ask_and_issue(http_a, &args).await;
@@ -417,6 +420,32 @@ async fn a_principal_without_a_client_certificate_neither_asks_for_nor_is_issued
     let _ = std::fs::remove_dir_all(&dir);
     assert_eq!((status, asked["error"].as_str()), (409, Some("not_a_client_holder")), "ASKED: {asked}");
     assert_eq!((dstatus, decided["error"].as_str()), (409, Some("not_a_member")), "ISSUABLE: {decided}");
+}
+
+/// **The grant door passes over a provider whose caller-context marker this gateway does not hold** (#802; #804's
+/// review, L2): the grant names the provider `/mcp` will send the call to, so the door chooses as `/mcp` does. The tool's
+/// only provider (planted at A, as gossip may deliver it before its marker) is unpromised: the request is answered
+/// `404 no_provider` with `data.reason` `provider_not_promised`, and counted on `/stats` under `grants/request`. Seen
+/// failing first with `grants.rs`'s `tool_provider` reverted to the bare first `tools/` record: `200`, a request naming
+/// the unpromised provider.
+#[tokio::test]
+async fn the_grant_door_passes_over_a_provider_whose_marker_is_not_held() {
+    let dir = scratch("unpromised");
+    let http_port = alloc_port();
+    // A serves no tool of its own: the only `tools/` record is the unpromised provider's.
+    let (a, _ran) = started_as(&dir, http_port, &Node { certs: dir.join("tls"), bootstrap: vec![], authority: true, port: None }, false).await;
+    let _key = forecaster_key(&a, &dir);
+    let unseen = NodeId::new("127.0.0.1", 1).unwrap();
+    let upd = crate::framing::make_gossip_update(&unseen, 5, Arc::from(format!("tools/{TOOL}/{unseen}").as_str()), bytes::Bytes::from_static(b"{}"), false, &a.task_ctx.hlc);
+    crate::store::apply_and_notify(&a.task_ctx.kv_state, &upd);
+    let (status, asked) = http(http_port, "fc-secret", reqwest::Method::POST, "/gateway/grants/request", Some(serde_json::json!({"tool": TOOL, "arguments": {"city": "Sète"}}))).await;
+    let (_, stats) = http(http_port, "fc-secret", reqwest::Method::GET, "/stats", None).await;
+    a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!((status, asked["error"].as_str()), (404, Some("no_provider")), "NOT YET A PROVIDER: {asked}");
+    assert_eq!(asked["data"]["reason"], "provider_not_promised", "{asked}");
+    assert_eq!(asked["data"]["passed_over"], 1, "{asked}");
+    assert_eq!(stats["providers_passed_over_unpromised"]["grants/request"], 1, "COUNTED: {stats}");
 }
 
 /// The holder segment round-trips, and is unambiguous: a node principal is written as it is, a client principal in

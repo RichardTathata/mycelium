@@ -1850,8 +1850,8 @@ async fn a_transient_listener_does_not_end_a_client_serve_stream() {
 /// #802: **a client's route passes over a provider whose caller-context marker the gateway does not hold** — the
 /// provider promises what it enforces by its `sys/caller-context/{node}` marker, and the gateway sends only to a
 /// provider whose promise it has seen. The provider's `llm/m802` advertisement is held at the gateway and its marker is
-/// not (tombstoned there, as a marker still in flight is absent): the route answers `404 no_provider`, which a client
-/// retries, and once the marker is back it is served. Seen failing first on c50f7bde: the route sent, was refused
+/// not (tombstoned there, as a marker still in flight is absent): the route answers `404 no_provider`, the answer for a model
+/// nobody serves, and once the marker is back it is served. Seen failing first on c50f7bde: the route sent, was refused
 /// -32021 `provider_without_caller_context`, and answered the exhausted route.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_client_route_passes_over_a_provider_whose_marker_is_not_held() {

@@ -4712,15 +4712,38 @@ With another provider whose marker it holds, the call goes there instead. **The 
 `tools/list` lists a tool, and the A2A agent card a skill, only when a provider the gateway may send to offers it — so a
 client that waits for a tool to be listed before calling it (a common readiness probe) is ready to call it.
 
+**`data.reason` `provider_not_promised` (additive).** Where the answer has a data field, it now says why when a
+provider was passed over: `/mcp`'s `-32601` gains `error.data = {"reason": "provider_not_promised", "passed_over": n}`,
+`/a2a`'s unresolved skill the same `error.data` (and the stream's failed event `detail` `provider_not_promised`), the LLM
+doors' and the grant door's `404 no_provider` a `data` object of that shape. So a client can tell "the advertisement
+is held, its provider's promise not yet" — transient — from a tool nobody advertises, whose answer is unchanged (no
+`data`). The reason router's `RouteError::NoProvider` carries no data and is unchanged. **The gateway promises only its
+answer: neither SDK retries any of these today, and MCP hosts read `-32601` as permanent** — a client that should ride
+out the gap retries on `provider_not_promised` itself, or waits for the provider's marker first.
+
 **What an adopter sees.** A transient `-32021` (HTTP `412`) right after a provider starts becomes the door's
-no-provider answer, which a client already retries. **Beyond that, one answer changes:** a provider that will
-**never** publish the marker — a node from before the marker (2.5.0), or one whose marker a member tombstoned — is now
-invisible at a choosing door: absent from `tools/list` and the agent card, and `/mcp` answers `tool not found`, `/a2a` `skill not found`, the LLM doors and the reason
-router `no_provider`, where they answered `-32021` / `412` naming the provider. *Check:* an operator who diagnosed a
-stale provider by its `-32021` finds it now by comparing `GET /gateway/kv/keys?prefix=tools/` (or `cap/`) with
-`?prefix=sys/caller-context/`; a debug log at `/mcp` names the providers passed over. Every node of a supported
+no-provider answer, with `data.reason` `provider_not_promised`. **Beyond that, these answers change:**
+
+- A provider that will **never** publish the marker — a node from before the marker (2.5.0) — is now invisible at a
+  choosing door: absent from `tools/list` and the agent card, and `/mcp` answers `tool not found`, `/a2a` `skill not
+  found`, the LLM doors and the reason router `no_provider`, where they answered `-32021` / `412` naming the provider.
+- A marker a member **tombstones** hides its provider the same way, but no longer for good: every node re-asserts its
+  own marker every `CALLER_CONTEXT_MARKER_REFRESH_MS` (60 s; the id marker's ticker), so the provider writes it back
+  within a period (#804's review, M1).
+- **A client that lists once** (`tools/list`, the agent card) during the gap after a provider starts can miss the
+  tool or skill for as long as it does not list again; before, it was listed and answered -32021 until the marker
+  came. Wait for the marker (`?prefix=sys/caller-context/`), or list again.
+- **`/gateway/caps/resolve` is not a choosing door:** it lists every provider it holds, marker or not, so a client that
+  resolves there and then names the target at `/gateway/rpc/call` can still meet a transient `-32021` / `412` — by
+  design for a named target, its message now saying to retry once the marker arrives.
+
+*Check:* every choosing door counts the providers it passed over, by door, on `/stats` as
+`providers_passed_over_unpromised` (`tools/call`, `grants/request`, `skill.invoke`, `llm.invoke`, and `companion` for
+a door that calls `GossipAgent::gateway_note_passed_over`, as the reason router does) and in
+`mycelium_gateway_providers_passed_over_total{door}`; a debug log at each door names the count. To name the provider, compare
+`GET /gateway/kv/keys?prefix=tools/` (or `cap/`) with `?prefix=sys/caller-context/`. Every node of a supported
 release publishes its marker before it advertises work (#794), so in a current fleet this arises only while a
-marker is in flight.
+marker is in flight or after a tombstone.
 
 **What -32021 means now.** No marker value says "does not enforce": a node publishes `"1"` (`MARKER_VERIFIES`) or
 `"2"` (`MARKER_PROMISES_ENVELOPES`), and both promise enforcement. So `-32021` / `412 provider_without_caller_context`
@@ -4733,8 +4756,11 @@ marker, or set gateway_caller_profile = legacy …"* (it said *"does not enforce
 status are unchanged. Under `gateway_caller_profile = legacy` nothing changes: no marker is asked for.
 
 **API (additive):** `GossipAgent::gateway_sends_to(&NodeId) -> bool` (`gateway`) — the predicate the node's doors use,
-for a companion door that chooses among providers before `ServiceHandle::rpc_call_as`.
+for a companion door that chooses among providers before `ServiceHandle::rpc_call_as` — and
+`GossipAgent::gateway_note_passed_over()`, which counts one such provider under `companion`. `mycelium-reason` 0.12.0
+uses both, so it needs a `mycelium` newer than 2.40.0. `/stats` gains `providers_passed_over_unpromised`.
 
-Tests: `src/agent/http/marker_race_tests.rs` (each door, the tool entry delivered before the marker; served once it
-arrives), `a_client_route_passes_over_a_provider_whose_marker_is_not_held` (`mycelium-reason/tests/gateway.rs`),
+Tests: `src/agent/http/marker_race_tests.rs` (each door, the tool entry delivered before the marker, its `data.reason`
+and count; served once it arrives; a tombstoned marker restored by its provider within a period),
+`the_grant_door_passes_over_a_provider_whose_marker_is_not_held` (`src/agent/client_grant_tests.rs`), `a_client_route_passes_over_a_provider_whose_marker_is_not_held` (`mycelium-reason/tests/gateway.rs`),
 `secure_profile_refuses_a_provider_without_the_marker_and_legacy_does_not` (the named target still `412`).

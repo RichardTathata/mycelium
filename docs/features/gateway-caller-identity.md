@@ -50,11 +50,17 @@ one of three questions. The end-to-end run is a test in
   it holds. Gossip can deliver a provider's `tools/` or `cap/` entry before its marker, so until the marker arrives
   that provider is not one to send to: every door that chooses a provider (`/mcp`, the grant door, `/a2a`, the LLM
   doors, the reason router's client routes, through `gateway_sends_to`) passes it over, and with none left answers its
-  own "no provider" (`-32601 tool not found`, `skill not found`, `404 no_provider`), which a client retries;
+  own "no provider" (`-32601 tool not found`, `skill not found`, `404 no_provider`), with `data.reason`
+  `provider_not_promised` and the count passed over where the answer has a data field — the gateway promises only its
+  answer; whether a client retries it is the client's (neither SDK does today);
   `tools/list` and the A2A agent card leave out what no such provider offers, so they agree with the calls. A target
   the client names (`/gateway/rpc/call`, `/gateway/scatter`, `/gateway/overlay/emit_reliable`, `rpc_call_as`) whose
   marker the gateway does not hold is refused `-32021` / HTTP `412 provider_without_caller_context`, naming it — not
-  yet seen, or never (a provider from before the marker). No marker value says "does not enforce". Tests:
+  yet seen, or never (a provider from before the marker). No marker value says "does not enforce". Each node
+  re-asserts its own marker every 60 s, so a member's tombstone of it hides the provider for at most one period, and
+  every choosing door counts the providers it passed over (`/stats` `providers_passed_over_unpromised`, by door).
+  `/gateway/caps/resolve` lists providers whatever their marker, so a client that resolves there and names the target
+  can still meet a transient `-32021`; a client that lists tools once during the gap can miss one. Tests:
   [`marker_race_tests.rs`](../../src/agent/http/marker_race_tests.rs).
 - **Not built:** a provider that never publishes its marker is invisible at a choosing door, not named: its
   advertisement is held and its calls answered "no provider" (§115 says how an operator finds it).

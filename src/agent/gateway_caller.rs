@@ -78,6 +78,8 @@ use bytes::{BufMut, Bytes, BytesMut};
 use serde::{Deserialize, Serialize};
 #[cfg(any(feature = "gateway", feature = "compliance", test))]
 use std::sync::Arc;
+#[cfg(feature = "gateway")]
+use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(any(feature = "gateway", test))]
 use std::time::Duration;
 
@@ -526,14 +528,150 @@ pub(crate) fn provider_enforces_context(ctx: &TaskCtx, node: &NodeId) -> bool {
 /// not yet one it can send to. **Every door that chooses a provider asks this** and passes over a provider it answers
 /// `false` for — `/mcp` `tools/call` and the grant door that names its provider, `/a2a` (send and stream), the LLM doors,
 /// and the reason router's `call_as` (through [`GossipAgent::gateway_sends_to`](crate::GossipAgent::gateway_sends_to))
-/// — so a client whose only provider is unseen is answered the door's own "no provider", which it retries, never
-/// -32021. Under `legacy` there is no envelope to enforce: every provider is one to send to. The dispatch itself
+/// — so a client whose only provider is unseen is answered the door's own "no provider" (with `data.reason`
+/// `provider_not_promised` where the answer has a data field), never -32021. Whether a client retries it is the
+/// client's: neither SDK retries it today. Under `legacy` there is no envelope to enforce: every provider is one to send to. The dispatch itself
 /// ([`gateway_rpc_call_with_mandate`]) still refuses -32021 for a target it does not hold the marker of — a target the
 /// client named (`/gateway/rpc/call`, `/gateway/scatter`, `/gateway/overlay/emit_reliable`,
 /// `ServiceHandle::rpc_call_as`), or one whose marker was withdrawn between the choice and the send.
 #[cfg(any(feature = "gateway", test))]
 pub(crate) fn gateway_sends_to(ctx: &TaskCtx, node: &NodeId) -> bool {
     ctx.config.gateway_caller_profile == crate::config::GatewayCallerProfile::Legacy || provider_enforces_context(ctx, node)
+}
+
+/// `data.reason` of a choosing door's "no provider" answer when it passed over at least one provider whose
+/// caller-context marker it does not hold (#802): the advertisement is held, the promise not yet — a transient case a
+/// client can tell apart from a tool or skill nobody advertises.
+#[cfg(feature = "gateway")]
+pub(crate) const PROVIDER_NOT_PROMISED: &str = "provider_not_promised";
+
+/// What a choosing door found: the first provider it may send to, and how many it passed over before it (#802).
+#[cfg(feature = "gateway")]
+pub(crate) struct Chosen {
+    pub(crate) node: Option<NodeId>,
+    pub(crate) passed_over: usize,
+}
+
+#[cfg(feature = "gateway")]
+impl Chosen {
+    /// The additive `data` of a "no provider" answer: `{reason: provider_not_promised, passed_over}` when a provider
+    /// was passed over, `None` when nothing is advertised at all (the answer then unchanged).
+    pub(crate) fn not_promised_data(&self) -> Option<serde_json::Value> {
+        (self.node.is_none() && self.passed_over > 0)
+            .then(|| serde_json::json!({ "reason": PROVIDER_NOT_PROMISED, "passed_over": self.passed_over }))
+    }
+}
+
+/// **The first of `candidates` this gateway may send to** ([`gateway_sends_to`]), counting at `door` each one passed
+/// over before it ([`PassedOver`], on `/stats` as `providers_passed_over_unpromised`).
+#[cfg(feature = "gateway")]
+pub(crate) fn first_sendable(ctx: &TaskCtx, door: PassedOverDoor, candidates: impl IntoIterator<Item = NodeId>) -> Chosen {
+    let mut passed_over = 0usize;
+    let node = candidates.into_iter().find(|n| {
+        let ok = gateway_sends_to(ctx, n);
+        if !ok {
+            passed_over += 1;
+        }
+        ok
+    });
+    if passed_over > 0 {
+        ctx.passed_over.note(door, passed_over as u64);
+    }
+    Chosen { node, passed_over }
+}
+
+/// The doors that choose a provider for a client's call (#802), each counted apart.
+#[cfg(feature = "gateway")]
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum PassedOverDoor {
+    /// `/mcp` `tools/call`.
+    ToolsCall,
+    /// `POST /gateway/grants/request`, which names the provider `/mcp` will choose.
+    GrantRequest,
+    /// `/a2a` send and stream.
+    SkillInvoke,
+    /// `/gateway/llm/call` and `/gateway/llm/stream`.
+    LlmInvoke,
+    /// A companion's door, through `GossipAgent::gateway_note_passed_over` (the reason router's client routes).
+    Companion,
+}
+
+#[cfg(feature = "gateway")]
+impl PassedOverDoor {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            PassedOverDoor::ToolsCall => "tools/call",
+            PassedOverDoor::GrantRequest => "grants/request",
+            PassedOverDoor::SkillInvoke => "skill.invoke",
+            PassedOverDoor::LlmInvoke => "llm.invoke",
+            PassedOverDoor::Companion => "companion",
+        }
+    }
+}
+
+/// **Providers a choosing door passed over because this gateway does not hold their caller-context marker**, by door
+/// (#802's review, M1): a marker still in flight, a provider from before the marker, or a marker a member tombstoned —
+/// the case that is otherwise silent, since the provider then answers nothing and is listed nowhere. In memory; on
+/// `/stats` as `providers_passed_over_unpromised`, and `mycelium_gateway_providers_passed_over_total{door}`.
+#[cfg(feature = "gateway")]
+#[derive(Default)]
+pub(crate) struct PassedOver {
+    pub(crate) tools_call: AtomicU64,
+    pub(crate) grant_request: AtomicU64,
+    pub(crate) skill_invoke: AtomicU64,
+    pub(crate) llm_invoke: AtomicU64,
+    pub(crate) companion: AtomicU64,
+}
+
+#[cfg(feature = "gateway")]
+impl PassedOver {
+    pub(crate) fn note(&self, door: PassedOverDoor, n: u64) {
+        let slot = match door {
+            PassedOverDoor::ToolsCall => &self.tools_call,
+            PassedOverDoor::GrantRequest => &self.grant_request,
+            PassedOverDoor::SkillInvoke => &self.skill_invoke,
+            PassedOverDoor::LlmInvoke => &self.llm_invoke,
+            PassedOverDoor::Companion => &self.companion,
+        };
+        slot.fetch_add(n, Ordering::Relaxed);
+        #[cfg(feature = "metrics")]
+        metrics::counter!("mycelium_gateway_providers_passed_over_total", "door" => door.label()).increment(n);
+        tracing::debug!(door = door.label(), n, "passed over providers whose caller-context marker this gateway does not hold");
+    }
+
+    /// The `/stats` body: one count per door.
+    pub(crate) fn to_json(&self) -> serde_json::Value {
+        let mut m = serde_json::Map::new();
+        for (door, a) in [
+            (PassedOverDoor::ToolsCall, &self.tools_call),
+            (PassedOverDoor::GrantRequest, &self.grant_request),
+            (PassedOverDoor::SkillInvoke, &self.skill_invoke),
+            (PassedOverDoor::LlmInvoke, &self.llm_invoke),
+            (PassedOverDoor::Companion, &self.companion),
+        ] {
+            m.insert(door.label().into(), serde_json::json!(a.load(Ordering::Relaxed)));
+        }
+        serde_json::Value::Object(m)
+    }
+}
+
+/// How often a node re-asserts its own `sys/caller-context/{self}` marker (#802's review, M1): a member's tombstone of
+/// it — which now hides the node from every choosing door — is written over within one period. The same ticker as the
+/// id marker's (`ID_MARKER_REFRESH_MS`, under `tls`).
+pub(crate) const CALLER_CONTEXT_MARKER_REFRESH_MS: u64 = 60_000;
+
+/// Test hook: a shorter re-assertion period for one node, keyed by its id, read once when its ticker starts.
+#[cfg(test)]
+pub(crate) static TEST_MARKER_REFRESH_MS: std::sync::LazyLock<papaya::HashMap<String, u64>> =
+    std::sync::LazyLock::new(papaya::HashMap::new);
+
+/// The re-assertion period for this node.
+pub(crate) fn marker_refresh_ms(_ctx: &TaskCtx) -> u64 {
+    #[cfg(test)]
+    if let Some(ms) = TEST_MARKER_REFRESH_MS.pin().get(&_ctx.node_id.to_string()) {
+        return *ms;
+    }
+    CALLER_CONTEXT_MARKER_REFRESH_MS
 }
 
 /// Test hook (#802): a provider whose marker one gateway reads as withdrawn **at the send only**, after the door chose
@@ -583,7 +721,7 @@ pub(crate) fn publish_caller_context_marker(ctx: &TaskCtx) {
 
 /// How often a node re-asserts its caller-envelope id marker (post-360 row E).
 #[cfg(feature = "tls")]
-pub(crate) const ID_MARKER_REFRESH_MS: u64 = 60_000;
+pub(crate) const ID_MARKER_REFRESH_MS: u64 = CALLER_CONTEXT_MARKER_REFRESH_MS;
 /// Domain separator for the id marker's signature.
 #[cfg(feature = "tls")]
 const ID_MARKER_SEP: &[u8] = b"mycelium:caller-context-id:v1\n";

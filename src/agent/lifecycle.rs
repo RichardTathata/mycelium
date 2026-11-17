@@ -903,25 +903,31 @@ impl GossipAgent {
                 // Already written by an advertisement, if one came first (#794's review, K2).
                 let _ = key;
                 super::gateway_caller::publish_caller_context_marker(&ctx);
+                // #802's review, M1: the marker now decides whether a gateway chooses this node at all, and any member
+                // can tombstone it. This node keeps its own promise visible: each tick re-asserts it (a no-op while the
+                // store holds this node's value), so a tombstone hides the node for at most one period, not until a
+                // restart.
+                //
                 // Post-360 row E: every envelope this node frames carries an id, so a provider may refuse
                 // an id-less one in this node's name as a replay with the id stripped. The marker is this
                 // node's signed, dated statement, re-asserted so a provider honours it only while it is
                 // fresh; it is never tombstoned — at shutdown it lapses on its own, after this node's last
                 // envelopes can no longer be replayed.
                 #[cfg(feature = "tls")]
-                {
-                    let id_key: Arc<str> = Arc::from(super::gateway_caller::id_marker_key(&ctx.node_id).as_str());
-                    let mut ticker = mycelium_core::sim_seam::interval_ms(
-                        "caller-context-id", super::gateway_caller::ID_MARKER_REFRESH_MS,
-                        tokio::time::MissedTickBehavior::Skip,
-                    );
-                    loop {
-                        tokio::select! { biased;
-                            _ = srx.wait_for(|v| *v) => return,
-                            _ = ticker.tick() => {
-                                if let Some(v) = super::gateway_caller::id_marker_value(&ctx) {
-                                    let _ = kv_set(&ctx, Arc::clone(&id_key), v);
-                                }
+                let id_key: Arc<str> = Arc::from(super::gateway_caller::id_marker_key(&ctx.node_id).as_str());
+                // One ticker for both (ID_MARKER_REFRESH_MS is CALLER_CONTEXT_MARKER_REFRESH_MS, 60 s).
+                let mut ticker = mycelium_core::sim_seam::interval_ms(
+                    "caller-context-id", super::gateway_caller::marker_refresh_ms(&ctx),
+                    tokio::time::MissedTickBehavior::Skip,
+                );
+                loop {
+                    tokio::select! { biased;
+                        _ = srx.wait_for(|v| *v) => return,
+                        _ = ticker.tick() => {
+                            super::gateway_caller::publish_caller_context_marker(&ctx);
+                            #[cfg(feature = "tls")]
+                            if let Some(v) = super::gateway_caller::id_marker_value(&ctx) {
+                                let _ = kv_set(&ctx, Arc::clone(&id_key), v);
                             }
                         }
                     }

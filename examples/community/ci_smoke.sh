@@ -76,7 +76,13 @@ for i in $(seq 1 60); do
     # schemas (4 skills × input+output = 8 keys) — capability convergence
     # alone is not enough, and racing it makes tasks/send flaky.
     schemas=$(kv_count "skills/")
-    [[ "$caps" -ge 4 && "$schemas" -ge 8 ]] && break
+    # …and the gateway holds the caller-context marker of every node it holds a capability of: until then it passes
+    # that provider over (#802), the agent card leaves its skill out and tasks/send answers "skill not found".
+    unpromised=$(curl -sf "$GATEWAY/gateway/kv/keys?prefix=cap/" 2>/dev/null \
+        | MARKERS="$(curl -sf "$GATEWAY/gateway/kv/keys?prefix=sys/caller-context/" 2>/dev/null || echo '{}')" python3 -c \
+            "import os,sys,json; m={k.split('/',2)[2] for k in json.loads(os.environ['MARKERS']).get('keys',[])}; print(len({k.split('/')[1] for k in json.load(sys.stdin).get('keys',[])} - m))" \
+        2>/dev/null || echo 1)
+    [[ "$caps" -ge 4 && "$schemas" -ge 8 && "$unpromised" == 0 ]] && break
     if [[ "$i" == 60 ]]; then
         echo "--- diagnostics ---" >&2
         curl -sf "$GATEWAY/gateway/kv/keys?prefix=skills/" 2>/dev/null >&2 || true
@@ -84,7 +90,7 @@ for i in $(seq 1 60); do
         for l in "$LOG_DIR"/{orchestrator,researcher,writer,verifier}.log; do
             echo "== $l ==" >&2; tail -4 "$l" >&2 2>/dev/null || true
         done
-        fail "cluster did not converge (caps: $caps/4, schemas: $schemas/8)"
+        fail "cluster did not converge (caps: $caps/4, schemas: $schemas/8, nodes without a marker: $unpromised)"
     fi
     sleep 1
 done

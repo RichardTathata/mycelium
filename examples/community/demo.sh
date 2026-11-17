@@ -32,9 +32,13 @@ kv_count() {
 # Count capability keys for one ns/name. Key shape is cap/{node}/{ns}/{name},
 # so the node segment sits between the prefix and the capability — a plain
 # prefix query cannot express it.
+# Only providers whose caller-context marker the gateway holds count: until it does, the gateway passes the provider
+# over (#802), so a provider counted earlier is not yet one it sends to.
 cap_count() {
+    local markers
+    markers=$(curl -sf "http://localhost:9050/gateway/kv/keys?prefix=sys/caller-context/" 2>/dev/null || echo '{}')
     curl -sf "http://localhost:9050/gateway/kv/keys?prefix=cap/" 2>/dev/null \
-        | python3 -c "import sys,json; d=json.load(sys.stdin); print(sum(1 for k in d.get('keys',[]) if k.endswith('/$1')))" 2>/dev/null \
+        | MARKERS="$markers" python3 -c "import os,sys,json; m={k.split('/',2)[2] for k in json.loads(os.environ['MARKERS']).get('keys',[])}; d=json.load(sys.stdin); print(sum(1 for k in d.get('keys',[]) if k.endswith('/$1') and k.split('/')[1] in m))" 2>/dev/null \
         || echo 0
 }
 
