@@ -278,6 +278,7 @@ pub(super) struct ServeCancel {
 /// stream and the stream has not ended (`rpc/respond` naming the stream; or 300 s), and past this window hands it no
 /// further request. Requests then wait in the stream's channel, whose fill the node's admission reads
 /// (`SignalHandlers::fill_ratio`), as for any slow worker.
+#[cfg_attr(not(all(feature = "gateway", feature = "tls")), allow(dead_code))]
 pub(super) const SERVE_WINDOW: usize = 256;
 
 /// A stream's name on the wire: its 128-bit id, 32 hex digits.
