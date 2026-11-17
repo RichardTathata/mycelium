@@ -4879,3 +4879,45 @@ calling it passes `roots_generation()` read before it loaded the client config);
 Nothing is removed or renamed.
 
 *Check:* `grep -rn "record_anchor(" --include='*.rs' .` — every call passes a generation.
+
+## 119. A rule with no limit decides while the evidence journal is being read, and under one that cannot be read; an unreadable journal is logged and counted (unreleased, #811)
+
+*Numbered 119 because open pull requests hold §116 (#806) and §118 (#810) at the time of writing; the sections are in
+order once they merge.*
+
+This applies to a node that has an evidence journal and an evaluator with at least one rule limited over history
+(`at_most`). On such a node every decision asks for the actor's history, which is read from the journal in the
+background from when the evaluator is attached (guide 20, *What the history is*).
+
+**Before.** While the journal was being read, and for as long as the node ran if the journal could not be read, a call
+under a rule with **no** limit was permitted only while its actor had no decision recorded at that enforcement point.
+From the actor's second decision on, each such call was refused `-32031` `authority_not_established` with the reason
+*the actor's history kept changing while this decision was made on it*. Nothing was changing: the version a permit is
+admitted at was a constant 0 whenever no history could be given, and every recorded decision moves an actor's version
+off 0.
+
+**Now.** Those calls are permitted, and each permit is counted into the actor's history, so a limited rule that
+matches the same operation and resource counts it once the history is read. **Rules with a limit are unchanged: with
+no history they are not established**, during the read and under an unreadable journal alike. A limit cannot be passed
+by corrupting the journal; corrupting it turns the limited rules into refusals.
+
+**What an operator of an unreadable journal sees, which is new.** Before, such a node refused nearly everything, with
+a misleading reason. Now it serves every call under an unlimited rule and refuses every limited one, so the refusals
+are no longer what gives it away. Two signals replace them:
+- one `WARN` when the read fails, naming the journal's path and the cause (`the evidence journal could not be read
+  into the actor histories …`);
+- `/stats` gains `evidence_history_unreadable`: `1` from the failed read until the node is restarted over a readable
+  journal; `0` while the journal is being read, once it is read, and on a node with no journal or no limited rule
+  (which never reads it). In memory, per node.
+
+**An evaluator of your own.** `ActionEvaluator`'s contract is that a decision needing history returns `Indeterminate`
+when the history is `Unavailable`; the reference evaluator does. An evaluator that permits on an unavailable history
+against that contract was, by the same accident, held to one permit per actor while no history could be given. It is
+not held now: the door admits what the evaluator permits.
+
+- Test: `a_rule_that_needs_no_history_permits_each_call_when_none_can_be_read`, `an_unreadable_journal_is_counted_on_stats`
+  (`src/agent/http/ae_seam_tests.rs`); `permits_decided_before_the_history_is_read_are_each_admitted`,
+  `permits_admitted_during_the_read_are_counted_once_it_is_read` (`src/agent/evidence_journal.rs`).
+
+*Check:* `curl -s http://NODE:HTTP_PORT/stats | jq .evidence_history_unreadable` — `0` on every node. A `1` means that
+node establishes no limited rule: find the `WARN` naming the journal, repair or replace the file, and restart.

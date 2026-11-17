@@ -747,6 +747,28 @@ fails the step on any such exit rather than retrying around it; a failed test's 
 doctest's has spaces, and `$1` retried `src/lib.rs`, which ran nothing and passed as a flake); and a retry
 passes only if it ran a test. `scripts/test-ci-retest.sh` holds each case.
 
+**A length a test needs is built from a clock, not from work** (2026-11-17). A test that needs an operation to last
+at least so long — so that something else can be seen happening during it — must make it last that long by
+construction. The row D heartbeat test gave its guest 3 000 000 000 units of fuel and asserted the call took 300 ms;
+a runner did it in 298.69 ms. Fuel, iterations and payload sizes are counts, and how long a count takes belongs to
+the machine. The guest now runs until a wall-clock call deadline stops it, and the minimum-length assertion, which is
+what gives the heartbeat assertion its meaning, stayed.
+
+**A script that restarts a process onto the same log empties the log before the launch** (2026-11-17). In
+`cmd > log &` the truncation is the background shell's, done whenever it is scheduled; a poll of `log` that follows
+can read the previous run's readiness line. `templates/two-domains/fleet.sh start` did, and with two reads of the
+file in its loop the second could find it emptied, ending the script under `set -e` with exit 1 and no output. The
+shape that is safe: `: > log` in the foreground, the process appending (`>> log`), and one read per poll whose result
+is what is printed.
+
+**To find who depends on something being fast, make it slow and run everything** (2026-11-17). The history index is
+read from the evidence journal on its own thread; a 3 s sleep planted in `HistoryIndex::load` and run over the whole
+lib suite named, beside the test that had flaked, one more that called a limited rule before the read had finished.
+Reading the tests would have taken longer and missed it. **Run the plant more than once:** a second test failed under
+it only some of the time (a 25 ms poll for a state that lasts until the owner's next tick), passed in the author's one
+run and was found by the reviewer's. One run enumerates what the plant breaks every time, and no more. Restore a
+plant by copying the snapshot back and touching the file.
+
 ## A client deadline below the server's budget is a defect, not a flake
 
 "Never fix a flake by widening a timeout" (above) has a sharp exception that is easy to

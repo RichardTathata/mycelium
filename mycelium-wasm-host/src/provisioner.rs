@@ -2272,13 +2272,20 @@ mod tests {
     /// its whole duration; a heartbeat task sleeping 10 ms at a time must keep beating while the
     /// call runs. Seen failing first: the heartbeat's longest gap equalled the call
     /// (`the heartbeat stalled for …` with the gap ≈ the call's duration).
+    ///
+    /// **The call is long by construction.** The guest spins until the host's wall-clock deadline
+    /// stops it, and a deadline of `d` is never reached before `d` has passed (`EPOCH_TICK`: the
+    /// ticker sleeps at least a tick between epochs, and the deadline is `ceil(d / tick) + 1` of
+    /// them), so the call lasts at least `LONG` on any machine. It used to end when a fuel budget
+    /// ran out, which is a count of instructions, not a time: a fast runner burned 3 000 000 000
+    /// units in 298.7 ms and the minimum-length assertion below failed (CI run 44085801848). Seen
+    /// failing first with a budget of 1 000 000: `the call was too short to show anything: 2.28 ms`.
     #[tokio::test]
     async fn a_long_guest_call_does_not_block_another_task_on_a_current_thread_runtime() {
-        // A budget the spin guest takes a good fraction of a second to burn through.
-        const LONG: u64 = 3_000_000_000;
-        // Review finding 4: no deadline on this host, so the fuel budget alone ends the call — the
-        // test does not race a 5 s default it never meant to measure.
-        let (agent, _host, _prov) = hosting_spin(WasmHost::metered().expect("engine").with_call_deadline(None), Some(LONG)).await;
+        // How long the guest runs: the deadline, twice the minimum asserted below.
+        const LONG: Duration = Duration::from_millis(600);
+        // Unmetered, so nothing but the deadline ends the call.
+        let (agent, _host, _prov) = hosting_spin(WasmHost::new().expect("engine").with_call_deadline(Some(LONG)), None).await;
 
         let beating = Arc::new(std::sync::atomic::AtomicBool::new(true));
         let longest_gap = Arc::new(std::sync::Mutex::new(Duration::ZERO));
@@ -2300,7 +2307,7 @@ mod tests {
         let call = started.elapsed();
         beating.store(false, std::sync::atomic::Ordering::Relaxed);
         heartbeat.await.unwrap();
-        assert!(reply.contains("fuel exhausted"), "{reply}");
+        assert!(reply.contains("deadline exceeded"), "the deadline, and nothing else, ended the call: {reply}");
         assert!(call >= Duration::from_millis(300), "the call was too short to show anything: {call:?}");
         let gap = *longest_gap.lock().unwrap();
         assert!(gap < Duration::from_millis(200), "the heartbeat stalled for {gap:?} during a {call:?} guest call");

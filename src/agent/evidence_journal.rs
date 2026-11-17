@@ -423,7 +423,18 @@ impl HistoryIndex {
         };
         let mut state = self.lock();
         match outcome {
-            Err(why) => state.load = Load::Unreadable(why),
+            Err(why) => {
+                // Said once, and counted (`evidence_history_unreadable` on `/stats`): from here every limited rule
+                // at this point is not established for as long as the node runs, and the reason on those refusals
+                // would otherwise be the only place an operator could learn why.
+                tracing::warn!(
+                    journal = %self.journal.display(),
+                    cause = %why,
+                    "the evidence journal could not be read into the actor histories: every rule with a limit over \
+                     history is not established at this node until it is restarted over a readable journal"
+                );
+                state.load = Load::Unreadable(why);
+            }
             Ok(()) => {
                 let pending = std::mem::take(&mut state.pending_executions);
                 for (key, history) in loaded.actors {
@@ -455,6 +466,12 @@ impl HistoryIndex {
         }
     }
 
+    /// Whether the journal's read ended unreadable: no history is established at this point, and will not be.
+    /// What `/stats` shows as `evidence_history_unreadable`.
+    pub(crate) fn unreadable(&self) -> bool {
+        matches!(self.lock().load, Load::Unreadable(_))
+    }
+
     /// The actor's stripe: hold it from reading the view to admitting the permit.
     pub(crate) fn gate(&self, actor: &str) -> &tokio::sync::Mutex<()> {
         use std::hash::{Hash, Hasher};
@@ -465,17 +482,26 @@ impl HistoryIndex {
 
     /// The actor's history at `point` for `request` as of `now_ms`, and the version a permit decided on it is
     /// admitted at.
+    ///
+    /// **The version is the actor's own even when no history can be given.** While the journal is being read, or
+    /// when it could not be, a rule that needs the history is not established and nothing is admitted; a rule that
+    /// needs none still permits, and that permit is admitted — into the actor's entries, which moves its version, as
+    /// does every decision recorded for it. The version returned with an unavailable history used to be a constant
+    /// 0, so a permit was admitted only for an actor with nothing recorded yet (0 is a new actor's version) and
+    /// every later one was refused, after three tries, as *the actor's history kept changing*: until the read
+    /// finished, or for good under an unreadable journal.
     pub(crate) fn view(&self, point: &str, actor: &str, request: HistoryRequest, now_ms: u64) -> (History, u64) {
         let state = self.lock();
-        match &state.load {
-            Load::Loaded => {}
-            Load::Unreadable(why) => return (History::Unavailable(why.clone()), 0),
-            Load::NotStarted | Load::Loading => {
-                return (History::Unavailable("the history is still being read from the evidence journal".into()), 0)
-            }
+        let key = (point.to_string(), actor.to_string());
+        let unavailable = match &state.load {
+            Load::Loaded => None,
+            Load::Unreadable(why) => Some(why.clone()),
+            Load::NotStarted | Load::Loading => Some("the history is still being read from the evidence journal".into()),
+        };
+        if let Some(why) = unavailable {
+            return (History::Unavailable(why), state.actors.get(&key).map_or(0, |h| h.version));
         }
         let from = now_ms.saturating_sub(request.window_ms);
-        let key = (point.to_string(), actor.to_string());
         let (in_window, forgotten, version): (Vec<&HistoryEntry>, Option<u64>, u64) = match state.actors.get(&key) {
             // Everything after the window's start — a record stamped after `now_ms` is one more, not none.
             Some(h) => (h.entries.iter().filter(|e| e.at_ms > from).collect(), h.forgotten_through_ms, h.version),
@@ -648,6 +674,54 @@ mod history_tests {
         let j = EvidenceJournal::open(temp_journal("unread"), EvidenceProfile::Strict).unwrap();
         let (h, _) = HistoryIndex::new(&j).view(GW, "alice", request(), 10_000);
         assert!(matches!(h, History::Unavailable(ref why) if why.contains("still being read")), "{h:?}");
+    }
+
+    /// A permit decided with no history to give — a rule that asked for none — is admitted, and so is the actor's
+    /// next: the version that comes with an unavailable history is the actor's own. Seen failing first with the
+    /// constant 0 it used to be: the second permit was not admitted, and at a door the call was refused as *the
+    /// actor's history kept changing* (the flake in `the_shadow_profile_counts_and_holds_nothing`, CI run
+    /// 44085801848, whenever the journal's read outlasted an actor's first two calls).
+    #[tokio::test]
+    async fn permits_decided_before_the_history_is_read_are_each_admitted() {
+        let permit = |attempt: &str| entry_of(&record("alice", attempt, 9_000, Verdict::Permit));
+        let unread = HistoryIndex::new(&EvidenceJournal::open(temp_journal("unread-admit"), EvidenceProfile::Strict).unwrap());
+        let path = temp_journal("unreadable-admit");
+        let j = EvidenceJournal::open(&path, EvidenceProfile::Strict).unwrap();
+        j.append(b"not an evidence record".to_vec()).await.unwrap();
+        let unreadable = HistoryIndex::new(&j);
+        unreadable.load(10_000);
+        for (state, index) in [("still being read", unread), ("unreadable", unreadable)] {
+            for attempt in ["a1", "a2", "a3"] {
+                let (h, version) = index.view(GW, "alice", request(), 10_000);
+                assert!(matches!(h, History::Unavailable(_)), "{state}: {h:?}");
+                assert!(index.admit(GW, "alice", version, permit(attempt)), "{state}: permit {attempt} was not admitted at the version its view gave");
+            }
+            // The version still guards: a permit decided before another was admitted is not.
+            let (_, stale) = index.view(GW, "alice", request(), 10_000);
+            assert!(index.admit(GW, "alice", stale, permit("a4")));
+            assert!(!index.admit(GW, "alice", stale, permit("a5")), "{state}: a permit decided on a superseded view was admitted");
+        }
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// What was admitted while the journal was being read is in the history once it is: the read merges under it.
+    /// Two permits, because the first was always admitted; seen failing first, with the version of an unavailable
+    /// history put back to 0, at the second (#811's review, finding 2).
+    #[tokio::test]
+    async fn permits_admitted_during_the_read_are_counted_once_it_is_read() {
+        let path = temp_journal("admit-then-load");
+        let j = EvidenceJournal::open(&path, EvidenceProfile::Strict).unwrap();
+        j.append(serde_json::to_vec(&record("alice", "old", 8_000, Verdict::Permit)).unwrap()).await.unwrap();
+        let index = HistoryIndex::new(&j);
+        for (attempt, at_ms) in [("live-1", 9_000), ("live-2", 9_500)] {
+            let (_, version) = index.view(GW, "alice", request(), 10_000);
+            assert!(index.admit(GW, "alice", version, entry_of(&record("alice", attempt, at_ms, Verdict::Permit))), "{attempt} was not admitted during the read");
+        }
+        index.load(10_000);
+        let v = view(index.view(GW, "alice", request(), 10_000).0);
+        let attempts: Vec<&str> = v.entries.iter().map(|e| e.attempt_id.as_str()).collect();
+        assert_eq!(attempts, ["old", "live-1", "live-2"], "the journal's record and both permits admitted during the read");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
     #[tokio::test]

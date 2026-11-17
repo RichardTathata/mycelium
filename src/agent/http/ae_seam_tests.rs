@@ -659,6 +659,18 @@ async fn at_most_three_posts_in_ten_minutes_counted_at_this_gateway() {
         }
         agent.with_action_evaluator(Arc::new(policy));
         agent.start().await.unwrap();
+        // The history is read from the journal on a thread of its own, started when the evaluator was attached;
+        // until it has been, a rule with a limit is *not established* (-32031), which is not what this test is
+        // about. Seen failing first with the read slowed by 3 s: "post 0 is within the limit: … history not
+        // established: the history is still being read from the evidence journal".
+        let ctx = Arc::clone(&agent.task_ctx);
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while !ctx.history_index.get().is_some_and(|i| {
+            matches!(i.view("gateway", "probe", crate::HistoryRequest { window_ms: 1, max_entries: 1 }, 1).0, crate::History::View(_))
+        }) {
+            assert!(std::time::Instant::now() < deadline, "the history index was never read");
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
         let runs = Arc::new(AtomicUsize::new(0));
         let mut handles = Vec::new();
         for tool in ["post", "burst"] {
@@ -676,6 +688,9 @@ async fn at_most_three_posts_in_ten_minutes_counted_at_this_gateway() {
     };
 
     let (agent, runs, handles) = start().await;
+    let stats: serde_json::Value =
+        reqwest::Client::new().get(format!("http://127.0.0.1:{http_port}/stats")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(stats["evidence_history_unreadable"], 0, "a journal that was read is not counted unreadable");
     for i in 0..3 {
         let r = tools_call(http_port, "post", serde_json::json!({})).await;
         assert!(r.get("error").is_none(), "post {i} is within the limit: {r}");
@@ -727,6 +742,124 @@ async fn at_most_three_posts_in_ten_minutes_counted_at_this_gateway() {
     assert_eq!(runs.load(Ordering::SeqCst), 0);
 
     drop(handles);
+    agent.shutdown().await;
+    let _ = std::fs::remove_dir_all(&cert_dir);
+    let _ = std::fs::remove_dir_all(journal_path.parent().unwrap());
+}
+
+/// **With no history to decide on, a rule that needs none still decides — every time** (post-360 row K). The
+/// journal here cannot be read, so the actor's history is unavailable for as long as the node runs: the limited
+/// tool is not established (fail closed, unchanged), and the unlimited one is permitted on each call.
+///
+/// Seen failing first: the unlimited tool's first call here was refused as *the actor's history kept changing while
+/// this decision was made on it*. Nothing was changing — the view of an unavailable history carried version 0
+/// whatever the actor's was, so once anything was recorded for the actor (here the limited call's refusal) no
+/// permit could be admitted. The same happened between a node's start and the end of its journal's read, which
+/// is how it reached CI as a flake.
+#[tokio::test]
+async fn a_rule_that_needs_no_history_permits_each_call_when_none_can_be_read() {
+    use super::super::action_evaluator::PreflightRefusal;
+    use super::super::evidence_journal::{EvidenceJournal, EvidenceProfile};
+    use super::{ae_preflight, Preflight};
+
+    let port = alloc_port();
+    let journal_path = std::env::temp_dir().join(format!("ae-unread-history-{port}")).join("evidence.log");
+    let _ = std::fs::remove_dir_all(journal_path.parent().unwrap());
+    let journal = EvidenceJournal::open(&journal_path, EvidenceProfile::Strict).unwrap();
+    journal.append(b"not an evidence record".to_vec()).await.unwrap();
+
+    let mut cfg = GossipConfig::default();
+    cfg.bind_port = port;
+    let agent = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg));
+    agent.with_evidence_journal(journal);
+    agent.with_action_evaluator(Arc::new(
+        ReferenceEvaluator::new("rev-k")
+            .with_catalogue("cat-k", "1")
+            .map_action("tools/call", "tool:plain")
+            .map_action("tools/call", "tool:limited")
+            .allow(Rule::new(crate::PRINCIPAL_ANONYMOUS, "tools/call", "tool:plain"))
+            .allow(Rule::new(crate::PRINCIPAL_ANONYMOUS, "tools/call", "tool:limited").at_most(3, 600_000)),
+    ));
+    agent.start().await.unwrap();
+    let call = |resource: &'static str| {
+        let ctx = Arc::clone(&agent.task_ctx);
+        async move { ae_preflight(&ctx, None, "tools/call", resource, &serde_json::json!({}), &serde_json::json!({}), "gateway:mcp/tools/call").await }
+    };
+    let said = |p: &Preflight| match p {
+        Preflight::Inert => "inert".to_string(),
+        Preflight::Proceed { evidence, .. } => format!("proceed ({})", evidence.reason),
+        Preflight::Refuse(r) => format!("refused: {r}"),
+    };
+
+    // The read ends unreadable; until it has, the history is unavailable as well, so no wait is needed for that.
+    let limited = call("tool:limited").await;
+    assert!(
+        matches!(&limited, Preflight::Refuse(PreflightRefusal::NotEstablished(d)) if d.errors.iter().any(|e| e.contains("history not established"))),
+        "a limit with no history to count in is not established: {}",
+        said(&limited)
+    );
+    for i in 1..=4 {
+        let p = call("tool:plain").await;
+        assert!(matches!(p, Preflight::Proceed { .. }), "call {i} under a rule that asks for no history: {}", said(&p));
+    }
+    let limited = call("tool:limited").await;
+    assert!(matches!(&limited, Preflight::Refuse(PreflightRefusal::NotEstablished(_))), "still not established: {}", said(&limited));
+
+    agent.shutdown().await;
+    let _ = std::fs::remove_dir_all(journal_path.parent().unwrap());
+}
+
+/// **An unreadable journal is said on `/stats`** (#811's review, finding 3). A node whose journal cannot be read
+/// into the actor histories keeps serving: rules with no limit decide, rules with a limit are not established. The
+/// gauge `evidence_history_unreadable` is what tells an operator, beside the one warning in the log; it is 0 on a
+/// node whose journal was read (`at_most_three_posts_in_ten_minutes_counted_at_this_gateway` asserts that).
+/// Seen failing first with the gauge reading a constant 0: "the gauge never read 1".
+#[tokio::test]
+async fn an_unreadable_journal_is_counted_on_stats() {
+    use super::super::evidence_journal::{EvidenceJournal, EvidenceProfile};
+
+    let gossip_port = alloc_port();
+    let http_port = alloc_port();
+    let cert_dir = std::env::temp_dir().join(format!("ae-unread-stats-{http_port}"));
+    let journal_path = std::env::temp_dir().join(format!("ae-unread-stats-journal-{http_port}")).join("evidence.log");
+    let _ = std::fs::remove_dir_all(&cert_dir);
+    let _ = std::fs::remove_dir_all(journal_path.parent().unwrap());
+    let journal = EvidenceJournal::open(&journal_path, EvidenceProfile::Strict).unwrap();
+    journal.append(b"not an evidence record".to_vec()).await.unwrap();
+
+    let mut cfg = GossipConfig::default();
+    cfg.bind_port = gossip_port;
+    cfg.http_port = Some(http_port);
+    cfg.tls = Some({
+        let mut tls = crate::TlsConfig::default();
+        tls.auto_cert_dir = cert_dir.clone();
+        tls
+    });
+    let agent = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", gossip_port).unwrap(), cfg));
+    agent.with_evidence_journal(journal);
+    agent.with_action_evaluator(Arc::new(
+        ReferenceEvaluator::new("rev-k")
+            .with_catalogue("cat-k", "1")
+            .map_action("tools/call", "tool:limited")
+            .allow(Rule::new(crate::PRINCIPAL_ANONYMOUS, "tools/call", "tool:limited").at_most(3, 600_000)),
+    ));
+    agent.start().await.unwrap();
+
+    // The read ends unreadable and stays so: a state that does not revert, so a poll cannot miss it.
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    let mut last = serde_json::Value::Null;
+    loop {
+        if let Ok(resp) = reqwest::Client::new().get(format!("http://127.0.0.1:{http_port}/stats")).send().await {
+            let stats: serde_json::Value = resp.json().await.unwrap();
+            last = stats["evidence_history_unreadable"].clone();
+            if last == 1 {
+                break;
+            }
+        }
+        assert!(std::time::Instant::now() < deadline, "the gauge never read 1 over an unreadable journal: {last}");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
     agent.shutdown().await;
     let _ = std::fs::remove_dir_all(&cert_dir);
     let _ = std::fs::remove_dir_all(journal_path.parent().unwrap());
