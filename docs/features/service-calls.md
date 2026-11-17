@@ -32,6 +32,16 @@ This feature is turned on in code, through `agent.service()`.
   cancellable rule is served only to a receiver that has declared it, and refused `door_cannot_stop` otherwise
   ([provider enforcement](provider-enforcement.md); [§110](../guide/deprecations.md)). Its stop is recorded as
   confirmed — its own promise — even when the node counts its answer as late (`rpc_rx_answered_after_lapse`).
+- On the SDK serve stream, `GET /gateway/rpc/serve/{kind}?stops_on_cancel=true` (`rpc_serve(kind, stops_on_cancel=True)`,
+  `rpcServe(kind, { stopsOnCancel: true })`): the subscriber declares that it stops a call on its `cancel` event — its
+  own promise, as `stops_when_authority_lapses` is a receiver's — and is then served a call under a cancellable rule.
+  When a streamed call's authority lapses the node stops waiting: the requester is answered `cancelled`, a stream that
+  reads them (`cancel_events=true`, which both SDKs send) gets a `cancel` event naming the request (the request's
+  `cancelled` / `signal`), and a later answer is discarded (`{"ok": true, "cancelled": true}`). The subscriber's
+  `POST /gateway/rpc/respond` with `"stopped": true` (`rpc_confirm_stopped`, `rpcConfirmStopped`) is the only thing a
+  confirmed stop is recorded on; `409 not_cancelled` for a call the node did not cancel
+  ([provider enforcement](provider-enforcement.md); [§116](../guide/deprecations.md)). A declaring SDK stream is read
+  beside its caller, so requests not yet taken wait in the SDK's memory.
 - [`scatter_gather`](../../src/agent/service_handle.rs): the targets, the kind, the payload, a timeout and `min_ok`. Any
   reply counts toward `min_ok`, a provider's refusal body included, and a target listed twice is called twice and can
   count twice; with `min_ok = 0` it returns at the first reply, or, if none comes, `Ok` of nothing once every call has

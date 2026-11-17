@@ -296,7 +296,19 @@ fn refuse_bridged(
     rpc_respond_ctx(ctx, req, Bytes::from(refusal.jsonrpc_body(&rpc_req["id"])));
 }
 
-/// Forward an admitted bridged call to the external MCP server and answer with its reply.
+/// How long the node waits on the bridged server to take its `notifications/cancelled` (identity-and-lifecycle I4, PR
+/// 3b). It is sent on a task of its own, so the loop never waits on it; nothing is read from the answer.
+#[cfg(feature = "gateway")]
+const BRIDGED_CANCEL_NOTIFY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Forward an admitted bridged call to the external MCP server and answer with its reply — **or, if `stop` resolves
+/// first, the node's own stop** (identity-and-lifecycle I4, PR 3b; the maintainer's decision (C) of 2026-11-16). `stop`
+/// resolves when the call's authority lapses (the caller's mandate, or the gateway cancelled the call). The node then
+/// promises only its own behaviour: it stops waiting for the forward (the request's future is dropped, so a late reply
+/// is never read, never answered), answers the requester `cancelled` (`data.reason` `cancelled`, `data.door`
+/// `bridged_mcp`), and sends the server `notifications/cancelled` for the request's id. It promises nothing about the
+/// work in the server, which made no promise through the node: the call's registration is unconfirmed, so a cancel's
+/// receipt says `Unbounded`. A call under a cancellable rule never gets here (`door_cannot_stop`, `bridged_mcp`).
 #[cfg(feature = "gateway")]
 async fn forward_bridged(
     ctx: &Arc<TaskCtx>,
@@ -304,6 +316,7 @@ async fn forward_bridged(
     server_url: &str,
     req: &RpcRequest,
     rpc_req: &serde_json::Value,
+    stop: impl std::future::Future<Output = ()>,
 ) {
     let call_req = json!({
         "jsonrpc": "2.0",
@@ -311,14 +324,38 @@ async fn forward_bridged(
         "method": "tools/call",
         "params": {"name": rpc_req["params"]["name"], "arguments": decided_arguments(rpc_req)},
     });
-    let response: serde_json::Value = match http_client.post(server_url).json(&call_req).send().await {
-        Ok(resp) => match resp.json().await {
-            Ok(v) => v,
+    let forward = async {
+        match http_client.post(server_url).json(&call_req).send().await {
+            Ok(resp) => match resp.json().await {
+                Ok(v) => v,
+                Err(e) => json!({"jsonrpc":"2.0","id":rpc_req["id"],
+                                 "error":{"code":-32603,"message":e.to_string()}}),
+            },
             Err(e) => json!({"jsonrpc":"2.0","id":rpc_req["id"],
-                             "error":{"code":-32603,"message":e.to_string()}}),
-        },
-        Err(e) => json!({"jsonrpc":"2.0","id":rpc_req["id"],
-                         "error":{"code":-32000,"message":e.to_string()}}),
+                             "error":{"code":-32000,"message":e.to_string()}}),
+        }
+    };
+    let response: serde_json::Value = tokio::select! { biased;
+        response = forward => response,
+        _ = stop => {
+            let answer = json!({"jsonrpc": "2.0", "id": rpc_req["id"], "error": {
+                "code": -32603,
+                "message": "cancelled: the call's authority lapsed while it ran; this node stopped waiting for the bridged server and discards its reply",
+                "data": {"reason": "cancelled", "door": "bridged_mcp"},
+            }});
+            rpc_respond_ctx(ctx, req, Bytes::from(answer.to_string().into_bytes()));
+            #[cfg(feature = "tls")]
+            super::provider_enforcement::count_door_stop(ctx, "bridged_mcp");
+            let notice = json!({"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {
+                "requestId": rpc_req["id"],
+                "reason": "the call's authority lapsed",
+            }});
+            let (client, url) = (http_client.clone(), server_url.to_string());
+            ctx.spawn_task(async move {
+                let _ = client.post(url).timeout(BRIDGED_CANCEL_NOTIFY_TIMEOUT).json(&notice).send().await;
+            });
+            return;
+        }
     };
     rpc_respond_ctx(ctx, req, Bytes::from(as_tool_answer(response, &rpc_req["id"]).to_string().into_bytes()));
 }
@@ -391,7 +428,7 @@ pub(super) async fn run_mcp_client_task(
                 _ = await_shutdown(&mut shutdown_rx) => break,
                 Some(((req, rpc_req), checked)) = pending.next(), if !pending.is_empty() => {
                     match checked {
-                        Ok(_admission) => forward_bridged(&ctx, &http_client, &server_url, &req, &rpc_req).await,
+                        Ok(admission) => forward_bridged(&ctx, &http_client, &server_url, &req, &rpc_req, admission.stop_asked()).await,
                         Err(refusal) => refuse_bridged(&ctx, &req, &rpc_req, &refusal),
                     }
                     continue;
@@ -449,14 +486,14 @@ pub(super) async fn run_mcp_client_task(
         // Closure plan C3: the bridged external server is protected at this node's boundary.
         #[cfg(all(feature = "gateway", feature = "tls"))]
         match super::provider_enforcement::check(&ctx, &req, true, super::provider_enforcement::Door::BridgedMcp).await {
-            super::provider_enforcement::Checked::Done(Ok(_admission)) => {
-                forward_bridged(&ctx, &http_client, &server_url, &req, &rpc_req).await
+            super::provider_enforcement::Checked::Done(Ok(admission)) => {
+                forward_bridged(&ctx, &http_client, &server_url, &req, &rpc_req, admission.stop_asked()).await
             }
             super::provider_enforcement::Checked::Done(Err(refusal)) => refuse_bridged(&ctx, &req, &rpc_req, &refusal),
             super::provider_enforcement::Checked::Waiting(waiting) => pending.spawn(waiting, (req, rpc_req)),
         }
         #[cfg(not(all(feature = "gateway", feature = "tls")))]
-        forward_bridged(&ctx, &http_client, &server_url, &req, &rpc_req).await;
+        forward_bridged(&ctx, &http_client, &server_url, &req, &rpc_req, std::future::pending::<()>()).await;
     }
 
     // Calls still settling a claim when the loop ends are answered, never left to time out.

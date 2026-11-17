@@ -177,6 +177,32 @@ describe_("MyceliumAgent — live node tests", () => {
     expect(replies[0].result.toString()).toBe("echo:ping");
   });
 
+  // Identity-and-lifecycle I4, PR 3b: the node takes a declaring stream (`stops_on_cancel`) and serves it as any
+  // other on a node that cancels nothing; a `stopped` for a call it did not cancel is refused `409 not_cancelled`.
+  it_("a declaring serve stream is served, and a confirmation for a call never cancelled is refused", async () => {
+    const self = await a.nodeId;
+    const kind = `ts-test.declared-echo.${Date.now()}`;
+    const server = agent();
+    const serve = server.rpcServe(kind, { stopsOnCancel: true });
+    const confirmed: boolean[] = [];
+    const served = (async () => {
+      for await (const req of serve) {
+        confirmed.push(await server.rpcConfirmStopped(req));
+        await server.rpcRespond(req, Buffer.concat([Buffer.from("echo:"), req.payload]));
+        break;
+      }
+    })();
+    await new Promise((r) => setTimeout(r, 300)); // the serve stream registers on connect
+    let reply: Buffer;
+    try {
+      reply = await a.rpcCall(self, kind, Buffer.from("ping"), { timeoutSecs: 5 });
+    } finally {
+      await Promise.race([served, new Promise((r) => setTimeout(r, 6000))]);
+    }
+    expect(confirmed).toEqual([false]);
+    expect(reply.toString()).toBe("echo:ping");
+  });
+
   it_("onSignal receives a signal emitted after it subscribed, with its kind", async () => {
     const kind = `ts-test.signal.${Date.now()}`;
     const sub = a.onSignal(kind);

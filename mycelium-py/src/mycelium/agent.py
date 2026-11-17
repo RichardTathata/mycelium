@@ -184,6 +184,10 @@ class ProtectedSlotError(_ProtectedWriteError):
         self.slot = slot
 
 
+#: How many handed-out requests a serve stream remembers so a ``cancel`` event finds its request.
+_HANDED_KEPT = 4096
+
+
 def _raise_if_serve_refused(resp: httpx.Response) -> None:
     """Raise :class:`ProtectedKindError` for a serve stream refused on a kind its node serves itself: ``403
     protected_kind`` (``mcp.invoke``, ``skill.invoke``, ``llm.invoke``) or ``403 served_in_process`` (any kind
@@ -337,6 +341,11 @@ class RpcRequest:
     the node verified the gateway's signature. ``None`` for a direct in-mesh call, where
     ``sender`` *is* the principal. A request whose context failed verification is never
     delivered.
+
+    ``cancelled`` is set when the node stops waiting for this call — its authority lapsed: the caller's mandate, or
+    the gateway cancelled the call (identity-and-lifecycle I4). The node has then answered the caller ``cancelled``
+    and discards a later :meth:`MyceliumAgent.rpc_respond`. A subscriber that declared ``stops_on_cancel`` promised to
+    stop the work when it is set, and confirms with :meth:`MyceliumAgent.rpc_confirm_stopped`.
     """
 
     kind:        str
@@ -344,6 +353,7 @@ class RpcRequest:
     sender:      str
     payload:     bytes
     caller:      Optional[Dict[str, Any]] = None
+    cancelled:   asyncio.Event = field(default_factory=asyncio.Event, repr=False, compare=False)
 
 
 @dataclass
@@ -1218,7 +1228,7 @@ class MyceliumAgent:
 
     # ── RPC serve / respond ─────────────────────────────────────────────────
 
-    async def rpc_serve(self, kind: str) -> "AsyncIterator[RpcRequest]":
+    async def rpc_serve(self, kind: str, *, stops_on_cancel: bool = False) -> "AsyncIterator[RpcRequest]":
         """Async generator that yields incoming RPC requests of ``kind``.
 
         For each yielded :class:`RpcRequest`, call :meth:`rpc_respond` to
@@ -1231,10 +1241,64 @@ class MyceliumAgent:
         On a scoped gateway, serving needs the ``mesh:serve`` scope (for this stream and for
         :meth:`rpc_respond`). A serving agent should not hold ``mesh:write``, which also opens
         :meth:`rpc_call`.
+
+        **Cancellation** (identity-and-lifecycle I4). When a call's authority lapses — its caller's mandate, or the
+        gateway cancelled it — the node stops waiting: it answers the caller ``cancelled``, sets the request's
+        ``cancelled`` event, and discards a later :meth:`rpc_respond`. That is the node's promise, not yours.
+
+        ``stops_on_cancel=True`` is **your** promise: you declare that you stop a call's work when its ``cancelled``
+        is set, and confirm with :meth:`rpc_confirm_stopped` once it has stopped. Only a declaring subscriber is
+        served a call under a rule declared cancellable (an undeclared one is refused it, ``door_cannot_stop``); the
+        node records a stop it can confirm only on your confirmation, and counts an answer you send more than a
+        second after the stop was asked (``rpc_serve_answered_after_lapse``). A declaring stream reads ahead of you, so
+        a cancel reaches a request you are still working on; requests not yet taken wait in memory::
+
+            async for req in agent.rpc_serve("my.method", stops_on_cancel=True):
+                work = asyncio.create_task(process(req.payload))
+                stop = asyncio.create_task(req.cancelled.wait())
+                done, _ = await asyncio.wait({work, stop}, return_when=asyncio.FIRST_COMPLETED)
+                if work in done:
+                    stop.cancel()
+                    agent.rpc_respond(req, work.result())
+                else:
+                    work.cancel()
+                    agent.rpc_confirm_stopped(req)
         """
+        import json as _json
         url = f"{self._base_url}/gateway/rpc/serve/{path_segment(kind)}"
+        # Every stream says it reads `cancel` events (a node sends none to a stream that does not, since an older
+        # client would read one as a request); a declaring one makes its promise.
+        params = {"cancel_events": "true"}
+        if stops_on_cancel:
+            params["stops_on_cancel"] = "true"
+        # The requests handed out and not yet cancelled, so a `cancel` event finds its request. Bounded: the oldest
+        # go first — a request that old has long been answered.
+        handed: "Dict[tuple[str, str], RpcRequest]" = {}
+
+        def parse(event: Any) -> "Optional[RpcRequest]":
+            data = _json.loads(event.data)
+            if event.event == "evicted" and data.get("error") == "evicted":
+                # The node took the kind: never return as though the stream had simply ended.
+                raise ServeEvictedError(str(data.get("kind", kind)), str(data.get("message", "evicted")))
+            if event.event == "cancel" and data.get("cancel") is True:
+                req = handed.pop((str(data.get("sender", "")), str(data.get("nonce_hex", ""))), None)
+                if req is not None:
+                    req.cancelled.set()
+                return None
+            req = RpcRequest(
+                kind      = event.event or kind,
+                nonce_hex = data.get("nonce_hex", ""),
+                sender    = data.get("sender", ""),
+                payload   = base64.b64decode(data.get("payload_b64", "")),
+                caller    = data.get("caller"),
+            )
+            handed[(req.sender, req.nonce_hex)] = req
+            while len(handed) > _HANDED_KEPT:
+                handed.pop(next(iter(handed)))
+            return req
+
         async with httpx.AsyncClient(timeout=None, headers=self._pool.headers, verify=self._pool.verify) as client:
-            async with aconnect_sse(client, "GET", url) as event_source:
+            async with aconnect_sse(client, "GET", url, params=params) as event_source:
                 resp = event_source.response
                 if resp.status_code >= 400:
                     # A kind the node serves itself is refused 403 with a JSON body (0.2.12): raised as
@@ -1242,20 +1306,38 @@ class MyceliumAgent:
                     await resp.aread()
                     _raise_if_serve_refused(resp)
                     resp.raise_for_status()
-                async for event in event_source.aiter_sse():
-                    import json as _json
-                    data    = _json.loads(event.data)
-                    if event.event == "evicted" and data.get("error") == "evicted":
-                        # The node took the kind: never return as though the stream had simply ended.
-                        raise ServeEvictedError(str(data.get("kind", kind)), str(data.get("message", "evicted")))
-                    payload = base64.b64decode(data.get("payload_b64", ""))
-                    yield RpcRequest(
-                        kind      = event.event or kind,
-                        nonce_hex = data.get("nonce_hex", ""),
-                        sender    = data.get("sender", ""),
-                        payload   = payload,
-                        caller    = data.get("caller"),
-                    )
+                if not stops_on_cancel:
+                    # Read as you ask: a `cancel` event is seen when you next ask for a request.
+                    async for event in event_source.aiter_sse():
+                        req = parse(event)
+                        if req is not None:
+                            yield req
+                    return
+                # Declared: the stream is read beside you, so a cancel reaches the request you are working on.
+                queue: "asyncio.Queue[Any]" = asyncio.Queue()
+                end = object()
+
+                async def pump() -> None:
+                    try:
+                        async for event in event_source.aiter_sse():
+                            req = parse(event)
+                            if req is not None:
+                                queue.put_nowait(req)
+                        queue.put_nowait(end)
+                    except Exception as e:  # noqa: BLE001 — handed to the iterating caller, raised there
+                        queue.put_nowait(e)
+
+                reader = asyncio.create_task(pump())
+                try:
+                    while True:
+                        item = await queue.get()
+                        if item is end:
+                            return
+                        if isinstance(item, BaseException):
+                            raise item
+                        yield item
+                finally:
+                    reader.cancel()
 
     def rpc_respond(self, request: "RpcRequest", result: bytes = b"") -> None:
         """Send a reply to an incoming RPC request.
@@ -1271,6 +1353,21 @@ class MyceliumAgent:
         }
         with self._pool.sync() as c:
             c.post("/gateway/rpc/respond", json=body).raise_for_status()
+
+    def rpc_confirm_stopped(self, request: "RpcRequest") -> bool:
+        """Confirm that you stopped the work of a request the node cancelled (identity-and-lifecycle I4).
+
+        Your own word, sent once the work has stopped: it is the only thing the node records a confirmed stop on — a
+        cancel's receipt then reads ``Stopped``. Returns ``True`` when the node took it, ``False`` when the request is
+        not one the node cancelled and streamed to you (``409 not_cancelled``: nothing is recorded or sent).
+        """
+        body = {"nonce_hex": request.nonce_hex, "sender": request.sender, "stopped": True}
+        with self._pool.sync() as c:
+            resp = c.post("/gateway/rpc/respond", json=body)
+            if resp.status_code == 409:
+                return False
+            resp.raise_for_status()
+            return True
 
     # ── Schedules (adopter-surface Y12) ─────────────────────────────────────
 

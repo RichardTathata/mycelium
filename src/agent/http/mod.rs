@@ -137,6 +137,8 @@ pub(crate) use mcp_bridge::{TEST_DISPATCH_TIMEOUT_MS, TEST_LAST_TIMEOUT};
 #[cfg(feature = "a2a")]
 pub(crate) use mcp_bridge::note_misplaced_causal_headers;
 mod mesh;
+#[cfg(all(feature = "gateway", feature = "tls"))]
+mod served_call;
 mod node;
 mod overlay;
 /// The schedule run stream (adopter-surface Y12): the gateway's node stands in a schedule's holder band for a client.
@@ -235,6 +237,11 @@ struct HttpCtx {
     /// Repeat answers to an already-answered request, accepted and dropped (`/stats`
     /// `rpc_respond_duplicates`): a replicated serve loop's losing replica.
     rpc_respond_duplicates: std::sync::atomic::AtomicU64,
+    /// Identity-and-lifecycle I4, PR 3b: the calls `rpc/serve` streamed that hold something — a cohort place, a
+    /// running-work registration — each owned by its watcher task until the subscriber ends it (`served_call`).
+    /// Lock-free (papaya): no lock-order row; each watcher removes only its own entry.
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    served_calls:    papaya::HashMap<(crate::node_id::NodeId, u64), Arc<served_call::ServedCall>>,
     /// Schedule runs handed to clients on `schedules/run` and not yet acknowledged (adopter-surface Y12), by run id;
     /// each removed when its run ends. Lock-free (papaya): no lock-order row.
     schedule_runs:   Arc<PendingRuns>,
@@ -334,6 +341,8 @@ pub(super) async fn run_http_server(
         oidc,
         served_rpcs:  Mutex::new(ServedRpcs::default()),
         rpc_respond_duplicates: std::sync::atomic::AtomicU64::new(0),
+        #[cfg(all(feature = "gateway", feature = "tls"))]
+        served_calls: papaya::HashMap::new(),
         schedule_runs: Arc::new(papaya::HashMap::new()),
     });
 

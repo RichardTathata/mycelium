@@ -457,6 +457,19 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   **Check:** the addressed node's evidence journal — a `Decided` record's `signed_decision.signed_with`; and
   `consent_grades_unread` on `GET /stats`.
 
+- **The node's own stop at the bridged MCP loop and the SDK serve stream; an SDK subscriber can declare it stops**
+  (identity-and-lifecycle I4, PR 3b; the maintainer's decision (C) of 2026-11-16; `deprecations.md` §116). A call
+  whose authority lapses while a bridged MCP server or an SDK subscriber works on it is no longer waited out: the node
+  answers the requester `cancelled`, sends the server `notifications/cancelled` or the stream a `cancel` event, and
+  discards the late reply — promising nothing about the other agent's work, so the stop is unconfirmed (`Unbounded`).
+  `GET /gateway/rpc/serve/{kind}?stops_on_cancel=true` is a subscriber's declaration that it stops on `cancel`: it is
+  then served a cancellable call (an undeclared one is still refused, as the bridged loop always is), and its
+  `rpc/respond` `"stopped": true` is the only thing a confirmed stop (`Stopped`) is recorded on; its answers past the
+  1 s grace are counted (`rpc_serve_answered_after_lapse`). `mycelium-py` (`rpc_serve(…, stops_on_cancel=True)`,
+  `RpcRequest.cancelled`, `rpc_confirm_stopped`) and `mycelium-ts` (`rpcServe(…, { stopsOnCancel: true })`,
+  `RpcRequest.signal`, `rpcConfirmStopped`) carry it; both bump at release. A streamed call's admission is now held
+  with or without a cohort budget (lock-order row 46 retired).
+
 - **A gateway's cancel reaches the provider directly, and the doors cancel** (identity-and-lifecycle I4, PR 3a;
   `deprecations.md` §114). `GossipAgent::cancel_call(term)` revokes a minted call's term, records it on disk and
   forwards it to the provider the call went to (the cancel-forward, `sys.call-cancel.v1`, accepted only from the

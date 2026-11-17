@@ -152,10 +152,17 @@ confirmed stop, checked against the class's bound. CI runs it.
   the provider holds the revocation, stops the work and answers its own class — `Stopped` only at a door whose agent
   promised to stop, and `NotRegistered` wherever it never registered the call: with enforcement off it registers
   nothing and holds nothing, and under a rule that is not cancellable a call whose `call:` slot did not establish
-  runs unregistered and runs on after its cancel (#799's review, M1). **Refused by name** (`door_cannot_stop`, the door in `data.door`; lifting it at the bridged
-  loop and the SDK stream is I4's PR 3b, the maintainer's decision): the bridged MCP loop (`bridged_mcp`), the SDK
-  serve stream (`sdk_serve`), a hosted component's kind through `rpc_rx` (`hosted_capability`) and a tool registered
-  unstoppable (`unstoppable_mcp_tool`) — so a cancellable rule over any of them refuses every call; an
+  runs unregistered and runs on after its cancel (#799's review, M1). **Refused by name** (`door_cannot_stop`, the door in `data.door`): the bridged MCP loop (`bridged_mcp`), the SDK
+  serve stream (`sdk_serve`) for a subscriber that has not declared `stops_on_cancel`, a hosted component's kind through `rpc_rx` (`hosted_capability`) and a tool registered
+  unstoppable (`unstoppable_mcp_tool`) — so a cancellable rule over any of them refuses every call. **The node's own
+  stop** (I4's PR 3b, the maintainer's decision (C) of 2026-11-16; [§116](../guide/deprecations.md)): at the bridged
+  loop and the SDK stream, a call whose authority lapses while it runs is no longer waited out — the requester is
+  answered `cancelled` (`data.door` names the door), the server is sent `notifications/cancelled` or the subscriber a
+  `cancel` event (a stream that said it reads them), and the other agent's late reply is discarded; the node
+  promises nothing about the work there, so the stop is unconfirmed (`Unbounded`) unless an SDK subscriber that
+  declared `stops_on_cancel` confirms it with `rpc/respond` `"stopped": true` — the only word a confirmed stop is
+  recorded on. A declared subscriber is served a cancellable call; its late answers are counted
+  (`rpc_serve_answered_after_lapse`), not refused (`GET /stats` `door_stops` counts the node's own stops). An
   `rpc_rx` receiver is refused one (`rpc_rx`) unless it declares that it stops when its call's authority lapses
   ([`stops_when_authority_lapses`](../../src/agent/rpc.rs)), and a declared receiver's late answers are counted
   (`rpc_rx_answered_after_lapse`), not refused ([ledger](../operations/what-is-proven.md#rpc-rx-cancellable-not-refused)); a

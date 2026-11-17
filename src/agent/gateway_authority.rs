@@ -765,6 +765,18 @@ impl WorkGuard {
         self.cancelled.load(std::sync::atomic::Ordering::Acquire)
     }
 
+    /// Resolves when the authority cancels this work (at once if it already has), and records **nothing**: for the
+    /// node's own stop at a door where another agent does the work (identity-and-lifecycle I4, PR 3b) — the node
+    /// stops waiting, and its seeing the request is not the work's acknowledgement.
+    pub(crate) async fn stop_asked(&self) {
+        let notified = self.cancel.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if !self.is_cancelled() {
+            notified.await;
+        }
+    }
+
     /// Resolves when the authority cancels this work (at once if it already has), and records that
     /// the work **acknowledged** the cancellation.
     pub async fn cancelled(&self) {

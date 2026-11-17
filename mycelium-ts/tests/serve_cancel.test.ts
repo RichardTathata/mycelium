@@ -1,0 +1,104 @@
+/**
+ * Cancellation on the SDK serve stream (identity-and-lifecycle I4, PR 3b; the maintainer's decision (C) of
+ * 2026-11-16). No node needed: `fetch` is stubbed with the events a node sends, and records what was sent.
+ *
+ * - **The declaration is the subscriber's own.** `rpcServe(kind, { stopsOnCancel: true })` opens the stream with
+ *   `stops_on_cancel=true`; every stream says it reads `cancel` events (`cancel_events=true`).
+ * - **A cancel reaches the request it names.** The node's `cancel` event aborts that request's `signal` — and, on a
+ *   declaring stream, while the caller still holds the request. A `cancel` event is never yielded as a request.
+ * - **The confirmation.** `rpcConfirmStopped` posts `{nonce_hex, sender, stopped: true}`; `409 not_cancelled` is
+ *   `false`.
+ */
+import { MyceliumAgent } from "../src/index";
+
+const realFetch = globalThis.fetch;
+afterAll(() => { globalThis.fetch = realFetch; });
+
+const REQ = { nonce_hex: "00000000000000aa", sender: "127.0.0.1:7001", payload_b64: "d29yaw==" };
+const OTHER = { nonce_hex: "00000000000000bb", sender: "127.0.0.1:7001", payload_b64: "d29yaw==" };
+const CANCEL = { cancel: true, nonce_hex: REQ.nonce_hex, sender: REQ.sender, reason: "cancelled" };
+
+let seen: Array<{ url: string; method: string; body: Record<string, unknown> }> = [];
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+function stub(respondStatus = 200): void {
+  seen = [];
+  globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+    const url = String(input instanceof URL ? input.toString() : input);
+    let body: Record<string, unknown> = {};
+    try { body = JSON.parse(String(init?.body ?? "{}")); } catch { /* not JSON */ }
+    seen.push({ url, method: init?.method ?? "GET", body });
+    if (url.includes("/rpc/serve/")) {
+      const enc = new TextEncoder();
+      const frame = (event: string, data: unknown) => enc.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+      const stream = new ReadableStream<Uint8Array>({
+        async start(c) {
+          c.enqueue(frame("depot.custom", REQ));
+          await sleep(200);
+          c.enqueue(frame("cancel", CANCEL));
+          c.enqueue(frame("depot.custom", OTHER));
+          await sleep(300);
+          c.close();
+        },
+      });
+      return new Response(stream, { status: 200, headers: { "content-type": "text/event-stream" } });
+    }
+    const reply = respondStatus === 200 ? { ok: true, stopped: true } : { ok: false, error: "not_cancelled" };
+    return new Response(JSON.stringify(reply), { status: respondStatus, headers: { "content-type": "application/json" } });
+  }) as typeof fetch;
+}
+
+const serveUrl = () => new URL(seen.find((s) => s.method === "GET")!.url);
+
+test("a declaring stream says so, and an undeclared one does not", async () => {
+  stub();
+  const agent = new MyceliumAgent("127.0.0.1", 1);
+  for await (const _ of agent.rpcServe("depot.custom", { stopsOnCancel: true })) break;
+  expect([serveUrl().searchParams.get("cancel_events"), serveUrl().searchParams.get("stops_on_cancel")]).toEqual(["true", "true"]);
+  stub();
+  for await (const _ of agent.rpcServe("depot.custom")) break;
+  expect([serveUrl().searchParams.get("cancel_events"), serveUrl().searchParams.get("stops_on_cancel")]).toEqual(["true", null]);
+});
+
+test("a cancel reaches the request a declaring subscriber still holds", async () => {
+  stub();
+  const stream = new MyceliumAgent("127.0.0.1", 1).rpcServe("depot.custom", { stopsOnCancel: true });
+  const first = (await stream.next()).value!;
+  // Not asking for the next request: the stream is read beside us, so the cancel still arrives.
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const aborted = await new Promise<boolean>((resolve) => {
+    if (first.signal!.aborted) return resolve(true);
+    first.signal!.addEventListener("abort", () => resolve(true), { once: true });
+    timer = setTimeout(() => resolve(false), 5000);
+  });
+  clearTimeout(timer);
+  const other = (await stream.next()).value!;
+  await stream.return(undefined);
+  expect(aborted).toBe(true);
+  expect(other.signal!.aborted).toBe(false);
+  expect([first.nonceHex, other.nonceHex]).toEqual([REQ.nonce_hex, OTHER.nonce_hex]);
+});
+
+test("an undeclared subscriber sees the cancel when it next asks", async () => {
+  stub();
+  const stream = new MyceliumAgent("127.0.0.1", 1).rpcServe("depot.custom");
+  const first = (await stream.next()).value!;
+  await sleep(500);
+  const before = first.signal!.aborted;
+  const other = (await stream.next()).value!;
+  await stream.return(undefined);
+  expect(other.nonceHex).toBe(OTHER.nonce_hex);
+  expect([before, first.signal!.aborted]).toEqual([false, true]);
+});
+
+test("the confirmation is the subscriber's word, and a refusal is false", async () => {
+  stub();
+  const agent = new MyceliumAgent("127.0.0.1", 1);
+  const req = { kind: "depot.custom", nonceHex: REQ.nonce_hex, sender: REQ.sender, payload: Buffer.alloc(0) };
+  expect(await agent.rpcConfirmStopped(req)).toBe(true);
+  const post = seen.filter((s) => s.method === "POST").pop()!;
+  expect(new URL(post.url).pathname).toBe("/gateway/rpc/respond");
+  expect(post.body).toEqual({ nonce_hex: REQ.nonce_hex, sender: REQ.sender, stopped: true });
+  stub(409);
+  expect(await agent.rpcConfirmStopped(req)).toBe(false);
+});

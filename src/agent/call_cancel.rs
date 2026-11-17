@@ -92,7 +92,8 @@ pub enum CancelClass {
     /// stop, the provider asked it to stop, and that work **has ended**, with its stop record. The rung is "the work
     /// promised to stop and has ended", not "the stop ended it": work that finished on its own just after the request
     /// is recorded the same way (a `WorkGuard` dropped after its cancel; #799's review, L4), so the requester may
-    /// still have the call's result.
+    /// still have the call's result. At the SDK serve stream it is recorded only on the subscriber's own confirmation
+    /// (`rpc/respond` `"stopped": true`, I4's PR 3b): the subscriber's word, never the node's inference.
     Stopped,
     /// The provider holds the revocation and asked the work under the term to stop; that work had not ended when it
     /// answered ([`CANCEL_CONFIRM_WAIT_MS`]). A stop asked for, not a stop seen.
@@ -517,8 +518,16 @@ async fn answer(ctx: &TaskCtx, by: &PrincipalId, signed: &SignedRevocationCheckp
                     let deadline = mycelium_core::sim_seam::mono_instant() + Duration::from_millis(CANCEL_CONFIRM_WAIT_MS);
                     loop {
                         let ended = authority.work_ended();
-                        if authority.call_registrations(by, scope).0 == 0 {
-                            break "stopped";
+                        // A registration whose agent promised to stop can still end as a release the provider cannot
+                        // confirm — an SDK subscriber that answered rather than confirmed its stop (PR 3b's
+                        // `served_call`) — so the end is read from its stop record, not from the count alone.
+                        match authority.call_registrations(by, scope) {
+                            (_, u) if u > 0 => break "unbounded",
+                            (0, _) => {
+                                let term = scope.strip_prefix(crate::mandate::grant::CALL_SCOPE_PREFIX).unwrap_or_default();
+                                break if authority.call_stop_recorded(by, scope, term) == Some(false) { "unbounded" } else { "stopped" };
+                            }
+                            _ => {}
                         }
                         let left = deadline.saturating_duration_since(mycelium_core::sim_seam::mono_instant());
                         if left.is_zero() {

@@ -48,8 +48,12 @@ grows a tool on demand ([hosted components](hosted-components.md)).
 - **Not built:** a tool registration is a claim, not proof the tool does what its description says; a bridged external
   server's own behaviour is outside the node; discovery is as fresh as gossip. **A bridged server's tool, and a tool
   registered with `register_mcp_tool_unstoppable`, refuse a call under a cancellable rule** (`door_cannot_stop`,
-  [§110](../guide/deprecations.md)): neither can stop a call once it runs (lifting the refusal at the bridged loop is I4's PR 3b, the maintainer's
-  decision). **`notifications/cancelled`** at `/mcp` cancels the caller's own in-flight `tools/call` of that
+  [§110](../guide/deprecations.md)): neither can stop a call once it runs, and a bridged server cannot promise
+  through the node (the maintainer's decision (C) of 2026-11-16, I4's PR 3b). **Under any other rule, a bridged call
+  whose authority lapses while it runs gets the node's own stop** ([§116](../guide/deprecations.md)): the node
+  stops waiting, answers the requester `cancelled` (`data.door` `bridged_mcp`), sends the server
+  `notifications/cancelled` for the request's id and never reads its reply — and promises nothing about the work in
+  the server, so a cancel's receipt says `Unbounded`. **`notifications/cancelled`** at `/mcp` cancels the caller's own in-flight `tools/call` of that
   `requestId` on a gateway that mints `call:` mandates, and is answered `202` with no body
   ([§114](../guide/deprecations.md); another principal's finds nothing and is counted, `mcp_cancels.unmatched`). **The gateway issues no
   `Mcp-Session-Id`**, so the cancel is keyed by principal and request id: clients that share one token can cancel
