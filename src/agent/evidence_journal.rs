@@ -423,7 +423,18 @@ impl HistoryIndex {
         };
         let mut state = self.lock();
         match outcome {
-            Err(why) => state.load = Load::Unreadable(why),
+            Err(why) => {
+                // Said once, and counted (`evidence_history_unreadable` on `/stats`): from here every limited rule
+                // at this point is not established for as long as the node runs, and the reason on those refusals
+                // would otherwise be the only place an operator could learn why.
+                tracing::warn!(
+                    journal = %self.journal.display(),
+                    cause = %why,
+                    "the evidence journal could not be read into the actor histories: every rule with a limit over \
+                     history is not established at this node until it is restarted over a readable journal"
+                );
+                state.load = Load::Unreadable(why);
+            }
             Ok(()) => {
                 let pending = std::mem::take(&mut state.pending_executions);
                 for (key, history) in loaded.actors {
@@ -453,6 +464,12 @@ impl HistoryIndex {
                 state.load = Load::Loaded;
             }
         }
+    }
+
+    /// Whether the journal's read ended unreadable: no history is established at this point, and will not be.
+    /// What `/stats` shows as `evidence_history_unreadable`.
+    pub(crate) fn unreadable(&self) -> bool {
+        matches!(self.lock().load, Load::Unreadable(_))
     }
 
     /// The actor's stripe: hold it from reading the view to admitting the permit.
@@ -688,18 +705,22 @@ mod history_tests {
     }
 
     /// What was admitted while the journal was being read is in the history once it is: the read merges under it.
+    /// Two permits, because the first was always admitted; seen failing first, with the version of an unavailable
+    /// history put back to 0, at the second (#811's review, finding 2).
     #[tokio::test]
-    async fn a_permit_admitted_during_the_read_is_counted_once_it_is_read() {
+    async fn permits_admitted_during_the_read_are_counted_once_it_is_read() {
         let path = temp_journal("admit-then-load");
         let j = EvidenceJournal::open(&path, EvidenceProfile::Strict).unwrap();
         j.append(serde_json::to_vec(&record("alice", "old", 8_000, Verdict::Permit)).unwrap()).await.unwrap();
         let index = HistoryIndex::new(&j);
-        let (_, version) = index.view(GW, "alice", request(), 10_000);
-        assert!(index.admit(GW, "alice", version, entry_of(&record("alice", "live", 9_000, Verdict::Permit))));
+        for (attempt, at_ms) in [("live-1", 9_000), ("live-2", 9_500)] {
+            let (_, version) = index.view(GW, "alice", request(), 10_000);
+            assert!(index.admit(GW, "alice", version, entry_of(&record("alice", attempt, at_ms, Verdict::Permit))), "{attempt} was not admitted during the read");
+        }
         index.load(10_000);
         let v = view(index.view(GW, "alice", request(), 10_000).0);
         let attempts: Vec<&str> = v.entries.iter().map(|e| e.attempt_id.as_str()).collect();
-        assert_eq!(attempts, ["old", "live"], "the journal's record and the permit admitted during the read");
+        assert_eq!(attempts, ["old", "live-1", "live-2"], "the journal's record and both permits admitted during the read");
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 

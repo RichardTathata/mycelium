@@ -375,8 +375,10 @@ times the limit. Every history decision names the scope and the point (`history 
 
 **What the history is.** Read from the journal in the background, once an evaluator that asks for history is attached
 (a node whose evaluator never asks never reads it), so a restart keeps it; until the read completes a limited call is
-not established, and so is every one if the journal cannot be read. A call under a rule with no limit is decided as
-usual meanwhile, and its permit is counted. Kept current by every decision recorded after. Bounded: each actor's records within 24 hours, at most
+not established, and every limited call stays so if the journal cannot be read: the node says so once in its log
+and `/stats` shows `evidence_history_unreadable: 1` until it is restarted over a readable journal. A call under a
+rule with no limit is decided as usual in both cases, and its permit is counted. Kept current by every decision
+recorded after. Bounded: each actor's records within 24 hours, at most
 1 024 of them, at most 65 536 actors per point (past it the oldest sixteenth are evicted, and an actor that then
 appears at that point is not established over windows reaching back past what was evicted — so under a sustained churn
 of new principals at one point, its quiet and new actors are refused, closed, until the churn stops) — so a limit above 1 024 a

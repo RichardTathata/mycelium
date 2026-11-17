@@ -30,8 +30,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   rules are unchanged: with no history they are not established. Affected: every release since policy over history
   (post-360 row K), for the length of the journal's read after a start — milliseconds on a small journal, longer on a
   large one — and permanently under an unreadable journal.
+  - **An unreadable journal is now said** (`deprecations.md` §119): such a node used to refuse nearly every call,
+    which is what gave it away. It now serves calls under unlimited rules and still refuses limited ones, so it logs
+    one `WARN` naming the journal and the cause, and `/stats` gains `evidence_history_unreadable` (`1` until a restart
+    over a readable journal).
   - **Check:** on a gateway with one `at_most` rule and one unlimited rule, restart over a large evidence journal and
-    call the unlimited tool twice: both are permitted (the second was refused -32031 before).
+    call the unlimited tool twice: both are permitted (the second was refused -32031 before). And
+    `curl -s http://NODE:HTTP_PORT/stats | jq .evidence_history_unreadable` is `0` on every node.
 - **A restarted SWIM seed is found again** (#798, #801; the Eve fleet job's `a write at node 1 reaching node 3 …
   within 120000 ms`). A node with no `bootstrap_peers` of its own (a seed) starts its restart with an empty membership
   table and contacts no one. If one probe landed while it was down, its peers held it `Suspect` — and the prober chose
