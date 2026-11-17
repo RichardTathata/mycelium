@@ -202,6 +202,25 @@ is, what adopting it would buy, what it would cost or risk, its state, and what 
   4. Run the full suites, the model job, and `make test-scale-resilience`.
   5. Lift the `retain` ban only if 0.2's `retain` is shown correct by the repro.
 
+### W9. `object_store` and its two unmaintained dependencies
+
+- **State:** `watch`.
+- **Upstream:** [object_store on crates.io](https://crates.io/crates/object_store);
+  [RUSTSEC-2026-0543](https://rustsec.org/advisories/RUSTSEC-2026-0543) (`chrono` unmaintained) and
+  [RUSTSEC-2026-0542](https://rustsec.org/advisories/RUSTSEC-2026-0542) (`humantime` unmaintained), both published
+  2026-11-17. Neither names a defect or a fixed version.
+- **Where Mycelium is:** `object_store = "0.14"` is an optional dependency of `mycelium-wasm-host`
+  (`mycelium-wasm-host/Cargo.toml:75`, feature `object_store`); `Cargo.lock` resolves 0.14.2, which pulls `chrono`
+  0.4.45 and `humantime` 2.4.0. The published stem is built with the feature (`release.yml`, `STEM_FEATURES`); no node
+  binary contains either crate. Mycelium calls neither crate itself.
+- **What was decided (the maintainer, 2026-11-17):** CI's audit step ignores those two advisory ids for the root
+  `Cargo.lock`, with a dated comment (`.github/workflows/ci.yml`, the `audit` job). The ignore names the two ids only:
+  a defect in either crate would be a new advisory and still fail the step.
+- **Cost and risk:** an unmaintained crate gets no fixes. The exposure is the stem's object-store path.
+- **Next:** at each monthly review, check `object_store`'s releases for one that drops or replaces either crate, then
+  upgrade and remove the ignore. If either crate gets a defect advisory first, this row becomes a security PATCH, not
+  a watch.
+
 ## Review log
 
 | Date | Reviewer | What changed |
@@ -210,3 +229,4 @@ is, what adopting it would buy, what it would cost or risk, its state, and what 
 | 2026-11-11 | maintainer | Priority agreed as proposed (W1–W7 in order). |
 | 2026-11-11 | independent review (#755) | Two of the first draft's own claims corrected. **W3:** record spans with correlation ids already ship (`src/span_export.rs`, Y4), so its proposed spike was already built; it is now about door and dispatch spans. **W5:** `aws-lc-rs` is already compiled in, so post-quantum TLS needs no new C build. W4's advisory list, the procedure's sources and `file:line`s, and the states made consistent. |
 | 2026-11-16 | maintainer + Claude | **W8 added** (papaya 0.2.x), state `plan`, to be built after the wave 1b release. Its cause: papaya 0.1.9's `retain` reads a tagged pointer after a resize, found in #799's review and banned there. |
+| 2026-11-17 | maintainer + Claude | **W9 added** (`object_store`'s `chrono` and `humantime`, both newly *unmaintained*), state `watch`. CI's audit ignores the two advisory ids, dated; removed when `object_store` drops them. |
