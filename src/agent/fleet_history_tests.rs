@@ -2097,20 +2097,35 @@ async fn a_forged_time_in_a_live_members_entry_is_scrubbed_by_its_owner() {
     let a_id = a.node_id().to_string();
     let key = super::tally_key(&a_id, "c-posts", "gateway", crate::PRINCIPAL_ANONYMOUS);
     let bctx = Arc::clone(&b.task_ctx);
-    let now = bctx.hlc.decision_now_ms();
-    let forged = serde_json::to_vec(&serde_json::json!({"w": TEN_MIN, "t": [now, u64::MAX]})).unwrap();
-    let _ = mycelium_core::ops::kv_set(&bctx, Arc::from(key.as_str()), bytes::Bytes::from(forged));
-    let honest = |ctx: &crate::agent::TaskCtx| {
-        mycelium_core::ops::kv_get(ctx, &key)
-            .and_then(|v| serde_json::from_slice::<serde_json::Value>(&v).ok())
-            .is_some_and(|v| v["t"].as_array().is_some_and(|t| !t.is_empty() && t.iter().all(|t| t.as_u64() != Some(u64::MAX))))
+    let times = |ctx: &crate::agent::TaskCtx| -> Option<Vec<u64>> {
+        let v: serde_json::Value = serde_json::from_slice(&mycelium_core::ops::kv_get(ctx, &key)?).ok()?;
+        v["t"].as_array().map(|t| t.iter().filter_map(|t| t.as_u64()).collect())
     };
+    // The forger's entry carries a time of its own beside the forged one — a mark the owner's entry never held.
+    // The owner's scrub keeps an entry's honest times, so the mark coming back to `b` without `u64::MAX` is the
+    // owner's rewrite of *the forged entry*: it says both that the forgery reached its owner and that it was scrubbed.
+    //
+    // That is a state that stays. The test used to wait first for the forged entry to be *at the owner*, which lasts
+    // from its arrival to the owner's next tick (500 ms here, so anything down to nothing) and was polled every
+    // 25 ms: a poll on a transient state, which misses when the arrival falls just before a tick. It did under a
+    // slow journal read, which moves the test against the tick (#811's review, finding 1: 2 of 6 runs with the read
+    // slowed by 3 s). Seen failing first, every time, with the poll slowed to 600 ms: "the forged entry reaches its
+    // owner".
+    let before = times(&a.task_ctx).expect("the owner's entry, after its permit");
+    let mut mark = bctx.hlc.decision_now_ms();
+    while before.contains(&mark) {
+        mark -= 1;
+    }
+    let forged = serde_json::to_vec(&serde_json::json!({"w": TEN_MIN, "t": [mark, u64::MAX]})).unwrap();
+    assert!(mycelium_core::ops::kv_set(&bctx, Arc::from(key.as_str()), bytes::Bytes::from(forged)), "the forged write is taken");
+    assert_eq!(times(&bctx), Some(vec![mark, u64::MAX]), "the forger reads its own forgery until the owner's rewrite arrives");
+    // Within a tick or two of its arrival the owner rewrites it without the forged time, and `b` can decide again.
     assert!(
-        until(|| mycelium_core::ops::kv_get(&a.task_ctx, &key).is_some_and(|v| String::from_utf8_lossy(&v).contains(&u64::MAX.to_string())), Duration::from_secs(5)).await,
-        "the forged entry reaches its owner"
+        until(|| times(&bctx) == Some(vec![mark]), Duration::from_secs(8)).await,
+        "the forged entry reaches its owner, and the owner scrubs the forged time and keeps the rest: {:?} at the forger, {:?} at the owner",
+        times(&bctx),
+        times(&a.task_ctx)
     );
-    // Within a tick or two the owner rewrites it with its honest time only, and `b` can decide again.
-    assert!(until(|| honest(&bctx), Duration::from_secs(3)).await, "the owner scrubs the forged time");
     let out = post(&b).await;
     assert!(admitted(&out).is_some(), "decidable again: {:?}", refusal(&out));
 
