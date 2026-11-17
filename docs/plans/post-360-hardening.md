@@ -2237,7 +2237,9 @@ runs of the whole `agent::bulk` module at 24 parallel processes.
 - `agent::exposure::tests::doors::the_shadow_profile_counts_and_holds_nothing` (Y5/Y11, the exposure policy's shadow
   rung) — *"legacy held: … the actor's history kept changing while this decision was made on it"*, once on PR #765's
   first CI run (run 43191033407, attempt 1, the strict `compliance,a2a` lib line, 2026-11-12); attempt 2 was green.
-  The branch touched only gate scripts and documentation.
+  The branch touched only gate scripts and documentation. **Fixed, 2026-11-17 (#811), a product defect:** the history
+  index gave version 0 with every history it could not give, so while the journal was being read an actor's later
+  permits were never admitted; the test's two calls straight after start lost to a slow read (`deprecations.md` §119).
 - `lib_tests::a_second_live_default_is_refused_by_name` (P2's migration) — *"the lock decides in the successor:
   Superseded"* at its closing `distributed_lock` (`src/lib_tests.rs`), once on `main`'s CI for the v2.40.0 release
   commit (run 43158368410, attempt 1, the strict `compliance,a2a` lib run, 2026-11-12), beside `row18` below; attempt 2
@@ -2273,7 +2275,9 @@ runs of the whole `agent::bulk` module at 24 parallel processes.
   — *"the call was too short to show anything: 298.426749ms"*, on #716's CI (run 42131289429, the WASM-host job,
   2026-11-05), a docs-only branch; failed on its retry too, and passed on `main`'s next run. The test's 300 ms floor is
   a guess at how long the spin guest takes to burn a 3 × 10⁹ fuel budget, and a fast runner came in 1.6 ms under it — a
-  floor on the guest's speed, not on the heartbeat gap the test is about.
+  floor on the guest's speed, not on the heartbeat gap the test is about. **Fixed, 2026-11-17 (#811):** the guest now
+  runs until a 600 ms call deadline stops it, which cannot come early, so the call is long on any runner; the 300 ms
+  assertion is unchanged.
 - `agent::lock_lifecycle_api_tests::row13_a_release_ends_an_adopted_recommit` (`src/agent/lock_lifecycle_api_tests.rs:105`)
   — *"the re-commit is the top"*, once under the strict `compliance,a2a` lib run on #718's CI (run 42250860966,
   attempt 2, 2026-11-06); attempts 1 and 3 of the same head passed. Its node has no persistence, so #718's directory

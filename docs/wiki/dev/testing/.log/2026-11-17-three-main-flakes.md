@@ -21,9 +21,22 @@ history could be given — the journal still being read, or unreadable. A permit
 version, so once an actor had anything recorded, each later permit failed `admit` three times and the door refused it
 as *the actor's history kept changing*. `the_shadow_profile_counts_and_holds_nothing` makes two calls straight after
 start and failed whenever the read outlasted them. A product defect, fixed in `view`; a 3 s sleep planted in `load`
-reproduced the CI failure at the same line, and run over the whole lib suite with the fix it found one more test that
-decided on a limit before the read had finished (`at_most_three_posts_in_ten_minutes_counted_at_this_gateway`), which
-now waits for the read.
+reproduced the CI failure at the same line. Run over the lib suite with the fix, the plant found **two** more tests:
+- `at_most_three_posts_in_ten_minutes_counted_at_this_gateway` decided on a limit before the read had finished. It
+  failed every time under the plant, and now waits for the read.
+- `a_forged_time_in_a_live_members_entry_is_scrubbed_by_its_owner` failed some of the time (the author's one run of
+  the suite passed; #811's reviewer saw it fail in the suite and in 2 of 6 runs alone, 0 of 12 without the plant). It
+  polled every 25 ms for the forged entry *at its owner*, a state that lasts only until the owner's next 500 ms tick;
+  the slow read moved the test against the tick. With the poll slowed to 600 ms it failed every time, which is the
+  mechanism. It now waits for a state that stays: the forger's own marked time back at the forger without the forged
+  one, which only the owner's rewrite of the forged entry produces. This is the
+  [transient-dip rule](2026-10-03-fleet-test-transient-dip.md) again.
+
+One run of a plant is an enumeration only of what fails every time under it. The first log of this work said the plant
+found one more test; it had been run once.
+
+The fix removed what had been covering for an unreadable journal: such a node used to refuse nearly everything. It
+now logs one warning and shows `evidence_history_unreadable` on `/stats` (`deprecations.md` §119).
 
 **Durable knowledge**, on the [testing page](../testing.md) § The CI flake tier: a fuel budget is not a duration; a
 script that restarts a process onto the same log must empty the log before it launches; and a planted delay run over

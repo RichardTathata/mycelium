@@ -764,8 +764,10 @@ is what is printed.
 **To find who depends on something being fast, make it slow and run everything** (2026-11-17). The history index is
 read from the evidence journal on its own thread; a 3 s sleep planted in `HistoryIndex::load` and run over the whole
 lib suite named, beside the test that had flaked, one more that called a limited rule before the read had finished.
-Reading the tests would have taken longer and missed it. Restore a plant by copying the snapshot back and touching
-the file.
+Reading the tests would have taken longer and missed it. **Run the plant more than once:** a second test failed under
+it only some of the time (a 25 ms poll for a state that lasts until the owner's next tick), passed in the author's one
+run and was found by the reviewer's. One run enumerates what the plant breaks every time, and no more. Restore a
+plant by copying the snapshot back and touching the file.
 
 ## A client deadline below the server's budget is a defect, not a flake
 
