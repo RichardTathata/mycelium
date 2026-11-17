@@ -82,6 +82,10 @@ pub struct NodeTls {
     /// finding 2). Never held across an `.await` or another lock (lock-order table, `NodeTls::activate_lock`).
     #[cfg(feature = "tls")]
     activate_lock: std::sync::Mutex<()>,
+    /// Mesh sessions closed because their peer's certificate fails roots this node changed to (I2, #805's review F10):
+    /// `[inbound old root, inbound predates the change, outbound old root, outbound predates the change]`.
+    #[cfg(feature = "tls")]
+    sessions_closed: [std::sync::atomic::AtomicU64; 4],
 }
 
 #[cfg(feature = "tls")]
@@ -116,6 +120,24 @@ impl NodeTls {
         self.roots_generation.load(std::sync::atomic::Ordering::Acquire)
     }
 
+    /// Count a mesh session closed at a change of roots (#805's review F10): `inbound` or outbound, and **why** — the
+    /// peer's key already has standing under the new roots (the session predates the change: the peer has a successor
+    /// certificate it would present on a new handshake) or it has none (the peer is on an old root).
+    pub fn note_session_closed(&self, inbound: bool, peer_der: &[u8]) {
+        // Only a standing the fold has judged under the current roots can say so: until then, an old-root anchor not yet
+        // dropped would read as a successor's, so the close counts as an old-root peer's.
+        let current = self.standing.judged_under() == Some(self.roots_generation());
+        let predates = current && ed25519_key_from_cert_der(peer_der).is_some_and(|k| self.standing.anchors_key(&k));
+        let i = (if inbound { 0 } else { 2 }) + usize::from(predates);
+        self.sessions_closed[i].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// [`Self::note_session_closed`]'s counters: inbound old root, inbound predates the change, outbound old root,
+    /// outbound predates the change.
+    pub fn sessions_closed_by_roots(&self) -> [u64; 4] {
+        std::array::from_fn(|i| self.sessions_closed[i].load(std::sync::atomic::Ordering::Relaxed))
+    }
+
     /// The CA certificates (DER) this node trusts now.
     pub fn roots_der(&self) -> Vec<Vec<u8>> {
         self.roots.load().as_ref().clone()
@@ -129,8 +151,14 @@ impl NodeTls {
     }
 
     /// Record a directly-connected peer's CA-validated key via the installed sink; no-op if none
-    /// is installed. Called by the outbound writer after a completed handshake.
-    pub fn record_anchor(&self, peer: &crate::node_id::NodeId, key: [u8; 32]) {
+    /// is installed. Called by the outbound writer after a completed handshake, with the roots generation
+    /// it read **before** it loaded the client config the handshake ran under (identity-and-lifecycle I2,
+    /// #796's review must-address 6): a handshake judged under roots that have changed since records
+    /// nothing, so an old-roots verdict never lands after the agent cleared the anchors at a change of roots.
+    pub fn record_anchor(&self, peer: &crate::node_id::NodeId, key: [u8; 32], judged_at: u64) {
+        if judged_at != self.roots_generation() {
+            return;
+        }
         if let Some(sink) = self.peer_anchor_sink.get() {
             sink(peer, key);
         }
@@ -184,6 +212,12 @@ impl NodeTls {
         self.gateway_key.store(m.gateway_key);
         self.node_cert.store(std::sync::Arc::new(m.node_cert_der));
         if let Some(roots) = m.roots {
+            // R1: a change that closes legacy closes it **before** the new chain check is visible, so no reader sees
+            // the narrowed roots with legacy still open; one that would reopen it (refused at widen, I2's record
+            // check) reopens only after.
+            if roots.legacy_closed {
+                self.standing.set_legacy_closed(true);
+            }
             self.cert_verifier.store(std::sync::Arc::new(roots.chain));
             self.fleet_server_current.store(std::sync::Arc::new(roots.fleet));
             self.roots.store(std::sync::Arc::new(roots.ders));
@@ -192,6 +226,9 @@ impl NodeTls {
                 plant(self);
             }
             self.roots_generation.fetch_add(1, std::sync::atomic::Ordering::Release);
+            if !roots.legacy_closed {
+                self.standing.set_legacy_closed(false);
+            }
         }
         Ok(())
     }
@@ -303,6 +340,9 @@ pub struct RotationMaterial {
 /// The chain checks over a new root set, carried by [`RotationMaterial`] for a change of roots.
 #[cfg(feature = "tls")]
 struct RootsMaterial {
+    /// Whether every root is generation 1 or later (I2, R1): what [`NodeTls::activate`] sets
+    /// [`KeyStanding::legacy_closed`](crate::removal::KeyStanding::legacy_closed) to.
+    legacy_closed: bool,
     ders: Vec<Vec<u8>>,
     chain: std::sync::Arc<dyn rustls::server::danger::ClientCertVerifier>,
     fleet: std::sync::Arc<dyn rustls::client::danger::ServerCertVerifier>,
@@ -326,6 +366,37 @@ pub struct CertIdentity {
 /// ranks below one it succeeds (post-360 plan row Q).
 pub fn issuance_after(floor_ms: u64) -> u64 {
     crate::sim_seam::wall_now_ms().max(floor_ms.saturating_add(1))
+}
+
+#[cfg(all(feature = "tls", any(test, feature = "test-support")))]
+thread_local! {
+    static NOT_AFTER_OVERRIDE: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+}
+
+/// The `notAfter` a node or client certificate is issued with: 2099-01-01, or — in a test build, on this thread inside
+/// [`with_not_after_for_test`] — the given time, so a test can issue a short-lived certificate (#805's review F3).
+#[cfg(feature = "tls")]
+pub(crate) fn set_not_after_for_issue(params: &mut rcgen::CertificateParams) {
+    params.not_after = rcgen::date_time_ymd(2099, 1, 1);
+    #[cfg(any(test, feature = "test-support"))]
+    if let Some(ms) = NOT_AFTER_OVERRIDE.with(|c| c.get()) {
+        params.not_after = rcgen::date_time_ymd(1970, 1, 1) + std::time::Duration::from_millis(ms);
+    }
+}
+
+/// Run `f` with every node or client certificate issued on this thread valid until `not_after_ms` (test builds only).
+#[cfg(all(feature = "tls", any(test, feature = "test-support")))]
+#[doc(hidden)]
+pub fn with_not_after_for_test<R>(not_after_ms: u64, f: impl FnOnce() -> R) -> R {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            NOT_AFTER_OVERRIDE.with(|c| c.set(None));
+        }
+    }
+    NOT_AFTER_OVERRIDE.with(|c| c.set(Some(not_after_ms)));
+    let _reset = Reset;
+    f()
 }
 
 /// The URI a node certificate names its node by: `mycelium://{node}`.
@@ -598,7 +669,11 @@ pub fn p256_point_on_curve(point: &[u8; 65]) -> bool {
 /// The DER content octets of [`CONSENT_GRADE_OID`] (base-128 arcs, the first two folded): what the walk compares an
 /// extension's `extnID` against. Pinned in a golden (`consent_tests`).
 pub fn consent_grade_oid_der() -> Vec<u8> {
-    let arcs = CONSENT_GRADE_OID;
+    oid_der(CONSENT_GRADE_OID)
+}
+
+/// The DER content octets of an OID given by its arcs (base-128, the first two folded).
+fn oid_der(arcs: &[u64]) -> Vec<u8> {
     let mut out = Vec::new();
     let mut push = |mut v: u64| {
         let mut tmp = [0u8; 10];
@@ -618,6 +693,197 @@ pub fn consent_grade_oid_der() -> Vec<u8> {
         push(a);
     }
     out
+}
+
+// ── The CA generation (identity-and-lifecycle I2, R1) ─────────────────────────────────────────────
+
+/// **PROVISIONAL — no certificate carrying it may ship.** The arcs of the `caGeneration` extension's OID
+/// (identity-and-lifecycle I2, R1): a non-critical extension on a **CA** certificate whose value is a DER `INTEGER`,
+/// the CA's generation — `tls ca` mints generation 0 (and writes no extension: a CA certificate without it, which
+/// covers every CA before I2, is generation 0), and a successor is its predecessor's generation plus one.
+///
+/// The row planned a `2.25` UUID OID, which rcgen cannot write (its arcs are `u64`). The maintainer decided
+/// (2026-11-15, decision (e)) that such identifiers go under a **registered IANA Private Enterprise Number** arc, which
+/// is requested and not yet held; I7's grade took the first sub-arc of the documentation PEN **32473** (RFC 5612),
+/// `32473.7`, and this takes its own, `32473.2`. Until the registered arc arrives, a build that is not a test build
+/// neither writes nor reads it ([`CA_GENERATION_OID_IS_PROVISIONAL`]) and a release is blocked on replacing it
+/// (`scripts/check-release-blockers.sh`): the OID is permanent once a certificate carries it.
+pub const CA_GENERATION_OID: &[u64] = &[1, 3, 6, 1, 4, 1, 32473, 2, 1];
+
+/// Whether [`CA_GENERATION_OID`] is still the provisional documentation-PEN arc. While it is, a build that is not a
+/// test build ([`ca_generation_oid_open`]) mints no CA carrying it and reads none: a root carrying it is refused by name
+/// at start, at a change of roots and by the issuer ([`ca_generation`] answers [`CaGenerationError::Provisional`]),
+/// never read as generation 0 — which would leave legacy open on a node that trusts only a successor (R1). Anyone
+/// holding a CA key can write the extension with openssl, so the gate is on the reader as well as the writer (I7's
+/// #800 review, finding 1, applied here).
+pub const CA_GENERATION_OID_IS_PROVISIONAL: bool = true;
+
+/// Whether this build may write and read [`CA_GENERATION_OID`]: always once it is registered; while it is
+/// provisional, only `cfg(test)` (mycelium-core's own tests) or the non-default feature `provisional-ca-generation`,
+/// which only the test lines that exercise a succession turn on (never a shipped binary, an example or an image).
+pub fn ca_generation_oid_open() -> bool {
+    consent_grade_oid_open_when(CA_GENERATION_OID_IS_PROVISIONAL, provisional_ca_generation_build_open())
+}
+
+#[cfg(any(test, feature = "provisional-ca-generation"))]
+thread_local! {
+    static PROVISIONAL_CA_GENERATION_CLOSED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn provisional_ca_generation_build_open() -> bool {
+    #[cfg(any(test, feature = "provisional-ca-generation"))]
+    {
+        !PROVISIONAL_CA_GENERATION_CLOSED.with(|c| c.get())
+    }
+    #[cfg(not(any(test, feature = "provisional-ca-generation")))]
+    {
+        false
+    }
+}
+
+/// Run `f` on this thread as a shipped build would: the `caGeneration` gate closed (the I2 tests of the shipped
+/// refusal). Only in a build that has the gate open to close.
+#[cfg(any(test, feature = "provisional-ca-generation"))]
+#[doc(hidden)]
+pub fn with_provisional_ca_generation_closed<R>(f: impl FnOnce() -> R) -> R {
+    struct Reopen;
+    impl Drop for Reopen {
+        fn drop(&mut self) {
+            PROVISIONAL_CA_GENERATION_CLOSED.with(|c| c.set(false));
+        }
+    }
+    PROVISIONAL_CA_GENERATION_CLOSED.with(|c| c.set(true));
+    let _reopen = Reopen;
+    f()
+}
+
+/// The DER content octets of [`CA_GENERATION_OID`]. Pinned in a golden (`ca_generation_tests`).
+pub fn ca_generation_oid_der() -> Vec<u8> {
+    oid_der(CA_GENERATION_OID)
+}
+
+/// The `extnValue` contents [`CA_GENERATION_OID`] carries for `generation`: a DER `INTEGER`, minimal, non-negative.
+pub fn ca_generation_extension_der(generation: u64) -> Vec<u8> {
+    let bytes = generation.to_be_bytes();
+    let first = bytes.iter().position(|&b| b != 0).unwrap_or(7);
+    let mut content: Vec<u8> = Vec::with_capacity(9);
+    if bytes[first] & 0x80 != 0 {
+        content.push(0);
+    }
+    content.extend_from_slice(&bytes[first..]);
+    let mut out = vec![0x02, content.len() as u8];
+    out.extend_from_slice(&content);
+    out
+}
+
+/// Why a CA certificate's generation cannot be read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CaGenerationError {
+    /// The certificate cannot be walked, carries the extension twice, or its value is not one minimal non-negative
+    /// DER `INTEGER` that fits a `u64`. Never read as 0 (R1: a successor read as generation 0 would leave legacy open).
+    Malformed,
+    /// The extension is present under the provisional OID and this is no test build ([`ca_generation_oid_open`]).
+    Provisional,
+}
+
+impl std::fmt::Display for CaGenerationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CaGenerationError::Malformed => f.write_str(
+                "its caGeneration extension is malformed (present twice, or not one minimal non-negative DER INTEGER)",
+            ),
+            CaGenerationError::Provisional => f.write_str(
+                "it carries the caGeneration extension under the provisional OID 1.3.6.1.4.1.32473.2.1, which this build \
+                 does not read until the registered IANA PEN arc replaces it (identity-and-lifecycle I2)",
+            ),
+        }
+    }
+}
+
+/// A CA certificate's **generation** (identity-and-lifecycle I2, R1): `Ok(0)` when it carries no `caGeneration`
+/// extension (every CA before I2, and every CA `tls ca` mints), `Ok(n)` for one well-formed extension, and an error —
+/// never 0 — for a malformed one or, outside a test build, one under the provisional OID. Never panics.
+#[cfg(feature = "tls")]
+pub fn ca_generation(der: &[u8]) -> Result<u64, CaGenerationError> {
+    let oid = ca_generation_oid_der();
+    let values = tbs_extension_values(der, &oid).ok_or(CaGenerationError::Malformed)?;
+    let value = match values.as_slice() {
+        [] => return Ok(0),
+        [one] => *one,
+        _ => return Err(CaGenerationError::Malformed),
+    };
+    if !ca_generation_oid_open() {
+        return Err(CaGenerationError::Provisional);
+    }
+    let (tag, body, rest) = der_tlv(value).ok_or(CaGenerationError::Malformed)?;
+    if tag != 0x02 || !rest.is_empty() || body.is_empty() || body[0] & 0x80 != 0 {
+        return Err(CaGenerationError::Malformed);
+    }
+    // Minimal: a leading zero only before a byte whose high bit is set.
+    if body.len() > 1 && body[0] == 0 && body[1] & 0x80 == 0 {
+        return Err(CaGenerationError::Malformed);
+    }
+    let digits = if body[0] == 0 { &body[1..] } else { body };
+    if digits.len() > 8 {
+        return Err(CaGenerationError::Malformed);
+    }
+    Ok(digits.iter().fold(0u64, |v, &b| (v << 8) | b as u64))
+}
+
+/// Whether a node trusting exactly `roots` has **no legacy class** (identity-and-lifecycle I2, R1, the maintainer's
+/// decision of 2026-11-12): every root is generation 1 or later. Derived from the roots alone, never from
+/// `succession/` (#768's H2): a node recovered by the operator's procedure, and one first started on a successor's
+/// files, have no `succession/` and are closed all the same. A root whose generation cannot be read is refused before
+/// this is asked (at load, [`NodeTls::reroot_material`]); here it counts as generation 0, so an unreadable root never
+/// closes anything it should not.
+#[cfg(feature = "tls")]
+pub fn roots_close_legacy(roots: &[Vec<u8>]) -> bool {
+    !roots.is_empty() && roots.iter().all(|r| ca_generation(r).is_ok_and(|g| g >= 1))
+}
+
+/// Every `extnValue` content (the OCTET STRING's contents) under `oid_der` in a certificate's extensions, in order.
+/// `None` for anything that is not a certificate the bounded walk can read. Never panics.
+#[cfg(feature = "tls")]
+fn tbs_extension_values<'a>(der: &'a [u8], oid_der: &[u8]) -> Option<Vec<&'a [u8]>> {
+    let (tag, cert, _) = der_tlv(der)?;
+    if tag != 0x30 { return None; }
+    let (tag, tbs, _) = der_tlv(cert)?;
+    if tag != 0x30 { return None; }
+    let mut rest = tbs;
+    let (tag, _, next) = der_tlv(rest)?;
+    if tag == 0xA0 {
+        rest = next; // [0] EXPLICIT version
+    }
+    // serial, signature, issuer, validity, subject, subjectPublicKeyInfo
+    for _ in 0..6 {
+        let (_, _, n) = der_tlv(rest)?;
+        rest = n;
+    }
+    let mut out = Vec::new();
+    while !rest.is_empty() {
+        let (tag, body, n) = der_tlv(rest)?;
+        rest = n;
+        if tag != 0xA3 { continue; }
+        let (tag, mut exts, _) = der_tlv(body)?;
+        if tag != 0x30 { return None; }
+        while !exts.is_empty() {
+            let (tag, ext, n) = der_tlv(exts)?;
+            exts = n;
+            if tag != 0x30 { return None; }
+            let (tag, oid, mut e) = der_tlv(ext)?;
+            if tag != 0x06 { return None; }
+            if oid != oid_der { continue; }
+            let (mut tag, mut value, mut n2) = der_tlv(e)?;
+            if tag == 0x01 {
+                e = n2;
+                (tag, value, n2) = der_tlv(e)?;
+            }
+            let _ = n2;
+            if tag != 0x04 { return None; }
+            out.push(value);
+        }
+    }
+    Some(out)
 }
 
 /// The grade a consent certificate carries (identity-and-lifecycle I7, P1, P4 revised by H2, P7): **the issuer's
@@ -868,6 +1134,60 @@ pub(crate) fn tbs_name(der: &[u8], which: TbsName) -> Option<&[u8]> {
     Some(&rest[..rest.len() - after.len()])
 }
 
+/// A certificate's issuer name (the DER `Name`), read by the bounded walk; `None` for anything that is not a
+/// certificate. What a kept anchor tells its issuers apart by (identity-and-lifecycle I2, R4). Never panics.
+#[cfg(feature = "tls")]
+pub fn cert_issuer_der(der: &[u8]) -> Option<Vec<u8>> {
+    tbs_name(der, TbsName::Issuer).map(<[u8]>::to_vec)
+}
+
+/// A certificate's `notAfter`, in ms since the epoch, read by the bounded walk; `None` for anything that is not a
+/// certificate or a time this walk cannot read. What a cached verdict carries so that a certificate's expiry is judged
+/// in-process as a restart judges it (identity-and-lifecycle I2, #805's review F3). Never panics.
+#[cfg(feature = "tls")]
+pub fn cert_not_after_ms(der: &[u8]) -> Option<u64> {
+    let (tag, cert, _) = der_tlv(der)?;
+    if tag != 0x30 { return None; }
+    let (tag, tbs, _) = der_tlv(cert)?;
+    if tag != 0x30 { return None; }
+    let mut rest = tbs;
+    let (tag, _, next) = der_tlv(rest)?;
+    if tag == 0xA0 {
+        rest = next;
+    }
+    // serial, signature, issuer; then validity
+    for _ in 0..3 {
+        let (_, _, n) = der_tlv(rest)?;
+        rest = n;
+    }
+    let (tag, validity, _) = der_tlv(rest)?;
+    if tag != 0x30 { return None; }
+    let (_, _, after_nb) = der_tlv(validity)?;
+    let (tag, t, _) = der_tlv(after_nb)?;
+    let t = std::str::from_utf8(t).ok()?;
+    let (year, rest) = match tag {
+        0x17 => {
+            let yy: i64 = t.get(0..2)?.parse().ok()?;
+            (if yy >= 50 { 1900 + yy } else { 2000 + yy }, t.get(2..)?)
+        }
+        0x18 => (t.get(0..4)?.parse().ok()?, t.get(4..)?),
+        _ => return None,
+    };
+    if rest.len() != 11 || !rest.ends_with('Z') { return None; }
+    let n = |i: usize| -> Option<i64> { rest.get(i..i + 2)?.parse().ok() };
+    let (mo, d, h, mi, se) = (n(0)?, n(2)?, n(4)?, n(6)?, n(8)?);
+    if !(1..=12).contains(&mo) || !(1..=31).contains(&d) || h > 23 || mi > 59 || se > 60 { return None; }
+    // Days from the civil date (Howard Hinnant's algorithm).
+    let y = if mo <= 2 { year - 1 } else { year };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * (if mo > 2 { mo - 3 } else { mo + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    let secs = days * 86_400 + h * 3_600 + mi * 60 + se;
+    u64::try_from(secs).ok()?.checked_mul(1_000)
+}
+
 /// The commonName of a CA certificate's subject, when the subject is **exactly** what this tree writes:
 /// one RDN holding one `commonName` (2.5.4.3) `UTF8String` — rcgen's default subject, which every CA
 /// before identity-and-lifecycle I2 has, and the subject `mycelium tls ca` writes since. `None` for any
@@ -986,14 +1306,28 @@ mod imp {
 
     #[cfg(test)]
     pub(crate) fn generate_ca_for_test() -> (CertificateDer<'static>, KeyPair) {
-        generate_ca(None).expect("a CA")
+        generate_ca(None, 0).expect("a CA")
+    }
+
+    /// A fresh CA at `generation` (identity-and-lifecycle I2's tests): its subject names a test fleet and the
+    /// generation, and a generation above 0 carries the `caGeneration` extension.
+    #[cfg(test)]
+    pub(crate) fn generate_ca_at_generation_for_test(fleet: u64, generation: u64) -> (CertificateDer<'static>, KeyPair) {
+        generate_ca(Some(super::fleet_ca_subject(fleet, generation)), generation).expect("a CA")
     }
 
     /// A fresh self-signed Ed25519 CA: its certificate and key pair, written nowhere. `subject` is its
     /// commonName ([`super::fleet_ca_subject`] for `mycelium tls ca`); `None` keeps rcgen's default, which
-    /// a node's own CA has.
-    fn generate_ca(subject: Option<String>) -> Result<(CertificateDer<'static>, KeyPair), GossipError> {
+    /// a node's own CA has. `generation` above 0 writes the `caGeneration` extension (I2, R1), refused by name while its
+    /// OID is provisional outside a test build; generation 0 writes none (absent reads as 0).
+    fn generate_ca(subject: Option<String>, generation: u64) -> Result<(CertificateDer<'static>, KeyPair), GossipError> {
         let err = |reason: String| GossipError::InvalidField { field: "tls", reason };
+        if generation > 0 && !super::ca_generation_oid_open() {
+            return Err(err(format!(
+                "TLS: a generation-{generation} CA is not minted by this build: the caGeneration extension's OID is \
+                 provisional until the registered IANA PEN arc replaces it (identity-and-lifecycle I2)"
+            )));
+        }
         let ca_key_pair = KeyPair::generate_for(&PKCS_ED25519).map_err(|e| err(format!("TLS: generate CA key: {e}")))?;
         let mut ca_params = CertificateParams::new(vec![]).map_err(|e| err(format!("TLS: CA params: {e}")))?;
         if let Some(cn) = subject {
@@ -1004,6 +1338,10 @@ mod imp {
         ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
         ca_params.not_before = rcgen::date_time_ymd(2024, 1, 1);
         ca_params.not_after = rcgen::date_time_ymd(2099, 1, 1);
+        if generation > 0 {
+            ca_params.custom_extensions =
+                vec![rcgen::CustomExtension::from_oid_content(super::CA_GENERATION_OID, super::ca_generation_extension_der(generation))];
+        }
         let ca_cert = ca_params.self_signed(&ca_key_pair).map_err(|e| err(format!("TLS: self-sign CA: {e}")))?;
         Ok((CertificateDer::from(ca_cert.der().to_vec()), ca_key_pair))
     }
@@ -1035,7 +1373,7 @@ mod imp {
         key_path: &Path,
     ) -> Result<(CertificateDer<'static>, KeyPair), GossipError> {
         let err = |reason: String| GossipError::InvalidField { field: "tls", reason };
-        let (ca_cert_der, ca_key_pair) = generate_ca(None)?;
+        let (ca_cert_der, ca_key_pair) = generate_ca(None, 0)?;
 
         let staged = stage_ca(dir, &ca_cert_der, &ca_key_pair)?;
         fs::rename(&staged.key, key_path).map_err(|e| err(format!("TLS: publish CA key: {e}")))?;
@@ -1104,6 +1442,8 @@ mod imp {
         // ── 4. Build rustls configs ───────────────────────────────────────
         let cert_bytes = node_cert_der.as_ref().to_vec();
         let roots = vec![ca_cert_der.as_ref().to_vec()];
+        // R1: legacy closed whenever the root set is built — here, at start, from the root's generation alone.
+        standing.set_legacy_closed(super::roots_close_legacy(&roots));
         let (server_config, client_config, gateway_key, cert_verifier, fleet_server_verifier) =
             build_rustls_configs(node_cert_der, &signing_key, std::slice::from_ref(&ca_cert_der), Arc::clone(&removed), Arc::clone(&standing))?;
         let gateway_key = Arc::new(arc_swap::ArcSwap::new(gateway_key));
@@ -1126,6 +1466,7 @@ mod imp {
             removed,
             standing,
             activate_lock: std::sync::Mutex::new(()),
+            sessions_closed: Default::default(),
         })
     }
 
@@ -1211,6 +1552,9 @@ mod imp {
             return Err(err("TLS: the certificate for a change of roots is not for this node's current key — the \
                  successor re-issues the node's current key, never a new one".into()));
         }
+        for (i, r) in roots.iter().enumerate() {
+            root_generation_readable(r, &format!("(root {i} of the change of roots)"))?;
+        }
         let root_ders: Vec<CertificateDer<'static>> = roots.iter().map(|d| CertificateDer::from(d.clone())).collect();
         let cert = CertificateDer::from(node_cert_der.clone());
         let (server_config, client_config, gateway_key, chain, fleet) =
@@ -1227,7 +1571,7 @@ mod imp {
             signing_key,
             gateway_key,
             node_cert_der,
-            roots: Some(super::RootsMaterial { ders: roots, chain, fleet }),
+            roots: Some(super::RootsMaterial { legacy_closed: super::roots_close_legacy(&roots), ders: roots, chain, fleet }),
             built_over: None,
         })
     }
@@ -1245,6 +1589,14 @@ mod imp {
     /// a `ca-key.pem` with no such marker is a lost certificate and is named as one (see [`lone_key_state`]). Under the
     /// lock it removes temporaries an earlier crashed creation left.
     pub fn mint_ca(ca_dir: &Path) -> Result<std::path::PathBuf, GossipError> {
+        mint_ca_at(ca_dir, None, 0)
+    }
+
+    /// [`mint_ca`] at `generation`, naming `fleet` (a fresh fleet id when `None`) — the primitive `mycelium tls commit`
+    /// mints a successor with (identity-and-lifecycle I2, PR 2b): generation above 0 writes the `caGeneration`
+    /// extension, refused by name while its OID is provisional outside a test build.
+    #[doc(hidden)]
+    pub fn mint_ca_at(ca_dir: &Path, fleet: Option<u64>, generation: u64) -> Result<std::path::PathBuf, GossipError> {
         let err = |reason: String| GossipError::InvalidField { field: "tls", reason };
         let exists = |p: &Path| err(format!("TLS: {p:?} exists — a CA is minted once; a second one over it is a new fleet"));
         let (cert, key) = (ca_dir.join("ca-cert.pem"), ca_dir.join("ca-key.pem"));
@@ -1282,7 +1634,7 @@ mod imp {
         for stale in creation_temporaries(ca_dir) {
             let _ = fs::remove_file(stale);
         }
-        publish_minted_ca(ca_dir, &cert, &key, &exists)?;
+        publish_minted_ca(ca_dir, &cert, &key, &exists, fleet, generation)?;
         tracing::info!("TLS: minted a fleet CA in {ca_dir:?} — distribute ca-cert.pem, never ca-key.pem");
         Ok(cert)
     }
@@ -1324,7 +1676,7 @@ mod imp {
     }
 
     /// Publish a freshly generated CA in `ca_dir`, while holding `ca.lock`.
-    fn publish_minted_ca(ca_dir: &Path, cert: &Path, key: &Path, exists: &dyn Fn(&Path) -> GossipError) -> Result<(), GossipError> {
+    fn publish_minted_ca(ca_dir: &Path, cert: &Path, key: &Path, exists: &dyn Fn(&Path) -> GossipError, fleet: Option<u64>, generation: u64) -> Result<(), GossipError> {
         let err = |reason: String| GossipError::InvalidField { field: "tls", reason };
         let no_links = |what: &str, e: std::io::Error| err(format!(
             "TLS: publish CA {what} by hard link in {ca_dir:?}: {e} — `tls ca` needs a filesystem with hard links (FAT, exFAT \
@@ -1332,8 +1684,8 @@ mod imp {
         ));
         // I2: a minted CA's subject names its fleet and its generation (0: no predecessor), so two
         // fleets' CAs never share a name and a node certificate's issuer is its own CA's.
-        let fleet = rand_core::RngCore::next_u64(&mut rand_core::OsRng);
-        let (ca_cert_der, ca_key_pair) = generate_ca(Some(super::fleet_ca_subject(fleet, 0)))?;
+        let fleet = fleet.unwrap_or_else(|| rand_core::RngCore::next_u64(&mut rand_core::OsRng));
+        let (ca_cert_der, ca_key_pair) = generate_ca(Some(super::fleet_ca_subject(fleet, generation)), generation)?;
         // Both files written in full under names of this call's own, then published by hard link, which fails when
         // the name exists — so the check above is a courtesy and the link is the guard: two concurrent mints
         // publish one CA, and the other is refused rather than replacing it (#695's review, finding 4). The key is
@@ -1436,7 +1788,20 @@ mod imp {
                 });
             }
         }
-        pem_cert_to_der(pem)
+        let der = pem_cert_to_der(pem)?;
+        root_generation_readable(der.as_ref(), &format!("{path:?}"))?;
+        Ok(der)
+    }
+
+    /// Refuse, by name, a root whose generation this build cannot read (identity-and-lifecycle I2, R1): a malformed
+    /// `caGeneration`, or one under the provisional OID outside a test build. Every root a node trusts passes here —
+    /// the file at start ([`ca_cert_to_der`]), the issuer's CA, and each root of a change of roots
+    /// ([`reroot_material`]) — so [`super::roots_close_legacy`] never meets a root it would misread as generation 0.
+    pub(super) fn root_generation_readable(der: &[u8], named: &str) -> Result<u64, GossipError> {
+        super::ca_generation(der).map_err(|why| GossipError::InvalidField {
+            field: "tls.ca_cert_pem",
+            reason: format!("TLS: the CA certificate {named} is refused: {why}"),
+        })
     }
 
     /// The section of `docs/guide/deprecations.md` that states [`ca_cert_to_der`]'s refusal.
@@ -1733,7 +2098,7 @@ mod imp {
         params.subject_alt_names = vec![SanType::IpAddress(ip), SanType::URI(uri)];
         params.serial_number = Some(rcgen::SerialNumber::from(issued_ms));
         params.not_before = rcgen::date_time_ymd(2024, 1, 1);
-        params.not_after  = rcgen::date_time_ymd(2099, 1, 1);
+        super::set_not_after_for_issue(&mut params);
         issue_checked(params, public, ca_cert_der, ca_key_pair)
     }
 
@@ -1786,7 +2151,7 @@ mod imp {
         params.subject_alt_names = vec![SanType::URI(uri)];
         params.serial_number = Some(rcgen::SerialNumber::from(issued_ms));
         params.not_before = rcgen::date_time_ymd(2024, 1, 1);
-        params.not_after  = rcgen::date_time_ymd(2099, 1, 1);
+        super::set_not_after_for_issue(&mut params);
         issue_checked(params, public, ca_cert_der, ca_key_pair)
     }
 
@@ -1810,6 +2175,17 @@ mod imp {
     /// `POST /gateway/identity/client-cert`, which publishes it. Issuing again for the same principal **supersedes**
     /// the earlier key: its serial is later, and the client-cert fold refuses the older one once the newer is read.
     /// Returns the two paths.
+    /// **Re-issue a client's existing key** under the CA in `ca_dir` (identity-and-lifecycle I2): a client certificate
+    /// for `token:{issuer}/{name}` over `public_key` alone, issued strictly after `floor_ms` (the principal's mark).
+    /// Returns its DER and writes nothing. The primitive `tls succeed`'s client re-issue is to call (I2's PR 3); until
+    /// then only tests do.
+    #[doc(hidden)]
+    pub fn issue_client_cert_for_key(ca_dir: &Path, issuer: &str, name: &str, public_key: [u8; 32], floor_ms: u64) -> Result<Vec<u8>, GossipError> {
+        let ca_cfg = TlsConfig { auto_cert_dir: ca_dir.to_path_buf(), ..TlsConfig::default() };
+        let (ca_cert_der, ca_key_pair) = load_existing_ca(&ca_cfg)?;
+        Ok(client_cert_under(issuer, name, &public_key, &ca_cert_der, &ca_key_pair, super::issuance_after(floor_ms))?.as_ref().to_vec())
+    }
+
     pub fn issue_client_cert(ca_dir: &Path, issuer: &str, name: &str, out_dir: &Path) -> Result<(std::path::PathBuf, std::path::PathBuf), GossipError> {
         use base64::{engine::general_purpose::STANDARD, Engine};
         use ed25519_dalek::pkcs8::EncodePrivateKey;
@@ -2375,7 +2751,7 @@ mod imp {
             .ok_or_else(|| GossipError::InvalidField { field: "tls", reason: "TLS: CA cert PEM contains no certificate".into() })
     }
 
-    fn cert_der_to_pem(der: &[u8]) -> String {
+    pub(crate) fn cert_der_to_pem(der: &[u8]) -> String {
         use base64::{engine::general_purpose::STANDARD, Engine};
         let b64 = STANDARD.encode(der);
         // wrap at 64 chars
@@ -2404,7 +2780,7 @@ mod imp {
 }
 
 #[cfg(feature = "tls")]
-pub use imp::{ed25519_key_from_cert_der, gateway_server_config_from_pem, generate_rotation, generate_rotation_after, issue_client_cert, issue_consent_cert, issue_node_cert, p256_point_from_cert_der, issue_node_cert_for_key, load_or_generate, mint_ca, sign_bytes, verify_bytes, writable_by_others};
+pub use imp::{ed25519_key_from_cert_der, gateway_server_config_from_pem, generate_rotation, generate_rotation_after, issue_client_cert, issue_client_cert_for_key, issue_consent_cert, issue_node_cert, p256_point_from_cert_der, issue_node_cert_for_key, load_or_generate, mint_ca, mint_ca_at, sign_bytes, verify_bytes, writable_by_others};
 
 #[cfg(all(test, feature = "tls"))]
 mod key_extract_tests {
@@ -3994,6 +4370,182 @@ mod succession_tests {
             assert!(said.contains("cannot be activated at generation 1"), "{said}");
         }
         assert_eq!(a.verifying_key_bytes(), key, "nothing was activated");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+}
+
+/// Identity-and-lifecycle I2, PR 2a: the CA generation (`caGeneration`, R1) — its provisional OID and encoding pinned,
+/// its reader, the gate a shipped build closes, and legacy closed from the roots alone.
+#[cfg(all(test, feature = "tls"))]
+mod ca_generation_tests {
+    use super::{CaGenerationError, NodeTls};
+    use crate::{config::TlsConfig, node_id::NodeId, removal::{KeyStanding, RemovedSet}};
+    use rustls::pki_types::{pem::PemObject, CertificateDer};
+    use std::{path::{Path, PathBuf}, sync::Arc};
+
+    fn fresh_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("myc-i2-gen-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn der_of(p: &Path) -> Vec<u8> {
+        CertificateDer::from_pem_file(p).unwrap().as_ref().to_vec()
+    }
+
+    /// A self-signed CA carrying `extensions` (OID arcs, extnValue contents) — malformed values a hand-rolled issuer
+    /// could write.
+    fn ca_with(extensions: Vec<(&[u64], Vec<u8>)>) -> Vec<u8> {
+        let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519).unwrap();
+        let mut p = rcgen::CertificateParams::new(vec![]).unwrap();
+        p.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        p.custom_extensions = extensions.into_iter().map(|(oid, v)| rcgen::CustomExtension::from_oid_content(oid, v)).collect();
+        p.self_signed(&key).unwrap().der().to_vec()
+    }
+
+    /// **The OID and the encoding, pinned** (decision (e): a golden, as I7 pins its grade). Provisional: the release is
+    /// blocked until the registered PEN arc replaces it, and this test changes with it.
+    #[test]
+    fn the_provisional_ca_generation_oid_and_its_encoding_are_pinned() {
+        const { assert!(super::CA_GENERATION_OID_IS_PROVISIONAL, "a release is blocked until the registered PEN arc replaces this OID") };
+        assert_eq!(super::CA_GENERATION_OID, &[1, 3, 6, 1, 4, 1, 32473, 2, 1]);
+        assert_ne!(super::CA_GENERATION_OID, super::CONSENT_GRADE_OID, "its own sub-arc, not I7's");
+        assert_eq!(super::ca_generation_oid_der(), vec![0x2B, 0x06, 0x01, 0x04, 0x01, 0x81, 0xFD, 0x59, 0x02, 0x01]);
+        assert_eq!(super::ca_generation_extension_der(0), vec![0x02, 0x01, 0x00]);
+        assert_eq!(super::ca_generation_extension_der(1), vec![0x02, 0x01, 0x01]);
+        assert_eq!(super::ca_generation_extension_der(127), vec![0x02, 0x01, 0x7F]);
+        assert_eq!(super::ca_generation_extension_der(128), vec![0x02, 0x02, 0x00, 0x80]);
+        assert_eq!(super::ca_generation_extension_der(u64::MAX), vec![0x02, 0x09, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]);
+    }
+
+    /// **R1: a generation is read, and a malformed one is never 0.** A CA without the extension is generation 0, one
+    /// minted at n reads n, and a value that is not one minimal non-negative `INTEGER` fitting a `u64`, or the
+    /// extension twice, is `Malformed` — and is refused at load and at a change of roots, never read as 0. Seen failing
+    /// first with the reader taking a malformed value as 0: the negative and twice cases read `Ok(0)`.
+    #[test]
+    fn a_ca_generation_is_read_and_a_malformed_one_is_never_zero() {
+        let (g0, _) = super::imp::generate_ca_for_test();
+        assert_eq!(super::ca_generation(g0.as_ref()), Ok(0), "no extension: generation 0, every CA before I2");
+        let (g3, _) = super::imp::generate_ca_at_generation_for_test(7, 3);
+        assert_eq!(super::ca_generation(g3.as_ref()), Ok(3));
+        let oid = super::CA_GENERATION_OID;
+        for (what, value) in [
+            ("negative", vec![0x02, 0x01, 0xFF]),
+            ("not minimal", vec![0x02, 0x02, 0x00, 0x01]),
+            ("not an INTEGER", vec![0x04, 0x01, 0x01]),
+            ("trailing bytes", vec![0x02, 0x01, 0x01, 0x00]),
+            ("too long for a u64", vec![0x02, 0x0A, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+            ("empty", vec![0x02, 0x00]),
+        ] {
+            assert_eq!(super::ca_generation(&ca_with(vec![(oid, value)])), Err(CaGenerationError::Malformed), "{what}");
+        }
+        let twice = ca_with(vec![(oid, super::ca_generation_extension_der(1)), (oid, super::ca_generation_extension_der(2))]);
+        assert_eq!(super::ca_generation(&twice), Err(CaGenerationError::Malformed), "twice");
+        // Refused at load, naming why.
+        let base = fresh_dir("malformed");
+        let path = base.join("ca-cert.pem");
+        std::fs::write(&path, super::imp::cert_der_to_pem(&twice)).unwrap();
+        let refused = super::imp::ca_cert_to_der(&std::fs::read_to_string(&path).unwrap(), &path, true).unwrap_err().to_string();
+        assert!(refused.contains("caGeneration") && refused.contains("malformed"), "{refused}");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// **The shipped build's refusal, by name** (decision (e), I7's #800 precedent). With the gate closed, as in a build
+    /// without `cfg(test)` or `provisional-ca-generation`: a CA under the provisional OID reads `Provisional` — never 0
+    /// — and is refused at load naming the OID; no generation above 0 is minted; a generation-0 CA, which carries no
+    /// extension, is read and minted as before. Seen failing first with the reader ignoring the gate: the successor read
+    /// as generation 1 in a closed build.
+    #[test]
+    fn a_closed_provisional_gate_reads_no_ca_generation_and_mints_none() {
+        let (g1, _) = super::imp::generate_ca_at_generation_for_test(7, 1);
+        let base = fresh_dir("closed");
+        let path = base.join("ca-cert.pem");
+        std::fs::write(&path, super::imp::cert_der_to_pem(g1.as_ref())).unwrap();
+        super::with_provisional_ca_generation_closed(|| {
+            assert!(!super::ca_generation_oid_open());
+            assert_eq!(super::ca_generation(g1.as_ref()), Err(CaGenerationError::Provisional));
+            let refused = super::imp::ca_cert_to_der(&std::fs::read_to_string(&path).unwrap(), &path, true).unwrap_err().to_string();
+            assert!(refused.contains("1.3.6.1.4.1.32473.2.1") && refused.contains("provisional"), "{refused}");
+            let minted = super::mint_ca_at(&base.join("succ"), Some(7), 1).unwrap_err().to_string();
+            assert!(minted.contains("not minted by this build"), "{minted}");
+            assert!(!base.join("succ").join("ca-cert.pem").exists(), "nothing written");
+            let (g0, _) = super::imp::generate_ca_for_test();
+            assert_eq!(super::ca_generation(g0.as_ref()), Ok(0));
+            super::mint_ca_at(&base.join("zero"), None, 0).expect("generation 0 writes no extension");
+        });
+        assert_eq!(super::ca_generation(g1.as_ref()), Ok(1), "the gate reopens");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// **R1 (exit 15's flag): legacy closes from the roots alone**, whenever the root set is built — at start and at
+    /// each change of roots. A node started on generation 0 is open, widening a first succession (0 and 1) stays open,
+    /// narrowing to 1 closes, and a node **started** on a generation-1 root — the operator's recovery, or a node
+    /// installed after the succession, neither of which has `succession/` (#768's H2) — is closed from its first
+    /// moment. A later succession's widened node (1 and 2) stays closed. Seen failing first with the flag set only at
+    /// `activate`, never at start: the node started on the successor's root answered as legacy-open.
+    #[test]
+    fn legacy_closes_only_when_every_root_is_generation_one_or_later() {
+        let (g0, _) = super::imp::generate_ca_for_test();
+        let (g1, _) = super::imp::generate_ca_at_generation_for_test(7, 1);
+        let (g2, _) = super::imp::generate_ca_at_generation_for_test(7, 2);
+        let (g0, g1, g2) = (g0.as_ref().to_vec(), g1.as_ref().to_vec(), g2.as_ref().to_vec());
+        assert!(!super::roots_close_legacy(std::slice::from_ref(&g0)));
+        assert!(!super::roots_close_legacy(&[g0.clone(), g1.clone()]), "a first succession's widened node is open");
+        assert!(super::roots_close_legacy(std::slice::from_ref(&g1)));
+        assert!(super::roots_close_legacy(&[g1.clone(), g2.clone()]), "a later succession's widened node stays closed");
+        assert!(!super::roots_close_legacy(&[]));
+
+        let base = fresh_dir("closed-at-start");
+        let ca0 = base.join("ca0");
+        super::mint_ca(&ca0).unwrap();
+        let ca1 = base.join("ca1");
+        let ca1_cert = super::mint_ca_at(&ca1, Some(9), 1).unwrap();
+        let start = |name: &str, ca_dir: &Path, trust: &Path, port: u16| -> (NodeTls, Arc<KeyStanding>) {
+            let id = NodeId::new("127.0.0.1", port).unwrap();
+            let (cert, key) = super::issue_node_cert(ca_dir, &id, &base.join(format!("{name}-issued"))).unwrap();
+            let cfg = TlsConfig { auto_cert_dir: base.join(format!("{name}-node")), cert_pem: Some(cert), key_pem: Some(key), ca_cert_pem: Some(trust.to_path_buf()) };
+            let standing = Arc::new(KeyStanding::default());
+            (super::load_or_generate(&cfg, &id, Arc::new(RemovedSet::default()), Arc::clone(&standing)).unwrap(), standing)
+        };
+        let (a, a_standing) = start("a", &ca0, &ca0.join("ca-cert.pem"), 9711);
+        assert!(!a_standing.legacy_closed(), "generation 0: open, as today");
+        let succ = der_of(&ca1_cert);
+        let a1 = super::issue_node_cert_for_key(&ca1, &NodeId::new("127.0.0.1", 9711).unwrap(), a.verifying_key_bytes(), 0).unwrap();
+        a.activate(a.reroot_material(a.node_cert_der(), vec![der_of(&ca0.join("ca-cert.pem")), succ.clone()]).unwrap()).unwrap();
+        assert!(!a_standing.legacy_closed(), "widened in the first succession: still open");
+        a.activate(a.reroot_material(a1, vec![succ.clone()]).unwrap()).unwrap();
+        assert!(a_standing.legacy_closed(), "narrowed to generation 1: closed");
+        let (_b, b_standing) = start("b", &ca1, &ca1_cert, 9712);
+        assert!(b_standing.legacy_closed(), "started on the successor's files, with no succession/: closed");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// **#796's review, must-address 6: a handshake judged under old roots records no anchor.** The writer reads the
+    /// roots generation before it loads the client config; an anchor tagged with an older generation than the node's
+    /// now reaches no sink, so it cannot land after the agent cleared the anchors at a change of roots. Seen failing
+    /// first with the tag ignored: the old-roots anchor was recorded.
+    #[test]
+    fn an_anchor_from_a_handshake_judged_under_old_roots_is_not_recorded() {
+        let base = fresh_dir("anchor-tag");
+        let ca1 = base.join("ca1");
+        super::mint_ca(&ca1).unwrap();
+        let ca2 = base.join("ca2");
+        let ca2_cert = super::mint_ca(&ca2).unwrap();
+        let id = NodeId::new("127.0.0.1", 9713).unwrap();
+        let (cert, key) = super::issue_node_cert(&ca1, &id, &base.join("issued")).unwrap();
+        let cfg = TlsConfig { auto_cert_dir: base.join("node"), cert_pem: Some(cert), key_pem: Some(key), ca_cert_pem: Some(ca1.join("ca-cert.pem")) };
+        let t = super::load_or_generate(&cfg, &id, Arc::new(RemovedSet::default()), Default::default()).unwrap();
+        let recorded = Arc::new(std::sync::Mutex::new(Vec::<[u8; 32]>::new()));
+        let sink = Arc::clone(&recorded);
+        t.set_anchor_sink(Arc::new(move |_, k| sink.lock().unwrap().push(k)));
+        let peer = NodeId::new("127.0.0.1", 9714).unwrap();
+        let before = t.roots_generation();
+        t.activate(t.reroot_material(t.node_cert_der(), vec![der_of(&ca1.join("ca-cert.pem")), der_of(&ca2_cert)]).unwrap()).unwrap();
+        t.record_anchor(&peer, [1u8; 32], before);
+        assert!(recorded.lock().unwrap().is_empty(), "judged under the old roots: not recorded");
+        t.record_anchor(&peer, [2u8; 32], t.roots_generation());
+        assert_eq!(*recorded.lock().unwrap(), vec![[2u8; 32]], "judged under the current roots: recorded");
         let _ = std::fs::remove_dir_all(&base);
     }
 }

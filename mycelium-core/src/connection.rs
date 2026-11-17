@@ -399,6 +399,13 @@ pub async fn handle_connection(
     let inbound_observer = task_ctx.inbound_observer.get().cloned();
     let wal             = task_ctx.wal.get().cloned();
     let tls             = task_ctx.tls.get().cloned();
+    // Identity-and-lifecycle I2 (#796's review, must-address 6): the peer's certificate and the roots generation it was
+    // last judged under. The accept's own verdict is not tagged (its server config was loaded before this runs, and the
+    // roots may have changed since), so the first frame re-judges it once under the current roots; after that, each
+    // change of roots re-judges it on the next frame, and the session closes, that frame unprocessed, when the new roots
+    // refuse the peer. No verifier runs on an established session, so an old-root peer's session used to outlive a narrow.
+    #[cfg(feature = "tls")]
+    let mut session: Option<(u64, Vec<u8>)> = tls.as_ref().and_then(|_| socket.peer_cert_der().map(|d| (u64::MAX, d)));
     let mut socket = BufReader::with_capacity(8_192, crate::stall::StallGuard::new(socket));
     let frame_progress = crate::stall::StallBound::read_from_config(&task_ctx.config);
     let mut shutdown_rx = shutdown.subscribe();
@@ -512,6 +519,19 @@ pub async fn handle_connection(
             _ = shutdown_rx.wait_for(|v| *v) => break,
         };
         socket.get_mut().arm(None);
+
+        #[cfg(feature = "tls")]
+        if let (Some(t), Some((judged_at, der))) = (tls.as_ref(), session.as_mut())
+            && *judged_at != t.roots_generation()
+        {
+            let (now, trusted) = t.verify_member_cert_tagged(der);
+            *judged_at = now;
+            if !trusted {
+                t.note_session_closed(true, der);
+                warn!(from = %peer_addr, "closing an inbound session: its certificate does not verify against this node's new roots");
+                break;
+            }
+        }
 
         spoke = true;
 

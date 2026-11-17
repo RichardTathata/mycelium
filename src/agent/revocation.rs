@@ -47,8 +47,11 @@
 //! counts is appended to a node-local journal (`src/agent/journal.rs`, when persistence is
 //! configured), so a revocation hidden while the node was down still counts after its restart. The
 //! journal is bounded (64 per node, 65 536 in all); a node whose budget is full is **saturated** and
-//! trusts only its newest anchored key — failing closed, never open. Anchored keys this process has
-//! judged are kept for its life, so hiding a certificate record does not demote a node in-process.
+//! trusts only its newest anchored key — failing closed, never open. **Kept anchors** (identity-and-lifecycle
+//! I2, R4): an anchored key keeps its certificates (at most two, one per issuer), journaled under
+//! `[persistence]`, so hiding a certificate record does not demote a node, in-process or across a restart. A
+//! kept certificate is removed only when it fails the roots this node trusts now — re-judged at every change of
+//! roots and at start — and a node left with none trusts nothing, never reverting to legacy.
 //! The owner republishes its certificate and its revocations at start, periodically, and whenever its
 //! records under these prefixes change (the `sys/` tripwire counts the foreign write).
 
@@ -255,15 +258,194 @@ impl ParsedRevocation {
 enum JournalEntry {
     Counted { node: String, path: String, bytes: Vec<u8> },
     Saturated { node: String },
+    /// A certificate this node keeps as one of `node`'s anchors (identity-and-lifecycle I2, R4): appended after it is
+    /// held in memory (store, then WAL), on its own budget line. Last, so the variants before it keep their encoding;
+    /// an older binary skips it with its "did not decode" warning.
+    Anchor { node: String, der: Vec<u8> },
+}
+
+/// Kept anchor certificates journaled per node before further ones live in memory only.
+pub(crate) const ANCHOR_JOURNAL_PER_NODE: usize = 2 * MAX_CERTS_PER_NODE;
+/// Kept anchor certificates journaled in all.
+pub(crate) const ANCHOR_JOURNAL_TOTAL: usize = 65_536;
+/// Certificates an anchor keeps: one per issuer, and two issuers at once is a succession's widened phase.
+pub(crate) const KEPT_CERTS_PER_ANCHOR: usize = 2;
+/// The roots generation a kept certificate restored from the journal carries: no generation's, so the first fold
+/// re-judges it against the roots this process has.
+const UNJUDGED: u64 = u64::MAX;
+
+/// One certificate an anchor keeps (identity-and-lifecycle I2, R4): the certificate itself, never its digest, so it
+/// can be re-judged against new roots after its record has left the store.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct KeptCert {
+    der: Arc<[u8]>,
+    /// The certificate's issuer name (DER) — one kept certificate per issuer.
+    issuer: Vec<u8>,
+    /// Its issuance (the serial, in ms): the anchor's rank is the lowest among its kept certificates.
+    issued: u64,
+    /// The roots generation it was last judged under ([`UNJUDGED`] when restored from the journal).
+    judged: u64,
+    /// Its `notAfter` (ms): once the wall clock reaches it the certificate is judged again, in-process as at a restart
+    /// (#805's review F3), and an expired one is dropped.
+    expires: u64,
+}
+
+/// What an anchor keeps: its certificates, at most [`KEPT_CERTS_PER_ANCHOR`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct KeptAnchor {
+    certs: Vec<KeptCert>,
+}
+
+impl KeptAnchor {
+    /// The anchor's rank: the lowest issuance among its kept certificates (a later re-issue never raises it).
+    fn rank(&self) -> Option<u64> {
+        self.certs.iter().map(|c| c.issued).min()
+    }
+
+    /// Keep `cert`: it replaces the kept certificate of the same issuer when it was issued earlier (the lower rank
+    /// stands), joins when there is room, and otherwise replaces the latest-issued kept certificate if it is earlier.
+    /// Returns whether it is now kept and was not before.
+    fn keep(&mut self, cert: KeptCert) -> bool {
+        if let Some(same) = self.certs.iter_mut().find(|c| c.issuer == cert.issuer) {
+            if cert.issued < same.issued || (cert.der == same.der && same.judged != cert.judged) {
+                let new = cert.der != same.der;
+                *same = cert;
+                return new;
+            }
+            return false;
+        }
+        if self.certs.len() < KEPT_CERTS_PER_ANCHOR {
+            self.certs.push(cert);
+            return true;
+        }
+        if let Some(latest) = self.certs.iter_mut().max_by_key(|c| c.issued)
+            && cert.issued < latest.issued
+        {
+            *latest = cert;
+            return true;
+        }
+        false
+    }
+}
+
+/// The kept-anchor journal's bookkeeping (I2, R4; #805's review F2 and its confirm round N1–N3), shared with the
+/// spawned appends. Durability is tracked **per certificate**: a certificate is journaled (its append durable), in flight,
+/// or neither — never offered, refused by the budget, or failed and waiting out its backoff. A caller waits for the
+/// certificates it cares about ([`IdentityLedger::anchors_durable_for`]), whichever fold started their appends, so an
+/// append in flight before the caller began is waited for too, and a later append finishing first satisfies nothing.
+/// Bounded: one entry per kept certificate in each map, and kept certificates are bounded by the anchors' caps.
+#[derive(Default)]
+struct AppendTally {
+    /// The next sequence number an append takes (the test hooks name appends by it).
+    next: AtomicU64,
+    /// Failed certificates: consecutive failures and the wall-clock ms before which no retry is made (N3's backoff).
+    retry: papaya::HashMap<(NodeId, [u8; 32]), (u32, u64)>,
+    /// Certificates whose refusal (budget, or not handed over) was already warned and counted: once per certificate.
+    refused_noted: papaya::HashSet<(NodeId, [u8; 32])>,
+    /// Kept certificates whose append is in flight, per node, by digest.
+    inflight: papaya::HashMap<NodeId, HashSet<[u8; 32]>>,
+    /// Kept certificates journaled durably (read at start, and appended since), per node, by digest.
+    journaled: papaya::HashMap<NodeId, HashSet<[u8; 32]>>,
+    journaled_total: AtomicUsize,
+    notify: tokio::sync::Notify,
+    /// Test hooks (#805's review F2): hold the append numbered `hold_plus1 - 1` until `gate` is notified, and fail the
+    /// one numbered `fail_plus1 - 1`. `0` holds and fails nothing.
+    #[cfg(test)]
+    hold_plus1: AtomicU64,
+    #[cfg(test)]
+    gate: tokio::sync::Notify,
+    #[cfg(test)]
+    fail_plus1: AtomicU64,
+    /// Panic the append task numbered `panic_plus1 - 1` before it appends.
+    #[cfg(test)]
+    panic_plus1: AtomicU64,
+}
+
+/// One kept-anchor append, settled exactly once: by [`SettleAppend::finish`] with its result, or — if the task panics
+/// or is dropped before that — as **failed** on drop. Either way the certificate leaves the in-flight set and the
+/// waiters are woken, so `anchors_durable_for` always answers and a later fold retries a failure.
+struct SettleAppend {
+    tally: Arc<AppendTally>,
+    node: NodeId,
+    digest: [u8; 32],
+    failed: Arc<AtomicU64>,
+    done: bool,
+}
+
+impl SettleAppend {
+    fn finish(&mut self, ok: bool) {
+        if self.done {
+            return;
+        }
+        self.done = true;
+        let key = (self.node.clone(), self.digest);
+        if ok {
+            if set_edit(&self.tally.journaled, &self.node, self.digest, true) {
+                self.tally.journaled_total.fetch_add(1, Ordering::Relaxed);
+            }
+            self.tally.retry.pin().remove(&key);
+            self.tally.refused_noted.pin().remove(&key);
+        } else {
+            self.failed.fetch_add(1, Ordering::Relaxed);
+            let at = mycelium_core::sim_seam::wall_now_ms();
+            self.tally.retry.pin().compute(key, |existing| {
+                let n = existing.map_or(0, |(_, (n, _))| *n).saturating_add(1);
+                let backoff = 1_000u64 << (n - 1).min(6);
+                papaya::Operation::Insert::<_, ()>((n, at.saturating_add(backoff)))
+            });
+        }
+        set_edit(&self.tally.inflight, &self.node, self.digest, false);
+        self.tally.notify.notify_waiters();
+    }
+}
+
+impl Drop for SettleAppend {
+    fn drop(&mut self) {
+        self.finish(false);
+    }
+}
+
+fn set_edit(map: &papaya::HashMap<NodeId, HashSet<[u8; 32]>>, node: &NodeId, digest: [u8; 32], insert: bool) -> bool {
+    let mut changed = false;
+    map.pin().compute(node.clone(), |existing| {
+        let mut set = existing.map(|(_, s)| s.clone()).unwrap_or_default();
+        changed = if insert { set.insert(digest) } else { set.remove(&digest) };
+        if changed { papaya::Operation::Insert(set) } else { papaya::Operation::Abort(()) }
+    });
+    changed
+}
+
+/// A certificate offered to `node`'s anchors by a fold: judged under the roots generation `judged`.
+pub(crate) struct Offered {
+    key: [u8; 32],
+    cert: KeptCert,
 }
 
 /// What this node keeps between folds (post-360 plan row Q). Lock-free (papaya and atomics), so no
 /// lock-order row; the fold itself is single-flight (`running` / `again`).
 #[derive(Default)]
 pub(crate) struct IdentityLedger {
-    /// Every anchored key this process has judged, per node, with its certificate's issuance — kept
-    /// for the process's life, so hiding a certificate record does not demote a node in-process.
-    anchors_seen: papaya::HashMap<NodeId, HashMap<[u8; 32], u64>>,
+    /// Every anchored key this node keeps, per node, **with its certificates** (identity-and-lifecycle I2, R4): an
+    /// anchor is removed only when its kept certificates fail the current roots, never because its record left the
+    /// store — so hiding a record demotes no node, in-process or (journaled, under `[persistence]`) across a restart.
+    /// A node's entry, once made, stays when it is empty: a node that had standing and lost it trusts nothing
+    /// (fails closed; #796's review, must-address 7), never reverting to legacy.
+    anchors_seen: papaya::HashMap<NodeId, HashMap<[u8; 32], KeptAnchor>>,
+    /// Anchor appends handed to the journal, and those finished — what [`IdentityLedger::anchors_durable`] waits on.
+    anchor_tally: Arc<AppendTally>,
+    /// Kept certificates the journal could not take (budget full, or a failed append): kept in memory only.
+    pub(crate) anchor_journal_refused: AtomicU64,
+    /// Kept certificates dropped because they no longer verify against this node's roots (I2, R4).
+    pub(crate) anchors_dropped: AtomicU64,
+    /// Kept-anchor appends that failed (each is tried again by a later fold).
+    pub(crate) anchor_append_failed: Arc<AtomicU64>,
+    /// **The one owner of this node's identity and roots** (identity-and-lifecycle I2, #796's review must-address 8):
+    /// `rotate_identity` holds it from building its material to activating it — across its propagation wait — and a
+    /// change of roots (`GossipAgent::change_roots`) holds it for its whole run, so the roots never change between a
+    /// rotation's publish and its cutover. Before, a change of roots in that wait made `activate` refuse the rotation
+    /// after its new key had been published and saved. A `tokio` mutex, held across `.await`; it is taken before
+    /// `NodeTls::activate_lock` and never while holding another lock (lock-order table, `IdentityLedger::identity_owner`).
+    pub(crate) identity_owner: tokio::sync::Mutex<()>,
     /// The journal of counted revocations, when persistence is configured. Swappable so shutdown can
     /// release it (and its ownership lock) for an agent restarted over the same directory.
     journal: arc_swap::ArcSwapOption<super::journal::Journal>,
@@ -279,7 +461,9 @@ pub(crate) struct IdentityLedger {
     /// The CA check and parse per distinct certificate (by SHA-256), bounded by [`CERT_CACHE_MAX`],
     /// each verdict tagged with the roots generation it was judged under (identity-and-lifecycle I2,
     /// R4): a verdict of an older generation is a miss.
-    cert_cache: papaya::HashMap<[u8; 32], (u64, Option<CertFacts>)>,
+    /// Each verdict also carries the certificate's `notAfter` (ms): a verdict is a miss once the wall clock reaches
+    /// it, so a certificate's expiry is judged in-process as a restart judges it (I2, #805's review F3).
+    cert_cache: papaya::HashMap<[u8; 32], (u64, u64, Option<CertFacts>)>,
     running: AtomicBool,
     again: AtomicBool,
     /// Certificate records whose issuance was past `wall_now_ms` plus the skew bound when judged.
@@ -312,6 +496,11 @@ impl IdentityLedger {
                         self.saturated.pin().insert(n);
                     }
                 }
+                Ok(JournalEntry::Anchor { node, der }) => {
+                    if let Ok(n) = node.parse::<NodeId>() {
+                        self.restore_anchor(&n, der);
+                    }
+                }
                 Err(_) => tracing::warn!(journal = %path.display(), "revocation journal: an entry did not decode; skipped"),
             }
         }
@@ -323,6 +512,166 @@ impl IdentityLedger {
     /// Release the journal (shutdown): its ownership lock goes with the last handle.
     pub(crate) fn close_journal(&self) {
         self.journal.store(None);
+    }
+
+    /// Take a journaled kept certificate back at start, **unjudged**: the first fold judges it against the roots this
+    /// process has, so a restart in a later phase than the journal's drops what no longer verifies.
+    fn restore_anchor(&self, node: &NodeId, der: Vec<u8>) {
+        let Some(id) = mycelium_core::tls::cert_identity(&der) else { return };
+        let Some(issuer) = mycelium_core::tls::cert_issuer_der(&der) else { return };
+        let digest: [u8; 32] = Sha256::digest(&der).into();
+        if set_edit(&self.anchor_tally.journaled, node, digest, true) {
+            self.anchor_tally.journaled_total.fetch_add(1, Ordering::Relaxed);
+        }
+        let expires = mycelium_core::tls::cert_not_after_ms(&der).unwrap_or(u64::MAX);
+        let cert = KeptCert { der: Arc::from(der), issuer, issued: id.issued_ms.unwrap_or(0), judged: UNJUDGED, expires };
+        self.anchors_seen.pin().compute(node.clone(), |existing| {
+            let mut m = existing.map(|(_, m)| m.clone()).unwrap_or_default();
+            m.entry(id.key).or_default().keep(cert.clone());
+            papaya::Operation::Insert::<_, ()>(m)
+        });
+    }
+
+    /// The sequence number the next kept-anchor append will take (the test hooks name appends by it).
+    #[cfg(test)]
+    pub(super) fn anchor_mark(&self) -> u64 {
+        self.anchor_tally.next.load(Ordering::Acquire)
+    }
+
+    /// Every certificate this node keeps as an anchor, by node and digest — what `change_roots` waits on.
+    #[cfg_attr(not(test), allow(dead_code))] // its caller, `change_roots`, has none outside the tests until PR 2b
+    pub(crate) fn kept_certs(&self) -> Vec<(NodeId, [u8; 32])> {
+        self.anchors_seen.pin().iter().flat_map(|(n, m)| {
+            m.values().flat_map(|a| a.certs.iter()).map(|c| (n.clone(), Sha256::digest(&c.der).into())).collect::<Vec<_>>()
+        }).collect()
+    }
+
+    /// Wait until each of `certs` is **settled** — journaled durably, or not in flight (refused by the budget, failed and
+    /// backing off, or never offered) — and answer whether every one is journaled (identity-and-lifecycle I2, R4: the
+    /// kept certificates are durable before the Narrowed phase is persisted; #805's review F2 and N1). Per certificate,
+    /// whichever fold started its append: one in flight before the caller began is waited for, and a later append
+    /// finishing first satisfies nothing. With no journal there is nothing to wait for and the anchors are in memory
+    /// only, which is `true`: durability across a restart is stated under `[persistence]`.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) async fn anchors_durable_for(&self, certs: &[(NodeId, [u8; 32])]) -> bool {
+        if self.journal.load().is_none() {
+            return true;
+        }
+        let t = Arc::clone(&self.anchor_tally);
+        let has = |m: &papaya::HashMap<NodeId, HashSet<[u8; 32]>>, n: &NodeId, d: &[u8; 32]| m.pin().get(n).is_some_and(|s| s.contains(d));
+        loop {
+            let notified = t.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if !certs.iter().any(|(n, d)| has(&t.inflight, n, d)) {
+                return certs.iter().all(|(n, d)| has(&t.journaled, n, d));
+            }
+            notified.await;
+        }
+    }
+
+    /// Count and warn a refusal once per certificate (N3).
+    fn refuse_once(&self, node: &NodeId, digest: [u8; 32], why: &str) {
+        if self.anchor_tally.refused_noted.pin().insert((node.clone(), digest)) {
+            self.anchor_journal_refused.fetch_add(1, Ordering::Relaxed);
+            tracing::warn!(%node, "identity journal: {why}; this anchor is kept in this process only");
+        }
+    }
+
+    /// Journal a kept certificate of `node`'s, within the anchors' own budget. Held in memory first (the caller has
+    /// merged it), then handed to the journal: the store-then-WAL order. A certificate already journaled or in flight
+    /// is left; one this cannot hand to the journal (no runtime, an encode failure) is counted, and the next fold tries
+    /// it again (#805's review F2).
+    fn journal_anchor(&self, node: &NodeId, der: &[u8]) {
+        let Some(j) = self.journal.load_full() else { return };
+        let t = &self.anchor_tally;
+        let digest: [u8; 32] = Sha256::digest(der).into();
+        let held = |m: &papaya::HashMap<NodeId, HashSet<[u8; 32]>>| m.pin().get(node).map_or(0, |s| s.len());
+        if t.journaled.pin().get(node).is_some_and(|s| s.contains(&digest)) || t.inflight.pin().get(node).is_some_and(|s| s.contains(&digest)) {
+            return;
+        }
+        if held(&t.journaled) + held(&t.inflight) >= ANCHOR_JOURNAL_PER_NODE || t.journaled_total.load(Ordering::Relaxed) >= ANCHOR_JOURNAL_TOTAL {
+            self.refuse_once(node, digest, "the kept-anchor budget is full");
+            return;
+        }
+        // N3: a certificate whose append failed is retried only after its backoff (1 s, doubling, at most 64 s).
+        let now = mycelium_core::sim_seam::wall_now_ms();
+        if t.retry.pin().get(&(node.clone(), digest)).is_some_and(|(_, after)| now < *after) {
+            return;
+        }
+        let entry = JournalEntry::Anchor { node: node.to_string(), der: der.to_vec() };
+        let (Ok(bytes), Ok(rt)) = (mycelium_core::serde_fixint::to_vec(&entry), tokio::runtime::Handle::try_current()) else {
+            self.refuse_once(node, digest, "a kept anchor could not be handed to the journal (the next fold tries again)");
+            return;
+        };
+        if !set_edit(&t.inflight, node, digest, true) {
+            return;
+        }
+        #[cfg_attr(not(test), allow(unused_variables))]
+        let seq = t.next.fetch_add(1, Ordering::AcqRel);
+        let tally = Arc::clone(t);
+        let node = node.clone();
+        let failed_counter = Arc::clone(&self.anchor_append_failed);
+        // Settled on every exit: a task that panics, or is dropped at shutdown, would otherwise leave the certificate in
+        // flight for good — the wait would never answer and no fold would retry it (#805's confirm round, the last item).
+        let mut settle = SettleAppend { tally, node: node.clone(), digest, failed: failed_counter, done: false };
+        rt.spawn(async move {
+            #[cfg(test)]
+            if settle.tally.hold_plus1.load(Ordering::Acquire) == seq + 1 {
+                settle.tally.gate.notified().await;
+            }
+            #[cfg(test)]
+            if settle.tally.panic_plus1.load(Ordering::Acquire) == seq + 1 {
+                panic!("the test's hook: this append task panics");
+            }
+            let ok = j.append(bytes).await.map_err(|e| tracing::warn!(error = %e, "identity journal: an anchor append failed; the next fold tries again")).is_ok();
+            #[cfg(test)]
+            let ok = ok && settle.tally.fail_plus1.load(Ordering::Acquire) != seq + 1;
+            settle.finish(ok);
+        });
+    }
+
+    /// Test hooks on the next appends (#805's review F2): hold append `hold` until [`Self::release_held_for_test`], and
+    /// fail append `fail`.
+    #[cfg(test)]
+    pub(super) fn hook_appends_for_test(&self, hold: Option<u64>, fail: Option<u64>) {
+        self.anchor_tally.hold_plus1.store(hold.map_or(0, |h| h + 1), Ordering::Release);
+        self.anchor_tally.fail_plus1.store(fail.map_or(0, |f| f + 1), Ordering::Release);
+    }
+
+    /// Panic the append task numbered `seq` (the drop guard's test).
+    #[cfg(test)]
+    pub(super) fn panic_append_for_test(&self, seq: u64) {
+        self.anchor_tally.panic_plus1.store(seq + 1, Ordering::Release);
+    }
+
+    /// Whether this node holds retry or refusal bookkeeping for `node`'s certificate `der` (the pruning test).
+    #[cfg(test)]
+    pub(super) fn anchor_bookkeeping_for_test(&self, node: &NodeId, der: &[u8]) -> bool {
+        let key = (node.clone(), <[u8; 32]>::from(Sha256::digest(der)));
+        self.anchor_tally.retry.pin().contains_key(&key) || self.anchor_tally.refused_noted.pin().contains(&key)
+    }
+
+    /// Forget the retry and refusal bookkeeping of certificates `node` no longer keeps, so each map holds one entry per
+    /// **kept** certificate at most (#805's confirm round: §117's bound, exact).
+    fn prune_anchor_bookkeeping(&self, node: &NodeId, gone: &[[u8; 32]]) {
+        for d in gone {
+            let key = (node.clone(), *d);
+            self.anchor_tally.retry.pin().remove(&key);
+            self.anchor_tally.refused_noted.pin().remove(&key);
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn release_held_for_test(&self) {
+        self.anchor_tally.gate.notify_waiters();
+    }
+
+    /// Whether `node`'s certificate `der` is journaled durably (I2's tests).
+    #[cfg(test)]
+    pub(super) fn anchor_journaled_for_test(&self, node: &NodeId, der: &[u8]) -> bool {
+        let digest: [u8; 32] = Sha256::digest(der).into();
+        self.anchor_tally.journaled.pin().get(node).is_some_and(|s| s.contains(&digest))
     }
 
     fn remember_journaled(&self, node: &NodeId, path: String, bytes: Vec<u8>) -> bool {
@@ -412,7 +761,7 @@ struct CertFacts {
 /// read before it loaded the chain check, and a verdict whose generation is not the node's current one is
 /// a miss. Clearing the cache when the roots change would not do: a fold judging across `activate` would
 /// insert its old-roots verdict after the clear.
-fn cert_facts(ledger: &IdentityLedger, tls: &mycelium_core::tls::NodeTls, der: &[u8]) -> Option<CertFacts> {
+fn cert_facts(ledger: &IdentityLedger, tls: &mycelium_core::tls::NodeTls, der: &[u8]) -> (u64, Option<CertFacts>) {
     cert_facts_with(ledger, tls, der, || {})
 }
 
@@ -424,18 +773,39 @@ pub(super) fn clear_cert_cache_for_test(ledger: &IdentityLedger) {
     ledger.cert_cache.pin().clear();
 }
 
+/// How many certificates `node`'s anchor for `key` keeps, and their issuer names (I2, R4's tests).
+#[cfg(all(test, feature = "provisional-ca-generation"))]
+pub(super) fn kept_for_test(ledger: &IdentityLedger, node: &NodeId, key: &[u8; 32]) -> Vec<Vec<u8>> {
+    ledger.anchors_seen.pin().get(node).and_then(|m| m.get(key).map(|a| a.certs.iter().map(|c| c.issuer.clone()).collect())).unwrap_or_default()
+}
+
+/// Whether this node holds an entry for `node`'s kept anchors at all (I2, must-address 7's tests).
+#[cfg(test)]
+pub(super) fn has_anchor_entry_for_test(ledger: &IdentityLedger, node: &NodeId) -> bool {
+    ledger.anchors_seen.pin().contains_key(node)
+}
+
+/// One node's fold under the generation it reads now; whether it completed (I2, #768's M3 test).
+#[cfg(all(test, feature = "provisional-ca-generation"))]
+pub(super) fn fold_node_for_test(ctx: &TaskCtx, node: &NodeId) -> bool {
+    let Some(tls) = ctx.tls.get() else { return false };
+    fold_node(ctx, tls, node, tls.roots_generation()).is_some()
+}
+
 /// Whether [`cert_facts_with`] gives `der` facts (I2's roots-generation tests).
 #[cfg(test)]
 pub(super) fn cert_verdict_for_test(ledger: &IdentityLedger, tls: &mycelium_core::tls::NodeTls, der: &[u8], between: impl FnOnce()) -> bool {
-    cert_facts_with(ledger, tls, der, between).is_some()
+    cert_facts_with(ledger, tls, der, between).1.is_some()
 }
 
-fn cert_facts_with(ledger: &IdentityLedger, tls: &mycelium_core::tls::NodeTls, der: &[u8], between: impl FnOnce()) -> Option<CertFacts> {
+/// The verdict and the roots generation it was reached under (the cached one's tag on a hit).
+fn cert_facts_with(ledger: &IdentityLedger, tls: &mycelium_core::tls::NodeTls, der: &[u8], between: impl FnOnce()) -> (u64, Option<CertFacts>) {
     let digest: [u8; 32] = Sha256::digest(der).into();
-    if let Some((generation, hit)) = ledger.cert_cache.pin().get(&digest)
+    if let Some((generation, expires, hit)) = ledger.cert_cache.pin().get(&digest)
         && *generation == tls.roots_generation()
+        && mycelium_core::sim_seam::wall_now_ms() < *expires
     {
-        return hit.clone();
+        return (*generation, hit.clone());
     }
     let (generation, facts) = match mycelium_core::tls::cert_identity(der) {
         Some(id) => {
@@ -449,27 +819,40 @@ fn cert_facts_with(ledger: &IdentityLedger, tls: &mycelium_core::tls::NodeTls, d
     if cache.len() >= CERT_CACHE_MAX {
         cache.clear();
     }
-    cache.insert(digest, (generation, facts.clone()));
-    facts
+    cache.insert(digest, (generation, mycelium_core::tls::cert_not_after_ms(der).unwrap_or(u64::MAX), facts.clone()));
+    (generation, facts)
 }
 
 /// Judge one certificate for `node`: issued by the fleet CA and valid now, naming `node` by URI,
 /// for `expect` when a path names the key, issued no later than the wall clock plus the skew bound.
 /// `Some((key, issued_ms))` for a certificate that anchors.
 fn judge_cert(ctx: &CoreCtx, tls: &mycelium_core::tls::NodeTls, ledger: &IdentityLedger, node: &NodeId, der: &[u8], expect: Option<[u8; 32]>) -> Option<([u8; 32], u64)> {
+    judge_cert_tagged(ctx, tls, ledger, node, der, expect).1
+}
+
+/// [`judge_cert`], with the roots generation the chain verdict was reached under (identity-and-lifecycle I2, R4): a
+/// fold merges a verdict into the kept anchors only when it was reached under the generation the fold started at.
+fn judge_cert_tagged(ctx: &CoreCtx, tls: &mycelium_core::tls::NodeTls, ledger: &IdentityLedger, node: &NodeId, der: &[u8], expect: Option<[u8; 32]>) -> (u64, Option<([u8; 32], u64)>) {
     // The parse is free; refuse on it before the CA check.
-    let id = mycelium_core::tls::cert_identity(der)?;
+    let Some(id) = mycelium_core::tls::cert_identity(der) else { return (tls.roots_generation(), None) };
     if expect.is_some_and(|k| k != id.key) || !id.node_uris.contains(&mycelium_core::tls::node_uri(node)) {
-        return None;
+        return (tls.roots_generation(), None);
     }
     let issued = id.issued_ms.unwrap_or(0);
     if issued > mycelium_core::sim_seam::wall_now_ms().saturating_add(skew_ms(ctx)) {
         ledger.cert_future.fetch_add(1, Ordering::Relaxed);
         tracing::warn!(%node, issued_ms = issued, "certificate record issued in the future beyond the skew bound: ignored (identity_cert_future)");
-        return None;
+        return (tls.roots_generation(), None);
     }
-    let facts = cert_facts(ledger, tls, der)?;
-    Some((facts.key, facts.issued))
+    let (generation, facts) = cert_facts(ledger, tls, der);
+    (generation, facts.map(|f| (f.key, f.issued)))
+}
+
+/// A certificate `judge_cert_tagged` passed, as an [`Offered`] kept certificate.
+fn offered(der: &[u8], key: [u8; 32], issued: u64, judged: u64) -> Option<Offered> {
+    let issuer = mycelium_core::tls::cert_issuer_der(der)?;
+    let expires = mycelium_core::tls::cert_not_after_ms(der).unwrap_or(u64::MAX);
+    Some(Offered { key, cert: KeptCert { der: Arc::from(der), issuer, issued, judged, expires } })
 }
 
 /// A revocation record found for a node: where, its bytes, and what it says.
@@ -520,42 +903,143 @@ struct Folded {
     provisional: Vec<Candidate>,
 }
 
-/// Merge `offered` into `node`'s anchors seen, keeping each key's **first** (lowest) issuance —
-/// a later re-issue of a key never raises its rank (the final review's finding 2). Retry-safe
-/// `compute`, so two folds never drop each other's anchors (finding 5).
-fn merge_anchors_seen(ledger: &IdentityLedger, node: &NodeId, offered: &HashMap<[u8; 32], u64>) -> HashMap<[u8; 32], u64> {
-    let mut merged_out = HashMap::new();
-    ledger.anchors_seen.pin().compute(node.clone(), |existing| {
-        let mut m = existing.map(|(_, m)| m.clone()).unwrap_or_default();
-        for (k, at) in offered {
-            let e = m.entry(*k).or_insert(*at);
-            *e = (*e).min(*at);
+/// Re-judge, under the roots generation `g0`, every certificate `node`'s anchors keep that was judged under another
+/// (identity-and-lifecycle I2, R4): `digest → verdict`, only for verdicts reached under `g0` itself — one reached under
+/// a later generation is left out, and the next fold judges it.
+fn rejudge_kept(ctx: &CoreCtx, tls: &mycelium_core::tls::NodeTls, ledger: &IdentityLedger, node: &NodeId, g0: u64) -> HashMap<[u8; 32], bool> {
+    let now = mycelium_core::sim_seam::wall_now_ms();
+    let stale: Vec<([u8; 32], Arc<[u8]>)> = ledger.anchors_seen.pin().get(node).map(|m| {
+        m.iter().flat_map(|(k, a)| a.certs.iter().filter(|c| c.judged != g0 || now >= c.expires).map(move |c| (*k, Arc::clone(&c.der)))).collect()
+    }).unwrap_or_default();
+    let mut out = HashMap::new();
+    for (key, der) in stale {
+        let (tag, verdict) = judge_cert_tagged(ctx, tls, ledger, node, &der, Some(key));
+        if tag == g0 {
+            out.insert(Sha256::digest(&der).into(), verdict.is_some());
         }
-        merged_out = m.clone();
+    }
+    out
+}
+
+/// Merge `offered` into `node`'s kept anchors, and apply `rejudged` to the certificates they keep (identity-and-lifecycle
+/// I2, R4). Each key's rank is its kept certificates' **lowest** issuance — a later re-issue of a key never raises it
+/// (the final review's finding 2). A kept certificate `rejudged` refuses is dropped, a key with none left is dropped,
+/// and the node's entry stays when it is empty (fails closed). Only verdicts reached under `g0` are merged, and when the
+/// roots generation has moved from `g0` **nothing** is merged: `None`, and the caller folds again. Retry-safe `compute`
+/// (the closure is a pure function of what it reads and its inputs), so two folds never drop each other's anchors
+/// (finding 5). Newly kept certificates are journaled after the merge (memory, then the journal).
+fn merge_anchors_seen(
+    ledger: &IdentityLedger,
+    tls: &mycelium_core::tls::NodeTls,
+    node: &NodeId,
+    offered: &[Offered],
+    rejudged: &HashMap<[u8; 32], bool>,
+    g0: u64,
+) -> Option<HashMap<[u8; 32], u64>> {
+    let mut merged_out: Option<HashMap<[u8; 32], u64>> = None;
+    let mut fresh: Vec<Arc<[u8]>> = Vec::new();
+    let mut gone: Vec<[u8; 32]> = Vec::new();
+    let mut dropped = 0u64;
+    let mut capped = 0u64;
+    ledger.anchors_seen.pin().compute(node.clone(), |existing| {
+        fresh.clear();
+        gone.clear();
+        dropped = 0;
+        capped = 0;
+        merged_out = None;
+        #[cfg(test)]
+        if let Some(plant) = MERGE_PLANT.with(|p| p.borrow_mut().take()) {
+            plant();
+        }
+        if tls.roots_generation() != g0 {
+            return papaya::Operation::Abort(());
+        }
+        let mut m: HashMap<[u8; 32], KeptAnchor> = existing.map(|(_, m)| m.clone()).unwrap_or_default();
+        for a in m.values_mut() {
+            a.certs.retain_mut(|c| {
+                let digest: [u8; 32] = Sha256::digest(&c.der).into();
+                match rejudged.get(&digest) {
+                    Some(true) => {
+                        c.judged = g0;
+                        true
+                    }
+                    Some(false) => {
+                        dropped += 1;
+                        false
+                    }
+                    None => true,
+                }
+            });
+        }
+        m.retain(|_, a| !a.certs.is_empty());
+        for o in offered {
+            if o.cert.judged == g0 {
+                m.entry(o.key).or_default().keep(o.cert.clone());
+            }
+        }
+        if m.len() > MAX_CERTS_PER_NODE {
+            let mut v: Vec<([u8; 32], u64)> = m.iter().map(|(k, a)| (*k, a.rank().unwrap_or(0))).collect();
+            v.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+            for (k, _) in v.into_iter().skip(MAX_CERTS_PER_NODE) {
+                m.remove(&k);
+                capped += 1;
+            }
+        }
+        // Every kept certificate is offered to the journal, which skips what is journaled or in flight: a failed or
+        // never-handed append is tried again here (#805's review F2).
+        fresh = m.values().flat_map(|a| a.certs.iter()).map(|c| Arc::clone(&c.der)).collect();
+        // Certificates this merge stops keeping (dropped, replaced or capped): their retry bookkeeping goes with them.
+        gone = existing.map(|(_, old)| {
+            old.values().flat_map(|a| a.certs.iter()).filter(|c| !fresh.contains(&c.der)).map(|c| Sha256::digest(&c.der).into()).collect()
+        }).unwrap_or_default();
+        merged_out = Some(m.iter().filter_map(|(k, a)| a.rank().map(|r| (*k, r))).collect());
+        if existing.is_none() && m.is_empty() {
+            return papaya::Operation::Abort(());
+        }
         if existing.is_some_and(|(_, old)| *old == m) {
             papaya::Operation::Abort(())
         } else {
             papaya::Operation::Insert(m)
         }
     });
+    if dropped > 0 {
+        ledger.anchors_dropped.fetch_add(dropped, Ordering::Relaxed);
+        tracing::warn!(%node, certificates = dropped, "kept anchor certificates no longer verify against this node's roots: dropped");
+    }
+    if capped > 0 {
+        ledger.over_cap.fetch_add(capped, Ordering::Relaxed);
+    }
+    for der in &fresh {
+        ledger.journal_anchor(node, der);
+    }
+    ledger.prune_anchor_bookkeeping(node, &gone);
     merged_out
 }
 
-fn fold_node(ctx: &TaskCtx, tls: &mycelium_core::tls::NodeTls, node: &NodeId) -> Folded {
+#[cfg(test)]
+thread_local! {
+    /// A plant for exit 18's merge race (#768's M3): run inside the next `merge_anchors_seen` closure on this thread,
+    /// before its generation check — where a test changes the roots between a fold's judging and its merge.
+    pub(super) static MERGE_PLANT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// One node's fold under the roots generation `g0` the whole fold started at; `None` when the roots changed during it
+/// (nothing was merged — the caller folds again).
+fn fold_node(ctx: &TaskCtx, tls: &mycelium_core::tls::NodeTls, node: &NodeId, g0: u64) -> Option<Folded> {
     let ledger = &ctx.identity_ledger;
+    // Stratum 0 (I2, R4) — the certificates the anchors keep, re-judged when the roots changed since they were judged.
+    let rejudged = rejudge_kept(ctx, tls, ledger, node, g0);
     // Stratum 1a — the store's certificate records: parse first, CA-check what survives.
-    let mut offered: HashMap<[u8; 32], u64> = HashMap::new();
-    let offer = |offered: &mut HashMap<[u8; 32], u64>, key: [u8; 32], issued: u64| {
-        let e = offered.entry(key).or_insert(issued);
-        *e = (*e).min(issued);
-    };
+    let mut offers: Vec<Offered> = Vec::new();
     for (path, der) in crate::store::scan_kv_prefix(&ctx.kv_state, &format!("{CERT_PREFIX}{node}/")) {
         let Some(expect) = path.rsplit('/').next().and_then(parse_hex32) else { continue };
-        if let Some((k, at)) = judge_cert(ctx, tls, ledger, node, &der, Some(expect)) {
-            offer(&mut offered, k, at);
+        if let (tag, Some((k, at))) = judge_cert_tagged(ctx, tls, ledger, node, &der, Some(expect))
+            && let Some(o) = offered(&der, k, at, tag)
+        {
+            offers.push(o);
         }
     }
-    let known_anchors = merge_anchors_seen(ledger, node, &offered);
+    let known_anchors = merge_anchors_seen(ledger, tls, node, &offers, &rejudged, g0)?;
     // Revocation records: the store, then the journal — parsed (path against body, at most two
     // certificates) before any check.
     let mut found: Vec<Candidate> = Vec::new();
@@ -615,14 +1099,17 @@ fn fold_node(ctx: &TaskCtx, tls: &mycelium_core::tls::NodeTls, node: &NodeId) ->
         selected.extend(cs);
     }
     // Stratum 1b — the certificates the selected records carry.
+    let mut carried: Vec<Offered> = Vec::new();
     for c in &selected {
         for der in c.parsed.trailer.iter().flat_map(|t| t.certs.iter()) {
-            if let Some((k, at)) = judge_cert(ctx, tls, ledger, node, der, None) {
-                offer(&mut offered, k, at);
+            if let (tag, Some((k, at))) = judge_cert_tagged(ctx, tls, ledger, node, der, None)
+                && let Some(o) = offered(der, k, at, tag)
+            {
+                carried.push(o);
             }
         }
     }
-    let mut anchors = merge_anchors_seen(ledger, node, &offered);
+    let mut anchors = merge_anchors_seen(ledger, tls, node, &carried, &HashMap::new(), g0)?;
     if anchors.len() > MAX_CERTS_PER_NODE {
         let mut v: Vec<([u8; 32], u64)> = anchors.into_iter().collect();
         v.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
@@ -660,7 +1147,7 @@ fn fold_node(ctx: &TaskCtx, tls: &mycelium_core::tls::NodeTls, node: &NodeId) ->
             }
         }
     }
-    Folded { anchors, counted, provisional }
+    Some(Folded { anchors, counted, provisional })
 }
 
 /// Every node with a certificate record, a revocation, or a journaled revocation.
@@ -692,11 +1179,20 @@ fn nodes_with_records(ctx: &TaskCtx) -> Vec<NodeId> {
 /// or `sys/revocation/` change, after the startup identity prewarm, periodically (to re-judge a
 /// certificate issued in the future), and by [`revoke_key`].
 pub(crate) fn refresh(ctx: &TaskCtx) {
+    let _ = refresh_now(ctx);
+}
+
+/// [`refresh`], saying whether **this call** ran a fold to completion (`true`) or found one running and asked it to run
+/// again (`false`). A caller that must see the fold's result before it goes on — `GossipAgent::change_roots`, after the
+/// roots changed — calls this until it is `true` (identity-and-lifecycle I2): a fold that ran under the old roots and
+/// re-runs on its own would otherwise finish after the caller had returned.
+pub(crate) fn refresh_now(ctx: &TaskCtx) -> bool {
     let ledger = &ctx.identity_ledger;
+    let mut ran = false;
     loop {
         if ledger.running.swap(true, Ordering::AcqRel) {
             ledger.again.store(true, Ordering::Release);
-            return;
+            return ran;
         }
         loop {
             ledger.again.store(false, Ordering::Release);
@@ -705,9 +1201,10 @@ pub(crate) fn refresh(ctx: &TaskCtx) {
                 break;
             }
         }
+        ran = true;
         ledger.running.store(false, Ordering::Release);
         if !ledger.again.swap(false, Ordering::AcqRel) {
-            return;
+            return ran;
         }
     }
 }
@@ -734,8 +1231,14 @@ fn remember_counted(ledger: &IdentityLedger, node: &NodeId, now: &HashSet<[u8; 3
 fn refresh_once(ctx: &TaskCtx) {
     let Some(tls) = ctx.tls.get() else { return };
     let ledger = &ctx.identity_ledger;
+    // I2, R4 (#768's M3): the whole fold is judged under one roots generation. If the roots change while it runs, the
+    // node being folded merges nothing, no standing judged under the old roots is published, and the fold runs again.
+    let g0 = tls.roots_generation();
     for node in nodes_with_records(ctx) {
-        let folded = fold_node(ctx, tls, &node);
+        let Some(folded) = fold_node(ctx, tls, &node, g0) else {
+            ledger.again.store(true, Ordering::Release);
+            return;
+        };
         let mut now = HashSet::new();
         for c in &folded.counted {
             now.insert(c.parsed.signed.event.revoked_key);
@@ -752,8 +1255,10 @@ fn refresh_once(ctx: &TaskCtx) {
         let counted = remember_counted(ledger, &node, &now);
         let mut revoked = counted.clone();
         revoked.extend(folded.provisional.iter().map(|c| c.parsed.signed.event.revoked_key));
+        // A node whose kept anchors were all dropped keeps its (empty) entry, and has no trusted key: removing anchors
+        // never takes a node back to legacy (#796's review, must-address 7). Only a node never anchored here is legacy.
         let anchored = if folded.anchors.is_empty() {
-            None
+            ledger.anchors_seen.pin().contains_key(&node).then(HashSet::new)
         } else if ledger.saturated.pin().contains(&node) {
             // Fail closed: the newest anchored key alone.
             folded.anchors.iter().max_by(|a, b| a.1.cmp(b.1).then(b.0.cmp(a.0))).map(|(k, _)| [*k].into_iter().collect())
@@ -761,9 +1266,16 @@ fn refresh_once(ctx: &TaskCtx) {
             Some(folded.anchors.keys().copied().collect::<HashSet<_>>())
         };
         let standing = NodeStanding { anchored, revoked, counted };
+        if tls.roots_generation() != g0 {
+            ledger.again.store(true, Ordering::Release);
+            return;
+        }
         if ctx.key_standing.get(&node).as_deref() != Some(&standing) {
             ctx.key_standing.set(&node, standing);
         }
+    }
+    if tls.roots_generation() == g0 {
+        ctx.key_standing.set_judged_under(g0);
     }
 }
 
@@ -772,7 +1284,7 @@ fn refresh_once(ctx: &TaskCtx) {
 pub(crate) fn validated_signed_revocations(ctx: &TaskCtx, node: &NodeId) -> Vec<SignedRevocation> {
     let Some(tls) = ctx.tls.get() else { return Vec::new() };
     let mut out: Vec<SignedRevocation> = Vec::new();
-    for c in fold_node(ctx, tls, node).counted {
+    for c in fold_node(ctx, tls, node, tls.roots_generation()).map(|f| f.counted).unwrap_or_default() {
         if !out.contains(&c.parsed.signed) {
             out.push(c.parsed.signed);
         }
@@ -873,14 +1385,18 @@ pub(crate) fn own_key_revoked(ctx: &TaskCtx, tls: &mycelium_core::tls::NodeTls) 
     let current = tls.verifying_key_bytes();
     // The node's own current certificate is an anchor before anything is judged (the confirming
     // review's N1), so a missing own-certificate record cannot make a planted record a refusal.
-    if let Some((k, at)) = judge_cert(ctx, tls, &ctx.identity_ledger, &ctx.node_id, &tls.node_cert_der(), Some(current)) {
-        merge_anchors_seen(&ctx.identity_ledger, &ctx.node_id, &[(k, at)].into_iter().collect());
+    let own = tls.node_cert_der();
+    if let (tag, Some((k, at))) = judge_cert_tagged(ctx, tls, &ctx.identity_ledger, &ctx.node_id, &own, Some(current))
+        && let Some(o) = offered(&own, k, at, tag)
+    {
+        merge_anchors_seen(&ctx.identity_ledger, tls, &ctx.node_id, &[o], &HashMap::new(), tag);
     }
     let journaled = ctx.identity_ledger.journaled.pin().get(&ctx.node_id).cloned().unwrap_or_default();
     if journaled.iter().filter_map(|(p, b)| candidate(&ctx.node_id, p, b)).any(|c| c.parsed.signed.event.revoked_key == current) {
         return true;
     }
-    fold_node(ctx, tls, &ctx.node_id).counted.iter().any(|c| c.parsed.signed.event.revoked_key == current)
+    fold_node(ctx, tls, &ctx.node_id, tls.roots_generation())
+        .is_some_and(|f| f.counted.iter().any(|c| c.parsed.signed.event.revoked_key == current))
 }
 
 /// Publish this node's certificate record for its current key — keeping a record already in the
@@ -1090,6 +1606,152 @@ mod tests {
         assert!(candidate(&node, &revocation_key_v2(&node, &[9u8; 32], &[5u8; 32]), &v2).is_none(), "another revoker in the path");
         let other: NodeId = "127.0.0.1:9001".parse().unwrap();
         assert!(candidate(&other, &revocation_key_v2(&other, &[9u8; 32], &pub_a), &v2).is_none(), "another node");
+    }
+
+    fn fixture(file: &str) -> Vec<(String, Vec<u8>)> {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/persistence/identity-journal-v1").join(file);
+        std::fs::read_to_string(path).unwrap().lines().map(|l| {
+            let (name, hex) = l.split_once(' ').unwrap();
+            (name.to_string(), (0..hex.len()).step_by(2).map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap()).collect())
+        }).collect()
+    }
+
+    /// **#805's review F6: the revocation journal's entries are pinned.** Each variant encodes to the golden bytes and the
+    /// golden bytes decode to it; a reader with only the variants before I2's PR 2a (an older binary) refuses `Anchor` —
+    /// which it skips, with its warning — and reads the others. A variant reordered or inserted in the middle fails here.
+    /// Seen failing first with `Anchor` moved before `Saturated`.
+    #[test]
+    fn the_identity_journal_entries_are_pinned() {
+        #[derive(serde::Deserialize)]
+        #[allow(dead_code)]
+        enum Before { Counted { node: String, path: String, bytes: Vec<u8> }, Saturated { node: String } }
+        let node = "127.0.0.1:9000".to_string();
+        let entries = [
+            ("Counted", JournalEntry::Counted { node: node.clone(), path: "sys/revocation/127.0.0.1:9000/aa/bb".into(), bytes: vec![1, 2, 3] }),
+            ("Saturated", JournalEntry::Saturated { node: node.clone() }),
+            ("Anchor", JournalEntry::Anchor { node: node.clone(), der: vec![4, 5, 6] }),
+        ];
+        let golden = fixture("revocations.hex");
+        assert_eq!(golden.len(), entries.len(), "one line per variant");
+        for ((name, entry), (gname, bytes)) in entries.iter().zip(&golden) {
+            assert_eq!(name, gname);
+            assert_eq!(&mycelium_core::serde_fixint::to_vec(entry).unwrap(), bytes, "{name} encodes to the golden bytes");
+            let back: JournalEntry = mycelium_core::serde_fixint::from_slice(bytes).unwrap();
+            assert_eq!(mycelium_core::serde_fixint::to_vec(&back).unwrap(), *bytes, "{name} decodes back");
+            let old = mycelium_core::serde_fixint::from_slice::<Before>(bytes);
+            assert_eq!(old.is_ok(), *name != "Anchor", "an older reader reads {name}: {}", old.is_ok());
+        }
+    }
+
+    fn temp_journal(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("myc-i2-anchor-journal-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("revocations.journal")
+    }
+
+    fn digest(der: &[u8]) -> [u8; 32] {
+        Sha256::digest(der).into()
+    }
+
+    /// **#805's confirm round N1 (and F2): a caller waits per certificate, whichever fold started its append.** The
+    /// append of X is held, and fails, as an append started before the caller began; the caller's re-fold offers X again,
+    /// which starts nothing (it is in flight), and the wait for X does not answer while X is in flight — not even once a
+    /// later append finishes — and then answers `false`, X not journaled. The reviewer's probe. Seen failing first with
+    /// the wait counting only the appends numbered after its mark: it answered `true` at once.
+    #[tokio::test]
+    async fn a_kept_anchor_in_flight_before_the_wait_is_waited_for() {
+        let ledger = IdentityLedger::default();
+        ledger.open_journal(&temp_journal("inflight")).unwrap();
+        let n: NodeId = "127.0.0.1:9100".parse().unwrap();
+        let (x, y) = ([1u8; 8], [2u8; 8]);
+        let before = ledger.anchor_mark();
+        ledger.hook_appends_for_test(Some(before), Some(before));
+        ledger.journal_anchor(&n, &x);
+        ledger.journal_anchor(&n, &x);
+        assert_eq!(ledger.anchor_mark(), before + 1, "re-offered while in flight: no second append");
+        let only_x = [(n.clone(), digest(&x))];
+        let wait = ledger.anchors_durable_for(&only_x);
+        tokio::pin!(wait);
+        assert!(tokio::time::timeout(std::time::Duration::from_millis(100), &mut wait).await.is_err(), "X in flight: no answer");
+        ledger.journal_anchor(&n, &y);
+        assert!(ledger.anchors_durable_for(&[(n.clone(), digest(&y))]).await, "Y durable on its own");
+        assert!(tokio::time::timeout(std::time::Duration::from_millis(100), &mut wait).await.is_err(), "a later append finishing first satisfies nothing");
+        let answered = loop {
+            ledger.release_held_for_test();
+            if let Ok(a) = tokio::time::timeout(std::time::Duration::from_millis(20), &mut wait).await {
+                break a;
+            }
+        };
+        assert!(!answered, "X's append failed: not durable");
+        assert!(!ledger.anchor_journaled_for_test(&n, &x));
+        assert!(ledger.anchors_durable_for(&[(n.clone(), digest(&y))]).await, "X's failure is X's alone");
+        assert_eq!(ledger.anchor_append_failed.load(Ordering::Relaxed), 1, "counted");
+    }
+
+    /// **#805's last item: an append task that panics settles its certificate as failed.** The task panics before it
+    /// appends; the drop guard takes the certificate out of the in-flight set, counts the failure and wakes the waiters,
+    /// so the wait answers `false` and a later offer, after the backoff, journals it. Seen failing first with the guard's
+    /// `Drop` removed: the certificate stayed in flight and the wait never answered.
+    #[tokio::test]
+    async fn a_panicking_anchor_append_settles_as_failed() {
+        let ledger = IdentityLedger::default();
+        ledger.open_journal(&temp_journal("panic")).unwrap();
+        let n: NodeId = "127.0.0.1:9103".parse().unwrap();
+        let x = [9u8; 8];
+        let first = ledger.anchor_mark();
+        ledger.panic_append_for_test(first);
+        ledger.journal_anchor(&n, &x);
+        let only_x = [(n.clone(), digest(&x))];
+        let answered = tokio::time::timeout(std::time::Duration::from_secs(3), ledger.anchors_durable_for(&only_x)).await;
+        assert_eq!(answered.ok(), Some(false), "the wait answers, and says not durable");
+        assert_eq!(ledger.anchor_append_failed.load(Ordering::Relaxed), 1, "counted as a failure");
+        tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+        ledger.journal_anchor(&n, &x);
+        assert!(ledger.anchors_durable_for(&only_x).await, "retried after the backoff, durable");
+    }
+
+    /// **#805's confirm round N3: a failed append backs off.** Right after X's append failed, offering it again starts no
+    /// append; once its backoff (1 s for a first failure) has passed, it does, and X is journaled. Seen failing first with
+    /// the backoff check removed: the retry started at once.
+    #[tokio::test]
+    async fn a_failed_anchor_append_is_retried_only_after_its_backoff() {
+        let ledger = IdentityLedger::default();
+        ledger.open_journal(&temp_journal("backoff")).unwrap();
+        let n: NodeId = "127.0.0.1:9101".parse().unwrap();
+        let x = [3u8; 8];
+        let first = ledger.anchor_mark();
+        ledger.hook_appends_for_test(None, Some(first));
+        ledger.journal_anchor(&n, &x);
+        assert!(!ledger.anchors_durable_for(&[(n.clone(), digest(&x))]).await, "failed");
+        ledger.journal_anchor(&n, &x);
+        assert_eq!(ledger.anchor_mark(), first + 1, "inside the backoff: no retry");
+        tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+        ledger.journal_anchor(&n, &x);
+        assert_eq!(ledger.anchor_mark(), first + 2, "after the backoff: retried");
+        assert!(ledger.anchors_durable_for(&[(n.clone(), digest(&x))]).await, "durable");
+    }
+
+    /// **#805's confirm round N3: a certificate past the budget is counted once.** A node's 32 kept certificates are
+    /// journaled; a 33rd, offered on fold after fold, is refused, warned and counted once. Seen failing first with the
+    /// refusal counted on every offer.
+    #[tokio::test]
+    async fn a_certificate_past_the_anchor_budget_is_counted_once() {
+        let ledger = IdentityLedger::default();
+        ledger.open_journal(&temp_journal("budget")).unwrap();
+        let n: NodeId = "127.0.0.1:9102".parse().unwrap();
+        let certs: Vec<[u8; 8]> = (0..ANCHOR_JOURNAL_PER_NODE as u8).map(|i| [i, 0xAB, 0, 0, 0, 0, 0, 0]).collect();
+        for c in &certs {
+            ledger.journal_anchor(&n, c);
+        }
+        let all: Vec<(NodeId, [u8; 32])> = certs.iter().map(|c| (n.clone(), digest(c))).collect();
+        assert!(ledger.anchors_durable_for(&all).await);
+        let extra = [0xEEu8; 8];
+        for _ in 0..3 {
+            ledger.journal_anchor(&n, &extra);
+        }
+        assert_eq!(ledger.anchor_journal_refused.load(Ordering::Relaxed), 1, "once per certificate");
+        assert!(!ledger.anchors_durable_for(&[(n.clone(), digest(&extra))]).await, "not durable: in memory only");
     }
 
     #[test]

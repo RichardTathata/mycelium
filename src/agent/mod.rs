@@ -2672,6 +2672,59 @@ impl GossipAgent {
         keys
     }
 
+    /// **A change of roots** (identity-and-lifecycle I2): this node changes **its own** trust to `roots` and presents
+    /// `node_cert_der`, a certificate for its **current** key — the reload path PR 1 built, now run as one act under the
+    /// identity's one owner (#796's review, must-address 8), with everything that judged a certificate under the old
+    /// roots judged again:
+    /// - the rustls configs and the chain checks are swapped and the roots generation bumped
+    ///   ([`NodeTls::activate`](crate::tls::NodeTls::activate)); legacy closes when every root is generation 1 or later (R1);
+    /// - the handshake anchors (`peer_anchor_keys`) are cleared — each was a verdict of the old roots (must-address 6);
+    ///   one recorded by a handshake judged under the old roots after this is discarded at the sink;
+    /// - each live mesh session re-judges its peer's certificate before its next frame, and closes if the new roots
+    ///   refuse it (must-address 6: no verifier runs on an established session);
+    /// - every node is re-folded: the kept anchors' certificates are re-judged, failing ones dropped, and a node left
+    ///   with none trusts nothing (R4; must-address 7); the client marks with them (#768's M4);
+    /// - when the certificate presented changed, it is published as this node's certificate record;
+    /// - it returns once the kept certificates the re-fold took are journaled (under `[persistence]`).
+    ///
+    /// What decides **when** a node changes its roots — the successor-signed record, the phases under `succession/` —
+    /// is I2's PR 2b; until it lands only tests call this. Refused, changing nothing, as
+    /// [`NodeTls::reroot_material`](crate::tls::NodeTls::reroot_material) refuses.
+    #[cfg(feature = "tls")]
+    #[cfg_attr(not(test), allow(dead_code))] // `pub(crate)` until PR 2b's phases call it (#805's review F9)
+    pub(crate) async fn change_roots(&self, node_cert_der: Vec<u8>, roots: Vec<Vec<u8>>) -> Result<(), crate::error::GossipError> {
+        let tls = self.task_ctx.tls.get().ok_or(crate::error::GossipError::InvalidField {
+            field: "tls", reason: "a change of roots requires the tls identity (set GossipConfig::tls)".into(),
+        })?;
+        let _owner = self.task_ctx.identity_ledger.identity_owner.lock().await;
+        let presented_before = tls.node_cert_der();
+        tls.activate(tls.reroot_material(node_cert_der, roots)?)?;
+        self.task_ctx.peer_anchor_keys.pin().clear();
+        let presented = tls.node_cert_der();
+        if presented != presented_before {
+            let path = revocation::cert_record_key(&self.node_id, &tls.verifying_key_bytes());
+            if mycelium_core::ops::kv_get(&self.task_ctx, &path).as_deref() != Some(presented.as_slice()) {
+                let _ = self.kv().set(path.clone(), Bytes::from(presented.clone()));
+            }
+            self.task_ctx.identity_ledger.own(path, presented);
+        }
+        // The re-fold completes, under the new roots, before this returns: a fold already running re-runs on its own,
+        // and would otherwise finish after the caller went on.
+        while !revocation::refresh_now(&self.task_ctx) {
+            tokio::task::yield_now().await;
+        }
+        client_cert::refresh(&self.task_ctx);
+        // R4: every certificate this node keeps after the re-fold is settled before this returns — journaled, or known not
+        // to be (#805's review F2, N1): one whose append was already in flight is waited for too. What I2's PR 2b relies
+        // on before it persists a Narrowed phase. A failed append leaves its certificate in memory, counted, and a later
+        // fold retries it after its backoff.
+        let kept = self.task_ctx.identity_ledger.kept_certs();
+        if !self.task_ctx.identity_ledger.anchors_durable_for(&kept).await {
+            tracing::warn!("a change of roots: a kept-anchor journal append failed; those anchors are kept in this process only");
+        }
+        Ok(())
+    }
+
     /// Rotate this node's TLS / identity key **without cluster disruption**.
     ///
     /// 1. Generate a new key + CA-signed cert (reusing the cluster CA), persisted
@@ -2707,6 +2760,10 @@ impl GossipAgent {
         let tls_cfg = self.config.tls.as_ref().ok_or(GossipError::InvalidField {
             field: "tls", reason: "rotate_identity requires GossipConfig::tls".into(),
         })?;
+        // I2 (#796's review, must-address 8): one owner over rotation and the change of roots. Held from building the
+        // material to activating it, so the roots cannot change while the new key propagates: the activation below can
+        // no longer be refused after the new key has been saved and published.
+        let _owner = self.task_ctx.identity_ledger.identity_owner.lock().await;
 
         // 1. Generate the new material (persisted, not yet active).
         // Post-360 plan row Q: the new certificate is issued strictly after every one of this node's

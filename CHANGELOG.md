@@ -445,6 +445,17 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Standing under a change of roots** (identity-and-lifecycle I2, PR 2a of 4; `deprecations.md` §117; the split and
+  each promise's evidence are in the plan's §8 row). A node that changes its roots judges again everything it judged
+  under the old ones: an anchored key keeps its certificates (journaled under `[persistence]`) and leaves only when they
+  fail the current roots, never because its record left the store, and a node left with none trusts nothing; a node
+  whose every root is generation 1 or later has no legacy class (a CA's `caGeneration`, under a **provisional** OID a
+  shipped build refuses by name — a release is blocked on it); a client's mark keeps its certificate (`RaisedWithCert`)
+  and the key at it is current only while that certificate verifies; live mesh sessions are re-judged and closed when
+  the new roots refuse the peer (`sessions_closed_by_roots`); and a rotation and a change of roots have one owner
+  (lock-order row 82). Nothing drives a change of roots yet but the crate-internal `GossipAgent::change_roots` the tests call: the
+  successor-signed record is PR 2b.
+
 - **CA succession, its first PR: one root in `ca_cert_pem`, a named fleet CA, and the reload path** (identity and
   lifecycle I2, PR 1 of 3; `deprecations.md` §111; the split and what each promise has is in the plan's §8 row).
   - **A `ca_cert_pem` holding more than one certificate is refused at start**, naming `tls.ca_cert_pem`, the path and

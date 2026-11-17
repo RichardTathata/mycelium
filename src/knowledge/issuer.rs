@@ -265,6 +265,17 @@ impl TrustedExternalIssuers {
         }
     }
 
+    /// Withdraw `issuer`'s client key when it is exactly `(issued, key)` (identity-and-lifecycle I2): the fold's mark
+    /// for it no longer stands — its certificate fails this node's roots — so it proves possession of nothing. A newer
+    /// key fed since is left in place. Returns whether one was withdrawn.
+    pub fn withdraw_client_key(&mut self, issuer: &IssuerId, issued: u64, key: [u8; 32]) -> bool {
+        if self.clients.get(issuer) == Some(&(issued, key)) {
+            self.clients.remove(issuer);
+            return true;
+        }
+        false
+    }
+
     /// `issuer`'s current client key, if the fold has fed one.
     pub fn client_key(&self, issuer: &IssuerId) -> Option<[u8; 32]> {
         self.clients.get(issuer).map(|(_, k)| *k)
@@ -314,6 +325,15 @@ impl SharedExternalIssuers {
             return Ok(false);
         }
         self.0.write().set_client_key(issuer, issued, key)
+    }
+
+    /// [`TrustedExternalIssuers::withdraw_client_key`], on the shared set; the write lock only when there is one to
+    /// withdraw.
+    pub fn withdraw_client_key(&self, issuer: &IssuerId, issued: u64, key: [u8; 32]) -> bool {
+        if self.0.read().clients.get(issuer) != Some(&(issued, key)) {
+            return false;
+        }
+        self.0.write().withdraw_client_key(issuer, issued, key)
     }
 
     /// Whether `self` and `other` are one set (a clone of the same handle).

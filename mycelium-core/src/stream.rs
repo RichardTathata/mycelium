@@ -100,4 +100,15 @@ impl GossipStream {
     pub fn peer_ed25519_key(&self) -> Option<[u8; 32]> {
         None
     }
+
+    /// The peer's end-entity certificate (DER), on either side of a TLS session; `None` for plaintext. What a session
+    /// re-judges against the node's roots when they change (identity-and-lifecycle I2, #796's review must-address 6).
+    #[cfg(feature = "tls")]
+    pub fn peer_cert_der(&self) -> Option<Vec<u8>> {
+        match self {
+            GossipStream::TlsClient(s) => s.get_ref().1.peer_certificates()?.first().map(|c| c.as_ref().to_vec()),
+            GossipStream::TlsServer(s) => s.get_ref().1.peer_certificates()?.first().map(|c| c.as_ref().to_vec()),
+            _ => None,
+        }
+    }
 }

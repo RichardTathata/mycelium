@@ -69,6 +69,9 @@ test-frame-filter = ["mycelium-core/test-frame-filter"]
 # exercise consent certificates enable it; no example, Docker image or shipped binary does. A shipped node fails
 # closed on such a certificate, and the release workflow refuses a release while the OID is provisional.
 provisional-consent-grade = ["tls", "mycelium-core/provisional-consent-grade"]
+# Identity-and-lifecycle I2 (PR 2a): lets a build mint and read a CA's `caGeneration` extension while its OID is
+# provisional (`mycelium-core/provisional-ca-generation`). Test lines only; a shipped node refuses such a root by name.
+provisional-ca-generation = ["tls", "mycelium-core/provisional-ca-generation"]
 
 # The `fuzz/` directory is its own cargo-fuzz crate; keep it out of any
 # implicit-workspace traversal from this parent manifest.

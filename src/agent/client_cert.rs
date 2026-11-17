@@ -176,9 +176,27 @@ pub(crate) struct Mark {
 /// record it republishes.
 #[derive(Serialize, Deserialize)]
 enum JournalEntry {
+    /// Written before identity-and-lifecycle I2's PR 2a; still decoded. A mark restored from it has no certificate and
+    /// holds as before until the first change of roots ([`HeldMark`]).
     Raised { principal: String, mark: Mark },
     Saturated { principal: String },
     Published { principal: String, path: String, der: Vec<u8> },
+    /// A mark **with the certificate that raised it** (I2, #768's M4), appended in place of `Raised` from this release
+    /// on, so a mark restored at start can be re-judged against new roots. Last, so the variants before it keep their
+    /// encoding; an older binary skips it with its "did not decode" warning (the downgrade the upgrade note states).
+    RaisedWithCert { principal: String, mark: Mark, der: Vec<u8> },
+}
+
+/// A principal's mark and the certificate that raised it (identity-and-lifecycle I2, #768's M4). The mark is the floor —
+/// it only rises — and the key at it is **current only while its certificate still verifies** against this node's
+/// roots: a mark whose certificate fails them reads `Unknown`, never `Current`. A mark restored from a pre-I2 `Raised`
+/// entry has no certificate: it holds as before while this node trusts the roots it started with and legacy is open,
+/// and is re-established, its certificate attached, as soon as a fold reads a verifying record for it — after a change
+/// of roots it reads `Unknown` until one is read.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct HeldMark {
+    pub(crate) mark: Mark,
+    der: Option<Arc<[u8]>>,
 }
 
 /// What one certificate says, once its chain is checked: cached by its digest.
@@ -204,11 +222,13 @@ pub enum ClientKeyStanding {
 /// What this node keeps between client-cert folds. Lock-free (papaya and atomics).
 #[derive(Default)]
 pub(crate) struct ClientCertLedger {
-    pub(super) marks: papaya::HashMap<String, Mark>,
+    pub(super) marks: papaya::HashMap<String, HeldMark>,
     /// The parse and chain verdict per distinct certificate (by SHA-256), bounded by [`CERT_CACHE_MAX`],
     /// each tagged with the roots generation it was judged under (identity-and-lifecycle I2, R4): a
     /// verdict of an older generation is a miss.
-    cert_cache: papaya::HashMap<[u8; 32], (u64, Option<Facts>)>,
+    /// Each verdict also carries the certificate's `notAfter` (ms): a verdict is a miss once the wall clock reaches
+    /// it, so a certificate's expiry is judged in-process as a restart judges it (I2, #805's review F3).
+    cert_cache: papaya::HashMap<[u8; 32], (u64, u64, Option<Facts>)>,
     /// The records this gateway published, newest per principal, `(path, der)`: republished when missing or
     /// overwritten, as `revocation.rs` republishes a node's own records.
     published: papaya::HashMap<String, (String, Vec<u8>)>,
@@ -246,7 +266,11 @@ impl ClientCertLedger {
         for bytes in existing {
             match mycelium_core::serde_fixint::from_slice::<JournalEntry>(&bytes) {
                 Ok(JournalEntry::Raised { principal, mark }) => {
-                    self.raise_in_memory(&principal, mark);
+                    self.raise_in_memory(&principal, mark, None);
+                    self.count_journaled(&principal);
+                }
+                Ok(JournalEntry::RaisedWithCert { principal, mark, der }) => {
+                    self.raise_in_memory(&principal, mark, Some(Arc::from(der)));
                     self.count_journaled(&principal);
                 }
                 Ok(JournalEntry::Saturated { principal }) => {
@@ -274,21 +298,22 @@ impl ClientCertLedger {
         self.journal.store(None);
     }
 
-    /// Raise `principal`'s mark to `to` if `to` is newer, in memory only. Returns whether it rose.
-    /// Retry-safe `compute`: two folds never lower each other's mark.
-    fn raise_in_memory(&self, principal: &str, to: Mark) -> bool {
-        let mut rose = false;
+    /// Raise `principal`'s mark to `to` if `to` is newer, in memory only — or, at the same mark, attach `der` to a mark
+    /// that holds no certificate (a pre-I2 `Raised` entry re-established from a verifying record). Returns whether it
+    /// changed. Retry-safe `compute`: two folds never lower each other's mark.
+    fn raise_in_memory(&self, principal: &str, to: Mark, der: Option<Arc<[u8]>>) -> bool {
+        let mut changed = false;
         self.marks.pin().compute(principal.to_string(), |existing| match existing {
-            Some((_, m)) if *m >= to => {
-                rose = false;
+            Some((_, h)) if h.mark > to || (h.mark == to && (h.der.is_some() || der.is_none())) => {
+                changed = false;
                 papaya::Operation::Abort(())
             }
             _ => {
-                rose = true;
-                papaya::Operation::Insert(to)
+                changed = true;
+                papaya::Operation::Insert(HeldMark { mark: to, der: der.clone() })
             }
         });
-        rose
+        changed
     }
 
     fn append(&self, entry: JournalEntry) {
@@ -326,10 +351,11 @@ impl ClientCertLedger {
         self.append(entry);
     }
 
-    /// Raise `principal`'s mark to `to`, journaling the rise when there is room (and a journal).
-    fn raise(&self, principal: &str, to: Mark) {
-        if self.raise_in_memory(principal, to) {
-            self.journal_within_budget(principal, JournalEntry::Raised { principal: principal.to_string(), mark: to });
+    /// Raise `principal`'s mark to `to`, raised by the certificate `der`, journaling the rise with its certificate
+    /// (`RaisedWithCert`, I2's M4) when there is room (and a journal).
+    fn raise(&self, principal: &str, to: Mark, der: &[u8]) {
+        if self.raise_in_memory(principal, to, Some(Arc::from(der))) {
+            self.journal_within_budget(principal, JournalEntry::RaisedWithCert { principal: principal.to_string(), mark: to, der: der.to_vec() });
         }
     }
 
@@ -353,9 +379,15 @@ impl ClientCertLedger {
         }
     }
 
-    /// `principal`'s current mark, if any record of it has been read.
+    /// `principal`'s mark — the floor, whether or not its certificate still verifies — if any record of it has been
+    /// read. What supersession is ordered by; what a key's **standing** is read from is [`current_mark`].
     pub(crate) fn mark(&self, principal: &str) -> Option<Mark> {
-        self.marks.pin().get(principal).copied()
+        self.marks.pin().get(principal).map(|h| h.mark)
+    }
+
+    /// `principal`'s held mark, with its certificate.
+    fn held(&self, principal: &str) -> Option<HeldMark> {
+        self.marks.pin().get(principal).cloned()
     }
 }
 
@@ -395,6 +427,27 @@ pub(crate) fn judge(ctx: &TaskCtx, tls: &mycelium_core::tls::NodeTls, principal:
     Some(Mark { issued, key: f.key })
 }
 
+/// Whether `held` — `principal`'s mark — still stands (identity-and-lifecycle I2, #768's M4): its certificate is judged
+/// again against this node's roots now (cached per roots generation), and must raise exactly this mark. A mark with no
+/// certificate (a pre-I2 `Raised` entry) stands only while this node has never changed its roots in this process and
+/// legacy is open: after a change of roots, or on a node trusting only successor roots, it reads as not standing until a
+/// fold re-establishes it from a verifying record.
+fn mark_stands(ctx: &TaskCtx, tls: &mycelium_core::tls::NodeTls, principal: &str, held: &HeldMark) -> bool {
+    match &held.der {
+        Some(der) => judge(ctx, tls, principal, der, Some(held.mark.key)).is_some_and(|m| m == held.mark),
+        None => tls.roots_generation() == 0 && !ctx.key_standing.legacy_closed(),
+    }
+}
+
+/// `principal`'s mark **when it stands** — its certificate still verifies against this node's roots (I2, #768's M4).
+/// What every reader of a client's standing reads: the possession check's current key, the replay window's current
+/// key, the grant doors' "a certificate on record here". A mark whose certificate fails the roots is no current key.
+pub(crate) fn current_mark(ctx: &TaskCtx, principal: &str) -> Option<Mark> {
+    let tls = ctx.tls.get()?;
+    let held = ctx.client_certs.held(principal)?;
+    mark_stands(ctx, tls, principal, &held).then_some(held.mark)
+}
+
 /// The parse and the CA chain check of `der`, once per distinct certificate (a member can write one certificate under
 /// many paths, or many principals' worth of foreign ones): cached by digest, the cache cleared when full. Only a
 /// client certificate the fleet CA issued has facts.
@@ -420,8 +473,9 @@ pub(super) fn client_verdict_for_test(ledger: &ClientCertLedger, tls: &mycelium_
 
 fn facts_with(ledger: &ClientCertLedger, tls: &mycelium_core::tls::NodeTls, der: &[u8], between: impl FnOnce()) -> Option<Facts> {
     let digest: [u8; 32] = Sha256::digest(der).into();
-    if let Some((generation, hit)) = ledger.cert_cache.pin().get(&digest)
+    if let Some((generation, expires, hit)) = ledger.cert_cache.pin().get(&digest)
         && *generation == tls.roots_generation()
+        && mycelium_core::sim_seam::wall_now_ms() < *expires
     {
         return hit.clone();
     }
@@ -444,7 +498,7 @@ fn facts_with(ledger: &ClientCertLedger, tls: &mycelium_core::tls::NodeTls, der:
     if cache.len() >= CERT_CACHE_MAX {
         cache.clear();
     }
-    cache.insert(digest, (generation, found.clone()));
+    cache.insert(digest, (generation, mycelium_core::tls::cert_not_after_ms(der).unwrap_or(u64::MAX), found.clone()));
     found
 }
 
@@ -453,6 +507,7 @@ fn facts_with(ledger: &ClientCertLedger, tls: &mycelium_core::tls::NodeTls, der:
 fn fold(ctx: &TaskCtx, tls: &mycelium_core::tls::NodeTls, principal: &str) -> HashMap<[u8; 32], u64> {
     let prefix = format!("{CLIENT_CERT_PREFIX}{}/", hex(principal.as_bytes()));
     let mut seen: HashMap<[u8; 32], u64> = HashMap::new();
+    let mut newest: Option<(Mark, Vec<u8>)> = None;
     // Every record is judged: a cap here would let a member's junk records, sorted ahead of the newer genuine one,
     // keep it from ever raising the mark. Each distinct certificate's chain is checked once (`facts`, by digest), so
     // a fold costs one scan of the principal's records and a chain check per certificate not yet seen.
@@ -462,10 +517,13 @@ fn fold(ctx: &TaskCtx, tls: &mycelium_core::tls::NodeTls, principal: &str) -> Ha
         if let Some(m) = judge(ctx, tls, principal, &der, Some(expect)) {
             let e = seen.entry(m.key).or_insert(m.issued);
             *e = (*e).max(m.issued);
+            if newest.as_ref().is_none_or(|(n, _)| m > *n) {
+                newest = Some((m, der.to_vec()));
+            }
         }
     }
-    if let Some(newest) = seen.iter().map(|(k, at)| Mark { issued: *at, key: *k }).max() {
-        ctx.client_certs.raise(principal, newest);
+    if let Some((mark, der)) = newest {
+        ctx.client_certs.raise(principal, mark, &der);
         feed_client_keys(ctx);
     }
     seen
@@ -498,9 +556,10 @@ pub fn consent_key_standing(ctx: &TaskCtx, principal: &str, point: &[u8; 65]) ->
 fn standing(ctx: &TaskCtx, principal: &str, key: &[u8; 32]) -> ClientKeyStanding {
     let Some(tls) = ctx.tls.get() else { return ClientKeyStanding::Unknown };
     let seen = fold(ctx, tls, principal);
-    let Some(mark) = ctx.client_certs.mark(principal) else { return ClientKeyStanding::Unknown };
-    if mark.key == *key {
-        return ClientKeyStanding::Current;
+    let Some(held) = ctx.client_certs.held(principal) else { return ClientKeyStanding::Unknown };
+    if held.mark.key == *key {
+        // I2 (#768's M4): the key at the mark is current only while the mark's certificate still verifies.
+        return if mark_stands(ctx, tls, principal, &held) { ClientKeyStanding::Current } else { ClientKeyStanding::Unknown };
     }
     // Below the mark: superseded while its verified record is visible, unknown once it is gone — never current.
     if seen.contains_key(key) {
@@ -539,19 +598,23 @@ pub(crate) fn refresh(ctx: &TaskCtx) {
 fn refresh_once(ctx: &TaskCtx) {
     let Some(tls) = ctx.tls.get() else { return };
     ctx.client_certs.scans.fetch_add(1, Ordering::Relaxed);
-    let mut newest: std::collections::BTreeMap<String, Mark> = std::collections::BTreeMap::new();
+    let mut newest: std::collections::BTreeMap<String, (Mark, Vec<u8>)> = std::collections::BTreeMap::new();
     for (path, der) in mycelium_core::store::scan_kv_prefix(&ctx.kv_state, CLIENT_CERT_PREFIX) {
         let Some(rest) = path.strip_prefix(CLIENT_CERT_PREFIX) else { continue };
         let Some((phex, khex)) = rest.split_once('/') else { continue };
         let Some(principal) = decode_principal_hex(phex) else { continue };
         let Some(expect) = parse_path_key(&principal, khex) else { continue };
         if let Some(m) = judge(ctx, tls, &principal, &der, Some(expect)) {
-            let e = newest.entry(principal).or_insert(m);
-            *e = (*e).max(m);
+            match newest.get(&principal) {
+                Some((n, _)) if *n >= m => {}
+                _ => {
+                    newest.insert(principal, (m, der.to_vec()));
+                }
+            }
         }
     }
-    for (principal, mark) in newest {
-        ctx.client_certs.raise(&principal, mark);
+    for (principal, (mark, der)) in newest {
+        ctx.client_certs.raise(&principal, mark, &der);
     }
     republish_own(ctx);
     feed_client_keys(ctx);
@@ -674,10 +737,50 @@ pub fn publish(ctx: &Arc<TaskCtx>, der: &[u8]) -> Result<Published, PublishRefus
     }
     let path = format!("{CLIENT_CERT_PREFIX}{}/{}", hex(principal.as_bytes()), id.key_hex);
     let _ = super::helpers::kv_set(ctx, Arc::from(path.as_str()), bytes::Bytes::copy_from_slice(der));
-    ctx.client_certs.raise(&principal, Mark { issued, key: id.key });
+    ctx.client_certs.raise(&principal, Mark { issued, key: id.key }, der);
     feed_client_keys(ctx);
     ctx.client_certs.hold_published(&principal, path, der.to_vec());
     Ok(Published { principal, key: id.key, key_hex: id.key_hex, issued_ms: issued, grade: id.grade })
+}
+
+/// A pre-I2 `Raised` journal entry — a mark with no certificate — as an older binary wrote it (I2, M4's tests).
+#[cfg(all(test, feature = "provisional-ca-generation"))]
+pub(crate) fn raised_entry_for_test(principal: &str, issued: u64, key: [u8; 32]) -> Vec<u8> {
+    mycelium_core::serde_fixint::to_vec(&JournalEntry::Raised { principal: principal.into(), mark: Mark { issued, key } }).unwrap()
+}
+
+/// **#805's review F6: the client-certificate journal's entries are pinned**, the pre-I2 `Raised` among them. Each
+/// variant encodes to the golden bytes and decodes back; a reader with only the variants before I2's PR 2a refuses
+/// `RaisedWithCert` (it skips it, with its warning) and reads the others. Seen failing first with `RaisedWithCert` moved
+/// before `Published`.
+#[cfg(test)]
+#[test]
+fn the_client_cert_journal_entries_are_pinned() {
+    #[derive(Deserialize)]
+    #[allow(dead_code)]
+    enum Before { Raised { principal: String, mark: Mark }, Saturated { principal: String }, Published { principal: String, path: String, der: Vec<u8> } }
+    let p = "token:fleet/svc".to_string();
+    let mark = Mark { issued: 1_700_000_000_123, key: [7u8; 32] };
+    let entries = [
+        ("Raised", JournalEntry::Raised { principal: p.clone(), mark }),
+        ("Saturated", JournalEntry::Saturated { principal: p.clone() }),
+        ("Published", JournalEntry::Published { principal: p.clone(), path: "sys/client-cert/aa/bb".into(), der: vec![8, 9] }),
+        ("RaisedWithCert", JournalEntry::RaisedWithCert { principal: p.clone(), mark, der: vec![10, 11, 12] }),
+    ];
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/persistence/identity-journal-v1/client-certs.hex");
+    let golden: Vec<(String, Vec<u8>)> = std::fs::read_to_string(path).unwrap().lines().map(|l| {
+        let (name, hex) = l.split_once(' ').unwrap();
+        (name.to_string(), (0..hex.len()).step_by(2).map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap()).collect())
+    }).collect();
+    assert_eq!(golden.len(), entries.len(), "one line per variant");
+    for ((name, entry), (gname, bytes)) in entries.iter().zip(&golden) {
+        assert_eq!(name, gname);
+        assert_eq!(&mycelium_core::serde_fixint::to_vec(entry).unwrap(), bytes, "{name} encodes to the golden bytes");
+        let back: JournalEntry = mycelium_core::serde_fixint::from_slice(bytes).unwrap();
+        assert_eq!(mycelium_core::serde_fixint::to_vec(&back).unwrap(), *bytes, "{name} decodes back");
+        let old = mycelium_core::serde_fixint::from_slice::<Before>(bytes);
+        assert_eq!(old.is_ok(), *name != "RaisedWithCert", "an older reader reads {name}: {}", old.is_ok());
+    }
 }
 
 /// A `Published` journal entry, encoded as the ledger writes it (tests build a journal by hand).
@@ -704,12 +807,20 @@ pub(crate) fn feed_client_keys(ctx: &TaskCtx) {
     if sinks.is_empty() {
         return;
     }
-    let marks: Vec<(String, Mark)> =
-        ctx.client_certs.marks.pin().iter().filter(|(p, _)| p.starts_with("token:")).map(|(p, m)| (p.clone(), *m)).collect();
-    for (principal, mark) in marks {
+    let Some(tls) = ctx.tls.get() else { return };
+    let marks: Vec<(String, HeldMark)> =
+        ctx.client_certs.marks.pin().iter().filter(|(p, _)| p.starts_with("token:")).map(|(p, m)| (p.clone(), m.clone())).collect();
+    for (principal, held) in marks {
         let Some(issuer) = crate::knowledge::IssuerId::new(&principal) else { continue };
+        // I2 (#768's M4): a mark whose certificate no longer verifies feeds no key, and the key it fed is withdrawn —
+        // a client that lost standing at a change of roots proves possession of nothing.
+        let stands = mark_stands(ctx, tls, &principal, &held);
         for sink in &sinks {
-            let _ = sink.set_client_key(issuer.clone(), mark.issued, mark.key);
+            if stands {
+                let _ = sink.set_client_key(issuer.clone(), held.mark.issued, held.mark.key);
+            } else {
+                sink.withdraw_client_key(&issuer, held.mark.issued, held.mark.key);
+            }
         }
     }
 }

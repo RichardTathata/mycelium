@@ -613,10 +613,11 @@ ids = ["concept:rule-catalogue", "concept:decision-trace"]
 # ------------------------------------------------------------------------------------------- exclusions
 
 [[exclusion]]
-reason = "A test, fuzz or model build switch, never on in a shipped build: it exposes internals to a harness (fuzz-internals, test-util, test-support) or to the acceptor's model (model-internals), filters frames in tests (test-frame-filter), turns on this crate's own test seams (mycelium-wasm-host's sim), or lets a test line issue and read consent certificates while their grade OID is provisional (provisional-consent-grade, I7; its page says a shipped build fails closed)."
+reason = "A test, fuzz or model build switch, never on in a shipped build: it exposes internals to a harness (fuzz-internals, test-util, test-support) or to the acceptor's model (model-internals), filters frames in tests (test-frame-filter), turns on this crate's own test seams (mycelium-wasm-host's sim), or lets a test line issue and read consent certificates while their grade OID is provisional (provisional-consent-grade, I7; its page says a shipped build fails closed), or mint and read a CA's generation while its OID is provisional (provisional-ca-generation, I2; the node-identity page says a shipped build refuses such a root by name)."
 ids = ["cargo:mycelium/fuzz-internals", "cargo:mycelium/model-internals", "cargo:mycelium/test-util", "cargo:mycelium/test-frame-filter",
        "cargo:mycelium-core/test-frame-filter", "cargo:mycelium-core/test-support", "cargo:mycelium-wasm-host/sim",
-       "cargo:mycelium/provisional-consent-grade", "cargo:mycelium-core/provisional-consent-grade"]
+       "cargo:mycelium/provisional-consent-grade", "cargo:mycelium-core/provisional-consent-grade",
+       "cargo:mycelium/provisional-ca-generation", "cargo:mycelium-core/provisional-ca-generation"]
 
 [[exclusion]]
 reason = "Builds the `mycelium` binary (with its log subscriber); the binary is how a node is run, and its subcommands belong to the features they serve (wire-check, node identity, replay)."

@@ -1698,7 +1698,7 @@ pub(crate) fn verify_received(ctx: &TaskCtx, req: &RpcRequest) -> Result<Option<
         #[cfg(feature = "tls")]
         if let Some(signed) = &c.client_signed {
             let horizon = now_ms.saturating_sub(CALLER_CONTEXT_MAX_AGE_MS.saturating_add(ctx.config.max_clock_drift_ms));
-            let current = ctx.client_certs.mark(&c.principal).map(|m| m.key);
+            let current = super::client_cert::current_mark(ctx, &c.principal).map(|m| m.key);
             match ctx.client_replay.admit(&c.principal, signed, current, horizon) {
                 Ok(()) => {}
                 Err(super::client_sig::ClientReplay::Replayed) => return Err(CallerError::ClientReplayed),
