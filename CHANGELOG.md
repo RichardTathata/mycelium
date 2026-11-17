@@ -41,7 +41,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   passes such a provider over (`gateway_sends_to`), and with none left answers its own "no provider" — with
   `data.reason` `provider_not_promised` where the answer has a data field, so a client can tell the transient case apart
   (neither SDK retries it today); `tools/list` and the A2A agent card list only what such a provider offers. -32021 stays for a target the client names. Every node re-asserts its own marker each 60 s, so a member's tombstone of it hides the
-  provider for at most one period; each door counts the providers it passed over (`/stats`
+  provider for at most one period (a tombstone stamped beyond `max_clock_drift_ms` ahead: until the clock catches up,
+  counted as `kv_future_stamps`); each door counts the providers it passed over (`/stats`
   `providers_passed_over_unpromised`, by door). *Check:* a provider that never publishes the marker (before 2.5.0) is
   now answered "no provider" at those doors rather than -32021, and a client that lists once during the marker gap can
   miss the tool. New: `GossipAgent::gateway_sends_to`, `GossipAgent::gateway_note_passed_over`.

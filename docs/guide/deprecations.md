@@ -4729,7 +4729,10 @@ no-provider answer, with `data.reason` `provider_not_promised`. **Beyond that, t
   found`, the LLM doors and the reason router `no_provider`, where they answered `-32021` / `412` naming the provider.
 - A marker a member **tombstones** hides its provider the same way, but no longer for good: every node re-asserts its
   own marker every `CALLER_CONTEXT_MARKER_REFRESH_MS` (60 s; the id marker's ticker), so the provider writes it back
-  within a period (#804's review, M1).
+  within a period (#804's review, M1) — except a tombstone a member stamps beyond `max_clock_drift_ms` ahead, which wins
+  last-writer-wins against the provider's rewrites until the wall clock catches up with its stamp (the HLC's documented
+  trade-off): detected, not prevented — counted as `kv_future_stamps` on `/stats` at the door it arrived through, and by
+  the self-owned `sys/` tripwire at the provider.
 - **A client that lists once** (`tools/list`, the agent card) during the gap after a provider starts can miss the
   tool or skill for as long as it does not list again; before, it was listed and answered -32021 until the marker
   came. Wait for the marker (`?prefix=sys/caller-context/`), or list again.

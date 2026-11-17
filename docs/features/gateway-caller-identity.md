@@ -57,7 +57,9 @@ one of three questions. The end-to-end run is a test in
   the client names (`/gateway/rpc/call`, `/gateway/scatter`, `/gateway/overlay/emit_reliable`, `rpc_call_as`) whose
   marker the gateway does not hold is refused `-32021` / HTTP `412 provider_without_caller_context`, naming it — not
   yet seen, or never (a provider from before the marker). No marker value says "does not enforce". Each node
-  re-asserts its own marker every 60 s, so a member's tombstone of it hides the provider for at most one period, and
+  re-asserts its own marker every 60 s, so a member's tombstone of it hides the provider for at most one period (one
+  stamped beyond `max_clock_drift_ms` ahead hides it until the wall clock catches up — detected as `kv_future_stamps`
+  and by the self-owned tripwire, not prevented), and
   every choosing door counts the providers it passed over (`/stats` `providers_passed_over_unpromised`, by door).
   `/gateway/caps/resolve` lists providers whatever their marker, so a client that resolves there and names the target
   can still meet a transient `-32021`; a client that lists tools once during the gap can miss one. Tests:

@@ -917,7 +917,7 @@ impl GossipAgent {
                 let id_key: Arc<str> = Arc::from(super::gateway_caller::id_marker_key(&ctx.node_id).as_str());
                 // One ticker for both (ID_MARKER_REFRESH_MS is CALLER_CONTEXT_MARKER_REFRESH_MS, 60 s).
                 let mut ticker = mycelium_core::sim_seam::interval_ms(
-                    "caller-context-id", super::gateway_caller::marker_refresh_ms(&ctx),
+                    "caller-context-markers", super::gateway_caller::marker_refresh_ms(&ctx),
                     tokio::time::MissedTickBehavior::Skip,
                 );
                 loop {

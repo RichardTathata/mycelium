@@ -1912,6 +1912,10 @@ async fn a_client_route_passes_over_a_provider_whose_marker_is_not_held() {
     let status = early.status().as_u16();
     let body: serde_json::Value = early.json().await.unwrap();
     assert_eq!((status, body["error"].as_str()), (404, Some("no_provider")), "NOT YET A PROVIDER: {body}");
+    // #804's confirm round, N2: the router counts the provider it passed over on the node's `/stats`.
+    let stats: serde_json::Value =
+        http.get(format!("http://127.0.0.1:{http_port}/stats")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(stats["providers_passed_over_unpromised"]["companion"], 1, "COUNTED: {stats}");
 
     // The marker arrives: served.
     assert!(provider.kv().set(marker.clone(), bytes::Bytes::from_static(b"1")));
