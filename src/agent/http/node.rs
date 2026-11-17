@@ -233,6 +233,7 @@ pub(super) async fn stats_handler(State(ctx): State<Arc<HttpCtx>>) -> impl IntoR
     {
         body["evidence_history_unreadable"] = json!(ctx.agent_ctx.history_index.get().map_or(0u64, |i| u64::from(i.unreadable())));
     }
+    // #802's review, M1: providers each choosing door passed over for want of their caller-context marker.
     body["providers_passed_over_unpromised"] = ctx.agent_ctx.passed_over.to_json();
     // Identity-and-lifecycle I1: client signatures' `cn`s dropped as replays, and new instances refused at the cap.
     #[cfg(feature = "tls")]
