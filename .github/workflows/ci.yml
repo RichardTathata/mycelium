@@ -1127,7 +1127,7 @@ jobs:
       - uses: taiki-e/install-action@cargo-audit
       # Fails on a vulnerability and, since R9 of the external review (2026-11-06), on any warning — unmaintained,
       # unsound, yanked (`--deny warnings`) — unless the lockfile's line below names it with a date and a reason. The
-      # root and fuzz lockfiles accept nothing. A newly published advisory therefore turns this job red without a code
+      # fuzz lockfile accepts nothing; the root one accepts two, dated below. A newly published advisory therefore turns this job red without a code
       # change; accept it here, per lockfile and in the open, or fix it.
       # Every tracked lockfile, by discovery — not the root one only. Until 2026-10-16 this ran
       # `cargo audit` on `Cargo.lock` alone, and `examples/conway-gpu/Cargo.lock` sat on five

@@ -291,9 +291,13 @@ this page is the index + the gate.
   a two-version jump is not. → procedure: [deployment.md § Rolling upgrades](deployment.md#rolling-upgrades);
   policy: `mycelium-core/src/framing.rs` (top).
 - ☐ **`cargo audit` clean** — CI gates it with `--deny warnings` on every tracked lockfile: a vulnerability, or an
-  unmaintained, unsound or yanked advisory, fails the job unless the job names it with a date and a reason (today one:
-  `paste` RUSTSEC-2024-0436, only in the excluded `examples/conway-gpu` crate, ignored on that lockfile's line in
-  `.github/workflows/ci.yml`). Re-run against your locked build.
+  unmaintained, unsound or yanked advisory, fails the job unless the job names it with a date and a reason. Today three are named, each *unmaintained* with no
+  defect advisory, each on its lockfile's line in `.github/workflows/ci.yml`:
+  - `paste` RUSTSEC-2024-0436, only in the excluded `examples/conway-gpu` crate;
+  - `chrono` RUSTSEC-2026-0543 and `humantime` RUSTSEC-2026-0542, on the root lockfile, both only through
+    `object_store` (the wasm host's optional feature: in the published stem, in no node binary).
+
+  Re-run against your locked build.
 - ☐ **Feature set pinned** — you build exactly the features you run (`tls` / `metrics` / `a2a` / `llm`
   / `compliance` / `gateway`), and `--no-default-features` still builds if you embed the minimal core.
 

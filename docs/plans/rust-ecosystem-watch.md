@@ -22,7 +22,7 @@ same assessment is not redone from scratch.
 4. Add one line to the [review log](#review-log): the date, who reviewed, and what changed. *No change* is a valid
    line, and it is what a skipped month cannot claim.
 5. Upgrades of a dependency for a security advisory are **not** this register's business: `cargo audit` in CI (the
-   `audit` job, over every tracked `Cargo.lock`, `.github/workflows/ci.yml:1102`) and the security PATCH releases
+   `audit` job, over every tracked `Cargo.lock`, `.github/workflows/ci.yml`, job `audit`) and the security PATCH releases
    handle those.
 
 **States.** `watch`: nothing to do until upstream moves. `spike`: a dated note in [`spikes/`](spikes/) would settle
@@ -44,7 +44,7 @@ is, what adopting it would buy, what it would cost or risk, its state, and what 
   registry-hardening goal (verifiable mirroring, quarantine), *unverified* end date, see the
   [Rust project goals](https://rust-lang.github.io/rust-project-goals/).
 - **Where Mycelium is:** `.github/workflows/release.yml:15` publishes `SHA256SUMS` and says *the sums are integrity,
-  not provenance*. `cargo audit` runs over every tracked lockfile (`ci.yml:1102`). On the capability side, the
+  not provenance*. `cargo audit` runs over every tracked lockfile (`ci.yml`, job `audit`). On the capability side, the
   artifact library already has signed manifests, fuel by publisher (D19) and proposed → shadow → accept (D20).
 - **What it buys:** a customer can check what produced the binary or image they run, from which commit, with which
   dependencies, and (for a capability) which approval admitted it. It makes the customer-control claim checkable.
@@ -207,8 +207,11 @@ is, what adopting it would buy, what it would cost or risk, its state, and what 
 - **State:** `watch`.
 - **Upstream:** [object_store on crates.io](https://crates.io/crates/object_store);
   [RUSTSEC-2026-0543](https://rustsec.org/advisories/RUSTSEC-2026-0543) (`chrono` unmaintained) and
-  [RUSTSEC-2026-0542](https://rustsec.org/advisories/RUSTSEC-2026-0542) (`humantime` unmaintained), both published
-  2026-11-17. Neither names a defect or a fixed version.
+  [RUSTSEC-2026-0542](https://rustsec.org/advisories/RUSTSEC-2026-0542) (`humantime` unmaintained). The advisory files are dated
+  2026-09-14; they first failed CI's audit on 2026-11-17. Neither names a defect or a fixed version.
+- **Why it is here, given rule 5:** rule 5 leaves security-advisory *upgrades* to the audit job. These two have no
+  defect and no fixed version, so there is nothing to upgrade to. This row tracks the exit instead: `object_store`
+  dropping or replacing the two crates.
 - **Where Mycelium is:** `object_store = "0.14"` is an optional dependency of `mycelium-wasm-host`
   (`mycelium-wasm-host/Cargo.toml:75`, feature `object_store`); `Cargo.lock` resolves 0.14.2, which pulls `chrono`
   0.4.45 and `humantime` 2.4.0. The published stem is built with the feature (`release.yml`, `STEM_FEATURES`); no node
