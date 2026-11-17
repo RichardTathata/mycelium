@@ -47,8 +47,12 @@ class _Node(BaseHTTPRequestHandler):
             self.wfile.flush()
 
         if _Node.burst:
-            for i in range(_Node.burst):
+            # The request in hand, more behind it, then the cancel of the first.
+            send("depot.custom", REQ)
+            for i in range(1, _Node.burst):
                 send("depot.custom", dict(REQ, nonce_hex=f"{i:016x}"))
+            time.sleep(0.2)
+            send("cancel", CANCEL)
             time.sleep(1.0)
             return
         send("depot.custom", REQ)
@@ -93,7 +97,7 @@ def test_a_declaring_stream_says_so_and_an_undeclared_one_does_not(port):
             return req
 
     asyncio.run(first(stops_on_cancel=True))
-    assert _serve_path() == "/gateway/rpc/serve/depot.custom?cancel_events=true&stops_on_cancel=true"
+    assert _serve_path() == "/gateway/rpc/serve/depot.custom?cancel_events=true&stops_on_cancel=true&read_ahead=256"
     _Node.seen.clear()
     asyncio.run(first())
     assert _serve_path() == "/gateway/rpc/serve/depot.custom?cancel_events=true"
@@ -173,27 +177,21 @@ def test_an_answer_names_its_stream(port):
     assert _posts()[-1]["stream"] == "7"
 
 
-def test_a_declaring_stream_reads_ahead_only_as_far_as_its_bound(port, monkeypatch):
-    """#806's review, M2: a declaring stream reads beside its caller, but no further than ``read_ahead``, so a busy
-    worker's backlog stays in the node's channel, which the node's admission reads."""
-    import mycelium.agent as agent_mod
+def test_a_cancel_reaches_the_request_in_hand_whatever_is_queued_behind_it(port):
+    """#806's confirm round, C1: with ``read_ahead=1`` and two more requests already sent, the cancel of the request
+    in hand still arrives — the stream is never paused; the node, not the SDK, bounds what the stream is handed."""
+    _Node.burst = 3
 
-    made: list[object] = []
+    async def run() -> bool:
+        stream = MyceliumAgent("127.0.0.1", port).rpc_serve("depot.custom", stops_on_cancel=True, read_ahead=1)
+        req = await stream.__anext__()
+        try:
+            await asyncio.wait_for(req.cancelled.wait(), timeout=2)
+        except asyncio.TimeoutError:
+            return False
+        finally:
+            await stream.aclose()
+        return True
 
-    class Counting(agent_mod.RpcRequest):
-        def __init__(self, *args: object, **kwargs: object) -> None:
-            super().__init__(*args, **kwargs)  # type: ignore[arg-type]
-            made.append(self)
-
-    monkeypatch.setattr(agent_mod, "RpcRequest", Counting)
-    _Node.burst = 10
-
-    async def run() -> None:
-        stream = MyceliumAgent("127.0.0.1", port).rpc_serve("depot.custom", stops_on_cancel=True, read_ahead=2)
-        await stream.__anext__()
-        await asyncio.sleep(0.5)  # a caller busy with its first request
-        await stream.aclose()
-
-    asyncio.run(run())
-    # The one taken, two queued, and one parsed and waiting for room — not all ten.
-    assert 1 <= len(made) <= 4, len(made)
+    assert asyncio.run(run()), "the cancel for the request in hand was not received"
+    assert _serve_path() == "/gateway/rpc/serve/depot.custom?cancel_events=true&stops_on_cancel=true&read_ahead=1"

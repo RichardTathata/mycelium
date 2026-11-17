@@ -52,7 +52,8 @@ grows a tool on demand ([hosted components](hosted-components.md)).
   through the node (the maintainer's decision (C) of 2026-11-16, I4's PR 3b). **Under any other rule, a bridged call
   whose authority lapses while it runs gets the node's own stop** ([§116](../guide/deprecations.md)): the node
   stops waiting, answers the requester `cancelled` (`data.door` `bridged_mcp`), sends the server
-  `notifications/cancelled` for the id the bridge forwarded under — its own, one per forward, never the requester's
+  `notifications/cancelled` for the id the bridge forwarded under — its own (`mycelium-bridge-{node}-{token}-{n}`), one
+  per forward, never the requester's
   — and never reads its reply — and promises nothing about the work in
   the server, so a cancel's receipt says `Unbounded`. **`notifications/cancelled`** at `/mcp` cancels the caller's own in-flight `tools/call` of that
   `requestId` on a gateway that mints `call:` mandates, and is answered `202` with no body

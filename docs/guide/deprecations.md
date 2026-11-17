@@ -4782,7 +4782,9 @@ call whose authority does not lapse**, and nothing changes on a provider without
   At the bridged loop the forward's request is dropped and the server is sent **`notifications/cancelled`** for the
   id the bridge forwarded under (on a task of its own, 5 s timeout, the answer unread). **Changed, the bridged
   loop's ids** (#806's review, M1): the bridge now forwards each call under an id of its own
-  (`mycelium-bridge-{n}`) and answers the requester under the requester's id; it forwarded the requester's id, which
+  (`mycelium-bridge-{node}-{token}-{n}`: this node, a random token drawn when the bridge task starts, a count — so
+  two nodes bridging one server, or a restarted bridge, never share one) and answers the requester under the
+  requester's id; it forwarded the requester's id, which
   two requesters numbering from 1 share — and once the node stops waiting, the server can hold both, so a notice
   naming that id could cancel the other requester's work. At the SDK stream the requester's answer is the
   node's, and a later `rpc/respond` for the call is answered **`{"ok": true, "cancelled": true}`** and sent nowhere.
@@ -4800,7 +4802,11 @@ call whose authority does not lapse**, and nothing changes on a provider without
   "cancelled", "message"}`, naming the request the node stopped waiting for. A kind literally named `cancel` is told
   apart by the `cancel: true` field, as `evicted` is by its `error`.
 - **New, additive: each serve stream is named** (the maintainer's decision of 2026-11-17): the `Mycelium-Serve-Stream`
-  response header, and `"stream"` in every request and `cancel` event the stream carries. `rpc/respond` takes it back
+  response header, and `"stream"` in every request and `cancel` event the stream carries — **128 random bits, 32 hex
+  digits** (from the operating system), so a process holding the same token cannot name a sibling's stream. **An
+  answer ends only its own stream's registration**: one naming a stream its principal did not open ends none, and one
+  naming no stream — an SDK before this change — ends the streams its own principal opened (it cannot say which) and
+  no other principal's. `rpc/respond` takes it back
   (`"stream"`, additive): an answer or a confirmation speaks **only for its own stream's work**, never a sibling
   replica's. Both SDKs send it.
 - **New, additive: `POST /gateway/rpc/respond` with `{"nonce_hex", "sender", "stopped": true, "stream"}`** — the subscriber's
@@ -4820,23 +4826,29 @@ call whose authority does not lapse**, and nothing changes on a provider without
   per-stream keying does not rely on it.
 - **Changed: a streamed call's admission is held whether or not a cohort budget is attached**, by a watcher task per
   stream a call that holds a cohort place or a running-work registration was handed to, until that stream answers or
-  confirms, or 300 s after it was streamed. **And a call without an envelope** (a member's direct call), which reaches
-  every stream of the kind, now **holds a cohort place at each stream for its life** (#806's review, M4): before, a
-  second replica's place replaced the first's. Kept, not restored — each stream that holds the call is doing work
-  the budget should count, as each stream speaks for its own work — so size an undeclared pool for replicas. Before, it was held only under a cohort budget (in `ProviderBudget::parked`, lock-order
+  confirms, or 300 s after it was streamed. **A call holds one cohort place, however many streams it reaches** (the maintainer's decision of
+  2026-11-17, #806's M4: a caller's budget is the caller's, and how many streams a server opens must not multiply
+  what a caller is charged): a call without an envelope (a member's direct call) reaches every stream of the kind,
+  the place is kept with the call, a later stream's is given back as it is handed the call, and the one place is
+  released when the call's last stream registration ends. As before this change, one place per call; each stream
+  still answers only for its own stop. Before, it was held only under a cohort budget (in `ProviderBudget::parked`, lock-order
   row 46, now retired) and was otherwise dropped when streamed, so nothing could see its lapse. A gateway holds at most
   65 536 such calls (`SERVED_RPC_CAP`); past it a call that needs one is refused before it is streamed, `-32004`
   `at_capacity`, `data.detail` `served_calls_full`.
 - **Changed, the receipt: a registration whose agent promised to stop is read from its stop record once it ends.**
   `Stopped` now needs the stop record's confirmation; a declared subscriber that answered with a result inside the
   receipt's wait reads `Unbounded`.
-- **A declaring SDK stream reads ahead at most 256 requests** (`read_ahead` / `readAhead`, the depth of the node's
-  channel for the stream; #806's review, M2). Past that it stops reading, so a busy worker's backlog fills the node's
-  channel and `SignalHandlers::fill_ratio`, which the node's admission reads, sees it — shedding then starts at about
-  twice the depth it did for an undeclared stream (the SDK's 256 and the channel's). A `cancel` event for a request
-  behind a full read-ahead is read when the caller takes its next request.
+- **A declaring stream is handed at most 256 requests it has not ended** (`?read_ahead=N`, 1–256, default 256;
+  `read_ahead` / `readAhead` in the SDKs; #806's review M2 and its confirm round, C1). **The bound is the node's
+  own**: it counts what it handed the stream and the stream has not ended — an `rpc/respond` naming the stream (an
+  answer or a confirmation), or 300 s — and past the window hands it nothing more and takes nothing more off the
+  stream's channel, so a busy worker's backlog fills that channel and `SignalHandlers::fill_ratio`, which admission
+  reads, sees it. **The SDKs read a declaring stream without pause**, so a `cancel` event is never stuck behind
+  requests. A declaring worker that takes requests and never answers them stalls at its window until they expire:
+  answer or confirm every request. An undeclared stream is unchanged.
 - **A call cancelled while it still waits in the stream's queue** is answered `cancelled`, never streamed, and recorded
-  as the node's own confirmed stop, whatever the stream declared: it was never handed out (#806's review, L7).
+  as the node's own confirmed stop, whatever the stream declared: it was never handed out (#806's review, L7) — also
+  when the stream closes with it still queued (before, `withdrawn`).
 - **SDKs** (`mycelium-py` and `mycelium-ts` bump at release): `rpc_serve(kind, stops_on_cancel=True)` /
   `rpcServe(kind, { stopsOnCancel: true })` declare; every stream sends `cancel_events=true`; each request carries
   `cancelled` (an `asyncio.Event`) / `signal` (an `AbortSignal`), set by its `cancel` event; `rpc_confirm_stopped(req)` /

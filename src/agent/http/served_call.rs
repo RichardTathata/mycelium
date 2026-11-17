@@ -29,13 +29,13 @@
 //! call's one answer); after the node's own stop, **its own stream's** answer or confirmation (the maintainer's
 //! decision of 2026-11-17: each stream speaks only for its own work, so a replica's `stopped` never ends a sibling's
 //! registration); or [`PARKED_TTL_MS`] after the call was streamed (the window in which `rpc/respond` takes an answer
-//! at all). Each stream is named ([`Words::watching`], the `stream` field the node puts on every event it streams and
+//! at all). Each stream is named, by 128 random bits ([`Words::watching`], the `stream` field the node puts on every event it streams and
 //! the SDK sends back). Every end but its own stream's confirmation is a release the node cannot confirm.
 //!
 //! **Today an enveloped call reaches one stream only**: the envelope replay window (`gateway_caller::verify_received`,
 //! node-wide) drops a second stream's copy of the same envelope, and every call that carries a registration is
 //! enveloped. Calls without an envelope (an in-mesh member's direct call) reach every stream of the kind and, under a
-//! cohort budget, take a place at each (§116). The per-stream keying holds whatever that window becomes.
+//! cohort budget, hold one place for the call, not one per stream ([`Words::place`]; §116). The per-stream keying holds whatever that window becomes.
 //!
 //! The table the respond route finds an entry in is a papaya map keyed `(sender, nonce)`, so it adds no lock; the
 //! entry goes with its last watcher (`remove_if` on the pointer), and it is bounded at [`SERVED_CALLS_CAP`]: past it the
@@ -57,20 +57,29 @@ pub(super) struct Words {
     /// Some stream answered the call (any answer, attributed or not): before a cancel, the call's one answer.
     any: bool,
     /// The streams that answered it with a result.
-    answered: std::collections::BTreeSet<u64>,
+    answered: std::collections::BTreeSet<u128>,
     /// The streams that confirmed they stopped it (`"stopped": true`).
-    stopped: std::collections::BTreeSet<u64>,
-    /// An answer that named no stream (a client before streams were named): it can be no stream's confirmation.
-    unattributed: bool,
+    stopped: std::collections::BTreeSet<u128>,
+    /// The principals that sent an answer naming no stream (a client before streams were named). Such an answer can
+    /// be no stream's confirmation, and it cannot say which of its principal's streams it came from: it ends every
+    /// stream **that principal** opened, and no other principal's (#806's confirm round, C4).
+    unattributed: std::collections::BTreeSet<Arc<str>>,
     /// The streams the call was handed to: the principal that opened each, and whether it declared `stops_on_cancel`.
-    watching: std::collections::BTreeMap<u64, (Arc<str>, bool)>,
+    watching: std::collections::BTreeMap<u128, (Arc<str>, bool)>,
+    /// **The call's one cohort place** (the maintainer's decision of 2026-11-17, M4): a caller's budget is the
+    /// caller's, so a call holds one place however many streams the server opened. The first stream's is kept here;
+    /// a later stream's is given back as it is handed the call. Released, explicitly, when the call's last stream
+    /// registration ends ([`leave`]) — not left to the entry's drop, which the table's reclamation may defer.
+    place: Option<crate::knowledge::cohort_budget::CohortSlot>,
 }
 
 impl Words {
-    /// Has `stream` itself ended the call after the node's stop — its confirmation, its answer — or did an answer come
-    /// that named no stream?
-    pub(super) fn ends(&self, stream: u64) -> bool {
-        self.stopped.contains(&stream) || self.answered.contains(&stream) || self.unattributed
+    /// Has `stream` itself ended the call after the node's stop — its confirmation, its answer — or did its own
+    /// principal send an answer that named no stream?
+    pub(super) fn ends(&self, stream: u128) -> bool {
+        self.stopped.contains(&stream)
+            || self.answered.contains(&stream)
+            || self.watching.get(&stream).is_some_and(|(p, _)| self.unattributed.contains(p))
     }
 }
 
@@ -121,15 +130,22 @@ impl ServedCall {
         self.stop_asked_ms.load(Ordering::Acquire) != 0
     }
 
-    /// A subscriber answered the call with a result, naming its stream if it did.
-    pub(super) fn answered(&self, stream: Option<u64>) {
+    /// **`principal` answered the call with a result**, naming its stream if it did (#806's confirm round, C4). The
+    /// call is answered — before a cancel, that is its one answer, whichever stream sent it. After a cancel an answer
+    /// ends only its own stream's registration: a named stream counts only if `principal` opened it and it was handed
+    /// the call (another's, or an unknown one, ends nothing); an answer naming none — an older SDK — ends the streams
+    /// `principal` opened, since it cannot say which, and no other principal's.
+    pub(super) fn answered(&self, stream: Option<u128>, principal: &str) {
         self.ended.send_modify(|w| {
             w.any = true;
             match stream {
-                Some(s) => {
+                Some(s) if w.watching.get(&s).is_some_and(|(p, _)| p.as_ref() == principal) => {
                     w.answered.insert(s);
                 }
-                None => w.unattributed = true,
+                Some(_) => {}
+                None => {
+                    w.unattributed.insert(Arc::from(principal));
+                }
             }
         });
     }
@@ -137,7 +153,7 @@ impl ServedCall {
     /// **A subscriber's confirmation that it stopped its own work** under `stream`. Refused by name unless the node
     /// cancelled the call, the confirmation names a stream, that stream was handed the call and opened by `principal`,
     /// and it declared that it stops: a stream speaks only for its own work, never a sibling's.
-    pub(super) fn confirm(&self, stream: Option<u64>, principal: &str) -> Result<(), NotConfirmed> {
+    pub(super) fn confirm(&self, stream: Option<u128>, principal: &str) -> Result<(), NotConfirmed> {
         if !self.cancelled() {
             return Err(NotConfirmed::NotCancelled);
         }
@@ -180,13 +196,13 @@ pub(super) fn full(http: &HttpCtx) -> bool {
 }
 
 /// The `cancel` event the stream carries for a call the node stopped waiting for.
-pub(super) fn cancel_event(req: &rpc::RpcRequest, stream: u64) -> Event {
+pub(super) fn cancel_event(req: &rpc::RpcRequest, stream: u128) -> Event {
     Event::default().event("cancel").data(
         json!({
             "cancel": true,
             "nonce_hex": format!("{:016x}", req.nonce()),
             "sender": req.sender().to_string(),
-            "stream": stream.to_string(),
+            "stream": super::mesh::stream_name(stream),
             "reason": "cancelled",
             "message": "the call's authority lapsed: the node stopped waiting for it and discards a later answer",
         })
@@ -223,12 +239,12 @@ pub(super) fn slim(req: &rpc::RpcRequest) -> rpc::RpcRequest {
 pub(super) struct Placed {
     entry: Arc<ServedCall>,
     key: (crate::node_id::NodeId, u64),
-    stream: u64,
+    stream: u128,
 }
 
 /// **Place a watcher for a streamed call on `stream`** — before the event is sent. A replicated serve loop shares one
 /// entry per call; each stream's watcher listens only for its own stream's word.
-pub(super) fn place(http: &HttpCtx, req: &rpc::RpcRequest, principal: &Arc<str>, stream: u64, declared: bool) -> Placed {
+pub(super) fn place(http: &HttpCtx, req: &rpc::RpcRequest, principal: &Arc<str>, stream: u128, declared: bool) -> Placed {
     let key = (req.sender().clone(), req.nonce());
     let entry = Arc::clone(http.served_calls.pin().get_or_insert(key.clone(), Arc::new(ServedCall::new(Arc::clone(req.kind())))));
     entry.ended.send_modify(|w| {
@@ -248,7 +264,15 @@ impl Placed {
 
     /// **Hold the streamed call's admission until its stream ends it** — the watcher (module doc). `cancels`: the
     /// stream the call went out on, if its subscriber reads `cancel` events.
-    pub(super) fn start(self, http: &Arc<HttpCtx>, req: &rpc::RpcRequest, principal: Arc<str>, admission: Admission, cancels: Option<tokio::sync::mpsc::UnboundedSender<Event>>) {
+    pub(super) fn start(self, http: &Arc<HttpCtx>, req: &rpc::RpcRequest, principal: Arc<str>, mut admission: Admission, cancels: Option<tokio::sync::mpsc::UnboundedSender<Event>>) {
+        // One place per call (M4): the call keeps the first stream's; this stream's, if the call has one, is released.
+        if let Some(place) = admission.take_place() {
+            self.entry.ended.send_modify(|w| {
+                if w.place.is_none() {
+                    w.place = Some(place);
+                }
+            });
+        }
         let req = slim(req);
         let http = Arc::clone(http);
         let spawner = Arc::clone(&http.agent_ctx);
@@ -260,17 +284,23 @@ impl Placed {
 }
 
 /// A stream's watcher is done: it leaves the entry, and the entry goes with the last of them.
-fn leave(http: &HttpCtx, entry: &Arc<ServedCall>, key: &(crate::node_id::NodeId, u64), stream: u64) {
+fn leave(http: &HttpCtx, entry: &Arc<ServedCall>, key: &(crate::node_id::NodeId, u64), stream: u128) {
+    let mut place = None;
     entry.ended.send_modify(|w| {
         w.watching.remove(&stream);
+        // The call's last stream registration has ended: its one place goes (M4).
+        if w.watching.is_empty() {
+            place = w.place.take();
+        }
     });
+    drop(place);
     if entry.ended.borrow().watching.is_empty() {
         http.served_calls.pin().remove_if(key, |_, v| Arc::ptr_eq(v, entry)).ok();
     }
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn run(http: &Arc<HttpCtx>, req: &rpc::RpcRequest, principal: &str, stream: u64, admission: Admission, cancels: Option<tokio::sync::mpsc::UnboundedSender<Event>>, entry: &ServedCall) {
+async fn run(http: &Arc<HttpCtx>, req: &rpc::RpcRequest, principal: &str, stream: u128, admission: Admission, cancels: Option<tokio::sync::mpsc::UnboundedSender<Event>>, entry: &ServedCall) {
     let mut ended = entry.ended.subscribe();
     let ttl = mycelium_core::sim_seam::sleep_ms("rpc-serve/parked", PARKED_TTL_MS);
     tokio::pin!(ttl);
@@ -327,7 +357,7 @@ async fn run(http: &Arc<HttpCtx>, req: &rpc::RpcRequest, principal: &str, stream
 mod tests {
     use super::*;
 
-    fn cancelled_call(streams: &[(u64, &str, bool)]) -> ServedCall {
+    fn cancelled_call(streams: &[(u128, &str, bool)]) -> ServedCall {
         let c = ServedCall::new(Arc::from("depot.custom"));
         c.ended.send_modify(|w| {
             for (s, p, d) in streams {
@@ -354,10 +384,28 @@ mod tests {
         assert_eq!(c.confirm(Some(1), "token:sdk"), Ok(()));
         assert!(c.ended.borrow().ends(1), "its own stream ends");
         assert!(!c.ended.borrow().ends(2), "the sibling's stands until it speaks for itself");
-        c.answered(Some(2));
+        c.answered(Some(2), "token:sdk");
         assert!(c.ended.borrow().ends(2) && !c.ended.borrow().stopped.contains(&2), "its answer ends it, unconfirmed");
         let uncancelled = ServedCall::new(Arc::from("depot.custom"));
         assert_eq!(uncancelled.confirm(Some(1), "token:sdk"), Err(NotConfirmed::NotCancelled));
+    }
+
+    /// **An answer ends only its own stream's registration** (#806's confirm round, C4). After a cancel, with streams 1
+    /// and 2 of one principal and 3 of another watching: an answer naming another principal's stream, or one nobody
+    /// holds, ends nothing; an answer naming stream 1 ends stream 1 only; an answer naming no stream (an older SDK)
+    /// ends its own principal's streams and not the other principal's. Seen failing first with `answered` taking any
+    /// named stream and an unnamed answer ending every stream.
+    #[test]
+    fn an_answer_ends_only_its_own_streams_registration() {
+        let c = cancelled_call(&[(1, "token:sdk", true), (2, "token:sdk", true), (3, "token:other", true)]);
+        c.answered(Some(3), "token:sdk");
+        c.answered(Some(9), "token:sdk");
+        assert!(!c.ended.borrow().ends(1) && !c.ended.borrow().ends(2) && !c.ended.borrow().ends(3), "another's stream, or none: nothing ends");
+        c.answered(Some(1), "token:sdk");
+        assert!(c.ended.borrow().ends(1) && !c.ended.borrow().ends(2) && !c.ended.borrow().ends(3));
+        c.answered(None, "token:sdk");
+        assert!(c.ended.borrow().ends(2), "an unnamed answer ends its principal's streams");
+        assert!(!c.ended.borrow().ends(3), "and no other principal's");
     }
 
     /// **A watcher keeps no payload** (#806's review, L5): its slim request answers to the same sender and nonce, with

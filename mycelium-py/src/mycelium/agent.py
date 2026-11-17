@@ -190,8 +190,8 @@ class ProtectedSlotError(_ProtectedWriteError):
         self.slot = slot
 
 
-#: How many requests a declaring serve stream reads ahead of its caller: the depth of the node's own channel for the
-#: stream (``rpc/serve``'s 256), so a worker's backlog still fills that channel, which the node's admission reads.
+#: The most requests the node hands a declaring serve stream before the stream ends one (``read_ahead``): the depth
+#: of the node's own channel for the stream. The node enforces it; the SDK only asks for it.
 _READ_AHEAD = 256
 
 #: How many handed-out requests a serve stream remembers so a ``cancel`` event finds its request.
@@ -1267,9 +1267,11 @@ class MyceliumAgent:
         served a call under a rule declared cancellable (an undeclared one is refused it, ``door_cannot_stop``); the
         node records a stop it can confirm only on your confirmation, and counts an answer you send more than a
         second after the stop was asked (``rpc_serve_answered_after_lapse``). A declaring stream reads ahead of you, so
-        a cancel reaches a request you are still working on — **at most** ``read_ahead`` requests (256, the depth of the
-        node's own channel for the stream): past that it stops reading, so the node's channel fills and its admission
-        sheds load as it does for any slow worker. Confirm only once the work **has** stopped::
+        a cancel reaches a request you are still working on, whatever else is waiting: the stream is read without
+        pause. What bounds it is the node: it hands a declaring stream at most ``read_ahead`` requests the stream has
+        not yet ended (256 by default and at most; an answer or a confirmation ends one, as does 300 s), and keeps
+        the rest in its own channel, where its admission sees a busy worker. So answer, or confirm, every request you
+        take. Confirm only once the work **has** stopped::
 
             async for req in agent.rpc_serve("my.method", stops_on_cancel=True):
                 work = asyncio.create_task(process(req.payload))
@@ -1293,6 +1295,8 @@ class MyceliumAgent:
         params = {"cancel_events": "true"}
         if stops_on_cancel:
             params["stops_on_cancel"] = "true"
+            # The node's window for this stream: how many requests it hands out before one is ended.
+            params["read_ahead"] = str(max(1, min(int(read_ahead), _READ_AHEAD)))
         # The requests handed out and not yet cancelled, so a `cancel` event finds its request. Bounded: the oldest
         # go first — a request that old has long been answered.
         handed: "Dict[tuple[str, str], RpcRequest]" = {}
@@ -1338,9 +1342,10 @@ class MyceliumAgent:
                         if req is not None:
                             yield req
                     return
-                # Declared: the stream is read beside you, so a cancel reaches the request you are working on — and
-                # bounded, so a busy worker's backlog stays visible to the node's admission (#806's review, M2).
-                queue: "asyncio.Queue[Any]" = asyncio.Queue(maxsize=max(1, read_ahead))
+                # Declared: the stream is read beside you and never paused, so a cancel reaches the request you are
+                # working on whatever is queued behind it (#806's confirm round, C1). The queue is bounded by the
+                # node, which hands this stream at most `read_ahead` requests it has not ended.
+                queue: "asyncio.Queue[Any]" = asyncio.Queue()
                 end = object()
 
                 async def pump() -> None:
@@ -1348,10 +1353,10 @@ class MyceliumAgent:
                         async for event in event_source.aiter_sse():
                             req = parse(event)
                             if req is not None:
-                                await queue.put(req)
-                        await queue.put(end)
+                                queue.put_nowait(req)
+                        queue.put_nowait(end)
                     except Exception as e:  # noqa: BLE001 — handed to the iterating caller, raised there
-                        await queue.put(e)
+                        queue.put_nowait(e)
 
                 reader = asyncio.create_task(pump())
                 try:

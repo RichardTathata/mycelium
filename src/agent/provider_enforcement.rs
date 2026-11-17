@@ -139,6 +139,13 @@ impl Admission {
         self._slot.is_some() || self.work.is_some() || self.call_work.is_some()
     }
 
+    /// **Take this call's cohort place out of the admission** (the maintainer's decision of 2026-11-17, M4): a call
+    /// holds one place however many serve streams it reaches, so the place is kept with the call
+    /// (`http::served_call`), not with each stream's admission.
+    pub(crate) fn take_place(&mut self) -> Option<CohortSlot> {
+        self._slot.take()
+    }
+
     /// Has the authority already asked this call's work to stop, under either registration?
     pub(crate) fn is_lapsed(&self) -> bool {
         [&self.work, &self.call_work].into_iter().flatten().any(|g| g.is_cancelled())
@@ -825,6 +832,12 @@ pub(crate) fn count_door_stop(ctx: &TaskCtx, door: &'static str) {
     #[cfg(feature = "metrics")]
     metrics::counter!("mycelium_provider_door_stops_total", "door" => door).increment(1);
     ctx.door_stops.pin().update_or_insert(door, |n| n + 1, 1);
+}
+
+/// Test hook: the places held in the undeclared pool now.
+#[cfg(all(test, feature = "compliance"))]
+pub(crate) fn test_undeclared_in_flight(ctx: &TaskCtx) -> Option<usize> {
+    Some(ctx.cohort_budget.get()?.budget.in_flight(&crate::knowledge::cohort_budget::BudgetPool::Undeclared))
 }
 
 /// Test hook: take one place in the cohort budget for `principal`, as an in-flight call would (`grant_tests`).

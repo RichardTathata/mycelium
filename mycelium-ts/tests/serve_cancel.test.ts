@@ -142,22 +142,35 @@ test("an answer names its stream", async () => {
   expect(posts().pop()!.body.stream).toBe("7");
 });
 
-test("a declaring stream reads ahead only as far as its bound", async () => {
-  // #806's review, M2. A pull-driven body: each event is produced only when the SDK reads.
-  let pulled = 0;
+test("a cancel reaches the request in hand, whatever is queued behind it", async () => {
+  // #806's confirm round, C1: readAhead 1, two more requests already sent, then the cancel of the one in hand.
   const enc = new TextEncoder();
-  globalThis.fetch = (async () => new Response(new ReadableStream<Uint8Array>({
-    pull(c) {
-      pulled += 1;
-      if (pulled > 50) return c.close();
-      c.enqueue(enc.encode(`event: depot.custom\ndata: ${JSON.stringify({ ...REQ, nonce_hex: pulled.toString(16).padStart(16, "0") })}\n\n`));
-    },
-  }, { highWaterMark: 0 }), { status: 200, headers: { "content-type": "text/event-stream" } })) as typeof fetch;
-  const stream = new MyceliumAgent("127.0.0.1", 1).rpcServe("depot.custom", { stopsOnCancel: true, readAhead: 2 });
-  await stream.next();
-  await sleep(300); // a caller busy with its first request
-  const read = pulled;
+  const frame = (event: string, data: unknown) => enc.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+  let url = "";
+  globalThis.fetch = (async (input: unknown) => {
+    url = String(input);
+    return new Response(new ReadableStream<Uint8Array>({
+      async start(c) {
+        c.enqueue(frame("depot.custom", REQ));
+        c.enqueue(frame("depot.custom", { ...REQ, nonce_hex: "0000000000000001" }));
+        c.enqueue(frame("depot.custom", { ...REQ, nonce_hex: "0000000000000002" }));
+        await sleep(200);
+        c.enqueue(frame("cancel", CANCEL));
+        await sleep(500);
+        c.close();
+      },
+    }), { status: 200, headers: { "content-type": "text/event-stream" } });
+  }) as typeof fetch;
+  const stream = new MyceliumAgent("127.0.0.1", 1).rpcServe("depot.custom", { stopsOnCancel: true, readAhead: 1 });
+  const first = (await stream.next()).value!;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const aborted = await new Promise<boolean>((resolve) => {
+    if (first.signal!.aborted) return resolve(true);
+    first.signal!.addEventListener("abort", () => resolve(true), { once: true });
+    timer = setTimeout(() => resolve(false), 2000);
+  });
+  clearTimeout(timer);
   await stream.return(undefined);
-  // The one taken, two queued, one parsed and waiting for room, and the reader's own buffering — not all fifty.
-  expect(read).toBeLessThan(10);
+  expect(aborted).toBe(true);
+  expect(new URL(url).searchParams.get("read_ahead")).toBe("1");
 });

@@ -305,10 +305,21 @@ const BRIDGED_CANCEL_NOTIFY_TIMEOUT: std::time::Duration = std::time::Duration::
 /// requesters numbering from `1` would otherwise share an id at the server — and once the node stops waiting for a
 /// cancelled call the server can hold both — so a `notifications/cancelled` naming the requester's id could cancel
 /// the other requester's work. The reply is mapped back to the requester's id.
+///
+/// `bridge` ([`bridge_token`]) makes the id this bridge task's alone: two nodes bridging one server, or a bridge
+/// restarted while the server still runs a forward it abandoned, would otherwise both count from 1 (#806's confirm
+/// round, C2).
 #[cfg(feature = "gateway")]
-fn mint_forward_id(forwards: &mut u64) -> serde_json::Value {
+pub(crate) fn mint_forward_id(bridge: &str, forwards: &mut u64) -> serde_json::Value {
     *forwards += 1;
-    json!(format!("mycelium-bridge-{forwards}"))
+    json!(format!("mycelium-bridge-{bridge}-{forwards}"))
+}
+
+/// What names one bridge task in the ids it forwards under: its node and a random token drawn (through the sim seam)
+/// when the task starts.
+#[cfg(feature = "gateway")]
+pub(crate) fn bridge_token(node: &str, token: u64) -> String {
+    format!("{node}-{token:016x}")
 }
 
 /// Forward an admitted bridged call to the external MCP server and answer with its reply — **or, if `stop` resolves
@@ -437,7 +448,9 @@ pub(super) async fn run_mcp_client_task(
     #[cfg(all(feature = "gateway", feature = "tls"))]
     let mut pending: super::provider_enforcement::DeferredChecks<(RpcRequest, serde_json::Value)> =
         super::provider_enforcement::DeferredChecks::new(&ctx);
-    // The ids this bridge forwards under (#806's review, M1): its own, one per forward.
+    // The ids this bridge forwards under (#806's review, M1): its own, one per forward — and its own across nodes and
+    // restarts too (the confirm round, C2): this node's id and a token drawn once for this bridge task.
+    let bridge = bridge_token(&ctx.node_id.to_string(), mycelium_core::sim_seam::rng_u64_from("nonce", 0));
     let mut forwards: u64 = 0;
     loop {
         #[cfg(all(feature = "gateway", feature = "tls"))]
@@ -448,7 +461,7 @@ pub(super) async fn run_mcp_client_task(
                 _ = await_shutdown(&mut shutdown_rx) => break,
                 Some(((req, rpc_req), checked)) = pending.next(), if !pending.is_empty() => {
                     match checked {
-                        Ok(admission) => forward_bridged(&ctx, &http_client, &server_url, &req, &rpc_req, mint_forward_id(&mut forwards), admission.stop_asked()).await,
+                        Ok(admission) => forward_bridged(&ctx, &http_client, &server_url, &req, &rpc_req, mint_forward_id(&bridge, &mut forwards), admission.stop_asked()).await,
                         Err(refusal) => refuse_bridged(&ctx, &req, &rpc_req, &refusal),
                     }
                     continue;
@@ -507,13 +520,13 @@ pub(super) async fn run_mcp_client_task(
         #[cfg(all(feature = "gateway", feature = "tls"))]
         match super::provider_enforcement::check(&ctx, &req, true, super::provider_enforcement::Door::BridgedMcp).await {
             super::provider_enforcement::Checked::Done(Ok(admission)) => {
-                forward_bridged(&ctx, &http_client, &server_url, &req, &rpc_req, mint_forward_id(&mut forwards), admission.stop_asked()).await
+                forward_bridged(&ctx, &http_client, &server_url, &req, &rpc_req, mint_forward_id(&bridge, &mut forwards), admission.stop_asked()).await
             }
             super::provider_enforcement::Checked::Done(Err(refusal)) => refuse_bridged(&ctx, &req, &rpc_req, &refusal),
             super::provider_enforcement::Checked::Waiting(waiting) => pending.spawn(waiting, (req, rpc_req)),
         }
         #[cfg(not(all(feature = "gateway", feature = "tls")))]
-        forward_bridged(&ctx, &http_client, &server_url, &req, &rpc_req, mint_forward_id(&mut forwards), std::future::pending::<()>()).await;
+        forward_bridged(&ctx, &http_client, &server_url, &req, &rpc_req, mint_forward_id(&bridge, &mut forwards), std::future::pending::<()>()).await;
     }
 
     // Calls still settling a claim when the loop ends are answered, never left to time out.

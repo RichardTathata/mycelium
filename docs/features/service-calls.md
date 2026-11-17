@@ -44,8 +44,9 @@ This feature is turned on in code, through `agent.service()`.
   otherwise. The SDKs refuse to confirm, client side (`CancelNotReceivedError`), unless the request's stream received
   its `cancel` event
   ([provider enforcement](provider-enforcement.md); [§116](../guide/deprecations.md)). A declaring SDK stream is read
-  beside its caller, at most 256 requests ahead (`read_ahead`, the node's channel depth), so a busy worker's backlog
-  still reaches the node's admission.
+  beside its caller without pause, so a cancel is never stuck behind requests; the node hands it at most 256 requests
+  it has not ended (`read_ahead`), so a busy worker's backlog still reaches the node's admission. Stream names are
+  128 random bits.
 - [`scatter_gather`](../../src/agent/service_handle.rs): the targets, the kind, the payload, a timeout and `min_ok`. Any
   reply counts toward `min_ok`, a provider's refusal body included, and a target listed twice is called twice and can
   count twice; with `min_ok = 0` it returns at the first reply, or, if none comes, `Ok` of nothing once every call has
