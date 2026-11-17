@@ -392,7 +392,9 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and no node can check — and which certificate the grade was read from. A refusal's and a revocation's KV record
   carry an unsigned copy; an issue's record, the signed grant, carries none. A service's decision is recorded `service`; a decision naming no
   grade has the message it had, so a pre-upgrade SDK's decisions verify unchanged. A consent principal holds
-  `grant:issue` only through the new `gateway_consent_principals` table, never a named token's; a rule may accept a
+  `grant:issue` only through the new `gateway_consent_principals` table, never a named token's; each entry names the one grade the gateway accepts for the principal (`signed_with`, required), and a decision is admitted only when the
+  signed body, the certificate and the entry agree — so the grade never rests on which certificate reached a node
+  first, and re-certifying a key at another grade means updating the entry; a rule may accept a
   set of grades (`signed_with` in a unit file, `Rule::accepting_grades`). The message format is pinned with and
   without a grade in `tests/fixtures/decision/vector.json`, read by the Rust, Python and TypeScript suites. **Still
   behind the provisional OID:** a shipped build verifies no consent signature, refuses a consent decision by name

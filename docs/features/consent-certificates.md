@@ -57,7 +57,13 @@ principal, and the decision. The developer's own tooling (`dev`, the macOS shim,
   [[gateway_consent_principals]]
   name = "richard"
   scopes = ["grant:issue"]
+  signed_with = "tty"
   ```
+
+  `signed_with` is required: the one consent grade this gateway accepts for the principal, the grade its certificate
+  was issued at. **Re-certifying the key at another grade means updating this entry too**, at every gateway that
+  admits the principal — a deliberate act by the gateway's operator, beside the CA operator's `tls issue --grade`.
+  Until then the gateway refuses the re-certified key's decisions (`decision_grade_not_accepted`).
 
   A consent principal's authority comes from this table and never from a named token's, so granting it gives nothing to the same
   person's `token:` principal, and removing the entry revokes the consent principal alone
@@ -120,11 +126,23 @@ and the grade recorded with it.
   any admitted member can rewrite the copy, and the status route serves what is there. Nothing decides on it. An
   issue's record is the signed grant and carries no copy at all. To check a KV record, re-verify its `signed` body and
   read `signed.grade`.
+- **Three statements must agree, and one of them is not in the KV.** A consent decision is admitted only when the
+  grade the signed body names, the grade of the certificate the node read, and the grade the gateway's own
+  `gateway_consent_principals` entry accepts are the same. The first two disagreeing is `decision_grade_mismatch`;
+  the entry disagreeing is `decision_grade_not_accepted`, counted on `GET /stats` (`consent_grades_not_accepted`).
+  The certificate is a KV record that any member can replace with an older, genuine one; the entry is the gateway
+  operator's configuration, which no member can write. So a node never relies on which certificate reached it
+  first: a gateway that joins late, or restarts with an empty persistence directory, and finds only an older
+  certificate at a different grade, admits nothing under it.
+- **What that does not cover.** It binds the grade, not the key. A late-joining node that finds only an older
+  certificate for a *different, superseded* key at the accepted grade takes that key as current: the supersession
+  residual of [client certificates](client-certificates.md), which `[persistence]` narrows to a node that has
+  never read the newer certificate.
 - **The grade cannot be altered in transit or by a record.** It is inside the signature, so a relay that rewrites it
   breaks the decision. A body naming a grade other than its certificate's is refused (`decision_grade_mismatch`), and
-  one naming none is refused (`decision_grade_missing`). The certificate's grade is read from the certificate the
-  principal's mark names: an older certificate for the same key, written back at its path by any member, changes
-  nothing — the decision is refused until the newest certificate is on record again, and the node counts it
+  one naming none is refused (`decision_grade_missing`). At a node that has read the newer certificate, the grade is
+  read from the certificate the principal's mark names: an older certificate for the same key, written back at its
+  path by any member, gives the key no grade — the decision is refused until the newest certificate is on record again, and the node counts it
   (`consent_grades_unread` on `GET /stats`).
 - **Consent decides only where an operator wrote it down.** A consent principal holds `grant:issue` through
   `gateway_consent_principals` alone, in every build. A superseded consent key decides nothing, before a restart or

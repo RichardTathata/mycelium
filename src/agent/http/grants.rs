@@ -179,6 +179,20 @@ fn decision_actor(
     if !decider_holds_grant_issue(ctx, &signed.decider) {
         return Err(refuse(DecisionRefusal::DeciderLacksScope));
     }
+    // The grade this gateway's operator accepts for a consent principal (the maintainer, 2026-11-17: bound outside
+    // the KV). `verify` established that the signed body and the certificate this node read name one grade; the
+    // operator's own entry must name it too, or the decision is refused by name and counted — so which certificate
+    // reached this node first decides nothing.
+    if let Some(accepted) = consent_grade_accepted(ctx, &signed.decider)
+        && accepted != signed_with.grade
+    {
+        ctx.client_certs.grade_not_accepted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        tracing::warn!(decider = %signed.decider, certificate_grade = %signed_with.grade, accepted = %accepted, "consent decision refused: its certificate's grade is not the one gateway_consent_principals accepts for the principal");
+        return Err(refuse(DecisionRefusal::GradeNotAccepted(format!(
+            "the decision is signed at the grade `{}`, the grade of {}'s consent certificate on record here; this gateway's gateway_consent_principals entry accepts `{accepted}` for it. If the key was re-certified, the certificate on record here is not the newest, or the entry's signed_with was not updated",
+            signed_with.grade, signed.decider
+        ))));
+    }
     let relay = caller.map(|c| c.principal.clone()).unwrap_or_else(|| gateway_caller::PRINCIPAL_ANONYMOUS.to_string());
     Ok(DecisionActor {
         caller: Some(ResolvedPrincipal { principal: signed.decider.clone(), scopes: vec!["grant:issue".to_string()], subject_token: None }),
@@ -216,6 +230,18 @@ impl Drop for DecisionClaim<'_> {
 fn checkpoint_seq_held(ctx: &TaskCtx, key: &str) -> Option<u64> {
     let bytes = mycelium_core::ops::kv_get(ctx, &format!("{key}/checkpoint"))?;
     serde_json::from_slice::<crate::mandate::authority::SignedRevocationCheckpoint>(&bytes).ok().map(|c| c.checkpoint.seq)
+}
+
+/// The consent grade this gateway's `gateway_consent_principals` entry accepts for the consent principal `decider`
+/// (`signed_with`); `None` for a service decider, which the table does not describe. A consent decider reaching
+/// this has an entry ([`decider_holds_grant_issue`] ran first), and `validate()` requires every entry to name a
+/// grade; an entry that names none (a configuration built in code and never validated) accepts no grade.
+fn consent_grade_accepted(ctx: &TaskCtx, decider: &str) -> Option<String> {
+    if !crate::agent::grant_decision::is_consent_principal(decider) {
+        return None;
+    }
+    let issuer = super::gateway_identity_issuer(ctx);
+    Some(ctx.config.gateway_consent_principals.iter().find(|p| gateway_caller::consent_principal(&issuer, &p.name) == decider).map(|p| p.signed_with.clone()).unwrap_or_default())
 }
 
 /// Whether `decider` holds `grant:issue` at this gateway.
@@ -1011,7 +1037,11 @@ mod consent_authority_tests {
             cfg.gateway_consent_principals = table;
             GossipAgent::new(NodeId::new("127.0.0.1", alloc_port()).unwrap(), cfg)
         };
-        let entry = |name: &str, scopes: &[&str]| GatewayConsentPrincipal { name: name.into(), scopes: scopes.iter().map(|s| s.to_string()).collect() };
+        let entry = |name: &str, scopes: &[&str]| {
+            let mut e = GatewayConsentPrincipal::new(name, "tty");
+            e.scopes = scopes.iter().map(|s| s.to_string()).collect();
+            e
+        };
         let none = node(vec![]);
         assert!(!decider_holds_grant_issue(&none.task_ctx, "consent:fleet/richard"), "ADMITTED: a consent decider with no table");
         let listed = node(vec![entry("richard", &["grant:issue"]), entry("dana", &[])]);

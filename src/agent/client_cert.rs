@@ -253,7 +253,14 @@ pub(crate) struct ClientCertLedger {
     pub(crate) provisional_grade: AtomicU64,
     /// Decisions refused because a current consent key's certificate — the one its principal's mark names — was not
     /// at the key's path, so its grade could not be read (identity-and-lifecycle I7; `consent_key_grade`).
+    #[cfg_attr(not(feature = "gateway"), allow(dead_code))]
     pub(crate) grade_unread: AtomicU64,
+    /// Consent decisions refused at the decision routes because the grade of the certificate read here (and named in
+    /// the signed body) is not the one this gateway's `gateway_consent_principals` entry accepts (the maintainer's
+    /// decision of 2026-11-17): an older certificate at the key's path on a node that never read the newer one, or an
+    /// entry not updated after a re-certification.
+    #[cfg_attr(not(feature = "gateway"), allow(dead_code))]
+    pub(crate) grade_not_accepted: AtomicU64,
 }
 
 impl std::fmt::Debug for ClientCertLedger {

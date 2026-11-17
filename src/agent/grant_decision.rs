@@ -39,6 +39,14 @@
 //! `mycelium_core::tls::verify_consent_p256` verifies nothing.
 //!
 //! `recording` is accepted only in a `sim` build.
+//!
+//! **The grade is bound outside the KV** (the maintainer's decision of 2026-11-17; #810's review, finding 1). The
+//! decision routes admit a consent decision only when three statements agree: the grade the signed body names, the
+//! grade of the certificate this node read (both checked here), and the grade the gateway's own
+//! `gateway_consent_principals` entry accepts for the principal (`http/grants.rs`, `decision_grade_not_accepted`,
+//! counted). The certificate is a KV record: a member can write an older, genuine one back, and a node that never
+//! read the newer one would take its grade. The entry is the operator's configuration, which no member writes — so a
+//! node never relies on which certificate reached it first.
 
 use serde::{Deserialize, Serialize};
 
@@ -389,6 +397,9 @@ pub(crate) enum DecisionRefusal {
     GradeMismatch(String),
     /// A `recording` consent grade outside a `sim` build.
     RecordingOutsideSim,
+    /// The decision's grade — the signed body's and the certificate's, which agree — is not the one this gateway's
+    /// `gateway_consent_principals` entry accepts for the principal (the maintainer's decision of 2026-11-17).
+    GradeNotAccepted(String),
 }
 
 #[cfg(all(feature = "gateway", feature = "tls"))]
@@ -409,6 +420,7 @@ impl DecisionRefusal {
             Self::GradeMissing => "decision_grade_missing",
             Self::GradeMismatch(_) => "decision_grade_mismatch",
             Self::RecordingOutsideSim => "recording_grade_outside_sim",
+            Self::GradeNotAccepted(_) => "decision_grade_not_accepted",
         }
     }
 
@@ -438,6 +450,7 @@ impl DecisionRefusal {
             Self::GradeMissing => "a consent principal's decision names its grade (signed.grade), inside the signature".into(),
             Self::GradeMismatch(why) => why.clone(),
             Self::RecordingOutsideSim => "a `recording` consent grade is accepted only by a `sim` build".into(),
+            Self::GradeNotAccepted(why) => why.clone(),
         }
     }
 }

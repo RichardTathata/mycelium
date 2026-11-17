@@ -101,7 +101,8 @@ This feature is turned on in code.
     ([`grant_decision_message_graded`](../../src/agent/grant_decision.rs)), sent as `signed.grade`. A service names
     none, or `service`; any other is `403 decision_grade_mismatch`. A
     [consent principal](consent-certificates.md) (`consent:{issuer}/{name}`, a P-256 key) names its certificate's
-    grade, and holds `grant:issue` through `gateway_consent_principals`, never through a named token. The evidence
+    grade, and holds `grant:issue` through `gateway_consent_principals`, never through a named token; the entry names
+    the grade accepted for it, and a decision at another grade is `403 decision_grade_not_accepted`. The evidence
     record carries `signed_with`: the key's kind, the grade, whose statement the grade is (`grade_source`; for a
     consent key the issuing operator's, which no node can check) and which certificate it was read from. A refusal's
     and a revocation's record carry an unsigned copy, which a member can rewrite; an issue's record carries none.

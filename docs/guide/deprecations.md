@@ -4912,7 +4912,8 @@ nothing changes** but the additive fields below.
   P-256 key under a service principal (`403 not_the_decider`).
 - **The grade is the certificate's at the principal's mark.** One key can hold two consent certificates with different
   grades (a re-issue over the same public key), at the same record path. The grade read is that of the certificate
-  the principal's mark names. If another certificate for the key sits at the path — an older one written back by any
+  the principal's mark names — at a node that has read the newer one. (A node that has not is covered by the
+  entry's `signed_with`, above.) If another certificate for the key sits at the path — an older one written back by any
   member — the grade is unread, the decision is refused `not_the_decider` (*"…its grade cannot be read"*), and the node
   counts it on `GET /stats` as `consent_grades_unread`. Republish the newest certificate to recover.
 - **`gateway_consent_principals`** (new `GossipConfig` field):
@@ -4921,6 +4922,7 @@ nothing changes** but the additive fields below.
   [[gateway_consent_principals]]
   name = "richard"
   scopes = ["grant:issue"]
+  signed_with = "tty"
   ```
 
   A consent decider holds `grant:issue` only through this table, **in every build** — a gateway without `compliance`,
@@ -4928,6 +4930,24 @@ nothing changes** but the additive fields below.
   but `grant:issue` (`*` included), a repeated name, and a name no consent certificate can carry (one segment of
   1–128 ASCII letters, digits, `-`, `_`, `.`; not `legacy`). `start()` refuses a non-empty table in a build without
   `gateway` and `tls`, and in a build that reads no consent certificate. There is no environment form.
+- **`signed_with` on the entry is required, and binds the grade outside the KV** (the maintainer's decision of
+  2026-11-17). It names the one consent grade this gateway accepts for the principal — the unit file's word, here a
+  single grade, since a certificate carries one. `validate()` refuses an entry without it, or naming anything but a
+  consent grade (`service` included). A consent decision is admitted only when **three statements agree**: the grade
+  the signed body names, the grade of the certificate this node read, and the entry's. Body and certificate
+  disagreeing is `403 decision_grade_mismatch`; the two agreeing and the entry not, `403
+  decision_grade_not_accepted`, counted on `GET /stats` as `consent_grades_not_accepted`.
+  - **Why.** The certificate is a KV record. Any member can write an older, genuine certificate for the key back at
+    its path, and a node that never read the newer one — a gateway that joins later, or one rebuilt with an empty
+    persistence directory — has the older one as the newest it knows. The entry is the operator's own configuration,
+    which no member can write, so **a node never relies on which certificate reached it first**.
+  - **Re-certifying a key at another grade is two deliberate acts**: `tls issue --grade` at the CA, and this field at
+    each gateway that admits the principal. Until a gateway's entry is updated it refuses the re-certified key's
+    decisions (`decision_grade_not_accepted`); that is the intended fail-closed order, and the counter shows it.
+  - **What this does not close.** It binds the *grade*, not the *key*: a node that never read a newer certificate for
+    a **different** key of the same principal, at the grade the entry accepts, still takes the older key as current.
+    That is the supersession residual `sys/client-cert/` already states
+    ([owner-signed records](../wiki/dev/owner-signed-records.md), status *Partly*), unchanged by this entry.
 - **A consent principal never holds a grant.** A decision for a request under a `consent:` holder is refused
   `409 consent_holder`: a consent key proves no possession, so the grant could never be presented.
 - **A policy keyed on `token:` principals does not match a `consent:` decider.** A deployment that admits a developer's
@@ -4975,10 +4995,10 @@ build a `SignedDecision` with `sign_grant_decision`, `sign_grant_decision_graded
 `SignedDecision::from_parts`; a `Rule` with `Rule::new` and its builder methods (its fields stay assignable); a
 `RuleDecl` from a unit file or the new `RuleDecl::new`. A literal of any, with `..` or without, no longer compiles
 (each type's doc holds the `compile_fail` twin). Additive: `KNOWN_GRADES`, `SignedWith::from_certificate`,
-`SignedWith::same_grade_as`, `/stats`' `consent_grades_unread` and `consent_certificates_provisional`, `grant_decision_message_graded` (`grant_decision_message` is unchanged and
+`SignedWith::same_grade_as`, `/stats`' `consent_grades_unread`, `consent_grades_not_accepted` and `consent_certificates_provisional`, `grant_decision_message_graded` (`grant_decision_message` is unchanged and
 is the no-grade form), `sign_grant_decision_graded`, `SignedDecision::message`, `SignedWith` (`#[non_exhaustive]`),
 `GRADE_SERVICE`, `recording_grade_accepted_when`, `ActionEnvelope::signed_with` and its builder method,
-`Rule::accepting_grades`, `GatewayConsentPrincipal`, `CONSENT_PRINCIPAL_SCOPE`,
+`Rule::accepting_grades`, `GatewayConsentPrincipal` (`#[non_exhaustive]`; `GatewayConsentPrincipal::new(name, signed_with)`), `CONSENT_PRINCIPAL_SCOPE`,
 `GossipConfig::gateway_consent_principals`, `mycelium_core::tls::verify_consent_p256`. `mycelium-py`'s
 `grant_decision_message` and `sign_grant_decision` take an optional `grade`; `mycelium-ts`'s `grantDecisionMessage`
 and `signGrantDecision` likewise, and `SignedDecision` gains an optional `grade`. **Unchanged by decision:**
@@ -4988,7 +5008,7 @@ and `signGrantDecision` likewise, and `SignedDecision` gains an optional `grade`
 *Check:* the evidence journal of the node the decision was addressed to: the `Decided` record's
 `signed_decision.signed_with` (the grade, its source and the certificate it was read from), and, where a rule read
 the grade, `signed_with grade=… key=… source=…` in its `checked`. Not the copy on a KV record, which is unsigned.
-`GET /stats`: `consent_grades_unread`.
+`GET /stats`: `consent_grades_unread` and `consent_grades_not_accepted`.
 
 Tests: `src/agent/consent_decision_tests.rs`; `the_graded_decision_vector_is_the_same_in_every_language` (Rust, pytest,
 jest, over `tests/fixtures/decision/vector.json`); `a_consent_principal_holds_grant_issue_or_nothing`

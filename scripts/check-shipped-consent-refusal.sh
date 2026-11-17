@@ -45,10 +45,11 @@ if [[ $code -ne 2 ]] || ! grep -q "consent certificates are not issued by this b
 fi
 echo "check-shipped-consent-refusal: refused by name, exit 2, nothing written: $(cat "$work/err")"
 
-# 2. The consent principals table: `doctor` runs `start()`'s preflight and prints its refusal.
+# 2. The consent principals table: `doctor` runs `start()`'s preflight and prints its refusal. The entry is a valid
+#    one (it names its grade, as `validate()` requires), so the refusal is the build's, not a malformed table's.
 port="${CONSENT_CHECK_PORT:-19461}"
 http=$((port + 1))
-printf 'bind_port = %s\nhttp_port = %s\n[[gateway_consent_principals]]\nname = "dev"\nscopes = ["grant:issue"]\n' "$port" "$http" > "$work/table.toml"
+printf 'bind_port = %s\nhttp_port = %s\n[[gateway_consent_principals]]\nname = "dev"\nscopes = ["grant:issue"]\nsigned_with = "tty"\n' "$port" "$http" > "$work/table.toml"
 set +e
 "$bin" doctor "$work/table.toml" > "$work/doctor" 2>&1
 set -e

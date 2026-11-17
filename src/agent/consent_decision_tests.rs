@@ -43,8 +43,13 @@ async fn started_with(dir: &Path, http_port: u16, port: Option<u16>, unit: &str,
     a
 }
 
+/// A consent table: each name holding `grant:issue`, its decisions accepted at `tty` — the grade most tests certify.
 fn consent_table(names: &[&str]) -> Vec<crate::config::GatewayConsentPrincipal> {
-    names.iter().map(|n| crate::config::GatewayConsentPrincipal { name: (*n).into(), scopes: vec!["grant:issue".into()] }).collect()
+    consent_table_at(names, "tty")
+}
+
+fn consent_table_at(names: &[&str], grade: &str) -> Vec<crate::config::GatewayConsentPrincipal> {
+    names.iter().map(|n| crate::config::GatewayConsentPrincipal::new(*n, grade)).collect()
 }
 
 /// A P-256 consent key as a developer's device would hold it: the private half stays here, the issuer sees the point.
@@ -333,7 +338,11 @@ async fn a_consent_principal_decides_by_its_own_table_and_never_by_a_named_token
             let scopes = if on_token { vec!["grant:read".to_string(), "grant:issue".to_string()] } else { vec!["grant:read".to_string()] };
             cfg.gateway_named_tokens.push(GatewayNamedToken { name: "richard".into(), token: "richard-secret".into(), scopes });
             // An entry with no scope stands for "listed, granting nothing"; no entry at all is the removal.
-            cfg.gateway_consent_principals = if in_consent_table { consent_table(&["richard"]) } else if on_token { vec![] } else { vec![crate::config::GatewayConsentPrincipal { name: "richard".into(), scopes: vec![] }] };
+            cfg.gateway_consent_principals = if in_consent_table { consent_table(&["richard"]) } else if on_token { vec![] } else { {
+                let mut listed = crate::config::GatewayConsentPrincipal::new("richard", "tty");
+                listed.scopes = vec![];
+                vec![listed]
+            } };
         })
         .await;
         let _ = forecaster_key(&a, &dir);
@@ -400,33 +409,37 @@ async fn a_rule_for_the_service_principal_does_not_admit_the_consent_principal()
 }
 
 /// **The grade at the evaluator** (I7 exit 15). The unit permits an issue only when it is signed with
-/// `os_presence(macos, unbound)` — a **set** of one accepted grade, on the consent principal's rule and on the
-/// service principal's. The same issue is refused signed at `tty` (Richard's consent key, certified `tty`) and at
-/// `service` (the treasurer's Ed25519 key), and admitted at `os_presence(macos, unbound)` (Richard re-enrolled with a
-/// key certified so). Each evidence record names the grade it decided with, and the permit's `checked` names the
-/// clause: the grade and that it is the operator's statement.
+/// `os_presence(macos, unbound)` — a **set** of one accepted grade — on each decider's rule. The same issue is
+/// refused signed at `tty` (Dana's consent key, certified `tty` and accepted at `tty` by the gateway's table) and at
+/// `service` (the treasurer's Ed25519 key), and admitted at `os_presence(macos, unbound)` (Richard's consent key,
+/// certified and accepted so). All three pass the door: the evaluator is what refuses. Each evidence record names the
+/// grade it decided with, and the permit's `checked` names the clause: the grade and that it is the operator's
+/// statement.
 ///
 /// Seen failing first with the rule's grade clause not read in `matches` (the `tty` and `service` decisions were
 /// admitted).
 #[tokio::test]
 async fn a_policy_accepting_one_grade_refuses_the_same_decision_at_any_other() {
+    const DANA: &str = "consent:fleet/dana";
     let dir = scratch("consent-policy");
     let http_port = alloc_port();
     let accept = format!("signed_with = [\"{OS}\"]");
     // The base unit's unconditional treasurer rules are replaced: the treasurer too issues only at the accepted grade.
     let base = UNIT.split("[[rule]]").take(2).collect::<Vec<_>>().join("[[rule]]");
-    let unit = format!("{base}\n{}{}", decides(RICHARD, &accept), decides(DECIDER, &accept));
-    let a = started_with(&dir, http_port, None, &unit, |cfg| cfg.gateway_consent_principals = consent_table(&["richard"])).await;
+    let unit = format!("{base}\n{}{}{}", decides(RICHARD, &accept), decides(DANA, &accept), decides(DECIDER, &accept));
+    let a = started_with(&dir, http_port, None, &unit, |cfg| {
+        cfg.gateway_consent_principals = vec![crate::config::GatewayConsentPrincipal::new("richard", OS), crate::config::GatewayConsentPrincipal::new("dana", "tty")];
+    })
+    .await;
     let _ = forecaster_key(&a, &dir);
     let treasurer = client_key_in(&a, &dir.join("tls"), &dir.join("client-treasurer"), "treasurer");
     let node = a.node_id().to_string();
     let requests = ask(http_port, 3).await;
     let tty = ConsentKey::new();
-    tty.enrol(&a, &dir, "richard", "consent-tty", ConsentGrade::Tty);
-    let at_tty = post_decision(http_port, "relay-secret", &requests[0], issue_body(tty.sign(RICHARD, &node, &requests[0], "issue", Some(600), None, Some("tty")))).await;
+    tty.enrol(&a, &dir, "dana", "consent-tty", ConsentGrade::Tty);
+    let at_tty = post_decision(http_port, "relay-secret", &requests[0], issue_body(tty.sign(DANA, &node, &requests[0], "issue", Some(600), None, Some("tty")))).await;
     let at_service = post_decision(http_port, "relay-secret", &requests[1],
         issue_body(signed_at(&treasurer, &node, &requests[1], "issue", Some(600), None, mycelium_core::sim_seam::wall_now_ms()))).await;
-    tokio::time::sleep(Duration::from_millis(20)).await;
     let os = ConsentKey::new();
     os.enrol(&a, &dir, "richard", "consent-os", ConsentGrade::OsPresenceMacosUnbound);
     let at_os = post_decision(http_port, "relay-secret", &requests[2], issue_body(os.sign(RICHARD, &node, &requests[2], "issue", Some(600), None, Some(OS)))).await;
@@ -438,10 +451,10 @@ async fn a_policy_accepting_one_grade_refuses_the_same_decision_at_any_other() {
     assert_eq!(at_service.0, 403, "SERVICE: admitted by a rule accepting only {OS}: {}", at_service.1);
     assert_eq!(at_os.0, 200, "OS_PRESENCE: {}", at_os.1);
     let grade_of = |r: &AeEvidence| r.signed_decision.clone().unwrap_or_default()["signed_with"]["grade"].as_str().unwrap_or_default().to_string();
-    let by_richard: Vec<(DecisionKind, String)> = decided(&journal, "grant.issue", RICHARD).iter().map(|r| (r.decision, grade_of(r))).collect();
-    assert_eq!(by_richard, vec![(DecisionKind::Indeterminate, "tty".to_string()), (DecisionKind::Permit, OS.to_string())], "EVIDENCE: each record names the grade it decided with");
-    let by_treasurer: Vec<(DecisionKind, String)> = decided(&journal, "grant.issue", DECIDER).iter().map(|r| (r.decision, grade_of(r))).collect();
-    assert_eq!(by_treasurer, vec![(DecisionKind::Indeterminate, "service".to_string())]);
+    let by = |who: &str| -> Vec<(DecisionKind, String)> { decided(&journal, "grant.issue", who).iter().map(|r| (r.decision, grade_of(r))).collect() };
+    assert_eq!(by(DANA), vec![(DecisionKind::Indeterminate, "tty".to_string())], "EVIDENCE: the evaluator, not the door, refused the tty decision, and its record names the grade");
+    assert_eq!(by(RICHARD), vec![(DecisionKind::Permit, OS.to_string())]);
+    assert_eq!(by(DECIDER), vec![(DecisionKind::Indeterminate, "service".to_string())]);
     let permit = journal.iter().find(|r| r.kind == RecordKind::Decided && r.operation == "grant.issue" && r.decision == DecisionKind::Permit).expect("the permit");
     let checked = serde_json::to_string(permit).unwrap();
     assert!(checked.contains(&format!("signed_with grade={OS} key=p256 source=operator")), "CHECKED: the permit names the grade clause: {checked}");
@@ -728,4 +741,89 @@ async fn a_grant_is_never_issued_to_a_consent_principal() {
         assert_eq!(code(answer), (409, Some("consent_holder".into())), "CONSENT HOLDER ({what}): {}", answer.1);
     }
     assert_eq!(written, 0, "nothing was written under the consent holder");
+}
+
+/// **The grade is bound outside the KV: a node never relies on which certificate reached it first** (the maintainer's
+/// decision of 2026-11-17; #810's review, finding 1). A decision is admitted only when three statements agree — the
+/// grade the signed body names, the grade of the certificate this node read, and the grade the gateway's own
+/// `gateway_consent_principals` entry accepts.
+///
+/// The reviewer's scenario. A key is certified `os_presence(macos, unbound)`; the operator then re-certifies it `tty`
+/// and writes `signed_with = "tty"` in the gateway's table. A **freshly joined node, its persistence directory
+/// empty**, holds no mark for the principal, and the only certificate at the key's path is the older, genuine one —
+/// a member wrote it back, and the newer one never arrived. To this node the older certificate is the newest it has
+/// read, so the certificate alone would give the key its old grade.
+/// - A decision naming `os_presence(macos, unbound)` — the grade the replayed certificate carries — is refused `403
+///   decision_grade_not_accepted`: the body and the certificate agree, the operator's entry does not. No grant is
+///   written, it is counted, and `GET /stats` shows it (`consent_grades_not_accepted`).
+/// - A decision naming `tty` is refused `decision_grade_mismatch`: the certificate on record carries another grade.
+///   Neither grade decides until the newer certificate arrives.
+/// - Once the newer certificate is on record, `tty` — body, certificate and entry agreeing — is admitted, and the old
+///   grade is refused.
+///
+/// The other configuration error it catches: an entry not updated after a re-certification (the table still says
+/// `os_presence(macos, unbound)`, the newest certificate `tty`) refuses the `tty` decision by the same name.
+///
+/// Seen failing first with the door's comparison against the entry removed — this PR's code before the decision: the
+/// decision naming the replayed grade was admitted (`200`, a grant written, recorded `{p256, os_presence(macos,
+/// unbound), operator}`).
+#[tokio::test]
+async fn a_node_that_never_read_the_newer_certificate_does_not_take_the_older_ones_grade() {
+    let dir = scratch("consent-first-seen");
+    let http_port = alloc_port();
+    let unit = unit_with(&decides(RICHARD, ""));
+    // The operator's table at this gateway: the grade the key was re-certified at.
+    let a = started_with(&dir, http_port, None, &unit, |cfg| cfg.gateway_consent_principals = consent_table_at(&["richard"], "tty")).await;
+    let _ = forecaster_key(&a, &dir);
+    let node = a.node_id().to_string();
+    let key = ConsentKey::new();
+    let older = key.certificate(&dir, "richard", "consent-older", ConsentGrade::OsPresenceMacosUnbound);
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let newer = key.certificate(&dir, "richard", "consent-newer", ConsentGrade::Tty);
+    let path: Arc<str> = Arc::from(crate::consent_cert_key(RICHARD, &key.point).as_str());
+    let write = |der: &[u8]| {
+        let _ = crate::agent::helpers::kv_set(&a.task_ctx, Arc::clone(&path), bytes::Bytes::copy_from_slice(der));
+    };
+    let requests = ask(http_port, 3).await;
+    let issued = |request: &str| mycelium_core::ops::kv_get(&a.task_ctx, &format!("grant/{}/{request}/issued", crate::agent::gateway_authority::grant_holder_segment(FORECASTER))).is_some();
+
+    // This node has never read the newer certificate: no mark, and the older one at the path.
+    assert!(a.task_ctx.client_certs.mark(RICHARD).is_none(), "a fresh node holds no mark for the principal");
+    write(&older);
+    let replayed = post_decision(http_port, "relay-secret", &requests[0], issue_body(key.sign(RICHARD, &node, &requests[0], "issue", Some(600), None, Some(OS)))).await;
+    let replayed_issued = issued(&requests[0]);
+    let current = post_decision(http_port, "relay-secret", &requests[0], issue_body(key.sign(RICHARD, &node, &requests[0], "issue", Some(600), None, Some("tty")))).await;
+    let (_, stats) = http(http_port, "treasurer-secret", reqwest::Method::GET, "/stats", None).await;
+
+    // The newer certificate arrives: the three statements agree on `tty`.
+    write(&newer);
+    let old_grade = post_decision(http_port, "relay-secret", &requests[1], issue_body(key.sign(RICHARD, &node, &requests[1], "issue", Some(600), None, Some(OS)))).await;
+    let agreed = post_decision(http_port, "relay-secret", &requests[1], issue_body(key.sign(RICHARD, &node, &requests[1], "issue", Some(600), None, Some("tty")))).await;
+    a.shutdown().await;
+    let journal = journal_of(&dir);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert_eq!(code(&replayed), (403, Some("decision_grade_not_accepted".into())), "FIRST SEEN: an older certificate gave the key its old grade at a node that never read the newer one: {}", replayed.1);
+    assert!(!replayed_issued, "FIRST SEEN: a grant was written under the replayed grade");
+    assert_eq!(code(&current), (403, Some("decision_grade_mismatch".into())), "the re-certified grade, with only the older certificate on record: {}", current.1);
+    assert_eq!(stats["consent_grades_not_accepted"].as_u64(), Some(1), "COUNTED: on GET /stats: {stats}");
+    assert_eq!(code(&old_grade), (403, Some("decision_grade_mismatch".into())), "{}", old_grade.1);
+    assert_eq!(agreed.0, 200, "the body, the certificate and the entry agree: {}", agreed.1);
+    let recorded: Vec<String> = decided(&journal, "grant.issue", RICHARD).iter().map(|r| r.signed_decision.clone().unwrap_or_default()["signed_with"]["grade"].as_str().unwrap_or_default().to_string()).collect();
+    assert_eq!(recorded, vec!["tty".to_string()], "RECORDED: only the agreed decision reached the evaluator");
+
+    // An entry not updated after a re-certification: the table still accepts the old grade, the certificate is `tty`.
+    let dir = scratch("consent-entry-stale");
+    let http_port = alloc_port();
+    let a = started_with(&dir, http_port, None, &unit, |cfg| cfg.gateway_consent_principals = consent_table_at(&["richard"], OS)).await;
+    let _ = forecaster_key(&a, &dir);
+    let node = a.node_id().to_string();
+    let key = ConsentKey::new();
+    key.enrol(&a, &dir, "richard", "consent-richard", ConsentGrade::Tty);
+    let requests = ask(http_port, 1).await;
+    let stale_entry = post_decision(http_port, "relay-secret", &requests[0], issue_body(key.sign(RICHARD, &node, &requests[0], "issue", Some(600), None, Some("tty")))).await;
+    a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(code(&stale_entry), (403, Some("decision_grade_not_accepted".into())), "STALE ENTRY: {}", stale_entry.1);
+    assert!(stale_entry.1["detail"].as_str().unwrap_or_default().contains("signed_with was not updated"), "{}", stale_entry.1);
 }

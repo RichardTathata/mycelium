@@ -621,6 +621,13 @@ signature, the chain, the standing and the equality of the two grades; the grade
 statement. Consent's authority is its own table, `gateway_consent_principals` (`grant:issue` or nothing), read for a
 consent decider in every build; a rule accepts a **set** of grades (`Rule::signed_with`), never a minimum, and an
 unsigned decision is none of them.
+**The grade is bound outside the KV** (the maintainer, 2026-11-17; #810's finding 1). A consent certificate is a KV
+record: any member can write an older, genuine one back, and a node that never read the newer one — joined late, or
+restarted on an empty directory — has the older as the newest it knows. So each `gateway_consent_principals` entry
+names the one grade accepted (`signed_with`, required), and `decision_actor` admits a decision only when the signed
+body, the certificate and the entry agree (`decision_grade_not_accepted`, `consent_grades_not_accepted`). **The lesson
+beyond consent: a "newest wins" fold is only as good as what a node has read; a fact that must not roll back at a
+fresh node needs an anchor outside the KV — here the operator's own configuration.** It binds the grade, not the key.
 **Where a grade may be read from, and how it reaches the evaluator** (#810's review). The verified statement is the
 node-local evidence journal's `signed_decision.signed_with`, which also names the certificate the grade was read from
 (`certificate_issued_ms`, `certificate_sha256`). The copy on a `grant/…/refused` or `…/revoked` record is unsigned and
