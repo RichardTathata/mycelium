@@ -1823,7 +1823,24 @@ pub struct ReferenceEvaluator {
 }
 
 /// One rule of the reference evaluator: exact matches, `*` for any.
+///
+/// `#[non_exhaustive]` (#810's review, finding 6; as critique plan CR12 did for the configuration structs): outside
+/// this crate, start from [`Rule::new`] and use its builder methods or assign the fields you set, so a clause added
+/// later breaks no caller. A struct literal is refused (`docs/guide/deprecations.md` §118).
+///
+/// ```
+/// let r = mycelium::Rule::new("token:fleet/treasurer", "grant.issue", "*").requiring_scopes(["grant:issue"]);
+/// assert_eq!(r.requires_scopes, ["grant:issue"]);
+/// ```
+///
+/// The same rule as a literal does not compile — the twin of the block above, so the error is the literal:
+///
+/// ```compile_fail
+/// let r = mycelium::Rule { requires_scopes: vec!["grant:issue".into()], ..mycelium::Rule::new("token:fleet/treasurer", "grant.issue", "*") };
+/// # let _ = r;
+/// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Rule {
     /// Actor principal, or `*`.
     pub actor: String,
@@ -1911,10 +1928,19 @@ impl Rule {
     }
 
     /// The rule applies only to a grant decision signed with one of `grades` (identity-and-lifecycle I7) — see
-    /// [`Rule::signed_with`]. A set of accepted grades, not a minimum.
-    pub fn accepting_grades<S: Into<String>>(mut self, grades: impl IntoIterator<Item = S>) -> Self {
-        self.signed_with = grades.into_iter().map(Into::into).collect();
-        self
+    /// [`Rule::signed_with`]. A set of accepted grades, not a minimum. **A grade that does not exist is refused, by
+    /// name** ([`KNOWN_GRADES`](crate::agent::grant_decision::KNOWN_GRADES)), as a unit file's `signed_with` is: a
+    /// rule naming it would apply to no decision, and its author meant one that does.
+    pub fn accepting_grades<S: Into<String>>(mut self, grades: impl IntoIterator<Item = S>) -> Result<Self, String> {
+        let grades: Vec<String> = grades.into_iter().map(Into::into).collect();
+        if let Some(unknown) = grades.iter().find(|g| !crate::agent::grant_decision::KNOWN_GRADES.contains(&g.as_str())) {
+            return Err(format!(
+                "signed_with names the grade \"{unknown}\", which is none of {:?}: the rule would apply to no decision",
+                crate::agent::grant_decision::KNOWN_GRADES
+            ));
+        }
+        self.signed_with = grades;
+        Ok(self)
     }
 
     /// The call this allowance permits must be **cancellable** (identity-and-lifecycle I4, D-2): a provider that
@@ -2829,7 +2855,7 @@ mod tests {
     fn a_rule_accepts_a_set_of_grades_and_never_an_unsigned_decision() {
         use crate::agent::grant_decision::SignedWith;
         let os = "os_presence(macos, unbound)";
-        let ev = ReferenceEvaluator::new("rev-1").allow(Rule::new("consent:fleet/richard", "grant.issue", "*").accepting_grades([os, "tty"]));
+        let ev = ReferenceEvaluator::new("rev-1").allow(Rule::new("consent:fleet/richard", "grant.issue", "*").accepting_grades([os, "tty"]).unwrap());
         let at = |signed_with: Option<SignedWith>| {
             let mut b = ActionEnvelope::builder("consent:fleet/richard", node(), "grant.issue", "tool:pay@n1").mapping(ActionMapping::mapped("c", "1")).validity(1_000, 61_000);
             if let Some(s) = signed_with {
@@ -2846,7 +2872,7 @@ mod tests {
             let d = at(signed_with);
             assert_eq!(d.verdict, Verdict::Indeterminate, "ADMITTED: {what}: {d:?}");
         }
-        let any = ReferenceEvaluator::new("rev-1").allow(Rule::new("*", "grant.issue", "*")).prohibit(Rule::new("*", "grant.issue", "*").accepting_grades(["tty"]));
+        let any = ReferenceEvaluator::new("rev-1").allow(Rule::new("*", "grant.issue", "*")).prohibit(Rule::new("*", "grant.issue", "*").accepting_grades(["tty"]).unwrap());
         let env = |s: Option<SignedWith>| {
             let mut b = ActionEnvelope::builder("consent:fleet/richard", node(), "grant.issue", "tool:pay@n1").mapping(ActionMapping::mapped("c", "1")).validity(1_000, 61_000);
             if let Some(s) = s {
@@ -2857,6 +2883,9 @@ mod tests {
         assert_eq!(any.evaluate(&env(Some(SignedWith::consent("tty")))).verdict, Verdict::Deny, "a prohibition on tty");
         assert_eq!(any.evaluate(&env(Some(SignedWith::consent(os)))).verdict, Verdict::Permit);
         assert_eq!(any.evaluate(&env(None)).verdict, Verdict::Permit, "a rule naming no grade does not read it");
+        // A grade that does not exist is refused where the rule is built, by name (#810's review, nit).
+        let err = Rule::new("*", "grant.issue", "*").accepting_grades(["tty", "ttty"]).unwrap_err();
+        assert!(err.contains("\"ttty\"") && err.contains("apply to no decision"), "UNKNOWN GRADE: {err}");
     }
 
     fn envelope(actor: &str, operation: &str, resource: &str) -> ActionEnvelope {

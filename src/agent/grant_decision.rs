@@ -46,8 +46,26 @@ use serde::{Deserialize, Serialize};
 pub const GRANT_DECISION_TAG: &[u8] = b"mycelium.gateway/grant-decision/1";
 
 /// A decision's signature, sent as the decision body's `signed` field.
+///
+/// `#[non_exhaustive]` (#810's review, finding 6; as critique plan CR12 did for the configuration structs): outside
+/// this crate, build one with [`sign_grant_decision`], [`sign_grant_decision_graded`] or [`SignedDecision::from_parts`]
+/// (a signer this crate does not hold the key of — a consent key's), so a field added later breaks no caller. A
+/// struct literal is refused (`docs/guide/deprecations.md` §118).
+///
+/// ```
+/// let d = mycelium::SignedDecision::from_parts("consent:fleet/richard", "127.0.0.1:7946", "token:fleet/forecaster", "r1", 1, "a2V5", "c2ln", Some("tty"));
+/// assert_eq!(d.grade.as_deref(), Some("tty"));
+/// ```
+///
+/// The same fields as a literal do not compile — the twin of the block above, so the error is the literal:
+///
+/// ```compile_fail
+/// let d = mycelium::SignedDecision { decider: "consent:fleet/richard".into(), node: "127.0.0.1:7946".into(), agent: "token:fleet/forecaster".into(), request: "r1".into(), t: 1, k: "a2V5".into(), sig: "c2ln".into(), grade: Some("tty".into()) };
+/// # let _ = d;
+/// ```
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct SignedDecision {
     /// The principal who decided, as its client certificate names it (`token:{issuer}/{name}`).
     pub decider: String,
@@ -77,6 +95,11 @@ pub struct SignedDecision {
 /// client certificate's Ed25519 key. Not a consent grade — no consent certificate carries it.
 pub const GRADE_SERVICE: &str = "service";
 
+/// Every grade a decision can be recorded with (identity-and-lifecycle I7): [`GRADE_SERVICE`] and the consent grades
+/// (`mycelium_core::tls::ConsentGrade`, as literals: this is read in every build). A rule's `signed_with` names
+/// some of these; any other string is refused, since such a rule would apply to no decision.
+pub const KNOWN_GRADES: [&str; 4] = [GRADE_SERVICE, "os_presence(macos, unbound)", "tty", "recording"];
+
 /// **Which key signed a decision, and the grade recorded with it** (identity-and-lifecycle I7) — on the answer's
 /// record and the evidence record (`signed_with`), and on the [`ActionEnvelope`](crate::ActionEnvelope) the decision
 /// is evaluated with.
@@ -98,6 +121,16 @@ pub struct SignedWith {
     /// Who the grade is the statement of: `operator` (a consent certificate's grade: the issuer's host was told it)
     /// or `certificate_scheme` (`service`: the key is in a client certificate).
     pub grade_source: String,
+    /// **Which certificate the grade was read from**: its issuance (ms, the certificate's serial) — the principal's
+    /// mark when the decision was verified (#810's review, finding 2). After a re-issue over the same key the record
+    /// path holds only the newer certificate, so this is what lets an auditor tell which of the key's certificates
+    /// the node's statement was about. `None` only where the node no longer held the mark.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub certificate_issued_ms: Option<u64>,
+    /// The SHA-256 of that certificate's DER, lower-case hex, for a consent key (the certificate was read to take its
+    /// grade). `None` for a service key, whose certificate is not read at the decision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub certificate_sha256: Option<String>,
 }
 
 impl SignedWith {
@@ -112,12 +145,24 @@ impl SignedWith {
 
     /// A service decider's: Ed25519, `service`.
     pub fn service() -> Self {
-        Self { key: Self::KEY_ED25519.into(), grade: GRADE_SERVICE.into(), grade_source: Self::SOURCE_CERTIFICATE_SCHEME.into() }
+        Self { key: Self::KEY_ED25519.into(), grade: GRADE_SERVICE.into(), grade_source: Self::SOURCE_CERTIFICATE_SCHEME.into(), certificate_issued_ms: None, certificate_sha256: None }
     }
 
     /// A consent decider's: P-256, the grade its certificate carries — the operator's statement.
     pub fn consent(grade: impl Into<String>) -> Self {
-        Self { key: Self::KEY_P256.into(), grade: grade.into(), grade_source: Self::SOURCE_OPERATOR.into() }
+        Self { key: Self::KEY_P256.into(), grade: grade.into(), grade_source: Self::SOURCE_OPERATOR.into(), certificate_issued_ms: None, certificate_sha256: None }
+    }
+
+    /// Naming the certificate the grade was read from: its issuance and, when it was read, its digest.
+    pub fn from_certificate(mut self, issued_ms: Option<u64>, sha256: Option<String>) -> Self {
+        self.certificate_issued_ms = issued_ms;
+        self.certificate_sha256 = sha256;
+        self
+    }
+
+    /// The key's kind, the grade and whose statement it is — without the certificate it was read from.
+    pub fn same_grade_as(&self, other: &Self) -> bool {
+        (&self.key, &self.grade, &self.grade_source) == (&other.key, &other.grade, &other.grade_source)
     }
 }
 
@@ -219,6 +264,23 @@ pub fn grant_decision_message_graded(
 }
 
 impl SignedDecision {
+    /// A signed decision from its parts, as a signer outside this crate assembles one: `k` and `sig` base64 (see the
+    /// fields), `grade` the grade named inside the signature, if any. Nothing is checked here; the node the decision
+    /// is addressed to verifies it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_parts(
+        decider: impl Into<String>,
+        node: impl Into<String>,
+        agent: impl Into<String>,
+        request: impl Into<String>,
+        t: u64,
+        k: impl Into<String>,
+        sig: impl Into<String>,
+        grade: Option<&str>,
+    ) -> Self {
+        Self { decider: decider.into(), node: node.into(), agent: agent.into(), request: request.into(), t, k: k.into(), sig: sig.into(), grade: grade.map(str::to_string) }
+    }
+
     /// Whether `sig` is a signature under `k` over this decision — the signed fields, the decision's terms and the
     /// grade the body names — for re-verifying a record afterwards (an evidence record's `signed_decision`, a
     /// refusal's or revocation's `signed`). It checks the signature only, under the key's kind (Ed25519, or P-256 for
@@ -441,12 +503,15 @@ pub(crate) fn verify(
     let superseded = || DecisionRefusal::NotTheDecider(format!("the key is one {} held before a newer certificate", signed.decider));
     let signed_with = match &key {
         DeciderKey::Ed25519(key, _) => match super::client_cert::client_key_standing(ctx, &signed.decider, key) {
-            ClientKeyStanding::Current => SignedWith::service(),
+            ClientKeyStanding::Current => {
+                SignedWith::service().from_certificate(ctx.client_certs.mark(&signed.decider).filter(|m| m.key == *key).map(|m| m.issued), None)
+            }
             ClientKeyStanding::Superseded => return Err(superseded()),
             _ => return Err(DecisionRefusal::NotTheDecider(format!("the key is not {}'s client key on record here", signed.decider))),
         },
         DeciderKey::P256(point, _) => match super::client_cert::consent_key_grade(ctx, &signed.decider, point) {
-            (ClientKeyStanding::Current, Some(certified)) => {
+            (ClientKeyStanding::Current, Some(read)) => {
+                let certified = read.grade;
                 // `GradeMissing` returned above, so the body names one.
                 let named = signed.grade.as_deref().unwrap_or_default();
                 if named != certified.as_str() {
@@ -458,7 +523,7 @@ pub(crate) fn verify(
                 if certified == mycelium_core::tls::ConsentGrade::Recording && !recording_grade_accepted_when(cfg!(feature = "sim")) {
                     return Err(DecisionRefusal::RecordingOutsideSim);
                 }
-                SignedWith::consent(certified.as_str())
+                SignedWith::consent(certified.as_str()).from_certificate(Some(read.issued_ms), Some(read.sha256))
             }
             (ClientKeyStanding::Current, None) => {
                 return Err(DecisionRefusal::NotTheDecider(format!(

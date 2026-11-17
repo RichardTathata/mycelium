@@ -255,6 +255,16 @@ pub(super) async fn stats_handler(State(ctx): State<Arc<HttpCtx>>) -> impl IntoR
         body["grant_decisions_unsigned"] = json!(u.decisions.load(std::sync::atomic::Ordering::Relaxed));
         body["provider_actions_unsigned"] = json!(u.at_provider.load(std::sync::atomic::Ordering::Relaxed));
     }
+    // Identity-and-lifecycle I7 (#810's review, finding 4): consent certificates this node did not read because the
+    // grade extension's OID is provisional, and decisions it refused because a current consent key's certificate —
+    // the one its principal's mark names — was not at the key's path, so its grade could not be read. The second is
+    // the only sign an operator has that an older certificate was written back over a newer one. In memory.
+    #[cfg(feature = "tls")]
+    {
+        let c = &ctx.agent_ctx.client_certs;
+        body["consent_certificates_provisional"] = json!(c.provisional_grade.load(std::sync::atomic::Ordering::Relaxed));
+        body["consent_grades_unread"] = json!(c.grade_unread.load(std::sync::atomic::Ordering::Relaxed));
+    }
     // Identity-and-lifecycle I3 (§9 O1): mandates established on the pre-I3 arguments digest, at this gateway's doors
     // and at this node as a provider — the one-release window (`deprecations.md` §93). Zero without an execution
     // authority; in memory, so zero again after a restart (the evidence record's `checked` is the durable record).

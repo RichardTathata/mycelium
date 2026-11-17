@@ -2673,10 +2673,16 @@ impl GossipConfig {
         // Consent has its own authority and one scope (identity-and-lifecycle I7, A): a consent key decides grants
         // and nothing else, so any other scope — `*` included — is refused by name, as is a blank or repeated name.
         for (i, p) in self.gateway_consent_principals.iter().enumerate() {
-            if p.name.trim().is_empty() {
+            // A name no consent certificate can carry would be accepted and never honoured (#810's review): one
+            // segment of 1–128 ASCII letters, digits, `-`, `_`, `.`, and not a reserved client name.
+            if !crate::tls::valid_client_segment(&p.name) || crate::tls::RESERVED_CLIENT_NAMES.contains(&p.name.as_str()) {
                 return Err(GossipError::InvalidField {
                     field: "gateway_consent_principals",
-                    reason: "an entry with a blank name names no consent principal; name the one its consent certificate carries".into(),
+                    reason: format!(
+                        "the name {:?} is one no consent certificate can carry: a name is 1-128 ASCII letters, digits, `-`, `_` or `.` \
+                         (not `.` or `..`, and not a reserved name such as `legacy`) — write it as `tls issue --client <name> --consent` took it",
+                        p.name
+                    ),
                 });
             }
             if self.gateway_consent_principals[..i].iter().any(|q| q.name == p.name) {
@@ -4025,8 +4031,17 @@ mod tests {
             let err = cfg.validate().expect_err(bad);
             assert!(matches!(&err, GossipError::InvalidField { field: "gateway_consent_principals", reason } if reason.contains(&format!("{bad:?}")) && reason.contains("richard")), "{bad}: {err}");
         }
-        cfg.gateway_consent_principals = vec![entry("  ", &["grant:issue"])];
-        assert!(matches!(cfg.validate(), Err(GossipError::InvalidField { field: "gateway_consent_principals", .. })), "a blank name");
+        // A name no consent certificate can carry (#810's review): blank, padded, two segments, outside the
+        // alphabet, a dot segment, a reserved client name, too long.
+        for bad in ["", "  ", " richard", "richard ", "fleet/richard", "rich ard", "richárd", ".", "..", "legacy", &"a".repeat(129)] {
+            cfg.gateway_consent_principals = vec![entry(bad, &["grant:issue"])];
+            let err = cfg.validate().expect_err(bad);
+            assert!(matches!(&err, GossipError::InvalidField { field: "gateway_consent_principals", reason } if reason.contains("no consent certificate can carry")), "NAME {bad:?}: {err}");
+        }
+        for good in ["richard", "r.t-1_x", &"a".repeat(128)] {
+            cfg.gateway_consent_principals = vec![entry(good, &["grant:issue"])];
+            cfg.validate().unwrap_or_else(|e| panic!("{good}: {e}"));
+        }
         cfg.gateway_consent_principals = vec![entry("richard", &["grant:issue"]), entry("richard", &[])];
         assert!(matches!(cfg.validate(), Err(GossipError::InvalidField { field: "gateway_consent_principals", .. })), "a repeated name");
         let parsed: GossipConfig = toml::from_str("[[gateway_consent_principals]]\nname = \"richard\"\nscopes = [\"grant:issue\"]\n").unwrap();

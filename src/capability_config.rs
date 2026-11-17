@@ -906,8 +906,26 @@ impl MandateDecl {
 /// `requires_values` are compared for equality by name. An unknown key is refused by name (adopter-surface X3,
 /// fourth PR): a misspelt `requires_grant` or `requires_mandate` would otherwise load as a rule that requires
 /// nothing, and admit without a word.
+///
+/// `#[non_exhaustive]` (#810's review, finding 6; as critique plan CR12 did for the configuration structs): outside
+/// this crate a `RuleDecl` comes from a unit file, or from [`RuleDecl::new`] with the fields you set assigned after,
+/// so a key added later breaks no caller. A struct literal is refused (`docs/guide/deprecations.md` §118).
+///
+/// ```
+/// let mut r = mycelium::RuleDecl::new("token:fleet/treasurer", "grant.issue", "tool:weather.forecast");
+/// r.signed_with = vec!["service".into()];
+/// # let _ = r;
+/// ```
+///
+/// The same rule as a literal does not compile — the twin of the block above, so the error is the literal:
+///
+/// ```compile_fail
+/// let r = mycelium::RuleDecl { signed_with: vec!["service".into()], ..mycelium::RuleDecl::new("token:fleet/treasurer", "grant.issue", "tool:weather.forecast") };
+/// # let _ = r;
+/// ```
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct RuleDecl {
     pub actor:     String,
     pub operation: String,
@@ -967,6 +985,24 @@ impl ExposureDecl {
 }
 
 impl RuleDecl {
+    /// An allowance for `actor` to do `operation` on `resource` (`*` is any), with no further clause: what a
+    /// `[[rule]]` naming only those three keys parses to.
+    pub fn new(actor: impl Into<String>, operation: impl Into<String>, resource: impl Into<String>) -> Self {
+        Self {
+            actor: actor.into(),
+            operation: operation.into(),
+            resource: resource.into(),
+            requires_scopes: Vec::new(),
+            requires_facts: Vec::new(),
+            requires_mandate: None,
+            requires_grant: false,
+            requires_values: BTreeMap::new(),
+            cancellable: false,
+            signed_with: Vec::new(),
+            exposure: None,
+        }
+    }
+
     /// Is this an exposure rule (Y5) rather than an allowance?
     pub fn is_exposure(&self) -> bool {
         self.exposure.is_some()
@@ -1016,7 +1052,7 @@ impl RuleDecl {
 
     /// The grades a `signed_with` clause may name (identity-and-lifecycle I7): `service` and the consent grades. The
     /// literals, not `tls::ConsentGrade`: a unit file is validated in every build. The test below holds them equal.
-    pub const SIGNED_WITH_GRADES: [&'static str; 4] = ["service", "os_presence(macos, unbound)", "tty", "recording"];
+    pub const SIGNED_WITH_GRADES: [&'static str; 4] = crate::agent::grant_decision::KNOWN_GRADES;
 
     /// A `signed_with` clause naming a grade that does not exist, refused by name: such a rule would match no
     /// decision, and its author meant one that does.
@@ -1043,10 +1079,7 @@ impl RuleDecl {
         }
         rule.requires_mandate = self.requires_mandate.clone();
         rule.cancellable = self.cancellable;
-        if let Some(why) = self.unknown_grade() {
-            return Err(why);
-        }
-        rule.signed_with = self.signed_with.clone();
+        rule = rule.accepting_grades(self.signed_with.iter().cloned())?;
         if self.requires_grant {
             rule = rule.requiring_grant();
         }
@@ -1797,6 +1830,9 @@ max_providers = 4
             assert_eq!(cfg.rules[0].to_rule().unwrap().signed_with, ["os_presence(macos, unbound)", "tty"]);
             assert!(plain.rules[0].to_rule().unwrap().signed_with.is_empty());
             assert!(misspelt.rules[0].to_rule().unwrap_err().contains("ttty"));
+            // `RuleDecl::new` is the three-key rule a file parses to (#810's review, finding 6).
+            let built = RuleDecl::new("consent:fleet/richard", "grant.issue", "tool:x");
+            assert_eq!(toml::to_string(&built).unwrap(), toml::to_string(&plain.rules[0]).unwrap());
         }
     }
 
@@ -1817,7 +1853,7 @@ max_providers = 4
         let typo = toml::from_str::<NodeCapabilityConfig>("[[mandate]]\nholder = \"p\"\nscope = \"s\"\noperations = []\nholders = [\"q\"]\n").unwrap_err().to_string();
         assert!(typo.contains("holders"), "{typo}");
         // The one reading of "may issue": `*` is any operation and any resource; a `@node` suffix is not matched.
-        let rule = |op: &str, res: &str| RuleDecl { actor: "t".into(), operation: op.into(), resource: res.into(), requires_scopes: vec![], requires_facts: vec![], requires_mandate: None, requires_grant: false, requires_values: Default::default(), cancellable: false, signed_with: vec![], exposure: None };
+        let rule = |op: &str, res: &str| RuleDecl::new("t", op, res);
         assert!(rule("grant.issue", "tool:x").admits_grant_issue_for("tool:x"));
         assert!(rule("*", "*").admits_grant_issue_for("tool:x"));
         assert!(rule("grant.issue", "tool:x").admits_grant_issue_for("tool:x@127.0.0.1:1"));

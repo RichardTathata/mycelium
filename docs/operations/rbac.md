@@ -294,12 +294,15 @@ call waits for a supervisor's grant and is refused on silence. Running it needs:
   [consent principal](../features/consent-certificates.md), `consent:{issuer}/{name}`, signs decisions with a P-256
   key and holds `grant:issue` only through
   [`gateway_consent_principals`](../reference/configuration.md#gateway_consent_principals) — its own table, so the
-  person's `token:` principal and their consent are granted and revoked apart. The decision's record carries
-  `signed_with`: the key's kind, the grade, and `grade_source`. A consent grade is what the operator who issued the
+  person's `token:` principal and their consent are granted and revoked apart. The deciding node's evidence journal
+  carries `signed_with`: the key's kind, the grade, `grade_source` and the certificate the grade was read from (the
+  copy on a refusal's or revocation's KV record is unsigned: do not audit from it). A consent grade is what the operator who issued the
   certificate was told about the key, not something a node observed; a rule may accept a set of grades
   (`signed_with` in a `[[rule]]`). The door's refusals for the grade: `403 decision_grade_missing`,
   `403 decision_grade_mismatch`, `400 decision_grade_empty`, `403 recording_grade_outside_sim`, and in a build that
-  reads no consent certificate `422 consent_grade_oid_provisional`.
+  reads no consent certificate `422 consent_grade_oid_provisional`. `GET /stats` counts `consent_grades_unread`
+  (decisions refused because a current consent key's newest certificate was not at its path — an older one was
+  written back, or the newest never arrived) and `consent_certificates_provisional`.
 - **Revoking.** `POST /gateway/grants/{agent}/{request}/revoke` (`grant:issue`), **at the node that issued it** —
   elsewhere `409 not_the_issuer`. Work already admitted under the grant is stopped within the execution authority's
   drain bound. Which nodes' grants an agent's node accepts is its entitlement table: its own (`entitle_grants`) or

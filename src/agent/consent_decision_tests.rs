@@ -80,14 +80,23 @@ impl ConsentKey {
         let t = mycelium_core::sim_seam::wall_now_ms();
         let msg = crate::grant_decision_message_graded(decider, node, FORECASTER, request, decision, ttl, reason, t, grade);
         let sig = mycelium_core::tls::sign_consent_p256_in_test_build(&self.pkcs8, &msg).expect("signed");
-        crate::SignedDecision { decider: decider.into(), node: node.into(), agent: FORECASTER.into(), request: request.into(), t, k: b64.encode(self.point), sig: b64.encode(sig), grade: grade.map(str::to_string) }
+        crate::SignedDecision::from_parts(decider, node, FORECASTER, request, t, b64.encode(self.point), b64.encode(sig), grade)
     }
 }
 
 /// `grant_decision::verify` on the node itself, for an issue of `ttl` 600 on `request`: the refusal's code, or what
-/// the decision is recorded as signed with.
+/// the decision is recorded as signed with — the key's kind, the grade and its source; which certificate the grade
+/// was read from is [`verified_whole`]'s.
 fn verified(a: &GossipAgent, signed: &crate::SignedDecision, request: &str) -> Result<SignedWith, String> {
+    verified_whole(a, signed, request).map(|s| s.from_certificate(None, None))
+}
+
+fn verified_whole(a: &GossipAgent, signed: &crate::SignedDecision, request: &str) -> Result<SignedWith, String> {
     gd::verify(&a.task_ctx, signed, FORECASTER, request, "issue", Some(600), None, mycelium_core::sim_seam::wall_now_ms()).map_err(|e| format!("{}: {}", e.code(), e.detail()))
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    <sha2::Sha256 as sha2::Digest>::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
 }
 
 fn refusal(r: &Result<SignedWith, String>) -> &str {
@@ -120,8 +129,13 @@ fn decided<'a>(journal: &'a [AeEvidence], op: &str, subject: &str) -> Vec<&'a Ae
 /// signed revocation's record carries the same `signed_with`. A service decider's records say `ed25519`, `service`,
 /// `certificate_scheme` — naming no grade (a pre-I7 body) and naming `service`.
 ///
+/// Each `signed_with` names **which certificate the grade was read from** — its issuance, and for the consent key its
+/// digest — so an auditor can tell, after a re-issue over the same key, which certificate the node's statement was
+/// about (#810's review, finding 2).
+///
 /// Seen failing first, one build per plant: `verify` answering every decision `SignedWith::service()` (the consent
-/// record said `service`); `Relayed::mark` not writing `signed_with` (the revocation record carried none).
+/// record said `service`); `Relayed::mark` not writing `signed_with` (the revocation record carried none); `verify`
+/// not naming the certificate (the record carried no issuance or digest).
 #[tokio::test]
 async fn a_consent_decision_is_verified_and_recorded_with_the_grade_its_certificate_carries() {
     let dir = scratch("consent-decide");
@@ -131,7 +145,8 @@ async fn a_consent_decision_is_verified_and_recorded_with_the_grade_its_certific
     let _ = forecaster_key(&a, &dir);
     let treasurer = client_key_in(&a, &dir.join("tls"), &dir.join("client-treasurer"), "treasurer");
     let key = ConsentKey::new();
-    key.enrol(&a, &dir, "richard", "consent-richard", ConsentGrade::Tty);
+    let certificate = key.enrol(&a, &dir, "richard", "consent-richard", ConsentGrade::Tty);
+    let certificate_issued = mycelium_core::tls::consent_identity(&certificate).and_then(|id| id.issued_ms).expect("the certificate's issuance");
     let node = a.node_id().to_string();
     let requests = ask(http_port, 3).await;
 
@@ -150,7 +165,8 @@ async fn a_consent_decision_is_verified_and_recorded_with_the_grade_its_certific
 
     assert_eq!(issued.0, 200, "CONSENT: the relayed consent-signed issue: {}", issued.1);
     assert_eq!(revoked.0, 200, "CONSENT REVOKE: {}", revoked.1);
-    let operator_tty = serde_json::json!({"key": "p256", "grade": "tty", "grade_source": "operator"});
+    // Which certificate the grade was read from travels with it (#810's review, finding 2): its issuance and digest.
+    let operator_tty = serde_json::json!({"key": "p256", "grade": "tty", "grade_source": "operator", "certificate_issued_ms": certificate_issued, "certificate_sha256": sha256_hex(&certificate)});
     let record = decided(&journal, "grant.issue", RICHARD);
     assert_eq!(record.len(), 1, "JOURNAL: the consent principal is the actor: {:?}", journal.iter().filter(|r| r.operation == "grant.issue").map(|r| &r.subject).collect::<Vec<_>>());
     let kept = record[0].signed_decision.clone().unwrap_or_default();
@@ -160,12 +176,13 @@ async fn a_consent_decision_is_verified_and_recorded_with_the_grade_its_certific
     assert!(body.verify_signature("issue", kept["ttl_secs"].as_u64(), kept["reason"].as_str()), "RE-VERIFY: the consent signature from the record alone: {kept}");
     assert!(!body.verify_signature("issue", Some(601), None), "another term re-verified");
     assert_eq!((revocation["issuer"].as_str(), &revocation["signed_with"]), (Some(RICHARD), &operator_tty), "REVOCATION RECORD: {revocation}");
-    let service = serde_json::json!({"key": "ed25519", "grade": "service", "grade_source": "certificate_scheme"});
     assert_eq!((plain.0, named.0), (200, 200), "{} / {}", plain.1, named.1);
     let by_service: Vec<_> = decided(&journal, "grant.issue", DECIDER).iter().map(|r| r.signed_decision.clone().unwrap_or_default()).collect();
     assert_eq!(by_service.len(), 2);
     for kept in &by_service {
-        assert_eq!(kept["signed_with"], service, "SERVICE: {kept}");
+        let w = &kept["signed_with"];
+        assert_eq!((w["key"].as_str(), w["grade"].as_str(), w["grade_source"].as_str()), (Some("ed25519"), Some("service"), Some("certificate_scheme")), "SERVICE: {kept}");
+        assert!(w["certificate_issued_ms"].as_u64().is_some_and(|t| t > 0) && w.get("certificate_sha256").is_none(), "SERVICE CERTIFICATE: its issuance, and no digest (the certificate is not read): {kept}");
     }
     assert_eq!(by_service.iter().filter(|k| k["signed"]["grade"] == "service").count(), 1, "one body named `service`, one named no grade");
     assert_eq!(by_service.iter().filter(|k| k["signed"].get("grade").is_none()).count(), 1, "a body naming no grade is kept as it was sent");
@@ -434,10 +451,11 @@ async fn a_policy_accepting_one_grade_refuses_the_same_decision_at_any_other() {
 /// consent certificate over K2: a decision signed by K1 is refused `not_the_decider` (a key held before a newer
 /// certificate) and K2's is admitted. After a restart under `[persistence]` — K2's record tombstoned first, so only
 /// the journal remembers it — K1 is still refused as superseded, and K2, whose certificate is no longer on record,
-/// is refused too: its grade cannot be read, and absence fails closed. Republished, K2 decides again.
+/// is refused too: its grade cannot be read, and absence fails closed — counted, and readable on `GET /stats`
+/// (`consent_grades_unread`). Republished, K2 decides again.
 ///
-/// Seen failing first with a consent key's standing read from its own record alone, without the principal's mark (K1
-/// was admitted, before the restart and after it).
+/// Seen failing first with a consent key's standing read from its own record alone and the mark's certificate not
+/// compared (K1 was admitted); and with the counters left off `/stats` (`STATS: … null`).
 #[tokio::test]
 async fn a_superseded_consent_key_decides_nothing_before_or_after_a_restart() {
     let dir = scratch("consent-reenrol");
@@ -468,6 +486,8 @@ async fn a_superseded_consent_key_decides_nothing_before_or_after_a_restart() {
     let older = verified(&b, &by(&k1), "r1");
     let newer_absent = verified(&b, &by(&k2), "r1");
     let unread = b.task_ctx.client_certs.grade_unread.load(Ordering::Relaxed);
+    // The same count where an operator can read it (#810's review, finding 4).
+    let (_, stats) = http(http_port, "treasurer-secret", reqwest::Method::GET, "/stats", None).await;
     let _ = crate::agent::helpers::kv_set(&b.task_ctx, Arc::from(crate::consent_cert_key(RICHARD, &k2.point).as_str()), bytes::Bytes::from(k2_der));
     let newer_back = verified(&b, &by(&k2), "r1");
     b.shutdown().await;
@@ -476,6 +496,7 @@ async fn a_superseded_consent_key_decides_nothing_before_or_after_a_restart() {
     assert_eq!(b.consent_key_standing(RICHARD, &k2.point), ClientKeyStanding::Current);
     assert!(newer_absent.as_ref().is_err_and(|e| e.starts_with("not_the_decider") && e.contains("grade cannot be read")), "ABSENT: K2 with its certificate gone: {newer_absent:?}");
     assert_eq!(unread, 1, "COUNTED: the unread grade");
+    assert_eq!((stats["consent_grades_unread"].as_u64(), stats["consent_certificates_provisional"].as_u64()), (Some(1), Some(0)), "STATS: the unread grade on GET /stats: {stats}");
     assert_eq!(newer_back, Ok(SignedWith::consent("tty")), "K2 republished decides again");
 }
 
@@ -643,4 +664,68 @@ async fn a_consent_key_is_refused_or_ignored_wherever_an_ed25519_key_is_read() {
     assert_eq!(fed.read().client_key(&consent), None, "BUDGET: a consent principal's key in the set ProviderBudget reads");
     a.shutdown().await;
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// **Only the grant decision routes can put a grade on an envelope** (#810's review, finding 5). A companion door
+/// calls the public `gateway_preflight`, names its enforcement point `gateway:grants/issue` — the grant routes' own —
+/// and passes its client's `params`, which claim a verified decision signed at `os_presence(macos, unbound)`. The
+/// unit permits the treasurer to issue only at that grade. The preflight refuses: the envelope carries no
+/// `signed_with`, and the evidence record no `signed_decision`, because both travel from `http/grants.rs` in a typed
+/// argument and are never read from `params`.
+///
+/// Seen failing first with the envelope's `signed_with` read from `params` at that enforcement point's name, as it
+/// was (the call proceeded: *an allowance matches this action*).
+#[tokio::test]
+async fn a_door_naming_the_grant_point_cannot_put_a_grade_on_the_envelope() {
+    let dir = scratch("consent-params");
+    let http_port = alloc_port();
+    let base = UNIT.split("[[rule]]").take(2).collect::<Vec<_>>().join("[[rule]]");
+    let unit = format!("{base}\n{}", decides(DECIDER, &format!("signed_with = [\"{OS}\"]")));
+    let a = started_with(&dir, http_port, None, &unit, |_| {}).await;
+    let node = a.node_id().to_string();
+    let caller = crate::agent::gateway_caller::ResolvedPrincipal { principal: DECIDER.into(), scopes: vec!["grant:issue".into()], subject_token: None };
+    let claimed = serde_json::json!({"key": "p256", "grade": OS, "grade_source": "operator"});
+    let params = serde_json::json!({"_meta": {"signed_decision": {"signed": {"decider": DECIDER}, "signed_with": claimed, "decision": "issue", "relayed_by": "token:fleet/relay"}}});
+    let mut answers = Vec::new();
+    for resource in ["tool:weather.forecast".to_string(), format!("tool:weather.forecast@{node}")] {
+        let p = a.gateway_preflight(Some(&caller), "grant.issue", &resource, &serde_json::json!({}), &params, crate::agent::http::grants::ENFORCEMENT_POINT_GRANT_ISSUE).await;
+        answers.push(if p.refusal().is_some() { "refuse" } else { "proceed" }.to_string());
+    }
+    a.shutdown().await;
+    let journal = journal_of(&dir);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(answers.iter().all(|a| a.starts_with("refuse")), "ADMITTED: a client's params put a grade on the envelope: {answers:?}");
+    let records = decided(&journal, "grant.issue", DECIDER);
+    assert_eq!(records.len(), 2, "{:?}", journal.iter().map(|r| (&r.operation, &r.subject)).collect::<Vec<_>>());
+    assert!(records.iter().all(|r| r.signed_decision.is_none()), "RECORDED: a client's `_meta.signed_decision` on the evidence record: {:?}", records.iter().map(|r| &r.signed_decision).collect::<Vec<_>>());
+}
+
+/// **A consent principal never holds a grant** (I7, *not built*: a consent key as a grant holder; #810's review). A
+/// consent key proves no possession, so a grant issued to `consent:{issuer}/{name}` could never be presented. With
+/// the consent principal's certificate on record — so the ledger holds a mark for it, which is what the door asks of
+/// a client holder — an issue, a refusal and a signed issue for a request under that holder are each answered `409
+/// consent_holder`, by name, and nothing is written.
+///
+/// Seen failing first with the refusal removed (the door went on to look for the request: `404 unknown_request`).
+#[tokio::test]
+async fn a_grant_is_never_issued_to_a_consent_principal() {
+    let dir = scratch("consent-holder");
+    let http_port = alloc_port();
+    let a = started_with(&dir, http_port, None, UNIT, |_| {}).await;
+    let treasurer = client_key_in(&a, &dir.join("tls"), &dir.join("client-treasurer"), "treasurer");
+    ConsentKey::new().enrol(&a, &dir, "richard", "consent-richard", ConsentGrade::Tty);
+    assert!(a.task_ctx.client_certs.mark(RICHARD).is_some(), "the ledger holds the consent principal's mark");
+    let node = a.node_id().to_string();
+    let path = format!("/gateway/grants/{}/r1", segment(RICHARD));
+    let issue = http(http_port, "treasurer-secret", reqwest::Method::POST, &path, Some(serde_json::json!({"decision": "issue", "ttl_secs": 60}))).await;
+    let refuse = http(http_port, "treasurer-secret", reqwest::Method::POST, &path, Some(serde_json::json!({"decision": "refuse", "reason": "no"}))).await;
+    let signed = crate::sign_grant_decision(&treasurer, DECIDER, &node, RICHARD, "r1", "issue", Some(60), None, mycelium_core::sim_seam::wall_now_ms());
+    let signed = http(http_port, "relay-secret", reqwest::Method::POST, &path, Some(serde_json::json!({"decision": "issue", "ttl_secs": 60, "signed": signed}))).await;
+    let written = mycelium_core::store::scan_kv_prefix(&a.task_ctx.kv_state, &format!("grant/{}/", crate::agent::gateway_authority::grant_holder_segment(RICHARD))).len();
+    a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+    for (what, answer) in [("issue", &issue), ("refuse", &refuse), ("signed issue", &signed)] {
+        assert_eq!(code(answer), (409, Some("consent_holder".into())), "CONSENT HOLDER ({what}): {}", answer.1);
+    }
+    assert_eq!(written, 0, "nothing was written under the consent holder");
 }

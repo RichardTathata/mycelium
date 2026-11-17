@@ -253,7 +253,6 @@ pub(crate) struct ClientCertLedger {
     pub(crate) provisional_grade: AtomicU64,
     /// Decisions refused because a current consent key's certificate — the one its principal's mark names — was not
     /// at the key's path, so its grade could not be read (identity-and-lifecycle I7; `consent_key_grade`).
-    #[cfg_attr(not(feature = "gateway"), allow(dead_code))]
     pub(crate) grade_unread: AtomicU64,
 }
 
@@ -557,6 +556,16 @@ pub fn consent_key_standing(ctx: &TaskCtx, principal: &str, point: &[u8; 65]) ->
     standing(ctx, principal, &consent_key_id(point))
 }
 
+/// A consent key's grade, and the certificate it was read from: the one the principal's mark names.
+#[cfg(feature = "gateway")]
+pub(crate) struct GradeRead {
+    pub(crate) grade: mycelium_core::tls::ConsentGrade,
+    /// The certificate's issuance (ms): the mark's.
+    pub(crate) issued_ms: u64,
+    /// The SHA-256 of the certificate's DER, lower-case hex.
+    pub(crate) sha256: String,
+}
+
 /// Where `point` stands for the consent principal `principal`, and — when it is [`Current`](ClientKeyStanding::Current)
 /// — **the grade of the certificate at the principal's mark** (identity-and-lifecycle I7, H2): the grade a decision
 /// signed by that key is checked against and recorded with.
@@ -568,7 +577,7 @@ pub fn consent_key_standing(ctx: &TaskCtx, principal: &str, point: &[u8; 65]) ->
 /// answer is `(Current, None)`, the decision is refused and the read is counted (`grade_unread`) — absence fails
 /// closed (the owner-signed rule), until the newer certificate is republished.
 #[cfg(feature = "gateway")]
-pub(crate) fn consent_key_grade(ctx: &TaskCtx, principal: &str, point: &[u8; 65]) -> (ClientKeyStanding, Option<mycelium_core::tls::ConsentGrade>) {
+pub(crate) fn consent_key_grade(ctx: &TaskCtx, principal: &str, point: &[u8; 65]) -> (ClientKeyStanding, Option<GradeRead>) {
     let standing = consent_key_standing(ctx, principal, point);
     if standing != ClientKeyStanding::Current {
         return (standing, None);
@@ -581,7 +590,8 @@ pub(crate) fn consent_key_grade(ctx: &TaskCtx, principal: &str, point: &[u8; 65]
         if judged != mark {
             return None;
         }
-        mycelium_core::tls::consent_identity(&der).map(|id| id.grade)
+        let sha256 = hex(&Sha256::digest(&der));
+        mycelium_core::tls::consent_identity(&der).map(|id| GradeRead { grade: id.grade, issued_ms: mark.issued, sha256 })
     })();
     if grade.is_none() {
         ctx.client_certs.grade_unread.fetch_add(1, Ordering::Relaxed);

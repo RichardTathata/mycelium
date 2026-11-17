@@ -621,6 +621,14 @@ signature, the chain, the standing and the equality of the two grades; the grade
 statement. Consent's authority is its own table, `gateway_consent_principals` (`grant:issue` or nothing), read for a
 consent decider in every build; a rule accepts a **set** of grades (`Rule::signed_with`), never a minimum, and an
 unsigned decision is none of them.
+**Where a grade may be read from, and how it reaches the evaluator** (#810's review). The verified statement is the
+node-local evidence journal's `signed_decision.signed_with`, which also names the certificate the grade was read from
+(`certificate_issued_ms`, `certificate_sha256`). The copy on a `grant/…/refused` or `…/revoked` record is unsigned and
+member-writable — never audit from it — and an issue's record carries none. The verified decision travels from
+`http/grants.rs` to the preflight as a typed value with private fields (`VerifiedDecision`), built in one place: **no
+enforcement point reads a grade, or a signed decision, from `params`**, so a companion door cannot assert one by
+naming its point `gateway:grants/issue`. The general rule: a fact an enforcement point verified goes to the envelope
+in a typed, crate-private argument, never through the request's own `_meta`.
 **The roots can change on a live node** (identity-and-lifecycle I2, PR 1, unreleased): `NodeTls` holds its chain
 checks behind `ArcSwap` and a **roots generation** (`mycelium-core/src/tls.rs`). `reroot_material` builds material for
 the node's *current* key over a set of roots with no CA key; `activate` swaps the chain checks, then bumps the

@@ -95,9 +95,10 @@ impl Relayed {
         json!({ "signed": self.signed, "signed_with": self.signed_with, "decision": self.decision, "ttl_secs": self.ttl_secs, "reason": self.reason, "relayed_by": self.relay })
     }
 
-    /// The preflight's `params`: the signed decision for the evidence record, read at this enforcement point only.
-    fn params(relayed: Option<&Relayed>) -> serde_json::Value {
-        relayed.map_or_else(|| json!({}), |r| json!({ "_meta": { "signed_decision": r.evidence() } }))
+    /// What the preflight is handed: the signed decision for the evidence record, and which key signed with what
+    /// grade for the envelope.
+    fn verified(relayed: Option<&Relayed>) -> Option<VerifiedDecision> {
+        relayed.map(|r| VerifiedDecision { evidence: r.evidence(), signed_with: r.signed_with.clone() })
     }
 
     /// Mark an answer's record: the signed body, `signed_with` (I7) and the relay.
@@ -107,6 +108,22 @@ impl Relayed {
             record["signed_with"] = json!(r.signed_with);
             record["relayed_by"] = json!(r.relay);
         }
+    }
+}
+
+/// **A signed grant decision this module verified**, as the preflight takes it (#810's review, finding 5): the
+/// evidence record's `signed_decision` and the envelope's `signed_with`. Its fields are private and it is built in
+/// one place, [`Relayed::verified`], from a decision [`grant_decision::verify`](crate::agent::grant_decision::verify)
+/// admitted — so no other door, in this crate or a companion, can put a grade on an envelope.
+pub(crate) struct VerifiedDecision {
+    evidence: serde_json::Value,
+    signed_with: crate::agent::grant_decision::SignedWith,
+}
+
+impl VerifiedDecision {
+    /// The evidence record's `signed_decision`, and the envelope's `signed_with`.
+    pub(super) fn into_parts(self) -> (serde_json::Value, crate::agent::grant_decision::SignedWith) {
+        (self.evidence, self.signed_with)
     }
 }
 
@@ -329,6 +346,12 @@ pub(crate) async fn decide_grant(ctx: &Arc<TaskCtx>, caller: Option<&ResolvedPri
     let Some((segment, holder_principal)) = super::gateway_authority::grant_holder_from_path(agent) else {
         return Err(GrantRefusal::door(StatusCode::BAD_REQUEST, "bad_request", format!("{agent} is neither a node principal, a client principal nor a client principal's hex segment")));
     };
+    // A consent principal never holds a grant (identity-and-lifecycle I7, *not built*; #810's review): its key decides
+    // and is never fed as a possession key, so a grant issued to it could never be presented. Refused by name, before
+    // the request is read — reaching here takes a request record a member wrote under a `consent:` holder.
+    if crate::agent::grant_decision::is_consent_principal(&holder_principal) {
+        return Err(GrantRefusal::door(StatusCode::CONFLICT, "consent_holder", format!("{holder_principal} is a consent principal: it decides grants and never holds one, since a consent key proves no possession")));
+    }
     let is_client = !holder_principal.starts_with("node:");
     if is_client {
         // A client holder must be able to prove possession: its certificate is on record here.
@@ -368,7 +391,7 @@ pub(crate) async fn decide_grant(ctx: &Arc<TaskCtx>, caller: Option<&ResolvedPri
     };
     // The evaluator sees the holder's principal, a client's as a node's (#743's review, item 8), never its key segment.
     let arguments = json!({ "tool": tool, "agent": holder_principal, "arguments_digest": digest, "request": request });
-    let preflight = ae_preflight(ctx, caller, operation, resource, &arguments, &Relayed::params(relayed), ENFORCEMENT_POINT_GRANT_ISSUE).await;
+    let preflight = ae_preflight_grant_decision(ctx, caller, operation, resource, &arguments, Relayed::verified(relayed)).await;
     let policy_revision: Option<String> = match &preflight {
         Preflight::Refuse(r) => {
             return Err(GrantRefusal::Policy { reason: r.reason(), detail: r.to_string(), data: r.error_data() });
@@ -850,7 +873,7 @@ pub(crate) async fn revoke_grant(ctx: &Arc<TaskCtx>, caller: Option<&ResolvedPri
     };
     let now_ms = ctx.hlc.decision_now_ms();
     let arguments = json!({ "tool": tool, "agent": holder_principal, "request": request });
-    let preflight = ae_preflight(ctx, caller, "grant.revoke", &resource, &arguments, &Relayed::params(relayed), ENFORCEMENT_POINT_GRANT_ISSUE).await;
+    let preflight = ae_preflight_grant_decision(ctx, caller, "grant.revoke", &resource, &arguments, Relayed::verified(relayed)).await;
     match &preflight {
         Preflight::Refuse(r) => {
             return Err(GrantRefusal::Policy { reason: r.reason(), detail: r.to_string(), data: r.error_data() });
@@ -963,3 +986,43 @@ async fn write_record(tc: &Arc<TaskCtx>, key: String, value: Vec<u8>) -> Result<
 
 /// The route, as it is named in every piece of evidence it produces.
 pub(crate) const ENFORCEMENT_POINT_GRANT_ISSUE: &str = "gateway:grants/issue";
+
+#[cfg(test)]
+mod consent_authority_tests {
+    use super::decider_holds_grant_issue;
+    use crate::config::{GatewayConsentPrincipal, GossipConfig};
+    use crate::test_util::alloc_port;
+    use crate::{GossipAgent, NodeId};
+
+    /// **A consent decider holds `grant:issue` only through `gateway_consent_principals`, in every build**
+    /// (identity-and-lifecycle I7, A; #810's review, finding 7). This test needs neither `compliance` nor a consent
+    /// certificate, so it runs in a build without the scope model — where every *service* decider holds
+    /// `grant:issue` (asserted there, as the contrast) and a consent decider still holds it only when the table
+    /// names it with the scope: not without the table, not under another name or issuer, not with an empty scope
+    /// list.
+    ///
+    /// Seen failing first, in a build without `compliance`, with the consent arm removed (every consent decider
+    /// held it, as a service does there).
+    #[test]
+    fn a_consent_decider_holds_grant_issue_only_through_its_table_in_every_build() {
+        let node = |table: Vec<GatewayConsentPrincipal>| {
+            let mut cfg = GossipConfig::default();
+            cfg.gateway_identity_issuer = Some("fleet".into());
+            cfg.gateway_consent_principals = table;
+            GossipAgent::new(NodeId::new("127.0.0.1", alloc_port()).unwrap(), cfg)
+        };
+        let entry = |name: &str, scopes: &[&str]| GatewayConsentPrincipal { name: name.into(), scopes: scopes.iter().map(|s| s.to_string()).collect() };
+        let none = node(vec![]);
+        assert!(!decider_holds_grant_issue(&none.task_ctx, "consent:fleet/richard"), "ADMITTED: a consent decider with no table");
+        let listed = node(vec![entry("richard", &["grant:issue"]), entry("dana", &[])]);
+        assert!(decider_holds_grant_issue(&listed.task_ctx, "consent:fleet/richard"));
+        for other in ["consent:fleet/dana", "consent:fleet/erin", "consent:other/richard", "consent:fleet/richard/x", "consent:richard"] {
+            assert!(!decider_holds_grant_issue(&listed.task_ctx, other), "ADMITTED: {other}");
+        }
+        // The contrast: a build without `compliance` has no scope model for services.
+        #[cfg(not(feature = "compliance"))]
+        assert!(decider_holds_grant_issue(&none.task_ctx, "token:fleet/anyone"), "a service decider, in a build with no scope model");
+        #[cfg(feature = "compliance")]
+        assert!(!decider_holds_grant_issue(&listed.task_ctx, "token:fleet/richard"), "the consent table gives the service principal nothing");
+    }
+}

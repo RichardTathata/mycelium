@@ -1074,7 +1074,7 @@ pub(crate) struct Settling {
     /// the refusal and that it was admitted ([`Settling::admit_in_shadow`]).
     shadow_admit: bool,
     /// Identity-and-lifecycle I3 (#754's review, finding 4): a signed grant decision as presented, for the record's
-    /// `signed_decision`. Read only at the grant decision point, whose `params` the route builds itself.
+    /// `signed_decision`. Handed over by the grant decision routes in a typed argument, never read from `params`.
     signed_decision: Option<serde_json::Value>,
     /// The presented mandate's own window end, when one was assessed: a grant's use is kept at this door at least
     /// that long (identity-and-lifecycle I4's collector; #794's round-2 review, C2).
@@ -1134,6 +1134,27 @@ pub(crate) async fn ae_preflight_door(
     }
 }
 
+/// [`ae_preflight`] for **the grant decision routes** (`gateway:grants/issue`), and for nothing else: `verified` is
+/// the signed decision those routes verified — its evidence, and which key signed with what grade (identity-and-
+/// lifecycle I7). It is a typed argument only `http/grants.rs` can build
+/// ([`VerifiedDecision`](super::grants::VerifiedDecision)), so the envelope's `signed_with` and the evidence record's
+/// `signed_decision` never come from a request's `params`: a companion door that names its own enforcement point
+/// `gateway:grants/issue` and passes a client's `_meta.signed_decision` gets neither (#810's review, finding 5).
+#[cfg(all(feature = "gateway", feature = "tls"))]
+pub(crate) async fn ae_preflight_grant_decision(
+    ctx: &Arc<TaskCtx>,
+    caller: Option<&ResolvedPrincipal>,
+    operation: &str,
+    resource: &str,
+    arguments: &serde_json::Value,
+    verified: Option<super::grants::VerifiedDecision>,
+) -> Preflight {
+    match ae_decide_verified(ctx, caller, operation, resource, arguments, &serde_json::json!({}), super::grants::ENFORCEMENT_POINT_GRANT_ISSUE, None, verified).await {
+        Decided::Done(p) => p,
+        Decided::Settle(s) => s.finish().await,
+    }
+}
+
 /// The decision half of [`ae_preflight`], from the real envelope: everything up to and including the release of the
 /// per-actor history gate. What is left — seat claims and the record — is a [`Settling`].
 #[cfg(all(feature = "gateway", feature = "tls"))]
@@ -1148,6 +1169,24 @@ pub(crate) async fn ae_decide(
     enforcement_point: &str,
     route: Option<&crate::agent::route_facts::RouteFacts>,
 ) -> Decided {
+    ae_decide_verified(ctx, caller, operation, resource, arguments, params, enforcement_point, route, None).await
+}
+
+/// [`ae_decide`], with the signed grant decision the grant routes verified (`None` from every other door).
+#[cfg(all(feature = "gateway", feature = "tls"))]
+#[allow(clippy::too_many_arguments)]
+async fn ae_decide_verified(
+    ctx: &Arc<TaskCtx>,
+    caller: Option<&ResolvedPrincipal>,
+    operation: &str,
+    resource: &str,
+    arguments: &serde_json::Value,
+    params: &serde_json::Value,
+    enforcement_point: &str,
+    route: Option<&crate::agent::route_facts::RouteFacts>,
+    verified: Option<super::grants::VerifiedDecision>,
+) -> Decided {
+    let (verified_evidence, verified_signed_with) = verified.map(super::grants::VerifiedDecision::into_parts).unzip();
     use super::action_evaluator as ae;
     // Adopter-surface X4: the request's causal fields, read from its own payload (`params._meta`, beside
     // `operation_id` and `mandate`) and nowhere else. Checked before the evaluator question so a malformed field is
@@ -1266,11 +1305,9 @@ pub(crate) async fn ae_decide(
         correlation: causal.correlation,
         parent: causal.parent,
         // I7: which key signed the decision and its grade, as the grant decision routes established them
-        // (`grant_decision::verify`) — read only at their enforcement point, whose `params` those routes build
-        // themselves and no caller supplies. An unsigned decision carries none.
-        signed_with: (enforcement_point == super::grants::ENFORCEMENT_POINT_GRANT_ISSUE)
-            .then(|| serde_json::from_value(params["_meta"]["signed_decision"]["signed_with"].clone()).ok())
-            .flatten(),
+        // (`grant_decision::verify`) and handed over in a typed argument only they can build — never read from
+        // `params`, which a door passes through from its client. An unsigned decision carries none.
+        signed_with: verified_signed_with,
     };
 
     // Decide, then record, *then* dispatch. Both outcomes are sealed: a permit with no record of
@@ -1416,9 +1453,7 @@ pub(crate) async fn ae_decide(
             _ => None,
         },
         shadow_admit: false,
-        signed_decision: (enforcement_point == super::grants::ENFORCEMENT_POINT_GRANT_ISSUE)
-            .then(|| params["_meta"]["signed_decision"].clone())
-            .filter(serde_json::Value::is_object),
+        signed_decision: verified_evidence,
         mandate_until_ms,
     }))
 }

@@ -51,8 +51,15 @@ principal, and the decision. The developer's own tooling (`dev`, the macOS shim,
   [`src/main.rs`](../../src/main.rs), runs the CLI flow.
 - **To let the principal decide**, list it in
   [`gateway_consent_principals`](../reference/configuration.md#gateway_consent_principals) on the gateway its
-  decisions are addressed to: `[[gateway_consent_principals]] name = "<name>" scopes = ["grant:issue"]`. A consent
-  principal's authority comes from this table and never from a named token's, so granting it gives nothing to the same
+  decisions are addressed to:
+
+  ```toml
+  [[gateway_consent_principals]]
+  name = "richard"
+  scopes = ["grant:issue"]
+  ```
+
+  A consent principal's authority comes from this table and never from a named token's, so granting it gives nothing to the same
   person's `token:` principal, and removing the entry revokes the consent principal alone
   ([`decider_holds_grant_issue`](../../src/agent/http/grants.rs)). `grant:issue` is the only scope the table takes.
 - **Give the policy a rule for the consent principal.** A rule for `token:{issuer}/{name}` does not admit
@@ -88,7 +95,8 @@ and the grade recorded with it.
   key. Neither the CA nor any node can promise that.
 - **What a node promises about a decision is what it checked.** The node a decision is addressed to checks the
   signature, the consent certificate's chain and standing, and that the grade the signed body names is the
-  certificate's. It then records `signed_with`: the key's kind (`p256`), the grade, and `grade_source: "operator"`.
+  certificate's. It then records `signed_with` in its evidence journal: the key's kind (`p256`), the grade,
+  `grade_source: "operator"`, and which certificate the grade was read from (its issuance and digest).
   That last field is the limit of the promise: the grade is the issuing operator's statement, carried unaltered, and
   not something the node, the relay or the evaluator observed. A policy that accepts only
   `os_presence(macos, unbound)` accepts that statement. A service's decision is recorded `ed25519`, `service`,
@@ -107,14 +115,22 @@ and the grade recorded with it.
   and never a `token:` key. A `token:` certificate never supersedes a consent key. Under `[persistence]` the
   supersession survives a restart, through the same journal and budget as
   [client certificates](client-certificates.md).
+- **Read the grade from the evidence journal, not from a KV record.** The journal is node-local and append-only. A
+  refusal's and a revocation's record under `grant/` carry a copy of `signed_with`, and those records are unsigned:
+  any admitted member can rewrite the copy, and the status route serves what is there. Nothing decides on it. An
+  issue's record is the signed grant and carries no copy at all. To check a KV record, re-verify its `signed` body and
+  read `signed.grade`.
 - **The grade cannot be altered in transit or by a record.** It is inside the signature, so a relay that rewrites it
   breaks the decision. A body naming a grade other than its certificate's is refused (`decision_grade_mismatch`), and
   one naming none is refused (`decision_grade_missing`). The certificate's grade is read from the certificate the
   principal's mark names: an older certificate for the same key, written back at its path by any member, changes
-  nothing — the decision is refused until the newest certificate is on record again, and the node counts it.
+  nothing — the decision is refused until the newest certificate is on record again, and the node counts it
+  (`consent_grades_unread` on `GET /stats`).
 - **Consent decides only where an operator wrote it down.** A consent principal holds `grant:issue` through
   `gateway_consent_principals` alone, in every build. A superseded consent key decides nothing, before a restart or
   after one under `[persistence]`. `recording` is accepted only by a `sim` build.
+- **A consent principal never holds a grant.** A decision for a request under a `consent:` holder is refused
+  `409 consent_holder`.
 - **A service key is never a consent key.** An Ed25519 key under a `consent:` principal, and a P-256 key under a
   `token:` one, are refused. A service names the grade `service` or none.
 - **Never a possession key, a `cs` signer or a mesh identity.** A consent key is not fed to an execution authority's
