@@ -777,3 +777,43 @@ async fn a_failed_anchor_append_is_retried_by_a_later_fold() {
     a.shutdown().await;
     let _ = std::fs::remove_dir_all(&base);
 }
+
+/// **#805's last item: the retry bookkeeping holds only kept certificates.** Under `[persistence]`, the append of N's
+/// short-lived certificate fails, which leaves a backoff entry for it; once the certificate has expired and a fold drops
+/// it, the entry is gone with it. Seen failing first with the pruning removed: the entry outlived the certificate.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_dropped_anchor_takes_its_retry_bookkeeping_with_it() {
+    let base = fresh_dir("prune");
+    let ((ca1, _), _) = two_cas(&base);
+    let (ia, mut cfg) = node_cfg(&base, "a", &ca1, &ca1.join("ca-cert.pem"), vec![]);
+    cfg.persistence = Some(crate::config::PersistenceConfig {
+        base_path: base.join("persist"),
+        sync_mode: crate::config::SyncMode::Flush,
+        snapshot_wal_threshold: 1_000,
+        snapshot_interval_secs: 3_600,
+        on_unreadable: crate::config::OnUnreadable::Refuse,
+    });
+    let a = started(&ia, &cfg).await;
+    let ledger = &a.task_ctx.identity_ledger;
+    assert!(ledger.anchors_durable_for(&ledger.kept_certs()).await, "start settled");
+    let n = NodeId::new("127.0.0.1", alloc_port()).unwrap();
+    let kn = [0x74u8; 32];
+    let until_ms = mycelium_core::sim_seam::wall_now_ms() + 3_000;
+    let n1 = crate::tls::with_not_after_for_test(until_ms, || crate::tls::issue_node_cert_for_key(&ca1, &n, kn, 0).unwrap());
+    ledger.hook_appends_for_test(None, Some(ledger.anchor_mark()));
+    put(&a.task_ctx, &revocation::cert_record_key(&n, &kn), &n1);
+    refold(&a.task_ctx);
+    let mine = vec![(n.clone(), <[u8; 32]>::from(<sha2::Sha256 as sha2::Digest>::digest(&n1)))];
+    assert!(!ledger.anchors_durable_for(&mine).await, "the append failed");
+    assert!(ledger.anchor_bookkeeping_for_test(&n, &n1), "a backoff entry while the certificate is kept");
+    put(&a.task_ctx, &revocation::cert_record_key(&n, &kn), b"hidden");
+    ledger.hook_appends_for_test(None, Some(u64::MAX - 1));
+    while mycelium_core::sim_seam::wall_now_ms() < until_ms + 1_100 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    refold(&a.task_ctx);
+    assert!(a.task_ctx.trusted_keys(&n).is_empty(), "expired and dropped");
+    assert!(!ledger.anchor_bookkeeping_for_test(&n, &n1), "its bookkeeping went with it");
+    a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&base);
+}

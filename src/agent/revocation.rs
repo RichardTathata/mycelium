@@ -356,6 +356,53 @@ struct AppendTally {
     gate: tokio::sync::Notify,
     #[cfg(test)]
     fail_plus1: AtomicU64,
+    /// Panic the append task numbered `panic_plus1 - 1` before it appends.
+    #[cfg(test)]
+    panic_plus1: AtomicU64,
+}
+
+/// One kept-anchor append, settled exactly once: by [`SettleAppend::finish`] with its result, or — if the task panics
+/// or is dropped before that — as **failed** on drop. Either way the certificate leaves the in-flight set and the
+/// waiters are woken, so `anchors_durable_for` always answers and a later fold retries a failure.
+struct SettleAppend {
+    tally: Arc<AppendTally>,
+    node: NodeId,
+    digest: [u8; 32],
+    failed: Arc<AtomicU64>,
+    done: bool,
+}
+
+impl SettleAppend {
+    fn finish(&mut self, ok: bool) {
+        if self.done {
+            return;
+        }
+        self.done = true;
+        let key = (self.node.clone(), self.digest);
+        if ok {
+            if set_edit(&self.tally.journaled, &self.node, self.digest, true) {
+                self.tally.journaled_total.fetch_add(1, Ordering::Relaxed);
+            }
+            self.tally.retry.pin().remove(&key);
+            self.tally.refused_noted.pin().remove(&key);
+        } else {
+            self.failed.fetch_add(1, Ordering::Relaxed);
+            let at = mycelium_core::sim_seam::wall_now_ms();
+            self.tally.retry.pin().compute(key, |existing| {
+                let n = existing.map_or(0, |(_, (n, _))| *n).saturating_add(1);
+                let backoff = 1_000u64 << (n - 1).min(6);
+                papaya::Operation::Insert::<_, ()>((n, at.saturating_add(backoff)))
+            });
+        }
+        set_edit(&self.tally.inflight, &self.node, self.digest, false);
+        self.tally.notify.notify_waiters();
+    }
+}
+
+impl Drop for SettleAppend {
+    fn drop(&mut self) {
+        self.finish(false);
+    }
 }
 
 fn set_edit(map: &papaya::HashMap<NodeId, HashSet<[u8; 32]>>, node: &NodeId, digest: [u8; 32], insert: bool) -> bool {
@@ -565,32 +612,22 @@ impl IdentityLedger {
         let tally = Arc::clone(t);
         let node = node.clone();
         let failed_counter = Arc::clone(&self.anchor_append_failed);
+        // Settled on every exit: a task that panics, or is dropped at shutdown, would otherwise leave the certificate in
+        // flight for good — the wait would never answer and no fold would retry it (#805's confirm round, the last item).
+        let mut settle = SettleAppend { tally, node: node.clone(), digest, failed: failed_counter, done: false };
         rt.spawn(async move {
             #[cfg(test)]
-            if tally.hold_plus1.load(Ordering::Acquire) == seq + 1 {
-                tally.gate.notified().await;
+            if settle.tally.hold_plus1.load(Ordering::Acquire) == seq + 1 {
+                settle.tally.gate.notified().await;
+            }
+            #[cfg(test)]
+            if settle.tally.panic_plus1.load(Ordering::Acquire) == seq + 1 {
+                panic!("the test's hook: this append task panics");
             }
             let ok = j.append(bytes).await.map_err(|e| tracing::warn!(error = %e, "identity journal: an anchor append failed; the next fold tries again")).is_ok();
             #[cfg(test)]
-            let ok = ok && tally.fail_plus1.load(Ordering::Acquire) != seq + 1;
-            let key = (node.clone(), digest);
-            if ok {
-                if set_edit(&tally.journaled, &node, digest, true) {
-                    tally.journaled_total.fetch_add(1, Ordering::Relaxed);
-                }
-                tally.retry.pin().remove(&key);
-                tally.refused_noted.pin().remove(&key);
-            } else {
-                failed_counter.fetch_add(1, Ordering::Relaxed);
-                let at = mycelium_core::sim_seam::wall_now_ms();
-                tally.retry.pin().compute(key, |existing| {
-                    let n = existing.map_or(0, |(_, (n, _))| *n).saturating_add(1);
-                    let backoff = 1_000u64 << (n - 1).min(6);
-                    papaya::Operation::Insert::<_, ()>((n, at.saturating_add(backoff)))
-                });
-            }
-            set_edit(&tally.inflight, &node, digest, false);
-            tally.notify.notify_waiters();
+            let ok = ok && settle.tally.fail_plus1.load(Ordering::Acquire) != seq + 1;
+            settle.finish(ok);
         });
     }
 
@@ -600,6 +637,29 @@ impl IdentityLedger {
     pub(super) fn hook_appends_for_test(&self, hold: Option<u64>, fail: Option<u64>) {
         self.anchor_tally.hold_plus1.store(hold.map_or(0, |h| h + 1), Ordering::Release);
         self.anchor_tally.fail_plus1.store(fail.map_or(0, |f| f + 1), Ordering::Release);
+    }
+
+    /// Panic the append task numbered `seq` (the drop guard's test).
+    #[cfg(test)]
+    pub(super) fn panic_append_for_test(&self, seq: u64) {
+        self.anchor_tally.panic_plus1.store(seq + 1, Ordering::Release);
+    }
+
+    /// Whether this node holds retry or refusal bookkeeping for `node`'s certificate `der` (the pruning test).
+    #[cfg(test)]
+    pub(super) fn anchor_bookkeeping_for_test(&self, node: &NodeId, der: &[u8]) -> bool {
+        let key = (node.clone(), <[u8; 32]>::from(Sha256::digest(der)));
+        self.anchor_tally.retry.pin().contains_key(&key) || self.anchor_tally.refused_noted.pin().contains(&key)
+    }
+
+    /// Forget the retry and refusal bookkeeping of certificates `node` no longer keeps, so each map holds one entry per
+    /// **kept** certificate at most (#805's confirm round: §117's bound, exact).
+    fn prune_anchor_bookkeeping(&self, node: &NodeId, gone: &[[u8; 32]]) {
+        for d in gone {
+            let key = (node.clone(), *d);
+            self.anchor_tally.retry.pin().remove(&key);
+            self.anchor_tally.refused_noted.pin().remove(&key);
+        }
     }
 
     #[cfg(test)]
@@ -878,10 +938,12 @@ fn merge_anchors_seen(
 ) -> Option<HashMap<[u8; 32], u64>> {
     let mut merged_out: Option<HashMap<[u8; 32], u64>> = None;
     let mut fresh: Vec<Arc<[u8]>> = Vec::new();
+    let mut gone: Vec<[u8; 32]> = Vec::new();
     let mut dropped = 0u64;
     let mut capped = 0u64;
     ledger.anchors_seen.pin().compute(node.clone(), |existing| {
         fresh.clear();
+        gone.clear();
         dropped = 0;
         capped = 0;
         merged_out = None;
@@ -926,6 +988,10 @@ fn merge_anchors_seen(
         // Every kept certificate is offered to the journal, which skips what is journaled or in flight: a failed or
         // never-handed append is tried again here (#805's review F2).
         fresh = m.values().flat_map(|a| a.certs.iter()).map(|c| Arc::clone(&c.der)).collect();
+        // Certificates this merge stops keeping (dropped, replaced or capped): their retry bookkeeping goes with them.
+        gone = existing.map(|(_, old)| {
+            old.values().flat_map(|a| a.certs.iter()).filter(|c| !fresh.iter().any(|f| *f == c.der)).map(|c| Sha256::digest(&c.der).into()).collect()
+        }).unwrap_or_default();
         merged_out = Some(m.iter().filter_map(|(k, a)| a.rank().map(|r| (*k, r))).collect());
         if existing.is_none() && m.is_empty() {
             return papaya::Operation::Abort(());
@@ -946,6 +1012,7 @@ fn merge_anchors_seen(
     for der in &fresh {
         ledger.journal_anchor(node, der);
     }
+    ledger.prune_anchor_bookkeeping(node, &gone);
     merged_out
 }
 
@@ -1620,6 +1687,28 @@ mod tests {
         assert!(!ledger.anchor_journaled_for_test(&n, &x));
         assert!(ledger.anchors_durable_for(&[(n.clone(), digest(&y))]).await, "X's failure is X's alone");
         assert_eq!(ledger.anchor_append_failed.load(Ordering::Relaxed), 1, "counted");
+    }
+
+    /// **#805's last item: an append task that panics settles its certificate as failed.** The task panics before it
+    /// appends; the drop guard takes the certificate out of the in-flight set, counts the failure and wakes the waiters,
+    /// so the wait answers `false` and a later offer, after the backoff, journals it. Seen failing first with the guard's
+    /// `Drop` removed: the certificate stayed in flight and the wait never answered.
+    #[tokio::test]
+    async fn a_panicking_anchor_append_settles_as_failed() {
+        let ledger = IdentityLedger::default();
+        ledger.open_journal(&temp_journal("panic")).unwrap();
+        let n: NodeId = "127.0.0.1:9103".parse().unwrap();
+        let x = [9u8; 8];
+        let first = ledger.anchor_mark();
+        ledger.panic_append_for_test(first);
+        ledger.journal_anchor(&n, &x);
+        let only_x = [(n.clone(), digest(&x))];
+        let answered = tokio::time::timeout(std::time::Duration::from_secs(3), ledger.anchors_durable_for(&only_x)).await;
+        assert_eq!(answered.ok(), Some(false), "the wait answers, and says not durable");
+        assert_eq!(ledger.anchor_append_failed.load(Ordering::Relaxed), 1, "counted as a failure");
+        tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+        ledger.journal_anchor(&n, &x);
+        assert!(ledger.anchors_durable_for(&only_x).await, "retried after the backoff, durable");
     }
 
     /// **#805's confirm round N3: a failed append backs off.** Right after X's append failed, offering it again starts no
