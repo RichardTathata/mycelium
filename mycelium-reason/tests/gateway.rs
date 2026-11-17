@@ -1886,7 +1886,7 @@ async fn a_client_route_passes_over_a_provider_whose_marker_is_not_held() {
     let cap = format!("cap/{p}/llm/m802");
     let until = |cond: &dyn Fn() -> bool| {
         let deadline = std::time::Instant::now() + Duration::from_secs(15);
-        let ok = loop {
+        loop {
             if cond() {
                 break true;
             }
@@ -1894,8 +1894,7 @@ async fn a_client_route_passes_over_a_provider_whose_marker_is_not_held() {
                 break false;
             }
             std::thread::sleep(Duration::from_millis(50));
-        };
-        ok
+        }
     };
     assert!(
         until(&|| gateway.kv().get(&cap).is_some() && gateway.kv().get(&marker).is_some() && gateway.peers().contains(&p)),
