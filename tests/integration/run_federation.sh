@@ -86,6 +86,13 @@ body() { jq -e "$1" /tmp/probe.out >/dev/null 2>&1; }
 # -- predicates, all callable by `check` and `poll_until` ------------------------------------
 test_peers()   { [ "$(admin "$1" tables | jq -r '.peers | length')" = "$2" ]; }
 has_cap()      { admin "$1" tables | jq -e --arg k "cap/$A1:57000/demo/whoami" '.entries[] | select(.key | startswith($k))'; }
+# holds_marker GATEWAY PROVIDER — the gateway holds the provider's caller-context marker (`sys/caller-context/{node}`),
+# its promise to enforce the caller context. A gateway sends only to a provider whose marker it holds (#802): one that
+# holds the capability but not yet the marker answers "skill not found", so the capability alone is not readiness. The
+# two are separate keys, and a provider's first signed writes can be dropped by a gateway that has not yet learned its
+# identity and arrive only with a later anti-entropy pull (the run of 2026-11-17 on #805: gw1 held `cap/` for a1 and
+# not its marker, and the two leg-1 calls through gw1 were refused "skill not found").
+holds_marker() { admin "$1" tables | jq -e --arg k "sys/caller-context/$2:57000" '.entries[] | select(.key == $k)'; }
 commits()      { post "http://$1:8301/fed-admin/propose" "{\"slot\":\"$2\",\"value\":\"$3\"}" | jq -e '.committed == true'; }
 # An exclusive outcome proposed to the whole cluster: refused, nothing committed (`cons.safety_profile`).
 exclusive_refused() { post "http://$1:8301/fed-admin/propose" "{\"slot\":\"$2\",\"value\":\"x\",\"safety_sensitive\":true}" \
@@ -174,6 +181,9 @@ check "alpha gw2 sees its three peers" poll_until 90 test_peers "$GW2" 3
 check "beta b1 sees its one peer"      poll_until 90 test_peers "$B1" 1
 check "alpha gw1 learned the provider's capability" poll_until 90 has_cap "$GW1"
 check "alpha gw2 learned the provider's capability" poll_until 90 has_cap "$GW2"
+for gw in $GW1 $GW2; do
+    check "alpha $gw holds the provider's caller-context marker" poll_until 90 holds_marker "$gw" "$A1"
+done
 for ip in $A1 $A2 $GW1 $GW2 $B1 $B2; do
     check "$ip started under secure-multi-domain rev 1, every requirement met" profile_met "$ip"
 done
