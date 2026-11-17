@@ -328,17 +328,20 @@ impl KeptAnchor {
     }
 }
 
-/// The kept-anchor journal's bookkeeping (I2, R4; #805's review F2), shared with the spawned appends. Each append has
-/// its own sequence number and its own result, so a caller waits for **its** appends, a later one finishing first
-/// satisfies nothing, and one old failure poisons nothing after it. A certificate is marked journaled only once its
-/// append is durable; until then it is in flight, and one that failed, or was never handed to the journal, is tried
-/// again by the next fold.
+/// The kept-anchor journal's bookkeeping (I2, R4; #805's review F2 and its confirm round N1–N3), shared with the
+/// spawned appends. Durability is tracked **per certificate**: a certificate is journaled (its append durable), in flight,
+/// or neither — never offered, refused by the budget, or failed and waiting out its backoff. A caller waits for the
+/// certificates it cares about ([`IdentityLedger::anchors_durable_for`]), whichever fold started their appends, so an
+/// append in flight before the caller began is waited for too, and a later append finishing first satisfies nothing.
+/// Bounded: one entry per kept certificate in each map, and kept certificates are bounded by the anchors' caps.
 #[derive(Default)]
 struct AppendTally {
-    /// The next sequence number an append takes.
+    /// The next sequence number an append takes (the test hooks name appends by it).
     next: AtomicU64,
-    /// Each finished append's result, by sequence number: `true` durable, `false` failed.
-    results: papaya::HashMap<u64, bool>,
+    /// Failed certificates: consecutive failures and the wall-clock ms before which no retry is made (N3's backoff).
+    retry: papaya::HashMap<(NodeId, [u8; 32]), (u32, u64)>,
+    /// Certificates whose refusal (budget, or not handed over) was already warned and counted: once per certificate.
+    refused_noted: papaya::HashSet<(NodeId, [u8; 32])>,
     /// Kept certificates whose append is in flight, per node, by digest.
     inflight: papaya::HashMap<NodeId, HashSet<[u8; 32]>>,
     /// Kept certificates journaled durably (read at start, and appended since), per node, by digest.
@@ -482,32 +485,49 @@ impl IdentityLedger {
         });
     }
 
-    /// The sequence number the next kept-anchor append will take: a caller reads it before the work whose appends it
-    /// must wait for, and passes it to [`Self::anchors_durable_since`].
-    #[cfg_attr(not(test), allow(dead_code))] // its caller, `change_roots`, has none outside the tests until PR 2b
-    pub(crate) fn anchor_mark(&self) -> u64 {
+    /// The sequence number the next kept-anchor append will take (the test hooks name appends by it).
+    #[cfg(test)]
+    pub(super) fn anchor_mark(&self) -> u64 {
         self.anchor_tally.next.load(Ordering::Acquire)
     }
 
-    /// Wait for **each** kept-anchor append numbered from `start` up to those handed to the journal before this call
-    /// (identity-and-lifecycle I2, R4: the append is awaited before the Narrowed phase is persisted; #805's review F2).
-    /// `true` when every one of them is durable — whatever happened to appends outside the range. With no journal there
-    /// is nothing to wait for and the anchors are in memory only, which is `true` too: durability across a restart is
-    /// stated under `[persistence]`. One that failed is tried again by the next fold, under a new number.
+    /// Every certificate this node keeps as an anchor, by node and digest — what `change_roots` waits on.
+    #[cfg_attr(not(test), allow(dead_code))] // its caller, `change_roots`, has none outside the tests until PR 2b
+    pub(crate) fn kept_certs(&self) -> Vec<(NodeId, [u8; 32])> {
+        self.anchors_seen.pin().iter().flat_map(|(n, m)| {
+            m.values().flat_map(|a| a.certs.iter()).map(|c| (n.clone(), Sha256::digest(&c.der).into())).collect::<Vec<_>>()
+        }).collect()
+    }
+
+    /// Wait until each of `certs` is **settled** — journaled durably, or not in flight (refused by the budget, failed and
+    /// backing off, or never offered) — and answer whether every one is journaled (identity-and-lifecycle I2, R4: the
+    /// kept certificates are durable before the Narrowed phase is persisted; #805's review F2 and N1). Per certificate,
+    /// whichever fold started its append: one in flight before the caller began is waited for, and a later append
+    /// finishing first satisfies nothing. With no journal there is nothing to wait for and the anchors are in memory
+    /// only, which is `true`: durability across a restart is stated under `[persistence]`.
     #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) async fn anchors_durable_since(&self, start: u64) -> bool {
+    pub(crate) async fn anchors_durable_for(&self, certs: &[(NodeId, [u8; 32])]) -> bool {
+        if self.journal.load().is_none() {
+            return true;
+        }
         let t = Arc::clone(&self.anchor_tally);
-        let end = t.next.load(Ordering::Acquire);
+        let has = |m: &papaya::HashMap<NodeId, HashSet<[u8; 32]>>, n: &NodeId, d: &[u8; 32]| m.pin().get(n).is_some_and(|s| s.contains(d));
         loop {
             let notified = t.notify.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
-            let results = t.results.pin();
-            if (start..end).all(|seq| results.contains_key(&seq)) {
-                return (start..end).all(|seq| results.get(&seq) == Some(&true));
+            if !certs.iter().any(|(n, d)| has(&t.inflight, n, d)) {
+                return certs.iter().all(|(n, d)| has(&t.journaled, n, d));
             }
-            drop(results);
             notified.await;
+        }
+    }
+
+    /// Count and warn a refusal once per certificate (N3).
+    fn refuse_once(&self, node: &NodeId, digest: [u8; 32], why: &str) {
+        if self.anchor_tally.refused_noted.pin().insert((node.clone(), digest)) {
+            self.anchor_journal_refused.fetch_add(1, Ordering::Relaxed);
+            tracing::warn!(%node, "identity journal: {why}; this anchor is kept in this process only");
         }
     }
 
@@ -524,19 +544,23 @@ impl IdentityLedger {
             return;
         }
         if held(&t.journaled) + held(&t.inflight) >= ANCHOR_JOURNAL_PER_NODE || t.journaled_total.load(Ordering::Relaxed) >= ANCHOR_JOURNAL_TOTAL {
-            self.anchor_journal_refused.fetch_add(1, Ordering::Relaxed);
-            tracing::warn!(%node, "identity journal: the kept-anchor budget is full; this anchor is kept in this process only");
+            self.refuse_once(node, digest, "the kept-anchor budget is full");
+            return;
+        }
+        // N3: a certificate whose append failed is retried only after its backoff (1 s, doubling, at most 64 s).
+        let now = mycelium_core::sim_seam::wall_now_ms();
+        if t.retry.pin().get(&(node.clone(), digest)).is_some_and(|(_, after)| now < *after) {
             return;
         }
         let entry = JournalEntry::Anchor { node: node.to_string(), der: der.to_vec() };
         let (Ok(bytes), Ok(rt)) = (mycelium_core::serde_fixint::to_vec(&entry), tokio::runtime::Handle::try_current()) else {
-            self.anchor_journal_refused.fetch_add(1, Ordering::Relaxed);
-            tracing::warn!(%node, "identity journal: a kept anchor could not be handed to the journal; the next fold tries again");
+            self.refuse_once(node, digest, "a kept anchor could not be handed to the journal (the next fold tries again)");
             return;
         };
         if !set_edit(&t.inflight, node, digest, true) {
             return;
         }
+        #[cfg_attr(not(test), allow(unused_variables))]
         let seq = t.next.fetch_add(1, Ordering::AcqRel);
         let tally = Arc::clone(t);
         let node = node.clone();
@@ -549,15 +573,23 @@ impl IdentityLedger {
             let ok = j.append(bytes).await.map_err(|e| tracing::warn!(error = %e, "identity journal: an anchor append failed; the next fold tries again")).is_ok();
             #[cfg(test)]
             let ok = ok && tally.fail_plus1.load(Ordering::Acquire) != seq + 1;
+            let key = (node.clone(), digest);
             if ok {
                 if set_edit(&tally.journaled, &node, digest, true) {
                     tally.journaled_total.fetch_add(1, Ordering::Relaxed);
                 }
+                tally.retry.pin().remove(&key);
+                tally.refused_noted.pin().remove(&key);
             } else {
                 failed_counter.fetch_add(1, Ordering::Relaxed);
+                let at = mycelium_core::sim_seam::wall_now_ms();
+                tally.retry.pin().compute(key, |existing| {
+                    let n = existing.map_or(0, |(_, (n, _))| *n).saturating_add(1);
+                    let backoff = 1_000u64 << (n - 1).min(6);
+                    papaya::Operation::Insert::<_, ()>((n, at.saturating_add(backoff)))
+                });
             }
             set_edit(&tally.inflight, &node, digest, false);
-            tally.results.pin().insert(seq, ok);
             tally.notify.notify_waiters();
         });
     }
@@ -1551,66 +1583,86 @@ mod tests {
         dir.join("revocations.journal")
     }
 
-    /// **#805's review F2: a caller waits for its own appends.** Append 0 is held while append 1 finishes: waiting from
-    /// before both does not complete — a later append finishing first satisfies nothing — and the held certificate is not
-    /// marked journaled until its append is durable. Seen failing first with the wait counting finished appends.
-    #[tokio::test]
-    async fn a_later_anchor_append_finishing_first_does_not_satisfy_the_wait() {
-        let ledger = IdentityLedger::default();
-        ledger.open_journal(&temp_journal("order")).unwrap();
-        let n: NodeId = "127.0.0.1:9100".parse().unwrap();
-        let mark = ledger.anchor_mark();
-        ledger.hook_appends_for_test(Some(mark), None);
-        ledger.journal_anchor(&n, &[1u8; 8]);
-        ledger.journal_anchor(&n, &[2u8; 8]);
-        let t = std::time::Instant::now();
-        while !ledger.anchor_journaled_for_test(&n, &[2u8; 8]) {
-            assert!(t.elapsed() < std::time::Duration::from_secs(5), "append 1 finishes");
-            tokio::task::yield_now().await;
-        }
-        let wait = ledger.anchors_durable_since(mark);
-        tokio::pin!(wait);
-        assert!(tokio::time::timeout(std::time::Duration::from_millis(100), &mut wait).await.is_err(), "append 0 is held: the wait does not complete");
-        // A later append, started after the wait took its range, finishes while append 0 is still held.
-        ledger.journal_anchor(&n, &[5u8; 8]);
-        let t = std::time::Instant::now();
-        while !ledger.anchor_journaled_for_test(&n, &[5u8; 8]) {
-            assert!(t.elapsed() < std::time::Duration::from_secs(5), "append 2 finishes");
-            tokio::task::yield_now().await;
-        }
-        assert!(tokio::time::timeout(std::time::Duration::from_millis(200), &mut wait).await.is_err(), "a later append finishing first satisfies nothing");
-        assert!(!ledger.anchor_journaled_for_test(&n, &[1u8; 8]), "not journaled before its append is durable");
-        let done = loop {
-            ledger.release_held_for_test();
-            if let Ok(done) = tokio::time::timeout(std::time::Duration::from_millis(20), &mut wait).await {
-                break done;
-            }
-        };
-        assert!(done, "both durable");
-        assert!(ledger.anchor_journaled_for_test(&n, &[1u8; 8]));
+    fn digest(der: &[u8]) -> [u8; 32] {
+        Sha256::digest(der).into()
     }
 
-    /// **#805's review F2: a failure is its own append's.** Append 0 fails: a wait from after it is satisfied by append 1,
-    /// a wait that includes it answers `false`, the certificate is not marked journaled, and offering it again appends
-    /// it under a new number. Seen failing first with one failure answering every later wait.
+    /// **#805's confirm round N1 (and F2): a caller waits per certificate, whichever fold started its append.** The
+    /// append of X is held, and fails, as an append started before the caller began; the caller's re-fold offers X again,
+    /// which starts nothing (it is in flight), and the wait for X does not answer while X is in flight — not even once a
+    /// later append finishes — and then answers `false`, X not journaled. The reviewer's probe. Seen failing first with
+    /// the wait counting only the appends numbered after its mark: it answered `true` at once.
     #[tokio::test]
-    async fn one_failed_anchor_append_poisons_no_later_wait_and_is_tried_again() {
+    async fn a_kept_anchor_in_flight_before_the_wait_is_waited_for() {
         let ledger = IdentityLedger::default();
-        ledger.open_journal(&temp_journal("fail")).unwrap();
+        ledger.open_journal(&temp_journal("inflight")).unwrap();
+        let n: NodeId = "127.0.0.1:9100".parse().unwrap();
+        let (x, y) = ([1u8; 8], [2u8; 8]);
+        let before = ledger.anchor_mark();
+        ledger.hook_appends_for_test(Some(before), Some(before));
+        ledger.journal_anchor(&n, &x);
+        ledger.journal_anchor(&n, &x);
+        assert_eq!(ledger.anchor_mark(), before + 1, "re-offered while in flight: no second append");
+        let only_x = [(n.clone(), digest(&x))];
+        let wait = ledger.anchors_durable_for(&only_x);
+        tokio::pin!(wait);
+        assert!(tokio::time::timeout(std::time::Duration::from_millis(100), &mut wait).await.is_err(), "X in flight: no answer");
+        ledger.journal_anchor(&n, &y);
+        assert!(ledger.anchors_durable_for(&[(n.clone(), digest(&y))]).await, "Y durable on its own");
+        assert!(tokio::time::timeout(std::time::Duration::from_millis(100), &mut wait).await.is_err(), "a later append finishing first satisfies nothing");
+        let answered = loop {
+            ledger.release_held_for_test();
+            if let Ok(a) = tokio::time::timeout(std::time::Duration::from_millis(20), &mut wait).await {
+                break a;
+            }
+        };
+        assert!(!answered, "X's append failed: not durable");
+        assert!(!ledger.anchor_journaled_for_test(&n, &x));
+        assert!(ledger.anchors_durable_for(&[(n.clone(), digest(&y))]).await, "X's failure is X's alone");
+        assert_eq!(ledger.anchor_append_failed.load(Ordering::Relaxed), 1, "counted");
+    }
+
+    /// **#805's confirm round N3: a failed append backs off.** Right after X's append failed, offering it again starts no
+    /// append; once its backoff (1 s for a first failure) has passed, it does, and X is journaled. Seen failing first with
+    /// the backoff check removed: the retry started at once.
+    #[tokio::test]
+    async fn a_failed_anchor_append_is_retried_only_after_its_backoff() {
+        let ledger = IdentityLedger::default();
+        ledger.open_journal(&temp_journal("backoff")).unwrap();
         let n: NodeId = "127.0.0.1:9101".parse().unwrap();
+        let x = [3u8; 8];
         let first = ledger.anchor_mark();
         ledger.hook_appends_for_test(None, Some(first));
-        ledger.journal_anchor(&n, &[3u8; 8]);
-        let second = ledger.anchor_mark();
-        ledger.journal_anchor(&n, &[4u8; 8]);
-        assert!(ledger.anchors_durable_since(second).await, "a later wait is not poisoned by the earlier failure");
-        assert!(!ledger.anchors_durable_since(first).await, "the wait that includes it says so");
-        assert!(!ledger.anchor_journaled_for_test(&n, &[3u8; 8]));
-        assert_eq!(ledger.anchor_append_failed.load(Ordering::Relaxed), 1, "counted");
-        let retry = ledger.anchor_mark();
-        ledger.journal_anchor(&n, &[3u8; 8]);
-        assert!(ledger.anchors_durable_since(retry).await, "tried again, durable");
-        assert!(ledger.anchor_journaled_for_test(&n, &[3u8; 8]));
+        ledger.journal_anchor(&n, &x);
+        assert!(!ledger.anchors_durable_for(&[(n.clone(), digest(&x))]).await, "failed");
+        ledger.journal_anchor(&n, &x);
+        assert_eq!(ledger.anchor_mark(), first + 1, "inside the backoff: no retry");
+        tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+        ledger.journal_anchor(&n, &x);
+        assert_eq!(ledger.anchor_mark(), first + 2, "after the backoff: retried");
+        assert!(ledger.anchors_durable_for(&[(n.clone(), digest(&x))]).await, "durable");
+    }
+
+    /// **#805's confirm round N3: a certificate past the budget is counted once.** A node's 32 kept certificates are
+    /// journaled; a 33rd, offered on fold after fold, is refused, warned and counted once. Seen failing first with the
+    /// refusal counted on every offer.
+    #[tokio::test]
+    async fn a_certificate_past_the_anchor_budget_is_counted_once() {
+        let ledger = IdentityLedger::default();
+        ledger.open_journal(&temp_journal("budget")).unwrap();
+        let n: NodeId = "127.0.0.1:9102".parse().unwrap();
+        let certs: Vec<[u8; 8]> = (0..ANCHOR_JOURNAL_PER_NODE as u8).map(|i| [i, 0xAB, 0, 0, 0, 0, 0, 0]).collect();
+        for c in &certs {
+            ledger.journal_anchor(&n, c);
+        }
+        let all: Vec<(NodeId, [u8; 32])> = certs.iter().map(|c| (n.clone(), digest(c))).collect();
+        assert!(ledger.anchors_durable_for(&all).await);
+        let extra = [0xEEu8; 8];
+        for _ in 0..3 {
+            ledger.journal_anchor(&n, &extra);
+        }
+        assert_eq!(ledger.anchor_journal_refused.load(Ordering::Relaxed), 1, "once per certificate");
+        assert!(!ledger.anchors_durable_for(&[(n.clone(), digest(&extra))]).await, "not durable: in memory only");
     }
 
     #[test]

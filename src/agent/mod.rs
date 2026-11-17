@@ -2710,15 +2710,16 @@ impl GossipAgent {
         }
         // The re-fold completes, under the new roots, before this returns: a fold already running re-runs on its own,
         // and would otherwise finish after the caller went on.
-        let mark = self.task_ctx.identity_ledger.anchor_mark();
         while !revocation::refresh_now(&self.task_ctx) {
             tokio::task::yield_now().await;
         }
         client_cert::refresh(&self.task_ctx);
-        // R4: the kept certificates this re-fold handed to the journal are durable before this returns — each one, by
-        // its own number (#805's review F2) — what I2's PR 2b relies on before it persists a Narrowed phase. A failed
-        // append leaves its certificate in memory, counted, and a later fold tries it again.
-        if !self.task_ctx.identity_ledger.anchors_durable_since(mark).await {
+        // R4: every certificate this node keeps after the re-fold is settled before this returns — journaled, or known not
+        // to be (#805's review F2, N1): one whose append was already in flight is waited for too. What I2's PR 2b relies
+        // on before it persists a Narrowed phase. A failed append leaves its certificate in memory, counted, and a later
+        // fold retries it after its backoff.
+        let kept = self.task_ctx.identity_ledger.kept_certs();
+        if !self.task_ctx.identity_ledger.anchors_durable_for(&kept).await {
             tracing::warn!("a change of roots: a kept-anchor journal append failed; those anchors are kept in this process only");
         }
         Ok(())

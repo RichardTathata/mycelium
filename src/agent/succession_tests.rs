@@ -457,7 +457,7 @@ async fn a_kept_anchor_survives_its_record_hidden_and_an_old_ca_one_is_dropped_a
     put(&a.task_ctx, &path, b"hidden");
     refold(&a.task_ctx);
     assert_eq!(a.task_ctx.trusted_keys(&n), vec![kn], "the record left the store; the kept certificate did not");
-    assert!(a.task_ctx.identity_ledger.anchors_durable_since(0).await, "every kept certificate journaled");
+    assert!(a.task_ctx.identity_ledger.anchors_durable_for(&a.task_ctx.identity_ledger.kept_certs()).await, "every kept certificate journaled");
     a.shutdown().await;
 
     // Restart on the successor's files (the end state the operator reaches), the record still hidden in the store.
@@ -742,4 +742,38 @@ async fn retain_trusted_with_an_empty_standing_and_legacy_closed_keeps_nothing()
         let members = super::knowledge_keys::member_keys_of(ctx);
         assert!(members.get(&l).is_some_and(|m| m.revoked.contains(&kl)), "the knowledge layer reads it as not trusted");
     }
+}
+
+/// **#805's confirm round N2: a failed anchor append is retried through a fold.** Under `[persistence]`, the append of
+/// N's kept certificate fails; the next fold, once the backoff has passed, offers it again, and it is journaled — the
+/// merge offers every kept certificate, not only new ones. Seen failing first with the merge offering only certificates
+/// it did not hold before: the certificate was never journaled.
+#[cfg(feature = "provisional-ca-generation")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_anchor_append_is_retried_by_a_later_fold() {
+    let base = fresh_dir("n2");
+    let ((ca1, _), _) = ca_and_successor(&base);
+    let (ia, mut cfg) = node_cfg(&base, "a", &ca1, &ca1.join("ca-cert.pem"), vec![]);
+    cfg.persistence = Some(crate::config::PersistenceConfig {
+        base_path: base.join("persist"),
+        sync_mode: crate::config::SyncMode::Flush,
+        snapshot_wal_threshold: 1_000,
+        snapshot_interval_secs: 3_600,
+        on_unreadable: crate::config::OnUnreadable::Refuse,
+    });
+    let a = started(&ia, &cfg).await;
+    let ledger = &a.task_ctx.identity_ledger;
+    assert!(ledger.anchors_durable_for(&ledger.kept_certs()).await, "start settled");
+    let n = NodeId::new("127.0.0.1", alloc_port()).unwrap();
+    let (kn, n1) = member_cert(&base, &ca1, &n, None);
+    ledger.hook_appends_for_test(None, Some(ledger.anchor_mark()));
+    put(&a.task_ctx, &revocation::cert_record_key(&n, &kn), &n1);
+    refold(&a.task_ctx);
+    let mine = vec![(n.clone(), <[u8; 32]>::from(<sha2::Sha256 as sha2::Digest>::digest(&n1)))];
+    assert!(!ledger.anchors_durable_for(&mine).await, "the first append failed");
+    tokio::time::sleep(Duration::from_millis(1_200)).await;
+    refold(&a.task_ctx);
+    assert!(ledger.anchors_durable_for(&mine).await, "retried by the later fold, durable");
+    a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&base);
 }

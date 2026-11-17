@@ -2896,9 +2896,12 @@ mod durability_tests {
         let root = golden_fixture_root();
         let mut dirs: Vec<_> = std::fs::read_dir(&root)
             .unwrap_or_else(|e| panic!("fixture root {} missing: {e}", root.display()))
-            // A KV on-disk format is a directory holding a WAL; the identity journals' goldens sit beside them
-            // (`identity-journal-v1/`, I2's PR 2a) and are pinned by their own tests in the root crate.
-            .filter_map(|d| d.ok()).map(|d| d.path()).filter(|p| p.is_dir() && p.join("wal.bin").exists()).collect();
+            // Every directory is a KV on-disk format, except the identity journals' goldens (`identity-journal-*`, I2's
+            // PR 2a), excluded by name and pinned by their own tests in the root crate — so an unexpected directory, or a
+            // KV format laid out differently, fails here rather than being skipped (#805's confirm round N4).
+            .filter_map(|d| d.ok()).map(|d| d.path())
+            .filter(|p| p.is_dir() && !p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("identity-journal-")))
+            .collect();
         dirs.sort();
         assert!(!dirs.is_empty(), "no fixture directories under {}", root.display());
         for dir in dirs {

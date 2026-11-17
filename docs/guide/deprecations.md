@@ -4797,7 +4797,10 @@ empty entry), where before it fell back to the legacy rule (`peer_keys`). Counte
 the budget is accepted, and a compaction of the anchor journal is a later row, **not built**) and `anchor_append_failed`,
 all on `GET /stats` (`identity_anchors_dropped`, `identity_anchor_journal_refused`, `identity_anchor_append_failed`). A
 kept certificate is marked journaled only once its append is durable; one that failed, or could not be handed to the
-journal, is tried again by the next fold.
+journal, is tried again by a later fold — after a backoff once an append has failed (1 s, doubling, at most 64 s), and a
+certificate refused by the budget is warned and counted once, not on every fold. The bookkeeping is one entry per kept
+certificate, bounded by the anchors' caps (#805's confirm round N3). `change_roots` waits for every certificate it keeps to
+be settled — journaled, or known not to be — whichever fold started its append (N1).
 - **The bound, stated (#805's review F1):** that a node with no anchor left trusts nothing holds **in-process and under
   `[persistence]`**. A node without `[persistence]` cannot remember across a restart that it dropped a peer's anchor: on
   a restart it rebuilds standing from the store, and with legacy open (every root generation 0) a peer whose anchor it
@@ -4846,7 +4849,9 @@ side and by why (`GET /stats` `sessions_closed_by_roots`: `inbound_old_root`, `i
 the new roots, so the peer holds a successor certificate and the session merely carried its old one; read only from a standing the fold has re-judged under the current roots — before that, a close counts as an old-root peer's). The handshake
 anchors (`peer_anchor_keys`) are cleared at a change of roots, and an anchor from a handshake judged under the old roots
 is discarded. Each new inbound session's certificate is judged once more on its first frame (one chain check per
-connection).
+connection). **Expiry is not a change of roots, stated (#805's confirm round N5):** an established session with a peer
+whose certificate expires stays open until the next change of roots, while that peer's signed writes are refused once its
+expired anchor is dropped.
 - **The reconnect burst, stated (#805's review F10):** at a narrow, every session that was established before the
   peer's cutover carries an old-root certificate, so each closes at its next frame and reconnects with a new handshake —
   across a fleet, at about the same time. The reconnect is the writer's own on its next frame (with its existing

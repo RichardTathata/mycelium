@@ -1,6 +1,6 @@
 # Golden on-disk persistence fixtures (V2 gate, contracts axis)
 
-One directory per **released KV on-disk format** (a directory holding `wal.bin`): `wal.bin` (u32le-length-prefixed `SyncEntry` records)
+One directory per **released KV on-disk format** (every directory but the `identity-journal-*` goldens, excluded by name): `wal.bin` (u32le-length-prefixed `SyncEntry` records)
 and `snapshot.bin` (`KvSnapshot { snapshot_hlc, entries }`), both in the `serde_fixint` encoding, plus
 `expected.json` — the live values and tombstoned keys a replay must produce.
 
