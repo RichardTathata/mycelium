@@ -445,7 +445,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
-- **Standing under a change of roots** (identity-and-lifecycle I2, PR 2a of 4; `deprecations.md` §115; the split and
+- **Standing under a change of roots** (identity-and-lifecycle I2, PR 2a of 4; `deprecations.md` §117; the split and
   each promise's evidence are in the plan's §8 row). A node that changes its roots judges again everything it judged
   under the old ones: an anchored key keeps its certificates (journaled under `[persistence]`) and leaves only when they
   fail the current roots, never because its record left the store, and a node left with none trusts nothing; a node

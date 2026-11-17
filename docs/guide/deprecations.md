@@ -4768,7 +4768,10 @@ and count; served once it arrives; a tombstoned marker restored by its provider 
 `the_grant_door_passes_over_a_provider_whose_marker_is_not_held` (`src/agent/client_grant_tests.rs`), `a_client_route_passes_over_a_provider_whose_marker_is_not_held` (`mycelium-reason/tests/gateway.rs`),
 `secure_profile_refuses_a_provider_without_the_marker_and_legacy_does_not` (the named target still `412`).
 
-## 115. Standing under changed roots: kept anchors, no legacy class on a node trusting only successor roots, client marks with their certificate, sessions re-judged, and a CA's generation (unreleased, identity-and-lifecycle I2, PR 2a)
+## 117. Standing under changed roots: kept anchors, no legacy class on a node trusting only successor roots, client marks with their certificate, sessions re-judged, and a CA's generation (unreleased, identity-and-lifecycle I2, PR 2a)
+
+*Numbered 117 because an open pull request holds §116 (#806) at the time of writing; the sections are in order once it
+merges.*
 
 Most changes below act only at a **change of a node's roots** or on a node whose roots are a successor's. Nothing in
 this release changes a node's roots on its own: the successor-signed record that drives a succession is I2's next PR,

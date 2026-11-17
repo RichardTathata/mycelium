@@ -14,4 +14,4 @@ what a node trusts, driven by `GossipAgent::change_roots`; PR 2b, the protocol t
 - One owner (`IdentityLedger::identity_owner`, a `tokio` mutex, lock-order row 82) over rotation and the change of roots.
 - Pages touched: `dev/concurrency/lock-order.md` (row 82 and the `tokio::sync` exception), `dev/owner-signed-records.md`
   (the `sys/identity-cert/` and `sys/client-cert/` rows). Outside the wiki: the plan's I2 row and §8 row,
-  `deprecations.md` §115, `CHANGELOG.md`, `features/node-identity.md`, `features/client-certificates.md`, the registry.
+  `deprecations.md` §117, `CHANGELOG.md`, `features/node-identity.md`, `features/client-certificates.md`, the registry.
