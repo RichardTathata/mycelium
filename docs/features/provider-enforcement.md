@@ -81,6 +81,12 @@ confirmed stop, checked against the class's bound. CI runs it.
   enforcement off no authority is checked; an attached cohort budget still verifies the caller context and admits by
   cohort.
 - **Guarantee:** [`prov.enforcement`](../reference/guarantee-catalogue.md#prov.enforcement).
+- **A provider promises its enforcement before it advertises work, and a gateway sends only on that promise.** Every
+  advertisement a gateway can dispatch to (a tool's `tools/{name}/{node}`, a capability's `cap/{node}/…`) is preceded
+  by the provider's `sys/caller-context/{node}` marker (#794), which the provider re-asserts every 60 s so a member's
+  tombstone of it lapses within a period (#804's review); a secure gateway passes over a provider whose marker it
+  does not hold yet, since gossip may deliver the two keys in either order, and the client is answered the door's "no
+  provider" rather than `-32021` (#802; [gateway caller identity](gateway-caller-identity.md), §115).
 - **Not built:** the check-then-act window between the check and the effect is narrowed and stated, not eliminated
   ([what-is-proven § the check-then-act window](../operations/what-is-proven.md#check-then-act-window)): a revocation
   before the work is registered refuses it, one after is the sweep's to stop; a provider

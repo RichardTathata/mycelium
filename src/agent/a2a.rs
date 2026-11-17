@@ -643,14 +643,34 @@ fn jsonrpc_ok(id: Option<Value>, result: Value) -> Value {
 }
 
 /// Resolves the first node for `skill_id` ("ns/name") from the live cap/ KV prefix, or says why not.
-fn resolve_skill(ctx: &TaskCtx, skill_id: &str) -> Result<crate::node_id::NodeId, String> {
-    let Some((ns, name)) = skill_id.split_once('/') else { return Err("skill not found".into()) };
+fn resolve_skill(ctx: &TaskCtx, skill_id: &str) -> Result<crate::node_id::NodeId, Unresolved> {
+    let unresolved = |why: String| Unresolved { why, passed_over: 0 };
+    let Some((ns, name)) = skill_id.split_once('/') else { return Err(unresolved("skill not found".into())) };
     if let Some(why) = not_an_a2a_skill(&ctx.kv_state, ns, name) {
-        return Err(why);
+        return Err(unresolved(why));
     }
     let filter = CapFilter::new(ns, name);
     let providers = resolve_providers(ctx, &filter);
-    providers.into_iter().next().map(|(n, _)| n).ok_or_else(|| "skill not found".into())
+    // #802: a provider whose caller-context marker this gateway does not yet hold is not yet one it sends to; with none
+    // left the skill is answered as one nobody advertises (with `data.reason` `provider_not_promised` when one was
+    // passed over).
+    let chosen = gateway_caller::first_sendable(ctx, gateway_caller::PassedOverDoor::SkillInvoke, providers.into_iter().map(|(n, _)| n));
+    chosen.node.ok_or(Unresolved { why: "skill not found".into(), passed_over: chosen.passed_over })
+}
+
+/// Why `/a2a` resolved no provider for a skill: the sentence it answers, and how many providers it passed over for want
+/// of their caller-context marker (#802's review, M2).
+#[derive(Debug)]
+struct Unresolved {
+    why: String,
+    passed_over: usize,
+}
+
+impl Unresolved {
+    /// The additive `data` of the answer, when a provider was passed over.
+    fn data(&self) -> Option<Value> {
+        (self.passed_over > 0).then(|| json!({ "reason": gateway_caller::PROVIDER_NOT_PROMISED, "passed_over": self.passed_over }))
+    }
 }
 
 /// The providers `tasks/send` may route to: every *fresh* advertisement matching `filter` — the
@@ -742,10 +762,14 @@ fn not_an_a2a_skill(kv: &crate::store::KvState, ns: &str, name: &str) -> Option<
 /// The skill ids an agent card lists: every *freshly* advertised capability that is not
 /// infrastructure, once — a skill whose only providers have crashed leaves the card when their ads
 /// go stale, as it stops resolving for `tasks/send` (rule `kv.expiry`; the review of #730).
-fn card_skill_ids(kv: &crate::store::KvState) -> std::collections::HashSet<String> {
+fn card_skill_ids(ctx: &TaskCtx) -> std::collections::HashSet<String> {
+    let kv = &ctx.kv_state;
     let mut skill_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for (_node_id, ns, name, _cap) in super::capability_ops::scan_fresh_caps(kv) {
+    for (node_id, ns, name, _cap) in super::capability_ops::scan_fresh_caps(kv) {
         if not_an_a2a_skill(kv, &ns, &name).is_some() { continue; }
+        // #802: as `tasks/send` resolves it — a skill whose providers have not been seen to promise the caller context
+        // is not yet one this gateway can send, so the card does not offer it.
+        if !gateway_caller::gateway_sends_to(ctx, &node_id) { continue; }
         skill_ids.insert(format!("{}/{}", ns, name));
     }
     skill_ids
@@ -775,7 +799,7 @@ fn a2a_endpoint_url(ctx: &TaskCtx) -> String {
 
 async fn agent_card_handler(State(state): State<A2aState>) -> impl IntoResponse {
     let kv = &state.task_ctx.kv_state;
-    let skill_ids = card_skill_ids(kv);
+    let skill_ids = card_skill_ids(&state.task_ctx);
     let skills: Vec<AgentSkill> = skill_ids.into_iter().map(|id| {
         let (description, input_schema) = skill_input_description(kv, &id);
         let tags = id.split_once('/').map(|(ns, _)| vec![ns.to_string()]).unwrap_or_default();
@@ -894,7 +918,13 @@ async fn dispatch_send(
 
     let target = match resolve_skill(&state.task_ctx, skill_id) {
         Ok(target) => target,
-        Err(why) => return Err(jsonrpc_error(id, unresolved_skill_code(req.generation), &why)),
+        Err(u) => {
+            let code = unresolved_skill_code(req.generation);
+            return Err(match u.data() {
+                Some(data) => jsonrpc_error_with_data(id, code, &u.why, data),
+                None => jsonrpc_error(id, code, &u.why),
+            });
+        }
     };
 
     // Generous: A2A skills are frequently multi-step LLM pipelines
@@ -1260,8 +1290,10 @@ pub(crate) async fn tasks_send_subscribe(
         let skill_id = req.skill_id.clone();
         let target = match resolve_skill(&state.task_ctx, &skill_id) {
             Ok(target) => target,
-            Err(why) => {
-                send_all(stream_events(&id, &req, Step::Failed { error: Some(why), detail: None })).await;
+            Err(u) => {
+                // #802's review, M2: the stream's `detail` names the transient case.
+                let detail = (u.passed_over > 0).then(|| gateway_caller::PROVIDER_NOT_PROMISED.to_string());
+                send_all(stream_events(&id, &req, Step::Failed { error: Some(u.why), detail })).await;
                 return;
             }
         };
@@ -2016,14 +2048,17 @@ mod tests {
         }
         apply_and_notify(&ctx.kv_state, &make_gossip_update(&ctx.node_id, 5, std::sync::Arc::from("prompts/llm/qwen3"),
             bytes::Bytes::from_static(b"{}"), false, &ctx.hlc));
-        let ids = card_skill_ids(&ctx.kv_state);
+        // The provider's caller-context marker, held: a provider without it is not one `/a2a` sends to (#802).
+        apply_and_notify(&ctx.kv_state, &make_gossip_update(&ctx.node_id, 5, std::sync::Arc::from("sys/caller-context/127.0.0.1:9001"),
+            bytes::Bytes::from_static(b"1"), false, &ctx.hlc));
+        let ids = card_skill_ids(&ctx);
         assert_eq!(ids, std::collections::HashSet::from(["demo/echo".to_string()]), "{ids:?}");
         // tasks/send agrees with the card: what the card leaves out does not resolve.
         assert!(resolve_skill(&ctx, "demo/echo").is_ok());
         for id in ["prov-shed/demo:echo:00ff", "artifact/librarian", "tuple/orders.primary", "llm/qwen3"] {
             assert!(resolve_skill(&ctx, id).is_err(), "{id} resolved");
         }
-        assert!(resolve_skill(&ctx, "llm/qwen3").unwrap_err().contains("/gateway/llm/call"));
+        assert!(resolve_skill(&ctx, "llm/qwen3").unwrap_err().why.contains("/gateway/llm/call"));
     }
 
     /// **A crashed provider's advertisement is never tombstoned** — it evaporates at its readers,
@@ -2046,12 +2081,17 @@ mod tests {
         seed("127.0.0.1:9001", "demo", "echo", now);           // live
         seed("127.0.0.1:9002", "demo", "echo", now - 60_000);  // crashed a minute ago: 60 s > 3 × 1 s
         seed("127.0.0.1:9003", "demo", "dead", now - 60_000);  // its only provider crashed
+        // Every provider's caller-context marker held, so staleness alone decides here (#802).
+        for node in ["127.0.0.1:9001", "127.0.0.1:9002", "127.0.0.1:9003"] {
+            apply_and_notify(&ctx.kv_state, &crate::framing::make_gossip_update(&ctx.node_id, 5,
+                std::sync::Arc::from(format!("sys/caller-context/{node}").as_str()), bytes::Bytes::from_static(b"1"), false, &ctx.hlc));
+        }
 
         let providers: Vec<String> = resolve_providers(&ctx, &CapFilter::new("demo", "echo"))
             .into_iter().map(|(n, _)| n.to_string()).collect();
         assert_eq!(providers, vec!["127.0.0.1:9001".to_string()], "a stale provider was routed to");
         assert!(resolve_skill(&ctx, "demo/dead").is_err(), "tasks/send resolved a skill whose only provider is stale");
-        let ids = card_skill_ids(&ctx.kv_state);
+        let ids = card_skill_ids(&ctx);
         assert_eq!(ids, std::collections::HashSet::from(["demo/echo".to_string()]), "the card lists a dead skill: {ids:?}");
     }
 
@@ -2066,8 +2106,9 @@ mod tests {
         let cap  = Capability::new("compute", "gpu");
         let bytes = cap.encode();
 
-        // Two cap/ entries for the same (ns, name) from different nodes.
-        for suffix in ["cap/127.0.0.1:9001/compute/gpu", "cap/127.0.0.1:9002/compute/gpu"] {
+        // Two cap/ entries for the same (ns, name) from different nodes, each with its caller-context marker (#802).
+        for suffix in ["cap/127.0.0.1:9001/compute/gpu", "cap/127.0.0.1:9002/compute/gpu",
+                       "sys/caller-context/127.0.0.1:9001", "sys/caller-context/127.0.0.1:9002"] {
             let upd = make_gossip_update(
                 &node, 5, std::sync::Arc::from(suffix),
                 bytes.clone(), false, &ctx.hlc,
@@ -2075,7 +2116,7 @@ mod tests {
             apply_and_notify(&ctx.kv_state, &upd);
         }
 
-        let skill_ids = card_skill_ids(&ctx.kv_state);
+        let skill_ids = card_skill_ids(&ctx);
         assert_eq!(skill_ids.len(), 1, "two nodes with same cap must produce one skill");
     }
 

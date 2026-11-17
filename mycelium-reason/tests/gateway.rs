@@ -1846,3 +1846,84 @@ async fn a_transient_listener_does_not_end_a_client_serve_stream() {
     let _ = waiting.await;
     agent.shutdown_with_timeout(Duration::from_secs(5)).await;
 }
+
+/// #802: **a client's route passes over a provider whose caller-context marker the gateway does not hold** — the
+/// provider promises what it enforces by its `sys/caller-context/{node}` marker, and the gateway sends only to a
+/// provider whose promise it has seen. The provider's `llm/m802` advertisement is held at the gateway and its marker is
+/// not (tombstoned there, as a marker still in flight is absent): the route answers `404 no_provider`, the answer for a model
+/// nobody serves, and once the marker is back it is served. Seen failing first on c50f7bde: the route sent, was refused
+/// -32021 `provider_without_caller_context`, and answered the exhausted route.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_client_route_passes_over_a_provider_whose_marker_is_not_held() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(FsBlobStore::open(dir.path()).unwrap());
+    let port = || std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let (g_port, http_port, p_port) = (port(), port(), port());
+    let mut cfg = GossipConfig::default();
+    cfg.bind_port = g_port;
+    cfg.http_port = Some(http_port);
+    let gateway = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", g_port).unwrap(), cfg));
+    gateway.with_http_routes(reason_router(Arc::clone(&gateway), Arc::clone(&store)));
+    gateway.start().await.unwrap();
+    let mut cfg = GossipConfig::default();
+    cfg.bind_port = p_port;
+    cfg.bootstrap_peers = vec![gateway.node_id().clone()];
+    cfg.reconnect_backoff_secs = 1;
+    let provider = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", p_port).unwrap(), cfg));
+    provider.start().await.unwrap();
+    let template = PromptTemplate {
+        system: "deterministic echo".into(),
+        user_template: "{{input}}".into(),
+        max_tokens: 64,
+        temperature: 0.0,
+        metadata: HashMap::new(),
+    };
+    let profile = ModelProfile { model: "m802".into(), ctx_window: None, family: None, extra: Vec::new() };
+    let _model = serve_model(&provider, profile, template, Arc::new(EchoBackend)).await.unwrap();
+
+    let p = provider.node_id().clone();
+    let marker = format!("sys/caller-context/{p}");
+    let cap = format!("cap/{p}/llm/m802");
+    let until = |cond: &dyn Fn() -> bool| {
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        loop {
+            if cond() {
+                break true;
+            }
+            if std::time::Instant::now() > deadline {
+                break false;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    };
+    assert!(
+        until(&|| gateway.kv().get(&cap).is_some() && gateway.kv().get(&marker).is_some() && gateway.peers().contains(&p)),
+        "the gateway holds the provider's advertisement and marker, and sees it live"
+    );
+    // The marker absent at the gateway, the advertisement held.
+    assert!(gateway.kv().delete(marker.clone()));
+    assert!(until(&|| gateway.kv().get(&marker).is_none()), "the marker is absent at the gateway");
+    assert!(!gateway.gateway_sends_to(&p), "not yet a provider the gateway can send to");
+
+    let http = reqwest::Client::new();
+    let url = format!("http://127.0.0.1:{http_port}/gateway/reason/route");
+    let early = http.post(&url).json(&serde_json::json!({ "model": "m802", "input": "hi" })).send().await.unwrap();
+    let status = early.status().as_u16();
+    let body: serde_json::Value = early.json().await.unwrap();
+    assert_eq!((status, body["error"].as_str()), (404, Some("no_provider")), "NOT YET A PROVIDER: {body}");
+    // #804's confirm round, N2: the router counts the provider it passed over on the node's `/stats`.
+    let stats: serde_json::Value =
+        http.get(format!("http://127.0.0.1:{http_port}/stats")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(stats["providers_passed_over_unpromised"]["companion"], 1, "COUNTED: {stats}");
+
+    // The marker arrives: served.
+    assert!(provider.kv().set(marker.clone(), bytes::Bytes::from_static(b"1")));
+    assert!(until(&|| gateway.kv().get(&marker).is_some()), "the marker reaches the gateway");
+    let served = http.post(&url).json(&serde_json::json!({ "model": "m802", "input": "hi" })).send().await.unwrap();
+    let status = served.status().as_u16();
+    let body: serde_json::Value = served.json().await.unwrap();
+    assert_eq!(status, 200, "SERVED once the marker arrived: {body}");
+    assert_eq!(body["provider"].as_str(), Some(p.to_string().as_str()));
+    provider.shutdown_with_timeout(Duration::from_secs(5)).await;
+    gateway.shutdown_with_timeout(Duration::from_secs(5)).await;
+}

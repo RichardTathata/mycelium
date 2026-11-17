@@ -226,6 +226,8 @@ pub(super) async fn stats_handler(State(ctx): State<Arc<HttpCtx>>) -> impl IntoR
         body["caller_envelopes_without_id"] = json!(r.without_id.load(std::sync::atomic::Ordering::Relaxed));
         body["caller_envelopes_replayed"] = json!(r.replayed.load(std::sync::atomic::Ordering::Relaxed));
     }
+    // #802's review, M1: providers each choosing door passed over for want of their caller-context marker.
+    body["providers_passed_over_unpromised"] = ctx.agent_ctx.passed_over.to_json();
     // Identity-and-lifecycle I1: client signatures' `cn`s dropped as replays, and new instances refused at the cap.
     #[cfg(feature = "tls")]
     {

@@ -118,6 +118,18 @@ pub(super) struct LlmCallBody {
 #[cfg(feature = "llm")]
 pub(super) fn default_timeout_ms() -> u64 { 30_000 }
 
+/// The provider an LLM door sends to: the first whose caller-context marker this gateway holds (#802,
+/// [`gateway_caller::first_sendable`]), each passed over counted under `llm.invoke`. With none left the door answers
+/// `no_provider`, as for a prompt skill nobody advertises, with `data.reason` `provider_not_promised` when one was
+/// passed over.
+#[cfg(feature = "llm")]
+fn sendable_provider(
+    ctx: &crate::agent::TaskCtx,
+    providers: Vec<(crate::node_id::NodeId, crate::capability::Capability)>,
+) -> gateway_caller::Chosen {
+    gateway_caller::first_sendable(ctx, gateway_caller::PassedOverDoor::LlmInvoke, providers.into_iter().map(|(n, _)| n))
+}
+
 #[cfg(feature = "llm")]
 pub(super) async fn gw_llm_call(
     State(ctx): State<Arc<HttpCtx>>,
@@ -140,18 +152,19 @@ pub(super) async fn gw_llm_call(
     }
     let timeout = gateway_rpc_timeout_ms(body.timeout_ms);
     let filter  = CapFilter::new(body.ns.as_str(), body.name.as_str());
-    let providers = resolve_cap_providers(&ctx.agent_ctx.kv_state, &filter);
+    let chosen = sendable_provider(&ctx.agent_ctx, resolve_cap_providers(&ctx.agent_ctx.kv_state, &filter));
 
-    let provider_str = providers.first()
-        .map(|(id, _)| id.to_string())
-        .unwrap_or_default();
+    let provider_str = chosen.node.as_ref().map(|id| id.to_string()).unwrap_or_default();
 
-    let (target, _) = match providers.into_iter().next() {
+    let target = match chosen.node.clone() {
         Some(p) => p,
         None => {
-            return (StatusCode::NOT_FOUND,
-                axum::Json(serde_json::json!({"error":"no_provider","detail":""})))
-                .into_response();
+            let mut body = serde_json::json!({"error":"no_provider","detail":""});
+            // #802's review, M2: additive — a provider is advertised, its caller-context marker not yet held here.
+            if let Some(data) = chosen.not_promised_data() {
+                body["data"] = data;
+            }
+            return (StatusCode::NOT_FOUND, axum::Json(body)).into_response();
         }
     };
 
@@ -287,9 +300,9 @@ pub(super) async fn gw_llm_stream(
     // with gw_llm_call, which uses 404/502/504).
     let timeout = std::time::Duration::from_secs(30);
     let filter  = CapFilter::new(body.ns.as_str(), body.name.as_str());
-    let providers = resolve_cap_providers(&ctx.agent_ctx.kv_state, &filter);
+    let chosen = sendable_provider(&ctx.agent_ctx, resolve_cap_providers(&ctx.agent_ctx.kv_state, &filter));
 
-    let event = match providers.into_iter().next() {
+    let event = match chosen.node.clone() {
         // Identity-and-lifecycle I1: this door binds no client signature; one sent here is refused, never dropped.
         _ if crate::agent::client_sig::carries_client_signature(&serde_json::json!({ "_meta": body.meta })) => {
             let data = serde_json::json!({"type":"error","error":"client_signature_unbound"}).to_string();
@@ -301,10 +314,13 @@ pub(super) async fn gw_llm_stream(
             Event::default().data(data)
         }
         None => {
-            let data = serde_json::json!({"type":"error","error":"no_provider"}).to_string();
-            Event::default().data(data)
+            let mut data = serde_json::json!({"type":"error","error":"no_provider"});
+            if let Some(d) = chosen.not_promised_data() {
+                data["data"] = d;
+            }
+            Event::default().data(data.to_string())
         }
-        Some((target, _)) => llm_stream_event(&ctx, caller.as_ref(), body, target, timeout).await,
+        Some(target) => llm_stream_event(&ctx, caller.as_ref(), body, target, timeout).await,
     };
 
     Sse::new(stream::once(async move { Ok::<_, std::convert::Infallible>(event) }))

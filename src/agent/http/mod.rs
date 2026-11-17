@@ -635,6 +635,10 @@ mod schedule_run_tests;
 #[cfg(test)]
 mod gateway_caller_tests;
 
+/// #802: a provider whose caller-context marker the gateway does not yet hold is not yet one it sends to.
+#[cfg(test)]
+mod marker_race_tests;
+
 /// The AE evaluator seam at the live gateway (`docs/design/action-envelope-ae0.md`): the unit
 /// fixtures prove the decision rules; these prove the **wiring** — that a refusal stops the
 /// dispatch and a permit does not.

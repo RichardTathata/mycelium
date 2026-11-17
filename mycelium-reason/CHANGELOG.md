@@ -8,6 +8,20 @@ All notable changes to this crate. It versions **independently** of the Mycelium
 
 ## [Unreleased]
 
+**0.12.0 at release** — `RouteError` gained a variant (a breaking change for an exhaustive `match`). Requires a
+`mycelium` newer than 2.40.0: the router calls `GossipAgent::gateway_sends_to` and `GossipAgent::gateway_note_passed_over`.
+
+- **A cancelled call is final at the router** (identity-and-lifecycle I4, #794). A provider's answer `data.reason`
+  `cancelled`, or `call_mandate_not_established` with `data.cause` `revoked`, ends the route with the new
+  `RouteError::Cancelled` (`409` at the façades) instead of trying the next provider under a new, uncancelled term.
+- **A client's route passes over a provider whose caller-context marker the gateway does not hold** (#802). Gossip can
+  deliver a provider's `llm/` advertisement before its `sys/caller-context/` marker; the gateway sends only to a
+  provider whose promise it holds. Such a provider is passed over, **not counted as an attempt**, and counted on the
+  node's `/stats` (`providers_passed_over_unpromised.companion`). With none left the client routes
+  (`/gateway/reason/route`, the chat route, `call_as`) answer `RouteError::NoProvider` — **`404 no_provider`** (the
+  chat route's `404 model_not_found`) — **where they answered `502 exhausted`** after the provider refused the call
+  -32021. `call` (the node's own action) is unchanged.
+
 ## [0.11.1] — 2026-11-12
 
 On mycelium v2.40.0. No code change.

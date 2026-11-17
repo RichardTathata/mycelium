@@ -33,6 +33,19 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - **Check:** stop a seed (a node with `bootstrap_peers = []` that the others list) for longer than
     `swim_suspicion_timeout_ms` (4 s by default) and start it again: within about one more suspicion window,
     `curl -s http://SEED:HTTP_PORT/stats | jq .peers` shows its peers again (it stayed `0` before).
+- **A gateway sends a client's call only to a provider whose caller-context marker it holds** (#802; `deprecations.md`
+  §115). #794 ordered the marker before the advertisement at the provider, but gossip does not deliver separate keys
+  in write order, so a gateway could still hold a provider's tool before its marker and refuse the call -32021
+  `provider_without_caller_context`. Every door that chooses a provider — `/mcp` `tools/call` and the grant door,
+  `/a2a` send and stream, `/gateway/llm/call` and `/gateway/llm/stream`, and `mycelium-reason`'s client routes — now
+  passes such a provider over (`gateway_sends_to`), and with none left answers its own "no provider" — with
+  `data.reason` `provider_not_promised` where the answer has a data field, so a client can tell the transient case apart
+  (neither SDK retries it today); `tools/list` and the A2A agent card list only what such a provider offers. -32021 stays for a target the client names. Every node re-asserts its own marker each 60 s, so a member's tombstone of it hides the
+  provider for at most one period (a tombstone stamped beyond `max_clock_drift_ms` ahead: until the clock catches up,
+  counted as `kv_future_stamps`); each door counts the providers it passed over (`/stats`
+  `providers_passed_over_unpromised`, by door). *Check:* a provider that never publishes the marker (before 2.5.0) is
+  now answered "no provider" at those doors rather than -32021, and a client that lists once during the marker gap can
+  miss the tool. New: `GossipAgent::gateway_sends_to`, `GossipAgent::gateway_note_passed_over`.
 - **A client calling soon after a provider starts is no longer refused `provider_without_caller_context`** (-32021;
   #794's review, K2, and the Eve fleet job on #796). A provider wrote its caller-context marker
   (`sys/caller-context/{node}`) from a task that waited for a peer, up to 5 s, while a tool's entry and a capability's
