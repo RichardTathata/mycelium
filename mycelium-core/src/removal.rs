@@ -103,6 +103,9 @@ pub struct KeyStanding {
     /// `anchored: None`, has no trusted key ([`Self::is_distrusted`] is true for every key of it). Stored `Release`,
     /// loaded `Acquire`. Lock-free: no lock-order row.
     legacy_closed: std::sync::atomic::AtomicBool,
+    /// The roots generation the last **complete** fold judged under, plus one (`0`: none yet) — so a reader can tell a
+    /// standing judged under the current roots from one the fold has not yet re-judged (#805's review F10).
+    judged_under_plus1: std::sync::atomic::AtomicU64,
 }
 
 impl std::fmt::Debug for KeyStanding {
@@ -169,6 +172,22 @@ impl KeyStanding {
             }
             None => self.legacy_closed(),
         }
+    }
+
+    /// Whether any node's judged standing anchors `key` (#805's review F10: a session closed at a change of roots whose
+    /// peer key already has standing under the new roots predates the change, rather than coming from an old-root peer).
+    pub fn anchors_key(&self, key: &[u8; 32]) -> bool {
+        !self.by_node.is_empty() && self.by_node.pin().iter().any(|(_, s)| s.anchored.as_ref().is_some_and(|a| a.contains(key)))
+    }
+
+    /// Record that a complete fold judged every standing under roots generation `generation` (the revocation fold).
+    pub fn set_judged_under(&self, generation: u64) {
+        self.judged_under_plus1.store(generation.saturating_add(1), std::sync::atomic::Ordering::Release);
+    }
+
+    /// The roots generation the last complete fold judged under, if any.
+    pub fn judged_under(&self) -> Option<u64> {
+        self.judged_under_plus1.load(std::sync::atomic::Ordering::Acquire).checked_sub(1)
     }
 
     /// Whether this node has no legacy class (I2, R1): every root it trusts is generation 1 or later.

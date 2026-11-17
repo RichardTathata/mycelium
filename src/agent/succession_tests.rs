@@ -457,7 +457,7 @@ async fn a_kept_anchor_survives_its_record_hidden_and_an_old_ca_one_is_dropped_a
     put(&a.task_ctx, &path, b"hidden");
     refold(&a.task_ctx);
     assert_eq!(a.task_ctx.trusted_keys(&n), vec![kn], "the record left the store; the kept certificate did not");
-    assert!(a.task_ctx.identity_ledger.anchors_durable().await, "every kept certificate journaled");
+    assert!(a.task_ctx.identity_ledger.anchors_durable_since(0).await, "every kept certificate journaled");
     a.shutdown().await;
 
     // Restart on the successor's files (the end state the operator reaches), the record still hidden in the store.
@@ -654,7 +654,92 @@ async fn an_established_session_to_an_old_root_peer_is_dropped_at_narrowing() {
     write(&f, "m6/f-after");
     tokio::time::sleep(Duration::from_secs(4)).await;
     assert!(f.kv().get("m6/a-after").is_none(), "A's write after the narrow did not cross the old session");
-    assert!(a.task_ctx.transport_bounds.sessions_closed_by_roots.load(std::sync::atomic::Ordering::Relaxed) >= 1, "A closed F's inbound session, counted");
+    let closed = ta.sessions_closed_by_roots();
+    assert!(closed[0] + closed[1] >= 1, "A closed F's inbound session, counted: {closed:?}");
+    assert!(closed[2] + closed[3] >= 1, "and its outbound one, counted apart: {closed:?}");
+    assert_eq!(closed[1] + closed[3], 0, "F holds no successor certificate: an old-root peer, not a session that predates the change");
     for x in [&a, &f] { x.shutdown().await; }
     let _ = std::fs::remove_dir_all(&base);
+}
+
+/// **#805's review F3: an expiring kept anchor is judged in-process as at a restart.** N's certificate record expires
+/// while A runs, with no change of roots: once it has expired, a fold drops it, so A trusts nothing for N — as a node
+/// restarted then would. Seen failing first with the kept certificates re-judged only at a change of roots: N stayed
+/// anchored after its certificate expired.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_expired_kept_anchor_is_dropped_while_the_node_runs() {
+    let base = fresh_dir("f3-anchor");
+    let ((ca1, _), _) = two_cas(&base);
+    let (ia, cfg) = node_cfg(&base, "a", &ca1, &ca1.join("ca-cert.pem"), vec![]);
+    let a = started(&ia, &cfg).await;
+    let ctx = &a.task_ctx;
+    let n = NodeId::new("127.0.0.1", alloc_port()).unwrap();
+    let kn = [0x71u8; 32];
+    let until_ms = mycelium_core::sim_seam::wall_now_ms() + 3_000;
+    let n1 = crate::tls::with_not_after_for_test(until_ms, || crate::tls::issue_node_cert_for_key(&ca1, &n, kn, 0).unwrap());
+    assert!(mycelium_core::tls::cert_not_after_ms(&n1).is_some_and(|t| t <= until_ms + 1_000), "a short-lived certificate");
+    put(ctx, &revocation::cert_record_key(&n, &kn), &n1);
+    refold(ctx);
+    assert_eq!(ctx.trusted_keys(&n), vec![kn], "anchored while valid");
+    put(ctx, &revocation::cert_record_key(&n, &kn), b"hidden");
+    while mycelium_core::sim_seam::wall_now_ms() < until_ms + 1_100 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    refold(ctx);
+    assert!(ctx.trusted_keys(&n).is_empty(), "expired: dropped in-process, so N has no trusted key");
+    a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// **#805's review F3, the client marks.** A client's certificate expires while the node runs: its key reads `Unknown`
+/// once it has expired, though the verdict was cached. Seen failing first with the cache's expiry ignored: the key
+/// stayed `Current`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_expired_client_certificate_loses_standing_while_the_node_runs() {
+    use client_cert::{client_key_standing, ClientKeyStanding::*};
+    let base = fresh_dir("f3-client");
+    let ((ca1, _), _) = two_cas(&base);
+    let (ia, cfg) = node_cfg(&base, "a", &ca1, &ca1.join("ca-cert.pem"), vec![]);
+    let a = started(&ia, &cfg).await;
+    let kc = [0x72u8; 32];
+    let until_ms = mycelium_core::sim_seam::wall_now_ms() + 3_000;
+    let c1 = crate::tls::with_not_after_for_test(until_ms, || crate::tls::issue_client_cert_for_key(&ca1, "fleet", "brief", kc, 0).unwrap());
+    put(&a.task_ctx, &client_cert::client_cert_key("token:fleet/brief", &kc), &c1);
+    assert_eq!(client_key_standing(&a.task_ctx, "token:fleet/brief", &kc), Current);
+    while mycelium_core::sim_seam::wall_now_ms() < until_ms + 1_100 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(client_key_standing(&a.task_ctx, "token:fleet/brief", &kc), Unknown, "expired: no current key");
+    a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// **#805's review F5: `retain_trusted`'s fast path reads `legacy_closed`.** With nothing judged at all (an empty
+/// standing) and legacy closed, a legacy node's key is dropped by `retain_trusted`, and the knowledge layer's member keys
+/// (`knowledge_keys::member_keys_of`, the caller it reaches) read it as revoked. Seen failing first with the fast path
+/// reverted to `is_empty()` alone: the key was kept and read as retained.
+#[tokio::test]
+async fn retain_trusted_with_an_empty_standing_and_legacy_closed_keeps_nothing() {
+    let port = alloc_port();
+    let id = NodeId::new("127.0.0.1", port).unwrap();
+    let mut cfg = GossipConfig::default();
+    cfg.bind_port = port;
+    let a = GossipAgent::new(id, cfg);
+    let ctx = &a.task_ctx;
+    let l = NodeId::new("127.0.0.1", alloc_port()).unwrap();
+    let kl = [0x73u8; 32];
+    ctx.peer_keys.pin().insert(l.clone(), vec![kl]);
+    assert!(ctx.key_standing.is_empty(), "nothing judged");
+    let mut keys = vec![kl];
+    ctx.retain_trusted(&l, &mut keys);
+    assert_eq!(keys, vec![kl], "legacy open: kept, as today");
+    ctx.key_standing.set_legacy_closed(true);
+    let mut keys = vec![kl];
+    ctx.retain_trusted(&l, &mut keys);
+    assert!(keys.is_empty(), "legacy closed: dropped, on the fast path too");
+    #[cfg(feature = "compliance")]
+    {
+        let members = super::knowledge_keys::member_keys_of(ctx);
+        assert!(members.get(&l).is_some_and(|m| m.revoked.contains(&kl)), "the knowledge layer reads it as not trusted");
+    }
 }

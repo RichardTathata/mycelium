@@ -527,7 +527,7 @@ pub async fn handle_connection(
             let (now, trusted) = t.verify_member_cert_tagged(der);
             *judged_at = now;
             if !trusted {
-                task_ctx.transport_bounds.sessions_closed_by_roots.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                t.note_session_closed(true, der);
                 warn!(from = %peer_addr, "closing an inbound session: its certificate does not verify against this node's new roots");
                 break;
             }

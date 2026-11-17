@@ -1,6 +1,6 @@
 # Golden on-disk persistence fixtures (V2 gate, contracts axis)
 
-One directory per **released on-disk format**: `wal.bin` (u32le-length-prefixed `SyncEntry` records)
+One directory per **released KV on-disk format** (a directory holding `wal.bin`): `wal.bin` (u32le-length-prefixed `SyncEntry` records)
 and `snapshot.bin` (`KvSnapshot { snapshot_hlc, entries }`), both in the `serde_fixint` encoding, plus
 `expected.json` — the live values and tombstoned keys a replay must produce.
 
@@ -13,3 +13,14 @@ directory here through the production `replay` + LWW apply path in CI.
 
 **A format change adds a directory; it never edits one.** Every released file must keep replaying.
 Record: `docs/design/contracts-receipts.md` §9.
+
+## The identity journals (identity-and-lifecycle I2, PR 2a; #805's review F6)
+
+`identity-journal-v1/` pins one entry of every variant of the two node-local identity journals, as hex, one
+`<variant> <hex>` line each: `revocations.hex` (`identity/revocations.journal`: `Counted`, `Saturated`, `Anchor`) and
+`client-certs.hex` (`identity/client-certs.journal`: `Raised` — the pre-I2 entry — `Saturated`, `Published`,
+`RaisedWithCert`). `the_identity_journal_entries_are_pinned` (`src/agent/revocation.rs`) and
+`the_client_cert_journal_entries_are_pinned` (`src/agent/client_cert.rs`) encode each entry and compare the bytes, decode
+each line back, and show that a reader with the variants before this release refuses (and so skips) the new ones while
+reading the old ones — a variant reordered or inserted in the middle fails them. **Add a line for a new variant; never edit
+one.**

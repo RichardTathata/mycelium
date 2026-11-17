@@ -285,6 +285,9 @@ pub(crate) struct KeptCert {
     issued: u64,
     /// The roots generation it was last judged under ([`UNJUDGED`] when restored from the journal).
     judged: u64,
+    /// Its `notAfter` (ms): once the wall clock reaches it the certificate is judged again, in-process as at a restart
+    /// (#805's review F3), and an expired one is dropped.
+    expires: u64,
 }
 
 /// What an anchor keeps: its certificates, at most [`KEPT_CERTS_PER_ANCHOR`].
@@ -325,13 +328,41 @@ impl KeptAnchor {
     }
 }
 
-/// The kept-anchor appends in flight (I2, R4).
+/// The kept-anchor journal's bookkeeping (I2, R4; #805's review F2), shared with the spawned appends. Each append has
+/// its own sequence number and its own result, so a caller waits for **its** appends, a later one finishing first
+/// satisfies nothing, and one old failure poisons nothing after it. A certificate is marked journaled only once its
+/// append is durable; until then it is in flight, and one that failed, or was never handed to the journal, is tried
+/// again by the next fold.
 #[derive(Default)]
 struct AppendTally {
-    started: AtomicU64,
-    done: AtomicU64,
-    failed: AtomicU64,
+    /// The next sequence number an append takes.
+    next: AtomicU64,
+    /// Each finished append's result, by sequence number: `true` durable, `false` failed.
+    results: papaya::HashMap<u64, bool>,
+    /// Kept certificates whose append is in flight, per node, by digest.
+    inflight: papaya::HashMap<NodeId, HashSet<[u8; 32]>>,
+    /// Kept certificates journaled durably (read at start, and appended since), per node, by digest.
+    journaled: papaya::HashMap<NodeId, HashSet<[u8; 32]>>,
+    journaled_total: AtomicUsize,
     notify: tokio::sync::Notify,
+    /// Test hooks (#805's review F2): hold the append numbered `hold_plus1 - 1` until `gate` is notified, and fail the
+    /// one numbered `fail_plus1 - 1`. `0` holds and fails nothing.
+    #[cfg(test)]
+    hold_plus1: AtomicU64,
+    #[cfg(test)]
+    gate: tokio::sync::Notify,
+    #[cfg(test)]
+    fail_plus1: AtomicU64,
+}
+
+fn set_edit(map: &papaya::HashMap<NodeId, HashSet<[u8; 32]>>, node: &NodeId, digest: [u8; 32], insert: bool) -> bool {
+    let mut changed = false;
+    map.pin().compute(node.clone(), |existing| {
+        let mut set = existing.map(|(_, s)| s.clone()).unwrap_or_default();
+        changed = if insert { set.insert(digest) } else { set.remove(&digest) };
+        if changed { papaya::Operation::Insert(set) } else { papaya::Operation::Abort(()) }
+    });
+    changed
 }
 
 /// A certificate offered to `node`'s anchors by a fold: judged under the roots generation `judged`.
@@ -350,15 +381,14 @@ pub(crate) struct IdentityLedger {
     /// A node's entry, once made, stays when it is empty: a node that had standing and lost it trusts nothing
     /// (fails closed; #796's review, must-address 7), never reverting to legacy.
     anchors_seen: papaya::HashMap<NodeId, HashMap<[u8; 32], KeptAnchor>>,
-    /// Kept certificates journaled (read at start, and appended since), per node, by digest.
-    anchors_journaled: papaya::HashMap<NodeId, HashSet<[u8; 32]>>,
-    anchors_journaled_total: AtomicUsize,
     /// Anchor appends handed to the journal, and those finished — what [`IdentityLedger::anchors_durable`] waits on.
     anchor_tally: Arc<AppendTally>,
     /// Kept certificates the journal could not take (budget full, or a failed append): kept in memory only.
     pub(crate) anchor_journal_refused: AtomicU64,
     /// Kept certificates dropped because they no longer verify against this node's roots (I2, R4).
     pub(crate) anchors_dropped: AtomicU64,
+    /// Kept-anchor appends that failed (each is tried again by a later fold).
+    pub(crate) anchor_append_failed: Arc<AtomicU64>,
     /// **The one owner of this node's identity and roots** (identity-and-lifecycle I2, #796's review must-address 8):
     /// `rotate_identity` holds it from building its material to activating it — across its propagation wait — and a
     /// change of roots (`GossipAgent::change_roots`) holds it for its whole run, so the roots never change between a
@@ -381,7 +411,9 @@ pub(crate) struct IdentityLedger {
     /// The CA check and parse per distinct certificate (by SHA-256), bounded by [`CERT_CACHE_MAX`],
     /// each verdict tagged with the roots generation it was judged under (identity-and-lifecycle I2,
     /// R4): a verdict of an older generation is a miss.
-    cert_cache: papaya::HashMap<[u8; 32], (u64, Option<CertFacts>)>,
+    /// Each verdict also carries the certificate's `notAfter` (ms): a verdict is a miss once the wall clock reaches
+    /// it, so a certificate's expiry is judged in-process as a restart judges it (I2, #805's review F3).
+    cert_cache: papaya::HashMap<[u8; 32], (u64, u64, Option<CertFacts>)>,
     running: AtomicBool,
     again: AtomicBool,
     /// Certificate records whose issuance was past `wall_now_ms` plus the skew bound when judged.
@@ -438,16 +470,11 @@ impl IdentityLedger {
         let Some(id) = mycelium_core::tls::cert_identity(&der) else { return };
         let Some(issuer) = mycelium_core::tls::cert_issuer_der(&der) else { return };
         let digest: [u8; 32] = Sha256::digest(&der).into();
-        let mut added = false;
-        self.anchors_journaled.pin().compute(node.clone(), |existing| {
-            let mut set = existing.map(|(_, s)| s.clone()).unwrap_or_default();
-            added = set.insert(digest);
-            if added { papaya::Operation::Insert(set) } else { papaya::Operation::Abort(()) }
-        });
-        if added {
-            self.anchors_journaled_total.fetch_add(1, Ordering::Relaxed);
+        if set_edit(&self.anchor_tally.journaled, node, digest, true) {
+            self.anchor_tally.journaled_total.fetch_add(1, Ordering::Relaxed);
         }
-        let cert = KeptCert { der: Arc::from(der), issuer, issued: id.issued_ms.unwrap_or(0), judged: UNJUDGED };
+        let expires = mycelium_core::tls::cert_not_after_ms(&der).unwrap_or(u64::MAX);
+        let cert = KeptCert { der: Arc::from(der), issuer, issued: id.issued_ms.unwrap_or(0), judged: UNJUDGED, expires };
         self.anchors_seen.pin().compute(node.clone(), |existing| {
             let mut m = existing.map(|(_, m)| m.clone()).unwrap_or_default();
             m.entry(id.key).or_default().keep(cert.clone());
@@ -455,69 +482,104 @@ impl IdentityLedger {
         });
     }
 
-    /// Wait until every kept-anchor append handed to the journal before this call has finished (identity-and-lifecycle
-    /// I2, R4: the append is awaited before the Narrowed phase is persisted). `true` when no anchor append has failed in this process; with no
-    /// journal there is nothing to wait for and the anchors are in memory only, which is `true` too — durability across
-    /// a restart is stated under `[persistence]`.
-    pub(crate) async fn anchors_durable(&self) -> bool {
+    /// The sequence number the next kept-anchor append will take: a caller reads it before the work whose appends it
+    /// must wait for, and passes it to [`Self::anchors_durable_since`].
+    #[cfg_attr(not(test), allow(dead_code))] // its caller, `change_roots`, has none outside the tests until PR 2b
+    pub(crate) fn anchor_mark(&self) -> u64 {
+        self.anchor_tally.next.load(Ordering::Acquire)
+    }
+
+    /// Wait for **each** kept-anchor append numbered from `start` up to those handed to the journal before this call
+    /// (identity-and-lifecycle I2, R4: the append is awaited before the Narrowed phase is persisted; #805's review F2).
+    /// `true` when every one of them is durable — whatever happened to appends outside the range. With no journal there
+    /// is nothing to wait for and the anchors are in memory only, which is `true` too: durability across a restart is
+    /// stated under `[persistence]`. One that failed is tried again by the next fold, under a new number.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) async fn anchors_durable_since(&self, start: u64) -> bool {
         let t = Arc::clone(&self.anchor_tally);
-        let target = t.started.load(Ordering::Acquire);
+        let end = t.next.load(Ordering::Acquire);
         loop {
             let notified = t.notify.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
-            if t.done.load(Ordering::Acquire) >= target {
-                break;
+            let results = t.results.pin();
+            if (start..end).all(|seq| results.contains_key(&seq)) {
+                return (start..end).all(|seq| results.get(&seq) == Some(&true));
             }
+            drop(results);
             notified.await;
         }
-        t.failed.load(Ordering::Acquire) == 0
     }
 
     /// Journal a kept certificate of `node`'s, within the anchors' own budget. Held in memory first (the caller has
-    /// merged it), then handed to the journal: the store-then-WAL order.
+    /// merged it), then handed to the journal: the store-then-WAL order. A certificate already journaled or in flight
+    /// is left; one this cannot hand to the journal (no runtime, an encode failure) is counted, and the next fold tries
+    /// it again (#805's review F2).
     fn journal_anchor(&self, node: &NodeId, der: &[u8]) {
-        if self.journal.load().is_none() {
-            return;
-        }
+        let Some(j) = self.journal.load_full() else { return };
+        let t = &self.anchor_tally;
         let digest: [u8; 32] = Sha256::digest(der).into();
-        if self.anchors_journaled.pin().get(node).is_some_and(|s| s.contains(&digest)) {
+        let held = |m: &papaya::HashMap<NodeId, HashSet<[u8; 32]>>| m.pin().get(node).map_or(0, |s| s.len());
+        if t.journaled.pin().get(node).is_some_and(|s| s.contains(&digest)) || t.inflight.pin().get(node).is_some_and(|s| s.contains(&digest)) {
             return;
         }
-        let per = self.anchors_journaled.pin().get(node).map_or(0, |s| s.len());
-        if per >= ANCHOR_JOURNAL_PER_NODE || self.anchors_journaled_total.load(Ordering::Relaxed) >= ANCHOR_JOURNAL_TOTAL {
+        if held(&t.journaled) + held(&t.inflight) >= ANCHOR_JOURNAL_PER_NODE || t.journaled_total.load(Ordering::Relaxed) >= ANCHOR_JOURNAL_TOTAL {
             self.anchor_journal_refused.fetch_add(1, Ordering::Relaxed);
             tracing::warn!(%node, "identity journal: the kept-anchor budget is full; this anchor is kept in this process only");
             return;
         }
-        let mut added = false;
-        self.anchors_journaled.pin().compute(node.clone(), |existing| {
-            let mut set = existing.map(|(_, s)| s.clone()).unwrap_or_default();
-            added = set.insert(digest);
-            if added { papaya::Operation::Insert(set) } else { papaya::Operation::Abort(()) }
-        });
-        if !added {
+        let entry = JournalEntry::Anchor { node: node.to_string(), der: der.to_vec() };
+        let (Ok(bytes), Ok(rt)) = (mycelium_core::serde_fixint::to_vec(&entry), tokio::runtime::Handle::try_current()) else {
+            self.anchor_journal_refused.fetch_add(1, Ordering::Relaxed);
+            tracing::warn!(%node, "identity journal: a kept anchor could not be handed to the journal; the next fold tries again");
+            return;
+        };
+        if !set_edit(&t.inflight, node, digest, true) {
             return;
         }
-        self.anchors_journaled_total.fetch_add(1, Ordering::Relaxed);
-        self.append_anchor(JournalEntry::Anchor { node: node.to_string(), der: der.to_vec() });
-    }
-
-    /// Append a kept-anchor entry, counted so [`IdentityLedger::anchors_durable`] can wait for it.
-    fn append_anchor(&self, entry: JournalEntry) {
-        let Some(j) = self.journal.load_full() else { return };
-        let Ok(bytes) = mycelium_core::serde_fixint::to_vec(&entry) else { return };
-        let Ok(rt) = tokio::runtime::Handle::try_current() else { return };
-        let tally = Arc::clone(&self.anchor_tally);
-        tally.started.fetch_add(1, Ordering::AcqRel);
+        let seq = t.next.fetch_add(1, Ordering::AcqRel);
+        let tally = Arc::clone(t);
+        let node = node.clone();
+        let failed_counter = Arc::clone(&self.anchor_append_failed);
         rt.spawn(async move {
-            if let Err(e) = j.append(bytes).await {
-                tally.failed.fetch_add(1, Ordering::AcqRel);
-                tracing::warn!(error = %e, "identity journal: an anchor append failed; it is kept in this process only");
+            #[cfg(test)]
+            if tally.hold_plus1.load(Ordering::Acquire) == seq + 1 {
+                tally.gate.notified().await;
             }
-            tally.done.fetch_add(1, Ordering::AcqRel);
+            let ok = j.append(bytes).await.map_err(|e| tracing::warn!(error = %e, "identity journal: an anchor append failed; the next fold tries again")).is_ok();
+            #[cfg(test)]
+            let ok = ok && tally.fail_plus1.load(Ordering::Acquire) != seq + 1;
+            if ok {
+                if set_edit(&tally.journaled, &node, digest, true) {
+                    tally.journaled_total.fetch_add(1, Ordering::Relaxed);
+                }
+            } else {
+                failed_counter.fetch_add(1, Ordering::Relaxed);
+            }
+            set_edit(&tally.inflight, &node, digest, false);
+            tally.results.pin().insert(seq, ok);
             tally.notify.notify_waiters();
         });
+    }
+
+    /// Test hooks on the next appends (#805's review F2): hold append `hold` until [`Self::release_held_for_test`], and
+    /// fail append `fail`.
+    #[cfg(test)]
+    pub(super) fn hook_appends_for_test(&self, hold: Option<u64>, fail: Option<u64>) {
+        self.anchor_tally.hold_plus1.store(hold.map_or(0, |h| h + 1), Ordering::Release);
+        self.anchor_tally.fail_plus1.store(fail.map_or(0, |f| f + 1), Ordering::Release);
+    }
+
+    #[cfg(test)]
+    pub(super) fn release_held_for_test(&self) {
+        self.anchor_tally.gate.notify_waiters();
+    }
+
+    /// Whether `node`'s certificate `der` is journaled durably (I2's tests).
+    #[cfg(test)]
+    pub(super) fn anchor_journaled_for_test(&self, node: &NodeId, der: &[u8]) -> bool {
+        let digest: [u8; 32] = Sha256::digest(der).into();
+        self.anchor_tally.journaled.pin().get(node).is_some_and(|s| s.contains(&digest))
     }
 
     fn remember_journaled(&self, node: &NodeId, path: String, bytes: Vec<u8>) -> bool {
@@ -647,8 +709,9 @@ pub(super) fn cert_verdict_for_test(ledger: &IdentityLedger, tls: &mycelium_core
 /// The verdict and the roots generation it was reached under (the cached one's tag on a hit).
 fn cert_facts_with(ledger: &IdentityLedger, tls: &mycelium_core::tls::NodeTls, der: &[u8], between: impl FnOnce()) -> (u64, Option<CertFacts>) {
     let digest: [u8; 32] = Sha256::digest(der).into();
-    if let Some((generation, hit)) = ledger.cert_cache.pin().get(&digest)
+    if let Some((generation, expires, hit)) = ledger.cert_cache.pin().get(&digest)
         && *generation == tls.roots_generation()
+        && mycelium_core::sim_seam::wall_now_ms() < *expires
     {
         return (*generation, hit.clone());
     }
@@ -664,7 +727,7 @@ fn cert_facts_with(ledger: &IdentityLedger, tls: &mycelium_core::tls::NodeTls, d
     if cache.len() >= CERT_CACHE_MAX {
         cache.clear();
     }
-    cache.insert(digest, (generation, facts.clone()));
+    cache.insert(digest, (generation, mycelium_core::tls::cert_not_after_ms(der).unwrap_or(u64::MAX), facts.clone()));
     (generation, facts)
 }
 
@@ -696,7 +759,8 @@ fn judge_cert_tagged(ctx: &CoreCtx, tls: &mycelium_core::tls::NodeTls, ledger: &
 /// A certificate `judge_cert_tagged` passed, as an [`Offered`] kept certificate.
 fn offered(der: &[u8], key: [u8; 32], issued: u64, judged: u64) -> Option<Offered> {
     let issuer = mycelium_core::tls::cert_issuer_der(der)?;
-    Some(Offered { key, cert: KeptCert { der: Arc::from(der), issuer, issued, judged } })
+    let expires = mycelium_core::tls::cert_not_after_ms(der).unwrap_or(u64::MAX);
+    Some(Offered { key, cert: KeptCert { der: Arc::from(der), issuer, issued, judged, expires } })
 }
 
 /// A revocation record found for a node: where, its bytes, and what it says.
@@ -751,8 +815,9 @@ struct Folded {
 /// (identity-and-lifecycle I2, R4): `digest → verdict`, only for verdicts reached under `g0` itself — one reached under
 /// a later generation is left out, and the next fold judges it.
 fn rejudge_kept(ctx: &CoreCtx, tls: &mycelium_core::tls::NodeTls, ledger: &IdentityLedger, node: &NodeId, g0: u64) -> HashMap<[u8; 32], bool> {
+    let now = mycelium_core::sim_seam::wall_now_ms();
     let stale: Vec<([u8; 32], Arc<[u8]>)> = ledger.anchors_seen.pin().get(node).map(|m| {
-        m.iter().flat_map(|(k, a)| a.certs.iter().filter(|c| c.judged != g0).map(move |c| (*k, Arc::clone(&c.der)))).collect()
+        m.iter().flat_map(|(k, a)| a.certs.iter().filter(|c| c.judged != g0 || now >= c.expires).map(move |c| (*k, Arc::clone(&c.der)))).collect()
     }).unwrap_or_default();
     let mut out = HashMap::new();
     for (key, der) in stale {
@@ -798,9 +863,6 @@ fn merge_anchors_seen(
         let mut m: HashMap<[u8; 32], KeptAnchor> = existing.map(|(_, m)| m.clone()).unwrap_or_default();
         for a in m.values_mut() {
             a.certs.retain_mut(|c| {
-                if c.judged == g0 {
-                    return true;
-                }
                 let digest: [u8; 32] = Sha256::digest(&c.der).into();
                 match rejudged.get(&digest) {
                     Some(true) => {
@@ -829,8 +891,9 @@ fn merge_anchors_seen(
                 capped += 1;
             }
         }
-        let held = |der: &Arc<[u8]>| existing.is_some_and(|(_, old)| old.values().any(|a| a.certs.iter().any(|c| &c.der == der)));
-        fresh = m.values().flat_map(|a| a.certs.iter()).filter(|c| !held(&c.der)).map(|c| Arc::clone(&c.der)).collect();
+        // Every kept certificate is offered to the journal, which skips what is journaled or in flight: a failed or
+        // never-handed append is tried again here (#805's review F2).
+        fresh = m.values().flat_map(|a| a.certs.iter()).map(|c| Arc::clone(&c.der)).collect();
         merged_out = Some(m.iter().filter_map(|(k, a)| a.rank().map(|r| (*k, r))).collect());
         if existing.is_none() && m.is_empty() {
             return papaya::Operation::Abort(());
@@ -1111,6 +1174,9 @@ fn refresh_once(ctx: &TaskCtx) {
         if ctx.key_standing.get(&node).as_deref() != Some(&standing) {
             ctx.key_standing.set(&node, standing);
         }
+    }
+    if tls.roots_generation() == g0 {
+        ctx.key_standing.set_judged_under(g0);
     }
 }
 
@@ -1441,6 +1507,110 @@ mod tests {
         assert!(candidate(&node, &revocation_key_v2(&node, &[9u8; 32], &[5u8; 32]), &v2).is_none(), "another revoker in the path");
         let other: NodeId = "127.0.0.1:9001".parse().unwrap();
         assert!(candidate(&other, &revocation_key_v2(&other, &[9u8; 32], &pub_a), &v2).is_none(), "another node");
+    }
+
+    fn fixture(file: &str) -> Vec<(String, Vec<u8>)> {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/persistence/identity-journal-v1").join(file);
+        std::fs::read_to_string(path).unwrap().lines().map(|l| {
+            let (name, hex) = l.split_once(' ').unwrap();
+            (name.to_string(), (0..hex.len()).step_by(2).map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap()).collect())
+        }).collect()
+    }
+
+    /// **#805's review F6: the revocation journal's entries are pinned.** Each variant encodes to the golden bytes and the
+    /// golden bytes decode to it; a reader with only the variants before I2's PR 2a (an older binary) refuses `Anchor` —
+    /// which it skips, with its warning — and reads the others. A variant reordered or inserted in the middle fails here.
+    /// Seen failing first with `Anchor` moved before `Saturated`.
+    #[test]
+    fn the_identity_journal_entries_are_pinned() {
+        #[derive(serde::Deserialize)]
+        #[allow(dead_code)]
+        enum Before { Counted { node: String, path: String, bytes: Vec<u8> }, Saturated { node: String } }
+        let node = "127.0.0.1:9000".to_string();
+        let entries = [
+            ("Counted", JournalEntry::Counted { node: node.clone(), path: "sys/revocation/127.0.0.1:9000/aa/bb".into(), bytes: vec![1, 2, 3] }),
+            ("Saturated", JournalEntry::Saturated { node: node.clone() }),
+            ("Anchor", JournalEntry::Anchor { node: node.clone(), der: vec![4, 5, 6] }),
+        ];
+        let golden = fixture("revocations.hex");
+        assert_eq!(golden.len(), entries.len(), "one line per variant");
+        for ((name, entry), (gname, bytes)) in entries.iter().zip(&golden) {
+            assert_eq!(name, gname);
+            assert_eq!(&mycelium_core::serde_fixint::to_vec(entry).unwrap(), bytes, "{name} encodes to the golden bytes");
+            let back: JournalEntry = mycelium_core::serde_fixint::from_slice(bytes).unwrap();
+            assert_eq!(mycelium_core::serde_fixint::to_vec(&back).unwrap(), *bytes, "{name} decodes back");
+            let old = mycelium_core::serde_fixint::from_slice::<Before>(bytes);
+            assert_eq!(old.is_ok(), *name != "Anchor", "an older reader reads {name}: {}", old.is_ok());
+        }
+    }
+
+    fn temp_journal(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("myc-i2-anchor-journal-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("revocations.journal")
+    }
+
+    /// **#805's review F2: a caller waits for its own appends.** Append 0 is held while append 1 finishes: waiting from
+    /// before both does not complete — a later append finishing first satisfies nothing — and the held certificate is not
+    /// marked journaled until its append is durable. Seen failing first with the wait counting finished appends.
+    #[tokio::test]
+    async fn a_later_anchor_append_finishing_first_does_not_satisfy_the_wait() {
+        let ledger = IdentityLedger::default();
+        ledger.open_journal(&temp_journal("order")).unwrap();
+        let n: NodeId = "127.0.0.1:9100".parse().unwrap();
+        let mark = ledger.anchor_mark();
+        ledger.hook_appends_for_test(Some(mark), None);
+        ledger.journal_anchor(&n, &[1u8; 8]);
+        ledger.journal_anchor(&n, &[2u8; 8]);
+        let t = std::time::Instant::now();
+        while !ledger.anchor_journaled_for_test(&n, &[2u8; 8]) {
+            assert!(t.elapsed() < std::time::Duration::from_secs(5), "append 1 finishes");
+            tokio::task::yield_now().await;
+        }
+        let wait = ledger.anchors_durable_since(mark);
+        tokio::pin!(wait);
+        assert!(tokio::time::timeout(std::time::Duration::from_millis(100), &mut wait).await.is_err(), "append 0 is held: the wait does not complete");
+        // A later append, started after the wait took its range, finishes while append 0 is still held.
+        ledger.journal_anchor(&n, &[5u8; 8]);
+        let t = std::time::Instant::now();
+        while !ledger.anchor_journaled_for_test(&n, &[5u8; 8]) {
+            assert!(t.elapsed() < std::time::Duration::from_secs(5), "append 2 finishes");
+            tokio::task::yield_now().await;
+        }
+        assert!(tokio::time::timeout(std::time::Duration::from_millis(200), &mut wait).await.is_err(), "a later append finishing first satisfies nothing");
+        assert!(!ledger.anchor_journaled_for_test(&n, &[1u8; 8]), "not journaled before its append is durable");
+        let done = loop {
+            ledger.release_held_for_test();
+            if let Ok(done) = tokio::time::timeout(std::time::Duration::from_millis(20), &mut wait).await {
+                break done;
+            }
+        };
+        assert!(done, "both durable");
+        assert!(ledger.anchor_journaled_for_test(&n, &[1u8; 8]));
+    }
+
+    /// **#805's review F2: a failure is its own append's.** Append 0 fails: a wait from after it is satisfied by append 1,
+    /// a wait that includes it answers `false`, the certificate is not marked journaled, and offering it again appends
+    /// it under a new number. Seen failing first with one failure answering every later wait.
+    #[tokio::test]
+    async fn one_failed_anchor_append_poisons_no_later_wait_and_is_tried_again() {
+        let ledger = IdentityLedger::default();
+        ledger.open_journal(&temp_journal("fail")).unwrap();
+        let n: NodeId = "127.0.0.1:9101".parse().unwrap();
+        let first = ledger.anchor_mark();
+        ledger.hook_appends_for_test(None, Some(first));
+        ledger.journal_anchor(&n, &[3u8; 8]);
+        let second = ledger.anchor_mark();
+        ledger.journal_anchor(&n, &[4u8; 8]);
+        assert!(ledger.anchors_durable_since(second).await, "a later wait is not poisoned by the earlier failure");
+        assert!(!ledger.anchors_durable_since(first).await, "the wait that includes it says so");
+        assert!(!ledger.anchor_journaled_for_test(&n, &[3u8; 8]));
+        assert_eq!(ledger.anchor_append_failed.load(Ordering::Relaxed), 1, "counted");
+        let retry = ledger.anchor_mark();
+        ledger.journal_anchor(&n, &[3u8; 8]);
+        assert!(ledger.anchors_durable_since(retry).await, "tried again, durable");
+        assert!(ledger.anchor_journaled_for_test(&n, &[3u8; 8]));
     }
 
     #[test]

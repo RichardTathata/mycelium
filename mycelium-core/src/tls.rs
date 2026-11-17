@@ -82,6 +82,10 @@ pub struct NodeTls {
     /// finding 2). Never held across an `.await` or another lock (lock-order table, `NodeTls::activate_lock`).
     #[cfg(feature = "tls")]
     activate_lock: std::sync::Mutex<()>,
+    /// Mesh sessions closed because their peer's certificate fails roots this node changed to (I2, #805's review F10):
+    /// `[inbound old root, inbound predates the change, outbound old root, outbound predates the change]`.
+    #[cfg(feature = "tls")]
+    sessions_closed: [std::sync::atomic::AtomicU64; 4],
 }
 
 #[cfg(feature = "tls")]
@@ -114,6 +118,24 @@ impl NodeTls {
     /// more at each [`activate`](NodeTls::activate) whose material changed the roots.
     pub fn roots_generation(&self) -> u64 {
         self.roots_generation.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Count a mesh session closed at a change of roots (#805's review F10): `inbound` or outbound, and **why** — the
+    /// peer's key already has standing under the new roots (the session predates the change: the peer has a successor
+    /// certificate it would present on a new handshake) or it has none (the peer is on an old root).
+    pub fn note_session_closed(&self, inbound: bool, peer_der: &[u8]) {
+        // Only a standing the fold has judged under the current roots can say so: until then, an old-root anchor not yet
+        // dropped would read as a successor's, so the close counts as an old-root peer's.
+        let current = self.standing.judged_under() == Some(self.roots_generation());
+        let predates = current && ed25519_key_from_cert_der(peer_der).is_some_and(|k| self.standing.anchors_key(&k));
+        let i = (if inbound { 0 } else { 2 }) + usize::from(predates);
+        self.sessions_closed[i].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// [`Self::note_session_closed`]'s counters: inbound old root, inbound predates the change, outbound old root,
+    /// outbound predates the change.
+    pub fn sessions_closed_by_roots(&self) -> [u64; 4] {
+        std::array::from_fn(|i| self.sessions_closed[i].load(std::sync::atomic::Ordering::Relaxed))
     }
 
     /// The CA certificates (DER) this node trusts now.
@@ -344,6 +366,37 @@ pub struct CertIdentity {
 /// ranks below one it succeeds (post-360 plan row Q).
 pub fn issuance_after(floor_ms: u64) -> u64 {
     crate::sim_seam::wall_now_ms().max(floor_ms.saturating_add(1))
+}
+
+#[cfg(all(feature = "tls", any(test, feature = "test-support")))]
+thread_local! {
+    static NOT_AFTER_OVERRIDE: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+}
+
+/// The `notAfter` a node or client certificate is issued with: 2099-01-01, or — in a test build, on this thread inside
+/// [`with_not_after_for_test`] — the given time, so a test can issue a short-lived certificate (#805's review F3).
+#[cfg(feature = "tls")]
+pub(crate) fn set_not_after_for_issue(params: &mut rcgen::CertificateParams) {
+    params.not_after = rcgen::date_time_ymd(2099, 1, 1);
+    #[cfg(any(test, feature = "test-support"))]
+    if let Some(ms) = NOT_AFTER_OVERRIDE.with(|c| c.get()) {
+        params.not_after = rcgen::date_time_ymd(1970, 1, 1) + std::time::Duration::from_millis(ms);
+    }
+}
+
+/// Run `f` with every node or client certificate issued on this thread valid until `not_after_ms` (test builds only).
+#[cfg(all(feature = "tls", any(test, feature = "test-support")))]
+#[doc(hidden)]
+pub fn with_not_after_for_test<R>(not_after_ms: u64, f: impl FnOnce() -> R) -> R {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            NOT_AFTER_OVERRIDE.with(|c| c.set(None));
+        }
+    }
+    NOT_AFTER_OVERRIDE.with(|c| c.set(Some(not_after_ms)));
+    let _reset = Reset;
+    f()
 }
 
 /// The URI a node certificate names its node by: `mycelium://{node}`.
@@ -1088,6 +1141,53 @@ pub fn cert_issuer_der(der: &[u8]) -> Option<Vec<u8>> {
     tbs_name(der, TbsName::Issuer).map(<[u8]>::to_vec)
 }
 
+/// A certificate's `notAfter`, in ms since the epoch, read by the bounded walk; `None` for anything that is not a
+/// certificate or a time this walk cannot read. What a cached verdict carries so that a certificate's expiry is judged
+/// in-process as a restart judges it (identity-and-lifecycle I2, #805's review F3). Never panics.
+#[cfg(feature = "tls")]
+pub fn cert_not_after_ms(der: &[u8]) -> Option<u64> {
+    let (tag, cert, _) = der_tlv(der)?;
+    if tag != 0x30 { return None; }
+    let (tag, tbs, _) = der_tlv(cert)?;
+    if tag != 0x30 { return None; }
+    let mut rest = tbs;
+    let (tag, _, next) = der_tlv(rest)?;
+    if tag == 0xA0 {
+        rest = next;
+    }
+    // serial, signature, issuer; then validity
+    for _ in 0..3 {
+        let (_, _, n) = der_tlv(rest)?;
+        rest = n;
+    }
+    let (tag, validity, _) = der_tlv(rest)?;
+    if tag != 0x30 { return None; }
+    let (_, _, after_nb) = der_tlv(validity)?;
+    let (tag, t, _) = der_tlv(after_nb)?;
+    let t = std::str::from_utf8(t).ok()?;
+    let (year, rest) = match tag {
+        0x17 => {
+            let yy: i64 = t.get(0..2)?.parse().ok()?;
+            (if yy >= 50 { 1900 + yy } else { 2000 + yy }, t.get(2..)?)
+        }
+        0x18 => (t.get(0..4)?.parse().ok()?, t.get(4..)?),
+        _ => return None,
+    };
+    if rest.len() != 11 || !rest.ends_with('Z') { return None; }
+    let n = |i: usize| -> Option<i64> { rest.get(i..i + 2)?.parse().ok() };
+    let (mo, d, h, mi, se) = (n(0)?, n(2)?, n(4)?, n(6)?, n(8)?);
+    if !(1..=12).contains(&mo) || !(1..=31).contains(&d) || h > 23 || mi > 59 || se > 60 { return None; }
+    // Days from the civil date (Howard Hinnant's algorithm).
+    let y = if mo <= 2 { year - 1 } else { year };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * (if mo > 2 { mo - 3 } else { mo + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    let secs = days * 86_400 + h * 3_600 + mi * 60 + se;
+    u64::try_from(secs).ok()?.checked_mul(1_000)
+}
+
 /// The commonName of a CA certificate's subject, when the subject is **exactly** what this tree writes:
 /// one RDN holding one `commonName` (2.5.4.3) `UTF8String` — rcgen's default subject, which every CA
 /// before identity-and-lifecycle I2 has, and the subject `mycelium tls ca` writes since. `None` for any
@@ -1366,6 +1466,7 @@ mod imp {
             removed,
             standing,
             activate_lock: std::sync::Mutex::new(()),
+            sessions_closed: Default::default(),
         })
     }
 
@@ -1997,7 +2098,7 @@ mod imp {
         params.subject_alt_names = vec![SanType::IpAddress(ip), SanType::URI(uri)];
         params.serial_number = Some(rcgen::SerialNumber::from(issued_ms));
         params.not_before = rcgen::date_time_ymd(2024, 1, 1);
-        params.not_after  = rcgen::date_time_ymd(2099, 1, 1);
+        super::set_not_after_for_issue(&mut params);
         issue_checked(params, public, ca_cert_der, ca_key_pair)
     }
 
@@ -2050,7 +2151,7 @@ mod imp {
         params.subject_alt_names = vec![SanType::URI(uri)];
         params.serial_number = Some(rcgen::SerialNumber::from(issued_ms));
         params.not_before = rcgen::date_time_ymd(2024, 1, 1);
-        params.not_after  = rcgen::date_time_ymd(2099, 1, 1);
+        super::set_not_after_for_issue(&mut params);
         issue_checked(params, public, ca_cert_der, ca_key_pair)
     }
 

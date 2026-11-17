@@ -453,7 +453,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   shipped build refuses by name — a release is blocked on it); a client's mark keeps its certificate (`RaisedWithCert`)
   and the key at it is current only while that certificate verifies; live mesh sessions are re-judged and closed when
   the new roots refuse the peer (`sessions_closed_by_roots`); and a rotation and a change of roots have one owner
-  (lock-order row 82). Nothing drives a change of roots yet but `GossipAgent::change_roots` (`#[doc(hidden)]`): the
+  (lock-order row 82). Nothing drives a change of roots yet but the crate-internal `GossipAgent::change_roots` the tests call: the
   successor-signed record is PR 2b.
 
 - **CA succession, its first PR: one root in `ca_cert_pem`, a named fleet CA, and the reload path** (identity and

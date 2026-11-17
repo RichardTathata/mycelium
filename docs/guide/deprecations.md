@@ -4770,14 +4770,21 @@ and count; served once it arrives; a tombstoned marker restored by its provider 
 
 ## 115. Standing under changed roots: kept anchors, no legacy class on a node trusting only successor roots, client marks with their certificate, sessions re-judged, and a CA's generation (unreleased, identity-and-lifecycle I2, PR 2a)
 
-*Numbered 115 because an open pull request holds §113 (#801) at the time of writing; the sections are in order once it
-merges.*
-
-Every change below acts only at a **change of a node's roots** or on a node whose roots are a successor's. In a fleet
-that has never succeeded — every root generation 0, no change of roots — behaviour is as before, except that kept
-anchors are journaled under `[persistence]` (the first item). Nothing in this release changes a node's roots on its
-own: the successor-signed record that drives a succession is I2's next PR, and until it lands only
-`GossipAgent::change_roots` (`#[doc(hidden)]`) does.
+Most changes below act only at a **change of a node's roots** or on a node whose roots are a successor's. Nothing in
+this release changes a node's roots on its own: the successor-signed record that drives a succession is I2's next PR,
+and until it lands nothing outside the tests does. **In a fleet that has never succeeded** — every root generation 0,
+no change of roots — three things change all the same:
+- kept anchors are journaled under `[persistence]`, and a node restarted under `[persistence]` whose journaled kept
+  certificate no longer verifies (for example, it has expired) trusts nothing for that peer until the peer's current
+  record is judged, where before it fell back to the legacy rule (the first item; accepted by the maintainer,
+  2026-11-16);
+- **a certificate's expiry is judged while the node runs**, not only at a start: a kept anchor whose certificate has
+  expired is dropped by the next fold, and a client key whose certificate has expired reads `Unknown`, though their
+  verdicts were cached. Before, a long-running node kept trusting an expired anchor until a restart, and the fleet's
+  trust diverged by restart history (#805's review F3). It matters for an operator PKI with short-lived certificates;
+  `tls issue` issues certificates valid to 2099 (tests `an_expired_kept_anchor_is_dropped_while_the_node_runs`,
+  `an_expired_client_certificate_loses_standing_while_the_node_runs`);
+- each new inbound mesh session's certificate is judged once more on its first frame (one chain check per connection).
 
 **An anchor keeps its certificates, journaled.** A key a certificate record anchors for a node is kept with the
 certificate itself (at most two, one per issuer), and under `[persistence]` each kept certificate is appended to the
@@ -4786,7 +4793,16 @@ fail the roots this node trusts now — at a change of roots and at start, never
 a node restarted under `[persistence]` keeps an anchor whose record was hidden while it was down. Before, anchors were
 kept for the process's life only. A node whose anchors were all dropped **trusts nothing** for that node (it keeps an
 empty entry), where before it fell back to the legacy rule (`peer_keys`). Counters: `anchors_dropped`,
-`anchor_journal_refused` (the anchors' own budget: 32 per node, 65 536 in all; past it an anchor lives in memory only).
+`anchor_journal_refused` (the anchors' own budget: 32 per node, 65 536 in all; past it an anchor lives in memory only;
+the budget is accepted, and a compaction of the anchor journal is a later row, **not built**) and `anchor_append_failed`,
+all on `GET /stats` (`identity_anchors_dropped`, `identity_anchor_journal_refused`, `identity_anchor_append_failed`). A
+kept certificate is marked journaled only once its append is durable; one that failed, or could not be handed to the
+journal, is tried again by the next fold.
+- **The bound, stated (#805's review F1):** that a node with no anchor left trusts nothing holds **in-process and under
+  `[persistence]`**. A node without `[persistence]` cannot remember across a restart that it dropped a peer's anchor: on
+  a restart it rebuilds standing from the store, and with legacy open (every root generation 0) a peer whose anchor it
+  had dropped and whose record is gone is legacy again. With legacy closed it trusts nothing for that peer either way.
+  A succession's own commands and phases will refuse to run on a node without `[persistence]` (I2's PR 2b).
 - **Downgrade:** an older binary skips `Anchor` entries with its "an entry did not decode" warning; nothing else in the
   journal is affected.
 - Tests: `a_kept_anchor_survives_its_record_hidden_and_an_old_ca_one_is_dropped_at_narrowing`,
@@ -4795,8 +4811,10 @@ empty entry), where before it fell back to the legacy rule (`peer_keys`). Counte
 
 **A node that trusts only successor roots has no legacy class** (R1, the maintainer's decision of 2026-11-12). When
 every root a node trusts is generation 1 or later, a node with no certificate standing has no trusted key: its keys in
-`peer_keys`, however they got there, verify nothing (`CoreCtx::trusted_keys`, `KeyStanding::is_distrusted`,
-`CoreCtx::retain_trusted`). The rule is derived from the roots alone, so it holds on a node recovered by the operator's
+`peer_keys`, however they got there, verify nothing live (`CoreCtx::trusted_keys`, `KeyStanding::is_distrusted`,
+`CoreCtx::retain_trusted`). **The stated exception** is `CoreCtx::history_keys`, the verify-only set audit-chain
+recovery and verification read (`audit.rs`): it keeps its rule, as the plan decided, so a record sealed in the past
+under such a key still verifies as history; nothing live is admitted under it. The rule is derived from the roots alone, so it holds on a node recovered by the operator's
 procedure and on one first started on a successor's files. It does not reach a fleet that has never succeeded (every
 root generation 0: §39's window is unchanged).
 
@@ -4822,10 +4840,17 @@ reads `Unknown` until a verifying record re-establishes it.
 - Test: `client_marks_are_re_judged_at_a_change_of_roots` (`src/agent/succession_tests.rs`).
 
 **A mesh session is re-judged when the roots change.** Each live session — inbound and outbound — judges its peer's
-certificate again against the new roots before its next frame, and closes when they refuse it; an inbound close is
-counted (`GET /stats` `sessions_closed_by_roots`). The handshake anchors (`peer_anchor_keys`) are cleared at a change of
-roots, and an anchor from a handshake judged under the old roots is discarded. Each new inbound session's certificate
-is judged once more on its first frame (one chain check per connection).
+certificate again against the new roots before its next frame, and closes when they refuse it. Each close is counted by
+side and by why (`GET /stats` `sessions_closed_by_roots`: `inbound_old_root`, `inbound_predates_change`,
+`outbound_old_root`, `outbound_predates_change` — "predates the change" when the peer's key already has standing under
+the new roots, so the peer holds a successor certificate and the session merely carried its old one; read only from a standing the fold has re-judged under the current roots — before that, a close counts as an old-root peer's). The handshake
+anchors (`peer_anchor_keys`) are cleared at a change of roots, and an anchor from a handshake judged under the old roots
+is discarded. Each new inbound session's certificate is judged once more on its first frame (one chain check per
+connection).
+- **The reconnect burst, stated (#805's review F10):** at a narrow, every session that was established before the
+  peer's cutover carries an old-root certificate, so each closes at its next frame and reconnects with a new handshake —
+  across a fleet, at about the same time. The reconnect is the writer's own on its next frame (with its existing
+  jittered backoff on a failure); no further jitter is added.
 - Test: `an_established_session_to_an_old_root_peer_is_dropped_at_narrowing` (`src/agent/succession_tests.rs`),
   `an_anchor_from_a_handshake_judged_under_old_roots_is_not_recorded` (`mycelium-core/src/tls.rs`).
 
@@ -4836,11 +4861,12 @@ refuses a rotation whose new key was already saved and published (#796's review,
 
 **API.** mycelium-core (`tls`): `CA_GENERATION_OID`, `CA_GENERATION_OID_IS_PROVISIONAL`, `ca_generation`,
 `CaGenerationError`, `ca_generation_oid_open`, `ca_generation_oid_der`, `ca_generation_extension_der`,
-`roots_close_legacy`, `cert_issuer_der`, `mint_ca_at` and `issue_client_cert_for_key` (both `#[doc(hidden)]`) are new;
+`roots_close_legacy`, `cert_issuer_der`, `cert_not_after_ms`, `mint_ca_at` and `issue_client_cert_for_key` (both
+`#[doc(hidden)]`), and `with_not_after_for_test` (test builds and `test-support` only) are new;
 **`NodeTls::record_anchor` takes a third argument**, the roots generation the handshake was judged under (an embedder
 calling it passes `roots_generation()` read before it loaded the client config); `GossipStream::peer_cert_der` is new;
-`KeyStanding` gains `legacy_closed` and `set_legacy_closed`; `TransportBounds` gains `sessions_closed_by_roots`.
-mycelium: `GossipAgent::change_roots` (`#[doc(hidden)]`); `SharedExternalIssuers::withdraw_client_key` and
+`KeyStanding` gains `legacy_closed`, `set_legacy_closed` and `anchors_key`; `NodeTls` gains `note_session_closed` and
+`sessions_closed_by_roots`. mycelium: `SharedExternalIssuers::withdraw_client_key` and
 `TrustedExternalIssuers::withdraw_client_key`; the Cargo feature `provisional-ca-generation` (test lines only).
 Nothing is removed or renamed.
 

@@ -2691,8 +2691,8 @@ impl GossipAgent {
     /// is I2's PR 2b; until it lands only tests call this. Refused, changing nothing, as
     /// [`NodeTls::reroot_material`](crate::tls::NodeTls::reroot_material) refuses.
     #[cfg(feature = "tls")]
-    #[doc(hidden)]
-    pub async fn change_roots(&self, node_cert_der: Vec<u8>, roots: Vec<Vec<u8>>) -> Result<(), crate::error::GossipError> {
+    #[cfg_attr(not(test), allow(dead_code))] // `pub(crate)` until PR 2b's phases call it (#805's review F9)
+    pub(crate) async fn change_roots(&self, node_cert_der: Vec<u8>, roots: Vec<Vec<u8>>) -> Result<(), crate::error::GossipError> {
         let tls = self.task_ctx.tls.get().ok_or(crate::error::GossipError::InvalidField {
             field: "tls", reason: "a change of roots requires the tls identity (set GossipConfig::tls)".into(),
         })?;
@@ -2710,13 +2710,15 @@ impl GossipAgent {
         }
         // The re-fold completes, under the new roots, before this returns: a fold already running re-runs on its own,
         // and would otherwise finish after the caller went on.
+        let mark = self.task_ctx.identity_ledger.anchor_mark();
         while !revocation::refresh_now(&self.task_ctx) {
             tokio::task::yield_now().await;
         }
         client_cert::refresh(&self.task_ctx);
-        // R4: the kept certificates this re-fold took are journaled before this returns — what I2's PR 2b relies on
-        // before it persists a Narrowed phase. A failed append leaves them in memory only, warned and counted.
-        if !self.task_ctx.identity_ledger.anchors_durable().await {
+        // R4: the kept certificates this re-fold handed to the journal are durable before this returns — each one, by
+        // its own number (#805's review F2) — what I2's PR 2b relies on before it persists a Narrowed phase. A failed
+        // append leaves its certificate in memory, counted, and a later fold tries it again.
+        if !self.task_ctx.identity_ledger.anchors_durable_since(mark).await {
             tracing::warn!("a change of roots: a kept-anchor journal append failed; those anchors are kept in this process only");
         }
         Ok(())

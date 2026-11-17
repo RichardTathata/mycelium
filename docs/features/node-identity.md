@@ -55,11 +55,12 @@ which needs two processes and lives in the Docker suites.
 - **Guarantees:** [`id.proofs_required`](../reference/guarantee-catalogue.md#id.proofs_required),
   [`id.ca_key_off_node`](../reference/guarantee-catalogue.md#id.ca_key_off_node) and
   [`id.revocation_authority`](../reference/guarantee-catalogue.md#id.revocation_authority).
-- **Under a change of roots** (plan row I2, PRs 1 and 2a): a node changes only its own trust
-  (`GossipAgent::change_roots`, under one owner with `rotate_identity`), and everything it judged under the old roots
-  is judged again. An anchored key keeps its certificates — one per issuer, journaled under `[persistence]` — and
+- **Under a change of roots** (plan row I2, PRs 1 and 2a): a node changes only its own trust (under one owner with
+  `rotate_identity`), and everything it judged under the old roots is judged again — and a certificate's expiry is
+  judged while the node runs, as at a restart. An anchored key keeps its certificates — one per issuer, journaled under `[persistence]` — and
   leaves only when they fail the roots the node trusts now, never because its record left the store; a node left with
-  no anchor trusts nothing, never reverting to legacy. A node whose every root is generation 1 or later (a CA's
+  no anchor trusts nothing, never reverting to legacy — in-process and under `[persistence]`; without `[persistence]` a
+  restart forgets the dropped anchor, and with legacy open that peer is legacy again. A node whose every root is generation 1 or later (a CA's
   `caGeneration`, under a **provisional** OID a shipped build refuses by name) has no legacy class. Live mesh sessions
   are re-judged before their next frame and closed when the new roots refuse the peer (`sessions_closed_by_roots`).
 - **Not built:** rotation in place under the off-node posture (recovery is re-issue); the CA key cannot be rotated,

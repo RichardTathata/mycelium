@@ -346,7 +346,6 @@ pub(super) async fn stats_handler(State(ctx): State<Arc<HttpCtx>>) -> impl IntoR
         body["kv_unsigned_frames_accepted"] = json!(load(&b.kv_unsigned_accepted));
         body["kv_unsigned_frames_refused"] = json!(load(&b.kv_unsigned_refused));
         body["kv_untagged_signatures_refused"] = json!(load(&b.kv_untagged_refused));
-        body["sessions_closed_by_roots"] = json!(load(&b.sessions_closed_by_roots));
         body["kv_signer_mismatch"] = json!(load(&b.kv_signer_mismatch));
         body["kv_identity_exempt_frames"] = json!(load(&b.kv_identity_exempt));
         body["kv_identity_stale_refused"] = json!(load(&b.kv_identity_stale_refused));
@@ -357,6 +356,20 @@ pub(super) async fn stats_handler(State(ctx): State<Arc<HttpCtx>>) -> impl IntoR
         body["identity_cert_future"] = json!(load(&l.cert_future));
         body["identity_records_over_cap"] = json!(load(&l.over_cap));
         body["revocation_journal_refused"] = json!(load(&l.journal_refused));
+        // Identity-and-lifecycle I2 (PR 2a; #805's review F7): kept anchor certificates dropped because they fail this
+        // node's roots, kept anchors the journal could not take (budget, or not handed over), and failed appends.
+        body["identity_anchors_dropped"] = json!(load(&l.anchors_dropped));
+        body["identity_anchor_journal_refused"] = json!(load(&l.anchor_journal_refused));
+        body["identity_anchor_append_failed"] = json!(load(&l.anchor_append_failed));
+        // #805's review F10: mesh sessions closed by a change of roots, by side and by why.
+        #[cfg(feature = "tls")]
+        if let Some(t) = ctx.agent_ctx.tls.get() {
+            let c = t.sessions_closed_by_roots();
+            body["sessions_closed_by_roots"] = json!({
+                "inbound_old_root": c[0], "inbound_predates_change": c[1],
+                "outbound_old_root": c[2], "outbound_predates_change": c[3],
+            });
+        }
         // Row Q: this node's own persisted audit records that did not verify at start (kept, never
         // sealed over).
         #[cfg(feature = "compliance")]

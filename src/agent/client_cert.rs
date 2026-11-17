@@ -226,7 +226,9 @@ pub(crate) struct ClientCertLedger {
     /// The parse and chain verdict per distinct certificate (by SHA-256), bounded by [`CERT_CACHE_MAX`],
     /// each tagged with the roots generation it was judged under (identity-and-lifecycle I2, R4): a
     /// verdict of an older generation is a miss.
-    cert_cache: papaya::HashMap<[u8; 32], (u64, Option<Facts>)>,
+    /// Each verdict also carries the certificate's `notAfter` (ms): a verdict is a miss once the wall clock reaches
+    /// it, so a certificate's expiry is judged in-process as a restart judges it (I2, #805's review F3).
+    cert_cache: papaya::HashMap<[u8; 32], (u64, u64, Option<Facts>)>,
     /// The records this gateway published, newest per principal, `(path, der)`: republished when missing or
     /// overwritten, as `revocation.rs` republishes a node's own records.
     published: papaya::HashMap<String, (String, Vec<u8>)>,
@@ -471,8 +473,9 @@ pub(super) fn client_verdict_for_test(ledger: &ClientCertLedger, tls: &mycelium_
 
 fn facts_with(ledger: &ClientCertLedger, tls: &mycelium_core::tls::NodeTls, der: &[u8], between: impl FnOnce()) -> Option<Facts> {
     let digest: [u8; 32] = Sha256::digest(der).into();
-    if let Some((generation, hit)) = ledger.cert_cache.pin().get(&digest)
+    if let Some((generation, expires, hit)) = ledger.cert_cache.pin().get(&digest)
         && *generation == tls.roots_generation()
+        && mycelium_core::sim_seam::wall_now_ms() < *expires
     {
         return hit.clone();
     }
@@ -495,7 +498,7 @@ fn facts_with(ledger: &ClientCertLedger, tls: &mycelium_core::tls::NodeTls, der:
     if cache.len() >= CERT_CACHE_MAX {
         cache.clear();
     }
-    cache.insert(digest, (generation, found.clone()));
+    cache.insert(digest, (generation, mycelium_core::tls::cert_not_after_ms(der).unwrap_or(u64::MAX), found.clone()));
     found
 }
 
@@ -744,6 +747,40 @@ pub fn publish(ctx: &Arc<TaskCtx>, der: &[u8]) -> Result<Published, PublishRefus
 #[cfg(all(test, feature = "provisional-ca-generation"))]
 pub(crate) fn raised_entry_for_test(principal: &str, issued: u64, key: [u8; 32]) -> Vec<u8> {
     mycelium_core::serde_fixint::to_vec(&JournalEntry::Raised { principal: principal.into(), mark: Mark { issued, key } }).unwrap()
+}
+
+/// **#805's review F6: the client-certificate journal's entries are pinned**, the pre-I2 `Raised` among them. Each
+/// variant encodes to the golden bytes and decodes back; a reader with only the variants before I2's PR 2a refuses
+/// `RaisedWithCert` (it skips it, with its warning) and reads the others. Seen failing first with `RaisedWithCert` moved
+/// before `Published`.
+#[cfg(test)]
+#[test]
+fn the_client_cert_journal_entries_are_pinned() {
+    #[derive(Deserialize)]
+    #[allow(dead_code)]
+    enum Before { Raised { principal: String, mark: Mark }, Saturated { principal: String }, Published { principal: String, path: String, der: Vec<u8> } }
+    let p = "token:fleet/svc".to_string();
+    let mark = Mark { issued: 1_700_000_000_123, key: [7u8; 32] };
+    let entries = [
+        ("Raised", JournalEntry::Raised { principal: p.clone(), mark }),
+        ("Saturated", JournalEntry::Saturated { principal: p.clone() }),
+        ("Published", JournalEntry::Published { principal: p.clone(), path: "sys/client-cert/aa/bb".into(), der: vec![8, 9] }),
+        ("RaisedWithCert", JournalEntry::RaisedWithCert { principal: p.clone(), mark, der: vec![10, 11, 12] }),
+    ];
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/persistence/identity-journal-v1/client-certs.hex");
+    let golden: Vec<(String, Vec<u8>)> = std::fs::read_to_string(path).unwrap().lines().map(|l| {
+        let (name, hex) = l.split_once(' ').unwrap();
+        (name.to_string(), (0..hex.len()).step_by(2).map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap()).collect())
+    }).collect();
+    assert_eq!(golden.len(), entries.len(), "one line per variant");
+    for ((name, entry), (gname, bytes)) in entries.iter().zip(&golden) {
+        assert_eq!(name, gname);
+        assert_eq!(&mycelium_core::serde_fixint::to_vec(entry).unwrap(), bytes, "{name} encodes to the golden bytes");
+        let back: JournalEntry = mycelium_core::serde_fixint::from_slice(bytes).unwrap();
+        assert_eq!(mycelium_core::serde_fixint::to_vec(&back).unwrap(), *bytes, "{name} decodes back");
+        let old = mycelium_core::serde_fixint::from_slice::<Before>(bytes);
+        assert_eq!(old.is_ok(), *name != "RaisedWithCert", "an older reader reads {name}: {}", old.is_ok());
+    }
 }
 
 /// A `Published` journal entry, encoded as the ledger writes it (tests build a journal by hand).

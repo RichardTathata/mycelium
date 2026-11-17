@@ -171,6 +171,7 @@ pub async fn run_peer_writer(
             if trusted {
                 session = Some((now, der.clone()));
             } else {
+                t.note_session_closed(false, der);
                 warn!("Dropping the session to {peer}: its certificate does not verify against this node's new roots");
                 conn = None;
                 session = None;
