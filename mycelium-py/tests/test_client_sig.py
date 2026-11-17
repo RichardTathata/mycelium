@@ -7,6 +7,8 @@ import base64
 import json
 from pathlib import Path
 
+import pytest
+
 from mycelium.client_sig import ClientSigner, canonical_json, client_signature_message, mcp_binding
 
 VECTOR = json.loads((Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "cs" / "vector.json").read_text())
@@ -92,3 +94,54 @@ def test_the_decision_vector_is_the_same_in_every_language():
         signed = signer.sign_grant_decision(v["node"], v["agent"], case["request"], case["decision"],
                                             ttl_secs=case["ttl_secs"], reason=case["reason"], issued_at_ms=v["t"])
         assert signed == case["signed"], case
+
+
+def test_the_graded_decision_vector_is_the_same_in_every_language():
+    # Identity-and-lifecycle I7: the grade inside the signed message. A service naming `service` (Ed25519, reproduced
+    # exactly), and a consent principal's P-256 decisions (ECDSA is randomised, so each pinned signature is verified).
+    import base64
+
+    from cryptography.exceptions import InvalidSignature
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.asymmetric import ec
+
+    from mycelium.client_sig import grant_decision_message
+
+    v = json.loads((Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "decision" / "vector.json").read_text())
+    graded = v["graded"]
+    signer = ClientSigner(bytes.fromhex(v["seed_hex"]), v["decider"])
+    for case in graded["service"]:
+        msg = grant_decision_message(v["decider"], v["node"], v["agent"], case["request"], case["decision"], case["ttl_secs"], case["reason"], v["t"], case["grade"])
+        assert msg.hex() == case["message_hex"], case
+        ungraded = grant_decision_message(v["decider"], v["node"], v["agent"], case["request"], case["decision"], case["ttl_secs"], case["reason"], v["t"])
+        assert msg == ungraded + len(case["grade"].encode()).to_bytes(4, "little") + case["grade"].encode(), case
+        signed = signer.sign_grant_decision(v["node"], v["agent"], case["request"], case["decision"],
+                                            ttl_secs=case["ttl_secs"], reason=case["reason"], issued_at_ms=v["t"], grade=case["grade"])
+        assert signed == case["signed"], case
+    consent = graded["consent"]
+    point = bytes.fromhex(consent["point_hex"])
+    key = ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(), point)
+    assert len(consent["cases"]) == 3 and {c["grade"] for c in consent["cases"]} == {"os_presence(macos, unbound)", "tty", "recording"}
+    for case in consent["cases"]:
+        signed = case["signed"]
+        assert signed["grade"] == case["grade"] and base64.b64decode(signed["k"]) == point, case
+        msg = grant_decision_message(consent["decider"], v["node"], v["agent"], case["request"], case["decision"], case["ttl_secs"], case["reason"], v["t"], case["grade"])
+        assert msg.hex() == case["message_hex"], case
+        key.verify(base64.b64decode(signed["sig"]), msg, ec.ECDSA(hashes.SHA256()))
+        # A relay altering the grade: the signature is over the grade it was signed with.
+        for other in ("tty", "os_presence(macos, unbound)", "recording", "service", None):
+            if other == case["grade"]:
+                continue
+            altered = grant_decision_message(consent["decider"], v["node"], v["agent"], case["request"], case["decision"], case["ttl_secs"], case["reason"], v["t"], other)
+            with pytest.raises(InvalidSignature):
+                key.verify(base64.b64decode(signed["sig"]), altered, ec.ECDSA(hashes.SHA256()))
+
+
+def test_a_service_signer_names_the_grade_service_or_none():
+    # I7: a ClientSigner's key is a client certificate's Ed25519 key; a consent grade is a consent key's.
+    signer = ClientSigner(bytes(range(32)), "token:fleet/treasurer")
+    assert "grade" not in signer.sign_grant_decision("n", "a", "r", "issue", ttl_secs=60, issued_at_ms=1)
+    assert signer.sign_grant_decision("n", "a", "r", "issue", ttl_secs=60, issued_at_ms=1, grade="service")["grade"] == "service"
+    for grade in ("tty", "os_presence(macos, unbound)", "recording", ""):
+        with pytest.raises(ValueError):
+            signer.sign_grant_decision("n", "a", "r", "issue", ttl_secs=60, issued_at_ms=1, grade=grade)

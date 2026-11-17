@@ -1266,3 +1266,10 @@ async fn an_issue_the_node_cannot_sign_records_that_nothing_ran() {
 /// second one. A child module, for this file's fleet and grant helpers.
 #[path = "grant_use_tests.rs"]
 mod grant_use;
+
+/// Identity-and-lifecycle I7, PR 2: the grade in signed decisions — the P-256 verifier, consent's own authority,
+/// `signed_with` on the record and the envelope. A child module, for this file's fleet and decision helpers; built
+/// where a consent certificate is read.
+#[cfg(feature = "provisional-consent-grade")]
+#[path = "consent_decision_tests.rs"]
+mod consent_decision;

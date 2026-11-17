@@ -383,6 +383,23 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   --release`). A consent key's point must lie on P-256; `tls issue --node … --consent` is refused.
   Verifying a consent decision, `gateway_consent_principals`, the grade on the record and `dev`'s key are PRs 2 and 3.
 
+- **Developer consent certificates: the grade in signed decisions** (identity-and-lifecycle I7, PR 2 of 3;
+  `deprecations.md` §118; [feature page](docs/features/consent-certificates.md)). A consent principal decides grants:
+  the node a signed decision is addressed to verifies its P-256 signature (`signed.k` the 65-byte point, `signed.sig`
+  ASN.1 DER ECDSA), checks the grade the body names — inside the signature, `signed.grade` — against the grade of the
+  certificate at the principal's mark, and records `signed_with` on the answer's record, the evidence record and the
+  `ActionEnvelope`: the key's kind, the grade, and `grade_source` — `operator` for a consent grade, which is what the
+  issuing operator was told and no node can check. A service's decision is recorded `service`; a decision naming no
+  grade has the message it had, so a pre-upgrade SDK's decisions verify unchanged. A consent principal holds
+  `grant:issue` only through the new `gateway_consent_principals` table, never a named token's; a rule may accept a
+  set of grades (`signed_with` in a unit file, `Rule::accepting_grades`). The message format is pinned with and
+  without a grade in `tests/fixtures/decision/vector.json`, read by the Rust, Python and TypeScript suites. **Still
+  behind the provisional OID:** a shipped build verifies no consent signature, refuses a consent decision by name
+  (`consent_grade_oid_provisional`) and refuses to start with the table. **Upgrade notes:** upgrade verifiers before a
+  signer names a grade (an older node refuses the field); add a `consent:` rule beside a `token:` one;
+  `SignedDecision`, `Rule` and `RuleDecl` each gain a field (a struct literal breaks). `dev`'s signer is PR 3.
+  **Check:** a decision record's `signed_with`.
+
 - **A gateway's cancel reaches the provider directly, and the doors cancel** (identity-and-lifecycle I4, PR 3a;
   `deprecations.md` §114). `GossipAgent::cancel_call(term)` revokes a minted call's term, records it on disk and
   forwards it to the provider the call went to (the cancel-forward, `sys.call-cancel.v1`, accepted only from the

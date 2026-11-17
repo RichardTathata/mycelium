@@ -290,6 +290,16 @@ call waits for a supervisor's grant and is refused on silence. Running it needs:
   `403 stale`, `403 decider_lacks_scope`; unsigned under `grant:relay` alone, `403 decision_unsigned`. Unsigned
   decisions under `grant:issue` are counted (`/stats` `grant_decisions_unsigned`) and refused at a later release
   (`deprecations.md` §95) — watch the counter, and give supervisors a client certificate before then.
+- **A person's consent** (identity-and-lifecycle I7, unreleased and behind the provisional grade OID). A developer's
+  [consent principal](../features/consent-certificates.md), `consent:{issuer}/{name}`, signs decisions with a P-256
+  key and holds `grant:issue` only through
+  [`gateway_consent_principals`](../reference/configuration.md#gateway_consent_principals) — its own table, so the
+  person's `token:` principal and their consent are granted and revoked apart. The decision's record carries
+  `signed_with`: the key's kind, the grade, and `grade_source`. A consent grade is what the operator who issued the
+  certificate was told about the key, not something a node observed; a rule may accept a set of grades
+  (`signed_with` in a `[[rule]]`). The door's refusals for the grade: `403 decision_grade_missing`,
+  `403 decision_grade_mismatch`, `400 decision_grade_empty`, `403 recording_grade_outside_sim`, and in a build that
+  reads no consent certificate `422 consent_grade_oid_provisional`.
 - **Revoking.** `POST /gateway/grants/{agent}/{request}/revoke` (`grant:issue`), **at the node that issued it** —
   elsewhere `409 not_the_issuer`. Work already admitted under the grant is stopped within the execution authority's
   drain bound. Which nodes' grants an agent's node accepts is its entitlement table: its own (`entitle_grants`) or

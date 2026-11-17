@@ -57,17 +57,27 @@ export function clientSignatureMessage(
 const GRANT_DECISION_TAG = "mycelium.gateway/grant-decision/1";
 
 /** A decision's signature, sent as the decision body's `signed` field (identity-and-lifecycle I3). */
-export interface SignedDecision { decider: string; node: string; agent: string; request: string; t: number; k: string; sig: string }
+export interface SignedDecision {
+  decider: string; node: string; agent: string; request: string; t: number; k: string; sig: string;
+  /**
+   * The grade the signer names, inside the signature (identity-and-lifecycle I7). Absent from a service's body, or
+   * `"service"` there; a consent principal's body names its consent certificate's grade.
+   */
+  grade?: string;
+}
 
 /**
  * The bytes a decider signs to answer a grant request (identity-and-lifecycle I3): the tag; the decider, the addressed
  * node, the request's holder (a principal), the request id, the decision (`issue`, `refuse` or `revoke`), an issue's
  * `ttlSecs` in decimal (empty when absent) and the reason (empty when absent), each a `u32` little-endian length and
- * its UTF-8 bytes; then `issuedAtMs` as a `u64` little-endian. Pinned by `tests/fixtures/decision/vector.json`.
+ * its UTF-8 bytes; then `issuedAtMs` as a `u64` little-endian. `grade` (identity-and-lifecycle I7): when given, a
+ * `u32` little-endian length and the grade's UTF-8 bytes follow; when left out nothing follows, so a decision naming
+ * no grade has the message it had before I7. Pinned, with a grade and without, by
+ * `tests/fixtures/decision/vector.json`.
  */
 export function grantDecisionMessage(
   decider: string, node: string, agent: string, request: string, decision: string,
-  ttlSecs: number | undefined, reason: string | undefined, issuedAtMs: bigint,
+  ttlSecs: number | undefined, reason: string | undefined, issuedAtMs: bigint, grade?: string,
 ): Uint8Array {
   const enc = new TextEncoder();
   const chunks: Uint8Array[] = [enc.encode(GRANT_DECISION_TAG)];
@@ -80,6 +90,13 @@ export function grantDecisionMessage(
   const t = new Uint8Array(8);
   new DataView(t.buffer).setBigUint64(0, issuedAtMs, true);
   chunks.push(t);
+  // I7: the grade, when named, follows the clock; a decision naming none has the message it had before I7.
+  if (grade !== undefined) {
+    const g = enc.encode(grade);
+    const len = new Uint8Array(4);
+    new DataView(len.buffer).setUint32(0, g.length, true);
+    chunks.push(len, g);
+  }
   const out = new Uint8Array(chunks.reduce((n, c) => n + c.length, 0));
   let off = 0;
   for (const c of chunks) { out.set(c, off); off += c.length; }
@@ -232,15 +249,23 @@ export class ClientSigner {
    * it), addressed to the node `node` (its id, as `GET /health` reports it): `decision` is `"issue"` (with `ttlSecs`),
    * `"refuse"` or `"revoke"` (with `reason`). Returns the decision body's `signed` field; the node it is addressed to
    * records this signer as the decision's actor, whoever carries it (identity-and-lifecycle I3).
+   *
+   * `grade` (identity-and-lifecycle I7): a service's decision is recorded `service` whether or not it names one, and
+   * `"service"` is the only grade this signer may name — its key is a client certificate's Ed25519 key, never a
+   * consent key. Left out (the default), the body is what it was before I7, which a node before I7 accepts; a body
+   * naming a grade is refused by such a node.
    */
   signGrantDecision(
     node: string, agent: string, request: string, decision: "issue" | "refuse" | "revoke",
-    opts?: { ttlSecs?: number; reason?: string; issuedAtMs?: number },
+    opts?: { ttlSecs?: number; reason?: string; issuedAtMs?: number; grade?: "service" },
   ): SignedDecision {
     if (!["issue", "refuse", "revoke"].includes(decision)) throw new Error('decision must be "issue", "refuse" or "revoke"');
+    if (opts?.grade !== undefined && opts.grade !== "service") throw new Error('a service signer names the grade "service" or none: a consent grade is a consent key\'s');
     const t = opts?.issuedAtMs ?? Date.now();
-    const msg = grantDecisionMessage(this.principal, node, agent, request, decision, opts?.ttlSecs, opts?.reason, BigInt(t));
-    return { decider: this.principal, node, agent, request, t, k: this.raw.toString("base64"), sig: sign(null, msg, this.key).toString("base64") };
+    const msg = grantDecisionMessage(this.principal, node, agent, request, decision, opts?.ttlSecs, opts?.reason, BigInt(t), opts?.grade);
+    const signed: SignedDecision = { decider: this.principal, node, agent, request, t, k: this.raw.toString("base64"), sig: sign(null, msg, this.key).toString("base64") };
+    if (opts?.grade !== undefined) signed.grade = opts.grade;
+    return signed;
   }
 
   /**

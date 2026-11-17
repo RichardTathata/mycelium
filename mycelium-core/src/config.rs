@@ -447,6 +447,29 @@ pub struct GatewayNamedToken {
     pub scopes: Vec<String>,
 }
 
+/// A **consent principal's authority at this gateway** (identity-and-lifecycle I7, the maintainer's decision A):
+/// `consent:{issuer}/{name}` — the principal a developer's consent certificate (`mycelium-consent://{issuer}/{name}`)
+/// names — and the scopes its signed decisions hold here.
+///
+/// A consent principal presents no bearer: it only signs grant decisions, which any bearer holding `grant:relay`
+/// carries. So it has its own table rather than a field on [`GatewayNamedToken`], whose entry would mint a bearer
+/// secret for a person who only decides. The one scope it can hold is `grant:issue`
+/// ([`GossipConfig::validate`] refuses any other by name, `*` included): a consent key decides grants and does nothing
+/// else. Granting it here gives nothing to the same person's `token:{issuer}/{name}` service principal, and the
+/// reverse; removing the entry revokes the consent principal alone.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GatewayConsentPrincipal {
+    /// The name the consent certificate carries, within this gateway's issuer (`gateway_identity_issuer`).
+    pub name: String,
+    /// `["grant:issue"]`, or empty (the entry then grants nothing).
+    #[serde(default)]
+    pub scopes: Vec<String>,
+}
+
+/// The one scope a [`GatewayConsentPrincipal`] may hold.
+pub const CONSENT_PRINCIPAL_SCOPE: &str = "grant:issue";
+
 /// Outbound egress allow-policy (WS3 crown-jewel — blast-radius containment).
 ///
 /// A node-local allowlist of hosts the substrate may reach *outbound*. It is a
@@ -1736,6 +1759,18 @@ pub struct GossipConfig {
     #[serde(default)]
     pub gateway_named_tokens: Vec<GatewayNamedToken>,
 
+    /// **Consent principals' authority** (identity-and-lifecycle I7, A; `gateway` + `tls`): which
+    /// `consent:{issuer}/{name}` principals' signed grant decisions hold `grant:issue` at this gateway. A consent
+    /// decider is matched against this table and never against [`gateway_named_tokens`](Self::gateway_named_tokens);
+    /// a service decider the reverse. Each entry's scopes are `grant:issue` or nothing — `validate()` refuses any
+    /// other by name. Default: empty, so no consent principal decides. There is no environment form.
+    ///
+    /// While the consent grade extension's OID is provisional (`tls::CONSENT_GRADE_OID_IS_PROVISIONAL`) a shipped
+    /// build reads no consent certificate, and `start()` refuses a non-empty table by name rather than accept a
+    /// table it would never honour.
+    #[serde(default)]
+    pub gateway_consent_principals: Vec<GatewayConsentPrincipal>,
+
     /// The issuing authority that qualifies every gateway-local caller principal (item 7):
     /// `token:{issuer}/…` for bearer tokens, and the `via` a provider sees. `None` (default) = this
     /// node's id, so two gateways never mint the same identity by accident. Set the **same** value on
@@ -2325,6 +2360,7 @@ impl Default for GossipConfig {
             gateway_max_connections:       1024,
             gateway_scoped_tokens:         Vec::new(),
             gateway_named_tokens:          Vec::new(),
+            gateway_consent_principals:    Vec::new(),
             gateway_identity_issuer:       None,
             require_identity_proofs:       true,
             #[allow(deprecated)]
@@ -2634,6 +2670,32 @@ impl GossipConfig {
         };
         for t in &self.gateway_scoped_tokens { malformed("gateway_scoped_tokens", &t.scopes)?; }
         for t in &self.gateway_named_tokens  { malformed("gateway_named_tokens",  &t.scopes)?; }
+        // Consent has its own authority and one scope (identity-and-lifecycle I7, A): a consent key decides grants
+        // and nothing else, so any other scope — `*` included — is refused by name, as is a blank or repeated name.
+        for (i, p) in self.gateway_consent_principals.iter().enumerate() {
+            if p.name.trim().is_empty() {
+                return Err(GossipError::InvalidField {
+                    field: "gateway_consent_principals",
+                    reason: "an entry with a blank name names no consent principal; name the one its consent certificate carries".into(),
+                });
+            }
+            if self.gateway_consent_principals[..i].iter().any(|q| q.name == p.name) {
+                return Err(GossipError::InvalidField {
+                    field: "gateway_consent_principals",
+                    reason: format!("the consent principal {:?} is listed twice; one entry holds its authority, so removing it revokes it", p.name),
+                });
+            }
+            if let Some(other) = p.scopes.iter().find(|s| s.as_str() != CONSENT_PRINCIPAL_SCOPE) {
+                return Err(GossipError::InvalidField {
+                    field: "gateway_consent_principals",
+                    reason: format!(
+                        "scope {other:?} for the consent principal {:?}: a consent principal holds `{CONSENT_PRINCIPAL_SCOPE}` or nothing — \
+                         it decides grants and presents no bearer; give any other scope to a named token",
+                        p.name
+                    ),
+                });
+            }
+        }
         // One rule for blank secrets (#598's adversarial review): an empty or whitespace-only token is
         // a secret anyone can present, so it is refused in every form, by name — never counted as a
         // credential at start nor matched at request time.
@@ -3945,6 +4007,32 @@ mod tests {
     #[test]
     fn under_sim_the_default_shard_count_does_not_read_the_host() {
         assert_eq!(GossipConfig::default().gossip_shards, SIM_GOSSIP_SHARDS, "a recording's shard map would follow the machine it was made on");
+    }
+
+    /// **A consent principal holds `grant:issue` or nothing** (identity-and-lifecycle I7, A; exit 14): `validate()`
+    /// refuses any other scope by name — `*`, a family wildcard, another exact scope, `grant:relay` — and a blank or
+    /// repeated name; `grant:issue` and an empty list pass, and the table parses from TOML with unknown keys refused
+    /// (a `token` there would be a bearer for a person who only decides). Seen failing first with the scope check
+    /// removed (`*` and `kv:read` were accepted).
+    #[test]
+    fn a_consent_principal_holds_grant_issue_or_nothing() {
+        let entry = |name: &str, scopes: &[&str]| GatewayConsentPrincipal { name: name.into(), scopes: scopes.iter().map(|s| s.to_string()).collect() };
+        let mut cfg = GossipConfig::default();
+        cfg.gateway_consent_principals = vec![entry("richard", &["grant:issue"]), entry("dana", &[])];
+        cfg.validate().expect("grant:issue, or nothing");
+        for bad in ["*", "grant:*", "grant:relay", "kv:read", "identity:write", "mcp:invoke", ""] {
+            cfg.gateway_consent_principals = vec![entry("richard", &["grant:issue", bad])];
+            let err = cfg.validate().expect_err(bad);
+            assert!(matches!(&err, GossipError::InvalidField { field: "gateway_consent_principals", reason } if reason.contains(&format!("{bad:?}")) && reason.contains("richard")), "{bad}: {err}");
+        }
+        cfg.gateway_consent_principals = vec![entry("  ", &["grant:issue"])];
+        assert!(matches!(cfg.validate(), Err(GossipError::InvalidField { field: "gateway_consent_principals", .. })), "a blank name");
+        cfg.gateway_consent_principals = vec![entry("richard", &["grant:issue"]), entry("richard", &[])];
+        assert!(matches!(cfg.validate(), Err(GossipError::InvalidField { field: "gateway_consent_principals", .. })), "a repeated name");
+        let parsed: GossipConfig = toml::from_str("[[gateway_consent_principals]]\nname = \"richard\"\nscopes = [\"grant:issue\"]\n").unwrap();
+        assert_eq!(parsed.gateway_consent_principals, vec![entry("richard", &["grant:issue"])]);
+        assert!(toml::from_str::<GossipConfig>("[[gateway_consent_principals]]\nname = \"richard\"\ntoken = \"s\"\n").is_err(), "a bearer on a consent principal");
+        assert!(GossipConfig::default().gateway_consent_principals.is_empty(), "default: no consent principal decides");
     }
 
     #[test]

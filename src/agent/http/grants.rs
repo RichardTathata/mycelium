@@ -78,6 +78,10 @@ pub(super) struct GrantDecisionBody {
 /// (`SignedDecision::verify_signature`) — #754's review, finding 4.
 pub(crate) struct Relayed {
     pub(crate) signed: crate::agent::grant_decision::SignedDecision,
+    /// Which key signed it and the grade recorded with it (identity-and-lifecycle I7), as
+    /// [`grant_decision::verify`](crate::agent::grant_decision::verify) established them: for a consent key the grade
+    /// its certificate carries — the operator's statement, never an observation.
+    pub(crate) signed_with: crate::agent::grant_decision::SignedWith,
     pub(crate) relay: String,
     pub(crate) decision: &'static str,
     pub(crate) ttl_secs: Option<u64>,
@@ -85,9 +89,10 @@ pub(crate) struct Relayed {
 }
 
 impl Relayed {
-    /// The evidence record's `signed_decision`: the body, the decision's terms and the relay.
+    /// The evidence record's `signed_decision`: the body, the decision's terms, the relay, and `signed_with` — the
+    /// key's kind and the grade the decision was evaluated with (I7).
     fn evidence(&self) -> serde_json::Value {
-        json!({ "signed": self.signed, "decision": self.decision, "ttl_secs": self.ttl_secs, "reason": self.reason, "relayed_by": self.relay })
+        json!({ "signed": self.signed, "signed_with": self.signed_with, "decision": self.decision, "ttl_secs": self.ttl_secs, "reason": self.reason, "relayed_by": self.relay })
     }
 
     /// The preflight's `params`: the signed decision for the evidence record, read at this enforcement point only.
@@ -95,10 +100,11 @@ impl Relayed {
         relayed.map_or_else(|| json!({}), |r| json!({ "_meta": { "signed_decision": r.evidence() } }))
     }
 
-    /// Mark an answer's record: the signed body and the relay.
+    /// Mark an answer's record: the signed body, `signed_with` (I7) and the relay.
     fn mark(relayed: Option<&Relayed>, record: &mut serde_json::Value) {
         if let Some(r) = relayed {
             record["signed"] = json!(r.signed);
+            record["signed_with"] = json!(r.signed_with);
             record["relayed_by"] = json!(r.relay);
         }
     }
@@ -152,14 +158,14 @@ fn decision_actor(
     let Some((_, holder)) = super::gateway_authority::grant_holder_from_path(agent) else {
         return Err(Box::new(refused(StatusCode::BAD_REQUEST, "bad_request", format!("{agent} is neither a node principal, a client principal nor a client principal's hex segment"))));
     };
-    gd::verify(ctx, signed, &holder, request, decision, ttl_secs, reason, ctx.hlc.decision_now_ms()).map_err(refuse)?;
+    let signed_with = gd::verify(ctx, signed, &holder, request, decision, ttl_secs, reason, ctx.hlc.decision_now_ms()).map_err(refuse)?;
     if !decider_holds_grant_issue(ctx, &signed.decider) {
         return Err(refuse(DecisionRefusal::DeciderLacksScope));
     }
     let relay = caller.map(|c| c.principal.clone()).unwrap_or_else(|| gateway_caller::PRINCIPAL_ANONYMOUS.to_string());
     Ok(DecisionActor {
         caller: Some(ResolvedPrincipal { principal: signed.decider.clone(), scopes: vec!["grant:issue".to_string()], subject_token: None }),
-        relayed: Some(Relayed { signed: signed.clone(), relay, decision, ttl_secs, reason: reason.map(str::to_string) }),
+        relayed: Some(Relayed { signed: signed.clone(), signed_with, relay, decision, ttl_secs, reason: reason.map(str::to_string) }),
         unsigned: false,
     })
 }
@@ -195,9 +201,24 @@ fn checkpoint_seq_held(ctx: &TaskCtx, key: &str) -> Option<u64> {
     serde_json::from_slice::<crate::mandate::authority::SignedRevocationCheckpoint>(&bytes).ok().map(|c| c.checkpoint.seq)
 }
 
-/// Whether `decider` holds `grant:issue` at this gateway: a named token of this gateway's issuer whose principal it is
-/// and whose scopes admit it. A gateway without `compliance` has no scope model, so every decider holds it there.
+/// Whether `decider` holds `grant:issue` at this gateway.
+///
+/// - A **service** (`token:{issuer}/{name}`): a named token of this gateway's issuer whose principal it is and whose
+///   scopes admit it. A gateway without `compliance` has no scope model, so every service decider holds it there.
+/// - A **consent principal** (`consent:{issuer}/{name}`, identity-and-lifecycle I7, A): an entry of
+///   `gateway_consent_principals` naming it with `grant:issue` — its own table, never a named token's, **in every
+///   build**: a consent key decides only where an operator wrote it down, so a build without a scope model admits no
+///   consent decider it was not given. Each table answers for its own kind only, so granting or revoking one
+///   principal never moves the other.
 fn decider_holds_grant_issue(ctx: &TaskCtx, decider: &str) -> bool {
+    if crate::agent::grant_decision::is_consent_principal(decider) {
+        let issuer = super::gateway_identity_issuer(ctx);
+        return ctx
+            .config
+            .gateway_consent_principals
+            .iter()
+            .any(|p| gateway_caller::consent_principal(&issuer, &p.name) == decider && p.scopes.iter().any(|s| s == "grant:issue"));
+    }
     #[cfg(feature = "compliance")]
     {
         let issuer = super::gateway_identity_issuer(ctx);

@@ -118,6 +118,10 @@ pub fn legacy_token_principal(issuer: &str) -> String { format!("token:{issuer}/
 pub fn positional_token_principal(issuer: &str, index: usize) -> String { format!("token:{issuer}/#{index}") }
 /// The principal of a `gateway_named_tokens` entry: `token:{issuer}/{name}`.
 pub fn named_token_principal(issuer: &str, name: &str) -> String { format!("token:{issuer}/{name}") }
+/// The principal of a `gateway_consent_principals` entry (identity-and-lifecycle I7): `consent:{issuer}/{name}` — the
+/// principal a consent certificate `mycelium-consent://{issuer}/{name}` names. It decides grants and presents no bearer.
+#[cfg(all(feature = "gateway", feature = "tls"))]
+pub fn consent_principal(issuer: &str, name: &str) -> String { format!("consent:{issuer}/{name}") }
 /// The principal of a validated OIDC bearer: `oidc:{idp issuer}/{subject}` — two IdPs' subjects
 /// never collide.
 pub fn oidc_principal(issuer: &str, subject: &str) -> String { format!("oidc:{issuer}/{subject}") }

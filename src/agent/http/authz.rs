@@ -1265,6 +1265,12 @@ pub(crate) async fn ae_decide(
         // X4: from the request's own payload, above.
         correlation: causal.correlation,
         parent: causal.parent,
+        // I7: which key signed the decision and its grade, as the grant decision routes established them
+        // (`grant_decision::verify`) — read only at their enforcement point, whose `params` those routes build
+        // themselves and no caller supplies. An unsigned decision carries none.
+        signed_with: (enforcement_point == super::grants::ENFORCEMENT_POINT_GRANT_ISSUE)
+            .then(|| serde_json::from_value(params["_meta"]["signed_decision"]["signed_with"].clone()).ok())
+            .flatten(),
     };
 
     // Decide, then record, *then* dispatch. Both outcomes are sealed: a permit with no record of

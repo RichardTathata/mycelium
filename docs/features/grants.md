@@ -97,6 +97,13 @@ This feature is turned on in code.
     neither scope is `403 insufficient scope`, naming both (`required_scope`, `or_scope`). At a gateway without
     `gateway_identity_issuer` a signed decision is `409 gateway_identity_issuer_unset`, as I1's doors refuse a signed
     call.
+  - **The grade** (identity-and-lifecycle I7): the signed message may end with a grade
+    ([`grant_decision_message_graded`](../../src/agent/grant_decision.rs)), sent as `signed.grade`. A service names
+    none, or `service`; any other is `403 decision_grade_mismatch`. A
+    [consent principal](consent-certificates.md) (`consent:{issuer}/{name}`, a P-256 key) names its certificate's
+    grade, and holds `grant:issue` through `gateway_consent_principals`, never through a named token. The answer's
+    record and the evidence record carry `signed_with`: the key's kind, the grade, and whose statement the grade is
+    (`grade_source`). For a consent key that is the issuing operator's, which no node can check.
   - **One answer per request** (#754's review): a decision takes a claim on its request at this node before it reads
     the request and holds it until the answer is written, so concurrent copies of one decision — signed or not, issue or
     revoke — are answered once; the rest `409 decision_in_flight` while it runs, `already_answered` or

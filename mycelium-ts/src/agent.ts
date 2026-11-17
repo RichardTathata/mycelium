@@ -559,7 +559,9 @@ export class MyceliumAgent {
    * - a signed decision: 400 `decision_signature_malformed`; 403 `not_the_decider` (another key, a superseded one,
    *   or terms the signature does not cover); 403 `decision_retargeted`; 409 `not_addressed_here`; 403 `stale`; 403
    *   `decider_lacks_scope`; 403 `decision_unverifiable` (the node has no identity); 409
-   *   `gateway_identity_issuer_unset`; and, unsigned under `grant:relay` alone, 403 `decision_unsigned`;
+   *   `gateway_identity_issuer_unset`; 403 `decision_grade_mismatch` (a body naming a grade other than the one
+   *   recorded for its key — a service's is `service`; identity-and-lifecycle I7); and, unsigned under `grant:relay`
+   *   alone, 403 `decision_unsigned`;
    * - the policy: 403 with the evaluator's reason (the actor — the decider of a signed decision — is not permitted),
    *   or 403 `no_evaluator`;
    * - the answer: 403 `no_identity` (the node cannot sign a grant); 409 `already_revoked` (a later checkpoint stands

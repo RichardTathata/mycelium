@@ -930,6 +930,13 @@ pub struct RuleDecl {
     /// before this key refuses the file by name (unknown keys are refused); declare it once every node is upgraded.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub cancellable: bool,
+    /// **The grades this rule accepts** for a signed grant decision (identity-and-lifecycle I7): the rule applies only
+    /// to a decision signed with one of them — `service`, `os_presence(macos, unbound)`, `tty`, `recording`. A set,
+    /// never a minimum: the grades are not ordered. A consent grade is what the operator who issued the consent
+    /// certificate was told, which no verifier can check. An unknown grade is refused by name; a reader before this
+    /// key refuses the file by name (unknown keys are refused), so declare it once every node is upgraded.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub signed_with: Vec<String>,
     /// **An exposure rule** (adopter-surface Y5): with this table the rule is not an allowance — it holds new dependent
     /// work it selects while the actor's unresolved closure is past a threshold, and carries no `requires_*` clause.
     /// Loaded into [`ExposurePolicy`](crate::exposure::ExposurePolicy), never into the evaluator.
@@ -975,6 +982,9 @@ impl RuleDecl {
         if self.cancellable {
             return Some(Err("an exposure rule selects and holds; `cancellable` belongs to an allowance — write the allowance as its own [[rule]]".into()));
         }
+        if !self.signed_with.is_empty() {
+            return Some(Err("an exposure rule selects and holds; `signed_with` belongs to an allowance — write the allowance as its own [[rule]]".into()));
+        }
         Some(
             crate::exposure::ExposureLimit::new(e.max_unresolved, e.max_oldest_age_ms, &e.scope)
                 .map(|limit| crate::exposure::ExposureRule { actor: self.actor.clone(), operation: self.operation.clone(), resource: self.resource.clone(), limit })
@@ -1004,6 +1014,18 @@ impl RuleDecl {
         })
     }
 
+    /// The grades a `signed_with` clause may name (identity-and-lifecycle I7): `service` and the consent grades. The
+    /// literals, not `tls::ConsentGrade`: a unit file is validated in every build. The test below holds them equal.
+    pub const SIGNED_WITH_GRADES: [&'static str; 4] = ["service", "os_presence(macos, unbound)", "tty", "recording"];
+
+    /// A `signed_with` clause naming a grade that does not exist, refused by name: such a rule would match no
+    /// decision, and its author meant one that does.
+    pub fn unknown_grade(&self) -> Option<String> {
+        self.signed_with.iter().find(|g| !Self::SIGNED_WITH_GRADES.contains(&g.as_str())).map(|g| {
+            format!("signed_with names the grade \"{g}\", which is none of {:?}: the rule would apply to no decision", Self::SIGNED_WITH_GRADES)
+        })
+    }
+
     /// The evaluator's own rule type, where the evaluator exists (a gateway that can attest).
     #[cfg(all(feature = "gateway", feature = "tls"))]
     pub fn to_rule(&self) -> Result<crate::Rule, String> {
@@ -1021,6 +1043,10 @@ impl RuleDecl {
         }
         rule.requires_mandate = self.requires_mandate.clone();
         rule.cancellable = self.cancellable;
+        if let Some(why) = self.unknown_grade() {
+            return Err(why);
+        }
+        rule.signed_with = self.signed_with.clone();
         if self.requires_grant {
             rule = rule.requiring_grant();
         }
@@ -1191,6 +1217,10 @@ impl NodeCapabilityConfig {
             // I4, D-1: a rule cannot require a call: mandate.
             if let Some(why) = r.call_scope_required() {
                 return Err(invalid("rule.requires_mandate", why));
+            }
+            // I7: a grade that does not exist, refused where every reader loads the file.
+            if let Some(why) = r.unknown_grade() {
+                return Err(invalid("rule.signed_with", why));
             }
             // Y5: an exposure rule is refused where every reader loads the file, by name.
             if let Some(Err(why)) = r.to_exposure_rule() {
@@ -1736,6 +1766,40 @@ max_providers = 4
         assert!(err.contains("`cancellable` belongs to an allowance"), "{err}");
     }
 
+    /// Identity-and-lifecycle I7 (exit 15): `signed_with` is an allowance's key — the grades the rule accepts for a
+    /// signed grant decision — and reaches the evaluator's rule; a grade that does not exist is refused by name where
+    /// the file is validated and where the rule is built; an exposure rule carries none; a file without the key
+    /// serialises without it. The grades it may name are `service` and the consent grades. Seen failing first with
+    /// the unknown-grade refusal removed (`"ttty"` loaded as a rule that applies to no decision).
+    #[test]
+    fn a_rule_naming_the_grades_it_accepts() {
+        let rule = "[[rule]]\nactor = \"consent:fleet/richard\"\noperation = \"grant.issue\"\nresource = \"tool:x\"\n";
+        let cfg: NodeCapabilityConfig = toml::from_str(&format!("{rule}signed_with = [\"os_presence(macos, unbound)\", \"tty\"]\n")).unwrap();
+        assert_eq!(cfg.rules[0].signed_with, ["os_presence(macos, unbound)", "tty"]);
+        cfg.validate().expect("known grades");
+        let plain: NodeCapabilityConfig = toml::from_str(rule).unwrap();
+        assert!(plain.rules[0].signed_with.is_empty());
+        assert!(!toml::to_string(&plain.rules[0]).unwrap().contains("signed_with"), "absent when empty");
+        let misspelt: NodeCapabilityConfig = toml::from_str(&format!("{rule}signed_with = [\"ttty\"]\n")).unwrap();
+        let err = misspelt.validate().unwrap_err().to_string();
+        assert!(err.contains("signed_with") && err.contains("ttty"), "{err}");
+        let exposure: NodeCapabilityConfig = toml::from_str(&format!("{rule}signed_with = [\"tty\"]\n[rule.exposure]\nmax_unresolved = 1\n")).unwrap();
+        let err = exposure.rules[0].to_exposure_rule().unwrap().unwrap_err();
+        assert!(err.contains("`signed_with` belongs to an allowance"), "{err}");
+        #[cfg(feature = "tls")]
+        assert_eq!(
+            RuleDecl::SIGNED_WITH_GRADES.to_vec(),
+            std::iter::once("service").chain(mycelium_core::tls::ConsentGrade::ALL.iter().map(|g| g.as_str())).collect::<Vec<_>>(),
+            "the unit file's grades are `service` and the consent grades"
+        );
+        #[cfg(all(feature = "gateway", feature = "tls"))]
+        {
+            assert_eq!(cfg.rules[0].to_rule().unwrap().signed_with, ["os_presence(macos, unbound)", "tty"]);
+            assert!(plain.rules[0].to_rule().unwrap().signed_with.is_empty());
+            assert!(misspelt.rules[0].to_rule().unwrap_err().contains("ttty"));
+        }
+    }
+
     #[test]
     fn a_rule_requiring_a_grant_and_an_unknown_rule_key() {
         let cfg: NodeCapabilityConfig = toml::from_str("[[rule]]\nactor = \"purchaser\"\noperation = \"tools/call\"\nresource = \"tool:purchase.approve\"\nrequires_grant = true\n").unwrap();
@@ -1753,7 +1817,7 @@ max_providers = 4
         let typo = toml::from_str::<NodeCapabilityConfig>("[[mandate]]\nholder = \"p\"\nscope = \"s\"\noperations = []\nholders = [\"q\"]\n").unwrap_err().to_string();
         assert!(typo.contains("holders"), "{typo}");
         // The one reading of "may issue": `*` is any operation and any resource; a `@node` suffix is not matched.
-        let rule = |op: &str, res: &str| RuleDecl { actor: "t".into(), operation: op.into(), resource: res.into(), requires_scopes: vec![], requires_facts: vec![], requires_mandate: None, requires_grant: false, requires_values: Default::default(), cancellable: false, exposure: None };
+        let rule = |op: &str, res: &str| RuleDecl { actor: "t".into(), operation: op.into(), resource: res.into(), requires_scopes: vec![], requires_facts: vec![], requires_mandate: None, requires_grant: false, requires_values: Default::default(), cancellable: false, signed_with: vec![], exposure: None };
         assert!(rule("grant.issue", "tool:x").admits_grant_issue_for("tool:x"));
         assert!(rule("*", "*").admits_grant_issue_for("tool:x"));
         assert!(rule("grant.issue", "tool:x").admits_grant_issue_for("tool:x@127.0.0.1:1"));

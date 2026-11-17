@@ -731,3 +731,73 @@ fn the_decision_vector_is_the_same_in_every_language() {
         assert_eq!(serde_json::to_value(&signed).unwrap(), case["signed"], "{case}");
     }
 }
+
+/// **The grade is in the signed message, the same in every language** (identity-and-lifecycle I7): the `graded`
+/// section of `tests/fixtures/decision/vector.json`, generated once and pinned, read by this test, jest and pytest.
+/// - Each case's message is the ungraded message followed by a `u32` little-endian length and the grade's bytes, and
+///   every ungraded case above is unchanged (`the_decision_vector_is_the_same_in_every_language`): a pre-I7 signature
+///   stands.
+/// - A service naming `service` (Ed25519, deterministic) signs exactly the pinned signature.
+/// - A consent principal's P-256 signature — ECDSA is randomised, so it is verified, not reproduced — verifies over
+///   the message with its grade (`SignedDecision::verify_signature`, the production path) and not with any other
+///   grade or none: **a relay altering the grade breaks the signature**. One case per consent grade. In a build
+///   whose provisional gate is closed (this test without `provisional-consent-grade`) the same genuine signature
+///   verifies under nothing.
+///
+/// Seen failing first with the message written without the grade (each graded message differed from its pin).
+#[test]
+fn the_graded_decision_vector_is_the_same_in_every_language() {
+    let v: serde_json::Value = serde_json::from_str(include_str!("../../tests/fixtures/decision/vector.json")).unwrap();
+    let hex = |b: &[u8]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
+    let seed: [u8; 32] = (0..32).map(|i| u8::from_str_radix(&v["seed_hex"].as_str().unwrap()[i * 2..i * 2 + 2], 16).unwrap()).collect::<Vec<_>>().try_into().unwrap();
+    let key = ed25519_dalek::SigningKey::from_bytes(&seed);
+    let (decider, node, agent, t) = (v["decider"].as_str().unwrap(), v["node"].as_str().unwrap(), v["agent"].as_str().unwrap(), v["t"].as_u64().unwrap());
+    let terms = |case: &serde_json::Value| (case["request"].as_str().unwrap().to_string(), case["decision"].as_str().unwrap().to_string(), case["ttl_secs"].as_u64(), case["reason"].as_str().map(str::to_string), case["grade"].as_str().unwrap().to_string());
+    let service = v["graded"]["service"].as_array().unwrap();
+    assert!(!service.is_empty());
+    for case in service {
+        let (request, decision, ttl, reason, grade) = terms(case);
+        assert_eq!(grade, crate::GRADE_SERVICE);
+        let msg = crate::grant_decision_message_graded(decider, node, agent, &request, &decision, ttl, reason.as_deref(), t, Some(&grade));
+        assert_eq!(hex(&msg), case["message_hex"].as_str().unwrap(), "{case}");
+        let mut expected = crate::grant_decision_message(decider, node, agent, &request, &decision, ttl, reason.as_deref(), t);
+        expected.extend_from_slice(&(grade.len() as u32).to_le_bytes());
+        expected.extend_from_slice(grade.as_bytes());
+        assert_eq!(msg, expected, "the grade follows the ungraded message: {case}");
+        let signed = crate::sign_grant_decision_graded(&key, decider, node, agent, &request, &decision, ttl, reason.as_deref(), t, Some(&grade));
+        assert_eq!(serde_json::to_value(&signed).unwrap(), case["signed"], "{case}");
+        assert!(signed.verify_signature(&decision, ttl, reason.as_deref()));
+    }
+    let consent = &v["graded"]["consent"];
+    let cases = consent["cases"].as_array().unwrap();
+    let mut grades: Vec<&str> = cases.iter().map(|c| c["grade"].as_str().unwrap()).collect();
+    grades.sort_unstable();
+    let mut all: Vec<&str> = crate::ConsentGrade::ALL.iter().map(|g| g.as_str()).collect();
+    all.sort_unstable();
+    assert_eq!(grades, all, "one case per consent grade");
+    for case in cases {
+        let (request, decision, ttl, reason, grade) = terms(case);
+        let signed: crate::SignedDecision = serde_json::from_value(case["signed"].clone()).unwrap();
+        assert_eq!((signed.decider.as_str(), signed.request.as_str(), signed.grade.as_deref()), (consent["decider"].as_str().unwrap(), request.as_str(), Some(grade.as_str())));
+        {
+            use base64::Engine as _;
+            assert_eq!(hex(&base64::engine::general_purpose::STANDARD.decode(&signed.k).unwrap()), consent["point_hex"].as_str().unwrap());
+        }
+        assert_eq!(crate::p256_point_from_spki_pem(consent["spki_pem"].as_str().unwrap()).map(|p| hex(&p)).as_deref(), Ok(consent["point_hex"].as_str().unwrap()));
+        assert_eq!(hex(&signed.message(&decision, ttl, reason.as_deref())), case["message_hex"].as_str().unwrap(), "{case}");
+        // A build that reads no consent certificate (no `provisional-consent-grade` while the OID is provisional)
+        // verifies no consent signature — the genuine one included.
+        if !mycelium_core::tls::consent_grade_oid_open() {
+            assert!(!signed.verify_signature(&decision, ttl, reason.as_deref()), "VERIFIED: a consent signature by a build whose provisional gate is closed: {case}");
+            continue;
+        }
+        assert!(signed.verify_signature(&decision, ttl, reason.as_deref()), "VERIFY: the pinned consent signature: {case}");
+        for other in all.iter().copied().chain(["service"]).map(Some).chain([None]) {
+            if other == Some(grade.as_str()) {
+                continue;
+            }
+            let altered = crate::SignedDecision { grade: other.map(str::to_string), ..signed.clone() };
+            assert!(!altered.verify_signature(&decision, ttl, reason.as_deref()), "ALTERED: the grade rewritten to {other:?} still verifies: {case}");
+        }
+    }
+}

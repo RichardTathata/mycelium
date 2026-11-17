@@ -251,6 +251,10 @@ pub(crate) struct ClientCertLedger {
     /// Consent certificates ignored because the grade extension's OID is provisional and this is no test build
     /// (identity-and-lifecycle I7, #800's review finding 1): a shipped node fails closed on them, and counts.
     pub(crate) provisional_grade: AtomicU64,
+    /// Decisions refused because a current consent key's certificate — the one its principal's mark names — was not
+    /// at the key's path, so its grade could not be read (identity-and-lifecycle I7; `consent_key_grade`).
+    #[cfg_attr(not(feature = "gateway"), allow(dead_code))]
+    pub(crate) grade_unread: AtomicU64,
 }
 
 impl std::fmt::Debug for ClientCertLedger {
@@ -551,6 +555,39 @@ pub fn consent_key_standing(ctx: &TaskCtx, principal: &str, point: &[u8; 65]) ->
         return ClientKeyStanding::Unknown;
     }
     standing(ctx, principal, &consent_key_id(point))
+}
+
+/// Where `point` stands for the consent principal `principal`, and — when it is [`Current`](ClientKeyStanding::Current)
+/// — **the grade of the certificate at the principal's mark** (identity-and-lifecycle I7, H2): the grade a decision
+/// signed by that key is checked against and recorded with.
+///
+/// The grade is read from the record at the key's own path, judged again here (the fleet CA's chain, the path's
+/// principal and key, the issuance bound), and counted **only if that certificate is the one the mark names** — the
+/// same issuance and key. One key can hold two certificates with different grades (a re-issue over the same public
+/// key), and any member can write the older one back at the path: its grade is then not the current one's, the
+/// answer is `(Current, None)`, the decision is refused and the read is counted (`grade_unread`) — absence fails
+/// closed (the owner-signed rule), until the newer certificate is republished.
+#[cfg(feature = "gateway")]
+pub(crate) fn consent_key_grade(ctx: &TaskCtx, principal: &str, point: &[u8; 65]) -> (ClientKeyStanding, Option<mycelium_core::tls::ConsentGrade>) {
+    let standing = consent_key_standing(ctx, principal, point);
+    if standing != ClientKeyStanding::Current {
+        return (standing, None);
+    }
+    let grade = (|| {
+        let tls = ctx.tls.get()?;
+        let mark = ctx.client_certs.mark(principal)?;
+        let der = mycelium_core::ops::kv_get(ctx, &consent_cert_key(principal, point))?;
+        let judged = judge(ctx, tls, principal, &der, Some(consent_key_id(point)))?;
+        if judged != mark {
+            return None;
+        }
+        mycelium_core::tls::consent_identity(&der).map(|id| id.grade)
+    })();
+    if grade.is_none() {
+        ctx.client_certs.grade_unread.fetch_add(1, Ordering::Relaxed);
+        tracing::warn!(%principal, "the consent certificate at the principal's mark is not at its key's path: its grade is unread and a decision signed by the key is refused");
+    }
+    (standing, grade)
 }
 
 fn standing(ctx: &TaskCtx, principal: &str, key: &[u8; 32]) -> ClientKeyStanding {
