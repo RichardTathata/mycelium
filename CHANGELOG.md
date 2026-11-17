@@ -11,6 +11,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The two-domains scaffold's `fleet.sh start` reads only its own start's log** (found as a CI flake in the Scaffold
+  job). `start` launched the node with `> data/<node>.log &` and then waited for the log's `up as` line. On a restart
+  the previous run's log was still there until the background shell emptied it, so `start` could return on the old
+  line before the node was up, or exit 1 printing nothing when the file was emptied between the loop's two reads. The
+  README's own sequence reaches it (`bash fleet.sh stop`, then `start-all` or `start kitchen-gw`). `start` now empties
+  the log before it launches, the node appends, and the loop reads once. A project scaffolded by 2.40.0 keeps the old
+  `fleet.sh`: replace its `start)` case with this release's (`templates/two-domains/fleet.sh`), or remove
+  `data/<node>.log` before a restart.
 - **A restarted SWIM seed is found again** (#798, #801; the Eve fleet job's `a write at node 1 reaching node 3 …
   within 120000 ms`). A node with no `bootstrap_peers` of its own (a seed) starts its restart with an empty membership
   table and contacts no one. If one probe landed while it was down, its peers held it `Suspect` — and the prober chose

@@ -47,10 +47,15 @@ case "${1:-}" in
     ;;
   start)
     n=$2; mkdir -p data
-    env "$(tokens_env "$n")" "$BIN" start "$n" > "data/$n.log" 2>&1 &
+    # The log is emptied here, before the node is launched, and the node appends to it. Emptied by the launch's own
+    # redirection it is emptied whenever the background shell gets to it: after a restart the loop below could read
+    # the previous run's "up as" line and return before this node was up — or fail, the log emptied between its
+    # two reads.
+    : > "data/$n.log"
+    env "$(tokens_env "$n")" "$BIN" start "$n" >> "data/$n.log" 2>&1 &
     echo $! > "data/$n.pid"
     for _ in $(seq 1 100); do
-      grep -q ': up as ' "data/$n.log" && { grep ': up as ' "data/$n.log"; exit 0; }
+      if up=$(grep ': up as ' "data/$n.log"); then echo "$up"; exit 0; fi   # one read: what was found is what is printed
       kill -0 "$(cat "data/$n.pid")" 2>/dev/null || { cat "data/$n.log"; exit 3; }
       sleep 0.2
     done
