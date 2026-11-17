@@ -1,4 +1,5 @@
 export {
+  CancelNotReceivedError,
   MyceliumAgent,
   ProtectedKeyError,
   ProtectedKindError,

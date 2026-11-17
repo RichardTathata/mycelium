@@ -37,6 +37,8 @@ export interface RpcRequest {
    * confirms with `rpcConfirmStopped`. Set on every request `rpcServe` yields.
    */
   signal?: AbortSignal;
+  /** The serve stream this request went out on, as the node named it; sent back on `rpcRespond` and `rpcConfirmStopped`. */
+  stream?: string;
 }
 
 /**

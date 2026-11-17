@@ -156,6 +156,16 @@ impl Admission {
         }
     }
 
+    /// **Release this admission as a stop the node saw complete** (#806's review, L7): the call was never handed to the
+    /// agent that would have done it — cancelled while it waited in the SDK stream's queue — so the end is the node's
+    /// own, confirmed, whether or not that agent declared it stops.
+    pub(crate) fn release_confirmed_by_node(self) {
+        let Admission { _slot, work, call_work, .. } = self;
+        drop(work.map(super::gateway_authority::WorkGuard::confirmed_by_node));
+        drop(call_work.map(super::gateway_authority::WorkGuard::confirmed_by_node));
+        drop(_slot);
+    }
+
     /// **Release this admission as a stop the node cannot confirm** (identity-and-lifecycle I4, PR 3b): whatever its
     /// door promised, the registration's end is recorded with no confirmation — the agent doing the work did not say
     /// it stopped. A guard that was never cancelled writes no stop record either way.

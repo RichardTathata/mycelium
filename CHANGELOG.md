@@ -467,7 +467,9 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `rpc/respond` `"stopped": true` is the only thing a confirmed stop (`Stopped`) is recorded on; its answers past the
   1 s grace are counted (`rpc_serve_answered_after_lapse`). `mycelium-py` (`rpc_serve(…, stops_on_cancel=True)`,
   `RpcRequest.cancelled`, `rpc_confirm_stopped`) and `mycelium-ts` (`rpcServe(…, { stopsOnCancel: true })`,
-  `RpcRequest.signal`, `rpcConfirmStopped`) carry it; both bump at release. A streamed call's admission is now held
+  `RpcRequest.signal`, `rpcConfirmStopped`) carry it; both bump at release. Each serve stream is named
+  (`Mycelium-Serve-Stream`, `stream` on its events and on `rpc/respond`) and confirms only its own stop (`stream_required`,
+  `not_your_stream`); the SDKs refuse a confirmation their stream was not asked for (`CancelNotReceivedError`). A streamed call's admission is now held
   with or without a cohort budget (lock-order row 46 retired).
 
 - **A gateway's cancel reaches the provider directly, and the doors cancel** (identity-and-lifecycle I4, PR 3a;

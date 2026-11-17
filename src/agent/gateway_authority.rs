@@ -752,6 +752,19 @@ impl WorkGuard {
         self
     }
 
+    /// **This work's stop is the node's own, and confirmed** (identity-and-lifecycle I4, PR 3b; #806's review, L7): the
+    /// node held the work and never handed it to the agent that would have done it (a streamed call cancelled while it
+    /// still waited in the stream's queue), so its drop is a stop the node itself saw complete, whatever that agent
+    /// would have promised.
+    pub(crate) fn confirmed_by_node(mut self) -> Self {
+        self.confirms = true;
+        // Row 48, flat, as `unconfirmed`.
+        if let Some(r) = self.authority.running.lock().unwrap_or_else(|e| e.into_inner()).get_mut(&self.id) {
+            r.confirms = true;
+        }
+        self
+    }
+
     /// When the authority asked this work to stop, on its own clock — `None` while it has not.
     pub(crate) fn stop_requested_ms(&self) -> Option<u64> {
         match self.requested_ms.load(std::sync::atomic::Ordering::Acquire) {

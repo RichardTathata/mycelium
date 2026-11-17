@@ -93,6 +93,12 @@ class ServeEvictedError(ProtectedKindError):
     the kind. The worker should stop serving it on this node, or serve it elsewhere."""
 
 
+class CancelNotReceivedError(RuntimeError):
+    """:meth:`MyceliumAgent.rpc_confirm_stopped` was called for a request whose stream never received a ``cancel``
+    event for it (identity-and-lifecycle I4; the maintainer's decision of 2026-11-17): the SDK never claims a stop it
+    was not asked for. Raised before anything is sent."""
+
+
 class _ProtectedWriteError(PermissionError, httpx.HTTPStatusError):
     """A raw KV or log route refused a namespace that a component owns (HTTP 403).
 
@@ -183,6 +189,10 @@ class ProtectedSlotError(_ProtectedWriteError):
         super().__init__(message, response)
         self.slot = slot
 
+
+#: How many requests a declaring serve stream reads ahead of its caller: the depth of the node's own channel for the
+#: stream (``rpc/serve``'s 256), so a worker's backlog still fills that channel, which the node's admission reads.
+_READ_AHEAD = 256
 
 #: How many handed-out requests a serve stream remembers so a ``cancel`` event finds its request.
 _HANDED_KEPT = 4096
@@ -353,7 +363,11 @@ class RpcRequest:
     sender:      str
     payload:     bytes
     caller:      Optional[Dict[str, Any]] = None
+    #: The serve stream this request went out on, as the node named it; sent back on :meth:`MyceliumAgent.rpc_respond`.
+    stream:      Optional[str] = None
     cancelled:   asyncio.Event = field(default_factory=asyncio.Event, repr=False, compare=False)
+    #: Set only by the stream, when its ``cancel`` event for this request arrived.
+    _cancel_received: bool = field(default=False, repr=False, compare=False)
 
 
 @dataclass
@@ -1228,7 +1242,9 @@ class MyceliumAgent:
 
     # ── RPC serve / respond ─────────────────────────────────────────────────
 
-    async def rpc_serve(self, kind: str, *, stops_on_cancel: bool = False) -> "AsyncIterator[RpcRequest]":
+    async def rpc_serve(
+        self, kind: str, *, stops_on_cancel: bool = False, read_ahead: int = _READ_AHEAD,
+    ) -> "AsyncIterator[RpcRequest]":
         """Async generator that yields incoming RPC requests of ``kind``.
 
         For each yielded :class:`RpcRequest`, call :meth:`rpc_respond` to
@@ -1251,7 +1267,9 @@ class MyceliumAgent:
         served a call under a rule declared cancellable (an undeclared one is refused it, ``door_cannot_stop``); the
         node records a stop it can confirm only on your confirmation, and counts an answer you send more than a
         second after the stop was asked (``rpc_serve_answered_after_lapse``). A declaring stream reads ahead of you, so
-        a cancel reaches a request you are still working on; requests not yet taken wait in memory::
+        a cancel reaches a request you are still working on — **at most** ``read_ahead`` requests (256, the depth of the
+        node's own channel for the stream): past that it stops reading, so the node's channel fills and its admission
+        sheds load as it does for any slow worker. Confirm only once the work **has** stopped::
 
             async for req in agent.rpc_serve("my.method", stops_on_cancel=True):
                 work = asyncio.create_task(process(req.payload))
@@ -1262,6 +1280,10 @@ class MyceliumAgent:
                     agent.rpc_respond(req, work.result())
                 else:
                     work.cancel()
+                    try:
+                        await work          # wait until it has actually stopped
+                    except asyncio.CancelledError:
+                        pass
                     agent.rpc_confirm_stopped(req)
         """
         import json as _json
@@ -1282,7 +1304,9 @@ class MyceliumAgent:
                 raise ServeEvictedError(str(data.get("kind", kind)), str(data.get("message", "evicted")))
             if event.event == "cancel" and data.get("cancel") is True:
                 req = handed.pop((str(data.get("sender", "")), str(data.get("nonce_hex", ""))), None)
-                if req is not None:
+                # This stream's own cancel of a request it handed out: the one ground for a confirmation.
+                if req is not None and data.get("stream") == req.stream:
+                    req._cancel_received = True
                     req.cancelled.set()
                 return None
             req = RpcRequest(
@@ -1291,6 +1315,7 @@ class MyceliumAgent:
                 sender    = data.get("sender", ""),
                 payload   = base64.b64decode(data.get("payload_b64", "")),
                 caller    = data.get("caller"),
+                stream    = data.get("stream"),
             )
             handed[(req.sender, req.nonce_hex)] = req
             while len(handed) > _HANDED_KEPT:
@@ -1313,8 +1338,9 @@ class MyceliumAgent:
                         if req is not None:
                             yield req
                     return
-                # Declared: the stream is read beside you, so a cancel reaches the request you are working on.
-                queue: "asyncio.Queue[Any]" = asyncio.Queue()
+                # Declared: the stream is read beside you, so a cancel reaches the request you are working on — and
+                # bounded, so a busy worker's backlog stays visible to the node's admission (#806's review, M2).
+                queue: "asyncio.Queue[Any]" = asyncio.Queue(maxsize=max(1, read_ahead))
                 end = object()
 
                 async def pump() -> None:
@@ -1322,10 +1348,10 @@ class MyceliumAgent:
                         async for event in event_source.aiter_sse():
                             req = parse(event)
                             if req is not None:
-                                queue.put_nowait(req)
-                        queue.put_nowait(end)
+                                await queue.put(req)
+                        await queue.put(end)
                     except Exception as e:  # noqa: BLE001 — handed to the iterating caller, raised there
-                        queue.put_nowait(e)
+                        await queue.put(e)
 
                 reader = asyncio.create_task(pump())
                 try:
@@ -1351,6 +1377,8 @@ class MyceliumAgent:
             "sender":     request.sender,
             "result_b64": base64.b64encode(result).decode(),
         }
+        if request.stream is not None:
+            body["stream"] = request.stream
         with self._pool.sync() as c:
             c.post("/gateway/rpc/respond", json=body).raise_for_status()
 
@@ -1358,10 +1386,19 @@ class MyceliumAgent:
         """Confirm that you stopped the work of a request the node cancelled (identity-and-lifecycle I4).
 
         Your own word, sent once the work has stopped: it is the only thing the node records a confirmed stop on — a
-        cancel's receipt then reads ``Stopped``. Returns ``True`` when the node took it, ``False`` when the request is
-        not one the node cancelled and streamed to you (``409 not_cancelled``: nothing is recorded or sent).
+        cancel's receipt then reads ``Stopped`` — and it speaks only for the stream the request came on (``stream``).
+        Returns ``True`` when the node took it, ``False`` when the node refused it (``409``: ``not_cancelled``,
+        ``stream_required``, ``not_your_stream``; nothing is recorded or sent).
+
+        Raises :class:`CancelNotReceivedError`, sending nothing, unless this request's stream received a ``cancel``
+        event for it: the SDK never claims a stop it was not asked for. (An older node, which sends no ``cancel``
+        event, would deliver a ``"stopped": true`` as an empty answer; it is never sent one.)
         """
-        body = {"nonce_hex": request.nonce_hex, "sender": request.sender, "stopped": True}
+        if not request._cancel_received:
+            raise CancelNotReceivedError(
+                f"no cancel event was received for request {request.nonce_hex} on its stream; a stop is confirmed only when asked"
+            )
+        body = {"nonce_hex": request.nonce_hex, "sender": request.sender, "stopped": True, "stream": request.stream}
         with self._pool.sync() as c:
             resp = c.post("/gateway/rpc/respond", json=body)
             if resp.status_code == 409:

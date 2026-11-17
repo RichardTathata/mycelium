@@ -168,6 +168,8 @@ pub use authz::{GatewayPreflight, GatewayRefusal};
 pub(crate) use authz::{ae_decide, ae_preflight, ae_preflight_door, ae_record_execution, observed_execution, release_grant_claim_after, release_unspent_grant_claim, Decided, Preflight};
 #[cfg(all(test, feature = "gateway", feature = "tls"))]
 pub(crate) use authz::TEST_HISTORY_REFUSES_ADMIT;
+#[cfg(all(test, feature = "gateway", feature = "tls", feature = "compliance"))]
+pub(crate) use mesh::test_hooks as mesh_test_hooks;
 #[cfg(all(test, feature = "compliance"))]
 pub(crate) use authz::pre_execution_refusal;
 #[cfg(all(test, feature = "gateway", feature = "tls", feature = "consensus"))]
@@ -237,6 +239,8 @@ struct HttpCtx {
     /// Repeat answers to an already-answered request, accepted and dropped (`/stats`
     /// `rpc_respond_duplicates`): a replicated serve loop's losing replica.
     rpc_respond_duplicates: std::sync::atomic::AtomicU64,
+    /// The next `rpc/serve` stream's identifier (I4, PR 3b): each stream is named so it speaks only for its own work.
+    next_serve_stream: std::sync::atomic::AtomicU64,
     /// Identity-and-lifecycle I4, PR 3b: the calls `rpc/serve` streamed that hold something — a cohort place, a
     /// running-work registration — each owned by its watcher task until the subscriber ends it (`served_call`).
     /// Lock-free (papaya): no lock-order row; each watcher removes only its own entry.
@@ -341,6 +345,7 @@ pub(super) async fn run_http_server(
         oidc,
         served_rpcs:  Mutex::new(ServedRpcs::default()),
         rpc_respond_duplicates: std::sync::atomic::AtomicU64::new(0),
+        next_serve_stream: std::sync::atomic::AtomicU64::new(1),
         #[cfg(all(feature = "gateway", feature = "tls"))]
         served_calls: papaya::HashMap::new(),
         schedule_runs: Arc::new(papaya::HashMap::new()),

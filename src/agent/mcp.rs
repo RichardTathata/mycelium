@@ -301,26 +301,38 @@ fn refuse_bridged(
 #[cfg(feature = "gateway")]
 const BRIDGED_CANCEL_NOTIFY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// The next id this bridge forwards a call under (#806's review, M1): the bridge's own, never the requester's. Two
+/// requesters numbering from `1` would otherwise share an id at the server — and once the node stops waiting for a
+/// cancelled call the server can hold both — so a `notifications/cancelled` naming the requester's id could cancel
+/// the other requester's work. The reply is mapped back to the requester's id.
+#[cfg(feature = "gateway")]
+fn mint_forward_id(forwards: &mut u64) -> serde_json::Value {
+    *forwards += 1;
+    json!(format!("mycelium-bridge-{forwards}"))
+}
+
 /// Forward an admitted bridged call to the external MCP server and answer with its reply — **or, if `stop` resolves
 /// first, the node's own stop** (identity-and-lifecycle I4, PR 3b; the maintainer's decision (C) of 2026-11-16). `stop`
 /// resolves when the call's authority lapses (the caller's mandate, or the gateway cancelled the call). The node then
 /// promises only its own behaviour: it stops waiting for the forward (the request's future is dropped, so a late reply
 /// is never read, never answered), answers the requester `cancelled` (`data.reason` `cancelled`, `data.door`
-/// `bridged_mcp`), and sends the server `notifications/cancelled` for the request's id. It promises nothing about the
+/// `bridged_mcp`), and sends the server `notifications/cancelled` for the id it forwarded under (its own, [`mint_forward_id`]). It promises nothing about the
 /// work in the server, which made no promise through the node: the call's registration is unconfirmed, so a cancel's
 /// receipt says `Unbounded`. A call under a cancellable rule never gets here (`door_cannot_stop`, `bridged_mcp`).
 #[cfg(feature = "gateway")]
+#[allow(clippy::too_many_arguments)]
 async fn forward_bridged(
     ctx: &Arc<TaskCtx>,
     http_client: &reqwest::Client,
     server_url: &str,
     req: &RpcRequest,
     rpc_req: &serde_json::Value,
+    forward_id: serde_json::Value,
     stop: impl std::future::Future<Output = ()>,
 ) {
     let call_req = json!({
         "jsonrpc": "2.0",
-        "id": rpc_req["id"],
+        "id": forward_id.clone(),
         "method": "tools/call",
         "params": {"name": rpc_req["params"]["name"], "arguments": decided_arguments(rpc_req)},
     });
@@ -346,8 +358,9 @@ async fn forward_bridged(
             rpc_respond_ctx(ctx, req, Bytes::from(answer.to_string().into_bytes()));
             #[cfg(feature = "tls")]
             super::provider_enforcement::count_door_stop(ctx, "bridged_mcp");
+            // The id this node forwarded under — its own, so the notice names only the call it stopped waiting for.
             let notice = json!({"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {
-                "requestId": rpc_req["id"],
+                "requestId": forward_id,
                 "reason": "the call's authority lapsed",
             }});
             let (client, url) = (http_client.clone(), server_url.to_string());
@@ -357,7 +370,12 @@ async fn forward_bridged(
             return;
         }
     };
-    rpc_respond_ctx(ctx, req, Bytes::from(as_tool_answer(response, &rpc_req["id"]).to_string().into_bytes()));
+    // The server answered under the bridge's id: the requester is answered under its own.
+    let mut response = as_tool_answer(response, &rpc_req["id"]);
+    if let Some(o) = response.as_object_mut() {
+        o.insert("id".into(), rpc_req["id"].clone());
+    }
+    rpc_respond_ctx(ctx, req, Bytes::from(response.to_string().into_bytes()));
 }
 
 /// **Only the node authors a refusal** (#745's confirm round): a bridged server's reply is its own bytes, so one shaped
@@ -419,6 +437,8 @@ pub(super) async fn run_mcp_client_task(
     #[cfg(all(feature = "gateway", feature = "tls"))]
     let mut pending: super::provider_enforcement::DeferredChecks<(RpcRequest, serde_json::Value)> =
         super::provider_enforcement::DeferredChecks::new(&ctx);
+    // The ids this bridge forwards under (#806's review, M1): its own, one per forward.
+    let mut forwards: u64 = 0;
     loop {
         #[cfg(all(feature = "gateway", feature = "tls"))]
         let req = {
@@ -428,7 +448,7 @@ pub(super) async fn run_mcp_client_task(
                 _ = await_shutdown(&mut shutdown_rx) => break,
                 Some(((req, rpc_req), checked)) = pending.next(), if !pending.is_empty() => {
                     match checked {
-                        Ok(admission) => forward_bridged(&ctx, &http_client, &server_url, &req, &rpc_req, admission.stop_asked()).await,
+                        Ok(admission) => forward_bridged(&ctx, &http_client, &server_url, &req, &rpc_req, mint_forward_id(&mut forwards), admission.stop_asked()).await,
                         Err(refusal) => refuse_bridged(&ctx, &req, &rpc_req, &refusal),
                     }
                     continue;
@@ -487,13 +507,13 @@ pub(super) async fn run_mcp_client_task(
         #[cfg(all(feature = "gateway", feature = "tls"))]
         match super::provider_enforcement::check(&ctx, &req, true, super::provider_enforcement::Door::BridgedMcp).await {
             super::provider_enforcement::Checked::Done(Ok(admission)) => {
-                forward_bridged(&ctx, &http_client, &server_url, &req, &rpc_req, admission.stop_asked()).await
+                forward_bridged(&ctx, &http_client, &server_url, &req, &rpc_req, mint_forward_id(&mut forwards), admission.stop_asked()).await
             }
             super::provider_enforcement::Checked::Done(Err(refusal)) => refuse_bridged(&ctx, &req, &rpc_req, &refusal),
             super::provider_enforcement::Checked::Waiting(waiting) => pending.spawn(waiting, (req, rpc_req)),
         }
         #[cfg(not(all(feature = "gateway", feature = "tls")))]
-        forward_bridged(&ctx, &http_client, &server_url, &req, &rpc_req, std::future::pending::<()>()).await;
+        forward_bridged(&ctx, &http_client, &server_url, &req, &rpc_req, mint_forward_id(&mut forwards), std::future::pending::<()>()).await;
     }
 
     // Calls still settling a claim when the loop ends are answered, never left to time out.

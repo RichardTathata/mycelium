@@ -224,7 +224,9 @@ pub(super) async fn gw_rpc_serve(
     let (pull_tx, pull_rx) = tokio::sync::mpsc::channel::<tokio::sync::oneshot::Sender<Event>>(1);
     let loop_ctx = Arc::clone(&ctx);
     let loop_evicted = evicted.clone();
-    ctx.agent_ctx.spawn_task(serve_stream_loop(loop_ctx, rx, pull_rx, principal, loop_evicted, cancel));
+    // This stream's identifier (I4, PR 3b): in the `Mycelium-Serve-Stream` header and in every event it carries.
+    let stream_id = ctx.next_serve_stream.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    ctx.agent_ctx.spawn_task(serve_stream_loop(loop_ctx, rx, pull_rx, principal, loop_evicted, cancel, stream_id));
     let stream = futures_util::stream::unfold(pull_tx, |pull_tx| async move {
         let (want, event) = tokio::sync::oneshot::channel();
         pull_tx.send(want).await.ok()?;
@@ -247,7 +249,11 @@ pub(super) async fn gw_rpc_serve(
         })
     }), |e| async move { e });
     let stream = futures_util::StreamExt::chain(stream, tail);
-    Sse::new(stream).keep_alive(KeepAlive::default()).into_response()
+    let mut response = Sse::new(stream).keep_alive(KeepAlive::default()).into_response();
+    if let Ok(v) = axum::http::HeaderValue::from_str(&stream_id.to_string()) {
+        response.headers_mut().insert("mycelium-serve-stream", v);
+    }
+    response
 }
 
 /// `rpc/serve`'s cancellation parameters (identity-and-lifecycle I4, PR 3b): what the subscriber says of itself.
@@ -264,7 +270,7 @@ pub(super) struct ServeCancel {
 
 /// What `rpc/serve` streams a checked request as, or `None` for one it drops: the caller context verified and handed
 /// on, the request recorded as served to this principal.
-fn serve_event(http_ctx: &HttpCtx, req: &super::rpc::RpcRequest, caller: Option<serde_json::Value>, principal: &str) -> Event {
+fn serve_event(http_ctx: &HttpCtx, req: &super::rpc::RpcRequest, caller: Option<serde_json::Value>, principal: &str, stream: u64) -> Event {
     use base64::Engine as _;
     // Handed to this principal: the only one `rpc/respond` will take an answer from.
     record_served_rpc(http_ctx, req.sender(), req.nonce(), principal);
@@ -273,6 +279,9 @@ fn serve_event(http_ctx: &HttpCtx, req: &super::rpc::RpcRequest, caller: Option<
         "nonce_hex":   format!("{:016x}", req.nonce()),
         "sender":      req.sender().to_string(),
         "payload_b64": payload_b64,
+        // The stream this request went out on (I4, PR 3b; the maintainer's decision of 2026-11-17): `rpc/respond`
+        // names it, so a stream's answer and its confirmation speak only for its own work.
+        "stream":      stream.to_string(),
     });
     if let Some(c) = caller {
         data["caller"] = c;
@@ -292,6 +301,7 @@ async fn serve_stream_loop(
     principal: Arc<str>,
     mut evicted: tokio::sync::watch::Receiver<bool>,
     #[cfg_attr(not(all(feature = "gateway", feature = "tls")), allow(unused_variables))] cancel: ServeCancel,
+    stream: u64,
 ) {
     let agent_ctx = Arc::clone(&ctx.agent_ctx);
     // The `cancel` events the node's own stops send this stream (`served_call`), if its subscriber reads them; streamed
@@ -321,12 +331,16 @@ async fn serve_stream_loop(
             }
         }
         #[cfg(all(feature = "gateway", feature = "tls"))]
-        while !gone && want.is_some() && let Some((req, caller, mut admission)) = ready.pop_front() {
+        let held = test_hooks::streaming_held(&agent_ctx);
+        #[cfg(all(feature = "gateway", feature = "tls"))]
+        while !gone && !held && want.is_some() && let Some((req, caller, mut admission)) = ready.pop_front() {
             // Its authority lapsed while it waited here: it was never handed to anyone, so the node's stop is the whole
-            // of it — answered `cancelled`, and the registration ends here.
+            // of it — answered `cancelled`, and the registration ends here, a stop the node saw complete whatever the
+            // stream declared (#806's review, L7).
             if admission.is_lapsed() {
                 super::rpc::rpc_respond_ctx(&agent_ctx, &req, super::served_call::cancelled_body("sdk_serve"));
                 super::provider_enforcement::count_door_stop(&agent_ctx, "sdk_serve");
+                admission.release_confirmed_by_node();
                 continue;
             }
             // A watcher is needed and none can be held: refused before streaming, never streamed unwatched.
@@ -335,11 +349,17 @@ async fn serve_stream_loop(
                 continue;
             }
             admission.promised_stop = cancel.stops_on_cancel;
-            let event = serve_event(&ctx, &req, caller.clone(), &principal);
-            match want.take().map(|w| w.send(event)) {
-                Some(Ok(())) if admission.holds_anything() => super::served_call::watch(&ctx, req, Arc::clone(&principal), admission, hears_cancel.clone(), cancel.stops_on_cancel),
-                Some(Ok(())) => {}
-                _ => {
+            // The watcher is placed before the event goes out, so an answer that comes at once finds it (#806's review,
+            // L6).
+            let placed = admission.holds_anything().then(|| super::served_call::place(&ctx, &req, &principal, stream, cancel.stops_on_cancel));
+            let event = serve_event(&ctx, &req, caller.clone(), &principal, stream);
+            match (want.take().map(|w| w.send(event)), placed) {
+                (Some(Ok(())), Some(placed)) => placed.start(&ctx, &req, Arc::clone(&principal), admission, hears_cancel.clone()),
+                (Some(Ok(())), None) => {}
+                (_, placed) => {
+                    if let Some(placed) = placed {
+                        placed.withdraw(&ctx);
+                    }
                     ready.push_front((req, caller, admission));
                     gone = true;
                     break;
@@ -364,6 +384,8 @@ async fn serve_stream_loop(
                 Some(w) => { want = Some(w); continue; }
                 None => break,
             },
+            // Test hook: streaming held, the loop wakes to see it released.
+            _ = mycelium_core::sim_seam::sleep_ms("rpc-serve/test-hold", 20), if held => continue,
             // A `cancel` event to send: taken while an ask is open, and sent at the top of the loop.
             Some(event) = cancel_rx.recv(), if !asking => {
                 if want.take().map(|w| w.send(event)).is_none_or(|r| r.is_err()) {
@@ -425,7 +447,7 @@ async fn serve_stream_loop(
         }
         #[cfg(not(all(feature = "gateway", feature = "tls")))]
         {
-            let event = serve_event(&ctx, &req, caller, &principal);
+            let event = serve_event(&ctx, &req, caller, &principal, stream);
             if want.take().map(|w| w.send(event)).is_none_or(|r| r.is_err()) {
                 break;
             }
@@ -503,21 +525,34 @@ pub(super) async fn gw_rpc_respond(
     // Identity-and-lifecycle I4, PR 3b: the subscriber's own word that it stopped a call the node cancelled
     // (`"stopped": true`) — the only thing a confirmed stop is recorded on. Accepted only for a call streamed to this
     // principal that the node stopped waiting for; anything else is refused `not_cancelled` and nothing moves.
+    // The stream the answer comes from (the maintainer's decision of 2026-11-17): a confirmation speaks only for that
+    // stream's work, never a sibling's. Absent: a client before streams were named.
+    #[cfg_attr(not(all(feature = "gateway", feature = "tls")), allow(unused_variables))]
+    let stream: Option<u64> = body["stream"].as_str().and_then(|s| s.parse().ok());
     #[cfg(all(feature = "gateway", feature = "tls"))]
     let served = super::served_call::find(&ctx, &sender, nonce);
     if body["stopped"].as_bool() == Some(true) {
         #[cfg(all(feature = "gateway", feature = "tls"))]
-        if let Some(s) = served.as_ref().filter(|s| s.cancelled())
-            && served_rpc_answered(&ctx, &sender, nonce, &principal) == Some(true)
-        {
-            s.assess(&ctx.agent_ctx);
-            s.end(true);
-            return Json(json!({ "ok": true, "stopped": true })).into_response();
-        }
+        let refused = match (served.as_ref(), served_rpc_answered(&ctx, &sender, nonce, &principal)) {
+            // Never streamed to this principal (#806's review, M5): not its call to confirm.
+            (_, None) => super::served_call::NotConfirmed::NotYourStream,
+            (Some(s), Some(true)) => match s.confirm(stream, &principal) {
+                Ok(()) => {
+                    s.assess(&ctx.agent_ctx);
+                    return Json(json!({ "ok": true, "stopped": true })).into_response();
+                }
+                Err(why) => why,
+            },
+            _ => super::served_call::NotConfirmed::NotCancelled,
+        };
+        #[cfg(not(all(feature = "gateway", feature = "tls")))]
+        let refused = "not_cancelled";
+        #[cfg(all(feature = "gateway", feature = "tls"))]
+        let refused = refused.label();
         return (StatusCode::CONFLICT, Json(json!({
             "ok": false,
-            "error": "not_cancelled",
-            "message": "\"stopped\" confirms a stop of a call this node cancelled and streamed to you; this request is not one",
+            "error": refused,
+            "message": "\"stopped\" confirms a stop of a call this node cancelled and streamed to you, on the stream it names (\"stream\", the one the call went out on); this request is not one",
         }))).into_response();
     }
     match answer_served_rpc(&ctx, &sender, nonce, &principal) {
@@ -528,7 +563,7 @@ pub(super) async fn gw_rpc_respond(
         ServedAnswer::Duplicate if served.as_ref().is_some_and(|s| s.cancelled()) => {
             if let Some(s) = &served {
                 s.assess(&ctx.agent_ctx);
-                s.end(false);
+                s.answered(stream);
             }
             return Json(json!({ "ok": true, "cancelled": true })).into_response();
         }
@@ -553,7 +588,7 @@ pub(super) async fn gw_rpc_respond(
     // holds (I4, PR 3b: `served_call`).
     #[cfg(all(feature = "gateway", feature = "tls"))]
     if let Some(s) = &served {
-        s.end(false);
+        s.answered(stream);
     }
 
     let mut buf = BytesMut::with_capacity(8 + result.len());
@@ -917,5 +952,24 @@ pub(super) async fn gw_shard_emit(
             pass.finish(crate::agent::door::DoorOutcome::Nothing).await;
             (StatusCode::NOT_FOUND, Json(json!({ "ok": false, "error": "no providers" }))).into_response()
         }
+    }
+}
+
+/// Test hooks for the serve loop.
+#[cfg(all(feature = "gateway", feature = "tls"))]
+pub(crate) mod test_hooks {
+    /// Nodes whose serve loops hold what they have checked instead of streaming it (#806's review, L7: a call that
+    /// lapses while it waits in the queue).
+    #[cfg(test)]
+    pub(crate) static HOLD_STREAMING: std::sync::LazyLock<papaya::HashSet<String>> = std::sync::LazyLock::new(papaya::HashSet::new);
+
+    #[cfg(test)]
+    pub(super) fn streaming_held(ctx: &crate::agent::TaskCtx) -> bool {
+        HOLD_STREAMING.pin().contains(&ctx.node_id.to_string())
+    }
+
+    #[cfg(not(test))]
+    pub(super) fn streaming_held(_: &crate::agent::TaskCtx) -> bool {
+        false
     }
 }

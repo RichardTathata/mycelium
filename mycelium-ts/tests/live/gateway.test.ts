@@ -12,7 +12,7 @@
  *   MYCELIUM_TEST_HOST=127.0.0.1 MYCELIUM_TEST_PORT=8300 npm test
  */
 
-import { MyceliumAgent, ProtectedSlotError, ProtectedStreamError } from "../../src/agent";
+import { CancelNotReceivedError, MyceliumAgent, ProtectedSlotError, ProtectedStreamError } from "../../src/agent";
 
 const TEST_HOST = process.env.MYCELIUM_TEST_HOST;
 const TEST_PORT = parseInt(process.env.MYCELIUM_TEST_PORT ?? "0", 10);
@@ -187,7 +187,9 @@ describe_("MyceliumAgent — live node tests", () => {
     const confirmed: boolean[] = [];
     const served = (async () => {
       for await (const req of serve) {
-        confirmed.push(await server.rpcConfirmStopped(req));
+        expect(req.stream).toBeTruthy();
+        // Never cancelled: the SDK itself refuses, and sends nothing.
+        confirmed.push(await server.rpcConfirmStopped(req).then(() => true, (e) => (e instanceof CancelNotReceivedError ? false : Promise.reject(e))));
         await server.rpcRespond(req, Buffer.concat([Buffer.from("echo:"), req.payload]));
         break;
       }

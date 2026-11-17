@@ -7,8 +7,10 @@
 * **A cancel reaches the request it names.** The node's ``cancel`` event sets that request's ``cancelled`` — and, on a
   declaring stream, while the caller still holds the request (the stream is read beside it). A ``cancel`` event is
   never yielded as a request.
-* **The confirmation.** ``rpc_confirm_stopped`` sends ``{"nonce_hex", "sender", "stopped": true}``; ``409
-  not_cancelled`` is ``False``.
+* **The confirmation** (the maintainer's decisions of 2026-11-17). ``rpc_confirm_stopped`` sends ``{"nonce_hex",
+  "sender", "stopped": true, "stream"}`` — the stream the request came on — and a ``409`` is ``False``. It raises
+  :class:`CancelNotReceivedError`, sending nothing, unless that stream received a ``cancel`` event for the request: the
+  SDK never claims a stop it was not asked for.
 """
 
 from __future__ import annotations
@@ -21,17 +23,18 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
-from mycelium import MyceliumAgent
+from mycelium import CancelNotReceivedError, MyceliumAgent
 
-REQ = {"nonce_hex": "00000000000000aa", "sender": "127.0.0.1:7001", "payload_b64": "d29yaw=="}
-OTHER = {"nonce_hex": "00000000000000bb", "sender": "127.0.0.1:7001", "payload_b64": "d29yaw=="}
-CANCEL = {"cancel": True, "nonce_hex": REQ["nonce_hex"], "sender": REQ["sender"], "reason": "cancelled"}
+REQ = {"nonce_hex": "00000000000000aa", "sender": "127.0.0.1:7001", "payload_b64": "d29yaw==", "stream": "7"}
+OTHER = {"nonce_hex": "00000000000000bb", "sender": "127.0.0.1:7001", "payload_b64": "d29yaw==", "stream": "7"}
+CANCEL = {"cancel": True, "nonce_hex": REQ["nonce_hex"], "sender": REQ["sender"], "reason": "cancelled", "stream": "7"}
 
 
 class _Node(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.0"
     seen: list[tuple[str, str, dict]] = []
     respond_status = 200
+    burst = 0
 
     def do_GET(self) -> None:  # noqa: N802
         _Node.seen.append(("GET", self.path, {}))
@@ -43,6 +46,11 @@ class _Node(BaseHTTPRequestHandler):
             self.wfile.write(f"event: {event}\ndata: {json.dumps(data)}\n\n".encode())
             self.wfile.flush()
 
+        if _Node.burst:
+            for i in range(_Node.burst):
+                send("depot.custom", dict(REQ, nonce_hex=f"{i:016x}"))
+            time.sleep(1.0)
+            return
         send("depot.custom", REQ)
         time.sleep(0.2)
         send("cancel", CANCEL)
@@ -65,7 +73,7 @@ class _Node(BaseHTTPRequestHandler):
 
 @pytest.fixture
 def port():
-    _Node.seen, _Node.respond_status = [], 200
+    _Node.seen, _Node.respond_status, _Node.burst = [], 200, 0
     server = ThreadingHTTPServer(("127.0.0.1", 0), _Node)
     server.daemon_threads = True
     threading.Thread(target=server.serve_forever, daemon=True).start()
@@ -121,16 +129,71 @@ def test_an_undeclared_subscriber_sees_the_cancel_when_it_next_asks(port):
     assert (before, after) == (False, True)
 
 
-def test_the_confirmation_is_the_subscribers_word_and_a_refusal_is_false(port):
+def _cancelled_and_not(agent):
+    """The first request once its cancel arrived, and the second (never cancelled)."""
+    async def run():
+        stream = agent.rpc_serve("depot.custom", stops_on_cancel=True)
+        req = await stream.__anext__()
+        await asyncio.wait_for(req.cancelled.wait(), timeout=5)
+        other = await stream.__anext__()
+        await stream.aclose()
+        return req, other
+    return asyncio.run(run())
+
+
+def _posts():
+    return [b for (m, p, b) in _Node.seen if m == "POST" and p == "/gateway/rpc/respond"]
+
+
+def test_the_confirmation_names_its_stream_and_a_refusal_is_false(port):
     agent = MyceliumAgent("127.0.0.1", port)
-
-    async def first():
-        async for req in agent.rpc_serve("depot.custom", stops_on_cancel=True):
-            return req
-
-    req = asyncio.run(first())
+    req, _ = _cancelled_and_not(agent)
     assert agent.rpc_confirm_stopped(req) is True
-    post = [b for (m, p, b) in _Node.seen if m == "POST" and p == "/gateway/rpc/respond"][-1]
-    assert post == {"nonce_hex": REQ["nonce_hex"], "sender": REQ["sender"], "stopped": True}
+    assert _posts()[-1] == {"nonce_hex": REQ["nonce_hex"], "sender": REQ["sender"], "stopped": True, "stream": "7"}
     _Node.respond_status = 409
     assert agent.rpc_confirm_stopped(req) is False
+
+
+def test_the_sdk_never_confirms_a_stop_it_was_not_asked_for(port):
+    agent = MyceliumAgent("127.0.0.1", port)
+    _, other = _cancelled_and_not(agent)
+    # Never cancelled; one built by hand; one whose `cancelled` the caller set itself: refused, nothing sent.
+    by_hand = type(other)(kind="depot.custom", nonce_hex=REQ["nonce_hex"], sender=REQ["sender"], payload=b"", stream="7")
+    by_hand.cancelled.set()
+    for req in (other, by_hand):
+        with pytest.raises(CancelNotReceivedError):
+            agent.rpc_confirm_stopped(req)
+    assert _posts() == []
+
+
+def test_an_answer_names_its_stream(port):
+    agent = MyceliumAgent("127.0.0.1", port)
+    _, other = _cancelled_and_not(agent)
+    agent.rpc_respond(other, b"done")
+    assert _posts()[-1]["stream"] == "7"
+
+
+def test_a_declaring_stream_reads_ahead_only_as_far_as_its_bound(port, monkeypatch):
+    """#806's review, M2: a declaring stream reads beside its caller, but no further than ``read_ahead``, so a busy
+    worker's backlog stays in the node's channel, which the node's admission reads."""
+    import mycelium.agent as agent_mod
+
+    made: list[object] = []
+
+    class Counting(agent_mod.RpcRequest):
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            super().__init__(*args, **kwargs)  # type: ignore[arg-type]
+            made.append(self)
+
+    monkeypatch.setattr(agent_mod, "RpcRequest", Counting)
+    _Node.burst = 10
+
+    async def run() -> None:
+        stream = MyceliumAgent("127.0.0.1", port).rpc_serve("depot.custom", stops_on_cancel=True, read_ahead=2)
+        await stream.__anext__()
+        await asyncio.sleep(0.5)  # a caller busy with its first request
+        await stream.aclose()
+
+    asyncio.run(run())
+    # The one taken, two queued, and one parsed and waiting for room — not all ten.
+    assert 1 <= len(made) <= 4, len(made)

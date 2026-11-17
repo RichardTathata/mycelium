@@ -226,15 +226,22 @@ class TestRpcGatewayServe:
 
     @pytest.mark.asyncio
     async def test_a_declaring_serve_stream_is_served_and_a_stray_confirmation_refused(self, agent: MyceliumAgent) -> None:
-        """Identity-and-lifecycle I4, PR 3b: the node takes ``stops_on_cancel`` and serves the stream as any other on
-        a node that cancels nothing; ``rpc_confirm_stopped`` for a call it did not cancel is ``False`` (409)."""
+        """Identity-and-lifecycle I4, PR 3b: the node takes ``stops_on_cancel``, names the stream, and serves it as any
+        other on a node that cancels nothing; ``rpc_confirm_stopped`` for a call never cancelled is refused by the SDK
+        itself (:class:`CancelNotReceivedError`), and nothing is sent."""
         import asyncio
+        from mycelium import CancelNotReceivedError
         node_id = agent.health()["node_id"]
         confirmed: list[bool] = []
 
         async def serve_once() -> None:
             async for req in agent.rpc_serve("gw-test.declared-echo", stops_on_cancel=True):
-                confirmed.append(agent.rpc_confirm_stopped(req))
+                assert req.stream, "the node names the stream"
+                try:
+                    agent.rpc_confirm_stopped(req)
+                    confirmed.append(True)
+                except CancelNotReceivedError:
+                    confirmed.append(False)
                 agent.rpc_respond(req, req.payload + b"-reply")
                 break
 
