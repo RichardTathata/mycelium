@@ -666,6 +666,33 @@ pub fn p256_point_on_curve(point: &[u8; 65]) -> bool {
     point[0] == 0x04 && p256::PublicKey::from_sec1_bytes(point).is_ok()
 }
 
+/// **The one P-256 verifier** (identity-and-lifecycle I7, P2): whether `sig` — an ASN.1 DER ECDSA signature, as
+/// CryptoKit's `derRepresentation` and `ring`'s `ECDSA_P256_SHA256_ASN1_SIGNING` write it — is `point`'s over the
+/// SHA-256 of `msg`. It sits beside [`verify_bytes`], which stays Ed25519-only, and is called where a consent record
+/// is checked (a signed grant decision) and nowhere else.
+///
+/// **`false` in every build where [`consent_grade_oid_open`] is false**: a shipped build neither issues nor reads a
+/// consent certificate while the grade OID is provisional, so it verifies no consent signature either — there is no
+/// ungated P-256 verification in this tree. `false` too for a point off the curve. The encoding is not canonical in
+/// the ECDSA sense (`(r, n − s)` verifies where `(r, s)` does); nothing keys on a decision's signature bytes.
+#[cfg(feature = "tls")]
+pub fn verify_consent_p256(point: &[u8; 65], msg: &[u8], sig_der: &[u8]) -> bool {
+    consent_grade_oid_open()
+        && p256_point_on_curve(point)
+        && ring::signature::UnparsedPublicKey::new(&ring::signature::ECDSA_P256_SHA256_ASN1, point).verify(msg, sig_der).is_ok()
+}
+
+/// Sign `msg` with the P-256 key in `pkcs8` (DER), as a consent key signs: ASN.1 DER ECDSA over SHA-256. **A test
+/// build's fixture only** (`cfg(test)` or `provisional-consent-grade`): `dev`'s signer is I7's PR 3, and no shipped
+/// build holds this. `None` for a key that does not parse.
+#[cfg(all(feature = "tls", any(test, feature = "provisional-consent-grade")))]
+#[doc(hidden)]
+pub fn sign_consent_p256_in_test_build(pkcs8: &[u8], msg: &[u8]) -> Option<Vec<u8>> {
+    let rng = ring::rand::SystemRandom::new();
+    let key = ring::signature::EcdsaKeyPair::from_pkcs8(&ring::signature::ECDSA_P256_SHA256_ASN1_SIGNING, pkcs8, &rng).ok()?;
+    key.sign(&rng, msg).ok().map(|s| s.as_ref().to_vec())
+}
+
 /// The DER content octets of [`CONSENT_GRADE_OID`] (base-128 arcs, the first two folded): what the walk compares an
 /// extension's `extnID` against. Pinned in a golden (`consent_tests`).
 pub fn consent_grade_oid_der() -> Vec<u8> {
@@ -3810,6 +3837,26 @@ mod ca_race_tests {
         assert!(named, "the closed gate is named as the reason");
         assert!(issued.is_err_and(|e| e.to_string().contains("provisional")), "ISSUED with the gate closed");
         assert!(super::consent_identity(cert.as_ref()).is_some(), "the gate reopens after the closure");
+    }
+
+    /// **The one P-256 verifier, and its gate** (I7, P2; #800's review finding 1, at the verifier). An ASN.1 DER ECDSA
+    /// signature by a consent key verifies under its point over the message, and not over another message, under
+    /// another point, for a truncated signature or a point off the curve. With the provisional gate closed — a
+    /// shipped build — the same signature verifies under nothing. Seen failing first with the gate check removed
+    /// (verified with the gate closed).
+    #[test]
+    fn the_p256_verifier_verifies_a_consent_signature_and_nothing_with_the_gate_closed() {
+        let (kp, point, _) = p256_key();
+        let (_, other, _) = p256_key();
+        let sig = super::sign_consent_p256_in_test_build(&kp.serialize_der(), b"a decision").expect("signed");
+        assert!(super::verify_consent_p256(&point, b"a decision", &sig));
+        assert!(!super::verify_consent_p256(&point, b"another decision", &sig), "another message");
+        assert!(!super::verify_consent_p256(&other, b"a decision", &sig), "another key");
+        assert!(!super::verify_consent_p256(&point, b"a decision", &sig[..sig.len() - 1]), "a truncated signature");
+        assert!(!super::verify_consent_p256(&[0u8; 65], b"a decision", &sig), "no point");
+        let closed = super::with_provisional_consent_grade_closed(|| super::verify_consent_p256(&point, b"a decision", &sig));
+        assert!(!closed, "VERIFIED: a consent signature with the provisional gate closed");
+        assert!(super::verify_consent_p256(&point, b"a decision", &sig), "the gate reopens after the closure");
     }
 
     /// **A point not on P-256 is refused at issue and at read** (#800's review, finding 4). `04 ‖ 0^64` and a point

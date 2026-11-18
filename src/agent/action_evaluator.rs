@@ -158,6 +158,12 @@ pub struct ActionEnvelope {
     pub correlation: Option<String>,
     /// The content hash of the record this action depends on, from `params._meta.parent` (X4). `None`: a root.
     pub parent: Option<String>,
+    /// **Which key signed the grant decision this envelope evaluates, and its grade** (identity-and-lifecycle I7) —
+    /// set at the grant decision point (`gateway:grants/issue`) for a signed decision the node verified, `None` for an
+    /// unsigned one and at every other enforcement point. A policy reads the grade as one of a **set it accepts**
+    /// ([`Rule::accepting_grades`]); the grades are not ordered. A consent grade is the statement of the operator who
+    /// issued the consent certificate, which no verifier can check — see [`SignedWith`](crate::SignedWith).
+    pub signed_with: Option<crate::agent::grant_decision::SignedWith>,
 }
 
 /// The mandate an action claims, and the enforcement point's finding about it (AE1).
@@ -290,6 +296,7 @@ impl ActionEnvelope {
                 data_class: None,
                 correlation: None,
                 parent: None,
+                signed_with: None,
             },
         }
     }
@@ -356,6 +363,13 @@ impl ActionEnvelopeBuilder {
     /// destination it established, never from the request.
     pub fn destination(mut self, destination: Destination) -> Self {
         self.inner.destination = Some(destination);
+        self
+    }
+
+    /// Which key signed the grant decision this envelope evaluates, and its grade (identity-and-lifecycle I7) — set
+    /// by the grant decision point from a decision it verified, never from the request.
+    pub fn signed_with(mut self, signed_with: crate::agent::grant_decision::SignedWith) -> Self {
+        self.inner.signed_with = Some(signed_with);
         self
     }
 
@@ -1809,7 +1823,24 @@ pub struct ReferenceEvaluator {
 }
 
 /// One rule of the reference evaluator: exact matches, `*` for any.
+///
+/// `#[non_exhaustive]` (#810's review, finding 6; as critique plan CR12 did for the configuration structs): outside
+/// this crate, start from [`Rule::new`] and use its builder methods or assign the fields you set, so a clause added
+/// later breaks no caller. A struct literal is refused (`docs/guide/deprecations.md` §118).
+///
+/// ```
+/// let r = mycelium::Rule::new("token:fleet/treasurer", "grant.issue", "*").requiring_scopes(["grant:issue"]);
+/// assert_eq!(r.requires_scopes, ["grant:issue"]);
+/// ```
+///
+/// The same rule as a literal does not compile — the twin of the block above, so the error is the literal:
+///
+/// ```compile_fail
+/// let r = mycelium::Rule { requires_scopes: vec!["grant:issue".into()], ..mycelium::Rule::new("token:fleet/treasurer", "grant.issue", "*") };
+/// # let _ = r;
+/// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Rule {
     /// Actor principal, or `*`.
     pub actor: String,
@@ -1851,6 +1882,15 @@ pub struct Rule {
     /// An allowance whose permitted call must be **cancellable** (identity-and-lifecycle I4, D-2): its permit
     /// carries [`Decision::cancellable`]. Read on an allowance only; a prohibition permits nothing.
     pub cancellable: bool,
+    /// **The grades this rule accepts** for a signed grant decision (identity-and-lifecycle I7): the rule applies
+    /// only to an envelope whose [`ActionEnvelope::signed_with`] names one of them. A **set**, never a minimum — the
+    /// grades are not ordered (`tty` and `service` are both a same-user file; `recording` exists only in `sim`). An
+    /// envelope with no `signed_with` (an unsigned decision, or any enforcement point but the grant decision's) is
+    /// not one of them, so the rule does not apply to it. Empty: the rule does not read the grade.
+    ///
+    /// A consent grade is what the operator who issued the consent certificate was told, which no verifier can check:
+    /// a rule accepting `os_presence(macos, unbound)` accepts that statement, not an observed presence.
+    pub signed_with: Vec<String>,
 }
 
 /// *At most `count` in `window_ms`* — a limit over the actor's history, counted at `scope`: this enforcement point
@@ -1883,7 +1923,24 @@ impl Rule {
             locality: None,
             counter: None,
             cancellable: false,
+            signed_with: Vec::new(),
         }
+    }
+
+    /// The rule applies only to a grant decision signed with one of `grades` (identity-and-lifecycle I7) — see
+    /// [`Rule::signed_with`]. A set of accepted grades, not a minimum. **A grade that does not exist is refused, by
+    /// name** ([`KNOWN_GRADES`](crate::agent::grant_decision::KNOWN_GRADES)), as a unit file's `signed_with` is: a
+    /// rule naming it would apply to no decision, and its author meant one that does.
+    pub fn accepting_grades<S: Into<String>>(mut self, grades: impl IntoIterator<Item = S>) -> Result<Self, String> {
+        let grades: Vec<String> = grades.into_iter().map(Into::into).collect();
+        if let Some(unknown) = grades.iter().find(|g| !crate::agent::grant_decision::KNOWN_GRADES.contains(&g.as_str())) {
+            return Err(format!(
+                "signed_with names the grade \"{unknown}\", which is none of {:?}: the rule would apply to no decision",
+                crate::agent::grant_decision::KNOWN_GRADES
+            ));
+        }
+        self.signed_with = grades;
+        Ok(self)
     }
 
     /// The call this allowance permits must be **cancellable** (identity-and-lifecycle I4, D-2): a provider that
@@ -2032,6 +2089,19 @@ impl Rule {
                 (Some(want), Some(d)) if d.locality != Locality::Unknown => want == d.locality,
                 _ => true,
             }
+            // I7: a rule naming grades applies only to a decision signed with one of them. An envelope carrying no
+            // `signed_with` was not signed (or is no grant decision): a definite fact, so the rule is not the one —
+            // never a match that some later clause could turn into a permit.
+            && (self.signed_with.is_empty() || env.signed_with.as_ref().is_some_and(|s| self.signed_with.contains(&s.grade)))
+    }
+
+    /// The grade clause a decision reports in `checked` when this rule read the grade (I7): the grade and whose
+    /// statement it is.
+    fn grade_clause(&self, env: &ActionEnvelope) -> Option<String> {
+        if self.signed_with.is_empty() {
+            return None;
+        }
+        env.signed_with.as_ref().map(|s| format!("signed_with grade={} key={} source={}", s.grade, s.key, s.grade_source))
     }
 }
 
@@ -2252,6 +2322,7 @@ impl ActionEvaluator for ReferenceEvaluator {
                     p.actor, p.operation, p.resource
                 ))
                 .chain(p.route_clause(env))
+                .chain(p.grade_clause(env))
                 .collect(),
                 reason: "an explicit prohibition matches this action".into(),
                 policy_revision: rev,
@@ -2379,6 +2450,7 @@ fn permit_of(a: &Rule, env: &ActionEnvelope, counted: Option<String>, rev: Strin
                 ));
             }
             c.extend(a.route_clause(env));
+            c.extend(a.grade_clause(env));
             c.extend(counted);
             if a.cancellable {
                 c.push("cancellable: runs only under an established call: mandate at the provider".into());
@@ -2771,6 +2843,49 @@ mod tests {
             let d = with_ledger(&ev, Some(other));
             assert_eq!(d.verdict, Verdict::Permit, "{other}: the allowance decides: {d:?}");
         }
+    }
+
+    /// **A rule accepts a set of grades** (identity-and-lifecycle I7; exit 15 at the evaluator). An allowance
+    /// accepting `os_presence(macos, unbound)` and `tty` permits a decision signed with either, names the grade and
+    /// whose statement it is in `checked`, and does not apply to one signed `service`, to an unsigned one (no
+    /// `signed_with`), or to a grade outside the set — authority not established, never a permit. A prohibition
+    /// naming `tty` denies a `tty` decision and leaves the others to the allowances. A rule naming no grade does not
+    /// read it. Seen failing first with `matches` not reading the clause (every case permitted).
+    #[test]
+    fn a_rule_accepts_a_set_of_grades_and_never_an_unsigned_decision() {
+        use crate::agent::grant_decision::SignedWith;
+        let os = "os_presence(macos, unbound)";
+        let ev = ReferenceEvaluator::new("rev-1").allow(Rule::new("consent:fleet/richard", "grant.issue", "*").accepting_grades([os, "tty"]).unwrap());
+        let at = |signed_with: Option<SignedWith>| {
+            let mut b = ActionEnvelope::builder("consent:fleet/richard", node(), "grant.issue", "tool:pay@n1").mapping(ActionMapping::mapped("c", "1")).validity(1_000, 61_000);
+            if let Some(s) = signed_with {
+                b = b.signed_with(s);
+            }
+            ev.evaluate(&b.build())
+        };
+        for grade in [os, "tty"] {
+            let d = at(Some(SignedWith::consent(grade)));
+            assert_eq!(d.verdict, Verdict::Permit, "{grade}: {d:?}");
+            assert!(d.checked.contains(&format!("signed_with grade={grade} key=p256 source=operator")), "CHECKED: {d:?}");
+        }
+        for (what, signed_with) in [("service", Some(SignedWith::service())), ("recording", Some(SignedWith::consent("recording"))), ("unsigned", None)] {
+            let d = at(signed_with);
+            assert_eq!(d.verdict, Verdict::Indeterminate, "ADMITTED: {what}: {d:?}");
+        }
+        let any = ReferenceEvaluator::new("rev-1").allow(Rule::new("*", "grant.issue", "*")).prohibit(Rule::new("*", "grant.issue", "*").accepting_grades(["tty"]).unwrap());
+        let env = |s: Option<SignedWith>| {
+            let mut b = ActionEnvelope::builder("consent:fleet/richard", node(), "grant.issue", "tool:pay@n1").mapping(ActionMapping::mapped("c", "1")).validity(1_000, 61_000);
+            if let Some(s) = s {
+                b = b.signed_with(s);
+            }
+            b.build()
+        };
+        assert_eq!(any.evaluate(&env(Some(SignedWith::consent("tty")))).verdict, Verdict::Deny, "a prohibition on tty");
+        assert_eq!(any.evaluate(&env(Some(SignedWith::consent(os)))).verdict, Verdict::Permit);
+        assert_eq!(any.evaluate(&env(None)).verdict, Verdict::Permit, "a rule naming no grade does not read it");
+        // A grade that does not exist is refused where the rule is built, by name (#810's review, nit).
+        let err = Rule::new("*", "grant.issue", "*").accepting_grades(["tty", "ttty"]).unwrap_err();
+        assert!(err.contains("\"ttty\"") && err.contains("apply to no decision"), "UNKNOWN GRADE: {err}");
     }
 
     fn envelope(actor: &str, operation: &str, resource: &str) -> ActionEnvelope {

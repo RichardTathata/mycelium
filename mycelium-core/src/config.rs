@@ -447,6 +447,72 @@ pub struct GatewayNamedToken {
     pub scopes: Vec<String>,
 }
 
+/// A **consent principal's authority at this gateway** (identity-and-lifecycle I7, the maintainer's decision A):
+/// `consent:{issuer}/{name}` — the principal a developer's consent certificate (`mycelium-consent://{issuer}/{name}`)
+/// names — the scopes its signed decisions hold here, and **the grade this gateway's operator accepts for it**.
+///
+/// A consent principal presents no bearer: it only signs grant decisions, which any bearer holding `grant:relay`
+/// carries. So it has its own table rather than a field on [`GatewayNamedToken`], whose entry would mint a bearer
+/// secret for a person who only decides. The one scope it can hold is `grant:issue`
+/// ([`GossipConfig::validate`] refuses any other by name, `*` included): a consent key decides grants and does nothing
+/// else. Granting it here gives nothing to the same person's `token:{issuer}/{name}` service principal, and the
+/// reverse; removing the entry revokes the consent principal alone.
+///
+/// **`signed_with` binds the grade outside the gossip KV** (the maintainer's decision of 2026-11-17, #810's review,
+/// finding 1). A decision is admitted only when three statements agree: the grade the signed body names, the grade
+/// of the consent certificate this node read, and the grade written here. The certificate travels in the KV, where
+/// any member can write an older, genuine one back and a node that never read the newer one would take its grade;
+/// this field is the gateway operator's own configuration, which no member can write. So a node never relies on
+/// which certificate reached it first. Re-certifying a key at another grade is therefore two deliberate acts by
+/// operators: `tls issue --grade` at the CA, and this field at each gateway.
+///
+/// `#[non_exhaustive]`: outside this crate, build one with [`GatewayConsentPrincipal::new`] and assign what differs,
+/// so a field added later breaks no caller. A struct literal is refused (`docs/guide/deprecations.md` §118).
+///
+/// ```
+/// let mut p = mycelium_core::config::GatewayConsentPrincipal::new("richard", "tty");
+/// p.scopes = vec![];
+/// # let _ = p;
+/// ```
+///
+/// The same entry as a literal does not compile — the twin of the block above, so the error is the literal:
+///
+/// ```compile_fail
+/// let p = mycelium_core::config::GatewayConsentPrincipal { scopes: vec![], ..mycelium_core::config::GatewayConsentPrincipal::new("richard", "tty") };
+/// # let _ = p;
+/// ```
+/// ```compile_fail
+/// let p = mycelium_core::config::GatewayConsentPrincipal { name: "richard".into(), scopes: vec![], signed_with: "tty".into() };
+/// # let _ = p;
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct GatewayConsentPrincipal {
+    /// The name the consent certificate carries, within this gateway's issuer (`gateway_identity_issuer`).
+    pub name: String,
+    /// `["grant:issue"]`, or empty (the entry then grants nothing).
+    #[serde(default)]
+    pub scopes: Vec<String>,
+    /// **The one consent grade accepted for this principal's decisions** — `os_presence(macos, unbound)`, `tty` or
+    /// `recording`; named as a unit file's rule names grades (`signed_with`), and here exactly one, since a consent
+    /// certificate carries one. Required: `validate()` refuses an entry without it, or naming a grade that is not a
+    /// consent grade (`service` included). As everywhere, a grade is what the certificate's issuer was told about
+    /// the key; this field says which such statement this gateway's operator accepts.
+    #[serde(default)]
+    pub signed_with: String,
+}
+
+impl GatewayConsentPrincipal {
+    /// `name` holding `grant:issue`, its decisions accepted at the consent grade `signed_with`.
+    pub fn new(name: impl Into<String>, signed_with: impl Into<String>) -> Self {
+        Self { name: name.into(), scopes: vec![CONSENT_PRINCIPAL_SCOPE.to_string()], signed_with: signed_with.into() }
+    }
+}
+
+/// The one scope a [`GatewayConsentPrincipal`] may hold.
+pub const CONSENT_PRINCIPAL_SCOPE: &str = "grant:issue";
+
 /// Outbound egress allow-policy (WS3 crown-jewel — blast-radius containment).
 ///
 /// A node-local allowlist of hosts the substrate may reach *outbound*. It is a
@@ -1736,6 +1802,22 @@ pub struct GossipConfig {
     #[serde(default)]
     pub gateway_named_tokens: Vec<GatewayNamedToken>,
 
+    /// **Consent principals' authority** (identity-and-lifecycle I7, A; `gateway` + `tls`): which
+    /// `consent:{issuer}/{name}` principals' signed grant decisions hold `grant:issue` at this gateway. A consent
+    /// decider is matched against this table and never against [`gateway_named_tokens`](Self::gateway_named_tokens);
+    /// a service decider the reverse. Each entry's scopes are `grant:issue` or nothing — `validate()` refuses any
+    /// other by name. Default: empty, so no consent principal decides. There is no environment form.
+    ///
+    /// While the consent grade extension's OID is provisional (`tls::CONSENT_GRADE_OID_IS_PROVISIONAL`) a shipped
+    /// build reads no consent certificate, and `start()` refuses a non-empty table by name rather than accept a
+    /// table it would never honour.
+    ///
+    /// Each entry also names the one grade accepted for the principal (`signed_with`, required): a decision is
+    /// admitted only when the signed body, the certificate and the entry agree on it
+    /// ([`GatewayConsentPrincipal`]).
+    #[serde(default)]
+    pub gateway_consent_principals: Vec<GatewayConsentPrincipal>,
+
     /// The issuing authority that qualifies every gateway-local caller principal (item 7):
     /// `token:{issuer}/…` for bearer tokens, and the `via` a provider sees. `None` (default) = this
     /// node's id, so two gateways never mint the same identity by accident. Set the **same** value on
@@ -2325,6 +2407,7 @@ impl Default for GossipConfig {
             gateway_max_connections:       1024,
             gateway_scoped_tokens:         Vec::new(),
             gateway_named_tokens:          Vec::new(),
+            gateway_consent_principals:    Vec::new(),
             gateway_identity_issuer:       None,
             require_identity_proofs:       true,
             #[allow(deprecated)]
@@ -2634,6 +2717,51 @@ impl GossipConfig {
         };
         for t in &self.gateway_scoped_tokens { malformed("gateway_scoped_tokens", &t.scopes)?; }
         for t in &self.gateway_named_tokens  { malformed("gateway_named_tokens",  &t.scopes)?; }
+        // Consent has its own authority and one scope (identity-and-lifecycle I7, A): a consent key decides grants
+        // and nothing else, so any other scope — `*` included — is refused by name, as is a blank or repeated name.
+        for (i, p) in self.gateway_consent_principals.iter().enumerate() {
+            // A name no consent certificate can carry would be accepted and never honoured (#810's review): one
+            // segment of 1–128 ASCII letters, digits, `-`, `_`, `.`, and not a reserved client name.
+            if !crate::tls::valid_client_segment(&p.name) || crate::tls::RESERVED_CLIENT_NAMES.contains(&p.name.as_str()) {
+                return Err(GossipError::InvalidField {
+                    field: "gateway_consent_principals",
+                    reason: format!(
+                        "the name {:?} is one no consent certificate can carry: a name is 1-128 ASCII letters, digits, `-`, `_` or `.` \
+                         (not `.` or `..`, and not a reserved name such as `legacy`) — write it as `tls issue --client <name> --consent` took it",
+                        p.name
+                    ),
+                });
+            }
+            if self.gateway_consent_principals[..i].iter().any(|q| q.name == p.name) {
+                return Err(GossipError::InvalidField {
+                    field: "gateway_consent_principals",
+                    reason: format!("the consent principal {:?} is listed twice; one entry holds its authority, so removing it revokes it", p.name),
+                });
+            }
+            // The grade is required and is a consent grade (the maintainer, 2026-11-17: the grade is bound here,
+            // outside the KV). Without it the entry would rest on whichever certificate reached the node first.
+            if crate::tls::ConsentGrade::parse(&p.signed_with).is_none() {
+                let all: Vec<&str> = crate::tls::ConsentGrade::ALL.iter().map(|g| g.as_str()).collect();
+                return Err(GossipError::InvalidField {
+                    field: "gateway_consent_principals",
+                    reason: if p.signed_with.is_empty() {
+                        format!("the consent principal {:?} names no grade: set `signed_with` to the one consent grade this gateway accepts for it, one of {all:?}", p.name)
+                    } else {
+                        format!("signed_with = {:?} for the consent principal {:?} is not a consent grade: one of {all:?}", p.signed_with, p.name)
+                    },
+                });
+            }
+            if let Some(other) = p.scopes.iter().find(|s| s.as_str() != CONSENT_PRINCIPAL_SCOPE) {
+                return Err(GossipError::InvalidField {
+                    field: "gateway_consent_principals",
+                    reason: format!(
+                        "scope {other:?} for the consent principal {:?}: a consent principal holds `{CONSENT_PRINCIPAL_SCOPE}` or nothing — \
+                         it decides grants and presents no bearer; give any other scope to a named token",
+                        p.name
+                    ),
+                });
+            }
+        }
         // One rule for blank secrets (#598's adversarial review): an empty or whitespace-only token is
         // a secret anyone can present, so it is refused in every form, by name — never counted as a
         // credential at start nor matched at request time.
@@ -3945,6 +4073,57 @@ mod tests {
     #[test]
     fn under_sim_the_default_shard_count_does_not_read_the_host() {
         assert_eq!(GossipConfig::default().gossip_shards, SIM_GOSSIP_SHARDS, "a recording's shard map would follow the machine it was made on");
+    }
+
+    /// **A consent principal holds `grant:issue` or nothing** (identity-and-lifecycle I7, A; exit 14): `validate()`
+    /// refuses any other scope by name — `*`, a family wildcard, another exact scope, `grant:relay` — and a blank or
+    /// repeated name; `grant:issue` and an empty list pass, and the table parses from TOML with unknown keys refused
+    /// (a `token` there would be a bearer for a person who only decides). Each entry names the one consent grade
+    /// accepted for it (`signed_with`), required and refused when absent or not a consent grade. Seen failing first
+    /// with the scope check removed (`*` and `kv:read` were accepted), with the name check reduced to blank-only, and
+    /// with the grade check removed (an entry with no grade, and one naming `service`, were accepted).
+    #[test]
+    fn a_consent_principal_holds_grant_issue_or_nothing() {
+        let entry = |name: &str, scopes: &[&str]| GatewayConsentPrincipal { name: name.into(), scopes: scopes.iter().map(|s| s.to_string()).collect(), signed_with: "tty".into() };
+        let mut cfg = GossipConfig::default();
+        cfg.gateway_consent_principals = vec![entry("richard", &["grant:issue"]), entry("dana", &[])];
+        cfg.validate().expect("grant:issue, or nothing");
+        for bad in ["*", "grant:*", "grant:relay", "kv:read", "identity:write", "mcp:invoke", ""] {
+            cfg.gateway_consent_principals = vec![entry("richard", &["grant:issue", bad])];
+            let err = cfg.validate().expect_err(bad);
+            assert!(matches!(&err, GossipError::InvalidField { field: "gateway_consent_principals", reason } if reason.contains(&format!("{bad:?}")) && reason.contains("richard")), "{bad}: {err}");
+        }
+        // A name no consent certificate can carry (#810's review): blank, padded, two segments, outside the
+        // alphabet, a dot segment, a reserved client name, too long.
+        for bad in ["", "  ", " richard", "richard ", "fleet/richard", "rich ard", "richárd", ".", "..", "legacy", &"a".repeat(129)] {
+            cfg.gateway_consent_principals = vec![entry(bad, &["grant:issue"])];
+            let err = cfg.validate().expect_err(bad);
+            assert!(matches!(&err, GossipError::InvalidField { field: "gateway_consent_principals", reason } if reason.contains("no consent certificate can carry")), "NAME {bad:?}: {err}");
+        }
+        for good in ["richard", "r.t-1_x", &"a".repeat(128)] {
+            cfg.gateway_consent_principals = vec![entry(good, &["grant:issue"])];
+            cfg.validate().unwrap_or_else(|e| panic!("{good}: {e}"));
+        }
+        cfg.gateway_consent_principals = vec![entry("richard", &["grant:issue"]), entry("richard", &[])];
+        assert!(matches!(cfg.validate(), Err(GossipError::InvalidField { field: "gateway_consent_principals", .. })), "a repeated name");
+        let parsed: GossipConfig = toml::from_str("[[gateway_consent_principals]]\nname = \"richard\"\nscopes = [\"grant:issue\"]\nsigned_with = \"tty\"\n").unwrap();
+        assert_eq!(parsed.gateway_consent_principals, vec![entry("richard", &["grant:issue"])]);
+        assert_eq!(GatewayConsentPrincipal::new("richard", "tty"), entry("richard", &["grant:issue"]));
+        // The grade is required and is a consent grade (the maintainer's decision of 2026-11-17): every consent
+        // grade passes; none, `service`, a near miss and a list's worth do not — by name.
+        for grade in crate::tls::ConsentGrade::ALL {
+            cfg.gateway_consent_principals = vec![GatewayConsentPrincipal::new("richard", grade.as_str())];
+            cfg.validate().unwrap_or_else(|e| panic!("{grade}: {e}"));
+        }
+        for bad in ["", "service", "ttty", "TTY", "os_presence", "tty,recording"] {
+            cfg.gateway_consent_principals = vec![GatewayConsentPrincipal::new("richard", bad)];
+            let err = cfg.validate().expect_err(bad);
+            assert!(matches!(&err, GossipError::InvalidField { field: "gateway_consent_principals", reason } if reason.contains("richard") && (reason.contains("names no grade") || reason.contains("not a consent grade"))), "GRADE {bad:?}: {err}");
+        }
+        let ungraded: GossipConfig = toml::from_str("[[gateway_consent_principals]]\nname = \"richard\"\nscopes = [\"grant:issue\"]\n").unwrap();
+        assert!(matches!(ungraded.validate(), Err(GossipError::InvalidField { field: "gateway_consent_principals", reason }) if reason.contains("names no grade")), "a file's entry without signed_with");
+        assert!(toml::from_str::<GossipConfig>("[[gateway_consent_principals]]\nname = \"richard\"\ntoken = \"s\"\n").is_err(), "a bearer on a consent principal");
+        assert!(GossipConfig::default().gateway_consent_principals.is_empty(), "default: no consent principal decides");
     }
 
     #[test]

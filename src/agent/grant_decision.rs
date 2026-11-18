@@ -10,6 +10,43 @@
 //! `not_addressed_here`; the clock inside the caller envelope's window — else `stale`. A replay of a signed decision
 //! inside its window finds the request already answered or already revoked, so no nonce cache is kept: the decision
 //! routes take one claim per request on this node (`http/grants.rs`), so concurrent copies are answered once.
+//!
+//! ## The grade (identity-and-lifecycle I7: P1, P2, P4 as H2 revised it, P7)
+//!
+//! A decider is one of two kinds, told apart by its principal and bound to its key's kind:
+//!
+//! - a **service**, `token:{issuer}/{name}`, signing with its client certificate's Ed25519 key (`k` 32 bytes, `sig`
+//!   64). Its decision is recorded `signed_with.grade = "service"`. Its body names no grade (a pre-I7 SDK's body, which
+//!   verifies unchanged) or names `service`; any other grade is refused;
+//! - a **consent principal**, `consent:{issuer}/{name}`, signing with the P-256 key its consent certificate names
+//!   (`k` the 65-byte uncompressed point, `sig` an ASN.1 DER ECDSA signature over SHA-256). Its body **names its
+//!   grade** — a body without one is refused before anything else is checked — and the grade must be the one in the
+//!   **certificate at the principal's mark**, or the decision is refused. A key of the other kind under either
+//!   principal is refused: a service key is never a consent key.
+//!
+//! The grade is inside the signed message ([`grant_decision_message_graded`]), so a relay cannot alter it.
+//!
+//! **What the grade says.** A consent grade is *what the operator who issued the certificate was told* about where
+//! the key lives; the fleet CA signed that statement, and no verifier can observe it (S-presence: a software key and
+//! an Enclave key verify alike). So [`SignedWith`] carries `grade_source: "operator"` beside a consent grade, and this
+//! node's promise is only what it checked itself: the signature, the certificate's chain and standing, and that the
+//! body's grade is the certificate's. `service` is read from the kind of certificate the key is in
+//! (`grade_source: "certificate_scheme"`).
+//!
+//! **The provisional gate.** While the grade extension's OID is provisional
+//! (`mycelium_core::tls::consent_grade_oid_open`), a build that is not a test build refuses a consent decider's
+//! decision by name (`consent_grade_oid_provisional`) before it reads a key or checks a signature, and
+//! `mycelium_core::tls::verify_consent_p256` verifies nothing.
+//!
+//! `recording` is accepted only in a `sim` build.
+//!
+//! **The grade is bound outside the KV** (the maintainer's decision of 2026-11-17; #810's review, finding 1). The
+//! decision routes admit a consent decision only when three statements agree: the grade the signed body names, the
+//! grade of the certificate this node read (both checked here), and the grade the gateway's own
+//! `gateway_consent_principals` entry accepts for the principal (`http/grants.rs`, `decision_grade_not_accepted`,
+//! counted). The certificate is a KV record: a member can write an older, genuine one back, and a node that never
+//! read the newer one would take its grade. The entry is the operator's configuration, which no member writes — so a
+//! node never relies on which certificate reached it first.
 
 use serde::{Deserialize, Serialize};
 
@@ -17,8 +54,26 @@ use serde::{Deserialize, Serialize};
 pub const GRANT_DECISION_TAG: &[u8] = b"mycelium.gateway/grant-decision/1";
 
 /// A decision's signature, sent as the decision body's `signed` field.
+///
+/// `#[non_exhaustive]` (#810's review, finding 6; as critique plan CR12 did for the configuration structs): outside
+/// this crate, build one with [`sign_grant_decision`], [`sign_grant_decision_graded`] or [`SignedDecision::from_parts`]
+/// (a signer this crate does not hold the key of — a consent key's), so a field added later breaks no caller. A
+/// struct literal is refused (`docs/guide/deprecations.md` §118).
+///
+/// ```
+/// let d = mycelium::SignedDecision::from_parts("consent:fleet/richard", "127.0.0.1:7946", "token:fleet/forecaster", "r1", 1, "a2V5", "c2ln", Some("tty"));
+/// assert_eq!(d.grade.as_deref(), Some("tty"));
+/// ```
+///
+/// The same fields as a literal do not compile — the twin of the block above, so the error is the literal:
+///
+/// ```compile_fail
+/// let d = mycelium::SignedDecision { decider: "consent:fleet/richard".into(), node: "127.0.0.1:7946".into(), agent: "token:fleet/forecaster".into(), request: "r1".into(), t: 1, k: "a2V5".into(), sig: "c2ln".into(), grade: Some("tty".into()) };
+/// # let _ = d;
+/// ```
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct SignedDecision {
     /// The principal who decided, as its client certificate names it (`token:{issuer}/{name}`).
     pub decider: String,
@@ -30,17 +85,147 @@ pub struct SignedDecision {
     pub request: String,
     /// The decider's wall clock (ms) when it signed.
     pub t: u64,
-    /// Base64 of the decider's client-certificate Ed25519 key (32 bytes).
+    /// Base64 of the decider's key: a service's client-certificate Ed25519 key (32 bytes), or a consent principal's
+    /// P-256 point (65 bytes, uncompressed X9.63 — identity-and-lifecycle I7).
     pub k: String,
-    /// Base64 of the Ed25519 signature (64 bytes) over [`grant_decision_message`].
+    /// Base64 of the signature over [`grant_decision_message_graded`]: Ed25519 (64 bytes) under a service key, ASN.1
+    /// DER ECDSA over SHA-256 under a consent key.
     pub sig: String,
+    /// The grade the signer names, inside the signature (identity-and-lifecycle I7). Absent from a service's body (a
+    /// pre-I7 body), or `service` there; **required** of a consent principal, and equal to its certificate's. Never
+    /// empty. Serialised only when present, so a pre-I7 body is byte-for-byte what it was — and a node before I7
+    /// refuses a body that carries it (unknown field), so verifiers are upgraded before a signer names a grade.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grade: Option<String>,
+}
+
+/// The grade a service's decision is recorded with (identity-and-lifecycle I7): a `token:` decider signing with its
+/// client certificate's Ed25519 key. Not a consent grade — no consent certificate carries it.
+pub const GRADE_SERVICE: &str = "service";
+
+/// Every grade a decision can be recorded with (identity-and-lifecycle I7): [`GRADE_SERVICE`] and the consent grades
+/// (`mycelium_core::tls::ConsentGrade`, as literals: this is read in every build). A rule's `signed_with` names
+/// some of these; any other string is refused, since such a rule would apply to no decision.
+pub const KNOWN_GRADES: [&str; 4] = [GRADE_SERVICE, "os_presence(macos, unbound)", "tty", "recording"];
+
+/// **Which key signed a decision, and the grade recorded with it** (identity-and-lifecycle I7) — on the answer's
+/// record and the evidence record (`signed_with`), and on the [`ActionEnvelope`](crate::ActionEnvelope) the decision
+/// is evaluated with.
+///
+/// `grade` is never an observation of how the decision was made. For a consent key it is **what the operator who
+/// issued the consent certificate was told** about where the key lives (`grade_source: "operator"`): the fleet CA
+/// signed that statement, the node that verified the decision checked that the signed body names the same grade, and
+/// nobody in the fleet can check the statement itself (P1, H2) — a `tty` decision may have been signed by any process
+/// running as the user, the agent whose request it approves included (P7's residual), and an `os_presence(macos,
+/// unbound)` one proves at most that a person was present, not what they were shown (P5). For a service key the grade
+/// is `service`, read from the kind of certificate the key is in (`grade_source: "certificate_scheme"`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct SignedWith {
+    /// The signing key's kind: `ed25519` (a service's client-certificate key) or `p256` (a consent key).
+    pub key: String,
+    /// `service`, or the consent certificate's grade (`os_presence(macos, unbound)`, `tty`, `recording`).
+    pub grade: String,
+    /// Who the grade is the statement of: `operator` (a consent certificate's grade: the issuer's host was told it)
+    /// or `certificate_scheme` (`service`: the key is in a client certificate).
+    pub grade_source: String,
+    /// **Which certificate the grade was read from**: its issuance (ms, the certificate's serial) — the principal's
+    /// mark when the decision was verified (#810's review, finding 2). After a re-issue over the same key the record
+    /// path holds only the newer certificate, so this is what lets an auditor tell which of the key's certificates
+    /// the node's statement was about. `None` only where the node no longer held the mark.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub certificate_issued_ms: Option<u64>,
+    /// The SHA-256 of that certificate's DER, lower-case hex, for a consent key (the certificate was read to take its
+    /// grade). `None` for a service key, whose certificate is not read at the decision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub certificate_sha256: Option<String>,
+}
+
+impl SignedWith {
+    /// `key` value: a service's Ed25519 client-certificate key.
+    pub const KEY_ED25519: &'static str = "ed25519";
+    /// `key` value: a consent principal's P-256 key.
+    pub const KEY_P256: &'static str = "p256";
+    /// `grade_source` value: the grade is the certificate issuer's statement of what it was told.
+    pub const SOURCE_OPERATOR: &'static str = "operator";
+    /// `grade_source` value: the grade follows from the kind of certificate the key is in.
+    pub const SOURCE_CERTIFICATE_SCHEME: &'static str = "certificate_scheme";
+
+    /// A service decider's: Ed25519, `service`.
+    pub fn service() -> Self {
+        Self { key: Self::KEY_ED25519.into(), grade: GRADE_SERVICE.into(), grade_source: Self::SOURCE_CERTIFICATE_SCHEME.into(), certificate_issued_ms: None, certificate_sha256: None }
+    }
+
+    /// A consent decider's: P-256, the grade its certificate carries — the operator's statement.
+    pub fn consent(grade: impl Into<String>) -> Self {
+        Self { key: Self::KEY_P256.into(), grade: grade.into(), grade_source: Self::SOURCE_OPERATOR.into(), certificate_issued_ms: None, certificate_sha256: None }
+    }
+
+    /// Naming the certificate the grade was read from: its issuance and, when it was read, its digest.
+    pub fn from_certificate(mut self, issued_ms: Option<u64>, sha256: Option<String>) -> Self {
+        self.certificate_issued_ms = issued_ms;
+        self.certificate_sha256 = sha256;
+        self
+    }
+
+    /// The key's kind, the grade and whose statement it is — without the certificate it was read from.
+    pub fn same_grade_as(&self, other: &Self) -> bool {
+        (&self.key, &self.grade, &self.grade_source) == (&other.key, &other.grade, &other.grade_source)
+    }
+}
+
+/// Whether `principal` is a consent principal (`consent:{issuer}/{name}`, identity-and-lifecycle I7).
+#[cfg(all(feature = "gateway", feature = "tls"))]
+pub(crate) fn is_consent_principal(principal: &str) -> bool {
+    principal.starts_with("consent:")
+}
+
+/// Whether a `recording` consent grade is accepted by a build: only a `sim` build's (identity-and-lifecycle I7).
+pub fn recording_grade_accepted_when(sim_build: bool) -> bool {
+    sim_build
+}
+
+/// A decision's key, decoded by its kind (identity-and-lifecycle I7, P2).
+#[cfg(feature = "tls")]
+enum DeciderKey {
+    Ed25519([u8; 32], [u8; 64]),
+    P256(Box<[u8; 65]>, Vec<u8>),
+}
+
+/// The longest ASN.1 DER ECDSA P-256 signature: a SEQUENCE of two 33-byte INTEGERs.
+#[cfg(feature = "tls")]
+const P256_DER_SIG_MAX: usize = 72;
+
+#[cfg(feature = "tls")]
+impl DeciderKey {
+    /// `k` and `sig` decoded by `k`'s length: 32 bytes is an Ed25519 key with a 64-byte signature, 65 a P-256 point
+    /// with a DER signature. Anything else is `None`.
+    fn decode(signed: &SignedDecision) -> Option<Self> {
+        use base64::Engine as _;
+        let b64 = base64::engine::general_purpose::STANDARD;
+        let (k, sig) = (b64.decode(&signed.k).ok()?, b64.decode(&signed.sig).ok()?);
+        match k.len() {
+            32 => Some(Self::Ed25519(k.try_into().ok()?, sig.try_into().ok()?)),
+            65 if !sig.is_empty() && sig.len() <= P256_DER_SIG_MAX => Some(Self::P256(Box::new(k.try_into().ok()?), sig)),
+            _ => None,
+        }
+    }
+
+    fn verifies(&self, msg: &[u8]) -> bool {
+        match self {
+            Self::Ed25519(key, sig) => crate::tls::verify_bytes(key, msg, sig),
+            // Gated: `false` in a build that reads no consent certificate.
+            Self::P256(point, sig) => mycelium_core::tls::verify_consent_p256(point, msg, sig),
+        }
+    }
 }
 
 /// The bytes a decider signs: [`GRANT_DECISION_TAG`], then the decider, the addressed node, the holder, the request,
 /// the decision (`issue`, `refuse` or `revoke`), an issue's `ttl_secs` in decimal (empty when absent) and the reason
 /// (empty when absent) — each as a `u32` little-endian length and its bytes — then `issued_at_ms` as a `u64`
 /// little-endian. **Published format**: the SDKs compute it, and `tests/fixtures/decision/vector.json` pins it in all
-/// three languages.
+/// three languages. This is the message of a decision naming **no grade**; [`grant_decision_message_graded`] is the
+/// whole format.
 #[allow(clippy::too_many_arguments)]
 pub fn grant_decision_message(
     decider: &str,
@@ -52,6 +237,26 @@ pub fn grant_decision_message(
     reason: Option<&str>,
     issued_at_ms: u64,
 ) -> Vec<u8> {
+    grant_decision_message_graded(decider, node, agent, request, decision, ttl_secs, reason, issued_at_ms, None)
+}
+
+/// [`grant_decision_message`] with the signer's **grade** (identity-and-lifecycle I7): when `grade` is `Some`, a `u32`
+/// little-endian length and the grade's bytes follow `issued_at_ms`; when it is `None` nothing follows, so a decision
+/// naming no grade has exactly the message it had before I7 and every signature over it stands. An empty grade is no
+/// grade a verifier accepts (a signed decision naming `""` is refused), and this writes it as its zero length.
+/// **Published format**, pinned with and without a grade in `tests/fixtures/decision/vector.json`.
+#[allow(clippy::too_many_arguments)]
+pub fn grant_decision_message_graded(
+    decider: &str,
+    node: &str,
+    agent: &str,
+    request: &str,
+    decision: &str,
+    ttl_secs: Option<u64>,
+    reason: Option<&str>,
+    issued_at_ms: u64,
+    grade: Option<&str>,
+) -> Vec<u8> {
     let ttl = ttl_secs.map(|t| t.to_string()).unwrap_or_default();
     let mut out = GRANT_DECISION_TAG.to_vec();
     for part in [decider, node, agent, request, decision, ttl.as_str(), reason.unwrap_or("")] {
@@ -59,30 +264,54 @@ pub fn grant_decision_message(
         out.extend_from_slice(part.as_bytes());
     }
     out.extend_from_slice(&issued_at_ms.to_le_bytes());
+    if let Some(grade) = grade {
+        out.extend_from_slice(&(grade.len() as u32).to_le_bytes());
+        out.extend_from_slice(grade.as_bytes());
+    }
     out
 }
 
 impl SignedDecision {
-    /// Whether `sig` is a signature under `k` over this decision — the signed fields and the decision's terms — for
-    /// re-verifying a record afterwards (an evidence record's `signed_decision`, a refusal's or revocation's
-    /// `signed`). It checks the signature only: whether `k` was the decider's current client key at `t` is read from
-    /// the decider's `sys/client-cert/` records.
+    /// A signed decision from its parts, as a signer outside this crate assembles one: `k` and `sig` base64 (see the
+    /// fields), `grade` the grade named inside the signature, if any. Nothing is checked here; the node the decision
+    /// is addressed to verifies it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_parts(
+        decider: impl Into<String>,
+        node: impl Into<String>,
+        agent: impl Into<String>,
+        request: impl Into<String>,
+        t: u64,
+        k: impl Into<String>,
+        sig: impl Into<String>,
+        grade: Option<&str>,
+    ) -> Self {
+        Self { decider: decider.into(), node: node.into(), agent: agent.into(), request: request.into(), t, k: k.into(), sig: sig.into(), grade: grade.map(str::to_string) }
+    }
+
+    /// Whether `sig` is a signature under `k` over this decision — the signed fields, the decision's terms and the
+    /// grade the body names — for re-verifying a record afterwards (an evidence record's `signed_decision`, a
+    /// refusal's or revocation's `signed`). It checks the signature only, under the key's kind (Ed25519, or P-256 for
+    /// a consent key): whether `k` was the decider's current key at `t`, and whether the grade is its certificate's,
+    /// are read from the decider's `sys/client-cert/` records. `false` for a body naming an empty grade, and for a
+    /// consent key's signature in a build that reads no consent certificate (the provisional gate).
     #[cfg(feature = "tls")]
     pub fn verify_signature(&self, decision: &str, ttl_secs: Option<u64>, reason: Option<&str>) -> bool {
-        use base64::Engine as _;
-        let b64 = base64::engine::general_purpose::STANDARD;
-        let (Some(key), Some(sig)) = (
-            b64.decode(&self.k).ok().and_then(|v| <[u8; 32]>::try_from(v).ok()),
-            b64.decode(&self.sig).ok().and_then(|v| <[u8; 64]>::try_from(v).ok()),
-        ) else {
+        if self.grade.as_deref() == Some("") {
             return false;
-        };
-        let msg = grant_decision_message(&self.decider, &self.node, &self.agent, &self.request, decision, ttl_secs, reason, self.t);
-        crate::tls::verify_bytes(&key, &msg, &sig)
+        }
+        let Some(key) = DeciderKey::decode(self) else { return false };
+        key.verifies(&self.message(decision, ttl_secs, reason))
+    }
+
+    /// The bytes this decision's signature is over, for `decision` and its terms.
+    pub fn message(&self, decision: &str, ttl_secs: Option<u64>, reason: Option<&str>) -> Vec<u8> {
+        grant_decision_message_graded(&self.decider, &self.node, &self.agent, &self.request, decision, ttl_secs, reason, self.t, self.grade.as_deref())
     }
 }
 
-/// Sign a decision with `key` as `decider`, at `issued_at_ms`.
+/// Sign a decision with `key` as `decider`, at `issued_at_ms`, naming no grade (a service's decision is recorded
+/// `service` either way).
 #[cfg(feature = "tls")]
 #[allow(clippy::too_many_arguments)]
 pub fn sign_grant_decision(
@@ -96,9 +325,29 @@ pub fn sign_grant_decision(
     reason: Option<&str>,
     issued_at_ms: u64,
 ) -> SignedDecision {
+    sign_grant_decision_graded(key, decider, node, agent, request, decision, ttl_secs, reason, issued_at_ms, None)
+}
+
+/// [`sign_grant_decision`] naming `grade` inside the signature (identity-and-lifecycle I7). An Ed25519 key is a
+/// service's, whose only grade is [`GRADE_SERVICE`]: a verifier refuses any other from it. A consent key's signer is
+/// `dev`'s (I7's later PR), not this function.
+#[cfg(feature = "tls")]
+#[allow(clippy::too_many_arguments)]
+pub fn sign_grant_decision_graded(
+    key: &ed25519_dalek::SigningKey,
+    decider: &str,
+    node: &str,
+    agent: &str,
+    request: &str,
+    decision: &str,
+    ttl_secs: Option<u64>,
+    reason: Option<&str>,
+    issued_at_ms: u64,
+    grade: Option<&str>,
+) -> SignedDecision {
     use base64::Engine as _;
     use ed25519_dalek::Signer as _;
-    let msg = grant_decision_message(decider, node, agent, request, decision, ttl_secs, reason, issued_at_ms);
+    let msg = grant_decision_message_graded(decider, node, agent, request, decision, ttl_secs, reason, issued_at_ms, grade);
     let b64 = base64::engine::general_purpose::STANDARD;
     SignedDecision {
         decider: decider.to_string(),
@@ -108,6 +357,7 @@ pub fn sign_grant_decision(
         t: issued_at_ms,
         k: b64.encode(key.verifying_key().to_bytes()),
         sig: b64.encode(key.sign(&msg).to_bytes()),
+        grade: grade.map(str::to_string),
     }
 }
 
@@ -135,6 +385,21 @@ pub(crate) enum DecisionRefusal {
     /// This gateway has no `gateway_identity_issuer`: its principals are qualified by its node id, which no client
     /// certificate names, so no decider can be one of them (as I1's doors refuse a signed call).
     IssuerUnset,
+    /// A consent decider's decision at a build that reads no consent certificate: the grade extension's OID is
+    /// provisional and this is no test build (identity-and-lifecycle I7). Refused before a key is read.
+    ConsentUnread,
+    /// The body names an empty grade.
+    GradeEmpty,
+    /// A consent decider's body names no grade.
+    GradeMissing,
+    /// The body's grade is not the one recorded for the key: a service naming any grade but `service`, or a consent
+    /// principal naming a grade other than its certificate's (the detail says which).
+    GradeMismatch(String),
+    /// A `recording` consent grade outside a `sim` build.
+    RecordingOutsideSim,
+    /// The decision's grade — the signed body's and the certificate's, which agree — is not the one this gateway's
+    /// `gateway_consent_principals` entry accepts for the principal (the maintainer's decision of 2026-11-17).
+    GradeNotAccepted(String),
 }
 
 #[cfg(all(feature = "gateway", feature = "tls"))]
@@ -150,21 +415,28 @@ impl DecisionRefusal {
             Self::Unsigned => "decision_unsigned",
             Self::Unverifiable => "decision_unverifiable",
             Self::IssuerUnset => "gateway_identity_issuer_unset",
+            Self::ConsentUnread => "consent_grade_oid_provisional",
+            Self::GradeEmpty => "decision_grade_empty",
+            Self::GradeMissing => "decision_grade_missing",
+            Self::GradeMismatch(_) => "decision_grade_mismatch",
+            Self::RecordingOutsideSim => "recording_grade_outside_sim",
+            Self::GradeNotAccepted(_) => "decision_grade_not_accepted",
         }
     }
 
     pub(crate) fn status(&self) -> axum::http::StatusCode {
         use axum::http::StatusCode;
         match self {
-            Self::Malformed => StatusCode::BAD_REQUEST,
+            Self::Malformed | Self::GradeEmpty => StatusCode::BAD_REQUEST,
             Self::NotAddressedHere(_) | Self::IssuerUnset => StatusCode::CONFLICT,
+            Self::ConsentUnread => StatusCode::UNPROCESSABLE_ENTITY,
             _ => StatusCode::FORBIDDEN,
         }
     }
 
     pub(crate) fn detail(&self) -> String {
         match self {
-            Self::Malformed => "signed.k is not a base64 32-byte key, or signed.sig not a base64 64-byte signature".into(),
+            Self::Malformed => "signed.k is not a base64 32-byte Ed25519 key with a base64 64-byte signature, nor a base64 65-byte P-256 point with a base64 DER signature".into(),
             Self::NotTheDecider(why) => why.clone(),
             Self::Retargeted => "the signed agent or request is not this route's: a decision is signed for one request".into(),
             Self::NotAddressedHere(node) => format!("the decision is addressed to {node}, not this node; deliver it there"),
@@ -173,12 +445,25 @@ impl DecisionRefusal {
             Self::Unsigned => "a bearer holding only grant:relay carries a decision a decider signed (`signed`)".into(),
             Self::Unverifiable => "this node has no identity ([tls]) and cannot judge a client certificate".into(),
             Self::IssuerUnset => "a signed decision needs this gateway's gateway_identity_issuer set: without it principals are qualified by the node id, which no client certificate names".into(),
+            Self::ConsentUnread => "consent decisions are not read by this build: the grade extension's OID is provisional until the registered IANA Private Enterprise Number arc arrives (identity-and-lifecycle I7)".into(),
+            Self::GradeEmpty => "signed.grade is empty: a decision names a grade or leaves the field out".into(),
+            Self::GradeMissing => "a consent principal's decision names its grade (signed.grade), inside the signature".into(),
+            Self::GradeMismatch(why) => why.clone(),
+            Self::RecordingOutsideSim => "a `recording` consent grade is accepted only by a `sim` build".into(),
+            Self::GradeNotAccepted(why) => why.clone(),
         }
     }
 }
 
 /// Verify `signed` for the decision a route holds: `holder` and `request` the route's path, `decision`, `ttl_secs`
-/// and `reason` its body. Checked in the module's order; `Ok` means the decider signed exactly this, here, now.
+/// and `reason` its body. Checked in the module's order; `Ok` means the decider signed exactly this, here, now, and
+/// names which key signed and the grade recorded with it ([`SignedWith`]).
+///
+/// The grade's order (identity-and-lifecycle I7): a consent decider at a build that reads no consent certificate is
+/// refused first, by name; then the body's grade as written (empty; absent from a consent decider; a service naming
+/// anything but `service`), before any key is used; then the key's kind against the principal's; the signature; the
+/// key's standing; and, for a consent key, the grade of **the certificate at the principal's mark** against the
+/// body's.
 #[cfg(all(feature = "gateway", feature = "tls"))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn verify(
@@ -190,26 +475,79 @@ pub(crate) fn verify(
     ttl_secs: Option<u64>,
     reason: Option<&str>,
     now_ms: u64,
-) -> Result<(), DecisionRefusal> {
-    use base64::Engine as _;
-    let b64 = base64::engine::general_purpose::STANDARD;
-    let key: [u8; 32] = b64.decode(&signed.k).ok().and_then(|v| v.try_into().ok()).ok_or(DecisionRefusal::Malformed)?;
-    let sig: [u8; 64] = b64.decode(&signed.sig).ok().and_then(|v| v.try_into().ok()).ok_or(DecisionRefusal::Malformed)?;
+) -> Result<SignedWith, DecisionRefusal> {
+    use super::client_cert::ClientKeyStanding;
+    let consent = is_consent_principal(&signed.decider);
+    // A shipped build reads no consent certificate, so it judges no consent decision: by name, before a key is read.
+    if consent && !mycelium_core::tls::consent_grade_oid_open() {
+        return Err(DecisionRefusal::ConsentUnread);
+    }
+    let key = DeciderKey::decode(signed).ok_or(DecisionRefusal::Malformed)?;
+    if matches!(key, DeciderKey::P256(..)) && !mycelium_core::tls::consent_grade_oid_open() {
+        return Err(DecisionRefusal::ConsentUnread);
+    }
+    // The grade as the body writes it, before any key is used.
+    match signed.grade.as_deref() {
+        Some("") => return Err(DecisionRefusal::GradeEmpty),
+        None if consent => return Err(DecisionRefusal::GradeMissing),
+        Some(g) if !consent && g != GRADE_SERVICE => {
+            return Err(DecisionRefusal::GradeMismatch(format!("{} is a service principal, whose decisions are recorded `{GRADE_SERVICE}`: it names `{g}`", signed.decider)))
+        }
+        _ => {}
+    }
     if ctx.tls.get().is_none() {
         return Err(DecisionRefusal::Unverifiable);
     }
-    let msg = grant_decision_message(&signed.decider, &signed.node, &signed.agent, &signed.request, decision, ttl_secs, reason, signed.t);
-    if !crate::tls::verify_bytes(&key, &msg, &sig) {
+    // The key's kind is the principal's: a service key is never a consent key, nor the reverse (H1).
+    match (&key, consent) {
+        (DeciderKey::Ed25519(..), true) => {
+            return Err(DecisionRefusal::NotTheDecider(format!("{} is a consent principal, whose key is a P-256 point: an Ed25519 key is a service's, never a consent key", signed.decider)))
+        }
+        (DeciderKey::P256(..), false) => {
+            return Err(DecisionRefusal::NotTheDecider(format!("{} is not a consent principal: a P-256 key decides only as consent:{{issuer}}/{{name}}", signed.decider)))
+        }
+        _ => {}
+    }
+    let msg = signed.message(decision, ttl_secs, reason);
+    if !key.verifies(&msg) {
         return Err(DecisionRefusal::NotTheDecider(format!("the signature is not {}'s over this decision", signed.decider)));
     }
     // After the signature, so a forgery answers as one.
-    match super::client_cert::client_key_standing(ctx, &signed.decider, &key) {
-        super::client_cert::ClientKeyStanding::Current => {}
-        super::client_cert::ClientKeyStanding::Superseded => {
-            return Err(DecisionRefusal::NotTheDecider(format!("the key is one {} held before a newer certificate", signed.decider)))
-        }
-        _ => return Err(DecisionRefusal::NotTheDecider(format!("the key is not {}'s client key on record here", signed.decider))),
-    }
+    let superseded = || DecisionRefusal::NotTheDecider(format!("the key is one {} held before a newer certificate", signed.decider));
+    let signed_with = match &key {
+        DeciderKey::Ed25519(key, _) => match super::client_cert::client_key_standing(ctx, &signed.decider, key) {
+            ClientKeyStanding::Current => {
+                SignedWith::service().from_certificate(ctx.client_certs.mark(&signed.decider).filter(|m| m.key == *key).map(|m| m.issued), None)
+            }
+            ClientKeyStanding::Superseded => return Err(superseded()),
+            _ => return Err(DecisionRefusal::NotTheDecider(format!("the key is not {}'s client key on record here", signed.decider))),
+        },
+        DeciderKey::P256(point, _) => match super::client_cert::consent_key_grade(ctx, &signed.decider, point) {
+            (ClientKeyStanding::Current, Some(read)) => {
+                let certified = read.grade;
+                // `GradeMissing` returned above, so the body names one.
+                let named = signed.grade.as_deref().unwrap_or_default();
+                if named != certified.as_str() {
+                    return Err(DecisionRefusal::GradeMismatch(format!(
+                        "the decision names the grade `{named}`; {}'s consent certificate carries `{certified}`, the grade its issuer was told",
+                        signed.decider
+                    )));
+                }
+                if certified == mycelium_core::tls::ConsentGrade::Recording && !recording_grade_accepted_when(cfg!(feature = "sim")) {
+                    return Err(DecisionRefusal::RecordingOutsideSim);
+                }
+                SignedWith::consent(certified.as_str()).from_certificate(Some(read.issued_ms), Some(read.sha256))
+            }
+            (ClientKeyStanding::Current, None) => {
+                return Err(DecisionRefusal::NotTheDecider(format!(
+                    "the consent certificate at {}'s mark is not on record here, so its grade cannot be read",
+                    signed.decider
+                )))
+            }
+            (ClientKeyStanding::Superseded, _) => return Err(superseded()),
+            _ => return Err(DecisionRefusal::NotTheDecider(format!("the key is not {}'s consent key on record here", signed.decider))),
+        },
+    };
     if signed.agent != holder || signed.request != request {
         return Err(DecisionRefusal::Retargeted);
     }
@@ -219,5 +557,5 @@ pub(crate) fn verify(
     if !super::gateway_caller::client_issue_time_fresh(ctx, signed.t, now_ms) {
         return Err(DecisionRefusal::Stale);
     }
-    Ok(())
+    Ok(signed_with)
 }

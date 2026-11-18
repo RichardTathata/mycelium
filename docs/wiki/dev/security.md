@@ -605,6 +605,37 @@ a property any verifier can check** (S-presence): write it so everywhere. The gr
 registered PEN arc arrives: outside a test build (`cfg(test)` or the test-only feature `provisional-consent-grade`, never
 `test-support`) the issuer refuses and the reader reads none, and `scripts/check-release-blockers.sh --release` stops a
 tag. A consent point must lie on P-256 (RustCrypto `p256`), at issue and at read.
+**A consent principal decides, and the record says whose statement the grade is** (I7, PR 2, unreleased).
+`grant_decision::verify` (`src/agent/grant_decision.rs`) decodes a decision's key by its kind — 32 bytes Ed25519 for a
+`token:` decider, a 65-byte P-256 point for a `consent:` one, the kind bound to the principal — and checks a consent
+signature with the one P-256 verifier, `verify_consent_p256` (`mycelium-core/src/tls.rs`), which returns `false` in
+every build where the provisional gate is closed. The grade is inside the signed message (appended after the clock,
+only when named, so a pre-I7 message is unchanged) and must equal the grade of **the certificate at the principal's
+mark** (`client_cert::consent_key_grade`): one key can hold two certificates with different grades at one path, so a
+certificate whose judged issuance is not the mark's gives no grade and the decision is refused and counted
+(`grade_unread`) — the owner-signed rule's "absence fails closed", and the reason the grade is not read from whatever
+verified certificate sits at the path. The node records `signed_with` = `{key, grade, grade_source}` on the answer's
+record, the evidence record and the envelope: `grade_source` is `operator` for a consent grade and
+`certificate_scheme` for `service`. **Keep that field wherever the grade is shown**: the node's promise is the
+signature, the chain, the standing and the equality of the two grades; the grade itself is the issuing operator's
+statement. Consent's authority is its own table, `gateway_consent_principals` (`grant:issue` or nothing), read for a
+consent decider in every build; a rule accepts a **set** of grades (`Rule::signed_with`), never a minimum, and an
+unsigned decision is none of them.
+**The grade is bound outside the KV** (the maintainer, 2026-11-17; #810's finding 1). A consent certificate is a KV
+record: any member can write an older, genuine one back, and a node that never read the newer one — joined late, or
+restarted on an empty directory — has the older as the newest it knows. So each `gateway_consent_principals` entry
+names the one grade accepted (`signed_with`, required), and `decision_actor` admits a decision only when the signed
+body, the certificate and the entry agree (`decision_grade_not_accepted`, `consent_grades_not_accepted`). **The lesson
+beyond consent: a "newest wins" fold is only as good as what a node has read; a fact that must not roll back at a
+fresh node needs an anchor outside the KV — here the operator's own configuration.** It binds the grade, not the key.
+**Where a grade may be read from, and how it reaches the evaluator** (#810's review). The verified statement is the
+node-local evidence journal's `signed_decision.signed_with`, which also names the certificate the grade was read from
+(`certificate_issued_ms`, `certificate_sha256`). The copy on a `grant/…/refused` or `…/revoked` record is unsigned and
+member-writable — never audit from it — and an issue's record carries none. The verified decision travels from
+`http/grants.rs` to the preflight as a typed value with private fields (`VerifiedDecision`), built in one place: **no
+enforcement point reads a grade, or a signed decision, from `params`**, so a companion door cannot assert one by
+naming its point `gateway:grants/issue`. The general rule: a fact an enforcement point verified goes to the envelope
+in a typed, crate-private argument, never through the request's own `_meta`.
 **The roots can change on a live node** (identity-and-lifecycle I2, PR 1, unreleased): `NodeTls` holds its chain
 checks behind `ArcSwap` and a **roots generation** (`mycelium-core/src/tls.rs`). `reroot_material` builds material for
 the node's *current* key over a set of roots with no CA key; `activate` swaps the chain checks, then bumps the

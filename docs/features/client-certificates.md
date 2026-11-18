@@ -84,6 +84,17 @@ way. `a_newer_certificate_supersedes_the_older_key_and_an_overwrite_cannot_lower
   per principal and 65,536 in all. A node that only reads records spends one record per supersession, so about 64.
   The gateway that publishes them spends two (the new mark and the record it republishes), so about 32. A principal past the budget keeps its newest mark only in this process. Without
   `[persistence]`, a restart forgets the mark until the newer record is read again.
+- **A node that never read the newer record** (#810's review): the mark is the newest issuance *this node* has
+  read. Persistence keeps a mark a node once held; it gives none to a node that joins late, with `[persistence]` or
+  without, while the newer record is absent from its view — a member wrote the older, genuine record back, and the
+  gateway that published the newer one is gone or lost the race. To that node the older key is current.
+  - What its holder gets: a superseded service key signs calls and proves possession as that principal; the holder
+    of a superseded [consent key](consent-certificates.md) can approve, refuse and revoke grants as that principal,
+    within policy.
+  - What it needs: the old private key, the newer record absent from that node's view, and a gateway that joined
+    after, or lost its persistence directory.
+  - It ends when the newer certificate is read there. For a consent principal an operator can stop it meanwhile by
+    removing or renaming its `gateway_consent_principals` entry at that gateway.
 - **Under a change of roots** (plan row I2, PR 2a; #768's M4): a mark keeps the certificate that raised it, journaled
   as `RaisedWithCert`, and the key at it is current only while that certificate verifies against the node's roots. A
   client whose key was not re-issued under a successor reads `Unknown` after the narrow — it is no grant holder and

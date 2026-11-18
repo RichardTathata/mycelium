@@ -63,18 +63,25 @@ def grant_decision_message(
     ttl_secs: Optional[int],
     reason: Optional[str],
     issued_at_ms: int,
+    grade: Optional[str] = None,
 ) -> bytes:
     """The bytes a decider signs to answer a grant request (identity-and-lifecycle I3): the tag; the decider, the
     addressed node, the request's holder (a principal), the request id, the decision (``issue``, ``refuse`` or
     ``revoke``), an issue's ``ttl_secs`` in decimal (empty when absent) and the reason (empty when absent), each a
-    ``u32`` little-endian length and its UTF-8 bytes; then ``issued_at_ms`` as a ``u64`` little-endian. Pinned by
-    ``tests/fixtures/decision/vector.json``."""
+    ``u32`` little-endian length and its UTF-8 bytes; then ``issued_at_ms`` as a ``u64`` little-endian.
+
+    ``grade`` (identity-and-lifecycle I7): when given, a ``u32`` little-endian length and the grade's UTF-8 bytes
+    follow ``issued_at_ms``; when ``None`` nothing follows, so a decision naming no grade has the message it had
+    before I7. Pinned, with a grade and without, by ``tests/fixtures/decision/vector.json``."""
     out = bytearray(GRANT_DECISION_TAG)
     ttl = "" if ttl_secs is None else str(int(ttl_secs))
     for part in (decider, node, agent, request, decision, ttl, reason or ""):
         b = part.encode("utf-8")
         out += struct.pack("<I", len(b)) + b
     out += struct.pack("<Q", issued_at_ms)
+    if grade is not None:
+        g = grade.encode("utf-8")
+        out += struct.pack("<I", len(g)) + g
     return bytes(out)
 
 
@@ -271,19 +278,26 @@ class ClientSigner:
 
     def sign_grant_decision(self, node: str, agent: str, request: str, decision: str, *,
                             ttl_secs: Optional[int] = None, reason: Optional[str] = None,
-                            issued_at_ms: Optional[int] = None) -> Dict[str, Any]:
+                            issued_at_ms: Optional[int] = None, grade: Optional[str] = None) -> Dict[str, Any]:
         """Sign an answer to the grant request ``request`` held by ``agent`` (a principal, as the pending list's
         ``agent`` names it), addressed to the node ``node`` (its id, as ``GET /health`` reports it): ``decision`` is
         ``"issue"`` (with ``ttl_secs``), ``"refuse"`` or ``"revoke"`` (with ``reason``). Returns the decision body's
         ``signed`` field; the node it is addressed to records this signer as the decision's actor, whoever carries it
-        (identity-and-lifecycle I3)."""
+        (identity-and-lifecycle I3).
+
+        ``grade`` (identity-and-lifecycle I7): a service's decision is recorded ``service`` whether or not it names
+        one, and ``"service"`` is the only grade this signer may name — its key is a client certificate's Ed25519
+        key, never a consent key. Left ``None`` (the default), the body is what it was before I7, which a node before
+        I7 accepts; a body naming a grade is refused by such a node."""
         import base64
 
         if decision not in ("issue", "refuse", "revoke"):
             raise ValueError('decision must be "issue", "refuse" or "revoke"')
+        if grade is not None and grade != "service":
+            raise ValueError('a service signer names the grade "service" or none: a consent grade is a consent key\'s')
         t = issued_at_ms if issued_at_ms is not None else int(time.time() * 1000)
-        msg = grant_decision_message(self.principal, node, agent, request, decision, ttl_secs, reason, t)
-        return {
+        msg = grant_decision_message(self.principal, node, agent, request, decision, ttl_secs, reason, t, grade)
+        signed = {
             "decider": self.principal,
             "node": node,
             "agent": agent,
@@ -292,6 +306,9 @@ class ClientSigner:
             "k": base64.b64encode(self._raw).decode(),
             "sig": base64.b64encode(self._key.sign(msg)).decode(),
         }
+        if grade is not None:
+            signed["grade"] = grade
+        return signed
 
     def sign(self, operation: str, resource: str, digest: bytes, *, issued_at_ms: Optional[int] = None,
              counter: Optional[int] = None) -> Dict[str, Any]:

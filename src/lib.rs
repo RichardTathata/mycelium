@@ -359,9 +359,9 @@ pub use agent::client_sig::ClientSigner;
 /// certificate signs it ([`ClientSigner::sign_grant_decision`]) and sends it as the decision body's `signed` field;
 /// the node it is addressed to records the decider as the actor. [`grant_decision_message`] is the published format
 /// the SDKs compute too.
-pub use agent::grant_decision::{grant_decision_message, SignedDecision, GRANT_DECISION_TAG};
+pub use agent::grant_decision::{grant_decision_message, grant_decision_message_graded, recording_grade_accepted_when, SignedDecision, SignedWith, GRADE_SERVICE, GRANT_DECISION_TAG, KNOWN_GRADES};
 #[cfg(feature = "tls")]
-pub use agent::grant_decision::sign_grant_decision;
+pub use agent::grant_decision::{sign_grant_decision, sign_grant_decision_graded};
 /// The replay seams' install point, re-exported under `sim` so a **companion** on the public API
 /// can record and replay its own runs under the kernel (item 6; first used by CN2).
 /// Re-exported in every build, not only under `sim`: a companion routes its draws and clocks through
@@ -527,7 +527,7 @@ pub use mesh_manifest::{
     GroupManifest, GroupStatus, MeshManifest, MeshMeta, MeshStatus,
     manifest_keys, semver_gt,
 };
-pub use config::{AuthorityConfig, AuthorityTier, GrantEntitlement, CredentialBinding, CredentialForm, credential_placeholder, credential_placeholders_in, CREDENTIAL_PLACEHOLDER_MARKER, DomainProfile, EgressPolicy, PROFILE_NAMES, GatewayCallerProfile, GatewayNamedToken, GatewayToken, GatewayTlsConfig, GossipConfig, GroupTopologyPolicy, PersistenceConfig, SyncMode, TlsConfig, TopologyEnforcement};
+pub use config::{AuthorityConfig, AuthorityTier, GrantEntitlement, CredentialBinding, CredentialForm, credential_placeholder, credential_placeholders_in, CREDENTIAL_PLACEHOLDER_MARKER, DomainProfile, EgressPolicy, PROFILE_NAMES, GatewayCallerProfile, GatewayNamedToken, GatewayConsentPrincipal, GatewayToken, GatewayTlsConfig, GossipConfig, GroupTopologyPolicy, PersistenceConfig, SyncMode, TlsConfig, TopologyEnforcement};
 pub use persistence::DataAtRestCipher;
 /// Exclusive ownership of a persistence file (`<file>.lock`), the lock the KV WAL and the node-local
 /// journal hold — re-exported so a companion's own log is refused to a second owner the same way.

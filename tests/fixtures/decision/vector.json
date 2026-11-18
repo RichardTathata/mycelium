@@ -86,5 +86,126 @@
         "sig": "fPP/yAfLlVlXZkaNqv1s7QlKiwhAeKrtef/lM/nBTPPqC5HdVT4y9e0Xb7TVnu4YhI9mw8fUQDCfVsXeJOguAQ=="
       }
     }
-  ]
+  ],
+  "graded": {
+    "_doc": "Identity-and-lifecycle I7: the grade inside the signed message (grant_decision_message_graded): after issued_at_ms, a u32 little-endian length and the grade's bytes, only when a grade is named — so every case above, naming none, is unchanged. `service`: the seed's Ed25519 key naming `service` (deterministic, reproduced exactly). `consent`: a consent principal's P-256 key (point_hex the uncompressed X9.63 point, also as SPKI PEM; pkcs8_hex the test key's private half, a fixture and nothing else), one case per consent grade; `sig` is ASN.1 DER ECDSA over SHA-256, which is randomised, so each language recomputes the message and VERIFIES the pinned signature rather than reproducing it. Generated once (ring, 2026-11-17) and pinned; checked by Rust (the_graded_decision_vector_is_the_same_in_every_language), jest and pytest.",
+    "service": [
+      {
+        "request": "01a1c24caa180000-127.0.0.1:7946",
+        "decision": "issue",
+        "ttl_secs": 600,
+        "reason": null,
+        "grade": "service",
+        "message_hex": "6d7963656c69756d2e676174657761792f6772616e742d6465636973696f6e2f3115000000746f6b656e3a666c6565742f7472656173757265720e0000003132372e302e302e313a3739343616000000746f6b656e3a666c6565742f666f72656361737465721f000000303161316332346361613138303030302d3132372e302e302e313a3739343605000000697373756503000000363030000000007b94bbb2a10100000700000073657276696365",
+        "signed": {
+          "decider": "token:fleet/treasurer",
+          "node": "127.0.0.1:7946",
+          "agent": "token:fleet/forecaster",
+          "request": "01a1c24caa180000-127.0.0.1:7946",
+          "t": 1794000000123,
+          "k": "6kpsY+KcUgq+9VB7Ey7F+ZVHdq6+vnuSQh7qaRRG0iw=",
+          "sig": "/gnxtNnj8hdfyeYKs4bpEECfux1alyShEpqSVDivuMoJVOk8fJ3j9/KT8sJ/qlpaQ6XjvajbgJAaZlXAEfX5CQ==",
+          "grade": "service"
+        }
+      },
+      {
+        "request": "01a1c24caa180001-127.0.0.1:7946",
+        "decision": "refuse",
+        "ttl_secs": null,
+        "reason": "not this season",
+        "grade": "service",
+        "message_hex": "6d7963656c69756d2e676174657761792f6772616e742d6465636973696f6e2f3115000000746f6b656e3a666c6565742f7472656173757265720e0000003132372e302e302e313a3739343616000000746f6b656e3a666c6565742f666f72656361737465721f000000303161316332346361613138303030312d3132372e302e302e313a3739343606000000726566757365000000000f0000006e6f74207468697320736561736f6e7b94bbb2a10100000700000073657276696365",
+        "signed": {
+          "decider": "token:fleet/treasurer",
+          "node": "127.0.0.1:7946",
+          "agent": "token:fleet/forecaster",
+          "request": "01a1c24caa180001-127.0.0.1:7946",
+          "t": 1794000000123,
+          "k": "6kpsY+KcUgq+9VB7Ey7F+ZVHdq6+vnuSQh7qaRRG0iw=",
+          "sig": "LvFFPigAZvSKOu1MG3DhTk2dR+SRKPD0KPktp+h0Jx57hq/vAYPB0Qrv2U/Ee0gvfEP0Hu7/rRH9HCT39T6YCA==",
+          "grade": "service"
+        }
+      },
+      {
+        "request": "01a1c24caa180002-127.0.0.1:7946",
+        "decision": "revoke",
+        "ttl_secs": null,
+        "reason": "élan 😀",
+        "grade": "service",
+        "message_hex": "6d7963656c69756d2e676174657761792f6772616e742d6465636973696f6e2f3115000000746f6b656e3a666c6565742f7472656173757265720e0000003132372e302e302e313a3739343616000000746f6b656e3a666c6565742f666f72656361737465721f000000303161316332346361613138303030322d3132372e302e302e313a37393436060000007265766f6b65000000000a000000c3a96c616e20f09f98807b94bbb2a10100000700000073657276696365",
+        "signed": {
+          "decider": "token:fleet/treasurer",
+          "node": "127.0.0.1:7946",
+          "agent": "token:fleet/forecaster",
+          "request": "01a1c24caa180002-127.0.0.1:7946",
+          "t": 1794000000123,
+          "k": "6kpsY+KcUgq+9VB7Ey7F+ZVHdq6+vnuSQh7qaRRG0iw=",
+          "sig": "TN7eqV4DmgQQpd/vYza4LrLqZnnrzqs3OBAxqYsrEgBOFQ1qiPDh+S5RzCfAwqCA3LFSYM3Dhg09FOSfGKgZBw==",
+          "grade": "service"
+        }
+      }
+    ],
+    "consent": {
+      "decider": "consent:fleet/richard",
+      "point_hex": "045329ad69d57394f67fa5e62986d6c60408c00b21326ed57c899f09061eed9bf110b1a53ab0340fb929b67e6e3de4e73233d2c4f711d6bfaf2ed1020b3c37e770",
+      "spki_pem": "-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEUymtadVzlPZ/peYphtbGBAjACyEy\nbtV8iZ8JBh7tm/EQsaU6sDQPuSm2fm495OcyM9LE9xHWv68u0QILPDfncA==\n-----END PUBLIC KEY-----\n",
+      "pkcs8_hex": "308187020100301306072a8648ce3d020106082a8648ce3d030107046d306b0201010420d2ead4236927e4f69518fd6e4e88a31385a60975b83700c0d22382d599dbd88ea144034200045329ad69d57394f67fa5e62986d6c60408c00b21326ed57c899f09061eed9bf110b1a53ab0340fb929b67e6e3de4e73233d2c4f711d6bfaf2ed1020b3c37e770",
+      "cases": [
+        {
+          "request": "01a1c24caa180000-127.0.0.1:7946",
+          "decision": "issue",
+          "ttl_secs": 600,
+          "reason": null,
+          "grade": "os_presence(macos, unbound)",
+          "message_hex": "6d7963656c69756d2e676174657761792f6772616e742d6465636973696f6e2f3115000000636f6e73656e743a666c6565742f726963686172640e0000003132372e302e302e313a3739343616000000746f6b656e3a666c6565742f666f72656361737465721f000000303161316332346361613138303030302d3132372e302e302e313a3739343605000000697373756503000000363030000000007b94bbb2a10100001b0000006f735f70726573656e6365286d61636f732c20756e626f756e6429",
+          "signed": {
+            "decider": "consent:fleet/richard",
+            "node": "127.0.0.1:7946",
+            "agent": "token:fleet/forecaster",
+            "request": "01a1c24caa180000-127.0.0.1:7946",
+            "t": 1794000000123,
+            "k": "BFMprWnVc5T2f6XmKYbWxgQIwAshMm7VfImfCQYe7ZvxELGlOrA0D7kptn5uPeTnMjPSxPcR1r+vLtECCzw353A=",
+            "sig": "MEYCIQDpB0+3mKK18zwhnf2SVRWcjFCt3XpZ9OZ5NwxSxhzVZwIhANNsVi31w7KUsv+RMy+aiR3D5GAuYYvasyQby5YJ/+VQ",
+            "grade": "os_presence(macos, unbound)"
+          }
+        },
+        {
+          "request": "01a1c24caa180001-127.0.0.1:7946",
+          "decision": "refuse",
+          "ttl_secs": null,
+          "reason": "not this season",
+          "grade": "tty",
+          "message_hex": "6d7963656c69756d2e676174657761792f6772616e742d6465636973696f6e2f3115000000636f6e73656e743a666c6565742f726963686172640e0000003132372e302e302e313a3739343616000000746f6b656e3a666c6565742f666f72656361737465721f000000303161316332346361613138303030312d3132372e302e302e313a3739343606000000726566757365000000000f0000006e6f74207468697320736561736f6e7b94bbb2a101000003000000747479",
+          "signed": {
+            "decider": "consent:fleet/richard",
+            "node": "127.0.0.1:7946",
+            "agent": "token:fleet/forecaster",
+            "request": "01a1c24caa180001-127.0.0.1:7946",
+            "t": 1794000000123,
+            "k": "BFMprWnVc5T2f6XmKYbWxgQIwAshMm7VfImfCQYe7ZvxELGlOrA0D7kptn5uPeTnMjPSxPcR1r+vLtECCzw353A=",
+            "sig": "MEYCIQDSRWS6YD56DqCppfhK+wPxNah98fU8oTn5meK3NRUQ4AIhANn9NcwsiJTQpSsozj5PZpf+L6OHpnmN7hbXFEPsp2xO",
+            "grade": "tty"
+          }
+        },
+        {
+          "request": "01a1c24caa180002-127.0.0.1:7946",
+          "decision": "revoke",
+          "ttl_secs": null,
+          "reason": "élan 😀",
+          "grade": "recording",
+          "message_hex": "6d7963656c69756d2e676174657761792f6772616e742d6465636973696f6e2f3115000000636f6e73656e743a666c6565742f726963686172640e0000003132372e302e302e313a3739343616000000746f6b656e3a666c6565742f666f72656361737465721f000000303161316332346361613138303030322d3132372e302e302e313a37393436060000007265766f6b65000000000a000000c3a96c616e20f09f98807b94bbb2a1010000090000007265636f7264696e67",
+          "signed": {
+            "decider": "consent:fleet/richard",
+            "node": "127.0.0.1:7946",
+            "agent": "token:fleet/forecaster",
+            "request": "01a1c24caa180002-127.0.0.1:7946",
+            "t": 1794000000123,
+            "k": "BFMprWnVc5T2f6XmKYbWxgQIwAshMm7VfImfCQYe7ZvxELGlOrA0D7kptn5uPeTnMjPSxPcR1r+vLtECCzw353A=",
+            "sig": "MEUCIH3q3mMF8kHI7d0qI5chla+a5QE+xoQj30QBpFmel4zuAiEAgjAsUY50/fkfFvde0eh72mxyacgZscJETuBuyChC+hM=",
+            "grade": "recording"
+          }
+        }
+      ]
+    }
+  }
 }

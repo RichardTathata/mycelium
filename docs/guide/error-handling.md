@@ -56,6 +56,7 @@ setting — the full list, by `field`:
 |---|---|---|
 | `gateway_named_tokens` / `gateway_scoped_tokens` / `oidc` | set in a build without `compliance` (it would ignore them and run an open gateway) | 2.18.1 |
 | `tls` / `gateway_tls` | set in a build without `tls` (it would run plaintext) | 2.18.1 |
+| `gateway_consent_principals` | set in a build without `gateway` and `tls`, or in a build that reads no consent certificate while the grade OID is provisional (it would accept the table and admit no consent decider) | unreleased (I7) |
 | `http_port` / `gateway_tls` | set in a build without `gateway` (it would run no gateway) | 2.25.0 |
 | `oidc` | the issuer, or a configured `jwks_uri`, is not on a non-empty `egress.allow_hosts` | 2.20.0 |
 | `audit_sink` | an audit sink is attached (`compliance`) without `[tls]` — nothing would be sealed | 2.20.0 |

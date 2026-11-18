@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The causal door registry's gate (adopter-surface X4; scripts/causal-doors.txt).
 
-Finds every door in the code — a call of the preflight (`ae_preflight`, `ae_preflight_routed`, `ae_decide`) outside
+Finds every door in the code — a call of the preflight (`ae_preflight`, `ae_preflight_routed`, `ae_preflight_grant_decision`, `ae_decide`) outside
 its definition and outside test modules, and each raw door the SCAN list names by symbol — and fails when one has no
 row in the registry, when a row names a door the code no longer has, or when a row's test is not a `fn` anywhere
 under src/ or tests/. `--self-test` plants an unregistered preflight call in a copy of the tree and expects the gate
@@ -16,7 +16,7 @@ import os, re, shutil, subprocess, sys, tempfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REGISTRY = os.path.join(ROOT, "scripts", "causal-doors.txt")
-PREFLIGHT = re.compile(r"\b(ae_preflight_routed|ae_preflight_door|ae_preflight|ae_decide)\s*\(")
+PREFLIGHT = re.compile(r"\b(ae_preflight_routed|ae_preflight_door|ae_preflight_grant_decision|ae_preflight|ae_decide_verified|ae_decide)\s*\(")
 # Raw doors: file → symbols the registry must list when the file defines them.
 SCAN = {
     # The seam's own file: its wrappers are not scanned as call sites; its two public doors are listed by symbol.

@@ -84,6 +84,31 @@ impl GossipAgent {
                 });
             }
         }
+        // `gateway_consent_principals` (identity-and-lifecycle I7, A): the same class twice. A build without the
+        // decision routes (`gateway` + `tls`) would accept the table and admit no consent decider; and while the
+        // consent grade extension's OID is provisional, a build that is not a test build reads no consent
+        // certificate, so it would accept the table and never honour it.
+        if !self.config.gateway_consent_principals.is_empty() {
+            #[cfg(not(all(feature = "gateway", feature = "tls")))]
+            return Err(GossipError::InvalidField {
+                field: "gateway_consent_principals",
+                reason: "a consent principal's signed decisions are verified only by a build with the `gateway` and `tls` \
+                         features; this build would accept the table and admit no consent decider. Build with both, or \
+                         remove the table"
+                    .into(),
+            });
+            #[cfg(all(feature = "gateway", feature = "tls"))]
+            if !mycelium_core::tls::consent_grade_oid_open() {
+                return Err(GossipError::InvalidField {
+                    field: "gateway_consent_principals",
+                    reason: "consent certificates are not read by this build: the grade extension's OID is provisional \
+                             until the registered IANA Private Enterprise Number arc arrives (identity-and-lifecycle I7), \
+                             so this table would be accepted and never honoured. Remove it until a release reads consent \
+                             certificates"
+                        .into(),
+                });
+            }
+        }
         // `gateway_a2a` in a build without `a2a`: the same class — the switch would be accepted and `/a2a` never served.
         #[cfg(not(feature = "a2a"))]
         if self.config.gateway_a2a {

@@ -4880,6 +4880,158 @@ Nothing is removed or renamed.
 
 *Check:* `grep -rn "record_anchor(" --include='*.rs' .` — every call passes a generation.
 
+## 118. A signed grant decision carries a grade; a consent principal decides by its own table; `signed_with` on the record, the envelope and a rule (unreleased, identity-and-lifecycle I7, PR 2)
+
+*Numbered 118 because §117 is #805's (merged) and an open pull request holds §116 (#806) at the time of writing.*
+
+§112 built the consent certificate and its principal. This change lets a consent principal **decide**: the node a
+signed grant decision is addressed to verifies a P-256 signature, checks the grade the body names against the
+certificate's, and records which key signed and with what grade
+([consent certificates](../features/consent-certificates.md)). **Not in a shipped binary yet**, as §112: while the
+grade extension's OID is provisional a build without the test-only feature `provisional-consent-grade` verifies no
+consent signature, refuses a consent decider's decision by name (`422 consent_grade_oid_provisional`) before it reads
+a key, and refuses to start with a `gateway_consent_principals` table. **For a fleet with no consent certificate,
+nothing changes** but the additive fields below.
+
+- **Upgrade verifiers before a signer names a grade.** `signed.grade` is new. A decision body without it is
+  byte-for-byte what it was, and its message and every signature over it are unchanged, so a pre-upgrade SDK's
+  decisions verify as before. A node before this change refuses a body that carries `grade` (`SignedDecision` refuses
+  unknown fields). The SDKs' `sign_grant_decision` / `signGrantDecision` name no grade unless asked.
+  **The older node's behaviour here and below was read from the v2.40.0 tag, not run**: at that tag `SignedDecision`
+  and `RuleDecl` refuse unknown fields and `GossipConfig` does not, so a v2.40.0 node refuses a body carrying `grade`,
+  refuses a unit file carrying `signed_with`, and ignores a `gateway_consent_principals` table while admitting no
+  consent decider. No two-version fleet was run.
+- **A service's decision is recorded `service`.** A `token:{issuer}/{name}` decider signing with its client
+  certificate's Ed25519 key names no grade, or `service`. Naming any other grade is refused
+  `403 decision_grade_mismatch`.
+- **A consent principal's decision names its certificate's grade.** `consent:{issuer}/{name}` signs with the P-256 key
+  its consent certificate names: `signed.k` is the base64 of the 65-byte uncompressed point and `signed.sig` the
+  base64 of an ASN.1 DER ECDSA signature over SHA-256. Refused by name: no grade (`403 decision_grade_missing`), an
+  empty one (`400 decision_grade_empty`), a grade other than the certificate's (`403 decision_grade_mismatch`),
+  `recording` outside a `sim` build (`403 recording_grade_outside_sim`), an Ed25519 key under a consent principal or a
+  P-256 key under a service principal (`403 not_the_decider`).
+- **The grade is the certificate's at the principal's mark.** One key can hold two consent certificates with different
+  grades (a re-issue over the same public key), at the same record path. The grade read is that of the certificate
+  the principal's mark names — at a node that has read the newer one. (A node that has not is covered by the
+  entry's `signed_with`, above.) If another certificate for the key sits at the path — an older one written back by any
+  member — the grade is unread, the decision is refused `not_the_decider` (*"…its grade cannot be read"*), and the node
+  counts it on `GET /stats` as `consent_grades_unread`. Republish the newest certificate to recover.
+- **`gateway_consent_principals`** (new `GossipConfig` field):
+
+  ```toml
+  [[gateway_consent_principals]]
+  name = "richard"
+  scopes = ["grant:issue"]
+  signed_with = "tty"
+  ```
+
+  A consent decider holds `grant:issue` only through this table, **in every build** — a gateway without `compliance`,
+  where every service decider holds it, admits no consent decider it was not given. `validate()` refuses any scope
+  but `grant:issue` (`*` included), a repeated name, and a name no consent certificate can carry (one segment of
+  1–128 ASCII letters, digits, `-`, `_`, `.`; not `legacy`). `start()` refuses a non-empty table in a build without
+  `gateway` and `tls`, and in a build that reads no consent certificate. There is no environment form.
+- **`signed_with` on the entry is required, and binds the grade outside the KV** (the maintainer's decision of
+  2026-11-17). It names the one consent grade this gateway accepts for the principal — the unit file's word, here a
+  single grade, since a certificate carries one. `validate()` refuses an entry without it, or naming anything but a
+  consent grade (`service` included). A consent decision is admitted only when **three statements agree**: the grade
+  the signed body names, the grade of the certificate this node read, and the entry's. Body and certificate
+  disagreeing is `403 decision_grade_mismatch`; the two agreeing and the entry not, `403
+  decision_grade_not_accepted`, counted on `GET /stats` as `consent_grades_not_accepted`.
+  - **Why.** The certificate is a KV record. Any member can write an older, genuine certificate for the key back at
+    its path, and a node that never read the newer one — a gateway that joins later, or one rebuilt with an empty
+    persistence directory — has the older one as the newest it knows. The entry is the operator's own configuration,
+    which no member can write, so **a node never relies on which certificate reached it first**.
+  - **Re-certifying a key at another grade is two deliberate acts, in this order:**
+    1. **update `signed_with` at each gateway that admits the principal** (a restart: the configuration is read at
+       start);
+    2. **then** re-certify at the CA (`tls issue --grade`) and publish the new certificate.
+
+    Between the two, every gateway refuses the principal's decisions (`decision_grade_not_accepted`: the certificate
+    still carries the old grade). That outage is the fail-closed side, and the counter shows it.
+    **Done the other way round — re-certified first, an entry still naming the old grade — there is a window at that
+    gateway**: a node there that has read the new certificate refuses (the entry disagrees), but a node that never
+    read it and finds only the older certificate at the path — written back by a member, on a gateway that joined
+    late or lost its persistence directory — still admits a decision at the **old** grade, because body, certificate
+    and entry all name it. The window closes when that gateway's entry is updated. So the entry goes first.
+  - **What this does not close.** It binds the *grade*, not the *key*. A node that never read a newer certificate
+    for a **different** key of the same principal, at the grade the entry accepts, takes the older key as current:
+    the supersession residual of `sys/client-cert/` ([owner-signed records](../wiki/dev/owner-signed-records.md),
+    status *Partly*), which is not only a restart without `[persistence]` — a node that **joins late, with
+    `[persistence]`**, and never read the newer record is in the same position.
+    - *What its holder gets:* the holder of a superseded consent key can approve, refuse and revoke grants as that
+      principal, within policy.
+    - *What it needs:* the old private key; the newer record absent from that node's view; and a gateway that joined
+      after, or lost its persistence directory.
+    - *When it ends:* when the newer certificate is read there.
+    - *What an operator can do meanwhile:* **remove or rename the principal's `gateway_consent_principals` entry** at
+      that gateway. With no entry the principal decides nothing there, whichever key signs.
+- **A consent principal never holds a grant.** A decision for a request under a `consent:` holder is refused
+  `409 consent_holder`: a consent key proves no possession, so the grant could never be presented.
+- **A policy keyed on `token:` principals does not match a `consent:` decider.** A deployment that admits a developer's
+  decisions by a rule for `token:{issuer}/{name}` adds a rule for `consent:{issuer}/{name}`: the two are different
+  actors. This holds for the reference evaluator and for any adapter (a Cedar policy naming the `token:` principal
+  as `principal ==` needs the `consent:` one beside it).
+- **`signed_with`** is on the evidence record's `signed_decision`, on the `ActionEnvelope` a decision is evaluated
+  with, and copied onto the refusal and revocation records: `{ "key": "ed25519" | "p256", "grade": …, "grade_source":
+  "certificate_scheme" | "operator", "certificate_issued_ms": …, "certificate_sha256": … }`.
+  - **The verified statement is the evidence journal's.** The journal is node-local and append-only, and its record is
+    what the node that verified the decision wrote. `certificate_issued_ms` (and, for a consent key,
+    `certificate_sha256`) name the certificate the grade was read from, so an auditor can tell which one after a
+    re-issue over the same key.
+  - **The copy on a `grant/…/refused` or `grant/…/revoked` record is unsigned.** Those KV records are not signed
+    (inventory rows in [owner-signed records](../wiki/dev/owner-signed-records.md); to close under I4a), any admitted
+    member can rewrite them, and `GET /gateway/grants/request/{request}` serves what is there. Nothing decides on that
+    copy. Do not read a grade from it: read the journal, or re-verify the record's `signed` body
+    (`SignedDecision::verify_signature`) and read `signed.grade`.
+  - **An issue has no copy outside the journal.** The issued record is the signed grant; it carries no `signed_with`.
+ **`grade_source: "operator"` means what it says**: a consent grade is what the
+  operator who issued the certificate was told about where the key lives. The fleet CA signed that statement; no
+  node observed it, and none can. `tty` may have been signed by any process running as the user, and
+  `os_presence(macos, unbound)` shows at most that a person was present, not what they were shown.
+- **A rule can accept a set of grades.** In a unit file:
+
+  ```toml
+  [[rule]]
+  actor = "consent:fleet/richard"
+  operation = "grant.issue"
+  resource = "tool:weather.forecast"
+  signed_with = ["os_presence(macos, unbound)"]
+  ```
+
+  In code, `Rule::accepting_grades`, which returns `Err` for a grade that does not exist. The rule applies only to a
+  grant decision signed with one of them. It is a set, not a
+  minimum — the grades are not ordered — and an unsigned decision is none of them. A unit file naming a grade that
+  does not exist is refused by name; **a reader before this change refuses a unit file carrying the key**, so declare
+  it once every node is upgraded. `mycelium test --faults grant` drives an unsigned decision, so it does not issue
+  under a rule that names `signed_with`.
+
+**API.** Breaking, in the open: `SignedDecision` gains `grade: Option<String>`, `Rule` gains `signed_with:
+Vec<String>` and `RuleDecl` gains `signed_with`, so a struct literal of any of them breaks — **and all three are now
+`#[non_exhaustive]`**, as §109 made the configuration structs, so the next field is additive. Outside the crate,
+build a `SignedDecision` with `sign_grant_decision`, `sign_grant_decision_graded` or the new
+`SignedDecision::from_parts`; a `Rule` with `Rule::new` and its builder methods (its fields stay assignable); a
+`RuleDecl` from a unit file or the new `RuleDecl::new`. A literal of any, with `..` or without, no longer compiles
+(each type's doc holds the `compile_fail` twin). Additive: `KNOWN_GRADES`, `SignedWith::from_certificate`,
+`SignedWith::same_grade_as`, `/stats`' `consent_grades_unread`, `consent_grades_not_accepted` and `consent_certificates_provisional`, `grant_decision_message_graded` (`grant_decision_message` is unchanged and
+is the no-grade form), `sign_grant_decision_graded`, `SignedDecision::message`, `SignedWith` (`#[non_exhaustive]`),
+`GRADE_SERVICE`, `recording_grade_accepted_when`, `ActionEnvelope::signed_with` and its builder method,
+`Rule::accepting_grades`, `GatewayConsentPrincipal` (`#[non_exhaustive]`; `GatewayConsentPrincipal::new(name, signed_with)`), `CONSENT_PRINCIPAL_SCOPE`,
+`GossipConfig::gateway_consent_principals`, `mycelium_core::tls::verify_consent_p256`. `mycelium-py`'s
+`grant_decision_message` and `sign_grant_decision` take an optional `grade`; `mycelium-ts`'s `grantDecisionMessage`
+and `signGrantDecision` likewise, and `SignedDecision` gains an optional `grade`. **Unchanged by decision:**
+`verify_bytes`, `client_key_standing`, `ClientSigned.key`, `ClientSigner::new` in all three languages,
+`TrustedExternalIssuers::set_client_key`, lock-order row 76: a consent key signs no call and proves no possession.
+
+*Check:* the evidence journal of the node the decision was addressed to: the `Decided` record's
+`signed_decision.signed_with` (the grade, its source and the certificate it was read from), and, where a rule read
+the grade, `signed_with grade=… key=… source=…` in its `checked`. Not the copy on a KV record, which is unsigned.
+`GET /stats`: `consent_grades_unread` and `consent_grades_not_accepted`.
+
+Tests: `src/agent/consent_decision_tests.rs`; `the_graded_decision_vector_is_the_same_in_every_language` (Rust, pytest,
+jest, over `tests/fixtures/decision/vector.json`); `a_consent_principal_holds_grant_issue_or_nothing`
+(`mycelium-core/src/config.rs`); `a_rule_accepts_a_set_of_grades_and_never_an_unsigned_decision`
+(`src/agent/action_evaluator.rs`); `a_rule_naming_the_grades_it_accepts` (`src/capability_config.rs`).
+
 ## 119. A rule with no limit decides while the evidence journal is being read, and under one that cannot be read; an unreadable journal is logged and counted (unreleased, #811)
 
 *Numbered 119 because open pull requests hold §116 (#806) and §118 (#810) at the time of writing; the sections are in
