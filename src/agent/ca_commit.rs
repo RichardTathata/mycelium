@@ -21,15 +21,24 @@
 
 use super::TaskCtx;
 use mycelium_core::node_id::NodeId;
-use mycelium_core::tls::{CaCommitment, CommitmentPin};
+use mycelium_core::tls::{CaCommitment, CommitmentPin, OfferedCommitment};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 /// KV namespace of the commitments nodes publish for detection: `sys/ca-commit/{node}`.
 pub const CA_COMMIT_PREFIX: &str = "sys/ca-commit/";
 
-/// Distinct refused or unverified copies remembered, so each is counted and warned once; past it the set is cleared.
-const NOTED_MAX: usize = 1_024;
+/// A copy larger than this is not a commitment (one is under 2 KiB) and is skipped unread: any admitted member can
+/// write a value of megabytes under the prefix, and the scan must not hash it.
+const MAX_COPY_BYTES: usize = 4_096;
+/// Copies read in one scan, in key order; the rest are skipped and the scan says how many
+/// (`ca_commitment_scan_skipped`).
+const MAX_COPIES_PER_SCAN: usize = 1_024;
+/// Distinct unverified copies counted in a process's life. Past it a further distinct one is **not counted** (and
+/// nothing is ever counted twice): the counter then reads "at least this many".
+const NOTED_UNVERIFIED_MAX: usize = 1_024;
+/// Distinct conflicting commitments counted in a process's life; past it, as above. Each needs the CA's own key.
+const NOTED_CONFLICTS_MAX: usize = 64;
 
 /// The key a node publishes its pinned commitment at.
 pub fn ca_commit_key(node: &NodeId) -> String {
@@ -44,12 +53,19 @@ pub(crate) struct CommitmentState {
     pinned: arc_swap::ArcSwapOption<CaCommitment>,
     /// Whether the pin's committing CA is still a root this node trusts (see [`CommitmentPin::Pinned`]).
     active: std::sync::atomic::AtomicBool,
-    /// Commitments refused because they conflict with the pin: the operator's file at a start, and distinct KV copies.
+    /// Second commitments the pinned CA's key signed, refused: distinct ones, from the operator's file at a start
+    /// and from KV copies.
     pub(crate) conflicts: AtomicU64,
-    /// Distinct KV copies read as absent: malformed, or not signed by a root this node trusts.
+    /// Documents read as absent — malformed, or not signed by a root this node trusts: distinct KV copies, and the
+    /// operator's file beside a pin at a start.
     pub(crate) unverified: AtomicU64,
-    /// Digests (of a commitment, or of a copy's bytes) already counted.
-    noted: papaya::HashSet<[u8; 32]>,
+    /// KV copies the last scan did not read: larger than a commitment can be, or past the per-scan bound. A gauge,
+    /// not a count: above 0, detection through the KV is degraded for as long as it stays there.
+    pub(crate) scan_skipped: AtomicU64,
+    /// Digests of the copies' bytes already counted as unverified (bounded, never cleared).
+    unverified_noted: papaya::HashSet<[u8; 32]>,
+    /// Digests of the conflicting commitments already counted (bounded, never cleared).
+    conflict_noted: papaya::HashSet<[u8; 32]>,
 }
 
 impl CommitmentState {
@@ -63,13 +79,28 @@ impl CommitmentState {
         self.pinned.load().is_some() && self.active.load(Ordering::Acquire)
     }
 
-    fn note_once(&self, digest: [u8; 32]) -> bool {
-        let noted = self.noted.pin();
-        if noted.len() >= NOTED_MAX {
-            noted.clear();
+    /// Count a conflicting commitment once per digest, wherever it was seen. `false` when it was counted before, or
+    /// when the bound is met (then it is not counted at all — never twice).
+    fn conflict_once(&self, digest: [u8; 32]) -> bool {
+        note_once(&self.conflict_noted, NOTED_CONFLICTS_MAX, digest) && {
+            self.conflicts.fetch_add(1, Ordering::Relaxed);
+            true
         }
-        noted.insert(digest)
     }
+
+    fn unverified_once(&self, digest: [u8; 32]) -> bool {
+        note_once(&self.unverified_noted, NOTED_UNVERIFIED_MAX, digest) && {
+            self.unverified.fetch_add(1, Ordering::Relaxed);
+            true
+        }
+    }
+}
+
+/// Whether `digest` is new to `set` and was taken: never when it is already there, and never past `max` — the set
+/// is not cleared to make room, so nothing noted is ever counted again (#812's review F4).
+fn note_once(set: &papaya::HashSet<[u8; 32]>, max: usize, digest: [u8; 32]) -> bool {
+    let set = set.pin();
+    !set.contains(&digest) && set.len() < max && set.insert(digest)
 }
 
 /// **At start, after the TLS identity is loaded and before it is installed:** pin the operator's commitment, or read
@@ -77,12 +108,8 @@ impl CommitmentState {
 /// commitment — a pin, or an operator's file — and no `[persistence]`. A conflicting operator's file is refused,
 /// counted and named; the pin stands. Nothing is published here: every refusal comes before this node says anything.
 pub(crate) fn at_start(ctx: &TaskCtx, tls_cfg: &mycelium_core::config::TlsConfig, tls: &mycelium_core::tls::NodeTls) -> Result<(), crate::error::GossipError> {
-    let holds = [
-        tls_cfg.auto_cert_dir.join(mycelium_core::tls::CA_COMMIT_FILE),
-        tls_cfg.auto_cert_dir.join(mycelium_core::tls::SUCCESSION_DIR).join(mycelium_core::tls::CA_COMMIT_PIN_FILE),
-    ];
     if ctx.config.persistence.is_none()
-        && let Some(found) = holds.iter().find(|p| p.exists())
+        && let Some(found) = mycelium_core::tls::held_ca_commitment(tls_cfg)
     {
         return Err(crate::error::GossipError::InvalidField {
             field: "persistence",
@@ -97,19 +124,36 @@ pub(crate) fn at_start(ctx: &TaskCtx, tls_cfg: &mycelium_core::config::TlsConfig
     let state = &ctx.ca_commitment;
     match mycelium_core::tls::pin_ca_commitment(tls_cfg, &tls.roots_der())? {
         CommitmentPin::None => {}
-        CommitmentPin::Pinned { commitment, first, active, refused } => {
+        CommitmentPin::Pinned { commitment, first, active, offered } => {
             let digest = hex(&commitment.digest());
             if first {
                 tracing::info!(commitment = %digest, "CA succession: pinned the commitment the operator placed (ca-commit.pem); this node refuses any other from this CA");
             }
-            if let Some(other) = refused {
-                state.conflicts.fetch_add(1, Ordering::Relaxed);
-                state.note_once(other);
-                tracing::error!(
-                    pinned = %digest, refused = %hex(&other),
-                    "CA succession: ca-commit.pem holds a commitment that conflicts with the one this node pinned; it is refused and the pin stands. \
-                     Two commitments from one CA mean a mistake or a stolen CA key: compare the file with the issuer's"
-                );
+            let file = tls_cfg.auto_cert_dir.join(mycelium_core::tls::CA_COMMIT_FILE);
+            match offered {
+                OfferedCommitment::Nothing => {}
+                // Not a second commitment from the CA: nothing shows the CA's key signed it (#812's review F3).
+                OfferedCommitment::Unverified(why) => {
+                    state.unverified.fetch_add(1, Ordering::Relaxed);
+                    tracing::warn!(
+                        file = %file.display(), pinned = %digest, %why,
+                        "CA succession: ca-commit.pem holds a document this node cannot assess against its roots; it is read as absent and the pin stands"
+                    );
+                }
+                OfferedCommitment::Conflict(other) => {
+                    state.conflict_once(other);
+                    tracing::error!(
+                        file = %file.display(), pinned = %digest, refused = %hex(&other),
+                        "CA succession: ca-commit.pem holds a second commitment the pinned CA's key signed, naming another successor; it is refused and the pin stands. \
+                         Two commitments from one CA mean a mistake or a stolen CA key: compare the file with the issuer's"
+                    );
+                }
+                // A different promiser. Whether a node pins one commitment per committing CA is not decided (plan row
+                // I2, §8): it is not pinned, and it is not a conflict of the pinned CA's.
+                OfferedCommitment::AnotherCa(other) => tracing::warn!(
+                    file = %file.display(), pinned = %digest, offered = %hex(&other),
+                    "CA succession: ca-commit.pem holds a commitment made by another CA than the one this node's pin names; it is not pinned and not counted as a conflict"
+                ),
             }
             state.active.store(active, Ordering::Release);
             state.pinned.store(Some(Arc::new(commitment)));
@@ -134,16 +178,38 @@ pub(crate) fn publish(ctx: &TaskCtx) {
 }
 
 /// **Read the commitments in the KV, for detection only.** Each copy under `sys/ca-commit/` is compared with this
-/// node's pin: the same commitment is nothing; one that does not verify against this node's roots — malformed, signed
-/// by another key, a successor it cannot read — is read as absent and counted once (`ca_commitment_unverified`); a
-/// verified one that differs from the pin is refused and counted once (`ca_commitment_conflict`), naming the node
-/// whose path carries it. Nothing read here is ever pinned: a node with no pin compares nothing and adopts nothing.
+/// node's pin:
+/// - the pinned commitment itself is nothing;
+/// - a copy that does not verify against this node's roots — malformed, signed by another key, a successor it cannot
+///   read — is read as absent and counted once (`ca_commitment_unverified`);
+/// - a copy that verifies, **names the pinned commitment's CA** and differs from the pin is a second commitment that
+///   CA's key signed: refused and counted once (`ca_commitment_conflict`), naming the key that carries it;
+/// - a copy that verifies and was made by another CA is not a conflict of the pinned CA's, and is not counted (the
+///   open question in [`OfferedCommitment::AnotherCa`]).
+///
+/// Nothing read here is ever pinned: a node with no pin compares nothing and adopts nothing.
+///
+/// **Bounded, because any admitted member can write any key here** (#812's review F4). A value larger than
+/// [`MAX_COPY_BYTES`] is skipped before it is hashed or parsed; at most [`MAX_COPIES_PER_SCAN`] copies are read, in
+/// key order; what was skipped is reported as a gauge (`ca_commitment_scan_skipped`). "Counted once" holds without
+/// limit of time: a copy already counted is never counted again, and past [`NOTED_UNVERIFIED_MAX`] distinct unverified
+/// copies (or [`NOTED_CONFLICTS_MAX`] distinct conflicts) a further distinct one is not counted at all. **What a flood
+/// can do, stated:** more than `MAX_COPIES_PER_SCAN` keys under the prefix can keep a genuine conflicting copy outside
+/// what a scan reads; the gauge above 0 is how that shows, and the operator's file path is not affected.
 pub(crate) fn scan(ctx: &TaskCtx) {
     let Some(tls) = ctx.tls.get() else { return };
     let state = &ctx.ca_commitment;
     let pinned = state.pinned();
     let roots = tls.roots_der();
-    for (path, bytes) in mycelium_core::store::scan_kv_prefix(&ctx.kv_state, CA_COMMIT_PREFIX) {
+    // In key order (`scan_kv_prefix` sorts), so which copies a bounded scan reads does not change from scan to scan.
+    let copies = mycelium_core::store::scan_kv_prefix(&ctx.kv_state, CA_COMMIT_PREFIX);
+    let (mut read, mut skipped) = (0usize, 0u64);
+    for (path, bytes) in copies {
+        if bytes.len() > MAX_COPY_BYTES || read >= MAX_COPIES_PER_SCAN {
+            skipped += 1;
+            continue;
+        }
+        read += 1;
         let copy = std::str::from_utf8(&bytes).ok().and_then(|pem| CaCommitment::from_pem(pem).ok());
         if let (Some(c), Some(p)) = (&copy, &pinned)
             && c.digest() == p.digest()
@@ -152,23 +218,28 @@ pub(crate) fn scan(ctx: &TaskCtx) {
         }
         match copy.filter(|c| c.verify(&roots).is_ok()) {
             None => {
-                if state.note_once(mycelium_core::tls::sha256(&bytes)) {
-                    state.unverified.fetch_add(1, Ordering::Relaxed);
+                if state.unverified_once(mycelium_core::tls::sha256(&bytes)) {
                     tracing::warn!(key = %path, "CA succession: a commitment in the KV is not one a root this node trusts signed; read as absent");
                 }
             }
             Some(c) => {
                 let Some(p) = &pinned else { continue };
-                if state.note_once(c.digest()) {
-                    state.conflicts.fetch_add(1, Ordering::Relaxed);
+                if c.predecessor != p.predecessor {
+                    continue;
+                }
+                if state.conflict_once(c.digest()) {
                     tracing::error!(
                         key = %path, pinned = %hex(&p.digest()), refused = %hex(&c.digest()),
-                        "CA succession: the KV carries a commitment, signed by the CA's key, that conflicts with the one this node pinned; it is refused and the pin stands. \
+                        "CA succession: the KV carries a second commitment the pinned CA's key signed, naming another successor; it is refused and the pin stands. \
                          Two commitments from one CA mean a mistake or a stolen CA key"
                     );
                 }
             }
         }
+    }
+    let before = state.scan_skipped.swap(skipped, Ordering::AcqRel);
+    if skipped > 0 && before == 0 {
+        tracing::warn!(skipped, prefix = CA_COMMIT_PREFIX, "CA succession: copies under the commitment prefix were not read (too large to be a commitment, or past the per-scan bound); detection through the KV is degraded while this lasts");
     }
 }
 

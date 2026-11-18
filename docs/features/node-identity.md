@@ -67,14 +67,16 @@ which needs two processes and lives in the Docker suites.
   issuer's host `mycelium tls commit --ca-dir <dir> --successor <dir>` mints the successor CA and writes
   `ca-commit.pem`, the old CA's signature over its successor — once. An operator copies that file into a node's
   certificate directory; the node assesses it against the root it trusts, pins it under its own `succession/`
-  (durably, before it goes on) and refuses any other commitment from then on, counting each
-  (`ca_commitment_conflict`). It pins from that file only: nodes republish what they pinned at `sys/ca-commit/{node}`
+  (durably, before it goes on) and from then on refuses a second commitment from that CA, counting each
+  (`ca_commitment_conflict`); a document it cannot assess is counted apart (`ca_commitment_unverified`), and a
+  commitment by another CA is not pinned (whether it should be is open, plan row I2). It pins from that file only: nodes republish what they pinned at `sys/ca-commit/{node}`
   so that a conflicting commitment — a mistake, or a stolen CA key — is seen and counted, and a copy there is never
   pinned. A node holding a commitment refuses to start without `[persistence]`. The commitment changes nothing a node
   trusts, and no shipped build makes or reads one while the `caGeneration` OID is provisional.
 - **The kept anchors' journal is compacted** (the same PR): its budget — 32 certificates per peer — counts the
-  anchors a node keeps now, so anchors it has dropped stop counting; a crash before the compaction's rename leaves the
-  journal as it was, and one after it leaves the compacted journal whole.
+  anchors a node keeps now, so anchors it has dropped stop counting; the last record of a peer it keeps nothing of
+  stays, as its memory that the peer was anchored; a crash before the compaction's rename leaves the journal as it
+  was, and one after it leaves the compacted journal whole.
 - **Not built:** rotation in place under the off-node posture (recovery is re-issue); the CA key cannot be rotated,
   and its compromise is recovered by re-issue only — CA succession (plan row I2) has its reload path, its standing
   rules, the commitment and the pin in the library and nothing yet that changes a node's roots: the successor-signed

@@ -238,16 +238,42 @@ new CA and a restart of every node. What this release changes, and an operator s
   commits **once**; a second run is refused. Copy `ca-commit.pem` — that one file, never a `ca-key.pem` — into each
   node's certificate directory (`[tls] auto_cert_dir`). At its next start a node checks the commitment against the
   root it trusts, **pins it** under `auto_cert_dir/succession/` and from then on refuses any other commitment from
-  that CA. What to know:
+  that CA. `tls commit` syncs the successor's files, the commitment and their directories to disk before it returns;
+  copy the file to nodes only after it has. What to know:
   - a node holding a commitment needs `[persistence]`, and refuses to start without it, naming it;
-  - a commitment the node cannot check (another CA's, a damaged file, a file with a key in it) refuses the start;
+  - on a node with no pin yet, a commitment it cannot check (another CA's, a damaged file, a file with a key in it)
+    refuses the start. On a node that already holds a pin, such a file is read as absent, counted
+    (`ca_commitment_unverified`) and warned by name, and the node starts on its pin;
+  - **do not copy `ca-commit.pem` to a node first started on the successor's files** (one provisioned after the
+    cutover, or recovered by re-issue under the successor). Its only root is the successor, the commitment names the
+    old CA as its signer, and the node refuses to start naming an unknown predecessor. Such a node needs no
+    commitment: remove the file;
   - a node pins from that file **only**. Nodes also republish what they pinned at `sys/ca-commit/{node}`, and each
     compares the copies it sees with its own pin: `ca_commitment_conflict` on `GET /stats` rising above 0 means two
-    different commitments signed by your CA's key exist — an operator's mistake, or a stolen CA key. Compare the
-    file on that node with the issuer's; do not remove a pin to make the count stop;
-  - to change a pin deliberately (the successor's key was lost before the succession ran), remove the node's
-    `succession/` directory and place the new file. A pin confers no trust by itself: nothing a node trusts changes
-    until a later release's phases act on a record the committed successor signs.
+    different commitments signed by **the same CA's** key exist — an operator's mistake, or a stolen CA key. Compare
+    the file on that node with the issuer's; do not remove a pin to make the count stop. A copy no trusted CA signed
+    is `ca_commitment_unverified`, not a conflict. `ca_commitment_scan_skipped` above 0 means the node is not reading
+    every copy (some are too large to be a commitment, or there are more than 1,024 under the prefix): someone is
+    writing junk there, and detection through the KV is degraded until it is removed;
+  - **the next succession is not settled yet.** Once a node trusts only the successor, the successor's own
+    commitment to *its* successor is a commitment by a different CA. This release does not pin it and does not count
+    it as a conflict (it warns by name); whether a node holds one pin per committing CA is an open decision (plan row
+    I2). Until it is made, a second succession needs each node's `succession/` removed first;
+  - **changing a commitment that was made by mistake** (the successor's key was lost before the succession ran).
+    There is no command for it, on purpose: a second commitment from the same CA is what a stolen key produces.
+    On the issuer's host, move the old `ca-commit.pem` and the lost successor's directory aside, then run `tls
+    commit` again — it refuses only while `ca-commit.pem` is there. On **every** node that pinned the old one,
+    remove `succession/`, place the new file and restart. **The abandoned commitment does not go away**: it is
+    validly signed and has no expiry, any member can republish it under `sys/ca-commit/`, and every node that pinned
+    the new one will count it as a conflict for good. After a deliberate change, `ca_commitment_conflict` at 1 on
+    each node is the expected reading, and a second distinct conflict is the alarm;
+  - **an empty or damaged `ca-commit.pem` on the issuer's host** (a crash while `tls commit` ran) is refused by the
+    next run, which says so. It names no successor and no node can pin from it. If no node was given a commitment
+    from this CA, remove it and the successor directory that run made and run `tls commit` again; if one was, copy
+    that node's file back;
+  - a pin confers no trust by itself: nothing a node trusts changes until a later release's phases act on a record
+    the committed successor signs. From that release on, `succession/` will also hold the node's phase, so removing
+    it will be a larger act than it is today.
 
 - **The fleet root file holds exactly one certificate.** A node whose `[tls] ca_cert_pem` names a file of two or more
   certificates — or, started from `cert_pem` with `ca_cert_pem` unset, whose `auto_cert_dir/ca-cert.pem` holds two —

@@ -930,3 +930,65 @@ async fn a_change_of_roots_compacts_the_anchor_journal_before_it_answers() {
     a.shutdown().await;
     let _ = std::fs::remove_dir_all(&base);
 }
+
+/// **#812's review F1: a compaction does not hand a fail-closed peer back to legacy at the next restart** (the
+/// decision of 2026-11-16, `deprecations.md` §117: a peer whose kept certificates no longer verify is trusted for
+/// nothing, "never falling back to legacy"). Two generation-0 CAs, so legacy is open. N is anchored under CA1; the
+/// node widens, narrows to CA2, and N's record is hidden: N has an entry and no anchor, and no trusted key. The
+/// journal is then compacted — or not, the control — and the node restarted on CA2's files with N's key in
+/// `peer_keys`. Either way N still has its entry and no trusted key. The reviewer's test, adopted. Seen failing first
+/// with every dead record removable: after the compaction and the restart N had no entry and its old key was trusted.
+#[cfg(feature = "provisional-ca-generation")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_compaction_then_a_restart_leaves_a_fail_closed_peer_fail_closed() {
+    for compact in [false, true] {
+        let base = fresh_dir(if compact { "f1-compacted" } else { "f1-control" });
+        let ((ca1, der1), (ca2, der2)) = two_cas(&base);
+        let (ia, mut cfg) = node_cfg(&base, "a", &ca1, &ca1.join("ca-cert.pem"), vec![]);
+        cfg.persistence = Some(persisted(&base));
+        let a = started(&ia, &cfg).await;
+        let n = NodeId::new("127.0.0.1", alloc_port()).unwrap();
+        let (kn, n1) = member_cert(&base, &ca1, &n, None);
+        let path = revocation::cert_record_key(&n, &kn);
+        put(&a.task_ctx, &path, &n1);
+        a.task_ctx.peer_keys.pin().insert(n.clone(), vec![kn]);
+        refold(&a.task_ctx);
+        assert_eq!(a.task_ctx.trusted_keys(&n), vec![kn]);
+        assert!(a.task_ctx.identity_ledger.anchors_durable_for(&a.task_ctx.identity_ledger.kept_certs()).await);
+        // A second peer, anchored under CA1 only: its record is dead after the narrow, so the compaction has work.
+        let m = NodeId::new("127.0.0.1", alloc_port()).unwrap();
+        let (km, m1) = member_cert(&base, &ca1, &m, None);
+        put(&a.task_ctx, &revocation::cert_record_key(&m, &km), &m1);
+        let (km2, m2) = member_cert(&base.join("m2"), &ca1, &m, None);
+        put(&a.task_ctx, &revocation::cert_record_key(&m, &km2), &m2);
+        refold(&a.task_ctx);
+        let ka = a.task_ctx.tls.get().unwrap().verifying_key_bytes();
+        a.change_roots(a.task_ctx.tls.get().unwrap().node_cert_der(), vec![der1.clone(), der2.clone()]).await.unwrap();
+        let (_, a2) = member_cert(&base, &ca2, &ia, Some(ka));
+        a.change_roots(a2.clone(), vec![der2.clone()]).await.unwrap();
+        assert!(!a.task_ctx.key_standing.legacy_closed(), "two generation-0 roots: legacy open");
+        assert!(revocation::has_anchor_entry_for_test(&a.task_ctx.identity_ledger, &n));
+        assert!(a.task_ctx.trusted_keys(&n).is_empty(), "in-process: fails closed");
+        put(&a.task_ctx, &path, b"hidden");
+        refold(&a.task_ctx);
+        if compact {
+            let removed = a.task_ctx.identity_ledger.compact_anchor_journal().await;
+            assert!(removed >= 1, "the compaction had dead records to remove ({removed})");
+        }
+        a.shutdown().await;
+
+        let cert_file = base.join("a2.cert.pem");
+        std::fs::write(&cert_file, pem(&a2)).unwrap();
+        let mut cfg2 = cfg.clone();
+        let tls2 = cfg2.tls.as_mut().unwrap();
+        tls2.cert_pem = Some(cert_file);
+        tls2.ca_cert_pem = Some(ca2.join("ca-cert.pem"));
+        let a = started(&ia, &cfg2).await;
+        a.task_ctx.peer_keys.pin().insert(n.clone(), vec![kn]);
+        refold(&a.task_ctx);
+        assert!(revocation::has_anchor_entry_for_test(&a.task_ctx.identity_ledger, &n), "compact={compact}: N's entry is rebuilt at the restart");
+        assert!(a.task_ctx.trusted_keys(&n).is_empty(), "compact={compact}: N still fails closed, never legacy");
+        a.shutdown().await;
+        let _ = std::fs::remove_dir_all(&base);
+    }
+}

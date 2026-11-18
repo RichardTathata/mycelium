@@ -398,6 +398,8 @@ pub(super) async fn stats_handler(State(ctx): State<Arc<HttpCtx>>) -> impl IntoR
             body["ca_commitment_pinned"] = json!(c.pinned().is_some());
             body["ca_commitment_conflict"] = json!(load(&c.conflicts));
             body["ca_commitment_unverified"] = json!(load(&c.unverified));
+            // A gauge: KV copies the last scan did not read (oversize, or past the per-scan bound).
+            body["ca_commitment_scan_skipped"] = json!(load(&c.scan_skipped));
         }
         // #805's review F10: mesh sessions closed by a change of roots, by side and by why.
         #[cfg(feature = "tls")]

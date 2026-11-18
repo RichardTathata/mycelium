@@ -52,6 +52,11 @@
 //! `[persistence]`, so hiding a certificate record does not demote a node, in-process or across a restart. A
 //! kept certificate is removed only when it fails the roots this node trusts now — re-judged at every change of
 //! roots and at start — and a node left with none trusts nothing, never reverting to legacy.
+//! **The journal of kept anchors is compacted** when its budget is met: a record leaves when its certificate is no
+//! longer kept, except the last record of a peer with nothing kept, which is the memory that keeps such a peer from
+//! reading as legacy after a restart. Throughout, the journaled set never names a certificate the file does not
+//! hold — `anchors_durable_for` rests on it — and [`compact`] argues that against every interleaving of an append,
+//! its settle, a rewrite and a change of what is kept.
 //! The owner republishes its certificate and its revocations at start, periodically, and whenever its
 //! records under these prefixes change (the `sys/` tripwire counts the foreign write).
 
@@ -426,32 +431,128 @@ pub(crate) struct Compaction {
     spawned: AtomicBool,
     /// No budget-triggered compaction before this wall-clock ms.
     not_before: AtomicU64,
+    /// A test's plant, run by the compaction between its first look at a dead record and taking it off the
+    /// journaled set — where a fold may keep the certificate again.
+    #[cfg(test)]
+    pub(super) between_looks: arc_swap::ArcSwapOption<BetweenLooks>,
 }
+
+#[cfg(test)]
+pub(super) type BetweenLooks = Box<dyn Fn(&NodeId, &[u8]) + Send + Sync>;
 
 type AnchorsSeen = papaya::HashMap<NodeId, HashMap<[u8; 32], KeptAnchor>>;
 
+/// Whether [`IdentityLedger::restore_anchor`] would take `der` back at a start. A record it would not take is not a
+/// compaction's to judge (a newer binary may have written it): it is kept as it is.
+fn restorable(der: &[u8]) -> bool {
+    // The journal's unit tests keep eight-byte stand-ins for certificates.
+    #[cfg(test)]
+    if der.len() == 8 {
+        return true;
+    }
+    mycelium_core::tls::cert_identity(der).is_some() && mycelium_core::tls::cert_issuer_der(der).is_some()
+}
+
+fn in_set(map: &papaya::HashMap<NodeId, HashSet<[u8; 32]>>, n: &NodeId, d: &[u8; 32]) -> bool {
+    map.pin().get(n).is_some_and(|s| s.contains(d))
+}
+
+/// Whether the journal holds, durably, a certificate `n`'s anchors keep now: then a restart re-creates `n`'s entry
+/// from a record that will still be there, and `n`'s dead records are not needed as its memory.
+fn anchored_on_disk(seen: &AnchorsSeen, tally: &AppendTally, n: &NodeId) -> bool {
+    let journaled = tally.journaled.pin();
+    let Some(on_disk) = journaled.get(n) else { return false };
+    seen.pin().get(n).is_some_and(|m| m.values().flat_map(|a| a.certs.iter()).any(|c| on_disk.contains(&<[u8; 32]>::from(Sha256::digest(&c.der)))))
+}
+
 /// One compaction of the identity journal `j`; how many records it removed.
+///
+/// # What a record is for, and so which may go
+///
+/// An `Anchor` record is read once, at a start ([`IdentityLedger::restore_anchor`]), and three things are rebuilt
+/// from it and from nothing else: (1) **the peer's entry** in `anchors_seen` — the memory that this node once anchored
+/// the peer, which is what makes a peer with no anchor left trust nothing instead of reading as legacy
+/// (`refresh_once`, `nodes_with_records`); (2) **the kept certificate**, with its rank; (3) **the journaled set**, which
+/// the budget counts and `anchors_durable_for` answers from. A dead record — one whose certificate this node no
+/// longer keeps — carries nothing of (2), and removing it is what (3) is compacted for. It may still carry (1): when
+/// it is the last record of a peer. So, per record, in the journal's order:
+///
+/// - not an `Anchor`, undecodable, its node unparseable, or its certificate one this binary would not restore: **kept**;
+/// - its certificate kept now, or its append still in flight: **kept** (once: a duplicate is left out);
+/// - dead, and the journal holds no kept certificate of that peer: **the first such record is kept** as the peer's
+///   memory (the others go); it leaves at a later compaction, once a kept certificate of the peer is journaled;
+/// - dead otherwise: **removed**.
+///
+/// # "Never believes one durable that is not"
+///
+/// `journaled` must never name a certificate the file under the journal's name does not hold. Four things move:
+/// an append (handed to the writer, then **settled**: put on `journaled`, then taken off `inflight`), a rewrite (this
+/// closure, run by the writer between appends), and the fold changing what is kept. The closure looks, takes the
+/// record off `journaled`, **looks again**, and only then leaves the frame out:
+///
+/// - *Appended, not yet settled, and no longer kept* (the frame is in the file, `journaled` does not have it yet): the
+///   record is in flight at the first look, so the frame is kept, and the settle that follows is true.
+/// - *Settled between the two halves of the first look*: either `inflight` still has it (kept), or the settle is
+///   complete and `journaled` has it, and it is taken off before its frame is left out.
+/// - *Kept again between the first look and the take-off* (the fold sees it on `journaled` and appends nothing): the
+///   second look sees it kept, puts it back and keeps the frame.
+/// - *Kept again after the take-off*: `journaled` no longer has it, so the fold appends it; the append is in flight or
+///   the certificate is kept at the second look (the frame is kept, the append adds a duplicate a later compaction
+///   leaves out), or it comes after the second look and lands in the new file, behind the rewrite.
+/// - *The rewrite fails before its rename*: the file is unchanged and what was taken off is put back.
+/// - *The rewrite ends in an error after its rename, or its answer is lost*: what was taken off stays off; the writer
+///   refuses appends until a reopen, and a restart rebuilds `journaled` from the file.
+///
+/// Between the take-off and the second look the node may believe un-journaled a record that is on disk; that answer
+/// is `false`, and a caller that waits for durability waits or retries. No interleaving leaves it believing the reverse.
 async fn compact(j: Arc<super::journal::Journal>, seen: Arc<AnchorsSeen>, tally: Arc<AppendTally>, state: Arc<Compaction>) -> u64 {
     let mut written: HashSet<(String, [u8; 32])> = HashSet::new();
+    // Peers whose one dead record this pass kept as their memory.
+    let mut remembered: HashSet<NodeId> = HashSet::new();
     // What the choice took off the journaled set, so a rewrite that changed nothing can put it back.
     let taken: Arc<papaya::HashSet<(NodeId, [u8; 32])>> = Arc::default();
     let (taken_in, tally_in) = (Arc::clone(&taken), Arc::clone(&tally));
+    #[cfg(test)]
+    let state_in = Arc::clone(&state);
     let keep: super::journal::KeepRecord = Box::new(move |bytes: &[u8]| {
         let Ok(JournalEntry::Anchor { node, der }) = mycelium_core::serde_fixint::from_slice::<JournalEntry>(bytes) else {
             return true;
         };
-        let digest: [u8; 32] = Sha256::digest(&der).into();
-        // A record this binary would not restore (its node does not parse) is not this compaction's to judge: kept.
         let Ok(n) = node.parse::<NodeId>() else { return true };
-        if !seen.pin().get(&n).is_some_and(|m| m.values().any(|a| a.certs.iter().any(|c| *c.der == *der))) {
-            if set_edit(&tally_in.journaled, &n, digest, false) {
-                tally_in.journaled_total.fetch_sub(1, Ordering::Relaxed);
-                taken_in.pin().insert((n, digest));
-            }
-            return false;
+        if !restorable(&der) {
+            return true;
         }
-        // One record per kept certificate: a duplicate (a retried append whose first copy did land) is left out.
-        written.insert((node, digest))
+        let digest: [u8; 32] = Sha256::digest(&der).into();
+        let needed = || {
+            seen.pin().get(&n).is_some_and(|m| m.values().any(|a| a.certs.iter().any(|c| *c.der == *der))) || in_set(&tally_in.inflight, &n, &digest)
+        };
+        if needed() {
+            // One record per kept certificate: a duplicate (a retried append whose first copy did land) is left out.
+            return written.insert((node, digest));
+        }
+        // The last memory that this peer was anchored: a restart must find it, or the peer reads as legacy.
+        if !anchored_on_disk(&seen, &tally_in, &n) && !remembered.contains(&n) {
+            remembered.insert(n);
+            return true;
+        }
+        #[cfg(test)]
+        if let Some(plant) = state_in.between_looks.load_full() {
+            plant(&n, &der);
+        }
+        let was_journaled = set_edit(&tally_in.journaled, &n, digest, false);
+        if was_journaled {
+            tally_in.journaled_total.fetch_sub(1, Ordering::Relaxed);
+        }
+        if needed() {
+            if was_journaled && set_edit(&tally_in.journaled, &n, digest, true) {
+                tally_in.journaled_total.fetch_add(1, Ordering::Relaxed);
+            }
+            return written.insert((node, digest));
+        }
+        if was_journaled {
+            taken_in.pin().insert((n, digest));
+        }
+        false
     });
     use super::journal::RewriteOutcome;
     match j.rewrite(keep).await {
@@ -659,13 +760,15 @@ impl IdentityLedger {
         }
     }
 
-    /// How many of `node`'s journaled anchor records name a certificate this node no longer keeps — what a compaction
-    /// would remove. With `node` `None`, over every node.
+    /// How many of `node`'s journaled anchor records a compaction would remove: those naming a certificate this node
+    /// no longer keeps and has no append in flight for, less the one a peer with nothing kept on disk retains as its
+    /// memory. With `node` `None`, over every node.
     fn dead_journaled(&self, node: Option<&NodeId>) -> usize {
-        let seen = self.anchors_seen.pin();
         let dead_of = |n: &NodeId, set: &HashSet<[u8; 32]>| {
-            let kept: HashSet<[u8; 32]> = seen.get(n).map(|m| m.values().flat_map(|a| a.certs.iter()).map(|c| Sha256::digest(&c.der).into()).collect()).unwrap_or_default();
-            set.iter().filter(|d| !kept.contains(*d)).count()
+            let kept: HashSet<[u8; 32]> = self.anchors_seen.pin().get(n).map(|m| m.values().flat_map(|a| a.certs.iter()).map(|c| Sha256::digest(&c.der).into()).collect()).unwrap_or_default();
+            let dead = set.iter().filter(|d| !kept.contains(*d) && !in_set(&self.anchor_tally.inflight, n, d)).count();
+            // A peer with no kept certificate journaled keeps one dead record as its memory ([`compact`]).
+            if set.iter().any(|d| kept.contains(d)) { dead } else { dead.saturating_sub(1) }
         };
         let journaled = self.anchor_tally.journaled.pin();
         match node {
@@ -678,8 +781,9 @@ impl IdentityLedger {
     /// budget of [`ANCHOR_JOURNAL_PER_NODE`] applies to the anchors a node keeps **now**, not to every one it ever
     /// kept). Every journaled `Anchor` record whose certificate this node no longer keeps is left out of a rewritten
     /// journal ([`Journal::rewrite`](super::journal::Journal::rewrite): new file, fsync, rename, directory fsync), and
-    /// stops counting against the budget; counted revocations, saturation marks and records this binary cannot decode
-    /// are kept as they are. Returns how many records it removed; `0` with no journal, nothing to remove, or a failure
+    /// stops counting against the budget; counted revocations, saturation marks, records this binary cannot decode
+    /// or would not restore, and **the last record of a peer this node keeps nothing of** are kept as they are
+    /// ([`compact`] states which record may go and why). Returns how many records it removed; `0` with no journal, nothing to remove, or a failure
     /// (counted, the journal as it was).
     ///
     /// The choice is made inside the journal's writer, against what this node keeps at that moment. A record is taken
@@ -2083,6 +2187,123 @@ mod tests {
         assert_eq!(ledger.compact_anchor_journal().await, 2, "the next compaction removes the two dropped anchors");
         assert_eq!(anchor_ders(&path).len(), 2);
         assert_eq!(ledger.anchors_journaled_count_for_test(&n), 2);
+    }
+
+    fn on_disk(path: &std::path::Path, der: &[u8]) -> bool {
+        anchor_ders(path).iter().any(|r| r.as_slice() == der)
+    }
+
+    /// **#812's review F2: an append that settles after a compaction is not believed durable unless it is on disk.**
+    /// K is kept and journaled, D is journaled and dropped (so the compaction has a record to remove). X is kept and
+    /// its append handed to the writer; before that append settles, X stops being kept and a compaction is queued
+    /// behind it. The writer appends X, then rewrites: X is in flight, so its frame is kept, and the settle that
+    /// follows — putting X on the journaled set — is true. Kept again, X is durable and on disk. (Current-thread
+    /// runtime: the order is the scheduler's.) Seen failing first with the compaction not consulting the in-flight
+    /// set: it removed two records, X's frame with D's, while X's append went on to settle — the state in which the
+    /// reviewer's run showed `anchors_durable_for` answering `true` for a certificate the journal did not hold.
+    #[tokio::test]
+    async fn an_append_settling_after_a_compaction_is_on_disk_when_it_is_believed_durable() {
+        let path = temp_journal("inflight-compact");
+        let ledger = Arc::new(IdentityLedger::default());
+        ledger.open_journal(&path).unwrap();
+        let n: NodeId = "127.0.0.1:9105".parse().unwrap();
+        keep_and_journal(&ledger, &n, 0..2).await; // K = 0, D = 1
+        ledger.keep_raw_for_test(&n, key_of(1), &cert_of(1), false);
+        let x = cert_of(2);
+        ledger.keep_raw_for_test(&n, key_of(2), &x, true);
+        ledger.journal_anchor(&n, &x);
+        let (l2, n2) = (Arc::clone(&ledger), n.clone());
+        let compaction = tokio::spawn(async move {
+            l2.keep_raw_for_test(&n2, key_of(2), &cert_of(2), false);
+            l2.compact_anchor_journal().await
+        });
+        let removed = tokio::time::timeout(std::time::Duration::from_secs(10), compaction).await.expect("bounded").unwrap();
+        assert_eq!(removed, 1, "D's record left the journal");
+        tokio::time::timeout(std::time::Duration::from_secs(10), ledger.anchors_durable_for(&[(n.clone(), digest(&x))])).await.expect("bounded");
+        assert_eq!(ledger.anchor_journaled_for_test(&n, &x), on_disk(&path, &x), "believed journaled exactly when the journal holds it");
+        ledger.keep_raw_for_test(&n, key_of(2), &x, true);
+        ledger.journal_anchor(&n, &x);
+        let durable = tokio::time::timeout(std::time::Duration::from_secs(10), ledger.anchors_durable_for(&ledger.kept_certs())).await.expect("bounded");
+        assert!(durable, "X kept again: durable");
+        assert!(on_disk(&path, &x), "and the journal holds it");
+        assert_eq!(ledger.dead_journaled(None), 0, "nothing is counted dead that no record stands for");
+    }
+
+    /// **#812's review F2, the narrower window: a certificate kept again while the compaction is deciding about it.**
+    /// D is journaled and dropped. Between the compaction's first look at D's record and its taking D off the
+    /// journaled set (a plant), the fold keeps D again and offers it to the journal, which appends nothing: D is on
+    /// the journaled set. The compaction looks again, sees D kept, puts it back and keeps the frame — D is believed
+    /// durable and the journal holds it. Seen failing first without the second look: D's frame was left out while D
+    /// was kept.
+    #[tokio::test]
+    async fn a_certificate_kept_again_while_the_compaction_decides_keeps_its_record() {
+        let path = temp_journal("relook");
+        let ledger = Arc::new(IdentityLedger::default());
+        ledger.open_journal(&path).unwrap();
+        let n: NodeId = "127.0.0.1:9106".parse().unwrap();
+        keep_and_journal(&ledger, &n, 0..2).await; // K = 0, D = 1
+        let d = cert_of(1);
+        ledger.keep_raw_for_test(&n, key_of(1), &d, false);
+        let l2 = Arc::clone(&ledger);
+        let plant: BetweenLooks = Box::new(move |node, der| {
+            l2.keep_raw_for_test(node, key_of(1), der, true);
+            l2.journal_anchor(node, der);
+        });
+        ledger.compaction.between_looks.store(Some(Arc::new(plant)));
+        tokio::time::timeout(std::time::Duration::from_secs(10), ledger.compact_anchor_journal()).await.expect("bounded");
+        ledger.compaction.between_looks.store(None);
+        assert!(on_disk(&path, &d), "D is kept: its record stays");
+        assert!(ledger.anchor_journaled_for_test(&n, &d));
+        assert!(tokio::time::timeout(std::time::Duration::from_secs(10), ledger.anchors_durable_for(&ledger.kept_certs())).await.expect("bounded"));
+    }
+
+    /// **#812's review F7: a record this binary would not restore is not the compaction's to remove.** An `Anchor`
+    /// whose certificate does not parse here — a newer binary's, read after a downgrade — is kept through a compaction
+    /// that removes a dead record beside it. Seen failing first with such a record judged like any other: it was not
+    /// kept, so it was removed.
+    #[tokio::test]
+    async fn a_compaction_keeps_an_anchor_record_this_binary_would_not_restore() {
+        let path = temp_journal("unrestorable");
+        let ledger = IdentityLedger::default();
+        ledger.open_journal(&path).unwrap();
+        let n: NodeId = "127.0.0.1:9107".parse().unwrap();
+        let foreign = b"a newer binary's certificate".to_vec();
+        let entry = JournalEntry::Anchor { node: n.to_string(), der: foreign.clone() };
+        ledger.journal.load_full().unwrap().append(mycelium_core::serde_fixint::to_vec(&entry).unwrap()).await.unwrap();
+        keep_and_journal(&ledger, &n, 0..2).await;
+        ledger.keep_raw_for_test(&n, key_of(1), &cert_of(1), false);
+        assert_eq!(tokio::time::timeout(std::time::Duration::from_secs(10), ledger.compact_anchor_journal()).await.expect("bounded"), 1);
+        assert!(on_disk(&path, &foreign), "kept as it is");
+        assert!(!on_disk(&path, &cert_of(1)), "the dead record beside it went");
+    }
+
+    /// **#812's review F1, at the journal: the last record of a peer this node keeps nothing of stays.** Three anchors
+    /// of a peer are journaled and all three dropped: nothing is removable by the node's own count, and a compaction
+    /// asked for all the same keeps one — the memory a restart rebuilds the peer's entry from. Once a certificate of
+    /// the peer is kept and journaled again, the dead records go. Seen failing first with every dead record
+    /// removable: the journal held no record of the peer.
+    #[tokio::test]
+    async fn a_compaction_keeps_the_last_record_of_a_peer_with_nothing_kept() {
+        let path = temp_journal("last-record");
+        let ledger = IdentityLedger::default();
+        ledger.open_journal(&path).unwrap();
+        let (n, other): (NodeId, NodeId) = ("127.0.0.1:9108".parse().unwrap(), "127.0.0.1:9109".parse().unwrap());
+        keep_and_journal(&ledger, &n, 0..3).await;
+        // Another peer with a dead record, so the compaction has work whatever it decides about N.
+        keep_and_journal(&ledger, &other, 10..12).await;
+        ledger.keep_raw_for_test(&other, key_of(11), &cert_of(11), false);
+        for i in 0..3 {
+            ledger.keep_raw_for_test(&n, key_of(i), &cert_of(i), false);
+        }
+        assert_eq!(ledger.dead_journaled(Some(&n)), 2, "one of N's three dead records is its memory");
+        assert_eq!(tokio::time::timeout(std::time::Duration::from_secs(10), ledger.compact_anchor_journal()).await.expect("bounded"), 3);
+        let of_n = |path: &std::path::Path| (0..3).filter(|i| on_disk(path, &cert_of(*i))).count();
+        assert_eq!(of_n(&path), 1, "exactly one record of N is left");
+        assert_eq!(ledger.anchors_journaled_count_for_test(&n), 1, "and it is still counted as journaled");
+        keep_and_journal(&ledger, &n, 5..6).await;
+        assert_eq!(tokio::time::timeout(std::time::Duration::from_secs(10), ledger.compact_anchor_journal()).await.expect("bounded"), 1);
+        assert_eq!(of_n(&path), 0, "N is anchored on disk again: its dead record goes");
+        assert!(on_disk(&path, &cert_of(5)));
     }
 
     /// **The compaction's second crash window: a crash after the rename**, before the directory is synced and the

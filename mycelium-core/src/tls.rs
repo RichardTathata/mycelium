@@ -1287,6 +1287,8 @@ pub enum CaCommitError {
     UnknownPredecessor,
     /// The named predecessor did not sign it (or is not an Ed25519 CA this tree mints).
     BadSignature,
+    /// The committing CA's own generation cannot be read from the root this node trusts.
+    PredecessorGeneration(CaGenerationError),
     /// The successor's generation cannot be read (malformed, or under the provisional OID in a shipped build).
     SuccessorGeneration(CaGenerationError),
     /// The successor is not its predecessor's generation plus one.
@@ -1301,6 +1303,7 @@ impl std::fmt::Display for CaCommitError {
             CaCommitError::Malformed(why) => write!(f, "the commitment is malformed: {why}"),
             CaCommitError::UnknownPredecessor => f.write_str("no root this node trusts is the CA the commitment names as its signer"),
             CaCommitError::BadSignature => f.write_str("the CA the commitment names did not sign it"),
+            CaCommitError::PredecessorGeneration(why) => write!(f, "the committing CA's certificate is refused: {why}"),
             CaCommitError::SuccessorGeneration(why) => write!(f, "the successor's CA certificate is refused: {why}"),
             CaCommitError::WrongGeneration { predecessor, successor } => write!(
                 f,
@@ -1360,7 +1363,7 @@ impl CaCommitment {
         if !verify_bytes(&key, &Self::message(&self.predecessor, &self.successor_der), &self.sig) {
             return Err(CaCommitError::BadSignature);
         }
-        let before = ca_generation(root).map_err(CaCommitError::SuccessorGeneration)?;
+        let before = ca_generation(root).map_err(CaCommitError::PredecessorGeneration)?;
         let after = ca_generation(&self.successor_der).map_err(CaCommitError::SuccessorGeneration)?;
         if before.checked_add(1) != Some(after) {
             return Err(CaCommitError::WrongGeneration { predecessor: before, successor: after });
@@ -1437,9 +1440,29 @@ pub enum CommitmentPin {
         /// `true` while the committing CA is a root this node trusts; `false` once only the successor is (the pin is
         /// spent: it records which succession this node went through).
         active: bool,
-        /// A different commitment the operator's file holds now, refused: its digest.
-        refused: Option<[u8; 32]>,
+        /// What the operator's file holds now, beside the pin.
+        offered: OfferedCommitment,
     },
+}
+
+/// What the operator's `ca-commit.pem` holds on a node that already has a pin ([`pin_ca_commitment`]). The pin
+/// stands in every case; these say what the file is, so the node counts and names the right thing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OfferedCommitment {
+    /// No file, or the pinned commitment itself.
+    Nothing,
+    /// A document this node cannot assess against its roots — a signature the named CA did not make, a CA it does
+    /// not trust, a successor it cannot read, or no commitment at all. It is **not** a second commitment from the
+    /// CA: nothing shows the CA's key signed it.
+    Unverified(CaCommitError),
+    /// **A second commitment the same CA's key signed**, naming another successor: its digest. A mistake by the
+    /// issuer, or a stolen CA key.
+    Conflict([u8; 32]),
+    /// A commitment that verifies and was made by **another CA** than the one the pin names (the successor's own
+    /// commitment to its successor, once this node trusts the successor): its digest. Not a conflict of the pinned
+    /// CA's. Whether a node holds one pin per committing CA is an open question (plan row I2, §8 "I2 (PR 2b-1 of
+    /// 7)"); until it is decided this is neither pinned nor counted as a conflict.
+    AnotherCa([u8; 32]),
 }
 
 #[cfg(feature = "tls")]
@@ -1950,8 +1973,20 @@ mod imp {
             "TLS: {out:?} exists — this CA has already committed to a successor, and a CA commits once: nodes pin the \
              first commitment they are given and refuse another"
         ));
-        if out.exists() {
-            return Err(committed());
+        match fs::read_to_string(&out) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            // A file that is not a commitment (empty, or cut short): what a crash left before this command synced the
+            // file ahead of its name. It names no successor, so no node can have pinned from it; the operator checks
+            // that no node was given another copy, and removes it.
+            Ok(text) if super::CaCommitment::from_pem(&text).is_err() => {
+                return Err(err(format!(
+                    "TLS: {out:?} exists and is not a commitment (it is empty or damaged — an interrupted `tls commit`). \
+                     It names no successor and no node can pin from it. If no node was given a commitment from this CA, \
+                     remove {out:?} and the successor directory that run made, and run `tls commit` again; if one was, \
+                     copy that node's `ca-commit.pem` back here instead: a CA commits once"
+                )))
+            }
+            _ => return Err(committed()),
         }
         let ca_cfg = TlsConfig { auto_cert_dir: ca_dir.to_path_buf(), ..TlsConfig::default() };
         let (ca_cert_der, _) = load_existing_ca(&ca_cfg)?;
@@ -1978,16 +2013,46 @@ mod imp {
         let commitment = super::CaCommitment::sign(ca_cert_der.as_ref(), &ca_key, successor_der.as_ref())
             .map_err(|e| err(format!("TLS: the commitment could not be made: {e}; {}", undo())))?;
         let tmp = ca_dir.join(format!(".ca-commit.tmp-{}-{:x}", std::process::id(), rand_core::RngCore::next_u64(&mut rand_core::OsRng)));
+        // The promise is durable before it is handed to anyone (#812's review F5): the successor's key and certificate
+        // and their directory, then the commitment's bytes, then its name (a hard link, which fails when the name
+        // exists), then the directory holding the name.
+        let synced = |path: &Path| fs::File::open(path).and_then(|f| f.sync_all());
         let published = (|| {
-            write_public(&tmp, commitment.to_pem().as_bytes()).map_err(|e| err(format!("TLS: write the commitment: {e}; {}", undo())))?;
+            let io = |what: &str, e: std::io::Error| err(format!("TLS: {what}: {e}; {}", undo()));
+            for f in [successor_dir.join("ca-key.pem"), successor_cert.clone()] {
+                synced(&f).map_err(|e| io("sync the successor CA", e))?;
+            }
+            crate::persistence::sync_parent_dir(&successor_cert).map_err(|e| io("sync the successor's directory", e))?;
+            write_public(&tmp, commitment.to_pem().as_bytes()).map_err(|e| io("write the commitment", e))?;
+            synced(&tmp).map_err(|e| io("sync the commitment", e))?;
             fs::hard_link(&tmp, &out).map_err(|e| {
-                if e.kind() == std::io::ErrorKind::AlreadyExists { committed() } else { err(format!("TLS: publish {out:?}: {e}; {}", undo())) }
-            })
+                if e.kind() == std::io::ErrorKind::AlreadyExists {
+                    committed()
+                } else {
+                    err(format!(
+                        "TLS: publish {out:?} by hard link: {e} — `tls commit` needs a filesystem with hard links (FAT, exFAT and \
+                         some SMB mounts have none): run it on a local disk; {}",
+                        undo()
+                    ))
+                }
+            })?;
+            crate::persistence::sync_parent_dir(&out).map_err(|e| io("sync the CA directory", e))
         })();
         let _ = fs::remove_file(&tmp);
         published?;
         tracing::info!("TLS: committed to a successor CA in {successor_dir:?}; copy {out:?} into each node's certificate directory");
         Ok((out, successor_cert))
+    }
+
+    /// The commitment file or pin this node holds, if either exists — what a node with no `[persistence]` is refused
+    /// for holding ([`pin_ca_commitment`]'s caller). The operator's file first.
+    pub fn held_ca_commitment(cfg: &TlsConfig) -> Option<std::path::PathBuf> {
+        [
+            cfg.auto_cert_dir.join(super::CA_COMMIT_FILE),
+            cfg.auto_cert_dir.join(super::SUCCESSION_DIR).join(super::CA_COMMIT_PIN_FILE),
+        ]
+        .into_iter()
+        .find(|p| fs::metadata(p).is_ok())
     }
 
     /// **A node's commitment check at start** (identity-and-lifecycle I2, PR 2b; the maintainer's decisions (a) of
@@ -1997,8 +2062,9 @@ mod imp {
     /// - reads the **operator-placed** `{auto_cert_dir}/ca-commit.pem`, if there is one. With no pin, it assesses the
     ///   file against its roots ([`super::CaCommitment::verify`]), refuses to start by name when that fails, and
     ///   otherwise **pins it**: the commitment is written under the node's own `succession/` — a temporary, fsynced,
-    ///   renamed, the directory fsynced — before this returns. With a pin, a file holding **another** commitment is
-    ///   refused: the pin stands, and the caller counts and names the refusal.
+    ///   renamed, the directory fsynced — before this returns. With a pin, the pin stands whatever the file holds, and
+    ///   the file is assessed and named ([`super::OfferedCommitment`]): a document this node cannot assess, a second
+    ///   commitment the pinned CA's key signed, or a commitment by another CA.
     ///
     /// The operator's file is never written, and nothing but that file is ever pinned: a commitment seen in the KV is
     /// compared with the pin by its reader and is never passed here.
@@ -2007,16 +2073,25 @@ mod imp {
         let file = cfg.auto_cert_dir.join(super::CA_COMMIT_FILE);
         let dir = cfg.auto_cert_dir.join(super::SUCCESSION_DIR);
         let pin_path = dir.join(super::CA_COMMIT_PIN_FILE);
-        let read = |path: &Path| -> Result<Option<super::CaCommitment>, GossipError> {
+        let text = |path: &Path| -> Result<Option<String>, GossipError> {
             match fs::read_to_string(path) {
-                Ok(pem) => super::CaCommitment::from_pem(&pem).map(Some).map_err(|e| refuse(format!("TLS: {path:?} is refused: {e}"))),
+                Ok(pem) => Ok(Some(pem)),
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
                 Err(e) => Err(refuse(format!("TLS: read {path:?}: {e}"))),
             }
         };
-        let (pinned, offered) = (read(&pin_path)?, read(&file)?);
+        let parse = |path: &Path, pem: &str| super::CaCommitment::from_pem(pem).map_err(|e| refuse(format!(
+            "TLS: {path:?} is refused: {e}. If it is this node's pin that is damaged and the node is to pin again from \
+             its operator's file, remove {dir:?} and start it again"
+        )));
+        let pinned = match text(&pin_path)? {
+            Some(pem) => Some(parse(&pin_path, &pem)?),
+            None => None,
+        };
+        let offered_text = text(&file)?;
         let Some(pinned) = pinned else {
-            let Some(offered) = offered else { return Ok(super::CommitmentPin::None) };
+            let Some(offered) = offered_text else { return Ok(super::CommitmentPin::None) };
+            let offered = parse(&file, &offered)?;
             offered.verify(roots).map_err(|e| refuse(format!("TLS: the CA commitment {file:?} is refused: {e}")))?;
             // Remembered before it is acted on: the pin is durable — its bytes, then its name — before this returns.
             let io = |what: &str, e: std::io::Error| refuse(format!("TLS: pin the CA commitment under {dir:?}: {what}: {e}"));
@@ -2026,7 +2101,7 @@ mod imp {
             fs::File::open(&tmp).and_then(|f| f.sync_all()).map_err(|e| io("sync", e))?;
             fs::rename(&tmp, &pin_path).map_err(|e| io("rename", e))?;
             crate::persistence::sync_parent_dir(&pin_path).map_err(|e| io("sync the directory", e))?;
-            return Ok(super::CommitmentPin::Pinned { commitment: offered, first: true, active: true, refused: None });
+            return Ok(super::CommitmentPin::Pinned { commitment: offered, first: true, active: true, offered: super::OfferedCommitment::Nothing });
         };
         let active = match pinned.verify(roots) {
             Ok(_) => true,
@@ -2041,8 +2116,20 @@ mod imp {
                 )))
             }
         };
-        let refused = offered.map(|o| o.digest()).filter(|d| *d != pinned.digest());
-        Ok(super::CommitmentPin::Pinned { commitment: pinned, first: false, active, refused })
+        // The file beside a pin is assessed before it is called anything (#812's review F3): only a document the
+        // pinned CA's key signed is a second commitment from that CA.
+        use super::OfferedCommitment as Offered;
+        let offered = match offered_text.as_deref().map(super::CaCommitment::from_pem) {
+            None => Offered::Nothing,
+            Some(Err(e)) => Offered::Unverified(e),
+            Some(Ok(o)) if o.digest() == pinned.digest() => Offered::Nothing,
+            Some(Ok(o)) => match o.verify(roots) {
+                Err(e) => Offered::Unverified(e),
+                Ok(_) if o.predecessor == pinned.predecessor => Offered::Conflict(o.digest()),
+                Ok(_) => Offered::AnotherCa(o.digest()),
+            },
+        };
+        Ok(super::CommitmentPin::Pinned { commitment: pinned, first: false, active, offered })
     }
 
     /// **Issue a node certificate off-node** (`id.ca_key_off_node`, plan §8). Runs where the CA key
@@ -3119,7 +3206,7 @@ mod imp {
 }
 
 #[cfg(feature = "tls")]
-pub use imp::{ed25519_key_from_cert_der, gateway_server_config_from_pem, generate_rotation, generate_rotation_after, issue_client_cert, issue_client_cert_for_key, issue_consent_cert, issue_node_cert, p256_point_from_cert_der, issue_node_cert_for_key, load_or_generate, mint_ca, mint_ca_at, commit_successor, pin_ca_commitment, sign_bytes, verify_bytes, writable_by_others};
+pub use imp::{ed25519_key_from_cert_der, gateway_server_config_from_pem, generate_rotation, generate_rotation_after, issue_client_cert, issue_client_cert_for_key, issue_consent_cert, issue_node_cert, p256_point_from_cert_der, issue_node_cert_for_key, load_or_generate, mint_ca, mint_ca_at, commit_successor, held_ca_commitment, pin_ca_commitment, sign_bytes, verify_bytes, writable_by_others};
 
 #[cfg(all(test, feature = "tls"))]
 mod key_extract_tests {
@@ -5083,13 +5170,13 @@ mod ca_commit_tests {
 
         std::fs::copy(d1.join(super::CA_COMMIT_FILE), &file).unwrap();
         let placed = std::fs::read(&file).unwrap();
-        assert_eq!(super::imp::pin_ca_commitment(&cfg, &roots).unwrap(), CommitmentPin::Pinned { commitment: c.clone(), first: true, active: true, refused: None });
+        assert_eq!(super::imp::pin_ca_commitment(&cfg, &roots).unwrap(), CommitmentPin::Pinned { commitment: c.clone(), first: true, active: true, offered: super::OfferedCommitment::Nothing });
         assert_eq!(std::fs::read(&file).unwrap(), placed, "the operator's file is never written");
         assert_eq!(CaCommitment::from_pem(&std::fs::read_to_string(&pin).unwrap()).unwrap(), c, "persisted under succession/");
         assert_eq!(std::fs::read_dir(pin.parent().unwrap()).unwrap().count(), 1, "no temporary left");
-        assert_eq!(super::imp::pin_ca_commitment(&cfg, &roots).unwrap(), CommitmentPin::Pinned { commitment: c.clone(), first: false, active: true, refused: None });
+        assert_eq!(super::imp::pin_ca_commitment(&cfg, &roots).unwrap(), CommitmentPin::Pinned { commitment: c.clone(), first: false, active: true, offered: super::OfferedCommitment::Nothing });
         std::fs::remove_file(&file).unwrap();
-        assert_eq!(super::imp::pin_ca_commitment(&cfg, &roots).unwrap(), CommitmentPin::Pinned { commitment: c.clone(), first: false, active: true, refused: None }, "the pin is the node's memory");
+        assert_eq!(super::imp::pin_ca_commitment(&cfg, &roots).unwrap(), CommitmentPin::Pinned { commitment: c.clone(), first: false, active: true, offered: super::OfferedCommitment::Nothing }, "the pin is the node's memory");
 
         // A second commitment the old CA's key did sign: a stolen key's.
         let rival = der_of(&super::imp::mint_ca_at(&base.join("rival"), None, 1).unwrap());
@@ -5098,7 +5185,7 @@ mod ca_commit_tests {
         std::fs::write(&file, second.to_pem()).unwrap();
         assert_eq!(
             super::imp::pin_ca_commitment(&cfg, &roots).unwrap(),
-            CommitmentPin::Pinned { commitment: c.clone(), first: false, active: true, refused: Some(second.digest()) }
+            CommitmentPin::Pinned { commitment: c.clone(), first: false, active: true, offered: super::OfferedCommitment::Conflict(second.digest()) }
         );
         assert_eq!(CaCommitment::from_pem(&std::fs::read_to_string(&pin).unwrap()).unwrap(), c, "the pin stands");
 
@@ -5127,10 +5214,118 @@ mod ca_commit_tests {
         let both = super::imp::pin_ca_commitment(&cfg, &[old.clone(), c.successor_der.clone()]).unwrap();
         assert!(matches!(both, CommitmentPin::Pinned { active: true, .. }), "widened: still assessed against the old root");
         let narrowed = super::imp::pin_ca_commitment(&cfg, std::slice::from_ref(&c.successor_der)).unwrap();
-        assert_eq!(narrowed, CommitmentPin::Pinned { commitment: c.clone(), first: false, active: false, refused: None }, "spent, the same file beside it");
+        assert_eq!(narrowed, CommitmentPin::Pinned { commitment: c.clone(), first: false, active: false, offered: super::OfferedCommitment::Nothing }, "spent, the same file beside it");
         let unrelated = der_of(&super::imp::mint_ca(&base.join("unrelated")).unwrap());
         let err = super::imp::pin_ca_commitment(&cfg, &[unrelated]).expect_err("unassessable");
         assert!(err.to_string().contains("commit.pin.pem") && err.to_string().contains("remove"), "{err}");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// **#812's review F3 (a): beside a pin, the operator's file is assessed before it is called a conflict.** A
+    /// document no CA signed (a garbage signature), one naming a CA this node does not trust, and one that is not a
+    /// commitment at all are each `Unverified`, never `Conflict`; the pin stands and the start goes on. Only a second
+    /// commitment the pinned CA's key signed is a `Conflict`. The reviewer's test, adopted. Seen failing first with the
+    /// file compared by digest alone: the garbage-signature document was reported as a conflict.
+    #[test]
+    fn beside_a_pin_an_unverifiable_operator_file_is_not_a_conflict() {
+        use super::OfferedCommitment as Offered;
+        let base = fresh_dir("offered");
+        let (d1, old, c) = committed(&base);
+        let roots = std::slice::from_ref(&old);
+        let cfg = node_cfg(&base.join("node"));
+        let file = cfg.auto_cert_dir.join(super::CA_COMMIT_FILE);
+        std::fs::copy(d1.join(super::CA_COMMIT_FILE), &file).unwrap();
+        super::imp::pin_ca_commitment(&cfg, roots).unwrap();
+        let offered = |doc: &str| {
+            std::fs::write(&file, doc).unwrap();
+            match super::imp::pin_ca_commitment(&cfg, roots).unwrap() {
+                CommitmentPin::Pinned { commitment, offered, first: false, active: true } => {
+                    assert_eq!(commitment, c, "the pin stands");
+                    offered
+                }
+                other => panic!("{other:?}"),
+            }
+        };
+        let attacker = der_of(&super::imp::mint_ca_at(&base.join("attacker"), None, 1).unwrap());
+        let forged = CaCommitment { predecessor: c.predecessor, successor_der: attacker.clone(), sig: [7u8; 64] };
+        assert_eq!(offered(&forged.to_pem()), Offered::Unverified(CaCommitError::BadSignature), "no CA signed it");
+        let elsewhere = CaCommitment { predecessor: [9u8; 32], ..forged.clone() };
+        assert_eq!(offered(&elsewhere.to_pem()), Offered::Unverified(CaCommitError::UnknownPredecessor));
+        assert!(matches!(offered("not a commitment"), Offered::Unverified(CaCommitError::Malformed(_))));
+        let second = CaCommitment::sign(&old, &ca_key(&d1), &attacker).unwrap();
+        assert_eq!(offered(&second.to_pem()), Offered::Conflict(second.digest()), "the pinned CA's key signed this one");
+        assert_eq!(offered(&c.to_pem()), Offered::Nothing);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// **#812's review F3 (b), the part that is not a decision: the next CA's commitment is not a conflict of the
+    /// pinned CA's.** A node pinned CA0's commitment to CA1 and now trusts only CA1 (the pin is spent). CA1's genuine
+    /// commitment to CA2 in the operator's file is reported as `AnotherCa` — a different promiser — and the spent pin
+    /// stands. **Whether it should be pinned is open** (the plan's §8 row): this test holds only that it is not called
+    /// a second commitment from CA0. Seen failing first with every verifying, differing commitment called a conflict.
+    #[test]
+    fn the_next_cas_commitment_beside_a_spent_pin_is_not_a_conflict_of_the_pinned_ca() {
+        use super::OfferedCommitment as Offered;
+        let base = fresh_dir("next-ca");
+        let (d1, old, c) = committed(&base);
+        let cfg = node_cfg(&base.join("node"));
+        let file = cfg.auto_cert_dir.join(super::CA_COMMIT_FILE);
+        std::fs::copy(d1.join(super::CA_COMMIT_FILE), &file).unwrap();
+        super::imp::pin_ca_commitment(&cfg, std::slice::from_ref(&old)).unwrap();
+        let (file2, _) = super::imp::commit_successor(&base.join("ca2"), &base.join("ca3")).unwrap();
+        let next = CaCommitment::from_pem(&std::fs::read_to_string(&file2).unwrap()).unwrap();
+        let ca1 = c.successor_der.clone();
+        assert_eq!(next.verify(std::slice::from_ref(&ca1)), Ok(2), "a genuine commitment by the root this node trusts now");
+        std::fs::copy(&file2, &file).unwrap();
+        assert_eq!(
+            super::imp::pin_ca_commitment(&cfg, std::slice::from_ref(&ca1)).unwrap(),
+            CommitmentPin::Pinned { commitment: c, first: false, active: false, offered: Offered::AnotherCa(next.digest()) }
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// **#812's review F5: a `ca-commit.pem` that is not a commitment is named as an interrupted run, with what to
+    /// do**, and a damaged pin's refusal names the way out. An empty file under the commitment's name refuses
+    /// `tls commit` saying it is not a commitment, that no node can pin from it, and how to go on — not "this CA has
+    /// already committed". Seen failing first with any existing file read as a commitment already made.
+    #[test]
+    fn an_empty_commitment_file_is_named_as_an_interrupted_run_not_as_a_commitment() {
+        let base = fresh_dir("empty");
+        let d1 = base.join("ca1");
+        let old = der_of(&super::imp::mint_ca(&d1).unwrap());
+        std::fs::write(d1.join(super::CA_COMMIT_FILE), b"").unwrap();
+        let err = super::imp::commit_successor(&d1, &base.join("ca2")).expect_err("an empty file").to_string();
+        assert!(err.contains("not a commitment") && err.contains("interrupted") && err.contains("remove"), "{err}");
+        assert!(!err.contains("already committed"), "{err}");
+        assert!(!base.join("ca2").exists(), "nothing minted");
+        std::fs::remove_file(d1.join(super::CA_COMMIT_FILE)).unwrap();
+        let (file, _) = super::imp::commit_successor(&d1, &base.join("ca2")).unwrap();
+        // A pin that does not parse refuses the start and names `succession/`.
+        let cfg = node_cfg(&base.join("node"));
+        std::fs::copy(&file, cfg.auto_cert_dir.join(super::CA_COMMIT_FILE)).unwrap();
+        super::imp::pin_ca_commitment(&cfg, std::slice::from_ref(&old)).unwrap();
+        let pin = cfg.auto_cert_dir.join(super::SUCCESSION_DIR).join(super::CA_COMMIT_PIN_FILE);
+        std::fs::write(&pin, b"damaged").unwrap();
+        let err = super::imp::pin_ca_commitment(&cfg, std::slice::from_ref(&old)).expect_err("a damaged pin").to_string();
+        assert!(err.contains("commit.pin.pem") && err.contains("succession") && err.contains("remove"), "{err}");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// **#812's review F7: an unreadable generation is blamed on the certificate that carries it.** A commitment whose
+    /// committing CA's own generation cannot be read is refused as the predecessor's, not the successor's. Seen
+    /// failing first with both mapped to `SuccessorGeneration`.
+    #[test]
+    fn an_unreadable_predecessor_generation_is_named_as_the_predecessors() {
+        let base = fresh_dir("pred-gen");
+        let (_, old, c) = committed(&base);
+        // Closed, a generation-0 root (no extension) still reads; the successor's does not.
+        let got = super::with_provisional_ca_generation_closed(|| c.verify(std::slice::from_ref(&old)));
+        assert!(matches!(got, Err(CaCommitError::SuccessorGeneration(_))), "{got:?}");
+        // A committing CA of generation 1 (it carries the extension), read by a closed build.
+        let (file2, _) = super::imp::commit_successor(&base.join("ca2"), &base.join("ca3")).unwrap();
+        let next = CaCommitment::from_pem(&std::fs::read_to_string(&file2).unwrap()).unwrap();
+        let got = super::with_provisional_ca_generation_closed(|| next.verify(std::slice::from_ref(&c.successor_der)));
+        assert!(matches!(got, Err(CaCommitError::PredecessorGeneration(_))), "{got:?}");
         let _ = std::fs::remove_dir_all(&base);
     }
 }

@@ -666,8 +666,13 @@ the name, the rename made durable — with the choice made **inside the writer**
 and none queued behind it. A failure before the rename changes nothing and `open` removes the temporary; one after
 it poisons the writer, whose handle may name the replaced file (an append there would be acknowledged and lost:
 `a_rewrite_keeps_the_chosen_records_and_later_appends_land_in_the_new_file`). The caller takes a record off its
-"journaled" set **before** the frame is left out, never after — the node may re-append what is still on disk, and
-never believes durable what is not. Sequence numbers restart at the kept count, so **a journal whose records are
+"journaled" set **before** the frame is left out, never after, and **looks again** before leaving it out — the node
+may re-append what is still on disk, and never believes durable what is not; a record whose append is still in flight
+is kept (#812's review F2: an append settling after the rewrite put a record on the set that the file no longer
+held). **A record is removed for what it no longer carries, not for being dead**: the last `Anchor` record of a peer
+this node keeps nothing of is the memory that the peer was anchored — without it a restart reads the peer as legacy —
+so it stays until a kept certificate of the peer is journaled (F1). `compact`'s doc in `src/agent/revocation.rs` lists
+what is rebuilt from a record and argues each interleaving. Sequence numbers restart at the kept count, so **a journal whose records are
 cited by position or chained by hash (the evidence journal, the rights ledger) is never rewritten**; `rewrite` is
 `pub(crate)` with one caller (`src/agent/revocation.rs` `compact`). And a persistence directory that cannot be created **refuses
 `start()`** (`InvalidField { field: "persistence" }`, R7, 2.24.0): it used to log and run **in memory**,
