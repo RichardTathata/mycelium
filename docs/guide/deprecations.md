@@ -4842,8 +4842,7 @@ call whose authority does not lapse**, and nothing changes on a provider without
   receipt's wait reads `Unbounded`.
 - **A declaring stream is handed at most 256 requests it has not ended** (`?read_ahead=N`, 1–256, default 256;
   `read_ahead` / `readAhead` in the SDKs; #806's review M2 and its confirm round, C1). **The bound is the node's
-  own**: it counts what it handed the stream and the stream has not ended — an `rpc/respond` naming the stream (an
-  answer or a confirmation), or 300 s — and past the window hands it nothing more and takes nothing more off the
+  own**: it counts what it handed the stream and the stream has not ended, and past the window hands it nothing more and takes nothing more off the
   stream's channel, so a busy worker's backlog fills that channel and `SignalHandlers::fill_ratio`, which admission
   reads, sees it. **The SDKs read a declaring stream without pause**, so a `cancel` event is never stuck behind
   requests. A declaring worker that takes requests and never answers them stalls at its window until they expire:
@@ -4852,13 +4851,18 @@ call whose authority does not lapse**, and nothing changes on a provider without
   - it works on **at most its window of calls at once** (256 at most); an undeclared stream has no such ceiling;
   - a request dropped **without any respond** holds a window slot for 300 s — as does one whose confirmation the SDK
     refused (`CancelNotReceivedError`) and that was not then answered;
-  - a respond the node **refuses** (`409`, `403`) ends nothing and opens no slot;
+  - **the one rule for what ends a request on a stream:** every `rpc/respond` the node answers in the 2xx class
+    (`ok`, `duplicate`, `cancelled`, `stopped`), naming a stream its own principal opened, ends that request on that
+    stream; any other answer (`409`, `403`, `400`) ends nothing, and so does a respond naming another principal's
+    stream. Failing that, a request ends 300 s after it was handed out;
   - a raw client that declares but does not send `stream` back on `rpc/respond` **never opens its window**;
   - `read_ahead` must be a whole number from 1 to 256: a declaring stream's 0, a larger value or a non-number is
     refused **`400 invalid_read_ahead`** (JSON), never clamped; on a stream that does not declare it is ignored.
 - **A call cancelled while it still waits in the stream's queue** is answered `cancelled`, never streamed, and recorded
   as the node's own confirmed stop, whatever the stream declared: it was never handed out (#806's review, L7) — also
-  when the stream closes with it still queued (before, `withdrawn`).
+  when the stream closes with it still queued (before, `withdrawn`). **When it is answered:** on the serve loop's next
+  turn — within a second while the stream's window is full; while the window has room and the stream is not asking
+  for an event, only when the stream next asks or closes.
 - **SDKs** (`mycelium-py` and `mycelium-ts` bump at release): `rpc_serve(kind, stops_on_cancel=True)` /
   `rpcServe(kind, { stopsOnCancel: true })` declare; every stream sends `cancel_events=true`; each request carries
   `cancelled` (an `asyncio.Event`) / `signal` (an `AbortSignal`), set by its `cancel` event; `rpc_confirm_stopped(req)` /

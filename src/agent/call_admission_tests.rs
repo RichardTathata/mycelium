@@ -1049,12 +1049,17 @@ struct Subscriber {
     http_port: u16,
     /// The stream's name, from the `Mycelium-Serve-Stream` header.
     stream: String,
+    token: &'static str,
 }
 
 impl Subscriber {
     async fn open(n: &Node, kind: &str, query: &str) -> Self {
+        Self::open_as(n, kind, query, "sdk-secret").await
+    }
+    /// As [`open`](Self::open), under another serving principal's token.
+    async fn open_as(n: &Node, kind: &str, query: &str, token: &'static str) -> Self {
         // No total timeout on the stream itself; its opening is bounded.
-        let opening = reqwest::Client::new().get(format!("http://127.0.0.1:{}/gateway/rpc/serve/{kind}{query}", n.http_port)).bearer_auth("sdk-secret").send();
+        let opening = reqwest::Client::new().get(format!("http://127.0.0.1:{}/gateway/rpc/serve/{kind}{query}", n.http_port)).bearer_auth(token).send();
         let mut stream = tokio::time::timeout(HTTP_BOUND, opening).await.expect("the serve stream opens within its bound").expect("the serve stream opens");
         assert_eq!(stream.status(), 200);
         let name = stream.headers().get("mycelium-serve-stream").and_then(|v| v.to_str().ok()).unwrap_or_default().to_string();
@@ -1082,7 +1087,7 @@ impl Subscriber {
         });
         // The stream's serve loop is registered when the response starts; give its first ask a moment.
         tokio::time::sleep(Duration::from_millis(200)).await;
-        Self { events, reader, http_port: n.http_port, stream: name }
+        Self { events, reader, http_port: n.http_port, stream: name, token }
     }
     /// Wait for the `i`-th event named `name`.
     async fn next(&self, name: &str) -> serde_json::Value {
@@ -1101,7 +1106,7 @@ impl Subscriber {
         // The stream the request went out on, as an SDK names it; `extra` may override it (`null`: none).
         let mut body = serde_json::json!({ "nonce_hex": req["nonce_hex"], "sender": req["sender"], "stream": req["stream"] });
         body.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
-        let r = http().post(format!("http://127.0.0.1:{}/gateway/rpc/respond", self.http_port)).bearer_auth("sdk-secret").json(&body).send().await.unwrap();
+        let r = http().post(format!("http://127.0.0.1:{}/gateway/rpc/respond", self.http_port)).bearer_auth(self.token).json(&body).send().await.unwrap();
         (r.status().as_u16(), r.json().await.unwrap_or_default())
     }
 }
@@ -1475,6 +1480,68 @@ async fn a_refused_respond_does_not_open_the_window_and_a_bad_read_ahead_is_refu
     assert!(until(|| sub.count(CUSTOM) == 2, Duration::from_secs(5)).await, "the taken answer made room");
     let req2 = sub.events.lock().unwrap().iter().filter(|(e, _)| e == CUSTOM).nth(1).map(|(_, d)| d.clone()).unwrap();
     assert_eq!(sub.respond(&req2, serde_json::json!({ "result_b64": done })).await.0, 200);
+    let _ = tokio::time::timeout(Duration::from_secs(5), second).await.expect("answered");
+    n.a.shutdown().await;
+}
+
+/// A member's call without an envelope to the plain kind, which reaches every stream open on it.
+fn bare_call(n: &Arc<Node>) -> tokio::task::JoinHandle<Vec<u8>> {
+    let n = Arc::clone(n);
+    tokio::spawn(async move {
+        super::rpc::rpc_call_framed(&n.a.task_ctx, n.a.node_id().clone(), Arc::from(PLAIN_RPC), Bytes::from_static(b"work"), Duration::from_secs(20)).await.expect("a reply").to_vec()
+    })
+}
+
+/// **One release rule: every `rpc/respond` the node answers 2xx, naming a stream, ends that request on that stream —
+/// and a refusal ends nothing** (#806's third confirm round, N1). Two declaring streams of one principal at
+/// `read_ahead=1`; a call without an envelope reaches both. The first answers and is told `ok`; the second answers
+/// too and is told `duplicate` — a 2xx: its request has ended on its stream as well. A second call is then handed to
+/// **both**. Seen failing first with the release sent from the taken-answer branches only: the losing replica's
+/// duplicate freed nothing, and it was not handed the second call (its slot held for 300 s).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_losing_replicas_duplicate_answer_frees_its_window_slot_too() {
+    let n = Arc::new(node_with(Opts { legacy: true, enforce: false, ..Opts::default() }).await);
+    let a = Subscriber::open(&n, PLAIN_RPC, "?stops_on_cancel=true&read_ahead=1").await;
+    let b = Subscriber::open(&n, PLAIN_RPC, "?stops_on_cancel=true&read_ahead=1").await;
+    let first = bare_call(&n);
+    let (ra, rb) = (a.next(PLAIN_RPC).await, b.next(PLAIN_RPC).await);
+    let done = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, b"done");
+    assert_eq!(a.respond(&ra, serde_json::json!({ "result_b64": done })).await, (200, serde_json::json!({ "ok": true })));
+    assert_eq!(b.respond(&rb, serde_json::json!({ "result_b64": done })).await, (200, serde_json::json!({ "ok": true, "duplicate": true })));
+    assert_eq!(tokio::time::timeout(Duration::from_secs(5), first).await.expect("answered").unwrap(), b"done".to_vec());
+    let second = bare_call(&n);
+    assert!(until(|| a.count(PLAIN_RPC) == 2 && b.count(PLAIN_RPC) == 2, Duration::from_secs(5)).await, "both streams are handed the second call: a {} b {}", a.count(PLAIN_RPC), b.count(PLAIN_RPC));
+    let ra2 = a.events.lock().unwrap().iter().filter(|(e, _)| e == PLAIN_RPC).nth(1).map(|(_, d)| d.clone()).unwrap();
+    assert_eq!(a.respond(&ra2, serde_json::json!({ "result_b64": done })).await.0, 200);
+    let _ = tokio::time::timeout(Duration::from_secs(5), second).await.expect("answered");
+    n.a.shutdown().await;
+}
+
+/// **A window slot is released only by its own stream's principal** (#806's third confirm round, N1's promise check:
+/// the window bounds a stream's own backlog, and ending a request on it is the subscriber's own word about its own
+/// stream). Two principals each hold a declaring stream at `read_ahead=1`, and a call without an envelope reaches
+/// both. The first principal answers **naming the other's stream** — a name it should not know, given to it here:
+/// the answer is taken (2xx), and it ends nothing on the other principal's stream, which is not handed the next call
+/// until its own principal answers. Seen failing first with the release not checking who opened the stream: the other
+/// principal's slot was freed, and it was handed the second call.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_respond_naming_another_principals_stream_frees_nothing_there() {
+    let n = Arc::new(node_with(Opts { legacy: true, enforce: false, ..Opts::default() }).await);
+    let mine = Subscriber::open(&n, PLAIN_RPC, "?stops_on_cancel=true&read_ahead=1").await;
+    let theirs = Subscriber::open_as(&n, PLAIN_RPC, "?stops_on_cancel=true&read_ahead=1", "sdk2-secret").await;
+    let first = bare_call(&n);
+    let (rm, rt) = (mine.next(PLAIN_RPC).await, theirs.next(PLAIN_RPC).await);
+    let done = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, b"done");
+    assert_eq!(mine.respond(&rm, serde_json::json!({ "result_b64": done, "stream": theirs.stream })).await.0, 200);
+    let _ = tokio::time::timeout(Duration::from_secs(5), first).await.expect("answered");
+    let second = bare_call(&n);
+    tokio::time::sleep(Duration::from_millis(900)).await;
+    assert_eq!(theirs.count(PLAIN_RPC), 1, "another principal's word frees nothing on this stream");
+    // Its own principal's answer does.
+    assert_eq!(theirs.respond(&rt, serde_json::json!({ "result_b64": done })).await.0, 200);
+    assert!(until(|| theirs.count(PLAIN_RPC) == 2, Duration::from_secs(5)).await, "its own answer frees its slot");
+    let rt2 = theirs.events.lock().unwrap().iter().filter(|(e, _)| e == PLAIN_RPC).nth(1).map(|(_, d)| d.clone()).unwrap();
+    assert_eq!(theirs.respond(&rt2, serde_json::json!({ "result_b64": done })).await.0, 200);
     let _ = tokio::time::timeout(Duration::from_secs(5), second).await.expect("answered");
     n.a.shutdown().await;
 }

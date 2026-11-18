@@ -1849,7 +1849,7 @@ failing first against its plant, but D3.
   is judged).
 - **D2: `read_ahead` is validated**: a declaring stream's 0, a value above 256 or a non-number is refused `400
   invalid_read_ahead` in the route's JSON shape; an undeclared stream's is ignored. The same test (plant: the clamp).
-- **D3: a cancelled call waiting in the stream's queue is answered at once**, whether or not the window has room:
+- **D3: a cancelled call waiting in the stream's queue is answered on the loop's next turn**, whether or not the window has room (corrected in the third confirm round from "at once"; below):
   the lapsed check is now a pass over the queue ahead of the hand-out loop, not inside it. **No test drives the case
   itself** — a call can be in the queue while the window is full only when its check settled a seat claim beside the
   loop, which no fixture here produces; the pass is the one path the two queue tests
@@ -1869,6 +1869,29 @@ failing first against its plant, but D3.
   the routed draw in `mesh.rs` (baseline 1) and **found four unrouted draws that predate this PR, in
   `mycelium-core/src/tls.rs`** (the CA's fleet number, its temporary files' tag, key generation): baselined in the
   open (23 → 27) with a row in the inventory's §2.2, not fixed here.
+
+**From #806's third confirm round (2026-11-18): the window made simpler, not given another case.**
+- **N1: one release rule, in one place.** *Every `rpc/respond` the node answers in the 2xx class, naming a stream its
+  own principal opened, ends that request on that stream; any other answer ends nothing.* `gw_rpc_respond` judges
+  the respond (`respond`) and applies the rule once, after the status is decided; the three per-branch releases are
+  gone. It fixes the reviewer's case — a replica that lost the answer race was told `duplicate` and kept its slot for
+  300 s — and keeps D1 (a refusal is not 2xx).
+  `a_losing_replicas_duplicate_answer_frees_its_window_slot_too` (the reviewer's probe; seen failing on the head
+  before the change: the losing stream was not handed the second call).
+- **The promise check, and a hole it found.** A slot's release is the subscriber's word about its own stream. Before
+  this change a respond that named **another principal's** stream released that stream's slot, if both had been handed
+  the call and the name had leaked. The rule's "its own principal opened" closes it in the same place
+  (`HttpCtx::serve_streams` keeps each stream's opener). `a_respond_naming_another_principals_stream_frees_nothing_there`
+  (seen failing on the head before the change: the other principal's stream was handed the next call).
+- **D3, tested directly.** The queue pass is a function, `take_lapsed`, taking the window's state so that "whatever
+  the window" is decided where it can be tested: `the_queue_pass_takes_lapsed_calls_whatever_the_window`
+  (`src/agent/http/mesh.rs`), seen failing with the pass skipped while the window is full — the reviewer's plant,
+  which no test caught before. **"At once" corrected** (§116, the comments): the pass runs on the loop's next turn —
+  within a second with a full window (its timer turns the loop); with room in the window and a stream that is not
+  asking, when the stream next asks or closes. **Stated, not fixed:** in that last case a cancelled, never-handed-out
+  call's requester waits for the subscriber's next read; nothing turns the loop for a lapse. It was so before this
+  PR's window; closing it needs the loop to wake on a queued call's lapse, a new mechanism not added here.
+- **The inventory row** says three draws and one `use` line for `tls.rs`'s `OsRng`, not four sites.
 
 #### I4a · Sign the grant request, `consumed`, `revoked` and `refused` records, then let each owner collect its own — *follow-up of I4, agreed with the maintainer 2026-11-15 — **not buildable until written***
 

@@ -37,6 +37,10 @@
 //! enveloped. Calls without an envelope (an in-mesh member's direct call) reach every stream of the kind and, under a
 //! cohort budget, hold one place for the call, not one per stream ([`Words::place`]; §116). The per-stream keying holds whatever that window becomes.
 //!
+//! **The stream's window** (`mesh::SERVE_WINDOW`) has one release rule, applied in one place (`mesh::gw_rpc_respond`):
+//! every `rpc/respond` the node answers 2xx, naming a stream its own principal opened, ends that request on that
+//! stream; any other answer ends nothing.
+//!
 //! The table the respond route finds an entry in is a papaya map keyed `(sender, nonce)`, so it adds no lock; the
 //! entry goes with its last watcher (`remove_if` on the pointer), and it is bounded at [`SERVED_CALLS_CAP`]: past it the
 //! serve loop refuses a call that would need a watcher, before streaming it. A watcher keeps only the request's
