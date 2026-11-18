@@ -922,6 +922,15 @@ async fn an_undeclared_receivers_stop_is_a_release_and_a_declared_ones_is_confir
 
 // ── I4, PR 3b: the node's own stop at the bridged MCP loop and the SDK serve stream ───────────────────────────────
 
+/// The bound on every HTTP exchange these tests make (#806's third round: a failure is a named failure, never a
+/// hang — a `read_ahead` plant once opened a stream whose body a test then read without one, for 16 hours).
+const HTTP_BOUND: Duration = Duration::from_secs(30);
+
+/// A client whose every request ends within [`HTTP_BOUND`]. Not for a serve stream, which is meant to stay open.
+fn http() -> reqwest::Client {
+    reqwest::Client::builder().timeout(HTTP_BOUND).build().expect("a client")
+}
+
 /// The provider's receipt for a cancel of `c{n}`: the gateway's revoking checkpoint sent to this node as the
 /// cancel-forward (`sys.call-cancel.v1`) — one node is the gateway and the provider here — and the class answered.
 async fn forward_cancel(n: &Node, id: u64) -> String {
@@ -1044,12 +1053,9 @@ struct Subscriber {
 
 impl Subscriber {
     async fn open(n: &Node, kind: &str, query: &str) -> Self {
-        let mut stream = reqwest::Client::new()
-            .get(format!("http://127.0.0.1:{}/gateway/rpc/serve/{kind}{query}", n.http_port))
-            .bearer_auth("sdk-secret")
-            .send()
-            .await
-            .expect("the serve stream opens");
+        // No total timeout on the stream itself; its opening is bounded.
+        let opening = reqwest::Client::new().get(format!("http://127.0.0.1:{}/gateway/rpc/serve/{kind}{query}", n.http_port)).bearer_auth("sdk-secret").send();
+        let mut stream = tokio::time::timeout(HTTP_BOUND, opening).await.expect("the serve stream opens within its bound").expect("the serve stream opens");
         assert_eq!(stream.status(), 200);
         let name = stream.headers().get("mycelium-serve-stream").and_then(|v| v.to_str().ok()).unwrap_or_default().to_string();
         let events = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -1095,7 +1101,7 @@ impl Subscriber {
         // The stream the request went out on, as an SDK names it; `extra` may override it (`null`: none).
         let mut body = serde_json::json!({ "nonce_hex": req["nonce_hex"], "sender": req["sender"], "stream": req["stream"] });
         body.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
-        let r = reqwest::Client::new().post(format!("http://127.0.0.1:{}/gateway/rpc/respond", self.http_port)).bearer_auth("sdk-secret").json(&body).send().await.unwrap();
+        let r = http().post(format!("http://127.0.0.1:{}/gateway/rpc/respond", self.http_port)).bearer_auth("sdk-secret").json(&body).send().await.unwrap();
         (r.status().as_u16(), r.json().await.unwrap_or_default())
     }
 }
@@ -1199,7 +1205,7 @@ async fn a_declared_subscribers_answer_past_the_grace_is_counted_and_nothing_is_
     let late = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, b"done");
     assert_eq!(sub.respond(&req, serde_json::json!({ "result_b64": late })).await, (200, serde_json::json!({ "ok": true, "cancelled": true })));
     assert_eq!(late_serve_answers(&n), 1);
-    let stats: serde_json::Value = reqwest::Client::new().get(format!("http://127.0.0.1:{}/stats", n.http_port)).send().await.unwrap().json().await.unwrap();
+    let stats: serde_json::Value = http().get(format!("http://127.0.0.1:{}/stats", n.http_port)).send().await.unwrap().json().await.unwrap();
     assert_eq!(stats["rpc_serve_answered_after_lapse"][CUSTOM].as_u64(), Some(1), "{}", stats["rpc_serve_answered_after_lapse"]);
     assert_eq!(stats["door_stops"]["sdk_serve"].as_u64(), Some(1), "{}", stats["door_stops"]);
     n.running(0).await;
@@ -1293,7 +1299,7 @@ async fn an_enveloped_call_reaches_one_stream_and_only_its_word_confirms() {
     // The sibling's real stream, named by a process that somehow learned it: it was not handed the call.
     let (status, body) = handed.respond(&req, serde_json::json!({ "stopped": true, "stream": other.stream })).await;
     assert_eq!((status, body["error"].as_str()), (409, Some("not_your_stream")), "{body}");
-    let r = reqwest::Client::new().post(format!("http://127.0.0.1:{}/gateway/rpc/respond", n.http_port)).bearer_auth("sdk2-secret")
+    let r = http().post(format!("http://127.0.0.1:{}/gateway/rpc/respond", n.http_port)).bearer_auth("sdk2-secret")
         .json(&serde_json::json!({ "nonce_hex": req["nonce_hex"], "sender": req["sender"], "stream": req["stream"], "stopped": true })).send().await.unwrap();
     let (status, body): (u16, serde_json::Value) = (r.status().as_u16(), r.json().await.unwrap_or_default());
     assert_eq!((status, body["error"].as_str()), (409, Some("not_your_stream")), "another principal's stopped: {body}");
@@ -1417,5 +1423,58 @@ async fn a_call_holds_one_cohort_place_however_many_streams_it_reaches() {
     assert_eq!(one.respond(&r1, serde_json::json!({ "result_b64": done })).await.0, 200);
     assert_eq!(tokio::time::timeout(Duration::from_secs(5), answered).await.expect("answered").unwrap(), b"done".to_vec());
     assert!(until(|| held(&n) == 0, Duration::from_secs(5)).await, "released once both streams' registrations ended: {}", held(&n));
+    n.a.shutdown().await;
+}
+
+/// **A refused `rpc/respond` does not open the window, and a bad `read_ahead` is refused by name** (#806's second
+/// confirm round, D1 and D2). At `read_ahead=1` the stream holds the first call and the second waits at the node. A
+/// `"stopped": true` for the call in hand — which the node has not cancelled — is refused `409 not_cancelled` and
+/// ends nothing: the second call still waits. The first call's answer, which is taken, makes room. And a declaring
+/// stream's `read_ahead` of 0, 257 or `abc` is refused `400 invalid_read_ahead` in the route's JSON shape, while an
+/// undeclared stream, which has no window, is opened whatever it says. Seen failing first with the window released
+/// before the respond is judged (the second call was handed out on the refusal), and with the value clamped.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_refused_respond_does_not_open_the_window_and_a_bad_read_ahead_is_refused() {
+    let n = Arc::new(node().await);
+    let open = |query: &'static str| {
+        let port = n.http_port;
+        // A stream that opens never ends, so only its head is awaited here, and that within a bound.
+        async move {
+            let opening = reqwest::Client::new().get(format!("http://127.0.0.1:{port}/gateway/rpc/serve/{PLAIN_RPC}{query}")).bearer_auth("sdk-secret").send();
+            tokio::time::timeout(HTTP_BOUND, opening).await.expect("answered within its bound").unwrap()
+        }
+    };
+    for bad in ["?stops_on_cancel=true&read_ahead=0", "?stops_on_cancel=true&read_ahead=257", "?stops_on_cancel=true&read_ahead=abc"] {
+        let r = open(bad).await;
+        // The status first: a stream that was opened (200) has no body to wait for — a named failure, not a hang.
+        assert_eq!(r.status().as_u16(), 400, "{bad}: refused, never opened");
+        let body: serde_json::Value = tokio::time::timeout(HTTP_BOUND, r.json()).await.expect("the refusal's body within its bound").expect("a JSON refusal");
+        assert_eq!(body["error"].as_str(), Some("invalid_read_ahead"), "{bad}: {body}");
+    }
+    assert_eq!(open("?read_ahead=abc").await.status(), 200, "an undeclared stream has no window: the parameter is ignored");
+
+    let sub = Subscriber::open(&n, CUSTOM, "?stops_on_cancel=true&read_ahead=1").await;
+    let send = |n: &Arc<Node>| {
+        let (framed, _, _) = n.frame(&n.custom(), None, Cm::Honest);
+        let (n2, call) = (Arc::clone(n), n.custom());
+        tokio::spawn(async move { n2.send(&call, framed).await })
+    };
+    let mut first = send(&n);
+    n.running_or_answered(1, &mut first).await;
+    let req = sub.next(CUSTOM).await;
+    let second = send(&n);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(sub.count(CUSTOM), 1);
+    let (status, body) = sub.respond(&req, serde_json::json!({ "stopped": true })).await;
+    assert_eq!((status, body["error"].as_str()), (409, Some("not_cancelled")), "{body}");
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    assert_eq!(sub.count(CUSTOM), 1, "a refused respond ends nothing: the second call still waits");
+    let done = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, b"done");
+    assert_eq!(sub.respond(&req, serde_json::json!({ "result_b64": done })).await.0, 200);
+    assert_eq!(tokio::time::timeout(Duration::from_secs(5), first).await.expect("answered").unwrap(), b"done".to_vec());
+    assert!(until(|| sub.count(CUSTOM) == 2, Duration::from_secs(5)).await, "the taken answer made room");
+    let req2 = sub.events.lock().unwrap().iter().filter(|(e, _)| e == CUSTOM).nth(1).map(|(_, d)| d.clone()).unwrap();
+    assert_eq!(sub.respond(&req2, serde_json::json!({ "result_b64": done })).await.0, 200);
+    let _ = tokio::time::timeout(Duration::from_secs(5), second).await.expect("answered");
     n.a.shutdown().await;
 }

@@ -4830,8 +4830,10 @@ call whose authority does not lapse**, and nothing changes on a provider without
   2026-11-17, #806's M4: a caller's budget is the caller's, and how many streams a server opens must not multiply
   what a caller is charged): a call without an envelope (a member's direct call) reaches every stream of the kind,
   the place is kept with the call, a later stream's is given back as it is handed the call, and the one place is
-  released when the call's last stream registration ends. As before this change, one place per call; each stream
-  still answers only for its own stop. Before, it was held only under a cohort budget (in `ProviderBudget::parked`, lock-order
+  released when the call's last stream registration ends — so after a cancel, a slow sibling stream keeps the
+  caller's one place until it ends or expires. As before this change, one place per call; each stream still answers
+  only for its own stop. **The excess, stated:** a stream that stops reading keeps one checked call, and that call's
+  cohort place, waiting until it reads or closes — at most one place per stream, never one per call. Before, it was held only under a cohort budget (in `ProviderBudget::parked`, lock-order
   row 46, now retired) and was otherwise dropped when streamed, so nothing could see its lapse. A gateway holds at most
   65 536 such calls (`SERVED_RPC_CAP`); past it a call that needs one is refused before it is streamed, `-32004`
   `at_capacity`, `data.detail` `served_calls_full`.
@@ -4845,7 +4847,15 @@ call whose authority does not lapse**, and nothing changes on a provider without
   stream's channel, so a busy worker's backlog fills that channel and `SignalHandlers::fill_ratio`, which admission
   reads, sees it. **The SDKs read a declaring stream without pause**, so a `cancel` event is never stuck behind
   requests. A declaring worker that takes requests and never answers them stalls at its window until they expire:
-  answer or confirm every request. An undeclared stream is unchanged.
+  answer or confirm every request. An undeclared stream is unchanged. **What the window means for a declaring
+  stream:**
+  - it works on **at most its window of calls at once** (256 at most); an undeclared stream has no such ceiling;
+  - a request dropped **without any respond** holds a window slot for 300 s — as does one whose confirmation the SDK
+    refused (`CancelNotReceivedError`) and that was not then answered;
+  - a respond the node **refuses** (`409`, `403`) ends nothing and opens no slot;
+  - a raw client that declares but does not send `stream` back on `rpc/respond` **never opens its window**;
+  - `read_ahead` must be a whole number from 1 to 256: a declaring stream's 0, a larger value or a non-number is
+    refused **`400 invalid_read_ahead`** (JSON), never clamped; on a stream that does not declare it is ignored.
 - **A call cancelled while it still waits in the stream's queue** is answered `cancelled`, never streamed, and recorded
   as the node's own confirmed stop, whatever the stream declared: it was never handed out (#806's review, L7) — also
   when the stream closes with it still queued (before, `withdrawn`).

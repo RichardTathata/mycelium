@@ -189,6 +189,10 @@ pub(super) async fn gw_rpc_serve(
     State(ctx):  State<Arc<HttpCtx>>,
     caller: Option<Extension<ResolvedPrincipal>>,
 ) -> axum::response::Response {
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    if let Err(message) = cancel.window() {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "ok": false, "error": "invalid_read_ahead", "message": message }))).into_response();
+    }
     // Post-360 row R's review: a kind this node serves itself is never handed to a client stream.
     if let Some(refused) = refuse_unservable_kind(&kind) {
         return refused;
@@ -257,7 +261,7 @@ pub(super) async fn gw_rpc_serve(
 }
 
 /// `rpc/serve`'s cancellation parameters (identity-and-lifecycle I4, PR 3b): what the subscriber says of itself.
-#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize)]
 #[cfg_attr(not(all(feature = "gateway", feature = "tls")), allow(dead_code))]
 pub(super) struct ServeCancel {
     /// The subscriber reads `cancel` events.
@@ -267,9 +271,29 @@ pub(super) struct ServeCancel {
     #[serde(default)]
     stops_on_cancel: bool,
     /// For a declaring stream: how many requests it may hold unanswered before the node stops handing it more
-    /// (1..=[`SERVE_WINDOW`], which is the default).
+    /// (1..=[`SERVE_WINDOW`], which is the default). Read as text and checked by the route ([`ServeCancel::window`]):
+    /// a declaring stream's value outside the range, or not a number, is refused by name; an undeclared stream's is
+    /// ignored, since it has no window.
     #[serde(default)]
-    read_ahead: Option<usize>,
+    read_ahead: Option<String>,
+}
+
+impl ServeCancel {
+    /// A declaring stream's window, or the refusal of a `read_ahead` that is not a whole number in
+    /// 1..=[`SERVE_WINDOW`] (#806's second confirm round, D2: refused, never clamped). `Ok(None)`: undeclared.
+    #[cfg_attr(not(all(feature = "gateway", feature = "tls")), allow(dead_code))]
+    fn window(&self) -> Result<Option<usize>, String> {
+        if !self.stops_on_cancel {
+            return Ok(None);
+        }
+        match self.read_ahead.as_deref() {
+            None => Ok(Some(SERVE_WINDOW)),
+            Some(text) => match text.parse::<usize>() {
+                Ok(n) if (1..=SERVE_WINDOW).contains(&n) => Ok(Some(n)),
+                _ => Err(format!("`read_ahead` must be a whole number from 1 to {SERVE_WINDOW}; got `{text}`")),
+            },
+        }
+    }
 }
 
 /// **The most requests a declaring serve stream holds unanswered** (#806's confirm round, C1): the depth of the
@@ -349,7 +373,7 @@ async fn serve_stream_loop(
     // A declaring stream's window ([`SERVE_WINDOW`]): what it was handed and has not ended, by `(sender, nonce)` and
     // when; `rpc/respond` tells this loop of each end through `HttpCtx::serve_streams`.
     #[cfg(all(feature = "gateway", feature = "tls"))]
-    let window = cancel.stops_on_cancel.then(|| cancel.read_ahead.unwrap_or(SERVE_WINDOW).clamp(1, SERVE_WINDOW));
+    let window = cancel.window().unwrap_or(None);
     #[cfg(all(feature = "gateway", feature = "tls"))]
     let mut outstanding: HashMap<(crate::node_id::NodeId, u64), u64> = HashMap::new();
     #[cfg(all(feature = "gateway", feature = "tls"))]
@@ -396,17 +420,25 @@ async fn serve_stream_loop(
             outstanding.retain(|_, at| now.saturating_sub(*at) <= SERVED_RPC_TTL_MS);
             full = window.is_some_and(|w| outstanding.len() >= w);
         }
+        // A call whose authority lapsed while it waited here was never handed to anyone, so the node's stop is the
+        // whole of it: answered `cancelled` at once and its registration ended, a stop the node saw complete whatever
+        // the stream declared (#806's review, L7). At once: whether or not the stream is asking or its window has room
+        // (the second confirm round, D3 — a call checked beside the loop can land here while the window is full).
+        #[cfg(all(feature = "gateway", feature = "tls"))]
+        if !held {
+            for _ in 0..ready.len() {
+                let Some((req, caller, admission)) = ready.pop_front() else { break };
+                if admission.is_lapsed() {
+                    super::rpc::rpc_respond_ctx(&agent_ctx, &req, super::served_call::cancelled_body("sdk_serve"));
+                    super::provider_enforcement::count_door_stop(&agent_ctx, "sdk_serve");
+                    admission.release_confirmed_by_node();
+                } else {
+                    ready.push_back((req, caller, admission));
+                }
+            }
+        }
         #[cfg(all(feature = "gateway", feature = "tls"))]
         while !gone && !held && !full && want.is_some() && let Some((req, caller, mut admission)) = ready.pop_front() {
-            // Its authority lapsed while it waited here: it was never handed to anyone, so the node's stop is the whole
-            // of it — answered `cancelled`, and the registration ends here, a stop the node saw complete whatever the
-            // stream declared (#806's review, L7).
-            if admission.is_lapsed() {
-                super::rpc::rpc_respond_ctx(&agent_ctx, &req, super::served_call::cancelled_body("sdk_serve"));
-                super::provider_enforcement::count_door_stop(&agent_ctx, "sdk_serve");
-                admission.release_confirmed_by_node();
-                continue;
-            }
             // A watcher is needed and none can be held: refused before streaming, never streamed unwatched.
             if admission.holds_anything() && super::served_call::full(&ctx) {
                 refuse_served(&agent_ctx, &req, &super::provider_enforcement::served_calls_full());
@@ -616,15 +648,17 @@ pub(super) async fn gw_rpc_respond(
     // stream's work, never a sibling's. Absent: a client before streams were named.
     #[cfg_attr(not(all(feature = "gateway", feature = "tls")), allow(unused_variables))]
     let stream: Option<u128> = body["stream"].as_str().and_then(stream_from_name);
-    // The named stream ended this request: room in its window ([`SERVE_WINDOW`]) — for a request streamed to this
-    // principal only, and the stream's name is 128 random bits only its holder knows.
+    // **The named stream ended this request: room in its window** ([`SERVE_WINDOW`]) — called only where this respond
+    // is *taken* (the first answer, an answer discarded after a cancel, an accepted confirmation), never for one
+    // refused (#806's second confirm round, D1). The stream's name is 128 random bits only its holder knows.
     #[cfg(all(feature = "gateway", feature = "tls"))]
-    if let Some(s) = stream
-        && served_rpc_answered(&ctx, &sender, nonce, &principal).is_some()
-        && let Some(tx) = ctx.serve_streams.pin().get(&s)
-    {
-        let _ = tx.send((sender.clone(), nonce));
-    }
+    let window_release = || {
+        if let Some(s) = stream
+            && let Some(tx) = ctx.serve_streams.pin().get(&s)
+        {
+            let _ = tx.send((sender.clone(), nonce));
+        }
+    };
     #[cfg(all(feature = "gateway", feature = "tls"))]
     let served = super::served_call::find(&ctx, &sender, nonce);
     if body["stopped"].as_bool() == Some(true) {
@@ -635,6 +669,7 @@ pub(super) async fn gw_rpc_respond(
             (Some(s), Some(true)) => match s.confirm(stream, &principal) {
                 Ok(()) => {
                     s.assess(&ctx.agent_ctx);
+                    window_release();
                     return Json(json!({ "ok": true, "stopped": true })).into_response();
                 }
                 Err(why) => why,
@@ -661,6 +696,7 @@ pub(super) async fn gw_rpc_respond(
                 s.assess(&ctx.agent_ctx);
                 s.answered(stream, &principal);
             }
+            window_release();
             return Json(json!({ "ok": true, "cancelled": true })).into_response();
         }
         // A replicated serve loop: every replica of this principal received the request and the
@@ -682,6 +718,8 @@ pub(super) async fn gw_rpc_respond(
 
     // Closure plan C4: the SDK agent has replied, so the call is no longer in flight — its watcher releases what it
     // holds (I4, PR 3b: `served_call`).
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    window_release();
     #[cfg(all(feature = "gateway", feature = "tls"))]
     if let Some(s) = &served {
         s.answered(stream, &principal);

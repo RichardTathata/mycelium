@@ -71,6 +71,9 @@ pub(super) struct Words {
     /// a later stream's is given back as it is handed the call. Released, explicitly, when the call's last stream
     /// registration ends ([`leave`]) — not left to the entry's drop, which the table's reclamation may defer.
     place: Option<crate::knowledge::cohort_budget::CohortSlot>,
+    /// The last stream has left: the entry is finished and takes no new stream ([`ServedCall::join`]), so leaving
+    /// and closing are one step (#806's second confirm round, D5).
+    closed: bool,
 }
 
 impl Words {
@@ -123,6 +126,34 @@ pub(super) struct ServedCall {
 impl ServedCall {
     fn new(kind: Arc<str>) -> Self {
         Self { ended: watch::channel(Words::default()).0, stop_asked_ms: AtomicU64::new(0), promised: AtomicBool::new(false), kind }
+    }
+
+    /// **`stream` joins the call's watchers** — unless the entry is closed (its last stream left), in which case the
+    /// caller takes a fresh entry: decided under the one update that `depart` closes it in.
+    fn join(&self, stream: u128, principal: &Arc<str>, declared: bool) -> bool {
+        let mut joined = false;
+        self.ended.send_modify(|w| {
+            if !w.closed {
+                w.watching.insert(stream, (Arc::clone(principal), declared));
+                joined = true;
+            }
+        });
+        joined
+    }
+
+    /// **`stream` leaves.** If it was the last, the entry closes in the same step and the call's one cohort place is
+    /// handed back to be released (M4): `Some` only then, so a slow sibling keeps the caller's place until it ends.
+    fn depart(&self, stream: u128) -> (bool, Option<crate::knowledge::cohort_budget::CohortSlot>) {
+        let (mut last, mut place) = (false, None);
+        self.ended.send_modify(|w| {
+            w.watching.remove(&stream);
+            if w.watching.is_empty() {
+                w.closed = true;
+                last = true;
+                place = w.place.take();
+            }
+        });
+        (last, place)
     }
 
     /// Has the node stopped waiting for this call (its authority lapsed)?
@@ -246,10 +277,15 @@ pub(super) struct Placed {
 /// entry per call; each stream's watcher listens only for its own stream's word.
 pub(super) fn place(http: &HttpCtx, req: &rpc::RpcRequest, principal: &Arc<str>, stream: u128, declared: bool) -> Placed {
     let key = (req.sender().clone(), req.nonce());
-    let entry = Arc::clone(http.served_calls.pin().get_or_insert(key.clone(), Arc::new(ServedCall::new(Arc::clone(req.kind())))));
-    entry.ended.send_modify(|w| {
-        w.watching.insert(stream, (Arc::clone(principal), declared));
-    });
+    // An entry whose last stream is leaving is closed: it is taken out (only if it is still that entry) and a fresh
+    // one tried. Retry-safe: each step acts on the entry it read.
+    let entry = loop {
+        let entry = Arc::clone(http.served_calls.pin().get_or_insert(key.clone(), Arc::new(ServedCall::new(Arc::clone(req.kind())))));
+        if entry.join(stream, principal, declared) {
+            break entry;
+        }
+        http.served_calls.pin().remove_if(&key, |_, v| Arc::ptr_eq(v, &entry)).ok();
+    };
     if declared {
         entry.promised.store(true, Ordering::Release);
     }
@@ -285,16 +321,11 @@ impl Placed {
 
 /// A stream's watcher is done: it leaves the entry, and the entry goes with the last of them.
 fn leave(http: &HttpCtx, entry: &Arc<ServedCall>, key: &(crate::node_id::NodeId, u64), stream: u128) {
-    let mut place = None;
-    entry.ended.send_modify(|w| {
-        w.watching.remove(&stream);
-        // The call's last stream registration has ended: its one place goes (M4).
-        if w.watching.is_empty() {
-            place = w.place.take();
-        }
-    });
+    // The call's last stream registration has ended: the entry is closed in that step, its one place goes (M4), and
+    // the closed entry is taken out of the table.
+    let (last, place) = entry.depart(stream);
     drop(place);
-    if entry.ended.borrow().watching.is_empty() {
+    if last {
         http.served_calls.pin().remove_if(key, |_, v| Arc::ptr_eq(v, entry)).ok();
     }
 }
@@ -406,6 +437,34 @@ mod tests {
         c.answered(None, "token:sdk");
         assert!(c.ended.borrow().ends(2), "an unnamed answer ends its principal's streams");
         assert!(!c.ended.borrow().ends(3), "and no other principal's");
+    }
+
+    /// **Leaving and closing are one step, and the call's one place goes with its last stream** (#806's second confirm
+    /// round: D5, and M4's staggered ends). Streams 1 and 2 watch a call that holds the caller's one cohort place.
+    /// Stream 1 leaves: not the last, the place is still held — a slow sibling keeps the caller charged. Stream 2
+    /// leaves: the last, the place is handed back and released, and the entry is closed, so a stream arriving now
+    /// cannot join it (it would be watching an entry `rpc/respond` no longer finds). Seen failing first with `depart`
+    /// giving the place back at any departure, and with `join` ignoring `closed`.
+    #[test]
+    fn the_last_stream_to_leave_closes_the_entry_and_releases_the_calls_one_place() {
+        use crate::knowledge::cohort_budget::{BudgetPool, CohortBudget};
+        let budget = CohortBudget::new(8, 4);
+        let held = || budget.in_flight(&BudgetPool::Undeclared);
+        let caller = crate::knowledge::IssuerId::new("node:127.0.0.1:7001").unwrap();
+        let slot = budget.admit(&caller, &crate::knowledge::cohort::CohortView::trusting([]), 1).ok().expect("a place");
+        let c = ServedCall::new(Arc::from("depot.custom"));
+        let sdk: Arc<str> = Arc::from("token:sdk");
+        assert!(c.join(1, &sdk, true) && c.join(2, &sdk, true));
+        c.ended.send_modify(|w| w.place = Some(slot));
+        assert_eq!(held(), 1);
+        let (last, place) = c.depart(1);
+        assert!(!last && place.is_none());
+        assert_eq!(held(), 1, "the slow sibling keeps the caller's one place");
+        let (last, place) = c.depart(2);
+        assert!(last && place.is_some());
+        drop(place);
+        assert_eq!(held(), 0, "released with the last stream");
+        assert!(!c.join(3, &sdk, true), "a closed entry takes no new stream");
     }
 
     /// **A watcher keeps no payload** (#806's review, L5): its slim request answers to the same sender and nonce, with

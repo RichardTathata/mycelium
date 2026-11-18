@@ -1841,6 +1841,35 @@ doc comment names (restored by copying a snapshot back and touching the file).
   stream's own place is held too, briefly; and the test's two registrations end together (on the call's answer) —
   an unenveloped call carries no work registration, so nothing ends one stream's before the other's but the 300 s.
 
+**From #806's second confirm round (2026-11-17), fixed in the PR, each as small as it could be made.** Each seen
+failing first against its plant, but D3.
+- **D1: a refused `rpc/respond` opens no window slot.** The release is sent only where the respond is taken — the first
+  answer, an answer discarded after a cancel, an accepted confirmation.
+  `a_refused_respond_does_not_open_the_window_and_a_bad_read_ahead_is_refused` (plant: the release before the respond
+  is judged).
+- **D2: `read_ahead` is validated**: a declaring stream's 0, a value above 256 or a non-number is refused `400
+  invalid_read_ahead` in the route's JSON shape; an undeclared stream's is ignored. The same test (plant: the clamp).
+- **D3: a cancelled call waiting in the stream's queue is answered at once**, whether or not the window has room:
+  the lapsed check is now a pass over the queue ahead of the hand-out loop, not inside it. **No test drives the case
+  itself** — a call can be in the queue while the window is full only when its check settled a seat claim beside the
+  loop, which no fixture here produces; the pass is the one path the two queue tests
+  (`a_call_cancelled_in_the_streams_queue_…`, `…_of_a_stream_that_closes_…`) already exercise.
+- **D5: leaving and closing an entry are one step.** `ServedCall::depart` closes the entry in the update that removes
+  its last stream, and `join` refuses a closed entry, so `place` takes a fresh one (a retry loop over
+  `get_or_insert` and `remove_if` on the pointer).
+  `the_last_stream_to_leave_closes_the_entry_and_releases_the_calls_one_place` (plant: `join` ignoring `closed`).
+- **M4, staggered ends pinned** in the same test: with two streams on a call, the first to leave releases nothing and
+  the caller's one place goes with the last (plant: the place given back at any departure). End to end the two
+  cannot be staggered — a call without an envelope has no registration to cancel — so this is shown at the watcher.
+- **D4:** §116 states the window's ceiling, the dropped request's 300 s, the raw client that never echoes `stream`,
+  and M4's excess (at most one place per stream that stops reading).
+- **D6:** no replay recording opens a serve stream (`tests/`, `mycelium-sim/`), so that the stream-id input is
+  recorded and not redrawn under a replay is **established by reading only**. `scripts/check-sim-seams.sh` now knows
+  `OsRng`, with a case in `scripts/test-check-sim-seams.sh` (seen failing against the old gate: counted 0). It counts
+  the routed draw in `mesh.rs` (baseline 1) and **found four unrouted draws that predate this PR, in
+  `mycelium-core/src/tls.rs`** (the CA's fleet number, its temporary files' tag, key generation): baselined in the
+  open (23 → 27) with a row in the inventory's §2.2, not fixed here.
+
 #### I4a · Sign the grant request, `consumed`, `revoked` and `refused` records, then let each owner collect its own — *follow-up of I4, agreed with the maintainer 2026-11-15 — **not buildable until written***
 
 *Why:* I4's collector is owner-only (the maintainer's decision of 2026-11-15: each agent's retention is a promise about
