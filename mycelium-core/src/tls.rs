@@ -2426,14 +2426,14 @@ mod imp {
     /// `0600` before any byte is written when the file already exists (a key an older release left `0644`). Every
     /// private key this module writes goes through here; a certificate goes through [`write_public`]. Elsewhere than
     /// unix it is a plain write: the file takes whatever the platform gives it.
-    fn write_private(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    pub fn write_private(path: &Path, contents: &[u8]) -> std::io::Result<()> {
         write_with_mode(path, contents, 0o600)
     }
 
     /// Write a certificate: `0644` on unix whatever the umask, narrowed when it rewrites a wider file, so no other
     /// local user can replace a trust anchor or a node's certificate (#695's confirmation round, follow-up 4). Elsewhere
     /// than unix a plain write.
-    fn write_public(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    pub fn write_public(path: &Path, contents: &[u8]) -> std::io::Result<()> {
         write_with_mode(path, contents, 0o644)
     }
 
@@ -2462,7 +2462,7 @@ mod imp {
     /// parents are created `0700` the same way (#699's review, finding 4). A directory that already exists is the
     /// operator's and is left as it is (a node warns when it is writable by others: [`writable_by_others`]).
     /// Elsewhere than unix a plain create.
-    fn create_private_dir(dir: &Path) -> std::io::Result<()> {
+    pub fn create_private_dir(dir: &Path) -> std::io::Result<()> {
         if dir.is_dir() {
             return Ok(());
         }
@@ -3360,6 +3360,8 @@ mod imp {
     }
 }
 
+#[cfg(feature = "tls")]
+pub(crate) use imp::{create_private_dir, write_private, write_public};
 #[cfg(feature = "tls")]
 pub use imp::{ed25519_key_from_cert_der, gateway_server_config_from_pem, generate_rotation, generate_rotation_after, issue_client_cert, issue_client_cert_for_key, issue_consent_cert, issue_node_cert, p256_point_from_cert_der, issue_node_cert_for_key, load_or_generate, mint_ca, mint_ca_at, commit_successor, held_ca_commitment, pin_ca_commitment, sign_bytes, verify_bytes, writable_by_others};
 

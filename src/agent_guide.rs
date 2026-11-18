@@ -96,7 +96,7 @@ mod tests {
         (6, "gw.token_tables:"),
     ];
     /// Each subcommand's `--format json` schema ids, and the source file that holds the literal.
-    const CLI_SCHEMAS: [(&str, &[(&str, &str)]); 9] = [
+    const CLI_SCHEMAS: [(&str, &[(&str, &str)]); 10] = [
         ("init", &[]),
         ("declare", &[("mycelium.declare/1", include_str!("declare.rs"))]),
         ("doctor", &[("mycelium.doctor/1", include_str!("doctor.rs"))]),
@@ -106,6 +106,8 @@ mod tests {
         ("explain", &[("mycelium.explain/1", include_str!("../mycelium-core/src/decision.rs")), ("mycelium.closure/1", include_str!("closure.rs"))]),
         ("tls", &[("mycelium.tls/1", include_str!("main.rs"))]),
         ("skills", &[(SCHEMA, include_str!("agent_guide.rs"))]),
+        // `dev consent approve` always prints JSON lines; built under `tls` and `gateway` (I7, PR 3a).
+        ("dev", &[("mycelium.dev.consent/1", include_str!("dev_consent.rs"))]),
     ];
     /// Schema ids in those source files that are records a command reads, not documents a command prints.
     const NOT_CLI_DOCUMENTS: [&str; 3] = ["mycelium.decision/1", "mycelium.coverage/1", "mycelium.ae/evidence/1"];

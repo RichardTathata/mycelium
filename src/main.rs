@@ -85,6 +85,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         // `mycelium skills list | get <name>` — the agent guide this binary embeds (identity-and-lifecycle N5).
         // Pure over the embedded text; reads no file and starts no node.
         Some("skills") => std::process::exit(skills_cli(std::env::args().skip(2).collect())),
+        // `mycelium dev consent key | enrol | approve` — the developer's consent key and its signer
+        // (identity-and-lifecycle I7, PR 3a). Starts no node; behind the provisional gate.
+        Some("dev") => std::process::exit(dev_cli(std::env::args().skip(2).collect())),
         _ => {}
     }
 
@@ -1232,6 +1235,167 @@ fn is_ca_certificate(der: &[u8]) -> Option<bool> {
     Some(false)
 }
 
+/// `mycelium dev consent …` — the developer's side of a consent decision (identity-and-lifecycle I7, PR 3a;
+/// `mycelium::dev_consent` says who promises what):
+///
+/// - `key --issuer <issuer> --name <name> [--force]` creates a software P-256 consent key, `0600` in a `0700`
+///   directory under the user's home (never the directory `dev` runs in, never a worktree), and prints where its
+///   public half is and **the grade that describes it: `tty`**. The private half is never printed.
+/// - `enrol --issuer <issuer> --name <name> --cert <cert.pem> [--gateway <url>] [--token <bearer>]` takes the
+///   certificate the fleet CA's holder issued over that public key, refuses one that names another principal, another
+///   key or any grade but `tty`, keeps it beside the key, and with `--gateway` publishes it through the
+///   client-certificate door (`identity:write`).
+/// - `approve --issuer <issuer> --name <name> [--gateway <url>] [--token <bearer>] [--ttl-secs <n>] <request>… | -`
+///   takes request **ids** (from the command line, or one per line on standard input with `-`), reads each one's
+///   record from the gateway (`grant:read`), shows it at the terminal (`/dev/tty`), and signs what is typed there:
+///   `approve` issues, `refuse` refuses, anything else signs nothing. The signed decision goes to the gateway under
+///   the bearer (`grant:relay`). At most `QUEUE_BOUND` requests wait; one more is answered `busy`. One JSON line per
+///   request on stdout (`mycelium.dev.consent/1`).
+///
+/// Exit 0 when everything asked was done (for `approve`: every request signed and admitted by the gateway), 1 when
+/// some request was not (busy, dismissed, unknown, refused by the gateway), 2 on usage or a refusal by name —
+/// `consent_grade_oid_provisional` in every build that reads no consent certificate, before anything is touched.
+fn dev_cli(args: Vec<String>) -> i32 {
+    const USAGE: &str = "Usage: mycelium dev consent key --issuer <issuer> --name <name> [--force]\n       mycelium dev consent enrol --issuer <issuer> --name <name> --cert <cert.pem> [--gateway <url>] [--token <bearer>]\n       mycelium dev consent approve --issuer <issuer> --name <name> [--gateway <url>] [--token <bearer>] [--ttl-secs <n>] <request>... | -";
+    let mut it = args.into_iter();
+    match (it.next().as_deref(), it.next()) {
+        (Some("-h" | "--help"), _) => { eprintln!("{USAGE}"); 0 }
+        (Some("consent"), Some(verb)) => dev_consent_cli(&verb, it.collect(), USAGE),
+        _ => { eprintln!("{USAGE}"); 2 }
+    }
+}
+
+#[cfg(not(all(feature = "tls", feature = "gateway")))]
+fn dev_consent_cli(_verb: &str, _args: Vec<String>, _usage: &str) -> i32 {
+    eprintln!("dev consent keeps a certified key and talks to a gateway, which only a build with the `tls` and `gateway` features has");
+    2
+}
+
+#[cfg(all(feature = "tls", feature = "gateway"))]
+fn dev_consent_cli(verb: &str, args: Vec<String>, usage: &str) -> i32 {
+    use mycelium::dev_consent as dc;
+    let (mut issuer, mut name, mut cert, mut gateway, mut token) = (None, None, None, None::<String>, std::env::var("MYCELIUM_GATEWAY_TOKEN").ok());
+    let (mut force, mut ttl_secs, mut requests, mut from_stdin) = (false, dc::DEFAULT_TTL_SECS, Vec::new(), false);
+    let mut it = args.into_iter();
+    while let Some(a) = it.next() {
+        let mut value = |flag: &str| it.next().ok_or_else(|| { eprintln!("{flag} needs a value\n{usage}"); 2 });
+        match (verb, a.as_str()) {
+            (_, "-h" | "--help") => { eprintln!("{usage}"); return 0; }
+            (_, "--issuer") => match value("--issuer") { Ok(v) => issuer = Some(v), Err(c) => return c },
+            (_, "--name") => match value("--name") { Ok(v) => name = Some(v), Err(c) => return c },
+            ("key", "--force") => force = true,
+            ("enrol", "--cert") => match value("--cert") { Ok(v) => cert = Some(v), Err(c) => return c },
+            ("enrol" | "approve", "--gateway") => match value("--gateway") { Ok(v) => gateway = Some(v), Err(c) => return c },
+            ("enrol" | "approve", "--token") => match value("--token") { Ok(v) => token = Some(v), Err(c) => return c },
+            ("approve", "--ttl-secs") => match value("--ttl-secs").map(|v| v.parse::<u64>()) {
+                Ok(Ok(n)) if (1..=3_600).contains(&n) => ttl_secs = n,
+                Ok(_) => { eprintln!("--ttl-secs is a number of seconds from 1 to 3600\n{usage}"); return 2; }
+                Err(c) => return c,
+            },
+            ("approve", "-") => from_stdin = true,
+            (_, flag) if flag.starts_with('-') => { eprintln!("unknown option `{flag}` for `dev consent {verb}`\n{usage}"); return 2; }
+            ("approve", _) => requests.push(a),
+            _ => { eprintln!("{usage}"); return 2; }
+        }
+    }
+    if !matches!(verb, "key" | "enrol" | "approve") {
+        eprintln!("{usage}");
+        return 2;
+    }
+    let (Some(issuer), Some(name)) = (issuer, name) else { eprintln!("--issuer and --name are required\n{usage}"); return 2; };
+    let refused = |r: &dyn std::fmt::Display, code: &str| { eprintln!("dev consent {verb}: refused ({code}): {r}"); 2 };
+    // The process's environment names the home directory; nothing else is read from it but the bearer above.
+    let store = match dc::Store::open(&|var| std::env::var(var).ok(), &issuer, &name) {
+        Ok(s) => s,
+        Err(r) => return refused(&r, r.code()),
+    };
+    match verb {
+        "key" => match store.create_key(force) {
+            Ok(key) => {
+                let fingerprint: String = <sha2::Sha256 as sha2::Digest>::digest(key.point()).iter().map(|b| format!("{b:02x}")).collect();
+                println!("created a software consent key for {}", store.principal());
+                println!("  key         {} (0600; it never leaves this device and is never printed)", store.key_path().display());
+                println!("  public key  {}", store.public_key_path().display());
+                println!("  fingerprint sha256:{fingerprint} (of the public point)");
+                println!("This is a software key in a file: any process running as you can sign with it, with no terminal. The grade that describes it is `tty`.");
+                println!("Send the public key to whoever holds the fleet CA's key, and ask them to run:");
+                println!("  mycelium tls issue --client {name} --consent --public-key <the public key> --grade tty --issuer {issuer} --ca-dir <dir> --out <dir>");
+                println!("Then: mycelium dev consent enrol --issuer {issuer} --name {name} --cert <the certificate>");
+                0
+            }
+            Err(r) => refused(&r, r.code()),
+        },
+        "enrol" => {
+            let Some(cert) = cert else { eprintln!("--cert is required\n{usage}"); return 2; };
+            // The one file reader `tls` already uses (`read_cert_file`), so no new filesystem site.
+            let pem = match read_cert_file(std::path::Path::new(&cert)) {
+                Ok(p) => p,
+                Err(e) => { eprintln!("--cert {cert}: {e}"); return 2; }
+            };
+            let enrolment = match store.enrol(&pem) {
+                Ok(e) => e,
+                Err(r) => return refused(&r, r.code()),
+            };
+            println!("enrolled {}: the certificate names this key and the grade `{}`; kept at {}", enrolment.principal(), enrolment.grade(), store.cert_path().display());
+            let Some(gateway) = gateway else {
+                println!("not published: pass --gateway (and a bearer holding identity:write) to publish it through POST /gateway/identity/client-cert");
+                return 0;
+            };
+            let published = dev_runtime().and_then(|rt| rt.block_on(async { dc::Gateway::new(&gateway, token).map_err(|r| r.to_string())?.publish(enrolment.cert_pem()).await }));
+            match published {
+                Ok((status, answer)) if (200..300).contains(&status) => { println!("published at {gateway}: {answer}"); 0 }
+                Ok((status, answer)) => { eprintln!("dev consent enrol: {gateway} did not publish the certificate (HTTP {status}): {answer}"); 1 }
+                Err(e) => { eprintln!("dev consent enrol: {e}"); 1 }
+            }
+        }
+        _ => {
+            if !requests.is_empty() && from_stdin {
+                eprintln!("request ids come from the command line or from standard input (`-`), not both\n{usage}");
+                return 2;
+            }
+            if requests.is_empty() && !from_stdin { eprintln!("name at least one request id, or `-` to read them from standard input\n{usage}"); return 2; }
+            // Checked before anything is asked: the key, its certificate, and that the certificate still names this key.
+            let enrolment = match store.enrolment() {
+                Ok(e) => e,
+                Err(r) => return refused(&r, r.code()),
+            };
+            let gateway = match dc::Gateway::new(gateway.as_deref().unwrap_or("http://127.0.0.1:8300"), token) {
+                Ok(g) => g,
+                Err(r) => return refused(&r, r.code()),
+            };
+            let say = |request: &str, answer: &dc::Answer| println!("{}", answer.line(request));
+            let (handle, queue) = dc::queue(dc::QUEUE_BOUND);
+            let busy = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let offer = { let busy = std::sync::Arc::clone(&busy); move |handle: &dc::QueueHandle, request: &str| if handle.offer(request).is_err() {
+                busy.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                println!("{}", dc::Answer::Busy.line(request));
+            } };
+            if from_stdin {
+                // Ids arrive while a prompt is up: a reader thread offers each line and answers `busy` itself.
+                std::thread::spawn(move || {
+                    for line in std::io::stdin().lines().map_while(Result::ok) {
+                        let request = line.trim();
+                        if !request.is_empty() { offer(&handle, request); }
+                    }
+                });
+            } else {
+                for request in &requests { offer(&handle, request); }
+                drop(handle);
+            }
+            let served = dev_runtime().map(|rt| rt.block_on(dc::serve(&gateway, &enrolment, &mut dc::TtyApprover, queue, ttl_secs, &mut |r, a| say(r, a))));
+            match served {
+                Ok((_, not)) => i32::from(not + busy.load(std::sync::atomic::Ordering::Relaxed) > 0),
+                Err(e) => { eprintln!("dev consent approve: {e}"); 2 }
+            }
+        }
+    }
+}
+
+#[cfg(all(feature = "tls", feature = "gateway"))]
+fn dev_runtime() -> Result<tokio::runtime::Runtime, String> {
+    tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|e| e.to_string())
+}
+
 /// `mycelium skills list | get <name> [--format text|json]` — the agent guide the binary serves
 /// (identity-and-lifecycle N5, `mycelium::agent_guide`). `get` prints the guide's Markdown as embedded, with the
 /// binary's release tag filled in; `--format json` prints one `mycelium.skills/1` document. An unknown name is
@@ -1265,7 +1429,7 @@ fn skills_cli(args: Vec<String>) -> i32 {
 
 fn print_usage() {
     eprintln!(
-        "Usage: mycelium [OPTIONS]\n       mycelium init <dir> [--template <name>] | --list\n       mycelium declare [project-dir] [--gateway <url>] [--token <bearer>] [--watch] [--format text|json]\n       mycelium doctor [config.toml] [--units <dir>] [--format text|json]\n       mycelium wire-check <units-dir> [--library <dir>] [--schemas <dir>] [--format text|json|dot] [--strict-deployed] [--no-authority]\n       mycelium rules [--format md|json]\n       mycelium test --faults [<class>,…] <units-dir> [--config <node.toml>] [--against <units-dir>] [--format text|json]\n       mycelium explain <decisions.jsonl> [--catalogue <rule-catalogue.json>] [--target <target>] [--format text|json]\n       mycelium explain --correlation <id> <files…> | --closure <sha256> <files…> [--fleet <n>] [--format text|json]\n       mycelium tls ca --out <dir> | issue --ca-dir <dir> (--node <ip:port> | --client <name> --issuer <issuer> [--consent --public-key <spki.pem> --grade <grade>]) --out <dir> [--force] | pin <cert.pem>  [--format text|json]\n       mycelium skills list | get <name> [--format text|json]  (agent guides)\n\
+        "Usage: mycelium [OPTIONS]\n       mycelium init <dir> [--template <name>] | --list\n       mycelium declare [project-dir] [--gateway <url>] [--token <bearer>] [--watch] [--format text|json]\n       mycelium doctor [config.toml] [--units <dir>] [--format text|json]\n       mycelium wire-check <units-dir> [--library <dir>] [--schemas <dir>] [--format text|json|dot] [--strict-deployed] [--no-authority]\n       mycelium rules [--format md|json]\n       mycelium test --faults [<class>,…] <units-dir> [--config <node.toml>] [--against <units-dir>] [--format text|json]\n       mycelium explain <decisions.jsonl> [--catalogue <rule-catalogue.json>] [--target <target>] [--format text|json]\n       mycelium explain --correlation <id> <files…> | --closure <sha256> <files…> [--fleet <n>] [--format text|json]\n       mycelium tls ca --out <dir> | issue --ca-dir <dir> (--node <ip:port> | --client <name> --issuer <issuer> [--consent --public-key <spki.pem> --grade <grade>]) --out <dir> [--force] | pin <cert.pem>  [--format text|json]\n       mycelium skills list | get <name> [--format text|json]  (agent guides)\n       mycelium dev consent key | enrol --cert <cert.pem> | approve <request>…  --issuer <issuer> --name <name>  (a developer's consent key)\n\
          \n\
          Options:\n\
          -c, --config <file>      Load configuration from a TOML file\n\

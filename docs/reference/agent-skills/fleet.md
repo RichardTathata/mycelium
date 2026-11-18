@@ -90,6 +90,7 @@ Every subcommand of this binary. One not listed here is not in it. Each prints i
 | `explain` | renders a decision trace, one run's chain, or a record's closure | `mycelium.explain/1`, `mycelium.closure/1` |
 | `tls` | mints a CA, issues a node or client certificate, prints a pin | `mycelium.tls/1` |
 | `skills` | prints an agent guide (`get fleet`, this one) or the list (`list`) | `mycelium.skills/1` |
+| `dev` | `dev consent key\|enrol\|approve`: a developer's consent key, and a grant decision signed from an answer typed at the terminal. Refused by name (`consent_grade_oid_provisional`) in a build that reads no consent certificate | `mycelium.dev.consent/1`, one line per request |
 
 ## Reading the output
 

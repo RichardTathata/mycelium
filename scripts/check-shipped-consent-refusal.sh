@@ -6,11 +6,13 @@
 # binary built without `provisional-consent-grade` shows the shipped refusal. CI's Eve fleet job runs this against the
 # release's NODE_FEATURES binary.
 #
-# Three shipped paths, each refused by name (I7's PR 2 added the second and third):
+# Four shipped paths, each refused by name (I7's PR 2 added the second and third, PR 3a the fourth):
 #   1. `tls issue --consent`: no consent certificate is issued, and nothing is written;
 #   2. `gateway_consent_principals`: `mycelium doctor` — which says what `start()` would — refuses the table;
 #   3. the grant decision door: a running node answers a consent principal's decision
 #      `422 consent_grade_oid_provisional`, before it reads a key (so the body's key and signature are filler).
+#   4. `dev consent` (I7's PR 3a): no consent key is created, no certificate enrolled and nothing signed — each verb
+#      refuses by name before it resolves a directory, and nothing is written under the home it was given.
 # The third starts a node on two loopback ports (CONSENT_CHECK_PORT, default 19461, and the next one up) and stops
 # it by its PID.
 #
@@ -25,9 +27,9 @@ work=$(mktemp -d)
 node_pid=""
 cleanup() {
   if [[ -n "$node_pid" ]]; then kill "$node_pid" 2>/dev/null || true; wait "$node_pid" 2>/dev/null || true; fi
-  rm -rf -- "${work:?}/ca" "${work:?}/out"
+  rm -rf -- "${work:?}/ca" "${work:?}/out" "${work:?}/home"
   rm -f -- "${work:?}/k.pem" "${work:?}/pub.pem" "${work:?}/err" "${work:?}/table.toml" "${work:?}/doctor" \
-    "${work:?}/node.toml" "${work:?}/node.log" "${work:?}/answer"
+    "${work:?}/node.toml" "${work:?}/node.log" "${work:?}/answer" "${work:?}/dev.err"
   rmdir -- "$work"
 }
 trap cleanup EXIT
@@ -89,3 +91,19 @@ if [[ "$status" != "422" ]] || ! grep -q '"consent_grade_oid_provisional"' "$wor
   exit 1
 fi
 echo "check-shipped-consent-refusal: a consent decision refused at the door, HTTP 422: $(cat "$work/answer")"
+
+# 4. `dev consent`: the developer's side. Each verb is given a home of its own, which must stay absent: a build that
+#    reads no consent certificate creates no consent key, keeps no certificate and signs nothing.
+for verb in "key" "enrol --cert $work/pub.pem" "approve r1"; do
+  set +e
+  # shellcheck disable=SC2086  # the verb's own arguments are meant to split
+  HOME="$work/home" XDG_DATA_HOME="" "$bin" dev consent $verb --issuer fleet --name dev 2>"$work/dev.err" >/dev/null
+  code=$?
+  set -e
+  if [[ $code -ne 2 ]] || ! grep -q "consent_grade_oid_provisional" "$work/dev.err" \
+     || ! grep -q "consent keys are not created or used by this build" "$work/dev.err" || [[ -e "$work/home" ]]; then
+    echo "::error::a shipped-configuration binary ran \`dev consent ${verb%% *}\`, or did not refuse it by name (exit $code): $(cat "$work/dev.err")"
+    exit 1
+  fi
+done
+echo "check-shipped-consent-refusal: dev consent key, enrol and approve refused by name, exit 2, nothing written: $(cat "$work/dev.err")"

@@ -5318,6 +5318,61 @@ new. mycelium: `commit_successor`, `CaCommitment`, `CaCommitError`, `CA_COMMIT_F
 either needs `[persistence]`; `grep -rn "identity_anchor_journal_refused" <your dashboards>` — it no longer rises with a
 node's age.
 
+## 121. `mycelium dev consent`: a developer's software consent key, its prompt and its signer; `dev` signs only at `tty` (unreleased, identity-and-lifecycle I7, PR 3a)
+
+*Numbered 121 because open pull requests hold §116 (#806) and §120 (identity-and-lifecycle I2, PR 2b) at the time of
+writing.*
+
+§112 built the consent certificate and §118 the decision. This change builds the developer's side for a **software**
+key ([consent certificates](../features/consent-certificates.md)). **Not in a shipped binary yet**, as §112 and §118:
+while the grade extension's OID is provisional, a build without the test-only feature `provisional-consent-grade`
+refuses every `mycelium dev consent` verb by name (`consent_grade_oid_provisional`, exit 2) before it resolves a
+directory, and writes nothing. **Nothing existing changes**: the subcommand, the two modules and the output schema
+are new.
+
+- **New subcommand: `mycelium dev consent key | enrol | approve`.** `mycelium dev` was not a subcommand before;
+  identity-and-lifecycle N4 (`mycelium dev --isolate`) will share the word. Exit codes: 0 done, 1 some request not
+  signed and admitted, 2 usage or a refusal by name.
+- **Where the key is kept.** `~/Library/Application Support/mycelium/consent/` on macOS;
+  `$XDG_DATA_HOME/mycelium/consent/`, default `~/.local/share/mycelium/consent/`, on Linux. Files:
+  `consent-{issuer}-{name}.key.p8` (PKCS#8, `0600`), `.pub.pem` and `.cert.pem` beside it, the directory `0700`.
+  `HOME` unset or relative is refused (`consent_dir_unresolved`); a directory with `.git` in it or above it is refused
+  (`consent_dir_in_worktree`), which includes a home directory kept under version control.
+- **A wider file is refused, not narrowed.** `dev` reads a key only from a regular file, in a directory, that group
+  and others cannot reach: `consent_key_too_open` / `consent_dir_too_open`, naming the mode. Fix it with `chmod 600`
+  / `chmod 700`. A symbolic link in place of either is refused.
+- **`dev` signs with a software key only under a certificate graded `tty`.** If the operator ran `tls issue --grade
+  os_presence(macos, unbound)` or `--grade recording` over a key `dev consent key` made, `dev consent enrol` refuses
+  the certificate and `dev consent approve` refuses to sign (`grade_not_this_keys`). Re-issue with `--grade tty`, and
+  name `signed_with = "tty"` on the principal's `gateway_consent_principals` entry (§118). This is `dev`'s own
+  refusal about its own key. No node can make that check, and the grade on a certificate stays the issuing
+  operator's statement.
+- **A replaced key needs a new certificate.** `dev consent key --force` makes a new key; the old certificate no
+  longer names it, and `approve` refuses (`enrolled_key_mismatch`) until the new public key is certified and
+  enrolled. Publishing the new certificate supersedes the old consent key at every node that reads it (§112).
+- **Type the answer after the prompt appears.** `approve` discards any line already entered at the terminal before
+  it shows a prompt, and says how many characters it discarded. A second `approve` typed while the first request was
+  being answered does not approve the next one.
+- **The bearer `approve` needs** holds `grant:read` and `grant:relay` and nothing else. It decides nothing: the
+  decision is the consent key's, and the consent principal needs its own `gateway_consent_principals` entry (§118).
+  `--token`, or `MYCELIUM_GATEWAY_TOKEN` as `mycelium declare` reads it.
+- **Output.** One JSON object per request on standard output, schema `mycelium.dev.consent/1`: `request`, `answer`
+  (`signed`, `dismissed`, `busy`, `unknown_request`, `ambiguous_request`, `record_unreadable`, `record_changed`,
+  `no_terminal`, `not_signed`, `gateway`), and for `signed` the `decision`, `gateway_status` and `gateway_answer`.
+  `signed` means `dev` signed and sent; whether the node admitted it is `gateway_status`.
+- **New public items.** `mycelium::dev_consent` (`Store`, `Enrolment`, `PromptRecord`, `Prompt`, `Approver`,
+  `TtyApprover`, `queue`, `answer_one`, `serve`, `Answer`, `Refusal`, `Gateway`), under `tls` and `gateway`;
+  `mycelium_core::consent_key` (`SoftwareConsentKey`, `ConsentKeyRefusal`, `store_public`, `load_public`), under
+  `tls`. `Refusal`, `Answer` and `ConsentKeyRefusal` are `#[non_exhaustive]`.
+- **Not built:** the macOS Secure Enclave key and its Swift shim (I7, PR 3b), so `os_presence(macos, unbound)` is
+  signed by nothing in this tree; Windows (`consent_key_platform_not_built`: no user-only ACL is set); a `recording`
+  signer for a `sim` build; a transport for another process to hand a running `dev` a request id, other than its
+  standard input.
+
+*Check:* on the developer's device, `ls -l` the consent directory: the `.key.p8` is `-rw-------` and the directory
+`drwx------`. After an approval, the addressed node's evidence journal holds a `Decided` record whose subject is
+`consent:{issuer}/{name}` and whose `signed_decision.signed_with.grade` is `tty`.
+
 ## 122. `wire-check` reads an edge to a hosted component as the provider built from the declaration decides a member's call of it: the rule must be the host's own, for a node, in a form that provider admits (unreleased, the maintainer's choice of 2026-11-18)
 
 *Numbered 122 because open pull requests hold §120 and §121 at the time of writing; the sections are in order once
