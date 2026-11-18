@@ -31,7 +31,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - a rule whose actor is `"*"` or a `node:` principal passes the edge (with `requires_mandate`, a declared
     mandate a `node:` principal holds);
   - **a `skill.invoke` or `tools/call` rule no longer passes it** — `unauthorisable edge`, exit 1, where the check
-    was green; `mycelium declare` and `mycelium test --faults` refuse such a declaration;
+    was green; `mycelium test --faults --library` refuses such a declaration (`mycelium declare` reads no library
+    and is unchanged);
   - a rule or mandate that names the requirer's **unit** principal is a new warning, `node-decided edge`: the
     provider decides the node, so the edge is not passed silently, and the checker, knowing no placement, does not
     claim the refusal.

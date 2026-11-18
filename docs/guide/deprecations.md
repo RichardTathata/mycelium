@@ -5185,10 +5185,11 @@ node establishes no limited rule: find the `WARN` naming the journal, repair or 
 *Numbered 122 because open pull requests hold §120 and §121 at the time of writing; the sections are in order once
 they merge.*
 
-This applies to a declaration checked with `mycelium wire-check` (and so to `mycelium declare`, `mycelium doctor
---units` and `mycelium test --faults`, which run the same check) **with an artifact library** (`--library`), in which
-a governed unit — one that declares a `[[rule]]` or a `[[mandate]]` — requires a capability that only a
-`wasm-component` artifact outside the `tool` namespace would provide. Nothing changes at run time: this is the
+This applies to a declaration checked **with an artifact library** — `mycelium wire-check --library`, and
+`mycelium doctor --units` and `mycelium test --faults` given `--library`, which run the same check — in which a
+governed unit, one that declares a `[[rule]]` or a `[[mandate]]`, requires a capability that only a `wasm-component`
+artifact outside the `tool` namespace would provide. `mycelium declare` reads no library, so it knows no hosted
+component and is unchanged. Nothing changes at run time: this is the
 design-time check catching up with what an enforcing provider has decided since §108.
 
 **Before.** The authority overlay read every edge as a skill (`skill.invoke` on `skill:{ns}/{name}`) or a tool
@@ -5207,9 +5208,9 @@ the actor the provider sees, the **calling node**:
 | `skill.invoke` on `skill:{ns}/{name}`, or `tools/call` on `tool:{name}` | clean, exit 0 | **`unauthorisable edge`, exit 1** |
 | `cap.invoke` on `cap:{ns}/{name}`, actor the requirer's unit principal — or any-node, requiring a mandate that unit principal holds | `unauthorisable edge`, exit 1 | **warning `node-decided edge`**, exit 0 |
 
-So **a check that was green can now fail, and one that failed can pass or warn.** `mycelium test --faults` and
-`mycelium declare` refuse a declaration the check fails, so a pipeline over such a declaration stops until the rule
-is corrected.
+So **a check that was green can now fail, and one that failed can pass or warn.** `mycelium test --faults` refuses
+a declaration the check fails (*nothing ran*), so a pipeline over such a declaration stops until the rule is
+corrected.
 
 **What to do.** For each `unauthorisable edge` naming a hosted capability, write the rule the provider reads, in the
 unit that hosts it (`[authority]` loads a node's own unit's rules, and qualifies the bare resource to its node):
