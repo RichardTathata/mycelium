@@ -844,7 +844,7 @@ impl IdentityLedger {
     }
 
     /// Let no budget-triggered compaction start (a test that shows another path compacts).
-    #[cfg(test)]
+    #[cfg(all(test, feature = "provisional-ca-generation"))]
     pub(super) fn block_spawned_compaction_for_test(&self) {
         self.compaction.spawned.store(true, Ordering::Release);
     }

@@ -1255,8 +1255,10 @@ pub const SUCCESSION_DIR: &str = "succession";
 /// The PEM label of the commitment's signed section.
 pub const CA_COMMIT_PEM_LABEL: &str = "MYCELIUM CA COMMITMENT";
 /// What the old CA signs: this tag, the SHA-256 of its own certificate, the SHA-256 of the successor's.
+#[cfg(feature = "tls")]
 const CA_COMMIT_DOMAIN: &[u8] = b"mycelium/ca-commit/v1\0";
 /// The signed section's one version.
+#[cfg(feature = "tls")]
 const CA_COMMIT_VERSION: u8 = 1;
 
 /// **A CA's commitment to its successor** (identity-and-lifecycle I2; the maintainer's decision (a), 2026-11-15): the
@@ -4963,7 +4965,7 @@ mod ca_commit_tests {
         let (d1, old, c) = committed(&base);
         let successor = der_of(&base.join("ca2").join("ca-cert.pem"));
         assert_eq!(c.successor_der, successor);
-        assert_eq!(c.verify(&[old.clone()]), Ok(1), "the successor is generation 1");
+        assert_eq!(c.verify(std::slice::from_ref(&old)), Ok(1), "the successor is generation 1");
         assert_eq!(super::ca_generation(&successor), Ok(1));
         let fleet = |der: &[u8]| super::ca_subject_cn(der).unwrap().split(' ').nth(2).unwrap().to_string();
         assert_eq!(fleet(&old), fleet(&successor), "the same fleet");
@@ -4973,27 +4975,27 @@ mod ca_commit_tests {
         assert!(!c.to_pem().contains("PRIVATE KEY"));
 
         let other = der_of(&super::imp::mint_ca(&base.join("other")).unwrap());
-        assert_eq!(c.verify(&[other.clone()]), Err(CaCommitError::UnknownPredecessor), "a root this node does not trust");
+        assert_eq!(c.verify(std::slice::from_ref(&other)), Err(CaCommitError::UnknownPredecessor), "a root this node does not trust");
         assert_eq!(c.verify(&[]), Err(CaCommitError::UnknownPredecessor));
         assert_eq!(c.verify(&[other.clone(), old.clone()]), Ok(1), "found among several roots");
 
         // A successor swapped under the old CA's signature.
         let attacker = der_of(&super::imp::mint_ca_at(&base.join("attacker"), None, 1).unwrap());
         let swapped = CaCommitment { successor_der: attacker.clone(), ..c.clone() };
-        assert_eq!(swapped.verify(&[old.clone()]), Err(CaCommitError::BadSignature));
+        assert_eq!(swapped.verify(std::slice::from_ref(&old)), Err(CaCommitError::BadSignature));
         // The forged record: signed by a key that is not the old CA's, naming the old CA as its signer.
         let forged_sig = super::sign_bytes(&ca_key(&base.join("attacker")), &CaCommitment::message(&c.predecessor, &attacker));
         let forged = CaCommitment { predecessor: c.predecessor, successor_der: attacker.clone(), sig: forged_sig };
-        assert_eq!(forged.verify(&[old.clone()]), Err(CaCommitError::BadSignature));
+        assert_eq!(forged.verify(std::slice::from_ref(&old)), Err(CaCommitError::BadSignature));
         assert!(CaCommitment::sign(&old, &ca_key(&base.join("attacker")), &attacker).is_err(), "a key that is not the certificate's signs nothing");
 
         // The generation: its predecessor's plus one, exactly.
         let key = ca_key(&d1);
         let gen2 = der_of(&super::imp::mint_ca_at(&base.join("gen2"), None, 2).unwrap());
         let signed = |successor: &[u8]| CaCommitment { predecessor: c.predecessor, successor_der: successor.to_vec(), sig: super::sign_bytes(&key, &CaCommitment::message(&c.predecessor, successor)) };
-        assert_eq!(signed(&gen2).verify(&[old.clone()]), Err(CaCommitError::WrongGeneration { predecessor: 0, successor: 2 }));
-        assert_eq!(signed(&other).verify(&[old.clone()]), Err(CaCommitError::WrongGeneration { predecessor: 0, successor: 0 }));
-        assert_eq!(signed(&old).verify(&[old.clone()]), Err(CaCommitError::WrongGeneration { predecessor: 0, successor: 0 }));
+        assert_eq!(signed(&gen2).verify(std::slice::from_ref(&old)), Err(CaCommitError::WrongGeneration { predecessor: 0, successor: 2 }));
+        assert_eq!(signed(&other).verify(std::slice::from_ref(&old)), Err(CaCommitError::WrongGeneration { predecessor: 0, successor: 0 }));
+        assert_eq!(signed(&old).verify(std::slice::from_ref(&old)), Err(CaCommitError::WrongGeneration { predecessor: 0, successor: 0 }));
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -5057,7 +5059,7 @@ mod ca_commit_tests {
         let (file, _) = super::imp::commit_successor(&d1, &base.join("ca2")).unwrap();
         let cfg = node_cfg(&base.join("node"));
         std::fs::copy(&file, cfg.auto_cert_dir.join(super::CA_COMMIT_FILE)).unwrap();
-        let err = super::with_provisional_ca_generation_closed(|| super::imp::pin_ca_commitment(&cfg, &[old.clone()])).expect_err("closed");
+        let err = super::with_provisional_ca_generation_closed(|| super::imp::pin_ca_commitment(&cfg, std::slice::from_ref(&old))).expect_err("closed");
         assert!(err.to_string().contains("provisional") && err.to_string().contains("ca-commit.pem"), "{err}");
         assert!(!cfg.auto_cert_dir.join(super::SUCCESSION_DIR).exists(), "nothing pinned");
         let _ = std::fs::remove_dir_all(&base);
@@ -5121,10 +5123,10 @@ mod ca_commit_tests {
         let (d1, old, c) = committed(&base);
         let cfg = node_cfg(&base.join("node"));
         std::fs::copy(d1.join(super::CA_COMMIT_FILE), cfg.auto_cert_dir.join(super::CA_COMMIT_FILE)).unwrap();
-        super::imp::pin_ca_commitment(&cfg, &[old.clone()]).unwrap();
+        super::imp::pin_ca_commitment(&cfg, std::slice::from_ref(&old)).unwrap();
         let both = super::imp::pin_ca_commitment(&cfg, &[old.clone(), c.successor_der.clone()]).unwrap();
         assert!(matches!(both, CommitmentPin::Pinned { active: true, .. }), "widened: still assessed against the old root");
-        let narrowed = super::imp::pin_ca_commitment(&cfg, &[c.successor_der.clone()]).unwrap();
+        let narrowed = super::imp::pin_ca_commitment(&cfg, std::slice::from_ref(&c.successor_der)).unwrap();
         assert_eq!(narrowed, CommitmentPin::Pinned { commitment: c.clone(), first: false, active: false, refused: None }, "spent, the same file beside it");
         let unrelated = der_of(&super::imp::mint_ca(&base.join("unrelated")).unwrap());
         let err = super::imp::pin_ca_commitment(&cfg, &[unrelated]).expect_err("unassessable");

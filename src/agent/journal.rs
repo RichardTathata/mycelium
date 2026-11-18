@@ -139,6 +139,8 @@ pub struct Appended {
 pub(crate) enum Msg {
     Append { bytes: Vec<u8>, ack: oneshot::Sender<Result<(u64, LocalDurability), String>> },
     /// Replace the file with the records `keep` answers `true` for ([`Journal::rewrite`]).
+    // Its one sender, the identity journal's compaction, is in builds with `tls`.
+    #[cfg_attr(not(feature = "tls"), allow(dead_code))]
     Rewrite { keep: KeepRecord, ack: oneshot::Sender<Result<RewriteOutcome, String>> },
 }
 
@@ -389,6 +391,7 @@ impl Journal {
     /// **Only for a journal its consumer folds as a set.** Sequence numbers restart at the kept count, as a restart
     /// would number them, so a journal whose records are cited by position or chained by hash (the evidence journal)
     /// must never be rewritten; this is `pub(crate)` and the identity journal is its one caller.
+    #[cfg_attr(not(feature = "tls"), allow(dead_code))] // its one caller, the identity ledger, is under `tls`
     pub(crate) async fn rewrite(&self, keep: KeepRecord) -> Result<RewriteOutcome, JournalError> {
         let (ack_tx, ack_rx) = oneshot::channel();
         match mycelium_core::sim_seam::chan_try_send(self.stream, &self.tx, Msg::Rewrite { keep, ack: ack_tx }) {
