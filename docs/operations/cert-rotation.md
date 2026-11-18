@@ -225,8 +225,29 @@ minting a new CA over the fleet's. For a federation partner, `mycelium tls pin
 
 Replacing the fleet CA live, by a pre-committed successor, is row I2 of
 [`identity-and-lifecycle.md`](../plans/identity-and-lifecycle.md). **This release does not run a succession**: there
-is no `tls commit`, no `tls succeed` and no successor-signed record yet, so a CA compromise is still recovered by
-re-issue under a new CA and a restart of every node. What this release changes, and an operator should know:
+is no `tls succeed` and no successor-signed record yet, and `tls commit` (below) is refused by every shipped build
+while its certificate extension's identifier is provisional, so a CA compromise is still recovered by re-issue under a
+new CA and a restart of every node. What this release changes, and an operator should know:
+
+- **The commitment, and a node's pin of it** (unreleased; `deprecations.md` §120). The first step of a succession is
+  the **old CA's own promise**: on the issuer's host,
+  ```bash
+  mycelium tls commit --ca-dir ./fleet-ca --successor ./fleet-ca-2   # refused by a shipped build for now, by name
+  ```
+  mints the successor CA into `./fleet-ca-2` and writes `./fleet-ca/ca-commit.pem`, signed with the old CA's key. A CA
+  commits **once**; a second run is refused. Copy `ca-commit.pem` — that one file, never a `ca-key.pem` — into each
+  node's certificate directory (`[tls] auto_cert_dir`). At its next start a node checks the commitment against the
+  root it trusts, **pins it** under `auto_cert_dir/succession/` and from then on refuses any other commitment from
+  that CA. What to know:
+  - a node holding a commitment needs `[persistence]`, and refuses to start without it, naming it;
+  - a commitment the node cannot check (another CA's, a damaged file, a file with a key in it) refuses the start;
+  - a node pins from that file **only**. Nodes also republish what they pinned at `sys/ca-commit/{node}`, and each
+    compares the copies it sees with its own pin: `ca_commitment_conflict` on `GET /stats` rising above 0 means two
+    different commitments signed by your CA's key exist — an operator's mistake, or a stolen CA key. Compare the
+    file on that node with the issuer's; do not remove a pin to make the count stop;
+  - to change a pin deliberately (the successor's key was lost before the succession ran), remove the node's
+    `succession/` directory and place the new file. A pin confers no trust by itself: nothing a node trusts changes
+    until a later release's phases act on a record the committed successor signs.
 
 - **The fleet root file holds exactly one certificate.** A node whose `[tls] ca_cert_pem` names a file of two or more
   certificates — or, started from `cert_pem` with `ca_cert_pem` unset, whose `auto_cert_dir/ca-cert.pem` holds two —

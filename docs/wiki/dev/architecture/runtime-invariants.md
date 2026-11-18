@@ -659,7 +659,17 @@ its first append** — both rustdocs say so. The pin is
 `a_torn_wal_tail_is_repaired_at_start_before_the_first_acknowledged_append` (seen failing with the
 trigger toggled off); the refusal and the ownership each have their own witness. The node-local
 `Journal` (`src/agent/journal.rs`) is a different file with the same two invariants since R1, enforced
-in its `open` rather than by a snapshot. And a persistence directory that cannot be created **refuses
+in its `open` rather than by a snapshot. **One journal is compacted** (2026-11-17, I2's PR 2b-1): the identity
+journal, whose consumer folds it as a set. `Journal::rewrite` writes the records its caller keeps to
+`<journal>.compact`, syncs that file, renames it over the journal and syncs the directory — bytes durable before
+the name, the rename made durable — with the choice made **inside the writer**, so it sees every acknowledged append
+and none queued behind it. A failure before the rename changes nothing and `open` removes the temporary; one after
+it poisons the writer, whose handle may name the replaced file (an append there would be acknowledged and lost:
+`a_rewrite_keeps_the_chosen_records_and_later_appends_land_in_the_new_file`). The caller takes a record off its
+"journaled" set **before** the frame is left out, never after — the node may re-append what is still on disk, and
+never believes durable what is not. Sequence numbers restart at the kept count, so **a journal whose records are
+cited by position or chained by hash (the evidence journal, the rights ledger) is never rewritten**; `rewrite` is
+`pub(crate)` with one caller (`src/agent/revocation.rs` `compact`). And a persistence directory that cannot be created **refuses
 `start()`** (`InvalidField { field: "persistence" }`, R7, 2.24.0): it used to log and run **in memory**,
 losing every write at the next restart, while `persist.configured` — resolved from the configuration
 alone — still said `enforced` and `secure-single-domain` admitted the node.

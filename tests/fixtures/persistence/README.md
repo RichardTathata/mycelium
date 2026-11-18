@@ -23,4 +23,6 @@ Record: `docs/design/contracts-receipts.md` §9.
 `the_client_cert_journal_entries_are_pinned` (`src/agent/client_cert.rs`) encode each entry and compare the bytes, decode
 each line back, and show that a reader with the variants before this release refuses (and so skips) the new ones while
 reading the old ones — a variant reordered or inserted in the middle fails them. **Add a line for a new variant; never edit
-one.**
+one.** The compaction of `revocations.journal` (identity-and-lifecycle I2, PR 2b-1) adds no variant and changes no
+encoding — a compacted journal is the same frames, fewer of them — so it adds no line here; its temporary,
+`revocations.journal.compact`, is never read (a start removes one a crash left).

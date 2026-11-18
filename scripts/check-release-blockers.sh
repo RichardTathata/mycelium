@@ -11,6 +11,14 @@
 #   prose; this makes it mechanical. The release workflow's `version` job runs it on every tag push (`--release`:
 #   a blocker fails the job); on a dry run it only warns, so pull requests stay green.
 #
+#   A GATED WRITER (identity-and-lifecycle I2, PR 2b-1). `mycelium tls commit` (`commit_successor`) is a new path
+#   that would write the generation extension: a successor is a generation-1 CA. While
+#   `CA_GENERATION_OID_IS_PROVISIONAL` is `true`, that function must ask `ca_generation_oid_open()` itself, before it
+#   writes anything — so a shipped binary refuses by name and writes nothing (CI's
+#   `scripts/check-shipped-ca-generation-refusal.sh` shows the binary doing so). A `commit_successor` without the
+#   check fails this script in either mode: nothing new ships under a provisional OID. A function added later that
+#   writes the extension is added to GATED_WRITERS below.
+#
 # USAGE
 #   scripts/check-release-blockers.sh [--release] [tls.rs path]
 #     --release   a blocker is an error (exit 1); without it, a warning (exit 0)
@@ -31,9 +39,14 @@ self_test() {
   if ! "$0" "$dir/blocked.rs" >/dev/null 2>&1; then echo "self-test: a provisional OID failed without --release"; ok=0; fi
   if ! "$0" --release "$dir/clear.rs" >/dev/null 2>&1; then echo "self-test: registered OIDs failed --release"; ok=0; fi
   if "$0" --release "$dir/missing.rs" >/dev/null 2>&1; then echo "self-test: a file without a constant passed"; ok=0; fi
-  rm -f "$dir/blocked.rs" "$dir/blocked-gen.rs" "$dir/clear.rs" "$dir/missing.rs"
+  local head='pub const CONSENT_GRADE_OID_IS_PROVISIONAL: bool = false;\npub const CA_GENERATION_OID_IS_PROVISIONAL: bool = true;\n'
+  printf "${head}    pub fn commit_successor() {\n        mint();\n    }\n    pub fn next() { ca_generation_oid_open(); }\n" >"$dir/ungated.rs"
+  printf "${head}    pub fn commit_successor() {\n        if !super::ca_generation_oid_open() { return; }\n        mint();\n    }\n" >"$dir/gated.rs"
+  if "$0" "$dir/ungated.rs" >/dev/null 2>&1; then echo "self-test: an ungated commit_successor passed under a provisional OID"; ok=0; fi
+  if ! "$0" "$dir/gated.rs" >/dev/null 2>&1; then echo "self-test: a gated commit_successor failed without --release"; ok=0; fi
+  rm -f "$dir/blocked.rs" "$dir/blocked-gen.rs" "$dir/clear.rs" "$dir/missing.rs" "$dir/ungated.rs" "$dir/gated.rs"
   rmdir "$dir"
-  if [[ $ok == 1 ]]; then echo "check-release-blockers --self-test: ok (5 cases)"; else exit 1; fi
+  if [[ $ok == 1 ]]; then echo "check-release-blockers --self-test: ok (7 cases)"; else exit 1; fi
 }
 
 release=0
@@ -65,6 +78,23 @@ for constant in CONSENT_GRADE_OID_IS_PROVISIONAL CA_GENERATION_OID_IS_PROVISIONA
     fi
   fi
 done
+# Writers of the generation extension must be gated while its OID is provisional (see A GATED WRITER above).
+GATED_WRITERS=(commit_successor)
+if grep -qE '^pub const CA_GENERATION_OID_IS_PROVISIONAL: bool = true;' "$file"; then
+  for fn in "${GATED_WRITERS[@]}"; do
+    if grep -qE "^\s*pub fn ${fn}\(" "$file"; then
+      # The function's body: from its `pub fn` line to the next `fn` at the same or an outer level.
+      if ! awk -v fn="$fn" '
+            $0 ~ "^[[:space:]]*pub fn " fn "\\(" { inside = 1; next }
+            inside && $0 ~ /^[[:space:]]*(pub(\([a-z]+\))? )?fn / { exit }
+            inside && /ca_generation_oid_open\(\)/ { found = 1 }
+            END { exit(found ? 0 : 1) }' "$file"; then
+        echo "::error::check-release-blockers: \`${fn}\` in $file writes the caGeneration extension and does not ask \`ca_generation_oid_open()\`: nothing new ships under a provisional OID (identity-and-lifecycle I2, decision (e))" >&2
+        exit 1
+      fi
+    fi
+  done
+fi
 if [[ $blocked == 1 ]]; then exit 1; fi
 if [[ $warned == 1 ]]; then exit 0; fi
 echo "check-release-blockers: no blocker"

@@ -386,6 +386,19 @@ pub(super) async fn stats_handler(State(ctx): State<Arc<HttpCtx>>) -> impl IntoR
         body["identity_anchors_dropped"] = json!(load(&l.anchors_dropped));
         body["identity_anchor_journal_refused"] = json!(load(&l.anchor_journal_refused));
         body["identity_anchor_append_failed"] = json!(load(&l.anchor_append_failed));
+        // The anchor journal's compaction (the maintainer's decision of 2026-11-17): journaled records removed because
+        // this node no longer keeps their certificates, and compactions that failed (the journal as it was).
+        body["identity_anchor_journal_compacted"] = json!(load(&l.compaction.removed));
+        body["identity_anchor_compaction_failed"] = json!(load(&l.compaction.failed));
+        // I2 (PR 2b): whether this node holds a pinned CA commitment, commitments refused because they conflict with
+        // it (the operator's file at a start, distinct KV copies), and KV copies no trusted root signed (read as absent).
+        #[cfg(feature = "tls")]
+        {
+            let c = &ctx.agent_ctx.ca_commitment;
+            body["ca_commitment_pinned"] = json!(c.pinned().is_some());
+            body["ca_commitment_conflict"] = json!(load(&c.conflicts));
+            body["ca_commitment_unverified"] = json!(load(&c.unverified));
+        }
         // #805's review F10: mesh sessions closed by a change of roots, by side and by why.
         #[cfg(feature = "tls")]
         if let Some(t) = ctx.agent_ctx.tls.get() {

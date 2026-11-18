@@ -415,6 +415,76 @@ fn set_edit(map: &papaya::HashMap<NodeId, HashSet<[u8; 32]>>, node: &NodeId, dig
     changed
 }
 
+/// The kept-anchor journal's compaction state ([`IdentityLedger::compact_anchor_journal`]).
+#[derive(Default)]
+pub(crate) struct Compaction {
+    /// Journaled anchor records compactions removed because this node no longer kept their certificates.
+    pub(crate) removed: AtomicU64,
+    /// Compactions that failed (the journal stood as it was; a later one tries again).
+    pub(crate) failed: AtomicU64,
+    /// A compaction the budget asked for is running or queued: one at a time from that path.
+    spawned: AtomicBool,
+    /// No budget-triggered compaction before this wall-clock ms.
+    not_before: AtomicU64,
+}
+
+type AnchorsSeen = papaya::HashMap<NodeId, HashMap<[u8; 32], KeptAnchor>>;
+
+/// One compaction of the identity journal `j`; how many records it removed.
+async fn compact(j: Arc<super::journal::Journal>, seen: Arc<AnchorsSeen>, tally: Arc<AppendTally>, state: Arc<Compaction>) -> u64 {
+    let mut written: HashSet<(String, [u8; 32])> = HashSet::new();
+    // What the choice took off the journaled set, so a rewrite that changed nothing can put it back.
+    let taken: Arc<papaya::HashSet<(NodeId, [u8; 32])>> = Arc::default();
+    let (taken_in, tally_in) = (Arc::clone(&taken), Arc::clone(&tally));
+    let keep: super::journal::KeepRecord = Box::new(move |bytes: &[u8]| {
+        let Ok(JournalEntry::Anchor { node, der }) = mycelium_core::serde_fixint::from_slice::<JournalEntry>(bytes) else {
+            return true;
+        };
+        let digest: [u8; 32] = Sha256::digest(&der).into();
+        // A record this binary would not restore (its node does not parse) is not this compaction's to judge: kept.
+        let Ok(n) = node.parse::<NodeId>() else { return true };
+        if !seen.pin().get(&n).is_some_and(|m| m.values().any(|a| a.certs.iter().any(|c| *c.der == *der))) {
+            if set_edit(&tally_in.journaled, &n, digest, false) {
+                tally_in.journaled_total.fetch_sub(1, Ordering::Relaxed);
+                taken_in.pin().insert((n, digest));
+            }
+            return false;
+        }
+        // One record per kept certificate: a duplicate (a retried append whose first copy did land) is left out.
+        written.insert((node, digest))
+    });
+    use super::journal::RewriteOutcome;
+    match j.rewrite(keep).await {
+        Ok(RewriteOutcome::Unchanged(why)) => {
+            // The journal is exactly what it was, so every record taken off the journaled set is still on disk: put
+            // them back, or the budget would stop counting records the file still holds and nothing would compact them.
+            for (n, digest) in taken.pin().iter() {
+                if set_edit(&tally.journaled, n, *digest, true) {
+                    tally.journaled_total.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+            state.failed.fetch_add(1, Ordering::Relaxed);
+            tracing::warn!(error = %why, "identity journal: a compaction failed before its rename; the journal is as it was and a later one tries again");
+            0
+        }
+        Ok(RewriteOutcome::Done(done)) => {
+            if done.dropped > 0 {
+                state.removed.fetch_add(done.dropped, Ordering::Relaxed);
+                tracing::info!(removed = done.dropped, kept = done.kept, "identity journal: compacted; anchors this node no longer keeps stop counting against the kept-anchor budget");
+            }
+            done.dropped
+        }
+        Err(e) => {
+            state.failed.fetch_add(1, Ordering::Relaxed);
+            // Which file the journal is now is not known here (the rename may have happened; the writer refuses
+            // appends until a reopen). What was taken off the journaled set stays off: this node may believe a record
+            // un-journaled that is on disk, never one durable that is not.
+            tracing::warn!(error = %e, "identity journal: a compaction did not finish; appends are refused until the journal is reopened, and a restart reads what it holds");
+            0
+        }
+    }
+}
+
 /// A certificate offered to `node`'s anchors by a fold: judged under the roots generation `judged`.
 pub(crate) struct Offered {
     key: [u8; 32],
@@ -430,7 +500,8 @@ pub(crate) struct IdentityLedger {
     /// store — so hiding a record demotes no node, in-process or (journaled, under `[persistence]`) across a restart.
     /// A node's entry, once made, stays when it is empty: a node that had standing and lost it trusts nothing
     /// (fails closed; #796's review, must-address 7), never reverting to legacy.
-    anchors_seen: papaya::HashMap<NodeId, HashMap<[u8; 32], KeptAnchor>>,
+    /// Shared (`Arc`) with the journal's compaction, which asks it record by record what this node still keeps.
+    anchors_seen: Arc<AnchorsSeen>,
     /// Anchor appends handed to the journal, and those finished — what [`IdentityLedger::anchors_durable`] waits on.
     anchor_tally: Arc<AppendTally>,
     /// Kept certificates the journal could not take (budget full, or a failed append): kept in memory only.
@@ -439,6 +510,9 @@ pub(crate) struct IdentityLedger {
     pub(crate) anchors_dropped: AtomicU64,
     /// Kept-anchor appends that failed (each is tried again by a later fold).
     pub(crate) anchor_append_failed: Arc<AtomicU64>,
+    /// The kept-anchor journal's compaction: its counters and its one-at-a-time flag, shared with the task the budget
+    /// spawns (the maintainer's decision of 2026-11-17).
+    pub(crate) compaction: Arc<Compaction>,
     /// **The one owner of this node's identity and roots** (identity-and-lifecycle I2, #796's review must-address 8):
     /// `rotate_identity` holds it from building its material to activating it — across its propagation wait — and a
     /// change of roots (`GossipAgent::change_roots`) holds it for its whole run, so the roots never change between a
@@ -483,6 +557,21 @@ impl std::fmt::Debug for IdentityLedger {
 impl IdentityLedger {
     /// Load the journal at `path` and open it for appends. Run once at start, before the first fold.
     pub(crate) fn open_journal(&self, path: &std::path::Path) -> std::io::Result<()> {
+        self.open_journal_with(path, |p| super::journal::Journal::open(p, "identity/revocations"))
+    }
+
+    /// [`Self::open_journal`] over a journal whose next compaction stops as a crash would (the crash-window tests).
+    #[cfg(test)]
+    pub(super) fn open_journal_crashing_for_test(&self, path: &std::path::Path, at: u8) -> std::io::Result<()> {
+        let crash = Arc::new(std::sync::atomic::AtomicU8::new(at));
+        self.open_journal_with(path, |p| super::journal::Journal::open_with_crash(p, "identity/revocations", crash, None))
+    }
+
+    fn open_journal_with(
+        &self,
+        path: &std::path::Path,
+        open: impl FnOnce(&std::path::Path) -> std::io::Result<Arc<super::journal::Journal>>,
+    ) -> std::io::Result<()> {
         let existing = if path.exists() { super::journal::read_journal(path)? } else { Vec::new() };
         for bytes in existing {
             match mycelium_core::serde_fixint::from_slice::<JournalEntry>(&bytes) {
@@ -504,7 +593,7 @@ impl IdentityLedger {
                 Err(_) => tracing::warn!(journal = %path.display(), "revocation journal: an entry did not decode; skipped"),
             }
         }
-        let j = super::journal::Journal::open(path, "identity/revocations")?;
+        let j = open(path)?;
         self.journal.store(Some(j));
         Ok(())
     }
@@ -570,6 +659,63 @@ impl IdentityLedger {
         }
     }
 
+    /// How many of `node`'s journaled anchor records name a certificate this node no longer keeps — what a compaction
+    /// would remove. With `node` `None`, over every node.
+    fn dead_journaled(&self, node: Option<&NodeId>) -> usize {
+        let seen = self.anchors_seen.pin();
+        let dead_of = |n: &NodeId, set: &HashSet<[u8; 32]>| {
+            let kept: HashSet<[u8; 32]> = seen.get(n).map(|m| m.values().flat_map(|a| a.certs.iter()).map(|c| Sha256::digest(&c.der).into()).collect()).unwrap_or_default();
+            set.iter().filter(|d| !kept.contains(*d)).count()
+        };
+        let journaled = self.anchor_tally.journaled.pin();
+        match node {
+            Some(n) => journaled.get(n).map_or(0, |set| dead_of(n, set)),
+            None => journaled.iter().map(|(n, set)| dead_of(n, set)).sum(),
+        }
+    }
+
+    /// **Compact the kept-anchor journal** (identity-and-lifecycle I2; the maintainer's decision of 2026-11-17: the
+    /// budget of [`ANCHOR_JOURNAL_PER_NODE`] applies to the anchors a node keeps **now**, not to every one it ever
+    /// kept). Every journaled `Anchor` record whose certificate this node no longer keeps is left out of a rewritten
+    /// journal ([`Journal::rewrite`](super::journal::Journal::rewrite): new file, fsync, rename, directory fsync), and
+    /// stops counting against the budget; counted revocations, saturation marks and records this binary cannot decode
+    /// are kept as they are. Returns how many records it removed; `0` with no journal, nothing to remove, or a failure
+    /// (counted, the journal as it was).
+    ///
+    /// The choice is made inside the journal's writer, against what this node keeps at that moment. A record is taken
+    /// off the journaled set **before** its frame is left out, never after: between the two this node may believe a
+    /// certificate un-journaled that is still on disk (it is appended again, and a duplicate is read once), but never
+    /// believes one durable that is not.
+    pub(crate) async fn compact_anchor_journal(&self) -> u64 {
+        let Some(j) = self.journal.load_full() else { return 0 };
+        if self.dead_journaled(None) == 0 {
+            return 0;
+        }
+        compact(j, Arc::clone(&self.anchors_seen), Arc::clone(&self.anchor_tally), Arc::clone(&self.compaction)).await
+    }
+
+    /// The budget met a journal holding records of anchors this node no longer keeps: compact it off the fold's
+    /// thread, one at a time, and let the next fold offer the certificate again. A failed compaction backs off a minute.
+    fn spawn_compaction(&self, j: Arc<super::journal::Journal>) {
+        let c = Arc::clone(&self.compaction);
+        if mycelium_core::sim_seam::wall_now_ms() < c.not_before.load(Ordering::Acquire) {
+            return;
+        }
+        let Ok(rt) = tokio::runtime::Handle::try_current() else { return };
+        if c.spawned.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let (seen, tally) = (Arc::clone(&self.anchors_seen), Arc::clone(&self.anchor_tally));
+        rt.spawn(async move {
+            let failed_before = c.failed.load(Ordering::Relaxed);
+            compact(j, seen, tally, Arc::clone(&c)).await;
+            if c.failed.load(Ordering::Relaxed) != failed_before {
+                c.not_before.store(mycelium_core::sim_seam::wall_now_ms().saturating_add(60_000), Ordering::Release);
+            }
+            c.spawned.store(false, Ordering::Release);
+        });
+    }
+
     /// Count and warn a refusal once per certificate (N3).
     fn refuse_once(&self, node: &NodeId, digest: [u8; 32], why: &str) {
         if self.anchor_tally.refused_noted.pin().insert((node.clone(), digest)) {
@@ -590,8 +736,16 @@ impl IdentityLedger {
         if t.journaled.pin().get(node).is_some_and(|s| s.contains(&digest)) || t.inflight.pin().get(node).is_some_and(|s| s.contains(&digest)) {
             return;
         }
-        if held(&t.journaled) + held(&t.inflight) >= ANCHOR_JOURNAL_PER_NODE || t.journaled_total.load(Ordering::Relaxed) >= ANCHOR_JOURNAL_TOTAL {
-            self.refuse_once(node, digest, "the kept-anchor budget is full");
+        let (node_full, all_full) = (held(&t.journaled) + held(&t.inflight) >= ANCHOR_JOURNAL_PER_NODE, t.journaled_total.load(Ordering::Relaxed) >= ANCHOR_JOURNAL_TOTAL);
+        if node_full || all_full {
+            // The budget is of the anchors kept **now** (the maintainer's decision of 2026-11-17): while the journal
+            // holds records of anchors this node dropped, it is compacted and the next fold offers this one again.
+            // Only a node keeping more than the budget at once is refused, by name.
+            if (node_full && self.dead_journaled(Some(node)) > 0) || (all_full && self.dead_journaled(None) > 0) {
+                self.spawn_compaction(j);
+                return;
+            }
+            self.refuse_once(node, digest, &format!("this node keeps more than the kept-anchor budget at once ({ANCHOR_JOURNAL_PER_NODE} per node, {ANCHOR_JOURNAL_TOTAL} in all)"));
             return;
         }
         // N3: a certificate whose append failed is retried only after its backoff (1 s, doubling, at most 64 s).
@@ -672,6 +826,33 @@ impl IdentityLedger {
     pub(super) fn anchor_journaled_for_test(&self, node: &NodeId, der: &[u8]) -> bool {
         let digest: [u8; 32] = Sha256::digest(der).into();
         self.anchor_tally.journaled.pin().get(node).is_some_and(|s| s.contains(&digest))
+    }
+
+    /// Keep `der` as `node`'s anchor under `key` without judging it, or stop keeping it (the journal tests, whose
+    /// certificates are plain bytes).
+    #[cfg(test)]
+    pub(super) fn keep_raw_for_test(&self, node: &NodeId, key: [u8; 32], der: &[u8], keep: bool) {
+        self.anchors_seen.pin().compute(node.clone(), |existing| {
+            let mut m = existing.map(|(_, m)| m.clone()).unwrap_or_default();
+            if keep {
+                m.entry(key).or_default().certs.push(KeptCert { der: Arc::from(der), issuer: key.to_vec(), issued: 1, judged: UNJUDGED, expires: u64::MAX });
+            } else {
+                m.remove(&key);
+            }
+            papaya::Operation::Insert::<_, ()>(m)
+        });
+    }
+
+    /// Let no budget-triggered compaction start (a test that shows another path compacts).
+    #[cfg(test)]
+    pub(super) fn block_spawned_compaction_for_test(&self) {
+        self.compaction.spawned.store(true, Ordering::Release);
+    }
+
+    /// How many anchor records of `node` the journal holds, by this node's bookkeeping.
+    #[cfg(test)]
+    pub(super) fn anchors_journaled_count_for_test(&self, node: &NodeId) -> usize {
+        self.anchor_tally.journaled.pin().get(node).map_or(0, |s| s.len())
     }
 
     fn remember_journaled(&self, node: &NodeId, path: String, bytes: Vec<u8>) -> bool {
@@ -1732,26 +1913,203 @@ mod tests {
         assert!(ledger.anchors_durable_for(&[(n.clone(), digest(&x))]).await, "durable");
     }
 
-    /// **#805's confirm round N3: a certificate past the budget is counted once.** A node's 32 kept certificates are
-    /// journaled; a 33rd, offered on fold after fold, is refused, warned and counted once. Seen failing first with the
-    /// refusal counted on every offer.
+    fn key_of(i: usize) -> [u8; 32] {
+        let mut k = [0u8; 32];
+        k[..8].copy_from_slice(&(i as u64).to_le_bytes());
+        k
+    }
+
+    fn cert_of(i: usize) -> [u8; 8] {
+        let mut c = [0xABu8; 8];
+        c[..2].copy_from_slice(&(i as u16).to_le_bytes());
+        c
+    }
+
+    /// Keep and journal certificates `range` of `n`, and wait until each is durable.
+    async fn keep_and_journal(ledger: &IdentityLedger, n: &NodeId, range: std::ops::Range<usize>) {
+        for i in range.clone() {
+            ledger.keep_raw_for_test(n, key_of(i), &cert_of(i), true);
+            ledger.journal_anchor(n, &cert_of(i));
+        }
+        let all: Vec<(NodeId, [u8; 32])> = range.map(|i| (n.clone(), digest(&cert_of(i)))).collect();
+        assert!(ledger.anchors_durable_for(&all).await);
+    }
+
+    async fn until_true(what: &str, f: impl Fn() -> bool) {
+        for _ in 0..400 {
+            if f() {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("timed out: {what}");
+    }
+
+    /// **#805's confirm round N3, under the decision of 2026-11-17: a node keeping more than the budget at once is still
+    /// refused by name, once per certificate.** A node's 32 kept certificates are journaled; a 33rd kept beside them,
+    /// offered on fold after fold, is refused, warned and counted once, and no compaction runs: nothing in the journal
+    /// is dead. Seen failing first with the refusal counted on every offer (N3), and with the budget treating every
+    /// full journal as compactable (the refusal never counted).
     #[tokio::test]
     async fn a_certificate_past_the_anchor_budget_is_counted_once() {
         let ledger = IdentityLedger::default();
         ledger.open_journal(&temp_journal("budget")).unwrap();
         let n: NodeId = "127.0.0.1:9102".parse().unwrap();
-        let certs: Vec<[u8; 8]> = (0..ANCHOR_JOURNAL_PER_NODE as u8).map(|i| [i, 0xAB, 0, 0, 0, 0, 0, 0]).collect();
-        for c in &certs {
-            ledger.journal_anchor(&n, c);
-        }
-        let all: Vec<(NodeId, [u8; 32])> = certs.iter().map(|c| (n.clone(), digest(c))).collect();
-        assert!(ledger.anchors_durable_for(&all).await);
-        let extra = [0xEEu8; 8];
+        keep_and_journal(&ledger, &n, 0..ANCHOR_JOURNAL_PER_NODE).await;
+        let extra = cert_of(900);
+        ledger.keep_raw_for_test(&n, key_of(900), &extra, true);
         for _ in 0..3 {
             ledger.journal_anchor(&n, &extra);
         }
         assert_eq!(ledger.anchor_journal_refused.load(Ordering::Relaxed), 1, "once per certificate");
         assert!(!ledger.anchors_durable_for(&[(n.clone(), digest(&extra))]).await, "not durable: in memory only");
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(ledger.compaction.removed.load(Ordering::Relaxed), 0, "every journaled anchor is kept: nothing to compact");
+        assert_eq!(ledger.anchors_journaled_count_for_test(&n), ANCHOR_JOURNAL_PER_NODE);
+    }
+
+    /// **The decision of 2026-11-17: the budget counts the anchors a node keeps now, not every one it ever kept.** A
+    /// node's 32 kept certificates are journaled beside a counted revocation; it stops keeping five of them and keeps a
+    /// new one. The new one meets a full budget, the journal is compacted — the five dropped anchors' records leave it
+    /// — and the next offer journals it: every kept certificate is durable again, nothing was refused, and a restart
+    /// over the compacted journal reads back exactly the kept anchors and the counted revocation. Seen failing first
+    /// with the budget refusing whenever the journal is full (no compaction): the new certificate was refused and
+    /// `anchors_durable_for(kept_certs())` answered `false`.
+    #[tokio::test]
+    async fn the_anchor_budget_counts_the_anchors_kept_now() {
+        let path = temp_journal("compact");
+        let ledger = IdentityLedger::default();
+        ledger.open_journal(&path).unwrap();
+        let n: NodeId = "127.0.0.1:9103".parse().unwrap();
+        assert!(ledger.record_counted(&n, "sys/revocation/127.0.0.1:9103/aa/bb", b"counted"));
+        keep_and_journal(&ledger, &n, 0..ANCHOR_JOURNAL_PER_NODE).await;
+        for i in 0..5 {
+            ledger.keep_raw_for_test(&n, key_of(i), &cert_of(i), false);
+        }
+        let fresh = cert_of(700);
+        ledger.keep_raw_for_test(&n, key_of(700), &fresh, true);
+        ledger.journal_anchor(&n, &fresh);
+        until_true("the compaction removed the five dead records", || ledger.compaction.removed.load(Ordering::Relaxed) == 5).await;
+        assert_eq!(ledger.anchors_journaled_count_for_test(&n), ANCHOR_JOURNAL_PER_NODE - 5, "the dropped anchors stopped counting");
+        ledger.journal_anchor(&n, &fresh);
+        assert!(ledger.anchors_durable_for(&ledger.kept_certs()).await, "every kept certificate is journaled again");
+        assert_eq!(ledger.anchor_journal_refused.load(Ordering::Relaxed), 0, "nothing was refused");
+        ledger.close_journal();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let records = super::super::journal::read_journal(&path).unwrap();
+        let (mut anchors, mut counted) = (HashSet::new(), 0);
+        for r in &records {
+            match mycelium_core::serde_fixint::from_slice::<JournalEntry>(r).unwrap() {
+                JournalEntry::Anchor { der, .. } => assert!(anchors.insert(der), "one record per kept certificate"),
+                JournalEntry::Counted { bytes, .. } => {
+                    assert_eq!(bytes, b"counted");
+                    counted += 1;
+                }
+                JournalEntry::Saturated { .. } => panic!("no node saturated"),
+            }
+        }
+        let want: HashSet<Vec<u8>> = (5..ANCHOR_JOURNAL_PER_NODE).map(|i| cert_of(i).to_vec()).chain([fresh.to_vec()]).collect();
+        assert_eq!(anchors, want, "exactly the anchors kept");
+        assert_eq!(counted, 1, "the counted revocation is untouched");
+    }
+
+    /// Four kept anchors and a counted revocation journaled at `path`, two of the anchors then dropped: the state both
+    /// crash windows start from. Returns the ledger and the node.
+    async fn before_a_compaction(path: &std::path::Path, crash_at: u8) -> (IdentityLedger, NodeId) {
+        let ledger = IdentityLedger::default();
+        ledger.open_journal_crashing_for_test(path, crash_at).unwrap();
+        let n: NodeId = "127.0.0.1:9104".parse().unwrap();
+        assert!(ledger.record_counted(&n, "sys/revocation/127.0.0.1:9104/aa/bb", b"counted"));
+        keep_and_journal(&ledger, &n, 0..4).await;
+        until_true("the counted record is on disk", || super::super::journal::read_journal(path).unwrap().len() == 5).await;
+        for i in 0..2 {
+            ledger.keep_raw_for_test(&n, key_of(i), &cert_of(i), false);
+        }
+        (ledger, n)
+    }
+
+    fn anchor_ders(path: &std::path::Path) -> Vec<Vec<u8>> {
+        super::super::journal::read_journal(path).unwrap().iter().filter_map(|r| match mycelium_core::serde_fixint::from_slice::<JournalEntry>(r) {
+            Ok(JournalEntry::Anchor { der, .. }) => Some(der),
+            _ => None,
+        }).collect()
+    }
+
+    fn compact_tmp(path: &std::path::Path) -> std::path::PathBuf {
+        std::path::PathBuf::from(format!("{}.compact", path.display()))
+    }
+
+    /// **The compaction's first crash window: a crash before the rename.** The live set is written and synced under the
+    /// temporary name and the process stops. The journal is byte for byte what it was — every anchor record, dropped
+    /// or kept, and the counted revocation — the compaction is counted as failed, and the next open removes the
+    /// temporary and reads the whole old journal. Seen failing first with the live set written over the journal's own
+    /// name (no temporary, no rename): the dropped anchors' records were already gone at the crash.
+    #[tokio::test]
+    async fn a_crash_before_the_compactions_rename_leaves_the_journal_as_it_was() {
+        let path = temp_journal("crash-before");
+        let (ledger, n) = before_a_compaction(&path, 1).await;
+        let before = std::fs::read(&path).unwrap();
+        assert_eq!(ledger.compact_anchor_journal().await, 0, "the compaction did not finish");
+        assert_eq!(ledger.compaction.failed.load(Ordering::Relaxed), 1);
+        assert_eq!(std::fs::read(&path).unwrap(), before, "the journal is untouched");
+        assert!(compact_tmp(&path).exists(), "the temporary a crash leaves");
+        ledger.close_journal();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let again = IdentityLedger::default();
+        again.open_journal(&path).unwrap();
+        assert!(!compact_tmp(&path).exists(), "the next open removes the temporary");
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert_eq!(anchor_ders(&path).len(), 4, "every anchor record read back");
+        assert_eq!(again.journaled.pin().get(&n).map_or(0, |v| v.len()), 1, "and the counted revocation");
+    }
+
+    /// **A compaction that fails before its rename leaves the bookkeeping true.** The temporary's name is taken, so
+    /// the rewrite changes nothing: the failure is counted, and the two dropped anchors' records — still on disk — are
+    /// still counted as journaled, so the next compaction, once the name is free, removes them. Seen failing first
+    /// without the records put back: the bookkeeping said two while the file held four, nothing was dead any more by
+    /// its count, and the second compaction removed nothing.
+    #[tokio::test]
+    async fn a_compaction_that_changes_nothing_leaves_the_journaled_set_as_it_was() {
+        let path = temp_journal("unchanged");
+        let (ledger, n) = before_a_compaction(&path, 0).await;
+        std::fs::create_dir(compact_tmp(&path)).unwrap();
+        assert_eq!(ledger.compact_anchor_journal().await, 0);
+        assert_eq!(ledger.compaction.failed.load(Ordering::Relaxed), 1);
+        assert_eq!(anchor_ders(&path).len(), 4, "the journal is as it was");
+        assert_eq!(ledger.anchors_journaled_count_for_test(&n), 4, "and so is what this node counts as journaled");
+        std::fs::remove_dir(compact_tmp(&path)).unwrap();
+        assert_eq!(ledger.compact_anchor_journal().await, 2, "the next compaction removes the two dropped anchors");
+        assert_eq!(anchor_ders(&path).len(), 2);
+        assert_eq!(ledger.anchors_journaled_count_for_test(&n), 2);
+    }
+
+    /// **The compaction's second crash window: a crash after the rename**, before the directory is synced and the
+    /// writer has reopened the file. The journal under its name is the compacted one, whole: the two kept anchors and
+    /// the counted revocation, no temporary beside it; a restart reads exactly those. The stopped writer refuses the
+    /// next append rather than write to the replaced file. Seen failing first with the writer left unpoisoned after
+    /// the stop: the append was acknowledged, and absent from the journal at the restart.
+    #[tokio::test]
+    async fn a_crash_after_the_compactions_rename_leaves_the_compacted_journal_whole() {
+        let path = temp_journal("crash-after");
+        let (ledger, n) = before_a_compaction(&path, 2).await;
+        assert_eq!(ledger.compact_anchor_journal().await, 0, "the compaction reported no success");
+        assert!(!compact_tmp(&path).exists(), "renamed");
+        let want: Vec<Vec<u8>> = (2..4).map(|i| cert_of(i).to_vec()).collect();
+        assert_eq!(anchor_ders(&path), want, "the compacted journal, whole");
+        // The writer still holds the replaced file: an append now must not be acknowledged.
+        let late = cert_of(800);
+        ledger.keep_raw_for_test(&n, key_of(800), &late, true);
+        ledger.journal_anchor(&n, &late);
+        assert!(!ledger.anchors_durable_for(&[(n.clone(), digest(&late))]).await, "an append after the stop is refused, not lost silently");
+        ledger.close_journal();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let again = IdentityLedger::default();
+        again.open_journal(&path).unwrap();
+        assert_eq!(anchor_ders(&path), want);
+        assert_eq!(again.journaled.pin().get(&n).map_or(0, |v| v.len()), 1, "and the counted revocation");
     }
 
     #[test]

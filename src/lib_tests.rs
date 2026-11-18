@@ -297,6 +297,8 @@ fn spawn_handler_with(
         #[cfg(feature = "tls")]
         identity_ledger: Arc::new(crate::agent::revocation::IdentityLedger::default()),
         #[cfg(feature = "tls")]
+        ca_commitment: Arc::default(),
+        #[cfg(feature = "tls")]
         client_certs: Arc::new(crate::agent::client_cert::ClientCertLedger::default()),
         #[cfg(feature = "tls")]
         client_key_sinks: papaya::HashMap::new(),
@@ -4539,6 +4541,8 @@ async fn test_subscribe_notified_via_gossip() {
         membership: std::sync::OnceLock::new(),
         #[cfg(feature = "tls")]
         identity_ledger: Arc::new(crate::agent::revocation::IdentityLedger::default()),
+        #[cfg(feature = "tls")]
+        ca_commitment: Arc::default(),
         #[cfg(feature = "tls")]
         client_certs: Arc::new(crate::agent::client_cert::ClientCertLedger::default()),
         #[cfg(feature = "tls")]

@@ -63,17 +63,31 @@ which needs two processes and lives in the Docker suites.
   restart forgets the dropped anchor, and with legacy open that peer is legacy again. A node whose every root is generation 1 or later (a CA's
   `caGeneration`, under a **provisional** OID a shipped build refuses by name) has no legacy class. Live mesh sessions
   are re-judged before their next frame and closed when the new roots refuse the peer (`sessions_closed_by_roots`).
+- **A CA commits to its successor, and a node pins that** (plan row I2, PR 2b-1; `deprecations.md` §120): on the
+  issuer's host `mycelium tls commit --ca-dir <dir> --successor <dir>` mints the successor CA and writes
+  `ca-commit.pem`, the old CA's signature over its successor — once. An operator copies that file into a node's
+  certificate directory; the node assesses it against the root it trusts, pins it under its own `succession/`
+  (durably, before it goes on) and refuses any other commitment from then on, counting each
+  (`ca_commitment_conflict`). It pins from that file only: nodes republish what they pinned at `sys/ca-commit/{node}`
+  so that a conflicting commitment — a mistake, or a stolen CA key — is seen and counted, and a copy there is never
+  pinned. A node holding a commitment refuses to start without `[persistence]`. The commitment changes nothing a node
+  trusts, and no shipped build makes or reads one while the `caGeneration` OID is provisional.
+- **The kept anchors' journal is compacted** (the same PR): its budget — 32 certificates per peer — counts the
+  anchors a node keeps now, so anchors it has dropped stop counting; a crash before the compaction's rename leaves the
+  journal as it was, and one after it leaves the compacted journal whole.
 - **Not built:** rotation in place under the off-node posture (recovery is re-issue); the CA key cannot be rotated,
-  and its compromise is recovered by re-issue only — CA succession (plan row I2) has its reload path and its standing
-  rules in the library and nothing yet that drives them: `ca-commit.pem`, `tls commit`, the successor-signed record, its
-  phases under `succession/` (PR 2b) and `tls succeed` (PR 3) are I2's next PRs; a node whose
+  and its compromise is recovered by re-issue only — CA succession (plan row I2) has its reload path, its standing
+  rules, the commitment and the pin in the library and nothing yet that changes a node's roots: the successor-signed
+  record, its phases under `succession/` (PRs 2b-2 to 2b-4) and `tls succeed` (PR 3) are I2's next PRs; a node whose
   certificate predates row Q has no standing to revoke until it is re-issued; a removed member's gateway tokens are a
   separate revocation ([cert rotation § Removing a member](../operations/cert-rotation.md#removing-a-member-an-operators-authority-c5)).
 - **Evidence:** the ledger rows
   [identity proofs required by default](../operations/what-is-proven.md#identity-proofs-required-default-so-member),
   [a revoked key stops verifying](../operations/what-is-proven.md#key-node-has-revoked-stops-verifying) and
   [a TLS node starts without the fleet CA](../operations/what-is-proven.md#tls-node-starts-without-fleet-ca),
-  [a node takes a new root set live](../operations/what-is-proven.md#node-takes-new-roots-live-and-caches-rejudge) and
+  [a node takes a new root set live](../operations/what-is-proven.md#node-takes-new-roots-live-and-caches-rejudge),
+  [a CA's commitment pinned from the operator's file only](../operations/what-is-proven.md#ca-commitment-pinned-from-operators-file-only),
+  [the kept-anchor journal compacted](../operations/what-is-proven.md#anchor-journal-compacted-crash-safely) and
   [one root in `ca_cert_pem`](../operations/what-is-proven.md#ca-cert-pem-one-root-and-named-fleet-ca).
 
 ## Go deeper

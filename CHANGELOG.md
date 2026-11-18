@@ -467,6 +467,28 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **CA succession: the old CA's commitment, a node's pin of it, and the kept-anchor journal's compaction**
+  (identity-and-lifecycle I2, PR 2b-1 of 7; `deprecations.md` §120; [feature page](docs/features/node-identity.md)).
+  `mycelium tls commit --ca-dir <dir> --successor <dir>` has the fleet CA mint its successor (the same fleet, the next
+  generation) and sign `ca-commit.pem`, naming it; a CA commits once. A node pins the commitment its operator places in
+  its certificate directory — assessed against the root it trusts, persisted under `succession/` — and from nowhere
+  else; it refuses to start with a commitment it cannot assess, or with one and no `[persistence]`, and it refuses and
+  counts a second commitment. Each node republishes what it pinned at `sys/ca-commit/{node}` **for detection only**: a
+  copy that conflicts with a node's pin is counted (`ca_commitment_conflict`), which is where a stolen CA key shows, and
+  a copy is never pinned. Nothing here changes what a node trusts — the successor's record and the phases are the next
+  PR — and **no shipped build makes or reads a commitment yet**: a successor is a generation-1 CA, whose extension's
+  OID is provisional, so `tls commit` refuses by name and writes nothing.
+  - **The kept-anchor budget counts what a node keeps now** (the maintainer's decision of 2026-11-17): the identity
+    journal is compacted — a new file, fsynced, renamed over the journal, the directory fsynced — when the budget is
+    met and the journal holds anchors the node has dropped, so a long-lived node whose peers rotate often keeps
+    journaling its anchors. A node keeping more than 32 anchors of one peer at once is still refused by name. `GET
+    /stats` gains `identity_anchor_journal_compacted` and `identity_anchor_compaction_failed`.
+  - **Not built, stated:** the successor-signed record and its gateway door, the phases under `succession/`, the
+    acceptance record, `id.ca_succession_committed` and the profile revisions, the `fleet_ca_path` check (PRs 2b-2 to
+    2b-4; the split is in the plan's §8).
+  - **Check:** `mycelium tls commit --ca-dir ./fleet-ca --successor ./fleet-ca-2` on a release binary exits 2 naming
+    the provisional OID, and neither `./fleet-ca-2` nor `./fleet-ca/ca-commit.pem` exists afterwards.
+
 - **Developer consent certificates: the certificate and its principal** (identity-and-lifecycle I7, PR 1 of 3;
   `deprecations.md` §112; [feature page](docs/features/consent-certificates.md)). `mycelium tls issue --client <name>
   --consent --public-key <spki.pem> --grade <grade>` certifies a developer's P-256 key over its public half alone
