@@ -170,7 +170,7 @@ A reference-evaluator rule, as written. `"*"` means any.
 |---|---|---|---|
 | `actor` | string | required | The principal the rule admits, or `"*"`. |
 | `operation` | string | required | The operation, e.g. `"skill.invoke"`, or `"*"`. |
-| `resource` | string | required | The resource, e.g. `"skill:depot/dispatch"`, or `"*"`. A member's direct call of a hosted capability is decided at an enforcing provider as `operation = "tools/call"` on `"tool:<name>"` for a `tool/<name>` component and as `operation = "cap.invoke"` on `"cap:<ns>/<name>"` for any other ([provider enforcement](../features/provider-enforcement.md)); under `[authority]` each bare form is qualified to the node. |
+| `resource` | string | required | The resource, e.g. `"skill:depot/dispatch"`, or `"*"`. A member's direct call of a hosted capability is decided at an enforcing provider as `operation = "tools/call"` on `"tool:<name>"` for a `tool/<name>` component and as `operation = "cap.invoke"` on `"cap:<ns>/<name>"` for any other ([provider enforcement](../features/provider-enforcement.md)); under `[authority]` each bare form is qualified to the node. For that call the actor the provider sees is the calling node, `node:<ip:port>`, so the rule's `actor` is `"*"` or a `node:` principal; `wire-check` warns `node-decided edge` on one that names a unit. |
 | `requires_scopes` | array of strings | empty | Scopes the actor must hold for the rule to apply. |
 | `requires_facts` | array of strings | empty | Facts the rule needs that the reference evaluator cannot establish (e.g. `budget`); such a rule decides *indeterminate*. |
 | `requires_mandate` | string | absent | The scope a live mandate must cover for the rule to apply. |

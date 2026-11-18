@@ -15,3 +15,12 @@ install_budget_bytes = 1073741824
 headroom             = 0.8
 trusted_publishers   = ["ed25519:coop-ci"]
 placement_root       = "/var/lib/mycelium/artifacts"
+
+# Who may call the optimizer this depot would host. A provider with enforcement on decides a member's direct call
+# of a hosted component as `cap.invoke` on `cap:route/optimize@{this node}`, for the actor `node:{the calling
+# node}` — the node, not the unit it runs — so the rule admits any member (`*`); a rule for one node names it,
+# `node:<ip:port>`. Declared here, in each unit that could host it: `[authority]` loads a node's own unit's rules.
+[[rule]]
+actor     = "*"
+operation = "cap.invoke"
+resource  = "cap:route/optimize"

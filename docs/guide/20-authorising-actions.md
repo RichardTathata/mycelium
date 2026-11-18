@@ -836,7 +836,8 @@ runs, the edges that no declaration could ever authorise. This is its **authorit
 sections.
 
 For each wired edge whose requirer declares a `[[mandate]]` or a `[[rule]]`, the check tries the
-edge's two call shapes — `skill.invoke` on `skill:{ns}/{name}` and `tools/call` on `tool:{name}`:
+edge's call shapes. Every edge to a deployed provider has two — `skill.invoke` on `skill:{ns}/{name}`
+and `tools/call` on `tool:{name}` — read for the requirer's unit principal:
 
 - **`unauthorisable edge`** (error): no declared rule admits the requirer's principal on either
   shape (actor, operation and resource, with `"*"` as a wildcard), or the rule that would admit it
@@ -846,14 +847,30 @@ edge's two call shapes — `skill.invoke` on `skill:{ns}/{name}` and `tools/call
 - **`ungoverned edge`** (warning): the requirer declares no mandate and no rule, while other units
   do. Its edge is outside the authority vocabulary.
 
-**Not built: an edge to a hosted capability** (2026-11-14,
-[ledger](../operations/what-is-proven.md#wire-check-does-not-know-the-hosted-capability-shape)). The two shapes
-are the only ones the overlay tries. A provider with enforcement on decides a member's direct call of a hosted
-component outside the `tool` namespace as `cap.invoke` on `cap:{ns}/{name}`, for the actor `node:{sender}`
-([deprecations §108](deprecations.md)). For such an edge the overlay is wrong in both directions: it reports
-`unauthorisable edge` when the only rule is the `cap.invoke` one, and it reports the edge clean on a
-`skill.invoke` rule that provider never reads (the co-op fixture's `auditor.toml` over `route-optimizer.toml`).
-Read its verdict by hand for those edges until the overlay learns the shape.
+**An edge to a hosted component** (2026-11-18;
+[ledger](../operations/what-is-proven.md#wire-check-reads-a-hosted-edge-as-its-provider-decides)). Where the
+edge's provider is a `wasm-component` artifact from the library, outside the `tool` namespace, the check reads
+it as the provider that hosts it decides a member's direct call: a third shape, `cap.invoke` on
+`cap:{ns}/{name}`, for the actor `node:{sender}` — the calling **node**, not the unit it runs
+([deprecations §108 and §122](deprecations.md)). The skill and tool shapes are not tried for such an edge: that
+provider never consults a rule on them.
+
+- The edge **passes** on a rule for `cap.invoke` on `cap:{ns}/{name}` (bare, as `[authority]` qualifies it to its
+  node, or already `@{node}`) whose actor is `"*"` or a `node:` principal — and, if the rule sets
+  `requires_mandate`, only with a declared mandate in that scope whose holder is a `node:` principal: a member
+  presents its own mandate as its node.
+- **`node-decided edge`** (warning): the only reading that admits the edge names the requirer's **unit**
+  principal, as the rule's actor or as the holder of the mandate it requires. The provider reads the node, so
+  the check neither passes the edge silently nor claims the refusal — it knows no placement. A provider as built
+  today refuses that call. Write the rule for `"*"` or for the calling node, `node:<ip:port>`.
+- **`unauthorisable edge`** (error): no rule on the hosted shape could admit a calling node. The message names a
+  `skill.invoke` or `tools/call` rule written for the edge, which the provider does not consult.
+
+What the check does not know: placement (a `node:` actor and an `@{node}` resource are read as possibly the
+calling node and the provider); which unit's rules a provider loads (it reads every unit's, `[authority]` only
+the node's own — declare a hosted capability's rule in each unit that hosts it); a component a unit declares as
+a plain `[[capability]]` (read as a skill or a tool); the `tool` namespace, which is read as the tool it is. Its
+answer is *could admit under these declarations*, never *is admitted*.
 
 An edge with no provider is skipped here; it is already reported as unwired. The overlay is on by
 default and `--no-authority` turns it off. An error makes the check exit 1. The whole

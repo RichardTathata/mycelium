@@ -47,15 +47,20 @@ runs it, and the [sixth tutorial](../guide/tutorials/06-declared-versus-observed
 
 - No guarantee or rule id of its own: the check applies [`cap.match`](../reference/rule-catalogue.md#capmatch), the same
   rule the resolver uses.
-- **Not built: the overlay does not know how a hosted capability is decided** (2026-11-14;
-  [ledger](../operations/what-is-proven.md#wire-check-does-not-know-the-hosted-capability-shape)). It tries a skill
-  shape and a tool shape for every edge. An enforcing provider decides a member's direct call of a hosted
-  component outside the `tool` namespace as `cap.invoke` on `cap:{ns}/{name}`, with the calling **node** as the
-  actor ([deprecations §108](../guide/deprecations.md)). So for such an edge the check can report
-  `unauthorisable edge` for a declaration the provider admits, and can report an edge clean on a `skill.invoke`
-  rule the provider never consults — the co-op fixture's `auditor.toml` over `route-optimizer.toml` is one. For an
-  edge to a hosted capability, "found in CI rather than in production" does not hold yet; to be closed before the
-  MINOR that ships §108.
+- **An edge to a hosted component is read as its provider decides it** (2026-11-18;
+  [ledger](../operations/what-is-proven.md#wire-check-reads-a-hosted-edge-as-its-provider-decides)). Where the
+  edge's provider is a `wasm-component` artifact outside the `tool` namespace, the overlay tries `cap.invoke` on
+  `cap:{ns}/{name}` for the calling **node** — what an enforcing provider decides a member's direct call on
+  ([deprecations §108, §122](../guide/deprecations.md)) — and not the skill or tool shape. A rule for `"*"` or a
+  `node:` principal passes the edge; a rule or mandate that names the requirer's unit principal is the warning
+  `node-decided edge`, never a silent pass; a `skill.invoke` or `tools/call` rule is `unauthorisable edge`. The
+  co-op fixture's `depot-a.toml` over `route-optimizer.toml` is the worked case, and a test sets the check's
+  reading beside the provider's decision.
+- **Not known to the overlay:** placement (a `node:` actor is read as possibly the calling node), which unit's
+  rules a provider loads (`[authority]` loads its node's own unit's; the overlay reads every unit's), a component
+  declared as a plain `[[capability]]`, and the `tool` namespace's actor on a direct call. Its answer is *could
+  admit*, never *is admitted*. A provider that decides on the calling unit's principal is not built
+  (identity-and-lifecycle §9, O9).
 - **Not built:** placement — `[hosts]` describes eligibility and the check never says which host installs; an observed
   binding — the answer is *would bind*; enforcement of `[[mandate]]` and `[[rule]]` at runtime from the file (an
   evaluator does that, built in code).

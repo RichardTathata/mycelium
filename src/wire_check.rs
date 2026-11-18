@@ -26,10 +26,12 @@
 //! | `schedule declared two ways` | two units declare one schedule id with a different period, phase, missed-run policy or holders; one id is one schedule fleet-wide, and its candidates refuse to hold while they disagree | error |
 //! | `schedule in a stem unit` | a unit with `[hosts]` or `[[serve]]` — a stem's — declares a `[[schedule]]`, which a stem refuses to start with | error |
 //! | `runtime with a schedule` | a unit an SDK agent loads (`runtime`) declares a `[[schedule]]`, which `POST /gateway/units/declare` refuses (422): an SDK agent runs one on `GET /gateway/schedules/run` (Y12), not in its unit | error |
-//! | `unauthorisable edge` | the requirer declares authority vocabulary, and no declared rule could admit the call as a skill or a tool — or the rule that would requires a mandate scope no mandate held by the requirer's principal enumerates | error |
+//! | `unauthorisable edge` | the requirer declares authority vocabulary, and no declared rule could admit the call as a skill or a tool — or, for an edge to a hosted component, as `cap.invoke` by the calling node — or the rule that would requires a mandate scope no declared mandate enumerates for it | error |
 //! | `would bind by provisioning` | no deployed provider, but a hostable artifact matches | warning (error with `strict_deployed`) |
 //! | `would bind after acceptance` | no deployed provider, and the hostable artifact that matches is **proposed** (D20) — it loads only into a shadow lane until a reviewer accepts it | warning (error with `strict_deployed`) |
 //! | `ungoverned edge` | the requirer declares no mandate and no rule while other units do | warning |
+//! | `node-decided edge` | an edge to a hosted component is admitted only by a rule, or a required mandate, that names the requirer's **unit** principal — and its provider decides a member's direct call as the calling **node** (`node:{sender}`), so the edge is neither passed nor claimed refused | warning |
+//! | `unissuable grant` | a rule admits a call only under a grant, and no declared rule admits anyone to `grant.issue` on its resource | warning |
 //! | `unranked ranking` | a ranking on an attribute no matching capability carries | warning |
 //! | `single provider` | a requirement with exactly one possible provider | warning |
 //!
@@ -122,9 +124,10 @@ pub struct CheckOptions {
     /// Run the **authority overlay** (W4): for every wired edge whose requirer has declared any
     /// authority vocabulary (a `[[mandate]]` or a `[[rule]]`), whether some declared rule could ever
     /// admit it — actor, operation and resource matching, and, where the rule requires a mandate
-    /// scope, a declared mandate held by the requirer's principal that enumerates the operation. It
-    /// does not evaluate policy; it finds edges that no declaration could ever authorise. On by
-    /// default; `--no-authority` turns it off.
+    /// scope, a declared mandate held by the requirer's principal that enumerates the operation. An
+    /// edge to a hosted component is read as its provider decides it: on [`hosted_call_shape`], for
+    /// the calling node. It does not evaluate policy; it finds edges that no declaration could ever
+    /// authorise — *could admit*, never *is admitted*. On by default; `--no-authority` turns it off.
     pub authority: bool,
     /// The revision to stamp on the document (the git commit of the units directory), if known.
     pub revision: Option<String>,
@@ -157,12 +160,31 @@ pub fn mandate_operation_form(operation: &str, resource: &str) -> String {
 /// skill) and `tools/call` on `tool:{name}` (an MCP tool). The authority overlay (W4) reasons over
 /// these; the JSON carries them on every edge (W6) so a consumer joining runtime records never
 /// re-derives them — and sees that the tool shape drops `ns`, which is why a tool-shaped
-/// observation can match more than one edge.
+/// observation can match more than one edge. A hosted component has a third, [`hosted_call_shape`].
 pub fn call_shapes(ns: &str, name: &str) -> [(String, String); 2] {
     [
         ("skill.invoke".to_string(), format!("skill:{ns}/{name}")),
         ("tools/call".to_string(), format!("tool:{name}")),
     ]
+}
+
+/// **The hosted shape** — the third call shape, for a capability a host serves from an installed component: the
+/// operation and resource an enforcing provider decides a member's direct call of it on, `cap.invoke` on
+/// `cap:{ns}/{name}` (`provider_enforcement::derive_call`; at the provider the resource carries `@{node}`, and
+/// `[authority]` qualifies a bare rule to its node). `None` in the `tool` namespace: a `tool/{name}` component is
+/// decided as the tool it is, the `tools/call` shape [`call_shapes`] already gives.
+///
+/// Separate from [`call_shapes`], whose two-shape return is a contract: an edge carries this one only where the
+/// declaration shows the provider is a hosted component (a `wasm-component` artifact description).
+pub fn hosted_call_shape(ns: &str, name: &str) -> Option<(String, String)> {
+    (ns != "tool").then(|| (crate::HOSTED_CAPABILITY_OPERATION.to_string(), format!("cap:{ns}/{name}")))
+}
+
+/// Is `provider` a component a host would serve — a `wasm-component` artifact description (the wasm host's serve
+/// loop answers its `cap.invoke/{ns}/{name}` kind)? A `blob` is bytes a node-local runtime consumes, and a unit's
+/// own `[[capability]]` or `[[serve]]` says nothing of how it is served, so neither is known to be one.
+fn is_hosted_component(artifacts: &[(String, ArtifactDescription)], provider: &Provider) -> bool {
+    matches!(provider, Provider::Artifact { artifact, .. } if artifacts.iter().any(|(name, a)| name == artifact && a.kind == "wasm-component"))
 }
 
 /// How serious a finding is: an `Error` makes the check exit 1; a `Warning` does not.
@@ -210,7 +232,9 @@ pub struct Edge {
     pub providers: Vec<Provider>,
     /// The call shapes this edge takes at a gateway ([`call_shapes`]), in the form a grant
     /// enumerates and an evidence record carries — the join to runtime records on the authority
-    /// side (W6). Always both; a consumer maps each through its own reviewed catalogue.
+    /// side (W6). Always both, first; a consumer maps each through its own reviewed catalogue. An
+    /// edge whose provider is a hosted component outside the `tool` namespace carries a third,
+    /// [`hosted_call_shape`] — the one the provider that hosts it decides (2026-11-18, additive).
     #[serde(default)]
     pub operations: Vec<CallShape>,
 }
@@ -691,6 +715,7 @@ pub fn check(units: &[Unit], artifacts: &[(String, ArtifactDescription)], opts: 
         for r in &u.config.requirements {
             let Ok(filter) = r.to_filter() else { continue };
             let providers = resolver.resolve(&u.name, &filter, "requirement", &mut findings);
+            let hosted = if providers.iter().any(|p| is_hosted_component(artifacts, p)) { hosted_call_shape(&r.ns, &r.name) } else { None };
             edges.push(Edge {
                 requirer:  u.name.clone(),
                 principal: u.config.principal.clone(),
@@ -700,6 +725,7 @@ pub fn check(units: &[Unit], artifacts: &[(String, ArtifactDescription)], opts: 
                 providers,
                 operations: call_shapes(&r.ns, &r.name)
                     .into_iter()
+                    .chain(hosted)
                     .map(|(operation, resource)| CallShape { operation, resource })
                     .collect(),
             });
@@ -865,8 +891,8 @@ pub fn check(units: &[Unit], artifacts: &[(String, ArtifactDescription)], opts: 
 
     // ── authority overlay (W4) ─────────────────────────────────────────────────────────
     // For an edge whose requirer has declared any authority vocabulary, some declared rule must be
-    // able to admit one of the call shapes the edge could take; a rule that requires a mandate
-    // scope needs a declared mandate, held by the requirer's principal, enumerating the operation.
+    // able to admit one of the call shapes the edge could take, for the actor its decider reads; a
+    // rule that requires a mandate scope needs a declared mandate enumerating the operation.
     if opts.authority {
         // An exposure rule (adopter-surface Y5) is never an allowance: it admits no edge and governs no unit — the
         // runtime's evaluator never loads one.
@@ -903,55 +929,121 @@ pub fn check(units: &[Unit], artifacts: &[(String, ArtifactDescription)], opts: 
                 });
                 continue;
             };
+            // The shapes this edge is read on. A deployed provider — a unit's own capability, a group — is called as
+            // a skill or a tool, for the requirer's unit principal: the two shapes, as before. A hosted component
+            // outside the `tool` namespace is decided by the provider that hosts it as `cap.invoke` on
+            // `cap:{ns}/{name}@{node}`, for the actor `node:{sender}` (`provider_enforcement::derive_call` and
+            // `check`): the hosted shape, read for the calling node. That provider never consults a skill or tool
+            // rule, so those two shapes admit nothing where every provider is hosted.
+            let hosted = if e.providers.iter().any(|p| is_hosted_component(artifacts, p)) { hosted_call_shape(&e.ns, &e.name) } else { None };
+            let deployed = hosted.is_none() || !e.providers.iter().all(|p| is_hosted_component(artifacts, p));
+            let shapes = call_shapes(&e.ns, &e.name).into_iter().map(|(o, r)| (o, r, false)).chain(hosted.clone().map(|(o, r)| (o, r, true)));
             let mut admitted = false;
             let mut nearest: Option<String> = None;
-            for (operation, resource) in call_shapes(&e.ns, &e.name) {
+            // The reading that would admit a hosted edge if the provider decided the unit, and it decides the node.
+            let mut as_unit: Option<String> = None;
+            // A skill or tool rule written for this edge that the hosting provider does not consult.
+            let mut unread: Option<String> = None;
+            'shapes: for (operation, resource, at_node) in shapes {
                 let enumerated = mandate_operation_form(&operation, &resource);
                 for r in &rules {
-                    let actor_ok = r.actor == "*" || r.actor == principal;
                     let op_ok = r.operation == "*" || r.operation == operation;
-                    let res_ok = r.resource == "*" || r.resource == resource;
-                    if !(actor_ok && op_ok && res_ok) {
+                    // The provider sees the hosted resource at itself, `cap:{ns}/{name}@{node}`, and matches a rule
+                    // exactly; `[authority]` also loads a bare rule qualified to its node. The checker knows no
+                    // address, so a rule written bare or for some node is one that could name the provider.
+                    let res_ok = r.resource == "*" || r.resource == resource || (at_node && r.resource.split('@').next() == Some(resource.as_str()));
+                    if !(op_ok && res_ok) {
                         continue;
                     }
-                    match &r.requires_mandate {
-                        // A rule requiring a grant admits the edge under one: the grant is issued at run time, not
-                        // declared (adopter-surface X3); whether anyone may issue it is the pass below.
-                        None => {
-                            admitted = true;
+                    if !at_node && !deployed {
+                        if unread.is_none() && r.operation != "*" && (r.actor == "*" || r.actor == principal) {
+                            unread = Some(format!("{operation} on {resource}"));
                         }
-                        Some(scope) => {
-                            let held = mandates.iter().any(|m| m.holder == principal && &m.scope == scope && m.permits(&enumerated));
-                            if held {
-                                admitted = true;
-                            } else if nearest.is_none() {
-                                nearest = Some(format!(
-                                    "a rule admits {operation} on {resource} but requires mandate scope {scope:?}, and no declared mandate held by {principal:?} in that scope enumerates {enumerated:?}"
-                                ));
-                            }
+                        continue;
+                    }
+                    // Who the decider reads: the requirer's unit principal at a skill or tool door; the calling node
+                    // at a hosted component's — where a rule naming the unit principal is noted, never passed.
+                    let (actor_ok, actor_unit) = if at_node {
+                        (r.actor == "*" || r.actor.starts_with("node:"), r.actor == principal)
+                    } else {
+                        (r.actor == "*" || r.actor == principal, false)
+                    };
+                    if !(actor_ok || actor_unit) {
+                        continue;
+                    }
+                    // A rule requiring a grant admits the edge under one: the grant is issued at run time, not
+                    // declared (adopter-surface X3); whether anyone may issue it is the pass below. A rule requiring
+                    // a mandate scope needs a declared mandate in it that enumerates the operation — held by the
+                    // requirer's principal, or, for a hosted component, by a node (`rpc_call_with_mandate` presents
+                    // a member's mandate as `node:{self}`).
+                    let held_by = |who: &dyn Fn(&str) -> bool, scope: &String| mandates.iter().any(|m| who(&m.holder) && &m.scope == scope && m.permits(&enumerated));
+                    let (mandate_ok, mandate_unit) = match &r.requires_mandate {
+                        None => (true, false),
+                        Some(scope) if at_node => (held_by(&|h| h.starts_with("node:"), scope), held_by(&|h| h == principal, scope)),
+                        Some(scope) => (held_by(&|h| h == principal, scope), false),
+                    };
+                    if actor_ok && mandate_ok {
+                        admitted = true;
+                        break 'shapes;
+                    }
+                    if mandate_ok || mandate_unit {
+                        if as_unit.is_none() {
+                            as_unit = Some(if actor_unit {
+                                format!("the rule for {operation} on {} names {principal:?} as its actor", r.resource)
+                            } else {
+                                format!(
+                                    "the rule for {operation} on {} requires mandate scope {:?}, and the declared mandate that enumerates {enumerated:?} is held by {principal:?}",
+                                    r.resource,
+                                    r.requires_mandate.as_deref().unwrap_or_default()
+                                )
+                            });
                         }
+                    } else if let Some(scope) = &r.requires_mandate
+                        && nearest.is_none()
+                    {
+                        nearest = Some(if at_node {
+                            format!(
+                                "a rule admits {operation} on {resource} but requires mandate scope {scope:?}, and no declared mandate held by a `node:` principal (the calling node) in that scope enumerates {enumerated:?}"
+                            )
+                        } else {
+                            format!(
+                                "a rule admits {operation} on {resource} but requires mandate scope {scope:?}, and no declared mandate held by {principal:?} in that scope enumerates {enumerated:?}"
+                            )
+                        });
                     }
-                    if admitted {
-                        break;
-                    }
-                }
-                if admitted {
-                    break;
                 }
             }
-            if !admitted {
+            if admitted {
+                continue;
+            }
+            if let (Some(why), Some((operation, resource))) = (&as_unit, &hosted) {
+                // Not passed, and not claimed refused: the checker knows no placement and no node's rules. What it
+                // knows is which principal the decider reads, and that this declaration names another.
                 findings.push(Finding {
-                    severity: Severity::Error,
-                    kind:     "unauthorisable edge".into(),
+                    severity: Severity::Warning,
+                    kind:     "node-decided edge".into(),
                     unit:     Some(e.requirer.clone()),
                     message:  format!(
-                        "requirement {}/{}: {}",
-                        e.ns,
-                        e.name,
-                        nearest.unwrap_or_else(|| format!("no declared rule admits {principal:?} calling it as a skill or a tool"))
+                        "requirement {}/{}: {why}, and the provider that hosts it decides a member's direct call as {operation} on {resource}@{{node}} for the actor node:{{sender}} — the calling node, not the unit it runs — so that is not a reading the provider makes; name the calling node (`node:<id>`) or \"*\"",
+                        e.ns, e.name
                     ),
                 });
+                continue;
             }
+            let none = match &hosted {
+                Some((operation, resource)) => format!(
+                    "no declared rule admits a calling node to {operation} on {resource} — what the provider that hosts it decides a member's direct call as, for the actor node:{{sender}} (a rule's actor is \"*\" or a `node:` principal){}{}",
+                    if deployed { format!(", and none admits {principal:?} calling it as a skill or a tool") } else { String::new() },
+                    unread.map(|u| format!("; that provider does not consult the rule on {u}")).unwrap_or_default()
+                ),
+                None => format!("no declared rule admits {principal:?} calling it as a skill or a tool"),
+            };
+            findings.push(Finding {
+                severity: Severity::Error,
+                kind:     "unauthorisable edge".into(),
+                unit:     Some(e.requirer.clone()),
+                message:  format!("requirement {}/{}: {}", e.ns, e.name, nearest.unwrap_or(none)),
+            });
         }
         // A rule that requires a grant needs someone the rules admit to issue one (`grant.issue` on its resource,
         // or on `*`); without that the call waits for a grant nobody may give and is refused on silence — the
@@ -1448,6 +1540,156 @@ mod tests {
         for (op, res) in [("tools/call", "tool:ledger@depot-node"), ("skill.invoke", "skill:depot/dispatch@x"), ("tools/call", "tool:bare")] {
             assert_eq!(mandate_operation_form(op, res), crate::mandate_operation(op, res));
         }
+    }
+
+    /// The route optimizer as a hosted component, a unit that can host it, and a worker that requires it under
+    /// `authority` — the co-op fixture's shape (`tests/fixtures/units/coop` over `artifacts/route-optimizer.toml`).
+    fn hosted(ns: &str, authority: &str) -> Report {
+        let art = (
+            "optimizer".to_string(),
+            ArtifactDescription::from_toml_str(&format!("kind=\"wasm-component\"\n[provides]\nns=\"{ns}\"\nname=\"optimize\"\n")).unwrap(),
+        );
+        let host = unit("depot", "principal=\"depot\"\n[hosts]\nkinds=[\"wasm-component\"]\naccept_unsigned=true\n");
+        let worker = unit("worker", &format!("principal=\"worker\"\n[[requirement]]\nns=\"{ns}\"\nname=\"optimize\"\n{authority}"));
+        check(&[host, worker], std::slice::from_ref(&art), &CheckOptions::default())
+    }
+
+    fn has(r: &Report, kind: &str) -> bool {
+        r.findings.iter().any(|f| f.kind == kind)
+    }
+
+    /// **The third call shape: a `cap.invoke` rule admits an edge to a hosted component** (the false red of
+    /// `docs/operations/what-is-proven.md#wire-check-does-not-know-the-hosted-capability-shape`). An enforcing provider
+    /// decides a member's direct call of a hosted component outside the `tool` namespace as `cap.invoke` on
+    /// `cap:{ns}/{name}@{node}` for the actor `node:{sender}` (`provider_enforcement::derive_call`), so a rule on
+    /// that operation and resource whose actor is `*` or a `node:` principal admits the edge — written bare, as
+    /// `[authority]` qualifies it to its node, or already qualified to a node. The edge's document carries the shape.
+    /// Seen failing first: on the code before this change (two shapes, the requirer's unit principal as the actor)
+    /// the first rule below was reported `unauthorisable edge`, exit 1.
+    #[test]
+    fn a_cap_invoke_rule_for_any_node_admits_an_edge_to_a_hosted_component() {
+        for (actor, resource) in [("*", "cap:route/optimize"), ("node:10.0.0.7:7946", "cap:route/optimize"), ("*", "cap:route/optimize@10.0.0.2:7946"), ("*", "*")] {
+            let r = hosted("route", &format!("[[rule]]\nactor=\"{actor}\"\noperation=\"cap.invoke\"\nresource=\"{resource}\"\n"));
+            assert_eq!(r.exit_code(), 0, "{actor} on {resource}: {}", r.render_text());
+            assert!(!has(&r, "unauthorisable edge") && !has(&r, "node-decided edge"), "{actor} on {resource}: {}", r.render_text());
+            let shapes: Vec<(&str, &str)> = r.edges[0].operations.iter().map(|s| (s.operation.as_str(), s.resource.as_str())).collect();
+            assert_eq!(
+                shapes,
+                vec![("skill.invoke", "skill:route/optimize"), ("tools/call", "tool:optimize"), ("cap.invoke", "cap:route/optimize")],
+                "the two shapes every edge carries, then the hosted one"
+            );
+        }
+        // Another capability's rule, or another operation's, admits nothing here.
+        for rule in ["actor=\"*\"\noperation=\"cap.invoke\"\nresource=\"cap:route/other\"\n", "actor=\"*\"\noperation=\"llm.invoke\"\nresource=\"cap:route/optimize\"\n"] {
+            let r = hosted("route", &format!("[[rule]]\n{rule}"));
+            assert!(has(&r, "unauthorisable edge"), "{rule}: {}", r.render_text());
+        }
+        // A mandate the rule requires is the calling node's to present (`rpc_call_with_mandate` frames `node:{self}`):
+        // one a `node:` principal holds admits; one nobody holds does not.
+        let rule = "[[rule]]\nactor=\"*\"\noperation=\"cap.invoke\"\nresource=\"cap:route/optimize\"\nrequires_mandate=\"routing\"\n";
+        let held = hosted("route", &format!("{rule}[[mandate]]\nholder=\"node:10.0.0.7:7946\"\nscope=\"routing\"\noperations=[\"cap.invoke:cap:route/optimize\"]\n"));
+        assert!(held.exit_code() == 0 && !has(&held, "node-decided edge"), "{}", held.render_text());
+        let unheld = hosted("route", rule);
+        assert!(has(&unheld, "unauthorisable edge"), "{}", unheld.render_text());
+        assert!(unheld.render_text().contains("requires mandate scope \"routing\""), "{}", unheld.render_text());
+    }
+
+    /// **A skill or tool rule does not admit an edge to a hosted component** (the false green of the same ledger
+    /// row; the co-op fixture's `auditor.toml` as it stood). The provider that hosts `route/optimize` decides
+    /// `cap.invoke` and never consults a `skill.invoke` or `tools/call` rule, so an edge only such a rule would
+    /// admit is `unauthorisable edge`, and the finding says which rule the provider does not read. Seen failing
+    /// first: on the code before this change the declaration below — the fixture's own rule and mandate — was
+    /// reported clean, exit 0.
+    #[test]
+    fn a_skill_rule_does_not_admit_an_edge_to_a_hosted_component() {
+        let skill = concat!(
+            "[[rule]]\nactor=\"worker\"\noperation=\"skill.invoke\"\nresource=\"skill:route/optimize\"\nrequires_mandate=\"routing\"\n",
+            "[[mandate]]\nholder=\"worker\"\nscope=\"routing\"\noperations=[\"skill.invoke:skill:route/optimize\"]\n",
+        );
+        let r = hosted("route", skill);
+        assert_eq!(r.exit_code(), 1, "FALSE GREEN: {}", r.render_text());
+        let finding = r.findings.iter().find(|f| f.kind == "unauthorisable edge").expect("the edge is named");
+        assert_eq!(finding.unit.as_deref(), Some("worker"));
+        assert!(finding.message.contains("cap.invoke on cap:route/optimize"), "{}", finding.message);
+        assert!(finding.message.contains("skill.invoke on skill:route/optimize") && finding.message.contains("does not consult"), "{}", finding.message);
+        let tool = hosted("route", "[[rule]]\nactor=\"*\"\noperation=\"tools/call\"\nresource=\"tool:optimize\"\n");
+        assert!(has(&tool, "unauthorisable edge"), "FALSE GREEN: {}", tool.render_text());
+
+        // What is unchanged. A deployed provider is read as a skill or a tool, as before: the same rule admits it,
+        // and its edge carries the two shapes.
+        let deployed = unit("optimizer", "[[capability]]\nns=\"route\"\nname=\"optimize\"\n");
+        let worker = unit("worker", &format!("principal=\"worker\"\n[[requirement]]\nns=\"route\"\nname=\"optimize\"\n{skill}"));
+        let r = check(&[deployed, worker], &[], &CheckOptions::default());
+        assert!(r.exit_code() == 0 && !has(&r, "unauthorisable edge"), "{}", r.render_text());
+        assert_eq!(r.edges[0].operations.len(), 2);
+        // A hosted component in the `tool` namespace is decided as the tool it is (`tools/call` on `tool:{name}`):
+        // the tool rule admits it, a `cap.invoke` rule does not, and the edge carries the two shapes.
+        let r = hosted("tool", "[[rule]]\nactor=\"worker\"\noperation=\"tools/call\"\nresource=\"tool:optimize\"\n");
+        assert!(r.exit_code() == 0 && !has(&r, "unauthorisable edge") && !has(&r, "node-decided edge"), "{}", r.render_text());
+        assert_eq!(r.edges[0].operations.len(), 2);
+        let r = hosted("tool", "[[rule]]\nactor=\"*\"\noperation=\"cap.invoke\"\nresource=\"cap:tool/optimize\"\n");
+        assert!(has(&r, "unauthorisable edge"), "{}", r.render_text());
+    }
+
+    /// **A rule that names the unit where the provider reads the node is a warning, never a silent pass.** The
+    /// provider decides a member's direct call as `node:{sender}` — the calling node, not the unit it runs — so a
+    /// `cap.invoke` rule whose actor is the requirer's unit principal, or one whose required mandate that principal
+    /// holds, admits the edge only if the provider read the unit: `node-decided edge`, a warning, saying so. It is
+    /// not an error — the checker knows no placement and no node's rules, and does not claim the refusal — and it is
+    /// not a pass. Seen failing first: on the code before this change the first declaration was `unauthorisable
+    /// edge` with no word about the actor, and with the actor check planted to accept the unit principal for the
+    /// hosted shape it passed with no finding.
+    #[test]
+    fn a_unit_principal_rule_on_a_hosted_edge_warns_that_the_provider_decides_the_node() {
+        let as_unit = hosted("route", "[[rule]]\nactor=\"worker\"\noperation=\"cap.invoke\"\nresource=\"cap:route/optimize\"\n");
+        assert_eq!(as_unit.exit_code(), 0, "a warning: {}", as_unit.render_text());
+        assert!(!has(&as_unit, "unauthorisable edge"), "{}", as_unit.render_text());
+        let w = as_unit.findings.iter().find(|f| f.kind == "node-decided edge").unwrap_or_else(|| panic!("PASSED SILENTLY: {}", as_unit.render_text()));
+        assert_eq!((w.severity, w.unit.as_deref()), (Severity::Warning, Some("worker")));
+        assert!(w.message.contains("requirement route/optimize") && w.message.contains("node:{sender}") && w.message.contains("\"worker\""), "{}", w.message);
+
+        // The same for a mandate: the rule is for any node, the mandate it requires is held by the unit principal.
+        let unit_held = hosted(
+            "route",
+            concat!(
+                "[[rule]]\nactor=\"*\"\noperation=\"cap.invoke\"\nresource=\"cap:route/optimize\"\nrequires_mandate=\"routing\"\n",
+                "[[mandate]]\nholder=\"worker\"\nscope=\"routing\"\noperations=[\"cap.invoke:cap:route/optimize\"]\n",
+            ),
+        );
+        assert!(unit_held.exit_code() == 0 && has(&unit_held, "node-decided edge") && !has(&unit_held, "unauthorisable edge"), "{}", unit_held.render_text());
+
+        // A rule that admits any node beside it: the edge passes, and nothing warns.
+        let both = hosted(
+            "route",
+            concat!(
+                "[[rule]]\nactor=\"worker\"\noperation=\"cap.invoke\"\nresource=\"cap:route/optimize\"\n",
+                "[[rule]]\nactor=\"*\"\noperation=\"cap.invoke\"\nresource=\"cap:route/optimize\"\n",
+            ),
+        );
+        assert!(both.exit_code() == 0 && !has(&both, "node-decided edge"), "{}", both.render_text());
+        // Another unit's principal is nobody's reading: an error, as any rule that names someone else.
+        let other = hosted("route", "[[rule]]\nactor=\"auditor\"\noperation=\"cap.invoke\"\nresource=\"cap:route/optimize\"\n");
+        assert!(has(&other, "unauthorisable edge") && !has(&other, "node-decided edge"), "{}", other.render_text());
+    }
+
+    /// The hosted shape is the provider's own derivation, not a restatement that can drift: for a kind outside the
+    /// `tool` namespace `derive_call` answers the shape's operation and its resource at the node; for the `tool`
+    /// namespace there is no hosted shape, and `derive_call` answers the tool shape every edge already carries.
+    /// Seen to bite: with `hosted_call_shape`'s resource planted to `cap:{name}` the first assertion failed.
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    #[test]
+    fn the_hosted_shape_is_what_the_provider_derives() {
+        let derive = |ns: &str, name: &str| {
+            let kind = format!("{}{ns}/{name}", crate::HOSTED_CAPABILITY_KIND_PREFIX);
+            let (operation, resource, _) = crate::agent::provider_enforcement::derive_call(&kind, b"{}", None, "10.0.0.2:7946").unwrap_or_else(|_| panic!("{kind} derives"));
+            (operation, resource)
+        };
+        let (operation, resource) = hosted_call_shape("route", "optimize").expect("outside the tool namespace");
+        assert_eq!(derive("route", "optimize"), (operation.clone(), format!("{resource}@10.0.0.2:7946")));
+        assert_eq!(operation, crate::HOSTED_CAPABILITY_OPERATION);
+        assert_eq!(hosted_call_shape("tool", "optimize"), None);
+        let [_, (tool_op, tool_res)] = call_shapes("tool", "optimize");
+        assert_eq!(derive("tool", "optimize"), (tool_op, format!("{tool_res}@10.0.0.2:7946")));
     }
 
     #[test]

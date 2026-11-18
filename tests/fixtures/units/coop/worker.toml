@@ -24,8 +24,9 @@ name = "done"
 role = "produces"
 
 # The authority vocabulary this unit expects: what it may call, as a grant enumerates it
-# (`{operation}:{resource}` — the gateway's own form), and the rule that admits it.
+# (`{operation}:{resource}` — the gateway's own form), and the rule that admits it. The optimizer is not
+# here: it is a hosted component, admitted by its hosts' own rule for the calling node (`depot-a.toml`).
 [[mandate]]
 holder     = "worker"
 scope      = "routing"
-operations = ["skill.invoke:skill:route/optimize", "skill.invoke:skill:depot/intake"]
+operations = ["skill.invoke:skill:depot/intake"]

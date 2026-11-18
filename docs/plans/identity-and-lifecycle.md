@@ -3278,3 +3278,29 @@ Items found while building a row that the row does not own. Each names its home,
   - `call_mandate_ttl_secs` (at most `GRANT_TTL_CAP_SECS`) is shorter than the succession window.
 
   **Closes** when I2's row records both, on I2's side.
+
+- **O9 · The provider decides on a unit principal the node can prove it speaks for** *(**not built; not buildable
+  until the maintainer decides it**; recorded 2026-11-18 when `wire-check` learned the hosted-capability shape, where
+  the maintainer chose the check's side (A) for this release and this row (B) as a follow-up)*.
+  - **Today.** A provider with enforcement on decides a member's direct call — a hosted capability's
+    `cap.invoke/{ns}/{name}`, or any protected kind sent unframed — for the actor `node:{sender}`
+    (`provider_enforcement::check`), and a member's own mandate travels in an envelope that names `node:{self}`
+    (`rpc_call_with_mandate`). A unit file's `principal` is not that actor: a `[[rule]]` whose actor is a unit's
+    principal admits nothing at that door, and `wire-check` says so (`node-decided edge`,
+    `docs/operations/what-is-proven.md#wire-check-reads-a-hosted-edge-as-its-provider-decides`). So a hosted
+    capability can be opened to a node or to every member, and not to "the worker unit, wherever it runs".
+  - **Who promises what (Promise Theory).** Today the calling node promises its own identity — its key signs its
+    frames and its certificate names it — and the provider assesses that promise itself. A unit principal on a
+    member's call would be a statement about *another* agent: which declared unit the node runs. A provider that
+    took the node's word for it would be trusting a claim, not assessing a promise, and any member could make it.
+    (B) therefore needs the node to **prove** that it speaks for the unit — a binding the unit's authority signed
+    and the provider verifies for itself (who signs it, what it binds to the node's key, how it lapses and is
+    revoked, and what a provider does when it cannot assess it: fail closed) — rather than the provider trusting
+    what a node says about a unit.
+  - **Decisions it needs before it is buildable:** who may bind a unit principal to a node key (the CA at issue,
+    an operator's signed record under the owner-signed rule, or a grant), where the binding lives and how a
+    provider learns its revocation, whether a rule may then name a unit principal at every provider door or at the
+    hosted-capability door alone, and what `[authority]` and `wire-check` read once it exists. None is made.
+  - **Does not:** change what a node's identity is, or let a rule name a unit on the strength of a declaration.
+  - **Home:** this plan, after wave 1b; it meets I7 (the developer's identity) and CR29 (a gateway door for a
+    hosted capability outside the `tool` namespace), which decide the same call for other callers.

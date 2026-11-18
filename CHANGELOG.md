@@ -19,6 +19,36 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the log before it launches, the node appends, and the loop reads once. A project scaffolded by 2.40.0 keeps the old
   `fleet.sh`: replace its `start)` case with this release's (`templates/two-domains/fleet.sh`), or remove
   `data/<node>.log` before a restart.
+- **`wire-check` reads an edge to a hosted component as its provider decides it** (the *not built* row
+  `what-is-proven.md#wire-check-does-not-know-the-hosted-capability-shape`, closed; `deprecations.md` §122). Since
+  §108 an enforcing provider decides a member's direct call of a hosted component outside the `tool` namespace as
+  `cap.invoke` on `cap:{ns}/{name}@{node}`, for the actor `node:{sender}`. The check's authority overlay tried only
+  a skill shape and a tool shape, for the requirer's unit principal, so for such an edge it was wrong both ways: a
+  declaration with the `cap.invoke` rule the provider reads failed (`unauthorisable edge`), and one authorised by a
+  `skill.invoke` rule the provider never consults passed. The repository's co-op fixture was such a false green.
+  For an edge whose provider is a `wasm-component` artifact (`--library`) the overlay now tries the third shape,
+  `cap.invoke` on `cap:{ns}/{name}`, for the calling node:
+  - a rule whose actor is `"*"` or a `node:` principal passes the edge (with `requires_mandate`, a declared
+    mandate a `node:` principal holds);
+  - **a `skill.invoke` or `tools/call` rule no longer passes it** — `unauthorisable edge`, exit 1, where the check
+    was green; `mycelium declare` and `mycelium test --faults` refuse such a declaration;
+  - a rule or mandate that names the requirer's **unit** principal is a new warning, `node-decided edge`: the
+    provider decides the node, so the edge is not passed silently, and the checker, knowing no placement, does not
+    claim the refusal.
+  - **The JSON document** (`mycelium.design/declaration/1`, unchanged): such an edge's `operations` carries a third
+    entry after the two every edge has, and `findings[].kind` gains `node-decided edge`. Additive: nothing is
+    renamed or removed. The pinned `declaration.schema.json` lists `cap.invoke` among a call shape's operations, so
+    a reader validating against an older copy of the pin refuses such an edge. `wire_check::hosted_call_shape` is
+    new; `call_shapes` is unchanged.
+  - **The co-op fixture** (`tests/fixtures/units/coop`): the optimizer's rule is `cap.invoke` on
+    `cap:route/optimize` for any node, declared in the two depots that host it; a test starts a provider from
+    `[authority]` over the fixture and shows the call run under that rule and refused under the old one.
+  - **Not built:** a provider that decides on a unit principal the node can prove it speaks for
+    (identity-and-lifecycle §9, O9). The check still knows no placement, reads every unit's rules where
+    `[authority]` loads one unit's, and reads a component declared as a plain `[[capability]]` as a skill or a tool.
+  - **Check:** `mycelium wire-check <units-dir> --library <artifacts-dir>` exits 0 and names no `unauthorisable
+    edge` or `node-decided edge`; where it does, give the hosted capability a `[[rule]]` with `actor = "*"` (or
+    `"node:<ip:port>"`), `operation = "cap.invoke"`, `resource = "cap:<ns>/<name>"` in the unit that hosts it.
 - **An actor's second call is no longer refused while the evidence journal is being read** (found as a CI flake in
   `the_shadow_profile_counts_and_holds_nothing`). On a node whose evaluator has a limited rule (`at_most`), every
   decision asks for the actor's history. Until the journal had been read into the history index — and for good if the

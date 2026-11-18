@@ -274,6 +274,21 @@ authority pass admits a grant-required rule at the edge (the grant is issued at 
 when no rule admits anyone to `grant.issue` on it. `RuleDecl` and `MandateDecl` are `deny_unknown_fields` now — the
 other section tables are not (stated in §65).
 
+**The overlay's hosted shape (2026-11-18; `deprecations.md` §122).** `wire_check::check` reads an edge by what the
+declaration shows of its provider. A deployed provider (a unit's `[[capability]]`, a group) keeps the two shapes of
+`call_shapes`, matched for the requirer's unit principal. An edge whose provider is a `wasm-component` artifact
+outside the `tool` namespace gets `hosted_call_shape` — `cap.invoke` on `cap:{ns}/{name}`, what
+`provider_enforcement::derive_call` answers for the kind, held equal by `the_hosted_shape_is_what_the_provider_derives`
+— and only that shape, because the provider that hosts it never consults a skill or tool rule. Its actor is the
+calling **node** (`provider_enforcement::check`: an unframed call is `node:{sender}`; `rpc_call_with_mandate` frames
+`node:{self}`), so a `*` or `node:` rule passes, a rule or mandate naming the unit principal is the warning
+`node-decided edge`, and anything else is `unauthorisable edge`. The reusable rule: **a design-time check predicts a
+decision another agent makes, so it reads the shape and the actor from that agent's own derivation and says *could
+admit*; where the declaration cannot show what the decider will see (placement, which unit's rules it loads) it
+warns or states the bound, and never passes on a reading the decider does not make.** The co-op fixture's rule for
+the optimizer lives in the depots that host it for the second of those reasons: `[authority]` loads its node's own
+unit's rules. The provider deciding on a unit principal is identity-and-lifecycle §9, O9 — *not built*.
+
 ## Grants, the third PR (adopter-surface X3, 2026-10-25)
 
 The surfaces. `gw_grants_stream` (`src/agent/http/grants.rs`): one task per client, woken by `subscribe_prefix("grant/")`,

@@ -437,6 +437,121 @@ fn a_bare_cap_resource_is_qualified_to_this_node() {
     assert_ne!(decide(format!("cap:route/other@{id}")), crate::Verdict::Permit, "nor another capability");
 }
 
+/// The co-op fixture's rule for `route/optimize` as it stood until 2026-11-18 (`tests/fixtures/units/coop/auditor.toml:11`).
+const COOP_OLD_RULE: &str = "[[rule]]\nactor            = \"worker\"\noperation        = \"skill.invoke\"\nresource         = \"skill:route/optimize\"\nrequires_mandate = \"routing\"\n";
+/// A `cap.invoke` rule that names the requirer's unit principal, where the provider reads the calling node.
+const COOP_UNIT_RULE: &str = "[[rule]]\nactor     = \"worker\"\noperation = \"cap.invoke\"\nresource  = \"cap:route/optimize\"\n";
+
+/// **`wire-check`'s verdict for the co-op's hosted edge is the provider's decision, in both directions**
+/// (`docs/operations/what-is-proven.md#wire-check-does-not-know-the-hosted-capability-shape`, closed 2026-11-18).
+///
+/// The provider is a node built from `[authority]` alone over the co-op declaration, as the unit `depot-a` — a unit
+/// that hosts `route/optimize` — with a receiver where the component's serve loop stands (it reads the same
+/// `rpc_rx`). The call is a member's direct `cap.invoke/route/optimize`, unframed, so the provider decides it as
+/// `node:{sender}`. Three declarations, and for each the check's reading beside what the receiver saw:
+///
+/// 1. **the fixture as it is** (`depot-a.toml`'s rule: any node, `cap.invoke`, `cap:route/optimize`) — the check
+///    passes the edge with no finding, and the call runs;
+/// 2. **the fixture's rule as it stood** (`skill.invoke` on `skill:route/optimize` for `worker`, placed in the
+///    provider's own unit, the one place `[authority]` would load it from) — the check reports `unauthorisable
+///    edge`, and the provider refuses: the receiver sees nothing;
+/// 3. **a `cap.invoke` rule naming the unit principal `worker`** — the check warns `node-decided edge` and does not
+///    pass it clean, and the provider refuses.
+///
+/// Seen failing first: on `wire_check::check` before this change, (1) was `unauthorisable edge` for a call the
+/// provider ran — the false red, this test red at its first reading; the same overlay read (2)'s declaration clean,
+/// exit 0, in `the_coops_hosted_edge_is_wired_by_a_rule_its_provider_reads` — the false green. And with the hosted
+/// shape's actor check planted to accept the unit principal, (3) was passed with no finding for a call the provider
+/// refused. The provider's half held throughout: it is the canon here.
+///
+/// One node is the provider and the caller, as in `hosted_capability_door_tests`; a second member's frame over a
+/// real connection is not in this suite. Every call is bounded (20 s), so a failure is a named assertion.
+#[tokio::test]
+async fn the_coop_fixtures_hosted_edge_is_decided_at_the_provider_as_wire_check_reads_it() {
+    use crate::wire_check::{check, ArtifactDescription, CheckOptions, Report};
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/units/coop");
+    let library = vec![(
+        "route-optimizer".to_string(),
+        ArtifactDescription::from_toml_str(include_str!("../../tests/fixtures/units/artifacts/route-optimizer.toml")).expect("the fixture's artifact"),
+    )];
+    let kind = format!("{}route/optimize", crate::HOSTED_CAPABILITY_KIND_PREFIX);
+
+    // The fixture's files with depot-a's and depot-b's rule replaced: the same deployment under another rule.
+    let with_rule = |tag: &str, rule: &str| -> PathBuf {
+        let dir = scratch(tag);
+        let units = dir.join("units");
+        std::fs::create_dir_all(&units).unwrap();
+        for entry in std::fs::read_dir(&fixture).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_none_or(|x| x != "toml") {
+                continue;
+            }
+            let mut text = std::fs::read_to_string(&path).unwrap();
+            if let Some(at) = text.find("[[rule]]").filter(|_| text.contains("cap:route/optimize")) {
+                text.truncate(at);
+                text.push_str(rule);
+            }
+            std::fs::write(units.join(path.file_name().unwrap()), text).unwrap();
+        }
+        units
+    };
+
+    // What the check says of the worker's edge to `route/optimize`: (refused, warned as decided for the node).
+    let reads = |declarations: &Path| -> (bool, bool, Report) {
+        let r = check(&crate::faults::load_units(declarations).expect("the units load"), &library, &CheckOptions::default());
+        let of = |kind: &str| r.findings.iter().any(|f| f.kind == kind && f.unit.as_deref() == Some("worker") && f.message.contains("route/optimize"));
+        (of("unauthorisable edge"), of("node-decided edge"), r)
+    };
+
+    // What the provider does with a member's direct call: `true` when the receiver was handed it.
+    let decides = |tag: &'static str, declarations: PathBuf| {
+        let kind = kind.clone();
+        async move {
+            let dir = scratch(tag);
+            let (id, cfg) = config(&dir, alloc_port(), Some(authority(&dir, declarations, "depot-a")));
+            let a = Arc::new(GossipAgent::new(id, cfg));
+            a.start().await.expect("the provider starts from the co-op declaration, as depot-a");
+            let ran = Arc::new(AtomicUsize::new(0));
+            let (svc, seen, k) = (Arc::clone(&a), Arc::clone(&ran), kind.clone());
+            let mut rx = a.service().rpc_rx(kind.clone());
+            let serve = tokio::spawn(async move {
+                while let Some(req) = rx.recv().await {
+                    seen.fetch_add(1, Ordering::SeqCst);
+                    svc.service().rpc_respond(&req, serde_json::json!({ "ran": k }).to_string().into_bytes());
+                }
+            });
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            let reply = a.service().rpc_call(a.node_id().clone(), kind.clone(), br#"{"stops": 3}"#.to_vec(), Duration::from_secs(20)).await.unwrap_or_else(|e| panic!("{tag}: no answer within 20 s: {e:?}"));
+            let reply: serde_json::Value = serde_json::from_slice(&reply).unwrap_or_default();
+            let ran = ran.load(Ordering::SeqCst);
+            assert_eq!(ran == 1, reply["ran"] == kind.as_str(), "{tag}: the answer and the receiver agree: {reply}");
+            assert!(ran == 1 || reply["reason"].as_str().is_some_and(|r| !r.is_empty()), "{tag}: a call that did not run was refused with a reason: {reply}");
+            serve.abort();
+            a.shutdown().await;
+            ran == 1
+        }
+    };
+
+    // 1. The fixture as it is.
+    let (refused, warned, r) = reads(&fixture);
+    assert!(!refused && !warned, "FALSE RED: the fixture's rule is one the provider admits:\n{}", r.render_text());
+    assert_eq!(r.exit_code(), 0, "{}", r.render_text());
+    assert!(decides("coop-now", fixture.clone()).await, "the provider runs the call the fixture's rule admits");
+
+    // 2. The rule as it stood.
+    let old = with_rule("coop-old-units", COOP_OLD_RULE);
+    assert!(std::fs::read_to_string(old.join("depot-a.toml")).unwrap().contains("skill:route/optimize"), "plant: the old rule is in the provider's own unit");
+    let (refused, _, r) = reads(&old);
+    assert!(refused && r.exit_code() == 1, "FALSE GREEN: the provider refuses this edge:\n{}", r.render_text());
+    assert!(!decides("coop-old", old).await, "the provider never consults a skill.invoke rule for a hosted component");
+
+    // 3. A cap.invoke rule that names the unit.
+    let as_unit = with_rule("coop-unit-units", COOP_UNIT_RULE);
+    let (refused, warned, r) = reads(&as_unit);
+    assert!(warned && !refused, "PASSED SILENTLY, or refused outright: the provider decides the calling node:\n{}", r.render_text());
+    assert!(!decides("coop-unit", as_unit).await, "the provider decides node:{{sender}}, which a rule for the unit principal does not name");
+}
+
 /// **The binary's configuration path, over the scaffold** (#733's review, the scaffold): the scaffold's `node.toml`
 /// with a gateway, its tokens, `[persistence]` and `[authority]` appended, loaded by `GossipConfig::load_from_file` and
 /// `validate()` as `mycelium -c` loads it, then started — the call no rule permits is refused at the gateway door and

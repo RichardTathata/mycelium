@@ -160,6 +160,51 @@ fn the_unauthorised_fixture_names_the_edge_no_declaration_could_authorise() {
     assert_eq!(r.exit_code(), 0, "{}", r.render_text());
 }
 
+/// **The co-op's hosted edge is wired by a rule its provider reads** (2026-11-18; the false green of
+/// `docs/operations/what-is-proven.md#wire-check-does-not-know-the-hosted-capability-shape`). `route/optimize` is
+/// provided only by a hosted component, which an enforcing provider decides as `cap.invoke` on
+/// `cap:route/optimize@{node}` for the calling node. The fixture as it stood until this change authorised that
+/// edge with `skill.invoke` on `skill:route/optimize` for the unit principal `worker` (`auditor.toml:11`, with
+/// `worker.toml`'s mandate enumerating it) — a rule the provider never consults — and the check read it green. It
+/// is now `unauthorisable edge`; the fixture's rule moved to the units that host the component, as the provider
+/// decides it, and the co-op is green with no word about that edge. The provider's own decision on both rules is
+/// `the_coop_fixtures_hosted_edge_is_decided_at_the_provider_as_wire_check_reads_it` (`src/agent/declared_authority_tests.rs`).
+/// Seen failing first: on the code before this change the old declaration below exited 0 with no `unauthorisable
+/// edge` — the false green itself.
+#[test]
+fn the_coops_hosted_edge_is_wired_by_a_rule_its_provider_reads() {
+    // The fixture as it stood: no rule in the depots, the skill rule in the auditor, the mandate enumerating it.
+    let mut old = load_units("tests/fixtures/units/coop");
+    for u in old.iter_mut() {
+        u.config.rules.retain(|r| r.resource != "cap:route/optimize");
+        if u.name == "auditor" {
+            let mut rule = mycelium::RuleDecl::new("worker", "skill.invoke", "skill:route/optimize");
+            rule.requires_mandate = Some("routing".into());
+            u.config.rules.push(rule);
+        }
+        if u.name == "worker" {
+            u.config.mandates[0].operations.push("skill.invoke:skill:route/optimize".into());
+        }
+    }
+    let r = check(&old, &load_artifacts("tests/fixtures/units/artifacts"), &CheckOptions::default());
+    assert_eq!(r.exit_code(), 1, "FALSE GREEN: the provider refuses this edge and the check passed it:\n{}", r.render_text());
+    let text = r.render_text();
+    assert!(text.contains("unauthorisable edge (worker): requirement route/optimize"), "{text}");
+    assert!(text.contains("cap.invoke on cap:route/optimize"), "{text}");
+    // The other edge of the same requirer — a deployed capability, read as a skill — is still admitted.
+    assert!(!text.contains("requirement depot/intake: no declared rule"), "{text}");
+
+    // The fixture as it is: green, the edge neither refused nor warned about, and carrying the hosted shape.
+    let r = coop();
+    assert_eq!(r.exit_code(), 0, "{}", r.render_text());
+    assert!(r.findings.iter().all(|f| f.kind != "unauthorisable edge" && f.kind != "node-decided edge"), "{}", r.render_text());
+    let optimize = r.edges.iter().find(|e| e.ns == "route" && e.name == "optimize").expect("the worker's requirement");
+    assert!(optimize.operations.iter().any(|s| s.operation == "cap.invoke" && s.resource == "cap:route/optimize"), "{:?}", optimize.operations);
+    let declaring: Vec<String> =
+        load_units("tests/fixtures/units/coop").into_iter().filter(|u| u.config.rules.iter().any(|r| r.operation == "cap.invoke")).map(|u| u.name).collect();
+    assert_eq!(declaring, ["depot-a", "depot-b"], "the rule is declared by each unit that could host the component: `[authority]` loads a node's own unit's rules");
+}
+
 #[test]
 fn a_proposed_artifact_would_bind_after_acceptance_not_by_provisioning() {
     // D20 (plan F2): the same co-op deployment over a library whose optimizer is *proposed* is

@@ -13,3 +13,12 @@ cargo run --features cli --bin mycelium -- wire-check tests/fixtures/units/coop 
 
 Without `--library` the same directory reports `unwired requirement` and `presence unhostable` for
 `route/optimize`, because then nothing could provide it — which is also correct.
+
+**Authority.** The worker's two edges are read as their providers decide them. `depot/intake` is a deployed
+capability: a skill, admitted by the auditor's rule for the worker under its `routing` mandate. `route/optimize` is a
+hosted component: an enforcing provider decides a member's direct call of it as `cap.invoke` on
+`cap:route/optimize@{node}` for the **calling node**, so its rule — any node, `cap.invoke`, `cap:route/optimize` — is
+declared in each depot that could host it (`[authority]` loads a node's own unit's rules). Until 2026-11-18 the
+optimizer was authorised by a `skill.invoke` rule for the worker, which that provider never reads; the check passed
+it, and now names it (`unauthorisable edge`). The provider's decision on both rules is shown by
+`the_coop_fixtures_hosted_edge_is_decided_at_the_provider_as_wire_check_reads_it`.

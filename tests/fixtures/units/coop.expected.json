@@ -247,6 +247,10 @@
         {
           "operation": "tools/call",
           "resource": "tool:optimize"
+        },
+        {
+          "operation": "cap.invoke",
+          "resource": "cap:route/optimize"
         }
       ]
     },

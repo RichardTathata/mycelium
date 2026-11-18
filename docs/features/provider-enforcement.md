@@ -130,8 +130,9 @@ confirmed stop, checked against the class's bound. CI runs it.
   payload carries no causal fields, so the exposure policy reads a direct call as a root; a
   capability whose namespace or name holds `@` is refused `malformed_call` at an enforcing provider; and a
   component's own `mesh.emit` of a `cap.invoke/…` kind its host listed is a member's call like any other —
-  decided at the provider that receives it as `node:{the emitting node}`; `wire-check`'s authority overlay does not
-  know the `cap.invoke` shape, in either direction ([ledger](../operations/what-is-proven.md#wire-check-does-not-know-the-hosted-capability-shape)).
+  decided at the provider that receives it as `node:{the emitting node}`. `wire-check`'s authority overlay reads
+  an edge to a hosted component as this door decides it — `cap.invoke` on `cap:{ns}/{name}`, for the calling node
+  — since 2026-11-18 ([ledger](../operations/what-is-proven.md#wire-check-reads-a-hosted-edge-as-its-provider-decides)).
 - **Not built: two receivers no decision is made at** (#785's review, 2026-11-14):
   1. **`bulk_serve`** — its handler runs with no caller context and no check, even for a kind in
      `protected_rpc_kinds` or a hosted capability's; members only, and a bypass only where an application serves
