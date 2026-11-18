@@ -177,6 +177,11 @@ pub(crate) use authz::{ae_preflight_routed, TEST_RECORD_PAUSE_MS};
 #[cfg(all(feature = "gateway", feature = "tls", feature = "a2a"))]
 pub(crate) use authz::ENFORCEMENT_POINT_A2A;
 
+/// A declaring serve stream as `rpc/respond` finds it: the principal that opened it, and where its loop is told that
+/// a `(sender, nonce)` it was handed has ended (the window's one release rule, `mesh::gw_rpc_respond`).
+#[cfg(all(feature = "gateway", feature = "tls"))]
+type ServeStreamEnds = (Arc<str>, tokio::sync::mpsc::UnboundedSender<(crate::node_id::NodeId, u64)>);
+
 /// Every door this build serves that asks the action evaluator, with the operation it asks under: `(enforcement
 /// point, operation)` (identity-and-lifecycle I0). `[authority]` maps each operation, so none of this node's doors
 /// is refused *unmapped* before a rule is read, and refuses the start naming any door its evaluator leaves
@@ -243,7 +248,7 @@ struct HttpCtx {
     /// tells a stream's loop that the stream ended a request, for its window. Lock-free (papaya); each loop inserts
     /// and removes only its own id.
     #[cfg(all(feature = "gateway", feature = "tls"))]
-    serve_streams: papaya::HashMap<u128, (Arc<str>, tokio::sync::mpsc::UnboundedSender<(crate::node_id::NodeId, u64)>)>,
+    serve_streams: papaya::HashMap<u128, ServeStreamEnds>,
     /// Identity-and-lifecycle I4, PR 3b: the calls `rpc/serve` streamed that hold something — a cohort place, a
     /// running-work registration — each owned by its watcher task until the subscriber ends it (`served_call`).
     /// Lock-free (papaya): no lock-order row; each watcher removes only its own entry.
