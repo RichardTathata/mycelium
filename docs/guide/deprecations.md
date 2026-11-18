@@ -4770,7 +4770,7 @@ and count; served once it arrives; a tombstoned marker restored by its provider 
 
 ## 116. The bridged MCP loop and the SDK serve stream stop waiting for a cancelled call; an SDK subscriber can declare it stops on a `cancel` event and is then served a cancellable call (unreleased, identity-and-lifecycle I4, PR 3b)
 
-*Numbered 116: §115 is #804's and §117 #805's, both merged.*
+*Numbered 116: §115 is #804's, §117 #805's and §118 #810's, all merged.*
 
 §114 left the two doors where another agent does the work refusing a cancellable call and waiting out a cancelled
 one. The maintainer's decision (C) of 2026-11-16: each agent promises only its own behaviour. **Nothing changes for a
