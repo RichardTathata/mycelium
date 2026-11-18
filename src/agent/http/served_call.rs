@@ -451,7 +451,7 @@ mod tests {
         let budget = CohortBudget::new(8, 4);
         let held = || budget.in_flight(&BudgetPool::Undeclared);
         let caller = crate::knowledge::IssuerId::new("node:127.0.0.1:7001").unwrap();
-        let slot = budget.admit(&caller, &crate::knowledge::cohort::CohortView::trusting([]), 1).ok().expect("a place");
+        let Ok(slot) = budget.admit(&caller, &crate::knowledge::cohort::CohortView::trusting([]), 1) else { panic!("a place") };
         let c = ServedCall::new(Arc::from("depot.custom"));
         let sdk: Arc<str> = Arc::from("token:sdk");
         assert!(c.join(1, &sdk, true) && c.join(2, &sdk, true));
