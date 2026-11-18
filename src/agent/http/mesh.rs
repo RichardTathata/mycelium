@@ -356,12 +356,12 @@ fn serve_event(http_ctx: &HttpCtx, req: &super::rpc::RpcRequest, caller: Option<
 }
 
 /// **The serve loop's queue pass**: take out of `queue`, in order, every checked call whose authority has lapsed (to be
-/// answered `cancelled` without being handed out). It runs **whatever the stream's window** — `window_full` is taken
-/// only so that this is said where it is decided (#806's second confirm round, D3: the pass once sat inside the
-/// hand-out loop, which a full window skips) — and not while a test holds the queue.
+/// answered `cancelled` without being handed out); nothing while a test holds the queue. It knows nothing of the
+/// stream's window. That the serve loop calls it **whatever the window** — ahead of the hand-out loop, outside its
+/// `!full` condition (#806's second confirm round, D3) — is the call's position, established by reading, not by a
+/// test (`docs/operations/what-is-proven.md`).
 #[cfg_attr(not(all(feature = "gateway", feature = "tls")), allow(dead_code))]
-fn take_lapsed<T>(queue: &mut std::collections::VecDeque<T>, held: bool, window_full: bool, lapsed: impl Fn(&T) -> bool) -> Vec<T> {
-    let _ = window_full;
+fn take_lapsed<T>(queue: &mut std::collections::VecDeque<T>, held: bool, lapsed: impl Fn(&T) -> bool) -> Vec<T> {
     if held {
         return Vec::new();
     }
@@ -448,7 +448,7 @@ async fn serve_stream_loop(
         // window has room — within a second with a full window (its timer turns the loop); with room in the window and
         // a stream that is not asking, when the stream next asks or closes, since nothing else turns the loop then.
         #[cfg(all(feature = "gateway", feature = "tls"))]
-        for (req, _, admission) in take_lapsed(&mut ready, held, full, |(_, _, admission)| admission.is_lapsed()) {
+        for (req, _, admission) in take_lapsed(&mut ready, held, |(_, _, admission)| admission.is_lapsed()) {
             super::rpc::rpc_respond_ctx(&agent_ctx, &req, super::served_call::cancelled_body("sdk_serve"));
             super::provider_enforcement::count_door_stop(&agent_ctx, "sdk_serve");
             admission.release_confirmed_by_node();
@@ -1141,21 +1141,18 @@ mod queue_pass_tests {
     use super::take_lapsed;
     use std::collections::VecDeque;
 
-    /// **A cancelled call waiting in the serve loop's queue is taken out whether or not the window has room** (#806's
-    /// second confirm round, D3; tested directly in the third). Of three queued calls the first and last have lapsed:
-    /// with a **full** window both are taken, in order, and the live one stays; the same with room; and nothing is
-    /// taken while a test holds the queue. Seen failing first with the pass skipped while the window is full.
+    /// **The serve loop's queue pass takes the lapsed calls out, in order, and leaves the rest.** Of three queued
+    /// calls the first and last have lapsed: both are taken, in order, and the live one stays; nothing is taken while
+    /// a test holds the queue. A test of the pass itself — not of where the loop calls it (whatever the stream's
+    /// window: established by reading). Seen failing first with the pass taking nothing.
     #[test]
-    fn the_queue_pass_takes_lapsed_calls_whatever_the_window() {
+    fn the_queue_pass_takes_the_lapsed_calls_and_leaves_the_rest() {
         let queue = || VecDeque::from([("a", true), ("b", false), ("c", true)]);
-        for window_full in [true, false] {
-            let mut q = queue();
-            let taken = take_lapsed(&mut q, false, window_full, |(_, lapsed)| *lapsed);
-            assert_eq!(taken, vec![("a", true), ("c", true)], "window_full {window_full}");
-            assert_eq!(q, VecDeque::from([("b", false)]), "window_full {window_full}");
-        }
         let mut q = queue();
-        assert!(take_lapsed(&mut q, true, false, |(_, lapsed)| *lapsed).is_empty());
+        assert_eq!(take_lapsed(&mut q, false, |(_, lapsed)| *lapsed), vec![("a", true), ("c", true)]);
+        assert_eq!(q, VecDeque::from([("b", false)]));
+        let mut q = queue();
+        assert!(take_lapsed(&mut q, true, |(_, lapsed)| *lapsed).is_empty());
         assert_eq!(q, queue());
     }
 }

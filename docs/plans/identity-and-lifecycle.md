@@ -1883,15 +1883,26 @@ failing first against its plant, but D3.
   the call and the name had leaked. The rule's "its own principal opened" closes it in the same place
   (`HttpCtx::serve_streams` keeps each stream's opener). `a_respond_naming_another_principals_stream_frees_nothing_there`
   (seen failing on the head before the change: the other principal's stream was handed the next call).
-- **D3, tested directly.** The queue pass is a function, `take_lapsed`, taking the window's state so that "whatever
-  the window" is decided where it can be tested: `the_queue_pass_takes_lapsed_calls_whatever_the_window`
-  (`src/agent/http/mesh.rs`), seen failing with the pass skipped while the window is full — the reviewer's plant,
-  which no test caught before. **"At once" corrected** (§116, the comments): the pass runs on the loop's next turn —
+- **D3: the queue pass is a function, tested as itself; where it is called is established by reading.** `take_lapsed`
+  takes lapsed calls out of the queue (`the_queue_pass_takes_the_lapsed_calls_and_leaves_the_rest`,
+  `src/agent/http/mesh.rs`). **Corrected in the fourth confirm round (2026-11-18):** the function first took the
+  window's state as an argument it ignored, and its test asserted only that; the argument and the claim are dropped.
+  **That the loop runs the pass whatever the window — the call sits ahead of the hand-out loop, outside its `!full`
+  condition — no test shows**: a plant gating the call on `!full` fails nothing. Driving it needs a checked call in
+  the queue while the window is full, which happens only when a deferred seat-claim check lands after the window
+  filled; the fixture that defers a check (`fleet_history_tests`) has no mint and no cancel, and joining the two is
+  not done here ([ledger](../operations/what-is-proven.md#serve-queue-pass-runs-whatever-the-window)). **"At once"
+  corrected** (§116, the comments): the pass runs on the loop's next turn —
   within a second with a full window (its timer turns the loop); with room in the window and a stream that is not
   asking, when the stream next asks or closes. **Stated, not fixed:** in that last case a cancelled, never-handed-out
   call's requester waits for the subscriber's next read; nothing turns the loop for a lapse. It was so before this
   PR's window; closing it needs the loop to wake on a queued call's lapse, a new mechanism not added here.
 - **The inventory row** says three draws and one `use` line for `tls.rs`'s `OsRng`, not four sites.
+- **Not built, a follow-up (the fourth confirm round): a bound on the window's release channel.** A subscriber that
+  replays a respond the node already took is answered `duplicate` (2xx) each time, and each adds one entry to its own
+  stream's release channel, which is unbounded; the loop drains one a turn. It is bounded in practice by the request
+  rate (each replay is one inline check), and only the sender's own stream is affected. The hardening: a bounded
+  channel of about twice `SERVE_WINDOW` with `try_send`, dropping on full, the 300 s sweep covering a dropped release.
 
 #### I4a · Sign the grant request, `consumed`, `revoked` and `refused` records, then let each owner collect its own — *follow-up of I4, agreed with the maintainer 2026-11-15 — **not buildable until written***
 

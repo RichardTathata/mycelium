@@ -4856,6 +4856,8 @@ call whose authority does not lapse**, and nothing changes on a provider without
     stream; any other answer (`409`, `403`, `400`) ends nothing, and so does a respond naming another principal's
     stream. Failing that, a request ends 300 s after it was handed out;
   - a raw client that declares but does not send `stream` back on `rpc/respond` **never opens its window**;
+  - the channel a stream's releases arrive on is **not bounded**: a subscriber that replays a respond the node already
+    took adds one entry per replay to its own stream's channel, at its own request rate, and to no other stream's;
   - `read_ahead` must be a whole number from 1 to 256: a declaring stream's 0, a larger value or a non-number is
     refused **`400 invalid_read_ahead`** (JSON), never clamped; on a stream that does not declare it is ignored.
 - **A call cancelled while it still waits in the stream's queue** is answered `cancelled`, never streamed, and recorded
