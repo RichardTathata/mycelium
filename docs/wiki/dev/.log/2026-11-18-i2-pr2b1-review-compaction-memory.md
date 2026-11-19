@@ -9,8 +9,12 @@
   writer and settled later; a rewrite between the two dropped the frame and the settle then called it journaled (F2).
   The choice now keeps an in-flight record, and looks, takes off, looks again.
 - **A counter means what its definition says.** `ca_commitment_conflict` is two commitments the same CA's key signed:
-  an unverifiable document is `ca_commitment_unverified`; a commitment by another CA is neither (and whether it is
-  pinned once a pin is spent is an open decision, plan row I2).
+  an unverifiable document is `ca_commitment_unverified`.
+- **A pin is per committing CA** (the maintainer's decision of 2026-11-18): the node's promise "no other successor
+  from this CA". The successor's commitment to its successor is another promiser's and is pinned beside the first
+  once the node trusts the successor. On disk: `succession/pin-{sha256 of the committing CA's certificate}.pem`, one
+  file each; removing a pin is removing that file. In the KV: `sys/ca-commit/{node}/{predecessor}`, compared with the
+  pin held for that copy's CA.
 - **A scan over a prefix any member can write is bounded before it hashes**: size, count per scan, a gauge for what
   was left, and noted sets that are never cleared.
 - Pages touched: `dev/architecture/runtime-invariants.md` (§Persistence), `dev/owner-signed-records.md` (the

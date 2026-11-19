@@ -8,24 +8,28 @@
 //!   maintainer's decisions (a) of 2026-11-15 and of 2026-11-16), after assessing it against a root it already
 //!   trusts, and persists the pin under its own `succession/` before it goes on. It refuses to start, by name, when
 //!   it holds a commitment and no `[persistence]`: a node can only promise what it can remember (#805's review, F1).
-//! - **A second commitment is refused and counted**, wherever it is seen: in the operator's file at a later start,
-//!   or in the KV.
-//! - **The KV carries commitments for detection only.** A node publishes the commitment it pinned at
-//!   `sys/ca-commit/{node}` — the statement "this is what I pinned", in its own path. A reader verifies a copy against
-//!   its own roots (the old CA signed it, or it is read as absent and counted), compares it with its pin, and counts
-//!   a conflict: two commitments the old CA's key signed, which is what a stolen key produces. **A KV copy never
-//!   becomes the source of a pin**: a node with no pin reads every copy and pins nothing.
+//! - **A pin is per committing CA** (the decision of 2026-11-18): the node's own promise "I accept no other successor
+//!   from this CA". Once it trusts the successor, it may pin one commitment from the successor the same way — a
+//!   different promiser, speaking of its own succession; the first pin is kept, spent.
+//! - **A second commitment from a CA it holds a pin for is refused and counted**, wherever it is seen: in the
+//!   operator's file at a later start, or in the KV. There is no in-band way to replace a pin.
+//! - **The KV carries commitments for detection only.** A node publishes each commitment it pinned, while it trusts
+//!   that commitment's CA, at `sys/ca-commit/{node}/{predecessor}` — the statement "this is what I pinned", in its own
+//!   path. A reader verifies a copy against its own roots (a CA it trusts signed it, or it is read as absent and
+//!   counted), compares it with the pin it holds **for that copy's CA**, and counts a conflict: two commitments one
+//!   CA's key signed, which is what a stolen key produces. A copy from a CA the reader holds no pin for is not a
+//!   conflict. **A KV copy never becomes the source of a pin.**
 //!
 //! Nothing here changes what a node trusts. The record the successor signs, and the phases that act on it, are the
-//! row's next PR; they read the successor from [`CommitmentState::pinned`], and from nowhere else.
+//! row's next PR; they read the successor from [`CommitmentState::pinned_for`], and from nowhere else.
 
 use super::TaskCtx;
 use mycelium_core::node_id::NodeId;
-use mycelium_core::tls::{CaCommitment, CommitmentPin, OfferedCommitment};
+use mycelium_core::tls::{CaCommitment, OfferedCommitment};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-/// KV namespace of the commitments nodes publish for detection: `sys/ca-commit/{node}`.
+/// KV namespace of the commitments nodes publish for detection: `sys/ca-commit/{node}/{predecessor-hex}`.
 pub const CA_COMMIT_PREFIX: &str = "sys/ca-commit/";
 
 /// A copy larger than this is not a commitment (one is under 2 KiB) and is skipped unread: any admitted member can
@@ -40,19 +44,18 @@ const NOTED_UNVERIFIED_MAX: usize = 1_024;
 /// Distinct conflicting commitments counted in a process's life; past it, as above. Each needs the CA's own key.
 const NOTED_CONFLICTS_MAX: usize = 64;
 
-/// The key a node publishes its pinned commitment at.
-pub fn ca_commit_key(node: &NodeId) -> String {
-    format!("{CA_COMMIT_PREFIX}{node}")
+/// The key a node publishes the commitment it pinned from one CA at: `predecessor` is the SHA-256 of that CA's
+/// certificate (the commitment's `predecessor`), so a node holding two pins publishes two keys.
+pub fn ca_commit_key(node: &NodeId, predecessor: &[u8; 32]) -> String {
+    format!("{CA_COMMIT_PREFIX}{node}/{}", hex(predecessor))
 }
 
 /// This node's commitment: its pin, and what it has refused. Lock-free (`ArcSwap`, papaya, atomics): no lock-order row.
 #[derive(Default)]
 pub(crate) struct CommitmentState {
-    /// The commitment this node pinned, set once at start from the operator's file or the persisted pin — never from
-    /// the KV.
-    pinned: arc_swap::ArcSwapOption<CaCommitment>,
-    /// Whether the pin's committing CA is still a root this node trusts (see [`CommitmentPin::Pinned`]).
-    active: std::sync::atomic::AtomicBool,
+    /// The commitments this node pinned — at most one per committing CA — each with whether that CA is still a root
+    /// this node trusts. Set once at start from the operator's file and the persisted pins — never from the KV.
+    pins: arc_swap::ArcSwap<Vec<(Arc<CaCommitment>, bool)>>,
     /// Second commitments the pinned CA's key signed, refused: distinct ones, from the operator's file at a start
     /// and from KV copies.
     pub(crate) conflicts: AtomicU64,
@@ -69,14 +72,24 @@ pub(crate) struct CommitmentState {
 }
 
 impl CommitmentState {
-    /// The pinned commitment, if this node holds one.
-    pub(crate) fn pinned(&self) -> Option<Arc<CaCommitment>> {
-        self.pinned.load_full()
+    /// Every commitment this node holds a pin for.
+    pub(crate) fn pinned(&self) -> Vec<Arc<CaCommitment>> {
+        self.pins.load().iter().map(|(c, _)| Arc::clone(c)).collect()
     }
 
-    /// Whether this node holds a commitment whose committing CA it still trusts — `id.ca_succession_committed`.
+    /// The commitment this node pinned from the CA whose certificate digest is `predecessor`, if it holds one — what
+    /// the succession's phases read the successor from (PR 2b-2; until then only tests ask).
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn pinned_for(&self, predecessor: &[u8; 32]) -> Option<Arc<CaCommitment>> {
+        self.pins.load().iter().find(|(c, _)| &c.predecessor == predecessor).map(|(c, _)| Arc::clone(c))
+    }
+
+    /// Whether this node holds a commitment whose committing CA it still trusts. **Not** the definition of
+    /// `id.ca_succession_committed` (PR 2b-4): this is `false` after narrowing and on a node first started on the
+    /// successor's files, and that guarantee must not fail a completed succession.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn committed(&self) -> bool {
-        self.pinned.load().is_some() && self.active.load(Ordering::Acquire)
+        self.pins.load().iter().any(|(_, active)| *active)
     }
 
     /// Count a conflicting commitment once per digest, wherever it was seen. `false` when it was counted before, or
@@ -122,72 +135,63 @@ pub(crate) fn at_start(ctx: &TaskCtx, tls_cfg: &mycelium_core::config::TlsConfig
         });
     }
     let state = &ctx.ca_commitment;
-    match mycelium_core::tls::pin_ca_commitment(tls_cfg, &tls.roots_der())? {
-        CommitmentPin::None => {}
-        CommitmentPin::Pinned { commitment, first, active, offered } => {
-            let digest = hex(&commitment.digest());
-            if first {
-                tracing::info!(commitment = %digest, "CA succession: pinned the commitment the operator placed (ca-commit.pem); this node refuses any other from this CA");
-            }
-            let file = tls_cfg.auto_cert_dir.join(mycelium_core::tls::CA_COMMIT_FILE);
-            match offered {
-                OfferedCommitment::Nothing => {}
-                // Not a second commitment from the CA: nothing shows the CA's key signed it (#812's review F3).
-                OfferedCommitment::Unverified(why) => {
-                    state.unverified.fetch_add(1, Ordering::Relaxed);
-                    tracing::warn!(
-                        file = %file.display(), pinned = %digest, %why,
-                        "CA succession: ca-commit.pem holds a document this node cannot assess against its roots; it is read as absent and the pin stands"
-                    );
-                }
-                OfferedCommitment::Conflict(other) => {
-                    state.conflict_once(other);
-                    tracing::error!(
-                        file = %file.display(), pinned = %digest, refused = %hex(&other),
-                        "CA succession: ca-commit.pem holds a second commitment the pinned CA's key signed, naming another successor; it is refused and the pin stands. \
-                         Two commitments from one CA mean a mistake or a stolen CA key: compare the file with the issuer's"
-                    );
-                }
-                // A different promiser. Whether a node pins one commitment per committing CA is not decided (plan row
-                // I2, §8): it is not pinned, and it is not a conflict of the pinned CA's.
-                OfferedCommitment::AnotherCa(other) => tracing::warn!(
-                    file = %file.display(), pinned = %digest, offered = %hex(&other),
-                    "CA succession: ca-commit.pem holds a commitment made by another CA than the one this node's pin names; it is not pinned and not counted as a conflict"
-                ),
-            }
-            state.active.store(active, Ordering::Release);
-            state.pinned.store(Some(Arc::new(commitment)));
+    let found = mycelium_core::tls::pin_ca_commitment(tls_cfg, &tls.roots_der())?;
+    let file = tls_cfg.auto_cert_dir.join(mycelium_core::tls::CA_COMMIT_FILE);
+    for pin in found.pins.iter().filter(|p| p.first) {
+        tracing::info!(commitment = %hex(&pin.commitment.digest()), ca = %hex(&pin.commitment.predecessor), "CA succession: pinned the commitment the operator placed (ca-commit.pem); this node refuses any other from that CA");
+    }
+    match found.offered {
+        OfferedCommitment::Nothing => {}
+        // Not a second commitment from a CA: nothing shows a CA's key signed it (#812's review F3). It pins nothing.
+        OfferedCommitment::Unverified(why) => {
+            state.unverified.fetch_add(1, Ordering::Relaxed);
+            tracing::warn!(
+                file = %file.display(), %why,
+                "CA succession: ca-commit.pem holds a document this node cannot assess against its roots; it is read as absent, nothing is pinned from it and this node's pins stand"
+            );
+        }
+        OfferedCommitment::Conflict(other) => {
+            state.conflict_once(other);
+            tracing::error!(
+                file = %file.display(), refused = %hex(&other),
+                "CA succession: ca-commit.pem holds a second commitment from a CA this node already holds a pin for, signed by that CA's key and naming another successor; it is refused and the pin stands. \
+                 Two commitments from one CA mean a mistake or a stolen CA key: compare the file with the issuer's"
+            );
         }
     }
+    state.pins.store(Arc::new(found.pins.into_iter().map(|p| (Arc::new(p.commitment), p.active)).collect()));
     Ok(())
 }
 
-/// **Once the TLS identity is installed** (so the write is signed as this node's): publish the commitment this node
-/// pinned at `sys/ca-commit/{self}`, while its committing CA is a root this node trusts, and register it to be
+/// **Once the TLS identity is installed** (so the writes are signed as this node's): publish each commitment this
+/// node pinned whose committing CA is a root it trusts, at `sys/ca-commit/{self}/{predecessor}`, and register it to be
 /// republished when it is overwritten or removed. The statement is this node's own — "this is what I pinned" — and
 /// the copy proves itself to a reader that trusts the same CA.
 pub(crate) fn publish(ctx: &TaskCtx) {
-    let state = &ctx.ca_commitment;
-    let Some(commitment) = state.pinned().filter(|_| state.committed()) else { return };
-    let path = ca_commit_key(&ctx.node_id);
-    let bytes = commitment.to_pem().into_bytes();
-    if mycelium_core::ops::kv_get(ctx, &path).as_deref() != Some(bytes.as_slice()) {
-        let _ = mycelium_core::ops::kv_set(ctx, Arc::from(path.as_str()), bytes::Bytes::from(bytes.clone()));
+    for (commitment, active) in ctx.ca_commitment.pins.load().iter() {
+        if !*active {
+            continue;
+        }
+        let path = ca_commit_key(&ctx.node_id, &commitment.predecessor);
+        let bytes = commitment.to_pem().into_bytes();
+        if mycelium_core::ops::kv_get(ctx, &path).as_deref() != Some(bytes.as_slice()) {
+            let _ = mycelium_core::ops::kv_set(ctx, Arc::from(path.as_str()), bytes::Bytes::from(bytes.clone()));
+        }
+        ctx.identity_ledger.own(path, bytes);
     }
-    ctx.identity_ledger.own(path, bytes);
 }
 
-/// **Read the commitments in the KV, for detection only.** Each copy under `sys/ca-commit/` is compared with this
-/// node's pin:
-/// - the pinned commitment itself is nothing;
+/// **Read the commitments in the KV, for detection only.** Each copy under `sys/ca-commit/` is compared with the pin
+/// this node holds **for that copy's committing CA**:
+/// - a commitment this node pinned is nothing;
 /// - a copy that does not verify against this node's roots — malformed, signed by another key, a successor it cannot
 ///   read — is read as absent and counted once (`ca_commitment_unverified`);
-/// - a copy that verifies, **names the pinned commitment's CA** and differs from the pin is a second commitment that
-///   CA's key signed: refused and counted once (`ca_commitment_conflict`), naming the key that carries it;
-/// - a copy that verifies and was made by another CA is not a conflict of the pinned CA's, and is not counted (the
-///   open question in [`OfferedCommitment::AnotherCa`]).
+/// - a copy that verifies and differs from the pin this node holds for its CA is a second commitment that CA's key
+///   signed: refused and counted once (`ca_commitment_conflict`), naming the key that carries it;
+/// - a copy that verifies, from a CA this node holds **no pin for**, is not a conflict and is not counted.
 ///
-/// Nothing read here is ever pinned: a node with no pin compares nothing and adopts nothing.
+/// Nothing read here is ever pinned: a node pins from its operator's file, and a copy — forged or genuine — adds no
+/// pin and changes none.
 ///
 /// **Bounded, because any admitted member can write any key here** (#812's review F4). A value larger than
 /// [`MAX_COPY_BYTES`] is skipped before it is hashed or parsed; at most [`MAX_COPIES_PER_SCAN`] copies are read, in
@@ -199,7 +203,7 @@ pub(crate) fn publish(ctx: &TaskCtx) {
 pub(crate) fn scan(ctx: &TaskCtx) {
     let Some(tls) = ctx.tls.get() else { return };
     let state = &ctx.ca_commitment;
-    let pinned = state.pinned();
+    let pins = state.pinned();
     let roots = tls.roots_der();
     // In key order (`scan_kv_prefix` sorts), so which copies a bounded scan reads does not change from scan to scan.
     let copies = mycelium_core::store::scan_kv_prefix(&ctx.kv_state, CA_COMMIT_PREFIX);
@@ -211,8 +215,8 @@ pub(crate) fn scan(ctx: &TaskCtx) {
         }
         read += 1;
         let copy = std::str::from_utf8(&bytes).ok().and_then(|pem| CaCommitment::from_pem(pem).ok());
-        if let (Some(c), Some(p)) = (&copy, &pinned)
-            && c.digest() == p.digest()
+        if let Some(c) = &copy
+            && pins.iter().any(|p| p.digest() == c.digest())
         {
             continue;
         }
@@ -223,14 +227,12 @@ pub(crate) fn scan(ctx: &TaskCtx) {
                 }
             }
             Some(c) => {
-                let Some(p) = &pinned else { continue };
-                if c.predecessor != p.predecessor {
-                    continue;
-                }
+                // Compared with the pin held for this copy's CA; with none, there is nothing it contradicts.
+                let Some(p) = pins.iter().find(|p| p.predecessor == c.predecessor) else { continue };
                 if state.conflict_once(c.digest()) {
                     tracing::error!(
                         key = %path, pinned = %hex(&p.digest()), refused = %hex(&c.digest()),
-                        "CA succession: the KV carries a second commitment the pinned CA's key signed, naming another successor; it is refused and the pin stands. \
+                        "CA succession: the KV carries a second commitment from a CA this node holds a pin for, signed by that CA's key and naming another successor; it is refused and the pin stands. \
                          Two commitments from one CA mean a mistake or a stolen CA key"
                     );
                 }

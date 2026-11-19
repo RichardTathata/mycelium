@@ -477,8 +477,9 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   **for detection only**: a copy by the same CA that conflicts with a node's pin is counted
   (`ca_commitment_conflict`), which is where a stolen CA key shows; a copy no trusted CA signed is counted apart
   (`ca_commitment_unverified`); a copy is never pinned; and the scan is bounded against a member flooding the prefix
-  (`ca_commitment_scan_skipped`). **Open:** whether a node pins one commitment per committing CA — the successor's own
-  commitment to its successor is, for now, neither pinned nor counted as a conflict. Nothing here changes what a node trusts — the successor's record and the phases are the next
+  (`ca_commitment_scan_skipped`). **A pin is per committing CA** (`succession/pin-{predecessor}.pem`): once a node
+  trusts the successor it pins one commitment from the successor the same way, beside the first, and compares a KV
+  copy with the pin it holds for that copy's CA. Nothing here changes what a node trusts — the successor's record and the phases are the next
   PR — and **no shipped build makes or reads a commitment yet**: a successor is a generation-1 CA, whose extension's
   OID is provisional, so `tls commit` refuses by name and writes nothing.
   - **The kept-anchor budget counts what a node keeps now** (the maintainer's decision of 2026-11-17): the identity

@@ -395,7 +395,9 @@ pub(super) async fn stats_handler(State(ctx): State<Arc<HttpCtx>>) -> impl IntoR
         #[cfg(feature = "tls")]
         {
             let c = &ctx.agent_ctx.ca_commitment;
-            body["ca_commitment_pinned"] = json!(c.pinned().is_some());
+            body["ca_commitment_pinned"] = json!(!c.pinned().is_empty());
+            // One pin per committing CA (the decision of 2026-11-18).
+            body["ca_commitment_pins"] = json!(c.pinned().len());
             body["ca_commitment_conflict"] = json!(load(&c.conflicts));
             body["ca_commitment_unverified"] = json!(load(&c.unverified));
             // A gauge: KV copies the last scan did not read (oversize, or past the per-scan bound).

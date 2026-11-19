@@ -5208,14 +5208,18 @@ never read as a commitment already made. The sync order is read from the code; n
 **A node pins the commitment its operator places, and only that.** An operator copies `ca-commit.pem` into the node's
 certificate directory (`[tls] auto_cert_dir`). At start the node assesses it against the root it trusts — the named CA
 signed it, the successor is a distinct CA of the next generation — and **pins it**: the commitment is written to
-`{auto_cert_dir}/succession/commit.pin.pem` (a temporary, fsynced, renamed, the directory fsynced) before the node goes
-on. The operator's file is never written. New refusals at start, each by name:
+`{auto_cert_dir}/succession/pin-{predecessor}.pem` (a temporary, fsynced, renamed, the directory fsynced) before the
+node goes on. **A pin is per committing CA** (the maintainer's decision of 2026-11-18): `{predecessor}` is the 64 hex
+digits of the SHA-256 of the committing CA's certificate, a node holds at most one pin per CA, and once it trusts the
+successor it pins **one** commitment from the successor the same way, keeping the first. The operator's file is never written. New refusals at start, each by name:
 - **a commitment the node cannot assess** — malformed, carrying a private key, signed by another key, naming a CA that
   is not the node's root, a successor of the wrong generation — refuses the start. It is never read as "no commitment";
 - **a node holding a commitment (the file, or a pin) with no `[persistence]`** refuses the start, naming
   `[persistence]`: a succession needs a node that remembers across a restart what it no longer trusts;
-- **a pin that can no longer be assessed** — neither its committing CA nor its successor is a root the node trusts —
-  refuses the start, naming the pin and the way out (remove `succession/`, as the operator's recovery does).
+- **a pin that can no longer be placed** — its committing CA is not a root the node trusts, nor is its successor, and
+  no other pin continues from it — or one damaged or under another CA's name, refuses the start, naming that one file
+  and the way out: remove **that file**. The node's other pins are untouched, and the directory will hold the
+  node's phase from the release that adds the phases, so it is not the thing to remove.
 
 **A second commitment from the same CA is refused and counted, wherever it is seen.** A node that pinned one
 commitment keeps it, and the operator's file beside a pin is assessed before it is called anything:
@@ -5223,25 +5227,33 @@ commitment keeps it, and the operator's file beside a pin is assessed before it 
   (`ca_commitment_conflict`); the start goes on with the pin and the log names both digests;
 - a document the node cannot assess — a signature the named CA did not make, a CA it does not trust, no commitment at
   all — is read as absent and counted as `ca_commitment_unverified`, not as a conflict, and the start goes on;
-- **open, not decided:** a commitment that verifies and was made by **another CA** than the pinned one's — the
-  successor's own commitment to its successor, on a node that now trusts the successor — is neither pinned nor counted
-  as a conflict; it is warned by name. Whether a node holds one pin per committing CA is with the maintainer (the
-  plan's I2 row). Until then a second succession needs each node's `succession/` removed first.
+- a commitment from a CA the node holds **no pin for**: pinned, if that CA is a root the node trusts (the successor's
+  own commitment to its successor, on a node that now trusts the successor — a different promiser, and no conflict);
+  if the node does not trust that CA yet, it is refused by name (unknown predecessor), pins nothing, and is counted
+  as `ca_commitment_unverified`.
 
-To change a pin deliberately an operator removes the node's `succession/` directory
-(`docs/operations/cert-rotation.md` says what that costs).
+There is no in-band way to replace a pin. To change one deliberately an operator removes that CA's pin file,
+`succession/pin-{predecessor}.pem` (`docs/operations/cert-rotation.md` says what that costs).
 - Test: `a_node_pins_the_operators_commitment_persists_it_and_refuses_another`,
-  `a_spent_pin_is_kept_and_an_unassessable_one_refuses_the_start` (`mycelium-core/src/tls.rs`);
+  `the_successors_own_commitment_is_pinned_beside_a_spent_pin_and_a_second_from_it_is_refused`,
+  `a_commitment_from_a_ca_the_node_does_not_trust_yet_is_refused_by_name_and_pins_nothing`,
+  `a_spent_pin_is_kept_and_an_unassessable_one_refuses_the_start_until_that_pin_is_removed`,
+  `a_pin_under_another_cas_name_and_a_damaged_pin_refuse_the_start_naming_the_file`,
+  `beside_a_pin_an_unverifiable_operator_file_is_not_a_conflict` (`mycelium-core/src/tls.rs`);
+  `a_node_pins_one_commitment_per_committing_ca_and_keeps_both_across_restarts`,
   `a_node_holding_a_commitment_without_persistence_refuses_to_start_by_name`,
   `a_node_pins_from_the_operators_file_publishes_it_and_keeps_the_pin_across_restarts` (`src/agent/ca_commit_tests.rs`).
 
-**A new KV namespace, `sys/ca-commit/{node}`, for detection only.** A node publishes the commitment it pinned under its
-own key and republishes it when it is overwritten or removed. Every node compares the copies it sees with its own pin:
+**A new KV namespace, `sys/ca-commit/{node}/{predecessor}`, for detection only.** A node publishes each commitment it
+pinned, while it trusts that commitment's CA, under its own key and republishes it when it is overwritten or removed.
+Every node compares a copy it sees with the pin it holds **for that copy's CA** (a verifiable copy from a CA it holds
+no pin for is not a conflict):
 a copy no root it trusts signed is read as absent and counted (`ca_commitment_unverified`), and a copy the CA's key
 **did** sign that differs from the pin is refused and counted (`ca_commitment_conflict`) — two commitments from one CA
 are a mistake or a stolen CA key, and this is where it shows. **A copy in the KV is never pinned**: a node with no
 operator's file holds no commitment, whatever the KV carries. `GET /stats` gains `ca_commitment_pinned`,
-`ca_commitment_conflict`, `ca_commitment_unverified` and `ca_commitment_scan_skipped`.
+`ca_commitment_pins` (the count: one per committing CA), `ca_commitment_conflict`, `ca_commitment_unverified` and
+`ca_commitment_scan_skipped`.
 - **The scan is bounded, because any member can write any key under the prefix.** A value over 4 KiB is skipped
   unread (a commitment is under 2 KiB); a scan reads at most 1,024 copies, in key order; `ca_commitment_scan_skipped`
   is a gauge of what the last scan left. Each distinct copy is counted once and never again; past 1,024 distinct
@@ -5250,7 +5262,7 @@ operator's file holds no commitment, whatever the KV carries. `GET /stats` gains
   gauge above 0 is how that shows. The prefix is under `sys/`, so the raw KV routes refuse a
 write to it as they do any owned key. An older node ignores the namespace.
 - Test: `a_kv_copy_of_a_commitment_is_compared_with_the_pin_and_never_becomes_one`,
-  `a_kv_copy_of_another_cas_commitment_is_not_a_conflict_of_the_pinned_ca`,
+  `a_kv_copy_is_compared_with_the_pin_for_its_own_ca_and_never_pins`,
   `a_flooded_prefix_is_counted_once_and_never_again`, `a_scan_reads_a_bounded_number_of_copies_and_reports_the_rest`,
   `a_value_too_large_to_be_a_commitment_is_skipped_unread`.
 
@@ -5279,8 +5291,9 @@ it leaves the compacted journal, whole. The on-disk format is unchanged: the sam
   (`src/agent/journal_repair_tests.rs`); `an_often_rotated_peer_does_not_exhaust_the_kept_anchor_budget`,
   `a_change_of_roots_compacts_the_anchor_journal_before_it_answers` (`src/agent/succession_tests.rs`).
 
-**API.** mycelium-core (`tls`): `CaCommitment`, `CaCommitError`, `CommitmentPin`, `OfferedCommitment`,
-`commit_successor`, `pin_ca_commitment`, `held_ca_commitment`, `sha256`, `CA_COMMIT_FILE`, `CA_COMMIT_PIN_FILE`, `CA_COMMIT_PEM_LABEL` and `SUCCESSION_DIR` are
+**API.** mycelium-core (`tls`): `CaCommitment`, `CaCommitError`, `CommitmentPins`, `PinnedCommitment`,
+`OfferedCommitment`, `commit_successor`, `pin_ca_commitment`, `held_ca_commitment`, `ca_commit_pin_file`, `sha256`,
+`CA_COMMIT_FILE`, `CA_COMMIT_PIN_PREFIX`, `CA_COMMIT_PIN_SUFFIX`, `CA_COMMIT_PEM_LABEL` and `SUCCESSION_DIR` are
 new. mycelium: `commit_successor`, `CaCommitment`, `CaCommitError`, `CA_COMMIT_FILE`, `ca_commit_key` and
 `CA_COMMIT_PREFIX` are re-exported. Nothing is removed or renamed, and no configuration field is added.
 
