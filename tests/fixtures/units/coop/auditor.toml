@@ -5,10 +5,5 @@ principal = "auditor"
 name = "done"
 role = "consumes"
 
-# The worker's call of a depot's intake, a deployed capability, under its `routing` mandate. The optimizer is a
-# hosted component: its rule is in the depots that host it (`depot-a.toml`, `depot-b.toml`), as `cap.invoke`.
-[[rule]]
-actor            = "worker"
-operation        = "skill.invoke"
-resource         = "skill:depot/intake"
-requires_mandate = "routing"
+# No rule here: who may call the optimizer and the intake is declared by the depots that provide them
+# (`depot-a.toml`, `depot-b.toml`), because a provider reads its own unit's rules.

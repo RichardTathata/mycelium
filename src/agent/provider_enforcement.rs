@@ -1113,11 +1113,9 @@ pub(crate) fn derive_call(kind: &str, payload: &[u8], claim: Option<&str>, me: &
         }
         // The `tool` namespace is decided as the tool it is — the operation and the resource the MCP tool loop
         // decides — so one rule covers both doors; any other namespace under the family's own operation.
-        return Ok(if ns == "tool" {
-            ("tools/call".into(), format!("tool:{name}@{me}"), arguments)
-        } else {
-            (super::HOSTED_CAPABILITY_OPERATION.into(), format!("cap:{ns}/{name}@{me}"), arguments)
-        });
+        // (`hosted_capability_call`: the one derivation, which `wire-check` reads an edge on too.)
+        let (operation, key) = super::hosted_capability_call(ns, name);
+        return Ok((operation.into(), format!("{key}@{me}"), arguments));
     }
 
     let Some(resource) = claim else {

@@ -15,9 +15,11 @@ runs. Its answer is *would bind*, never *is bound*; the runtime keeps the last w
 
 - **Use it when** a fleet's units are written down and you want an unwired requirement, a schema mismatch or an
   unauthorisable edge found in CI rather than in production.
-- **Not when** you need to know what is bound now: the check never observes a fleet. `[[lane]]`, `[[mandate]]` and
-  `[[rule]]` are read only by the check's overlay — at runtime a stem logs them and an SDK agent reports them in
-  `not_enforced` ([unit-file § Who reads which section](../reference/unit-file.md#who-reads-which-section)).
+- **Not when** you need to know what is bound now: the check never observes a fleet. `[[lane]]` and `[[mandate]]`
+  are read only by the check; `[[rule]]` is read by the check and, at run time, by a node with an
+  [`[authority]`](declared-authority.md) table, which builds its evaluator from its own unit's rules — a stem
+  without one logs them and an SDK agent reports them in `not_enforced`
+  ([unit-file § Who reads which section](../reference/unit-file.md#who-reads-which-section)).
 
 ## Turn it on
 
@@ -47,23 +49,29 @@ runs it, and the [sixth tutorial](../guide/tutorials/06-declared-versus-observed
 
 - No guarantee or rule id of its own: the check applies [`cap.match`](../reference/rule-catalogue.md#capmatch), the same
   rule the resolver uses.
-- **An edge to a hosted component is read as its provider decides it** (2026-11-18;
+- **An edge to a hosted component is read as the provider built from the declaration decides a member's call of
+  it** (2026-11-18;
   [ledger](../operations/what-is-proven.md#wire-check-reads-a-hosted-edge-as-its-provider-decides)). Where the
-  edge's provider is a `wasm-component` artifact outside the `tool` namespace, the overlay tries `cap.invoke` on
-  `cap:{ns}/{name}` for the calling **node** — what an enforcing provider decides a member's direct call on
-  ([deprecations §108, §122](../guide/deprecations.md)) — and not the skill or tool shape. A rule for `"*"` or a
-  `node:` principal passes the edge; a rule or mandate that names the requirer's unit principal is the warning
-  `node-decided edge`, never a silent pass; a `skill.invoke` or `tools/call` rule is `unauthorisable edge`. The
-  co-op fixture's `depot-a.toml` over `route-optimizer.toml` is the worked case, and a test sets the check's
-  reading beside the provider's decision.
-- **Not known to the overlay:** placement (a `node:` actor is read as possibly the calling node), which unit's
-  rules a provider loads (`[authority]` loads its node's own unit's; the overlay reads every unit's), a component
-  declared as a plain `[[capability]]`, and the `tool` namespace's actor on a direct call. Its answer is *could
-  admit*, never *is admitted*. A provider that decides on the calling unit's principal is not built
-  (identity-and-lifecycle §9, O9).
-- **Not built:** placement — `[hosts]` describes eligibility and the check never says which host installs; an observed
-  binding — the answer is *would bind*; enforcement of `[[mandate]]` and `[[rule]]` at runtime from the file (an
-  evaluator does that, built in code).
+  edge's provider is a `wasm-component` artifact, the overlay reads the rules of each unit that could host it —
+  the ones a node with [`[authority]`](declared-authority.md) loads — on the shape that provider decides
+  (`cap.invoke` on `cap:{ns}/{name}`; `tools/call` on `tool:{name}` in the `tool` namespace), for the calling
+  **node**, field by field and in order ([deprecations §108, §122](../guide/deprecations.md)). A rule for `"*"` or
+  `node:<ip>:<port>` in every host passes the edge; `host-dependent edge`, `node-decided edge` and
+  `mandate-dependent edge` are warnings, never a silent pass; anything else is `unauthorisable edge`, naming the
+  reason. The co-op fixture's `depot-a.toml` over `route-optimizer.toml` is the worked case, and each reading is
+  tested beside the provider's decision.
+- **Not built, each an open ledger row:** an edge to a **deployed** provider is read for the requirer's unit
+  principal from any unit's rules, which is not how its provider decides it
+  ([row](../operations/what-is-proven.md#wire-check-reads-a-deployed-edge-for-the-unit)); a component a unit
+  declares as a plain `[[capability]]`, and a `blob`-provided capability, are read that way too
+  ([row](../operations/what-is-proven.md#wire-check-does-not-know-a-declared-capability-is-hosted)). A provider that
+  decides on the calling unit's principal is not built (identity-and-lifecycle §9, O9).
+- **Not known to the check, by design:** placement — `[hosts]` describes eligibility and the check never says which
+  host installs, nor which node a `node:` rule's caller is; an observed binding — the answer is *would bind* and
+  *could admit*.
+- **Who enforces a `[[rule]]` at run time:** a node whose configuration has an `[authority]` table builds its
+  evaluator from its own unit's `[[rule]]`s ([declared authority](declared-authority.md)); a stem without one logs
+  them, and an SDK agent reports them in `not_enforced`. `[[mandate]]` is read by the check only.
 - **Evidence:** the ledger row
   [the declared fleet checks offline and runs as stem nodes](../operations/what-is-proven.md#declared-fleet-checks-offline-runs-stem).
 

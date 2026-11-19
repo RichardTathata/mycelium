@@ -146,8 +146,7 @@ fn the_schema_window_fixture_names_the_window_and_the_unknown_schema() {
 }
 
 /// W4: a governed requirer whose only admitting rule requires a mandate scope nobody declares is
-/// `unauthorisable edge`; the co-op deployment, whose mandate and rules use the gateway's own
-/// operation form, stays green.
+/// `unauthorisable edge`; with the overlay off the same directory is green.
 #[test]
 fn the_unauthorised_fixture_names_the_edge_no_declaration_could_authorise() {
     let r = check(&load_units("tests/fixtures/units/unauthorised"), &[], &CheckOptions::default());
@@ -166,24 +165,32 @@ fn the_unauthorised_fixture_names_the_edge_no_declaration_could_authorise() {
 /// `cap:route/optimize@{node}` for the calling node. The fixture as it stood until this change authorised that
 /// edge with `skill.invoke` on `skill:route/optimize` for the unit principal `worker` (`auditor.toml:11`, with
 /// `worker.toml`'s mandate enumerating it) — a rule the provider never consults — and the check read it green. It
-/// is now `unauthorisable edge`; the fixture's rule moved to the units that host the component, as the provider
-/// decides it, and the co-op is green with no word about that edge. The provider's own decision on both rules is
+/// is now `unauthorisable edge`, naming the unit the rule sits in and the units its provider reads; the fixture's
+/// rule moved to the units that host the component, as the provider decides it, and the co-op is green with no word
+/// about that edge. The provider's own decision on both rules is
 /// `the_coop_fixtures_hosted_edge_is_decided_at_the_provider_as_wire_check_reads_it` (`src/agent/declared_authority_tests.rs`).
 /// Seen failing first: on the code before this change the old declaration below exited 0 with no `unauthorisable
 /// edge` — the false green itself.
 #[test]
 fn the_coops_hosted_edge_is_wired_by_a_rule_its_provider_reads() {
-    // The fixture as it stood: no rule in the depots, the skill rule in the auditor, the mandate enumerating it.
+    // The fixture as it stood: no rule in the depots; the skill rules in the auditor, for the worker; the worker's
+    // mandate enumerating both.
     let mut old = load_units("tests/fixtures/units/coop");
     for u in old.iter_mut() {
-        u.config.rules.retain(|r| r.resource != "cap:route/optimize");
+        u.config.rules.clear();
         if u.name == "auditor" {
-            let mut rule = mycelium::RuleDecl::new("worker", "skill.invoke", "skill:route/optimize");
-            rule.requires_mandate = Some("routing".into());
-            u.config.rules.push(rule);
+            for resource in ["skill:route/optimize", "skill:depot/intake"] {
+                let mut rule = mycelium::RuleDecl::new("worker", "skill.invoke", resource);
+                rule.requires_mandate = Some("routing".into());
+                u.config.rules.push(rule);
+            }
         }
         if u.name == "worker" {
-            u.config.mandates[0].operations.push("skill.invoke:skill:route/optimize".into());
+            u.config.mandates = mycelium::NodeCapabilityConfig::from_toml_str(
+                "[[mandate]]\nholder = \"worker\"\nscope = \"routing\"\noperations = [\"skill.invoke:skill:route/optimize\", \"skill.invoke:skill:depot/intake\"]\n",
+            )
+            .unwrap()
+            .mandates;
         }
     }
     let r = check(&old, &load_artifacts("tests/fixtures/units/artifacts"), &CheckOptions::default());
@@ -191,8 +198,7 @@ fn the_coops_hosted_edge_is_wired_by_a_rule_its_provider_reads() {
     let text = r.render_text();
     assert!(text.contains("unauthorisable edge (worker): requirement route/optimize"), "{text}");
     assert!(text.contains("cap.invoke on cap:route/optimize"), "{text}");
-    // The other edge of the same requirer — a deployed capability, read as a skill — is still admitted.
-    assert!(!text.contains("requirement depot/intake: no declared rule"), "{text}");
+    assert!(text.contains("`auditor`") && text.contains("depot-a|depot-b"), "where the rule is, and where its provider reads it: {text}");
 
     // The fixture as it is: green, the edge neither refused nor warned about, and carrying the hosted shape.
     let r = coop();

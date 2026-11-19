@@ -15,7 +15,8 @@
   admit. It is a warning because the checker knows no placement and does not claim the refusal.
 - **`[authority]` loads one unit's rules; the overlay reads every unit's.** Found moving the fixture's rule: left
   in `auditor.toml` it would pass the check and never be loaded by the depot that decides. The rule is now declared
-  in `depot-a.toml` and `depot-b.toml`. The overlay does not check this placement — a stated bound.
+  in `depot-a.toml` and `depot-b.toml`. The overlay did not check this placement at first; it does since #814's review
+  (`2026-11-19-wire-check-hosted-review-814.md`).
 - **Enumeration** (rule 1). Where a door derives a capability call: `provider_enforcement::derive_call` (five arms:
   `mcp.invoke`, `llm.invoke`, the `cap.invoke/` family, `skill.invoke`, any other protected kind) and its actor in
   `check`; the gateway's `/a2a` (`skill.invoke` on `skill:{id}@{target}`, `a2a.rs`) and `/mcp` doors; the gateway's

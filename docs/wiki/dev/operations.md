@@ -274,20 +274,33 @@ authority pass admits a grant-required rule at the edge (the grant is issued at 
 when no rule admits anyone to `grant.issue` on it. `RuleDecl` and `MandateDecl` are `deny_unknown_fields` now — the
 other section tables are not (stated in §65).
 
-**The overlay's hosted shape (2026-11-18; `deprecations.md` §122).** `wire_check::check` reads an edge by what the
-declaration shows of its provider. A deployed provider (a unit's `[[capability]]`, a group) keeps the two shapes of
-`call_shapes`, matched for the requirer's unit principal. An edge whose provider is a `wasm-component` artifact
-outside the `tool` namespace gets `hosted_call_shape` — `cap.invoke` on `cap:{ns}/{name}`, what
-`provider_enforcement::derive_call` answers for the kind, held equal by `the_hosted_shape_is_what_the_provider_derives`
-— and only that shape, because the provider that hosts it never consults a skill or tool rule. Its actor is the
-calling **node** (`provider_enforcement::check`: an unframed call is `node:{sender}`; `rpc_call_with_mandate` frames
-`node:{self}`), so a `*` or `node:` rule passes, a rule or mandate naming the unit principal is the warning
-`node-decided edge`, and anything else is `unauthorisable edge`. The reusable rule: **a design-time check predicts a
-decision another agent makes, so it reads the shape and the actor from that agent's own derivation and says *could
-admit*; where the declaration cannot show what the decider will see (placement, which unit's rules it loads) it
-warns or states the bound, and never passes on a reading the decider does not make.** The co-op fixture's rule for
-the optimizer lives in the depots that host it for the second of those reasons: `[authority]` loads its node's own
-unit's rules. The provider deciding on a unit principal is identity-and-lifecycle §9, O9 — *not built*.
+**The overlay's hosted reading (2026-11-18; `deprecations.md` §122; revised on #814's review).** `wire_check::check`
+reads an edge by what the declaration shows of its provider. A deployed provider (a unit's `[[capability]]`, a group)
+keeps the two shapes of `call_shapes`, matched for the requirer's unit principal from any unit's rules — the older
+reading, which is **not** the provider's (open rows on `what-is-proven.md`). An edge whose provider is a
+`wasm-component` artifact is read by `hosted_edge` / `host_reading` as **the provider built from the declaration**
+decides **a member's direct call**:
+
+- the shape is `hosted_capability_call(ns, name)` (`src/agent/mod.rs`), the function `derive_call` itself calls;
+- the rules are those of each unit in `Provider::Artifact::hosts`, and no other — `declared_authority::plan` loads
+  the node's own unit's rules — in file order, because `ReferenceEvaluator::evaluate_with_history` decides by the
+  **first** allowance whose `matches` holds, and a matching rule that does not permit shadows the rest;
+- the actor is `node:{sender}` (`provider_enforcement::check`), matched exactly: `*`, or `node:` and a `NodeId` in its
+  own spelling. A unit principal is `node-decided edge`;
+- each `RuleDecl` field is read as that door reads it: `requires_scopes` and `signed_with` take the rule out of
+  `matches` for a member's call; `cancellable` is `door_cannot_stop` at `rpc_rx` for a hosted kind; `requires_facts`
+  is *indeterminate* at the reference evaluator; `requires_mandate` needs an authority `[authority]` never entitles
+  (`mandate-dependent edge`); `requires_grant` and `requires_values` are run-time and not read. `limit`, `data_class`,
+  `locality` and `counter` exist on `Rule` and cannot be written in a unit file.
+
+The severities of the three hosted warnings are constants (`NODE_DECIDED`, `HOST_DEPENDENT`, `MANDATE_DEPENDENT`).
+The reusable rule: **a design-time check predicts a decision another agent makes, so it reads the shape, the actor,
+the rule set and each field from that agent's own code path, pairs every reading with a test at that agent's door,
+and says *could admit*; where the declaration cannot show what the decider will see it warns or states the bound,
+and never passes on a reading the decider does not make.** The second half was learned the hard way: the first cut
+took the shape from the provider and left the rule set, the matcher and the fields as the overlay's own, and the
+review found a false green in each. The provider deciding on a unit principal is identity-and-lifecycle §9, O9 —
+*not built*.
 
 ## Grants, the third PR (adopter-surface X3, 2026-10-25)
 

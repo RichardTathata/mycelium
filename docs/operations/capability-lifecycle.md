@@ -62,11 +62,13 @@ Each finding has a `kind` a script can key on (`src/wire_check.rs`):
 | `unhostable entry` — an artifact would satisfy the filter but no `[hosts]` can take it | error |
 | `presence unhostable` — a `[[presence]]` floor cannot be met | error |
 | `presence bands overlap` — two `[[presence]]` bands, at least one capped, can match the same providers | warning |
-| `unauthorisable edge` — the requirer declares authority, and no declared rule and mandate could admit the call | error |
+| `unauthorisable edge` — no declared rule and mandate could admit the call; for a hosted component, no rule of a unit that could host it admits a calling node | error |
 | `would bind by provisioning` — no deployed provider, but a hostable artifact matches | warning; error with `--strict-deployed` |
 | `would bind after acceptance` — as above, but the artifact is **proposed** and loads only into a shadow lane until accepted | warning; error with `--strict-deployed` |
 | `ungoverned edge` — the requirer declares no mandate and no rule while other units do | warning |
-| `node-decided edge` — an edge to a hosted component is admitted only by a rule or mandate naming the requirer's unit principal, where its provider decides the calling node (`node:{sender}`) | warning |
+| `node-decided edge` — an edge to a hosted component is admitted only by a rule or mandate naming the requirer's unit principal, where its provider decides the calling node (`node:{sender}`): a provider as built today refuses the call | warning |
+| `host-dependent edge` — of the units that could host a component, one's own rules admit the call and another's do not | warning |
+| `mandate-dependent edge` — the rule that would admit a hosted edge requires a mandate scope; a provider built from `[authority]` entitles no authority to one | warning |
 | `unranked ranking` — a ranking on an attribute no matching capability carries | warning |
 | `single provider` — exactly one possible provider | warning |
 
@@ -78,7 +80,7 @@ Flags (`mycelium wire-check <units-dir> --help`):
 | `--schemas <dir>` | the schema directory (guide 12); every declared `schema_id` must name a `.json` file in it |
 | `--format text\|json\|dot` | text (default), the versioned JSON declaration document, or a Graphviz picture |
 | `--strict-deployed` | the two *would bind* warnings become errors |
-| `--no-authority` | skip the authority overlay (`unauthorisable edge`, `ungoverned edge`, `node-decided edge`, `unissuable grant`) |
+| `--no-authority` | skip the authority overlay (`unauthorisable edge`, `ungoverned edge`, `node-decided edge`, `host-dependent edge`, `mandate-dependent edge`, `unissuable grant`) |
 | `--revision <rev>` | the revision stamped on the JSON; defaults to `git rev-parse HEAD` in the units directory |
 
 Exit codes: **0** no errors, **1** at least one error, **2** a usage error or a file that does not

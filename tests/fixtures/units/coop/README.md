@@ -14,11 +14,20 @@ cargo run --features cli --bin mycelium -- wire-check tests/fixtures/units/coop 
 Without `--library` the same directory reports `unwired requirement` and `presence unhostable` for
 `route/optimize`, because then nothing could provide it — which is also correct.
 
-**Authority.** The worker's two edges are read as their providers decide them. `depot/intake` is a deployed
-capability: a skill, admitted by the auditor's rule for the worker under its `routing` mandate. `route/optimize` is a
-hosted component: an enforcing provider decides a member's direct call of it as `cap.invoke` on
-`cap:route/optimize@{node}` for the **calling node**, so its rule — any node, `cap.invoke`, `cap:route/optimize` — is
-declared in each depot that could host it (`[authority]` loads a node's own unit's rules). Until 2026-11-18 the
-optimizer was authorised by a `skill.invoke` rule for the worker, which that provider never reads; the check passed
-it, and now names it (`unauthorisable edge`). The provider's decision on both rules is shown by
-`the_coop_fixtures_hosted_edge_is_decided_at_the_provider_as_wire_check_reads_it`.
+**Authority.** Who may call what a depot provides is declared by the depots, because a node with `[authority]`
+builds its evaluator from its own unit's rules and a provider decides a member's call for the calling **node**:
+
+- `route/optimize` is a hosted component, decided as `cap.invoke` on `cap:route/optimize@{node}`. `wire-check` reads
+  this edge as that provider decides it, from the depots' rules, and passes it.
+- `depot/intake` is a deployed capability, a skill, decided as `skill.invoke` on `skill:depot/intake@{node}` for a
+  call that names it. `wire-check` does not read a deployed edge as its provider decides it (an open row on
+  `docs/operations/what-is-proven.md`); the worker declares no vocabulary, so the check says `ungoverned edge` and
+  claims nothing about it.
+
+Both rules are for `actor = "*"` — every admitted member, the widest rule there is — because a declaration carries
+no placement and so has no node address to name; a deployment that knows its callers names them,
+`actor = "node:<ip>:<port>"`. Until 2026-11-18 both edges were authorised in `auditor.toml`, by `skill.invoke` rules
+for the unit principal `worker` under a mandate `worker` held: rules no depot loads, for a principal no provider
+sees, and the check passed them. What a provider built from this directory does with each call, under the rules as
+they are and as they stood, is shown by `the_coop_fixtures_hosted_edge_is_decided_at_the_provider_as_wire_check_reads_it`
+and `the_coop_fixtures_deployed_edge_runs_under_the_rule_its_depot_declares` (`src/agent/declared_authority_tests.rs`).

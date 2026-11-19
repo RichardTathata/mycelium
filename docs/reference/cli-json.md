@@ -19,6 +19,11 @@ one:
   and a field that could not does not become so.
 - **A reader ignores what it does not know**: an unknown field, and an unknown `declare` event. A reader that refuses
   an unknown field is not reading this contract.
+- **A set of values and a list may grow too** (stated 2026-11-18, with `wire-check`'s third call shape): within `/N`
+  a string field that names one of a set — a finding's `kind`, a call shape's `operation`, an event's name — may take
+  a value it did not take before, and an array may hold more items than it did. A reader treats a value it does not
+  know as it treats an unknown field, and does not rely on an array's length. A value is never renamed or given
+  another meaning.
 - **A breaking change is a new version**: `/N+1`, announced with an entry in
   [`deprecations.md`](../guide/deprecations.md) saying what changed and how a reader moves.
 - [`declaration.schema.json`](declaration.schema.json) is **not a reader's validator**: it says
