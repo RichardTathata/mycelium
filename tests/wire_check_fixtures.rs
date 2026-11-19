@@ -165,7 +165,7 @@ fn the_unauthorised_fixture_names_the_edge_no_declaration_could_authorise() {
 /// `cap:route/optimize@{node}` for the calling node. The fixture as it stood until this change authorised that
 /// edge with `skill.invoke` on `skill:route/optimize` for the unit principal `worker` (`auditor.toml:11`, with
 /// `worker.toml`'s mandate enumerating it) — a rule the provider never consults — and the check read it green. It
-/// is now `unauthorisable edge`, naming the unit the rule sits in and the units its provider reads; the fixture's
+/// is now `unauthorisable edge`, naming the units whose rules its provider reads and the rule it does not; the fixture's
 /// rule moved to the units that host the component, as the provider decides it, and the co-op is green with no word
 /// about that edge. The provider's own decision on both rules is
 /// `the_coop_fixtures_hosted_edge_is_decided_at_the_provider_as_wire_check_reads_it` (`src/agent/declared_authority_tests.rs`).
@@ -198,7 +198,7 @@ fn the_coops_hosted_edge_is_wired_by_a_rule_its_provider_reads() {
     let text = r.render_text();
     assert!(text.contains("unauthorisable edge (worker): requirement route/optimize"), "{text}");
     assert!(text.contains("cap.invoke on cap:route/optimize"), "{text}");
-    assert!(text.contains("`auditor`") && text.contains("depot-a|depot-b"), "where the rule is, and where its provider reads it: {text}");
+    assert!(text.contains("no rule declared by depot-a|depot-b") && text.contains("does not consult the rule on skill.invoke on skill:route/optimize"), "where its provider reads its rules, and the rule it does not read: {text}");
 
     // The fixture as it is: green, the edge neither refused nor warned about, and carrying the hosted shape.
     let r = coop();
