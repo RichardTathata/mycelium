@@ -2233,6 +2233,43 @@ task is spawned **and before the capability that names it is advertised**:
 Every other site registers before it spawns, or inside the function that awaits the receiver. After the fix, 0 in 240
 runs of the whole `agent::bulk` module at 24 parallel processes.
 
+**Known flake, closed (2026-11-20): a test client, not the gateway.** `agent::http::substrate_kind_tests::an_ordinary_kind_passes_every_door`
+— *"/gateway/signal/emit [secret] gave no response for `repair.request` in 20s"* on PR #812's CI (run 44752877045, attempt
+2, the strict `compliance,a2a` lib line; it was the only occurrence in the 45 failed CI runs searched). Reproduced: 17 of
+200 runs under load (40 parallel, 12 spinning cores), 14 of them a send door — `signal/emit`, `mailbox/deliver`,
+`overlay/emit_reliable` — answering nothing, for no particular kind or token. The request never reached the gateway: a
+counter in its auth layer read one request fewer than the test sent, and the gateway's per-connection byte counts showed
+no connection holding it. The test's one pooled `reqwest` client holds event streams open and sends beside them; its
+pool trace showed, once in each failing run and in none of 2 407 passing batches, a connection put back in the pool
+before the request it had been taken for was answered — so a later request was handed a connection carrying a stream.
+With the pool off (`pool_max_idle_per_host(0)`, the module's `door_client`) 0 of 200 failed under the same load. No
+timeout, sleep or retry changed. `the_door_client_keeps_no_connection_between_requests` pins the client: seen failing
+first with the pool on (*"1 connection(s) still open"*). **Not fixed, the same hazard (rule 1):** every test that holds a
+stream open on one pooled client and sends beside it — `grep -ln "reqwest::Client" src mycelium-*/tests tests` crossed
+with the streaming routes finds `http/http_tests.rs`, `lib_tests.rs`, `http/schedule_run_tests.rs`,
+`call_admission_tests.rs`, `http/log_read_tests.rs`, `fleet_history_tests.rs`, `http/grant_tests.rs`,
+`hosted_capability_door_tests.rs`, `http/kv_read_tests.rs`, `tests/exposure_doors.rs`, and the tuple-space and
+reason companions' `tests/gateway.rs`; none is a recorded flake. Whether the re-pooling is `hyper-util`'s defect
+(0.1.20) is not established; no product code holds a stream on a pooled client.
+
+**Known flake, closed (2026-11-20): the `governed-call` scaffold waited for one side.** The Scaffold job's
+`governed-call` run ended *"Error: Timeout"* 8 s after starting (PR #812, run 44752877045, attempt 1, job 136344972540);
+attempt 2 passed. `templates/governed-call/src/main.rs` waited for `b.connected_peers()` — B's own writer to A, which
+exists before A has heard of B — and then made B's 5 s `rpc_call` to A. A has no bootstrap peers, so its reply goes only
+to a peer in its own table (`src/agent/tasks.rs`, the gossip shard's dispatch: no targets, the frame is dropped). In the
+plant below A's table was empty when B called and held B before B's 5 s were up, and the call still timed out: a reply
+dropped this way is not sent again — the shape of O2 (`identity-and-lifecycle.md` §9), here on a first meeting rather
+than a restart. Not reproduced as CI saw it (60 runs under 24 spinning cores and 12 under disk-write load, all
+green; A learned B within ~10 ms of B's first connection). Shown by a plant: with SWIM off on A, so that A learns B only
+from B's first ping, the shipped wait failed 9 of 9 with the same *"Error: Timeout"*, and the new wait — both nodes list
+the other, bounded at 30 s — passed 13 of 14 (the fourteenth, the first run of a fresh binary, was killed by its 40 s
+watchdog; it is not explained). A scaffold made by 2.40.0 keeps the old wait (CHANGELOG). **Not the same cause as**
+`mycelium-wasm-host` `stem_compliance::a_compliance_stem_starts_with_a_token_table_and_attaches_its_authority` (*"the
+stem's gateway never answered"* at its 60 s deadline, once locally on PR #815, 2 s alone): that test is a fixed-time
+wait for a separate debug process to start. Its stderr pipe, unread until exit, is not what holds it — the stem writes
+nothing to stderr — and a debug stem on this machine took about 5.4 s from launch to its gateway, 3.6 s of it before
+`[authority]` attached, so a 60 s miss is a tenfold slowdown under load. Open, not investigated further.
+
 **Known flakes, open (seen during the v2.36.0 work, 2026-10-19; not yet investigated):**
 - `agent::exposure::tests::doors::the_shadow_profile_counts_and_holds_nothing` (Y5/Y11, the exposure policy's shadow
   rung) — *"legacy held: … the actor's history kept changing while this decision was made on it"*, once on PR #765's

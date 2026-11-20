@@ -55,6 +55,29 @@ fn tokens() -> Vec<&'static str> {
     { vec![TOKEN] }
 }
 
+/// The client every test here asks the doors with. **It keeps no connection between requests** (2026-11-20, the
+/// `an_ordinary_kind_passes_every_door` flake): these tests hold event streams open and send beside them, and a pooled
+/// client lost a request. In the failing runs one request of a batch was never written: the gateway's auth layer counted
+/// one request fewer than the test sent, and the client's own trace (`hyper_util::client::legacy::pool`) showed a
+/// connection put back in the pool before the request it had been taken for was answered — 1 time in each failing run,
+/// 0 times in 2 407 batches of the passing ones. A connection back in the pool while it carries a stream hands the next
+/// request a connection that will never be free. Seen as `/gateway/signal/emit … gave no response … in 20s` (CI run
+/// 44752877045), 17 times in 200 runs of the test under load with the pool, 0 in 200 without.
+/// [`the_door_client_keeps_no_connection_between_requests`] pins the client's configuration.
+///
+/// Bounded, so a stalled door fails instead of hanging the run (one run of `an_ordinary_kind_passes_every_door` hung
+/// ~15 min for #788's author; likely this same lost request, not confirmed): a connection must open in 5 s, and a body that
+/// sends nothing for 30 s errors. No whole-request timeout — a stream's response is held open across a test, and that
+/// would cut it.
+fn door_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .pool_max_idle_per_host(0)
+        .connect_timeout(Duration::from_secs(5))
+        .read_timeout(Duration::from_secs(30))
+        .build()
+        .expect("the test client builds")
+}
+
 async fn node(cfg_edit: impl FnOnce(&mut GossipConfig)) -> (Arc<GossipAgent>, String, reqwest::Client) {
     let gossip_port = alloc_port();
     let http_port = alloc_port();
@@ -73,14 +96,7 @@ async fn node(cfg_edit: impl FnOnce(&mut GossipConfig)) -> (Arc<GossipAgent>, St
     let agent = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", gossip_port).unwrap(), cfg));
     agent.start().await.unwrap();
     let base = format!("http://127.0.0.1:{http_port}");
-    // Bounded, so a stalled door fails instead of hanging the run (one run of `an_ordinary_kind_passes_every_door` hung
-    // ~15 min for #788's author): a connection must open in 5 s, and a body that sends nothing for 30 s errors. No
-    // whole-request timeout — a stream's response is held open across a test, and that would cut it.
-    let client = reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(5))
-        .read_timeout(Duration::from_secs(30))
-        .build()
-        .expect("the test client builds");
+    let client = door_client();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     while client.get(format!("{base}/health")).send().await.is_err() {
         assert!(tokio::time::Instant::now() < deadline, "the gateway did not come up");
@@ -294,6 +310,30 @@ async fn an_ordinary_kind_passes_every_door() {
     assert_eq!(r.status(), 200);
     let event = next_event(&mut tap, Duration::from_secs(5)).await.expect("the ordinary signal reaches its tap");
     assert_eq!(event, b"pump-7");
+    agent.shutdown().await;
+}
+
+/// **The door client keeps no connection between requests**, so no request of these tests can be given a connection
+/// that carries, or carried, another's response (see [`door_client`]). After a response is read to its end the gateway
+/// holds no connection of the client's: with a pooling client it holds the idle one until its own header-read bound
+/// (30 s) closes it. Seen failing first with the pool on: *"1 connection(s) still open"* at the 10 s bound.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_door_client_keeps_no_connection_between_requests() {
+    let (agent, base, client) = node(|_| {}).await;
+    for _ in 0..2 {
+        let r = tokio::time::timeout(REQUEST_BOUND, client.get(format!("{base}/health")).send())
+            .await.expect("/health answers in time").unwrap();
+        assert_eq!(r.status(), 200);
+        tokio::time::timeout(REQUEST_BOUND, r.bytes()).await.expect("the body ends in time").unwrap();
+    }
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let open = agent.system_stats().gateway_connections_open;
+        if open == 0 { break; }
+        assert!(tokio::time::Instant::now() < deadline,
+            "{open} connection(s) still open after every response was read: the door client kept one to use again");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     agent.shutdown().await;
 }
 
