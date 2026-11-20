@@ -35,8 +35,9 @@ pub const CA_COMMIT_PREFIX: &str = "sys/ca-commit/";
 /// A copy larger than this is not a commitment (one is under 2 KiB) and is skipped unread: any admitted member can
 /// write a value of megabytes under the prefix, and the scan must not hash it.
 const MAX_COPY_BYTES: usize = 4_096;
-/// Copies read in one scan, in key order; the rest are skipped and the scan says how many
-/// (`ca_commitment_scan_skipped`).
+/// Copies read in one scan; the rest are left for the next scans and the scan says how many
+/// (`ca_commitment_scan_skipped`). Each scan starts where the last one stopped, in key order and wrapping, so with `n`
+/// readable copies every one is read within `ceil(n / MAX_COPIES_PER_SCAN)` consecutive scans.
 const MAX_COPIES_PER_SCAN: usize = 1_024;
 /// Distinct unverified copies counted in a process's life. Past it a further distinct one is **not counted** (and
 /// nothing is ever counted twice): the counter then reads "at least this many".
@@ -59,9 +60,15 @@ pub(crate) struct CommitmentState {
     /// Second commitments the pinned CA's key signed, refused: distinct ones, from the operator's file at a start
     /// and from KV copies.
     pub(crate) conflicts: AtomicU64,
-    /// Documents read as absent — malformed, or not signed by a root this node trusts: distinct KV copies, and the
-    /// operator's file beside a pin at a start.
+    /// Distinct KV copies read as absent: malformed, or not signed by a root this node trusts. The KV's only: the
+    /// operator's file has its own signal.
     pub(crate) unverified: AtomicU64,
+    /// `1` when, at this start, the operator's file held a commitment from a CA this node does not trust (yet) and
+    /// the node, holding a pin, started without pinning it. Every other file it cannot assess refuses the start.
+    pub(crate) file_untrusted_ca: AtomicU64,
+    /// Where the next bounded scan starts among the copies, so that every copy is read within a bounded number of
+    /// scans whatever sorts ahead of it (#812's confirm round C3). A cursor, not a random draw: deterministic.
+    scan_cursor: std::sync::atomic::AtomicUsize,
     /// KV copies the last scan did not read: larger than a commitment can be, or past the per-scan bound. A gauge,
     /// not a count: above 0, detection through the KV is degraded for as long as it stays there.
     pub(crate) scan_skipped: AtomicU64,
@@ -142,12 +149,15 @@ pub(crate) fn at_start(ctx: &TaskCtx, tls_cfg: &mycelium_core::config::TlsConfig
     }
     match found.offered {
         OfferedCommitment::Nothing => {}
-        // Not a second commitment from a CA: nothing shows a CA's key signed it (#812's review F3). It pins nothing.
-        OfferedCommitment::Unverified(why) => {
-            state.unverified.fetch_add(1, Ordering::Relaxed);
+        // The operator's file, from a CA this node does not trust (yet): the one unassessable file a node with a pin
+        // starts with (`EARLY_COMMITMENT_BESIDE_A_PIN_STARTS`). Its own signal — the KV's unverified copies are a
+        // different thing, which any member can raise.
+        OfferedCommitment::UntrustedCa => {
+            state.file_untrusted_ca.fetch_add(1, Ordering::Relaxed);
             tracing::warn!(
-                file = %file.display(), %why,
-                "CA succession: ca-commit.pem holds a document this node cannot assess against its roots; it is read as absent, nothing is pinned from it and this node's pins stand"
+                file = %file.display(),
+                "CA succession: ca-commit.pem holds a commitment from a CA this node does not trust (placed before this node cut over to that CA?); \
+                 nothing is pinned from it, this node's pins stand, and the file is read again at the next start"
             );
         }
         OfferedCommitment::Conflict(other) => {
@@ -193,27 +203,32 @@ pub(crate) fn publish(ctx: &TaskCtx) {
 /// Nothing read here is ever pinned: a node pins from its operator's file, and a copy — forged or genuine — adds no
 /// pin and changes none.
 ///
-/// **Bounded, because any admitted member can write any key here** (#812's review F4). A value larger than
-/// [`MAX_COPY_BYTES`] is skipped before it is hashed or parsed; at most [`MAX_COPIES_PER_SCAN`] copies are read, in
-/// key order; what was skipped is reported as a gauge (`ca_commitment_scan_skipped`). "Counted once" holds without
-/// limit of time: a copy already counted is never counted again, and past [`NOTED_UNVERIFIED_MAX`] distinct unverified
-/// copies (or [`NOTED_CONFLICTS_MAX`] distinct conflicts) a further distinct one is not counted at all. **What a flood
-/// can do, stated:** more than `MAX_COPIES_PER_SCAN` keys under the prefix can keep a genuine conflicting copy outside
-/// what a scan reads; the gauge above 0 is how that shows, and the operator's file path is not affected.
+/// **Bounded, because any admitted member can write any key here** (#812's review F4, its confirm round C3). A value
+/// larger than [`MAX_COPY_BYTES`] is skipped before it is hashed or parsed. Of the rest, a scan reads at most
+/// [`MAX_COPIES_PER_SCAN`], in key order **from where the last scan stopped**, wrapping — so keys that sort ahead of a
+/// genuine copy delay its reading by a bounded number of scans and never hide it; what a scan left is reported as a
+/// gauge (`ca_commitment_scan_skipped`). "Counted once" holds without limit of time: a copy already counted is never
+/// counted again, and past [`NOTED_UNVERIFIED_MAX`] distinct unverified copies (or [`NOTED_CONFLICTS_MAX`] distinct
+/// conflicts) a further distinct one is not counted at all. Conflicts have their own set, so junk cannot use up the
+/// room a conflict is counted in.
 pub(crate) fn scan(ctx: &TaskCtx) {
     let Some(tls) = ctx.tls.get() else { return };
     let state = &ctx.ca_commitment;
     let pins = state.pinned();
     let roots = tls.roots_der();
-    // In key order (`scan_kv_prefix` sorts), so which copies a bounded scan reads does not change from scan to scan.
-    let copies = mycelium_core::store::scan_kv_prefix(&ctx.kv_state, CA_COMMIT_PREFIX);
-    let (mut read, mut skipped) = (0usize, 0u64);
+    // In key order (`scan_kv_prefix` sorts), so the cursor means the same copies from scan to scan.
+    let all = mycelium_core::store::scan_kv_prefix(&ctx.kv_state, CA_COMMIT_PREFIX);
+    let oversize = all.iter().filter(|(_, bytes)| bytes.len() > MAX_COPY_BYTES).count();
+    let mut copies: Vec<_> = all.into_iter().filter(|(_, bytes)| bytes.len() <= MAX_COPY_BYTES).collect();
+    let mut skipped = oversize as u64;
+    if copies.len() > MAX_COPIES_PER_SCAN {
+        let n = copies.len();
+        let start = state.scan_cursor.fetch_add(MAX_COPIES_PER_SCAN, Ordering::Relaxed) % n;
+        copies.rotate_left(start);
+        copies.truncate(MAX_COPIES_PER_SCAN);
+        skipped += (n - MAX_COPIES_PER_SCAN) as u64;
+    }
     for (path, bytes) in copies {
-        if bytes.len() > MAX_COPY_BYTES || read >= MAX_COPIES_PER_SCAN {
-            skipped += 1;
-            continue;
-        }
-        read += 1;
         let copy = std::str::from_utf8(&bytes).ok().and_then(|pem| CaCommitment::from_pem(pem).ok());
         if let Some(c) = &copy
             && pins.iter().any(|p| p.digest() == c.digest())

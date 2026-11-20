@@ -224,11 +224,18 @@ async fn a_kv_copy_of_a_commitment_is_compared_with_the_pin_and_never_becomes_on
     let _ = std::fs::remove_dir_all(&base);
 }
 
-/// **#812's review F3 (a), on a live node: an operator's file no CA signed is not a stolen-key alarm.** A node with a
-/// pin is restarted with a `ca-commit.pem` carrying a garbage signature: it starts, keeps its pin, counts one
-/// unverified document and **no conflict**. Seen failing first with an unverifiable file counted as a conflict.
+/// **#812's review F3 (a) and its confirm round's C1, on a live node: beside a pin, an operator's file is never a
+/// stolen-key alarm unless a CA's key signed it, and only an early file lets the start go on.** A node with a pin:
+/// - restarted with a `ca-commit.pem` carrying a garbage signature, **refuses to start** naming the file — and no
+///   conflict is counted by the start that follows;
+/// - restarted with the successor's own commitment, placed **before it trusts the successor**, starts: nothing is
+///   pinned, its pin stands, and the file has its own signal (`ca_commitment_file_untrusted_ca`), apart from the KV's
+///   unverified copies and from conflicts.
+///
+/// Seen failing first, one build each: with every unassessable file beside a pin passed over (the node started on the
+/// garbage signature); and with the early file counted among the KV's unverified copies.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn an_unsigned_operator_file_beside_a_pin_is_counted_unverified_not_as_a_conflict() {
+async fn beside_a_pin_a_file_no_ca_signed_refuses_the_start_and_an_early_one_has_its_own_signal() {
     let base = fresh_dir("unsigned-file");
     let (d1, c) = committed(&base);
     let (id, cfg) = node(&base, "a", &d1, true);
@@ -238,10 +245,16 @@ async fn an_unsigned_operator_file_beside_a_pin_is_counted_unverified_not_as_a_c
     let mut forged = rival(&base, &d1, "rival");
     forged.sig = [7u8; 64];
     std::fs::write(&file, forged.to_pem()).unwrap();
+    let err = GossipAgent::new(id.clone(), cfg.clone()).start().await.expect_err("no CA signed it").to_string();
+    assert!(err.contains("ca-commit.pem") && err.contains("did not sign"), "{err}");
+
+    let (file2, _) = crate::tls::commit_successor(&base.join("ca2"), &base.join("ca3")).unwrap();
+    std::fs::copy(&file2, &file).unwrap();
     let a = started(&id, &cfg).await;
     let state = &a.task_ctx.ca_commitment;
-    assert_eq!(held(&a), vec![c.clone()], "the pin stands");
-    assert_eq!((state.unverified.load(Ordering::Relaxed), state.conflicts.load(Ordering::Relaxed)), (1, 0));
+    assert_eq!(held(&a), vec![c.clone()], "the pin stands, and the early commitment is not pinned");
+    assert_eq!(state.file_untrusted_ca.load(Ordering::Relaxed), 1, "the operator's file has its own signal");
+    assert_eq!((state.unverified.load(Ordering::Relaxed), state.conflicts.load(Ordering::Relaxed)), (0, 0));
     a.shutdown().await;
     let _ = std::fs::remove_dir_all(&base);
 }
@@ -396,7 +409,10 @@ async fn a_flooded_prefix_is_counted_once_and_never_again() {
     // Sorted ahead of the junk, so the bounded scan reads it.
     put(&a.task_ctx, &format!("{} conflict", ca_commit::CA_COMMIT_PREFIX), rival(&base, &d1, "rival").to_pem().as_bytes());
     let counts = || (state.unverified.load(Ordering::Relaxed), state.conflicts.load(Ordering::Relaxed));
-    ca_commit::scan(&a.task_ctx);
+    // Every copy is read within two scans of 1,024 (the cursor moves on from where the watcher's own scans left it).
+    for _ in 0..2 {
+        ca_commit::scan(&a.task_ctx);
+    }
     let first = counts();
     assert_eq!(first.1, 1, "the genuine conflict is counted");
     assert!(first.0 >= 1 && first.0 <= 1_024, "unverified copies are counted up to the bound: {}", first.0);
@@ -420,6 +436,32 @@ async fn a_scan_reads_a_bounded_number_of_copies_and_reports_the_rest() {
         ca_commit::scan(&a.task_ctx);
         assert_eq!(state.scan_skipped.load(Ordering::Relaxed), 1_101 - 1_024, "what the scan did not read, not a running total");
     }
+    a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// **#812's confirm round C3: keys that sort ahead of a genuine conflicting copy delay its reading and never hide
+/// it.** 1,024 junk keys sort ahead of every node's path (a node id begins with a digit), and a second commitment the
+/// CA's key signed sits at a node's path behind them — 1,026 readable copies with the node's own. Each scan starts
+/// where the last stopped, so two consecutive scans read every copy: the conflict is counted within two scans, once.
+/// The reviewer's test. Seen failing first with every scan starting at the first key: after five scans the conflict
+/// had never been read.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_conflict_behind_a_flood_of_keys_is_counted_within_a_bounded_number_of_scans() {
+    let base = fresh_dir("behind-flood");
+    let (d1, _) = committed(&base);
+    let (a, state) = flooded(&base, &d1, 1_024).await;
+    let stolen = rival(&base, &d1, "rival");
+    put(&a.task_ctx, &format!("{}127.0.0.1:7/{}", ca_commit::CA_COMMIT_PREFIX, "ab".repeat(32)), stolen.to_pem().as_bytes());
+    for _ in 0..2 {
+        ca_commit::scan(&a.task_ctx);
+    }
+    assert_eq!(state.conflicts.load(Ordering::Relaxed), 1, "read within ceil(1026 / 1024) = 2 scans");
+    assert_eq!(state.scan_skipped.load(Ordering::Relaxed), 2, "each scan leaves two copies for the next");
+    for _ in 0..3 {
+        ca_commit::scan(&a.task_ctx);
+    }
+    assert_eq!(state.conflicts.load(Ordering::Relaxed), 1, "and counted once");
     a.shutdown().await;
     let _ = std::fs::remove_dir_all(&base);
 }

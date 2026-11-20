@@ -473,7 +473,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   generation) and sign `ca-commit.pem`, naming it; a CA commits once. A node pins the commitment its operator places in
   its certificate directory — assessed against the root it trusts, persisted under `succession/` — and from nowhere
   else; it refuses to start with a commitment it cannot assess, or with one and no `[persistence]`, and it refuses and
-  counts a second commitment the same CA's key signed. Each node republishes what it pinned at `sys/ca-commit/{node}`
+  counts a second commitment the same CA's key signed. Each node republishes what it pinned at `sys/ca-commit/{node}/{predecessor}`
   **for detection only**: a copy by the same CA that conflicts with a node's pin is counted
   (`ca_commitment_conflict`), which is where a stolen CA key shows; a copy no trusted CA signed is counted apart
   (`ca_commitment_unverified`); a copy is never pinned; and the scan is bounded against a member flooding the prefix

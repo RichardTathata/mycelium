@@ -400,6 +400,8 @@ pub(super) async fn stats_handler(State(ctx): State<Arc<HttpCtx>>) -> impl IntoR
             body["ca_commitment_pins"] = json!(c.pinned().len());
             body["ca_commitment_conflict"] = json!(load(&c.conflicts));
             body["ca_commitment_unverified"] = json!(load(&c.unverified));
+            // The operator's own file, at this start: a commitment from a CA this node does not trust (yet), not pinned.
+            body["ca_commitment_file_untrusted_ca"] = json!(load(&c.file_untrusted_ca));
             // A gauge: KV copies the last scan did not read (oversize, or past the per-scan bound).
             body["ca_commitment_scan_skipped"] = json!(load(&c.scan_skipped));
         }

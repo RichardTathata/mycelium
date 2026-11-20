@@ -505,6 +505,8 @@ fn anchored_on_disk(seen: &AnchorsSeen, tally: &AppendTally, n: &NodeId) -> bool
 ///
 /// Between the take-off and the second look the node may believe un-journaled a record that is on disk; that answer
 /// is `false`, and a caller that waits for durability waits or retries. No interleaving leaves it believing the reverse.
+/// The same direction holds for a duplicate of the record kept as a peer's memory: the second copy is dead, is taken
+/// off `journaled` and left out, while the first stays on disk — un-journaled by the node's count, and on disk.
 async fn compact(j: Arc<super::journal::Journal>, seen: Arc<AnchorsSeen>, tally: Arc<AppendTally>, state: Arc<Compaction>) -> u64 {
     let mut written: HashSet<(String, [u8; 32])> = HashSet::new();
     // Peers whose one dead record this pass kept as their memory.
@@ -2198,9 +2200,9 @@ mod tests {
     /// its append handed to the writer; before that append settles, X stops being kept and a compaction is queued
     /// behind it. The writer appends X, then rewrites: X is in flight, so its frame is kept, and the settle that
     /// follows — putting X on the journaled set — is true. Kept again, X is durable and on disk. (Current-thread
-    /// runtime: the order is the scheduler's.) Seen failing first with the compaction not consulting the in-flight
-    /// set: it removed two records, X's frame with D's, while X's append went on to settle — the state in which the
-    /// reviewer's run showed `anchors_durable_for` answering `true` for a certificate the journal did not hold.
+    /// runtime: the order is the scheduler's.) The durable claim is asserted before the count of removed records, so
+    /// it is the claim that fails. Seen failing first with the compaction not consulting the in-flight set: X was on
+    /// the journaled set and the journal did not hold it.
     #[tokio::test]
     async fn an_append_settling_after_a_compaction_is_on_disk_when_it_is_believed_durable() {
         let path = temp_journal("inflight-compact");
@@ -2218,15 +2220,67 @@ mod tests {
             l2.compact_anchor_journal().await
         });
         let removed = tokio::time::timeout(std::time::Duration::from_secs(10), compaction).await.expect("bounded").unwrap();
-        assert_eq!(removed, 1, "D's record left the journal");
         tokio::time::timeout(std::time::Duration::from_secs(10), ledger.anchors_durable_for(&[(n.clone(), digest(&x))])).await.expect("bounded");
-        assert_eq!(ledger.anchor_journaled_for_test(&n, &x), on_disk(&path, &x), "believed journaled exactly when the journal holds it");
+        // The claim itself, first (#812's confirm round): believed durable only when the journal holds it.
+        assert!(!ledger.anchor_journaled_for_test(&n, &x) || on_disk(&path, &x), "X is on the journaled set and the journal does not hold it");
         ledger.keep_raw_for_test(&n, key_of(2), &x, true);
         ledger.journal_anchor(&n, &x);
         let durable = tokio::time::timeout(std::time::Duration::from_secs(10), ledger.anchors_durable_for(&ledger.kept_certs())).await.expect("bounded");
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(!durable || on_disk(&path, &x), "anchors_durable_for answered true for a kept certificate the journal does not hold");
         assert!(durable, "X kept again: durable");
-        assert!(on_disk(&path, &x), "and the journal holds it");
+        assert_eq!(removed, 1, "D's record, and only D's, left the journal");
         assert_eq!(ledger.dead_journaled(None), 0, "nothing is counted dead that no record stands for");
+    }
+
+    /// **#812's review F2, concurrently and with no plant (the confirm round's run, adopted): keeping, dropping and
+    /// compacting at once never leaves the journaled set naming a record the journal does not hold.** On a
+    /// multi-thread runtime one task keeps, offers and drops three certificates while another compacts; at each
+    /// quiescent point the journaled set must be a subset of the file. 400 rounds, bounded at 40 s. It witnesses the
+    /// in-flight rule; the second look's window is a few instructions wide and only the planted test above reaches
+    /// it. Seen failing first with the compaction not consulting the in-flight set: a phantom within the first rounds.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn keeping_dropping_and_compacting_at_once_never_believes_what_is_not_on_disk() {
+        let path = temp_journal("stress");
+        let ledger = Arc::new(IdentityLedger::default());
+        ledger.open_journal(&path).unwrap();
+        let n: NodeId = "127.0.0.1:9110".parse().unwrap();
+        keep_and_journal(&ledger, &n, 0..1).await; // K stays kept, so no dead record is retained as the peer's memory
+        let started = std::time::Instant::now();
+        let (mut rounds, mut removed_total) = (0u32, 0u64);
+        while rounds < 400 && started.elapsed() < std::time::Duration::from_secs(40) {
+            rounds += 1;
+            let (l1, n1) = (Arc::clone(&ledger), n.clone());
+            let toggler = tokio::spawn(async move {
+                for i in 0..40usize {
+                    let c = 2 + (i % 3);
+                    l1.keep_raw_for_test(&n1, key_of(c), &cert_of(c), true);
+                    l1.journal_anchor(&n1, &cert_of(c));
+                    tokio::task::yield_now().await;
+                    l1.keep_raw_for_test(&n1, key_of(c), &cert_of(c), false);
+                    tokio::task::yield_now().await;
+                }
+            });
+            let l2 = Arc::clone(&ledger);
+            let compactor = tokio::spawn(async move {
+                let mut removed = 0;
+                for _ in 0..40 {
+                    removed += l2.compact_anchor_journal().await;
+                    tokio::task::yield_now().await;
+                }
+                removed
+            });
+            tokio::time::timeout(std::time::Duration::from_secs(20), toggler).await.expect("bounded").unwrap();
+            removed_total += tokio::time::timeout(std::time::Duration::from_secs(20), compactor).await.expect("bounded").unwrap();
+            // Quiesce: no append in flight for this peer (bounded).
+            let all: Vec<(NodeId, [u8; 32])> = (0..6).map(|i| (n.clone(), digest(&cert_of(i)))).collect();
+            tokio::time::timeout(std::time::Duration::from_secs(10), ledger.anchors_durable_for(&all)).await.expect("bounded");
+            let believed: HashSet<[u8; 32]> = ledger.anchor_tally.journaled.pin().get(&n).cloned().unwrap_or_default();
+            let disk: HashSet<[u8; 32]> = anchor_ders(&path).iter().map(|d| digest(d)).collect();
+            let phantom = believed.difference(&disk).count();
+            assert_eq!(phantom, 0, "round {rounds}: certificates on the journaled set that the journal does not hold (compactions removed {removed_total} so far)");
+        }
+        assert!(removed_total > 0, "the compaction never had work: the run witnessed nothing");
     }
 
     /// **#812's review F2, the narrower window: a certificate kept again while the compaction is deciding about it.**

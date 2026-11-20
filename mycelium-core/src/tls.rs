@@ -1459,22 +1459,32 @@ pub struct PinnedCommitment {
     pub active: bool,
 }
 
-/// What the operator's `ca-commit.pem` holds beside the pins a node already has ([`pin_ca_commitment`]). The pins
-/// stand in every case; these say what the file is, so the node counts and names the right thing. A file that is
-/// pinned at this start is not here: it is a [`PinnedCommitment`] with `first` set.
+/// What the operator's `ca-commit.pem` holds beside the pins a node already has ([`pin_ca_commitment`]), when the
+/// start goes on. The pins stand in every case. A file that is pinned at this start is not here: it is a
+/// [`PinnedCommitment`] with `first` set. A file the node cannot read as a commitment, or one a CA it trusts did not
+/// sign, is not here either: it **refuses the start**, with a pin as without one.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum OfferedCommitment {
     /// No file, or a commitment this node has pinned.
     Nothing,
-    /// A document this node cannot assess against its roots — a signature the named CA did not make, **a committing
-    /// CA it does not trust (yet)**, a successor it cannot read, or no commitment at all. It pins nothing, and it is
-    /// **not** a second commitment from a CA: nothing shows a CA's key signed it.
-    Unverified(CaCommitError),
+    /// A well-formed commitment whose committing CA is **no root this node trusts** — the successor's commitment to
+    /// its successor, placed before this node trusts the successor (or a CA this node no longer trusts). It pins
+    /// nothing; the node reads the file again at its next start. Reported only on a node that holds a pin
+    /// ([`EARLY_COMMITMENT_BESIDE_A_PIN_STARTS`]); on a node with none it refuses the start.
+    UntrustedCa,
     /// **A second commitment from a CA this node already holds a pin for**, signed by that CA's key and naming
     /// another successor: its digest. A mistake by the issuer, or a stolen CA key. There is no in-band way to replace
     /// a pin: an operator removes it.
     Conflict([u8; 32]),
 }
+
+/// **The one difference between a node that holds a pin and one that does not**, for the operator's file
+/// ([`pin_ca_commitment`]; #812's confirm round C1): a commitment from a CA the node does not trust (yet) lets the
+/// start go on beside a pin — reported and counted, nothing pinned — because a fleet-wide copy of the successor's
+/// commitment must not stop the nodes that have not cut over from restarting. With no pin the same file refuses the
+/// start. `false` here makes it refuse in both cases; nothing else changes. Every other file a node cannot assess —
+/// malformed, empty, carrying a key, a signature a trusted CA did not make — refuses the start in both cases.
+pub const EARLY_COMMITMENT_BESIDE_A_PIN_STARTS: bool = true;
 
 #[cfg(feature = "tls")]
 mod imp {
@@ -2034,6 +2044,9 @@ mod imp {
                 synced(&f).map_err(|e| io("sync the successor CA", e))?;
             }
             crate::persistence::sync_parent_dir(&successor_cert).map_err(|e| io("sync the successor's directory", e))?;
+            // …and the directory's own entry in the directory above it: a durable commitment must not name a
+            // successor whose directory a power loss can take.
+            crate::persistence::sync_parent_dir(successor_dir).map_err(|e| io("sync the successor directory's entry", e))?;
             write_public(&tmp, commitment.to_pem().as_bytes()).map_err(|e| io("write the commitment", e))?;
             synced(&tmp).map_err(|e| io("sync the commitment", e))?;
             fs::hard_link(&tmp, &out).map_err(|e| {
@@ -2047,7 +2060,12 @@ mod imp {
                     ))
                 }
             })?;
-            crate::persistence::sync_parent_dir(&out).map_err(|e| io("sync the CA directory", e))
+            // From here the commitment exists under its name and names the successor: nothing is to be removed.
+            crate::persistence::sync_parent_dir(&out).map_err(|e| err(format!(
+                "TLS: {out:?} is written and names the successor in {successor_dir:?}, but syncing its directory failed: {e}. \
+                 **Do not remove either and do not run `tls commit` again**: the commitment is made. Sync the disk (or \
+                 check both are still there after a restart of this host) before copying the file to any node"
+            )))
         })();
         let _ = fs::remove_file(&tmp);
         published?;
@@ -2092,7 +2110,11 @@ mod imp {
     /// - reads **every pin**, and refuses to start, by name, on one it cannot read as the pin its name says, or can
     ///   no longer place: a pin **stands** when its committing CA is a root this node trusts (active), or its
     ///   successor is (spent), or its successor is the committing CA of another pin that stands (an earlier
-    ///   succession's). The refusal names that one file and the way out — remove it; the other pins are untouched;
+    ///   succession's). The refusal names **every** pin that does not stand and the way out — remove them. Removing a
+    ///   pin leaves the pins of later CAs untouched; the pins of earlier ones stand only through it. **Only an active
+    ///   pin's signature is checked at a start**: a spent pin does not carry its committing CA's certificate, so it
+    ///   is held as this node's own record of a succession it went through and nothing may read a successor from it
+    ///   for trust (the phases read only a pin that verified at this start — plan row I2, PR 2b-2);
     /// - reads the **operator-placed** `{auto_cert_dir}/ca-commit.pem`, if there is one:
     ///   - a commitment it already holds: nothing;
     ///   - a commitment from a CA it holds **no pin for**, which verifies against its roots (the committing CA is a
@@ -2100,9 +2122,15 @@ mod imp {
     ///     fsynced) before this returns. So the first commitment is pinned from the old CA, and, once the node trusts
     ///     the successor, one commitment from the successor, the same way;
     ///   - a second commitment from a CA it **holds a pin for**, signed by that CA's key: a conflict — the pin stands;
-    ///   - anything it cannot assess (another signer, a committing CA it does not trust yet, no commitment at all):
-    ///     on a node with no pin, the start is refused by name; on a node with a pin, it is reported as unverified,
-    ///     nothing is pinned and the start goes on.
+    ///   - a file it cannot read as a commitment (malformed, empty, carrying a key), or one a CA it trusts did not
+    ///     sign: the start is refused by name, with a pin as without one;
+    ///   - a commitment from a CA it does not trust (yet): with no pin, the start is refused by name; beside a pin it
+    ///     is reported, nothing is pinned, and the start goes on ([`super::EARLY_COMMITMENT_BESIDE_A_PIN_STARTS`], the
+    ///     one place the two differ).
+    ///
+    /// **"Per CA" is per CA certificate**: the pin's name is the digest of the committing CA's certificate, so a CA
+    /// re-issued under the same key with another certificate is another committing CA; the old pin can then not be
+    /// placed and refuses the start (fails closed).
     ///
     /// The operator's file is never written, and nothing but that file is ever pinned: a commitment seen in the KV is
     /// compared with the pins by its reader and is never passed here.
@@ -2113,8 +2141,9 @@ mod imp {
         let dir = cfg.auto_cert_dir.join(super::SUCCESSION_DIR);
         let way_out = |pin: &Path| format!(
             "The pin is this node's memory of a commitment it accepted from one CA. To drop that one pin, remove {pin:?} \
-             and start the node again (its other pins are untouched; from the release that adds the succession's phases, \
-             {dir:?} also holds this node's phase, so do not remove the directory)"
+             and start the node again. The pins of later CAs are untouched; a pin of an **earlier** succession stands only \
+             through the pins after it, so removing one from the middle leaves every older one unplaceable too. From the \
+             release that adds the succession's phases, {dir:?} also holds this node's phase, so do not remove the directory"
         );
         let mut held: Vec<(std::path::PathBuf, super::CaCommitment)> = Vec::new();
         for path in pin_files(&dir).map_err(|e| refuse(format!("TLS: read {dir:?}: {e}")))? {
@@ -2144,13 +2173,17 @@ mod imp {
                 break;
             }
         }
-        if let Some(i) = stands.iter().position(|ok| !ok) {
-            let (path, pin) = &held[i];
-            let why = pin.verify(roots).err().map(|e| e.to_string()).unwrap_or_default();
+        // Every pin that does not stand is named in the one refusal, so an operator is not sent through one restart
+        // per pin (#812's confirm round C2).
+        let fallen: Vec<&std::path::PathBuf> = held.iter().zip(&stands).filter(|(_, ok)| !**ok).map(|((path, _), _)| path).collect();
+        if let Some(first) = fallen.first() {
+            let all = fallen.iter().map(|p| format!("{p:?}")).collect::<Vec<_>>().join(", ");
             return Err(refuse(format!(
-                "TLS: the pinned CA commitment {path:?} cannot be assessed against the roots this node trusts ({why}), its \
-                 successor is not one of them, and no other pin this node holds continues from it. {}",
-                way_out(path)
+                "TLS: {} pinned CA commitment(s) cannot be placed against the roots this node trusts: {all}. For each, its \
+                 committing CA is not a root this node trusts, its successor is not one either, and no pin that stands \
+                 continues from it. If they are to go, remove every file named here. {}",
+                fallen.len(),
+                way_out(first)
             )));
         }
         let mut pins: Vec<PinnedCommitment> =
@@ -2160,9 +2193,15 @@ mod imp {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
             Err(e) => return Err(refuse(format!("TLS: read {file:?}: {e}"))),
         };
-        // Refused by name on a node with no pin; reported, the pins standing, on a node with one (#812's review F3).
+        // A file this node cannot assess refuses the start, with a pin as without one — it is never called a conflict
+        // (#812's review F3), and it is never passed over (the confirm round's C1). The one exception, and the one
+        // place a pin makes a difference: a commitment from a CA this node does not trust (yet), beside a pin.
         let cannot_assess = |e: super::CaCommitError| -> Result<Offered, GossipError> {
-            if held.is_empty() { Err(refuse(format!("TLS: the CA commitment {file:?} is refused: {e}"))) } else { Ok(Offered::Unverified(e)) }
+            if e == super::CaCommitError::UnknownPredecessor && !held.is_empty() && super::EARLY_COMMITMENT_BESIDE_A_PIN_STARTS {
+                Ok(Offered::UntrustedCa)
+            } else {
+                Err(refuse(format!("TLS: the CA commitment {file:?} is refused: {e}")))
+            }
         };
         let offered = match offered_text.as_deref().map(super::CaCommitment::from_pem) {
             None => Offered::Nothing,
@@ -2181,7 +2220,11 @@ mod imp {
                     let tmp = dir.join(format!(".pin.tmp-{}", std::process::id()));
                     write_public(&tmp, o.to_pem().as_bytes()).map_err(|e| io("write", e))?;
                     fs::File::open(&tmp).and_then(|f| f.sync_all()).map_err(|e| io("sync", e))?;
-                    fs::rename(&tmp, &pin_path).map_err(|e| io("rename", e))?;
+                    // By hard link, which fails when the name exists: "the first commitment from this CA" is then a
+                    // property of the file system, not of this function having read the directory first.
+                    let linked = fs::hard_link(&tmp, &pin_path);
+                    let _ = fs::remove_file(&tmp);
+                    linked.map_err(|e| io("publish the pin (a pin for this CA appeared while this node was starting: start it again)", e))?;
                     crate::persistence::sync_parent_dir(&pin_path).map_err(|e| io("sync the directory", e))?;
                     pins.push(PinnedCommitment { commitment: o, first: true, active: true });
                     Offered::Nothing
@@ -5335,7 +5378,7 @@ mod ca_commit_tests {
         pins(&cfg, roots);
         place(&cfg, &second);
         let got = pins(&cfg, roots);
-        assert_eq!(got, CommitmentPins { pins: vec![pinned(&first, false, true)], offered: Offered::Unverified(CaCommitError::UnknownPredecessor) });
+        assert_eq!(got, CommitmentPins { pins: vec![pinned(&first, false, true)], offered: Offered::UntrustedCa });
         assert!(!pin_path(&cfg, &second).exists(), "nothing pinned");
         let fresh = node_cfg(&base.join("node2"));
         place(&fresh, &second);
@@ -5370,6 +5413,7 @@ mod ca_commit_tests {
         let unrelated = der_of(&super::imp::mint_ca(&base.join("unrelated")).unwrap());
         let err = super::imp::pin_ca_commitment(&cfg, std::slice::from_ref(&unrelated)).expect_err("unplaceable").to_string();
         assert!(err.contains("pin-") && err.contains("remove") && err.contains("phase"), "{err}");
+        assert!(err.contains("2 pinned CA commitment(s)"), "both pins are named in the one refusal: {err}");
         // The first pin alone cannot be placed once the second is gone and the roots are CA2's; removing the first is
         // the way out, and the second is untouched.
         std::fs::remove_file(cfg.auto_cert_dir.join(super::CA_COMMIT_FILE)).unwrap();
@@ -5399,11 +5443,18 @@ mod ca_commit_tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    /// **#812's review F3 (a): beside a pin, the operator's file is assessed before it is called a conflict.** A
-    /// document no CA signed (a garbage signature), one naming a CA this node does not trust, and one that is not a
-    /// commitment at all are each `Unverified`, never `Conflict`; the pin stands and the start goes on. Only a second
-    /// commitment the pinned CA's key signed is a `Conflict`. The reviewer's test, adopted. Seen failing first with a
-    /// differing file for a pinned CA called a conflict without being assessed.
+    /// **#812's review F3 (a) and its confirm round's C1: beside a pin, an operator's file the node cannot assess is
+    /// never called a conflict, and never passed over.** On a node that holds a pin:
+    /// - a document no CA signed (a garbage signature under the pinned CA's name), text that is not a commitment, an
+    ///   **empty** file, and the pinned commitment **with the CA's private key in the file** each **refuse the start**
+    ///   naming the file, exactly as on a node with no pin — none is a `Conflict`;
+    /// - a well-formed commitment from a CA the node does not trust is the one file the start goes on with, reported
+    ///   as `UntrustedCa`, nothing pinned;
+    /// - only a second commitment the pinned CA's key signed is a `Conflict`.
+    ///
+    /// The pin stands through all of it. The reviewer's tests, adopted. Seen failing first, one build each: with a
+    /// differing file for a pinned CA called a conflict without being assessed; and with every file a node with a pin
+    /// cannot assess passed over (the start went on with the empty file, the text, the key and the garbage signature).
     #[test]
     fn beside_a_pin_an_unverifiable_operator_file_is_not_a_conflict() {
         let base = fresh_dir("offered");
@@ -5415,19 +5466,67 @@ mod ca_commit_tests {
         pins(&cfg, roots);
         let offered = |doc: &str| {
             std::fs::write(&file, doc).unwrap();
-            let got = pins(&cfg, roots);
-            assert_eq!(got.pins, vec![pinned(&c, false, true)], "the pin stands, and nothing more is pinned");
-            got.offered
+            super::imp::pin_ca_commitment(&cfg, roots).map(|got| {
+                assert_eq!(got.pins, vec![pinned(&c, false, true)], "the pin stands, and nothing more is pinned");
+                got.offered
+            })
+        };
+        let refused = |doc: &str, why: &str| {
+            let err = offered(doc).expect_err(why).to_string();
+            assert!(err.contains("ca-commit.pem") && err.contains("is refused"), "{why}: {err}");
+            assert_eq!(std::fs::read_dir(pin_path(&cfg, &c).parent().unwrap()).unwrap().count(), 1, "{why}: the pin is as it was");
+            err
         };
         let attacker = der_of(&super::imp::mint_ca_at(&base.join("attacker"), None, 1).unwrap());
         let forged = CaCommitment { predecessor: c.predecessor, successor_der: attacker.clone(), sig: [7u8; 64] };
-        assert_eq!(offered(&forged.to_pem()), Offered::Unverified(CaCommitError::BadSignature), "no CA signed it");
+        assert!(refused(&forged.to_pem(), "no CA signed it").contains("did not sign"));
+        refused("not a commitment", "text");
+        refused("", "an empty file");
+        let with_key = format!("{}{}", c.to_pem(), std::fs::read_to_string(d1.join("ca-key.pem")).unwrap());
+        assert!(refused(&with_key, "the CA's key in the file").contains("private key"));
         let elsewhere = CaCommitment { predecessor: [9u8; 32], ..forged.clone() };
-        assert_eq!(offered(&elsewhere.to_pem()), Offered::Unverified(CaCommitError::UnknownPredecessor));
-        assert!(matches!(offered("not a commitment"), Offered::Unverified(CaCommitError::Malformed(_))));
+        assert_eq!(offered(&elsewhere.to_pem()).unwrap(), Offered::UntrustedCa, "a CA this node does not trust: the start goes on");
         let second = CaCommitment::sign(&old, &ca_key(&d1), &attacker).unwrap();
-        assert_eq!(offered(&second.to_pem()), Offered::Conflict(second.digest()), "the pinned CA's key signed this one");
-        assert_eq!(offered(&c.to_pem()), Offered::Nothing);
+        assert_eq!(offered(&second.to_pem()).unwrap(), Offered::Conflict(second.digest()), "the pinned CA's key signed this one");
+        assert_eq!(offered(&c.to_pem()).unwrap(), Offered::Nothing);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// **#812's confirm round C2: one refusal names every pin that does not stand.** Four successions, the node
+    /// trusting only the last CA; the operator removes the pin of the third. The two older pins stood only through
+    /// it: the next start is refused **naming both files**, and says that a pin of an earlier succession stands only
+    /// through the pins after it. With both removed the node starts, the newest pin untouched. The reviewer's
+    /// scenario. Seen failing first with the refusal naming the first such pin alone.
+    #[test]
+    fn removing_a_middle_pin_refuses_the_start_naming_every_pin_that_no_longer_stands() {
+        let base = fresh_dir("middle");
+        let ([_, _, _], [first, second]) = two_successions(&base);
+        let chain = |from: &str, to: &str| {
+            let (file, _) = super::imp::commit_successor(&base.join(from), &base.join(to)).unwrap();
+            CaCommitment::from_pem(&std::fs::read_to_string(file).unwrap()).unwrap()
+        };
+        let (third, fourth) = (chain("ca3", "ca4"), chain("ca4", "ca5"));
+        let cfg = node_cfg(&base.join("node"));
+        // Pinned one succession at a time, each while its committing CA is the node's root.
+        for c in [&first, &second, &third, &fourth] {
+            place(&cfg, c);
+            let root = if c.predecessor == first.predecessor { der_of(&base.join("ca1").join("ca-cert.pem")) } else {
+                [&first, &second, &third].iter().find(|p| super::sha256(&p.successor_der) == c.predecessor).unwrap().successor_der.clone()
+            };
+            pins(&cfg, std::slice::from_ref(&root));
+        }
+        std::fs::remove_file(cfg.auto_cert_dir.join(super::CA_COMMIT_FILE)).unwrap();
+        let last = std::slice::from_ref(&fourth.successor_der);
+        assert_eq!(pins(&cfg, last).pins.len(), 4, "the whole chain stands");
+        std::fs::remove_file(pin_path(&cfg, &third)).unwrap();
+        let err = super::imp::pin_ca_commitment(&cfg, last).expect_err("two pins no longer stand").to_string();
+        let name = |c: &CaCommitment| super::ca_commit_pin_file(&c.predecessor);
+        assert!(err.contains(&name(&first)) && err.contains(&name(&second)), "both are named: {err}");
+        assert!(!err.contains(&name(&fourth)), "the newest pin stands: {err}");
+        assert!(err.contains("stands only") && err.contains("every file named here"), "{err}");
+        std::fs::remove_file(pin_path(&cfg, &first)).unwrap();
+        std::fs::remove_file(pin_path(&cfg, &second)).unwrap();
+        assert_eq!(pins(&cfg, last).pins, vec![pinned(&fourth, false, false)], "the newest pin is untouched");
         let _ = std::fs::remove_dir_all(&base);
     }
 

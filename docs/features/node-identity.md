@@ -68,9 +68,10 @@ which needs two processes and lives in the Docker suites.
   `ca-commit.pem`, the old CA's signature over its successor — once. An operator copies that file into a node's
   certificate directory; the node assesses it against the root it trusts, pins it under its own `succession/`
   (durably, before it goes on) and from then on refuses a second commitment from that CA, counting each
-  (`ca_commitment_conflict`); a document it cannot assess is counted apart (`ca_commitment_unverified`). A pin is
+  (`ca_commitment_conflict`); a file it cannot read as a commitment, or one a trusted CA did not sign, refuses the
+  start. A pin is
   per committing CA: once the node trusts the successor it pins one commitment from the successor the same way,
-  beside the first. It pins from that file only: nodes republish what they pinned at `sys/ca-commit/{node}`
+  beside the first. It pins from that file only: nodes republish what they pinned at `sys/ca-commit/{node}/{predecessor}`
   so that a conflicting commitment — a mistake, or a stolen CA key — is seen and counted, and a copy there is never
   pinned. A node holding a commitment refuses to start without `[persistence]`. The commitment changes nothing a node
   trusts, and no shipped build makes or reads one while the `caGeneration` OID is provisional.
