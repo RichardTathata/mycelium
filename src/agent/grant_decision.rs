@@ -7,9 +7,19 @@
 //! ([`grant_decision_message`]). The addressed node verifies, in order: the signature under the key it carries, that
 //! key the decider's current client key here (`client_cert::client_key_standing`) — else `not_the_decider`; the
 //! holder and request the same as the route's path — else `decision_retargeted`; the addressed node itself — else
-//! `not_addressed_here`; the clock inside the caller envelope's window — else `stale`. A replay of a signed decision
-//! inside its window finds the request already answered or already revoked, so no nonce cache is kept: the decision
-//! routes take one claim per request on this node (`http/grants.rs`), so concurrent copies are answered once.
+//! `not_addressed_here`; the clock inside the caller envelope's window — else `stale`. The decision routes take one
+//! claim per request on this node (`http/grants.rs`), so concurrent copies are answered once, and a replay of a signed
+//! decision inside its window finds the request already answered or already revoked **while that answer is on
+//! record**. No nonce cache is kept.
+//!
+//! **What the signature does not bind, and what follows** (#813's review, F1, 2026-11-19; true since I3). The signed
+//! bytes name no tool, resource or arguments digest: the grant is issued from this node's own copy of the request
+//! record, which is unsigned in the KV. So a member who rewrites that record changes what a signed decision is
+//! applied to; and the answer a replay "finds" is `…/issued`, a KV record any member can tombstone — with it gone,
+//! the same signed body is admitted again within the freshness window, for whatever the record then says. Both were
+//! run against a node. Closed by identity-and-lifecycle row I7-S (the decider signs what it saw; a spent-decision
+//! memory that is not a deletable KV record); `mycelium_core::tls::CONSENT_DECISION_DOES_NOT_NAME_WHAT_WAS_SHOWN`
+//! blocks a release until then.
 //!
 //! ## The grade (identity-and-lifecycle I7: P1, P2, P4 as H2 revised it, P7)
 //!

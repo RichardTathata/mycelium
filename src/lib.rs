@@ -275,6 +275,11 @@ pub use agent::door;
 /// `mycelium declare` — a project's declaration sent to a gateway, once or kept current (adopter-surface X10).
 #[cfg(feature = "gateway")]
 pub mod declare;
+/// `mycelium dev consent` — the developer's side of a consent decision (identity-and-lifecycle I7, PR 3a): a
+/// software consent key kept off the worktree, a prompt rendered from the fleet's record, a bounded request queue,
+/// and the signer. Behind the provisional gate: a build that reads no consent certificate refuses by name.
+#[cfg(all(feature = "tls", feature = "gateway"))]
+pub mod dev_consent;
 /// `mycelium test --faults` — the existing proofs against an adopter's declaration (adopter-surface X6).
 pub mod faults;
 /// Declared recurring work (adopter-surface Y2, D15): a `[[schedule]]`'s holder elected by rendezvous, its tick

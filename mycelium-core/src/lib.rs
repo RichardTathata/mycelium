@@ -48,6 +48,9 @@ pub mod stream;
 pub mod swim;
 pub mod swim_membership;
 pub mod tls;
+/// A developer's software consent key (identity-and-lifecycle I7, P7): generated, kept private and used to sign.
+#[cfg(feature = "tls")]
+pub mod consent_key;
 pub mod writer;
 
 // Root-level re-exports of the substrate's primary types, so `crate::NodeId`,

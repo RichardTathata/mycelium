@@ -612,6 +612,17 @@ pub const CONSENT_GRADE_OID: &[u64] = &[1, 3, 6, 1, 4, 1, 32473, 7, 1];
 /// --release`, run by the release workflow on a tag push, refuses a release while this is `true`.
 pub const CONSENT_GRADE_OID_IS_PROVISIONAL: bool = true;
 
+/// **A release blocker that is not an OID** (the maintainer's decision of 2026-11-18, on #813's review, F1): a consent
+/// decision's signature names the request's id, its holder and the decision's terms — **not the tool, the resource or
+/// the arguments' digest the approver was shown** — and the addressed node issues the grant from its own copy of an
+/// unsigned request record. So an approval can be applied to another tool, digest, resource or expiry by rewriting
+/// that record, and the same signed decision can be admitted again within the freshness window by tombstoning the
+/// answer. It is closed by the approver signing what it saw (the plan's row *I7-S*, its own PR after I7's PR 3a; the
+/// signed request record, I4a, closes the requester's half). **While this is `true` no release may carry consent
+/// decisions**: `scripts/check-release-blockers.sh --release` refuses the tag, beside the grade OID. It gates
+/// nothing at run time — the provisional gate does that; it is the mechanical form of a sentence in the plan.
+pub const CONSENT_DECISION_DOES_NOT_NAME_WHAT_WAS_SHOWN: bool = true;
+
 /// Whether this build may issue and read a consent certificate under [`CONSENT_GRADE_OID`]: always once the OID is
 /// registered; while it is provisional, only in a test build — `cfg(test)` (mycelium-core's own tests) or the
 /// non-default feature `provisional-consent-grade`, which only the test lines that exercise consent certificates turn
@@ -1173,6 +1184,19 @@ pub fn cert_issuer_der(der: &[u8]) -> Option<Vec<u8>> {
 /// in-process as a restart judges it (identity-and-lifecycle I2, #805's review F3). Never panics.
 #[cfg(feature = "tls")]
 pub fn cert_not_after_ms(der: &[u8]) -> Option<u64> {
+    cert_validity_times(der)?.1
+}
+
+/// A certificate's validity, `(notBefore, notAfter)` in ms since the epoch, each `None` when it is a time this walk
+/// cannot read (before 1970 among them); the outer `None` for anything that is not a certificate. For a reader that
+/// must fail closed on either bound (a developer's consent enrolment, #813's confirm round). Never panics.
+#[cfg(feature = "tls")]
+pub fn cert_validity_ms(der: &[u8]) -> Option<(Option<u64>, Option<u64>)> {
+    cert_validity_times(der)
+}
+
+#[cfg(feature = "tls")]
+fn cert_validity_times(der: &[u8]) -> Option<(Option<u64>, Option<u64>)> {
     let (tag, cert, _) = der_tlv(der)?;
     if tag != 0x30 { return None; }
     let (tag, tbs, _) = der_tlv(cert)?;
@@ -1189,8 +1213,14 @@ pub fn cert_not_after_ms(der: &[u8]) -> Option<u64> {
     }
     let (tag, validity, _) = der_tlv(rest)?;
     if tag != 0x30 { return None; }
-    let (_, _, after_nb) = der_tlv(validity)?;
-    let (tag, t, _) = der_tlv(after_nb)?;
+    let (nb_tag, nb, after_nb) = der_tlv(validity)?;
+    let (na_tag, na, _) = der_tlv(after_nb)?;
+    Some((x509_time_ms(nb_tag, nb), x509_time_ms(na_tag, na)))
+}
+
+/// An X.509 `Time` (UTCTime or GeneralizedTime, `…Z`) in ms since the epoch.
+#[cfg(feature = "tls")]
+fn x509_time_ms(tag: u8, t: &[u8]) -> Option<u64> {
     let t = std::str::from_utf8(t).ok()?;
     let (year, rest) = match tag {
         0x17 => {
@@ -2462,7 +2492,7 @@ mod imp {
     /// parents are created `0700` the same way (#699's review, finding 4). A directory that already exists is the
     /// operator's and is left as it is (a node warns when it is writable by others: [`writable_by_others`]).
     /// Elsewhere than unix a plain create.
-    fn create_private_dir(dir: &Path) -> std::io::Result<()> {
+    pub fn create_private_dir(dir: &Path) -> std::io::Result<()> {
         if dir.is_dir() {
             return Ok(());
         }
@@ -2848,7 +2878,9 @@ mod imp {
         params.subject_alt_names = vec![SanType::URI(uri)];
         params.serial_number = Some(rcgen::SerialNumber::from(issued_ms));
         params.not_before = rcgen::date_time_ymd(2024, 1, 1);
-        params.not_after  = rcgen::date_time_ymd(2099, 1, 1);
+        // 2099-01-01 as before; a test build may issue a short-lived one (`with_not_after_for_test`), as for a node's
+        // or a client's certificate.
+        super::set_not_after_for_issue(&mut params);
         params.custom_extensions = vec![rcgen::CustomExtension::from_oid_content(super::CONSENT_GRADE_OID, grade.extension_der())];
         issue_checked_over(params, &P256Public(*point), ca_cert_der, ca_key_pair)
     }
@@ -3360,6 +3392,8 @@ mod imp {
     }
 }
 
+#[cfg(feature = "tls")]
+pub(crate) use imp::create_private_dir;
 #[cfg(feature = "tls")]
 pub use imp::{ed25519_key_from_cert_der, gateway_server_config_from_pem, generate_rotation, generate_rotation_after, issue_client_cert, issue_client_cert_for_key, issue_consent_cert, issue_node_cert, p256_point_from_cert_der, issue_node_cert_for_key, load_or_generate, mint_ca, mint_ca_at, commit_successor, held_ca_commitment, pin_ca_commitment, sign_bytes, verify_bytes, writable_by_others};
 

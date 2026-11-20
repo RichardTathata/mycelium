@@ -827,3 +827,8 @@ async fn a_node_that_never_read_the_newer_certificate_does_not_take_the_older_on
     assert_eq!(code(&stale_entry), (403, Some("decision_grade_not_accepted".into())), "STALE ENTRY: {}", stale_entry.1);
     assert!(stale_entry.1["detail"].as_str().unwrap_or_default().contains("signed_with was not updated"), "{}", stale_entry.1);
 }
+
+/// Identity-and-lifecycle I7, PR 3a: `dev`'s side — its software key, its prompt from the record and its signer —
+/// against this file's fleet.
+#[path = "dev_consent_tests.rs"]
+mod dev_consent;

@@ -5318,6 +5318,105 @@ new. mycelium: `commit_successor`, `CaCommitment`, `CaCommitError`, `CA_COMMIT_F
 either needs `[persistence]`; `grep -rn "identity_anchor_journal_refused" <your dashboards>` — it no longer rises with a
 node's age.
 
+## 121. `mycelium dev consent`: a developer's software consent key, its prompt and its signer; `dev` signs only at `tty` (unreleased, identity-and-lifecycle I7, PR 3a)
+
+*Numbered 121 because open pull requests hold §116 (#806) and §120 (identity-and-lifecycle I2, PR 2b) at the time of
+writing.*
+
+§112 built the consent certificate and §118 the decision. This change builds the developer's side for a **software**
+key ([consent certificates](../features/consent-certificates.md)). **Not in a shipped binary yet**, as §112 and §118:
+while the grade extension's OID is provisional, a build without the test-only feature `provisional-consent-grade`
+refuses every `mycelium dev consent` verb by name (`consent_grade_oid_provisional`, exit 2) before it resolves a
+directory, and writes nothing. **Nothing existing changes**: the subcommand, the two modules and the output schema
+are new.
+
+- **A second release blocker, which is not an OID.** A consent decision's signature names the request's id, its
+  holder and the decision's terms. It does not name the tool, the resource or the digest the approver was shown, and
+  the node issues the grant from its own copy of an unsigned request record. So an approval can be applied to another
+  call by rewriting that record, and admitted again within the freshness window by tombstoning the answer (the
+  [feature page](../features/consent-certificates.md) says exactly what can and cannot be changed). This predates
+  this change (#754, #810); it matters now because a person is shown the record. The maintainer decided on
+  2026-11-18 that the approver signs what it saw, as its own change, and that no release carries consent decisions
+  before it: `scripts/check-release-blockers.sh --release` fails while
+  `CONSENT_DECISION_DOES_NOT_NAME_WHAT_WAS_SHOWN` is `true`.
+- **New subcommand: `mycelium dev consent key | enrol | approve`.** `mycelium dev` was not a subcommand before;
+  identity-and-lifecycle N4 (`mycelium dev --isolate`) will share the word. Exit codes: 0 done, 1 some request not
+  signed and admitted, 2 usage or a refusal by name.
+- **Where the key is kept.** `~/Library/Application Support/mycelium/consent/` on macOS;
+  `$XDG_DATA_HOME/mycelium/consent/`, default `~/.local/share/mycelium/consent/`, on Linux. Files:
+  `consent+{issuer}+{name}+{digest}.key.p8` (PKCS#8, `0600`; the digest is 16 hex digits of the principal's SHA-256,
+  so principals differing only in case are separate files on a case-insensitive filesystem), `.pub.pem` and
+  `.cert.pem` beside it, the directory `0700`. A key made by an earlier, unreleased build of this change under a
+  name without the digest (`consent-{issuer}-{name}` or `consent+{issuer}+{name}`) is not found
+  (`no_consent_key`): run `dev consent key` again and have the new key certified. No release used those names.
+  `HOME` unset or relative is refused (`consent_dir_unresolved`).
+- **Never in a worktree, by the real path.** Every symbolic link in the directory's path is resolved first, and the
+  real path must have no `.git` at or above it (`consent_dir_in_worktree`). That covers a repository's worktree, a
+  linked worktree, a home directory with a `.git` in it, and a link above the directory that leads into one.
+  **It does not cover** a home tracked by a repository whose `.git` is elsewhere (`git --git-dir=…
+  --work-tree=$HOME`): nothing in the home says so, and `dev` does not detect it. Keep the consent directory out of
+  such a repository yourself (`Library/` or `.local/share/mycelium/` in its ignore file).
+- **What `dev` checks before it reads the key, and refuses, never narrows.** The file: opened without following a
+  link; a regular file; owned by you (`consent_key_not_owned`); closed to group and others (`consent_key_too_open`);
+  with one name, not hard-linked elsewhere (`consent_key_hard_linked`). Its directory: a directory, not a link,
+  yours, closed to group and others (`consent_dir_too_open`). Each directory above it up to your home: not writable
+  by group or others, and yours or root's (`consent_dir_ancestor_too_open`). Fix with `chmod 600` / `chmod 700` /
+  `chmod go-w`.
+- **On macOS an ACL is not read.** A file whose mode is `0600` and which carries an access-control entry for another
+  user loads. `ls -le` shows a `+` after the mode when an ACL is present; `chmod -N <file>` removes it. `dev consent
+  key` says so when it creates a key on a Mac. Accepted by the maintainer for the software key (2026-11-20).
+- **`dev` signs with a software key only under a certificate graded `tty`.** If the operator ran `tls issue --grade
+  os_presence(macos, unbound)` or `--grade recording` over a key `dev consent key` made, `dev consent enrol` refuses
+  the certificate and `dev consent approve` refuses to sign (`grade_not_this_keys`). Re-issue with `--grade tty`, and
+  name `signed_with = "tty"` on the principal's `gateway_consent_principals` entry (§118). This is `dev`'s own
+  refusal about its own key. No node can make that check, and the grade on a certificate stays the issuing
+  operator's statement. A certificate that is not valid now is refused too (`certificate_expired`,
+  `certificate_not_yet_valid`), and so is one whose validity cannot be read.
+- **A replaced key needs a new certificate.** `dev consent key --force` makes a new key; the old certificate no
+  longer names it, and `approve` refuses (`enrolled_key_mismatch`) until the new public key is certified and
+  enrolled. Publishing the new certificate supersedes the old consent key at every node that reads it (§112).
+- **A request `dev` will not show.** `dev` shows a request only when its record's arguments hash to the digest the
+  record names. A request whose arguments are withheld by a data class, are over the 16 KiB rendering cap, or hold a
+  number of magnitude 2^53 or more, is answered `arguments_unverified` and cannot be approved with `dev`; a service
+  decider can still decide the first two.
+- **What the prompt shows.** Printable ASCII as itself; everything else, in the arguments as in the identifiers, as
+  a `\u{…}` escape, and a space after a space likewise. Arguments in another script are shown as escapes. The lines
+  an approval is about are the last on the screen of a terminal at least 80 columns wide; the width is not read.
+  Arguments cannot be padded with blanks into rows that copy those lines; filled with a visible character they
+  still can line up such rows, plainly filled and above the real block, which is always last.
+- **Type the answer after the prompt appears.** `approve` discards whatever was typed at the terminal before it
+  shows a prompt, entered or not, and says how many entered characters it discarded. A second `approve` typed while
+  the first request was being answered does not approve the next one.
+- **One `dev` per terminal, and pipe the ids.** Two `dev` processes sharing a terminal are not serialised. `approve
+  -` is refused when standard input is the terminal (`requests_from_a_terminal`).
+- **The bearer `approve` needs** holds `grant:read` and `grant:relay` and nothing else. It decides nothing: the
+  decision is the consent key's, and the consent principal needs its own `gateway_consent_principals` entry (§118).
+  `--token`, or `MYCELIUM_GATEWAY_TOKEN` as `mycelium declare` reads it. `dev` trusts the gateway it is pointed at,
+  and the path to it, for what the record says.
+- **Output.** One JSON object per request on standard output, schema `mycelium.dev.consent/1`: `request`, `answer`
+  (`signed`, `dismissed`, `busy`, `unknown_request`, `ambiguous_request`, `record_unreadable`,
+  `arguments_unverified`, `record_changed`, `enrolment_refused`, `request_id_too_long`, `no_terminal`, `not_signed`,
+  `gateway`), and for `signed` the `decision`, `gateway_status` and `gateway_answer`. `signed` means `dev` signed and
+  sent; whether the node admitted it is `gateway_status`. More than 8 ids on one command line: the rest are `busy`.
+- **New public items.** `mycelium::dev_consent` (`Store`, `Enrolment`, `PromptRecord`, `Prompt`, `Approver`,
+  `TtyApprover`, `queue`, `answer_one`, `serve`, `Answer`, `Refusal`, `Gateway`, `shown_text`, `shown_id`,
+  `sh_quoted`), under
+  `tls` and `gateway`; `mycelium_core::consent_key` (`SoftwareConsentKey`, `ConsentKeyRefusal`, `create_dir`,
+  `store_public`, `load_public`, `real_path`, `guarded_ancestors`), under `tls`;
+  `mycelium_core::tls::CONSENT_DECISION_DOES_NOT_NAME_WHAT_WAS_SHOWN` and `cert_validity_ms`. `Refusal`, `Answer` and `ConsentKeyRefusal`
+  are `#[non_exhaustive]`.
+- **Dependencies.** Under `tls`, on unix, `rustix` becomes a dependency of `mycelium` (the terminal flush) and of
+  `mycelium-core` (this process's uid). A build without `tls` does not compile it. It was already in a node's tree
+  through `reqwest`; no crate is added to the lockfile.
+- **Not built:** the approver signing what it saw (above); the macOS Secure Enclave key and its Swift shim (I7, PR
+  3b), so `os_presence(macos, unbound)` is signed by nothing in this tree; Windows (`consent_key_platform_not_built`:
+  no user-only ACL is set, and no CI job compiles that refusal); a `recording` signer for a `sim` build; a transport
+  for another process to hand a running `dev` a request id, other than its standard input.
+
+*Check:* on the developer's device, `ls -le` the consent directory: the `.key.p8` is `-rw-------` with no `+`, and
+the directory `drwx------`. After an approval, the addressed node's evidence journal holds a `Decided` record whose
+subject is `consent:{issuer}/{name}` and whose `signed_decision.signed_with.grade` is `tty`.
+
 ## 122. `wire-check` reads an edge to a hosted component as the provider built from the declaration decides a member's call of it: the rule must be the host's own, for a node, in a form that provider admits (unreleased, the maintainer's choice of 2026-11-18)
 
 *Numbered 122 because open pull requests hold §120 and §121 at the time of writing; the sections are in order once

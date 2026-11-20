@@ -51,6 +51,7 @@ mycelium.explain/ # decision.rs EXPLAIN_SCHEMA: `explain --format json`'s schema
 mycelium.declare/ # declare.rs DECLARE_SCHEMA: `declare --format json`'s schema id (identity-and-lifecycle N3)
 mycelium.tls/ # main.rs TLS_SCHEMA: `tls … --format json`'s schema id (identity-and-lifecycle N3)
 mycelium.skills/ # agent_guide.rs SCHEMA: `skills … --format json`'s schema id (identity-and-lifecycle N5)
+mycelium.dev.consent/ # dev_consent.rs SCHEMA: `dev consent approve`'s per-request answer line's schema id (identity-and-lifecycle I7, PR 3a)
 mycelium.ae/          # agent/action_evaluator.rs: the evidence / reference record schema ids
 mycelium.guarantees/  # agent/guarantee.rs: the guarantee-report schema id
 mycelium.federation/  # federation*.rs: the descriptor / policy / call / catalogue signing-domain tags

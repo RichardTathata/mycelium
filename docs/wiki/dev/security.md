@@ -636,6 +636,41 @@ member-writable — never audit from it — and an issue's record carries none. 
 enforcement point reads a grade, or a signed decision, from `params`**, so a companion door cannot assert one by
 naming its point `gateway:grants/issue`. The general rule: a fact an enforcement point verified goes to the envelope
 in a typed, crate-private argument, never through the request's own `_meta`.
+**The developer's device is the only agent that can say how a consent key is guarded** (I7, PR 3a, unreleased:
+`mycelium dev consent`, `src/dev_consent.rs`, `mycelium-core/src/consent_key.rs`). `dev`'s software key is a `0600`
+PKCS#8 file in a `0700` directory under the home, refused when either is wider, a symbolic link, or inside a worktree
+(any ancestor holding `.git`). **`dev` signs with it only under a certificate graded `tty`**: a certificate calling
+that key `os_presence(macos, unbound)` or `recording` is refused at enrolment and on every use
+(`grade_not_this_keys`), so the signer never signs under a statement about its key that it does not make true. That
+is the device's promise about itself; no node can check it, and the grade on a record stays the operator's statement
+(`grade_source: operator`). The prompt is rendered from the request record a gateway served under the id, escaped,
+and only `approve` or `refuse` typed at `/dev/tty` is signed; the record is read again before signing. **What that
+leaves, stated:** `tty` does not mean a person typed (the tests sign through a pseudo-terminal with nobody there);
+and the signed decision names the request's id and terms, not the tool or digest, so what the grant binds is the
+addressed node's own copy of the unsigned request record (inventory row `grant/{agent}/{request}`, I4a). **The rule
+for the next signer (the macOS shim, N7's plugin): a signer's grade is what that signer itself enforces, checked by
+the signer against its certificate before it signs — never taken from the certificate alone.**
+**What #813's review found, and the rules it leaves** (2026-11-19). (1) **A signature binds what it names and
+nothing else.** A signed grant decision names the request's id and terms, not the tool, resource or digest, and the
+node issues from an unsigned record: one approval was moved to another tool and digest, and admitted twice after the
+answer was tombstoned ("a replay finds the request already answered" rested on a deletable KV record). Row I7-S
+closes it; until then `CONSENT_DECISION_DOES_NOT_NAME_WHAT_WAS_SHOWN` blocks a release. **When a person is shown
+something and signs, ask of every shown field: is it in the signed bytes? If not, who can change it afterwards?**
+(2) **Check a record against itself before showing it**: `dev` now recomputes the arguments' digest and refuses a
+record whose arguments do not hash to it, or whose resource is not its tool at its node. (3) **A prompt's decisive
+lines go last, below everything the requester controls, and every field is bounded**: the requester's own arguments
+scrolled the real tool out of an 80×24 terminal. Escape everything but printable ASCII, and a space after a space:
+an allow-list of "letters and digits" still passed right-to-left letters, combining marks and full-width forms, and
+padding laid out a copy of the prompt's own block (the confirm round). The "last on the screen" claim holds for a
+terminal at least 80 columns wide; say the width wherever the claim is made. (4) **A path check is a check of the real path**: resolve links before asking whether a
+directory is in a worktree; read a secret from a descriptor opened `O_NOFOLLOW` and `fstat`ed (type, owner, mode,
+link count); create with `O_EXCL`; replace by rename, and remove what could not be written whole. Keep a test that
+fails when the bytes are read through the path again. A file name that must be unique per principal carries a
+digest: case-insensitive filesystems fold the rest. Mode bits are not the whole access check on macOS — an ACL is
+not read (accepted by the maintainer for the software key, 2026-11-20), and the page, the refusal and the tool's own
+output say so. (5) **Flush the terminal before a prompt** (`tcflush`): typed-ahead text with no
+newline otherwise answers a bare return. It protects a person from their own keystrokes and stops no process that can
+type.
 **The roots can change on a live node** (identity-and-lifecycle I2, PR 1, unreleased): `NodeTls` holds its chain
 checks behind `ArcSwap` and a **roots generation** (`mycelium-core/src/tls.rs`). `reroot_material` builds material for
 the node's *current* key over a set of roots with no CA key; `activate` swaps the chain checks, then bumps the

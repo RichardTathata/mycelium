@@ -45,6 +45,7 @@ one:
 | `mycelium declare [--watch] --format json` | `mycelium.declare/1`, one line per event | [`declare.json`](../../tests/fixtures/cli/declare.json), [`declare-refused.json`](../../tests/fixtures/cli/declare-refused.json), [`declare-watch-*.json`](../../tests/fixtures/cli) |
 | `mycelium tls ca\|issue\|pin --format json` | `mycelium.tls/1` | [`tls-ca.json`](../../tests/fixtures/cli/tls-ca.json), [`tls-issue-node.json`](../../tests/fixtures/cli/tls-issue-node.json), [`tls-issue-client.json`](../../tests/fixtures/cli/tls-issue-client.json), [`tls-pin.json`](../../tests/fixtures/cli/tls-pin.json) |
 | `mycelium skills list\|get <name> --format json` | `mycelium.skills/1` | [`skills-list.json`](../../tests/fixtures/cli/skills-list.json), [`skills-get.json`](../../tests/fixtures/cli/skills-get.json) |
+| `mycelium dev consent approve …` (always JSON on stdout; the prompt goes to the terminal) | `mycelium.dev.consent/1`, one line per request | none; its fields are [`Answer::line`](../../src/dev_consent.rs)'s, asserted by [`tests/dev_consent_cli.rs`](../../tests/dev_consent_cli.rs) |
 
 The `explain`, `declare` and `tls` rows are identity-and-lifecycle N3, and `skills` its N5. Their goldens are checked by
 [`tests/cli_json.rs`](../../tests/cli_json.rs), which runs the built binary: every object's keys, every array's length

@@ -17,7 +17,7 @@ categories = ["network-programming", "asynchronous"]
 [features]
 default = []
 # mTLS transport, Ed25519 node identity, signed KV/consensus payloads, hot rotation.
-tls = ["dep:tokio-rustls", "dep:rustls", "dep:rcgen", "dep:ed25519-dalek", "dep:rand_core", "dep:arc-swap", "dep:ring", "dep:zeroize", "dep:webpki", "dep:p256"]
+tls = ["dep:tokio-rustls", "dep:rustls", "dep:rcgen", "dep:ed25519-dalek", "dep:rand_core", "dep:arc-swap", "dep:ring", "dep:zeroize", "dep:webpki", "dep:p256", "dep:rustix"]
 # Prometheus gauge/counter emission from the store/connection paths (no-op without).
 metrics = ["dep:metrics"]
 # Signed-identity surface the compliance layer builds on (audit/RBAC live upstream).
@@ -96,6 +96,12 @@ p256           = { version = "0.14", default-features = false, features = ["arit
 
 # Prometheus metrics (optional — "metrics" feature)
 metrics = { version = "0.24", optional = true }
+
+# The developer's software consent key (`consent_key`, identity-and-lifecycle I7): this process's uid, to check a key
+# file's owner, and the `O_NOFOLLOW` / `O_NONBLOCK` constants — safe wrappers, since this crate denies `unsafe`.
+# Under `tls`. Already in the workspace's lockfile (mycelium-wasm-host; reqwest's tree).
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1", features = ["process", "fs"], optional = true }
 
 [dev-dependencies]
 proptest = "1"

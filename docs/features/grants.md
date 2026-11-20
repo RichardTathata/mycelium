@@ -138,7 +138,13 @@ This feature is turned on in code.
     (issued, refused or revoked; never an attempt refused first) on `/stats` (`grant_decisions_unsigned`) and as
     `mycelium_gateway_decisions_unsigned_total{decision}`; a later release refuses it (`deprecations.md` §95).
   - A replay of a signed decision inside its window finds the request already answered, or the grant already revoked
-    (one at a time or concurrent, above), so no nonce cache is kept.
+    (one at a time or concurrent, above) — **for as long as that answer is on record**. No nonce cache is kept, and
+    the answer (`…/issued`) is a KV record any member can tombstone: with it gone, the same signed body is admitted
+    again, within the 300 s freshness window plus drift, and for whatever the request record then says, since the
+    signature names the request's id and terms and not its tool, resource or digest (#813's review, F1; run:
+    two `grant.issue` records from one signature). Closed by identity-and-lifecycle row I7-S (the decider signs
+    what it saw, and a spent-decision memory that is not a deletable KV record); dated on
+    [what is proven](../operations/what-is-proven.md#signed-decision-moved-and-replayed).
   - From the SDKs: `grant_decide(…, signer=…)` / `grantDecide(…, { signer })` and `grant_revoke(…, signer=…)` /
     `grantRevoke(…, { signer })`; the node is read from `GET /health` unless given. `ClientSigner.sign_grant_decision`
     / `signGrantDecision` sign alone. `tests/fixtures/decision/vector.json` pins the message and the signature in Rust,

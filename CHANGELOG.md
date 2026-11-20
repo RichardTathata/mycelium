@@ -544,6 +544,29 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `not_your_stream`); the SDKs refuse a confirmation their stream was not asked for (`CancelNotReceivedError`). A streamed call's admission is now held
   with or without a cohort budget (lock-order row 46 retired).
 
+- **Developer consent certificates: `mycelium dev consent`, the developer's side for a software key**
+  (identity-and-lifecycle I7, PR 3a; `deprecations.md` §121; [feature page](docs/features/consent-certificates.md)).
+  `mycelium dev consent key` creates a software P-256 consent key, `0600` in a `0700` directory under the user's home
+  whose real path is in no worktree, and names the grade that describes it: `tty`. `dev consent enrol` takes the
+  certificate the CA's holder issued over its public half and keeps it beside the key. `dev consent approve
+  <request>…` reads each request's record from a gateway, shows it only if its arguments hash to its digest, puts the
+  lines an approval is about last on the screen, and signs what is typed there after the prompt appears (`approve`
+  or `refuse`; anything else signs nothing, and whatever was typed ahead of a prompt is discarded), sending the
+  signed decision under a low-scope bearer (`grant:read`, `grant:relay`). At most 8 requests wait; one more is
+  answered `busy`. `dev` signs with a software key only under a certificate graded `tty`: one certified as
+  `os_presence(macos, unbound)` or `recording` is refused by name (`grade_not_this_keys`), as is a certificate over
+  another key (`enrolled_key_mismatch`) and a key file that is not the user's own private, singly-named file. So a
+  consent decision is now signed outside a test fixture. `tty` still says where the key lives and not that a person
+  typed. **Still behind the provisional OID:** in a shipped build every `dev consent` verb refuses by name
+  (`consent_grade_oid_provisional`) and writes nothing. **A second release blocker:** a consent decision does not
+  yet name the tool, resource and digest its approver was shown, so an approval can be moved to another call and
+  replayed; `scripts/check-release-blockers.sh --release` refuses a tag until the approver signs what it saw.
+  **Not built:** the macOS Secure Enclave key and its Swift shim (PR 3b), Windows, a `recording` signer, reading a
+  macOS ACL. New library surface: `mycelium::dev_consent`, `mycelium_core::consent_key`.
+  **Check:** `mycelium dev consent approve … <request>` prints one `mycelium.dev.consent/1` line per request; a
+  `signed` line quotes the gateway's status, and the addressed node's evidence journal names
+  `consent:{issuer}/{name}` with `signed_with.grade = "tty"`.
+
 - **A gateway's cancel reaches the provider directly, and the doors cancel** (identity-and-lifecycle I4, PR 3a;
   `deprecations.md` §114). `GossipAgent::cancel_call(term)` revokes a minted call's term, records it on disk and
   forwards it to the provider the call went to (the cancel-forward, `sys.call-cancel.v1`, accepted only from the
