@@ -399,13 +399,16 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (v2.38.0 and earlier) wasmtime was built with its defaults, which include both. **RUSTSEC-2026-0572** (low; a panic
   when a component cancels a stream or future copy on the wrong end) is not reachable: by the advisory the panic needs
   two component instances in one `Store` and a host that passes a `stream` or `future` between them; the host makes
-  one `Store` for each instance and instantiates one component in it (`host.rs:458-474`), its world has no `stream` or
-  `future` type, and it names no `StreamReader` or `FutureReader`. What the advisory leaves a single-instance embedder
-  is a trap, which already ends the call and has the serve loop replace the instance. **RUSTSEC-2026-0569** (low; a
+  one `Store` for each instance and instantiates one component in it (`host.rs:458-474`), and it names no
+  `StreamReader` or `FutureReader`. That the host's world has no `stream` or `future` type is not the barrier:
+  component-model async is compiled in and on in the engine (`Cargo.toml:29`; the `Config` does not turn it off), so
+  a guest can make streams of its own. What the advisory leaves a single-instance embedder is a trap (its statement,
+  not exercised here), which already ends the call and has the serve loop replace the instance. **RUSTSEC-2026-0569** (low; a
   panic in `Caller::get_module_export`) is not reachable: it affects core WebAssembly only, not components (the
   advisory), and the crate has no `Caller` — it instantiates components only, through the generated bindings.
   **Affected releases:** v2.38.3, v2.39.0 and v2.40.0 link wasmtime 49.0.5, and earlier releases with the WASM host
-  link older wasmtime inside the advisories' ranges (45.0.3 at v2.0.0 through 49.0.4 at v2.38.2); the host's engine
+  link older wasmtime (45.0.3 at v2.0.0 through 49.0.4 at v2.38.2), inside the ranges of -0566, -0567, -0569 and
+  -0571 throughout, of -0572 from wasmtime 46.0.0 and of -0568, -0570 and -0573 from 47.0.0; the host's engine
   configuration, WASI context and linker calls at the three 49.0.5 tags are those read here, so none of the eight is
   reachable in them either. **The fix is on `main`, unreleased**; no released version carries it. A node built without
   `mycelium-wasm-host` does not link wasmtime. wasmtime 49.0.7's feature table is identical to 49.0.5's (`default`

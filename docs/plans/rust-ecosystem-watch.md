@@ -117,8 +117,8 @@ is, what adopting it would buy, what it would cost or risk, its state, and what 
   - Of v2.38.3's RUSTSEC-2026-0420, -0422, -0423 and -0424, one (-0420) affects only WASI 0.3 sockets.
   - Eight more, RUSTSEC-2026-0566 to -0573 (published 2026-11-16, fixed in wasmtime 49.0.6), are answered by the
     bump to 49.0.7, which is on `main`, unreleased: none is reachable through the host as configured (CHANGELOG,
-    Unreleased, Security), so they have driven no release. One of them (-0572) is in component-model async, the
-    code this row would turn on.
+    Unreleased, Security), so they have driven no release. One of them (-0572) is in component-model async, which
+    is already compiled in and on in the engine; what this row would add is the host's use of it.
   - Async components change the confinement model: streams that cross components need new answers for the fuel
     budget, the call deadline and the memory cap. This is interface and host design, not a dependency bump.
 - **Next:** `spike` when `wasm32-wasip3` is tier 2 on stable. The spike's question: what fuel, deadline and memory
