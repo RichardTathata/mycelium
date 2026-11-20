@@ -849,8 +849,8 @@ and `tools/call` on `tool:{name}` — read for the requirer's unit principal:
 
 **An edge to a hosted component** (2026-11-18;
 [ledger](../operations/what-is-proven.md#wire-check-reads-a-hosted-edge-as-its-provider-decides)). Where the
-edge's provider is a `wasm-component` artifact from the library, and any unit declares a rule or a mandate, the
-check reads what **the provider built from the declaration** decides for **a member's direct call**
+edge's provider is a `wasm-component` artifact from the library, and the requirer or a unit that could host it
+declares a rule or a mandate, the check reads what **the provider built from the declaration** decides for **a member's direct call**
 ([deprecations §108 and §122](deprecations.md)). That provider is a node with `[authority]`. It loads its **own
 unit's** rules; it decides the call as `cap.invoke` on `cap:{ns}/{name}@{node}` (`tools/call` on
 `tool:{name}@{node}` for a `tool/{name}` component) for the actor `node:{sender}` — the calling **node**, not the
@@ -866,8 +866,8 @@ So the check reads the rules of each unit that could host the component, in the 
 - **`host-dependent edge`** (warning): one host's rules admit and another's do not. Which host installs the
   component is decided at run time.
 - **`node-decided edge`** (warning): the only reading that admits names the requirer's **unit** principal, as the
-  rule's actor or the holder of the mandate it requires. No node is a unit's principal, so a provider as built
-  today **refuses** this call.
+  rule's actor or the holder of the mandate it requires. No node is a unit's principal, so a provider built from
+  `[authority]` **refuses** this call.
 - **`mandate-dependent edge`** (warning): the admitting rule sets `requires_mandate`, and a declared mandate held
   by a `node:` principal covers it. `[authority]` entitles no authority to a mandate scope, so the provider built
   from the declaration refuses; a node whose execution authority is attached in code can establish it.
@@ -877,8 +877,13 @@ So the check reads the rules of each unit that could host the component, in the 
   (the reference evaluator establishes none), an actor or resource that names no node (`node:*` is no wildcard), a
   rule shadowed by an earlier one — and a rule that would admit declared in a unit no provider loads it from.
 
+Where neither the requirer nor any host declares vocabulary and another unit does, the edge is `ungoverned edge`,
+as for any edge — whether a host enforces at all is its node's `[authority]` table, not a unit file — and the
+warning names a rule for the edge that the hosts do not read.
+
 What the check does not know: placement (a rule for `node:<id>` passes whoever the caller turns out to be);
-`requires_grant` and `requires_values`, which are run-time facts; a call a gateway frames for a client
+`requires_grant` and `requires_values`, which are run-time facts — so a rule with either, placed before a plain
+rule, can be the first match at the provider and refuse a call the check passed: put the plain rule first; a call a gateway frames for a client
 (`rpc_call_as`), which the provider decides for that client; and an evaluator attached in code. **An edge to a
 deployed provider is still read the older way** — the unit principal, any unit's rule — which is not how its
 provider decides it, and a component a unit declares as a plain `[[capability]]` is read that way too

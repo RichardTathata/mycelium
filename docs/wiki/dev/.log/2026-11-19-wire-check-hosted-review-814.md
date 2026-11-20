@@ -21,6 +21,13 @@
 - **Method.** Every reading has a test with two halves in one function: `wire_check::check` over a declaration, and a
   node built from `[authority]` over the same directory with a receiver counting what it is handed
   (`door_decides`, `src/agent/declared_authority_tests.rs`). Those tests build only with `compliance`.
+- **The confirm round (2026-11-20).** Two false reds from the round's own additions. (C1) A rule naming a value
+  (`requires_values`) was counted as a first-match blocker; `Rule::matches` skips it when the call carries another
+  value, so it blocks nothing. (C2) "Any unit's vocabulary turns the hosted reading on" failed deployments that
+  enforce only at a gateway: `[authority]` is node configuration, so where neither the requirer nor a host declares
+  vocabulary the edge is `ungoverned edge` again, reworded to name the hosts and a rule they do not read. Stated,
+  not read: a `requires_grant` or `requires_values` rule before a plain one shadows it at the provider; a host unit
+  with an exposure rule or no `principal`. `mandate-dependent edge` has a door half that presents a mandate.
 
 Pages: `docs/wiki/dev/operations.md` (the overlay's hosted reading), `docs/operations/what-is-proven.md` (the proven
 row rewritten; three open rows), `docs/guide/deprecations.md` §122 (retitled), `docs/guide/20-authorising-actions.md`,

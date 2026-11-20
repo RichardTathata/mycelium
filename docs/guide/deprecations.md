@@ -5188,8 +5188,8 @@ they merge.*
 
 This applies to a declaration checked **with an artifact library** — `mycelium wire-check --library`, and
 `mycelium doctor --units` and `mycelium test --faults` given `--library`, which run the same check — in which a
-capability is provided only by a `wasm-component` artifact, and some unit declares a `[[rule]]` or a `[[mandate]]`
-(the requirer need not: a hosted edge is decided by its host's rules). `mycelium declare` reads no library, so it knows no hosted component and is
+capability is provided only by a `wasm-component` artifact, and the requirer or a unit that could host the component
+declares a `[[rule]]` or a `[[mandate]]` (the requirer need not: a hosted edge is decided by its host's rules). `mycelium declare` reads no library, so it knows no hosted component and is
 unchanged. Nothing changes at run time: this is the design-time check catching up with what an enforcing provider has
 decided since §108.
 
@@ -5213,7 +5213,9 @@ that could host the component, in order, each field as that provider reads it:
 | actor the requirer's unit principal — or any-node, requiring a mandate that unit principal holds | `unauthorisable edge` (clean in the `tool` namespace) | warning **`node-decided edge`** |
 | any-node, `requires_mandate`, with a declared mandate a `node:` principal holds | `unauthorisable edge`, exit 1 | warning **`mandate-dependent edge`** |
 | `cancellable = true`; `requires_scopes`; `signed_with`; `requires_facts`; `actor = "node:*"` or another string that is no node; a resource ending `@` or naming no node; a rule after one that matches the call and does not permit it | as the row it otherwise falls in | **`unauthorisable edge`, exit 1**, naming the form |
-| the right rule, declared only by a unit that does not host the component | as the row it otherwise falls in | **`unauthorisable edge`, exit 1**, naming that unit and the hosts |
+| the right rule, declared only by a unit that does not host the component, where a host (or the requirer) declares some rule or mandate of its own | as the row it otherwise falls in | **`unauthorisable edge`, exit 1**, naming that unit and the hosts |
+| the requirer declares nothing, a host declares some rule or mandate, and none of the hosts' rules admits the call | `ungoverned edge`, exit 0 | **`unauthorisable edge`, exit 1** — the edge is the host's to decide, and it declares authority |
+| neither the requirer nor any host declares a rule or a mandate, and another unit does | `ungoverned edge`, exit 0 | `ungoverned edge`, exit 0, **reworded**: it names the hosts, says a host built from `[authority]` would refuse the call, and names a rule for it that another unit declares and the hosts do not read |
 
 So **a check that was green can now fail, and one that failed can pass or warn.** `mycelium test --faults` refuses
 a declaration the check fails (*nothing ran*), so a pipeline over such a declaration stops until the rule is
@@ -5225,12 +5227,17 @@ carries no scopes, so the rule does not apply. `signed_with`: the rule applies o
 (§118). `requires_facts`: the reference evaluator, the one `[authority]` builds, establishes no fact. `node:*`: an
 actor is matched exactly, and nothing after `node:` is a wildcard. Order: the evaluator decides by the first allowance
 that matches. `requires_grant` and `requires_values` are not read — a grant and a call's arguments are run-time facts
-— and a rule with either is taken to permit.
+— and a rule with either is taken to permit. **That has an order consequence the check does not see:** such a rule
+placed *before* a plain rule is the first match at the provider whenever no grant is presented, or the call lacks the
+named value, and it then decides *indeterminate* — the plain rule after it is never reached and the call is refused,
+while the check has passed the edge on the first rule. Put the plain rule first, or do not write both. (A rule naming
+a value the call carries with *another* value is skipped by the provider, so it shadows nothing, and the check reads
+it so.)
 
 **The three warnings**, each exit 0:
 
 - **`node-decided edge`** — a rule or a mandate names the calling **unit**, and the provider reads the calling
-  **node**. No node is a unit's principal, so **a provider as built today refuses this call**. It is a warning and not
+  **node**. No node is a unit's principal, so **a provider built from `[authority]` refuses this call**. It is a warning and not
   an error by the maintainer's choice of 2026-11-18 (the severity is one constant, `wire_check::NODE_DECIDED`).
 - **`host-dependent edge`** — which host installs the component is decided at run time, and the call runs at one and
   is refused at another. Declare the rule in each unit that could host it.
@@ -5277,7 +5284,11 @@ rules — not as its provider decides it — and a unit that declares as `[[capa
 is read that way too; a `blob`-provided capability likewise. Each is an open row on
 [what-is-proven](../operations/what-is-proven.md#wire-check-reads-a-deployed-edge-for-the-unit). Without `--library`
 nothing is known to be hosted. An evaluator or execution authority attached in code, not from `[authority]`, may load
-other rules and entitle a mandate authority.
+other rules and entitle a mandate authority. **Whether a host enforces at all is not in a unit file**: `[authority]`
+is a table of the node's configuration, so every error above is true of a host that sets it, and a host that does not
+runs the call — which is why an edge whose hosts declare nothing stays a warning. **Two host units no provider can be
+built from** pass the check: one that carries an exposure rule, and one with no `principal` — `[authority]` refuses
+to start as either, by name, and the check does not say so (a stated bound, not a finding).
 
 - Test: in `src/wire_check.rs`, `a_cap_invoke_rule_for_any_node_admits_an_edge_to_a_hosted_component`,
   `a_skill_rule_does_not_admit_an_edge_to_a_hosted_component`, `a_hosted_tool_is_read_for_the_calling_node`,

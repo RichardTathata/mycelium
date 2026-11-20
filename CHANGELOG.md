@@ -35,7 +35,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     `unauthorisable edge`, exit 1, naming the reason, where the check was green; `mycelium test --faults --library`
     refuses such a declaration (`mycelium declare` reads no library and is unchanged);
   - three new warnings, each exit 0: `node-decided edge` (a rule or mandate names the requirer's **unit** principal;
-    the provider decides the node, and as built today refuses the call), `host-dependent edge` (one host's rules admit
+    the provider decides the node, and one built from `[authority]` refuses the call), `host-dependent edge` (one host's rules admit
     and another's do not) and `mandate-dependent edge` (the rule requires a mandate scope, which `[authority]`
     entitles no authority to).
   - **The JSON document** (`mycelium.design/declaration/1`, unchanged): such an edge's `operations` carries a third
@@ -49,6 +49,11 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     depots that provide them, for any node, and nothing else declares authority; tests start a provider from
     `[authority]` over the fixture and over each refused form and set the check's reading beside what the provider
     does.
+  - An edge whose hosts and requirer declare no rule or mandate stays `ungoverned edge`, exit 0, as it was —
+    whether a host enforces is its node's `[authority]` table, not a unit file — and the warning now names the hosts
+    and any rule for the edge that another unit declares and they do not read. Not read, and stated: a rule under a
+    grant, or naming a value, placed before a plain rule can be the first match at the provider and refuse a call the
+    check passed.
   - **Not built**, each a dated row on `what-is-proven.md`: an edge to a **deployed** provider is still read for the
     requirer's unit principal from any unit's rules; a component declared as a plain `[[capability]]`, and a `blob`,
     are read that way too; `test --faults policy-diff` decides the hosted shape for the unit principal. A provider

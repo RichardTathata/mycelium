@@ -513,6 +513,12 @@ fn reads_optimizer(declarations: &Path) -> (Vec<String>, crate::wire_check::Repo
 /// A member's call at the provider's door.
 #[derive(Clone, Copy)]
 enum MemberCall {
+    /// `rpc_call_with_mandate`: the kind, in the member's own envelope (`node:{self}`), **presenting a mandate** in
+    /// the named scope — held by the calling node, enumerating the call, its possession proof signed with the node's
+    /// own identity key over the operation, resource and arguments the provider derives, and its grant signed by an
+    /// operator key. Everything a member can do to hold a mandate; what is left is whether the provider's execution
+    /// authority entitles the operator.
+    Mandated(&'static str, &'static str),
     /// `rpc_call`, unframed: the provider decides `node:{sender}`.
     Direct(&'static str),
     /// A skill call in the member's own envelope (`node:{self}`, no scopes, no mandate — what `rpc_call_with_mandate`
@@ -523,18 +529,25 @@ enum MemberCall {
 /// Start a provider from `[authority]` over the declaration `make(its node id)` writes, as `unit`; make the call;
 /// answer whether the receiver was handed it. A call that did not run was refused with a reason.
 async fn door_decides(tag: &str, unit: &str, call: MemberCall, make: impl FnOnce(&NodeId) -> PathBuf) -> bool {
+    door_answers(tag, Some(unit), call, make).await.0
+}
+
+/// [`door_decides`], with the provider's answer. `unit: None` is a node with **no** `[authority]` table: the same
+/// node, enforcing nothing.
+async fn door_answers(tag: &str, unit: Option<&str>, call: MemberCall, make: impl FnOnce(&NodeId) -> PathBuf) -> (bool, serde_json::Value) {
     let dir = scratch(tag);
     let (id, mut cfg) = config(&dir, alloc_port(), None);
-    cfg.authority = Some(authority(&dir, make(&id), unit));
+    let declarations = make(&id);
+    cfg.authority = unit.map(|unit| authority(&dir, declarations, unit));
     let a = Arc::new(GossipAgent::new(id.clone(), cfg));
-    a.start().await.unwrap_or_else(|e| panic!("{tag}: the provider starts from the declaration, as {unit}: {e}"));
+    a.start().await.unwrap_or_else(|e| panic!("{tag}: the provider starts from the declaration, as {unit:?}: {e}"));
     let kind: String = match call {
-        MemberCall::Direct(kind) => kind.to_string(),
+        MemberCall::Direct(kind) | MemberCall::Mandated(kind, _) => kind.to_string(),
         MemberCall::Skill(..) => "skill.invoke".to_string(),
     };
     let _advertised = match call {
         MemberCall::Skill(ns, name) => Some(a.capabilities().advertise_capability(crate::Capability::new(ns, name), Duration::from_secs(30))),
-        MemberCall::Direct(_) => None,
+        MemberCall::Direct(_) | MemberCall::Mandated(..) => None,
     };
     let ran = Arc::new(AtomicUsize::new(0));
     let (svc, seen, k) = (Arc::clone(&a), Arc::clone(&ran), kind.clone());
@@ -550,6 +563,32 @@ async fn door_decides(tag: &str, unit: &str, call: MemberCall, make: impl FnOnce
     let payload = br#"{"stops": 3}"#.to_vec();
     let reply = match call {
         MemberCall::Direct(_) => a.service().rpc_call(id.clone(), kind.clone(), payload, within).await,
+        MemberCall::Mandated(_, scope) => {
+            use crate::agent::gateway_authority::{arguments_digest, possession_request, PresentedMandate};
+            use crate::mandate::grant::{possession_message, SignedMandateGrant};
+            use crate::mandate::{Mandate, PrincipalId, TermId};
+            let (ns, name) = crate::hosted_capability_of(&kind).expect("a hosted capability's kind");
+            let (operation, key) = crate::hosted_capability_call(ns, name);
+            let m = Mandate {
+                holder: PrincipalId::new(&crate::agent::gateway_caller::node_principal(&id)).unwrap(),
+                established_by: PrincipalId::new("operator:coop").unwrap(),
+                purpose: scope.into(),
+                scope: scope.into(),
+                operations: vec![format!("{operation}:{key}")],
+                epoch: 1,
+                term: TermId::new("t1").unwrap(),
+                valid_from_ms: 0,
+                valid_until_ms: a.task_ctx.hlc.decision_now_ms() + 3_000_000,
+            };
+            let resource = format!("{key}@{id}");
+            let arguments: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+            let node_key = a.task_ctx.tls.get().expect("the node has its identity key").signing_key();
+            let proof = mycelium_core::tls::sign_bytes(&node_key, &possession_message(&m, &possession_request(operation, &resource, &arguments_digest(&arguments))));
+            let operator = ed25519_dalek::SigningKey::from_bytes(&[60u8; 32]);
+            let grant = SignedMandateGrant { signature: mycelium_core::tls::sign_bytes(&operator, &m.canonical_bytes()).to_vec(), mandate: m };
+            let presented = serde_json::to_value(PresentedMandate { grant, possession: base64::Engine::encode(&base64::engine::general_purpose::STANDARD, proof) }).unwrap();
+            a.service().rpc_call_with_mandate(id.clone(), kind.clone(), payload, &presented, &resource, within).await
+        }
         MemberCall::Skill(ns, name) => {
             let me = crate::agent::gateway_caller::node_principal(&id);
             let framed = crate::agent::gateway_caller::frame_with_context_and_mandate(&a.task_ctx, &id, &me, &[], bytes::Bytes::from(payload), None, Some(&format!("skill:{ns}/{name}@{id}")))
@@ -564,7 +603,7 @@ async fn door_decides(tag: &str, unit: &str, call: MemberCall, make: impl FnOnce
     assert!(ran == 1 || reply["reason"].as_str().is_some_and(|r| !r.is_empty()), "{tag}: a call that did not run was refused with a reason: {reply}");
     serve.abort();
     a.shutdown().await;
-    ran == 1
+    (ran == 1, reply)
 }
 
 const OPTIMIZE: MemberCall = MemberCall::Direct("cap.invoke/route/optimize");
@@ -635,9 +674,11 @@ async fn the_coop_fixtures_hosted_edge_is_decided_at_the_provider_as_wire_check_
 /// declarations were read clean, exit 0 with no finding, while `depot-a` refused.
 #[tokio::test]
 async fn a_hosted_edges_rule_admits_only_from_a_unit_that_hosts_it() {
+    // The depots declare vocabulary of their own — the intake's rule — and not the optimizer's: an error.
+    let intake_only = "[[rule]]\nactor     = \"*\"\noperation = \"skill.invoke\"\nresource  = \"skill:depot/intake\"\n";
     let elsewhere = coop_with("coop-auditor-units", |unit, text| match unit {
         "auditor" => format!("{text}\n{COOP_RULE}"),
-        u if u.starts_with("depot-") => no_rules(text, ""),
+        u if u.starts_with("depot-") => no_rules(text, intake_only),
         _ => text,
     });
     let (kinds, r) = reads_optimizer(&elsewhere);
@@ -645,6 +686,22 @@ async fn a_hosted_edges_rule_admits_only_from_a_unit_that_hosts_it() {
     let text = r.render_text();
     assert!(text.contains("`auditor`") && text.contains("depot-a|depot-b"), "the finding says where the rule is and where the provider reads it: {text}");
     assert!(!depot_a_runs("coop-auditor", &elsewhere).await, "depot-a loads its own unit's rules, and the rule is the auditor's");
+
+    // The depots declare **nothing** (#814's confirm round, C2). Whether a depot enforces at all is its node's
+    // `[authority]` table, which no unit file shows: with one it refuses the call, with none it runs it. So the
+    // check does not fail the declaration; it warns `ungoverned edge`, naming the hosts and the rule they do not read.
+    let outside = coop_with("coop-outside-units", |unit, text| match unit {
+        "auditor" => format!("{text}\n{COOP_RULE}"),
+        u if u.starts_with("depot-") => no_rules(text, ""),
+        _ => text,
+    });
+    let (kinds, r) = reads_optimizer(&outside);
+    assert!(kinds == ["ungoverned edge"] && r.exit_code() == 0, "FALSE RED: the hosts declare no vocabulary, and one without [authority] runs the call:\n{}", r.render_text());
+    let text = r.render_text();
+    assert!(text.contains("`auditor`") && text.contains("depot-a|depot-b") && text.contains("[authority]"), "the warning says the hosts do not read the auditor's rule: {text}");
+    assert!(!depot_a_runs("coop-outside-enforcing", &outside).await, "with [authority], depot-a loads no rule for it and refuses");
+    let open = outside.clone();
+    assert!(door_answers("coop-outside-open", None, OPTIMIZE, move |_| open).await.0, "with no [authority] table, the same depot runs the call");
 
     let one_host = coop_with("coop-one-host-units", |unit, text| if unit == "depot-a" { no_rules(text, "") } else { text });
     let (kinds, r) = reads_optimizer(&one_host);
@@ -696,6 +753,53 @@ async fn a_rule_form_no_provider_admits_a_members_call_under_is_not_passed() {
     let (kinds, r) = reads_optimizer(&plain_first);
     assert!(kinds.is_empty(), "the first matching allowance permits: {}", r.render_text());
     assert!(depot_a_runs("coop-form-plain-first", &plain_first).await, "the plain rule is reached first, and the call runs");
+}
+
+/// **A rule that names a value stands in no later rule's way** (#814's confirm round, C1). The evaluator skips a rule
+/// whose `requires_values` names a value the call carries with another value, so whether such a rule matches is a
+/// run-time fact. Two declarations: a rule naming `stops = 99` that is `cancellable`, or that requires a fact, and
+/// then the plain rule. The call carries `stops = 3`: the provider skips the first rule and **runs** the call on
+/// the second, and the check passes the edge.
+///
+/// Seen failing first: on the overlay at `9fed73af` the check reported `unauthorisable edge` ("never reached") for
+/// both, while the provider ran the call — a false red.
+#[tokio::test]
+async fn a_rule_naming_a_value_does_not_shadow_the_rule_after_it() {
+    let base = "[[rule]]\nactor     = \"*\"\noperation = \"cap.invoke\"\nresource  = \"cap:route/optimize\"\n";
+    for (tag, refusing) in [("values-cancellable", "cancellable = true\n"), ("values-facts", "requires_facts = [\"budget\"]\n")] {
+        let declarations = coop_depots(&format!("coop-{tag}-units"), &format!("{base}{refusing}requires_values = {{ stops = 99 }}\n\n{base}"));
+        let (kinds, r) = reads_optimizer(&declarations);
+        assert!(kinds.is_empty() && r.exit_code() == 0, "{tag}: FALSE RED: the provider runs this call:\n{}", r.render_text());
+        assert!(depot_a_runs(&format!("coop-{tag}"), &declarations).await, "{tag}: the call's `stops` is 3, so the first rule is not the one, and the plain rule admits it");
+    }
+}
+
+/// **A mandate a calling node presents is not established by a provider built from `[authority]`** (#814's confirm
+/// round, C4) — the door half of `mandate-dependent edge`. The rule is for any node and requires the scope
+/// `routing`; a declared mandate, held by a node, covers it; and the call **presents** one
+/// (`rpc_call_with_mandate`): held by the calling node, enumerating `cap.invoke:cap:route/optimize`, its possession
+/// proof signed with the node's identity key over the operation, resource and arguments the provider derives, its
+/// grant signed by an operator. The provider refuses it, `authority_not_established`, and the receiver sees
+/// nothing: `[authority]` builds an execution authority that entitles grants to this node (or the fleet) and trusts
+/// no external issuer (`declared_authority::plan`), so no operator's mandate in a scope of its own is ever
+/// established there. The same call with no mandate is refused too (the `mandate` case of
+/// `a_rule_form_no_provider_admits_a_members_call_under_is_not_passed`).
+///
+/// Not red before: it adds the half that was read from the code. What it cannot show in-process is the other side —
+/// a provider whose execution authority, attached in code, entitles the operator and so runs the call — because a
+/// node with `[authority]` refuses an authority attached in code beside the table
+/// (`an_authority_attached_in_code_beside_the_table_refuses_the_start`); that side is
+/// `a_mandate_bound_at_the_mcp_door_verifies_on_a_direct_call_of_the_same_tool_and_arguments`
+/// (`hosted_capability_door_tests`), for a client holder.
+#[tokio::test]
+async fn a_presented_mandate_is_not_established_by_a_provider_built_from_its_declaration() {
+    let rules = "[[rule]]\nactor     = \"*\"\noperation = \"cap.invoke\"\nresource  = \"cap:route/optimize\"\nrequires_mandate = \"routing\"\n\n[[mandate]]\nholder = \"node:10.0.0.7:7946\"\nscope = \"routing\"\noperations = [\"cap.invoke:cap:route/optimize\"]\n";
+    let declarations = coop_depots("coop-presented-units", rules);
+    let (kinds, r) = reads_optimizer(&declarations);
+    assert!(kinds == ["mandate-dependent edge"] && r.exit_code() == 0, "{}", r.render_text());
+    let (ran, reply) = door_answers("coop-presented", Some("depot-a"), MemberCall::Mandated("cap.invoke/route/optimize", "routing"), move |_| declarations).await;
+    assert!(!ran, "RAN: a provider built from [authority] established an operator's mandate: {reply}");
+    assert_eq!(reply["reason"], "authority_not_established", "refused because the mandate is not established, not for its form: {reply}");
 }
 
 /// **A hosted component in the `tool` namespace is decided for the calling node too** (#814's review, F3). It is
