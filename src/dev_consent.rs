@@ -25,7 +25,9 @@
 //!   are **the last thing shown**, below everything the requester controls; every field is cut to a bound that keeps
 //!   them on one screen of a terminal at least 80 columns wide (the width is not read), and every character that is
 //!   not printable ASCII is written as an escape, as is a space after a space ([`shown_text`], [`shown_id`]), so a
-//!   record cannot repaint the terminal, scroll those lines away, or lay out a copy of them.
+//!   record cannot repaint the terminal, scroll those lines away, or pad itself with blanks into rows that copy
+//!   them. **What it still can:** arguments filled with a visible character (dots, say) can line up rows that read
+//!   like those lines — plainly filled, inside the arguments, and above the real block, which is always last.
 //! - **What it signed.** Only an answer typed at the terminal it opened (`/dev/tty`, [`TtyApprover`]), **after the
 //!   prompt was shown**, is signed: `approve` signs an issue, `refuse` signs a refusal, and anything else — an empty
 //!   line, end of input, no terminal — signs nothing and sends nothing. Whatever was typed before the prompt, entered
@@ -626,7 +628,8 @@ fn shown_within(text: &str, max: usize, spaces: bool) -> (String, usize) {
 /// everything else as its `\u{…}` escape**, and a space that follows a space as an escape too. So the text cannot
 /// move the cursor, reorder or hide what is beside it (no right-to-left letter, no combining mark, no control or
 /// format character reaches the terminal), pass a look-alike of another script or width for an ASCII character, or
-/// lay itself out in columns to imitate the prompt's own lines. **The price, chosen:** arguments in any script but
+/// pad itself with blanks into columns that imitate the prompt's own lines. (Padded with a visible character it
+/// still can line up such rows; they are visibly filled, and the prompt's own block is below them, last.) **The price, chosen:** arguments in any script but
 /// ASCII are shown as escapes, which a person cannot read as words; they are shown exactly, and never as something
 /// they are not. (An allow-list of letters and digits was tried first; right-to-left letters, alphabetic combining
 /// marks and full-width forms passed it — #813's confirm round, C3.)

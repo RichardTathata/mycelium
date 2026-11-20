@@ -835,16 +835,20 @@ fn approve_from_standard_input_is_refused_when_standard_input_is_the_terminal() 
 /// only that host knows, and `dev`'s own `enrol`. Each is run here **through `sh -c`, exactly as quoted**, with the
 /// two directories filled in; then `approve` finds the enrolment.
 /// Seen failing first, one build per plant: the earlier wording, which left `--issuer`, `--ca-dir` and `--out` off
-/// (the quoted command exited 2); the public key's path left unquoted (on macOS, where it holds a space, `sh` split
-/// it and `tls issue` printed its usage — #813's confirm round, C7).
+/// (the quoted command exited 2); the public key's path left unquoted (`sh` split it and `tls issue` printed its
+/// usage — #813's confirm round, C7; the home holds a space and a quote on every platform since the second confirm
+/// round, N3, so this fails on Linux too and not only where the consent path has a space of its own).
 #[test]
 fn the_not_enrolled_refusal_quotes_commands_that_run() {
-    let root = scratch("quoted");
+    // The scratch name holds a space and a single quote, so the home does on every platform (on Linux the consent
+    // path has no space of its own, and an unquoted command would otherwise run there).
+    let root = scratch("quoted it's here");
     let (work, home, _) = set_up(&root, "tty", false);
+    assert!(home.to_string_lossy().contains(' ') && home.to_string_lossy().contains('\''), "the home holds a space and a quote: {}", home.display());
     let o = mycelium(&work, &home).args(["dev", "consent", "approve", "--issuer", "fleet", "--name", "alex", "r1"]).output().unwrap();
     let said = text(&o);
     assert!(o.status.code() == Some(2) && said.contains("not_enrolled"), "{said}");
-    let quoted: Vec<String> = said.split('`').filter(|part| part.starts_with("mycelium ")).map(|c| c.replace("<ca-dir>", root.join("ca").to_str().unwrap()).replace("<out-dir>", root.join("out2").to_str().unwrap())).collect();
+    let quoted: Vec<String> = said.split('`').filter(|part| part.starts_with("mycelium ")).map(|c| c.replace("<ca-dir>", &dc::sh_quoted(root.join("ca").to_str().unwrap())).replace("<out-dir>", &dc::sh_quoted(root.join("out2").to_str().unwrap()))).collect();
     assert_eq!(quoted.len(), 2, "two commands are quoted: {said}");
     assert!(quoted[0].starts_with("mycelium tls issue ") && quoted[1].starts_with("mycelium dev consent enrol "), "{quoted:?}");
     let bin_dir = Path::new(env!("CARGO_BIN_EXE_mycelium")).parent().unwrap().to_path_buf();

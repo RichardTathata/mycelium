@@ -5346,7 +5346,9 @@ are new.
   `$XDG_DATA_HOME/mycelium/consent/`, default `~/.local/share/mycelium/consent/`, on Linux. Files:
   `consent+{issuer}+{name}+{digest}.key.p8` (PKCS#8, `0600`; the digest is 16 hex digits of the principal's SHA-256,
   so principals differing only in case are separate files on a case-insensitive filesystem), `.pub.pem` and
-  `.cert.pem` beside it, the directory `0700`.
+  `.cert.pem` beside it, the directory `0700`. A key made by an earlier, unreleased build of this change under a
+  name without the digest (`consent-{issuer}-{name}` or `consent+{issuer}+{name}`) is not found
+  (`no_consent_key`): run `dev consent key` again and have the new key certified. No release used those names.
   `HOME` unset or relative is refused (`consent_dir_unresolved`).
 - **Never in a worktree, by the real path.** Every symbolic link in the directory's path is resolved first, and the
   real path must have no `.git` at or above it (`consent_dir_in_worktree`). That covers a repository's worktree, a
@@ -5380,6 +5382,8 @@ are new.
 - **What the prompt shows.** Printable ASCII as itself; everything else, in the arguments as in the identifiers, as
   a `\u{…}` escape, and a space after a space likewise. Arguments in another script are shown as escapes. The lines
   an approval is about are the last on the screen of a terminal at least 80 columns wide; the width is not read.
+  Arguments cannot be padded with blanks into rows that copy those lines; filled with a visible character they
+  still can line up such rows, plainly filled and above the real block, which is always last.
 - **Type the answer after the prompt appears.** `approve` discards whatever was typed at the terminal before it
   shows a prompt, entered or not, and says how many entered characters it discarded. A second `approve` typed while
   the first request was being answered does not approve the next one.

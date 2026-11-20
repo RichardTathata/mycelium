@@ -41,7 +41,8 @@ request and signs what is typed. The macOS Secure Enclave key and its Swift shim
     `~/Library/Application Support/mycelium/consent/` on macOS, `$XDG_DATA_HOME/mycelium/consent/` (default
     `~/.local/share/mycelium/consent/`) on Linux, as `consent+{issuer}+{name}+{digest}.key.p8`, where the digest is
     16 hex digits of the principal's SHA-256, so two principals that differ only in case are two files on a
-    case-insensitive filesystem too. It is never the directory
+    case-insensitive filesystem too. A key made by an earlier, unreleased build under a name without the digest
+    is not found (`no_consent_key`): create it again. No release used that name. It is never the directory
     `dev` runs in;
   - the directory's **real path**, with every symbolic link resolved, must have no `.git` at or above it
     (`consent_dir_in_worktree`): a repository's worktree, a linked worktree, a home with a `.git` in it, and a link
@@ -132,7 +133,9 @@ request and signs what is typed. The macOS Secure Enclave key and its Swift shim
   - **Everything that is not printable ASCII is written as an escape** (`\u{…}`), in the arguments and in every
     identifier, and so is a space that follows a space. Arguments in another script are therefore shown as escapes
     and cannot be read as words. That is the price of showing nothing that reorders, hides, stacks on, or passes
-    for other text, and nothing padded into rows that look like the prompt's own.
+    for other text, and nothing padded with blanks into rows that look like the prompt's own. Arguments filled
+    with a visible character, such as dots, can still line up rows that read like those lines. They are plainly
+    filled, they sit inside the arguments, and the real block is always the last thing shown.
   - Type `approve` to sign an issue (for `--ttl-secs`, default 300) or `refuse` to sign a refusal. Anything else,
     an empty line or no terminal signs nothing and sends nothing. **Whatever was typed before the prompt appeared
     is discarded**, entered or not, and the prompt says how many entered characters went.
