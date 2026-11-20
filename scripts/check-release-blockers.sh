@@ -62,9 +62,14 @@ self_test() {
   if "$0" "$dir/comment.rs" >/dev/null 2>&1; then echo "self-test: a gate named only in a comment passed"; ok=0; fi
   if "$0" "$dir/late.rs" >/dev/null 2>&1; then echo "self-test: a gate asked after the mint and the publish passed"; ok=0; fi
   if "$0" "$dir/crate.rs" >/dev/null 2>&1; then echo "self-test: an ungated pub(crate) commit_successor passed"; ok=0; fi
-  rm -f "$dir/blocked.rs" "$dir/blocked-gen.rs" "$dir/clear.rs" "$dir/missing.rs" "$dir/ungated.rs" "$dir/gated.rs" "$dir/comment.rs" "$dir/late.rs" "$dir/crate.rs"
+  # A wrapper that hands to the writer holding the gate passes; one that hands to an ungated writer does not.
+  printf "${head}    pub fn commit_successor() {\n        commit_successor_observed()\n    }\n    pub(super) fn commit_successor_observed() {\n        if !super::ca_generation_oid_open() { return; }\n        mint_ca_at();\n    }\n" >"$dir/wrapped.rs"
+  printf "${head}    pub fn commit_successor() {\n        commit_successor_observed()\n    }\n    pub(super) fn commit_successor_observed() {\n        mint_ca_at();\n    }\n" >"$dir/wrapped-ungated.rs"
+  if ! "$0" "$dir/wrapped.rs" >/dev/null 2>&1; then echo "self-test: a wrapper over a gated writer failed"; ok=0; fi
+  if "$0" "$dir/wrapped-ungated.rs" >/dev/null 2>&1; then echo "self-test: a wrapper over an ungated writer passed"; ok=0; fi
+  rm -f "$dir/blocked.rs" "$dir/blocked-gen.rs" "$dir/clear.rs" "$dir/missing.rs" "$dir/ungated.rs" "$dir/gated.rs" "$dir/comment.rs" "$dir/late.rs" "$dir/crate.rs" "$dir/wrapped.rs" "$dir/wrapped-ungated.rs"
   rmdir "$dir"
-  if [[ $ok == 1 ]]; then echo "check-release-blockers --self-test: ok (10 cases)"; else exit 1; fi
+  if [[ $ok == 1 ]]; then echo "check-release-blockers --self-test: ok (12 cases)"; else exit 1; fi
 }
 
 release=0
@@ -97,7 +102,10 @@ for constant in CONSENT_GRADE_OID_IS_PROVISIONAL CA_GENERATION_OID_IS_PROVISIONA
   fi
 done
 # Writers of the generation extension must be gated while its OID is provisional (see A GATED WRITER above).
-GATED_WRITERS=(commit_successor)
+# `commit_successor` hands straight to `commit_successor_observed`, which holds the gate (and reports its steps to a
+# test): a listed writer may delegate to another listed writer before it writes anything, and each is checked itself.
+GATED_WRITERS=(commit_successor commit_successor_observed)
+delegates=$(IFS='|'; echo "${GATED_WRITERS[*]}")
 if grep -qE '^pub const CA_GENERATION_OID_IS_PROVISIONAL: bool = true;' "$file"; then
   for fn in "${GATED_WRITERS[@]}"; do
     # Whatever its visibility: `fn`, `pub fn`, `pub(crate) fn`.
@@ -105,12 +113,13 @@ if grep -qE '^pub const CA_GENERATION_OID_IS_PROVISIONAL: bool = true;' "$file";
       # The body runs from the function's line to the next `fn` item. Comments are dropped first, so a call named in
       # one does not count. The gate must be an `if !…ca_generation_oid_open()` — its answer acted on — and must come
       # before the first line that mints or writes.
-      if ! awk -v fn="$fn" '
+      if ! awk -v fn="$fn" -v delegates="$delegates" '
             $0 ~ "^[[:space:]]*(pub(\\([a-z]+\\))? )?fn " fn "\\(" { inside = 1; next }
             inside && $0 ~ /^[[:space:]]*(pub(\([a-z]+\))? )?fn / { exit }
             inside {
               line = $0; sub(/\/\/.*/, "", line)
               if (!wrote && line ~ /if[[:space:]]+!.*ca_generation_oid_open\(\)/) gated = 1
+              if (!wrote && line ~ ("(^|[^a-z_])(" delegates ")\\(") && line !~ ("fn " fn "\\(")) gated = 1
               if (line ~ /mint_ca_at\(|write_public\(|write_private\(|hard_link\(|fs::write\(|fs::rename\(/) wrote = 1
             }
             END { exit(gated ? 0 : 1) }' "$file"; then
