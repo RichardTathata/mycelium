@@ -15,3 +15,23 @@ install_budget_bytes = 1073741824
 headroom             = 0.8
 trusted_publishers   = ["ed25519:coop-ci"]
 placement_root       = "/var/lib/mycelium/artifacts"
+
+# Who may call what this depot provides. A node with `[authority]` builds its evaluator from **its own unit's**
+# rules, so each is declared here, in the unit that decides it — a rule for these in another unit is one no depot
+# loads. A provider decides a **member's** call for the actor `node:{the calling node}` — the node, never the unit it
+# runs — so `actor = "*"` here admits every admitted member: the widest rule there is. Where the callers are known,
+# name them, one rule each: `actor = "node:<ip:port>"`. This fixture cannot: a declaration carries no placement, so it
+# has no address to name (the unit-principal form, "the worker, wherever it runs", is not built —
+# docs/plans/identity-and-lifecycle.md §9, O9).
+
+# The optimizer this depot would host, a component: `cap.invoke` on `cap:route/optimize@{this node}`.
+[[rule]]
+actor     = "*"
+operation = "cap.invoke"
+resource  = "cap:route/optimize"
+
+# The intake it deploys, a skill: `skill.invoke` on `skill:depot/intake@{this node}`, for a call that names it.
+[[rule]]
+actor     = "*"
+operation = "skill.invoke"
+resource  = "skill:depot/intake"

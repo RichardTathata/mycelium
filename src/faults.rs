@@ -1325,7 +1325,7 @@ mod policy_diff {
         let via = fleet.nodes[0].id.clone();
 
         // The call set: every call a [[rule]] names (as written, and without the values it requires) and every
-        // wired edge's two call shapes, from each requirer's principal.
+        // wired edge's call shapes (two, and a hosted component's third), from each requirer's principal.
         let mut calls: Vec<(String, String, String, serde_json::Map<String, serde_json::Value>)> = Vec::new();
         let principals: Vec<String> = units.iter().filter_map(|u| u.config.principal.clone()).collect();
         for u in units {

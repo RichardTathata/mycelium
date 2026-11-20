@@ -354,6 +354,19 @@ pub const HOSTED_CAPABILITY_KIND_PREFIX: &str = "cap.invoke/";
 /// The operation a hosted capability outside the `tool` namespace is decided under at an enforcing provider.
 pub const HOSTED_CAPABILITY_OPERATION: &str = "cap.invoke";
 
+/// **What a hosted capability's call is decided as**, less the node: the operation and the resource key an enforcing
+/// provider decides a call of the component `{namespace}/{name}` on — `tools/call` on `tool:{name}` in the `tool`
+/// namespace (the tool it also is at the MCP door), `cap.invoke` on `cap:{namespace}/{name}` in any other. The
+/// provider's door appends `@{node}` (`provider_enforcement::derive_call`); `wire-check` reads an edge to a hosted
+/// component on the same pair (`wire_check::check`), so the two cannot drift.
+pub fn hosted_capability_call(namespace: &str, name: &str) -> (&'static str, String) {
+    if namespace == "tool" {
+        ("tools/call", format!("tool:{name}"))
+    } else {
+        (HOSTED_CAPABILITY_OPERATION, format!("cap:{namespace}/{name}"))
+    }
+}
+
 /// The `(namespace, name)` a hosted capability's kind names, `cap.invoke/{namespace}/{name}`: the namespace up to
 /// the first `/`, the name everything after it. `None` for a kind outside the family, and for one inside it that
 /// names no capability (an empty namespace or name) or carries `@` — the separator a resource puts before its node.

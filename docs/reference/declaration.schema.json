@@ -196,7 +196,7 @@
           "items": {
             "$ref": "#/$defs/call_shape"
           },
-          "description": "The call shapes this edge takes at a gateway, as a grant enumerates them (`{operation}:{resource}`) and an evidence record carries them \u2014 the join on the authority side. Both shapes, always; the tool shape drops `ns`, so a tool-shaped observation can match more than one edge and a consumer must say so rather than pick."
+          "description": "The call shapes this edge takes at a gateway, as a grant enumerates them (`{operation}:{resource}`) and an evidence record carries them \u2014 the join on the authority side. The skill shape and the tool shape, always and first; the tool shape drops `ns`, so a tool-shaped observation can match more than one edge and a consumer must say so rather than pick. An edge whose provider is a hosted component outside the `tool` namespace carries a third, `cap.invoke` on `cap:{ns}/{name}` \u2014 the shape the provider that hosts it decides a member's direct call on, for the calling node (since 2026-11-18; additive)."
         }
       }
     },
@@ -342,8 +342,10 @@
         "operation": {
           "enum": [
             "skill.invoke",
-            "tools/call"
-          ]
+            "tools/call",
+            "cap.invoke"
+          ],
+          "description": "`cap.invoke` only on an edge whose provider is a hosted component outside the `tool` namespace (since 2026-11-18)."
         },
         "resource": {
           "type": "string"

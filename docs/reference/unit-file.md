@@ -34,6 +34,8 @@ TOML needs one key per line. `ns = "a"; name = "b"` is not valid TOML.
 | `[[serve]]` | counted as an offer | registers a routable skill (needs feature `llm`) | refused, **422** |
 | `[[schedule]]` | `schedule without holders`, `schedule declared two ways`, `schedule in a stem unit`, `runtime with a schedule` | refused (the work is the embedding application's) | refused, **422** (`schedule section`): run it on `GET /gateway/schedules/run` instead |
 
+A fourth reader is not a column: **a node with an `[authority]` table** ([declared authority](../features/declared-authority.md)) loads the `[[rule]]`s of the one unit its table names and builds its evaluator from them — that unit's rules only, in the order the file declares them. `mycelium wire-check` reads an edge to a hosted component as that node decides it.
+
 An SDK agent hosts nothing, so the four hosting sections are a stem's. A `[[schedule]]` is not declared with a unit
 at all: it runs while something supplies its work — the application that embeds the node, with
 `GossipAgent::run_schedule`, or an SDK agent, which sends the section on `GET /gateway/schedules/run` and receives its
@@ -170,7 +172,7 @@ A reference-evaluator rule, as written. `"*"` means any.
 |---|---|---|---|
 | `actor` | string | required | The principal the rule admits, or `"*"`. |
 | `operation` | string | required | The operation, e.g. `"skill.invoke"`, or `"*"`. |
-| `resource` | string | required | The resource, e.g. `"skill:depot/dispatch"`, or `"*"`. A member's direct call of a hosted capability is decided at an enforcing provider as `operation = "tools/call"` on `"tool:<name>"` for a `tool/<name>` component and as `operation = "cap.invoke"` on `"cap:<ns>/<name>"` for any other ([provider enforcement](../features/provider-enforcement.md)); under `[authority]` each bare form is qualified to the node. |
+| `resource` | string | required | The resource, e.g. `"skill:depot/dispatch"`, or `"*"`. A member's direct call of a hosted capability is decided at an enforcing provider as `operation = "tools/call"` on `"tool:<name>"` for a `tool/<name>` component and as `operation = "cap.invoke"` on `"cap:<ns>/<name>"` for any other ([provider enforcement](../features/provider-enforcement.md)); under `[authority]` each bare form is qualified to the node. For that call the actor the provider sees is the calling node, `node:<ip:port>`, so the rule's `actor` is `"*"` (every member: the widest rule) or `"node:<ip>:<port>"`, matched exactly; `wire-check` reports `node-decided edge`, an error, on one that names a unit, and reads such a rule only from a unit that could host the component. |
 | `requires_scopes` | array of strings | empty | Scopes the actor must hold for the rule to apply. |
 | `requires_facts` | array of strings | empty | Facts the rule needs that the reference evaluator cannot establish (e.g. `budget`); such a rule decides *indeterminate*. |
 | `requires_mandate` | string | absent | The scope a live mandate must cover for the rule to apply. |

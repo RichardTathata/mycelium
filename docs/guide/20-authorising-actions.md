@@ -836,7 +836,8 @@ runs, the edges that no declaration could ever authorise. This is its **authorit
 sections.
 
 For each wired edge whose requirer declares a `[[mandate]]` or a `[[rule]]`, the check tries the
-edge's two call shapes — `skill.invoke` on `skill:{ns}/{name}` and `tools/call` on `tool:{name}`:
+edge's call shapes. Every edge to a deployed provider has two — `skill.invoke` on `skill:{ns}/{name}`
+and `tools/call` on `tool:{name}` — read for the requirer's unit principal:
 
 - **`unauthorisable edge`** (error): no declared rule admits the requirer's principal on either
   shape (actor, operation and resource, with `"*"` as a wildcard), or the rule that would admit it
@@ -846,14 +847,51 @@ edge's two call shapes — `skill.invoke` on `skill:{ns}/{name}` and `tools/call
 - **`ungoverned edge`** (warning): the requirer declares no mandate and no rule, while other units
   do. Its edge is outside the authority vocabulary.
 
-**Not built: an edge to a hosted capability** (2026-11-14,
-[ledger](../operations/what-is-proven.md#wire-check-does-not-know-the-hosted-capability-shape)). The two shapes
-are the only ones the overlay tries. A provider with enforcement on decides a member's direct call of a hosted
-component outside the `tool` namespace as `cap.invoke` on `cap:{ns}/{name}`, for the actor `node:{sender}`
-([deprecations §108](deprecations.md)). For such an edge the overlay is wrong in both directions: it reports
-`unauthorisable edge` when the only rule is the `cap.invoke` one, and it reports the edge clean on a
-`skill.invoke` rule that provider never reads (the co-op fixture's `auditor.toml` over `route-optimizer.toml`).
-Read its verdict by hand for those edges until the overlay learns the shape.
+**An edge to a hosted component** (2026-11-18;
+[ledger](../operations/what-is-proven.md#wire-check-reads-a-hosted-edge-as-its-provider-decides)). Where the
+edge's provider is a `wasm-component` artifact from the library, and the requirer or a unit that could host it
+declares a rule or a mandate, the check reads what **the provider built from the declaration** decides for **a member's direct call**
+([deprecations §108 and §122](deprecations.md)). That provider is a node with `[authority]`. It loads its **own
+unit's** rules; it decides the call as `cap.invoke` on `cap:{ns}/{name}@{node}` (`tools/call` on
+`tool:{name}@{node}` for a `tool/{name}` component) for the actor `node:{sender}` — the calling **node**, not the
+unit it runs; and it takes the **first** rule that matches. The skill and tool shapes are not tried: that provider
+never consults a rule on them.
+
+So the check reads the rules of each unit that could host the component, in the order the file declares them:
+
+- The edge **passes** when every such unit has a rule on the hosted shape — resource bare (`[authority]` qualifies
+  it to its node), `@<ip>:<port>`, or `"*"` — whose actor is `"*"` or `"node:<ip>:<port>"`, reached before any rule
+  that matches the call and does not permit it. `"*"` is the widest rule there is: every admitted member. Name the
+  calling nodes where you know them.
+- **`host-dependent edge`** (warning): one host's rules admit and another's do not. Which host installs the
+  component is decided at run time.
+- **`node-decided edge`** (error): the only reading that admits names the requirer's **unit** principal, as the
+  rule's actor or the holder of the mandate it requires. No node is a unit's principal, so a provider built from
+  `[authority]` **refuses** this call.
+- **`mandate-dependent edge`** (error): the admitting rule sets `requires_mandate`, and a declared mandate held
+  by a `node:` principal covers it. `[authority]` entitles no authority to a mandate scope, so the provider built
+  from the declaration refuses; a node whose execution authority is attached in code can establish it, and is
+  not the provider the check models.
+- **`unauthorisable edge`** (error): otherwise. The message names the units whose rules the provider reads and why
+  each rule written for the call does not admit — `cancellable` (the door cannot stop a begun call),
+  `requires_scopes` (a member's call carries none), `signed_with` (a signed grant decision only), `requires_facts`
+  (the reference evaluator establishes none), an actor or resource that names no node (`node:*` is no wildcard), a
+  rule shadowed by an earlier one — and a rule that would admit declared in a unit no provider loads it from.
+
+Where neither the requirer nor any host declares vocabulary and another unit does, the edge is `ungoverned edge`,
+as for any edge — whether a host enforces at all is its node's `[authority]` table, not a unit file — and the
+warning names a rule for the edge that the hosts do not read.
+
+What the check does not know: placement (a rule for `node:<id>` passes whoever the caller turns out to be);
+`requires_grant` and `requires_values`, which are run-time facts — so a rule with either, placed before a plain
+rule, can be the first match at the provider and refuse a call the check passed, and so can a refusing rule that
+names a value (the check takes it not to shadow; it does when the call's value matches or is absent): put the plain
+rule first; a call a gateway frames for a client
+(`rpc_call_as`), which the provider decides for that client; and an evaluator attached in code. **An edge to a
+deployed provider is still read the older way** — the unit principal, any unit's rule — which is not how its
+provider decides it, and a component a unit declares as a plain `[[capability]]` is read that way too
+([open rows](../operations/what-is-proven.md#wire-check-reads-a-deployed-edge-for-the-unit)). The answer is
+*could admit under these declarations*, never *is admitted*.
 
 An edge with no provider is skipped here; it is already reported as unwired. The overlay is on by
 default and `--no-authority` turns it off. An error makes the check exit 1. The whole

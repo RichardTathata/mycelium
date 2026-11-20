@@ -23,9 +23,5 @@ role = "consumes"
 name = "done"
 role = "produces"
 
-# The authority vocabulary this unit expects: what it may call, as a grant enumerates it
-# (`{operation}:{resource}` — the gateway's own form), and the rule that admits it.
-[[mandate]]
-holder     = "worker"
-scope      = "routing"
-operations = ["skill.invoke:skill:route/optimize", "skill.invoke:skill:depot/intake"]
+# No authority vocabulary here: what admits the worker's calls is declared by the depots that receive them. A
+# `[[mandate]]` held by `worker` would name the unit, and a provider verifies a member's mandate as its node's.

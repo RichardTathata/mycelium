@@ -5,14 +5,5 @@ principal = "auditor"
 name = "done"
 role = "consumes"
 
-[[rule]]
-actor            = "worker"
-operation        = "skill.invoke"
-resource         = "skill:route/optimize"
-requires_mandate = "routing"
-
-[[rule]]
-actor            = "worker"
-operation        = "skill.invoke"
-resource         = "skill:depot/intake"
-requires_mandate = "routing"
+# No rule here: who may call the optimizer and the intake is declared by the depots that provide them
+# (`depot-a.toml`, `depot-b.toml`), because a provider reads its own unit's rules.

@@ -247,6 +247,10 @@
         {
           "operation": "tools/call",
           "resource": "tool:optimize"
+        },
+        {
+          "operation": "cap.invoke",
+          "resource": "cap:route/optimize"
         }
       ]
     },
@@ -330,6 +334,12 @@
       "kind": "ungoverned edge",
       "unit": "dispatcher",
       "message": "requirement logistics/intake: dispatcher declares no mandate and no rule, while other units do — this edge is outside the authority vocabulary"
+    },
+    {
+      "severity": "warning",
+      "kind": "ungoverned edge",
+      "unit": "worker",
+      "message": "requirement depot/intake: worker declares no mandate and no rule, while other units do — this edge is outside the authority vocabulary"
     }
   ]
 }

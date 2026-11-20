@@ -4213,22 +4213,16 @@ run without it).
 - **Not built:** `bulk_serve` and a raw `signal_rx` receiver run no check for this family either (§105's items 2
   and 3); an HTTP client still has no route to a hosted capability outside the `tool` namespace (CR29); the
   payload carries no causal fields, so the exposure policy reads a direct call as a root.
-- **Not built, and to be closed before the MINOR that ships this section: `wire-check`'s authority overlay does
-  not know the `cap.invoke` shape** ([ledger](../operations/what-is-proven.md#wire-check-does-not-know-the-hosted-capability-shape)). It reads an edge as a skill (`skill.invoke` on
-  `skill:{ns}/{name}`) or a tool (`tools/call` on `tool:{name}`), and it is wrong in both directions for a hosted
-  capability outside the `tool` namespace:
-  - **a false red:** a governed requirer whose only rule for the capability is the `cap.invoke` one above is
-    reported `unauthorisable edge` — an error at design time for a declaration the provider admits;
-  - **a false green:** an edge authorised by a `skill.invoke` (or `tools/call`) rule is reported clean, and an
-    enforcing provider that hosts the capability never consults that rule — it decides `cap.invoke` on
-    `cap:{ns}/{name}@{node}` and refuses. The repository's own fixture is the instance:
-    `tests/fixtures/units/coop/auditor.toml` authorises `route/optimize` with `skill.invoke` on
-    `skill:route/optimize`, `tests/fixtures/units/artifacts/route-optimizer.toml` provides it as a hosted component,
-    and the check reads the pair green. Nothing shipped turns enforcement on over that fixture.
-
-  The overlay also reads a rule's actor as a unit principal, where the provider sees `node:{sender}` (above).
-  Until the overlay learns the shape (it is part of the declaration JSON's contract, `operations`), read its
-  finding by hand for an edge to a hosted capability, or run the check with `--no-authority`.
+- **`wire-check`'s authority overlay reads the `cap.invoke` shape** (closed 2026-11-18, §122 below;
+  [ledger](../operations/what-is-proven.md#wire-check-reads-a-hosted-edge-as-its-provider-decides)). Until then it
+  read every edge as a skill (`skill.invoke` on `skill:{ns}/{name}`) or a tool (`tools/call` on `tool:{name}`), and
+  was wrong in both directions for a hosted capability outside the `tool` namespace: it reported `unauthorisable
+  edge` for a governed requirer whose only rule was the `cap.invoke` one above, and it reported an edge clean on a
+  `skill.invoke` (or `tools/call`) rule that an enforcing provider hosting the capability never consults — the
+  repository's own co-op fixture was the instance. It also read a rule's actor as a unit principal, where the
+  provider sees `node:{sender}`. For an edge whose provider is a hosted component it now reads the rules of the
+  units that could host it, for the calling node, as the provider built from the declaration does; §122 is what an
+  operator sees. For an edge to a deployed provider the older reading stands, an open row on the ledger.
 - ***Check:*** on an enforcing stem that hosts `route/optimize` and has no rule for it, a member's
   `rpc_call(stem, "cap.invoke/route/optimize", payload)` returns
   `{"error": "…", "reason": "authority_not_established", …}`, and the stem's evidence journal (the file
@@ -5186,3 +5180,142 @@ not held now: the door admits what the evaluator permits.
 
 *Check:* `curl -s http://NODE:HTTP_PORT/stats | jq .evidence_history_unreadable` — `0` on every node. A `1` means that
 node establishes no limited rule: find the `WARN` naming the journal, repair or replace the file, and restart.
+
+## 122. `wire-check` reads an edge to a hosted component as the provider built from the declaration decides a member's call of it: the rule must be the host's own, for a node, in a form that provider admits (unreleased, the maintainer's choice of 2026-11-18)
+
+*Numbered 122 because open pull requests hold §120 and §121 at the time of writing; the sections are in order once
+they merge.*
+
+This applies to a declaration checked **with an artifact library** — `mycelium wire-check --library`, and
+`mycelium doctor --units` and `mycelium test --faults` given `--library`, which run the same check — in which a
+capability is provided only by a `wasm-component` artifact, and the requirer or a unit that could host the component
+declares a `[[rule]]` or a `[[mandate]]` (the requirer need not: a hosted edge is decided by its host's rules). `mycelium declare` reads no library, so it knows no hosted component and is
+unchanged. Nothing changes at run time: this is the design-time check catching up with what an enforcing provider has
+decided since §108.
+
+**Before.** The authority overlay read every edge as a skill (`skill.invoke` on `skill:{ns}/{name}`) or a tool
+(`tools/call` on `tool:{name}`), for the requirer's unit principal, from every unit's rules. For an edge to a hosted
+component it was wrong both ways: a declaration whose rule was the `cap.invoke` one the provider reads was
+`unauthorisable edge`, exit 1; and a declaration authorised by a `skill.invoke` or `tools/call` rule was clean, exit
+0, although the provider that hosts the component never consults that rule and refuses the call.
+
+**Now.** For such an edge the overlay reads what **the provider built from the declaration** decides for **a member's
+direct call**. That provider is a node with `[authority]`: it loads **its own unit's** rules, decides the call as
+`cap.invoke` on `cap:{ns}/{name}@{node}` (`tools/call` on `tool:{name}@{node}` for a `tool/{name}` component) for the
+actor `node:{sender}`, and takes the **first** of its rules that matches. So the check reads the rules of each unit
+that could host the component, in order, each field as that provider reads it:
+
+| The rule, declared by a unit that could host the component | Before | Now |
+|---|---|---|
+| actor `"*"` or `"node:<ip>:<port>"`, on the hosted shape (resource bare, `@<ip>:<port>`, or `"*"`), in every host | `unauthorisable edge`, exit 1 | clean |
+| the same, in one host and not another | `unauthorisable edge`, exit 1 | warning **`host-dependent edge`** |
+| `skill.invoke` on `skill:{ns}/{name}`, or `tools/call` on `tool:{name}` outside the `tool` namespace | clean, exit 0 | **`unauthorisable edge`, exit 1** |
+| actor the requirer's unit principal — or any-node, requiring a mandate that unit principal holds | `unauthorisable edge` (clean, exit 0, in the `tool` namespace) | **`node-decided edge`, exit 1** — an error of its own kind |
+| any-node, `requires_mandate`, with a declared mandate a `node:` principal holds | `unauthorisable edge`, exit 1 | **`mandate-dependent edge`, exit 1** — an error of its own kind |
+| `cancellable = true`; `requires_scopes`; `signed_with`; `requires_facts`; `actor = "node:*"` or another string that is no node; a resource ending `@` or naming no node; a rule after one that matches the call and does not permit it | as the row it otherwise falls in | **`unauthorisable edge`, exit 1**, naming the form |
+| the right rule, declared only by a unit that does not host the component, where a host (or the requirer) declares some rule or mandate of its own | as the row it otherwise falls in | **`unauthorisable edge`, exit 1**, naming that unit and the hosts |
+| the requirer declares nothing, a host declares some rule or mandate, and none of the hosts' rules admits the call | `ungoverned edge`, exit 0 | **`unauthorisable edge`, exit 1** — the edge is the host's to decide, and it declares authority |
+| neither the requirer nor any host declares a rule or a mandate, and another unit does | `ungoverned edge`, exit 0 | `ungoverned edge`, exit 0, **reworded**: it names the hosts, says a host built from `[authority]` would refuse the call, and names a rule for it that another unit declares and the hosts do not read |
+
+So **a check that was green can now fail, and one that failed can pass or warn.** `mycelium test --faults` refuses
+a declaration the check fails (*nothing ran*), so a pipeline over such a declaration stops until the rule is
+corrected.
+
+**Why each form does not admit.** `cancellable`: a hosted component is reached through a door that cannot stop a
+begun call, so the provider refuses a call a cancellable rule permits (§110). `requires_scopes`: a member's own call
+carries no scopes, so the rule does not apply. `signed_with`: the rule applies only to a signed grant decision
+(§118). `requires_facts`: the reference evaluator, the one `[authority]` builds, establishes no fact. `node:*`: an
+actor is matched exactly, and nothing after `node:` is a wildcard. Order: the evaluator decides by the first allowance
+that matches. `requires_grant` and `requires_values` are not read — a grant and a call's arguments are run-time facts
+— and a rule with either is taken to permit. **That has an order consequence the check does not see:** such a rule
+placed *before* a plain rule is the first match at the provider whenever no grant is presented, or the call lacks the
+named value, and it then decides *indeterminate* — the plain rule after it is never reached and the call is refused,
+while the check has passed the edge on the first rule. Put the plain rule first, or do not write both. **The same holds for a rule that
+names a value and refuses** (`requires_values` with `cancellable`, `requires_facts` or `requires_mandate`): the check
+does not read values, so it takes such a rule **not** to shadow the rules after it. That is right when the call
+carries the named value with another value — the provider skips the rule — and wrong when the call's value matches,
+or the call lacks the value: then the rule is the first match, the provider refuses, and the check has passed the edge
+on the plain rule behind it. Which of the two happens is the call's arguments, a run-time fact; an open row on
+[what-is-proven](../operations/what-is-proven.md#wire-check-does-not-read-a-rules-values).
+
+**The three new kinds.** Two are errors, exit 1, and one a warning, exit 0 — the maintainer's decision of
+2026-11-20: the check models the provider `[authority]` builds, and does not exit 0 on a call that provider refuses.
+(On this branch the first and third were warnings from 2026-11-18 until that decision; no release carried them so.)
+
+- **`node-decided edge`** (error) — a rule or a mandate names the calling **unit**, and the provider reads the
+  calling **node**. No node is a unit's principal, so **a provider built from `[authority]` refuses this call**. Name
+  the calling node, `node:<ip>:<port>`, or `"*"`.
+- **`host-dependent edge`** (warning) — which host installs the component is decided at run time, and the call runs
+  at one and is refused at another. Declare the rule in each unit that could host it.
+- **`mandate-dependent edge`** (error) — `[authority]` entitles no authority to a mandate scope (it entitles grants
+  only), so the provider built from the declaration refuses. A node whose execution authority is attached in code,
+  entitled for that scope, can establish the mandate a calling node presents; that is not the provider the check
+  models, so for such a deployment run the check with `--no-authority`, or drop `requires_mandate` from the rule the
+  declared provider reads.
+
+Each severity is one constant (`wire_check::NODE_DECIDED`, `HOST_DEPENDENT`, `MANDATE_DEPENDENT`).
+
+**What to do.** For each `unauthorisable edge` naming a hosted capability, write the rule the provider reads, **in
+the unit that hosts it**, before any rule that would match the call and not permit it:
+
+```toml
+[[rule]]
+actor     = "node:10.0.0.7:7946"   # the calling node; one rule per caller
+operation = "cap.invoke"           # "tools/call" for a tool/<name> component
+resource  = "cap:route/optimize"   # "tool:<name>" for a tool/<name> component
+```
+
+`actor = "*"` is the other form the provider admits, and it is **the widest rule there is**: every admitted member
+may call the component, and so may any gateway client a companion's own route forwards (`rpc_call_as` frames the call
+for the client, and `"*"` names it too). Prefer `node:<ip>:<port>` wherever the callers are known. A rule for the
+calling **unit** — "the worker, wherever it runs" — cannot be written today: a provider that decides on a unit
+principal the node can prove it speaks for is not built (identity-and-lifecycle §9, O9).
+
+**The JSON document** (`--format json`, schema `mycelium.design/declaration/1`, unchanged): an edge to a hosted
+component outside the `tool` namespace carries a third entry in `operations`, `{"operation": "cap.invoke",
+"resource": "cap:{ns}/{name}"}`, after the two every edge carries; `findings[].kind` gains `node-decided edge`,
+`host-dependent edge` and `mandate-dependent edge`. All are additive: no field or kind is renamed or removed, and the
+pinned schema's `minItems: 2` holds. A consumer that indexed `operations` by position, or assumed exactly two, reads
+the first two as before. **The pin moved with it** (`docs/reference/declaration.schema.json`): the `operation` of a
+call shape was an enumeration of `skill.invoke` and `tools/call`, and now lists `cap.invoke` too. A reader that
+validates the document against a copy of the older pin refuses an edge to a hosted component; take this release's
+file, or validate only the fields you read ([cli-json](../reference/cli-json.md): within a version a string's set of
+values and an array's length may grow, and the file is the repository's gate, not a reader's validator).
+
+**Compiler:** new public items — `wire_check::hosted_call_shape(ns, name) -> Option<(String, String)>`; the
+constants `wire_check::NODE_DECIDED`, `HOST_DEPENDENT` and `MANDATE_DEPENDENT`, each a finding kind with its severity;
+and `hosted_capability_call(namespace, name) -> (&'static str, String)`, the one derivation the provider's door and
+the check both call. `wire_check::call_shapes` and its return type are unchanged.
+
+**Unchanged, and not claimed.** The answer is *could admit*, never *is admitted*: a declaration carries no
+placement, so a rule for `node:<id>` passes whoever the caller turns out to be. An edge to a **deployed** provider (a
+unit's `[[capability]]`, a group) is still read as a skill or a tool for the requirer's unit principal from any unit's
+rules — not as its provider decides it — and a unit that declares as `[[capability]]` what it serves from a component
+is read that way too; a `blob`-provided capability likewise. Each is an open row on
+[what-is-proven](../operations/what-is-proven.md#wire-check-reads-a-deployed-edge-for-the-unit). Without `--library`
+nothing is known to be hosted. An evaluator or execution authority attached in code, not from `[authority]`, may load
+other rules and entitle a mandate authority. **Whether a host enforces at all is not in a unit file**: `[authority]`
+is a table of the node's configuration, so every error above is true of a host that sets it, and a host that does not
+runs the call — which is why an edge whose hosts declare nothing stays a warning. **Two host units no provider can be
+built from** pass the check: one that carries an exposure rule, and one with no `principal` — `[authority]` refuses
+to start as either, by name, and the check does not say so (a stated bound, not a finding).
+
+- Test: in `src/wire_check.rs`, `a_cap_invoke_rule_for_any_node_admits_an_edge_to_a_hosted_component`,
+  `a_skill_rule_does_not_admit_an_edge_to_a_hosted_component`, `a_hosted_tool_is_read_for_the_calling_node`,
+  `a_unit_principal_rule_on_a_hosted_edge_warns_that_the_provider_decides_the_node`,
+  `a_hosted_edges_rule_admits_only_from_a_host_unit`,
+  `a_rule_form_no_provider_admits_a_members_call_under_is_unauthorisable`,
+  `a_blob_beside_a_component_does_not_admit_by_a_skill_rule`, `the_hosted_shape_is_what_the_provider_derives`;
+  `the_coops_hosted_edge_is_wired_by_a_rule_its_provider_reads` (`tests/wire_check_fixtures.rs`); and, each reading
+  beside the decision of a provider built from `[authority]` over the same declaration, in
+  `src/agent/declared_authority_tests.rs`:
+  `the_coop_fixtures_hosted_edge_is_decided_at_the_provider_as_wire_check_reads_it`,
+  `a_hosted_edges_rule_admits_only_from_a_unit_that_hosts_it`,
+  `a_rule_form_no_provider_admits_a_members_call_under_is_not_passed`,
+  `a_hosted_tool_is_decided_for_the_calling_node_as_wire_check_reads_it`,
+  `the_coop_fixtures_deployed_edge_runs_under_the_rule_its_depot_declares`.
+
+*Check:* `mycelium wire-check <units-dir> --library <artifacts-dir>` exits 0, and
+`mycelium wire-check <units-dir> --library <artifacts-dir> --format json | jq '[.findings[] | select(.kind |
+endswith(" edge")) | select(.kind != "ungoverned edge")]'` is `[]`. For each entry it prints instead, the message
+names the unit whose rules the provider reads and why its rule does not admit: correct the rule there, as above.

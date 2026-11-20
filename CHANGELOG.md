@@ -19,6 +19,51 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the log before it launches, the node appends, and the loop reads once. A project scaffolded by 2.40.0 keeps the old
   `fleet.sh`: replace its `start)` case with this release's (`templates/two-domains/fleet.sh`), or remove
   `data/<node>.log` before a restart.
+- **`wire-check` reads an edge to a hosted component as the provider built from the declaration decides a member's
+  call of it** (the *not built* row `what-is-proven.md#wire-check-does-not-know-the-hosted-capability-shape`, closed;
+  `deprecations.md` §122). Since §108 an enforcing provider decides a member's direct call of a hosted component as
+  `cap.invoke` on `cap:{ns}/{name}@{node}` (`tools/call` on `tool:{name}@{node}` in the `tool` namespace), for the
+  actor `node:{sender}`, from its own unit's rules. The check's authority overlay tried a skill shape and a tool
+  shape, for the requirer's unit principal, from every unit's rules — so for such an edge it failed a declaration the
+  provider admits and passed one it refuses. The repository's co-op fixture was such a false green. For an edge whose
+  provider is a `wasm-component` artifact (`--library`) the overlay now reads the rules of each unit that could host
+  the component, in order, each field as that provider reads it:
+  - a rule whose actor is `"*"` or `"node:<ip>:<port>"`, in every host, passes the edge;
+  - **a `skill.invoke` or `tools/call` rule no longer passes it**, nor does the right rule declared in a unit that
+    does not host the component, nor one that is `cancellable`, requires scopes or facts, sets `signed_with`, names
+    no node (`node:*` is no wildcard), or comes after a rule that matches the call and does not permit it —
+    `unauthorisable edge`, exit 1, naming the reason, where the check was green; `mycelium test --faults --library`
+    refuses such a declaration (`mycelium declare` reads no library and is unchanged);
+  - three new finding kinds. Two are **errors**, exit 1 (the maintainer's decision of 2026-11-20: the check does not
+    exit 0 on a call the provider `[authority]` builds refuses): `node-decided edge` (a rule or mandate names the
+    requirer's **unit** principal; the provider decides the node) and `mandate-dependent edge` (the rule requires a
+    mandate scope, which `[authority]` entitles no authority to). One is a warning, exit 0: `host-dependent edge`
+    (one host's rules admit and another's do not; which host installs is decided at run time).
+  - **The JSON document** (`mycelium.design/declaration/1`, unchanged): such an edge's `operations` carries a third
+    entry after the two every edge has, and `findings[].kind` gains the three kinds. Additive: nothing is renamed or
+    removed. The pinned `declaration.schema.json` lists `cap.invoke` among a call shape's operations, so a reader
+    validating against an older copy of the pin refuses such an edge; `docs/reference/cli-json.md` now says that a
+    set of values and an array may grow within a version. New public items: `wire_check::hosted_call_shape`,
+    `wire_check::{NODE_DECIDED, HOST_DEPENDENT, MANDATE_DEPENDENT}` and `hosted_capability_call`, the one derivation
+    the provider's door and the check both call; `call_shapes` is unchanged.
+  - **The co-op fixture** (`tests/fixtures/units/coop`): the optimizer's and the intake's rules are declared by the
+    depots that provide them, for any node, and nothing else declares authority; tests start a provider from
+    `[authority]` over the fixture and over each refused form and set the check's reading beside what the provider
+    does.
+  - An edge whose hosts and requirer declare no rule or mandate stays `ungoverned edge`, exit 0, as it was —
+    whether a host enforces is its node's `[authority]` table, not a unit file — and the warning now names the hosts
+    and any rule for the edge that another unit declares and they do not read. Not read, and stated: a rule under a
+    grant, or naming a value, placed before a plain rule can be the first match at the provider and refuse a call the
+    check passed.
+  - **Not built**, each a dated row on `what-is-proven.md`: an edge to a **deployed** provider is still read for the
+    requirer's unit principal from any unit's rules; a component declared as a plain `[[capability]]`, and a `blob`,
+    are read that way too; `test --faults policy-diff` decides the hosted shape for the unit principal. A provider
+    that decides on a unit principal the node can prove it speaks for is identity-and-lifecycle §9, O9.
+  - **Check:** `mycelium wire-check <units-dir> --library <artifacts-dir>` exits 0 and names no `unauthorisable edge`,
+    `node-decided edge`, `host-dependent edge` or `mandate-dependent edge`. Where it does, give the hosted capability
+    a `[[rule]]` **in each unit that could host it**: `actor = "node:<ip>:<port>"` for each calling node,
+    `operation = "cap.invoke"`, `resource = "cap:<ns>/<name>"`. `actor = "*"` also passes and is the widest rule
+    there is — every admitted member — so use it only where that is what you mean.
 - **An actor's second call is no longer refused while the evidence journal is being read** (found as a CI flake in
   `the_shadow_profile_counts_and_holds_nothing`). On a node whose evaluator has a limited rule (`at_most`), every
   decision asks for the actor's history. Until the journal had been read into the history index — and for good if the
