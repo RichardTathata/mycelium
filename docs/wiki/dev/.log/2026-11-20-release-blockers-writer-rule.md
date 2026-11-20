@@ -12,10 +12,14 @@ its own. Comments (line and nested block) and the inside of string and char lite
 every definition of a listed name is checked, whatever its qualifiers or generics, each bounded by brace depth. Found
 on the way and gated: a gate inside a string or a block comment, a second ungated definition under another `cfg`, a
 wrapper over a delegate the file does not define, an `async` or generic writer the old pattern did not see.
+The PR's own review (#818) added four: a file without `commit_successor` while the constant is `true` now fails,
+naming it (a rename or a move must update the list); a definition with its `#[…]` attribute on the same line, and
+one with a space before its `(`, are seen; a C string (`c"…"`, `cr#"…"#`) is read as one. A gated function nested
+inside an ungated wrapper still lends it its gate; the header says so.
 
 Still a textual tripwire, and the header says what it cannot see (no Rust parse; helpers and macros it does not name;
 a listed writer missing from the file). The guards remain `mint_ca_at`'s own refusal, the readers' refusal and CI's
-run of the shipped binary. Self-test 14 → 25 cases; passes under BWK awk, mawk and gawk.
+run of the shipped binary. Self-test 14 → 30 cases; passes under BWK awk, mawk and gawk.
 
 Pages: none of the wiki's states the writer rule; the plan's I2 PR 2b-1 row
 (`docs/plans/identity-and-lifecycle.md`) is corrected.

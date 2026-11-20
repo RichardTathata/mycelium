@@ -30,14 +30,18 @@
 #
 #   WHAT THIS CHECK IS, AND WHAT IT CANNOT SEE (#812's review F6). It is a **tripwire over text**, not the guard.
 #   What it sees: each line with its comments dropped (`//`, nested `/* */`) and the inside of its string literals
-#   (plain, byte, raw, across lines) and char literals emptied, so a gate, a call or a write named in a comment or a
-#   string counts for nothing; every definition of a listed name, whatever its visibility or qualifiers (`pub(…)`,
-#   `const`, `async`, `unsafe`, `extern "…"`, generics), each followed by brace depth to its closing brace and each
-#   checked. What it does not see: it does not parse Rust, so it cannot tell that the `if` returns rather than
-#   logging and going on, or that `if !x || ca_generation_oid_open()` is no gate; it does not see a write reached
-#   through a helper it does not name, nor a macro that expands to one; a listed writer missing from the file, or a
-#   writer under another name, is invisible until it is listed (the list is not checked against the code); its
-#   scanner is approximate (an unusual literal it misreads could hide what follows). **The guards are elsewhere:**
+#   (plain, byte, C, raw, across lines) and char literals emptied, so a gate, a call or a write named in a comment or
+#   a string counts for nothing; every definition of a listed name, whatever its visibility or qualifiers (`pub(…)`,
+#   `const`, `async`, `unsafe`, `extern "…"`, generics), with any `#[…]` attributes before it on its line and any
+#   space before its `(`, each followed by brace depth to its closing brace and each checked. It fails closed on the
+#   wrapper: while the constant is `true` the file must define `commit_successor` (#818's review, R1). What it does
+#   not see: it does not parse Rust, so it cannot tell that the `if` returns rather than logging and going on, or
+#   that `if !x || ca_generation_oid_open()` is no gate; it does not see a write reached through a helper it does not
+#   name, nor a macro that expands to one; a function defined inside a listed writer's body is not a definition of
+#   its own, so a gated `commit_successor_observed` nested inside an ungated `commit_successor` lends the wrapper its
+#   gate (#818's review, F5); a listed writer other than the wrapper missing from the file, or a writer under another
+#   name, is invisible until it is listed (the list is not checked against the code); its scanner is approximate (an
+#   unusual literal it misreads could hide what follows). **The guards are elsewhere:**
 #   `mint_ca_at` (through `generate_ca`) refuses a generation above 0 by itself while the gate is closed, every reader
 #   refuses the extension (`ca_generation`), and CI runs the shipped binary
 #   (`scripts/check-shipped-ca-generation-refusal.sh`). This check only makes removing the early refusal a red build.
@@ -120,6 +124,21 @@ self_test() {
   plant multiline-ok.rs $'    pub fn commit_successor() {\n        let m = "mint_ca_at( is named \\\n            here";\n        if !super::ca_generation_oid_open() { return; }\n        mint_ca_at();\n    }\n'
   # N (must fail): a `\'"\'` char literal does not open a string that would hide the mint from the late gate.
   plant char-quote.rs $'    pub fn commit_successor<\'a>(x: &\'a str) {\n        let q = \'"\';\n        mint_ca_at();\n        let r = \'"\';\n        if !super::ca_generation_oid_open() { return; }\n    }\n'
+  # #818's review: R1, the wrapper renamed away (fail closed: while the constant is `true` the file must define
+  # `commit_successor`); R2, an ungated twin whose attribute sits on its line; R3, a space before the parenthesis;
+  # R4, a C raw string ending in a backslash, which read as a plain string would hide the mint from the late gate;
+  # R5 (must pass), C strings ahead of the gate.
+  local gated_twin=$'    #[cfg(test)]\n    pub fn commit_successor() {\n        if !super::ca_generation_oid_open() { return; }\n        mint_ca_at();\n    }\n'
+  plant renamed.rs $'    pub fn commit_successor_v2() {\n        mint_ca_at();\n    }\n'
+  plant attr-line.rs "$gated_twin"$'    #[cfg(not(test))] pub fn commit_successor() { mint_ca_at(); }\n'
+  plant space-paren.rs "$gated_twin"$'    #[cfg(not(test))]\n    pub fn commit_successor () {\n        mint_ca_at();\n    }\n'
+  plant c-raw.rs $'    pub fn commit_successor() {\n        let p = cr"C:\\";\n        mint_ca_at();\n        let q = \'"\';\n        if !super::ca_generation_oid_open() { return; }\n    }\n'
+  plant c-str-ok.rs $'    pub fn commit_successor() {\n        let p = c"a\\"b";\n        let q = cr#"x"y"#;\n        if !super::ca_generation_oid_open() { return; }\n        mint_ca_at();\n    }\n'
+  if "$0" "$dir/renamed.rs" >/dev/null 2>&1; then echo "self-test: (R1) a file with no commit_successor passed under a provisional OID"; ok=0; fi
+  if "$0" "$dir/attr-line.rs" >/dev/null 2>&1; then echo "self-test: (R2) an ungated definition with its attribute on its line passed"; ok=0; fi
+  if "$0" "$dir/space-paren.rs" >/dev/null 2>&1; then echo "self-test: (R3) an ungated definition with a space before its parenthesis passed"; ok=0; fi
+  if "$0" "$dir/c-raw.rs" >/dev/null 2>&1; then echo "self-test: (R4) a late gate behind a C raw string ending in a backslash passed"; ok=0; fi
+  if ! "$0" "$dir/c-str-ok.rs" >/dev/null 2>&1; then echo "self-test: (R5) a gated writer with C strings ahead of its gate failed"; ok=0; fi
   if "$0" "$dir/wrap-writes.rs" >/dev/null 2>&1; then echo "self-test: (A) a wrapper that minted after delegating passed"; ok=0; fi
   if "$0" "$dir/observed-string.rs" >/dev/null 2>&1; then echo "self-test: (C) an ungated delegate naming the wrapper in a string passed"; ok=0; fi
   if "$0" "$dir/mutual.rs" >/dev/null 2>&1; then echo "self-test: (D) two writers handing to each other passed"; ok=0; fi
@@ -132,9 +151,10 @@ self_test() {
   if ! "$0" "$dir/multiline-ok.rs" >/dev/null 2>&1; then echo "self-test: (M) a gated writer with a write named in a two-line string failed"; ok=0; fi
   if "$0" "$dir/char-quote.rs" >/dev/null 2>&1; then echo "self-test: (N) a late gate behind a quote char literal passed"; ok=0; fi
   rm -f "$dir/blocked.rs" "$dir/blocked-gen.rs" "$dir/blocked-shown.rs" "$dir/clear.rs" "$dir/missing.rs" "$dir/missing-shown.rs" "$dir/ungated.rs" "$dir/gated.rs" "$dir/comment.rs" "$dir/late.rs" "$dir/crate.rs" "$dir/wrapped.rs" "$dir/wrapped-ungated.rs" \
-    "$dir/wrap-writes.rs" "$dir/observed-string.rs" "$dir/mutual.rs" "$dir/wrap-string.rs" "$dir/gate-string.rs" "$dir/gate-block.rs" "$dir/two-defs.rs" "$dir/wrap-absent.rs" "$dir/async.rs" "$dir/multiline-ok.rs" "$dir/char-quote.rs"
+    "$dir/wrap-writes.rs" "$dir/observed-string.rs" "$dir/mutual.rs" "$dir/wrap-string.rs" "$dir/gate-string.rs" "$dir/gate-block.rs" "$dir/two-defs.rs" "$dir/wrap-absent.rs" "$dir/async.rs" "$dir/multiline-ok.rs" "$dir/char-quote.rs" \
+    "$dir/renamed.rs" "$dir/attr-line.rs" "$dir/space-paren.rs" "$dir/c-raw.rs" "$dir/c-str-ok.rs"
   rmdir "$dir"
-  if [[ $ok == 1 ]]; then echo "check-release-blockers --self-test: ok (25 cases)"; else exit 1; fi
+  if [[ $ok == 1 ]]; then echo "check-release-blockers --self-test: ok (30 cases)"; else exit 1; fi
 }
 
 release=0
@@ -211,8 +231,9 @@ if grep -qE '^pub const CA_GENERATION_OID_IS_PROVISIONAL: bool = true;' "$file";
         if (c == "/" && nx == "*") { blk = 1; i += 2; continue }
         if (c == "\"") { str = 1; out = out "\""; i++; continue }
         pre = (i == 1) ? "" : substr(s, i - 1, 1)
-        if (c == "b" && nx == "r" && pre !~ /[A-Za-z0-9_]/) { out = out c; i++; continue }
-        if (c == "r" && (pre !~ /[A-Za-z0-9_]/ || (pre == "b" && (i == 2 || substr(s, i - 2, 1) !~ /[A-Za-z0-9_]/)))) {
+        # `b` and `c` prefix a raw string (`br"…"`, `cr#"…"#`) as they do a plain one.
+        if ((c == "b" || c == "c") && nx == "r" && pre !~ /[A-Za-z0-9_]/) { out = out c; i++; continue }
+        if (c == "r" && (pre !~ /[A-Za-z0-9_]/ || ((pre == "b" || pre == "c") && (i == 2 || substr(s, i - 2, 1) !~ /[A-Za-z0-9_]/)))) {
           j = i + 1; h = 0
           while (substr(s, j, 1) == "#") { h++; j++ }
           if (substr(s, j, 1) == "\"") { raw = h; out = out "\""; i = j + 1; continue }
@@ -227,11 +248,17 @@ if grep -qE '^pub const CA_GENERATION_OID_IS_PROVISIONAL: bool = true;' "$file";
       }
       return out
     }
-    BEGIN { raw = -1; decl = "^[[:space:]]*(pub(\\([^)]*\\))?[[:space:]]+)?((const|async|unsafe|extern[[:space:]]+\"[^\"]*\")[[:space:]]+)*fn[[:space:]]+(" names ")[(<]" }
+    BEGIN {
+      raw = -1
+      # Leading `#[…]` attributes on the same line are skipped; a space may stand before the `(` or `<`.
+      decl = "^[[:space:]]*(#\\[[^]]*\\][[:space:]]*)*(pub(\\([^)]*\\))?[[:space:]]+)?((const|async|unsafe|extern[[:space:]]+\"[^\"]*\")[[:space:]]+)*fn[[:space:]]+(" names ")[[:space:]]*[(<]"
+      named = "fn[[:space:]]+(" names ")[[:space:]]*[(<]"
+    }
     {
       line = clean($0)
       if (!inside && line ~ decl) {
-        fname = line; sub(/^.*fn[[:space:]]+/, "", fname); sub(/[(<].*$/, "", fname)
+        match(line, named); fname = substr(line, RSTART, RLENGTH)
+        sub(/^fn[[:space:]]+/, "", fname); sub(/[[:space:]]*[(<]$/, "", fname)
         inside = 1; opened = 0; depth = 0; gated = 0; wrote = 0; calls = 0
       }
       if (!inside) next
@@ -249,6 +276,11 @@ if grep -qE '^pub const CA_GENERATION_OID_IS_PROVISIONAL: bool = true;' "$file";
     echo "::error::check-release-blockers: \`$1\` in $file $2: nothing new ships under a provisional OID (identity-and-lifecycle I2, decision (e))" >&2
     exit 1
   }
+  # Fail closed on the wrapper: `tls commit` is the shipped path, and a file without it under a provisional OID is a
+  # rename or a move that left this list behind (#818's review, R1). Only the wrapper: a delegate need not exist.
+  if ! grep -q "^$WRAPPER " <<<"$records"; then
+    refuse "$WRAPPER" "is not defined (renamed or moved?) while the caGeneration OID is provisional — update GATED_WRITERS to name the function that writes the extension"
+  fi
   delegate_defs=0
   delegate_gated=1
   while read -r name gated wrote calls; do
