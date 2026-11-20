@@ -769,6 +769,21 @@ it only some of the time (a 25 ms poll for a state that lasts until the owner's 
 run and was found by the reviewer's. One run enumerates what the plant breaks every time, and no more. Restore a
 plant by copying the snapshot back and touching the file.
 
+**A test that holds a stream open sends on a client that keeps no connection** (2026-11-20). `an_ordinary_kind_passes_every_door`
+opened the gateway's event streams and sent on the same pooled `reqwest` client; once in a while a send was never
+written, and the test waited out its 20 s bound naming a door that had done nothing wrong. The gateway never saw the
+request (a counter in its auth layer read one fewer than the test sent); the client's pool trace showed a connection
+put back before its request was answered, so a later request was handed a connection carrying a stream. A client with
+`pool_max_idle_per_host(0)` failed 0 in 200 runs under load where the pooled one failed 17. When a door "gives no
+response", count what reached the server before suspecting the server. The other test files that stream and send on
+one client are listed in `docs/plans/post-360-hardening.md` §3.6; none has flaked.
+
+**Wait for the side that answers** (2026-11-20). The `governed-call` scaffold waited for `b.connected_peers()` — B's
+own writer, which exists before A has heard of B — and then called A. A, with no bootstrap peers, sends a reply only to
+a peer in its table, and a reply dropped for want of one is not sent again, so the call timed out. The readiness poll
+must hold the caller's view *and* the callee's (here, both `peers()` tables), as the [structural-polling](#structural-polling-not-fixed-sleeps)
+section's "poll it in both directions" says for keys.
+
 ## A client deadline below the server's budget is a defect, not a flake
 
 "Never fix a flake by widening a timeout" (above) has a sharp exception that is easy to

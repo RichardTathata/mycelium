@@ -11,6 +11,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The governed-call scaffold waits until both nodes know each other before node B calls node A** (found as a CI flake
+  in the Scaffold job: the run ended `Error: Timeout`). It waited for B's connection only. A has no bootstrap peers
+  and sends a reply only to a node in its own peer table, so a call made before A had heard of B lost its reply and
+  timed out after 5 s. The wait now holds both peer tables, bounded at 30 s with an error naming it. A project
+  scaffolded by 2.40.0 keeps the old wait: in its `src/main.rs`, replace the `while b.connected_peers().is_empty()`
+  line with this release's four (a comment and three lines of code, `templates/governed-call/src/main.rs`).
 - **The two-domains scaffold's `fleet.sh start` reads only its own start's log** (found as a CI flake in the Scaffold
   job). `start` launched the node with `> data/<node>.log &` and then waited for the log's `up as` line. On a restart
   the previous run's log was still there until the background shell emptied it, so `start` could return on the old
