@@ -231,7 +231,7 @@ async function issued(args) {
   const asked = await mcp.requestGrant("get_weather", args);
   await until(`request ${asked.request} pending at the supervisor`, async () => (await supervisor.grantsPending()).some((r) => r.request === asked.request));
   const row = (await supervisor.grantsPending()).find((r) => r.request === asked.request);
-  await supervisor.grantDecide(row.agent, row.request, "issue");
+  await supervisor.grantDecide(row, "issue");
   const answer = await mcp.waitForGrant(asked.request, { timeoutMs: 30_000 });
   return { asked, row, grant: answer.grant };
 }
@@ -317,7 +317,7 @@ const madrid = { city: "Madrid" };
 const asked4 = await newMcp.requestGrant("get_weather", madrid);
 await until("request 4 pending", async () => (await supervisor.grantsPending()).some((r) => r.request === asked4.request));
 const row4 = (await supervisor.grantsPending()).find((r) => r.request === asked4.request);
-await supervisor.grantDecide(row4.agent, row4.request, "issue");
+await supervisor.grantDecide(row4, "issue");
 const g4 = await newMcp.waitForGrant(asked4.request, { timeoutMs: 30_000 });
 const ranNew = await callRetrying(newMcp, "get_weather", madrid, { grant: g4.grant });
 if (!text(ranNew).includes("Sunny")) fail(`the current key's call: ${JSON.stringify(ranNew)}`);

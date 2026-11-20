@@ -253,6 +253,10 @@ pub(super) async fn stats_handler(State(ctx): State<Arc<HttpCtx>>) -> impl IntoR
         });
         // Identity-and-lifecycle I3: grant decisions answered under `grant:issue` with no decider's signature.
         body["grant_decisions_unsigned"] = json!(u.decisions.load(std::sync::atomic::Ordering::Relaxed));
+        // Identity-and-lifecycle I7-S: decisions answered naming nothing (under the one-release opt-out), and those
+        // refused because what they name is not this node's record.
+        body["grant_decisions_unnamed"] = json!(u.decisions_unnamed.load(std::sync::atomic::Ordering::Relaxed));
+        body["grant_decisions_naming_another"] = json!(u.decisions_naming_another.load(std::sync::atomic::Ordering::Relaxed));
         body["provider_actions_unsigned"] = json!(u.at_provider.load(std::sync::atomic::Ordering::Relaxed));
     }
     // Identity-and-lifecycle I7 (#810's review, finding 4): consent certificates this node did not read because the

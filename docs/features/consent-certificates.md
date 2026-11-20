@@ -234,24 +234,18 @@ gateway.
   - *That the gateway told the truth.* The record is what the gateway at `--gateway` answered, over the transport
     its URL names. The default is plain `http://` to this machine. Nothing signs the record, so `dev` checks it
     against itself and not against the requester.
-  - *What the grant binds.* The signed decision names the request's id, holder and terms. It does **not** name the
-    tool, the resource or the digest. The addressed node issues the grant from its own copy of the request record,
-    which is unsigned in the KV ([owner-signed records](../wiki/dev/owner-signed-records.md), row
-    `grant/{agent}/{request}`). So today, after a person typed `approve` and with `dev`'s second read in place:
-    - any admitted member can change the **tool**, the **arguments digest**, the **resource** and the **expiry**
-      that the approval is applied to, by rewriting the record before the node reads it;
-    - leaving the resource alone while changing the tool carries a tool past a rule written for the resource: the
-      evaluator is asked about the resource, and the grant permits the tool;
-    - a member who tombstones the answer (`…/issued`) can have **the same signed decision admitted again**, for
-      another rewritten record, for as long as the decision is fresh: 300 s plus clock drift;
-    - what cannot be changed: the holder, the request id, the addressed node, the decision, the ttl, the grade and
-      the decider.
-    `dev`'s second read catches a change it can see before it signs, and nothing after. **This is closed by the
-    approver signing what it saw** — a service decider as well as a developer — which the maintainer decided on
-    2026-11-18 and 2026-11-20 as its own PR after this one
-    ([identity and lifecycle, row I7-S](../plans/identity-and-lifecycle.md)). Until it is built no release carries
-    consent decisions: `scripts/check-release-blockers.sh --release` refuses the tag
-    (`CONSENT_DECISION_DOES_NOT_NAME_WHAT_WAS_SHOWN`).
+  - *What the grant binds.* Since identity-and-lifecycle I7-S (PR 1) the signed decision names what the prompt
+    showed: the request's **tool**, **resource**, **arguments digest** (the record's own string, which `dev` checked
+    hashes from the arguments it showed, in either form a node honours) and **expiry**, after the grade
+    (`PromptRecord::shown`). The addressed node compares them with its own copy of the request record and refuses a
+    difference by name (`decision_names_another_request`), so a member who rewrites the record after the person typed
+    `approve` — after `dev`'s second read included — no longer moves the approval onto another tool, digest, resource
+    or expiry; a consent decision naming no block is refused `decision_shown_missing`. **Still open:** a member who
+    tombstones the answer (`…/issued`) can have **the same signed decision admitted again**, for the same request,
+    while it is fresh — up to 900 s of node time at the default drift. That is closed by I7-S's second PR (a
+    spent-decision memory at the addressed node), **not built**; until it is, no release carries consent decisions:
+    `scripts/check-release-blockers.sh --release` refuses the tag (`CONSENT_DECISION_DOES_NOT_NAME_WHAT_WAS_SHOWN`
+    stays `true`).
   - *That the decision was admitted.* `dev` reports that it signed and sent, and quotes the gateway's answer.
 - **No grade, no consent.** A consent certificate with no grade, a grade outside the set, or the grade twice never
   counts.
@@ -304,7 +298,7 @@ gateway.
   external issuers. `client_key_standing`, which the `cs` check and the doors read, answers `Unknown` for a consent
   principal. The mesh refuses the certificate for its key ("a mesh certificate must carry an Ed25519 identity key"),
   and refuses the consent scheme on an Ed25519 certificate too.
-- **Not built yet:** the approver signing what it saw (row I7-S, a release blocker); the macOS Secure Enclave key
+- **Not built yet:** the spent-decision memory (row I7-S, PR 2, a release blocker); the macOS Secure Enclave key
   and its Swift shim (I7's last PR), so nothing in this tree signs at `os_presence(macos, unbound)` and no person's
   Touch ID run has produced a decision; a software key on Windows; reading a macOS ACL; a `recording` signer for a
   `sim` build; a lock between two `dev` processes on one terminal; how another process hands a running `dev` a

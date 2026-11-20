@@ -525,8 +525,13 @@ protected kind — is thrown, never reported as `"timeout"`.
 
 ### The supervisor's grants, and a task's lifecycle (0.2.7)
 
-`grantsPending()` reads `GET /gateway/grants/pending` (`grant:read`) and `grantDecide(agent, request, "issue" |
-"refuse", { ttlSecs, reason })` posts the answer to `POST /gateway/grants/{agent}/{request}` (`grant:issue`);
+`grantsPending()` reads `GET /gateway/grants/pending` (`grant:read`) and `grantDecide(record, "issue" | "refuse", {
+ttlSecs, reason })` posts the answer to `POST /gateway/grants/{agent}/{request}` (`grant:issue`), `record` a row of
+`grantsPending()` or a `grant_request` event: since 0.2.10 the decision **names what it was made on** — the record's
+tool, resource, digest and expiry (`shownFromRecord`) — and the node refuses it if its own record says otherwise
+(`decision_names_another_request`). The ids-only `grantDecide(agent, request, decision)` is `@deprecated`: a gateway
+after identity-and-lifecycle I7-S refuses it (`decision_names_nothing`) unless its operator sets
+`gateway_accept_unnamed_decisions`;
 issuing is itself an action the node's evaluator decides, so a refusal is the route's 403, and 409 `not_a_member`
 names an agent on no member node this gateway knows. A node's grant is presented by its holder, the agent's node; a client's own grant by the client (below). `grantRevoke(agent, request, {
 reason })` revokes at the issuing node, and `grantsStream()` is the requests as they come (an async generator of

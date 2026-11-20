@@ -77,15 +77,27 @@ impl ConsentKey {
         der
     }
 
-    /// A decision by `decider` on the forecaster's `request`, naming `grade`, signed by this key.
+    /// A decision by `decider` on the forecaster's `request`, naming `grade`, signed by this key. A graded issue or
+    /// refusal names what the request door answered for `request` (identity-and-lifecycle I7-S, [`asked_block`]), or —
+    /// for the tests that verify a body with no request behind it — a block that is no record's.
     #[allow(clippy::too_many_arguments)]
     fn sign(&self, decider: &str, node: &str, request: &str, decision: &str, ttl: Option<u64>, reason: Option<&str>, grade: Option<&str>) -> crate::SignedDecision {
+        let shown = (grade.is_some() && decision != "revoke").then(|| asked_block(request).unwrap_or_else(|| crate::Shown::new(TOOL, format!("tool:{TOOL}@{node}"), "00", u64::MAX)));
+        self.sign_naming(decider, node, request, decision, ttl, reason, grade, shown)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn sign_naming(&self, decider: &str, node: &str, request: &str, decision: &str, ttl: Option<u64>, reason: Option<&str>, grade: Option<&str>, shown: Option<crate::Shown>) -> crate::SignedDecision {
         use base64::Engine as _;
         let b64 = base64::engine::general_purpose::STANDARD;
         let t = mycelium_core::sim_seam::wall_now_ms();
-        let msg = crate::grant_decision_message_graded(decider, node, FORECASTER, request, decision, ttl, reason, t, grade);
+        let msg = crate::grant_decision_message_shown(decider, node, FORECASTER, request, decision, ttl, reason, t, grade, shown.as_ref());
         let sig = mycelium_core::tls::sign_consent_p256_in_test_build(&self.pkcs8, &msg).expect("signed");
-        crate::SignedDecision::from_parts(decider, node, FORECASTER, request, t, b64.encode(self.point), b64.encode(sig), grade)
+        let signed = crate::SignedDecision::from_parts(decider, node, FORECASTER, request, t, b64.encode(self.point), b64.encode(sig), grade);
+        match shown {
+            Some(s) => signed.naming(s),
+            None => signed,
+        }
     }
 }
 
@@ -146,7 +158,13 @@ async fn a_consent_decision_is_verified_and_recorded_with_the_grade_its_certific
     let dir = scratch("consent-decide");
     let http_port = alloc_port();
     let unit = unit_with(&decides(RICHARD, ""));
-    let a = started_with(&dir, http_port, None, &unit, |cfg| cfg.gateway_consent_principals = consent_table(&["richard"])).await;
+    // The service's two bodies below name nothing of what was seen (a pre-I7 body, and one naming only `service`):
+    // admitted here under the one-release opt-out (I7-S, D2), so the grade they are recorded with is what is tested.
+    let a = started_with(&dir, http_port, None, &unit, |cfg| {
+        cfg.gateway_consent_principals = consent_table(&["richard"]);
+        cfg.gateway_accept_unnamed_decisions = true;
+    })
+    .await;
     let _ = forecaster_key(&a, &dir);
     let treasurer = client_key_in(&a, &dir.join("tls"), &dir.join("client-treasurer"), "treasurer");
     let key = ConsentKey::new();
@@ -161,7 +179,7 @@ async fn a_consent_decision_is_verified_and_recorded_with_the_grade_its_certific
         .and_then(|b| serde_json::from_slice(&b).ok())
         .unwrap_or_default();
     let now = mycelium_core::sim_seam::wall_now_ms();
-    let plain = post_decision(http_port, "relay-secret", &requests[1], issue_body(signed_at(&treasurer, &node, &requests[1], "issue", Some(600), None, now))).await;
+    let plain = post_decision(http_port, "relay-secret", &requests[1], issue_body(crate::sign_grant_decision(&treasurer, DECIDER, &node, FORECASTER, &requests[1], "issue", Some(600), None, now))).await;
     let named = crate::sign_grant_decision_graded(&treasurer, DECIDER, &node, FORECASTER, &requests[2], "issue", Some(600), None, now, Some("service"));
     let named = post_decision(http_port, "relay-secret", &requests[2], issue_body(named)).await;
     a.shutdown().await;
@@ -274,11 +292,18 @@ async fn a_decision_names_the_grade_its_certificate_carries_and_a_relay_cannot_a
     // A service decider: `service` or nothing; never a consent grade.
     let now = mycelium_core::sim_seam::wall_now_ms();
     let by_service = |grade: Option<&str>| crate::sign_grant_decision_graded(&treasurer, DECIDER, &node, FORECASTER, "r1", "issue", Some(600), None, now, grade);
-    for (what, grade) in [("a pre-I7 body", None), ("naming service", Some("service"))] {
+    // Since I7-S a service's issue names what it saw: a body naming nothing — pre-I7, or naming only `service` — is
+    // refused by default (D2), and one naming the block under `service` is recorded `service`.
+    for (what, grade) in [("a pre-I7 body", None), ("naming service, and nothing seen", Some("service"))] {
         let got = verified(&a, &by_service(grade), "r1");
-        if got != Ok(SignedWith::service()) {
+        if refusal(&got) != "decision_names_nothing" {
             wrong.push(format!("SERVICE: {what} is recorded {got:?}"));
         }
+    }
+    let shown = crate::Shown::new(TOOL, format!("tool:{TOOL}@{node}"), "00", u64::MAX);
+    let named = crate::sign_grant_decision_naming(&treasurer, DECIDER, &node, FORECASTER, "r1", "issue", Some(600), None, now, &shown);
+    if verified(&a, &named, "r1") != Ok(SignedWith::service()) {
+        wrong.push(format!("SERVICE: naming the block is recorded {:?}", verified(&a, &named, "r1")));
     }
     for g in grades {
         let got = verified(&a, &by_service(Some(g.as_str())), "r1");
@@ -286,11 +311,12 @@ async fn a_decision_names_the_grade_its_certificate_carries_and_a_relay_cannot_a
             wrong.push(format!("SERVICE CLAIMS {g}: {got:?}"));
         }
     }
-    let mut stripped = by_service(Some("service"));
+    // The grade stripped after signing: the signature no longer verifies, and the door refuses the block left
+    // without a grade before it reads the key.
+    let mut stripped = named.clone();
     stripped.grade = None;
-    let stripped = verified(&a, &stripped, "r1");
-    if refusal(&stripped) != "not_the_decider" {
-        wrong.push(format!("STRIPPED: a service's `service` grade removed after signing: {stripped:?}"));
+    if stripped.verify_signature("issue", Some(600), None) || refusal(&verified(&a, &stripped, "r1")) != "decision_shown_ungraded" {
+        wrong.push(format!("STRIPPED: a service's `service` grade removed after signing: {:?}", verified(&a, &stripped, "r1")));
     }
 
     // The service's own, current Ed25519 key under the consent principal of the same name.
@@ -311,7 +337,11 @@ async fn a_decision_names_the_grade_its_certificate_carries_and_a_relay_cannot_a
 fn key_of_a_service_as_consent(a: &GossipAgent, dir: &Path, node: &str) -> Option<String> {
     let service = client_key_in(a, &dir.join("tls"), &dir.join("client-dana"), "dana");
     ConsentKey::new().enrol(a, dir, "dana", "consent-dana", ConsentGrade::Tty);
-    let forged = crate::sign_grant_decision_graded(&service, "consent:fleet/dana", node, FORECASTER, "r1", "issue", Some(600), None, mycelium_core::sim_seam::wall_now_ms(), Some("tty"));
+    // Naming a block (I7-S), so the key's kind is what refuses it.
+    let shown = crate::Shown::new(TOOL, format!("tool:{TOOL}@{node}"), "00", u64::MAX);
+    let msg = crate::grant_decision_message_shown("consent:fleet/dana", node, FORECASTER, "r1", "issue", Some(600), None, 1, Some("tty"), Some(&shown));
+    let b64 = |b: &[u8]| base64::Engine::encode(&base64::engine::general_purpose::STANDARD, b);
+    let forged = crate::SignedDecision::from_parts("consent:fleet/dana", node, FORECASTER, "r1", 1, b64(&service.verifying_key().to_bytes()), b64(&ed25519_dalek::Signer::sign(&service, &msg).to_bytes()), Some("tty")).naming(shown);
     let got = verified(a, &forged, "r1");
     (!got.as_ref().is_err_and(|e| e.starts_with("not_the_decider") && e.contains("never a consent key"))).then(|| format!("SERVICE KEY AS CONSENT: {got:?}"))
 }
@@ -353,7 +383,7 @@ async fn a_consent_principal_decides_by_its_own_table_and_never_by_a_named_token
         let requests = ask(http_port, 2).await;
         let by_consent = post_decision(http_port, "relay-secret", &requests[0], issue_body(consent.sign(RICHARD, &node, &requests[0], "issue", Some(600), None, Some("tty")))).await;
         let by_service = post_decision(http_port, "relay-secret", &requests[1],
-            issue_body(crate::sign_grant_decision(&service, RICHARD_SERVICE, &node, FORECASTER, &requests[1], "issue", Some(600), None, mycelium_core::sim_seam::wall_now_ms()))).await;
+            issue_body(signed_by(&service, RICHARD_SERVICE, &node, &requests[1], "issue", Some(600), None, mycelium_core::sim_seam::wall_now_ms()))).await;
         a.shutdown().await;
         let _ = std::fs::remove_dir_all(&dir);
         let want = |granted: bool| if granted { (200, None) } else { (403, Some("decider_lacks_scope".to_string())) };
@@ -730,9 +760,11 @@ async fn a_grant_is_never_issued_to_a_consent_principal() {
     assert!(a.task_ctx.client_certs.mark(RICHARD).is_some(), "the ledger holds the consent principal's mark");
     let node = a.node_id().to_string();
     let path = format!("/gateway/grants/{}/r1", segment(RICHARD));
-    let issue = http(http_port, "treasurer-secret", reqwest::Method::POST, &path, Some(serde_json::json!({"decision": "issue", "ttl_secs": 60}))).await;
-    let refuse = http(http_port, "treasurer-secret", reqwest::Method::POST, &path, Some(serde_json::json!({"decision": "refuse", "reason": "no"}))).await;
-    let signed = crate::sign_grant_decision(&treasurer, DECIDER, &node, RICHARD, "r1", "issue", Some(60), None, mycelium_core::sim_seam::wall_now_ms());
+    // Each names a block (I7-S), so nothing but the holder refuses it.
+    let shown = serde_json::to_value(crate::Shown::new(TOOL, format!("tool:{TOOL}@{node}"), "00", u64::MAX)).unwrap();
+    let issue = http(http_port, "treasurer-secret", reqwest::Method::POST, &path, Some(serde_json::json!({"decision": "issue", "ttl_secs": 60, "shown": shown}))).await;
+    let refuse = http(http_port, "treasurer-secret", reqwest::Method::POST, &path, Some(serde_json::json!({"decision": "refuse", "reason": "no", "shown": shown}))).await;
+    let signed = crate::sign_grant_decision_naming(&treasurer, DECIDER, &node, RICHARD, "r1", "issue", Some(60), None, mycelium_core::sim_seam::wall_now_ms(), &serde_json::from_value(shown.clone()).unwrap());
     let signed = http(http_port, "relay-secret", reqwest::Method::POST, &path, Some(serde_json::json!({"decision": "issue", "ttl_secs": 60, "signed": signed}))).await;
     let written = mycelium_core::store::scan_kv_prefix(&a.task_ctx.kv_state, &format!("grant/{}/", crate::agent::gateway_authority::grant_holder_segment(RICHARD))).len();
     a.shutdown().await;

@@ -64,6 +64,7 @@ def grant_decision_message(
     reason: Optional[str],
     issued_at_ms: int,
     grade: Optional[str] = None,
+    shown: Optional[Dict[str, Any]] = None,
 ) -> bytes:
     """The bytes a decider signs to answer a grant request (identity-and-lifecycle I3): the tag; the decider, the
     addressed node, the request's holder (a principal), the request id, the decision (``issue``, ``refuse`` or
@@ -72,7 +73,13 @@ def grant_decision_message(
 
     ``grade`` (identity-and-lifecycle I7): when given, a ``u32`` little-endian length and the grade's UTF-8 bytes
     follow ``issued_at_ms``; when ``None`` nothing follows, so a decision naming no grade has the message it had
-    before I7. Pinned, with a grade and without, by ``tests/fixtures/decision/vector.json``."""
+    before I7. Pinned, with a grade and without, by ``tests/fixtures/decision/vector.json``.
+
+    ``shown`` (identity-and-lifecycle I7-S): what the decider saw of the request — a dict with ``tool``,
+    ``resource``, ``arguments_digest`` and ``request_expires_at_ms`` (:func:`shown_from_record`). When given, after
+    the grade come ``"shown/1"``, the tool, the resource and the digest, each a ``u32`` little-endian length and its
+    UTF-8 bytes, then ``request_expires_at_ms`` as a ``u64`` little-endian. A block requires a grade: a node refuses
+    a body naming one without a grade. Pinned by the vector's ``shown`` section."""
     out = bytearray(GRANT_DECISION_TAG)
     ttl = "" if ttl_secs is None else str(int(ttl_secs))
     for part in (decider, node, agent, request, decision, ttl, reason or ""):
@@ -82,7 +89,27 @@ def grant_decision_message(
     if grade is not None:
         g = grade.encode("utf-8")
         out += struct.pack("<I", len(g)) + g
+    if shown is not None:
+        for part in (SHOWN_MARKER, shown["tool"], shown["resource"], shown["arguments_digest"]):
+            b = part.encode("utf-8")
+            out += struct.pack("<I", len(b)) + b
+        out += struct.pack("<Q", int(shown["request_expires_at_ms"]))
     return bytes(out)
+
+
+SHOWN_MARKER = "shown/1"
+
+
+def shown_from_record(record: Dict[str, Any]) -> Dict[str, Any]:
+    """What a decision on ``record`` names of it (identity-and-lifecycle I7-S): a request record as
+    ``grants_pending()`` lists it or ``grants_stream()`` reports it — its ``tool``, ``resource``,
+    ``arguments_digest`` (the record's own string) and ``expires_at_ms`` as ``request_expires_at_ms``. The node the
+    decision is addressed to compares each with its own record and refuses a difference by name
+    (``decision_names_another_request``). Raises ``ValueError`` when one is absent or not of its type."""
+    tool, resource, digest, expires = (record.get(f) for f in ("tool", "resource", "arguments_digest", "expires_at_ms"))
+    if not all(isinstance(v, str) for v in (tool, resource, digest)) or not isinstance(expires, int) or isinstance(expires, bool):
+        raise ValueError("a request record names tool, resource and arguments_digest (strings) and expires_at_ms (an integer)")
+    return {"tool": tool, "resource": resource, "arguments_digest": digest, "request_expires_at_ms": expires}
 
 
 _MAX_SAFE_INTEGER = 2**53 - 1
@@ -278,7 +305,8 @@ class ClientSigner:
 
     def sign_grant_decision(self, node: str, agent: str, request: str, decision: str, *,
                             ttl_secs: Optional[int] = None, reason: Optional[str] = None,
-                            issued_at_ms: Optional[int] = None, grade: Optional[str] = None) -> Dict[str, Any]:
+                            issued_at_ms: Optional[int] = None, grade: Optional[str] = None,
+                            shown: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Sign an answer to the grant request ``request`` held by ``agent`` (a principal, as the pending list's
         ``agent`` names it), addressed to the node ``node`` (its id, as ``GET /health`` reports it): ``decision`` is
         ``"issue"`` (with ``ttl_secs``), ``"refuse"`` or ``"revoke"`` (with ``reason``). Returns the decision body's
@@ -288,15 +316,25 @@ class ClientSigner:
         ``grade`` (identity-and-lifecycle I7): a service's decision is recorded ``service`` whether or not it names
         one, and ``"service"`` is the only grade this signer may name — its key is a client certificate's Ed25519
         key, never a consent key. Left ``None`` (the default), the body is what it was before I7, which a node before
-        I7 accepts; a body naming a grade is refused by such a node."""
+        I7 accepts; a body naming a grade is refused by such a node.
+
+        ``shown`` (identity-and-lifecycle I7-S): what this signer saw of the request (:func:`shown_from_record`),
+        signed after the grade — which is then ``"service"``, named or not. A gateway after I7-S refuses an issue or
+        refusal naming no block by default (``decision_names_nothing``); a node before I7-S refuses one naming it, so
+        upgrade the gateways first. A revocation names no block."""
         import base64
 
         if decision not in ("issue", "refuse", "revoke"):
             raise ValueError('decision must be "issue", "refuse" or "revoke"')
         if grade is not None and grade != "service":
             raise ValueError('a service signer names the grade "service" or none: a consent grade is a consent key\'s')
+        if shown is not None:
+            if decision == "revoke":
+                raise ValueError("a revocation names the grant at its path, not what was shown")
+            shown = shown_from_record({**shown, "expires_at_ms": shown.get("request_expires_at_ms")})
+            grade = "service"
         t = issued_at_ms if issued_at_ms is not None else int(time.time() * 1000)
-        msg = grant_decision_message(self.principal, node, agent, request, decision, ttl_secs, reason, t, grade)
+        msg = grant_decision_message(self.principal, node, agent, request, decision, ttl_secs, reason, t, grade, shown)
         signed = {
             "decider": self.principal,
             "node": node,
@@ -308,6 +346,8 @@ class ClientSigner:
         }
         if grade is not None:
             signed["grade"] = grade
+        if shown is not None:
+            signed["shown"] = shown
         return signed
 
     def sign(self, operation: str, resource: str, digest: bytes, *, issued_at_ms: Optional[int] = None,

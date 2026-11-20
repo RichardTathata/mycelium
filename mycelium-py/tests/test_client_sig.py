@@ -137,6 +137,61 @@ def test_the_graded_decision_vector_is_the_same_in_every_language():
                 key.verify(base64.b64decode(signed["sig"]), altered, ec.ECDSA(hashes.SHA256()))
 
 
+def test_the_shown_decision_vector_is_the_same_in_every_language():
+    # Identity-and-lifecycle I7-S: what the decider saw, after the grade. A service naming the block (Ed25519,
+    # reproduced exactly) and a consent principal's P-256 decisions (verified, and refused with any one field altered
+    # or the block removed).
+    import base64
+
+    from cryptography.exceptions import InvalidSignature
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.asymmetric import ec
+
+    from mycelium import shown_from_record
+    from mycelium.client_sig import grant_decision_message
+
+    v = json.loads((Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "decision" / "vector.json").read_text())
+    section = v["shown"]
+    signer = ClientSigner(bytes.fromhex(v["seed_hex"]), v["decider"])
+    assert len(section["service"]) >= 3
+    for case in section["service"]:
+        sh = case["shown"]
+        msg = grant_decision_message(v["decider"], v["node"], v["agent"], case["request"], case["decision"], case["ttl_secs"], case["reason"], v["t"], case["grade"], sh)
+        assert msg.hex() == case["message_hex"], case
+        graded = grant_decision_message(v["decider"], v["node"], v["agent"], case["request"], case["decision"], case["ttl_secs"], case["reason"], v["t"], case["grade"])
+        tail = b"".join(len(p.encode()).to_bytes(4, "little") + p.encode() for p in ("shown/1", sh["tool"], sh["resource"], sh["arguments_digest"]))
+        assert msg == graded + tail + sh["request_expires_at_ms"].to_bytes(8, "little"), case
+        record = {"tool": sh["tool"], "resource": sh["resource"], "arguments_digest": sh["arguments_digest"], "expires_at_ms": sh["request_expires_at_ms"]}
+        assert shown_from_record(record) == sh
+        signed = signer.sign_grant_decision(v["node"], v["agent"], case["request"], case["decision"], ttl_secs=case["ttl_secs"],
+                                            reason=case["reason"], issued_at_ms=v["t"], shown=shown_from_record(record))
+        assert signed == case["signed"], case
+    consent = section["consent"]
+    key = ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(), bytes.fromhex(v["graded"]["consent"]["point_hex"]))
+    for case in consent["cases"]:
+        signed, sh = case["signed"], case["shown"]
+        args = (consent["decider"], v["node"], v["agent"], case["request"], case["decision"], case["ttl_secs"], case["reason"], v["t"], case["grade"])
+        msg = grant_decision_message(*args, sh)
+        assert msg.hex() == case["message_hex"] and signed["shown"] == sh, case
+        key.verify(base64.b64decode(signed["sig"]), msg, ec.ECDSA(hashes.SHA256()))
+        for field, value in (("tool", sh["tool"] + "x"), ("resource", sh["resource"] + "x"), ("arguments_digest", sh["arguments_digest"].upper()),
+                             ("request_expires_at_ms", sh["request_expires_at_ms"] + 1)):
+            with pytest.raises(InvalidSignature):
+                key.verify(base64.b64decode(signed["sig"]), grant_decision_message(*args, {**sh, field: value}), ec.ECDSA(hashes.SHA256()))
+        with pytest.raises(InvalidSignature):
+            key.verify(base64.b64decode(signed["sig"]), grant_decision_message(*args), ec.ECDSA(hashes.SHA256()))
+
+
+def test_a_signer_naming_the_block_names_service_and_never_on_a_revocation():
+    signer = ClientSigner(bytes(range(32)), "token:fleet/treasurer")
+    sh = {"tool": "t", "resource": "tool:t@n", "arguments_digest": "ab", "request_expires_at_ms": 9}
+    assert signer.sign_grant_decision("n", "a", "r", "issue", issued_at_ms=1, shown=sh)["grade"] == "service"
+    with pytest.raises(ValueError):
+        signer.sign_grant_decision("n", "a", "r", "revoke", issued_at_ms=1, shown=sh)
+    with pytest.raises(ValueError):
+        signer.sign_grant_decision("n", "a", "r", "issue", issued_at_ms=1, shown={**sh, "request_expires_at_ms": "9"})
+
+
 def test_a_service_signer_names_the_grade_service_or_none():
     # I7: a ClientSigner's key is a client certificate's Ed25519 key; a consent grade is a consent key's.
     signer = ClientSigner(bytes(range(32)), "token:fleet/treasurer")

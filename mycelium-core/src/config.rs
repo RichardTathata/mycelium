@@ -1818,6 +1818,17 @@ pub struct GossipConfig {
     #[serde(default)]
     pub gateway_consent_principals: Vec<GatewayConsentPrincipal>,
 
+    /// **Admit a grant decision that names nothing of what its decider saw** (identity-and-lifecycle I7-S, D2;
+    /// `gateway` + `tls`): a service's signed issue or refusal with no `signed.shown`, or a bearer's unsigned one with
+    /// no `shown`. Default `false`: such a decision is refused by name (`decision_names_nothing`), since the node
+    /// could not tell the request the decider decided from one a member rewrote after it read. `true` admits it for
+    /// a rollout, each one answered counted (`/stats` `grant_decisions_unnamed`,
+    /// `mycelium_gateway_decisions_unnamed_total`) and warned about. **One release only:** the field is removed in
+    /// the release after the one that adds it (`deprecations.md` §123). A consent decider's decision names its block
+    /// whatever this says. There is no environment form.
+    #[serde(default)]
+    pub gateway_accept_unnamed_decisions: bool,
+
     /// The issuing authority that qualifies every gateway-local caller principal (item 7):
     /// `token:{issuer}/…` for bearer tokens, and the `via` a provider sees. `None` (default) = this
     /// node's id, so two gateways never mint the same identity by accident. Set the **same** value on
@@ -2408,6 +2419,7 @@ impl Default for GossipConfig {
             gateway_scoped_tokens:         Vec::new(),
             gateway_named_tokens:          Vec::new(),
             gateway_consent_principals:    Vec::new(),
+            gateway_accept_unnamed_decisions: false,
             gateway_identity_issuer:       None,
             require_identity_proofs:       true,
             #[allow(deprecated)]

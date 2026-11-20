@@ -302,3 +302,85 @@ async fn dev_publishes_its_certificate_through_the_door_and_signed_is_not_admitt
     assert_eq!((published.1["principal"].as_str(), published.1["grade"].as_str(), published.1["grade_source"].as_str()), (Some(ALEX), Some("tty"), Some("operator")), "PUBLISHED: {}", published.1);
     assert!(after.admitted(), "AFTER: the published key's decision is admitted: {after:?}");
 }
+
+/// **`dev` signs what its prompt showed, and the node refuses a record rewritten after `dev`'s second read**
+/// (identity-and-lifecycle I7-S; #813's review, F1, which `dev_signs_nothing_when_the_record_changed_under_the_prompt`
+/// left open). An approval at the prompt is signed naming the record's tool, resource, digest and expiry — exactly
+/// the block of the record the prompt was rendered from. Then the steps of `answer_one` are taken by hand so that a
+/// member can rewrite the record **after** `dev` read it the second time and signed: the decision is refused `409
+/// decision_names_another_request` naming the digest, and nothing is issued. And a consent decision naming no block
+/// is refused `decision_shown_missing` before any key is used. Seen failing first: `Enrolment::sign` naming no block
+/// (the approval refused `decision_shown_missing`; before the node's comparison, the rewritten decision was issued).
+#[tokio::test]
+async fn dev_names_what_it_showed_and_a_rewrite_after_its_second_read_is_refused() {
+    let dir = scratch("dev-consent-shown");
+    let http_port = alloc_port();
+    let unit = unit_with(&decides(ALEX, ""));
+    let a = started_with(&dir, http_port, None, &unit, |cfg| cfg.gateway_consent_principals = consent_table(&["alex"])).await;
+    let _ = forecaster_key(&a, &dir);
+    let (_store, enrolment) = enrolled(&a, &dir, "alex");
+    let requests = ask(http_port, 2).await;
+    let gw = gateway(http_port);
+    let mut approver = Scripted::answering([Approval::Approve]);
+    let approved = tokio::time::timeout(Duration::from_secs(30), dc::answer_one(&gw, &enrolment, &mut approver, &requests[0], 600)).await.expect("bounded");
+    // By hand: read, sign, then the rewrite, then send.
+    let (pending, _) = gw.pending().await.expect("pending");
+    let record = dc::PromptRecord::find(&pending, &requests[1]).expect("a record dev can show");
+    let node = gw.node_id().await.expect("the node");
+    let signed = enrolment.sign(&node, &record, "issue", Some(600), None, mycelium_core::sim_seam::wall_now_ms()).expect("signed");
+    let mut row = pending.as_array().unwrap().iter().find(|r| r["request"].as_str() == Some(requests[1].as_str())).unwrap().clone();
+    row.as_object_mut().unwrap().remove("key");
+    let other = serde_json::json!({"city": "Paris"});
+    row["arguments_digest"] = crate::agent::action_evaluator::hex32(&crate::arguments_digest(&other)).into();
+    row["arguments"] = other;
+    assert!(a.kv().set(record.key.clone(), bytes::Bytes::from(serde_json::to_vec(&row).unwrap())), "a member rewrites the record after dev's second read");
+    let rewritten = gw.decide(&record, &serde_json::json!({"decision": "issue", "ttl_secs": 600, "signed": signed})).await.expect("sent");
+    let unnamed = crate::SignedDecision { shown: None, ..signed.clone() };
+    let missing = verified(&a, &unnamed, &requests[1]);
+    let issued = mycelium_core::ops::kv_get(&a.task_ctx, &format!("{}/issued", record.key)).is_some();
+    a.shutdown().await;
+    let journal = journal_of(&dir);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert!(approved.admitted(), "APPROVED: {approved:?}");
+    let shown_at_prompt = approver.prompts.borrow()[0].record.shown();
+    let body: crate::SignedDecision = serde_json::from_value(decided(&journal, "grant.issue", ALEX)[0].signed_decision.clone().unwrap()["signed"].clone()).unwrap();
+    assert_eq!(body.shown.as_ref(), Some(&shown_at_prompt), "NAMED: dev signs the block of the record its prompt showed");
+    assert_eq!(signed.shown.as_ref(), Some(&record.shown()), "the block is the record's: its digest string, its expiry");
+    assert_eq!((rewritten.0, rewritten.1["error"].as_str()), (409, Some("decision_names_another_request")), "REWRITE: {}", rewritten.1);
+    assert!(rewritten.1["detail"].as_str().unwrap_or_default().starts_with("the decision names arguments_digest "), "{}", rewritten.1);
+    assert!(!issued, "nothing issued for the rewritten record");
+    assert_eq!(refusal(&missing), "decision_shown_missing", "{missing:?}");
+}
+
+/// **A request recorded under the pre-I3 digest form is approved by `dev` and admitted** (I7-S, the report's C2;
+/// `deprecations.md` §93, for as long as the nodes honour that form). `dev` checks the record's digest against the
+/// arguments it shows under either form, and signs the record's own digest string — so the node, comparing byte for
+/// byte, admits it. Seen failing first with `dev` signing the RFC 8785 digest it recomputed (`409
+/// decision_names_another_request`, naming the digest).
+#[tokio::test]
+async fn dev_approves_a_request_recorded_under_the_legacy_digest() {
+    let dir = scratch("dev-consent-legacy");
+    let http_port = alloc_port();
+    let unit = unit_with(&decides(ALEX, ""));
+    let a = started_with(&dir, http_port, None, &unit, |cfg| cfg.gateway_consent_principals = consent_table(&["alex"])).await;
+    let _ = forecaster_key(&a, &dir);
+    let (_store, enrolment) = enrolled(&a, &dir, "alex");
+    let args = serde_json::json!({"\u{ff01}": 1, "\u{1F600}": 2});
+    let legacy = crate::agent::action_evaluator::hex32(&crate::legacy_arguments_digest(&args));
+    assert_ne!(legacy, crate::agent::action_evaluator::hex32(&crate::arguments_digest(&args)), "the two forms differ here");
+    let (_, asked) = http(http_port, "fc-secret", reqwest::Method::POST, "/gateway/grants/request", Some(serde_json::json!({"tool": TOOL, "arguments": args}))).await;
+    let key = asked["key"].as_str().unwrap().to_string();
+    let mut record: serde_json::Value = serde_json::from_slice(&mycelium_core::ops::kv_get(&a.task_ctx, &key).unwrap()).unwrap();
+    record["arguments_digest"] = legacy.clone().into();
+    assert!(a.kv().set(key.clone(), bytes::Bytes::from(serde_json::to_vec(&record).unwrap())), "the record as a pre-I3 gateway wrote it");
+    let gw = gateway(http_port);
+    let mut approver = Scripted::answering([Approval::Approve]);
+    let answer = tokio::time::timeout(Duration::from_secs(30), dc::answer_one(&gw, &enrolment, &mut approver, asked["request"].as_str().unwrap(), 600)).await.expect("bounded");
+    let issued = mycelium_core::ops::kv_get(&a.task_ctx, &format!("{key}/issued")).is_some();
+    a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(answer.admitted(), "LEGACY: {answer:?}");
+    assert!(issued, "issued");
+    assert_eq!(approver.prompts.borrow()[0].record.shown().arguments_digest, legacy, "dev names the record's own digest string");
+}

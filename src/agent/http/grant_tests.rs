@@ -158,7 +158,30 @@ fn policy(window_ms: u64) -> AgentPolicy {
     AgentPolicy { require_grant_for: vec!["deploy".into()], grant_window: Some(Duration::from_millis(window_ms)), ..AgentPolicy::default() }
 }
 
-async fn supervisor(http_port: u16, token: &str, method: reqwest::Method, path: &str, body: Option<serde_json::Value>) -> (u16, serde_json::Value) {
+/// The block each request was named with the first time a decision was sent on it (identity-and-lifecycle I7-S), by
+/// the decision route's path: a repeated decision names what the first one did.
+static NAMED: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, serde_json::Value>>> = std::sync::LazyLock::new(Default::default);
+
+/// A request to the gateway as a supervisor makes it, under `token`. An unsigned issue or refusal carrying no `shown`
+/// names what the supervisor read (I7-S, D4): the pending record of the path's request, the first time; the same block
+/// after, so a repeated decision is answered as one.
+async fn supervisor(http_port: u16, token: &str, method: reqwest::Method, path: &str, mut body: Option<serde_json::Value>) -> (u16, serde_json::Value) {
+    let decision = method == reqwest::Method::POST && path.starts_with("/gateway/grants/") && !path.ends_with("/revoke") && !path.starts_with("/gateway/grants/request");
+    if decision && let Some(b) = body.as_mut().filter(|b| b.get("signed").is_none() && b.get("shown").is_none()) {
+        let held = NAMED.lock().unwrap().get(&format!("{http_port}{path}")).cloned();
+        let shown = match held {
+            Some(s) => Some(s),
+            None => {
+                let (_, listed) = Box::pin(supervisor(http_port, token, reqwest::Method::GET, "/gateway/grants/pending", None)).await;
+                let request = path.rsplit('/').next().unwrap_or_default();
+                listed["pending"].as_array().and_then(|rows| rows.iter().find(|r| r["request"].as_str() == Some(request))).and_then(crate::Shown::from_record).map(|s| serde_json::to_value(s).unwrap())
+            }
+        };
+        if let Some(s) = shown {
+            NAMED.lock().unwrap().insert(format!("{http_port}{path}"), s.clone());
+            b["shown"] = s;
+        }
+    }
     let mut req = reqwest::Client::new().request(method, format!("http://127.0.0.1:{http_port}{path}")).bearer_auth(token);
     if let Some(b) = body {
         req = req.json(&b);

@@ -198,7 +198,10 @@ async fn the_provider_door_refuses_a_call_under_a_revoked_grant() {
         let resp = req.send().await.unwrap();
         (resp.status().as_u16(), resp.json::<serde_json::Value>().await.unwrap_or_default())
     };
-    let (status, issued) = treasurer(reqwest::Method::POST, format!("/gateway/grants/{agent}/{request}"), Some(serde_json::json!({"decision": "issue"}))).await;
+    // Naming what the treasurer read (identity-and-lifecycle I7-S): the request's own record.
+    let record: serde_json::Value = mycelium_core::ops::kv_get(&a.task_ctx, &format!("grant/{agent}/{request}")).and_then(|b| serde_json::from_slice(&b).ok()).expect("the request record");
+    let shown = crate::Shown::from_record(&record).expect("a block");
+    let (status, issued) = treasurer(reqwest::Method::POST, format!("/gateway/grants/{agent}/{request}"), Some(serde_json::json!({"decision": "issue", "shown": shown}))).await;
     assert_eq!(status, 200, "the declared issuer issues: {issued}");
     let mandate = waiting.await.unwrap().expect("the grant verifies at the agent").expect("a grant-required tool returns its grant");
     let (status, revoked) = treasurer(reqwest::Method::POST, format!("/gateway/grants/{agent}/{request}/revoke"), Some(serde_json::json!({"reason": "freeze"}))).await;

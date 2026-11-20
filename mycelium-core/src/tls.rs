@@ -621,6 +621,10 @@ pub const CONSENT_GRADE_OID_IS_PROVISIONAL: bool = true;
 /// signed request record, I4a, closes the requester's half). **While this is `true` no release may carry consent
 /// decisions**: `scripts/check-release-blockers.sh --release` refuses the tag, beside the grade OID. It gates
 /// nothing at run time — the provisional gate does that; it is the mechanical form of a sentence in the plan.
+///
+/// **Half closed** (I7-S's first PR, 2026-11-20): a decision now names the tool, resource, digest and expiry it was
+/// made on, and the addressed node refuses one its record contradicts — the rewrite. The replay, a tombstoned answer
+/// re-admitting the same body, is I7-S's second PR; this stays `true` until it lands.
 pub const CONSENT_DECISION_DOES_NOT_NAME_WHAT_WAS_SHOWN: bool = true;
 
 /// Whether this build may issue and read a consent certificate under [`CONSENT_GRADE_OID`]: always once the OID is

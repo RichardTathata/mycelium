@@ -290,6 +290,12 @@ call waits for a supervisor's grant and is refused on silence. Running it needs:
   `403 stale`, `403 decider_lacks_scope`; unsigned under `grant:relay` alone, `403 decision_unsigned`. Unsigned
   decisions under `grant:issue` are counted (`/stats` `grant_decisions_unsigned`) and refused at a later release
   (`deprecations.md` §95) — watch the counter, and give supervisors a client certificate before then.
+- **A decision names what it was made on** (identity-and-lifecycle I7-S, unreleased). An issue or refusal names the
+  request record's tool, resource, digest and expiry — inside `signed`, or as `shown` beside a bearer's body (the
+  SDKs' `grant_decide(record, …)`) — and the node refuses one its own record contradicts (`409
+  decision_names_another_request`) or one naming nothing (`403 decision_names_nothing`); for one release
+  [`gateway_accept_unnamed_decisions`](../reference/configuration.md#gateway_accept_unnamed_decisions) admits the
+  latter, counted (`grant_decisions_unnamed`). Upgrade the gateways before the deciders ([grants](../features/grants.md)).
 - **A person's consent** (identity-and-lifecycle I7, unreleased and behind the provisional grade OID). A developer's
   [consent principal](../features/consent-certificates.md), `consent:{issuer}/{name}`, signs decisions with a P-256
   key and holds `grant:issue` only through

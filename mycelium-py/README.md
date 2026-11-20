@@ -265,8 +265,12 @@ wrong key and a proof over other arguments look the same to the gateway, which s
 ### The supervisor's grants, and a task's lifecycle (0.2.13)
 
 `grants_pending()` reads `GET /gateway/grants/pending` (`grant:read`) — every unanswered request this node holds — the records gossip, so the fleet's, not only this node's agents' —
-oldest first — and `grant_decide(agent, request, "issue" | "refuse", ttl_secs=…, reason=…)` posts the answer to
-`POST /gateway/grants/{agent}/{request}` (`grant:issue`); issuing is itself an action the node's evaluator decides,
+oldest first — and `grant_decide(record, "issue" | "refuse", ttl_secs=…, reason=…)` posts the answer to
+`POST /gateway/grants/{agent}/{request}` (`grant:issue`), `record` a row of `grants_pending()` or a `grant_request`
+event: since 0.2.16 the decision **names what it was made on** — the record's tool, resource, digest and expiry
+(`shown_from_record`) — and the node refuses it if its own record says otherwise (`decision_names_another_request`).
+The ids-only `grant_decide(agent, request, decision)` is deprecated: a gateway after identity-and-lifecycle I7-S
+refuses it (`decision_names_nothing`) unless its operator sets `gateway_accept_unnamed_decisions`; issuing is itself an action the node's evaluator decides,
 so a refusal is the route's 403, and 409 `not_a_member` names an agent on no member node this gateway knows. A node's
 grant is presented by its holder, the agent's node; a client's own grant by the client (above). `grant_revoke(agent, request, reason=…)` revokes at the issuing
 node, and `grants_stream()` is the requests as they come (an async iterator of `grant_request` and `grant_answered`

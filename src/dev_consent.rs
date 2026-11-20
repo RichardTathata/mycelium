@@ -43,16 +43,15 @@
 //! - **That the gateway told the truth.** The record is whatever the gateway at `--gateway` answered, over whatever
 //!   transport its URL names (plain `http://` by default). `dev` checks the record against itself, not against the
 //!   requester: nothing signs the record.
-//! - **What the grant will bind.** The signed decision names the request's id, holder and terms
-//!   (`grant_decision_message_graded`, a published format), **not** the tool, the resource or the digest. The node
-//!   the decision is addressed to issues the grant from **its own** copy of the request record, which is unsigned in
-//!   the KV (`owner-signed-records.md`, row `grant/{agent}/{request}`). So today any admitted member can change —
-//!   after the person typed `approve`, and with `dev`'s second read in place — the tool, the digest, the resource
-//!   and the expiry the approval is applied to, and can have the same signed decision admitted again within the
-//!   node's freshness window by tombstoning the answer (#813's review, F1). `dev`'s second read catches a change
-//!   it can see before it signs and nothing after. **This is closed by the approver signing what it saw** (the
-//!   maintainer's decision of 2026-11-18: its own PR after this one, a blocker of the release beside the grade
-//!   OID, `CONSENT_DECISION_DOES_NOT_NAME_WHAT_WAS_SHOWN`), and by I4a's signed request record.
+//! - **What the grant will bind, past the second read.** Since identity-and-lifecycle I7-S the signed decision
+//!   names what the prompt showed — the tool, the resource, the record's digest string and the expiry
+//!   ([`PromptRecord::shown`], `grant_decision_message_shown`, a published format) — and the node it is addressed to
+//!   compares them with **its own** copy of the request record, refusing a difference by name
+//!   (`decision_names_another_request`). So a member who rewrites the record after the person typed `approve` no
+//!   longer moves the approval onto another tool, digest, resource or expiry. **Still open** (#813's review, F1):
+//!   the node remembers an answer only in the KV, so a member who tombstones it can have the same signed decision
+//!   admitted again within the freshness window — for the same request now, not another. Closed by I7-S's second PR
+//!   (a spent-decision memory); `CONSENT_DECISION_DOES_NOT_NAME_WHAT_WAS_SHOWN` blocks the release until then.
 //! - **That the decision was admitted.** `dev` reports that it signed and sent, and quotes the gateway's answer as
 //!   the gateway's ([`Answer::Signed`]).
 //!
@@ -445,15 +444,19 @@ impl Enrolment {
         &self.cert_pem
     }
 
-    /// Sign `decision` (`issue` or `refuse`) on `record`, addressed to `node`, at `now_ms`, naming the grade inside
-    /// the signature.
+    /// Sign `decision` (`issue` or `refuse`) on `record`, addressed to `node`, at `now_ms`, naming the grade and
+    /// **what the prompt showed** inside the signature (identity-and-lifecycle I7-S): the record's tool, resource,
+    /// arguments digest and expiry ([`PromptRecord::shown`]). The digest is the record's own string, which
+    /// [`PromptRecord::find`] checked hashes from the arguments shown — so a request recorded in the pre-I3 form is
+    /// named in that form, which is what the node compares with.
     pub fn sign(&self, node: &str, record: &PromptRecord, decision: &str, ttl_secs: Option<u64>, reason: Option<&str>, now_ms: u64) -> Result<crate::SignedDecision, Refusal> {
         use base64::Engine as _;
         let b64 = base64::engine::general_purpose::STANDARD;
         let grade = self.grade().as_str();
-        let msg = crate::grant_decision_message_graded(&self.principal, node, &record.holder, &record.request, decision, ttl_secs, reason, now_ms, Some(grade));
+        let shown = record.shown();
+        let msg = crate::grant_decision_message_shown(&self.principal, node, &record.holder, &record.request, decision, ttl_secs, reason, now_ms, Some(grade), Some(&shown));
         let sig = self.key.sign(&msg)?;
-        Ok(crate::SignedDecision::from_parts(self.principal.as_str(), node, record.holder.as_str(), record.request.as_str(), now_ms, b64.encode(self.key.point()), b64.encode(sig), Some(grade)))
+        Ok(crate::SignedDecision::from_parts(self.principal.as_str(), node, record.holder.as_str(), record.request.as_str(), now_ms, b64.encode(self.key.point()), b64.encode(sig), Some(grade)).naming(shown))
     }
 }
 
@@ -586,10 +589,17 @@ impl PromptRecord {
         self.key.split('/').nth(1).unwrap_or_default()
     }
 
-    /// Whether `other` is the same request saying the same thing: what `dev` compares before it signs.
+    /// What a decision on this record names of it (identity-and-lifecycle I7-S): its tool, resource, arguments
+    /// digest (the record's string) and expiry — the fields the prompt shows that the node compares with its record.
+    pub fn shown(&self) -> crate::Shown {
+        crate::Shown::new(self.tool.as_str(), self.resource.as_str(), self.arguments_digest.as_str(), self.expires_at_ms)
+    }
+
+    /// Whether `other` is the same request saying the same thing, its expiry included (the prompt shows when it
+    /// lapses, and the decision names it): what `dev` compares before it signs.
     pub fn says_the_same_as(&self, other: &Self) -> bool {
-        (&self.request, &self.holder, &self.tool, &self.resource, &self.arguments_digest, &self.arguments, &self.key)
-            == (&other.request, &other.holder, &other.tool, &other.resource, &other.arguments_digest, &other.arguments, &other.key)
+        (&self.request, &self.holder, &self.tool, &self.resource, &self.arguments_digest, &self.arguments, self.expires_at_ms, &self.key)
+            == (&other.request, &other.holder, &other.tool, &other.resource, &other.arguments_digest, &other.arguments, other.expires_at_ms, &other.key)
     }
 }
 

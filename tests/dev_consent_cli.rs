@@ -312,6 +312,9 @@ fn an_answer_typed_at_the_terminal_is_what_dev_signs_and_the_key_stays_off_the_w
         let signed: mycelium::SignedDecision = serde_json::from_value(body["signed"].clone()).expect("a signed decision");
         assert_eq!((signed.decider.as_str(), signed.node.as_str(), signed.agent.as_str(), signed.request.as_str(), signed.grade.as_deref()), ("consent:fleet/alex", NODE, "token:fleet/forecaster", request, Some("tty")));
         assert_eq!(base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &signed.k).unwrap(), point, "signed by the enrolled key");
+        // Identity-and-lifecycle I7-S: the block of the record the prompt showed, inside the signature.
+        let shown = signed.shown.as_ref().expect("the decision names what was shown");
+        assert_eq!((shown.resource.as_str(), shown.request_expires_at_ms), (format!("tool:{}@{NODE}", shown.tool).as_str(), 4_000_000_000_000), "SHOWN: {body}");
         assert!(signed.verify_signature(decision, ttl, body["reason"].as_str()), "VERIFY: {body}");
         assert!(!signed.verify_signature(if decision == "issue" { "refuse" } else { "issue" }, ttl, body["reason"].as_str()), "and not as the other decision");
     }

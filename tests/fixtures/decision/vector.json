@@ -207,5 +207,165 @@
         }
       ]
     }
+  },
+  "shown": {
+    "_doc": "Identity-and-lifecycle I7-S: what the decider saw, inside the signed message (grant_decision_message_shown). After the grade: a u32 little-endian length and \"shown/1\", then the tool, the resource and the arguments digest (the record's own string, never recomputed), each a u32 little-endian length and its bytes, then request_expires_at_ms as a u64 little-endian. A block requires a grade. Every case above, naming no block, is unchanged. `service`: the seed's Ed25519 key, deterministic, reproduced exactly. `consent`: the `graded.consent` P-256 key; ECDSA is randomised, so each language recomputes the message and VERIFIES the pinned signature. Generated once (Python `cryptography`, 2026-11-20) and pinned; checked by Rust (the_shown_decision_vector_is_the_same_in_every_language), jest and pytest.",
+    "service": [
+      {
+        "request": "01a1c24caa180010-127.0.0.1:7946",
+        "decision": "issue",
+        "ttl_secs": 600,
+        "reason": null,
+        "grade": "service",
+        "shown": {
+          "tool": "weather.forecast",
+          "resource": "tool:weather.forecast@127.0.0.1:7946",
+          "arguments_digest": "4f3c1b7a2e9d08c6b5a4f3e2d1c0b9a8f7e6d5c4b3a291807f6e5d4c3b2a1908",
+          "request_expires_at_ms": 1794000060123
+        },
+        "message_hex": "6d7963656c69756d2e676174657761792f6772616e742d6465636973696f6e2f3115000000746f6b656e3a666c6565742f7472656173757265720e0000003132372e302e302e313a3739343616000000746f6b656e3a666c6565742f666f72656361737465721f000000303161316332346361613138303031302d3132372e302e302e313a3739343605000000697373756503000000363030000000007b94bbb2a101000007000000736572766963650700000073686f776e2f3110000000776561746865722e666f72656361737424000000746f6f6c3a776561746865722e666f726563617374403132372e302e302e313a373934364000000034663363316237613265396430386336623561346633653264316330623961386637653664356334623361323931383037663665356434633362326131393038db7ebcb2a1010000",
+        "signed": {
+          "decider": "token:fleet/treasurer",
+          "node": "127.0.0.1:7946",
+          "agent": "token:fleet/forecaster",
+          "request": "01a1c24caa180010-127.0.0.1:7946",
+          "t": 1794000000123,
+          "k": "6kpsY+KcUgq+9VB7Ey7F+ZVHdq6+vnuSQh7qaRRG0iw=",
+          "sig": "JkjSBouFahozbW7ZUVMVOFaYm4MAJWp4O40qut8FAH4deAbNHgoVPQSozthqBrf2Wz6RBlsApufm3Mit/G94Dg==",
+          "grade": "service",
+          "shown": {
+            "tool": "weather.forecast",
+            "resource": "tool:weather.forecast@127.0.0.1:7946",
+            "arguments_digest": "4f3c1b7a2e9d08c6b5a4f3e2d1c0b9a8f7e6d5c4b3a291807f6e5d4c3b2a1908",
+            "request_expires_at_ms": 1794000060123
+          }
+        }
+      },
+      {
+        "request": "01a1c24caa180011-127.0.0.1:7946",
+        "decision": "refuse",
+        "ttl_secs": null,
+        "reason": "not this season",
+        "grade": "service",
+        "shown": {
+          "tool": "météo.prévision",
+          "resource": "tool:météo.prévision@127.0.0.1:7946",
+          "arguments_digest": "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90",
+          "request_expires_at_ms": 1794000060123
+        },
+        "message_hex": "6d7963656c69756d2e676174657761792f6772616e742d6465636973696f6e2f3115000000746f6b656e3a666c6565742f7472656173757265720e0000003132372e302e302e313a3739343616000000746f6b656e3a666c6565742f666f72656361737465721f000000303161316332346361613138303031312d3132372e302e302e313a3739343606000000726566757365000000000f0000006e6f74207468697320736561736f6e7b94bbb2a101000007000000736572766963650700000073686f776e2f31120000006dc3a974c3a96f2e7072c3a9766973696f6e26000000746f6f6c3a6dc3a974c3a96f2e7072c3a9766973696f6e403132372e302e302e313a373934364000000061316232633364346535663630373138323933613462356336643765386639306131623263336434653566363037313832393361346235633664376538663930db7ebcb2a1010000",
+        "signed": {
+          "decider": "token:fleet/treasurer",
+          "node": "127.0.0.1:7946",
+          "agent": "token:fleet/forecaster",
+          "request": "01a1c24caa180011-127.0.0.1:7946",
+          "t": 1794000000123,
+          "k": "6kpsY+KcUgq+9VB7Ey7F+ZVHdq6+vnuSQh7qaRRG0iw=",
+          "sig": "UpPEcMG2uVulcMt5z2hll+bR6Zcw9MoVGDzXuo9BLPtHKCu/O6sJFMh+agi/uBkm8v+uScvnWmLeo+Si9BMJCg==",
+          "grade": "service",
+          "shown": {
+            "tool": "météo.prévision",
+            "resource": "tool:météo.prévision@127.0.0.1:7946",
+            "arguments_digest": "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90",
+            "request_expires_at_ms": 1794000060123
+          }
+        }
+      },
+      {
+        "request": "01a1c24caa180012-127.0.0.1:7946",
+        "decision": "issue",
+        "ttl_secs": null,
+        "reason": null,
+        "grade": "service",
+        "shown": {
+          "tool": "a@b",
+          "resource": "tool:a@b@127.0.0.1:7946",
+          "arguments_digest": "4f3c1b7a2e9d08c6b5a4f3e2d1c0b9a8f7e6d5c4b3a291807f6e5d4c3b2a1908",
+          "request_expires_at_ms": 9007199254740991
+        },
+        "message_hex": "6d7963656c69756d2e676174657761792f6772616e742d6465636973696f6e2f3115000000746f6b656e3a666c6565742f7472656173757265720e0000003132372e302e302e313a3739343616000000746f6b656e3a666c6565742f666f72656361737465721f000000303161316332346361613138303031322d3132372e302e302e313a3739343605000000697373756500000000000000007b94bbb2a101000007000000736572766963650700000073686f776e2f310300000061406217000000746f6f6c3a614062403132372e302e302e313a373934364000000034663363316237613265396430386336623561346633653264316330623961386637653664356334623361323931383037663665356434633362326131393038ffffffffffff1f00",
+        "signed": {
+          "decider": "token:fleet/treasurer",
+          "node": "127.0.0.1:7946",
+          "agent": "token:fleet/forecaster",
+          "request": "01a1c24caa180012-127.0.0.1:7946",
+          "t": 1794000000123,
+          "k": "6kpsY+KcUgq+9VB7Ey7F+ZVHdq6+vnuSQh7qaRRG0iw=",
+          "sig": "NF/Jm/gnB7FEEJmOrpAC/lP/38RfOrmLdwnn0ZreYSoKQ9dNXtbyq87abtb3ogSReXA38vmF5EhGdrAYJ8BpBw==",
+          "grade": "service",
+          "shown": {
+            "tool": "a@b",
+            "resource": "tool:a@b@127.0.0.1:7946",
+            "arguments_digest": "4f3c1b7a2e9d08c6b5a4f3e2d1c0b9a8f7e6d5c4b3a291807f6e5d4c3b2a1908",
+            "request_expires_at_ms": 9007199254740991
+          }
+        }
+      }
+    ],
+    "consent": {
+      "decider": "consent:fleet/richard",
+      "cases": [
+        {
+          "request": "01a1c24caa180020-127.0.0.1:7946",
+          "decision": "issue",
+          "ttl_secs": 600,
+          "reason": null,
+          "grade": "tty",
+          "shown": {
+            "tool": "weather.forecast",
+            "resource": "tool:weather.forecast@127.0.0.1:7946",
+            "arguments_digest": "4f3c1b7a2e9d08c6b5a4f3e2d1c0b9a8f7e6d5c4b3a291807f6e5d4c3b2a1908",
+            "request_expires_at_ms": 1794000060123
+          },
+          "message_hex": "6d7963656c69756d2e676174657761792f6772616e742d6465636973696f6e2f3115000000636f6e73656e743a666c6565742f726963686172640e0000003132372e302e302e313a3739343616000000746f6b656e3a666c6565742f666f72656361737465721f000000303161316332346361613138303032302d3132372e302e302e313a3739343605000000697373756503000000363030000000007b94bbb2a1010000030000007474790700000073686f776e2f3110000000776561746865722e666f72656361737424000000746f6f6c3a776561746865722e666f726563617374403132372e302e302e313a373934364000000034663363316237613265396430386336623561346633653264316330623961386637653664356334623361323931383037663665356434633362326131393038db7ebcb2a1010000",
+          "signed": {
+            "decider": "consent:fleet/richard",
+            "node": "127.0.0.1:7946",
+            "agent": "token:fleet/forecaster",
+            "request": "01a1c24caa180020-127.0.0.1:7946",
+            "t": 1794000000123,
+            "k": "BFMprWnVc5T2f6XmKYbWxgQIwAshMm7VfImfCQYe7ZvxELGlOrA0D7kptn5uPeTnMjPSxPcR1r+vLtECCzw353A=",
+            "sig": "MEUCIE2bQfq/kK++pI99Z0JWzmncPMj5yMvGX7loRLKCB7wdAiEAvpv6CbvC9x4TtnUPShPOlCc+K79DKDsrug12AU7rEAk=",
+            "grade": "tty",
+            "shown": {
+              "tool": "weather.forecast",
+              "resource": "tool:weather.forecast@127.0.0.1:7946",
+              "arguments_digest": "4f3c1b7a2e9d08c6b5a4f3e2d1c0b9a8f7e6d5c4b3a291807f6e5d4c3b2a1908",
+              "request_expires_at_ms": 1794000060123
+            }
+          }
+        },
+        {
+          "request": "01a1c24caa180021-127.0.0.1:7946",
+          "decision": "refuse",
+          "ttl_secs": null,
+          "reason": "refused at the developer's terminal",
+          "grade": "tty",
+          "shown": {
+            "tool": "weather.forecast",
+            "resource": "tool:weather.forecast@127.0.0.1:7946",
+            "arguments_digest": "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90",
+            "request_expires_at_ms": 1794000060123
+          },
+          "message_hex": "6d7963656c69756d2e676174657761792f6772616e742d6465636973696f6e2f3115000000636f6e73656e743a666c6565742f726963686172640e0000003132372e302e302e313a3739343616000000746f6b656e3a666c6565742f666f72656361737465721f000000303161316332346361613138303032312d3132372e302e302e313a37393436060000007265667573650000000023000000726566757365642061742074686520646576656c6f7065722773207465726d696e616c7b94bbb2a1010000030000007474790700000073686f776e2f3110000000776561746865722e666f72656361737424000000746f6f6c3a776561746865722e666f726563617374403132372e302e302e313a373934364000000061316232633364346535663630373138323933613462356336643765386639306131623263336434653566363037313832393361346235633664376538663930db7ebcb2a1010000",
+          "signed": {
+            "decider": "consent:fleet/richard",
+            "node": "127.0.0.1:7946",
+            "agent": "token:fleet/forecaster",
+            "request": "01a1c24caa180021-127.0.0.1:7946",
+            "t": 1794000000123,
+            "k": "BFMprWnVc5T2f6XmKYbWxgQIwAshMm7VfImfCQYe7ZvxELGlOrA0D7kptn5uPeTnMjPSxPcR1r+vLtECCzw353A=",
+            "sig": "MEUCIQDn7hKm7YgtGtCJK0HgQmMjvbTY3R1XkQJ9GKFiFBw1ygIgTDuJfU93+hrOn+8kiy7mTHYRbr8fLKZUKNjfTZVQo3Y=",
+            "grade": "tty",
+            "shown": {
+              "tool": "weather.forecast",
+              "resource": "tool:weather.forecast@127.0.0.1:7946",
+              "arguments_digest": "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90",
+              "request_expires_at_ms": 1794000060123
+            }
+          }
+        }
+      ]
+    }
   }
 }
