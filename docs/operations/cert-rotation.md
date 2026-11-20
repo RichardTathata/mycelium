@@ -241,6 +241,10 @@ new CA and a restart of every node. What this release changes, and an operator s
   `pin-<sha256 of that CA's certificate>.pem` — and from then on refuses any other commitment from that CA. `tls commit` syncs the successor's files, the commitment and their directories to disk before it returns;
   copy the file to nodes only after it has. What to know:
   - a node holding a commitment needs `[persistence]`, and refuses to start without it, naming it;
+  - **the node's certificate directory must be on a file system with hard links** (FAT, exFAT and some SMB mounts
+    have none): a pin is published by hard link, so that "the first commitment from this CA" cannot be replaced by a
+    second start. Without them the node refuses to start when it would pin, naming the link error — starting again
+    does not help; move `auto_cert_dir` to a local disk;
   - a file the node cannot read as a commitment (damaged, empty, a file with a key in it) or one a CA it trusts did
     not sign **refuses the start**, whether or not the node already holds a pin: fix or remove the file;
   - a commitment from a CA the node does not trust (yet) refuses the start on a node with **no pin**. On a node that
@@ -263,7 +267,10 @@ new CA and a restart of every node. What this release changes, and an operator s
     to be removed. Placed too early — while the node does not yet trust the successor — it pins nothing: the node,
     which holds a pin, starts all the same, warns by name and shows `ca_commitment_file_untrusted_ca: 1`, and reads
     the file again at its next start, so it is pinned at the first start after the node has cut over. (A node with
-    no pin at all refuses to start on such a file.) `ca_commitment_pins` on `GET /stats` is the number of pins a node holds;
+    no pin at all refuses to start on such a file.) The same reading, `ca_commitment_file_untrusted_ca: 1`, with a
+    different warning, is a file naming a CA the node **already pinned from and has moved past** that differs from
+    that pin: the node can no longer check that CA's signature, pins nothing, and says so — compare the file with the
+    issuer's; `ca_commitment_pins` on `GET /stats` is the number of pins a node holds;
   - **changing a commitment that was made by mistake** (the successor's key was lost before the succession ran).
     There is no command for it, on purpose: a second commitment from the same CA is what a stolen key produces.
     On the issuer's host, move the old `ca-commit.pem` and the lost successor's directory aside, then run `tls

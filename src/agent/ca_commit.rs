@@ -147,27 +147,20 @@ pub(crate) fn at_start(ctx: &TaskCtx, tls_cfg: &mycelium_core::config::TlsConfig
     for pin in found.pins.iter().filter(|p| p.first) {
         tracing::info!(commitment = %hex(&pin.commitment.digest()), ca = %hex(&pin.commitment.predecessor), "CA succession: pinned the commitment the operator placed (ca-commit.pem); this node refuses any other from that CA");
     }
-    match found.offered {
-        OfferedCommitment::Nothing => {}
-        // The operator's file, from a CA this node does not trust (yet): the one unassessable file a node with a pin
-        // starts with (`EARLY_COMMITMENT_BESIDE_A_PIN_STARTS`). Its own signal — the KV's unverified copies are a
-        // different thing, which any member can raise.
-        OfferedCommitment::UntrustedCa => {
+    // What the operator's file is beside this node's pins, in the node's own words ([`OfferedCommitment::describe`]).
+    match (&found.offered, found.offered.describe()) {
+        // From a CA this node does not trust: the one unassessable file a node with a pin starts with
+        // (`EARLY_COMMITMENT_BESIDE_A_PIN_STARTS`). Its own signal — the KV's unverified copies are a different thing,
+        // which any member can raise.
+        (OfferedCommitment::UntrustedCa | OfferedCommitment::DiffersFromSpentPin(_), Some(said)) => {
             state.file_untrusted_ca.fetch_add(1, Ordering::Relaxed);
-            tracing::warn!(
-                file = %file.display(),
-                "CA succession: ca-commit.pem holds a commitment from a CA this node does not trust (placed before this node cut over to that CA?); \
-                 nothing is pinned from it, this node's pins stand, and the file is read again at the next start"
-            );
+            tracing::warn!(file = %file.display(), "CA succession: {said}");
         }
-        OfferedCommitment::Conflict(other) => {
-            state.conflict_once(other);
-            tracing::error!(
-                file = %file.display(), refused = %hex(&other),
-                "CA succession: ca-commit.pem holds a second commitment from a CA this node already holds a pin for, signed by that CA's key and naming another successor; it is refused and the pin stands. \
-                 Two commitments from one CA mean a mistake or a stolen CA key: compare the file with the issuer's"
-            );
+        (OfferedCommitment::Conflict(other), Some(said)) => {
+            state.conflict_once(*other);
+            tracing::error!(file = %file.display(), refused = %hex(other), "CA succession: {said}");
         }
+        _ => {}
     }
     state.pins.store(Arc::new(found.pins.into_iter().map(|p| (Arc::new(p.commitment), p.active)).collect()));
     Ok(())
@@ -207,7 +200,9 @@ pub(crate) fn publish(ctx: &TaskCtx) {
 /// larger than [`MAX_COPY_BYTES`] is skipped before it is hashed or parsed. Of the rest, a scan reads at most
 /// [`MAX_COPIES_PER_SCAN`], in key order **from where the last scan stopped**, wrapping — so keys that sort ahead of a
 /// genuine copy delay its reading by a bounded number of scans and never hide it; what a scan left is reported as a
-/// gauge (`ca_commitment_scan_skipped`). "Counted once" holds without limit of time: a copy already counted is never
+/// gauge (`ca_commitment_scan_skipped`). **The bound `ceil(n / MAX_COPIES_PER_SCAN)` is for a key set that stands
+/// still**: a member that keeps adding and removing keys moves the copies under the cursor, and the delay then grows
+/// with the flood rather than being fixed. "Counted once" holds without limit of time: a copy already counted is never
 /// counted again, and past [`NOTED_UNVERIFIED_MAX`] distinct unverified copies (or [`NOTED_CONFLICTS_MAX`] distinct
 /// conflicts) a further distinct one is not counted at all. Conflicts have their own set, so junk cannot use up the
 /// room a conflict is counted in.

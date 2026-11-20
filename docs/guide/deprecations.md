@@ -5272,7 +5272,8 @@ operator's file holds no commitment, whatever the KV carries. `GET /stats` gains
 - **The scan is bounded, because any member can write any key under the prefix.** A value over 4 KiB is skipped
   unread (a commitment is under 2 KiB); a scan reads at most 1,024 copies, in key order **from where the last scan
   stopped**, wrapping, so with `n` readable copies every one is read within `ceil(n / 1,024)` scans — keys that sort
-  ahead of a genuine copy delay its reading and do not hide it; `ca_commitment_scan_skipped` is a gauge of what the
+  ahead of a genuine copy delay its reading and do not hide it (the bound is for a key set that stands still: under
+  churn the delay grows with the flood); `ca_commitment_scan_skipped` is a gauge of what the
   last scan left for the next. Each distinct copy is counted once and never again; past 1,024 distinct unverified
   copies (64 distinct conflicts, in a set of their own) in a process's life a further distinct one is not counted. The prefix is under `sys/`, so the raw KV routes refuse a
 write to it as they do any owned key. An older node ignores the namespace.
