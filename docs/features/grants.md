@@ -39,14 +39,19 @@ This feature is turned on in code.
   below). Issuing, refusing and revoking are actions the evaluator sees (`grant.issue` · `grant.refuse` ·
   `grant.revoke` on `tool:{tool}@{agent node}`, the caller as the actor; a `503 not_durable` on revoke means the supervisor
   owes a retry — until the retried revoke is on disk the revocation holds only in this process, and any restart re-arms the
-  grant, `deprecations.md` §77).: a client holding `grant:issue` is not thereby
+  grant, `deprecations.md` §77): a client holding `grant:issue` is not thereby
   an approver of everything, and a gateway with no evaluator answers nothing. The two scopes are checked only in a build
   with `compliance` (the published node has it); without it any valid bearer reaches the routes and the evaluator
   alone decides. The revoke acts only on the grant recorded at the path's `…/issued` that this node signed (under any
   key it has held), held by the path's agent, and **answering the path's request** — its term the request, its scope
   `grant:{request}`: any other record, a genuine grant copied from another request included, is refused
   `409 unreadable_grant` and nothing is revoked. The agent's wait and `GET /gateway/grants/request/{request}` read such
-  a copy as no answer. Each is counted on `/stats` as `grant_issued_refused` (`revoke` · `agent_wait` · `status`). A
+  a copy as no answer. Each such **read** is counted on `/stats` as `grant_issued_refused` (`revoke` · `agent_wait` ·
+  `status`); the SDKs poll every 0.5 s, so one copy counts once per poll. **Revoking can still be denied.** A member who
+  writes a copy, garbage or a tombstone to `…/issued` stops the issuing node revoking that request, and the grant stays
+  live until its `valid_until`. Refusing beats revoking the wrong term. Closing it needs the issuing node's own memory
+  of what it issued: identity-and-lifecycle I7-S's decision journal (PR 2). The status route verifies no signature: a
+  forged grant with the right term and holder is handed out as `issued`, and every door refuses it. A
   grant is issued for an agent on this
   node or on a fleet member this node holds the key of; the agent's node decides whether that issuer may
   ([`entitle_grants_from_fleet`](../../src/mandate/grant.rs)). [`gw_grants_stream`](../../src/agent/http/grants.rs) —

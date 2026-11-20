@@ -277,8 +277,9 @@ pub(super) async fn stats_handler(State(ctx): State<Arc<HttpCtx>>) -> impl IntoR
         body["legacy_digest_matches"] = json!(a.map_or(0, |a| a.legacy_digest_matches()));
         body["provider_legacy_digest_matches"] = json!(a.map_or(0, |a| a.legacy_digest_matches_at_provider()));
         body["agent_legacy_digest_matches"] = json!(a.map_or(0, |a| a.legacy_digest_matches_at_agent()));
-        // A grant's `…/issued` records each reader treated as absent: another request's grant copied under the key, or
-        // at the revoke route one that is not this node's signature or names another holder (the owner-signed rule).
+        // Reads of a grant's `…/issued` that each reader treated as absent — reads, not records (the SDKs poll every
+        // 0.5 s): another request's grant copied under the key, or at the revoke route one that is not this node's
+        // signature or names another holder (the owner-signed rule).
         {
             let r = &ctx.agent_ctx.grant_issued_refused;
             let n = |v: &std::sync::atomic::AtomicU64| v.load(std::sync::atomic::Ordering::Relaxed);

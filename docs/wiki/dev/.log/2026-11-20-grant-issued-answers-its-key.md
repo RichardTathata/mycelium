@@ -16,3 +16,13 @@ for display (the issuer's name from `purpose`) and decides nothing. The doors an
 presented grant's signed body, not from a key; `protected.rs` reads grants from capability attributes.
 
 Pages: [owner-signed-records](../owner-signed-records.md) (the `grant/…/issued` row); `docs/features/grants.md`.
+
+#819's independent review, the same day: the code held. Four docs fixes:
+- the CHANGELOG check no longer reads `already_revoked` as proof (a copied revoke wrote `…/revoked` too, and any
+  member can plant it); the evidence is the issuing node's signed checkpoint with scope `grant:{request}` naming it;
+- the revocation denial is stated: a copy, garbage or a tombstone at `…/issued` stops the revoke, and the grant
+  lives to `valid_until`; to close it, I7-S's decision journal;
+- the availability-only readers are stated, `checkpoint_seq_held`'s unverified sequence among them;
+- the counters count reads.
+
+Hardening: a term holding `/` never answers a key, so two holders cannot share one.
