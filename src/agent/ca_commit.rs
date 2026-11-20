@@ -79,7 +79,7 @@ impl CommitmentState {
 
     /// The commitment this node pinned from the CA whose certificate digest is `predecessor`, if it holds one — what
     /// the succession's phases read the successor from (PR 2b-2; until then only tests ask).
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[allow(dead_code)] // read by this module's tests, which are built only with `provisional-ca-generation`
     pub(crate) fn pinned_for(&self, predecessor: &[u8; 32]) -> Option<Arc<CaCommitment>> {
         self.pins.load().iter().find(|(c, _)| &c.predecessor == predecessor).map(|(c, _)| Arc::clone(c))
     }
@@ -87,7 +87,7 @@ impl CommitmentState {
     /// Whether this node holds a commitment whose committing CA it still trusts. **Not** the definition of
     /// `id.ca_succession_committed` (PR 2b-4): this is `false` after narrowing and on a node first started on the
     /// successor's files, and that guarantee must not fail a completed succession.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[allow(dead_code)] // read by this module's tests, which are built only with `provisional-ca-generation`
     pub(crate) fn committed(&self) -> bool {
         self.pins.load().iter().any(|(_, active)| *active)
     }
