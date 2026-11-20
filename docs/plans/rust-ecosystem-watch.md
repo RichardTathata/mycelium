@@ -115,6 +115,10 @@ is, what adopting it would buy, what it would cost or risk, its state, and what 
     v2.4.1, v2.18.2, v2.36.1 and v2.38.3, and behind v2.38.1 through wasmtime's `cache` feature; the MINORs v2.4.0,
     v2.17.0 and v2.34.0 carried more (CHANGELOG).
   - Of v2.38.3's RUSTSEC-2026-0420, -0422, -0423 and -0424, one (-0420) affects only WASI 0.3 sockets.
+  - Eight more, RUSTSEC-2026-0566 to -0573 (published 2026-11-16, fixed in wasmtime 49.0.6), are answered by the
+    bump to 49.0.7, which is on `main`, unreleased: none is reachable through the host as configured (CHANGELOG,
+    Unreleased, Security), so they have driven no release. One of them (-0572) is in component-model async, the
+    code this row would turn on.
   - Async components change the confinement model: streams that cross components need new answers for the fuel
     budget, the call deadline and the memory cap. This is interface and host design, not a dependency bump.
 - **Next:** `spike` when `wasm32-wasip3` is tier 2 on stable. The spike's question: what fuel, deadline and memory
@@ -233,3 +237,4 @@ is, what adopting it would buy, what it would cost or risk, its state, and what 
 | 2026-11-11 | independent review (#755) | Two of the first draft's own claims corrected. **W3:** record spans with correlation ids already ship (`src/span_export.rs`, Y4), so its proposed spike was already built; it is now about door and dispatch spans. **W5:** `aws-lc-rs` is already compiled in, so post-quantum TLS needs no new C build. W4's advisory list, the procedure's sources and `file:line`s, and the states made consistent. |
 | 2026-11-16 | maintainer + Claude | **W8 added** (papaya 0.2.x), state `plan`, to be built after the wave 1b release. Its cause: papaya 0.1.9's `retain` reads a tagged pointer after a resize, found in #799's review and banned there. |
 | 2026-11-17 | maintainer + Claude | **W9 added** (`object_store`'s `chrono` and `humantime`, both newly *unmaintained*), state `watch`. CI's audit ignores the two advisory ids, dated; removed when `object_store` drops them. |
+| 2026-11-19 | Claude | **W4:** wasmtime 49.0.5 → 49.0.7 for RUSTSEC-2026-0566 to -0573 (eight advisories of 2026-11-16, which CI's audit was failing on); none reachable through the host as configured; on `main`, unreleased. No state change. |

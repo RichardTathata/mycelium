@@ -367,6 +367,55 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   result). `quinn` itself stays at 0.11.9. It is here because CI's audit was failing every PR. No API change.
   **Check:** `grep -A1 -E '^name = "quinn-(proto|udp)"$' Cargo.lock` shows `0.11.19` and `0.5.16`, and
   `cargo audit --deny warnings -f Cargo.lock` reports none of the three.
+- **`wasmtime` / `wasmtime-wasi` 49.0.5 → 49.0.7**, with the cranelift family 0.136.5 → 0.136.7 and pulley and wiggle
+  49.0.5 → 49.0.7 (eight advisories published 2026-11-16, each fixed in 49.0.6; 49.0.7 is the current 49.x). **Check
+  whether you are affected:** a node links wasmtime only if it hosts WASM components — it runs `mycelium-stem`, or a
+  binary that links `mycelium-wasm-host`. **None of the eight is reachable through the host as it is configured**, so
+  no hosted component can use them against a node; the bump is here because the vulnerable versions were linked and
+  CI's audit was failing every PR. After upgrading, `grep -A1 '^name = "wasmtime"$' Cargo.lock` in the build shows
+  `49.0.7`, and `cargo audit -f Cargo.lock` no longer reports RUSTSEC-2026-0566 to -0573. Reachability, each read from
+  the upstream advisory and checked against the host's code (`mycelium-wasm-host/src/host.rs`,
+  `mycelium-wasm-host/Cargo.toml`); a guest here is a component the node installed, so on a node installing only what
+  `[hosts].trusted_publishers` signed it is one of those publishers' components. **RUSTSEC-2026-0566** (medium;
+  `wasmtime-wasi`, host memory grows by 32 bytes for each empty `output-stream.write` to an `AsyncWriteStream`) is not
+  reachable: the only WASI context a component gets is `WasiCtxBuilder::new().build()` (`host.rs:195`, a private field
+  of `HostState`), whose stdout and stderr are `tokio::io::empty()`, and that type's WASI p2 stream is
+  `SinkOutputStream`, not the `AsyncWriteStream` adapter (`wasmtime-wasi` 49.0.5 `src/cli.rs:108-116`,
+  `src/cli/empty.rs:22-25`); no file is preopened, every socket address is refused, and no other p2 stream in
+  `wasmtime-wasi` is an `AsyncWriteStream`. An embedder cannot give a component another stdout through this crate.
+  **RUSTSEC-2026-0571** (medium; `wasmtime-wasi-http`, empty body writes over HTTP/2) is **not linked**:
+  `wasmtime-wasi-http` is in no tracked lockfile, here or at v2.38.3, v2.39.0 or v2.40.0. **RUSTSEC-2026-0568**
+  (medium; a stale GC heap base pointer lets a guest abort the host) is not reachable: by the advisory it needs a host
+  function that allocates a GC object and returns it to the guest, and the host's imports are the WIT world's `kv`,
+  `mesh` and `log` (strings, byte lists, options; `wit/host.wit`) and WASI p2 — the crate names no `ExternRef`,
+  `AnyRef`, `StructRef` or `ArrayRef`. The GC proposal itself is on (wasmtime's default; the host does not call
+  `wasm_gc(false)`), so this one rests on the advisory's stated condition, not on a disabled feature.
+  **RUSTSEC-2026-0573** (low; process abort when a GC heap's reservation is not a multiple of the page size) is not
+  reachable: it needs `gc_heap_may_move(false)` or `memory_may_move(false)` with a `gc_heap_reservation` or
+  `memory_reservation` that is not page-aligned, and the host's one `Config` sets the component model, fuel and epoch
+  interruption and nothing else (`host.rs:357-365`); the advisory states the default configuration is not affected.
+  **RUSTSEC-2026-0567** and **-0570** (low; an abort in a build *without* the `threads`, respectively the `gc`, cargo
+  feature) do not apply: the host's feature list turns both on (`Cargo.toml:27-30`), and before the list existed
+  (v2.38.0 and earlier) wasmtime was built with its defaults, which include both. **RUSTSEC-2026-0572** (low; a panic
+  when a component cancels a stream or future copy on the wrong end) is not reachable: by the advisory the panic needs
+  two component instances in one `Store` and a host that passes a `stream` or `future` between them; the host makes
+  one `Store` for each instance and instantiates one component in it (`host.rs:458-474`), its world has no `stream` or
+  `future` type, and it names no `StreamReader` or `FutureReader`. What the advisory leaves a single-instance embedder
+  is a trap, which already ends the call and has the serve loop replace the instance. **RUSTSEC-2026-0569** (low; a
+  panic in `Caller::get_module_export`) is not reachable: it affects core WebAssembly only, not components (the
+  advisory), and the crate has no `Caller` — it instantiates components only, through the generated bindings.
+  **Affected releases:** v2.38.3, v2.39.0 and v2.40.0 link wasmtime 49.0.5, and earlier releases with the WASM host
+  link older wasmtime inside the advisories' ranges (45.0.3 at v2.0.0 through 49.0.4 at v2.38.2); the host's engine
+  configuration, WASI context and linker calls at the three 49.0.5 tags are those read here, so none of the eight is
+  reachable in them either. **The fix is on `main`, unreleased**; no released version carries it. A node built without
+  `mycelium-wasm-host` does not link wasmtime. wasmtime 49.0.7's feature table is identical to 49.0.5's (`default`
+  included, and `wasmtime-wasi`'s too), so `mycelium-wasm-host`'s list (every default but `cache`) needs no change and
+  `zstd` stays out of the tree. A lockfile change only: the version and checksum lines of 32 packages in `Cargo.lock`
+  (wasmtime, `wasmtime-wasi`, `wasmtime-wasi-io`, `wasmtime-environ`, the `wasmtime-internal-*` crates, wiggle,
+  pulley, cranelift), nothing else — `cargo update -p wasmtime -p wasmtime-wasi` also moved `hyper-util`'s, `quinn`'s
+  and `quinn-udp`'s `socket2` from 0.6.4 to 0.5.9 and `prost-derive`'s `itertools` from 0.14.0 to 0.10.5, which were
+  left as they were (`cargo metadata --locked` accepts the result). The two other tracked lockfiles hold no wasmtime.
+  No API change; the minimum Rust version wasmtime 49 requires (1.96.0, the pinned toolchain) is unchanged.
 
 ### Added
 
