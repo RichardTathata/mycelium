@@ -37,7 +37,7 @@ fuzz-internals = []
 model-internals = ["consensus"]
 # Enables mTLS on the gossip TCP port, keypair-backed node identity, and
 # consensus payload signing. Adds tokio-rustls, rcgen, and ed25519-dalek.
-tls = ["mycelium-core/tls", "dep:tokio-rustls", "dep:rustls", "dep:rcgen", "dep:ed25519-dalek", "dep:rand_core", "dep:arc-swap", "dep:webpki", "reqwest?/rustls-tls-manual-roots"]
+tls = ["mycelium-core/tls", "dep:tokio-rustls", "dep:rustls", "dep:rcgen", "dep:ed25519-dalek", "dep:rand_core", "dep:arc-swap", "dep:webpki", "reqwest?/rustls-tls-manual-roots", "dep:rustix"]
 # Enables OTEL span export from SkillRunner (opentelemetry-otlp gRPC).
 otel = ["dep:opentelemetry", "dep:opentelemetry-otlp", "dep:tracing-opentelemetry", "dep:opentelemetry_sdk"]
 # Exposes a Prometheus /metrics endpoint on the gateway HTTP port.
@@ -176,10 +176,11 @@ metrics                     = { version = "0.24", optional = true }
 metrics-exporter-prometheus = { version = "0.16", optional = true }
 
 # `mycelium dev consent` discards what was typed at the terminal before a prompt is shown: `tcflush` and the
-# `O_NONBLOCK` constant, through rustix's safe wrappers (this crate denies `unsafe`). Already in the node's tree
-# (reqwest -> native-tls -> tempfile -> rustix), so no crate is added to a shipped build.
+# `O_NONBLOCK` constant, through rustix's safe wrappers (this crate denies `unsafe`). Optional, under `tls` (with
+# `mycelium-core`'s own use of it): a build without `tls` does not compile it. Already in a shipped node's tree
+# (reqwest -> native-tls -> tempfile -> rustix), so no crate is added there.
 [target.'cfg(unix)'.dependencies]
-rustix = { version = "1", features = ["termios", "fs"] }
+rustix = { version = "1", features = ["termios", "fs"], optional = true }
 
 [dev-dependencies]
 # W6: the declaration document's schema (docs/reference/declaration.schema.json) is validated

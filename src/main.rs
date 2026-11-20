@@ -1317,7 +1317,10 @@ fn dev_consent_cli(verb: &str, args: Vec<String>, usage: &str) -> i32 {
             Ok(key) => {
                 let fingerprint: String = <sha2::Sha256 as sha2::Digest>::digest(key.point()).iter().map(|b| format!("{b:02x}")).collect();
                 println!("created a software consent key for {}", store.principal());
-                println!("  key         {} (0600; it never leaves this device and is never printed)", store.key_path().display());
+                println!("  key         {} (mode 0600, yours; dev never prints it or sends it anywhere)", store.key_path().display());
+                if cfg!(target_os = "macos") {
+                    println!("              the mode is all dev checks: on macOS an ACL is not read. `ls -le` shows a `+` after the mode when one is present; `chmod -N` removes it");
+                }
                 println!("  public key  {}", store.public_key_path().display());
                 println!("  fingerprint sha256:{fingerprint} (of the public point)");
                 println!("This is a software key in a file: any process running as you can sign with it, with no terminal. The grade that describes it is `tty`.");

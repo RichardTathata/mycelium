@@ -1184,6 +1184,19 @@ pub fn cert_issuer_der(der: &[u8]) -> Option<Vec<u8>> {
 /// in-process as a restart judges it (identity-and-lifecycle I2, #805's review F3). Never panics.
 #[cfg(feature = "tls")]
 pub fn cert_not_after_ms(der: &[u8]) -> Option<u64> {
+    cert_validity_times(der)?.1
+}
+
+/// A certificate's validity, `(notBefore, notAfter)` in ms since the epoch, each `None` when it is a time this walk
+/// cannot read (before 1970 among them); the outer `None` for anything that is not a certificate. For a reader that
+/// must fail closed on either bound (a developer's consent enrolment, #813's confirm round). Never panics.
+#[cfg(feature = "tls")]
+pub fn cert_validity_ms(der: &[u8]) -> Option<(Option<u64>, Option<u64>)> {
+    cert_validity_times(der)
+}
+
+#[cfg(feature = "tls")]
+fn cert_validity_times(der: &[u8]) -> Option<(Option<u64>, Option<u64>)> {
     let (tag, cert, _) = der_tlv(der)?;
     if tag != 0x30 { return None; }
     let (tag, tbs, _) = der_tlv(cert)?;
@@ -1200,8 +1213,14 @@ pub fn cert_not_after_ms(der: &[u8]) -> Option<u64> {
     }
     let (tag, validity, _) = der_tlv(rest)?;
     if tag != 0x30 { return None; }
-    let (_, _, after_nb) = der_tlv(validity)?;
-    let (tag, t, _) = der_tlv(after_nb)?;
+    let (nb_tag, nb, after_nb) = der_tlv(validity)?;
+    let (na_tag, na, _) = der_tlv(after_nb)?;
+    Some((x509_time_ms(nb_tag, nb), x509_time_ms(na_tag, na)))
+}
+
+/// An X.509 `Time` (UTCTime or GeneralizedTime, `…Z`) in ms since the epoch.
+#[cfg(feature = "tls")]
+fn x509_time_ms(tag: u8, t: &[u8]) -> Option<u64> {
     let t = std::str::from_utf8(t).ok()?;
     let (year, rest) = match tag {
         0x17 => {

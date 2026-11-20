@@ -101,8 +101,8 @@ impl std::fmt::Display for ConsentKeyRefusal {
                 "consent keys are not created or used by this build: the grade extension's OID is provisional until the registered IANA Private Enterprise Number arc arrives (identity-and-lifecycle I7)",
             ),
             Self::KeyExists(p) => write!(f, "a consent key is already stored at {}: replacing it voids the certificate issued over it (pass --force to replace it, then have the new key certified)", p.display()),
-            Self::KeyTooOpen(p, why) => write!(f, "the consent key file {} is refused: {why}. A consent key is read only from a regular file that its user alone can reach (chmod 600)", p.display()),
-            Self::DirTooOpen(p, why) => write!(f, "the consent key directory {} is refused: {why}. A consent key is kept only in a directory that its user alone can reach (chmod 700)", p.display()),
+            Self::KeyTooOpen(p, why) => write!(f, "the consent key file {} is refused: {why}. A consent key is read only from a regular file whose mode bits close it to group and others (chmod 600); an ACL on it is not read", p.display()),
+            Self::DirTooOpen(p, why) => write!(f, "the consent key directory {} is refused: {why}. A consent key is kept only in a directory whose mode bits close it to group and others (chmod 700); an ACL on it is not read", p.display()),
             Self::NotOwned(p, owner, me) => write!(f, "{} belongs to uid {owner}, and this is uid {me}: a consent key is read only from a file and a directory its own user owns", p.display()),
             Self::HardLinked(p, n) => write!(f, "the consent key file {} has {n} names (hard links): its other name can be anywhere. Remove the other link, or replace the key", p.display()),
             Self::AncestorTooOpen(p, why) => write!(f, "{} is above the consent key and is refused: {why}. Whoever can write it can replace the directory below it", p.display()),
@@ -226,13 +226,21 @@ impl SoftwareConsentKey {
 
     #[cfg(unix)]
     fn load_owned_by(path: &Path, owner: u32) -> Result<Self, ConsentKeyRefusal> {
-        use std::io::Read as _;
         private_dir(dir_of(path)?, owner)?;
         let file = open_nofollow(path)?;
         private_regular(&file, path, owner)?;
+        Self::read_checked(&file, path)
+    }
+
+    /// The key in `file` — **the descriptor that was checked, and nothing reached by the path again**: whatever
+    /// stands at `path` by now (another file renamed over it since the check) is not what is read. `path` is for
+    /// the refusal's text only.
+    #[cfg(unix)]
+    fn read_checked(file: &std::fs::File, path: &Path) -> Result<Self, ConsentKeyRefusal> {
+        use std::io::Read as _;
         let mut bytes = zeroize::Zeroizing::new(Vec::new());
         // A PKCS#8 P-256 key is 138 bytes; the bound keeps a file that is not one from being read whole.
-        (&file).take(16 * 1024).read_to_end(&mut bytes).map_err(|e| ConsentKeyRefusal::Io(path.to_path_buf(), e))?;
+        file.take(16 * 1024).read_to_end(&mut bytes).map_err(|e| ConsentKeyRefusal::Io(path.to_path_buf(), e))?;
         Self::parse(&bytes).ok_or_else(|| ConsentKeyRefusal::NotAKey(path.to_path_buf()))
     }
 }
@@ -426,11 +434,25 @@ fn private_regular(file: &std::fs::File, path: &Path, owner: u32) -> Result<(), 
 #[cfg(unix)]
 fn create_exclusive(path: &Path, contents: &[u8], mode: u32) -> std::io::Result<()> {
     use std::io::Write as _;
+    create_exclusive_with(path, mode, |file| {
+        file.write_all(contents)?;
+        file.sync_all()
+    })
+}
+
+/// [`create_exclusive`] with the writing given as `fill`. **A file created here and not written whole is removed**:
+/// when the mode, the write or the sync fails, nothing is left at `path` — not a partial private key under the
+/// key's name, nor one under the temporary name a replacement is written to.
+#[cfg(unix)]
+fn create_exclusive_with(path: &Path, mode: u32, fill: impl FnOnce(&mut std::fs::File) -> std::io::Result<()>) -> std::io::Result<()> {
     use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
     let mut file = std::fs::OpenOptions::new().write(true).create_new(true).mode(mode).custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32).open(path)?;
-    file.set_permissions(std::fs::Permissions::from_mode(mode))?;
-    file.write_all(contents)?;
-    file.sync_all()
+    let written = file.set_permissions(std::fs::Permissions::from_mode(mode)).and_then(|()| fill(&mut file));
+    if written.is_err() {
+        // This call created the file (`O_EXCL`), so it is this call's to remove.
+        let _ = std::fs::remove_file(path);
+    }
+    written
 }
 
 /// Write `contents` to a new file beside `path` and rename it over `path`: the file at `path` is replaced whole, never
@@ -611,6 +633,48 @@ mod tests {
         std::os::unix::fs::symlink(&target, &dangling).unwrap();
         assert_eq!(first.store(&dangling, false).expect_err("something is at the path").code(), "consent_key_exists");
         assert!(!target.exists(), "nothing was created through the link");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **The key's bytes come from the descriptor that was checked** (#813's confirm round, C1). The key file is
+    /// opened and checked; then another key is renamed over its path, as a process racing the check would. What is
+    /// read is the first key — the file behind the checked descriptor — and not the one the path names now.
+    /// Seen failing first: the bytes read through the path again (the second key loaded).
+    #[cfg(unix)]
+    #[test]
+    fn the_keys_bytes_come_from_the_descriptor_that_was_checked() {
+        let root = scratch("descriptor");
+        let dir = root.join("consent");
+        let (path, other) = (dir.join("k.p8"), dir.join("other.p8"));
+        let (first, second) = (SoftwareConsentKey::generate().unwrap(), SoftwareConsentKey::generate().unwrap());
+        first.store(&path, false).unwrap();
+        second.store(&other, false).unwrap();
+        let checked = open_nofollow(&path).unwrap();
+        private_regular(&checked, &path, me()).expect("checked");
+        std::fs::rename(&other, &path).unwrap();
+        assert_eq!(SoftwareConsentKey::load(&path).unwrap().point(), second.point(), "the path names the second key now");
+        assert_eq!(SoftwareConsentKey::read_checked(&checked, &path).unwrap().point(), first.point(), "what is read is the file that was checked");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **A file that could not be written whole is not left behind** (#813's confirm round, C9): when the write
+    /// fails after the file was created, nothing remains at its path — neither a partial key nor, for a
+    /// replacement, its temporary.
+    /// Seen failing first: the file left where the write failed.
+    #[cfg(unix)]
+    #[test]
+    fn a_file_that_could_not_be_written_whole_is_not_left_behind() {
+        use std::io::Write as _;
+        let root = scratch("partial");
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("k.p8");
+        let failed = create_exclusive_with(&path, 0o600, |file| {
+            file.write_all(b"half a k")?;
+            Err(std::io::Error::other("the disk filled"))
+        });
+        assert!(failed.is_err());
+        assert!(!path.exists(), "the half-written file was left at {}", path.display());
+        create_exclusive(&path, b"whole", 0o600).expect("and the name is free for the next attempt");
         let _ = std::fs::remove_dir_all(&root);
     }
 

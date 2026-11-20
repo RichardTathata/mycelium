@@ -451,13 +451,14 @@ fn runtime() -> tokio::runtime::Runtime {
 ///   asked about the resource and the grant permits the tool, so `dev` shows neither when they disagree.
 ///
 /// Seen failing first, one build per plant: the digest comparison removed (*another call's digest: SHOWN*, and the
-/// withheld and cut records with it); the resource comparison removed (*a resource naming another tool: SHOWN*).
+/// withheld and cut records with it); the resource comparison removed (*a resource naming another tool: SHOWN*);
+/// the unsafe-integer refusal removed (*an integer beyond 2^53 …: SHOWN*).
 #[test]
 fn a_record_whose_arguments_do_not_hash_to_its_digest_prompts_nothing() {
     let lyon = json!({"city": "Lyon"});
     let transfer = json!({"to": "acct-9", "amount": 5000});
-    // ECMAScript writes 1e21 as `1e+21` and serde_json as `1e21`: the two digest forms differ for it.
-    let float = json!({"x": 1e21});
+    // ECMAScript writes 0.000001 as `0.000001` and serde_json as `1e-6`: the two digest forms differ for it.
+    let float = json!({"x": 0.000001});
     let (jcs, legacy) = (hex(&mycelium::arguments_digest(&float)), hex(&mycelium::legacy_arguments_digest(&float)));
     assert_ne!(jcs, legacy, "the two forms differ for this value, so the legacy case below is a real one");
     let with = |change: &dyn Fn(&mut Value)| {
@@ -474,6 +475,9 @@ fn a_record_whose_arguments_do_not_hash_to_its_digest_prompts_nothing() {
         ("arguments over the rendering cap", with(&|r| r["arguments"] = json!({"withheld": "over the rendering cap", "bytes": 20000, "cap": 16384}))),
         ("no arguments", with(&|r| r["arguments"] = Value::Null)),
         ("a digest that is not hex of anything", with(&|r| r["arguments_digest"] = "ff".repeat(32).into())),
+        // #813's confirm round, C2: 2^53 + 1 and 2^53 share a digest, so the digest does not say which is meant.
+        ("an integer beyond 2^53, under its neighbour's digest", with(&|r| { r["arguments"] = json!({"account": 9007199254740993u64}); r["arguments_digest"] = hex(&mycelium::arguments_digest(&json!({"account": 9007199254740992u64}))).into(); })),
+        ("an integer beyond 2^53, under its own digest", with(&|r| { r["arguments"] = json!({"account": 9007199254740993u64}); r["arguments_digest"] = hex(&mycelium::arguments_digest(&json!({"account": 9007199254740993u64}))).into(); })),
     ] {
         if !unverified(&result) {
             wrong.push(format!("{what}: SHOWN or misnamed ({result:?}), not arguments_unverified"));
@@ -516,7 +520,8 @@ fn rows_at_80(text: &str) -> Vec<String> {
 /// - the arguments come **first** and are cut to `ARGUMENTS_SHOWN_MAX` characters, with what was cut said;
 /// - request, holder, tool, resource, digest and the terms come **after** them, directly above the question, each
 ///   identifier cut to `ID_SHOWN_MAX`: with every field at its longest, the request line to the question is at most
-///   fifteen rows of an 80-column terminal — so they are on the screen when the answer is typed;
+///   fifteen rows **of an 80-column terminal** — so they are on the screen when the answer is typed there. The
+///   terminal's width is not read: on a narrower one the block is longer, and this test does not count that;
 /// - the bottom 24 rows of the reviewer's prompt hold the real tool, `payments.transfer`, below anything forged.
 ///
 /// Seen failing first, one build per plant: the arguments rendered below the digest (*the arguments are shown
@@ -548,34 +553,43 @@ fn the_lines_an_approval_is_about_are_the_last_thing_shown_whatever_the_record_h
     assert!(rows_at_80(tail).len() <= 15, "from the request line to the question is at most 15 rows of 80 columns, whatever the record holds: {} rows\n{tail}", rows_at_80(tail).len());
 }
 
-/// **Every character that is not printable ASCII, a letter or a digit is written as an escape** (#813's review, F3):
-/// decided by what a character *is* (an allow-list over the Unicode properties), not by a list of bad ones. In the
-/// arguments: the escape character, a bidirectional override and isolate, the Arabic letter mark U+061C, the line
-/// and paragraph separators, a tag character, a zero-width space, a byte-order mark, a no-break space, a Hangul
-/// filler, a private-use character and a backslash each reach the terminal as `\u{…}`; a letter of another script
-/// is shown as itself (**stated: it can look like a Latin one**). In an identifier: only printable ASCII is shown
-/// as itself — a Cyrillic `а` in a tool's name and a space are escapes.
+/// **Everything that is not printable ASCII is written as an escape, and so is a space after a space** (#813's
+/// review, F3; its confirm round, C3 and C4). In the arguments and in an identifier alike: the escape character, a
+/// bidirectional override and isolate, U+061C, the line and paragraph separators, a tag character, a zero-width
+/// space, a byte-order mark, a no-break space, a Hangul filler, a private-use character, a backslash — and **a
+/// Hebrew and an Arabic letter, a Cyrillic look-alike, an alphabetic combining mark, a full-width letter and
+/// digit**, which an allow-list of "letters and digits" let through — each reach the terminal as `\u{…}`. The
+/// price is stated: arguments in a script other than ASCII are shown as escapes. A run of spaces is shown as one
+/// space and escapes, so arguments cannot be padded into rows that imitate the prompt's own block.
 ///
-/// Seen failing first: the rule replaced by the earlier list of code points (*U+061C … reached the terminal*).
+/// Seen failing first, one build per plant: letters and digits beyond ASCII shown as themselves (*U+05D0 reached
+/// the terminal in free text*, and the marks and full-width forms with it); a run of spaces shown as it is (*a run
+/// of spaces is shown as spaces*).
 #[test]
-fn every_character_that_is_not_ascii_a_letter_or_a_digit_is_an_escape() {
-    let hidden = ['\u{1b}', '\u{202e}', '\u{2066}', '\u{61c}', '\u{2028}', '\u{2029}', '\u{e0041}', '\u{200b}', '\u{feff}', '\u{a0}', '\u{3164}', '\u{e000}', '\u{7f}', '\u{85}', '\\'];
+fn everything_that_is_not_printable_ascii_is_an_escape_and_so_is_a_space_after_a_space() {
+    let hidden = ['\u{1b}', '\u{202e}', '\u{2066}', '\u{61c}', '\u{2028}', '\u{2029}', '\u{e0041}', '\u{200b}', '\u{feff}', '\u{a0}', '\u{3164}', '\u{e000}', '\u{7f}', '\u{85}', '\\',
+        '\u{5d0}', '\u{627}', '\u{430}', '\u{345}', '\u{5b0}', '\u{64e}', '\u{ff41}', '\u{ff11}', '\u{e9}', '\u{6771}'];
     let mut wrong: Vec<String> = Vec::new();
     for c in hidden {
-        let shown = dc::shown_text(&format!("a{c}b"), 100);
-        if (c != '\\' && shown.contains(c)) || shown != format!("a\\u{{{:x}}}b", c as u32) {
-            wrong.push(format!("U+{:04X} reached the terminal in free text: {shown:?}", c as u32));
-        }
-        let shown = dc::shown_id(&format!("a{c}b"), 100);
-        if shown != format!("a\\u{{{:x}}}b", c as u32) {
-            wrong.push(format!("U+{:04X} reached the terminal in an identifier: {shown:?}", c as u32));
+        for (what, shown) in [("free text", dc::shown_text(&format!("a{c}b"), 100)), ("an identifier", dc::shown_id(&format!("a{c}b"), 100))] {
+            if shown != format!("a\\u{{{:x}}}b", c as u32) {
+                wrong.push(format!("U+{:04X} reached the terminal in {what}: {shown:?}", c as u32));
+            }
         }
     }
     assert!(wrong.is_empty(), "{wrong:#?}");
-    assert_eq!(dc::shown_text("Lyon, été, 東京 42 {\"k\":[1]}", 100), "Lyon, été, 東京 42 {\"k\":[1]}", "letters, digits and ASCII punctuation are shown as themselves");
-    assert_eq!(dc::shown_id("p\u{430}yments.transfer x", 100), "p\\u{430}yments.transfer\\u{20}x", "an identifier shows only printable ASCII: no look-alike letter, no space");
-    assert_eq!(dc::shown_text("p\u{430}yments", 100), "p\u{430}yments", "STATED: in free text a look-alike letter is shown as itself");
+    assert_eq!(dc::shown_text("Lyon 42 {\"k\":[1], \"n\": -3.5e2}", 100), "Lyon 42 {\"k\":[1], \"n\": -3.5e2}", "printable ASCII is shown as itself, single spaces included");
+    assert_eq!(dc::shown_id("payments.transfer x", 100), "payments.transfer\\u{20}x", "an identifier shows no space");
     assert_eq!(dc::shown_id(&"x".repeat(500), 96), format!("{} …[cut: 404 more characters not shown]", "x".repeat(96)), "a cut says how much");
+
+    // C4: padding cannot lay the arguments out in rows of their own.
+    let padded = format!("x{}What `approve` signs is about these lines:{}  tool       weather.forecast", " ".repeat(40), " ".repeat(38));
+    let shown = dc::shown_text(&padded, 400);
+    assert!(!shown.contains("  "), "a run of spaces is shown as spaces: {shown:?}");
+    assert!(shown.starts_with("x \\u{20}\\u{20}"), "one space, then escapes: {shown:?}");
+    let record = dc::PromptRecord::find(&json!([row_of("r1", "payments.transfer", json!({"note": padded}))]), "r1").unwrap();
+    let prompt = dc::Prompt::render(&record, "consent:fleet/alex", mycelium::ConsentGrade::Tty, "http://g", NODE, 300, 0).text;
+    assert_eq!(rows_at_80(&prompt).iter().filter(|row| row.trim_start().starts_with("What `approve` signs")).count(), 1, "one block with that heading on an 80-column terminal:\n{prompt}");
 }
 
 /// **The consent directory is refused by its real path** (#813's review, F4). The check used to walk the path as
@@ -628,9 +642,12 @@ fn the_consent_directory_is_refused_by_its_real_path() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
-/// **Two principals never share a file** (#813's review, F12): `a-b`/`c` and `a`/`b-c` both made
-/// `consent-a-b-c.key.p8`. The separator is now a character neither an issuer nor a name can hold.
-/// Seen failing first: the `-` separator restored (*the two principals share …*).
+/// **Two principals never share a file** (#813's review, F12; its confirm round, C6): `a-b`/`c` and `a`/`b-c` both
+/// made `consent-a-b-c.key.p8`, and on a case-insensitive filesystem `Fleet`/`x` and `fleet`/`x` were one file, so
+/// `key --force` for one replaced the other's key. The separator is a character neither part can hold, and the name
+/// ends in a digest of the principal: the files differ **even when their names are compared without case**.
+/// Seen failing first, one build per plant: the `-` separator restored (*the two principals share …*); the digest
+/// left out (*… share a file on a case-insensitive filesystem*).
 #[test]
 fn two_principals_never_share_a_file() {
     let root = scratch("names");
@@ -640,6 +657,15 @@ fn two_principals_never_share_a_file() {
     for (a, b) in [(one.key_path(), two.key_path()), (one.public_key_path(), two.public_key_path()), (one.cert_path(), two.cert_path())] {
         assert_ne!(a, b, "the two principals share {}", a.display());
     }
+    let (upper, lower) = (dc::Store::at(root.join("consent"), "Fleet", "x").unwrap(), dc::Store::at(root.join("consent"), "fleet", "x").unwrap());
+    for (a, b) in [(upper.key_path(), lower.key_path()), (upper.public_key_path(), lower.public_key_path()), (upper.cert_path(), lower.cert_path())] {
+        assert_ne!(a.to_string_lossy().to_lowercase(), b.to_string_lossy().to_lowercase(), "consent:Fleet/x and consent:fleet/x share a file on a case-insensitive filesystem: {}", a.display());
+    }
+    // On this filesystem, whichever it is: a key made for one is not there for the other, and neither replaces the other's.
+    let made = upper.create_key(false).expect("a key for consent:Fleet/x");
+    let other = lower.create_key(false).expect("and one for consent:fleet/x, not refused as existing");
+    assert_ne!(made.point(), other.point());
+    assert_eq!(std::fs::read(upper.public_key_path()).unwrap(), made.spki_pem().into_bytes(), "the first principal's files are its own still");
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -665,12 +691,15 @@ fn enrol_keeps_the_certificate_alone() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
-/// **`enrol` and `approve` refuse an expired certificate** (#813's review, F12): `dev` would have signed under it and
-/// every node refused. A certificate whose validity ended is refused by name at enrolment and, written beside the
-/// key, on use.
-/// Seen failing first: the validity not read (*an expired certificate was enrolled*).
+/// **`enrol` and `approve` refuse a certificate that is not valid now** (#813's review, F12; its confirm round, C9):
+/// `dev` would have signed under it and every node refused. A certificate whose validity ended is refused by name
+/// at enrolment and, written beside the key, on use; so is one whose validity has not begun; and one whose validity
+/// cannot be read is refused rather than taken as valid.
+/// Seen failing first, one build per plant: the validity not read (*an expired certificate was enrolled*);
+/// `notBefore` not compared (*a certificate not valid yet was enrolled*); an unreadable bound accepted (*a
+/// certificate whose validity cannot be read was enrolled*).
 #[test]
-fn an_expired_certificate_is_refused_at_enrolment_and_on_use() {
+fn a_certificate_that_is_not_valid_now_is_refused_at_enrolment_and_on_use() {
     let root = scratch("expired");
     let (store, ca) = api_store(&root, false);
     let public = std::fs::read_to_string(store.public_key_path()).unwrap();
@@ -683,6 +712,26 @@ fn an_expired_certificate_is_refused_at_enrolment_and_on_use() {
     store.enrol(&current).expect("one still valid is enrolled");
     mycelium_core::consent_key::store_public(&store.cert_path(), expired.as_bytes()).unwrap();
     assert_eq!(store.enrolment().map(|_| ()).expect_err("an expired certificate beside the key").code(), "certificate_expired");
+
+    // #813's confirm round, C9: the other bound, and a bound that cannot be read. These two certificates are made
+    // here over the stored key itself (the chain is not judged on the developer's side), since the CA's issuer
+    // always dates `notBefore` 2024.
+    let pair = rcgen::KeyPair::try_from(std::fs::read(store.key_path()).unwrap().as_slice()).expect("the stored PKCS#8");
+    let with_validity = |not_before: (i32, u8, u8), not_after: (i32, u8, u8)| {
+        let mut params = rcgen::CertificateParams::new(vec![]).unwrap();
+        params.subject_alt_names = vec![rcgen::SanType::URI(rcgen::Ia5String::try_from(mycelium::consent_uri("fleet", "alex")).unwrap())];
+        params.custom_extensions = vec![rcgen::CustomExtension::from_oid_content(mycelium_core::tls::CONSENT_GRADE_OID, mycelium::ConsentGrade::Tty.extension_der())];
+        params.not_before = rcgen::date_time_ymd(not_before.0, not_before.1, not_before.2);
+        params.not_after = rcgen::date_time_ymd(not_after.0, not_after.1, not_after.2);
+        params.self_signed(&pair).unwrap().pem()
+    };
+    store.enrol(&with_validity((2024, 1, 1), (2099, 1, 1))).expect("the control: such a certificate, valid now, is enrolled");
+    let refused = store.enrol(&with_validity((2090, 1, 1), (2099, 1, 1))).map(|_| ()).expect_err("a certificate not valid yet was enrolled");
+    assert_eq!(refused.code(), "certificate_not_yet_valid", "{refused}");
+    // A `notAfter` before 1970 is one the reader cannot express: unreadable, and so refused rather than taken as unexpired.
+    let refused = store.enrol(&with_validity((1960, 1, 1), (1965, 1, 1))).map(|_| ()).expect_err("a certificate whose validity cannot be read was enrolled");
+    assert_eq!(refused.code(), "not_a_consent_certificate", "{refused}");
+    assert!(refused.to_string().contains("validity"), "{refused}");
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -783,10 +832,11 @@ fn approve_from_standard_input_is_refused_when_standard_input_is_the_terminal() 
 
 /// **The `not_enrolled` refusal quotes commands that run as written** (#813's review, F12). `approve` before `enrol`
 /// is refused by name and quotes two commands: the CA holder's `tls issue`, complete but for the two directories
-/// only that host knows, and `dev`'s own `enrol`. Each is run here exactly as quoted, with the two directories
-/// filled in; then `approve` finds the enrolment.
-/// Seen failing first: the earlier wording, which left `--issuer`, `--ca-dir` and `--out` off (the quoted command
-/// exited 2).
+/// only that host knows, and `dev`'s own `enrol`. Each is run here **through `sh -c`, exactly as quoted**, with the
+/// two directories filled in; then `approve` finds the enrolment.
+/// Seen failing first, one build per plant: the earlier wording, which left `--issuer`, `--ca-dir` and `--out` off
+/// (the quoted command exited 2); the public key's path left unquoted (on macOS, where it holds a space, `sh` split
+/// it and `tls issue` printed its usage — #813's confirm round, C7).
 #[test]
 fn the_not_enrolled_refusal_quotes_commands_that_run() {
     let root = scratch("quoted");
@@ -797,14 +847,14 @@ fn the_not_enrolled_refusal_quotes_commands_that_run() {
     let quoted: Vec<String> = said.split('`').filter(|part| part.starts_with("mycelium ")).map(|c| c.replace("<ca-dir>", root.join("ca").to_str().unwrap()).replace("<out-dir>", root.join("out2").to_str().unwrap())).collect();
     assert_eq!(quoted.len(), 2, "two commands are quoted: {said}");
     assert!(quoted[0].starts_with("mycelium tls issue ") && quoted[1].starts_with("mycelium dev consent enrol "), "{quoted:?}");
+    let bin_dir = Path::new(env!("CARGO_BIN_EXE_mycelium")).parent().unwrap().to_path_buf();
+    let path = format!("{}:{}", bin_dir.display(), std::env::var("PATH").unwrap_or_default());
     for command in &quoted {
         assert!(!command.contains('<'), "nothing is left to fill in but the two directories: {command}");
-        // Split as a shell would: the public key's path can hold a space (macOS's `Application Support`).
-        let args: Vec<String> = command.strip_prefix("mycelium ").unwrap().split(" --").enumerate().flat_map(|(i, part)| {
-            if i == 0 { part.split(' ').map(str::to_string).collect::<Vec<_>>() } else { let (flag, value) = part.split_once(' ').map_or((part, None), |(f, v)| (f, Some(v))); std::iter::once(format!("--{flag}")).chain(value.map(str::to_string)).collect() }
-        }).collect();
-        let ran = mycelium(&work, &home).args(&args).output().unwrap();
-        assert!(ran.status.success(), "the quoted command ran as written: {command}\n{}", text(&ran));
+        // Exactly as a person would: the printed line, pasted into a POSIX shell. The public key's path holds a
+        // space on macOS (`Application Support`), so the line must quote it.
+        let ran = Command::new("sh").arg("-c").arg(command).current_dir(&work).env("PATH", &path).env("HOME", &home).env_remove("XDG_DATA_HOME").env_remove("MYCELIUM_GATEWAY_TOKEN").output().expect("sh");
+        assert!(ran.status.success(), "the quoted command ran as written, through `sh -c`: {command}\n{}", text(&ran));
     }
     let o = mycelium(&work, &home).args(["dev", "consent", "approve", "--issuer", "fleet", "--name", "alex", "--gateway", "http://127.0.0.1:1", "r1"]).output().unwrap();
     assert!(!text(&o).contains("not_enrolled"), "enrolled now: {}", text(&o));

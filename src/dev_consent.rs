@@ -23,8 +23,9 @@
 //!   its node; a record whose arguments are withheld, cut or another call's prompts nothing
 //!   ([`NoRecord::ArgumentsUnverified`]). The lines an approval is about — holder, tool, resource, digest, terms —
 //!   are **the last thing shown**, below everything the requester controls; every field is cut to a bound that keeps
-//!   them on one screen, and every character that is not printable ASCII, a letter or a digit is written as an
-//!   escape ([`shown_text`], [`shown_id`]), so a record cannot repaint the terminal or scroll those lines away.
+//!   them on one screen of a terminal at least 80 columns wide (the width is not read), and every character that is
+//!   not printable ASCII is written as an escape, as is a space after a space ([`shown_text`], [`shown_id`]), so a
+//!   record cannot repaint the terminal, scroll those lines away, or lay out a copy of them.
 //! - **What it signed.** Only an answer typed at the terminal it opened (`/dev/tty`, [`TtyApprover`]), **after the
 //!   prompt was shown**, is signed: `approve` signs an issue, `refuse` signs a refusal, and anything else — an empty
 //!   line, end of input, no terminal — signs nothing and sends nothing. Whatever was typed before the prompt, entered
@@ -52,8 +53,6 @@
 //!   OID, `CONSENT_DECISION_DOES_NOT_NAME_WHAT_WAS_SHOWN`), and by I4a's signed request record.
 //! - **That the decision was admitted.** `dev` reports that it signed and sent, and quotes the gateway's answer as
 //!   the gateway's ([`Answer::Signed`]).
-//! - **That what looks like one word is that word.** Letters of another script that look like Latin ones are shown
-//!   as themselves in the arguments (an identifier field shows only printable ASCII, everything else escaped).
 //!
 //! ## The queue
 //!
@@ -63,8 +62,9 @@
 //! limits: ids on the command line are all offered before the first prompt, so of more than [`QUEUE_BOUND`] the
 //! surplus are `busy`; the bound is on what waits, not on how many prompts a caller that keeps feeding ids can
 //! raise over time, and ids carry no source to be fair between; `busy` is printed on `dev`'s standard output only —
-//! the requesting agent learns nothing until its request lapses; and any member can make a request
-//! `ambiguous_request` by writing a second record with its id under another holder (availability only). Two `dev`
+//! the requesting agent learns nothing until its request lapses; and any member can keep a request from being
+//! prompted — `ambiguous_request` by writing a second record with its id under another holder,
+//! `arguments_unverified` or `record_unreadable` by rewriting the record's arguments or resource (availability only). Two `dev`
 //! processes sharing one terminal are not serialised: each shows its prompt, and a typed answer goes to whichever
 //! reads first — run one `dev` per terminal. How another process hands `dev` an id while it runs (N4's and N7's
 //! transport) is theirs to build; this is the queue it feeds.
@@ -136,6 +136,8 @@ pub enum Refusal {
     GradeNotThisKeys { principal: String, certificate: ConsentGrade },
     /// The certificate's validity ended (its `notAfter`, ms since the epoch).
     CertificateExpired { principal: String, not_after_ms: u64 },
+    /// The certificate's validity has not begun (its `notBefore`, ms since the epoch).
+    CertificateNotYetValid { principal: String, not_before_ms: u64 },
     /// `--issuer` or `--name` is not a valid segment.
     BadName(String),
     /// The gateway could not be asked, or answered something `dev` cannot use.
@@ -158,6 +160,7 @@ impl Refusal {
             Self::EnrolledKeyMismatch { .. } => "enrolled_key_mismatch",
             Self::GradeNotThisKeys { .. } => "grade_not_this_keys",
             Self::CertificateExpired { .. } => "certificate_expired",
+            Self::CertificateNotYetValid { .. } => "certificate_not_yet_valid",
             Self::BadName(_) => "bad_name",
             Self::Gateway(_) => "gateway",
         }
@@ -182,7 +185,7 @@ impl std::fmt::Display for Refusal {
                 f,
                 "no consent certificate at {}: have the key certified on the host that holds the fleet CA's key — `mycelium tls issue --ca-dir <ca-dir> --client {name} --consent --public-key {} --grade tty --issuer {issuer} --out <out-dir>` — then `mycelium dev consent enrol --issuer {issuer} --name {name} --cert <out-dir>/consent-{issuer}-{name}.cert.pem`",
                 cert.display(),
-                public_key.display()
+                sh_quoted(&public_key.display().to_string())
             ),
             Self::NotAConsentCertificate(why) => write!(f, "not a consent certificate this build reads: {why}"),
             Self::AnotherPrincipal { certificate, asked } => write!(f, "the certificate is {certificate}'s, not {asked}'s"),
@@ -197,6 +200,7 @@ impl std::fmt::Display for Refusal {
                 SoftwareConsentKey::GRADE
             ),
             Self::CertificateExpired { principal, not_after_ms } => write!(f, "the certificate for {principal} expired (its validity ended at {not_after_ms} ms since the epoch): every node refuses a decision under it; have the key certified again"),
+            Self::CertificateNotYetValid { principal, not_before_ms } => write!(f, "the certificate for {principal} is not valid yet (its validity begins at {not_before_ms} ms since the epoch, by this device's clock): every node refuses a decision under it"),
             Self::BadName(why) => f.write_str(why),
             Self::Gateway(why) => f.write_str(why),
         }
@@ -309,10 +313,14 @@ impl Store {
         format!("consent:{}/{}", self.issuer, self.name)
     }
 
-    /// The files' common stem. `+` separates the issuer from the name: neither can hold one, so two principals
-    /// never share a file (`a-b`/`c` and `a`/`b-c` did, under a `-`).
+    /// The files' common stem: the issuer and the name for a person to read, then the first 16 hex digits of the
+    /// SHA-256 of the principal. `+` separates the parts and neither part can hold one (`a-b`/`c` and `a`/`b-c`
+    /// shared a file under a `-`); the digest tells apart two principals that differ only in case, which are one
+    /// name on a case-insensitive filesystem (macOS's default — `Fleet/x` replaced `fleet/x`'s key there). So two
+    /// principals share a file only if 64 bits of SHA-256 collide.
     fn stem(&self) -> String {
-        format!("consent+{}+{}", self.issuer, self.name)
+        let digest: String = <sha2::Sha256 as sha2::Digest>::digest(self.principal().as_bytes()).iter().take(8).map(|b| format!("{b:02x}")).collect();
+        format!("consent+{}+{}+{digest}", self.issuer, self.name)
     }
 
     /// The private key's file.
@@ -386,7 +394,8 @@ impl Enrolment {
     /// `key` under `cert_pem` as `principal`, or the named reason it is not: the PEM holds one consent certificate
     /// this build reads; it names `principal`; it was issued over `key`'s public point; its grade is the one a
     /// software key carries, `tty` — a certificate stating any other grade says something about the key that this
-    /// device does not do, and nothing is signed under it; and its validity has not ended (by this device's clock).
+    /// device does not do, and nothing is signed under it; and it is valid now by this device's clock — both bounds
+    /// read, and a certificate whose validity cannot be read refused.
     /// The chain is not judged here: the nodes judge it.
     pub fn check(key: SoftwareConsentKey, principal: &str, cert_pem: &str) -> Result<Self, Refusal> {
         gate()?;
@@ -402,8 +411,18 @@ impl Enrolment {
         if id.grade != SoftwareConsentKey::GRADE {
             return Err(Refusal::GradeNotThisKeys { principal: principal.to_string(), certificate: id.grade });
         }
-        if let Some(not_after_ms) = mycelium_core::tls::cert_not_after_ms(&der).filter(|end| *end <= mycelium_core::sim_seam::wall_now_ms()) {
-            return Err(Refusal::CertificateExpired { principal: principal.to_string(), not_after_ms });
+        // Both bounds, by this device's clock, and a bound that cannot be read is a refusal: absence fails closed.
+        let now_ms = mycelium_core::sim_seam::wall_now_ms();
+        match mycelium_core::tls::cert_validity_ms(&der) {
+            Some((Some(not_before_ms), Some(not_after_ms))) => {
+                if not_after_ms <= now_ms {
+                    return Err(Refusal::CertificateExpired { principal: principal.to_string(), not_after_ms });
+                }
+                if not_before_ms > now_ms {
+                    return Err(Refusal::CertificateNotYetValid { principal: principal.to_string(), not_before_ms });
+                }
+            }
+            _ => return Err(Refusal::NotAConsentCertificate("its validity (notBefore, notAfter) cannot be read, so it cannot be said to be valid now".into())),
         }
         Ok(Self { key, principal: principal.to_string(), cert_pem: certificate_pem(&der) })
     }
@@ -434,6 +453,12 @@ impl Enrolment {
         let sig = self.key.sign(&msg)?;
         Ok(crate::SignedDecision::from_parts(self.principal.as_str(), node, record.holder.as_str(), record.request.as_str(), now_ms, b64.encode(self.key.point()), b64.encode(sig), Some(grade)))
     }
+}
+
+/// `text` as one word of a POSIX shell: in single quotes, a single quote inside written `'\''`. A path quoted in a
+/// command a person is told to run must survive being pasted (macOS's consent directory holds a space).
+pub fn sh_quoted(text: &str) -> String {
+    format!("'{}'", text.replace('\'', "'\\''"))
 }
 
 /// The DER of the one PEM certificate in `pem`.
@@ -506,7 +531,8 @@ impl PromptRecord {
     ///   the nodes drop it, so does this). Arguments the record withholds (a data class the policy does not render)
     ///   or cuts (over the 16 KiB rendering cap) are an object that says so, which hashes to no call's digest: such
     ///   a request is **refused, not shown with a caveat** — a person cannot approve what this device cannot relate
-    ///   to the digest.
+    ///   to the digest. So are arguments holding a number of magnitude 2^53 or more, which the digest does not pin
+    ///   exactly (the doors refuse them too).
     ///
     /// A record that fails any of these prompts nothing.
     pub fn find(pending: &serde_json::Value, request: &str) -> Result<Self, NoRecord> {
@@ -531,6 +557,11 @@ impl PromptRecord {
         let arguments = &row["arguments"];
         if arguments.is_null() {
             return Err(NoRecord::ArgumentsUnverified("the record carries no arguments"));
+        }
+        // An integer beyond ±(2^53 − 1) is not pinned by the digest (RFC 8785 writes it as the double it rounds to, so
+        // two neighbours share one): the request door and the call door refuse such arguments, and so does `dev`.
+        if crate::agent::client_sig::holds_unsafe_integer(arguments) {
+            return Err(NoRecord::ArgumentsUnverified("the arguments hold a number of magnitude 2^53 or more, which the digest does not pin exactly"));
         }
         if !crate::agent::gateway_authority::recorded_digest_matches(&row["arguments_digest"], arguments) {
             let why = if arguments.get("withheld").is_some() { "the record withholds or cuts the arguments, so they cannot be checked against the digest" } else { "the arguments in the record do not hash to the digest it names" };
@@ -560,27 +591,21 @@ impl PromptRecord {
     }
 }
 
-/// Whether a character of free text is shown as itself: printable ASCII; or, beyond ASCII, a letter or a digit by
-/// the Unicode properties `char::is_alphanumeric` reads — an allow-list, so every control, format, separator,
-/// private-use, unassigned, punctuation and symbol character beyond ASCII is an escape (the bidirectional marks and
-/// overrides, U+061C, the line and paragraph separators, the tag characters, the zero-width ones, among them). Four
-/// letters that render as a blank (the Hangul fillers) are escaped too.
-fn shown_raw_in_text(c: char) -> bool {
-    (matches!(c, ' '..='~') && c != '\\') || (!c.is_ascii() && c.is_alphanumeric() && !matches!(c, '\u{115F}' | '\u{1160}' | '\u{3164}' | '\u{FFA0}'))
+/// Whether a character is shown as itself: printable ASCII other than the backslash (which is written as its
+/// escape, so an escape in the output is always one this module wrote). Everything else — every control, format,
+/// separator and combining character, and **every letter and digit beyond ASCII** — is an escape.
+fn shown_raw(c: char) -> bool {
+    matches!(c, ' '..='~') && c != '\\'
 }
 
-/// Whether a character of an identifier is shown as itself: printable ASCII other than the space and the backslash.
-fn shown_raw_in_id(c: char) -> bool {
-    matches!(c, '!'..='~') && c != '\\'
-}
-
-/// `text` with each character shown as itself when `raw` says so and as its `\u{…}` escape otherwise, cut so the
-/// result is at most `max` characters, with what was cut said in a marker after it. Returns the shown text and how
-/// many of `text`'s characters were not shown.
-fn shown_within(text: &str, max: usize, raw: fn(char) -> bool) -> (String, usize) {
-    let (mut out, mut used, mut taken) = (String::new(), 0usize, 0usize);
+/// `text` with each character shown as itself or as its `\u{…}` escape, cut so the result is at most `max`
+/// characters, with what was cut said in a marker after it. A space is an escape when `spaces` is false, and in any
+/// case when it follows another space. Returns the shown text and how many of `text`'s characters were not shown.
+fn shown_within(text: &str, max: usize, spaces: bool) -> (String, usize) {
+    let (mut out, mut used, mut taken, mut after_space) = (String::new(), 0usize, 0usize, false);
     for c in text.chars() {
-        let piece = if raw(c) { c.to_string() } else { format!("\\u{{{:x}}}", c as u32) };
+        let raw = shown_raw(c) && (c != ' ' || (spaces && !after_space));
+        let piece = if raw { c.to_string() } else { format!("\\u{{{:x}}}", c as u32) };
         let width = piece.chars().count();
         if used + width > max {
             break;
@@ -588,6 +613,7 @@ fn shown_within(text: &str, max: usize, raw: fn(char) -> bool) -> (String, usize
         used += width;
         out.push_str(&piece);
         taken += 1;
+        after_space = c == ' ';
     }
     let cut = text.chars().count() - taken;
     if cut > 0 {
@@ -596,19 +622,22 @@ fn shown_within(text: &str, max: usize, raw: fn(char) -> bool) -> (String, usize
     (out, cut)
 }
 
-/// Free text (the arguments) as a prompt shows it: at most `max` characters, everything that is not printable
-/// ASCII, a letter or a digit written as an escape (`shown_raw_in_text`), so it cannot move the cursor, reorder or
-/// hide text, or fill the screen. **What it leaves:** a letter of another script that looks like a Latin one is
-/// shown as itself.
+/// Free text (the arguments) as a prompt shows it: at most `max` characters, **printable ASCII as itself and
+/// everything else as its `\u{…}` escape**, and a space that follows a space as an escape too. So the text cannot
+/// move the cursor, reorder or hide what is beside it (no right-to-left letter, no combining mark, no control or
+/// format character reaches the terminal), pass a look-alike of another script or width for an ASCII character, or
+/// lay itself out in columns to imitate the prompt's own lines. **The price, chosen:** arguments in any script but
+/// ASCII are shown as escapes, which a person cannot read as words; they are shown exactly, and never as something
+/// they are not. (An allow-list of letters and digits was tried first; right-to-left letters, alphabetic combining
+/// marks and full-width forms passed it — #813's confirm round, C3.)
 pub fn shown_text(text: &str, max: usize) -> String {
-    shown_within(text, max, shown_raw_in_text).0
+    shown_within(text, max, true).0
 }
 
 /// An identifier (request, holder, tool, resource, gateway, node) as a prompt shows it: at most `max` characters,
-/// only printable ASCII as itself — a space, and every character beyond ASCII, is an escape, so no look-alike letter
-/// passes for an ASCII one here.
+/// printable ASCII as itself; every space, and every character beyond ASCII, is an escape.
 pub fn shown_id(text: &str, max: usize) -> String {
-    shown_within(text, max, shown_raw_in_id).0
+    shown_within(text, max, false).0
 }
 
 /// What the person is asked: every line of it from the record, the gateway's own answers and `dev`'s enrolment.
@@ -627,11 +656,13 @@ impl Prompt {
     /// **The order is the defence.** What the requester controls freely — the arguments — comes first, cut to
     /// [`ARGUMENTS_SHOWN_MAX`]. What an approval is about — request, holder, tool, resource, digest, terms — comes
     /// **last**, each identifier cut to [`ID_SHOWN_MAX`], directly above the question: whatever a record holds, those
-    /// lines are the bottom of the screen when the answer is typed (at most fifteen rows of an 80-column terminal
-    /// from the request line to the question).
+    /// lines are the bottom of the screen when the answer is typed — **on a terminal at least 80 columns wide**,
+    /// where the request line to the question is at most fifteen rows. The terminal's width is not read: on a
+    /// narrower one the block is longer (37 rows at 40 columns with every identifier at its bound), and its first
+    /// lines can be above a 24-row screen.
     pub fn render(record: &PromptRecord, principal: &str, grade: ConsentGrade, gateway: &str, node: &str, ttl_secs: u64, now_ms: u64) -> Self {
         let left = record.expires_at_ms.saturating_sub(now_ms) / 1_000;
-        let (arguments, cut) = shown_within(&record.arguments, ARGUMENTS_SHOWN_MAX, shown_raw_in_text);
+        let (arguments, cut) = shown_within(&record.arguments, ARGUMENTS_SHOWN_MAX, true);
         let checked = match cut {
             0 => "this device checked: the arguments shown above hash to it".to_string(),
             n => format!("this device checked: the whole arguments hash to it; {n} characters of them are NOT shown above"),

@@ -5344,7 +5344,9 @@ are new.
   signed and admitted, 2 usage or a refusal by name.
 - **Where the key is kept.** `~/Library/Application Support/mycelium/consent/` on macOS;
   `$XDG_DATA_HOME/mycelium/consent/`, default `~/.local/share/mycelium/consent/`, on Linux. Files:
-  `consent+{issuer}+{name}.key.p8` (PKCS#8, `0600`), `.pub.pem` and `.cert.pem` beside it, the directory `0700`.
+  `consent+{issuer}+{name}+{digest}.key.p8` (PKCS#8, `0600`; the digest is 16 hex digits of the principal's SHA-256,
+  so principals differing only in case are separate files on a case-insensitive filesystem), `.pub.pem` and
+  `.cert.pem` beside it, the directory `0700`.
   `HOME` unset or relative is refused (`consent_dir_unresolved`).
 - **Never in a worktree, by the real path.** Every symbolic link in the directory's path is resolved first, and the
   real path must have no `.git` at or above it (`consent_dir_in_worktree`). That covers a repository's worktree, a
@@ -5359,19 +5361,25 @@ are new.
   by group or others, and yours or root's (`consent_dir_ancestor_too_open`). Fix with `chmod 600` / `chmod 700` /
   `chmod go-w`.
 - **On macOS an ACL is not read.** A file whose mode is `0600` and which carries an access-control entry for another
-  user loads. `ls -le` shows a `+` after the mode when an ACL is present; `chmod -N <file>` removes it.
+  user loads. `ls -le` shows a `+` after the mode when an ACL is present; `chmod -N <file>` removes it. `dev consent
+  key` says so when it creates a key on a Mac. Accepted by the maintainer for the software key (2026-11-20).
 - **`dev` signs with a software key only under a certificate graded `tty`.** If the operator ran `tls issue --grade
   os_presence(macos, unbound)` or `--grade recording` over a key `dev consent key` made, `dev consent enrol` refuses
   the certificate and `dev consent approve` refuses to sign (`grade_not_this_keys`). Re-issue with `--grade tty`, and
   name `signed_with = "tty"` on the principal's `gateway_consent_principals` entry (§118). This is `dev`'s own
   refusal about its own key. No node can make that check, and the grade on a certificate stays the issuing
-  operator's statement. An expired certificate is refused too (`certificate_expired`).
+  operator's statement. A certificate that is not valid now is refused too (`certificate_expired`,
+  `certificate_not_yet_valid`), and so is one whose validity cannot be read.
 - **A replaced key needs a new certificate.** `dev consent key --force` makes a new key; the old certificate no
   longer names it, and `approve` refuses (`enrolled_key_mismatch`) until the new public key is certified and
   enrolled. Publishing the new certificate supersedes the old consent key at every node that reads it (§112).
 - **A request `dev` will not show.** `dev` shows a request only when its record's arguments hash to the digest the
-  record names. A request whose arguments are withheld by a data class, or are over the 16 KiB rendering cap, is
-  answered `arguments_unverified` and cannot be approved with `dev`; a service decider can still decide it.
+  record names. A request whose arguments are withheld by a data class, are over the 16 KiB rendering cap, or hold a
+  number of magnitude 2^53 or more, is answered `arguments_unverified` and cannot be approved with `dev`; a service
+  decider can still decide the first two.
+- **What the prompt shows.** Printable ASCII as itself; everything else, in the arguments as in the identifiers, as
+  a `\u{…}` escape, and a space after a space likewise. Arguments in another script are shown as escapes. The lines
+  an approval is about are the last on the screen of a terminal at least 80 columns wide; the width is not read.
 - **Type the answer after the prompt appears.** `approve` discards whatever was typed at the terminal before it
   shows a prompt, entered or not, and says how many entered characters it discarded. A second `approve` typed while
   the first request was being answered does not approve the next one.
@@ -5387,14 +5395,15 @@ are new.
   `gateway`), and for `signed` the `decision`, `gateway_status` and `gateway_answer`. `signed` means `dev` signed and
   sent; whether the node admitted it is `gateway_status`. More than 8 ids on one command line: the rest are `busy`.
 - **New public items.** `mycelium::dev_consent` (`Store`, `Enrolment`, `PromptRecord`, `Prompt`, `Approver`,
-  `TtyApprover`, `queue`, `answer_one`, `serve`, `Answer`, `Refusal`, `Gateway`, `shown_text`, `shown_id`), under
+  `TtyApprover`, `queue`, `answer_one`, `serve`, `Answer`, `Refusal`, `Gateway`, `shown_text`, `shown_id`,
+  `sh_quoted`), under
   `tls` and `gateway`; `mycelium_core::consent_key` (`SoftwareConsentKey`, `ConsentKeyRefusal`, `create_dir`,
   `store_public`, `load_public`, `real_path`, `guarded_ancestors`), under `tls`;
-  `mycelium_core::tls::CONSENT_DECISION_DOES_NOT_NAME_WHAT_WAS_SHOWN`. `Refusal`, `Answer` and `ConsentKeyRefusal`
+  `mycelium_core::tls::CONSENT_DECISION_DOES_NOT_NAME_WHAT_WAS_SHOWN` and `cert_validity_ms`. `Refusal`, `Answer` and `ConsentKeyRefusal`
   are `#[non_exhaustive]`.
-- **Dependencies.** `rustix` becomes a unix dependency of `mycelium` (the terminal flush) and, under `tls`, of
-  `mycelium-core` (this process's uid). It was already in a node's tree through `reqwest`; no crate is added to the
-  lockfile.
+- **Dependencies.** Under `tls`, on unix, `rustix` becomes a dependency of `mycelium` (the terminal flush) and of
+  `mycelium-core` (this process's uid). A build without `tls` does not compile it. It was already in a node's tree
+  through `reqwest`; no crate is added to the lockfile.
 - **Not built:** the approver signing what it saw (above); the macOS Secure Enclave key and its Swift shim (I7, PR
   3b), so `os_presence(macos, unbound)` is signed by nothing in this tree; Windows (`consent_key_platform_not_built`:
   no user-only ACL is set, and no CI job compiles that refusal); a `recording` signer for a `sim` build; a transport

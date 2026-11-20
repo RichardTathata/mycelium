@@ -159,7 +159,7 @@ mod with_a_key {
         let key = store.create_key(false).expect("created");
         let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o7777;
         assert_eq!((mode(&store.key_path()), mode(store.key_path().parent().unwrap())), (0o600, 0o700));
-        assert!(store.key_path().starts_with(std::fs::canonicalize(&plain).unwrap()) && store.key_path().file_name().unwrap() == "consent+fleet+alex.key.p8");
+        assert!(store.key_path().starts_with(std::fs::canonicalize(&plain).unwrap()) && store.key_path().file_name().unwrap().to_string_lossy().starts_with("consent+fleet+alex+") && store.key_path().to_string_lossy().ends_with(".key.p8"));
         let public = String::from_utf8(std::fs::read(store.public_key_path()).unwrap()).unwrap();
         assert_eq!(mycelium_core::tls::p256_point_from_spki_pem(&public).unwrap(), key.point(), "the public half beside it is the key's");
         assert!(!public.contains("PRIVATE"), "and holds nothing private");

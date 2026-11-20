@@ -39,7 +39,9 @@ request and signs what is typed. The macOS Secure Enclave key and its Swift shim
   ([`dev_cli`](../../src/main.rs), [`SoftwareConsentKey`](../../mycelium-core/src/consent_key.rs)):
   - the key is PKCS#8 in a `0600` file in a `0700` directory under the user's home:
     `~/Library/Application Support/mycelium/consent/` on macOS, `$XDG_DATA_HOME/mycelium/consent/` (default
-    `~/.local/share/mycelium/consent/`) on Linux, as `consent+{issuer}+{name}.key.p8`. It is never the directory
+    `~/.local/share/mycelium/consent/`) on Linux, as `consent+{issuer}+{name}+{digest}.key.p8`, where the digest is
+    16 hex digits of the principal's SHA-256, so two principals that differ only in case are two files on a
+    case-insensitive filesystem too. It is never the directory
     `dev` runs in;
   - the directory's **real path**, with every symbolic link resolved, must have no `.git` at or above it
     (`consent_dir_in_worktree`): a repository's worktree, a linked worktree, a home with a `.git` in it, and a link
@@ -47,7 +49,8 @@ request and signs what is typed. The macOS Secure Enclave key and its Swift shim
     is elsewhere (`git --git-dir=… --work-tree=$HOME`, a bare dotfiles repository);
   - it prints where the public key is, a fingerprint of it, and **the grade that describes this key: `tty`**. Ask
     the CA's holder for `--grade tty` and nothing else: a software key is a file any process running as you can
-    read. The private half is never printed;
+    read. The private half is never printed. On macOS it also says that the mode is all `dev` checks, and how to
+    look for an ACL;
   - a key already there is kept (`consent_key_exists`) unless `--force`, since a new key voids the old certificate.
     A replacement is written beside the old key and renamed over it;
   - Windows is not built: no user-only ACL is set there, so `dev` keeps no key (`consent_key_platform_not_built`).
@@ -62,7 +65,8 @@ request and signs what is typed. The macOS Secure Enclave key and its Swift shim
 - Back on the developer's device: `mycelium dev consent enrol --issuer <issuer> --name <name> --cert <cert.pem>
   [--gateway <url>] [--token <bearer>]`. `dev` refuses a certificate that names another principal
   (`certificate_for_another_principal`), another key (`enrolled_key_mismatch`), **any grade but `tty`**
-  (`grade_not_this_keys`), or whose validity has ended (`certificate_expired`). It keeps a good one beside the key:
+  (`grade_not_this_keys`), or that is not valid now by this device's clock (`certificate_expired`,
+  `certificate_not_yet_valid`; a validity that cannot be read is refused too). It keeps a good one beside the key:
   the certificate alone, re-encoded, so nothing else in the file given is kept or sent on. With `--gateway` it
   publishes the certificate through the door below, under a bearer holding `identity:write`.
 - Upgrade every node first: an older node never reads a consent certificate, and its door refuses one
@@ -118,12 +122,17 @@ request and signs what is typed. The macOS Secure Enclave key and its Swift shim
     ([`deprecations.md` §93](../guide/deprecations.md)). The resource must be the record's tool at its node. A
     record that fails either prompts nothing (`arguments_unverified`, `record_unreadable`). So does a request whose
     arguments the record withholds (a data class the policy does not render) or cuts (over the 16 KiB rendering
-    cap): `dev` refuses it and does not show it with a caveat, so such a request cannot be approved with `dev`.
+    cap), and one whose arguments hold a number of magnitude 2^53 or more, which the digest does not pin exactly:
+    `dev` refuses it and does not show it with a caveat, so such a request cannot be approved with `dev`.
   - It shows the record at the terminal it opens by name (`/dev/tty`). The arguments come first, cut to 400
     characters with what was cut said. The request, holder, tool, resource, digest and terms come **last**,
     directly above the question, each identifier cut to 96 characters, so they are on the screen when the answer
-    is typed whatever the record holds. Every character that is not printable ASCII, a letter or a digit is written
-    as an escape; an identifier shows only printable ASCII.
+    is typed whatever the record holds, **on a terminal at least 80 columns wide**: `dev` does not read the
+    terminal's width, and on a narrower one the first of those lines can be above the screen.
+  - **Everything that is not printable ASCII is written as an escape** (`\u{…}`), in the arguments and in every
+    identifier, and so is a space that follows a space. Arguments in another script are therefore shown as escapes
+    and cannot be read as words. That is the price of showing nothing that reorders, hides, stacks on, or passes
+    for other text, and nothing padded into rows that look like the prompt's own.
   - Type `approve` to sign an issue (for `--ttl-secs`, default 300) or `refuse` to sign a refusal. Anything else,
     an empty line or no terminal signs nothing and sends nothing. **Whatever was typed before the prompt appeared
     is discarded**, entered or not, and the prompt says how many entered characters went.
@@ -131,7 +140,9 @@ request and signs what is typed. The macOS Secure Enclave key and its Swift shim
     gateway under the same bearer (`grant:relay`). The bearer signs nothing.
   - At most 8 requests wait; one more is answered `busy` at once and never shown. Ids on the command line are all
     queued before the first prompt, so of more than 8 the rest are `busy`. `busy` is printed by `dev` only: the
-    requesting agent learns nothing until its request lapses.
+    requesting agent learns nothing until its request lapses. Any member can keep a request from being prompted,
+    by writing a second record under its id (`ambiguous_request`) or rewriting its arguments or resource
+    (`arguments_unverified`, `record_unreadable`): availability only.
   - Run one `dev` per terminal. Two sharing a terminal each show a prompt, and a typed answer goes to whichever
     reads first.
   - It prints one JSON line per request (`mycelium.dev.consent/1`): `signed` with the gateway's own status and
@@ -197,7 +208,8 @@ gateway.
     file whose mode says `0600`, and a directory's inheritable ACL puts one on each key created in it. `dev` loads
     such a key. Reading an ACL needs a call into the platform's C library that this crate's no-`unsafe` rule keeps
     out. So on macOS `tty` claims the owner, the mode bits, the link count and the path, and not the ACL. Check
-    with `ls -le`: a `+` after the mode means an ACL is present.
+    with `ls -le`: a `+` after the mode means an ACL is present. The maintainer accepted this gap for the software
+    key on 2026-11-20; it stands until the Touch ID signer (I7's last PR).
   - *It claims no more than it does.* `dev` signs with a software key only under a certificate graded `tty`. If the
     operator certified that key as `os_presence(macos, unbound)` or `recording`, `dev` refuses to enrol and refuses
     to sign (`grade_not_this_keys`): the certificate would say something about the key that the device does not do.
@@ -232,13 +244,12 @@ gateway.
     - what cannot be changed: the holder, the request id, the addressed node, the decision, the ttl, the grade and
       the decider.
     `dev`'s second read catches a change it can see before it signs, and nothing after. **This is closed by the
-    approver signing what it saw**, which the maintainer decided on 2026-11-18 as its own PR after this one
+    approver signing what it saw** — a service decider as well as a developer — which the maintainer decided on
+    2026-11-18 and 2026-11-20 as its own PR after this one
     ([identity and lifecycle, row I7-S](../plans/identity-and-lifecycle.md)). Until it is built no release carries
     consent decisions: `scripts/check-release-blockers.sh --release` refuses the tag
     (`CONSENT_DECISION_DOES_NOT_NAME_WHAT_WAS_SHOWN`).
   - *That the decision was admitted.* `dev` reports that it signed and sent, and quotes the gateway's answer.
-  - *That a word is the word it looks like.* In the arguments, a letter of another script that resembles a Latin
-    one is shown as itself.
 - **No grade, no consent.** A consent certificate with no grade, a grade outside the set, or the grade twice never
   counts.
 - **A key on the curve.** The point must lie on P-256, at issue and at read, so a corrupt public key file can never
