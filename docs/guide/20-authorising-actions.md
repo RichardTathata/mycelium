@@ -883,7 +883,9 @@ warning names a rule for the edge that the hosts do not read.
 
 What the check does not know: placement (a rule for `node:<id>` passes whoever the caller turns out to be);
 `requires_grant` and `requires_values`, which are run-time facts — so a rule with either, placed before a plain
-rule, can be the first match at the provider and refuse a call the check passed: put the plain rule first; a call a gateway frames for a client
+rule, can be the first match at the provider and refuse a call the check passed, and so can a refusing rule that
+names a value (the check takes it not to shadow; it does when the call's value matches or is absent): put the plain
+rule first; a call a gateway frames for a client
 (`rpc_call_as`), which the provider decides for that client; and an evaluator attached in code. **An edge to a
 deployed provider is still read the older way** — the unit principal, any unit's rule — which is not how its
 provider decides it, and a component a unit declares as a plain `[[capability]]` is read that way too

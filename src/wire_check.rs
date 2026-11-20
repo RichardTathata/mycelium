@@ -243,10 +243,13 @@ fn names_a_node(s: &str) -> bool {
 ///   read: the rule is taken to permit.
 ///
 /// **The first allowance that matches decides** (`ReferenceEvaluator::evaluate_with_history`), so a rule that
-/// matches the call and does not permit it stands in the way of every later rule it covers — unless it names a value
-/// (`requires_values`), which makes its match a run-time fact. The converse is a stated bound, not read here: a rule
-/// taken to permit — one under a grant, or naming a value — that at run time matches and does not permit (no grant
-/// presented, the value absent) shadows a later plain rule at the provider, and the check has passed the edge on it.
+/// matches the call and does not permit it stands in the way of every later rule it covers. **Values are not read**
+/// (`requires_values`), and that is a bound in both directions, each stated and neither decidable here: a refusing
+/// rule that names a value is taken **not** to shadow — right when the call carries the value with another one (the
+/// evaluator skips the rule), wrong when the call's value matches or is absent (the rule is then the first match and
+/// the provider refuses a call the check passed on a later rule); and a rule taken to permit — one under a grant, or
+/// naming a value — that at run time matches and does not permit (no grant presented, the value absent) shadows a
+/// later plain rule at the provider, and the check has passed the edge on it.
 fn host_reading(rules: &[crate::capability_config::RuleDecl], mandates: &[&crate::capability_config::MandateDecl], principal: Option<&str>, operation: &str, resource: &str) -> HostReading {
     let enumerated = mandate_operation_form(operation, resource);
     let mut reasons: Vec<String> = Vec::new();
@@ -339,7 +342,9 @@ fn host_reading(rules: &[crate::capability_config::RuleDecl], mandates: &[&crate
             ));
         }
         // A rule that names a value is skipped by the evaluator when the call carries that value with another one
-        // (`Rule::matches`), so whether it is the first match is a run-time fact: it stands in no later rule's way.
+        // (`Rule::matches`), so whether it is the first match is a run-time fact. The check does not read values: it
+        // takes the rule not to stand in a later rule's way, which is wrong when the call's value matches or is
+        // absent (a stated bound, `what-is-proven.md#wire-check-does-not-read-a-rules-values`).
         if r.requires_values.is_empty() {
             blockers.push(r);
         }

@@ -779,13 +779,15 @@ async fn a_rule_naming_a_value_does_not_shadow_the_rule_after_it() {
 /// `routing`; a declared mandate, held by a node, covers it; and the call **presents** one
 /// (`rpc_call_with_mandate`): held by the calling node, enumerating `cap.invoke:cap:route/optimize`, its possession
 /// proof signed with the node's identity key over the operation, resource and arguments the provider derives, its
-/// grant signed by an operator. The provider refuses it, `authority_not_established`, and the receiver sees
-/// nothing: `[authority]` builds an execution authority that entitles grants to this node (or the fleet) and trusts
+/// grant signed by an operator. The provider refuses it — `authority_not_established`, its recorded error `grant not
+/// established: … UntrustedExternal`, where a call with no mandate records only `mandate not established: scope
+/// routing` — and the receiver sees nothing: `[authority]` builds an execution authority that entitles grants to this node (or the fleet) and trusts
 /// no external issuer (`declared_authority::plan`), so no operator's mandate in a scope of its own is ever
 /// established there. The same call with no mandate is refused too (the `mandate` case of
 /// `a_rule_form_no_provider_admits_a_members_call_under_is_not_passed`).
 ///
-/// Not red before: it adds the half that was read from the code. What it cannot show in-process is the other side —
+/// Not red on the overlay before: it adds the half that was read from the code. Its assertion on the recorded error
+/// was seen failing first with the call planted to present no mandate (`MemberCall::Direct`). What it cannot show in-process is the other side —
 /// a provider whose execution authority, attached in code, entitles the operator and so runs the call — because a
 /// node with `[authority]` refuses an authority attached in code beside the table
 /// (`an_authority_attached_in_code_beside_the_table_refuses_the_start`); that side is
@@ -799,7 +801,12 @@ async fn a_presented_mandate_is_not_established_by_a_provider_built_from_its_dec
     assert!(kinds == ["mandate-dependent edge"] && r.exit_code() == 0, "{}", r.render_text());
     let (ran, reply) = door_answers("coop-presented", Some("depot-a"), MemberCall::Mandated("cap.invoke/route/optimize", "routing"), move |_| declarations).await;
     assert!(!ran, "RAN: a provider built from [authority] established an operator's mandate: {reply}");
-    assert_eq!(reply["reason"], "authority_not_established", "refused because the mandate is not established, not for its form: {reply}");
+    // Every refusal at this door carries the reason `authority_not_established`; what tells this one apart is the
+    // error the evaluator records. With no mandate it is "mandate not established: scope routing" and nothing more;
+    // with the presented one, the grant was read and its issuer is not one this authority trusts.
+    assert_eq!(reply["reason"], "authority_not_established", "{reply}");
+    let errors = reply["data"]["errors"].to_string();
+    assert!(errors.contains("grant not established") && errors.contains("UntrustedExternal"), "refused because the presented grant's issuer is untrusted, not for want of a mandate: {reply}");
 }
 
 /// **A hosted component in the `tool` namespace is decided for the calling node too** (#814's review, F3). It is

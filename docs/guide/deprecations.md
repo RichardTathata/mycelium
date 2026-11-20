@@ -5230,9 +5230,13 @@ that matches. `requires_grant` and `requires_values` are not read — a grant an
 — and a rule with either is taken to permit. **That has an order consequence the check does not see:** such a rule
 placed *before* a plain rule is the first match at the provider whenever no grant is presented, or the call lacks the
 named value, and it then decides *indeterminate* — the plain rule after it is never reached and the call is refused,
-while the check has passed the edge on the first rule. Put the plain rule first, or do not write both. (A rule naming
-a value the call carries with *another* value is skipped by the provider, so it shadows nothing, and the check reads
-it so.)
+while the check has passed the edge on the first rule. Put the plain rule first, or do not write both. **The same holds for a rule that
+names a value and refuses** (`requires_values` with `cancellable`, `requires_facts` or `requires_mandate`): the check
+does not read values, so it takes such a rule **not** to shadow the rules after it. That is right when the call
+carries the named value with another value — the provider skips the rule — and wrong when the call's value matches,
+or the call lacks the value: then the rule is the first match, the provider refuses, and the check has passed the edge
+on the plain rule behind it. Which of the two happens is the call's arguments, a run-time fact; an open row on
+[what-is-proven](../operations/what-is-proven.md#wire-check-does-not-read-a-rules-values).
 
 **The three warnings**, each exit 0:
 
