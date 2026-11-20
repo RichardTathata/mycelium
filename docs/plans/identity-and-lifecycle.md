@@ -1981,7 +1981,9 @@ unless it says debug, two in-process nodes on loopback, one run, 2026-11-20, oth
   - `a_cancel_is_on_disk_inside_bound_1_while_the_collector_deletes_a_backlog` (`#[ignore]`: **it fails today**):
     500 calls minted and past their floor, the collector's pass, then a cancel — on disk after 13.7 s (release; 4.3 s on a debug run an hour earlier — the disk's sync time on a machine other builds were writing to), against
     8 ms with the WAL quiet. A minute's records at the soak's rate are more than twice that backlog; the
-    soak's windows are 30 s, so calls cancelled then ran to their windows.
+    soak's windows are 30 s, so calls cancelled then ran to their windows. **It measures the revocation reaching
+    disk**, which O10's chosen fix does not change — only O11's group commit would pass it — so it is O11's test
+    (#816's confirm round, R2).
   - **Not fixed here.** The PR first named three fixes, all about retention or the WAL; #816's review added a fourth,
     forwarding the cancel beside the durable write (with 20 calls in flight the mint's two writes took 250 ms p50 and
     with 50, 600 ms, in debug runs, each waiting its turn). None is small and local. **Decided 2026-11-20 (below):**
@@ -2038,6 +2040,18 @@ unless it says debug, two in-process nodes on loopback, one run, 2026-11-20, oth
     and in its wait: in the new order it sees the registration and waits for `ended` (notified after both steps), or
     sees none and finds the record. **The soak now asserts the receipt's class on every lane** — a stop, or no answer
     in time — where it asserted `cancel_call`'s alone.
+  - **R1, from the confirm round — a window the reorder opened, closed here.** With the flag read before the
+    registration was removed, a sweep landing between the two (the one `call_cancel::answer` runs among them) could
+    cancel work already ending on its own; it was then removed with no record, and a forward answered `stopped` for a
+    call it never stopped. The flag is set only by `sweep`, under row 48, so the drop now reads it and, if clear,
+    removes the registration **in that one hold**. When a cancel and a completion race, whoever takes row 48 first
+    decides: the guard — the call completed, no record, a forward answers `not_running`; or the sweep — the stop was
+    asked before the work ended, a record, `stopped` (the rung `CancelClass::Stopped` already names, *"the work
+    promised to stop and has ended"*, #799's L4). `a_sweep_never_cancels_ended_work_and_a_cancelled_guard_always_leaves_a_record`
+    (`gateway_authority.rs`): a sweep at the drop's start cancels the still-registered work, and the record is there;
+    seen failing with the previous shape planted back (no record). The readers enumerated above re-checked: the sweep
+    can no longer find an uncancelled guard that has begun to end; `answer` reads a registration, or a record, or
+    neither only for a call that completed.
   - **The envelope test was flaky by construction** (17 of the reviewer's 40 runs): it searched for the largest `ot`
     over frames whose size is not repeatable. It now computes the envelope at its most and at its least and asserts
     against those.
@@ -3723,14 +3737,27 @@ Items found while building a row that the row does not own. Each names its home,
     first promise is kept in a way that withholds from the provider what its own promise needs: the revocation waits
     for the disk before it is sent at all. (d) asks whether the gateway may tell the provider what it has decided
     before it can prove it kept the record — a statement about its own decision, which is the gateway's to make.
-  - *Evidence in the tree:* `a_cancel_is_on_disk_inside_bound_1_while_the_collector_deletes_a_backlog`
-    (`src/agent/call_soak_tests.rs`, `#[ignore]`: it fails today, asserting the cancel's latency against the quiet
-    write's) ([ledger](../operations/what-is-proven.md#call-cancel-behind-collector)).
+  - *Evidence in the tree:* the soak's failures over a `flush` gateway
+    ([ledger](../operations/what-is-proven.md#call-cancel-behind-collector)). The pinned
+    `a_cancel_is_on_disk_inside_bound_1_while_the_collector_deletes_a_backlog` measures the revocation reaching disk,
+    which (d) does not change: it is **O11's** test (#816's confirm round, R2).
   - **Decided 2026-11-20 (the maintainer): (d).** The gateway forwards the cancel at once and holds only the caller's
     acknowledgement for the durable write; if the write then fails, the call has still been stopped and the caller is
     told the cancel was not durable (the rule *"stands in this process only, and is not forwarded"* is reversed). Its
     own PR, after #816; then exit 14's soak re-run over a durable gateway under `flush` and under the default, and
     only then is I4 closed. (a) and (b) are not taken. (c) is O11. *Home:* that PR.
+  - **What that PR must add, test first** (#816's confirm round, R2): during a `flush` burst ahead of the revoke (the
+    collector's pass, or plain owned writes), **the provider's stop arrives inside bound 1 while the caller's
+    acknowledgement still waits for the disk** — the test that (d) passes and today's code fails. The disk-latency
+    test pinned here is O11's, not its.
+  - **The crash bound that PR must state and test** (#816's confirm round): under (d) the forwarded revocation is not
+    yet in the gateway's KV — the required-sync write applies it only after its sync — so a gateway that crashes
+    before the sync has no record of the revocation after its restart; the provider holds it only in memory (the hold
+    and the window, D-4: nothing persisted); and after a **provider** restart, a call re-presented inside its window
+    is admitted again and is not refused `revoked`, since no KV record exists to read. The bound: such a cancel lasts
+    as long as the provider process that holds it, and at most to the call's window. The caller is told the cancel
+    was not durable, so the bound is announced, not silent; the PR's test crashes the gateway between the forward and
+    the sync, restarts the provider, and shows the re-presented call admitted, as stated.
 - **O11 · WAL group commit** *(open; a row of its own by the maintainer's decision of 2026-11-20, from O10; **before
   the wave 1b release**)*. The WAL's writer commits what is queued under one sync, so no synced append waits for a
   sync per record ahead of it — the cause O10's (d) works around for a cancel, and what still holds a mint, a grant's
@@ -3740,4 +3767,6 @@ Items found while building a row that the row does not own. Each names its home,
   `TriggerSnapshot` and `Shutdown` end a batch, so *"everything before this is durable"* still holds; recorded sim
   traces are re-recorded. Unchanged: the on-disk format, and *"apply, then hand to the WAL"*. Not covered by it: the
   writer's inline threshold snapshot, and the evidence journal's writer, which syncs one record at a time the same
-  way (`src/agent/journal.rs`). *Home:* its own plan row, to be written.
+  way (`src/agent/journal.rs`). *Evidence it must pass:* `a_cancel_is_on_disk_inside_bound_1_while_the_collector_deletes_a_backlog`
+  (`src/agent/call_soak_tests.rs`, `#[ignore]`: it fails today — a revocation on disk at about 700 times the quiet
+  write behind 1 000 deletes), un-ignored. *Home:* its own plan row, to be written.

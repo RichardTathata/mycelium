@@ -523,8 +523,11 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   appends (read, not run).
   **Fixed — a stopped call could be answered `not_running`** (a race since I4's PR 3a, unreleased; found by #816's
   review): a cancelled work guard removed its registration before it kept its stop record, and a cancel-forward
-  landing between the two found neither. The record is now kept first
-  (`a_stopped_calls_registration_is_removed_only_after_its_stop_record_is_kept`), and the soak asserts the receipt's
+  landing between the two found neither. The record is now kept first, and an uncancelled guard reads its flag and
+  removes its registration in one hold, so no sweep can cancel work that has begun to end and a provider never answers
+  `stopped` for a call that completed (#816's confirm round;
+  `a_stopped_calls_registration_is_removed_only_after_its_stop_record_is_kept`,
+  `a_sweep_never_cancels_ended_work_and_a_cancelled_guard_always_leaves_a_record`). The soak asserts the receipt's
   class on every lane.
   **Also found, each a ledger row:** an execution authority never forgets a `grant:` scope it was fed (about 430 B
   each; [ledger](docs/operations/what-is-proven.md#authority-grant-scopes-not-reclaimed)); and a node's memory for

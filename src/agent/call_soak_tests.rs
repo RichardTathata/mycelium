@@ -1150,10 +1150,13 @@ async fn the_memory_a_held_call_window_takes_is_measured_on_each_node() {
 /// pass took (and 25 ms), so a disk that syncs in a millisecond does not pass it unfixed. **It is not, today** —
 /// 4.3 s on one run and 13.7 s on another against 5 and 8 ms quiet, on the machine of the dated run — during which
 /// the call runs on, to its window if that comes first. That is why the 10⁵ soak fails over a `Flush` gateway.
-/// Ignored until the fix, which is not this PR's to choose: four candidates are on the plan's §9 O10
-/// (`docs/operations/what-is-proven.md#call-cancel-behind-collector`).
+/// **It is the test of the WAL's group commit (the plan's §9 O11), not of O10's fix** (#816's confirm round, R2): the
+/// fix the maintainer chose for O10 forwards the cancel at once and holds only the caller's acknowledgement for the
+/// disk, which changes when the provider is told and not when the revocation reaches disk — what this measures. O10's
+/// own PR adds its own test: the provider's stop inside bound 1 during such a burst while the acknowledgement waits.
+/// Ignored until O11 (`docs/operations/what-is-proven.md#call-cancel-behind-collector`).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "fails today — the soak's finding: a revoke waits behind the collector's deletes in the WAL; run it with -- --ignored --nocapture; un-ignore with the fix"]
+#[ignore = "fails today — the soak's finding: a revocation waits its turn at the WAL behind the collector's deletes; the test of WAL group commit (plan §9 O11); run it with -- --ignored --nocapture; un-ignore with O11"]
 async fn a_cancel_is_on_disk_inside_bound_1_while_the_collector_deletes_a_backlog() {
     const BACKLOG: usize = 500;
     let n = lone_with(true, 1).await;
