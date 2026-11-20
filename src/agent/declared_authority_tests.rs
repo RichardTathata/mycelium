@@ -570,7 +570,7 @@ async fn door_answers(tag: &str, unit: Option<&str>, call: MemberCall, make: imp
             let (ns, name) = crate::hosted_capability_of(&kind).expect("a hosted capability's kind");
             let (operation, key) = crate::hosted_capability_call(ns, name);
             let m = Mandate {
-                holder: PrincipalId::new(&crate::agent::gateway_caller::node_principal(&id)).unwrap(),
+                holder: PrincipalId::new(crate::agent::gateway_caller::node_principal(&id)).unwrap(),
                 established_by: PrincipalId::new("operator:coop").unwrap(),
                 purpose: scope.into(),
                 scope: scope.into(),
