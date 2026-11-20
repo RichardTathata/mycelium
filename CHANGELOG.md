@@ -505,17 +505,33 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `call:` views and records back to nothing. 10³ calls run on every merge; **10⁵ were run once, over a gateway with
   no `[persistence]`**, and are dated on the ledger with the costs re-measured on the shipped code (a provider's
   `assess` of a `call:` mandate 117.5 µs, the gateway's mint 63 µs and its two durable writes 9.14 ms, the worst-case
-  envelope 3 226 B of the 8 192 B cap) and the memory a held window takes (about 2.1 KiB per call at a gateway and
+  envelope computed at its most against the 8 192 B cap) and the memory a held window takes (about 2.1 KiB per call at a gateway and
   3.2 KiB per window at a provider, at the 64-byte term cap).
-  **Found, open:** on a gateway with `[persistence]`, a cancel asked for while the collector's minute pass is
-  deleting expired `call/` records waits for every delete queued ahead of it in the WAL — seconds for a thousand
-  records — and until then nothing of it is applied, gossiped or forwarded; a new call's mint waits the same way.
-  The 10⁵ soak fails there, a test pins it (ignored: it fails today), and the fix is the maintainer's to choose
-  ([ledger](docs/operations/what-is-proven.md#call-cancel-behind-collector)); until it lands a call cancelled in
-  that interval runs on, at most to its mandate's window (`call_mandate_ttl_secs`). **Also found:** an execution
-  authority never forgets a `grant:` scope it was fed
-  ([ledger](docs/operations/what-is-proven.md#authority-grant-scopes-not-reclaimed)). `MAX_CALL_WINDOWS`' doc
-  comment said a held scope is under 1 KiB; measured, it is about 1.4 KiB, and the comment says so.
+  **Found, open — a cancel waits its turn at the gateway's WAL.** The WAL's writer syncs one record at a time in
+  arrival order — every append under `sync_mode = "flush"`, every required-sync write under any mode — and a
+  cancel's revocation is a required-sync write that is neither gossiped nor forwarded until its own sync returns. So
+  under `flush` any burst of writes holds a cancel from reaching the provider (the collector's minute pass is how
+  the soak met it: 13.7 s behind 1 000 deletes), and under any mode a cancel queues behind the mints in flight (the
+  reviewer measured 1.7 s behind 300 under `flush`, 1.25 s under the default `async`); a new call's mint waits the
+  same way. The call runs on meanwhile, at most to its mandate's window (`call_mandate_ttl_secs`); work on the
+  gateway node itself stops at once. The 10⁵ soak fails over a `flush` gateway, a test pins the defect (ignored: it
+  fails today). **Decided (the maintainer, 2026-11-20), not in this release's change:** the gateway will forward a
+  cancel at once and hold only the caller's acknowledgement for the durable write — a cancel the disk then refuses has
+  still stopped the call, and the caller is told it was not durable — in a later change; WAL group commit is planned
+  separately ([ledger](docs/operations/what-is-proven.md#call-cancel-behind-collector)). The same queue already serves, in
+  2.40.0, a grant's revocation, grant and use-marker records, `KvHandle`'s required-sync writes and consensus's
+  appends (read, not run).
+  **Fixed — a stopped call could be answered `not_running`** (a race since I4's PR 3a, unreleased; found by #816's
+  review): a cancelled work guard removed its registration before it kept its stop record, and a cancel-forward
+  landing between the two found neither. The record is now kept first
+  (`a_stopped_calls_registration_is_removed_only_after_its_stop_record_is_kept`), and the soak asserts the receipt's
+  class on every lane.
+  **Also found, each a ledger row:** an execution authority never forgets a `grant:` scope it was fed (about 430 B
+  each; [ledger](docs/operations/what-is-proven.md#authority-grant-scopes-not-reclaimed)); and a node's memory for
+  the compliance audit chain grows by 2.6 records a cancellable call at every node until an operator prunes it — most
+  of what the soak's process held ([ledger](docs/operations/what-is-proven.md#audit-chain-grows-per-call); predates
+  I4). `MAX_CALL_WINDOWS`' doc comment said a held scope is under 1 KiB; measured, it is about 1.4 KiB, and the
+  comment says so.
   *Check:* `cargo test --lib --features compliance,a2a call_soak_tests`.
 
 - **Developer consent certificates: the certificate and its principal** (identity-and-lifecycle I7, PR 1 of 3;

@@ -813,14 +813,19 @@ impl WorkGuard {
 
 impl Drop for WorkGuard {
     fn drop(&mut self) {
-        let was = self.authority.running.lock().unwrap_or_else(|e| e.into_inner()).remove(&self.id);
+        // **The stop record first, the registration's removal second** (#816's review; the order was the reverse since
+        // I4's PR 3a). A reader that finds no registration under a term reads the stop record next
+        // (`call_cancel::answer`): with the registration removed first, a cancel-forward landing between the two steps
+        // found neither and answered a stopped call `not_running`. In this order a reader sees the registration, or
+        // the record, or both — never neither. Three flat acquisitions (rows 48, 49, 48), none held across another.
         if self.is_cancelled() {
+            let was = self.authority.running.lock().unwrap_or_else(|e| e.into_inner()).get(&self.id).map(|r| r.work.mandate.clone());
             let at = |v: &std::sync::atomic::AtomicU64| match v.load(std::sync::atomic::Ordering::Acquire) {
                 0 => None,
                 t => Some(t),
             };
             let now = (self.now_ms)();
-            let mandate = was.and_then(|r| r.work.mandate);
+            let mandate = was.flatten();
             let record = NamedStop {
                 established_by: mandate.as_ref().map(|m| m.established_by.as_str().to_string()),
                 scope: mandate.as_ref().map(|m| m.scope.clone()),
@@ -838,7 +843,11 @@ impl Drop for WorkGuard {
                 stops.pop_front();
             }
             stops.push_back(record);
+            drop(stops);
+            #[cfg(test)]
+            call_hooks::fire(&self.authority, call_hooks::Stage::StopRecordedBeforeRemoval);
         }
+        self.authority.running.lock().unwrap_or_else(|e| e.into_inner()).remove(&self.id);
         // A cancel-forward waiting for this work to end is woken (identity-and-lifecycle I4, PR 3).
         self.authority.ended.notify_waiters();
     }
@@ -1733,6 +1742,8 @@ pub(crate) mod call_hooks {
         BeforeLocalRead,
         /// The local copy has been read; nothing is offered yet.
         AfterLocalRead,
+        /// In a cancelled work guard's drop: its stop record is kept, its registration not yet removed (#816's review).
+        StopRecordedBeforeRemoval,
     }
 
     pub(crate) type Hook = Arc<dyn Fn(Stage) + Send + Sync>;
@@ -2823,6 +2834,40 @@ mod call_cancel_tests {
         drop(guard);
         assert_eq!(a.call_stop_recorded(&p(A), "call:c42", "c42"), Some(true), "A's own record");
         assert_eq!(a.call_stop_recorded(&p(B), "call:c42", "c42"), None, "never B's");
+    }
+
+    /// **A reader never finds a stopped call with neither its registration nor its stop record** (#816's review, a race
+    /// since PR 3a). The provider's answer to a cancel-forward reads the registrations under the term and then the
+    /// stop record (`call_cancel::answer`); a cancelled guard's drop does two things under two locks. Between them —
+    /// where the hook reads as the answer does — the call is still registered **and** its record is kept, so the
+    /// answer waits for the end or reads `stopped`, never `not_running`. Seen failing first with the drop's old order
+    /// planted back (the registration removed before the record was pushed): at the hook the registration was
+    /// already gone, `(0, 0)` — in that order a reader landing before the push found no registration and no record.
+    #[test]
+    fn a_stopped_calls_registration_is_removed_only_after_its_stop_record_is_kept() {
+        let a = provider();
+        let c = mint(&key_a(), A, "c43", OP, RES, &args(), 1_000, 60_000);
+        let s = a.assess_call(A, OP, RES, &args(), &c, 2_000, &members(), |_| None);
+        assert_eq!(s.binding.map(|b| b.state), Some(MandateState::Established));
+        let m = &c.grant.mandate;
+        let guard = a.begin(AuthorizedWork::new(mandate_operation(OP, RES), Some(m.clone()), m.valid_until_ms), Arc::new(|| 3_000));
+        let revoking = checkpoint(&key_a(), A, "call:c43", 2, 2_500, &["c43"]);
+        assert_eq!(a.hold_call_revocation(&p(A), &revoking, 2_600, &members()), CallRevocationHeld::Held { registered: true });
+        assert_eq!(a.sweep(2_700), 1);
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (a2, seen2) = (Arc::clone(&a), Arc::clone(&seen));
+        call_hooks::HOOKS.pin().insert(
+            call_hooks::key(&a),
+            Arc::new(move |stage| {
+                if stage == call_hooks::Stage::StopRecordedBeforeRemoval {
+                    seen2.lock().unwrap().push((a2.call_registrations(&p(A), "call:c43"), a2.call_stop_recorded(&p(A), "call:c43", "c43")));
+                }
+            }),
+        );
+        drop(guard);
+        call_hooks::HOOKS.pin().remove(&call_hooks::key(&a));
+        assert_eq!(*seen.lock().unwrap(), vec![((1, 0), Some(true))], "between the drop's two steps: still registered, and the stop already on record");
+        assert_eq!((a.call_registrations(&p(A), "call:c43"), a.call_stop_recorded(&p(A), "call:c43", "c43")), ((0, 0), Some(true)), "after it: ended, and stopped");
     }
 
     /// **M3: holds from cancel-forwards have a budget of their own, per sender, and take nothing admitted calls need.**

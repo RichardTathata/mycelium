@@ -19,8 +19,9 @@
 //! read: it is asserted as **registrations**, one per call and a second for each both-slots call. Then the odd calls
 //! are cancelled and the even ones released. What the soak asserts is in [`soak`]'s doc comment.
 //!
-//! **The gateway's `[persistence]`.** The soak passes over a gateway without it and **fails** over one with it, at
-//! the collector's minute pass: the finding, pinned at the end of this file by a test that fails today
+//! **The gateway's `[persistence]`.** The soak passes over a gateway without it and **fails** over one with it under
+//! `SyncMode::Flush` (what `Soak::persist` sets), at the collector's minute pass: a cancel waits its turn at the WAL,
+//! one sync per synced append. The finding, pinned at the end of this file by a test that fails today
 //! (`a_cancel_is_on_disk_inside_bound_1_while_the_collector_deletes_a_backlog`). The CI run and the dated run are
 //! therefore of a gateway with no `[persistence]`, and say so.
 //!
@@ -63,7 +64,8 @@ struct Soak {
     batch: usize,
     /// `call_mandate_ttl_secs`: every window ends this long after its mint, so it bounds what both nodes hold.
     ttl_secs: u64,
-    /// The gateway's `[persistence]`: with it, each mint's two records are fsynced before the call is sent.
+    /// The gateway's `[persistence]`, under `SyncMode::Flush`: with it, each mint's two records are fsynced before the
+    /// call is sent.
     persist: bool,
     /// The whole soak fails past this.
     within: Duration,
@@ -287,15 +289,30 @@ async fn soak_node(port: u16, http_port: u16, o: NodeOpts<'_>) -> Node {
 
 /// The soak's two nodes, ready: each holds the other's key, and the gateway sees every tool, both skills and the
 /// provider's caller-context marker (#802).
-async fn fleet(s: &Soak, tools: Arc<Tools>) -> (Arc<Node>, Arc<Node>, std::path::PathBuf) {
+/// A fleet's certificate directory, removed when the test lets go of it — on a failure too (#816's review: a failing
+/// soak left its CA directory behind).
+struct CertDir(std::path::PathBuf);
+
+impl Drop for CertDir {
+    fn drop(&mut self) {
+        // Guarded: only this helper's own directory under the temp dir.
+        let ours = self.0.starts_with(std::env::temp_dir()) && self.0.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("i4-soak-ca-"));
+        if ours {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+}
+
+async fn fleet(s: &Soak, tools: Arc<Tools>) -> (Arc<Node>, Arc<Node>, CertDir) {
     let port = crate::test_util::alloc_port;
     let (gport, pport) = (port(), port());
     let (gid, pid) = (NodeId::new("127.0.0.1", gport).unwrap(), NodeId::new("127.0.0.1", pport).unwrap());
     let cert_dir = std::env::temp_dir().join(format!("i4-soak-ca-{gport}"));
     let _ = std::fs::remove_dir_all(&cert_dir);
+    let cert_dir = CertDir(cert_dir);
     let mcp_tools = s.batch / 5;
-    let g = soak_node(gport, port(), NodeOpts { cert_dir: &cert_dir, bootstrap: vec![], provider: &pid, gateway: &gid, mint: true, ttl_secs: s.ttl_secs, persist: s.persist, mcp_tools, tools: None }).await;
-    let p = soak_node(pport, port(), NodeOpts { cert_dir: &cert_dir, bootstrap: vec![gid.clone()], provider: &pid, gateway: &gid, mint: false, ttl_secs: s.ttl_secs, persist: false, mcp_tools, tools: Some(tools) }).await;
+    let g = soak_node(gport, port(), NodeOpts { cert_dir: &cert_dir.0, bootstrap: vec![], provider: &pid, gateway: &gid, mint: true, ttl_secs: s.ttl_secs, persist: s.persist, mcp_tools, tools: None }).await;
+    let p = soak_node(pport, port(), NodeOpts { cert_dir: &cert_dir.0, bootstrap: vec![gid.clone()], provider: &pid, gateway: &gid, mint: false, ttl_secs: s.ttl_secs, persist: false, mcp_tools, tools: Some(tools) }).await;
     let knows = |x: &GossipAgent, n: &NodeId| x.task_ctx.peer_keys.pin().get(n).is_some_and(|k| !k.is_empty());
     assert!(until(|| knows(&g.a, &pid) && knows(&p.a, &gid), Duration::from_secs(20)).await, "the nodes learned each other's keys");
     for k in 0..mcp_tools {
@@ -424,7 +441,7 @@ struct Report {
 ///   `finished` counts exactly the others;
 /// - **the counters reconcile**: one mint per call and none refused; no window, checkpoint or hold refused at the
 ///   provider; no cancel unmatched, no cancel-forward refused, the `/mcp` table neither full nor colliding, and empty
-///   at the end; every `cancel_call` receipt a stop (`stopped`, `stop_requested`) or `delivery_unknown` — no answer
+///   at the end; every cancel-forward's receipt, on every lane, a stop (`stopped`, `stop_requested`) or `delivery_unknown` — no answer
 ///   to the forward in its 5 s, which is not a negative: it is counted and printed with the call's timeline, and the
 ///   call must still have stopped inside bound 1;
 /// - **both nodes' views return to zero after the last window**: the gateway's `(0, 0, 0)`; the provider's `call:`
@@ -441,7 +458,7 @@ async fn soak(s: Soak) -> Report {
     }
     let began = Instant::now();
     let tools = Tools::new(s.n);
-    let (g, p, cert_dir) = fleet(&s, Arc::clone(&tools)).await;
+    let (g, p, _cert_dir) = fleet(&s, Arc::clone(&tools)).await;
     let http = reqwest::Client::builder().timeout(Duration::from_secs(120)).build().unwrap();
     let (mcp_url, a2a_url) = (format!("http://127.0.0.1:{}/mcp", g.http_port), format!("http://127.0.0.1:{}/a2a", g.http_port));
     let rss_start = rss_kib();
@@ -721,6 +738,13 @@ async fn soak(s: Soak) -> Report {
     );
     assert_eq!(call_cancel::test_hooks::mcp_calls_held(g.ctx()), 0, "the /mcp table holds no finished call");
     assert_eq!(receipts.values().sum::<usize>(), both_n / 2, "one receipt for each cancel_call");
+    // Every lane's receipt (#816's review): a door's forward is sent on a task of its own and counted when the provider
+    // answers, so the count is waited for; then each of the n/2 is a stop, or no answer in time — never `not_running`
+    // for a call this soak saw stopped, `not_registered`, `not_held`, `unbounded` or a refusal.
+    assert!(until(|| door_receipts(&g).values().sum::<u64>() >= (s.n / 2) as u64, Duration::from_secs(30)).await, "a receipt for every cancel: {:?}", door_receipts(&g));
+    let by_class = door_receipts(&g);
+    assert_eq!(by_class.values().sum::<u64>(), (s.n / 2) as u64, "one receipt a cancel, whichever door sent it: {by_class:?}");
+    assert!(by_class.keys().all(|class| ["stopped", "stop_requested", "delivery_unknown"].contains(class)), "every cancel-forward's receipt is a stop, or no answer in time: {by_class:?}");
     for n in [&g, &p] {
         assert!(n.ctx().call_issuer.cancel_forwards_refused.pin().is_empty(), "no cancel-forward was refused");
         assert_eq!((n.authority.call_windows_refused(), n.authority.call_checkpoints_refused(), n.authority.call_holds_refused()), (0, 0, 0), "nothing refused at an authority");
@@ -741,7 +765,9 @@ async fn soak(s: Soak) -> Report {
     assert!(g.ctx().call_issuer.issued_terms().is_empty(), "the gateway holds no call as issued");
     assert_eq!(g.call_keys(), 0, "the gateway's own call/ records are collected");
     let records_collected = c.call_records_collected.load(Ordering::Relaxed) as usize;
-    assert_eq!(records_collected, 2 * s.n, "two records a call, each collected once (the gateway held {held_before} at the last collection)");
+    // Not an equality (#816's review): the node's own collector runs the same pass each minute on another task, and
+    // two passes that overlap both count a key. What is asserted is the KV, above; the counter is a floor.
+    assert!(records_collected >= 2 * s.n, "two records a call were collected: {records_collected} (the gateway held {held_before} at the last collection)");
     assert!(until(|| p.call_keys() == 0, Duration::from_secs(120)).await, "the provider's copies go with the gateway's tombstones: {} left", p.call_keys());
 
     let rss_end = rss_kib();
@@ -752,7 +778,6 @@ async fn soak(s: Soak) -> Report {
     let (forwards, drops) = (door_receipts(&g), transport_drops(&g, &p));
     g.a.shutdown().await;
     p.a.shutdown().await;
-    let _ = std::fs::remove_dir_all(&cert_dir);
     cancel_to_answer.values_mut().for_each(|v| v.sort());
     phases.values_mut().for_each(|v| v.sort());
     Report { drops, forwards, slowest, phases, worst: worst.map(|w| w.1).unwrap_or_default(), unanswered: unanswered_lines, cancel_to_answer, took, receipts, peak_windows, peak_issued, rss: (rss_start, rss_peak.max(rss_end), rss_end), grant_scopes_left: both_n, records_collected, mint_writes }
@@ -798,7 +823,7 @@ async fn a_thousand_cancellable_calls_half_cancelled_while_running_all_reconcile
 /// once, in release, and dated on `docs/operations/what-is-proven.md`; not run in CI. Bounded: the soak fails past
 /// two hours, and each batch has its own deadlines.
 ///
-/// **The dated run is of a gateway with no `[persistence]`.** With it (`I4_SOAK_PERSIST=1`) the soak **fails** at
+/// **The dated run is of a gateway with no `[persistence]`.** With it under `SyncMode::Flush` (`I4_SOAK_PERSIST=1`) the soak **fails** at
 /// one of the gateway's collection passes with a backlog — it first stalled 60 to 130 s in, between calls 1 100 and
 /// 2 600, in every run made: the finding pinned by [`a_cancel_is_on_disk_inside_bound_1_while_the_collector_deletes_a_backlog`]. Exit 14 as the
 /// plan states it — over a fleet whose gateway keeps the promise of exit 11 — is therefore **not met**.
@@ -850,11 +875,14 @@ fn window_record(key: &ed25519_dalek::SigningKey, term: &str, until_ms: u64) -> 
 /// **Exit 18's bytes: the worst-case envelope against the 8 KiB cap.** One envelope carrying everything a call can:
 /// an OIDC user's exchanged token (`ot`, RS256, DPoP-bound by `cnf.jkt`) under the gateway's added signature (`so`);
 /// a client's grant in slot 1, bound to its resource and policy revision, with the client's own `cs`/`cn`; the
-/// resource claim; and the minted `call:` mandate with its base64 checkpoint in slot 2. It fits, and its bytes are
-/// printed by field. Then the token is grown until the producer refuses: the largest `ot` that still fits is printed
-/// and held to a floor, and one byte more frames nothing (the dispatch's refusal by name, `caller_context_too_large`,
-/// is `an_envelope_past_the_cap_with_its_call_mandate_is_refused_by_name_and_writes_nothing`). A DPoP **proof** is not
-/// in the envelope: it goes to the IdP with the exchange.
+/// resource claim; and the minted `call:` mandate with its base64 checkpoint in slot 2. Its size is **computed at its
+/// most** — two of its signatures are JSON arrays of decimals, whose width depends on the signature's bytes — and that
+/// fits the cap; its bytes are printed by field. The room left for the token is computed the same way: a token of
+/// that length is framed every time, held to a floor of 4 KiB, and one too long for even the shortest signatures is
+/// framed by none (the dispatch's refusal by name, `caller_context_too_large`, is
+/// `an_envelope_past_the_cap_with_its_call_mandate_is_refused_by_name_and_writes_nothing`). A DPoP **proof** is not
+/// in the envelope: it goes to the IdP with the exchange. Seen failing first as it was written before #816's review
+/// (a binary search over frames whose size is not repeatable): 17 of the reviewer's 40 runs.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_worst_case_envelope_fits_the_cap_and_its_bytes_are_stated() {
     use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
@@ -904,23 +932,45 @@ async fn the_worst_case_envelope_fits_the_cap_and_its_bytes_are_stated() {
     let env: serde_json::Value = serde_json::from_slice(&framed[7..7 + len]).unwrap();
     let field = |k: &str| serde_json::to_vec(&env[k]).unwrap().len();
     assert!(["m", "cm", "ot", "so", "cs", "cn", "r"].iter().all(|k| !env[*k].is_null()), "every slot is carried: {env}");
-    assert!(len <= MAX_ENVELOPE_BYTES);
-    // Grow the token until the producer refuses: `fits(l)` is monotone in the token's length.
-    let fits = |l: usize| frame(&"x".repeat(l)).is_some();
-    let (mut lo, mut hi) = (ot.len(), MAX_ENVELOPE_BYTES);
-    assert!(fits(lo) && !fits(hi));
-    while hi - lo > 1 {
-        let mid = (lo + hi) / 2;
-        if fits(mid) { lo = mid } else { hi = mid }
+    // **One sample is not the worst case** (#816's review): a `SignedMandateGrant`'s signature is a `Vec<u8>`, which
+    // JSON writes as an array of decimals — 129 to 257 bytes for 64 signature bytes — and each frame mints a fresh
+    // `cm` with fresh signatures, so the envelope's size moves by tens of bytes from one frame to the next. The
+    // bounds are therefore computed: every byte of every array-encoded signature at three digits (the most), and at
+    // one (the least). Everything else in the envelope has a fixed width.
+    let (mut arrays, mut to_most, mut to_least) = (0usize, 0usize, 0usize);
+    let mut stack = vec![&env];
+    while let Some(v) = stack.pop() {
+        match v {
+            serde_json::Value::Array(a) if a.len() == 64 && a.iter().all(|b| b.as_u64().is_some_and(|b| b < 256)) => {
+                arrays += 1;
+                for digits in a.iter().map(|b| b.to_string().len()) {
+                    to_most += 3 - digits;
+                    to_least += digits - 1;
+                }
+            }
+            serde_json::Value::Array(a) => stack.extend(a),
+            serde_json::Value::Object(o) => stack.extend(o.values()),
+            _ => {}
+        }
     }
+    assert_eq!(arrays, 2, "the two array-encoded signatures: the client's grant (slot 1) and the call: mandate (slot 2)");
+    let (most, least) = (len + to_most, len - to_least);
+    assert!(most <= MAX_ENVELOPE_BYTES, "the envelope fits the cap whatever its signatures' bytes: at most {most} B");
+    // The room an exchanged token has beside everything else, whatever the signatures: the cap less the rest at its
+    // most. A token of that length always fits; one longer than the rest at its least allows never does.
+    let always_fits = MAX_ENVELOPE_BYTES - (most - ot.len());
+    let never_fits = MAX_ENVELOPE_BYTES - (least - ot.len()) + 1;
     eprintln!(
-        "i4-pr4 exit 18, the worst-case envelope: {len} B of the {MAX_ENVELOPE_BYTES} B cap — ot {} B (so {} B), slot 1 (m, a client's grant) {} B, cs {} B, cn {} B, r {} B, slot 2 (cm) {} B of which its checkpoint {} B; the rest (p, via, s, t, k, sig, n, o, sn) {} B. The largest ot that still fits: {lo} B.",
+        "i4-pr4 exit 18, the worst-case envelope: at most {most} B of the {MAX_ENVELOPE_BYTES} B cap (this frame {len} B, at least {least} B: two signatures are JSON arrays of decimals) — ot {} B (so {} B), slot 1 (m, a client's grant) {} B, cs {} B, cn {} B, r {} B, slot 2 (cm) {} B of which its checkpoint {} B; the rest (p, via, s, t, k, sig, n, o, sn) {} B. An ot of up to {always_fits} B fits whatever the signatures; one of {never_fits} B never does.",
         field("ot"), field("so"), field("m"), field("cs"), field("cn"), field("r"), field("cm"), serde_json::to_vec(&env["cm"]["checkpoint"]).unwrap().len(),
         len - ["ot", "so", "m", "cs", "cn", "r", "cm"].iter().map(|k| field(k)).sum::<usize>(),
     );
     // A floor under the room an IdP's token has, so a field added to the envelope shows here before it shows in a fleet.
-    assert!(lo >= 4_096, "with every other slot carried, an exchanged token of 4 KiB still fits: {lo}");
-    assert!(frame(&"x".repeat(lo + 1)).is_none(), "one byte more and the producer frames nothing");
+    assert!(always_fits >= 4_096, "with every other slot carried, an exchanged token of 4 KiB fits whatever the signatures: {always_fits}");
+    for _ in 0..20 {
+        assert!(frame(&"x".repeat(always_fits)).is_some(), "a token of {always_fits} B fits on every frame");
+        assert!(frame(&"x".repeat(never_fits)).is_none(), "a token of {never_fits} B is framed by none");
+    }
     assert!(n.ctx().call_issuer.issued_terms().is_empty() && n.call_keys() == 0, "a framed envelope that was never recorded holds and writes nothing");
     n.a.shutdown().await;
 }
@@ -1082,19 +1132,26 @@ async fn the_memory_a_held_call_window_takes_is_measured_on_each_node() {
     n.a.shutdown().await;
 }
 
-/// **The soak's finding (2026-11-20): a cancel waits behind the collector's deletes.** A gateway with
-/// `[persistence]` mints 500 calls; once their windows and D-5's floor have passed, its collector's pass
-/// (`call_issuer::collect`, what `start_collector` runs each minute) deletes their 1 000 records in one go — each a
-/// WAL append, which under `SyncMode::Flush` the WAL's writer syncs one at a time. A cancel asked for at that moment
-/// is a required-sync write (`revoke` → `kv_set_requiring_sync`), which is **durable first: nothing is applied,
-/// gossiped or forwarded until its own sync returns** — so it waits for every delete queued ahead of it.
+/// **The soak's finding (2026-11-20): a cancel waits its turn at the gateway's WAL** — here, behind the collector's
+/// deletes. A gateway with `[persistence]` under `SyncMode::Flush` mints 500 calls; once their windows and D-5's floor
+/// have passed, its collector's pass (`call_issuer::collect`, what `start_collector` runs each minute) deletes their
+/// 1 000 records in one go — each a WAL append, which under `Flush` the WAL's writer syncs one at a time, in arrival
+/// order. A cancel asked for at that moment is a required-sync write (`revoke` → `kv_set_requiring_sync`), which is
+/// **durable first: nothing is applied, gossiped or forwarded until its own sync returns** — so it waits for every
+/// delete queued ahead of it, and the provider is not told meanwhile.
 ///
-/// Asserted: the cancel is on disk **inside bound 1's *F* (2 s)** of being asked, as one asked just before the pass
-/// is (printed). **It is not, today** — 4.3 s on one run and 13.7 s on another on the machine of the dated run
-/// (4 to 14 ms a queued delete, as the disk allowed), and longer for a minute's records at the soak's rate, during
-/// which the call runs on, to its window if that comes first. That is why the 10⁵ soak fails over a gateway with `[persistence]`. Ignored until the
-/// fix, which is not this PR's to choose: pacing the collector, or a WAL that does not sync each tombstone, or one
-/// that commits a queue's worth of records under one sync (`docs/operations/what-is-proven.md#call-cancel-behind-collector`).
+/// **The collector is one trigger, not the defect** (#816's review): the defect is one sync per synced append, served
+/// in arrival order. Under `Flush` any burst of appends does the same (the reviewer: 5.9 s behind 1 000 plain owned
+/// writes); under any mode required-sync writes queue behind each other (1.7 s behind 300 concurrent mints under
+/// `Flush`, 1.25 s under the default `Async`, where the collector's deletes hold nothing: 15 ms). This test pins the
+/// one trigger the soak met.
+///
+/// Asserted — **structure, not a wall clock**: the cancel is on disk within ten times what one asked just before the
+/// pass took (and 25 ms), so a disk that syncs in a millisecond does not pass it unfixed. **It is not, today** —
+/// 4.3 s on one run and 13.7 s on another against 5 and 8 ms quiet, on the machine of the dated run — during which
+/// the call runs on, to its window if that comes first. That is why the 10⁵ soak fails over a `Flush` gateway.
+/// Ignored until the fix, which is not this PR's to choose: four candidates are on the plan's §9 O10
+/// (`docs/operations/what-is-proven.md#call-cancel-behind-collector`).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "fails today — the soak's finding: a revoke waits behind the collector's deletes in the WAL; run it with -- --ignored --nocapture; un-ignore with the fix"]
 async fn a_cancel_is_on_disk_inside_bound_1_while_the_collector_deletes_a_backlog() {
@@ -1129,5 +1186,9 @@ async fn a_cancel_is_on_disk_inside_bound_1_while_the_collector_deletes_a_backlo
     let behind = asked.elapsed();
     eprintln!("i4-pr4 finding: a cancel recorded with the WAL quiet took {quiet:?}; asked as the collector deleted {} records, {behind:?}", 2 * BACKLOG);
     n.a.shutdown().await;
-    assert!(behind < Duration::from_millis(F_MS), "a cancel asked while the collector deleted {} records was on disk only after {behind:?} (with the WAL quiet: {quiet:?}) — outside F = {F_MS} ms", 2 * BACKLOG);
+    // Structure, not a wall clock (#816's review): against the quiet write, so a disk that syncs in a millisecond does
+    // not pass it unfixed. A cancel that waits for its own sync, or for one more that was under way, costs a few
+    // quiet writes; one that waits for a thousand costs a thousand.
+    let allowed = quiet * 10 + Duration::from_millis(25);
+    assert!(behind < allowed, "a cancel asked while the collector deleted {} records was on disk only after {behind:?} — {:.0} times the {quiet:?} it takes with the WAL quiet (allowed: ten times, and 25 ms)", 2 * BACKLOG, behind.as_secs_f64() / quiet.as_secs_f64());
 }

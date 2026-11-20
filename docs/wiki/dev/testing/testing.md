@@ -829,8 +829,16 @@ each a way to write a soak that passes while showing nothing:
   and at the soak's rate the second pass fell there. Varying the batch size (50, 100, 200) and turning one thing off
   at a time (the gateway's persistence) found it in three short runs; a state dump at the failure (`diagnose`) and
   the slowest batch per phase, printed with every progress line, are what made the runs comparable.
-- **Do not let a known defect decide a CI test by the runner's speed.** With the gateway's `[persistence]` on, a run
-  still minting at the collector's pass stalls ([the finding](../../../operations/what-is-proven.md#call-cancel-behind-collector));
+- **A measured size that depends on a signature's bytes is not a constant.** A `Vec<u8>` signature is a JSON array of
+  decimals, 129 to 257 bytes for 64; the envelope test searched for the largest token that fits over frames whose
+  size moved by tens of bytes, and failed four runs in ten. Compute the most and the least and assert against those.
+- **An assertion about a defect should fail for the defect's reason.** The pinned test first asserted a wall-clock
+  2 s; a fast disk passes that unfixed. It asserts the cancel's latency against the same write with the WAL quiet.
+- **A test that calls a periodic pass itself shares it with the node's own.** The soak called `collect` and asserted
+  the collector's counter exactly; the node's minute pass can overlap and count a key twice. Assert the state (the
+  KV), and the counter as a floor.
+- **Do not let a known defect decide a CI test by the runner's speed.** With the gateway's `[persistence]` under
+  `sync_mode = "flush"`, a run still minting at the collector's pass stalls ([the finding](../../../operations/what-is-proven.md#call-cancel-behind-collector));
   a 10³ run reaches that pass or not by how fast the machine is. The CI soak therefore runs without it, says so, and
   the durable case is one focused test that fails today, ignored and listed with its reason.
 - **A receipt of `DeliveryUnknown` is counted, not failed on.** It is "no answer to the forward in 5 s", never a
