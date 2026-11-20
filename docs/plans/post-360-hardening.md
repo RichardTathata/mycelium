@@ -2244,12 +2244,15 @@ pool trace showed, once in each failing run and in none of 2 407 passing batches
 before the request it had been taken for was answered — so a later request was handed a connection carrying a stream.
 With the pool off (`pool_max_idle_per_host(0)`, the module's `door_client`) 0 of 200 failed under the same load. No
 timeout, sleep or retry changed. `the_door_client_keeps_no_connection_between_requests` pins the client: seen failing
-first with the pool on (*"1 connection(s) still open"*). **Not fixed, the same hazard (rule 1):** every test that holds a
-stream open on one pooled client and sends beside it — `grep -ln "reqwest::Client" src mycelium-*/tests tests` crossed
-with the streaming routes finds `http/http_tests.rs`, `lib_tests.rs`, `http/schedule_run_tests.rs`,
+first with the pool on (*"1 connection(s) still open"*). **Not fixed, the same hazard (rule 1):** the hazard is a stream
+**held open** while the test sends on the same pooled client. `grep -ln "reqwest::Client" src mycelium-*/tests tests`
+crossed with the streaming routes finds these that do so: `http/http_tests.rs`, `lib_tests.rs`, `http/schedule_run_tests.rs`,
 `call_admission_tests.rs`, `http/log_read_tests.rs`, `fleet_history_tests.rs`, `http/grant_tests.rs`,
 `hosted_capability_door_tests.rs`, `http/kv_read_tests.rs`, `tests/exposure_doors.rs`, and the tuple-space and
-reason companions' `tests/gateway.rs`; none is a recorded flake. Whether the re-pooling is `hyper-util`'s defect
+reason companions' `tests/gateway.rs`; none is a recorded flake. Checked and not affected (#817's review), because each
+reads a stream to its end before the next request: `client_sig_tests.rs`, `http/ae_seam_tests.rs`,
+`gateway_caller_tests.rs`, `http/marker_race_tests.rs`, `llm_door_tests.rs`, `oidc_exchange_tests.rs`, the in-module
+tests of `a2a.rs`, and `capability_config.rs`. Whether the re-pooling is `hyper-util`'s defect
 (0.1.20) is not established; no product code holds a stream on a pooled client.
 
 **Known flake, closed (2026-11-20): the `governed-call` scaffold waited for one side.** The Scaffold job's
@@ -2259,7 +2262,8 @@ exists before A has heard of B — and then made B's 5 s `rpc_call` to A. A has 
 to a peer in its own table (`src/agent/tasks.rs`, the gossip shard's dispatch: no targets, the frame is dropped). In the
 plant below A's table was empty when B called and held B before B's 5 s were up, and the call still timed out: a reply
 dropped this way is not sent again — the shape of O2 (`identity-and-lifecycle.md` §9), here on a first meeting rather
-than a restart. Not reproduced as CI saw it (60 runs under 24 spinning cores and 12 under disk-write load, all
+than a restart. The product gap behind it is [what-is-proven.md, *a reply to a caller the provider has not yet learned*](../operations/what-is-proven.md#reply-to-unlearned-caller-is-dropped);
+the template's two-sided wait works around it in one process, not across two. Not reproduced as CI saw it (60 runs under 24 spinning cores and 12 under disk-write load, all
 green; A learned B within ~10 ms of B's first connection). Shown by a plant: with SWIM off on A, so that A learns B only
 from B's first ping, the shipped wait failed 9 of 9 with the same *"Error: Timeout"*, and the new wait — both nodes list
 the other, bounded at 30 s — passed 13 of 14 (the fourteenth, the first run of a fresh binary, was killed by its 40 s

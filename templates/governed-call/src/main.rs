@@ -41,7 +41,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     b.start().await?;
     let skill = PromptTemplate { system: String::new(), user_template: std::fs::read_to_string("skills/demo/greeting.md")?, max_tokens: 64, temperature: 0.0, metadata: Default::default() };
     let _skill = b.llm().register_prompt_skill("demo", "greeting", skill, Arc::new(EchoBackend)).await?;
-    // Each must know the other: B can send once it has a connection, but A's reply goes only to a peer A knows. Bounded.
+    // Each must know the other: A's reply goes only to a peer A knows, and is not resent (what-is-proven.md#reply-to-unlearned-caller-is-dropped).
     let met = || !a.peers().is_empty() && !b.peers().is_empty();
     for _ in 0..600 { if met() { break } tokio::time::sleep(Duration::from_millis(50)).await }
     if !met() { return Err("node A and node B did not meet within 30 s".into()) }
