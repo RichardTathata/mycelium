@@ -7,40 +7,67 @@
 //! `dev` runs on the developer's device, and promises only its own behaviour:
 //!
 //! - **How the key is guarded.** The key is a software P-256 key in a `0600` file in a `0700` directory under the
-//!   user's home ([`consent_dir`]), never under a worktree ([`refuse_worktree`]). That is all the guarding there is:
+//!   user's home ([`consent_dir`]), owned by the user, with one name, and with no directory above it (up to the
+//!   home) that group or others can write (`mycelium_core::consent_key`). The directory's **real path** — every
+//!   symbolic link resolved — has no `.git` at or above it ([`refuse_worktree`]). That is all the guarding there is:
 //!   any process running as the user can read the file and sign, with no terminal and no person (I7's residual B).
 //!   So `dev` signs with this key **only under a certificate graded `tty`** ([`Refusal::GradeNotThisKeys`]): `tty`
 //!   says where the key lives, and `dev` will not sign under a certificate that says more about the key than `dev`
 //!   does to it. The grade on a certificate stays the issuing operator's statement; `dev` tells the operator which
-//!   grade describes this key, and refuses to use one that was certified as something else.
+//!   grade describes this key, and refuses to use one that was certified as something else. The key and its
+//!   certificate are read and checked again **before every prompt** ([`serve`]).
 //! - **What it showed.** The prompt is rendered from the request record a gateway served under the request's id
-//!   ([`PromptRecord`]) — the holder, the tool, the resource, the arguments' digest — and from nothing a caller
-//!   passed: a caller hands `dev` an id and no text. A request with no record prompts nothing. The record's text is
-//!   escaped before it is shown ([`shown`]), so a record cannot repaint the terminal.
-//! - **What it signed.** Only an answer typed at the terminal it opened (`/dev/tty`, [`TtyApprover`]) is signed:
-//!   `approve` issues, `refuse` refuses, and anything else — an empty line, end of input, no terminal — signs
-//!   nothing and sends nothing. A line entered **before** a prompt was shown is discarded, not taken as its answer. `dev` approves nothing on the person's behalf, and has no flag that would.
-//!   It reads the record again after the answer and signs only if what it showed is still what the gateway serves
+//!   ([`PromptRecord`]) and from nothing a caller passed: a caller hands `dev` an id and no text. A request with no
+//!   record prompts nothing. `dev` checks the record against itself before it shows anything: **the arguments must
+//!   hash to the digest** the record names (the digest a grant binds), and the resource must be the record's tool at
+//!   its node; a record whose arguments are withheld, cut or another call's prompts nothing
+//!   ([`NoRecord::ArgumentsUnverified`]). The lines an approval is about — holder, tool, resource, digest, terms —
+//!   are **the last thing shown**, below everything the requester controls; every field is cut to a bound that keeps
+//!   them on one screen, and every character that is not printable ASCII, a letter or a digit is written as an
+//!   escape ([`shown_text`], [`shown_id`]), so a record cannot repaint the terminal or scroll those lines away.
+//! - **What it signed.** Only an answer typed at the terminal it opened (`/dev/tty`, [`TtyApprover`]), **after the
+//!   prompt was shown**, is signed: `approve` signs an issue, `refuse` signs a refusal, and anything else — an empty
+//!   line, end of input, no terminal — signs nothing and sends nothing. Whatever was typed before the prompt, entered
+//!   or not, is discarded first. `dev` approves nothing on the person's behalf, and has no flag that would. It reads
+//!   the record again after the answer and signs only if what it showed is still what the gateway serves
 //!   ([`Answer::RecordChanged`]).
 //!
 //! What `dev` does **not** promise, because it is not `dev`'s to keep:
 //!
-//! - **That a person typed.** A terminal is a file descriptor; a process with a pseudo-terminal types as well as a
-//!   person does. `tty` is the grade of that, and the feature page says so.
+//! - **That a person typed.** A terminal is a file descriptor; a process with a pseudo-terminal, or one that can
+//!   write to the developer's terminal, types as well as a person does — after the prompt is shown as readily as
+//!   before. `tty` is the grade of that, and the feature page says so.
+//! - **That the gateway told the truth.** The record is whatever the gateway at `--gateway` answered, over whatever
+//!   transport its URL names (plain `http://` by default). `dev` checks the record against itself, not against the
+//!   requester: nothing signs the record.
 //! - **What the grant will bind.** The signed decision names the request's id, holder and terms
-//!   (`grant_decision_message_graded`, a published format), not the tool or the digest. The node the decision is
-//!   addressed to issues the grant from **its own** copy of the request record, which is unsigned in the KV
-//!   (`owner-signed-records.md`, row `grant/{agent}/{request}`, closed by plan row I4a). `dev` shows what a gateway
-//!   served and re-reads it before signing; it cannot promise the addressed node reads the same.
+//!   (`grant_decision_message_graded`, a published format), **not** the tool, the resource or the digest. The node
+//!   the decision is addressed to issues the grant from **its own** copy of the request record, which is unsigned in
+//!   the KV (`owner-signed-records.md`, row `grant/{agent}/{request}`). So today any admitted member can change —
+//!   after the person typed `approve`, and with `dev`'s second read in place — the tool, the digest, the resource
+//!   and the expiry the approval is applied to, and can have the same signed decision admitted again within the
+//!   node's freshness window by tombstoning the answer (#813's review, F1). `dev`'s second read catches a change
+//!   it can see before it signs and nothing after. **This is closed by the approver signing what it saw** (the
+//!   maintainer's decision of 2026-11-18: its own PR after this one, a blocker of the release beside the grade
+//!   OID, `CONSENT_DECISION_DOES_NOT_NAME_WHAT_WAS_SHOWN`), and by I4a's signed request record.
 //! - **That the decision was admitted.** `dev` reports that it signed and sent, and quotes the gateway's answer as
 //!   the gateway's ([`Answer::Signed`]).
+//! - **That what looks like one word is that word.** Letters of another script that look like Latin ones are shown
+//!   as themselves in the arguments (an identifier field shows only printable ASCII, everything else escaped).
 //!
 //! ## The queue
 //!
 //! Requests reach `dev` as ids, on its command line or one per line on its standard input, and wait in a bounded
 //! queue ([`queue`], [`QUEUE_BOUND`]). An id offered while the queue is full is answered `busy` at once and never
-//! prompted: a caller that floods `dev` cannot build a backlog of prompts for a person to click through. How another
-//! process hands `dev` an id while it runs (N4's and N7's transport) is theirs to build; this is the queue it feeds.
+//! prompted: a caller that floods `dev` cannot build a backlog of prompts for a person to click through. Stated
+//! limits: ids on the command line are all offered before the first prompt, so of more than [`QUEUE_BOUND`] the
+//! surplus are `busy`; the bound is on what waits, not on how many prompts a caller that keeps feeding ids can
+//! raise over time, and ids carry no source to be fair between; `busy` is printed on `dev`'s standard output only —
+//! the requesting agent learns nothing until its request lapses; and any member can make a request
+//! `ambiguous_request` by writing a second record with its id under another holder (availability only). Two `dev`
+//! processes sharing one terminal are not serialised: each shows its prompt, and a typed answer goes to whichever
+//! reads first — run one `dev` per terminal. How another process hands `dev` an id while it runs (N4's and N7's
+//! transport) is theirs to build; this is the queue it feeds.
 //!
 //! ## The provisional gate
 //!
@@ -50,8 +77,11 @@
 //! ## Not built
 //!
 //! The macOS Secure Enclave key and its Swift shim (I7's PR 3b — `os_presence(macos, unbound)` is that key's grade
-//! and never this one's); Windows (no user-only ACL is set, so no key is kept there); a `recording` signer for a
-//! `sim` build (E6's); verifying the certificate's chain on the developer's side (the nodes judge it).
+//! and never this one's); Windows (no user-only ACL is set, so no key is kept there; the refusing arms are compiled
+//! by no CI job); reading a macOS ACL on the key file or its directory (`mycelium_core::consent_key` says why); a
+//! `recording` signer for a `sim` build (E6's); verifying the certificate's chain on the developer's side (the nodes
+//! judge it); a home directory tracked by a repository whose `.git` is elsewhere (a bare dotfiles repository) is
+//! not detected.
 
 use mycelium_core::consent_key::{self, ConsentKeyRefusal, SoftwareConsentKey};
 use mycelium_core::tls::ConsentGrade;
@@ -66,8 +96,17 @@ pub const SCHEMA: &str = "mycelium.dev.consent/1";
 /// How long a grant `dev` approves stands, unless the person asks otherwise: the decision route's own default.
 pub const DEFAULT_TTL_SECS: u64 = 300;
 
-/// The longest a record's field is shown in full; the digest names the whole.
-const SHOWN_MAX: usize = 2_000;
+/// The longest request id `dev` takes from its standard input, in bytes.
+pub const REQUEST_ID_MAX: usize = 256;
+
+/// The most of a gateway's answer `dev` reads, in bytes.
+pub const GATEWAY_ANSWER_MAX: usize = 4 * 1024 * 1024;
+
+/// The most characters of the arguments a prompt shows (five rows of an 80-column terminal).
+pub const ARGUMENTS_SHOWN_MAX: usize = 400;
+
+/// The most characters of an identifier field — request, holder, tool, resource, gateway, node — a prompt shows.
+pub const ID_SHOWN_MAX: usize = 96;
 
 /// Why `dev` did nothing. Each has a stable [`code`](Self::code).
 #[derive(Debug)]
@@ -77,14 +116,16 @@ pub enum Refusal {
     ProvisionalOid,
     /// No home directory is named by the environment, so there is nowhere outside a worktree to keep the key.
     DirUnresolved(&'static str),
-    /// The consent directory lies inside a worktree (the directory named holds `.git`).
+    /// The consent directory's real path lies inside a worktree (the directory named holds `.git`).
     DirInWorktree { dir: PathBuf, worktree: PathBuf },
+    /// The consent directory is no longer where it was resolved to: a component of its path became a link.
+    DirMoved { dir: PathBuf, real: PathBuf },
     /// The key file's refusal ([`ConsentKeyRefusal`]).
     Key(ConsentKeyRefusal),
     /// No consent key is stored for the principal.
     NoKey(PathBuf),
     /// No certificate is stored for the principal: the key was never enrolled here.
-    NotEnrolled(PathBuf),
+    NotEnrolled { cert: PathBuf, public_key: PathBuf, issuer: String, name: String },
     /// The file is not one PEM consent certificate this build reads.
     NotAConsentCertificate(String),
     /// The certificate names another principal than the one asked for.
@@ -93,6 +134,8 @@ pub enum Refusal {
     EnrolledKeyMismatch { principal: String },
     /// The certificate states a grade a software key does not carry.
     GradeNotThisKeys { principal: String, certificate: ConsentGrade },
+    /// The certificate's validity ended (its `notAfter`, ms since the epoch).
+    CertificateExpired { principal: String, not_after_ms: u64 },
     /// `--issuer` or `--name` is not a valid segment.
     BadName(String),
     /// The gateway could not be asked, or answered something `dev` cannot use.
@@ -106,13 +149,15 @@ impl Refusal {
             Self::ProvisionalOid => "consent_grade_oid_provisional",
             Self::DirUnresolved(_) => "consent_dir_unresolved",
             Self::DirInWorktree { .. } => "consent_dir_in_worktree",
+            Self::DirMoved { .. } => "consent_dir_moved",
             Self::Key(k) => k.code(),
             Self::NoKey(_) => "no_consent_key",
-            Self::NotEnrolled(_) => "not_enrolled",
+            Self::NotEnrolled { .. } => "not_enrolled",
             Self::NotAConsentCertificate(_) => "not_a_consent_certificate",
             Self::AnotherPrincipal { .. } => "certificate_for_another_principal",
             Self::EnrolledKeyMismatch { .. } => "enrolled_key_mismatch",
             Self::GradeNotThisKeys { .. } => "grade_not_this_keys",
+            Self::CertificateExpired { .. } => "certificate_expired",
             Self::BadName(_) => "bad_name",
             Self::Gateway(_) => "gateway",
         }
@@ -130,9 +175,15 @@ impl std::fmt::Display for Refusal {
                 dir.display(),
                 worktree.display()
             ),
+            Self::DirMoved { dir, real } => write!(f, "the consent directory {} now resolves to {}: a component of its path became a link since it was resolved, and nothing is kept or read through it", dir.display(), real.display()),
             Self::Key(k) => k.fmt(f),
             Self::NoKey(p) => write!(f, "no consent key at {}: create one with `mycelium dev consent key`", p.display()),
-            Self::NotEnrolled(p) => write!(f, "no consent certificate at {}: have the key certified (`mycelium tls issue --client <name> --consent --public-key <pub.pem> --grade tty`, on the host that holds the fleet CA's key), then `mycelium dev consent enrol --cert <cert.pem>`", p.display()),
+            Self::NotEnrolled { cert, public_key, issuer, name } => write!(
+                f,
+                "no consent certificate at {}: have the key certified on the host that holds the fleet CA's key — `mycelium tls issue --ca-dir <ca-dir> --client {name} --consent --public-key {} --grade tty --issuer {issuer} --out <out-dir>` — then `mycelium dev consent enrol --issuer {issuer} --name {name} --cert <out-dir>/consent-{issuer}-{name}.cert.pem`",
+                cert.display(),
+                public_key.display()
+            ),
             Self::NotAConsentCertificate(why) => write!(f, "not a consent certificate this build reads: {why}"),
             Self::AnotherPrincipal { certificate, asked } => write!(f, "the certificate is {certificate}'s, not {asked}'s"),
             Self::EnrolledKeyMismatch { principal } => write!(
@@ -145,6 +196,7 @@ impl std::fmt::Display for Refusal {
                 SoftwareConsentKey::GRADE,
                 SoftwareConsentKey::GRADE
             ),
+            Self::CertificateExpired { principal, not_after_ms } => write!(f, "the certificate for {principal} expired (its validity ended at {not_after_ms} ms since the epoch): every node refuses a decision under it; have the key certified again"),
             Self::BadName(why) => f.write_str(why),
             Self::Gateway(why) => f.write_str(why),
         }
@@ -166,30 +218,39 @@ fn gate() -> Result<(), Refusal> {
     if mycelium_core::tls::consent_grade_oid_open() { Ok(()) } else { Err(Refusal::ProvisionalOid) }
 }
 
-/// The directory a consent key is kept in, from the environment `var` reads (the process's, in the binary):
+/// The directory a consent key is kept in and the base it is under, from the environment `var` reads (the
+/// process's, in the binary):
 ///
-/// - macOS: `$HOME/Library/Application Support/mycelium/consent`;
-/// - other unix: `$XDG_DATA_HOME/mycelium/consent` when `XDG_DATA_HOME` is an absolute path, else
-///   `$HOME/.local/share/mycelium/consent`.
+/// - macOS: `$HOME/Library/Application Support/mycelium/consent`, under `$HOME`;
+/// - other unix: `$XDG_DATA_HOME/mycelium/consent` under `$XDG_DATA_HOME` when that is an absolute path, else
+///   `$HOME/.local/share/mycelium/consent` under `$HOME`.
 ///
 /// Never the current directory, and never a relative path: an unset or relative `HOME` is refused
-/// ([`Refusal::DirUnresolved`]). Nothing is created here. Off unix the key store itself refuses.
-pub fn consent_dir(var: &dyn Fn(&str) -> Option<String>) -> Result<PathBuf, Refusal> {
+/// ([`Refusal::DirUnresolved`]). The base is the bound of the ancestor check
+/// (`mycelium_core::consent_key::guarded_ancestors`). Nothing is created or resolved here; [`Store::open`] resolves
+/// links. Off unix the key store itself refuses.
+pub fn consent_place(var: &dyn Fn(&str) -> Option<String>) -> Result<(PathBuf, PathBuf), Refusal> {
     gate()?;
     let absolute = |name: &str| var(name).map(PathBuf::from).filter(|p| p.is_absolute());
     let home = absolute("HOME");
     if cfg!(target_os = "macos") {
-        return home.map(|h| h.join("Library").join("Application Support").join("mycelium").join("consent")).ok_or(Refusal::DirUnresolved("HOME"));
+        return home.map(|h| (h.join("Library").join("Application Support").join("mycelium").join("consent"), h)).ok_or(Refusal::DirUnresolved("HOME"));
     }
     if let Some(data) = absolute("XDG_DATA_HOME") {
-        return Ok(data.join("mycelium").join("consent"));
+        return Ok((data.join("mycelium").join("consent"), data));
     }
-    home.map(|h| h.join(".local").join("share").join("mycelium").join("consent")).ok_or(Refusal::DirUnresolved("HOME"))
+    home.map(|h| (h.join(".local").join("share").join("mycelium").join("consent"), h)).ok_or(Refusal::DirUnresolved("HOME"))
+}
+
+/// The directory of [`consent_place`].
+pub fn consent_dir(var: &dyn Fn(&str) -> Option<String>) -> Result<PathBuf, Refusal> {
+    consent_place(var).map(|(dir, _)| dir)
 }
 
 /// Refuse `dir` when it, or any directory above it, holds `.git` — a repository's worktree, a linked worktree (whose
-/// `.git` is a file) or a home directory kept under version control. The key is never kept where a commit could take
-/// it.
+/// `.git` is a file) or a home directory with a `.git` in it. **`dir` must be a real path** (links resolved:
+/// [`Store`] passes one), or a link above it hides the repository it leads into. What this does not see: a
+/// repository whose `.git` is elsewhere (`git --git-dir=… --work-tree=$HOME`, a bare dotfiles repository).
 pub fn refuse_worktree(dir: &Path) -> Result<(), Refusal> {
     match dir.ancestors().find(|a| a.join(".git").exists()) {
         Some(worktree) => Err(Refusal::DirInWorktree { dir: dir.to_path_buf(), worktree: worktree.to_path_buf() }),
@@ -201,26 +262,46 @@ pub fn refuse_worktree(dir: &Path) -> Result<(), Refusal> {
 #[derive(Clone, Debug)]
 pub struct Store {
     dir: PathBuf,
+    base: PathBuf,
     issuer: String,
     name: String,
 }
 
 impl Store {
-    /// The store for `consent:{issuer}/{name}` under the environment's consent directory. Refused when the directory
-    /// lies in a worktree; nothing is created.
+    /// The store for `consent:{issuer}/{name}` under the environment's consent directory, **with every symbolic
+    /// link in its path resolved**. Refused when the real directory lies in a worktree; nothing is created.
     pub fn open(var: &dyn Fn(&str) -> Option<String>, issuer: &str, name: &str) -> Result<Self, Refusal> {
-        let dir = consent_dir(var)?;
-        Self::at(dir, issuer, name)
+        let (dir, base) = consent_place(var)?;
+        Self::under(dir, base, issuer, name)
     }
 
-    /// The store under `dir` — [`open`](Self::open) with the directory already resolved.
+    /// The store under `dir` — [`open`](Self::open) with the directory given; the directory is its own base.
     pub fn at(dir: PathBuf, issuer: &str, name: &str) -> Result<Self, Refusal> {
+        Self::under(dir.clone(), dir, issuer, name)
+    }
+
+    fn under(dir: PathBuf, base: PathBuf, issuer: &str, name: &str) -> Result<Self, Refusal> {
         gate()?;
         if !mycelium_core::tls::valid_client_segment(issuer) || !mycelium_core::tls::valid_client_segment(name) {
             return Err(Refusal::BadName(format!("--issuer and --name are each 1-128 of A-Z a-z 0-9 - _ . (got {issuer:?} and {name:?})")));
         }
+        let real = |p: &Path| consent_key::real_path(p).map_err(|e| Refusal::Key(ConsentKeyRefusal::Io(p.to_path_buf(), e)));
+        let (dir, base) = (real(&dir)?, real(&base)?);
         refuse_worktree(&dir)?;
-        Ok(Self { dir, issuer: issuer.to_string(), name: name.to_string() })
+        Ok(Self { dir, base, issuer: issuer.to_string(), name: name.to_string() })
+    }
+
+    /// What is asked of the directory every time it is used, once it exists: its path still resolves to itself (no
+    /// component became a link), its real path is in no worktree, and no directory above it up to the base can be
+    /// written by group or others.
+    fn guarded(&self) -> Result<(), Refusal> {
+        let real = consent_key::real_path(&self.dir).map_err(|e| Refusal::Key(ConsentKeyRefusal::Io(self.dir.clone(), e)))?;
+        if real != self.dir {
+            return Err(Refusal::DirMoved { dir: self.dir.clone(), real });
+        }
+        refuse_worktree(&self.dir)?;
+        consent_key::guarded_ancestors(&self.dir, &self.base)?;
+        Ok(())
     }
 
     /// `consent:{issuer}/{name}`.
@@ -228,30 +309,43 @@ impl Store {
         format!("consent:{}/{}", self.issuer, self.name)
     }
 
+    /// The files' common stem. `+` separates the issuer from the name: neither can hold one, so two principals
+    /// never share a file (`a-b`/`c` and `a`/`b-c` did, under a `-`).
+    fn stem(&self) -> String {
+        format!("consent+{}+{}", self.issuer, self.name)
+    }
+
     /// The private key's file.
     pub fn key_path(&self) -> PathBuf {
-        self.dir.join(format!("consent-{}-{}.key.p8", self.issuer, self.name))
+        self.dir.join(format!("{}.key.p8", self.stem()))
     }
 
     /// The public key's file (SPKI PEM), which goes to the issuer.
     pub fn public_key_path(&self) -> PathBuf {
-        self.dir.join(format!("consent-{}-{}.pub.pem", self.issuer, self.name))
+        self.dir.join(format!("{}.pub.pem", self.stem()))
     }
 
-    /// The certificate's file, as the issuer names it.
+    /// The certificate's file.
     pub fn cert_path(&self) -> PathBuf {
-        self.dir.join(format!("consent-{}-{}.cert.pem", self.issuer, self.name))
+        self.dir.join(format!("{}.cert.pem", self.stem()))
     }
 
-    /// Create the key and write its public half beside it. Refused when a key is there unless `replace`.
+    /// Create the key and write its public half beside it. Refused when a key is there unless `replace`. The
+    /// directory is created first and asked again whether it is where it should be, before a key is written.
     pub fn create_key(&self, replace: bool) -> Result<SoftwareConsentKey, Refusal> {
         let key = SoftwareConsentKey::generate()?;
+        consent_key::create_dir(&self.dir)?;
+        self.guarded()?;
         key.store(&self.key_path(), replace)?;
         consent_key::store_public(&self.public_key_path(), key.spki_pem().as_bytes())?;
         Ok(key)
     }
 
     fn key(&self) -> Result<SoftwareConsentKey, Refusal> {
+        if !self.dir.exists() {
+            return Err(Refusal::NoKey(self.key_path()));
+        }
+        self.guarded()?;
         match SoftwareConsentKey::load(&self.key_path()) {
             Err(ConsentKeyRefusal::Io(p, e)) if e.kind() == std::io::ErrorKind::NotFound => Err(Refusal::NoKey(p)),
             other => other.map_err(Refusal::from),
@@ -259,19 +353,22 @@ impl Store {
     }
 
     /// Take the certificate the issuer returned: checked against the stored key ([`Enrolment`]'s rules), then kept
-    /// beside it. A certificate that fails a check is not stored.
+    /// beside it — **the certificate alone, re-encoded**: anything else in the file given (another PEM block, text)
+    /// is neither kept nor, later, sent to a gateway. A certificate that fails a check is not stored.
     pub fn enrol(&self, cert_pem: &str) -> Result<Enrolment, Refusal> {
         let key = self.key()?;
         let enrolment = Enrolment::check(key, &self.principal(), cert_pem)?;
-        consent_key::store_public(&self.cert_path(), cert_pem.as_bytes())?;
+        consent_key::store_public(&self.cert_path(), enrolment.cert_pem().as_bytes())?;
         Ok(enrolment)
     }
 
-    /// The stored key under its stored certificate, checked again **on every use**: the certificate still names this
-    /// principal, **this key** and the grade a software key carries.
+    /// The stored key under its stored certificate, read and checked again **on every use**: the directory and the
+    /// key file are still this user's private ones, and the certificate still names this principal, **this key**
+    /// and the grade a software key carries, and has not expired.
     pub fn enrolment(&self) -> Result<Enrolment, Refusal> {
         let key = self.key()?;
-        let pem = consent_key::load_public(&self.cert_path())?.ok_or_else(|| Refusal::NotEnrolled(self.cert_path()))?;
+        let not_enrolled = || Refusal::NotEnrolled { cert: self.cert_path(), public_key: self.public_key_path(), issuer: self.issuer.clone(), name: self.name.clone() };
+        let pem = consent_key::load_public(&self.cert_path())?.ok_or_else(not_enrolled)?;
         let pem = String::from_utf8(pem).map_err(|_| Refusal::NotAConsentCertificate("the stored certificate is not text".into()))?;
         Enrolment::check(key, &self.principal(), &pem)
     }
@@ -287,9 +384,10 @@ pub struct Enrolment {
 
 impl Enrolment {
     /// `key` under `cert_pem` as `principal`, or the named reason it is not: the PEM holds one consent certificate
-    /// this build reads; it names `principal`; it was issued over `key`'s public point; and its grade is the one a
+    /// this build reads; it names `principal`; it was issued over `key`'s public point; its grade is the one a
     /// software key carries, `tty` — a certificate stating any other grade says something about the key that this
-    /// device does not do, and nothing is signed under it. The chain is not judged here: the nodes judge it.
+    /// device does not do, and nothing is signed under it; and its validity has not ended (by this device's clock).
+    /// The chain is not judged here: the nodes judge it.
     pub fn check(key: SoftwareConsentKey, principal: &str, cert_pem: &str) -> Result<Self, Refusal> {
         gate()?;
         let der = one_certificate(cert_pem).map_err(Refusal::NotAConsentCertificate)?;
@@ -304,7 +402,10 @@ impl Enrolment {
         if id.grade != SoftwareConsentKey::GRADE {
             return Err(Refusal::GradeNotThisKeys { principal: principal.to_string(), certificate: id.grade });
         }
-        Ok(Self { key, principal: principal.to_string(), cert_pem: cert_pem.to_string() })
+        if let Some(not_after_ms) = mycelium_core::tls::cert_not_after_ms(&der).filter(|end| *end <= mycelium_core::sim_seam::wall_now_ms()) {
+            return Err(Refusal::CertificateExpired { principal: principal.to_string(), not_after_ms });
+        }
+        Ok(Self { key, principal: principal.to_string(), cert_pem: certificate_pem(&der) })
     }
 
     /// The principal the key decides as.
@@ -317,7 +418,8 @@ impl Enrolment {
         SoftwareConsentKey::GRADE
     }
 
-    /// The certificate, as PEM, for the publication door.
+    /// The certificate and nothing else, as PEM re-encoded from its DER: what is kept, and what the publication
+    /// door is sent.
     pub fn cert_pem(&self) -> &str {
         &self.cert_pem
     }
@@ -344,21 +446,35 @@ fn one_certificate(pem: &str) -> Result<Vec<u8>, String> {
     base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b64).map_err(|e| format!("the certificate is not base64: {e}"))
 }
 
-/// What a grant request's record says, as a gateway served it: the only source of a prompt's content.
+/// `der` as one PEM `CERTIFICATE` block.
+fn certificate_pem(der: &[u8]) -> String {
+    let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, der);
+    let mut pem = String::from("-----BEGIN CERTIFICATE-----\n");
+    for chunk in b64.as_bytes().chunks(64) {
+        pem.push_str(&String::from_utf8_lossy(chunk));
+        pem.push('\n');
+    }
+    pem.push_str("-----END CERTIFICATE-----\n");
+    pem
+}
+
+/// What a grant request's record says, as a gateway served it: the only source of a prompt's content. One exists
+/// only for a record that agrees with itself ([`find`](Self::find)).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PromptRecord {
     /// The request's id.
     pub request: String,
     /// The holder: the principal the grant would be issued to.
     pub holder: String,
-    /// The tool the grant would admit.
+    /// The tool the record names.
     pub tool: String,
-    /// The resource (`tool:{tool}@{node}`).
+    /// The resource: `tool:{tool}@{node}`, checked.
     pub resource: String,
-    /// The digest of the call's arguments the grant would bind.
+    /// The digest of the call's arguments the record names — **checked here against [`arguments`](Self::arguments)**;
+    /// what the node's grant binds is the digest in the node's own copy of the record.
     pub arguments_digest: String,
-    /// The arguments as the record renders them (JSON text), when it renders them.
-    pub arguments: Option<String>,
+    /// The arguments, as JSON text: the whole of what hashes to the digest.
+    pub arguments: String,
     /// When the request lapses.
     pub expires_at_ms: u64,
     /// The record's KV key, `grant/{holder segment}/{request}`: where the decision is sent.
@@ -372,13 +488,27 @@ pub enum NoRecord {
     Unknown,
     /// More than one holder has an open request with this id: `dev` does not choose between them.
     Ambiguous(usize),
-    /// A record has this id and lacks a field the prompt shows.
+    /// A record has this id and lacks a field the prompt shows, or a field contradicts another.
     Unreadable(&'static str),
+    /// The record's arguments do not hash to the digest it names — withheld by a data class, over the rendering
+    /// cap, or simply not this digest's — so this device cannot show what the digest stands for.
+    ArgumentsUnverified(&'static str),
 }
 
 impl PromptRecord {
     /// The record with id `request` among a gateway's open requests (`GET /gateway/grants/pending`'s `pending`).
-    /// Every field the prompt shows must be present and a string: a record missing one prompts nothing.
+    ///
+    /// Every field the prompt shows must be present, and the record must agree with itself:
+    /// - its key is `grant/{segment}/{request}`;
+    /// - its resource is `tool:{tool}@{node}`;
+    /// - **its arguments hash to its digest** — the RFC 8785 digest a grant binds, or the pre-I3 form for as long as
+    ///   the nodes still honour that one (`gateway_authority::recorded_digest_matches`, `deprecations.md` §93; when
+    ///   the nodes drop it, so does this). Arguments the record withholds (a data class the policy does not render)
+    ///   or cuts (over the 16 KiB rendering cap) are an object that says so, which hashes to no call's digest: such
+    ///   a request is **refused, not shown with a caveat** — a person cannot approve what this device cannot relate
+    ///   to the digest.
+    ///
+    /// A record that fails any of these prompts nothing.
     pub fn find(pending: &serde_json::Value, request: &str) -> Result<Self, NoRecord> {
         let rows: Vec<&serde_json::Value> = pending.as_array().map(|a| a.iter().filter(|r| r["request"].as_str() == Some(request)).collect()).unwrap_or_default();
         let row = match rows.as_slice() {
@@ -393,13 +523,26 @@ impl PromptRecord {
         if (parts.next(), parts.nth(1), parts.next()) != (Some("grant"), Some(request), None) {
             return Err(NoRecord::Unreadable("key"));
         }
+        let (tool, resource, node) = (text("tool")?, text("resource")?, text("node")?);
+        if resource != format!("tool:{tool}@{node}") {
+            return Err(NoRecord::Unreadable("resource"));
+        }
+        let arguments_digest = text("arguments_digest")?;
+        let arguments = &row["arguments"];
+        if arguments.is_null() {
+            return Err(NoRecord::ArgumentsUnverified("the record carries no arguments"));
+        }
+        if !crate::agent::gateway_authority::recorded_digest_matches(&row["arguments_digest"], arguments) {
+            let why = if arguments.get("withheld").is_some() { "the record withholds or cuts the arguments, so they cannot be checked against the digest" } else { "the arguments in the record do not hash to the digest it names" };
+            return Err(NoRecord::ArgumentsUnverified(why));
+        }
         Ok(Self {
             request: request.to_string(),
             holder: text("agent")?,
-            tool: text("tool")?,
-            resource: text("resource")?,
-            arguments_digest: text("arguments_digest")?,
-            arguments: (!row["arguments"].is_null()).then(|| row["arguments"].to_string()),
+            tool,
+            resource,
+            arguments_digest,
+            arguments: arguments.to_string(),
             expires_at_ms: row["expires_at_ms"].as_u64().ok_or(NoRecord::Unreadable("expires_at_ms"))?,
             key,
         })
@@ -417,26 +560,55 @@ impl PromptRecord {
     }
 }
 
-/// `text` as a prompt shows it: every control character, and every character that reorders or hides text (the
-/// Unicode bidirectional and zero-width formatting characters), written as its `\u{…}` escape, so a record's content
-/// cannot move the cursor, clear the screen or disguise one word as another; cut at [`SHOWN_MAX`] characters with the
-/// count that was cut.
-pub fn shown(text: &str) -> String {
-    let hidden = |c: char| c.is_control() || matches!(c, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2069}' | '\u{FEFF}' | '\u{00AD}');
-    let mut out = String::new();
-    let mut chars = text.chars();
-    for c in chars.by_ref().take(SHOWN_MAX) {
-        if hidden(c) {
-            out.push_str(&format!("\\u{{{:x}}}", c as u32));
-        } else {
-            out.push(c);
+/// Whether a character of free text is shown as itself: printable ASCII; or, beyond ASCII, a letter or a digit by
+/// the Unicode properties `char::is_alphanumeric` reads — an allow-list, so every control, format, separator,
+/// private-use, unassigned, punctuation and symbol character beyond ASCII is an escape (the bidirectional marks and
+/// overrides, U+061C, the line and paragraph separators, the tag characters, the zero-width ones, among them). Four
+/// letters that render as a blank (the Hangul fillers) are escaped too.
+fn shown_raw_in_text(c: char) -> bool {
+    (matches!(c, ' '..='~') && c != '\\') || (!c.is_ascii() && c.is_alphanumeric() && !matches!(c, '\u{115F}' | '\u{1160}' | '\u{3164}' | '\u{FFA0}'))
+}
+
+/// Whether a character of an identifier is shown as itself: printable ASCII other than the space and the backslash.
+fn shown_raw_in_id(c: char) -> bool {
+    matches!(c, '!'..='~') && c != '\\'
+}
+
+/// `text` with each character shown as itself when `raw` says so and as its `\u{…}` escape otherwise, cut so the
+/// result is at most `max` characters, with what was cut said in a marker after it. Returns the shown text and how
+/// many of `text`'s characters were not shown.
+fn shown_within(text: &str, max: usize, raw: fn(char) -> bool) -> (String, usize) {
+    let (mut out, mut used, mut taken) = (String::new(), 0usize, 0usize);
+    for c in text.chars() {
+        let piece = if raw(c) { c.to_string() } else { format!("\\u{{{:x}}}", c as u32) };
+        let width = piece.chars().count();
+        if used + width > max {
+            break;
         }
+        used += width;
+        out.push_str(&piece);
+        taken += 1;
     }
-    let cut = chars.count();
+    let cut = text.chars().count() - taken;
     if cut > 0 {
-        out.push_str(&format!(" … ({cut} more characters not shown; the digest names the whole)"));
+        out.push_str(&format!(" …[cut: {cut} more characters not shown]"));
     }
-    out
+    (out, cut)
+}
+
+/// Free text (the arguments) as a prompt shows it: at most `max` characters, everything that is not printable
+/// ASCII, a letter or a digit written as an escape (`shown_raw_in_text`), so it cannot move the cursor, reorder or
+/// hide text, or fill the screen. **What it leaves:** a letter of another script that looks like a Latin one is
+/// shown as itself.
+pub fn shown_text(text: &str, max: usize) -> String {
+    shown_within(text, max, shown_raw_in_text).0
+}
+
+/// An identifier (request, holder, tool, resource, gateway, node) as a prompt shows it: at most `max` characters,
+/// only printable ASCII as itself — a space, and every character beyond ASCII, is an escape, so no look-alike letter
+/// passes for an ASCII one here.
+pub fn shown_id(text: &str, max: usize) -> String {
+    shown_within(text, max, shown_raw_in_id).0
 }
 
 /// What the person is asked: every line of it from the record, the gateway's own answers and `dev`'s enrolment.
@@ -451,32 +623,42 @@ pub struct Prompt {
 impl Prompt {
     /// The prompt for `record`, to be decided as `principal` at `grade`, addressed to `node` through `gateway`, the
     /// grant standing `ttl_secs` if approved; `now_ms` only says how long the request has left.
+    ///
+    /// **The order is the defence.** What the requester controls freely — the arguments — comes first, cut to
+    /// [`ARGUMENTS_SHOWN_MAX`]. What an approval is about — request, holder, tool, resource, digest, terms — comes
+    /// **last**, each identifier cut to [`ID_SHOWN_MAX`], directly above the question: whatever a record holds, those
+    /// lines are the bottom of the screen when the answer is typed (at most fifteen rows of an 80-column terminal
+    /// from the request line to the question).
     pub fn render(record: &PromptRecord, principal: &str, grade: ConsentGrade, gateway: &str, node: &str, ttl_secs: u64, now_ms: u64) -> Self {
         let left = record.expires_at_ms.saturating_sub(now_ms) / 1_000;
-        let arguments = match &record.arguments {
-            Some(a) => shown(a),
-            None => "(not rendered in the record; the digest names them)".to_string(),
+        let (arguments, cut) = shown_within(&record.arguments, ARGUMENTS_SHOWN_MAX, shown_raw_in_text);
+        let checked = match cut {
+            0 => "this device checked: the arguments shown above hash to it".to_string(),
+            n => format!("this device checked: the whole arguments hash to it; {n} characters of them are NOT shown above"),
         };
+        let id = |text: &str| shown_id(text, ID_SHOWN_MAX);
         let text = format!(
-            "\nmycelium consent: a grant request, as {gateway} serves its record\n\
+            "\nmycelium consent: a grant request. Its record, as {} serves it:\n\
+             \x20 arguments  {arguments}\n\
+             \x20 lapses     in {left} s\n\
+             \x20 decided as {}, by a software key in a file (grade {grade}), addressed to node {}\n\
+             What `approve` signs is about these lines:\n\
              \x20 request    {}\n\
              \x20 holder     {}\n\
              \x20 tool       {}\n\
              \x20 resource   {}\n\
-             \x20 arguments  {}\n\
              \x20 digest     {}\n\
-             \x20 lapses     in {left} s\n\
-             \x20 decided as {}, by a software key in a file (grade {grade}), addressed to node {}\n\
-             \x20 approving issues a grant for {ttl_secs} s; the node issues it for the record it holds under this id\n\
-             Type `approve` to issue, `refuse` to refuse, or anything else to leave the request unanswered: ",
-            shown(&record.request),
-            shown(&record.holder),
-            shown(&record.tool),
-            shown(&record.resource),
-            arguments,
-            shown(&record.arguments_digest),
-            shown(principal),
-            shown(node),
+             \x20            ({checked})\n\
+             \x20 `approve` signs a decision to issue a grant for {ttl_secs} s. The node issues it, for the record it holds under this id.\n\
+             Type `approve` to sign that, `refuse` to sign a refusal, or anything else to leave the request unanswered: ",
+            id(gateway),
+            id(principal),
+            id(node),
+            id(&record.request),
+            id(&record.holder),
+            id(&record.tool),
+            id(&record.resource),
+            id(&record.arguments_digest),
         );
         Self { record: record.clone(), text }
     }
@@ -524,9 +706,11 @@ impl Approver for TtyApprover {
         #[cfg(unix)]
         {
             use std::io::{BufRead as _, Write as _};
-            // An answer is one typed after the prompt is shown: whatever waits at the terminal is discarded first.
-            let discarded = discard_typed_ahead();
             let Ok(tty) = std::fs::OpenOptions::new().read(true).write(true).open("/dev/tty") else { return Approval::NoTerminal };
+            // An answer is one typed after the prompt is shown: whatever waits at the terminal goes first — the lines
+            // already entered (counted, so the prompt can say so), then everything the terminal still holds, entered
+            // or not.
+            let discarded = discard_typed_ahead(&tty);
             let mut out = &tty;
             let note = match discarded {
                 0 => String::new(),
@@ -550,24 +734,55 @@ impl Approver for TtyApprover {
     }
 }
 
-/// Read and discard every line already entered at the terminal (`/dev/tty`, opened non-blocking for this alone), and
-/// return how many bytes that was. Called before a prompt is written, so a line typed while an earlier request was
-/// being answered — a second `approve`, a pasted block — is never taken as the answer to a prompt that had not been
-/// shown yet. Characters typed and not yet entered (no newline) are the line discipline's and stay; they become an
-/// answer only when the person presses return, with the prompt on the screen. At most 64 KiB is read.
+/// Discard everything typed at the terminal before a prompt is written, and return how many bytes of entered lines
+/// that was. Two steps: the lines already entered are read (non-blocking, through a second descriptor, at most
+/// 64 KiB) so they can be counted; then the terminal's input queue is flushed (`tcflush(TCIFLUSH)`), which also
+/// drops what was typed and **not yet entered** — otherwise `approve` typed while an earlier request was being
+/// answered would become this prompt's answer on a bare return, with an empty line on the screen.
+///
+/// **What this is and is not.** It keeps a person's early or doubled keystrokes from answering a prompt they have
+/// not seen. It is no barrier to a process that can type at the terminal: such a process types after the prompt is
+/// shown, and is signed — which is what `tty` cannot promise.
 #[cfg(unix)]
-fn discard_typed_ahead() -> usize {
+fn discard_typed_ahead(tty: &std::fs::File) -> usize {
     use std::io::Read as _;
     use std::os::unix::fs::OpenOptionsExt as _;
-    let Ok(mut tty) = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NONBLOCK).open("/dev/tty") else { return 0 };
-    let (mut discarded, mut buf) = (0usize, [0u8; 1024]);
-    while discarded < 64 * 1024 {
-        match tty.read(&mut buf) {
-            Ok(n) if n > 0 => discarded += n,
-            _ => break,
+    let mut discarded = 0usize;
+    if let Ok(mut entered) = std::fs::OpenOptions::new().read(true).custom_flags(rustix::fs::OFlags::NONBLOCK.bits() as i32).open("/dev/tty") {
+        let mut buf = [0u8; 1024];
+        while discarded < 64 * 1024 {
+            match entered.read(&mut buf) {
+                Ok(n) if n > 0 => discarded += n,
+                _ => break,
+            }
         }
     }
+    let _ = rustix::termios::tcflush(tty, rustix::termios::QueueSelector::IFlush);
     discarded
+}
+
+/// One request id from `input` (`dev`'s standard input): `None` at the end of input; `Some(Ok(id))` for a line of
+/// at most [`REQUEST_ID_MAX`] bytes, trimmed (an empty one is for the caller to skip); `Some(Err(start))` for a
+/// longer line, of which only the start is kept and the rest read and dropped, so one endless line costs no memory.
+pub fn read_request_id(input: &mut impl std::io::BufRead) -> Option<Result<String, String>> {
+    use std::io::{BufRead as _, Read as _};
+    let mut line = Vec::new();
+    match input.by_ref().take(REQUEST_ID_MAX as u64 + 1).read_until(b'\n', &mut line) {
+        Ok(0) | Err(_) => return None,
+        Ok(_) => {}
+    }
+    if line.last() != Some(&b'\n') && line.len() > REQUEST_ID_MAX {
+        loop {
+            let mut rest = Vec::new();
+            match input.by_ref().take(4096).read_until(b'\n', &mut rest) {
+                Ok(0) | Err(_) => break,
+                Ok(_) if rest.last() == Some(&b'\n') => break,
+                Ok(_) => {}
+            }
+        }
+        return Some(Err(String::from_utf8_lossy(&line[..32]).into_owned()));
+    }
+    Some(Ok(String::from_utf8_lossy(&line).trim().to_string()))
 }
 
 /// The sending half of the request queue: [`offer`](Self::offer) an id, or learn at once that `dev` is busy.
@@ -602,6 +817,11 @@ pub fn queue(bound: usize) -> (QueueHandle, Queue) {
 pub enum Answer {
     /// The queue was full when the id arrived. Nothing was looked up or shown.
     Busy,
+    /// A line on standard input longer than [`REQUEST_ID_MAX`] bytes: no id. Nothing was looked up or shown.
+    IdTooLong,
+    /// The key or its certificate was refused when read for this request (the refusal's code, and its text).
+    /// Nothing was shown.
+    Enrolment(&'static str, String),
     /// No record: nothing was shown.
     NoRecord(NoRecord),
     /// The gateway could not be read. Nothing was shown.
@@ -623,9 +843,12 @@ impl Answer {
     pub fn word(&self) -> &'static str {
         match self {
             Answer::Busy => "busy",
+            Answer::IdTooLong => "request_id_too_long",
+            Answer::Enrolment(..) => "enrolment_refused",
             Answer::NoRecord(NoRecord::Unknown) => "unknown_request",
             Answer::NoRecord(NoRecord::Ambiguous(_)) => "ambiguous_request",
             Answer::NoRecord(NoRecord::Unreadable(_)) => "record_unreadable",
+            Answer::NoRecord(NoRecord::ArgumentsUnverified(_)) => "arguments_unverified",
             Answer::Gateway(_) => "gateway",
             Answer::Dismissed => "dismissed",
             Answer::NoTerminal => "no_terminal",
@@ -645,7 +868,13 @@ impl Answer {
         let mut line = serde_json::json!({ "schema": SCHEMA, "request": request, "answer": self.word() });
         match self {
             Answer::NoRecord(NoRecord::Ambiguous(n)) => line["detail"] = format!("{n} holders have an open request with this id").into(),
-            Answer::NoRecord(NoRecord::Unreadable(field)) => line["detail"] = format!("the record lacks `{field}`").into(),
+            Answer::NoRecord(NoRecord::Unreadable(field)) => line["detail"] = format!("the record lacks `{field}`, or it contradicts the rest of the record").into(),
+            Answer::NoRecord(NoRecord::ArgumentsUnverified(why)) => line["detail"] = (*why).into(),
+            Answer::IdTooLong => line["detail"] = format!("a request id is at most {REQUEST_ID_MAX} bytes; the line's start is given as the request").into(),
+            Answer::Enrolment(code, why) => {
+                line["refusal"] = (*code).into();
+                line["detail"] = why.as_str().into();
+            }
             Answer::Gateway(why) | Answer::NotSigned(why) => line["detail"] = why.as_str().into(),
             Answer::Signed { decision, status, gateway } => {
                 line["decision"] = (*decision).into();
@@ -659,7 +888,9 @@ impl Answer {
 }
 
 /// A gateway, asked over HTTP with a bearer: `grant:read` to read the open requests, `grant:relay` to carry a signed
-/// decision, `identity:write` to publish a certificate. The bearer signs nothing.
+/// decision, `identity:write` to publish a certificate. The bearer signs nothing. **`dev` trusts this gateway, and
+/// the path to it, for what the record says**: nothing signs the record, and `http://` is not confidential or
+/// authenticated.
 #[derive(Clone, Debug)]
 pub struct Gateway {
     base: String,
@@ -668,7 +899,8 @@ pub struct Gateway {
 }
 
 impl Gateway {
-    /// A gateway at `base`. Every request is bounded (10 s), so a gateway that stops answering is a named failure.
+    /// A gateway at `base`. Every request is bounded (10 s, and [`GATEWAY_ANSWER_MAX`] bytes of answer), so a
+    /// gateway that stops answering, or never stops, is a named failure.
     pub fn new(base: &str, token: Option<String>) -> Result<Self, Refusal> {
         let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(10)).build().map_err(|e| Refusal::Gateway(e.to_string()))?;
         Ok(Self { base: base.trim_end_matches('/').to_string(), token, client })
@@ -684,10 +916,17 @@ impl Gateway {
             Some(t) => req.bearer_auth(t),
             None => req,
         };
-        let resp = req.send().await.map_err(|e| format!("{}: {e}", self.base))?;
+        let mut resp = req.send().await.map_err(|e| format!("{}: {e}", self.base))?;
         let status = resp.status().as_u16();
-        let text = resp.text().await.unwrap_or_default();
-        Ok((status, serde_json::from_str(&text).unwrap_or(serde_json::Value::String(text))))
+        let mut body = Vec::new();
+        while let Some(chunk) = resp.chunk().await.map_err(|e| format!("{}: {e}", self.base))? {
+            if body.len() + chunk.len() > GATEWAY_ANSWER_MAX {
+                return Err(format!("{}: the answer is over {GATEWAY_ANSWER_MAX} bytes, and is not read further", self.base));
+            }
+            body.extend_from_slice(&chunk);
+        }
+        let text = String::from_utf8_lossy(&body);
+        Ok((status, serde_json::from_str(&text).unwrap_or_else(|_| serde_json::Value::String(text.into_owned()))))
     }
 
     async fn get(&self, route: &str) -> Result<serde_json::Value, String> {
@@ -721,7 +960,8 @@ impl Gateway {
 
 /// Answer one request: read its record, show it, and sign what the person typed.
 ///
-/// 1. The record is read from the gateway by `request`'s id; absent, ambiguous or unreadable, **nothing is shown**.
+/// 1. The record is read from the gateway by `request`'s id; absent, ambiguous, unreadable, or with arguments that
+///    do not hash to its digest, **nothing is shown**.
 /// 2. The prompt is rendered from that record and shown by `approver`.
 /// 3. Anything but `approve` or `refuse` signs nothing.
 /// 4. The record is read again; if it no longer says what was shown, nothing is signed.
@@ -770,11 +1010,17 @@ pub async fn answer_one(gateway: &Gateway, enrolment: &Enrolment, approver: &mut
 }
 
 /// Drain `queue`, one prompt at a time, until every [`QueueHandle`] is dropped; `said` hears each answer as it is
-/// made. Returns how many requests were signed and admitted, and how many were not.
-pub async fn serve(gateway: &Gateway, enrolment: &Enrolment, approver: &mut dyn Approver, mut queue: Queue, ttl_secs: u64, said: &mut dyn FnMut(&str, &Answer)) -> (usize, usize) {
+/// made. **Before every prompt the key and its certificate are read from `store` and checked again**
+/// ([`Store::enrolment`]): a key file widened, replaced or re-certified while `dev` runs is refused for the requests
+/// that follow ([`Answer::Enrolment`]), and no key is held between prompts. Returns how many requests were signed and
+/// admitted, and how many were not.
+pub async fn serve(gateway: &Gateway, store: &Store, approver: &mut dyn Approver, mut queue: Queue, ttl_secs: u64, said: &mut dyn FnMut(&str, &Answer)) -> (usize, usize) {
     let (mut admitted, mut not) = (0, 0);
     while let Some(request) = queue.0.recv().await {
-        let answer = answer_one(gateway, enrolment, approver, &request, ttl_secs).await;
+        let answer = match store.enrolment() {
+            Ok(enrolment) => answer_one(gateway, &enrolment, approver, &request, ttl_secs).await,
+            Err(refusal) => Answer::Enrolment(refusal.code(), refusal.to_string()),
+        };
         if answer.admitted() { admitted += 1 } else { not += 1 }
         said(&request, &answer);
     }

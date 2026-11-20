@@ -15,6 +15,9 @@ use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::rc::Rc;
 
+/// The consent principal of these tests: a developer's, under this file's fleet.
+const ALEX: &str = "consent:fleet/alex";
+
 /// What a test does while a prompt is up.
 type During = Box<dyn FnOnce(&dc::Prompt)>;
 
@@ -78,7 +81,7 @@ fn private_runs(key_path: &Path) -> Vec<String> {
 /// **A decision answered at `dev`'s prompt is signed by its software key, verified by the node and recorded `tty`**
 /// (I7, P7; exit 6 — the terminal itself is `tests/dev_consent_cli.rs`'s). `dev` creates the key, the CA certifies
 /// its public half at `tty`, and three requests are put to `dev` by id:
-/// - **approved**: the gateway answers `200`; the evidence record's subject is `consent:fleet/richard`, its
+/// - **approved**: the gateway answers `200`; the evidence record's subject is `consent:fleet/alex`, its
 ///   `signed_decision.signed_with` is `p256`, `tty`, `grade_source: operator`; the kept body names `tty` and
 ///   re-verifies from the record alone;
 /// - **dismissed**: nothing is signed, nothing is sent, the request is still open and no record names it (exit 2's
@@ -94,10 +97,10 @@ fn private_runs(key_path: &Path) -> Vec<String> {
 async fn a_decision_typed_at_devs_prompt_is_signed_by_its_software_key_and_recorded_tty() {
     let dir = scratch("dev-consent");
     let http_port = alloc_port();
-    let unit = unit_with(&decides(RICHARD, ""));
-    let a = started_with(&dir, http_port, None, &unit, |cfg| cfg.gateway_consent_principals = consent_table(&["richard"])).await;
+    let unit = unit_with(&decides(ALEX, ""));
+    let a = started_with(&dir, http_port, None, &unit, |cfg| cfg.gateway_consent_principals = consent_table(&["alex"])).await;
     let _ = forecaster_key(&a, &dir);
-    let (store, enrolment) = enrolled(&a, &dir, "richard");
+    let (store, enrolment) = enrolled(&a, &dir, "alex");
     let requests = ask(http_port, 3).await;
     let rows = pending_rows(http_port).await;
     let gw = gateway(http_port);
@@ -116,13 +119,13 @@ async fn a_decision_typed_at_devs_prompt_is_signed_by_its_software_key_and_recor
     // Approved.
     let dc::Answer::Signed { decision, status, gateway: said } = &answers[0] else { panic!("APPROVED: {:?}", answers[0]) };
     assert_eq!((*decision, *status), ("issue", 200), "APPROVED: the node admitted dev's signed issue: {said}");
-    let record = decided(&journal, "grant.issue", RICHARD);
+    let record = decided(&journal, "grant.issue", ALEX);
     assert_eq!(record.len(), 1, "JOURNAL: the consent principal is the actor of one issue");
     let kept = record[0].signed_decision.clone().unwrap_or_default();
     let w = &kept["signed_with"];
     assert_eq!((w["key"].as_str(), w["grade"].as_str(), w["grade_source"].as_str()), (Some("p256"), Some("tty"), Some("operator")), "SIGNED_WITH: {kept}");
     let body: crate::SignedDecision = serde_json::from_value(kept["signed"].clone()).expect("the signed body is kept");
-    assert_eq!((body.decider.as_str(), body.grade.as_deref(), body.request.as_str()), (RICHARD, Some("tty"), requests[0].as_str()));
+    assert_eq!((body.decider.as_str(), body.grade.as_deref(), body.request.as_str()), (ALEX, Some("tty"), requests[0].as_str()));
     assert!(body.verify_signature("issue", Some(600), None), "RE-VERIFY: dev's signature, from the record alone: {kept}");
     // Dismissed.
     assert_eq!(answers[1], dc::Answer::Dismissed, "DISMISSED: nothing signed");
@@ -131,7 +134,7 @@ async fn a_decision_typed_at_devs_prompt_is_signed_by_its_software_key_and_recor
     // Refused.
     let dc::Answer::Signed { decision, status, gateway: said } = &answers[2] else { panic!("REFUSED: {:?}", answers[2]) };
     assert_eq!((*decision, *status), ("refuse", 200), "REFUSED: {said}");
-    let refusal = decided(&journal, "grant.refuse", RICHARD);
+    let refusal = decided(&journal, "grant.refuse", ALEX);
     assert_eq!(refusal.len(), 1, "JOURNAL: one refusal by the consent principal");
     assert_eq!(refusal[0].signed_decision.clone().unwrap_or_default()["signed_with"]["grade"], "tty");
     // The prompts: from the record.
@@ -143,7 +146,7 @@ async fn a_decision_typed_at_devs_prompt_is_signed_by_its_software_key_and_recor
             let said = row[field].as_str().expect(field);
             assert!(prompt.text.contains(said), "PROMPT: names the record's {field} ({said}):\n{}", prompt.text);
         }
-        assert!(prompt.text.contains(RICHARD) && prompt.text.contains("grade tty") && !prompt.text.contains("os_presence"), "PROMPT: says who decides, and at what grade:\n{}", prompt.text);
+        assert!(prompt.text.contains(ALEX) && prompt.text.contains("grade tty") && !prompt.text.contains("os_presence"), "PROMPT: says who decides, and at what grade:\n{}", prompt.text);
     }
     // The private key: nowhere.
     let mut everything = format!("{enrolment:?} {store:?} {journal_text}");
@@ -172,10 +175,10 @@ async fn a_decision_typed_at_devs_prompt_is_signed_by_its_software_key_and_recor
 async fn a_request_with_no_record_prompts_nothing_and_the_queue_answers_busy_past_its_bound() {
     let dir = scratch("dev-consent-queue");
     let http_port = alloc_port();
-    let unit = unit_with(&decides(RICHARD, ""));
-    let a = started_with(&dir, http_port, None, &unit, |cfg| cfg.gateway_consent_principals = consent_table(&["richard"])).await;
+    let unit = unit_with(&decides(ALEX, ""));
+    let a = started_with(&dir, http_port, None, &unit, |cfg| cfg.gateway_consent_principals = consent_table(&["alex"])).await;
     let _ = forecaster_key(&a, &dir);
-    let (_store, enrolment) = enrolled(&a, &dir, "richard");
+    let (store, _enrolment) = enrolled(&a, &dir, "alex");
     let requests = ask(http_port, 4).await;
     let gw = gateway(http_port);
 
@@ -191,7 +194,7 @@ async fn a_request_with_no_record_prompts_nothing_and_the_queue_answers_busy_pas
         move |_| late.borrow_mut().extend([handle.offer(&ids[1]), handle.offer(&ids[2]), handle.offer(&ids[3])])
     }));
     let mut said: Vec<(String, dc::Answer)> = Vec::new();
-    let counts = tokio::time::timeout(Duration::from_secs(60), dc::serve(&gw, &enrolment, &mut approver, queue, 600, &mut |r, answer| said.push((r.to_string(), answer.clone())))).await.expect("the queue drains within 60 s");
+    let counts = tokio::time::timeout(Duration::from_secs(60), dc::serve(&gw, &store, &mut approver, queue, 600, &mut |r, answer| said.push((r.to_string(), answer.clone())))).await.expect("the queue drains within 60 s");
     let still_open: Vec<String> = pending_rows(http_port).await.iter().filter_map(|r| r["request"].as_str().map(str::to_string)).collect();
     a.shutdown().await;
     let _ = std::fs::remove_dir_all(&dir);
@@ -206,20 +209,22 @@ async fn a_request_with_no_record_prompts_nothing_and_the_queue_answers_busy_pas
 }
 
 /// **`dev` signs nothing when the record changed under the prompt.** While the prompt for a weather forecast is up,
-/// the request's record — unsigned in the KV, writable by any member — is rewritten to name another digest. `dev`
-/// reads the record again after the answer: it no longer says what was shown, so `approve` signs nothing and sends
-/// nothing (`record_changed`), and the request stays open. What this does **not** close is stated in
-/// `crate::dev_consent`: a rewrite after `dev`'s second read, or one only the addressed node sees.
+/// the request's record — unsigned in the KV, writable by any member — is rewritten to another call's arguments and
+/// their digest. `dev` reads the record again after the answer: it no longer says what was shown, so `approve` signs
+/// nothing and sends nothing (`record_changed`), and the request stays open. **What this does not close** is stated
+/// in `crate::dev_consent` (#813's review, F1): the signature names neither tool nor digest, so a rewrite after
+/// `dev`'s second read is applied by the node, and the same signed decision can be admitted again. It is closed by
+/// the approver signing what it saw (plan row I7-S).
 ///
 /// Seen failing first: the second read removed (the changed request was signed, `200`).
 #[tokio::test]
 async fn dev_signs_nothing_when_the_record_changed_under_the_prompt() {
     let dir = scratch("dev-consent-changed");
     let http_port = alloc_port();
-    let unit = unit_with(&decides(RICHARD, ""));
-    let a = started_with(&dir, http_port, None, &unit, |cfg| cfg.gateway_consent_principals = consent_table(&["richard"])).await;
+    let unit = unit_with(&decides(ALEX, ""));
+    let a = started_with(&dir, http_port, None, &unit, |cfg| cfg.gateway_consent_principals = consent_table(&["alex"])).await;
     let _ = forecaster_key(&a, &dir);
-    let (_store, enrolment) = enrolled(&a, &dir, "richard");
+    let (_store, enrolment) = enrolled(&a, &dir, "alex");
     let requests = ask(http_port, 2).await;
     let rows = pending_rows(http_port).await;
     let row = rows.iter().find(|r| r["request"].as_str() == Some(&requests[0])).expect("the record").clone();
@@ -230,7 +235,10 @@ async fn dev_signs_nothing_when_the_record_changed_under_the_prompt() {
         move |_| {
             let key = row["key"].as_str().unwrap().to_string();
             row.as_object_mut().unwrap().remove("key");
-            row["arguments_digest"] = "ff".repeat(32).into();
+            // Another call, and a record that agrees with itself: its arguments hash to its digest.
+            let other = serde_json::json!({"city": "Paris"});
+            row["arguments_digest"] = crate::arguments_digest(&other).iter().map(|b| format!("{b:02x}")).collect::<String>().into();
+            row["arguments"] = other;
             assert!(a.kv().set(key, bytes::Bytes::from(serde_json::to_vec(&row).unwrap())), "a member rewrites the request record");
         }
     }));
@@ -244,7 +252,7 @@ async fn dev_signs_nothing_when_the_record_changed_under_the_prompt() {
     assert_eq!(changed, dc::Answer::RecordChanged, "CHANGED: approve was typed for another record than the one now served");
     assert_eq!(still_open, [requests[0].clone()], "CHANGED: nothing was sent, so the request is still open");
     assert!(untouched.admitted(), "the control: an unchanged record is signed and admitted: {untouched:?}");
-    assert_eq!(decided(&journal, "grant.issue", RICHARD).len(), 1, "one issue — the unchanged request's");
+    assert_eq!(decided(&journal, "grant.issue", ALEX).len(), 1, "one issue — the unchanged request's");
 }
 
 /// **`dev` publishes its certificate through the client-certificate door, and `signed` is not `admitted`** (I7's
@@ -262,16 +270,16 @@ async fn dev_signs_nothing_when_the_record_changed_under_the_prompt() {
 async fn dev_publishes_its_certificate_through_the_door_and_signed_is_not_admitted() {
     let dir = scratch("dev-consent-publish");
     let http_port = alloc_port();
-    let unit = unit_with(&decides(RICHARD, ""));
+    let unit = unit_with(&decides(ALEX, ""));
     let a = started_with(&dir, http_port, None, &unit, |cfg| {
-        cfg.gateway_consent_principals = consent_table(&["richard"]);
+        cfg.gateway_consent_principals = consent_table(&["alex"]);
         cfg.gateway_named_tokens.push(crate::config::GatewayNamedToken { name: "operator".into(), token: "operator-secret".into(), scopes: vec!["identity:write".into()] });
     })
     .await;
     let _ = forecaster_key(&a, &dir);
-    let store = dc::Store::at(dir.join("home").join("consent"), ISSUER, "richard").expect("outside a worktree");
+    let store = dc::Store::at(dir.join("home").join("consent"), ISSUER, "alex").expect("outside a worktree");
     let key = store.create_key(false).expect("dev creates the key");
-    let cert = crate::issue_consent_cert(&dir.join("tls"), ISSUER, "richard", &key.spki_pem(), ConsentGrade::Tty, &dir.join("consent-out")).expect("certified");
+    let cert = crate::issue_consent_cert(&dir.join("tls"), ISSUER, "alex", &key.spki_pem(), ConsentGrade::Tty, &dir.join("consent-out")).expect("certified");
     let enrolment = store.enrol(&std::fs::read_to_string(&cert).unwrap()).expect("enrolled, not published");
     let requests = ask(http_port, 2).await;
     let gw = gateway(http_port);
@@ -291,6 +299,6 @@ async fn dev_publishes_its_certificate_through_the_door_and_signed_is_not_admitt
     assert!(!before.admitted() && before.word() == "signed", "BEFORE: signed, and not admitted");
     assert_eq!(by_relay.0, 403, "RELAY: a bearer without identity:write does not publish: {}", by_relay.1);
     assert_eq!(published.0, 200, "PUBLISHED: {}", published.1);
-    assert_eq!((published.1["principal"].as_str(), published.1["grade"].as_str(), published.1["grade_source"].as_str()), (Some(RICHARD), Some("tty"), Some("operator")), "PUBLISHED: {}", published.1);
+    assert_eq!((published.1["principal"].as_str(), published.1["grade"].as_str(), published.1["grade_source"].as_str()), (Some(ALEX), Some("tty"), Some("operator")), "PUBLISHED: {}", published.1);
     assert!(after.admitted(), "AFTER: the published key's decision is admitted: {after:?}");
 }

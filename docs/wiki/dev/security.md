@@ -650,6 +650,22 @@ and the signed decision names the request's id and terms, not the tool or digest
 addressed node's own copy of the unsigned request record (inventory row `grant/{agent}/{request}`, I4a). **The rule
 for the next signer (the macOS shim, N7's plugin): a signer's grade is what that signer itself enforces, checked by
 the signer against its certificate before it signs — never taken from the certificate alone.**
+**What #813's review found, and the rules it leaves** (2026-11-19). (1) **A signature binds what it names and
+nothing else.** A signed grant decision names the request's id and terms, not the tool, resource or digest, and the
+node issues from an unsigned record: one approval was moved to another tool and digest, and admitted twice after the
+answer was tombstoned ("a replay finds the request already answered" rested on a deletable KV record). Row I7-S
+closes it; until then `CONSENT_DECISION_DOES_NOT_NAME_WHAT_WAS_SHOWN` blocks a release. **When a person is shown
+something and signs, ask of every shown field: is it in the signed bytes? If not, who can change it afterwards?**
+(2) **Check a record against itself before showing it**: `dev` now recomputes the arguments' digest and refuses a
+record whose arguments do not hash to it, or whose resource is not its tool at its node. (3) **A prompt's decisive
+lines go last, below everything the requester controls, and every field is bounded**: the requester's own arguments
+scrolled the real tool out of an 80×24 terminal. Escape by allow-list (printable ASCII, letters, digits), never by a
+list of bad code points. (4) **A path check is a check of the real path**: resolve links before asking whether a
+directory is in a worktree; read a secret from a descriptor opened `O_NOFOLLOW` and `fstat`ed (type, owner, mode,
+link count); create with `O_EXCL`; replace by rename. Mode bits are not the whole access check on macOS — an ACL is
+not read, and the page says so. (5) **Flush the terminal before a prompt** (`tcflush`): typed-ahead text with no
+newline otherwise answers a bare return. It protects a person from their own keystrokes and stops no process that can
+type.
 **The roots can change on a live node** (identity-and-lifecycle I2, PR 1, unreleased): `NodeTls` holds its chain
 checks behind `ArcSwap` and a **roots generation** (`mycelium-core/src/tls.rs`). `reroot_material` builds material for
 the node's *current* key over a set of roots with no CA key; `activate` swaps the chain checks, then bumps the

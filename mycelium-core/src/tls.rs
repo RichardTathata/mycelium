@@ -612,6 +612,17 @@ pub const CONSENT_GRADE_OID: &[u64] = &[1, 3, 6, 1, 4, 1, 32473, 7, 1];
 /// --release`, run by the release workflow on a tag push, refuses a release while this is `true`.
 pub const CONSENT_GRADE_OID_IS_PROVISIONAL: bool = true;
 
+/// **A release blocker that is not an OID** (the maintainer's decision of 2026-11-18, on #813's review, F1): a consent
+/// decision's signature names the request's id, its holder and the decision's terms — **not the tool, the resource or
+/// the arguments' digest the approver was shown** — and the addressed node issues the grant from its own copy of an
+/// unsigned request record. So an approval can be applied to another tool, digest, resource or expiry by rewriting
+/// that record, and the same signed decision can be admitted again within the freshness window by tombstoning the
+/// answer. It is closed by the approver signing what it saw (the plan's row *I7-S*, its own PR after I7's PR 3a; the
+/// signed request record, I4a, closes the requester's half). **While this is `true` no release may carry consent
+/// decisions**: `scripts/check-release-blockers.sh --release` refuses the tag, beside the grade OID. It gates
+/// nothing at run time — the provisional gate does that; it is the mechanical form of a sentence in the plan.
+pub const CONSENT_DECISION_DOES_NOT_NAME_WHAT_WAS_SHOWN: bool = true;
+
 /// Whether this build may issue and read a consent certificate under [`CONSENT_GRADE_OID`]: always once the OID is
 /// registered; while it is provisional, only in a test build — `cfg(test)` (mycelium-core's own tests) or the
 /// non-default feature `provisional-consent-grade`, which only the test lines that exercise consent certificates turn
@@ -2426,14 +2437,14 @@ mod imp {
     /// `0600` before any byte is written when the file already exists (a key an older release left `0644`). Every
     /// private key this module writes goes through here; a certificate goes through [`write_public`]. Elsewhere than
     /// unix it is a plain write: the file takes whatever the platform gives it.
-    pub fn write_private(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    fn write_private(path: &Path, contents: &[u8]) -> std::io::Result<()> {
         write_with_mode(path, contents, 0o600)
     }
 
     /// Write a certificate: `0644` on unix whatever the umask, narrowed when it rewrites a wider file, so no other
     /// local user can replace a trust anchor or a node's certificate (#695's confirmation round, follow-up 4). Elsewhere
     /// than unix a plain write.
-    pub fn write_public(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    fn write_public(path: &Path, contents: &[u8]) -> std::io::Result<()> {
         write_with_mode(path, contents, 0o644)
     }
 
@@ -2848,7 +2859,9 @@ mod imp {
         params.subject_alt_names = vec![SanType::URI(uri)];
         params.serial_number = Some(rcgen::SerialNumber::from(issued_ms));
         params.not_before = rcgen::date_time_ymd(2024, 1, 1);
-        params.not_after  = rcgen::date_time_ymd(2099, 1, 1);
+        // 2099-01-01 as before; a test build may issue a short-lived one (`with_not_after_for_test`), as for a node's
+        // or a client's certificate.
+        super::set_not_after_for_issue(&mut params);
         params.custom_extensions = vec![rcgen::CustomExtension::from_oid_content(super::CONSENT_GRADE_OID, grade.extension_der())];
         issue_checked_over(params, &P256Public(*point), ca_cert_der, ca_key_pair)
     }
@@ -3361,7 +3374,7 @@ mod imp {
 }
 
 #[cfg(feature = "tls")]
-pub(crate) use imp::{create_private_dir, write_private, write_public};
+pub(crate) use imp::create_private_dir;
 #[cfg(feature = "tls")]
 pub use imp::{ed25519_key_from_cert_der, gateway_server_config_from_pem, generate_rotation, generate_rotation_after, issue_client_cert, issue_client_cert_for_key, issue_consent_cert, issue_node_cert, p256_point_from_cert_der, issue_node_cert_for_key, load_or_generate, mint_ca, mint_ca_at, commit_successor, held_ca_commitment, pin_ca_commitment, sign_bytes, verify_bytes, writable_by_others};
 

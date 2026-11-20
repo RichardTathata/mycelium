@@ -11,7 +11,7 @@
 //! answers when the prompt appears: a process, not a person — which is exactly what the `tty` grade can and cannot
 //! say (I7's residual B). The gateway is a stub in this file that serves two fixed routes and keeps what is posted to
 //! it; the signed bodies it receives are verified here with `SignedDecision::verify_signature`. A real node verifying
-//! and recording `dev`'s decision is `src/agent/dev_consent_tests.rs`. Every child is bounded (60 s in the helper).
+//! and recording `dev`'s decision is `src/agent/dev_consent_tests.rs`. Every child is bounded (240 s in the helper).
 #![cfg(all(unix, feature = "cli", feature = "tls", feature = "gateway", feature = "provisional-consent-grade"))]
 
 use std::io::{Read, Write};
@@ -24,20 +24,24 @@ use serde_json::{json, Value};
 const NODE: &str = "127.0.0.1:7946";
 
 /// Runs `argv` under a pseudo-terminal, typing each `|`-separated answer when a prompt ends (a literal `\n` inside
-/// one is a newline, so one answer can enter two lines at once); or, with `notty`, in a
+/// one is a newline, so one answer can enter two lines at once; with `ahead` the first answer is typed at once, with
+/// no newline, before any prompt); or, with `notty`, in a
 /// new session with no controlling terminal and `STDIN` as its standard input. Prints everything the child wrote and
-/// exits with its code; 124 when the child outlives 60 s.
+/// exits with its code; 124 when the child outlives 240 s (a loaded macOS machine was seen to hold one launch of a
+/// freshly built binary for a minute before its first instruction).
 const HELPER: &str = r#"
 import os, pty, select, subprocess, sys, time
 mode, answers, argv = sys.argv[1], [a for a in sys.argv[2].split("|")] if sys.argv[2] != "-" else [], sys.argv[3:]
 if mode == "notty":
-    p = subprocess.run(argv, input=os.environ.get("STDIN", "").encode(), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True, timeout=60)
+    p = subprocess.run(argv, input=os.environ.get("STDIN", "").encode(), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True, timeout=240)
     sys.stdout.buffer.write(p.stdout)
     sys.exit(p.returncode)
 pid, fd = pty.fork()
 if pid == 0:
     os.execv(argv[0], argv)
-buf, seen, deadline, mark = b"", 0, time.time() + 60, b"unanswered: "
+if mode == "ahead":
+    os.write(fd, answers.pop(0).encode())
+buf, seen, deadline, mark = b"", 0, time.time() + 240, b"unanswered: "
 while True:
     left = deadline - time.time()
     if left <= 0:
@@ -89,7 +93,7 @@ fn helped(cwd: &Path, home: &Path, mode: &str, answers: &str, stdin: &str, args:
         .stdin(Stdio::null())
         .output()
         .expect("python3 runs the pseudo-terminal helper (this test needs python3 on PATH)");
-    assert_ne!(out.status.code(), Some(124), "the binary outlived 60 s:\n{}", String::from_utf8_lossy(&out.stdout));
+    assert_ne!(out.status.code(), Some(124), "the binary outlived 240 s:\n{}", String::from_utf8_lossy(&out.stdout));
     out
 }
 
@@ -106,13 +110,27 @@ fn lines(out: &str) -> Vec<(String, String, Value)> {
         .collect()
 }
 
-fn row(request: &str) -> Value {
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// A request record that agrees with itself: its resource is its tool at its node, and its arguments hash to its
+/// digest (RFC 8785, as the request door writes it).
+fn row_of(request: &str, tool: &str, arguments: Value) -> Value {
     json!({
         "schema": "mycelium.grant-request/1", "request": request, "agent": "token:fleet/forecaster", "node": NODE,
-        "tool": "weather.forecast", "operation": "tools/call", "resource": format!("tool:weather.forecast@{NODE}"),
-        "arguments_digest": "5e".repeat(32), "arguments": {"city": "Lyon"}, "requested_at_ms": 1_000, "expires_at_ms": 4_000_000_000_000u64,
+        "tool": tool, "operation": "tools/call", "resource": format!("tool:{tool}@{NODE}"),
+        "arguments_digest": hex(&mycelium::arguments_digest(&arguments)), "arguments": arguments, "requested_at_ms": 1_000, "expires_at_ms": 4_000_000_000_000u64,
         "key": format!("grant/746f6b656e3a666c6565742f666f72656361737465722e/{request}"),
     })
+}
+
+fn row(request: &str) -> Value {
+    row_of(request, "weather.forecast", json!({"city": "Lyon"}))
+}
+
+fn lyon_digest() -> String {
+    hex(&mycelium::arguments_digest(&json!({"city": "Lyon"})))
 }
 
 /// What the stub gateway was sent: each `POST`'s path and JSON body.
@@ -121,6 +139,11 @@ type Posted = Arc<Mutex<Vec<(String, Value)>>>;
 /// A stub gateway: `/health` names [`NODE`], `/gateway/grants/pending` lists `rows`, and every `POST` is kept (its
 /// path and JSON body) and answered `200`. One request per connection; it stops when the test process ends.
 fn stub_gateway(rows: Vec<Value>) -> (String, Posted) {
+    stub_gateway_with(rows, 0, None)
+}
+
+/// [`stub_gateway`] whose pending list is padded with `pad` bytes, and which runs `on_post` after keeping each `POST`.
+fn stub_gateway_with(rows: Vec<Value>, pad: usize, on_post: Option<Box<dyn Fn() + Send>>) -> (String, Posted) {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
     let base = format!("http://{}", listener.local_addr().unwrap());
     let posted: Posted = Arc::default();
@@ -151,9 +174,12 @@ fn stub_gateway(rows: Vec<Value>) -> (String, Posted) {
             let (method, path) = (first.next().unwrap_or_default(), first.next().unwrap_or_default().to_string());
             let answer = match (method, path.as_str()) {
                 ("GET", "/health") => json!({"status": "ok", "node_id": NODE}),
-                ("GET", "/gateway/grants/pending") => json!({"ok": true, "pending": rows, "now_ms": 1_000}),
+                ("GET", "/gateway/grants/pending") => json!({"ok": true, "pending": rows, "now_ms": 1_000, "pad": "x".repeat(pad)}),
                 ("POST", _) => {
                     kept.lock().unwrap().push((path.clone(), serde_json::from_slice(&raw[head_end..]).unwrap_or(Value::Null)));
+                    if let Some(on_post) = &on_post {
+                        on_post();
+                    }
                     json!({"ok": true, "stub": "kept"})
                 }
                 _ => json!({"ok": false}),
@@ -200,18 +226,18 @@ fn set_up(root: &Path, grade: &str, enrol: bool) -> (PathBuf, PathBuf, String) {
     std::fs::write(work.join("README.md"), "a project\n").unwrap();
     std::fs::create_dir_all(&home).unwrap();
     let mut said = String::new();
-    let o = mycelium(&work, &home).args(["dev", "consent", "key", "--issuer", "fleet", "--name", "richard"]).output().unwrap();
+    let o = mycelium(&work, &home).args(["dev", "consent", "key", "--issuer", "fleet", "--name", "alex"]).output().unwrap();
     assert!(o.status.success(), "dev consent key: {}", text(&o));
     said.push_str(&text(&o));
     let public = find(&home, ".pub.pem");
     assert!(mycelium(&work, &home).args(["tls", "ca", "--out", ca.to_str().unwrap()]).output().unwrap().status.success());
     let o = mycelium(&work, &home)
-        .args(["tls", "issue", "--ca-dir", ca.to_str().unwrap(), "--client", "richard", "--consent", "--public-key", public.to_str().unwrap(), "--grade", grade, "--issuer", "fleet", "--out", out.to_str().unwrap()])
+        .args(["tls", "issue", "--ca-dir", ca.to_str().unwrap(), "--client", "alex", "--consent", "--public-key", public.to_str().unwrap(), "--grade", grade, "--issuer", "fleet", "--out", out.to_str().unwrap()])
         .output()
         .unwrap();
     assert!(o.status.success(), "tls issue --consent: {}", text(&o));
     if enrol {
-        let o = mycelium(&work, &home).args(["dev", "consent", "enrol", "--issuer", "fleet", "--name", "richard", "--cert", out.join("consent-fleet-richard.cert.pem").to_str().unwrap()]).output().unwrap();
+        let o = mycelium(&work, &home).args(["dev", "consent", "enrol", "--issuer", "fleet", "--name", "alex", "--cert", out.join("consent-fleet-alex.cert.pem").to_str().unwrap()]).output().unwrap();
         assert!(o.status.success(), "dev consent enrol: {}", text(&o));
         said.push_str(&text(&o));
     }
@@ -253,7 +279,7 @@ fn an_answer_typed_at_the_terminal_is_what_dev_signs_and_the_key_stays_off_the_w
     assert!(key.starts_with(&home) && !key.starts_with(&work));
     let (base, posted) = stub_gateway(vec![row("r1"), row("r2"), row("r3")]);
 
-    let o = helped(&work, &home, "pty", "approve||refuse", "", &["dev", "consent", "approve", "--issuer", "fleet", "--name", "richard", "--gateway", &base, "--token", "relay", "--ttl-secs", "120", "r1", "r2", "r3"]);
+    let o = helped(&work, &home, "pty", "approve||refuse", "", &["dev", "consent", "approve", "--issuer", "fleet", "--name", "alex", "--gateway", &base, "--token", "relay", "--ttl-secs", "120", "r1", "r2", "r3"]);
     let out = text(&o);
     said.push_str(&out);
     let sent = posted.lock().unwrap().clone();
@@ -273,7 +299,7 @@ fn an_answer_typed_at_the_terminal_is_what_dev_signs_and_the_key_stays_off_the_w
     let answered: Vec<(String, String)> = lines(&out).into_iter().map(|(r, a, _)| (r, a)).collect();
     assert_eq!(answered, [("r1".into(), "signed".into()), ("r2".into(), "dismissed".into()), ("r3".into(), "signed".into())], "ANSWERS:\n{out}");
     assert_eq!(o.status.code(), Some(1), "one request was left unanswered:\n{out}");
-    for shown in ["weather.forecast", &format!("tool:weather.forecast@{NODE}"), &"5e".repeat(32), "consent:fleet/richard", "grade tty", "for 120 s"] {
+    for shown in ["weather.forecast", &format!("tool:weather.forecast@{NODE}"), &lyon_digest(), "consent:fleet/alex", "grade tty", "for 120 s"] {
         assert!(out.contains(shown), "PROMPT: shows {shown:?}:\n{out}");
     }
 
@@ -284,7 +310,7 @@ fn an_answer_typed_at_the_terminal_is_what_dev_signs_and_the_key_stays_off_the_w
         assert_eq!(path, &format!("/gateway/grants/746f6b656e3a666c6565742f666f72656361737465722e/{request}"), "sent to the record's own key");
         assert_eq!((body["decision"].as_str(), body["ttl_secs"].as_u64()), (Some(decision), ttl), "{body}");
         let signed: mycelium::SignedDecision = serde_json::from_value(body["signed"].clone()).expect("a signed decision");
-        assert_eq!((signed.decider.as_str(), signed.node.as_str(), signed.agent.as_str(), signed.request.as_str(), signed.grade.as_deref()), ("consent:fleet/richard", NODE, "token:fleet/forecaster", request, Some("tty")));
+        assert_eq!((signed.decider.as_str(), signed.node.as_str(), signed.agent.as_str(), signed.request.as_str(), signed.grade.as_deref()), ("consent:fleet/alex", NODE, "token:fleet/forecaster", request, Some("tty")));
         assert_eq!(base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &signed.k).unwrap(), point, "signed by the enrolled key");
         assert!(signed.verify_signature(decision, ttl, body["reason"].as_str()), "VERIFY: {body}");
         assert!(!signed.verify_signature(if decision == "issue" { "refuse" } else { "issue" }, ttl, body["reason"].as_str()), "and not as the other decision");
@@ -292,7 +318,7 @@ fn an_answer_typed_at_the_terminal_is_what_dev_signs_and_the_key_stays_off_the_w
 
     // A wider key file is refused by name before anything is asked.
     std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o644)).unwrap();
-    let o = helped(&work, &home, "pty", "approve", "", &["dev", "consent", "approve", "--issuer", "fleet", "--name", "richard", "--gateway", &base, "--token", "relay", "r2"]);
+    let o = helped(&work, &home, "pty", "approve", "", &["dev", "consent", "approve", "--issuer", "fleet", "--name", "alex", "--gateway", &base, "--token", "relay", "r2"]);
     assert_eq!(o.status.code(), Some(2), "{}", text(&o));
     assert!(text(&o).contains("consent_key_too_open") && text(&o).contains("644") && !text(&o).contains("unanswered: "), "WIDER: refused by name, no prompt:\n{}", text(&o));
     assert_eq!(posted.lock().unwrap().len(), 2, "and nothing more was sent");
@@ -312,7 +338,7 @@ fn a_line_entered_before_a_prompt_was_shown_is_discarded() {
     let root = scratch("ahead");
     let (work, home, _) = set_up(&root, "tty", true);
     let (base, posted) = stub_gateway(vec![row("r1"), row("r2")]);
-    let o = helped(&work, &home, "pty", "approve\\napprove|", "", &["dev", "consent", "approve", "--issuer", "fleet", "--name", "richard", "--gateway", &base, "--token", "relay", "r1", "r2"]);
+    let o = helped(&work, &home, "pty", "approve\\napprove|", "", &["dev", "consent", "approve", "--issuer", "fleet", "--name", "alex", "--gateway", &base, "--token", "relay", "r1", "r2"]);
     let out = text(&o);
     let answered: Vec<(String, String)> = lines(&out).into_iter().map(|(r, a, _)| (r, a)).collect();
     let sent: Vec<String> = posted.lock().unwrap().iter().map(|(path, _)| path.rsplit('/').next().unwrap_or_default().to_string()).collect();
@@ -334,7 +360,7 @@ fn without_a_terminal_dev_signs_nothing_and_standard_input_is_not_an_answer() {
     let root = scratch("notty");
     let (work, home, _) = set_up(&root, "tty", true);
     let (base, posted) = stub_gateway(vec![row("r1"), row("r2")]);
-    let common = ["dev", "consent", "approve", "--issuer", "fleet", "--name", "richard", "--gateway", base.as_str(), "--token", "relay"];
+    let common = ["dev", "consent", "approve", "--issuer", "fleet", "--name", "alex", "--gateway", base.as_str(), "--token", "relay"];
 
     let o = helped(&work, &home, "notty", "-", "approve\napprove\n", &[&common[..], &["r1"]].concat());
     let answered: Vec<(String, String)> = lines(&text(&o)).into_iter().map(|(r, a, _)| (r, a)).collect();
@@ -356,17 +382,432 @@ fn without_a_terminal_dev_signs_nothing_and_standard_input_is_not_an_answer() {
 fn the_binary_refuses_a_presence_grade_for_its_software_key() {
     let root = scratch("grade");
     let (work, home, _) = set_up(&root, "os_presence(macos, unbound)", false);
-    let cert = root.join("out").join("consent-fleet-richard.cert.pem");
-    let o = mycelium(&work, &home).args(["dev", "consent", "enrol", "--issuer", "fleet", "--name", "richard", "--cert", cert.to_str().unwrap()]).output().unwrap();
+    let cert = root.join("out").join("consent-fleet-alex.cert.pem");
+    let o = mycelium(&work, &home).args(["dev", "consent", "enrol", "--issuer", "fleet", "--name", "alex", "--cert", cert.to_str().unwrap()]).output().unwrap();
     assert_eq!(o.status.code(), Some(2), "{}", text(&o));
     assert!(text(&o).contains("grade_not_this_keys") && text(&o).contains("--grade tty"), "refused by name, saying what the key is:\n{}", text(&o));
     let key = find(&home, ".key.p8");
     assert!(!tree(&home).iter().any(|p| p.to_string_lossy().ends_with(".cert.pem")), "the refused certificate was not kept");
-    std::fs::copy(&cert, key.parent().unwrap().join("consent-fleet-richard.cert.pem")).unwrap();
+    std::fs::copy(&cert, key.to_str().unwrap().replace(".key.p8", ".cert.pem")).unwrap();
     let (base, posted) = stub_gateway(vec![row("r1")]);
-    let o = helped(&work, &home, "pty", "approve", "", &["dev", "consent", "approve", "--issuer", "fleet", "--name", "richard", "--gateway", &base, "r1"]);
+    let o = helped(&work, &home, "pty", "approve", "", &["dev", "consent", "approve", "--issuer", "fleet", "--name", "alex", "--gateway", &base, "r1"]);
     assert_eq!(o.status.code(), Some(2), "{}", text(&o));
     assert!(text(&o).contains("grade_not_this_keys") && !text(&o).contains("unanswered: "), "refused on use, no prompt:\n{}", text(&o));
     assert!(posted.lock().unwrap().is_empty());
     let _ = std::fs::remove_dir_all(&root);
 }
+
+// ---------------------------------------------------------------------------------------------------------------
+// #813's review: what a record, a terminal and a directory can and cannot do. The tests below drive
+// `mycelium::dev_consent`'s public surface directly where no terminal is needed, and the binary where one is.
+// ---------------------------------------------------------------------------------------------------------------
+
+use mycelium::dev_consent as dc;
+
+/// A store under a fresh scratch home, with a key made by `dev` and (when `grade` is given) a certificate at that
+/// grade issued by a scratch CA and enrolled. Returns the store, the CA directory and the home.
+fn api_store(root: &Path, enrol: bool) -> (dc::Store, PathBuf) {
+    let ca = root.join("ca");
+    mycelium::mint_ca(&ca).expect("a CA");
+    let store = dc::Store::at(root.join("home").join("consent"), "fleet", "alex").expect("outside a worktree");
+    let key = store.create_key(false).expect("a key");
+    if enrol {
+        let cert = mycelium::issue_consent_cert(&ca, "fleet", "alex", &key.spki_pem(), mycelium::ConsentGrade::Tty, &root.join("out")).expect("certified");
+        store.enrol(&std::fs::read_to_string(cert).unwrap()).expect("enrolled");
+    }
+    (store, ca)
+}
+
+/// An approver answering from a list; `during` runs while the first prompt is up.
+struct Scripted {
+    answers: Vec<dc::Approval>,
+    prompts: usize,
+    during: Option<Box<dyn FnOnce()>>,
+}
+
+impl dc::Approver for Scripted {
+    fn ask(&mut self, _: &dc::Prompt) -> dc::Approval {
+        self.prompts += 1;
+        if let Some(during) = self.during.take() {
+            during();
+        }
+        if self.answers.is_empty() { dc::Approval::Dismissed } else { self.answers.remove(0) }
+    }
+}
+
+fn runtime() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_current_thread().enable_all().build().expect("a runtime")
+}
+
+/// **A record whose arguments do not hash to its digest prompts nothing** (#813's review, F2). The grant binds the
+/// digest; the person reads the arguments; `dev` shows a record only when the one is the hash of the other:
+/// - benign arguments beside **another call's digest** — refused (`arguments_unverified`), though the record never
+///   changes and no timing is involved;
+/// - arguments the record **withholds** (a data class) or **cuts** (over the rendering cap), and a record with
+///   none — refused, not shown with a caveat: a person cannot approve what this device cannot relate to the digest;
+/// - the RFC 8785 digest, and the pre-I3 form the nodes still honour for the window (`deprecations.md` §93), are
+///   each accepted;
+/// - a record whose **resource is not its tool at its node** is refused (`record_unreadable`): the evaluator is
+///   asked about the resource and the grant permits the tool, so `dev` shows neither when they disagree.
+///
+/// Seen failing first, one build per plant: the digest comparison removed (*another call's digest: SHOWN*, and the
+/// withheld and cut records with it); the resource comparison removed (*a resource naming another tool: SHOWN*).
+#[test]
+fn a_record_whose_arguments_do_not_hash_to_its_digest_prompts_nothing() {
+    let lyon = json!({"city": "Lyon"});
+    let transfer = json!({"to": "acct-9", "amount": 5000});
+    // ECMAScript writes 1e21 as `1e+21` and serde_json as `1e21`: the two digest forms differ for it.
+    let float = json!({"x": 1e21});
+    let (jcs, legacy) = (hex(&mycelium::arguments_digest(&float)), hex(&mycelium::legacy_arguments_digest(&float)));
+    assert_ne!(jcs, legacy, "the two forms differ for this value, so the legacy case below is a real one");
+    let with = |change: &dyn Fn(&mut Value)| {
+        let mut r = row_of("r1", "weather.forecast", lyon.clone());
+        change(&mut r);
+        dc::PromptRecord::find(&json!([r]), "r1").map(|_| ()).map_err(|e| format!("{e:?}"))
+    };
+    let unverified = |r: &Result<(), String>| r.as_ref().err().is_some_and(|e| e.starts_with("ArgumentsUnverified"));
+    let mut wrong: Vec<String> = Vec::new();
+    for (what, result) in [
+        ("another call's digest", with(&|r| r["arguments_digest"] = hex(&mycelium::arguments_digest(&transfer)).into())),
+        ("another call's arguments", with(&|r| r["arguments"] = transfer.clone())),
+        ("arguments withheld by a data class", with(&|r| r["arguments"] = json!({"withheld": "data class secret: not rendered into the gossiped request", "class": "secret", "bytes": 15}))),
+        ("arguments over the rendering cap", with(&|r| r["arguments"] = json!({"withheld": "over the rendering cap", "bytes": 20000, "cap": 16384}))),
+        ("no arguments", with(&|r| r["arguments"] = Value::Null)),
+        ("a digest that is not hex of anything", with(&|r| r["arguments_digest"] = "ff".repeat(32).into())),
+    ] {
+        if !unverified(&result) {
+            wrong.push(format!("{what}: SHOWN or misnamed ({result:?}), not arguments_unverified"));
+        }
+    }
+    for (what, result) in [
+        ("the RFC 8785 digest", with(&|_| {})),
+        ("the RFC 8785 digest of a float", with(&|r| { r["arguments"] = float.clone(); r["arguments_digest"] = jcs.clone().into(); })),
+        ("the legacy digest of a float, honoured for the window", with(&|r| { r["arguments"] = float.clone(); r["arguments_digest"] = legacy.clone().into(); })),
+    ] {
+        if result.is_err() {
+            wrong.push(format!("{what}: refused ({result:?})"));
+        }
+    }
+    for (what, result) in [
+        ("a resource naming another tool", with(&|r| r["resource"] = format!("tool:payments.transfer@{NODE}").into())),
+        ("a tool the resource does not name", with(&|r| r["tool"] = "payments.transfer".into())),
+        ("a resource at another node", with(&|r| r["resource"] = "tool:weather.forecast@10.0.0.9:7946".into())),
+    ] {
+        if result != Err("Unreadable(\"resource\")".to_string()) {
+            wrong.push(format!("{what}: SHOWN or misnamed ({result:?}), not record_unreadable"));
+        }
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
+    assert_eq!(dc::Answer::NoRecord(dc::NoRecord::ArgumentsUnverified("x")).word(), "arguments_unverified");
+}
+
+/// What an 80-column terminal shows of `text`: each line wrapped at 80.
+fn rows_at_80(text: &str) -> Vec<String> {
+    text.split('\n').flat_map(|line| {
+        let chars: Vec<char> = line.chars().collect();
+        if chars.is_empty() { vec![String::new()] } else { chars.chunks(80).map(|c| c.iter().collect()).collect() }
+    }).collect()
+}
+
+/// **The lines an approval is about are the last thing shown, whatever the record holds** (#813's review, F3). The
+/// requester controls its arguments through the door, so no forgery is needed: the reviewer's request — a transfer
+/// whose arguments are 58 spaces, 17 blank rows and a forged header naming `weather.forecast`, 1 933 characters —
+/// scrolled the real lines out of an 80×24 terminal. Now:
+/// - the arguments come **first** and are cut to `ARGUMENTS_SHOWN_MAX` characters, with what was cut said;
+/// - request, holder, tool, resource, digest and the terms come **after** them, directly above the question, each
+///   identifier cut to `ID_SHOWN_MAX`: with every field at its longest, the request line to the question is at most
+///   fifteen rows of an 80-column terminal — so they are on the screen when the answer is typed;
+/// - the bottom 24 rows of the reviewer's prompt hold the real tool, `payments.transfer`, below anything forged.
+///
+/// Seen failing first, one build per plant: the arguments rendered below the digest (*the arguments are shown
+/// before…*); `ARGUMENTS_SHOWN_MAX` raised to 100 000 (*the arguments are cut…*); `ID_SHOWN_MAX` raised to 10 000
+/// (*…at most 15 rows*).
+#[test]
+fn the_lines_an_approval_is_about_are_the_last_thing_shown_whatever_the_record_holds() {
+    let forged = format!("{}{}mycelium consent: a grant request.{}  request    r1{}  holder     token:fleet/forecaster{}  tool       weather.forecast{}", " ".repeat(58), " ".repeat(80 * 17), " ".repeat(46), " ".repeat(65), " ".repeat(45), " ".repeat(1933 - 58 - 80 * 17 - 34 - 46 - 15 - 65 - 35 - 45 - 27));
+    let record = dc::PromptRecord::find(&json!([row_of("r1", "payments.transfer", json!({"note": forged}))]), "r1").expect("the record agrees with itself");
+    let prompt = dc::Prompt::render(&record, "consent:fleet/alex", mycelium::ConsentGrade::Tty, "http://127.0.0.1:19577", NODE, 300, 1_000).text;
+    let rows = rows_at_80(&prompt);
+    let screen = &rows[rows.len().saturating_sub(24)..];
+    let real = screen.iter().position(|r| r.starts_with("  tool       payments.transfer")).unwrap_or_else(|| panic!("the real tool line is on the last screen:\n{}", screen.join("\n")));
+    assert!(!screen.iter().skip(real).any(|r| r.contains("weather.forecast")), "nothing naming another tool is below it:\n{}", screen.join("\n"));
+    let (arguments_at, request_at) = (prompt.find("  arguments  ").expect("arguments"), prompt.find("\n  request    ").expect("request"));
+    assert!(arguments_at < request_at, "the arguments are shown before the lines an approval is about:\n{prompt}");
+    let shown_arguments = &prompt[arguments_at..prompt[arguments_at..].find('\n').map(|n| arguments_at + n).unwrap()];
+    assert!(shown_arguments.chars().count() <= dc::ARGUMENTS_SHOWN_MAX + 80 && shown_arguments.contains("more characters not shown]"), "the arguments are cut to the bound, and say so: {} characters", shown_arguments.chars().count());
+    assert!(prompt.contains("characters of them are NOT shown above"), "and the digest line says the person has not seen all of them:\n{prompt}");
+
+    // Every field at its longest: the request line to the question still fits well inside one screen.
+    let long = "x".repeat(4000);
+    let mut hostile = row_of(&long, &long, json!({"note": long}));
+    hostile["agent"] = long.clone().into();
+    hostile["key"] = format!("grant/seg/{long}").into();
+    let record = dc::PromptRecord::find(&json!([hostile]), &long).expect("long fields, and a record that agrees with itself");
+    let prompt = dc::Prompt::render(&record, "consent:fleet/alex", mycelium::ConsentGrade::Tty, &long, &long, 3600, 0).text;
+    let tail = &prompt[prompt.find("\n  request    ").unwrap() + 1..];
+    assert!(rows_at_80(tail).len() <= 15, "from the request line to the question is at most 15 rows of 80 columns, whatever the record holds: {} rows\n{tail}", rows_at_80(tail).len());
+}
+
+/// **Every character that is not printable ASCII, a letter or a digit is written as an escape** (#813's review, F3):
+/// decided by what a character *is* (an allow-list over the Unicode properties), not by a list of bad ones. In the
+/// arguments: the escape character, a bidirectional override and isolate, the Arabic letter mark U+061C, the line
+/// and paragraph separators, a tag character, a zero-width space, a byte-order mark, a no-break space, a Hangul
+/// filler, a private-use character and a backslash each reach the terminal as `\u{…}`; a letter of another script
+/// is shown as itself (**stated: it can look like a Latin one**). In an identifier: only printable ASCII is shown
+/// as itself — a Cyrillic `а` in a tool's name and a space are escapes.
+///
+/// Seen failing first: the rule replaced by the earlier list of code points (*U+061C … reached the terminal*).
+#[test]
+fn every_character_that_is_not_ascii_a_letter_or_a_digit_is_an_escape() {
+    let hidden = ['\u{1b}', '\u{202e}', '\u{2066}', '\u{61c}', '\u{2028}', '\u{2029}', '\u{e0041}', '\u{200b}', '\u{feff}', '\u{a0}', '\u{3164}', '\u{e000}', '\u{7f}', '\u{85}', '\\'];
+    let mut wrong: Vec<String> = Vec::new();
+    for c in hidden {
+        let shown = dc::shown_text(&format!("a{c}b"), 100);
+        if (c != '\\' && shown.contains(c)) || shown != format!("a\\u{{{:x}}}b", c as u32) {
+            wrong.push(format!("U+{:04X} reached the terminal in free text: {shown:?}", c as u32));
+        }
+        let shown = dc::shown_id(&format!("a{c}b"), 100);
+        if shown != format!("a\\u{{{:x}}}b", c as u32) {
+            wrong.push(format!("U+{:04X} reached the terminal in an identifier: {shown:?}", c as u32));
+        }
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
+    assert_eq!(dc::shown_text("Lyon, été, 東京 42 {\"k\":[1]}", 100), "Lyon, été, 東京 42 {\"k\":[1]}", "letters, digits and ASCII punctuation are shown as themselves");
+    assert_eq!(dc::shown_id("p\u{430}yments.transfer x", 100), "p\\u{430}yments.transfer\\u{20}x", "an identifier shows only printable ASCII: no look-alike letter, no space");
+    assert_eq!(dc::shown_text("p\u{430}yments", 100), "p\u{430}yments", "STATED: in free text a look-alike letter is shown as itself");
+    assert_eq!(dc::shown_id(&"x".repeat(500), 96), format!("{} …[cut: 404 more characters not shown]", "x".repeat(96)), "a cut says how much");
+}
+
+/// **The consent directory is refused by its real path** (#813's review, F4). The check used to walk the path as
+/// written, so a link above the directory led the key into a repository:
+/// - `HOME` a symbolic link to a directory inside a repository — refused (`consent_dir_in_worktree`), as the same
+///   directory named directly is;
+/// - `…/mycelium` a symbolic link into a repository — refused;
+/// - a home with no link and no `.git` above it — a key is created, and its path is the real one.
+///
+/// **Not detected, stated:** a home tracked by a repository whose `.git` is elsewhere (a bare dotfiles repository).
+///
+/// Seen failing first: the links not resolved (*HOME a link into a repository: a key was created at …/repo/sub/…*).
+#[test]
+fn the_consent_directory_is_refused_by_its_real_path() {
+    let root = scratch("realpath");
+    let (repo, plain) = (root.join("repo"), root.join("plain"));
+    std::fs::create_dir_all(repo.join(".git")).unwrap();
+    std::fs::create_dir_all(repo.join("sub")).unwrap();
+    std::fs::create_dir_all(repo.join("stash")).unwrap();
+    std::fs::create_dir_all(&plain).unwrap();
+    // The directory `dev` would use under a home, relative to it, on this platform.
+    let under = |home: &Path| dc::consent_dir(&|v| (v == "HOME").then(|| home.display().to_string())).unwrap();
+    let open = |home: &Path| dc::Store::open(&|v| (v == "HOME").then(|| home.display().to_string()), "fleet", "alex");
+    let mut wrong: Vec<String> = Vec::new();
+
+    let linked_home = root.join("linked-home");
+    std::os::unix::fs::symlink(repo.join("sub"), &linked_home).unwrap();
+    for (what, home) in [("HOME inside a repository", repo.join("sub")), ("HOME a link into a repository", linked_home.clone())] {
+        match open(&home).and_then(|s| s.create_key(false).map(|_| s)) {
+            Err(r) if r.code() == "consent_dir_in_worktree" => {}
+            Err(r) => wrong.push(format!("{what}: refused {}, not consent_dir_in_worktree", r.code())),
+            Ok(s) => wrong.push(format!("{what}: a key was created at {}", s.key_path().display())),
+        }
+    }
+    let link_home = root.join("home-with-a-linked-directory");
+    let app = under(&link_home);
+    std::fs::create_dir_all(app.parent().unwrap().parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(repo.join("stash"), app.parent().unwrap()).unwrap();
+    match open(&link_home).and_then(|s| s.create_key(false).map(|_| s)) {
+        Err(r) if r.code() == "consent_dir_in_worktree" => {}
+        Err(r) => wrong.push(format!("the mycelium directory a link into a repository: refused {}, not consent_dir_in_worktree", r.code())),
+        Ok(s) => wrong.push(format!("the mycelium directory a link into a repository: a key was created at {}", s.key_path().display())),
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
+    assert!(tree(&repo).is_empty(), "nothing was written into the repository: {:?}", tree(&repo));
+
+    let store = open(&plain).expect("no link, no repository");
+    store.create_key(false).expect("a key");
+    assert!(store.key_path().starts_with(std::fs::canonicalize(&plain).unwrap()), "the key's path is the real one: {}", store.key_path().display());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// **Two principals never share a file** (#813's review, F12): `a-b`/`c` and `a`/`b-c` both made
+/// `consent-a-b-c.key.p8`. The separator is now a character neither an issuer nor a name can hold.
+/// Seen failing first: the `-` separator restored (*the two principals share …*).
+#[test]
+fn two_principals_never_share_a_file() {
+    let root = scratch("names");
+    let dir = root.join("consent");
+    let (one, two) = (dc::Store::at(dir.clone(), "a-b", "c").unwrap(), dc::Store::at(dir, "a", "b-c").unwrap());
+    assert_ne!(one.principal(), two.principal());
+    for (a, b) in [(one.key_path(), two.key_path()), (one.public_key_path(), two.public_key_path()), (one.cert_path(), two.cert_path())] {
+        assert_ne!(a, b, "the two principals share {}", a.display());
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// **`enrol` keeps the certificate alone** (#813's review, F12). The file handed to `enrol` holds the certificate,
+/// some text, and another PEM block — here a block marked as a private key. What is kept beside the key, and what
+/// the publication door would be sent, is the one certificate, re-encoded: nothing else of the file.
+/// Seen failing first: the file kept as given (*the kept file holds what was beside the certificate*).
+#[test]
+fn enrol_keeps_the_certificate_alone() {
+    let root = scratch("pem");
+    let (store, ca) = api_store(&root, false);
+    let public = std::fs::read_to_string(store.public_key_path()).unwrap();
+    let cert = std::fs::read_to_string(mycelium::issue_consent_cert(&ca, "fleet", "alex", &public, mycelium::ConsentGrade::Tty, &root.join("out")).unwrap()).unwrap();
+    let given = format!("a note the issuer left\n{cert}-----BEGIN PRIVATE KEY-----\nbm90IGEga2V5LCBidXQgbWFya2VkIGFzIG9uZQ==\n-----END PRIVATE KEY-----\n");
+    let enrolment = store.enrol(&given).expect("the certificate in it is this key's");
+    let kept = std::fs::read_to_string(store.cert_path()).unwrap();
+    for (what, text) in [("the kept file", kept.as_str()), ("what the door is sent", enrolment.cert_pem())] {
+        assert!(!text.contains("PRIVATE KEY") && !text.contains("a note"), "{what} holds what was beside the certificate:\n{text}");
+        assert_eq!(text.matches("-----BEGIN ").count(), 1, "{what} is one PEM block");
+    }
+    assert_eq!(kept.split_whitespace().collect::<String>(), cert.split_whitespace().collect::<String>(), "and it is the certificate that was issued");
+    assert_eq!(store.enrolment().expect("read back").cert_pem(), kept);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// **`enrol` and `approve` refuse an expired certificate** (#813's review, F12): `dev` would have signed under it and
+/// every node refused. A certificate whose validity ended is refused by name at enrolment and, written beside the
+/// key, on use.
+/// Seen failing first: the validity not read (*an expired certificate was enrolled*).
+#[test]
+fn an_expired_certificate_is_refused_at_enrolment_and_on_use() {
+    let root = scratch("expired");
+    let (store, ca) = api_store(&root, false);
+    let public = std::fs::read_to_string(store.public_key_path()).unwrap();
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+    let issue = |until: u64, tag: &str| mycelium_core::tls::with_not_after_for_test(until, || std::fs::read_to_string(mycelium::issue_consent_cert(&ca, "fleet", "alex", &public, mycelium::ConsentGrade::Tty, &root.join(tag)).unwrap()).unwrap());
+    let (expired, current) = (issue(now - 3_600_000, "expired"), issue(now + 3_600_000, "current"));
+    let refused = store.enrol(&expired).map(|_| ()).expect_err("an expired certificate was enrolled");
+    assert_eq!(refused.code(), "certificate_expired", "{refused}");
+    assert!(!store.cert_path().exists(), "and it was not kept");
+    store.enrol(&current).expect("one still valid is enrolled");
+    mycelium_core::consent_key::store_public(&store.cert_path(), expired.as_bytes()).unwrap();
+    assert_eq!(store.enrolment().map(|_| ()).expect_err("an expired certificate beside the key").code(), "certificate_expired");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// **The key and its certificate are read and checked again before every prompt** (#813's review, F8). A `dev` fed
+/// ids on its standard input runs for as long as that stays open. While the first request's prompt is up, the
+/// certificate beside the key is replaced by one that calls the key an OS-presence key. The first request, read
+/// before the change, is signed; the second is answered `enrolment_refused` (`grade_not_this_keys`) and **raises no
+/// prompt**.
+/// Seen failing first: the enrolment read once, before the queue is served (*the second request was signed*).
+#[test]
+fn the_key_and_its_certificate_are_checked_again_before_every_prompt() {
+    let root = scratch("every-prompt");
+    let (store, ca) = api_store(&root, true);
+    let public = std::fs::read_to_string(store.public_key_path()).unwrap();
+    let presence = std::fs::read_to_string(mycelium::issue_consent_cert(&ca, "fleet", "alex", &public, mycelium::ConsentGrade::OsPresenceMacosUnbound, &root.join("presence")).unwrap()).unwrap();
+    let (base, posted) = stub_gateway(vec![row("r1"), row("r2")]);
+    let gateway = dc::Gateway::new(&base, Some("relay".into())).unwrap();
+    let cert_path = store.cert_path();
+    let mut approver = Scripted { answers: vec![dc::Approval::Approve, dc::Approval::Approve], prompts: 0, during: Some(Box::new(move || mycelium_core::consent_key::store_public(&cert_path, presence.as_bytes()).unwrap())) };
+    let (handle, queue) = dc::queue(dc::QUEUE_BOUND);
+    handle.offer("r1").unwrap();
+    handle.offer("r2").unwrap();
+    drop(handle);
+    let mut said: Vec<(String, String, Value)> = Vec::new();
+    runtime().block_on(async { tokio::time::timeout(std::time::Duration::from_secs(30), dc::serve(&gateway, &store, &mut approver, queue, 300, &mut |r, a| said.push((r.to_string(), a.word().to_string(), a.line(r))))).await.expect("served within 30 s") });
+    let words: Vec<(&str, &str)> = said.iter().map(|(r, w, _)| (r.as_str(), w.as_str())).collect();
+    assert_eq!(words, [("r1", "signed"), ("r2", "enrolment_refused")], "the second request was signed, or misnamed: {said:?}");
+    assert_eq!(said[1].2["refusal"], "grade_not_this_keys", "{}", said[1].2);
+    assert_eq!((approver.prompts, posted.lock().unwrap().len()), (1, 1), "one prompt, one decision sent");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// **A gateway's answer and a line of standard input are bounded** (#813's review, F11). A pending list of more
+/// than `GATEWAY_ANSWER_MAX` bytes is not read further: the request is answered `gateway`, by name, and nothing is
+/// shown. A line of standard input longer than `REQUEST_ID_MAX` bytes is no id: its start is reported, the rest is
+/// read and dropped, and the next line is read as usual.
+/// Seen failing first, one build per plant: the answer read whole (*an answer over the bound was read: signed*); the
+/// line read whole (*a line over the bound was taken as an id*).
+#[test]
+fn a_gateways_answer_and_a_line_of_standard_input_are_bounded() {
+    let root = scratch("bounds");
+    let (store, _ca) = api_store(&root, true);
+    let (base, posted) = stub_gateway_with(vec![row("r1")], dc::GATEWAY_ANSWER_MAX + 1024, None);
+    let gateway = dc::Gateway::new(&base, Some("relay".into())).unwrap();
+    let mut approver = Scripted { answers: vec![dc::Approval::Approve], prompts: 0, during: None };
+    let enrolment = store.enrolment().unwrap();
+    let answer = runtime().block_on(async { tokio::time::timeout(std::time::Duration::from_secs(30), dc::answer_one(&gateway, &enrolment, &mut approver, "r1", 300)).await.expect("answered within 30 s") });
+    assert!(matches!(&answer, dc::Answer::Gateway(why) if why.contains("over")), "an answer over the bound was read: {}", answer.word());
+    assert_eq!((approver.prompts, posted.lock().unwrap().len()), (0, 0), "nothing shown, nothing sent");
+
+    let mut input = std::io::Cursor::new([vec![b'a'; 3 * 1024 * 1024], b"\nr2\n\n  r3  \n".to_vec(), vec![b'b'; dc::REQUEST_ID_MAX], b"\n".to_vec(), vec![b'c'; dc::REQUEST_ID_MAX + 1]].concat());
+    let mut read = Vec::new();
+    while let Some(line) = dc::read_request_id(&mut input) {
+        read.push(line.map(|id| if id.len() > 8 { format!("{}…{}", &id[..1], id.len()) } else { id }));
+    }
+    assert_eq!(read, [Err("a".repeat(32)), Ok("r2".into()), Ok(String::new()), Ok("r3".into()), Ok(format!("b…{}", dc::REQUEST_ID_MAX)), Err("c".repeat(32))], "a line over the bound was taken as an id, or a line after it was lost");
+    assert_eq!(dc::Answer::IdTooLong.word(), "request_id_too_long");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// **Text typed before the prompt and not yet entered is not the answer to a bare return** (#813's review, F7).
+/// `approve` is typed, with no return, before `dev` has shown anything; when the prompt appears, only a return is
+/// entered. The terminal's input is flushed before the prompt is written, so the line that is read is empty and
+/// nothing is signed. **What stays, stated:** a process that can type at the terminal types after the prompt, and is
+/// signed.
+/// Seen failing first: the terminal's input not flushed (*`approve` typed before the prompt was signed on a bare
+/// return*).
+#[test]
+fn text_typed_before_the_prompt_and_not_entered_is_not_the_answer() {
+    let root = scratch("partial");
+    let (work, home, _) = set_up(&root, "tty", true);
+    let (base, posted) = stub_gateway(vec![row("r1")]);
+    let o = helped(&work, &home, "ahead", "approve|", "", &["dev", "consent", "approve", "--issuer", "fleet", "--name", "alex", "--gateway", &base, "--token", "relay", "r1"]);
+    let out = text(&o);
+    let answered: Vec<(String, String)> = lines(&out).into_iter().map(|(r, a, _)| (r, a)).collect();
+    assert_eq!(answered, [("r1".into(), "dismissed".into())], "`approve` typed before the prompt was signed on a bare return:\n{out}");
+    assert!(posted.lock().unwrap().is_empty(), "nothing was sent");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// **`approve -` is refused when standard input is the terminal** (#813's review, F10): the ids and the answers
+/// would be read from one keyboard, and a typed `approve` taken as an id. Refused by name, exit 2, before anything
+/// is asked.
+/// Seen failing first: the refusal removed (the binary read ids from the terminal until the helper's bound).
+#[test]
+fn approve_from_standard_input_is_refused_when_standard_input_is_the_terminal() {
+    let root = scratch("stdin-tty");
+    let (work, home, _) = set_up(&root, "tty", true);
+    let (base, posted) = stub_gateway(vec![row("r1")]);
+    let out = Command::new("python3")
+        .args(["-c", HELPER, "pty", "approve", env!("CARGO_BIN_EXE_mycelium"), "dev", "consent", "approve", "--issuer", "fleet", "--name", "alex", "--gateway", &base, "--token", "relay", "-"])
+        .current_dir(&work).env("HOME", &home).env("STDIN", "").env_remove("XDG_DATA_HOME").env_remove("MYCELIUM_GATEWAY_TOKEN").stdin(Stdio::null()).output().expect("python3");
+    assert_eq!(out.status.code(), Some(2), "refused, not left reading ids from the terminal (124 is the helper's 240 s bound):\n{}", text(&out));
+    assert!(text(&out).contains("requests_from_a_terminal"), "by name:\n{}", text(&out));
+    assert!(posted.lock().unwrap().is_empty());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// **The `not_enrolled` refusal quotes commands that run as written** (#813's review, F12). `approve` before `enrol`
+/// is refused by name and quotes two commands: the CA holder's `tls issue`, complete but for the two directories
+/// only that host knows, and `dev`'s own `enrol`. Each is run here exactly as quoted, with the two directories
+/// filled in; then `approve` finds the enrolment.
+/// Seen failing first: the earlier wording, which left `--issuer`, `--ca-dir` and `--out` off (the quoted command
+/// exited 2).
+#[test]
+fn the_not_enrolled_refusal_quotes_commands_that_run() {
+    let root = scratch("quoted");
+    let (work, home, _) = set_up(&root, "tty", false);
+    let o = mycelium(&work, &home).args(["dev", "consent", "approve", "--issuer", "fleet", "--name", "alex", "r1"]).output().unwrap();
+    let said = text(&o);
+    assert!(o.status.code() == Some(2) && said.contains("not_enrolled"), "{said}");
+    let quoted: Vec<String> = said.split('`').filter(|part| part.starts_with("mycelium ")).map(|c| c.replace("<ca-dir>", root.join("ca").to_str().unwrap()).replace("<out-dir>", root.join("out2").to_str().unwrap())).collect();
+    assert_eq!(quoted.len(), 2, "two commands are quoted: {said}");
+    assert!(quoted[0].starts_with("mycelium tls issue ") && quoted[1].starts_with("mycelium dev consent enrol "), "{quoted:?}");
+    for command in &quoted {
+        assert!(!command.contains('<'), "nothing is left to fill in but the two directories: {command}");
+        // Split as a shell would: the public key's path can hold a space (macOS's `Application Support`).
+        let args: Vec<String> = command.strip_prefix("mycelium ").unwrap().split(" --").enumerate().flat_map(|(i, part)| {
+            if i == 0 { part.split(' ').map(str::to_string).collect::<Vec<_>>() } else { let (flag, value) = part.split_once(' ').map_or((part, None), |(f, v)| (f, Some(v))); std::iter::once(format!("--{flag}")).chain(value.map(str::to_string)).collect() }
+        }).collect();
+        let ran = mycelium(&work, &home).args(&args).output().unwrap();
+        assert!(ran.status.success(), "the quoted command ran as written: {command}\n{}", text(&ran));
+    }
+    let o = mycelium(&work, &home).args(["dev", "consent", "approve", "--issuer", "fleet", "--name", "alex", "--gateway", "http://127.0.0.1:1", "r1"]).output().unwrap();
+    assert!(!text(&o).contains("not_enrolled"), "enrolled now: {}", text(&o));
+    let _ = std::fs::remove_dir_all(&root);
+}
+

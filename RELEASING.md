@@ -27,7 +27,7 @@ Must exit 0. Today it fails while `CONSENT_GRADE_OID_IS_PROVISIONAL` is `true` i
 grade extension's OID is a documentation-PEN placeholder until the registered IANA Private Enterprise Number arc
 arrives, and a certificate carrying an OID is permanent (identity-and-lifecycle I7). Replace `CONSENT_GRADE_OID` with
 the registered arc, set the constant to `false`, and update the golden (`the_grade_extensions_oid_and_each_grades_der_are_pinned`)
-in one PR before cutting a release that carries I7. The release workflow's `version` job runs the same check on the
+in one PR before cutting a release that carries I7. It fails too while `CONSENT_DECISION_DOES_NOT_NAME_WHAT_WAS_SHOWN` is `true` in the same file, which is not an OID: a consent decision's signature does not yet name the tool, resource and digest the approver was shown, so an approval can be moved to another call and replayed (the maintainer's decision of 2026-11-18; identity-and-lifecycle row I7-S, the approver signs what it saw). The PR that builds I7-S sets it `false`. The release workflow's `version` job runs the same check on the
 tag push and refuses the release by name.
 
 ## 2b. CI on the branch you are releasing **from**
@@ -190,7 +190,7 @@ re-point `latest` by hand afterwards.
 ## 8. Publish the GitHub Release
 
 **Not while a release blocker stands.** Run `scripts/check-release-blockers.sh --release` first; while it fails (today:
-`CONSENT_GRADE_OID_IS_PROVISIONAL` is `true`, identity-and-lifecycle I7, and `CA_GENERATION_OID_IS_PROVISIONAL`, I2), do not publish by hand with `gh release
+`CONSENT_GRADE_OID_IS_PROVISIONAL` is `true`, identity-and-lifecycle I7; `CA_GENERATION_OID_IS_PROVISIONAL`, I2; and `CONSENT_DECISION_DOES_NOT_NAME_WHAT_WAS_SHOWN`, I7-S), do not publish by hand with `gh release
 create` — the release workflow's `version` job refuses such a tag, and a hand-run publish would go around that refusal.
 
 A tag is not an announcement. The Releases page is what a reader who watches releases rather than

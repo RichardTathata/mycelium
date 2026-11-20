@@ -5330,48 +5330,79 @@ refuses every `mycelium dev consent` verb by name (`consent_grade_oid_provisiona
 directory, and writes nothing. **Nothing existing changes**: the subcommand, the two modules and the output schema
 are new.
 
+- **A second release blocker, which is not an OID.** A consent decision's signature names the request's id, its
+  holder and the decision's terms. It does not name the tool, the resource or the digest the approver was shown, and
+  the node issues the grant from its own copy of an unsigned request record. So an approval can be applied to another
+  call by rewriting that record, and admitted again within the freshness window by tombstoning the answer (the
+  [feature page](../features/consent-certificates.md) says exactly what can and cannot be changed). This predates
+  this change (#754, #810); it matters now because a person is shown the record. The maintainer decided on
+  2026-11-18 that the approver signs what it saw, as its own change, and that no release carries consent decisions
+  before it: `scripts/check-release-blockers.sh --release` fails while
+  `CONSENT_DECISION_DOES_NOT_NAME_WHAT_WAS_SHOWN` is `true`.
 - **New subcommand: `mycelium dev consent key | enrol | approve`.** `mycelium dev` was not a subcommand before;
   identity-and-lifecycle N4 (`mycelium dev --isolate`) will share the word. Exit codes: 0 done, 1 some request not
   signed and admitted, 2 usage or a refusal by name.
 - **Where the key is kept.** `~/Library/Application Support/mycelium/consent/` on macOS;
   `$XDG_DATA_HOME/mycelium/consent/`, default `~/.local/share/mycelium/consent/`, on Linux. Files:
-  `consent-{issuer}-{name}.key.p8` (PKCS#8, `0600`), `.pub.pem` and `.cert.pem` beside it, the directory `0700`.
-  `HOME` unset or relative is refused (`consent_dir_unresolved`); a directory with `.git` in it or above it is refused
-  (`consent_dir_in_worktree`), which includes a home directory kept under version control.
-- **A wider file is refused, not narrowed.** `dev` reads a key only from a regular file, in a directory, that group
-  and others cannot reach: `consent_key_too_open` / `consent_dir_too_open`, naming the mode. Fix it with `chmod 600`
-  / `chmod 700`. A symbolic link in place of either is refused.
+  `consent+{issuer}+{name}.key.p8` (PKCS#8, `0600`), `.pub.pem` and `.cert.pem` beside it, the directory `0700`.
+  `HOME` unset or relative is refused (`consent_dir_unresolved`).
+- **Never in a worktree, by the real path.** Every symbolic link in the directory's path is resolved first, and the
+  real path must have no `.git` at or above it (`consent_dir_in_worktree`). That covers a repository's worktree, a
+  linked worktree, a home directory with a `.git` in it, and a link above the directory that leads into one.
+  **It does not cover** a home tracked by a repository whose `.git` is elsewhere (`git --git-dir=…
+  --work-tree=$HOME`): nothing in the home says so, and `dev` does not detect it. Keep the consent directory out of
+  such a repository yourself (`Library/` or `.local/share/mycelium/` in its ignore file).
+- **What `dev` checks before it reads the key, and refuses, never narrows.** The file: opened without following a
+  link; a regular file; owned by you (`consent_key_not_owned`); closed to group and others (`consent_key_too_open`);
+  with one name, not hard-linked elsewhere (`consent_key_hard_linked`). Its directory: a directory, not a link,
+  yours, closed to group and others (`consent_dir_too_open`). Each directory above it up to your home: not writable
+  by group or others, and yours or root's (`consent_dir_ancestor_too_open`). Fix with `chmod 600` / `chmod 700` /
+  `chmod go-w`.
+- **On macOS an ACL is not read.** A file whose mode is `0600` and which carries an access-control entry for another
+  user loads. `ls -le` shows a `+` after the mode when an ACL is present; `chmod -N <file>` removes it.
 - **`dev` signs with a software key only under a certificate graded `tty`.** If the operator ran `tls issue --grade
   os_presence(macos, unbound)` or `--grade recording` over a key `dev consent key` made, `dev consent enrol` refuses
   the certificate and `dev consent approve` refuses to sign (`grade_not_this_keys`). Re-issue with `--grade tty`, and
   name `signed_with = "tty"` on the principal's `gateway_consent_principals` entry (§118). This is `dev`'s own
   refusal about its own key. No node can make that check, and the grade on a certificate stays the issuing
-  operator's statement.
+  operator's statement. An expired certificate is refused too (`certificate_expired`).
 - **A replaced key needs a new certificate.** `dev consent key --force` makes a new key; the old certificate no
   longer names it, and `approve` refuses (`enrolled_key_mismatch`) until the new public key is certified and
   enrolled. Publishing the new certificate supersedes the old consent key at every node that reads it (§112).
-- **Type the answer after the prompt appears.** `approve` discards any line already entered at the terminal before
-  it shows a prompt, and says how many characters it discarded. A second `approve` typed while the first request was
-  being answered does not approve the next one.
+- **A request `dev` will not show.** `dev` shows a request only when its record's arguments hash to the digest the
+  record names. A request whose arguments are withheld by a data class, or are over the 16 KiB rendering cap, is
+  answered `arguments_unverified` and cannot be approved with `dev`; a service decider can still decide it.
+- **Type the answer after the prompt appears.** `approve` discards whatever was typed at the terminal before it
+  shows a prompt, entered or not, and says how many entered characters it discarded. A second `approve` typed while
+  the first request was being answered does not approve the next one.
+- **One `dev` per terminal, and pipe the ids.** Two `dev` processes sharing a terminal are not serialised. `approve
+  -` is refused when standard input is the terminal (`requests_from_a_terminal`).
 - **The bearer `approve` needs** holds `grant:read` and `grant:relay` and nothing else. It decides nothing: the
   decision is the consent key's, and the consent principal needs its own `gateway_consent_principals` entry (§118).
-  `--token`, or `MYCELIUM_GATEWAY_TOKEN` as `mycelium declare` reads it.
+  `--token`, or `MYCELIUM_GATEWAY_TOKEN` as `mycelium declare` reads it. `dev` trusts the gateway it is pointed at,
+  and the path to it, for what the record says.
 - **Output.** One JSON object per request on standard output, schema `mycelium.dev.consent/1`: `request`, `answer`
-  (`signed`, `dismissed`, `busy`, `unknown_request`, `ambiguous_request`, `record_unreadable`, `record_changed`,
-  `no_terminal`, `not_signed`, `gateway`), and for `signed` the `decision`, `gateway_status` and `gateway_answer`.
-  `signed` means `dev` signed and sent; whether the node admitted it is `gateway_status`.
+  (`signed`, `dismissed`, `busy`, `unknown_request`, `ambiguous_request`, `record_unreadable`,
+  `arguments_unverified`, `record_changed`, `enrolment_refused`, `request_id_too_long`, `no_terminal`, `not_signed`,
+  `gateway`), and for `signed` the `decision`, `gateway_status` and `gateway_answer`. `signed` means `dev` signed and
+  sent; whether the node admitted it is `gateway_status`. More than 8 ids on one command line: the rest are `busy`.
 - **New public items.** `mycelium::dev_consent` (`Store`, `Enrolment`, `PromptRecord`, `Prompt`, `Approver`,
-  `TtyApprover`, `queue`, `answer_one`, `serve`, `Answer`, `Refusal`, `Gateway`), under `tls` and `gateway`;
-  `mycelium_core::consent_key` (`SoftwareConsentKey`, `ConsentKeyRefusal`, `store_public`, `load_public`), under
-  `tls`. `Refusal`, `Answer` and `ConsentKeyRefusal` are `#[non_exhaustive]`.
-- **Not built:** the macOS Secure Enclave key and its Swift shim (I7, PR 3b), so `os_presence(macos, unbound)` is
-  signed by nothing in this tree; Windows (`consent_key_platform_not_built`: no user-only ACL is set); a `recording`
-  signer for a `sim` build; a transport for another process to hand a running `dev` a request id, other than its
-  standard input.
+  `TtyApprover`, `queue`, `answer_one`, `serve`, `Answer`, `Refusal`, `Gateway`, `shown_text`, `shown_id`), under
+  `tls` and `gateway`; `mycelium_core::consent_key` (`SoftwareConsentKey`, `ConsentKeyRefusal`, `create_dir`,
+  `store_public`, `load_public`, `real_path`, `guarded_ancestors`), under `tls`;
+  `mycelium_core::tls::CONSENT_DECISION_DOES_NOT_NAME_WHAT_WAS_SHOWN`. `Refusal`, `Answer` and `ConsentKeyRefusal`
+  are `#[non_exhaustive]`.
+- **Dependencies.** `rustix` becomes a unix dependency of `mycelium` (the terminal flush) and, under `tls`, of
+  `mycelium-core` (this process's uid). It was already in a node's tree through `reqwest`; no crate is added to the
+  lockfile.
+- **Not built:** the approver signing what it saw (above); the macOS Secure Enclave key and its Swift shim (I7, PR
+  3b), so `os_presence(macos, unbound)` is signed by nothing in this tree; Windows (`consent_key_platform_not_built`:
+  no user-only ACL is set, and no CI job compiles that refusal); a `recording` signer for a `sim` build; a transport
+  for another process to hand a running `dev` a request id, other than its standard input.
 
-*Check:* on the developer's device, `ls -l` the consent directory: the `.key.p8` is `-rw-------` and the directory
-`drwx------`. After an approval, the addressed node's evidence journal holds a `Decided` record whose subject is
-`consent:{issuer}/{name}` and whose `signed_decision.signed_with.grade` is `tty`.
+*Check:* on the developer's device, `ls -le` the consent directory: the `.key.p8` is `-rw-------` with no `+`, and
+the directory `drwx------`. After an approval, the addressed node's evidence journal holds a `Decided` record whose
+subject is `consent:{issuer}/{name}` and whose `signed_decision.signed_with.grade` is `tty`.
 
 ## 122. `wire-check` reads an edge to a hosted component as the provider built from the declaration decides a member's call of it: the rule must be the host's own, for a node, in a form that provider admits (unreleased, the maintainer's choice of 2026-11-18)
 

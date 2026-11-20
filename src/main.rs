@@ -1239,18 +1239,21 @@ fn is_ca_certificate(der: &[u8]) -> Option<bool> {
 /// `mycelium::dev_consent` says who promises what):
 ///
 /// - `key --issuer <issuer> --name <name> [--force]` creates a software P-256 consent key, `0600` in a `0700`
-///   directory under the user's home (never the directory `dev` runs in, never a worktree), and prints where its
-///   public half is and **the grade that describes it: `tty`**. The private half is never printed.
+///   directory under the user's home (never the directory `dev` runs in; never a directory whose real path, links
+///   resolved, has `.git` at or above it), and prints where its public half is and **the grade that describes it:
+///   `tty`**. The private half is never printed.
 /// - `enrol --issuer <issuer> --name <name> --cert <cert.pem> [--gateway <url>] [--token <bearer>]` takes the
 ///   certificate the fleet CA's holder issued over that public key, refuses one that names another principal, another
-///   key or any grade but `tty`, keeps it beside the key, and with `--gateway` publishes it through the
-///   client-certificate door (`identity:write`).
+///   key or any grade but `tty`, or that has expired, keeps the certificate alone beside the key, and with `--gateway`
+///   publishes it through the client-certificate door (`identity:write`).
 /// - `approve --issuer <issuer> --name <name> [--gateway <url>] [--token <bearer>] [--ttl-secs <n>] <request>… | -`
-///   takes request **ids** (from the command line, or one per line on standard input with `-`), reads each one's
-///   record from the gateway (`grant:read`), shows it at the terminal (`/dev/tty`), and signs what is typed there:
-///   `approve` issues, `refuse` refuses, anything else signs nothing. The signed decision goes to the gateway under
-///   the bearer (`grant:relay`). At most `QUEUE_BOUND` requests wait; one more is answered `busy`. One JSON line per
-///   request on stdout (`mycelium.dev.consent/1`).
+///   takes request **ids** (from the command line, or one per line on a piped standard input with `-`), reads each
+///   one's record from the gateway (`grant:read`), checks that its arguments hash to its digest, shows it at the
+///   terminal (`/dev/tty`), and signs what is typed there after the prompt: `approve` signs an issue, `refuse` a
+///   refusal, anything else signs nothing. The key and its certificate are read again before every prompt. The signed
+///   decision goes to the gateway under the bearer (`grant:relay`). At most `QUEUE_BOUND` requests wait; one more is
+///   answered `busy` — ids on the command line are all queued before the first prompt, so past the bound they are
+///   `busy`. One JSON line per request on stdout (`mycelium.dev.consent/1`).
 ///
 /// Exit 0 when everything asked was done (for `approve`: every request signed and admitted by the gateway), 1 when
 /// some request was not (busy, dismissed, unknown, refused by the gateway), 2 on usage or a refusal by name —
@@ -1354,37 +1357,54 @@ fn dev_consent_cli(verb: &str, args: Vec<String>, usage: &str) -> i32 {
                 return 2;
             }
             if requests.is_empty() && !from_stdin { eprintln!("name at least one request id, or `-` to read them from standard input\n{usage}"); return 2; }
-            // Checked before anything is asked: the key, its certificate, and that the certificate still names this key.
-            let enrolment = match store.enrolment() {
-                Ok(e) => e,
-                Err(r) => return refused(&r, r.code()),
-            };
+            // `-` reads ids from standard input while the answers are read from the terminal: when standard input IS
+            // the terminal the two read the same keyboard, and a typed answer is taken as an id (#813's review, F10).
+            if from_stdin && std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+                eprintln!("dev consent approve: refused (requests_from_a_terminal): `-` reads request ids from standard input, and standard input is this terminal, where the answers are typed; pipe the ids in, or name them on the command line");
+                return 2;
+            }
+            // Checked before anything is asked — and again before every prompt (`serve`): the key, its certificate,
+            // and that the certificate still names this key.
+            if let Err(r) = store.enrolment() {
+                return refused(&r, r.code());
+            }
             let gateway = match dc::Gateway::new(gateway.as_deref().unwrap_or("http://127.0.0.1:8300"), token) {
                 Ok(g) => g,
                 Err(r) => return refused(&r, r.code()),
             };
             let say = |request: &str, answer: &dc::Answer| println!("{}", answer.line(request));
             let (handle, queue) = dc::queue(dc::QUEUE_BOUND);
-            let busy = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-            let offer = { let busy = std::sync::Arc::clone(&busy); move |handle: &dc::QueueHandle, request: &str| if handle.offer(request).is_err() {
-                busy.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let unqueued = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let offer = { let unqueued = std::sync::Arc::clone(&unqueued); move |handle: &dc::QueueHandle, request: &str| if handle.offer(request).is_err() {
+                unqueued.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 println!("{}", dc::Answer::Busy.line(request));
             } };
             if from_stdin {
-                // Ids arrive while a prompt is up: a reader thread offers each line and answers `busy` itself.
+                // Ids arrive while a prompt is up: a reader thread offers each line and answers `busy` itself. A line
+                // is bounded (`REQUEST_ID_MAX`): a longer one is no id, and is answered so.
+                let unqueued = std::sync::Arc::clone(&unqueued);
                 std::thread::spawn(move || {
-                    for line in std::io::stdin().lines().map_while(Result::ok) {
-                        let request = line.trim();
-                        if !request.is_empty() { offer(&handle, request); }
+                    let stdin = std::io::stdin();
+                    let mut input = stdin.lock();
+                    while let Some(line) = dc::read_request_id(&mut input) {
+                        match line {
+                            Ok(request) if request.is_empty() => {}
+                            Ok(request) => offer(&handle, &request),
+                            Err(start) => {
+                                unqueued.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                println!("{}", dc::Answer::IdTooLong.line(&start));
+                            }
+                        }
                     }
                 });
             } else {
+                // Every id on the command line is offered before the first prompt: past the bound they are `busy`.
                 for request in &requests { offer(&handle, request); }
                 drop(handle);
             }
-            let served = dev_runtime().map(|rt| rt.block_on(dc::serve(&gateway, &enrolment, &mut dc::TtyApprover, queue, ttl_secs, &mut |r, a| say(r, a))));
+            let served = dev_runtime().map(|rt| rt.block_on(dc::serve(&gateway, &store, &mut dc::TtyApprover, queue, ttl_secs, &mut |r, a| say(r, a))));
             match served {
-                Ok((_, not)) => i32::from(not + busy.load(std::sync::atomic::Ordering::Relaxed) > 0),
+                Ok((_, not)) => i32::from(not + unqueued.load(std::sync::atomic::Ordering::Relaxed) > 0),
                 Err(e) => { eprintln!("dev consent approve: {e}"); 2 }
             }
         }

@@ -29,6 +29,12 @@
 #   closed, every reader refuses the extension (`ca_generation`), and CI runs the shipped binary
 #   (`scripts/check-shipped-ca-generation-refusal.sh`). This check only makes removing the early refusal a red build.
 #
+#   A third blocker, not an OID (the maintainer's decision of 2026-11-18; #813's review, F1):
+#   `CONSENT_DECISION_DOES_NOT_NAME_WHAT_WAS_SHOWN`, in the same file. A consent decision's signature does not name
+#   the tool, resource or digest the approver was shown, so an approval can be moved to another call and replayed.
+#   No release may carry consent decisions while it is `true`; the PR that makes the approver sign what it saw
+#   (the plan's row I7-S) sets it `false`.
+#
 # USAGE
 #   scripts/check-release-blockers.sh [--release] [tls.rs path]
 #     --release   a blocker is an error (exit 1); without it, a warning (exit 0)
@@ -39,17 +45,23 @@ set -euo pipefail
 self_test() {
   local dir
   dir=$(mktemp -d)
-  printf 'pub const CONSENT_GRADE_OID_IS_PROVISIONAL: bool = true;\npub const CA_GENERATION_OID_IS_PROVISIONAL: bool = false;\n' >"$dir/blocked.rs"
-  printf 'pub const CONSENT_GRADE_OID_IS_PROVISIONAL: bool = false;\npub const CA_GENERATION_OID_IS_PROVISIONAL: bool = true;\n' >"$dir/blocked-gen.rs"
-  printf 'pub const CONSENT_GRADE_OID_IS_PROVISIONAL: bool = false;\npub const CA_GENERATION_OID_IS_PROVISIONAL: bool = false;\n' >"$dir/clear.rs"
+  local shown_clear='pub const CONSENT_DECISION_DOES_NOT_NAME_WHAT_WAS_SHOWN: bool = false;\n'
+  printf "pub const CONSENT_GRADE_OID_IS_PROVISIONAL: bool = true;\npub const CA_GENERATION_OID_IS_PROVISIONAL: bool = false;\n$shown_clear" >"$dir/blocked.rs"
+  printf "pub const CONSENT_GRADE_OID_IS_PROVISIONAL: bool = false;\npub const CA_GENERATION_OID_IS_PROVISIONAL: bool = true;\n$shown_clear" >"$dir/blocked-gen.rs"
+  printf "pub const CONSENT_GRADE_OID_IS_PROVISIONAL: bool = false;\npub const CA_GENERATION_OID_IS_PROVISIONAL: bool = false;\n$shown_clear" >"$dir/clear.rs"
+  printf 'pub const CONSENT_GRADE_OID_IS_PROVISIONAL: bool = false;\npub const CA_GENERATION_OID_IS_PROVISIONAL: bool = false;\npub const CONSENT_DECISION_DOES_NOT_NAME_WHAT_WAS_SHOWN: bool = true;\n' >"$dir/blocked-shown.rs"
   printf 'pub const CONSENT_GRADE_OID_IS_PROVISIONAL: bool = false;\n' >"$dir/missing.rs"
+  printf 'pub const CONSENT_GRADE_OID_IS_PROVISIONAL: bool = false;\npub const CA_GENERATION_OID_IS_PROVISIONAL: bool = false;\n' >"$dir/missing-shown.rs"
   local ok=1
   if "$0" --release "$dir/blocked.rs" >/dev/null 2>&1; then echo "self-test: a provisional grade OID passed --release"; ok=0; fi
   if "$0" --release "$dir/blocked-gen.rs" >/dev/null 2>&1; then echo "self-test: a provisional generation OID passed --release"; ok=0; fi
+  if "$0" --release "$dir/blocked-shown.rs" >/dev/null 2>&1; then echo "self-test: a consent decision that does not name what was shown passed --release"; ok=0; fi
   if ! "$0" "$dir/blocked.rs" >/dev/null 2>&1; then echo "self-test: a provisional OID failed without --release"; ok=0; fi
   if ! "$0" --release "$dir/clear.rs" >/dev/null 2>&1; then echo "self-test: registered OIDs failed --release"; ok=0; fi
   if "$0" --release "$dir/missing.rs" >/dev/null 2>&1; then echo "self-test: a file without a constant passed"; ok=0; fi
-  local head='pub const CONSENT_GRADE_OID_IS_PROVISIONAL: bool = false;\npub const CA_GENERATION_OID_IS_PROVISIONAL: bool = true;\n'
+  if "$0" --release "$dir/missing-shown.rs" >/dev/null 2>&1; then echo "self-test: a file without the third constant passed"; ok=0; fi
+  # The writer cases: every constant present, so that what fails or passes is the writer's gate.
+  local head='pub const CONSENT_GRADE_OID_IS_PROVISIONAL: bool = false;\npub const CA_GENERATION_OID_IS_PROVISIONAL: bool = true;\npub const CONSENT_DECISION_DOES_NOT_NAME_WHAT_WAS_SHOWN: bool = false;\n'
   printf "${head}    pub fn commit_successor() {\n        mint();\n    }\n    pub fn next() { ca_generation_oid_open(); }\n" >"$dir/ungated.rs"
   printf "${head}    pub fn commit_successor() {\n        if !super::ca_generation_oid_open() { return; }\n        mint();\n    }\n" >"$dir/gated.rs"
   if "$0" "$dir/ungated.rs" >/dev/null 2>&1; then echo "self-test: an ungated commit_successor passed under a provisional OID"; ok=0; fi
@@ -67,9 +79,9 @@ self_test() {
   printf "${head}    pub fn commit_successor() {\n        commit_successor_observed()\n    }\n    pub(super) fn commit_successor_observed() {\n        mint_ca_at();\n    }\n" >"$dir/wrapped-ungated.rs"
   if ! "$0" "$dir/wrapped.rs" >/dev/null 2>&1; then echo "self-test: a wrapper over a gated writer failed"; ok=0; fi
   if "$0" "$dir/wrapped-ungated.rs" >/dev/null 2>&1; then echo "self-test: a wrapper over an ungated writer passed"; ok=0; fi
-  rm -f "$dir/blocked.rs" "$dir/blocked-gen.rs" "$dir/clear.rs" "$dir/missing.rs" "$dir/ungated.rs" "$dir/gated.rs" "$dir/comment.rs" "$dir/late.rs" "$dir/crate.rs" "$dir/wrapped.rs" "$dir/wrapped-ungated.rs"
+  rm -f "$dir/blocked.rs" "$dir/blocked-gen.rs" "$dir/blocked-shown.rs" "$dir/clear.rs" "$dir/missing.rs" "$dir/missing-shown.rs" "$dir/ungated.rs" "$dir/gated.rs" "$dir/comment.rs" "$dir/late.rs" "$dir/crate.rs" "$dir/wrapped.rs" "$dir/wrapped-ungated.rs"
   rmdir "$dir"
-  if [[ $ok == 1 ]]; then echo "check-release-blockers --self-test: ok (12 cases)"; else exit 1; fi
+  if [[ $ok == 1 ]]; then echo "check-release-blockers --self-test: ok (14 cases)"; else exit 1; fi
 }
 
 release=0
@@ -84,14 +96,18 @@ done
 
 blocked=0
 warned=0
-for constant in CONSENT_GRADE_OID_IS_PROVISIONAL CA_GENERATION_OID_IS_PROVISIONAL; do
+for constant in CONSENT_GRADE_OID_IS_PROVISIONAL CA_GENERATION_OID_IS_PROVISIONAL CONSENT_DECISION_DOES_NOT_NAME_WHAT_WAS_SHOWN; do
   line=$(grep -E "^pub const ${constant}: bool = (true|false);" "$file" || true)
   if [[ -z "$line" ]]; then
     echo "check-release-blockers: $file has no \`pub const ${constant}: bool = …;\` line — the check cannot read the blocker" >&2
     exit 1
   fi
   if [[ "$line" == *"= true;"* ]]; then
-    msg="release blocked: ${constant} is true in $file — the OID is the documentation-PEN placeholder until the registered IANA PEN arc replaces it (identity-and-lifecycle I7 and I2; RELEASING.md § 2)"
+    if [[ "$constant" == CONSENT_DECISION_DOES_NOT_NAME_WHAT_WAS_SHOWN ]]; then
+      msg="release blocked: ${constant} is true in $file — a consent decision's signature does not name the tool, resource or digest the approver was shown, so an approval can be moved to another call and replayed (identity-and-lifecycle I7-S: the approver signs what it saw; RELEASING.md § 2)"
+    else
+      msg="release blocked: ${constant} is true in $file — the OID is the documentation-PEN placeholder until the registered IANA PEN arc replaces it (identity-and-lifecycle I7 and I2; RELEASING.md § 2)"
+    fi
     if [[ $release == 1 ]]; then
       echo "::error::$msg"
       blocked=1

@@ -175,10 +175,11 @@ tracing-opentelemetry  = { version = "0.28", optional = true }
 metrics                     = { version = "0.24", optional = true }
 metrics-exporter-prometheus = { version = "0.16", optional = true }
 
-# `mycelium dev consent` opens the terminal non-blocking to discard what was typed before a prompt (`O_NONBLOCK`, a
-# constant; no call into libc). Already in every build's tree (tokio), and this package's lockfile entry.
+# `mycelium dev consent` discards what was typed at the terminal before a prompt is shown: `tcflush` and the
+# `O_NONBLOCK` constant, through rustix's safe wrappers (this crate denies `unsafe`). Already in the node's tree
+# (reqwest -> native-tls -> tempfile -> rustix), so no crate is added to a shipped build.
 [target.'cfg(unix)'.dependencies]
-libc = "0.2"
+rustix = { version = "1", features = ["termios", "fs"] }
 
 [dev-dependencies]
 # W6: the declaration document's schema (docs/reference/declaration.schema.json) is validated
